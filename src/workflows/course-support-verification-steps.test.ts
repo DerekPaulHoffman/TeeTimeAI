@@ -173,6 +173,17 @@ function allowOwnedDiscovery() {
   );
 }
 
+function allowDirectDiscoveryVerification() {
+  verificationMocks.markCourseSupportVerificationDiscoveryVerified.mockResolvedValueOnce(
+    {
+      marked: true,
+      revision: 6,
+      discoveryAttemptedAt,
+      discoveryVerifiedAt: discoveryAttemptedAt,
+    },
+  );
+}
+
 function installPlaybookRuntime(
   seed: AutomationPlaybookEventInput[] = [],
   afterTransition?: () => void,
@@ -295,6 +306,48 @@ function completedPlaybookSeedThroughBrowserAdapter(): AutomationPlaybookEventIn
       failureFingerprint: "PLAYBOOK:BROWSER_ADAPTER_RETRY:CHALLENGE",
       runtimeVersion,
       observedAt: new Date("2026-07-21T11:56:00.000Z"),
+    },
+  ];
+}
+
+function completedPlaybookSeedThroughTypedAdapter(): AutomationPlaybookEventInput[] {
+  const observedAt = new Date("2026-07-21T11:59:00.000Z");
+  return [
+    {
+      cycle: 1,
+      stage: "OFFICIAL_IDENTITY",
+      transition: "COMPLETED",
+      readPath: "OFFICIAL_IDENTITY",
+      evidenceKind: "OFFICIAL_SOURCE",
+      failureFingerprint: "PLAYBOOK:OFFICIAL_IDENTITY:COMPLETED",
+      runtimeVersion,
+      observedAt,
+    },
+    {
+      cycle: 1,
+      stage: "TYPED_ADAPTER",
+      transition: "SUCCEEDED",
+      readPath: "TYPED_PROVIDER_ADAPTER",
+      evidenceKind: "PROVIDER_RESPONSE",
+      failureFingerprint: "PLAYBOOK:TYPED_ADAPTER:SUCCEEDED",
+      runtimeVersion,
+      observedAt,
+    },
+  ];
+}
+
+function completedPlaybookSeedThroughLocalReader(): AutomationPlaybookEventInput[] {
+  return [
+    ...completedPlaybookSeedThroughBrowserAdapter(),
+    {
+      cycle: 1,
+      stage: "LOCAL_READER",
+      transition: "SUCCEEDED",
+      readPath: "LOCAL_READER",
+      evidenceKind: "LOCAL_READER_RESULT",
+      failureFingerprint: "PLAYBOOK:LOCAL_READER:SUCCEEDED",
+      runtimeVersion: "reader-v1",
+      observedAt: new Date("2026-07-21T11:59:00.000Z"),
     },
   ];
 }
@@ -1265,6 +1318,253 @@ describe("executeCourseSupportVerificationStep", () => {
     );
   });
 
+  it("persists typed-adapter discovery proof before recording ordered success", async () => {
+    installPlaybookRuntime();
+    allowOwnedDiscovery();
+    allowDirectDiscoveryVerification();
+    providerReadMocks.fetchCourseTeeSheet.mockResolvedValue({
+      slots: [],
+      targetDateStatus: "OPEN",
+      bookingWindowEvidence: null,
+    });
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "completed",
+      providerOutcome: "NO_MATCH",
+    });
+
+    expect(
+      verificationMocks.markCourseSupportVerificationDiscoveryAttempted,
+    ).toHaveBeenCalledWith({
+      requestId: "verification-request-1",
+      expectedRevision: 4,
+      leaseToken: "lease-1",
+      runtimeVersion,
+      now: new Date("2026-07-21T12:00:00.000Z"),
+    });
+    expect(
+      verificationMocks.markCourseSupportVerificationDiscoveryAttempted.mock
+        .invocationCallOrder[0],
+    ).toBeLessThan(
+      providerLeaseMocks.runWithProviderRequestLease.mock.invocationCallOrder[0],
+    );
+    expect(
+      providerReadMocks.fetchCourseTeeSheet.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      verificationMocks.markCourseSupportVerificationDiscoveryVerified.mock
+        .invocationCallOrder[0],
+    );
+    const typedSuccessCall =
+      playbookMocks.recordRuntimePlaybookTransition.mock.calls.findIndex(
+        ([, transition]) =>
+          transition.stage === "TYPED_ADAPTER" &&
+          transition.transition === "SUCCEEDED",
+      );
+    expect(typedSuccessCall).toBeGreaterThanOrEqual(0);
+    expect(
+      verificationMocks.markCourseSupportVerificationDiscoveryVerified.mock
+        .invocationCallOrder[0],
+    ).toBeLessThan(
+      playbookMocks.recordRuntimePlaybookTransition.mock.invocationCallOrder[
+        typedSuccessCall
+      ],
+    );
+    expect(
+      playbookMocks.recordRuntimePlaybookTransition.mock.invocationCallOrder[
+        typedSuccessCall
+      ],
+    ).toBeLessThan(
+      verificationMocks.completeCourseSupportVerificationRequest.mock
+        .invocationCallOrder[0],
+    );
+    expect(
+      verificationMocks.completeCourseSupportVerificationRequest,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({ expectedRevision: 6 }),
+    );
+    expect(
+      discoveryMocks.prepareCourseSupportVerificationMonitoring,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("performs no provider I/O when the typed-adapter attempt fence rejects ownership", async () => {
+    installPlaybookRuntime();
+    allowOwnedDiscovery();
+    verificationMocks.markCourseSupportVerificationDiscoveryAttempted.mockResolvedValueOnce(
+      { marked: false, reason: "provider_snapshot_changed" },
+    );
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "stopped",
+      reason: "provider_snapshot_changed",
+    });
+
+    expect(
+      providerLeaseMocks.runWithProviderRequestLease,
+    ).not.toHaveBeenCalled();
+    expect(providerReadMocks.fetchCourseTeeSheet).not.toHaveBeenCalled();
+    expect(
+      verificationMocks.markCourseSupportVerificationDiscoveryVerified,
+    ).not.toHaveBeenCalled();
+    expect(
+      playbookMocks.recordRuntimePlaybookTransition.mock.calls.some(
+        ([, transition]) =>
+          transition.stage === "TYPED_ADAPTER" &&
+          transition.transition === "SUCCEEDED",
+      ),
+    ).toBe(false);
+  });
+
+  it("records no typed success when ownership is lost after a safe provider response", async () => {
+    installPlaybookRuntime();
+    allowOwnedDiscovery();
+    providerReadMocks.fetchCourseTeeSheet.mockResolvedValue({
+      slots: [],
+      targetDateStatus: "OPEN",
+      bookingWindowEvidence: null,
+    });
+    verificationMocks.markCourseSupportVerificationDiscoveryVerified.mockResolvedValueOnce(
+      { marked: false, reason: "provider_snapshot_changed" },
+    );
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "stopped",
+      reason: "provider_snapshot_changed",
+    });
+
+    expect(providerReadMocks.fetchCourseTeeSheet).toHaveBeenCalledOnce();
+    expect(
+      playbookMocks.recordRuntimePlaybookTransition.mock.calls.some(
+        ([, transition]) =>
+          transition.stage === "TYPED_ADAPTER" &&
+          transition.transition === "SUCCEEDED",
+      ),
+    ).toBe(false);
+    expect(
+      verificationMocks.completeCourseSupportVerificationRequest,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("recovers a concluded typed-adapter ledger with fresh request proof and no duplicate transition", async () => {
+    const runtime = installPlaybookRuntime(
+      completedPlaybookSeedThroughTypedAdapter(),
+    );
+    allowOwnedDiscovery();
+    allowDirectDiscoveryVerification();
+    providerReadMocks.fetchCourseTeeSheet.mockResolvedValue({
+      slots: [],
+      targetDateStatus: "OPEN",
+      bookingWindowEvidence: null,
+    });
+
+    expect(runtime.assessment.conclusion).toBe("MONITORING_RESTORED");
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "completed",
+      providerOutcome: "NO_MATCH",
+    });
+
+    expect(providerReadMocks.fetchCourseTeeSheet).toHaveBeenCalledOnce();
+    expect(
+      verificationMocks.markCourseSupportVerificationDiscoveryAttempted,
+    ).toHaveBeenCalledOnce();
+    expect(
+      verificationMocks.markCourseSupportVerificationDiscoveryVerified,
+    ).toHaveBeenCalledOnce();
+    expect(
+      verificationMocks.completeCourseSupportVerificationRequest,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({ expectedRevision: 6 }),
+    );
+    expect(
+      playbookMocks.recordRuntimePlaybookTransition,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("allows only one bounded transient retry while recovering a concluded adapter", async () => {
+    installPlaybookRuntime(completedPlaybookSeedThroughTypedAdapter());
+    allowOwnedDiscovery();
+    providerReadMocks.fetchCourseTeeSheet.mockRejectedValue(
+      new Error("provider throttled"),
+    );
+    capabilityMocks.classifyProviderFailure.mockReturnValue({
+      failureClass: "RATE_LIMIT",
+      httpStatus: 429,
+      retryAfterSeconds: 30 * 60,
+    });
+    verificationMocks.failCourseSupportVerificationRequest.mockResolvedValue({
+      failed: true,
+      status: "RETRYABLE_FAILED",
+    });
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "failed",
+      retryable: true,
+    });
+
+    expect(providerReadMocks.fetchCourseTeeSheet).toHaveBeenCalledOnce();
+    expect(
+      verificationMocks.failCourseSupportVerificationRequest,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expectedRevision: 5,
+        retryAt: new Date("2026-07-21T12:30:00.000Z"),
+        retryAfterSeconds: 30 * 60,
+      }),
+    );
+    expect(
+      playbookMocks.recordRuntimePlaybookTransition,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("fails concluded-adapter recovery closed after its persisted retry fence", async () => {
+    installPlaybookRuntime(completedPlaybookSeedThroughTypedAdapter());
+    verificationMocks.attachCourseSupportVerificationProviderSnapshot.mockResolvedValueOnce(
+      {
+        attached: true,
+        revision: 4,
+        providerSnapshotFingerprint: "current-provider",
+        discoveryAttemptedAt,
+        discoveryVerifiedAt: null,
+        courseId: "course-1",
+        intent,
+      },
+    );
+    providerReadMocks.fetchCourseTeeSheet.mockRejectedValue(
+      new Error("provider throttled again"),
+    );
+    capabilityMocks.classifyProviderFailure.mockReturnValue({
+      failureClass: "RATE_LIMIT",
+      httpStatus: 429,
+      retryAfterSeconds: 30 * 60,
+    });
+    verificationMocks.failCourseSupportVerificationRequest.mockResolvedValue({
+      failed: true,
+      status: "STALE",
+    });
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "failed",
+      retryable: false,
+    });
+
+    expect(providerReadMocks.fetchCourseTeeSheet).toHaveBeenCalledOnce();
+    expect(
+      verificationMocks.markCourseSupportVerificationDiscoveryAttempted,
+    ).not.toHaveBeenCalled();
+    expect(
+      verificationMocks.failCourseSupportVerificationRequest,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expectedRevision: 4,
+        retryAt: null,
+        retryAfterSeconds: undefined,
+      }),
+    );
+    expect(
+      playbookMocks.recordRuntimePlaybookTransition,
+    ).not.toHaveBeenCalled();
+  });
+
   it("runs the typed adapter before HTTP discovery and retries it after learned metadata", async () => {
     installPlaybookRuntime();
     allowOwnedExecution();
@@ -1298,6 +1598,36 @@ describe("executeCourseSupportVerificationStep", () => {
         .invocationCallOrder[0],
     ).toBeLessThan(
       providerReadMocks.fetchCourseTeeSheet.mock.invocationCallOrder[1],
+    );
+    expect(
+      verificationMocks.markCourseSupportVerificationDiscoveryAttempted.mock
+        .invocationCallOrder[0],
+    ).toBeLessThan(
+      discoveryMocks.prepareCourseSupportVerificationMonitoring.mock
+        .invocationCallOrder[0],
+    );
+    expect(
+      discoveryMocks.prepareCourseSupportVerificationMonitoring.mock
+        .invocationCallOrder[0],
+    ).toBeLessThan(
+      verificationMocks.attachCourseSupportVerificationProviderSnapshot.mock
+        .invocationCallOrder[1],
+    );
+    expect(
+      verificationMocks.attachCourseSupportVerificationProviderSnapshot.mock
+        .invocationCallOrder[1],
+    ).toBeLessThan(
+      verificationMocks.markCourseSupportVerificationDiscoveryVerified.mock
+        .invocationCallOrder[0],
+    );
+    expect(
+      verificationMocks.attachCourseSupportVerificationProviderSnapshot,
+    ).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        expectedRevision: 5,
+        purpose: "POST_DISCOVERY",
+      }),
     );
     expect(
       playbookMocks.recordRuntimePlaybookTransition.mock.calls.map(
@@ -1348,6 +1678,241 @@ describe("executeCourseSupportVerificationStep", () => {
     ]);
     expect(
       localReaderMocks.getLocalReaderCourseVerification,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("establishes owned proof for ordered local-reader-only success", async () => {
+    installPlaybookRuntime();
+    allowOwnedDiscovery();
+    allowDirectDiscoveryVerification();
+    prismaMocks.courseFindUnique.mockResolvedValue({
+      ...course,
+      monitoringMode: "LOCAL_READER_ONLY",
+    });
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("cps:course-1");
+    localReaderMocks.getLocalReaderCourseVerification.mockResolvedValue({
+      status: "COMPLETED",
+      observedAt: new Date("2026-07-21T12:00:30.000Z"),
+      readerVersion: "reader-v1",
+      slots: [],
+    });
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "completed",
+      providerOutcome: "NO_MATCH",
+    });
+
+    expect(
+      verificationMocks.markCourseSupportVerificationDiscoveryAttempted.mock
+        .invocationCallOrder[0],
+    ).toBeLessThan(
+      localReaderMocks.getLocalReaderCourseVerification.mock
+        .invocationCallOrder[0],
+    );
+    expect(
+      localReaderMocks.getLocalReaderCourseVerification.mock
+        .invocationCallOrder[0],
+    ).toBeLessThan(
+      verificationMocks.markCourseSupportVerificationDiscoveryVerified.mock
+        .invocationCallOrder[0],
+    );
+    const localSuccessCall =
+      playbookMocks.recordRuntimePlaybookTransition.mock.calls.findIndex(
+        ([, transition]) =>
+          transition.stage === "LOCAL_READER" &&
+          transition.transition === "SUCCEEDED",
+      );
+    expect(localSuccessCall).toBeGreaterThanOrEqual(0);
+    expect(
+      verificationMocks.markCourseSupportVerificationDiscoveryVerified.mock
+        .invocationCallOrder[0],
+    ).toBeLessThan(
+      playbookMocks.recordRuntimePlaybookTransition.mock.invocationCallOrder[
+        localSuccessCall
+      ],
+    );
+    expect(
+      playbookMocks.recordRuntimePlaybookTransition.mock.invocationCallOrder[
+        localSuccessCall
+      ],
+    ).toBeLessThan(
+      verificationMocks.completeCourseSupportVerificationRequest.mock
+        .invocationCallOrder[0],
+    );
+    expect(
+      localReaderMocks.getLocalReaderCourseVerification,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({ notBefore: discoveryAttemptedAt }),
+    );
+    expect(providerReadMocks.fetchCourseTeeSheet).not.toHaveBeenCalled();
+    expect(
+      verificationMocks.completeCourseSupportVerificationRequest,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({ expectedRevision: 6 }),
+    );
+    expect(
+      discoveryMocks.prepareCourseSupportVerificationMonitoring,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("rejects a signed reader result that predates the owned attempt boundary", async () => {
+    installPlaybookRuntime();
+    allowOwnedDiscovery();
+    prismaMocks.courseFindUnique.mockResolvedValue({
+      ...course,
+      monitoringMode: "LOCAL_READER_ONLY",
+    });
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("cps:course-1");
+    localReaderMocks.getLocalReaderCourseVerification.mockResolvedValue({
+      status: "COMPLETED",
+      observedAt: new Date("2026-07-21T11:59:59.000Z"),
+      readerVersion: "reader-v1",
+      slots: [],
+    });
+    verificationMocks.failCourseSupportVerificationRequest.mockResolvedValue({
+      failed: true,
+      status: "RETRYABLE_FAILED",
+    });
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "failed",
+      retryable: true,
+    });
+
+    expect(
+      localReaderMocks.queueLocalReaderCourseVerification,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({ notBefore: discoveryAttemptedAt }),
+    );
+    expect(
+      verificationMocks.markCourseSupportVerificationDiscoveryVerified,
+    ).not.toHaveBeenCalled();
+    expect(
+      verificationMocks.completeCourseSupportVerificationRequest,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("recovers a concluded local-reader ledger only from a fresh signed result", async () => {
+    const runtime = installPlaybookRuntime(
+      completedPlaybookSeedThroughLocalReader(),
+    );
+    allowOwnedDiscovery();
+    allowDirectDiscoveryVerification();
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("cps:course-1");
+    localReaderMocks.getLocalReaderCourseVerification.mockResolvedValue({
+      status: "COMPLETED",
+      observedAt: new Date("2026-07-21T12:00:30.000Z"),
+      readerVersion: "reader-v2",
+      slots: [],
+    });
+
+    expect(runtime.assessment.conclusion).toBe("MONITORING_RESTORED");
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "completed",
+      providerOutcome: "NO_MATCH",
+    });
+
+    expect(
+      localReaderMocks.getLocalReaderCourseVerification,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({ notBefore: discoveryAttemptedAt }),
+    );
+    expect(
+      verificationMocks.markCourseSupportVerificationDiscoveryVerified,
+    ).toHaveBeenCalledOnce();
+    expect(
+      verificationMocks.completeCourseSupportVerificationRequest,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({ expectedRevision: 6 }),
+    );
+    expect(
+      playbookMocks.recordRuntimePlaybookTransition,
+    ).not.toHaveBeenCalled();
+    expect(providerReadMocks.fetchCourseTeeSheet).not.toHaveBeenCalled();
+  });
+
+  it("queues one fresh signed read for a concluded local-reader recovery", async () => {
+    installPlaybookRuntime(completedPlaybookSeedThroughLocalReader());
+    allowOwnedDiscovery();
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("cps:course-1");
+    localReaderMocks.getLocalReaderCourseVerification.mockResolvedValue(null);
+    verificationMocks.failCourseSupportVerificationRequest.mockResolvedValue({
+      failed: true,
+      status: "RETRYABLE_FAILED",
+    });
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "failed",
+      retryable: true,
+    });
+
+    expect(
+      localReaderMocks.queueLocalReaderCourseVerification,
+    ).toHaveBeenCalledOnce();
+    expect(
+      localReaderMocks.queueLocalReaderCourseVerification,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({ notBefore: discoveryAttemptedAt }),
+    );
+    expect(
+      verificationMocks.failCourseSupportVerificationRequest,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expectedRevision: 5,
+        retryAt: new Date("2026-07-21T12:02:00.000Z"),
+      }),
+    );
+    expect(
+      playbookMocks.recordRuntimePlaybookTransition,
+    ).not.toHaveBeenCalled();
+    expect(
+      verificationMocks.completeCourseSupportVerificationRequest,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("fails concluded local-reader recovery closed after its one queued retry", async () => {
+    installPlaybookRuntime(completedPlaybookSeedThroughLocalReader());
+    verificationMocks.attachCourseSupportVerificationProviderSnapshot.mockResolvedValueOnce(
+      {
+        attached: true,
+        revision: 4,
+        providerSnapshotFingerprint: "current-provider",
+        discoveryAttemptedAt,
+        discoveryVerifiedAt: null,
+        courseId: "course-1",
+        intent,
+      },
+    );
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("cps:course-1");
+    localReaderMocks.getLocalReaderCourseVerification.mockResolvedValue({
+      status: "PENDING",
+    });
+    verificationMocks.failCourseSupportVerificationRequest.mockResolvedValue({
+      failed: true,
+      status: "STALE",
+    });
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "failed",
+      retryable: false,
+    });
+
+    expect(
+      verificationMocks.markCourseSupportVerificationDiscoveryAttempted,
+    ).not.toHaveBeenCalled();
+    expect(
+      localReaderMocks.queueLocalReaderCourseVerification,
+    ).not.toHaveBeenCalled();
+    expect(
+      verificationMocks.failCourseSupportVerificationRequest,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({ expectedRevision: 4, retryAt: null }),
+    );
+    expect(
+      verificationMocks.markCourseSupportVerificationDiscoveryVerified,
+    ).not.toHaveBeenCalled();
+    expect(
+      verificationMocks.completeCourseSupportVerificationRequest,
     ).not.toHaveBeenCalled();
   });
 
@@ -1698,7 +2263,7 @@ describe("executeCourseSupportVerificationStep", () => {
       localReaderMocks.getLocalReaderCourseVerification,
     ).toHaveBeenCalledWith(
       expect.objectContaining({
-        notBefore: new Date("2026-07-21T11:56:00.000Z"),
+        notBefore: discoveryAttemptedAt,
       }),
     );
     expect(

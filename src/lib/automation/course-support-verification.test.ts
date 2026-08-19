@@ -1495,6 +1495,42 @@ describe("course-support verification execution fencing", () => {
     );
   });
 
+  it("clears both discovery markers when a claim observes a changed provider snapshot", async () => {
+    const changedCourse = course({
+      bookingMetadata: { provider: "CPS", facilityId: "changed-before-claim" },
+    });
+    prismaMocks.requestFindUnique.mockResolvedValue(
+      request({
+        runtimeVersion: null,
+        status: "QUEUED",
+        revision: 0,
+        leaseToken: null,
+        leaseExpiresAt: null,
+        nextAttemptAt: now,
+        course: changedCourse,
+      }),
+    );
+
+    await expect(
+      claimCourseSupportVerificationRequest({
+        requestId: "request-1",
+        expectedRevision: 0,
+        runtimeVersion: releaseSha,
+        now,
+      }),
+    ).resolves.toMatchObject({ claimed: true, revision: 1 });
+
+    expect(prismaMocks.requestUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          providerSnapshotFingerprint: fingerprint(changedCourse),
+          discoveryAttemptedAt: null,
+          discoveryVerifiedAt: null,
+        }),
+      }),
+    );
+  });
+
   it("attaches and heartbeats a Workflow through its lease and monotonic revision fence", async () => {
     await expect(
       attachCourseSupportVerificationWorkflow({
@@ -1552,6 +1588,7 @@ describe("course-support verification execution fencing", () => {
       expectedRevision: 1,
       leaseToken: "lease-1",
       runtimeVersion: releaseSha,
+      purpose: "PRE_EXECUTION",
       now,
     });
 
@@ -1561,7 +1598,7 @@ describe("course-support verification execution fencing", () => {
       fingerprint(changedCourse),
     );
     expect(result).toMatchObject({
-      discoveryAttemptedAt: new Date("2026-07-21T11:57:00.000Z"),
+      discoveryAttemptedAt: null,
       discoveryVerifiedAt: null,
     });
     expect(prismaMocks.requestUpdateMany).toHaveBeenCalledWith(
@@ -1569,11 +1606,75 @@ describe("course-support verification execution fencing", () => {
         data: expect.objectContaining({
           providerSnapshotFingerprint: fingerprint(changedCourse),
           providerSnapshotAt: now,
+          discoveryAttemptedAt: null,
           discoveryVerifiedAt: null,
           revision: { increment: 1 },
         }),
       }),
     );
+  });
+
+  it("preserves the owned attempt when post-discovery attachment observes learned provider metadata", async () => {
+    const attemptedAt = new Date("2026-07-21T11:59:00.000Z");
+    const changedCourse = course({
+      bookingMetadata: { provider: "CPS", facilityId: "learned-by-discovery" },
+    });
+    prismaMocks.requestFindUnique.mockResolvedValue(
+      request({
+        course: changedCourse,
+        discoveryAttemptedAt: attemptedAt,
+        discoveryVerifiedAt: null,
+      }),
+    );
+
+    await expect(
+      attachCourseSupportVerificationProviderSnapshot({
+        requestId: "request-1",
+        expectedRevision: 1,
+        leaseToken: "lease-1",
+        runtimeVersion: releaseSha,
+        purpose: "POST_DISCOVERY",
+        now,
+      }),
+    ).resolves.toMatchObject({
+      attached: true,
+      revision: 2,
+      providerSnapshotFingerprint: fingerprint(changedCourse),
+      discoveryAttemptedAt: attemptedAt,
+      discoveryVerifiedAt: null,
+    });
+
+    const update = prismaMocks.requestUpdateMany.mock.calls.at(-1)?.[0];
+    expect(update).toEqual(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          providerSnapshotFingerprint: fingerprint(changedCourse),
+          discoveryVerifiedAt: null,
+        }),
+      }),
+    );
+    expect(update.data).not.toHaveProperty("discoveryAttemptedAt");
+  });
+
+  it("rejects post-discovery attachment without an owned discovery attempt", async () => {
+    prismaMocks.requestFindUnique.mockResolvedValue(
+      request({ discoveryAttemptedAt: null, discoveryVerifiedAt: null }),
+    );
+
+    await expect(
+      attachCourseSupportVerificationProviderSnapshot({
+        requestId: "request-1",
+        expectedRevision: 1,
+        leaseToken: "lease-1",
+        runtimeVersion: releaseSha,
+        purpose: "POST_DISCOVERY",
+        now,
+      }),
+    ).resolves.toEqual({
+      attached: false,
+      reason: "discovery_not_attempted",
+    });
+    expect(prismaMocks.requestUpdateMany).not.toHaveBeenCalled();
   });
 
   it("stops provider attachment when the current course becomes private", async () => {
@@ -1587,6 +1688,7 @@ describe("course-support verification execution fencing", () => {
         expectedRevision: 1,
         leaseToken: "lease-1",
         runtimeVersion: releaseSha,
+        purpose: "PRE_EXECUTION",
         now,
       }),
     ).resolves.toEqual({

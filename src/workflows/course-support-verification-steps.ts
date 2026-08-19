@@ -105,6 +105,7 @@ export async function executeCourseSupportVerificationStep(
       expectedRevision: revision,
       leaseToken: input.leaseToken,
       runtimeVersion,
+      purpose: "PRE_EXECUTION",
     },
   );
   if (!beforeDiscovery.attached) {
@@ -312,6 +313,7 @@ export async function executeCourseSupportVerificationStep(
     expectedRevision: revision,
     leaseToken: input.leaseToken,
     runtimeVersion,
+    purpose: "POST_DISCOVERY",
   });
   if (!afterDiscovery.attached) {
     return { outcome: "stopped" as const, reason: afterDiscovery.reason };
@@ -695,6 +697,73 @@ async function executeOrderedCourseSupportVerification(input: {
       message: getFactualDispositionMessage(runtime.assessment.factualDisposition),
     });
   }
+  if (
+    discoveryVerifiedAt &&
+    !hasCoherentDiscoveryProof(discoveryAttemptedAt, discoveryVerifiedAt)
+  ) {
+    return failVerification({
+      input: input.input,
+      revision,
+      runtimeVersion: input.runtimeVersion,
+      failureClass: "SCHEMA",
+      providerExecution: false,
+      message: "Provider discovery proof is inconsistent.",
+    });
+  }
+  if (runtime.assessment.conclusion === "MONITORING_RESTORED") {
+    const succeededAdapter = runtime.assessment.stages.find(
+      (candidate) =>
+        isProviderAdapterPlaybookStage(candidate.stage) &&
+        candidate.status === "SUCCEEDED",
+    );
+    if (
+      succeededAdapter &&
+      isProviderAdapterPlaybookStage(succeededAdapter.stage)
+    ) {
+      const recovery = await executePlaybookAdapterStage({
+        input: input.input,
+        revision,
+        runtime,
+        runtimeVersion: input.runtimeVersion,
+        stage: succeededAdapter.stage,
+        course,
+        intent: input.ownedIntent,
+        discoveryAttemptedAt,
+        discoveryVerifiedAt,
+        transitionMode: "REUSE_SUCCEEDED",
+      });
+      if (recovery.outcome === "returned") {
+        return recovery.value;
+      }
+      return failVerification({
+        input: input.input,
+        revision: recovery.revision,
+        runtimeVersion: input.runtimeVersion,
+        failureClass: "SCHEMA",
+        providerExecution: false,
+        message:
+          "The concluded adapter proof could not be recovered for this request.",
+      });
+    }
+    const succeededLocalReader = runtime.assessment.stages.find(
+      (candidate) =>
+        candidate.stage === "LOCAL_READER" && candidate.status === "SUCCEEDED",
+    );
+    if (succeededLocalReader) {
+      return recoverSucceededPlaybookLocalReader({
+        input: input.input,
+        revision,
+        runtimeVersion: input.runtimeVersion,
+        course,
+        intent: input.ownedIntent,
+        discoveryAttemptedAt,
+        discoveryVerifiedAt,
+        priorSucceededAt: succeededLocalReader.completedAt
+          ? new Date(succeededLocalReader.completedAt)
+          : null,
+      });
+    }
+  }
   if (runtime.assessment.conclusion !== "INCOMPLETE") {
     return failVerification({
       input: input.input,
@@ -784,10 +853,15 @@ async function executeOrderedCourseSupportVerification(input: {
         stage,
         course,
         intent: input.ownedIntent,
+        discoveryAttemptedAt,
+        discoveryVerifiedAt,
       });
       if (adapterResult.outcome === "returned") {
         return adapterResult.value;
       }
+      revision = adapterResult.revision;
+      discoveryAttemptedAt = adapterResult.discoveryAttemptedAt;
+      discoveryVerifiedAt = adapterResult.discoveryVerifiedAt;
       continue;
     }
 
@@ -874,11 +948,14 @@ async function executeOrderedCourseSupportVerification(input: {
           expectedRevision: revision,
           leaseToken: input.input.leaseToken,
           runtimeVersion: input.runtimeVersion,
+          purpose: "POST_DISCOVERY",
         });
       if (!afterDiscovery.attached) {
         return { outcome: "stopped" as const, reason: afterDiscovery.reason };
       }
       revision = afterDiscovery.revision;
+      discoveryAttemptedAt = afterDiscovery.discoveryAttemptedAt;
+      discoveryVerifiedAt = afterDiscovery.discoveryVerifiedAt;
       if (
         afterDiscovery.courseId !== input.ownedCourseId ||
         !sameVerificationIntent(afterDiscovery.intent, input.ownedIntent)
@@ -908,20 +985,18 @@ async function executeOrderedCourseSupportVerification(input: {
         });
       }
       course = refreshedCourse;
-      if (!discoveryVerifiedAt) {
-        const verified = await markCourseSupportVerificationDiscoveryVerified({
-          requestId: input.input.requestId,
-          expectedRevision: revision,
-          leaseToken: input.input.leaseToken,
-          runtimeVersion: input.runtimeVersion,
-        });
-        if (!verified.marked) {
-          return { outcome: "stopped" as const, reason: verified.reason };
-        }
-        revision = verified.revision;
-        discoveryAttemptedAt = verified.discoveryAttemptedAt;
-        discoveryVerifiedAt = verified.discoveryVerifiedAt;
+      const verified = await markCourseSupportVerificationDiscoveryVerified({
+        requestId: input.input.requestId,
+        expectedRevision: revision,
+        leaseToken: input.input.leaseToken,
+        runtimeVersion: input.runtimeVersion,
+      });
+      if (!verified.marked) {
+        return { outcome: "stopped" as const, reason: verified.reason };
       }
+      revision = verified.revision;
+      discoveryAttemptedAt = verified.discoveryAttemptedAt;
+      discoveryVerifiedAt = verified.discoveryVerifiedAt;
       await requireRecordedPlaybookTransition(runtime, {
         stage,
         transition: "COMPLETED",
@@ -962,6 +1037,22 @@ async function executeOrderedCourseSupportVerification(input: {
         continue;
       }
 
+      if (!discoveryAttemptedAt) {
+        const attempted = await markCourseSupportVerificationDiscoveryAttempted({
+          requestId: input.input.requestId,
+          expectedRevision: revision,
+          leaseToken: input.input.leaseToken,
+          runtimeVersion: input.runtimeVersion,
+          now: new Date(),
+        });
+        if (!attempted.marked) {
+          return { outcome: "stopped" as const, reason: attempted.reason };
+        }
+        revision = attempted.revision;
+        discoveryAttemptedAt = attempted.discoveryAttemptedAt;
+        discoveryVerifiedAt = attempted.discoveryVerifiedAt;
+      }
+
       const browserStage = runtime.assessment.stages.find(
         (candidate) => candidate.stage === "RENDERED_BROWSER_DISCOVERY",
       );
@@ -990,7 +1081,26 @@ async function executeOrderedCourseSupportVerification(input: {
         bookingUrl,
         notBefore,
       });
-      if (readerVerification?.status === "COMPLETED") {
+      const currentReaderResult = Boolean(
+        readerVerification &&
+          readerVerification.status !== "PENDING" &&
+          readerVerification.observedAt.getTime() >= notBefore.getTime(),
+      );
+      if (readerVerification?.status === "COMPLETED" && currentReaderResult) {
+        if (
+          readerVerification.slots.some(
+            (slot) => !getSafeOfficialBookingUrl(slot.bookingUrl),
+          )
+        ) {
+          return failVerification({
+            input: input.input,
+            revision,
+            runtimeVersion: input.runtimeVersion,
+            failureClass: "SCHEMA",
+            providerExecution: true,
+            message: "The signed local reader returned an unsafe booking destination.",
+          });
+        }
         const matchingSlots = filterSlotsForSearch(
           {
             date: input.ownedIntent.targetDateLocal,
@@ -1002,6 +1112,25 @@ async function executeOrderedCourseSupportVerification(input: {
           readerVerification.slots,
         );
         const outcome = matchingSlots.length > 0 ? "MATCH_FOUND" : "NO_MATCH";
+        const verified = await markCourseSupportVerificationDiscoveryVerified({
+          requestId: input.input.requestId,
+          expectedRevision: revision,
+          leaseToken: input.input.leaseToken,
+          runtimeVersion: input.runtimeVersion,
+          now: new Date(),
+        });
+        if (!verified.marked) {
+          return { outcome: "stopped" as const, reason: verified.reason };
+        }
+        revision = verified.revision;
+        discoveryAttemptedAt = verified.discoveryAttemptedAt;
+        discoveryVerifiedAt = verified.discoveryVerifiedAt;
+        if (!hasCoherentDiscoveryProof(discoveryAttemptedAt, discoveryVerifiedAt)) {
+          return {
+            outcome: "stopped" as const,
+            reason: "discovery_not_verified",
+          };
+        }
         await requireRecordedPlaybookTransition(runtime, {
           stage,
           transition: "SUCCEEDED",
@@ -1027,7 +1156,7 @@ async function executeOrderedCourseSupportVerification(input: {
           ? { outcome: "completed" as const, providerOutcome: outcome }
           : { outcome: "stopped" as const, reason: completed.reason };
       }
-      if (readerVerification?.status === "TERMINAL") {
+      if (readerVerification?.status === "TERMINAL" && currentReaderResult) {
         if (readerVerification.resultStatus === "ACCESS_CHALLENGE") {
           await requireRecordedPlaybookTransition(runtime, {
             stage,
@@ -1132,6 +1261,16 @@ async function executeOrderedCourseSupportVerification(input: {
   });
 }
 
+function isProviderAdapterPlaybookStage(
+  stage: string,
+): stage is "TYPED_ADAPTER" | "HTTP_ADAPTER_RETRY" | "BROWSER_ADAPTER_RETRY" {
+  return (
+    stage === "TYPED_ADAPTER" ||
+    stage === "HTTP_ADAPTER_RETRY" ||
+    stage === "BROWSER_ADAPTER_RETRY"
+  );
+}
+
 async function executePlaybookAdapterStage(input: {
   input: CourseSupportVerificationWorkflowInput;
   revision: number;
@@ -1140,8 +1279,16 @@ async function executePlaybookAdapterStage(input: {
   stage: "TYPED_ADAPTER" | "HTTP_ADAPTER_RETRY" | "BROWSER_ADAPTER_RETRY";
   course: VerificationCourse;
   intent: VerificationIntent;
+  discoveryAttemptedAt: Date | null;
+  discoveryVerifiedAt: Date | null;
+  transitionMode?: "RECORD" | "REUSE_SUCCEEDED";
 }): Promise<
-  | { outcome: "continued" }
+  | {
+      outcome: "continued";
+      revision: number;
+      discoveryAttemptedAt: Date | null;
+      discoveryVerifiedAt: Date | null;
+    }
   | {
       outcome: "returned";
       value:
@@ -1150,8 +1297,24 @@ async function executePlaybookAdapterStage(input: {
         | { outcome: "stopped"; reason: string };
     }
 > {
+  const recoveryStartedWithAttempt = Boolean(input.discoveryAttemptedAt);
   const capability = resolveProviderCapability(input.course);
   if (!capability.isRunnable) {
+    if (input.transitionMode === "REUSE_SUCCEEDED") {
+      return {
+        outcome: "returned",
+        value: await failVerification({
+          input: input.input,
+          revision: input.revision,
+          runtimeVersion: input.runtimeVersion,
+          failureClass:
+            getProviderReadinessFailure(capability) ?? "UNSUPPORTED_FAMILY",
+          providerExecution: false,
+          message:
+            "The previously successful provider adapter is no longer runnable.",
+        }),
+      };
+    }
     await requireRecordedPlaybookTransition(input.runtime, {
       stage: input.stage,
       transition: "NOT_APPLICABLE",
@@ -1160,7 +1323,34 @@ async function executePlaybookAdapterStage(input: {
       skipReason: "NO_RUNNABLE_ADAPTER",
       runtimeVersion: input.runtimeVersion,
     });
-    return { outcome: "continued" };
+    return {
+      outcome: "continued",
+      revision: input.revision,
+      discoveryAttemptedAt: input.discoveryAttemptedAt,
+      discoveryVerifiedAt: input.discoveryVerifiedAt,
+    };
+  }
+
+  let revision = input.revision;
+  let discoveryAttemptedAt = input.discoveryAttemptedAt;
+  let discoveryVerifiedAt = input.discoveryVerifiedAt;
+  if (!discoveryAttemptedAt) {
+    const attempted = await markCourseSupportVerificationDiscoveryAttempted({
+      requestId: input.input.requestId,
+      expectedRevision: revision,
+      leaseToken: input.input.leaseToken,
+      runtimeVersion: input.runtimeVersion,
+      now: new Date(),
+    });
+    if (!attempted.marked) {
+      return {
+        outcome: "returned",
+        value: { outcome: "stopped", reason: attempted.reason },
+      };
+    }
+    revision = attempted.revision;
+    discoveryAttemptedAt = attempted.discoveryAttemptedAt;
+    discoveryVerifiedAt = attempted.discoveryVerifiedAt;
   }
 
   let providerExecutionStarted = false;
@@ -1210,21 +1400,47 @@ async function executePlaybookAdapterStage(input: {
         execution.value.slots,
       );
       const outcome = matchingSlots.length > 0 ? "MATCH_FOUND" : "NO_MATCH";
-      await requireRecordedPlaybookTransition(input.runtime, {
-        stage: input.stage,
-        transition: "SUCCEEDED",
-        readPath: "TYPED_PROVIDER_ADAPTER",
-        evidenceKind: "PROVIDER_RESPONSE",
+      const observedAt = new Date();
+      const verified = await markCourseSupportVerificationDiscoveryVerified({
+        requestId: input.input.requestId,
+        expectedRevision: revision,
+        leaseToken: input.input.leaseToken,
         runtimeVersion: input.runtimeVersion,
+        now: observedAt,
       });
+      if (!verified.marked) {
+        return {
+          outcome: "returned",
+          value: { outcome: "stopped", reason: verified.reason },
+        };
+      }
+      revision = verified.revision;
+      discoveryAttemptedAt = verified.discoveryAttemptedAt;
+      discoveryVerifiedAt = verified.discoveryVerifiedAt;
+      if (!hasCoherentDiscoveryProof(discoveryAttemptedAt, discoveryVerifiedAt)) {
+        return {
+          outcome: "returned",
+          value: { outcome: "stopped", reason: "discovery_not_verified" },
+        };
+      }
+      if (input.transitionMode !== "REUSE_SUCCEEDED") {
+        await requireRecordedPlaybookTransition(input.runtime, {
+          stage: input.stage,
+          transition: "SUCCEEDED",
+          readPath: "TYPED_PROVIDER_ADAPTER",
+          evidenceKind: "PROVIDER_RESPONSE",
+          runtimeVersion: input.runtimeVersion,
+          now: observedAt,
+        });
+      }
       const completed = await completeCourseSupportVerificationRequest({
         requestId: input.input.requestId,
-        expectedRevision: input.revision,
+        expectedRevision: revision,
         leaseToken: input.input.leaseToken,
         runtimeVersion: input.runtimeVersion,
         observation: {
           outcome,
-          observedAt: new Date(),
+          observedAt,
           adapterKey: capability.providerFamilyKey,
           availabilityCount: matchingSlots.length,
           providerExecution: true,
@@ -1239,6 +1455,30 @@ async function executePlaybookAdapterStage(input: {
     }
   } catch (error) {
     failure = classifyProviderFailure({ error });
+  }
+
+  if (input.transitionMode === "REUSE_SUCCEEDED") {
+    const failedAt = new Date();
+    const retryAt =
+      !recoveryStartedWithAttempt &&
+      PLAYBOOK_RETRYABLE_FAILURES.has(failure!.failureClass)
+        ? getTransientProviderRetryAt(failedAt, failure!.retryAfterSeconds)
+        : null;
+    return {
+      outcome: "returned",
+      value: await failVerification({
+        input: input.input,
+        revision,
+        runtimeVersion: input.runtimeVersion,
+        failureClass: failure!.failureClass,
+        providerExecution: providerExecutionStarted,
+        httpStatus: failure!.httpStatus,
+        retryAfterSeconds: retryAt ? failure!.retryAfterSeconds : undefined,
+        message:
+          "The current provider adapter could not reproduce its prior successful result.",
+        retryAt,
+      }),
+    };
   }
 
   const stageAssessment = input.runtime.assessment.stages.find(
@@ -1256,13 +1496,18 @@ async function executePlaybookAdapterStage(input: {
     runtimeVersion: input.runtimeVersion,
   });
   if (!retryable) {
-    return { outcome: "continued" };
+    return {
+      outcome: "continued",
+      revision,
+      discoveryAttemptedAt,
+      discoveryVerifiedAt,
+    };
   }
   return {
     outcome: "returned",
     value: await failVerification({
       input: input.input,
-      revision: input.revision,
+      revision,
       runtimeVersion: input.runtimeVersion,
       failureClass: failure!.failureClass,
       providerExecution: providerExecutionStarted,
@@ -1273,6 +1518,177 @@ async function executePlaybookAdapterStage(input: {
       retryAt: new Date(Date.now() + PLAYBOOK_RETRY_MS),
     }),
   };
+}
+
+async function recoverSucceededPlaybookLocalReader(input: {
+  input: CourseSupportVerificationWorkflowInput;
+  revision: number;
+  runtimeVersion: string;
+  course: VerificationCourse;
+  intent: VerificationIntent;
+  discoveryAttemptedAt: Date | null;
+  discoveryVerifiedAt: Date | null;
+  priorSucceededAt: Date | null;
+}) {
+  const bookingUrl = input.course.detectedBookingUrl ?? input.course.website;
+  if (
+    !bookingUrl ||
+    input.course.monitoringMode === "SERVER_ONLY" ||
+    input.course.monitoringMode === "CONTACT_ONLY" ||
+    getLocalReaderCourseKey(bookingUrl) === null
+  ) {
+    return failVerification({
+      input: input.input,
+      revision: input.revision,
+      runtimeVersion: input.runtimeVersion,
+      failureClass: "READER_PARSER_MISSING",
+      providerExecution: false,
+      message:
+        "The previously successful signed local reader is no longer runnable.",
+    });
+  }
+
+  const recoveryStartedWithAttempt = Boolean(input.discoveryAttemptedAt);
+  let revision = input.revision;
+  let discoveryAttemptedAt = input.discoveryAttemptedAt;
+  let discoveryVerifiedAt = input.discoveryVerifiedAt;
+  if (!discoveryAttemptedAt) {
+    const attempted = await markCourseSupportVerificationDiscoveryAttempted({
+      requestId: input.input.requestId,
+      expectedRevision: revision,
+      leaseToken: input.input.leaseToken,
+      runtimeVersion: input.runtimeVersion,
+      now: new Date(),
+    });
+    if (!attempted.marked) {
+      return { outcome: "stopped" as const, reason: attempted.reason };
+    }
+    revision = attempted.revision;
+    discoveryAttemptedAt = attempted.discoveryAttemptedAt;
+    discoveryVerifiedAt = attempted.discoveryVerifiedAt;
+  }
+  if (!discoveryAttemptedAt) {
+    return { outcome: "stopped" as const, reason: "discovery_not_attempted" };
+  }
+
+  const priorSucceededAt = input.priorSucceededAt?.getTime() ?? 0;
+  const notBefore = new Date(
+    Math.max(discoveryAttemptedAt.getTime(), priorSucceededAt + 1),
+  );
+  const readerVerification = await getLocalReaderCourseVerification({
+    courseId: input.course.id,
+    targetDate: input.intent.targetDateLocal,
+    players: input.intent.players,
+    bookingUrl,
+    notBefore,
+  });
+  const currentReaderResult = Boolean(
+    readerVerification &&
+      readerVerification.status !== "PENDING" &&
+      readerVerification.observedAt.getTime() >= notBefore.getTime(),
+  );
+  if (readerVerification?.status === "COMPLETED" && currentReaderResult) {
+    if (
+      readerVerification.slots.some(
+        (slot) => !getSafeOfficialBookingUrl(slot.bookingUrl),
+      )
+    ) {
+      return failVerification({
+        input: input.input,
+        revision,
+        runtimeVersion: input.runtimeVersion,
+        failureClass: "SCHEMA",
+        providerExecution: true,
+        message: "The signed local reader returned an unsafe booking destination.",
+      });
+    }
+    const matchingSlots = filterSlotsForSearch(
+      {
+        date: input.intent.targetDateLocal,
+        startTime: input.intent.startTimeLocal,
+        endTime: input.intent.endTimeLocal,
+        players: input.intent.players,
+        preferredCourses: [{ courseId: input.course.id, rank: 1 }],
+      },
+      readerVerification.slots,
+    );
+    const outcome = matchingSlots.length > 0 ? "MATCH_FOUND" : "NO_MATCH";
+    const verified = await markCourseSupportVerificationDiscoveryVerified({
+      requestId: input.input.requestId,
+      expectedRevision: revision,
+      leaseToken: input.input.leaseToken,
+      runtimeVersion: input.runtimeVersion,
+      now: new Date(),
+    });
+    if (!verified.marked) {
+      return { outcome: "stopped" as const, reason: verified.reason };
+    }
+    revision = verified.revision;
+    discoveryAttemptedAt = verified.discoveryAttemptedAt;
+    discoveryVerifiedAt = verified.discoveryVerifiedAt;
+    if (!hasCoherentDiscoveryProof(discoveryAttemptedAt, discoveryVerifiedAt)) {
+      return { outcome: "stopped" as const, reason: "discovery_not_verified" };
+    }
+    const completed = await completeCourseSupportVerificationRequest({
+      requestId: input.input.requestId,
+      expectedRevision: revision,
+      leaseToken: input.input.leaseToken,
+      runtimeVersion: input.runtimeVersion,
+      observation: {
+        outcome,
+        observedAt: readerVerification.observedAt,
+        adapterKey: `LOCAL_READER:${resolveProviderCapability(input.course).providerFamilyKey}`,
+        availabilityCount: matchingSlots.length,
+        providerExecution: true,
+      },
+    });
+    return completed.completed
+      ? { outcome: "completed" as const, providerOutcome: outcome }
+      : { outcome: "stopped" as const, reason: completed.reason };
+  }
+
+  if (readerVerification?.status === "TERMINAL" && currentReaderResult) {
+    return failVerification({
+      input: input.input,
+      revision,
+      runtimeVersion: input.runtimeVersion,
+      failureClass:
+        readerVerification.resultStatus === "ACCESS_CHALLENGE"
+          ? "CHALLENGE"
+          : readerVerification.resultStatus === "PAGE_MISMATCH"
+            ? "SCHEMA"
+            : readerVerification.resultStatus === "EXPIRED"
+              ? "TIMEOUT"
+              : "UNKNOWN",
+      providerExecution: true,
+      message:
+        "The current signed local reader could not reproduce its prior successful result.",
+      retryAt: null,
+    });
+  }
+
+  const retryAt = recoveryStartedWithAttempt
+    ? null
+    : new Date(Date.now() + PLAYBOOK_RETRY_MS);
+  if (!recoveryStartedWithAttempt && readerVerification?.status !== "PENDING") {
+    await queueLocalReaderCourseVerification({
+      courseId: input.course.id,
+      targetDate: input.intent.targetDateLocal,
+      players: input.intent.players,
+      bookingUrl,
+      notBefore,
+    });
+  }
+  return failVerification({
+    input: input.input,
+    revision,
+    runtimeVersion: input.runtimeVersion,
+    failureClass: "HTTP_5XX",
+    providerExecution: false,
+    message:
+      "A fresh signed local-reader result is required to recover the concluded request.",
+    retryAt,
+  });
 }
 
 async function requireRecordedPlaybookTransition(

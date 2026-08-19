@@ -692,6 +692,7 @@ export async function claimCourseSupportVerificationRequest(input: {
             ...provider,
             ...(providerSnapshotChanged
               ? {
+                  discoveryAttemptedAt: null,
                   discoveryVerifiedAt: null,
                 }
               : {}),
@@ -780,6 +781,7 @@ export async function attachCourseSupportVerificationProviderSnapshot(input: {
   expectedRevision: number;
   leaseToken: string;
   runtimeVersion: string;
+  purpose: "PRE_EXECUTION" | "POST_DISCOVERY";
   now?: Date;
 }) {
   const now = validDate(input.now ?? new Date(), "provider snapshot time");
@@ -829,6 +831,13 @@ export async function attachCourseSupportVerificationProviderSnapshot(input: {
       const providerSnapshotChanged =
         provider.providerSnapshotFingerprint !==
         ownedRequest.providerSnapshotFingerprint;
+      if (
+        input.purpose === "POST_DISCOVERY" &&
+        (!ownedRequest.discoveryAttemptedAt ||
+          ownedRequest.discoveryAttemptedAt.getTime() > now.getTime())
+      ) {
+        return rejectedAttachment("discovery_not_attempted");
+      }
       const updated =
         await transaction.courseSupportVerificationRequest.updateMany({
           where: ownedCheckingWhere(input, now),
@@ -836,6 +845,9 @@ export async function attachCourseSupportVerificationProviderSnapshot(input: {
             ...provider,
             ...(providerSnapshotChanged
               ? {
+                  ...(input.purpose === "PRE_EXECUTION"
+                    ? { discoveryAttemptedAt: null }
+                    : {}),
                   discoveryVerifiedAt: null,
                 }
               : {}),
@@ -851,7 +863,10 @@ export async function attachCourseSupportVerificationProviderSnapshot(input: {
         attached: true as const,
         revision: ownedRequest.revision + 1,
         providerSnapshotFingerprint: provider.providerSnapshotFingerprint,
-        discoveryAttemptedAt: ownedRequest.discoveryAttemptedAt,
+        discoveryAttemptedAt:
+          providerSnapshotChanged && input.purpose === "PRE_EXECUTION"
+            ? null
+            : ownedRequest.discoveryAttemptedAt,
         discoveryVerifiedAt: providerSnapshotChanged
           ? null
           : ownedRequest.discoveryVerifiedAt,
