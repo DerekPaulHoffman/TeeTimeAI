@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { prisma } from "@/lib/prisma";
 import { buildBrowserDiscovery } from "./browser-discovery";
+import { COURSE_PROVIDER_EXECUTION_EVIDENCE_FIELDS } from "./course-provider-execution-evidence";
 import { appendAutomationPlaybookEvent } from "./course-monitoring-playbook";
 import {
   applyBrowserDiscoveryToCourse,
@@ -61,6 +62,17 @@ function currentIntelligenceEvidence() {
     intelligenceVerifiedAt: new Date(now - 60 * 60 * 1000),
     intelligenceReviewAt: new Date(now + 30 * 24 * 60 * 60 * 1000)
   };
+}
+
+function expectCompleteProviderExecutionEvidenceSelect(query: unknown) {
+  const select = (query as { select?: Record<string, unknown> }).select;
+  expect(select).toEqual(
+    expect.objectContaining(
+      Object.fromEntries(
+        COURSE_PROVIDER_EXECUTION_EVIDENCE_FIELDS.map((field) => [field, true])
+      )
+    )
+  );
 }
 
 function browserReadyAttemptLedger() {
@@ -226,6 +238,86 @@ describe("browser discovery persistence", () => {
         intelligenceConfidence: 0.95
       }
     });
+    expectCompleteProviderExecutionEvidenceSelect(
+      mockedPrisma.course.findUnique.mock.calls[0]?.[0]
+    );
+  });
+
+  it("does not reopen monitoring for an immaterial discovery refresh on a verified-layout course", async () => {
+    const updatedAt = new Date("2026-08-18T18:00:00.000Z");
+    const layoutHolesVerifiedAt = new Date("2026-07-15T19:40:00.000Z");
+    const bookingMetadata = {
+      scheduleId: 11739,
+      bookingClassId: 22739,
+      bookingBaseUrl:
+        "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes"
+    };
+    const current = {
+      id: "course-verified-layout",
+      name: "Verified Layout Golf Course",
+      timeZone: "America/New_York",
+      website: "https://course.example.com",
+      detectedBookingUrl:
+        "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes",
+      detectedPlatform: "FOREUP",
+      providerFamilyKey: "FOREUP",
+      bookingMethod: "PUBLIC_ONLINE",
+      bookingWindowDaysAhead: null,
+      bookingWindowEvidenceUrl: null,
+      bookingReleaseTimeLocal: null,
+      bookingWindowSource: null,
+      bookingWindowConfidence: null,
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      monitoringMode: "AUTOMATIC",
+      bookingAccessMode: "PUBLIC_SIGNED_OUT",
+      isPublic: true,
+      intelligenceVerifiedAt: new Date("2026-08-17T18:00:00.000Z"),
+      intelligenceReviewAt: null,
+      intelligenceConfidence: 0.95,
+      bookingMetadata,
+      layoutHoleCounts: [18],
+      layoutHolesVerifiedAt,
+      updatedAt
+    };
+    const applied = {
+      ...current,
+      intelligenceVerifiedAt: new Date("2026-08-18T18:01:00.000Z"),
+      updatedAt: new Date("2026-08-18T18:01:00.000Z")
+    };
+    mockedPrisma.course.findUnique
+      .mockImplementationOnce(async (query) => {
+        const select = (query as { select?: Record<string, unknown> }).select;
+        return Object.fromEntries(
+          Object.entries(current).filter(([field]) => select?.[field] === true)
+        ) as never;
+      })
+      .mockResolvedValueOnce(applied as never);
+    mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
+
+    await expect(
+      applyBrowserDiscoveryToCourse({
+        courseId: current.id,
+        status: "LEARNED",
+        detectedPlatform: "FOREUP",
+        sourceUrl: current.website,
+        bookingUrl: current.detectedBookingUrl,
+        apiMetadata: bookingMetadata,
+        confidence: current.intelligenceConfidence,
+        evidence: {
+          learnedFrom: "foreup-api-request",
+          observedUrls: []
+        }
+      })
+    ).resolves.toEqual(applied);
+
+    expectCompleteProviderExecutionEvidenceSelect(
+      mockedPrisma.course.findUnique.mock.calls[0]?.[0]
+    );
+    expect(mockedPrisma.courseSupportIncident.findUnique).not.toHaveBeenCalled();
+    expect(mockedPrisma.courseMonitoringStatus.findUnique).not.toHaveBeenCalled();
+    expect(mockedPrisma.courseMonitoringEvent.create).not.toHaveBeenCalled();
+    expect(mockedPrisma.teeSearch.updateMany).not.toHaveBeenCalled();
   });
 
   it("does not persist failed discovery evidence after unowned incident state changes", async () => {
@@ -547,6 +639,9 @@ describe("browser discovery persistence", () => {
         detectedBookingUrl: "https://www.chronogolf.com/club/blue-rock-golf-course"
       }
     });
+    expectCompleteProviderExecutionEvidenceSelect(
+      mockedPrisma.course.findUnique.mock.calls[0]?.[0]
+    );
   });
 
   it("persists EZLinks identity without marking the course runnable", async () => {

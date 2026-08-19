@@ -7137,6 +7137,8 @@ describe("detached verification atomic batch fences", () => {
       intelligenceVerifiedAt: Date | null;
       intelligenceReviewAt: Date | null;
       intelligenceConfidence: number | null;
+      layoutHoleCounts: number[];
+      layoutHolesVerifiedAt: Date | null;
       monitoringStatus: {
         state: "AUTO_INVESTIGATING" | "HEALTHY" | "FINAL_MANUAL";
         lastSuccessfulAt: Date | null;
@@ -7161,6 +7163,8 @@ describe("detached verification atomic batch fences", () => {
       intelligenceVerifiedAt: null,
       intelligenceReviewAt: null,
       intelligenceConfidence: null,
+      layoutHoleCounts: [],
+      layoutHolesVerifiedAt: null,
       bookingMetadata: { adapter: "example" },
       monitoringStatus: {
         state: "AUTO_INVESTIGATING",
@@ -8664,6 +8668,85 @@ describe("detached verification atomic batch fences", () => {
             select: expect.objectContaining({
               course: {
                 select: expect.objectContaining({ monitoringMode: true })
+              }
+            })
+          })
+        })
+      })
+    );
+  });
+
+  it("revalidates stable detached success with verified layout fingerprint fields", async () => {
+    const layoutHolesVerifiedAt = new Date("2026-07-15T19:40:00.000Z");
+    const verifiedLayoutCourse = providerCourse({
+      layoutHoleCounts: [18],
+      layoutHolesVerifiedAt
+    });
+    prismaMocks.batchFindFirst.mockResolvedValue(verificationBatch());
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.verificationRequestFindUnique.mockImplementation(
+      async (query: {
+        select: {
+          batchIncident: {
+            select: { course: { select: Record<string, unknown> } };
+          };
+        };
+      }) => {
+        const request = atomicRequest(verifiedLayoutCourse);
+        const selectedCourse = Object.fromEntries(
+          Object.entries(verifiedLayoutCourse).filter(
+            ([key]) => query.select.batchIncident.select.course.select[key] === true
+          )
+        );
+        return {
+          ...request,
+          batchIncident: { ...request.batchIncident, course: selectedCourse }
+        };
+      }
+    );
+    verificationMocks.getEligibleCourseSupportVerificationProof.mockResolvedValue(eligibleProof());
+    verificationMocks.buildCourseSupportProviderSnapshotFingerprint.mockImplementation(
+      (selectedCourse: {
+        layoutHoleCounts?: number[];
+        layoutHolesVerifiedAt?: Date | null;
+      }) =>
+        selectedCourse.layoutHoleCounts?.length === 1 &&
+        selectedCourse.layoutHoleCounts[0] === 18 &&
+        selectedCourse.layoutHolesVerifiedAt?.getTime() === layoutHolesVerifiedAt.getTime()
+          ? providerFingerprint
+          : "c".repeat(64)
+    );
+
+    await verifyCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      releaseSha,
+      now
+    });
+
+    expect(prismaMocks.incidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ result: "RESTORED" })
+      })
+    );
+    expect(verificationMocks.buildCourseSupportProviderSnapshotFingerprint).toHaveBeenCalledWith(
+      expect.objectContaining({
+        layoutHoleCounts: [18],
+        layoutHolesVerifiedAt
+      })
+    );
+    expect(prismaMocks.verificationRequestFindUnique).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: expect.objectContaining({
+          batchIncident: expect.objectContaining({
+            select: expect.objectContaining({
+              course: {
+                select: expect.objectContaining({
+                  layoutHoleCounts: true,
+                  layoutHolesVerifiedAt: true
+                })
               }
             })
           })

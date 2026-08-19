@@ -193,6 +193,8 @@ const DETACHED_VERIFICATION_COURSE_SELECT = {
   intelligenceReviewAt: true,
   intelligenceConfidence: true,
   bookingMetadata: true,
+  layoutHoleCounts: true,
+  layoutHolesVerifiedAt: true,
   monitoringStatus: {
     select: {
       state: true,
