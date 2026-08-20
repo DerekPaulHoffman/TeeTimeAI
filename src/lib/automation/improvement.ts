@@ -10,35 +10,9 @@ export type PendingAlertOwnerDeliveryInput = {
   matchIds: string[];
 };
 
-type ActionableProbeInput = {
-  id: string;
-  outcome:
-    | "BLOCKED_POLICY"
-    | "BLOCKED_AUTH"
-    | "BLOCKED_TOOLING"
-    | "FETCH_FAILED"
-    | "NEEDS_ADAPTER"
-    | "IDENTITY_RECHECK";
-  courseName: string;
-  platform: string;
-  observedAt: string;
-  message?: string | null;
-};
-
-type SupportIncidentInput = {
-  id: string;
-  status: "AUTO_INVESTIGATING" | "NEEDS_HUMAN";
-  kind: "NEEDS_ADAPTER" | "FETCH_FAILED" | "BLOCKED_AUTH" | "BLOCKED_TOOLING";
-  courseName: string;
-  platform: string;
-  lastSeenAt: string;
-  message?: string | null;
-  engineeringOnly?: boolean;
-};
-
 type LearningSignalInput = {
   key: string;
-  kind: "adapter_gap" | "ui_smoke" | "provider_config" | "tooling" | "research";
+  kind: "ui_smoke" | "tooling" | "research";
   category?: ImprovementCategory;
   summary: string;
   lastSeenAt: string;
@@ -130,8 +104,6 @@ type CourseProfileQueueInput = {
 export type ImprovementCandidateInput = {
   activeSearchCount: number;
   pendingAlerts: PendingAlertInput[];
-  supportIncidents?: SupportIncidentInput[];
-  actionableProbes: ActionableProbeInput[];
   learningSignals?: LearningSignalInput[];
   portfolioCandidates?: PortfolioCandidateInput[];
   categoryHistory?: ImprovementCategoryHistoryInput[];
@@ -141,20 +113,12 @@ export type ImprovementCandidate = {
   outcome:
     | "success"
     | "exploration_required"
-    | "needs_adapter"
-    | "blocked_policy"
     | "blocked_auth"
     | "blocked_tooling"
     | "blocked_env"
     | "needs_human";
   kind:
     | "pending_alert"
-    | "adapter_remediation"
-    | "adapter_gap"
-    | "policy_blocker"
-    | "auth_blocker"
-    | "tooling_blocker"
-    | "fetch_failure"
     | "ui_smoke"
     | "learning_followup"
     | "portfolio_signal"
@@ -167,15 +131,6 @@ export type ImprovementCandidate = {
   priority?: number;
   selectionReason?: string;
   evidence?: string[];
-  engineeringOnly?: boolean;
-};
-
-export type AdapterRemediationCloseoutEvidence = {
-  incidentId: string;
-  attempts: string[];
-  evidence: string[];
-  result: string;
-  requiredExternalAction: string;
 };
 
 export function filterFutureDeferredPendingAlerts(
@@ -230,15 +185,6 @@ export type ImprovementCheckpoints = {
 export const HOURLY_IMPROVEMENT_AUTOMATION_ID =
   "teetimeai-hourly-product-improvement-loop";
 export const HOURLY_IMPROVEMENT_CLAIM_WINDOW_MS = 40 * 60 * 1000;
-
-const ACTIONABLE_PROBE_OUTCOMES = new Set<ActionableProbeInput["outcome"]>([
-  "BLOCKED_POLICY",
-  "BLOCKED_AUTH",
-  "BLOCKED_TOOLING",
-  "FETCH_FAILED",
-  "NEEDS_ADAPTER",
-  "IDENTITY_RECHECK"
-]);
 
 const SENSITIVE_QUERY_PARAMETER_NAMES = new Set([
   "access_token",
@@ -408,11 +354,6 @@ export function selectImprovementCandidate(
     };
   }
 
-  const supportIncident = input.supportIncidents?.[0];
-  if (supportIncident) {
-    return candidateFromSupportIncident(supportIncident);
-  }
-
   const rankedPortfolio = rankPortfolioCandidates(
     input.portfolioCandidates ?? [],
     input.categoryHistory ?? []
@@ -425,11 +366,6 @@ export function selectImprovementCandidate(
   );
   if (urgentPortfolioCandidate) {
     return candidateFromPortfolioSignal(urgentPortfolioCandidate);
-  }
-
-  const probe = selectFreshProbe(input.actionableProbes, input.learningSignals ?? []);
-  if (probe) {
-    return candidateFromProbe(probe);
   }
 
   const portfolioCandidate = selectablePortfolio[0];
@@ -460,7 +396,7 @@ export function selectImprovementCandidate(
     summary:
       input.activeSearchCount === 0
         ? "Initial queue evidence is empty; broaden ZIP, device, route, feedback, course-coverage, accessibility, performance, security, metadata, and current-practice exploration until a safe valuable improvement or concrete blocker is found."
-        : "Active searches have no current delivery, incident, probe, or shippable portfolio blocker; broaden ZIP, device, route, feedback, course-coverage, accessibility, performance, security, metadata, and current-practice exploration until a safe valuable improvement or concrete blocker is found.",
+        : "Active searches have no current delivery or shippable non-course-support portfolio blocker; broaden ZIP, device, route, feedback, aggregate course-coverage, accessibility, performance, security, metadata, and current-practice exploration until a safe valuable improvement or concrete blocker is found.",
     researchDirective:
       "Rotate to the least-recently covered evidence surfaces. A healthy first pass is not a terminal outcome."
   };
@@ -760,7 +696,9 @@ export function buildPortfolioCategoryHistory(
       {
         category,
         selectedAt: toIsoString(run.completedAt),
-        incidentOverride: record.candidate?.kind === "adapter_remediation"
+        incidentOverride:
+          (record.candidate as { kind?: string } | undefined)?.kind ===
+          "adapter_remediation"
       }
     ];
   });
@@ -829,28 +767,6 @@ export function buildRepeatedCoveragePortfolioCandidates(
   });
 }
 
-export function selectLatestActionableProbes<
-  T extends {
-    teeSearchId: string;
-    courseId: string;
-    outcome: string;
-  }
->(probesNewestFirst: readonly T[]): Array<T & { outcome: ActionableProbeInput["outcome"] }> {
-  const latest = new Map<string, T>();
-
-  for (const probe of probesNewestFirst) {
-    const key = `${probe.teeSearchId}:${probe.courseId}`;
-    if (!latest.has(key)) {
-      latest.set(key, probe);
-    }
-  }
-
-  return [...latest.values()].filter(
-    (probe): probe is T & { outcome: ActionableProbeInput["outcome"] } =>
-      ACTIONABLE_PROBE_OUTCOMES.has(probe.outcome as ActionableProbeInput["outcome"])
-  );
-}
-
 export function buildImprovementCheckpoints(input: {
   queueConfirmed: boolean;
   candidateSelected: boolean;
@@ -874,54 +790,6 @@ export function buildImprovementCheckpoints(input: {
     production_verified: input.productionVerified ?? false,
     outcome_recorded: false
   };
-}
-
-export function validateAdapterRemediationCloseout(input: {
-  candidate: ImprovementCandidate | undefined;
-  outcome: string;
-  evidence: unknown;
-}) {
-  if (input.candidate?.kind !== "adapter_remediation") {
-    return { escalate: false } as const;
-  }
-  if (input.outcome === "needs_adapter") {
-    throw new Error(
-      "adapter remediation cannot close as needs_adapter; complete the adapter, classify a current technical-access or direct-booking outcome, or record a concrete blocker"
-    );
-  }
-  if (input.outcome !== "needs_human") {
-    return { escalate: false } as const;
-  }
-  if (input.candidate.engineeringOnly) {
-    throw new Error(
-      "engineering-only adapter remediation cannot escalate to an owner; persist a runnable or conclusive final disposition"
-    );
-  }
-
-  const evidence = input.evidence as Partial<AdapterRemediationCloseoutEvidence> | null;
-  const referenceId = input.candidate.referenceId;
-  if (
-    !evidence ||
-    !referenceId ||
-    evidence.incidentId !== referenceId ||
-    !Array.isArray(evidence.attempts) ||
-    evidence.attempts.filter(isNonEmptyString).length === 0 ||
-    !Array.isArray(evidence.evidence) ||
-    evidence.evidence.filter(isNonEmptyString).length === 0 ||
-    !isNonEmptyString(evidence.result) ||
-    !isNonEmptyString(evidence.requiredExternalAction)
-  ) {
-    throw new Error(
-      "needs_human adapter closeout requires adapterRemediation evidence with the incident id, automated attempts, sources, result, and exact external action"
-    );
-  }
-
-  return {
-    escalate: true,
-    incidentId: referenceId,
-    message: evidence.result.trim(),
-    nextAction: evidence.requiredExternalAction.trim()
-  } as const;
 }
 
 export function markImprovementOutcomeRecorded(
@@ -1244,99 +1112,6 @@ function isRepoRelativeOwnedPath(path: string) {
   );
 }
 
-function candidateFromProbe(probe: ActionableProbeInput): ImprovementCandidate {
-  switch (probe.outcome) {
-    case "NEEDS_ADAPTER":
-      return {
-        outcome: "needs_adapter",
-        kind: "adapter_gap",
-        summary: `${probe.courseName} needs a ${probe.platform} adapter before it can be polled.`,
-        referenceId: probe.id,
-        category: "search_discovery",
-        priority: 84,
-        selectionReason:
-          "Fresh real-demand or explicit multi-cycle coverage evidence outranks discretionary work.",
-        researchDirective:
-          "Inspect current official booking surface and policy evidence before implementing; if unsupported after repeated inspection, record a blocked or stale learning instead of repeating the same probe."
-      };
-    case "BLOCKED_POLICY":
-    case "IDENTITY_RECHECK":
-      return {
-        outcome: "needs_adapter",
-        kind: "adapter_gap",
-        summary:
-          probe.outcome === "IDENTITY_RECHECK"
-            ? `${probe.courseName} needs a fresh official identity check before monitoring can be classified.`
-            : `${probe.courseName} has a legacy policy block that requires a fresh public read-only access check.`,
-        referenceId: probe.id,
-        category: "search_discovery",
-        priority: 90,
-        selectionReason:
-          "Legacy policy-only evidence on real demand must be re-verified and cannot remain a terminal monitoring disposition.",
-        researchDirective:
-          "Inspect the current signed-out public booking surface. Implement reusable read-only monitoring when technically accessible; record only a present technical access blocker, contact-only method, or identity disposition."
-      };
-    case "BLOCKED_AUTH":
-      return {
-        outcome: "blocked_auth",
-        kind: "auth_blocker",
-        summary: `${probe.courseName} requires auth or human account setup before automation can proceed.`,
-        referenceId: probe.id,
-        category: "operations_incidents",
-        priority: 90,
-        selectionReason: "A current authentication blocker on real demand requires disposition."
-      };
-    case "BLOCKED_TOOLING":
-      return {
-        outcome: "blocked_tooling",
-        kind: "tooling_blocker",
-        summary: `${probe.courseName} is blocked by missing or failing automation tooling.`,
-        referenceId: probe.id,
-        category: "operations_incidents",
-        priority: 90,
-        selectionReason: "A current tooling blocker on real demand requires disposition."
-      };
-    case "FETCH_FAILED":
-      return {
-        outcome: "needs_human",
-        kind: "fetch_failure",
-        summary: `${probe.courseName} fetch failed and needs adapter or endpoint diagnosis.`,
-        referenceId: probe.id,
-        category: "operations_incidents",
-        priority: 92,
-        selectionReason: "A fresh provider failure on real demand outranks discretionary work."
-      };
-  }
-}
-
-function candidateFromSupportIncident(
-  incident: SupportIncidentInput
-): ImprovementCandidate {
-  const action =
-    incident.kind === "FETCH_FAILED"
-      ? "Repair the existing provider integration or replace the failing public endpoint"
-      : incident.kind === "BLOCKED_TOOLING"
-        ? "Repair the automation tooling and complete the provider integration"
-        : incident.kind === "BLOCKED_AUTH"
-          ? "Find a public signed-out read-only retrieval path or conclusively classify the current technical access requirement"
-          : "Build or extend a reusable provider adapter";
-  return {
-    outcome: "needs_adapter",
-    kind: "adapter_remediation",
-    summary: `${action} for ${incident.courseName} (${incident.platform}) and verify the affected active search end to end.`,
-    referenceId: incident.id,
-    engineeringOnly: incident.engineeringOnly,
-    category: "operations_incidents",
-    priority: 110,
-    selectionReason: incident.engineeringOnly
-      ? "An engineering-only multi-cycle coverage incident has priority until it receives a runnable or final disposition."
-      : "An open support incident affecting real active demand has priority.",
-    researchDirective: incident.engineeringOnly
-      ? "Start from the current official booking surface, inspect public signed-out provider traffic, implement reusable metadata discovery and read-only retrieval when technically accessible, add focused tests, and rerun the affected search. Persist a conclusive technical-access, contact, or identity disposition when public monitoring is not possible; do not escalate synthetic coverage to the owner."
-      : "Start from the current official booking surface, inspect public signed-out provider traffic, implement reusable metadata discovery and read-only retrieval when technically accessible, add focused tests, and rerun the affected search. Booking or transaction policy text alone is never terminal. Do not ask the owner to research or code the adapter. Only use needs_human after concrete automated attempts prove an exact external action is unavoidable."
-  };
-}
-
 function isRecordObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -1374,9 +1149,6 @@ function categoryFromLearningKind(
   kind: LearningSignalInput["kind"]
 ): ImprovementCategory {
   switch (kind) {
-    case "adapter_gap":
-    case "provider_config":
-      return "search_discovery";
     case "ui_smoke":
       return "ui_ux";
     case "tooling":
@@ -1388,31 +1160,6 @@ function categoryFromLearningKind(
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && Boolean(value.trim());
-}
-
-function selectFreshProbe(
-  probes: ActionableProbeInput[],
-  learningSignals: LearningSignalInput[]
-) {
-  const staleAdapterKeys = new Set(
-    learningSignals
-      .filter(
-        (signal) =>
-          signal.kind === "adapter_gap" &&
-          signal.repeats >= 2 &&
-          (signal.status === "stale" || signal.status === "blocked" || /no reusable adapter/i.test(signal.summary))
-      )
-      .map((signal) => normalizeKey(signal.key))
-  );
-
-  return probes.find((probe) => {
-    if (probe.outcome !== "NEEDS_ADAPTER") {
-      return true;
-    }
-
-    const courseKey = normalizeKey(`adapter:${probe.courseName}`);
-    return !staleAdapterKeys.has(courseKey);
-  });
 }
 
 function selectLearningFollowup(signals: LearningSignalInput[]) {
@@ -1466,7 +1213,8 @@ function categoryFromFeedback(
 function inferHistoricalCategory(
   record: HourlyImprovementRunRecord
 ): ImprovementCategory | null {
-  switch (record.candidate?.kind) {
+  const historicalKind = (record.candidate as { kind?: string } | undefined)?.kind;
+  switch (historicalKind) {
     case "pending_alert":
       return "email_alerts";
     case "adapter_remediation":
@@ -1560,8 +1308,4 @@ function readStringArray(value: unknown) {
 
 function toIsoString(value: Date | string) {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
-}
-
-function normalizeKey(value: string) {
-  return value.trim().toLowerCase();
 }

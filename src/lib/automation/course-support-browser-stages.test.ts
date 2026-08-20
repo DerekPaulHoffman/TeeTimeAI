@@ -233,9 +233,11 @@ describe("persistOwnedCourseSupportBrowserPlaybookStages", () => {
 
     await expect(
       persistOwnedCourseSupportBrowserPlaybookStages(input, {
-        loadBatch: vi.fn().mockResolvedValue(
-          ownedBrowserBatch({ releaseSha: null, deployedAt: null }),
-        ),
+        loadBatch: vi
+          .fn()
+          .mockResolvedValue(
+            ownedBrowserBatch({ releaseSha: null, deployedAt: null }),
+          ),
         runBrowserProbe,
       }),
     ).resolves.toEqual({
@@ -261,20 +263,20 @@ describe("persistOwnedCourseSupportBrowserPlaybookStages", () => {
       }),
       expected: "Deployment time does not match",
     },
-  ])("does not invoke the browser runner for a mismatched $name fence", async ({
-    batch,
-    expected,
-  }) => {
-    const runBrowserProbe = vi.fn();
+  ])(
+    "does not invoke the browser runner for a mismatched $name fence",
+    async ({ batch, expected }) => {
+      const runBrowserProbe = vi.fn();
 
-    await expect(
-      persistOwnedCourseSupportBrowserPlaybookStages(input, {
-        loadBatch: vi.fn().mockResolvedValue(batch),
-        runBrowserProbe,
-      }),
-    ).rejects.toThrow(expected);
-    expect(runBrowserProbe).not.toHaveBeenCalled();
-  });
+      await expect(
+        persistOwnedCourseSupportBrowserPlaybookStages(input, {
+          loadBatch: vi.fn().mockResolvedValue(batch),
+          runBrowserProbe,
+        }),
+      ).rejects.toThrow(expected);
+      expect(runBrowserProbe).not.toHaveBeenCalled();
+    },
+  );
 
   it("blocks downstream classification and probe writes when ownership changes after the stage transition", async () => {
     const current = ownedBrowserBatch();
@@ -392,6 +394,7 @@ describe("persistOwnedCourseSupportBrowserPlaybookStages", () => {
     expect(runBrowserProbe).toHaveBeenCalledWith(
       expect.objectContaining({
         courseId: "course-1",
+        mode: "RENDERED",
         deferTerminalCloseout: true,
         persistSearchProbe: false,
       }),

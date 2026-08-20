@@ -108,6 +108,49 @@ describe("operator overview aggregation", () => {
     ).toBeNull();
   });
 
+  it("keeps repeated on-cadence scheduled failures visible until a successful run", () => {
+    const worker = {
+      desiredState: "ACTIVE",
+      lastOutcome: "inspect_failed",
+      monitoringStartedAt: new Date("2026-08-17T14:00:00.000Z"),
+      nextExpectedAt: new Date("2026-08-17T14:30:00.000Z"),
+      graceSeconds: 180
+    };
+
+    expect(
+      buildCourseSupportResponderAlert({
+        now: new Date("2026-08-17T14:16:00.000Z"),
+        openIncidentCount: 65,
+        worker
+      })
+    ).toEqual({
+      status: "FAILED",
+      title: "Course investigation responder failed",
+      detail:
+        "65 open course investigations are waiting after the latest scheduled responder run failed."
+    });
+    expect(
+      buildCourseSupportResponderAlert({
+        now: new Date("2026-08-17T14:31:00.000Z"),
+        openIncidentCount: 65,
+        worker: {
+          ...worker,
+          nextExpectedAt: new Date("2026-08-17T14:45:00.000Z")
+        }
+      })
+    ).toMatchObject({ status: "FAILED" });
+    expect(
+      buildCourseSupportResponderAlert({
+        now: new Date("2026-08-17T14:29:00.000Z"),
+        openIncidentCount: 65,
+        worker: {
+          ...worker,
+          lastOutcome: "inspect_completed"
+        }
+      })
+    ).toBeNull();
+  });
+
   it("excludes courses waiting for material change from responder work metrics", () => {
     const incidents = [
       { id: "incident-active", courseId: "course-active" },

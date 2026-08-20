@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  getFreshRenderedCorroborationEvidence,
+  resolveBrowserInvestigationMode,
   resolveBrowserProbeRuntimeVersion,
+  resolveBrowserProbeTargetSelection,
   runBrowserProbeCli,
 } from "../../../scripts/automation/browser-probe-needed-adapters";
 import { getAutomationRuntimeVersion } from "./runtime-version";
@@ -74,5 +77,114 @@ describe("browser probe direct entry", () => {
     expect(() =>
       resolveBrowserProbeRuntimeVersion("b".repeat(40), persistenceFence),
     ).toThrow("does not match the owned batch release");
+  });
+
+  it("uses distinct rendered and independent investigation modes from the ordered stage", () => {
+    expect(resolveBrowserInvestigationMode({ persistenceFence })).toBe(
+      "RENDERED",
+    );
+    expect(
+      resolveBrowserInvestigationMode({
+        persistenceFence: {
+          ...persistenceFence,
+          stage: "INDEPENDENT_CONFIRMATION",
+        },
+      }),
+    ).toBe("INDEPENDENT");
+  });
+
+  it("passes the exact owned persistence fence into target selection", () => {
+    expect(
+      resolveBrowserProbeTargetSelection({
+        limit: 1,
+        courseName: undefined,
+        courseId: "course-1",
+        persistenceFence,
+      }),
+    ).toEqual({
+      limit: 1,
+      courseName: undefined,
+      courseId: "course-1",
+      persistenceFence,
+    });
+  });
+
+  it("accepts corroboration only from a fresh rendered observation in the same cycle and runtime", () => {
+    const confirmedAt = new Date("2026-08-20T12:00:00.000Z");
+    const evidence = {
+      accessBarriers: [
+        { url: "https://provider.example/public", status: 403 },
+      ],
+      browserInvestigation: {
+        mode: "RENDERED",
+        incidentCycle: 3,
+        runtimeVersion: releaseSha,
+        observedAt: "2026-08-20T12:01:00.000Z",
+      },
+    };
+    const discovery = {
+      createdAt: new Date("2026-08-20T12:01:01.000Z"),
+      evidence,
+    };
+    const context = {
+      incidentCycle: 3,
+      runtimeVersion: releaseSha,
+      confirmedAt,
+    };
+
+    expect(getFreshRenderedCorroborationEvidence(discovery, context)).toBe(
+      evidence,
+    );
+    expect(
+      getFreshRenderedCorroborationEvidence(
+        {
+          ...discovery,
+          evidence: {
+            ...evidence,
+            browserInvestigation: {
+              ...evidence.browserInvestigation,
+              mode: "INDEPENDENT",
+            },
+          },
+        },
+        context,
+      ),
+    ).toBeNull();
+    expect(
+      getFreshRenderedCorroborationEvidence(discovery, {
+        ...context,
+        incidentCycle: 4,
+      }),
+    ).toBeNull();
+    expect(
+      getFreshRenderedCorroborationEvidence(discovery, {
+        ...context,
+        runtimeVersion: "b".repeat(40),
+      }),
+    ).toBeNull();
+    expect(
+      getFreshRenderedCorroborationEvidence(
+        {
+          createdAt: new Date("2026-08-20T11:59:59.000Z"),
+          evidence,
+        },
+        context,
+      ),
+    ).toBeNull();
+    expect(
+      getFreshRenderedCorroborationEvidence(
+        {
+          ...discovery,
+          evidence: {
+            ...evidence,
+            browserInvestigation: {
+              ...evidence.browserInvestigation,
+              observedAt: "2026-08-20T11:59:59.000Z",
+            },
+          },
+        },
+        context,
+      ),
+    ).toBeNull();
   });
 });

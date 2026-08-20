@@ -37,7 +37,11 @@ import {
   type CourseDiagnosticKey,
   type CourseInventoryItem
 } from "@/lib/operator/course-status";
-import { loadOperatorOverview, type OperatorOverview } from "@/lib/operator/overview";
+import {
+  isFailedAutomationWorkerOutcome,
+  loadOperatorOverview,
+  type OperatorOverview
+} from "@/lib/operator/overview";
 import { parseOperatorRange } from "@/lib/operator/time";
 
 export const dynamic = "force-dynamic";
@@ -150,6 +154,9 @@ function OperatorDashboard({
           supporting="Start with golfer impact, then see each course's current state and whether automation or a person acts next."
         />
         <CourseFleetSummary overview={overview} />
+        <CourseSupportCampaignSummary
+          campaign={overview.operations.courseSupportCampaign}
+        />
         <CourseDiagnosticBreakdown
           courses={overview.courseFleet.courses}
           days={overview.range.days}
@@ -532,19 +539,36 @@ function OperatorDashboard({
           supporting="Engineering worker health is tracked independently from golfer search scheduling."
         />
         <div className="operator-health-strip">
-          {overview.operations.workers.map((worker) => (
-            <HealthItem
-              key={worker.workerKey}
-              label={formatEnum(worker.workerKey)}
-              value={worker.overdueSince ? "Overdue" : worker.desiredState}
-              detail={
-                worker.lastCompletedAt
-                  ? `Last completed ${formatDateTime(worker.lastCompletedAt)}`
-                  : "Waiting for first worker heartbeat"
-              }
-              warning={Boolean(worker.overdueSince)}
-            />
-          ))}
+          {overview.operations.workers.map((worker) => {
+            const latestScheduledRunFailed =
+              worker.desiredState === "ACTIVE" &&
+              isFailedAutomationWorkerOutcome(worker.lastOutcome);
+            return (
+              <HealthItem
+                key={worker.workerKey}
+                label={formatEnum(worker.workerKey)}
+                value={
+                  latestScheduledRunFailed
+                    ? "Failed"
+                    : worker.overdueSince
+                      ? "Overdue"
+                      : worker.desiredState
+                }
+                detail={
+                  latestScheduledRunFailed
+                    ? `Latest scheduled run failed${
+                        worker.lastCompletedAt
+                          ? ` ${formatDateTime(worker.lastCompletedAt)}`
+                          : ""
+                      }`
+                    : worker.lastCompletedAt
+                      ? `Last completed ${formatDateTime(worker.lastCompletedAt)}`
+                      : "Waiting for first worker heartbeat"
+                }
+                warning={latestScheduledRunFailed || Boolean(worker.overdueSince)}
+              />
+            );
+          })}
           <HealthItem
             label="Recent automation runs"
             value={overview.operations.recentRuns.length}
@@ -714,6 +738,114 @@ function CourseFleetSummary({ overview }: { overview: OperatorOverview }) {
   );
 }
 
+function CourseSupportCampaignSummary({
+  campaign
+}: {
+  campaign: OperatorOverview["operations"]["courseSupportCampaign"];
+}) {
+  if (!campaign) {
+    return (
+      <div className="operator-automation-summary-heading">
+        <strong>3. Unfamiliar-course acceptance</strong>
+        <span>No parked-course baseline has been captured.</span>
+      </div>
+    );
+  }
+
+  const current = campaign.currentResults;
+  const baselineAutomatic = campaign.automaticWithin24Hours;
+  const futureAutomatic = campaign.futureAutomaticWithin24Hours;
+  const rollingHuman = campaign.rollingHumanReview;
+  const repeats = campaign.repeatImplementations;
+  return (
+    <>
+      <div className="operator-automation-summary-heading">
+        <strong>3. Unfamiliar-course acceptance</strong>
+        <span>
+          {formatEnum(campaign.status)} baseline captured {formatDateTime(campaign.capturedAt)}
+          {` · ${campaign.expectedCount} baseline courses`}
+        </span>
+      </div>
+      <div className="operator-course-summary" aria-label="Unfamiliar-course acceptance">
+        <CourseFleetCount
+          count={`${campaign.progress.terminalCount}/${campaign.progress.totalCount}`}
+          icon={
+            campaign.progress.status === "COMPLETE" ? (
+              <CheckCircle2 size={17} />
+            ) : (
+              <Activity size={17} />
+            )
+          }
+          label="Baseline terminal progress"
+          detail={`${formatEnum(campaign.progress.status)} · ${campaign.progress.remainingGlobalParkedCount} parked globally`}
+          tone={campaignMetricTone(campaign.progress.status)}
+        />
+        <CourseFleetCount
+          count={`${current.resultCount}/${current.totalCount}`}
+          icon={current.status === "PASS" ? <CheckCircle2 size={17} /> : <Search size={17} />}
+          label="Baseline current results"
+          detail={
+            current.status === "PASS"
+              ? `Every course has a result · bucket invariant ${current.bucketInvariantStatus}`
+              : `${current.missingCount} unknown · bucket invariant ${current.bucketInvariantStatus}`
+          }
+          tone={campaignMetricTone(current.status)}
+        />
+        <CourseFleetCount
+          count={`${baselineAutomatic.automaticCount}/${baselineAutomatic.totalCount}`}
+          icon={<Clock3 size={17} />}
+          label="Baseline 24h diagnostic"
+          detail={`${formatEnum(baselineAutomatic.status)} against the ${baselineAutomatic.targetPercent}% SLA diagnostic by ${formatDateTime(baselineAutomatic.deadlineAt)} · not a rollout gate`}
+          tone="neutral"
+        />
+        <CourseFleetCount
+          count={
+            futureAutomatic.ratePercent === null
+              ? "—"
+              : `${futureAutomatic.ratePercent.toFixed(1)}%`
+          }
+          icon={<Clock3 size={17} />}
+          label="Future unfamiliar cycles within 24h"
+          detail={`${formatEnum(futureAutomatic.status)} · ${futureAutomatic.automaticCount} automatic, ${futureAutomatic.nonAutomaticCount} nonautomatic, ${futureAutomatic.pendingCount} pending, ${futureAutomatic.unknownCount} unknown of ${futureAutomatic.eligibleCount} in ${futureAutomatic.windowDays} days · target ${futureAutomatic.targetPercent}%`}
+          tone={campaignMetricTone(futureAutomatic.status)}
+        />
+        <CourseFleetCount
+          count={
+            rollingHuman.ratePercent === null ? "—" : `${rollingHuman.ratePercent.toFixed(1)}%`
+          }
+          icon={<Users size={17} />}
+          label="Rolling human review"
+          detail={
+            rollingHuman.ambiguousEndpointCount > 0
+              ? `Unknown · ${rollingHuman.ambiguousEndpointCount} legacy endpoint groups lack cycle proof`
+              : `${formatEnum(rollingHuman.status)} · ${rollingHuman.humanReviewCount}/${rollingHuman.endpointCount} endpoints in ${rollingHuman.windowDays} days · target ≤${rollingHuman.targetPercent}%`
+          }
+          tone={campaignMetricTone(rollingHuman.status)}
+        />
+        <CourseFleetCount
+          count={repeats.repeatImplementationCount}
+          icon={<Wrench size={17} />}
+          label="Repeat implementations since baseline"
+          detail={`${formatEnum(repeats.status)} · ${repeats.implementationBatchCount} implementations across ${repeats.implementationGroupCount} groups`}
+          tone={campaignMetricTone(repeats.status)}
+        />
+      </div>
+      <div className="operator-automation-summary-heading">
+        <strong>Baseline result mix</strong>
+        <span>
+          {current.monitoredCount} monitored · {current.bookingNotOpenCount} booking not open ·{" "}
+          {current.factualLimitationCount} factual limitation · {current.technicalLimitationCount}
+          {" technical limitation · "}
+          {current.sourceUnverifiedCount} source unverified · {current.readyCount} ready ·{" "}
+          {current.activeCount} active · {current.engineeringBlockerCount} engineering blocker ·{" "}
+          {current.missingCount} unknown · {current.campaignHumanReviewCount} campaign human-review
+          requests
+        </span>
+      </div>
+    </>
+  );
+}
+
 function CourseFleetCount({
   count,
   icon,
@@ -721,7 +853,7 @@ function CourseFleetCount({
   detail,
   tone
 }: {
-  count: number;
+  count: React.ReactNode;
   icon: React.ReactNode;
   label: string;
   detail: string;
@@ -735,6 +867,14 @@ function CourseFleetCount({
       <p>{detail}</p>
     </div>
   );
+}
+
+function campaignMetricTone(
+  status: "PASS" | "FAIL" | "NO_DATA" | "UNKNOWN" | "IN_PROGRESS" | "COMPLETE"
+) {
+  if (status === "PASS" || status === "COMPLETE") return "positive" as const;
+  if (status === "FAIL") return "critical" as const;
+  return "warning" as const;
 }
 
 function CourseDiagnosticBreakdown({

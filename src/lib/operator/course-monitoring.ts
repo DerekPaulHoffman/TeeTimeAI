@@ -1032,6 +1032,9 @@ export async function applyOperatorCourseDecision(
           occurredAt: now,
           audit: {
             action: "set_course_outcome",
+            cycle: current.incident!.cycle,
+            confirmedAt: current.incident!.confirmedAt?.toISOString() ?? null,
+            automatedFinal: false,
             decision: input.decision,
             officialEvidenceCaptured: true,
             timerBasedRevalidation: false,
@@ -1180,6 +1183,9 @@ export async function approveOperatorCourseTechnicalFinal(
           occurredAt: now,
           audit: {
             action: "approve_technical_final",
+            cycle: current.incident!.cycle,
+            confirmedAt: current.incident!.confirmedAt?.toISOString() ?? null,
+            automatedFinal: false,
             reason: input.reason,
             timerBasedRevalidation: false,
             customerDataIncluded: false

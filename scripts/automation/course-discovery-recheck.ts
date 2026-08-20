@@ -4,11 +4,12 @@ import { pathToFileURL } from "node:url";
 
 import type { Prisma } from "@prisma/client";
 
+import { runParkedCourseCampaignCommand } from "@/lib/automation/course-support-campaign";
 import { finishAutomationRun, startAutomationRun } from "@/lib/automation/db-service";
 import {
   KNOWN_PROVIDER_FAMILIES,
   SOURCE_CONFLICT_PROVIDER_FAMILY,
-  SOURCE_MISSING_PROVIDER_FAMILY,
+  SOURCE_MISSING_PROVIDER_FAMILY
 } from "@/lib/automation/provider-capabilities";
 import { prepareCourseSupportVerificationMonitoring } from "@/lib/automation/search-monitoring-discovery";
 import { prisma } from "@/lib/prisma";
@@ -55,14 +56,24 @@ type DiscoveryRecheckDependencies = {
   startRun: () => Promise<{ id: string }>;
   finishRun: (
     id: string,
-    input: { outcome: string; errors?: Prisma.InputJsonValue; notes: string },
+    input: { outcome: string; errors?: Prisma.InputJsonValue; notes: string }
   ) => Promise<unknown>;
+  runParkedCohort?: typeof runParkedCourseCampaignCommand;
 };
 
-export type CourseDiscoveryRecheckOptions = {
-  apply: boolean;
-  courseNames: string[];
-};
+export type CourseDiscoveryRecheckOptions =
+  | {
+      apply: boolean;
+      courseNames: string[];
+      parkedCohort?: false;
+    }
+  | {
+      apply: boolean;
+      courseNames: [];
+      parkedCohort: true;
+      expectCount: number;
+      expectDigest?: string | null;
+    };
 
 export type CourseDiscoveryRecheckResult = {
   mode: "apply" | "dry-run";
@@ -93,8 +104,18 @@ export type CourseDiscoveryRecheckResult = {
 
 export async function runCourseDiscoveryRecheck(
   options: CourseDiscoveryRecheckOptions,
-  dependencies: DiscoveryRecheckDependencies = defaultDependencies,
-): Promise<CourseDiscoveryRecheckResult> {
+  dependencies: DiscoveryRecheckDependencies = defaultDependencies
+): Promise<
+  CourseDiscoveryRecheckResult | Awaited<ReturnType<typeof runParkedCourseCampaignCommand>>
+> {
+  if (options.parkedCohort) {
+    const runner = dependencies.runParkedCohort ?? runParkedCourseCampaignCommand;
+    return runner({
+      apply: options.apply,
+      expectedCount: options.expectCount,
+      expectedDigest: options.expectDigest
+    });
+  }
   const courseNames = normalizeCourseNames(options.courseNames);
   const loadedTargets = await dependencies.loadTargets(courseNames);
   const targets = orderTargets(courseNames, loadedTargets);
@@ -106,7 +127,10 @@ export async function runCourseDiscoveryRecheck(
       mode: "dry-run",
       requestedCount: targets.length,
       readyCount,
-      outcomes: readiness.map((outcome, index) => ({ ordinal: index + 1, outcome })),
+      outcomes: readiness.map((outcome, index) => ({
+        ordinal: index + 1,
+        outcome
+      }))
     };
   }
 
@@ -130,14 +154,14 @@ export async function runCourseDiscoveryRecheck(
         : snapshot?.supportIncident?.status === "RESOLVED"
           ? "ALREADY_RESOLVED"
           : recheck.appliedCourseIds.includes(target.id)
-        ? "EVIDENCE_APPLIED"
-        : recheck.failedCourseIds.includes(target.id)
-          ? "FETCH_FAILED"
-          : recheck.deferredCourseIds.includes(target.id)
-            ? "PROVIDER_BUSY"
-            : recheck.attemptedCourseIds.includes(target.id)
-              ? "EVIDENCE_RECORDED"
-              : "NO_ACTION";
+            ? "EVIDENCE_APPLIED"
+            : recheck.failedCourseIds.includes(target.id)
+              ? "FETCH_FAILED"
+              : recheck.deferredCourseIds.includes(target.id)
+                ? "PROVIDER_BUSY"
+                : recheck.attemptedCourseIds.includes(target.id)
+                  ? "EVIDENCE_RECORDED"
+                  : "NO_ACTION";
       if (outcome === "FETCH_FAILED") {
         failedOrdinals.push(ordinal);
       }
@@ -152,22 +176,47 @@ export async function runCourseDiscoveryRecheck(
     mode: "apply",
     requestedCount: targets.length,
     readyCount,
-    outcomes,
+    outcomes
   };
   const notes = JSON.stringify(result);
   await dependencies.finishRun(run.id, {
     outcome: failedOrdinals.length === 0 ? "completed" : "completed_with_findings",
     ...(failedOrdinals.length > 0 ? { errors: { failedOrdinals } } : {}),
-    notes,
+    notes
   });
   return result;
 }
 
 export function parseCourseDiscoveryRecheckArgs(argv: readonly string[]) {
   const courseNames: string[] = [];
+  let parkedCohort = false;
+  let expectCount: number | null = null;
+  let expectDigest: string | null = null;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--apply") {
+      continue;
+    }
+    if (argument === "--parked-cohort") {
+      parkedCohort = true;
+      continue;
+    }
+    if (argument === "--expect-count") {
+      const value = argv[index + 1]?.trim();
+      if (!value || value.startsWith("--") || !/^\d+$/u.test(value)) {
+        throw new Error("--expect-count requires a positive integer.");
+      }
+      expectCount = Number(value);
+      index += 1;
+      continue;
+    }
+    if (argument === "--expect-digest") {
+      const value = argv[index + 1]?.trim();
+      if (!value || value.startsWith("--")) {
+        throw new Error("--expect-digest requires a value.");
+      }
+      expectDigest = value;
+      index += 1;
       continue;
     }
     if (argument !== "--course-name") {
@@ -179,6 +228,24 @@ export function parseCourseDiscoveryRecheckArgs(argv: readonly string[]) {
     }
     courseNames.push(value);
     index += 1;
+  }
+  if (parkedCohort) {
+    if (courseNames.length > 0) {
+      throw new Error("--parked-cohort cannot be combined with --course-name.");
+    }
+    if (expectCount === null) {
+      throw new Error("--parked-cohort requires --expect-count.");
+    }
+    return {
+      apply: argv.includes("--apply"),
+      courseNames: [] as [],
+      parkedCohort: true as const,
+      expectCount,
+      ...(expectDigest ? { expectDigest } : {})
+    };
+  }
+  if (expectCount !== null || expectDigest !== null) {
+    throw new Error("--expect-count and --expect-digest require --parked-cohort.");
   }
   return { apply: argv.includes("--apply"), courseNames };
 }
@@ -210,7 +277,7 @@ function orderTargets(courseNames: readonly string[], loadedTargets: readonly Re
       throw new Error(
         matches.length === 0
           ? "A requested course was not found."
-          : "A requested course name was ambiguous.",
+          : "A requested course name was ambiguous."
       );
     }
     return matches[0];
@@ -236,15 +303,13 @@ function sanitizeSnapshot(snapshot: RecheckSnapshot | null) {
     automationReason: snapshot.automationReason,
     bookingAccessMode: snapshot.bookingAccessMode,
     monitoringState: snapshot.monitoringStatus?.state ?? null,
-    incidentStatus: snapshot.supportIncident?.status ?? null,
+    incidentStatus: snapshot.supportIncident?.status ?? null
   };
 }
 
 function sanitizeProviderFamilyKey(value: string) {
   const normalized = value.trim().toUpperCase();
-  return KNOWN_PROVIDER_FAMILIES.includes(
-    normalized as (typeof KNOWN_PROVIDER_FAMILIES)[number],
-  ) ||
+  return KNOWN_PROVIDER_FAMILIES.includes(normalized as (typeof KNOWN_PROVIDER_FAMILIES)[number]) ||
     normalized === SOURCE_MISSING_PROVIDER_FAMILY ||
     normalized === SOURCE_CONFLICT_PROVIDER_FAMILY
     ? normalized
@@ -265,10 +330,10 @@ const defaultDependencies: DiscoveryRecheckDependencies = {
             cycle: true,
             revision: true,
             status: true,
-            activeBatchId: true,
-          },
-        },
-      },
+            activeBatchId: true
+          }
+        }
+      }
     }),
   recheck: (target) =>
     prepareCourseSupportVerificationMonitoring(target.id, undefined, new Date(), {
@@ -277,8 +342,8 @@ const defaultDependencies: DiscoveryRecheckDependencies = {
         id: target.supportIncident!.id,
         cycle: target.supportIncident!.cycle,
         revision: target.supportIncident!.revision,
-        status: target.supportIncident!.status,
-      },
+        status: target.supportIncident!.status
+      }
     }),
   loadSnapshot: (courseId) =>
     prisma.course.findUnique({
@@ -291,28 +356,27 @@ const defaultDependencies: DiscoveryRecheckDependencies = {
         automationReason: true,
         bookingAccessMode: true,
         supportIncident: { select: { status: true, activeBatchId: true } },
-        monitoringStatus: { select: { state: true } },
-      },
+        monitoringStatus: { select: { state: true } }
+      }
     }),
   startRun: () => startAutomationRun(PROMPT_VERSION),
   finishRun: (id, input) =>
     finishAutomationRun(id, {
       outcome: input.outcome,
       ...(input.errors ? { errors: input.errors } : {}),
-      notes: input.notes,
+      notes: input.notes
     }),
+  runParkedCohort: runParkedCourseCampaignCommand
 };
 
 async function main() {
   const result = await runCourseDiscoveryRecheck(
-    parseCourseDiscoveryRecheckArgs(process.argv.slice(2)),
+    parseCourseDiscoveryRecheckArgs(process.argv.slice(2))
   );
   console.log(JSON.stringify(result, null, 2));
 }
 
-const isMain = process.argv[1]
-  ? import.meta.url === pathToFileURL(process.argv[1]).href
-  : false;
+const isMain = process.argv[1] ? import.meta.url === pathToFileURL(process.argv[1]).href : false;
 
 if (isMain) {
   main()

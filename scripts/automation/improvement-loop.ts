@@ -105,7 +105,7 @@ Loop engineering requirements:
 - Course profiles are durable customer-facing maintenance, not optional filler. Inspection separates actionable courseProfileQueue work from courseProfileLocationQueue records that cannot receive a guide until city/state is verified. When either queue has items and no production or customer-impacting incident is active, process up to three as one metadata_seo batch whenever the oldest item has waited at least 24 hours or no metadata_seo batch has completed in the prior 24 hours. Resolve location-queue items first with authoritative course or municipal evidence, persist only corroborated city/state, then let the next inspection create or select their profiles; never guess a location. This maintenance floor outranks discretionary UI, performance, analytics, and developer-tooling work. Use automation:course-profile research packets, authoritative sources, and dry-run validation, and apply only profiles that pass. Record source-backed physical layout/par facts through the existing evidence fields when research establishes them, but never infer physical layout from purchasable tee-sheet options. A failed refresh must preserve previously published content as stale; never delay or disable alert creation when evidence is insufficient. Write public profile prose as a confident facility guide focused on layouts, setting, amenities, ownership, access, and playing experience. Keep claim keys, evidence summaries, research-process language, and broad uncertainty internal; when one fact is unavailable, qualify only that field and point golfers to the official course or booking page.
 - A required evidence track may report healthy, empty with sample counts, unavailable with the exact blocker, or actionable; it may not be omitted. After the same access gap appears in three successful runs, surface it as a durable coverage blocker instead of repeating a harmless note forever.
 - If the same non-incident course/tool/UI issue has been inspected repeatedly without new evidence, mark it stale or blocked and rotate to the next highest-signal improvement. Leave all provider-remediation incidents and retries to the dedicated course-support responder.
-- Stop with a normalized terminal outcome: success, no_action_healthy, incident, needs_adapter, blocked_auth, blocked_tooling, blocked_env, blocked_dirty_worktree, blocked_git, blocked_concurrent, or needs_human. Treat legacy blocked_policy evidence as needs_adapter until current technical access is re-verified.
+- Stop with a normalized terminal outcome: success, no_action_healthy, incident, blocked_policy, blocked_auth, blocked_tooling, blocked_env, blocked_dirty_worktree, blocked_git, blocked_concurrent, or needs_human. Treat legacy course-provider blocked_policy evidence as responder-only aggregate context; it must never become an hourly candidate.
 
 Hard boundaries:
 - Alert only; never book, hold, pay, bypass controls, or solve account-specific course flows.
@@ -308,7 +308,6 @@ async function closeoutImprovementRun() {
     "success",
     "no_action_healthy",
     "incident",
-    "needs_adapter",
     "blocked_policy",
     "blocked_auth",
     "blocked_tooling",
@@ -811,7 +810,7 @@ async function prepareImprovementRun() {
       snapshot: {
         activeSearchCount: snapshot.activeSearchCount,
         pendingAlertCount: snapshot.pendingAlerts.length,
-        actionableProbeCount: snapshot.actionableProbes.length,
+        actionableProbeCount: 0,
         learningSignalCount: snapshot.learningSignals?.length ?? 0,
         portfolioCandidateCount: snapshot.portfolioCandidates?.length ?? 0,
         dueCategory,
@@ -1147,7 +1146,6 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
     activeSearchCount,
     pendingAlerts,
     recentRuns,
-    recentDiscoveries,
     unresolvedFeedback,
     publicFunnelCounts,
     courseProfileQueue,
@@ -1192,15 +1190,6 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
         notes: true,
         startedAt: true,
         completedAt: true
-      }
-    }),
-    prisma.courseAutomationDiscovery.findMany({
-      orderBy: {
-        createdAt: "desc"
-      },
-      take: 25,
-      include: {
-        course: true
       }
     }),
     prisma.websiteFeedback.findMany({
@@ -1293,9 +1282,7 @@ async function loadImprovementSnapshot(): Promise<ImprovementCandidateInput> {
       }),
       observedAt
     ),
-    supportIncidents: [],
-    actionableProbes: [],
-    learningSignals: buildLearningSignals(recentRuns, recentDiscoveries),
+    learningSignals: buildLearningSignals(recentRuns),
     portfolioCandidates,
     categoryHistory
   };
@@ -1306,23 +1293,13 @@ function buildLearningSignals(
     outcome: string | null;
     notes: string | null;
     startedAt: Date;
-  }>,
-  recentDiscoveries: Array<{
-    status: string;
-    detectedPlatform: string;
-    confidence: number;
-    bookingUrl: string | null;
-    createdAt: Date;
-    course: {
-      name: string;
-    };
   }>
 ) {
   const signals = new Map<
     string,
     {
       key: string;
-      kind: "adapter_gap" | "ui_smoke" | "provider_config" | "tooling" | "research";
+      kind: "ui_smoke" | "tooling" | "research";
       summary: string;
       lastSeenAt: string;
       repeats: number;
@@ -1330,27 +1307,6 @@ function buildLearningSignals(
       status?: "open" | "learned" | "blocked" | "stale";
     }
   >();
-
-  for (const discovery of recentDiscoveries) {
-    if (discovery.status !== "INSPECTED") {
-      continue;
-    }
-
-    const key = `adapter:${discovery.course.name}`;
-    const existing = signals.get(key);
-    signals.set(key, {
-      key,
-      kind: "adapter_gap",
-      summary: `${discovery.course.name} browser probe inspected ${discovery.bookingUrl ?? "course site"} but did not learn reusable ${discovery.detectedPlatform} metadata.`,
-      lastSeenAt: latestIso(existing?.lastSeenAt, discovery.createdAt),
-      repeats: (existing?.repeats ?? 0) + 1,
-      status: (existing?.repeats ?? 0) + 1 >= 2 ? "stale" : "open",
-      nextAction:
-        (existing?.repeats ?? 0) + 1 >= 2
-          ? "Do not rerun the same probe until a new booking URL, platform clue, or policy source appears."
-          : "Inspect current official booking surface and policy evidence."
-    });
-  }
 
   for (const run of recentRuns) {
     const notes = run.notes ?? "";

@@ -11,6 +11,7 @@ import { getLocalReaderCourseKey, isLocalReaderCandidateUrl } from "@/lib/local-
 import { localReaderResultSchema } from "@/lib/local-reader/contracts";
 import { prisma } from "@/lib/prisma";
 
+import { loadOperatorCourseSupportCampaign } from "./course-support-campaign";
 import { formatOperatorDayKey, getOperatorDateRange, type OperatorDateRange } from "./time";
 import { buildCourseInventory, summarizeCourseInventory } from "./course-status";
 
@@ -39,6 +40,7 @@ export function buildCourseSupportResponderAlert(input: {
   openIncidentCount: number;
   worker?: {
     desiredState: string;
+    lastOutcome?: string | null;
     monitoringStartedAt: Date | null;
     nextExpectedAt: Date | null;
     graceSeconds: number;
@@ -62,6 +64,13 @@ export function buildCourseSupportResponderAlert(input: {
       detail: `${input.openIncidentCount} open course investigations will wait until the responder is resumed.`
     };
   }
+  if (isFailedAutomationWorkerOutcome(worker.lastOutcome)) {
+    return {
+      status: "FAILED" as const,
+      title: "Course investigation responder failed",
+      detail: `${input.openIncidentCount} open course investigations are waiting after the latest scheduled responder run failed.`
+    };
+  }
   const overdue = Boolean(
     worker.desiredState === "ACTIVE" &&
       worker.monitoringStartedAt &&
@@ -76,6 +85,10 @@ export function buildCourseSupportResponderAlert(input: {
     title: "Course investigations are stalled",
     detail: `${input.openIncidentCount} open course investigations are waiting because the responder missed its expected run.`
   };
+}
+
+export function isFailedAutomationWorkerOutcome(value: string | null | undefined) {
+  return typeof value === "string" && value.endsWith("_failed");
 }
 
 export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) {
@@ -102,7 +115,8 @@ export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) 
     problemSearches,
     problemDeliveries,
     probeCounts,
-    allCourses
+    allCourses,
+    courseSupportCampaign
   ] = await Promise.all([
     prisma.websiteEvent.findMany({
       where: {
@@ -513,7 +527,8 @@ export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) 
           }
         }
       }
-    })
+    }),
+    loadOperatorCourseSupportCampaign({ now })
   ]);
 
   const topCourses = buildTopCourses(rangePreferences);
@@ -817,6 +832,7 @@ export async function loadOperatorOverview(input: { days: 7 | 30; now?: Date }) 
     operations: {
       workers: workerStates,
       courseSupportAlert,
+      courseSupportCampaign,
       recentRuns: recentAutomationRuns,
       activeSearches: {
         public: activePublicSearches,

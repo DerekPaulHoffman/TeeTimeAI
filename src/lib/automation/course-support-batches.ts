@@ -27,12 +27,19 @@ import {
 } from "./course-support-verification";
 import {
   AUTOMATION_PLAYBOOK_STAGES,
+  appendAutomationPlaybookEvent,
   assessAutomationPlaybook,
   isAutomationHumanReviewProofCurrentOrPrior,
   isAutomationPlaybookExhausted,
   parseAutomationPlaybookLedger,
   type AutomationPlaybookStage
 } from "./course-monitoring-playbook";
+import {
+  buildCourseSupportSourceSearchAttemptRef,
+  buildCourseSupportSourceSearchContext,
+  buildCourseSupportSourceSearchScopeDigest,
+  normalizeCourseSupportSourceSearchResult
+} from "./course-support-source-search";
 import {
   COURSE_SUPPORT_REMEDIATION_WORK_MODES,
   DEFAULT_COURSE_SUPPORT_TRANSIENT_RETRY_BUDGET,
@@ -48,8 +55,13 @@ import {
   getCourseMonitoringEscalationDeadline,
   getHumanReviewRetryAt,
   inferHumanReviewReason,
+  reopenParkedCourseForResponderCampaignInTransaction,
   runSerializedCourseMonitoringWrite
 } from "./course-monitoring";
+import {
+  planNextParkedCourseCampaignCohort,
+  inspectActiveParkedCourseCampaign
+} from "./course-support-campaign";
 import { enqueueRemediatedCourseRechecks } from "./search-recheck-queue";
 import { withPostgresAdvisoryTextLease } from "./lease";
 import {
@@ -81,10 +93,7 @@ import {
   type CourseSupportCandidate,
   type SelectedCourseSupportBatch
 } from "./course-support-selection";
-import {
-  MONITORING_STRATEGY_ACTIONS,
-  type MonitoringStrategyAction
-} from "./monitoring-strategy";
+import { MONITORING_STRATEGY_ACTIONS, type MonitoringStrategyAction } from "./monitoring-strategy";
 
 export {
   selectCourseSupportBatch,
@@ -97,8 +106,6 @@ const NEAR_DATE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const SEARCH_TIMELINESS_GRACE_MS = 15 * 60 * 1000;
 const RECHECK_HEALTH_FRESHNESS_MS = 2 * 60 * 1000;
 const DETACHED_FAILURE_FALLBACK_COOLDOWN_MS = 24 * 60 * 60 * 1000;
-const SOURCE_UNVERIFIED_FINAL_MIN_AGE_MS = 24 * 60 * 60 * 1000;
-const SOURCE_UNVERIFIED_FINAL_ATTEMPT_COUNT = 4;
 const EXPIRED_UNRELEASED_BATCH_RETRY_DELAY_MS = 60 * 1000;
 const COURSE_SUPPORT_WRITE_CONFLICT_MAX_ATTEMPTS = 3;
 const COURSE_SUPPORT_WRITE_CONFLICT_BACKOFF_MS = 25;
@@ -227,6 +234,59 @@ const DETACHED_VERIFICATION_REQUEST_STATE_SELECT = {
   nextAttemptAt: true,
   completedAt: true
 } satisfies Prisma.CourseSupportVerificationRequestSelect;
+const COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT = {
+  id: true,
+  courseId: true,
+  cycle: true,
+  confirmedAt: true,
+  attemptLedger: true,
+  kind: true,
+  providerFamilyKey: true,
+  failureClass: true,
+  failureFingerprint: true,
+  humanReviewReason: true,
+  engineeringOnly: true,
+  activeRealSearchCount: true,
+  earliestTargetDate: true,
+  escalationDeadlineAt: true,
+  escalatedAt: true,
+  firstSeenAt: true,
+  lastSeenAt: true,
+  lastAttemptAt: true,
+  nextAttemptAt: true,
+  attemptCount: true,
+  updatedAt: true,
+  batchIncidents: {
+    where: { batch: { completedAt: { not: null } } },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: {
+      cycle: true,
+      batch: { select: { summary: true } }
+    }
+  },
+  course: {
+    select: {
+      ...DETACHED_VERIFICATION_COURSE_SELECT,
+      preferences: {
+        where: {
+          teeSearch: {
+            status: "ACTIVE",
+            trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] }
+          }
+        },
+        select: { teeSearch: { select: { id: true, date: true } } }
+      }
+    }
+  }
+} satisfies Prisma.CourseSupportIncidentSelect;
+
+type CourseSupportCandidateIncident = Prisma.CourseSupportIncidentGetPayload<{
+  select: typeof COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT;
+}>;
+
+type CourseSupportClaimCandidate = CourseSupportCandidate & {
+  playbookEventCountAtClaim: number;
+};
 
 type DetachedVerificationRequestState = Prisma.CourseSupportVerificationRequestGetPayload<{
   select: typeof DETACHED_VERIFICATION_REQUEST_STATE_SELECT;
@@ -587,9 +647,7 @@ export async function renewCourseSupportBatchOperationLease(input: {
         if (otherActiveBatches.some((candidate) => courseSupportBatchReservesCheckout(candidate))) {
           return null;
         }
-        const leaseExpiresAt = new Date(
-          databaseNow.getTime() + COURSE_SUPPORT_BATCH_LEASE_MS
-        );
+        const leaseExpiresAt = new Date(databaseNow.getTime() + COURSE_SUPPORT_BATCH_LEASE_MS);
         const updated = await transaction.courseSupportBatch.updateMany({
           where: {
             id: input.batchId,
@@ -740,8 +798,8 @@ function readCourseSupportRemediationDirective(
           (retryBudgetRecord.attemptsCompleted as number)
       ) &&
     retryBudgetRecord.exhausted ===
-      ((retryBudgetRecord.attemptsCompleted as number) >=
-        (retryBudgetRecord.maximumAttempts as number))
+      (retryBudgetRecord.attemptsCompleted as number) >=
+        (retryBudgetRecord.maximumAttempts as number)
       ? {
           maximumAttempts: retryBudgetRecord.maximumAttempts as number,
           attemptsCompleted: retryBudgetRecord.attemptsCompleted as number,
@@ -845,10 +903,7 @@ function parseCourseSupportRemediationApproach(
   };
 }
 
-function countCourseSupportPlaybookEvents(input: {
-  attemptLedger: unknown;
-  cycle: number;
-}) {
+function countCourseSupportPlaybookEvents(input: { attemptLedger: unknown; cycle: number }) {
   return (
     parseAutomationPlaybookLedger(input.attemptLedger)?.events.filter(
       (event) => event.cycle === input.cycle
@@ -866,9 +921,7 @@ function hasCourseSupportPlaybookAttemptSinceClaim(input: {
   if (!ledger) {
     return false;
   }
-  const currentCycleEvents = ledger.events.filter(
-    (event) => event.cycle === input.cycle
-  );
+  const currentCycleEvents = ledger.events.filter((event) => event.cycle === input.cycle);
   if (
     typeof input.eventCountAtClaim === "number" &&
     Number.isInteger(input.eventCountAtClaim) &&
@@ -894,14 +947,13 @@ function hasCurrentCourseSupportProviderExecutionProof(input: {
       : typeof proof.runtimeVersion === "string"
         ? proof.runtimeVersion
         : null;
-  const observedAt =
-    typeof proof.observedAt === "string" ? new Date(proof.observedAt) : null;
+  const observedAt = typeof proof.observedAt === "string" ? new Date(proof.observedAt) : null;
   return Boolean(
     proof.providerExecution === true &&
-      runtimeVersion === (input.releaseSha ?? input.baseSha) &&
-      observedAt &&
-      Number.isFinite(observedAt.getTime()) &&
-      observedAt.getTime() >= input.claimedAt.getTime()
+    runtimeVersion === (input.releaseSha ?? input.baseSha) &&
+    observedAt &&
+    Number.isFinite(observedAt.getTime()) &&
+    observedAt.getTime() >= input.claimedAt.getTime()
   );
 }
 
@@ -912,9 +964,7 @@ function didCourseSupportCloseoutConsumeRemediationAttempt(input: {
   const closeout = asJsonObject(asJsonObject(input.summary).closeout);
   const courseRef = createCourseSupportRemediationCourseRef(input.courseId);
   const rawAttempt = Array.isArray(closeout.remediationAttempts)
-    ? closeout.remediationAttempts.find(
-        (entry) => asJsonObject(entry).courseRef === courseRef
-      )
+    ? closeout.remediationAttempts.find((entry) => asJsonObject(entry).courseRef === courseRef)
     : null;
   const attempt = asJsonObject(rawAttempt);
   if (typeof attempt.consumed === "boolean") {
@@ -976,9 +1026,7 @@ function readPersistedCourseSupportRemediationAttempt(input: {
   courseId: string;
 }): PersistedCourseSupportRemediationAttempt | null {
   const attempt = readPersistedCourseSupportRemediationAttemptRecord(input);
-  return attempt &&
-    attempt.consumed &&
-    didCourseSupportCloseoutConsumeRemediationAttempt(input)
+  return attempt && attempt.consumed && didCourseSupportCloseoutConsumeRemediationAttempt(input)
     ? attempt
     : null;
 }
@@ -989,10 +1037,10 @@ function isSameCourseSupportRemediationApproach(
 ) {
   return Boolean(
     left &&
-      right &&
-      left.workMode === right.workMode &&
-      left.strategyAction === right.strategyAction &&
-      left.playbookStage === right.playbookStage
+    right &&
+    left.workMode === right.workMode &&
+    left.strategyAction === right.strategyAction &&
+    left.playbookStage === right.playbookStage
   );
 }
 
@@ -1158,13 +1206,10 @@ export function selectCourseSupportRetryBatch(input: {
     remediationDirective &&
     selectedIncidents.some(
       (candidate) =>
-        JSON.stringify(candidate.remediationDirective) !==
-        JSON.stringify(remediationDirective)
+        JSON.stringify(candidate.remediationDirective) !== JSON.stringify(remediationDirective)
     )
   ) {
-    throw new Error(
-      "The targeted responder retry now requires a different remediation route."
-    );
+    throw new Error("The targeted responder retry now requires a different remediation route.");
   }
 
   return {
@@ -1527,23 +1572,58 @@ export function shouldFinalizeSourceUnverified(input: {
   attemptCount: number;
   activeRealSearchCount: number;
   firstSeenAt: Date;
+  freshCycleStartedAt: Date | null;
+  attemptLedger: unknown;
+  cycle: number;
   verifiedAt: Date | null;
   result: CourseSupportBatchIncidentResult;
   now?: Date;
 }) {
-  const now = input.now ?? new Date();
+  const playbook = assessAutomationPlaybook(input.attemptLedger, input.cycle);
+  const freshPlaybookComplete = Boolean(
+    input.freshCycleStartedAt &&
+    playbook.valid &&
+    playbook.cycle === input.cycle &&
+    playbook.conclusion === "UNRESOLVED_EXHAUSTED" &&
+    playbook.completedStages.length === AUTOMATION_PLAYBOOK_STAGES.length &&
+    hasDurableSourceUnverifiedPlaybookEvidence(playbook, input.freshCycleStartedAt)
+  );
   return Boolean(
     input.result === "RETRY_SCHEDULED" &&
-    input.activeRealSearchCount === 0 &&
-    input.attemptCount >= SOURCE_UNVERIFIED_FINAL_ATTEMPT_COUNT &&
-    now.getTime() - input.firstSeenAt.getTime() >= SOURCE_UNVERIFIED_FINAL_MIN_AGE_MS &&
+    freshPlaybookComplete &&
     input.verifiedAt &&
-    input.verifiedAt.getTime() - input.firstSeenAt.getTime() >=
-      SOURCE_UNVERIFIED_FINAL_MIN_AGE_MS &&
+    input.verifiedAt.getTime() >= input.freshCycleStartedAt!.getTime() &&
     ((input.providerFamilyKey === SOURCE_MISSING_PROVIDER_FAMILY &&
       input.failureClass === "MISSING_SOURCE") ||
       (input.providerFamilyKey === SOURCE_CONFLICT_PROVIDER_FAMILY &&
         input.failureClass === "MISSING_METADATA"))
+  );
+}
+
+function hasDurableSourceUnverifiedPlaybookEvidence(
+  playbook: ReturnType<typeof assessAutomationPlaybook>,
+  freshCycleStartedAt: Date
+) {
+  const officialIdentity = playbook.stages.find(
+    (stage) => stage.stage === "OFFICIAL_IDENTITY"
+  );
+  const independentConfirmation = playbook.stages.find(
+    (stage) => stage.stage === "INDEPENDENT_CONFIRMATION"
+  );
+  return Boolean(
+    officialIdentity?.applicability === "APPLICABLE" &&
+    officialIdentity.attemptCount > 0 &&
+    officialIdentity.completedAt &&
+    new Date(officialIdentity.completedAt).getTime() >= freshCycleStartedAt.getTime() &&
+    independentConfirmation?.applicability === "APPLICABLE" &&
+    independentConfirmation.attemptCount > 0 &&
+    independentConfirmation.completedAt &&
+    playbook.stages.every(
+      (stage) =>
+        stage.completedAt &&
+        new Date(stage.completedAt).getTime() >= freshCycleStartedAt.getTime() &&
+        (stage.applicability !== "APPLICABLE" || stage.attemptCount > 0)
+    )
   );
 }
 
@@ -1841,6 +1921,7 @@ export function shouldDispatchRemediatedCourseRechecks(input: {
 export async function inspectCourseSupportQueue(input?: {
   now?: Date;
   requestingThreadId?: string;
+  completeParkedCampaignIfDone?: boolean;
 }) {
   const now = input?.now ?? new Date();
   const requestingThreadId = input?.requestingThreadId?.trim() || null;
@@ -1848,7 +1929,7 @@ export async function inspectCourseSupportQueue(input?: {
     validateOwnerThread(input.requestingThreadId);
   }
   const dueWhere = buildDueResponderIncidentWhere(now);
-  const [rawDueIncidents, activeBatches, expiredBatch] = await Promise.all([
+  const [rawDueIncidents, activeBatches, expiredBatch, parkedCampaign] = await Promise.all([
     prisma.courseSupportIncident.findMany({
       where: dueWhere,
       select: {
@@ -1910,6 +1991,9 @@ export async function inspectCourseSupportQueue(input?: {
         status: true,
         leaseExpiresAt: true
       }
+    }),
+    inspectActiveParkedCourseCampaign({
+      completeIfDone: input?.completeParkedCampaignIfDone === true
     })
   ]);
   const activeBatch =
@@ -2055,7 +2139,9 @@ export async function inspectCourseSupportQueue(input?: {
     activeBatchOwnerThreadId: activeBatch?.ownerThreadId,
     requestingThreadId,
     hasExpiredBatch: Boolean(expiredBatch),
-    dueIncidentCount: availableDueIncidents.length
+    dueIncidentCount:
+      availableDueIncidents.length +
+      (parkedCampaign?.status === "RUNNING" ? parkedCampaign.readyCount : 0)
   });
   const ownedByCurrentTask = Boolean(
     activeBatch && requestingThreadId && activeBatch.ownerThreadId === requestingThreadId
@@ -2071,7 +2157,10 @@ export async function inspectCourseSupportQueue(input?: {
             dueEngineeringCount,
             dueHistoricalRealCount,
             providerGroupCount: providerGroups.size,
-            activeBatchCount: activeBatches.length
+            activeBatchCount: activeBatches.length,
+            parkedCampaignReadyCount:
+              parkedCampaign?.status === "RUNNING" ? parkedCampaign.readyCount : 0,
+            parkedCampaignPendingCount: parkedCampaign?.pendingCount ?? 0
           }
         })
       : false;
@@ -2094,6 +2183,29 @@ export async function inspectCourseSupportQueue(input?: {
     dueEngineeringCount,
     dueHistoricalRealCount,
     providerGroupCount: providerGroups.size,
+    parkedCampaign: parkedCampaign
+      ? {
+          status: parkedCampaign.status,
+          capturedAt: parkedCampaign.capturedAt,
+          expectedCount: parkedCampaign.expectedCount,
+          terminalCount: parkedCampaign.terminalCount,
+          pendingCount: parkedCampaign.pendingCount,
+          readyCount: parkedCampaign.readyCount,
+          activeCount: parkedCampaign.activeCount,
+          monitoredCount: parkedCampaign.monitoredCount,
+          bookingNotOpenCount: parkedCampaign.bookingNotOpenCount,
+          factualLimitationCount: parkedCampaign.factualLimitationCount,
+          technicalLimitationCount: parkedCampaign.technicalLimitationCount,
+          sourceUnverifiedCount: parkedCampaign.sourceUnverifiedCount,
+          engineeringBlockerCount: parkedCampaign.engineeringBlockerCount,
+          currentResultMissingCount: parkedCampaign.currentResultMissingCount,
+          humanReviewCount: parkedCampaign.humanReviewCount,
+          terminalWithin24HoursCount: parkedCampaign.terminalWithin24HoursCount,
+          automaticWithin24HoursCount: parkedCampaign.automaticWithin24HoursCount,
+          remainingGlobalParkedCount: parkedCampaign.remainingGlobalParkedCount,
+          membershipDigest: parkedCampaign.membershipDigest
+        }
+      : null,
     activeWriterCount: activeBatches.length,
     availableWriterSlots: Math.max(0, MAX_CONCURRENT_COURSE_SUPPORT_BATCHES - activeBatches.length),
     readOnlyDispatchPlan: {
@@ -2106,10 +2218,13 @@ export async function inspectCourseSupportQueue(input?: {
     recoveryContinuation: {
       reinspectAfterRecovery: Boolean(
         expiredBatch &&
-        availableDueIncidents.length > 0 &&
+        (availableDueIncidents.length > 0 ||
+          (parkedCampaign?.status === "RUNNING" && parkedCampaign.readyCount > 0)) &&
         activeBatches.length < MAX_CONCURRENT_COURSE_SUPPORT_BATCHES
       ),
-      dueIncidentCount: availableDueIncidents.length,
+      dueIncidentCount:
+        availableDueIncidents.length +
+        (parkedCampaign?.status === "RUNNING" ? parkedCampaign.readyCount : 0),
       availableWriterSlots: Math.max(
         0,
         MAX_CONCURRENT_COURSE_SUPPORT_BATCHES - activeBatches.length
@@ -2230,7 +2345,7 @@ export async function claimCourseSupportBatch(input: {
       };
     }
 
-    const [allCandidates, recentBatches, retryBatch] = await Promise.all([
+    const [initialCandidates, recentBatches, retryBatch] = await Promise.all([
       listDueCourseSupportCandidates(now),
       prisma.courseSupportBatch.findMany({
         where: { completedAt: { not: null } },
@@ -2287,6 +2402,22 @@ export async function claimCourseSupportBatch(input: {
     const activeProviderGroups = new Set(
       activeBatches.map((batch) => `${batch.providerFamilyKey}\u0000${batch.failureFingerprint}`)
     );
+    const campaignPlan = input.retryBatchId
+      ? {
+          members: [],
+          campaignRunId: null,
+          membershipDigest: null
+        }
+      : await planNextParkedCourseCampaignCohort({
+          now,
+          maxCourses: Math.min(maxCourses, 5),
+          hasDueRealDemand: initialCandidates.some(
+            (candidate) => candidate.activeRealSearchCount > 0
+          ),
+          activeProviderGroups
+        });
+    const campaignCandidates = await listParkedCourseCampaignCandidates(campaignPlan, now);
+    const allCandidates = [...campaignCandidates, ...initialCandidates];
     const providerEligibleCandidates = allCandidates.filter(
       (candidate) =>
         !activeProviderGroups.has(
@@ -2307,26 +2438,24 @@ export async function claimCourseSupportBatch(input: {
       throw new Error("The targeted responder retry batch was not found.");
     }
     const waitingCandidates = eligibleCandidates.filter(
-      (candidate) =>
-        candidate.remediationRoute?.workMode === "WAIT_FOR_MATERIAL_CHANGE"
+      (candidate) => candidate.remediationRoute?.workMode === "WAIT_FOR_MATERIAL_CHANGE"
     );
     const parkedForMaterialChangeCount = input.retryBatchId
       ? 0
       : await parkCourseSupportCandidatesForMaterialChange(waitingCandidates, now);
     const candidates = eligibleCandidates.filter(
-      (candidate) =>
-        candidate.remediationRoute?.workMode !== "WAIT_FOR_MATERIAL_CHANGE"
+      (candidate) => candidate.remediationRoute?.workMode !== "WAIT_FOR_MATERIAL_CHANGE"
     );
     const targetedRetryBlockedByCheckout = Boolean(
       retryBatch &&
-        implementationBlockedCandidates.some((candidate) =>
-          retryBatch.incidents.some(
-            (entry) =>
-              entry.incidentId === candidate.id &&
-              entry.courseId === candidate.courseId &&
-              entry.cycle === candidate.cycle
-          )
+      implementationBlockedCandidates.some((candidate) =>
+        retryBatch.incidents.some(
+          (entry) =>
+            entry.incidentId === candidate.id &&
+            entry.courseId === candidate.courseId &&
+            entry.cycle === candidate.cycle
         )
+      )
     );
     if (targetedRetryBlockedByCheckout) {
       const recorded = await recordRoutineResponderObservation({
@@ -2349,6 +2478,12 @@ export async function claimCourseSupportBatch(input: {
         })
       };
     }
+    const fairnessEvidence = recentBatches.map((batch) => ({
+      includedEngineeringOnly: batch.incidents.some((entry) => entry.incident.engineeringOnly),
+      includedCriticalRealDemand: batch.incidents.some((entry) =>
+        isHistoricalCriticalRealDemand(entry.incident, now)
+      )
+    }));
     const selected = retryBatch
       ? selectCourseSupportRetryBatch({
           candidates,
@@ -2357,19 +2492,22 @@ export async function claimCourseSupportBatch(input: {
           maxCourses,
           now
         })
-      : selectCourseSupportBatch({
-          candidates,
-          recentBatches: recentBatches.map((batch) => ({
-            includedEngineeringOnly: batch.incidents.some(
-              (entry) => entry.incident.engineeringOnly
-            ),
-            includedCriticalRealDemand: batch.incidents.some((entry) =>
-              isHistoricalCriticalRealDemand(entry.incident, now)
-            )
-          })),
+      : (selectCourseSupportBatch({
+          candidates: candidates.filter(
+            (candidate) => !candidate.campaign || candidate.activeRealSearchCount > 0
+          ),
+          recentBatches: fairnessEvidence,
           maxCourses,
           now
-        });
+        }) ??
+        selectCourseSupportBatch({
+          candidates: candidates.filter(
+            (candidate) => Boolean(candidate.campaign) && candidate.activeRealSearchCount === 0
+          ),
+          recentBatches: fairnessEvidence,
+          maxCourses: Math.min(maxCourses, 5),
+          now
+        }));
     if (!selected) {
       const deferredForImplementation = implementationBlockedCandidates.length > 0;
       const outcome = deferredForImplementation ? "deferred_busy" : "no_due_work";
@@ -2392,9 +2530,7 @@ export async function claimCourseSupportBatch(input: {
         outcome,
         durableCloseoutRecorded: recorded,
         parkedForMaterialChangeCount,
-        ...(deferredForImplementation
-          ? { sharedCheckoutImplementationBusy: true }
-          : {}),
+        ...(deferredForImplementation ? { sharedCheckoutImplementationBusy: true } : {}),
         ...getResponderThreadPolicy({
           outcome,
           durableCloseoutRecorded: recorded
@@ -2404,15 +2540,10 @@ export async function claimCourseSupportBatch(input: {
 
     const selectedRemediationRoute = selected.incidents[0]?.remediationRoute;
     if (!selectedRemediationRoute || !selected.remediationDirective) {
-      throw new Error(
-        "Course-support remediation routing was unavailable; no batch was claimed."
-      );
+      throw new Error("Course-support remediation routing was unavailable; no batch was claimed.");
     }
     const playbookEventCountAtClaimByIncidentId = new Map(
-      candidates.map((candidate) => [
-        candidate.id,
-        candidate.playbookEventCountAtClaim
-      ])
+      candidates.map((candidate) => [candidate.id, candidate.playbookEventCountAtClaim])
     );
     const remediationSummary = {
       ...serializeCourseSupportRemediationRoute(selectedRemediationRoute),
@@ -2424,8 +2555,7 @@ export async function claimCourseSupportBatch(input: {
         failureFingerprint: incident.failureFingerprint,
         runtimeVersion: input.baseSha,
         activeRealSearchCount: incident.activeRealSearchCount,
-        playbookEventCountAtClaim:
-          playbookEventCountAtClaimByIncidentId.get(incident.id) ?? 0,
+        playbookEventCountAtClaim: playbookEventCountAtClaimByIncidentId.get(incident.id) ?? 0,
         reason: incident.remediationRoute?.reason ?? selectedRemediationRoute.reason,
         approach:
           incident.remediationRoute?.attemptSignature ??
@@ -2433,6 +2563,25 @@ export async function claimCourseSupportBatch(input: {
           null
       }))
     } satisfies Prisma.InputJsonObject;
+    const campaignAttempts = selected.incidents.flatMap((incident) =>
+      incident.campaign
+        ? [
+            {
+              courseRef: createCourseSupportRemediationCourseRef(incident.courseId),
+              runId: incident.campaign.runId,
+              membershipDigest: incident.campaign.membershipDigest,
+              cycle: incident.cycle
+            }
+          ]
+        : []
+    );
+    const campaignSummary =
+      campaignAttempts.length > 0
+        ? ({
+            kind: "PARKED_COHORT",
+            attempts: campaignAttempts
+          } satisfies Prisma.InputJsonObject)
+        : null;
 
     const selectedCourseIds = selected.incidents.map((incident) => incident.courseId);
     const newestProbes = await prisma.courseProbe.findMany({
@@ -2475,6 +2624,37 @@ export async function claimCourseSupportBatch(input: {
     const created = await prisma.$transaction(
       async (tx) => {
         const courseMonitoringAvailable = hasCourseMonitoringPersistence(tx);
+        for (const incident of selected.incidents) {
+          if (!incident.campaign) continue;
+          const reopened = await reopenParkedCourseForResponderCampaignInTransaction(tx, {
+            courseId: incident.courseId,
+            incidentId: incident.id,
+            expectedCycle: incident.campaign.priorCycle,
+            expectedRevision: incident.campaign.priorRevision,
+            expectedMonitoringRevision: incident.campaign.priorMonitoringRevision,
+            capturedRevision: incident.campaign.capturedRevision,
+            capturedMonitoringRevision: incident.campaign.capturedMonitoringRevision,
+            expectedKind: incident.campaign.expectedKind,
+            expectedFailureClass: incident.campaign.expectedFailureClass,
+            expectedLatestProbeAt: incident.campaign.expectedLatestProbeAt,
+            expectedLatestDiscoveryAt: incident.campaign.expectedLatestDiscoveryAt,
+            expectedProviderFamilyKey: incident.providerFamilyKey,
+            expectedFailureFingerprint: incident.failureFingerprint,
+            expectedProviderSnapshotFingerprint:
+              incident.campaign.expectedProviderSnapshotFingerprint,
+            expectedAttemptLedgerFingerprint:
+              incident.campaign.expectedAttemptLedgerFingerprint,
+            expectedPlaybookConclusion: incident.campaign.expectedPlaybookConclusion,
+            campaignRunId: incident.campaign.runId,
+            campaignMembershipDigest: incident.campaign.membershipDigest,
+            now
+          });
+          if (!reopened.admitted || reopened.cycle !== incident.cycle) {
+            throw new Error(
+              "A parked-course campaign member changed before atomic batch admission."
+            );
+          }
+        }
         const currentIncidents = await tx.courseSupportIncident.findMany({
           where: {
             id: { in: selected.incidents.map((incident) => incident.id) }
@@ -2488,6 +2668,7 @@ export async function claimCourseSupportBatch(input: {
             status: true,
             activeBatchId: true,
             engineeringOnly: true,
+            updatedAt: true,
             course: {
               select: {
                 ...DETACHED_VERIFICATION_COURSE_SELECT,
@@ -2686,6 +2867,7 @@ export async function claimCourseSupportBatch(input: {
               incidentCount: selected.incidents.length,
               fairnessReason: selected.fairnessReason,
               remediation: remediationSummary,
+              ...(campaignSummary ? { campaign: campaignSummary } : {}),
               targetedRetry: Boolean(input.retryBatchId),
               ...(input.retryOrdinal !== undefined
                 ? {
@@ -2717,6 +2899,7 @@ export async function claimCourseSupportBatch(input: {
               plannedPaths,
               fairnessReason: selected.fairnessReason,
               remediation: remediationSummary,
+              ...(campaignSummary ? { campaign: campaignSummary } : {}),
               targetedRetry: Boolean(input.retryBatchId),
               ...(input.retryOrdinal !== undefined
                 ? {
@@ -2751,7 +2934,7 @@ export async function claimCourseSupportBatch(input: {
               cycle: incident.cycle,
               providerFamilyKey: incident.providerFamilyKey,
               failureFingerprint: incident.failureFingerprint,
-              updatedAt: incident.updatedAt,
+              updatedAt: currentIncidentById.get(incident.id)?.updatedAt ?? incident.updatedAt,
               status: "AUTO_INVESTIGATING",
               activeBatchId: null,
               ...(retrySourceEntry
@@ -2814,6 +2997,14 @@ export async function claimCourseSupportBatch(input: {
                 providerFamilyKey: selected.providerFamilyKey,
                 maxCourses,
                 serializedWriterLane: true,
+                ...(incident.campaign
+                  ? {
+                      campaignKind: "PARKED_COHORT",
+                      campaignRunId: incident.campaign.runId,
+                      campaignMembershipDigest: incident.campaign.membershipDigest,
+                      cycle: incident.cycle
+                    }
+                  : {}),
                 customerDataIncluded: false
               }
             }))
@@ -2981,9 +3172,7 @@ export async function appendCourseSupportBatchPath(input: {
         select: { status: true, summary: true }
       });
       if (
-        otherActiveBatches.some((activeBatch) =>
-          courseSupportBatchReservesCheckout(activeBatch)
-        )
+        otherActiveBatches.some((activeBatch) => courseSupportBatchReservesCheckout(activeBatch))
       ) {
         throw new Error(
           "Responder code changes require exclusive access to the approved checkout."
@@ -3167,10 +3356,7 @@ export async function getCourseSupportBatchPacket(input: {
           },
           batch
         );
-      const playbook = assessAutomationPlaybook(
-        entry.incident.attemptLedger,
-        entry.cycle
-      );
+      const playbook = assessAutomationPlaybook(entry.incident.attemptLedger, entry.cycle);
       return {
         ordinal: String(index + 1).padStart(2, "0"),
         providerFamilyKey: entry.course.providerFamilyKey,
@@ -3204,6 +3390,536 @@ export async function getCourseSupportBatchPacket(input: {
     }),
     threadDisposition: "KEEP_VISIBLE" as const,
     archiveReason: "The responder batch is still in progress."
+  };
+}
+
+const COURSE_SUPPORT_SOURCE_SEARCH_READ_PATH = "CODEX_EXACT_SOURCE_SEARCH";
+const courseSupportSourceSearchBatchSelect = {
+  status: true,
+  revision: true,
+  leaseExpiresAt: true,
+  summary: true,
+  incidents: {
+    orderBy: [{ course: { name: "asc" } }, { createdAt: "asc" }, { id: "asc" }],
+    select: {
+      id: true,
+      createdAt: true,
+      cycle: true,
+      result: true,
+      updatedAt: true,
+      course: {
+        select: {
+          id: true,
+          name: true,
+          address: true,
+          city: true,
+          stateCode: true,
+          website: true,
+          detectedBookingUrl: true,
+          detectedPlatform: true,
+          providerFamilyKey: true,
+          bookingMetadata: true,
+          monitoringMode: true,
+          updatedAt: true,
+          monitoringStatus: { select: { state: true } }
+        }
+      },
+      incident: {
+        select: {
+          id: true,
+          cycle: true,
+          revision: true,
+          status: true,
+          kind: true,
+          providerFamilyKey: true,
+          failureClass: true,
+          activeBatchId: true,
+          attemptLedger: true,
+          attemptCount: true,
+          lastSeenAt: true,
+          resolution: true,
+          updatedAt: true
+        }
+      }
+    }
+  }
+} satisfies Prisma.CourseSupportBatchSelect;
+
+type CourseSupportSourceSearchBatch = Prisma.CourseSupportBatchGetPayload<{
+  select: typeof courseSupportSourceSearchBatchSelect;
+}>;
+
+export async function getOwnedCourseSupportSourceSearchContext(input: {
+  batchId: string;
+  leaseToken: string;
+  ownerThreadId: string;
+  ordinal: number;
+  now?: Date;
+}) {
+  const now = input.now ?? new Date();
+  validateCourseSupportSourceSearchOrdinal(input.ordinal);
+  const batch = await prisma.courseSupportBatch.findFirst({
+    where: {
+      id: input.batchId,
+      leaseToken: input.leaseToken,
+      ownerThreadId: input.ownerThreadId,
+      status: { in: ACTIVE_BATCH_STATUSES },
+      leaseExpiresAt: { gte: now }
+    },
+    select: courseSupportSourceSearchBatchSelect
+  });
+  if (!batch) {
+    return courseSupportSourceSearchRecoveryRequired();
+  }
+  const resolved = resolveOwnedCourseSupportSourceSearchEntry({
+    batchId: input.batchId,
+    batch,
+    ordinal: input.ordinal,
+    requireRenderedStage: true
+  });
+  return {
+    outcome: "ready" as const,
+    ordinal: String(input.ordinal).padStart(2, "0"),
+    searchBudget: 1 as const,
+    privateContext: {
+      query: resolved.searchContext.query,
+      attemptRef: resolved.attemptRef
+    },
+    threadDisposition: "KEEP_VISIBLE" as const,
+    archiveReason: "The owned responder must perform one exact read-only source search."
+  };
+}
+
+export async function recordOwnedCourseSupportSourceSearchResult(input: {
+  batchId: string;
+  leaseToken: string;
+  ownerThreadId: string;
+  ordinal: number;
+  attemptRef: string;
+  candidateUrl?: string | null;
+  noUnique?: boolean;
+  runtimeVersion: string;
+  now?: Date;
+}) {
+  validateCourseSupportSourceSearchOrdinal(input.ordinal);
+  if (!/^[a-f0-9]{64}$/u.test(input.attemptRef)) {
+    throw new Error("Source-search attempt reference is invalid.");
+  }
+  const result = normalizeCourseSupportSourceSearchResult({
+    candidateUrl: input.candidateUrl,
+    noUnique: input.noUnique
+  });
+  const persisted = await runCourseSupportSerializableTransactionWithRetry(async (transaction) => {
+    const databaseNow = input.now ?? (await getCourseSupportDatabaseNow(transaction));
+    const batch = await transaction.courseSupportBatch.findFirst({
+      where: {
+        id: input.batchId,
+        leaseToken: input.leaseToken,
+        ownerThreadId: input.ownerThreadId,
+        status: { in: ACTIVE_BATCH_STATUSES },
+        leaseExpiresAt: { gt: databaseNow }
+      },
+      select: courseSupportSourceSearchBatchSelect
+    });
+    if (!batch) {
+      return null;
+    }
+    const resolved = resolveOwnedCourseSupportSourceSearchEntry({
+      batchId: input.batchId,
+      batch,
+      ordinal: input.ordinal,
+      requireRenderedStage: false
+    });
+    if (resolved.attemptRef !== input.attemptRef) {
+      throw new Error("Source-search context changed before the result was recorded.");
+    }
+    const idempotencyKey = `course-support-source-search:${resolved.attemptRef}`;
+    const existing = await transaction.courseMonitoringEvent.findUnique({
+      where: { idempotencyKey },
+      select: { evidenceUrl: true, audit: true }
+    });
+    if (existing) {
+      if (!doesCourseSupportSourceSearchEventMatch(existing, result)) {
+        throw new Error("A different source-search result already owns this incident cycle.");
+      }
+      return {
+        replayed: true,
+        leaseExpiresAt: batch.leaseExpiresAt,
+        result: result.result
+      };
+    }
+    if (resolved.playbook.nextStage !== "RENDERED_BROWSER_DISCOVERY") {
+      throw new Error("Exact source search is not the current owned playbook step.");
+    }
+    if (
+      !(await lockOwnedCourseSupportSourceSearchSnapshot(
+        transaction,
+        input.batchId,
+        resolved.entry
+      ))
+    ) {
+      throw new Error("Course-support source state changed during exact source search.");
+    }
+
+    const leaseExpiresAt = new Date(databaseNow.getTime() + COURSE_SUPPORT_BATCH_LEASE_MS);
+    const ownership = await transaction.courseSupportBatch.updateMany({
+      where: {
+        id: input.batchId,
+        leaseToken: input.leaseToken,
+        ownerThreadId: input.ownerThreadId,
+        status: batch.status,
+        revision: batch.revision,
+        leaseExpiresAt: { gt: databaseNow }
+      },
+      data: {
+        heartbeatAt: databaseNow,
+        leaseExpiresAt,
+        revision: { increment: 1 }
+      }
+    });
+    if (ownership.count !== 1) {
+      throw new Error("Course-support batch ownership changed during exact source search.");
+    }
+
+    if (result.result === "NO_UNIQUE") {
+      const attemptLedger = appendNoUniqueCourseSupportSourceSearchLadder({
+        attemptLedger: resolved.entry.incident.attemptLedger,
+        cycle: resolved.entry.cycle,
+        runtimeVersion: input.runtimeVersion,
+        observedAt: databaseNow
+      });
+      const incident = await transaction.courseSupportIncident.updateMany({
+        where: {
+          id: resolved.entry.incident.id,
+          cycle: resolved.entry.cycle,
+          revision: resolved.entry.incident.revision,
+          status: "AUTO_INVESTIGATING",
+          activeBatchId: input.batchId,
+          updatedAt: resolved.entry.incident.updatedAt
+        },
+        data: {
+          attemptLedger,
+          attemptCount: { increment: 1 },
+          lastAttemptAt: databaseNow,
+          latestMessage:
+            "One bounded exact source search found no unique safe direct official candidate.",
+          updatedAt: databaseNow,
+          revision: { increment: 1 }
+        }
+      });
+      if (incident.count !== 1) {
+        throw new Error("Course-support incident changed during exact source search.");
+      }
+    }
+
+    await transaction.courseMonitoringEvent.create({
+      data: {
+        courseId: resolved.entry.course.id,
+        incidentId: resolved.entry.incident.id,
+        eventType: "AUTOMATION_ATTEMPTED",
+        source: "COURSE_SUPPORT_RESPONDER",
+        readPath: COURSE_SUPPORT_SOURCE_SEARCH_READ_PATH,
+        message:
+          result.result === "CANDIDATE"
+            ? "One bounded exact source search selected a direct candidate for owned browser verification."
+            : "One bounded exact source search found no unique safe direct candidate.",
+        evidenceUrl: result.candidateUrl,
+        runtimeVersion: input.runtimeVersion,
+        idempotencyKey,
+        audit: {
+          schemaVersion: 1,
+          action: "OWNED_EXACT_SOURCE_SEARCH",
+          result: result.result,
+          incidentCycle: resolved.entry.cycle,
+          ordinal: input.ordinal,
+          queryDigest: resolved.searchContext.queryDigest,
+          missingIdentityFields: resolved.searchContext.missingIdentityFields,
+          ownershipScopeDigest: resolved.scopeDigest,
+          rawSearchPayloadStored: false,
+          courseProjectionApplied: false,
+          browserVerificationRequired: result.result === "CANDIDATE",
+          independentConfirmationRecorded: result.result === "NO_UNIQUE",
+          ...(await readCourseSupportCampaignProvenance(
+            transaction,
+            batch.summary,
+            resolved.entry.course.id,
+            resolved.entry.incident.id,
+            resolved.entry.cycle,
+            databaseNow
+          ))
+        }
+      }
+    });
+    return { replayed: false, leaseExpiresAt, result: result.result };
+  });
+
+  if (!persisted) {
+    return courseSupportSourceSearchRecoveryRequired();
+  }
+  return {
+    outcome: "ready" as const,
+    ordinal: String(input.ordinal).padStart(2, "0"),
+    resultRecorded: true,
+    candidateRecorded: persisted.result === "CANDIDATE",
+    noUniqueRecorded: persisted.result === "NO_UNIQUE",
+    replayed: persisted.replayed,
+    browserVerificationRequired: persisted.result === "CANDIDATE",
+    leaseExpiresAt: persisted.leaseExpiresAt.toISOString(),
+    threadDisposition: "KEEP_VISIBLE" as const,
+    archiveReason: "The responder batch is still in progress."
+  };
+}
+
+function resolveOwnedCourseSupportSourceSearchEntry(input: {
+  batchId: string;
+  batch: CourseSupportSourceSearchBatch;
+  ordinal: number;
+  requireRenderedStage: boolean;
+}) {
+  const entry = orderCourseSupportBatchIncidents(input.batch.incidents)[input.ordinal - 1];
+  if (!entry) {
+    throw new Error("Course-support ordinal is not present in the owned batch.");
+  }
+  const playbook = assessAutomationPlaybook(entry.incident.attemptLedger, entry.cycle);
+  const officialIdentity = playbook.stages.find(
+    (stage) => stage.stage === "OFFICIAL_IDENTITY"
+  );
+  const provider = resolveProviderCapability(entry.course);
+  if (
+    entry.result !== "PENDING" ||
+    entry.cycle !== entry.incident.cycle ||
+    entry.incident.status !== "AUTO_INVESTIGATING" ||
+    entry.incident.activeBatchId !== input.batchId ||
+    entry.incident.kind !== "NEEDS_ADAPTER" ||
+    entry.incident.providerFamilyKey !== SOURCE_MISSING_PROVIDER_FAMILY ||
+    entry.incident.failureClass !== "MISSING_SOURCE" ||
+    entry.course.providerFamilyKey !== SOURCE_MISSING_PROVIDER_FAMILY ||
+    entry.course.website !== null ||
+    entry.course.detectedBookingUrl !== null ||
+    provider.capability ||
+    entry.course.monitoringMode === "LOCAL_READER_ONLY" ||
+    entry.incident.resolution !== null ||
+    entry.course.monitoringStatus?.state === "FINAL_MANUAL" ||
+    entry.course.monitoringStatus?.state === "FINAL_IDENTITY" ||
+    !playbook.valid ||
+    officialIdentity?.applicability !== "APPLICABLE" ||
+    officialIdentity.attemptCount < 1 ||
+    !officialIdentity.completedAt ||
+    (input.requireRenderedStage && playbook.nextStage !== "RENDERED_BROWSER_DISCOVERY")
+  ) {
+    throw new Error("Exact source search is not eligible for this owned incident cycle.");
+  }
+  const searchContext = buildCourseSupportSourceSearchContext(entry.course);
+  const scopeDigest = buildCourseSupportSourceSearchScopeDigest({
+    batchId: input.batchId,
+    incidentId: entry.incident.id,
+    cycle: entry.cycle
+  });
+  return {
+    entry,
+    playbook,
+    searchContext,
+    scopeDigest,
+    attemptRef: buildCourseSupportSourceSearchAttemptRef({
+      scopeDigest,
+      queryDigest: searchContext.queryDigest,
+      courseUpdatedAt: entry.course.updatedAt
+    })
+  };
+}
+
+async function readCourseSupportCampaignProvenance(
+  transaction: Prisma.TransactionClient,
+  summaryValue: unknown,
+  courseId: string,
+  incidentId: string,
+  cycle: number,
+  occurredAt: Date
+) {
+  const summary = asJsonObject(summaryValue);
+  const campaign = asJsonObject(summary.campaign);
+  const courseRef = createCourseSupportRemediationCourseRef(courseId);
+  const summaryAttempt =
+    campaign.kind === "PARKED_COHORT" && Array.isArray(campaign.attempts)
+      ? campaign.attempts.find((value) => {
+          const entry = asJsonObject(value);
+          return entry.courseRef === courseRef && entry.cycle === cycle;
+        })
+      : null;
+  const summaryRecord = asJsonObject(summaryAttempt);
+  if (
+    typeof summaryRecord.runId === "string" &&
+    summaryRecord.runId.trim() &&
+    typeof summaryRecord.membershipDigest === "string" &&
+    /^[a-f0-9]{64}$/u.test(summaryRecord.membershipDigest)
+  ) {
+    return buildCourseSupportCampaignProvenance(
+      summaryRecord.runId,
+      summaryRecord.membershipDigest,
+      cycle
+    );
+  }
+
+  const admission = await transaction.courseMonitoringEvent.findFirst({
+    where: {
+      courseId,
+      incidentId,
+      eventType: "REVALIDATION_REQUESTED",
+      source: "COURSE_SUPPORT_RESPONDER",
+      occurredAt: { lte: occurredAt },
+      AND: [
+        { audit: { path: ["action"], equals: "parked_cohort_admission" } },
+        { audit: { path: ["cycle"], equals: cycle } }
+      ]
+    },
+    orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
+    select: { audit: true }
+  });
+  const record = asJsonObject(admission?.audit);
+  if (
+    record.action !== "parked_cohort_admission" ||
+    record.cycle !== cycle ||
+    typeof record.campaignRunId !== "string" ||
+    !record.campaignRunId.trim() ||
+    typeof record.campaignMembershipDigest !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(record.campaignMembershipDigest)
+  ) {
+    return {};
+  }
+  return buildCourseSupportCampaignProvenance(
+    record.campaignRunId,
+    record.campaignMembershipDigest,
+    cycle
+  );
+}
+
+function buildCourseSupportCampaignProvenance(
+  runId: string,
+  membershipDigest: string,
+  cycle: number
+) {
+  return {
+    campaign: {
+      kind: "PARKED_COHORT" as const,
+      runId,
+      membershipDigest,
+      cycle
+    }
+  };
+}
+
+async function lockOwnedCourseSupportSourceSearchSnapshot(
+  transaction: Prisma.TransactionClient,
+  batchId: string,
+  entry: CourseSupportSourceSearchBatch["incidents"][number]
+) {
+  const course = await transaction.$queryRaw<Array<{ locked: number }>>(Prisma.sql`
+    SELECT 1 AS locked
+    FROM "Course"
+    WHERE id = ${entry.course.id}
+      AND "updatedAt" = ${entry.course.updatedAt}
+      AND website IS NULL
+      AND "detectedBookingUrl" IS NULL
+      AND "providerFamilyKey" = ${SOURCE_MISSING_PROVIDER_FAMILY}
+      AND "monitoringMode" <> 'LOCAL_READER_ONLY'
+    FOR UPDATE
+  `);
+  const incident = await transaction.$queryRaw<Array<{ locked: number }>>(Prisma.sql`
+    SELECT 1 AS locked
+    FROM "CourseSupportIncident"
+    WHERE id = ${entry.incident.id}
+      AND cycle = ${entry.cycle}
+      AND revision = ${entry.incident.revision}
+      AND status = 'AUTO_INVESTIGATING'
+      AND "activeBatchId" = ${batchId}
+      AND "updatedAt" = ${entry.incident.updatedAt}
+    FOR UPDATE
+  `);
+  const batchEntry = await transaction.$queryRaw<Array<{ locked: number }>>(Prisma.sql`
+    SELECT 1 AS locked
+    FROM "CourseSupportBatchIncident"
+    WHERE id = ${entry.id}
+      AND cycle = ${entry.cycle}
+      AND result = 'PENDING'
+      AND "updatedAt" = ${entry.updatedAt}
+    FOR UPDATE
+  `);
+  return course.length === 1 && incident.length === 1 && batchEntry.length === 1;
+}
+
+function appendNoUniqueCourseSupportSourceSearchLadder(input: {
+  attemptLedger: unknown;
+  cycle: number;
+  runtimeVersion: string;
+  observedAt: Date;
+}) {
+  let ledger = input.attemptLedger;
+  const skippedStages = [
+    {
+      stage: "RENDERED_BROWSER_DISCOVERY",
+      readPath: "RENDERED_BROWSER",
+      skipReason: "NO_BROWSER_ROUTE"
+    },
+    {
+      stage: "BROWSER_ADAPTER_RETRY",
+      readPath: "TYPED_PROVIDER_ADAPTER",
+      skipReason: "NO_METADATA_CHANGE"
+    },
+    {
+      stage: "LOCAL_READER",
+      readPath: "LOCAL_READER",
+      skipReason: "NO_LOCAL_READER_CAPABILITY"
+    }
+  ] as const;
+  for (const stage of skippedStages) {
+    ledger = appendAutomationPlaybookEvent(ledger, {
+      cycle: input.cycle,
+      stage: stage.stage,
+      transition: "NOT_APPLICABLE",
+      readPath: stage.readPath,
+      evidenceKind: "TOOLING",
+      failureFingerprint: `SOURCE_MISSING:EXACT_SEARCH:${stage.stage}`,
+      runtimeVersion: input.runtimeVersion,
+      skipReason: stage.skipReason,
+      note: "No safe source route exists for this ordered playbook stage.",
+      observedAt: input.observedAt
+    });
+  }
+  return appendAutomationPlaybookEvent(ledger, {
+    cycle: input.cycle,
+    stage: "INDEPENDENT_CONFIRMATION",
+    transition: "FAILED_TERMINAL",
+    readPath: "INDEPENDENT_CONFIRMATION",
+    evidenceKind: "TOOLING",
+    failureFingerprint: "SOURCE_MISSING:EXACT_SEARCH:NO_UNIQUE",
+    runtimeVersion: input.runtimeVersion,
+    failureClass: "MISSING_SOURCE",
+    note:
+      "One bounded best-available exact course identity search found no unique direct official source.",
+    observedAt: input.observedAt
+  });
+}
+
+function doesCourseSupportSourceSearchEventMatch(
+  event: { evidenceUrl: string | null; audit: unknown },
+  result: ReturnType<typeof normalizeCourseSupportSourceSearchResult>
+) {
+  const audit = asJsonObject(event.audit);
+  return audit.result === result.result && event.evidenceUrl === result.candidateUrl;
+}
+
+function validateCourseSupportSourceSearchOrdinal(ordinal: number) {
+  if (!Number.isInteger(ordinal) || ordinal < 1) {
+    throw new Error("Course-support ordinal must be a positive integer.");
+  }
+}
+
+function courseSupportSourceSearchRecoveryRequired() {
+  return {
+    outcome: "recovery_required" as const,
+    resultRecorded: false,
+    threadDisposition: "KEEP_VISIBLE" as const,
+    archiveReason: "Responder batch ownership or lease freshness was lost."
   };
 }
 
@@ -3438,13 +4154,18 @@ export async function heartbeatCourseSupportBatch(input: CourseSupportHeartbeatI
             select: { status: true, summary: true }
           });
           if (
-            otherActiveBatches.some((candidate) =>
-              courseSupportBatchReservesCheckout(candidate)
-            )
+            otherActiveBatches.some((candidate) => courseSupportBatchReservesCheckout(candidate))
           ) {
             return null;
           }
-          return persistCourseSupportHeartbeat(transaction, input, current, plan, databaseNow, true);
+          return persistCourseSupportHeartbeat(
+            transaction,
+            input,
+            current,
+            plan,
+            databaseNow,
+            true
+          );
         })
       )
     : {
@@ -3462,10 +4183,9 @@ export async function heartbeatCourseSupportBatch(input: CourseSupportHeartbeatI
     releaseAdvanced: heartbeat?.releaseAdvanced ?? false,
     leaseExpiresAt: heartbeat?.leaseExpiresAt.toISOString() ?? null,
     threadDisposition: "KEEP_VISIBLE" as const,
-    archiveReason:
-      heartbeat
-        ? "The responder batch is still in progress."
-        : "Responder batch ownership changed during heartbeat."
+    archiveReason: heartbeat
+      ? "The responder batch is still in progress."
+      : "Responder batch ownership changed during heartbeat."
   };
 }
 
@@ -4675,10 +5395,7 @@ function getCurrentCourseSupportMonitoringFailureIdentity(input: {
   }>;
 }) {
   const failureFingerprint = input.monitoringStatus?.failureFingerprint;
-  if (
-    !failureFingerprint ||
-    failureFingerprint === input.incidentFailureFingerprint
-  ) {
+  if (!failureFingerprint || failureFingerprint === input.incidentFailureFingerprint) {
     return null;
   }
   const event = input.monitoringEvents?.[0];
@@ -4736,9 +5453,7 @@ class CourseSupportCloseoutSnapshotChangedError extends Error {
   }
 }
 
-async function closeoutCourseSupportBatchAttempt(
-  input: CloseoutCourseSupportBatchInput
-) {
+async function closeoutCourseSupportBatchAttempt(input: CloseoutCourseSupportBatchInput) {
   const now = input.now ?? new Date();
   const verificationWatchMode = input.verificationWatchMode ?? "STANDARD";
   const batch = await prisma.courseSupportBatch.findFirst({
@@ -4936,12 +5651,15 @@ async function closeoutCourseSupportBatchAttempt(
         attemptCount: entry.incident.attemptCount,
         activeRealSearchCount: entry.incident.activeRealSearchCount,
         firstSeenAt: entry.incident.firstSeenAt,
+        freshCycleStartedAt: entry.incident.confirmedAt,
+        attemptLedger: entry.incident.attemptLedger,
+        cycle: entry.incident.cycle,
         verifiedAt: entry.verifiedAt,
         result: entry.result,
         now
       });
       if (sourceUnverifiedFinal) {
-        // The source-specific human-review proof is normalized by the next branch.
+        // The complete source-specific proof is normalized by the next branch.
       } else {
         const playbook = assessAutomationPlaybook(
           entry.incident.attemptLedger,
@@ -4982,6 +5700,9 @@ async function closeoutCourseSupportBatchAttempt(
         attemptCount: entry.incident.attemptCount,
         activeRealSearchCount: entry.incident.activeRealSearchCount,
         firstSeenAt: entry.incident.firstSeenAt,
+        freshCycleStartedAt: entry.incident.confirmedAt,
+        attemptLedger: entry.incident.attemptLedger,
+        cycle: entry.incident.cycle,
         verifiedAt: entry.verifiedAt,
         result: entry.result,
         now
@@ -4992,20 +5713,23 @@ async function closeoutCourseSupportBatchAttempt(
         ...entry,
         currentProviderSnapshotFingerprint,
         automationStalled: false,
-        normalizedResult: "NEEDS_HUMAN" as const,
+        normalizedResult: "FINAL_DISPOSITION" as const,
         proofSnapshot: {
-          kind: "HUMAN_REVIEW_REQUIRED",
+          kind: "SOURCE_UNVERIFIED_FINAL",
           disposition: "SOURCE_UNVERIFIED",
           providerFamilyKey: entry.incident.providerFamilyKey,
           failureClass: entry.incident.failureClass,
           attemptCount: entry.incident.attemptCount,
           activeRealSearchCount: entry.incident.activeRealSearchCount,
           firstSeenAt: entry.incident.firstSeenAt.toISOString(),
+          freshCycleStartedAt: entry.incident.confirmedAt!.toISOString(),
+          cycle: entry.incident.cycle,
+          completedStageCount: AUTOMATION_PLAYBOOK_STAGES.length,
           verifiedAt: entry.verifiedAt!.toISOString(),
           priorProofKind: typeof priorProof.kind === "string" ? priorProof.kind : "UNKNOWN"
         } as Prisma.JsonValue,
         message:
-          "Repeated current checks could not establish one trustworthy public provider source; an engineer must verify the official link before approving a final limitation."
+          "A fresh complete signed-out playbook, including independent confirmation, could not establish one trustworthy public provider source."
       };
     }
     if (
@@ -5072,7 +5796,7 @@ async function closeoutCourseSupportBatchAttempt(
           ? plannedAttempt.providerSnapshotFingerprint
           : typeof proofProviderSnapshotFingerprint === "string"
             ? proofProviderSnapshotFingerprint
-          : entry.currentProviderSnapshotFingerprint;
+            : entry.currentProviderSnapshotFingerprint;
       const providerSnapshotChanged =
         claimedProviderSnapshotFingerprint !== entry.currentProviderSnapshotFingerprint;
       const monitoringFailure = getCurrentCourseSupportMonitoringFailureIdentity({
@@ -5111,9 +5835,7 @@ async function closeoutCourseSupportBatchAttempt(
       }
       const handoffRetryCandidates = [now];
       if (monitoringFailure && entry.course.monitoringStatus?.nextAutomaticAttemptAt) {
-        handoffRetryCandidates.push(
-          entry.course.monitoringStatus.nextAutomaticAttemptAt
-        );
+        handoffRetryCandidates.push(entry.course.monitoringStatus.nextAutomaticAttemptAt);
       }
       const playbookAssessment = assessAutomationPlaybook(
         entry.incident.attemptLedger,
@@ -5188,8 +5910,7 @@ async function closeoutCourseSupportBatchAttempt(
     }
     if (
       entry.normalizedResult === "RETRY_SCHEDULED" &&
-      (verificationWatchMode === "STANDARD" ||
-        verificationWatchMode === "WATCH_SETTLED") &&
+      (verificationWatchMode === "STANDARD" || verificationWatchMode === "WATCH_SETTLED") &&
       !currentFailureIdentityByBatchIncidentId.get(entry.id)?.materialChange &&
       !canCloseCourseSupportRetry(
         getEffectiveCourseSupportRetryFailureClass({
@@ -5205,12 +5926,8 @@ async function closeoutCourseSupportBatchAttempt(
     }
     if (
       ["RESTORED", "FINAL_DISPOSITION"].includes(entry.normalizedResult) &&
-      !isAuthoritativeFactualCourseMonitoringState(
-        entry.course.monitoringStatus?.state
-      ) &&
-      !getAuthoritativeCourseMonitoringResolution(
-        entry.course.monitoringStatus?.state
-      ) &&
+      !isAuthoritativeFactualCourseMonitoringState(entry.course.monitoringStatus?.state) &&
+      !getAuthoritativeCourseMonitoringResolution(entry.course.monitoringStatus?.state) &&
       !isDurableTerminalProof(entry, batch) &&
       !currentFailureIdentityByBatchIncidentId.get(entry.id)?.materialChange
     ) {
@@ -5240,8 +5957,8 @@ async function closeoutCourseSupportBatchAttempt(
     const claimedImplementationPaths = readBatchPlannedPaths(batch.summary).length > 0;
     const newReleaseRecorded = Boolean(
       typeof batch.baseSha === "string" &&
-        typeof batch.releaseSha === "string" &&
-        batch.releaseSha !== batch.baseSha
+      typeof batch.releaseSha === "string" &&
+      batch.releaseSha !== batch.baseSha
     );
     const deploymentRecorded = Boolean(newReleaseRecorded && batch.deployedAt);
     const postProbeRecorded = Boolean(
@@ -5261,20 +5978,16 @@ async function closeoutCourseSupportBatchAttempt(
     });
     const durableFactualBatchProofRecorded = Boolean(
       entry.normalizedResult === "FINAL_DISPOSITION" &&
-        asJsonObject(entry.proofSnapshot).kind === "PLAYBOOK_FACTUAL_FINAL" &&
-        isDurableTerminalProof(entry, batch)
+      asJsonObject(entry.proofSnapshot).kind === "PLAYBOOK_FACTUAL_FINAL" &&
+      isDurableTerminalProof(entry, batch)
     );
     const terminalResultRecorded = Boolean(
       ["RESTORED", "FINAL_DISPOSITION"].includes(entry.normalizedResult) &&
-        (isAuthoritativeFactualCourseMonitoringState(
-          entry.course.monitoringStatus?.state
-        ) ||
-          durableFactualBatchProofRecorded ||
-          (!currentFailureIdentityByBatchIncidentId.get(entry.id)?.materialChange &&
-            (getAuthoritativeCourseMonitoringResolution(
-              entry.course.monitoringStatus?.state
-            ) ||
-              isDurableTerminalProof(entry, batch))))
+      (isAuthoritativeFactualCourseMonitoringState(entry.course.monitoringStatus?.state) ||
+        durableFactualBatchProofRecorded ||
+        (!currentFailureIdentityByBatchIncidentId.get(entry.id)?.materialChange &&
+          (getAuthoritativeCourseMonitoringResolution(entry.course.monitoringStatus?.state) ||
+            isDurableTerminalProof(entry, batch))))
     );
     const consumed =
       deploymentRecorded ||
@@ -5357,9 +6070,7 @@ async function closeoutCourseSupportBatchAttempt(
       ["RESTORED", "FINAL_DISPOSITION", "RETRY_SCHEDULED", "NEEDS_HUMAN"].includes(
         entry.normalizedResult
       );
-    if (
-      staleResultAfterMaterialChange
-    ) {
+    if (staleResultAfterMaterialChange) {
       return {
         ...entry,
         normalizedResult: "RETRY_SCHEDULED" as const,
@@ -5512,8 +6223,7 @@ async function closeoutCourseSupportBatchAttempt(
         input.snapshot.state === "FINAL_TECHNICAL";
       const materialHandoffCanSupersedeSnapshot =
         input.allowMaterialHandoff === true &&
-        (input.snapshot.state === "HEALTHY" ||
-          input.snapshot.state === "FINAL_TECHNICAL");
+        (input.snapshot.state === "HEALTHY" || input.snapshot.state === "FINAL_TECHNICAL");
       if (snapshotIsAuthoritative && !materialHandoffCanSupersedeSnapshot) {
         if (input.snapshot.state === input.targetState) {
           // Lock and CAS the unchanged authoritative row so a newer search
@@ -5566,9 +6276,7 @@ async function closeoutCourseSupportBatchAttempt(
         })
       : [];
     const materialHandoffBatchIncidentIds = new Set(
-      normalizedEntries
-        .filter((entry) => entry.providerFamilyHandoff)
-        .map((entry) => entry.id)
+      normalizedEntries.filter((entry) => entry.providerFamilyHandoff).map((entry) => entry.id)
     );
     const factualSucceededRequestBatchIncidentIds = new Set(
       detachedRequestStates
@@ -5581,8 +6289,7 @@ async function closeoutCourseSupportBatchAttempt(
     );
     const supersededBatchIncidentIds = new Set(
       [...materialHandoffBatchIncidentIds].filter(
-        (batchIncidentId) =>
-          !factualSucceededRequestBatchIncidentIds.has(batchIncidentId)
+        (batchIncidentId) => !factualSucceededRequestBatchIncidentIds.has(batchIncidentId)
       )
     );
     const supersededDetachedRequestCount = detachedRequestStates.filter(
@@ -5595,7 +6302,9 @@ async function closeoutCourseSupportBatchAttempt(
         where: {
           batchIncidentId: { in: [...supersededBatchIncidentIds] },
           releaseSha: batch.releaseSha,
-          status: { in: ["QUEUED", "CHECKING", "SUCCEEDED", "RETRYABLE_FAILED"] }
+          status: {
+            in: ["QUEUED", "CHECKING", "SUCCEEDED", "RETRYABLE_FAILED"]
+          }
         },
         data: {
           status: "STALE",
@@ -5663,11 +6372,11 @@ async function closeoutCourseSupportBatchAttempt(
 
     const shouldWakeParkedProviderSiblings = Boolean(
       reusableFamilyRestoredCount > 0 &&
-        remediationDirective?.workMode === "IMPLEMENT_REUSABLE_SUPPORT" &&
-        remediationDirective.requiresImplementationPath &&
-        batch.releaseSha &&
-        batch.releaseSha !== batch.baseSha &&
-        batch.deployedAt
+      remediationDirective?.workMode === "IMPLEMENT_REUSABLE_SUPPORT" &&
+      remediationDirective.requiresImplementationPath &&
+      batch.releaseSha &&
+      batch.releaseSha !== batch.baseSha &&
+      batch.deployedAt
     );
     const parkedProviderSiblings = shouldWakeParkedProviderSiblings
       ? await tx.courseSupportIncident.findMany({
@@ -5775,8 +6484,8 @@ async function closeoutCourseSupportBatchAttempt(
         ownershipReleaseMode ||
         entry.providerFamilyHandoff ||
         currentFailureIdentityByBatchIncidentId.get(entry.id)?.materialChange
-        ? entry.incident.updatedAt
-        : (entry.verifiedIncidentUpdatedAt ?? entry.incident.updatedAt);
+          ? entry.incident.updatedAt
+          : (entry.verifiedIncidentUpdatedAt ?? entry.incident.updatedAt);
       let incidentUpdated: { count: number };
       const authoritativeMonitoringResolution = ownershipReleaseMode
         ? getAuthoritativeCourseMonitoringResolution(entry.course.monitoringStatus?.state)
@@ -5852,6 +6561,14 @@ async function closeoutCourseSupportBatchAttempt(
           }
         });
         if (monitoringUpdated) {
+          const campaignProvenance = await readCourseSupportCampaignProvenance(
+            tx,
+            batch.summary,
+            entry.courseId,
+            entry.incidentId,
+            entry.cycle,
+            now
+          );
           await tx.courseMonitoringEvent.create({
             data: {
               courseId: entry.courseId,
@@ -5867,7 +6584,11 @@ async function closeoutCourseSupportBatchAttempt(
               occurredAt: now,
               audit: {
                 freshRuntimeProof: true,
-                customerDataIncluded: false
+                automatedFinal: true,
+                customerDataIncluded: false,
+                ...campaignProvenance,
+                cycle: entry.cycle,
+                confirmedAt: entry.incident.confirmedAt?.toISOString() ?? null
               }
             }
           });
@@ -5875,12 +6596,14 @@ async function closeoutCourseSupportBatchAttempt(
       } else if (entry.normalizedResult === "FINAL_DISPOSITION") {
         const resolution = getFinalDispositionResolution(entry.proofSnapshot);
         const proof = asJsonObject(entry.proofSnapshot);
+        const sourceUnverifiedFinal = proof.kind === "SOURCE_UNVERIFIED_FINAL";
         const finalMonitoringState =
           proof.kind === "EXACT_PLACE_REVIEW" ||
           proof.kind === "BROWSER_PRIVATE_IDENTITY" ||
           (proof.kind === "PLAYBOOK_FACTUAL_FINAL" && proof.disposition === "IDENTITY_FINAL")
             ? ("FINAL_IDENTITY" as const)
-            : proof.kind === "FINAL_DISPOSITION" && proof.disposition !== "MANUAL_DIRECT"
+            : sourceUnverifiedFinal ||
+                (proof.kind === "FINAL_DISPOSITION" && proof.disposition !== "MANUAL_DIRECT")
               ? ("FINAL_TECHNICAL" as const)
               : ("FINAL_MANUAL" as const);
         incidentUpdated = await tx.courseSupportIncident.updateMany({
@@ -5920,6 +6643,14 @@ async function closeoutCourseSupportBatchAttempt(
           }
         });
         if (monitoringUpdated) {
+          const campaignProvenance = await readCourseSupportCampaignProvenance(
+            tx,
+            batch.summary,
+            entry.courseId,
+            entry.incidentId,
+            entry.cycle,
+            now
+          );
           await tx.courseMonitoringEvent.create({
             data: {
               courseId: entry.courseId,
@@ -5929,16 +6660,23 @@ async function closeoutCourseSupportBatchAttempt(
               fromState: "AUTO_INVESTIGATING",
               toState: finalMonitoringState,
               message,
+              runtimeVersion: batch.releaseSha,
+              deploymentSha: batch.releaseSha,
               occurredAt: now,
               audit: {
                 automatedFinal: true,
                 finalKind:
                   finalMonitoringState === "FINAL_IDENTITY"
                     ? "identity"
-                    : finalMonitoringState === "FINAL_TECHNICAL"
-                      ? "known_technical_limitation"
-                      : "manual_direct",
-                customerDataIncluded: false
+                    : sourceUnverifiedFinal
+                      ? "source_unverified"
+                      : finalMonitoringState === "FINAL_TECHNICAL"
+                        ? "known_technical_limitation"
+                        : "manual_direct",
+                customerDataIncluded: false,
+                ...campaignProvenance,
+                cycle: entry.cycle,
+                confirmedAt: entry.incident.confirmedAt?.toISOString() ?? null
               }
             }
           });
@@ -6021,10 +6759,8 @@ async function closeoutCourseSupportBatchAttempt(
                 providerSnapshotChanged: handoff.providerSnapshotChanged,
                 priorProviderFamilyKey: handoff.fromProviderFamilyKey,
                 providerFamilyKey: handoff.toProviderFamilyKey,
-                claimedProviderSnapshotFingerprint:
-                  handoff.claimedProviderSnapshotFingerprint,
-                observedProviderSnapshotFingerprint:
-                  handoff.observedProviderSnapshotFingerprint,
+                claimedProviderSnapshotFingerprint: handoff.claimedProviderSnapshotFingerprint,
+                observedProviderSnapshotFingerprint: handoff.observedProviderSnapshotFingerprint,
                 priorFailureFingerprint: handoff.priorFailureFingerprint,
                 failureFingerprint: handoff.failureFingerprint,
                 customerDataIncluded: false
@@ -6099,8 +6835,7 @@ async function closeoutCourseSupportBatchAttempt(
                 automationStalled: entry.automationStalled,
                 parkedUntilMaterialChange: entry.automationStalled,
                 endpointStalled: entry.automationStalled,
-                operationalRetryBudgetExhausted:
-                  entry.operationalRetryBudgetExhausted,
+                operationalRetryBudgetExhausted: entry.operationalRetryBudgetExhausted,
                 reason: entry.operationalRetryBudgetExhausted
                   ? "OPERATIONAL_RETRY_BUDGET_EXHAUSTED"
                   : null,
@@ -6140,14 +6875,13 @@ async function closeoutCourseSupportBatchAttempt(
           incidentFailureClass: entry.incident.failureClass,
           proofSnapshot: entry.proofSnapshot
         });
-        const effectiveFailureFingerprint =
-          getEffectiveCourseSupportRetryFailureFingerprint({
-            providerFamilyKey: entry.incident.providerFamilyKey,
-            incidentKind: entry.incident.kind,
-            incidentFailureClass: entry.incident.failureClass,
-            incidentFailureFingerprint: entry.incident.failureFingerprint,
-            proofSnapshot: entry.proofSnapshot
-          });
+        const effectiveFailureFingerprint = getEffectiveCourseSupportRetryFailureFingerprint({
+          providerFamilyKey: entry.incident.providerFamilyKey,
+          incidentKind: entry.incident.kind,
+          incidentFailureClass: entry.incident.failureClass,
+          incidentFailureFingerprint: entry.incident.failureFingerprint,
+          proofSnapshot: entry.proofSnapshot
+        });
         const watchContinuationAt =
           verificationWatchMode === "WATCH_SETTLED" &&
           playbookAssessment.conclusion === "INCOMPLETE" &&
@@ -6156,8 +6890,7 @@ async function closeoutCourseSupportBatchAttempt(
             ? new Date(now.getTime() + 60 * 1000)
             : null;
         const closeoutRemediationAttempt = closeoutRemediationAttempts.find(
-          (attempt) =>
-            attempt.courseRef === createCourseSupportRemediationCourseRef(entry.courseId)
+          (attempt) => attempt.courseRef === createCourseSupportRemediationCourseRef(entry.courseId)
         );
         const operationalRetryAt =
           closeoutRemediationAttempt && !closeoutRemediationAttempt.consumed
@@ -6293,15 +7026,11 @@ async function closeoutCourseSupportBatchAttempt(
         }
       };
       await updateSiblingIncidentGroup(
-        relevantParkedProviderSiblings.filter(
-          (sibling) => sibling.activeRealSearchCount > 0
-        ),
+        relevantParkedProviderSiblings.filter((sibling) => sibling.activeRealSearchCount > 0),
         true
       );
       await updateSiblingIncidentGroup(
-        relevantParkedProviderSiblings.filter(
-          (sibling) => sibling.activeRealSearchCount <= 0
-        ),
+        relevantParkedProviderSiblings.filter((sibling) => sibling.activeRealSearchCount <= 0),
         false
       );
 
@@ -6348,12 +7077,10 @@ async function closeoutCourseSupportBatchAttempt(
         where: {
           status: "ACTIVE",
           trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
-          OR: [...courseIdsByStorageBoundary.entries()].map(
-            ([boundaryTimestamp, courseIds]) => ({
-              date: { gte: new Date(boundaryTimestamp) },
-              preferences: { some: { courseId: { in: courseIds } } }
-            })
-          )
+          OR: [...courseIdsByStorageBoundary.entries()].map(([boundaryTimestamp, courseIds]) => ({
+            date: { gte: new Date(boundaryTimestamp) },
+            preferences: { some: { courseId: { in: courseIds } } }
+          }))
         },
         data: {
           nextCheckAt: now,
@@ -6494,12 +7221,9 @@ async function closeoutCourseSupportBatchAttempt(
   };
 }
 
-export async function closeoutCourseSupportBatch(
-  input: CloseoutCourseSupportBatchInput
-) {
+export async function closeoutCourseSupportBatch(input: CloseoutCourseSupportBatchInput) {
   const ownershipReleaseMode =
-    input.verificationWatchMode === "EARLY_RETRY" ||
-    input.verificationWatchMode === "ENDPOINT";
+    input.verificationWatchMode === "EARLY_RETRY" || input.verificationWatchMode === "ENDPOINT";
   const maxAttempts = ownershipReleaseMode ? 3 : 1;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -6956,9 +7680,7 @@ export async function recoverCourseSupportBatch(input: {
         const terminalMessage =
           "Expired responder ownership was superseded by a later durable course decision.";
         const summary = asJsonObject(batch.summary);
-        const plannedRemediationAttempts = Array.isArray(
-          asJsonObject(summary.remediation).attempts
-        )
+        const plannedRemediationAttempts = Array.isArray(asJsonObject(summary.remediation).attempts)
           ? (asJsonObject(summary.remediation).attempts as unknown[])
           : [];
         const safeRequeueRemediationAttempts = retryIncidents.flatMap((entry) => {
@@ -7197,8 +7919,7 @@ export async function recoverCourseSupportBatch(input: {
                     needsHumanCount,
                     failureDomain: "GIT",
                     remediationAttemptConsumed: false,
-                    operationalNoProgressAttemptCount:
-                      safeRequeueRemediationAttempts.length,
+                    operationalNoProgressAttemptCount: safeRequeueRemediationAttempts.length,
                     reason: closeoutReason
                   })
                 }
@@ -7862,9 +8583,7 @@ export async function parkCourseSupportCandidatesForMaterialChange(
           }
         });
         if (incidentUpdated.count !== 1) {
-          throw new Error(
-            "Course-support parking write conflict while updating the incident."
-          );
+          throw new Error("Course-support parking write conflict while updating the incident.");
         }
         const monitoringUpdated = await transaction.courseMonitoringStatus.updateMany({
           where: {
@@ -7905,10 +8624,8 @@ export async function parkCourseSupportCandidatesForMaterialChange(
               parkedUntilMaterialChange: true,
               reason: route.reason,
               resumeWorkMode: route.resumeWorkMode,
-              repeatedApproachSuppressed:
-                route.reason === "UNCHANGED_ATTEMPT_ALREADY_RECORDED",
-              transientBudgetExhausted:
-                route.reason === "TRANSIENT_RETRY_BUDGET_EXHAUSTED",
+              repeatedApproachSuppressed: route.reason === "UNCHANGED_ATTEMPT_ALREADY_RECORDED",
+              transientBudgetExhausted: route.reason === "TRANSIENT_RETRY_BUDGET_EXHAUSTED",
               operationalRetryBudgetExhausted:
                 route.reason === "OPERATIONAL_RETRY_BUDGET_EXHAUSTED",
               customerDataIncluded: false
@@ -7929,58 +8646,15 @@ async function listDueCourseSupportCandidates(now: Date) {
   const incidents = await prisma.courseSupportIncident.findMany({
     where: buildDueResponderIncidentWhere(now),
     orderBy: [{ earliestTargetDate: "asc" }, { firstSeenAt: "asc" }],
-    select: {
-      id: true,
-      courseId: true,
-      cycle: true,
-      confirmedAt: true,
-      attemptLedger: true,
-      kind: true,
-      providerFamilyKey: true,
-      failureClass: true,
-      failureFingerprint: true,
-      humanReviewReason: true,
-      engineeringOnly: true,
-      activeRealSearchCount: true,
-      earliestTargetDate: true,
-      escalationDeadlineAt: true,
-      escalatedAt: true,
-      firstSeenAt: true,
-      lastSeenAt: true,
-      lastAttemptAt: true,
-      nextAttemptAt: true,
-      attemptCount: true,
-      updatedAt: true,
-      batchIncidents: {
-        where: { batch: { completedAt: { not: null } } },
-        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-        select: {
-          cycle: true,
-          batch: {
-            select: {
-              summary: true
-            }
-          }
-        }
-      },
-      course: {
-        select: {
-          ...DETACHED_VERIFICATION_COURSE_SELECT,
-          preferences: {
-            where: {
-              teeSearch: {
-                status: "ACTIVE",
-                trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] }
-              }
-            },
-            select: {
-              teeSearch: { select: { id: true, date: true } }
-            }
-          }
-        }
-      }
-    }
+    select: COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT
   });
+  return buildCourseSupportCandidates(incidents, now);
+}
+
+function buildCourseSupportCandidates(
+  incidents: readonly CourseSupportCandidateIncident[],
+  now: Date
+): CourseSupportClaimCandidate[] {
   return incidents.flatMap(({ course, batchIncidents, ...incident }) => {
     const currentDemand = deriveCourseSupportCurrentDemand(course.preferences, {
       timeZone: course.timeZone,
@@ -7996,10 +8670,7 @@ async function listDueCourseSupportCandidates(now: Date) {
     ) {
       return [];
     }
-    const playbookAssessment = assessAutomationPlaybook(
-      incident.attemptLedger,
-      incident.cycle
-    );
+    const playbookAssessment = assessAutomationPlaybook(incident.attemptLedger, incident.cycle);
     const providerSnapshotFingerprint = buildCourseSupportProviderSnapshotFingerprint(course);
     const currentCycleBatchIncidents = (batchIncidents ?? []).filter(
       (entry) => entry.cycle === incident.cycle
@@ -8050,9 +8721,7 @@ async function listDueCourseSupportCandidates(now: Date) {
       intelligenceReviewAt: course.intelligenceReviewAt,
       intelligenceConfidence: course.intelligenceConfidence,
       failureClass: incident.failureClass,
-      discoveryAttempt: playbookAssessment.completedStages.includes(
-        "OFFICIAL_HTTP_DISCOVERY"
-      )
+      discoveryAttempt: playbookAssessment.completedStages.includes("OFFICIAL_HTTP_DISCOVERY")
         ? "HTTP_INCONCLUSIVE"
         : "NONE",
       attemptCount: routingAttemptCount,
@@ -8120,6 +8789,75 @@ async function listDueCourseSupportCandidates(now: Date) {
           attemptLedger: incident.attemptLedger,
           cycle: incident.cycle
         })
+      }
+    ];
+  });
+}
+
+async function listParkedCourseCampaignCandidates(
+  plan: Awaited<ReturnType<typeof planNextParkedCourseCampaignCohort>>,
+  now: Date
+) {
+  if (!plan.campaignRunId || !plan.members.length || !plan.membershipDigest) {
+    return [] as CourseSupportClaimCandidate[];
+  }
+  const memberByIncidentId = new Map(plan.members.map((member) => [member.incidentId, member]));
+  const incidents = await prisma.courseSupportIncident.findMany({
+    where: { id: { in: plan.members.map((member) => member.incidentId) } },
+    orderBy: [{ firstSeenAt: "asc" }, { id: "asc" }],
+    select: COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT
+  });
+  const reopenedCycleCandidates = buildCourseSupportCandidates(
+    incidents.flatMap((incident) => {
+      const member = memberByIncidentId.get(incident.id);
+      if (
+        !member ||
+        incident.courseId !== member.courseId ||
+        incident.cycle !== member.cycle ||
+        incident.kind !== member.kind ||
+        incident.failureClass !== member.failureClass ||
+        incident.providerFamilyKey !== member.providerFamilyKey ||
+        incident.failureFingerprint !== member.failureFingerprint
+      ) {
+        return [];
+      }
+      return [
+        {
+          ...incident,
+          cycle: incident.cycle + 1,
+          confirmedAt: now,
+          humanReviewReason: null,
+          lastAttemptAt: null,
+          nextAttemptAt: now,
+          attemptCount: 0,
+          batchIncidents: []
+        }
+      ];
+    }),
+    now
+  );
+  return reopenedCycleCandidates.flatMap((candidate) => {
+    const member = plan.members.find((entry) => entry.incidentId === candidate.id);
+    if (!member) return [];
+    return [
+      {
+        ...candidate,
+        campaign: {
+          runId: plan.campaignRunId!,
+          membershipDigest: plan.membershipDigest!,
+          priorCycle: member.cycle,
+          priorRevision: member.revision,
+          priorMonitoringRevision: member.monitoringRevision,
+          capturedRevision: member.capturedRevision,
+          capturedMonitoringRevision: member.capturedMonitoringRevision,
+          expectedKind: candidate.kind,
+          expectedFailureClass: candidate.failureClass,
+          expectedProviderSnapshotFingerprint: member.providerSnapshotFingerprint,
+          expectedAttemptLedgerFingerprint: member.attemptLedgerFingerprint,
+          expectedPlaybookConclusion: member.playbookConclusion,
+          expectedLatestProbeAt: member.latestProbeAt,
+          expectedLatestDiscoveryAt: member.latestDiscoveryAt
+        }
       }
     ];
   });
@@ -8759,6 +9497,7 @@ export function isDurableTerminalProof(
       activeRealSearchCount: number;
       cycle?: number;
       attemptLedger?: Prisma.JsonValue | null;
+      confirmedAt?: Date | null;
     };
   },
   batch: {
@@ -8811,6 +9550,8 @@ export function isDurableTerminalProof(
     );
   }
   if (entry.normalizedResult === "FINAL_DISPOSITION") {
+    const terminalEvidenceBoundary =
+      entry.incident.confirmedAt ?? entry.incident.firstSeenAt;
     if (proof.kind === "PLAYBOOK_FACTUAL_FINAL") {
       return Boolean(
         batch.releaseSha &&
@@ -8819,7 +9560,7 @@ export function isDurableTerminalProof(
           proof,
           attemptLedger: entry.incident.attemptLedger,
           cycle: entry.incident.cycle,
-          firstSeenAt: entry.incident.firstSeenAt,
+          firstSeenAt: terminalEvidenceBoundary,
           releaseSha: batch.releaseSha,
           verifiedAt: entry.verifiedAt,
           notBefore: [
@@ -8832,23 +9573,33 @@ export function isDurableTerminalProof(
     }
     if (proof.kind === "SOURCE_UNVERIFIED_FINAL") {
       const firstSeenAt = parseProofDate(proof.firstSeenAt);
+      const freshCycleStartedAt = parseProofDate(proof.freshCycleStartedAt);
       const verifiedAt = parseProofDate(proof.verifiedAt);
+      const playbook = assessAutomationPlaybook(entry.incident.attemptLedger, entry.incident.cycle);
       return Boolean(
         proof.disposition === "SOURCE_UNVERIFIED" &&
         proof.providerFamilyKey === entry.incident.providerFamilyKey &&
         proof.failureClass === entry.incident.failureClass &&
         proof.attemptCount === entry.incident.attemptCount &&
-        proof.activeRealSearchCount === 0 &&
-        entry.incident.activeRealSearchCount === 0 &&
-        entry.incident.attemptCount >= SOURCE_UNVERIFIED_FINAL_ATTEMPT_COUNT &&
+        proof.activeRealSearchCount === entry.incident.activeRealSearchCount &&
+        proof.cycle === entry.incident.cycle &&
+        proof.completedStageCount === AUTOMATION_PLAYBOOK_STAGES.length &&
         ((entry.incident.providerFamilyKey === SOURCE_MISSING_PROVIDER_FAMILY &&
           entry.incident.failureClass === "MISSING_SOURCE") ||
           (entry.incident.providerFamilyKey === SOURCE_CONFLICT_PROVIDER_FAMILY &&
             entry.incident.failureClass === "MISSING_METADATA")) &&
         firstSeenAt?.getTime() === entry.incident.firstSeenAt.getTime() &&
+        freshCycleStartedAt &&
+        entry.incident.confirmedAt &&
+        freshCycleStartedAt.getTime() === entry.incident.confirmedAt.getTime() &&
         verifiedAt?.getTime() === entry.verifiedAt.getTime() &&
         verifiedAt &&
-        verifiedAt.getTime() - firstSeenAt.getTime() >= SOURCE_UNVERIFIED_FINAL_MIN_AGE_MS
+        verifiedAt.getTime() >= freshCycleStartedAt.getTime() &&
+        playbook.valid &&
+        playbook.cycle === entry.incident.cycle &&
+        playbook.conclusion === "UNRESOLVED_EXHAUSTED" &&
+        playbook.completedStages.length === AUTOMATION_PLAYBOOK_STAGES.length &&
+        hasDurableSourceUnverifiedPlaybookEvidence(playbook, freshCycleStartedAt)
       );
     }
     if (proof.kind === "EXACT_PLACE_REVIEW") {
@@ -8862,7 +9613,7 @@ export function isDurableTerminalProof(
         getSafeEvidenceOrigin(proof.evidenceOrigin) === proof.evidenceOrigin &&
         reviewedAt &&
         reviewUpdatedAt &&
-        reviewUpdatedAt.getTime() >= entry.incident.firstSeenAt.getTime() &&
+        reviewUpdatedAt.getTime() >= terminalEvidenceBoundary.getTime() &&
         proof.automationEligibility === "BLOCKED" &&
         proof.automationReason === "OTHER"
       );
@@ -8890,8 +9641,8 @@ export function isDurableTerminalProof(
         discoveryCreatedAt &&
         intelligenceVerifiedAt &&
         intelligenceReviewAt &&
-        discoveryCreatedAt.getTime() >= entry.incident.firstSeenAt.getTime() &&
-        intelligenceVerifiedAt.getTime() >= entry.incident.firstSeenAt.getTime() &&
+        discoveryCreatedAt.getTime() >= terminalEvidenceBoundary.getTime() &&
+        intelligenceVerifiedAt.getTime() >= terminalEvidenceBoundary.getTime() &&
         discoveryCreatedAt.getTime() <= maximumEvidenceAt &&
         intelligenceVerifiedAt.getTime() <= maximumEvidenceAt &&
         Math.abs(discoveryCreatedAt.getTime() - intelligenceVerifiedAt.getTime()) <=
@@ -8925,7 +9676,7 @@ export function isDurableTerminalProof(
       typeof proof.evidenceOrigin === "string" &&
       getSafeEvidenceOrigin(proof.evidenceOrigin) === proof.evidenceOrigin &&
       discoveredAt &&
-      discoveredAt.getTime() >= entry.incident.firstSeenAt.getTime() &&
+      discoveredAt.getTime() >= terminalEvidenceBoundary.getTime() &&
       typeof proof.confidence === "number" &&
       proof.confidence >= 0.7
     );

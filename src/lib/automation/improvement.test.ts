@@ -14,9 +14,7 @@ import {
   markImprovementOutcomeRecorded,
   rankPortfolioCandidates,
   sanitizeAutomationText,
-  selectLatestActionableProbes,
   selectImprovementCandidate,
-  validateAdapterRemediationCloseout,
   validateHourlyCloseoutAudit,
   validateHourlyRunCommitTopology
 } from "./improvement";
@@ -232,7 +230,6 @@ describe("selectImprovementCandidate", () => {
           firstSeenAt: "2026-07-09T12:00:00.000Z"
         }
       ],
-      actionableProbes: [],
       learningSignals: []
     });
 
@@ -247,7 +244,7 @@ describe("selectImprovementCandidate", () => {
     });
   });
 
-  it("lets real BROKEN feedback outrank a fresh discretionary adapter gap", () => {
+  it("selects real BROKEN feedback ahead of discretionary work", () => {
     const portfolioCandidates = buildFeedbackPortfolioCandidates([
       {
         id: "feedback-1",
@@ -262,15 +259,6 @@ describe("selectImprovementCandidate", () => {
     const candidate = selectImprovementCandidate({
       activeSearchCount: 1,
       pendingAlerts: [],
-      actionableProbes: [
-        {
-          id: "probe-1",
-          outcome: "NEEDS_ADAPTER",
-          courseName: "Example Golf",
-          platform: "UNKNOWN",
-          observedAt: "2026-07-15T00:00:00.000Z"
-        }
-      ],
       portfolioCandidates,
       categoryHistory: []
     });
@@ -315,114 +303,11 @@ describe("selectImprovementCandidate", () => {
     expect(ranked[0].selectionReason).toContain("least-recently shipped");
   });
 
-  it("maps adapter probes to a needs_adapter terminal outcome", () => {
-    const candidate = selectImprovementCandidate({
-      activeSearchCount: 1,
-      pendingAlerts: [],
-      actionableProbes: [
-        {
-          id: "probe-1",
-          outcome: "NEEDS_ADAPTER",
-          courseName: "Example Golf",
-          platform: "GOLFNOW",
-          observedAt: "2026-07-09T12:00:00.000Z",
-          message: "No supported adapter yet for GOLFNOW"
-        }
-      ],
-      learningSignals: []
-    });
-
-    expect(candidate).toMatchObject({
-      outcome: "needs_adapter",
-      kind: "adapter_gap",
-      referenceId: "probe-1"
-    });
-  });
-
-  it("reopens legacy policy blocks as adapter work", () => {
-    const candidate = selectImprovementCandidate({
-      activeSearchCount: 1,
-      pendingAlerts: [],
-      actionableProbes: [
-        {
-          id: "probe-policy",
-          outcome: "BLOCKED_POLICY",
-          courseName: "Yale University Golf Course",
-          platform: "WHOOSH",
-          observedAt: "2026-07-15T12:00:00.000Z"
-        }
-      ],
-      learningSignals: []
-    });
-
-    expect(candidate).toMatchObject({
-      outcome: "needs_adapter",
-      kind: "adapter_gap",
-      referenceId: "probe-policy",
-      summary: expect.stringContaining("legacy policy block")
-    });
-  });
-
-  it("prioritizes an open adapter incident even when repeated browser discovery is stale", () => {
+  it("follows a living non-course-support learning signal", () => {
     const candidate = selectImprovementCandidate({
       activeSearchCount: 2,
       pendingAlerts: [],
-      supportIncidents: [
-        {
-          id: "incident-1",
-          status: "AUTO_INVESTIGATING",
-          kind: "NEEDS_ADAPTER",
-          courseName: "Dennis Pines",
-          platform: "UNKNOWN",
-          lastSeenAt: "2026-07-13T20:00:00.000Z",
-          message: "Official site discovery did not learn a reusable adapter."
-        }
-      ],
-      actionableProbes: [],
       learningSignals: [
-        {
-          key: "adapter:Dennis Pines",
-          kind: "adapter_gap",
-          summary: "Dennis Pines was inspected twice with no reusable adapter learned.",
-          lastSeenAt: "2026-07-13T20:00:00.000Z",
-          repeats: 3,
-          status: "stale"
-        }
-      ]
-    });
-
-    expect(candidate).toMatchObject({
-      outcome: "needs_adapter",
-      kind: "adapter_remediation",
-      referenceId: "incident-1",
-      summary: expect.stringContaining("Build or extend a reusable provider adapter")
-    });
-  });
-
-  it("skips repeated stale adapter gaps and follows a living learning signal", () => {
-    const candidate = selectImprovementCandidate({
-      activeSearchCount: 2,
-      pendingAlerts: [],
-      actionableProbes: [
-        {
-          id: "probe-1",
-          outcome: "NEEDS_ADAPTER",
-          courseName: "Longshore Golf Course",
-          platform: "UNKNOWN",
-          observedAt: "2026-07-09T12:00:00.000Z",
-          message: "No supported adapter yet for UNKNOWN"
-        }
-      ],
-      learningSignals: [
-        {
-          key: "adapter:Longshore Golf Course",
-          kind: "adapter_gap",
-          summary: "Longshore was inspected twice with no reusable adapter learned.",
-          lastSeenAt: "2026-07-09T12:00:00.000Z",
-          repeats: 3,
-          status: "stale",
-          nextAction: "Only revisit if a new booking URL or platform signal appears."
-        },
         {
           key: "research:waitlist-ux",
           kind: "research",
@@ -446,7 +331,6 @@ describe("selectImprovementCandidate", () => {
     const candidate = selectImprovementCandidate({
       activeSearchCount: 0,
       pendingAlerts: [],
-      actionableProbes: [],
       learningSignals: []
     });
 
@@ -464,7 +348,6 @@ describe("selectImprovementCandidate", () => {
     const candidate = selectImprovementCandidate({
       activeSearchCount: 3,
       pendingAlerts: [],
-      actionableProbes: [],
       learningSignals: []
     });
 
@@ -472,7 +355,7 @@ describe("selectImprovementCandidate", () => {
       outcome: "exploration_required",
       kind: "exploration_required",
       summary:
-        "Active searches have no current delivery, incident, probe, or shippable portfolio blocker; broaden ZIP, device, route, feedback, course-coverage, accessibility, performance, security, metadata, and current-practice exploration until a safe valuable improvement or concrete blocker is found.",
+        "Active searches have no current delivery or shippable non-course-support portfolio blocker; broaden ZIP, device, route, feedback, aggregate course-coverage, accessibility, performance, security, metadata, and current-practice exploration until a safe valuable improvement or concrete blocker is found.",
       researchDirective:
         "Rotate to the least-recently covered evidence surfaces. A healthy first pass is not a terminal outcome."
     });
@@ -498,7 +381,6 @@ describe("selectImprovementCandidate", () => {
       selectImprovementCandidate({
         activeSearchCount: 3,
         pendingAlerts: [],
-        actionableProbes: [],
         portfolioCandidates: [coverageBlocker],
         learningSignals: []
       })
@@ -512,7 +394,6 @@ describe("selectImprovementCandidate", () => {
     const candidate = selectImprovementCandidate({
       activeSearchCount: 3,
       pendingAlerts: [],
-      actionableProbes: [],
       portfolioCandidates: [
         {
           id: "coverage:discord-history",
@@ -655,123 +536,6 @@ describe("portfolio evidence collectors", () => {
       }
     ]);
     expect(candidates[0].evidence).toHaveLength(3);
-  });
-});
-
-describe("selectLatestActionableProbes", () => {
-  it("lets a newer successful probe supersede an older failure", () => {
-    const probes = selectLatestActionableProbes([
-      {
-        id: "bayberry-success",
-        teeSearchId: "search-1",
-        courseId: "bayberry",
-        outcome: "MATCH_FOUND"
-      },
-      {
-        id: "other-current-failure",
-        teeSearchId: "search-1",
-        courseId: "other-course",
-        outcome: "FETCH_FAILED"
-      },
-      {
-        id: "bayberry-old-failure",
-        teeSearchId: "search-1",
-        courseId: "bayberry",
-        outcome: "FETCH_FAILED"
-      }
-    ]);
-
-    expect(probes.map((probe) => probe.id)).toEqual(["other-current-failure"]);
-  });
-});
-
-describe("adapter remediation closeout", () => {
-  const candidate = selectImprovementCandidate({
-    activeSearchCount: 1,
-    pendingAlerts: [],
-    supportIncidents: [
-      {
-        id: "incident-1",
-        status: "AUTO_INVESTIGATING",
-        kind: "NEEDS_ADAPTER",
-        courseName: "Dennis Pines",
-        platform: "UNKNOWN",
-        lastSeenAt: "2026-07-13T20:00:00.000Z"
-      }
-    ],
-    actionableProbes: []
-  });
-
-  it("rejects needs_adapter as a terminal result", () => {
-    expect(() =>
-      validateAdapterRemediationCloseout({
-        candidate,
-        outcome: "needs_adapter",
-        evidence: null
-      })
-    ).toThrow("cannot close as needs_adapter");
-  });
-
-  it("allows owner escalation only with concrete automated-attempt evidence", () => {
-    expect(() =>
-      validateAdapterRemediationCloseout({
-        candidate,
-        outcome: "needs_human",
-        evidence: { incidentId: "incident-1" }
-      })
-    ).toThrow("requires adapterRemediation evidence");
-
-    expect(
-      validateAdapterRemediationCloseout({
-        candidate,
-        outcome: "needs_human",
-        evidence: {
-          incidentId: "incident-1",
-          attempts: ["Inspected the public booking flow and provider network requests."],
-          evidence: ["Official provider terms require a signed data-access agreement."],
-          result: "No policy-safe unauthenticated retrieval path exists.",
-          requiredExternalAction: "Approve or decline the provider data-access agreement."
-        }
-      })
-    ).toEqual({
-      escalate: true,
-      incidentId: "incident-1",
-      message: "No policy-safe unauthenticated retrieval path exists.",
-      nextAction: "Approve or decline the provider data-access agreement."
-    });
-  });
-
-  it("never escalates engineering-only coverage to the owner", () => {
-    const engineeringCandidate = selectImprovementCandidate({
-      activeSearchCount: 0,
-      pendingAlerts: [],
-      supportIncidents: [
-        {
-          id: "engineering-incident",
-          status: "AUTO_INVESTIGATING",
-          kind: "NEEDS_ADAPTER",
-          courseName: "Coverage Course",
-          platform: "UNKNOWN",
-          lastSeenAt: "2026-07-15T20:00:00.000Z",
-          engineeringOnly: true
-        }
-      ],
-      actionableProbes: []
-    });
-
-    expect(() =>
-      validateAdapterRemediationCloseout({
-        candidate: engineeringCandidate,
-        outcome: "needs_human",
-        evidence: {
-          incidentId: "engineering-incident",
-          attempts: ["Inspected the official public booking surface."],
-          evidence: ["The provider requires an account."],
-          result: "No public unauthenticated retrieval path exists.",
-          requiredExternalAction: "Create a provider account."
-        }
-      })
-    ).toThrow("cannot escalate to an owner");
   });
 });
 

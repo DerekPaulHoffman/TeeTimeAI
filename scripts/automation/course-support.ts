@@ -2,6 +2,8 @@ import "./load-local-env";
 
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   normalizeGitCommandOutput,
@@ -20,15 +22,18 @@ import {
   getCourseSupportBatchPacket,
   getCourseSupportBatchRecoveryProvenance,
   getOwnedCourseSupportLeaseToken,
+  getOwnedCourseSupportSourceSearchContext,
   heartbeatCourseSupportBatch,
   inspectCourseSupportQueue,
   markCourseSupportBatchNeedsHuman,
+  recordOwnedCourseSupportSourceSearchResult,
   recoverCourseSupportBatch,
   renewCourseSupportBatchOperationLease,
   resolveCourseSupportBatchReference,
   verifyCourseSupportBatch,
   type CourseSupportReleaseAdvanceProof
 } from "@/lib/automation/course-support-batches";
+import { getAutomationRuntimeVersion } from "@/lib/automation/runtime-version";
 import {
   AUTOMATION_WORKERS,
   completeAutomationWorker,
@@ -133,7 +138,8 @@ async function runCommand(command: string, args: string[]) {
     case "inspect":
       writeResult(
         await inspectCourseSupportQueue({
-          requestingThreadId: optionalOwnerThread(args)
+          requestingThreadId: optionalOwnerThread(args),
+          completeParkedCampaignIfDone: shouldCompleteParkedCampaignForInspection(args)
         })
       );
       return;
@@ -148,6 +154,12 @@ async function runCommand(command: string, args: string[]) {
       return;
     case "claim-path":
       writeResult(await claimPath(args));
+      return;
+    case "source-search-context":
+      writeResult(await sourceSearchContext(args));
+      return;
+    case "record-source-search":
+      writeResult(await recordSourceSearch(args));
       return;
     case "mark-needs-human":
       writeResult(await markNeedsHuman(args));
@@ -171,7 +183,7 @@ async function runCommand(command: string, args: string[]) {
       return;
     default:
       throw new Error(
-        "Unknown course-support command. Use inspect, coverage, claim, packet, claim-path, mark-needs-human, heartbeat, verify, closeout, recover, or backfill."
+        "Unknown course-support command. Use inspect, coverage, claim, packet, claim-path, source-search-context, record-source-search, mark-needs-human, heartbeat, verify, closeout, recover, or backfill."
       );
   }
 }
@@ -227,6 +239,61 @@ async function claimPath(args: string[]) {
     ownerThreadId,
     path: requireOption(args, "--path")
   });
+}
+
+export function shouldCompleteParkedCampaignForInspection(args: readonly string[]) {
+  return args.includes("--scheduled-cycle");
+}
+
+async function sourceSearchContext(args: string[]) {
+  const ownerThreadId = requireOwnerThread(args);
+  const batchId = await resolveBatchId(args);
+  const ordinal = readSingleIntegerOption(args, "--ordinal");
+  if (!ordinal || ordinal < 1) {
+    throw new Error("source-search-context requires a positive --ordinal.");
+  }
+  return getOwnedCourseSupportSourceSearchContext({
+    batchId,
+    leaseToken: await getOwnedCourseSupportLeaseToken({ batchId, ownerThreadId }),
+    ownerThreadId,
+    ordinal
+  });
+}
+
+async function recordSourceSearch(args: string[]) {
+  const ownerThreadId = requireOwnerThread(args);
+  const batchId = await resolveBatchId(args);
+  const options = parseCourseSupportSourceSearchResultOptions(args);
+  return recordOwnedCourseSupportSourceSearchResult({
+    batchId,
+    leaseToken: await getOwnedCourseSupportLeaseToken({ batchId, ownerThreadId }),
+    ownerThreadId,
+    ordinal: options.ordinal,
+    attemptRef: options.attemptRef,
+    candidateUrl: options.candidateUrl,
+    noUnique: options.noUnique,
+    runtimeVersion: getAutomationRuntimeVersion()
+  });
+}
+
+export function parseCourseSupportSourceSearchResultOptions(args: string[]) {
+  const ordinal = readSingleIntegerOption(args, "--ordinal");
+  if (!ordinal || ordinal < 1) {
+    throw new Error("record-source-search requires a positive --ordinal.");
+  }
+  if (args.filter((argument) => argument === "--no-unique").length > 1) {
+    throw new Error("--no-unique may be provided only once.");
+  }
+  const attemptRef = readSingleOption(args, "--attempt-ref");
+  if (!attemptRef) {
+    throw new Error("--attempt-ref requires a value.");
+  }
+  return {
+    ordinal,
+    attemptRef,
+    candidateUrl: readSingleOption(args, "--candidate-url"),
+    noUnique: args.includes("--no-unique")
+  };
 }
 
 async function markNeedsHuman(args: string[]) {
@@ -903,23 +970,29 @@ function writeResult(value: unknown) {
   process.stdout.write(`${JSON.stringify(sanitizeResponderValue(value), null, 2)}\n`);
 }
 
-main().catch((error) => {
-  const message = sanitizeResponderText(
-    error instanceof Error ? error.message : "Unknown course-support command failure."
-  );
-  const outcome = classifyCommandFailure(message);
-  const policy = getResponderThreadPolicy({
-    outcome,
-    durableCloseoutRecorded: false
+const directEntry = process.argv[1]
+  ? resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+  : false;
+
+if (directEntry) {
+  main().catch((error) => {
+    const message = sanitizeResponderText(
+      error instanceof Error ? error.message : "Unknown course-support command failure."
+    );
+    const outcome = classifyCommandFailure(message);
+    const policy = getResponderThreadPolicy({
+      outcome,
+      durableCloseoutRecorded: false
+    });
+    writeResult({
+      outcome,
+      error: message,
+      durableCloseoutRecorded: false,
+      ...policy
+    });
+    process.exitCode = 1;
   });
-  writeResult({
-    outcome,
-    error: message,
-    durableCloseoutRecorded: false,
-    ...policy
-  });
-  process.exitCode = 1;
-});
+}
 
 function classifyCommandFailure(message: string): ResponderOutcome {
   const normalized = message.toLowerCase();

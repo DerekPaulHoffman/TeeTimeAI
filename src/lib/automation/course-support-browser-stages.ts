@@ -3,6 +3,7 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 
 import { assessAutomationPlaybook } from "./course-monitoring-playbook";
+import type { BrowserInvestigationMode } from "./browser-probe-evidence";
 
 export type CourseSupportBrowserStageTarget = {
   ordinal: number;
@@ -53,6 +54,7 @@ export type CourseSupportBrowserPersistenceGuard = (input: {
 
 type BrowserProbeRunner = (input: {
   courseId: string;
+  mode: BrowserInvestigationMode;
   beforePersist: (input?: { requireCurrentStage?: boolean }) => Promise<void>;
   persistenceFence: CourseSupportBrowserPersistenceFence;
   deferTerminalCloseout: true;
@@ -293,6 +295,10 @@ export async function persistOwnedCourseSupportBrowserPlaybookStages(
     await assertCurrentTarget();
     const result = await dependencies.runBrowserProbe({
       courseId: target.courseId,
+      mode:
+        target.stage === "INDEPENDENT_CONFIRMATION"
+          ? "INDEPENDENT"
+          : "RENDERED",
       beforePersist: assertCurrentTarget,
       persistenceFence,
       deferTerminalCloseout: true,
@@ -324,7 +330,9 @@ function resolvePersistedBrowserReleaseFence(input: {
     input.batch.releaseSha &&
     input.requestedReleaseSha !== input.batch.releaseSha
   ) {
-    throw new Error("Release SHA does not match the batch's persisted release.");
+    throw new Error(
+      "Release SHA does not match the batch's persisted release.",
+    );
   }
   if (
     input.requestedDeployedAt &&

@@ -7,10 +7,7 @@ import {
 } from "@prisma/client";
 
 import type { BookingWindowEvidence } from "@/lib/courses/booking-window";
-import {
-  normalizeLayoutHoleCounts,
-  type CourseLayoutHoleCount
-} from "@/lib/courses/course-layout";
+import { normalizeLayoutHoleCounts, type CourseLayoutHoleCount } from "@/lib/courses/course-layout";
 import { resolveBookingAccessMode } from "@/lib/courses/intelligence";
 import {
   lockSearchForAlertMutation,
@@ -47,9 +44,10 @@ import {
 import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
 import { assessAutomationPlaybook } from "./course-monitoring-playbook";
 import {
-  earliestPotentiallyActiveSearchDate,
-  isSearchWindowActive
-} from "./date-boundary";
+  buildCourseSupportSourceSearchScopeDigest,
+  normalizeCourseSupportSourceSearchResult
+} from "./course-support-source-search";
+import { earliestPotentiallyActiveSearchDate, isSearchWindowActive } from "./date-boundary";
 import {
   hasCompletePreEditProvenance,
   HOURLY_IMPROVEMENT_AUTOMATION_ID,
@@ -186,6 +184,10 @@ export type BrowserProbeTarget = {
   course: {
     id: string;
     name: string;
+    address: string | null;
+    city: string | null;
+    stateCode: string | null;
+    googlePlaceIdPresent: boolean;
     website: string | null;
     detectedBookingUrl: string | null;
     detectedPlatform: string;
@@ -200,8 +202,10 @@ export type BrowserProbeTarget = {
     bookingMetadata: unknown;
     verifiedLayoutHoleCounts?: CourseLayoutHoleCount[];
     monitoringFailureEvidence?: BrowserProbeCourseInput["monitoringFailureEvidence"];
+    incidentConfirmedAt?: Date | null;
   };
   probeUrl: string;
+  unprojectedSourceCandidate?: true;
 };
 
 export function runWithAutomationPollLease<T>(worker: () => Promise<T>) {
@@ -365,17 +369,27 @@ export async function getCourseMonitoringPlaybookContext(courseId: string) {
 export async function listBrowserProbeTargets(
   limit = 5,
   courseName?: string,
-  courseId?: string
+  courseId?: string,
+  persistenceFence?: CourseSupportBrowserPersistenceFence
 ): Promise<BrowserProbeTarget[]> {
   const requestedCourseName = courseName?.trim().toLocaleLowerCase("en-US");
   const requestedCourseId = courseId?.trim();
   if (requestedCourseName && requestedCourseId) {
     throw new Error("A browser probe may select a course by name or id, not both.");
   }
+  if (
+    persistenceFence &&
+    (!requestedCourseId ||
+      requestedCourseName ||
+      requestedCourseId !== persistenceFence.courseId)
+  ) {
+    throw new Error("An owned browser probe must select the fenced course id.");
+  }
   if (requestedCourseName || requestedCourseId) {
     return listExactIncidentBrowserProbeTarget({
       requestedCourseName,
-      requestedCourseId
+      requestedCourseId,
+      persistenceFence
     });
   }
   const [searches, openIncidents] = await Promise.all([
@@ -407,10 +421,15 @@ export async function listBrowserProbeTargets(
         kind: true,
         occurrenceCount: true,
         lastSeenAt: true,
+        confirmedAt: true,
         course: {
           select: {
             id: true,
             name: true,
+            googlePlaceId: true,
+            address: true,
+            city: true,
+            stateCode: true,
             website: true,
             detectedBookingUrl: true,
             detectedPlatform: true,
@@ -446,8 +465,7 @@ export async function listBrowserProbeTargets(
           incident.cycle
         ).nextStage;
         return (
-          nextStage === "RENDERED_BROWSER_DISCOVERY" ||
-          nextStage === "INDEPENDENT_CONFIRMATION"
+          nextStage === "RENDERED_BROWSER_DISCOVERY" || nextStage === "INDEPENDENT_CONFIRMATION"
         );
       })
       .map((incident) => [incident.courseId, incident])
@@ -465,9 +483,8 @@ export async function listBrowserProbeTargets(
     ])
   );
 
-  const targets: Array<
-    BrowserProbeTarget & { supportPriority: number; episodeStartedAt: Date }
-  > = [];
+  const targets: Array<BrowserProbeTarget & { supportPriority: number; episodeStartedAt: Date }> =
+    [];
   const queuedCourseIds = new Set<string>();
 
   for (const search of searches) {
@@ -489,6 +506,10 @@ export async function listBrowserProbeTargets(
         course: {
           id: course.id,
           name: course.name,
+          address: course.address,
+          city: course.city,
+          stateCode: course.stateCode,
+          googlePlaceIdPresent: Boolean(course.googlePlaceId),
           website: course.website,
           detectedBookingUrl: course.detectedBookingUrl,
           detectedPlatform: course.detectedPlatform,
@@ -503,12 +524,11 @@ export async function listBrowserProbeTargets(
           bookingMetadata: course.bookingMetadata,
           ...(course.layoutHolesVerifiedAt
             ? {
-                verifiedLayoutHoleCounts: normalizeLayoutHoleCounts(
-                  course.layoutHoleCounts
-                )
+                verifiedLayoutHoleCounts: normalizeLayoutHoleCounts(course.layoutHoleCounts)
               }
             : {}),
-          monitoringFailureEvidence
+          monitoringFailureEvidence,
+          incidentConfirmedAt: readyIncident.confirmedAt
         },
         probeUrl,
         supportPriority: incidentPriority.get(course.id) ?? 1,
@@ -536,6 +556,10 @@ export async function listBrowserProbeTargets(
       course: {
         id: course.id,
         name: course.name,
+        address: course.address,
+        city: course.city,
+        stateCode: course.stateCode,
+        googlePlaceIdPresent: Boolean(course.googlePlaceId),
         website: course.website,
         detectedBookingUrl: course.detectedBookingUrl,
         detectedPlatform: course.detectedPlatform,
@@ -550,12 +574,11 @@ export async function listBrowserProbeTargets(
         bookingMetadata: course.bookingMetadata,
         ...(course.layoutHolesVerifiedAt
           ? {
-              verifiedLayoutHoleCounts: normalizeLayoutHoleCounts(
-                course.layoutHoleCounts
-              )
+              verifiedLayoutHoleCounts: normalizeLayoutHoleCounts(course.layoutHoleCounts)
             }
           : {}),
-        monitoringFailureEvidence
+        monitoringFailureEvidence,
+        incidentConfirmedAt: readyIncident.confirmedAt
       },
       probeUrl,
       supportPriority: incidentPriority.get(course.id) ?? 1,
@@ -581,6 +604,7 @@ export async function listBrowserProbeTargets(
 async function listExactIncidentBrowserProbeTarget(input: {
   requestedCourseName?: string;
   requestedCourseId?: string;
+  persistenceFence?: CourseSupportBrowserPersistenceFence;
 }): Promise<BrowserProbeTarget[]> {
   const courses = await prisma.course.findMany({
     where: {
@@ -602,6 +626,7 @@ async function listExactIncidentBrowserProbeTarget(input: {
           occurrenceCount: true,
           lastSeenAt: true,
           cycle: true,
+          confirmedAt: true,
           attemptLedger: true
         }
       },
@@ -646,16 +671,19 @@ async function listExactIncidentBrowserProbeTarget(input: {
       course.supportIncident.failureClass ?? ""
     )
   );
-  const probeUrl = probeCourse
+  const currentCourseProbeUrl = probeCourse
     ? hasCurrentUnsupportedCoverageFailure
       ? getBestUnsupportedCoverageProbeUrl(probeCourse)
       : getBestProbeUrl(probeCourse)
     : null;
+  const ownedSourceCandidate =
+    !currentCourseProbeUrl && input.persistenceFence
+      ? await getOwnedCourseSupportSourceSearchCandidate(input.persistenceFence)
+      : null;
+  const probeUrl = currentCourseProbeUrl ?? ownedSourceCandidate;
   const nextPlaybookStage = course?.supportIncident
-    ? assessAutomationPlaybook(
-        course.supportIncident.attemptLedger,
-        course.supportIncident.cycle
-      ).nextStage
+    ? assessAutomationPlaybook(course.supportIncident.attemptLedger, course.supportIncident.cycle)
+        .nextStage
     : null;
   const readerOnlyIndependentConfirmation = Boolean(
     course?.monitoringMode === "LOCAL_READER_ONLY" &&
@@ -665,8 +693,7 @@ async function listExactIncidentBrowserProbeTarget(input: {
     !course ||
     !probeUrl ||
     !probeCourse ||
-    (course.monitoringMode === "LOCAL_READER_ONLY" &&
-      !readerOnlyIndependentConfirmation) ||
+    (course.monitoringMode === "LOCAL_READER_ONLY" && !readerOnlyIndependentConfirmation) ||
     (!shouldQueueBrowserProbe(probeCourse) &&
       !hasCurrentTechnicalAccessFailure &&
       !hasCurrentUnsupportedCoverageFailure &&
@@ -682,6 +709,10 @@ async function listExactIncidentBrowserProbeTarget(input: {
       course: {
         id: course.id,
         name: course.name,
+        address: course.address,
+        city: course.city,
+        stateCode: course.stateCode,
+        googlePlaceIdPresent: Boolean(course.googlePlaceId),
         website: course.website,
         detectedBookingUrl: course.detectedBookingUrl,
         detectedPlatform: course.detectedPlatform,
@@ -696,16 +727,127 @@ async function listExactIncidentBrowserProbeTarget(input: {
         bookingMetadata: course.bookingMetadata,
         ...(course.layoutHolesVerifiedAt
           ? {
-              verifiedLayoutHoleCounts: normalizeLayoutHoleCounts(
-                course.layoutHoleCounts
-              )
+              verifiedLayoutHoleCounts: normalizeLayoutHoleCounts(course.layoutHoleCounts)
             }
           : {}),
-        monitoringFailureEvidence
+        monitoringFailureEvidence,
+        incidentConfirmedAt: course.supportIncident?.confirmedAt ?? null
       },
-      probeUrl
+      probeUrl,
+      ...(!currentCourseProbeUrl && ownedSourceCandidate
+        ? { unprojectedSourceCandidate: true as const }
+        : {})
     }
   ];
+}
+
+async function getOwnedCourseSupportSourceSearchCandidate(
+  fence: CourseSupportBrowserPersistenceFence
+) {
+  const ownershipScopeDigest = buildCourseSupportSourceSearchScopeDigest({
+    batchId: fence.batchId,
+    incidentId: fence.incidentId,
+    cycle: fence.cycle
+  });
+  const event = await prisma.courseMonitoringEvent.findFirst({
+    where: {
+      courseId: fence.courseId,
+      incidentId: fence.incidentId,
+      eventType: "AUTOMATION_ATTEMPTED",
+      source: "COURSE_SUPPORT_RESPONDER",
+      readPath: "CODEX_EXACT_SOURCE_SEARCH",
+      evidenceUrl: { not: null },
+      audit: { path: ["ownershipScopeDigest"], equals: ownershipScopeDigest }
+    },
+    orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
+    select: { evidenceUrl: true, audit: true }
+  });
+  const audit = event?.audit;
+  if (!event?.evidenceUrl || !audit || typeof audit !== "object" || Array.isArray(audit)) {
+    return null;
+  }
+  const record = audit as Record<string, unknown>;
+  if (
+    record.result !== "CANDIDATE" ||
+    record.incidentCycle !== fence.cycle ||
+    record.ownershipScopeDigest !== ownershipScopeDigest ||
+    record.courseProjectionApplied !== false ||
+    record.browserVerificationRequired !== true
+  ) {
+    return null;
+  }
+  const batch = await prisma.courseSupportBatch.findFirst({
+    where: {
+      id: fence.batchId,
+      leaseToken: fence.leaseToken,
+      ownerThreadId: fence.ownerThreadId,
+      status: { in: ["CLAIMED", "IMPLEMENTING", "VERIFYING"] },
+      leaseExpiresAt: { gte: new Date() },
+      releaseSha: fence.releaseSha,
+      deployedAt: fence.deployedAt
+    },
+    select: {
+      releaseSha: true,
+      deployedAt: true,
+      incidents: {
+        where: {
+          incidentId: fence.incidentId,
+          courseId: fence.courseId,
+          cycle: fence.cycle
+        },
+        take: 1,
+        select: {
+          courseId: true,
+          cycle: true,
+          result: true,
+          course: {
+            select: {
+              website: true,
+              detectedBookingUrl: true
+            }
+          },
+          incident: {
+            select: {
+              id: true,
+              cycle: true,
+              status: true,
+              activeBatchId: true,
+              attemptLedger: true
+            }
+          }
+        }
+      }
+    }
+  });
+  const entry = batch?.incidents[0];
+  if (
+    fence.runtimeVersion !== fence.releaseSha ||
+    !batch ||
+    batch.releaseSha !== fence.releaseSha ||
+    batch.deployedAt?.getTime() !== fence.deployedAt.getTime() ||
+    !entry ||
+    entry.courseId !== fence.courseId ||
+    entry.cycle !== fence.cycle ||
+    entry.result !== "PENDING" ||
+    Boolean(entry.course.website || entry.course.detectedBookingUrl) ||
+    entry.incident.id !== fence.incidentId ||
+    entry.incident.cycle !== fence.cycle ||
+    entry.incident.status !== "AUTO_INVESTIGATING" ||
+    entry.incident.activeBatchId !== fence.batchId ||
+    assessAutomationPlaybook(
+      entry.incident.attemptLedger,
+      entry.incident.cycle
+    ).nextStage !== fence.stage
+  ) {
+    return null;
+  }
+  try {
+    return normalizeCourseSupportSourceSearchResult({
+      candidateUrl: event.evidenceUrl
+    }).candidateUrl;
+  } catch {
+    return null;
+  }
 }
 
 function getIncidentMonitoringFailureEvidence(incident: {
@@ -819,7 +961,14 @@ export async function recordBrowserDiscovery(
       ) {
         return null;
       }
-      return transaction.courseAutomationDiscovery.create({ data });
+      return transaction.courseAutomationDiscovery.create({
+        data: await attachParkedCampaignToDiscovery(
+          transaction,
+          data,
+          expectedUnownedIncident.id,
+          expectedUnownedIncident.cycle
+        )
+      });
     });
   }
   return runSerializedCourseMonitoringWrite(input.courseId, (transaction) =>
@@ -837,10 +986,79 @@ export async function recordBrowserDiscovery(
         ) {
           return null;
         }
-        return ownedTransaction.courseAutomationDiscovery.create({ data });
+        return ownedTransaction.courseAutomationDiscovery.create({
+          data: await attachParkedCampaignToDiscovery(
+            ownedTransaction,
+            data,
+            persistenceFence.incidentId,
+            persistenceFence.cycle
+          )
+        });
       }
     })
   );
+}
+
+async function attachParkedCampaignToDiscovery(
+  transaction: Prisma.TransactionClient,
+  data: ReturnType<typeof buildBrowserDiscoveryPersistenceData>,
+  incidentId: string,
+  cycle: number
+) {
+  const admission = await transaction.courseMonitoringEvent.findFirst({
+    where: {
+      incidentId,
+      eventType: "REVALIDATION_REQUESTED",
+      source: "COURSE_SUPPORT_RESPONDER",
+      AND: [
+        {
+          audit: {
+            path: ["action"],
+            equals: "parked_cohort_admission"
+          }
+        },
+        {
+          audit: {
+            path: ["cycle"],
+            equals: cycle
+          }
+        }
+      ]
+    },
+    orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
+    select: { audit: true }
+  });
+  const audit =
+    admission?.audit && typeof admission.audit === "object" && !Array.isArray(admission.audit)
+      ? (admission.audit as Record<string, unknown>)
+      : null;
+  if (
+    audit?.action !== "parked_cohort_admission" ||
+    audit.cycle !== cycle ||
+    typeof audit.campaignRunId !== "string" ||
+    !audit.campaignRunId.trim() ||
+    typeof audit.campaignMembershipDigest !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(audit.campaignMembershipDigest)
+  ) {
+    return data;
+  }
+  const evidence =
+    data.evidence && typeof data.evidence === "object" && !Array.isArray(data.evidence)
+      ? (data.evidence as Prisma.InputJsonObject)
+      : {};
+  return {
+    ...data,
+    evidence: {
+      ...evidence,
+      campaign: {
+        kind: "PARKED_COHORT",
+        runId: audit.campaignRunId,
+        membershipDigest: audit.campaignMembershipDigest,
+        cycle
+      },
+      customerDataIncluded: false
+    } satisfies Prisma.InputJsonObject
+  };
 }
 
 function buildBrowserDiscoveryPersistenceData(input: BrowserDiscovery) {
@@ -894,9 +1112,9 @@ function hasAuthoritativeFactualCourseFinal(input: {
 }) {
   return Boolean(
     input.monitoringStatus?.state === "FINAL_MANUAL" ||
-      input.monitoringStatus?.state === "FINAL_IDENTITY" ||
-      input.supportIncident?.resolution === "DIRECT_BOOKING_CLASSIFIED" ||
-      input.supportIncident?.resolution === "IDENTITY_CLASSIFIED"
+    input.monitoringStatus?.state === "FINAL_IDENTITY" ||
+    input.supportIncident?.resolution === "DIRECT_BOOKING_CLASSIFIED" ||
+    input.supportIncident?.resolution === "IDENTITY_CLASSIFIED"
   );
 }
 
@@ -1074,20 +1292,18 @@ export async function retireLegacyPolicyOnlyCourseBlock(
     if (updated.count !== 1) {
       return null;
     }
-    const applied = await transaction.course.findUnique({ where: { id: courseId } });
+    const applied = await transaction.course.findUnique({
+      where: { id: courseId }
+    });
     if (applied) {
-      await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(
-        transaction,
-        {
-          courseId,
-          before: current,
-          after: applied,
-          providerSnapshotFingerprint:
-            buildCourseSupportProviderSnapshotFingerprint(applied),
-          source: "COURSE_SUPPORT_RESPONDER",
-          now: new Date()
-        }
-      );
+      await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(transaction, {
+        courseId,
+        before: current,
+        after: applied,
+        providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(applied),
+        source: "COURSE_SUPPORT_RESPONDER",
+        now: new Date()
+      });
     }
     return applied;
   });
@@ -1158,7 +1374,9 @@ export async function recordAndApplyBrowserDiscoveryToCourse(
     if (!applied && options.recordIfNotApplied === false) {
       return { applied: null, discovery: null };
     }
-    const discovery = await transaction.courseAutomationDiscovery.create({ data });
+    const discovery = await transaction.courseAutomationDiscovery.create({
+      data
+    });
     return { applied, discovery };
   });
 }
@@ -1187,8 +1405,7 @@ async function applyBrowserDiscoveryToCourseInTransaction(
         })
       : null;
   const learnedOnlineAdapter = input.status === "LEARNED" && provider.isRunnable;
-  const nonRunnableOfficialBookingLink =
-    resolveNonRunnableOfficialCourseBookingLinkIdentity(input);
+  const nonRunnableOfficialBookingLink = resolveNonRunnableOfficialCourseBookingLinkIdentity(input);
   const claimsNonRunnableOfficialBookingLink =
     input.evidence.learnedFrom === "official-course-non-runnable-booking-link" ||
     input.evidence.courseIdentityCorroboration?.kind ===
@@ -1213,10 +1430,7 @@ async function applyBrowserDiscoveryToCourseInTransaction(
     if (claimsNonRunnableOfficialBookingLink && !nonRunnableOfficialBookingLink) {
       return null;
     }
-    if (
-      inspectedProviderRequiresOfficialCourseCorroboration &&
-      !nonRunnableOfficialBookingLink
-    ) {
+    if (inspectedProviderRequiresOfficialCourseCorroboration && !nonRunnableOfficialBookingLink) {
       return null;
     }
     if (!inspectedProviderIdentity && !nonRunnableOfficialBookingLink) {
@@ -1300,18 +1514,14 @@ async function applyBrowserDiscoveryToCourseInTransaction(
         where: { id: input.courseId }
       });
       if (applied) {
-        await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(
-          transaction,
-          {
-            courseId: input.courseId,
-            before: current,
-            after: applied,
-            providerSnapshotFingerprint:
-              buildCourseSupportProviderSnapshotFingerprint(applied),
-            source: "COURSE_SUPPORT_RESPONDER",
-            now: observedAt
-          }
-        );
+        await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(transaction, {
+          courseId: input.courseId,
+          before: current,
+          after: applied,
+          providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(applied),
+          source: "COURSE_SUPPORT_RESPONDER",
+          now: observedAt
+        });
       }
       return applied;
     }
@@ -1355,18 +1565,14 @@ async function applyBrowserDiscoveryToCourseInTransaction(
       where: { id: input.courseId }
     });
     if (applied) {
-      await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(
-        transaction,
-        {
-          courseId: input.courseId,
-          before: current,
-          after: applied,
-          providerSnapshotFingerprint:
-            buildCourseSupportProviderSnapshotFingerprint(applied),
-          source: "COURSE_SUPPORT_RESPONDER",
-          now: observedAt
-        }
-      );
+      await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(transaction, {
+        courseId: input.courseId,
+        before: current,
+        after: applied,
+        providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(applied),
+        source: "COURSE_SUPPORT_RESPONDER",
+        now: observedAt
+      });
     }
     return applied;
   }
@@ -1377,9 +1583,7 @@ async function applyBrowserDiscoveryToCourseInTransaction(
     automationEligibility === "BLOCKED" &&
     ["PHONE_ONLY", "CONTACT_COURSE", "WALK_IN"].includes(bookingMethod);
   const officialRequestUrl =
-    bookingMethod === "CONTACT_COURSE" &&
-    input.bookingUrl &&
-    input.bookingUrl !== input.sourceUrl
+    bookingMethod === "CONTACT_COURSE" && input.bookingUrl && input.bookingUrl !== input.sourceUrl
       ? input.bookingUrl
       : null;
 
@@ -1469,11 +1673,15 @@ async function applyBrowserDiscoveryToCourseInTransaction(
       persistedProviderConflict: persistedProvider.evidenceConflict
     })
   );
+  const lowerAuthorityManualWouldReplaceRunnableProvider = Boolean(
+    manualOnly && persistedProvider.isRunnable && !isAuthoritativeManualReplacement(input)
+  );
   if (
     provider.evidenceConflict ||
     (persistedProvider.evidenceConflict && !trustedPersistedReplacement) ||
     (current.isPublic === false && !verifiedPrivateIdentity && !corroboratedPrivateReopening) ||
     sourceUnavailableWouldReplaceProviderState ||
+    lowerAuthorityManualWouldReplaceRunnableProvider ||
     (learnedOnlineAdapter && !persistedGate.adapterAllowed && !corroboratedPrivateReopening) ||
     (!learnedOnlineAdapter &&
       !incomingTerminal &&
@@ -1555,20 +1763,56 @@ async function applyBrowserDiscoveryToCourseInTransaction(
     where: { id: input.courseId }
   });
   if (applied) {
-    await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(
-      transaction,
-      {
-        courseId: input.courseId,
-        before: current,
-        after: applied,
-        providerSnapshotFingerprint:
-          buildCourseSupportProviderSnapshotFingerprint(applied),
-        source: "COURSE_SUPPORT_RESPONDER",
-        now: observedAt
-      }
-    );
+    await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(transaction, {
+      courseId: input.courseId,
+      before: current,
+      after: applied,
+      providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(applied),
+      source: "COURSE_SUPPORT_RESPONDER",
+      now: observedAt
+    });
   }
   return applied;
+}
+
+const AUTHORITATIVE_MANUAL_REPLACEMENT_SOURCES = new Set([
+  "official-phone-only-tee-time-access",
+  "official-public-play-request-form",
+  "official-walk-in-only-tee-time-access",
+  "chronogolf-public-club-profile"
+]);
+
+function isAuthoritativeManualReplacement(input: BrowserDiscovery) {
+  if (
+    input.status !== "VERIFIED" ||
+    input.automationEligibility !== "BLOCKED" ||
+    input.automationReason !== "NO_ONLINE_BOOKING" ||
+    !input.bookingMethod ||
+    !["PHONE_ONLY", "CONTACT_COURSE", "WALK_IN"].includes(input.bookingMethod) ||
+    input.confidence < 0.95 ||
+    !AUTHORITATIVE_MANUAL_REPLACEMENT_SOURCES.has(input.evidence.learnedFrom)
+  ) {
+    return false;
+  }
+
+  if (input.bookingMethod === "PHONE_ONLY") {
+    const digits = input.bookingPhone?.replace(/\D/gu, "") ?? "";
+    if (digits.length < 7 || digits.length > 15) {
+      return false;
+    }
+  }
+
+  const source = parseSafePublicUrl(input.sourceUrl);
+  const finalUrl = parseSafePublicUrl(input.evidence.finalUrl ?? input.sourceUrl);
+  return Boolean(
+    source &&
+    finalUrl &&
+    haveSameCourseWebsiteOrigin(source, finalUrl) &&
+    input.evidence.observedUrls.some((url) => {
+      const observed = parseSafePublicUrl(url);
+      return Boolean(observed && haveSameCourseWebsiteOrigin(source, observed));
+    })
+  );
 }
 
 async function reserveUnownedIncidentForBrowserDiscovery(
@@ -2219,10 +2463,7 @@ export async function queueSearchCheck(
   if (remediationDispatchKey && expectedState) {
     throw new Error("Expected-state guards cannot be combined with remediation dispatch.");
   }
-  if (
-    expectedState?.recoveryDispatchKey &&
-    expectedState.recoveryDispatchKey.length > 128
-  ) {
+  if (expectedState?.recoveryDispatchKey && expectedState.recoveryDispatchKey.length > 128) {
     throw new Error("Recovery dispatch key is too long.");
   }
   return prisma.$transaction(async (tx) => {
@@ -2239,9 +2480,7 @@ export async function queueSearchCheck(
           scheduleVersion: expectedState.scheduleVersion,
           updatedAt: expectedState.updatedAt,
           checkStatus: expectedCheckStatus,
-          ...(hasExpectedWorkflowRunId
-            ? { workflowRunId: expectedState.workflowRunId }
-            : {}),
+          ...(hasExpectedWorkflowRunId ? { workflowRunId: expectedState.workflowRunId } : {}),
           OR: [
             { checkLeaseExpiresAt: null },
             { checkLeaseExpiresAt: { lte: expectedState.observedAt } }
@@ -2259,8 +2498,7 @@ export async function queueSearchCheck(
           ...(expectedState.recoveryDispatchKey
             ? {
                 remediationDispatchKey: expectedState.recoveryDispatchKey,
-                remediationDispatchVersion:
-                  expectedState.scheduleVersion + 1
+                remediationDispatchVersion: expectedState.scheduleVersion + 1
               }
             : {})
         }
@@ -2331,12 +2569,8 @@ export async function queueSearchCheck(
           };
         }
 
-        const earliestEndpointDeadlineAt = (
-          current.preferences ?? []
-        )
-          .map(
-            (preference) => preference.course.supportIncident
-          )
+        const earliestEndpointDeadlineAt = (current.preferences ?? [])
+          .map((preference) => preference.course.supportIncident)
           .filter(
             (incident) =>
               incident?.status === "AUTO_INVESTIGATING" &&
@@ -2678,10 +2912,7 @@ export async function completeExpiredSyntheticSearch(input: {
     const search = await lockSearchForAlertMutation(transaction, {
       searchId: input.searchId
     });
-    if (
-      search.status !== "ACTIVE" ||
-      search.checkLeaseToken !== input.leaseToken
-    ) {
+    if (search.status !== "ACTIVE" || search.checkLeaseToken !== input.leaseToken) {
       return null;
     }
 
@@ -2869,16 +3100,12 @@ export async function listSearchesNeedingScheduleRecovery(now = new Date()) {
   const queuedOverdueBefore = new Date(now.getTime() - 2 * 60 * 1000);
   const overdueBefore = new Date(now.getTime() - 10 * 60 * 1000);
   const missingInitialVerdictBefore = new Date(now.getTime() - 5 * 60 * 1000);
-  const attachedSetupRecoveryBefore = new Date(
-    now.getTime() - 4 * 60 * 1000
-  );
+  const attachedSetupRecoveryBefore = new Date(now.getTime() - 4 * 60 * 1000);
   // The general recovery cron runs every five minutes. Looking a second full
   // interval ahead guarantees that even the worst phase offset leaves one
   // complete cron interval to replace a sleeping endpoint Workflow.
   const endpointRecoveryHorizon = new Date(now.getTime() + 10 * 60 * 1000);
-  const recentEndpointEscalationAfter = new Date(
-    now.getTime() - 5 * 60 * 1000
-  );
+  const recentEndpointEscalationAfter = new Date(now.getTime() - 5 * 60 * 1000);
   const recoverySelect = {
     id: true,
     scheduleVersion: true,
@@ -3089,8 +3316,7 @@ export async function listSearchesNeedingScheduleRecovery(now = new Date()) {
         )
         .sort(
           (left, right) =>
-            left!.escalationDeadlineAt!.getTime() -
-            right!.escalationDeadlineAt!.getTime()
+            left!.escalationDeadlineAt!.getTime() - right!.escalationDeadlineAt!.getTime()
         )[0];
       const recentlyEscalated = incidents.some(
         (incident) =>
@@ -3099,8 +3325,7 @@ export async function listSearchesNeedingScheduleRecovery(now = new Date()) {
           incident.escalationDeadlineAt &&
           incident.escalationDeadlineAt <= now &&
           (incident.humanReviewReason === "AUTOMATION_STALLED" ||
-            (incident.status === "NEEDS_HUMAN" &&
-              Boolean(incident.humanReviewReason)))
+            (incident.status === "NEEDS_HUMAN" && Boolean(incident.humanReviewReason)))
       );
       const attachedSetupRecovery =
         search.statusEmailSentAt === null &&
@@ -3109,21 +3334,15 @@ export async function listSearchesNeedingScheduleRecovery(now = new Date()) {
         search.updatedAt <= attachedSetupRecoveryBefore;
       const attachedEndpointRecovery = Boolean(
         imminentIncident &&
-          search.workflowRunId &&
-          (search.checkStatus === "QUEUED" ||
-            search.checkStatus === "WAITING")
+        search.workflowRunId &&
+        (search.checkStatus === "QUEUED" || search.checkStatus === "WAITING")
       );
       if (!attachedEndpointRecovery || !imminentIncident) {
         return [search];
       }
       const recoveryDispatchKey = `endpoint-deadline:${imminentIncident.id}:${imminentIncident.cycle}`;
-      const alreadyDispatched =
-        search.remediationDispatchKey === recoveryDispatchKey;
-      if (
-        alreadyDispatched &&
-        !attachedSetupRecovery &&
-        !recentlyEscalated
-      ) {
+      const alreadyDispatched = search.remediationDispatchKey === recoveryDispatchKey;
+      if (alreadyDispatched && !attachedSetupRecovery && !recentlyEscalated) {
         return [];
       }
       return alreadyDispatched
@@ -3131,14 +3350,8 @@ export async function listSearchesNeedingScheduleRecovery(now = new Date()) {
         : [{ ...search, endpointRecoveryDispatchKey: recoveryDispatchKey }];
     }
   );
-  const selected = new Map<
-    string,
-    RecoverySearch
-  >();
-  for (const search of [
-    ...filteredCriticalEndpointSearches,
-    ...standardRecoverySearches
-  ]) {
+  const selected = new Map<string, RecoverySearch>();
+  for (const search of [...filteredCriticalEndpointSearches, ...standardRecoverySearches]) {
     if (!selected.has(search.id)) {
       selected.set(search.id, search);
     }
@@ -3210,9 +3423,7 @@ export async function recordCourseProbeIfChanged(input: CourseProbeInput) {
     where: {
       teeSearchId: input.searchId,
       courseId: input.courseId,
-      ...(input.observedAtOrAfter
-        ? { observedAt: { gte: input.observedAtOrAfter } }
-        : {})
+      ...(input.observedAtOrAfter ? { observedAt: { gte: input.observedAtOrAfter } } : {})
     },
     orderBy: { observedAt: "desc" },
     select: {
@@ -3359,18 +3570,14 @@ export async function recordCourseBookingWindowEvidence(input: {
         bookingWindowObservedAt: observedAt
       }
     });
-    await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(
-      transaction,
-      {
-        courseId: input.courseId,
-        before: current,
-        after: applied,
-        providerSnapshotFingerprint:
-          buildCourseSupportProviderSnapshotFingerprint(applied),
-        source: input.source ?? "SEARCH_WORKFLOW",
-        now: observedAt
-      }
-    );
+    await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(transaction, {
+      courseId: input.courseId,
+      before: current,
+      after: applied,
+      providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(applied),
+      source: input.source ?? "SEARCH_WORKFLOW",
+      now: observedAt
+    });
     return applied;
   });
 }
@@ -3396,10 +3603,7 @@ export async function recordCoursePhysicalLayoutEvidence(input: {
       "Physical layout evidence must contain unique 9- and/or 18-hole values and a valid non-future verification date"
     );
   }
-  if (
-    !Number.isFinite(input.expectedUpdatedAt.getTime()) ||
-    !input.expectedName.trim()
-  ) {
+  if (!Number.isFinite(input.expectedUpdatedAt.getTime()) || !input.expectedName.trim()) {
     throw new Error("Physical layout evidence requires a valid pre-fetch course snapshot");
   }
   let evidenceUrl: URL;
@@ -3446,18 +3650,14 @@ export async function recordCoursePhysicalLayoutEvidence(input: {
         layoutHolesVerifiedAt: input.verifiedAt
       }
     });
-    await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(
-      transaction,
-      {
-        courseId: input.courseId,
-        before: current,
-        after: applied,
-        providerSnapshotFingerprint:
-          buildCourseSupportProviderSnapshotFingerprint(applied),
-        source: input.source ?? "OPERATOR_CLI",
-        now: operationTime
-      }
-    );
+    await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(transaction, {
+      courseId: input.courseId,
+      before: current,
+      after: applied,
+      providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(applied),
+      source: input.source ?? "OPERATOR_CLI",
+      now: operationTime
+    });
     return applied;
   });
 }

@@ -23,6 +23,8 @@ const prismaMocks = vi.hoisted(() => ({
   monitoringStatusFindUnique: vi.fn(),
   monitoringEventCreate: vi.fn(),
   monitoringEventCreateMany: vi.fn(),
+  monitoringEventFindFirst: vi.fn(),
+  monitoringEventFindUnique: vi.fn(),
   automationRunUpdateMany: vi.fn(),
   teeSearchCount: vi.fn(),
   teeSearchUpdateMany: vi.fn(),
@@ -69,9 +71,16 @@ vi.mock("./course-support-verification", () => verificationMocks);
 vi.mock("./lease", () => leaseMocks);
 vi.mock("./support-incidents", () => supportIncidentMocks);
 
-import { appendAutomationPlaybookEvent } from "./course-monitoring-playbook";
+import {
+  appendAutomationPlaybookEvent,
+  assessAutomationPlaybook
+} from "./course-monitoring-playbook";
 import { hasDurableAutomationStalledEndpointProof } from "../customer-monitoring-status";
 import { buildProviderFailureFingerprint } from "./provider-capabilities";
+import {
+  createParkedCourseCampaignAttemptLedgerFingerprint,
+  createParkedCourseCampaignAudit
+} from "./course-support-campaign";
 
 import {
   appendCourseSupportBatchPath,
@@ -97,12 +106,14 @@ import {
   deriveCourseSupportCurrentDemand,
   findConflictingResponderPaths,
   getCourseSupportBatchPacket,
+  getOwnedCourseSupportSourceSearchContext,
   heartbeatCourseSupportBatch,
   inspectCourseSupportQueue,
   isDurableTerminalProof,
   isRetryableCourseSupportWriteConflict,
   isRemediatedSearchSchedulerHealthy,
   markCourseSupportBatchNeedsHuman,
+  recordOwnedCourseSupportSourceSearchResult,
   normalizeCourseSupportObservedGitPaths,
   orderCourseSupportBatchIncidents,
   preserveExplicitHumanVerification,
@@ -122,7 +133,7 @@ import {
 
 const now = new Date("2026-07-15T20:00:00.000Z");
 
-function exhaustedAttemptLedger(cycle = 1) {
+function exhaustedAttemptLedger(cycle = 1, observedAt = now) {
   let ledger: unknown = null;
   const stages = [
     ["OFFICIAL_IDENTITY", "OFFICIAL_IDENTITY", "NO_PROVIDER_METADATA"],
@@ -144,10 +155,66 @@ function exhaustedAttemptLedger(cycle = 1) {
       failureFingerprint: "TEST:EXHAUSTED",
       runtimeVersion: "test-runtime",
       skipReason,
-      observedAt: now
+      observedAt
     });
   }
   return ledger;
+}
+
+function sourceUnverifiedAttemptLedger(
+  cycle: number,
+  observedAt: Date,
+  independentApplicable = true
+) {
+  let ledger: unknown = null;
+  const stages = [
+    ["OFFICIAL_IDENTITY", "OFFICIAL_IDENTITY", "NO_PROVIDER_METADATA"],
+    ["TYPED_ADAPTER", "TYPED_PROVIDER_ADAPTER", "NO_RUNNABLE_ADAPTER"],
+    ["OFFICIAL_HTTP_DISCOVERY", "OFFICIAL_HTTP", "NO_PROVIDER_METADATA"],
+    ["HTTP_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER", "NO_METADATA_CHANGE"],
+    ["RENDERED_BROWSER_DISCOVERY", "RENDERED_BROWSER", "NO_BROWSER_ROUTE"],
+    ["BROWSER_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER", "NO_METADATA_CHANGE"],
+    ["LOCAL_READER", "LOCAL_READER", "NO_LOCAL_READER_CAPABILITY"]
+  ] as const;
+  for (const [stage, readPath, skipReason] of stages) {
+    ledger =
+      stage === "OFFICIAL_IDENTITY"
+        ? appendAutomationPlaybookEvent(ledger, {
+            cycle,
+            stage,
+            transition: "FAILED_TERMINAL",
+            readPath,
+            evidenceKind: "OFFICIAL_SOURCE",
+            failureFingerprint: `SOURCE_UNVERIFIED:${stage}`,
+            runtimeVersion: "test-runtime",
+            failureClass: "MISSING_SOURCE",
+            observedAt
+          })
+        : appendAutomationPlaybookEvent(ledger, {
+            cycle,
+            stage,
+            transition: "NOT_APPLICABLE",
+            readPath,
+            evidenceKind: "TOOLING",
+            failureFingerprint: `SOURCE_UNVERIFIED:${stage}`,
+            runtimeVersion: "test-runtime",
+            skipReason,
+            observedAt
+          });
+  }
+  return appendAutomationPlaybookEvent(ledger, {
+    cycle,
+    stage: "INDEPENDENT_CONFIRMATION",
+    transition: independentApplicable ? "FAILED_TERMINAL" : "NOT_APPLICABLE",
+    readPath: "INDEPENDENT_CONFIRMATION",
+    evidenceKind: independentApplicable ? "RENDERED_PAGE" : "TOOLING",
+    failureFingerprint: "SOURCE_UNVERIFIED:INDEPENDENT_CONFIRMATION",
+    runtimeVersion: "test-runtime",
+    ...(independentApplicable
+      ? { failureClass: "MISSING_SOURCE" as const }
+      : { skipReason: "NO_INDEPENDENT_CONFIRMATION" as const }),
+    observedAt
+  });
 }
 
 function browserReadyAttemptLedger(cycle = 1) {
@@ -456,7 +523,9 @@ const monitoringTransactionClient = {
   ...transactionClient,
   courseMonitoringEvent: {
     create: prismaMocks.monitoringEventCreate,
-    createMany: prismaMocks.monitoringEventCreateMany
+    createMany: prismaMocks.monitoringEventCreateMany,
+    findFirst: prismaMocks.monitoringEventFindFirst,
+    findUnique: prismaMocks.monitoringEventFindUnique
   }
 };
 
@@ -490,6 +559,8 @@ beforeEach(() => {
     id: "monitoring-event-1"
   });
   prismaMocks.monitoringEventCreateMany.mockResolvedValue({ count: 1 });
+  prismaMocks.monitoringEventFindFirst.mockResolvedValue(null);
+  prismaMocks.monitoringEventFindUnique.mockResolvedValue(null);
   prismaMocks.automationRunUpdateMany.mockResolvedValue({ count: 1 });
   prismaMocks.teeSearchCount.mockResolvedValue(0);
   prismaMocks.supportIncidentFindMany.mockResolvedValue([]);
@@ -1091,6 +1162,321 @@ describe("course-support claim demand fencing", () => {
     };
   }
 
+  function parkedCampaignFixture(activeDemand = false) {
+    const parkedAt = new Date("2026-07-15T18:00:00.000Z");
+    const latestProbeAt = new Date("2026-07-15T18:30:00.000Z");
+    const latestDiscoveryAt = new Date("2026-07-15T18:45:00.000Z");
+    const escalatedAt = new Date("2026-07-15T19:00:00.000Z");
+    const failureFingerprint = buildProviderFailureFingerprint({
+      providerFamilyKey: "SOURCE_MISSING",
+      failureClass: "MISSING_SOURCE",
+      operation: "METADATA"
+    });
+    const course = {
+      timeZone: "America/New_York",
+      isPublic: true,
+      website: null,
+      detectedBookingUrl: null,
+      detectedPlatform: null,
+      providerFamilyKey: "SOURCE_MISSING",
+      bookingMethod: "UNKNOWN",
+      bookingWindowDaysAhead: null,
+      bookingReleaseTimeLocal: null,
+      bookingWindowSource: null,
+      bookingWindowConfidence: null,
+      bookingWindowEvidenceUrl: null,
+      automationEligibility: "UNKNOWN",
+      automationReason: "NONE",
+      monitoringMode: "STANDARD",
+      bookingAccessMode: "UNKNOWN",
+      intelligenceVerifiedAt: null,
+      intelligenceReviewAt: null,
+      intelligenceConfidence: null,
+      bookingMetadata: null,
+      layoutHoleCounts: [],
+      layoutHolesVerifiedAt: null,
+      monitoringEvents: [],
+      monitoringStatus: {
+        state: "ENGINEERING_VERIFICATION_NEEDED",
+        lastSuccessfulAt: null,
+        failureFingerprint,
+        nextAutomaticAttemptAt: null,
+        revalidationRequestedAt: null,
+        revision: 11
+      },
+      preferences: activeDemand
+        ? [
+            {
+              teeSearch: {
+                id: "real-search-campaign",
+                date: new Date("2026-07-20T00:00:00.000Z")
+              }
+            }
+          ]
+        : []
+    };
+    const parkedMember = {
+      id: "incident-campaign",
+      courseId: "course-campaign",
+      cycle: 3,
+      revision: 7,
+      kind: "NEEDS_ADAPTER",
+      providerFamilyKey: "SOURCE_MISSING",
+      failureClass: "MISSING_SOURCE",
+      failureFingerprint,
+      attemptLedger: null,
+      humanReviewReason: "AUTOMATION_STALLED",
+      status: "NEEDS_HUMAN",
+      activeRealSearchCount: activeDemand ? 1 : 0,
+      escalatedAt,
+      resolution: null,
+      resolvedAt: null,
+      resolutionMessage: null,
+      resolutionNotifiedAt: null,
+      decisionActorId: null,
+      decisionAt: null,
+      decisionNote: null,
+      decisionEvidenceUrl: null,
+      decisionIdempotencyKey: null,
+      monitoringEvents: [
+        {
+          incidentId: "incident-campaign",
+          eventType: "HUMAN_REVIEW_REQUESTED",
+          occurredAt: escalatedAt,
+          audit: {
+            cycle: 3,
+            customerState: "NEEDS_HUMAN_REVIEW",
+            parkedUntilMaterialChange: true,
+            automationStalled: true
+          }
+        }
+      ],
+      course: {
+        preferences: course.preferences,
+        monitoringStatus: {
+          state: "ENGINEERING_VERIFICATION_NEEDED",
+          revision: 11,
+          failureFingerprint,
+          nextAutomaticAttemptAt: null,
+          revalidationRequestedAt: null
+        },
+        probes: [{ observedAt: latestProbeAt }],
+        automationDiscoveries: [{ createdAt: latestDiscoveryAt }]
+      }
+    };
+    const candidateIncident = {
+      id: "incident-campaign",
+      courseId: "course-campaign",
+      cycle: 3,
+      confirmedAt: parkedAt,
+      attemptLedger: null,
+      kind: "NEEDS_ADAPTER",
+      providerFamilyKey: "SOURCE_MISSING",
+      failureClass: "MISSING_SOURCE",
+      failureFingerprint,
+      humanReviewReason: "AUTOMATION_STALLED",
+      engineeringOnly: true,
+      activeRealSearchCount: 0,
+      earliestTargetDate: null,
+      escalationDeadlineAt: null,
+      escalatedAt,
+      firstSeenAt: parkedAt,
+      lastSeenAt: escalatedAt,
+      lastAttemptAt: null,
+      nextAttemptAt: null,
+      attemptCount: 4,
+      updatedAt: escalatedAt,
+      batchIncidents: [],
+      course
+    };
+    const audit = createParkedCourseCampaignAudit({
+      expectedCount: 1,
+      capturedAt: new Date("2026-07-15T19:30:00.000Z"),
+      members: [
+        {
+          courseId: "course-campaign",
+          incidentId: "incident-campaign",
+          cycle: 3,
+          revision: 5,
+          monitoringRevision: 9,
+          kind: "NEEDS_ADAPTER",
+          providerFamilyKey: "SOURCE_MISSING",
+          failureClass: "MISSING_SOURCE",
+          failureFingerprint,
+          providerSnapshotFingerprint: "b".repeat(64),
+          attemptLedgerFingerprint:
+            createParkedCourseCampaignAttemptLedgerFingerprint(null),
+          playbookConclusion: "INCOMPLETE",
+          latestProbeAt: latestProbeAt.toISOString(),
+          latestDiscoveryAt: latestDiscoveryAt.toISOString()
+        }
+      ]
+    });
+    const reopenIncident = {
+      ...parkedMember,
+      activeRealSearchCount: activeDemand ? 1 : 0,
+      activeBatchId: null,
+      nextAttemptAt: null,
+      course: {
+        ...course,
+        probes: [{ observedAt: latestProbeAt }],
+        automationDiscoveries: [{ createdAt: latestDiscoveryAt }]
+      }
+    };
+    const currentIncident = {
+      ...candidateIncident,
+      cycle: 4,
+      revision: 8,
+      confirmedAt: now,
+      status: "AUTO_INVESTIGATING",
+      activeBatchId: null,
+      updatedAt: now,
+      attemptCount: 0,
+      course: {
+        ...course,
+        monitoringStatus: {
+          ...course.monitoringStatus,
+          state: "AUTO_INVESTIGATING",
+          nextAutomaticAttemptAt: now,
+          revalidationRequestedAt: now,
+          revision: 12
+        }
+      }
+    };
+    return {
+      audit,
+      candidateIncident,
+      currentIncident,
+      parkedMember,
+      reopenIncident
+    };
+  }
+
+  it("atomically admits a bounded parked campaign member inside its batch claim", async () => {
+    const fixture = parkedCampaignFixture();
+    prismaMocks.automationRunFindFirst.mockResolvedValue({
+      id: "campaign-run-1",
+      status: "RUNNING",
+      completedAt: null,
+      outcome: null,
+      audit: fixture.audit
+    });
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([fixture.parkedMember])
+      .mockResolvedValueOnce([fixture.candidateIncident])
+      .mockResolvedValueOnce([fixture.currentIncident]);
+    prismaMocks.supportIncidentFindUnique.mockResolvedValue(fixture.reopenIncident);
+    prismaMocks.transaction.mockImplementation(
+      async (worker: (transaction: typeof monitoringTransactionClient) => Promise<unknown>) =>
+        worker(monitoringTransactionClient)
+    );
+
+    const result = await claimCourseSupportBatch({
+      ownerThreadId: "owner-thread-campaign",
+      branch: "automation/course-support-20260715-200000",
+      baseSha,
+      now,
+      maxCourses: 20
+    });
+
+    expect(result).toMatchObject({ outcome: "ready", incidentCount: 1 });
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "incident-campaign",
+          cycle: 3,
+          revision: 7
+        }),
+        data: expect.objectContaining({
+          cycle: { increment: 1 },
+          status: "AUTO_INVESTIGATING"
+        })
+      })
+    );
+    expect(prismaMocks.batchCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          summary: expect.objectContaining({
+            campaign: expect.objectContaining({ kind: "PARKED_COHORT" })
+          })
+        })
+      })
+    );
+    expect(prismaMocks.monitoringEventCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          eventType: "REVALIDATION_REQUESTED",
+          audit: expect.objectContaining({
+            campaignRunId: "campaign-run-1",
+            capturedIncidentRevision: 5,
+            capturedMonitoringRevision: 9,
+            admittedIncidentRevision: 7,
+            admittedMonitoringRevision: 11,
+            activeDemandAtAdmission: false
+          })
+        })
+      })
+    );
+  });
+
+  it("keeps a captured parked member eligible and prioritized when real demand arrives", async () => {
+    const fixture = parkedCampaignFixture(true);
+    prismaMocks.automationRunFindFirst.mockResolvedValue({
+      id: "campaign-run-1",
+      status: "RUNNING",
+      completedAt: null,
+      outcome: null,
+      audit: fixture.audit
+    });
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([
+        incidentRecord({ engineeringOnly: true, preferences: [] })
+      ])
+      .mockResolvedValueOnce([fixture.parkedMember])
+      .mockResolvedValueOnce([fixture.candidateIncident])
+      .mockResolvedValueOnce([fixture.currentIncident]);
+    prismaMocks.supportIncidentFindUnique.mockResolvedValue(fixture.reopenIncident);
+    prismaMocks.transaction.mockImplementation(
+      async (worker: (transaction: typeof monitoringTransactionClient) => Promise<unknown>) =>
+        worker(monitoringTransactionClient)
+    );
+
+    const result = await claimCourseSupportBatch({
+      ownerThreadId: "owner-thread-campaign-demand",
+      branch: "automation/course-support-20260715-200000",
+      baseSha,
+      now,
+      maxCourses: 20
+    });
+
+    expect(result).toMatchObject({ outcome: "ready", incidentCount: 1 });
+    expect(prismaMocks.batchCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          summary: expect.objectContaining({
+            campaign: expect.objectContaining({ kind: "PARKED_COHORT" }),
+            remediation: expect.objectContaining({
+              attempts: [expect.objectContaining({ activeRealSearchCount: 1 })]
+            })
+          })
+        })
+      })
+    );
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ activeRealSearchCount: 1, engineeringOnly: false })
+      })
+    );
+    expect(prismaMocks.monitoringEventCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          audit: expect.objectContaining({ activeDemandAtAdmission: true })
+        })
+      })
+    );
+  });
+
   function remediationHistoryEntry(input: {
     consumed: boolean;
     workMode?: "IMPLEMENT_REUSABLE_SUPPORT" | "VERIFY_TRANSIENT";
@@ -1112,12 +1498,8 @@ describe("course-support claim demand fencing", () => {
             remediationAttemptConsumed: input.consumed,
             remediationAttempts: [
               {
-                courseRef: createHash("sha256")
-                  .update("course-1")
-                  .digest("hex")
-                  .slice(0, 24),
-                providerSnapshotFingerprint:
-                  input.providerSnapshotFingerprint ?? "b".repeat(64),
+                courseRef: createHash("sha256").update("course-1").digest("hex").slice(0, 24),
+                providerSnapshotFingerprint: input.providerSnapshotFingerprint ?? "b".repeat(64),
                 failureFingerprint:
                   input.failureFingerprint ?? "v1:UNSUPPORTED_FAMILY:NEEDS_ADAPTER",
                 runtimeVersion: input.runtimeVersion ?? baseSha,
@@ -1127,9 +1509,7 @@ describe("course-support claim demand fencing", () => {
                   workMode: input.workMode ?? "IMPLEMENT_REUSABLE_SUPPORT",
                   strategyAction: input.strategyAction ?? "REPAIR_PROVIDER_ADAPTER",
                   playbookStage:
-                    input.playbookStage === undefined
-                      ? "OFFICIAL_IDENTITY"
-                      : input.playbookStage
+                    input.playbookStage === undefined ? "OFFICIAL_IDENTITY" : input.playbookStage
                 }
               }
             ]
@@ -1172,9 +1552,8 @@ describe("course-support claim demand fencing", () => {
       revision: 2
     });
     prismaMocks.transaction.mockImplementation(
-      async (
-        worker: (transaction: typeof monitoringTransactionClient) => Promise<unknown>
-      ) => worker(monitoringTransactionClient)
+      async (worker: (transaction: typeof monitoringTransactionClient) => Promise<unknown>) =>
+        worker(monitoringTransactionClient)
     );
   }
 
@@ -1239,10 +1618,7 @@ describe("course-support claim demand fencing", () => {
                 derivedOutcome: "retryable_failed",
                 remediationAttempts: [
                   {
-                    courseRef: createHash("sha256")
-                      .update("course-1")
-                      .digest("hex")
-                      .slice(0, 24),
+                    courseRef: createHash("sha256").update("course-1").digest("hex").slice(0, 24),
                     providerSnapshotFingerprint: "b".repeat(64),
                     failureFingerprint: "v1:UNSUPPORTED_FAMILY:NEEDS_ADAPTER",
                     runtimeVersion: baseSha,
@@ -1285,9 +1661,8 @@ describe("course-support claim demand fencing", () => {
       revision: 2
     });
     prismaMocks.transaction.mockImplementation(
-      async (
-        worker: (transaction: typeof monitoringTransactionClient) => Promise<unknown>
-      ) => worker(monitoringTransactionClient)
+      async (worker: (transaction: typeof monitoringTransactionClient) => Promise<unknown>) =>
+        worker(monitoringTransactionClient)
     );
 
     await expect(
@@ -1343,10 +1718,7 @@ describe("course-support claim demand fencing", () => {
                 remediationAttemptConsumed: false,
                 remediationAttempts: [
                   {
-                    courseRef: createHash("sha256")
-                      .update("course-1")
-                      .digest("hex")
-                      .slice(0, 24),
+                    courseRef: createHash("sha256").update("course-1").digest("hex").slice(0, 24),
                     providerSnapshotFingerprint: "b".repeat(64),
                     failureFingerprint: "v1:UNSUPPORTED_FAMILY:NEEDS_ADAPTER",
                     runtimeVersion: baseSha,
@@ -1437,7 +1809,10 @@ describe("course-support claim demand fencing", () => {
       ...incidentRecord({ engineeringOnly: true, preferences: [] }),
       attemptCount: 2,
       batchIncidents: [
-        remediationHistoryEntry({ consumed: false, runtimeVersion: "f".repeat(40) }),
+        remediationHistoryEntry({
+          consumed: false,
+          runtimeVersion: "f".repeat(40)
+        }),
         remediationHistoryEntry({
           consumed: false,
           outcome: "blocked_env",
@@ -1540,7 +1915,10 @@ describe("course-support claim demand fencing", () => {
 
   it("keeps a consumed transient budget exhausted behind newer zero-work closeouts", async () => {
     const transientFingerprint = "v1:RATE_LIMIT:FETCH_FAILED";
-    const baseIncident = incidentRecord({ engineeringOnly: true, preferences: [] });
+    const baseIncident = incidentRecord({
+      engineeringOnly: true,
+      preferences: []
+    });
     const incident = {
       ...baseIncident,
       kind: "FETCH_FAILED" as const,
@@ -1621,7 +1999,10 @@ describe("course-support claim demand fencing", () => {
     }
   ])("$label", async (testCase) => {
     const transientFingerprint = "v1:RATE_LIMIT:FETCH_FAILED";
-    const baseIncident = incidentRecord({ engineeringOnly: true, preferences: [] });
+    const baseIncident = incidentRecord({
+      engineeringOnly: true,
+      preferences: []
+    });
     const transientAttempt = (providerSnapshotFingerprint: string) =>
       remediationHistoryEntry({
         consumed: true,
@@ -1716,10 +2097,7 @@ describe("course-support claim demand fencing", () => {
                 derivedOutcome: "retryable_failed",
                 remediationAttempts: [
                   {
-                    courseRef: createHash("sha256")
-                      .update("course-1")
-                      .digest("hex")
-                      .slice(0, 24),
+                    courseRef: createHash("sha256").update("course-1").digest("hex").slice(0, 24),
                     providerSnapshotFingerprint: "b".repeat(64),
                     failureFingerprint: "v1:UNSUPPORTED_FAMILY:NEEDS_ADAPTER",
                     runtimeVersion: baseSha,
@@ -1753,7 +2131,9 @@ describe("course-support claim demand fencing", () => {
 
     expect(prismaMocks.batchCreate).toHaveBeenCalled();
     expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ status: "NEEDS_HUMAN" }) })
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "NEEDS_HUMAN" })
+      })
     );
   });
 
@@ -1770,10 +2150,7 @@ describe("course-support claim demand fencing", () => {
                 derivedOutcome: "retryable_failed",
                 remediationAttempts: [
                   {
-                    courseRef: createHash("sha256")
-                      .update("course-1")
-                      .digest("hex")
-                      .slice(0, 24),
+                    courseRef: createHash("sha256").update("course-1").digest("hex").slice(0, 24),
                     providerSnapshotFingerprint: "a".repeat(64),
                     failureFingerprint: "v1:UNSUPPORTED_FAMILY:NEEDS_ADAPTER",
                     runtimeVersion: baseSha,
@@ -1809,7 +2186,9 @@ describe("course-support claim demand fencing", () => {
       expect.objectContaining({
         data: expect.objectContaining({
           summary: expect.objectContaining({
-            remediation: expect.objectContaining({ reason: "MATERIAL_CHANGE_REOPENED" })
+            remediation: expect.objectContaining({
+              reason: "MATERIAL_CHANGE_REOPENED"
+            })
           })
         })
       })
@@ -1839,10 +2218,7 @@ describe("course-support claim demand fencing", () => {
                 derivedOutcome: "retryable_failed",
                 remediationAttempts: [
                   {
-                    courseRef: createHash("sha256")
-                      .update("course-1")
-                      .digest("hex")
-                      .slice(0, 24),
+                    courseRef: createHash("sha256").update("course-1").digest("hex").slice(0, 24),
                     providerSnapshotFingerprint: "b".repeat(64),
                     failureFingerprint: "v1:UNSUPPORTED_FAMILY:NEEDS_ADAPTER",
                     runtimeVersion: baseSha,
@@ -1885,9 +2261,8 @@ describe("course-support claim demand fencing", () => {
       revision: 2
     });
     prismaMocks.transaction.mockImplementation(
-      async (
-        worker: (transaction: typeof monitoringTransactionClient) => Promise<unknown>
-      ) => worker(monitoringTransactionClient)
+      async (worker: (transaction: typeof monitoringTransactionClient) => Promise<unknown>) =>
+        worker(monitoringTransactionClient)
     );
 
     await expect(
@@ -3543,6 +3918,50 @@ describe("fresh runtime verification", () => {
     ).toBe(true);
   });
 
+  it("requires an exact-place review to be updated in the reopened incident cycle", () => {
+    const confirmedAt = new Date("2026-07-15T19:45:00.000Z");
+    const entry = {
+      normalizedResult: "FINAL_DISPOSITION" as const,
+      proofSnapshot: {
+        kind: "EXACT_PLACE_REVIEW",
+        disposition: "VERIFIED_PRIVATE",
+        classification: "PRIVATE_MEMBER_AMENITY",
+        evidenceOrigin: "https://course.example",
+        reviewedAt: "2026-07-15T00:00:00.000Z",
+        reviewUpdatedAt: "2026-07-15T19:30:00.000Z",
+        automationEligibility: "BLOCKED",
+        automationReason: "OTHER"
+      },
+      verifiedAt: now,
+      verifiedIncidentUpdatedAt: confirmedAt,
+      incident: {
+        firstSeenAt: new Date("2026-07-14T18:00:00.000Z"),
+        confirmedAt,
+        lastSeenAt: confirmedAt
+      }
+    };
+    const batch = {
+      createdAt: new Date("2026-07-15T18:00:00.000Z"),
+      releaseSha: null,
+      deployedAt: null,
+      recheckDispatchStartedAt: null
+    };
+
+    expect(isDurableTerminalProof(entry, batch)).toBe(false);
+    expect(
+      isDurableTerminalProof(
+        {
+          ...entry,
+          proofSnapshot: {
+            ...entry.proofSnapshot,
+            reviewUpdatedAt: "2026-07-15T19:46:00.000Z"
+          }
+        },
+        batch
+      )
+    ).toBe(true);
+  });
+
   it.each(["MANUAL_DIRECT", "IDENTITY_FINAL"] as const)(
     "accepts exact-release ordered %s proof as a durable batch final",
     (disposition) => {
@@ -3590,6 +4009,150 @@ describe("fresh runtime verification", () => {
       ).toBe(true);
     }
   );
+
+  it("passes the reopened incident boundary into factual-final proof validation", () => {
+    const releaseSha = "a".repeat(40);
+    const attemptLedger = factualFinalLedger("MANUAL_DIRECT");
+    const event = attemptLedger.events.at(-1)!;
+    const observedAt = new Date(event.observedAt);
+    verificationMocks.isCourseSupportFactualFinalProof.mockImplementation(
+      (input: { firstSeenAt: Date }) => input.firstSeenAt.getTime() <= observedAt.getTime()
+    );
+    const entry = {
+      normalizedResult: "FINAL_DISPOSITION" as const,
+      proofSnapshot: {
+        schemaVersion: 1,
+        kind: "PLAYBOOK_FACTUAL_FINAL",
+        playbookVersion: 1,
+        disposition: "MANUAL_DIRECT",
+        outcome: "MANUAL_DIRECT",
+        cycle: 1,
+        stage: event.stage,
+        sequence: event.sequence,
+        readPath: event.readPath,
+        evidenceKind: event.evidenceKind,
+        failureFingerprint: event.failureFingerprint,
+        observedAt: event.observedAt,
+        completedAt: "2026-07-15T20:06:30.000Z",
+        releaseSha,
+        runtimeVersion: releaseSha,
+        providerExecution: false
+      },
+      verifiedAt: new Date("2026-07-15T20:07:00.000Z"),
+      verifiedIncidentUpdatedAt: new Date("2026-07-15T20:06:30.000Z"),
+      incident: {
+        cycle: 1,
+        attemptLedger,
+        firstSeenAt: new Date("2026-07-14T18:00:00.000Z"),
+        confirmedAt: new Date("2026-07-15T20:05:30.000Z"),
+        lastSeenAt: new Date("2026-07-15T20:05:30.000Z")
+      }
+    };
+    const batch = {
+      createdAt: new Date("2026-07-15T19:00:00.000Z"),
+      releaseSha,
+      deployedAt: new Date("2026-07-15T20:05:00.000Z"),
+      recheckDispatchStartedAt: new Date("2026-07-15T20:05:30.000Z")
+    };
+
+    expect(isDurableTerminalProof(entry, batch)).toBe(true);
+    expect(
+      isDurableTerminalProof(
+        {
+          ...entry,
+          incident: {
+            ...entry.incident,
+            confirmedAt: new Date("2026-07-15T20:06:01.000Z")
+          }
+        },
+        batch
+      )
+    ).toBe(false);
+  });
+
+  it("accepts source-unverified proof only for a fresh complete ladder with an independent attempt", () => {
+    const freshCycleStartedAt = new Date("2026-07-22T19:00:00.000Z");
+    const firstSeenAt = freshCycleStartedAt;
+    const verifiedAt = new Date("2026-07-22T20:00:00.000Z");
+    const attemptLedger = sourceUnverifiedAttemptLedger(4, new Date("2026-07-22T19:05:00.000Z"));
+    const entry = {
+      normalizedResult: "FINAL_DISPOSITION" as const,
+      proofSnapshot: {
+        kind: "SOURCE_UNVERIFIED_FINAL",
+        disposition: "SOURCE_UNVERIFIED",
+        providerFamilyKey: "SOURCE_MISSING",
+        failureClass: "MISSING_SOURCE",
+        attemptCount: 1,
+        activeRealSearchCount: 1,
+        firstSeenAt: firstSeenAt.toISOString(),
+        freshCycleStartedAt: freshCycleStartedAt.toISOString(),
+        cycle: 4,
+        completedStageCount: 8,
+        verifiedAt: verifiedAt.toISOString()
+      },
+      verifiedAt,
+      verifiedIncidentUpdatedAt: verifiedAt,
+      incident: {
+        firstSeenAt,
+        lastSeenAt: verifiedAt,
+        confirmedAt: freshCycleStartedAt,
+        providerFamilyKey: "SOURCE_MISSING",
+        failureClass: "MISSING_SOURCE" as const,
+        attemptCount: 1,
+        activeRealSearchCount: 1,
+        cycle: 4,
+        attemptLedger
+      }
+    };
+    const batch = {
+      createdAt: freshCycleStartedAt,
+      releaseSha: null,
+      deployedAt: null,
+      recheckDispatchStartedAt: null
+    };
+
+    expect(isDurableTerminalProof(entry, batch)).toBe(true);
+    expect(
+      isDurableTerminalProof(
+        {
+          ...entry,
+          proofSnapshot: { ...entry.proofSnapshot, activeRealSearchCount: 0 }
+        },
+        batch
+      )
+    ).toBe(false);
+    expect(
+      isDurableTerminalProof(
+        {
+          ...entry,
+          incident: {
+            ...entry.incident,
+            attemptLedger: sourceUnverifiedAttemptLedger(
+              4,
+              new Date("2026-07-22T19:05:00.000Z"),
+              false
+            )
+          }
+        },
+        batch
+      )
+    ).toBe(false);
+    expect(
+      isDurableTerminalProof(
+        {
+          ...entry,
+          incident: {
+            ...entry.incident,
+            attemptLedger: exhaustedAttemptLedger(
+              4,
+              new Date("2026-07-22T19:05:00.000Z")
+            )
+          }
+        },
+        batch
+      )
+    ).toBe(false);
+  });
 
   it("rejects exact-place terminal proof older than the incident cycle", () => {
     expect(
@@ -3642,6 +4205,42 @@ describe("fresh runtime verification", () => {
           deployedAt: null,
           recheckDispatchStartedAt: null
         }
+      )
+    ).toBe(true);
+  });
+
+  it("requires browser-private identity evidence from the reopened incident cycle", () => {
+    const confirmedAt = new Date("2026-07-15T19:45:00.000Z");
+    const entry = {
+      normalizedResult: "FINAL_DISPOSITION" as const,
+      proofSnapshot: browserPrivateProof,
+      verifiedAt: now,
+      verifiedIncidentUpdatedAt: confirmedAt,
+      incident: {
+        firstSeenAt: new Date("2026-07-14T18:00:00.000Z"),
+        confirmedAt,
+        lastSeenAt: confirmedAt
+      }
+    };
+    const batch = {
+      createdAt: new Date("2026-07-15T18:00:00.000Z"),
+      releaseSha: null,
+      deployedAt: null,
+      recheckDispatchStartedAt: null
+    };
+
+    expect(isDurableTerminalProof(entry, batch)).toBe(false);
+    expect(
+      isDurableTerminalProof(
+        {
+          ...entry,
+          proofSnapshot: {
+            ...browserPrivateProof,
+            discoveryCreatedAt: "2026-07-15T19:46:00.000Z",
+            intelligenceVerifiedAt: "2026-07-15T19:47:00.000Z"
+          }
+        },
+        batch
       )
     ).toBe(true);
   });
@@ -3772,6 +4371,55 @@ describe("fresh runtime verification", () => {
           deployedAt: null,
           recheckDispatchStartedAt: null
         }
+      )
+    ).toBe(true);
+  });
+
+  it("requires legacy manual evidence from the reopened incident cycle", () => {
+    const confirmedAt = new Date("2026-07-15T19:45:00.000Z");
+    const proofSnapshot = {
+      kind: "FINAL_DISPOSITION",
+      disposition: "MANUAL_DIRECT",
+      evidenceOrigin: "https://course.example",
+      discoveryCreatedAt: "2026-07-15T19:30:00.000Z",
+      confidence: 0.9,
+      discoveryStatus: "VERIFIED",
+      bookingMethod: "PHONE_ONLY",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      discoveryBookingMethod: "PHONE_ONLY",
+      discoveryAutomationEligibility: "BLOCKED",
+      discoveryAutomationReason: "NO_ONLINE_BOOKING"
+    };
+    const entry = {
+      normalizedResult: "FINAL_DISPOSITION" as const,
+      proofSnapshot,
+      verifiedAt: now,
+      verifiedIncidentUpdatedAt: confirmedAt,
+      incident: {
+        firstSeenAt: new Date("2026-07-14T18:00:00.000Z"),
+        confirmedAt,
+        lastSeenAt: confirmedAt
+      }
+    };
+    const batch = {
+      createdAt: new Date("2026-07-15T18:00:00.000Z"),
+      releaseSha: null,
+      deployedAt: null,
+      recheckDispatchStartedAt: null
+    };
+
+    expect(isDurableTerminalProof(entry, batch)).toBe(false);
+    expect(
+      isDurableTerminalProof(
+        {
+          ...entry,
+          proofSnapshot: {
+            ...proofSnapshot,
+            discoveryCreatedAt: "2026-07-15T19:46:00.000Z"
+          }
+        },
+        batch
       )
     ).toBe(true);
   });
@@ -5390,13 +6038,17 @@ describe("course-support inspection ownership", () => {
     ).toBe("deferred_busy");
   });
 
-  it("finalizes only old repeated source gaps without active real demand", () => {
+  it("finalizes a fresh complete source gap without parking a future unfamiliar course", () => {
+    const freshCycleStartedAt = new Date("2026-07-22T19:00:00.000Z");
     const evidence = {
       providerFamilyKey: "SOURCE_MISSING",
       failureClass: "MISSING_SOURCE" as const,
-      attemptCount: 4,
-      activeRealSearchCount: 0,
-      firstSeenAt: new Date("2026-07-20T20:00:00.000Z"),
+      attemptCount: 1,
+      activeRealSearchCount: 1,
+      firstSeenAt: freshCycleStartedAt,
+      freshCycleStartedAt,
+      attemptLedger: sourceUnverifiedAttemptLedger(4, new Date("2026-07-22T19:05:00.000Z")),
+      cycle: 4,
       verifiedAt: new Date("2026-07-22T20:00:00.000Z"),
       result: "RETRY_SCHEDULED" as const,
       now: new Date("2026-07-22T20:00:00.000Z")
@@ -5405,13 +6057,31 @@ describe("course-support inspection ownership", () => {
     expect(
       shouldFinalizeSourceUnverified({
         ...evidence,
-        activeRealSearchCount: 1
+        activeRealSearchCount: 0
+      })
+    ).toBe(true);
+    expect(
+      shouldFinalizeSourceUnverified({
+        ...evidence,
+        attemptCount: 4
+      })
+    ).toBe(true);
+    expect(
+      shouldFinalizeSourceUnverified({
+        ...evidence,
+        attemptLedger: sourceUnverifiedAttemptLedger(4, new Date("2026-07-22T19:05:00.000Z"), false)
       })
     ).toBe(false);
     expect(
       shouldFinalizeSourceUnverified({
         ...evidence,
-        attemptCount: 3
+        freshCycleStartedAt: new Date("2026-07-22T19:10:00.000Z")
+      })
+    ).toBe(false);
+    expect(
+      shouldFinalizeSourceUnverified({
+        ...evidence,
+        attemptLedger: exhaustedAttemptLedger(4, new Date("2026-07-22T19:05:00.000Z"))
       })
     ).toBe(false);
   });
@@ -5852,7 +6522,13 @@ describe("course-support inspection ownership", () => {
       durableCloseoutRecorded: false,
       threadDisposition: "KEEP_VISIBLE"
     });
-    expect(prismaMocks.automationRunFindFirst).not.toHaveBeenCalled();
+    expect(prismaMocks.automationRunFindFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          promptVersion: "tee-time-spot-course-support-parked-cohort-v1"
+        })
+      })
+    );
     expect(prismaMocks.automationRunCreate).not.toHaveBeenCalled();
   });
 
@@ -5989,6 +6665,277 @@ describe("course-support batch ordinals", () => {
     ]);
     expect(result.courses[1]).not.toHaveProperty("attemptLedger");
     expect(result.courses.every((course) => !("name" in course))).toBe(true);
+  });
+
+  function sourceSearchBatch(overrides: Record<string, unknown> = {}) {
+    const courseId = "course-source-missing";
+    const updatedAt = new Date("2026-07-15T19:45:00.000Z");
+    return {
+      status: "CLAIMED",
+      revision: 3,
+      leaseExpiresAt: new Date("2026-07-15T20:15:00.000Z"),
+      summary: {
+        campaign: {
+          kind: "PARKED_COHORT",
+          attempts: [
+            {
+              courseRef: createHash("sha256").update(courseId).digest("hex").slice(0, 24),
+              runId: "campaign-run-1",
+              membershipDigest: "c".repeat(64),
+              cycle: 1
+            }
+          ]
+        }
+      },
+      incidents: [
+        {
+          id: "entry-source-missing",
+          createdAt: new Date("2026-07-15T19:40:00.000Z"),
+          cycle: 1,
+          result: "PENDING",
+          updatedAt,
+          course: {
+            id: courseId,
+            name: "Pine Ridge Golf Course",
+            address: "10 Main Street",
+            city: "Springfield",
+            stateCode: "MA",
+            website: null,
+            detectedBookingUrl: null,
+            detectedPlatform: "UNKNOWN",
+            providerFamilyKey: "SOURCE_MISSING",
+            bookingMetadata: null,
+            monitoringMode: "AUTOMATIC",
+            monitoringStatus: { state: "AUTO_INVESTIGATING" },
+            updatedAt
+          },
+          incident: {
+            id: "incident-source-missing",
+            cycle: 1,
+            revision: 4,
+            status: "AUTO_INVESTIGATING",
+            kind: "NEEDS_ADAPTER",
+            providerFamilyKey: "SOURCE_MISSING",
+            failureClass: "MISSING_SOURCE",
+            activeBatchId: "batch-1",
+            attemptLedger: browserReadyAttemptLedger(),
+            attemptCount: 2,
+            lastSeenAt: updatedAt,
+            resolution: null,
+            updatedAt
+          }
+        }
+      ],
+      ...overrides
+    };
+  }
+
+  it("returns exact public search context only to the current ordinal owner", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue(sourceSearchBatch());
+
+    const result = await getOwnedCourseSupportSourceSearchContext({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      ordinal: 1,
+      now
+    });
+
+    expect(result).toMatchObject({
+      outcome: "ready",
+      ordinal: "01",
+      searchBudget: 1,
+      privateContext: {
+        query:
+          '"Pine Ridge Golf Course" "10 Main Street" "Springfield, MA" "official golf course"',
+        attemptRef: expect.stringMatching(/^[a-f0-9]{64}$/u)
+      }
+    });
+    expect(prismaMocks.batchFindFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "batch-1",
+          leaseToken: "lease-1",
+          ownerThreadId: "owner-thread"
+        })
+      })
+    );
+  });
+
+  it("persists one candidate as append-only owned evidence without projecting the course", async () => {
+    const batch = sourceSearchBatch();
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    const context = await getOwnedCourseSupportSourceSearchContext({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      ordinal: 1,
+      now
+    });
+    if (context.outcome !== "ready") throw new Error("Expected source-search context.");
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.transaction.mockImplementation(
+      async (worker: (transaction: typeof monitoringTransactionClient) => Promise<unknown>) =>
+        worker(monitoringTransactionClient)
+    );
+
+    await expect(
+      recordOwnedCourseSupportSourceSearchResult({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        ordinal: 1,
+        attemptRef: context.privateContext.attemptRef,
+        candidateUrl: "https://parks.example.gov/golf/pine-ridge#tee-times",
+        runtimeVersion: "test-runtime",
+        now
+      })
+    ).resolves.toMatchObject({
+      outcome: "ready",
+      candidateRecorded: true,
+      noUniqueRecorded: false,
+      browserVerificationRequired: true
+    });
+
+    expect(prismaMocks.monitoringEventCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        courseId: "course-source-missing",
+        incidentId: "incident-source-missing",
+        evidenceUrl: "https://parks.example.gov/golf/pine-ridge",
+        readPath: "CODEX_EXACT_SOURCE_SEARCH",
+        audit: expect.objectContaining({
+          result: "CANDIDATE",
+          queryDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+          missingIdentityFields: [],
+          ownershipScopeDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+          rawSearchPayloadStored: false,
+          courseProjectionApplied: false,
+          campaign: {
+            kind: "PARKED_COHORT",
+            runId: "campaign-run-1",
+            membershipDigest: "c".repeat(64),
+            cycle: 1
+          }
+        })
+      })
+    });
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.queryRaw).toHaveBeenCalledTimes(3);
+  });
+
+  it("loses the candidate write when the exact course snapshot CAS no longer locks", async () => {
+    const batch = sourceSearchBatch();
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    const context = await getOwnedCourseSupportSourceSearchContext({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      ordinal: 1,
+      now
+    });
+    if (context.outcome !== "ready") throw new Error("Expected source-search context.");
+    prismaMocks.queryRaw.mockResolvedValueOnce([]);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.transaction.mockImplementation(
+      async (worker: (transaction: typeof monitoringTransactionClient) => Promise<unknown>) =>
+        worker(monitoringTransactionClient)
+    );
+
+    await expect(
+      recordOwnedCourseSupportSourceSearchResult({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        ordinal: 1,
+        attemptRef: context.privateContext.attemptRef,
+        candidateUrl: "https://parks.example.gov/golf/pine-ridge",
+        runtimeVersion: "test-runtime",
+        now
+      })
+    ).rejects.toThrow("source state changed");
+    expect(prismaMocks.monitoringEventCreate).not.toHaveBeenCalled();
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("records NO_UNIQUE as the complete safe remaining ladder with real independent confirmation", async () => {
+    const batch = sourceSearchBatch();
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    const context = await getOwnedCourseSupportSourceSearchContext({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      ordinal: 1,
+      now
+    });
+    if (context.outcome !== "ready") throw new Error("Expected source-search context.");
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.transaction.mockImplementation(
+      async (worker: (transaction: typeof monitoringTransactionClient) => Promise<unknown>) =>
+        worker(monitoringTransactionClient)
+    );
+
+    const result = await recordOwnedCourseSupportSourceSearchResult({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      ordinal: 1,
+      attemptRef: context.privateContext.attemptRef,
+      noUnique: true,
+      runtimeVersion: "test-runtime",
+      now
+    });
+
+    expect(result).toMatchObject({ noUniqueRecorded: true, browserVerificationRequired: false });
+    const incidentWrite = prismaMocks.supportIncidentUpdateMany.mock.calls[0]?.[0];
+    const assessment = assessAutomationPlaybook(incidentWrite.data.attemptLedger, 1);
+    expect(assessment).toMatchObject({
+      conclusion: "UNRESOLVED_EXHAUSTED",
+      nextStage: null,
+      completedStages: [
+        "OFFICIAL_IDENTITY",
+        "TYPED_ADAPTER",
+        "OFFICIAL_HTTP_DISCOVERY",
+        "HTTP_ADAPTER_RETRY",
+        "RENDERED_BROWSER_DISCOVERY",
+        "BROWSER_ADAPTER_RETRY",
+        "LOCAL_READER",
+        "INDEPENDENT_CONFIRMATION"
+      ]
+    });
+    expect(
+      assessment.stages.find((stage) => stage.stage === "OFFICIAL_IDENTITY")
+    ).toMatchObject({ applicability: "APPLICABLE", attemptCount: 1 });
+    expect(
+      assessment.stages.find((stage) => stage.stage === "INDEPENDENT_CONFIRMATION")
+    ).toMatchObject({ applicability: "APPLICABLE", attemptCount: 1 });
+  });
+
+  it("rejects source search when a route, reader, or all-skipped identity ladder remains", async () => {
+    for (const mutate of [
+      (batch: ReturnType<typeof sourceSearchBatch>) => {
+        batch.incidents[0].course.website = "https://course.example/";
+      },
+      (batch: ReturnType<typeof sourceSearchBatch>) => {
+        batch.incidents[0].course.monitoringMode = "LOCAL_READER_ONLY";
+      },
+      (batch: ReturnType<typeof sourceSearchBatch>) => {
+        batch.incidents[0].incident.attemptLedger = exhaustedAttemptLedger();
+      }
+    ]) {
+      const batch = sourceSearchBatch();
+      mutate(batch);
+      prismaMocks.batchFindFirst.mockResolvedValueOnce(batch);
+      await expect(
+        getOwnedCourseSupportSourceSearchContext({
+          batchId: "batch-1",
+          leaseToken: "lease-1",
+          ownerThreadId: "owner-thread",
+          ordinal: 1,
+          now
+        })
+      ).rejects.toThrow("not eligible");
+    }
   });
 
   it("claims implementation scope only while the shared checkout is otherwise idle", async () => {
@@ -6753,11 +7700,13 @@ describe("course-support release heartbeat persistence", () => {
       renewalPaused = resolve;
     });
     leaseMocks.withPostgresAdvisoryTextLease
-      .mockImplementationOnce(async (_client: unknown, _key: string, worker: () => Promise<unknown>) => {
-        renewalPaused();
-        await waitForRenewal;
-        return { acquired: true, value: await worker() };
-      })
+      .mockImplementationOnce(
+        async (_client: unknown, _key: string, worker: () => Promise<unknown>) => {
+          renewalPaused();
+          await waitForRenewal;
+          return { acquired: true, value: await worker() };
+        }
+      )
       .mockImplementationOnce(
         async (_client: unknown, _key: string, worker: () => Promise<unknown>) => ({
           acquired: true,
@@ -6826,7 +7775,9 @@ describe("course-support release heartbeat persistence", () => {
     prismaMocks.batchFindMany.mockResolvedValue([
       {
         status: "VERIFYING",
-        summary: { plannedPaths: ["src/lib/tee-times/adapters/chronogolf/fetch.ts"] }
+        summary: {
+          plannedPaths: ["src/lib/tee-times/adapters/chronogolf/fetch.ts"]
+        }
       }
     ]);
 
@@ -7266,6 +8217,7 @@ describe("detached verification atomic batch fences", () => {
           updatedAt: incidentUpdatedAt,
           incident: {
             cycle: 1,
+            confirmedAt: new Date("2026-07-15T18:30:00.000Z"),
             status: "AUTO_INVESTIGATING",
             engineeringOnly,
             activeBatchId: "batch-1",
@@ -7439,6 +8391,7 @@ describe("detached verification atomic batch fences", () => {
           course: providerCourse(),
           incident: {
             cycle: 1,
+            confirmedAt: new Date("2026-07-15T18:30:00.000Z"),
             status: "AUTO_INVESTIGATING",
             providerFamilyKey: "booking.example",
             engineeringOnly: result === "NEEDS_HUMAN" ? false : true,
@@ -7504,6 +8457,123 @@ describe("detached verification atomic batch fences", () => {
     };
   }
 
+  it.each([
+    { result: "RESTORED" as const, eventType: "RECOVERED" },
+    { result: "FINAL_DISPOSITION" as const, eventType: "STATE_CHANGED" }
+  ])("tags a campaign $eventType closeout event with member provenance", async (scenario) => {
+    const batch = closeoutBatch(scenario.result);
+    batch.summary = {
+      ...batch.summary,
+      campaign: {
+        kind: "PARKED_COHORT",
+        attempts: [
+          {
+            courseRef: createHash("sha256").update("course-1").digest("hex").slice(0, 24),
+            runId: "campaign-run-1",
+            membershipDigest: "c".repeat(64),
+            cycle: 1
+          }
+        ]
+      }
+    };
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.verificationRequestFindUnique.mockResolvedValue(atomicRequest());
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.transaction.mockImplementationOnce(
+      async (worker: (transaction: typeof monitoringTransactionClient) => Promise<unknown>) =>
+        worker(monitoringTransactionClient)
+    );
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        verificationWatchMode: "WATCH_SETTLED",
+        now
+      })
+    ).resolves.toMatchObject({ terminalCount: 1 });
+    expect(prismaMocks.monitoringEventCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        eventType: scenario.eventType,
+        deploymentSha: releaseSha,
+        runtimeVersion: releaseSha,
+        audit: expect.objectContaining({
+          automatedFinal: true,
+          confirmedAt: "2026-07-15T18:30:00.000Z",
+          cycle: 1,
+          campaign: {
+            kind: "PARKED_COHORT",
+            runId: "campaign-run-1",
+            membershipDigest: "c".repeat(64),
+            cycle: 1
+          }
+        })
+      })
+    });
+  });
+
+  it("recovers campaign provenance from admission evidence in a later retry batch", async () => {
+    const batch = closeoutBatch("FINAL_DISPOSITION");
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.monitoringEventFindFirst.mockResolvedValue({
+      audit: {
+        action: "parked_cohort_admission",
+        campaignRunId: "campaign-run-1",
+        campaignMembershipDigest: "c".repeat(64),
+        priorCycle: 0,
+        cycle: 1,
+        preservesPriorAttemptEvents: true,
+        customerDataIncluded: false
+      }
+    });
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.transaction.mockImplementationOnce(
+      async (worker: (transaction: typeof monitoringTransactionClient) => Promise<unknown>) =>
+        worker(monitoringTransactionClient)
+    );
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        verificationWatchMode: "WATCH_SETTLED",
+        now
+      })
+    ).resolves.toMatchObject({ terminalCount: 1 });
+    expect(prismaMocks.monitoringEventFindFirst).toHaveBeenCalledWith({
+      where: {
+        courseId: "course-1",
+        incidentId: "incident-1",
+        eventType: "REVALIDATION_REQUESTED",
+        source: "COURSE_SUPPORT_RESPONDER",
+        occurredAt: { lte: now },
+        AND: [
+          { audit: { path: ["action"], equals: "parked_cohort_admission" } },
+          { audit: { path: ["cycle"], equals: 1 } }
+        ]
+      },
+      orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
+      select: { audit: true }
+    });
+    expect(prismaMocks.monitoringEventCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        eventType: "STATE_CHANGED",
+        audit: expect.objectContaining({
+          campaign: {
+            kind: "PARKED_COHORT",
+            runId: "campaign-run-1",
+            membershipDigest: "c".repeat(64),
+            cycle: 1
+          }
+        })
+      })
+    });
+  });
+
   it("hands a same-family provider snapshot change to a fresh episode", async () => {
     const claimedProviderFingerprint = "a".repeat(64);
     const observedProviderFingerprint = "b".repeat(64);
@@ -7525,10 +8595,7 @@ describe("detached verification atomic batch fences", () => {
       remediation: {
         attempts: [
           {
-            courseRef: createHash("sha256")
-              .update("course-1")
-              .digest("hex")
-              .slice(0, 24),
+            courseRef: createHash("sha256").update("course-1").digest("hex").slice(0, 24),
             providerSnapshotFingerprint: claimedProviderFingerprint,
             approach: {
               workMode: "IMPLEMENT_REUSABLE_SUPPORT",
@@ -7677,13 +8744,9 @@ describe("detached verification atomic batch fences", () => {
       ...proofEvidence(),
       providerSnapshotFingerprint: "a".repeat(64)
     };
-    verificationMocks.buildCourseSupportProviderSnapshotFingerprint.mockReturnValue(
-      "c".repeat(64)
-    );
+    verificationMocks.buildCourseSupportProviderSnapshotFingerprint.mockReturnValue("c".repeat(64));
     prismaMocks.batchFindFirst.mockResolvedValue(batch);
-    prismaMocks.verificationRequestFindMany.mockResolvedValue([
-      detachedRequestState("SUCCEEDED")
-    ]);
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([detachedRequestState("SUCCEEDED")]);
     prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 1 });
     prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
     prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
@@ -7747,8 +8810,7 @@ describe("detached verification atomic batch fences", () => {
       };
       Object.assign(batch.incidents[0].course.monitoringStatus!, {
         state,
-        lastSuccessfulAt:
-          state === "HEALTHY" ? new Date("2026-07-15T19:59:00.000Z") : null,
+        lastSuccessfulAt: state === "HEALTHY" ? new Date("2026-07-15T19:59:00.000Z") : null,
         revision: 5
       });
       verificationMocks.buildCourseSupportProviderSnapshotFingerprint.mockReturnValue(
@@ -7839,9 +8901,7 @@ describe("detached verification atomic batch fences", () => {
           data: expect.objectContaining({
             status: "RESOLVED",
             resolution:
-              state === "FINAL_IDENTITY"
-                ? "IDENTITY_CLASSIFIED"
-                : "DIRECT_BOOKING_CLASSIFIED"
+              state === "FINAL_IDENTITY" ? "IDENTITY_CLASSIFIED" : "DIRECT_BOOKING_CLASSIFIED"
           })
         })
       );
@@ -7864,9 +8924,7 @@ describe("detached verification atomic batch fences", () => {
     const batch = closeoutBatch("FINAL_DISPOSITION");
     batch.incidents[0].proofSnapshot = evidence;
     batch.incidents[0].verifiedAt = new Date("2026-07-15T20:07:00.000Z");
-    batch.incidents[0].verifiedIncidentUpdatedAt = new Date(
-      "2026-07-15T20:06:30.000Z"
-    );
+    batch.incidents[0].verifiedIncidentUpdatedAt = new Date("2026-07-15T20:06:30.000Z");
     batch.incidents[0].incident.attemptLedger = attemptLedger;
     batch.incidents[0].incident.lastSeenAt = providerChangeAt;
     batch.incidents[0].incident.updatedAt = providerChangeAt;
@@ -7875,10 +8933,7 @@ describe("detached verification atomic batch fences", () => {
       remediation: {
         attempts: [
           {
-            courseRef: createHash("sha256")
-              .update("course-1")
-              .digest("hex")
-              .slice(0, 24),
+            courseRef: createHash("sha256").update("course-1").digest("hex").slice(0, 24),
             providerSnapshotFingerprint: "a".repeat(64),
             approach: {
               workMode: "IMPLEMENT_REUSABLE_SUPPORT",
@@ -7889,18 +8944,14 @@ describe("detached verification atomic batch fences", () => {
         ]
       }
     };
-    verificationMocks.buildCourseSupportProviderSnapshotFingerprint.mockReturnValue(
-      "c".repeat(64)
-    );
+    verificationMocks.buildCourseSupportProviderSnapshotFingerprint.mockReturnValue("c".repeat(64));
     verificationMocks.isCourseSupportFactualFinalProof.mockImplementation(
       (input: { proof: unknown; notBefore?: Date[] }) => {
         const proof = input.proof as { observedAt?: string };
         const observedAt = new Date(proof.observedAt ?? "invalid");
         return Boolean(
           Number.isFinite(observedAt.getTime()) &&
-            (input.notBefore ?? []).every(
-              (boundary) => observedAt.getTime() >= boundary.getTime()
-            )
+          (input.notBefore ?? []).every((boundary) => observedAt.getTime() >= boundary.getTime())
         );
       }
     );
@@ -7937,10 +8988,7 @@ describe("detached verification atomic batch fences", () => {
     );
     expect(verificationMocks.isCourseSupportFactualFinalProof).toHaveBeenCalledWith(
       expect.objectContaining({
-        notBefore: [
-          new Date("2026-07-15T19:50:00.000Z"),
-          new Date("2026-07-15T19:51:00.000Z")
-        ]
+        notBefore: [new Date("2026-07-15T19:50:00.000Z"), new Date("2026-07-15T19:51:00.000Z")]
       })
     );
     expect(prismaMocks.verificationRequestUpdateMany).not.toHaveBeenCalledWith(
@@ -7954,19 +9002,14 @@ describe("detached verification atomic batch fences", () => {
 
   it("requires factual detached success to be copied before it can win material change", async () => {
     const { attemptLedger, evidence } = factualDetachedEvidence("MANUAL_DIRECT");
-    const buildMaterialBatch = (
-      result: "RETRY_SCHEDULED" | "FINAL_DISPOSITION"
-    ) => {
+    const buildMaterialBatch = (result: "RETRY_SCHEDULED" | "FINAL_DISPOSITION") => {
       const batch = closeoutBatch(result);
       batch.summary = {
         ...healthyDetachedDispatch(),
         remediation: {
           attempts: [
             {
-              courseRef: createHash("sha256")
-                .update("course-1")
-                .digest("hex")
-                .slice(0, 24),
+              courseRef: createHash("sha256").update("course-1").digest("hex").slice(0, 24),
               providerSnapshotFingerprint: "a".repeat(64),
               approach: {
                 workMode: "IMPLEMENT_REUSABLE_SUPPORT",
@@ -7992,12 +9035,8 @@ describe("detached verification atomic batch fences", () => {
       completedAt: new Date(evidence.completedAt),
       providerSnapshotFingerprint: "a".repeat(64)
     });
-    verificationMocks.buildCourseSupportProviderSnapshotFingerprint.mockReturnValue(
-      "c".repeat(64)
-    );
-    prismaMocks.batchFindFirst
-      .mockResolvedValueOnce(staleBatch)
-      .mockResolvedValueOnce(copiedBatch);
+    verificationMocks.buildCourseSupportProviderSnapshotFingerprint.mockReturnValue("c".repeat(64));
+    prismaMocks.batchFindFirst.mockResolvedValueOnce(staleBatch).mockResolvedValueOnce(copiedBatch);
     prismaMocks.verificationRequestFindMany.mockResolvedValue([factualRequest]);
     prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
     prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
@@ -8052,10 +9091,7 @@ describe("detached verification atomic batch fences", () => {
       remediation: {
         attempts: [
           {
-            courseRef: createHash("sha256")
-              .update("course-1")
-              .digest("hex")
-              .slice(0, 24),
+            courseRef: createHash("sha256").update("course-1").digest("hex").slice(0, 24),
             providerSnapshotFingerprint: claimedProviderFingerprint,
             approach: {
               workMode: "IMPLEMENT_REUSABLE_SUPPORT",
@@ -8112,10 +9148,7 @@ describe("detached verification atomic batch fences", () => {
       remediation: {
         attempts: [
           {
-            courseRef: createHash("sha256")
-              .update("course-1")
-              .digest("hex")
-              .slice(0, 24),
+            courseRef: createHash("sha256").update("course-1").digest("hex").slice(0, 24),
             providerSnapshotFingerprint: claimedProviderFingerprint,
             approach: {
               workMode: "IMPLEMENT_REUSABLE_SUPPORT",
@@ -8707,10 +9740,7 @@ describe("detached verification atomic batch fences", () => {
     );
     verificationMocks.getEligibleCourseSupportVerificationProof.mockResolvedValue(eligibleProof());
     verificationMocks.buildCourseSupportProviderSnapshotFingerprint.mockImplementation(
-      (selectedCourse: {
-        layoutHoleCounts?: number[];
-        layoutHolesVerifiedAt?: Date | null;
-      }) =>
+      (selectedCourse: { layoutHoleCounts?: number[]; layoutHolesVerifiedAt?: Date | null }) =>
         selectedCourse.layoutHoleCounts?.length === 1 &&
         selectedCourse.layoutHoleCounts[0] === 18 &&
         selectedCourse.layoutHolesVerifiedAt?.getTime() === layoutHolesVerifiedAt.getTime()
@@ -9011,23 +10041,16 @@ describe("detached verification atomic batch fences", () => {
         ...sameFamilySibling.course,
         detectedPlatform: "FOREUP",
         providerFamilyKey: "FOREUP",
-        detectedBookingUrl:
-          "https://foreupsoftware.com/index.php/booking/21017#/teetimes",
+        detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/21017#/teetimes",
         bookingMetadata: {
           scheduleId: 6654,
-          bookingBaseUrl:
-            "https://foreupsoftware.com/index.php/booking/21017#/teetimes"
+          bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/21017#/teetimes"
         }
       }
     };
     prismaMocks.batchFindFirst.mockResolvedValue(batch);
-    prismaMocks.verificationRequestFindUnique.mockResolvedValue(
-      atomicRequest(chronogolfCourse)
-    );
-    prismaMocks.supportIncidentFindMany.mockResolvedValue([
-      sameFamilySibling,
-      unrelatedSibling
-    ]);
+    prismaMocks.verificationRequestFindUnique.mockResolvedValue(atomicRequest(chronogolfCourse));
+    prismaMocks.supportIncidentFindMany.mockResolvedValue([sameFamilySibling, unrelatedSibling]);
     prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
     prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
     prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
@@ -9064,9 +10087,7 @@ describe("detached verification atomic batch fences", () => {
       expect.objectContaining({
         where: expect.objectContaining({
           id: { in: ["incident-sibling"] },
-          OR: [
-            expect.objectContaining({ id: "incident-sibling", cycle: 3 })
-          ]
+          OR: [expect.objectContaining({ id: "incident-sibling", cycle: 3 })]
         }),
         data: expect.objectContaining({
           cycle: { increment: 1 },
@@ -9170,9 +10191,7 @@ describe("detached verification atomic batch fences", () => {
       }
     }));
     prismaMocks.batchFindFirst.mockResolvedValue(batch);
-    prismaMocks.verificationRequestFindUnique.mockResolvedValue(
-      atomicRequest(chronogolfCourse)
-    );
+    prismaMocks.verificationRequestFindUnique.mockResolvedValue(atomicRequest(chronogolfCourse));
     prismaMocks.supportIncidentFindMany.mockResolvedValue(siblings);
     prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
     prismaMocks.supportIncidentUpdateMany.mockImplementation(
@@ -9185,7 +10204,9 @@ describe("detached verification atomic batch fences", () => {
         count: args.where?.courseId?.in?.length ?? 1
       })
     );
-    prismaMocks.monitoringEventCreateMany.mockResolvedValue({ count: siblings.length });
+    prismaMocks.monitoringEventCreateMany.mockResolvedValue({
+      count: siblings.length
+    });
     prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
     prismaMocks.transaction.mockImplementationOnce(
       async (worker: (transaction: typeof monitoringTransactionClient) => Promise<unknown>) =>
@@ -9205,8 +10226,8 @@ describe("detached verification atomic batch fences", () => {
       siblingWakeCount: 25
     });
 
-    const incidentBulkCalls = prismaMocks.supportIncidentUpdateMany.mock.calls.filter(
-      ([args]) => Array.isArray(args.where?.id?.in)
+    const incidentBulkCalls = prismaMocks.supportIncidentUpdateMany.mock.calls.filter(([args]) =>
+      Array.isArray(args.where?.id?.in)
     );
     expect(incidentBulkCalls).toHaveLength(1);
     expect(incidentBulkCalls[0]?.[0].where.id.in).toHaveLength(25);
@@ -9217,8 +10238,8 @@ describe("detached verification atomic batch fences", () => {
       firstSeenAt: now,
       confirmedAt: now
     });
-    const monitoringBulkCalls = prismaMocks.monitoringStatusUpdateMany.mock.calls.filter(
-      ([args]) => Array.isArray(args.where?.courseId?.in)
+    const monitoringBulkCalls = prismaMocks.monitoringStatusUpdateMany.mock.calls.filter(([args]) =>
+      Array.isArray(args.where?.courseId?.in)
     );
     expect(monitoringBulkCalls).toHaveLength(1);
     expect(monitoringBulkCalls[0]?.[0].where.courseId.in).toHaveLength(25);
@@ -9249,12 +10270,10 @@ describe("detached verification atomic batch fences", () => {
       ...providerCourse(),
       detectedPlatform: "FOREUP",
       providerFamilyKey: "FOREUP",
-      detectedBookingUrl:
-        "https://foreupsoftware.com/index.php/booking/21017#/teetimes",
+      detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/21017#/teetimes",
       bookingMetadata: {
         scheduleId: 6654,
-        bookingBaseUrl:
-          "https://foreupsoftware.com/index.php/booking/21017#/teetimes"
+        bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/21017#/teetimes"
       }
     };
     batch.baseSha = "c".repeat(40);
@@ -9304,12 +10323,10 @@ describe("detached verification atomic batch fences", () => {
       ...providerCourse(),
       detectedPlatform: "FOREUP",
       providerFamilyKey: "FOREUP",
-      detectedBookingUrl:
-        "https://foreupsoftware.com/index.php/booking/21017#/teetimes",
+      detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/21017#/teetimes",
       bookingMetadata: {
         scheduleId: 6654,
-        bookingBaseUrl:
-          "https://foreupsoftware.com/index.php/booking/21017#/teetimes"
+        bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/21017#/teetimes"
       }
     };
     batch.baseSha = "c".repeat(40);
@@ -9326,10 +10343,7 @@ describe("detached verification atomic batch fences", () => {
       remediation: {
         attempts: [
           {
-            courseRef: createHash("sha256")
-              .update("course-1")
-              .digest("hex")
-              .slice(0, 24),
+            courseRef: createHash("sha256").update("course-1").digest("hex").slice(0, 24),
             providerSnapshotFingerprint: providerFingerprint,
             approach: {
               workMode: "IMPLEMENT_REUSABLE_SUPPORT",
@@ -9463,10 +10477,7 @@ describe("detached verification atomic batch fences", () => {
       remediation: {
         attempts: [
           {
-            courseRef: createHash("sha256")
-              .update("course-1")
-              .digest("hex")
-              .slice(0, 24),
+            courseRef: createHash("sha256").update("course-1").digest("hex").slice(0, 24),
             providerSnapshotFingerprint: providerFingerprint,
             approach: {
               workMode: "IMPLEMENT_REUSABLE_SUPPORT",
@@ -9573,10 +10584,7 @@ describe("detached verification atomic batch fences", () => {
       remediation: {
         attempts: [
           {
-            courseRef: createHash("sha256")
-              .update("course-1")
-              .digest("hex")
-              .slice(0, 24),
+            courseRef: createHash("sha256").update("course-1").digest("hex").slice(0, 24),
             providerSnapshotFingerprint: providerFingerprint,
             approach: {
               workMode: "IMPLEMENT_REUSABLE_SUPPORT",
@@ -9893,10 +10901,7 @@ describe("detached verification atomic batch fences", () => {
       remediation: {
         attempts: [
           {
-            courseRef: createHash("sha256")
-              .update("course-1")
-              .digest("hex")
-              .slice(0, 24),
+            courseRef: createHash("sha256").update("course-1").digest("hex").slice(0, 24),
             providerSnapshotFingerprint: providerFingerprint,
             playbookEventCountAtClaim: 0,
             approach: {
@@ -9928,9 +10933,7 @@ describe("detached verification atomic batch fences", () => {
       derivedOutcome: "retryable_failed"
     });
 
-    expect(
-      prismaMocks.batchUpdateMany.mock.calls[0]?.[0]?.data?.summary?.closeout
-    ).toMatchObject({
+    expect(prismaMocks.batchUpdateMany.mock.calls[0]?.[0]?.data?.summary?.closeout).toMatchObject({
       remediationAttemptConsumed: false,
       remediationAttempts: [expect.objectContaining({ consumed: false })]
     });
@@ -9941,19 +10944,14 @@ describe("detached verification atomic batch fences", () => {
     batch.baseSha = "c".repeat(40);
     batch.releaseSha = null;
     batch.deployedAt = null;
-    batch.incidents[0].incident.escalationDeadlineAt = new Date(
-      now.getTime() + 10 * 60_000
-    );
+    batch.incidents[0].incident.escalationDeadlineAt = new Date(now.getTime() + 10 * 60_000);
     batch.summary = {
       ...healthyDetachedDispatch(),
       plannedPaths: ["src/lib/tee-times/adapters/example.ts"],
       remediation: {
         attempts: [
           {
-            courseRef: createHash("sha256")
-              .update("course-1")
-              .digest("hex")
-              .slice(0, 24),
+            courseRef: createHash("sha256").update("course-1").digest("hex").slice(0, 24),
             providerSnapshotFingerprint: providerFingerprint,
             approach: {
               workMode: "IMPLEMENT_REUSABLE_SUPPORT",
@@ -10121,10 +11119,7 @@ describe("detached verification atomic batch fences", () => {
       remediation: {
         attempts: [
           {
-            courseRef: createHash("sha256")
-              .update("course-1")
-              .digest("hex")
-              .slice(0, 24),
+            courseRef: createHash("sha256").update("course-1").digest("hex").slice(0, 24),
             providerSnapshotFingerprint: providerFingerprint,
             approach: {
               workMode: "IMPLEMENT_REUSABLE_SUPPORT",
@@ -10158,19 +11153,14 @@ describe("detached verification atomic batch fences", () => {
   it("consumes a deployed implementation that later fails production verification", async () => {
     const batch = closeoutBatch("PENDING");
     batch.baseSha = "c".repeat(40);
-    batch.incidents[0].incident.escalationDeadlineAt = new Date(
-      now.getTime() + 10 * 60_000
-    );
+    batch.incidents[0].incident.escalationDeadlineAt = new Date(now.getTime() + 10 * 60_000);
     batch.summary = {
       ...healthyDetachedDispatch(),
       plannedPaths: ["src/lib/tee-times/adapters/example.ts"],
       remediation: {
         attempts: [
           {
-            courseRef: createHash("sha256")
-              .update("course-1")
-              .digest("hex")
-              .slice(0, 24),
+            courseRef: createHash("sha256").update("course-1").digest("hex").slice(0, 24),
             providerSnapshotFingerprint: providerFingerprint,
             playbookEventCountAtClaim: 0,
             approach: {
@@ -10247,18 +11237,13 @@ describe("detached verification atomic batch fences", () => {
       runtimeVersion: testCase.proofRuntimeVersion,
       providerExecution: true
     };
-    batch.incidents[0].incident.escalationDeadlineAt = new Date(
-      now.getTime() + 10 * 60_000
-    );
+    batch.incidents[0].incident.escalationDeadlineAt = new Date(now.getTime() + 10 * 60_000);
     batch.summary = {
       plannedPaths: [],
       remediation: {
         attempts: [
           {
-            courseRef: createHash("sha256")
-              .update("course-1")
-              .digest("hex")
-              .slice(0, 24),
+            courseRef: createHash("sha256").update("course-1").digest("hex").slice(0, 24),
             providerSnapshotFingerprint: providerFingerprint,
             playbookEventCountAtClaim: 0,
             approach: {
@@ -10349,9 +11334,7 @@ describe("detached verification atomic batch fences", () => {
     currentBatch.incidents[0].incident.updatedAt = currentIncidentUpdatedAt;
     currentBatch.incidents[0].incident.lastSeenAt = currentIncidentUpdatedAt;
     for (const batch of [staleBatch, currentBatch]) {
-      batch.incidents[0].incident.escalationDeadlineAt = new Date(
-        now.getTime() + 10 * 60_000
-      );
+      batch.incidents[0].incident.escalationDeadlineAt = new Date(now.getTime() + 10 * 60_000);
     }
     prismaMocks.batchFindFirst
       .mockResolvedValueOnce(staleBatch)
@@ -10441,7 +11424,7 @@ describe("detached verification atomic batch fences", () => {
     );
   });
 
-  it("moves source-age-eligible watch evidence to explicit human review", async () => {
+  it("does not accept aged source evidence without fresh independent confirmation", async () => {
     const batch = closeoutBatch("RETRY_SCHEDULED", {
       kind: "SOURCE_REVALIDATION",
       outcome: "NEEDS_ADAPTER"
@@ -10481,14 +11464,14 @@ describe("detached verification atomic batch fences", () => {
       outcome: "needs_human",
       durableCloseoutRecorded: true,
       retryCount: 0,
-      automationStalledCount: 0
+      automationStalledCount: 1
     });
     expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           status: "NEEDS_HUMAN",
           activeBatchId: null,
-          humanReviewReason: "SOURCE_UNVERIFIED"
+          humanReviewReason: "AUTOMATION_STALLED"
         })
       })
     );

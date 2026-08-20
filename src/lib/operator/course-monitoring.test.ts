@@ -89,6 +89,7 @@ function status() {
         cycle: 2,
         revision: 7,
         status: "NEEDS_HUMAN",
+        confirmedAt: new Date("2026-08-20T12:00:00.000Z"),
         activeRealSearchCount: 1,
         attemptLedger: null,
         resolution: null,
@@ -866,7 +867,13 @@ describe("operator course monitoring mutations", () => {
         outcome: "MANUAL_DIRECT",
         evidenceUrl: cabqFaqUrl,
         message:
-          "The official FAQ says reservations alternate between in-person and phone requests."
+          "The official FAQ says reservations alternate between in-person and phone requests.",
+        audit: expect.objectContaining({
+          action: "set_course_outcome",
+          cycle: 2,
+          confirmedAt: "2026-08-20T12:00:00.000Z",
+          automatedFinal: false
+        })
       })
     });
   });
@@ -1058,6 +1065,18 @@ describe("operator course monitoring mutations", () => {
           action: "approve_technical_final",
           classification: "CAPTCHA_OR_QUEUE",
           note: "Confirmed the current signed-out technical limitation."
+        })
+      })
+    });
+    expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        eventType: "HUMAN_DECISION",
+        toState: "FINAL_TECHNICAL",
+        audit: expect.objectContaining({
+          action: "approve_technical_final",
+          cycle: 2,
+          confirmedAt: "2026-08-20T12:00:00.000Z",
+          automatedFinal: false
         })
       })
     });

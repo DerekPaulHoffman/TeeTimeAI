@@ -86,6 +86,11 @@ function sourceMissingSearch() {
           id: "source-missing-course",
           googlePlaceId: "place-id",
           name: "Source Missing Golf Course",
+          address: "100 Main Street",
+          city: "Hartford",
+          stateCode: "CT",
+          latitude: 41.7658,
+          longitude: -72.6734,
           website: null,
           detectedBookingUrl: null,
           detectedPlatform: "UNKNOWN",
@@ -235,6 +240,197 @@ describe("search monitoring discovery", () => {
     expect(dbMocks.applyRecoveredOfficialWebsiteToCourse).toHaveBeenCalledOnce();
     expect(dbMocks.applyBrowserDiscoveryToCourse).not.toHaveBeenCalled();
     expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
+    expect(result.attemptedCourseIds).toEqual([]);
+  });
+
+  it("recovers one exact official website by name and location when no Place ID is stored", async () => {
+    googlePlacesMocks.getGooglePlacesApiKey.mockReturnValue("test-key");
+    prismaMocks.courseSupportBatchSearch.findMany.mockResolvedValue([
+      remediationDispatchRow(["source-missing-course"])
+    ]);
+    const search = sourceMissingSearch() as {
+      preferences: Array<{ course: { googlePlaceId: string | null } }>;
+    };
+    search.preferences[0]!.course.googlePlaceId = null;
+    const officialWebsite = "https://source-missing.example/golf";
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = input.toString();
+      if (url.endsWith("places:searchText")) {
+        expect(init).toMatchObject({
+          method: "POST",
+          headers: {
+            "X-Goog-Api-Key": "test-key"
+          }
+        });
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          textQuery:
+            "Source Missing Golf Course, 100 Main Street, Hartford, CT",
+          includedType: "golf_course",
+          strictTypeFiltering: true
+        });
+        return Response.json({
+          places: [
+            {
+              id: "recovered-place",
+              displayName: { text: "Source Missing Golf Course" },
+              formattedAddress: "100 Main St, Hartford, CT 06103",
+              location: { latitude: 41.7659, longitude: -72.6735 },
+              websiteUri: officialWebsite,
+              types: ["golf_course"],
+              primaryType: "golf_course",
+              businessStatus: "OPERATIONAL"
+            }
+          ]
+        });
+      }
+      expect(url).toBe(officialWebsite);
+      return new Response("<html><h1>Source Missing Golf Course</h1></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      });
+    });
+
+    const result = await prepareSearchMonitoring(
+      search as never,
+      fetchImpl as typeof fetch,
+      now
+    );
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(dbMocks.applyRecoveredOfficialWebsiteToCourse).toHaveBeenCalledWith({
+      courseId: "source-missing-course",
+      website: officialWebsite,
+      expectedUpdatedAt: new Date("2026-07-13T19:00:00.000Z"),
+      observedAt: now
+    });
+    expect(result.attemptedCourseIds).toEqual(["source-missing-course"]);
+  });
+
+  it.each([
+    ["a different street", "200 Main St, Hartford, CT 06103"],
+    ["a different locality", "100 Main St, New Haven, CT 06510"]
+  ])("rejects an exact-name nearby candidate with %s", async (_case, formattedAddress) => {
+    googlePlacesMocks.getGooglePlacesApiKey.mockReturnValue("test-key");
+    prismaMocks.courseSupportBatchSearch.findMany.mockResolvedValue([
+      remediationDispatchRow(["source-missing-course"])
+    ]);
+    const search = sourceMissingSearch() as {
+      preferences: Array<{ course: { googlePlaceId: string | null } }>;
+    };
+    search.preferences[0]!.course.googlePlaceId = null;
+    const fetchImpl = vi.fn(async () =>
+      Response.json({
+        places: [
+          {
+            id: "nearby-sibling-place",
+            displayName: { text: "Source Missing Golf Course" },
+            formattedAddress,
+            location: { latitude: 41.7659, longitude: -72.6735 },
+            websiteUri: "https://nearby-sibling.example/golf",
+            types: ["golf_course"],
+            primaryType: "golf_course",
+            businessStatus: "OPERATIONAL"
+          }
+        ]
+      })
+    );
+
+    const result = await prepareSearchMonitoring(search as never, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(dbMocks.applyRecoveredOfficialWebsiteToCourse).not.toHaveBeenCalled();
+    expect(result.attemptedCourseIds).toEqual([]);
+  });
+
+  it.each([
+    ["street address", { address: null }],
+    ["city", { city: null }],
+    ["state", { stateCode: null }]
+  ])("rejects name-and-distance recovery when the stored %s is missing", async (_case, missing) => {
+    googlePlacesMocks.getGooglePlacesApiKey.mockReturnValue("test-key");
+    prismaMocks.courseSupportBatchSearch.findMany.mockResolvedValue([
+      remediationDispatchRow(["source-missing-course"])
+    ]);
+    const search = sourceMissingSearch() as {
+      preferences: Array<{
+        course: {
+          googlePlaceId: string | null;
+          address: string | null;
+          city: string | null;
+          stateCode: string | null;
+        };
+      }>;
+    };
+    Object.assign(search.preferences[0]!.course, {
+      googlePlaceId: null,
+      ...missing
+    });
+    const fetchImpl = vi.fn(async () =>
+      Response.json({
+        places: [
+          {
+            id: "nearby-same-name-place",
+            displayName: { text: "Source Missing Golf Course" },
+            formattedAddress: "100 Main St, Hartford, CT 06103",
+            location: { latitude: 41.7659, longitude: -72.6735 },
+            websiteUri: "https://nearby-same-name.example/golf",
+            types: ["golf_course"],
+            primaryType: "golf_course",
+            businessStatus: "OPERATIONAL"
+          }
+        ]
+      })
+    );
+
+    const result = await prepareSearchMonitoring(search as never, fetchImpl as typeof fetch, now);
+
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(dbMocks.applyRecoveredOfficialWebsiteToCourse).not.toHaveBeenCalled();
+    expect(result.attemptedCourseIds).toEqual([]);
+  });
+
+  it("does not persist an ambiguous name-and-location website recovery", async () => {
+    googlePlacesMocks.getGooglePlacesApiKey.mockReturnValue("test-key");
+    prismaMocks.courseSupportBatchSearch.findMany.mockResolvedValue([
+      remediationDispatchRow(["source-missing-course"])
+    ]);
+    const search = sourceMissingSearch() as {
+      preferences: Array<{ course: { googlePlaceId: string | null } }>;
+    };
+    search.preferences[0]!.course.googlePlaceId = null;
+    const fetchImpl = vi.fn(async () =>
+      Response.json({
+        places: [
+          {
+            id: "candidate-one",
+            displayName: { text: "Source Missing Golf Course" },
+            location: { latitude: 41.7659, longitude: -72.6735 },
+            websiteUri: "https://candidate-one.example/golf",
+            types: ["golf_course"],
+            primaryType: "golf_course",
+            businessStatus: "OPERATIONAL"
+          },
+          {
+            id: "candidate-two",
+            displayName: { text: "Source Missing Golf Course" },
+            location: { latitude: 41.766, longitude: -72.6736 },
+            websiteUri: "https://candidate-two.example/golf",
+            types: ["golf_course"],
+            primaryType: "golf_course",
+            businessStatus: "OPERATIONAL"
+          }
+        ]
+      })
+    );
+
+    const result = await prepareSearchMonitoring(
+      search as never,
+      fetchImpl as typeof fetch,
+      now
+    );
+
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(dbMocks.applyRecoveredOfficialWebsiteToCourse).not.toHaveBeenCalled();
     expect(result.attemptedCourseIds).toEqual([]);
   });
 

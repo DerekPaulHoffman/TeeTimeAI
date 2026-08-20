@@ -67,7 +67,32 @@ export type BrowserDiscoveryEvidence = {
   bookingCallToAction?: boolean;
   teeItUpLegacyConfigurations?: TeeItUpLegacyConfigurationEvidence[];
   teeItUpFacilityResponses?: TeeItUpFacilityResponseEvidence[];
+  unprojectedSourceCandidate?: boolean;
+  sourceCandidateIdentityVerified?: boolean;
 };
+
+export function isKnownPublicSearchSurfaceUrl(value: URL | string) {
+  let url: URL;
+  try {
+    url = typeof value === "string" ? new URL(value) : value;
+  } catch {
+    return true;
+  }
+  const hostname = url.hostname.toLocaleLowerCase("en-US").replace(/\.$/u, "");
+  return Boolean(
+    /(?:^|\.)google\.(?:com|[a-z]{2,3}|co\.[a-z]{2}|com\.[a-z]{2})$/u.test(hostname) ||
+      /(?:^|\.)bing\.com$/u.test(hostname) ||
+      /(?:^|\.)duckduckgo\.com$/u.test(hostname) ||
+      /(?:^|\.)search\.brave\.com$/u.test(hostname) ||
+      /(?:^|\.)startpage\.com$/u.test(hostname) ||
+      /(?:^|\.)search\.yahoo\.(?:com|[a-z]{2,3}|co\.[a-z]{2}|com\.[a-z]{2})$/u.test(
+        hostname,
+      ) ||
+      /(?:^|\.)(?:ecosia\.org|qwant\.com|yandex\.(?:com|ru)|baidu\.com)$/u.test(
+        hostname,
+      )
+  );
+}
 
 export type TeeItUpLegacyConfigurationEvidence = {
   providerUrl: string;
@@ -620,6 +645,23 @@ export type BrowserProbeCourseInput = {
 
 export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): BrowserDiscovery {
   evidence = sanitizeClubCaddieDiscoveryEvidence(evidence);
+  if (
+    evidence.unprojectedSourceCandidate === true &&
+    evidence.sourceCandidateIdentityVerified !== true
+  ) {
+    return {
+      courseId: evidence.courseId,
+      status: "INSPECTED",
+      detectedPlatform: "UNKNOWN",
+      sourceUrl: evidence.sourceUrl,
+      confidence: 0,
+      evidence: {
+        finalUrl: evidence.finalUrl,
+        observedUrls: [],
+        learnedFrom: "unprojected-source-candidate-identity-unverified"
+      }
+    };
+  }
   const unscopedEvidence = evidence;
   const unscopedObservedUrls = uniqueUrls([
     evidence.finalUrl,

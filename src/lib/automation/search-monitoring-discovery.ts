@@ -337,9 +337,26 @@ type SearchMonitoringDiscoveryOptions = {
 type MissingOfficialWebsiteCourse = {
   id: string;
   googlePlaceId: string | null;
+  name: string;
+  address: string | null;
+  city: string | null;
+  stateCode: string | null;
+  latitude: number;
+  longitude: number;
   website: string | null;
   detectedBookingUrl: string | null;
   updatedAt: Date;
+};
+
+type GoogleOfficialWebsiteCandidate = {
+  id?: unknown;
+  displayName?: { text?: unknown };
+  formattedAddress?: unknown;
+  location?: { latitude?: unknown; longitude?: unknown };
+  websiteUri?: unknown;
+  types?: unknown;
+  primaryType?: unknown;
+  businessStatus?: unknown;
 };
 
 function applyMonitoringDiscovery(
@@ -396,29 +413,39 @@ async function refreshMissingOfficialWebsites(
 
   for (const course of courses) {
     const placeId = course.googlePlaceId?.trim();
-    if (course.website || course.detectedBookingUrl || !placeId) {
+    if (course.website || course.detectedBookingUrl) {
       continue;
     }
     const execution = await runWithProviderRequestLease(
       "SOURCE_MISSING",
       async () => {
-        const response = await publicFetch(
-          `https://places.googleapis.com/v1/places/${encodeURIComponent(placeId)}`,
-          {
-            cache: "no-store",
-            headers: {
-              "X-Goog-Api-Key": apiKey,
-              "X-Goog-FieldMask": "websiteUri"
+        if (placeId) {
+          const response = await publicFetch(
+            `https://places.googleapis.com/v1/places/${encodeURIComponent(placeId)}`,
+            {
+              cache: "no-store",
+              headers: {
+                "X-Goog-Api-Key": apiKey,
+                "X-Goog-FieldMask": "websiteUri"
+              }
+            }
+          );
+          if (response.ok) {
+            const place = (await response.json()) as { websiteUri?: unknown };
+            const website = typeof place.websiteUri === "string"
+              ? readSafePublicUrl(place.websiteUri)
+              : null;
+            if (website) {
+              return website;
             }
           }
-        );
-        if (!response.ok) {
-          return null;
         }
-        const place = (await response.json()) as { websiteUri?: unknown };
-        return typeof place.websiteUri === "string"
-          ? readSafePublicUrl(place.websiteUri)
-          : null;
+
+        return searchGooglePlacesForExactOfficialWebsite(
+          course,
+          apiKey,
+          publicFetch
+        );
       }
     );
     if (execution.acquired && execution.value) {
@@ -437,6 +464,198 @@ async function refreshMissingOfficialWebsites(
       }
     }
   }
+}
+
+async function searchGooglePlacesForExactOfficialWebsite(
+  course: MissingOfficialWebsiteCourse,
+  apiKey: string,
+  publicFetch: typeof fetch
+) {
+  const query = [course.name, course.address, course.city, course.stateCode]
+    .map((value) => value?.trim())
+    .filter(Boolean)
+    .join(", ");
+  if (!query) {
+    return null;
+  }
+
+  const response = await publicFetch(
+    "https://places.googleapis.com/v1/places:searchText",
+    {
+      method: "POST",
+      cache: "no-store",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": apiKey,
+        "X-Goog-FieldMask":
+          "places.id,places.displayName,places.formattedAddress,places.location,places.websiteUri,places.types,places.primaryType,places.businessStatus"
+      },
+      body: JSON.stringify({
+        textQuery: query,
+        languageCode: "en",
+        includedType: "golf_course",
+        strictTypeFiltering: true,
+        pageSize: 5,
+        rankPreference: "RELEVANCE",
+        ...(Number.isFinite(course.latitude) && Number.isFinite(course.longitude)
+          ? {
+              locationBias: {
+                circle: {
+                  center: {
+                    latitude: course.latitude,
+                    longitude: course.longitude
+                  },
+                  radius: 10_000
+                }
+              }
+            }
+          : {})
+      })
+    }
+  );
+  if (!response.ok) {
+    return null;
+  }
+
+  const payload = (await response.json()) as {
+    places?: GoogleOfficialWebsiteCandidate[];
+  };
+  const matches = (payload.places ?? []).flatMap((candidate) => {
+    const website = typeof candidate.websiteUri === "string"
+      ? readSafePublicUrl(candidate.websiteUri)
+      : null;
+    if (!website || !isExactGoogleOfficialWebsiteCandidate(course, candidate)) {
+      return [];
+    }
+    return [website];
+  });
+  const unique = [...new Set(matches)];
+  return unique.length === 1 ? unique[0] : null;
+}
+
+function isExactGoogleOfficialWebsiteCandidate(
+  course: MissingOfficialWebsiteCourse,
+  candidate: GoogleOfficialWebsiteCandidate
+) {
+  const candidateTypes = Array.isArray(candidate.types)
+    ? candidate.types.filter((value): value is string => typeof value === "string")
+    : [];
+  if (
+    candidate.primaryType !== "golf_course" ||
+    !candidateTypes.includes("golf_course") ||
+    candidate.businessStatus === "CLOSED_PERMANENTLY"
+  ) {
+    return false;
+  }
+
+  const expectedPlaceId = normalizeGooglePlaceId(course.googlePlaceId);
+  const candidatePlaceId = normalizeGooglePlaceId(candidate.id);
+  if (expectedPlaceId) {
+    return candidatePlaceId === expectedPlaceId;
+  }
+
+  const candidateName = candidate.displayName?.text;
+  const candidateAddress =
+    typeof candidate.formattedAddress === "string" ? candidate.formattedAddress : null;
+  const latitude = candidate.location?.latitude;
+  const longitude = candidate.location?.longitude;
+  return Boolean(
+    typeof candidateName === "string" &&
+      haveCompatibleOfficialPageCourseNames(course.name, candidateName) &&
+      hasExactGoogleCandidateAddressCorroboration(course, candidateAddress) &&
+      typeof latitude === "number" &&
+      typeof longitude === "number" &&
+      Number.isFinite(course.latitude) &&
+      Number.isFinite(course.longitude) &&
+      getCoordinateDistanceMeters(
+        course.latitude,
+        course.longitude,
+        latitude,
+        longitude
+      ) <= 2_000
+  );
+}
+
+const ADDRESS_TOKEN_ALIASES: Readonly<Record<string, string>> = {
+  avenue: "ave",
+  boulevard: "blvd",
+  circle: "cir",
+  court: "ct",
+  drive: "dr",
+  east: "e",
+  highway: "hwy",
+  lane: "ln",
+  north: "n",
+  parkway: "pkwy",
+  place: "pl",
+  road: "rd",
+  route: "rt",
+  south: "s",
+  street: "st",
+  terrace: "ter",
+  trail: "trl",
+  west: "w"
+};
+
+function hasExactGoogleCandidateAddressCorroboration(
+  course: MissingOfficialWebsiteCourse,
+  candidateAddress: string | null
+) {
+  const expectedAddressTokens = normalizeAddressTokens(course.address?.split(",")[0] ?? null);
+  const expectedCityTokens = normalizeAddressTokens(course.city);
+  const expectedStateTokens = normalizeAddressTokens(course.stateCode);
+  if (
+    expectedAddressTokens.length === 0 ||
+    expectedCityTokens.length === 0 ||
+    expectedStateTokens.length === 0
+  ) {
+    return false;
+  }
+  if (!candidateAddress) {
+    return false;
+  }
+  const candidateParts = candidateAddress.split(",");
+  const candidateAddressTokens = new Set(normalizeAddressTokens(candidateParts[0]));
+  const candidateLocalityTokens = new Set(
+    normalizeAddressTokens(candidateParts.slice(1).join(" "))
+  );
+  return (
+    expectedAddressTokens.every((token) => candidateAddressTokens.has(token)) &&
+    expectedCityTokens.every((token) => candidateLocalityTokens.has(token)) &&
+    expectedStateTokens.every((token) => candidateLocalityTokens.has(token))
+  );
+}
+
+function normalizeAddressTokens(value: string | null | undefined) {
+  return (value ?? "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/gu, "")
+    .toLocaleLowerCase("en-US")
+    .match(/[a-z0-9]+/gu)
+    ?.map((token) => ADDRESS_TOKEN_ALIASES[token] ?? token) ?? [];
+}
+
+function normalizeGooglePlaceId(value: unknown) {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().replace(/^places\//u, "");
+  return normalized || null;
+}
+
+function getCoordinateDistanceMeters(
+  leftLatitude: number,
+  leftLongitude: number,
+  rightLatitude: number,
+  rightLongitude: number
+) {
+  const radians = (degrees: number) => (degrees * Math.PI) / 180;
+  const latitudeDelta = radians(rightLatitude - leftLatitude);
+  const longitudeDelta = radians(rightLongitude - leftLongitude);
+  const a =
+    Math.sin(latitudeDelta / 2) ** 2 +
+    Math.cos(radians(leftLatitude)) *
+      Math.cos(radians(rightLatitude)) *
+      Math.sin(longitudeDelta / 2) ** 2;
+  return 6_371_000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 export async function prepareSearchMonitoring(

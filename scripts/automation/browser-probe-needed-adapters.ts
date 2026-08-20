@@ -3,7 +3,13 @@ import "./load-local-env";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { chromium, type Page } from "@playwright/test";
+import {
+  chromium,
+  type Frame,
+  type Page,
+  type Request,
+  type Route,
+} from "@playwright/test";
 
 import {
   buildBrowserDiscovery,
@@ -12,24 +18,38 @@ import {
   findCorroboratingAccessBarrier,
   haveSamePublicWebsiteOrigin,
   isEvidenceOnlyOfficialBookingAccountLink,
+  isKnownPublicSearchSurfaceUrl,
   isSafeManualEvidenceUrl,
   keepPolicyOnlyDiscoveryActionable,
   pickLikelyBookingHref,
   prioritizeBrowserDiscoveryLinks,
   sanitizeBrowserDiscoveryAccessEvidence,
+  type BrowserDiscovery,
   type BrowserDiscoveryEvidence,
 } from "@/lib/automation/browser-discovery";
 import {
   assertBrowserProbeExpectedDisposition,
+  buildBrowserButtonCandidates,
+  buildBrowserNetworkContractFingerprint,
   buildBrowserFrameCandidates,
   buildBrowserFrameCandidatesFromHtml,
   buildBrowserProbeDecisionTrace,
-  buildRedirectedProviderBookingCandidate,
   buildBrowserWidgetCandidates,
-  finalizeBrowserEvidenceSnapshots,
-  hasDistinctProviderBookingCandidate,
+  classifyRenderedOfficialPageCourseIdentity,
+  finalizeBrowserInvestigationEvidence,
+  isRenderedUnprojectedSourceCandidateLocalityCorroborated,
   isRelevantBrowserAccessBarrierUrl,
+  MAX_BROWSER_BOOKING_DESTINATION_VISITS,
+  MAX_BROWSER_INVESTIGATION_DEPTH,
+  MAX_BROWSER_SAME_ORIGIN_PAGE_VISITS,
+  planBrowserInvestigationLinks,
   prepareBrowserPageEvidence,
+  sanitizeBrowserAuditUrl,
+  type BrowserBookingDestinationVisit,
+  type BrowserInvestigationEvidence,
+  type BrowserInvestigationMode,
+  type BrowserInvestigationPageVisit,
+  type BrowserNetworkContractFingerprint,
   type BrowserProbeDecisionTrace,
   type BrowserProbeExpectedDisposition,
 } from "@/lib/automation/browser-probe-evidence";
@@ -67,6 +87,7 @@ export type BrowserProbeOptions = ReturnType<typeof parseOptions> & {
   persistenceFence?: CourseSupportBrowserPersistenceFence;
   deferTerminalCloseout?: boolean;
   persistSearchProbe?: boolean;
+  mode?: BrowserInvestigationMode;
 };
 
 export async function runBrowserProbe(options: BrowserProbeOptions) {
@@ -80,23 +101,25 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
       "Persisted browser progression requires an owned responder batch and deferred closeout.",
     );
   }
-  const limit = options.limit;
   const requestedCourseName = options.courseName;
   const requestedCourseId = options.courseId;
   const runtimeVersion = resolveBrowserProbeRuntimeVersion(
     getAutomationRuntimeVersion(),
     options.persistenceFence,
   );
+  const investigationMode = resolveBrowserInvestigationMode(options);
   const run = options.dryRun ? null : await startAutomationRun(PROMPT_VERSION);
   const notes: string[] = [];
   const traces: BrowserProbeDecisionTrace[] = [];
   let persistedCount = 0;
 
   try {
+    const selection = resolveBrowserProbeTargetSelection(options);
     const targets = await listBrowserProbeTargets(
-      limit,
-      requestedCourseName,
-      requestedCourseId,
+      selection.limit,
+      selection.courseName,
+      selection.courseId,
+      selection.persistenceFence,
     );
     notes.push(`Selected ${targets.length} browser probe targets.`);
 
@@ -117,7 +140,8 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
     const browser = await chromium.launch();
     try {
       for (const target of targets) {
-        const page = await browser.newPage({ serviceWorkers: "block" });
+        const context = await browser.newContext({ serviceWorkers: "block" });
+        const page = await context.newPage();
         let playbookRuntime: Awaited<
           ReturnType<typeof loadCourseMonitoringPlaybookRuntime>
         > = null;
@@ -148,12 +172,48 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
             );
             continue;
           }
+          const investigationObservedAt = new Date();
           const previousDiscovery =
-            await prisma.courseAutomationDiscovery.findFirst({
-              where: { courseId: target.course.id },
-              orderBy: { createdAt: "desc" },
-              select: { evidence: true },
-            });
+            investigationMode === "INDEPENDENT" &&
+            options.persistenceFence &&
+            target.course.incidentConfirmedAt
+              ? await prisma.courseAutomationDiscovery.findFirst({
+                  where: {
+                    courseId: target.course.id,
+                    createdAt: { gte: target.course.incidentConfirmedAt },
+                    AND: [
+                      {
+                        evidence: {
+                          path: ["browserInvestigation", "mode"],
+                          equals: "RENDERED",
+                        },
+                      },
+                      {
+                        evidence: {
+                          path: ["browserInvestigation", "incidentCycle"],
+                          equals: options.persistenceFence.cycle,
+                        },
+                      },
+                      {
+                        evidence: {
+                          path: ["browserInvestigation", "runtimeVersion"],
+                          equals: runtimeVersion,
+                        },
+                      },
+                    ],
+                  },
+                  orderBy: { createdAt: "desc" },
+                  select: { createdAt: true, evidence: true },
+                })
+              : null;
+          const freshRenderedEvidence = getFreshRenderedCorroborationEvidence(
+            previousDiscovery,
+            {
+              incidentCycle: options.persistenceFence?.cycle ?? null,
+              runtimeVersion,
+              confirmedAt: target.course.incidentConfirmedAt ?? null,
+            },
+          );
           const providerFamilyKey = resolveProviderCapability({
             detectedPlatform: target.course.detectedPlatform,
             providerFamilyKey: target.course.providerFamilyKey,
@@ -164,14 +224,32 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
           const providerExecution = await runWithProviderRequestLease(
             providerFamilyKey,
             () =>
-              collectBrowserEvidence(page, {
-                courseId: target.course.id,
-                courseName: target.course.name,
-                sourceUrl: target.probeUrl,
-                officialCourseWebsite: target.course.website,
-                verifiedLayoutHoleCounts:
-                  target.course.verifiedLayoutHoleCounts,
-              }),
+              collectBrowserEvidence(
+                page,
+                {
+                  courseId: target.course.id,
+                  courseName: target.course.name,
+                  address: target.course.address,
+                  city: target.course.city,
+                  stateCode: target.course.stateCode,
+                  googlePlaceIdPresent: target.course.googlePlaceIdPresent,
+                  sourceUrl: target.probeUrl,
+                  officialCourseWebsite: target.course.website,
+                  verifiedLayoutHoleCounts:
+                    target.course.verifiedLayoutHoleCounts,
+                },
+                {
+                  mode: investigationMode,
+                  retainedBookingUrl: target.course.detectedBookingUrl,
+                  unprojectedSourceCandidate:
+                    target.unprojectedSourceCandidate === true,
+                  auditContext: {
+                    incidentCycle: options.persistenceFence?.cycle ?? null,
+                    runtimeVersion,
+                    observedAt: investigationObservedAt,
+                  },
+                },
+              ),
           );
           if (!providerExecution.acquired) {
             if (options.dryRun) {
@@ -188,11 +266,14 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
             ...providerExecution.value,
             corroboratedAccessBarrier:
               findCorroboratingAccessBarrier(
-                previousDiscovery?.evidence,
+                freshRenderedEvidence,
                 providerExecution.value.accessBarriers,
               ) ?? undefined,
           };
-          const initialDiscovery = buildBrowserDiscovery(evidence);
+          const initialDiscovery = attachBrowserInvestigationAudit(
+            buildBrowserDiscovery(evidence),
+            evidence.browserInvestigation,
+          );
           const enrichment = await enrichBrowserDiscoveryWithProviderLease(
             initialDiscovery,
             target.course.name,
@@ -209,25 +290,34 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
             );
             continue;
           }
-          const discovery = sanitizeBrowserDiscoveryAccessEvidence(
-            keepPolicyOnlyDiscoveryActionable(enrichment.discovery),
-            evidence.accessBarriers,
+          const actionableDiscovery = attachBrowserInvestigationAudit(
+            sanitizeBrowserDiscoveryAccessEvidence(
+              keepPolicyOnlyDiscoveryActionable(enrichment.discovery),
+              evidence.accessBarriers,
+            ),
+            evidence.browserInvestigation,
+          );
+          const persistedDiscovery = retainOnlyPersistableBrowserUrls(
+            actionableDiscovery,
+            evidence,
           );
 
           if (options.dryRun) {
-            traces.push(buildBrowserProbeDecisionTrace(evidence, discovery));
+            traces.push(
+              buildBrowserProbeDecisionTrace(evidence, actionableDiscovery),
+            );
             continue;
           }
 
           await persistBrowserMutation(true, () =>
             recordBrowserDiscovery(
-              discovery,
+              persistedDiscovery,
               options.persistenceFence,
               runtimeVersion,
             ),
           );
           const observedMonitoringGate =
-            evaluateBrowserDiscoveryMonitoringGate(discovery);
+            evaluateBrowserDiscoveryMonitoringGate(actionableDiscovery);
           const accessControlObserved =
             observedMonitoringGate.disposition === "TECHNICAL_FINAL";
           // Shared persistence normalizes one technical browser observation
@@ -235,7 +325,7 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
           // never persists a BLOCKED technical final from this observation.
           const appliedCourse = await persistBrowserMutation(true, () =>
             applyBrowserDiscoveryToCourse(
-              discovery,
+              actionableDiscovery,
               undefined,
               options.persistenceFence,
               runtimeVersion,
@@ -268,7 +358,7 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
               observedMonitoringGate.disposition === "IDENTITY_FINAL"),
           );
           const browserTechnicalReason = accessControlObserved
-            ? getBrowserTechnicalReason(discovery.automationReason)
+            ? getBrowserTechnicalReason(actionableDiscovery.automationReason)
             : null;
           const browserFactualDisposition = directBookingObserved
             ? observedMonitoringGate.disposition === "IDENTITY_FINAL"
@@ -309,12 +399,13 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
           }
 
           notes.push(
-            `${target.course.name}: ${discovery.status} ${discovery.detectedPlatform} confidence=${discovery.confidence}`,
+            `${target.course.name}: ${actionableDiscovery.status} ${actionableDiscovery.detectedPlatform} confidence=${actionableDiscovery.confidence}`,
           );
         } catch (error) {
           if (!options.dryRun) {
-            playbookRuntime ??=
-              await loadCourseMonitoringPlaybookRuntime(target.course.id);
+            playbookRuntime ??= await loadCourseMonitoringPlaybookRuntime(
+              target.course.id,
+            );
             const failurePlaybookRuntime = playbookRuntime;
             const failedStage = failurePlaybookRuntime?.assessment.nextStage;
             if (
@@ -332,9 +423,7 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
                   {
                     stage: failedStage,
                     transition:
-                      attemptCount < 1
-                        ? "FAILED_RETRYABLE"
-                        : "FAILED_TERMINAL",
+                      attemptCount < 1 ? "FAILED_RETRYABLE" : "FAILED_TERMINAL",
                     readPath:
                       failedStage === "RENDERED_BROWSER_DISCOVERY"
                         ? "RENDERED_BROWSER"
@@ -362,7 +451,7 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
             throw error;
           }
         } finally {
-          await page.close().catch(() => undefined);
+          await context.close().catch(() => undefined);
         }
       }
     } finally {
@@ -436,6 +525,217 @@ export function resolveBrowserProbeRuntimeVersion(
     );
   }
   return persistenceFence.runtimeVersion;
+}
+
+export function resolveBrowserInvestigationMode(
+  options: Pick<BrowserProbeOptions, "mode" | "persistenceFence">,
+): BrowserInvestigationMode {
+  if (options.mode) {
+    return options.mode;
+  }
+  return options.persistenceFence?.stage === "INDEPENDENT_CONFIRMATION"
+    ? "INDEPENDENT"
+    : "RENDERED";
+}
+
+export function resolveBrowserProbeTargetSelection(
+  options: Pick<
+    BrowserProbeOptions,
+    "limit" | "courseName" | "courseId" | "persistenceFence"
+  >,
+) {
+  return {
+    limit: options.limit,
+    courseName: options.courseName,
+    courseId: options.courseId,
+    persistenceFence: options.persistenceFence,
+  };
+}
+
+export function getFreshRenderedCorroborationEvidence(
+  discovery:
+    | { createdAt: Date; evidence: unknown }
+    | null
+    | undefined,
+  context: {
+    incidentCycle: number | null;
+    runtimeVersion: string;
+    confirmedAt: Date | null;
+  },
+) {
+  if (
+    !discovery ||
+    context.incidentCycle === null ||
+    !context.confirmedAt ||
+    discovery.createdAt.getTime() < context.confirmedAt.getTime() ||
+    !discovery.evidence ||
+    typeof discovery.evidence !== "object" ||
+    Array.isArray(discovery.evidence)
+  ) {
+    return null;
+  }
+  const evidence = discovery.evidence as Record<string, unknown>;
+  const audit = evidence.browserInvestigation;
+  if (!audit || typeof audit !== "object" || Array.isArray(audit)) {
+    return null;
+  }
+  const record = audit as Record<string, unknown>;
+  const observedAt =
+    typeof record.observedAt === "string"
+      ? new Date(record.observedAt)
+      : null;
+  if (
+    record.mode !== "RENDERED" ||
+    record.incidentCycle !== context.incidentCycle ||
+    record.runtimeVersion !== context.runtimeVersion ||
+    !observedAt ||
+    !Number.isFinite(observedAt.getTime()) ||
+    observedAt.getTime() < context.confirmedAt.getTime()
+  ) {
+    return null;
+  }
+  return discovery.evidence;
+}
+
+function attachBrowserInvestigationAudit(
+  discovery: BrowserDiscovery,
+  browserInvestigation: BrowserInvestigationEvidence["browserInvestigation"],
+) {
+  return {
+    ...discovery,
+    evidence: {
+      ...discovery.evidence,
+      browserInvestigation,
+    },
+  };
+}
+
+export function retainOnlyPersistableBrowserUrls(
+  discovery: ReturnType<typeof attachBrowserInvestigationAudit>,
+  evidence: BrowserInvestigationEvidence,
+) {
+  const retainedUrls = new Set(
+    [
+      evidence.sourceUrl,
+      evidence.finalUrl,
+      evidence.officialCourseWebsite,
+      evidence.officialPage?.url,
+      ...(evidence.linkCandidates?.map(({ url }) => url) ?? []),
+      ...evidence.browserInvestigation.sameOriginPages.flatMap((visit) => [
+        visit.requestedUrl,
+        visit.finalUrl,
+      ]),
+      ...evidence.browserInvestigation.bookingDestinations.flatMap((visit) => [
+        visit.requestedUrl,
+        visit.finalUrl,
+      ]),
+      evidence.browserInvestigation.retainedInputs.officialWebsite,
+      evidence.browserInvestigation.retainedInputs.sourceUrl,
+      evidence.browserInvestigation.retainedInputs.bookingUrl,
+      discovery.sourceUrl,
+      discovery.bookingUrl,
+      discovery.evidence.finalUrl,
+      discovery.evidence.courseIdentityCorroboration?.officialPageUrl,
+      discovery.evidence.courseIdentityCorroboration?.providerUrl,
+    ].flatMap((value) => {
+      const canonical = value ? canonicalBrowserPageOrCtaUrl(value) : null;
+      return canonical ? [canonical] : [];
+    }),
+  );
+  const sanitizeEvidenceUrl = (value: string) =>
+    sanitizeBrowserAuditUrl(value) ?? "about:blank";
+  const observedUrls = discovery.evidence.observedUrls
+    .filter((value) => {
+      const canonical = canonicalBrowserPageOrCtaUrl(value);
+      return Boolean(canonical && retainedUrls.has(canonical));
+    })
+    .map(sanitizeEvidenceUrl)
+    .filter((value, index, values) => values.indexOf(value) === index);
+  const browserInvestigation = discovery.evidence.browserInvestigation;
+  return {
+    ...discovery,
+    evidence: {
+      ...discovery.evidence,
+      ...(discovery.evidence.finalUrl
+        ? { finalUrl: sanitizeEvidenceUrl(discovery.evidence.finalUrl) }
+        : {}),
+      observedUrls,
+      ...(evidence.persistableVisibleText
+        ? { visibleText: evidence.persistableVisibleText.slice(0, 12_000) }
+        : { visibleText: undefined }),
+      ...(discovery.evidence.accessBarriers
+        ? {
+            accessBarriers: discovery.evidence.accessBarriers.map((barrier) => ({
+              ...barrier,
+              url: sanitizeEvidenceUrl(barrier.url),
+            })),
+          }
+        : {}),
+      ...(discovery.evidence.courseIdentityCorroboration
+        ? {
+            courseIdentityCorroboration: {
+              ...discovery.evidence.courseIdentityCorroboration,
+              officialWebsiteUrl: sanitizeEvidenceUrl(
+                discovery.evidence.courseIdentityCorroboration.officialWebsiteUrl,
+              ),
+              officialPageUrl: sanitizeEvidenceUrl(
+                discovery.evidence.courseIdentityCorroboration.officialPageUrl,
+              ),
+              providerUrl: sanitizeEvidenceUrl(
+                discovery.evidence.courseIdentityCorroboration.providerUrl,
+              ),
+            },
+          }
+        : {}),
+      ...(browserInvestigation
+        ? {
+            browserInvestigation: {
+              ...browserInvestigation,
+              retainedInputs: {
+                officialWebsite: browserInvestigation.retainedInputs.officialWebsite
+                  ? sanitizeEvidenceUrl(
+                      browserInvestigation.retainedInputs.officialWebsite,
+                    )
+                  : null,
+                sourceUrl: sanitizeEvidenceUrl(
+                  browserInvestigation.retainedInputs.sourceUrl,
+                ),
+                bookingUrl: browserInvestigation.retainedInputs.bookingUrl
+                  ? sanitizeEvidenceUrl(
+                      browserInvestigation.retainedInputs.bookingUrl,
+                    )
+                  : null,
+              },
+              sameOriginPages: browserInvestigation.sameOriginPages.map(
+                (visit) => ({
+                  ...visit,
+                  requestedUrl: sanitizeEvidenceUrl(visit.requestedUrl),
+                  finalUrl: sanitizeEvidenceUrl(visit.finalUrl),
+                }),
+              ),
+              bookingDestinations:
+                browserInvestigation.bookingDestinations.map((visit) => ({
+                  ...visit,
+                  requestedUrl: sanitizeEvidenceUrl(visit.requestedUrl),
+                  finalUrl: sanitizeEvidenceUrl(visit.finalUrl),
+                })),
+            },
+          }
+        : {}),
+    },
+  };
+}
+
+function canonicalBrowserPageOrCtaUrl(value: string) {
+  try {
+    const url = new URL(value);
+    url.hash = "";
+    return isSafeRenderedBrowserInteractionDestination(url.toString(), value)
+      ? url.toString()
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 async function main() {
@@ -533,6 +833,8 @@ function writeDryRunTrace(
 
 type MainFrameInteractionGuard = {
   isBlocked: () => boolean;
+  getDeferredCrossOriginDestination: () => string | null;
+  dispose: () => Promise<void>;
 };
 
 export function isSafeRenderedBrowserInteractionDestination(
@@ -550,22 +852,29 @@ export function isSafeRenderedBrowserInteractionDestination(
   }
   return Boolean(
     isSafeManualEvidenceUrl(destination) &&
-      !isEvidenceOnlyOfficialBookingAccountLink(
-        {
-          url: destination.toString(),
-          label: "Book a tee time",
-        },
-        officialPageUrl,
-      ),
+    !isKnownPublicSearchSurfaceUrl(destination) &&
+    !isEvidenceOnlyOfficialBookingAccountLink(
+      {
+        url: destination.toString(),
+        label: "Book a tee time",
+      },
+      officialPageUrl,
+    ),
   );
+}
+
+export function isReadOnlyBrowserRequestMethod(method: string) {
+  return ["GET", "HEAD", "OPTIONS"].includes(method.toUpperCase());
 }
 
 async function createMainFrameInteractionGuard(
   page: Page,
   officialPageUrl: string,
+  options: { deferCrossOriginMainFrame?: boolean } = {},
 ): Promise<MainFrameInteractionGuard> {
   const mainFrame = page.mainFrame();
   let blocked = false;
+  let deferredCrossOriginDestination: string | null = null;
   const observeDestination = (url: string) => {
     if (
       !blocked &&
@@ -579,39 +888,63 @@ async function createMainFrameInteractionGuard(
     return blocked;
   };
 
-  page.on("framenavigated", (frame) => {
+  const onFrameNavigated = (frame: Frame) => {
     if (frame === mainFrame) {
       observeDestination(frame.url());
     }
-  });
-  page.on("request", (request) => {
+  };
+  const onRequest = (request: Request) => {
     if (request.isNavigationRequest() && request.frame() === mainFrame) {
       observeDestination(request.url());
     }
-  });
-  await page.route("**/*", async (route) => {
+  };
+  page.on("framenavigated", onFrameNavigated);
+  page.on("request", onRequest);
+  const routeHandler = async (route: Route) => {
     const request = route.request();
+    if (!isReadOnlyBrowserRequestMethod(request.method())) {
+      blocked = true;
+      await route.abort("blockedbyclient").catch(() => undefined);
+      return;
+    }
     const isMainFrameNavigation =
       request.isNavigationRequest() && request.frame() === mainFrame;
+    const shouldDeferCrossOriginNavigation = Boolean(
+      options.deferCrossOriginMainFrame &&
+      isMainFrameNavigation &&
+      request.url() !== "about:blank" &&
+      !haveSamePublicWebsiteOrigin(officialPageUrl, request.url()),
+    );
     const isSafeRequestDestination =
       isSafeRenderedBrowserInteractionDestination(
         request.url(),
         officialPageUrl,
       );
+    if (shouldDeferCrossOriginNavigation && isSafeRequestDestination) {
+      deferredCrossOriginDestination ??= request.url();
+      await route.abort("blockedbyclient").catch(() => undefined);
+      return;
+    }
     if (isMainFrameNavigation && !isSafeRequestDestination) {
       blocked = true;
     }
-    if (
-      !isSafeRequestDestination ||
-      (blocked && isMainFrameNavigation)
-    ) {
+    if (!isSafeRequestDestination || (blocked && isMainFrameNavigation)) {
       await route.abort("blockedbyclient").catch(() => undefined);
       return;
     }
     await route.fallback().catch(() => undefined);
-  });
+  };
+  await page.route("**/*", routeHandler);
 
-  return { isBlocked };
+  return {
+    isBlocked,
+    getDeferredCrossOriginDestination: () => deferredCrossOriginDestination,
+    dispose: async () => {
+      page.off("framenavigated", onFrameNavigated);
+      page.off("request", onRequest);
+      await page.unroute("**/*", routeHandler).catch(() => undefined);
+    },
+  };
 }
 
 export async function collectBrowserEvidence(
@@ -623,44 +956,424 @@ export async function collectBrowserEvidence(
     | "sourceUrl"
     | "officialCourseWebsite"
     | "verifiedLayoutHoleCounts"
-  >,
-): Promise<BrowserDiscoveryEvidence> {
-  const observedUrls = new Set<string>();
-  const successfulProviderUrls = new Set<string>();
-  const teeItUpFacilityResponses = new Map<
+  > & {
+    address?: string | null;
+    city?: string | null;
+    stateCode?: string | null;
+    googlePlaceIdPresent?: boolean;
+  },
+  options: {
+    mode?: BrowserInvestigationMode;
+    retainedBookingUrl?: string | null;
+    unprojectedSourceCandidate?: boolean;
+    auditContext?: {
+      incidentCycle: number | null;
+      runtimeVersion: string;
+      observedAt: Date;
+    };
+  } = {},
+): Promise<BrowserInvestigationEvidence> {
+  const mode = options.mode ?? "RENDERED";
+  const officialPageUrl = input.officialCourseWebsite ?? input.sourceUrl;
+  const pageVisits: BrowserInvestigationPageVisit[] = [];
+  const bookingDestinations: BrowserBookingDestinationVisit[] = [];
+  const queuedSameOriginUrls = new Set<string>();
+  const visitedSameOriginUrls = new Set<string>();
+  const queuedBookingUrls = new Set<string>();
+  const sameOriginQueue: Array<{
+    url: string;
+    label: string;
+    depth: number;
+    parentUrl: string | null;
+    parentTrusted: boolean;
+    requiresDirectIdentityMatch?: boolean;
+  }> = [];
+  const bookingQueue: Array<{
+    url: string;
+    label: string;
+    sourcePageUrl: string | null;
+    courseScoped: boolean;
+  }> = [];
+
+  const enqueueSameOrigin = (candidate: {
+    url: string;
+    label: string;
+    depth: number;
+    parentUrl: string | null;
+    parentTrusted: boolean;
+    requiresDirectIdentityMatch?: boolean;
+  }) => {
+    const normalized = normalizeSafeBrowserVisitUrl(
+      candidate.url,
+      officialPageUrl,
+    );
+    if (
+      !normalized ||
+      candidate.depth > MAX_BROWSER_INVESTIGATION_DEPTH ||
+      !haveSamePublicWebsiteOrigin(officialPageUrl, normalized) ||
+      queuedSameOriginUrls.has(normalized)
+    ) {
+      return;
+    }
+    queuedSameOriginUrls.add(normalized);
+    sameOriginQueue.push({ ...candidate, url: normalized });
+  };
+  const enqueueBooking = (candidate: {
+    url: string;
+    label: string;
+    sourcePageUrl: string | null;
+    courseScoped: boolean;
+  }) => {
+    const normalized = normalizeSafeBrowserVisitUrl(
+      candidate.url,
+      officialPageUrl,
+    );
+    if (
+      !normalized ||
+      queuedBookingUrls.has(normalized)
+    ) {
+      return;
+    }
+    queuedBookingUrls.add(normalized);
+    bookingQueue.push({ ...candidate, url: normalized });
+  };
+
+  const isExactBookingDestination = (url: string, label: string) =>
+    planBrowserInvestigationLinks({
+      pageUrl: officialPageUrl,
+      officialPageUrl,
+      courseName: input.courseName,
+      sourceTrustedForCourse: true,
+      candidates: [{ url, label }],
+    }).bookingDestinations.length > 0;
+  if (options.unprojectedSourceCandidate) {
+    enqueueSameOrigin({
+      url: officialPageUrl,
+      label: input.courseName,
+      depth: 0,
+      parentUrl: null,
+      parentTrusted: false,
+      requiresDirectIdentityMatch: true,
+    });
+  } else if (isExactBookingDestination(officialPageUrl, input.courseName)) {
+    enqueueBooking({
+      url: officialPageUrl,
+      label: input.courseName,
+      sourcePageUrl: null,
+      courseScoped: true,
+    });
+  } else {
+    enqueueSameOrigin({
+      url: officialPageUrl,
+      label: input.courseName,
+      depth: 0,
+      parentUrl: null,
+      parentTrusted: false,
+    });
+  }
+  if (options.unprojectedSourceCandidate) {
+    // The owner-only candidate is the same URL as officialPageUrl and remains
+    // untrusted until its rendered course identity and locality match.
+  } else if (isExactBookingDestination(input.sourceUrl, "Retained course source")) {
+    enqueueBooking({
+      url: input.sourceUrl,
+      label: "Retained course source",
+      sourcePageUrl: null,
+      courseScoped: true,
+    });
+  } else if (haveSamePublicWebsiteOrigin(officialPageUrl, input.sourceUrl)) {
+    enqueueSameOrigin({
+      url: input.sourceUrl,
+      label: input.courseName,
+      depth: 0,
+      parentUrl: null,
+      parentTrusted: false,
+    });
+  } else {
+    enqueueBooking({
+      url: input.sourceUrl,
+      label: "Retained course source",
+      sourcePageUrl: null,
+      courseScoped: true,
+    });
+  }
+  if (options.retainedBookingUrl) {
+    enqueueBooking({
+      url: options.retainedBookingUrl,
+      label: "Retained booking page",
+      sourcePageUrl: null,
+      courseScoped: true,
+    });
+  }
+
+  const visitQueuedBookingDestinations = async () => {
+    while (
+      bookingQueue.length > 0 &&
+      bookingDestinations.length < MAX_BROWSER_BOOKING_DESTINATION_VISITS
+    ) {
+      const candidate = bookingQueue.shift()!;
+      const destinationPage = await createAdditionalInvestigationPage(page);
+      try {
+        bookingDestinations.push(
+          await visitBookingDestination(destinationPage, {
+            ...candidate,
+            officialPageUrl,
+            courseName: input.courseName,
+          }),
+        );
+      } finally {
+        if (destinationPage !== page) {
+          await destinationPage.close().catch(() => undefined);
+        }
+      }
+    }
+  };
+
+  if (mode === "INDEPENDENT") {
+    await visitQueuedBookingDestinations();
+  }
+
+  let rootPageUsed = false;
+  let sameOriginNavigationAttempts = 0;
+  while (
+    sameOriginQueue.length > 0 &&
+    sameOriginNavigationAttempts < MAX_BROWSER_SAME_ORIGIN_PAGE_VISITS &&
+    bookingDestinations.length < MAX_BROWSER_BOOKING_DESTINATION_VISITS
+  ) {
+    const candidate = sameOriginQueue.shift()!;
+    if (visitedSameOriginUrls.has(candidate.url)) {
+      continue;
+    }
+    visitedSameOriginUrls.add(candidate.url);
+    sameOriginNavigationAttempts += 1;
+    const visitPage = !rootPageUsed
+      ? page
+      : await createAdditionalInvestigationPage(page);
+    rootPageUsed = true;
+    try {
+      const visit = await visitOfficialPage(visitPage, {
+        requestedUrl: candidate.url,
+        label: candidate.label,
+        depth: candidate.depth,
+        parentUrl: candidate.parentUrl,
+        officialPageUrl,
+        courseName: input.courseName,
+        requiresDirectIdentityMatch: candidate.requiresDirectIdentityMatch,
+      });
+      const identityStatus = classifyRenderedOfficialPageCourseIdentity(
+        visit.finalUrl,
+        visit.evidence,
+        input,
+      );
+      const directCandidateLocalityVerified = candidate.requiresDirectIdentityMatch
+        ? isRenderedUnprojectedSourceCandidateLocalityCorroborated(visit.evidence, input)
+        : true;
+      const visitTrusted =
+        (identityStatus === "MATCH" && directCandidateLocalityVerified) ||
+        (identityStatus === "UNKNOWN" && candidate.parentTrusted);
+      if (candidate.requiresDirectIdentityMatch) {
+        pageVisits.push(visit);
+      }
+      if (visit.deferredBookingUrl) {
+        enqueueBooking({
+          url: visit.deferredBookingUrl,
+          label: candidate.label || "Course booking page",
+          sourcePageUrl: visit.finalUrl,
+          courseScoped: candidate.requiresDirectIdentityMatch
+            ? visitTrusted
+            : candidate.parentTrusted || candidate.parentUrl === null,
+        });
+      }
+      const finalUrlIsBookingDestination = isExactBookingDestination(
+        visit.finalUrl,
+        candidate.label,
+      );
+      if (
+        !haveSamePublicWebsiteOrigin(officialPageUrl, visit.finalUrl) ||
+        finalUrlIsBookingDestination
+      ) {
+        if (
+          bookingDestinations.length < MAX_BROWSER_BOOKING_DESTINATION_VISITS
+        ) {
+          bookingDestinations.push({
+            sourcePageUrl: candidate.parentUrl,
+            requestedUrl: visit.requestedUrl,
+            finalUrl: visit.finalUrl,
+            label: candidate.label,
+            courseScoped: candidate.requiresDirectIdentityMatch
+              ? visitTrusted
+              : candidate.parentTrusted || candidate.parentUrl === null,
+            interactionBlocked: visit.interactionBlocked,
+            evidence: visit.evidence,
+            observedUrls: visit.observedUrls,
+            successfulProviderUrls: visit.successfulProviderUrls,
+            teeItUpFacilityResponses: visit.teeItUpFacilityResponses,
+            accessBarriers: visit.accessBarriers,
+            networkContracts: visit.networkContracts,
+          });
+        }
+        continue;
+      }
+      if (!candidate.requiresDirectIdentityMatch) {
+        pageVisits.push(visit);
+      }
+      const planned = planBrowserInvestigationLinks({
+        pageUrl: visit.finalUrl,
+        officialPageUrl,
+        courseName: input.courseName,
+        sourceTrustedForCourse: visitTrusted,
+        candidates: visit.evidence.linkCandidates,
+      });
+      if (candidate.depth < MAX_BROWSER_INVESTIGATION_DEPTH) {
+        for (const link of planned.sameOriginPages) {
+          enqueueSameOrigin({
+            ...link,
+            depth: candidate.depth + 1,
+            parentUrl: visit.finalUrl,
+            parentTrusted: visitTrusted,
+          });
+        }
+      }
+      if (visitTrusted) {
+        for (const link of planned.bookingDestinations) {
+          enqueueBooking({
+            ...link,
+            sourcePageUrl: visit.finalUrl,
+            courseScoped: true,
+          });
+        }
+      }
+    } finally {
+      if (visitPage !== page) {
+        await visitPage.close().catch(() => undefined);
+      }
+    }
+  }
+
+  await visitQueuedBookingDestinations();
+
+  return finalizeBrowserInvestigationEvidence({
+    course: input,
+    mode,
+    auditContext: options.auditContext,
+    retainedBookingUrl: options.retainedBookingUrl,
+    unprojectedSourceCandidate: options.unprojectedSourceCandidate,
+    pageVisits,
+    bookingDestinations,
+  });
+}
+
+type BrowserPageObservation = {
+  observedUrls: Set<string>;
+  successfulProviderUrls: Set<string>;
+  teeItUpFacilityResponses: Map<
     string,
     NonNullable<BrowserDiscoveryEvidence["teeItUpFacilityResponses"]>[number]
-  >();
-  const teeItUpFacilityResponseReads: Promise<void>[] = [];
-  const accessBarrierUrls = new Set<string>();
-  const accessBarriers = new Map<string, 401 | 403>();
-  const interactionGuard = await createMainFrameInteractionGuard(
-    page,
-    input.sourceUrl,
-  );
+  >;
+  responseReads: Promise<void>[];
+  accessBarriers: Map<string, 401 | 403>;
+  networkContracts: Map<string, BrowserNetworkContractFingerprint>;
+};
+
+async function createAdditionalInvestigationPage(rootPage: Page) {
+  try {
+    return await rootPage.context().newPage();
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message.includes("Please use browser.newContext()")
+    ) {
+      // `browser.newPage()` creates an implicit single-page context. Direct
+      // diagnostic callers may still use that API, so retain the legacy
+      // sequential-page behavior there. The persisted runner always creates
+      // an explicit context and therefore isolates every destination.
+      return rootPage;
+    }
+    throw error;
+  }
+}
+
+function normalizeSafeBrowserVisitUrl(value: string, officialPageUrl: string) {
+  try {
+    const url = new URL(value);
+    url.hash = "";
+    return isSafeRenderedBrowserInteractionDestination(
+      url.toString(),
+      officialPageUrl,
+    )
+      ? url.toString()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function observeBrowserPageNetwork(
+  page: Page,
+  officialSourceUrl: string,
+): BrowserPageObservation {
+  const observation: BrowserPageObservation = {
+    observedUrls: new Set<string>(),
+    successfulProviderUrls: new Set<string>(),
+    teeItUpFacilityResponses: new Map(),
+    responseReads: [],
+    accessBarriers: new Map(),
+    networkContracts: new Map(),
+  };
+  const retainFingerprint = (
+    fingerprint: BrowserNetworkContractFingerprint | null,
+  ) => {
+    if (!fingerprint) {
+      return;
+    }
+    const key = JSON.stringify({
+      origin: fingerprint.origin,
+      method: fingerprint.method,
+      pathPattern: fingerprint.pathPattern,
+      queryKeys: fingerprint.queryKeys,
+      resourceType: fingerprint.resourceType,
+    });
+    const current = observation.networkContracts.get(key);
+    if (!current || fingerprint.status !== null) {
+      observation.networkContracts.set(key, fingerprint);
+    }
+  };
 
   page.on("request", (request) => {
-    observedUrls.add(request.url());
+    observation.observedUrls.add(request.url());
+    retainFingerprint(
+      buildBrowserNetworkContractFingerprint({
+        url: request.url(),
+        method: request.method(),
+        resourceType: request.resourceType(),
+      }),
+    );
   });
   page.on("response", (response) => {
-    observedUrls.add(response.url());
+    const request = response.request();
+    observation.observedUrls.add(response.url());
+    retainFingerprint(
+      buildBrowserNetworkContractFingerprint({
+        url: response.url(),
+        method: request.method(),
+        resourceType: request.resourceType(),
+        status: response.status(),
+      }),
+    );
     if (
       response.ok() &&
       /^https:\/\/phx-api-be-east-1b\.kenna\.io\/alias\/[^/]+\/facilities(?:\?|$)/i.test(
         response.url(),
       )
     ) {
-      successfulProviderUrls.add(response.url());
-      teeItUpFacilityResponseReads.push(
+      observation.successfulProviderUrls.add(response.url());
+      observation.responseReads.push(
         response
           .json()
           .then((value) => {
-            const parsed = parseTeeItUpFacilityResponse(
-              response.url(),
-              value,
-            );
+            const parsed = parseTeeItUpFacilityResponse(response.url(), value);
             if (parsed) {
-              teeItUpFacilityResponses.set(parsed.url, parsed);
+              observation.teeItUpFacilityResponses.set(parsed.url, parsed);
             }
           })
           .catch(() => undefined),
@@ -671,241 +1384,191 @@ export async function collectBrowserEvidence(
       isRelevantBrowserAccessBarrierUrl({
         responseUrl: response.url(),
         currentPageUrl: page.url(),
-        officialSourceUrl: input.sourceUrl,
+        officialSourceUrl,
       })
     ) {
-      accessBarrierUrls.add(response.url());
-      accessBarriers.set(response.url(), response.status() as 401 | 403);
+      observation.accessBarriers.set(
+        response.url(),
+        response.status() as 401 | 403,
+      );
     }
   });
+  return observation;
+}
 
-  await page.goto(input.sourceUrl, {
-    waitUntil: "domcontentloaded",
-    timeout: NAVIGATION_TIMEOUT_MS,
-  });
-  await page
-    .waitForLoadState("networkidle", { timeout: 5_000 })
-    .catch(() => undefined);
-  const landingPageUrl = page.url();
-  const landingInteractionBlocked = interactionGuard.isBlocked();
-  const landingPageEvidence = await collectPageEvidence(page, input.courseName, {
-    allowStaticPageFetch: !landingInteractionBlocked,
-  });
-  if (
-    landingInteractionBlocked ||
-    shouldStopBrowserDiscovery({
-      accessBarrierCount: accessBarriers.size,
-      accessControlDetected: landingPageEvidence.accessControlDetected,
-    })
-  ) {
-    await Promise.allSettled(teeItUpFacilityResponseReads);
-    return finalizeBrowserEvidence({
-      input,
-      page,
-      observedUrls,
-      successfulProviderUrls,
-      teeItUpFacilityResponses,
-      accessBarrierUrls,
-      accessBarriers,
-      landingPageUrl,
-      landingPageEvidence,
-      firstDestinationPageUrl: landingPageUrl,
-      firstDestinationPageEvidence: landingPageEvidence,
-      destinationPageUrl: landingPageUrl,
-      destinationPageEvidence: landingPageEvidence,
-    });
-  }
+async function materializeBrowserPageObservation(
+  observation: BrowserPageObservation,
+) {
+  await Promise.allSettled(observation.responseReads);
+  return {
+    observedUrls: [...observation.observedUrls],
+    successfulProviderUrls: [...observation.successfulProviderUrls],
+    teeItUpFacilityResponses: [
+      ...observation.teeItUpFacilityResponses.values(),
+    ],
+    accessBarriers: [...observation.accessBarriers].map(([url, status]) => ({
+      url,
+      status,
+    })),
+    networkContracts: [...observation.networkContracts.values()],
+  };
+}
 
-  const selectedBookingLink = await clickLikelyBookingLink(
+async function visitOfficialPage(
+  page: Page,
+  input: {
+    requestedUrl: string;
+    label: string;
+    depth: number;
+    parentUrl: string | null;
+    officialPageUrl: string;
+    courseName: string;
+    requiresDirectIdentityMatch?: boolean;
+  },
+): Promise<BrowserInvestigationPageVisit> {
+  const observation = observeBrowserPageNetwork(page, input.officialPageUrl);
+  const interactionGuard = await createMainFrameInteractionGuard(
     page,
-    input.courseName,
-    interactionGuard,
+    input.officialPageUrl,
+    { deferCrossOriginMainFrame: true },
   );
   await page
+    .goto(input.requestedUrl, {
+      waitUntil: "domcontentloaded",
+      timeout: NAVIGATION_TIMEOUT_MS,
+    })
+    .catch(() => undefined);
+  await page
     .waitForLoadState("networkidle", { timeout: 5_000 })
     .catch(() => undefined);
-  const firstDestinationPageUrl = page.url();
-  const redirectedBookingCandidate = selectedBookingLink
-    ? buildRedirectedProviderBookingCandidate({
-        officialPageUrl: landingPageUrl,
-        selectedUrl: selectedBookingLink.href,
-        selectedLabel: selectedBookingLink.text,
-        destinationUrl: firstDestinationPageUrl,
-      })
-    : null;
-  const scopedLandingPageEvidence = redirectedBookingCandidate
-    ? {
-        ...landingPageEvidence,
-        anchors: [
-          ...new Set([
-            ...landingPageEvidence.anchors,
-            redirectedBookingCandidate.url,
-          ]),
-        ],
-        linkCandidates: [
-          ...landingPageEvidence.linkCandidates,
-          redirectedBookingCandidate,
-        ],
-      }
-    : landingPageEvidence;
-  const firstDestinationInteractionBlocked = interactionGuard.isBlocked();
-  const firstDestinationPageEvidence = firstDestinationInteractionBlocked
-    ? firstDestinationPageUrl === landingPageUrl
-      ? landingPageEvidence
-      : prepareBrowserPageEvidence({
-          accessControlDetected: false,
-          anchors: [],
-          linkCandidates: [],
-          scripts: [],
-          structuredActionScripts: [],
-          visibleText: "",
-        })
-    : await collectPageEvidence(
-        page,
-        haveSamePublicWebsiteOrigin(landingPageUrl, firstDestinationPageUrl)
-          ? input.courseName
-          : undefined,
-      );
+  const interactionBlocked = interactionGuard.isBlocked();
+  const finalUrl =
+    page.url() === "about:blank" ? input.requestedUrl : page.url();
+  const evidence =
+    interactionBlocked && page.url() === "about:blank"
+      ? emptyPreparedBrowserPageEvidence()
+      : await collectPageEvidence(
+          page,
+          haveSamePublicWebsiteOrigin(input.officialPageUrl, finalUrl)
+            ? input.courseName
+            : undefined,
+          { allowStaticPageFetch: !interactionBlocked },
+        ).catch(() => emptyPreparedBrowserPageEvidence());
+  const network = await materializeBrowserPageObservation(observation);
+  const deferredBookingUrl =
+    interactionGuard.getDeferredCrossOriginDestination();
+  await interactionGuard.dispose();
+  return {
+    requestedUrl: input.requestedUrl,
+    finalUrl,
+    label: input.label,
+    depth: input.depth,
+    parentUrl: input.parentUrl,
+    requiresDirectIdentityMatch: input.requiresDirectIdentityMatch,
+    interactionBlocked,
+    deferredBookingUrl,
+    evidence,
+    ...network,
+  };
+}
 
-  if (firstDestinationInteractionBlocked) {
-    await Promise.allSettled(teeItUpFacilityResponseReads);
-    return finalizeBrowserEvidence({
-      input,
-      page,
-      observedUrls,
-      successfulProviderUrls,
-      teeItUpFacilityResponses,
-      accessBarrierUrls,
-      accessBarriers,
-      landingPageUrl,
-      landingPageEvidence: scopedLandingPageEvidence,
-      firstDestinationPageUrl,
-      firstDestinationPageEvidence,
-      destinationPageUrl: firstDestinationPageUrl,
-      destinationPageEvidence: firstDestinationPageEvidence,
-    });
-  }
+async function visitBookingDestination(
+  page: Page,
+  input: {
+    url: string;
+    label: string;
+    sourcePageUrl: string | null;
+    courseScoped: boolean;
+    officialPageUrl: string;
+    courseName: string;
+  },
+): Promise<BrowserBookingDestinationVisit> {
+  const observation = observeBrowserPageNetwork(page, input.officialPageUrl);
+  const interactionGuard = await createMainFrameInteractionGuard(
+    page,
+    input.officialPageUrl,
+  );
+  await page
+    .goto(input.url, {
+      waitUntil: "domcontentloaded",
+      timeout: NAVIGATION_TIMEOUT_MS,
+    })
+    .catch(() => undefined);
+  await page
+    .waitForLoadState("networkidle", { timeout: 5_000 })
+    .catch(() => undefined);
+  let interactionBlocked = interactionGuard.isBlocked();
+  let evidence =
+    interactionBlocked && page.url() === "about:blank"
+      ? emptyPreparedBrowserPageEvidence()
+      : await collectPageEvidence(page, undefined, {
+          allowStaticPageFetch: !interactionBlocked,
+        }).catch(() => emptyPreparedBrowserPageEvidence());
 
   if (
-    (!shouldStopBrowserDiscovery({
-      accessBarrierCount: accessBarriers.size,
-      accessControlDetected: firstDestinationPageEvidence.accessControlDetected,
-    }) ||
-      hasDistinctProviderBookingCandidate({
-        linkCandidates: firstDestinationPageEvidence.linkCandidates,
-        accessBarriers: [...accessBarriers].map(([url, status]) => ({
-          url,
-          status,
-        })),
-      })) &&
-    haveSamePublicWebsiteOrigin(landingPageUrl, firstDestinationPageUrl)
+    !interactionBlocked &&
+    !shouldStopBrowserDiscovery({
+      accessBarrierCount: observation.accessBarriers.size,
+      accessControlDetected: evidence.accessControlDetected,
+    })
   ) {
     await clickLikelyBookingLink(page, undefined, interactionGuard);
     await page
       .waitForLoadState("networkidle", { timeout: 5_000 })
       .catch(() => undefined);
+    interactionBlocked = interactionGuard.isBlocked();
+    if (!interactionBlocked) {
+      const preDateEvidence = await collectPageEvidence(page).catch(
+        () => evidence,
+      );
+      if (
+        !shouldStopBrowserDiscovery({
+          accessBarrierCount: observation.accessBarriers.size,
+          accessControlDetected: preDateEvidence.accessControlDetected,
+        })
+      ) {
+        await trySelectSearchDate(page, interactionGuard);
+        await page
+          .waitForLoadState("networkidle", { timeout: 5_000 })
+          .catch(() => undefined);
+      }
+      evidence = await collectPageEvidence(page).catch(() => preDateEvidence);
+      interactionBlocked = interactionGuard.isBlocked();
+    }
   }
-  const preDateInteractionBlocked = interactionGuard.isBlocked();
-  const preDatePageEvidence = await collectPageEvidence(
-    page,
-    haveSamePublicWebsiteOrigin(landingPageUrl, page.url())
-      ? input.courseName
-      : undefined,
-    {
-      allowStaticPageFetch: !preDateInteractionBlocked,
-    },
-  );
-  if (
-    !preDateInteractionBlocked &&
-    !shouldStopBrowserDiscovery({
-      accessBarrierCount: accessBarriers.size,
-      accessControlDetected: preDatePageEvidence.accessControlDetected,
-    })
-  ) {
-    await trySelectSearchDate(page, interactionGuard);
-  }
-  await page
-    .waitForLoadState("networkidle", { timeout: 5_000 })
-    .catch(() => undefined);
-  const destinationPageUrl = page.url();
-  const destinationInteractionBlocked = interactionGuard.isBlocked();
-  const destinationPageEvidence = await collectPageEvidence(
-    page,
-    haveSamePublicWebsiteOrigin(landingPageUrl, destinationPageUrl)
-      ? input.courseName
-      : undefined,
-    {
-      allowStaticPageFetch: !destinationInteractionBlocked,
-    },
-  );
 
-  await Promise.allSettled(teeItUpFacilityResponseReads);
-  return finalizeBrowserEvidence({
-    input,
-    page,
-    observedUrls,
-    successfulProviderUrls,
-    teeItUpFacilityResponses,
-    accessBarrierUrls,
-    accessBarriers,
-    landingPageUrl,
-    landingPageEvidence: scopedLandingPageEvidence,
-    firstDestinationPageUrl,
-    firstDestinationPageEvidence,
-    destinationPageUrl,
-    destinationPageEvidence,
-  });
+  const finalUrl = page.url() === "about:blank" ? input.url : page.url();
+  const network = await materializeBrowserPageObservation(observation);
+  await interactionGuard.dispose();
+  return {
+    sourcePageUrl: input.sourcePageUrl,
+    requestedUrl: input.url,
+    finalUrl,
+    label: input.label,
+    courseScoped: input.courseScoped,
+    interactionBlocked,
+    evidence,
+    ...network,
+  };
 }
 
-function finalizeBrowserEvidence(input: {
-  input: Pick<
-    BrowserDiscoveryEvidence,
-    | "courseId"
-    | "courseName"
-    | "sourceUrl"
-    | "officialCourseWebsite"
-    | "verifiedLayoutHoleCounts"
-  >;
-  page: Page;
-  observedUrls: Set<string>;
-  successfulProviderUrls: Set<string>;
-  teeItUpFacilityResponses: Map<
-    string,
-    NonNullable<BrowserDiscoveryEvidence["teeItUpFacilityResponses"]>[number]
-  >;
-  accessBarrierUrls: Set<string>;
-  accessBarriers: Map<string, 401 | 403>;
-  landingPageUrl: string;
-  landingPageEvidence: Awaited<ReturnType<typeof collectPageEvidence>>;
-  firstDestinationPageUrl: string;
-  firstDestinationPageEvidence: Awaited<ReturnType<typeof collectPageEvidence>>;
-  destinationPageUrl: string;
-  destinationPageEvidence: Awaited<ReturnType<typeof collectPageEvidence>>;
-}): BrowserDiscoveryEvidence {
-  return finalizeBrowserEvidenceSnapshots({
-    course: input.input,
-    finalUrl: input.page.url(),
-    observedUrls: [...input.observedUrls],
-    successfulProviderUrls: [...input.successfulProviderUrls],
-    teeItUpFacilityResponses: [...input.teeItUpFacilityResponses.values()],
-    accessBarrierUrls: [...input.accessBarrierUrls],
-    accessBarriers: [...input.accessBarriers].map(([url, status]) => ({
-      url,
-      status,
-    })),
-    landingPageUrl: input.landingPageUrl,
-    landingPageEvidence: input.landingPageEvidence,
-    firstDestinationPageUrl: input.firstDestinationPageUrl,
-    firstDestinationPageEvidence: input.firstDestinationPageEvidence,
-    destinationPageUrl: input.destinationPageUrl,
-    destinationPageEvidence: input.destinationPageEvidence,
+function emptyPreparedBrowserPageEvidence() {
+  return prepareBrowserPageEvidence({
+    accessControlDetected: false,
+    anchors: [],
+    linkCandidates: [],
+    scripts: [],
+    structuredActionScripts: [],
+    visibleText: "",
   });
 }
 
 function parseTeeItUpFacilityResponse(
   responseUrl: string,
   value: unknown,
-): NonNullable<BrowserDiscoveryEvidence["teeItUpFacilityResponses"]>[number] | null {
+):
+  | NonNullable<BrowserDiscoveryEvidence["teeItUpFacilityResponses"]>[number]
+  | null {
   let url: URL;
   try {
     url = new URL(responseUrl);
@@ -974,9 +1637,25 @@ async function collectPageEvidence(
         .map((heading) => heading.innerText.replace(/\s+/g, " ").trim())
         .filter(Boolean)
         .slice(0, 10),
-    ].filter((identity, index, values) =>
-      Boolean(identity) && values.indexOf(identity) === index
+    ].filter(
+      (identity, index, values) =>
+        Boolean(identity) && values.indexOf(identity) === index,
     );
+    const localityCandidates = [
+      ...Array.from(
+        document.querySelectorAll<HTMLElement>(
+          "address, [itemprop='address'], [class*='address' i], [class*='location' i]",
+        ),
+      )
+        .map((element) =>
+          (element.innerText || element.textContent || "")
+            .replace(/\s+/g, " ")
+            .trim(),
+        )
+        .filter(Boolean)
+        .slice(0, 25),
+      pageText.slice(0, 100_000),
+    ];
     const accessControlDetected = Boolean(
       document.querySelector(
         [
@@ -1008,7 +1687,24 @@ async function collectPageEvidence(
             }))
             .slice(0, 20)
         : [];
-    const linkCandidates = [...anchorCandidates];
+    const buttonCandidateInputs = Array.from(
+      document.querySelectorAll<HTMLButtonElement>("button"),
+    )
+      .map((button) => ({
+        label: (button.innerText || button.textContent || "")
+          .replace(/\s+/g, " ")
+          .trim(),
+        type: button.getAttribute("type"),
+        disabled: button.disabled,
+        insideForm: Boolean(button.closest("form")),
+        dataHref: button.getAttribute("data-href"),
+        dataUrl:
+          button.getAttribute("data-url") ??
+          button.getAttribute("data-booking-url"),
+        onClick: button.getAttribute("onclick"),
+        baseUrl: document.baseURI,
+      }))
+      .slice(0, 100);
     const scripts = Array.from(
       document.querySelectorAll<HTMLScriptElement>("script[src]"),
     )
@@ -1052,18 +1748,22 @@ async function collectPageEvidence(
     return {
       accessControlDetected,
       identityCandidates,
+      localityCandidates,
       frameCandidateInputs,
+      buttonCandidateInputs,
       structuredActionScripts,
-      linkCandidates,
+      linkCandidates: anchorCandidates,
       scripts,
       widgetConfigInputs,
-      visibleText: [inlineCourseData, widgetConfigs, pageText.slice(0, 100_000)]
+      providerExtractionText: [inlineCourseData, widgetConfigs]
         .filter(Boolean)
         .join("\n"),
+      visibleText: pageText.slice(0, 100_000),
     };
   }, MAX_RENDERED_ANCHOR_CANDIDATES);
   const {
     frameCandidateInputs,
+    buttonCandidateInputs,
     widgetConfigInputs,
     linkCandidates: rawLinkCandidates,
     ...pageEvidence
@@ -1073,22 +1773,26 @@ async function collectPageEvidence(
     200,
   );
   const frameCandidates = buildBrowserFrameCandidates(frameCandidateInputs);
+  const buttonCandidates = buildBrowserButtonCandidates(buttonCandidateInputs);
   const widgetCandidates = buildBrowserWidgetCandidates(widgetConfigInputs);
-  const staticFrameCandidates = options.allowStaticPageFetch === false
-    ? []
-    : await collectStaticPageFrameCandidates(page, page.url());
+  const staticFrameCandidates =
+    options.allowStaticPageFetch === false
+      ? []
+      : await collectStaticPageFrameCandidates(page, page.url());
   return prepareBrowserPageEvidence(
     {
       ...pageEvidence,
       anchors: [
         ...anchorCandidates.map((candidate) => candidate.url),
         ...frameCandidates.map((candidate) => candidate.url),
+        ...buttonCandidates.map((candidate) => candidate.url),
         ...widgetCandidates.map((candidate) => candidate.url),
         ...staticFrameCandidates.map((candidate) => candidate.url),
       ],
       linkCandidates: [
         ...anchorCandidates,
         ...frameCandidates,
+        ...buttonCandidates,
         ...widgetCandidates,
         ...staticFrameCandidates,
       ],
@@ -1192,10 +1896,7 @@ export async function collectStaticPageFrameCandidates(
     ) {
       return [];
     }
-    return buildBrowserFrameCandidatesFromHtml(
-      await response.text(),
-      pageUrl,
-    );
+    return buildBrowserFrameCandidatesFromHtml(await response.text(), pageUrl);
   } catch {
     return [];
   }

@@ -41,6 +41,22 @@ export type CourseSupportCandidate = {
   remediationRoute?: CourseSupportRemediationRoute;
   providerSnapshotFingerprint?: string;
   remediationCourseRef?: string;
+  campaign?: {
+    runId: string;
+    membershipDigest: string;
+    priorCycle: number;
+    priorRevision: number;
+    priorMonitoringRevision: number;
+    capturedRevision: number;
+    capturedMonitoringRevision: number;
+    expectedKind: CourseSupportIncidentKind;
+    expectedFailureClass: CourseSupportFailureClass;
+    expectedProviderSnapshotFingerprint: string;
+    expectedAttemptLedgerFingerprint: string;
+    expectedPlaybookConclusion: string;
+    expectedLatestProbeAt: string | null;
+    expectedLatestDiscoveryAt: string | null;
+  };
 };
 
 export type RecentBatchFairnessEvidence = {
@@ -111,8 +127,7 @@ export function selectCourseSupportBatch(input: {
       group.some(
         (candidate) =>
           candidate.engineeringOnly &&
-          now.getTime() - candidate.firstSeenAt.getTime() >=
-            COURSE_SUPPORT_SYNTHETIC_AGING_MS
+          now.getTime() - candidate.firstSeenAt.getTime() >= COURSE_SUPPORT_SYNTHETIC_AGING_MS
       )
     )
     .sort((left, right) => oldestSeenAt(left) - oldestSeenAt(right))[0];
@@ -223,9 +238,7 @@ function reserveAgedSyntheticSlots(
       selectedIds.add(candidate.id);
     }
   }
-  return selected.sort((left, right) =>
-    compareCourseSupportCandidates(left, right, now)
-  );
+  return selected.sort((left, right) => compareCourseSupportCandidates(left, right, now));
 }
 
 function compareCourseSupportGroups(
@@ -244,14 +257,8 @@ function compareCourseSupportGroups(
   if (leadComparison !== 0) {
     return leadComparison;
   }
-  const leftDemand = left.reduce(
-    (sum, candidate) => sum + candidate.activeRealSearchCount,
-    0
-  );
-  const rightDemand = right.reduce(
-    (sum, candidate) => sum + candidate.activeRealSearchCount,
-    0
-  );
+  const leftDemand = left.reduce((sum, candidate) => sum + candidate.activeRealSearchCount, 0);
+  const rightDemand = right.reduce((sum, candidate) => sum + candidate.activeRealSearchCount, 0);
   return rightDemand - leftDemand || oldestSeenAt(left) - oldestSeenAt(right);
 }
 
@@ -266,15 +273,12 @@ export function compareCourseSupportGroupPriority(
   }
   if (leftHasPendingInitialEndpoint) {
     const pendingDeadlineOrder =
-      (left.earliestPendingInitialEndpointDeadlineAt?.getTime() ??
-        Number.MAX_SAFE_INTEGER) -
-      (right.earliestPendingInitialEndpointDeadlineAt?.getTime() ??
-        Number.MAX_SAFE_INTEGER);
+      (left.earliestPendingInitialEndpointDeadlineAt?.getTime() ?? Number.MAX_SAFE_INTEGER) -
+      (right.earliestPendingInitialEndpointDeadlineAt?.getTime() ?? Number.MAX_SAFE_INTEGER);
     if (pendingDeadlineOrder !== 0) {
       return pendingDeadlineOrder;
     }
-    const pendingCountOrder =
-      right.pendingInitialEndpointCount - left.pendingInitialEndpointCount;
+    const pendingCountOrder = right.pendingInitialEndpointCount - left.pendingInitialEndpointCount;
     if (pendingCountOrder !== 0) {
       return pendingCountOrder;
     }
@@ -308,11 +312,8 @@ function candidateGroupPriority(
   const pendingInitialEndpointCandidates = activeRealCandidates.filter(
     (candidate) => !candidate.endpointHumanReviewProven
   );
-  const pendingInitialEndpointDeadlines = pendingInitialEndpointCandidates.flatMap(
-    (candidate) =>
-      candidate.escalationDeadlineAt
-        ? [candidate.escalationDeadlineAt.getTime()]
-        : []
+  const pendingInitialEndpointDeadlines = pendingInitialEndpointCandidates.flatMap((candidate) =>
+    candidate.escalationDeadlineAt ? [candidate.escalationDeadlineAt.getTime()] : []
   );
   const deadlines = activeRealCandidates.flatMap((candidate) =>
     candidate.escalationDeadlineAt ? [candidate.escalationDeadlineAt.getTime()] : []
@@ -327,8 +328,7 @@ function candidateGroupPriority(
       (sum, candidate) => sum + candidate.activeRealSearchCount,
       0
     ),
-    earliestEscalationDeadlineAt:
-      deadlines.length > 0 ? new Date(Math.min(...deadlines)) : null
+    earliestEscalationDeadlineAt: deadlines.length > 0 ? new Date(Math.min(...deadlines)) : null
   };
 }
 
