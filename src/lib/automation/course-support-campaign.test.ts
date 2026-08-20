@@ -207,6 +207,19 @@ describe("parked course campaign", () => {
       failureFingerprint: "SOURCE:MISSING",
       monitoringFailureFingerprint: "SOURCE:LEGACY"
     });
+    expect(snapshots[0]).not.toHaveProperty("activeRealSearchCount");
+    const audit = createParkedCourseCampaignAudit({
+      expectedCount: 1,
+      capturedAt: parkedAt,
+      members: snapshots
+    });
+    expect(parseParkedCourseCampaignAudit(audit)).toEqual(audit);
+    expect(
+      parseParkedCourseCampaignAudit({
+        ...audit,
+        members: [{ ...audit.members[0], activeRealSearchCount: 0 }]
+      })
+    ).toBeNull();
     await expect(
       loadParkedCourseCampaignMembers({
         courseSupportIncident: { findMany }

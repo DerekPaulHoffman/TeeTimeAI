@@ -766,8 +766,14 @@ function assertCampaignSnapshotMatchesExpectation(
 export async function loadParkedCourseCampaignMembers(
   database: ParkedCourseCampaignDatabase = prisma
 ) {
-  return loadParkedCourseCampaignMemberSnapshots(database, {
+  const snapshots = await loadParkedCourseCampaignMemberSnapshots(database, {
     requireZeroDemand: true
+  });
+  return snapshots.map(({ activeRealSearchCount, ...member }) => {
+    if (activeRealSearchCount !== 0) {
+      throw new Error("The immutable parked-course campaign cannot capture active demand.");
+    }
+    return member;
   });
 }
 
