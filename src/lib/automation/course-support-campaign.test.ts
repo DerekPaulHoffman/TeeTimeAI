@@ -5,6 +5,7 @@ import {
   createParkedCourseCampaignAudit,
   createParkedCourseCampaignMembershipDigest,
   inspectActiveParkedCourseCampaign,
+  loadParkedCourseCampaignMembers,
   parseParkedCourseCampaignAudit,
   runParkedCourseCampaignCommand,
   summarizeCampaignEvidenceCategories,
@@ -25,6 +26,7 @@ function member(
     cycle: 3,
     revision: 7,
     monitoringRevision: 11,
+    monitoringFailureFingerprint: "SOURCE:MISSING",
     kind: "NEEDS_ADAPTER",
     providerFamilyKey: "SOURCE_MISSING",
     failureClass: "MISSING_SOURCE",
@@ -107,6 +109,128 @@ function campaignDependencies(input: {
 }
 
 describe("parked course campaign", () => {
+  it("captures a stale monitoring fingerprint only with matching durable incident proof", async () => {
+    const parkedAt = new Date("2026-08-19T12:00:00.000Z");
+    const parkedRow = {
+      id: "incident-1",
+      courseId: "course-1",
+      cycle: 3,
+      revision: 7,
+      kind: "NEEDS_ADAPTER",
+      providerFamilyKey: "SOURCE_MISSING",
+      failureClass: "MISSING_SOURCE",
+      failureFingerprint: "SOURCE:MISSING",
+      attemptLedger: null,
+      humanReviewReason: "AUTOMATION_STALLED",
+      status: "NEEDS_HUMAN",
+      activeRealSearchCount: 0,
+      escalatedAt: parkedAt,
+      resolution: null,
+      resolvedAt: null,
+      resolutionMessage: null,
+      resolutionNotifiedAt: null,
+      decisionActorId: null,
+      decisionAt: null,
+      decisionNote: null,
+      decisionEvidenceUrl: null,
+      decisionIdempotencyKey: null,
+      monitoringEvents: [
+        {
+          incidentId: "incident-1",
+          eventType: "HUMAN_REVIEW_REQUESTED",
+          failureFingerprint: "SOURCE:MISSING",
+          occurredAt: parkedAt,
+          audit: {
+            cycle: 3,
+            customerState: "NEEDS_HUMAN_REVIEW",
+            parkedUntilMaterialChange: true,
+            automationStalled: true
+          }
+        }
+      ],
+      course: {
+        timeZone: "America/New_York",
+        isPublic: true,
+        website: null,
+        detectedBookingUrl: null,
+        detectedPlatform: "UNKNOWN",
+        providerFamilyKey: "SOURCE_MISSING",
+        bookingMethod: "UNKNOWN",
+        bookingWindowDaysAhead: null,
+        bookingReleaseTimeLocal: null,
+        bookingWindowSource: null,
+        bookingWindowConfidence: null,
+        bookingWindowEvidenceUrl: null,
+        automationEligibility: "UNKNOWN",
+        automationReason: "NONE",
+        monitoringMode: "STANDARD",
+        bookingAccessMode: "UNKNOWN",
+        intelligenceVerifiedAt: null,
+        intelligenceReviewAt: null,
+        intelligenceConfidence: null,
+        bookingMetadata: null,
+        layoutHoleCounts: [],
+        layoutHolesVerifiedAt: null,
+        preferences: [],
+        monitoringStatus: {
+          state: "ENGINEERING_VERIFICATION_NEEDED",
+          revision: 11,
+          failureFingerprint: "SOURCE:LEGACY",
+          nextAutomaticAttemptAt: null,
+          revalidationRequestedAt: null
+        },
+        probes: [],
+        automationDiscoveries: []
+      }
+    };
+    const findMany = vi
+      .fn()
+      .mockResolvedValueOnce([parkedRow])
+      .mockResolvedValueOnce([
+        {
+          ...parkedRow,
+          monitoringEvents: [
+            {
+              ...parkedRow.monitoringEvents[0],
+              failureFingerprint: "SOURCE:OTHER"
+            }
+          ]
+        }
+      ]);
+
+    const snapshots = await loadParkedCourseCampaignMembers({
+      courseSupportIncident: { findMany }
+    } as never);
+
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]).toMatchObject({
+      failureFingerprint: "SOURCE:MISSING",
+      monitoringFailureFingerprint: "SOURCE:LEGACY"
+    });
+    await expect(
+      loadParkedCourseCampaignMembers({
+        courseSupportIncident: { findMany }
+      } as never)
+    ).resolves.toEqual([]);
+
+    expect(findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          course: expect.objectContaining({
+            preferences: {
+              none: {
+                teeSearch: {
+                  status: "ACTIVE",
+                  trafficClass: { notIn: expect.arrayContaining(["AUTOMATION", "TEST"]) }
+                }
+              }
+            }
+          })
+        })
+      })
+    );
+  });
+
   it("hashes attempt ledgers canonically so object key order is not material", () => {
     expect(
       createParkedCourseCampaignAttemptLedgerFingerprint({
@@ -130,6 +254,7 @@ describe("parked course campaign", () => {
     });
 
     expect(audit.members.map((entry) => entry.courseId)).toEqual(["course-1", "course-2"]);
+    expect(audit.schemaVersion).toBe(2);
     expect(audit.membershipDigest).toBe(createParkedCourseCampaignMembershipDigest(members));
     expect(audit.aggregateEvidenceCategories).toEqual({
       sourceMissingCount: 2,
@@ -143,6 +268,11 @@ describe("parked course campaign", () => {
       audit.aggregateEvidenceCategories
     );
     expect(parseParkedCourseCampaignAudit(audit)).toEqual(audit);
+    expect(
+      createParkedCourseCampaignMembershipDigest([
+        member(1, { monitoringFailureFingerprint: "SOURCE:LEGACY" })
+      ])
+    ).not.toBe(createParkedCourseCampaignMembershipDigest([member(1)]));
     expect(
       parseParkedCourseCampaignAudit({
         ...audit,

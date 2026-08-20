@@ -1000,6 +1000,7 @@ function campaignMember(index: number) {
     cycle: 1,
     revision: 0,
     monitoringRevision: 0,
+    monitoringFailureFingerprint: "legacy-private-fingerprint",
     kind: "NEEDS_ADAPTER",
     providerFamilyKey: "private-provider-family",
     failureClass: "SOURCE_MISSING",

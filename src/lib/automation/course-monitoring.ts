@@ -4897,6 +4897,7 @@ export type ParkedCourseResponderCampaignReopenInput = {
   expectedLatestDiscoveryAt: string | null;
   expectedProviderFamilyKey: string;
   expectedFailureFingerprint: string;
+  expectedMonitoringFailureFingerprint: string | null;
   expectedProviderSnapshotFingerprint: string;
   expectedAttemptLedgerFingerprint: string;
   expectedPlaybookConclusion: string;
@@ -4953,6 +4954,7 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
           select: {
             incidentId: true,
             eventType: true,
+            failureFingerprint: true,
             occurredAt: true,
             audit: true,
           },
@@ -5044,7 +5046,7 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
       incident.providerFamilyKey !== input.expectedProviderFamilyKey ||
       incident.failureClass !== input.expectedFailureClass ||
       incident.failureFingerprint !== input.expectedFailureFingerprint ||
-      status.failureFingerprint !== input.expectedFailureFingerprint ||
+      status.failureFingerprint !== input.expectedMonitoringFailureFingerprint ||
       buildCourseSupportProviderSnapshotFingerprint(incident.course) !==
         input.expectedProviderSnapshotFingerprint ||
       createHash("sha256")
@@ -5081,7 +5083,9 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
         humanReviewReason: incident.humanReviewReason,
         incidentEscalatedAt: incident.escalatedAt,
         monitoringState: status.state,
-        endpointEvents: incident.monitoringEvents,
+        endpointEvents: incident.monitoringEvents.filter(
+          (event) => event.failureFingerprint === incident.failureFingerprint,
+        ),
       })
     ) {
       return { admitted: false as const };
@@ -5143,7 +5147,7 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
         courseId: input.courseId,
         revision: status.revision,
         state: "ENGINEERING_VERIFICATION_NEEDED",
-        failureFingerprint: input.expectedFailureFingerprint,
+        failureFingerprint: input.expectedMonitoringFailureFingerprint,
         nextAutomaticAttemptAt: null,
         revalidationRequestedAt: null,
       },

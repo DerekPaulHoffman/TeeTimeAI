@@ -2636,6 +2636,8 @@ export async function claimCourseSupportBatch(input: {
             capturedMonitoringRevision: incident.campaign.capturedMonitoringRevision,
             expectedKind: incident.campaign.expectedKind,
             expectedFailureClass: incident.campaign.expectedFailureClass,
+            expectedMonitoringFailureFingerprint:
+              incident.campaign.expectedMonitoringFailureFingerprint,
             expectedLatestProbeAt: incident.campaign.expectedLatestProbeAt,
             expectedLatestDiscoveryAt: incident.campaign.expectedLatestDiscoveryAt,
             expectedProviderFamilyKey: incident.providerFamilyKey,
@@ -8850,6 +8852,7 @@ async function listParkedCourseCampaignCandidates(
           priorMonitoringRevision: member.monitoringRevision,
           capturedRevision: member.capturedRevision,
           capturedMonitoringRevision: member.capturedMonitoringRevision,
+          expectedMonitoringFailureFingerprint: member.monitoringFailureFingerprint,
           expectedKind: candidate.kind,
           expectedFailureClass: candidate.failureClass,
           expectedProviderSnapshotFingerprint: member.providerSnapshotFingerprint,

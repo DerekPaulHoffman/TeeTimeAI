@@ -16,7 +16,7 @@ import { COURSE_SUPPORT_WRITER_LANE } from "./writer-lanes";
 
 export const PARKED_COURSE_CAMPAIGN_PROMPT_VERSION =
   "tee-time-spot-course-support-parked-cohort-v1";
-export const PARKED_COURSE_CAMPAIGN_AUDIT_SCHEMA_VERSION = 1 as const;
+export const PARKED_COURSE_CAMPAIGN_AUDIT_SCHEMA_VERSION = 2 as const;
 export const PARKED_COURSE_CAMPAIGN_MAX_ADMISSION = 5;
 export const PARKED_COURSE_CAMPAIGN_EXPECTED_COUNT = 112;
 
@@ -27,6 +27,7 @@ const campaignMemberSchema = z
     cycle: z.number().int().positive(),
     revision: z.number().int().nonnegative(),
     monitoringRevision: z.number().int().nonnegative(),
+    monitoringFailureFingerprint: z.string().min(1).nullable(),
     kind: z.string().min(1),
     providerFamilyKey: z.string().min(1),
     failureClass: z.string().min(1),
@@ -224,6 +225,7 @@ export function createParkedCourseCampaignMembershipDigest(
             cycle: member.cycle,
             revision: member.revision,
             monitoringRevision: member.monitoringRevision,
+            monitoringFailureFingerprint: member.monitoringFailureFingerprint,
             kind: member.kind,
             providerFamilyKey: member.providerFamilyKey,
             failureClass: member.failureClass,
@@ -712,6 +714,7 @@ function isSameCampaignMemberMaterialSnapshot(
     captured.incidentId === current.incidentId &&
     captured.cycle === current.cycle &&
     captured.kind === current.kind &&
+    captured.monitoringFailureFingerprint === current.monitoringFailureFingerprint &&
     captured.providerFamilyKey === current.providerFamilyKey &&
     captured.failureClass === current.failureClass &&
     captured.failureFingerprint === current.failureFingerprint &&
@@ -760,7 +763,7 @@ function assertCampaignSnapshotMatchesExpectation(
   }
 }
 
-async function loadParkedCourseCampaignMembers(
+export async function loadParkedCourseCampaignMembers(
   database: ParkedCourseCampaignDatabase = prisma
 ) {
   return loadParkedCourseCampaignMemberSnapshots(database, {
@@ -841,7 +844,16 @@ async function loadParkedCourseCampaignMemberSnapshots(
       decisionIdempotencyKey: null,
       course: {
         ...(input.requireZeroDemand
-          ? { preferences: { none: { teeSearch: { status: "ACTIVE" } } } }
+          ? {
+              preferences: {
+                none: {
+                  teeSearch: {
+                    status: "ACTIVE",
+                    trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] }
+                  }
+                }
+              }
+            }
           : {}),
         monitoringStatus: {
           is: {
@@ -883,6 +895,7 @@ async function loadParkedCourseCampaignMemberSnapshots(
         select: {
           incidentId: true,
           eventType: true,
+          failureFingerprint: true,
           occurredAt: true,
           audit: true
         }
@@ -947,7 +960,6 @@ async function loadParkedCourseCampaignMemberSnapshots(
     const monitoringStatus = incident.course.monitoringStatus;
     if (
       !monitoringStatus ||
-      monitoringStatus.failureFingerprint !== incident.failureFingerprint ||
       incident.resolution !== null ||
       incident.resolvedAt !== null ||
       incident.resolutionMessage !== null ||
@@ -964,7 +976,9 @@ async function loadParkedCourseCampaignMemberSnapshots(
         humanReviewReason: incident.humanReviewReason,
         incidentEscalatedAt: incident.escalatedAt,
         monitoringState: monitoringStatus.state,
-        endpointEvents: incident.monitoringEvents
+        endpointEvents: incident.monitoringEvents.filter(
+          (event) => event.failureFingerprint === incident.failureFingerprint
+        )
       })
     ) {
       return [];
@@ -976,6 +990,7 @@ async function loadParkedCourseCampaignMemberSnapshots(
         cycle: incident.cycle,
         revision: incident.revision,
         monitoringRevision: monitoringStatus.revision,
+        monitoringFailureFingerprint: monitoringStatus.failureFingerprint,
         kind: incident.kind,
         providerFamilyKey: incident.providerFamilyKey,
         failureClass: incident.failureClass,

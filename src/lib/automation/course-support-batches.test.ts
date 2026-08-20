@@ -1242,6 +1242,7 @@ describe("course-support claim demand fencing", () => {
         {
           incidentId: "incident-campaign",
           eventType: "HUMAN_REVIEW_REQUESTED",
+          failureFingerprint,
           occurredAt: escalatedAt,
           audit: {
             cycle: 3,
@@ -1299,6 +1300,7 @@ describe("course-support claim demand fencing", () => {
           cycle: 3,
           revision: 5,
           monitoringRevision: 9,
+          monitoringFailureFingerprint: failureFingerprint,
           kind: "NEEDS_ADAPTER",
           providerFamilyKey: "SOURCE_MISSING",
           failureClass: "MISSING_SOURCE",

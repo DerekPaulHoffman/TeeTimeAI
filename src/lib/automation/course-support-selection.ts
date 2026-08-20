@@ -49,6 +49,7 @@ export type CourseSupportCandidate = {
     priorMonitoringRevision: number;
     capturedRevision: number;
     capturedMonitoringRevision: number;
+    expectedMonitoringFailureFingerprint: string | null;
     expectedKind: CourseSupportIncidentKind;
     expectedFailureClass: CourseSupportFailureClass;
     expectedProviderSnapshotFingerprint: string;

@@ -154,6 +154,7 @@ describe("course monitoring write serialization", () => {
         {
           incidentId: "incident-campaign",
           eventType: "HUMAN_REVIEW_REQUESTED",
+          failureFingerprint: "SOURCE:MISSING",
           occurredAt: escalatedAt,
           audit: {
             cycle: 3,
@@ -171,7 +172,7 @@ describe("course monitoring write serialization", () => {
         monitoringStatus: {
           state: "ENGINEERING_VERIFICATION_NEEDED",
           revision: 11,
-          failureFingerprint: "SOURCE:MISSING",
+          failureFingerprint: "SOURCE:LEGACY",
           nextAutomaticAttemptAt: null,
           revalidationRequestedAt: null,
         },
@@ -195,6 +196,7 @@ describe("course monitoring write serialization", () => {
           expectedLatestDiscoveryAt: latestDiscoveryAt.toISOString(),
           expectedProviderFamilyKey: "SOURCE_MISSING",
           expectedFailureFingerprint: "SOURCE:MISSING",
+          expectedMonitoringFailureFingerprint: "SOURCE:LEGACY",
           expectedProviderSnapshotFingerprint:
             buildCourseSupportProviderSnapshotFingerprint(providerCourse),
           expectedAttemptLedgerFingerprint:
@@ -236,7 +238,13 @@ describe("course monitoring write serialization", () => {
       transactionMocks.courseMonitoringStatus.updateMany,
     ).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({ revision: 11 }),
+        where: expect.objectContaining({
+          revision: 11,
+          failureFingerprint: "SOURCE:LEGACY",
+        }),
+        data: expect.objectContaining({
+          failureFingerprint: "SOURCE:MISSING",
+        }),
       }),
     );
     expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith(
@@ -314,6 +322,7 @@ describe("course monitoring write serialization", () => {
         {
           incidentId: "incident-campaign",
           eventType: "HUMAN_REVIEW_REQUESTED",
+          failureFingerprint: "SOURCE:MISSING",
           occurredAt: escalatedAt,
           audit: {
             cycle: 3,
@@ -355,6 +364,7 @@ describe("course monitoring write serialization", () => {
           expectedLatestDiscoveryAt: null,
           expectedProviderFamilyKey: "SOURCE_MISSING",
           expectedFailureFingerprint: "SOURCE:MISSING",
+          expectedMonitoringFailureFingerprint: "SOURCE:MISSING",
           expectedProviderSnapshotFingerprint:
             buildCourseSupportProviderSnapshotFingerprint(providerCourse),
           expectedAttemptLedgerFingerprint:
@@ -434,6 +444,7 @@ describe("course monitoring write serialization", () => {
         {
           incidentId: "incident-campaign",
           eventType: "HUMAN_REVIEW_REQUESTED",
+          failureFingerprint: "SOURCE:MISSING",
           occurredAt: escalatedAt,
           audit: {
             cycle: 3,
@@ -471,6 +482,7 @@ describe("course monitoring write serialization", () => {
       expectedLatestDiscoveryAt: latestDiscoveryAt.toISOString(),
       expectedProviderFamilyKey: "SOURCE_MISSING",
       expectedFailureFingerprint: "SOURCE:MISSING",
+      expectedMonitoringFailureFingerprint: "SOURCE:MISSING",
       expectedProviderSnapshotFingerprint:
         buildCourseSupportProviderSnapshotFingerprint(capturedProviderCourse),
       expectedAttemptLedgerFingerprint:
@@ -482,6 +494,18 @@ describe("course monitoring write serialization", () => {
 
     for (const changed of [
       { incident: { ...makeIncident(), course: { ...makeIncident().course, website: "https://changed.example" } } },
+      {
+        incident: {
+          ...makeIncident(),
+          course: {
+            ...makeIncident().course,
+            monitoringStatus: {
+              ...makeIncident().course.monitoringStatus,
+              failureFingerprint: "SOURCE:CHANGED",
+            },
+          },
+        },
+      },
       { incident: { ...makeIncident(), attemptLedger: { version: 1, events: [] } } },
       { incident: { ...makeIncident(), decisionAt: new Date("2026-08-20T11:00:00.000Z") } },
     ]) {
