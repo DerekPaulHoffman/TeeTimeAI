@@ -145,3 +145,38 @@ Course-support improvements can correctly change the best current provider or bo
 - Source-missing and transient failures never erase a previously verified booking route or direct-action fact.
 - Provider changes never combine a booking URL from one family with execution metadata from another.
 - Mixed facility evidence remains scoped to the correct course or is escalated as a visible conflict.
+
+## 2026-08-20 - Keep Trusted Booking Links Before Adapter Support Exists
+
+### Observed Pattern
+
+An exact official course page could expose one clear external tee-time link, and discovery could append that link repeatedly, while the mutable course projection still remained source missing. The promotion boundary required a provider already known to the capability registry, so a new provider was invisible to current routing even though its source evidence was stronger than the stored classification.
+
+### What Helped
+
+- Comparing append-only discovery history with the current course projection separated extraction success from promotion failure.
+- Reproducing the collector and classifier against the same official page proved that the exact CTA survived link extraction.
+- Treating provider recognition and runnable monitoring as separate decisions allowed the booking link to remain useful without weakening adapter safety.
+- A route identity based on bounded provider and course components prevents a shared provider landing from standing in for an exact course.
+
+### What Did Not Work
+
+- Re-running discovery after the same exact link had already been appended.
+- Calling the course source missing merely because the provider did not yet have an adapter.
+- Requiring known runnable metadata before retaining an otherwise unambiguous official booking destination.
+- Selecting the first booking-looking link from a shared municipal page when a later CTA was explicitly scoped to the target course.
+
+### Process Decision
+
+- A canonical official course page may retain one unique, safe, course-compatible external tee-time CTA as non-runnable evidence even when its provider is new.
+- Unknown-provider evidence never grants runnable status, supplies adapter metadata, or bypasses provider capability validation.
+- Ambiguous destinations, sibling labels, shared pages without exact course authority, account or transaction paths, unsafe query data, and conflicting current provider state remain fail-closed.
+- Add a strict provider-family recognizer when a reusable hostname and public landing grammar are proven. Add server monitoring only as a separate change with signed-out read tests and exact-runtime verification.
+- Preserve every accepted observation in append-only history; update the mutable course projection only through the serialized ownership, authority, and compare-and-set fences.
+
+### Success Measures
+
+- Zero exact official booking links remain classified as source missing solely because their provider is new.
+- Zero unknown-provider links are marked runnable without a registered, metadata-valid capability.
+- Zero ambiguous shared-page or sibling destinations are promoted.
+- Repeated discovery of an unchanged official CTA does not create another source-missing investigation cycle.

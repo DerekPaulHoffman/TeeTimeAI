@@ -944,7 +944,12 @@ function hasOperatorOfficialLinkCorroboration(
   bookingUrl: string
 ) {
   const proof = readOperatorEvidenceRecord(evidence?.courseIdentityCorroboration);
-  if (proof?.kind !== "OFFICIAL_COURSE_PROVIDER_LINK") return false;
+  if (
+    proof?.kind !== "OFFICIAL_COURSE_PROVIDER_LINK" &&
+    proof?.kind !== "OFFICIAL_COURSE_NON_RUNNABLE_BOOKING_LINK"
+  ) {
+    return false;
+  }
   const officialWebsiteUrl = sanitizeOperatorUrl(
     readOperatorEvidenceString(proof, "officialWebsiteUrl")
   );

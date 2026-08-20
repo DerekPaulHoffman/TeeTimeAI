@@ -44,7 +44,9 @@ import {
   haveCompatibleCourseNames,
   haveCompatibleOfficialPageCourseNames,
   haveCompatibleOfficialPageCourseNamesWithVerifiedLayout,
+  hasConflictingOfficialCourseIdentityDiscriminator,
   isConflictingOfficialPageCourseIdentity,
+  isExplicitCourseIdentityName,
   isOfficialOrganizationIdentityCorroboratedByUrl,
   normalizeOfficialPagePresentationIdentity,
   normalizeCourseIdentityName
@@ -2524,24 +2526,105 @@ function getPageMarkupCourseIdentityStatus(
   verifiedLayoutHoleCounts: readonly (9 | 18)[] = [],
   pageUrl?: string
 ): "MATCH" | "CONFLICT" | "ABSENT" {
-  const identities = [
-    ...html.matchAll(/<title\b[^>]*>([\s\S]*?)<\/title>/giu),
-    ...html.matchAll(/<h1\b[^>]*>([\s\S]*?)<\/h1>/giu)
-  ]
-    .map((match) => stripHtml(decodeHtmlEntities(match[1] ?? "")))
-    .filter(Boolean);
-  const statuses = identities.map((identity) =>
+  const identities = getOfficialPageMarkupIdentities(html);
+  const getStatus = (identity: string) =>
     getFirstPartyOfficialPageIdentityStatus(
       courseName,
       identity,
       verifiedLayoutHoleCounts,
       pageUrl
+    );
+  const primaryStatuses = identities.primary.map(getStatus);
+  const secondaryStatuses = identities.secondary.map(getStatus);
+  if (
+    primaryStatuses.includes("CONFLICT") ||
+    identities.secondary.some(
+      (identity, index) =>
+        secondaryStatuses[index] === "CONFLICT" &&
+        isExplicitConflictingCourseHeading(identity, courseName)
     )
-  );
-  if (statuses.includes("CONFLICT")) {
+  ) {
     return "CONFLICT";
   }
-  return statuses.includes("MATCH") ? "MATCH" : "ABSENT";
+  if (primaryStatuses.includes("MATCH")) {
+    return "MATCH";
+  }
+  return pageUrl &&
+    secondaryStatuses.includes("MATCH") &&
+    doesExactCourseDetailUrlIdentifyCourse(pageUrl, courseName)
+    ? "MATCH"
+    : "ABSENT";
+}
+
+function getOfficialPageMarkupIdentities(html: string) {
+  const structuralHtml = html
+    .replace(/<!--[\s\S]*?-->/gu, " ")
+    .replace(
+      /<(script|style|template|textarea|svg)\b[^>]*>[\s\S]*?<\/\1>/giu,
+      " "
+    );
+  const explicitHead = structuralHtml.match(
+    /<head\b[^>]*>([\s\S]*?)<\/head>/iu
+  )?.[1];
+  const implicitHead = structuralHtml.split(/<body\b[^>]*>/iu, 1)[0] ?? "";
+  const documentTitle = (explicitHead ?? implicitHead).match(
+    /<title\b[^>]*>([\s\S]*?)<\/title>/iu
+  )?.[1];
+  const normalizeIdentity = (value: string | undefined) =>
+    stripHtml(decodeHtmlEntities(value ?? "")).trim();
+  const headings = (level: 1 | 2 | 3) => [
+    ...structuralHtml.matchAll(
+      new RegExp(`<h${level}\\b[^>]*>([\\s\\S]*?)<\\/h${level}>`, "giu")
+    )
+  ]
+    .map((match) => normalizeIdentity(match[1]))
+    .filter(Boolean);
+  return {
+    primary: [normalizeIdentity(documentTitle), ...headings(1)].filter(Boolean),
+    secondary: [...headings(2), ...headings(3)]
+  };
+}
+
+function doesExactCourseDetailUrlIdentifyCourse(
+  value: string,
+  courseName: string
+) {
+  try {
+    const page = parseSafePublicUrl(value);
+    if (page.search || page.hash) {
+      return false;
+    }
+    const decodedPath = decodePublicUrlPath(page.pathname);
+    const rawIdentity = decodedPath?.split("/").filter(Boolean).at(-1);
+    if (!rawIdentity) {
+      return false;
+    }
+    const identity = stripSafeOfficialPageExtension(rawIdentity)
+      .replace(/[-_]+/gu, " ")
+      .trim();
+    const identities = [
+      identity,
+      identity.replace(/\s+\d{1,12}\s*$/u, "").trim()
+    ].filter(
+      (candidate, index, candidates) =>
+        Boolean(candidate) && candidates.indexOf(candidate) === index
+    );
+    return identities.some((candidate) =>
+      haveCompatibleFirstPartyOfficialPageCourseNames(courseName, candidate)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isExplicitConflictingCourseHeading(
+  identity: string,
+  courseName: string
+) {
+  return Boolean(
+    isExplicitCourseIdentityName(identity) ||
+      hasConflictingOfficialCourseIdentityDiscriminator(courseName, identity)
+  );
 }
 
 function doesPageMarkupOrFallbackIdentifyCourse(
@@ -2626,7 +2709,7 @@ function getFirstPartyOfficialPageIdentityStatus(
 
 function getFirstPartyOfficialIdentityVariants(pageIdentity: string) {
   const decoratedSegments = pageIdentity
-    .split(/\s+(?:\||[–—]|-\s)\s*/u)
+    .split(/\s+(?:\||[•–—]|-\s)\s*/u)
     .map((segment) => segment.trim())
     .filter(Boolean);
   const baseIdentities =
@@ -2706,11 +2789,26 @@ function doesProviderLandingHostnameIdentifyCourse(
 }
 
 function doesSecondaryHeadingIdentifyCourse(html: string, courseName: string) {
-  return [...html.matchAll(/<h[23]\b[^>]*>([\s\S]*?)<\/h[23]>/giu)]
-    .map((match) => stripHtml(decodeHtmlEntities(match[1] ?? "")))
-    .filter(Boolean)
-    .some((identity) =>
-      haveCompatibleFirstPartyOfficialPageCourseNames(courseName, identity));
+  const identities = getOfficialPageMarkupIdentities(html);
+  const primaryStatuses = identities.primary.map((identity) =>
+    getFirstPartyOfficialPageIdentityStatus(courseName, identity)
+  );
+  const secondaryStatuses = identities.secondary.map((identity) =>
+    getFirstPartyOfficialPageIdentityStatus(courseName, identity)
+  );
+  if (
+    primaryStatuses.includes("CONFLICT") ||
+    identities.secondary.some(
+      (identity, index) =>
+        secondaryStatuses[index] === "CONFLICT" &&
+        isExplicitConflictingCourseHeading(identity, courseName)
+    )
+  ) {
+    return false;
+  }
+  return identities.secondary.some((identity) =>
+    haveCompatibleFirstPartyOfficialPageCourseNames(courseName, identity)
+  );
 }
 
 async function fetchWordPressRenderedPageContent(

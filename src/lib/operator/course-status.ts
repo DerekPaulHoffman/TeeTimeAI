@@ -1174,6 +1174,23 @@ function getLatestDiscoveryOperatorCopy(
     };
   }
 
+  const recognizedNonRunnableProvider =
+    discovery.bookingCandidateRecorded &&
+    discovery.officialLinkCorroborated &&
+    course.coverageCategory === "UNSUPPORTED_FAMILY" &&
+    !["SOURCE_MISSING", "SOURCE_CONFLICT"].includes(course.providerFamilyKey);
+  if (recognizedNonRunnableProvider) {
+    const providerLabel =
+      getDiscoveryPlatformLabel(course.providerFamilyKey) ?? "Booking provider";
+    return {
+      providerLabel: `${providerLabel} official link retained`,
+      statusLabel: "Monitoring support needs engineering",
+      meaning: `AI corroborated this course's official ${providerLabel} booking link and recognized the provider, but Tee Time Spot still needs reusable signed-out monitoring support.`,
+      problemSummary: `The official ${providerLabel} booking link is retained on the course, but no runnable public read-only monitoring path is available yet.`,
+      recommendedAction: `Build or complete reusable ${providerLabel} signed-out monitoring support, then run one fresh monitoring check. Do not re-find or replace the retained official link unless newer evidence conflicts.`
+    };
+  }
+
   const platformLabel = getDiscoveryPlatformLabel(discovery.detectedPlatform);
   if (platformLabel && discovery.bookingCandidateRecorded) {
     const officialFinding = discovery.officialLinkCorroborated;
@@ -1232,6 +1249,7 @@ function getLatestDiscoveryOperatorCopy(
 }
 
 function getDiscoveryPlatformLabel(value: string) {
+  if (value === "MEMBERSPORTS") return "MemberSports";
   if (value === "TEEITUP") return "TeeItUp";
   if (value === "GOLFNOW") return "GolfNow";
   if (value === "FOREUP") return "ForeUP";

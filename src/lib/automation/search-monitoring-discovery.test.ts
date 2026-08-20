@@ -7159,6 +7159,190 @@ describe("search monitoring discovery", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
+  it("retains Arthur B. Sim's exact MemberSports CTA as non-runnable evidence", async () => {
+    const sourceUrl =
+      "https://www.wichita.gov/facilities/facility/details/Arthur-B-Sim-Golf-Course-150";
+    const bookingUrl =
+      "https://app.membersports.com/tee-times/7128/8903/0/8/0";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      if (url.toString() === sourceUrl) {
+        return new Response(
+          `<html><head><title>Facilities • Arthur B. Sim Golf Course</title></head><body><svg aria-hidden="true"><title>Arrow Left</title><path d="M1 1"></path></svg><h1>Facilities</h1><h2>Arthur B. Sim Golf Course</h2><a href="${bookingUrl}">Book a Tee Time at Arthur B. Sim</a></body></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      if (url.toString() === bookingUrl) {
+        return new Response(
+          "<html><title>MemberSports</title><body><membersports-root></membersports-root><noscript>Please enable JavaScript to continue using this application.</noscript></body></html>",
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      throw new Error(`Unexpected URL ${url.toString()}`);
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Arthur B. Sim Golf Course",
+      undefined,
+      undefined,
+      sourceUrl
+    );
+    expect(evidence.officialPage?.linkCandidates).toContainEqual({
+      url: bookingUrl,
+      label: "Book a Tee Time at Arthur B. Sim"
+    });
+
+    const discovery = buildBrowserDiscovery({
+      ...evidence,
+      courseId: "arthur-b-sim",
+      courseName: "Arthur B. Sim Golf Course",
+      officialCourseWebsite: sourceUrl
+    });
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "CUSTOM",
+      bookingUrl,
+      confidence: 0.8,
+      evidence: {
+        learnedFrom: "official-course-non-runnable-booking-link",
+        courseIdentityCorroboration: {
+          kind: "OFFICIAL_COURSE_NON_RUNNABLE_BOOKING_LINK",
+          officialPageUrl: sourceUrl,
+          providerUrl: bookingUrl
+        }
+      }
+    });
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it("accepts an exact course-detail URL with a target h2 under neutral page chrome", async () => {
+    const sourceUrl =
+      "https://www.wichita.gov/facilities/facility/details/Arthur-B-Sim-Golf-Course-150";
+    const bookingUrl =
+      "https://app.membersports.com/tee-times/7128/8903/0/8/0";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      if (url.toString() === sourceUrl) {
+        return new Response(
+          `<html><head><title>Facilities</title></head><body><h1>Facilities</h1><h2>Arthur B. Sim Golf Course</h2><a href="${bookingUrl}">Book a Tee Time at Arthur B. Sim</a></body></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      return new Response("<html><title>MemberSports</title></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      });
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Arthur B. Sim Golf Course",
+      undefined,
+      undefined,
+      sourceUrl
+    );
+
+    expect(evidence.officialPage).toMatchObject({
+      url: sourceUrl,
+      courseName: "Arthur B. Sim Golf Course",
+      linkCandidates: [{
+        url: bookingUrl,
+        label: "Book a Tee Time at Arthur B. Sim"
+      }]
+    });
+  });
+
+  it.each([
+    {
+      label: "document title",
+      markup:
+        "<head><title>Facilities • Tex Consolver Golf Course</title></head><body><h1>Facilities</h1><h2>Arthur B. Sim Golf Course</h2>"
+    },
+    {
+      label: "h1",
+      markup:
+        "<head><title>Facilities</title></head><body><h1>Tex Consolver Golf Course</h1><h2>Arthur B. Sim Golf Course</h2>"
+    },
+    {
+      label: "h2",
+      markup:
+        "<head><title>Facilities</title></head><body><h1>Facilities</h1><h2>Tex Consolver Golf Course</h2><h3>Arthur B. Sim Golf Course</h3>"
+    },
+    {
+      label: "h3",
+      markup:
+        "<head><title>Facilities</title></head><body><h1>Facilities</h1><h2>Arthur B. Sim Golf Course</h2><h3>Tex Consolver Golf Course</h3>"
+    }
+  ])("lets an explicit conflicting course $label veto secondary identity", async ({ markup }) => {
+    const sourceUrl =
+      "https://www.wichita.gov/facilities/facility/details/Arthur-B-Sim-Golf-Course-150";
+    const bookingUrl =
+      "https://app.membersports.com/tee-times/7128/8903/0/8/0";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      if (url.toString() === sourceUrl) {
+        return new Response(
+          `<html>${markup}<a href="${bookingUrl}">Book a Tee Time at Arthur B. Sim</a></body></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      return new Response("<html><title>MemberSports</title></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      });
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Arthur B. Sim Golf Course",
+      undefined,
+      undefined,
+      sourceUrl
+    );
+
+    expect(evidence.officialPage).toBeUndefined();
+  });
+
+  it("does not corroborate ambiguous Arthur B. Sim booking destinations", async () => {
+    const sourceUrl =
+      "https://www.wichita.gov/facilities/facility/details/Arthur-B-Sim-Golf-Course-150";
+    const bookingUrl =
+      "https://app.membersports.com/tee-times/7128/8903/0/8/0";
+    const competingBookingUrl =
+      "https://booking-vendor.example/tee-times/arthur-b-sim";
+    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+      if (url.toString() === sourceUrl) {
+        return new Response(
+          `<html><title>Arthur B. Sim Golf Course</title><h1>Arthur B. Sim Golf Course</h1><a href="${bookingUrl}">Book a Tee Time at Arthur B. Sim</a><a href="${competingBookingUrl}">Book Tee Times</a></html>`,
+          { status: 200, headers: { "content-type": "text/html" } }
+        );
+      }
+      return new Response(
+        "<html><body>Arthur B. Sim Golf Course public tee times</body></html>",
+        { status: 200, headers: { "content-type": "text/html" } }
+      );
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl,
+      fetchImpl as typeof fetch,
+      "Arthur B. Sim Golf Course",
+      undefined,
+      undefined,
+      sourceUrl
+    );
+    const discovery = buildBrowserDiscovery({
+      ...evidence,
+      courseId: "arthur-b-sim-ambiguous",
+      courseName: "Arthur B. Sim Golf Course",
+      officialCourseWebsite: sourceUrl
+    });
+
+    expect(discovery.evidence.courseIdentityCorroboration).toBeUndefined();
+    expect(discovery.evidence.learnedFrom).toBe("browser-visible-links");
+  });
+
   it("rejects an overlapping sibling name on a shared official booking page", async () => {
     const sourceUrl =
       "https://www.playdcgolf.example/rock-creek-park-golf/";

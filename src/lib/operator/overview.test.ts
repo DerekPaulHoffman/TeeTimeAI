@@ -264,6 +264,37 @@ describe("operator overview aggregation", () => {
     });
   });
 
+  it("shows a uniquely corroborated unknown-provider CTA as an official non-runnable link", () => {
+    const bookingUrl = "https://booking.vendor.example/tee-times/12/34/0";
+    const summary = buildOperatorDiscoverySummary({
+      status: "INSPECTED",
+      detectedPlatform: "CUSTOM",
+      bookingMethod: "UNKNOWN",
+      automationEligibility: "UNKNOWN",
+      automationReason: "NONE",
+      bookingAccessMode: "UNKNOWN",
+      bookingUrl,
+      confidence: 0.7,
+      evidence: {
+        learnedFrom: "official-course-non-runnable-booking-link",
+        courseIdentityCorroboration: {
+          kind: "OFFICIAL_COURSE_NON_RUNNABLE_BOOKING_LINK",
+          officialWebsiteUrl: "https://course.example/",
+          officialPageUrl: "https://course.example/course-name",
+          providerUrl: bookingUrl
+        }
+      },
+      createdAt: new Date("2026-08-20T14:00:00.000Z")
+    });
+
+    expect(summary).toMatchObject({
+      bookingCandidateRecorded: true,
+      officialLinkCorroborated: true,
+      providerLandingFound: false
+    });
+    expect(summary).not.toHaveProperty("evidence");
+  });
+
   it("preserves an absolute latest failed discovery instead of reviving older proof", () => {
     const summary = buildOperatorDiscoverySummary({
       status: "FAILED",

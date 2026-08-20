@@ -418,7 +418,8 @@ describe("provider capability registry", () => {
       AGILYSYS: [true, "CUSTOM"],
       CLUB_CADDIE: [true, "CLUB_CADDIE"],
       WHOOSH: [true, "CUSTOM"],
-      TENFORE: [false, "CUSTOM"]
+      TENFORE: [false, "CUSTOM"],
+      MEMBERSPORTS: [false, "CUSTOM"]
     });
   });
 
@@ -506,7 +507,8 @@ describe("provider capability registry", () => {
     ["book.onagilysys.com", "AGILYSYS"],
     ["app.clubcaddie.com", "CLUB_CADDIE"],
     ["app.whoosh.io", "WHOOSH"],
-    ["fox.tenfore.golf", "TENFORE"]
+    ["fox.tenfore.golf", "TENFORE"],
+    ["app.membersports.com", "MEMBERSPORTS"]
   ])("maps %s to the canonical %s family", (hostname, family) => {
     expect(getKnownProviderFamilyForHostname(hostname)).toBe(family);
   });
@@ -581,6 +583,103 @@ describe("provider capability registry", () => {
     ).toBeNull();
     expect(
       getKnownProviderFamilyForHostname("not-ezlinksgolf.com")
+    ).toBeNull();
+  });
+
+  it("recognizes the exact MemberSports app host without claiming runnable coverage", () => {
+    const resolution = resolveProviderCapability({
+      detectedPlatform: "CUSTOM",
+      detectedBookingUrl: "https://app.membersports.com/tee-times/7128/8903/0/8/0"
+    });
+
+    expect(resolution).toMatchObject({
+      providerFamilyKey: "MEMBERSPORTS",
+      detectedPlatform: "CUSTOM",
+      metadataReady: false,
+      isRunnable: false,
+      evidenceConflict: false
+    });
+    expect(getProviderReadinessFailure(resolution)).toBe("UNSUPPORTED_FAMILY");
+    expect(
+      resolveProviderDiscoveryIdentity({
+        detectedPlatform: "CUSTOM",
+        bookingUrl: "https://app.membersports.com/tee-times/7128/8903/0/8/0",
+        confidence: 0.95
+      })
+    ).toMatchObject({ providerFamilyKey: "MEMBERSPORTS", isRunnable: false });
+    expect(getKnownProviderFamilyForHostname("membersports.com")).toBeNull();
+    expect(getKnownProviderFamilyForHostname("www.membersports.com")).toBeNull();
+    expect(getKnownProviderFamilyForHostname("tenant.app.membersports.com")).toBeNull();
+    expect(
+      getKnownProviderFamilyForHostname("app.membersports.com.attacker.example")
+    ).toBeNull();
+  });
+
+  it.each([
+    "https://app.membersports.com/tee-times/7128/8903/0/8/0",
+    "https://app.membersports.com/tee-times/7128/8903/0",
+    "https://app.membersports.com/tee-times/7128/8903/0/",
+    "https://app.membersports.com/tee-times/2147483647/2147483647/2147483647/0/8?utm_source=wichita"
+  ])("keeps only a bounded public MemberSports tee-time landing %s", (url) => {
+    expect(isProviderInfrastructureUrl(url)).toBe(false);
+    expect(isProviderPublicBookingLandingUrl(url)).toBe(true);
+    expect(getProviderPublicBookingLandingIdentity(url)).not.toBeNull();
+  });
+
+  it("keys MemberSports landing identity only by club and course across trailing-slash redirects", () => {
+    const supplied = getProviderPublicBookingLandingIdentity(
+      "https://app.membersports.com/tee-times/7128/8903/0/8/0"
+    );
+    expect(supplied).toBe("MEMBERSPORTS:app.membersports.com:7128:8903");
+    expect(
+      getProviderPublicBookingLandingIdentity(
+        "https://app.membersports.com/tee-times/7128/8903/0?utm_source=course"
+      )
+    ).toBe(supplied);
+    expect(
+      getProviderPublicBookingLandingIdentity(
+        "https://app.membersports.com/tee-times/7128/8903/0/"
+      )
+    ).toBe(supplied);
+    expect(
+      getProviderPublicBookingLandingIdentity(
+        "https://app.membersports.com/tee-times/7128/9999/0/8/0/"
+      )
+    ).not.toBe(supplied);
+  });
+
+  it.each([
+    "http://app.membersports.com/tee-times/7128/8903/0/8/0",
+    "https://membersports.com/tee-times/7128/8903/0/8/0",
+    "https://tenant.app.membersports.com/tee-times/7128/8903/0/8/0",
+    "https://app.membersports.com/tee-times/0/8903/0",
+    "https://app.membersports.com/tee-times/7128/0/0",
+    "https://app.membersports.com/tee-times/021/8903/0",
+    "https://app.membersports.com/tee-times/7128/08903/0",
+    "https://app.membersports.com/tee-times/2147483648/8903/0",
+    "https://app.membersports.com/tee-times/7128/2147483648/0",
+    "https://app.membersports.com/tee-times/7128/8903/2147483648",
+    "https://app.membersports.com/tee-times/7128/8903/00",
+    "https://app.membersports.com/tee-times/7128/8903",
+    "https://app.membersports.com/tee-times/7128/8903/0/8",
+    "https://app.membersports.com/tee-times/7128/8903/0/8/0/9",
+    "https://app.membersports.com/tee-times/7128/8903/0/checkout/0",
+    "https://app.membersports.com/login",
+    "https://app.membersports.com/account/tee-times/7128/8903/0",
+    "https://app.membersports.com/checkout/tee-times/7128/8903/0",
+    "https://app.membersports.com/transactions/7128/8903/0",
+    "https://app.membersports.com/tee-times/7128/8903/0?date=2026-08-20",
+    "https://app.membersports.com/tee-times/7128/8903/0#tee-times",
+    "https://app.membersports.com/tee-times/%37%31%32%38/8903/0"
+  ])("rejects unsafe or ambiguous MemberSports route %s", (url) => {
+    expect(isProviderPublicBookingLandingUrl(url)).toBe(false);
+    expect(getProviderPublicBookingLandingIdentity(url)).toBeNull();
+    expect(
+      resolveProviderDiscoveryIdentity({
+        detectedPlatform: "CUSTOM",
+        bookingUrl: url,
+        confidence: 0.95
+      })
     ).toBeNull();
   });
 

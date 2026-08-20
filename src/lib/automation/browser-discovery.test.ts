@@ -276,6 +276,179 @@ describe("booking-link selection", () => {
   });
 });
 
+describe("non-runnable official booking links", () => {
+  const courseName = "Arthur B. Sim Golf Course";
+  const officialPageUrl =
+    "https://www.wichita.gov/facilities/facility/details/Arthur-B-Sim-Golf-Course-150";
+  const memberSportsUrl =
+    "https://app.membersports.com/tee-times/7128/8903/0/8/0";
+
+  function discover(options: {
+    officialPageUrl?: string;
+    officialCourseWebsite?: string;
+    linkCandidates?: Array<{ url: string; label: string }>;
+    observedUrls?: string[];
+    visibleText?: string;
+  } = {}) {
+    const pageUrl = options.officialPageUrl ?? officialPageUrl;
+    return buildBrowserDiscovery({
+      courseId: "arthur-b-sim",
+      courseName,
+      sourceUrl: pageUrl,
+      finalUrl: pageUrl,
+      observedUrls: options.observedUrls ?? [pageUrl, memberSportsUrl],
+      officialCourseWebsite:
+        options.officialCourseWebsite ?? pageUrl,
+      officialPage: {
+        url: pageUrl,
+        courseName,
+        linkCandidates: options.linkCandidates ?? [{
+          url: memberSportsUrl,
+          label: "Book a Tee Time at Arthur B. Sim"
+        }],
+        ...(options.observedUrls ? { observedUrls: options.observedUrls } : {}),
+        visibleText:
+          options.visibleText ??
+          "Arthur B. Sim Golf Course. Book a Tee Time at Arthur B. Sim."
+      },
+      visibleText:
+        options.visibleText ??
+        "Arthur B. Sim Golf Course. Book a Tee Time at Arthur B. Sim."
+    });
+  }
+
+  it("preserves the exact Arthur B. Sim MemberSports CTA as non-runnable evidence", () => {
+    const discovery = discover();
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "CUSTOM",
+      sourceUrl: officialPageUrl,
+      bookingUrl: memberSportsUrl,
+      confidence: 0.8,
+      evidence: {
+        bookingCallToAction: true,
+        learnedFrom: "official-course-non-runnable-booking-link",
+        courseIdentityCorroboration: {
+          kind: "OFFICIAL_COURSE_NON_RUNNABLE_BOOKING_LINK",
+          courseName,
+          officialWebsiteUrl: officialPageUrl,
+          officialPageUrl,
+          providerUrl: memberSportsUrl
+        }
+      }
+    });
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(discovery.automationEligibility).toBeUndefined();
+    expect(discovery.apiEndpoint).toBeUndefined();
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it("does not corroborate multiple external tee-time destinations", () => {
+    const discovery = discover({
+      linkCandidates: [
+        { url: memberSportsUrl, label: "Book a Tee Time at Arthur B. Sim" },
+        {
+          url: "https://booking-vendor.example/tee-times/arthur-b-sim",
+          label: "Book Tee Times"
+        }
+      ]
+    });
+
+    expect(discovery.evidence.courseIdentityCorroboration).toBeUndefined();
+    expect(discovery.evidence.learnedFrom).toBe("browser-visible-links");
+  });
+
+  it("rejects conflicting MemberSports course identities observed on one official page", () => {
+    const siblingMemberSportsUrl =
+      "https://app.membersports.com/tee-times/7128/9999/0/8/0/";
+    const discovery = discover({
+      observedUrls: [officialPageUrl, `${memberSportsUrl}/`, siblingMemberSportsUrl],
+      linkCandidates: [{
+        url: `${memberSportsUrl}/`,
+        label: "Book a Tee Time at Arthur B. Sim"
+      }]
+    });
+
+    expect(discovery.evidence.courseIdentityCorroboration).toBeUndefined();
+    expect(discovery.evidence.learnedFrom).toContain("provider-evidence-conflict");
+  });
+
+  it("does not corroborate a sibling course label", () => {
+    const discovery = discover({
+      linkCandidates: [{
+        url: memberSportsUrl,
+        label: "Book a Tee Time at Tex Consolver Golf Course"
+      }]
+    });
+
+    expect(discovery.evidence.courseIdentityCorroboration).toBeUndefined();
+  });
+
+  it("does not treat a shared municipal index as an exact course page", () => {
+    const sharedPageUrl = "https://www.wichita.gov/golf/courses";
+    const discovery = discover({
+      officialPageUrl: sharedPageUrl,
+      officialCourseWebsite: sharedPageUrl,
+      linkCandidates: [{ url: memberSportsUrl, label: "Book a Tee Time" }]
+    });
+
+    expect(discovery.evidence.courseIdentityCorroboration).toBeUndefined();
+  });
+
+  it.each([
+    `https://user:password@app.membersports.com/tee-times/7128/8903/0/8/0`,
+    `${memberSportsUrl}?token=private`,
+    `${memberSportsUrl}#access_token=private`,
+    "https://app.membersports.com/tee-times/7128/8903",
+    "https://app.membersports.com/reservations/arthur-b-sim",
+    "https://app.membersports.com/login",
+    "https://app.membersports.com/account/tee-times",
+    "https://app.membersports.com/checkout/start",
+    "https://app.membersports.com/transaction/confirm"
+  ])("does not corroborate unsafe booking destination %s", (unsafeUrl) => {
+    const discovery = discover({
+      linkCandidates: [{ url: unsafeUrl, label: "Book a Tee Time" }]
+    });
+
+    expect(discovery.evidence.courseIdentityCorroboration).toBeUndefined();
+  });
+
+  it("preserves exact official-link corroboration for non-runnable TenFore", () => {
+    const tenForeOfficialPage =
+      "https://examplegolf.com/example-golf-course";
+    const tenForeBookingUrl = "https://fox.tenfore.golf/example";
+    const discovery = buildBrowserDiscovery({
+      courseId: "example-tenfore-course",
+      courseName: "Example Golf Course",
+      sourceUrl: tenForeOfficialPage,
+      finalUrl: tenForeOfficialPage,
+      observedUrls: [tenForeOfficialPage, tenForeBookingUrl],
+      officialCourseWebsite: tenForeOfficialPage,
+      officialPage: {
+        url: tenForeOfficialPage,
+        courseName: "Example Golf Course",
+        linkCandidates: [{ url: tenForeBookingUrl, label: "Book Tee Times" }],
+        visibleText: "Example Golf Course. Book Tee Times."
+      },
+      visibleText: "Example Golf Course. Book Tee Times."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      detectedPlatform: "CUSTOM",
+      bookingUrl: tenForeBookingUrl,
+      evidence: {
+        courseIdentityCorroboration: {
+          kind: "OFFICIAL_COURSE_PROVIDER_LINK",
+          officialPageUrl: tenForeOfficialPage,
+          providerUrl: tenForeBookingUrl
+        }
+      }
+    });
+  });
+});
+
 describe("browser discovery monitoring gate", () => {
   const now = new Date("2026-07-16T12:00:00.000Z");
 

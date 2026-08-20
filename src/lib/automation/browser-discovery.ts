@@ -15,6 +15,7 @@ import {
 } from "@/lib/adapters/golfnow";
 import {
   getKnownProviderFamilyForHostname,
+  getProviderReadinessFailure,
   getProviderPublicBookingLandingIdentity,
   isProviderInfrastructureUrl,
   isProviderPublicBookingLandingUrl,
@@ -242,7 +243,9 @@ export type BrowserDiscovery = {
     };
     bookingCallToAction?: boolean;
     courseIdentityCorroboration?: {
-      kind: "OFFICIAL_COURSE_PROVIDER_LINK";
+      kind:
+        | "OFFICIAL_COURSE_PROVIDER_LINK"
+        | "OFFICIAL_COURSE_NON_RUNNABLE_BOOKING_LINK";
       courseName?: string;
       officialWebsiteUrl: string;
       officialPageUrl: string;
@@ -799,6 +802,12 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
 
   if (firstProviderDiscovery) {
     return withCourseIdentityCorroboration(firstProviderDiscovery, evidence);
+  }
+
+  const nonRunnableOfficialBookingLink =
+    learnNonRunnableOfficialBookingLink(unscopedEvidence, unscopedObservedUrls);
+  if (nonRunnableOfficialBookingLink) {
+    return nonRunnableOfficialBookingLink;
   }
 
   const clubCaddieCandidates = getClubCaddieCandidates(
@@ -1714,6 +1723,7 @@ function hasUnresolvedProviderEvidenceConflict(
     "AGILYSYS",
     "TEESNAP",
     "TENFORE",
+    "MEMBERSPORTS",
     "WEBTRAC",
     "WHOOSH"
   ]);
@@ -2296,6 +2306,9 @@ function getOfficialCourseProviderLinkCorroboration(
   const officialWebsite = parseUrl(evidence.officialCourseWebsite);
   const officialPage = parseUrl(evidence.officialPage?.url);
   const providerUrl = parseUrl(discovery.bookingUrl);
+  const provider = providerUrl
+    ? resolveProviderCapability({ detectedBookingUrl: providerUrl.toString() })
+    : null;
   if (
     !officialWebsite ||
     !officialPage ||
@@ -2308,6 +2321,10 @@ function getOfficialCourseProviderLinkCorroboration(
     !hasCanonicalTargetPageAuthority(evidence) ||
     getKnownProviderFamilyForHostname(officialWebsite.hostname) ||
     !getKnownProviderFamilyForHostname(providerUrl.hostname) ||
+    !isProviderPublicBookingLandingUrl(providerUrl) ||
+    !provider?.capability ||
+    (discovery.status === "INSPECTED" &&
+      getProviderReadinessFailure(provider) === "UNSUPPORTED_FAMILY") ||
     !haveSameWebsiteOrigin(officialWebsite, officialPage)
   ) {
     return null;
@@ -7333,6 +7350,182 @@ function isNeutralTeeItUpOrganizationalAlias(
           normalized,
           officialPageUrl
         ))
+  );
+}
+
+function learnNonRunnableOfficialBookingLink(
+  evidence: BrowserDiscoveryEvidence,
+  observedUrls: string[]
+): BrowserDiscovery | null {
+  const officialWebsite = parseUrl(evidence.officialCourseWebsite);
+  const officialPage = parseUrl(evidence.officialPage?.url);
+  if (
+    !officialWebsite ||
+    !officialPage ||
+    officialPage.protocol !== "https:" ||
+    officialPage.search ||
+    officialPage.hash ||
+    !isSafeManualEvidenceUrl(officialWebsite) ||
+    !isSafeManualEvidenceUrl(officialPage) ||
+    !evidence.officialPage?.courseName ||
+    !haveCompatibleOfficialPageCourseNames(
+      evidence.courseName,
+      evidence.officialPage.courseName
+    ) ||
+    !hasCanonicalTargetPageAuthority(evidence) ||
+    !doesExactOfficialPageUrlIdentifyCourse(officialPage, evidence.courseName) ||
+    !hasOfficialPageTargetCourseIdentity(
+      evidence.officialPage.visibleText ?? "",
+      evidence.courseName
+    ) ||
+    !haveSamePublicWebsiteOrigin(
+      officialWebsite.toString(),
+      officialPage.toString()
+    )
+  ) {
+    return null;
+  }
+
+  const externalBookingCallsToAction =
+    evidence.officialPage.linkCandidates.filter((candidate) => {
+      const destination = parseUrl(candidate.url);
+      return Boolean(
+        destination &&
+          !haveSamePublicWebsiteOrigin(
+            destination.toString(),
+            officialPage.toString()
+          ) &&
+          isBookingCallToActionCandidate(candidate)
+      );
+    });
+  if (externalBookingCallsToAction.length === 0) {
+    return null;
+  }
+
+  const safeCandidates = externalBookingCallsToAction.flatMap((candidate) => {
+    const destination = parseUrl(candidate.url);
+    if (
+      !destination ||
+      destination.protocol !== "https:" ||
+      !isSafeManualEvidenceUrl(destination) ||
+      !isNonTransactionalOfficialBookingDestination(destination) ||
+      isProviderInfrastructureUrl(destination) ||
+      isClearlyUnrelatedBookingUrl(destination) ||
+      !doesNonRunnableOfficialBookingLabelMatchTarget(
+        candidate.label,
+        evidence.courseName
+      )
+    ) {
+      return [];
+    }
+    const provider = resolveProviderCapability({
+      detectedBookingUrl: destination.toString()
+    });
+    if (
+      provider.capability &&
+      (getProviderReadinessFailure(provider) !== "UNSUPPORTED_FAMILY" ||
+        !isProviderPublicBookingLandingUrl(destination) ||
+        !getProviderPublicBookingLandingIdentity(destination))
+    ) {
+      return [];
+    }
+    return [{ ...candidate, url: destination.toString() }];
+  });
+  if (safeCandidates.length !== externalBookingCallsToAction.length) {
+    return null;
+  }
+
+  const candidatesByUrl = new Map(
+    safeCandidates.map((candidate) => [candidate.url, candidate])
+  );
+  if (candidatesByUrl.size !== 1) {
+    return null;
+  }
+  const bookingUrl = [...candidatesByUrl.keys()][0];
+  return {
+    courseId: evidence.courseId,
+    status: "INSPECTED",
+    detectedPlatform: detectPlatform([bookingUrl]),
+    sourceUrl: officialPage.toString(),
+    bookingUrl,
+    confidence: 0.8,
+    evidence: {
+      finalUrl: evidence.finalUrl,
+      observedUrls: uniqueUrls([...observedUrls, bookingUrl]),
+      visibleText: summarizeVisibleText(evidence.officialPage.visibleText),
+      bookingCallToAction: true,
+      courseIdentityCorroboration: {
+        kind: "OFFICIAL_COURSE_NON_RUNNABLE_BOOKING_LINK",
+        courseName: evidence.courseName,
+        officialWebsiteUrl: officialWebsite.toString(),
+        officialPageUrl: officialPage.toString(),
+        providerUrl: bookingUrl
+      },
+      learnedFrom: "official-course-non-runnable-booking-link"
+    }
+  };
+}
+
+function doesNonRunnableOfficialBookingLabelMatchTarget(
+  label: string,
+  courseName: string
+) {
+  const explicitCourseIdentity = getOfficialBookingCandidateCourseIdentity(label);
+  return Boolean(
+    !explicitCourseIdentity ||
+      haveCompatibleOfficialPageCourseNames(courseName, explicitCourseIdentity) ||
+      haveSameOfficialCourseIdentityCore(courseName, explicitCourseIdentity)
+  );
+}
+
+function isNonTransactionalOfficialBookingDestination(url: URL) {
+  const decodedPath = decodeUrlPath(url.pathname);
+  const decodedHash = decodeUrlComponent(url.hash.slice(1));
+  if (!decodedPath || decodedHash === null) {
+    return false;
+  }
+  const normalizedSegments = `${decodedPath}/${decodedHash}`
+    .split(/[/;=?&#]+/u)
+    .map((segment) =>
+      segment
+        .normalize("NFKC")
+        .replace(/[^a-z0-9]/giu, "")
+        .toLocaleLowerCase("en-US")
+    )
+    .filter(Boolean);
+  return !normalizedSegments.some((segment) =>
+    /^(?:accounts?|myaccount|login|signin|signup|logout|register|registration|members?|customers?|users?|secure|portal|dashboard|profile|settings|auth(?:entication|orization|orize)?|oauth\d*|openid|oidc|sso\d*|saml|password|session|token|captcha|recaptcha|queue|queueit|waitingroom|challenge|verify|verification|checkout|cart|payment|pay|purchase|order|transaction|receipt|confirm|confirmation|complete|completion|success)$/u.test(
+      segment
+    )
+  );
+}
+
+function doesExactOfficialPageUrlIdentifyCourse(page: URL, courseName: string) {
+  const pathSegment = decodePagePath(page)
+    .split("/")
+    .filter(Boolean)
+    .at(-1)
+    ?.replace(/\.(?:html?|xhtml)$/iu, "")
+    .replace(/[-_]+/gu, " ")
+    .replace(/\s+\d{1,12}\s*$/u, "")
+    .trim();
+  if (
+    pathSegment &&
+    (haveCompatibleOfficialPageCourseNames(courseName, pathSegment) ||
+      haveSameOfficialCourseIdentityCore(courseName, pathSegment))
+  ) {
+    return true;
+  }
+
+  const hostnameIdentity = page.hostname
+    .toLocaleLowerCase("en-US")
+    .replace(/^www\./u, "")
+    .split(".")[0]
+    ?.replace(/[-_]+/gu, " ");
+  return Boolean(
+    hostnameIdentity &&
+      (haveCompatibleOfficialPageCourseNames(courseName, hostnameIdentity) ||
+        haveSameOfficialCourseIdentityCore(courseName, hostnameIdentity))
   );
 }
 

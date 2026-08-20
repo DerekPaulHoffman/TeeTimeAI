@@ -35,7 +35,8 @@ export const KNOWN_PROVIDER_FAMILIES = [
   "CLUB_CADDIE",
   "WHOOSH",
   "SUPREME_GOLF",
-  "TENFORE"
+  "TENFORE",
+  "MEMBERSPORTS"
 ] as const;
 
 export type KnownProviderFamily = (typeof KNOWN_PROVIDER_FAMILIES)[number];
@@ -208,6 +209,12 @@ export const PROVIDER_CAPABILITIES = {
     detectedPlatform: "CUSTOM",
     supportsAutomation: false,
     matchesHostname: (hostname) => matchesDomain(hostname, "tenfore.golf")
+  },
+  MEMBERSPORTS: {
+    family: "MEMBERSPORTS",
+    detectedPlatform: "CUSTOM",
+    supportsAutomation: false,
+    matchesHostname: (hostname) => hostname === "app.membersports.com"
   }
 } satisfies Record<KnownProviderFamily, ProviderCapability>;
 
@@ -335,6 +342,14 @@ export function resolveProviderDiscoveryIdentity(input: {
   const bookingHostname = getSafePublicHostname(input.bookingUrl);
   const bookingFamily = bookingHostname ? getKnownProviderFamilyForHostname(bookingHostname) : null;
   const metadataFamily = getMetadataProviderFamily(input.apiMetadata);
+  if (
+    bookingFamily === "MEMBERSPORTS" &&
+    (!input.bookingUrl ||
+      !isProviderPublicBookingLandingUrl(input.bookingUrl) ||
+      !getProviderPublicBookingLandingIdentity(input.bookingUrl))
+  ) {
+    return null;
+  }
   if (!bookingFamily && !metadataFamily) {
     return null;
   }
@@ -592,6 +607,12 @@ export function getProviderPublicBookingLandingIdentity(value: URL | string) {
       return `${providerFamily}:${hostname}:${pathname}:${readProviderLandingQueryValue(url, "secondarycode")?.toLocaleLowerCase("en-US")}`;
     case "CLUB_CADDIE":
       return `${providerFamily}:${hostname}:${pathname.replace(/\/slots$/iu, "")}`;
+    case "MEMBERSPORTS": {
+      const scope = readMemberSportsLandingScope(url, url.pathname);
+      return scope
+        ? `${providerFamily}:${hostname}:${scope.clubId}:${scope.courseId}`
+        : null;
+    }
     default:
       return `${providerFamily}:${hostname}:${pathname}:${url.hash.toLocaleLowerCase("en-US")}`;
   }
@@ -744,9 +765,36 @@ function isProviderFamilyPublicBookingLandingUrl(
         hasOnlyProviderTrackingQuery(url) &&
         !url.hash
       );
+    case "MEMBERSPORTS":
+      return Boolean(readMemberSportsLandingScope(url, pathname));
     case "CLUB_CADDIE":
       return false;
   }
+}
+
+function readMemberSportsLandingScope(url: URL, pathname: string) {
+  if (
+    url.hostname.toLocaleLowerCase("en-US") !== "app.membersports.com" ||
+    url.pathname !== pathname ||
+    url.hash ||
+    !hasOnlyProviderTrackingQuery(url)
+  ) {
+    return null;
+  }
+  const match = pathname.match(
+    /^\/tee-times\/([1-9]\d{0,9})\/([1-9]\d{0,9})\/(0|[1-9]\d{0,9})(?:\/(0|[1-9]\d{0,9})\/(0|[1-9]\d{0,9}))?\/?$/u
+  );
+  if (
+    !match ||
+    !readBoundedProviderLandingInteger(match[1], 2_147_483_647) ||
+    !readBoundedProviderLandingInteger(match[2], 2_147_483_647) ||
+    ![match[3], match[4], match[5]].every(
+      (value) => value === undefined || readBoundedProviderLandingNonnegativeInteger(value)
+    )
+  ) {
+    return null;
+  }
+  return { clubId: match[1], courseId: match[2] };
 }
 
 function hasOnlyAgilysysLandingQuery(url: URL) {
@@ -1067,6 +1115,14 @@ function readBoundedProviderLandingInteger(value: string | undefined, maximum: n
   }
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed <= maximum;
+}
+
+function readBoundedProviderLandingNonnegativeInteger(value: string) {
+  if (!/^(?:0|[1-9]\d{0,9})$/u.test(value)) {
+    return false;
+  }
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed <= 2_147_483_647;
 }
 
 function isValidProviderLandingDate(value: string) {

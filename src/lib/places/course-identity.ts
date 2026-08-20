@@ -483,7 +483,9 @@ function isNeutralOfficialSiteBrandIdentity(value: string) {
   if (isExplicitCourseIdentityName(value)) {
     return false;
   }
-  return /^(?:golf\s+courses|city\s+golf|municipal\s+golf)$/u.test(normalized);
+  return /^(?:facilit(?:y|ies)|golf\s+courses|city\s+golf|municipal\s+golf)$/u.test(
+    normalized
+  );
 }
 
 function getOfficialOrganizationIdentityCore(value: string) {

@@ -444,6 +444,57 @@ describe("operator course inventory", () => {
     });
   });
 
+  it("shows retained MemberSports evidence as recognized engineering work", () => {
+    const [result] = buildCourseInventory(
+      [
+        course({
+          name: "Arthur B. Sim Golf Course",
+          providerFamilyKey: "MEMBERSPORTS",
+          detectedBookingUrl:
+            "https://app.membersports.com/tee-times/7128/8903/0/8/0",
+          automationEligibility: "UNKNOWN",
+          automationReason: "NONE",
+          bookingAccessMode: "UNKNOWN",
+          bookingMethod: "UNKNOWN",
+          coverageCategory: "UNSUPPORTED_FAMILY",
+          monitoringStatus: monitoringStatus("ENGINEERING_VERIFICATION_NEEDED"),
+          incident: {
+            id: "incident-membersports",
+            status: "NEEDS_HUMAN",
+            kind: "NEEDS_ADAPTER",
+            activeRealSearchCount: 0,
+            firstSeenAt: new Date("2026-07-24T17:00:00.000Z"),
+            latestMessage: "No public booking surface is currently available.",
+            nextAction: "Check the official course website again.",
+            failureClass: "UNSUPPORTED_FAMILY",
+            attemptCount: 2
+          },
+          latestDiscovery: discovery({
+            status: "INSPECTED",
+            detectedPlatform: "CUSTOM",
+            bookingCandidateRecorded: true,
+            officialLinkCorroborated: true,
+            providerLandingFound: false
+          })
+        })
+      ],
+      NOW
+    );
+
+    expect(result).toMatchObject({
+      statusLabel: "Engineering verification needed",
+      discoveryProviderLabel: "MemberSports official link retained",
+      discoveryStatusLabel: "Monitoring support needs engineering",
+      problemSummary:
+        "The official MemberSports booking link is retained on the course, but no runnable public read-only monitoring path is available yet.",
+      recommendedAction:
+        "Build or complete reusable MemberSports signed-out monitoring support, then run one fresh monitoring check. Do not re-find or replace the retained official link unless newer evidence conflicts."
+    });
+    expect(result.statusMeaning).toContain("recognized the provider");
+    expect(result.problemSummary).not.toContain("identity unconfirmed");
+    expect(result.recommendedAction).not.toContain("Verify the candidate");
+  });
+
   it("does not call an ambiguous official provider link runnable", () => {
     const [result] = buildCourseInventory(
       [

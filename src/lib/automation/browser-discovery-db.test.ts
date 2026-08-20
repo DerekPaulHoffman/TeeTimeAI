@@ -56,6 +56,17 @@ const chronogolfOfficialLinkProof = {
   officialPageUrl: "https://westwoodsgc.com/",
   providerUrl: "https://www.chronogolf.com/club/westwoods-golf-course"
 };
+const arthurSimOfficialUrl =
+  "https://www.wichita.gov/facilities/facility/details/Arthur-B-Sim-Golf-Course-150";
+const arthurSimMemberSportsUrl =
+  "https://app.membersports.com/tee-times/7128/8903/0/8/0";
+const arthurSimNonRunnableLinkProof = {
+  kind: "OFFICIAL_COURSE_NON_RUNNABLE_BOOKING_LINK" as const,
+  courseName: "Arthur B. Sim Golf Course",
+  officialWebsiteUrl: arthurSimOfficialUrl,
+  officialPageUrl: arthurSimOfficialUrl,
+  providerUrl: arthurSimMemberSportsUrl
+};
 
 function currentIntelligenceEvidence() {
   const now = Date.now();
@@ -900,6 +911,305 @@ describe("browser discovery persistence", () => {
 
     expect(result).toBeNull();
     expect(mockedPrisma.course.update).not.toHaveBeenCalled();
+  });
+
+  it("retains Arthur B. Sim's exact official MemberSports link without granting runnable support", async () => {
+    const updatedAt = new Date("2026-08-20T12:00:00.000Z");
+    mockedPrisma.course.findUnique
+      .mockResolvedValueOnce({
+        name: "Arthur B. Sim Golf Course",
+        providerFamilyKey: "wichita.gov",
+        detectedPlatform: "UNKNOWN",
+        detectedBookingUrl: null,
+        website: arthurSimOfficialUrl,
+        bookingMetadata: null,
+        isPublic: true,
+        bookingMethod: "UNKNOWN",
+        automationEligibility: "NEEDS_REVIEW",
+        automationReason: "UNSUPPORTED_PLATFORM",
+        bookingAccessMode: "UNKNOWN",
+        monitoringStatus: { state: "ENGINEERING_NEEDED" },
+        supportIncident: { resolution: null },
+        updatedAt
+      } as never)
+      .mockResolvedValueOnce({ id: "arthur-sim" } as never);
+    mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
+
+    const result = await applyBrowserDiscoveryToCourse({
+      courseId: "arthur-sim",
+      status: "INSPECTED",
+      detectedPlatform: "CUSTOM",
+      sourceUrl: arthurSimOfficialUrl,
+      bookingUrl: arthurSimMemberSportsUrl,
+      confidence: 0.8,
+      evidence: {
+        learnedFrom: "official-course-non-runnable-booking-link",
+        observedUrls: [arthurSimOfficialUrl, arthurSimMemberSportsUrl],
+        bookingCallToAction: true,
+        courseIdentityCorroboration: arthurSimNonRunnableLinkProof
+      }
+    });
+
+    expect(result).toEqual({ id: "arthur-sim" });
+    expect(mockedPrisma.course.updateMany).toHaveBeenCalledWith({
+      where: { id: "arthur-sim", updatedAt },
+      data: {
+        detectedPlatform: "CUSTOM",
+        providerFamilyKey: "MEMBERSPORTS",
+        detectedBookingUrl: arthurSimMemberSportsUrl
+      }
+    });
+    expectCompleteProviderExecutionEvidenceSelect(
+      mockedPrisma.course.findUnique.mock.calls[0]?.[0]
+    );
+  });
+
+  it("does not persist an exact MemberSports route without official course corroboration", async () => {
+    const result = await applyBrowserDiscoveryToCourse({
+      courseId: "arthur-sim",
+      status: "INSPECTED",
+      detectedPlatform: "CUSTOM",
+      sourceUrl: arthurSimOfficialUrl,
+      bookingUrl: arthurSimMemberSportsUrl,
+      confidence: 0.95,
+      evidence: {
+        learnedFrom: "browser-visible-links",
+        observedUrls: [arthurSimMemberSportsUrl]
+      }
+    });
+
+    expect(result).toBeNull();
+    expect(mockedPrisma.course.findUnique).not.toHaveBeenCalled();
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("upgrades a safe CUSTOM placeholder when stronger exact official CTA evidence arrives", async () => {
+    const updatedAt = new Date("2026-08-20T12:01:00.000Z");
+    mockedPrisma.course.findUnique
+      .mockResolvedValueOnce({
+        name: "Arthur B. Sim Golf Course",
+        providerFamilyKey: "wichita.gov",
+        detectedPlatform: "CUSTOM",
+        detectedBookingUrl: null,
+        website: arthurSimOfficialUrl,
+        bookingMetadata: null,
+        isPublic: true,
+        bookingMethod: "UNKNOWN",
+        automationEligibility: "NEEDS_REVIEW",
+        automationReason: "OTHER",
+        bookingAccessMode: "UNKNOWN",
+        updatedAt
+      } as never)
+      .mockResolvedValueOnce({ id: "arthur-sim" } as never);
+    mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
+
+    const result = await applyBrowserDiscoveryToCourse({
+      courseId: "arthur-sim",
+      status: "INSPECTED",
+      detectedPlatform: "CUSTOM",
+      sourceUrl: arthurSimOfficialUrl,
+      bookingUrl: arthurSimMemberSportsUrl,
+      confidence: 0.8,
+      evidence: {
+        learnedFrom: "official-course-non-runnable-booking-link",
+        observedUrls: [arthurSimMemberSportsUrl],
+        bookingCallToAction: true,
+        courseIdentityCorroboration: arthurSimNonRunnableLinkProof
+      }
+    });
+
+    expect(result).toEqual({ id: "arthur-sim" });
+    expect(mockedPrisma.course.updateMany).toHaveBeenCalledWith({
+      where: { id: "arthur-sim", updatedAt },
+      data: {
+        detectedPlatform: "CUSTOM",
+        providerFamilyKey: "MEMBERSPORTS",
+        detectedBookingUrl: arthurSimMemberSportsUrl
+      }
+    });
+  });
+
+  it("rejects a broadly similar sibling-course name in official CTA proof", async () => {
+    mockedPrisma.course.findUnique.mockResolvedValueOnce({
+      name: "Arthur B. Sim Golf Course",
+      providerFamilyKey: "wichita.gov",
+      detectedPlatform: "UNKNOWN",
+      detectedBookingUrl: null,
+      website: arthurSimOfficialUrl,
+      bookingMetadata: null,
+      isPublic: true,
+      bookingMethod: "UNKNOWN",
+      automationEligibility: "NEEDS_REVIEW",
+      automationReason: "UNSUPPORTED_PLATFORM",
+      bookingAccessMode: "UNKNOWN",
+      updatedAt: new Date("2026-08-20T12:02:00.000Z")
+    } as never);
+
+    const result = await applyBrowserDiscoveryToCourse({
+      courseId: "arthur-sim",
+      status: "INSPECTED",
+      detectedPlatform: "CUSTOM",
+      sourceUrl: arthurSimOfficialUrl,
+      bookingUrl: arthurSimMemberSportsUrl,
+      confidence: 0.8,
+      evidence: {
+        learnedFrom: "official-course-non-runnable-booking-link",
+        observedUrls: [arthurSimMemberSportsUrl],
+        bookingCallToAction: true,
+        courseIdentityCorroboration: {
+          ...arthurSimNonRunnableLinkProof,
+          courseName: "Arthur B. Sim Golf Course at MacDonald Golf Course"
+        }
+      }
+    });
+
+    expect(result).toBeNull();
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("does not combine an official non-runnable link with existing execution metadata", async () => {
+    mockedPrisma.course.findUnique.mockResolvedValueOnce({
+      name: "Arthur B. Sim Golf Course",
+      providerFamilyKey: "wichita.gov",
+      detectedPlatform: "UNKNOWN",
+      detectedBookingUrl: null,
+      website: arthurSimOfficialUrl,
+      bookingMetadata: {
+        scheduleId: 999,
+        bookingBaseUrl: "https://unrelated.example/tee-times"
+      },
+      isPublic: true,
+      bookingMethod: "UNKNOWN",
+      automationEligibility: "NEEDS_REVIEW",
+      automationReason: "UNSUPPORTED_PLATFORM",
+      bookingAccessMode: "UNKNOWN",
+      updatedAt: new Date("2026-08-20T12:00:00.000Z")
+    } as never);
+
+    const result = await applyBrowserDiscoveryToCourse({
+      courseId: "arthur-sim",
+      status: "INSPECTED",
+      detectedPlatform: "CUSTOM",
+      sourceUrl: arthurSimOfficialUrl,
+      bookingUrl: arthurSimMemberSportsUrl,
+      confidence: 0.8,
+      evidence: {
+        learnedFrom: "official-course-non-runnable-booking-link",
+        observedUrls: [arthurSimMemberSportsUrl],
+        bookingCallToAction: true,
+        courseIdentityCorroboration: arthurSimNonRunnableLinkProof
+      }
+    });
+
+    expect(result).toBeNull();
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("does not overwrite a different current booking link with non-runnable CTA evidence", async () => {
+    mockedPrisma.course.findUnique.mockResolvedValueOnce({
+      name: "Arthur B. Sim Golf Course",
+      providerFamilyKey: "wichita.gov",
+      detectedPlatform: "UNKNOWN",
+      detectedBookingUrl: "https://legacy-booking.example/arthur-sim",
+      website: arthurSimOfficialUrl,
+      bookingMetadata: null,
+      isPublic: true,
+      bookingMethod: "UNKNOWN",
+      automationEligibility: "NEEDS_REVIEW",
+      automationReason: "UNSUPPORTED_PLATFORM",
+      bookingAccessMode: "UNKNOWN",
+      updatedAt: new Date("2026-08-20T12:00:00.000Z")
+    } as never);
+
+    const result = await applyBrowserDiscoveryToCourse({
+      courseId: "arthur-sim",
+      status: "INSPECTED",
+      detectedPlatform: "CUSTOM",
+      sourceUrl: arthurSimOfficialUrl,
+      bookingUrl: arthurSimMemberSportsUrl,
+      confidence: 0.8,
+      evidence: {
+        learnedFrom: "official-course-non-runnable-booking-link",
+        observedUrls: [arthurSimMemberSportsUrl],
+        bookingCallToAction: true,
+        courseIdentityCorroboration: arthurSimNonRunnableLinkProof
+      }
+    });
+
+    expect(result).toBeNull();
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: "without exact course corroboration",
+      bookingUrl: arthurSimMemberSportsUrl,
+      observedUrls: [arthurSimMemberSportsUrl],
+      courseIdentityCorroboration: undefined
+    },
+    {
+      label: "with ambiguous destination evidence",
+      bookingUrl: arthurSimMemberSportsUrl,
+      observedUrls: [
+        arthurSimMemberSportsUrl,
+        "https://other-booking.example/tee-times/another-course"
+      ],
+      courseIdentityCorroboration: {
+        ...arthurSimNonRunnableLinkProof,
+        providerUrl: "https://other-booking.example/tee-times/another-course"
+      }
+    },
+    {
+      label: "with an untrusted credential-bearing destination",
+      bookingUrl: "https://user:secret@app.membersports.com/tee-times/7128/8903/0/8/0",
+      observedUrls: [
+        "https://user:secret@app.membersports.com/tee-times/7128/8903/0/8/0"
+      ],
+      courseIdentityCorroboration: {
+        ...arthurSimNonRunnableLinkProof,
+        providerUrl:
+          "https://user:secret@app.membersports.com/tee-times/7128/8903/0/8/0"
+      }
+    },
+    {
+      label: "with a truncated known-provider route",
+      bookingUrl: "https://app.membersports.com/tee-times/7128/8903",
+      observedUrls: ["https://app.membersports.com/tee-times/7128/8903"],
+      courseIdentityCorroboration: {
+        ...arthurSimNonRunnableLinkProof,
+        providerUrl: "https://app.membersports.com/tee-times/7128/8903"
+      }
+    },
+    {
+      label: "with a non-tee-time known-provider route",
+      bookingUrl: "https://app.membersports.com/reservations/arthur-sim",
+      observedUrls: ["https://app.membersports.com/reservations/arthur-sim"],
+      courseIdentityCorroboration: {
+        ...arthurSimNonRunnableLinkProof,
+        providerUrl: "https://app.membersports.com/reservations/arthur-sim"
+      }
+    }
+  ])("rejects an official non-runnable booking link $label", async (testCase) => {
+    const result = await applyBrowserDiscoveryToCourse({
+      courseId: "arthur-sim",
+      status: "INSPECTED",
+      detectedPlatform: "CUSTOM",
+      sourceUrl: arthurSimOfficialUrl,
+      bookingUrl: testCase.bookingUrl,
+      confidence: 0.8,
+      evidence: {
+        learnedFrom: "official-course-non-runnable-booking-link",
+        observedUrls: testCase.observedUrls,
+        bookingCallToAction: true,
+        ...(testCase.courseIdentityCorroboration
+          ? { courseIdentityCorroboration: testCase.courseIdentityCorroboration }
+          : {})
+      }
+    });
+
+    expect(result).toBeNull();
+    expect(mockedPrisma.course.findUnique).not.toHaveBeenCalled();
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
   });
 
   it("persists the exact built soft-404 classification without rewriting provider fields", async () => {

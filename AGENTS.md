@@ -478,7 +478,7 @@ Adapter behavior:
 Do not assume every `DetectedPlatform` enum has a runnable adapter.
 
 - Runnable families: `FOREUP`, `TEEITUP`, `CHRONOGOLF`, `CPS`, `CHELSEA`, `TEESNAP`, `GOLFBACK`, `GOLF_WITH_ACCESS`, `WEBTRAC`, `GOLFNOW`, `AGILYSYS`, `CLUB_CADDIE`, `WHOOSH`, and `SUPREME_GOLF`, each only when the registry validates its required metadata and the current course/provider shape meets that family's safety checks.
-- Recognized but not runnable through the server dispatcher today: `EZLINKS` and `TENFORE`. A compatible allowlisted local-reader route may exist for a narrow public shape, but recognition or reader eligibility is not server-adapter coverage.
+- Recognized but not runnable through the server dispatcher today: `EZLINKS`, `MEMBERSPORTS`, and `TENFORE`. A compatible allowlisted local-reader route may exist for a narrow public shape, but recognition or reader eligibility is not server-adapter coverage.
 - `UNKNOWN` means provider discovery is still needed, not that the course is unsupported forever.
 
 Use the registry's consumer dispositions rather than optimistic support labels. Only a current trusted `MATCH_AVAILABLE`, `CHECKED_NO_MATCH`, or `BOOKING_NOT_OPEN` result counts as effective monitored coverage. Direct-site, phone/walk-in, account-required, CAPTCHA/queue, private/invalid, source-unverified, retrying, and engineering states must remain distinct. Treat `policy-blocked` as a legacy state that requires live revalidation, not a terminal result for public read-only monitoring.

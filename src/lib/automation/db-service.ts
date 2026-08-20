@@ -18,7 +18,10 @@ import {
   suppressSearchEmailDeliveriesForMatches
 } from "@/lib/email/search-delivery-outbox";
 import { prisma } from "@/lib/prisma";
-import { haveCompatibleCourseNames } from "@/lib/places/course-identity";
+import {
+  haveCompatibleCourseNames,
+  haveCompatibleOfficialPageCourseNames
+} from "@/lib/places/course-identity";
 import { recordCourseBookingFacts } from "@/lib/pricing/course-booking-facts";
 import { zonedDateTimeToDate } from "@/lib/timezones";
 
@@ -56,6 +59,8 @@ import {
 import { withPostgresAdvisoryLease, withPostgresAdvisoryTextLease } from "./lease";
 import { HOURLY_IMPROVEMENT_WRITER_LANE } from "./writer-lanes";
 import {
+  getProviderPublicBookingLandingIdentity,
+  isProviderPublicBookingLandingUrl,
   normalizeProviderFamilyKey,
   resolveProviderCapability,
   resolveProviderDiscoveryIdentity,
@@ -1182,6 +1187,14 @@ async function applyBrowserDiscoveryToCourseInTransaction(
         })
       : null;
   const learnedOnlineAdapter = input.status === "LEARNED" && provider.isRunnable;
+  const nonRunnableOfficialBookingLink =
+    resolveNonRunnableOfficialCourseBookingLinkIdentity(input);
+  const claimsNonRunnableOfficialBookingLink =
+    input.evidence.learnedFrom === "official-course-non-runnable-booking-link" ||
+    input.evidence.courseIdentityCorroboration?.kind ===
+      "OFFICIAL_COURSE_NON_RUNNABLE_BOOKING_LINK";
+  const inspectedProviderRequiresOfficialCourseCorroboration =
+    inspectedProviderIdentity?.providerFamilyKey === "MEMBERSPORTS";
   const incomingGate = evaluateBrowserDiscoveryMonitoringGate(input);
   const incomingTerminal = incomingGate.disposition !== "ACTIONABLE";
   const verifiedPrivateIdentity = isVerifiedPrivateIdentityDiscovery(input);
@@ -1197,13 +1210,23 @@ async function applyBrowserDiscoveryToCourseInTransaction(
   const sourceUnavailableClassification = isSourceUnavailableClassification(input);
 
   if (!learnedOnlineAdapter && !verifiedClassification && !sourceUnavailableClassification) {
-    if (!inspectedProviderIdentity) {
+    if (claimsNonRunnableOfficialBookingLink && !nonRunnableOfficialBookingLink) {
+      return null;
+    }
+    if (
+      inspectedProviderRequiresOfficialCourseCorroboration &&
+      !nonRunnableOfficialBookingLink
+    ) {
+      return null;
+    }
+    if (!inspectedProviderIdentity && !nonRunnableOfficialBookingLink) {
       return null;
     }
 
     const current = await transaction.course.findUnique({
       where: { id: input.courseId },
       select: {
+        name: true,
         timeZone: true,
         providerFamilyKey: true,
         detectedPlatform: true,
@@ -1240,6 +1263,63 @@ async function applyBrowserDiscoveryToCourseInTransaction(
     }
 
     const persistedProvider = resolveProviderCapability(current);
+    if (nonRunnableOfficialBookingLink) {
+      if (
+        !canApplyNonRunnableOfficialCourseBookingLink({
+          current,
+          identity: nonRunnableOfficialBookingLink,
+          persistedProviderIsRunnable: persistedProvider.isRunnable
+        })
+      ) {
+        return null;
+      }
+
+      if (
+        !(await reserveUnownedIncidentForBrowserDiscovery(
+          transaction,
+          input.courseId,
+          expectedUnownedIncident
+        ))
+      ) {
+        return null;
+      }
+
+      const updated = await transaction.course.updateMany({
+        where: { id: input.courseId, updatedAt: current.updatedAt },
+        data: {
+          detectedPlatform: nonRunnableOfficialBookingLink.detectedPlatform,
+          providerFamilyKey: nonRunnableOfficialBookingLink.providerFamilyKey,
+          detectedBookingUrl: nonRunnableOfficialBookingLink.bookingUrl
+        }
+      });
+      if (updated.count !== 1) {
+        return null;
+      }
+
+      const applied = await transaction.course.findUnique({
+        where: { id: input.courseId }
+      });
+      if (applied) {
+        await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(
+          transaction,
+          {
+            courseId: input.courseId,
+            before: current,
+            after: applied,
+            providerSnapshotFingerprint:
+              buildCourseSupportProviderSnapshotFingerprint(applied),
+            source: "COURSE_SUPPORT_RESPONDER",
+            now: observedAt
+          }
+        );
+      }
+      return applied;
+    }
+
+    if (!inspectedProviderIdentity) {
+      return null;
+    }
+
     if (
       persistedProvider.evidenceConflict ||
       persistedProvider.isRunnable ||
@@ -1779,6 +1859,130 @@ function hasPersistedOfficialCourseProviderCorroboration(
     haveSameCourseWebsiteOrigin(persisted, source) &&
     proofProvider.toString() === discoveredProvider.toString()
   );
+}
+
+function resolveNonRunnableOfficialCourseBookingLinkIdentity(discovery: BrowserDiscovery) {
+  const proof = discovery.evidence.courseIdentityCorroboration;
+  const bookingUrl = parseSafePublicUrl(discovery.bookingUrl ?? "");
+  const sourceUrl = parseSafePublicUrl(discovery.sourceUrl);
+  const officialWebsiteUrl = parseSafePublicUrl(proof?.officialWebsiteUrl ?? "");
+  const officialPageUrl = parseSafePublicUrl(proof?.officialPageUrl ?? "");
+  const providerUrl = parseSafePublicUrl(proof?.providerUrl ?? "");
+  const provider = resolveProviderCapability({
+    detectedPlatform: discovery.detectedPlatform,
+    detectedBookingUrl: discovery.bookingUrl,
+    website: discovery.sourceUrl,
+    bookingMetadata: discovery.apiMetadata
+  });
+  if (
+    discovery.status !== "INSPECTED" ||
+    discovery.evidence.learnedFrom !== "official-course-non-runnable-booking-link" ||
+    discovery.evidence.bookingCallToAction !== true ||
+    proof?.kind !== "OFFICIAL_COURSE_NON_RUNNABLE_BOOKING_LINK" ||
+    !proof.courseName ||
+    discovery.confidence < 0.8 ||
+    discovery.confidence > 1 ||
+    discovery.bookingMethod !== undefined ||
+    discovery.bookingPhone !== undefined ||
+    discovery.automationEligibility !== undefined ||
+    discovery.automationReason !== undefined ||
+    discovery.bookingAccessMode !== undefined ||
+    discovery.policyNotes !== undefined ||
+    discovery.intelligenceReviewAt !== undefined ||
+    discovery.apiEndpoint !== undefined ||
+    discovery.apiMetadata !== undefined ||
+    !bookingUrl ||
+    !sourceUrl ||
+    !officialWebsiteUrl ||
+    !officialPageUrl ||
+    !providerUrl ||
+    !isSafeManualEvidenceUrl(bookingUrl) ||
+    !isSafeManualEvidenceUrl(sourceUrl) ||
+    !isSafeManualEvidenceUrl(officialWebsiteUrl) ||
+    !isSafeManualEvidenceUrl(officialPageUrl) ||
+    !isSafeManualEvidenceUrl(providerUrl) ||
+    sourceUrl.toString() !== officialPageUrl.toString() ||
+    bookingUrl.toString() !== providerUrl.toString() ||
+    haveSameCourseWebsiteOrigin(officialPageUrl, providerUrl) ||
+    !discovery.evidence.observedUrls.some((url) => {
+      const observed = parseSafePublicUrl(url);
+      return observed?.toString() === providerUrl.toString();
+    }) ||
+    provider.evidenceConflict ||
+    provider.isRunnable ||
+    provider.capability?.supportsAutomation ||
+    (provider.capability &&
+      (!isProviderPublicBookingLandingUrl(bookingUrl) ||
+        !getProviderPublicBookingLandingIdentity(bookingUrl)))
+  ) {
+    return null;
+  }
+
+  return {
+    bookingUrl: bookingUrl.toString(),
+    detectedPlatform: provider.detectedPlatform,
+    providerFamilyKey: provider.providerFamilyKey,
+    courseName: proof.courseName,
+    officialWebsiteUrl,
+    officialPageUrl
+  };
+}
+
+function canApplyNonRunnableOfficialCourseBookingLink(input: {
+  current: {
+    name: string;
+    providerFamilyKey: string | null;
+    detectedPlatform: string | null;
+    detectedBookingUrl: string | null;
+    website: string | null;
+    bookingMetadata: unknown;
+    isPublic: boolean | null;
+    bookingMethod: string | null;
+    automationEligibility: string | null;
+    automationReason: string | null;
+    bookingAccessMode: string | null;
+  };
+  identity: NonNullable<ReturnType<typeof resolveNonRunnableOfficialCourseBookingLinkIdentity>>;
+  persistedProviderIsRunnable: boolean;
+}) {
+  const { current, identity } = input;
+  const persistedWebsite = parseSafePublicUrl(current.website ?? "");
+  const currentBookingUrl = parseSafePublicUrl(current.detectedBookingUrl ?? "");
+  if (!persistedWebsite || !isSafeManualEvidenceUrl(persistedWebsite)) {
+    return false;
+  }
+
+  const currentProviderFamily = normalizeProviderFamilyKey(current.providerFamilyKey);
+  const officialProviderFamily = normalizeProviderFamilyKey(persistedWebsite.hostname);
+  const currentFamilyIsSafePlaceholder =
+    currentProviderFamily === SOURCE_MISSING_PROVIDER_FAMILY ||
+    normalizeProviderHostnameFamily(currentProviderFamily) ===
+      normalizeProviderHostnameFamily(officialProviderFamily) ||
+    currentProviderFamily === identity.providerFamilyKey;
+
+  return Boolean(
+    currentFamilyIsSafePlaceholder &&
+    !input.persistedProviderIsRunnable &&
+    current.isPublic !== false &&
+    (!current.detectedPlatform || ["UNKNOWN", "CUSTOM"].includes(current.detectedPlatform)) &&
+    (!currentBookingUrl || currentBookingUrl.toString() === identity.bookingUrl) &&
+    (current.bookingMetadata === null || current.bookingMetadata === undefined) &&
+    (!current.bookingMethod || current.bookingMethod === "UNKNOWN") &&
+    (!current.automationEligibility ||
+      ["UNKNOWN", "NEEDS_REVIEW"].includes(current.automationEligibility)) &&
+    (!current.bookingAccessMode || current.bookingAccessMode === "UNKNOWN") &&
+    (!current.automationReason ||
+      ["NONE", "UNSUPPORTED_PLATFORM", "TEMPORARILY_UNAVAILABLE", "OTHER"].includes(
+        current.automationReason
+      )) &&
+    haveCompatibleOfficialPageCourseNames(current.name, identity.courseName) &&
+    persistedWebsite.toString() === identity.officialWebsiteUrl.toString() &&
+    haveSameCourseWebsiteOrigin(persistedWebsite, identity.officialPageUrl)
+  );
+}
+
+function normalizeProviderHostnameFamily(value: string) {
+  return value.toLowerCase().replace(/^www\./u, "");
 }
 
 function parseSafePublicUrl(value: string) {

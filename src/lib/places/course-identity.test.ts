@@ -330,6 +330,12 @@ describe("course identity matching", () => {
     expect(isExplicitCourseIdentityName("City of Phoenix Golf")).toBe(false);
     expect(isExplicitCourseIdentityName("Phoenix Golf Courses")).toBe(false);
     expect(isExplicitCourseIdentityName("Golf Course")).toBe(false);
+    expect(
+      isConflictingOfficialPageCourseIdentity(
+        "Arthur B. Sim Golf Course",
+        "Facilities"
+      )
+    ).toBe(false);
   });
 
   it("detects abbreviated sibling identities without treating site brands as courses", () => {
