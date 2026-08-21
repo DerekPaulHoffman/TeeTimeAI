@@ -9,6 +9,7 @@ import {
   COURSE_SUPPORT_SYNTHETIC_FAIRNESS_WINDOW,
   clampCourseSupportBatchSize
 } from "./course-support-responder-policy";
+import type { AutomationPlaybookStage } from "./course-monitoring-playbook";
 import type {
   CourseSupportRemediationDirective,
   CourseSupportRemediationRoute
@@ -49,6 +50,21 @@ export type CourseSupportCandidate = {
     priorMonitoringRevision: number;
     capturedRevision: number;
     capturedMonitoringRevision: number;
+    capturedCycle: number;
+    capturedKind: string;
+    capturedProviderFamilyKey: string;
+    campaignCapturedAt: string;
+    admissionMode:
+      | "FRESH_CYCLE"
+      | "ZERO_EXECUTION_RECOVERY"
+      | "INCOMPLETE_PLAYBOOK_RECOVERY"
+      | "DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY"
+      | "PARKED_COHORT_REQUESTLESS_STALE_OWNERSHIP_RECOVERY"
+      | "CURRENT_CYCLE_ORCHESTRATION_RECOVERY";
+    zeroExecutionHistoryDigest: string | null;
+    sameCycleRecoveryHistoryDigest: string | null;
+    playbookNextStage: AutomationPlaybookStage | null;
+    playbookCompletedStageCount: number;
     expectedMonitoringFailureFingerprint: string | null;
     expectedKind: CourseSupportIncidentKind;
     expectedFailureClass: CourseSupportFailureClass;

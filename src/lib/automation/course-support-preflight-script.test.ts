@@ -160,7 +160,9 @@ describe("course support preflight process launch", () => {
   });
 
   it("can make the fast preflight inspection health-bearing for scheduled launches", () => {
-    expect(responderInvocation("linux", undefined, true)).toEqual({
+    const invocation = responderInvocation("linux", undefined, true);
+
+    expect(invocation).toEqual({
       command: "npx",
       args: [
         "vercel",
@@ -177,6 +179,8 @@ describe("course support preflight process launch", () => {
         "--scheduled-cycle"
       ]
     });
+    expect(invocation.args.filter((arg) => arg === "inspect")).toHaveLength(1);
+    expect(invocation.args).not.toContain("claim");
   });
 
   it("reports spawn errors without exposing their message", () => {

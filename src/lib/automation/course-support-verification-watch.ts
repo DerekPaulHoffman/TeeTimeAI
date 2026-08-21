@@ -1,3 +1,4 @@
+import { isCourseSupportSearchExecutionFenceRetryError } from "./course-support-search-execution-fence";
 export const DEFAULT_COURSE_SUPPORT_VERIFICATION_WATCH_MINUTES = 18;
 export const DEFAULT_COURSE_SUPPORT_VERIFICATION_POLL_MS = 20_000;
 export const DEFAULT_COURSE_SUPPORT_VERIFICATION_RELEASE_CLEANUP_MS = 60_000;
@@ -178,6 +179,9 @@ export type CourseSupportVerificationPassResult<TVerification> = {
     detachedVerification?: {
       rerunNeeded?: boolean;
     } | null;
+    searchExecutionFence?: {
+      rerunNeeded?: boolean;
+    } | null;
   };
 };
 
@@ -187,6 +191,7 @@ export async function runCourseSupportVerificationPass<
     outcome?: string;
     verified?: boolean;
     detachedVerification?: { rerunNeeded?: boolean } | null;
+    searchExecutionFence?: { rerunNeeded?: boolean } | null;
   }
 >(input: {
   signal?: AbortSignal;
@@ -237,6 +242,7 @@ export async function runCourseSupportVerificationWatch<
     outcome?: string;
     verified?: boolean;
     detachedVerification?: { rerunNeeded?: boolean } | null;
+    searchExecutionFence?: { rerunNeeded?: boolean } | null;
   },
   TCloseout = never
 >(input: {
@@ -435,7 +441,8 @@ export async function runCourseSupportVerificationWatch<
     const needsAnotherPass =
       settledPass.browserStages.eligibleCount > 0 ||
       settledPass.browserStages.persistedCount > 0 ||
-      settledPass.verification.detachedVerification?.rerunNeeded === true;
+      settledPass.verification.detachedVerification?.rerunNeeded === true ||
+      settledPass.verification.searchExecutionFence?.rerunNeeded === true;
     // Verification can apply a detached result that advances the ledger into
     // an owner-only browser stage after this pass's browser scan. Requiring
     // two consecutive clean scans prevents that phase change from being
@@ -455,6 +462,17 @@ export async function runCourseSupportVerificationWatch<
           return stop(deadlineReason);
         }
         if (closeoutResult.kind === "error") {
+          if (
+            isCourseSupportSearchExecutionFenceRetryError(closeoutResult.error)
+          ) {
+            consecutiveCleanPassCount = 0;
+            const remainingMs = deadline - now();
+            if (remainingMs <= 0) {
+              return stop(deadlineReason);
+            }
+            await sleep(Math.min(pollMs, remainingMs));
+            continue;
+          }
           return stop("error", closeoutResult.error);
         }
         closeout = closeoutResult.value;

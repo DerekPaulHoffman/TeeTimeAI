@@ -304,7 +304,9 @@ describe("course-support verification intent and fingerprint", () => {
       course({ bookingMetadata: { provider: "CPS", facilityId: "changed" } }),
     );
     const accessChanged = fingerprint(course({ isPublic: false }));
-    const timeZoneChanged = fingerprint(course({ timeZone: "America/Chicago" }));
+    const timeZoneChanged = fingerprint(
+      course({ timeZone: "America/Chicago" }),
+    );
     const bookingWindowChanged = fingerprint(
       course({
         bookingWindowDaysAhead: 14,
@@ -1457,6 +1459,9 @@ describe("course-support verification execution fencing", () => {
         }),
       }),
     );
+    expect(
+      prismaMocks.requestUpdateMany.mock.calls.at(-1)?.[0]?.data,
+    ).not.toHaveProperty("startedAt");
   });
 
   it("claims queued responder progression even when active demand still exists", async () => {
@@ -1610,6 +1615,51 @@ describe("course-support verification execution fencing", () => {
           discoveryVerifiedAt: null,
           revision: { increment: 1 },
         }),
+      }),
+    );
+  });
+
+  it("records execution only when the owned provider path is about to run", async () => {
+    prismaMocks.requestFindUnique.mockResolvedValue(
+      request({ startedAt: null }),
+    );
+
+    await expect(
+      attachCourseSupportVerificationProviderSnapshot({
+        requestId: "request-1",
+        expectedRevision: 1,
+        leaseToken: "lease-1",
+        runtimeVersion: releaseSha,
+        purpose: "PRE_EXECUTION",
+        now,
+      }),
+    ).resolves.toMatchObject({ attached: true });
+
+    expect(prismaMocks.requestUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ startedAt: now }),
+      }),
+    );
+  });
+
+  it("preserves the first execution marker across provider-path retries", async () => {
+    const firstExecutionAt = new Date("2026-07-21T11:58:00.000Z");
+    prismaMocks.requestFindUnique.mockResolvedValue(
+      request({ startedAt: firstExecutionAt }),
+    );
+
+    await attachCourseSupportVerificationProviderSnapshot({
+      requestId: "request-1",
+      expectedRevision: 1,
+      leaseToken: "lease-1",
+      runtimeVersion: releaseSha,
+      purpose: "PRE_EXECUTION",
+      now,
+    });
+
+    expect(prismaMocks.requestUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ startedAt: firstExecutionAt }),
       }),
     );
   });

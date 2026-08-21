@@ -70,6 +70,25 @@ describe("GET /api/cron/recover-course-support-verifications", () => {
     expect(mocks.recoverDueCourseSupportVerificationRequests).toHaveBeenCalledTimes(1);
   });
 
+  it("returns a failing cron status when any detached workflow start fails", async () => {
+    mocks.recoverDueCourseSupportVerificationRequests.mockResolvedValue({
+      considered: 2,
+      started: 1,
+      skipped: 0,
+      failed: 1,
+    });
+
+    const response = await authorizedRequest();
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toEqual({
+      considered: 2,
+      started: 1,
+      skipped: 0,
+      failed: 1,
+    });
+  });
+
   it("returns a generic 503 when detached dispatch cannot inspect durable work", async () => {
     mocks.recoverDueCourseSupportVerificationRequests.mockRejectedValue(
       new Error("database detail must not escape")

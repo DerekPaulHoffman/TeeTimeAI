@@ -8,6 +8,7 @@ import {
   runWithBoundedCourseSupportHeartbeat,
   selectCourseSupportVerificationEndpointDeadline
 } from "@/lib/automation/course-support-verification-watch";
+import { CourseSupportSearchExecutionFenceRetryError } from "@/lib/automation/course-support-search-execution-fence";
 
 describe("assertCourseSupportVerificationWatchFlags", () => {
   it("requires the ownership-releasing closeout lane for every watch", () => {
@@ -130,6 +131,50 @@ describe("runCourseSupportVerificationWatch", () => {
 
     expect(result.passCount).toBe(4);
     expect(pass).toHaveBeenCalledTimes(4);
+    expect(closeout).toHaveBeenCalledOnce();
+  });
+
+  it("runs another two clean passes when closeout observes a changed search fence", async () => {
+    const pass = vi.fn(async () => cleanPass());
+    const closeout = vi
+      .fn()
+      .mockRejectedValueOnce(new CourseSupportSearchExecutionFenceRetryError())
+      .mockResolvedValueOnce({ durableCloseoutRecorded: true });
+    const sleep = vi.fn(async () => undefined);
+
+    const result = await runCourseSupportVerificationWatch({
+      pass,
+      closeout,
+      sleep,
+    });
+
+    expect(result.passCount).toBe(4);
+    expect(pass).toHaveBeenCalledTimes(4);
+    expect(closeout).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not call closeout while the search execution fence is unsettled", async () => {
+    const pass = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ...cleanPass(),
+        verification: {
+          ...cleanPass().verification,
+          searchExecutionFence: { rerunNeeded: true },
+        },
+      })
+      .mockResolvedValueOnce(cleanPass())
+      .mockResolvedValueOnce(cleanPass());
+    const closeout = vi.fn(async () => ({ durableCloseoutRecorded: true }));
+
+    const result = await runCourseSupportVerificationWatch({
+      pass,
+      closeout,
+      sleep: async () => undefined,
+    });
+
+    expect(result.passCount).toBe(3);
     expect(closeout).toHaveBeenCalledOnce();
   });
 
@@ -435,7 +480,7 @@ describe("runWithBoundedCourseSupportHeartbeat", () => {
     let intervalCallback: (() => void) | undefined;
     let inFlightSignal: AbortSignal | undefined;
     let resolveOperation:
-      | ((value: { durableCloseoutRecorded: true }) => void)
+      ((value: { durableCloseoutRecorded: true }) => void)
       | undefined;
     const intervalHandle = { unref: vi.fn() };
     const clearIntervalTimer = vi.fn();
@@ -483,7 +528,7 @@ describe("runWithBoundedCourseSupportHeartbeat", () => {
   it("does not treat a timed-out renewal as success without closeout proof", async () => {
     let intervalCallback: (() => void) | undefined;
     let resolveOperation:
-      | ((value: { durableCloseoutRecorded: false }) => void)
+      ((value: { durableCloseoutRecorded: false }) => void)
       | undefined;
     const renew = vi
       .fn<(signal: AbortSignal) => Promise<void>>()
@@ -531,7 +576,7 @@ describe("closeoutSettledCourseSupportVerification", () => {
       closeout: async (humanReviewCount) => {
         events.push(`closeout:${humanReviewCount}`);
         return { durableCloseoutRecorded: true };
-      }
+      },
     });
 
     expect(events).toEqual(["closeout:1"]);
@@ -544,10 +589,14 @@ describe("closeoutSettledCourseSupportVerification", () => {
     await expect(
       closeoutSettledCourseSupportVerification({
         courses: [
-          { ordinal: "01", result: "RETRY_SCHEDULED", playbookExhausted: false }
+          {
+            ordinal: "01",
+            result: "RETRY_SCHEDULED",
+            playbookExhausted: false,
+          },
         ],
-        closeout
-      })
+        closeout,
+      }),
     ).resolves.toMatchObject({ humanReviewCount: 0 });
     expect(closeout).toHaveBeenCalledWith(0);
   });
@@ -561,16 +610,16 @@ describe("closeoutSettledCourseSupportVerification", () => {
           {
             ordinal: "01",
             result: "NEEDS_HUMAN",
-            playbookExhausted: true
+            playbookExhausted: true,
           },
           {
             ordinal: "02",
             result: "NEEDS_HUMAN",
-            playbookExhausted: false
-          }
+            playbookExhausted: false,
+          },
         ],
-        closeout
-      })
+        closeout,
+      }),
     ).rejects.toThrow("explicit human result before its playbook is exhausted");
     expect(closeout).not.toHaveBeenCalled();
   });

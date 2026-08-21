@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const prismaMocks = vi.hoisted(() => ({
@@ -9,7 +10,8 @@ const prismaMocks = vi.hoisted(() => ({
     create: vi.fn(),
     update: vi.fn(),
     updateMany: vi.fn()
-  }
+  },
+  courseSupportBatchIncident: { findFirst: vi.fn() },
 }));
 
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMocks }));
@@ -129,6 +131,7 @@ describe("course support incidents", () => {
       syntheticMultiCycle: false
     });
     prismaMocks.courseSupportIncident.updateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.courseSupportBatchIncident.findFirst.mockResolvedValue(null);
   });
 
   it("opens a durable incident without alerting the operator before a retry", async () => {
@@ -523,6 +526,60 @@ describe("course support incidents", () => {
           escalationDeadlineAt: new Date(firstSeenAt.getTime() + 28 * 60 * 1000)
         })
       })
+    );
+  });
+
+  it("preserves an intentional orchestration-only deadline pause on recurring failures", async () => {
+    const existing = incident({
+      providerFamilyKey: "FOREUP",
+      failureClass: "AUTH",
+      failureFingerprint: authFailureFingerprint,
+      platformSnapshot: "FOREUP",
+      bookingUrlSnapshot: foreupCourse.detectedBookingUrl,
+      escalationDeadlineAt: null,
+    });
+    const courseRef = createHash("sha256")
+      .update("course-1")
+      .digest("hex")
+      .slice(0, 24);
+    mockRealDemand(1);
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(existing);
+    prismaMocks.courseSupportIncident.update.mockResolvedValue(existing);
+    prismaMocks.courseSupportBatchIncident.findFirst.mockResolvedValue({
+      batch: {
+        summary: {
+          closeout: {
+            remediationAttempts: [
+              {
+                courseRef,
+                consumed: false,
+                countsTowardOperationalNoProgress: false,
+                executionEvidence: {
+                  deploymentRecorded: false,
+                  providerAttemptRecorded: false,
+                  playbookAttemptRecorded: false,
+                  terminalResultRecorded: false,
+                  providerExecutionStarted: false,
+                },
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    await reportCourseSupportIssue({
+      course: foreupCourse,
+      searchId: "search-public",
+      kind: "FETCH_FAILED",
+      error: { status: 401 },
+      now,
+    });
+
+    expect(prismaMocks.courseSupportIncident.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ escalationDeadlineAt: null }),
+      }),
     );
   });
 

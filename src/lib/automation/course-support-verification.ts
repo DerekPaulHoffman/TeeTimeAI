@@ -701,7 +701,6 @@ export async function claimCourseSupportVerificationRequest(input: {
             failureClass: null,
             evidence: Prisma.JsonNull,
             lastError: null,
-            startedAt: now,
             completedAt: null,
             updatedAt: now,
           },
@@ -843,6 +842,9 @@ export async function attachCourseSupportVerificationProviderSnapshot(input: {
           where: ownedCheckingWhere(input, now),
           data: {
             ...provider,
+            ...(input.purpose === "PRE_EXECUTION"
+              ? { startedAt: ownedRequest.startedAt ?? now }
+              : {}),
             ...(providerSnapshotChanged
               ? {
                   ...(input.purpose === "PRE_EXECUTION"

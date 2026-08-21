@@ -12,6 +12,7 @@ import {
 import { prisma } from "@/lib/prisma";
 
 import { sanitizeResponderText } from "./course-support-responder-policy";
+import { isCourseSupportCompletedBatchOrchestrationOnly } from "./course-support-zero-execution";
 import { getCourseLocalDateStorageBoundary } from "./date-boundary";
 import {
   createIncidentReference,
@@ -74,7 +75,7 @@ export async function reportCourseSupportIssue(
   const lease = await withPostgresAdvisoryTextLease(
     prisma,
     `course-support:${input.course.id}`,
-    () => reportCourseSupportIssueWithLease(input)
+    () => reportCourseSupportIssueWithLease(input),
   );
 
   return lease.acquired
@@ -82,7 +83,7 @@ export async function reportCourseSupportIssue(
     : {
         incidentId: null,
         status: "UNRECORDED",
-        ownerAlerted: false
+        ownerAlerted: false,
       };
 }
 
@@ -103,8 +104,8 @@ export async function resolveCourseSupportIncident(input: {
       revision: true,
       ownerNotifiedAt: true,
       escalationNotifiedAt: true,
-      resolutionNotifiedAt: true
-    }
+      resolutionNotifiedAt: true,
+    },
   });
   if (
     !current ||
@@ -112,7 +113,7 @@ export async function resolveCourseSupportIncident(input: {
     (current.status === "RESOLVED" &&
       !canUpgradeResolvedCourseSupportIncident(
         current.resolution,
-        input.resolution
+        input.resolution,
       ))
   ) {
     return current;
@@ -121,7 +122,7 @@ export async function resolveCourseSupportIncident(input: {
   const lease = await withPostgresAdvisoryTextLease(
     prisma,
     `course-support:${input.courseId}`,
-    () => resolveCourseSupportIncidentWithLease(input)
+    () => resolveCourseSupportIncidentWithLease(input),
   );
 
   return lease.acquired ? lease.value : null;
@@ -134,7 +135,7 @@ export async function escalateCourseSupportIncident(input: {
   now?: Date;
 }) {
   const current = await prisma.courseSupportIncident.findUnique({
-    where: { id: input.incidentId }
+    where: { id: input.incidentId },
   });
   if (!current || current.status === "RESOLVED") {
     return current;
@@ -146,7 +147,7 @@ export async function escalateCourseSupportIncident(input: {
     `course-support:${current.courseId}`,
     async () => {
       const latest = await prisma.courseSupportIncident.findUnique({
-        where: { id: input.incidentId }
+        where: { id: input.incidentId },
       });
       if (!latest || latest.status === "RESOLVED") {
         return latest;
@@ -161,15 +162,15 @@ export async function escalateCourseSupportIncident(input: {
             latest.humanReviewReason ??
             inferHumanReviewReason({
               kind: latest.kind,
-              failureClass: latest.failureClass
+              failureClass: latest.failureClass,
             }),
           nextReminderAt: now,
           escalatedAt: latest.escalatedAt ?? now,
           lastSeenAt: now,
-          revision: { increment: 1 }
-        }
+          revision: { increment: 1 },
+        },
       });
-    }
+    },
   );
   if (!lease.acquired || !lease.value || lease.value.status === "RESOLVED") {
     return lease.acquired ? lease.value : null;
@@ -178,13 +179,16 @@ export async function escalateCourseSupportIncident(input: {
   return lease.value;
 }
 
-async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput) {
+async function reportCourseSupportIssueWithLease(
+  input: CourseSupportIssueInput,
+) {
   const now = input.now ?? new Date();
   const requestedEpisodeTime = input.episodeStartedAt?.getTime();
   const requestedEpisodeStartedAt = new Date(
-    Number.isFinite(requestedEpisodeTime) && requestedEpisodeTime! <= now.getTime()
+    Number.isFinite(requestedEpisodeTime) &&
+      requestedEpisodeTime! <= now.getTime()
       ? requestedEpisodeTime!
-      : now.getTime()
+      : now.getTime(),
   );
   const safeMessage = input.message
     ? sanitizeResponderText(input.message).slice(0, 500)
@@ -192,97 +196,128 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
   const safeNextAction = input.nextAction
     ? sanitizeResponderText(input.nextAction).slice(0, 500)
     : undefined;
-  const dateBoundary = getCourseLocalDateStorageBoundary(input.course.timeZone, now);
-  const [sourceSearch, affectedSearchCount, realDemand, existing] = await Promise.all([
-    prisma.teeSearch.findUnique({
-      where: { id: input.searchId },
-      select: { trafficClass: true, syntheticMultiCycle: true }
-    }),
-    prisma.teeSearch.count({
-      where: {
-        status: "ACTIVE",
-        date: { gte: dateBoundary },
-        OR: [
-          { trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] } },
-          { syntheticMultiCycle: true }
-        ],
-        preferences: {
-          some: { courseId: input.course.id }
-        }
-      }
-    }),
-    prisma.teeSearch.aggregate({
-      where: {
-        status: "ACTIVE",
-        date: { gte: dateBoundary },
-        trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
-        preferences: {
-          some: { courseId: input.course.id }
-        }
-      },
-      _count: { id: true },
-      _min: { date: true }
-    }),
-    prisma.courseSupportIncident.findUnique({
-      where: { courseId: input.course.id }
-    })
-  ]);
+  const dateBoundary = getCourseLocalDateStorageBoundary(
+    input.course.timeZone,
+    now,
+  );
+  const [sourceSearch, affectedSearchCount, realDemand, existing] =
+    await Promise.all([
+      prisma.teeSearch.findUnique({
+        where: { id: input.searchId },
+        select: { trafficClass: true, syntheticMultiCycle: true },
+      }),
+      prisma.teeSearch.count({
+        where: {
+          status: "ACTIVE",
+          date: { gte: dateBoundary },
+          OR: [
+            { trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] } },
+            { syntheticMultiCycle: true },
+          ],
+          preferences: {
+            some: { courseId: input.course.id },
+          },
+        },
+      }),
+      prisma.teeSearch.aggregate({
+        where: {
+          status: "ACTIVE",
+          date: { gte: dateBoundary },
+          trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
+          preferences: {
+            some: { courseId: input.course.id },
+          },
+        },
+        _count: { id: true },
+        _min: { date: true },
+      }),
+      prisma.courseSupportIncident.findUnique({
+        where: { courseId: input.course.id },
+      }),
+    ]);
 
   const disposableSyntheticSearch = Boolean(
     sourceSearch &&
     isSyntheticWebsiteTrafficClass(sourceSearch.trafficClass) &&
-    !sourceSearch.syntheticMultiCycle
+    !sourceSearch.syntheticMultiCycle,
   );
   const engineeringOnlySource = Boolean(
     sourceSearch &&
     isSyntheticWebsiteTrafficClass(sourceSearch.trafficClass) &&
-    sourceSearch.syntheticMultiCycle
+    sourceSearch.syntheticMultiCycle,
   );
   const activeRealSearchCount = realDemand._count.id;
   const earliestTargetDate = realDemand._min.date;
   const bookingUrl = input.course.detectedBookingUrl ?? input.course.website;
   const provider = resolveProviderCapability(input.course);
   const readinessFailure =
-    input.kind === "NEEDS_ADAPTER" ? getProviderReadinessFailure(provider) : null;
+    input.kind === "NEEDS_ADAPTER"
+      ? getProviderReadinessFailure(provider)
+      : null;
   const failure = classifyProviderFailure({
     error: input.error ?? input.message,
-    readinessFailure
+    readinessFailure,
   });
   const failureClass =
-    input.kind === "READER_CANDIDATE" ? ("READER_PARSER_MISSING" as const) : failure.failureClass;
+    input.kind === "READER_CANDIDATE"
+      ? ("READER_PARSER_MISSING" as const)
+      : failure.failureClass;
   const failureFingerprint = buildProviderFailureFingerprint({
     providerFamilyKey: provider.providerFamilyKey,
     failureClass,
     operation: input.kind === "NEEDS_ADAPTER" ? "METADATA" : "AVAILABILITY",
-    httpStatus: failure.httpStatus
+    httpStatus: failure.httpStatus,
   });
   const materialFailureInputChanged = Boolean(
     existing &&
-      (existing.providerFamilyKey !== provider.providerFamilyKey ||
-        existing.failureFingerprint !== failureFingerprint ||
-        existing.platformSnapshot !== input.course.detectedPlatform ||
-        existing.bookingUrlSnapshot !== bookingUrl)
+    (existing.providerFamilyKey !== provider.providerFamilyKey ||
+      existing.failureFingerprint !== failureFingerprint ||
+      existing.platformSnapshot !== input.course.detectedPlatform ||
+      existing.bookingUrlSnapshot !== bookingUrl),
+  );
+  const latestCompletedBatchIncident =
+    existing &&
+    existing.escalationDeadlineAt === null &&
+    existing.activeBatchId === null &&
+    !materialFailureInputChanged
+      ? await prisma.courseSupportBatchIncident.findFirst({
+          where: {
+            incidentId: existing.id,
+            cycle: existing.cycle,
+            batch: { completedAt: { not: null } },
+          },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          select: { batch: { select: { summary: true } } },
+        })
+      : null;
+  const intentionalOrchestrationPause = Boolean(
+    existing &&
+    latestCompletedBatchIncident &&
+    isCourseSupportCompletedBatchOrchestrationOnly({
+      courseId: existing.courseId,
+      summary: latestCompletedBatchIncident.batch.summary,
+    }),
   );
   const authoritativeFactualFinal = Boolean(
     existing?.status === "RESOLVED" &&
-      (existing.resolution === "DIRECT_BOOKING_CLASSIFIED" ||
-        existing.resolution === "IDENTITY_CLASSIFIED")
+    (existing.resolution === "DIRECT_BOOKING_CLASSIFIED" ||
+      existing.resolution === "IDENTITY_CLASSIFIED"),
   );
   const sourceUnverifiedWithRealDemand = Boolean(
     existing?.status === "RESOLVED" &&
-      existing.resolution === "SOURCE_UNVERIFIED" &&
-      activeRealSearchCount > 0
+    existing.resolution === "SOURCE_UNVERIFIED" &&
+    activeRealSearchCount > 0,
   );
   const resolvedFinalDecision = Boolean(
     existing?.status === "RESOLVED" &&
-      existing.resolution &&
-      existing.resolution !== "MONITORING_RESTORED" &&
-      existing.resolution !== "SOURCE_UNVERIFIED"
+    existing.resolution &&
+    existing.resolution !== "MONITORING_RESTORED" &&
+    existing.resolution !== "SOURCE_UNVERIFIED",
   );
   const opensFreshFailureCycle = Boolean(
     existing &&
-      !existing.activeBatchId &&
-      (existing.status === "RESOLVED" || materialFailureInputChanged)
+    !existing.activeBatchId &&
+    (existing.status === "RESOLVED" || materialFailureInputChanged),
   );
   const effectiveEpisodeStartedAt = opensFreshFailureCycle
     ? now
@@ -292,7 +327,7 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
     return {
       incidentId: null,
       status: "UNRECORDED",
-      ownerAlerted: false
+      ownerAlerted: false,
     } satisfies CourseSupportIssueState;
   }
 
@@ -306,7 +341,7 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
     return {
       incidentId: null,
       status: "UNRECORDED",
-      ownerAlerted: false
+      ownerAlerted: false,
     } satisfies CourseSupportIssueState;
   }
 
@@ -336,39 +371,37 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
       !authoritativeFactualFinal &&
       (materialFailureInputChanged || sourceUnverifiedWithRealDemand),
     now,
-    episodeStartedAt: effectiveEpisodeStartedAt
+    episodeStartedAt: effectiveEpisodeStartedAt,
   });
 
   if (monitoringFailure.retainedHumanFinal) {
     return {
       incidentId: existing?.id ?? null,
       status: "UNRECORDED",
-      ownerAlerted: false
+      ownerAlerted: false,
     } satisfies CourseSupportIssueState;
   }
 
   const beginsFirstRealDemandEpisode = Boolean(
     existing?.engineeringOnly &&
-      existing.activeRealSearchCount === 0 &&
-      activeRealSearchCount > 0
+    existing.activeRealSearchCount === 0 &&
+    activeRealSearchCount > 0,
   );
   const continuesCurrentIncidentEpisode = Boolean(
-    existing &&
-      existing.status !== "RESOLVED" &&
-      !materialFailureInputChanged
+    existing && existing.status !== "RESOLVED" && !materialFailureInputChanged,
   );
   const incidentEpisodeStartedAt =
     continuesCurrentIncidentEpisode && !beginsFirstRealDemandEpisode
-    ? new Date(
-        Math.min(
-          existing?.firstSeenAt.getTime() ?? now.getTime(),
-          effectiveEpisodeStartedAt.getTime()
+      ? new Date(
+          Math.min(
+            existing?.firstSeenAt.getTime() ?? now.getTime(),
+            effectiveEpisodeStartedAt.getTime(),
+          ),
         )
-      )
-    : effectiveEpisodeStartedAt;
+      : effectiveEpisodeStartedAt;
   const episodeEscalationDeadlineAt = getCourseMonitoringEscalationDeadline(
     incidentEpisodeStartedAt,
-    activeRealSearchCount
+    activeRealSearchCount,
   );
 
   if (
@@ -383,47 +416,71 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
         id: existing.id,
         cycle: existing.cycle,
         status: existing.status,
-        activeBatchId: null
+        activeBatchId: null,
       },
       data: {
-        affectedSearchCount: Math.max(existing.affectedSearchCount, affectedSearchCount, 1),
+        affectedSearchCount: Math.max(
+          existing.affectedSearchCount,
+          affectedSearchCount,
+          1,
+        ),
         occurrenceCount: { increment: 1 },
         engineeringOnly:
-          existing.engineeringOnly && engineeringOnlySource && activeRealSearchCount === 0,
-        activeRealSearchCount: Math.max(existing.activeRealSearchCount, activeRealSearchCount),
+          existing.engineeringOnly &&
+          engineeringOnlySource &&
+          activeRealSearchCount === 0,
+        activeRealSearchCount: Math.max(
+          existing.activeRealSearchCount,
+          activeRealSearchCount,
+        ),
         earliestTargetDate:
           existing.earliestTargetDate && earliestTargetDate
             ? new Date(
-                Math.min(existing.earliestTargetDate.getTime(), earliestTargetDate.getTime())
+                Math.min(
+                  existing.earliestTargetDate.getTime(),
+                  earliestTargetDate.getTime(),
+                ),
               )
             : (existing.earliestTargetDate ?? earliestTargetDate),
         lastSeenAt: now,
-        revision: { increment: 1 }
-      }
+        revision: { increment: 1 },
+      },
     });
     return {
       incidentId: existing.id,
       status: existing.status === "NEEDS_HUMAN" ? "NEEDS_HUMAN" : "UNRECORDED",
-      ownerAlerted: Boolean(existing.ownerNotifiedAt || existing.escalationNotifiedAt)
+      ownerAlerted: Boolean(
+        existing.ownerNotifiedAt || existing.escalationNotifiedAt,
+      ),
     } satisfies CourseSupportIssueState;
   }
 
   if (existing?.activeBatchId && existing.status !== "RESOLVED") {
     const nextActiveRealSearchCount = Math.max(
       existing.activeRealSearchCount,
-      activeRealSearchCount
+      activeRealSearchCount,
     );
-    const nextAffectedSearchCount = Math.max(existing.affectedSearchCount, affectedSearchCount, 1);
+    const nextAffectedSearchCount = Math.max(
+      existing.affectedSearchCount,
+      affectedSearchCount,
+      1,
+    );
     const nextEarliestTargetDate =
       existing.earliestTargetDate && earliestTargetDate
-        ? new Date(Math.min(existing.earliestTargetDate.getTime(), earliestTargetDate.getTime()))
+        ? new Date(
+            Math.min(
+              existing.earliestTargetDate.getTime(),
+              earliestTargetDate.getTime(),
+            ),
+          )
         : (existing.earliestTargetDate ?? earliestTargetDate);
     const shouldPromoteRealDemand =
       activeRealSearchCount > 0 &&
       (existing.engineeringOnly ||
         nextActiveRealSearchCount !== existing.activeRealSearchCount ||
         nextAffectedSearchCount !== existing.affectedSearchCount ||
-        nextEarliestTargetDate?.getTime() !== existing.earliestTargetDate?.getTime());
+        nextEarliestTargetDate?.getTime() !==
+          existing.earliestTargetDate?.getTime());
 
     if (shouldPromoteRealDemand || materialFailureInputChanged) {
       await prisma.courseSupportIncident.updateMany({
@@ -432,7 +489,7 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
           cycle: existing.cycle,
           status: existing.status,
           activeBatchId: existing.activeBatchId,
-          updatedAt: existing.updatedAt
+          updatedAt: existing.updatedAt,
         },
         data: {
           ...(shouldPromoteRealDemand
@@ -441,26 +498,33 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
                 engineeringOnly: false,
                 activeRealSearchCount: nextActiveRealSearchCount,
                 earliestTargetDate: nextEarliestTargetDate,
-                confirmedAt: existing.confirmedAt ?? (monitoringFailure.confirmed ? now : null),
-                escalationDeadlineAt:
-                  beginsFirstRealDemandEpisode
-                    ? episodeEscalationDeadlineAt
-                    : (existing.escalationDeadlineAt ?? episodeEscalationDeadlineAt)
+                confirmedAt:
+                  existing.confirmedAt ??
+                  (monitoringFailure.confirmed ? now : null),
+                escalationDeadlineAt: beginsFirstRealDemandEpisode
+                  ? episodeEscalationDeadlineAt
+                  : (existing.escalationDeadlineAt ??
+                    episodeEscalationDeadlineAt),
               }
             : {}),
           ...(materialFailureInputChanged
             ? { occurrenceCount: { increment: 1 } }
             : {}),
           lastSeenAt: now,
-          revision: { increment: 1 }
-        }
+          revision: { increment: 1 },
+        },
       });
     }
 
     return {
       incidentId: existing.id,
-      status: existing.status === "NEEDS_HUMAN" ? "NEEDS_HUMAN" : "AUTO_INVESTIGATING",
-      ownerAlerted: Boolean(existing.ownerNotifiedAt || existing.escalationNotifiedAt)
+      status:
+        existing.status === "NEEDS_HUMAN"
+          ? "NEEDS_HUMAN"
+          : "AUTO_INVESTIGATING",
+      ownerAlerted: Boolean(
+        existing.ownerNotifiedAt || existing.escalationNotifiedAt,
+      ),
     } satisfies CourseSupportIssueState;
   }
 
@@ -496,8 +560,8 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
         activeRealSearchCount,
         earliestTargetDate,
         firstSeenAt: now,
-        lastSeenAt: now
-      }
+        lastSeenAt: now,
+      },
     });
   } else if (existing.status === "RESOLVED") {
     const reopened = await prisma.courseSupportIncident.updateMany({
@@ -507,7 +571,7 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
         revision: existing.revision,
         status: "RESOLVED",
         resolution: existing.resolution,
-        activeBatchId: null
+        activeBatchId: null,
       },
       data: {
         cycle: { increment: 1 },
@@ -550,11 +614,11 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
         decisionNote: null,
         decisionEvidenceUrl: null,
         decisionIdempotencyKey: null,
-        revision: { increment: 1 }
-      }
+        revision: { increment: 1 },
+      },
     });
     const current = await prisma.courseSupportIncident.findUnique({
-      where: { id: existing.id }
+      where: { id: existing.id },
     });
     if (reopened.count !== 1 || !current) {
       return {
@@ -565,15 +629,23 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
             : current?.status === "AUTO_INVESTIGATING"
               ? "AUTO_INVESTIGATING"
               : "UNRECORDED",
-        ownerAlerted: Boolean(current?.ownerNotifiedAt || current?.escalationNotifiedAt)
+        ownerAlerted: Boolean(
+          current?.ownerNotifiedAt || current?.escalationNotifiedAt,
+        ),
       } satisfies CourseSupportIssueState;
     }
     incident = current;
   } else {
-    const promotedToRealDemand = existing.engineeringOnly && activeRealSearchCount > 0;
+    const promotedToRealDemand =
+      existing.engineeringOnly && activeRealSearchCount > 0;
     const promotedNextAttemptAt =
       failureClass === "RATE_LIMIT"
-        ? new Date(Math.max(existing.nextAttemptAt?.getTime() ?? 0, initialNextAttemptAt.getTime()))
+        ? new Date(
+            Math.max(
+              existing.nextAttemptAt?.getTime() ?? 0,
+              initialNextAttemptAt.getTime(),
+            ),
+          )
         : now;
     const incidentUpdateData = {
       ...(materialFailureInputChanged
@@ -598,7 +670,7 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
             decisionAt: null,
             decisionNote: null,
             decisionEvidenceUrl: null,
-            decisionIdempotencyKey: null
+            decisionIdempotencyKey: null,
           }
         : {}),
       kind: input.kind,
@@ -607,10 +679,16 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
       failureFingerprint,
       latestMessage: safeMessage,
       nextAction: safeNextAction,
-      affectedSearchCount: Math.max(existing.affectedSearchCount, affectedSearchCount, 1),
+      affectedSearchCount: Math.max(
+        existing.affectedSearchCount,
+        affectedSearchCount,
+        1,
+      ),
       occurrenceCount: { increment: 1 },
       engineeringOnly:
-        existing.engineeringOnly && engineeringOnlySource && activeRealSearchCount === 0,
+        existing.engineeringOnly &&
+        engineeringOnlySource &&
+        activeRealSearchCount === 0,
       nextAttemptAt: materialFailureInputChanged
         ? initialNextAttemptAt
         : promotedToRealDemand
@@ -624,10 +702,12 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
         : (existing.confirmedAt ?? confirmedAt),
       escalationDeadlineAt: materialFailureInputChanged
         ? escalationDeadlineAt
-        : beginsFirstRealDemandEpisode
-          ? escalationDeadlineAt
-          : (existing.escalationDeadlineAt ?? escalationDeadlineAt),
-      revision: { increment: 1 }
+        : intentionalOrchestrationPause
+          ? null
+          : beginsFirstRealDemandEpisode
+            ? escalationDeadlineAt
+            : (existing.escalationDeadlineAt ?? escalationDeadlineAt),
+      revision: { increment: 1 },
     };
 
     if (materialFailureInputChanged) {
@@ -637,14 +717,14 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
           cycle: existing.cycle,
           revision: existing.revision,
           status: existing.status,
-          activeBatchId: null
+          activeBatchId: null,
         },
-        data: incidentUpdateData
+        data: incidentUpdateData,
       });
 
       if (reopen.count === 0) {
         const winner = await prisma.courseSupportIncident.findUnique({
-          where: { id: existing.id }
+          where: { id: existing.id },
         });
         return {
           incidentId: winner?.id ?? null,
@@ -654,33 +734,38 @@ async function reportCourseSupportIssueWithLease(input: CourseSupportIssueInput)
               : winner && winner.status !== "RESOLVED"
                 ? "AUTO_INVESTIGATING"
                 : "UNRECORDED",
-          ownerAlerted: Boolean(winner?.ownerNotifiedAt || winner?.escalationNotifiedAt)
+          ownerAlerted: Boolean(
+            winner?.ownerNotifiedAt || winner?.escalationNotifiedAt,
+          ),
         } satisfies CourseSupportIssueState;
       }
 
       return {
         incidentId: existing.id,
         status: "AUTO_INVESTIGATING",
-        ownerAlerted: false
+        ownerAlerted: false,
       } satisfies CourseSupportIssueState;
     }
 
     incident = await prisma.courseSupportIncident.update({
       where: { id: existing.id },
-      data: incidentUpdateData
+      data: incidentUpdateData,
     });
   }
 
   return {
     incidentId: incident.id,
-    status: incident.status === "NEEDS_HUMAN" ? "NEEDS_HUMAN" : "AUTO_INVESTIGATING",
-    ownerAlerted: Boolean(incident.ownerNotifiedAt || incident.escalationNotifiedAt)
+    status:
+      incident.status === "NEEDS_HUMAN" ? "NEEDS_HUMAN" : "AUTO_INVESTIGATING",
+    ownerAlerted: Boolean(
+      incident.ownerNotifiedAt || incident.escalationNotifiedAt,
+    ),
   } satisfies CourseSupportIssueState;
 }
 
 function getInitialCourseSupportAttemptAt(
   failure: ReturnType<typeof classifyProviderFailure>,
-  now: Date
+  now: Date,
 ) {
   if (failure.failureClass !== "RATE_LIMIT") {
     return now;
@@ -700,7 +785,7 @@ async function resolveCourseSupportIncidentWithLease(input: {
 }) {
   const now = input.now ?? new Date();
   const existing = await prisma.courseSupportIncident.findUnique({
-    where: { courseId: input.courseId }
+    where: { courseId: input.courseId },
   });
 
   if (!existing || existing.activeBatchId) {
@@ -711,7 +796,7 @@ async function resolveCourseSupportIncidentWithLease(input: {
     existing.status !== "RESOLVED" ||
     canUpgradeResolvedCourseSupportIncident(
       existing.resolution,
-      input.resolution
+      input.resolution,
     )
   ) {
     const updated = await prisma.courseSupportIncident.updateMany({
@@ -722,7 +807,7 @@ async function resolveCourseSupportIncidentWithLease(input: {
         revision: existing.revision,
         ...(existing.status === "RESOLVED"
           ? { resolution: existing.resolution }
-          : {})
+          : {}),
       },
       data: {
         status: "RESOLVED",
@@ -734,16 +819,16 @@ async function resolveCourseSupportIncidentWithLease(input: {
         nextAttemptAt: null,
         activeBatchId: null,
         nextReminderAt: null,
-        revision: { increment: 1 }
-      }
+        revision: { increment: 1 },
+      },
     });
     if (updated.count !== 1) {
       return prisma.courseSupportIncident.findUnique({
-        where: { id: existing.id }
+        where: { id: existing.id },
       });
     }
     const resolved = await prisma.courseSupportIncident.findUnique({
-      where: { id: existing.id }
+      where: { id: existing.id },
     });
     if (!resolved) {
       return null;
