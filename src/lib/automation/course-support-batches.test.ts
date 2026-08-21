@@ -5831,7 +5831,7 @@ describe("course-support recovery", () => {
     );
   });
 
-  it("adopts a proven empty legacy execution fence before safe requeue", async () => {
+  it("adopts a proven empty legacy execution fence with an unchanged-runtime release before safe requeue", async () => {
     const courseRef = createHash("sha256")
       .update("course-1")
       .digest("hex")
@@ -5847,7 +5847,7 @@ describe("course-support recovery", () => {
       ownerAutomationRunId: "run-legacy-empty-fence",
       providerFamilyKey: "CHRONOGOLF",
       failureFingerprint: "v1:UNSUPPORTED_FAMILY:NEEDS_ADAPTER",
-      releaseSha: null,
+      releaseSha: "c".repeat(40),
       deployedAt: null,
       summary: {
         branch: "automation/course-support-old",

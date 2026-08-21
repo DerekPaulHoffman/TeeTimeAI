@@ -9349,7 +9349,8 @@ export async function recoverCourseSupportBatch(input: {
               );
             const exactLegacyPreverificationShape = Boolean(
               !summaryHasSearchExecutionFence &&
-                batch.releaseSha === null &&
+                (batch.releaseSha === null ||
+                  batch.releaseSha === batch.baseSha) &&
                 batch.deployedAt === null &&
                 batch.recheckDispatchKey === null &&
                 batch.recheckDispatchStartedAt === null &&
