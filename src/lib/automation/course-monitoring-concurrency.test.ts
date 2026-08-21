@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const transactionMocks = vi.hoisted(() => ({
+  $queryRaw: vi.fn(),
   $queryRawUnsafe: vi.fn(),
   courseMonitoringEvent: {
     create: vi.fn(),
@@ -37,7 +38,6 @@ const transactionMocks = vi.hoisted(() => ({
   },
   courseProbe: {
     findFirst: vi.fn(),
-    updateMany: vi.fn(),
   },
   courseAutomationDiscovery: {
     findFirst: vi.fn(),
@@ -82,6 +82,7 @@ import {
 } from "./course-monitoring";
 import { parkCourseSupportCandidatesForMaterialChange } from "./course-support-batches";
 import {
+  assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery,
   assessParkedCourseCampaignSameIdentityMaterialChangeIncompletePlaybookRecovery,
   assessParkedCourseCampaignSameCycleRecoveryHistory,
   assessParkedCourseCampaignRequestlessStaleOwnershipRecovery,
@@ -99,6 +100,19 @@ import { buildProviderFailureFingerprint } from "./provider-capabilities";
 describe("course monitoring write serialization", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    transactionMocks.$queryRaw.mockImplementation(
+      async (query: { strings?: readonly string[]; values?: unknown[] }) => {
+        const sql = query.strings?.join("") ?? "";
+        const [id, courseId, timestamp] = query.values ?? [];
+        if (sql.includes('FROM "CourseProbe"')) {
+          return [{ id, courseId, observedAt: timestamp }];
+        }
+        if (sql.includes('FROM "CourseAutomationDiscovery"')) {
+          return [{ id, courseId, createdAt: timestamp }];
+        }
+        return [];
+      },
+    );
     prismaMocks.$transaction
       .mockRejectedValueOnce(
         Object.assign(new Error("Transaction failed due to a write conflict"), {
@@ -154,7 +168,6 @@ describe("course monitoring write serialization", () => {
     transactionMocks.course.findUnique.mockResolvedValue(null);
     transactionMocks.course.updateMany.mockResolvedValue({ count: 1 });
     transactionMocks.courseProbe.findFirst.mockResolvedValue(null);
-    transactionMocks.courseProbe.updateMany.mockResolvedValue({ count: 1 });
     transactionMocks.courseAutomationDiscovery.findFirst.mockResolvedValue(
       null,
     );
@@ -1374,7 +1387,7 @@ describe("course monitoring write serialization", () => {
       courseId: "course-1",
       createdAt: new Date("2026-08-20T12:42:00.000Z"),
     };
-    const providerCourse = {
+    const capturedProviderCourse = {
       updatedAt: new Date("2026-08-20T12:09:00.000Z"),
       timeZone: "America/New_York",
       isPublic: true,
@@ -1399,6 +1412,12 @@ describe("course monitoring write serialization", () => {
       layoutHoleCounts: [],
       layoutHolesVerifiedAt: null,
     };
+    const providerCourse = {
+      ...capturedProviderCourse,
+      website: "https://official.example/tee-times",
+    };
+    const capturedProviderSnapshotFingerprint =
+      buildCourseSupportProviderSnapshotFingerprint(capturedProviderCourse);
     const providerSnapshotFingerprint =
       buildCourseSupportProviderSnapshotFingerprint(providerCourse);
     const attemptLedger = {
@@ -1433,12 +1452,12 @@ describe("course monitoring write serialization", () => {
           cycle: 3,
           revision: 5,
           monitoringRevision: 9,
-          monitoringFailureFingerprint: "SOURCE:MISSING",
+          monitoringFailureFingerprint: "SOURCE:LEGACY",
           kind: "NEEDS_ADAPTER",
           providerFamilyKey: "SOURCE_MISSING",
           failureClass: "MISSING_SOURCE",
           failureFingerprint: "SOURCE:MISSING",
-          providerSnapshotFingerprint,
+          providerSnapshotFingerprint: capturedProviderSnapshotFingerprint,
           attemptLedgerFingerprint:
             createParkedCourseCampaignAttemptLedgerFingerprint(null),
           playbookConclusion: "INCOMPLETE",
@@ -1477,6 +1496,7 @@ describe("course monitoring write serialization", () => {
           releaseSha: "release-old",
           deployedAt: new Date("2026-08-20T12:09:00.000Z"),
           createdAt: new Date(createdAt.getTime() - 30_000),
+          updatedAt: completedAt,
           recheckDispatchKey: `dispatch-${ordinal}`,
           recheckDispatchStartedAt: createdAt,
           recheckDispatchedAt: createdAt,
@@ -1496,7 +1516,12 @@ describe("course monitoring write serialization", () => {
         verificationRequests: [
           {
             id: `request-${ordinal}`,
+            courseId: "course-1",
             releaseSha: "release-old",
+            providerSnapshotFingerprint,
+            providerSnapshotAt: materialChangeAt,
+            createdAt: materialChangeAt,
+            updatedAt: completedAt,
             status: "SUCCEEDED" as const,
             revision: ordinal + 1,
             attemptCount: 1,
@@ -1521,6 +1546,7 @@ describe("course monitoring write serialization", () => {
     expect(history).not.toBeNull();
     const monitoringEvents = [
       {
+        id: "endpoint-material-change",
         incidentId: "incident-campaign",
         eventType: "HUMAN_REVIEW_REQUESTED",
         source: "RECOVERY_CRON",
@@ -1537,6 +1563,7 @@ describe("course monitoring write serialization", () => {
         },
       },
       {
+        id: "operator-material-change",
         incidentId: "incident-campaign",
         eventType: "REVALIDATION_REQUESTED",
         source: "OPERATOR_CLI",
@@ -1557,6 +1584,7 @@ describe("course monitoring write serialization", () => {
         },
       },
       {
+        id: "campaign-admission-material-change",
         incidentId: "incident-campaign",
         eventType: "REVALIDATION_REQUESTED",
         source: "COURSE_SUPPORT_RESPONDER",
@@ -1790,7 +1818,28 @@ describe("course monitoring write serialization", () => {
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       select: { id: true, courseId: true, createdAt: true },
     });
-    expect(transactionMocks.courseProbe.updateMany).not.toHaveBeenCalled();
+    const evidenceLockQueries = transactionMocks.$queryRaw.mock.calls.map(
+      ([query]) => query as { strings: readonly string[]; values: unknown[] },
+    );
+    expect(evidenceLockQueries).toHaveLength(2);
+    expect(evidenceLockQueries[0]!.strings.join("")).toContain(
+      'FROM "CourseProbe"',
+    );
+    expect(evidenceLockQueries[0]!.strings.join("")).toContain("FOR UPDATE");
+    expect(evidenceLockQueries[0]!.values).toEqual([
+      latestProbe.id,
+      latestProbe.courseId,
+      latestProbe.observedAt,
+    ]);
+    expect(evidenceLockQueries[1]!.strings.join("")).toContain(
+      'FROM "CourseAutomationDiscovery"',
+    );
+    expect(evidenceLockQueries[1]!.strings.join("")).toContain("FOR UPDATE");
+    expect(evidenceLockQueries[1]!.values).toEqual([
+      latestDiscovery.id,
+      latestDiscovery.courseId,
+      latestDiscovery.createdAt,
+    ]);
     expect(
       transactionMocks.courseSupportBatch.updateMany,
     ).toHaveBeenCalledTimes(3);
@@ -1807,7 +1856,9 @@ describe("course monitoring write serialization", () => {
         where: expect.objectContaining({
           id: "batch-1",
           createdAt: batchIncidents[0]!.batch.createdAt,
+          updatedAt: batchIncidents[0]!.batch.updatedAt,
         }),
+        data: { updatedAt: batchIncidents[0]!.batch.updatedAt },
       }),
     );
     expect(
@@ -1819,8 +1870,16 @@ describe("course monitoring write serialization", () => {
       expect.objectContaining({
         where: expect.objectContaining({
           id: "request-1",
+          courseId: "course-1",
+          providerSnapshotFingerprint,
+          providerSnapshotAt: materialChangeAt,
+          createdAt: materialChangeAt,
+          updatedAt: batchIncidents[0]!.verificationRequests[0]!.updatedAt,
           evidence: { equals: { ordinal: 1, providerExecution: true } },
         }),
+        data: {
+          updatedAt: batchIncidents[0]!.verificationRequests[0]!.updatedAt,
+        },
       }),
     );
     expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith(
@@ -1840,6 +1899,7 @@ describe("course monitoring write serialization", () => {
             startedRequestCount: 3,
             playbookCompletedStageCount: 4,
             playbookNextStage: "RENDERED_BROWSER_DISCOVERY",
+            supersededEndpointId: "endpoint-material-change",
             supersededEndpointAt: parkedAt.toISOString(),
             sameCycleRecovery: true,
             oneShot: true,
@@ -1903,6 +1963,11 @@ describe("course monitoring write serialization", () => {
             id: "discovery-appended-at-same-timestamp",
           },
         ),
+      () => transactionMocks.$queryRaw.mockResolvedValueOnce([]),
+      () =>
+        transactionMocks.$queryRaw
+          .mockResolvedValueOnce([latestProbe])
+          .mockResolvedValueOnce([]),
       () =>
         transactionMocks.courseMonitoringEvent.findFirst.mockResolvedValueOnce({
           id: "late-recovery-marker",
@@ -1927,9 +1992,7 @@ describe("course monitoring write serialization", () => {
         ...baseIncident,
         course: {
           ...baseIncident.course,
-          probes: [
-            { ...latestProbe, id: "probe-committed-at-same-timestamp" },
-          ],
+          probes: [{ ...latestProbe, id: "probe-committed-at-same-timestamp" }],
         },
       },
       {
@@ -1977,7 +2040,10 @@ describe("course monitoring write serialization", () => {
     ).not.toHaveBeenCalled();
   });
 
-  it("uses SERIALIZABLE for the same-identity +2 recovery admission", async () => {
+  it.each([
+    "SAME_IDENTITY_MATERIAL_CHANGE_INCOMPLETE_PLAYBOOK_RECOVERY",
+    "POST_MARKER_INCOMPLETE_PLAYBOOK_RECOVERY",
+  ] as const)("uses SERIALIZABLE for %s admission", async (admissionMode) => {
     prismaMocks.$transaction.mockReset();
     prismaMocks.$transaction.mockImplementation(async (worker) =>
       worker(transactionMocks),
@@ -1995,8 +2061,7 @@ describe("course monitoring write serialization", () => {
         capturedMonitoringRevision: 9,
         capturedCycle: 3,
         campaignCapturedAt: "2026-08-20T12:00:00.000Z",
-        admissionMode:
-          "SAME_IDENTITY_MATERIAL_CHANGE_INCOMPLETE_PLAYBOOK_RECOVERY",
+        admissionMode,
         expectedSameCycleRecoveryHistoryDigest: "a".repeat(64),
         expectedPlaybookNextStage: "RENDERED_BROWSER_DISCOVERY",
         expectedPlaybookCompletedStageCount: 4,
@@ -2016,6 +2081,7 @@ describe("course monitoring write serialization", () => {
         expectedPlaybookConclusion: "INCOMPLETE",
         campaignRunId: "campaign-run-1",
         campaignMembershipDigest: "d".repeat(64),
+        currentRuntimeVersion: "e".repeat(40),
       }),
     ).resolves.toEqual({ admitted: false });
     expect(prismaMocks.$transaction).toHaveBeenCalledWith(
@@ -2025,6 +2091,605 @@ describe("course monitoring write serialization", () => {
         timeout: 15_000,
       }),
     );
+  });
+
+  it("atomically resumes the exact requestless post-marker batch on a newer runtime", async () => {
+    const capturedAt = new Date("2026-08-20T12:00:00.000Z");
+    const admittedAt = new Date("2026-08-20T12:05:00.000Z");
+    const firstEndpointAt = new Date("2026-08-20T12:15:00.000Z");
+    const priorMarkerAt = new Date("2026-08-20T12:18:00.000Z");
+    const postDeploymentAt = new Date("2026-08-20T12:17:00.000Z");
+    const finalEndpointAt = new Date("2026-08-20T12:30:00.000Z");
+    const recoveredAt = new Date("2026-08-20T13:00:00.000Z");
+    const priorRuntime = "a".repeat(40);
+    const currentRuntime = "b".repeat(40);
+    const providerCourse = {
+      updatedAt: new Date("2026-08-20T12:04:00.000Z"),
+      timeZone: "America/New_York",
+      isPublic: true,
+      website: null,
+      detectedBookingUrl: null,
+      detectedPlatform: "UNKNOWN" as const,
+      providerFamilyKey: "SOURCE_MISSING",
+      bookingMethod: "UNKNOWN" as const,
+      bookingWindowDaysAhead: null,
+      bookingReleaseTimeLocal: null,
+      bookingWindowSource: null,
+      bookingWindowConfidence: null,
+      bookingWindowEvidenceUrl: null,
+      automationEligibility: "UNKNOWN" as const,
+      automationReason: "NONE" as const,
+      monitoringMode: "STANDARD" as const,
+      bookingAccessMode: "UNKNOWN",
+      intelligenceVerifiedAt: null,
+      intelligenceReviewAt: null,
+      intelligenceConfidence: null,
+      bookingMetadata: null,
+      layoutHoleCounts: [],
+      layoutHolesVerifiedAt: null,
+    };
+    const providerSnapshotFingerprint =
+      buildCourseSupportProviderSnapshotFingerprint(providerCourse);
+    const attemptLedger = {
+      version: 1,
+      events: [
+        ["OFFICIAL_IDENTITY", "OFFICIAL_IDENTITY"],
+        ["TYPED_ADAPTER", "TYPED_PROVIDER_ADAPTER"],
+        ["OFFICIAL_HTTP_DISCOVERY", "OFFICIAL_HTTP"],
+        ["HTTP_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER"],
+      ].map(([stage, readPath], index) => ({
+        sequence: index + 1,
+        cycle: 4,
+        stage,
+        transition: "NOT_APPLICABLE",
+        readPath,
+        evidenceKind: "TOOLING",
+        observedAt: new Date(
+          admittedAt.getTime() + index * 1_000,
+        ).toISOString(),
+        failureFingerprint: "SOURCE:MISSING",
+        runtimeVersion: priorRuntime,
+        skipReason: "NO_PROVIDER_METADATA",
+      })),
+    };
+    const attemptLedgerFingerprint =
+      createParkedCourseCampaignAttemptLedgerFingerprint(attemptLedger);
+    const campaignAudit = createParkedCourseCampaignAudit({
+      expectedCount: 1,
+      capturedAt,
+      members: [
+        {
+          courseId: "course-1",
+          incidentId: "incident-campaign",
+          cycle: 3,
+          revision: 5,
+          monitoringRevision: 9,
+          monitoringFailureFingerprint: "SOURCE:MISSING",
+          kind: "NEEDS_ADAPTER",
+          providerFamilyKey: "SOURCE_MISSING",
+          failureClass: "MISSING_SOURCE",
+          failureFingerprint: "SOURCE:MISSING",
+          providerSnapshotFingerprint,
+          attemptLedgerFingerprint:
+            createParkedCourseCampaignAttemptLedgerFingerprint(null),
+          playbookConclusion: "INCOMPLETE",
+          latestProbeAt: null,
+          latestDiscoveryAt: null,
+        },
+      ],
+    });
+    const courseRef = createHash("sha256")
+      .update("course-1")
+      .digest("hex")
+      .slice(0, 24);
+    const preMarkerEntry = {
+      id: "batch-entry-before-marker",
+      batchId: "batch-before-marker",
+      incidentId: "incident-campaign",
+      courseId: "course-1",
+      cycle: 4,
+      result: "NEEDS_HUMAN",
+      preProbeId: null,
+      postProbeId: null,
+      proofSnapshot: { providerExecution: true },
+      verifiedIncidentUpdatedAt: null,
+      verifiedAt: null,
+      createdAt: new Date("2026-08-20T12:06:00.000Z"),
+      updatedAt: new Date("2026-08-20T12:12:00.000Z"),
+      batch: {
+        id: "batch-before-marker",
+        status: "PARTIAL",
+        revision: 2,
+        ownerAutomationRunId: null,
+        baseSha: priorRuntime,
+        releaseSha: priorRuntime,
+        deployedAt: new Date("2026-08-20T12:04:00.000Z"),
+        createdAt: new Date("2026-08-20T12:05:30.000Z"),
+        updatedAt: new Date("2026-08-20T12:12:00.000Z"),
+        recheckDispatchKey: "dispatch-before-marker",
+        recheckDispatchStartedAt: new Date("2026-08-20T12:06:00.000Z"),
+        recheckDispatchedAt: new Date("2026-08-20T12:06:00.000Z"),
+        completedAt: new Date("2026-08-20T12:12:00.000Z"),
+        summary: { closeout: { providerExecutionStarted: true } },
+        ownerAutomationRun: null,
+      },
+      verificationRequests: [
+        {
+          id: "request-before-marker",
+          releaseSha: priorRuntime,
+          updatedAt: new Date("2026-08-20T12:12:00.000Z"),
+          status: "SUCCEEDED" as const,
+          revision: 3,
+          attemptCount: 1,
+          workflowRunId: "workflow-before-marker",
+          startedAt: new Date("2026-08-20T12:07:00.000Z"),
+          outcome: "FETCH_FAILED" as const,
+          failureClass: "MISSING_SOURCE" as const,
+          evidence: { providerExecution: true },
+          lastError: "source remained unavailable",
+        },
+      ],
+    };
+    const postMarkerEntry = {
+      id: "batch-entry-after-marker",
+      batchId: "batch-after-marker",
+      incidentId: "incident-campaign",
+      courseId: "course-1",
+      cycle: 4,
+      result: "RETRY_SCHEDULED",
+      preProbeId: null,
+      postProbeId: null,
+      proofSnapshot: null,
+      verifiedIncidentUpdatedAt: null,
+      verifiedAt: null,
+      createdAt: new Date("2026-08-20T12:20:00.000Z"),
+      updatedAt: new Date("2026-08-20T12:25:00.000Z"),
+      batch: {
+        id: "batch-after-marker",
+        status: "RETRYABLE_FAILED",
+        revision: 3,
+        ownerAutomationRunId: null,
+        baseSha: priorRuntime,
+        releaseSha: priorRuntime,
+        deployedAt: postDeploymentAt,
+        createdAt: new Date("2026-08-20T12:19:00.000Z"),
+        updatedAt: new Date("2026-08-20T12:25:00.000Z"),
+        recheckDispatchKey: null,
+        recheckDispatchStartedAt: null,
+        recheckDispatchedAt: null,
+        completedAt: new Date("2026-08-20T12:25:00.000Z"),
+        summary: {
+          closeout: {
+            orchestrationOnly: true,
+            orchestrationOnlyCount: 1,
+            remediationAttempts: [
+              {
+                courseRef,
+                providerSnapshotFingerprint,
+                observedProviderSnapshotFingerprint:
+                  providerSnapshotFingerprint,
+                failureFingerprint: "SOURCE:MISSING",
+                observedFailureFingerprint: "SOURCE:MISSING",
+                runtimeVersion: priorRuntime,
+                activeRealSearchCount: 0,
+                consumed: false,
+                countsTowardOperationalNoProgress: false,
+                executionEvidence: {
+                  claimedImplementationPaths: false,
+                  newReleaseRecorded: false,
+                  deploymentRecorded: false,
+                  postProbeRecorded: false,
+                  providerAttemptRecorded: false,
+                  providerExecutionAttemptRecorded: false,
+                  playbookAttemptRecorded: false,
+                  terminalResultRecorded: false,
+                  providerExecutionStarted: false,
+                },
+                approach: {
+                  workMode: "DISCOVERY_ONLY",
+                  strategyAction: "DISCOVER_WITH_BROWSER",
+                  playbookStage: "RENDERED_BROWSER_DISCOVERY",
+                },
+              },
+            ],
+          },
+        },
+        ownerAutomationRun: null,
+      },
+      verificationRequests: [],
+    };
+    const batchIncidents = [preMarkerEntry, postMarkerEntry];
+    const priorHistory = assessParkedCourseCampaignSameCycleRecoveryHistory({
+      courseId: "course-1",
+      cycle: 4,
+      entries: [preMarkerEntry],
+      requireOrchestrationOnly: false,
+      requireStartedRequest: true,
+      requireCausalStartedRequest: true,
+      minimumStartedAt: admittedAt,
+    });
+    expect(priorHistory).not.toBeNull();
+    const endpointAudit = {
+      cycle: 4,
+      customerState: "NEEDS_HUMAN_REVIEW",
+      playbookConclusion: "INCOMPLETE",
+      playbookExhausted: false,
+      automationStalled: true,
+      parkedUntilMaterialChange: true,
+      nextStage: "RENDERED_BROWSER_DISCOVERY",
+      campaign: {
+        kind: "PARKED_COHORT",
+        runId: "campaign-run-1",
+        membershipDigest: campaignAudit.membershipDigest,
+        cycle: 4,
+      },
+      customerDataIncluded: false,
+    };
+    const monitoringEvents = [
+      {
+        id: "endpoint-post-marker",
+        incidentId: "incident-campaign",
+        eventType: "HUMAN_REVIEW_REQUESTED",
+        source: "RECOVERY_CRON",
+        failureFingerprint: "SOURCE:MISSING",
+        readPath: null,
+        occurredAt: finalEndpointAt,
+        audit: endpointAudit,
+      },
+      {
+        id: "marker-incomplete-recovery",
+        incidentId: "incident-campaign",
+        eventType: "REVALIDATION_REQUESTED",
+        source: "COURSE_SUPPORT_RESPONDER",
+        failureFingerprint: "SOURCE:MISSING",
+        readPath: null,
+        occurredAt: priorMarkerAt,
+        audit: {
+          action: "parked_cohort_incomplete_playbook_recovery",
+          admissionMode: "INCOMPLETE_PLAYBOOK_RECOVERY",
+          campaignRunId: "campaign-run-1",
+          campaignMembershipDigest: campaignAudit.membershipDigest,
+          capturedCycle: 3,
+          cycle: 4,
+          sameCycleRecoveryHistoryDigest: priorHistory!.historyDigest,
+          providerSnapshotFingerprint,
+          attemptLedgerFingerprint,
+          latestProbeAt: null,
+          latestDiscoveryAt: null,
+          playbookCompletedStageCount: 4,
+          playbookNextStage: "RENDERED_BROWSER_DISCOVERY",
+          recoveryRuntimeVersion: priorRuntime,
+          sameCycleRecovery: true,
+          oneShot: true,
+          preservesAttemptLedger: true,
+          preservesAttemptCounts: true,
+          preservesAttemptTimestamps: true,
+          preservesOperatorEvidence: true,
+          preservesImmutableCampaignAudit: true,
+          campaign: endpointAudit.campaign,
+          customerDataIncluded: false,
+        },
+      },
+      {
+        id: "endpoint-before-marker",
+        incidentId: "incident-campaign",
+        eventType: "HUMAN_REVIEW_REQUESTED",
+        source: "RECOVERY_CRON",
+        failureFingerprint: "SOURCE:MISSING",
+        readPath: null,
+        occurredAt: firstEndpointAt,
+        audit: endpointAudit,
+      },
+      {
+        id: "campaign-admission-post-marker",
+        incidentId: "incident-campaign",
+        eventType: "REVALIDATION_REQUESTED",
+        source: "COURSE_SUPPORT_RESPONDER",
+        failureFingerprint: "SOURCE:MISSING",
+        readPath: null,
+        occurredAt: admittedAt,
+        audit: {
+          action: "parked_cohort_admission",
+          campaignRunId: "campaign-run-1",
+          campaignMembershipDigest: campaignAudit.membershipDigest,
+          priorCycle: 3,
+          cycle: 4,
+          capturedIncidentRevision: 5,
+          capturedMonitoringRevision: 9,
+          preservesPriorAttemptEvents: true,
+          customerDataIncluded: false,
+        },
+      },
+    ];
+    const baseIncident = {
+      id: "incident-campaign",
+      courseId: "course-1",
+      cycle: 4,
+      revision: 10,
+      status: "NEEDS_HUMAN",
+      kind: "NEEDS_ADAPTER",
+      providerFamilyKey: "SOURCE_MISSING",
+      failureClass: "MISSING_SOURCE",
+      failureFingerprint: "SOURCE:MISSING",
+      attemptLedger,
+      humanReviewReason: "AUTOMATION_STALLED",
+      activeRealSearchCount: 0,
+      attemptCount: 6,
+      lastAttemptAt: new Date("2026-08-20T12:25:00.000Z"),
+      confirmedAt: admittedAt,
+      activeBatchId: null,
+      nextAttemptAt: null,
+      escalatedAt: finalEndpointAt,
+      resolution: null,
+      resolvedAt: null,
+      resolutionMessage: null,
+      resolutionNotifiedAt: null,
+      decisionActorId: null,
+      decisionAt: null,
+      decisionNote: null,
+      decisionEvidenceUrl: null,
+      decisionIdempotencyKey: null,
+      monitoringEvents,
+      batchIncidents,
+      course: {
+        ...providerCourse,
+        probes: [],
+        automationDiscoveries: [],
+        preferences: [],
+        monitoringStatus: {
+          state: "ENGINEERING_VERIFICATION_NEEDED",
+          revision: 16,
+          failureFingerprint: "SOURCE:MISSING",
+          nextAutomaticAttemptAt: null,
+          revalidationRequestedAt: null,
+        },
+      },
+    };
+    const campaignRun = {
+      promptVersion: PARKED_COURSE_CAMPAIGN_PROMPT_VERSION,
+      status: "RUNNING",
+      completedAt: null,
+      audit: campaignAudit,
+    };
+    const recoveryAssessment =
+      assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery({
+        captured: campaignAudit.members[0]!,
+        current: {
+          courseId: "course-1",
+          incidentId: "incident-campaign",
+          cycle: 4,
+          revision: 10,
+          monitoringRevision: 16,
+          monitoringFailureFingerprint: "SOURCE:MISSING",
+          kind: "NEEDS_ADAPTER",
+          providerFamilyKey: "SOURCE_MISSING",
+          failureClass: "MISSING_SOURCE",
+          failureFingerprint: "SOURCE:MISSING",
+          providerSnapshotFingerprint,
+          attemptLedgerFingerprint,
+          playbookConclusion: "INCOMPLETE",
+          latestProbeAt: null,
+          latestDiscoveryAt: null,
+          activeRealSearchCount: 0,
+          zeroExecutionEvidence: {
+            latestProbe: null,
+            latestDiscovery: null,
+            monitoringEvents,
+            batchIncidents,
+            playbookAssessment: assessAutomationPlaybook(attemptLedger, 4),
+          },
+        },
+        capturedAt,
+        campaignRunId: "campaign-run-1",
+        campaignMembershipDigest: campaignAudit.membershipDigest,
+        currentRuntimeVersion: currentRuntime,
+      });
+    expect(recoveryAssessment).not.toBeNull();
+    const input = {
+      courseId: "course-1",
+      incidentId: "incident-campaign",
+      expectedCycle: 4,
+      expectedRevision: 10,
+      expectedMonitoringRevision: 16,
+      capturedRevision: 5,
+      capturedMonitoringRevision: 9,
+      capturedCycle: 3,
+      campaignCapturedAt: campaignAudit.capturedAt,
+      admissionMode: "POST_MARKER_INCOMPLETE_PLAYBOOK_RECOVERY" as const,
+      expectedSameCycleRecoveryHistoryDigest:
+        recoveryAssessment!.history.historyDigest,
+      expectedPlaybookNextStage: "RENDERED_BROWSER_DISCOVERY",
+      expectedPlaybookCompletedStageCount: 4,
+      currentRuntimeVersion: currentRuntime,
+      capturedKind: "NEEDS_ADAPTER" as const,
+      capturedProviderFamilyKey: "SOURCE_MISSING",
+      expectedKind: "NEEDS_ADAPTER" as const,
+      expectedFailureClass: "MISSING_SOURCE" as const,
+      expectedLatestProbeAt: null,
+      expectedLatestDiscoveryAt: null,
+      expectedLatestProbeId: null,
+      expectedLatestDiscoveryId: null,
+      expectedProviderFamilyKey: "SOURCE_MISSING",
+      expectedFailureFingerprint: "SOURCE:MISSING",
+      expectedMonitoringFailureFingerprint: "SOURCE:MISSING",
+      expectedProviderSnapshotFingerprint: providerSnapshotFingerprint,
+      expectedAttemptLedgerFingerprint: attemptLedgerFingerprint,
+      expectedPlaybookConclusion: "INCOMPLETE",
+      campaignRunId: "campaign-run-1",
+      campaignMembershipDigest: campaignAudit.membershipDigest,
+      now: recoveredAt,
+    };
+    const arrangeBase = () => {
+      vi.clearAllMocks();
+      transactionMocks.courseSupportIncident.findUnique.mockResolvedValue(
+        baseIncident,
+      );
+      transactionMocks.automationRun.findUnique.mockResolvedValue(campaignRun);
+      transactionMocks.automationRun.updateMany.mockResolvedValue({ count: 1 });
+      transactionMocks.course.updateMany.mockResolvedValue({ count: 1 });
+      transactionMocks.courseSupportBatch.updateMany.mockResolvedValue({
+        count: 1,
+      });
+      transactionMocks.courseSupportBatchIncident.findMany.mockResolvedValue(
+        batchIncidents,
+      );
+      transactionMocks.courseSupportBatchIncident.findFirst.mockResolvedValue(
+        null,
+      );
+      transactionMocks.courseSupportBatchIncident.updateMany.mockResolvedValue({
+        count: 1,
+      });
+      transactionMocks.courseSupportVerificationRequest.updateMany.mockResolvedValue(
+        { count: 1 },
+      );
+      transactionMocks.courseSupportVerificationRequest.findFirst.mockResolvedValue(
+        null,
+      );
+      transactionMocks.courseProbe.findFirst.mockResolvedValue(null);
+      transactionMocks.courseAutomationDiscovery.findFirst.mockResolvedValue(
+        null,
+      );
+      transactionMocks.courseMonitoringEvent.findFirst.mockResolvedValue(null);
+      transactionMocks.courseSupportIncident.updateMany.mockResolvedValue({
+        count: 1,
+      });
+      transactionMocks.courseMonitoringStatus.updateMany.mockResolvedValue({
+        count: 1,
+      });
+      transactionMocks.courseMonitoringEvent.create.mockResolvedValue({
+        id: "post-marker-recovery",
+      });
+    };
+
+    arrangeBase();
+    await expect(
+      reopenParkedCourseForResponderCampaignInTransaction(
+        transactionMocks as never,
+        input,
+      ),
+    ).resolves.toMatchObject({ admitted: true, cycle: 4 });
+    expect(
+      transactionMocks.courseSupportVerificationRequest.updateMany,
+    ).toHaveBeenCalledTimes(1);
+    expect(transactionMocks.courseSupportBatch.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "batch-after-marker",
+          updatedAt: postMarkerEntry.batch.updatedAt,
+        }),
+        data: { updatedAt: postMarkerEntry.batch.updatedAt },
+      }),
+    );
+    expect(
+      transactionMocks.courseSupportVerificationRequest.updateMany,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "request-before-marker",
+          updatedAt: preMarkerEntry.verificationRequests[0]!.updatedAt,
+        }),
+        data: {
+          updatedAt: preMarkerEntry.verificationRequests[0]!.updatedAt,
+        },
+      }),
+    );
+    expect(
+      transactionMocks.courseSupportVerificationRequest.findFirst,
+    ).toHaveBeenCalledWith({
+      where: { batchIncidentId: "batch-entry-after-marker" },
+      select: { id: true },
+    });
+    const incidentUpdate =
+      transactionMocks.courseSupportIncident.updateMany.mock.calls[0]![0];
+    expect(incidentUpdate.data).toMatchObject({
+      status: "AUTO_INVESTIGATING",
+      nextAttemptAt: recoveredAt,
+    });
+    for (const preserved of [
+      "cycle",
+      "attemptLedger",
+      "attemptCount",
+      "confirmedAt",
+      "lastAttemptAt",
+    ]) {
+      expect(incidentUpdate.data).not.toHaveProperty(preserved);
+    }
+    expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          idempotencyKey: expect.stringContaining(
+            "parked-cohort-post-marker-incomplete-playbook-recovery",
+          ),
+          audit: expect.objectContaining({
+            admissionMode: "POST_MARKER_INCOMPLETE_PLAYBOOK_RECOVERY",
+            priorRecoveryMarkerDigest:
+              recoveryAssessment!.priorRecoveryMarkerDigest,
+            priorRecoveryRuntimeVersion: priorRuntime,
+            recoveryRuntimeVersion: currentRuntime,
+            failedRuntimeVersions: [priorRuntime],
+            postMarkerHistoryDigest:
+              recoveryAssessment!.postMarkerHistoryDigest,
+            postMarkerBatchCount: 1,
+            postMarkerRequestCount: 0,
+            batchCount: 2,
+            startedRequestCount: 1,
+            supersededEndpointId: "endpoint-post-marker",
+            supersededEndpointAt: finalEndpointAt.toISOString(),
+            playbookCompletedStageCount: 4,
+            playbookNextStage: "RENDERED_BROWSER_DISCOVERY",
+            preservesOperatorEvidence: true,
+            customerDataIncluded: false,
+          }),
+        }),
+      }),
+    );
+
+    arrangeBase();
+    transactionMocks.courseSupportVerificationRequest.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: "late-post-marker-request" });
+    await expect(
+      reopenParkedCourseForResponderCampaignInTransaction(
+        transactionMocks as never,
+        input,
+      ),
+    ).resolves.toEqual({ admitted: false });
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).not.toHaveBeenCalled();
+
+    arrangeBase();
+    transactionMocks.automationRun.updateMany.mockResolvedValueOnce({
+      count: 0,
+    });
+    await expect(
+      reopenParkedCourseForResponderCampaignInTransaction(
+        transactionMocks as never,
+        input,
+      ),
+    ).resolves.toEqual({ admitted: false });
+
+    arrangeBase();
+    transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
+      ...baseIncident,
+      monitoringEvents: [
+        ...monitoringEvents,
+        {
+          ...monitoringEvents[1],
+          occurredAt: new Date("2026-08-20T12:31:00.000Z"),
+          audit: {
+            ...monitoringEvents[1]!.audit,
+            action: "parked_cohort_post_marker_incomplete_playbook_recovery",
+          },
+        },
+      ],
+    });
+    await expect(
+      reopenParkedCourseForResponderCampaignInTransaction(
+        transactionMocks as never,
+        input,
+      ),
+    ).resolves.toEqual({ admitted: false });
   });
 
   it("atomically reopens only the exact requestless stale campaign owner without resetting progress", async () => {
@@ -2430,10 +3095,16 @@ describe("course monitoring write serialization", () => {
       }),
     );
 
-    expect(transactionMocks.courseProbe.updateMany).toHaveBeenCalledWith({
-      where: historicalProbe,
-      data: { observedAt: historicalProbeAt },
-    });
+    const [probeLockQuery] = transactionMocks.$queryRaw.mock.calls[0] as [
+      { strings: readonly string[]; values: unknown[] },
+    ];
+    expect(probeLockQuery.strings.join("")).toContain('FROM "CourseProbe"');
+    expect(probeLockQuery.strings.join("")).toContain("FOR UPDATE");
+    expect(probeLockQuery.values).toEqual([
+      historicalProbe.id,
+      historicalProbe.courseId,
+      historicalProbeAt,
+    ]);
     expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
@@ -2492,9 +3163,7 @@ describe("course monitoring write serialization", () => {
           observedAt: new Date("2026-08-20T12:45:00.000Z"),
         }),
       () =>
-        transactionMocks.courseProbe.updateMany.mockResolvedValueOnce({
-          count: 0,
-        }),
+        transactionMocks.$queryRaw.mockResolvedValueOnce([]),
     ];
     for (const arrangeRace of raceControls) {
       vi.clearAllMocks();
@@ -2514,7 +3183,6 @@ describe("course monitoring write serialization", () => {
       );
       transactionMocks.courseMonitoringEvent.findFirst.mockResolvedValue(null);
       transactionMocks.courseProbe.findFirst.mockResolvedValue(historicalProbe);
-      transactionMocks.courseProbe.updateMany.mockResolvedValue({ count: 1 });
       transactionMocks.courseAutomationDiscovery.findFirst.mockResolvedValue(
         null,
       );
@@ -3371,6 +4039,10 @@ describe("course monitoring write serialization", () => {
       action: "parked_cohort_descendant_incomplete_playbook_recovery",
     },
     {
+      provenance: "post-marker incomplete-playbook recovery",
+      action: "parked_cohort_post_marker_incomplete_playbook_recovery",
+    },
+    {
       provenance: "requestless stale-ownership recovery",
       action: "parked_cohort_requestless_stale_ownership_recovery",
     },
@@ -3410,62 +4082,98 @@ describe("course monitoring write serialization", () => {
         occurredAt: new Date("2026-07-27T15:44:00.000Z"),
         audit: {
           action,
-          ...(action === "parked_cohort_descendant_incomplete_playbook_recovery"
+          ...(action ===
+          "parked_cohort_post_marker_incomplete_playbook_recovery"
             ? {
-                admissionMode: "DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY",
-                descendantLineageDigest: "b".repeat(64),
-                descendantHandoffCount: 1,
+                admissionMode: "POST_MARKER_INCOMPLETE_PLAYBOOK_RECOVERY",
+                sameCycleRecoveryHistoryDigest: "b".repeat(64),
+                priorRecoveryMarkerDigest: "c".repeat(64),
+                priorRecoveryRuntimeVersion: "a".repeat(40),
+                recoveryRuntimeVersion: "b".repeat(40),
+                failedRuntimeVersions: ["a".repeat(40)],
+                postMarkerHistoryDigest: "c".repeat(64),
+                postMarkerBatchCount: 1,
+                postMarkerRequestCount: 0,
+                providerSnapshotFingerprint: "d".repeat(64),
+                attemptLedgerFingerprint: "e".repeat(64),
+                batchCount: 2,
+                startedRequestCount: 1,
+                playbookCompletedStageCount: 4,
+                playbookNextStage: "RENDERED_BROWSER_DISCOVERY",
+                supersededEndpointId: "endpoint-post-marker",
+                supersededEndpointAt: "2026-07-27T15:43:00.000Z",
+                customerDataIncluded: false,
+                preservesOperatorEvidence: true,
                 sameCycleRecovery: true,
                 oneShot: true,
+                preservesAttemptLedger: true,
+                preservesAttemptCounts: true,
+                preservesAttemptTimestamps: true,
                 preservesImmutableCampaignAudit: true,
+                campaign: {
+                  kind: "PARKED_COHORT",
+                  runId: "campaign-run-1",
+                  membershipDigest: "a".repeat(64),
+                  cycle: 5,
+                },
               }
-            : action === "parked_cohort_requestless_stale_ownership_recovery"
+            : action === "parked_cohort_descendant_incomplete_playbook_recovery"
               ? {
-                  admissionMode:
-                    "PARKED_COHORT_REQUESTLESS_STALE_OWNERSHIP_RECOVERY",
-                  sameCycleRecoveryHistoryDigest: "b".repeat(64),
-                  abandonedBaseRuntime: "release-old",
-                  recoveryRuntimeVersion: "release-current",
-                  requestCount: 0,
-                  releaseEvidenceAbsent: true,
-                  executionEvidenceAbsent: true,
+                  admissionMode: "DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY",
+                  descendantLineageDigest: "b".repeat(64),
+                  descendantHandoffCount: 1,
                   sameCycleRecovery: true,
                   oneShot: true,
-                  preservesAttemptLedger: true,
-                  preservesAttemptCounts: true,
-                  preservesAttemptTimestamps: true,
                   preservesImmutableCampaignAudit: true,
                 }
-              : action ===
-                  "parked_cohort_same_identity_material_change_incomplete_playbook_recovery"
+              : action === "parked_cohort_requestless_stale_ownership_recovery"
                 ? {
                     admissionMode:
-                      "SAME_IDENTITY_MATERIAL_CHANGE_INCOMPLETE_PLAYBOOK_RECOVERY",
+                      "PARKED_COHORT_REQUESTLESS_STALE_OWNERSHIP_RECOVERY",
                     sameCycleRecoveryHistoryDigest: "b".repeat(64),
-                    materialChangeLineageDigest: "c".repeat(64),
-                    providerSnapshotFingerprint: "d".repeat(64),
-                    attemptLedgerFingerprint: "e".repeat(64),
-                    batchCount: 3,
-                    startedRequestCount: 1,
-                    playbookCompletedStageCount: 4,
-                    playbookNextStage: "RENDERED_BROWSER_DISCOVERY",
-                    supersededEndpointAt: "2026-07-27T15:43:00.000Z",
-                    customerDataIncluded: false,
-                    preservesOperatorEvidence: true,
+                    abandonedBaseRuntime: "release-old",
+                    recoveryRuntimeVersion: "release-current",
+                    requestCount: 0,
+                    releaseEvidenceAbsent: true,
+                    executionEvidenceAbsent: true,
                     sameCycleRecovery: true,
                     oneShot: true,
                     preservesAttemptLedger: true,
                     preservesAttemptCounts: true,
                     preservesAttemptTimestamps: true,
                     preservesImmutableCampaignAudit: true,
-                    campaign: {
-                      kind: "PARKED_COHORT",
-                      runId: "campaign-run-1",
-                      membershipDigest: "a".repeat(64),
-                      cycle: 5,
-                    },
                   }
-                : {}),
+                : action ===
+                    "parked_cohort_same_identity_material_change_incomplete_playbook_recovery"
+                  ? {
+                      admissionMode:
+                        "SAME_IDENTITY_MATERIAL_CHANGE_INCOMPLETE_PLAYBOOK_RECOVERY",
+                      sameCycleRecoveryHistoryDigest: "b".repeat(64),
+                      materialChangeLineageDigest: "c".repeat(64),
+                      providerSnapshotFingerprint: "d".repeat(64),
+                      attemptLedgerFingerprint: "e".repeat(64),
+                      batchCount: 3,
+                      startedRequestCount: 1,
+                      playbookCompletedStageCount: 4,
+                      playbookNextStage: "RENDERED_BROWSER_DISCOVERY",
+                      supersededEndpointId: "endpoint-material-change",
+                      supersededEndpointAt: "2026-07-27T15:43:00.000Z",
+                      customerDataIncluded: false,
+                      preservesOperatorEvidence: true,
+                      sameCycleRecovery: true,
+                      oneShot: true,
+                      preservesAttemptLedger: true,
+                      preservesAttemptCounts: true,
+                      preservesAttemptTimestamps: true,
+                      preservesImmutableCampaignAudit: true,
+                      campaign: {
+                        kind: "PARKED_COHORT",
+                        runId: "campaign-run-1",
+                        membershipDigest: "a".repeat(64),
+                        cycle: 5,
+                      },
+                    }
+                  : {}),
           campaignRunId: "campaign-run-1",
           campaignMembershipDigest: "a".repeat(64),
           cycle: 5,

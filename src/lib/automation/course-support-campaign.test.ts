@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  assessParkedCourseCampaignSameCycleRecoveryHistory,
   createParkedCourseCampaignAttemptLedgerFingerprint,
   createParkedCourseCampaignAudit,
   createParkedCourseCampaignMembershipDigest,
@@ -141,7 +142,9 @@ function campaignParkedRow(input: {
   providerFamilyKey?: string;
   failureClass?: string;
   failureFingerprint?: string;
-  providerCourse?: typeof providerCourseSnapshot;
+  providerCourse?: Parameters<
+    typeof buildCourseSupportProviderSnapshotFingerprint
+  >[0];
   probes?: Array<{ id: string; courseId: string; observedAt: Date }>;
   discoveries?: Array<{ id: string; courseId: string; createdAt: Date }>;
 }) {
@@ -670,13 +673,20 @@ describe("parked course campaign", () => {
     const admittedAt = new Date("2026-08-20T12:05:00.000Z");
     const materialChangeAt = new Date("2026-08-20T12:10:00.000Z");
     const parkedAt = new Date("2026-08-20T12:45:00.000Z");
-    const providerSnapshotFingerprint =
+    const currentProviderCourse = {
+      ...providerCourseSnapshot,
+      website: "https://official.example/tee-times",
+    };
+    const capturedProviderSnapshotFingerprint =
       buildCourseSupportProviderSnapshotFingerprint(providerCourseSnapshot);
+    const providerSnapshotFingerprint =
+      buildCourseSupportProviderSnapshotFingerprint(currentProviderCourse);
     const captured = member(1, {
       cycle: 3,
       revision: 5,
       monitoringRevision: 9,
-      providerSnapshotFingerprint,
+      monitoringFailureFingerprint: "SOURCE:LEGACY",
+      providerSnapshotFingerprint: capturedProviderSnapshotFingerprint,
       attemptLedgerFingerprint:
         createParkedCourseCampaignAttemptLedgerFingerprint(null),
       playbookConclusion: "INCOMPLETE",
@@ -718,6 +728,7 @@ describe("parked course campaign", () => {
         releaseSha: "release-old",
         deployedAt: new Date("2026-08-20T12:09:00.000Z"),
         createdAt: new Date(new Date(input.createdAt).getTime() - 30_000),
+        updatedAt: new Date(input.completedAt),
         recheckDispatchKey: `dispatch-${input.ordinal}`,
         recheckDispatchStartedAt: new Date(input.createdAt),
         recheckDispatchedAt: new Date(input.createdAt),
@@ -728,7 +739,12 @@ describe("parked course campaign", () => {
       verificationRequests: [
         {
           id: `request-${input.ordinal}`,
+          courseId: "course-1",
           releaseSha: "release-old",
+          providerSnapshotFingerprint,
+          providerSnapshotAt: materialChangeAt,
+          createdAt: materialChangeAt,
+          updatedAt: new Date(input.completedAt),
           status: input.requestStatus,
           revision: input.ordinal + 1,
           attemptCount: 1,
@@ -745,8 +761,10 @@ describe("parked course campaign", () => {
       campaignParkedRow({
         cycle: 5,
         attemptLedger: partialPlaybookLedger(5, 4),
+        providerCourse: currentProviderCourse,
         events: [
           {
+            id: "endpoint-material-change",
             incidentId: "incident-1",
             eventType: "HUMAN_REVIEW_REQUESTED",
             source: "RECOVERY_CRON",
@@ -762,6 +780,7 @@ describe("parked course campaign", () => {
             },
           },
           {
+            id: "operator-material-change",
             incidentId: "incident-1",
             eventType: "REVALIDATION_REQUESTED",
             source: "OPERATOR_CLI",
@@ -781,6 +800,7 @@ describe("parked course campaign", () => {
             },
           },
           {
+            id: "campaign-admission-material-change",
             incidentId: "incident-1",
             eventType: "REVALIDATION_REQUESTED",
             source: "COURSE_SUPPORT_RESPONDER",
@@ -797,6 +817,7 @@ describe("parked course campaign", () => {
             },
           },
           {
+            id: "historical-attempt-material-change",
             incidentId: "incident-1",
             eventType: "AUTOMATION_ATTEMPTED",
             source: "COURSE_SUPPORT_RESPONDER",
@@ -878,6 +899,24 @@ describe("parked course campaign", () => {
       /^[a-f0-9]{64}$/u,
     );
 
+    const laterIncompleteStage = makeRow();
+    laterIncompleteStage.attemptLedger = partialPlaybookLedger(5, 5);
+    await expect(
+      loadParkedCourseCampaignAdmissionMembers(
+        audit,
+        database(laterIncompleteStage),
+        "campaign-run-1",
+        "release-current",
+      ),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        admissionMode:
+          "SAME_IDENTITY_MATERIAL_CHANGE_INCOMPLETE_PLAYBOOK_RECOVERY",
+        playbookCompletedStageCount: 5,
+        playbookNextStage: "BROWSER_ADAPTER_RETRY",
+      }),
+    ]);
+
     const evidenceObservedAt = new Date("2026-08-20T12:40:00.000Z");
     const planWithEvidence = async (probeId: string, discoveryId: string) => {
       const row = makeRow();
@@ -891,12 +930,13 @@ describe("parked course campaign", () => {
           createdAt: evidenceObservedAt,
         },
       ];
-      const [memberWithEvidence] = await loadParkedCourseCampaignAdmissionMembers(
-        audit,
-        database(row),
-        "campaign-run-1",
-        "release-current",
-      );
+      const [memberWithEvidence] =
+        await loadParkedCourseCampaignAdmissionMembers(
+          audit,
+          database(row),
+          "campaign-run-1",
+          "release-current",
+        );
       return memberWithEvidence!;
     };
     const evidencePlan = await planWithEvidence("probe-a", "discovery-a");
@@ -931,9 +971,7 @@ describe("parked course campaign", () => {
     );
     expect(
       alternateDiscoveryIdentityPlan.sameCycleRecoveryHistoryDigest,
-    ).not.toBe(
-      evidencePlan.sameCycleRecoveryHistoryDigest,
-    );
+    ).not.toBe(evidencePlan.sameCycleRecoveryHistoryDigest);
 
     const providerExecutionNotSticky = makeRow();
     providerExecutionNotSticky.batchIncidents[0]!.verificationRequests[0]!.evidence =
@@ -1035,6 +1073,12 @@ describe("parked course campaign", () => {
     const failClosedRows = [
       (row: ReturnType<typeof makeRow>) => {
         row.monitoringEvents.push({
+          ...row.monitoringEvents[0]!,
+          id: "endpoint-material-change-duplicate",
+        });
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.monitoringEvents.push({
           ...row.monitoringEvents[2]!,
           occurredAt: new Date("2026-08-20T12:06:00.000Z"),
         });
@@ -1070,10 +1114,39 @@ describe("parked course campaign", () => {
         }
       },
       (row: ReturnType<typeof makeRow>) => {
+        row.batchIncidents[0]!.verificationRequests[0]!.courseId =
+          "course-other";
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.batchIncidents[0]!.verificationRequests[0]!.providerSnapshotFingerprint =
+          capturedProviderSnapshotFingerprint;
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.batchIncidents[0]!.verificationRequests[0]!.providerSnapshotAt =
+          new Date(materialChangeAt.getTime() - 1);
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.batchIncidents[0]!.verificationRequests[0]!.createdAt = new Date(
+          materialChangeAt.getTime() - 1,
+        );
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.batchIncidents[0]!.verificationRequests[0]!.providerSnapshotAt =
+          new Date(
+            row.batchIncidents[0]!.verificationRequests[0]!.startedAt!.getTime() +
+              1,
+          );
+      },
+      (row: ReturnType<typeof makeRow>) => {
         row.batchIncidents[1]!.batch.status = "VERIFYING";
       },
       (row: ReturnType<typeof makeRow>) => {
         row.batchIncidents[1]!.createdAt = new Date("2026-08-20T12:18:00.000Z");
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.batchIncidents[0]!.batch.createdAt = new Date(
+          "2026-08-20T12:09:59.000Z",
+        );
       },
       (row: ReturnType<typeof makeRow>) => {
         row.batchIncidents[2]!.batch.completedAt = new Date(
@@ -1118,6 +1191,572 @@ describe("parked course campaign", () => {
         ),
       ).resolves.toEqual([]);
     }
+  });
+
+  it("plans one post-marker rendered-browser recovery only on a newer exact runtime", async () => {
+    const admittedAt = new Date("2026-08-20T12:05:00.000Z");
+    const priorBatchCompletedAt = new Date("2026-08-20T12:12:00.000Z");
+    const priorEndpointAt = new Date("2026-08-20T12:15:00.000Z");
+    const priorMarkerAt = new Date("2026-08-20T12:18:00.000Z");
+    const deployedAt = new Date("2026-08-20T12:17:00.000Z");
+    const postBatchCompletedAt = new Date("2026-08-20T12:25:00.000Z");
+    const parkedAt = new Date("2026-08-20T12:30:00.000Z");
+    const priorRuntime = "a".repeat(40);
+    const currentRuntime = "b".repeat(40);
+    const providerSnapshotFingerprint =
+      buildCourseSupportProviderSnapshotFingerprint(providerCourseSnapshot);
+    const attemptLedger = partialPlaybookLedger(4, 4);
+    const attemptLedgerFingerprint =
+      createParkedCourseCampaignAttemptLedgerFingerprint(attemptLedger);
+    const captured = member(1, {
+      cycle: 3,
+      revision: 5,
+      monitoringRevision: 9,
+      providerSnapshotFingerprint,
+      attemptLedgerFingerprint:
+        createParkedCourseCampaignAttemptLedgerFingerprint(null),
+      playbookConclusion: "INCOMPLETE",
+      latestProbeAt: null,
+      latestDiscoveryAt: null,
+    });
+    const audit = createParkedCourseCampaignAudit({
+      expectedCount: 1,
+      capturedAt,
+      members: [captured],
+    });
+    const courseRef = createHash("sha256")
+      .update("course-1")
+      .digest("hex")
+      .slice(0, 24);
+    const preMarkerEntry = () => ({
+      id: "batch-entry-before-marker",
+      batchId: "batch-before-marker",
+      incidentId: "incident-1",
+      courseId: "course-1",
+      cycle: 4,
+      result: "NEEDS_HUMAN",
+      preProbeId: null,
+      postProbeId: null,
+      proofSnapshot: { providerExecution: true },
+      verifiedIncidentUpdatedAt: null,
+      verifiedAt: null,
+      createdAt: new Date("2026-08-20T12:06:00.000Z"),
+      updatedAt: priorBatchCompletedAt,
+      batch: {
+        id: "batch-before-marker",
+        status: "PARTIAL",
+        revision: 2,
+        ownerAutomationRunId: null,
+        baseSha: priorRuntime,
+        releaseSha: priorRuntime,
+        deployedAt: new Date("2026-08-20T12:04:00.000Z"),
+        createdAt: new Date("2026-08-20T12:05:30.000Z"),
+        updatedAt: priorBatchCompletedAt,
+        recheckDispatchKey: "dispatch-before-marker",
+        recheckDispatchStartedAt: new Date("2026-08-20T12:06:00.000Z"),
+        recheckDispatchedAt: new Date("2026-08-20T12:06:00.000Z"),
+        completedAt: priorBatchCompletedAt,
+        summary: { closeout: { providerExecutionStarted: true } },
+        ownerAutomationRun: null,
+      },
+      verificationRequests: [
+        {
+          id: "request-before-marker",
+          releaseSha: priorRuntime,
+          updatedAt: priorBatchCompletedAt,
+          status: "SUCCEEDED",
+          revision: 3,
+          attemptCount: 1,
+          workflowRunId: "workflow-before-marker",
+          startedAt: new Date("2026-08-20T12:07:00.000Z"),
+          outcome: "FETCH_FAILED",
+          failureClass: "MISSING_SOURCE",
+          evidence: { providerExecution: true },
+          lastError: "source remained unavailable",
+        },
+      ],
+    });
+    const postMarkerEntry = () => ({
+      id: "batch-entry-after-marker",
+      batchId: "batch-after-marker",
+      incidentId: "incident-1",
+      courseId: "course-1",
+      cycle: 4,
+      result: "RETRY_SCHEDULED",
+      preProbeId: null,
+      postProbeId: null,
+      proofSnapshot: null,
+      verifiedIncidentUpdatedAt: null,
+      verifiedAt: null,
+      createdAt: new Date("2026-08-20T12:20:00.000Z"),
+      updatedAt: postBatchCompletedAt,
+      batch: {
+        id: "batch-after-marker",
+        status: "RETRYABLE_FAILED",
+        revision: 3,
+        ownerAutomationRunId: null,
+        baseSha: priorRuntime,
+        releaseSha: priorRuntime,
+        deployedAt,
+        createdAt: new Date("2026-08-20T12:19:00.000Z"),
+        updatedAt: postBatchCompletedAt,
+        recheckDispatchKey: null,
+        recheckDispatchStartedAt: null,
+        recheckDispatchedAt: null,
+        completedAt: postBatchCompletedAt,
+        summary: {
+          closeout: {
+            orchestrationOnly: true,
+            orchestrationOnlyCount: 1,
+            remediationAttempts: [
+              {
+                courseRef,
+                providerSnapshotFingerprint,
+                observedProviderSnapshotFingerprint:
+                  providerSnapshotFingerprint,
+                failureFingerprint: "SOURCE:MISSING",
+                observedFailureFingerprint: "SOURCE:MISSING",
+                runtimeVersion: priorRuntime,
+                activeRealSearchCount: 0,
+                consumed: false,
+                countsTowardOperationalNoProgress: false,
+                executionEvidence: {
+                  claimedImplementationPaths: false,
+                  newReleaseRecorded: false,
+                  deploymentRecorded: false,
+                  postProbeRecorded: false,
+                  providerAttemptRecorded: false,
+                  providerExecutionAttemptRecorded: false,
+                  playbookAttemptRecorded: false,
+                  terminalResultRecorded: false,
+                  providerExecutionStarted: false,
+                },
+                approach: {
+                  workMode: "DISCOVERY_ONLY",
+                  strategyAction: "DISCOVER_WITH_BROWSER",
+                  playbookStage: "RENDERED_BROWSER_DISCOVERY",
+                },
+              },
+            ],
+          },
+        },
+        ownerAutomationRun: null,
+      },
+      verificationRequests: [],
+    });
+    const priorHistory = assessParkedCourseCampaignSameCycleRecoveryHistory({
+      courseId: "course-1",
+      cycle: 4,
+      entries: [preMarkerEntry()] as never,
+      requireOrchestrationOnly: false,
+      requireStartedRequest: true,
+      requireCausalStartedRequest: true,
+      minimumStartedAt: admittedAt,
+    });
+    expect(priorHistory).not.toBeNull();
+    const endpointAudit = {
+      cycle: 4,
+      customerState: "NEEDS_HUMAN_REVIEW",
+      playbookConclusion: "INCOMPLETE",
+      playbookExhausted: false,
+      automationStalled: true,
+      parkedUntilMaterialChange: true,
+      nextStage: "RENDERED_BROWSER_DISCOVERY",
+      campaign: {
+        kind: "PARKED_COHORT",
+        runId: "campaign-run-1",
+        membershipDigest: audit.membershipDigest,
+        cycle: 4,
+      },
+      customerDataIncluded: false,
+    };
+    const makeRow = () =>
+      campaignParkedRow({
+        cycle: 4,
+        revision: 10,
+        attemptLedger,
+        events: [
+          {
+            id: "endpoint-post-marker",
+            incidentId: "incident-1",
+            eventType: "HUMAN_REVIEW_REQUESTED",
+            source: "RECOVERY_CRON",
+            failureFingerprint: "SOURCE:MISSING",
+            readPath: null,
+            occurredAt: parkedAt,
+            audit: endpointAudit,
+          },
+          {
+            id: "marker-incomplete-recovery",
+            incidentId: "incident-1",
+            eventType: "REVALIDATION_REQUESTED",
+            source: "COURSE_SUPPORT_RESPONDER",
+            failureFingerprint: "SOURCE:MISSING",
+            readPath: null,
+            occurredAt: priorMarkerAt,
+            audit: {
+              action: "parked_cohort_incomplete_playbook_recovery",
+              admissionMode: "INCOMPLETE_PLAYBOOK_RECOVERY",
+              campaignRunId: "campaign-run-1",
+              campaignMembershipDigest: audit.membershipDigest,
+              capturedCycle: 3,
+              cycle: 4,
+              sameCycleRecoveryHistoryDigest: priorHistory!.historyDigest,
+              providerSnapshotFingerprint,
+              attemptLedgerFingerprint,
+              latestProbeAt: null,
+              latestDiscoveryAt: null,
+              playbookCompletedStageCount: 4,
+              playbookNextStage: "RENDERED_BROWSER_DISCOVERY",
+              recoveryRuntimeVersion: priorRuntime,
+              sameCycleRecovery: true,
+              oneShot: true,
+              preservesAttemptLedger: true,
+              preservesAttemptCounts: true,
+              preservesAttemptTimestamps: true,
+              preservesOperatorEvidence: true,
+              preservesImmutableCampaignAudit: true,
+              campaign: endpointAudit.campaign,
+              customerDataIncluded: false,
+            },
+          },
+          {
+            id: "endpoint-before-marker",
+            incidentId: "incident-1",
+            eventType: "HUMAN_REVIEW_REQUESTED",
+            source: "RECOVERY_CRON",
+            failureFingerprint: "SOURCE:MISSING",
+            readPath: null,
+            occurredAt: priorEndpointAt,
+            audit: endpointAudit,
+          },
+          {
+            id: "campaign-admission",
+            incidentId: "incident-1",
+            eventType: "REVALIDATION_REQUESTED",
+            source: "COURSE_SUPPORT_RESPONDER",
+            failureFingerprint: "SOURCE:MISSING",
+            readPath: null,
+            occurredAt: admittedAt,
+            audit: {
+              action: "parked_cohort_admission",
+              campaignRunId: "campaign-run-1",
+              campaignMembershipDigest: audit.membershipDigest,
+              priorCycle: 3,
+              cycle: 4,
+              capturedIncidentRevision: 5,
+              capturedMonitoringRevision: 9,
+              preservesPriorAttemptEvents: true,
+              customerDataIncluded: false,
+            },
+          },
+        ],
+        batchIncidents: [preMarkerEntry(), postMarkerEntry()],
+      });
+    const database = (row: ReturnType<typeof makeRow>) => {
+      const findMany = vi.fn().mockResolvedValue([row]);
+      return {
+        database: { courseSupportIncident: { findMany } } as never,
+        findMany,
+      };
+    };
+
+    const positive = database(makeRow());
+    const planned = await loadParkedCourseCampaignAdmissionMembers(
+      audit,
+      positive.database,
+      "campaign-run-1",
+      currentRuntime,
+    );
+    expect(planned).toHaveLength(1);
+    expect(planned[0]).toMatchObject({
+      admissionMode: "POST_MARKER_INCOMPLETE_PLAYBOOK_RECOVERY",
+      capturedCycle: 3,
+      cycle: 4,
+      playbookCompletedStageCount: 4,
+      playbookNextStage: "RENDERED_BROWSER_DISCOVERY",
+      latestProbeId: null,
+      latestDiscoveryId: null,
+    });
+    expect(planned[0]?.sameCycleRecoveryHistoryDigest).toMatch(
+      /^[a-f0-9]{64}$/u,
+    );
+    expect(positive.findMany).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        where: { id: "incident-1", cycle: 4 },
+        select: expect.objectContaining({
+          batchIncidents: expect.objectContaining({ take: 21 }),
+        }),
+      }),
+    );
+
+    await expect(
+      loadParkedCourseCampaignAdmissionMembers(
+        audit,
+        database(makeRow()).database,
+        "campaign-run-1",
+        priorRuntime,
+      ),
+    ).resolves.toEqual([]);
+
+    const historicalProbeAt = new Date("2026-08-19T12:00:00.000Z");
+    const historicalAudit = createParkedCourseCampaignAudit({
+      expectedCount: 1,
+      capturedAt,
+      members: [
+        {
+          ...captured,
+          latestProbeAt: historicalProbeAt.toISOString(),
+        },
+      ],
+    });
+    const historicalPreProbe = makeRow();
+    historicalPreProbe.monitoringEvents =
+      historicalPreProbe.monitoringEvents.map((event) => ({
+        ...event,
+        audit: structuredClone(event.audit),
+      }));
+    historicalPreProbe.course.probes = [
+      {
+        id: "probe-before-marker",
+        courseId: "course-1",
+        observedAt: historicalProbeAt,
+      },
+    ];
+    historicalPreProbe.batchIncidents[1]!.preProbeId = "probe-before-marker";
+    for (const event of historicalPreProbe.monitoringEvents) {
+      const eventAudit = event.audit as Record<string, unknown>;
+      if ("campaignMembershipDigest" in eventAudit) {
+        eventAudit.campaignMembershipDigest = historicalAudit.membershipDigest;
+      }
+      const campaign = eventAudit.campaign as
+        Record<string, unknown> | undefined;
+      if (campaign) {
+        campaign.membershipDigest = historicalAudit.membershipDigest;
+      }
+    }
+    const historicalMarkerAudit = historicalPreProbe.monitoringEvents[1]!
+      .audit as Record<string, unknown>;
+    historicalMarkerAudit.latestProbeAt = historicalProbeAt.toISOString();
+    await expect(
+      loadParkedCourseCampaignAdmissionMembers(
+        historicalAudit,
+        database(historicalPreProbe).database,
+        "campaign-run-1",
+        currentRuntime,
+      ),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        admissionMode: "POST_MARKER_INCOMPLETE_PLAYBOOK_RECOVERY",
+        latestProbeId: "probe-before-marker",
+        latestProbeAt: historicalProbeAt.toISOString(),
+      }),
+    ]);
+
+    const failClosedMutations = [
+      (row: ReturnType<typeof makeRow>) => {
+        row.batchIncidents[1]!.batch.deployedAt = null;
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.batchIncidents[1]!.batch.deployedAt = priorMarkerAt;
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.batchIncidents[1]!.batch.releaseSha = currentRuntime;
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.batchIncidents[1]!.batch.createdAt = new Date(
+          "2026-08-20T12:17:59.000Z",
+        );
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.batchIncidents[0]!.verificationRequests = [];
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.batchIncidents[1]!.verificationRequests.push({
+          ...row.batchIncidents[0]!.verificationRequests[0]!,
+          id: "late-post-marker-request",
+        });
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.monitoringEvents.push({ ...row.monitoringEvents[1]! });
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.monitoringEvents.push({
+          ...row.monitoringEvents[1]!,
+          audit: {
+            ...(row.monitoringEvents[1]!.audit as Record<string, unknown>),
+            action: "parked_cohort_post_marker_incomplete_playbook_recovery",
+          },
+        });
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.monitoringEvents[0]!.occurredAt = new Date(
+          "2026-08-20T12:24:00.000Z",
+        );
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.course.probes = [
+          {
+            id: "probe-after-marker",
+            courseId: "course-1",
+            observedAt: new Date("2026-08-20T12:19:00.000Z"),
+          },
+        ];
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.course.automationDiscoveries = [
+          {
+            id: "discovery-after-marker",
+            courseId: "course-1",
+            createdAt: new Date("2026-08-20T12:19:00.000Z"),
+          },
+        ];
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.monitoringEvents.push({
+          id: "attempt-after-marker",
+          incidentId: "incident-1",
+          eventType: "AUTOMATION_ATTEMPTED",
+          source: "COURSE_SUPPORT_RESPONDER",
+          failureFingerprint: "SOURCE:MISSING",
+          readPath: null,
+          occurredAt: new Date("2026-08-20T12:19:00.000Z"),
+          audit: { cycle: 4 },
+        });
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.monitoringEvents.push({
+          id: "attempt-at-endpoint",
+          incidentId: "incident-1",
+          eventType: "AUTOMATION_ATTEMPTED",
+          source: "COURSE_SUPPORT_RESPONDER",
+          failureFingerprint: "SOURCE:MISSING",
+          readPath: null,
+          occurredAt: parkedAt,
+          audit: { cycle: 4 },
+        });
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.monitoringEvents.push({
+          id: "attempt-after-endpoint",
+          incidentId: "incident-1",
+          eventType: "AUTOMATION_ATTEMPTED",
+          source: "COURSE_SUPPORT_RESPONDER",
+          failureFingerprint: "SOURCE:MISSING",
+          readPath: null,
+          occurredAt: new Date("2026-08-20T12:31:00.000Z"),
+          audit: { cycle: 4 },
+        });
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.batchIncidents[1]!.preProbeId = "pre-probe-residue";
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.batchIncidents[1]!.postProbeId = "post-probe-residue";
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.batchIncidents[1]!.proofSnapshot = { providerExecution: true };
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.batchIncidents[1]!.verifiedIncidentUpdatedAt = new Date(
+          "2026-08-20T12:24:00.000Z",
+        );
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.batchIncidents[1]!.verifiedAt = new Date(
+          "2026-08-20T12:24:00.000Z",
+        );
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.batchIncidents[1]!.batch.recheckDispatchKey = "dispatch-residue";
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.batchIncidents[1]!.batch.recheckDispatchStartedAt = new Date(
+          "2026-08-20T12:24:00.000Z",
+        );
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.batchIncidents[1]!.batch.recheckDispatchedAt = new Date(
+          "2026-08-20T12:24:00.000Z",
+        );
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        const marker = row.monitoringEvents[1]!.audit as Record<
+          string,
+          unknown
+        >;
+        marker.attemptLedgerFingerprint = "f".repeat(64);
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        const summary = row.batchIncidents[1]!.batch.summary as {
+          closeout: { remediationAttempts: Array<Record<string, unknown>> };
+        };
+        summary.closeout.remediationAttempts[0]!.consumed = true;
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        const summary = row.batchIncidents[1]!.batch.summary as {
+          closeout: { remediationAttempts: Array<Record<string, unknown>> };
+        };
+        const execution = summary.closeout.remediationAttempts[0]!
+          .executionEvidence as Record<string, unknown>;
+        execution.claimedImplementationPaths = true;
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        const summary = row.batchIncidents[1]!.batch.summary as {
+          closeout: { remediationAttempts: Array<Record<string, unknown>> };
+        };
+        const approach = summary.closeout.remediationAttempts[0]!
+          .approach as Record<string, unknown>;
+        delete approach.workMode;
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        const summary = row.batchIncidents[1]!.batch.summary as {
+          closeout: { remediationAttempts: Array<Record<string, unknown>> };
+        };
+        const approach = summary.closeout.remediationAttempts[0]!
+          .approach as Record<string, unknown>;
+        approach.strategyAction = "IMPLEMENT_PROVIDER_ADAPTER";
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        const summary = row.batchIncidents[1]!.batch.summary as {
+          closeout: { remediationAttempts: Array<Record<string, unknown>> };
+        };
+        const approach = summary.closeout.remediationAttempts[0]!
+          .approach as Record<string, unknown>;
+        approach.playbookStage = "BROWSER_ADAPTER_RETRY";
+      },
+    ];
+    for (const mutate of failClosedMutations) {
+      const row = makeRow();
+      mutate(row);
+      await expect(
+        loadParkedCourseCampaignAdmissionMembers(
+          audit,
+          database(row).database,
+          "campaign-run-1",
+          currentRuntime,
+        ),
+      ).resolves.toEqual([]);
+    }
+
+    const tooMany = makeRow();
+    for (let ordinal = 0; ordinal < 19; ordinal += 1) {
+      const extra = preMarkerEntry();
+      extra.id = `extra-entry-${ordinal}`;
+      extra.batchId = `extra-batch-${ordinal}`;
+      extra.batch.id = `extra-batch-${ordinal}`;
+      extra.verificationRequests[0]!.id = `extra-request-${ordinal}`;
+      tooMany.batchIncidents.push(extra);
+    }
+    await expect(
+      loadParkedCourseCampaignAdmissionMembers(
+        audit,
+        database(tooMany).database,
+        "campaign-run-1",
+        currentRuntime,
+      ),
+    ).resolves.toEqual([]);
   });
 
   it("plans only the exact requestless stale-ownership campaign recovery", async () => {
@@ -2289,6 +2928,7 @@ describe("parked course campaign", () => {
     const membershipDigest = "c".repeat(64);
     const supersededEndpointAt = new Date("2026-08-20T12:20:00.000Z");
     const earlierAutomatedPark = {
+      id: "endpoint-earlier",
       eventType: "HUMAN_REVIEW_REQUESTED",
       source: "RECOVERY_CRON",
       occurredAt: new Date("2026-08-20T12:15:00.000Z"),
@@ -2301,6 +2941,7 @@ describe("parked course campaign", () => {
     };
     const supersededEndpoint = {
       ...earlierAutomatedPark,
+      id: "endpoint-superseded",
       occurredAt: supersededEndpointAt,
     };
     const marker = {
@@ -2321,6 +2962,7 @@ describe("parked course campaign", () => {
       startedRequestCount: 1,
       playbookCompletedStageCount: 4,
       playbookNextStage: "RENDERED_BROWSER_DISCOVERY",
+      supersededEndpointId: "endpoint-superseded",
       supersededEndpointAt: supersededEndpointAt.toISOString(),
       customerDataIncluded: false,
       preservesOperatorEvidence: true,
@@ -2352,6 +2994,23 @@ describe("parked course campaign", () => {
     expect(
       deriveParkedCourseCampaignHumanReviewCycles({
         events: [earlierAutomatedPark, supersededEndpoint, markerEvent],
+        campaignRunId: "campaign-run-1",
+        campaignMembershipDigest: membershipDigest,
+      }),
+    ).toEqual([5]);
+    expect(
+      deriveParkedCourseCampaignHumanReviewCycles({
+        events: [
+          supersededEndpoint,
+          markerEvent,
+          {
+            id: "operator-material-change",
+            eventType: "REVALIDATION_REQUESTED",
+            source: "OPERATOR_CLI",
+            occurredAt: new Date("2026-08-20T12:10:00.000Z"),
+            audit: { cycle: 5, providerEvidenceChanged: true },
+          },
+        ],
         campaignRunId: "campaign-run-1",
         campaignMembershipDigest: membershipDigest,
       }),
@@ -2400,6 +3059,134 @@ describe("parked course campaign", () => {
         campaignMembershipDigest: membershipDigest,
       }),
     ).toEqual([5]);
+  });
+
+  it("suppresses only the exact post-marker machine endpoint and preserves operator evidence", () => {
+    const membershipDigest = "c".repeat(64);
+    const supersededEndpointAt = new Date("2026-08-20T12:30:00.000Z");
+    const automatedEndpoint = {
+      id: "endpoint-post-marker",
+      eventType: "HUMAN_REVIEW_REQUESTED",
+      source: "RECOVERY_CRON",
+      occurredAt: supersededEndpointAt,
+      audit: {
+        cycle: 4,
+        automationStalled: true,
+        parkedUntilMaterialChange: true,
+        playbookExhausted: false,
+      },
+    };
+    const marker = {
+      action: "parked_cohort_post_marker_incomplete_playbook_recovery",
+      admissionMode: "POST_MARKER_INCOMPLETE_PLAYBOOK_RECOVERY",
+      campaignRunId: "campaign-run-1",
+      campaignMembershipDigest: membershipDigest,
+      cycle: 4,
+      sameCycleRecovery: true,
+      oneShot: true,
+      sameCycleRecoveryHistoryDigest: "d".repeat(64),
+      priorRecoveryMarkerDigest: "e".repeat(64),
+      priorRecoveryRuntimeVersion: "a".repeat(40),
+      recoveryRuntimeVersion: "b".repeat(40),
+      failedRuntimeVersions: ["a".repeat(40)],
+      postMarkerHistoryDigest: "f".repeat(64),
+      postMarkerBatchCount: 1,
+      postMarkerRequestCount: 0,
+      providerSnapshotFingerprint: "1".repeat(64),
+      attemptLedgerFingerprint: "2".repeat(64),
+      batchCount: 2,
+      startedRequestCount: 1,
+      playbookCompletedStageCount: 4,
+      playbookNextStage: "RENDERED_BROWSER_DISCOVERY",
+      supersededEndpointId: "endpoint-post-marker",
+      supersededEndpointAt: supersededEndpointAt.toISOString(),
+      customerDataIncluded: false,
+      preservesOperatorEvidence: true,
+      preservesAttemptLedger: true,
+      preservesAttemptCounts: true,
+      preservesAttemptTimestamps: true,
+      preservesImmutableCampaignAudit: true,
+      campaign: {
+        kind: "PARKED_COHORT",
+        runId: "campaign-run-1",
+        membershipDigest,
+        cycle: 4,
+      },
+    };
+    const markerEvent = {
+      eventType: "REVALIDATION_REQUESTED",
+      source: "COURSE_SUPPORT_RESPONDER",
+      occurredAt: new Date("2026-08-20T13:00:00.000Z"),
+      audit: marker,
+    };
+    expect(
+      deriveParkedCourseCampaignHumanReviewCycles({
+        events: [automatedEndpoint, markerEvent],
+        campaignRunId: "campaign-run-1",
+        campaignMembershipDigest: membershipDigest,
+      }),
+    ).toEqual([]);
+    expect(
+      deriveParkedCourseCampaignHumanReviewCycles({
+        events: [
+          {
+            ...automatedEndpoint,
+            occurredAt: new Date("2026-08-20T12:29:00.000Z"),
+          },
+          automatedEndpoint,
+          markerEvent,
+        ],
+        campaignRunId: "campaign-run-1",
+        campaignMembershipDigest: membershipDigest,
+      }),
+    ).toEqual([4]);
+    expect(
+      deriveParkedCourseCampaignHumanReviewCycles({
+        events: [
+          automatedEndpoint,
+          { ...automatedEndpoint, id: "endpoint-same-time-other" },
+          markerEvent,
+        ],
+        campaignRunId: "campaign-run-1",
+        campaignMembershipDigest: membershipDigest,
+      }),
+    ).toEqual([4]);
+    expect(
+      deriveParkedCourseCampaignHumanReviewCycles({
+        events: [
+          automatedEndpoint,
+          markerEvent,
+          {
+            eventType: "REVALIDATION_REQUESTED",
+            source: "OPERATOR_CLI",
+            occurredAt: new Date("2026-08-20T12:45:00.000Z"),
+            audit: { cycle: 4 },
+          },
+        ],
+        campaignRunId: "campaign-run-1",
+        campaignMembershipDigest: membershipDigest,
+      }),
+    ).toEqual([4]);
+    for (const malformedMarker of [
+      { ...marker, postMarkerBatchCount: 2 },
+      { ...marker, postMarkerRequestCount: 1 },
+      { ...marker, preservesOperatorEvidence: false },
+      {
+        ...marker,
+        campaign: { ...marker.campaign, membershipDigest: "9".repeat(64) },
+      },
+    ]) {
+      expect(
+        deriveParkedCourseCampaignHumanReviewCycles({
+          events: [
+            automatedEndpoint,
+            { ...markerEvent, audit: malformedMarker },
+          ],
+          campaignRunId: "campaign-run-1",
+          campaignMembershipDigest: membershipDigest,
+        }),
+      ).toEqual([4]);
+    }
   });
 
   it.each([
