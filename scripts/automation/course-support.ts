@@ -98,7 +98,53 @@ const FAILURE_DOMAINS = new Set<ResponderFailureDomain>([
 ]);
 const COURSE_SUPPORT_OPERATION_HEARTBEAT_INTERVAL_MS = 4 * 60 * 1_000;
 
+type CourseSupportDatabaseEnvironment = {
+  [key: string]: string | undefined;
+  DATABASE_URL?: string;
+};
+
+export const COURSE_SUPPORT_DATABASE_URL_FAILURE_CLASS =
+  "DATABASE_URL_MISSING";
+
+export class CourseSupportDatabaseEnvironmentError extends Error {
+  readonly outcome: ResponderOutcome = "blocked_env";
+  readonly failureDomain: ResponderFailureDomain = "ENV";
+  readonly failureClass = COURSE_SUPPORT_DATABASE_URL_FAILURE_CLASS;
+
+  constructor() {
+    super(
+      "Course-support database access requires an explicit DATABASE_URL; run the command through the configured environment wrapper."
+    );
+    this.name = "CourseSupportDatabaseEnvironmentError";
+  }
+}
+
+export function requireExplicitCourseSupportDatabaseUrl(
+  environment: CourseSupportDatabaseEnvironment
+) {
+  const databaseUrl = environment.DATABASE_URL?.replace(/^\uFEFF/, "").trim();
+  if (!databaseUrl) {
+    throw new CourseSupportDatabaseEnvironmentError();
+  }
+  return databaseUrl;
+}
+
+export async function runWithExplicitCourseSupportDatabaseUrl<T>(
+  environment: CourseSupportDatabaseEnvironment,
+  operation: () => Promise<T> | T
+) {
+  requireExplicitCourseSupportDatabaseUrl(environment);
+  return operation();
+}
+
 async function main() {
+  await runWithExplicitCourseSupportDatabaseUrl(
+    process.env,
+    runConfiguredCommand
+  );
+}
+
+async function runConfiguredCommand() {
   const [command = "inspect", ...args] = process.argv.slice(2);
   const scheduledCycle = shouldRecordAutomationWorkerCycle({ command, args });
   if (!scheduledCycle) {
@@ -1019,25 +1065,38 @@ const directEntry = process.argv[1]
 
 if (directEntry) {
   main().catch((error) => {
-    const message = sanitizeResponderText(
-      error instanceof Error ? error.message : "Unknown course-support command failure."
-    );
-    const outcome = classifyCommandFailure(message);
-    const policy = getResponderThreadPolicy({
-      outcome,
-      durableCloseoutRecorded: false
-    });
-    writeResult({
-      outcome,
-      error: message,
-      durableCloseoutRecorded: false,
-      ...policy
-    });
+    writeResult(buildCourseSupportCommandFailure(error));
     process.exitCode = 1;
   });
 }
 
-function classifyCommandFailure(message: string): ResponderOutcome {
+export function buildCourseSupportCommandFailure(error: unknown) {
+  const message = sanitizeResponderText(
+    error instanceof Error ? error.message : "Unknown course-support command failure."
+  );
+  const outcome =
+    error instanceof CourseSupportDatabaseEnvironmentError
+      ? error.outcome
+      : classifyCommandFailure(message);
+  const failureDomain = commandFailureDomain(outcome);
+  const policy = getResponderThreadPolicy({
+    outcome,
+    failureDomain,
+    durableCloseoutRecorded: false
+  });
+  return {
+    outcome,
+    ...(failureDomain ? { failureDomain } : {}),
+    ...(error instanceof CourseSupportDatabaseEnvironmentError
+      ? { failureClass: error.failureClass }
+      : {}),
+    error: message,
+    durableCloseoutRecorded: false,
+    ...policy
+  };
+}
+
+export function classifyCommandFailure(message: string): ResponderOutcome {
   const normalized = message.toLowerCase();
   if (normalized.includes("git") || normalized.includes("checkout")) {
     return "blocked_git";
@@ -1053,4 +1112,10 @@ function classifyCommandFailure(message: string): ResponderOutcome {
     return "blocked_env";
   }
   return "command_failed";
+}
+
+function commandFailureDomain(
+  outcome: ResponderOutcome
+): ResponderFailureDomain | undefined {
+  return outcome === "blocked_env" ? "ENV" : undefined;
 }
