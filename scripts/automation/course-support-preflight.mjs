@@ -141,6 +141,14 @@ export function responderChildLaunchOptions(checkout) {
   };
 }
 
+export function isApprovedCourseSupportResponderBranch(branch) {
+  return (
+    typeof branch === "string" &&
+    branch.startsWith("automation/course-support-") &&
+    branch.length > "automation/course-support-".length
+  );
+}
+
 export function selectApprovedCourseSupportResponderCheckout(input) {
   const normalize = (value) =>
     input.platform === "win32" ? value.toLowerCase() : value;
@@ -312,6 +320,7 @@ function prepareApprovedResponderCheckout(candidate, currentMain) {
   }
   const checkout = realpathSync(candidate);
   const clean = git(["status", "--porcelain"], checkout) === "";
+  const branch = git(["rev-parse", "--abbrev-ref", "HEAD"], checkout);
   const head = git(["rev-parse", "HEAD"], checkout);
   const counts = git(["rev-list", "--left-right", "--count", "HEAD...origin/main"], checkout)
     ?.split(/\s+/u)
@@ -320,7 +329,7 @@ function prepareApprovedResponderCheckout(candidate, currentMain) {
     git(["diff", "--name-only", "HEAD..origin/main", "--", "package-lock.json"], checkout)
   );
   const plan = getResponderCheckoutRefreshPlan({
-    prepared: true,
+    prepared: isApprovedCourseSupportResponderBranch(branch),
     clean,
     currentMain,
     head,

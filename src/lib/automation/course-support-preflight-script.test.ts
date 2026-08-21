@@ -6,6 +6,7 @@ import {
   generatedPrismaSetupRequiredResult,
   getResponderCheckoutRefreshPlan,
   inspectGeneratedPrismaClient,
+  isApprovedCourseSupportResponderBranch,
   launchFailureResult,
   requiredCourseSupportIncidentScalarFields,
   responderChildLaunchOptions,
@@ -143,6 +144,17 @@ describe("course support preflight process launch", () => {
       exactHead: true
     });
     expect(responderChildLaunchOptions(checkout)).toMatchObject({ cwd: checkout });
+  });
+
+  it("admits only responder-owned task branches", () => {
+    expect(
+      isApprovedCourseSupportResponderBranch("automation/course-support-self-healing")
+    ).toBe(true);
+    expect(isApprovedCourseSupportResponderBranch("automation/course-support-")).toBe(false);
+    expect(isApprovedCourseSupportResponderBranch("fix/recover-unstarted-course-checks")).toBe(
+      false
+    );
+    expect(isApprovedCourseSupportResponderBranch("main")).toBe(false);
   });
 
   it("routes the static responder command through cmd.exe on Windows", () => {
