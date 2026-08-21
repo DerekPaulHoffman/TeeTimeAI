@@ -38,6 +38,8 @@ import {
   runSerializedCourseMonitoringWrite
 } from "./course-monitoring";
 import {
+  ACTIVE_OWNED_COURSE_SUPPORT_BROWSER_RESULTS,
+  isActiveOwnedCourseSupportBrowserResult,
   runCourseSupportBrowserPersistenceWrite,
   type CourseSupportBrowserPersistenceFence
 } from "./course-support-browser-stages";
@@ -712,12 +714,16 @@ async function listExactIncidentBrowserProbeTarget(input: {
     course?.monitoringMode === "LOCAL_READER_ONLY" &&
     nextPlaybookStage === "INDEPENDENT_CONFIRMATION"
   );
+  const currentOwnedBrowserStageEligible = Boolean(
+    currentOwnedFence && course?.isPublic !== false
+  );
   if (
     !course ||
     !probeUrl ||
     !probeCourse ||
     (course.monitoringMode === "LOCAL_READER_ONLY" && !readerOnlyIndependentConfirmation) ||
     (!shouldQueueBrowserProbe(probeCourse) &&
+      !currentOwnedBrowserStageEligible &&
       !hasCurrentTechnicalAccessFailure &&
       !hasOwnedBlockedToolingAccessFailure &&
       !hasCurrentUnsupportedCoverageFailure &&
@@ -809,7 +815,9 @@ async function hasCurrentOwnedBrowserProbeBatchFence(
           incidentId: fence.incidentId,
           courseId: fence.courseId,
           cycle: fence.cycle,
-          result: "PENDING"
+          result: {
+            in: [...ACTIVE_OWNED_COURSE_SUPPORT_BROWSER_RESULTS]
+          }
         }
       }
     },
@@ -905,7 +913,7 @@ async function getOwnedCourseSupportSourceSearchCandidate(
     !entry ||
     entry.courseId !== fence.courseId ||
     entry.cycle !== fence.cycle ||
-    entry.result !== "PENDING" ||
+    !isActiveOwnedCourseSupportBrowserResult(entry.result) ||
     Boolean(entry.course.website || entry.course.detectedBookingUrl) ||
     entry.incident.id !== fence.incidentId ||
     entry.incident.cycle !== fence.cycle ||

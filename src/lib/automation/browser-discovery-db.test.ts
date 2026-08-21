@@ -3004,7 +3004,7 @@ describe("browser discovery persistence", () => {
     expect(targets[0]?.course.automationEligibility).toBe("BLOCKED");
   });
 
-  it("uses an unprojected source candidate only for its exact owned browser fence", async () => {
+  it.each(["PENDING", "STALE_EVIDENCE", "RETRY_SCHEDULED"])("uses an unprojected source candidate only for its exact owned %s browser fence", async (result) => {
     const fence = {
       batchId: "batch-source",
       leaseToken: "lease-source",
@@ -3073,7 +3073,7 @@ describe("browser discovery persistence", () => {
         {
           courseId: fence.courseId,
           cycle: fence.cycle,
-          result: "PENDING",
+          result,
           course: {
             website: null,
             detectedBookingUrl: null
@@ -3126,7 +3126,9 @@ describe("browser discovery persistence", () => {
   });
 
   it.each([
-    ["completed entry", { result: "RESTORED" }],
+    ["restored entry", { result: "RESTORED" }],
+    ["final-disposition entry", { result: "FINAL_DISPOSITION" }],
+    ["needs-human entry", { result: "NEEDS_HUMAN" }],
     ["stale incident status", { incidentStatus: "RESOLVED" }],
     ["different active batch", { activeBatchId: "batch-other" }],
     ["different incident cycle", { incidentCycle: 3 }],

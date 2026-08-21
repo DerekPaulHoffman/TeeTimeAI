@@ -30,6 +30,7 @@ import {
   type AutomationPlaybookEventInput
 } from "./course-monitoring-playbook";
 import {
+  ACTIVE_OWNED_COURSE_SUPPORT_BROWSER_RESULTS,
   persistOwnedCourseSupportBrowserPlaybookStages,
   type CourseSupportBrowserPersistenceFence,
   type CourseSupportBrowserStageBatch
@@ -278,6 +279,21 @@ function blockedToolingBrowserProbeCourse(
   };
 }
 
+function fetchFailedMissingMetadataBrowserProbeCourse(
+  overrides: Record<string, unknown> = {}
+) {
+  const base = blockedToolingBrowserProbeCourse("AUTH");
+  return {
+    ...base,
+    supportIncident: {
+      ...base.supportIncident,
+      kind: "FETCH_FAILED",
+      failureClass: "MISSING_METADATA"
+    },
+    ...overrides
+  };
+}
+
 describe("automation query payloads", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -363,7 +379,9 @@ describe("automation query payloads", () => {
               incidentId: "incident-blocked-tooling",
               courseId: "course-blocked-tooling",
               cycle: 1,
-              result: "PENDING"
+              result: {
+                in: [...ACTIVE_OWNED_COURSE_SUPPORT_BROWSER_RESULTS]
+              }
             }
           }
         },
@@ -381,6 +399,81 @@ describe("automation query payloads", () => {
 
       await expect(
         listBrowserProbeTargets(1, undefined, "course-blocked-tooling")
+      ).resolves.toEqual([]);
+    }
+  );
+
+  it("selects an owned FETCH_FAILED/MISSING_METADATA course at its exact rendered stage", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      fetchFailedMissingMetadataBrowserProbeCourse()
+    ] as never);
+
+    await expect(
+      listBrowserProbeTargets(
+        1,
+        undefined,
+        "course-blocked-tooling",
+        ownedBrowserPersistenceFence()
+      )
+    ).resolves.toEqual([
+      expect.objectContaining({
+        course: expect.objectContaining({ id: "course-blocked-tooling" }),
+        probeUrl: "https://course.example/tee-times"
+      })
+    ]);
+  });
+
+  it("keeps an unowned FETCH_FAILED/MISSING_METADATA course out of exact browser selection", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      fetchFailedMissingMetadataBrowserProbeCourse()
+    ] as never);
+
+    await expect(
+      listBrowserProbeTargets(1, undefined, "course-blocked-tooling")
+    ).resolves.toEqual([]);
+    expect(mockedPrisma.courseSupportBatch.findFirst).not.toHaveBeenCalled();
+  });
+
+  it("keeps FETCH_FAILED/MISSING_METADATA excluded when its owner fence is stale", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      fetchFailedMissingMetadataBrowserProbeCourse()
+    ] as never);
+    mockedPrisma.courseSupportBatch.findFirst.mockResolvedValue(null);
+
+    await expect(
+      listBrowserProbeTargets(
+        1,
+        undefined,
+        "course-blocked-tooling",
+        ownedBrowserPersistenceFence()
+      )
+    ).resolves.toEqual([]);
+  });
+
+  it.each([
+    ["a private identity", { isPublic: false }],
+    [
+      "an unsafe source",
+      {
+        website: "http://127.0.0.1/private",
+        detectedBookingUrl: "http://127.0.0.1/private"
+      }
+    ]
+  ])(
+    "does not let an exact owner fence admit FETCH_FAILED/MISSING_METADATA with %s",
+    async (_label, overrides) => {
+      mockedPrisma.course.findMany.mockResolvedValue([
+        fetchFailedMissingMetadataBrowserProbeCourse(overrides)
+      ] as never);
+      mockedPrisma.courseMonitoringEvent.findFirst.mockResolvedValue(null);
+
+      await expect(
+        listBrowserProbeTargets(
+          1,
+          undefined,
+          "course-blocked-tooling",
+          ownedBrowserPersistenceFence()
+        )
       ).resolves.toEqual([]);
     }
   );
@@ -451,7 +544,9 @@ describe("automation query payloads", () => {
                 incidentId: fence.incidentId,
                 courseId: fence.courseId,
                 cycle: fence.cycle,
-                result: "PENDING"
+                result: {
+                  in: [...ACTIVE_OWNED_COURSE_SUPPORT_BROWSER_RESULTS]
+                }
               })
             }
           })

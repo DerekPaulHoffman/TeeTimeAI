@@ -30,6 +30,18 @@ export type CourseSupportBrowserStageBatch = {
   incidents: CourseSupportBrowserStageEntry[];
 };
 
+export const ACTIVE_OWNED_COURSE_SUPPORT_BROWSER_RESULTS = [
+  "PENDING",
+  "STALE_EVIDENCE",
+  "RETRY_SCHEDULED",
+] as const;
+
+export function isActiveOwnedCourseSupportBrowserResult(result: string) {
+  return ACTIVE_OWNED_COURSE_SUPPORT_BROWSER_RESULTS.some(
+    (activeResult) => activeResult === result,
+  );
+}
+
 type BrowserReleaseFence = {
   releaseSha: string;
   deployedAt: Date;
@@ -131,7 +143,7 @@ export async function runCourseSupportBrowserPersistenceWrite<T>(input: {
     !membership ||
     membership.courseId !== fence.courseId ||
     membership.cycle !== fence.cycle ||
-    membership.result !== "PENDING" ||
+    !isActiveOwnedCourseSupportBrowserResult(membership.result) ||
     !incident ||
     incident.cycle !== fence.cycle ||
     assessAutomationPlaybook(incident.attemptLedger, incident.cycle)
@@ -164,7 +176,7 @@ export function selectOwnedCourseSupportBrowserStageTargets(input: {
 }): CourseSupportBrowserStageTarget[] {
   return input.entries.flatMap((entry, index) => {
     if (
-      entry.result !== "PENDING" ||
+      !isActiveOwnedCourseSupportBrowserResult(entry.result) ||
       entry.incident.status !== "AUTO_INVESTIGATING" ||
       entry.incident.activeBatchId !== input.batchId ||
       entry.incident.cycle !== entry.cycle
@@ -260,7 +272,7 @@ export async function persistOwnedCourseSupportBrowserPlaybookStages(
         (entry) =>
           entry.courseId === target.courseId &&
           entry.incident.id === initialEntry.incident.id &&
-          entry.result === "PENDING" &&
+          isActiveOwnedCourseSupportBrowserResult(entry.result) &&
           entry.incident.status === "AUTO_INVESTIGATING" &&
           entry.incident.activeBatchId === input.batchId &&
           entry.incident.cycle === entry.cycle,

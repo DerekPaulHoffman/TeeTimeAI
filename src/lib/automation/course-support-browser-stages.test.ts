@@ -14,6 +14,10 @@ import {
   selectOwnedCourseSupportBrowserStageTargets,
   type CourseSupportBrowserStageBatch,
 } from "./course-support-browser-stages";
+import {
+  runCourseSupportVerificationPass,
+  runCourseSupportVerificationWatch,
+} from "./course-support-verification-watch";
 
 const runtimeVersion = "a".repeat(40);
 
@@ -84,34 +88,99 @@ function ownedBrowserBatch(
   };
 }
 
-describe("selectOwnedCourseSupportBrowserStageTargets", () => {
-  it("keeps an owned automation-stalled customer course eligible for its browser stage", () => {
-    expect(
-      selectOwnedCourseSupportBrowserStageTargets({
-        batchId: "batch-1",
-        entries: [
-          {
-            courseId: "course-1",
-            cycle: 1,
-            result: "PENDING",
-            incident: {
-              id: "incident-1",
-              cycle: 1,
-              status: "AUTO_INVESTIGATING",
-              activeBatchId: "batch-1",
-              attemptLedger: ledger(throughHttpRetry),
-            },
-          },
-        ],
+function browserPersistenceFence() {
+  return {
+    batchId: "batch-1",
+    leaseToken: "lease-1",
+    ownerThreadId: "thread-1",
+    releaseSha: runtimeVersion,
+    deployedAt: new Date("2026-07-21T11:50:00.000Z"),
+    runtimeVersion,
+    incidentId: "incident-1",
+    courseId: "course-1",
+    cycle: 1,
+    stage: "RENDERED_BROWSER_DISCOVERY" as const,
+  };
+}
+
+function ownedBrowserPersistenceTransaction(result: string) {
+  return {
+    courseSupportIncident: {
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      findUnique: vi.fn().mockResolvedValue({
+        cycle: 1,
+        attemptLedger: ledger(throughHttpRetry),
       }),
-    ).toEqual([
-      {
-        ordinal: 1,
+    },
+    courseSupportBatch: {
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    },
+    courseSupportBatchIncident: {
+      findUnique: vi.fn().mockResolvedValue({
         courseId: "course-1",
-        stage: "RENDERED_BROWSER_DISCOVERY",
-      },
-    ]);
-  });
+        cycle: 1,
+        result,
+      }),
+    },
+  } as unknown as Prisma.TransactionClient;
+}
+
+describe("selectOwnedCourseSupportBrowserStageTargets", () => {
+  it.each(["PENDING", "STALE_EVIDENCE", "RETRY_SCHEDULED"])(
+    "keeps an owned %s member eligible for its current browser stage",
+    (result) => {
+      expect(
+        selectOwnedCourseSupportBrowserStageTargets({
+          batchId: "batch-1",
+          entries: [
+            {
+              courseId: "course-1",
+              cycle: 1,
+              result,
+              incident: {
+                id: "incident-1",
+                cycle: 1,
+                status: "AUTO_INVESTIGATING",
+                activeBatchId: "batch-1",
+                attemptLedger: ledger(throughHttpRetry),
+              },
+            },
+          ],
+        }),
+      ).toEqual([
+        {
+          ordinal: 1,
+          courseId: "course-1",
+          stage: "RENDERED_BROWSER_DISCOVERY",
+        },
+      ]);
+    },
+  );
+
+  it.each(["RESTORED", "FINAL_DISPOSITION", "NEEDS_HUMAN"])(
+    "keeps terminal %s members out of owner-browser selection",
+    (result) => {
+      expect(
+        selectOwnedCourseSupportBrowserStageTargets({
+          batchId: "batch-1",
+          entries: [
+            {
+              courseId: "course-1",
+              cycle: 1,
+              result,
+              incident: {
+                id: "incident-1",
+                cycle: 1,
+                status: "AUTO_INVESTIGATING",
+                activeBatchId: "batch-1",
+                attemptLedger: ledger(throughHttpRetry),
+              },
+            },
+          ],
+        }),
+      ).toEqual([]);
+    },
+  );
 
   it("selects independent browser confirmation only after the reader is terminal", () => {
     const attemptLedger = ledger([
@@ -383,34 +452,28 @@ describe("persistOwnedCourseSupportBrowserPlaybookStages", () => {
     expect(runBrowserProbe).toHaveBeenCalledTimes(2);
   });
 
-  it("runs only the pending member in a mixed settled browser batch", async () => {
+  it("runs every active owner-stage result and excludes terminal members in a mixed batch", async () => {
+    const results = [
+      "PENDING",
+      "STALE_EVIDENCE",
+      "RETRY_SCHEDULED",
+      "RESTORED",
+      "FINAL_DISPOSITION",
+      "NEEDS_HUMAN",
+    ];
     const current = ownedBrowserBatch({
-      incidents: [
-        {
-          courseId: "course-settled",
+      incidents: results.map((result, index) => ({
+        courseId: `course-${index + 1}`,
+        cycle: 1,
+        result,
+        incident: {
+          id: `incident-${index + 1}`,
           cycle: 1,
-          result: "RETRY_SCHEDULED",
-          incident: {
-            id: "incident-settled",
-            cycle: 1,
-            status: "AUTO_INVESTIGATING",
-            activeBatchId: "batch-1",
-            attemptLedger: ledger(throughHttpRetry),
-          },
+          status: "AUTO_INVESTIGATING",
+          activeBatchId: "batch-1",
+          attemptLedger: ledger(throughHttpRetry),
         },
-        {
-          courseId: "course-pending",
-          cycle: 1,
-          result: "PENDING",
-          incident: {
-            id: "incident-pending",
-            cycle: 1,
-            status: "AUTO_INVESTIGATING",
-            activeBatchId: "batch-1",
-            attemptLedger: ledger(throughHttpRetry),
-          },
-        },
-      ],
+      })),
     });
     const runBrowserProbe = vi.fn(async () => ({ persistedCount: 1 }));
 
@@ -419,15 +482,145 @@ describe("persistOwnedCourseSupportBrowserPlaybookStages", () => {
         loadBatch: vi.fn().mockResolvedValue(current),
         runBrowserProbe,
       }),
-    ).resolves.toMatchObject({ eligibleCount: 1, persistedCount: 1 });
+    ).resolves.toMatchObject({ eligibleCount: 3, persistedCount: 3 });
 
+    expect(runBrowserProbe).toHaveBeenCalledTimes(3);
+    expect(
+      runBrowserProbe.mock.calls.map(([call]) => call.courseId),
+    ).toEqual(["course-1", "course-2", "course-3"]);
+  });
+
+  it("advances a stale browser projection once and does not re-probe its completed stage", async () => {
+    const current = ownedBrowserBatch({
+      incidents: [
+        {
+          ...ownedBrowserBatch().incidents[0],
+          result: "STALE_EVIDENCE",
+        },
+      ],
+    });
+    const runBrowserProbe = vi.fn(
+      async ({ beforePersist, persistenceFence }) => {
+        await beforePersist();
+        current.incidents[0].incident.attemptLedger =
+          appendAutomationPlaybookEvent(
+            current.incidents[0].incident.attemptLedger,
+            {
+              cycle: persistenceFence.cycle,
+              stage: "RENDERED_BROWSER_DISCOVERY",
+              transition: "COMPLETED",
+              readPath: "RENDERED_BROWSER",
+              evidenceKind: "RENDERED_PAGE",
+              failureFingerprint:
+                "PLAYBOOK:RENDERED_BROWSER_DISCOVERY:COMPLETED",
+              runtimeVersion: persistenceFence.runtimeVersion,
+            },
+          );
+        return { persistedCount: 1 };
+      },
+    );
+
+    await expect(
+      persistOwnedCourseSupportBrowserPlaybookStages(input, {
+        loadBatch: vi.fn(async () => current),
+        runBrowserProbe,
+      }),
+    ).resolves.toMatchObject({ eligibleCount: 1, persistedCount: 1 });
+    expect(
+      assessAutomationPlaybook(
+        current.incidents[0].incident.attemptLedger,
+        1,
+      ).nextStage,
+    ).toBe("BROWSER_ADAPTER_RETRY");
+
+    await expect(
+      persistOwnedCourseSupportBrowserPlaybookStages(input, {
+        loadBatch: vi.fn(async () => current),
+        runBrowserProbe,
+      }),
+    ).resolves.toMatchObject({ eligibleCount: 0, persistedCount: 0 });
     expect(runBrowserProbe).toHaveBeenCalledOnce();
-    expect(runBrowserProbe).toHaveBeenCalledWith(
-      expect.objectContaining({
-        courseId: "course-pending",
-        mode: "RENDERED",
+  });
+
+  it("runs a detached retry's newly exposed browser stage in the same watched batch", async () => {
+    const current = ownedBrowserBatch({
+      incidents: [
+        {
+          ...ownedBrowserBatch().incidents[0],
+          incident: {
+            ...ownedBrowserBatch().incidents[0].incident,
+            attemptLedger: ledger(throughHttpRetry.slice(0, -1)),
+          },
+        },
+      ],
+    });
+    let verificationCount = 0;
+    const observedBatchIds: string[] = [];
+    const runBrowserProbe = vi.fn(
+      async ({ beforePersist, persistenceFence }) => {
+        observedBatchIds.push(persistenceFence.batchId);
+        await beforePersist();
+        current.incidents[0].incident.attemptLedger =
+          appendAutomationPlaybookEvent(
+            current.incidents[0].incident.attemptLedger,
+            {
+              cycle: persistenceFence.cycle,
+              stage: "RENDERED_BROWSER_DISCOVERY",
+              transition: "FACTUAL_FINAL",
+              readPath: "RENDERED_BROWSER",
+              evidenceKind: "RENDERED_PAGE",
+              factualDisposition: "MANUAL_DIRECT",
+              failureFingerprint: "BROWSER:MANUAL_DIRECT",
+              runtimeVersion: persistenceFence.runtimeVersion,
+            },
+          );
+        return { persistedCount: 1 };
+      },
+    );
+    const pass = vi.fn(() =>
+      runCourseSupportVerificationPass({
+        persistBrowserStages: () =>
+          persistOwnedCourseSupportBrowserPlaybookStages(input, {
+            loadBatch: vi.fn(async () => current),
+            runBrowserProbe,
+          }),
+        verifyBatch: async () => {
+          verificationCount += 1;
+          if (verificationCount === 1) {
+            current.incidents[0].incident.attemptLedger =
+              appendAutomationPlaybookEvent(
+                current.incidents[0].incident.attemptLedger,
+                throughHttpRetry[throughHttpRetry.length - 1],
+              );
+            current.incidents[0].result = "RETRY_SCHEDULED";
+            return { detachedVerification: { rerunNeeded: true } };
+          }
+          if (verificationCount === 2) {
+            current.incidents[0].result = "FINAL_DISPOSITION";
+          }
+          return { detachedVerification: { rerunNeeded: false } };
+        },
       }),
     );
+    const closeout = vi.fn(async () => ({ durableCloseoutRecorded: true }));
+
+    const result = await runCourseSupportVerificationWatch({
+      pass,
+      closeout,
+      sleep: async () => undefined,
+    });
+
+    expect(result.passCount).toBe(4);
+    expect(runBrowserProbe).toHaveBeenCalledOnce();
+    expect(observedBatchIds).toEqual(["batch-1"]);
+    expect(closeout).toHaveBeenCalledOnce();
+    expect(
+      assessAutomationPlaybook(
+        current.incidents[0].incident.attemptLedger,
+        1,
+      ).nextStage,
+    ).toBeNull();
+    expect(current.incidents[0].result).toBe("FINAL_DISPOSITION");
   });
 
   it("does not invoke the persisted browser runner before the release fence exists", async () => {
@@ -536,6 +729,42 @@ describe("persistOwnedCourseSupportBrowserPlaybookStages", () => {
     expect(downstreamMutation).not.toHaveBeenCalled();
   });
 
+  it.each(["RESTORED", "FINAL_DISPOSITION", "NEEDS_HUMAN"])(
+    "rejects a pre-persist result race to %s",
+    async (result) => {
+      const current = ownedBrowserBatch({
+        incidents: [
+          {
+            ...ownedBrowserBatch().incidents[0],
+            result: "RETRY_SCHEDULED",
+          },
+        ],
+      });
+      const terminal = ownedBrowserBatch({
+        incidents: [{ ...current.incidents[0], result }],
+      });
+      const loadBatch = vi
+        .fn()
+        .mockResolvedValueOnce(current)
+        .mockResolvedValueOnce(current)
+        .mockResolvedValueOnce(terminal);
+      const downstreamMutation = vi.fn();
+      const runBrowserProbe = vi.fn(async ({ beforePersist }) => {
+        await beforePersist();
+        downstreamMutation();
+        return { persistedCount: 1 };
+      });
+
+      await expect(
+        persistOwnedCourseSupportBrowserPlaybookStages(input, {
+          loadBatch,
+          runBrowserProbe,
+        }),
+      ).rejects.toThrow("lost current course ownership");
+      expect(downstreamMutation).not.toHaveBeenCalled();
+    },
+  );
+
   it("blocks discovery, course, and ledger writes after a handoff that follows the precheck", async () => {
     const current = ownedBrowserBatch();
     const discoveryWrite = vi.fn().mockResolvedValue(undefined);
@@ -581,48 +810,39 @@ describe("persistOwnedCourseSupportBrowserPlaybookStages", () => {
     expect(ledgerWrite).not.toHaveBeenCalled();
   });
 
-  it("rejects a browser write after its batch member is no longer pending", async () => {
-    const mutate = vi.fn();
-    const transaction = {
-      courseSupportIncident: {
-        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
-        findUnique: vi.fn().mockResolvedValue({
-          cycle: 1,
-          attemptLedger: ledger(throughHttpRetry),
-        }),
-      },
-      courseSupportBatch: {
-        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
-      },
-      courseSupportBatchIncident: {
-        findUnique: vi.fn().mockResolvedValue({
-          courseId: "course-1",
-          cycle: 1,
-          result: "RETRY_SCHEDULED",
-        }),
-      },
-    } as unknown as Prisma.TransactionClient;
+  it.each(["PENDING", "STALE_EVIDENCE", "RETRY_SCHEDULED"])(
+    "permits a transaction write for an active owned %s member",
+    async (result) => {
+      const mutate = vi.fn(async () => "persisted");
+      const transaction = ownedBrowserPersistenceTransaction(result);
 
-    await expect(
-      runCourseSupportBrowserPersistenceWrite({
-        transaction,
-        fence: {
-          batchId: "batch-1",
-          leaseToken: "lease-1",
-          ownerThreadId: "thread-1",
-          releaseSha: runtimeVersion,
-          deployedAt: new Date("2026-07-21T11:50:00.000Z"),
-          runtimeVersion,
-          incidentId: "incident-1",
-          courseId: "course-1",
-          cycle: 1,
-          stage: "RENDERED_BROWSER_DISCOVERY",
-        },
-        mutate,
-      }),
-    ).rejects.toThrow("stage ownership changed inside persistence");
-    expect(mutate).not.toHaveBeenCalled();
-  });
+      await expect(
+        runCourseSupportBrowserPersistenceWrite({
+          transaction,
+          fence: browserPersistenceFence(),
+          mutate,
+        }),
+      ).resolves.toBe("persisted");
+      expect(mutate).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each(["RESTORED", "FINAL_DISPOSITION", "NEEDS_HUMAN"])(
+    "rejects a transaction result race to %s",
+    async (result) => {
+      const mutate = vi.fn();
+      const transaction = ownedBrowserPersistenceTransaction(result);
+
+      await expect(
+        runCourseSupportBrowserPersistenceWrite({
+          transaction,
+          fence: browserPersistenceFence(),
+          mutate,
+        }),
+      ).rejects.toThrow("stage ownership changed inside persistence");
+      expect(mutate).not.toHaveBeenCalled();
+    },
+  );
 
   it("defers factual closeout and search probes so a newer workflow success remains authoritative", async () => {
     const current = ownedBrowserBatch();
