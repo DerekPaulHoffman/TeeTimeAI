@@ -10520,6 +10520,198 @@ describe("detached verification atomic batch fences", () => {
     return batch;
   }
 
+  function productionFailureCooldownBatch(input: {
+    incidentFailureClass: "MISSING_METADATA" | "HTTP_5XX";
+    observedFailureClass: "MISSING_METADATA" | "HTTP_5XX" | "SCHEMA";
+    closeoutAt: Date;
+    batchCreatedAt?: Date;
+    priorCycleBatchCreatedAt?: Date;
+  }) {
+    const cycle = 17;
+    const providerFamilyKey = "booking.example";
+    const incidentFailureFingerprint = buildProviderFailureFingerprint({
+      providerFamilyKey,
+      failureClass: input.incidentFailureClass,
+      operation: "AVAILABILITY",
+    });
+    const observedFailureFingerprint = buildProviderFailureFingerprint({
+      providerFamilyKey,
+      failureClass: input.observedFailureClass,
+      operation: "AVAILABILITY",
+    });
+    const handoffAt = new Date("2026-07-15T19:45:00.000Z");
+    const observedAt = new Date(input.closeoutAt.getTime() - 60_000);
+    const requestNextAttemptAt = new Date(
+      input.closeoutAt.getTime() + 5 * 60_000,
+    );
+    const providerRetryNotBeforeAt = new Date(
+      input.closeoutAt.getTime() + 24 * 60_000,
+    );
+    const proof = {
+      kind: "PROVIDER_VERIFICATION_FAILURE",
+      status: "RETRYABLE_FAILED",
+      outcome: "FETCH_FAILED",
+      failureClass: input.observedFailureClass,
+      observedAt: observedAt.toISOString(),
+      completedAt: null,
+      nextAttemptAt: requestNextAttemptAt.toISOString(),
+      providerRetryNotBeforeAt: providerRetryNotBeforeAt.toISOString(),
+      runtimeVersion: releaseSha,
+      providerExecution: true,
+      providerSnapshotFingerprint: providerFingerprint,
+    };
+    let attemptLedger: unknown = browserReadyAttemptLedger(cycle);
+    attemptLedger = appendAutomationPlaybookEvent(attemptLedger, {
+      cycle,
+      stage: "RENDERED_BROWSER_DISCOVERY",
+      transition: "COMPLETED",
+      readPath: "RENDERED_BROWSER",
+      evidenceKind: "RENDERED_PAGE",
+      failureFingerprint: "TEST:RENDERED_BROWSER:COMPLETE",
+      runtimeVersion: releaseSha,
+      observedAt,
+    });
+    const batch = closeoutBatch("RETRY_SCHEDULED", proof);
+    Object.assign(batch, {
+      baseSha: releaseSha,
+      releaseSha,
+      deployedAt: new Date("2026-07-15T19:50:00.000Z"),
+      createdAt:
+        input.batchCreatedAt ??
+        new Date(input.closeoutAt.getTime() - 5 * 60_000),
+      providerFamilyKey,
+      summary: {
+        ...healthyDetachedDispatch(),
+        searchExecutionFence: emptySearchExecutionFence(),
+        remediation: {
+          workMode: "VERIFY_TRANSIENT",
+          strategyAction: "RUN_TYPED_ADAPTER",
+          playbookStage: "BROWSER_ADAPTER_RETRY",
+          allowUnchangedRuntime: true,
+          requiresImplementationPath: false,
+          reason: "EXISTING_SUPPORT_READY",
+          retryBudget: null,
+          attempts: [
+            {
+              courseRef: createHash("sha256")
+                .update("course-1")
+                .digest("hex")
+                .slice(0, 24),
+              providerSnapshotFingerprint: providerFingerprint,
+              failureFingerprint: incidentFailureFingerprint,
+              playbookEventCountAtClaim: 4,
+              approach: {
+                workMode: "VERIFY_TRANSIENT",
+                strategyAction: "RUN_TYPED_ADAPTER",
+                playbookStage: "BROWSER_ADAPTER_RETRY",
+              },
+            },
+          ],
+        },
+      },
+    });
+    batch.incidents[0].cycle = cycle;
+    batch.incidents[0].verifiedAt = observedAt;
+    batch.incidents[0].verifiedIncidentUpdatedAt = observedAt;
+    batch.incidents[0].updatedAt = observedAt;
+    Object.assign(batch.incidents[0].course.monitoringStatus!, {
+      failureFingerprint: incidentFailureFingerprint,
+    });
+    Object.assign(batch.incidents[0].incident, {
+      cycle,
+      kind: "FETCH_FAILED",
+      providerFamilyKey,
+      failureClass: input.incidentFailureClass,
+      failureFingerprint: incidentFailureFingerprint,
+      attemptCount: 2,
+      attemptLedger,
+      confirmedAt: new Date("2026-07-15T18:30:00.000Z"),
+      firstSeenAt: new Date("2026-07-15T18:00:00.000Z"),
+      updatedAt: observedAt,
+      batchIncidents: input.priorCycleBatchCreatedAt
+        ? [
+            {
+              id: "prior-current-cycle-entry",
+              cycle,
+              verificationRequests: [],
+              batch: {
+                summary: {},
+                releaseSha,
+                createdAt: input.priorCycleBatchCreatedAt,
+              },
+            },
+          ]
+        : [],
+      monitoringEvents: [
+        {
+          occurredAt: new Date("2026-07-15T19:50:00.000Z"),
+          audit: {
+            action: "orchestration_retry_scheduled",
+            cycle,
+            customerDataIncluded: false,
+          },
+        },
+        {
+          occurredAt: handoffAt,
+          audit: {
+            providerFamilyHandoff: true,
+            providerFamilyChanged: false,
+            providerSnapshotChanged: false,
+            priorCycle: cycle - 1,
+            cycle,
+            priorProviderFamilyKey: providerFamilyKey,
+            providerFamilyKey,
+            priorFailureFingerprint: buildProviderFailureFingerprint({
+              providerFamilyKey,
+              failureClass: "UNKNOWN",
+              operation: "AVAILABILITY",
+            }),
+            failureFingerprint: incidentFailureFingerprint,
+            claimedProviderSnapshotFingerprint: providerFingerprint,
+            observedProviderSnapshotFingerprint: providerFingerprint,
+            customerDataIncluded: false,
+          },
+        },
+      ],
+    });
+    const request = detachedRequestState("RETRYABLE_FAILED", {
+      id: `request-${input.observedFailureClass}`,
+      revision: 2,
+      attemptCount: 1,
+      startedAt: new Date(observedAt.getTime() - 30_000),
+      failureClass: input.observedFailureClass,
+      evidence: proof,
+      nextAttemptAt: requestNextAttemptAt,
+      completedAt: null,
+    });
+    const currentFailure = {
+      current: true as const,
+      releaseSha,
+      runtimeVersion: releaseSha,
+      status: "RETRYABLE_FAILED" as const,
+      outcome: "FETCH_FAILED" as const,
+      failureClass: input.observedFailureClass,
+      providerExecution: true,
+      observedAt,
+      completedAt: null,
+      nextAttemptAt: requestNextAttemptAt,
+      providerRetryNotBeforeAt,
+      providerSnapshotFingerprint: providerFingerprint,
+      evidence: proof,
+    };
+    return {
+      batch,
+      request,
+      currentFailure,
+      cycle,
+      attemptLedger,
+      incidentFailureFingerprint,
+      observedFailureFingerprint,
+      providerRetryNotBeforeAt,
+      handoffAt,
+    };
+  }
+
   function factualDetachedEvidence(
     disposition: "MANUAL_DIRECT" | "IDENTITY_FINAL",
   ) {
@@ -13448,7 +13640,20 @@ describe("detached verification atomic batch fences", () => {
     });
   });
 
-  it("uses the canonical incident operation for a newly observed transient fingerprint", async () => {
+  it.each([
+    {
+      label: "structural to transient",
+      incidentFailureClass: "MISSING_METADATA" as const,
+      observedFailureClass: "HTTP_5XX" as const,
+    },
+    {
+      label: "transient to structural",
+      incidentFailureClass: "HTTP_5XX" as const,
+      observedFailureClass: "MISSING_METADATA" as const,
+    },
+  ])(
+    "keeps a verifier-only $label fingerprint change in the owned cycle",
+    async ({ incidentFailureClass, observedFailureClass }) => {
     const batch = closeoutBatch("PENDING");
     const chronogolfCourse = {
       ...providerCourse(),
@@ -13466,11 +13671,39 @@ describe("detached verification atomic batch fences", () => {
     batch.deployedAt = null;
     batch.providerFamilyKey = "CHRONOGOLF";
     batch.incidents[0].course = chronogolfCourse;
-    batch.incidents[0].proofSnapshot = { failureClass: "TIMEOUT" };
+    batch.incidents[0].cycle = 2;
+    batch.incidents[0].proofSnapshot = {
+      failureClass: observedFailureClass,
+    };
+    const priorFingerprint = buildProviderFailureFingerprint({
+      providerFamilyKey: "CHRONOGOLF",
+      failureClass: incidentFailureClass,
+      operation: "METADATA"
+    });
     Object.assign(batch.incidents[0].incident, {
       kind: "NEEDS_ADAPTER",
+      cycle: 2,
       providerFamilyKey: "CHRONOGOLF",
-      failureClass: "UNSUPPORTED_FAMILY"
+      failureClass: incidentFailureClass,
+      failureFingerprint: priorFingerprint,
+      monitoringEvents: [
+        {
+          occurredAt: new Date("2026-07-15T19:30:01.000Z"),
+          audit: {
+            providerFamilyHandoff: true,
+            providerFamilyChanged: false,
+            providerSnapshotChanged: false,
+            priorCycle: 1,
+            cycle: 2,
+            priorProviderFamilyKey: "CHRONOGOLF",
+            providerFamilyKey: "CHRONOGOLF",
+            priorFailureFingerprint: "a".repeat(64),
+            failureFingerprint: priorFingerprint,
+            claimedProviderSnapshotFingerprint: providerFingerprint,
+            observedProviderSnapshotFingerprint: providerFingerprint,
+          },
+        },
+      ],
     });
     batch.summary = {
       searchExecutionFence: emptySearchExecutionFence(),
@@ -13491,7 +13724,7 @@ describe("detached verification atomic batch fences", () => {
     };
     const reportFingerprint = buildProviderFailureFingerprint({
       providerFamilyKey: "CHRONOGOLF",
-      failureClass: "TIMEOUT",
+      failureClass: observedFailureClass,
       operation: "METADATA"
     });
     prismaMocks.batchFindFirst.mockResolvedValue(batch);
@@ -13508,17 +13741,722 @@ describe("detached verification atomic batch fences", () => {
         verificationWatchMode: "EARLY_RETRY",
         now
       })
-    ).resolves.toMatchObject({ outcome: "command_failed" });
+    ).resolves.toMatchObject({
+      outcome: "command_failed",
+      providerFamilyHandoffCount: 0,
+      retryCount: 1,
+    });
 
-    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+    const incidentUpdate = prismaMocks.supportIncidentUpdateMany.mock.calls.find(
+      (call) => call[0]?.where?.id === "incident-1",
+    );
+    expect(incidentUpdate?.[0]).toEqual(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "incident-1",
+          cycle: 2,
+          activeBatchId: "batch-1",
+        }),
+        data: expect.objectContaining({
+          status: "AUTO_INVESTIGATING",
+          activeBatchId: null,
+          failureClass: incidentFailureClass,
+          failureFingerprint: priorFingerprint,
+          nextAttemptAt: expect.any(Date),
+        }),
+      }),
+    );
+    expect(incidentUpdate?.[0].data).not.toHaveProperty("cycle");
+    expect(incidentUpdate?.[0].data).not.toHaveProperty("attemptCount");
+    expect(incidentUpdate?.[0].data).not.toHaveProperty("firstSeenAt");
+    expect(
+      (incidentUpdate?.[0].data.nextAttemptAt as Date).getTime(),
+    ).toBeGreaterThan(now.getTime());
+    const persistedSummary =
+      prismaMocks.batchUpdateMany.mock.calls[0]?.[0]?.data?.summary;
+    expect(persistedSummary?.closeout?.remediationAttempts?.[0]).toMatchObject({
+      failureFingerprint: priorFingerprint,
+      observedFailureFingerprint: reportFingerprint,
+      failureOnlyHandoffCooldownUntil: "2026-07-15T20:00:01.000Z",
+    });
+    expect(prismaMocks.monitoringEventCreate).not.toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
-          failureClass: "TIMEOUT",
-          failureFingerprint: reportFingerprint
-        })
-      })
+          eventType: "REVALIDATION_REQUESTED",
+          audit: expect.objectContaining({ providerFamilyHandoff: true }),
+        }),
+      }),
     );
   });
+
+  it.each([
+    {
+      result: "RESTORED" as const,
+      expectedError: "Terminal course-support evidence is missing or stale.",
+    },
+    {
+      result: "FINAL_DISPOSITION" as const,
+      expectedError: "Terminal course-support evidence is missing or stale.",
+    },
+    {
+      result: "NEEDS_HUMAN" as const,
+      expectedError:
+        "Course-support closeout cannot request human review before the current automation playbook is exhausted.",
+    },
+  ])(
+    "does not let a verifier-only fingerprint change bypass $result closeout evidence",
+    async ({ result, expectedError }) => {
+      const batch = closeoutBatch(result);
+      const currentIncidentFingerprint = buildProviderFailureFingerprint({
+        providerFamilyKey: "booking.example",
+        failureClass: "MISSING_METADATA",
+        operation: "METADATA",
+      });
+      batch.incidents[0].proofSnapshot = { failureClass: "HTTP_5XX" };
+      batch.incidents[0].cycle = 2;
+      batch.incidents[0].incident.attemptLedger = null;
+      batch.incidents[0].incident.cycle = 2;
+      batch.incidents[0].incident.failureClass = "MISSING_METADATA";
+      batch.incidents[0].incident.failureFingerprint =
+        currentIncidentFingerprint;
+      batch.incidents[0].incident.monitoringEvents = [
+        {
+          occurredAt: new Date("2026-07-15T19:30:01.000Z"),
+          audit: {
+            providerFamilyHandoff: true,
+            providerFamilyChanged: false,
+            providerSnapshotChanged: false,
+            priorCycle: 1,
+            cycle: 2,
+            priorProviderFamilyKey: "booking.example",
+            providerFamilyKey: "booking.example",
+            priorFailureFingerprint: "a".repeat(64),
+            failureFingerprint: currentIncidentFingerprint,
+            claimedProviderSnapshotFingerprint: providerFingerprint,
+            observedProviderSnapshotFingerprint: providerFingerprint,
+          },
+        },
+      ];
+      prismaMocks.batchFindFirst.mockResolvedValue(batch);
+
+      await expect(
+        closeoutCourseSupportBatch({
+          batchId: "batch-1",
+          leaseToken: "lease-1",
+          ownerThreadId: "owner-thread",
+          now,
+        }),
+      ).rejects.toThrow(expectedError);
+      expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+      expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+    },
+  );
+
+  it("starts the cooldown horizon at a delayed first current-cycle claim", async () => {
+    const closeoutAt = new Date("2026-07-15T20:45:00.000Z");
+    const firstClaimAt = new Date("2026-07-15T20:40:00.000Z");
+    const fixture = productionFailureCooldownBatch({
+      incidentFailureClass: "MISSING_METADATA",
+      observedFailureClass: "HTTP_5XX",
+      closeoutAt,
+      batchCreatedAt: firstClaimAt,
+    });
+    prismaMocks.batchFindFirst.mockResolvedValue(fixture.batch);
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([
+      fixture.request,
+    ]);
+    verificationMocks.getCurrentCourseSupportVerificationFailure.mockResolvedValue(
+      fixture.currentFailure,
+    );
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        requestedOutcome: "retryable_failed",
+        verificationWatchMode: "WATCH_SETTLED",
+        now: closeoutAt,
+      }),
+    ).resolves.toMatchObject({
+      providerFamilyHandoffCount: 0,
+      retryCount: 1,
+    });
+    const persistedSummary =
+      prismaMocks.batchUpdateMany.mock.calls[0]?.[0]?.data?.summary;
+    expect(persistedSummary?.closeout?.remediationAttempts?.[0]).toMatchObject({
+      failureFingerprint: fixture.incidentFailureFingerprint,
+      observedFailureFingerprint: fixture.observedFailureFingerprint,
+      failureOnlyHandoffCooldownUntil: "2026-07-15T21:10:00.000Z",
+    });
+  });
+
+  it.each(["authoritative monitoring failure", "provider snapshot"] as const)(
+    "lets a genuine $change bypass an active failure-only cooldown",
+    async (change) => {
+      const closeoutAt = new Date("2026-07-15T20:10:00.000Z");
+      const fixture = productionFailureCooldownBatch({
+        incidentFailureClass: "MISSING_METADATA",
+        observedFailureClass: "HTTP_5XX",
+        closeoutAt,
+      });
+      if (change === "authoritative monitoring failure") {
+        fixture.batch.incidents[0].course.monitoringStatus!.failureFingerprint =
+          fixture.observedFailureFingerprint;
+        fixture.batch.incidents[0].course.monitoringEvents = [
+          {
+            failureFingerprint: fixture.observedFailureFingerprint,
+            occurredAt: new Date("2026-07-15T20:09:30.000Z"),
+            audit: {
+              cycle: fixture.cycle,
+              failureClass: "HTTP_5XX",
+              providerFamilyKey: "booking.example",
+              customerDataIncluded: false,
+            },
+          },
+        ];
+      } else {
+        verificationMocks.buildCourseSupportProviderSnapshotFingerprint.mockReturnValue(
+          "c".repeat(64),
+        );
+      }
+      prismaMocks.batchFindFirst.mockResolvedValue(fixture.batch);
+      prismaMocks.verificationRequestFindMany.mockResolvedValue([
+        fixture.request,
+      ]);
+      verificationMocks.getCurrentCourseSupportVerificationFailure.mockResolvedValue(
+        fixture.currentFailure,
+      );
+      prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+      prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+      prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 1 });
+      prismaMocks.transaction.mockImplementation(
+        async (
+          worker: (
+            transaction: typeof monitoringTransactionClient,
+          ) => Promise<unknown>,
+        ) => worker(monitoringTransactionClient),
+      );
+
+      await expect(
+        closeoutCourseSupportBatch({
+          batchId: "batch-1",
+          leaseToken: "lease-1",
+          ownerThreadId: "owner-thread",
+          requestedOutcome: "retryable_failed",
+          verificationWatchMode: "WATCH_SETTLED",
+          now: closeoutAt,
+        }),
+      ).resolves.toMatchObject({
+        providerFamilyHandoffCount: 1,
+        retryCount: 1,
+      });
+      expect(prismaMocks.monitoringEventCreate).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          eventType: "REVALIDATION_REQUESTED",
+          audit: expect.objectContaining({
+            providerFamilyHandoff: true,
+            providerSnapshotChanged: change === "provider snapshot",
+          }),
+        }),
+      });
+    },
+  );
+
+  it.each([
+    {
+      label: "wrong prior cycle",
+      mutate: (audit: Record<string, unknown>) => {
+        audit.priorCycle = 15;
+      },
+    },
+    {
+      label: "wrong prior family",
+      mutate: (audit: Record<string, unknown>) => {
+        audit.priorProviderFamilyKey = "other.example";
+      },
+    },
+    {
+      label: "wrong claimed snapshot",
+      mutate: (audit: Record<string, unknown>) => {
+        audit.claimedProviderSnapshotFingerprint = "c".repeat(64);
+      },
+    },
+    {
+      label: "malformed failure fingerprint",
+      mutate: (audit: Record<string, unknown>) => {
+        audit.priorFailureFingerprint = "not-a-fingerprint";
+      },
+    },
+    {
+      label: "mismatched current failure fingerprint",
+      mutate: (audit: Record<string, unknown>) => {
+        audit.failureFingerprint = "d".repeat(64);
+      },
+    },
+  ])(
+    "does not suppress a failure handoff from $label audit lineage",
+    async ({ mutate }) => {
+      const fixture = productionFailureCooldownBatch({
+        incidentFailureClass: "MISSING_METADATA",
+        observedFailureClass: "HTTP_5XX",
+        closeoutAt: new Date("2026-07-15T20:10:00.000Z"),
+      });
+      mutate(
+        fixture.batch.incidents[0].incident.monitoringEvents[1]
+          .audit as Record<string, unknown>,
+      );
+      prismaMocks.batchFindFirst.mockResolvedValue(fixture.batch);
+      prismaMocks.verificationRequestFindMany.mockResolvedValue([
+        fixture.request,
+      ]);
+      verificationMocks.getCurrentCourseSupportVerificationFailure.mockResolvedValue(
+        fixture.currentFailure,
+      );
+      prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+      prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+      prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 1 });
+      prismaMocks.transaction.mockImplementation(
+        async (
+          worker: (
+            transaction: typeof monitoringTransactionClient,
+          ) => Promise<unknown>,
+        ) => worker(monitoringTransactionClient),
+      );
+
+      await expect(
+        closeoutCourseSupportBatch({
+          batchId: "batch-1",
+          leaseToken: "lease-1",
+          ownerThreadId: "owner-thread",
+          requestedOutcome: "retryable_failed",
+          verificationWatchMode: "WATCH_SETTLED",
+          now: new Date("2026-07-15T20:10:00.000Z"),
+        }),
+      ).resolves.toMatchObject({
+        providerFamilyHandoffCount: 1,
+        retryCount: 1,
+      });
+      expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            cycle: { increment: 1 },
+            failureClass: "HTTP_5XX",
+            failureFingerprint: fixture.observedFailureFingerprint,
+          }),
+        }),
+      );
+    },
+  );
+
+  it("allows a verifier-only failure handoff again after the cooldown expires", async () => {
+    const batch = closeoutBatch("PENDING");
+    const priorFingerprint = buildProviderFailureFingerprint({
+      providerFamilyKey: "booking.example",
+      failureClass: "MISSING_METADATA",
+      operation: "METADATA",
+    });
+    const observedFingerprint = buildProviderFailureFingerprint({
+      providerFamilyKey: "booking.example",
+      failureClass: "HTTP_5XX",
+      operation: "METADATA",
+    });
+    batch.incidents[0].proofSnapshot = { failureClass: "HTTP_5XX" };
+    batch.incidents[0].cycle = 2;
+    Object.assign(batch.incidents[0].incident, {
+      cycle: 2,
+      kind: "NEEDS_ADAPTER",
+      failureClass: "MISSING_METADATA",
+      failureFingerprint: priorFingerprint,
+      monitoringEvents: [
+        {
+          occurredAt: new Date("2026-07-15T19:29:59.999Z"),
+          audit: {
+            providerFamilyHandoff: true,
+            providerFamilyChanged: false,
+            providerSnapshotChanged: false,
+            priorCycle: 1,
+            cycle: 2,
+            priorProviderFamilyKey: "booking.example",
+            providerFamilyKey: "booking.example",
+            priorFailureFingerprint: "a".repeat(64),
+            failureFingerprint: priorFingerprint,
+            claimedProviderSnapshotFingerprint: providerFingerprint,
+            observedProviderSnapshotFingerprint: providerFingerprint,
+          },
+        },
+      ],
+    });
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        requestedOutcome: "command_failed",
+        failureDomain: "SLA",
+        verificationWatchMode: "EARLY_RETRY",
+        now,
+      }),
+    ).resolves.toMatchObject({
+      providerFamilyHandoffCount: 1,
+      retryCount: 1,
+      nextAttemptAt: now.toISOString(),
+    });
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ cycle: 2 }),
+        data: expect.objectContaining({
+          cycle: { increment: 1 },
+          failureClass: "HTTP_5XX",
+          failureFingerprint: observedFingerprint,
+          attemptCount: 0,
+          firstSeenAt: now,
+          nextAttemptAt: now,
+        }),
+      }),
+    );
+  });
+
+  it("allows a production-shaped verifier handoff at the exact cooldown boundary", async () => {
+    const cooldownExpiresAt = new Date("2026-07-15T20:30:00.000Z");
+    const fixture = productionFailureCooldownBatch({
+      incidentFailureClass: "MISSING_METADATA",
+      observedFailureClass: "HTTP_5XX",
+      closeoutAt: cooldownExpiresAt,
+      batchCreatedAt: new Date("2026-07-15T20:29:00.000Z"),
+      priorCycleBatchCreatedAt: new Date("2026-07-15T20:00:00.000Z"),
+    });
+    prismaMocks.batchFindFirst.mockResolvedValue(fixture.batch);
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([
+      fixture.request,
+    ]);
+    verificationMocks.getCurrentCourseSupportVerificationFailure.mockResolvedValue(
+      fixture.currentFailure,
+    );
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.transaction.mockImplementation(
+      async (
+        worker: (
+          transaction: typeof monitoringTransactionClient,
+        ) => Promise<unknown>,
+      ) => worker(monitoringTransactionClient),
+    );
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        requestedOutcome: "retryable_failed",
+        verificationWatchMode: "WATCH_SETTLED",
+        now: cooldownExpiresAt,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "retryable_failed",
+      providerFamilyHandoffCount: 1,
+      retryCount: 1,
+    });
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          cycle: fixture.cycle,
+          activeBatchId: "batch-1",
+        }),
+        data: expect.objectContaining({
+          cycle: { increment: 1 },
+          failureClass: "HTTP_5XX",
+          failureFingerprint: fixture.observedFailureFingerprint,
+          firstSeenAt: cooldownExpiresAt,
+        }),
+      }),
+    );
+    expect(prismaMocks.monitoringEventCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        eventType: "REVALIDATION_REQUESTED",
+        audit: expect.objectContaining({
+          providerFamilyHandoff: true,
+          priorCycle: fixture.cycle,
+          cycle: fixture.cycle + 1,
+        }),
+      }),
+    });
+  });
+
+  it.each([
+    {
+      label: "MISSING_METADATA to HTTP_5XX",
+      incidentFailureClass: "MISSING_METADATA" as const,
+      observedFailureClass: "HTTP_5XX" as const,
+    },
+    {
+      label: "HTTP_5XX to MISSING_METADATA",
+      incidentFailureClass: "HTTP_5XX" as const,
+      observedFailureClass: "MISSING_METADATA" as const,
+    },
+  ])(
+    "bounds production-shaped $label churn, then permits the same observation after expiry",
+    async ({ incidentFailureClass, observedFailureClass }) => {
+      const firstCloseoutAt = new Date("2026-07-15T20:05:00.000Z");
+      const withinWindow = productionFailureCooldownBatch({
+        incidentFailureClass,
+        observedFailureClass,
+        closeoutAt: firstCloseoutAt,
+      });
+      expect(
+        assessAutomationPlaybook(
+          withinWindow.attemptLedger,
+          withinWindow.cycle,
+        ),
+      ).toMatchObject({
+        conclusion: "INCOMPLETE",
+        nextStage: "BROWSER_ADAPTER_RETRY",
+      });
+      prismaMocks.batchFindFirst.mockResolvedValue(withinWindow.batch);
+      prismaMocks.verificationRequestFindMany.mockResolvedValue([
+        withinWindow.request,
+      ]);
+      verificationMocks.getCurrentCourseSupportVerificationFailure.mockResolvedValue(
+        withinWindow.currentFailure,
+      );
+      prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+      prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+      prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 1 });
+      prismaMocks.transaction.mockImplementation(
+        async (
+          worker: (
+            transaction: typeof monitoringTransactionClient,
+          ) => Promise<unknown>,
+        ) => worker(monitoringTransactionClient),
+      );
+
+      await expect(
+        closeoutCourseSupportBatch({
+          batchId: "batch-1",
+          leaseToken: "lease-1",
+          ownerThreadId: "owner-thread",
+          requestedOutcome: "retryable_failed",
+          verificationWatchMode: "WATCH_SETTLED",
+          now: firstCloseoutAt,
+        }),
+      ).resolves.toMatchObject({
+        outcome: "retryable_failed",
+        providerFamilyHandoffCount: 0,
+        retryCount: 1,
+        nextAttemptAt:
+          withinWindow.providerRetryNotBeforeAt.toISOString(),
+      });
+
+      const firstIncidentUpdate =
+        prismaMocks.supportIncidentUpdateMany.mock.calls.find(
+          (call) => call[0]?.where?.id === "incident-1",
+        )?.[0];
+      expect(firstIncidentUpdate).toEqual(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            cycle: withinWindow.cycle,
+            activeBatchId: "batch-1",
+          }),
+          data: expect.objectContaining({
+            activeBatchId: null,
+            failureClass: incidentFailureClass,
+            failureFingerprint: withinWindow.incidentFailureFingerprint,
+            nextAttemptAt: withinWindow.providerRetryNotBeforeAt,
+          }),
+        }),
+      );
+      for (const preservedField of [
+        "cycle",
+        "attemptCount",
+        "attemptLedger",
+        "confirmedAt",
+        "firstSeenAt",
+      ]) {
+        expect(firstIncidentUpdate?.data).not.toHaveProperty(preservedField);
+      }
+      expect(prismaMocks.monitoringStatusUpdateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            failureFingerprint: withinWindow.incidentFailureFingerprint,
+            nextAutomaticAttemptAt:
+              withinWindow.providerRetryNotBeforeAt,
+          }),
+        }),
+      );
+      expect(prismaMocks.verificationRequestUpdateMany).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            lastError: "material_failure_identity_superseded",
+          }),
+        }),
+      );
+      expect(prismaMocks.monitoringEventCreate).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            eventType: "REVALIDATION_REQUESTED",
+            audit: expect.objectContaining({ providerFamilyHandoff: true }),
+          }),
+        }),
+      );
+      const firstSummary =
+        prismaMocks.batchUpdateMany.mock.calls[0]?.[0]?.data?.summary;
+      expect(firstSummary?.closeout?.remediationAttempts?.[0]).toMatchObject({
+        failureFingerprint: withinWindow.incidentFailureFingerprint,
+        observedFailureFingerprint:
+          withinWindow.observedFailureFingerprint,
+        failureOnlyHandoffCooldownUntil: "2026-07-15T20:30:00.000Z",
+      });
+      expect(firstIncidentUpdate?.data.failureFingerprint).toBe(
+        withinWindow.batch.incidents[0].incident.monitoringEvents[1].audit
+          .failureFingerprint,
+      );
+
+      const secondWithinWindowAt =
+        withinWindow.providerRetryNotBeforeAt;
+      const finalObservedFailureClass = "SCHEMA" as const;
+      const secondWithinWindow = productionFailureCooldownBatch({
+        incidentFailureClass: firstIncidentUpdate?.data
+          .failureClass as typeof incidentFailureClass,
+        observedFailureClass: finalObservedFailureClass,
+        closeoutAt: secondWithinWindowAt,
+        batchCreatedAt: secondWithinWindowAt,
+        priorCycleBatchCreatedAt: withinWindow.batch.createdAt,
+      });
+      secondWithinWindow.batch.incidents[0].incident.failureFingerprint =
+        firstIncidentUpdate?.data.failureFingerprint;
+      secondWithinWindow.batch.incidents[0].course.monitoringStatus!.failureFingerprint =
+        firstIncidentUpdate?.data.failureFingerprint;
+      prismaMocks.batchFindFirst
+        .mockReset()
+        .mockResolvedValue(secondWithinWindow.batch);
+      prismaMocks.verificationRequestFindMany
+        .mockReset()
+        .mockResolvedValue([secondWithinWindow.request]);
+      verificationMocks.getCurrentCourseSupportVerificationFailure
+        .mockReset()
+        .mockResolvedValue(secondWithinWindow.currentFailure);
+      prismaMocks.batchUpdateMany.mockClear().mockResolvedValue({ count: 1 });
+      prismaMocks.supportIncidentUpdateMany
+        .mockClear()
+        .mockResolvedValue({ count: 1 });
+      prismaMocks.verificationRequestUpdateMany
+        .mockClear()
+        .mockResolvedValue({ count: 1 });
+      prismaMocks.monitoringEventCreate.mockClear();
+
+      await expect(
+        closeoutCourseSupportBatch({
+          batchId: "batch-1",
+          leaseToken: "lease-1",
+          ownerThreadId: "owner-thread",
+          requestedOutcome: "retryable_failed",
+          verificationWatchMode: "WATCH_SETTLED",
+          now: secondWithinWindowAt,
+        }),
+      ).resolves.toMatchObject({
+        outcome: "retryable_failed",
+        providerFamilyHandoffCount: 0,
+        retryCount: 1,
+        nextAttemptAt:
+          secondWithinWindow.providerRetryNotBeforeAt.toISOString(),
+      });
+      const secondIncidentUpdate =
+        prismaMocks.supportIncidentUpdateMany.mock.calls.find(
+          (call) => call[0]?.where?.id === "incident-1",
+        )?.[0];
+      expect(secondIncidentUpdate?.data).toMatchObject({
+        failureClass: incidentFailureClass,
+        failureFingerprint: withinWindow.incidentFailureFingerprint,
+        nextAttemptAt: secondWithinWindow.providerRetryNotBeforeAt,
+      });
+      expect(prismaMocks.monitoringEventCreate).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            eventType: "REVALIDATION_REQUESTED",
+            audit: expect.objectContaining({ providerFamilyHandoff: true }),
+          }),
+        }),
+      );
+
+      const afterExpiry = secondWithinWindow.providerRetryNotBeforeAt;
+      const expired = productionFailureCooldownBatch({
+        incidentFailureClass: secondIncidentUpdate?.data
+          .failureClass as typeof incidentFailureClass,
+        observedFailureClass: finalObservedFailureClass,
+        closeoutAt: afterExpiry,
+        batchCreatedAt: afterExpiry,
+        priorCycleBatchCreatedAt: withinWindow.batch.createdAt,
+      });
+      expired.batch.incidents[0].incident.failureFingerprint =
+        secondIncidentUpdate?.data.failureFingerprint;
+      expired.batch.incidents[0].course.monitoringStatus!.failureFingerprint =
+        secondIncidentUpdate?.data.failureFingerprint;
+      prismaMocks.batchFindFirst.mockReset().mockResolvedValue(expired.batch);
+      prismaMocks.verificationRequestFindMany
+        .mockReset()
+        .mockResolvedValue([expired.request]);
+      verificationMocks.getCurrentCourseSupportVerificationFailure
+        .mockReset()
+        .mockResolvedValue(expired.currentFailure);
+      prismaMocks.batchUpdateMany.mockClear().mockResolvedValue({ count: 1 });
+      prismaMocks.supportIncidentUpdateMany
+        .mockClear()
+        .mockResolvedValue({ count: 1 });
+      prismaMocks.verificationRequestUpdateMany
+        .mockClear()
+        .mockResolvedValue({ count: 1 });
+      prismaMocks.monitoringEventCreate.mockClear();
+
+      await expect(
+        closeoutCourseSupportBatch({
+          batchId: "batch-1",
+          leaseToken: "lease-1",
+          ownerThreadId: "owner-thread",
+          requestedOutcome: "retryable_failed",
+          verificationWatchMode: "WATCH_SETTLED",
+          now: afterExpiry,
+        }),
+      ).resolves.toMatchObject({
+        outcome: "retryable_failed",
+        providerFamilyHandoffCount: 1,
+        retryCount: 1,
+        nextAttemptAt: expired.providerRetryNotBeforeAt.toISOString(),
+      });
+      expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            cycle: withinWindow.cycle,
+            activeBatchId: "batch-1",
+          }),
+          data: expect.objectContaining({
+            cycle: { increment: 1 },
+            failureClass: finalObservedFailureClass,
+            failureFingerprint: expired.observedFailureFingerprint,
+            attemptCount: 0,
+            firstSeenAt: afterExpiry,
+            nextAttemptAt: expired.providerRetryNotBeforeAt,
+          }),
+        }),
+      );
+      expect(prismaMocks.monitoringEventCreate).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          eventType: "REVALIDATION_REQUESTED",
+          audit: expect.objectContaining({
+            providerFamilyHandoff: true,
+            priorCycle: withinWindow.cycle,
+            cycle: withinWindow.cycle + 1,
+          }),
+        }),
+      });
+    },
+  );
 
   it.each(["QUEUED", "CHECKING"] as const)(
     "refuses closeout while detached verification is %s",

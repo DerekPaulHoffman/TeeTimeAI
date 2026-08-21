@@ -52,8 +52,10 @@ import {
   type CourseSupportRemediationRoute
 } from "./course-support-remediation-routing";
 import {
+  ACTIVE_DEMAND_ESCALATION_MS,
   getCourseMonitoringEscalationDeadline,
   getHumanReviewRetryAt,
+  INACTIVE_INVESTIGATION_MS,
   inferHumanReviewReason,
   reopenParkedCourseForResponderCampaignInTransaction,
   runSerializedCourseMonitoringWrite
@@ -130,6 +132,11 @@ const NEAR_DATE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const SEARCH_TIMELINESS_GRACE_MS = 15 * 60 * 1000;
 const RECHECK_HEALTH_FRESHNESS_MS = 2 * 60 * 1000;
 const DETACHED_FAILURE_FALLBACK_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+// One verifier-only failure reclassification may reopen the episode, but a
+// stable provider must then get one bounded investigation horizon to drain its
+// existing playbook before another reclassification can reset that work.
+const COURSE_SUPPORT_FAILURE_ONLY_HANDOFF_COOLDOWN_MS =
+  Math.min(ACTIVE_DEMAND_ESCALATION_MS, INACTIVE_INVESTIGATION_MS);
 const EXPIRED_UNRELEASED_BATCH_RETRY_DELAY_MS = 60 * 1000;
 const COURSE_SUPPORT_WRITE_CONFLICT_MAX_ATTEMPTS = 3;
 const COURSE_SUPPORT_WRITE_CONFLICT_BACKOFF_MS = 25;
@@ -6619,6 +6626,82 @@ function getCurrentCourseSupportMonitoringFailureIdentity(input: {
   };
 }
 
+function getActiveCourseSupportFailureOnlyHandoffCooldown(input: {
+  incidentCycle: number;
+  incidentFailureFingerprint: string;
+  providerFamilyKey: string;
+  claimedProviderSnapshotFingerprint: string;
+  providerSnapshotFingerprint: string;
+  currentBatchCreatedAt: Date;
+  batchIncidents?: Array<{
+    cycle: number;
+    batch: { createdAt: Date };
+  }>;
+  monitoringEvents?: Array<{
+    occurredAt: Date;
+    audit: Prisma.JsonValue | null;
+  }>;
+  now: Date;
+}) {
+  // The bounded query is newest-first and also contains routine same-cycle
+  // continuation events. Find the canonical handoff that created this cycle;
+  // a later material handoff necessarily creates another cycle and cannot
+  // satisfy this exact lineage.
+  const handoff = input.monitoringEvents?.find((event) => {
+    const audit = asJsonObject(event.audit);
+    const priorFailureFingerprint = audit.priorFailureFingerprint;
+    const failureFingerprint = audit.failureFingerprint;
+    return (
+      event.occurredAt instanceof Date &&
+      event.occurredAt.getTime() <= input.now.getTime() &&
+      audit.providerFamilyHandoff === true &&
+      audit.providerFamilyChanged === false &&
+      audit.providerSnapshotChanged === false &&
+      audit.priorCycle === input.incidentCycle - 1 &&
+      audit.cycle === input.incidentCycle &&
+      audit.priorProviderFamilyKey === input.providerFamilyKey &&
+      audit.providerFamilyKey === input.providerFamilyKey &&
+      typeof priorFailureFingerprint === "string" &&
+      /^[a-f0-9]{64}$/u.test(priorFailureFingerprint) &&
+      typeof failureFingerprint === "string" &&
+      /^[a-f0-9]{64}$/u.test(failureFingerprint) &&
+      priorFailureFingerprint !== failureFingerprint &&
+      failureFingerprint === input.incidentFailureFingerprint &&
+      audit.claimedProviderSnapshotFingerprint ===
+        input.claimedProviderSnapshotFingerprint &&
+      audit.observedProviderSnapshotFingerprint ===
+        input.providerSnapshotFingerprint &&
+      input.claimedProviderSnapshotFingerprint ===
+        input.providerSnapshotFingerprint
+    );
+  });
+  if (!handoff) {
+    return null;
+  }
+  const firstCycleBatchCreatedAt = [
+    input.currentBatchCreatedAt,
+    ...(input.batchIncidents ?? []).flatMap((entry) =>
+      entry.cycle === input.incidentCycle &&
+      entry.batch.createdAt instanceof Date
+        ? [entry.batch.createdAt]
+        : [],
+    ),
+  ].reduce((earliest, candidate) =>
+    candidate.getTime() < earliest.getTime() ? candidate : earliest,
+  );
+  const cooldownAnchor =
+    firstCycleBatchCreatedAt.getTime() > handoff.occurredAt.getTime()
+      ? firstCycleBatchCreatedAt
+      : handoff.occurredAt;
+  const expiresAt = new Date(
+    cooldownAnchor.getTime() +
+      COURSE_SUPPORT_FAILURE_ONLY_HANDOFF_COOLDOWN_MS,
+  );
+  return expiresAt.getTime() > input.now.getTime()
+    ? { occurredAt: handoff.occurredAt, expiresAt }
+    : null;
+}
+
 function getEffectiveCourseSupportRetryFailureFingerprint(input: {
   providerFamilyKey: string;
   incidentKind: CourseSupportIncidentKind;
@@ -6679,7 +6762,7 @@ async function closeoutCourseSupportBatchAttempt(
                 where: { eventType: "REVALIDATION_REQUESTED" },
                 orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
                 take: 20,
-                select: { audit: true },
+                select: { occurredAt: true, audit: true },
               },
               batchIncidents: {
                 where: { batch: { completedAt: { not: null } } },
@@ -6696,7 +6779,13 @@ async function closeoutCourseSupportBatchAttempt(
                       startedAt: true,
                     },
                   },
-                  batch: { select: { summary: true, releaseSha: true } },
+                  batch: {
+                    select: {
+                      summary: true,
+                      releaseSha: true,
+                      createdAt: true,
+                    },
+                  },
                 },
               },
             },
@@ -7209,6 +7298,26 @@ async function closeoutCourseSupportBatchAttempt(
           }),
         );
       }
+      const verifierFailureFingerprintChanged =
+        monitoringFailure === null &&
+        failureFingerprint !== entry.incident.failureFingerprint;
+      const failureOnlyHandoffCooldown =
+        verifierFailureFingerprintChanged &&
+        providerFamilyKey === entry.incident.providerFamilyKey &&
+        !providerSnapshotChanged
+          ? getActiveCourseSupportFailureOnlyHandoffCooldown({
+              incidentCycle: entry.cycle,
+              incidentFailureFingerprint: entry.incident.failureFingerprint,
+              providerFamilyKey,
+              claimedProviderSnapshotFingerprint,
+              providerSnapshotFingerprint:
+                entry.currentProviderSnapshotFingerprint,
+              currentBatchCreatedAt: batch.createdAt,
+              batchIncidents: entry.incident.batchIncidents,
+              monitoringEvents: entry.incident.monitoringEvents,
+              now,
+            })
+          : null;
       return [
         entry.id,
         {
@@ -7219,13 +7328,16 @@ async function closeoutCourseSupportBatchAttempt(
           observedProviderSnapshotFingerprint:
             entry.currentProviderSnapshotFingerprint,
           providerSnapshotChanged,
+          failureOnlyHandoffCooldown,
           nextAttemptAt: handoffRetryCandidates.reduce((latest, candidate) =>
             candidate.getTime() > latest.getTime() ? candidate : latest,
           ),
           materialChange:
             providerFamilyKey !== entry.incident.providerFamilyKey ||
-            failureFingerprint !== entry.incident.failureFingerprint ||
-            providerSnapshotChanged,
+            providerSnapshotChanged ||
+            monitoringFailure !== null ||
+            (verifierFailureFingerprintChanged &&
+              failureOnlyHandoffCooldown === null),
         },
       ] as const;
     }),
@@ -7239,18 +7351,22 @@ async function closeoutCourseSupportBatchAttempt(
     const canContinueIncompletePlaybook =
       playbookAssessment.conclusion === "INCOMPLETE" &&
       Boolean(playbookAssessment.nextStage) &&
-      shouldContinueSettledCourseSupportRemediation({
-        remediationDirective,
-        failureClass: getEffectiveCourseSupportRetryFailureClass({
-          incidentFailureClass: entry.incident.failureClass,
-          proofSnapshot: entry.proofSnapshot,
-        }),
-        attemptCount: entry.incident.attemptCount,
-        playbookConclusion: playbookAssessment.conclusion,
-        nextPlaybookStage: playbookAssessment.nextStage,
-        nextPlaybookStageAttemptCount:
-          getCourseSupportNextStageAttemptCount(playbookAssessment),
-      });
+      (Boolean(
+        currentFailureIdentityByBatchIncidentId.get(entry.id)
+          ?.failureOnlyHandoffCooldown,
+      ) ||
+        shouldContinueSettledCourseSupportRemediation({
+          remediationDirective,
+          failureClass: getEffectiveCourseSupportRetryFailureClass({
+            incidentFailureClass: entry.incident.failureClass,
+            proofSnapshot: entry.proofSnapshot,
+          }),
+          attemptCount: entry.incident.attemptCount,
+          playbookConclusion: playbookAssessment.conclusion,
+          nextPlaybookStage: playbookAssessment.nextStage,
+          nextPlaybookStageAttemptCount:
+            getCourseSupportNextStageAttemptCount(playbookAssessment),
+        }));
     const sourceUnverifiedHumanReview =
       normalizedProof.kind === "HUMAN_REVIEW_REQUIRED" &&
       normalizedProof.disposition === "SOURCE_UNVERIFIED";
@@ -7426,6 +7542,10 @@ async function closeoutCourseSupportBatchAttempt(
       observedFailureFingerprint:
         currentFailureIdentityByBatchIncidentId.get(entry.id)
           ?.failureFingerprint ?? entry.incident.failureFingerprint,
+      failureOnlyHandoffCooldownUntil:
+        currentFailureIdentityByBatchIncidentId
+          .get(entry.id)
+          ?.failureOnlyHandoffCooldown?.expiresAt.toISOString() ?? null,
       runtimeVersion: batch.releaseSha ?? batch.baseSha,
       activeRealSearchCount: entry.incident.activeRealSearchCount,
       consumed,
@@ -7540,6 +7660,10 @@ async function closeoutCourseSupportBatchAttempt(
     const currentFailureIdentity = currentFailureIdentityByBatchIncidentId.get(
       entry.id,
     )!;
+    const currentPlaybookAssessment = assessAutomationPlaybook(
+      entry.incident.attemptLedger,
+      entry.cycle,
+    );
     const factualMonitoringWinner =
       isAuthoritativeFactualCourseMonitoringState(
         entry.course.monitoringStatus?.state,
@@ -7583,6 +7707,24 @@ async function closeoutCourseSupportBatchAttempt(
           "Current provider or failure evidence changed while the batch was active, so the incident was moved to a fresh remediation episode.",
       };
     }
+    const cooldownContinuesIncompletePlaybook =
+      Boolean(currentFailureIdentity.failureOnlyHandoffCooldown) &&
+      ["PENDING", "STALE_EVIDENCE", "RETRY_SCHEDULED"].includes(
+        entry.result,
+      ) &&
+      currentPlaybookAssessment.conclusion === "INCOMPLETE" &&
+      Boolean(currentPlaybookAssessment.nextStage);
+    if (cooldownContinuesIncompletePlaybook) {
+      return {
+        ...entry,
+        normalizedResult: "RETRY_SCHEDULED" as const,
+        automationStalled: false,
+        operationalRetryBudgetExhausted: false,
+        providerFamilyHandoff: null,
+        message:
+          "Verifier-only failure churn stayed in the current bounded playbook episode.",
+      };
+    }
     const remediationAttempt = closeoutRemediationAttempts.find(
       (attempt) =>
         attempt.courseRef ===
@@ -7621,13 +7763,9 @@ async function closeoutCourseSupportBatchAttempt(
     const operationalRetry = operationalRetryByCourseRef.get(
       createCourseSupportRemediationCourseRef(entry.courseId),
     );
-    const playbookAssessment = assessAutomationPlaybook(
-      entry.incident.attemptLedger,
-      entry.incident.cycle,
-    );
     const canContinueIncompletePlaybook =
-      playbookAssessment.conclusion === "INCOMPLETE" &&
-      Boolean(playbookAssessment.nextStage) &&
+      currentPlaybookAssessment.conclusion === "INCOMPLETE" &&
+      Boolean(currentPlaybookAssessment.nextStage) &&
       shouldContinueSettledCourseSupportRemediation({
         remediationDirective,
         failureClass: getEffectiveCourseSupportRetryFailureClass({
@@ -7635,10 +7773,10 @@ async function closeoutCourseSupportBatchAttempt(
           proofSnapshot: entry.proofSnapshot,
         }),
         attemptCount: entry.incident.attemptCount,
-        playbookConclusion: playbookAssessment.conclusion,
-        nextPlaybookStage: playbookAssessment.nextStage,
+        playbookConclusion: currentPlaybookAssessment.conclusion,
+        nextPlaybookStage: currentPlaybookAssessment.nextStage,
         nextPlaybookStageAttemptCount:
-          getCourseSupportNextStageAttemptCount(playbookAssessment),
+          getCourseSupportNextStageAttemptCount(currentPlaybookAssessment),
       });
     if (
       operationalRetry?.exhausted &&
@@ -8562,18 +8700,33 @@ async function closeoutCourseSupportBatchAttempt(
             incidentFailureFingerprint: entry.incident.failureFingerprint,
             proofSnapshot: entry.proofSnapshot,
           });
+        const failureOnlyHandoffCooldownActive = Boolean(
+          currentFailureIdentityByBatchIncidentId.get(entry.id)
+            ?.failureOnlyHandoffCooldown,
+        );
+        // Keep the cycle opener's canonical identity stable while verifier
+        // churn is cooling down. The immutable batch proof/summary retains the
+        // observation and the effective identity still drives retry timing;
+        // after expiry, the same observation can open one fresh episode.
+        const persistedFailureClass = failureOnlyHandoffCooldownActive
+          ? entry.incident.failureClass
+          : effectiveFailureClass;
+        const persistedFailureFingerprint = failureOnlyHandoffCooldownActive
+          ? entry.incident.failureFingerprint
+          : effectiveFailureFingerprint;
         const continueIncompletePlaybook =
           playbookAssessment.conclusion === "INCOMPLETE" &&
           Boolean(playbookAssessment.nextStage) &&
-          shouldContinueSettledCourseSupportRemediation({
-            remediationDirective,
-            failureClass: effectiveFailureClass,
-            attemptCount: entry.incident.attemptCount,
-            playbookConclusion: playbookAssessment.conclusion,
-            nextPlaybookStage: playbookAssessment.nextStage,
-            nextPlaybookStageAttemptCount:
-              getCourseSupportNextStageAttemptCount(playbookAssessment),
-          });
+          (failureOnlyHandoffCooldownActive ||
+            shouldContinueSettledCourseSupportRemediation({
+              remediationDirective,
+              failureClass: effectiveFailureClass,
+              attemptCount: entry.incident.attemptCount,
+              playbookConclusion: playbookAssessment.conclusion,
+              nextPlaybookStage: playbookAssessment.nextStage,
+              nextPlaybookStageAttemptCount:
+                getCourseSupportNextStageAttemptCount(playbookAssessment),
+            }));
         const watchContinuationAt =
           (verificationWatchMode === "WATCH_SETTLED" ||
             verificationWatchMode === "ENDPOINT") &&
@@ -8658,8 +8811,8 @@ async function closeoutCourseSupportBatchAttempt(
           data: {
             status: "AUTO_INVESTIGATING",
             activeBatchId: null,
-            failureClass: effectiveFailureClass,
-            failureFingerprint: effectiveFailureFingerprint,
+            failureClass: persistedFailureClass,
+            failureFingerprint: persistedFailureFingerprint,
             escalationDeadlineAt: retryEscalationDeadline,
             nextAttemptAt,
             latestMessage: message,
@@ -8673,7 +8826,7 @@ async function closeoutCourseSupportBatchAttempt(
           targetState: "AUTO_INVESTIGATING",
           data: {
             state: "AUTO_INVESTIGATING",
-            failureFingerprint: effectiveFailureFingerprint,
+            failureFingerprint: persistedFailureFingerprint,
             nextAutomaticAttemptAt: nextAttemptAt,
             stateChangedAt: now,
             revision: { increment: 1 },
