@@ -8,7 +8,9 @@ import {
   inspectGeneratedPrismaClient,
   launchFailureResult,
   requiredCourseSupportIncidentScalarFields,
+  responderChildLaunchOptions,
   responderInvocation,
+  selectedResponderCheckoutContext,
   selectApprovedCourseSupportResponderCheckout
 } from "../../../scripts/automation/course-support-preflight.mjs";
 
@@ -128,6 +130,21 @@ describe("course support checkout refresh planning", () => {
 });
 
 describe("course support preflight process launch", () => {
+  it.each([
+    [approvedCourseSupportResponderCheckout, false],
+    [approvedCourseSupportResponderCheckouts[1], true]
+  ])("surfaces selected checkout %s before the single child inspection", (checkout, failover) => {
+    expect(
+      selectedResponderCheckoutContext(checkout, failover)
+    ).toEqual({
+      kind: "course_support_preflight_context",
+      selectedCheckout: checkout,
+      failover,
+      exactHead: true
+    });
+    expect(responderChildLaunchOptions(checkout)).toMatchObject({ cwd: checkout });
+  });
+
   it("routes the static responder command through cmd.exe on Windows", () => {
     expect(responderInvocation("win32", "C:\\Windows\\System32\\cmd.exe")).toEqual({
       command: "C:\\Windows\\System32\\cmd.exe",

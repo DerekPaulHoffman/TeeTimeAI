@@ -124,6 +124,23 @@ export function launchFailureResult(command) {
   };
 }
 
+export function selectedResponderCheckoutContext(checkout, failover) {
+  return {
+    kind: "course_support_preflight_context",
+    selectedCheckout: checkout,
+    failover: failover === true,
+    exactHead: true
+  };
+}
+
+export function responderChildLaunchOptions(checkout) {
+  return {
+    cwd: checkout,
+    stdio: "inherit",
+    shell: false
+  };
+}
+
 export function selectApprovedCourseSupportResponderCheckout(input) {
   const normalize = (value) =>
     input.platform === "win32" ? value.toLowerCase() : value;
@@ -263,11 +280,16 @@ function main() {
         process.env.ComSpec,
         process.argv.includes("--scheduled-cycle")
       );
-      const command = spawnSync(invocation.command, invocation.args, {
-        cwd: resolvedCheckout,
-        stdio: "inherit",
-        shell: false
-      });
+      process.stdout.write(
+        `${JSON.stringify(
+          selectedResponderCheckoutContext(resolvedCheckout, selection.failover)
+        )}\n`
+      );
+      const command = spawnSync(
+        invocation.command,
+        invocation.args,
+        responderChildLaunchOptions(resolvedCheckout)
+      );
       const launchFailure = launchFailureResult(command);
 
       if (launchFailure) {
