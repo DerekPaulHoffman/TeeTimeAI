@@ -343,6 +343,16 @@ function resolvePersistedBrowserReleaseFence(input: {
       "Deployment time does not match the batch's persisted deployment.",
     );
   }
+  if (input.batch.releaseSha && !input.batch.deployedAt) {
+    throw new Error(
+      "Course-support browser progression requires trusted deployment proof for the persisted release.",
+    );
+  }
+  if (!input.batch.releaseSha && input.batch.deployedAt) {
+    throw new Error(
+      "Course-support browser deployment proof has no persisted release SHA.",
+    );
+  }
   if (!input.batch.releaseSha || !input.batch.deployedAt) {
     return null;
   }

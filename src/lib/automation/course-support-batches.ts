@@ -3088,6 +3088,9 @@ export async function claimCourseSupportBatch(input: {
               expectedLatestProbeAt: incident.campaign.expectedLatestProbeAt,
               expectedLatestDiscoveryAt:
                 incident.campaign.expectedLatestDiscoveryAt,
+              expectedLatestProbeId: incident.campaign.expectedLatestProbeId,
+              expectedLatestDiscoveryId:
+                incident.campaign.expectedLatestDiscoveryId,
               expectedProviderFamilyKey: incident.providerFamilyKey,
               expectedFailureFingerprint: incident.failureFingerprint,
               expectedProviderSnapshotFingerprint:
@@ -3785,6 +3788,193 @@ export function canAppendCourseSupportBatchPath(input: {
     input.status === "VERIFYING" &&
     input.releaseSha === null &&
     input.plannedPaths.length === 0
+  );
+}
+
+const COURSE_SUPPORT_VERIFICATION_STAGE_DEADLINE_GRANT_KEY =
+  "verificationStageDeadlineGrant";
+
+export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
+  batchId: string;
+  leaseToken: string;
+  ownerThreadId: string;
+}) {
+  return runCourseSupportSerializableTransactionWithRetry(
+    async (transaction) => {
+      const databaseNow = await getCourseSupportDatabaseNow(transaction);
+      const batch = await transaction.courseSupportBatch.findFirst({
+        where: {
+          id: input.batchId,
+          leaseToken: input.leaseToken,
+          ownerThreadId: input.ownerThreadId,
+          status: { in: ACTIVE_BATCH_STATUSES },
+          leaseExpiresAt: { gt: databaseNow },
+        },
+        select: {
+          status: true,
+          revision: true,
+          leaseExpiresAt: true,
+          summary: true,
+          incidents: {
+            orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+            select: {
+              cycle: true,
+              incident: {
+                select: {
+                  id: true,
+                  cycle: true,
+                  revision: true,
+                  status: true,
+                  activeBatchId: true,
+                  attemptCount: true,
+                  attemptLedger: true,
+                  activeRealSearchCount: true,
+                },
+              },
+            },
+          },
+        },
+      });
+      if (!batch) {
+        throw new Error(
+          "Course-support verification watch lost ownership before its deadline grant.",
+        );
+      }
+
+      const summary = asJsonObject(batch.summary);
+      if (
+        Object.prototype.hasOwnProperty.call(
+          summary,
+          COURSE_SUPPORT_VERIFICATION_STAGE_DEADLINE_GRANT_KEY,
+        )
+      ) {
+        return {
+          granted: false,
+          replayed: true,
+          grantedIncidentCount: 0,
+        };
+      }
+
+      const remediationDirective = readCourseSupportRemediationDirective(
+        batch.summary,
+      );
+      const targets = batch.incidents.flatMap((entry) => {
+        const playbook = assessAutomationPlaybook(
+          entry.incident.attemptLedger,
+          entry.incident.cycle,
+        );
+        const stage = playbook.nextStage;
+        const ownedStage =
+          stage === "RENDERED_BROWSER_DISCOVERY" ||
+          stage === "INDEPENDENT_CONFIRMATION";
+        return entry.cycle === entry.incident.cycle &&
+          entry.incident.status === "AUTO_INVESTIGATING" &&
+          entry.incident.activeBatchId === input.batchId &&
+          playbook.conclusion === "INCOMPLETE" &&
+          ownedStage &&
+          stage === remediationDirective?.playbookStage &&
+          getCourseSupportNextStageAttemptCount(playbook) === 0
+          ? [
+              {
+                entry,
+                stage,
+                deadlineAt: getCourseMonitoringEscalationDeadline(
+                  databaseNow,
+                  entry.incident.activeRealSearchCount,
+                ),
+              },
+            ]
+          : [];
+      });
+      if (targets.length === 0) {
+        return {
+          granted: false,
+          replayed: false,
+          grantedIncidentCount: 0,
+        };
+      }
+
+      for (const target of targets) {
+        const { incident } = target.entry;
+        const updated = await transaction.courseSupportIncident.updateMany({
+          where: {
+            id: incident.id,
+            cycle: incident.cycle,
+            revision: incident.revision,
+            status: "AUTO_INVESTIGATING",
+            activeBatchId: input.batchId,
+            attemptCount: incident.attemptCount,
+            attemptLedger: {
+              equals:
+                incident.attemptLedger === null
+                  ? Prisma.DbNull
+                  : incident.attemptLedger,
+            },
+          },
+          data: {
+            escalationDeadlineAt: target.deadlineAt,
+            revision: { increment: 1 },
+          },
+        });
+        if (updated.count !== 1) {
+          throw new Error(
+            "Course-support incident stage changed during its verification deadline grant.",
+          );
+        }
+      }
+
+      const stageGrants = Array.from(
+        targets.reduce((grants, target) => {
+          const key = `${target.entry.cycle}:${target.stage}:${target.deadlineAt.toISOString()}`;
+          const current = grants.get(key);
+          grants.set(key, {
+            cycle: target.entry.cycle,
+            stage: target.stage,
+            deadlineAt: target.deadlineAt.toISOString(),
+            incidentCount: (current?.incidentCount ?? 0) + 1,
+          });
+          return grants;
+        }, new Map<string, { cycle: number; stage: AutomationPlaybookStage; deadlineAt: string; incidentCount: number }>()),
+      ).map(([, grant]) => grant);
+      const marker = {
+        schemaVersion: 1,
+        grantedAt: databaseNow.toISOString(),
+        incidentCount: targets.length,
+        stages: stageGrants,
+      } satisfies Prisma.InputJsonObject;
+      const ownership = await transaction.courseSupportBatch.updateMany({
+        where: {
+          id: input.batchId,
+          leaseToken: input.leaseToken,
+          ownerThreadId: input.ownerThreadId,
+          status: batch.status,
+          revision: batch.revision,
+          leaseExpiresAt: { gt: databaseNow },
+          summary: {
+            equals: batch.summary === null ? Prisma.DbNull : batch.summary,
+          },
+        },
+        data: {
+          summary: {
+            ...summary,
+            [COURSE_SUPPORT_VERIFICATION_STAGE_DEADLINE_GRANT_KEY]: marker,
+          } as Prisma.InputJsonObject,
+          revision: { increment: 1 },
+        },
+      });
+      if (ownership.count !== 1) {
+        throw new Error(
+          "Course-support batch ownership or directive changed during its verification deadline grant.",
+        );
+      }
+
+      return {
+        granted: true,
+        replayed: false,
+        grantedIncidentCount: targets.length,
+        grantedAt: marker.grantedAt,
+      };
+    },
   );
 }
 
@@ -4687,6 +4877,7 @@ type CourseSupportHeartbeatInput = {
   ownerThreadId: string;
   status?: "IMPLEMENTING" | "VERIFYING";
   releaseSha?: string | null;
+  deployedAt?: Date | null;
   releaseAdvanceProof?: CourseSupportReleaseAdvanceProof;
   now?: Date;
 };
@@ -4697,6 +4888,9 @@ export async function heartbeatCourseSupportBatch(
   const now = input.now ?? new Date();
   if (input.releaseSha) {
     validateGitSha(input.releaseSha, "release SHA");
+  }
+  if (input.deployedAt && !Number.isFinite(input.deployedAt.getTime())) {
+    throw new Error("Deployment proof must be a valid timestamp.");
   }
   const batch = await prisma.courseSupportBatch.findFirst({
     where: {
@@ -4809,6 +5003,21 @@ function prepareCourseSupportHeartbeat(
   const remediationDirective = readCourseSupportRemediationDirective(
     batch.summary,
   );
+  const requestedDeploymentSha = input.releaseSha ?? batch.releaseSha;
+  if (input.deployedAt && !requestedDeploymentSha) {
+    throw new Error(
+      "Deployment proof requires a persisted or requested release SHA.",
+    );
+  }
+  if (
+    batch.deployedAt &&
+    input.deployedAt &&
+    batch.deployedAt.getTime() !== input.deployedAt.getTime()
+  ) {
+    throw new Error(
+      "Deployment time does not match the batch's persisted deployment.",
+    );
+  }
   if (
     input.releaseSha &&
     !batch.releaseSha &&
@@ -4876,6 +5085,11 @@ function prepareCourseSupportHeartbeat(
   const releaseAdvanced = releaseTransition.action === "ADVANCE";
   if (releaseAdvanced && input.status !== "VERIFYING") {
     throw new Error("A follow-up release must explicitly enter VERIFYING.");
+  }
+  if (releaseAdvanced && input.deployedAt) {
+    throw new Error(
+      "A follow-up release must be persisted before its deployment proof.",
+    );
   }
   if (input.status === "IMPLEMENTING" && batch.status !== "IMPLEMENTING") {
     throw new Error(
@@ -4976,6 +5190,9 @@ async function persistCourseSupportHeartbeat(
             recheckDispatchStartedAt: null,
             recheckDispatchedAt: null,
           }
+        : {}),
+      ...(!plan.releaseAdvanced && input.deployedAt
+        ? { deployedAt: input.deployedAt }
         : {}),
       ...(releaseSummary
         ? { summary: releaseSummary as Prisma.InputJsonValue }
@@ -6289,7 +6506,19 @@ export function shouldContinueSettledCourseSupportRemediation(input: {
   attemptCount: number;
   playbookConclusion: ReturnType<typeof assessAutomationPlaybook>["conclusion"];
   nextPlaybookStage: AutomationPlaybookStage | null;
+  nextPlaybookStageAttemptCount?: number;
 }) {
+  if (
+    input.playbookConclusion === "INCOMPLETE" &&
+    (input.nextPlaybookStage === "RENDERED_BROWSER_DISCOVERY" ||
+      input.nextPlaybookStage === "INDEPENDENT_CONFIRMATION") &&
+    input.nextPlaybookStageAttemptCount === 0
+  ) {
+    // These are owner-only stages. Reaching an old endpoint before their first
+    // attempt is an orchestration miss, not unchanged course evidence and not
+    // proof that the safe playbook is exhausted.
+    return true;
+  }
   if (
     input.playbookConclusion === "INCOMPLETE" &&
     input.nextPlaybookStage &&
@@ -6323,6 +6552,17 @@ export function shouldContinueSettledCourseSupportRemediation(input: {
     return false;
   }
   return false;
+}
+
+function getCourseSupportNextStageAttemptCount(
+  assessment: ReturnType<typeof assessAutomationPlaybook>,
+) {
+  if (!assessment.nextStage) {
+    return undefined;
+  }
+  return assessment.stages.find(
+    (stage) => stage.stage === assessment.nextStage,
+  )?.attemptCount;
 }
 
 function getEffectiveCourseSupportRetryFailureClass(input: {
@@ -6616,6 +6856,8 @@ async function closeoutCourseSupportBatchAttempt(
         attemptCount: entry.incident.attemptCount,
         playbookConclusion: playbookAssessment.conclusion,
         nextPlaybookStage: playbookAssessment.nextStage,
+        nextPlaybookStageAttemptCount:
+          getCourseSupportNextStageAttemptCount(playbookAssessment),
       });
     const terminalProofIsDurable =
       entry.result === "RESTORED" || entry.result === "FINAL_DISPOSITION"
@@ -6749,6 +6991,8 @@ async function closeoutCourseSupportBatchAttempt(
             attemptCount: entry.incident.attemptCount,
             playbookConclusion: playbookAssessment.conclusion,
             nextPlaybookStage: playbookAssessment.nextStage,
+            nextPlaybookStageAttemptCount:
+              getCourseSupportNextStageAttemptCount(playbookAssessment),
           })
         ) {
           return {
@@ -7004,6 +7248,8 @@ async function closeoutCourseSupportBatchAttempt(
         attemptCount: entry.incident.attemptCount,
         playbookConclusion: playbookAssessment.conclusion,
         nextPlaybookStage: playbookAssessment.nextStage,
+        nextPlaybookStageAttemptCount:
+          getCourseSupportNextStageAttemptCount(playbookAssessment),
       });
     const sourceUnverifiedHumanReview =
       normalizedProof.kind === "HUMAN_REVIEW_REQUIRED" &&
@@ -7391,6 +7637,8 @@ async function closeoutCourseSupportBatchAttempt(
         attemptCount: entry.incident.attemptCount,
         playbookConclusion: playbookAssessment.conclusion,
         nextPlaybookStage: playbookAssessment.nextStage,
+        nextPlaybookStageAttemptCount:
+          getCourseSupportNextStageAttemptCount(playbookAssessment),
       });
     if (
       operationalRetry?.exhausted &&
@@ -8323,6 +8571,8 @@ async function closeoutCourseSupportBatchAttempt(
             attemptCount: entry.incident.attemptCount,
             playbookConclusion: playbookAssessment.conclusion,
             nextPlaybookStage: playbookAssessment.nextStage,
+            nextPlaybookStageAttemptCount:
+              getCourseSupportNextStageAttemptCount(playbookAssessment),
           });
         const watchContinuationAt =
           (verificationWatchMode === "WATCH_SETTLED" ||
@@ -11105,6 +11355,8 @@ async function listParkedCourseCampaignCandidates(
           expectedPlaybookConclusion: member.playbookConclusion,
           expectedLatestProbeAt: member.latestProbeAt,
           expectedLatestDiscoveryAt: member.latestDiscoveryAt,
+          expectedLatestProbeId: member.latestProbeId,
+          expectedLatestDiscoveryId: member.latestDiscoveryId,
         },
       },
     ];

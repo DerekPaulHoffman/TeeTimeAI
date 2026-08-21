@@ -228,6 +228,45 @@ describe("persistOwnedCourseSupportBrowserPlaybookStages", () => {
     now: new Date("2026-07-21T12:00:00.000Z"),
   };
 
+  it("runs every rendered stage in a three-entry depth-four owned batch", async () => {
+    const current = ownedBrowserBatch({
+      incidents: Array.from({ length: 3 }, (_, index) => ({
+        courseId: `course-${index + 1}`,
+        cycle: 1,
+        incident: {
+          id: `incident-${index + 1}`,
+          cycle: 1,
+          status: "AUTO_INVESTIGATING",
+          activeBatchId: "batch-1",
+          attemptLedger: ledger(throughHttpRetry),
+        },
+      })),
+    });
+    const runBrowserProbe = vi.fn(async () => ({ persistedCount: 1 }));
+
+    await expect(
+      persistOwnedCourseSupportBrowserPlaybookStages(input, {
+        loadBatch: vi.fn().mockResolvedValue(current),
+        runBrowserProbe,
+      }),
+    ).resolves.toMatchObject({
+      releaseFenceReady: true,
+      eligibleCount: 3,
+      persistedCount: 3,
+      renderedDiscoveryCount: 3,
+      independentConfirmationCount: 0,
+    });
+    expect(runBrowserProbe).toHaveBeenCalledTimes(3);
+    expect(runBrowserProbe).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ courseId: "course-1", mode: "RENDERED" }),
+    );
+    expect(runBrowserProbe).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({ courseId: "course-3", mode: "RENDERED" }),
+    );
+  });
+
   it("does not invoke the persisted browser runner before the release fence exists", async () => {
     const runBrowserProbe = vi.fn();
 
@@ -247,6 +286,20 @@ describe("persistOwnedCourseSupportBrowserPlaybookStages", () => {
       renderedDiscoveryCount: 0,
       independentConfirmationCount: 0,
     });
+    expect(runBrowserProbe).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when a persisted unchanged release lacks deployment proof", async () => {
+    const runBrowserProbe = vi.fn();
+
+    await expect(
+      persistOwnedCourseSupportBrowserPlaybookStages(input, {
+        loadBatch: vi
+          .fn()
+          .mockResolvedValue(ownedBrowserBatch({ deployedAt: null })),
+        runBrowserProbe,
+      }),
+    ).rejects.toThrow("requires trusted deployment proof");
     expect(runBrowserProbe).not.toHaveBeenCalled();
   });
 

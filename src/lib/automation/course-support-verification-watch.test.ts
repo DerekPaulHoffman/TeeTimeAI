@@ -6,7 +6,8 @@ import {
   runCourseSupportVerificationPass,
   runCourseSupportVerificationWatch,
   runWithBoundedCourseSupportHeartbeat,
-  selectCourseSupportVerificationEndpointDeadline
+  selectCourseSupportVerificationEndpointDeadline,
+  selectCourseSupportVerificationStopMode
 } from "@/lib/automation/course-support-verification-watch";
 import { CourseSupportSearchExecutionFenceRetryError } from "@/lib/automation/course-support-search-execution-fence";
 
@@ -88,6 +89,55 @@ describe("runCourseSupportVerificationWatch", () => {
     expect(result.passCount).toBe(3);
     expect(pass).toHaveBeenCalledTimes(3);
     expect(sleep).toHaveBeenCalledTimes(2);
+  });
+
+  it("attempts all three owned browser stages before settled closeout", async () => {
+    const pass = vi
+      .fn()
+      .mockResolvedValueOnce({
+        browserStages: { eligibleCount: 3, persistedCount: 3 },
+        verification: { detachedVerification: { rerunNeeded: false } }
+      })
+      .mockResolvedValueOnce(cleanPass())
+      .mockResolvedValueOnce(cleanPass());
+    const closeout = vi.fn(async () => ({ durableCloseoutRecorded: true }));
+
+    const result = await runCourseSupportVerificationWatch({
+      pass,
+      closeout,
+      sleep: async () => undefined
+    });
+
+    expect(result.passCount).toBe(3);
+    expect(pass).toHaveBeenCalledTimes(3);
+    expect(closeout).toHaveBeenCalledOnce();
+  });
+
+  it("releases an expired zero-pass browser watch as an automatic retry", async () => {
+    const pass = vi.fn(async () => cleanPass());
+    const onStopped = vi.fn(
+      async ({ reason, passCount }: { reason: "endpoint"; passCount: number }) => ({
+        mode: selectCourseSupportVerificationStopMode({
+          reason,
+          passCount,
+          endpointDeadlineAt: 1_000,
+          now: 1_000
+        })
+      })
+    );
+
+    const result = await runCourseSupportVerificationWatch({
+      deadlineAt: 1_000,
+      now: () => 1_000,
+      pass,
+      onStopped
+    });
+
+    expect(pass).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      stoppedReason: "endpoint",
+      closeout: { mode: "EARLY_RETRY" }
+    });
   });
 
   it("requires an extra clean pass after browser work", async () => {

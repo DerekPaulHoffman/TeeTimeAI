@@ -290,13 +290,16 @@ npm run automation:browser-probe -- --dry-run --trace-json --course-name "<exact
 
 # Only when the packet's remediation directive explicitly allows unchanged
 # runtime, verify the shared adapter/classification on the exact production
-# deployment of the clean claimed base SHA. Adapter/parser repair routes reject
-# this command and require a claimed reusable implementation path.
+# deployment of the clean claimed base SHA. Use the exact `deployedAt` value
+# returned by deployment:wait; never substitute claim time or the current time.
+# Adapter/parser repair routes reject this command and require a claimed
+# reusable implementation path.
 npm run automation:course-support -- heartbeat --batch-ref <batch-ref> --status VERIFYING --current-runtime
 npm run deployment:wait -- --sha <claimed-base-sha>
 npm run automation:course-support -- verify --batch-ref <batch-ref> --current-runtime --deployed-at <iso-timestamp> --watch --closeout
 
-# Verify classification evidence, or first run deployment:wait and then verify fresh probes from the exact deployed SHA.
+# Verify classification evidence, or first run deployment:wait and pass its
+# exact `deployedAt` value when verifying fresh probes from the deployed SHA.
 npm run automation:course-support -- verify --batch-ref <batch-ref> --watch --closeout
 npm run deployment:wait -- --sha <git-sha>
 npm run automation:course-support -- verify --batch-ref <batch-ref> --release-sha <git-sha> --deployed-at <iso-timestamp> --watch --closeout

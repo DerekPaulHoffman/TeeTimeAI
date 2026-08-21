@@ -1,11 +1,45 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  parseCanonicalCourseSupportDeployedAt,
   parseCourseSupportSourceSearchResultOptions,
   shouldCompleteParkedCampaignForInspection,
 } from "../../../scripts/automation/course-support";
 
 describe("course-support source-search CLI", () => {
+  it("accepts only one exact canonical UTC deployment timestamp", () => {
+    expect(
+      parseCanonicalCourseSupportDeployedAt([
+        "--deployed-at",
+        "2026-08-21T15:04:05.123Z",
+      ]),
+    ).toEqual(new Date("2026-08-21T15:04:05.123Z"));
+    expect(parseCanonicalCourseSupportDeployedAt([])).toBeNull();
+
+    for (const raw of [
+      " 2026-08-21T15:04:05.123Z",
+      "2026-08-21T15:04:05.123Z ",
+      "2026-08-21T11:04:05.123-04:00",
+      "2026-08-21T15:04:05Z",
+      "not-a-timestamp",
+    ]) {
+      expect(() =>
+        parseCanonicalCourseSupportDeployedAt(["--deployed-at", raw]),
+      ).toThrow("exact canonical UTC ISO");
+    }
+    expect(() =>
+      parseCanonicalCourseSupportDeployedAt([
+        "--deployed-at",
+        "2026-08-21T15:04:05.123Z",
+        "--deployed-at",
+        "2026-08-21T15:04:05.123Z",
+      ]),
+    ).toThrow("only once");
+    expect(() =>
+      parseCanonicalCourseSupportDeployedAt(["--deployed-at"]),
+    ).toThrow("requires a value");
+  });
+
   it("parses one ordinal-scoped candidate result", () => {
     expect(
       parseCourseSupportSourceSearchResultOptions([

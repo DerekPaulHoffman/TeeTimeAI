@@ -60,6 +60,7 @@ export type CourseSupportCandidate = {
       | "INCOMPLETE_PLAYBOOK_RECOVERY"
       | "DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY"
       | "PARKED_COHORT_REQUESTLESS_STALE_OWNERSHIP_RECOVERY"
+      | "SAME_IDENTITY_MATERIAL_CHANGE_INCOMPLETE_PLAYBOOK_RECOVERY"
       | "CURRENT_CYCLE_ORCHESTRATION_RECOVERY";
     zeroExecutionHistoryDigest: string | null;
     sameCycleRecoveryHistoryDigest: string | null;
@@ -73,6 +74,8 @@ export type CourseSupportCandidate = {
     expectedPlaybookConclusion: string;
     expectedLatestProbeAt: string | null;
     expectedLatestDiscoveryAt: string | null;
+    expectedLatestProbeId?: string | null;
+    expectedLatestDiscoveryId?: string | null;
   };
 };
 

@@ -49,7 +49,7 @@ const campaignMemberSchema = z
     attemptLedgerFingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
     playbookConclusion: z.string().min(1),
     latestProbeAt: z.string().datetime().nullable(),
-    latestDiscoveryAt: z.string().datetime().nullable()
+    latestDiscoveryAt: z.string().datetime().nullable(),
   })
   .strict();
 
@@ -60,7 +60,7 @@ const campaignEvidenceCategoryCountsSchema = z
     providerSpecificCount: z.number().int().nonnegative(),
     priorProbeCount: z.number().int().nonnegative(),
     priorDiscoveryCount: z.number().int().nonnegative(),
-    noPriorEvidenceCount: z.number().int().nonnegative()
+    noPriorEvidenceCount: z.number().int().nonnegative(),
   })
   .strict();
 
@@ -73,7 +73,7 @@ const parkedCourseCampaignAuditSchema = z
     membershipDigest: z.string().regex(/^[a-f0-9]{64}$/u),
     aggregateEvidenceCategories: campaignEvidenceCategoryCountsSchema,
     members: z.array(campaignMemberSchema).min(1),
-    customerDataIncluded: z.literal(false)
+    customerDataIncluded: z.literal(false),
   })
   .strict()
   .superRefine((audit, context) => {
@@ -81,25 +81,34 @@ const parkedCourseCampaignAuditSchema = z
       context.addIssue({
         code: "custom",
         path: ["members"],
-        message: "The parked-course campaign count does not match its immutable membership."
+        message:
+          "The parked-course campaign count does not match its immutable membership.",
       });
     }
-    const sortedCourseIds = audit.members.map((member) => member.courseId).sort();
+    const sortedCourseIds = audit.members
+      .map((member) => member.courseId)
+      .sort();
     if (
-      sortedCourseIds.some((courseId, index) => courseId !== audit.members[index]?.courseId) ||
+      sortedCourseIds.some(
+        (courseId, index) => courseId !== audit.members[index]?.courseId,
+      ) ||
       new Set(sortedCourseIds).size !== sortedCourseIds.length
     ) {
       context.addIssue({
         code: "custom",
         path: ["members"],
-        message: "The parked-course campaign membership must be unique and sorted."
+        message:
+          "The parked-course campaign membership must be unique and sorted.",
       });
     }
-    if (createParkedCourseCampaignMembershipDigest(audit.members) !== audit.membershipDigest) {
+    if (
+      createParkedCourseCampaignMembershipDigest(audit.members) !==
+      audit.membershipDigest
+    ) {
       context.addIssue({
         code: "custom",
         path: ["membershipDigest"],
-        message: "The parked-course campaign membership digest is invalid."
+        message: "The parked-course campaign membership digest is invalid.",
       });
     }
     if (
@@ -109,16 +118,21 @@ const parkedCourseCampaignAuditSchema = z
       context.addIssue({
         code: "custom",
         path: ["aggregateEvidenceCategories"],
-        message: "The parked-course campaign aggregate evidence categories are invalid."
+        message:
+          "The parked-course campaign aggregate evidence categories are invalid.",
       });
     }
   });
 
 export type ParkedCourseCampaignMember = z.infer<typeof campaignMemberSchema>;
-export type ParkedCourseCampaignAudit = z.infer<typeof parkedCourseCampaignAuditSchema>;
+export type ParkedCourseCampaignAudit = z.infer<
+  typeof parkedCourseCampaignAuditSchema
+>;
 
 export type ParkedCourseCampaignAdmissionMember = ParkedCourseCampaignMember & {
   activeRealSearchCount: number;
+  latestProbeId: string | null;
+  latestDiscoveryId: string | null;
   capturedRevision: number;
   capturedMonitoringRevision: number;
   capturedCycle: number;
@@ -131,6 +145,7 @@ export type ParkedCourseCampaignAdmissionMember = ParkedCourseCampaignMember & {
     | "INCOMPLETE_PLAYBOOK_RECOVERY"
     | "DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY"
     | "PARKED_COHORT_REQUESTLESS_STALE_OWNERSHIP_RECOVERY"
+    | "SAME_IDENTITY_MATERIAL_CHANGE_INCOMPLETE_PLAYBOOK_RECOVERY"
     | "CURRENT_CYCLE_ORCHESTRATION_RECOVERY";
   zeroExecutionHistoryDigest: string | null;
   sameCycleRecoveryHistoryDigest: string | null;
@@ -192,7 +207,10 @@ export function deriveParkedCourseCampaignHumanReviewCycles(input: {
   campaignRunId: string;
   campaignMembershipDigest: string;
 }) {
-  const recoveredAtByCycle = new Map<number, Date>();
+  const recoveredAtByCycle = new Map<
+    number,
+    { recoveredAt: Date; supersededEndpointAt: Date | null }
+  >();
   for (const event of input.events) {
     if (event.eventType !== "REVALIDATION_REQUESTED") continue;
     const audit = asCampaignRecord(event.audit);
@@ -213,10 +231,42 @@ export function deriveParkedCourseCampaignHumanReviewCycles(input: {
       Number(audit.descendantHandoffCount) >= 1 &&
       Number(audit.descendantHandoffCount) <=
         PARKED_COURSE_CAMPAIGN_MAX_DESCENDANT_HANDOFFS;
+    const sameIdentityMaterialChangeIncompleteRecovery =
+      event.source === "COURSE_SUPPORT_RESPONDER" &&
+      audit.action ===
+        "parked_cohort_same_identity_material_change_incomplete_playbook_recovery" &&
+      audit.admissionMode ===
+        "SAME_IDENTITY_MATERIAL_CHANGE_INCOMPLETE_PLAYBOOK_RECOVERY" &&
+      typeof audit.materialChangeLineageDigest === "string" &&
+      /^[a-f0-9]{64}$/u.test(audit.materialChangeLineageDigest) &&
+      Number.isInteger(audit.startedRequestCount) &&
+      Number(audit.startedRequestCount) >= 1 &&
+      Number.isInteger(audit.batchCount) &&
+      Number(audit.batchCount) >= 1 &&
+      Number.isInteger(audit.playbookCompletedStageCount) &&
+      Number(audit.playbookCompletedStageCount) > 0 &&
+      typeof audit.playbookNextStage === "string" &&
+      audit.playbookNextStage.trim().length > 0 &&
+      typeof audit.supersededEndpointAt === "string" &&
+      Number.isFinite(new Date(audit.supersededEndpointAt).getTime()) &&
+      new Date(audit.supersededEndpointAt).getTime() <
+        event.occurredAt.getTime() &&
+      audit.customerDataIncluded === false &&
+      audit.preservesOperatorEvidence === true &&
+      asCampaignRecord(audit.campaign).kind === "PARKED_COHORT" &&
+      asCampaignRecord(audit.campaign).runId === audit.campaignRunId &&
+      asCampaignRecord(audit.campaign).membershipDigest ===
+        audit.campaignMembershipDigest &&
+      asCampaignRecord(audit.campaign).cycle === cycle &&
+      audit.preservesAttemptLedger === true &&
+      audit.preservesAttemptCounts === true &&
+      audit.preservesAttemptTimestamps === true &&
+      audit.preservesImmutableCampaignAudit === true;
     const validIncompletePlaybookRecovery =
       ((audit.action === "parked_cohort_incomplete_playbook_recovery" &&
         audit.admissionMode === "INCOMPLETE_PLAYBOOK_RECOVERY") ||
-        descendantIncompleteRecovery) &&
+        descendantIncompleteRecovery ||
+        sameIdentityMaterialChangeIncompleteRecovery) &&
       typeof audit.sameCycleRecoveryHistoryDigest === "string" &&
       /^[a-f0-9]{64}$/u.test(audit.sameCycleRecoveryHistoryDigest) &&
       typeof audit.providerSnapshotFingerprint === "string" &&
@@ -253,9 +303,15 @@ export function deriveParkedCourseCampaignHumanReviewCycles(input: {
     ) {
       continue;
     }
+    const supersededEndpointAt = sameIdentityMaterialChangeIncompleteRecovery
+      ? new Date(audit.supersededEndpointAt as string)
+      : null;
     const prior = recoveredAtByCycle.get(cycle);
-    if (!prior || event.occurredAt < prior) {
-      recoveredAtByCycle.set(cycle, event.occurredAt);
+    if (!prior || event.occurredAt < prior.recoveredAt) {
+      recoveredAtByCycle.set(cycle, {
+        recoveredAt: event.occurredAt,
+        supersededEndpointAt,
+      });
     }
   }
 
@@ -275,7 +331,7 @@ export function deriveParkedCourseCampaignHumanReviewCycles(input: {
           ? (audit.cycle as number)
           : null;
         if (cycle === null) return [];
-        const recoveredAt = recoveredAtByCycle.get(cycle);
+        const recovery = recoveredAtByCycle.get(cycle);
         const supersededInfrastructureParking =
           event.eventType === "HUMAN_REVIEW_REQUESTED" &&
           event.source !== "OPERATOR_DASHBOARD" &&
@@ -283,8 +339,11 @@ export function deriveParkedCourseCampaignHumanReviewCycles(input: {
           audit.automationStalled === true &&
           audit.parkedUntilMaterialChange === true &&
           audit.playbookExhausted === false &&
-          recoveredAt !== undefined &&
-          event.occurredAt < recoveredAt;
+          recovery !== undefined &&
+          (recovery.supersededEndpointAt
+            ? event.occurredAt.getTime() ===
+              recovery.supersededEndpointAt.getTime()
+            : event.occurredAt < recovery.recoveredAt);
         return supersededInfrastructureParking ? [] : [cycle];
       }),
     ),
@@ -334,16 +393,18 @@ type ParkedCourseCampaignDependencies = {
   loadMemberObservations: (
     audit: ParkedCourseCampaignAudit,
     parkedCourseIds: ReadonlySet<string>,
-    campaignRunId: string
+    campaignRunId: string,
   ) => Promise<ParkedCourseCampaignMemberObservation[]>;
-  createCampaign: (audit: ParkedCourseCampaignAudit) => Promise<StoredCampaignRun>;
+  createCampaign: (
+    audit: ParkedCourseCampaignAudit,
+  ) => Promise<StoredCampaignRun>;
   completeCampaign: (
     runId: string,
     audit: ParkedCourseCampaignAudit,
-    progress: ParkedCourseCampaignProgress
+    progress: ParkedCourseCampaignProgress,
   ) => Promise<boolean>;
   withTransitionLease: <T>(
-    worker: () => Promise<T>
+    worker: () => Promise<T>,
   ) => Promise<{ acquired: true; value: T } | { acquired: false }>;
 };
 
@@ -358,7 +419,7 @@ export function parseParkedCourseCampaignAudit(value: unknown) {
 }
 
 export function createParkedCourseCampaignMembershipDigest(
-  members: readonly ParkedCourseCampaignMember[]
+  members: readonly ParkedCourseCampaignMember[],
 ) {
   return createHash("sha256")
     .update(
@@ -380,15 +441,15 @@ export function createParkedCourseCampaignMembershipDigest(
             attemptLedgerFingerprint: member.attemptLedgerFingerprint,
             playbookConclusion: member.playbookConclusion,
             latestProbeAt: member.latestProbeAt,
-            latestDiscoveryAt: member.latestDiscoveryAt
-          }))
-      )
+            latestDiscoveryAt: member.latestDiscoveryAt,
+          })),
+      ),
     )
     .digest("hex");
 }
 
 export function summarizeCampaignEvidenceCategories(
-  members: readonly ParkedCourseCampaignMember[]
+  members: readonly ParkedCourseCampaignMember[],
 ) {
   return members.reduce(
     (counts, member) => {
@@ -412,8 +473,8 @@ export function summarizeCampaignEvidenceCategories(
       providerSpecificCount: 0,
       priorProbeCount: 0,
       priorDiscoveryCount: 0,
-      noPriorEvidenceCount: 0
-    }
+      noPriorEvidenceCount: 0,
+    },
   );
 }
 
@@ -423,7 +484,7 @@ export function createParkedCourseCampaignAudit(input: {
   members: readonly ParkedCourseCampaignMember[];
 }): ParkedCourseCampaignAudit {
   const members = [...input.members].sort((left, right) =>
-    left.courseId.localeCompare(right.courseId)
+    left.courseId.localeCompare(right.courseId),
   );
   return parkedCourseCampaignAuditSchema.parse({
     schemaVersion: PARKED_COURSE_CAMPAIGN_AUDIT_SCHEMA_VERSION,
@@ -433,7 +494,7 @@ export function createParkedCourseCampaignAudit(input: {
     membershipDigest: createParkedCourseCampaignMembershipDigest(members),
     aggregateEvidenceCategories: summarizeCampaignEvidenceCategories(members),
     members,
-    customerDataIncluded: false
+    customerDataIncluded: false,
   });
 }
 
@@ -444,7 +505,10 @@ export function summarizeParkedCourseCampaignProgress(input: {
 }): ParkedCourseCampaignProgress {
   const capturedAt = new Date(input.audit.capturedAt);
   const observationByCourseId = new Map(
-    input.observations.map((observation) => [observation.courseId, observation])
+    input.observations.map((observation) => [
+      observation.courseId,
+      observation,
+    ]),
   );
   const counts = {
     terminalCount: 0,
@@ -459,13 +523,15 @@ export function summarizeParkedCourseCampaignProgress(input: {
     currentResultMissingCount: 0,
     humanReviewCount: 0,
     terminalWithin24HoursCount: 0,
-    automaticWithin24HoursCount: 0
+    automaticWithin24HoursCount: 0,
   };
   const humanReviewKeys = new Set<string>();
 
   for (const member of input.audit.members) {
     const observation = observationByCourseId.get(member.courseId);
-    const terminalKind = observation ? getFreshTerminalKind(member, observation, capturedAt) : null;
+    const terminalKind = observation
+      ? getFreshTerminalKind(member, observation, capturedAt)
+      : null;
     if (terminalKind) {
       counts.terminalCount += 1;
       if (
@@ -488,7 +554,8 @@ export function summarizeParkedCourseCampaignProgress(input: {
         observation.cycle !== null &&
         observation.campaignTerminalAutomatedFinal === false
       ) {
-        humanReviewKeys.add(`${observation.incidentId}\u0000${observation.cycle}`,
+        humanReviewKeys.add(
+          `${observation.incidentId}\u0000${observation.cycle}`,
         );
       }
       if (terminalKind === "MONITORED") counts.monitoredCount += 1;
@@ -1021,6 +1088,7 @@ export async function loadParkedCourseCampaignAdmissionMembers(
     {
       requireZeroDemand: false,
       incidentIds: audit.members.map((member) => member.incidentId),
+      requireExactCurrentCycleBatchHistory: true,
     },
   );
   return currentMembers.flatMap((current) => {
@@ -1071,12 +1139,29 @@ export async function loadParkedCourseCampaignAdmissionMembers(
             campaignRunId,
             campaignMembershipDigest: audit.membershipDigest,
           });
-    const currentCycleOrchestrationHistory =
+    const sameIdentityMaterialChangeIncompletePlaybookRecovery =
       freshCycle ||
       requestlessStaleOwnershipHistory ||
       zeroExecutionHistory ||
       incompletePlaybookHistory ||
       descendantIncompletePlaybookRecovery
+        ? null
+        : assessParkedCourseCampaignSameIdentityMaterialChangeIncompletePlaybookRecovery(
+            {
+              captured,
+              current,
+              capturedAt: new Date(audit.capturedAt),
+              campaignRunId,
+              campaignMembershipDigest: audit.membershipDigest,
+            },
+          );
+    const currentCycleOrchestrationHistory =
+      freshCycle ||
+      requestlessStaleOwnershipHistory ||
+      zeroExecutionHistory ||
+      incompletePlaybookHistory ||
+      descendantIncompletePlaybookRecovery ||
+      sameIdentityMaterialChangeIncompletePlaybookRecovery
         ? null
         : getParkedCourseCampaignCurrentCycleOrchestrationRecovery({
             captured,
@@ -1090,6 +1175,7 @@ export async function loadParkedCourseCampaignAdmissionMembers(
       !zeroExecutionHistory &&
       !incompletePlaybookHistory &&
       !descendantIncompletePlaybookRecovery &&
+      !sameIdentityMaterialChangeIncompletePlaybookRecovery &&
       !currentCycleOrchestrationHistory
     ) {
       return [];
@@ -1104,7 +1190,9 @@ export async function loadParkedCourseCampaignAdmissionMembers(
             ? ("INCOMPLETE_PLAYBOOK_RECOVERY" as const)
             : descendantIncompletePlaybookRecovery
               ? ("DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY" as const)
-              : ("CURRENT_CYCLE_ORCHESTRATION_RECOVERY" as const);
+              : sameIdentityMaterialChangeIncompletePlaybookRecovery
+                ? ("SAME_IDENTITY_MATERIAL_CHANGE_INCOMPLETE_PLAYBOOK_RECOVERY" as const)
+                : ("CURRENT_CYCLE_ORCHESTRATION_RECOVERY" as const);
     const playbookAssessment = current.zeroExecutionEvidence.playbookAssessment;
     return [
       {
@@ -1121,10 +1209,15 @@ export async function loadParkedCourseCampaignAdmissionMembers(
           requestlessStaleOwnershipHistory?.historyDigest ??
           incompletePlaybookHistory?.historyDigest ??
           descendantIncompletePlaybookRecovery?.history.historyDigest ??
+          sameIdentityMaterialChangeIncompletePlaybookRecovery?.history
+            .historyDigest ??
           currentCycleOrchestrationHistory?.historyDigest ??
           null,
         playbookNextStage: playbookAssessment.nextStage,
         playbookCompletedStageCount: playbookAssessment.completedStages.length,
+        latestProbeId: current.zeroExecutionEvidence.latestProbe?.id ?? null,
+        latestDiscoveryId:
+          current.zeroExecutionEvidence.latestDiscovery?.id ?? null,
       },
     ];
   });
@@ -1135,6 +1228,11 @@ type ParkedCourseCampaignRecoveryEvidence = {
     id: string;
     courseId: string;
     observedAt: Date;
+  } | null;
+  latestDiscovery: {
+    id: string;
+    courseId: string;
+    createdAt: Date;
   } | null;
   monitoringEvents: Array<{
     incidentId: string | null;
@@ -1169,6 +1267,7 @@ export type ParkedCourseCampaignBatchEvidence = Omit<
     revision: number;
     ownerAutomationRunId: string | null;
     deployedAt: Date | null;
+    createdAt: Date;
     recheckDispatchKey: string | null;
     recheckDispatchStartedAt: Date | null;
     recheckDispatchedAt: Date | null;
@@ -1184,6 +1283,66 @@ export type ParkedCourseCampaignBatchEvidence = Omit<
     } | null;
   };
 };
+
+const parkedCourseCampaignBatchIncidentSelect = {
+  id: true,
+  batchId: true,
+  incidentId: true,
+  courseId: true,
+  cycle: true,
+  result: true,
+  preProbeId: true,
+  postProbeId: true,
+  proofSnapshot: true,
+  verifiedIncidentUpdatedAt: true,
+  verifiedAt: true,
+  createdAt: true,
+  updatedAt: true,
+  batch: {
+    select: {
+      id: true,
+      status: true,
+      revision: true,
+      ownerAutomationRunId: true,
+      baseSha: true,
+      releaseSha: true,
+      deployedAt: true,
+      createdAt: true,
+      recheckDispatchKey: true,
+      recheckDispatchStartedAt: true,
+      recheckDispatchedAt: true,
+      completedAt: true,
+      summary: true,
+      ownerAutomationRun: {
+        select: {
+          id: true,
+          promptVersion: true,
+          kind: true,
+          status: true,
+          runtimeVersion: true,
+          completedAt: true,
+          outcome: true,
+          notes: true,
+        },
+      },
+    },
+  },
+  verificationRequests: {
+    select: {
+      id: true,
+      releaseSha: true,
+      status: true,
+      revision: true,
+      attemptCount: true,
+      workflowRunId: true,
+      startedAt: true,
+      outcome: true,
+      failureClass: true,
+      evidence: true,
+      lastError: true,
+    },
+  },
+} satisfies Prisma.CourseSupportBatchIncidentSelect;
 
 export type ParkedCourseCampaignSameCycleRecoveryHistory = {
   historyDigest: string;
@@ -1201,6 +1360,7 @@ export type ParkedCourseCampaignSameCycleRecoveryHistory = {
     startedAt: Date | null;
     outcome: CourseSupportZeroExecutionBatchEvidence["verificationRequests"][number]["outcome"];
     failureClass: CourseSupportZeroExecutionBatchEvidence["verificationRequests"][number]["failureClass"];
+    evidence: unknown;
     lastError: string | null;
   }>;
   absentRequestFences: Array<{
@@ -1214,6 +1374,8 @@ export function assessParkedCourseCampaignSameCycleRecoveryHistory(input: {
   entries: readonly CourseSupportZeroExecutionBatchEvidence[];
   requireOrchestrationOnly: boolean;
   requireStartedRequest?: boolean;
+  requireCausalStartedRequest?: boolean;
+  minimumStartedAt?: Date;
 }): ParkedCourseCampaignSameCycleRecoveryHistory | null {
   const entries = input.entries
     .filter((entry) => entry.cycle === input.cycle)
@@ -1272,11 +1434,22 @@ export function assessParkedCourseCampaignSameCycleRecoveryHistory(input: {
         startedAt: request.startedAt,
         outcome: request.outcome,
         failureClass: request.failureClass,
+        evidence: request.evidence,
         lastError: request.lastError ?? null,
       });
       if (
         request.startedAt &&
         request.attemptCount > 0 &&
+        request.revision >= 2 &&
+        (!input.requireCausalStartedRequest ||
+          ("createdAt" in entry &&
+            entry.createdAt instanceof Date &&
+            "createdAt" in entry.batch &&
+            entry.batch.createdAt instanceof Date &&
+            request.startedAt >= entry.createdAt &&
+            request.startedAt >= entry.batch.createdAt &&
+            (!input.minimumStartedAt ||
+              request.startedAt >= input.minimumStartedAt))) &&
         request.startedAt <= entry.batch.completedAt
       ) {
         startedRequestCount += 1;
@@ -1893,6 +2066,7 @@ async function loadParkedCourseCampaignMemberSnapshots(
   input: {
     requireZeroDemand: boolean;
     incidentIds?: readonly string[];
+    requireExactCurrentCycleBatchHistory?: boolean;
   },
 ): Promise<ParkedCourseCampaignMemberSnapshot[]> {
   const incidents = await database.courseSupportIncident.findMany({
@@ -1987,64 +2161,7 @@ async function loadParkedCourseCampaignMemberSnapshots(
       batchIncidents: {
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         take: 20,
-        select: {
-          id: true,
-          batchId: true,
-          incidentId: true,
-          courseId: true,
-          cycle: true,
-          result: true,
-          preProbeId: true,
-          postProbeId: true,
-          proofSnapshot: true,
-          verifiedIncidentUpdatedAt: true,
-          verifiedAt: true,
-          createdAt: true,
-          updatedAt: true,
-          batch: {
-            select: {
-              id: true,
-              status: true,
-              revision: true,
-              ownerAutomationRunId: true,
-              baseSha: true,
-              releaseSha: true,
-              deployedAt: true,
-              recheckDispatchKey: true,
-              recheckDispatchStartedAt: true,
-              recheckDispatchedAt: true,
-              completedAt: true,
-              summary: true,
-              ownerAutomationRun: {
-                select: {
-                  id: true,
-                  promptVersion: true,
-                  kind: true,
-                  status: true,
-                  runtimeVersion: true,
-                  completedAt: true,
-                  outcome: true,
-                  notes: true,
-                },
-              },
-            },
-          },
-          verificationRequests: {
-            select: {
-              id: true,
-              releaseSha: true,
-              status: true,
-              revision: true,
-              attemptCount: true,
-              workflowRunId: true,
-              startedAt: true,
-              outcome: true,
-              failureClass: true,
-              evidence: true,
-              lastError: true,
-            },
-          },
-        },
+        select: parkedCourseCampaignBatchIncidentSelect,
       },
       course: {
         select: {
@@ -2096,13 +2213,63 @@ async function loadParkedCourseCampaignMemberSnapshots(
           automationDiscoveries: {
             orderBy: [{ createdAt: "desc" }, { id: "desc" }],
             take: 1,
-            select: { createdAt: true },
+            select: { id: true, courseId: true, createdAt: true },
           },
         },
       },
     },
   });
+  const exactCurrentCycleBatchHistory =
+    input.requireExactCurrentCycleBatchHistory
+      ? new Map(
+          (
+            await Promise.all(
+              incidents.map(async (incident) => {
+                const [reloaded] =
+                  await database.courseSupportIncident.findMany({
+                    where: { id: incident.id, cycle: incident.cycle },
+                    take: 1,
+                    select: {
+                      id: true,
+                      cycle: true,
+                      batchIncidents: {
+                        where: { cycle: incident.cycle },
+                        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+                        take: 21,
+                        select: parkedCourseCampaignBatchIncidentSelect,
+                      },
+                    },
+                  });
+                if (
+                  !reloaded ||
+                  reloaded.id !== incident.id ||
+                  reloaded.cycle !== incident.cycle
+                ) {
+                  return null;
+                }
+                return [
+                  incident.id,
+                  reloaded.batchIncidents.filter(
+                    (entry) => entry.cycle === incident.cycle,
+                  ),
+                ] as const;
+              }),
+            )
+          ).filter(
+            (entry): entry is NonNullable<typeof entry> => entry !== null,
+          ),
+        )
+      : null;
   return incidents.flatMap((incident) => {
+    const currentCycleBatchIncidents = exactCurrentCycleBatchHistory?.get(
+      incident.id,
+    );
+    if (
+      input.requireExactCurrentCycleBatchHistory &&
+      !currentCycleBatchIncidents
+    ) {
+      return [];
+    }
     const monitoringStatus = incident.course.monitoringStatus;
     if (
       !monitoringStatus ||
@@ -2162,8 +2329,9 @@ async function loadParkedCourseCampaignMemberSnapshots(
         ),
         zeroExecutionEvidence: {
           latestProbe: incident.course.probes[0] ?? null,
+          latestDiscovery: incident.course.automationDiscoveries[0] ?? null,
           monitoringEvents: incident.monitoringEvents,
-          batchIncidents: incident.batchIncidents,
+          batchIncidents: currentCycleBatchIncidents ?? incident.batchIncidents,
           playbookAssessment: assessAutomationPlaybook(
             incident.attemptLedger,
             incident.cycle,
@@ -2537,6 +2705,314 @@ function getParkedCourseCampaignDescendantIncompletePlaybookRecovery(input: {
     requireStartedRequest: true,
   });
   return history ? { lineage, history } : null;
+}
+
+export type ParkedCourseCampaignSameIdentityMaterialChangeLineage = {
+  lineageDigest: string;
+  admissionAt: Date;
+  materialChangeAt: Date;
+};
+
+export function findParkedCourseCampaignSameIdentityMaterialChangeLineage(input: {
+  captured: ParkedCourseCampaignMember;
+  current: ParkedCourseCampaignMember;
+  capturedAt: Date;
+  campaignRunId: string;
+  campaignMembershipDigest: string;
+  events: readonly ParkedCourseCampaignRecoveryEvidence["monitoringEvents"][number][];
+}): ParkedCourseCampaignSameIdentityMaterialChangeLineage | null {
+  const { captured, current } = input;
+  if (
+    !input.campaignRunId.trim() ||
+    !/^[a-f0-9]{64}$/u.test(input.campaignMembershipDigest) ||
+    !Number.isFinite(input.capturedAt.getTime()) ||
+    current.courseId !== captured.courseId ||
+    current.incidentId !== captured.incidentId ||
+    current.cycle !== captured.cycle + 2 ||
+    current.kind !== captured.kind ||
+    current.providerFamilyKey !== captured.providerFamilyKey ||
+    current.failureClass !== captured.failureClass ||
+    current.failureFingerprint !== captured.failureFingerprint ||
+    current.providerSnapshotFingerprint !==
+      captured.providerSnapshotFingerprint ||
+    current.monitoringFailureFingerprint !==
+      captured.monitoringFailureFingerprint ||
+    current.monitoringFailureFingerprint !== current.failureFingerprint
+  ) {
+    return null;
+  }
+
+  const eventsSinceCapture = input.events.filter(
+    (event) => event.occurredAt >= input.capturedAt,
+  );
+  if (
+    input.events.length >= 50 &&
+    eventsSinceCapture.length === input.events.length
+  ) {
+    // The recovery query is bounded to 50 events. If every returned event is
+    // inside the campaign window, older cycle transitions may have been
+    // truncated, so the lineage cannot be proven complete.
+    return null;
+  }
+
+  const admissions = eventsSinceCapture.filter((event) => {
+    const audit = asCampaignRecord(event.audit);
+    return (
+      event.incidentId === current.incidentId &&
+      event.eventType === "REVALIDATION_REQUESTED" &&
+      event.source === "COURSE_SUPPORT_RESPONDER" &&
+      event.failureFingerprint === captured.failureFingerprint &&
+      audit.action === "parked_cohort_admission" &&
+      audit.campaignRunId === input.campaignRunId &&
+      audit.campaignMembershipDigest === input.campaignMembershipDigest &&
+      audit.priorCycle === captured.cycle &&
+      audit.cycle === captured.cycle + 1 &&
+      audit.preservesPriorAttemptEvents === true &&
+      audit.customerDataIncluded === false
+    );
+  });
+  if (admissions.length !== 1) return null;
+  const admission = admissions[0]!;
+
+  const materialChanges = eventsSinceCapture.filter((event) => {
+    const audit = asCampaignRecord(event.audit);
+    return (
+      event.incidentId === current.incidentId &&
+      event.eventType === "REVALIDATION_REQUESTED" &&
+      (event.source === "OPERATOR_CLI" ||
+        event.source === "OPERATOR_DASHBOARD") &&
+      event.failureFingerprint === current.failureFingerprint &&
+      event.occurredAt > admission.occurredAt &&
+      audit.reason === "AUTOMATION_STALLED_PROVIDER_EVIDENCE_CHANGED" &&
+      audit.priorCycle === captured.cycle + 1 &&
+      audit.cycle === current.cycle &&
+      audit.priorProviderFamilyKey === captured.providerFamilyKey &&
+      audit.providerFamilyKey === current.providerFamilyKey &&
+      audit.providerFamilyChanged === false &&
+      Array.isArray(audit.changedFields) &&
+      audit.changedFields.length > 0 &&
+      audit.changedFields.every(
+        (field) => typeof field === "string" && field.trim().length > 0,
+      ) &&
+      audit.evidenceFingerprint === current.providerSnapshotFingerprint &&
+      audit.preservesPriorAttemptEvents === true &&
+      audit.customerDataIncluded === false
+    );
+  });
+  if (materialChanges.length !== 1) return null;
+  const materialChange = materialChanges[0]!;
+
+  const cycleTransitions = eventsSinceCapture.filter((event) => {
+    const audit = asCampaignRecord(event.audit);
+    return (
+      event.incidentId === current.incidentId &&
+      event.eventType === "REVALIDATION_REQUESTED" &&
+      Number.isInteger(audit.priorCycle) &&
+      Number.isInteger(audit.cycle) &&
+      Number(audit.cycle) === Number(audit.priorCycle) + 1 &&
+      Number(audit.priorCycle) >= captured.cycle &&
+      Number(audit.cycle) <= current.cycle
+    );
+  });
+  if (
+    cycleTransitions.length !== 2 ||
+    !cycleTransitions.includes(admission) ||
+    !cycleTransitions.includes(materialChange)
+  ) {
+    return null;
+  }
+
+  return {
+    lineageDigest: createHash("sha256")
+      .update(
+        stableCourseProviderExecutionEvidenceValue({
+          admission: canonicalizeParkedCourseCampaignRecoveryEvent(admission),
+          materialChange:
+            canonicalizeParkedCourseCampaignRecoveryEvent(materialChange),
+        }),
+      )
+      .digest("hex"),
+    admissionAt: admission.occurredAt,
+    materialChangeAt: materialChange.occurredAt,
+  };
+}
+
+export function assessParkedCourseCampaignSameIdentityMaterialChangeIncompletePlaybookRecovery(input: {
+  captured: ParkedCourseCampaignMember;
+  current: ParkedCourseCampaignMemberSnapshot;
+  capturedAt: Date;
+  campaignRunId: string;
+  campaignMembershipDigest: string;
+}) {
+  const { captured, current } = input;
+  const playbook = current.zeroExecutionEvidence.playbookAssessment;
+  const lineage = findParkedCourseCampaignSameIdentityMaterialChangeLineage({
+    captured,
+    current,
+    capturedAt: input.capturedAt,
+    campaignRunId: input.campaignRunId,
+    campaignMembershipDigest: input.campaignMembershipDigest,
+    events: current.zeroExecutionEvidence.monitoringEvents,
+  });
+  if (
+    !lineage ||
+    playbook.valid !== true ||
+    playbook.cycle !== current.cycle ||
+    playbook.conclusion !== "INCOMPLETE" ||
+    playbook.completedStages.length === 0 ||
+    playbook.nextStage === null
+  ) {
+    return null;
+  }
+
+  const events = current.zeroExecutionEvidence.monitoringEvents;
+  const endpoint = findParkedCourseCampaignAutomationStalledEndpoint(current);
+  const alreadyRecovered = hasParkedCourseCampaignRecoveryMarker({
+    events,
+    action:
+      "parked_cohort_same_identity_material_change_incomplete_playbook_recovery",
+    campaignRunId: input.campaignRunId,
+    cycle: current.cycle,
+  });
+  if (
+    !endpoint ||
+    endpoint.occurredAt < lineage.materialChangeAt ||
+    alreadyRecovered
+  ) {
+    return null;
+  }
+
+  const entries = current.zeroExecutionEvidence.batchIncidents
+    .filter((entry) => entry.cycle === current.cycle)
+    .sort(
+      (left, right) =>
+        left.createdAt.getTime() - right.createdAt.getTime() ||
+        left.id.localeCompare(right.id),
+    );
+  if (
+    entries.length === 0 ||
+    entries.length > 20 ||
+    entries.some(
+      (entry, index) =>
+        entry.incidentId !== current.incidentId ||
+        entry.courseId !== current.courseId ||
+        !entry.batch.completedAt ||
+        !("createdAt" in entry.batch) ||
+        !(entry.batch.createdAt instanceof Date) ||
+        !["SUCCEEDED", "PARTIAL", "RETRYABLE_FAILED"].includes(
+          entry.batch.status,
+        ) ||
+        entry.createdAt < lineage.materialChangeAt ||
+        entry.batch.completedAt < entry.createdAt ||
+        entry.batch.completedAt > endpoint.occurredAt ||
+        (index > 0 && entry.createdAt < entries[index - 1]!.batch.completedAt!),
+    )
+  ) {
+    return null;
+  }
+
+  const history = assessParkedCourseCampaignSameCycleRecoveryHistory({
+    courseId: current.courseId,
+    cycle: current.cycle,
+    entries,
+    requireOrchestrationOnly: false,
+    requireStartedRequest: true,
+    requireCausalStartedRequest: true,
+    minimumStartedAt: lineage.materialChangeAt,
+  });
+  if (!history) return null;
+  const exactEvidenceDigest = createHash("sha256")
+    .update(
+      stableCourseProviderExecutionEvidenceValue({
+        schemaVersion: 1,
+        lineageDigest: lineage.lineageDigest,
+        endpoint: canonicalizeParkedCourseCampaignRecoveryEvent(endpoint),
+        current: {
+          courseId: current.courseId,
+          incidentId: current.incidentId,
+          cycle: current.cycle,
+          revision: current.revision,
+          monitoringRevision: current.monitoringRevision,
+          monitoringFailureFingerprint: current.monitoringFailureFingerprint,
+          kind: current.kind,
+          providerFamilyKey: current.providerFamilyKey,
+          failureClass: current.failureClass,
+          failureFingerprint: current.failureFingerprint,
+          providerSnapshotFingerprint: current.providerSnapshotFingerprint,
+          attemptLedgerFingerprint: current.attemptLedgerFingerprint,
+          latestProbe: current.zeroExecutionEvidence.latestProbe
+            ? {
+                id: current.zeroExecutionEvidence.latestProbe.id,
+                observedAt:
+                  current.zeroExecutionEvidence.latestProbe.observedAt.toISOString(),
+              }
+            : null,
+          latestDiscovery: current.zeroExecutionEvidence.latestDiscovery
+            ? {
+                id: current.zeroExecutionEvidence.latestDiscovery.id,
+                createdAt:
+                  current.zeroExecutionEvidence.latestDiscovery.createdAt.toISOString(),
+              }
+            : null,
+          playbookCompletedStages: playbook.completedStages,
+          playbookNextStage: playbook.nextStage,
+        },
+        batches: entries.map((entry) => ({
+          batchIncident: {
+            id: entry.id,
+            batchId: entry.batchId,
+            incidentId: entry.incidentId,
+            courseId: entry.courseId,
+            cycle: entry.cycle,
+            result: entry.result,
+            preProbeId: entry.preProbeId,
+            postProbeId: entry.postProbeId,
+            proofSnapshot: entry.proofSnapshot,
+            verifiedIncidentUpdatedAt:
+              entry.verifiedIncidentUpdatedAt?.toISOString() ?? null,
+            verifiedAt: entry.verifiedAt?.toISOString() ?? null,
+            createdAt: entry.createdAt.toISOString(),
+            updatedAt: entry.updatedAt.toISOString(),
+          },
+          batch: {
+            id: entry.batch.id,
+            status: entry.batch.status,
+            revision: entry.batch.revision,
+            ownerAutomationRunId: entry.batch.ownerAutomationRunId,
+            baseSha: entry.batch.baseSha,
+            releaseSha: entry.batch.releaseSha,
+            deployedAt: entry.batch.deployedAt?.toISOString() ?? null,
+            createdAt: entry.batch.createdAt.toISOString(),
+            recheckDispatchKey: entry.batch.recheckDispatchKey,
+            recheckDispatchStartedAt:
+              entry.batch.recheckDispatchStartedAt?.toISOString() ?? null,
+            recheckDispatchedAt:
+              entry.batch.recheckDispatchedAt?.toISOString() ?? null,
+            completedAt: entry.batch.completedAt!.toISOString(),
+            summary: entry.batch.summary,
+            ownerAutomationRun: entry.batch.ownerAutomationRun
+              ? {
+                  ...entry.batch.ownerAutomationRun,
+                  completedAt:
+                    entry.batch.ownerAutomationRun.completedAt?.toISOString() ??
+                    null,
+                }
+              : null,
+          },
+          verificationRequests: [...entry.verificationRequests]
+            .sort((left, right) => left.id.localeCompare(right.id))
+            .map((request) => ({
+              ...request,
+              startedAt: request.startedAt?.toISOString() ?? null,
+            })),
+        })),
+      }),
+    )
+    .digest("hex");
+  return {
+    lineage,
+    history: { ...history, historyDigest: exactEvidenceDigest },
+  };
 }
 
 export function findParkedCourseCampaignCurrentCycleOrchestrationLineage(input: {

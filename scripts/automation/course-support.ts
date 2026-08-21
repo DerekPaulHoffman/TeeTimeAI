@@ -21,6 +21,7 @@ import {
   canVerifyUnchangedCourseSupportRuntime,
   getCourseSupportBatchPacket,
   getCourseSupportBatchRecoveryProvenance,
+  grantOwnedCourseSupportVerificationStageDeadline,
   getOwnedCourseSupportLeaseToken,
   getOwnedCourseSupportSourceSearchContext,
   heartbeatCourseSupportBatch,
@@ -49,7 +50,8 @@ import {
   runWithBoundedCourseSupportHeartbeat,
   runCourseSupportVerificationPass,
   runCourseSupportVerificationWatch,
-  selectCourseSupportVerificationEndpointDeadline
+  selectCourseSupportVerificationEndpointDeadline,
+  selectCourseSupportVerificationStopMode
 } from "@/lib/automation/course-support-verification-watch";
 import { getProviderCoverageDashboard } from "@/lib/automation/provider-coverage";
 import { persistOwnedCourseSupportBrowserPlaybookStages } from "@/lib/automation/course-support-browser-stages";
@@ -394,11 +396,7 @@ async function heartbeat(args: string[]) {
 }
 
 async function verify(args: string[]) {
-  const deployedAtValue = readOption(args, "--deployed-at");
-  const deployedAt = deployedAtValue ? new Date(deployedAtValue) : null;
-  if (deployedAt && !Number.isFinite(deployedAt.getTime())) {
-    throw new Error("--deployed-at must be an ISO timestamp.");
-  }
+  const deployedAt = parseCanonicalCourseSupportDeployedAt(args);
   const batchId = await resolveBatchId(args);
   const ownerThreadId = requireOwnerThread(args);
   const watch = args.includes("--watch");
@@ -433,6 +431,21 @@ async function verify(args: string[]) {
       allowDurableCloseout: closeoutAfterWatch
     },
     async (leaseToken) => {
+      if (deployedAt) {
+        const deploymentProof = await heartbeatCourseSupportBatch({
+          batchId,
+          leaseToken,
+          ownerThreadId,
+          status: "VERIFYING",
+          releaseSha,
+          deployedAt
+        });
+        if (!deploymentProof.heartbeatRecorded) {
+          throw new Error(
+            "Course-support deployment proof could not be persisted before browser verification."
+          );
+        }
+      }
       const runPass = (signal?: AbortSignal) =>
         runCourseSupportVerificationPass({
           signal,
@@ -490,6 +503,11 @@ async function verify(args: string[]) {
         return { ...pass.verification, browserStages: pass.browserStages };
       }
 
+      await grantOwnedCourseSupportVerificationStageDeadline({
+        batchId,
+        leaseToken,
+        ownerThreadId
+      });
       const initialPacket = await getCourseSupportBatchPacket({
         batchId,
         leaseToken,
@@ -526,12 +544,11 @@ async function verify(args: string[]) {
                 ownerThreadId,
                 passCount,
                 signal,
-                mode:
-                  reason === "endpoint" ||
-                  (endpointDeadlineAt !== undefined &&
-                    Date.now() >= endpointDeadlineAt)
-                    ? "ENDPOINT"
-                    : "EARLY_RETRY"
+                mode: selectCourseSupportVerificationStopMode({
+                  reason,
+                  passCount,
+                  endpointDeadlineAt
+                })
               })
           : undefined
       });
@@ -956,6 +973,32 @@ function readSingleIntegerOption(args: string[], name: string) {
     throw new Error(`${name} must be an integer.`);
   }
   return parsed;
+}
+
+export function parseCanonicalCourseSupportDeployedAt(args: readonly string[]) {
+  const optionIndexes = args.flatMap((argument, index) =>
+    argument === "--deployed-at" ? [index] : []
+  );
+  if (optionIndexes.length > 1) {
+    throw new Error("--deployed-at may be provided only once.");
+  }
+  if (optionIndexes.length === 0) {
+    return null;
+  }
+  const raw = args[optionIndexes[0] + 1];
+  if (raw === undefined || raw.startsWith("--")) {
+    throw new Error("--deployed-at requires a value.");
+  }
+  const deployedAt = new Date(raw);
+  if (
+    !Number.isFinite(deployedAt.getTime()) ||
+    raw !== deployedAt.toISOString()
+  ) {
+    throw new Error(
+      "--deployed-at must be an exact canonical UTC ISO timestamp."
+    );
+  }
+  return deployedAt;
 }
 
 function stringValue(value: unknown) {

@@ -166,6 +166,35 @@ export function selectCourseSupportVerificationEndpointDeadline(
   return earliestDeadline;
 }
 
+export function selectCourseSupportVerificationStopMode(input: {
+  reason: "endpoint" | "max" | "error";
+  passCount: number;
+  endpointDeadlineAt?: number | null;
+  now?: number;
+}) {
+  if (!Number.isInteger(input.passCount) || input.passCount < 0) {
+    throw new Error(
+      "Course-support verification pass count must be a non-negative integer."
+    );
+  }
+  const endpointReached =
+    input.endpointDeadlineAt !== undefined &&
+    input.endpointDeadlineAt !== null &&
+    (input.now ?? Date.now()) >= input.endpointDeadlineAt;
+
+  // An expired endpoint must not skip the owner-only browser stage and then
+  // turn the absence of that attempt into course-level human work. A watch
+  // that never completed its first persistence/verification pass releases the
+  // batch as an automatic retry; endpoint closeout is available only after at
+  // least one full pass had a chance to advance the owned stage.
+  if (input.passCount === 0) {
+    return "EARLY_RETRY" as const;
+  }
+  return input.reason === "endpoint" || endpointReached
+    ? ("ENDPOINT" as const)
+    : ("EARLY_RETRY" as const);
+}
+
 export type CourseSupportVerificationBrowserStages = {
   eligibleCount: number;
   persistedCount: number;

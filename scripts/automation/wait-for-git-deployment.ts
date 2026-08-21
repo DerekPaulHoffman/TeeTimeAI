@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 
 import {
   evaluateProductionAliasTargets,
+  getVercelDeploymentCreatedAtIso,
   isFailedDeploymentState,
   selectGitProductionDeployment,
   type VercelDeploymentInspection,
@@ -79,6 +80,7 @@ async function waitForGitDeployment() {
                 aliases: requiredAliases,
                 branch,
                 commitSha,
+                deployedAt: getVercelDeploymentCreatedAtIso(deployment),
                 deploymentId: inspection.id,
                 deploymentUrl: `https://${deployment.url}`,
                 source: "git",

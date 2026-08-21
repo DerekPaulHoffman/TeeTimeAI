@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   evaluateProductionAliasTargets,
+  getVercelDeploymentCreatedAtIso,
   isFailedDeploymentState,
   selectGitProductionDeployment
 } from "./vercel-git";
@@ -55,6 +56,17 @@ describe("selectGitProductionDeployment", () => {
 });
 
 describe("deployment verification", () => {
+  it("returns the exact Git deployment creation time as canonical ISO proof", () => {
+    expect(
+      getVercelDeploymentCreatedAtIso({
+        createdAt: Date.parse("2026-07-21T00:00:00.000Z"),
+      }),
+    ).toBe("2026-07-21T00:00:00.000Z");
+    expect(() => getVercelDeploymentCreatedAtIso({})).toThrow(
+      "did not include a valid creation timestamp",
+    );
+  });
+
   it("recognizes terminal deployment failures", () => {
     expect(isFailedDeploymentState("ERROR")).toBe(true);
     expect(isFailedDeploymentState("CANCELED")).toBe(true);

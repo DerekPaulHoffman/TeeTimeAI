@@ -45,6 +45,26 @@ export function isFailedDeploymentState(state: string | undefined) {
   return FAILED_DEPLOYMENT_STATES.has(state ?? "");
 }
 
+export function getVercelDeploymentCreatedAtIso(
+  deployment: VercelDeploymentSummary,
+) {
+  if (
+    !Number.isFinite(deployment.createdAt) ||
+    (deployment.createdAt ?? 0) <= 0
+  ) {
+    throw new Error(
+      "The exact Git deployment did not include a valid creation timestamp.",
+    );
+  }
+  const deployedAt = new Date(deployment.createdAt!);
+  if (!Number.isFinite(deployedAt.getTime())) {
+    throw new Error(
+      "The exact Git deployment creation timestamp is invalid.",
+    );
+  }
+  return deployedAt.toISOString();
+}
+
 export function evaluateProductionAliasTargets(
   inspections: Array<{ alias: string; inspection: VercelDeploymentInspection }>,
   options: { deploymentUrl: string; requiredAliases: string[] }
