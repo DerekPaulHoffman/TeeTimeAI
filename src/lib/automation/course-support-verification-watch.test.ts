@@ -140,6 +140,46 @@ describe("runCourseSupportVerificationWatch", () => {
     });
   });
 
+  it("runs verification passes after mixed peer endpoints are refreshed into the future", async () => {
+    const startedAt = 1_000;
+    const refreshedDeadlineAt = startedAt + 28 * 60_000;
+    const deadlineAt = selectCourseSupportVerificationEndpointDeadline([
+      {
+        result: "PENDING",
+        escalationDeadlineAt: new Date(refreshedDeadlineAt).toISOString(),
+        terminalProofDurable: false,
+      },
+      {
+        result: "PENDING",
+        escalationDeadlineAt: new Date(
+          startedAt + 30 * 60_000,
+        ).toISOString(),
+        terminalProofDurable: false,
+      },
+    ]);
+    const pass = vi.fn(async () => cleanPass());
+    const sleep = vi.fn(async () => undefined);
+    const onStopped = vi.fn(async () => ({ mode: "EARLY_RETRY" }));
+
+    const result = await runCourseSupportVerificationWatch({
+      maxMinutes: 1,
+      deadlineAt,
+      now: () => startedAt,
+      pass,
+      sleep,
+      onStopped,
+    });
+
+    expect(deadlineAt).toBe(refreshedDeadlineAt);
+    expect(result).toMatchObject({
+      outcome: "verification_watch_settled",
+      passCount: 2,
+    });
+    expect(pass).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledOnce();
+    expect(onStopped).not.toHaveBeenCalled();
+  });
+
   it("requires an extra clean pass after browser work", async () => {
     const pass = vi
       .fn()

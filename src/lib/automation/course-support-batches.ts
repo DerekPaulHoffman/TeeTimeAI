@@ -3822,10 +3822,27 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
           revision: true,
           leaseExpiresAt: true,
           summary: true,
+          createdAt: true,
+          releaseSha: true,
+          deployedAt: true,
+          recheckDispatchStartedAt: true,
           incidents: {
             orderBy: [{ createdAt: "asc" }, { id: "asc" }],
             select: {
+              id: true,
               cycle: true,
+              result: true,
+              proofSnapshot: true,
+              verifiedAt: true,
+              verifiedIncidentUpdatedAt: true,
+              verificationRequests: {
+                take: 1,
+                select: {
+                  id: true,
+                  status: true,
+                  startedAt: true,
+                },
+              },
               incident: {
                 select: {
                   id: true,
@@ -3836,6 +3853,12 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
                   attemptCount: true,
                   attemptLedger: true,
                   activeRealSearchCount: true,
+                  providerFamilyKey: true,
+                  failureClass: true,
+                  confirmedAt: true,
+                  escalationDeadlineAt: true,
+                  firstSeenAt: true,
+                  lastSeenAt: true,
                 },
               },
             },
@@ -3871,16 +3894,32 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
           entry.incident.cycle,
         );
         const stage = playbook.nextStage;
+        const stageAssessment = playbook.stages.find(
+          (assessment) => assessment.stage === stage,
+        );
         const ownedStage =
           stage === "RENDERED_BROWSER_DISCOVERY" ||
+          stage === "BROWSER_ADAPTER_RETRY" ||
           stage === "INDEPENDENT_CONFIRMATION";
+        const retryBudget = remediationDirective?.retryBudget;
+        const grantableStageState =
+          (stageAssessment?.status === "PENDING" &&
+            stageAssessment.attemptCount === 0) ||
+          (stage === "BROWSER_ADAPTER_RETRY" &&
+            stageAssessment?.status === "FAILED_RETRYABLE" &&
+            stageAssessment.attemptCount === 1 &&
+            retryBudget !== null &&
+            retryBudget !== undefined &&
+            !retryBudget.exhausted &&
+            retryBudget.attemptsRemaining > 0);
         return entry.cycle === entry.incident.cycle &&
           entry.incident.status === "AUTO_INVESTIGATING" &&
           entry.incident.activeBatchId === input.batchId &&
           playbook.conclusion === "INCOMPLETE" &&
           ownedStage &&
           stage === remediationDirective?.playbookStage &&
-          getCourseSupportNextStageAttemptCount(playbook) === 0
+          grantableStageState &&
+          entry.verificationRequests.length === 0
           ? [
               {
                 entry,
@@ -3894,6 +3933,40 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
           : [];
       });
       if (targets.length === 0) {
+        return {
+          granted: false,
+          replayed: false,
+          grantedIncidentCount: 0,
+        };
+      }
+
+      const prospectiveDeadlineByBatchIncidentId = new Map(
+        targets.map((target) => [target.entry.id, target.deadlineAt] as const),
+      );
+      const unsafeEndpointPeer = batch.incidents.some((entry) => {
+        const terminalProofDurable =
+          entry.result === "FINAL_DISPOSITION" &&
+          isDurableTerminalProof(
+            {
+              ...entry,
+              normalizedResult: entry.result,
+            },
+            batch,
+          );
+        if (terminalProofDurable) {
+          return false;
+        }
+        const prospectiveDeadline =
+          prospectiveDeadlineByBatchIncidentId.get(entry.id) ??
+          entry.incident.escalationDeadlineAt;
+        const prospectiveDeadlineTime = prospectiveDeadline?.getTime();
+        return (
+          prospectiveDeadlineTime !== undefined &&
+          Number.isFinite(prospectiveDeadlineTime) &&
+          prospectiveDeadlineTime <= databaseNow.getTime()
+        );
+      });
+      if (unsafeEndpointPeer) {
         return {
           granted: false,
           replayed: false,
@@ -3917,6 +3990,15 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
                   ? Prisma.DbNull
                   : incident.attemptLedger,
             },
+            batchIncidents: {
+              some: {
+                id: target.entry.id,
+                batchId: input.batchId,
+                incidentId: incident.id,
+                cycle: target.entry.cycle,
+                verificationRequests: { none: {} },
+              },
+            },
           },
           data: {
             escalationDeadlineAt: target.deadlineAt,
@@ -3925,7 +4007,7 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
         });
         if (updated.count !== 1) {
           throw new Error(
-            "Course-support incident stage changed during its verification deadline grant.",
+            "Course-support incident stage changed or a verification request was created during its verification deadline grant.",
           );
         }
       }

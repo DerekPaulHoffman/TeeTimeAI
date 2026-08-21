@@ -304,9 +304,33 @@ function browserReadyAttemptLedger(cycle = 1) {
   });
 }
 
-function independentReadyAttemptLedger(cycle = 1) {
+function renderedBrowserFailedRetryableAttemptLedger(cycle = 1) {
   let ledger: unknown = browserReadyAttemptLedger(cycle);
   ledger = appendAutomationPlaybookEvent(ledger, {
+    cycle,
+    stage: "RENDERED_BROWSER_DISCOVERY",
+    transition: "STARTED",
+    readPath: "RENDERED_BROWSER",
+    evidenceKind: "RENDERED_PAGE",
+    failureFingerprint: "TEST:RENDERED_BROWSER:NETWORK",
+    runtimeVersion: "test-runtime",
+    observedAt: now,
+  });
+  return appendAutomationPlaybookEvent(ledger, {
+    cycle,
+    stage: "RENDERED_BROWSER_DISCOVERY",
+    transition: "FAILED_RETRYABLE",
+    readPath: "RENDERED_BROWSER",
+    evidenceKind: "RENDERED_PAGE",
+    failureFingerprint: "TEST:RENDERED_BROWSER:NETWORK",
+    runtimeVersion: "test-runtime",
+    failureClass: "NETWORK",
+    observedAt: now,
+  });
+}
+
+function browserAdapterRetryReadyAttemptLedger(cycle = 1) {
+  return appendAutomationPlaybookEvent(browserReadyAttemptLedger(cycle), {
     cycle,
     stage: "RENDERED_BROWSER_DISCOVERY",
     transition: "COMPLETED",
@@ -316,6 +340,42 @@ function independentReadyAttemptLedger(cycle = 1) {
     runtimeVersion: "test-runtime",
     observedAt: now,
   });
+}
+
+function browserAdapterRetryFailedRetryableAttemptLedger(
+  cycle = 1,
+  attemptCount = 1,
+) {
+  let ledger: unknown = browserAdapterRetryReadyAttemptLedger(cycle);
+  for (let attempt = 1; attempt <= attemptCount; attempt += 1) {
+    const observedAt = new Date(now.getTime() + attempt);
+    ledger = appendAutomationPlaybookEvent(ledger, {
+      cycle,
+      stage: "BROWSER_ADAPTER_RETRY",
+      transition: "STARTED",
+      readPath: "TYPED_PROVIDER_ADAPTER",
+      evidenceKind: "TOOLING",
+      failureFingerprint: "TEST:BROWSER_ADAPTER_RETRY:NETWORK",
+      runtimeVersion: "test-runtime",
+      observedAt,
+    });
+    ledger = appendAutomationPlaybookEvent(ledger, {
+      cycle,
+      stage: "BROWSER_ADAPTER_RETRY",
+      transition: "FAILED_RETRYABLE",
+      readPath: "TYPED_PROVIDER_ADAPTER",
+      evidenceKind: "TOOLING",
+      failureFingerprint: "TEST:BROWSER_ADAPTER_RETRY:NETWORK",
+      runtimeVersion: "test-runtime",
+      failureClass: "NETWORK",
+      observedAt,
+    });
+  }
+  return ledger;
+}
+
+function independentReadyAttemptLedger(cycle = 1) {
+  let ledger: unknown = browserAdapterRetryReadyAttemptLedger(cycle);
   ledger = appendAutomationPlaybookEvent(ledger, {
     cycle,
     stage: "BROWSER_ADAPTER_RETRY",
@@ -336,6 +396,31 @@ function independentReadyAttemptLedger(cycle = 1) {
     failureFingerprint: "TEST:LOCAL_READER:TERMINAL",
     runtimeVersion: "test-runtime",
     failureClass: "UNKNOWN",
+    observedAt: now,
+  });
+}
+
+function independentFailedRetryableAttemptLedger(cycle = 1) {
+  let ledger: unknown = independentReadyAttemptLedger(cycle);
+  ledger = appendAutomationPlaybookEvent(ledger, {
+    cycle,
+    stage: "INDEPENDENT_CONFIRMATION",
+    transition: "STARTED",
+    readPath: "INDEPENDENT_CONFIRMATION",
+    evidenceKind: "RENDERED_PAGE",
+    failureFingerprint: "TEST:INDEPENDENT_CONFIRMATION:NETWORK",
+    runtimeVersion: "test-runtime",
+    observedAt: now,
+  });
+  return appendAutomationPlaybookEvent(ledger, {
+    cycle,
+    stage: "INDEPENDENT_CONFIRMATION",
+    transition: "FAILED_RETRYABLE",
+    readPath: "INDEPENDENT_CONFIRMATION",
+    evidenceKind: "RENDERED_PAGE",
+    failureFingerprint: "TEST:INDEPENDENT_CONFIRMATION:NETWORK",
+    runtimeVersion: "test-runtime",
+    failureClass: "NETWORK",
     observedAt: now,
   });
 }
@@ -1246,6 +1331,10 @@ describe("course-support claim demand fencing", () => {
 
   function ownedStageDeadlineGrantBatch(input: {
     attemptLedgers?: unknown[];
+    escalationDeadlines?: Array<Date | null>;
+    verificationRequests?: Array<
+      Array<{ id: string; status: string; startedAt: Date | null }>
+    >;
     summary?: Record<string, unknown>;
     leaseExpiresAt?: Date;
   } = {}) {
@@ -1255,6 +1344,10 @@ describe("course-support claim demand fencing", () => {
     return {
       status: "VERIFYING",
       revision: 11,
+      createdAt: new Date("2026-07-21T01:37:00.000Z"),
+      releaseSha: "a".repeat(40),
+      deployedAt: null,
+      recheckDispatchStartedAt: null,
       leaseExpiresAt:
         input.leaseExpiresAt ?? new Date("2026-07-21T02:30:00.000Z"),
       summary:
@@ -1271,7 +1364,13 @@ describe("course-support claim demand fencing", () => {
           },
         } as const),
       incidents: attemptLedgers.map((attemptLedger, index) => ({
+        id: `batch-incident-${index + 1}`,
         cycle: 1,
+        result: "PENDING",
+        proofSnapshot: null,
+        verifiedAt: null,
+        verifiedIncidentUpdatedAt: null,
+        verificationRequests: input.verificationRequests?.[index] ?? [],
         incident: {
           id: `browser-incident-${index + 1}`,
           cycle: 1,
@@ -1281,6 +1380,15 @@ describe("course-support claim demand fencing", () => {
           attemptCount: 4,
           attemptLedger,
           activeRealSearchCount: index === 0 ? 1 : 0,
+          providerFamilyKey: "CHRONOGOLF",
+          failureClass: "UNSUPPORTED_FAMILY",
+          confirmedAt: new Date("2026-07-21T01:00:00.000Z"),
+          escalationDeadlineAt:
+            input.escalationDeadlines?.[index] === undefined
+              ? new Date("2026-07-21T01:30:00.000Z")
+              : input.escalationDeadlines[index],
+          firstSeenAt: new Date("2026-07-21T01:00:00.000Z"),
+          lastSeenAt: new Date("2026-07-21T01:30:00.000Z"),
         },
       })),
     };
@@ -3200,26 +3308,632 @@ describe("course-support claim demand fencing", () => {
     );
   });
 
-  it("never grants a second stage deadline after the one-shot marker expires", async () => {
+  it("grants a zero-attempt browser adapter retry a fresh deadline immediately before watch", async () => {
+    const verifyStartedAt = new Date("2026-07-21T02:20:23.000Z");
+    prismaMocks.queryRaw.mockResolvedValue([{ now: verifyStartedAt }]);
+    prismaMocks.batchFindFirst.mockResolvedValue(
+      ownedStageDeadlineGrantBatch({
+        attemptLedgers: [browserAdapterRetryReadyAttemptLedger()],
+        summary: {
+          remediation: {
+            workMode: "VERIFY_TRANSIENT",
+            strategyAction: "RUN_TYPED_ADAPTER",
+            playbookStage: "BROWSER_ADAPTER_RETRY",
+            allowUnchangedRuntime: true,
+            requiresImplementationPath: false,
+            reason: "EXISTING_SUPPORT_READY",
+            retryBudget: {
+              maximumAttempts: 4,
+              attemptsCompleted: 3,
+              attemptsRemaining: 1,
+              exhausted: false,
+            },
+          },
+        },
+      }),
+    );
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      grantOwnedCourseSupportVerificationStageDeadline({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+      }),
+    ).resolves.toMatchObject({
+      granted: true,
+      replayed: false,
+      grantedIncidentCount: 1,
+      grantedAt: verifyStartedAt.toISOString(),
+    });
+
+    expect(prismaMocks.batchFindFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: expect.objectContaining({
+          incidents: expect.objectContaining({
+            select: expect.objectContaining({
+              id: true,
+              verificationRequests: {
+                take: 1,
+                select: { id: true, status: true, startedAt: true },
+              },
+            }),
+          }),
+        }),
+      }),
+    );
+    const incidentUpdate =
+      prismaMocks.supportIncidentUpdateMany.mock.calls[0][0];
+    expect(incidentUpdate.where).toMatchObject({
+      id: "browser-incident-1",
+      cycle: 1,
+      revision: 20,
+      status: "AUTO_INVESTIGATING",
+      activeBatchId: "batch-1",
+      attemptCount: 4,
+      attemptLedger: { equals: expect.any(Object) },
+      batchIncidents: {
+        some: {
+          id: "batch-incident-1",
+          batchId: "batch-1",
+          incidentId: "browser-incident-1",
+          cycle: 1,
+          verificationRequests: { none: {} },
+        },
+      },
+    });
+    expect(incidentUpdate.data.escalationDeadlineAt).toEqual(
+      new Date("2026-07-21T02:48:23.000Z"),
+    );
+    expect(prismaMocks.batchUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          summary: expect.objectContaining({
+            verificationStageDeadlineGrant: expect.objectContaining({
+              schemaVersion: 1,
+              grantedAt: verifyStartedAt.toISOString(),
+              incidentCount: 1,
+              stages: [
+                expect.objectContaining({
+                  cycle: 1,
+                  stage: "BROWSER_ADAPTER_RETRY",
+                  deadlineAt: "2026-07-21T02:48:23.000Z",
+                  incidentCount: 1,
+                }),
+              ],
+            }),
+          }),
+        }),
+      }),
+    );
+  });
+
+  it("atomically grants pending and failed-retryable browser adapter peers", async () => {
+    const verifyStartedAt = new Date("2026-07-21T02:20:23.000Z");
+    const retryableLedger =
+      browserAdapterRetryFailedRetryableAttemptLedger();
+    expect(assessAutomationPlaybook(retryableLedger, 1)).toMatchObject({
+      conclusion: "INCOMPLETE",
+      nextStage: "BROWSER_ADAPTER_RETRY",
+      stages: expect.arrayContaining([
+        expect.objectContaining({
+          stage: "BROWSER_ADAPTER_RETRY",
+          status: "FAILED_RETRYABLE",
+          attemptCount: 1,
+        }),
+      ]),
+    });
+    prismaMocks.queryRaw.mockResolvedValue([{ now: verifyStartedAt }]);
+    prismaMocks.batchFindFirst.mockResolvedValue(
+      ownedStageDeadlineGrantBatch({
+        attemptLedgers: [
+          browserAdapterRetryReadyAttemptLedger(),
+          retryableLedger,
+        ],
+        escalationDeadlines: [
+          new Date("2026-07-21T01:51:59.000Z"),
+          new Date("2026-07-21T01:51:59.000Z"),
+        ],
+        summary: {
+          remediation: {
+            workMode: "VERIFY_TRANSIENT",
+            strategyAction: "RUN_TYPED_ADAPTER",
+            playbookStage: "BROWSER_ADAPTER_RETRY",
+            allowUnchangedRuntime: true,
+            requiresImplementationPath: false,
+            reason: "EXISTING_SUPPORT_READY",
+            retryBudget: {
+              maximumAttempts: 4,
+              attemptsCompleted: 3,
+              attemptsRemaining: 1,
+              exhausted: false,
+            },
+          },
+        },
+      }),
+    );
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      grantOwnedCourseSupportVerificationStageDeadline({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+      }),
+    ).resolves.toMatchObject({
+      granted: true,
+      replayed: false,
+      grantedIncidentCount: 2,
+      grantedAt: verifyStartedAt.toISOString(),
+    });
+
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledTimes(2);
+    expect(
+      prismaMocks.supportIncidentUpdateMany.mock.calls.map(
+        ([update]) => update.data.escalationDeadlineAt,
+      ),
+    ).toEqual([
+      new Date("2026-07-21T02:48:23.000Z"),
+      new Date("2026-07-21T02:50:23.000Z"),
+    ]);
+    expect(prismaMocks.batchUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          summary: expect.objectContaining({
+            verificationStageDeadlineGrant: expect.objectContaining({
+              incidentCount: 2,
+              stages: [
+                {
+                  cycle: 1,
+                  stage: "BROWSER_ADAPTER_RETRY",
+                  deadlineAt: "2026-07-21T02:48:23.000Z",
+                  incidentCount: 1,
+                },
+                {
+                  cycle: 1,
+                  stage: "BROWSER_ADAPTER_RETRY",
+                  deadlineAt: "2026-07-21T02:50:23.000Z",
+                  incidentCount: 1,
+                },
+              ],
+            }),
+          }),
+        }),
+      }),
+    );
+  });
+
+  it.each([
+    [
+      "rendered browser discovery",
+      renderedBrowserFailedRetryableAttemptLedger(),
+      {
+        workMode: "ADVANCE_DISCOVERY",
+        strategyAction: "DISCOVER_WITH_BROWSER",
+        playbookStage: "RENDERED_BROWSER_DISCOVERY",
+        allowUnchangedRuntime: true,
+        requiresImplementationPath: false,
+        reason: "PLAYBOOK_STAGE_PENDING",
+        retryBudget: {
+          maximumAttempts: 4,
+          attemptsCompleted: 1,
+          attemptsRemaining: 3,
+          exhausted: false,
+        },
+      },
+    ],
+    [
+      "independent confirmation",
+      independentFailedRetryableAttemptLedger(),
+      {
+        workMode: "ADVANCE_DISCOVERY",
+        strategyAction: "VERIFY_TECHNICAL_CONSTRAINT",
+        playbookStage: "INDEPENDENT_CONFIRMATION",
+        allowUnchangedRuntime: true,
+        requiresImplementationPath: false,
+        reason: "PLAYBOOK_STAGE_PENDING",
+        retryBudget: {
+          maximumAttempts: 4,
+          attemptsCompleted: 1,
+          attemptsRemaining: 3,
+          exhausted: false,
+        },
+      },
+    ],
+  ] as const)(
+    "does not reuse a failed-retryable %s deadline grant",
+    async (_stage, attemptLedger, remediation) => {
+      const assessment = assessAutomationPlaybook(attemptLedger, 1);
+      expect(assessment.stages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            stage: assessment.nextStage,
+            status: "FAILED_RETRYABLE",
+            attemptCount: 1,
+          }),
+        ]),
+      );
+      prismaMocks.batchFindFirst.mockResolvedValue(
+        ownedStageDeadlineGrantBatch({
+          attemptLedgers: [attemptLedger],
+          summary: { remediation },
+        }),
+      );
+
+      await expect(
+        grantOwnedCourseSupportVerificationStageDeadline({
+          batchId: "batch-1",
+          leaseToken: "lease-1",
+          ownerThreadId: "owner-thread",
+        }),
+      ).resolves.toEqual({
+        granted: false,
+        replayed: false,
+        grantedIncidentCount: 0,
+      });
+      expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+      expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["missing", browserAdapterRetryFailedRetryableAttemptLedger(), null],
+    [
+      "exhausted",
+      browserAdapterRetryFailedRetryableAttemptLedger(),
+      {
+        maximumAttempts: 4,
+        attemptsCompleted: 4,
+        attemptsRemaining: 0,
+        exhausted: true,
+      },
+    ],
+    [
+      "duplicate-attempt",
+      browserAdapterRetryFailedRetryableAttemptLedger(1, 2),
+      {
+        maximumAttempts: 4,
+        attemptsCompleted: 1,
+        attemptsRemaining: 3,
+        exhausted: false,
+      },
+    ],
+  ] as const)(
+    "does not grant a failed-retryable browser adapter with a %s retry budget",
+    async (_budgetState, attemptLedger, retryBudget) => {
+      prismaMocks.batchFindFirst.mockResolvedValue(
+        ownedStageDeadlineGrantBatch({
+          attemptLedgers: [attemptLedger],
+          summary: {
+            remediation: {
+              workMode: "VERIFY_TRANSIENT",
+              strategyAction: "RUN_TYPED_ADAPTER",
+              playbookStage: "BROWSER_ADAPTER_RETRY",
+              allowUnchangedRuntime: true,
+              requiresImplementationPath: false,
+              reason: "EXISTING_SUPPORT_READY",
+              retryBudget,
+            },
+          },
+        }),
+      );
+
+      await expect(
+        grantOwnedCourseSupportVerificationStageDeadline({
+          batchId: "batch-1",
+          leaseToken: "lease-1",
+          ownerThreadId: "owner-thread",
+        }),
+      ).resolves.toEqual({
+        granted: false,
+        replayed: false,
+        grantedIncidentCount: 0,
+      });
+      expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+      expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["unstarted", "QUEUED", null],
+    ["started", "CHECKING", new Date("2026-07-21T02:20:22.000Z")],
+  ] as const)(
+    "does not grant a browser adapter retry deadline with an existing %s verification request",
+    async (_state, status, startedAt) => {
+      prismaMocks.batchFindFirst.mockResolvedValue(
+        ownedStageDeadlineGrantBatch({
+          attemptLedgers: [browserAdapterRetryReadyAttemptLedger()],
+          verificationRequests: [
+            [{ id: "verification-request-1", status, startedAt }],
+          ],
+          summary: {
+            remediation: {
+              workMode: "VERIFY_TRANSIENT",
+              strategyAction: "RUN_TYPED_ADAPTER",
+              playbookStage: "BROWSER_ADAPTER_RETRY",
+              allowUnchangedRuntime: true,
+              requiresImplementationPath: false,
+              reason: "EXISTING_SUPPORT_READY",
+              retryBudget: null,
+            },
+          },
+        }),
+      );
+
+      await expect(
+        grantOwnedCourseSupportVerificationStageDeadline({
+          batchId: "batch-1",
+          leaseToken: "lease-1",
+          ownerThreadId: "owner-thread",
+        }),
+      ).resolves.toEqual({
+        granted: false,
+        replayed: false,
+        grantedIncidentCount: 0,
+      });
+      expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+      expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not grant a browser adapter retry deadline after its first attempt starts", async () => {
+    const startedLedger = appendAutomationPlaybookEvent(
+      browserAdapterRetryReadyAttemptLedger(),
+      {
+        cycle: 1,
+        stage: "BROWSER_ADAPTER_RETRY",
+        transition: "STARTED",
+        readPath: "TYPED_PROVIDER_ADAPTER",
+        evidenceKind: "TOOLING",
+        failureFingerprint: "TEST:BROWSER_ADAPTER_RETRY:STARTED",
+        runtimeVersion: "test-runtime",
+        observedAt: new Date("2026-07-21T02:20:24.000Z"),
+      },
+    );
+    prismaMocks.batchFindFirst.mockResolvedValue(
+      ownedStageDeadlineGrantBatch({
+        attemptLedgers: [startedLedger],
+        summary: {
+          remediation: {
+            workMode: "VERIFY_TRANSIENT",
+            strategyAction: "RUN_TYPED_ADAPTER",
+            playbookStage: "BROWSER_ADAPTER_RETRY",
+            allowUnchangedRuntime: true,
+            requiresImplementationPath: false,
+            reason: "EXISTING_SUPPORT_READY",
+            retryBudget: null,
+          },
+        },
+      }),
+    );
+
+    await expect(
+      grantOwnedCourseSupportVerificationStageDeadline({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+      }),
+    ).resolves.toEqual({
+      granted: false,
+      replayed: false,
+      grantedIncidentCount: 0,
+    });
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("does not grant a browser adapter retry deadline for a mismatched batch directive", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue(
+      ownedStageDeadlineGrantBatch({
+        attemptLedgers: [browserAdapterRetryReadyAttemptLedger()],
+      }),
+    );
+
+    await expect(
+      grantOwnedCourseSupportVerificationStageDeadline({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+      }),
+    ).resolves.toEqual({
+      granted: false,
+      replayed: false,
+      grantedIncidentCount: 0,
+    });
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("does not partially grant while a non-final ineligible peer keeps an expired endpoint", async () => {
+    const verifyStartedAt = new Date("2026-07-21T02:20:23.000Z");
+    prismaMocks.queryRaw.mockResolvedValue([{ now: verifyStartedAt }]);
+    prismaMocks.batchFindFirst.mockResolvedValue(
+      ownedStageDeadlineGrantBatch({
+        attemptLedgers: [
+          browserAdapterRetryReadyAttemptLedger(),
+          typedAdapterReadyAttemptLedger(),
+        ],
+        escalationDeadlines: [
+          new Date("2026-07-21T01:51:59.000Z"),
+          new Date("2026-07-21T01:51:59.000Z"),
+        ],
+        summary: {
+          remediation: {
+            workMode: "VERIFY_TRANSIENT",
+            strategyAction: "RUN_TYPED_ADAPTER",
+            playbookStage: "BROWSER_ADAPTER_RETRY",
+            allowUnchangedRuntime: true,
+            requiresImplementationPath: false,
+            reason: "EXISTING_SUPPORT_READY",
+            retryBudget: null,
+          },
+        },
+      }),
+    );
+
+    await expect(
+      grantOwnedCourseSupportVerificationStageDeadline({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+      }),
+    ).resolves.toEqual({
+      granted: false,
+      replayed: false,
+      grantedIncidentCount: 0,
+    });
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("does not grant when a durable restored peer still owns an expired endpoint", async () => {
+    const verifyStartedAt = new Date("2026-07-21T02:20:23.000Z");
+    const releaseSha = "a".repeat(40);
+    const providerSnapshotFingerprint = "b".repeat(64);
+    const batch = ownedStageDeadlineGrantBatch({
+      attemptLedgers: [
+        browserAdapterRetryReadyAttemptLedger(),
+        typedAdapterReadyAttemptLedger(),
+      ],
+      escalationDeadlines: [
+        new Date("2026-07-21T01:51:59.000Z"),
+        new Date("2026-07-21T01:51:59.000Z"),
+      ],
+      summary: {
+        remediation: {
+          workMode: "VERIFY_TRANSIENT",
+          strategyAction: "RUN_TYPED_ADAPTER",
+          playbookStage: "BROWSER_ADAPTER_RETRY",
+          allowUnchangedRuntime: true,
+          requiresImplementationPath: false,
+          reason: "EXISTING_SUPPORT_READY",
+          retryBudget: null,
+        },
+      },
+    });
+    batch.recheckDispatchStartedAt = new Date("2026-07-21T02:00:00.000Z");
+    Object.assign(batch.incidents[1], {
+      result: "RESTORED",
+      proofSnapshot: {
+        kind: "PROVIDER_VERIFICATION",
+        outcome: "NO_MATCH",
+        observedAt: "2026-07-21T02:10:00.000Z",
+        completedAt: "2026-07-21T02:11:00.000Z",
+        runtimeVersion: releaseSha,
+        providerExecution: true,
+        providerSnapshotFingerprint,
+      },
+      verifiedAt: new Date("2026-07-21T02:12:00.000Z"),
+      verifiedIncidentUpdatedAt: new Date("2026-07-21T02:12:00.000Z"),
+    });
+    expect(
+      isDurableTerminalProof(
+        {
+          ...batch.incidents[1],
+          normalizedResult: "RESTORED",
+          currentProviderSnapshotFingerprint: providerSnapshotFingerprint,
+        } as Parameters<typeof isDurableTerminalProof>[0],
+        batch,
+      ),
+    ).toBe(true);
+    prismaMocks.queryRaw.mockResolvedValue([{ now: verifyStartedAt }]);
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+
+    await expect(
+      grantOwnedCourseSupportVerificationStageDeadline({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+      }),
+    ).resolves.toEqual({
+      granted: false,
+      replayed: false,
+      grantedIncidentCount: 0,
+    });
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["missing", null],
+    ["invalid", new Date(Number.NaN)],
+  ] as const)(
+    "ignores a %s ineligible peer endpoint while granting a safe target",
+    async (_kind, peerDeadline) => {
+      const verifyStartedAt = new Date("2026-07-21T02:20:23.000Z");
+      prismaMocks.queryRaw.mockResolvedValue([{ now: verifyStartedAt }]);
+      prismaMocks.batchFindFirst.mockResolvedValue(
+        ownedStageDeadlineGrantBatch({
+          attemptLedgers: [
+            browserAdapterRetryReadyAttemptLedger(),
+            typedAdapterReadyAttemptLedger(),
+          ],
+          escalationDeadlines: [
+            new Date("2026-07-21T01:51:59.000Z"),
+            peerDeadline,
+          ],
+          summary: {
+            remediation: {
+              workMode: "VERIFY_TRANSIENT",
+              strategyAction: "RUN_TYPED_ADAPTER",
+              playbookStage: "BROWSER_ADAPTER_RETRY",
+              allowUnchangedRuntime: true,
+              requiresImplementationPath: false,
+              reason: "EXISTING_SUPPORT_READY",
+              retryBudget: null,
+            },
+          },
+        }),
+      );
+      prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+      prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+
+      await expect(
+        grantOwnedCourseSupportVerificationStageDeadline({
+          batchId: "batch-1",
+          leaseToken: "lease-1",
+          ownerThreadId: "owner-thread",
+        }),
+      ).resolves.toMatchObject({
+        granted: true,
+        replayed: false,
+        grantedIncidentCount: 1,
+      });
+      expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledOnce();
+      expect(prismaMocks.batchUpdateMany).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("never grants a second browser adapter retry deadline after the one-shot marker expires", async () => {
     const later = new Date("2026-07-21T04:00:00.000Z");
     prismaMocks.queryRaw.mockResolvedValue([{ now: later }]);
     prismaMocks.batchFindFirst.mockResolvedValue(
       ownedStageDeadlineGrantBatch({
+        attemptLedgers: [browserAdapterRetryReadyAttemptLedger()],
         summary: {
           remediation: {
-            workMode: "ADVANCE_DISCOVERY",
-            strategyAction: "DISCOVER_WITH_BROWSER",
-            playbookStage: "RENDERED_BROWSER_DISCOVERY",
+            workMode: "VERIFY_TRANSIENT",
+            strategyAction: "RUN_TYPED_ADAPTER",
+            playbookStage: "BROWSER_ADAPTER_RETRY",
             allowUnchangedRuntime: true,
             requiresImplementationPath: false,
-            reason: "PLAYBOOK_STAGE_PENDING",
+            reason: "EXISTING_SUPPORT_READY",
             retryBudget: null,
           },
           verificationStageDeadlineGrant: {
             schemaVersion: 1,
-            grantedAt: "2026-07-21T02:06:00.000Z",
+            grantedAt: "2026-07-21T02:20:23.000Z",
             incidentCount: 1,
-            stages: [],
+            stages: [
+              {
+                cycle: 1,
+                stage: "BROWSER_ADAPTER_RETRY",
+                deadlineAt: "2026-07-21T02:48:23.000Z",
+                incidentCount: 1,
+              },
+            ],
           },
         },
         leaseExpiresAt: new Date("2026-07-21T04:30:00.000Z"),
@@ -3292,6 +4006,17 @@ describe("course-support claim demand fencing", () => {
     prismaMocks.batchFindFirst.mockResolvedValue(
       ownedStageDeadlineGrantBatch({
         attemptLedgers: [typedAdapterReadyAttemptLedger()],
+        summary: {
+          remediation: {
+            workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+            strategyAction: "REPAIR_PROVIDER_ADAPTER",
+            playbookStage: "TYPED_ADAPTER",
+            allowUnchangedRuntime: false,
+            requiresImplementationPath: true,
+            reason: "IMPLEMENTATION_REQUIRED",
+            retryBudget: null,
+          },
+        },
       }),
     );
 
@@ -3323,6 +4048,37 @@ describe("course-support claim demand fencing", () => {
         ownerThreadId: "owner-thread",
       }),
     ).rejects.toThrow("incident stage changed");
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when a verification request insertion races the incident CAS", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue(
+      ownedStageDeadlineGrantBatch(),
+    );
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 0 });
+
+    await expect(
+      grantOwnedCourseSupportVerificationStageDeadline({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+      }),
+    ).rejects.toThrow("verification request was created");
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          batchIncidents: {
+            some: {
+              id: "batch-incident-1",
+              batchId: "batch-1",
+              incidentId: "browser-incident-1",
+              cycle: 1,
+              verificationRequests: { none: {} },
+            },
+          },
+        }),
+      }),
+    );
     expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
   });
 
