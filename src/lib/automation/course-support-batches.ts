@@ -94,6 +94,7 @@ import {
   readCourseSupportReleaseExecutionEvidence,
 } from "./course-support-zero-execution";
 import {
+  buildCourseSupportSearchExecutionFenceSnapshot,
   CourseSupportSearchExecutionFenceRetryError,
   canAdvanceCourseSupportSearchExecutionFence,
   courseSupportSearchExecutionFenceMatches,
@@ -3371,6 +3372,20 @@ export async function claimCourseSupportBatch(input: {
             summary: {
               schemaVersion: 1,
               branch: input.branch,
+              searchExecutionFence: persistCourseSupportSearchExecutionFence(
+                buildCourseSupportSearchExecutionFenceSnapshot({
+                  courseIds: selected.incidents.map(
+                    (incident) => incident.courseId,
+                  ),
+                  expectedSearches: [],
+                  recheckDispatchKey: null,
+                  recheckDispatchStartedAt: null,
+                  recheckDispatchedAt: null,
+                  now,
+                  dispatches: [],
+                }),
+                now,
+              ),
               plannedPaths,
               fairnessReason: selected.fairnessReason,
               remediation: remediationSummary,

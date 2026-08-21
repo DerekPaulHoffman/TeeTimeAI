@@ -2000,6 +2000,37 @@ describe("course-support claim demand fencing", () => {
     );
   });
 
+  it("seeds an empty execution fence before an expired endpoint can close", async () => {
+    const incident = {
+      ...incidentRecord({ engineeringOnly: true, preferences: [] }),
+      escalationDeadlineAt: new Date(now.getTime() - 60_000),
+    };
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([incident])
+      .mockResolvedValueOnce([incident]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread-expired-endpoint",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        now,
+      }),
+    ).resolves.toMatchObject({ outcome: "ready", incidentCount: 1 });
+
+    expect(prismaMocks.batchCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          summary: expect.objectContaining({
+            searchExecutionFence: emptySearchExecutionFenceForCourses([
+              "course-1",
+            ]),
+          }),
+        }),
+      }),
+    );
+  });
+
   it("parks an identical structural remediation until a material input changes", async () => {
     const incident = {
       ...incidentRecord({ engineeringOnly: true, preferences: [] }),
@@ -13358,6 +13389,53 @@ describe("detached verification atomic batch fences", () => {
         }),
       }),
     );
+  });
+
+  it("keeps a truly legacy zero-execution closeout without a persisted fence fail-closed", async () => {
+    const batch = closeoutBatch("PENDING");
+    batch.baseSha = "c".repeat(40);
+    batch.releaseSha = null;
+    batch.deployedAt = null;
+    batch.recheckDispatchStartedAt = null;
+    batch.recheckDispatchedAt = null;
+    batch.incidents[0].incident.failureClass = "RATE_LIMIT";
+    batch.incidents[0].incident.failureFingerprint =
+      "v1:RATE_LIMIT:FETCH_FAILED";
+    batch.summary = {
+      plannedPaths: [],
+      remediation: {
+        attempts: [
+          {
+            courseRef: createHash("sha256")
+              .update("course-1")
+              .digest("hex")
+              .slice(0, 24),
+            providerSnapshotFingerprint: providerFingerprint,
+            playbookEventCountAtClaim: 0,
+            approach: {
+              workMode: "VERIFY_TRANSIENT",
+              strategyAction: "RETRY_PROVIDER",
+              playbookStage: null,
+            },
+          },
+        ],
+      },
+    };
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        now,
+      }),
+    ).rejects.toThrow(
+      "Legacy course-support verification lacks a search-execution fence",
+    );
+
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
   });
 
   it("does not spend the provider no-progress budget when the detached read never began", async () => {
