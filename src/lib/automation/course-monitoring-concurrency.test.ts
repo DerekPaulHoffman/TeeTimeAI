@@ -83,6 +83,7 @@ import {
 } from "./course-monitoring";
 import { parkCourseSupportCandidatesForMaterialChange } from "./course-support-batches";
 import {
+  assessParkedCourseCampaignDescendantIncompletePlaybookRecovery,
   assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery,
   assessParkedCourseCampaignSameIdentityMaterialChangeIncompletePlaybookRecovery,
   assessParkedCourseCampaignSameCycleRecoveryHistory,
@@ -91,6 +92,7 @@ import {
   createParkedCourseCampaignAudit,
   PARKED_COURSE_CAMPAIGN_PROMPT_VERSION,
 } from "./course-support-campaign";
+import { persistCourseSupportSearchExecutionFence } from "./course-support-search-execution-fence";
 import { assessAutomationPlaybook } from "./course-monitoring-playbook";
 import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
 import { COURSE_SUPPORT_RESPONDER_PROMPT_VERSION } from "./course-support-responder-policy";
@@ -1142,6 +1144,7 @@ describe("course monitoring write serialization", () => {
     };
     const currentProviderCourse = {
       ...capturedProviderCourse,
+      updatedAt: new Date("2026-08-20T12:14:00.000Z"),
       website: "https://official.example",
       providerFamilyKey: "GENERIC_HTTP",
     };
@@ -1176,18 +1179,46 @@ describe("course monitoring write serialization", () => {
     const batchIncidents = [
       {
         id: "batch-entry-descendant",
+        batchId: "batch-descendant",
+        incidentId: "incident-campaign",
+        courseId: "course-1",
         cycle: 5,
         result: "NEEDS_HUMAN",
+        preProbeId: null,
+        postProbeId: null,
+        proofSnapshot: { providerExecution: true },
+        verifiedIncidentUpdatedAt: null,
+        verifiedAt: null,
+        createdAt: new Date("2026-08-20T12:19:00.000Z"),
+        updatedAt: new Date("2026-08-20T12:25:00.000Z"),
         batch: {
+          id: "batch-descendant",
+          status: "PARTIAL",
+          revision: 3,
+          ownerAutomationRunId: null,
           baseSha: "release-old",
           releaseSha: "release-old",
+          deployedAt: new Date("2026-08-20T12:17:00.000Z"),
+          createdAt: new Date("2026-08-20T12:18:00.000Z"),
+          updatedAt: new Date("2026-08-20T12:25:00.000Z"),
+          recheckDispatchKey: "dispatch-descendant",
+          recheckDispatchStartedAt: new Date("2026-08-20T12:18:30.000Z"),
+          recheckDispatchedAt: new Date("2026-08-20T12:18:45.000Z"),
           completedAt: new Date("2026-08-20T12:25:00.000Z"),
           summary: { closeout: { providerExecutionStarted: true } },
+          ownerAutomationRun: null,
         },
         verificationRequests: [
           {
             id: "request-descendant",
+            courseId: "course-1",
             releaseSha: "release-old",
+            providerSnapshotFingerprint: currentProviderSnapshotFingerprint,
+            providerSnapshotAt: startedAt,
+            discoveryAttemptedAt: null,
+            discoveryVerifiedAt: null,
+            createdAt: new Date("2026-08-20T12:19:00.000Z"),
+            updatedAt: new Date("2026-08-20T12:25:00.000Z"),
             status: "SUCCEEDED" as const,
             revision: 3,
             attemptCount: 1,
@@ -1211,6 +1242,7 @@ describe("course monitoring write serialization", () => {
     expect(history).not.toBeNull();
     const monitoringEvents = [
       {
+        id: "endpoint-descendant",
         incidentId: "incident-campaign",
         eventType: "HUMAN_REVIEW_REQUESTED",
         source: "RECOVERY_CRON",
@@ -1226,6 +1258,7 @@ describe("course monitoring write serialization", () => {
         },
       },
       {
+        id: "handoff-descendant",
         incidentId: "incident-campaign",
         eventType: "REVALIDATION_REQUESTED",
         source: "COURSE_SUPPORT_RESPONDER",
@@ -1249,6 +1282,7 @@ describe("course monitoring write serialization", () => {
         },
       },
       {
+        id: "admission-descendant",
         incidentId: "incident-campaign",
         eventType: "REVALIDATION_REQUESTED",
         source: "COURSE_SUPPORT_RESPONDER",
@@ -1329,6 +1363,8 @@ describe("course monitoring write serialization", () => {
       expectedFailureClass: "MISSING_METADATA" as const,
       expectedLatestProbeAt: null,
       expectedLatestDiscoveryAt: null,
+      expectedLatestProbeId: null,
+      expectedLatestDiscoveryId: null,
       expectedProviderFamilyKey: "GENERIC_HTTP",
       expectedFailureFingerprint: "METADATA:MISSING",
       expectedMonitoringFailureFingerprint: "METADATA:MISSING",
@@ -1348,6 +1384,9 @@ describe("course monitoring write serialization", () => {
     });
     transactionMocks.courseSupportIncident.findUnique.mockResolvedValue(
       baseIncident,
+    );
+    transactionMocks.courseSupportBatchIncident.findMany.mockResolvedValue(
+      batchIncidents,
     );
 
     await expect(
@@ -1433,6 +1472,525 @@ describe("course monitoring write serialization", () => {
     ).not.toHaveBeenCalled();
   });
 
+  it("atomically resumes only the exact requestless zero-stage +3 descendant", async () => {
+    const capturedAt = new Date("2026-08-20T12:00:00.000Z");
+    const admittedAt = new Date("2026-08-20T12:05:00.000Z");
+    const firstHandoffAt = new Date("2026-08-20T12:10:00.000Z");
+    const finalHandoffAt = new Date("2026-08-20T12:15:00.000Z");
+    const parkedAt = new Date("2026-08-20T12:30:00.000Z");
+    const recoveredAt = new Date("2026-08-20T13:00:00.000Z");
+    const capturedCourse = {
+      timeZone: "America/New_York",
+      isPublic: true,
+      website: null,
+      detectedBookingUrl: null,
+      detectedPlatform: "UNKNOWN" as const,
+      providerFamilyKey: "SOURCE_MISSING",
+      bookingMethod: "UNKNOWN" as const,
+      bookingWindowDaysAhead: null,
+      bookingReleaseTimeLocal: null,
+      bookingWindowSource: null,
+      bookingWindowConfidence: null,
+      bookingWindowEvidenceUrl: null,
+      automationEligibility: "UNKNOWN" as const,
+      automationReason: "NONE" as const,
+      monitoringMode: "STANDARD" as const,
+      bookingAccessMode: "UNKNOWN",
+      intelligenceVerifiedAt: null,
+      intelligenceReviewAt: null,
+      intelligenceConfidence: null,
+      bookingMetadata: null,
+      layoutHoleCounts: [],
+      layoutHolesVerifiedAt: null,
+    };
+    const intermediateCourse = {
+      ...capturedCourse,
+      website: "https://first.example/tee-times",
+      providerFamilyKey: "GENERIC_HTTP",
+    };
+    const currentCourse = {
+      ...intermediateCourse,
+      updatedAt: new Date("2026-08-20T12:18:00.000Z"),
+      website: "https://second.example/tee-times",
+    };
+    const capturedFingerprint =
+      buildCourseSupportProviderSnapshotFingerprint(capturedCourse);
+    const intermediateFingerprint =
+      buildCourseSupportProviderSnapshotFingerprint(intermediateCourse);
+    const currentFingerprint =
+      buildCourseSupportProviderSnapshotFingerprint(currentCourse);
+    const emptyLedger = { version: 1, events: [] };
+    const campaignAudit = createParkedCourseCampaignAudit({
+      expectedCount: 1,
+      capturedAt,
+      members: [
+        {
+          courseId: "course-1",
+          incidentId: "incident-campaign",
+          cycle: 3,
+          revision: 5,
+          monitoringRevision: 9,
+          monitoringFailureFingerprint: "SOURCE:MISSING",
+          kind: "NEEDS_ADAPTER",
+          providerFamilyKey: "SOURCE_MISSING",
+          failureClass: "MISSING_SOURCE",
+          failureFingerprint: "SOURCE:MISSING",
+          providerSnapshotFingerprint: capturedFingerprint,
+          attemptLedgerFingerprint:
+            createParkedCourseCampaignAttemptLedgerFingerprint(null),
+          playbookConclusion: "INCOMPLETE",
+          latestProbeAt: null,
+          latestDiscoveryAt: null,
+        },
+      ],
+    });
+    const courseRef = createHash("sha256")
+      .update("course-1")
+      .digest("hex")
+      .slice(0, 24);
+    const noExecution = {
+      claimedImplementationPaths: true,
+      newReleaseRecorded: false,
+      deploymentRecorded: false,
+      postProbeRecorded: false,
+      providerAttemptRecorded: false,
+      playbookAttemptRecorded: false,
+      terminalResultRecorded: false,
+      providerExecutionStarted: false,
+    };
+    const searchExecutionFence = persistCourseSupportSearchExecutionFence(
+      {
+        schemaVersion: 1,
+        digest: "1".repeat(64),
+        searchStateDigest: "2".repeat(64),
+        probeEvidenceRefs: [],
+        settled: true,
+        reasons: [],
+        batchSearchCount: 0,
+        teeSearchCount: 0,
+        preferenceCount: 0,
+        probeCount: 0,
+        deletedSearchRefs: [],
+        probeEvidenceBySearch: [],
+        memberships: [],
+        providerExecutionAttemptCourseIds: [],
+        providerExecutionAttemptCourseRefs: [],
+        searchExecutionMayHaveStartedCourseRefs: [],
+      },
+      new Date("2026-08-20T12:24:00.000Z"),
+    );
+    const batchEntry = {
+      id: "zero-entry",
+      batchId: "zero-batch",
+      incidentId: "incident-campaign",
+      courseId: "course-1",
+      cycle: 6,
+      result: "NEEDS_HUMAN",
+      preProbeId: null,
+      postProbeId: null,
+      proofSnapshot: null,
+      verifiedIncidentUpdatedAt: null,
+      verifiedAt: null,
+      createdAt: new Date("2026-08-20T12:20:00.000Z"),
+      updatedAt: new Date("2026-08-20T12:25:00.000Z"),
+      batch: {
+        id: "zero-batch",
+        status: "PARTIAL",
+        revision: 1,
+        ownerAutomationRunId: null,
+        baseSha: "release-old",
+        releaseSha: null,
+        deployedAt: null,
+        createdAt: new Date("2026-08-20T12:19:00.000Z"),
+        updatedAt: new Date("2026-08-20T12:25:00.000Z"),
+        recheckDispatchKey: null,
+        recheckDispatchStartedAt: null,
+        recheckDispatchedAt: null,
+        completedAt: new Date("2026-08-20T12:25:00.000Z"),
+        summary: {
+          campaign: {
+            kind: "PARKED_COHORT",
+            attempts: [
+              {
+                courseRef,
+                runId: "campaign-run-1",
+                membershipDigest: campaignAudit.membershipDigest,
+                cycle: 6,
+              },
+            ],
+          },
+          searchExecutionFence,
+          closeout: {
+            orchestrationOnlyCourseRefs: [courseRef],
+            remediationAttempts: [
+              {
+                courseRef,
+                providerSnapshotFingerprint: currentFingerprint,
+                failureFingerprint: "SOURCE:MISSING",
+                runtimeVersion: "release-old",
+                consumed: false,
+                countsTowardOperationalNoProgress: false,
+                executionEvidence: noExecution,
+              },
+            ],
+          },
+        },
+        ownerAutomationRun: null,
+      },
+      verificationRequests: [],
+    };
+    const monitoringEvents = [
+      {
+        id: "zero-endpoint",
+        incidentId: "incident-campaign",
+        eventType: "HUMAN_REVIEW_REQUESTED",
+        source: "RECOVERY_CRON",
+        failureFingerprint: "SOURCE:MISSING",
+        readPath: null,
+        occurredAt: parkedAt,
+        audit: {
+          cycle: 6,
+          customerState: "NEEDS_HUMAN_REVIEW",
+          parkedUntilMaterialChange: true,
+          automationStalled: true,
+          playbookExhausted: false,
+          endpointStalled: true,
+        },
+      },
+      {
+        id: "zero-handoff-2",
+        incidentId: "incident-campaign",
+        eventType: "REVALIDATION_REQUESTED",
+        source: "COURSE_SUPPORT_RESPONDER",
+        failureFingerprint: "SOURCE:MISSING",
+        readPath: null,
+        occurredAt: finalHandoffAt,
+        audit: {
+          providerFamilyHandoff: true,
+          priorCycle: 5,
+          cycle: 6,
+          priorProviderFamilyKey: "GENERIC_HTTP",
+          providerFamilyKey: "GENERIC_HTTP",
+          priorFailureFingerprint: "HTTP:MISSING",
+          failureFingerprint: "SOURCE:MISSING",
+          claimedProviderSnapshotFingerprint: intermediateFingerprint,
+          observedProviderSnapshotFingerprint: currentFingerprint,
+          providerFamilyChanged: false,
+          providerSnapshotChanged: true,
+          customerDataIncluded: false,
+        },
+      },
+      {
+        id: "zero-handoff-1",
+        incidentId: "incident-campaign",
+        eventType: "REVALIDATION_REQUESTED",
+        source: "COURSE_SUPPORT_RESPONDER",
+        failureFingerprint: "HTTP:MISSING",
+        readPath: null,
+        occurredAt: firstHandoffAt,
+        audit: {
+          providerFamilyHandoff: true,
+          priorCycle: 4,
+          cycle: 5,
+          priorProviderFamilyKey: "SOURCE_MISSING",
+          providerFamilyKey: "GENERIC_HTTP",
+          priorFailureFingerprint: "SOURCE:MISSING",
+          failureFingerprint: "HTTP:MISSING",
+          claimedProviderSnapshotFingerprint: capturedFingerprint,
+          observedProviderSnapshotFingerprint: intermediateFingerprint,
+          providerFamilyChanged: true,
+          providerSnapshotChanged: true,
+          customerDataIncluded: false,
+        },
+      },
+      {
+        id: "zero-admission",
+        incidentId: "incident-campaign",
+        eventType: "REVALIDATION_REQUESTED",
+        source: "COURSE_SUPPORT_RESPONDER",
+        failureFingerprint: "SOURCE:MISSING",
+        readPath: null,
+        occurredAt: admittedAt,
+        audit: {
+          action: "parked_cohort_admission",
+          campaignRunId: "campaign-run-1",
+          campaignMembershipDigest: campaignAudit.membershipDigest,
+          priorCycle: 3,
+          cycle: 4,
+          preservesPriorAttemptEvents: true,
+          customerDataIncluded: false,
+        },
+      },
+    ];
+    const baseIncident = {
+      id: "incident-campaign",
+      courseId: "course-1",
+      cycle: 6,
+      revision: 12,
+      status: "NEEDS_HUMAN",
+      kind: "NEEDS_ADAPTER",
+      providerFamilyKey: "GENERIC_HTTP",
+      failureClass: "MISSING_SOURCE",
+      failureFingerprint: "SOURCE:MISSING",
+      attemptLedger: emptyLedger,
+      humanReviewReason: "AUTOMATION_STALLED",
+      activeRealSearchCount: 0,
+      attemptCount: 7,
+      lastAttemptAt: batchEntry.batch.completedAt,
+      activeBatchId: null,
+      nextAttemptAt: null,
+      escalatedAt: parkedAt,
+      resolution: null,
+      resolvedAt: null,
+      resolutionMessage: null,
+      resolutionNotifiedAt: null,
+      decisionActorId: null,
+      decisionAt: null,
+      decisionNote: null,
+      decisionEvidenceUrl: null,
+      decisionIdempotencyKey: null,
+      monitoringEvents,
+      batchIncidents: [batchEntry],
+      course: {
+        ...currentCourse,
+        probes: [],
+        automationDiscoveries: [],
+        preferences: [],
+        monitoringStatus: {
+          state: "ENGINEERING_VERIFICATION_NEEDED",
+          revision: 16,
+          failureFingerprint: "SOURCE:MISSING",
+          nextAutomaticAttemptAt: null,
+          revalidationRequestedAt: null,
+        },
+      },
+    };
+    const assessment =
+      assessParkedCourseCampaignDescendantIncompletePlaybookRecovery({
+        captured: campaignAudit.members[0]!,
+        current: {
+          courseId: "course-1",
+          incidentId: "incident-campaign",
+          cycle: 6,
+          revision: 12,
+          monitoringRevision: 16,
+          monitoringFailureFingerprint: "SOURCE:MISSING",
+          kind: "NEEDS_ADAPTER",
+          providerFamilyKey: "GENERIC_HTTP",
+          failureClass: "MISSING_SOURCE",
+          failureFingerprint: "SOURCE:MISSING",
+          providerSnapshotFingerprint: currentFingerprint,
+          attemptLedgerFingerprint:
+            createParkedCourseCampaignAttemptLedgerFingerprint(emptyLedger),
+          playbookConclusion: "INCOMPLETE",
+          latestProbeAt: null,
+          latestDiscoveryAt: null,
+          activeRealSearchCount: 0,
+          zeroExecutionEvidence: {
+            latestProbe: null,
+            latestDiscovery: null,
+            latestProbeTimestampRowCount: 0,
+            latestDiscoveryTimestampRowCount: 0,
+            monitoringEvents,
+            batchIncidents: [batchEntry],
+            playbookAssessment: assessAutomationPlaybook(emptyLedger, 6),
+          },
+        },
+        capturedAt,
+        campaignRunId: "campaign-run-1",
+        campaignMembershipDigest: campaignAudit.membershipDigest,
+      });
+    expect(assessment).not.toBeNull();
+    const input = {
+      courseId: "course-1",
+      incidentId: "incident-campaign",
+      expectedCycle: 6,
+      expectedRevision: 12,
+      expectedMonitoringRevision: 16,
+      capturedRevision: 5,
+      capturedMonitoringRevision: 9,
+      capturedCycle: 3,
+      campaignCapturedAt: campaignAudit.capturedAt,
+      admissionMode: "DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY" as const,
+      expectedSameCycleRecoveryHistoryDigest: assessment!.history.historyDigest,
+      expectedPlaybookNextStage: "OFFICIAL_IDENTITY",
+      expectedPlaybookCompletedStageCount: 0,
+      currentRuntimeVersion: "release-current",
+      capturedKind: "NEEDS_ADAPTER" as const,
+      capturedProviderFamilyKey: "SOURCE_MISSING",
+      expectedKind: "NEEDS_ADAPTER" as const,
+      expectedFailureClass: "MISSING_SOURCE" as const,
+      expectedLatestProbeAt: null,
+      expectedLatestDiscoveryAt: null,
+      expectedLatestProbeId: null,
+      expectedLatestDiscoveryId: null,
+      expectedProviderFamilyKey: "GENERIC_HTTP",
+      expectedFailureFingerprint: "SOURCE:MISSING",
+      expectedMonitoringFailureFingerprint: "SOURCE:MISSING",
+      expectedProviderSnapshotFingerprint: currentFingerprint,
+      expectedAttemptLedgerFingerprint:
+        createParkedCourseCampaignAttemptLedgerFingerprint(emptyLedger),
+      expectedPlaybookConclusion: "INCOMPLETE",
+      campaignRunId: "campaign-run-1",
+      campaignMembershipDigest: campaignAudit.membershipDigest,
+      now: recoveredAt,
+    };
+    const arrangeBase = () => {
+      vi.clearAllMocks();
+      transactionMocks.courseSupportIncident.findUnique.mockResolvedValue(
+        baseIncident,
+      );
+      transactionMocks.courseSupportBatchIncident.findMany.mockResolvedValue([
+        batchEntry,
+      ]);
+      transactionMocks.automationRun.findUnique.mockResolvedValue({
+        promptVersion: PARKED_COURSE_CAMPAIGN_PROMPT_VERSION,
+        status: "RUNNING",
+        completedAt: null,
+        audit: campaignAudit,
+      });
+      transactionMocks.automationRun.updateMany.mockResolvedValue({ count: 1 });
+      transactionMocks.course.updateMany.mockResolvedValue({ count: 1 });
+      transactionMocks.courseSupportBatch.updateMany.mockResolvedValue({
+        count: 1,
+      });
+      transactionMocks.courseSupportBatchIncident.updateMany.mockResolvedValue({
+        count: 1,
+      });
+      transactionMocks.courseSupportBatchIncident.findFirst.mockResolvedValue(
+        null,
+      );
+      transactionMocks.courseSupportVerificationRequest.findFirst.mockResolvedValue(
+        null,
+      );
+      transactionMocks.courseProbe.findFirst.mockResolvedValue(null);
+      transactionMocks.courseAutomationDiscovery.findFirst.mockResolvedValue(
+        null,
+      );
+      transactionMocks.courseMonitoringEvent.findFirst.mockResolvedValue(null);
+      transactionMocks.courseSupportIncident.updateMany.mockResolvedValue({
+        count: 1,
+      });
+      transactionMocks.courseMonitoringStatus.updateMany.mockResolvedValue({
+        count: 1,
+      });
+      transactionMocks.courseMonitoringEvent.create.mockResolvedValue({
+        id: "zero-recovery-marker",
+      });
+    };
+
+    arrangeBase();
+    await expect(
+      reopenParkedCourseForResponderCampaignInTransaction(
+        transactionMocks as never,
+        input,
+      ),
+    ).resolves.toMatchObject({ admitted: true, cycle: 6 });
+    expect(
+      transactionMocks.courseSupportVerificationRequest.updateMany,
+    ).not.toHaveBeenCalled();
+    expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          audit: expect.objectContaining({
+            admissionMode: "DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY",
+            descendantHandoffCount: 2,
+            batchCount: 1,
+            requestCount: 0,
+            startedRequestCount: 0,
+            playbookCompletedStageCount: 0,
+            playbookNextStage: "OFFICIAL_IDENTITY",
+            zeroProgressOrchestrationOnly: true,
+            releaseEvidenceAbsent: true,
+            executionEvidenceAbsent: true,
+          }),
+        }),
+      }),
+    );
+
+    for (const arrangeRace of [
+      () =>
+        transactionMocks.courseSupportBatchIncident.findFirst.mockResolvedValueOnce(
+          { id: "late-entry" },
+        ),
+      () =>
+        transactionMocks.courseSupportVerificationRequest.findFirst.mockResolvedValueOnce(
+          { id: "late-request" },
+        ),
+      () => {
+        const changed = structuredClone(batchEntry);
+        changed.batch.summary.searchExecutionFence.searchExecutionMayHaveStartedCourseRefs =
+          [courseRef];
+        transactionMocks.courseSupportBatchIncident.findMany.mockResolvedValueOnce(
+          [changed],
+        );
+      },
+      () =>
+        transactionMocks.courseSupportIncident.findUnique.mockResolvedValueOnce(
+          {
+            ...baseIncident,
+            course: {
+              ...baseIncident.course,
+              probes: [
+                {
+                  id: "post-handoff-probe",
+                  courseId: "course-1",
+                  observedAt: new Date(finalHandoffAt.getTime() + 1),
+                },
+              ],
+            },
+          },
+        ),
+      () =>
+        transactionMocks.courseSupportIncident.findUnique.mockResolvedValueOnce(
+          {
+            ...baseIncident,
+            course: {
+              ...baseIncident.course,
+              automationDiscoveries: [
+                {
+                  id: "post-handoff-discovery",
+                  courseId: "course-1",
+                  createdAt: new Date(finalHandoffAt.getTime() + 1),
+                },
+              ],
+            },
+          },
+        ),
+      () => {
+        const changed = structuredClone(batchEntry);
+        changed.verificationRequests.push({
+          id: "late-request-row",
+          releaseSha: "release-old",
+          status: "STALE",
+          revision: 1,
+          attemptCount: 0,
+          workflowRunId: null,
+          startedAt: null,
+          outcome: null,
+          failureClass: null,
+          evidence: null,
+          lastError: null,
+        });
+        transactionMocks.courseSupportBatchIncident.findMany.mockResolvedValueOnce(
+          [changed],
+        );
+      },
+    ]) {
+      arrangeBase();
+      arrangeRace();
+      await expect(
+        reopenParkedCourseForResponderCampaignInTransaction(
+          transactionMocks as never,
+          input,
+        ),
+      ).resolves.toEqual({ admitted: false });
+      expect(
+        transactionMocks.courseSupportIncident.updateMany,
+      ).not.toHaveBeenCalled();
+    }
+  });
+
   it("atomically resumes the exact same-identity +2 depth-4 campaign member and fences every evidence layer", async () => {
     const recoveredAt = new Date("2026-08-20T13:00:00.000Z");
     const admittedAt = new Date("2026-08-20T12:05:00.000Z");
@@ -1481,6 +2039,10 @@ describe("course monitoring write serialization", () => {
       buildCourseSupportProviderSnapshotFingerprint(capturedProviderCourse);
     const providerSnapshotFingerprint =
       buildCourseSupportProviderSnapshotFingerprint(providerCourse);
+    const courseRef = createHash("sha256")
+      .update("course-1")
+      .digest("hex")
+      .slice(0, 24);
     const attemptLedger = {
       version: 1,
       events: [
@@ -1562,7 +2124,26 @@ describe("course monitoring write serialization", () => {
           recheckDispatchStartedAt: createdAt,
           recheckDispatchedAt: createdAt,
           completedAt,
-          summary: { closeout: { ordinal } },
+          summary: {
+            remediation: {
+              attempts: [{ courseRef, providerSnapshotFingerprint }],
+            },
+            closeout: {
+              ordinal,
+              remediationAttempts: [
+                {
+                  courseRef,
+                  providerSnapshotFingerprint,
+                  observedProviderSnapshotFingerprint:
+                    providerSnapshotFingerprint,
+                  failureFingerprint: "SOURCE:MISSING",
+                  observedFailureFingerprint: "SOURCE:MISSING",
+                  runtimeVersion: "release-old",
+                  providerSnapshotChanged: false,
+                },
+              ],
+            },
+          },
           ownerAutomationRun: {
             id: `owner-${ordinal}`,
             promptVersion: COURSE_SUPPORT_RESPONDER_PROMPT_VERSION,
@@ -1580,7 +2161,9 @@ describe("course monitoring write serialization", () => {
             courseId: "course-1",
             releaseSha: "release-old",
             providerSnapshotFingerprint,
-            providerSnapshotAt: materialChangeAt,
+            providerSnapshotAt: new Date(createdAt.getTime() + 20_000),
+            discoveryAttemptedAt: new Date(createdAt.getTime() + 10_000),
+            discoveryVerifiedAt: new Date(createdAt.getTime() + 30_000),
             createdAt: materialChangeAt,
             updatedAt: completedAt,
             status: "SUCCEEDED" as const,
@@ -1738,6 +2321,8 @@ describe("course monitoring write serialization", () => {
             zeroExecutionEvidence: {
               latestProbe,
               latestDiscovery,
+              latestProbeTimestampRowCount: 1,
+              latestDiscoveryTimestampRowCount: 1,
               monitoringEvents,
               batchIncidents,
               playbookAssessment: assessAutomationPlaybook(attemptLedger, 5),
@@ -1933,7 +2518,12 @@ describe("course monitoring write serialization", () => {
           id: "request-1",
           courseId: "course-1",
           providerSnapshotFingerprint,
-          providerSnapshotAt: materialChangeAt,
+          providerSnapshotAt:
+            batchIncidents[0]!.verificationRequests[0]!.providerSnapshotAt,
+          discoveryAttemptedAt:
+            batchIncidents[0]!.verificationRequests[0]!.discoveryAttemptedAt,
+          discoveryVerifiedAt:
+            batchIncidents[0]!.verificationRequests[0]!.discoveryVerifiedAt,
           createdAt: materialChangeAt,
           updatedAt: batchIncidents[0]!.verificationRequests[0]!.updatedAt,
           evidence: { equals: { ordinal: 1, providerExecution: true } },
@@ -2004,6 +2594,27 @@ describe("course monitoring write serialization", () => {
         transactionMocks.courseSupportVerificationRequest.updateMany.mockResolvedValueOnce(
           { count: 0 },
         ),
+      () => {
+        const timestampDrift = batchIncidents.map((entry, index) =>
+          index === 0
+            ? {
+                ...entry,
+                verificationRequests: [
+                  {
+                    ...entry.verificationRequests[0]!,
+                    discoveryVerifiedAt: new Date(
+                      entry.verificationRequests[0]!.discoveryVerifiedAt!.getTime() +
+                        1,
+                    ),
+                  },
+                ],
+              }
+            : entry,
+        );
+        transactionMocks.courseSupportBatchIncident.findMany.mockResolvedValueOnce(
+          timestampDrift,
+        );
+      },
       () =>
         transactionMocks.courseSupportBatchIncident.findFirst.mockResolvedValueOnce(
           { id: "late-current-cycle-entry" },
@@ -2164,6 +2775,11 @@ describe("course monitoring write serialization", () => {
     const recoveredAt = new Date("2026-08-20T13:00:00.000Z");
     const priorRuntime = "a".repeat(40);
     const currentRuntime = "b".repeat(40);
+    const legacyDiscovery = {
+      id: "discovery-before-marker",
+      courseId: "course-1",
+      createdAt: new Date("2026-08-20T12:16:00.000Z"),
+    };
     const providerCourse = {
       updatedAt: new Date("2026-08-20T12:04:00.000Z"),
       timeZone: "America/New_York",
@@ -2416,7 +3032,7 @@ describe("course monitoring write serialization", () => {
           providerSnapshotFingerprint,
           attemptLedgerFingerprint,
           latestProbeAt: null,
-          latestDiscoveryAt: null,
+          latestDiscoveryAt: legacyDiscovery.createdAt.toISOString(),
           playbookCompletedStageCount: 4,
           playbookNextStage: "RENDERED_BROWSER_DISCOVERY",
           recoveryRuntimeVersion: priorRuntime,
@@ -2495,7 +3111,7 @@ describe("course monitoring write serialization", () => {
       course: {
         ...providerCourse,
         probes: [],
-        automationDiscoveries: [],
+        automationDiscoveries: [legacyDiscovery],
         preferences: [],
         monitoringStatus: {
           state: "ENGINEERING_VERIFICATION_NEEDED",
@@ -2530,11 +3146,13 @@ describe("course monitoring write serialization", () => {
           attemptLedgerFingerprint,
           playbookConclusion: "INCOMPLETE",
           latestProbeAt: null,
-          latestDiscoveryAt: null,
+          latestDiscoveryAt: legacyDiscovery.createdAt.toISOString(),
           activeRealSearchCount: 0,
           zeroExecutionEvidence: {
             latestProbe: null,
-            latestDiscovery: null,
+            latestDiscovery: legacyDiscovery,
+            latestProbeTimestampRowCount: 0,
+            latestDiscoveryTimestampRowCount: 1,
             monitoringEvents,
             batchIncidents,
             playbookAssessment: assessAutomationPlaybook(attemptLedger, 4),
@@ -2567,9 +3185,9 @@ describe("course monitoring write serialization", () => {
       expectedKind: "NEEDS_ADAPTER" as const,
       expectedFailureClass: "MISSING_SOURCE" as const,
       expectedLatestProbeAt: null,
-      expectedLatestDiscoveryAt: null,
+      expectedLatestDiscoveryAt: legacyDiscovery.createdAt.toISOString(),
       expectedLatestProbeId: null,
-      expectedLatestDiscoveryId: null,
+      expectedLatestDiscoveryId: legacyDiscovery.id,
       expectedProviderFamilyKey: "SOURCE_MISSING",
       expectedFailureFingerprint: "SOURCE:MISSING",
       expectedMonitoringFailureFingerprint: "SOURCE:MISSING",
@@ -2608,7 +3226,7 @@ describe("course monitoring write serialization", () => {
       );
       transactionMocks.courseProbe.findFirst.mockResolvedValue(null);
       transactionMocks.courseAutomationDiscovery.findFirst.mockResolvedValue(
-        null,
+        legacyDiscovery,
       );
       transactionMocks.courseMonitoringEvent.findFirst.mockResolvedValue(null);
       transactionMocks.courseSupportIncident.updateMany.mockResolvedValue({
@@ -2692,6 +3310,8 @@ describe("course monitoring write serialization", () => {
               recoveryAssessment!.postMarkerHistoryDigest,
             postMarkerBatchCount: 1,
             postMarkerRequestCount: 0,
+            latestDiscoveryId: legacyDiscovery.id,
+            latestDiscoveryAt: legacyDiscovery.createdAt.toISOString(),
             batchCount: 2,
             startedRequestCount: 1,
             supersededEndpointId: "endpoint-post-marker",
@@ -2704,6 +3324,32 @@ describe("course monitoring write serialization", () => {
         }),
       }),
     );
+    const discoveryLock = transactionMocks.$queryRaw.mock.calls.find(
+      ([query]) =>
+        (query as { strings?: readonly string[] }).strings
+          ?.join("")
+          .includes('FROM "CourseAutomationDiscovery"'),
+    );
+    expect(discoveryLock?.[0].values).toEqual([
+      legacyDiscovery.id,
+      legacyDiscovery.courseId,
+      legacyDiscovery.createdAt,
+    ]);
+
+    arrangeBase();
+    transactionMocks.$queryRaw.mockResolvedValueOnce([
+      legacyDiscovery,
+      { ...legacyDiscovery, id: "discovery-same-timestamp-sibling" },
+    ]);
+    await expect(
+      reopenParkedCourseForResponderCampaignInTransaction(
+        transactionMocks as never,
+        input,
+      ),
+    ).resolves.toEqual({ admitted: false });
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).not.toHaveBeenCalled();
 
     arrangeBase();
     transactionMocks.courseSupportVerificationRequest.findFirst
@@ -2994,6 +3640,8 @@ describe("course monitoring write serialization", () => {
               observedAt: historicalProbeAt,
             },
             latestDiscovery: null,
+            latestProbeTimestampRowCount: 1,
+            latestDiscoveryTimestampRowCount: 0,
             monitoringEvents,
             batchIncidents,
             playbookAssessment: {
@@ -3223,8 +3871,7 @@ describe("course monitoring write serialization", () => {
           id: "probe-new",
           observedAt: new Date("2026-08-20T12:45:00.000Z"),
         }),
-      () =>
-        transactionMocks.$queryRaw.mockResolvedValueOnce([]),
+      () => transactionMocks.$queryRaw.mockResolvedValueOnce([]),
     ];
     for (const arrangeRace of raceControls) {
       vi.clearAllMocks();
@@ -4098,23 +4745,32 @@ describe("course monitoring write serialization", () => {
     {
       provenance: "descendant recovery",
       action: "parked_cohort_descendant_incomplete_playbook_recovery",
+      zeroProgress: false,
+    },
+    {
+      provenance: "zero-progress descendant recovery",
+      action: "parked_cohort_descendant_incomplete_playbook_recovery",
+      zeroProgress: true,
     },
     {
       provenance: "post-marker incomplete-playbook recovery",
       action: "parked_cohort_post_marker_incomplete_playbook_recovery",
+      zeroProgress: false,
     },
     {
       provenance: "requestless stale-ownership recovery",
       action: "parked_cohort_requestless_stale_ownership_recovery",
+      zeroProgress: false,
     },
     {
       provenance: "same-identity +2 incomplete-playbook recovery",
       action:
         "parked_cohort_same_identity_material_change_incomplete_playbook_recovery",
+      zeroProgress: false,
     },
   ])(
     "closes an unclaimed automatic incident with $provenance campaign provenance",
-    async ({ action }) => {
+    async ({ action, zeroProgress = false }) => {
       prismaMocks.$transaction.mockReset();
       prismaMocks.$transaction.mockImplementation(async (worker) =>
         worker(transactionMocks),
@@ -4183,9 +4839,37 @@ describe("course monitoring write serialization", () => {
                   admissionMode: "DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY",
                   descendantLineageDigest: "b".repeat(64),
                   descendantHandoffCount: 1,
+                  sameCycleRecoveryHistoryDigest: "c".repeat(64),
+                  providerSnapshotFingerprint: "d".repeat(64),
+                  attemptLedgerFingerprint: "e".repeat(64),
+                  batchCount: 1,
+                  startedRequestCount: zeroProgress ? 0 : null,
+                  playbookCompletedStageCount: zeroProgress ? 0 : 5,
+                  playbookNextStage: zeroProgress
+                    ? "OFFICIAL_IDENTITY"
+                    : "BROWSER_ADAPTER_RETRY",
+                  ...(zeroProgress
+                    ? {
+                        requestCount: 0,
+                        zeroProgressOrchestrationOnly: true,
+                        releaseEvidenceAbsent: true,
+                        executionEvidenceAbsent: true,
+                      }
+                    : {}),
+                  customerDataIncluded: false,
+                  preservesOperatorEvidence: true,
                   sameCycleRecovery: true,
                   oneShot: true,
+                  preservesAttemptLedger: true,
+                  preservesAttemptCounts: true,
+                  preservesAttemptTimestamps: true,
                   preservesImmutableCampaignAudit: true,
+                  campaign: {
+                    kind: "PARKED_COHORT",
+                    runId: "campaign-run-1",
+                    membershipDigest: "a".repeat(64),
+                    cycle: 5,
+                  },
                 }
               : action === "parked_cohort_requestless_stale_ownership_recovery"
                 ? {
@@ -4359,6 +5043,58 @@ describe("course monitoring write serialization", () => {
         .map(([call]) => call.data)
         .find((data) => data.eventType === "RECOVERED");
     expect(recoveredEvent.audit).not.toHaveProperty("campaign");
+
+    transactionMocks.courseMonitoringEvent.create.mockClear();
+    transactionMocks.courseMonitoringEvent.findFirst.mockResolvedValue({
+      occurredAt: new Date("2026-07-27T15:44:00.000Z"),
+      audit: {
+        action: "parked_cohort_descendant_incomplete_playbook_recovery",
+        admissionMode: "DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY",
+        campaignRunId: "campaign-run-1",
+        campaignMembershipDigest: "a".repeat(64),
+        cycle: 5,
+        descendantLineageDigest: "b".repeat(64),
+        descendantHandoffCount: 1,
+        sameCycleRecoveryHistoryDigest: "c".repeat(64),
+        providerSnapshotFingerprint: "d".repeat(64),
+        attemptLedgerFingerprint: "e".repeat(64),
+        batchCount: 1,
+        requestCount: 0,
+        startedRequestCount: 0,
+        playbookCompletedStageCount: 0,
+        playbookNextStage: "OFFICIAL_IDENTITY",
+        zeroProgressOrchestrationOnly: true,
+        releaseEvidenceAbsent: true,
+        executionEvidenceAbsent: true,
+        customerDataIncluded: false,
+        preservesOperatorEvidence: false,
+        sameCycleRecovery: true,
+        oneShot: true,
+        preservesAttemptLedger: true,
+        preservesAttemptCounts: true,
+        preservesAttemptTimestamps: true,
+        preservesImmutableCampaignAudit: true,
+        campaign: {
+          kind: "PARKED_COHORT",
+          runId: "campaign-run-1",
+          membershipDigest: "a".repeat(64),
+          cycle: 5,
+        },
+      },
+    });
+    await recordCourseMonitoringSuccess({
+      courseId: "course-1",
+      outcome: "NO_MATCH",
+      runtimeVersion: "d".repeat(40),
+      now: new Date(succeededAt.getTime() + 1),
+    });
+    const malformedDescendantRecoveredEvent =
+      transactionMocks.courseMonitoringEvent.create.mock.calls
+        .map(([call]) => call.data)
+        .find((data) => data.eventType === "RECOVERED");
+    expect(malformedDescendantRecoveredEvent.audit).not.toHaveProperty(
+      "campaign",
+    );
   });
 
   it("closes an unclaimed parked human incident when fresh monitoring succeeds", async () => {

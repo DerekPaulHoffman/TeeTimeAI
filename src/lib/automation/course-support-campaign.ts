@@ -17,11 +17,13 @@ import {
 import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
 import { getAutomationRuntimeVersion } from "./runtime-version";
 import { COURSE_SUPPORT_RESPONDER_PROMPT_VERSION } from "./course-support-responder-policy";
+import { readPersistedCourseSupportSearchExecutionFence } from "./course-support-search-execution-fence";
 import { COURSE_SUPPORT_WRITER_LANE } from "./writer-lanes";
 import {
   assessCourseSupportZeroExecutionHistory,
   isCourseSupportCompletedBatchOrchestrationOnly,
   isCourseSupportVerificationRequestUnstarted,
+  readCourseSupportReleaseExecutionEvidence,
   type CourseSupportZeroExecutionBatchEvidence,
 } from "./course-support-zero-execution";
 
@@ -221,7 +223,24 @@ export function deriveParkedCourseCampaignHumanReviewCycles(input: {
       audit.action === "parked_cohort_zero_execution_recovery" &&
       typeof audit.zeroExecutionHistoryDigest === "string" &&
       /^[a-f0-9]{64}$/u.test(audit.zeroExecutionHistoryDigest);
+    const descendantProgressedShape =
+      Number.isInteger(audit.playbookCompletedStageCount) &&
+      Number(audit.playbookCompletedStageCount) > 0 &&
+      typeof audit.playbookNextStage === "string" &&
+      audit.playbookNextStage.trim().length > 0 &&
+      (audit.startedRequestCount === null ||
+        (Number.isInteger(audit.startedRequestCount) &&
+          Number(audit.startedRequestCount) >= 1));
+    const descendantZeroProgressShape =
+      audit.playbookCompletedStageCount === 0 &&
+      audit.playbookNextStage === "OFFICIAL_IDENTITY" &&
+      audit.requestCount === 0 &&
+      audit.startedRequestCount === 0 &&
+      audit.zeroProgressOrchestrationOnly === true &&
+      audit.releaseEvidenceAbsent === true &&
+      audit.executionEvidenceAbsent === true;
     const descendantIncompleteRecovery =
+      event.source === "COURSE_SUPPORT_RESPONDER" &&
       audit.action ===
         "parked_cohort_descendant_incomplete_playbook_recovery" &&
       audit.admissionMode === "DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY" &&
@@ -230,7 +249,21 @@ export function deriveParkedCourseCampaignHumanReviewCycles(input: {
       Number.isInteger(audit.descendantHandoffCount) &&
       Number(audit.descendantHandoffCount) >= 1 &&
       Number(audit.descendantHandoffCount) <=
-        PARKED_COURSE_CAMPAIGN_MAX_DESCENDANT_HANDOFFS;
+        PARKED_COURSE_CAMPAIGN_MAX_DESCENDANT_HANDOFFS &&
+      Number.isInteger(audit.batchCount) &&
+      Number(audit.batchCount) >= 1 &&
+      audit.customerDataIncluded === false &&
+      audit.preservesOperatorEvidence === true &&
+      audit.preservesAttemptLedger === true &&
+      audit.preservesAttemptCounts === true &&
+      audit.preservesAttemptTimestamps === true &&
+      audit.preservesImmutableCampaignAudit === true &&
+      asCampaignRecord(audit.campaign).kind === "PARKED_COHORT" &&
+      asCampaignRecord(audit.campaign).runId === audit.campaignRunId &&
+      asCampaignRecord(audit.campaign).membershipDigest ===
+        audit.campaignMembershipDigest &&
+      asCampaignRecord(audit.campaign).cycle === cycle &&
+      (descendantProgressedShape || descendantZeroProgressShape);
     const postMarkerIncompleteRecovery =
       event.source === "COURSE_SUPPORT_RESPONDER" &&
       audit.action ===
@@ -1199,7 +1232,7 @@ export async function loadParkedCourseCampaignAdmissionMembers(
       incompletePlaybookHistory ||
       postMarkerIncompletePlaybookRecovery
         ? null
-        : getParkedCourseCampaignDescendantIncompletePlaybookRecovery({
+        : assessParkedCourseCampaignDescendantIncompletePlaybookRecovery({
             captured,
             current,
             capturedAt: new Date(audit.capturedAt),
@@ -1307,6 +1340,8 @@ type ParkedCourseCampaignRecoveryEvidence = {
     courseId: string;
     createdAt: Date;
   } | null;
+  latestProbeTimestampRowCount: number;
+  latestDiscoveryTimestampRowCount: number;
   monitoringEvents: Array<{
     id?: string;
     incidentId: string | null;
@@ -1340,6 +1375,8 @@ export type ParkedCourseCampaignBatchEvidence = Omit<
       courseId?: string;
       providerSnapshotFingerprint?: string;
       providerSnapshotAt?: Date;
+      discoveryAttemptedAt?: Date | null;
+      discoveryVerifiedAt?: Date | null;
       createdAt?: Date;
       updatedAt?: Date;
     }
@@ -1419,6 +1456,8 @@ const parkedCourseCampaignBatchIncidentSelect = {
       releaseSha: true,
       providerSnapshotFingerprint: true,
       providerSnapshotAt: true,
+      discoveryAttemptedAt: true,
+      discoveryVerifiedAt: true,
       createdAt: true,
       updatedAt: true,
       status: true,
@@ -1446,6 +1485,8 @@ export type ParkedCourseCampaignSameCycleRecoveryHistory = {
     releaseSha: string;
     providerSnapshotFingerprint?: string;
     providerSnapshotAt?: Date;
+    discoveryAttemptedAt: Date | null;
+    discoveryVerifiedAt: Date | null;
     createdAt?: Date;
     updatedAt?: Date;
     status: CourseSupportZeroExecutionBatchEvidence["verificationRequests"][number]["status"];
@@ -1513,6 +1554,8 @@ export function assessParkedCourseCampaignSameCycleRecoveryHistory(input: {
         courseId?: string;
         providerSnapshotFingerprint?: string;
         providerSnapshotAt?: Date;
+        discoveryAttemptedAt?: Date | null;
+        discoveryVerifiedAt?: Date | null;
         createdAt?: Date;
         updatedAt?: Date;
       };
@@ -1532,6 +1575,8 @@ export function assessParkedCourseCampaignSameCycleRecoveryHistory(input: {
         releaseSha: request.releaseSha,
         providerSnapshotFingerprint: requestLineage.providerSnapshotFingerprint,
         providerSnapshotAt: requestLineage.providerSnapshotAt,
+        discoveryAttemptedAt: requestLineage.discoveryAttemptedAt ?? null,
+        discoveryVerifiedAt: requestLineage.discoveryVerifiedAt ?? null,
         createdAt: requestLineage.createdAt,
         updatedAt: requestLineage.updatedAt,
         status: request.status,
@@ -2307,12 +2352,12 @@ async function loadParkedCourseCampaignMemberSnapshots(
           },
           probes: {
             orderBy: [{ observedAt: "desc" }, { id: "desc" }],
-            take: 1,
+            take: 2,
             select: { id: true, courseId: true, observedAt: true },
           },
           automationDiscoveries: {
             orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-            take: 1,
+            take: 2,
             select: { id: true, courseId: true, createdAt: true },
           },
         },
@@ -2430,6 +2475,21 @@ async function loadParkedCourseCampaignMemberSnapshots(
         zeroExecutionEvidence: {
           latestProbe: incident.course.probes[0] ?? null,
           latestDiscovery: incident.course.automationDiscoveries[0] ?? null,
+          latestProbeTimestampRowCount: incident.course.probes[0]
+            ? incident.course.probes.filter(
+                (probe) =>
+                  probe.observedAt.getTime() ===
+                  incident.course.probes[0]!.observedAt.getTime(),
+              ).length
+            : 0,
+          latestDiscoveryTimestampRowCount: incident.course
+            .automationDiscoveries[0]
+            ? incident.course.automationDiscoveries.filter(
+                (discovery) =>
+                  discovery.createdAt.getTime() ===
+                  incident.course.automationDiscoveries[0]!.createdAt.getTime(),
+              ).length
+            : 0,
           monitoringEvents: incident.monitoringEvents,
           batchIncidents: currentCycleBatchIncidents ?? incident.batchIncidents,
           playbookAssessment: assessAutomationPlaybook(
@@ -2685,7 +2745,6 @@ export function assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery(i
     current.providerSnapshotFingerprint !==
       captured.providerSnapshotFingerprint ||
     current.latestProbeAt !== captured.latestProbeAt ||
-    current.latestDiscoveryAt !== captured.latestDiscoveryAt ||
     playbook.valid !== true ||
     playbook.cycle !== current.cycle ||
     playbook.conclusion !== "INCOMPLETE" ||
@@ -2772,6 +2831,14 @@ export function assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery(i
     ) ||
     priorMarkerAudit.latestProbeAt !== current.latestProbeAt ||
     priorMarkerAudit.latestDiscoveryAt !== current.latestDiscoveryAt ||
+    (priorMarkerAudit.latestProbeAt !== null &&
+      typeof priorMarkerAudit.latestProbeId !== "string") ||
+    (priorMarkerAudit.latestProbeId !== undefined &&
+      priorMarkerAudit.latestProbeId !==
+        (current.zeroExecutionEvidence.latestProbe?.id ?? null)) ||
+    (priorMarkerAudit.latestDiscoveryId !== undefined &&
+      priorMarkerAudit.latestDiscoveryId !==
+        (current.zeroExecutionEvidence.latestDiscovery?.id ?? null)) ||
     priorMarkerAudit.playbookCompletedStageCount !== 4 ||
     priorMarkerAudit.playbookNextStage !== "RENDERED_BROWSER_DISCOVERY" ||
     typeof priorMarkerAudit.recoveryRuntimeVersion !== "string" ||
@@ -2862,14 +2929,26 @@ export function assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery(i
   const latestProbe = current.zeroExecutionEvidence.latestProbe;
   const latestDiscovery = current.zeroExecutionEvidence.latestDiscovery;
   const postMarkerEvents = events.filter(
-    (event) => event.occurredAt > priorMarker.occurredAt,
+    (event) =>
+      event.id !== priorMarker.id && event.occurredAt >= priorMarker.occurredAt,
   );
   if (
     (latestProbe?.observedAt.toISOString() ?? null) !== current.latestProbeAt ||
     (latestDiscovery?.createdAt.toISOString() ?? null) !==
       current.latestDiscoveryAt ||
-    (latestProbe && latestProbe.observedAt > priorMarker.occurredAt) ||
-    (latestDiscovery && latestDiscovery.createdAt > priorMarker.occurredAt) ||
+    (latestProbe &&
+      (latestProbe.courseId !== current.courseId ||
+        latestProbe.observedAt >= priorMarker.occurredAt ||
+        current.zeroExecutionEvidence.latestProbeTimestampRowCount !== 1)) ||
+    (latestDiscovery &&
+      (latestDiscovery.courseId !== current.courseId ||
+        latestDiscovery.createdAt >= priorMarker.occurredAt ||
+        current.zeroExecutionEvidence.latestDiscoveryTimestampRowCount !==
+          1)) ||
+    (!latestProbe &&
+      current.zeroExecutionEvidence.latestProbeTimestampRowCount !== 0) ||
+    (!latestDiscovery &&
+      current.zeroExecutionEvidence.latestDiscoveryTimestampRowCount !== 0) ||
     postMarkerEvents.length !== 1 ||
     postMarkerEvents[0]!.id !== endpoint.id
   ) {
@@ -3042,6 +3121,7 @@ export function findParkedCourseCampaignDescendantLineage(input: {
   if (
     !input.campaignRunId.trim() ||
     !/^[a-f0-9]{64}$/u.test(input.campaignMembershipDigest) ||
+    !Number.isFinite(input.capturedAt.getTime()) ||
     current.courseId !== captured.courseId ||
     current.incidentId !== captured.incidentId ||
     current.kind !== captured.kind ||
@@ -3051,14 +3131,23 @@ export function findParkedCourseCampaignDescendantLineage(input: {
     return null;
   }
 
-  const admissions = input.events.filter((event) => {
+  const eventsSinceCapture = input.events.filter(
+    (event) => event.occurredAt >= input.capturedAt,
+  );
+  if (
+    input.events.length >= 50 &&
+    eventsSinceCapture.length === input.events.length
+  ) {
+    return null;
+  }
+
+  const admissions = eventsSinceCapture.filter((event) => {
     const audit = asCampaignRecord(event.audit);
     return (
       event.incidentId === current.incidentId &&
       event.eventType === "REVALIDATION_REQUESTED" &&
       event.source === "COURSE_SUPPORT_RESPONDER" &&
       event.failureFingerprint === captured.failureFingerprint &&
-      event.occurredAt >= input.capturedAt &&
       audit.action === "parked_cohort_admission" &&
       audit.campaignRunId === input.campaignRunId &&
       audit.campaignMembershipDigest === input.campaignMembershipDigest &&
@@ -3075,15 +3164,16 @@ export function findParkedCourseCampaignDescendantLineage(input: {
   let providerFamilyKey = captured.providerFamilyKey;
   let failureFingerprint = captured.failureFingerprint;
   let providerSnapshotFingerprint = captured.providerSnapshotFingerprint;
+  const lineageEvents = [admission];
   const canonicalHandoffs: Array<Record<string, unknown>> = [];
   for (let cycle = captured.cycle + 2; cycle <= current.cycle; cycle += 1) {
-    const handoffs = input.events.filter((event) => {
+    const handoffs = eventsSinceCapture.filter((event) => {
       const audit = asCampaignRecord(event.audit);
       return (
         event.incidentId === current.incidentId &&
         event.eventType === "REVALIDATION_REQUESTED" &&
         event.source === "COURSE_SUPPORT_RESPONDER" &&
-        event.occurredAt >= priorOccurredAt &&
+        event.occurredAt > priorOccurredAt &&
         audit.providerFamilyHandoff === true &&
         audit.priorCycle === cycle - 1 &&
         audit.cycle === cycle &&
@@ -3144,10 +3234,31 @@ export function findParkedCourseCampaignDescendantLineage(input: {
       providerFamilyChanged,
       providerSnapshotChanged,
     });
+    lineageEvents.push(handoff);
     priorOccurredAt = handoff.occurredAt;
     providerFamilyKey = audit.providerFamilyKey;
     failureFingerprint = audit.failureFingerprint;
     providerSnapshotFingerprint = audit.observedProviderSnapshotFingerprint;
+  }
+
+  const boundedCycleTransitions = eventsSinceCapture.filter((event) => {
+    const audit = asCampaignRecord(event.audit);
+    return (
+      event.incidentId === current.incidentId &&
+      event.eventType === "REVALIDATION_REQUESTED" &&
+      Number.isInteger(audit.priorCycle) &&
+      Number.isInteger(audit.cycle) &&
+      ((Number(audit.priorCycle) >= captured.cycle &&
+        Number(audit.priorCycle) <= current.cycle) ||
+        (Number(audit.cycle) >= captured.cycle &&
+          Number(audit.cycle) <= current.cycle))
+    );
+  });
+  if (
+    boundedCycleTransitions.length !== lineageEvents.length ||
+    lineageEvents.some((event) => !boundedCycleTransitions.includes(event))
+  ) {
+    return null;
   }
 
   if (
@@ -3180,7 +3291,192 @@ export function findParkedCourseCampaignDescendantLineage(input: {
   };
 }
 
-function getParkedCourseCampaignDescendantIncompletePlaybookRecovery(input: {
+function assessParkedCourseCampaignDescendantZeroProgressHistory(input: {
+  current: ParkedCourseCampaignMemberSnapshot;
+  minimumCreatedAt: Date;
+  maximumCompletedAt: Date;
+  campaignRunId: string;
+  campaignMembershipDigest: string;
+}) {
+  const { current } = input;
+  const courseRef = createHash("sha256")
+    .update(current.courseId)
+    .digest("hex")
+    .slice(0, 24);
+  const entries = current.zeroExecutionEvidence.batchIncidents
+    .filter((entry) => entry.cycle === current.cycle)
+    .sort(
+      (left, right) =>
+        left.createdAt.getTime() - right.createdAt.getTime() ||
+        left.id.localeCompare(right.id),
+    );
+  if (
+    entries.length === 0 ||
+    entries.length > 20 ||
+    entries.some((entry, index) => {
+      const executionEver = readCourseSupportReleaseExecutionEvidence({
+        summary: entry.batch.summary,
+        baseSha: entry.batch.baseSha,
+        courseRef,
+      });
+      const summary = asCampaignRecord(entry.batch.summary);
+      const searchExecutionFence =
+        readPersistedCourseSupportSearchExecutionFence(
+          summary.searchExecutionFence,
+        );
+      const campaign = asCampaignRecord(summary.campaign);
+      const campaignAttempts = Array.isArray(campaign.attempts)
+        ? campaign.attempts.map(asCampaignRecord)
+        : [];
+      const currentCourseCampaignAttempts = campaignAttempts.filter(
+        (attempt) =>
+          attempt.courseRef === courseRef && attempt.cycle === current.cycle,
+      );
+      const matchingCampaignAttempts = currentCourseCampaignAttempts.filter(
+        (attempt) =>
+          hasExactCampaignRecordKeys(attempt, [
+            "courseRef",
+            "runId",
+            "membershipDigest",
+            "cycle",
+          ]) &&
+          attempt.runId === input.campaignRunId &&
+          attempt.membershipDigest === input.campaignMembershipDigest,
+      );
+      const closeout = asCampaignRecord(summary.closeout);
+      const matchingAttempts = Array.isArray(closeout.remediationAttempts)
+        ? (closeout.remediationAttempts as unknown[])
+            .map(asCampaignRecord)
+            .filter((attempt) => attempt.courseRef === courseRef)
+        : [];
+      const hasExecutionAttempt = matchingAttempts.some((attempt) => {
+        const execution = asCampaignRecord(attempt.executionEvidence);
+        return (
+          attempt.consumed !== false ||
+          attempt.countsTowardOperationalNoProgress !== false ||
+          [
+            "newReleaseRecorded",
+            "deploymentRecorded",
+            "postProbeRecorded",
+            "providerAttemptRecorded",
+            "providerExecutionAttemptRecorded",
+            "playbookAttemptRecorded",
+            "terminalResultRecorded",
+            "providerExecutionStarted",
+          ].some((key) => execution[key] === true)
+        );
+      });
+      const exactNoExecutionAttempt =
+        matchingAttempts.length === 1 &&
+        matchingAttempts.every((attempt) => {
+          const execution = asCampaignRecord(attempt.executionEvidence);
+          return (
+            attempt.providerSnapshotFingerprint ===
+              current.providerSnapshotFingerprint &&
+            (attempt.observedProviderSnapshotFingerprint === undefined ||
+              attempt.observedProviderSnapshotFingerprint ===
+                current.providerSnapshotFingerprint) &&
+            attempt.failureFingerprint === current.failureFingerprint &&
+            (attempt.observedFailureFingerprint === undefined ||
+              attempt.observedFailureFingerprint ===
+                current.failureFingerprint) &&
+            attempt.runtimeVersion === entry.batch.baseSha &&
+            attempt.consumed === false &&
+            attempt.countsTowardOperationalNoProgress === false &&
+            (attempt.providerSnapshotChanged === undefined ||
+              attempt.providerSnapshotChanged === false) &&
+            [
+              "newReleaseRecorded",
+              "deploymentRecorded",
+              "postProbeRecorded",
+              "providerAttemptRecorded",
+              "playbookAttemptRecorded",
+              "terminalResultRecorded",
+              "providerExecutionStarted",
+            ].every((key) => execution[key] === false) &&
+            (execution.claimedImplementationPaths === false ||
+              execution.claimedImplementationPaths === true) &&
+            (execution.providerExecutionAttemptRecorded === undefined ||
+              execution.providerExecutionAttemptRecorded === false)
+          );
+        });
+      return (
+        entry.batchId !== entry.batch.id ||
+        entry.incidentId !== current.incidentId ||
+        entry.courseId !== current.courseId ||
+        !entry.batch.completedAt ||
+        !(entry.batch.createdAt instanceof Date) ||
+        !entry.batch.baseSha.trim() ||
+        !["SUCCEEDED", "PARTIAL", "RETRYABLE_FAILED"].includes(
+          entry.batch.status,
+        ) ||
+        entry.batch.releaseSha !== null ||
+        entry.batch.deployedAt !== null ||
+        entry.batch.recheckDispatchKey !== null ||
+        entry.batch.recheckDispatchStartedAt !== null ||
+        entry.batch.recheckDispatchedAt !== null ||
+        entry.createdAt < input.minimumCreatedAt ||
+        entry.batch.createdAt < input.minimumCreatedAt ||
+        entry.batch.createdAt > entry.createdAt ||
+        entry.batch.completedAt < entry.createdAt ||
+        entry.batch.completedAt > input.maximumCompletedAt ||
+        (index > 0 &&
+          (entry.createdAt < entries[index - 1]!.batch.completedAt! ||
+            entry.batch.createdAt < entries[index - 1]!.batch.completedAt!)) ||
+        entry.postProbeId !== null ||
+        entry.proofSnapshot !== null ||
+        entry.verifiedIncidentUpdatedAt !== null ||
+        entry.verifiedAt !== null ||
+        entry.verificationRequests.length !== 0 ||
+        campaign.kind !== "PARKED_COHORT" ||
+        currentCourseCampaignAttempts.length !== 1 ||
+        matchingCampaignAttempts.length !== 1 ||
+        !searchExecutionFence ||
+        searchExecutionFence.settled !== true ||
+        searchExecutionFence.reasons.length !== 0 ||
+        searchExecutionFence.providerExecutionAttemptCourseRefs.includes(
+          courseRef,
+        ) ||
+        searchExecutionFence.searchExecutionMayHaveStartedCourseRefs.includes(
+          courseRef,
+        ) ||
+        searchExecutionFence.memberships.some((membership) =>
+          membership.courseRefs.includes(courseRef),
+        ) ||
+        searchExecutionFence.probeEvidenceBySearch.some((evidence) =>
+          evidence.probes.some((probe) => probe.courseRef === courseRef),
+        ) ||
+        !isCourseSupportCompletedBatchOrchestrationOnly({
+          courseId: current.courseId,
+          summary: entry.batch.summary,
+          allowValidatedLegacy: false,
+        }) ||
+        !exactNoExecutionAttempt ||
+        hasExecutionAttempt ||
+        executionEver.changedReleaseDeploymentEver ||
+        executionEver.providerExecutionEverForCourse ||
+        executionEver.providerExecutionAttemptEverForCourse ||
+        executionEver.terminalExecutionEverForCourse
+      );
+    })
+  ) {
+    return null;
+  }
+
+  const history = assessParkedCourseCampaignSameCycleRecoveryHistory({
+    courseId: current.courseId,
+    cycle: current.cycle,
+    entries,
+    requireOrchestrationOnly: true,
+  });
+  return history &&
+    history.requestCount === 0 &&
+    history.startedRequestCount === 0
+    ? history
+    : null;
+}
+
+export function assessParkedCourseCampaignDescendantIncompletePlaybookRecovery(input: {
   captured: ParkedCourseCampaignMember;
   current: ParkedCourseCampaignMemberSnapshot;
   capturedAt: Date;
@@ -3189,6 +3485,7 @@ function getParkedCourseCampaignDescendantIncompletePlaybookRecovery(input: {
 }) {
   const { captured, current } = input;
   const playbook = current.zeroExecutionEvidence.playbookAssessment;
+  const zeroProgress = playbook.completedStages.length === 0;
   const lineage = findParkedCourseCampaignDescendantLineage({
     captured,
     current,
@@ -3203,8 +3500,10 @@ function getParkedCourseCampaignDescendantIncompletePlaybookRecovery(input: {
     playbook.valid !== true ||
     playbook.cycle !== current.cycle ||
     playbook.conclusion !== "INCOMPLETE" ||
-    playbook.completedStages.length === 0 ||
-    playbook.nextStage === null
+    playbook.nextStage === null ||
+    (zeroProgress &&
+      (playbook.nextStage !== "OFFICIAL_IDENTITY" ||
+        playbook.stages.some((stage) => stage.attemptCount !== 0)))
   ) {
     return null;
   }
@@ -3220,17 +3519,32 @@ function getParkedCourseCampaignDescendantIncompletePlaybookRecovery(input: {
   if (
     !endpoint ||
     endpoint.occurredAt < lineage.lastHandoffAt ||
-    alreadyRecovered
+    alreadyRecovered ||
+    (zeroProgress &&
+      ((current.zeroExecutionEvidence.latestProbe?.observedAt.getTime() ?? 0) >
+        lineage.lastHandoffAt.getTime() ||
+        (current.zeroExecutionEvidence.latestDiscovery?.createdAt.getTime() ??
+          0) > lineage.lastHandoffAt.getTime()))
   ) {
     return null;
   }
-  const history = assessParkedCourseCampaignSameCycleRecoveryHistory({
-    courseId: current.courseId,
-    cycle: current.cycle,
-    entries: current.zeroExecutionEvidence.batchIncidents,
-    requireOrchestrationOnly: false,
-    requireStartedRequest: true,
-  });
+  const history = zeroProgress
+    ? assessParkedCourseCampaignDescendantZeroProgressHistory({
+        current,
+        minimumCreatedAt: lineage.lastHandoffAt,
+        maximumCompletedAt: endpoint.occurredAt,
+        campaignRunId: input.campaignRunId,
+        campaignMembershipDigest: input.campaignMembershipDigest,
+      })
+    : assessParkedCourseCampaignSameCycleRecoveryHistory({
+        courseId: current.courseId,
+        cycle: current.cycle,
+        entries: current.zeroExecutionEvidence.batchIncidents,
+        requireOrchestrationOnly: false,
+        requireStartedRequest: true,
+        requireCausalStartedRequest: true,
+        minimumStartedAt: lineage.lastHandoffAt,
+      });
   return history ? { lineage, history } : null;
 }
 
@@ -3239,6 +3553,58 @@ export type ParkedCourseCampaignSameIdentityMaterialChangeLineage = {
   admissionAt: Date;
   materialChangeAt: Date;
 };
+
+function hasExactSameIdentityMaterialChangeProviderSnapshot(input: {
+  courseId: string;
+  failureFingerprint: string;
+  providerSnapshotFingerprint: string;
+  entry: ParkedCourseCampaignBatchEvidence;
+}) {
+  const courseRef = createHash("sha256")
+    .update(input.courseId)
+    .digest("hex")
+    .slice(0, 24);
+  const summary = asCampaignRecord(input.entry.batch.summary);
+  const plannedAttempts = Array.isArray(
+    asCampaignRecord(summary.remediation).attempts,
+  )
+    ? (asCampaignRecord(summary.remediation).attempts as unknown[])
+        .map(asCampaignRecord)
+        .filter((attempt) => attempt.courseRef === courseRef)
+    : [];
+  if (
+    plannedAttempts.length !== 1 ||
+    plannedAttempts[0]!.providerSnapshotFingerprint !==
+      input.providerSnapshotFingerprint
+  ) {
+    return false;
+  }
+
+  const closeoutAttempts = Array.isArray(
+    asCampaignRecord(summary.closeout).remediationAttempts,
+  )
+    ? (asCampaignRecord(summary.closeout).remediationAttempts as unknown[])
+        .map(asCampaignRecord)
+        .filter((attempt) => attempt.courseRef === courseRef)
+    : [];
+  if (closeoutAttempts.length !== 1) return false;
+  const attempt = closeoutAttempts[0]!;
+  const runtimeVersion =
+    input.entry.batch.releaseSha ?? input.entry.batch.baseSha;
+  const proof = asCampaignRecord(input.entry.proofSnapshot);
+  return (
+    attempt.providerSnapshotFingerprint === input.providerSnapshotFingerprint &&
+    attempt.observedProviderSnapshotFingerprint ===
+      input.providerSnapshotFingerprint &&
+    attempt.failureFingerprint === input.failureFingerprint &&
+    attempt.observedFailureFingerprint === input.failureFingerprint &&
+    attempt.runtimeVersion === runtimeVersion &&
+    (attempt.providerSnapshotChanged === undefined ||
+      attempt.providerSnapshotChanged === false) &&
+    (proof.providerSnapshotFingerprint === undefined ||
+      proof.providerSnapshotFingerprint === input.providerSnapshotFingerprint)
+  );
+}
 
 export function findParkedCourseCampaignSameIdentityMaterialChangeLineage(input: {
   captured: ParkedCourseCampaignMember;
@@ -3512,18 +3878,38 @@ export function assessParkedCourseCampaignSameIdentityMaterialChangeIncompletePl
     causalRequests.some(({ entry, request }) => {
       const providerSnapshotAt = request.providerSnapshotAt;
       const requestCreatedAt = request.createdAt;
-      return (
+      const discoveryAttemptedAt = request.discoveryAttemptedAt ?? null;
+      const discoveryVerifiedAt = request.discoveryVerifiedAt ?? null;
+      if (
         request.courseId !== current.courseId ||
         request.providerSnapshotFingerprint !==
           current.providerSnapshotFingerprint ||
+        !hasExactSameIdentityMaterialChangeProviderSnapshot({
+          courseId: current.courseId,
+          failureFingerprint: current.failureFingerprint,
+          providerSnapshotFingerprint: current.providerSnapshotFingerprint,
+          entry,
+        }) ||
         !(providerSnapshotAt instanceof Date) ||
         !(requestCreatedAt instanceof Date) ||
         providerSnapshotAt < lineage.materialChangeAt ||
         requestCreatedAt < lineage.materialChangeAt ||
-        providerSnapshotAt > request.startedAt! ||
         requestCreatedAt > request.startedAt! ||
         providerSnapshotAt > entry.batch.completedAt! ||
         requestCreatedAt > entry.batch.completedAt!
+      ) {
+        return true;
+      }
+      if (providerSnapshotAt.getTime() === request.startedAt!.getTime()) {
+        return discoveryAttemptedAt !== null || discoveryVerifiedAt !== null;
+      }
+      return (
+        !(discoveryAttemptedAt instanceof Date) ||
+        !(discoveryVerifiedAt instanceof Date) ||
+        discoveryAttemptedAt < request.startedAt! ||
+        discoveryAttemptedAt > providerSnapshotAt ||
+        discoveryVerifiedAt < providerSnapshotAt ||
+        discoveryVerifiedAt > entry.batch.completedAt!
       );
     })
   ) {
@@ -3614,6 +4000,10 @@ export function assessParkedCourseCampaignSameIdentityMaterialChangeIncompletePl
               ...request,
               providerSnapshotAt:
                 request.providerSnapshotAt?.toISOString() ?? null,
+              discoveryAttemptedAt:
+                request.discoveryAttemptedAt?.toISOString() ?? null,
+              discoveryVerifiedAt:
+                request.discoveryVerifiedAt?.toISOString() ?? null,
               createdAt: request.createdAt?.toISOString() ?? null,
               updatedAt: request.updatedAt?.toISOString() ?? null,
               startedAt: request.startedAt?.toISOString() ?? null,
