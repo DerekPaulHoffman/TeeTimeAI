@@ -3042,8 +3042,11 @@ describe("browser discovery persistence", () => {
       layoutHoleCounts: [],
       layoutHolesVerifiedAt: null,
       supportIncident: {
+        id: fence.incidentId,
         kind: "NEEDS_ADAPTER",
         failureClass: "MISSING_SOURCE",
+        status: "AUTO_INVESTIGATING",
+        activeBatchId: fence.batchId,
         occurrenceCount: 2,
         lastSeenAt: new Date("2026-08-20T12:00:00.000Z"),
         cycle: 2,
@@ -3169,8 +3172,11 @@ describe("browser discovery persistence", () => {
         layoutHoleCounts: [],
         layoutHolesVerifiedAt: null,
         supportIncident: {
+          id: fence.incidentId,
           kind: "NEEDS_ADAPTER",
           failureClass: "MISSING_SOURCE",
+          status: "AUTO_INVESTIGATING",
+          activeBatchId: fence.batchId,
           occurrenceCount: 2,
           lastSeenAt: new Date(),
           cycle: fence.cycle,
@@ -3255,12 +3261,15 @@ describe("browser discovery persistence", () => {
         layoutHoleCounts: [],
         layoutHolesVerifiedAt: null,
         supportIncident: {
+          id: fence.incidentId,
           kind: "NEEDS_ADAPTER",
           failureClass: "MISSING_SOURCE",
+          status: "AUTO_INVESTIGATING",
+          activeBatchId: fence.batchId,
           occurrenceCount: 2,
           lastSeenAt: new Date(),
           cycle: 2,
-          attemptLedger: browserReadyAttemptLedger()
+          attemptLedger: browserReadyAttemptLedger(2)
         },
         probes: [],
         preferences: []
@@ -3280,12 +3289,15 @@ describe("browser discovery persistence", () => {
         browserVerificationRequired: true
       }
     } as never);
+    mockedPrisma.courseSupportBatch.findFirst.mockResolvedValue({
+      id: fence.batchId
+    } as never);
 
     const targets = await listBrowserProbeTargets(1, undefined, "course-source", fence);
 
     expect(targets[0]?.probeUrl).toBe("https://current-course.example/");
     expect(targets[0]).not.toHaveProperty("unprojectedSourceCandidate");
     expect(mockedPrisma.courseMonitoringEvent.findFirst).not.toHaveBeenCalled();
-    expect(mockedPrisma.courseSupportBatch.findFirst).not.toHaveBeenCalled();
+    expect(mockedPrisma.courseSupportBatch.findFirst).toHaveBeenCalledOnce();
   });
 });

@@ -621,8 +621,11 @@ async function listExactIncidentBrowserProbeTarget(input: {
     include: {
       supportIncident: {
         select: {
+          id: true,
           kind: true,
           failureClass: true,
+          status: true,
+          activeBatchId: true,
           occurrenceCount: true,
           lastSeenAt: true,
           cycle: true,
@@ -661,9 +664,33 @@ async function listExactIncidentBrowserProbeTarget(input: {
       })
     : undefined;
   const probeCourse = course ? { ...course, monitoringFailureEvidence } : null;
+  const nextPlaybookStage = course?.supportIncident
+    ? assessAutomationPlaybook(course.supportIncident.attemptLedger, course.supportIncident.cycle)
+        .nextStage
+    : null;
+  const currentOwnedIncidentFence = input.persistenceFence
+    ? isCurrentOwnedBrowserProbeIncidentFence({
+        courseId: course?.id,
+        incident: course?.supportIncident,
+        nextPlaybookStage,
+        fence: input.persistenceFence
+      })
+    : false;
+  const currentOwnedFence =
+    currentOwnedIncidentFence && input.persistenceFence
+      ? await hasCurrentOwnedBrowserProbeBatchFence(input.persistenceFence)
+      : false;
+  if (input.persistenceFence && !currentOwnedFence) {
+    return [];
+  }
   const hasCurrentTechnicalAccessFailure = Boolean(
     course?.supportIncident?.kind === "FETCH_FAILED" &&
     ["AUTH", "CHALLENGE"].includes(course.supportIncident.failureClass ?? "")
+  );
+  const hasOwnedBlockedToolingAccessFailure = Boolean(
+    currentOwnedFence &&
+      course?.supportIncident?.kind === "BLOCKED_TOOLING" &&
+      ["AUTH", "CHALLENGE"].includes(course.supportIncident.failureClass ?? "")
   );
   const hasCurrentUnsupportedCoverageFailure = Boolean(
     course?.supportIncident?.kind === "NEEDS_ADAPTER" &&
@@ -681,10 +708,6 @@ async function listExactIncidentBrowserProbeTarget(input: {
       ? await getOwnedCourseSupportSourceSearchCandidate(input.persistenceFence)
       : null;
   const probeUrl = currentCourseProbeUrl ?? ownedSourceCandidate;
-  const nextPlaybookStage = course?.supportIncident
-    ? assessAutomationPlaybook(course.supportIncident.attemptLedger, course.supportIncident.cycle)
-        .nextStage
-    : null;
   const readerOnlyIndependentConfirmation = Boolean(
     course?.monitoringMode === "LOCAL_READER_ONLY" &&
     nextPlaybookStage === "INDEPENDENT_CONFIRMATION"
@@ -696,6 +719,7 @@ async function listExactIncidentBrowserProbeTarget(input: {
     (course.monitoringMode === "LOCAL_READER_ONLY" && !readerOnlyIndependentConfirmation) ||
     (!shouldQueueBrowserProbe(probeCourse) &&
       !hasCurrentTechnicalAccessFailure &&
+      !hasOwnedBlockedToolingAccessFailure &&
       !hasCurrentUnsupportedCoverageFailure &&
       !readerOnlyIndependentConfirmation)
   ) {
@@ -739,6 +763,59 @@ async function listExactIncidentBrowserProbeTarget(input: {
         : {})
     }
   ];
+}
+
+function isCurrentOwnedBrowserProbeIncidentFence(input: {
+  courseId?: string;
+  incident?: {
+    id: string;
+    cycle: number;
+    status: string;
+    activeBatchId: string | null;
+  } | null;
+  nextPlaybookStage: ReturnType<typeof assessAutomationPlaybook>["nextStage"];
+  fence: CourseSupportBrowserPersistenceFence;
+}) {
+  return Boolean(
+    input.courseId === input.fence.courseId &&
+      input.incident?.id === input.fence.incidentId &&
+      input.incident.cycle === input.fence.cycle &&
+      input.incident.status === "AUTO_INVESTIGATING" &&
+      input.incident.activeBatchId === input.fence.batchId &&
+      input.nextPlaybookStage === input.fence.stage
+  );
+}
+
+async function hasCurrentOwnedBrowserProbeBatchFence(
+  fence: CourseSupportBrowserPersistenceFence
+) {
+  if (
+    fence.runtimeVersion !== fence.releaseSha ||
+    !Number.isFinite(fence.deployedAt.getTime())
+  ) {
+    return false;
+  }
+  const batch = await prisma.courseSupportBatch.findFirst({
+    where: {
+      id: fence.batchId,
+      leaseToken: fence.leaseToken,
+      ownerThreadId: fence.ownerThreadId,
+      status: { in: ["CLAIMED", "IMPLEMENTING", "VERIFYING"] },
+      leaseExpiresAt: { gt: new Date() },
+      releaseSha: fence.releaseSha,
+      deployedAt: fence.deployedAt,
+      incidents: {
+        some: {
+          incidentId: fence.incidentId,
+          courseId: fence.courseId,
+          cycle: fence.cycle,
+          result: "PENDING"
+        }
+      }
+    },
+    select: { id: true }
+  });
+  return Boolean(batch);
 }
 
 async function getOwnedCourseSupportSourceSearchCandidate(

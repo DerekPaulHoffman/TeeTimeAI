@@ -30,6 +30,11 @@ import {
   type AutomationPlaybookEventInput
 } from "./course-monitoring-playbook";
 import {
+  persistOwnedCourseSupportBrowserPlaybookStages,
+  type CourseSupportBrowserPersistenceFence,
+  type CourseSupportBrowserStageBatch
+} from "./course-support-browser-stages";
+import {
   buildHourlyImprovementRunProvenance,
   buildImprovementCheckpoints,
   type HourlyImprovementRunRecord
@@ -71,6 +76,9 @@ vi.mock("@/lib/prisma", () => ({
       findUnique: vi.fn(),
       updateMany: vi.fn()
     },
+    courseSupportBatch: {
+      findFirst: vi.fn()
+    },
     courseMonitoringStatus: {
       create: vi.fn(),
       findUnique: vi.fn(),
@@ -78,6 +86,7 @@ vi.mock("@/lib/prisma", () => ({
     },
     courseMonitoringEvent: {
       create: vi.fn(),
+      findFirst: vi.fn(),
       findUnique: vi.fn()
     },
     $queryRaw: vi.fn(),
@@ -92,6 +101,25 @@ import { prisma } from "@/lib/prisma";
 const mockedPrisma = vi.mocked(prisma, { deep: true });
 
 const browserRuntimeVersion = "a".repeat(40);
+const browserDeployedAt = new Date("2026-07-21T12:00:00.000Z");
+
+function ownedBrowserPersistenceFence(
+  overrides: Partial<CourseSupportBrowserPersistenceFence> = {}
+): CourseSupportBrowserPersistenceFence {
+  return {
+    batchId: "batch-browser",
+    leaseToken: "lease-browser",
+    ownerThreadId: "owner-browser",
+    releaseSha: browserRuntimeVersion,
+    deployedAt: browserDeployedAt,
+    runtimeVersion: browserRuntimeVersion,
+    incidentId: "incident-blocked-tooling",
+    courseId: "course-blocked-tooling",
+    cycle: 1,
+    stage: "RENDERED_BROWSER_DISCOVERY",
+    ...overrides
+  };
+}
 
 function browserPlaybookLedger(includeTerminalReader: boolean) {
   const events: AutomationPlaybookEventInput[] = [
@@ -205,9 +233,57 @@ function localReaderOnlyBrowserProbeCourse(attemptLedger: unknown) {
   };
 }
 
+function blockedToolingBrowserProbeCourse(
+  failureClass: "AUTH" | "CHALLENGE",
+  overrides: Record<string, unknown> = {}
+) {
+  return {
+    id: "course-blocked-tooling",
+    name: "Blocked Tooling Course",
+    googlePlaceId: "place-blocked-tooling",
+    address: "1 Public Course Way",
+    city: "Testville",
+    stateCode: "MA",
+    website: "https://course.example/tee-times",
+    detectedBookingUrl: "https://course.example/tee-times",
+    detectedPlatform: "UNKNOWN",
+    providerFamilyKey: "UNKNOWN",
+    automationEligibility: "BLOCKED",
+    automationReason:
+      failureClass === "AUTH" ? "ACCOUNT_REQUIRED" : "CAPTCHA_OR_QUEUE",
+    bookingMethod: "PUBLIC_ONLINE",
+    monitoringMode: "BROWSER_ONLY",
+    isPublic: true,
+    intelligenceVerifiedAt: null,
+    intelligenceReviewAt: null,
+    intelligenceConfidence: null,
+    bookingMetadata: null,
+    layoutHoleCounts: [],
+    layoutHolesVerifiedAt: null,
+    supportIncident: {
+      id: "incident-blocked-tooling",
+      kind: "BLOCKED_TOOLING",
+      failureClass,
+      status: "AUTO_INVESTIGATING",
+      activeBatchId: "batch-browser",
+      occurrenceCount: 1,
+      lastSeenAt: new Date("2026-07-21T12:00:00.000Z"),
+      cycle: 1,
+      confirmedAt: new Date("2026-07-21T11:00:00.000Z"),
+      attemptLedger: browserPlaybookLedger(false)
+    },
+    probes: [],
+    preferences: [],
+    ...overrides
+  };
+}
+
 describe("automation query payloads", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockedPrisma.courseSupportBatch.findFirst.mockResolvedValue({
+      id: "current-owned-batch"
+    } as never);
   });
 
   it("selects an exact reader-only course for independent browser confirmation", async () => {
@@ -238,6 +314,287 @@ describe("automation query payloads", () => {
     await expect(
       listBrowserProbeTargets(1, undefined, "course-reader-only")
     ).resolves.toEqual([]);
+  });
+
+  it.each(["AUTH", "CHALLENGE"] as const)(
+    "selects an owned BLOCKED_TOOLING/%s course for its exact rendered stage",
+    async (failureClass) => {
+      mockedPrisma.course.findMany.mockResolvedValue([
+        blockedToolingBrowserProbeCourse(failureClass)
+      ] as never);
+
+      await expect(
+        listBrowserProbeTargets(
+          1,
+          undefined,
+          "course-blocked-tooling",
+          ownedBrowserPersistenceFence()
+        )
+      ).resolves.toEqual([
+        expect.objectContaining({
+          course: expect.objectContaining({ id: "course-blocked-tooling" }),
+          probeUrl: "https://course.example/tee-times"
+        })
+      ]);
+      expect(mockedPrisma.course.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          include: expect.objectContaining({
+            supportIncident: {
+              select: expect.objectContaining({
+                id: true,
+                status: true,
+                activeBatchId: true
+              })
+            }
+          })
+        })
+      );
+      expect(mockedPrisma.courseSupportBatch.findFirst).toHaveBeenCalledWith({
+        where: {
+          id: "batch-browser",
+          leaseToken: "lease-browser",
+          ownerThreadId: "owner-browser",
+          status: { in: ["CLAIMED", "IMPLEMENTING", "VERIFYING"] },
+          leaseExpiresAt: { gt: expect.any(Date) },
+          releaseSha: browserRuntimeVersion,
+          deployedAt: browserDeployedAt,
+          incidents: {
+            some: {
+              incidentId: "incident-blocked-tooling",
+              courseId: "course-blocked-tooling",
+              cycle: 1,
+              result: "PENDING"
+            }
+          }
+        },
+        select: { id: true }
+      });
+    }
+  );
+
+  it.each(["AUTH", "CHALLENGE"] as const)(
+    "keeps unowned BLOCKED_TOOLING/%s excluded from exact browser selection",
+    async (failureClass) => {
+      mockedPrisma.course.findMany.mockResolvedValue([
+        blockedToolingBrowserProbeCourse(failureClass)
+      ] as never);
+
+      await expect(
+        listBrowserProbeTargets(1, undefined, "course-blocked-tooling")
+      ).resolves.toEqual([]);
+    }
+  );
+
+  it.each([
+    ["course", { courseId: "course-other" }, {}],
+    ["incident", { incidentId: "incident-other" }, {}],
+    ["cycle", { cycle: 2 }, {}],
+    ["active batch", {}, { activeBatchId: "batch-other" }],
+    ["incident status", {}, { status: "NEEDS_HUMAN" }],
+    ["stage", { stage: "INDEPENDENT_CONFIRMATION" }, {}]
+  ] as const)(
+    "excludes an owned blocked-tooling target when the %s fence is stale",
+    async (_field, fenceOverrides, incidentOverrides) => {
+      const course = blockedToolingBrowserProbeCourse("AUTH");
+      course.supportIncident = {
+        ...course.supportIncident,
+        ...incidentOverrides
+      };
+      mockedPrisma.course.findMany.mockResolvedValue([course] as never);
+      const fence = ownedBrowserPersistenceFence(
+        fenceOverrides as Partial<CourseSupportBrowserPersistenceFence>
+      );
+
+      await expect(
+        listBrowserProbeTargets(1, undefined, fence.courseId, fence)
+      ).resolves.toEqual([]);
+    }
+  );
+
+  it.each([
+    ["lease", { leaseToken: "lease-stale" }],
+    ["owner", { ownerThreadId: "owner-stale" }],
+    [
+      "release",
+      { releaseSha: "b".repeat(40), runtimeVersion: "b".repeat(40) }
+    ],
+    ["deployment", { deployedAt: new Date("2026-07-21T12:01:00.000Z") }],
+    ["inactive status", {}],
+    ["expired lease", {}],
+    ["missing membership", {}],
+    ["completed member", {}]
+  ] as const)(
+    "excludes an owned target when current batch %s proof is absent",
+    async (_field, fenceOverrides) => {
+      mockedPrisma.course.findMany.mockResolvedValue([
+        blockedToolingBrowserProbeCourse("AUTH")
+      ] as never);
+      mockedPrisma.courseSupportBatch.findFirst.mockResolvedValue(null);
+      const fence = ownedBrowserPersistenceFence(
+        fenceOverrides as Partial<CourseSupportBrowserPersistenceFence>
+      );
+
+      await expect(
+        listBrowserProbeTargets(1, undefined, fence.courseId, fence)
+      ).resolves.toEqual([]);
+      expect(mockedPrisma.courseSupportBatch.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            id: fence.batchId,
+            leaseToken: fence.leaseToken,
+            ownerThreadId: fence.ownerThreadId,
+            leaseExpiresAt: { gt: expect.any(Date) },
+            releaseSha: fence.releaseSha,
+            deployedAt: fence.deployedAt,
+            incidents: {
+              some: expect.objectContaining({
+                incidentId: fence.incidentId,
+                courseId: fence.courseId,
+                cycle: fence.cycle,
+                result: "PENDING"
+              })
+            }
+          })
+        })
+      );
+    }
+  );
+
+  it("rejects a persistence fence whose runtime differs from its release", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([
+      blockedToolingBrowserProbeCourse("AUTH")
+    ] as never);
+    const fence = ownedBrowserPersistenceFence({
+      runtimeVersion: "b".repeat(40)
+    });
+
+    await expect(
+      listBrowserProbeTargets(1, undefined, fence.courseId, fence)
+    ).resolves.toEqual([]);
+    expect(mockedPrisma.courseSupportBatch.findFirst).not.toHaveBeenCalled();
+  });
+
+  it("keeps LOCAL_READER_ONLY rendered discovery excluded under a current fence", async () => {
+    const course = localReaderOnlyBrowserProbeCourse(
+      browserPlaybookLedger(false)
+    );
+    course.supportIncident = {
+      ...course.supportIncident,
+      id: "incident-reader-only",
+      status: "AUTO_INVESTIGATING",
+      activeBatchId: "batch-browser"
+    } as typeof course.supportIncident;
+    mockedPrisma.course.findMany.mockResolvedValue([course] as never);
+    const fence = ownedBrowserPersistenceFence({
+      courseId: course.id,
+      incidentId: "incident-reader-only"
+    });
+
+    await expect(
+      listBrowserProbeTargets(1, undefined, course.id, fence)
+    ).resolves.toEqual([]);
+  });
+
+  it.each([
+    [null, null],
+    ["http://127.0.0.1/private", "http://127.0.0.1/private"]
+  ])(
+    "rejects an owned blocked-tooling target without a safe public probe URL",
+    async (website, detectedBookingUrl) => {
+      mockedPrisma.course.findMany.mockResolvedValue([
+        blockedToolingBrowserProbeCourse("AUTH", {
+          website,
+          detectedBookingUrl
+        })
+      ] as never);
+      mockedPrisma.courseMonitoringEvent.findFirst.mockResolvedValue(null);
+
+      await expect(
+        listBrowserProbeTargets(
+          1,
+          undefined,
+          "course-blocked-tooling",
+          ownedBrowserPersistenceFence()
+        )
+      ).resolves.toEqual([]);
+    }
+  );
+
+  it("runs every exact target when blocked-tooling AUTH entries precede fetch-failed AUTH", async () => {
+    const courseRows = Array.from({ length: 3 }, (_, index) => {
+      const blocked = blockedToolingBrowserProbeCourse("AUTH");
+      return {
+        ...blocked,
+        id: `mixed-course-${index + 1}`,
+        supportIncident: {
+          ...blocked.supportIncident,
+          id: `mixed-incident-${index + 1}`,
+          activeBatchId: "batch-1",
+          ...(index === 2 ? { kind: "FETCH_FAILED" } : {})
+        }
+      };
+    });
+    mockedPrisma.course.findMany.mockImplementation(async (query) => {
+      const requestedId = query.where?.id;
+      return courseRows.filter((course) => course.id === requestedId) as never;
+    });
+    const batch: CourseSupportBrowserStageBatch = {
+      releaseSha: browserRuntimeVersion,
+      deployedAt: browserDeployedAt,
+      incidents: courseRows.map((course) => ({
+        courseId: course.id,
+        cycle: 1,
+        incident: {
+          id: course.supportIncident.id,
+          cycle: 1,
+          status: "AUTO_INVESTIGATING",
+          activeBatchId: "batch-1",
+          attemptLedger: course.supportIncident.attemptLedger
+        }
+      }))
+    };
+    const runBrowserProbe = vi.fn(
+      async (input: {
+        courseId: string;
+        persistenceFence: CourseSupportBrowserPersistenceFence;
+      }) => {
+        const targets = await listBrowserProbeTargets(
+          1,
+          undefined,
+          input.courseId,
+          input.persistenceFence
+        );
+        expect(targets).toHaveLength(1);
+        return { persistedCount: 1 };
+      }
+    );
+
+    await expect(
+      persistOwnedCourseSupportBrowserPlaybookStages(
+        {
+          batchId: "batch-1",
+          leaseToken: "lease-1",
+          ownerThreadId: "thread-1",
+          requestedReleaseSha: browserRuntimeVersion,
+          requestedDeployedAt: browserDeployedAt,
+          now: new Date("2026-07-21T12:05:00.000Z")
+        },
+        {
+          loadBatch: vi.fn().mockResolvedValue(batch),
+          runBrowserProbe
+        }
+      )
+    ).resolves.toMatchObject({
+      eligibleCount: 3,
+      persistedCount: 3,
+      renderedDiscoveryCount: 3
+    });
+    expect(runBrowserProbe).toHaveBeenCalledTimes(3);
+    expect(runBrowserProbe.mock.calls.map(([input]) => input.courseId)).toEqual([
+      "mixed-course-1",
+      "mixed-course-2",
+      "mixed-course-3"
+    ]);
   });
 
   it("loads an active check without historical matches or unused user fields", async () => {
