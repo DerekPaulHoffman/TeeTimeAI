@@ -7106,7 +7106,10 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
               failureClass: request.failureClass,
               evidence:
                 request.evidence === null
-                  ? { equals: Prisma.DbNull }
+                  // Prisma reads both database NULL (new requests) and JSON
+                  // null (claimed/reset requests) as JavaScript null. Both
+                  // mean no material evidence in the campaign digest.
+                  ? { equals: Prisma.AnyNull }
                   : { equals: request.evidence as Prisma.InputJsonValue },
               lastError: request.lastError,
             },

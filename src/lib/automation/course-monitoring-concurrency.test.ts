@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { Prisma } from "@prisma/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const transactionMocks = vi.hoisted(() => ({
@@ -937,6 +938,7 @@ describe("course monitoring write serialization", () => {
           id: "request-partial",
           workflowRunId: "workflow-partial",
           startedAt: new Date("2026-08-20T12:20:00.000Z"),
+          evidence: { equals: { providerExecution: true } },
         }),
       }),
     );
@@ -1004,6 +1006,65 @@ describe("course monitoring write serialization", () => {
       transactionMocks.courseSupportIncident.updateMany,
     ).not.toHaveBeenCalled();
 
+    batchIncidents[0]!.verificationRequests[0]!.evidence = null;
+    const nullEvidenceHistory =
+      assessParkedCourseCampaignSameCycleRecoveryHistory({
+        courseId: "course-1",
+        cycle: 4,
+        entries: batchIncidents,
+        requireOrchestrationOnly: false,
+      });
+    expect(nullEvidenceHistory).not.toBeNull();
+    transactionMocks.courseSupportIncident.findUnique.mockResolvedValue(
+      baseIncident,
+    );
+    transactionMocks.courseSupportVerificationRequest.updateMany.mockResolvedValueOnce(
+      { count: 1 },
+    );
+    await expect(
+      reopenParkedCourseForResponderCampaignInTransaction(
+        transactionMocks as never,
+        {
+          ...input,
+          expectedSameCycleRecoveryHistoryDigest:
+            nullEvidenceHistory!.historyDigest,
+        },
+      ),
+    ).resolves.toMatchObject({ admitted: true, cycle: 4 });
+    expect(
+      transactionMocks.courseSupportVerificationRequest.updateMany,
+    ).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "request-partial",
+          // Prisma returns both database NULL and JSON null as JavaScript
+          // null, so the semantic null fence must admit either representation.
+          evidence: { equals: Prisma.AnyNull },
+        }),
+      }),
+    );
+
+    transactionMocks.courseSupportIncident.updateMany.mockClear();
+    transactionMocks.courseSupportVerificationRequest.updateMany.mockResolvedValueOnce(
+      { count: 0 },
+    );
+    await expect(
+      reopenParkedCourseForResponderCampaignInTransaction(
+        transactionMocks as never,
+        {
+          ...input,
+          expectedSameCycleRecoveryHistoryDigest:
+            nullEvidenceHistory!.historyDigest,
+        },
+      ),
+    ).resolves.toEqual({ admitted: false });
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).not.toHaveBeenCalled();
+
+    batchIncidents[0]!.verificationRequests[0]!.evidence = {
+      providerExecution: true,
+    };
     transactionMocks.courseSupportIncident.findUnique.mockResolvedValue(
       baseIncident,
     );

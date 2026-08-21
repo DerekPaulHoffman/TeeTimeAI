@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const prismaMocks = vi.hoisted(() => ({
@@ -456,6 +457,7 @@ describe("course-support verification scheduling", () => {
     expect(create.data[0]).not.toHaveProperty("website");
     expect(create.data[0]).not.toHaveProperty("detectedBookingUrl");
     expect(create.data[0]).not.toHaveProperty("bookingMetadata");
+    expect(create.data[0]).not.toHaveProperty("evidence");
     expect(create.data[0]).not.toHaveProperty("teeSearchId");
     expect(create.data[0]).not.toHaveProperty("recipient");
     expect(prismaMocks.activeSearchCount).toHaveBeenCalledWith({
@@ -1456,6 +1458,7 @@ describe("course-support verification execution fencing", () => {
           runtimeVersion: releaseSha,
           revision: { increment: 1 },
           attemptCount: { increment: 1 },
+          evidence: Prisma.JsonNull,
         }),
       }),
     );
