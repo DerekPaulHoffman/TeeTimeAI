@@ -14,6 +14,7 @@ export type CourseSupportBrowserStageTarget = {
 export type CourseSupportBrowserStageEntry = {
   courseId: string;
   cycle: number;
+  result: string;
   incident: {
     id: string;
     cycle: number;
@@ -119,7 +120,7 @@ export async function runCourseSupportBrowserPersistenceWrite<T>(input: {
           incidentId: fence.incidentId,
         },
       },
-      select: { courseId: true, cycle: true },
+      select: { courseId: true, cycle: true, result: true },
     }),
     transaction.courseSupportIncident.findUnique({
       where: { id: fence.incidentId },
@@ -130,6 +131,7 @@ export async function runCourseSupportBrowserPersistenceWrite<T>(input: {
     !membership ||
     membership.courseId !== fence.courseId ||
     membership.cycle !== fence.cycle ||
+    membership.result !== "PENDING" ||
     !incident ||
     incident.cycle !== fence.cycle ||
     assessAutomationPlaybook(incident.attemptLedger, incident.cycle)
@@ -162,6 +164,7 @@ export function selectOwnedCourseSupportBrowserStageTargets(input: {
 }): CourseSupportBrowserStageTarget[] {
   return input.entries.flatMap((entry, index) => {
     if (
+      entry.result !== "PENDING" ||
       entry.incident.status !== "AUTO_INVESTIGATING" ||
       entry.incident.activeBatchId !== input.batchId ||
       entry.incident.cycle !== entry.cycle
@@ -257,6 +260,7 @@ export async function persistOwnedCourseSupportBrowserPlaybookStages(
         (entry) =>
           entry.courseId === target.courseId &&
           entry.incident.id === initialEntry.incident.id &&
+          entry.result === "PENDING" &&
           entry.incident.status === "AUTO_INVESTIGATING" &&
           entry.incident.activeBatchId === input.batchId &&
           entry.incident.cycle === entry.cycle,
@@ -408,6 +412,7 @@ async function loadOwnedCourseSupportBrowserStageBatch(input: {
         select: {
           courseId: true,
           cycle: true,
+          result: true,
           incident: {
             select: {
               id: true,

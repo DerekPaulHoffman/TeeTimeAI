@@ -90,6 +90,18 @@ export type BrowserProbeOptions = ReturnType<typeof parseOptions> & {
   mode?: BrowserInvestigationMode;
 };
 
+export async function recordOwnedBrowserStageAfterCourseProjection<T>(input: {
+  courseProjectionApplied: boolean;
+  currentCourseRunnable: boolean;
+  recordTransition: () => Promise<T>;
+}) {
+  return {
+    newerRunnableCourseProjectionPreserved:
+      !input.courseProjectionApplied && input.currentCourseRunnable,
+    playbookResult: await input.recordTransition(),
+  };
+}
+
 export async function runBrowserProbe(options: BrowserProbeOptions) {
   if (
     !options.dryRun &&
@@ -331,6 +343,7 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
               runtimeVersion,
             ),
           );
+          let currentCourseRunnable = false;
           if (!appliedCourse) {
             const currentCourse = await prisma.course.findUnique({
               where: { id: target.course.id },
@@ -342,15 +355,10 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
                 bookingMetadata: true,
               },
             });
-            if (
+            currentCourseRunnable = Boolean(
               currentCourse &&
-              resolveProviderCapability(currentCourse).isRunnable
-            ) {
-              notes.push(
-                `${target.course.name}: stale browser result ignored because newer runnable provider evidence is already persisted.`,
-              );
-              continue;
-            }
+              resolveProviderCapability(currentCourse).isRunnable,
+            );
           }
           const directBookingObserved = Boolean(
             appliedCourse &&
@@ -367,33 +375,43 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
             : null;
           const browserPlaybookRuntime = playbookRuntime;
           const playbookStage = browserPlaybookRuntime?.assessment.nextStage;
-          const playbookResult =
-            browserPlaybookRuntime &&
-            (playbookStage === "RENDERED_BROWSER_DISCOVERY" ||
-              playbookStage === "INDEPENDENT_CONFIRMATION")
-              ? await persistBrowserMutation(true, () =>
-                  recordRuntimePlaybookTransition(
-                    browserPlaybookRuntime,
-                    {
-                      stage: playbookStage,
-                      readPath:
-                        playbookStage === "RENDERED_BROWSER_DISCOVERY"
-                          ? "RENDERED_BROWSER"
-                          : "INDEPENDENT_CONFIRMATION",
-                      runtimeVersion,
-                      source: "COURSE_SUPPORT_RESPONDER",
-                      ...buildBrowserPlaybookTransition({
-                        stage: playbookStage,
-                        technicalReason: browserTechnicalReason,
-                        localReaderTechnicalReason:
-                          browserPlaybookRuntime.localReaderTechnicalReason,
-                        factualDisposition: browserFactualDisposition,
-                      }),
-                    },
-                    options.persistenceFence,
-                  ),
-                )
-              : null;
+          const { newerRunnableCourseProjectionPreserved, playbookResult } =
+            await recordOwnedBrowserStageAfterCourseProjection({
+              courseProjectionApplied: Boolean(appliedCourse),
+              currentCourseRunnable,
+              recordTransition: () =>
+                browserPlaybookRuntime &&
+                (playbookStage === "RENDERED_BROWSER_DISCOVERY" ||
+                  playbookStage === "INDEPENDENT_CONFIRMATION")
+                  ? persistBrowserMutation(true, () =>
+                      recordRuntimePlaybookTransition(
+                        browserPlaybookRuntime,
+                        {
+                          stage: playbookStage,
+                          readPath:
+                            playbookStage === "RENDERED_BROWSER_DISCOVERY"
+                              ? "RENDERED_BROWSER"
+                              : "INDEPENDENT_CONFIRMATION",
+                          runtimeVersion,
+                          source: "COURSE_SUPPORT_RESPONDER",
+                          ...buildBrowserPlaybookTransition({
+                            stage: playbookStage,
+                            technicalReason: browserTechnicalReason,
+                            localReaderTechnicalReason:
+                              browserPlaybookRuntime.localReaderTechnicalReason,
+                            factualDisposition: browserFactualDisposition,
+                          }),
+                        },
+                        options.persistenceFence,
+                      ),
+                    )
+                  : Promise.resolve(null),
+            });
+          if (newerRunnableCourseProjectionPreserved) {
+            notes.push(
+              `${target.course.name}: newer runnable provider evidence kept as the course projection; current owned browser evidence was retained.`,
+            );
+          }
           if (playbookResult?.recorded) {
             persistedCount += 1;
           }

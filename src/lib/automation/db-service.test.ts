@@ -544,6 +544,7 @@ describe("automation query payloads", () => {
       incidents: courseRows.map((course) => ({
         courseId: course.id,
         cycle: 1,
+        result: "PENDING",
         incident: {
           id: course.supportIncident.id,
           cycle: 1,

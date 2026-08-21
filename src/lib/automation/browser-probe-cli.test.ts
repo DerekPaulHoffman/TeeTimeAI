@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   getFreshRenderedCorroborationEvidence,
+  recordOwnedBrowserStageAfterCourseProjection,
   resolveBrowserInvestigationMode,
   resolveBrowserProbeRuntimeVersion,
   resolveBrowserProbeTargetSelection,
@@ -107,6 +108,23 @@ describe("browser probe direct entry", () => {
       courseId: "course-1",
       persistenceFence,
     });
+  });
+
+  it("records the owned browser attempt while preserving a newer runnable course projection", async () => {
+    const recordTransition = vi.fn().mockResolvedValue({ recorded: true });
+
+    await expect(
+      recordOwnedBrowserStageAfterCourseProjection({
+        courseProjectionApplied: false,
+        currentCourseRunnable: true,
+        recordTransition,
+      }),
+    ).resolves.toEqual({
+      newerRunnableCourseProjectionPreserved: true,
+      playbookResult: { recorded: true },
+    });
+
+    expect(recordTransition).toHaveBeenCalledOnce();
   });
 
   it("accepts corroboration only from a fresh rendered observation in the same cycle and runtime", () => {
