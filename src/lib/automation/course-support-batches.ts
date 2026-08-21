@@ -9342,9 +9342,122 @@ export async function recoverCourseSupportBatch(input: {
           );
           const persistedFence = persistedSafeRequeueSearchExecutionFence;
           if (!persistedFence) {
-            throw new Error(
-              "Search execution changed during safe responder requeue.",
+            const summaryHasSearchExecutionFence =
+              Object.prototype.hasOwnProperty.call(
+                asJsonObject(batch.summary),
+                "searchExecutionFence",
+              );
+            const exactLegacyPreverificationShape = Boolean(
+              !summaryHasSearchExecutionFence &&
+                batch.releaseSha === null &&
+                batch.deployedAt === null &&
+                batch.recheckDispatchKey === null &&
+                batch.recheckDispatchStartedAt === null &&
+                batch.recheckDispatchedAt === null &&
+                terminalIncidents.length === 0 &&
+                retryIncidents.length > 0 &&
+                safeRequeueOrchestrationOnlyEntryIds.size ===
+                  retryIncidents.length &&
+                retryIncidents.every(
+                  (entry) =>
+                    entry.result === "PENDING" &&
+                    entry.proofSnapshot === null &&
+                    (entry.verificationRequests ?? []).length === 0,
+                ),
             );
+            const emptyLegacyFence =
+              persistCourseSupportSearchExecutionFence(
+                buildCourseSupportSearchExecutionFenceSnapshot({
+                  courseIds: retryIncidents.map((entry) => entry.courseId),
+                  expectedSearches: [],
+                  recheckDispatchKey: null,
+                  recheckDispatchStartedAt: null,
+                  recheckDispatchedAt: null,
+                  now,
+                  dispatches: [],
+                }),
+                now,
+              );
+            if (
+              !exactLegacyPreverificationShape ||
+              !courseSupportSearchExecutionFenceMatches(
+                emptyLegacyFence,
+                currentFence,
+              )
+            ) {
+              throw new Error(
+                "Search execution changed during safe responder requeue.",
+              );
+            }
+            const adoptedLegacyFence =
+              await runCourseSupportSerializableTransactionWithRetry(
+                async (tx) => {
+                  await lockCourseSupportSearchExecutionFenceRows(
+                    tx,
+                    fenceInput,
+                  );
+                  const lockedFence =
+                    await readCourseSupportSearchExecutionFence(tx, fenceInput);
+                  if (
+                    !courseSupportSearchExecutionFenceMatches(
+                      emptyLegacyFence,
+                      lockedFence,
+                    )
+                  ) {
+                    throw new Error(
+                      "Search execution changed during safe responder requeue.",
+                    );
+                  }
+                  const lateVerificationRequest =
+                    await tx.courseSupportVerificationRequest.findFirst({
+                      where: { batchIncident: { batchId: batch.id } },
+                      select: { id: true },
+                    });
+                  if (lateVerificationRequest) {
+                    throw new Error(
+                      "Detached verification execution changed during safe responder requeue.",
+                    );
+                  }
+                  return tx.courseSupportBatch.updateMany({
+                    where: {
+                      id: batch.id,
+                      status: batch.status,
+                      revision: batch.revision,
+                      leaseExpiresAt: { lte: now },
+                      releaseSha: batch.releaseSha,
+                      deployedAt: batch.deployedAt,
+                      recheckDispatchKey: null,
+                      recheckDispatchStartedAt: null,
+                      recheckDispatchedAt: null,
+                      completedAt: null,
+                    },
+                    data: {
+                      summary: {
+                        ...asJsonObject(batch.summary),
+                        searchExecutionFence: emptyLegacyFence,
+                      } as Prisma.InputJsonValue,
+                      revision: { increment: 1 },
+                    },
+                  });
+                },
+              );
+            if (adoptedLegacyFence.count !== 1) {
+              throw new Error(
+                "Expired responder ownership changed during fence adoption.",
+              );
+            }
+            return {
+              outcome: "recovery_required" as const,
+              recovered: false,
+              safelyRequeued: false,
+              durableCloseoutRecorded: false,
+              reasons: [
+                "Legacy responder search execution was proven empty; run recovery again against the retained fence.",
+              ],
+              threadDisposition: "KEEP_VISIBLE" as const,
+              archiveReason:
+                "Responder recovery needs one exact fence pass before closeout.",
+            };
           }
           const fenceMatches = Boolean(
             courseSupportSearchExecutionFenceMatches(

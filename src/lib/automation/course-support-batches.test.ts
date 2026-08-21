@@ -5831,6 +5831,164 @@ describe("course-support recovery", () => {
     );
   });
 
+  it("adopts a proven empty legacy execution fence before safe requeue", async () => {
+    const courseRef = createHash("sha256")
+      .update("course-1")
+      .digest("hex")
+      .slice(0, 24);
+    const approach = {
+      workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+      strategyAction: "REPAIR_PROVIDER_ADAPTER",
+      playbookStage: "OFFICIAL_IDENTITY",
+    };
+    const expiredBatch = {
+      ...expiredRecoveryBatch(["AUTO_INVESTIGATING"]),
+      status: "CLAIMED",
+      ownerAutomationRunId: "run-legacy-empty-fence",
+      providerFamilyKey: "CHRONOGOLF",
+      failureFingerprint: "v1:UNSUPPORTED_FAMILY:NEEDS_ADAPTER",
+      releaseSha: null,
+      deployedAt: null,
+      summary: {
+        branch: "automation/course-support-old",
+        plannedPaths: [],
+        remediation: {
+          attempts: [
+            {
+              courseRef,
+              providerSnapshotFingerprint: "b".repeat(64),
+              approach,
+            },
+          ],
+        },
+      },
+    };
+    expiredBatch.incidents[0].result = "PENDING";
+    Object.assign(expiredBatch.incidents[0].incident, {
+      failureFingerprint: expiredBatch.failureFingerprint,
+      activeRealSearchCount: 0,
+      attemptLedger: null,
+      batchIncidents: [],
+    });
+    prismaMocks.batchFindUnique.mockResolvedValue(expiredBatch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      recoverCourseSupportBatch({
+        batchId: expiredBatch.id,
+        requestingThreadId: "new-thread",
+        currentBranch: "fix/unrelated-head",
+        currentHeadSha: "b".repeat(40),
+        dirtyPaths: [],
+        releaseIsPublished: false,
+        baseIsAncestor: false,
+        now,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "recovery_required",
+      safelyRequeued: false,
+      durableCloseoutRecorded: false,
+    });
+
+    const adoptedSummary =
+      prismaMocks.batchUpdateMany.mock.calls[0]?.[0]?.data?.summary;
+    expect(adoptedSummary).toEqual({
+      ...expiredBatch.summary,
+      searchExecutionFence: emptySearchExecutionFenceForCourses([
+        "course-1",
+      ]),
+    });
+    expect(prismaMocks.incidentUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.verificationRequestUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.automationRunUpdateMany).not.toHaveBeenCalled();
+
+    prismaMocks.batchFindUnique.mockResolvedValue({
+      ...expiredBatch,
+      revision: expiredBatch.revision + 1,
+      summary: adoptedSummary,
+    });
+    prismaMocks.batchUpdateMany.mockClear().mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      recoverCourseSupportBatch({
+        batchId: expiredBatch.id,
+        requestingThreadId: "new-thread",
+        currentBranch: "fix/unrelated-head",
+        currentHeadSha: "b".repeat(40),
+        dirtyPaths: [],
+        releaseIsPublished: false,
+        baseIsAncestor: false,
+        now,
+      }),
+    ).resolves.toMatchObject({
+      safelyRequeued: true,
+      durableCloseoutRecorded: true,
+    });
+    expect(prismaMocks.incidentUpdateMany).toHaveBeenCalledTimes(1);
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not overwrite a malformed legacy execution fence during recovery", async () => {
+    const courseRef = createHash("sha256")
+      .update("course-1")
+      .digest("hex")
+      .slice(0, 24);
+    const expiredBatch = {
+      ...expiredRecoveryBatch(["AUTO_INVESTIGATING"]),
+      status: "CLAIMED",
+      ownerAutomationRunId: null,
+      providerFamilyKey: "CHRONOGOLF",
+      failureFingerprint: "v1:UNSUPPORTED_FAMILY:NEEDS_ADAPTER",
+      releaseSha: null,
+      deployedAt: null,
+      summary: {
+        branch: "automation/course-support-old",
+        plannedPaths: [],
+        searchExecutionFence: { schemaVersion: 2, settled: true },
+        remediation: {
+          attempts: [
+            {
+              courseRef,
+              providerSnapshotFingerprint: "b".repeat(64),
+              approach: {
+                workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+                strategyAction: "REPAIR_PROVIDER_ADAPTER",
+                playbookStage: "OFFICIAL_IDENTITY",
+              },
+            },
+          ],
+        },
+      },
+    };
+    expiredBatch.incidents[0].result = "PENDING";
+    Object.assign(expiredBatch.incidents[0].incident, {
+      failureFingerprint: expiredBatch.failureFingerprint,
+      activeRealSearchCount: 0,
+      attemptLedger: null,
+      batchIncidents: [],
+    });
+    prismaMocks.batchFindUnique.mockResolvedValue(expiredBatch);
+
+    await expect(
+      recoverCourseSupportBatch({
+        batchId: expiredBatch.id,
+        requestingThreadId: "new-thread",
+        currentBranch: "fix/unrelated-head",
+        currentHeadSha: "b".repeat(40),
+        dirtyPaths: [],
+        releaseIsPublished: false,
+        baseIsAncestor: false,
+        now,
+      }),
+    ).rejects.toThrow("Search execution changed during safe responder requeue");
+
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+  });
+
   it("does not park safe-requeue tasks that never reached provider execution", async () => {
     const courseRef = createHash("sha256")
       .update("course-1")
@@ -6035,17 +6193,19 @@ describe("course-support recovery", () => {
       batchIncidents: [],
     });
     prismaMocks.batchFindUnique.mockResolvedValue(expiredBatch);
-    prismaMocks.batchSearchFindMany.mockResolvedValue([
-      {
-        id: "late-batch-search",
-        teeSearchId: null,
-        searchRef: "e".repeat(64),
-        scheduleVersion: 1,
-        removedAt: null,
-        removalReason: null,
-        teeSearch: null,
-      },
-    ]);
+    prismaMocks.batchSearchFindMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: "late-batch-search",
+          teeSearchId: null,
+          searchRef: "e".repeat(64),
+          scheduleVersion: 1,
+          removedAt: null,
+          removalReason: null,
+          teeSearch: null,
+        },
+      ]);
 
     await expect(
       recoverCourseSupportBatch({
