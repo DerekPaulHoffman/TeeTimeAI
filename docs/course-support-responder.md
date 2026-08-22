@@ -222,7 +222,7 @@ Operational acceptance additionally requires all of these aggregate metrics:
 - Human-review endpoints are at most 5% of all automatic-plus-human endpoints across the rolling 30-day window. Ambiguous legacy endpoint provenance makes the metric `UNKNOWN`, not passing.
 - The repeat implementation count is zero for deployed implementation batches grouped by `providerFamilyKey` plus failure fingerprint after the campaign baseline. Missing release/provenance evidence makes this metric `UNKNOWN`, not passing; the responder must reuse a working family implementation instead of implementing the same fingerprint again.
 
-Campaign and operator reporting is aggregate-only: counts, digest, evidence-category totals, rates, and pass/fail/unknown states. Never expose the immutable membership, exact course names, addresses, identity query, source/booking URLs, ids, or provider payloads in an aggregate or final task report.
+Campaign and operator reporting is aggregate-only: counts, digest, evidence-category totals, rates, and pass/fail/unknown states. Never expose the immutable membership, exact course names, addresses, identity query, source/booking URLs, ids, or provider payloads in an aggregate or final task report. Claim and packet output retain the raw `providerFamilyKey` for internal routing and selected-note lookup, but reporting must use only the deterministic `providerFamilyCategory`: `SOURCE_MISSING`, `SOURCE_CONFLICT`, or `PROVIDER_SPECIFIC`. Known vendor keys and hostname-derived families both report as `PROVIDER_SPECIFIC`; never copy a literal raw family key into commentary, automation memory, inbox items, or a final report.
 
 ## Task Retention Policy
 

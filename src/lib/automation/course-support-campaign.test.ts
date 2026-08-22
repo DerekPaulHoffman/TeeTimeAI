@@ -7,6 +7,7 @@ import {
   createParkedCourseCampaignAudit,
   createParkedCourseCampaignMembershipDigest,
   deriveParkedCourseCampaignHumanReviewCycles,
+  getReportSafeProviderFamilyCategory,
   inspectActiveParkedCourseCampaign,
   loadParkedCourseCampaignAdmissionMembers,
   loadParkedCourseCampaignMembers,
@@ -3155,6 +3156,20 @@ describe("parked course campaign", () => {
       }),
     );
   });
+
+  it.each([
+    ["SOURCE_MISSING", "SOURCE_MISSING"],
+    ["SOURCE_CONFLICT", "SOURCE_CONFLICT"],
+    ["CHRONOGOLF", "PROVIDER_SPECIFIC"],
+    ["booking.course.example", "PROVIDER_SPECIFIC"],
+  ] as const)(
+    "projects provider family %j to report-safe category %s",
+    (providerFamilyKey, expected) => {
+      expect(getReportSafeProviderFamilyCategory(providerFamilyKey)).toBe(
+        expected,
+      );
+    },
+  );
 
   it("creates a deterministic immutable membership digest and rejects tampering", () => {
     const members = [member(2), member(1)];

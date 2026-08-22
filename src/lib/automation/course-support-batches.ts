@@ -63,6 +63,7 @@ import {
   runSerializedCourseMonitoringWrite
 } from "./course-monitoring";
 import {
+  getReportSafeProviderFamilyCategory,
   planNextParkedCourseCampaignCohort,
   inspectActiveParkedCourseCampaign,
   PARKED_COURSE_CAMPAIGN_PROMPT_VERSION,
@@ -4224,6 +4225,9 @@ export async function claimCourseSupportBatch(input: {
       batchRef: created.batchRef,
       leaseExpiresAt: leaseExpiresAt.toISOString(),
       providerFamilyKey: selected.providerFamilyKey,
+      providerFamilyCategory: getReportSafeProviderFamilyCategory(
+        selected.providerFamilyKey,
+      ),
       failureFingerprint: selected.failureFingerprint,
       incidentCount: selected.incidents.length,
       leverage: {
@@ -4785,6 +4789,9 @@ export async function getCourseSupportBatchPacket(input: {
     outcome: "ready" as const,
     batchRef: batch.reference,
     providerFamilyKey: batch.providerFamilyKey,
+    providerFamilyCategory: getReportSafeProviderFamilyCategory(
+      batch.providerFamilyKey,
+    ),
     failureFingerprint: batch.failureFingerprint,
     claimedAt: batch.createdAt.toISOString(),
     remediation: remediationDirective,
@@ -4812,6 +4819,9 @@ export async function getCourseSupportBatchPacket(input: {
         return {
           ordinal: String(index + 1).padStart(2, "0"),
           providerFamilyKey: entry.course.providerFamilyKey,
+          providerFamilyCategory: getReportSafeProviderFamilyCategory(
+            entry.course.providerFamilyKey,
+          ),
           detectedPlatform: entry.course.detectedPlatform,
           failureClass: entry.incident.failureClass,
           kind: entry.incident.kind,

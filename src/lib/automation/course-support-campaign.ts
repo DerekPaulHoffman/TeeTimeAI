@@ -538,14 +538,34 @@ export function createParkedCourseCampaignMembershipDigest(
     .digest("hex");
 }
 
+export type CourseSupportProviderFamilyCategory =
+  | "SOURCE_MISSING"
+  | "SOURCE_CONFLICT"
+  | "PROVIDER_SPECIFIC";
+
+export function getReportSafeProviderFamilyCategory(
+  providerFamilyKey: string,
+): CourseSupportProviderFamilyCategory {
+  if (providerFamilyKey === "SOURCE_MISSING") {
+    return "SOURCE_MISSING";
+  }
+  if (providerFamilyKey === "SOURCE_CONFLICT") {
+    return "SOURCE_CONFLICT";
+  }
+  return "PROVIDER_SPECIFIC";
+}
+
 export function summarizeCampaignEvidenceCategories(
   members: readonly ParkedCourseCampaignMember[],
 ) {
   return members.reduce(
     (counts, member) => {
-      if (member.providerFamilyKey === "SOURCE_MISSING") {
+      const providerFamilyCategory = getReportSafeProviderFamilyCategory(
+        member.providerFamilyKey,
+      );
+      if (providerFamilyCategory === "SOURCE_MISSING") {
         counts.sourceMissingCount += 1;
-      } else if (member.providerFamilyKey === "SOURCE_CONFLICT") {
+      } else if (providerFamilyCategory === "SOURCE_CONFLICT") {
         counts.sourceConflictCount += 1;
       } else {
         counts.providerSpecificCount += 1;

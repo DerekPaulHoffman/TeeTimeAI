@@ -3032,6 +3032,7 @@ describe("course-support claim demand fencing", () => {
       outcome: "ready",
       incidentCount: 1,
       providerFamilyKey: "CHRONOGOLF",
+      providerFamilyCategory: "PROVIDER_SPECIFIC",
       failureFingerprint: fixture.canonicalFailureFingerprint,
     });
 
@@ -4894,6 +4895,8 @@ describe("course-support claim demand fencing", () => {
     expect(result).toMatchObject({
       outcome: "ready",
       incidentCount: 1,
+      providerFamilyKey: "SOURCE_MISSING",
+      providerFamilyCategory: "SOURCE_MISSING",
       fairnessReason: "PARKED_CAMPAIGN_RESERVATION",
     });
     expect(prismaMocks.transaction).toHaveBeenCalledWith(
@@ -13337,6 +13340,19 @@ describe("course-support batch ordinals", () => {
     if (result.outcome !== "ready") {
       throw new Error("Expected a ready packet.");
     }
+    expect(result).toMatchObject({
+      providerFamilyKey: "UNKNOWN",
+      providerFamilyCategory: "PROVIDER_SPECIFIC",
+    });
+    expect(
+      result.courses.map(({ providerFamilyCategory }) =>
+        providerFamilyCategory,
+      ),
+    ).toEqual([
+      "PROVIDER_SPECIFIC",
+      "PROVIDER_SPECIFIC",
+      "PROVIDER_SPECIFIC",
+    ]);
     expect(
       result.courses.map(
         ({
