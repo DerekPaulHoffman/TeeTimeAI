@@ -2255,6 +2255,32 @@ type ParkedCourseCampaignMemberSnapshot = ParkedCourseCampaignMember & {
   zeroExecutionEvidence: ParkedCourseCampaignRecoveryEvidence;
 };
 
+function hasExactParkedCourseCampaignLatestEvidence(input: {
+  current: ParkedCourseCampaignMemberSnapshot;
+  strictlyBefore?: Date;
+}) {
+  const { current } = input;
+  const latestProbe = current.zeroExecutionEvidence.latestProbe;
+  const latestDiscovery = current.zeroExecutionEvidence.latestDiscovery;
+  return (
+    (latestProbe?.observedAt.toISOString() ?? null) === current.latestProbeAt &&
+    (latestDiscovery?.createdAt.toISOString() ?? null) ===
+      current.latestDiscoveryAt &&
+    (latestProbe
+      ? latestProbe.courseId === current.courseId &&
+        (!input.strictlyBefore ||
+          latestProbe.observedAt < input.strictlyBefore) &&
+        current.zeroExecutionEvidence.latestProbeTimestampRowCount === 1
+      : current.zeroExecutionEvidence.latestProbeTimestampRowCount === 0) &&
+    (latestDiscovery
+      ? latestDiscovery.courseId === current.courseId &&
+        (!input.strictlyBefore ||
+          latestDiscovery.createdAt < input.strictlyBefore) &&
+        current.zeroExecutionEvidence.latestDiscoveryTimestampRowCount === 1
+      : current.zeroExecutionEvidence.latestDiscoveryTimestampRowCount === 0)
+  );
+}
+
 async function loadParkedCourseCampaignMemberSnapshots(
   database: ParkedCourseCampaignDatabase,
   input: {
@@ -2967,34 +2993,22 @@ export function assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery(i
   }
   const endpoint = endpoints[0]!;
 
-  const latestProbe = current.zeroExecutionEvidence.latestProbe;
-  const latestDiscovery = current.zeroExecutionEvidence.latestDiscovery;
   const postMarkerEvents = events.filter(
     (event) =>
       event.id !== priorMarker.id && event.occurredAt >= priorMarker.occurredAt,
   );
   if (
-    (latestProbe?.observedAt.toISOString() ?? null) !== current.latestProbeAt ||
-    (latestDiscovery?.createdAt.toISOString() ?? null) !==
-      current.latestDiscoveryAt ||
-    (latestProbe &&
-      (latestProbe.courseId !== current.courseId ||
-        latestProbe.observedAt >= priorMarker.occurredAt ||
-        current.zeroExecutionEvidence.latestProbeTimestampRowCount !== 1)) ||
-    (latestDiscovery &&
-      (latestDiscovery.courseId !== current.courseId ||
-        latestDiscovery.createdAt >= priorMarker.occurredAt ||
-        current.zeroExecutionEvidence.latestDiscoveryTimestampRowCount !==
-          1)) ||
-    (!latestProbe &&
-      current.zeroExecutionEvidence.latestProbeTimestampRowCount !== 0) ||
-    (!latestDiscovery &&
-      current.zeroExecutionEvidence.latestDiscoveryTimestampRowCount !== 0) ||
+    !hasExactParkedCourseCampaignLatestEvidence({
+      current,
+      strictlyBefore: priorMarker.occurredAt,
+    }) ||
     postMarkerEvents.length !== 1 ||
     postMarkerEvents[0]!.id !== endpoint.id
   ) {
     return null;
   }
+
+  const latestProbe = current.zeroExecutionEvidence.latestProbe;
 
   const entries = current.zeroExecutionEvidence.batchIncidents
     .filter((entry) => entry.cycle === current.cycle)
@@ -3527,6 +3541,10 @@ export function assessParkedCourseCampaignDescendantIncompletePlaybookRecovery(i
   const { captured, current } = input;
   const playbook = current.zeroExecutionEvidence.playbookAssessment;
   const zeroProgress = playbook.completedStages.length === 0;
+  const currentCycleBatchIncidentCount =
+    current.zeroExecutionEvidence.batchIncidents.filter(
+      (entry) => entry.cycle === current.cycle,
+    ).length;
   const lineage = findParkedCourseCampaignDescendantLineage({
     captured,
     current,
@@ -3542,6 +3560,10 @@ export function assessParkedCourseCampaignDescendantIncompletePlaybookRecovery(i
     playbook.cycle !== current.cycle ||
     playbook.conclusion !== "INCOMPLETE" ||
     playbook.nextStage === null ||
+    !hasExactParkedCourseCampaignLatestEvidence({ current }) ||
+    (!zeroProgress &&
+      (currentCycleBatchIncidentCount === 0 ||
+        currentCycleBatchIncidentCount > 20)) ||
     (zeroProgress &&
       (playbook.nextStage !== "OFFICIAL_IDENTITY" ||
         playbook.stages.some((stage) => stage.attemptCount !== 0)))

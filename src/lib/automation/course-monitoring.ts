@@ -7788,6 +7788,103 @@ async function lockExactCourseAutomationDiscoveryEvidence(
   );
 }
 
+type ExactParkedCourseCampaignHistoryRowIds = {
+  batchIds: readonly string[];
+  ownerAutomationRunIds: readonly string[];
+  batchIncidentIds: readonly string[];
+  verificationRequestIds: readonly string[];
+};
+
+function lockedIdsMatchExpected(
+  rows: readonly { id: string }[],
+  expectedIds: readonly string[],
+) {
+  const remaining = new Set(expectedIds);
+  if (rows.length !== remaining.size) return false;
+  for (const row of rows) {
+    if (!remaining.delete(row.id)) return false;
+  }
+  return remaining.size === 0;
+}
+
+async function lockExactParkedCourseCampaignHistoryRows(
+  transaction: Prisma.TransactionClient,
+  input: ExactParkedCourseCampaignHistoryRowIds,
+) {
+  const batchIds = [...new Set(input.batchIds)].sort((left, right) =>
+    left.localeCompare(right),
+  );
+  const ownerAutomationRunIds = [
+    ...new Set(input.ownerAutomationRunIds),
+  ].sort((left, right) => left.localeCompare(right));
+  const batchIncidentIds = [...new Set(input.batchIncidentIds)].sort(
+    (left, right) => left.localeCompare(right),
+  );
+  const verificationRequestIds = [
+    ...new Set(input.verificationRequestIds),
+  ].sort((left, right) => left.localeCompare(right));
+
+  // The caller has already loaded and validated the exact history inside a
+  // Serializable transaction. Lock each static table as one deterministic
+  // set: a post-snapshot row change raises a serialization failure, while a
+  // missing row fails the cardinality fence without one CAS round trip per
+  // historical batch/request.
+  const lockedBatches =
+    batchIds.length === 0
+      ? []
+      : await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+          SELECT "id"
+          FROM "CourseSupportBatch"
+          WHERE "id" IN (${Prisma.join(batchIds)})
+          ORDER BY "id"
+          FOR UPDATE
+        `);
+  if (!lockedIdsMatchExpected(lockedBatches, batchIds)) return false;
+
+  const lockedOwnerRuns =
+    ownerAutomationRunIds.length === 0
+      ? []
+      : await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+          SELECT "id"
+          FROM "AutomationRun"
+          WHERE "id" IN (${Prisma.join(ownerAutomationRunIds)})
+          ORDER BY "id"
+          FOR UPDATE
+        `);
+  if (!lockedIdsMatchExpected(lockedOwnerRuns, ownerAutomationRunIds)) {
+    return false;
+  }
+
+  const lockedBatchIncidents =
+    batchIncidentIds.length === 0
+      ? []
+      : await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+          SELECT "id"
+          FROM "CourseSupportBatchIncident"
+          WHERE "id" IN (${Prisma.join(batchIncidentIds)})
+          ORDER BY "id"
+          FOR UPDATE
+        `);
+  if (!lockedIdsMatchExpected(lockedBatchIncidents, batchIncidentIds)) {
+    return false;
+  }
+
+  const lockedVerificationRequests =
+    verificationRequestIds.length === 0
+      ? []
+      : await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+          SELECT "id"
+          FROM "CourseSupportVerificationRequest"
+          WHERE "id" IN (${Prisma.join(verificationRequestIds)})
+          ORDER BY "id"
+          FOR UPDATE
+        `);
+  return lockedIdsMatchExpected(
+    lockedVerificationRequests,
+    verificationRequestIds,
+  );
+}
+
 export async function reopenParkedCourseForResponderCampaign(
   input: ParkedCourseResponderCampaignReopenInput,
 ) {
@@ -8705,93 +8802,25 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
           currentCampaignMember!.zeroExecutionEvidence.batchIncidents.filter(
             (entry) => entry.cycle === incident.cycle,
           );
-        for (const entry of currentCycleEntries) {
-          const batchUnchanged =
-            await transaction.courseSupportBatch.updateMany({
-              where: {
-                id: entry.batch.id,
-                status: entry.batch.status as CourseSupportBatchStatus,
-                revision: entry.batch.revision,
-                ownerAutomationRunId: entry.batch.ownerAutomationRunId,
-                baseSha: entry.batch.baseSha,
-                releaseSha: entry.batch.releaseSha,
-                deployedAt: entry.batch.deployedAt,
-                createdAt: entry.batch.createdAt,
-                updatedAt: entry.batch.updatedAt,
-                recheckDispatchKey: entry.batch.recheckDispatchKey,
-                recheckDispatchStartedAt: entry.batch.recheckDispatchStartedAt,
-                recheckDispatchedAt: entry.batch.recheckDispatchedAt,
-                completedAt: entry.batch.completedAt,
-                summary:
-                  entry.batch.summary === null
-                    ? { equals: Prisma.DbNull }
-                    : {
-                        equals: entry.batch.summary as Prisma.InputJsonValue,
-                      },
-              },
-              data: { updatedAt: entry.batch.updatedAt },
-            });
-          if (batchUnchanged.count !== 1) {
-            return { admitted: false as const };
-          }
-
-          if (entry.batch.ownerAutomationRun) {
-            const ownerRunUnchanged =
-              await transaction.automationRun.updateMany({
-                where: {
-                  id: entry.batch.ownerAutomationRun.id,
-                  promptVersion: entry.batch.ownerAutomationRun.promptVersion,
-                  kind: entry.batch.ownerAutomationRun.kind,
-                  status: entry.batch.ownerAutomationRun.status,
-                  runtimeVersion: entry.batch.ownerAutomationRun.runtimeVersion,
-                  completedAt: entry.batch.ownerAutomationRun.completedAt,
-                  outcome: entry.batch.ownerAutomationRun.outcome,
-                  notes: entry.batch.ownerAutomationRun.notes,
-                },
-                data: {
-                  status: entry.batch.ownerAutomationRun.status,
-                  outcome: entry.batch.ownerAutomationRun.outcome,
-                },
-              });
-            if (ownerRunUnchanged.count !== 1) {
-              return { admitted: false as const };
-            }
-          }
-
-          const batchIncidentUnchanged =
-            await transaction.courseSupportBatchIncident.updateMany({
-              where: {
-                id: entry.id,
-                batchId: entry.batchId,
-                incidentId: entry.incidentId,
-                courseId: entry.courseId,
-                cycle: entry.cycle,
-                result: entry.result as CourseSupportBatchIncidentResult,
-                preProbeId: entry.preProbeId,
-                postProbeId: entry.postProbeId,
-                proofSnapshot:
-                  entry.proofSnapshot === null
-                    ? { equals: Prisma.DbNull }
-                    : {
-                        equals: entry.proofSnapshot as Prisma.InputJsonValue,
-                      },
-                verifiedIncidentUpdatedAt: entry.verifiedIncidentUpdatedAt,
-                verifiedAt: entry.verifiedAt,
-                createdAt: entry.createdAt,
-                updatedAt: entry.updatedAt,
-              },
-              data: { updatedAt: entry.updatedAt },
-            });
-          if (batchIncidentUnchanged.count !== 1) {
-            return { admitted: false as const };
-          }
-        }
-
         const currentCycleEntryIds = currentCycleEntries.map(
           (entry) => entry.id,
         );
         const currentCycleRequestIds =
           sameCycleRecoveryHistory!.requestFences.map((request) => request.id);
+        const exactHistoryRowsLocked =
+          await lockExactParkedCourseCampaignHistoryRows(transaction, {
+            batchIds: currentCycleEntries.map((entry) => entry.batch.id),
+            ownerAutomationRunIds: currentCycleEntries.flatMap((entry) =>
+              entry.batch.ownerAutomationRun
+                ? [entry.batch.ownerAutomationRun.id]
+                : [],
+            ),
+            batchIncidentIds: currentCycleEntryIds,
+            verificationRequestIds: currentCycleRequestIds,
+          });
+        if (!exactHistoryRowsLocked) {
+          return { admitted: false as const };
+        }
         const currentMonitoringEvents =
           currentCampaignMember!.zeroExecutionEvidence.monitoringEvents;
         if (
@@ -9052,51 +9081,54 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
           return { admitted: false as const };
         }
       }
-      for (const request of sameCycleRecoveryHistory!.requestFences) {
-        const requestUnchanged =
-          await transaction.courseSupportVerificationRequest.updateMany({
-            where: {
-              id: request.id,
-              batchIncidentId: request.batchIncidentId,
-              courseId: request.courseId,
-              releaseSha: request.releaseSha,
-              providerSnapshotFingerprint: request.providerSnapshotFingerprint,
-              providerSnapshotAt: request.providerSnapshotAt,
-              discoveryAttemptedAt: request.discoveryAttemptedAt,
-              discoveryVerifiedAt: request.discoveryVerifiedAt,
-              createdAt: request.createdAt,
-              updatedAt: request.updatedAt,
-              status: request.status,
-              revision: request.revision,
-              attemptCount: request.attemptCount,
-              workflowRunId: request.workflowRunId,
-              startedAt: request.startedAt,
-              outcome: request.outcome,
-              failureClass: request.failureClass,
-              evidence:
-                request.evidence === null
-                  ? // Prisma reads both database NULL (new requests) and JSON
-                    // null (claimed/reset requests) as JavaScript null. Both
-                    // mean no material evidence in the campaign digest.
-                    { equals: Prisma.AnyNull }
-                  : { equals: request.evidence as Prisma.InputJsonValue },
-              lastError: request.lastError,
-            },
-            data: { updatedAt: request.updatedAt },
-          });
-        if (requestUnchanged.count !== 1) {
-          return { admitted: false as const };
+      if (!exactEvidenceRecoveryRequested) {
+        for (const request of sameCycleRecoveryHistory!.requestFences) {
+          const requestUnchanged =
+            await transaction.courseSupportVerificationRequest.updateMany({
+              where: {
+                id: request.id,
+                batchIncidentId: request.batchIncidentId,
+                courseId: request.courseId,
+                releaseSha: request.releaseSha,
+                providerSnapshotFingerprint:
+                  request.providerSnapshotFingerprint,
+                providerSnapshotAt: request.providerSnapshotAt,
+                discoveryAttemptedAt: request.discoveryAttemptedAt,
+                discoveryVerifiedAt: request.discoveryVerifiedAt,
+                createdAt: request.createdAt,
+                updatedAt: request.updatedAt,
+                status: request.status,
+                revision: request.revision,
+                attemptCount: request.attemptCount,
+                workflowRunId: request.workflowRunId,
+                startedAt: request.startedAt,
+                outcome: request.outcome,
+                failureClass: request.failureClass,
+                evidence:
+                  request.evidence === null
+                    ? // Prisma reads both database NULL (new requests) and JSON
+                      // null (claimed/reset requests) as JavaScript null. Both
+                      // mean no material evidence in the campaign digest.
+                      { equals: Prisma.AnyNull }
+                    : { equals: request.evidence as Prisma.InputJsonValue },
+                lastError: request.lastError,
+              },
+              data: { updatedAt: request.updatedAt },
+            });
+          if (requestUnchanged.count !== 1) {
+            return { admitted: false as const };
+          }
         }
-      }
-      for (const absentRequest of sameCycleRecoveryHistory!
-        .absentRequestFences) {
-        const lateRequest =
-          await transaction.courseSupportVerificationRequest.findFirst({
-            where: { batchIncidentId: absentRequest.batchIncidentId },
-            select: { id: true },
-          });
-        if (lateRequest) {
-          return { admitted: false as const };
+        for (const absentRequest of sameCycleRecoveryHistory!
+          .absentRequestFences) {
+          const lateRequest =
+            await transaction.courseSupportVerificationRequest.findFirst({
+              where: { batchIncidentId: absentRequest.batchIncidentId },
+              select: { id: true },
+            });
+          if (lateRequest) {
+            return { admitted: false as const };
+          }
         }
       }
 

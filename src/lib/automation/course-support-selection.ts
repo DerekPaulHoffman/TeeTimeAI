@@ -92,13 +92,33 @@ export type CourseSupportCandidate = {
 export type RecentBatchFairnessEvidence = {
   includedEngineeringOnly: boolean;
   includedCriticalRealDemand: boolean;
+  campaignSummaryState: CourseSupportCampaignSummaryState;
 };
+
+export type CourseSupportCampaignSummaryState =
+  | "CAMPAIGN"
+  | "NON_CAMPAIGN"
+  | "UNKNOWN";
+
+export type CourseSupportAdmissionLane =
+  | {
+      lane: "PRIORITY";
+      parkedCampaignReservation: false;
+    }
+  | {
+      lane: "REQUESTLESS_PARKED_CAMPAIGN";
+      parkedCampaignReservation: boolean;
+    };
 
 export type SelectedCourseSupportBatch = {
   providerFamilyKey: string;
   failureFingerprint: string;
   incidents: CourseSupportCandidate[];
-  fairnessReason: "PRIORITY" | "AGED_SYNTHETIC_RESERVATION" | "TARGETED_RETRY";
+  fairnessReason:
+    | "PRIORITY"
+    | "AGED_SYNTHETIC_RESERVATION"
+    | "PARKED_CAMPAIGN_RESERVATION"
+    | "TARGETED_RETRY";
   containsCriticalRealDemand: boolean;
   remediationDirective?: CourseSupportRemediationDirective;
 };
@@ -109,6 +129,97 @@ export type CourseSupportGroupPriority = {
   activeRealDemandCount: number;
   earliestEscalationDeadlineAt: Date | null;
 };
+
+export function classifyCourseSupportCampaignSummary(
+  value: unknown,
+): CourseSupportCampaignSummaryState {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return "UNKNOWN";
+  }
+  const summary = value as Record<string, unknown>;
+  if (summary.schemaVersion !== 1) {
+    return "UNKNOWN";
+  }
+  if (!Object.prototype.hasOwnProperty.call(summary, "campaign")) {
+    return "NON_CAMPAIGN";
+  }
+  const campaign = summary.campaign;
+  if (!campaign || typeof campaign !== "object" || Array.isArray(campaign)) {
+    return "UNKNOWN";
+  }
+  const campaignRecord = campaign as Record<string, unknown>;
+  if (
+    Object.keys(campaignRecord).length !== 2 ||
+    campaignRecord.kind !== "PARKED_COHORT" ||
+    !Array.isArray(campaignRecord.attempts) ||
+    campaignRecord.attempts.length === 0 ||
+    !campaignRecord.attempts.every((value) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        return false;
+      }
+      const attempt = value as Record<string, unknown>;
+      return (
+        Object.keys(attempt).length === 4 &&
+        typeof attempt.courseRef === "string" &&
+        /^[a-f0-9]{24}$/u.test(attempt.courseRef) &&
+        typeof attempt.runId === "string" &&
+        attempt.runId.trim().length > 0 &&
+        typeof attempt.membershipDigest === "string" &&
+        /^[a-f0-9]{64}$/u.test(attempt.membershipDigest) &&
+        typeof attempt.cycle === "number" &&
+        Number.isInteger(attempt.cycle) &&
+        attempt.cycle > 0
+      );
+    })
+  ) {
+    return "UNKNOWN";
+  }
+  return "CAMPAIGN";
+}
+
+export function selectCourseSupportAdmissionLane(input: {
+  priorityCandidateAvailable: boolean;
+  requestlessParkedCampaignAvailable: boolean;
+  hasCurrentActiveRealDemand: boolean;
+  activeBatchCampaignSummaryStates?: readonly CourseSupportCampaignSummaryState[];
+  recentBatches?: RecentBatchFairnessEvidence[];
+}): CourseSupportAdmissionLane | null {
+  const recentFairnessWindow = (input.recentBatches ?? []).slice(
+    0,
+    COURSE_SUPPORT_SYNTHETIC_FAIRNESS_WINDOW
+  );
+  const parkedCampaignReservationDue = Boolean(
+    input.priorityCandidateAvailable &&
+      input.requestlessParkedCampaignAvailable &&
+      !input.hasCurrentActiveRealDemand &&
+      (input.activeBatchCampaignSummaryStates ?? []).every(
+        (state) => state === "NON_CAMPAIGN",
+      ) &&
+      recentFairnessWindow.length >= COURSE_SUPPORT_SYNTHETIC_FAIRNESS_WINDOW &&
+      recentFairnessWindow.every(
+        (batch) =>
+          !batch.includedCriticalRealDemand &&
+          batch.campaignSummaryState === "NON_CAMPAIGN",
+      )
+  );
+
+  if (parkedCampaignReservationDue) {
+    return {
+      lane: "REQUESTLESS_PARKED_CAMPAIGN",
+      parkedCampaignReservation: true
+    };
+  }
+  if (input.priorityCandidateAvailable) {
+    return { lane: "PRIORITY", parkedCampaignReservation: false };
+  }
+  if (input.requestlessParkedCampaignAvailable) {
+    return {
+      lane: "REQUESTLESS_PARKED_CAMPAIGN",
+      parkedCampaignReservation: false
+    };
+  }
+  return null;
+}
 
 export function selectCourseSupportBatch(input: {
   candidates: CourseSupportCandidate[];

@@ -120,6 +120,7 @@ import {
   chooseCourseSupportReleaseDiffBase,
   chooseNewestProviderVerificationEvidence,
   classifyCourseSupportQueueInspection,
+  classifyCourseSupportCampaignSummary,
   classifyDetachedVerificationFailure,
   classifyDetachedVerificationEvidence,
   classifyFreshBatchEvidence,
@@ -148,6 +149,7 @@ import {
   recoverCourseSupportBatch,
   renewCourseSupportBatchOperationLease,
   resolveCourseSupportProviderCapability,
+  selectCourseSupportAdmissionLane,
   selectCourseSupportBatch,
   selectCourseSupportRetryBatch,
   shouldDispatchRemediatedCourseRechecks,
@@ -756,7 +758,26 @@ beforeEach(() => {
     reference: "batch-reference",
   });
   prismaMocks.batchIncidentCreateMany.mockResolvedValue({ count: 1 });
-  prismaMocks.queryRaw.mockResolvedValue([{ now }]);
+  prismaMocks.queryRaw.mockImplementation(
+    async (query: { strings?: readonly string[]; values?: unknown[] }) => {
+      const sql = query.strings?.join("") ?? "";
+      if (
+        sql.includes("FOR UPDATE") &&
+        [
+          'FROM "CourseSupportBatch"',
+          'FROM "AutomationRun"',
+          'FROM "CourseSupportBatchIncident"',
+          'FROM "CourseSupportVerificationRequest"',
+        ].some((table) => sql.includes(table))
+      ) {
+        return [...new Set(query.values ?? [])]
+          .filter((value): value is string => typeof value === "string")
+          .sort((left, right) => left.localeCompare(right))
+          .map((id) => ({ id }));
+      }
+      return [{ now }];
+    },
+  );
   prismaMocks.courseProbeFindMany.mockResolvedValue([]);
   prismaMocks.courseProbeFindFirst.mockResolvedValue(null);
   prismaMocks.courseAutomationDiscoveryFindFirst.mockResolvedValue(null);
@@ -767,10 +788,22 @@ beforeEach(() => {
   prismaMocks.automationRunFindUnique.mockResolvedValue(null);
   prismaMocks.automationRunCreate.mockResolvedValue({ id: "routine-run" });
   leaseMocks.withPostgresAdvisoryTextLease.mockImplementation(
-    async (_client: unknown, _key: string, worker: () => Promise<unknown>) => ({
-      acquired: true,
-      value: await worker(),
-    }),
+    async (
+      _client: unknown,
+      _key: string,
+      worker: (context: { deadlineAt: Date; timeoutMs: number }) =>
+        Promise<unknown>,
+      options?: { timeout?: number },
+    ) => {
+      const timeoutMs = options?.timeout ?? 60_000;
+      return {
+        acquired: true,
+        value: await worker({
+          deadlineAt: new Date(Date.now() + timeoutMs),
+          timeoutMs,
+        }),
+      };
+    },
   );
 });
 
@@ -943,6 +976,7 @@ describe("course-support batch selection", () => {
       recentBatches: Array.from({ length: 3 }, () => ({
         includedEngineeringOnly: false,
         includedCriticalRealDemand: false,
+        campaignSummaryState: "NON_CAMPAIGN" as const,
       })),
       now,
     });
@@ -950,6 +984,210 @@ describe("course-support batch selection", () => {
     expect(selected).toMatchObject({
       providerFamilyKey: "CHRONOGOLF",
       fairnessReason: "AGED_SYNTHETIC_RESERVATION",
+    });
+  });
+
+  it("reserves one requestless parked campaign claim after every three noncritical ordinary completions", () => {
+    const recentBatches: Array<{
+      includedEngineeringOnly: boolean;
+      includedCriticalRealDemand: boolean;
+      campaignSummaryState: "CAMPAIGN" | "NON_CAMPAIGN" | "UNKNOWN";
+    }> = [];
+    const lanes = Array.from({ length: 8 }, () => {
+      const decision = selectCourseSupportAdmissionLane({
+        priorityCandidateAvailable: true,
+        requestlessParkedCampaignAvailable: true,
+        hasCurrentActiveRealDemand: false,
+        activeBatchCampaignSummaryStates: [],
+        recentBatches,
+      });
+      const selectedCampaign =
+        decision?.lane === "REQUESTLESS_PARKED_CAMPAIGN";
+      recentBatches.unshift({
+        includedEngineeringOnly: false,
+        includedCriticalRealDemand: false,
+        campaignSummaryState: selectedCampaign
+          ? "CAMPAIGN"
+          : "NON_CAMPAIGN",
+      });
+      recentBatches.splice(3);
+      return decision?.lane;
+    });
+
+    expect(lanes).toEqual([
+      "PRIORITY",
+      "PRIORITY",
+      "PRIORITY",
+      "REQUESTLESS_PARKED_CAMPAIGN",
+      "PRIORITY",
+      "PRIORITY",
+      "PRIORITY",
+      "REQUESTLESS_PARKED_CAMPAIGN",
+    ]);
+  });
+
+  it("classifies only supported summary envelopes as ordinary or campaign batches", () => {
+    expect(
+      classifyCourseSupportCampaignSummary({
+        schemaVersion: 1,
+        fairnessReason: "PRIORITY",
+      }),
+    ).toBe("NON_CAMPAIGN");
+    expect(
+      classifyCourseSupportCampaignSummary({
+        schemaVersion: 1,
+        campaign: {
+          kind: "PARKED_COHORT",
+          attempts: [
+            {
+              courseRef: "a".repeat(24),
+              runId: "campaign-run-1",
+              membershipDigest: "b".repeat(64),
+              cycle: 4,
+            },
+          ],
+        },
+      }),
+    ).toBe("CAMPAIGN");
+  });
+
+  it.each([
+    ["null", null],
+    ["an array", [{ schemaVersion: 1 }]],
+    ["a primitive", "legacy-summary"],
+    ["a legacy ordinary object", { fairnessReason: "PRIORITY" }],
+    [
+      "a legacy campaign object",
+      {
+        campaign: {
+          kind: "PARKED_COHORT",
+          attempts: [],
+        },
+      },
+    ],
+    [
+      "a malformed campaign marker",
+      {
+        schemaVersion: 1,
+        campaign: { kind: "PARKED_COHORT" },
+      },
+    ],
+    [
+      "a malformed campaign attempt",
+      {
+        schemaVersion: 1,
+        campaign: {
+          kind: "PARKED_COHORT",
+          attempts: [{ runId: "campaign-run-1" }],
+        },
+      },
+    ],
+  ])("treats %s as unknown campaign history", (_label, summary) => {
+    expect(classifyCourseSupportCampaignSummary(summary)).toBe("UNKNOWN");
+  });
+
+  it.each([
+    ["current active real demand", { hasCurrentActiveRealDemand: true }],
+    [
+      "an active campaign owner",
+      { activeBatchCampaignSummaryStates: ["CAMPAIGN" as const] },
+    ],
+    [
+      "an unknown active batch summary",
+      { activeBatchCampaignSummaryStates: ["UNKNOWN" as const] },
+    ],
+    [
+      "a recent campaign completion",
+      {
+        recentBatches: [
+          {
+            includedEngineeringOnly: false,
+            includedCriticalRealDemand: false,
+            campaignSummaryState: "CAMPAIGN" as const,
+          },
+          ...Array.from({ length: 2 }, () => ({
+            includedEngineeringOnly: false,
+            includedCriticalRealDemand: false,
+            campaignSummaryState: "NON_CAMPAIGN" as const,
+          })),
+        ],
+      },
+    ],
+    [
+      "unknown recent history",
+      {
+        recentBatches: [
+          {
+            includedEngineeringOnly: false,
+            includedCriticalRealDemand: false,
+            campaignSummaryState: "UNKNOWN" as const,
+          },
+          ...Array.from({ length: 2 }, () => ({
+            includedEngineeringOnly: false,
+            includedCriticalRealDemand: false,
+            campaignSummaryState: "NON_CAMPAIGN" as const,
+          })),
+        ],
+      },
+    ],
+    [
+      "a recent critical batch",
+      {
+        recentBatches: [
+          {
+            includedEngineeringOnly: false,
+            includedCriticalRealDemand: true,
+            campaignSummaryState: "NON_CAMPAIGN" as const,
+          },
+          ...Array.from({ length: 2 }, () => ({
+            includedEngineeringOnly: false,
+            includedCriticalRealDemand: false,
+            campaignSummaryState: "NON_CAMPAIGN" as const,
+          })),
+        ],
+      },
+    ],
+    [
+      "an incomplete fairness window",
+      {
+        recentBatches: Array.from({ length: 2 }, () => ({
+          includedEngineeringOnly: false,
+          includedCriticalRealDemand: false,
+          campaignSummaryState: "NON_CAMPAIGN" as const,
+        })),
+      },
+    ],
+  ])("keeps ordinary priority when reservation is suppressed by %s", (_label, overrides) => {
+    const ordinaryHistory = Array.from({ length: 3 }, () => ({
+      includedEngineeringOnly: false,
+      includedCriticalRealDemand: false,
+      campaignSummaryState: "NON_CAMPAIGN" as const,
+    }));
+
+    expect(
+      selectCourseSupportAdmissionLane({
+        priorityCandidateAvailable: true,
+        requestlessParkedCampaignAvailable: true,
+        hasCurrentActiveRealDemand: false,
+        activeBatchCampaignSummaryStates: [],
+        recentBatches: ordinaryHistory,
+        ...overrides,
+      }),
+    ).toEqual({ lane: "PRIORITY", parkedCampaignReservation: false });
+  });
+
+  it("keeps campaign fallback when no ordinary candidate is available", () => {
+    expect(
+      selectCourseSupportAdmissionLane({
+        priorityCandidateAvailable: false,
+        requestlessParkedCampaignAvailable: true,
+        hasCurrentActiveRealDemand: false,
+        activeBatchCampaignSummaryStates: ["CAMPAIGN"],
+        recentBatches: [],
+      }),
+    ).toEqual({
+      lane: "REQUESTLESS_PARKED_CAMPAIGN",
+      parkedCampaignReservation: false,
     });
   });
 
@@ -3259,8 +3497,77 @@ describe("course-support claim demand fencing", () => {
     };
   }
 
-  it("atomically admits a bounded parked campaign member inside its batch claim", async () => {
+  function ordinaryFairnessBatch(
+    index: number,
+    overrides: Record<string, unknown> = {},
+  ) {
+    const completedAt = new Date(now.getTime() - index * 60_000);
+    return {
+      id: `ordinary-fairness-batch-${index}`,
+      completedAt,
+      revision: index,
+      summary: { schemaVersion: 1, fairnessReason: "PRIORITY" },
+      incidents: [
+        {
+          incident: {
+            engineeringOnly: false,
+            activeRealSearchCount: 0,
+            kind: "NEEDS_ADAPTER",
+            earliestTargetDate: null,
+          },
+        },
+      ],
+      ...overrides,
+    };
+  }
+
+  function exactParkedCampaignBatchSummary(cycle = 4) {
+    return {
+      schemaVersion: 1,
+      campaign: {
+        kind: "PARKED_COHORT",
+        attempts: [
+          {
+            courseRef: "c".repeat(24),
+            runId: "campaign-run-1",
+            membershipDigest: "d".repeat(64),
+            cycle,
+          },
+        ],
+      },
+    };
+  }
+
+  function configureRequestlessCampaignReservationClaim(input?: {
+    transactionHistory?: (
+      history: ReturnType<typeof ordinaryFairnessBatch>[],
+    ) => unknown[];
+    transactionActiveBatches?: unknown[];
+    transactionDueIncidents?: (ordinaryIncident: unknown) => unknown[];
+  }) {
     const fixture = parkedCampaignFixture();
+    const ordinaryIncident = {
+      ...incidentRecord({ engineeringOnly: false, preferences: [] }),
+      id: "ordinary-historical-incident",
+      courseId: "ordinary-historical-course",
+      providerFamilyKey: "ORDINARY_HISTORICAL",
+      failureFingerprint: "ordinary-historical-fingerprint",
+      course: {
+        ...incidentRecord({ engineeringOnly: false, preferences: [] }).course,
+        id: "ordinary-historical-course",
+      },
+    };
+    const history = Array.from({ length: 3 }, (_, index) =>
+      ordinaryFairnessBatch(index + 1),
+    );
+    const transactionHistory = input?.transactionHistory
+      ? input.transactionHistory(history)
+      : history;
+    prismaMocks.batchFindMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(history)
+      .mockResolvedValueOnce(transactionHistory)
+      .mockResolvedValueOnce(input?.transactionActiveBatches ?? []);
     prismaMocks.automationRunFindFirst.mockResolvedValue({
       id: "campaign-run-1",
       status: "RUNNING",
@@ -3269,7 +3576,7 @@ describe("course-support claim demand fencing", () => {
       audit: fixture.audit,
     });
     prismaMocks.supportIncidentFindMany
-      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([ordinaryIncident])
       .mockResolvedValueOnce([fixture.parkedMember])
       .mockResolvedValueOnce([
         {
@@ -3279,9 +3586,98 @@ describe("course-support claim demand fencing", () => {
         },
       ])
       .mockResolvedValueOnce([fixture.candidateIncident])
-      .mockResolvedValueOnce([fixture.currentIncident]);
+      .mockResolvedValueOnce(
+        input?.transactionDueIncidents?.(ordinaryIncident) ??
+          [ordinaryIncident],
+      )
+      .mockResolvedValue([fixture.currentIncident]);
     prismaMocks.supportIncidentFindUnique.mockResolvedValue(
       fixture.reopenIncident,
+    );
+    prismaMocks.transaction.mockImplementation(
+      async (
+        worker: (
+          transaction: typeof monitoringTransactionClient,
+        ) => Promise<unknown>,
+      ) => worker(monitoringTransactionClient),
+    );
+    return { fixture, history, ordinaryIncident };
+  }
+
+  it("atomically admits the maximum five parked campaign members inside one bounded claim transaction", async () => {
+    const remapFixture = (ordinal: number) => {
+      const replacements = new Map([
+        ["course-campaign", `course-campaign-${ordinal}`],
+        ["incident-campaign", `incident-campaign-${ordinal}`],
+        [
+          "probe-campaign-historical",
+          `probe-campaign-historical-${ordinal}`,
+        ],
+        [
+          "discovery-campaign-historical",
+          `discovery-campaign-historical-${ordinal}`,
+        ],
+      ]);
+      const remap = (value: unknown): unknown => {
+        if (typeof value === "string") {
+          return replacements.get(value) ?? value;
+        }
+        if (value instanceof Date) return value;
+        if (Array.isArray(value)) return value.map(remap);
+        if (value && typeof value === "object") {
+          return Object.fromEntries(
+            Object.entries(value).map(([key, nested]) => [key, remap(nested)]),
+          );
+        }
+        return value;
+      };
+      return remap(parkedCampaignFixture()) as ReturnType<
+        typeof parkedCampaignFixture
+      >;
+    };
+    const fixtures = Array.from({ length: 5 }, (_, index) =>
+      remapFixture(index + 1),
+    );
+    const campaignAudit = createParkedCourseCampaignAudit({
+      expectedCount: fixtures.length,
+      capturedAt: new Date(fixtures[0]!.audit.capturedAt),
+      members: fixtures.map((fixture) => fixture.audit.members[0]!),
+    });
+    prismaMocks.automationRunFindFirst.mockResolvedValue({
+      id: "campaign-run-1",
+      status: "RUNNING",
+      completedAt: null,
+      outcome: null,
+      audit: campaignAudit,
+    });
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce(fixtures.map((fixture) => fixture.parkedMember));
+    for (const fixture of fixtures) {
+      prismaMocks.supportIncidentFindMany.mockResolvedValueOnce([
+        {
+          id: fixture.parkedMember.id,
+          cycle: fixture.parkedMember.cycle,
+          batchIncidents: [],
+        },
+      ]);
+    }
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce(
+        fixtures.map((fixture) => fixture.candidateIncident),
+      )
+      .mockResolvedValue(
+        fixtures.map((fixture) => fixture.currentIncident),
+      );
+    const reopenIncidentById = new Map(
+      fixtures.map((fixture) => [
+        fixture.reopenIncident.id,
+        fixture.reopenIncident,
+      ]),
+    );
+    prismaMocks.supportIncidentFindUnique.mockImplementation(
+      async ({ where }: { where: { id: string } }) =>
+        reopenIncidentById.get(where.id) ?? null,
     );
     prismaMocks.transaction.mockImplementation(
       async (
@@ -3299,20 +3695,32 @@ describe("course-support claim demand fencing", () => {
       maxCourses: 20,
     });
 
-    expect(result).toMatchObject({ outcome: "ready", incidentCount: 1 });
-    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({
-          id: "incident-campaign",
-          cycle: 3,
-          revision: 7,
-        }),
-        data: expect.objectContaining({
-          cycle: { increment: 1 },
-          status: "AUTO_INVESTIGATING",
-        }),
-      }),
+    expect(result).toMatchObject({ outcome: "ready", incidentCount: 5 });
+    expect(prismaMocks.batchIncidentCreateMany).toHaveBeenCalledWith({
+      data: expect.arrayContaining(
+        fixtures.map((fixture) =>
+          expect.objectContaining({
+            incidentId: fixture.parkedMember.id,
+            courseId: fixture.parkedMember.courseId,
+          }),
+        ),
+      ),
+    });
+    expect(
+      prismaMocks.supportIncidentUpdateMany.mock.calls.filter(
+        ([call]) => call.data?.cycle?.increment === 1,
+      ),
+    ).toHaveLength(5);
+    expect(prismaMocks.transaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      {
+        isolationLevel: "Serializable",
+        timeout: 60_000,
+      },
     );
+    expect(
+      leaseMocks.withPostgresAdvisoryTextLease.mock.calls[0]?.[3],
+    ).toEqual({ timeout: 240_000 });
     expect(prismaMocks.batchCreate).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
@@ -3322,18 +3730,413 @@ describe("course-support claim demand fencing", () => {
         }),
       }),
     );
-    expect(prismaMocks.monitoringEventCreate).toHaveBeenCalledWith(
+    for (const fixture of fixtures) {
+      expect(prismaMocks.monitoringEventCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            courseId: fixture.parkedMember.courseId,
+            incidentId: fixture.parkedMember.id,
+            eventType: "REVALIDATION_REQUESTED",
+            audit: expect.objectContaining({
+              campaignRunId: "campaign-run-1",
+              capturedIncidentRevision: 5,
+              capturedMonitoringRevision: 9,
+              admittedIncidentRevision: 7,
+              admittedMonitoringRevision: 11,
+              activeDemandAtAdmission: false,
+            }),
+          }),
+        }),
+      );
+    }
+  });
+
+  it("atomically reserves a requestless campaign member after three ordinary completions", async () => {
+    const { ordinaryIncident } =
+      configureRequestlessCampaignReservationClaim();
+
+    const result = await claimCourseSupportBatch({
+      ownerThreadId: "owner-thread-campaign-reservation",
+      branch: "automation/course-support-20260715-200000",
+      baseSha,
+      now,
+      maxCourses: 5,
+    });
+
+    expect(result).toMatchObject({
+      outcome: "ready",
+      incidentCount: 1,
+      fairnessReason: "PARKED_CAMPAIGN_RESERVATION",
+    });
+    expect(prismaMocks.transaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      {
+        isolationLevel: "Serializable",
+        timeout: 60_000,
+      },
+    );
+    expect(
+      leaseMocks.withPostgresAdvisoryTextLease.mock.calls[0]?.[3],
+    ).toEqual({ timeout: 240_000 });
+    expect(prismaMocks.batchCreate).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
-          eventType: "REVALIDATION_REQUESTED",
-          audit: expect.objectContaining({
-            campaignRunId: "campaign-run-1",
-            capturedIncidentRevision: 5,
-            capturedMonitoringRevision: 9,
-            admittedIncidentRevision: 7,
-            admittedMonitoringRevision: 11,
-            activeDemandAtAdmission: false,
+          summary: expect.objectContaining({
+            campaign: expect.objectContaining({ kind: "PARKED_COHORT" }),
+            fairnessReason: "PARKED_CAMPAIGN_RESERVATION",
           }),
+        }),
+      }),
+    );
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: ordinaryIncident.id }),
+      }),
+    );
+  });
+
+  it("keeps campaign claim retries inside the remaining writer-lease deadline", async () => {
+    configureRequestlessCampaignReservationClaim();
+    const commitTransaction = prismaMocks.transaction.getMockImplementation();
+    if (!commitTransaction) throw new Error("Transaction mock is unavailable.");
+    const conflict = Object.assign(new Error("write conflict"), {
+      code: "P2034",
+    });
+    prismaMocks.transaction
+      .mockReset()
+      .mockRejectedValueOnce(conflict)
+      .mockRejectedValueOnce(conflict)
+      .mockImplementation(commitTransaction);
+    leaseMocks.withPostgresAdvisoryTextLease.mockImplementation(
+      async (
+        _client: unknown,
+        _key: string,
+        worker: (context: { deadlineAt: Date; timeoutMs: number }) =>
+          Promise<unknown>,
+        options?: { timeout?: number },
+      ) => {
+        expect(options).toEqual({ timeout: 240_000 });
+        return {
+          acquired: true,
+          value: await worker({
+            deadlineAt: new Date(200_000),
+            timeoutMs: 240_000,
+          }),
+        };
+      },
+    );
+    const dateNow = vi
+      .spyOn(Date, "now")
+      .mockReturnValueOnce(100_000)
+      .mockReturnValueOnce(150_000)
+      .mockReturnValueOnce(190_000);
+
+    try {
+      await expect(
+        claimCourseSupportBatch({
+          ownerThreadId: "owner-thread-campaign-deadline-retry",
+          branch: "automation/course-support-20260715-200000",
+          baseSha,
+          now,
+          maxCourses: 5,
+        }),
+      ).resolves.toMatchObject({ outcome: "ready", incidentCount: 1 });
+    } finally {
+      dateNow.mockRestore();
+    }
+
+    expect(
+      prismaMocks.transaction.mock.calls.map(([, options]) => options),
+    ).toEqual([
+      { isolationLevel: "Serializable", timeout: 60_000 },
+      { isolationLevel: "Serializable", timeout: 45_000 },
+      { isolationLevel: "Serializable", timeout: 5_000 },
+    ]);
+  });
+
+  it("does not start a campaign claim after writer-lease headroom is consumed", async () => {
+    configureRequestlessCampaignReservationClaim();
+    leaseMocks.withPostgresAdvisoryTextLease.mockImplementation(
+      async (
+        _client: unknown,
+        _key: string,
+        worker: (context: { deadlineAt: Date; timeoutMs: number }) =>
+          Promise<unknown>,
+        options?: { timeout?: number },
+      ) => {
+        expect(options).toEqual({ timeout: 240_000 });
+        return {
+          acquired: true,
+          value: await worker({
+            deadlineAt: new Date(105_000),
+            timeoutMs: 240_000,
+          }),
+        };
+      },
+    );
+    const dateNow = vi.spyOn(Date, "now").mockReturnValue(100_000);
+
+    try {
+      await expect(
+        claimCourseSupportBatch({
+          ownerThreadId: "owner-thread-campaign-deadline-exhausted",
+          branch: "automation/course-support-20260715-200000",
+          baseSha,
+          now,
+          maxCourses: 5,
+        }),
+      ).rejects.toThrow("writer lease budget was exhausted");
+    } finally {
+      dateNow.mockRestore();
+      // The deadline aborts before the transaction consumes the configured
+      // transaction-side selection snapshots. Clear those one-shot fixtures
+      // so they cannot leak into the next test under clearAllMocks().
+      prismaMocks.batchFindMany.mockReset();
+      prismaMocks.supportIncidentFindMany.mockReset();
+    }
+
+    expect(prismaMocks.transaction).not.toHaveBeenCalled();
+  });
+
+  it("fails a reserved campaign claim closed when a concurrent ordinary completion changes the exact history window", async () => {
+    configureRequestlessCampaignReservationClaim({
+      transactionHistory: (history) => [
+        ordinaryFairnessBatch(0, {
+          id: "concurrent-ordinary-completion",
+          completedAt: now,
+          revision: 17,
+        }),
+        ...history.slice(0, 2),
+      ],
+    });
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread-campaign-history-race",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        now,
+        maxCourses: 5,
+      }),
+    ).rejects.toThrow(
+      "The requestless parked-campaign reservation changed during atomic claim; rerun selection.",
+    );
+    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+  });
+
+  it("fails a reserved campaign claim closed when a campaign completion enters the history window", async () => {
+    configureRequestlessCampaignReservationClaim({
+      transactionHistory: (history) => [
+        ordinaryFairnessBatch(0, {
+          id: "concurrent-campaign-completion",
+          completedAt: now,
+          revision: 18,
+          summary: exactParkedCampaignBatchSummary(),
+        }),
+        ...history.slice(0, 2),
+      ],
+    });
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread-campaign-completion-race",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        now,
+        maxCourses: 5,
+      }),
+    ).rejects.toThrow(
+      "The requestless parked-campaign reservation changed during atomic claim; rerun selection.",
+    );
+    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+  });
+
+  it("fails a reserved campaign claim closed when an active campaign appears", async () => {
+    configureRequestlessCampaignReservationClaim({
+      transactionActiveBatches: [
+        activeBatch(9, {
+          providerFamilyKey: "CONCURRENT_CAMPAIGN",
+          failureFingerprint: "concurrent-campaign-fingerprint",
+          summary: exactParkedCampaignBatchSummary(),
+        }),
+      ],
+    });
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread-active-campaign-race",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        now,
+        maxCourses: 5,
+      }),
+    ).rejects.toThrow(
+      "The requestless parked-campaign reservation changed during atomic claim; rerun selection.",
+    );
+    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+  });
+
+  it("fails a reserved campaign claim closed when active real demand becomes due", async () => {
+    const newlyDueRealDemand = {
+      ...incidentRecord({
+        engineeringOnly: false,
+        preferences: [
+          {
+            teeSearch: {
+              id: "newly-due-real-search",
+              date: new Date("2026-07-20T00:00:00.000Z"),
+            },
+          },
+        ],
+      }),
+      id: "newly-due-real-incident",
+      courseId: "newly-due-real-course",
+      providerFamilyKey: "NEWLY_DUE_REAL",
+      failureFingerprint: "newly-due-real-fingerprint",
+      course: {
+        ...incidentRecord({
+          engineeringOnly: false,
+          preferences: [
+            {
+              teeSearch: {
+                id: "newly-due-real-search",
+                date: new Date("2026-07-20T00:00:00.000Z"),
+              },
+            },
+          ],
+        }).course,
+        id: "newly-due-real-course",
+      },
+    };
+    configureRequestlessCampaignReservationClaim({
+      transactionDueIncidents: (ordinaryIncident) => [
+        ordinaryIncident,
+        newlyDueRealDemand,
+      ],
+    });
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread-real-demand-race",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        now,
+        maxCourses: 5,
+      }),
+    ).rejects.toThrow(
+      "The requestless parked-campaign reservation changed during atomic claim; rerun selection.",
+    );
+    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+  });
+
+  it("fails a reserved campaign claim closed when its admission evidence drifts", async () => {
+    const { fixture, ordinaryIncident } =
+      configureRequestlessCampaignReservationClaim();
+    prismaMocks.supportIncidentFindUnique.mockResolvedValue({
+      ...fixture.reopenIncident,
+      revision: fixture.reopenIncident.revision + 1,
+    });
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread-campaign-reservation-drift",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        now,
+        maxCourses: 5,
+      }),
+    ).rejects.toThrow(
+      "A parked-course campaign member changed before atomic batch admission.",
+    );
+    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: ordinaryIncident.id }),
+      }),
+    );
+  });
+
+  it("keeps the remaining writer slot on ordinary work while a campaign reservation is active", async () => {
+    const fixture = parkedCampaignFixture();
+    const ordinaryIncident = {
+      ...fixture.candidateIncident,
+      id: "ordinary-while-campaign-active",
+      courseId: "ordinary-course-while-campaign-active",
+      providerFamilyKey: "ORDINARY_WHILE_CAMPAIGN_ACTIVE",
+      failureFingerprint: "ordinary-while-campaign-active-fingerprint",
+      course: {
+        ...fixture.candidateIncident.course,
+        id: "ordinary-course-while-campaign-active",
+      },
+    };
+    const currentOrdinaryIncident = {
+      ...fixture.currentIncident,
+      ...ordinaryIncident,
+      activeBatchId: null,
+      status: "AUTO_INVESTIGATING",
+    };
+    prismaMocks.batchFindMany
+      .mockResolvedValueOnce([
+        activeBatch(1, {
+          providerFamilyKey: "ACTIVE_CAMPAIGN_OTHER",
+          failureFingerprint: "active-campaign-other-fingerprint",
+          summary: exactParkedCampaignBatchSummary(),
+        }),
+      ])
+      .mockResolvedValueOnce(
+        Array.from({ length: 3 }, () => ({
+          summary: null,
+          incidents: [
+            {
+              incident: {
+                engineeringOnly: false,
+                activeRealSearchCount: 0,
+                kind: "NEEDS_ADAPTER",
+                earliestTargetDate: null,
+              },
+            },
+          ],
+        })),
+      );
+    prismaMocks.automationRunFindFirst.mockResolvedValue({
+      id: "campaign-run-1",
+      status: "RUNNING",
+      completedAt: null,
+      outcome: null,
+      audit: fixture.audit,
+    });
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([ordinaryIncident])
+      .mockResolvedValueOnce([fixture.parkedMember])
+      .mockResolvedValueOnce([
+        {
+          id: fixture.parkedMember.id,
+          cycle: fixture.parkedMember.cycle,
+          batchIncidents: [],
+        },
+      ])
+      .mockResolvedValueOnce([fixture.candidateIncident])
+      .mockResolvedValueOnce([currentOrdinaryIncident]);
+
+    const result = await claimCourseSupportBatch({
+      ownerThreadId: "owner-thread-active-campaign-reset",
+      branch: "automation/course-support-20260715-200000",
+      baseSha,
+      now,
+      maxCourses: 5,
+    });
+
+    expect(result).toMatchObject({
+      outcome: "ready",
+      incidentCount: 1,
+      providerFamilyKey: ordinaryIncident.providerFamilyKey,
+      fairnessReason: "PRIORITY",
+    });
+    expect(prismaMocks.batchCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          providerFamilyKey: ordinaryIncident.providerFamilyKey,
+          summary: expect.not.objectContaining({ campaign: expect.anything() }),
         }),
       }),
     );
@@ -6081,6 +6884,7 @@ describe("course-support claim demand fencing", () => {
     );
     expect(prismaMocks.transaction).toHaveBeenCalledWith(expect.any(Function), {
       isolationLevel: "Serializable",
+      timeout: 60_000,
     });
   });
 
@@ -10151,6 +10955,73 @@ describe("course-support inspection ownership", () => {
     ).toEqual({
       action: "CLAIM",
       source: "PARKED_CAMPAIGN",
+      maxCourses: 5,
+      selection: "ATOMIC_SERVER_SIDE",
+    });
+  });
+
+  it("serializes a due requestless campaign reservation ahead of historical ordinary work", () => {
+    expect(
+      buildCourseSupportResponderHandoff({
+        outcome: "ready",
+        hasExpiredBatch: false,
+        ownedByCurrentTask: false,
+        availableWriterSlots: 1,
+        ordinaryDispatchGroupCount: 1,
+        parkedCampaign: { status: "RUNNING", readyCount: 1 },
+        hasCurrentActiveRealDemand: false,
+        activeBatchCampaignSummaryStates: [],
+        recentBatches: Array.from({ length: 3 }, () => ({
+          includedEngineeringOnly: false,
+          includedCriticalRealDemand: false,
+          campaignSummaryState: "NON_CAMPAIGN" as const,
+        })),
+      }),
+    ).toEqual({
+      action: "CLAIM",
+      source: "PARKED_CAMPAIGN",
+      maxCourses: 5,
+      selection: "ATOMIC_SERVER_SIDE",
+    });
+  });
+
+  it("keeps recovery, resume, and active real demand ahead of a campaign reservation", () => {
+    const reservation = {
+      outcome: "ready" as const,
+      hasExpiredBatch: false,
+      ownedByCurrentTask: false,
+      availableWriterSlots: 1,
+      ordinaryDispatchGroupCount: 1,
+      parkedCampaign: { status: "RUNNING", readyCount: 1 },
+      hasCurrentActiveRealDemand: false,
+      activeBatchCampaignSummaryStates: [],
+      recentBatches: Array.from({ length: 3 }, () => ({
+        includedEngineeringOnly: false,
+        includedCriticalRealDemand: false,
+        campaignSummaryState: "NON_CAMPAIGN" as const,
+      })),
+    };
+
+    expect(
+      buildCourseSupportResponderHandoff({
+        ...reservation,
+        hasExpiredBatch: true,
+      }),
+    ).toEqual({ action: "RECOVER", source: "EXPIRED_BATCH" });
+    expect(
+      buildCourseSupportResponderHandoff({
+        ...reservation,
+        ownedByCurrentTask: true,
+      }),
+    ).toEqual({ action: "RESUME", source: "OWNED_BATCH" });
+    expect(
+      buildCourseSupportResponderHandoff({
+        ...reservation,
+        hasCurrentActiveRealDemand: true,
+      }),
+    ).toEqual({
+      action: "CLAIM",
+      source: "ORDINARY_DISPATCH",
       maxCourses: 5,
       selection: "ATOMIC_SERVER_SIDE",
     });

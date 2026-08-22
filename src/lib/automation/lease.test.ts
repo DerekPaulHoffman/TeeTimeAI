@@ -1,8 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { withPostgresAdvisoryLease } from "./lease";
+import {
+  withPostgresAdvisoryLease,
+  withPostgresAdvisoryTextLease,
+} from "./lease";
 
-describe("withPostgresAdvisoryLease", () => {
+describe("Postgres advisory leases", () => {
   it("skips the worker when the lease is already held", async () => {
     const client = createLeaseClient(false);
     let calls = 0;
@@ -46,6 +49,57 @@ describe("withPostgresAdvisoryLease", () => {
     expect(client.calls).toEqual([
       { sql: "SELECT pg_try_advisory_xact_lock($1::bigint) AS locked", values: [789n] }
     ]);
+  });
+
+  it("keeps the default timeout while exposing an absolute worker deadline", async () => {
+    const client = createLeaseClient(true);
+    const dateNow = vi.spyOn(Date, "now").mockReturnValue(1_000);
+
+    try {
+      await expect(
+        withPostgresAdvisoryTextLease(
+          client,
+          "writer-lane",
+          async (context) => context,
+        ),
+      ).resolves.toEqual({
+        acquired: true,
+        value: {
+          deadlineAt: new Date(61_000),
+          timeoutMs: 60_000,
+        },
+      });
+    } finally {
+      dateNow.mockRestore();
+    }
+
+    expect(client.transactionOptions).toEqual([{ timeout: 60_000 }]);
+  });
+
+  it("applies an explicit writer envelope to the transaction and deadline", async () => {
+    const client = createLeaseClient(true);
+    const dateNow = vi.spyOn(Date, "now").mockReturnValue(10_000);
+
+    try {
+      await expect(
+        withPostgresAdvisoryTextLease(
+          client,
+          "course-support-writer",
+          async (context) => context,
+          { timeout: 240_000 },
+        ),
+      ).resolves.toEqual({
+        acquired: true,
+        value: {
+          deadlineAt: new Date(250_000),
+          timeoutMs: 240_000,
+        },
+      });
+    } finally {
+      dateNow.mockRestore();
+    }
+
+    expect(client.transactionOptions).toEqual([{ timeout: 240_000 }]);
   });
 });
 

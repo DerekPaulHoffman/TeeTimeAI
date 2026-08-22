@@ -91,6 +91,7 @@ import {
   assessParkedCourseCampaignRequestlessStaleOwnershipRecovery,
   createParkedCourseCampaignAttemptLedgerFingerprint,
   createParkedCourseCampaignAudit,
+  loadParkedCourseCampaignAdmissionMembers,
   PARKED_COURSE_CAMPAIGN_PROMPT_VERSION,
 } from "./course-support-campaign";
 import { persistCourseSupportSearchExecutionFence } from "./course-support-search-execution-fence";
@@ -113,6 +114,20 @@ describe("course monitoring write serialization", () => {
         }
         if (sql.includes('FROM "CourseAutomationDiscovery"')) {
           return [{ id, courseId, createdAt: timestamp }];
+        }
+        if (
+          sql.includes("FOR UPDATE") &&
+          [
+            'FROM "CourseSupportBatch"',
+            'FROM "AutomationRun"',
+            'FROM "CourseSupportBatchIncident"',
+            'FROM "CourseSupportVerificationRequest"',
+          ].some((table) => sql.includes(table))
+        ) {
+          return [...new Set(query.values ?? [])]
+            .filter((value): value is string => typeof value === "string")
+            .sort((left, right) => left.localeCompare(right))
+            .map((rowId) => ({ id: rowId }));
         }
         return [];
       },
@@ -651,7 +666,6 @@ describe("course monitoring write serialization", () => {
         }),
       }),
     );
-
     transactionMocks.courseSupportIncident.updateMany.mockClear();
     transactionMocks.courseMonitoringEvent.create.mockClear();
     transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
@@ -1096,6 +1110,16 @@ describe("course monitoring write serialization", () => {
     const handoffAt = new Date("2026-08-20T12:15:00.000Z");
     const startedAt = new Date("2026-08-20T12:20:00.000Z");
     const parkedAt = new Date("2026-08-20T12:30:00.000Z");
+    const latestProbe = {
+      id: "probe-descendant-planned",
+      courseId: "course-1",
+      observedAt: new Date("2026-08-20T12:26:00.000Z"),
+    };
+    const latestDiscovery = {
+      id: "discovery-descendant-planned",
+      courseId: "course-1",
+      createdAt: new Date("2026-08-20T12:27:00.000Z"),
+    };
     const stages = [
       ["OFFICIAL_IDENTITY", "OFFICIAL_IDENTITY"],
       ["TYPED_ADAPTER", "TYPED_PROVIDER_ADAPTER"],
@@ -1178,10 +1202,17 @@ describe("course monitoring write serialization", () => {
         },
       ],
     });
-    const batchIncidents = [
-      {
-        id: "batch-entry-descendant",
-        batchId: "batch-descendant",
+    const batchIncidents = Array.from({ length: 20 }, (_, index) => {
+      const suffix = String(index + 1).padStart(2, "0");
+      const createdAt = new Date(
+        new Date("2026-08-20T12:19:00.000Z").getTime() + index,
+      );
+      const completedAt = new Date(
+        new Date("2026-08-20T12:25:00.000Z").getTime() + index,
+      );
+      return {
+        id: `batch-entry-descendant-${suffix}`,
+        batchId: `batch-descendant-${suffix}`,
         incidentId: "incident-campaign",
         courseId: "course-1",
         cycle: 5,
@@ -1191,40 +1222,49 @@ describe("course monitoring write serialization", () => {
         proofSnapshot: { providerExecution: true },
         verifiedIncidentUpdatedAt: null,
         verifiedAt: null,
-        createdAt: new Date("2026-08-20T12:19:00.000Z"),
-        updatedAt: new Date("2026-08-20T12:25:00.000Z"),
+        createdAt,
+        updatedAt: completedAt,
         batch: {
-          id: "batch-descendant",
+          id: `batch-descendant-${suffix}`,
           status: "PARTIAL",
           revision: 3,
-          ownerAutomationRunId: null,
+          ownerAutomationRunId: `owner-descendant-${suffix}`,
           baseSha: "release-old",
           releaseSha: "release-old",
           deployedAt: new Date("2026-08-20T12:17:00.000Z"),
-          createdAt: new Date("2026-08-20T12:18:00.000Z"),
-          updatedAt: new Date("2026-08-20T12:25:00.000Z"),
-          recheckDispatchKey: "dispatch-descendant",
+          createdAt,
+          updatedAt: completedAt,
+          recheckDispatchKey: `dispatch-descendant-${suffix}`,
           recheckDispatchStartedAt: new Date("2026-08-20T12:18:30.000Z"),
           recheckDispatchedAt: new Date("2026-08-20T12:18:45.000Z"),
-          completedAt: new Date("2026-08-20T12:25:00.000Z"),
+          completedAt,
           summary: { closeout: { providerExecutionStarted: true } },
-          ownerAutomationRun: null,
+          ownerAutomationRun: {
+            id: `owner-descendant-${suffix}`,
+            promptVersion: COURSE_SUPPORT_RESPONDER_PROMPT_VERSION,
+            kind: "COURSE_SUPPORT",
+            status: "COMPLETED",
+            runtimeVersion: "release-old",
+            completedAt,
+            outcome: "needs_human",
+            notes: `closed descendant ${suffix}`,
+          },
         },
         verificationRequests: [
           {
-            id: "request-descendant",
+            id: `request-descendant-${suffix}`,
             courseId: "course-1",
             releaseSha: "release-old",
             providerSnapshotFingerprint: currentProviderSnapshotFingerprint,
             providerSnapshotAt: startedAt,
             discoveryAttemptedAt: null,
             discoveryVerifiedAt: null,
-            createdAt: new Date("2026-08-20T12:19:00.000Z"),
-            updatedAt: new Date("2026-08-20T12:25:00.000Z"),
+            createdAt,
+            updatedAt: completedAt,
             status: "SUCCEEDED" as const,
             revision: 3,
             attemptCount: 1,
-            workflowRunId: "workflow-descendant",
+            workflowRunId: `workflow-descendant-${suffix}`,
             startedAt,
             outcome: "FETCH_FAILED" as const,
             failureClass: "MISSING_METADATA" as const,
@@ -1232,8 +1272,8 @@ describe("course monitoring write serialization", () => {
             lastError: "metadata remained incomplete",
           },
         ],
-      },
-    ];
+      };
+    });
     const history = assessParkedCourseCampaignSameCycleRecoveryHistory({
       courseId: "course-1",
       cycle: 5,
@@ -1332,8 +1372,8 @@ describe("course monitoring write serialization", () => {
       batchIncidents,
       course: {
         ...currentProviderCourse,
-        probes: [],
-        automationDiscoveries: [],
+        probes: [latestProbe],
+        automationDiscoveries: [latestDiscovery],
         preferences: [],
         monitoringStatus: {
           state: "ENGINEERING_VERIFICATION_NEEDED",
@@ -1344,36 +1384,57 @@ describe("course monitoring write serialization", () => {
         },
       },
     };
+    const plannerFindMany = vi
+      .fn()
+      .mockResolvedValueOnce([baseIncident])
+      .mockResolvedValueOnce([{ ...baseIncident, batchIncidents }]);
+    const plannedMembers = await loadParkedCourseCampaignAdmissionMembers(
+      campaignAudit,
+      {
+        courseSupportIncident: { findMany: plannerFindMany },
+      } as never,
+      "campaign-run-1",
+      "release-current",
+    );
+    expect(plannedMembers).toEqual([
+      expect.objectContaining({
+        admissionMode: "DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY",
+        latestProbeId: latestProbe.id,
+        latestDiscoveryId: latestDiscovery.id,
+      }),
+    ]);
+    const planned = plannedMembers[0]!;
     const input = {
       courseId: "course-1",
       incidentId: "incident-campaign",
-      expectedCycle: 5,
-      expectedRevision: 12,
-      expectedMonitoringRevision: 16,
-      capturedRevision: 5,
-      capturedMonitoringRevision: 9,
-      capturedCycle: 3,
-      campaignCapturedAt: campaignAudit.capturedAt,
-      admissionMode: "DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY" as const,
-      expectedSameCycleRecoveryHistoryDigest: history!.historyDigest,
-      expectedPlaybookNextStage: "BROWSER_ADAPTER_RETRY",
-      expectedPlaybookCompletedStageCount: 5,
+      expectedCycle: planned.cycle,
+      expectedRevision: planned.revision,
+      expectedMonitoringRevision: planned.monitoringRevision,
+      capturedRevision: planned.capturedRevision,
+      capturedMonitoringRevision: planned.capturedMonitoringRevision,
+      capturedCycle: planned.capturedCycle,
+      campaignCapturedAt: planned.campaignCapturedAt,
+      admissionMode: planned.admissionMode,
+      expectedSameCycleRecoveryHistoryDigest:
+        planned.sameCycleRecoveryHistoryDigest,
+      expectedPlaybookNextStage: planned.playbookNextStage,
+      expectedPlaybookCompletedStageCount: planned.playbookCompletedStageCount,
       currentRuntimeVersion: "release-current",
-      capturedKind: "NEEDS_ADAPTER" as const,
-      capturedProviderFamilyKey: "SOURCE_MISSING",
-      expectedKind: "NEEDS_ADAPTER" as const,
-      expectedFailureClass: "MISSING_METADATA" as const,
-      expectedLatestProbeAt: null,
-      expectedLatestDiscoveryAt: null,
-      expectedLatestProbeId: null,
-      expectedLatestDiscoveryId: null,
-      expectedProviderFamilyKey: "GENERIC_HTTP",
-      expectedFailureFingerprint: "METADATA:MISSING",
-      expectedMonitoringFailureFingerprint: "METADATA:MISSING",
-      expectedProviderSnapshotFingerprint: currentProviderSnapshotFingerprint,
-      expectedAttemptLedgerFingerprint:
-        createParkedCourseCampaignAttemptLedgerFingerprint(attemptLedger),
-      expectedPlaybookConclusion: "INCOMPLETE",
+      capturedKind: planned.capturedKind,
+      capturedProviderFamilyKey: planned.capturedProviderFamilyKey,
+      expectedKind: planned.kind,
+      expectedFailureClass: planned.failureClass,
+      expectedLatestProbeAt: planned.latestProbeAt,
+      expectedLatestDiscoveryAt: planned.latestDiscoveryAt,
+      expectedLatestProbeId: planned.latestProbeId,
+      expectedLatestDiscoveryId: planned.latestDiscoveryId,
+      expectedProviderFamilyKey: planned.providerFamilyKey,
+      expectedFailureFingerprint: planned.failureFingerprint,
+      expectedMonitoringFailureFingerprint:
+        planned.monitoringFailureFingerprint,
+      expectedProviderSnapshotFingerprint: planned.providerSnapshotFingerprint,
+      expectedAttemptLedgerFingerprint: planned.attemptLedgerFingerprint,
+      expectedPlaybookConclusion: planned.playbookConclusion,
       campaignRunId: "campaign-run-1",
       campaignMembershipDigest: campaignAudit.membershipDigest,
       now: recoveredAt,
@@ -1389,6 +1450,10 @@ describe("course monitoring write serialization", () => {
     );
     transactionMocks.courseSupportBatchIncident.findMany.mockResolvedValue(
       batchIncidents,
+    );
+    transactionMocks.courseProbe.findFirst.mockResolvedValue(latestProbe);
+    transactionMocks.courseAutomationDiscovery.findFirst.mockResolvedValue(
+      latestDiscovery,
     );
 
     await expect(
@@ -1432,6 +1497,34 @@ describe("course monitoring write serialization", () => {
         }),
       }),
     );
+    const historyLockQueries = transactionMocks.$queryRaw.mock.calls.filter(
+      ([query]) => {
+        const sql = (query as { strings?: readonly string[] }).strings?.join("");
+        return (
+          sql?.includes("FOR UPDATE") &&
+          [
+            'FROM "CourseSupportBatch"',
+            'FROM "AutomationRun"',
+            'FROM "CourseSupportBatchIncident"',
+            'FROM "CourseSupportVerificationRequest"',
+          ].some((table) => sql.includes(table))
+        );
+      },
+    );
+    expect(historyLockQueries).toHaveLength(4);
+    expect(
+      historyLockQueries.map(
+        ([query]) => (query as { values?: unknown[] }).values?.length,
+      ),
+    ).toEqual([20, 20, 20, 20]);
+    expect(transactionMocks.automationRun.updateMany).toHaveBeenCalledTimes(1);
+    expect(transactionMocks.courseSupportBatch.updateMany).not.toHaveBeenCalled();
+    expect(
+      transactionMocks.courseSupportBatchIncident.updateMany,
+    ).not.toHaveBeenCalled();
+    expect(
+      transactionMocks.courseSupportVerificationRequest.updateMany,
+    ).not.toHaveBeenCalled();
 
     transactionMocks.courseSupportIncident.updateMany.mockClear();
     transactionMocks.courseMonitoringEvent.create.mockClear();
@@ -1455,23 +1548,132 @@ describe("course monitoring write serialization", () => {
       transactionMocks.courseSupportIncident.updateMany,
     ).not.toHaveBeenCalled();
 
+    for (const changedCourseEvidence of [
+      {
+        ...baseIncident.course,
+        probes: [
+          latestProbe,
+          { ...latestProbe, id: "probe-descendant-same-time-sibling" },
+        ],
+      },
+      {
+        ...baseIncident.course,
+        automationDiscoveries: [
+          latestDiscovery,
+          {
+            ...latestDiscovery,
+            id: "discovery-descendant-same-time-sibling",
+          },
+        ],
+      },
+    ]) {
+      transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
+        ...baseIncident,
+        course: changedCourseEvidence,
+      });
+      await expect(
+        reopenParkedCourseForResponderCampaignInTransaction(
+          transactionMocks as never,
+          input,
+        ),
+      ).resolves.toEqual({ admitted: false });
+      expect(
+        transactionMocks.courseSupportIncident.updateMany,
+      ).not.toHaveBeenCalled();
+    }
+
     transactionMocks.courseSupportIncident.findUnique.mockResolvedValue(
       baseIncident,
     );
-    transactionMocks.courseSupportVerificationRequest.updateMany.mockResolvedValueOnce(
-      { count: 0 },
+    const defaultQueryRaw = transactionMocks.$queryRaw.getMockImplementation()!;
+    transactionMocks.$queryRaw.mockImplementation(
+      async (query: { strings?: readonly string[]; values?: unknown[] }) => {
+        const sql = query.strings?.join("") ?? "";
+        if (sql.includes('FROM "CourseProbe"')) {
+          return [
+            latestProbe,
+            { ...latestProbe, id: "probe-descendant-late-sibling" },
+          ];
+        }
+        return defaultQueryRaw(query);
+      },
     );
-
     await expect(
       reopenParkedCourseForResponderCampaignInTransaction(
         transactionMocks as never,
         input,
       ),
     ).resolves.toEqual({ admitted: false });
-
     expect(
       transactionMocks.courseSupportIncident.updateMany,
     ).not.toHaveBeenCalled();
+
+    transactionMocks.$queryRaw.mockImplementation(
+      async (query: { strings?: readonly string[]; values?: unknown[] }) => {
+        const sql = query.strings?.join("") ?? "";
+        if (sql.includes('FROM "CourseAutomationDiscovery"')) {
+          return [
+            latestDiscovery,
+            {
+              ...latestDiscovery,
+              id: "discovery-descendant-late-sibling",
+            },
+          ];
+        }
+        return defaultQueryRaw(query);
+      },
+    );
+    await expect(
+      reopenParkedCourseForResponderCampaignInTransaction(
+        transactionMocks as never,
+        input,
+      ),
+    ).resolves.toEqual({ admitted: false });
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).not.toHaveBeenCalled();
+
+    for (const arrangeLockedHistoryRace of [
+      () =>
+        transactionMocks.$queryRaw.mockImplementation(
+          async (query: { strings?: readonly string[]; values?: unknown[] }) => {
+            const sql = query.strings?.join("") ?? "";
+            if (sql.includes('FROM "CourseSupportVerificationRequest"')) {
+              return [];
+            }
+            return defaultQueryRaw(query);
+          },
+        ),
+      () =>
+        transactionMocks.$queryRaw.mockImplementation(
+          async (query: { strings?: readonly string[]; values?: unknown[] }) => {
+            const sql = query.strings?.join("") ?? "";
+            if (sql.includes('FROM "CourseSupportBatchIncident"')) {
+              const expectedIds = [...new Set(query.values ?? [])]
+                .filter((value): value is string => typeof value === "string")
+                .sort((left, right) => left.localeCompare(right));
+              return expectedIds.map((id, index) => ({
+                id: index === 0 ? "batch-entry-descendant-substituted" : id,
+              }));
+            }
+            return defaultQueryRaw(query);
+          },
+        ),
+    ]) {
+      transactionMocks.courseSupportIncident.findUnique.mockResolvedValue(
+        baseIncident,
+      );
+      arrangeLockedHistoryRace();
+      await expect(
+        reopenParkedCourseForResponderCampaignInTransaction(
+          transactionMocks as never,
+          input,
+        ),
+      ).resolves.toEqual({ admitted: false });
+      expect(
+        transactionMocks.courseSupportIncident.updateMany,
+      ).not.toHaveBeenCalled();
+    }
   });
 
   it("atomically resumes only the exact requestless zero-stage +3 descendant", async () => {
@@ -1837,8 +2039,10 @@ describe("course monitoring write serialization", () => {
       campaignMembershipDigest: campaignAudit.membershipDigest,
       now: recoveredAt,
     };
+    const defaultQueryRaw = transactionMocks.$queryRaw.getMockImplementation()!;
     const arrangeBase = () => {
       vi.clearAllMocks();
+      transactionMocks.$queryRaw.mockImplementation(defaultQueryRaw);
       transactionMocks.courseSupportIncident.findUnique.mockResolvedValue(
         baseIncident,
       );
@@ -2372,8 +2576,18 @@ describe("course monitoring write serialization", () => {
       campaignMembershipDigest: campaignAudit.membershipDigest,
       now: recoveredAt,
     };
+    const defaultQueryRaw = transactionMocks.$queryRaw.getMockImplementation()!;
+    const failLockedTable = (table: string) =>
+      transactionMocks.$queryRaw.mockImplementation(
+        async (query: { strings?: readonly string[]; values?: unknown[] }) => {
+          const sql = query.strings?.join("") ?? "";
+          if (sql.includes(table)) return [];
+          return defaultQueryRaw(query);
+        },
+      );
     const arrangeBase = () => {
       vi.clearAllMocks();
+      transactionMocks.$queryRaw.mockImplementation(defaultQueryRaw);
       transactionMocks.courseSupportIncident.findUnique.mockResolvedValue(
         baseIncident,
       );
@@ -2466,9 +2680,18 @@ describe("course monitoring write serialization", () => {
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       select: { id: true, courseId: true, createdAt: true },
     });
-    const evidenceLockQueries = transactionMocks.$queryRaw.mock.calls.map(
-      ([query]) => query as { strings: readonly string[]; values: unknown[] },
-    );
+    const evidenceLockQueries = transactionMocks.$queryRaw.mock.calls
+      .map(
+        ([query]) =>
+          query as { strings: readonly string[]; values: unknown[] },
+      )
+      .filter((query) => {
+        const sql = query.strings.join("");
+        return (
+          sql.includes('FROM "CourseProbe"') ||
+          sql.includes('FROM "CourseAutomationDiscovery"')
+        );
+      });
     expect(evidenceLockQueries).toHaveLength(2);
     expect(evidenceLockQueries[0]!.strings.join("")).toContain(
       'FROM "CourseProbe"',
@@ -2488,9 +2711,25 @@ describe("course monitoring write serialization", () => {
       latestDiscovery.courseId,
       latestDiscovery.createdAt,
     ]);
-    expect(
-      transactionMocks.courseSupportBatch.updateMany,
-    ).toHaveBeenCalledTimes(3);
+    const historyLockQueries = transactionMocks.$queryRaw.mock.calls
+      .map(
+        ([query]) =>
+          query as { strings: readonly string[]; values: unknown[] },
+      )
+      .filter((query) => {
+        const sql = query.strings.join("");
+        return [
+          'FROM "CourseSupportBatch"',
+          'FROM "AutomationRun"',
+          'FROM "CourseSupportBatchIncident"',
+          'FROM "CourseSupportVerificationRequest"',
+        ].some((table) => sql.includes(table));
+      });
+    expect(historyLockQueries).toHaveLength(4);
+    expect(historyLockQueries.map((query) => query.values.length)).toEqual([
+      3, 3, 3, 3,
+    ]);
+    expect(transactionMocks.courseSupportBatch.updateMany).not.toHaveBeenCalled();
     expect(
       transactionMocks.courseSupportBatchIncident.findMany,
     ).toHaveBeenCalledWith(
@@ -2499,42 +2738,12 @@ describe("course monitoring write serialization", () => {
         take: 21,
       }),
     );
-    expect(transactionMocks.courseSupportBatch.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({
-          id: "batch-1",
-          createdAt: batchIncidents[0]!.batch.createdAt,
-          updatedAt: batchIncidents[0]!.batch.updatedAt,
-        }),
-        data: { updatedAt: batchIncidents[0]!.batch.updatedAt },
-      }),
-    );
     expect(
       transactionMocks.courseSupportBatchIncident.updateMany,
-    ).toHaveBeenCalledTimes(3);
+    ).not.toHaveBeenCalled();
     expect(
       transactionMocks.courseSupportVerificationRequest.updateMany,
-    ).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({
-          id: "request-1",
-          courseId: "course-1",
-          providerSnapshotFingerprint,
-          providerSnapshotAt:
-            batchIncidents[0]!.verificationRequests[0]!.providerSnapshotAt,
-          discoveryAttemptedAt:
-            batchIncidents[0]!.verificationRequests[0]!.discoveryAttemptedAt,
-          discoveryVerifiedAt:
-            batchIncidents[0]!.verificationRequests[0]!.discoveryVerifiedAt,
-          createdAt: materialChangeAt,
-          updatedAt: batchIncidents[0]!.verificationRequests[0]!.updatedAt,
-          evidence: { equals: { ordinal: 1, providerExecution: true } },
-        }),
-        data: {
-          updatedAt: batchIncidents[0]!.verificationRequests[0]!.updatedAt,
-        },
-      }),
-    );
+    ).not.toHaveBeenCalled();
     expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
@@ -2578,24 +2787,12 @@ describe("course monitoring write serialization", () => {
         transactionMocks.automationRun.updateMany.mockResolvedValueOnce({
           count: 0,
         }),
-      () =>
-        transactionMocks.automationRun.updateMany
-          .mockResolvedValueOnce({ count: 1 })
-          .mockResolvedValueOnce({ count: 0 }),
+      () => failLockedTable('FROM "AutomationRun"'),
       () =>
         transactionMocks.course.updateMany.mockResolvedValueOnce({ count: 0 }),
-      () =>
-        transactionMocks.courseSupportBatch.updateMany.mockResolvedValueOnce({
-          count: 0,
-        }),
-      () =>
-        transactionMocks.courseSupportBatchIncident.updateMany.mockResolvedValueOnce(
-          { count: 0 },
-        ),
-      () =>
-        transactionMocks.courseSupportVerificationRequest.updateMany.mockResolvedValueOnce(
-          { count: 0 },
-        ),
+      () => failLockedTable('FROM "CourseSupportBatch"'),
+      () => failLockedTable('FROM "CourseSupportBatchIncident"'),
+      () => failLockedTable('FROM "CourseSupportVerificationRequest"'),
       () => {
         const timestampDrift = batchIncidents.map((entry, index) =>
           index === 0
@@ -2637,25 +2834,24 @@ describe("course monitoring write serialization", () => {
             id: "discovery-appended-at-same-timestamp",
           },
         ),
-      () => transactionMocks.$queryRaw.mockResolvedValueOnce([]),
-      () =>
-        transactionMocks.$queryRaw
-          .mockResolvedValueOnce([latestProbe])
-          .mockResolvedValueOnce([]),
+      () => failLockedTable('FROM "CourseProbe"'),
+      () => failLockedTable('FROM "CourseAutomationDiscovery"'),
       () =>
         transactionMocks.courseMonitoringEvent.findFirst.mockResolvedValueOnce({
           id: "late-recovery-marker",
         }),
     ];
-    for (const arrangeRace of raceControls) {
+    for (const [raceIndex, arrangeRace] of raceControls.entries()) {
       arrangeBase();
       arrangeRace();
-      await expect(
-        reopenParkedCourseForResponderCampaignInTransaction(
+      const raceResult =
+        await reopenParkedCourseForResponderCampaignInTransaction(
           transactionMocks as never,
           input,
-        ),
-      ).resolves.toEqual({ admitted: false });
+        );
+      expect(raceResult, `race control ${raceIndex}`).toEqual({
+        admitted: false,
+      });
       expect(
         transactionMocks.courseSupportIncident.updateMany,
       ).not.toHaveBeenCalled();
@@ -3200,8 +3396,10 @@ describe("course monitoring write serialization", () => {
       campaignMembershipDigest: campaignAudit.membershipDigest,
       now: recoveredAt,
     };
+    const defaultQueryRaw = transactionMocks.$queryRaw.getMockImplementation()!;
     const arrangeBase = () => {
       vi.clearAllMocks();
+      transactionMocks.$queryRaw.mockImplementation(defaultQueryRaw);
       transactionMocks.courseSupportIncident.findUnique.mockResolvedValue(
         baseIncident,
       );
@@ -3251,35 +3449,23 @@ describe("course monitoring write serialization", () => {
     ).resolves.toMatchObject({ admitted: true, cycle: 4 });
     expect(
       transactionMocks.courseSupportVerificationRequest.updateMany,
-    ).toHaveBeenCalledTimes(1);
-    expect(transactionMocks.courseSupportBatch.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: expect.objectContaining({
-          id: "batch-after-marker",
-          updatedAt: postMarkerEntry.batch.updatedAt,
-        }),
-        data: { updatedAt: postMarkerEntry.batch.updatedAt },
-      }),
-    );
+    ).not.toHaveBeenCalled();
+    expect(transactionMocks.courseSupportBatch.updateMany).not.toHaveBeenCalled();
     expect(
-      transactionMocks.courseSupportVerificationRequest.updateMany,
+      transactionMocks.courseSupportBatchIncident.updateMany,
+    ).not.toHaveBeenCalled();
+    expect(
+      transactionMocks.courseSupportVerificationRequest.findFirst,
     ).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          id: "request-before-marker",
-          updatedAt: preMarkerEntry.verificationRequests[0]!.updatedAt,
+          batchIncidentId: {
+            in: ["batch-entry-before-marker", "batch-entry-after-marker"],
+          },
+          id: { notIn: ["request-before-marker"] },
         }),
-        data: {
-          updatedAt: preMarkerEntry.verificationRequests[0]!.updatedAt,
-        },
       }),
     );
-    expect(
-      transactionMocks.courseSupportVerificationRequest.findFirst,
-    ).toHaveBeenCalledWith({
-      where: { batchIncidentId: "batch-entry-after-marker" },
-      select: { id: true },
-    });
     const incidentUpdate =
       transactionMocks.courseSupportIncident.updateMany.mock.calls[0]![0];
     expect(incidentUpdate.data).toMatchObject({
@@ -3339,10 +3525,18 @@ describe("course monitoring write serialization", () => {
     ]);
 
     arrangeBase();
-    transactionMocks.$queryRaw.mockResolvedValueOnce([
-      legacyDiscovery,
-      { ...legacyDiscovery, id: "discovery-same-timestamp-sibling" },
-    ]);
+    transactionMocks.$queryRaw.mockImplementation(
+      async (query: { strings?: readonly string[]; values?: unknown[] }) => {
+        const sql = query.strings?.join("") ?? "";
+        if (sql.includes('FROM "CourseAutomationDiscovery"')) {
+          return [
+            legacyDiscovery,
+            { ...legacyDiscovery, id: "discovery-same-timestamp-sibling" },
+          ];
+        }
+        return defaultQueryRaw(query);
+      },
+    );
     await expect(
       reopenParkedCourseForResponderCampaignInTransaction(
         transactionMocks as never,
@@ -3354,9 +3548,9 @@ describe("course monitoring write serialization", () => {
     ).not.toHaveBeenCalled();
 
     arrangeBase();
-    transactionMocks.courseSupportVerificationRequest.findFirst
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({ id: "late-post-marker-request" });
+    transactionMocks.courseSupportVerificationRequest.findFirst.mockResolvedValueOnce(
+      { id: "late-post-marker-request" },
+    );
     await expect(
       reopenParkedCourseForResponderCampaignInTransaction(
         transactionMocks as never,

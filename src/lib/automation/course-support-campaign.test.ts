@@ -516,7 +516,39 @@ describe("parked course campaign", () => {
       capturedAt,
       members: [captured],
     });
-    const makeRow = () =>
+    const makeEntry = (ordinal: number) => ({
+      id: `batch-entry-descendant-${ordinal}`,
+      batchId: `batch-descendant-${ordinal}`,
+      incidentId: "incident-1",
+      courseId: "course-1",
+      cycle: 5,
+      result: "NEEDS_HUMAN",
+      createdAt: new Date("2026-08-20T12:19:00.000Z"),
+      batch: {
+        id: `batch-descendant-${ordinal}`,
+        createdAt: new Date("2026-08-20T12:18:00.000Z"),
+        baseSha: "release-old",
+        releaseSha: "release-old",
+        completedAt: new Date("2026-08-20T12:25:00.000Z"),
+        summary: { closeout: { providerExecutionStarted: true } },
+      },
+      verificationRequests: [
+        {
+          id: `request-descendant-${ordinal}`,
+          releaseSha: "release-old",
+          status: "SUCCEEDED",
+          revision: 3,
+          attemptCount: 1,
+          workflowRunId: `workflow-descendant-${ordinal}`,
+          startedAt,
+          outcome: "FETCH_FAILED",
+          failureClass: "MISSING_METADATA",
+          evidence: { providerExecution: true },
+          lastError: "metadata remained incomplete",
+        },
+      ],
+    });
+    const makeRow = (batchCount = 1) =>
       campaignParkedRow({
         cycle: 5,
         attemptLedger: partialPlaybookLedger(5, 5),
@@ -580,45 +612,24 @@ describe("parked course campaign", () => {
             },
           },
         ],
-        batchIncidents: [
-          {
-            id: "batch-entry-descendant",
-            batchId: "batch-descendant",
-            incidentId: "incident-1",
-            courseId: "course-1",
-            cycle: 5,
-            result: "NEEDS_HUMAN",
-            createdAt: new Date("2026-08-20T12:19:00.000Z"),
-            batch: {
-              id: "batch-descendant",
-              createdAt: new Date("2026-08-20T12:18:00.000Z"),
-              baseSha: "release-old",
-              releaseSha: "release-old",
-              completedAt: new Date("2026-08-20T12:25:00.000Z"),
-              summary: { closeout: { providerExecutionStarted: true } },
-            },
-            verificationRequests: [
-              {
-                id: "request-descendant",
-                releaseSha: "release-old",
-                status: "SUCCEEDED",
-                revision: 3,
-                attemptCount: 1,
-                workflowRunId: "workflow-descendant",
-                startedAt,
-                outcome: "FETCH_FAILED",
-                failureClass: "MISSING_METADATA",
-                evidence: { providerExecution: true },
-                lastError: "metadata remained incomplete",
-              },
-            ],
-          },
-        ],
+        batchIncidents: Array.from({ length: batchCount }, (_, index) =>
+          makeEntry(index + 1),
+        ),
       });
-    const database = (row: ReturnType<typeof makeRow>) =>
-      ({
-        courseSupportIncident: { findMany: vi.fn().mockResolvedValue([row]) },
-      }) as never;
+    const database = (row: ReturnType<typeof makeRow>) => {
+      const exactCurrentCycleRow = {
+        ...row,
+        batchIncidents: row.batchIncidents.slice(0, 21),
+      };
+      return {
+        courseSupportIncident: {
+          findMany: vi
+            .fn()
+            .mockResolvedValueOnce([row])
+            .mockResolvedValueOnce([exactCurrentCycleRow]),
+        },
+      } as never;
+    };
 
     const members = await loadParkedCourseCampaignAdmissionMembers(
       audit,
@@ -639,6 +650,60 @@ describe("parked course campaign", () => {
       /^[a-f0-9]{64}$/u,
     );
 
+    const twentyBatchMembers = await loadParkedCourseCampaignAdmissionMembers(
+      audit,
+      database(makeRow(20)),
+      "campaign-run-1",
+      "release-current",
+    );
+    expect(twentyBatchMembers).toEqual([
+      expect.objectContaining({
+        admissionMode: "DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY",
+      }),
+    ]);
+    for (const batchCount of [21, 22]) {
+      await expect(
+        loadParkedCourseCampaignAdmissionMembers(
+          audit,
+          database(makeRow(batchCount)),
+          "campaign-run-1",
+          "release-current",
+        ),
+      ).resolves.toEqual([]);
+    }
+
+    const latestProbeAt = new Date("2026-08-20T12:26:00.000Z");
+    const latestDiscoveryAt = new Date("2026-08-20T12:27:00.000Z");
+    const exactLatestEvidence = makeRow();
+    exactLatestEvidence.course.probes = [
+      {
+        id: "probe-descendant-latest",
+        courseId: "course-1",
+        observedAt: latestProbeAt,
+      },
+    ];
+    exactLatestEvidence.course.automationDiscoveries = [
+      {
+        id: "discovery-descendant-latest",
+        courseId: "course-1",
+        createdAt: latestDiscoveryAt,
+      },
+    ];
+    await expect(
+      loadParkedCourseCampaignAdmissionMembers(
+        audit,
+        database(exactLatestEvidence),
+        "campaign-run-1",
+        "release-current",
+      ),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        admissionMode: "DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY",
+        latestProbeId: "probe-descendant-latest",
+        latestDiscoveryId: "discovery-descendant-latest",
+      }),
+    ]);
+
     const duplicateHandoff = makeRow();
     duplicateHandoff.monitoringEvents.push({
       ...duplicateHandoff.monitoringEvents[1]!,
@@ -657,6 +722,18 @@ describe("parked course campaign", () => {
     missingHandoff.monitoringEvents.splice(1, 1);
     const gappedDescendant = makeRow();
     gappedDescendant.cycle = 6;
+    const duplicateLatestProbe = structuredClone(exactLatestEvidence);
+    duplicateLatestProbe.course.probes.push({
+      id: "probe-descendant-latest-sibling",
+      courseId: "course-1",
+      observedAt: latestProbeAt,
+    });
+    const duplicateLatestDiscovery = structuredClone(exactLatestEvidence);
+    duplicateLatestDiscovery.course.automationDiscoveries.push({
+      id: "discovery-descendant-latest-sibling",
+      courseId: "course-1",
+      createdAt: latestDiscoveryAt,
+    });
 
     for (const changed of [
       duplicateHandoff,
@@ -664,6 +741,8 @@ describe("parked course campaign", () => {
       staleCurrentSnapshot,
       missingHandoff,
       gappedDescendant,
+      duplicateLatestProbe,
+      duplicateLatestDiscovery,
     ]) {
       await expect(
         loadParkedCourseCampaignAdmissionMembers(

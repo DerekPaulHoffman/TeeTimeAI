@@ -78,7 +78,10 @@ import {
   type DeferredFailureHandoffSignal,
 } from "./course-support-deferred-failure-handoff";
 import { enqueueRemediatedCourseRechecks } from "./search-recheck-queue";
-import { withPostgresAdvisoryTextLease } from "./lease";
+import {
+  withPostgresAdvisoryTextLease,
+  type PostgresAdvisoryLeaseContext,
+} from "./lease";
 import {
   buildProviderFailureFingerprint,
   classifyProviderFailure,
@@ -127,16 +130,23 @@ import {
   type PersistedCourseSupportSearchExecutionFence,
 } from "./course-support-search-execution-fence";
 import {
+  classifyCourseSupportCampaignSummary,
   compareCourseSupportGroupPriority,
   isCriticalRealDemand,
+  selectCourseSupportAdmissionLane,
   selectCourseSupportBatch,
+  type CourseSupportCampaignSummaryState,
   type CourseSupportCandidate,
+  type RecentBatchFairnessEvidence,
   type SelectedCourseSupportBatch
 } from "./course-support-selection";
 import { MONITORING_STRATEGY_ACTIONS, type MonitoringStrategyAction } from "./monitoring-strategy";
 
 export {
+  classifyCourseSupportCampaignSummary,
+  selectCourseSupportAdmissionLane,
   selectCourseSupportBatch,
+  type CourseSupportCampaignSummaryState,
   type CourseSupportCandidate,
   type RecentBatchFairnessEvidence,
   type SelectedCourseSupportBatch
@@ -155,6 +165,17 @@ const EXPIRED_UNRELEASED_BATCH_RETRY_DELAY_MS = 60 * 1000;
 const COURSE_SUPPORT_WRITE_CONFLICT_MAX_ATTEMPTS = 3;
 const COURSE_SUPPORT_WRITE_CONFLICT_BACKOFF_MS = 25;
 const COURSE_SUPPORT_SERIALIZABLE_TRANSACTION_TIMEOUT_MS = 15_000;
+// One atomic campaign claim can fence five members with twenty historical
+// entries each, so it gets the same per-attempt budget as campaign closeout.
+const COURSE_SUPPORT_BATCH_CLAIM_TRANSACTION_TIMEOUT_MS = 60_000;
+const COURSE_SUPPORT_BATCH_CLAIM_PLANNING_BUDGET_MS = 60_000;
+// Planning and retry backoff consume this same absolute envelope. Each inner
+// attempt is capped to its remaining time while preserving release headroom.
+const COURSE_SUPPORT_BATCH_CLAIM_WRITER_LEASE_HEADROOM_MS = 5_000;
+const COURSE_SUPPORT_BATCH_CLAIM_WRITER_LEASE_TIMEOUT_MS =
+  COURSE_SUPPORT_BATCH_CLAIM_PLANNING_BUDGET_MS +
+  COURSE_SUPPORT_BATCH_CLAIM_TRANSACTION_TIMEOUT_MS *
+    COURSE_SUPPORT_WRITE_CONFLICT_MAX_ATTEMPTS;
 const COURSE_SUPPORT_ACTIVE_CAMPAIGN_FENCE_LIMIT = 100;
 const ACTIVE_BATCH_STATUSES: CourseSupportBatchStatus[] = ["CLAIMED", "IMPLEMENTING", "VERIFYING"];
 // Keep long-lived Codex ownership aligned with the global provider I/O limit.
@@ -560,8 +581,16 @@ const CURRENT_PROVIDER_EVIDENCE_TIE_PRIORITY = {
   DETACHED_FAILURE: 3
 } as const satisfies Record<CurrentProviderEvidenceSource, number>;
 
-export function runWithCourseSupportWriterTransitionLease<T>(worker: () => Promise<T>) {
-  return withPostgresAdvisoryTextLease(prisma, COURSE_SUPPORT_WRITER_LANE, worker);
+export function runWithCourseSupportWriterTransitionLease<T>(
+  worker: (context: PostgresAdvisoryLeaseContext) => Promise<T>,
+  options?: { timeout?: number },
+) {
+  return withPostgresAdvisoryTextLease(
+    prisma,
+    COURSE_SUPPORT_WRITER_LANE,
+    worker,
+    options,
+  );
 }
 
 export function isRetryableCourseSupportWriteConflict(error: unknown) {
@@ -700,14 +729,33 @@ function runCourseSupportTransactionWithRetry<T>(
 }
 
 function runCourseSupportSerializableTransactionWithRetry<T>(
-  operation: (transaction: Prisma.TransactionClient) => Promise<T>
+  operation: (transaction: Prisma.TransactionClient) => Promise<T>,
+  timeout = COURSE_SUPPORT_SERIALIZABLE_TRANSACTION_TIMEOUT_MS,
+  writerLeaseBudget?: {
+    deadlineAt: Date;
+    headroomMs: number;
+  },
 ) {
-  return withCourseSupportWriteConflictRetry(() =>
-    prisma.$transaction(operation, {
+  return withCourseSupportWriteConflictRetry(() => {
+    let attemptTimeout = timeout;
+    if (writerLeaseBudget) {
+      const remainingBeforeHeadroom = Math.floor(
+        writerLeaseBudget.deadlineAt.getTime() -
+          Date.now() -
+          writerLeaseBudget.headroomMs,
+      );
+      if (remainingBeforeHeadroom < 1) {
+        throw new Error(
+          "The course-support writer lease budget was exhausted before the serializable transaction could start.",
+        );
+      }
+      attemptTimeout = Math.min(timeout, remainingBeforeHeadroom);
+    }
+    return prisma.$transaction(operation, {
       isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-      timeout: COURSE_SUPPORT_SERIALIZABLE_TRANSACTION_TIMEOUT_MS
-    })
-  );
+      timeout: attemptTimeout,
+    });
+  });
 }
 
 async function getCourseSupportDatabaseNow(transaction: Prisma.TransactionClient) {
@@ -1890,6 +1938,58 @@ export type CourseSupportResponderHandoff =
       source: "NO_ACTIONABLE_WORK" | "WRITER_CAPACITY";
     };
 
+const COURSE_SUPPORT_RECENT_FAIRNESS_BATCH_SELECT = {
+  id: true,
+  completedAt: true,
+  revision: true,
+  summary: true,
+  incidents: {
+    select: {
+      incident: {
+        select: {
+          engineeringOnly: true,
+          activeRealSearchCount: true,
+          kind: true,
+          earliestTargetDate: true,
+        },
+      },
+    },
+  },
+} satisfies Prisma.CourseSupportBatchSelect;
+
+type CourseSupportRecentFairnessBatch =
+  Prisma.CourseSupportBatchGetPayload<{
+    select: typeof COURSE_SUPPORT_RECENT_FAIRNESS_BATCH_SELECT;
+  }>;
+
+function buildCourseSupportRecentFairnessEvidence(
+  batches: readonly CourseSupportRecentFairnessBatch[],
+  now: Date
+): RecentBatchFairnessEvidence[] {
+  return batches.map((batch) => ({
+    includedEngineeringOnly: batch.incidents.some(
+      (entry) => entry.incident.engineeringOnly
+    ),
+    includedCriticalRealDemand: batch.incidents.some((entry) =>
+      isHistoricalCriticalRealDemand(entry.incident, now)
+    ),
+    campaignSummaryState: classifyCourseSupportCampaignSummary(batch.summary),
+  }));
+}
+
+function buildCourseSupportFairnessHistoryFence(
+  batches: readonly CourseSupportRecentFairnessBatch[],
+  now: Date,
+) {
+  const evidence = buildCourseSupportRecentFairnessEvidence(batches, now);
+  return batches.map((batch, index) => ({
+    id: batch.id,
+    completedAt: batch.completedAt?.toISOString() ?? null,
+    revision: batch.revision,
+    ...evidence[index],
+  }));
+}
+
 export function buildCourseSupportResponderHandoff(input: {
   outcome: ResponderOutcome;
   hasExpiredBatch: boolean;
@@ -1897,6 +1997,9 @@ export function buildCourseSupportResponderHandoff(input: {
   availableWriterSlots: number;
   ordinaryDispatchGroupCount: number;
   parkedCampaign: { status: string; readyCount: number } | null;
+  hasCurrentActiveRealDemand?: boolean;
+  activeBatchCampaignSummaryStates?: readonly CourseSupportCampaignSummaryState[];
+  recentBatches?: RecentBatchFairnessEvidence[];
 }): CourseSupportResponderHandoff {
   if (input.hasExpiredBatch && input.availableWriterSlots > 0) {
     return { action: "RECOVER", source: "EXPIRED_BATCH" };
@@ -1904,27 +2007,28 @@ export function buildCourseSupportResponderHandoff(input: {
   if (input.ownedByCurrentTask) {
     return { action: "RESUME", source: "OWNED_BATCH" };
   }
-  if (
-    input.outcome === "ready" &&
-    input.availableWriterSlots > 0 &&
-    input.ordinaryDispatchGroupCount > 0
-  ) {
+  const admissionLane =
+    input.outcome === "ready" && input.availableWriterSlots > 0
+      ? selectCourseSupportAdmissionLane({
+          priorityCandidateAvailable: input.ordinaryDispatchGroupCount > 0,
+          requestlessParkedCampaignAvailable: Boolean(
+            input.parkedCampaign?.status === "RUNNING" &&
+              input.parkedCampaign.readyCount > 0
+          ),
+          hasCurrentActiveRealDemand:
+            input.hasCurrentActiveRealDemand === true,
+          activeBatchCampaignSummaryStates:
+            input.activeBatchCampaignSummaryStates,
+          recentBatches: input.recentBatches
+        })
+      : null;
+  if (admissionLane) {
     return {
       action: "CLAIM",
-      source: "ORDINARY_DISPATCH",
-      maxCourses: 5,
-      selection: "ATOMIC_SERVER_SIDE",
-    };
-  }
-  if (
-    input.outcome === "ready" &&
-    input.availableWriterSlots > 0 &&
-    input.parkedCampaign?.status === "RUNNING" &&
-    input.parkedCampaign.readyCount > 0
-  ) {
-    return {
-      action: "CLAIM",
-      source: "PARKED_CAMPAIGN",
+      source:
+        admissionLane.lane === "REQUESTLESS_PARKED_CAMPAIGN"
+          ? "PARKED_CAMPAIGN"
+          : "ORDINARY_DISPATCH",
       maxCourses: 5,
       selection: "ATOMIC_SERVER_SIDE",
     };
@@ -2370,7 +2474,13 @@ export async function inspectCourseSupportQueue(input?: {
     validateOwnerThread(input.requestingThreadId);
   }
   const dueWhere = buildDueResponderIncidentWhere(now);
-  const [rawDueIncidents, activeBatches, expiredBatch, parkedCampaign] =
+  const [
+    rawDueIncidents,
+    activeBatches,
+    expiredBatch,
+    parkedCampaign,
+    recentCompletedBatches,
+  ] =
     await Promise.all([
       prisma.courseSupportIncident.findMany({
         where: dueWhere,
@@ -2419,6 +2529,7 @@ export async function inspectCourseSupportQueue(input?: {
           providerFamilyKey: true,
           failureFingerprint: true,
           ownerThreadId: true,
+          summary: true,
         },
       }),
       prisma.courseSupportBatch.findFirst({
@@ -2436,6 +2547,12 @@ export async function inspectCourseSupportQueue(input?: {
       }),
       inspectActiveParkedCourseCampaign({
         completeIfDone: input?.completeParkedCampaignIfDone === true,
+      }),
+      prisma.courseSupportBatch.findMany({
+        where: { completedAt: { not: null } },
+        orderBy: [{ completedAt: "desc" }, { id: "desc" }],
+        take: COURSE_SUPPORT_SYNTHETIC_FAIRNESS_WINDOW,
+        select: COURSE_SUPPORT_RECENT_FAIRNESS_BATCH_SELECT,
       }),
     ]);
   const activeBatch =
@@ -2646,6 +2763,10 @@ export async function inspectCourseSupportQueue(input?: {
     0,
     MAX_CONCURRENT_COURSE_SUPPORT_BATCHES - activeBatches.length,
   );
+  const recentFairnessEvidence = buildCourseSupportRecentFairnessEvidence(
+    recentCompletedBatches,
+    now,
+  );
   const handoff = buildCourseSupportResponderHandoff({
     outcome,
     hasExpiredBatch: Boolean(expiredBatch),
@@ -2653,6 +2774,11 @@ export async function inspectCourseSupportQueue(input?: {
     availableWriterSlots,
     ordinaryDispatchGroupCount: readOnlyDispatchGroups.length,
     parkedCampaign,
+    hasCurrentActiveRealDemand: dueRealCount > 0,
+    activeBatchCampaignSummaryStates: activeBatches.map((batch) =>
+      classifyCourseSupportCampaignSummary(batch.summary),
+    ),
+    recentBatches: recentFairnessEvidence,
   });
 
   return {
@@ -2778,7 +2904,8 @@ export async function claimCourseSupportBatch(input: {
     ? createHash("sha256").update(input.retryBatchId).digest("hex")
     : null;
 
-  const lease = await runWithCourseSupportWriterTransitionLease(async () => {
+  const lease = await runWithCourseSupportWriterTransitionLease(
+    async (writerLease) => {
     const activeBatches = await prisma.courseSupportBatch.findMany({
       where: {
         status: { in: ACTIVE_BATCH_STATUSES },
@@ -2835,27 +2962,13 @@ export async function claimCourseSupportBatch(input: {
     }
 
     const selectionDatabaseNow = await getCourseSupportDatabaseNow(prisma);
-    const [initialCandidates, recentBatches, retryBatch] = await Promise.all([
+    const [initialCandidates, recentCompletedBatches, retryBatch] = await Promise.all([
       listDueCourseSupportCandidates(selectionDatabaseNow),
       prisma.courseSupportBatch.findMany({
         where: { completedAt: { not: null } },
-        orderBy: { completedAt: "desc" },
+        orderBy: [{ completedAt: "desc" }, { id: "desc" }],
         take: COURSE_SUPPORT_SYNTHETIC_FAIRNESS_WINDOW,
-        select: {
-          summary: true,
-          incidents: {
-            select: {
-              incident: {
-                select: {
-                  engineeringOnly: true,
-                  activeRealSearchCount: true,
-                  kind: true,
-                  earliestTargetDate: true,
-                },
-              },
-            },
-          },
-        },
+        select: COURSE_SUPPORT_RECENT_FAIRNESS_BATCH_SELECT,
       }),
       input.retryBatchId
         ? prisma.courseSupportBatch.findUnique({
@@ -2981,23 +3094,13 @@ export async function claimCourseSupportBatch(input: {
         }),
       };
     }
-    const fairnessEvidence = recentBatches.map((batch) => ({
-      includedEngineeringOnly: batch.incidents.some(
-        (entry) => entry.incident.engineeringOnly,
-      ),
-      includedCriticalRealDemand: batch.incidents.some((entry) =>
-        isHistoricalCriticalRealDemand(entry.incident, now),
-      ),
-    }));
-    const selected = retryBatch
-      ? selectCourseSupportRetryBatch({
-          candidates,
-          retryBatch,
-          retryOrdinal: input.retryOrdinal,
-          maxCourses,
-          now,
-        })
-      : (selectCourseSupportBatch({
+    const fairnessEvidence = buildCourseSupportRecentFairnessEvidence(
+      recentCompletedBatches,
+      now,
+    );
+    const prioritySelection = input.retryBatchId
+      ? null
+      : selectCourseSupportBatch({
           candidates: candidates.filter(
             (candidate) =>
               !candidate.campaign || candidate.activeRealSearchCount > 0,
@@ -3005,8 +3108,10 @@ export async function claimCourseSupportBatch(input: {
           recentBatches: fairnessEvidence,
           maxCourses,
           now,
-        }) ??
-        selectCourseSupportBatch({
+        });
+    const requestlessCampaignSelection = input.retryBatchId
+      ? null
+      : selectCourseSupportBatch({
           candidates: candidates.filter(
             (candidate) =>
               Boolean(candidate.campaign) &&
@@ -3015,7 +3120,40 @@ export async function claimCourseSupportBatch(input: {
           recentBatches: fairnessEvidence,
           maxCourses: Math.min(maxCourses, 5),
           now,
-        }));
+        });
+    const admissionLane = input.retryBatchId
+      ? null
+      : selectCourseSupportAdmissionLane({
+          priorityCandidateAvailable: Boolean(prioritySelection),
+          requestlessParkedCampaignAvailable: Boolean(
+            requestlessCampaignSelection,
+          ),
+          hasCurrentActiveRealDemand: initialCandidates.some(
+            (candidate) => candidate.activeRealSearchCount > 0,
+          ),
+          activeBatchCampaignSummaryStates: activeBatches.map((batch) =>
+            classifyCourseSupportCampaignSummary(batch.summary),
+          ),
+          recentBatches: fairnessEvidence,
+        });
+    const selected = retryBatch
+      ? selectCourseSupportRetryBatch({
+          candidates,
+          retryBatch,
+          retryOrdinal: input.retryOrdinal,
+          maxCourses,
+          now,
+        })
+      : admissionLane?.lane === "REQUESTLESS_PARKED_CAMPAIGN"
+        ? requestlessCampaignSelection && {
+            ...requestlessCampaignSelection,
+            fairnessReason: admissionLane.parkedCampaignReservation
+              ? ("PARKED_CAMPAIGN_RESERVATION" as const)
+              : requestlessCampaignSelection.fairnessReason,
+          }
+        : admissionLane?.lane === "PRIORITY"
+          ? prioritySelection
+          : null;
     if (!selected) {
       const deferredForImplementation =
         implementationBlockedCandidates.length > 0;
@@ -3119,6 +3257,17 @@ export async function claimCourseSupportBatch(input: {
             attempts: campaignAttempts,
           } satisfies Prisma.InputJsonObject)
         : null;
+    const requestlessParkedCampaignReservationPlanned = Boolean(
+      admissionLane?.lane === "REQUESTLESS_PARKED_CAMPAIGN" &&
+        admissionLane.parkedCampaignReservation &&
+        selected.incidents.length > 0 &&
+        selected.incidents.every(
+          (incident) =>
+            Boolean(incident.campaign) && incident.activeRealSearchCount === 0,
+        ),
+    );
+    const preplannedFairnessHistoryFence =
+      buildCourseSupportFairnessHistoryFence(recentCompletedBatches, now);
 
     const selectedCourseIds = selected.incidents.map(
       (incident) => incident.courseId,
@@ -3164,9 +3313,121 @@ export async function claimCourseSupportBatch(input: {
         }),
       };
     }
-    const created = await prisma.$transaction(
+    const created = await runCourseSupportSerializableTransactionWithRetry(
       async (tx) => {
         const courseMonitoringAvailable = hasCourseMonitoringPersistence(tx);
+        if (requestlessParkedCampaignReservationPlanned) {
+          const transactionSelectionNow =
+            await getCourseSupportDatabaseNow(tx);
+          const [
+            currentRecentCompletedBatches,
+            currentActiveBatches,
+            currentDueIncidents,
+          ] = await Promise.all([
+            tx.courseSupportBatch.findMany({
+              where: { completedAt: { not: null } },
+              orderBy: [{ completedAt: "desc" }, { id: "desc" }],
+              take: COURSE_SUPPORT_SYNTHETIC_FAIRNESS_WINDOW,
+              select: COURSE_SUPPORT_RECENT_FAIRNESS_BATCH_SELECT,
+            }),
+            tx.courseSupportBatch.findMany({
+              where: {
+                status: { in: ACTIVE_BATCH_STATUSES },
+                leaseExpiresAt: { gt: transactionSelectionNow },
+              },
+              orderBy: { heartbeatAt: "desc" },
+              take: MAX_CONCURRENT_COURSE_SUPPORT_BATCHES,
+              select: {
+                id: true,
+                status: true,
+                providerFamilyKey: true,
+                failureFingerprint: true,
+                summary: true,
+              },
+            }),
+            tx.courseSupportIncident.findMany({
+              where: buildDueResponderIncidentWhere(transactionSelectionNow),
+              orderBy: [
+                { earliestTargetDate: "asc" },
+                { firstSeenAt: "asc" },
+              ],
+              select: COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT,
+            }),
+          ]);
+          const currentFairnessEvidence =
+            buildCourseSupportRecentFairnessEvidence(
+              currentRecentCompletedBatches,
+              transactionSelectionNow,
+            );
+          const currentFairnessHistoryFence =
+            buildCourseSupportFairnessHistoryFence(
+              currentRecentCompletedBatches,
+              transactionSelectionNow,
+            );
+          const currentDueCandidates = buildCourseSupportCandidates(
+            currentDueIncidents,
+            transactionSelectionNow,
+          );
+          const currentActiveProviderGroups = new Set(
+            currentActiveBatches.map(
+              (batch) =>
+                `${batch.providerFamilyKey}\u0000${batch.failureFingerprint}`,
+            ),
+          );
+          const currentSharedCheckoutImplementationReserved =
+            currentActiveBatches.some((batch) =>
+              courseSupportBatchReservesCheckout(batch),
+            );
+          const currentPrioritySelection = selectCourseSupportBatch({
+            candidates: currentDueCandidates.filter(
+              (candidate) =>
+                !currentActiveProviderGroups.has(
+                  `${candidate.providerFamilyKey}\u0000${candidate.failureFingerprint}`,
+                ) &&
+                candidate.remediationRoute?.workMode !==
+                  "WAIT_FOR_MATERIAL_CHANGE" &&
+                (!currentSharedCheckoutImplementationReserved ||
+                  candidate.remediationRoute?.requiresImplementationPath !==
+                    true),
+            ),
+            recentBatches: currentFairnessEvidence,
+            maxCourses,
+            now: transactionSelectionNow,
+          });
+          const selectedCampaignStillAvailable = Boolean(
+            !currentActiveProviderGroups.has(
+              `${selected.providerFamilyKey}\u0000${selected.failureFingerprint}`,
+            ) &&
+              (!currentSharedCheckoutImplementationReserved ||
+                selectedRemediationRoute.requiresImplementationPath !== true),
+          );
+          const currentAdmissionLane = selectCourseSupportAdmissionLane({
+            priorityCandidateAvailable: Boolean(currentPrioritySelection),
+            requestlessParkedCampaignAvailable:
+              selectedCampaignStillAvailable,
+            hasCurrentActiveRealDemand: currentDueCandidates.some(
+              (candidate) => candidate.activeRealSearchCount > 0,
+            ),
+            activeBatchCampaignSummaryStates: currentActiveBatches.map(
+              (batch) =>
+                classifyCourseSupportCampaignSummary(batch.summary),
+            ),
+            recentBatches: currentFairnessEvidence,
+          });
+          if (
+            JSON.stringify(currentFairnessHistoryFence) !==
+              JSON.stringify(preplannedFairnessHistoryFence) ||
+            currentActiveBatches.length >=
+              MAX_CONCURRENT_COURSE_SUPPORT_BATCHES ||
+            currentAdmissionLane?.lane !==
+              "REQUESTLESS_PARKED_CAMPAIGN" ||
+            !currentAdmissionLane.parkedCampaignReservation
+          ) {
+            throw new Error(
+              "The requestless parked-campaign reservation changed during atomic claim; rerun selection.",
+            );
+          }
+        }
         const deferredSelectedIncidents = selected.incidents.filter(
           (incident) => incident.deferredFailureHandoff,
         );
@@ -3865,7 +4126,11 @@ export async function claimCourseSupportBatch(input: {
           batchRef: batch.reference,
         };
       },
-      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      COURSE_SUPPORT_BATCH_CLAIM_TRANSACTION_TIMEOUT_MS,
+      {
+        deadlineAt: writerLease.deadlineAt,
+        headroomMs: COURSE_SUPPORT_BATCH_CLAIM_WRITER_LEASE_HEADROOM_MS,
+      },
     );
 
     if ("reconciledAuthoritativeFinalCount" in created) {
@@ -3918,7 +4183,9 @@ export async function claimCourseSupportBatch(input: {
       threadDisposition: "KEEP_VISIBLE" as const,
       archiveReason: "The claimed responder batch is still in progress.",
     };
-  });
+    },
+    { timeout: COURSE_SUPPORT_BATCH_CLAIM_WRITER_LEASE_TIMEOUT_MS },
+  );
 
   if (!lease.acquired) {
     return {
