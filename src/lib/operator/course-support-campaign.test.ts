@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { createParkedCourseCampaignAudit } from "@/lib/automation/course-support-campaign";
 
@@ -11,6 +11,8 @@ import {
 } from "./course-support-campaign";
 
 const capturedAt = new Date("2026-08-20T12:00:00.000Z");
+const campaignRunId = "private-campaign-run";
+const campaignMembershipDigest = "c".repeat(64);
 type CampaignFixture = Parameters<
   typeof buildOperatorCourseSupportCampaignSummary
 >[0]["campaign"];
@@ -310,6 +312,8 @@ describe("operator course-support campaign aggregation", () => {
   it("passes future unfamiliar courses with exact automatic terminal evidence within 24 hours", () => {
     const result = summarizeFutureAutomaticResolution({
       campaignCapturedAt: capturedAt,
+      campaignRunId,
+      campaignMembershipDigest,
       campaignIncidentCycles: [],
       incidents: [futureIncident()],
       now: new Date("2026-08-21T12:00:00.000Z")
@@ -331,6 +335,8 @@ describe("operator course-support campaign aggregation", () => {
   it("fails future unfamiliar courses resolved after the 24-hour deadline", () => {
     const result = summarizeFutureAutomaticResolution({
       campaignCapturedAt: capturedAt,
+      campaignRunId,
+      campaignMembershipDigest,
       campaignIncidentCycles: [],
       incidents: [
         futureIncident({
@@ -355,6 +361,8 @@ describe("operator course-support campaign aggregation", () => {
   it("counts human decisions and operator-provenance finals as nonautomatic", () => {
     const result = summarizeFutureAutomaticResolution({
       campaignCapturedAt: capturedAt,
+      campaignRunId,
+      campaignMembershipDigest,
       campaignIncidentCycles: [],
       incidents: [
         futureIncident({
@@ -386,6 +394,8 @@ describe("operator course-support campaign aggregation", () => {
   it("reports future acceptance unknown when terminal provenance is missing", () => {
     const result = summarizeFutureAutomaticResolution({
       campaignCapturedAt: capturedAt,
+      campaignRunId,
+      campaignMembershipDigest,
       campaignIncidentCycles: [],
       incidents: [
         futureIncident({
@@ -409,6 +419,8 @@ describe("operator course-support campaign aggregation", () => {
   it("does not count a nonterminal state change as a future automatic endpoint", () => {
     const result = summarizeFutureAutomaticResolution({
       campaignCapturedAt: capturedAt,
+      campaignRunId,
+      campaignMembershipDigest,
       campaignIncidentCycles: [],
       incidents: [
         futureIncident({
@@ -443,6 +455,8 @@ describe("operator course-support campaign aggregation", () => {
     ({ deploymentSha, runtimeVersion }) => {
     const result = summarizeFutureAutomaticResolution({
       campaignCapturedAt: capturedAt,
+      campaignRunId,
+      campaignMembershipDigest,
       campaignIncidentCycles: [],
       incidents: [
         futureIncident({
@@ -461,6 +475,8 @@ describe("operator course-support campaign aggregation", () => {
   it("keeps a completed future cycle after the durable incident row reopens", () => {
     const result = summarizeFutureAutomaticResolution({
       campaignCapturedAt: capturedAt,
+      campaignRunId,
+      campaignMembershipDigest,
       campaignIncidentCycles: [],
       incidents: [
         futureIncident({
@@ -487,6 +503,8 @@ describe("operator course-support campaign aggregation", () => {
   it("keeps a human-final future cycle after the durable incident row reopens", () => {
     const result = summarizeFutureAutomaticResolution({
       campaignCapturedAt: capturedAt,
+      campaignRunId,
+      campaignMembershipDigest,
       campaignIncidentCycles: [],
       incidents: [
         futureIncident({
@@ -529,6 +547,8 @@ describe("operator course-support campaign aggregation", () => {
   it("never lets another incident with the same cycle and timestamp satisfy an unresolved course", () => {
     const result = summarizeFutureAutomaticResolution({
       campaignCapturedAt: capturedAt,
+      campaignRunId,
+      campaignMembershipDigest,
       campaignIncidentCycles: [],
       incidents: [
         futureIncident({
@@ -557,6 +577,8 @@ describe("operator course-support campaign aggregation", () => {
     expect(
       summarizeFutureAutomaticResolution({
         campaignCapturedAt: capturedAt,
+        campaignRunId,
+        campaignMembershipDigest,
         campaignIncidentCycles: [],
         incidents: [],
         now: new Date("2026-08-21T12:00:00.000Z")
@@ -572,6 +594,8 @@ describe("operator course-support campaign aggregation", () => {
     expect(
       summarizeFutureAutomaticResolution({
         campaignCapturedAt: capturedAt,
+        campaignRunId,
+        campaignMembershipDigest,
         campaignIncidentCycles: [],
         incidents: [
           futureIncident({
@@ -592,6 +616,8 @@ describe("operator course-support campaign aggregation", () => {
     expect(
       summarizeFutureAutomaticResolution({
         campaignCapturedAt: capturedAt,
+        campaignRunId,
+        campaignMembershipDigest,
         campaignIncidentCycles: [],
         incidents: [
           futureIncident({
@@ -607,14 +633,57 @@ describe("operator course-support campaign aggregation", () => {
     ).toMatchObject({ eligibleCount: 1, unknownCount: 1, status: "UNKNOWN" });
   });
 
-  it("excludes the campaign admission cycle derived from the captured parked cycle", () => {
+  it.each([
+    ["untagged", null],
+    ["wrong campaign run", { campaignRunId: "different-campaign-run" }],
+    ["wrong membership digest", { campaignMembershipDigest: "d".repeat(64) }],
+    ["invalid admission action", { action: "provider_evidence_changed" }],
+    ["wrong baseline cycle", { priorCycle: 2 }],
+    ["malformed admission cycle", { cycle: "2" }]
+  ] as const)("counts an N+1 material-change cycle with %s admission evidence", (_, audit) => {
     expect(
       summarizeFutureAutomaticResolution({
         campaignCapturedAt: capturedAt,
+        campaignRunId,
+        campaignMembershipDigest,
         campaignIncidentCycles: [{ incidentId: "future-incident", cycle: 1 }],
         incidents: [
           futureIncident({
             cycle: 2,
+            campaignAdmissionEvents: audit
+              ? [futureCampaignAdmissionEvent(audit)]
+              : [],
+            terminalEvents: [
+              futureTerminalEvent({
+                audit: {
+                  automatedFinal: true,
+                  confirmedAt: "2026-08-20T14:00:00.000Z",
+                  cycle: 2
+                }
+              })
+            ]
+          })
+        ],
+        now: new Date("2026-08-21T12:00:00.000Z")
+      })
+    ).toMatchObject({
+      eligibleCount: 1,
+      automaticCount: 1,
+      status: "PASS"
+    });
+  });
+
+  it("excludes only an exactly attributed campaign admission cycle", () => {
+    expect(
+      summarizeFutureAutomaticResolution({
+        campaignCapturedAt: capturedAt,
+        campaignRunId,
+        campaignMembershipDigest,
+        campaignIncidentCycles: [{ incidentId: "future-incident", cycle: 1 }],
+        incidents: [
+          futureIncident({
+            cycle: 2,
+            campaignAdmissionEvents: [futureCampaignAdmissionEvent()],
             terminalEvents: [
               futureTerminalEvent({
                 audit: {
@@ -631,10 +700,39 @@ describe("operator course-support campaign aggregation", () => {
     ).toMatchObject({ eligibleCount: 0, status: "NO_DATA" });
   });
 
+  it("does not attribute an exact-looking admission to a different baseline incident", () => {
+    expect(
+      summarizeFutureAutomaticResolution({
+        campaignCapturedAt: capturedAt,
+        campaignRunId,
+        campaignMembershipDigest,
+        campaignIncidentCycles: [{ incidentId: "different-incident", cycle: 1 }],
+        incidents: [
+          futureIncident({
+            cycle: 2,
+            campaignAdmissionEvents: [futureCampaignAdmissionEvent()],
+            terminalEvents: [
+              futureTerminalEvent({
+                audit: {
+                  automatedFinal: true,
+                  confirmedAt: "2026-08-20T14:00:00.000Z",
+                  cycle: 2
+                }
+              })
+            ]
+          })
+        ],
+        now: new Date("2026-08-21T12:00:00.000Z")
+      })
+    ).toMatchObject({ eligibleCount: 1, automaticCount: 1, status: "PASS" });
+  });
+
   it("includes a later material-change cycle on a baseline course", () => {
     expect(
       summarizeFutureAutomaticResolution({
         campaignCapturedAt: capturedAt,
+        campaignRunId,
+        campaignMembershipDigest,
         campaignIncidentCycles: [{ incidentId: "future-incident", cycle: 1 }],
         incidents: [
           futureIncident({
@@ -642,6 +740,10 @@ describe("operator course-support campaign aggregation", () => {
             confirmedAt: new Date("2026-08-21T10:00:00.000Z"),
             lastSeenAt: new Date("2026-08-21T11:00:00.000Z"),
             resolvedAt: new Date("2026-08-21T11:00:00.000Z"),
+            campaignAdmissionEvents: [
+              futureCampaignAdmissionEvent(),
+              futureCampaignAdmissionEvent({ priorCycle: 2, cycle: 3 })
+            ],
             terminalEvents: [
               futureTerminalEvent({
                 occurredAt: new Date("2026-08-21T11:00:00.000Z"),
@@ -910,6 +1012,41 @@ describe("operator course-support campaign aggregation", () => {
       expect(serialized).not.toContain(privateValue);
     }
   });
+
+  it("reuses a supplied campaign inspection and audit without rereading progress", async () => {
+    const audit = createParkedCourseCampaignAudit({
+      capturedAt,
+      expectedCount: 2,
+      members: [campaignMember(1), campaignMember(2)]
+    });
+    const inspectLatestCampaign = vi.fn(async () => {
+      throw new Error("campaign progress should not be recomputed");
+    });
+    const loadCampaignAudit = vi.fn(async () => {
+      throw new Error("the supplied immutable audit should be reused");
+    });
+
+    const result = await loadOperatorCourseSupportCampaign(
+      {
+        now: new Date("2026-08-20T18:00:00.000Z"),
+        campaignInspection: campaignInspection({
+          membershipDigest: audit.membershipDigest
+        }),
+        campaignAudit: audit
+      },
+      {
+        inspectLatestCampaign,
+        loadCampaignAudit,
+        loadRollingEndpointEvents: async () => [],
+        loadFutureUnfamiliarIncidents: async () => [],
+        loadImplementationBatches: async () => []
+      }
+    );
+
+    expect(result?.expectedCount).toBe(2);
+    expect(inspectLatestCampaign).not.toHaveBeenCalled();
+    expect(loadCampaignAudit).not.toHaveBeenCalled();
+  });
 });
 
 function endpointEvent(input: {
@@ -968,6 +1105,7 @@ function futureIncident(
     resolvedAt: new Date("2026-08-20T15:00:00.000Z"),
     decisionAt: null,
     decisionActorId: null,
+    campaignAdmissionEvents: [],
     terminalEvents: [futureTerminalEvent()],
     ...overrides
   };
@@ -990,6 +1128,25 @@ function futureTerminalEvent(
       cycle: 1
     },
     ...overrides
+  };
+}
+
+function futureCampaignAdmissionEvent(
+  auditOverrides: Record<string, unknown> = {}
+): FutureIncidentFixture["campaignAdmissionEvents"][number] {
+  return {
+    eventType: "REVALIDATION_REQUESTED",
+    source: "COURSE_SUPPORT_RESPONDER",
+    occurredAt: new Date("2026-08-20T13:30:00.000Z"),
+    audit: {
+      action: "parked_cohort_admission",
+      campaignRunId,
+      campaignMembershipDigest,
+      priorCycle: 1,
+      cycle: 2,
+      customerDataIncluded: false,
+      ...auditOverrides
+    }
   };
 }
 

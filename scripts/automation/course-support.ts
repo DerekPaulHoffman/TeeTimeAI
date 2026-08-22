@@ -55,6 +55,7 @@ import {
 } from "@/lib/automation/course-support-verification-watch";
 import { getProviderCoverageDashboard } from "@/lib/automation/provider-coverage";
 import { persistOwnedCourseSupportBrowserPlaybookStages } from "@/lib/automation/course-support-browser-stages";
+import { attachCourseSupportAcceptanceProjectionFromWorker } from "@/lib/operator/course-support-acceptance-process";
 import {
   getResponderThreadPolicy,
   sanitizeResponderText,
@@ -185,10 +186,13 @@ async function runCommand(command: string, args: string[]) {
   switch (command) {
     case "inspect":
       writeResult(
-        await inspectCourseSupportQueue({
-          requestingThreadId: optionalOwnerThread(args),
-          completeParkedCampaignIfDone: shouldCompleteParkedCampaignForInspection(args)
-        })
+        await attachCourseSupportAcceptanceProjectionFromWorker(
+          await inspectCourseSupportQueue({
+            requestingThreadId: optionalOwnerThread(args),
+            completeParkedCampaignIfDone:
+              shouldCompleteParkedCampaignForInspection(args)
+          })
+        )
       );
       return;
     case "coverage":

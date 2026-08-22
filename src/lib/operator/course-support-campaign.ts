@@ -10,7 +10,7 @@ const AUTOMATIC_RESOLUTION_TARGET_PERCENT = 95;
 const CAMPAIGN_RESOLUTION_DEADLINE_MS = 24 * 60 * 60 * 1000;
 const FUTURE_UNFAMILIAR_COURSE_WINDOW_DAYS = 30;
 
-type CampaignInspection = NonNullable<
+export type CampaignInspection = NonNullable<
   Awaited<ReturnType<typeof inspectLatestParkedCourseCampaign>>
 >;
 
@@ -38,6 +38,13 @@ type FutureTerminalEvent = {
   audit: unknown;
 };
 
+type FutureCampaignAdmissionEvent = {
+  eventType: string;
+  source: string;
+  occurredAt: Date;
+  audit: unknown;
+};
+
 type FutureUnfamiliarIncident = {
   id: string;
   courseId: string;
@@ -49,6 +56,7 @@ type FutureUnfamiliarIncident = {
   resolvedAt: Date | null;
   decisionAt: Date | null;
   decisionActorId: string | null;
+  campaignAdmissionEvents: FutureCampaignAdmissionEvent[];
   terminalEvents: FutureTerminalEvent[];
 };
 
@@ -148,18 +156,27 @@ type OperatorCourseSupportCampaignDependencies = {
 };
 
 export async function loadOperatorCourseSupportCampaign(
-  input: { now?: Date } = {},
+  input: {
+    now?: Date;
+    campaignInspection?: CampaignInspection | null;
+    campaignAudit?: unknown | null;
+  } = {},
   dependencies: OperatorCourseSupportCampaignDependencies = defaultDependencies
 ): Promise<OperatorCourseSupportCampaign | null> {
   const now = input.now ?? new Date();
-  const campaign = await dependencies.inspectLatestCampaign();
+  const campaign =
+    input.campaignInspection !== undefined
+      ? input.campaignInspection
+      : await dependencies.inspectLatestCampaign();
   if (!campaign) return null;
 
   const rollingSince = new Date(
     now.getTime() - ROLLING_HUMAN_REVIEW_DAYS * 24 * 60 * 60 * 1000
   );
   const [storedAudit, rollingEvents] = await Promise.all([
-    dependencies.loadCampaignAudit(campaign.runId),
+    input.campaignAudit !== undefined
+      ? Promise.resolve(input.campaignAudit)
+      : dependencies.loadCampaignAudit(campaign.runId),
     dependencies.loadRollingEndpointEvents({ since: rollingSince, until: now })
   ]);
   const audit = parseParkedCourseCampaignAudit(storedAudit);
@@ -185,6 +202,8 @@ export async function loadOperatorCourseSupportCampaign(
   const futureAutomaticWithin24Hours = futureIncidents
     ? summarizeFutureAutomaticResolution({
         campaignCapturedAt,
+        campaignRunId: campaign.runId,
+        campaignMembershipDigest: campaign.membershipDigest,
         campaignIncidentCycles:
           audit?.members.map((member) => ({
             incidentId: member.incidentId,
@@ -309,6 +328,8 @@ export function summarizeRollingHumanReview(
 
 export function summarizeFutureAutomaticResolution(input: {
   campaignCapturedAt: Date;
+  campaignRunId: string;
+  campaignMembershipDigest: string;
   campaignIncidentCycles: readonly { incidentId: string; cycle: number }[];
   incidents: readonly FutureUnfamiliarIncident[];
   now: Date;
@@ -330,15 +351,7 @@ export function summarizeFutureAutomaticResolution(input: {
       incidentId: string;
     }
   >();
-  const capturedIncidentCycleKeys = new Set(
-    input.campaignIncidentCycles.map(({ incidentId, cycle }) =>
-      // The immutable audit captures each member while it is parked at cycle N.
-      // Campaign admission always reopens that incident into cycle N+1, so the
-      // admission cycle—not the parked snapshot—must be excluded from the
-      // rolling future denominator. Later material-change cycles remain eligible.
-      futureIncidentCycleKey(incidentId, cycle + 1)
-    )
-  );
+  const campaignAdmissionCycleKeys = collectCampaignAdmissionCycleKeys(input);
   const eligibleIncidents = input.incidents;
 
   for (const incident of eligibleIncidents) {
@@ -353,7 +366,7 @@ export function summarizeFutureAutomaticResolution(input: {
       const confirmedAt = readAuditDate(event.audit, "confirmedAt");
       if (!cycle || !isFutureWindowDate(confirmedAt, input, windowStart)) continue;
       const key = futureIncidentCycleKey(incident.id, cycle);
-      if (capturedIncidentCycleKeys.has(key)) continue;
+      if (campaignAdmissionCycleKeys.has(key)) continue;
       const existing = candidates.get(key);
       if (existing) {
         existing.confirmedAtConflict ||=
@@ -395,7 +408,7 @@ export function summarizeFutureAutomaticResolution(input: {
     if (!confirmedAtIsEligible && !missingConfirmationCouldBeFuture) continue;
     const cycle = isPositiveInteger(incident.cycle) ? incident.cycle : 0;
     const key = futureIncidentCycleKey(incident.id, cycle || "unknown");
-    if (capturedIncidentCycleKeys.has(key)) continue;
+    if (campaignAdmissionCycleKeys.has(key)) continue;
     const existing = candidates.get(key);
     if (existing) {
       existing.currentIncident = incident;
@@ -474,6 +487,53 @@ export function summarizeFutureAutomaticResolution(input: {
 
 function futureIncidentCycleKey(incidentId: string, cycle: number | "unknown") {
   return `${incidentId}\u0000cycle:${cycle}`;
+}
+
+function collectCampaignAdmissionCycleKeys(input: {
+  campaignCapturedAt: Date;
+  campaignRunId: string;
+  campaignMembershipDigest: string;
+  campaignIncidentCycles: readonly { incidentId: string; cycle: number }[];
+  incidents: readonly FutureUnfamiliarIncident[];
+  now: Date;
+}) {
+  const capturedCycleByIncident = new Map(
+    input.campaignIncidentCycles.map(({ incidentId, cycle }) => [incidentId, cycle])
+  );
+  const keys = new Set<string>();
+  if (
+    !input.campaignRunId.trim() ||
+    !/^[a-f0-9]{64}$/u.test(input.campaignMembershipDigest)
+  ) {
+    return keys;
+  }
+
+  for (const incident of input.incidents) {
+    const capturedCycle = capturedCycleByIncident.get(incident.id);
+    if (!isPositiveInteger(capturedCycle)) continue;
+    for (const event of incident.campaignAdmissionEvents) {
+      const audit = asRecord(event.audit);
+      const cycle = readPositiveCycle(event.audit);
+      if (
+        event.eventType !== "REVALIDATION_REQUESTED" ||
+        event.source !== "COURSE_SUPPORT_RESPONDER" ||
+        !isValidDate(event.occurredAt) ||
+        event.occurredAt.getTime() < input.campaignCapturedAt.getTime() ||
+        event.occurredAt.getTime() > input.now.getTime() ||
+        !cycle ||
+        audit.action !== "parked_cohort_admission" ||
+        audit.campaignRunId !== input.campaignRunId ||
+        audit.campaignMembershipDigest !== input.campaignMembershipDigest ||
+        audit.priorCycle !== capturedCycle ||
+        cycle !== capturedCycle + 1 ||
+        audit.customerDataIncluded !== false
+      ) {
+        continue;
+      }
+      keys.add(futureIncidentCycleKey(incident.id, cycle));
+    }
+  }
+  return keys;
 }
 
 function classifyFutureUnfamiliarCycle(
@@ -998,7 +1058,13 @@ const defaultDependencies: OperatorCourseSupportCampaignDependencies = {
               where: {
                 occurredAt: { gte: since, lte: until },
                 eventType: {
-                  in: ["HUMAN_REVIEW_REQUESTED", "HUMAN_DECISION", "RECOVERED", "STATE_CHANGED"]
+                  in: [
+                    "HUMAN_REVIEW_REQUESTED",
+                    "HUMAN_DECISION",
+                    "RECOVERED",
+                    "REVALIDATION_REQUESTED",
+                    "STATE_CHANGED"
+                  ]
                 }
               },
               select: {
@@ -1018,7 +1084,12 @@ const defaultDependencies: OperatorCourseSupportCampaignDependencies = {
     );
     return partitions.flat().map(({ monitoringEvents, ...incident }) => ({
       ...incident,
-      terminalEvents: monitoringEvents
+      campaignAdmissionEvents: monitoringEvents.filter(
+        (event) => event.eventType === "REVALIDATION_REQUESTED"
+      ),
+      terminalEvents: monitoringEvents.filter(
+        (event) => event.eventType !== "REVALIDATION_REQUESTED"
+      )
     }));
   },
   loadImplementationBatches: ({ capturedAt, until }) =>
