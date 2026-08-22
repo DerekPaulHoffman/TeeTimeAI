@@ -310,6 +310,20 @@ function selectActionableRoute(input: {
     return routeStructuralFailure(input);
   }
 
+  if (
+    input.playbookAssessment.nextStage === "LOCAL_READER" &&
+    input.failureClass !== "READER_PARSER_MISSING"
+  ) {
+    return actionableRoute({
+      workMode: "ADVANCE_DISCOVERY",
+      reason: "PLAYBOOK_STAGE_PENDING",
+      strategy: input.strategy,
+      materialChangeDetected: input.materialChangeDetected,
+      playbookStage: input.playbookAssessment.nextStage,
+      retryBudget: input.retryBudget,
+    });
+  }
+
   if (input.strategy.action === "REPAIR_PROVIDER_ADAPTER") {
     return implementationRoute(input);
   }

@@ -129,6 +129,36 @@ describe("course-support remediation routing", () => {
     });
   });
 
+  it("advances an available local reader instead of repairing a stale platform snapshot", () => {
+    const result = routeCourseSupportRemediation({
+      ...runnableCourse,
+      detectedPlatform: "CUSTOM",
+      providerFamilyKey: "CPS",
+      detectedBookingUrl: "https://public-course.cps.golf/onlineresweb/search-teetime",
+      bookingMetadata: null,
+      automationEligibility: "NEEDS_REVIEW",
+      failureClass: "HTTP_5XX",
+      playbookAssessment: incompletePlaybook("LOCAL_READER"),
+      priorUnchangedAttempt: {
+        workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+        strategyAction: "REPAIR_PROVIDER_ADAPTER",
+        playbookStage: "LOCAL_READER",
+      },
+      materialChanges: { providerSnapshotChanged: true },
+    });
+
+    expect(result).toMatchObject({
+      workMode: "ADVANCE_DISCOVERY",
+      allowUnchangedRuntime: true,
+      requiresImplementationPath: false,
+      reason: "MATERIAL_CHANGE_REOPENED",
+      attemptSignature: {
+        strategyAction: "REPAIR_PROVIDER_ADAPTER",
+        playbookStage: "LOCAL_READER",
+      },
+    });
+  });
+
   it("reuses newly runnable support for a sibling with a stale unsupported failure", () => {
     const result = routeCourseSupportRemediation({
       ...runnableCourse,
