@@ -45,6 +45,7 @@ const transactionMocks = vi.hoisted(() => ({
   },
   automationRun: {
     findFirst: vi.fn(),
+    findMany: vi.fn(),
     findUnique: vi.fn(),
     updateMany: vi.fn(),
   },
@@ -175,6 +176,7 @@ describe("course monitoring write serialization", () => {
       null,
     );
     transactionMocks.automationRun.findFirst.mockResolvedValue(null);
+    transactionMocks.automationRun.findMany.mockResolvedValue([]);
     transactionMocks.automationRun.findUnique.mockResolvedValue(null);
     transactionMocks.automationRun.updateMany.mockResolvedValue({ count: 1 });
     transactionMocks.teeSearch.updateMany.mockResolvedValue({ count: 1 });
@@ -4582,7 +4584,7 @@ describe("course monitoring write serialization", () => {
     });
     transactionMocks.courseMonitoringEvent.findUnique.mockResolvedValue(null);
 
-    transactionMocks.automationRun.findFirst.mockResolvedValueOnce({
+    transactionMocks.automationRun.findMany.mockResolvedValueOnce([{
       audit: createParkedCourseCampaignAudit({
         expectedCount: 1,
         capturedAt: new Date("2026-08-20T11:00:00.000Z"),
@@ -4606,7 +4608,7 @@ describe("course monitoring write serialization", () => {
           },
         ],
       }),
-    });
+    }]);
 
     await expect(
       reconcileCourseMonitoringDeadline({
@@ -4626,9 +4628,9 @@ describe("course monitoring write serialization", () => {
       transactionMocks.courseMonitoringEvent.create,
     ).not.toHaveBeenCalled();
 
-    transactionMocks.automationRun.findFirst.mockResolvedValueOnce({
+    transactionMocks.automationRun.findMany.mockResolvedValueOnce([{
       audit: { schemaVersion: 999, campaignKind: "PARKED_COHORT" },
-    });
+    }]);
     await expect(
       reconcileCourseMonitoringDeadline({
         courseId: "course-1",

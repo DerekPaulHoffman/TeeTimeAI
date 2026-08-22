@@ -44,6 +44,7 @@ const prismaMocks = vi.hoisted(() => ({
     updateMany: vi.fn(),
   },
   automationRun: {
+    findMany: vi.fn(),
     findFirst: vi.fn(),
     updateMany: vi.fn(),
   },
@@ -56,6 +57,7 @@ vi.mock("@/lib/prisma", () => ({ prisma: prismaMocks }));
 
 import {
   FAILURE_CONFIRMATION_WINDOW_MS,
+  getDeferredFailureHandoffEscalationDeadline,
   recordCourseMonitoringFailure,
   runCourseMonitoringWatchdog,
 } from "./course-monitoring";
@@ -65,10 +67,20 @@ import {
   type AutomationPlaybookReadPath,
   type AutomationPlaybookStage,
 } from "./course-monitoring-playbook";
+import { createParkedCourseCampaignAudit } from "./course-support-campaign";
 import {
   buildCourseSupportSearchExecutionFenceSnapshot,
   persistCourseSupportSearchExecutionFence,
 } from "./course-support-search-execution-fence";
+import {
+  createDeferredFailureHandoffAdmission,
+  createDeferredFailureHandoffBatchIncidentDigest,
+  createDeferredFailureHandoffSignal,
+  parseDeferredFailureHandoffAdmission,
+  parseDeferredFailureHandoffSignal,
+} from "./course-support-deferred-failure-handoff";
+import { buildProviderFailureFingerprint } from "./provider-capabilities";
+import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
 
 const now = new Date("2026-07-27T16:00:00.000Z");
 
@@ -140,7 +152,7 @@ function incident(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function exhaustedLedger() {
+function exhaustedLedger(cycle = 1) {
   const stages: Array<[AutomationPlaybookStage, AutomationPlaybookReadPath]> = [
     ["OFFICIAL_IDENTITY", "OFFICIAL_IDENTITY"],
     ["TYPED_ADAPTER", "TYPED_PROVIDER_ADAPTER"],
@@ -154,7 +166,7 @@ function exhaustedLedger() {
   let ledger: AutomationPlaybookLedger | null = null;
   for (const [stage, readPath] of stages) {
     ledger = appendAutomationPlaybookEvent(ledger, {
-      cycle: 1,
+      cycle,
       stage,
       transition: "NOT_APPLICABLE",
       readPath,
@@ -238,14 +250,23 @@ function responderBatch(
       id?: string;
       batchIncidentId?: string;
       releaseSha?: string;
+      runtimeVersion?: string | null;
       status?: string;
       revision?: number;
       attemptCount?: number;
       startedAt: Date | null;
+      providerSnapshotAt?: Date;
+      discoveryAttemptedAt?: Date | null;
+      discoveryVerifiedAt?: Date | null;
       outcome?: string | null;
       failureClass?: string | null;
       evidence?: unknown;
       lastError?: string | null;
+      providerSnapshotFingerprint?: string | null;
+      nextAttemptAt?: Date | null;
+      completedAt?: Date | null;
+      createdAt?: Date;
+      updatedAt?: Date;
     }>;
   }>,
   overrides: Record<string, unknown> = {},
@@ -284,7 +305,6 @@ function responderBatch(
     revision: 4,
     ownerAutomationRunId: "run-1",
     ownerAutomationRun: null,
-    summary: {},
     activeIncidents: entries.map((entry) => ({
       id: String(entry.incident.id),
     })),
@@ -328,6 +348,419 @@ function responderBatch(
       searchExecutionFence:
         overrideSummary.searchExecutionFence ?? searchExecutionFence,
     },
+  };
+}
+
+function deferredFailureCarrierScenario(startedAt: Date | null) {
+  const canonicalFailureFingerprint = buildProviderFailureFingerprint({
+    providerFamilyKey: "SOURCE_MISSING",
+    failureClass: "HTTP_5XX",
+    operation: "AVAILABILITY",
+    httpStatus: null,
+  });
+  const observedFailureFingerprint = buildProviderFailureFingerprint({
+    providerFamilyKey: "SOURCE_MISSING",
+    failureClass: "MISSING_SOURCE",
+    operation: "AVAILABILITY",
+    httpStatus: null,
+  });
+  const runtimeVersion = "a".repeat(40);
+  const providerCourse = {
+    timeZone: "America/New_York",
+    website: "https://course.example",
+    detectedBookingUrl: "https://course.example/book",
+    detectedPlatform: "UNKNOWN" as const,
+    providerFamilyKey: "SOURCE_MISSING",
+    bookingMethod: "UNKNOWN" as const,
+    bookingWindowDaysAhead: null,
+    bookingWindowEvidenceUrl: null,
+    bookingReleaseTimeLocal: null,
+    bookingWindowSource: null,
+    bookingWindowConfidence: null,
+    automationEligibility: "NEEDS_REVIEW" as const,
+    automationReason: "OTHER" as const,
+    monitoringMode: "AUTOMATIC" as const,
+    bookingAccessMode: "UNKNOWN",
+    isPublic: true,
+    intelligenceVerifiedAt: null,
+    intelligenceReviewAt: null,
+    intelligenceConfidence: null,
+    bookingMetadata: null,
+    layoutHoleCounts: [] as number[],
+    layoutHolesVerifiedAt: null,
+  };
+  const providerSnapshotFingerprint =
+    buildCourseSupportProviderSnapshotFingerprint(providerCourse);
+  const source = createDeferredFailureHandoffSignal({
+    state: "AVAILABLE",
+    sourceBatchIncidentDigest:
+      createDeferredFailureHandoffBatchIncidentDigest("source-entry"),
+    sourceProofDigest: "3".repeat(64),
+    providerFamilyKey: "SOURCE_MISSING",
+    canonicalFailureFingerprint,
+    observedFailureFingerprint,
+    claimedProviderSnapshotFingerprint: providerSnapshotFingerprint,
+    observedProviderSnapshotFingerprint: providerSnapshotFingerprint,
+    runtimeVersion,
+    cooldownExpiresAt: new Date(now.getTime() - 5 * 60 * 1000).toISOString(),
+    providerNotBeforeAt: null,
+    eligibleAt: new Date(now.getTime() - 60 * 1000).toISOString(),
+    sourceVerificationWatchMode: "WATCH_SETTLED",
+    sourceResult: "RETRY_SCHEDULED",
+    sourceAttemptConsumed: true,
+    confirmationStarted: false,
+  });
+  const admission = createDeferredFailureHandoffAdmission({
+    signal: source,
+    admittedAt: new Date(now.getTime() - 60 * 1000),
+  });
+  const currentIncident = incident({
+    activeBatchId: "batch-1",
+    providerFamilyKey: "SOURCE_MISSING",
+    failureFingerprint: canonicalFailureFingerprint,
+    attemptLedger: exhaustedLedger(),
+    escalationDeadlineAt: new Date("2026-07-27T15:30:00.000Z"),
+    activeRealSearchCount: 0,
+    engineeringOnly: true,
+    batchIncidents: [],
+  });
+  const currentMonitoring = monitoringSnapshot("AUTO_INVESTIGATING", {
+    failureFingerprint: canonicalFailureFingerprint,
+  });
+  const courseRef = createHash("sha256")
+    .update("course-1")
+    .digest("hex")
+    .slice(0, 24);
+  const batch = responderBatch(
+    [
+      {
+        incident: currentIncident,
+        monitoringStatus: currentMonitoring,
+        course: providerCourse,
+        verificationRequests: [
+          {
+            startedAt,
+            runtimeVersion: startedAt ? runtimeVersion : null,
+            providerSnapshotAt: new Date("2026-07-27T15:49:00.000Z"),
+            discoveryAttemptedAt: null,
+            discoveryVerifiedAt: null,
+            status: startedAt ? "CHECKING" : "QUEUED",
+            attemptCount: startedAt ? 1 : 0,
+            outcome: null,
+            failureClass: null,
+            evidence: null,
+            lastError: null,
+            providerSnapshotFingerprint,
+            nextAttemptAt: null,
+            completedAt: null,
+            createdAt: new Date("2026-07-27T15:49:00.000Z"),
+            updatedAt: startedAt ?? new Date("2026-07-27T15:49:00.000Z"),
+          },
+        ],
+      },
+    ],
+    {
+      providerFamilyKey: "SOURCE_MISSING",
+      failureFingerprint: canonicalFailureFingerprint,
+      baseSha: runtimeVersion,
+      releaseSha: runtimeVersion,
+      deployedAt: null,
+      summary: {
+        plannedPaths: [],
+        remediation: {
+          attempts: [
+            {
+              courseRef,
+              providerSnapshotFingerprint,
+              failureFingerprint: canonicalFailureFingerprint,
+              runtimeVersion,
+              activeRealSearchCount: 0,
+              approach: null,
+              deferredFailureHandoffSource: source,
+              deferredFailureHandoffAdmission: admission,
+            },
+          ],
+        },
+      },
+    },
+  );
+  return {
+    admission,
+    batch,
+    canonicalFailureFingerprint,
+    courseRef,
+    currentIncident,
+    currentMonitoring,
+    observedFailureFingerprint,
+    providerSnapshotFingerprint,
+    runtimeVersion,
+    source,
+  };
+}
+
+function legacyDeferredFailureHandoffScenario(
+  overrides: {
+    monitoringEvents?: Array<Record<string, unknown>>;
+    sourceActiveRealSearchCount?: number;
+    currentActiveRealSearchCount?: number;
+    currentEngineeringOnly?: boolean;
+  } = {},
+) {
+  const cycle = 2;
+  const canonicalFailureFingerprint = "1".repeat(64);
+  const priorFailureFingerprint = "0".repeat(64);
+  const runtimeVersion = "a".repeat(40);
+  const lineageAt = new Date("2026-07-27T15:00:00.000Z");
+  const sourceBatchCreatedAt = new Date("2026-07-27T15:10:00.000Z");
+  const sourceObservedAt = new Date("2026-07-27T15:19:00.000Z");
+  const sourceCompletedAt = new Date("2026-07-27T15:20:00.000Z");
+  const endpointAt = sourceCompletedAt;
+  const escalationDeadlineAt = new Date("2026-07-27T15:25:00.000Z");
+  const cooldownExpiresAt = new Date("2026-07-27T15:40:00.000Z");
+  const providerCourse = {
+    timeZone: "America/New_York",
+    website: "https://course.example",
+    detectedBookingUrl: "https://www.chronogolf.com/club/example-course",
+    detectedPlatform: "CHRONOGOLF" as const,
+    providerFamilyKey: "CHRONOGOLF",
+    bookingMethod: "PUBLIC_ONLINE" as const,
+    bookingWindowDaysAhead: 7,
+    bookingWindowEvidenceUrl: "https://course.example/booking-policy",
+    bookingReleaseTimeLocal: "07:00",
+    bookingWindowSource: "OFFICIAL_BOOKING_PAGE",
+    bookingWindowConfidence: 0.95,
+    automationEligibility: "ALLOWED" as const,
+    automationReason: "NONE" as const,
+    monitoringMode: "AUTOMATIC" as const,
+    bookingAccessMode: "PUBLIC_SIGNED_OUT",
+    isPublic: true,
+    intelligenceVerifiedAt: new Date("2026-07-26T12:00:00.000Z"),
+    intelligenceReviewAt: new Date("2026-08-26T12:00:00.000Z"),
+    intelligenceConfidence: 0.95,
+    bookingMetadata: {
+      clubId: 123,
+      courseIds: ["example-course"],
+      bookingBaseUrl: "https://www.chronogolf.com/club/example-course",
+    },
+    layoutHoleCounts: [18],
+    layoutHolesVerifiedAt: new Date("2026-07-26T12:00:00.000Z"),
+  };
+  const providerSnapshotFingerprint =
+    buildCourseSupportProviderSnapshotFingerprint(providerCourse);
+  const observedFailureFingerprint = buildProviderFailureFingerprint({
+    providerFamilyKey: "CHRONOGOLF",
+    failureClass: "MISSING_SOURCE",
+    operation: "AVAILABILITY",
+    httpStatus: null,
+  });
+  const courseRef = createHash("sha256")
+    .update("course-1")
+    .digest("hex")
+    .slice(0, 24);
+  const sourceActiveRealSearchCount =
+    overrides.sourceActiveRealSearchCount ?? 0;
+  const currentActiveRealSearchCount =
+    overrides.currentActiveRealSearchCount ?? sourceActiveRealSearchCount;
+  const endpointEvent = {
+    incidentId: "incident-1",
+    eventType: "HUMAN_REVIEW_REQUESTED",
+    occurredAt: endpointAt,
+    audit: {
+      humanReviewReason: "AUTOMATION_STALLED",
+      cycle,
+      customerState: "NEEDS_HUMAN_REVIEW",
+      automationStalled: true,
+      parkedUntilMaterialChange: true,
+      endpointStalled: true,
+      operationalRetryBudgetExhausted: false,
+      reason: null,
+      escalationDeadlineAt: escalationDeadlineAt.toISOString(),
+      playbookExhausted: true,
+      activeDemand: sourceActiveRealSearchCount > 0,
+      customerDataIncluded: false,
+    },
+  };
+  const lineageEvent = {
+    id: "lineage-event",
+    eventType: "REVALIDATION_REQUESTED",
+    occurredAt: lineageAt,
+    failureFingerprint: canonicalFailureFingerprint,
+    audit: {
+      providerFamilyHandoff: true,
+      providerFamilyChanged: false,
+      providerSnapshotChanged: false,
+      priorCycle: cycle - 1,
+      cycle,
+      priorProviderFamilyKey: "CHRONOGOLF",
+      providerFamilyKey: "CHRONOGOLF",
+      priorFailureFingerprint,
+      failureFingerprint: canonicalFailureFingerprint,
+      claimedProviderSnapshotFingerprint: providerSnapshotFingerprint,
+      observedProviderSnapshotFingerprint: providerSnapshotFingerprint,
+      customerDataIncluded: false,
+    },
+  };
+  const sourceProof = {
+    kind: "PROVIDER_VERIFICATION_FAILURE",
+    status: "RETRYABLE_FAILED",
+    outcome: "FETCH_FAILED",
+    failureClass: "MISSING_SOURCE",
+    observedAt: sourceObservedAt.toISOString(),
+    runtimeVersion,
+    providerExecution: false,
+    providerSnapshotFingerprint,
+    completedAt: null,
+    nextAttemptAt: new Date("2026-07-27T15:25:00.000Z").toISOString(),
+    providerRetryNotBeforeAt: null,
+    httpStatus: null,
+  };
+  const sourceEntry = {
+    id: "legacy-source-entry",
+    incidentId: "incident-1",
+    courseId: "course-1",
+    cycle,
+    result: "NEEDS_HUMAN",
+    proofSnapshot: sourceProof,
+    verifiedAt: sourceObservedAt,
+    createdAt: sourceBatchCreatedAt,
+    updatedAt: new Date(sourceCompletedAt.getTime() + 2),
+    verificationRequests: [
+      {
+        id: "legacy-source-request",
+        batchIncidentId: "legacy-source-entry",
+        releaseSha: runtimeVersion,
+        runtimeVersion,
+        status: "STALE",
+        revision: 3,
+        attemptCount: 1,
+        startedAt: new Date("2026-07-27T15:18:00.000Z"),
+        outcome: "FETCH_FAILED",
+        failureClass: "MISSING_SOURCE",
+        evidence: {
+          schemaVersion: 1,
+          kind: "PROVIDER_VERIFICATION",
+          releaseSha: runtimeVersion,
+          runtimeVersion,
+          observedAt: sourceObservedAt.toISOString(),
+          outcome: "FETCH_FAILED",
+          failureClass: "MISSING_SOURCE",
+          providerExecution: false,
+          providerFamilyKey: "CHRONOGOLF",
+          providerSnapshotFingerprint,
+        },
+        lastError: "batch_closed",
+        providerSnapshotFingerprint,
+        nextAttemptAt: null,
+        completedAt: sourceCompletedAt,
+        createdAt: new Date("2026-07-27T15:17:00.000Z"),
+        updatedAt: sourceCompletedAt,
+      },
+    ],
+    batch: {
+      id: "legacy-source-batch",
+      status: "PARTIAL",
+      providerFamilyKey: "CHRONOGOLF",
+      failureFingerprint: canonicalFailureFingerprint,
+      baseSha: runtimeVersion,
+      releaseSha: runtimeVersion,
+      deployedAt: new Date("2026-07-27T15:12:00.000Z"),
+      createdAt: sourceBatchCreatedAt,
+      completedAt: sourceCompletedAt,
+      revision: 8,
+      updatedAt: new Date(sourceCompletedAt.getTime() + 1),
+      _count: { incidents: 1 },
+      summary: {
+        closeout: {
+          outcome: "needs_human",
+          derivedOutcome: "needs_human",
+          terminalCount: 0,
+          reusableFamilyRestoredCount: 0,
+          retryCount: 0,
+          needsHumanCount: 1,
+          automationStalledCount: 1,
+          operationalRetryBudgetExhaustedCount: 0,
+          orchestrationOnlyCount: 0,
+          providerFamilyHandoffCount: 0,
+          verificationWatchMode: "WATCH_SETTLED",
+          remediationAttemptConsumed: false,
+          remediationAttempts: [
+            {
+              courseRef,
+              consumed: false,
+              countsTowardOperationalNoProgress: true,
+              executionEvidence: {
+                claimedImplementationPaths: false,
+                newReleaseRecorded: false,
+                deploymentRecorded: false,
+                postProbeRecorded: false,
+                providerAttemptRecorded: false,
+                providerExecutionAttemptRecorded: false,
+                playbookAttemptRecorded: false,
+                terminalResultRecorded: false,
+                providerExecutionStarted: true,
+              },
+              failureFingerprint: canonicalFailureFingerprint,
+              observedFailureFingerprint,
+              providerSnapshotFingerprint,
+              observedProviderSnapshotFingerprint:
+                providerSnapshotFingerprint,
+              runtimeVersion,
+              activeRealSearchCount: sourceActiveRealSearchCount,
+              failureOnlyHandoffCooldownUntil:
+                cooldownExpiresAt.toISOString(),
+              operationalRetry: null,
+              orchestrationRetry: null,
+            },
+          ],
+        },
+      },
+    },
+  };
+  const currentIncident = incident({
+    cycle,
+    status: "NEEDS_HUMAN",
+    kind: "FETCH_FAILED",
+    providerFamilyKey: "CHRONOGOLF",
+    failureClass: "HTTP_5XX",
+    failureFingerprint: canonicalFailureFingerprint,
+    attemptLedger: exhaustedLedger(cycle),
+    humanReviewReason: "AUTOMATION_STALLED",
+    escalatedAt: endpointAt,
+    escalationDeadlineAt,
+    nextAttemptAt: null,
+    nextReminderAt: sourceCompletedAt,
+    activeBatchId: null,
+    attemptCount: 8,
+    occurrenceCount: 11,
+    activeRealSearchCount: currentActiveRealSearchCount,
+    engineeringOnly:
+      overrides.currentEngineeringOnly ?? currentActiveRealSearchCount === 0,
+    lastSeenAt: endpointAt,
+    batchIncidents: [sourceEntry],
+    monitoringEvents: overrides.monitoringEvents ?? [lineageEvent],
+  });
+  const currentMonitoring = monitoringSnapshot(
+    "ENGINEERING_VERIFICATION_NEEDED",
+    {
+      stateChangedAt: endpointAt,
+      failureFingerprint: canonicalFailureFingerprint,
+      nextAutomaticAttemptAt: null,
+      revalidationRequestedAt: null,
+    },
+  );
+  return {
+    canonicalFailureFingerprint,
+    cooldownExpiresAt,
+    currentIncident,
+    currentMonitoring,
+    endpointEvent,
+    lineageEvent,
+    observedFailureFingerprint,
+    providerCourse,
+    providerSnapshotFingerprint,
+    runtimeVersion,
+    sourceCompletedAt,
+    sourceObservedAt,
   };
 }
 
@@ -413,6 +846,7 @@ describe("course monitoring watchdog", () => {
       null,
     );
     prismaMocks.automationRun.updateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.automationRun.findMany.mockResolvedValue([]);
     prismaMocks.automationRun.findFirst.mockResolvedValue(null);
     prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(null);
     prismaMocks.courseMonitoringStatus.findUnique.mockResolvedValue(null);
@@ -430,6 +864,29 @@ describe("course monitoring watchdog", () => {
   function useDeadlineIncident(value: Record<string, unknown>) {
     prismaMocks.courseSupportIncident.findUnique.mockReset();
     prismaMocks.courseSupportIncident.findUnique.mockResolvedValueOnce(value);
+  }
+
+  function useDeferredFailureCarrierScenario(
+    scenario: ReturnType<typeof deferredFailureCarrierScenario>,
+    monitoringStatus = scenario.currentMonitoring,
+  ) {
+    scenario.batch.incidents[0]!.course.monitoringStatus = monitoringStatus;
+    prismaMocks.courseSupportIncident.findMany
+      .mockReset()
+      .mockResolvedValueOnce([{ courseId: "course-1" }])
+      .mockResolvedValueOnce([]);
+    useDeadlineIncident({
+      ...scenario.currentIncident,
+      activeBatch: scenario.batch,
+    });
+    prismaMocks.courseMonitoringStatus.findUnique.mockResolvedValue(
+      monitoringStatus,
+    );
+    prismaMocks.course.findUnique.mockResolvedValue({
+      bookingAccessMode: "UNKNOWN",
+      automationReason: "OTHER",
+    });
+    prismaMocks.courseMonitoringStatus.findMany.mockResolvedValue([]);
   }
 
   it("turns an unconfirmed fifteen-minute gap into explicit tooling work", async () => {
@@ -1022,6 +1479,1726 @@ describe("course monitoring watchdog", () => {
       );
     },
   );
+
+  it("preserves an admitted deferred failure carrier when stale ownership expires before confirmation starts", async () => {
+    const scenario = deferredFailureCarrierScenario(null);
+    prismaMocks.courseSupportIncident.findMany
+      .mockReset()
+      .mockResolvedValueOnce([{ courseId: "course-1" }])
+      .mockResolvedValueOnce([]);
+    useDeadlineIncident({
+      ...scenario.currentIncident,
+      activeBatch: scenario.batch,
+    });
+    prismaMocks.courseMonitoringStatus.findUnique.mockResolvedValue(
+      scenario.currentMonitoring,
+    );
+    prismaMocks.course.findUnique.mockResolvedValue({
+      bookingAccessMode: "UNKNOWN",
+      automationReason: "OTHER",
+    });
+    prismaMocks.courseMonitoringStatus.findMany.mockResolvedValue([]);
+
+    await expect(runCourseMonitoringWatchdog(now)).resolves.toMatchObject({
+      scheduled: 1,
+      escalated: 0,
+    });
+
+    const closeoutCall =
+      prismaMocks.courseSupportBatch.updateMany.mock.calls.find(
+        ([input]) => input.data?.completedAt?.getTime() === now.getTime(),
+      );
+    expect(closeoutCall).toBeDefined();
+    const closeout = closeoutCall?.[0].data.summary.closeout;
+    expect(closeout).toMatchObject({
+      outcome: "retryable_failed",
+      endpointCount: 0,
+      automationStalledCount: 0,
+      exhaustedEndpointCount: 0,
+      orchestrationRetryCount: 1,
+      deferredFailureHandoffAvailableCount: 1,
+      deferredFailureHandoffConsumedCount: 0,
+    });
+    const attempt = closeout.remediationAttempts[0];
+    const carried = parseDeferredFailureHandoffSignal(
+      attempt.deferredFailureHandoff,
+    );
+    expect(carried).toMatchObject({
+      state: "AVAILABLE",
+      confirmationStarted: false,
+      signalDigest: scenario.source.signalDigest,
+      sourceBatchIncidentDigest:
+        createDeferredFailureHandoffBatchIncidentDigest("batch-entry-1"),
+      canonicalFailureFingerprint: scenario.canonicalFailureFingerprint,
+      observedFailureFingerprint: scenario.observedFailureFingerprint,
+      claimedProviderSnapshotFingerprint: scenario.providerSnapshotFingerprint,
+      runtimeVersion: scenario.runtimeVersion,
+      eligibleAt: new Date(now.getTime() + 15 * 60 * 1000).toISOString(),
+    });
+    expect(attempt).toMatchObject({
+      courseRef: scenario.courseRef,
+      consumed: false,
+      countsTowardOperationalNoProgress: false,
+      executionEvidence: {
+        claimedImplementationPaths: false,
+        newReleaseRecorded: false,
+        deploymentRecorded: false,
+        postProbeRecorded: false,
+        providerAttemptRecorded: false,
+        providerExecutionAttemptRecorded: false,
+        playbookAttemptRecorded: false,
+        terminalResultRecorded: false,
+        providerExecutionStarted: false,
+      },
+      orchestrationRetry: {
+        attemptNumber: 1,
+        delaySeconds: 15 * 60,
+        retryAt: new Date(now.getTime() + 15 * 60 * 1000).toISOString(),
+      },
+    });
+    expect(
+      parseDeferredFailureHandoffAdmission(
+        attempt.deferredFailureHandoffAdmission,
+      ),
+    ).toMatchObject({
+      signalDigest: carried?.signalDigest,
+      sourceRecordDigest: carried?.recordDigest,
+      sourceBatchIncidentDigest: carried?.sourceBatchIncidentDigest,
+      admittedAt: scenario.admission.admittedAt,
+    });
+    expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "incident-1",
+          cycle: 1,
+          activeBatchId: "batch-1",
+        }),
+        data: expect.objectContaining({
+          activeBatchId: null,
+          nextAttemptAt: new Date(now.getTime() + 15 * 60 * 1000),
+          escalationDeadlineAt: null,
+        }),
+      }),
+    );
+    expect(
+      prismaMocks.courseSupportVerificationRequest.updateMany,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "verification-1-1",
+          batchIncidentId: "batch-entry-1",
+          startedAt: null,
+        }),
+        data: {
+          revision: { increment: 0 },
+          updatedAt: new Date("2026-07-27T15:49:00.000Z"),
+        },
+      }),
+    );
+    expect(prismaMocks.courseSupportBatchIncident.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "batch-entry-1",
+          result: "PENDING",
+        }),
+        data: expect.objectContaining({
+          result: "RETRY_SCHEDULED",
+          updatedAt: now,
+        }),
+      }),
+    );
+    expect(
+      prismaMocks.courseSupportBatchIncident.updateMany.mock.calls.some(
+        ([input]) => "proofSnapshot" in input.data,
+      ),
+    ).toBe(false);
+    expect(
+      prismaMocks.courseMonitoringEvent.create.mock.calls.some(
+        ([input]) => input.data.eventType === "HUMAN_REVIEW_REQUESTED",
+      ),
+    ).toBe(false);
+  });
+
+  it("consumes an admitted deferred failure carrier when confirmation started without durable current-failure proof", async () => {
+    const startedAt = new Date("2026-07-27T15:50:00.000Z");
+    const scenario = deferredFailureCarrierScenario(startedAt);
+    prismaMocks.courseSupportIncident.findMany
+      .mockReset()
+      .mockResolvedValueOnce([{ courseId: "course-1" }])
+      .mockResolvedValueOnce([]);
+    useDeadlineIncident({
+      ...scenario.currentIncident,
+      activeBatch: scenario.batch,
+    });
+    prismaMocks.courseMonitoringStatus.findUnique.mockResolvedValue(
+      scenario.currentMonitoring,
+    );
+    prismaMocks.course.findUnique.mockResolvedValue({
+      bookingAccessMode: "UNKNOWN",
+      automationReason: "OTHER",
+    });
+    prismaMocks.courseMonitoringStatus.findMany.mockResolvedValue([]);
+
+    await expect(runCourseMonitoringWatchdog(now)).resolves.toMatchObject({
+      scheduled: 1,
+      escalated: 0,
+    });
+
+    const closeoutCall =
+      prismaMocks.courseSupportBatch.updateMany.mock.calls.find(
+        ([input]) => input.data?.completedAt?.getTime() === now.getTime(),
+      );
+    expect(closeoutCall).toBeDefined();
+    const closeout = closeoutCall?.[0].data.summary.closeout;
+    expect(closeout).toMatchObject({
+      outcome: "retryable_failed",
+      endpointCount: 0,
+      automationStalledCount: 0,
+      exhaustedEndpointCount: 0,
+      orchestrationRetryCount: 0,
+      deferredFailureHandoffAvailableCount: 0,
+      deferredFailureHandoffConsumedCount: 1,
+    });
+    const attempt = closeout.remediationAttempts[0];
+    const consumed = parseDeferredFailureHandoffSignal(
+      attempt.deferredFailureHandoff,
+    );
+    expect(consumed).toMatchObject({
+      state: "CONSUMED",
+      confirmationStarted: true,
+      signalDigest: scenario.source.signalDigest,
+      sourceBatchIncidentDigest:
+        createDeferredFailureHandoffBatchIncidentDigest("batch-entry-1"),
+      canonicalFailureFingerprint: scenario.canonicalFailureFingerprint,
+    });
+    expect(attempt).toMatchObject({
+      consumed: false,
+      countsTowardOperationalNoProgress: true,
+      executionEvidence: expect.objectContaining({
+        providerExecutionStarted: true,
+        providerExecutionAttemptRecorded: false,
+        providerAttemptRecorded: false,
+      }),
+      operationalRetry: null,
+      orchestrationRetry: null,
+    });
+    expect(
+      parseDeferredFailureHandoffAdmission(
+        attempt.deferredFailureHandoffAdmission,
+      ),
+    ).toMatchObject({
+      signalDigest: consumed?.signalDigest,
+      sourceRecordDigest: consumed?.recordDigest,
+      sourceBatchIncidentDigest: consumed?.sourceBatchIncidentDigest,
+      admittedAt: scenario.admission.admittedAt,
+    });
+    expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "incident-1",
+          cycle: 1,
+          activeBatchId: "batch-1",
+        }),
+        data: expect.objectContaining({
+          activeBatchId: null,
+          nextAttemptAt: new Date(now.getTime() + 60 * 1000),
+          escalationDeadlineAt: new Date(now.getTime() + 30 * 60 * 1000),
+          nextAction:
+            "Retry the unchanged failure after the deferred confirmation started without durable current-failure proof.",
+        }),
+      }),
+    );
+    expect(
+      prismaMocks.courseSupportVerificationRequest.updateMany,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "verification-1-1",
+          batchIncidentId: "batch-entry-1",
+          startedAt,
+        }),
+        data: {
+          revision: { increment: 0 },
+          updatedAt: startedAt,
+        },
+      }),
+    );
+    expect(
+      prismaMocks.courseMonitoringEvent.create.mock.calls.some(
+        ([input]) => input.data.eventType === "HUMAN_REVIEW_REQUESTED",
+      ),
+    ).toBe(false);
+  });
+
+  it.each(["MISSING_SOURCE", "SCHEMA"] as const)(
+    "atomically hands off a provider-executed deferred %s proof while releasing stale ownership",
+    async (failureClass) => {
+      const startedAt = new Date("2026-07-27T15:50:00.000Z");
+      const observedAt = new Date("2026-07-27T15:55:00.000Z");
+      const scenario = deferredFailureCarrierScenario(startedAt);
+      scenario.batch.incidents[0].proofSnapshot = {
+        kind: "PROVIDER_VERIFICATION_FAILURE",
+        status: "RETRYABLE_FAILED",
+        outcome: "FETCH_FAILED",
+        failureClass,
+        observedAt: observedAt.toISOString(),
+        completedAt: null,
+        nextAttemptAt: null,
+        providerRetryNotBeforeAt: null,
+        runtimeVersion: scenario.runtimeVersion,
+        providerExecution: true,
+        providerSnapshotFingerprint: scenario.providerSnapshotFingerprint,
+      };
+      Object.assign(scenario.batch.incidents[0].verificationRequests[0], {
+        runtimeVersion: scenario.runtimeVersion,
+        status: "RETRYABLE_FAILED",
+        attemptCount: 1,
+        startedAt,
+        providerSnapshotAt: startedAt,
+        outcome: "FETCH_FAILED",
+        failureClass,
+        evidence: {
+          schemaVersion: 1,
+          kind: "PROVIDER_VERIFICATION",
+          releaseSha: scenario.runtimeVersion,
+          runtimeVersion: scenario.runtimeVersion,
+          observedAt: observedAt.toISOString(),
+          outcome: "FETCH_FAILED",
+          failureClass,
+          providerExecution: true,
+          providerFamilyKey: "SOURCE_MISSING",
+          providerSnapshotFingerprint: scenario.providerSnapshotFingerprint,
+        },
+        providerSnapshotFingerprint: scenario.providerSnapshotFingerprint,
+        nextAttemptAt: null,
+        completedAt: null,
+        createdAt: new Date("2026-07-27T15:49:00.000Z"),
+        updatedAt: observedAt,
+      });
+      prismaMocks.courseSupportIncident.findMany
+        .mockReset()
+        .mockResolvedValueOnce([{ courseId: "course-1" }])
+        .mockResolvedValueOnce([]);
+      useDeadlineIncident({
+        ...scenario.currentIncident,
+        activeBatch: scenario.batch,
+      });
+      prismaMocks.courseMonitoringStatus.findUnique.mockResolvedValue(
+        scenario.currentMonitoring,
+      );
+      prismaMocks.course.findUnique.mockResolvedValue({
+        bookingAccessMode: "UNKNOWN",
+        automationReason: "OTHER",
+      });
+      prismaMocks.courseMonitoringStatus.findMany.mockResolvedValue([]);
+
+      await expect(runCourseMonitoringWatchdog(now)).resolves.toMatchObject({
+        scheduled: 1,
+        escalated: 0,
+      });
+
+      const failureFingerprint = buildProviderFailureFingerprint({
+        providerFamilyKey: "SOURCE_MISSING",
+        failureClass,
+        operation: "AVAILABILITY",
+        httpStatus: null,
+      });
+      const closeoutCall =
+        prismaMocks.courseSupportBatch.updateMany.mock.calls.find(
+          ([input]) => input.data?.completedAt?.getTime() === now.getTime(),
+        );
+      expect(closeoutCall?.[0].data.summary.closeout).toMatchObject({
+        derivedOutcome: "retryable_failed",
+        deferredFailureHandoffAvailableCount: 0,
+        deferredFailureHandoffConsumedCount: 1,
+        deferredFailureMaterialHandoffCount: 1,
+      });
+      expect(
+        parseDeferredFailureHandoffSignal(
+          closeoutCall?.[0].data.summary.closeout.remediationAttempts[0]
+            .deferredFailureHandoff,
+        ),
+      ).toMatchObject({ state: "CONSUMED", confirmationStarted: true });
+      expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            id: "incident-1",
+            cycle: 1,
+            activeBatchId: "batch-1",
+            failureFingerprint: scenario.canonicalFailureFingerprint,
+          }),
+          data: expect.objectContaining({
+            cycle: { increment: 1 },
+            activeBatchId: null,
+            failureClass,
+            failureFingerprint,
+            attemptCount: 0,
+            nextAttemptAt: now,
+          }),
+        }),
+      );
+      expect(
+        prismaMocks.courseMonitoringStatus.updateMany,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            failureFingerprint: scenario.canonicalFailureFingerprint,
+          }),
+          data: expect.objectContaining({
+            state: "AUTO_INVESTIGATING",
+            failureFingerprint,
+            nextAutomaticAttemptAt: now,
+            revalidationRequestedAt: now,
+          }),
+        }),
+      );
+      expect(
+        prismaMocks.courseSupportVerificationRequest.updateMany,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            id: "verification-1-1",
+            runtimeVersion: scenario.runtimeVersion,
+            providerSnapshotFingerprint: scenario.providerSnapshotFingerprint,
+            startedAt,
+            createdAt: new Date("2026-07-27T15:49:00.000Z"),
+            updatedAt: observedAt,
+            evidence: { equals: expect.anything() },
+          }),
+          data: expect.objectContaining({
+            revision: { increment: 0 },
+            updatedAt: observedAt,
+          }),
+        }),
+      );
+      expect(
+        prismaMocks.courseSupportBatchIncident.updateMany,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            id: "batch-entry-1",
+            proofSnapshot: { equals: expect.anything() },
+          }),
+        }),
+      );
+      expect(prismaMocks.courseMonitoringEvent.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            eventType: "REVALIDATION_REQUESTED",
+            failureFingerprint,
+            audit: expect.objectContaining({
+              priorCycle: 1,
+              cycle: 2,
+              providerFamilyHandoff: true,
+              providerFamilyChanged: false,
+              priorFailureFingerprint: scenario.canonicalFailureFingerprint,
+              failureFingerprint,
+              staleOwnershipRecovery: true,
+              confirmationStarted: true,
+              customerDataIncluded: false,
+            }),
+          }),
+        }),
+      );
+      expect(
+        prismaMocks.courseMonitoringEvent.create.mock.calls.some(
+          ([input]) => input.data.eventType === "HUMAN_REVIEW_REQUESTED",
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it.each([
+    { failureClass: "RATE_LIMIT" as const, httpStatus: 429 },
+    { failureClass: "HTTP_5XX" as const, httpStatus: 503 },
+  ])(
+    "keeps a provider-executed deferred $failureClass handoff behind its one-hour provider floor",
+    async ({ failureClass, httpStatus }) => {
+      const startedAt = new Date("2026-07-27T15:50:00.000Z");
+      const observedAt = new Date("2026-07-27T15:55:00.000Z");
+      const providerFloor = new Date(now.getTime() + 60 * 60 * 1000);
+      const scenario = deferredFailureCarrierScenario(startedAt);
+      scenario.batch.incidents[0].proofSnapshot = {
+        kind: "PROVIDER_VERIFICATION_FAILURE",
+        status: "RETRYABLE_FAILED",
+        outcome: "FETCH_FAILED",
+        failureClass,
+        observedAt: observedAt.toISOString(),
+        completedAt: null,
+        nextAttemptAt: providerFloor.toISOString(),
+        providerRetryNotBeforeAt: providerFloor.toISOString(),
+        httpStatus,
+        runtimeVersion: scenario.runtimeVersion,
+        providerExecution: true,
+        providerSnapshotFingerprint: scenario.providerSnapshotFingerprint,
+      };
+      Object.assign(scenario.batch.incidents[0].verificationRequests[0], {
+        runtimeVersion: scenario.runtimeVersion,
+        status: "RETRYABLE_FAILED",
+        attemptCount: 1,
+        startedAt,
+        providerSnapshotAt: startedAt,
+        outcome: "FETCH_FAILED",
+        failureClass,
+        evidence: {
+          schemaVersion: 1,
+          kind: "PROVIDER_VERIFICATION",
+          releaseSha: scenario.runtimeVersion,
+          runtimeVersion: scenario.runtimeVersion,
+          observedAt: observedAt.toISOString(),
+          outcome: "FETCH_FAILED",
+          failureClass,
+          providerExecution: true,
+          providerFamilyKey: "SOURCE_MISSING",
+          providerSnapshotFingerprint: scenario.providerSnapshotFingerprint,
+          providerRetryNotBeforeAt: providerFloor.toISOString(),
+          httpStatus,
+        },
+        providerSnapshotFingerprint: scenario.providerSnapshotFingerprint,
+        nextAttemptAt: providerFloor,
+        completedAt: null,
+        createdAt: new Date("2026-07-27T15:49:00.000Z"),
+        updatedAt: observedAt,
+      });
+      useDeferredFailureCarrierScenario(scenario);
+
+      await expect(runCourseMonitoringWatchdog(now)).resolves.toMatchObject({
+        scheduled: 1,
+        escalated: 0,
+      });
+
+      const failureFingerprint = buildProviderFailureFingerprint({
+        providerFamilyKey: "SOURCE_MISSING",
+        failureClass,
+        operation: "AVAILABILITY",
+        httpStatus,
+      });
+      const incidentHandoff =
+        prismaMocks.courseSupportIncident.updateMany.mock.calls.find(
+          ([input]) => input.data?.cycle?.increment === 1,
+        )?.[0];
+      expect(incidentHandoff?.data).toEqual(
+        expect.objectContaining({
+          cycle: { increment: 1 },
+          failureClass,
+          failureFingerprint,
+          nextAttemptAt: providerFloor,
+        }),
+      );
+      const freshCycleDeadline = incidentHandoff?.data.escalationDeadlineAt;
+      expect(freshCycleDeadline).toBeInstanceOf(Date);
+      expect(freshCycleDeadline.getTime()).toBeGreaterThan(
+        providerFloor.getTime(),
+      );
+      expect(
+        prismaMocks.courseMonitoringStatus.updateMany,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            state: "AUTO_INVESTIGATING",
+            failureFingerprint,
+            nextAutomaticAttemptAt: providerFloor,
+            revalidationRequestedAt: providerFloor,
+          }),
+        }),
+      );
+
+      const beforeProviderFloor = new Date(
+        providerFloor.getTime() - 10 * 60 * 1000,
+      );
+      const recoveredIncident = {
+        ...scenario.currentIncident,
+        cycle: scenario.currentIncident.cycle + 1,
+        revision: scenario.currentIncident.revision + 1,
+        activeBatchId: null,
+        failureClass,
+        failureFingerprint,
+        firstSeenAt: now,
+        confirmedAt: now,
+        escalationDeadlineAt: freshCycleDeadline,
+        nextAttemptAt: providerFloor,
+        humanReviewReason: null,
+        nextReminderAt: null,
+        lastSeenAt: now,
+      };
+      vi.clearAllMocks();
+      prismaMocks.courseSupportIncident.findMany.mockResolvedValue([]);
+      prismaMocks.courseMonitoringStatus.findMany.mockResolvedValue([
+        {
+          courseId: "course-1",
+          state: "AUTO_INVESTIGATING",
+          stateChangedAt: now,
+          firstDegradedAt: null,
+          failureFingerprint,
+          nextAutomaticAttemptAt: providerFloor,
+          revalidationRequestedAt: providerFloor,
+          revision: scenario.currentMonitoring.revision + 1,
+          course: course(recoveredIncident),
+        },
+      ]);
+
+      await expect(
+        runCourseMonitoringWatchdog(beforeProviderFloor),
+      ).resolves.toMatchObject({ checked: 1, scheduled: 0, escalated: 0 });
+
+      expect(prismaMocks.courseSupportIncident.updateMany).not.toHaveBeenCalled();
+      expect(
+        prismaMocks.courseMonitoringStatus.updateMany,
+      ).not.toHaveBeenCalled();
+      expect(prismaMocks.teeSearch.updateMany).not.toHaveBeenCalled();
+      expect(prismaMocks.courseSupportBatch.updateMany).not.toHaveBeenCalled();
+      expect(prismaMocks.courseMonitoringEvent.create).not.toHaveBeenCalled();
+    },
+  );
+
+  it("adopts a completed deferred failure request when ownership expires before entry reflection", async () => {
+    const startedAt = new Date("2026-07-27T15:50:00.000Z");
+    const observedAt = new Date("2026-07-27T15:55:00.000Z");
+    const scenario = deferredFailureCarrierScenario(startedAt);
+    Object.assign(scenario.batch.incidents[0].verificationRequests[0], {
+      runtimeVersion: scenario.runtimeVersion,
+      status: "RETRYABLE_FAILED",
+      outcome: "FETCH_FAILED",
+      failureClass: "MISSING_SOURCE",
+      evidence: {
+        schemaVersion: 1,
+        kind: "PROVIDER_VERIFICATION",
+        releaseSha: scenario.runtimeVersion,
+        runtimeVersion: scenario.runtimeVersion,
+        observedAt: observedAt.toISOString(),
+        outcome: "FETCH_FAILED",
+        failureClass: "MISSING_SOURCE",
+        providerExecution: true,
+        providerFamilyKey: "SOURCE_MISSING",
+        providerSnapshotFingerprint: scenario.providerSnapshotFingerprint,
+      },
+      providerSnapshotFingerprint: scenario.providerSnapshotFingerprint,
+      nextAttemptAt: null,
+      completedAt: null,
+      updatedAt: observedAt,
+    });
+    expect(scenario.batch.incidents[0].proofSnapshot).toBeNull();
+    scenario.currentIncident.activeRealSearchCount = 1;
+    useDeferredFailureCarrierScenario(scenario);
+
+    await expect(runCourseMonitoringWatchdog(now)).resolves.toMatchObject({
+      scheduled: 1,
+      escalated: 0,
+    });
+
+    const failureFingerprint = buildProviderFailureFingerprint({
+      providerFamilyKey: "SOURCE_MISSING",
+      failureClass: "MISSING_SOURCE",
+      operation: "AVAILABILITY",
+      httpStatus: null,
+    });
+    expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          cycle: { increment: 1 },
+          failureClass: "MISSING_SOURCE",
+          failureFingerprint,
+        }),
+      }),
+    );
+    expect(prismaMocks.courseSupportBatchIncident.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "batch-entry-1",
+          proofSnapshot: { equals: expect.anything() },
+        }),
+        data: expect.objectContaining({
+          result: "RETRY_SCHEDULED",
+          updatedAt: now,
+        }),
+      }),
+    );
+  });
+
+  it("consumes a completed current-F1 confirmation without replaying the old F2 after an owner crash", async () => {
+    const startedAt = new Date("2026-07-27T15:50:00.000Z");
+    const observedAt = new Date("2026-07-27T15:55:00.000Z");
+    const scenario = deferredFailureCarrierScenario(startedAt);
+    Object.assign(scenario.batch.incidents[0].verificationRequests[0], {
+      runtimeVersion: scenario.runtimeVersion,
+      status: "RETRYABLE_FAILED",
+      outcome: "FETCH_FAILED",
+      failureClass: "HTTP_5XX",
+      evidence: {
+        schemaVersion: 1,
+        kind: "PROVIDER_VERIFICATION",
+        releaseSha: scenario.runtimeVersion,
+        runtimeVersion: scenario.runtimeVersion,
+        observedAt: observedAt.toISOString(),
+        outcome: "FETCH_FAILED",
+        failureClass: "HTTP_5XX",
+        providerExecution: true,
+        providerFamilyKey: "SOURCE_MISSING",
+        providerSnapshotFingerprint: scenario.providerSnapshotFingerprint,
+      },
+      providerSnapshotFingerprint: scenario.providerSnapshotFingerprint,
+      nextAttemptAt: null,
+      completedAt: null,
+      updatedAt: observedAt,
+    });
+    expect(scenario.batch.incidents[0].proofSnapshot).toBeNull();
+    useDeferredFailureCarrierScenario(scenario);
+
+    await expect(runCourseMonitoringWatchdog(now)).resolves.toMatchObject({
+      scheduled: 1,
+      escalated: 0,
+    });
+
+    const incidentUpdate =
+      prismaMocks.courseSupportIncident.updateMany.mock.calls.find(
+        ([input]) => input.where?.id === "incident-1",
+      )?.[0];
+    expect(incidentUpdate?.data).not.toHaveProperty("cycle");
+    expect(incidentUpdate?.data).not.toHaveProperty(
+      "failureFingerprint",
+      scenario.observedFailureFingerprint,
+    );
+    expect(incidentUpdate?.data).toMatchObject({
+      activeBatchId: null,
+      nextAttemptAt: new Date(now.getTime() + 60 * 1000),
+    });
+    const closeoutCall =
+      prismaMocks.courseSupportBatch.updateMany.mock.calls.find(
+        ([input]) => input.data?.completedAt?.getTime() === now.getTime(),
+      );
+    expect(
+      parseDeferredFailureHandoffSignal(
+        closeoutCall?.[0].data.summary.closeout.remediationAttempts[0]
+          .deferredFailureHandoff,
+      ),
+    ).toMatchObject({
+      state: "CONSUMED",
+      confirmationStarted: true,
+      canonicalFailureFingerprint: scenario.canonicalFailureFingerprint,
+    });
+    expect(
+      prismaMocks.courseMonitoringEvent.create.mock.calls.some(
+        ([input]) => input.data?.audit?.providerFamilyHandoff === true,
+      ),
+    ).toBe(false);
+  });
+
+  it("adopts a completed deferred success request when ownership expires before entry reflection", async () => {
+    const startedAt = new Date("2026-07-27T15:50:00.000Z");
+    const attemptedAt = new Date("2026-07-27T15:51:00.000Z");
+    const verifiedAt = new Date("2026-07-27T15:52:00.000Z");
+    const observedAt = new Date("2026-07-27T15:55:00.000Z");
+    const completedAt = new Date("2026-07-27T15:56:00.000Z");
+    const scenario = deferredFailureCarrierScenario(startedAt);
+    Object.assign(scenario.batch.incidents[0].verificationRequests[0], {
+      runtimeVersion: scenario.runtimeVersion,
+      status: "SUCCEEDED",
+      outcome: "NO_MATCH",
+      failureClass: null,
+      evidence: {
+        schemaVersion: 1,
+        kind: "PROVIDER_VERIFICATION",
+        releaseSha: scenario.runtimeVersion,
+        runtimeVersion: scenario.runtimeVersion,
+        observedAt: observedAt.toISOString(),
+        outcome: "NO_MATCH",
+        providerExecution: true,
+        providerFamilyKey: "SOURCE_MISSING",
+        providerSnapshotFingerprint: scenario.providerSnapshotFingerprint,
+      },
+      lastError: null,
+      providerSnapshotFingerprint: scenario.providerSnapshotFingerprint,
+      discoveryAttemptedAt: attemptedAt,
+      discoveryVerifiedAt: verifiedAt,
+      nextAttemptAt: null,
+      completedAt,
+      updatedAt: completedAt,
+    });
+    expect(scenario.batch.incidents[0].proofSnapshot).toBeNull();
+    useDeferredFailureCarrierScenario(scenario);
+
+    await expect(runCourseMonitoringWatchdog(now)).resolves.toMatchObject({
+      scheduled: 0,
+      escalated: 0,
+    });
+
+    expect(prismaMocks.courseMonitoringStatus.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          state: "HEALTHY",
+          lastSuccessfulAt: observedAt,
+          failureFingerprint: null,
+        }),
+      }),
+    );
+    expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "RESOLVED",
+          activeBatchId: null,
+          resolution: "MONITORING_RESTORED",
+          resolvedAt: observedAt,
+        }),
+      }),
+    );
+    expect(prismaMocks.courseSupportBatchIncident.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ result: "RESTORED", updatedAt: now }),
+      }),
+    );
+  });
+
+  it.each([
+    ["HEALTHY", "RESTORED", "MONITORING_RESTORED"],
+    ["FINAL_TECHNICAL", "FINAL_DISPOSITION", "TECHNICAL_LIMITATION_CLASSIFIED"],
+  ] as const)(
+    "releases an expired deferred carrier to the newer authoritative %s state without replaying the stale failure",
+    async (state, result, resolution) => {
+      const scenario = deferredFailureCarrierScenario(null);
+      const authoritativeMonitoring = monitoringSnapshot(state, {
+        failureFingerprint: null,
+        stateChangedAt: new Date("2026-07-27T15:58:00.000Z"),
+        revision: 9,
+      });
+      useDeferredFailureCarrierScenario(scenario, authoritativeMonitoring);
+
+      await expect(runCourseMonitoringWatchdog(now)).resolves.toMatchObject({
+        scheduled: 0,
+        escalated: 0,
+      });
+
+      expect(
+        prismaMocks.courseSupportBatchIncident.updateMany,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            id: "batch-entry-1",
+            incidentId: "incident-1",
+            cycle: 1,
+            result: "PENDING",
+          }),
+          data: expect.objectContaining({ result }),
+        }),
+      );
+      expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            id: "incident-1",
+            cycle: 1,
+            activeBatchId: "batch-1",
+          }),
+          data: expect.objectContaining({
+            status: "RESOLVED",
+            activeBatchId: null,
+            resolution,
+          }),
+        }),
+      );
+      const closeoutCall =
+        prismaMocks.courseSupportBatch.updateMany.mock.calls.find(
+          ([input]) => input.data?.completedAt?.getTime() === now.getTime(),
+        );
+      const attempt = closeoutCall?.[0].data.summary.closeout.remediationAttempts[0];
+      expect(parseDeferredFailureHandoffSignal(attempt?.deferredFailureHandoff)).toMatchObject({
+        state: "CONSUMED",
+        confirmationStarted: false,
+        canonicalFailureFingerprint: scenario.canonicalFailureFingerprint,
+      });
+      expect(attempt?.deferredFailureHandoffInvalidation).toEqual({
+        schemaVersion: 1,
+        reason: "MUTABLE_CURRENT_STATE_CHANGED",
+        signalDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+        customerDataIncluded: false,
+      });
+      expect(
+        prismaMocks.courseSupportIncident.updateMany.mock.calls.some(
+          ([input]) => input.data?.cycle !== undefined,
+        ),
+      ).toBe(false);
+      expect(
+        prismaMocks.courseMonitoringEvent.create.mock.calls.some(
+          ([input]) => input.data?.audit?.providerFamilyHandoff === true,
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it.each([
+    ["provider snapshot", null],
+    ["monitoring identity", null],
+    ["provider snapshot", new Date("2026-07-27T15:50:00.000Z")],
+    ["monitoring identity", new Date("2026-07-27T15:50:00.000Z")],
+  ] as const)(
+    "invalidates an expired deferred carrier after %s drift (started at %s) and releases ownership without projecting the stale F2",
+    async (drift, startedAt) => {
+      const scenario = deferredFailureCarrierScenario(startedAt);
+      if (drift === "provider snapshot") {
+        scenario.batch.incidents[0]!.course.website =
+          "https://new-provider-shape.example";
+      } else {
+        scenario.currentMonitoring.failureFingerprint = "4".repeat(64);
+      }
+      useDeferredFailureCarrierScenario(scenario);
+
+      await expect(runCourseMonitoringWatchdog(now)).resolves.toMatchObject({
+        scheduled: 1,
+        escalated: 0,
+      });
+
+      expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            id: "incident-1",
+            cycle: 1,
+            activeBatchId: "batch-1",
+          }),
+          data: expect.objectContaining({
+            activeBatchId: null,
+            nextAttemptAt: new Date(now.getTime() + 60 * 1000),
+            nextAction:
+              "Retry from current monitoring and provider evidence after invalidating the superseded deferred confirmation.",
+          }),
+        }),
+      );
+      const closeoutCall =
+        prismaMocks.courseSupportBatch.updateMany.mock.calls.find(
+          ([input]) => input.data?.completedAt?.getTime() === now.getTime(),
+        );
+      expect(closeoutCall?.[0].data.summary.closeout).toMatchObject({
+        outcome: "retryable_failed",
+        deferredFailureHandoffAvailableCount: 0,
+        deferredFailureHandoffConsumedCount: 1,
+        deferredFailureMaterialHandoffCount: 0,
+      });
+      const attempt = closeoutCall?.[0].data.summary.closeout.remediationAttempts[0];
+      const consumed = parseDeferredFailureHandoffSignal(
+        attempt?.deferredFailureHandoff,
+      );
+      expect(consumed).toMatchObject({
+        state: "CONSUMED",
+        confirmationStarted: startedAt !== null,
+        canonicalFailureFingerprint: scenario.canonicalFailureFingerprint,
+        observedFailureFingerprint: scenario.observedFailureFingerprint,
+      });
+      expect(attempt).toMatchObject({
+        consumed: false,
+        countsTowardOperationalNoProgress: startedAt !== null,
+        executionEvidence: expect.objectContaining({
+          providerExecutionStarted: startedAt !== null,
+        }),
+        deferredFailureHandoffInvalidation: {
+          schemaVersion: 1,
+          reason: "MUTABLE_CURRENT_STATE_CHANGED",
+          signalDigest: consumed?.signalDigest,
+          customerDataIncluded: false,
+        },
+      });
+      expect(
+        prismaMocks.courseSupportIncident.updateMany.mock.calls.some(
+          ([input]) =>
+            input.data?.cycle !== undefined ||
+            input.data?.failureFingerprint === scenario.observedFailureFingerprint,
+        ),
+      ).toBe(false);
+      expect(
+        prismaMocks.courseMonitoringEvent.create.mock.calls.some(
+          ([input]) => input.data?.audit?.providerFamilyHandoff === true,
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it("restores the exact parked CHRONOGOLF legacy handoff once at database-clock expiry", async () => {
+    const scenario = legacyDeferredFailureHandoffScenario();
+    expect(scenario.currentIncident.batchIncidents).toEqual([
+      expect.objectContaining({
+        result: "NEEDS_HUMAN",
+        updatedAt: new Date(scenario.sourceCompletedAt.getTime() + 2),
+        verificationRequests: [
+          expect.objectContaining({
+            status: "STALE",
+            lastError: "batch_closed",
+            nextAttemptAt: null,
+            completedAt: scenario.sourceCompletedAt,
+            updatedAt: scenario.sourceCompletedAt,
+          }),
+        ],
+        batch: expect.objectContaining({
+          status: "PARTIAL",
+          updatedAt: new Date(scenario.sourceCompletedAt.getTime() + 1),
+          _count: { incidents: 1 },
+          summary: expect.objectContaining({
+            closeout: expect.objectContaining({
+              outcome: "needs_human",
+              derivedOutcome: "needs_human",
+              retryCount: 0,
+              needsHumanCount: 1,
+              automationStalledCount: 1,
+              verificationWatchMode: "WATCH_SETTLED",
+              remediationAttemptConsumed: false,
+              remediationAttempts: [
+                expect.objectContaining({
+                  consumed: false,
+                  executionEvidence: expect.objectContaining({
+                    playbookAttemptRecorded: false,
+                    providerExecutionStarted: true,
+                    providerAttemptRecorded: false,
+                  }),
+                }),
+              ],
+            }),
+          }),
+        }),
+      }),
+    ]);
+    prismaMocks.courseSupportIncident.findMany
+      .mockReset()
+      .mockResolvedValueOnce([{ courseId: "course-1" }])
+      .mockResolvedValue([]);
+    useDeadlineIncident(scenario.currentIncident);
+    prismaMocks.courseMonitoringStatus.findUnique.mockResolvedValue(
+      scenario.currentMonitoring,
+    );
+    prismaMocks.course.findUnique.mockResolvedValue(scenario.providerCourse);
+    prismaMocks.courseMonitoringEvent.findFirst.mockResolvedValue(
+      scenario.endpointEvent,
+    );
+    prismaMocks.courseMonitoringStatus.findMany.mockResolvedValue([]);
+    prismaMocks.$queryRaw.mockResolvedValue([
+      { now: scenario.cooldownExpiresAt },
+    ]);
+
+    await expect(
+      runCourseMonitoringWatchdog(
+        new Date(scenario.cooldownExpiresAt.getTime() + 5 * 60 * 1000),
+      ),
+    ).resolves.toMatchObject({
+      checked: 0,
+      scheduled: 1,
+      escalated: 0,
+    });
+
+    expect(prismaMocks.courseSupportBatch.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "legacy-source-batch",
+          status: "PARTIAL",
+          providerFamilyKey: "CHRONOGOLF",
+          failureFingerprint: scenario.canonicalFailureFingerprint,
+          releaseSha: scenario.runtimeVersion,
+        }),
+        data: {
+          revision: { increment: 0 },
+          updatedAt: new Date(scenario.sourceCompletedAt.getTime() + 1),
+        },
+      }),
+    );
+    expect(
+      prismaMocks.courseSupportBatchIncident.updateMany,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "legacy-source-entry",
+          incidentId: "incident-1",
+          courseId: "course-1",
+          cycle: 2,
+          result: "NEEDS_HUMAN",
+        }),
+        data: {
+          updatedAt: new Date(scenario.sourceCompletedAt.getTime() + 2),
+        },
+      }),
+    );
+    expect(
+      prismaMocks.courseSupportVerificationRequest.updateMany,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "legacy-source-request",
+          releaseSha: scenario.runtimeVersion,
+          runtimeVersion: scenario.runtimeVersion,
+          status: "STALE",
+          failureClass: "MISSING_SOURCE",
+          providerSnapshotFingerprint: scenario.providerSnapshotFingerprint,
+        }),
+        data: {
+          revision: { increment: 0 },
+          updatedAt: scenario.sourceCompletedAt,
+        },
+      }),
+    );
+
+    const incidentRecovery =
+      prismaMocks.courseSupportIncident.updateMany.mock.calls.find(
+        ([input]) => input.data?.status === "AUTO_INVESTIGATING",
+      )?.[0];
+    expect(incidentRecovery).toEqual(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "incident-1",
+          courseId: "course-1",
+          cycle: 2,
+          revision: 0,
+          status: "NEEDS_HUMAN",
+          kind: "FETCH_FAILED",
+          providerFamilyKey: "CHRONOGOLF",
+          failureClass: "HTTP_5XX",
+          failureFingerprint: scenario.canonicalFailureFingerprint,
+          humanReviewReason: "AUTOMATION_STALLED",
+          activeBatchId: null,
+          nextAttemptAt: null,
+          nextReminderAt: scenario.sourceCompletedAt,
+          lastSeenAt: scenario.sourceCompletedAt,
+        }),
+        data: expect.objectContaining({
+          status: "AUTO_INVESTIGATING",
+          humanReviewReason: null,
+          nextAttemptAt: scenario.cooldownExpiresAt,
+          lastSeenAt: scenario.cooldownExpiresAt,
+          revision: { increment: 1 },
+        }),
+      }),
+    );
+    expect(incidentRecovery?.data.escalationDeadlineAt).toBeInstanceOf(Date);
+    expect(
+      incidentRecovery?.data.escalationDeadlineAt.getTime(),
+    ).toBeGreaterThan(scenario.cooldownExpiresAt.getTime());
+    expect(incidentRecovery?.data).not.toHaveProperty("cycle");
+    expect(incidentRecovery?.data).not.toHaveProperty("failureFingerprint");
+    expect(incidentRecovery?.data).not.toHaveProperty("attemptLedger");
+    expect(incidentRecovery?.data).not.toHaveProperty("attemptCount");
+    expect(incidentRecovery?.data).not.toHaveProperty("occurrenceCount");
+
+    expect(prismaMocks.courseMonitoringStatus.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          courseId: "course-1",
+          state: "ENGINEERING_VERIFICATION_NEEDED",
+          revision: 7,
+          failureFingerprint: scenario.canonicalFailureFingerprint,
+          nextAutomaticAttemptAt: null,
+          revalidationRequestedAt: null,
+        }),
+        data: expect.objectContaining({
+          state: "AUTO_INVESTIGATING",
+          failureFingerprint: scenario.canonicalFailureFingerprint,
+          nextAutomaticAttemptAt: scenario.cooldownExpiresAt,
+          revalidationRequestedAt: scenario.cooldownExpiresAt,
+          stateChangedAt: scenario.cooldownExpiresAt,
+        }),
+      }),
+    );
+
+    const marker =
+      prismaMocks.courseMonitoringEvent.create.mock.calls.find(
+        ([input]) =>
+          input.data?.audit?.action ===
+          "deferred_failure_handoff_legacy_recovery",
+      )?.[0].data;
+    expect(marker).toEqual(
+      expect.objectContaining({
+        courseId: "course-1",
+        incidentId: "incident-1",
+        eventType: "REVALIDATION_REQUESTED",
+        fromState: "ENGINEERING_VERIFICATION_NEEDED",
+        toState: "AUTO_INVESTIGATING",
+        failureFingerprint: scenario.canonicalFailureFingerprint,
+        runtimeVersion: scenario.runtimeVersion,
+        occurredAt: scenario.cooldownExpiresAt,
+        idempotencyKey: expect.stringContaining(
+          "course-monitoring-deferred-failure-recovery:incident-1:2:",
+        ),
+        audit: expect.objectContaining({
+          schemaVersion: 1,
+          action: "deferred_failure_handoff_legacy_recovery",
+          cycle: 2,
+          sourceResult: "NEEDS_HUMAN",
+          sourceBatchStatus: "PARTIAL",
+          sourceDerivedOutcome: "needs_human",
+          sourceVerificationWatchMode: "WATCH_SETTLED",
+          sourceAttemptConsumed: true,
+          eligibleAt: scenario.cooldownExpiresAt.toISOString(),
+          sameCycleRecovery: true,
+          oneShotPerEvidenceSnapshot: true,
+          preservesCanonicalFailureFingerprint: true,
+          preservesAttemptLedger: true,
+          preservesAttemptCount: true,
+          customerDataIncluded: false,
+        }),
+      }),
+    );
+    const signal = parseDeferredFailureHandoffSignal(
+      marker?.audit?.deferredFailureHandoff,
+    );
+    expect(signal).toMatchObject({
+      state: "AVAILABLE",
+      providerFamilyKey: "CHRONOGOLF",
+      canonicalFailureFingerprint: scenario.canonicalFailureFingerprint,
+      observedFailureFingerprint: scenario.observedFailureFingerprint,
+      claimedProviderSnapshotFingerprint: scenario.providerSnapshotFingerprint,
+      observedProviderSnapshotFingerprint:
+        scenario.providerSnapshotFingerprint,
+      runtimeVersion: scenario.runtimeVersion,
+      cooldownExpiresAt: scenario.cooldownExpiresAt.toISOString(),
+      eligibleAt: scenario.cooldownExpiresAt.toISOString(),
+      sourceVerificationWatchMode: "WATCH_SETTLED",
+      sourceResult: "NEEDS_HUMAN",
+      sourceAttemptConsumed: true,
+      confirmationStarted: false,
+    });
+    expect(marker?.audit?.legacySourceRecordDigest).toMatch(/^[a-f0-9]{64}$/u);
+    expect(marker?.audit?.sourceBatchIncidentDigest).toMatch(
+      /^[a-f0-9]{64}$/u,
+    );
+    expect(marker?.audit?.sourceProofDigest).toMatch(/^[a-f0-9]{64}$/u);
+    const privacySafeAudit = JSON.stringify(marker?.audit);
+    expect(privacySafeAudit).not.toContain("course-1");
+    expect(privacySafeAudit).not.toContain("Example Public Golf Course");
+    expect(privacySafeAudit).not.toContain("course.example");
+    expect(privacySafeAudit).not.toContain("chronogolf.com");
+    expect(prismaMocks.teeSearch.updateMany).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: "historical demand ended before recovery",
+      sourceActiveRealSearchCount: 1,
+      currentActiveRealSearchCount: 0,
+      currentEngineeringOnly: false,
+    },
+    {
+      label: "real demand arrived after the archived closeout",
+      sourceActiveRealSearchCount: 0,
+      currentActiveRealSearchCount: 1,
+      currentEngineeringOnly: false,
+    },
+  ])(
+    "validates archived demand against the archived endpoint when $label",
+    async ({
+      sourceActiveRealSearchCount,
+      currentActiveRealSearchCount,
+      currentEngineeringOnly,
+    }) => {
+      const scenario = legacyDeferredFailureHandoffScenario({
+        sourceActiveRealSearchCount,
+        currentActiveRealSearchCount,
+        currentEngineeringOnly,
+      });
+      const sourceAttempt =
+        scenario.currentIncident.batchIncidents[0].batch.summary.closeout
+          .remediationAttempts[0];
+      expect(sourceAttempt.activeRealSearchCount).toBe(
+        sourceActiveRealSearchCount,
+      );
+      expect(scenario.endpointEvent.audit.activeDemand).toBe(
+        sourceActiveRealSearchCount > 0,
+      );
+      expect(scenario.currentIncident.activeRealSearchCount).toBe(
+        currentActiveRealSearchCount,
+      );
+      expect(scenario.currentIncident.engineeringOnly).toBe(
+        currentEngineeringOnly,
+      );
+
+      prismaMocks.courseSupportIncident.findMany
+        .mockReset()
+        .mockResolvedValueOnce([{ courseId: "course-1" }])
+        .mockResolvedValue([]);
+      useDeadlineIncident(scenario.currentIncident);
+      prismaMocks.courseMonitoringStatus.findUnique.mockResolvedValue(
+        scenario.currentMonitoring,
+      );
+      prismaMocks.course.findUnique.mockResolvedValue(scenario.providerCourse);
+      prismaMocks.courseMonitoringEvent.findFirst.mockResolvedValue(
+        scenario.endpointEvent,
+      );
+      prismaMocks.courseMonitoringStatus.findMany.mockResolvedValue([]);
+      prismaMocks.$queryRaw.mockResolvedValue([
+        { now: scenario.cooldownExpiresAt },
+      ]);
+
+      await expect(
+        runCourseMonitoringWatchdog(scenario.cooldownExpiresAt),
+      ).resolves.toMatchObject({ scheduled: 1, escalated: 0 });
+
+      const incidentRecovery =
+        prismaMocks.courseSupportIncident.updateMany.mock.calls.find(
+          ([input]) => input.data?.status === "AUTO_INVESTIGATING",
+        )?.[0];
+      expect(incidentRecovery?.data).toEqual(
+        expect.objectContaining({
+          escalationDeadlineAt: getDeferredFailureHandoffEscalationDeadline(
+            scenario.cooldownExpiresAt,
+            currentActiveRealSearchCount,
+          ),
+        }),
+      );
+      expect(incidentRecovery?.data).not.toHaveProperty(
+        "activeRealSearchCount",
+      );
+      expect(incidentRecovery?.data).not.toHaveProperty("engineeringOnly");
+    },
+  );
+
+  it("rejects a legacy source whose archived demand count contradicts its archived endpoint", async () => {
+    const scenario = legacyDeferredFailureHandoffScenario({
+      sourceActiveRealSearchCount: 1,
+      currentActiveRealSearchCount: 0,
+      currentEngineeringOnly: false,
+    });
+    scenario.endpointEvent.audit.activeDemand = false;
+    prismaMocks.courseSupportIncident.findMany
+      .mockReset()
+      .mockResolvedValueOnce([{ courseId: "course-1" }])
+      .mockResolvedValue([]);
+    useDeadlineIncident(scenario.currentIncident);
+    prismaMocks.courseMonitoringStatus.findUnique.mockResolvedValue(
+      scenario.currentMonitoring,
+    );
+    prismaMocks.course.findUnique.mockResolvedValue(scenario.providerCourse);
+    prismaMocks.courseMonitoringEvent.findFirst.mockResolvedValue(
+      scenario.endpointEvent,
+    );
+    prismaMocks.courseMonitoringStatus.findMany.mockResolvedValue([]);
+
+    await expect(
+      runCourseMonitoringWatchdog(scenario.cooldownExpiresAt),
+    ).resolves.toMatchObject({ scheduled: 0, escalated: 0 });
+
+    expect(prismaMocks.$queryRaw).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportBatch.updateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseMonitoringEvent.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects the fabricated retryable legacy source shape that settled exhausted closeout never persisted", async () => {
+    const scenario = legacyDeferredFailureHandoffScenario();
+    const sourceEntry = scenario.currentIncident.batchIncidents[0];
+    sourceEntry.result = "RETRY_SCHEDULED";
+    sourceEntry.batch.status = "RETRYABLE_FAILED";
+    Object.assign(sourceEntry.batch.summary.closeout, {
+      outcome: "retryable_failed",
+      derivedOutcome: "retryable_failed",
+      retryCount: 1,
+      needsHumanCount: 0,
+      automationStalledCount: 0,
+    });
+    prismaMocks.courseSupportIncident.findMany
+      .mockReset()
+      .mockResolvedValueOnce([{ courseId: "course-1" }])
+      .mockResolvedValue([]);
+    useDeadlineIncident(scenario.currentIncident);
+    prismaMocks.courseMonitoringStatus.findUnique.mockResolvedValue(
+      scenario.currentMonitoring,
+    );
+    prismaMocks.course.findUnique.mockResolvedValue(scenario.providerCourse);
+    prismaMocks.courseMonitoringEvent.findFirst.mockResolvedValue(
+      scenario.endpointEvent,
+    );
+    prismaMocks.courseMonitoringStatus.findMany.mockResolvedValue([]);
+
+    await expect(
+      runCourseMonitoringWatchdog(scenario.cooldownExpiresAt),
+    ).resolves.toMatchObject({ scheduled: 0, escalated: 0 });
+
+    expect(prismaMocks.$queryRaw).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportBatch.updateMany).not.toHaveBeenCalled();
+    expect(
+      prismaMocks.courseSupportIncident.updateMany.mock.calls.some(
+        ([input]) => input.data?.status === "AUTO_INVESTIGATING",
+      ),
+    ).toBe(false);
+    expect(prismaMocks.courseMonitoringEvent.create).not.toHaveBeenCalled();
+  });
+
+  it("keeps the exact legacy handoff parked one database millisecond before expiry", async () => {
+    const scenario = legacyDeferredFailureHandoffScenario();
+    prismaMocks.courseSupportIncident.findMany
+      .mockReset()
+      .mockResolvedValueOnce([{ courseId: "course-1" }])
+      .mockResolvedValue([]);
+    useDeadlineIncident(scenario.currentIncident);
+    prismaMocks.courseMonitoringStatus.findUnique.mockResolvedValue(
+      scenario.currentMonitoring,
+    );
+    prismaMocks.course.findUnique.mockResolvedValue(scenario.providerCourse);
+    prismaMocks.courseMonitoringEvent.findFirst.mockResolvedValue(
+      scenario.endpointEvent,
+    );
+    prismaMocks.courseMonitoringStatus.findMany.mockResolvedValue([]);
+    prismaMocks.$queryRaw.mockResolvedValue([
+      { now: new Date(scenario.cooldownExpiresAt.getTime() - 1) },
+    ]);
+
+    await expect(
+      runCourseMonitoringWatchdog(
+        new Date(scenario.cooldownExpiresAt.getTime() + 5 * 60 * 1000),
+      ),
+    ).resolves.toMatchObject({
+      scheduled: 0,
+      escalated: 0,
+    });
+
+    expect(prismaMocks.courseSupportBatch.updateMany).not.toHaveBeenCalled();
+    expect(
+      prismaMocks.courseSupportBatchIncident.updateMany,
+    ).not.toHaveBeenCalled();
+    expect(
+      prismaMocks.courseSupportVerificationRequest.updateMany,
+    ).not.toHaveBeenCalled();
+    expect(
+      prismaMocks.courseSupportIncident.updateMany.mock.calls.some(
+        ([input]) => input.data?.status === "AUTO_INVESTIGATING",
+      ),
+    ).toBe(false);
+    expect(
+      prismaMocks.courseMonitoringStatus.updateMany.mock.calls.some(
+        ([input]) => input.data?.state === "AUTO_INVESTIGATING",
+      ),
+    ).toBe(false);
+    expect(prismaMocks.courseMonitoringEvent.create).not.toHaveBeenCalled();
+  });
+
+  it("writes the newest exact recovery marker after nineteen bounded old events", async () => {
+    const scenario = legacyDeferredFailureHandoffScenario();
+    const oldEvents = Array.from({ length: 18 }, (_, index) => ({
+      id: `old-revalidation-${String(index + 1).padStart(2, "0")}`,
+      eventType: "REVALIDATION_REQUESTED",
+      occurredAt: new Date(
+        scenario.sourceCompletedAt.getTime() - (index + 1) * 1_000,
+      ),
+      failureFingerprint: scenario.canonicalFailureFingerprint,
+      audit: {
+        action: "ordinary_revalidation",
+        customerDataIncluded: false,
+      },
+    }));
+    scenario.currentIncident.monitoringEvents = [
+      ...oldEvents,
+      scenario.lineageEvent,
+    ].sort(
+      (left, right) =>
+        right.occurredAt.getTime() - left.occurredAt.getTime() ||
+        right.id.localeCompare(left.id),
+    );
+    expect(scenario.currentIncident.monitoringEvents).toHaveLength(19);
+    prismaMocks.courseSupportIncident.findMany
+      .mockReset()
+      .mockResolvedValueOnce([{ courseId: "course-1" }])
+      .mockResolvedValue([]);
+    useDeadlineIncident(scenario.currentIncident);
+    prismaMocks.courseMonitoringStatus.findUnique.mockResolvedValue(
+      scenario.currentMonitoring,
+    );
+    prismaMocks.course.findUnique.mockResolvedValue(scenario.providerCourse);
+    prismaMocks.courseMonitoringEvent.findFirst.mockResolvedValue(
+      scenario.endpointEvent,
+    );
+    prismaMocks.courseMonitoringStatus.findMany.mockResolvedValue([]);
+    prismaMocks.$queryRaw.mockResolvedValue([
+      { now: scenario.cooldownExpiresAt },
+    ]);
+
+    await expect(
+      runCourseMonitoringWatchdog(scenario.cooldownExpiresAt),
+    ).resolves.toMatchObject({ scheduled: 1, escalated: 0 });
+
+    expect(prismaMocks.courseSupportIncident.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: expect.objectContaining({
+          monitoringEvents: expect.objectContaining({
+            orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
+            take: 20,
+          }),
+        }),
+      }),
+    );
+    const marker =
+      prismaMocks.courseMonitoringEvent.create.mock.calls.find(
+        ([input]) =>
+          input.data?.audit?.action ===
+          "deferred_failure_handoff_legacy_recovery",
+      )?.[0].data;
+    expect(marker?.occurredAt).toEqual(scenario.cooldownExpiresAt);
+    expect(
+      scenario.currentIncident.monitoringEvents.every(
+        (event) => event.occurredAt.getTime() < marker!.occurredAt.getTime(),
+      ),
+    ).toBe(true);
+  });
+
+  it("fails closed when an aged recovery marker could be outside the saturated event window", async () => {
+    const scenario = legacyDeferredFailureHandoffScenario();
+    const newerEvents = Array.from({ length: 19 }, (_, index) => ({
+      id: `newer-revalidation-${String(index + 1).padStart(2, "0")}`,
+      eventType: "REVALIDATION_REQUESTED",
+      occurredAt: new Date(
+        scenario.sourceCompletedAt.getTime() - (index + 1) * 1_000,
+      ),
+      failureFingerprint: scenario.canonicalFailureFingerprint,
+      audit: {
+        action: "ordinary_revalidation",
+        customerDataIncluded: false,
+      },
+    }));
+    scenario.currentIncident.monitoringEvents = [
+      ...newerEvents,
+      scenario.lineageEvent,
+    ].sort(
+      (left, right) =>
+        right.occurredAt.getTime() - left.occurredAt.getTime() ||
+        right.id.localeCompare(left.id),
+    );
+    expect(scenario.currentIncident.monitoringEvents).toHaveLength(20);
+    prismaMocks.courseSupportIncident.findMany
+      .mockReset()
+      .mockResolvedValueOnce([{ courseId: "course-1" }])
+      .mockResolvedValue([]);
+    useDeadlineIncident(scenario.currentIncident);
+    prismaMocks.courseMonitoringStatus.findUnique.mockResolvedValue(
+      scenario.currentMonitoring,
+    );
+    prismaMocks.course.findUnique.mockResolvedValue(scenario.providerCourse);
+    prismaMocks.courseMonitoringEvent.findFirst.mockResolvedValue(
+      scenario.endpointEvent,
+    );
+    prismaMocks.courseMonitoringStatus.findMany.mockResolvedValue([]);
+
+    await expect(
+      runCourseMonitoringWatchdog(scenario.cooldownExpiresAt),
+    ).resolves.toMatchObject({ scheduled: 0, escalated: 0 });
+
+    expect(prismaMocks.$queryRaw).not.toHaveBeenCalled();
+    expect(prismaMocks.courseMonitoringEvent.findUnique).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportBatch.updateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseMonitoringEvent.create).not.toHaveBeenCalled();
+  });
+
+  it("keeps the legacy handoff parked when an active campaign exists", async () => {
+    const scenario = legacyDeferredFailureHandoffScenario();
+    prismaMocks.courseSupportIncident.findMany
+      .mockReset()
+      .mockResolvedValueOnce([{ courseId: "course-1" }])
+      .mockResolvedValue([]);
+    useDeadlineIncident(scenario.currentIncident);
+    prismaMocks.courseMonitoringStatus.findUnique.mockResolvedValue(
+      scenario.currentMonitoring,
+    );
+    prismaMocks.course.findUnique.mockResolvedValue(scenario.providerCourse);
+    prismaMocks.courseMonitoringEvent.findFirst.mockResolvedValue(
+      scenario.endpointEvent,
+    );
+    prismaMocks.courseMonitoringStatus.findMany.mockResolvedValue([]);
+    prismaMocks.automationRun.findMany.mockResolvedValue([{ audit: null }]);
+
+    await expect(
+      runCourseMonitoringWatchdog(scenario.cooldownExpiresAt),
+    ).resolves.toMatchObject({ scheduled: 0, escalated: 0 });
+
+    expect(prismaMocks.$queryRaw).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportBatch.updateMany).not.toHaveBeenCalled();
+    expect(
+      prismaMocks.courseSupportIncident.updateMany.mock.calls.some(
+        ([input]) => input.data?.status === "AUTO_INVESTIGATING",
+      ),
+    ).toBe(false);
+    expect(prismaMocks.courseMonitoringEvent.create).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: "course ownership survives an incident-id change",
+      conflictCourseId: "course-1",
+      conflictIncidentId: "replacement-incident",
+    },
+    {
+      label: "incident ownership survives a course-id mismatch",
+      conflictCourseId: "replacement-course",
+      conflictIncidentId: "incident-1",
+    },
+  ])(
+    "checks every bounded active campaign when $label",
+    async ({ conflictCourseId, conflictIncidentId }) => {
+      const scenario = legacyDeferredFailureHandoffScenario();
+      const campaignAudit = (courseId: string, incidentId: string) =>
+        createParkedCourseCampaignAudit({
+          expectedCount: 1,
+          capturedAt: new Date("2026-07-27T15:05:00.000Z"),
+          members: [
+            {
+              courseId,
+              incidentId,
+              cycle: 2,
+              revision: 1,
+              monitoringRevision: 1,
+              monitoringFailureFingerprint: "1".repeat(64),
+              kind: "FETCH_FAILED",
+              providerFamilyKey: "CHRONOGOLF",
+              failureClass: "HTTP_5XX",
+              failureFingerprint: "1".repeat(64),
+              providerSnapshotFingerprint:
+                scenario.providerSnapshotFingerprint,
+              attemptLedgerFingerprint: "4".repeat(64),
+              playbookConclusion: "UNRESOLVED_EXHAUSTED",
+              latestProbeAt: null,
+              latestDiscoveryAt: null,
+            },
+          ],
+        });
+      prismaMocks.courseSupportIncident.findMany
+        .mockReset()
+        .mockResolvedValueOnce([{ courseId: "course-1" }])
+        .mockResolvedValue([]);
+      useDeadlineIncident(scenario.currentIncident);
+      prismaMocks.courseMonitoringStatus.findUnique.mockResolvedValue(
+        scenario.currentMonitoring,
+      );
+      prismaMocks.course.findUnique.mockResolvedValue(scenario.providerCourse);
+      prismaMocks.courseMonitoringEvent.findFirst.mockResolvedValue(
+        scenario.endpointEvent,
+      );
+      prismaMocks.courseMonitoringStatus.findMany.mockResolvedValue([]);
+      prismaMocks.automationRun.findMany.mockResolvedValue([
+        {
+          audit: campaignAudit("unrelated-course", "unrelated-incident"),
+        },
+        {
+          audit: campaignAudit(conflictCourseId, conflictIncidentId),
+        },
+      ]);
+
+      await expect(
+        runCourseMonitoringWatchdog(scenario.cooldownExpiresAt),
+      ).resolves.toMatchObject({ scheduled: 0, escalated: 0 });
+
+      expect(prismaMocks.automationRun.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            status: "RUNNING",
+            completedAt: null,
+          }),
+          take: 21,
+        }),
+      );
+      expect(prismaMocks.$queryRaw).not.toHaveBeenCalled();
+      expect(prismaMocks.courseSupportBatch.updateMany).not.toHaveBeenCalled();
+      expect(
+        prismaMocks.courseSupportIncident.updateMany.mock.calls.some(
+          ([input]) => input.data?.status === "AUTO_INVESTIGATING",
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it("keeps the legacy handoff parked when its one-shot marker already exists", async () => {
+    const scenario = legacyDeferredFailureHandoffScenario();
+    scenario.currentIncident.monitoringEvents = [
+      scenario.lineageEvent,
+      {
+        id: "prior-legacy-recovery",
+        eventType: "REVALIDATION_REQUESTED",
+        occurredAt: scenario.sourceCompletedAt,
+        failureFingerprint: scenario.canonicalFailureFingerprint,
+        audit: {
+          action: "deferred_failure_handoff_legacy_recovery",
+          cycle: 2,
+          customerDataIncluded: false,
+        },
+      },
+    ];
+    prismaMocks.courseSupportIncident.findMany
+      .mockReset()
+      .mockResolvedValueOnce([{ courseId: "course-1" }])
+      .mockResolvedValue([]);
+    useDeadlineIncident(scenario.currentIncident);
+    prismaMocks.courseMonitoringStatus.findUnique.mockResolvedValue(
+      scenario.currentMonitoring,
+    );
+    prismaMocks.course.findUnique.mockResolvedValue(scenario.providerCourse);
+    prismaMocks.courseMonitoringEvent.findFirst.mockResolvedValue(
+      scenario.endpointEvent,
+    );
+    prismaMocks.courseMonitoringStatus.findMany.mockResolvedValue([]);
+
+    await expect(
+      runCourseMonitoringWatchdog(scenario.cooldownExpiresAt),
+    ).resolves.toMatchObject({ scheduled: 0, escalated: 0 });
+
+    expect(prismaMocks.$queryRaw).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportBatch.updateMany).not.toHaveBeenCalled();
+    expect(
+      prismaMocks.courseSupportIncident.updateMany.mock.calls.some(
+        ([input]) => input.data?.status === "AUTO_INVESTIGATING",
+      ),
+    ).toBe(false);
+    expect(prismaMocks.courseMonitoringEvent.create).not.toHaveBeenCalled();
+  });
+
+  it("keeps the legacy handoff parked when a newer duplicate source request shadows it", async () => {
+    const scenario = legacyDeferredFailureHandoffScenario();
+    const sourceEntry = scenario.currentIncident.batchIncidents[0];
+    sourceEntry.verificationRequests.push({
+      ...structuredClone(sourceEntry.verificationRequests[0]),
+      id: "newer-contradictory-request",
+      createdAt: new Date("2026-07-27T15:18:30.000Z"),
+      updatedAt: new Date("2026-07-27T15:19:30.000Z"),
+    });
+    prismaMocks.courseSupportIncident.findMany
+      .mockReset()
+      .mockResolvedValueOnce([{ courseId: "course-1" }])
+      .mockResolvedValue([]);
+    useDeadlineIncident(scenario.currentIncident);
+    prismaMocks.courseMonitoringStatus.findUnique.mockResolvedValue(
+      scenario.currentMonitoring,
+    );
+    prismaMocks.course.findUnique.mockResolvedValue(scenario.providerCourse);
+    prismaMocks.courseMonitoringEvent.findFirst.mockResolvedValue(
+      scenario.endpointEvent,
+    );
+    prismaMocks.courseMonitoringStatus.findMany.mockResolvedValue([]);
+
+    await expect(
+      runCourseMonitoringWatchdog(scenario.cooldownExpiresAt),
+    ).resolves.toMatchObject({ scheduled: 0, escalated: 0 });
+
+    expect(prismaMocks.$queryRaw).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportBatch.updateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseMonitoringEvent.create).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the legacy source batch loses its no-op CAS", async () => {
+    const scenario = legacyDeferredFailureHandoffScenario();
+    prismaMocks.courseSupportIncident.findMany
+      .mockReset()
+      .mockResolvedValueOnce([{ courseId: "course-1" }])
+      .mockResolvedValue([]);
+    useDeadlineIncident(scenario.currentIncident);
+    prismaMocks.courseMonitoringStatus.findUnique.mockResolvedValue(
+      scenario.currentMonitoring,
+    );
+    prismaMocks.course.findUnique.mockResolvedValue(scenario.providerCourse);
+    prismaMocks.courseMonitoringEvent.findFirst.mockResolvedValue(
+      scenario.endpointEvent,
+    );
+    prismaMocks.courseMonitoringStatus.findMany.mockResolvedValue([]);
+    prismaMocks.$queryRaw.mockResolvedValue([
+      { now: scenario.cooldownExpiresAt },
+    ]);
+    prismaMocks.courseSupportBatch.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(
+      runCourseMonitoringWatchdog(scenario.cooldownExpiresAt),
+    ).rejects.toThrow(
+      "The legacy deferred-failure source changed during watchdog recovery.",
+    );
+
+    expect(
+      prismaMocks.courseSupportIncident.updateMany.mock.calls.some(
+        ([input]) => input.data?.status === "AUTO_INVESTIGATING",
+      ),
+    ).toBe(false);
+    expect(prismaMocks.courseMonitoringStatus.updateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseMonitoringEvent.create).not.toHaveBeenCalled();
+  });
 
   it("does not label a stalled descendant orchestration-only after an archived release deployment", async () => {
     const currentIncident = incident({

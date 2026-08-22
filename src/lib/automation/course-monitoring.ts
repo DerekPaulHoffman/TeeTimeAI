@@ -2,8 +2,12 @@ import { createHash, randomUUID } from "node:crypto";
 
 import {
   Prisma,
+  type AutomationEligibility,
+  type AutomationReason,
   type AutomationRunKind,
   type AutomationRunStatus,
+  type BookingMethod,
+  type CourseMonitoringMode,
   type CourseSupportBatchIncidentResult,
   type CourseSupportBatchStatus,
   type CourseSupportFailureClass,
@@ -14,6 +18,7 @@ import {
   type CourseHumanReviewReason,
   type CourseMonitoringEventSource,
   type CourseMonitoringState,
+  type DetectedPlatform,
   type ProbeOutcome,
 } from "@prisma/client";
 
@@ -49,7 +54,20 @@ import {
   buildProviderFailureFingerprint,
   normalizeProviderFamilyKey,
 } from "./provider-capabilities";
-import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
+import {
+  buildCourseSupportProviderSnapshotFingerprint,
+  COURSE_SUPPORT_VERIFICATION_ENDPOINT_DELIVERY_MARGIN_MS,
+  COURSE_SUPPORT_VERIFICATION_REQUEST_HORIZON_MS,
+} from "./course-support-verification";
+import {
+  createDeferredFailureHandoffAdmission,
+  createDeferredFailureHandoffBatchIncidentDigest,
+  createDeferredFailureHandoffLegacySourceRecordDigest,
+  createDeferredFailureHandoffSignal,
+  createDeferredFailureHandoffSourceProofDigest,
+  parseDeferredFailureHandoffAdmission,
+  parseDeferredFailureHandoffSignal,
+} from "./course-support-deferred-failure-handoff";
 import {
   buildCourseSupportExecutionEverSummary,
   areCourseSupportCompletedAttemptsOrchestrationOnly,
@@ -109,6 +127,25 @@ const COURSE_MONITORING_WRITE_TIMEOUT_MS = 15_000;
 const PROVIDER_EVIDENCE_REVALIDATION_CAS_ATTEMPTS = 3;
 const MAX_COURSE_SUPPORT_BATCH_INCIDENTS = 20;
 const STALE_BATCH_RELEASE_RETRY_MS = 60 * 1000;
+const COURSE_SUPPORT_FAILURE_ONLY_HANDOFF_COOLDOWN_MS = Math.min(
+  ACTIVE_DEMAND_ESCALATION_MS,
+  INACTIVE_INVESTIGATION_MS,
+);
+const COURSE_SUPPORT_FAILURE_CLASSES = new Set<CourseSupportFailureClass>([
+  "MISSING_SOURCE",
+  "MISSING_METADATA",
+  "UNSUPPORTED_FAMILY",
+  "READER_PARSER_MISSING",
+  "AUTH",
+  "RATE_LIMIT",
+  "CHALLENGE",
+  "NOT_FOUND",
+  "HTTP_5XX",
+  "TIMEOUT",
+  "NETWORK",
+  "SCHEMA",
+  "UNKNOWN",
+]);
 const ACTIVE_COURSE_SUPPORT_BATCH_STATUSES = new Set([
   "CLAIMED",
   "IMPLEMENTING",
@@ -123,6 +160,7 @@ type FailureObservation = {
 type DeadlineMonitoringStatusSnapshot = {
   state: CourseMonitoringState;
   stateChangedAt: Date;
+  failureFingerprint?: string | null;
   nextAutomaticAttemptAt: Date | null;
   revalidationRequestedAt: Date | null;
   revision: number;
@@ -134,8 +172,10 @@ type DeadlineIncidentSnapshot = {
   cycle: number;
   confirmedAt: Date | null;
   revision: number;
+  updatedAt: Date;
   status: CourseSupportIncidentStatus;
   kind: string;
+  providerFamilyKey: string;
   failureClass: string;
   attemptLedger: Prisma.JsonValue | null;
   failureFingerprint: string;
@@ -151,8 +191,56 @@ type DeadlineIncidentSnapshot = {
   resolvedAt: Date | null;
   resolution: CourseSupportResolution | null;
   batchIncidents?: Array<{
+    id?: string;
+    incidentId?: string;
+    courseId?: string;
     cycle: number;
-    batch: { summary: Prisma.JsonValue | null };
+    result?: CourseSupportBatchIncidentResult;
+    proofSnapshot?: Prisma.JsonValue | null;
+    verifiedAt?: Date | null;
+    createdAt?: Date;
+    updatedAt?: Date;
+    verificationRequests?: Array<{
+      id: string;
+      batchIncidentId?: string;
+      releaseSha: string;
+      runtimeVersion?: string | null;
+      status: CourseSupportVerificationStatus;
+      revision: number;
+      attemptCount: number;
+      startedAt: Date | null;
+      outcome?: ProbeOutcome | null;
+      failureClass?: CourseSupportFailureClass | null;
+      evidence?: Prisma.JsonValue | null;
+      lastError?: string | null;
+      providerSnapshotFingerprint?: string | null;
+      nextAttemptAt?: Date | null;
+      completedAt?: Date | null;
+      createdAt?: Date;
+      updatedAt: Date;
+    }>;
+    batch: {
+      id?: string;
+      status?: CourseSupportBatchStatus;
+      providerFamilyKey?: string;
+      failureFingerprint?: string;
+      baseSha?: string;
+      releaseSha?: string | null;
+      deployedAt?: Date | null;
+      createdAt?: Date;
+      completedAt?: Date | null;
+      revision?: number;
+      updatedAt?: Date;
+      summary: Prisma.JsonValue | null;
+      _count?: { incidents: number };
+    };
+  }>;
+  monitoringEvents?: Array<{
+    id: string;
+    eventType: string;
+    occurredAt: Date;
+    failureFingerprint: string | null;
+    audit: Prisma.JsonValue | null;
   }>;
 };
 
@@ -169,21 +257,50 @@ type DeadlineBatchIncidentSnapshot = {
     id: string;
     batchIncidentId: string;
     releaseSha: string;
+    runtimeVersion: string | null;
     status: CourseSupportVerificationStatus;
     revision: number;
     attemptCount: number;
     startedAt: Date | null;
+    providerSnapshotAt: Date;
+    discoveryAttemptedAt: Date | null;
+    discoveryVerifiedAt: Date | null;
     outcome: ProbeOutcome | null;
     failureClass: CourseSupportFailureClass | null;
     evidence: Prisma.JsonValue | null;
     lastError: string | null;
+    providerSnapshotFingerprint: string;
+    nextAttemptAt: Date | null;
+    completedAt: Date | null;
+    createdAt: Date;
+    updatedAt: Date;
   }>;
   incident: DeadlineIncidentSnapshot;
   course: {
     id: string;
     name: string;
     bookingAccessMode: string | null;
-    automationReason: string | null;
+    automationReason: AutomationReason;
+    timeZone?: string | null;
+    website?: string | null;
+    detectedBookingUrl?: string | null;
+    detectedPlatform?: DetectedPlatform;
+    providerFamilyKey?: string | null;
+    bookingMethod?: BookingMethod;
+    bookingWindowDaysAhead?: number | null;
+    bookingReleaseTimeLocal?: string | null;
+    bookingWindowSource?: string | null;
+    bookingWindowConfidence?: number | null;
+    bookingWindowEvidenceUrl?: string | null;
+    automationEligibility?: AutomationEligibility;
+    monitoringMode?: CourseMonitoringMode;
+    isPublic?: boolean | null;
+    intelligenceVerifiedAt?: Date | null;
+    intelligenceReviewAt?: Date | null;
+    intelligenceConfidence?: number | null;
+    bookingMetadata?: Prisma.JsonValue | null;
+    layoutHoleCounts?: number[];
+    layoutHolesVerifiedAt?: Date | null;
     monitoringStatus: DeadlineMonitoringStatusSnapshot | null;
     probes: Array<{
       outcome: ProbeOutcome;
@@ -195,6 +312,8 @@ type DeadlineBatchIncidentSnapshot = {
 
 type DeadlineBatchSnapshot = {
   id: string;
+  providerFamilyKey: string;
+  failureFingerprint: string;
   baseSha: string;
   releaseSha: string | null;
   status: CourseSupportBatchStatus;
@@ -267,6 +386,25 @@ export function getCourseMonitoringEscalationDeadline(
       ? ACTIVE_DEMAND_ESCALATION_MS - CUSTOMER_ENDPOINT_DELIVERY_HEADROOM_MS
       : INACTIVE_INVESTIGATION_MS;
   return new Date(episodeStartedAt.getTime() + escalationMs);
+}
+
+export function getDeferredFailureHandoffEscalationDeadline(
+  dueAt: Date,
+  activeRealSearchCount: number,
+) {
+  const ordinaryDeadline = getCourseMonitoringEscalationDeadline(
+    dueAt,
+    activeRealSearchCount,
+  );
+  const confirmationSafeDeadline = new Date(
+    dueAt.getTime() +
+      COURSE_SUPPORT_VERIFICATION_REQUEST_HORIZON_MS +
+      COURSE_SUPPORT_VERIFICATION_ENDPOINT_DELIVERY_MARGIN_MS +
+      CUSTOMER_ENDPOINT_DELIVERY_HEADROOM_MS,
+  );
+  return ordinaryDeadline.getTime() >= confirmationSafeDeadline.getTime()
+    ? ordinaryDeadline
+    : confirmationSafeDeadline;
 }
 
 export function getFirstFailureRetryAt(
@@ -2283,6 +2421,7 @@ export async function reconcileCourseMonitoringDeadline(input: {
             status: true,
             attemptLedger: true,
             kind: true,
+            providerFamilyKey: true,
             failureClass: true,
             failureFingerprint: true,
             humanReviewReason: true,
@@ -2293,6 +2432,8 @@ export async function reconcileCourseMonitoringDeadline(input: {
             activeBatch: {
               select: {
                 id: true,
+                providerFamilyKey: true,
+                failureFingerprint: true,
                 baseSha: true,
                 releaseSha: true,
                 status: true,
@@ -2342,14 +2483,23 @@ export async function reconcileCourseMonitoringDeadline(input: {
                         id: true,
                         batchIncidentId: true,
                         releaseSha: true,
+                        runtimeVersion: true,
                         status: true,
                         revision: true,
                         attemptCount: true,
                         startedAt: true,
+                        providerSnapshotAt: true,
+                        discoveryAttemptedAt: true,
+                        discoveryVerifiedAt: true,
                         outcome: true,
                         failureClass: true,
                         evidence: true,
                         lastError: true,
+                        providerSnapshotFingerprint: true,
+                        nextAttemptAt: true,
+                        completedAt: true,
+                        createdAt: true,
+                        updatedAt: true,
                       },
                     },
                     incident: {
@@ -2359,8 +2509,10 @@ export async function reconcileCourseMonitoringDeadline(input: {
                         cycle: true,
                         confirmedAt: true,
                         revision: true,
+                        updatedAt: true,
                         status: true,
                         kind: true,
+                        providerFamilyKey: true,
                         failureClass: true,
                         attemptLedger: true,
                         failureFingerprint: true,
@@ -2390,8 +2542,28 @@ export async function reconcileCourseMonitoringDeadline(input: {
                       select: {
                         id: true,
                         name: true,
+                        timeZone: true,
+                        website: true,
+                        detectedBookingUrl: true,
+                        detectedPlatform: true,
+                        providerFamilyKey: true,
+                        bookingMethod: true,
+                        bookingWindowDaysAhead: true,
+                        bookingReleaseTimeLocal: true,
+                        bookingWindowSource: true,
+                        bookingWindowConfidence: true,
+                        bookingWindowEvidenceUrl: true,
+                        automationEligibility: true,
                         bookingAccessMode: true,
                         automationReason: true,
+                        monitoringMode: true,
+                        isPublic: true,
+                        intelligenceVerifiedAt: true,
+                        intelligenceReviewAt: true,
+                        intelligenceConfidence: true,
+                        bookingMetadata: true,
+                        layoutHoleCounts: true,
+                        layoutHolesVerifiedAt: true,
                         probes: {
                           where: {
                             outcome: { in: ["MATCH_FOUND", "NO_MATCH"] },
@@ -2415,6 +2587,7 @@ export async function reconcileCourseMonitoringDeadline(input: {
                           select: {
                             state: true,
                             stateChangedAt: true,
+                            failureFingerprint: true,
                             nextAutomaticAttemptAt: true,
                             revalidationRequestedAt: true,
                             revision: true,
@@ -2426,12 +2599,81 @@ export async function reconcileCourseMonitoringDeadline(input: {
                 },
               },
             },
+            monitoringEvents: {
+              where: { eventType: "REVALIDATION_REQUESTED" },
+              orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
+              take: 20,
+              select: {
+                id: true,
+                eventType: true,
+                occurredAt: true,
+                failureFingerprint: true,
+                audit: true,
+              },
+            },
+            batchIncidents: {
+              where: { batch: { completedAt: { not: null } } },
+              orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+              take: 21,
+              select: {
+                id: true,
+                incidentId: true,
+                courseId: true,
+                cycle: true,
+                result: true,
+                proofSnapshot: true,
+                verifiedAt: true,
+                createdAt: true,
+                updatedAt: true,
+                verificationRequests: {
+                  orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+                  take: 21,
+                  select: {
+                    id: true,
+                    batchIncidentId: true,
+                    releaseSha: true,
+                    runtimeVersion: true,
+                    status: true,
+                    revision: true,
+                    attemptCount: true,
+                    startedAt: true,
+                    outcome: true,
+                    failureClass: true,
+                    evidence: true,
+                    lastError: true,
+                    providerSnapshotFingerprint: true,
+                    nextAttemptAt: true,
+                    completedAt: true,
+                    createdAt: true,
+                    updatedAt: true,
+                  },
+                },
+                batch: {
+                  select: {
+                    id: true,
+                    status: true,
+                    providerFamilyKey: true,
+                    failureFingerprint: true,
+                    baseSha: true,
+                    releaseSha: true,
+                    deployedAt: true,
+                    createdAt: true,
+                    completedAt: true,
+                    revision: true,
+                    updatedAt: true,
+                    summary: true,
+                    _count: { select: { incidents: true } },
+                  },
+                },
+              },
+            },
             nextAttemptAt: true,
             nextReminderAt: true,
             resolution: true,
             resolvedAt: true,
             lastSeenAt: true,
             revision: true,
+            updatedAt: true,
           },
         }),
         transaction.courseMonitoringStatus.findUnique({
@@ -2439,6 +2681,7 @@ export async function reconcileCourseMonitoringDeadline(input: {
           select: {
             state: true,
             stateChangedAt: true,
+            failureFingerprint: true,
             nextAutomaticAttemptAt: true,
             revalidationRequestedAt: true,
             revision: true,
@@ -2447,8 +2690,28 @@ export async function reconcileCourseMonitoringDeadline(input: {
         transaction.course.findUnique({
           where: { id: input.courseId },
           select: {
+            timeZone: true,
+            website: true,
+            detectedBookingUrl: true,
+            detectedPlatform: true,
+            providerFamilyKey: true,
+            bookingMethod: true,
+            bookingWindowDaysAhead: true,
+            bookingReleaseTimeLocal: true,
+            bookingWindowSource: true,
+            bookingWindowConfidence: true,
+            bookingWindowEvidenceUrl: true,
+            automationEligibility: true,
             bookingAccessMode: true,
             automationReason: true,
+            monitoringMode: true,
+            isPublic: true,
+            intelligenceVerifiedAt: true,
+            intelligenceReviewAt: true,
+            intelligenceConfidence: true,
+            bookingMetadata: true,
+            layoutHoleCounts: true,
+            layoutHolesVerifiedAt: true,
           },
         }),
       ]);
@@ -2747,6 +3010,29 @@ export async function reconcileCourseMonitoringDeadline(input: {
         status.state === "ENGINEERING_VERIFICATION_NEEDED" &&
         status.nextAutomaticAttemptAt === null &&
         status.revalidationRequestedAt === null;
+      if (
+        parkedWithoutNewMaterial &&
+        durableAutomationStalledEndpoint &&
+        humanReviewEndpointEvent &&
+        currentCycleExhausted
+      ) {
+        const recoveredLegacyDeferredFailure =
+          await recoverLegacyDeferredFailureHandoff(transaction, {
+            courseId: input.courseId,
+            incident,
+            monitoringStatus: status,
+            course,
+            endpointEvent: humanReviewEndpointEvent,
+            now: input.now,
+            source: input.source,
+          });
+        if (recoveredLegacyDeferredFailure) {
+          return {
+            outcome: "RETRYING" as const,
+            incidentId: incident.id,
+          };
+        }
+      }
       if (
         parkedWithoutNewMaterial &&
         durableAutomationStalledEndpoint &&
@@ -3075,32 +3361,726 @@ async function isOwnedByActiveParkedCourseCampaign(
   transaction: Prisma.TransactionClient,
   input: { courseId: string; incidentId: string },
 ) {
-  const campaign = await transaction.automationRun.findFirst({
+  const campaigns = await transaction.automationRun.findMany({
     where: {
       promptVersion: PARKED_COURSE_CAMPAIGN_PROMPT_VERSION,
       status: "RUNNING",
       completedAt: null,
     },
     orderBy: [{ startedAt: "desc" }, { id: "desc" }],
+    take: MAX_COURSE_SUPPORT_BATCH_INCIDENTS + 1,
     select: { audit: true },
   });
-  if (!campaign) {
+  if (campaigns.length === 0) {
     return false;
   }
-  const audit = parseParkedCourseCampaignAudit(campaign.audit);
-  if (!audit) {
-    // An active but unreadable immutable campaign must fail closed. Reopening
-    // the row through the generic watchdog would bypass its cycle and
-    // provenance fences and could make the member impossible to close.
+  if (campaigns.length > MAX_COURSE_SUPPORT_BATCH_INCIDENTS) {
     return true;
   }
-  return Boolean(
-    audit.members.some(
-      (member) =>
-        member.courseId === input.courseId &&
-        member.incidentId === input.incidentId,
-    ),
+  for (const campaign of campaigns) {
+    const audit = parseParkedCourseCampaignAudit(campaign.audit);
+    if (!audit) {
+      // Any active but unreadable immutable campaign must fail closed.
+      // Reopening through the generic watchdog could bypass its cycle and
+      // provenance fences and make the member impossible to close.
+      return true;
+    }
+    if (
+      audit.members.some(
+        (member) =>
+          member.courseId === input.courseId ||
+          member.incidentId === input.incidentId,
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function parseStrictMonitoringIso(value: unknown) {
+  if (typeof value !== "string") return null;
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value
+    ? parsed
+    : null;
+}
+
+async function getCourseMonitoringDatabaseNow(
+  transaction: Prisma.TransactionClient,
+) {
+  const [row] = await transaction.$queryRaw<Array<{ now: Date }>>(
+    Prisma.sql`SELECT clock_timestamp() AS "now"`,
   );
+  if (
+    !row ||
+    !(row.now instanceof Date) ||
+    !Number.isFinite(row.now.getTime())
+  ) {
+    throw new Error("The course-monitoring database clock is unavailable.");
+  }
+  return row.now;
+}
+
+async function recoverLegacyDeferredFailureHandoff(
+  transaction: Prisma.TransactionClient,
+  input: {
+    courseId: string;
+    incident: DeadlineIncidentSnapshot;
+    monitoringStatus: DeadlineMonitoringStatusSnapshot;
+    course: Parameters<typeof buildCourseSupportProviderSnapshotFingerprint>[0];
+    endpointEvent: {
+      incidentId: string | null;
+      eventType: string;
+      occurredAt: Date;
+      audit: Prisma.JsonValue | null;
+    };
+    now: Date;
+    source: Extract<
+      CourseMonitoringEventSource,
+      "SEARCH_WORKFLOW" | "RECOVERY_CRON"
+    >;
+  },
+) {
+  const playbook = assessAutomationPlaybook(
+    input.incident.attemptLedger,
+    input.incident.cycle,
+  );
+  const history = input.incident.batchIncidents ?? [];
+  const monitoringEvents = input.incident.monitoringEvents ?? [];
+  const endpointAudit = asMonitoringJsonRecord(input.endpointEvent.audit);
+  if (
+    input.incident.status !== "NEEDS_HUMAN" ||
+    input.incident.humanReviewReason !== "AUTOMATION_STALLED" ||
+    input.incident.activeBatchId !== null ||
+    input.incident.nextAttemptAt !== null ||
+    !input.incident.nextReminderAt ||
+    input.monitoringStatus.state !== "ENGINEERING_VERIFICATION_NEEDED" ||
+    input.monitoringStatus.failureFingerprint !==
+      input.incident.failureFingerprint ||
+    input.monitoringStatus.nextAutomaticAttemptAt !== null ||
+    input.monitoringStatus.revalidationRequestedAt !== null ||
+    playbook.valid !== true ||
+    playbook.cycle !== input.incident.cycle ||
+    playbook.conclusion !== "UNRESOLVED_EXHAUSTED" ||
+    playbook.nextStage !== null ||
+    input.endpointEvent.incidentId !== input.incident.id ||
+    input.endpointEvent.eventType !== "HUMAN_REVIEW_REQUESTED" ||
+    endpointAudit.humanReviewReason !== "AUTOMATION_STALLED" ||
+    endpointAudit.cycle !== input.incident.cycle ||
+    endpointAudit.customerState !== "NEEDS_HUMAN_REVIEW" ||
+    endpointAudit.automationStalled !== true ||
+    endpointAudit.parkedUntilMaterialChange !== true ||
+    endpointAudit.endpointStalled !== true ||
+    endpointAudit.operationalRetryBudgetExhausted !== false ||
+    endpointAudit.reason !== null ||
+    endpointAudit.playbookExhausted !== true ||
+    typeof endpointAudit.activeDemand !== "boolean" ||
+    endpointAudit.customerDataIncluded !== false ||
+    history.length === 0 ||
+    history.length >= 21 ||
+    monitoringEvents.length >= 20 ||
+    !/^[a-f0-9]{64}$/u.test(input.incident.failureFingerprint) ||
+    input.incident.kind !== "FETCH_FAILED" ||
+    input.incident.failureClass !== "HTTP_5XX" ||
+    normalizeProviderFamilyKey(input.incident.providerFamilyKey) !==
+      "CHRONOGOLF" ||
+    normalizeProviderFamilyKey(input.course.providerFamilyKey) !== "CHRONOGOLF"
+  ) {
+    return false;
+  }
+  if (
+    await isOwnedByActiveParkedCourseCampaign(transaction, {
+      courseId: input.courseId,
+      incidentId: input.incident.id,
+    })
+  ) {
+    return false;
+  }
+
+  const currentCycleHistory = history.filter(
+    (entry) => entry.cycle === input.incident.cycle,
+  );
+  const sourceEntry = currentCycleHistory[0];
+  if (
+    !sourceEntry ||
+    !sourceEntry.id ||
+    !sourceEntry.incidentId ||
+    !sourceEntry.courseId ||
+    !sourceEntry.createdAt ||
+    !sourceEntry.updatedAt ||
+    !sourceEntry.batch.id ||
+    !sourceEntry.batch.createdAt ||
+    !sourceEntry.batch.completedAt ||
+    !sourceEntry.batch.updatedAt ||
+    sourceEntry.batch._count?.incidents !== 1 ||
+    sourceEntry.incidentId !== input.incident.id ||
+    sourceEntry.courseId !== input.courseId ||
+    sourceEntry.result !== "NEEDS_HUMAN" ||
+    sourceEntry.batch.status !== "PARTIAL" ||
+    sourceEntry.batch.providerFamilyKey !== input.incident.providerFamilyKey ||
+    sourceEntry.batch.failureFingerprint !==
+      input.incident.failureFingerprint ||
+    sourceEntry.batch.createdAt.getTime() > sourceEntry.createdAt.getTime() ||
+    sourceEntry.createdAt.getTime() > sourceEntry.updatedAt.getTime() ||
+    sourceEntry.updatedAt.getTime() > input.incident.updatedAt.getTime() ||
+    sourceEntry.batch.completedAt.getTime() >
+      sourceEntry.batch.updatedAt.getTime() ||
+    sourceEntry.batch.updatedAt.getTime() > input.incident.updatedAt.getTime() ||
+    !sourceEntry.verifiedAt ||
+    sourceEntry.verifiedAt.getTime() >
+      sourceEntry.batch.completedAt.getTime() ||
+    currentCycleHistory.some(
+      (entry) =>
+        !entry.createdAt || !entry.batch.createdAt || !entry.batch.completedAt,
+    ) ||
+    (currentCycleHistory[1]?.createdAt?.getTime() ?? -1) ===
+      sourceEntry.createdAt.getTime()
+  ) {
+    return false;
+  }
+  const effectiveRuntime =
+    sourceEntry.batch.releaseSha ?? sourceEntry.batch.baseSha;
+  if (!effectiveRuntime || !/^[a-f0-9]{40}$/u.test(effectiveRuntime)) {
+    return false;
+  }
+
+  const summary = asMonitoringJsonRecord(sourceEntry.batch.summary);
+  const closeout = asMonitoringJsonRecord(summary.closeout);
+  const rawAttempts = closeout.remediationAttempts;
+  const courseRef = createHash("sha256")
+    .update(input.courseId)
+    .digest("hex")
+    .slice(0, 24);
+  if (
+    closeout.verificationWatchMode !== "WATCH_SETTLED" ||
+    closeout.outcome !== "needs_human" ||
+    closeout.derivedOutcome !== "needs_human" ||
+    closeout.terminalCount !== 0 ||
+    closeout.reusableFamilyRestoredCount !== 0 ||
+    closeout.retryCount !== 0 ||
+    closeout.needsHumanCount !== 1 ||
+    closeout.automationStalledCount !== 1 ||
+    closeout.operationalRetryBudgetExhaustedCount !== 0 ||
+    closeout.orchestrationOnlyCount !== 0 ||
+    closeout.providerFamilyHandoffCount !== 0 ||
+    !Array.isArray(rawAttempts) ||
+    rawAttempts.length !== 1
+  ) {
+    return false;
+  }
+  const matchingAttempts = rawAttempts.filter(
+    (candidate) => asMonitoringJsonRecord(candidate).courseRef === courseRef,
+  );
+  if (matchingAttempts.length !== 1) return false;
+  const attempt = asMonitoringJsonRecord(matchingAttempts[0]);
+  const executionEvidence = asMonitoringJsonRecord(attempt.executionEvidence);
+  const executionEvidenceKeys = Object.keys(executionEvidence);
+  const historicalActiveRealSearchCount = attempt.activeRealSearchCount;
+  const playbookAttemptRecorded =
+    executionEvidence.playbookAttemptRecorded === true;
+  const exactLegacyExecutionEvidence = Boolean(
+    executionEvidenceKeys.length === 9 &&
+      [
+        "claimedImplementationPaths",
+        "newReleaseRecorded",
+        "deploymentRecorded",
+        "postProbeRecorded",
+        "providerAttemptRecorded",
+        "providerExecutionAttemptRecorded",
+        "playbookAttemptRecorded",
+        "terminalResultRecorded",
+        "providerExecutionStarted",
+      ].every((key) => executionEvidenceKeys.includes(key)) &&
+      executionEvidence.claimedImplementationPaths === false &&
+      executionEvidence.newReleaseRecorded === false &&
+      executionEvidence.deploymentRecorded === false &&
+      executionEvidence.postProbeRecorded === false &&
+      executionEvidence.providerAttemptRecorded === false &&
+      executionEvidence.providerExecutionAttemptRecorded === false &&
+      typeof executionEvidence.playbookAttemptRecorded === "boolean" &&
+      executionEvidence.terminalResultRecorded === false &&
+      executionEvidence.providerExecutionStarted === true,
+  );
+  const cooldownExpiresAt = parseStrictMonitoringIso(
+    attempt.failureOnlyHandoffCooldownUntil,
+  );
+  const currentProviderSnapshotFingerprint =
+    buildCourseSupportProviderSnapshotFingerprint(input.course);
+  if (
+    !exactLegacyExecutionEvidence ||
+    attempt.consumed !== playbookAttemptRecorded ||
+    closeout.remediationAttemptConsumed !== playbookAttemptRecorded ||
+    attempt.countsTowardOperationalNoProgress !== true ||
+    typeof historicalActiveRealSearchCount !== "number" ||
+    !Number.isInteger(historicalActiveRealSearchCount) ||
+    historicalActiveRealSearchCount < 0 ||
+    endpointAudit.activeDemand !== (historicalActiveRealSearchCount > 0) ||
+    attempt.operationalRetry !== null ||
+    attempt.orchestrationRetry !== null ||
+    attempt.deferredFailureHandoff !== undefined ||
+    attempt.deferredFailureHandoffAdmission !== undefined ||
+    attempt.failureFingerprint !== input.incident.failureFingerprint ||
+    typeof attempt.observedFailureFingerprint !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(attempt.observedFailureFingerprint) ||
+    attempt.observedFailureFingerprint === input.incident.failureFingerprint ||
+    attempt.providerSnapshotFingerprint !==
+      currentProviderSnapshotFingerprint ||
+    attempt.observedProviderSnapshotFingerprint !==
+      currentProviderSnapshotFingerprint ||
+    attempt.runtimeVersion !== effectiveRuntime ||
+    !cooldownExpiresAt
+  ) {
+    return false;
+  }
+
+  const proof = asMonitoringJsonRecord(sourceEntry.proofSnapshot);
+  const proofObservedAt = parseStrictMonitoringIso(proof.observedAt);
+  const proofNextAttemptAt =
+    proof.nextAttemptAt === null
+      ? null
+      : parseStrictMonitoringIso(proof.nextAttemptAt);
+  const proofProviderNotBeforeAt =
+    proof.providerRetryNotBeforeAt === null
+      ? null
+      : parseStrictMonitoringIso(proof.providerRetryNotBeforeAt);
+  const proofCompletedAt =
+    proof.completedAt === null
+      ? null
+      : parseStrictMonitoringIso(proof.completedAt);
+  if (
+    proof.kind !== "PROVIDER_VERIFICATION_FAILURE" ||
+    (proof.status !== "RETRYABLE_FAILED" && proof.status !== "STALE") ||
+    proof.outcome !== "FETCH_FAILED" ||
+    proof.failureClass !== "MISSING_SOURCE" ||
+    !COURSE_SUPPORT_FAILURE_CLASSES.has(
+      proof.failureClass as CourseSupportFailureClass,
+    ) ||
+    proof.providerExecution !== false ||
+    proof.runtimeVersion !== effectiveRuntime ||
+    proof.providerSnapshotFingerprint !== currentProviderSnapshotFingerprint ||
+    !proofObservedAt ||
+    proofObservedAt.getTime() > sourceEntry.batch.completedAt.getTime() ||
+    sourceEntry.verifiedAt?.getTime() !== proofObservedAt.getTime() ||
+    (proof.completedAt !== null && !proofCompletedAt) ||
+    (proof.nextAttemptAt !== null && !proofNextAttemptAt) ||
+    (proof.providerRetryNotBeforeAt !== null && !proofProviderNotBeforeAt)
+  ) {
+    return false;
+  }
+  const observedFailureFingerprint = buildProviderFailureFingerprint({
+    providerFamilyKey: input.incident.providerFamilyKey,
+    failureClass: "MISSING_SOURCE",
+    operation: "AVAILABILITY",
+    httpStatus:
+      typeof proof.httpStatus === "number" && Number.isInteger(proof.httpStatus)
+        ? proof.httpStatus
+        : null,
+  });
+  if (attempt.observedFailureFingerprint !== observedFailureFingerprint) {
+    return false;
+  }
+  const requests = sourceEntry.verificationRequests ?? [];
+  const sourceRequest = requests[0];
+  const sourceRequestEvidence = asMonitoringJsonRecord(
+    sourceRequest?.evidence,
+  );
+  const evidenceProviderNotBeforeAt =
+    sourceRequestEvidence.providerRetryNotBeforeAt === undefined
+      ? null
+      : parseStrictMonitoringIso(
+          sourceRequestEvidence.providerRetryNotBeforeAt,
+        );
+  const proofHttpStatus =
+    typeof proof.httpStatus === "number" && Number.isInteger(proof.httpStatus)
+      ? proof.httpStatus
+      : null;
+  const evidenceHttpStatus =
+    typeof sourceRequestEvidence.httpStatus === "number" &&
+    Number.isInteger(sourceRequestEvidence.httpStatus)
+      ? sourceRequestEvidence.httpStatus
+      : null;
+  const sourceRequestWasClosedFromRetryable = Boolean(
+    sourceRequest &&
+      proof.status === "RETRYABLE_FAILED" &&
+      sourceRequest.status === "STALE" &&
+      sourceRequest.nextAttemptAt === null &&
+      sourceRequest.completedAt?.getTime() ===
+        sourceEntry.batch.completedAt.getTime() &&
+      sourceRequest.updatedAt.getTime() ===
+        sourceEntry.batch.completedAt.getTime() &&
+      sourceRequest.lastError === "batch_closed",
+  );
+  const sourceRequestAlreadyStale = Boolean(
+    sourceRequest &&
+      proof.status === "STALE" &&
+      sourceRequest.status === "STALE" &&
+      (sourceRequest.nextAttemptAt?.toISOString() ?? null) ===
+        (proofNextAttemptAt?.toISOString() ?? null) &&
+      (sourceRequest.completedAt?.toISOString() ?? null) ===
+        (proofCompletedAt?.toISOString() ?? null),
+  );
+  if (
+    requests.length !== 1 ||
+    !sourceRequest ||
+    sourceRequest.batchIncidentId !== sourceEntry.id ||
+    sourceRequest.releaseSha !== effectiveRuntime ||
+    sourceRequest.runtimeVersion !== effectiveRuntime ||
+    (!sourceRequestWasClosedFromRetryable && !sourceRequestAlreadyStale) ||
+    sourceRequest.outcome !== proof.outcome ||
+    sourceRequest.failureClass !== "MISSING_SOURCE" ||
+    sourceRequest.providerSnapshotFingerprint !==
+      currentProviderSnapshotFingerprint ||
+    sourceRequest.startedAt === null ||
+    sourceRequest.startedAt.getTime() > proofObservedAt.getTime() ||
+    !sourceRequest.createdAt ||
+    sourceRequest.createdAt.getTime() <
+      sourceEntry.batch.createdAt.getTime() ||
+    sourceRequest.createdAt.getTime() > sourceRequest.startedAt.getTime() ||
+    sourceRequest.createdAt.getTime() > sourceRequest.updatedAt.getTime() ||
+    sourceRequest.updatedAt.getTime() > input.incident.updatedAt.getTime() ||
+    sourceRequestEvidence.schemaVersion !== 1 ||
+    sourceRequestEvidence.kind !== "PROVIDER_VERIFICATION" ||
+    sourceRequestEvidence.releaseSha !== effectiveRuntime ||
+    sourceRequestEvidence.runtimeVersion !== effectiveRuntime ||
+    sourceRequestEvidence.observedAt !== proofObservedAt.toISOString() ||
+    sourceRequestEvidence.outcome !== proof.outcome ||
+    sourceRequestEvidence.failureClass !== "MISSING_SOURCE" ||
+    sourceRequestEvidence.providerExecution !== false ||
+    sourceRequestEvidence.providerFamilyKey !==
+      input.incident.providerFamilyKey ||
+    sourceRequestEvidence.providerSnapshotFingerprint !==
+      currentProviderSnapshotFingerprint ||
+    (sourceRequestEvidence.providerRetryNotBeforeAt !== undefined &&
+      !evidenceProviderNotBeforeAt) ||
+    evidenceProviderNotBeforeAt?.toISOString() !==
+      proofProviderNotBeforeAt?.toISOString() ||
+    evidenceHttpStatus !== proofHttpStatus
+  ) {
+    return false;
+  }
+
+  const lineage = monitoringEvents.filter((event) => {
+    const audit = asMonitoringJsonRecord(event.audit);
+    return (
+      audit.providerFamilyHandoff === true &&
+      audit.providerFamilyChanged === false &&
+      audit.providerSnapshotChanged === false &&
+      audit.priorCycle === input.incident.cycle - 1 &&
+      audit.cycle === input.incident.cycle &&
+      audit.priorProviderFamilyKey === input.incident.providerFamilyKey &&
+      audit.providerFamilyKey === input.incident.providerFamilyKey &&
+      audit.failureFingerprint === input.incident.failureFingerprint &&
+      audit.claimedProviderSnapshotFingerprint ===
+        currentProviderSnapshotFingerprint &&
+      audit.observedProviderSnapshotFingerprint ===
+        currentProviderSnapshotFingerprint &&
+      typeof audit.priorFailureFingerprint === "string" &&
+      /^[a-f0-9]{64}$/u.test(audit.priorFailureFingerprint) &&
+      audit.priorFailureFingerprint !== input.incident.failureFingerprint
+    );
+  });
+  const canonicalLineage = lineage[0];
+  if (
+    lineage.length !== 1 ||
+    !canonicalLineage ||
+    canonicalLineage.occurredAt.getTime() >
+      sourceEntry.batch.createdAt.getTime() ||
+    monitoringEvents.some((event) => {
+      const audit = asMonitoringJsonRecord(event.audit);
+      return (
+        audit.action === "deferred_failure_handoff_legacy_recovery" ||
+        event.occurredAt.getTime() > sourceEntry.batch.completedAt!.getTime()
+      );
+    })
+  ) {
+    return false;
+  }
+  const firstCurrentCycleBatchAt = currentCycleHistory.reduce(
+    (earliest, entry) =>
+      entry.batch.createdAt!.getTime() < earliest.getTime()
+        ? entry.batch.createdAt!
+        : earliest,
+    sourceEntry.batch.createdAt,
+  );
+  const cooldownAnchor =
+    firstCurrentCycleBatchAt.getTime() > canonicalLineage.occurredAt.getTime()
+      ? firstCurrentCycleBatchAt
+      : canonicalLineage.occurredAt;
+  const expectedCooldownExpiresAt = new Date(
+    cooldownAnchor.getTime() + COURSE_SUPPORT_FAILURE_ONLY_HANDOFF_COOLDOWN_MS,
+  );
+  if (
+    cooldownExpiresAt.getTime() !== expectedCooldownExpiresAt.getTime() ||
+    sourceEntry.batch.completedAt.getTime() >= cooldownExpiresAt.getTime() ||
+    input.endpointEvent.occurredAt.getTime() !==
+      sourceEntry.batch.completedAt.getTime() ||
+    input.incident.escalatedAt?.getTime() !==
+      sourceEntry.batch.completedAt.getTime() ||
+    input.incident.nextReminderAt.getTime() !==
+      sourceEntry.batch.completedAt.getTime() ||
+    input.incident.lastSeenAt.getTime() !==
+      sourceEntry.batch.completedAt.getTime() ||
+    input.monitoringStatus.stateChangedAt.getTime() !==
+      sourceEntry.batch.completedAt.getTime() ||
+    endpointAudit.escalationDeadlineAt !==
+      input.incident.escalationDeadlineAt?.toISOString()
+  ) {
+    return false;
+  }
+
+  const databaseNow = await getCourseMonitoringDatabaseNow(transaction);
+  const detachedNotBeforeAt = [proofNextAttemptAt, proofProviderNotBeforeAt]
+    .filter(
+      (candidate): candidate is Date =>
+        candidate !== null &&
+        candidate.getTime() > sourceEntry.batch.completedAt!.getTime(),
+    )
+    .reduce<Date | null>(
+      (latest, candidate) =>
+        !latest || candidate.getTime() > latest.getTime() ? candidate : latest,
+      null,
+    );
+  const eligibleFloor = detachedNotBeforeAt
+    ? Math.max(cooldownExpiresAt.getTime(), detachedNotBeforeAt.getTime())
+    : cooldownExpiresAt.getTime();
+  if (databaseNow.getTime() < eligibleFloor) return false;
+  const eligibleAt = databaseNow;
+  const sourceBatchIncidentDigest =
+    createDeferredFailureHandoffBatchIncidentDigest(sourceEntry.id);
+  const sourceProofDigest = createDeferredFailureHandoffSourceProofDigest({
+    kind: "PROVIDER_VERIFICATION_FAILURE",
+    status: proof.status as string,
+    outcome: "FETCH_FAILED",
+    failureClass: "MISSING_SOURCE",
+    observedAt: proofObservedAt.toISOString(),
+    runtimeVersion: effectiveRuntime,
+    providerExecution: false,
+    providerSnapshotFingerprint: currentProviderSnapshotFingerprint,
+    completedAt: proofCompletedAt?.toISOString() ?? null,
+    nextAttemptAt: proofNextAttemptAt?.toISOString() ?? null,
+    providerRetryNotBeforeAt: proofProviderNotBeforeAt?.toISOString() ?? null,
+  });
+  const signal = createDeferredFailureHandoffSignal({
+    state: "AVAILABLE",
+    sourceBatchIncidentDigest,
+    sourceProofDigest,
+    providerFamilyKey: input.incident.providerFamilyKey,
+    canonicalFailureFingerprint: input.incident.failureFingerprint,
+    observedFailureFingerprint,
+    claimedProviderSnapshotFingerprint: currentProviderSnapshotFingerprint,
+    observedProviderSnapshotFingerprint: currentProviderSnapshotFingerprint,
+    runtimeVersion: effectiveRuntime,
+    cooldownExpiresAt: cooldownExpiresAt.toISOString(),
+    providerNotBeforeAt: detachedNotBeforeAt?.toISOString() ?? null,
+    eligibleAt: eligibleAt.toISOString(),
+    sourceVerificationWatchMode: "WATCH_SETTLED",
+    sourceResult: "NEEDS_HUMAN",
+    sourceAttemptConsumed: true,
+    confirmationStarted: false,
+  });
+  if (!parseDeferredFailureHandoffSignal(signal)) return false;
+  const legacySourceRecordDigest =
+    createDeferredFailureHandoffLegacySourceRecordDigest({
+      sourceBatchIncidentDigest,
+      sourceProofDigest,
+      courseRef,
+      providerFamilyKey: input.incident.providerFamilyKey,
+      canonicalFailureFingerprint: input.incident.failureFingerprint,
+      observedFailureFingerprint,
+      providerSnapshotFingerprint: currentProviderSnapshotFingerprint,
+      runtimeVersion: effectiveRuntime,
+      cooldownExpiresAt: cooldownExpiresAt.toISOString(),
+      providerNotBeforeAt: detachedNotBeforeAt?.toISOString() ?? null,
+      sourceVerificationWatchMode: "WATCH_SETTLED",
+      sourceResult: "NEEDS_HUMAN",
+      sourceBatchStatus: "PARTIAL",
+      sourceDerivedOutcome: "needs_human",
+      sourceAttemptConsumed: true,
+    });
+  const idempotencyKey = `course-monitoring-deferred-failure-recovery:${input.incident.id}:${input.incident.cycle}:${signal.signalDigest}`;
+  const priorRecovery = await transaction.courseMonitoringEvent.findUnique({
+    where: { idempotencyKey },
+    select: { id: true },
+  });
+  if (priorRecovery) return false;
+
+  const sourceBatchFenced = await transaction.courseSupportBatch.updateMany({
+    where: {
+      id: sourceEntry.batch.id,
+      status: "PARTIAL",
+      providerFamilyKey: input.incident.providerFamilyKey,
+      failureFingerprint: input.incident.failureFingerprint,
+      baseSha: sourceEntry.batch.baseSha,
+      releaseSha: sourceEntry.batch.releaseSha,
+      deployedAt: sourceEntry.batch.deployedAt,
+      completedAt: sourceEntry.batch.completedAt,
+      revision: sourceEntry.batch.revision,
+      updatedAt: sourceEntry.batch.updatedAt,
+      summary: { equals: sourceEntry.batch.summary as Prisma.InputJsonValue },
+    },
+    data: {
+      revision: { increment: 0 },
+      updatedAt: sourceEntry.batch.updatedAt,
+    },
+  });
+  const sourceEntryFenced =
+    await transaction.courseSupportBatchIncident.updateMany({
+      where: {
+        id: sourceEntry.id,
+        batchId: sourceEntry.batch.id,
+        incidentId: input.incident.id,
+        courseId: input.courseId,
+        cycle: input.incident.cycle,
+        result: "NEEDS_HUMAN",
+        proofSnapshot: {
+          equals: sourceEntry.proofSnapshot as Prisma.InputJsonValue,
+        },
+        verifiedAt: sourceEntry.verifiedAt,
+        createdAt: sourceEntry.createdAt,
+        updatedAt: sourceEntry.updatedAt,
+      },
+      data: { updatedAt: sourceEntry.updatedAt },
+    });
+  const sourceRequestFenced =
+    await transaction.courseSupportVerificationRequest.updateMany({
+      where: {
+        id: sourceRequest.id,
+        batchIncidentId: sourceEntry.id,
+        releaseSha: sourceRequest.releaseSha,
+        runtimeVersion: sourceRequest.runtimeVersion,
+        status: sourceRequest.status,
+        revision: sourceRequest.revision,
+        attemptCount: sourceRequest.attemptCount,
+        startedAt: sourceRequest.startedAt,
+        outcome: sourceRequest.outcome,
+        failureClass: sourceRequest.failureClass,
+        evidence: {
+          equals: sourceRequest.evidence as Prisma.InputJsonValue,
+        },
+        lastError: sourceRequest.lastError,
+        providerSnapshotFingerprint: sourceRequest.providerSnapshotFingerprint,
+        nextAttemptAt: sourceRequest.nextAttemptAt,
+        completedAt: sourceRequest.completedAt,
+        createdAt: sourceRequest.createdAt,
+        updatedAt: sourceRequest.updatedAt,
+      },
+      data: {
+        revision: { increment: 0 },
+        updatedAt: sourceRequest.updatedAt,
+      },
+    });
+  if (
+    sourceBatchFenced.count !== 1 ||
+    sourceEntryFenced.count !== 1 ||
+    sourceRequestFenced.count !== 1
+  ) {
+    throw new Error(
+      "The legacy deferred-failure source changed during watchdog recovery.",
+    );
+  }
+
+  const nextDeadlineAt = getDeferredFailureHandoffEscalationDeadline(
+    eligibleAt,
+    input.incident.activeRealSearchCount,
+  );
+  const incidentUpdated = await transaction.courseSupportIncident.updateMany({
+    where: {
+      id: input.incident.id,
+      courseId: input.courseId,
+      cycle: input.incident.cycle,
+      revision: input.incident.revision,
+      status: "NEEDS_HUMAN",
+      kind: "FETCH_FAILED",
+      providerFamilyKey: input.incident.providerFamilyKey,
+      failureClass: "HTTP_5XX",
+      failureFingerprint: input.incident.failureFingerprint,
+      humanReviewReason: "AUTOMATION_STALLED",
+      activeBatchId: null,
+      nextAttemptAt: null,
+      nextReminderAt: input.incident.nextReminderAt,
+      escalationDeadlineAt: input.incident.escalationDeadlineAt,
+      escalatedAt: input.incident.escalatedAt,
+      lastSeenAt: input.incident.lastSeenAt,
+    },
+    data: {
+      status: "AUTO_INVESTIGATING",
+      humanReviewReason: null,
+      escalationDeadlineAt: nextDeadlineAt,
+      nextReminderAt: null,
+      nextAttemptAt: eligibleAt,
+      nextAction:
+        "Run one exact verifier-only confirmation after the failure-only cooldown.",
+      lastSeenAt: eligibleAt,
+      revision: { increment: 1 },
+    },
+  });
+  if (incidentUpdated.count !== 1) {
+    throw new Error(
+      "The parked course incident changed during legacy deferred-failure recovery.",
+    );
+  }
+  const statusUpdated = await transaction.courseMonitoringStatus.updateMany({
+    where: {
+      courseId: input.courseId,
+      state: "ENGINEERING_VERIFICATION_NEEDED",
+      stateChangedAt: input.monitoringStatus.stateChangedAt,
+      revision: input.monitoringStatus.revision,
+      failureFingerprint: input.incident.failureFingerprint,
+      nextAutomaticAttemptAt: null,
+      revalidationRequestedAt: null,
+    },
+    data: {
+      state: "AUTO_INVESTIGATING",
+      failureFingerprint: input.incident.failureFingerprint,
+      nextAutomaticAttemptAt: eligibleAt,
+      revalidationRequestedAt: eligibleAt,
+      stateChangedAt: eligibleAt,
+      revision: { increment: 1 },
+    },
+  });
+  if (statusUpdated.count !== 1) {
+    throw new Error(
+      "The parked monitoring state changed during legacy deferred-failure recovery.",
+    );
+  }
+  await appendMonitoringEvent(transaction, {
+    courseId: input.courseId,
+    incidentId: input.incident.id,
+    eventType: "REVALIDATION_REQUESTED",
+    source: input.source,
+    fromState: input.monitoringStatus.state,
+    toState: "AUTO_INVESTIGATING",
+    failureFingerprint: input.incident.failureFingerprint,
+    runtimeVersion: effectiveRuntime,
+    message:
+      "The watchdog restored one verifier-only failure confirmation from exact durable cooldown evidence.",
+    idempotencyKey,
+    occurredAt: eligibleAt,
+    audit: {
+      schemaVersion: 1,
+      action: "deferred_failure_handoff_legacy_recovery",
+      cycle: input.incident.cycle,
+      deferredFailureHandoff: signal,
+      legacySourceRecordDigest,
+      sourceBatchIncidentDigest,
+      sourceProofDigest,
+      sourceResult: "NEEDS_HUMAN",
+      sourceBatchStatus: "PARTIAL",
+      sourceDerivedOutcome: "needs_human",
+      sourceVerificationWatchMode: "WATCH_SETTLED",
+      sourceAttemptConsumed: true,
+      eligibleAt: eligibleAt.toISOString(),
+      nextEscalationDeadlineAt: nextDeadlineAt.toISOString(),
+      sameCycleRecovery: true,
+      oneShotPerEvidenceSnapshot: true,
+      preservesCanonicalFailureFingerprint: true,
+      preservesAttemptLedger: true,
+      preservesAttemptCount: true,
+      customerDataIncluded: false,
+    },
+  });
+  return true;
 }
 
 async function resumeIncompleteAutomationStalledPlaybook(
@@ -3787,6 +4767,421 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
     };
   }
 
+  type StaleDeferredFailureCarrier = {
+    courseRef: string;
+    source: NonNullable<ReturnType<typeof parseDeferredFailureHandoffSignal>>;
+    admission: NonNullable<
+      ReturnType<typeof parseDeferredFailureHandoffAdmission>
+    >;
+    plannedAttempt: Record<string, unknown>;
+    confirmationStarted: boolean;
+    invalidatedByCurrentState: boolean;
+    preserveAvailable: boolean;
+    materialFailureHandoff: {
+      failureClass: CourseSupportFailureClass;
+      failureFingerprint: string;
+      nextAttemptAt: Date;
+    } | null;
+    confirmedSuccess: {
+      outcome: Extract<ProbeOutcome, "MATCH_FOUND" | "NO_MATCH">;
+      observedAt: Date;
+      runtimeVersion: string;
+    } | null;
+  };
+  const deferredFailureCarrierByIncidentId = new Map<
+    string,
+    StaleDeferredFailureCarrier
+  >();
+  const summary = asMonitoringJsonRecord(batch.summary);
+  const plannedRemediation = asMonitoringJsonRecord(summary.remediation);
+  const plannedRemediationAttempts = Array.isArray(plannedRemediation.attempts)
+    ? plannedRemediation.attempts
+    : [];
+  const effectiveReleaseSha = batch.releaseSha ?? batch.baseSha;
+  for (const entry of batch.incidents) {
+    const courseRef = createHash("sha256")
+      .update(entry.courseId)
+      .digest("hex")
+      .slice(0, 24);
+    const matchingAttempts = plannedRemediationAttempts.filter(
+      (attempt) => asMonitoringJsonRecord(attempt).courseRef === courseRef,
+    );
+    const deferredAttempts = matchingAttempts.filter((attempt) => {
+      const record = asMonitoringJsonRecord(attempt);
+      return (
+        "deferredFailureHandoffSource" in record ||
+        "deferredFailureHandoffAdmission" in record
+      );
+    });
+    if (deferredAttempts.length === 0) {
+      continue;
+    }
+    if (matchingAttempts.length !== 1 || deferredAttempts.length !== 1) {
+      return {
+        outcome: "OWNED" as const,
+        incidentId: input.currentIncidentId,
+      };
+    }
+
+    const plannedAttempt = asMonitoringJsonRecord(deferredAttempts[0]);
+    const source = parseDeferredFailureHandoffSignal(
+      plannedAttempt.deferredFailureHandoffSource,
+    );
+    const admission = parseDeferredFailureHandoffAdmission(
+      plannedAttempt.deferredFailureHandoffAdmission,
+    );
+    const [confirmationRequest] = entry.verificationRequests;
+    const confirmationStarted = Boolean(
+      confirmationRequest?.startedAt instanceof Date,
+    );
+    const monitoringStatus = entry.course.monitoringStatus;
+    const hasProviderSnapshot = Boolean(
+      entry.course.detectedPlatform &&
+      entry.course.bookingMethod &&
+      entry.course.automationEligibility,
+    );
+    const currentProviderSnapshotFingerprint = hasProviderSnapshot
+      ? buildCourseSupportProviderSnapshotFingerprint({
+          timeZone: entry.course.timeZone,
+          website: entry.course.website,
+          detectedBookingUrl: entry.course.detectedBookingUrl,
+          detectedPlatform: entry.course.detectedPlatform!,
+          providerFamilyKey: entry.course.providerFamilyKey,
+          bookingMethod: entry.course.bookingMethod!,
+          bookingWindowDaysAhead: entry.course.bookingWindowDaysAhead,
+          bookingWindowEvidenceUrl: entry.course.bookingWindowEvidenceUrl,
+          bookingReleaseTimeLocal: entry.course.bookingReleaseTimeLocal,
+          bookingWindowSource: entry.course.bookingWindowSource,
+          bookingWindowConfidence: entry.course.bookingWindowConfidence,
+          automationEligibility: entry.course.automationEligibility!,
+          automationReason: entry.course.automationReason,
+          monitoringMode: entry.course.monitoringMode,
+          bookingAccessMode: entry.course.bookingAccessMode,
+          isPublic: entry.course.isPublic,
+          intelligenceVerifiedAt: entry.course.intelligenceVerifiedAt,
+          intelligenceReviewAt: entry.course.intelligenceReviewAt,
+          intelligenceConfidence: entry.course.intelligenceConfidence,
+          bookingMetadata: entry.course.bookingMetadata,
+          layoutHoleCounts: entry.course.layoutHoleCounts,
+          layoutHolesVerifiedAt: entry.course.layoutHolesVerifiedAt,
+        })
+      : null;
+    if (
+      !source ||
+      !admission ||
+      source.state !== "AVAILABLE" ||
+      source.confirmationStarted ||
+      admission.signalDigest !== source.signalDigest ||
+      admission.sourceRecordDigest !== source.recordDigest ||
+      admission.sourceBatchIncidentDigest !==
+        source.sourceBatchIncidentDigest ||
+      source.providerFamilyKey !== batch.providerFamilyKey ||
+      source.canonicalFailureFingerprint !== batch.failureFingerprint ||
+      source.claimedProviderSnapshotFingerprint !==
+        source.observedProviderSnapshotFingerprint ||
+      plannedAttempt.providerSnapshotFingerprint !==
+        source.claimedProviderSnapshotFingerprint ||
+      plannedAttempt.failureFingerprint !==
+        source.canonicalFailureFingerprint ||
+      plannedAttempt.runtimeVersion !== effectiveReleaseSha ||
+      entry.verificationRequests.length > 1 ||
+      (confirmationRequest &&
+        (confirmationRequest.batchIncidentId !== entry.id ||
+          confirmationRequest.releaseSha !== effectiveReleaseSha ||
+          ![
+            "QUEUED",
+            "CHECKING",
+            "SUCCEEDED",
+            "RETRYABLE_FAILED",
+            "STALE",
+          ].includes(confirmationRequest.status))) ||
+      new Date(source.eligibleAt).getTime() > input.now.getTime()
+    ) {
+      return {
+        outcome: "OWNED" as const,
+        incidentId: input.currentIncidentId,
+      };
+    }
+
+    const mutableCurrentStateChanged = Boolean(
+      source.providerFamilyKey !== entry.incident.providerFamilyKey ||
+        source.canonicalFailureFingerprint !==
+          entry.incident.failureFingerprint ||
+        source.claimedProviderSnapshotFingerprint !==
+          currentProviderSnapshotFingerprint ||
+        normalizeProviderFamilyKey(entry.course.providerFamilyKey) !==
+          source.providerFamilyKey ||
+        monitoringStatus?.failureFingerprint !==
+          source.canonicalFailureFingerprint,
+    );
+    if (mutableCurrentStateChanged) {
+      deferredFailureCarrierByIncidentId.set(entry.incidentId, {
+        courseRef,
+        source,
+        admission,
+        plannedAttempt,
+        confirmationStarted,
+        invalidatedByCurrentState: true,
+        preserveAvailable: false,
+        materialFailureHandoff: null,
+        confirmedSuccess: null,
+      });
+      continue;
+    }
+
+    const proof = asMonitoringJsonRecord(entry.proofSnapshot);
+    const confirmationEvidence = asMonitoringJsonRecord(
+      confirmationRequest?.evidence,
+    );
+    const confirmationObservedAt = parseStrictMonitoringIso(
+      confirmationEvidence.observedAt,
+    );
+    const evidenceProviderNotBeforeAt =
+      confirmationEvidence.providerRetryNotBeforeAt === undefined
+        ? null
+        : parseStrictMonitoringIso(
+            confirmationEvidence.providerRetryNotBeforeAt,
+          );
+    const evidenceHttpStatus =
+      confirmationEvidence.httpStatus === undefined ||
+      confirmationEvidence.httpStatus === null
+        ? null
+        : typeof confirmationEvidence.httpStatus === "number" &&
+            Number.isInteger(confirmationEvidence.httpStatus)
+          ? confirmationEvidence.httpStatus
+          : undefined;
+    const coherentProviderExecutedRequest = Boolean(
+      confirmationStarted &&
+        confirmationRequest &&
+        confirmationObservedAt &&
+        confirmationRequest.runtimeVersion === effectiveReleaseSha &&
+        confirmationRequest.providerSnapshotFingerprint ===
+          currentProviderSnapshotFingerprint &&
+        confirmationRequest.providerSnapshotAt instanceof Date &&
+        confirmationRequest.createdAt.getTime() <=
+          confirmationRequest.providerSnapshotAt.getTime() &&
+        confirmationRequest.providerSnapshotAt.getTime() <=
+          confirmationRequest.startedAt!.getTime() &&
+        confirmationRequest.createdAt.getTime() <=
+          confirmationRequest.startedAt!.getTime() &&
+        confirmationRequest.startedAt!.getTime() <=
+          confirmationObservedAt.getTime() &&
+        confirmationObservedAt.getTime() <= input.now.getTime() &&
+        confirmationRequest.createdAt.getTime() <=
+          confirmationRequest.updatedAt.getTime() &&
+        confirmationRequest.updatedAt.getTime() <= input.now.getTime() &&
+        confirmationEvidence.schemaVersion === 1 &&
+        confirmationEvidence.kind === "PROVIDER_VERIFICATION" &&
+        confirmationEvidence.releaseSha === effectiveReleaseSha &&
+        confirmationEvidence.runtimeVersion === effectiveReleaseSha &&
+        confirmationEvidence.outcome === confirmationRequest.outcome &&
+        confirmationEvidence.failureClass ===
+          (confirmationRequest.failureClass ?? undefined) &&
+        confirmationEvidence.providerExecution === true &&
+        confirmationEvidence.providerFamilyKey === source.providerFamilyKey &&
+        confirmationEvidence.providerSnapshotFingerprint ===
+          currentProviderSnapshotFingerprint &&
+        evidenceHttpStatus !== undefined &&
+        (confirmationEvidence.providerRetryNotBeforeAt === undefined ||
+          evidenceProviderNotBeforeAt),
+    );
+    const coherentProviderExecutedSuccess = Boolean(
+      coherentProviderExecutedRequest &&
+        confirmationRequest &&
+        confirmationObservedAt &&
+        confirmationRequest.status === "SUCCEEDED" &&
+        (confirmationRequest.outcome === "MATCH_FOUND" ||
+          confirmationRequest.outcome === "NO_MATCH") &&
+        confirmationRequest.failureClass === null &&
+        confirmationRequest.lastError === null &&
+        confirmationRequest.nextAttemptAt === null &&
+        confirmationRequest.completedAt instanceof Date &&
+        confirmationObservedAt.getTime() <=
+          confirmationRequest.completedAt.getTime() &&
+        confirmationRequest.completedAt.getTime() <=
+          confirmationRequest.updatedAt.getTime() &&
+        confirmationRequest.discoveryAttemptedAt instanceof Date &&
+        confirmationRequest.discoveryVerifiedAt instanceof Date &&
+        confirmationRequest.providerSnapshotAt!.getTime() <=
+          confirmationRequest.discoveryAttemptedAt.getTime() &&
+        confirmationRequest.discoveryAttemptedAt.getTime() <=
+          confirmationRequest.discoveryVerifiedAt.getTime() &&
+        confirmationRequest.discoveryVerifiedAt.getTime() <=
+          confirmationRequest.completedAt.getTime(),
+    );
+    const requestFailureClass =
+      confirmationRequest?.failureClass &&
+      COURSE_SUPPORT_FAILURE_CLASSES.has(confirmationRequest.failureClass)
+        ? confirmationRequest.failureClass
+        : null;
+    const requestFailureFingerprint =
+      requestFailureClass &&
+      evidenceHttpStatus !== undefined &&
+      (entry.incident.kind === "NEEDS_ADAPTER" ||
+        entry.incident.kind === "FETCH_FAILED")
+        ? buildProviderFailureFingerprint({
+            providerFamilyKey: source.providerFamilyKey,
+            failureClass: requestFailureClass,
+            operation:
+              entry.incident.kind === "NEEDS_ADAPTER"
+                ? "METADATA"
+                : "AVAILABILITY",
+            httpStatus: evidenceHttpStatus,
+          })
+        : null;
+    const proofNextAttemptAt =
+      proof.nextAttemptAt === null
+        ? null
+        : parseStrictMonitoringIso(proof.nextAttemptAt);
+    const proofProviderNotBeforeAt =
+      proof.providerRetryNotBeforeAt === null
+        ? null
+        : parseStrictMonitoringIso(proof.providerRetryNotBeforeAt);
+    const proofCompletedAt =
+      proof.completedAt === null
+        ? null
+        : parseStrictMonitoringIso(proof.completedAt);
+    const proofHttpStatus =
+      proof.httpStatus === undefined || proof.httpStatus === null
+        ? null
+        : typeof proof.httpStatus === "number" &&
+            Number.isInteger(proof.httpStatus)
+          ? proof.httpStatus
+          : undefined;
+    const reflectedFailureProofIsCoherent = Boolean(
+      entry.proofSnapshot === null ||
+        (confirmationRequest &&
+          confirmationObservedAt &&
+          proof.kind === "PROVIDER_VERIFICATION_FAILURE" &&
+          proof.providerExecution === true &&
+          proof.status === confirmationRequest.status &&
+          proof.outcome === confirmationRequest.outcome &&
+          proof.failureClass === confirmationRequest.failureClass &&
+          proof.observedAt === confirmationObservedAt.toISOString() &&
+          proof.runtimeVersion === effectiveReleaseSha &&
+          proof.providerSnapshotFingerprint ===
+            currentProviderSnapshotFingerprint &&
+          (proof.nextAttemptAt === null || proofNextAttemptAt) &&
+          (proof.providerRetryNotBeforeAt === null ||
+            proofProviderNotBeforeAt) &&
+          (proof.completedAt === null || proofCompletedAt) &&
+          proofHttpStatus !== undefined &&
+          (confirmationRequest.nextAttemptAt?.toISOString() ?? null) ===
+            (proofNextAttemptAt?.toISOString() ?? null) &&
+          (confirmationRequest.completedAt?.toISOString() ?? null) ===
+            (proofCompletedAt?.toISOString() ?? null) &&
+          (evidenceProviderNotBeforeAt?.toISOString() ?? null) ===
+            (proofProviderNotBeforeAt?.toISOString() ?? null) &&
+          evidenceHttpStatus === proofHttpStatus),
+    );
+    const coherentProviderExecutedFailure = Boolean(
+      coherentProviderExecutedRequest &&
+        confirmationRequest &&
+        confirmationObservedAt &&
+        (confirmationRequest.status === "RETRYABLE_FAILED" ||
+          confirmationRequest.status === "STALE") &&
+        confirmationRequest.outcome === "FETCH_FAILED" &&
+        requestFailureClass &&
+        reflectedFailureProofIsCoherent,
+    );
+    if (coherentProviderExecutedSuccess) {
+      deferredFailureCarrierByIncidentId.set(entry.incidentId, {
+        courseRef,
+        source,
+        admission,
+        plannedAttempt,
+        confirmationStarted: true,
+        invalidatedByCurrentState: false,
+        preserveAvailable: false,
+        materialFailureHandoff: null,
+        confirmedSuccess: {
+          outcome: confirmationRequest!.outcome as Extract<
+            ProbeOutcome,
+            "MATCH_FOUND" | "NO_MATCH"
+          >,
+          observedAt: confirmationObservedAt!,
+          runtimeVersion: effectiveReleaseSha,
+        },
+      });
+      continue;
+    }
+    if (
+      coherentProviderExecutedFailure &&
+      requestFailureFingerprint &&
+      requestFailureFingerprint !== source.canonicalFailureFingerprint
+    ) {
+      const nextAttemptAt = [
+        input.now,
+        ...(confirmationRequest!.nextAttemptAt &&
+        confirmationRequest!.nextAttemptAt.getTime() > input.now.getTime()
+          ? [confirmationRequest!.nextAttemptAt]
+          : []),
+        ...(evidenceProviderNotBeforeAt &&
+        evidenceProviderNotBeforeAt.getTime() > input.now.getTime()
+          ? [evidenceProviderNotBeforeAt]
+          : []),
+      ].reduce((latest, candidate) =>
+        candidate.getTime() > latest.getTime() ? candidate : latest,
+      );
+      deferredFailureCarrierByIncidentId.set(entry.incidentId, {
+        courseRef,
+        source,
+        admission,
+        plannedAttempt,
+        confirmationStarted: true,
+        invalidatedByCurrentState: false,
+        preserveAvailable: false,
+        materialFailureHandoff: {
+          failureClass: requestFailureClass!,
+          failureFingerprint: requestFailureFingerprint,
+          nextAttemptAt,
+        },
+        confirmedSuccess: null,
+      });
+      continue;
+    }
+
+    const historicalExecution = readCourseSupportReleaseExecutionEvidence({
+      summary: batch.summary,
+      baseSha: batch.baseSha,
+      courseRef,
+    });
+    const preserveAvailable = Boolean(
+      !confirmationStarted &&
+      batch.deployedAt === null &&
+      (batch.releaseSha === null || batch.releaseSha === batch.baseSha) &&
+      !historicalExecution.changedReleaseDeploymentEver &&
+        !historicalExecution.providerExecutionEverForCourse &&
+        !historicalExecution.providerExecutionAttemptEverForCourse &&
+        !historicalExecution.terminalExecutionEverForCourse &&
+        entry.proofSnapshot === null &&
+        proof.providerExecution !== true &&
+      entry.verificationRequests.every((request) =>
+        isCourseSupportVerificationRequestUnstarted(request),
+      ) &&
+      !searchExecutionMayHaveStartedCourseRefs.has(courseRef) &&
+      Array.isArray(summary.plannedPaths) &&
+      summary.plannedPaths.length === 0,
+    );
+    if (!confirmationStarted && !preserveAvailable) {
+      return {
+        outcome: "OWNED" as const,
+        incidentId: input.currentIncidentId,
+      };
+    }
+    deferredFailureCarrierByIncidentId.set(entry.incidentId, {
+      courseRef,
+      source,
+      admission,
+      plannedAttempt,
+      confirmationStarted,
+      invalidatedByCurrentState: false,
+      preserveAvailable,
+      materialFailureHandoff: null,
+      confirmedSuccess: null,
+    });
+  }
+
   type StaleOwnerDisposition =
     | "STALLED_ENDPOINT"
     | "EXHAUSTED_ENDPOINT"
@@ -3794,6 +5189,7 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
     | "AUTHORITATIVE_PROBE"
     | "TERMINAL_HUMAN"
     | "TERMINAL_RESOLVED"
+    | "MATERIAL_HANDOFF"
     | "RETRY";
   const dispositionByIncidentId = new Map<
     string,
@@ -3802,6 +5198,10 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
       result: CourseSupportBatchIncidentResult;
       orchestrationOnly?: boolean;
       incompletePlaybook?: boolean;
+      deferredFailureCarrier?: "AVAILABLE" | "CONSUMED";
+      materialFailureHandoff?: NonNullable<
+        StaleDeferredFailureCarrier["materialFailureHandoff"]
+      >;
       resolution?: CourseSupportResolution;
       successProbe?: DeadlineBatchIncidentSnapshot["course"]["probes"][number];
     }
@@ -3877,6 +5277,42 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
       dispositionByIncidentId.set(incident.id, {
         disposition: "TERMINAL_HUMAN",
         result: "NEEDS_HUMAN",
+      });
+      continue;
+    }
+    const deferredFailureCarrier = deferredFailureCarrierByIncidentId.get(
+      incident.id,
+    );
+    if (deferredFailureCarrier?.confirmedSuccess) {
+      dispositionByIncidentId.set(incident.id, {
+        disposition: "AUTHORITATIVE_PROBE",
+        result: "RESTORED",
+        deferredFailureCarrier: "CONSUMED",
+        resolution: "MONITORING_RESTORED",
+        successProbe: deferredFailureCarrier.confirmedSuccess,
+      });
+      continue;
+    }
+    if (deferredFailureCarrier?.materialFailureHandoff) {
+      dispositionByIncidentId.set(incident.id, {
+        disposition: "MATERIAL_HANDOFF",
+        result: "RETRY_SCHEDULED",
+        deferredFailureCarrier: "CONSUMED",
+        materialFailureHandoff:
+          deferredFailureCarrier.materialFailureHandoff,
+      });
+      continue;
+    }
+    if (deferredFailureCarrier) {
+      dispositionByIncidentId.set(incident.id, {
+        disposition: "RETRY",
+        result: "RETRY_SCHEDULED",
+        orchestrationOnly: deferredFailureCarrier.preserveAvailable,
+        deferredFailureCarrier:
+          deferredFailureCarrier.confirmationStarted ||
+          deferredFailureCarrier.invalidatedByCurrentState
+          ? "CONSUMED"
+          : "AVAILABLE",
       });
       continue;
     }
@@ -3981,10 +5417,109 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
     ? batch.incidents.filter(
         (entry) =>
           dispositionByIncidentId.get(entry.incidentId)?.orchestrationOnly ===
-          true,
+            true && !deferredFailureCarrierByIncidentId.has(entry.incidentId),
       )
     : [];
-  const effectiveReleaseSha = batch.releaseSha ?? batch.baseSha;
+  if (shouldCloseBatch) {
+    const deferredCarrierBatchIncidentIds = batch.incidents.flatMap((entry) =>
+      deferredFailureCarrierByIncidentId.has(entry.incidentId)
+        ? [entry.id]
+        : [],
+    );
+    if (deferredCarrierBatchIncidentIds.length > 0) {
+      // Verification-request creation takes a foreign-key KEY SHARE lock on
+      // its batch-incident parent. Holding the parent rows FOR UPDATE makes
+      // the snapshot/late-request check a complete fence: a scheduler that
+      // read the old batch state can only insert after this closeout commits,
+      // when request claiming will observe the terminal batch.
+      await transaction.$queryRaw(
+        Prisma.sql`SELECT "id"
+                   FROM "CourseSupportBatchIncident"
+                   WHERE "id" IN (${Prisma.join(
+                     deferredCarrierBatchIncidentIds,
+                   )})
+                   ORDER BY "id"
+                   FOR UPDATE`,
+      );
+    }
+    for (const entry of batch.incidents) {
+      if (!deferredFailureCarrierByIncidentId.has(entry.incidentId)) {
+        continue;
+      }
+      if (
+        entry.verificationRequests.some(
+          (request) =>
+            request.batchIncidentId !== entry.id ||
+            request.releaseSha !== effectiveReleaseSha,
+        )
+      ) {
+        return {
+          outcome: "OWNED" as const,
+          incidentId: input.currentIncidentId,
+        };
+      }
+      for (const request of entry.verificationRequests) {
+        const requestUnchanged =
+          await transaction.courseSupportVerificationRequest.updateMany({
+            where: {
+              id: request.id,
+              batchIncidentId: request.batchIncidentId,
+              releaseSha: request.releaseSha,
+              status: request.status,
+              revision: request.revision,
+              attemptCount: request.attemptCount,
+              startedAt: request.startedAt,
+              providerSnapshotAt: request.providerSnapshotAt,
+              discoveryAttemptedAt: request.discoveryAttemptedAt,
+              discoveryVerifiedAt: request.discoveryVerifiedAt,
+              outcome: request.outcome,
+              failureClass: request.failureClass,
+              evidence:
+                request.evidence === null
+                  ? { equals: Prisma.AnyNull }
+                  : { equals: request.evidence as Prisma.InputJsonValue },
+              lastError: request.lastError,
+              runtimeVersion: request.runtimeVersion,
+              providerSnapshotFingerprint:
+                request.providerSnapshotFingerprint,
+              nextAttemptAt: request.nextAttemptAt,
+              completedAt: request.completedAt,
+              createdAt: request.createdAt,
+              updatedAt: request.updatedAt,
+            },
+            data: {
+              revision: { increment: 0 },
+              updatedAt: request.updatedAt,
+            },
+          });
+        if (requestUnchanged.count !== 1) {
+          return {
+            outcome: "OWNED" as const,
+            incidentId: input.currentIncidentId,
+          };
+        }
+      }
+      const snapshottedRequestIds = entry.verificationRequests.map(
+        (request) => request.id,
+      );
+      const lateRequest =
+        await transaction.courseSupportVerificationRequest.findFirst({
+          where: {
+            batchIncidentId: entry.id,
+            ...(snapshottedRequestIds.length > 0
+              ? { id: { notIn: snapshottedRequestIds } }
+              : {}),
+          },
+          select: { id: true },
+        });
+      if (lateRequest) {
+        return {
+          outcome: "OWNED" as const,
+          incidentId: input.currentIncidentId,
+        };
+      }
+    }
+  }
   for (const entry of orchestrationOnlyEntries) {
     for (const request of entry.verificationRequests) {
       const requestUnchanged =
@@ -3997,11 +5532,27 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
             revision: request.revision,
             attemptCount: request.attemptCount,
             startedAt: null,
+            providerSnapshotAt: request.providerSnapshotAt,
+            discoveryAttemptedAt: request.discoveryAttemptedAt,
+            discoveryVerifiedAt: request.discoveryVerifiedAt,
             outcome: request.outcome,
             failureClass: request.failureClass,
+            evidence:
+              request.evidence === null
+                ? { equals: Prisma.AnyNull }
+                : { equals: request.evidence as Prisma.InputJsonValue },
             lastError: request.lastError,
+            runtimeVersion: request.runtimeVersion,
+            providerSnapshotFingerprint: request.providerSnapshotFingerprint,
+            nextAttemptAt: request.nextAttemptAt,
+            completedAt: request.completedAt,
+            createdAt: request.createdAt,
+            updatedAt: request.updatedAt,
           },
-          data: { revision: { increment: 0 } },
+          data: {
+            revision: { increment: 0 },
+            updatedAt: request.updatedAt,
+          },
         });
       if (requestUnchanged.count !== 1) {
         return {
@@ -4031,6 +5582,137 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
       }
     }
   }
+  const deferredFailureCarrierRetryByIncidentId = new Map(
+    batch.incidents.flatMap((entry) => {
+      const carrier = deferredFailureCarrierByIncidentId.get(entry.incidentId);
+      if (!carrier) return [];
+      const schedule = carrier.materialFailureHandoff
+        ? {
+            attemptNumber: 0,
+            delayMs: Math.max(
+              0,
+              carrier.materialFailureHandoff.nextAttemptAt.getTime() -
+                input.now.getTime(),
+            ),
+            retryAt: carrier.materialFailureHandoff.nextAttemptAt,
+          }
+        : carrier.preserveAvailable
+          ? getCourseSupportOrchestrationRetrySchedule({
+              now: input.now,
+              priorAttemptCount:
+                countCourseSupportCompletedOrchestrationOnlyAttempts({
+                  courseId: entry.courseId,
+                  cycle: entry.incident.cycle,
+                  entries: entry.incident.batchIncidents ?? [],
+                }),
+            })
+          : {
+              attemptNumber: 0,
+              delayMs: STALE_BATCH_RELEASE_RETRY_MS,
+              retryAt: new Date(
+                input.now.getTime() + STALE_BATCH_RELEASE_RETRY_MS,
+              ),
+            };
+      return [[entry.incidentId, schedule] as const];
+    }),
+  );
+  const deferredFailureCloseoutAttempts = shouldCloseBatch
+    ? batch.incidents.flatMap((entry) => {
+        const carrier = deferredFailureCarrierByIncidentId.get(
+          entry.incidentId,
+        );
+        const retrySchedule = deferredFailureCarrierRetryByIncidentId.get(
+          entry.incidentId,
+        );
+        if (!carrier || !retrySchedule) return [];
+        const eligibleAt = carrier.preserveAvailable
+          ? new Date(
+              Math.max(
+                new Date(carrier.source.eligibleAt).getTime(),
+                retrySchedule.retryAt.getTime(),
+              ),
+            ).toISOString()
+          : carrier.source.eligibleAt;
+        const persistedSignal = createDeferredFailureHandoffSignal({
+          state:
+            carrier.confirmationStarted || carrier.invalidatedByCurrentState
+              ? "CONSUMED"
+              : "AVAILABLE",
+          sourceBatchIncidentDigest:
+            createDeferredFailureHandoffBatchIncidentDigest(entry.id),
+          sourceProofDigest: carrier.source.sourceProofDigest,
+          providerFamilyKey: carrier.source.providerFamilyKey,
+          canonicalFailureFingerprint:
+            carrier.source.canonicalFailureFingerprint,
+          observedFailureFingerprint: carrier.source.observedFailureFingerprint,
+          claimedProviderSnapshotFingerprint:
+            carrier.source.claimedProviderSnapshotFingerprint,
+          observedProviderSnapshotFingerprint:
+            carrier.source.observedProviderSnapshotFingerprint,
+          runtimeVersion: carrier.source.runtimeVersion,
+          cooldownExpiresAt: carrier.source.cooldownExpiresAt,
+          providerNotBeforeAt: carrier.source.providerNotBeforeAt,
+          eligibleAt,
+          sourceVerificationWatchMode: "WATCH_SETTLED",
+          sourceResult: carrier.source.sourceResult,
+          sourceAttemptConsumed: true,
+          confirmationStarted: carrier.confirmationStarted,
+        });
+        return [
+          {
+            courseRef: carrier.courseRef,
+            providerSnapshotFingerprint:
+              carrier.source.claimedProviderSnapshotFingerprint,
+            observedProviderSnapshotFingerprint:
+              carrier.source.observedProviderSnapshotFingerprint,
+            failureFingerprint: carrier.source.canonicalFailureFingerprint,
+            observedFailureFingerprint:
+              carrier.source.observedFailureFingerprint,
+            failureOnlyHandoffCooldownUntil: carrier.source.cooldownExpiresAt,
+            runtimeVersion: effectiveReleaseSha,
+            activeRealSearchCount: entry.incident.activeRealSearchCount,
+            consumed: false,
+            countsTowardOperationalNoProgress: carrier.confirmationStarted,
+            executionEvidence: {
+              claimedImplementationPaths: false,
+              newReleaseRecorded: false,
+              deploymentRecorded: false,
+              postProbeRecorded: false,
+              providerAttemptRecorded: false,
+              providerExecutionAttemptRecorded: false,
+              playbookAttemptRecorded: false,
+              terminalResultRecorded: false,
+              providerExecutionStarted: carrier.confirmationStarted,
+            },
+            deferredFailureHandoff: persistedSignal,
+            deferredFailureHandoffAdmission:
+              createDeferredFailureHandoffAdmission({
+                signal: persistedSignal,
+                admittedAt: new Date(carrier.admission.admittedAt),
+              }),
+            ...(carrier.invalidatedByCurrentState
+              ? {
+                  deferredFailureHandoffInvalidation: {
+                    schemaVersion: 1,
+                    reason: "MUTABLE_CURRENT_STATE_CHANGED",
+                    signalDigest: persistedSignal.signalDigest,
+                    customerDataIncluded: false,
+                  },
+                }
+              : {}),
+            approach: carrier.plannedAttempt.approach ?? null,
+            operationalRetry: null,
+            orchestrationRetry: carrier.preserveAvailable
+              ? {
+                  attemptNumber: retrySchedule.attemptNumber,
+                  delaySeconds: Math.floor(retrySchedule.delayMs / 1000),
+                  retryAt: retrySchedule.retryAt.toISOString(),
+                }
+              : null,
+          },
+        ];
+      })
+    : [];
   const needsHumanCount = finalResults.filter(
     (result) => result === "NEEDS_HUMAN",
   ).length;
@@ -4205,6 +5887,33 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
                   ]
                 : [];
             }),
+            ...(deferredFailureCloseoutAttempts.length > 0
+              ? {
+                  remediationAttemptConsumed: false,
+                  remediationAttempts: deferredFailureCloseoutAttempts,
+                  deferredFailureHandoffAvailableCount:
+                    deferredFailureCloseoutAttempts.filter((attempt) => {
+                      const signal = parseDeferredFailureHandoffSignal(
+                        attempt.deferredFailureHandoff,
+                      );
+                      return signal?.state === "AVAILABLE";
+                    }).length,
+                  deferredFailureHandoffConsumedCount:
+                    deferredFailureCloseoutAttempts.filter((attempt) => {
+                      const signal = parseDeferredFailureHandoffSignal(
+                        attempt.deferredFailureHandoff,
+                      );
+                      return signal?.state === "CONSUMED";
+                    }).length,
+                  deferredFailureMaterialHandoffCount: batch.incidents.filter(
+                    (entry) =>
+                      deferredFailureCarrierByIncidentId.get(entry.incidentId)
+                        ?.materialFailureHandoff !== null &&
+                      deferredFailureCarrierByIncidentId.get(entry.incidentId)
+                        ?.materialFailureHandoff !== undefined,
+                  ).length,
+                }
+              : {}),
             failureDomain: "SLA",
             verificationWatchMode: "ENDPOINT",
             reason: "stale_endpoint_ownership_released",
@@ -4225,6 +5934,11 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
     batch.incidents.flatMap((entry) => {
       const planned = dispositionByIncidentId.get(entry.incidentId);
       if (planned?.disposition !== "RETRY") return [];
+      const deferredFailureCarrierRetry =
+        deferredFailureCarrierRetryByIncidentId.get(entry.incidentId);
+      if (deferredFailureCarrierRetry) {
+        return [[entry.incidentId, deferredFailureCarrierRetry] as const];
+      }
       if (!planned.orchestrationOnly) {
         return [
           [
@@ -4418,6 +6132,126 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
           input.now,
         );
       }
+    } else if (
+      planned.disposition === "MATERIAL_HANDOFF" &&
+      planned.materialFailureHandoff &&
+      monitoringStatus
+    ) {
+      const handoff = planned.materialFailureHandoff;
+      const freshCycleDeadlineAnchor = new Date(
+        Math.max(input.now.getTime(), handoff.nextAttemptAt.getTime()),
+      );
+      const incidentUpdated =
+        await transaction.courseSupportIncident.updateMany({
+          where: {
+            id: incident.id,
+            courseId: entry.courseId,
+            cycle: entry.cycle,
+            revision: incident.revision,
+            status: "AUTO_INVESTIGATING",
+            activeBatchId: batch.id,
+            providerFamilyKey: incident.providerFamilyKey,
+            failureFingerprint: incident.failureFingerprint,
+          },
+          data: {
+            cycle: { increment: 1 },
+            status: "AUTO_INVESTIGATING",
+            activeBatchId: null,
+            failureClass: handoff.failureClass,
+            failureFingerprint: handoff.failureFingerprint,
+            lastAttemptAt: null,
+            attemptCount: 0,
+            occurrenceCount: 1,
+            firstSeenAt: input.now,
+            confirmedAt: input.now,
+            escalationDeadlineAt: getCourseMonitoringEscalationDeadline(
+              freshCycleDeadlineAnchor,
+              incident.activeRealSearchCount,
+            ),
+            humanReviewReason: null,
+            nextReminderAt: null,
+            nextAttemptAt: handoff.nextAttemptAt,
+            nextAction:
+              "Run a fresh ordered playbook for the newly confirmed failure identity.",
+            ownerNotifiedAt: null,
+            escalatedAt: null,
+            escalationNotifiedAt: null,
+            latestMessage:
+              "A provider-executed confirmation established a new failure identity while stale responder ownership was released.",
+            lastSeenAt: input.now,
+            revision: { increment: 1 },
+          },
+        });
+      if (incidentUpdated.count !== 1) {
+        throw new Error(
+          "Deferred failure evidence changed during stale material handoff.",
+        );
+      }
+      const monitoringUpdated =
+        await transaction.courseMonitoringStatus.updateMany({
+          where: {
+            courseId: entry.courseId,
+            state: monitoringStatus.state,
+            stateChangedAt: monitoringStatus.stateChangedAt,
+            revision: monitoringStatus.revision,
+            failureFingerprint: incident.failureFingerprint,
+          },
+          data: {
+            state: "AUTO_INVESTIGATING",
+            failureFingerprint: handoff.failureFingerprint,
+            nextAutomaticAttemptAt: handoff.nextAttemptAt,
+            revalidationRequestedAt: handoff.nextAttemptAt,
+            stateChangedAt: input.now,
+            revision: { increment: 1 },
+          },
+        });
+      if (monitoringUpdated.count !== 1) {
+        throw new Error(
+          "Deferred monitoring evidence changed during stale material handoff.",
+        );
+      }
+      await appendMonitoringEvent(transaction, {
+        courseId: entry.courseId,
+        incidentId: incident.id,
+        eventType: "REVALIDATION_REQUESTED",
+        source: input.source,
+        fromState: monitoringStatus.state,
+        toState: "AUTO_INVESTIGATING",
+        failureFingerprint: handoff.failureFingerprint,
+        runtimeVersion: batch.releaseSha ?? batch.baseSha,
+        deploymentSha: batch.deployedAt ? batch.releaseSha : null,
+        message:
+          "A provider-executed confirmation established a new failure identity, so a fresh remediation cycle was queued.",
+        idempotencyKey: `course-support-stale-deferred-material-handoff:${batch.id}:${entry.id}`,
+        occurredAt: input.now,
+        audit: {
+          priorCycle: entry.cycle,
+          cycle: entry.cycle + 1,
+          providerFamilyHandoff: true,
+          providerFamilyChanged: false,
+          providerSnapshotChanged: false,
+          priorProviderFamilyKey: incident.providerFamilyKey,
+          providerFamilyKey: incident.providerFamilyKey,
+          claimedProviderSnapshotFingerprint:
+            deferredFailureCarrierByIncidentId.get(incident.id)?.source
+              .claimedProviderSnapshotFingerprint ?? null,
+          observedProviderSnapshotFingerprint:
+            deferredFailureCarrierByIncidentId.get(incident.id)?.source
+              .observedProviderSnapshotFingerprint ?? null,
+          priorFailureFingerprint: incident.failureFingerprint,
+          failureFingerprint: handoff.failureFingerprint,
+          staleOwnershipRecovery: true,
+          confirmationStarted: true,
+          customerDataIncluded: false,
+        },
+      });
+      if (incident.activeRealSearchCount > 0) {
+        await queueActiveRealSearchesForCourse(
+          transaction,
+          entry.courseId,
+          handoff.nextAttemptAt,
+        );
+      }
     } else {
       const retryable = planned.disposition === "RETRY";
       const retrySchedule = retryScheduleByIncidentId.get(incident.id);
@@ -4459,19 +6293,31 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
                       }
                     : {}),
                   nextAttemptAt: retryAt,
-                  escalationDeadlineAt: planned.incompletePlaybook
-                    ? getCourseMonitoringEscalationDeadline(
-                        input.now,
-                        incident.activeRealSearchCount,
-                      )
-                    : planned.orchestrationOnly
-                      ? null
-                      : incident.escalationDeadlineAt,
-                  nextAction: planned.incompletePlaybook
-                    ? "Continue the next incomplete current-cycle playbook stage after stale responder ownership was released."
-                    : planned.orchestrationOnly
-                      ? "Retry provider verification because the prior responder ownership expired before execution began."
-                      : "Retry the ordered playbook after stale responder ownership was released.",
+                  escalationDeadlineAt:
+                    planned.deferredFailureCarrier === "CONSUMED"
+                      ? getCourseMonitoringEscalationDeadline(
+                          input.now,
+                          incident.activeRealSearchCount,
+                        )
+                      : planned.incompletePlaybook
+                        ? getCourseMonitoringEscalationDeadline(
+                            input.now,
+                            incident.activeRealSearchCount,
+                          )
+                        : planned.orchestrationOnly
+                          ? null
+                          : incident.escalationDeadlineAt,
+                  nextAction:
+                    planned.deferredFailureCarrier === "CONSUMED"
+                      ? deferredFailureCarrierByIncidentId.get(incident.id)
+                          ?.invalidatedByCurrentState
+                        ? "Retry from current monitoring and provider evidence after invalidating the superseded deferred confirmation."
+                        : "Retry the unchanged failure after the deferred confirmation started without durable current-failure proof."
+                      : planned.incompletePlaybook
+                        ? "Continue the next incomplete current-cycle playbook stage after stale responder ownership was released."
+                        : planned.orchestrationOnly
+                          ? "Retry provider verification because the prior responder ownership expired before execution began."
+                          : "Retry the ordered playbook after stale responder ownership was released.",
                 }
               : {}),
             revision: { increment: 1 },
@@ -4587,9 +6433,20 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
           cycle: entry.cycle,
           result: entry.result,
           updatedAt: entry.updatedAt,
+          ...(planned.disposition === "MATERIAL_HANDOFF"
+            ? {
+                proofSnapshot: {
+                  equals:
+                    entry.proofSnapshot === null
+                      ? Prisma.AnyNull
+                      : (entry.proofSnapshot as Prisma.InputJsonValue),
+                },
+              }
+            : {}),
         },
         data: {
           result: planned.result,
+          updatedAt: input.now,
           message:
             planned.disposition === "STALLED_ENDPOINT"
               ? "The responder lease expired before the bounded automation endpoint completed."
@@ -4599,6 +6456,8 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
                   ? planned.orchestrationOnly
                     ? "Expired responder ownership was released because provider verification never began execution."
                     : "Expired responder ownership was released for a safe automatic retry."
+                  : planned.disposition === "MATERIAL_HANDOFF"
+                    ? "Expired responder ownership was released after a provider-executed confirmation established a new failure identity."
                   : "Expired responder ownership was superseded by authoritative course evidence.",
         },
       });
@@ -4735,6 +6594,7 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
           },
           data: {
             result: targetResult,
+            updatedAt: input.now,
             message:
               "Detached responder evidence was reconciled from its durable course decision.",
           },
@@ -4748,10 +6608,20 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
   }
 
   if (shouldCloseBatch) {
+    const deferredFailureCarrierRequestIds = batch.incidents
+      .filter((entry) =>
+        deferredFailureCarrierByIncidentId.has(entry.incidentId),
+      )
+      .flatMap((entry) =>
+        entry.verificationRequests.map((request) => request.id),
+      );
     await transaction.courseSupportVerificationRequest.updateMany({
       where: {
         batchIncident: { batchId: batch.id },
         status: { in: ["QUEUED", "CHECKING", "RETRYABLE_FAILED"] },
+        ...(deferredFailureCarrierRequestIds.length > 0
+          ? { id: { notIn: deferredFailureCarrierRequestIds } }
+          : {}),
       },
       data: {
         status: "STALE",

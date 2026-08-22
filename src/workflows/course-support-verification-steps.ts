@@ -1,7 +1,9 @@
 import type {
   AutomationEligibility,
   AutomationReason,
+  BookingAccessMode,
   BookingMethod,
+  BookingWindowSource,
   CourseMonitoringMode,
   CourseSupportFailureClass,
   DetectedPlatform,
@@ -16,6 +18,7 @@ import {
 } from "@/lib/automation/course-monitoring-playbook-runtime";
 import {
   attachCourseSupportVerificationProviderSnapshot,
+  buildCourseSupportProviderSnapshotFingerprint,
   completeCourseSupportVerificationFactualFinal,
   completeCourseSupportVerificationRequest,
   failCourseSupportVerificationRequest,
@@ -27,6 +30,7 @@ import { prepareCourseSupportVerificationMonitoring } from "@/lib/automation/sea
 import {
   classifyProviderFailure,
   getProviderReadinessFailure,
+  normalizeProviderFamilyKey,
   resolveProviderCapability,
 } from "@/lib/automation/provider-capabilities";
 import { evaluateMonitoringGate } from "@/lib/automation/policy";
@@ -78,14 +82,21 @@ const providerCourseSelect = {
   detectedPlatform: true,
   bookingMetadata: true,
   bookingWindowEvidenceUrl: true,
+  bookingWindowDaysAhead: true,
+  bookingReleaseTimeLocal: true,
+  bookingWindowSource: true,
+  bookingWindowConfidence: true,
   bookingMethod: true,
   automationEligibility: true,
   automationReason: true,
   monitoringMode: true,
+  bookingAccessMode: true,
   isPublic: true,
   intelligenceVerifiedAt: true,
   intelligenceReviewAt: true,
   intelligenceConfidence: true,
+  layoutHoleCounts: true,
+  layoutHolesVerifiedAt: true,
 } as const;
 
 export async function executeCourseSupportVerificationStep(
@@ -147,6 +158,42 @@ export async function executeCourseSupportVerificationStep(
       failureClass: "SCHEMA",
       providerExecution: false,
       message: "Course-support verification timezone changed during execution.",
+    });
+  }
+  if (beforeDiscovery.deferredFailureConfirmation === true) {
+    const currentProviderSnapshotFingerprint =
+      buildCourseSupportProviderSnapshotFingerprint(courseBeforeDiscovery);
+    const currentProviderFamilyKey = normalizeProviderFamilyKey(
+      courseBeforeDiscovery.providerFamilyKey,
+    );
+    const currentGate = evaluateMonitoringGate(courseBeforeDiscovery);
+    if (
+      currentProviderSnapshotFingerprint !==
+        beforeDiscovery.providerSnapshotFingerprint ||
+      currentProviderFamilyKey !== beforeDiscovery.providerFamilyKeySnapshot
+    ) {
+      return {
+        outcome: "stopped" as const,
+        reason: "provider_snapshot_changed" as const,
+      };
+    }
+    if (
+      courseBeforeDiscovery.monitoringMode === "LOCAL_READER_ONLY" ||
+      currentGate.disposition !== "ACTIONABLE" ||
+      currentGate.adapterAllowed !== true
+    ) {
+      return {
+        outcome: "stopped" as const,
+        reason: "monitoring_not_actionable" as const,
+      };
+    }
+    return executeDeferredFailureConfirmation({
+      input,
+      runtimeVersion,
+      revision,
+      course: courseBeforeDiscovery,
+      intent: ownedIntent,
+      discoveryAttemptedAt: beforeDiscovery.discoveryAttemptedAt,
     });
   }
   const playbookRuntime =
@@ -431,8 +478,7 @@ export async function executeCourseSupportVerificationStep(
     getLocalReaderCourseKey(bookingUrl) !== null;
 
   const handleLocalReaderVerification = async () => {
-    const readerNotBefore =
-      afterDiscovery.discoveryAttemptedAt ?? new Date(0);
+    const readerNotBefore = afterDiscovery.discoveryAttemptedAt ?? new Date(0);
     const readerVerification = await getLocalReaderCourseVerification({
       courseId,
       targetDate: intent.targetDateLocal,
@@ -640,6 +686,159 @@ export async function executeCourseSupportVerificationStep(
   }
 }
 
+async function executeDeferredFailureConfirmation(input: {
+  input: CourseSupportVerificationWorkflowInput;
+  revision: number;
+  runtimeVersion: string;
+  course: VerificationCourse;
+  intent: VerificationIntent;
+  discoveryAttemptedAt: Date | null;
+}) {
+  const capability = resolveProviderCapability(input.course);
+  if (!capability.isRunnable) {
+    return failVerification({
+      input: input.input,
+      revision: input.revision,
+      runtimeVersion: input.runtimeVersion,
+      failureClass:
+        getProviderReadinessFailure(capability) ?? "UNSUPPORTED_FAMILY",
+      providerExecution: false,
+      message:
+        "The exact deferred confirmation no longer has a runnable public adapter.",
+    });
+  }
+
+  let revision = input.revision;
+  let discoveryAttemptedAt = input.discoveryAttemptedAt;
+  if (!discoveryAttemptedAt) {
+    const attempted = await markCourseSupportVerificationDiscoveryAttempted({
+      requestId: input.input.requestId,
+      expectedRevision: revision,
+      leaseToken: input.input.leaseToken,
+      runtimeVersion: input.runtimeVersion,
+      now: new Date(),
+    });
+    if (!attempted.marked) {
+      return { outcome: "stopped" as const, reason: attempted.reason };
+    }
+    revision = attempted.revision;
+    discoveryAttemptedAt = attempted.discoveryAttemptedAt;
+  }
+
+  let providerReadFailed = false;
+  let providerReadError: unknown = null;
+  let execution:
+    | {
+        acquired: true;
+        value: Awaited<ReturnType<typeof fetchCourseTeeSheet>>;
+      }
+    | { acquired: false };
+  try {
+    execution = await runWithProviderRequestLease<
+      Awaited<ReturnType<typeof fetchCourseTeeSheet>>
+    >(capability.providerFamilyKey, async () => {
+      try {
+        return await fetchCourseTeeSheet(
+          input.course,
+          new Date(`${input.intent.targetDateLocal}T00:00:00.000Z`),
+          input.intent.players,
+          true,
+        );
+      } catch (error) {
+        providerReadFailed = true;
+        providerReadError = error;
+        throw error;
+      }
+    });
+  } catch (error) {
+    if (!providerReadFailed) {
+      throw error;
+    }
+    const failure = classifyProviderFailure({
+      error: providerReadError,
+    });
+    const failedAt = new Date();
+    return failVerification({
+      input: input.input,
+      revision,
+      runtimeVersion: input.runtimeVersion,
+      failureClass: failure.failureClass,
+      providerExecution: true,
+      httpStatus: failure.httpStatus,
+      retryAfterSeconds: failure.retryAfterSeconds,
+      retryAt: TRANSIENT_PROVIDER_FAILURES.has(failure.failureClass)
+        ? getTransientProviderRetryAt(failedAt, failure.retryAfterSeconds)
+        : null,
+      message: "The exact deferred provider confirmation failed.",
+    });
+  }
+  if (!execution.acquired) {
+    return failVerification({
+      input: input.input,
+      revision,
+      runtimeVersion: input.runtimeVersion,
+      failureClass: "RATE_LIMIT",
+      providerExecution: false,
+      message:
+        "The exact deferred confirmation could not acquire its provider read lease.",
+      retryAt: new Date(Date.now() + LEASE_BUSY_RETRY_MS),
+    });
+  }
+  if (
+    execution.value.slots.some(
+      (slot) => !getSafeOfficialBookingUrl(slot.bookingUrl),
+    )
+  ) {
+    return failVerification({
+      input: input.input,
+      revision,
+      runtimeVersion: input.runtimeVersion,
+      failureClass: "SCHEMA",
+      providerExecution: true,
+      message:
+        "The exact deferred confirmation returned an unsafe booking destination.",
+    });
+  }
+  const matchingSlots = filterSlotsForSearch(
+    {
+      date: input.intent.targetDateLocal,
+      startTime: input.intent.startTimeLocal,
+      endTime: input.intent.endTimeLocal,
+      players: input.intent.players,
+      preferredCourses: [{ courseId: input.course.id, rank: 1 }],
+    },
+    execution.value.slots,
+  );
+  const outcome = matchingSlots.length > 0 ? "MATCH_FOUND" : "NO_MATCH";
+  const observedAt = new Date();
+  const verified = await markCourseSupportVerificationDiscoveryVerified({
+    requestId: input.input.requestId,
+    expectedRevision: revision,
+    leaseToken: input.input.leaseToken,
+    runtimeVersion: input.runtimeVersion,
+    now: observedAt,
+  });
+  if (!verified.marked) {
+    return { outcome: "stopped" as const, reason: verified.reason };
+  }
+  const completed = await completeCourseSupportVerificationRequest({
+    requestId: input.input.requestId,
+    expectedRevision: verified.revision,
+    leaseToken: input.input.leaseToken,
+    runtimeVersion: input.runtimeVersion,
+    observation: {
+      outcome,
+      observedAt,
+      adapterKey: capability.providerFamilyKey,
+      availabilityCount: matchingSlots.length,
+      providerExecution: true,
+    },
+  });
+  return completed.completed
+    ? { outcome: "completed" as const, providerOutcome: outcome }
+    : { outcome: "stopped" as const, reason: completed.reason };
+}
+
 type VerificationCourse = {
   id: string;
   timeZone: string;
@@ -649,14 +848,21 @@ type VerificationCourse = {
   detectedPlatform: DetectedPlatform;
   bookingMetadata: unknown;
   bookingWindowEvidenceUrl: string | null;
+  bookingWindowDaysAhead: number | null;
+  bookingReleaseTimeLocal: string | null;
+  bookingWindowSource: BookingWindowSource | null;
+  bookingWindowConfidence: number | null;
   bookingMethod: BookingMethod;
   automationEligibility: AutomationEligibility;
   automationReason: AutomationReason;
   monitoringMode: CourseMonitoringMode;
+  bookingAccessMode: BookingAccessMode;
   isPublic: boolean | null;
   intelligenceVerifiedAt: Date | null;
   intelligenceReviewAt: Date | null;
   intelligenceConfidence: number | null;
+  layoutHoleCounts: number[];
+  layoutHolesVerifiedAt: Date | null;
 };
 
 type VerificationIntent = {
@@ -694,7 +900,9 @@ async function executeOrderedCourseSupportVerification(input: {
       revision,
       runtimeVersion: input.runtimeVersion,
       disposition: runtime.assessment.factualDisposition,
-      message: getFactualDispositionMessage(runtime.assessment.factualDisposition),
+      message: getFactualDispositionMessage(
+        runtime.assessment.factualDisposition,
+      ),
     });
   }
   if (
@@ -1038,13 +1246,15 @@ async function executeOrderedCourseSupportVerification(input: {
       }
 
       if (!discoveryAttemptedAt) {
-        const attempted = await markCourseSupportVerificationDiscoveryAttempted({
-          requestId: input.input.requestId,
-          expectedRevision: revision,
-          leaseToken: input.input.leaseToken,
-          runtimeVersion: input.runtimeVersion,
-          now: new Date(),
-        });
+        const attempted = await markCourseSupportVerificationDiscoveryAttempted(
+          {
+            requestId: input.input.requestId,
+            expectedRevision: revision,
+            leaseToken: input.input.leaseToken,
+            runtimeVersion: input.runtimeVersion,
+            now: new Date(),
+          },
+        );
         if (!attempted.marked) {
           return { outcome: "stopped" as const, reason: attempted.reason };
         }
@@ -1060,9 +1270,7 @@ async function executeOrderedCourseSupportVerification(input: {
         (candidate) => candidate.stage === "BROWSER_ADAPTER_RETRY",
       );
       const notBefore = [
-        browserStage?.completedAt
-          ? new Date(browserStage.completedAt)
-          : null,
+        browserStage?.completedAt ? new Date(browserStage.completedAt) : null,
         browserAdapterRetryStage?.completedAt
           ? new Date(browserAdapterRetryStage.completedAt)
           : null,
@@ -1083,8 +1291,8 @@ async function executeOrderedCourseSupportVerification(input: {
       });
       const currentReaderResult = Boolean(
         readerVerification &&
-          readerVerification.status !== "PENDING" &&
-          readerVerification.observedAt.getTime() >= notBefore.getTime(),
+        readerVerification.status !== "PENDING" &&
+        readerVerification.observedAt.getTime() >= notBefore.getTime(),
       );
       if (readerVerification?.status === "COMPLETED" && currentReaderResult) {
         if (
@@ -1098,7 +1306,8 @@ async function executeOrderedCourseSupportVerification(input: {
             runtimeVersion: input.runtimeVersion,
             failureClass: "SCHEMA",
             providerExecution: true,
-            message: "The signed local reader returned an unsafe booking destination.",
+            message:
+              "The signed local reader returned an unsafe booking destination.",
           });
         }
         const matchingSlots = filterSlotsForSearch(
@@ -1125,7 +1334,9 @@ async function executeOrderedCourseSupportVerification(input: {
         revision = verified.revision;
         discoveryAttemptedAt = verified.discoveryAttemptedAt;
         discoveryVerifiedAt = verified.discoveryVerifiedAt;
-        if (!hasCoherentDiscoveryProof(discoveryAttemptedAt, discoveryVerifiedAt)) {
+        if (
+          !hasCoherentDiscoveryProof(discoveryAttemptedAt, discoveryVerifiedAt)
+        ) {
           return {
             outcome: "stopped" as const,
             reason: "discovery_not_verified",
@@ -1190,8 +1401,8 @@ async function executeOrderedCourseSupportVerification(input: {
             readerVerification.resultStatus === "EXPIRED"
               ? "TIMEOUT"
               : readerVerification.resultStatus === "PAGE_MISMATCH"
-              ? "SCHEMA"
-              : "UNKNOWN",
+                ? "SCHEMA"
+                : "UNKNOWN",
           runtimeVersion:
             readerVerification.readerVersion ?? input.runtimeVersion,
           now: readerVerification.observedAt,
@@ -1417,7 +1628,9 @@ async function executePlaybookAdapterStage(input: {
       revision = verified.revision;
       discoveryAttemptedAt = verified.discoveryAttemptedAt;
       discoveryVerifiedAt = verified.discoveryVerifiedAt;
-      if (!hasCoherentDiscoveryProof(discoveryAttemptedAt, discoveryVerifiedAt)) {
+      if (
+        !hasCoherentDiscoveryProof(discoveryAttemptedAt, discoveryVerifiedAt)
+      ) {
         return {
           outcome: "returned",
           value: { outcome: "stopped", reason: "discovery_not_verified" },
@@ -1584,8 +1797,8 @@ async function recoverSucceededPlaybookLocalReader(input: {
   });
   const currentReaderResult = Boolean(
     readerVerification &&
-      readerVerification.status !== "PENDING" &&
-      readerVerification.observedAt.getTime() >= notBefore.getTime(),
+    readerVerification.status !== "PENDING" &&
+    readerVerification.observedAt.getTime() >= notBefore.getTime(),
   );
   if (readerVerification?.status === "COMPLETED" && currentReaderResult) {
     if (
@@ -1599,7 +1812,8 @@ async function recoverSucceededPlaybookLocalReader(input: {
         runtimeVersion: input.runtimeVersion,
         failureClass: "SCHEMA",
         providerExecution: true,
-        message: "The signed local reader returned an unsafe booking destination.",
+        message:
+          "The signed local reader returned an unsafe booking destination.",
       });
     }
     const matchingSlots = filterSlotsForSearch(

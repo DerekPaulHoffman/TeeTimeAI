@@ -19,6 +19,7 @@ const supportIncidentMocks = vi.hoisted(() => ({
 
 const verificationMocks = vi.hoisted(() => ({
   attachCourseSupportVerificationProviderSnapshot: vi.fn(),
+  buildCourseSupportProviderSnapshotFingerprint: vi.fn(),
   completeCourseSupportVerificationFactualFinal: vi.fn(),
   completeCourseSupportVerificationRequest: vi.fn(),
   failCourseSupportVerificationRequest: vi.fn(),
@@ -34,6 +35,7 @@ const discoveryMocks = vi.hoisted(() => ({
 const capabilityMocks = vi.hoisted(() => ({
   classifyProviderFailure: vi.fn(),
   getProviderReadinessFailure: vi.fn(),
+  normalizeProviderFamilyKey: vi.fn(),
   resolveProviderCapability: vi.fn(),
 }));
 
@@ -113,14 +115,21 @@ const course = {
   detectedPlatform: "CUSTOM",
   bookingMetadata: { provider: "CPS", tenantId: "tenant-1" },
   bookingWindowEvidenceUrl: null,
+  bookingWindowDaysAhead: 7,
+  bookingReleaseTimeLocal: "07:00",
+  bookingWindowSource: "PROVIDER_CONFIG",
+  bookingWindowConfidence: 0.9,
   bookingMethod: "PUBLIC_ONLINE",
   automationEligibility: "ALLOWED",
   automationReason: "PUBLIC_READ_ONLY",
   monitoringMode: "AUTOMATIC",
+  bookingAccessMode: "PUBLIC_SIGNED_OUT",
   isPublic: true,
   intelligenceVerifiedAt: null,
   intelligenceReviewAt: null,
   intelligenceConfidence: null,
+  layoutHoleCounts: [],
+  layoutHolesVerifiedAt: null,
 };
 
 const discoveryAttemptedAt = new Date("2026-07-21T12:00:00.000Z");
@@ -383,6 +392,22 @@ function completedPlaybookSeedThroughIndependentFactualFinal(
   ];
 }
 
+function allowDeferredFailureConfirmation() {
+  verificationMocks.attachCourseSupportVerificationProviderSnapshot.mockResolvedValueOnce(
+    {
+      attached: true,
+      revision: 4,
+      providerFamilyKeySnapshot: "CPS",
+      providerSnapshotFingerprint: "current-provider-snapshot",
+      discoveryAttemptedAt: null,
+      discoveryVerifiedAt: null,
+      courseId: "course-1",
+      intent,
+      deferredFailureConfirmation: true,
+    },
+  );
+}
+
 describe("executeCourseSupportVerificationStep", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -391,6 +416,12 @@ describe("executeCourseSupportVerificationStep", () => {
     vi.setSystemTime(new Date("2026-07-21T12:00:00.000Z"));
 
     runtimeMocks.getAutomationRuntimeVersion.mockReturnValue(runtimeVersion);
+    verificationMocks.buildCourseSupportProviderSnapshotFingerprint.mockReturnValue(
+      "current-provider-snapshot",
+    );
+    capabilityMocks.normalizeProviderFamilyKey.mockImplementation(
+      (value: string) => value.trim().toUpperCase(),
+    );
     playbookMocks.loadCourseMonitoringPlaybookRuntime.mockResolvedValue(null);
     verificationMocks.heartbeatCourseSupportVerificationRequest.mockResolvedValue(
       {
@@ -467,6 +498,261 @@ describe("executeCourseSupportVerificationStep", () => {
     localReaderMocks.queueLocalReaderCourseVerification.mockResolvedValue({
       id: "reader-verification-1",
     });
+  });
+
+  it("executes one provider read for an authenticated deferred confirmation on an exhausted ledger", async () => {
+    allowDeferredFailureConfirmation();
+    providerReadMocks.fetchCourseTeeSheet.mockResolvedValue({ slots: [] });
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "completed",
+      providerOutcome: "NO_MATCH",
+    });
+
+    expect(providerReadMocks.fetchCourseTeeSheet).toHaveBeenCalledOnce();
+    expect(
+      playbookMocks.recordRuntimePlaybookTransition,
+    ).not.toHaveBeenCalled();
+    expect(
+      verificationMocks.completeCourseSupportVerificationRequest,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        observation: expect.objectContaining({
+          outcome: "NO_MATCH",
+          providerExecution: true,
+        }),
+      }),
+    );
+  });
+
+  it("fails closed for a local-reader-only deferred course without acquiring a provider lease", async () => {
+    allowDeferredFailureConfirmation();
+    prismaMocks.courseFindUnique.mockResolvedValue({
+      ...course,
+      monitoringMode: "LOCAL_READER_ONLY",
+    });
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "stopped",
+      reason: "monitoring_not_actionable",
+    });
+
+    expect(
+      providerLeaseMocks.runWithProviderRequestLease,
+    ).not.toHaveBeenCalled();
+    expect(providerReadMocks.fetchCourseTeeSheet).not.toHaveBeenCalled();
+    expect(
+      localReaderMocks.getLocalReaderCourseVerification,
+    ).not.toHaveBeenCalled();
+    expect(
+      localReaderMocks.queueLocalReaderCourseVerification,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("stops before the provider lease when the final deferred pre-I/O mark observes an authoritative winner", async () => {
+    allowDeferredFailureConfirmation();
+    verificationMocks.markCourseSupportVerificationDiscoveryAttempted.mockResolvedValueOnce(
+      { marked: false, reason: "monitoring_not_actionable" },
+    );
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "stopped",
+      reason: "monitoring_not_actionable",
+    });
+
+    expect(
+      verificationMocks.markCourseSupportVerificationDiscoveryAttempted,
+    ).toHaveBeenCalledOnce();
+    expect(
+      providerLeaseMocks.runWithProviderRequestLease,
+    ).not.toHaveBeenCalled();
+    expect(providerReadMocks.fetchCourseTeeSheet).not.toHaveBeenCalled();
+    expect(
+      verificationMocks.failCourseSupportVerificationRequest,
+    ).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: "full provider snapshot drift",
+      arrange: () =>
+        verificationMocks.buildCourseSupportProviderSnapshotFingerprint.mockReturnValue(
+          "changed-provider-snapshot",
+        ),
+    },
+    {
+      label: "normalized provider family drift",
+      arrange: () =>
+        capabilityMocks.normalizeProviderFamilyKey.mockReturnValue(
+          "CHANGED_FAMILY",
+        ),
+    },
+  ])(
+    "stops deferred I/O after the post-attach reload detects $label",
+    async ({ arrange }) => {
+      allowDeferredFailureConfirmation();
+      arrange();
+
+      await expect(
+        executeCourseSupportVerificationStep(input),
+      ).resolves.toEqual({
+        outcome: "stopped",
+        reason: "provider_snapshot_changed",
+      });
+
+      expect(
+        providerLeaseMocks.runWithProviderRequestLease,
+      ).not.toHaveBeenCalled();
+      expect(providerReadMocks.fetchCourseTeeSheet).not.toHaveBeenCalled();
+      expect(
+        verificationMocks.failCourseSupportVerificationRequest,
+      ).not.toHaveBeenCalled();
+    },
+  );
+
+  it("propagates the provider retry floor from a deferred provider failure", async () => {
+    allowDeferredFailureConfirmation();
+    providerReadMocks.fetchCourseTeeSheet.mockRejectedValue(
+      new Error("provider throttled"),
+    );
+    capabilityMocks.classifyProviderFailure.mockReturnValue({
+      failureClass: "RATE_LIMIT",
+      httpStatus: 429,
+      retryAfterSeconds: 30 * 60,
+    });
+    verificationMocks.failCourseSupportVerificationRequest.mockResolvedValue({
+      failed: true,
+      status: "STALE",
+    });
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "failed",
+      retryable: false,
+    });
+
+    expect(
+      verificationMocks.failCourseSupportVerificationRequest,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        failureClass: "RATE_LIMIT",
+        retryAfterSeconds: 30 * 60,
+        retryAt: new Date("2026-07-21T12:30:00.000Z"),
+        observation: expect.objectContaining({
+          httpStatus: 429,
+          providerExecution: true,
+        }),
+      }),
+    );
+  });
+
+  it.each(["discovery mark", "completion"])(
+    "does not rewrite a healthy deferred response as provider failure when $label persistence throws",
+    async (label) => {
+      allowDeferredFailureConfirmation();
+      verificationMocks.attachCourseSupportVerificationProviderSnapshot.mockResolvedValueOnce(
+        { attached: false, reason: "stale_revision" },
+      );
+      providerReadMocks.fetchCourseTeeSheet.mockResolvedValue({ slots: [] });
+      if (label === "discovery mark") {
+        verificationMocks.markCourseSupportVerificationDiscoveryVerified.mockRejectedValueOnce(
+          new Error("discovery CAS unavailable"),
+        );
+      } else {
+        verificationMocks.completeCourseSupportVerificationRequest.mockRejectedValueOnce(
+          new Error("completion CAS unavailable"),
+        );
+      }
+
+      await expect(executeCourseSupportVerificationStep(input)).rejects.toThrow(
+        label === "discovery mark"
+          ? "discovery CAS unavailable"
+          : "completion CAS unavailable",
+      );
+      await expect(
+        executeCourseSupportVerificationStep(input),
+      ).resolves.toEqual({
+        outcome: "stopped",
+        reason: "stale_revision",
+      });
+
+      expect(providerReadMocks.fetchCourseTeeSheet).toHaveBeenCalledOnce();
+      expect(capabilityMocks.classifyProviderFailure).not.toHaveBeenCalled();
+      expect(
+        verificationMocks.failCourseSupportVerificationRequest,
+      ).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not classify provider-lease persistence errors as provider read failures", async () => {
+    allowDeferredFailureConfirmation();
+    providerLeaseMocks.runWithProviderRequestLease.mockRejectedValue(
+      new Error("provider lease store unavailable"),
+    );
+
+    await expect(executeCourseSupportVerificationStep(input)).rejects.toThrow(
+      "provider lease store unavailable",
+    );
+
+    expect(providerReadMocks.fetchCourseTeeSheet).not.toHaveBeenCalled();
+    expect(capabilityMocks.classifyProviderFailure).not.toHaveBeenCalled();
+    expect(
+      verificationMocks.failCourseSupportVerificationRequest,
+    ).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "tampered source",
+    "tampered admission",
+    "consumed",
+    "route drift",
+    "technical revision drift",
+  ])(
+    "does not fall back to ordinary playbook or provider I/O after terminal deferred %s rejection",
+    async () => {
+      verificationMocks.attachCourseSupportVerificationProviderSnapshot.mockResolvedValueOnce(
+        { attached: false, reason: "invalid_evidence" },
+      );
+
+      await expect(
+        executeCourseSupportVerificationStep(input),
+      ).resolves.toEqual({
+        outcome: "stopped",
+        reason: "invalid_evidence",
+      });
+
+      expect(providerReadMocks.fetchCourseTeeSheet).not.toHaveBeenCalled();
+      expect(
+        verificationMocks.failCourseSupportVerificationRequest,
+      ).not.toHaveBeenCalled();
+      expect(
+        discoveryMocks.prepareCourseSupportVerificationMonitoring,
+      ).not.toHaveBeenCalled();
+      expect(
+        playbookMocks.recordRuntimePlaybookTransition,
+      ).not.toHaveBeenCalled();
+      expect(
+        playbookMocks.loadCourseMonitoringPlaybookRuntime,
+      ).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not execute the deferred provider read again after a restarted step", async () => {
+    allowDeferredFailureConfirmation();
+    verificationMocks.attachCourseSupportVerificationProviderSnapshot.mockResolvedValueOnce(
+      { attached: false, reason: "stale_revision" },
+    );
+    providerReadMocks.fetchCourseTeeSheet.mockResolvedValue({ slots: [] });
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "completed",
+      providerOutcome: "NO_MATCH",
+    });
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "stopped",
+      reason: "stale_revision",
+    });
+
+    expect(providerReadMocks.fetchCourseTeeSheet).toHaveBeenCalledOnce();
   });
 
   afterEach(() => {
@@ -1346,7 +1632,8 @@ describe("executeCourseSupportVerificationStep", () => {
       verificationMocks.markCourseSupportVerificationDiscoveryAttempted.mock
         .invocationCallOrder[0],
     ).toBeLessThan(
-      providerLeaseMocks.runWithProviderRequestLease.mock.invocationCallOrder[0],
+      providerLeaseMocks.runWithProviderRequestLease.mock
+        .invocationCallOrder[0],
     );
     expect(
       providerReadMocks.fetchCourseTeeSheet.mock.invocationCallOrder[0],
@@ -1379,9 +1666,7 @@ describe("executeCourseSupportVerificationStep", () => {
     );
     expect(
       verificationMocks.completeCourseSupportVerificationRequest,
-    ).toHaveBeenCalledWith(
-      expect.objectContaining({ expectedRevision: 6 }),
-    );
+    ).toHaveBeenCalledWith(expect.objectContaining({ expectedRevision: 6 }));
     expect(
       discoveryMocks.prepareCourseSupportVerificationMonitoring,
     ).not.toHaveBeenCalled();
@@ -1472,9 +1757,7 @@ describe("executeCourseSupportVerificationStep", () => {
     ).toHaveBeenCalledOnce();
     expect(
       verificationMocks.completeCourseSupportVerificationRequest,
-    ).toHaveBeenCalledWith(
-      expect.objectContaining({ expectedRevision: 6 }),
-    );
+    ).toHaveBeenCalledWith(expect.objectContaining({ expectedRevision: 6 }));
     expect(
       playbookMocks.recordRuntimePlaybookTransition,
     ).not.toHaveBeenCalled();
@@ -1747,9 +2030,7 @@ describe("executeCourseSupportVerificationStep", () => {
     expect(providerReadMocks.fetchCourseTeeSheet).not.toHaveBeenCalled();
     expect(
       verificationMocks.completeCourseSupportVerificationRequest,
-    ).toHaveBeenCalledWith(
-      expect.objectContaining({ expectedRevision: 6 }),
-    );
+    ).toHaveBeenCalledWith(expect.objectContaining({ expectedRevision: 6 }));
     expect(
       discoveryMocks.prepareCourseSupportVerificationMonitoring,
     ).not.toHaveBeenCalled();
@@ -1822,9 +2103,7 @@ describe("executeCourseSupportVerificationStep", () => {
     ).toHaveBeenCalledOnce();
     expect(
       verificationMocks.completeCourseSupportVerificationRequest,
-    ).toHaveBeenCalledWith(
-      expect.objectContaining({ expectedRevision: 6 }),
-    );
+    ).toHaveBeenCalledWith(expect.objectContaining({ expectedRevision: 6 }));
     expect(
       playbookMocks.recordRuntimePlaybookTransition,
     ).not.toHaveBeenCalled();
@@ -1952,7 +2231,9 @@ describe("executeCourseSupportVerificationStep", () => {
       );
       allowOwnedDiscovery();
 
-      await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      await expect(
+        executeCourseSupportVerificationStep(input),
+      ).resolves.toEqual({
         outcome: "completed",
         providerOutcome: disposition,
       });
@@ -2045,9 +2326,7 @@ describe("executeCourseSupportVerificationStep", () => {
       playbookMocks.recordRuntimePlaybookTransition.mock.calls.map(
         ([, transition]) => [transition.stage, transition.transition],
       ),
-    ).toEqual([
-      ["LOCAL_READER", "NOT_APPLICABLE"],
-    ]);
+    ).toEqual([["LOCAL_READER", "NOT_APPLICABLE"]]);
     expect(runtime.assessment.conclusion).toBe("INCOMPLETE");
     expect(runtime.assessment.nextStage).toBe("INDEPENDENT_CONFIRMATION");
     expect(
@@ -2088,12 +2367,16 @@ describe("executeCourseSupportVerificationStep", () => {
         status: "RETRYABLE_FAILED",
       });
 
-      await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      await expect(
+        executeCourseSupportVerificationStep(input),
+      ).resolves.toEqual({
         outcome: "failed",
         retryable: true,
       });
 
-      expect(playbookMocks.recordRuntimePlaybookTransition).toHaveBeenCalledWith(
+      expect(
+        playbookMocks.recordRuntimePlaybookTransition,
+      ).toHaveBeenCalledWith(
         expect.anything(),
         expect.objectContaining({
           stage: "LOCAL_READER",
@@ -2104,8 +2387,7 @@ describe("executeCourseSupportVerificationStep", () => {
       );
       expect(
         playbookMocks.recordRuntimePlaybookTransition.mock.calls.some(
-          ([, transition]) =>
-            transition.stage === "INDEPENDENT_CONFIRMATION",
+          ([, transition]) => transition.stage === "INDEPENDENT_CONFIRMATION",
         ),
       ).toBe(false);
       expect(runtime.assessment.conclusion).toBe("INCOMPLETE");

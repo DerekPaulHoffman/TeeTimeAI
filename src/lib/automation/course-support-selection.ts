@@ -14,6 +14,7 @@ import type {
   CourseSupportRemediationDirective,
   CourseSupportRemediationRoute
 } from "./course-support-remediation-routing";
+import type { DeferredFailureHandoffSignal } from "./course-support-deferred-failure-handoff";
 
 const NEAR_DATE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -42,6 +43,14 @@ export type CourseSupportCandidate = {
   remediationRoute?: CourseSupportRemediationRoute;
   providerSnapshotFingerprint?: string;
   remediationCourseRef?: string;
+  deferredFailureHandoff?: {
+    signal: DeferredFailureHandoffSignal;
+    sourceBatchIncidentId: string;
+    sourceBatchId: string;
+    expectedIncidentRevision: number;
+    expectedMonitoringRevision: number;
+    expectedMonitoringStateChangedAt: Date;
+  };
   campaign?: {
     runId: string;
     membershipDigest: string;
