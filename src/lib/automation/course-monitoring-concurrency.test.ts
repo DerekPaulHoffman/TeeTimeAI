@@ -3407,6 +3407,7 @@ describe("course monitoring write serialization", () => {
     const admittedAt = new Date("2026-08-20T12:05:00.000Z");
     const attemptedAt = admittedAt;
     const historicalProbeAt = new Date("2026-08-20T11:30:00.000Z");
+    const historicalDiscoveryAt = new Date("2026-08-20T11:40:00.000Z");
     const parkedAt = new Date("2026-08-20T12:30:00.000Z");
     const recoveredAt = new Date("2026-08-20T13:00:00.000Z");
     const attemptLedger = { version: 1, events: [] };
@@ -3457,7 +3458,7 @@ describe("course monitoring write serialization", () => {
           attemptLedgerFingerprint,
           playbookConclusion: "INCOMPLETE",
           latestProbeAt: historicalProbeAt.toISOString(),
-          latestDiscoveryAt: null,
+          latestDiscoveryAt: historicalDiscoveryAt.toISOString(),
         },
       ],
     });
@@ -3584,6 +3585,7 @@ describe("course monitoring write serialization", () => {
           recheckDispatchStartedAt: null,
           recheckDispatchedAt: null,
           completedAt: parkedAt,
+          updatedAt: parkedAt,
           summary: {
             selectedIncidentCount: 1,
             campaign: {
@@ -3634,16 +3636,20 @@ describe("course monitoring write serialization", () => {
           attemptLedgerFingerprint,
           playbookConclusion: "INCOMPLETE",
           latestProbeAt: historicalProbeAt.toISOString(),
-          latestDiscoveryAt: null,
+          latestDiscoveryAt: historicalDiscoveryAt.toISOString(),
           zeroExecutionEvidence: {
             latestProbe: {
               id: "probe-historical",
               courseId: "course-1",
               observedAt: historicalProbeAt,
             },
-            latestDiscovery: null,
+            latestDiscovery: {
+              id: "discovery-historical",
+              courseId: "course-1",
+              createdAt: historicalDiscoveryAt,
+            },
             latestProbeTimestampRowCount: 1,
-            latestDiscoveryTimestampRowCount: 0,
+            latestDiscoveryTimestampRowCount: 1,
             monitoringEvents,
             batchIncidents,
             playbookAssessment: {
@@ -3702,7 +3708,13 @@ describe("course monitoring write serialization", () => {
             observedAt: historicalProbeAt,
           },
         ],
-        automationDiscoveries: [],
+        automationDiscoveries: [
+          {
+            id: "discovery-historical",
+            courseId: "course-1",
+            createdAt: historicalDiscoveryAt,
+          },
+        ],
         preferences: [],
         monitoringStatus: {
           state: "ENGINEERING_VERIFICATION_NEEDED",
@@ -3734,7 +3746,9 @@ describe("course monitoring write serialization", () => {
       expectedKind: "NEEDS_ADAPTER" as const,
       expectedFailureClass: "MISSING_SOURCE" as const,
       expectedLatestProbeAt: historicalProbeAt.toISOString(),
-      expectedLatestDiscoveryAt: null,
+      expectedLatestDiscoveryAt: historicalDiscoveryAt.toISOString(),
+      expectedLatestProbeId: "probe-historical",
+      expectedLatestDiscoveryId: "discovery-historical",
       expectedProviderFamilyKey: "SOURCE_MISSING",
       expectedFailureFingerprint: "SOURCE:MISSING",
       expectedMonitoringFailureFingerprint: "SOURCE:MISSING",
@@ -3760,7 +3774,15 @@ describe("course monitoring write serialization", () => {
       courseId: "course-1",
       observedAt: historicalProbeAt,
     };
+    const historicalDiscovery = {
+      id: "discovery-historical",
+      courseId: "course-1",
+      createdAt: historicalDiscoveryAt,
+    };
     transactionMocks.courseProbe.findFirst.mockResolvedValue(historicalProbe);
+    transactionMocks.courseAutomationDiscovery.findFirst.mockResolvedValue(
+      historicalDiscovery,
+    );
 
     await expect(
       reopenParkedCourseForResponderCampaignInTransaction(
@@ -3790,7 +3812,12 @@ describe("course monitoring write serialization", () => {
           releaseSha: null,
           deployedAt: null,
           recheckDispatchedAt: null,
+          updatedAt: parkedAt,
         }),
+        data: {
+          revision: { increment: 0 },
+          updatedAt: parkedAt,
+        },
       }),
     );
     expect(
@@ -3815,6 +3842,17 @@ describe("course monitoring write serialization", () => {
       historicalProbe.id,
       historicalProbe.courseId,
       historicalProbeAt,
+    ]);
+    const discoveryLock = transactionMocks.$queryRaw.mock.calls.find(
+      ([query]) =>
+        (query as { strings?: readonly string[] }).strings
+          ?.join("")
+          .includes('FROM "CourseAutomationDiscovery"'),
+    );
+    expect(discoveryLock?.[0].values).toEqual([
+      historicalDiscovery.id,
+      historicalDiscovery.courseId,
+      historicalDiscoveryAt,
     ]);
     expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -3873,6 +3911,39 @@ describe("course monitoring write serialization", () => {
           id: "probe-new",
           observedAt: new Date("2026-08-20T12:45:00.000Z"),
         }),
+      () =>
+        transactionMocks.courseAutomationDiscovery.findFirst.mockResolvedValueOnce(
+          {
+            ...historicalDiscovery,
+            id: "discovery-newer",
+            createdAt: new Date("2026-08-20T12:45:00.000Z"),
+          },
+        ),
+      () =>
+        transactionMocks.courseAutomationDiscovery.findFirst.mockResolvedValueOnce(
+          {
+            ...historicalDiscovery,
+            id: "discovery-same-time-substitute",
+          },
+        ),
+      () =>
+        transactionMocks.courseAutomationDiscovery.findFirst.mockResolvedValueOnce(
+          null,
+        ),
+      () =>
+        transactionMocks.courseAutomationDiscovery.findFirst.mockResolvedValueOnce(
+          { ...historicalDiscovery, courseId: "course-other" },
+        ),
+      () =>
+        transactionMocks.$queryRaw
+          .mockResolvedValueOnce([historicalProbe])
+          .mockResolvedValueOnce([
+            historicalDiscovery,
+            {
+              ...historicalDiscovery,
+              id: "discovery-same-time-sibling",
+            },
+          ]),
       () => transactionMocks.$queryRaw.mockResolvedValueOnce([]),
     ];
     for (const arrangeRace of raceControls) {
@@ -3894,7 +3965,7 @@ describe("course monitoring write serialization", () => {
       transactionMocks.courseMonitoringEvent.findFirst.mockResolvedValue(null);
       transactionMocks.courseProbe.findFirst.mockResolvedValue(historicalProbe);
       transactionMocks.courseAutomationDiscovery.findFirst.mockResolvedValue(
-        null,
+        historicalDiscovery,
       );
       transactionMocks.courseSupportVerificationRequest.findFirst.mockResolvedValue(
         null,

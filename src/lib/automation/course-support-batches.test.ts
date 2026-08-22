@@ -17,8 +17,12 @@ const prismaMocks = vi.hoisted(() => ({
   supportIncidentUpdateMany: vi.fn(),
   automationRunFindFirst: vi.fn(),
   automationRunFindMany: vi.fn(),
+  automationRunFindUnique: vi.fn(),
   automationRunCreate: vi.fn(),
   courseProbeFindMany: vi.fn(),
+  courseProbeFindFirst: vi.fn(),
+  courseAutomationDiscoveryFindFirst: vi.fn(),
+  batchIncidentFindFirst: vi.fn(),
   verificationRequestFindUnique: vi.fn(),
   verificationRequestFindFirst: vi.fn(),
   verificationRequestFindMany: vi.fn(),
@@ -89,8 +93,10 @@ import { hasDurableAutomationStalledEndpointProof } from "../customer-monitoring
 import { buildProviderFailureFingerprint } from "./provider-capabilities";
 import {
   createParkedCourseCampaignAttemptLedgerFingerprint,
-  createParkedCourseCampaignAudit
+  createParkedCourseCampaignAudit,
+  PARKED_COURSE_CAMPAIGN_PROMPT_VERSION,
 } from "./course-support-campaign";
+import { COURSE_SUPPORT_RESPONDER_PROMPT_VERSION } from "./course-support-responder-policy";
 import {
   createDeferredFailureHandoffAdmission,
   createDeferredFailureHandoffBatchIncidentDigest,
@@ -638,6 +644,7 @@ const transactionClient = {
     create: prismaMocks.automationRunCreate,
     findFirst: prismaMocks.automationRunFindFirst,
     findMany: prismaMocks.automationRunFindMany,
+    findUnique: prismaMocks.automationRunFindUnique,
     updateMany: prismaMocks.automationRunUpdateMany,
   },
   courseSupportBatch: {
@@ -648,6 +655,7 @@ const transactionClient = {
   },
   courseSupportBatchIncident: {
     createMany: prismaMocks.batchIncidentCreateMany,
+    findFirst: prismaMocks.batchIncidentFindFirst,
     updateMany: prismaMocks.incidentUpdateMany,
   },
   courseSupportBatchSearch: {
@@ -660,7 +668,11 @@ const transactionClient = {
     updateMany: prismaMocks.supportIncidentUpdateMany,
   },
   courseProbe: {
+    findFirst: prismaMocks.courseProbeFindFirst,
     findMany: prismaMocks.courseProbeFindMany,
+  },
+  courseAutomationDiscovery: {
+    findFirst: prismaMocks.courseAutomationDiscoveryFindFirst,
   },
   courseSupportVerificationRequest: {
     findUnique: prismaMocks.verificationRequestFindUnique,
@@ -746,9 +758,13 @@ beforeEach(() => {
   prismaMocks.batchIncidentCreateMany.mockResolvedValue({ count: 1 });
   prismaMocks.queryRaw.mockResolvedValue([{ now }]);
   prismaMocks.courseProbeFindMany.mockResolvedValue([]);
+  prismaMocks.courseProbeFindFirst.mockResolvedValue(null);
+  prismaMocks.courseAutomationDiscoveryFindFirst.mockResolvedValue(null);
+  prismaMocks.batchIncidentFindFirst.mockResolvedValue(null);
   prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
   prismaMocks.automationRunFindFirst.mockResolvedValue(null);
   prismaMocks.automationRunFindMany.mockResolvedValue([]);
+  prismaMocks.automationRunFindUnique.mockResolvedValue(null);
   prismaMocks.automationRunCreate.mockResolvedValue({ id: "routine-run" });
   leaseMocks.withPostgresAdvisoryTextLease.mockImplementation(
     async (_client: unknown, _key: string, worker: () => Promise<unknown>) => ({
@@ -2874,8 +2890,20 @@ describe("course-support claim demand fencing", () => {
           nextAutomaticAttemptAt: null,
           revalidationRequestedAt: null,
         },
-        probes: [{ observedAt: latestProbeAt }],
-        automationDiscoveries: [{ createdAt: latestDiscoveryAt }],
+        probes: [
+          {
+            id: "probe-campaign-historical",
+            courseId: "course-campaign",
+            observedAt: latestProbeAt,
+          },
+        ],
+        automationDiscoveries: [
+          {
+            id: "discovery-campaign-historical",
+            courseId: "course-campaign",
+            createdAt: latestDiscoveryAt,
+          },
+        ],
       },
     };
     const candidateIncident = {
@@ -2934,8 +2962,20 @@ describe("course-support claim demand fencing", () => {
       nextAttemptAt: null,
       course: {
         ...course,
-        probes: [{ observedAt: latestProbeAt }],
-        automationDiscoveries: [{ createdAt: latestDiscoveryAt }],
+        probes: [
+          {
+            id: "probe-campaign-historical",
+            courseId: "course-campaign",
+            observedAt: latestProbeAt,
+          },
+        ],
+        automationDiscoveries: [
+          {
+            id: "discovery-campaign-historical",
+            courseId: "course-campaign",
+            createdAt: latestDiscoveryAt,
+          },
+        ],
       },
     };
     const currentIncident = {
@@ -2964,6 +3004,258 @@ describe("course-support claim demand fencing", () => {
       currentIncident,
       parkedMember,
       reopenIncident,
+    };
+  }
+
+  function requestlessStaleOwnershipCampaignFixture() {
+    const fixture = parkedCampaignFixture();
+    const attemptLedger = { version: 1, events: [] };
+    const audit = createParkedCourseCampaignAudit({
+      expectedCount: 1,
+      capturedAt: new Date(fixture.audit.capturedAt),
+      members: [
+        {
+          ...fixture.audit.members[0]!,
+          attemptLedgerFingerprint:
+            createParkedCourseCampaignAttemptLedgerFingerprint(attemptLedger),
+        },
+      ],
+    });
+    const admittedAt = new Date("2026-07-15T19:35:00.000Z");
+    const parkedAt = new Date("2026-07-15T19:45:00.000Z");
+    const historicalProbe = {
+      id: "probe-campaign-historical",
+      courseId: "course-campaign",
+      observedAt: new Date("2026-07-15T18:30:00.000Z"),
+    };
+    const historicalDiscovery = {
+      id: "discovery-campaign-historical",
+      courseId: "course-campaign",
+      createdAt: new Date("2026-07-15T18:45:00.000Z"),
+    };
+    const oldRuntime = "d".repeat(40);
+    const closeout = {
+      outcome: "needs_human",
+      derivedOutcome: "needs_human",
+      terminalCount: 0,
+      restoredCount: 0,
+      finalDispositionCount: 0,
+      retryCount: 0,
+      needsHumanCount: 1,
+      endpointCount: 1,
+      automationStalledCount: 1,
+      exhaustedEndpointCount: 0,
+      failureDomain: "SLA",
+      verificationWatchMode: "ENDPOINT",
+      reason: "stale_endpoint_ownership_released",
+    };
+    const monitoringEvents = [
+      {
+        id: "requestless-endpoint",
+        incidentId: "incident-campaign",
+        eventType: "HUMAN_REVIEW_REQUESTED",
+        source: "RECOVERY_CRON",
+        failureFingerprint: fixture.parkedMember.failureFingerprint,
+        readPath: null,
+        occurredAt: parkedAt,
+        audit: {
+          cycle: 4,
+          customerState: "NEEDS_HUMAN_REVIEW",
+          playbookConclusion: "INCOMPLETE",
+          playbookExhausted: false,
+          automationStalled: true,
+          parkedUntilMaterialChange: true,
+          nextStage: "OFFICIAL_IDENTITY",
+          campaign: {
+            kind: "PARKED_COHORT",
+            runId: "campaign-run-1",
+            membershipDigest: audit.membershipDigest,
+            cycle: 4,
+          },
+          customerDataIncluded: false,
+        },
+      },
+      {
+        id: "requestless-attempt",
+        incidentId: "incident-campaign",
+        eventType: "AUTOMATION_ATTEMPTED",
+        source: "COURSE_SUPPORT_RESPONDER",
+        failureFingerprint: fixture.parkedMember.failureFingerprint,
+        readPath: "BOUNDED_RECOVERY_PLAYBOOK",
+        occurredAt: admittedAt,
+        audit: {
+          providerFamilyKey: "SOURCE_MISSING",
+          maxCourses: 5,
+          serializedWriterLane: true,
+          campaignKind: "PARKED_COHORT",
+          campaignRunId: "campaign-run-1",
+          campaignMembershipDigest: audit.membershipDigest,
+          cycle: 4,
+          customerDataIncluded: false,
+        },
+      },
+      {
+        id: "requestless-admission",
+        incidentId: "incident-campaign",
+        eventType: "REVALIDATION_REQUESTED",
+        source: "COURSE_SUPPORT_RESPONDER",
+        failureFingerprint: fixture.parkedMember.failureFingerprint,
+        readPath: null,
+        occurredAt: admittedAt,
+        audit: {
+          action: "parked_cohort_admission",
+          campaignRunId: "campaign-run-1",
+          campaignMembershipDigest: audit.membershipDigest,
+          priorCycle: 3,
+          cycle: 4,
+          capturedIncidentRevision: 5,
+          capturedMonitoringRevision: 9,
+          preservesPriorAttemptEvents: true,
+          customerDataIncluded: false,
+        },
+      },
+    ];
+    const staleBatchIncident = {
+      id: "requestless-stale-entry",
+      batchId: "requestless-stale-batch",
+      incidentId: "incident-campaign",
+      courseId: "course-campaign",
+      cycle: 4,
+      result: "NEEDS_HUMAN",
+      preProbeId: historicalProbe.id,
+      postProbeId: null,
+      proofSnapshot: null,
+      verifiedIncidentUpdatedAt: null,
+      verifiedAt: null,
+      createdAt: admittedAt,
+      updatedAt: parkedAt,
+      batch: {
+        id: "requestless-stale-batch",
+        status: "PARTIAL",
+        revision: 2,
+        ownerAutomationRunId: "requestless-owner-run",
+        baseSha: oldRuntime,
+        releaseSha: null,
+        deployedAt: null,
+        createdAt: admittedAt,
+        updatedAt: parkedAt,
+        recheckDispatchKey: null,
+        recheckDispatchStartedAt: null,
+        recheckDispatchedAt: null,
+        completedAt: parkedAt,
+        summary: {
+          selectedIncidentCount: 1,
+          campaign: {
+            kind: "PARKED_COHORT",
+            attempts: [
+              {
+                courseRef: createHash("sha256")
+                  .update("course-campaign")
+                  .digest("hex")
+                  .slice(0, 24),
+                runId: "campaign-run-1",
+                membershipDigest: audit.membershipDigest,
+                cycle: 4,
+              },
+            ],
+          },
+          closeout,
+        },
+        ownerAutomationRun: {
+          id: "requestless-owner-run",
+          promptVersion: COURSE_SUPPORT_RESPONDER_PROMPT_VERSION,
+          kind: "COURSE_SUPPORT",
+          status: "COMPLETED",
+          runtimeVersion: oldRuntime,
+          completedAt: parkedAt,
+          outcome: "needs_human",
+          notes: JSON.stringify({
+            schemaVersion: 1,
+            lifecycle: "closeout",
+            status: "PARTIAL",
+            ...closeout,
+          }),
+        },
+      },
+      verificationRequests: [],
+    };
+    const recoveryMember = {
+      ...fixture.parkedMember,
+      cycle: 4,
+      revision: 8,
+      attemptLedger,
+      escalatedAt: parkedAt,
+      monitoringEvents,
+      batchIncidents: [staleBatchIncident],
+      course: {
+        ...fixture.parkedMember.course,
+        monitoringStatus: {
+          ...fixture.parkedMember.course.monitoringStatus,
+          revision: 12,
+        },
+        probes: [historicalProbe],
+        automationDiscoveries: [historicalDiscovery],
+      },
+    };
+    const recoveryCandidate = {
+      ...fixture.candidateIncident,
+      cycle: 4,
+      revision: 8,
+      attemptLedger,
+      confirmedAt: admittedAt,
+      escalatedAt: parkedAt,
+      batchIncidents: [staleBatchIncident],
+    };
+    const recoveryIncident = {
+      ...fixture.reopenIncident,
+      cycle: 4,
+      revision: 8,
+      attemptLedger,
+      escalatedAt: parkedAt,
+      monitoringEvents,
+      batchIncidents: [staleBatchIncident],
+      course: {
+        ...fixture.reopenIncident.course,
+        monitoringStatus: {
+          ...fixture.reopenIncident.course.monitoringStatus,
+          revision: 12,
+        },
+        probes: [historicalProbe],
+        automationDiscoveries: [historicalDiscovery],
+      },
+    };
+    const currentIncident = {
+      ...recoveryCandidate,
+      revision: 9,
+      status: "AUTO_INVESTIGATING",
+      humanReviewReason: null,
+      activeBatchId: null,
+      nextAttemptAt: now,
+      updatedAt: now,
+      course: {
+        ...recoveryCandidate.course,
+        monitoringStatus: {
+          ...recoveryCandidate.course.monitoringStatus,
+          state: "AUTO_INVESTIGATING",
+          revision: 13,
+          stateChangedAt: now,
+          lastSuccessfulAt: null,
+          nextAutomaticAttemptAt: now,
+          revalidationRequestedAt: now,
+        },
+      },
+    };
+    return {
+      ...fixture,
+      audit,
+      currentIncident,
+      historicalDiscovery,
+      historicalProbe,
+      parkedAt,
+      recoveryCandidate,
+      recoveryIncident,
+      recoveryMember,
+      staleBatchIncident,
     };
   }
 
@@ -3045,6 +3337,109 @@ describe("course-support claim demand fencing", () => {
         }),
       }),
     );
+  });
+
+  it("atomically claims requestless stale ownership with the exact historical discovery fence", async () => {
+    const fixture = requestlessStaleOwnershipCampaignFixture();
+    const campaignRun = {
+      id: "campaign-run-1",
+      promptVersion: PARKED_COURSE_CAMPAIGN_PROMPT_VERSION,
+      status: "RUNNING",
+      completedAt: null,
+      outcome: null,
+      audit: fixture.audit,
+    };
+    prismaMocks.automationRunFindFirst.mockResolvedValue(campaignRun);
+    prismaMocks.automationRunFindUnique.mockResolvedValue(campaignRun);
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([fixture.recoveryMember])
+      .mockResolvedValueOnce([
+        {
+          id: fixture.recoveryMember.id,
+          cycle: fixture.recoveryMember.cycle,
+          batchIncidents: [fixture.staleBatchIncident],
+        },
+      ])
+      .mockResolvedValueOnce([fixture.recoveryCandidate])
+      .mockResolvedValueOnce([fixture.currentIncident]);
+    prismaMocks.supportIncidentFindUnique.mockResolvedValue(
+      fixture.recoveryIncident,
+    );
+    prismaMocks.courseProbeFindMany.mockResolvedValue([
+      fixture.historicalProbe,
+    ]);
+    prismaMocks.courseProbeFindFirst.mockResolvedValue(fixture.historicalProbe);
+    prismaMocks.courseAutomationDiscoveryFindFirst.mockResolvedValue(
+      fixture.historicalDiscovery,
+    );
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.queryRaw.mockImplementation(
+      async (query: { strings?: readonly string[] }) => {
+        const sql = query.strings?.join("") ?? "";
+        if (sql.includes('FROM "CourseProbe"')) {
+          return [fixture.historicalProbe];
+        }
+        if (sql.includes('FROM "CourseAutomationDiscovery"')) {
+          return [fixture.historicalDiscovery];
+        }
+        return [{ now }];
+      },
+    );
+    prismaMocks.transaction.mockImplementation(
+      async (
+        worker: (
+          transaction: typeof monitoringTransactionClient,
+        ) => Promise<unknown>,
+      ) => worker(monitoringTransactionClient),
+    );
+
+    const result = await claimCourseSupportBatch({
+      ownerThreadId: "owner-thread-requestless-stale-ownership",
+      branch: "automation/course-support-20260715-200000",
+      baseSha,
+      now,
+      maxCourses: 5,
+    });
+
+    expect(result).toMatchObject({ outcome: "ready", incidentCount: 1 });
+    const recoveryEvent = prismaMocks.monitoringEventCreate.mock.calls.find(
+      ([call]) =>
+        call.data?.audit?.action ===
+        "parked_cohort_requestless_stale_ownership_recovery",
+    )?.[0];
+    expect(recoveryEvent?.data.audit).toMatchObject({
+      admissionMode: "PARKED_COHORT_REQUESTLESS_STALE_OWNERSHIP_RECOVERY",
+      latestProbeAt: fixture.historicalProbe.observedAt.toISOString(),
+      latestProbeId: fixture.historicalProbe.id,
+      latestDiscoveryAt: fixture.historicalDiscovery.createdAt.toISOString(),
+      latestDiscoveryId: fixture.historicalDiscovery.id,
+      sameCycleRecoveryHistoryDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+    });
+    const discoveryLock = prismaMocks.queryRaw.mock.calls.find(([query]) =>
+      (query as { strings?: readonly string[] }).strings
+        ?.join("")
+        .includes('FROM "CourseAutomationDiscovery"'),
+    );
+    expect(discoveryLock?.[0].values).toEqual([
+      fixture.historicalDiscovery.id,
+      fixture.historicalDiscovery.courseId,
+      fixture.historicalDiscovery.createdAt,
+    ]);
+    expect(prismaMocks.batchUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: fixture.staleBatchIncident.batch.id,
+          updatedAt: fixture.parkedAt,
+        }),
+        data: {
+          revision: { increment: 0 },
+          updatedAt: fixture.parkedAt,
+        },
+      }),
+    );
+    expect(prismaMocks.batchCreate).toHaveBeenCalledTimes(1);
   });
 
   it("keeps a captured parked member eligible and prioritized when real demand arrives", async () => {

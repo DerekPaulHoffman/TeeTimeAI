@@ -1661,6 +1661,7 @@ export type ParkedCourseCampaignRequestlessStaleOwnershipRecovery =
       ownerAutomationRunId: string;
       baseSha: string;
       completedAt: Date;
+      updatedAt: Date;
       summary: unknown;
     };
     batchIncidentFence: {
@@ -1687,6 +1688,11 @@ export type ParkedCourseCampaignRequestlessStaleOwnershipRecovery =
       id: string;
       courseId: string;
       observedAt: Date;
+    } | null;
+    discoveryFence: {
+      id: string;
+      courseId: string;
+      createdAt: Date;
     } | null;
   };
 
@@ -1750,6 +1756,28 @@ export function assessParkedCourseCampaignRequestlessStaleOwnershipRecovery(inpu
     return null;
   }
 
+  const capturedLatestDiscoveryAt = captured.latestDiscoveryAt
+    ? new Date(captured.latestDiscoveryAt)
+    : null;
+  const latestDiscovery = current.zeroExecutionEvidence.latestDiscovery;
+  if (
+    (capturedLatestDiscoveryAt !== null &&
+      (!Number.isFinite(capturedLatestDiscoveryAt.getTime()) ||
+        capturedLatestDiscoveryAt >= input.capturedAt ||
+        !latestDiscovery ||
+        !latestDiscovery.id.trim() ||
+        latestDiscovery.courseId !== current.courseId ||
+        latestDiscovery.createdAt.getTime() !==
+          capturedLatestDiscoveryAt.getTime() ||
+        current.zeroExecutionEvidence.latestDiscoveryTimestampRowCount !==
+          1)) ||
+    (capturedLatestDiscoveryAt === null &&
+      (latestDiscovery !== null ||
+        current.zeroExecutionEvidence.latestDiscoveryTimestampRowCount !== 0))
+  ) {
+    return null;
+  }
+
   const currentCycleEntries =
     current.zeroExecutionEvidence.batchIncidents.filter(
       (entry) => entry.cycle === current.cycle,
@@ -1780,6 +1808,9 @@ export function assessParkedCourseCampaignRequestlessStaleOwnershipRecovery(inpu
     batch.recheckDispatchStartedAt !== null ||
     batch.recheckDispatchedAt !== null ||
     !batch.baseSha.trim() ||
+    !(batch.updatedAt instanceof Date) ||
+    !Number.isFinite(batch.updatedAt.getTime()) ||
+    batch.completedAt.getTime() > batch.updatedAt.getTime() ||
     batch.baseSha === input.currentRuntimeVersion ||
     !batch.ownerAutomationRunId ||
     !ownerRun ||
@@ -2060,6 +2091,13 @@ export function assessParkedCourseCampaignRequestlessStaleOwnershipRecovery(inpu
       playbookConclusion: current.playbookConclusion,
       latestProbeAt: current.latestProbeAt,
       latestDiscoveryAt: current.latestDiscoveryAt,
+      latestDiscovery: latestDiscovery
+        ? {
+            id: latestDiscovery.id,
+            courseId: latestDiscovery.courseId,
+            createdAt: latestDiscovery.createdAt.toISOString(),
+          }
+        : null,
     },
     currentRuntimeVersion: input.currentRuntimeVersion,
     admission: canonicalizeParkedCourseCampaignRecoveryEvent(admissions[0]!),
@@ -2092,6 +2130,7 @@ export function assessParkedCourseCampaignRequestlessStaleOwnershipRecovery(inpu
       recheckDispatchStartedAt: batch.recheckDispatchStartedAt,
       recheckDispatchedAt: batch.recheckDispatchedAt,
       completedAt: batch.completedAt.toISOString(),
+      updatedAt: batch.updatedAt.toISOString(),
       summary: batch.summary,
     },
     ownerRun: {
@@ -2122,6 +2161,7 @@ export function assessParkedCourseCampaignRequestlessStaleOwnershipRecovery(inpu
       ownerAutomationRunId: batch.ownerAutomationRunId,
       baseSha: batch.baseSha,
       completedAt: batch.completedAt,
+      updatedAt: batch.updatedAt,
       summary: batch.summary,
     },
     batchIncidentFence: {
@@ -2145,6 +2185,7 @@ export function assessParkedCourseCampaignRequestlessStaleOwnershipRecovery(inpu
       notes: ownerRun.notes,
     },
     probeFence: latestProbe,
+    discoveryFence: latestDiscovery,
   };
 }
 

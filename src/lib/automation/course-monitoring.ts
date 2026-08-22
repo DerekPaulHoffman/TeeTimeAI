@@ -7774,7 +7774,7 @@ async function lockExactCourseAutomationDiscoveryEvidence(
     SELECT "CourseAutomationDiscovery"."id", "courseId", "createdAt"
     FROM "CourseAutomationDiscovery", "expected"
     WHERE "courseId" = ${expected.courseId}
-      AND "createdAt" = ${expected.createdAt}
+      AND "createdAt" >= ${expected.createdAt}
     ORDER BY "CourseAutomationDiscovery"."id"
     FOR UPDATE OF "CourseAutomationDiscovery"
   `);
@@ -8558,10 +8558,16 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
                 input.expectedLatestProbeAt ||
               descendantCapturedMember.latestDiscoveryAt !==
                 input.expectedLatestDiscoveryAt ||
+              input.expectedLatestProbeId === undefined ||
+              input.expectedLatestDiscoveryId === undefined ||
+              !requestlessStaleOwnershipRecovery ||
+              (requestlessStaleOwnershipRecovery.probeFence?.id ?? null) !==
+                input.expectedLatestProbeId ||
+              (requestlessStaleOwnershipRecovery.discoveryFence?.id ?? null) !==
+                input.expectedLatestDiscoveryId ||
               input.expectedCycle !== (input.capturedCycle ?? 0) + 1 ||
               currentPlaybookAssessment.completedStages.length !== 0 ||
               currentPlaybookAssessment.nextStage !== "OFFICIAL_IDENTITY" ||
-              !requestlessStaleOwnershipRecovery ||
               requestlessStaleOwnershipRecovery.historyDigest !==
                 input.expectedSameCycleRecoveryHistoryDigest ||
               !input.currentRuntimeVersion ||
@@ -8908,11 +8914,15 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
             recheckDispatchStartedAt: null,
             recheckDispatchedAt: null,
             completedAt: staleRecovery.batchFence.completedAt,
+            updatedAt: staleRecovery.batchFence.updatedAt,
             summary: {
               equals: staleRecovery.batchFence.summary as Prisma.InputJsonValue,
             },
           },
-          data: { revision: { increment: 0 } },
+          data: {
+            revision: { increment: 0 },
+            updatedAt: staleRecovery.batchFence.updatedAt,
+          },
         });
         if (batchUnchanged.count !== 1) {
           return { admitted: false as const };
@@ -8998,7 +9008,8 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
           }),
           transaction.courseAutomationDiscovery.findFirst({
             where: { courseId: input.courseId },
-            select: { id: true },
+            orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+            select: { id: true, courseId: true, createdAt: true },
           }),
         ]);
         if (
@@ -9011,7 +9022,14 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
               lateProbe.observedAt.getTime() !==
                 staleRecovery.probeFence.observedAt.getTime()
             : lateProbe !== null) ||
-          lateDiscovery
+          (staleRecovery.discoveryFence
+            ? !lateDiscovery ||
+              lateDiscovery.id !== staleRecovery.discoveryFence.id ||
+              lateDiscovery.courseId !==
+                staleRecovery.discoveryFence.courseId ||
+              lateDiscovery.createdAt.getTime() !==
+                staleRecovery.discoveryFence.createdAt.getTime()
+            : lateDiscovery !== null)
         ) {
           return { admitted: false as const };
         }
@@ -9020,6 +9038,15 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
           !(await lockExactCourseProbeEvidence(
             transaction,
             staleRecovery.probeFence,
+          ))
+        ) {
+          return { admitted: false as const };
+        }
+        if (
+          staleRecovery.discoveryFence &&
+          !(await lockExactCourseAutomationDiscoveryEvidence(
+            transaction,
+            staleRecovery.discoveryFence,
           ))
         ) {
           return { admitted: false as const };

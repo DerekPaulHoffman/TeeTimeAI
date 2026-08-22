@@ -2443,6 +2443,7 @@ describe("parked course campaign", () => {
     const admittedAt = new Date("2026-08-20T12:05:00.000Z");
     const attemptedAt = admittedAt;
     const historicalProbeAt = new Date("2026-08-20T11:30:00.000Z");
+    const historicalDiscoveryAt = new Date("2026-08-20T11:40:00.000Z");
     const parkedAt = new Date("2026-08-20T12:30:00.000Z");
     const providerSnapshotFingerprint =
       buildCourseSupportProviderSnapshotFingerprint(providerCourseSnapshot);
@@ -2456,7 +2457,7 @@ describe("parked course campaign", () => {
         createParkedCourseCampaignAttemptLedgerFingerprint(attemptLedger),
       playbookConclusion: "INCOMPLETE",
       latestProbeAt: historicalProbeAt.toISOString(),
-      latestDiscoveryAt: null,
+      latestDiscoveryAt: historicalDiscoveryAt.toISOString(),
     });
     const audit = createParkedCourseCampaignAudit({
       expectedCount: 1,
@@ -2505,6 +2506,13 @@ describe("parked course campaign", () => {
             id: "probe-historical",
             courseId: "course-1",
             observedAt: historicalProbeAt,
+          },
+        ],
+        discoveries: [
+          {
+            id: "discovery-historical",
+            courseId: "course-1",
+            createdAt: historicalDiscoveryAt,
           },
         ],
         events: [
@@ -2597,6 +2605,7 @@ describe("parked course campaign", () => {
               recheckDispatchStartedAt: null,
               recheckDispatchedAt: null,
               completedAt: parkedAt,
+              updatedAt: parkedAt,
               summary: {
                 selectedIncidentCount: 1,
                 campaign: {
@@ -2649,6 +2658,8 @@ describe("parked course campaign", () => {
       playbookCompletedStageCount: 0,
       playbookNextStage: "OFFICIAL_IDENTITY",
       zeroExecutionHistoryDigest: null,
+      latestProbeId: "probe-historical",
+      latestDiscoveryId: "discovery-historical",
     });
     expect(planned[0]?.sameCycleRecoveryHistoryDigest).toMatch(
       /^[a-f0-9]{64}$/u,
@@ -2675,6 +2686,24 @@ describe("parked course campaign", () => {
           courseId: "course-1",
           observedAt: new Date("2026-08-20T12:01:00.000Z"),
         });
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.course.automationDiscoveries[0]!.courseId = "course-other";
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.course.automationDiscoveries.unshift({
+          id: "discovery-same-time-sibling",
+          courseId: "course-1",
+          createdAt: historicalDiscoveryAt,
+        });
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.course.automationDiscoveries[0]!.createdAt = new Date(
+          "2026-08-20T12:01:00.000Z",
+        );
+      },
+      (row: ReturnType<typeof makeRow>) => {
+        row.course.automationDiscoveries = [];
       },
       (row: ReturnType<typeof makeRow>) => {
         row.batchIncidents[0]!.postProbeId = "probe-after";
