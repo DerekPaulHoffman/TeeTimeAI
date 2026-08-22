@@ -94,6 +94,7 @@ import {
   assessParkedCourseCampaignRequestlessStaleOwnershipRecovery,
   assessParkedCourseCampaignSameCycleRecoveryHistory,
   findParkedCourseCampaignCurrentCycleOrchestrationLineage,
+  isParkedCourseCampaignPostMarkerRecoveryStageShape,
   PARKED_COURSE_CAMPAIGN_MAX_DESCENDANT_HANDOFFS,
   PARKED_COURSE_CAMPAIGN_PROMPT_VERSION,
   parseParkedCourseCampaignAudit,
@@ -7546,8 +7547,15 @@ async function attachParkedCampaignToMonitoringAudit(
         Number(admissionAudit.startedRequestCount) < 1 ||
         !Number.isInteger(admissionAudit.batchCount) ||
         Number(admissionAudit.batchCount) < 1 ||
-        admissionAudit.playbookCompletedStageCount !== 4 ||
-        admissionAudit.playbookNextStage !== "RENDERED_BROWSER_DISCOVERY" ||
+        !isParkedCourseCampaignPostMarkerRecoveryStageShape({
+          completedStageCount: Number(
+            admissionAudit.playbookCompletedStageCount
+          ),
+          nextStage:
+            typeof admissionAudit.playbookNextStage === "string"
+              ? admissionAudit.playbookNextStage
+              : null
+        }) ||
         typeof admissionAudit.supersededEndpointId !== "string" ||
         !admissionAudit.supersededEndpointId.trim() ||
         typeof admissionAudit.supersededEndpointAt !== "string" ||
@@ -8596,9 +8604,11 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
               input.expectedCycle !== (input.capturedCycle ?? 0) + 1 ||
               !input.currentRuntimeVersion ||
               !/^[a-f0-9]{40}$/u.test(input.currentRuntimeVersion) ||
-              currentPlaybookAssessment.completedStages.length !== 4 ||
-              currentPlaybookAssessment.nextStage !==
-                "RENDERED_BROWSER_DISCOVERY" ||
+              !isParkedCourseCampaignPostMarkerRecoveryStageShape({
+                completedStageCount:
+                  currentPlaybookAssessment.completedStages.length,
+                nextStage: currentPlaybookAssessment.nextStage
+              }) ||
               !postMarkerIncompletePlaybookRecovery ||
               postMarkerIncompletePlaybookRecovery.history.historyDigest !==
                 input.expectedSameCycleRecoveryHistoryDigest ||

@@ -206,6 +206,63 @@ function request(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function browserAdapterRetryReadyLedger(attempted = false) {
+  let ledger: unknown = null;
+  const completedStages = [
+    ["OFFICIAL_IDENTITY", "OFFICIAL_IDENTITY", "COMPLETED", null],
+    [
+      "TYPED_ADAPTER",
+      "TYPED_PROVIDER_ADAPTER",
+      "NOT_APPLICABLE",
+      "NO_RUNNABLE_ADAPTER"
+    ],
+    ["OFFICIAL_HTTP_DISCOVERY", "OFFICIAL_HTTP", "COMPLETED", null],
+    [
+      "HTTP_ADAPTER_RETRY",
+      "TYPED_PROVIDER_ADAPTER",
+      "NOT_APPLICABLE",
+      "NO_METADATA_CHANGE"
+    ],
+    ["RENDERED_BROWSER_DISCOVERY", "RENDERED_BROWSER", "COMPLETED", null]
+  ] as const;
+  for (const [stage, readPath, transition, skipReason] of completedStages) {
+    ledger = appendAutomationPlaybookEvent(ledger, {
+      cycle: 1,
+      stage,
+      transition,
+      readPath,
+      evidenceKind:
+        readPath === "RENDERED_BROWSER" ? "RENDERED_PAGE" : "TOOLING",
+      failureFingerprint: `TEST:${stage}:${transition}`,
+      runtimeVersion: releaseSha,
+      ...(skipReason ? { skipReason } : {}),
+      observedAt: now
+    });
+  }
+  if (!attempted) return ledger;
+  ledger = appendAutomationPlaybookEvent(ledger, {
+    cycle: 1,
+    stage: "BROWSER_ADAPTER_RETRY",
+    transition: "STARTED",
+    readPath: "TYPED_PROVIDER_ADAPTER",
+    evidenceKind: "TOOLING",
+    failureFingerprint: "TEST:BROWSER_ADAPTER_RETRY:NETWORK",
+    runtimeVersion: releaseSha,
+    observedAt: now
+  });
+  return appendAutomationPlaybookEvent(ledger, {
+    cycle: 1,
+    stage: "BROWSER_ADAPTER_RETRY",
+    transition: "FAILED_RETRYABLE",
+    readPath: "TYPED_PROVIDER_ADAPTER",
+    evidenceKind: "TOOLING",
+    failureClass: "NETWORK",
+    failureFingerprint: "TEST:BROWSER_ADAPTER_RETRY:NETWORK",
+    runtimeVersion: releaseSha,
+    observedAt: now
+  });
+}
+
 function verificationEvidence(outcome = "NO_MATCH", providerExecution = true) {
   return {
     schemaVersion: 1,
@@ -971,6 +1028,7 @@ describe("course-support verification scheduling", () => {
       createdCount: 0,
       eligibleCount: 0,
       ineligibleCount: 1,
+      ineligibleReasonCounts: { incident_demand_changed: 1 },
       requests: [],
     });
     expect(prismaMocks.batchIncidentUpdateMany).not.toHaveBeenCalled();
@@ -1098,11 +1156,162 @@ describe("course-support verification scheduling", () => {
       createdCount: 0,
       eligibleCount: 0,
       ineligibleCount: 1,
+      ineligibleReasonCounts: { monitoring_not_actionable: 1 },
       requests: [],
     });
     expect(prismaMocks.requestCreateMany).not.toHaveBeenCalled();
     expect(prismaMocks.activeSearchCount).not.toHaveBeenCalled();
   });
+
+  it("schedules only the assigned zero-attempt browser adapter progression while retaining blocked provider evidence", async () => {
+    prismaMocks.batchFindUnique.mockResolvedValue({
+      id: "batch-1",
+      status: "VERIFYING",
+      releaseSha,
+      completedAt: null,
+      summary: {
+        remediation: {
+          workMode: "VERIFY_TRANSIENT",
+          strategyAction: "RUN_TYPED_ADAPTER",
+          playbookStage: "BROWSER_ADAPTER_RETRY",
+          allowUnchangedRuntime: true,
+          requiresImplementationPath: false,
+          reason: "EXISTING_SUPPORT_READY",
+          retryBudget: {
+            maximumAttempts: 4,
+            attemptsCompleted: 3,
+            attemptsRemaining: 1,
+            exhausted: false,
+          },
+        },
+      },
+      incidents: [
+        {
+          id: "batch-incident-1",
+          incidentId: "incident-1",
+          courseId: "course-1",
+          cycle: 1,
+          verifiedIncidentUpdatedAt: new Date("2026-07-21T11:55:00.000Z"),
+          incident: incident({
+            attemptLedger: browserAdapterRetryReadyLedger(),
+          }),
+          course: course({
+            detectedPlatform: null,
+            providerFamilyKey: "SOURCE_MISSING",
+            bookingMetadata: null,
+            automationEligibility: "BLOCKED",
+            automationReason: "ACCOUNT_REQUIRED",
+            ...currentIntelligence(),
+          }),
+        },
+      ],
+    });
+
+    await expect(
+      scheduleCourseSupportVerificationRequests({
+        batchId: "batch-1",
+        releaseSha,
+        now,
+      }),
+    ).resolves.toEqual({
+      createdCount: 1,
+      eligibleCount: 1,
+      ineligibleCount: 0,
+      requests: [],
+    });
+    expect(prismaMocks.requestCreateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: [
+          expect.objectContaining({
+            automationEligibilitySnapshot: "BLOCKED",
+            automationReasonSnapshot: "ACCOUNT_REQUIRED",
+          }),
+        ],
+      }),
+    );
+  });
+
+  it.each([
+    ["first stage attempt", browserAdapterRetryReadyLedger(true), false, false],
+    ["exhausted route budget", browserAdapterRetryReadyLedger(), true, false],
+    [
+      "a current runnable-provider technical block",
+      browserAdapterRetryReadyLedger(),
+      false,
+      true,
+    ],
+  ] as const)(
+    "keeps blocked browser adapter progression ineligible after %s",
+    async (_case, attemptLedger, exhausted, runnableProvider) => {
+      prismaMocks.batchFindUnique.mockResolvedValue({
+        id: "batch-1",
+        status: "VERIFYING",
+        releaseSha,
+        completedAt: null,
+        summary: {
+          remediation: {
+            workMode: "VERIFY_TRANSIENT",
+            strategyAction: "RUN_TYPED_ADAPTER",
+            playbookStage: "BROWSER_ADAPTER_RETRY",
+            allowUnchangedRuntime: true,
+            requiresImplementationPath: false,
+            reason: "EXISTING_SUPPORT_READY",
+            retryBudget: {
+              maximumAttempts: 4,
+              attemptsCompleted: exhausted ? 4 : 3,
+              attemptsRemaining: exhausted ? 0 : 1,
+              exhausted,
+            },
+          },
+        },
+        incidents: [
+          {
+            id: "batch-incident-1",
+            incidentId: "incident-1",
+            courseId: "course-1",
+            cycle: 1,
+            verifiedIncidentUpdatedAt: new Date("2026-07-21T11:55:00.000Z"),
+            incident: incident({ attemptLedger }),
+            course: course({
+              ...(runnableProvider
+                ? {
+                    detectedBookingUrl: "https://public-course.cps.golf/",
+                    bookingMetadata: {
+                      provider: "CPS",
+                      siteName: "public-course",
+                      bookingBaseUrl: "https://public-course.cps.golf/",
+                      courseIds: [1],
+                    },
+                  }
+                : {
+                    detectedPlatform: null,
+                    providerFamilyKey: "SOURCE_MISSING",
+                    bookingMetadata: null,
+                  }),
+              automationEligibility: "BLOCKED",
+              automationReason: "ACCOUNT_REQUIRED",
+              ...currentIntelligence(),
+            }),
+          },
+        ],
+      });
+
+      await expect(
+        scheduleCourseSupportVerificationRequests({
+          batchId: "batch-1",
+          releaseSha,
+          now,
+        }),
+      ).resolves.toEqual({
+        createdCount: 0,
+        eligibleCount: 0,
+        ineligibleCount: 1,
+        ineligibleReasonCounts: { monitoring_not_actionable: 1 },
+        requests: [],
+      });
+      expect(prismaMocks.requestCreateMany).not.toHaveBeenCalled();
+    },
+  );
 
   it("caps a scheduled request before an earlier customer endpoint", async () => {
     prismaMocks.batchFindUnique.mockResolvedValue({
@@ -1300,6 +1509,7 @@ describe("course-support verification scheduling", () => {
       createdCount: 0,
       eligibleCount: 0,
       ineligibleCount: 1,
+      ineligibleReasonCounts: { request_horizon_exceeded: 1 },
       requests: [],
     });
     expect(prismaMocks.activeSearchCount).not.toHaveBeenCalled();

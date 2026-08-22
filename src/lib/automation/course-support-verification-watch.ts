@@ -207,6 +207,9 @@ export type CourseSupportVerificationPassResult<TVerification> = {
     verified?: boolean;
     detachedVerification?: {
       rerunNeeded?: boolean;
+      assignedStageOrchestrationGapCount?: number;
+      schedulerDispatchError?: boolean;
+      schedulerIneligibleReasonCounts?: Record<string, number>;
     } | null;
     searchExecutionFence?: {
       rerunNeeded?: boolean;
@@ -219,7 +222,12 @@ export async function runCourseSupportVerificationPass<
   TVerification extends {
     outcome?: string;
     verified?: boolean;
-    detachedVerification?: { rerunNeeded?: boolean } | null;
+    detachedVerification?: {
+      rerunNeeded?: boolean;
+      assignedStageOrchestrationGapCount?: number;
+      schedulerDispatchError?: boolean;
+      schedulerIneligibleReasonCounts?: Record<string, number>;
+    } | null;
     searchExecutionFence?: { rerunNeeded?: boolean } | null;
   }
 >(input: {
@@ -241,7 +249,7 @@ export async function closeoutSettledCourseSupportVerification<TCloseout>(input:
     result: string;
     playbookExhausted: boolean;
   }>;
-  closeout: (humanReviewCount: number) => Promise<TCloseout>;
+  closeout: (preCloseoutExplicitHumanCount: number) => Promise<TCloseout>;
 }) {
   const humanReviewCourses = input.courses.filter(
     (course) => course.result === "NEEDS_HUMAN"
@@ -262,7 +270,7 @@ export async function closeoutSettledCourseSupportVerification<TCloseout>(input:
 
   return {
     closeout: await input.closeout(humanReviewCourses.length),
-    humanReviewCount: humanReviewCourses.length
+    preCloseoutExplicitHumanCount: humanReviewCourses.length
   };
 }
 
@@ -270,7 +278,12 @@ export async function runCourseSupportVerificationWatch<
   TVerification extends {
     outcome?: string;
     verified?: boolean;
-    detachedVerification?: { rerunNeeded?: boolean } | null;
+    detachedVerification?: {
+      rerunNeeded?: boolean;
+      assignedStageOrchestrationGapCount?: number;
+      schedulerDispatchError?: boolean;
+      schedulerIneligibleReasonCounts?: Record<string, number>;
+    } | null;
     searchExecutionFence?: { rerunNeeded?: boolean } | null;
   },
   TCloseout = never
@@ -465,6 +478,18 @@ export async function runCourseSupportVerificationWatch<
     }
     if (now() >= deadline) {
       return stop(deadlineReason);
+    }
+
+    const detachedVerification = settledPass.verification.detachedVerification;
+    if (
+      (detachedVerification?.assignedStageOrchestrationGapCount ?? 0) > 0
+    ) {
+      return stop(
+        "error",
+        new Error(
+          "Course-support verification scheduling did not start the assigned remediation stage."
+        )
+      );
     }
 
     const needsAnotherPass =

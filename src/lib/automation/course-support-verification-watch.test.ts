@@ -377,6 +377,64 @@ describe("runCourseSupportVerificationWatch", () => {
     );
   });
 
+  it.each([
+    [
+      "ineligible",
+      {
+        rerunNeeded: true,
+        assignedStageOrchestrationGapCount: 1,
+        schedulerIneligibleReasonCounts: { monitoring_not_actionable: 1 },
+        schedulerDispatchError: false
+      }
+    ],
+    [
+      "errored",
+      {
+        rerunNeeded: true,
+        assignedStageOrchestrationGapCount: 1,
+        schedulerIneligibleReasonCounts: {},
+        schedulerDispatchError: true
+      }
+    ],
+    [
+      "eligible but left as an unstarted stale duplicate",
+      {
+        rerunNeeded: true,
+        assignedStageOrchestrationGapCount: 1,
+        schedulerIneligibleReasonCounts: {},
+        schedulerDispatchError: false
+      }
+    ]
+  ])(
+    "releases through the error lane when assigned-stage scheduling is %s",
+    async (_reason, detachedVerification) => {
+      const closeout = vi.fn(async () => ({ durableCloseoutRecorded: true }));
+      const onStopped = vi.fn(async () => ({
+        durableCloseoutRecorded: true
+      }));
+
+      await expect(
+        runCourseSupportVerificationWatch({
+          pass: async () => ({
+            browserStages: { eligibleCount: 0, persistedCount: 0 },
+            verification: { detachedVerification }
+          }),
+          closeout,
+          onStopped
+        })
+      ).resolves.toMatchObject({
+        outcome: "verification_watch_closed",
+        stoppedReason: "error",
+        passCount: 1,
+        closeout: { durableCloseoutRecorded: true }
+      });
+      expect(closeout).not.toHaveBeenCalled();
+      expect(onStopped).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: "error", passCount: 1 })
+      );
+    }
+  );
+
   it("attempts the release lane once when clean-pass closeout fails", async () => {
     const onStopped = vi.fn(async () => ({ durableCloseoutRecorded: true }));
 
@@ -663,14 +721,14 @@ describe("closeoutSettledCourseSupportVerification", () => {
         { ordinal: "04", result: "RETRY_SCHEDULED", playbookExhausted: true },
         { ordinal: "05", result: "NEEDS_HUMAN", playbookExhausted: true }
       ],
-      closeout: async (humanReviewCount) => {
-        events.push(`closeout:${humanReviewCount}`);
+      closeout: async (preCloseoutExplicitHumanCount) => {
+        events.push(`closeout:${preCloseoutExplicitHumanCount}`);
         return { durableCloseoutRecorded: true };
       },
     });
 
     expect(events).toEqual(["closeout:1"]);
-    expect(result.humanReviewCount).toBe(1);
+    expect(result.preCloseoutExplicitHumanCount).toBe(1);
   });
 
   it("allows an ordinary unexhausted retry to release ownership", async () => {
@@ -687,7 +745,7 @@ describe("closeoutSettledCourseSupportVerification", () => {
         ],
         closeout,
       }),
-    ).resolves.toMatchObject({ humanReviewCount: 0 });
+    ).resolves.toMatchObject({ preCloseoutExplicitHumanCount: 0 });
     expect(closeout).toHaveBeenCalledWith(0);
   });
 

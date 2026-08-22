@@ -5918,6 +5918,7 @@ export async function verifyCourseSupportBatch(input: {
               activeBatchId: true,
               firstSeenAt: true,
               lastSeenAt: true,
+              attemptLedger: true,
               updatedAt: true,
             },
           },
@@ -5967,6 +5968,9 @@ export async function verifyCourseSupportBatch(input: {
   }
   const releaseSha = input.releaseSha ?? batch.releaseSha;
   const deployedAt = input.deployedAt ?? batch.deployedAt;
+  const remediationDirective = readCourseSupportRemediationDirective(
+    batch.summary
+  );
   if (
     batch.releaseSha &&
     input.releaseSha &&
@@ -5985,8 +5989,7 @@ export async function verifyCourseSupportBatch(input: {
   if (
     releaseSha === batch.baseSha &&
     readBatchPlannedPaths(batch.summary).length === 0 &&
-    readCourseSupportRemediationDirective(batch.summary)
-      ?.allowUnchangedRuntime === false
+    remediationDirective?.allowUnchangedRuntime === false
   ) {
     throw new Error(
       "This remediation route requires a reusable implementation or material change; unchanged-runtime verification is not allowed.",
@@ -6447,6 +6450,7 @@ export async function verifyCourseSupportBatch(input: {
     eligibleCount: number;
     createdCount: number;
     ineligibleCount: number;
+    ineligibleReasonCounts: Record<string, number>;
     dispatchError: boolean;
   } | null = null;
   if (releaseSha && deployedAt && recheckBatchIncidentIds.length > 0) {
@@ -6462,6 +6466,7 @@ export async function verifyCourseSupportBatch(input: {
         eligibleCount: scheduled.eligibleCount,
         createdCount: scheduled.createdCount,
         ineligibleCount: scheduled.ineligibleCount,
+        ineligibleReasonCounts: scheduled.ineligibleReasonCounts ?? {},
         dispatchError: false,
       };
     } catch {
@@ -6470,6 +6475,7 @@ export async function verifyCourseSupportBatch(input: {
         eligibleCount: 0,
         createdCount: 0,
         ineligibleCount: recheckBatchIncidentIds.length,
+        ineligibleReasonCounts: {},
         dispatchError: true,
       };
     }
@@ -6490,6 +6496,40 @@ export async function verifyCourseSupportBatch(input: {
     ),
     currentFailureBatchIncidentIds: currentDetachedFailureBatchIncidentIds,
   });
+  const assignedStageOrchestrationGapCount =
+    remediationDirective?.playbookStage === "BROWSER_ADAPTER_RETRY"
+      ? recheckVerifications.filter(({ entry }) => {
+          const playbook = assessAutomationPlaybook(
+            entry.incident.attemptLedger,
+            entry.cycle
+          );
+          if (
+            playbook.conclusion !== "INCOMPLETE" ||
+            playbook.nextStage !== "BROWSER_ADAPTER_RETRY" ||
+            getCourseSupportNextStageAttemptCount(playbook) !== 0
+          ) {
+            return false;
+          }
+          return !detachedRequestStates.some(
+            (request) =>
+              request.batchIncidentId === entry.id &&
+              (Boolean(request.startedAt) ||
+                request.status === "QUEUED" ||
+                request.status === "CHECKING" ||
+                request.status === "RETRYABLE_FAILED")
+          );
+        }).length
+      : 0;
+  const detachedVerification = {
+    ...detachedVerificationRerun,
+    rerunNeeded:
+      detachedVerificationRerun.rerunNeeded ||
+      assignedStageOrchestrationGapCount > 0,
+    assignedStageOrchestrationGapCount,
+    schedulerIneligibleReasonCounts:
+      detachedDispatch?.ineligibleReasonCounts ?? {},
+    schedulerDispatchError: detachedDispatch?.dispatchError ?? false
+  };
   const shouldDispatch = Boolean(
     recheckDispatchKey &&
     recheckDispatchStartedAt &&
@@ -6528,9 +6568,12 @@ export async function verifyCourseSupportBatch(input: {
           detachedDispatch?.ineligibleCount ?? recheckCourseIds.length,
         detachedVerificationDispatchError:
           detachedDispatch?.dispatchError ?? false,
-        detachedVerificationPendingCount:
-          detachedVerificationRerun.pendingCount,
-        detachedVerificationRerunNeeded: detachedVerificationRerun.rerunNeeded,
+        detachedVerificationIneligibleReasonCounts:
+          detachedVerification.schedulerIneligibleReasonCounts,
+        detachedVerificationAssignedStageOrchestrationGapCount:
+          detachedVerification.assignedStageOrchestrationGapCount,
+        detachedVerificationPendingCount: detachedVerification.pendingCount,
+        detachedVerificationRerunNeeded: detachedVerification.rerunNeeded,
         affectedSearchRefs: dispatched.affectedSearchRefs,
         dispatchError: !dispatchComplete,
       };
@@ -6550,9 +6593,12 @@ export async function verifyCourseSupportBatch(input: {
           detachedDispatch?.ineligibleCount ?? recheckCourseIds.length,
         detachedVerificationDispatchError:
           detachedDispatch?.dispatchError ?? false,
-        detachedVerificationPendingCount:
-          detachedVerificationRerun.pendingCount,
-        detachedVerificationRerunNeeded: detachedVerificationRerun.rerunNeeded,
+        detachedVerificationIneligibleReasonCounts:
+          detachedVerification.schedulerIneligibleReasonCounts,
+        detachedVerificationAssignedStageOrchestrationGapCount:
+          detachedVerification.assignedStageOrchestrationGapCount,
+        detachedVerificationPendingCount: detachedVerification.pendingCount,
+        detachedVerificationRerunNeeded: detachedVerification.rerunNeeded,
         dispatchError: true,
         error: sanitizeResponderText(
           error instanceof Error
@@ -6617,10 +6663,14 @@ export async function verifyCourseSupportBatch(input: {
             detachedVerificationIneligibleCount:
               detachedDispatch.ineligibleCount,
             detachedVerificationDispatchError: detachedDispatch.dispatchError,
+            detachedVerificationIneligibleReasonCounts:
+              detachedVerification.schedulerIneligibleReasonCounts,
+            detachedVerificationAssignedStageOrchestrationGapCount:
+              detachedVerification.assignedStageOrchestrationGapCount,
           }
         : {}),
-      detachedVerificationPendingCount: detachedVerificationRerun.pendingCount,
-      detachedVerificationRerunNeeded: detachedVerificationRerun.rerunNeeded,
+      detachedVerificationPendingCount: detachedVerification.pendingCount,
+      detachedVerificationRerunNeeded: detachedVerification.rerunNeeded,
       dispatchError:
         recheckDispatch.dispatchError === true ||
         detachedDispatch?.dispatchError === true,
@@ -6631,8 +6681,12 @@ export async function verifyCourseSupportBatch(input: {
       affectedSearchCount: 0,
       queuedCount: 0,
       queueFailureCount: 0,
-      detachedVerificationPendingCount: detachedVerificationRerun.pendingCount,
-      detachedVerificationRerunNeeded: detachedVerificationRerun.rerunNeeded,
+      detachedVerificationIneligibleReasonCounts:
+        detachedVerification.schedulerIneligibleReasonCounts,
+      detachedVerificationAssignedStageOrchestrationGapCount:
+        detachedVerification.assignedStageOrchestrationGapCount,
+      detachedVerificationPendingCount: detachedVerification.pendingCount,
+      detachedVerificationRerunNeeded: detachedVerification.rerunNeeded,
       dispatchError: false,
       reason: "FINAL_DISPOSITION_ONLY",
     };
@@ -6835,7 +6889,7 @@ export async function verifyCourseSupportBatch(input: {
     releaseSha: releaseSha ?? null,
     deployedAt: deployedAt?.toISOString() ?? null,
     counts,
-    detachedVerification: detachedVerificationRerun,
+    detachedVerification,
     searchExecutionFence: verifiedSearchExecutionFence
       ? {
           settled: verifiedSearchExecutionFence.settled,
@@ -7163,15 +7217,26 @@ export function shouldContinueSettledCourseSupportRemediation(input: {
   nextPlaybookStage: AutomationPlaybookStage | null;
   nextPlaybookStageAttemptCount?: number;
 }) {
+  const assignedZeroAttemptBrowserAdapterRetry =
+    input.nextPlaybookStage === "BROWSER_ADAPTER_RETRY" &&
+    input.remediationDirective?.workMode === "VERIFY_TRANSIENT" &&
+    input.remediationDirective.strategyAction === "RUN_TYPED_ADAPTER" &&
+    input.remediationDirective.playbookStage === "BROWSER_ADAPTER_RETRY" &&
+    input.remediationDirective.allowUnchangedRuntime === true &&
+    input.remediationDirective.requiresImplementationPath === false &&
+    (input.remediationDirective.retryBudget === null ||
+      (input.remediationDirective.retryBudget.exhausted === false &&
+        input.remediationDirective.retryBudget.attemptsRemaining > 0));
   if (
     input.playbookConclusion === "INCOMPLETE" &&
     (input.nextPlaybookStage === "RENDERED_BROWSER_DISCOVERY" ||
+      assignedZeroAttemptBrowserAdapterRetry ||
       input.nextPlaybookStage === "INDEPENDENT_CONFIRMATION") &&
     input.nextPlaybookStageAttemptCount === 0
   ) {
-    // These are owner-only stages. Reaching an old endpoint before their first
-    // attempt is an orchestration miss, not unchanged course evidence and not
-    // proof that the safe playbook is exhausted.
+    // Reaching an assigned stage's endpoint before its first attempt is an
+    // orchestration miss, not unchanged course evidence and not proof that the
+    // safe playbook is exhausted.
     return true;
   }
   if (
@@ -9067,6 +9132,34 @@ async function closeoutCourseSupportBatchAttempt(
   const orchestrationOnlyCount = closeoutRemediationAttempts.filter(
     (attempt) => attempt.countsTowardOperationalNoProgress === false,
   ).length;
+  const playbookAssessments = normalizedEntries.map((entry) =>
+    assessAutomationPlaybook(entry.incident.attemptLedger, entry.cycle)
+  );
+  const playbookExhaustedCount = playbookAssessments.filter((assessment) =>
+    ["TECHNICAL_FINAL", "UNRESOLVED_EXHAUSTED"].includes(
+      assessment.conclusion
+    )
+  ).length;
+  const incompletePlaybookCount = playbookAssessments.filter(
+    (assessment) => assessment.conclusion === "INCOMPLETE"
+  ).length;
+  const zeroAttemptBrowserAdapterRetryCount = playbookAssessments.filter(
+    (assessment) =>
+      assessment.conclusion === "INCOMPLETE" &&
+      assessment.nextStage === "BROWSER_ADAPTER_RETRY" &&
+      getCourseSupportNextStageAttemptCount(assessment) === 0
+  ).length;
+  const decisionBasis = {
+    schemaVersion: 1,
+    normalizedIncidentCount: normalizedEntries.length,
+    needsHumanCount,
+    automationStalledCount,
+    operationalRetryBudgetExhaustedCount,
+    orchestrationOnlyCount,
+    playbookExhaustedCount,
+    incompletePlaybookCount,
+    zeroAttemptBrowserAdapterRetryCount
+  };
   const deferredProbeFenceEntries = baseNormalizedEntries.filter((entry) => {
     const courseRef = createCourseSupportRemediationCourseRef(entry.courseId);
     const plannedAttempt = asJsonObject(
@@ -9540,6 +9633,7 @@ async function closeoutCourseSupportBatchAttempt(
             operationalRetryBudgetExhaustedCount,
             orchestrationOnlyCount,
             providerFamilyHandoffCount,
+            decisionBasis,
             verificationWatchMode,
             remediationAttemptConsumed,
             remediationAttempts: closeoutRemediationAttempts,
@@ -10410,6 +10504,7 @@ async function closeoutCourseSupportBatchAttempt(
             operationalRetryBudgetExhaustedCount,
             orchestrationOnlyCount,
             providerFamilyHandoffCount,
+            decisionBasis,
             verificationWatchMode,
             failureDomain: input.failureDomain ?? "NONE",
             remediationAttemptConsumed,
@@ -10441,9 +10536,11 @@ async function closeoutCourseSupportBatchAttempt(
     terminalCount,
     reusableFamilyRestoredCount,
     retryCount,
+    needsHumanCount,
     automationStalledCount,
     operationalRetryBudgetExhaustedCount,
     providerFamilyHandoffCount,
+    decisionBasis,
     siblingWakeCount,
     notificationPendingCount: 0,
     leverage: {

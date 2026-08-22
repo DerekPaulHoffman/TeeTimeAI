@@ -631,7 +631,7 @@ async function closeoutSettledCourseSupportBatch(input: {
 
   const settled = await closeoutSettledCourseSupportVerification({
     courses: packet.courses,
-    closeout: (humanReviewCount) =>
+    closeout: (preCloseoutExplicitHumanCount) =>
       closeoutCourseSupportBatch({
         batchId: input.batchId,
         leaseToken: input.leaseToken,
@@ -641,7 +641,7 @@ async function closeoutSettledCourseSupportBatch(input: {
           verificationWatch: {
             settled: true,
             passCount: input.passCount,
-            humanReviewCount
+            preCloseoutExplicitHumanCount
           }
         }
       })
@@ -653,7 +653,10 @@ async function closeoutSettledCourseSupportBatch(input: {
       "Course-support verification watch did not record durable closeout."
     );
   }
-  return { ...result, humanReviewCount: settled.humanReviewCount };
+  return {
+    ...result,
+    preCloseoutExplicitHumanCount: settled.preCloseoutExplicitHumanCount
+  };
 }
 
 async function closeoutStoppedCourseSupportBatch(input: {

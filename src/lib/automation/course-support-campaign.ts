@@ -287,8 +287,13 @@ export function deriveParkedCourseCampaignHumanReviewCycles(input: {
       Number(audit.startedRequestCount) >= 1 &&
       Number.isInteger(audit.batchCount) &&
       Number(audit.batchCount) >= 1 &&
-      audit.playbookCompletedStageCount === 4 &&
-      audit.playbookNextStage === "RENDERED_BROWSER_DISCOVERY" &&
+      isParkedCourseCampaignPostMarkerRecoveryStageShape({
+        completedStageCount: Number(audit.playbookCompletedStageCount),
+        nextStage:
+          typeof audit.playbookNextStage === "string"
+            ? audit.playbookNextStage
+            : null
+      }) &&
       typeof audit.supersededEndpointId === "string" &&
       audit.supersededEndpointId.trim().length > 0 &&
       typeof audit.supersededEndpointAt === "string" &&
@@ -2734,12 +2739,63 @@ export type ParkedCourseCampaignPostMarkerIncompletePlaybookRecovery = {
   history: ParkedCourseCampaignSameCycleRecoveryHistory;
 };
 
+type ParkedCourseCampaignPostMarkerRecoveryRoute =
+  | {
+      completedStageCount: 4;
+      playbookStage: "RENDERED_BROWSER_DISCOVERY";
+      workMode: "DISCOVERY_ONLY";
+      strategyAction: "DISCOVER_WITH_BROWSER";
+    }
+  | {
+      completedStageCount: 5;
+      playbookStage: "BROWSER_ADAPTER_RETRY";
+      workMode: "VERIFY_TRANSIENT";
+      strategyAction: "RUN_TYPED_ADAPTER";
+    };
+
+function getParkedCourseCampaignPostMarkerRecoveryRoute(input: {
+  completedStageCount: number;
+  nextStage: string | null;
+}): ParkedCourseCampaignPostMarkerRecoveryRoute | null {
+  if (
+    input.completedStageCount === 4 &&
+    input.nextStage === "RENDERED_BROWSER_DISCOVERY"
+  ) {
+    return {
+      completedStageCount: 4,
+      playbookStage: "RENDERED_BROWSER_DISCOVERY",
+      workMode: "DISCOVERY_ONLY",
+      strategyAction: "DISCOVER_WITH_BROWSER"
+    };
+  }
+  if (
+    input.completedStageCount === 5 &&
+    input.nextStage === "BROWSER_ADAPTER_RETRY"
+  ) {
+    return {
+      completedStageCount: 5,
+      playbookStage: "BROWSER_ADAPTER_RETRY",
+      workMode: "VERIFY_TRANSIENT",
+      strategyAction: "RUN_TYPED_ADAPTER"
+    };
+  }
+  return null;
+}
+
+export function isParkedCourseCampaignPostMarkerRecoveryStageShape(input: {
+  completedStageCount: number;
+  nextStage: string | null;
+}) {
+  return getParkedCourseCampaignPostMarkerRecoveryRoute(input) !== null;
+}
+
 function hasExactPostMarkerOrchestrationOnlyAttempt(input: {
   courseId: string;
   failureFingerprint: string;
   providerSnapshotFingerprint: string;
   runtimeVersion: string;
   summary: unknown;
+  route: ParkedCourseCampaignPostMarkerRecoveryRoute;
 }) {
   if (
     !isCourseSupportCompletedBatchOrchestrationOnly({
@@ -2775,9 +2831,9 @@ function hasExactPostMarkerOrchestrationOnlyAttempt(input: {
     attempt.consumed === false &&
     attempt.countsTowardOperationalNoProgress === false &&
     execution.claimedImplementationPaths === false &&
-    approach.workMode === "DISCOVERY_ONLY" &&
-    approach.strategyAction === "DISCOVER_WITH_BROWSER" &&
-    approach.playbookStage === "RENDERED_BROWSER_DISCOVERY" &&
+    approach.workMode === input.route.workMode &&
+    approach.strategyAction === input.route.strategyAction &&
+    approach.playbookStage === input.route.playbookStage &&
     [
       "newReleaseRecorded",
       "deploymentRecorded",
@@ -2801,6 +2857,10 @@ export function assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery(i
 }): ParkedCourseCampaignPostMarkerIncompletePlaybookRecovery | null {
   const { captured, current } = input;
   const playbook = current.zeroExecutionEvidence.playbookAssessment;
+  const recoveryRoute = getParkedCourseCampaignPostMarkerRecoveryRoute({
+    completedStageCount: playbook.completedStages.length,
+    nextStage: playbook.nextStage
+  });
   if (
     !input.campaignRunId.trim() ||
     !/^[a-f0-9]{64}$/u.test(input.campaignMembershipDigest) ||
@@ -2815,8 +2875,7 @@ export function assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery(i
     playbook.valid !== true ||
     playbook.cycle !== current.cycle ||
     playbook.conclusion !== "INCOMPLETE" ||
-    playbook.completedStages.length !== 4 ||
-    playbook.nextStage !== "RENDERED_BROWSER_DISCOVERY"
+    !recoveryRoute
   ) {
     return null;
   }
@@ -2906,8 +2965,9 @@ export function assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery(i
     (priorMarkerAudit.latestDiscoveryId !== undefined &&
       priorMarkerAudit.latestDiscoveryId !==
         (current.zeroExecutionEvidence.latestDiscovery?.id ?? null)) ||
-    priorMarkerAudit.playbookCompletedStageCount !== 4 ||
-    priorMarkerAudit.playbookNextStage !== "RENDERED_BROWSER_DISCOVERY" ||
+    priorMarkerAudit.playbookCompletedStageCount !==
+      recoveryRoute.completedStageCount ||
+    priorMarkerAudit.playbookNextStage !== recoveryRoute.playbookStage ||
     typeof priorMarkerAudit.recoveryRuntimeVersion !== "string" ||
     !/^[a-f0-9]{40}$/u.test(priorMarkerAudit.recoveryRuntimeVersion) ||
     priorMarkerAudit.sameCycleRecovery !== true ||
@@ -2965,7 +3025,7 @@ export function assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery(i
       audit.customerState === "NEEDS_HUMAN_REVIEW" &&
       audit.playbookConclusion === "INCOMPLETE" &&
       audit.playbookExhausted === false &&
-      audit.nextStage === "RENDERED_BROWSER_DISCOVERY" &&
+      audit.nextStage === recoveryRoute.playbookStage &&
       audit.customerDataIncluded === false &&
       campaign.kind === "PARKED_COHORT" &&
       campaign.runId === input.campaignRunId &&
@@ -3066,6 +3126,7 @@ export function assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery(i
           providerSnapshotFingerprint: current.providerSnapshotFingerprint,
           runtimeVersion: priorRecoveryRuntimeVersion,
           summary: entry.batch.summary,
+          route: recoveryRoute
         }) ||
         (index > 0 &&
           entry.createdAt < postMarkerEntries[index - 1]!.batch.completedAt!),

@@ -12892,38 +12892,89 @@ describe("course-support release heartbeat persistence", () => {
     ).toBe(false);
   });
 
-  it("keeps a zero-attempt assigned browser stage automatic at its endpoint", () => {
-    const remediationDirective = {
-      workMode: "ADVANCE_DISCOVERY" as const,
-      strategyAction: "DISCOVER_WITH_BROWSER" as const,
-      playbookStage: "RENDERED_BROWSER_DISCOVERY" as const,
-      allowUnchangedRuntime: true,
-      requiresImplementationPath: false,
-      reason: "PLAYBOOK_STAGE_PENDING",
-      retryBudget: null,
-    };
-
-    expect(
-      shouldContinueSettledCourseSupportRemediation({
-        remediationDirective,
-        failureClass: "UNSUPPORTED_FAMILY",
-        attemptCount: 4,
-        playbookConclusion: "INCOMPLETE",
-        nextPlaybookStage: "RENDERED_BROWSER_DISCOVERY",
-        nextPlaybookStageAttemptCount: 0,
-      }),
-    ).toBe(true);
-    expect(
-      shouldContinueSettledCourseSupportRemediation({
-        remediationDirective,
-        failureClass: "UNSUPPORTED_FAMILY",
-        attemptCount: 4,
-        playbookConclusion: "INCOMPLETE",
-        nextPlaybookStage: "RENDERED_BROWSER_DISCOVERY",
-        nextPlaybookStageAttemptCount: 1,
-      }),
-    ).toBe(false);
-  });
+  it.each([
+    [
+      "rendered browser discovery",
+      {
+        workMode: "ADVANCE_DISCOVERY" as const,
+        strategyAction: "DISCOVER_WITH_BROWSER" as const,
+        playbookStage: "RENDERED_BROWSER_DISCOVERY" as const,
+        allowUnchangedRuntime: true,
+        requiresImplementationPath: false,
+        reason: "PLAYBOOK_STAGE_PENDING",
+        retryBudget: null,
+      },
+      true,
+    ],
+    [
+      "browser adapter retry",
+      {
+        workMode: "VERIFY_TRANSIENT" as const,
+        strategyAction: "RUN_TYPED_ADAPTER" as const,
+        playbookStage: "BROWSER_ADAPTER_RETRY" as const,
+        allowUnchangedRuntime: true,
+        requiresImplementationPath: false,
+        reason: "EXISTING_SUPPORT_READY",
+        retryBudget: null,
+      },
+      true,
+    ],
+    [
+      "browser adapter retry with an exhausted route budget",
+      {
+        workMode: "VERIFY_TRANSIENT" as const,
+        strategyAction: "RUN_TYPED_ADAPTER" as const,
+        playbookStage: "BROWSER_ADAPTER_RETRY" as const,
+        allowUnchangedRuntime: true,
+        requiresImplementationPath: false,
+        reason: "EXISTING_SUPPORT_READY",
+        retryBudget: {
+          maximumAttempts: 4,
+          attemptsCompleted: 4,
+          attemptsRemaining: 0,
+          exhausted: true,
+        },
+      },
+      false,
+    ],
+    [
+      "browser adapter retry with a mismatched directive",
+      {
+        workMode: "DISCOVERY_ONLY" as const,
+        strategyAction: "DISCOVER_WITH_BROWSER" as const,
+        playbookStage: "BROWSER_ADAPTER_RETRY" as const,
+        allowUnchangedRuntime: true,
+        requiresImplementationPath: false,
+        reason: "PLAYBOOK_STAGE_PENDING",
+        retryBudget: null,
+      },
+      false,
+    ],
+  ])(
+    "applies the zero-attempt endpoint guard to %s",
+    (_label, remediationDirective, expectedAtZeroAttempts) => {
+      expect(
+        shouldContinueSettledCourseSupportRemediation({
+          remediationDirective,
+          failureClass: "UNSUPPORTED_FAMILY",
+          attemptCount: 4,
+          playbookConclusion: "INCOMPLETE",
+          nextPlaybookStage: remediationDirective.playbookStage,
+          nextPlaybookStageAttemptCount: 0,
+        }),
+      ).toBe(expectedAtZeroAttempts);
+      expect(
+        shouldContinueSettledCourseSupportRemediation({
+          remediationDirective,
+          failureClass: "UNSUPPORTED_FAMILY",
+          attemptCount: 4,
+          playbookConclusion: "INCOMPLETE",
+          nextPlaybookStage: remediationDirective.playbookStage,
+          nextPlaybookStageAttemptCount: 1,
+        }),
+      ).toBe(false);
+    },
+  );
 
   it("renews a no-path operation lease without serializing against a checkout owner", async () => {
     prismaMocks.batchFindFirst.mockResolvedValue({
@@ -15805,6 +15856,220 @@ describe("detached verification atomic batch fences", () => {
         detachedVerificationRerunNeeded: true,
       },
     });
+  });
+
+  it("keeps an assigned zero-attempt browser adapter retry unsettled when scheduling creates no request", async () => {
+    const batch = verificationBatch();
+    Object.assign(batch, {
+      summary: {
+        remediation: {
+          workMode: "VERIFY_TRANSIENT",
+          strategyAction: "RUN_TYPED_ADAPTER",
+          playbookStage: "BROWSER_ADAPTER_RETRY",
+          allowUnchangedRuntime: true,
+          requiresImplementationPath: false,
+          reason: "EXISTING_SUPPORT_READY",
+          retryBudget: null,
+        },
+      },
+    });
+    Object.assign(batch.incidents[0].incident, {
+      attemptLedger: browserAdapterRetryReadyAttemptLedger(),
+    });
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    verificationMocks.scheduleCourseSupportVerificationRequests.mockResolvedValue(
+      {
+        createdCount: 0,
+        eligibleCount: 0,
+        ineligibleCount: 1,
+        ineligibleReasonCounts: { monitoring_not_actionable: 1 },
+        requests: [],
+      },
+    );
+
+    const result = await verifyCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      releaseSha,
+      now,
+    });
+
+    expect(result).toMatchObject({
+      detachedVerification: {
+        pendingCount: 0,
+        rerunNeeded: true,
+        assignedStageOrchestrationGapCount: 1,
+        schedulerIneligibleReasonCounts: { monitoring_not_actionable: 1 },
+        schedulerDispatchError: false,
+      },
+      recheckDispatch: {
+        detachedVerificationRerunNeeded: true,
+        detachedVerificationAssignedStageOrchestrationGapCount: 1,
+        detachedVerificationIneligibleReasonCounts: {
+          monitoring_not_actionable: 1,
+        },
+      },
+    });
+  });
+
+  it("reports the same-release unstarted stale duplicate as an unresolved assigned-stage gap", async () => {
+    const batch = verificationBatch();
+    Object.assign(batch, {
+      summary: {
+        remediation: {
+          workMode: "VERIFY_TRANSIENT",
+          strategyAction: "RUN_TYPED_ADAPTER",
+          playbookStage: "BROWSER_ADAPTER_RETRY",
+          allowUnchangedRuntime: true,
+          requiresImplementationPath: false,
+          reason: "EXISTING_SUPPORT_READY",
+          retryBudget: null,
+        },
+      },
+    });
+    Object.assign(batch.incidents[0].incident, {
+      attemptLedger: browserAdapterRetryReadyAttemptLedger(),
+    });
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([
+      detachedRequestState("STALE", {
+        startedAt: null,
+        outcome: null,
+        failureClass: null,
+        evidence: null,
+      }),
+    ]);
+    verificationMocks.scheduleCourseSupportVerificationRequests.mockResolvedValue(
+      {
+        createdCount: 0,
+        eligibleCount: 1,
+        ineligibleCount: 0,
+        requests: [],
+      },
+    );
+
+    const result = await verifyCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      releaseSha,
+      now,
+    });
+
+    expect(result).toMatchObject({
+      detachedVerification: {
+        pendingCount: 0,
+        rerunNeeded: true,
+        assignedStageOrchestrationGapCount: 1,
+        schedulerIneligibleReasonCounts: {},
+        schedulerDispatchError: false,
+      },
+      recheckDispatch: {
+        detachedVerificationEligibleCount: 1,
+        detachedVerificationCreatedCount: 0,
+        detachedVerificationIneligibleCount: 0,
+        detachedVerificationAssignedStageOrchestrationGapCount: 1,
+        detachedVerificationIneligibleReasonCounts: {},
+        detachedVerificationDispatchError: false,
+        detachedVerificationRerunNeeded: true,
+      },
+    });
+  });
+
+  it("does not report an orchestration gap after the assigned browser adapter request started", async () => {
+    const batch = verificationBatch();
+    Object.assign(batch, {
+      summary: {
+        remediation: {
+          workMode: "VERIFY_TRANSIENT",
+          strategyAction: "RUN_TYPED_ADAPTER",
+          playbookStage: "BROWSER_ADAPTER_RETRY",
+          allowUnchangedRuntime: true,
+          requiresImplementationPath: false,
+          reason: "EXISTING_SUPPORT_READY",
+          retryBudget: null,
+        },
+      },
+    });
+    Object.assign(batch.incidents[0].incident, {
+      attemptLedger: browserAdapterRetryReadyAttemptLedger(),
+    });
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([
+      detachedRequestState("STALE", {
+        startedAt: new Date("2026-07-15T19:55:00.000Z"),
+        evidence: null,
+      }),
+    ]);
+
+    const result = await verifyCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      releaseSha,
+      now,
+    });
+
+    expect(result).toMatchObject({
+      detachedVerification: {
+        assignedStageOrchestrationGapCount: 0,
+      },
+    });
+  });
+
+  it("reports a privacy-safe scheduler error for an unstarted assigned browser adapter retry", async () => {
+    const batch = verificationBatch();
+    Object.assign(batch, {
+      summary: {
+        remediation: {
+          workMode: "VERIFY_TRANSIENT",
+          strategyAction: "RUN_TYPED_ADAPTER",
+          playbookStage: "BROWSER_ADAPTER_RETRY",
+          allowUnchangedRuntime: true,
+          requiresImplementationPath: false,
+          reason: "EXISTING_SUPPORT_READY",
+          retryBudget: null,
+        },
+      },
+    });
+    Object.assign(batch.incidents[0].incident, {
+      attemptLedger: browserAdapterRetryReadyAttemptLedger(),
+    });
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    verificationMocks.scheduleCourseSupportVerificationRequests.mockRejectedValue(
+      new Error("sensitive scheduler detail"),
+    );
+
+    const result = await verifyCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      releaseSha,
+      now,
+    });
+
+    expect(result).toMatchObject({
+      detachedVerification: {
+        rerunNeeded: true,
+        assignedStageOrchestrationGapCount: 1,
+        schedulerIneligibleReasonCounts: {},
+        schedulerDispatchError: true,
+      },
+      recheckDispatch: {
+        detachedVerificationDispatchError: true,
+        detachedVerificationRerunNeeded: true,
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("sensitive scheduler detail");
   });
 
   it("does not schedule or await detached work after human evidence wins", async () => {
@@ -19082,20 +19347,34 @@ describe("detached verification atomic batch fences", () => {
         worker(monitoringTransactionClient)
     );
 
-    await expect(
-      closeoutCourseSupportBatch({
-        batchId: "batch-1",
-        leaseToken: "lease-1",
-        ownerThreadId: "owner-thread",
-        verificationWatchMode: "ENDPOINT",
-        failureDomain: "SLA",
-        now
-      })
-    ).resolves.toMatchObject({
+    const result = await closeoutCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      verificationWatchMode: "ENDPOINT",
+      failureDomain: "SLA",
+      now
+    });
+    expect(result).toMatchObject({
       outcome: "needs_human",
       durableCloseoutRecorded: true,
-      automationStalledCount: 1
+      needsHumanCount: 1,
+      automationStalledCount: 1,
+      decisionBasis: {
+        normalizedIncidentCount: 1,
+        needsHumanCount: 1,
+        automationStalledCount: 1,
+        orchestrationOnlyCount: 0,
+        playbookExhaustedCount: 0,
+        incompletePlaybookCount: 1
+      }
     });
+    const persistedDecisionBasis = prismaMocks.batchUpdateMany.mock.calls.find(
+      ([update]) => update.data?.status === "PARTIAL"
+    )?.[0]?.data?.summary?.closeout?.decisionBasis;
+    expect(persistedDecisionBasis).toEqual(
+      (result as { decisionBasis: unknown }).decisionBasis
+    );
     expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({ activeBatchId: "batch-1" }),
@@ -19910,6 +20189,12 @@ describe("detached verification atomic batch fences", () => {
       derivedOutcome: "retryable_failed",
       failureDomain: "ENV",
       remediationAttemptConsumed: false,
+      decisionBasis: {
+        normalizedIncidentCount: 1,
+        needsHumanCount: 0,
+        orchestrationOnlyCount: 1,
+        playbookExhaustedCount: 0
+      },
       remediationAttempts: [
         expect.objectContaining({
           consumed: false,

@@ -34,7 +34,10 @@ import {
   type DeferredFailureHandoffSignal,
 } from "./course-support-deferred-failure-handoff";
 import { evaluateMonitoringGate } from "./policy";
-import { normalizeProviderFamilyKey } from "./provider-capabilities";
+import {
+  normalizeProviderFamilyKey,
+  resolveProviderCapability,
+} from "./provider-capabilities";
 import { sanitizeResponderText } from "./course-support-responder-policy";
 import { getAutomationRuntimeVersion } from "./runtime-version";
 
@@ -257,6 +260,7 @@ export async function scheduleCourseSupportVerificationRequests(input: {
           status: true,
           releaseSha: true,
           completedAt: true,
+          summary: true,
           incidents: {
             ...(input.batchIncidentIds
               ? { where: { id: { in: [...new Set(input.batchIncidentIds)] } } }
@@ -337,6 +341,15 @@ export async function scheduleCourseSupportVerificationRequests(input: {
         incidentCycle: number;
         deadlineAt: Date;
       }>;
+      const ineligibleReasonCounts: Partial<
+        Record<CourseSupportVerificationRejectionReason, number>
+      > = {};
+      const recordIneligibleReason = (
+        reason: CourseSupportVerificationRejectionReason,
+      ) => {
+        ineligibleReasonCounts[reason] =
+          (ineligibleReasonCounts[reason] ?? 0) + 1;
+      };
 
       for (const entry of batch.incidents) {
         const deadlineAt = getCourseSupportVerificationRequestDeadline({
@@ -344,6 +357,7 @@ export async function scheduleCourseSupportVerificationRequests(input: {
           escalationDeadlineAt: entry.incident.escalationDeadlineAt,
         });
         if (!deadlineAt) {
+          recordIneligibleReason("request_horizon_exceeded");
           endpointExpired.push({
             batchIncidentId: entry.id,
             incidentId: entry.incidentId,
@@ -365,6 +379,7 @@ export async function scheduleCourseSupportVerificationRequests(input: {
           "PROGRESSION",
         );
         if (!eligibility.eligible) {
+          recordIneligibleReason(eligibility.reason);
           continue;
         }
 
@@ -505,6 +520,15 @@ export async function scheduleCourseSupportVerificationRequests(input: {
         createdCount: created.count,
         eligibleCount: eligible.length,
         ineligibleCount: batch.incidents.length - eligible.length,
+        ...(Object.keys(ineligibleReasonCounts).length > 0
+          ? {
+              ineligibleReasonCounts: Object.fromEntries(
+                Object.entries(ineligibleReasonCounts).sort(([left], [right]) =>
+                  left.localeCompare(right),
+                ),
+              ),
+            }
+          : {}),
         requests,
       };
     },
@@ -2559,23 +2583,14 @@ type DetachedEligibilityInput = {
   batchStatus: string;
   batchReleaseSha: string | null;
   batchCompletedAt: Date | null;
+  batchSummary: Prisma.JsonValue | null;
   batchIncidentCourseId: string;
   batchIncidentId: string;
   batchIncidentIncidentId: string;
   batchIncidentCycle: number;
   batchIncidentVerifiedIncidentUpdatedAt: Date | null;
   courseId: string;
-  course: Pick<
-    ProviderCourseSnapshot,
-    | "timeZone"
-    | "bookingMethod"
-    | "automationEligibility"
-    | "automationReason"
-    | "isPublic"
-    | "intelligenceVerifiedAt"
-    | "intelligenceReviewAt"
-    | "intelligenceConfidence"
-  >;
+  course: ProviderCourseSnapshot;
   releaseSha: string;
   incident: {
     id: string;
@@ -2598,6 +2613,7 @@ function buildDetachedEligibilityInput(input: {
     status: string;
     releaseSha: string | null;
     completedAt: Date | null;
+    summary: Prisma.JsonValue | null;
   };
   batchIncident: {
     id: string;
@@ -2616,6 +2632,7 @@ function buildDetachedEligibilityInput(input: {
     batchStatus: input.batch.status,
     batchReleaseSha: input.batch.releaseSha,
     batchCompletedAt: input.batch.completedAt,
+    batchSummary: input.batch.summary,
     batchIncidentId: input.batchIncident.id,
     batchIncidentIncidentId: input.batchIncident.incidentId,
     batchIncidentCourseId: input.batchIncident.courseId,
@@ -2680,9 +2697,12 @@ async function evaluateDetachedEligibility(
   ) {
     return { eligible: true };
   }
+  const assignedBrowserAdapterProgression =
+    isAssignedZeroAttemptBrowserAdapterProgression(input);
   if (
+    !assignedBrowserAdapterProgression &&
     evaluateMonitoringGate({ ...input.course, now }).disposition !==
-    "ACTIONABLE"
+      "ACTIONABLE"
   ) {
     return { eligible: false, reason: "monitoring_not_actionable" };
   }
@@ -2748,6 +2768,54 @@ async function evaluateDetachedEligibility(
   input.incident.updatedAt = reconciledAt;
   input.batchIncidentVerifiedIncidentUpdatedAt = reconciledAt;
   return { eligible: true };
+}
+
+function isAssignedZeroAttemptBrowserAdapterProgression(
+  input: DetachedEligibilityInput,
+) {
+  const remediation = asJsonRecord(
+    asJsonRecord(input.batchSummary).remediation,
+  );
+  const rawRetryBudget = remediation.retryBudget;
+  const retryBudget = asJsonRecord(rawRetryBudget);
+  const retryBudgetAvailable =
+    rawRetryBudget === null ||
+    rawRetryBudget === undefined ||
+    (Number.isInteger(retryBudget.maximumAttempts) &&
+      Number.isInteger(retryBudget.attemptsCompleted) &&
+      Number.isInteger(retryBudget.attemptsRemaining) &&
+      (retryBudget.maximumAttempts as number) > 0 &&
+      (retryBudget.attemptsCompleted as number) >= 0 &&
+      (retryBudget.attemptsRemaining as number) ===
+        Math.max(
+          0,
+          (retryBudget.maximumAttempts as number) -
+            (retryBudget.attemptsCompleted as number),
+        ) &&
+      retryBudget.exhausted === false &&
+      (retryBudget.attemptsRemaining as number) > 0);
+  const playbook = assessAutomationPlaybook(
+    input.incident.attemptLedger,
+    input.incident.cycle,
+  );
+  const browserStage = playbook.stages.find(
+    (stage) => stage.stage === "BROWSER_ADAPTER_RETRY",
+  );
+  const providerCapability = resolveProviderCapability(input.course);
+  return Boolean(
+    remediation.workMode === "VERIFY_TRANSIENT" &&
+    remediation.strategyAction === "RUN_TYPED_ADAPTER" &&
+    remediation.playbookStage === "BROWSER_ADAPTER_RETRY" &&
+    remediation.allowUnchangedRuntime === true &&
+    remediation.requiresImplementationPath === false &&
+    retryBudgetAvailable &&
+    !providerCapability.isRunnable &&
+    playbook.valid === true &&
+    playbook.cycle === input.incident.cycle &&
+    playbook.conclusion === "INCOMPLETE" &&
+    playbook.nextStage === "BROWSER_ADAPTER_RETRY" &&
+    browserStage?.attemptCount === 0,
+  );
 }
 
 function validateExecutionOwnership(

@@ -2963,7 +2963,28 @@ describe("course monitoring write serialization", () => {
     );
   });
 
-  it("atomically resumes the exact requestless post-marker batch on a newer runtime", async () => {
+  it.each([
+    [
+      "rendered-browser",
+      {
+        completedStageCount: 4,
+        nextStage: "RENDERED_BROWSER_DISCOVERY" as const,
+        workMode: "DISCOVERY_ONLY",
+        strategyAction: "DISCOVER_WITH_BROWSER",
+      },
+    ],
+    [
+      "browser-adapter",
+      {
+        completedStageCount: 5,
+        nextStage: "BROWSER_ADAPTER_RETRY" as const,
+        workMode: "VERIFY_TRANSIENT",
+        strategyAction: "RUN_TYPED_ADAPTER",
+      },
+    ],
+  ])(
+    "plans and atomically resumes the exact requestless post-marker %s batch on a newer runtime",
+    async (_label, route) => {
     const capturedAt = new Date("2026-08-20T12:00:00.000Z");
     const admittedAt = new Date("2026-08-20T12:05:00.000Z");
     const firstEndpointAt = new Date("2026-08-20T12:15:00.000Z");
@@ -3012,20 +3033,28 @@ describe("course monitoring write serialization", () => {
         ["TYPED_ADAPTER", "TYPED_PROVIDER_ADAPTER"],
         ["OFFICIAL_HTTP_DISCOVERY", "OFFICIAL_HTTP"],
         ["HTTP_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER"],
-      ].map(([stage, readPath], index) => ({
-        sequence: index + 1,
-        cycle: 4,
-        stage,
-        transition: "NOT_APPLICABLE",
-        readPath,
-        evidenceKind: "TOOLING",
-        observedAt: new Date(
-          admittedAt.getTime() + index * 1_000,
-        ).toISOString(),
-        failureFingerprint: "SOURCE:MISSING",
-        runtimeVersion: priorRuntime,
-        skipReason: "NO_PROVIDER_METADATA",
-      })),
+        ...(route.completedStageCount === 5
+          ? [["RENDERED_BROWSER_DISCOVERY", "RENDERED_BROWSER"]]
+          : []),
+      ].map(([stage, readPath], index) => {
+        const renderedBrowser = stage === "RENDERED_BROWSER_DISCOVERY";
+        return {
+          sequence: index + 1,
+          cycle: 4,
+          stage,
+          transition: renderedBrowser ? "COMPLETED" : "NOT_APPLICABLE",
+          readPath,
+          evidenceKind: renderedBrowser ? "RENDERED_PAGE" : "TOOLING",
+          observedAt: new Date(
+            admittedAt.getTime() + index * 1_000,
+          ).toISOString(),
+          failureFingerprint: "SOURCE:MISSING",
+          runtimeVersion: priorRuntime,
+          ...(renderedBrowser
+            ? {}
+            : { skipReason: "NO_PROVIDER_METADATA" }),
+        };
+      }),
     };
     const attemptLedgerFingerprint =
       createParkedCourseCampaignAttemptLedgerFingerprint(attemptLedger);
@@ -3161,9 +3190,9 @@ describe("course monitoring write serialization", () => {
                   providerExecutionStarted: false,
                 },
                 approach: {
-                  workMode: "DISCOVERY_ONLY",
-                  strategyAction: "DISCOVER_WITH_BROWSER",
-                  playbookStage: "RENDERED_BROWSER_DISCOVERY",
+                  workMode: route.workMode,
+                  strategyAction: route.strategyAction,
+                  playbookStage: route.nextStage,
                 },
               },
             ],
@@ -3191,7 +3220,7 @@ describe("course monitoring write serialization", () => {
       playbookExhausted: false,
       automationStalled: true,
       parkedUntilMaterialChange: true,
-      nextStage: "RENDERED_BROWSER_DISCOVERY",
+      nextStage: route.nextStage,
       campaign: {
         kind: "PARKED_COHORT",
         runId: "campaign-run-1",
@@ -3231,8 +3260,8 @@ describe("course monitoring write serialization", () => {
           attemptLedgerFingerprint,
           latestProbeAt: null,
           latestDiscoveryAt: legacyDiscovery.createdAt.toISOString(),
-          playbookCompletedStageCount: 4,
-          playbookNextStage: "RENDERED_BROWSER_DISCOVERY",
+          playbookCompletedStageCount: route.completedStageCount,
+          playbookNextStage: route.nextStage,
           recoveryRuntimeVersion: priorRuntime,
           sameCycleRecovery: true,
           oneShot: true,
@@ -3362,36 +3391,54 @@ describe("course monitoring write serialization", () => {
         currentRuntimeVersion: currentRuntime,
       });
     expect(recoveryAssessment).not.toBeNull();
+    const plannerFindMany = vi.fn().mockResolvedValue([baseIncident]);
+    const plannedMembers = await loadParkedCourseCampaignAdmissionMembers(
+      campaignAudit,
+      {
+        courseSupportIncident: { findMany: plannerFindMany },
+      } as never,
+      "campaign-run-1",
+      currentRuntime,
+    );
+    expect(plannedMembers).toEqual([
+      expect.objectContaining({
+        admissionMode: "POST_MARKER_INCOMPLETE_PLAYBOOK_RECOVERY",
+        playbookCompletedStageCount: route.completedStageCount,
+        playbookNextStage: route.nextStage,
+      }),
+    ]);
+    const planned = plannedMembers[0]!;
     const input = {
-      courseId: "course-1",
-      incidentId: "incident-campaign",
-      expectedCycle: 4,
-      expectedRevision: 10,
-      expectedMonitoringRevision: 16,
-      capturedRevision: 5,
-      capturedMonitoringRevision: 9,
-      capturedCycle: 3,
-      campaignCapturedAt: campaignAudit.capturedAt,
-      admissionMode: "POST_MARKER_INCOMPLETE_PLAYBOOK_RECOVERY" as const,
+      courseId: planned.courseId,
+      incidentId: planned.incidentId,
+      expectedCycle: planned.cycle,
+      expectedRevision: planned.revision,
+      expectedMonitoringRevision: planned.monitoringRevision,
+      capturedRevision: planned.capturedRevision,
+      capturedMonitoringRevision: planned.capturedMonitoringRevision,
+      capturedCycle: planned.capturedCycle,
+      campaignCapturedAt: planned.campaignCapturedAt,
+      admissionMode: planned.admissionMode,
       expectedSameCycleRecoveryHistoryDigest:
-        recoveryAssessment!.history.historyDigest,
-      expectedPlaybookNextStage: "RENDERED_BROWSER_DISCOVERY",
-      expectedPlaybookCompletedStageCount: 4,
+        planned.sameCycleRecoveryHistoryDigest,
+      expectedPlaybookNextStage: planned.playbookNextStage,
+      expectedPlaybookCompletedStageCount: planned.playbookCompletedStageCount,
       currentRuntimeVersion: currentRuntime,
-      capturedKind: "NEEDS_ADAPTER" as const,
-      capturedProviderFamilyKey: "SOURCE_MISSING",
-      expectedKind: "NEEDS_ADAPTER" as const,
-      expectedFailureClass: "MISSING_SOURCE" as const,
-      expectedLatestProbeAt: null,
-      expectedLatestDiscoveryAt: legacyDiscovery.createdAt.toISOString(),
-      expectedLatestProbeId: null,
-      expectedLatestDiscoveryId: legacyDiscovery.id,
-      expectedProviderFamilyKey: "SOURCE_MISSING",
-      expectedFailureFingerprint: "SOURCE:MISSING",
-      expectedMonitoringFailureFingerprint: "SOURCE:MISSING",
-      expectedProviderSnapshotFingerprint: providerSnapshotFingerprint,
-      expectedAttemptLedgerFingerprint: attemptLedgerFingerprint,
-      expectedPlaybookConclusion: "INCOMPLETE",
+      capturedKind: planned.capturedKind,
+      capturedProviderFamilyKey: planned.capturedProviderFamilyKey,
+      expectedKind: planned.kind,
+      expectedFailureClass: planned.failureClass,
+      expectedLatestProbeAt: planned.latestProbeAt,
+      expectedLatestDiscoveryAt: planned.latestDiscoveryAt,
+      expectedLatestProbeId: planned.latestProbeId,
+      expectedLatestDiscoveryId: planned.latestDiscoveryId,
+      expectedProviderFamilyKey: planned.providerFamilyKey,
+      expectedFailureFingerprint: planned.failureFingerprint,
+      expectedMonitoringFailureFingerprint:
+        planned.monitoringFailureFingerprint,
+      expectedProviderSnapshotFingerprint: planned.providerSnapshotFingerprint,
+      expectedAttemptLedgerFingerprint: planned.attemptLedgerFingerprint,
+      expectedPlaybookConclusion: planned.playbookConclusion,
       campaignRunId: "campaign-run-1",
       campaignMembershipDigest: campaignAudit.membershipDigest,
       now: recoveredAt,
@@ -3504,8 +3551,8 @@ describe("course monitoring write serialization", () => {
             startedRequestCount: 1,
             supersededEndpointId: "endpoint-post-marker",
             supersededEndpointAt: finalEndpointAt.toISOString(),
-            playbookCompletedStageCount: 4,
-            playbookNextStage: "RENDERED_BROWSER_DISCOVERY",
+            playbookCompletedStageCount: route.completedStageCount,
+            playbookNextStage: route.nextStage,
             preservesOperatorEvidence: true,
             customerDataIncluded: false,
           }),
@@ -3523,6 +3570,25 @@ describe("course monitoring write serialization", () => {
       legacyDiscovery.courseId,
       legacyDiscovery.createdAt,
     ]);
+
+    arrangeBase();
+    await expect(
+      reopenParkedCourseForResponderCampaignInTransaction(
+        transactionMocks as never,
+        {
+          ...input,
+          expectedPlaybookCompletedStageCount:
+            route.completedStageCount === 4 ? 5 : 4,
+          expectedPlaybookNextStage:
+            route.nextStage === "RENDERED_BROWSER_DISCOVERY"
+              ? "BROWSER_ADAPTER_RETRY"
+              : "RENDERED_BROWSER_DISCOVERY",
+        },
+      ),
+    ).resolves.toEqual({ admitted: false });
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).not.toHaveBeenCalled();
 
     arrangeBase();
     transactionMocks.$queryRaw.mockImplementation(

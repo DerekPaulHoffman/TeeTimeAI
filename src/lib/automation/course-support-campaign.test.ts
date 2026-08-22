@@ -1868,7 +1868,7 @@ describe("parked course campaign", () => {
     }
   });
 
-  it("plans one post-marker rendered-browser recovery only on a newer exact runtime", async () => {
+  it("plans one post-marker browser-stage recovery only on a newer exact runtime", async () => {
     const admittedAt = new Date("2026-08-20T12:05:00.000Z");
     const priorBatchCompletedAt = new Date("2026-08-20T12:12:00.000Z");
     const priorEndpointAt = new Date("2026-08-20T12:15:00.000Z");
@@ -2138,6 +2138,38 @@ describe("parked course campaign", () => {
         findMany,
       };
     };
+    const makeBrowserAdapterRow = () => {
+      const row = structuredClone(makeRow());
+      const browserAdapterLedger = partialPlaybookLedger(4, 5);
+      row.attemptLedger = browserAdapterLedger;
+      const browserAdapterLedgerFingerprint =
+        createParkedCourseCampaignAttemptLedgerFingerprint(
+          browserAdapterLedger,
+        );
+      for (const event of [
+        row.monitoringEvents[0]!,
+        row.monitoringEvents[2]!,
+      ]) {
+        (event.audit as Record<string, unknown>).nextStage =
+          "BROWSER_ADAPTER_RETRY";
+      }
+      const markerAudit = row.monitoringEvents[1]!.audit as Record<
+        string,
+        unknown
+      >;
+      markerAudit.attemptLedgerFingerprint = browserAdapterLedgerFingerprint;
+      markerAudit.playbookCompletedStageCount = 5;
+      markerAudit.playbookNextStage = "BROWSER_ADAPTER_RETRY";
+      const summary = row.batchIncidents[1]!.batch.summary as {
+        closeout: { remediationAttempts: Array<Record<string, unknown>> };
+      };
+      const approach = summary.closeout.remediationAttempts[0]!
+        .approach as Record<string, unknown>;
+      approach.workMode = "VERIFY_TRANSIENT";
+      approach.strategyAction = "RUN_TYPED_ADAPTER";
+      approach.playbookStage = "BROWSER_ADAPTER_RETRY";
+      return row;
+    };
 
     const positive = database(makeRow());
     const planned = await loadParkedCourseCampaignAdmissionMembers(
@@ -2168,6 +2200,24 @@ describe("parked course campaign", () => {
         }),
       }),
     );
+
+    const browserAdapter = database(makeBrowserAdapterRow());
+    await expect(
+      loadParkedCourseCampaignAdmissionMembers(
+        audit,
+        browserAdapter.database,
+        "campaign-run-1",
+        currentRuntime,
+      ),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        admissionMode: "POST_MARKER_INCOMPLETE_PLAYBOOK_RECOVERY",
+        capturedCycle: 3,
+        cycle: 4,
+        playbookCompletedStageCount: 5,
+        playbookNextStage: "BROWSER_ADAPTER_RETRY",
+      }),
+    ]);
 
     await expect(
       loadParkedCourseCampaignAdmissionMembers(
