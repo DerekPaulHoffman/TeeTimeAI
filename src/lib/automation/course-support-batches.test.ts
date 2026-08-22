@@ -96,7 +96,10 @@ import {
   createParkedCourseCampaignAudit,
   PARKED_COURSE_CAMPAIGN_PROMPT_VERSION,
 } from "./course-support-campaign";
-import { COURSE_SUPPORT_RESPONDER_PROMPT_VERSION } from "./course-support-responder-policy";
+import {
+  COURSE_SUPPORT_RESPONDER_PROMPT_VERSION,
+  sanitizeResponderValue,
+} from "./course-support-responder-policy";
 import {
   createDeferredFailureHandoffAdmission,
   createDeferredFailureHandoffBatchIncidentDigest,
@@ -111,6 +114,7 @@ import {
   appendCourseSupportBatchPath,
   assessCourseSupportRecovery,
   assessCourseSupportReleaseTransition,
+  buildCourseSupportCloseoutRemediationDecisionBasis,
   buildFailureFingerprint,
   buildCourseSupportResponderHandoff,
   buildCourseSupportReleaseHistory,
@@ -166,6 +170,973 @@ import {
 } from "./course-support-search-execution-fence";
 
 const now = new Date("2026-07-15T20:00:00.000Z");
+
+const decisionRuntimeVersion = "a".repeat(40);
+const decisionProviderFingerprint = "b".repeat(64);
+const decisionFailureFingerprint = "c".repeat(64);
+const decisionObservedFailureFingerprint = "d".repeat(64);
+
+function decisionAttemptPair(input: {
+  courseId: string;
+  retryBudget: {
+    maximumAttempts: number;
+    attemptsCompleted: number;
+    attemptsRemaining: number;
+    exhausted: boolean;
+  } | null;
+  cooldownUntil?: string | null;
+  execution?: Partial<{
+    claimedImplementationPaths: boolean;
+    newReleaseRecorded: boolean;
+    deploymentRecorded: boolean;
+    postProbeRecorded: boolean;
+    providerAttemptRecorded: boolean;
+    providerExecutionAttemptRecorded: boolean;
+    playbookAttemptRecorded: boolean;
+    terminalResultRecorded: boolean;
+    providerExecutionStarted: boolean;
+  }>;
+  observedFailureFingerprint?: string;
+  plannedDeferred?: Record<string, unknown>;
+  closeoutDeferred?: Record<string, unknown>;
+}) {
+  const courseRef = createHash("sha256").update(input.courseId).digest("hex").slice(0, 24);
+  const approach = {
+    workMode: "VERIFY_TRANSIENT",
+    strategyAction: "RETRY_PROVIDER",
+    playbookStage: null
+  };
+  const executionEvidence = {
+    claimedImplementationPaths: false,
+    newReleaseRecorded: false,
+    deploymentRecorded: false,
+    postProbeRecorded: false,
+    providerAttemptRecorded: false,
+    providerExecutionAttemptRecorded: false,
+    playbookAttemptRecorded: false,
+    terminalResultRecorded: false,
+    providerExecutionStarted: false,
+    ...input.execution
+  };
+  const consumed =
+    executionEvidence.deploymentRecorded ||
+    executionEvidence.providerAttemptRecorded ||
+    executionEvidence.playbookAttemptRecorded ||
+    executionEvidence.terminalResultRecorded;
+  const countsTowardOperationalNoProgress =
+    consumed ||
+    executionEvidence.providerExecutionAttemptRecorded ||
+    executionEvidence.providerExecutionStarted;
+  return {
+    planned: {
+      courseRef,
+      providerSnapshotFingerprint: decisionProviderFingerprint,
+      failureFingerprint: decisionFailureFingerprint,
+      runtimeVersion: decisionRuntimeVersion,
+      activeRealSearchCount: 0,
+      playbookEventCountAtClaim: 0,
+      reason: "TRANSIENT_RETRY_AVAILABLE",
+      retryBudget: input.retryBudget,
+      approach,
+      ...input.plannedDeferred
+    },
+    closeout: {
+      courseRef,
+      providerSnapshotFingerprint: decisionProviderFingerprint,
+      observedProviderSnapshotFingerprint: decisionProviderFingerprint,
+      failureFingerprint: decisionFailureFingerprint,
+      observedFailureFingerprint: input.observedFailureFingerprint ?? decisionFailureFingerprint,
+      failureOnlyHandoffCooldownUntil: input.cooldownUntil ?? null,
+      runtimeVersion: decisionRuntimeVersion,
+      activeRealSearchCount: 0,
+      consumed,
+      countsTowardOperationalNoProgress,
+      executionEvidence,
+      retryBudget: input.retryBudget,
+      operationalRetry: null,
+      orchestrationRetry: null,
+      approach,
+      ...input.closeoutDeferred
+    }
+  };
+}
+
+function decisionDeferredCarrier(input: {
+  courseId: string;
+  batchIncidentId: string;
+  includePlannedArtifacts?: boolean;
+  plannedSourceProofDigest?: string;
+  closeoutSourceProofDigest?: string;
+  plannedAdmittedAt?: Date;
+  closeoutAdmittedAt?: Date;
+  closeoutBatchIncidentDigest?: string;
+  confirmationStarted?: boolean;
+  invalidated?: boolean;
+}) {
+  const cooldownExpiresAt = "2026-07-15T20:30:00.000Z";
+  const confirmationStarted = input.confirmationStarted ?? true;
+  const commonSignal = {
+    providerFamilyKey: "booking.example",
+    canonicalFailureFingerprint: decisionFailureFingerprint,
+    observedFailureFingerprint: decisionObservedFailureFingerprint,
+    claimedProviderSnapshotFingerprint: decisionProviderFingerprint,
+    observedProviderSnapshotFingerprint: decisionProviderFingerprint,
+    runtimeVersion: decisionRuntimeVersion,
+    cooldownExpiresAt,
+    providerNotBeforeAt: null,
+    eligibleAt: cooldownExpiresAt,
+    sourceVerificationWatchMode: "WATCH_SETTLED" as const,
+    sourceResult: "RETRY_SCHEDULED" as const,
+    sourceAttemptConsumed: true as const,
+  };
+  const sourceSignal = createDeferredFailureHandoffSignal({
+    ...commonSignal,
+    state: "AVAILABLE",
+    sourceBatchIncidentDigest: "f".repeat(64),
+    sourceProofDigest: input.plannedSourceProofDigest ?? "e".repeat(64),
+    confirmationStarted: false,
+  });
+  const consumedSignal = createDeferredFailureHandoffSignal({
+    ...commonSignal,
+    state: "CONSUMED",
+    sourceBatchIncidentDigest:
+      input.closeoutBatchIncidentDigest ??
+      createDeferredFailureHandoffBatchIncidentDigest(input.batchIncidentId),
+    sourceProofDigest:
+      input.closeoutSourceProofDigest ??
+      input.plannedSourceProofDigest ??
+      "e".repeat(64),
+    confirmationStarted,
+  });
+  const plannedAdmittedAt =
+    input.plannedAdmittedAt ?? new Date("2026-07-15T19:45:00.000Z");
+  const closeoutAdmittedAt = input.closeoutAdmittedAt ?? plannedAdmittedAt;
+  return decisionAttemptPair({
+    courseId: input.courseId,
+    retryBudget: null,
+    cooldownUntil: cooldownExpiresAt,
+    observedFailureFingerprint: decisionObservedFailureFingerprint,
+    execution: confirmationStarted
+      ? { providerExecutionStarted: true }
+      : undefined,
+    plannedDeferred:
+      input.includePlannedArtifacts === false
+        ? undefined
+        : {
+            deferredFailureHandoffSource: sourceSignal,
+            deferredFailureHandoffAdmission:
+              createDeferredFailureHandoffAdmission({
+                signal: sourceSignal,
+                admittedAt: plannedAdmittedAt,
+              }),
+          },
+    closeoutDeferred: {
+      deferredFailureHandoff: consumedSignal,
+      deferredFailureHandoffAdmission:
+        createDeferredFailureHandoffAdmission({
+          signal: consumedSignal,
+          admittedAt: closeoutAdmittedAt,
+        }),
+      ...(input.invalidated
+        ? {
+            deferredFailureHandoffInvalidation: {
+              schemaVersion: 1,
+              reason: "MUTABLE_CURRENT_STATE_CHANGED",
+              signalDigest: consumedSignal.signalDigest,
+              customerDataIncluded: false,
+            },
+          }
+        : {}),
+    },
+  });
+}
+
+function expectDecisionBasisReconciles(
+  result: ReturnType<
+    typeof buildCourseSupportCloseoutRemediationDecisionBasis
+  >,
+  incidentCount: number,
+) {
+  expect(
+    result.remediationEvidenceAvailableIncidentCount +
+      result.remediationEvidenceUnavailableIncidentCount,
+  ).toBe(incidentCount);
+  expect(
+    result.executionEvidenceAvailableIncidentCount +
+      result.executionEvidenceUnavailableIncidentCount,
+  ).toBe(incidentCount);
+  expect(
+    result.retryBudgetEvidenceAvailableIncidentCount +
+      result.retryBudgetUnavailableIncidentCount,
+  ).toBe(incidentCount);
+  expect(
+    result.cooldownEvidenceAvailableIncidentCount +
+      result.cooldownEvidenceUnavailableIncidentCount,
+  ).toBe(incidentCount);
+  expect(
+    result.deferredSignalEvidenceAvailableIncidentCount +
+      result.deferredSignalEvidenceUnavailableIncidentCount,
+  ).toBe(incidentCount);
+
+  if (result.executionEvidenceUnavailableIncidentCount === 0) {
+    expect(result.providerExecutionStartedIncidentCount).not.toBeNull();
+    expect(result.providerExecutionAttemptRecordedIncidentCount).not.toBeNull();
+    expect(result.providerExecutionCompletedIncidentCount).not.toBeNull();
+    expect(result.providerExecutionStartedIncidentCount!).toBeLessThanOrEqual(
+      incidentCount,
+    );
+    expect(
+      result.providerExecutionAttemptRecordedIncidentCount!,
+    ).toBeLessThanOrEqual(incidentCount);
+    expect(result.providerExecutionCompletedIncidentCount!).toBeLessThanOrEqual(
+      result.providerExecutionAttemptRecordedIncidentCount!,
+    );
+  }
+
+  if (result.retryBudgetUnavailableIncidentCount === 0) {
+    expect(
+      result.retryBudgetApplicableIncidentCount! +
+        result.retryBudgetNotApplicableIncidentCount!,
+    ).toBe(incidentCount);
+    if (result.retryBudgetApplicableIncidentCount! > 0) {
+      expect(Number.isSafeInteger(result.retryBudgetAttemptsRemainingTotal)).toBe(
+        true,
+      );
+      expect(result.retryBudgetExhaustedIncidentCount!).toBeLessThanOrEqual(
+        result.retryBudgetApplicableIncidentCount!,
+      );
+    } else {
+      expect(result.retryBudgetAttemptsRemainingTotal).toBeNull();
+      expect(result.retryBudgetExhaustedIncidentCount).toBeNull();
+    }
+  }
+
+  if (result.cooldownEvidenceUnavailableIncidentCount === 0) {
+    expect(
+      result.cooldownApplicableIncidentCount! +
+        result.cooldownNotApplicableIncidentCount!,
+    ).toBe(incidentCount);
+    if (result.cooldownApplicableIncidentCount! > 0) {
+      expect(result.activeCooldownIncidentCount!).toBeLessThanOrEqual(
+        result.cooldownApplicableIncidentCount!,
+      );
+    } else {
+      expect(result.activeCooldownIncidentCount).toBeNull();
+    }
+  }
+
+  if (result.deferredSignalEvidenceUnavailableIncidentCount === 0) {
+    expect(
+      result.deferredSignalApplicableIncidentCount! +
+        result.deferredSignalNotApplicableIncidentCount!,
+    ).toBe(incidentCount);
+    if (result.deferredSignalApplicableIncidentCount! > 0) {
+      expect(
+        result.deferredSignalAvailableIncidentCount! +
+          result.deferredSignalConsumedIncidentCount!,
+      ).toBe(result.deferredSignalApplicableIncidentCount);
+    } else {
+      expect(result.deferredSignalAvailableIncidentCount).toBeNull();
+      expect(result.deferredSignalConsumedIncidentCount).toBeNull();
+    }
+  }
+}
+
+describe("course-support closeout decision basis", () => {
+  it("aggregates exact multi-course execution, budget, and cooldown evidence", () => {
+    const first = decisionAttemptPair({
+      courseId: "decision-course-1",
+      retryBudget: {
+        maximumAttempts: 4,
+        attemptsCompleted: 1,
+        attemptsRemaining: 3,
+        exhausted: false
+      },
+      cooldownUntil: "2026-07-15T20:30:00.000Z",
+      execution: {
+        providerExecutionStarted: true,
+        providerExecutionAttemptRecorded: true,
+        providerAttemptRecorded: true
+      }
+    });
+    const second = decisionAttemptPair({
+      courseId: "decision-course-2",
+      retryBudget: null,
+      cooldownUntil: "2026-07-15T19:30:00.000Z"
+    });
+
+    const result = buildCourseSupportCloseoutRemediationDecisionBasis({
+      incidents: [
+        {
+          courseId: "decision-course-1",
+          batchIncidentId: "decision-entry-1"
+        },
+        {
+          courseId: "decision-course-2",
+          batchIncidentId: "decision-entry-2"
+        }
+      ],
+      plannedAttempts: [first.planned, second.planned],
+      closeoutAttempts: [first.closeout, second.closeout],
+      now
+    });
+
+    expect(result).toEqual({
+      remediationEvidenceAvailableIncidentCount: 2,
+      remediationEvidenceUnavailableIncidentCount: 0,
+      executionEvidenceAvailableIncidentCount: 2,
+      executionEvidenceUnavailableIncidentCount: 0,
+      providerExecutionStartedIncidentCount: 1,
+      providerExecutionAttemptRecordedIncidentCount: 1,
+      providerExecutionCompletedIncidentCount: 1,
+      retryBudgetEvidenceAvailableIncidentCount: 2,
+      retryBudgetUnavailableIncidentCount: 0,
+      retryBudgetApplicableIncidentCount: 1,
+      retryBudgetNotApplicableIncidentCount: 1,
+      retryBudgetAttemptsRemainingTotal: 3,
+      retryBudgetExhaustedIncidentCount: 0,
+      cooldownEvidenceAvailableIncidentCount: 2,
+      cooldownEvidenceUnavailableIncidentCount: 0,
+      cooldownApplicableIncidentCount: 2,
+      cooldownNotApplicableIncidentCount: 0,
+      activeCooldownIncidentCount: 1,
+      deferredSignalEvidenceAvailableIncidentCount: 2,
+      deferredSignalEvidenceUnavailableIncidentCount: 0,
+      deferredSignalApplicableIncidentCount: 0,
+      deferredSignalNotApplicableIncidentCount: 2,
+      deferredSignalAvailableIncidentCount: null,
+      deferredSignalConsumedIncidentCount: null
+    });
+    expect(
+      result.remediationEvidenceAvailableIncidentCount +
+        result.remediationEvidenceUnavailableIncidentCount
+    ).toBe(2);
+    expect(
+      result.executionEvidenceAvailableIncidentCount +
+        result.executionEvidenceUnavailableIncidentCount
+    ).toBe(2);
+    expect(
+      result.retryBudgetEvidenceAvailableIncidentCount + result.retryBudgetUnavailableIncidentCount
+    ).toBe(2);
+    expectDecisionBasisReconciles(result, 2);
+  });
+
+  it.each([
+    {
+      label: "not applicable",
+      retryBudget: null,
+      mutate: () => {},
+      expected: {
+        retryBudgetEvidenceAvailableIncidentCount: 1,
+        retryBudgetUnavailableIncidentCount: 0,
+        retryBudgetApplicableIncidentCount: 0,
+        retryBudgetNotApplicableIncidentCount: 1,
+        retryBudgetAttemptsRemainingTotal: null,
+        retryBudgetExhaustedIncidentCount: null
+      }
+    },
+    {
+      label: "available with a proven zero exhausted count",
+      retryBudget: {
+        maximumAttempts: 2,
+        attemptsCompleted: 0,
+        attemptsRemaining: 2,
+        exhausted: false
+      },
+      mutate: () => {},
+      expected: {
+        retryBudgetEvidenceAvailableIncidentCount: 1,
+        retryBudgetUnavailableIncidentCount: 0,
+        retryBudgetApplicableIncidentCount: 1,
+        retryBudgetNotApplicableIncidentCount: 0,
+        retryBudgetAttemptsRemainingTotal: 2,
+        retryBudgetExhaustedIncidentCount: 0
+      }
+    },
+    {
+      label: "unavailable when arithmetic is malformed",
+      retryBudget: {
+        maximumAttempts: 2,
+        attemptsCompleted: 0,
+        attemptsRemaining: 2,
+        exhausted: false
+      },
+      mutate: (pair: ReturnType<typeof decisionAttemptPair>) => {
+        pair.closeout.retryBudget = {
+          maximumAttempts: 2,
+          attemptsCompleted: 1,
+          attemptsRemaining: 2,
+          exhausted: false
+        };
+      },
+      expected: {
+        retryBudgetEvidenceAvailableIncidentCount: 0,
+        retryBudgetUnavailableIncidentCount: 1,
+        retryBudgetApplicableIncidentCount: null,
+        retryBudgetNotApplicableIncidentCount: null,
+        retryBudgetAttemptsRemainingTotal: null,
+        retryBudgetExhaustedIncidentCount: null
+      }
+    },
+    {
+      label: "unavailable when an integer is unsafe",
+      retryBudget: {
+        maximumAttempts: 2,
+        attemptsCompleted: 0,
+        attemptsRemaining: 2,
+        exhausted: false
+      },
+      mutate: (pair: ReturnType<typeof decisionAttemptPair>) => {
+        const unsafeBudget = {
+          maximumAttempts: Number.MAX_SAFE_INTEGER + 1,
+          attemptsCompleted: 0,
+          attemptsRemaining: Number.MAX_SAFE_INTEGER + 1,
+          exhausted: false
+        };
+        pair.planned.retryBudget = unsafeBudget;
+        pair.closeout.retryBudget = unsafeBudget;
+      },
+      expected: {
+        retryBudgetEvidenceAvailableIncidentCount: 0,
+        retryBudgetUnavailableIncidentCount: 1,
+        retryBudgetApplicableIncidentCount: null,
+        retryBudgetNotApplicableIncidentCount: null,
+        retryBudgetAttemptsRemainingTotal: null,
+        retryBudgetExhaustedIncidentCount: null
+      }
+    }
+  ])("keeps retry budget evidence $label", ({ retryBudget, mutate, expected }) => {
+    const pair = decisionAttemptPair({
+      courseId: "decision-course-1",
+      retryBudget
+    });
+    mutate(pair);
+    const result = buildCourseSupportCloseoutRemediationDecisionBasis({
+      incidents: [
+        {
+          courseId: "decision-course-1",
+          batchIncidentId: "decision-entry-1"
+        }
+      ],
+      plannedAttempts: [pair.planned],
+      closeoutAttempts: [pair.closeout],
+      now
+    });
+    expect(result).toMatchObject(expected);
+    expect(
+      result.retryBudgetEvidenceAvailableIncidentCount + result.retryBudgetUnavailableIncidentCount
+    ).toBe(1);
+    expectDecisionBasisReconciles(result, 1);
+  });
+
+  it("fails the whole retry aggregate closed when exact per-incident totals overflow", () => {
+    const retryBudget = {
+      maximumAttempts: Number.MAX_SAFE_INTEGER,
+      attemptsCompleted: 0,
+      attemptsRemaining: Number.MAX_SAFE_INTEGER,
+      exhausted: false,
+    };
+    const first = decisionAttemptPair({
+      courseId: "decision-course-1",
+      retryBudget,
+    });
+    const second = decisionAttemptPair({
+      courseId: "decision-course-2",
+      retryBudget,
+    });
+    const result = buildCourseSupportCloseoutRemediationDecisionBasis({
+      incidents: [
+        { courseId: "decision-course-1", batchIncidentId: "decision-entry-1" },
+        { courseId: "decision-course-2", batchIncidentId: "decision-entry-2" },
+      ],
+      plannedAttempts: [first.planned, second.planned],
+      closeoutAttempts: [first.closeout, second.closeout],
+      now,
+    });
+
+    expect(result).toMatchObject({
+      retryBudgetEvidenceAvailableIncidentCount: 0,
+      retryBudgetUnavailableIncidentCount: 2,
+      retryBudgetApplicableIncidentCount: null,
+      retryBudgetNotApplicableIncidentCount: null,
+      retryBudgetAttemptsRemainingTotal: null,
+      retryBudgetExhaustedIncidentCount: null,
+    });
+    expectDecisionBasisReconciles(result, 2);
+  });
+
+  it.each([
+    {
+      label: "not applicable when the exact cooldown is null",
+      cooldownUntil: null,
+      expected: {
+        providerExecutionStartedIncidentCount: 0,
+        providerExecutionAttemptRecordedIncidentCount: 0,
+        providerExecutionCompletedIncidentCount: 0,
+        cooldownEvidenceAvailableIncidentCount: 1,
+        cooldownEvidenceUnavailableIncidentCount: 0,
+        cooldownApplicableIncidentCount: 0,
+        cooldownNotApplicableIncidentCount: 1,
+        activeCooldownIncidentCount: null,
+      },
+    },
+    {
+      label: "an exact zero when the applicable cooldown elapsed",
+      cooldownUntil: "2026-07-15T19:30:00.000Z",
+      expected: {
+        cooldownEvidenceAvailableIncidentCount: 1,
+        cooldownEvidenceUnavailableIncidentCount: 0,
+        cooldownApplicableIncidentCount: 1,
+        cooldownNotApplicableIncidentCount: 0,
+        activeCooldownIncidentCount: 0,
+      },
+    },
+  ])("reports active cooldown as $label", ({ cooldownUntil, expected }) => {
+    const pair = decisionAttemptPair({
+      courseId: "decision-course-1",
+      retryBudget: null,
+      cooldownUntil,
+    });
+    const result = buildCourseSupportCloseoutRemediationDecisionBasis({
+      incidents: [
+        { courseId: "decision-course-1", batchIncidentId: "decision-entry-1" },
+      ],
+      plannedAttempts: [pair.planned],
+      closeoutAttempts: [pair.closeout],
+      now,
+    });
+
+    expect(result).toMatchObject(expected);
+    expect(
+      result.cooldownEvidenceAvailableIncidentCount +
+        result.cooldownEvidenceUnavailableIncidentCount,
+    ).toBe(1);
+    expectDecisionBasisReconciles(result, 1);
+  });
+
+  it.each([
+    {
+      label: "missing",
+      mutate: (pair: ReturnType<typeof decisionAttemptPair>) => {
+        delete pair.closeout.failureOnlyHandoffCooldownUntil;
+      },
+    },
+    {
+      label: "malformed",
+      mutate: (pair: ReturnType<typeof decisionAttemptPair>) => {
+        pair.closeout.failureOnlyHandoffCooldownUntil = "not-an-iso-date";
+      },
+    },
+  ])("fails $label cooldown evidence closed", ({ mutate }) => {
+    const pair = decisionAttemptPair({
+      courseId: "decision-course-1",
+      retryBudget: null,
+    });
+    mutate(pair);
+    const result = buildCourseSupportCloseoutRemediationDecisionBasis({
+      incidents: [
+        { courseId: "decision-course-1", batchIncidentId: "decision-entry-1" },
+      ],
+      plannedAttempts: [pair.planned],
+      closeoutAttempts: [pair.closeout],
+      now,
+    });
+
+    expect(result).toMatchObject({
+      cooldownEvidenceAvailableIncidentCount: 0,
+      cooldownEvidenceUnavailableIncidentCount: 1,
+      cooldownApplicableIncidentCount: null,
+      cooldownNotApplicableIncidentCount: null,
+      activeCooldownIncidentCount: null,
+    });
+    expectDecisionBasisReconciles(result, 1);
+  });
+
+  it.each([
+    {
+      label: "duplicate matching attempts",
+      mutate: (pair: ReturnType<typeof decisionAttemptPair>) => ({
+        plannedAttempts: [pair.planned, { ...pair.planned }],
+        closeoutAttempts: [pair.closeout],
+      }),
+      expectedRemediationAvailable: 0,
+    },
+    {
+      label: "an extra unmatched attempt",
+      mutate: (pair: ReturnType<typeof decisionAttemptPair>) => {
+        const extra = decisionAttemptPair({
+          courseId: "unexpected-course",
+          retryBudget: null,
+        });
+        return {
+          plannedAttempts: [pair.planned, extra.planned],
+          closeoutAttempts: [pair.closeout],
+        };
+      },
+      expectedRemediationAvailable: 0,
+    },
+    {
+      label: "incoherent execution booleans",
+      mutate: (pair: ReturnType<typeof decisionAttemptPair>) => {
+        pair.closeout.executionEvidence.providerExecutionStarted = true;
+        return {
+          plannedAttempts: [pair.planned],
+          closeoutAttempts: [pair.closeout],
+        };
+      },
+      expectedRemediationAvailable: 1,
+    },
+    {
+      label: "an extra execution-evidence key",
+      mutate: (pair: ReturnType<typeof decisionAttemptPair>) => {
+        Object.assign(pair.closeout.executionEvidence, { extra: false });
+        return {
+          plannedAttempts: [pair.planned],
+          closeoutAttempts: [pair.closeout],
+        };
+      },
+      expectedRemediationAvailable: 1,
+    },
+  ])("fails $label closed independently", ({ mutate, expectedRemediationAvailable }) => {
+    const pair = decisionAttemptPair({
+      courseId: "decision-course-1",
+      retryBudget: null,
+    });
+    const attempts = mutate(pair);
+
+    const result = buildCourseSupportCloseoutRemediationDecisionBasis({
+      incidents: [
+        {
+          courseId: "decision-course-1",
+          batchIncidentId: "decision-entry-1",
+        },
+      ],
+      ...attempts,
+      now,
+    });
+
+    expect(result).toMatchObject({
+      remediationEvidenceAvailableIncidentCount: expectedRemediationAvailable,
+      remediationEvidenceUnavailableIncidentCount:
+        1 - expectedRemediationAvailable,
+      executionEvidenceAvailableIncidentCount: 0,
+      executionEvidenceUnavailableIncidentCount: 1,
+      providerExecutionStartedIncidentCount: null,
+      providerExecutionAttemptRecordedIncidentCount: null,
+      providerExecutionCompletedIncidentCount: null,
+    });
+    expectDecisionBasisReconciles(result, 1);
+  });
+
+  it("keeps mixed evidence availability explicit while nulling partial execution totals", () => {
+    const exact = decisionAttemptPair({
+      courseId: "decision-course-1",
+      retryBudget: null,
+    });
+    const incoherent = decisionAttemptPair({
+      courseId: "decision-course-2",
+      retryBudget: null,
+    });
+    incoherent.closeout.executionEvidence.providerExecutionStarted = true;
+
+    const result = buildCourseSupportCloseoutRemediationDecisionBasis({
+      incidents: [
+        { courseId: "decision-course-1", batchIncidentId: "decision-entry-1" },
+        { courseId: "decision-course-2", batchIncidentId: "decision-entry-2" },
+      ],
+      plannedAttempts: [exact.planned, incoherent.planned],
+      closeoutAttempts: [exact.closeout, incoherent.closeout],
+      now,
+    });
+
+    expect(result).toMatchObject({
+      remediationEvidenceAvailableIncidentCount: 2,
+      remediationEvidenceUnavailableIncidentCount: 0,
+      executionEvidenceAvailableIncidentCount: 1,
+      executionEvidenceUnavailableIncidentCount: 1,
+      providerExecutionStartedIncidentCount: null,
+      providerExecutionAttemptRecordedIncidentCount: null,
+      providerExecutionCompletedIncidentCount: null,
+    });
+    expect(
+      result.executionEvidenceAvailableIncidentCount +
+        result.executionEvidenceUnavailableIncidentCount,
+    ).toBe(2);
+    expectDecisionBasisReconciles(result, 2);
+  });
+
+  it("fails duplicate batch-incident identities closed before deferred binding", () => {
+    const first = decisionAttemptPair({
+      courseId: "decision-course-1",
+      retryBudget: null,
+    });
+    const second = decisionAttemptPair({
+      courseId: "decision-course-2",
+      retryBudget: null,
+    });
+    const result = buildCourseSupportCloseoutRemediationDecisionBasis({
+      incidents: [
+        { courseId: "decision-course-1", batchIncidentId: "duplicate-entry" },
+        { courseId: "decision-course-2", batchIncidentId: "duplicate-entry" },
+      ],
+      plannedAttempts: [first.planned, second.planned],
+      closeoutAttempts: [first.closeout, second.closeout],
+      now,
+    });
+
+    expect(result).toMatchObject({
+      remediationEvidenceAvailableIncidentCount: 0,
+      remediationEvidenceUnavailableIncidentCount: 2,
+      executionEvidenceAvailableIncidentCount: 0,
+      executionEvidenceUnavailableIncidentCount: 2,
+      retryBudgetEvidenceAvailableIncidentCount: 0,
+      retryBudgetUnavailableIncidentCount: 2,
+      cooldownEvidenceAvailableIncidentCount: 0,
+      cooldownEvidenceUnavailableIncidentCount: 2,
+      deferredSignalEvidenceAvailableIncidentCount: 0,
+      deferredSignalEvidenceUnavailableIncidentCount: 2,
+    });
+    expectDecisionBasisReconciles(result, 2);
+  });
+
+  it.each([
+    {
+      label: "a noncanonical fingerprint",
+      mutate: (pair: ReturnType<typeof decisionAttemptPair>) => {
+        pair.planned.providerSnapshotFingerprint = "B".repeat(64);
+        pair.closeout.providerSnapshotFingerprint = "B".repeat(64);
+      },
+    },
+    {
+      label: "an unknown routing reason",
+      mutate: (pair: ReturnType<typeof decisionAttemptPair>) => {
+        pair.planned.reason = "TRANSIENT_RETRY";
+      },
+    },
+    {
+      label: "an approach with extra keys",
+      mutate: (pair: ReturnType<typeof decisionAttemptPair>) => {
+        Object.assign(pair.planned.approach, { privateHint: "not exact" });
+      },
+    },
+  ])("fails the exact attempt envelope closed for $label", ({ mutate }) => {
+    const pair = decisionAttemptPair({
+      courseId: "decision-course-1",
+      retryBudget: null,
+    });
+    mutate(pair);
+    const result = buildCourseSupportCloseoutRemediationDecisionBasis({
+      incidents: [
+        { courseId: "decision-course-1", batchIncidentId: "decision-entry-1" },
+      ],
+      plannedAttempts: [pair.planned],
+      closeoutAttempts: [pair.closeout],
+      now,
+    });
+
+    expect(result).toMatchObject({
+      remediationEvidenceAvailableIncidentCount: 0,
+      remediationEvidenceUnavailableIncidentCount: 1,
+      executionEvidenceAvailableIncidentCount: 0,
+      executionEvidenceUnavailableIncidentCount: 1,
+    });
+    expectDecisionBasisReconciles(result, 1);
+  });
+
+  it("counts one available initial signal and one consumed carrier once each", () => {
+    const initialCourseId = "decision-course-1";
+    const initialBatchIncidentId = "decision-entry-1";
+    const consumedCourseId = "decision-course-2";
+    const consumedBatchIncidentId = "decision-entry-2";
+    const cooldownExpiresAt = "2026-07-15T20:30:00.000Z";
+    const commonSignal = {
+      sourceProofDigest: "e".repeat(64),
+      providerFamilyKey: "booking.example",
+      canonicalFailureFingerprint: decisionFailureFingerprint,
+      observedFailureFingerprint: decisionObservedFailureFingerprint,
+      claimedProviderSnapshotFingerprint: decisionProviderFingerprint,
+      observedProviderSnapshotFingerprint: decisionProviderFingerprint,
+      runtimeVersion: decisionRuntimeVersion,
+      cooldownExpiresAt,
+      providerNotBeforeAt: null,
+      eligibleAt: cooldownExpiresAt,
+      sourceVerificationWatchMode: "WATCH_SETTLED" as const,
+      sourceResult: "RETRY_SCHEDULED" as const,
+      sourceAttemptConsumed: true as const
+    };
+    const initialSignal = createDeferredFailureHandoffSignal({
+      ...commonSignal,
+      state: "AVAILABLE",
+      sourceBatchIncidentDigest:
+        createDeferredFailureHandoffBatchIncidentDigest(initialBatchIncidentId),
+      confirmationStarted: false
+    });
+    const initial = decisionAttemptPair({
+      courseId: initialCourseId,
+      retryBudget: null,
+      cooldownUntil: cooldownExpiresAt,
+      observedFailureFingerprint: decisionObservedFailureFingerprint,
+      execution: { providerExecutionStarted: true },
+      closeoutDeferred: { deferredFailureHandoff: initialSignal }
+    });
+
+    const sourceSignal = createDeferredFailureHandoffSignal({
+      ...commonSignal,
+      state: "AVAILABLE",
+      sourceBatchIncidentDigest: "f".repeat(64),
+      confirmationStarted: false
+    });
+    const admittedAt = new Date("2026-07-15T19:45:00.000Z");
+    const consumedSignal = createDeferredFailureHandoffSignal({
+      ...commonSignal,
+      state: "CONSUMED",
+      sourceBatchIncidentDigest:
+        createDeferredFailureHandoffBatchIncidentDigest(consumedBatchIncidentId),
+      confirmationStarted: true
+    });
+    const consumed = decisionAttemptPair({
+      courseId: consumedCourseId,
+      retryBudget: null,
+      cooldownUntil: cooldownExpiresAt,
+      observedFailureFingerprint: decisionObservedFailureFingerprint,
+      execution: { providerExecutionStarted: true },
+      plannedDeferred: {
+        deferredFailureHandoffSource: sourceSignal,
+        deferredFailureHandoffAdmission: createDeferredFailureHandoffAdmission({
+          signal: sourceSignal,
+          admittedAt
+        })
+      },
+      closeoutDeferred: {
+        deferredFailureHandoff: consumedSignal,
+        deferredFailureHandoffAdmission: createDeferredFailureHandoffAdmission({
+          signal: consumedSignal,
+          admittedAt
+        })
+      }
+    });
+
+    const result = buildCourseSupportCloseoutRemediationDecisionBasis({
+      incidents: [
+        { courseId: initialCourseId, batchIncidentId: initialBatchIncidentId },
+        {
+          courseId: consumedCourseId,
+          batchIncidentId: consumedBatchIncidentId
+        }
+      ],
+      plannedAttempts: [initial.planned, consumed.planned],
+      closeoutAttempts: [initial.closeout, consumed.closeout],
+      now
+    });
+
+    expect(result).toMatchObject({
+      deferredSignalEvidenceAvailableIncidentCount: 2,
+      deferredSignalEvidenceUnavailableIncidentCount: 0,
+      deferredSignalApplicableIncidentCount: 2,
+      deferredSignalNotApplicableIncidentCount: 0,
+      deferredSignalAvailableIncidentCount: 1,
+      deferredSignalConsumedIncidentCount: 1
+    });
+    expect(
+      result.deferredSignalAvailableIncidentCount! + result.deferredSignalConsumedIncidentCount!
+    ).toBe(2);
+    expectDecisionBasisReconciles(result, 2);
+  });
+
+  it.each([
+    {
+      label: "a carrier with no planned source or admission",
+      build: () =>
+        decisionDeferredCarrier({
+          courseId: "decision-course-1",
+          batchIncidentId: "decision-entry-1",
+          includePlannedArtifacts: false,
+        }),
+    },
+    {
+      label: "a substituted stable signal digest",
+      build: () =>
+        decisionDeferredCarrier({
+          courseId: "decision-course-1",
+          batchIncidentId: "decision-entry-1",
+          plannedSourceProofDigest: "e".repeat(64),
+          closeoutSourceProofDigest: "1".repeat(64),
+        }),
+    },
+    {
+      label: "a substituted admission timestamp",
+      build: () =>
+        decisionDeferredCarrier({
+          courseId: "decision-course-1",
+          batchIncidentId: "decision-entry-1",
+          closeoutAdmittedAt: new Date("2026-07-15T19:46:00.000Z"),
+        }),
+    },
+    {
+      label: "the wrong current batch-incident digest",
+      build: () =>
+        decisionDeferredCarrier({
+          courseId: "decision-course-1",
+          batchIncidentId: "decision-entry-1",
+          closeoutBatchIncidentDigest:
+            createDeferredFailureHandoffBatchIncidentDigest("wrong-entry"),
+        }),
+    },
+  ])("fails deferred evidence closed for $label", ({ build }) => {
+    const pair = build();
+    const result = buildCourseSupportCloseoutRemediationDecisionBasis({
+      incidents: [
+        { courseId: "decision-course-1", batchIncidentId: "decision-entry-1" },
+      ],
+      plannedAttempts: [pair.planned],
+      closeoutAttempts: [pair.closeout],
+      now,
+    });
+
+    expect(result).toMatchObject({
+      remediationEvidenceAvailableIncidentCount: 1,
+      remediationEvidenceUnavailableIncidentCount: 0,
+      deferredSignalEvidenceAvailableIncidentCount: 0,
+      deferredSignalEvidenceUnavailableIncidentCount: 1,
+      deferredSignalApplicableIncidentCount: null,
+      deferredSignalNotApplicableIncidentCount: null,
+      deferredSignalAvailableIncidentCount: null,
+      deferredSignalConsumedIncidentCount: null,
+    });
+    expect(
+      result.deferredSignalEvidenceAvailableIncidentCount +
+        result.deferredSignalEvidenceUnavailableIncidentCount,
+    ).toBe(1);
+    expectDecisionBasisReconciles(result, 1);
+  });
+
+  it("counts an invalidated unstarted carrier as consumed", () => {
+    const pair = decisionDeferredCarrier({
+      courseId: "decision-course-1",
+      batchIncidentId: "decision-entry-1",
+      confirmationStarted: false,
+      invalidated: true,
+    });
+    const result = buildCourseSupportCloseoutRemediationDecisionBasis({
+      incidents: [
+        { courseId: "decision-course-1", batchIncidentId: "decision-entry-1" },
+      ],
+      plannedAttempts: [pair.planned],
+      closeoutAttempts: [pair.closeout],
+      now,
+    });
+
+    expect(result).toMatchObject({
+      deferredSignalEvidenceAvailableIncidentCount: 1,
+      deferredSignalEvidenceUnavailableIncidentCount: 0,
+      deferredSignalApplicableIncidentCount: 1,
+      deferredSignalNotApplicableIncidentCount: 0,
+      deferredSignalAvailableIncidentCount: 0,
+      deferredSignalConsumedIncidentCount: 1,
+    });
+    expectDecisionBasisReconciles(result, 1);
+  });
+});
 
 function emptySearchExecutionFenceForCourses(courseIds = ["course-1"]) {
   return persistCourseSupportSearchExecutionFence(
@@ -4616,6 +5587,7 @@ describe("course-support claim demand fencing", () => {
 
   function remediationHistoryEntry(input: {
     consumed: boolean;
+    courseId?: string;
     workMode?: "IMPLEMENT_REUSABLE_SUPPORT" | "VERIFY_TRANSIENT";
     strategyAction?: "REPAIR_PROVIDER_ADAPTER" | "RETRY_PROVIDER";
     playbookStage?: "OFFICIAL_IDENTITY" | null;
@@ -4637,7 +5609,7 @@ describe("course-support claim demand fencing", () => {
             remediationAttempts: [
               {
                 courseRef: createHash("sha256")
-                  .update("course-1")
+                  .update(input.courseId ?? "course-1")
                   .digest("hex")
                   .slice(0, 24),
                 providerSnapshotFingerprint:
@@ -5271,6 +6243,96 @@ describe("course-support claim demand fencing", () => {
       expect(result).toMatchObject({ parkedForMaterialChangeCount: 1 });
       expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
     }
+  });
+
+  it("persists each claimed incident's exact transient retry budget", async () => {
+    const transientFingerprint = "v1:RATE_LIMIT:FETCH_FAILED";
+    const buildIncident = (
+      ordinal: number,
+      attemptsCompleted: number,
+    ) => {
+      const courseId = `course-budget-${ordinal}`;
+      const baseIncident = incidentRecord({
+        engineeringOnly: true,
+        preferences: [],
+      });
+      return {
+        ...baseIncident,
+        id: `incident-budget-${ordinal}`,
+        courseId,
+        kind: "FETCH_FAILED" as const,
+        failureClass: "RATE_LIMIT" as const,
+        failureFingerprint: transientFingerprint,
+        attemptCount: attemptsCompleted,
+        firstSeenAt: new Date(now.getTime() + ordinal),
+        course: {
+          ...baseIncident.course,
+          isPublic: true,
+          website: `https://public-course-${ordinal}.example/`,
+          detectedBookingUrl:
+            "https://www.chronogolf.com/club/example-course",
+          detectedPlatform: "CHRONOGOLF",
+          providerFamilyKey: "CHRONOGOLF",
+          bookingMetadata: {
+            clubId: 1,
+            courseIds: [courseId],
+            bookingBaseUrl:
+              "https://www.chronogolf.com/club/example-course",
+          },
+          bookingMethod: "PUBLIC_ONLINE",
+          automationEligibility: "ALLOWED",
+          automationReason: "NONE",
+          intelligenceVerifiedAt: null,
+          intelligenceReviewAt: null,
+          intelligenceConfidence: null,
+        },
+        batchIncidents: Array.from({ length: attemptsCompleted }, () =>
+          remediationHistoryEntry({
+            consumed: true,
+            courseId,
+            workMode: "VERIFY_TRANSIENT",
+            strategyAction: "RETRY_PROVIDER",
+            playbookStage: null,
+            failureFingerprint: transientFingerprint,
+          }),
+        ),
+      };
+    };
+    const incidents = [buildIncident(1, 1), buildIncident(2, 3)];
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce(incidents)
+      .mockResolvedValueOnce(incidents);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread-per-incident-budget",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        now,
+      }),
+    ).resolves.toMatchObject({ outcome: "ready", incidentCount: 2 });
+
+    const attempts = prismaMocks.batchCreate.mock.calls[0]?.[0]?.data?.summary
+      ?.remediation?.attempts as Array<Record<string, unknown>>;
+    expect(attempts).toHaveLength(2);
+    expect(
+      Object.fromEntries(
+        attempts.map((attempt) => [attempt.courseRef, attempt.retryBudget]),
+      ),
+    ).toEqual({
+      [createHash("sha256").update("course-budget-1").digest("hex").slice(0, 24)]: {
+        maximumAttempts: 4,
+        attemptsCompleted: 1,
+        attemptsRemaining: 3,
+        exhausted: false,
+      },
+      [createHash("sha256").update("course-budget-2").digest("hex").slice(0, 24)]: {
+        maximumAttempts: 4,
+        attemptsCompleted: 3,
+        attemptsRemaining: 1,
+        exhausted: false,
+      },
+    });
   });
 
   it("does not let a prior-cycle attempt suppress an explicit material reopen", async () => {
@@ -11801,8 +12863,13 @@ describe("course-support batch ordinals", () => {
       incidents: [
         incident({ id: "entry-1", name: "Alpha", attemptLedger: null }),
         incident({
-          id: "entry-2",
+          id: "entry-3",
           name: "Bravo",
+          attemptLedger: { version: 1, events: [] },
+        }),
+        incident({
+          id: "entry-2",
+          name: "Charlie",
           attemptLedger: exhaustedAttemptLedger(),
         }),
       ],
@@ -11820,15 +12887,54 @@ describe("course-support batch ordinals", () => {
       throw new Error("Expected a ready packet.");
     }
     expect(
-      result.courses.map(({ ordinal, playbookExhausted }) => ({
-        ordinal,
-        playbookExhausted,
-      })),
+      result.courses.map(
+        ({
+          ordinal,
+          playbookAssessmentStatus,
+          playbookExhausted,
+          playbookConclusion,
+          nextPlaybookStage,
+          nextPlaybookStageAttemptCount,
+        }) => ({
+          ordinal,
+          playbookAssessmentStatus,
+          playbookExhausted,
+          playbookConclusion,
+          nextPlaybookStage,
+          nextPlaybookStageAttemptCount,
+        }),
+      ),
     ).toEqual([
-      { ordinal: "01", playbookExhausted: false },
-      { ordinal: "02", playbookExhausted: true },
+      {
+        ordinal: "01",
+        playbookAssessmentStatus: "UNAVAILABLE",
+        playbookExhausted: null,
+        playbookConclusion: null,
+        nextPlaybookStage: null,
+        nextPlaybookStageAttemptCount: null,
+      },
+      {
+        ordinal: "02",
+        playbookAssessmentStatus: "AVAILABLE",
+        playbookExhausted: false,
+        playbookConclusion: "INCOMPLETE",
+        nextPlaybookStage: "OFFICIAL_IDENTITY",
+        nextPlaybookStageAttemptCount: 0,
+      },
+      {
+        ordinal: "03",
+        playbookAssessmentStatus: "AVAILABLE",
+        playbookExhausted: true,
+        playbookConclusion: "UNRESOLVED_EXHAUSTED",
+        nextPlaybookStage: null,
+        nextPlaybookStageAttemptCount: null,
+      },
     ]);
-    expect(result.courses[1]).not.toHaveProperty("attemptLedger");
+    expect(result.courses[1]).toMatchObject({
+      attemptCount: 1,
+      nextPlaybookStageAttemptCount: 0,
+    });
+    expect(result.courses[2]).not.toHaveProperty("attemptLedger");
     expect(result.courses.every((course) => !("name" in course))).toBe(true);
   });
 
@@ -14398,6 +15504,36 @@ describe("detached verification atomic batch fences", () => {
       });
     },
   );
+
+  it("reports exact numeric playbook zeroes for a valid empty ledger", async () => {
+    const batch = closeoutBatch("RESTORED");
+    batch.incidents[0].incident.attemptLedger = { version: 1, events: [] };
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.verificationRequestFindUnique.mockResolvedValue(
+      atomicRequest(),
+    );
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        verificationWatchMode: "WATCH_SETTLED",
+        now,
+      }),
+    ).resolves.toMatchObject({
+      decisionBasis: {
+        normalizedIncidentCount: 1,
+        playbookAssessmentAvailableIncidentCount: 1,
+        playbookAssessmentInvalidIncidentCount: 0,
+        playbookExhaustedCount: 0,
+        incompletePlaybookCount: 1,
+        zeroAttemptBrowserAdapterRetryCount: 0,
+      },
+    });
+  });
 
   it("recovers campaign provenance from admission evidence in a later retry batch", async () => {
     const batch = closeoutBatch("FINAL_DISPOSITION");
@@ -19246,6 +20382,17 @@ describe("detached verification atomic batch fences", () => {
 
   it("keeps mixed restored and unfinished structural work automatic", async () => {
     const batch = closeoutBatch("RESTORED");
+    const exactFailureFingerprint = "c".repeat(64);
+    Object.assign(batch, {
+      baseSha: releaseSha,
+      providerFamilyKey: "booking.example",
+      failureFingerprint: exactFailureFingerprint,
+    });
+    Object.assign(batch.incidents[0].incident, {
+      activeRealSearchCount: 0,
+      failureFingerprint: exactFailureFingerprint,
+      attemptLedger: { version: 1, events: [] },
+    });
     batch.incidents.push({
       ...batch.incidents[0],
       id: "entry-2",
@@ -19266,6 +20413,68 @@ describe("detached verification atomic batch fences", () => {
         "course-1",
         "course-2",
       ]),
+      remediation: {
+        workMode: "VERIFY_TRANSIENT",
+        strategyAction: "RETRY_PROVIDER",
+        playbookStage: null,
+        allowUnchangedRuntime: true,
+        requiresImplementationPath: false,
+        reason: "TRANSIENT_RETRY_AVAILABLE",
+        retryBudget: {
+          maximumAttempts: 4,
+          attemptsCompleted: 1,
+          attemptsRemaining: 3,
+          exhausted: false,
+        },
+        attempts: [
+          {
+            courseRef: createHash("sha256")
+              .update("course-1")
+              .digest("hex")
+              .slice(0, 24),
+            providerSnapshotFingerprint: providerFingerprint,
+            failureFingerprint: exactFailureFingerprint,
+            runtimeVersion: releaseSha,
+            activeRealSearchCount: 0,
+            playbookEventCountAtClaim: 0,
+            reason: "TRANSIENT_RETRY_AVAILABLE",
+            retryBudget: {
+              maximumAttempts: 4,
+              attemptsCompleted: 1,
+              attemptsRemaining: 3,
+              exhausted: false,
+            },
+            approach: {
+              workMode: "VERIFY_TRANSIENT",
+              strategyAction: "RETRY_PROVIDER",
+              playbookStage: null,
+            },
+          },
+          {
+            courseRef: createHash("sha256")
+              .update("course-2")
+              .digest("hex")
+              .slice(0, 24),
+            providerSnapshotFingerprint: providerFingerprint,
+            failureFingerprint: exactFailureFingerprint,
+            runtimeVersion: releaseSha,
+            activeRealSearchCount: 0,
+            playbookEventCountAtClaim: 0,
+            reason: "TRANSIENT_RETRY_AVAILABLE",
+            retryBudget: {
+              maximumAttempts: 4,
+              attemptsCompleted: 3,
+              attemptsRemaining: 1,
+              exhausted: false,
+            },
+            approach: {
+              workMode: "VERIFY_TRANSIENT",
+              strategyAction: "RETRY_PROVIDER",
+              playbookStage: null,
+            },
+          },
+        ],
+      },
     };
     prismaMocks.batchFindFirst.mockResolvedValue(batch);
     prismaMocks.verificationRequestFindMany.mockResolvedValue([
@@ -19285,21 +20494,69 @@ describe("detached verification atomic batch fences", () => {
     prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
     prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
 
-    await expect(
-      closeoutCourseSupportBatch({
-        batchId: "batch-1",
-        leaseToken: "lease-1",
-        ownerThreadId: "owner-thread",
-        verificationWatchMode: "WATCH_SETTLED",
-        now
-      })
-    ).resolves.toMatchObject({
+    const mixedResult = await closeoutCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      verificationWatchMode: "WATCH_SETTLED",
+      now,
+    });
+    expect(mixedResult).toMatchObject({
       outcome: "partial",
       durableCloseoutRecorded: true,
       terminalCount: 1,
       retryCount: 1,
       automationStalledCount: 0,
+      decisionBasis: {
+        normalizedIncidentCount: 2,
+        playbookAssessmentAvailableIncidentCount: 1,
+        playbookAssessmentInvalidIncidentCount: 1,
+        playbookExhaustedCount: null,
+        incompletePlaybookCount: null,
+        zeroAttemptBrowserAdapterRetryCount: null,
+        retryBudgetEvidenceAvailableIncidentCount: 2,
+        retryBudgetUnavailableIncidentCount: 0,
+        retryBudgetApplicableIncidentCount: 2,
+        retryBudgetNotApplicableIncidentCount: 0,
+        retryBudgetAttemptsRemainingTotal: 4,
+        retryBudgetExhaustedIncidentCount: 0,
+      },
     });
+    expect(
+      mixedResult.decisionBasis.playbookAssessmentAvailableIncidentCount +
+        mixedResult.decisionBasis.playbookAssessmentInvalidIncidentCount,
+    ).toBe(2);
+    const persistedAttempts = prismaMocks.batchUpdateMany.mock.calls.find(
+      ([update]) => update.data?.status === "PARTIAL",
+    )?.[0]?.data?.summary?.closeout?.remediationAttempts;
+    expect(persistedAttempts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          courseRef: createHash("sha256")
+            .update("course-1")
+            .digest("hex")
+            .slice(0, 24),
+          retryBudget: {
+            maximumAttempts: 4,
+            attemptsCompleted: 1,
+            attemptsRemaining: 3,
+            exhausted: false,
+          },
+        }),
+        expect.objectContaining({
+          courseRef: createHash("sha256")
+            .update("course-2")
+            .digest("hex")
+            .slice(0, 24),
+          retryBudget: {
+            maximumAttempts: 4,
+            attemptsCompleted: 3,
+            attemptsRemaining: 1,
+            exhausted: false,
+          },
+        }),
+      ]),
+    );
     expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledTimes(2);
     expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -19317,7 +20574,10 @@ describe("detached verification atomic batch fences", () => {
   });
 
   it("records a truthful endpoint automation stall and releases ownership", async () => {
-    const batch = closeoutBatch("PENDING");
+    const batch = {
+      ...closeoutBatch("PENDING"),
+      ownerAutomationRunId: "run-decision-basis",
+    };
     batch.incidents[0].incident.escalationDeadlineAt = now;
     batch.incidents[0].incident.attemptLedger =
       typedAdapterReadyAttemptLedger();
@@ -19353,6 +20613,13 @@ describe("detached verification atomic batch fences", () => {
       ownerThreadId: "owner-thread",
       verificationWatchMode: "ENDPOINT",
       failureDomain: "SLA",
+      summary: {
+        verificationWatch: {
+          settled: true,
+          passCount: 3,
+          preCloseoutExplicitHumanCount: 0,
+        },
+      },
       now
     });
     expect(result).toMatchObject({
@@ -19365,16 +20632,41 @@ describe("detached verification atomic batch fences", () => {
         needsHumanCount: 1,
         automationStalledCount: 1,
         orchestrationOnlyCount: 0,
+        playbookAssessmentAvailableIncidentCount: 1,
+        playbookAssessmentInvalidIncidentCount: 0,
         playbookExhaustedCount: 0,
-        incompletePlaybookCount: 1
+        incompletePlaybookCount: 1,
+        zeroAttemptBrowserAdapterRetryCount: 0
       }
     });
+    expect(
+      result.decisionBasis.playbookAssessmentAvailableIncidentCount +
+        result.decisionBasis.playbookAssessmentInvalidIncidentCount,
+    ).toBe(1);
     const persistedDecisionBasis = prismaMocks.batchUpdateMany.mock.calls.find(
       ([update]) => update.data?.status === "PARTIAL"
     )?.[0]?.data?.summary?.closeout?.decisionBasis;
-    expect(persistedDecisionBasis).toEqual(
-      (result as { decisionBasis: unknown }).decisionBasis
+    const persistedVerificationWatch = prismaMocks.batchUpdateMany.mock.calls.find(
+      ([update]) => update.data?.status === "PARTIAL"
+    )?.[0]?.data?.summary?.closeout?.summary?.verificationWatch;
+    expect(persistedVerificationWatch).toEqual({
+      settled: true,
+      passCount: 3,
+      preCloseoutExplicitHumanCount: 0,
+    });
+    const returnedDecisionBasis = (result as { decisionBasis: unknown })
+      .decisionBasis;
+    expect(persistedDecisionBasis).toBe(returnedDecisionBasis);
+    const automationRunNotes = JSON.parse(
+      prismaMocks.automationRunUpdateMany.mock.calls.find(
+        ([update]) => update.where?.id === "run-decision-basis",
+      )?.[0]?.data?.notes,
     );
+    expect(automationRunNotes.decisionBasis).toEqual(returnedDecisionBasis);
+    expect(
+      (sanitizeResponderValue(result) as { decisionBasis: unknown })
+        .decisionBasis,
+    ).toEqual(returnedDecisionBasis);
     expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({ activeBatchId: "batch-1" }),
@@ -20193,7 +21485,11 @@ describe("detached verification atomic batch fences", () => {
         normalizedIncidentCount: 1,
         needsHumanCount: 0,
         orchestrationOnlyCount: 1,
-        playbookExhaustedCount: 0
+        playbookAssessmentAvailableIncidentCount: 0,
+        playbookAssessmentInvalidIncidentCount: 1,
+        playbookExhaustedCount: null,
+        incompletePlaybookCount: null,
+        zeroAttemptBrowserAdapterRetryCount: null
       },
       remediationAttempts: [
         expect.objectContaining({

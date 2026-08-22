@@ -655,6 +655,7 @@ async function closeoutSettledCourseSupportBatch(input: {
   }
   return {
     ...result,
+    verificationWatchPassCount: input.passCount,
     preCloseoutExplicitHumanCount: settled.preCloseoutExplicitHumanCount
   };
 }

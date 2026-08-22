@@ -749,26 +749,26 @@ describe("closeoutSettledCourseSupportVerification", () => {
     expect(closeout).toHaveBeenCalledWith(0);
   });
 
-  it("preflights every explicit human result before closeout", async () => {
-    const closeout = vi.fn(async () => ({ durableCloseoutRecorded: true }));
+  it.each([false, null])(
+    "preflights an explicit human result with %s exhaustion proof before closeout",
+    async (playbookExhausted) => {
+      const closeout = vi.fn(async () => ({ durableCloseoutRecorded: true }));
 
-    await expect(
-      closeoutSettledCourseSupportVerification({
-        courses: [
-          {
-            ordinal: "01",
-            result: "NEEDS_HUMAN",
-            playbookExhausted: true,
-          },
-          {
-            ordinal: "02",
-            result: "NEEDS_HUMAN",
-            playbookExhausted: false,
-          },
-        ],
-        closeout,
-      }),
-    ).rejects.toThrow("explicit human result before its playbook is exhausted");
-    expect(closeout).not.toHaveBeenCalled();
-  });
+      await expect(
+        closeoutSettledCourseSupportVerification({
+          courses: [
+            {
+              ordinal: "01",
+              result: "NEEDS_HUMAN",
+              playbookExhausted,
+            },
+          ],
+          closeout,
+        }),
+      ).rejects.toThrow(
+        "explicit human result before its playbook is exhausted",
+      );
+      expect(closeout).not.toHaveBeenCalled();
+    },
+  );
 });

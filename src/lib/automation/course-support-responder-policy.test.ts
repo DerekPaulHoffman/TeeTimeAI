@@ -131,4 +131,32 @@ describe("course-support responder safeguards", () => {
         "email [redacted-email] at https://example.test or [redacted-database-url]"
     });
   });
+
+  it("keeps authoritative closeout counts distinct in the sanitized CLI envelope", () => {
+    expect(
+      sanitizeResponderValue({
+        outcome: "needs_human",
+        needsHumanCount: 2,
+        preCloseoutExplicitHumanCount: 0,
+        verificationWatchPassCount: 3,
+        batchId: "private-batch-id",
+        decisionBasis: {
+          schemaVersion: 2,
+          needsHumanCount: 2,
+          providerExecutionStartedIncidentCount: 0
+        }
+      })
+    ).toEqual({
+      outcome: "needs_human",
+      needsHumanCount: 2,
+      preCloseoutExplicitHumanCount: 0,
+      verificationWatchPassCount: 3,
+      batchId: "[redacted]",
+      decisionBasis: {
+        schemaVersion: 2,
+        needsHumanCount: 2,
+        providerExecutionStartedIncidentCount: 0
+      }
+    });
+  });
 });

@@ -247,7 +247,7 @@ export async function closeoutSettledCourseSupportVerification<TCloseout>(input:
   courses: Array<{
     ordinal: string | number;
     result: string;
-    playbookExhausted: boolean;
+    playbookExhausted: boolean | null;
   }>;
   closeout: (preCloseoutExplicitHumanCount: number) => Promise<TCloseout>;
 }) {
@@ -261,7 +261,10 @@ export async function closeoutSettledCourseSupportVerification<TCloseout>(input:
         "Course-support verification watch received an invalid course ordinal."
       );
     }
-    if (course.result === "NEEDS_HUMAN" && !course.playbookExhausted) {
+    if (
+      course.result === "NEEDS_HUMAN" &&
+      course.playbookExhausted !== true
+    ) {
       throw new Error(
         "Course-support verification watch cannot close an explicit human result before its playbook is exhausted."
       );

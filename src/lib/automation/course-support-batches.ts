@@ -49,6 +49,7 @@ import {
   type CourseSupportRemediationAttemptSignature,
   type CourseSupportRemediationDirective,
   type CourseSupportRemediationRetryBudget,
+  type CourseSupportRemediationRoutingReason,
   type CourseSupportRemediationRoute
 } from "./course-support-remediation-routing";
 import {
@@ -921,6 +922,19 @@ function createCourseSupportRemediationCourseRef(courseId: string) {
   return createHash("sha256").update(courseId).digest("hex").slice(0, 24);
 }
 
+function serializeCourseSupportRemediationRetryBudget(
+  retryBudget: CourseSupportRemediationRetryBudget | null
+) {
+  return retryBudget
+    ? {
+        maximumAttempts: retryBudget.maximumAttempts,
+        attemptsCompleted: retryBudget.attemptsCompleted,
+        attemptsRemaining: retryBudget.attemptsRemaining,
+        exhausted: retryBudget.exhausted
+      }
+    : null;
+}
+
 function serializeCourseSupportRemediationRoute(route: CourseSupportRemediationRoute) {
   return {
     schemaVersion: 1,
@@ -932,14 +946,7 @@ function serializeCourseSupportRemediationRoute(route: CourseSupportRemediationR
     strategyAction: route.strategy.action,
     strategyReason: route.strategy.reason,
     playbookStage: route.attemptSignature?.playbookStage ?? null,
-    retryBudget: route.retryBudget
-      ? {
-          maximumAttempts: route.retryBudget.maximumAttempts,
-          attemptsCompleted: route.retryBudget.attemptsCompleted,
-          attemptsRemaining: route.retryBudget.attemptsRemaining,
-          exhausted: route.retryBudget.exhausted
-        }
-      : null
+    retryBudget: serializeCourseSupportRemediationRetryBudget(route.retryBudget)
   } satisfies Prisma.InputJsonObject;
 }
 
@@ -3219,6 +3226,9 @@ export async function claimCourseSupportBatch(input: {
           reason:
             incident.remediationRoute?.reason ??
             selectedRemediationRoute.reason,
+          retryBudget: serializeCourseSupportRemediationRetryBudget(
+            incident.remediationRoute?.retryBudget ?? null,
+          ),
           approach:
             incident.remediationRoute?.attemptSignature ??
             selectedRemediationRoute.attemptSignature ??
@@ -4734,6 +4744,8 @@ export async function getCourseSupportBatchPacket(input: {
           entry.incident.attemptLedger,
           entry.cycle,
         );
+        const playbookAssessmentAvailable =
+          playbook.valid && playbook.cycle === entry.cycle;
         return {
           ordinal: String(index + 1).padStart(2, "0"),
           providerFamilyKey: entry.course.providerFamilyKey,
@@ -4750,12 +4762,24 @@ export async function getCourseSupportBatchPacket(input: {
           escalationDeadlineAt:
             entry.incident.escalationDeadlineAt?.toISOString() ?? null,
           attemptCount: entry.incident.attemptCount,
-          playbookExhausted: isAutomationPlaybookExhausted(
-            entry.incident.attemptLedger,
-            entry.cycle,
-          ),
-          playbookConclusion: playbook.conclusion,
-          nextPlaybookStage: playbook.nextStage,
+          playbookAssessmentStatus: playbookAssessmentAvailable
+            ? ("AVAILABLE" as const)
+            : ("UNAVAILABLE" as const),
+          playbookExhausted: playbookAssessmentAvailable
+            ? isAutomationPlaybookExhausted(
+                entry.incident.attemptLedger,
+                entry.cycle,
+              )
+            : null,
+          playbookConclusion: playbookAssessmentAvailable
+            ? playbook.conclusion
+            : null,
+          nextPlaybookStage: playbookAssessmentAvailable
+            ? playbook.nextStage
+            : null,
+          nextPlaybookStageAttemptCount: playbookAssessmentAvailable
+            ? (getCourseSupportNextStageAttemptCount(playbook) ?? null)
+            : null,
           bookingMethod: entry.course.bookingMethod,
           automationEligibility: entry.course.automationEligibility,
           automationReason: entry.course.automationReason,
@@ -7285,6 +7309,555 @@ function getCourseSupportNextStageAttemptCount(
   )?.attemptCount;
 }
 
+const COURSE_SUPPORT_DECISION_EXECUTION_EVIDENCE_KEYS = [
+  "claimedImplementationPaths",
+  "newReleaseRecorded",
+  "deploymentRecorded",
+  "postProbeRecorded",
+  "providerAttemptRecorded",
+  "providerExecutionAttemptRecorded",
+  "playbookAttemptRecorded",
+  "terminalResultRecorded",
+  "providerExecutionStarted"
+] as const;
+
+const COURSE_SUPPORT_DECISION_ROUTING_REASONS = new Set<
+  CourseSupportRemediationRoutingReason
+>([
+  "EXISTING_SUPPORT_READY",
+  "TRANSIENT_RETRY_AVAILABLE",
+  "TRANSIENT_RETRY_BUDGET_EXHAUSTED",
+  "PLAYBOOK_STAGE_PENDING",
+  "PLAYBOOK_EXHAUSTED",
+  "NO_PLAYBOOK_STAGE_AVAILABLE",
+  "IMPLEMENTATION_REQUIRED",
+  "CLASSIFICATION_READY",
+  "UNCHANGED_ATTEMPT_ALREADY_RECORDED",
+  "OPERATIONAL_RETRY_BUDGET_EXHAUSTED",
+  "MATERIAL_CHANGE_REOPENED",
+]);
+
+type CourseSupportDecisionExecutionEvidence = Record<
+  (typeof COURSE_SUPPORT_DECISION_EXECUTION_EVIDENCE_KEYS)[number],
+  boolean
+>;
+
+type ExactCourseSupportDecisionAttempts = {
+  planned: Record<string, unknown>;
+  closeout: Record<string, unknown>;
+};
+
+function readExactCourseSupportDecisionExecutionEvidenceShape(
+  value: unknown,
+): CourseSupportDecisionExecutionEvidence | null {
+  const evidence = asJsonObject(value);
+  const keys = Object.keys(evidence);
+  return keys.length === COURSE_SUPPORT_DECISION_EXECUTION_EVIDENCE_KEYS.length &&
+    COURSE_SUPPORT_DECISION_EXECUTION_EVIDENCE_KEYS.every(
+      (key) => typeof evidence[key] === "boolean",
+    )
+    ? (evidence as CourseSupportDecisionExecutionEvidence)
+    : null;
+}
+
+function readExactCourseSupportDecisionAttempts(input: {
+  courseId: string;
+  plannedAttempts: unknown[];
+  closeoutAttempts: unknown[];
+}): ExactCourseSupportDecisionAttempts | null {
+  const courseRef = createCourseSupportRemediationCourseRef(input.courseId);
+  const plannedMatches = input.plannedAttempts.filter(
+    (candidate) => asJsonObject(candidate).courseRef === courseRef
+  );
+  const closeoutMatches = input.closeoutAttempts.filter(
+    (candidate) => asJsonObject(candidate).courseRef === courseRef
+  );
+  if (plannedMatches.length !== 1 || closeoutMatches.length !== 1) {
+    return null;
+  }
+  const planned = asJsonObject(plannedMatches[0]);
+  const closeout = asJsonObject(closeoutMatches[0]);
+  const plannedApproach =
+    planned.approach === null ? null : parseCourseSupportRemediationApproach(planned.approach);
+  const closeoutApproach =
+    closeout.approach === null ? null : parseCourseSupportRemediationApproach(closeout.approach);
+  const plannedApproachRecord = asJsonObject(planned.approach);
+  const closeoutApproachRecord = asJsonObject(closeout.approach);
+  const exactApproachKeys = ["workMode", "strategyAction", "playbookStage"];
+  if (
+    typeof planned.providerSnapshotFingerprint !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(planned.providerSnapshotFingerprint) ||
+    typeof planned.failureFingerprint !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(planned.failureFingerprint) ||
+    typeof planned.runtimeVersion !== "string" ||
+    !/^[a-f0-9]{40}$/u.test(planned.runtimeVersion) ||
+    !Number.isSafeInteger(planned.activeRealSearchCount) ||
+    (planned.activeRealSearchCount as number) < 0 ||
+    !Number.isSafeInteger(planned.playbookEventCountAtClaim) ||
+    (planned.playbookEventCountAtClaim as number) < 0 ||
+    !COURSE_SUPPORT_DECISION_ROUTING_REASONS.has(
+      planned.reason as CourseSupportRemediationRoutingReason,
+    ) ||
+    !Object.prototype.hasOwnProperty.call(planned, "approach") ||
+    (planned.approach !== null &&
+      (!plannedApproach ||
+        Object.keys(plannedApproachRecord).length !== exactApproachKeys.length ||
+        !exactApproachKeys.every((key) =>
+          Object.prototype.hasOwnProperty.call(plannedApproachRecord, key)
+        ))) ||
+    typeof closeout.providerSnapshotFingerprint !== "string" ||
+    closeout.providerSnapshotFingerprint !== planned.providerSnapshotFingerprint ||
+    typeof closeout.observedProviderSnapshotFingerprint !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(closeout.observedProviderSnapshotFingerprint) ||
+    closeout.failureFingerprint !== planned.failureFingerprint ||
+    typeof closeout.observedFailureFingerprint !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(closeout.observedFailureFingerprint) ||
+    typeof closeout.runtimeVersion !== "string" ||
+    !/^[a-f0-9]{40}$/u.test(closeout.runtimeVersion) ||
+    closeout.activeRealSearchCount !== planned.activeRealSearchCount ||
+    typeof closeout.consumed !== "boolean" ||
+    typeof closeout.countsTowardOperationalNoProgress !== "boolean" ||
+    !Object.prototype.hasOwnProperty.call(closeout, "approach") ||
+    (closeout.approach !== null &&
+      (!closeoutApproach ||
+        Object.keys(closeoutApproachRecord).length !== exactApproachKeys.length ||
+        !exactApproachKeys.every((key) =>
+          Object.prototype.hasOwnProperty.call(closeoutApproachRecord, key)
+        ))) ||
+    !(
+      (plannedApproach === null && closeoutApproach === null) ||
+      isSameCourseSupportRemediationApproach(plannedApproach, closeoutApproach)
+    )
+  ) {
+    return null;
+  }
+  return { planned, closeout };
+}
+
+function readExactCourseSupportDecisionExecutionEvidence(
+  attempt: ExactCourseSupportDecisionAttempts
+): CourseSupportDecisionExecutionEvidence | null {
+  const exact = readExactCourseSupportDecisionExecutionEvidenceShape(
+    attempt.closeout.executionEvidence,
+  );
+  if (!exact) {
+    return null;
+  }
+  const consumed =
+    exact.deploymentRecorded ||
+    exact.providerAttemptRecorded ||
+    exact.playbookAttemptRecorded ||
+    exact.terminalResultRecorded;
+  const countsTowardOperationalNoProgress =
+    consumed || exact.providerExecutionAttemptRecorded || exact.providerExecutionStarted;
+  if (
+    attempt.closeout.consumed !== consumed ||
+    attempt.closeout.countsTowardOperationalNoProgress !== countsTowardOperationalNoProgress ||
+    (exact.providerAttemptRecorded && !exact.providerExecutionAttemptRecorded)
+  ) {
+    return null;
+  }
+  return exact;
+}
+
+type CourseSupportDecisionRetryBudget = {
+  maximumAttempts: number;
+  attemptsCompleted: number;
+  attemptsRemaining: number;
+  exhausted: boolean;
+};
+
+function readCourseSupportDecisionRetryBudgetValue(
+  record: Record<string, unknown>
+):
+  | { status: "NOT_APPLICABLE" }
+  | { status: "AVAILABLE"; budget: CourseSupportDecisionRetryBudget }
+  | { status: "UNAVAILABLE" } {
+  if (!Object.prototype.hasOwnProperty.call(record, "retryBudget")) {
+    return { status: "UNAVAILABLE" };
+  }
+  if (record.retryBudget === null) {
+    return { status: "NOT_APPLICABLE" };
+  }
+  const budget = asJsonObject(record.retryBudget);
+  const keys = Object.keys(budget);
+  const maximumAttempts = budget.maximumAttempts;
+  const attemptsCompleted = budget.attemptsCompleted;
+  const attemptsRemaining = budget.attemptsRemaining;
+  const exhausted = budget.exhausted;
+  if (
+    keys.length !== 4 ||
+    !["maximumAttempts", "attemptsCompleted", "attemptsRemaining", "exhausted"].every((key) =>
+      keys.includes(key)
+    ) ||
+    !Number.isSafeInteger(maximumAttempts) ||
+    (maximumAttempts as number) <= 0 ||
+    !Number.isSafeInteger(attemptsCompleted) ||
+    (attemptsCompleted as number) < 0 ||
+    !Number.isSafeInteger(attemptsRemaining) ||
+    (attemptsRemaining as number) < 0 ||
+    attemptsRemaining !==
+      Math.max(0, (maximumAttempts as number) - (attemptsCompleted as number)) ||
+    typeof exhausted !== "boolean" ||
+    exhausted !== (attemptsCompleted as number) >= (maximumAttempts as number)
+  ) {
+    return { status: "UNAVAILABLE" };
+  }
+  return {
+    status: "AVAILABLE",
+    budget: {
+      maximumAttempts: maximumAttempts as number,
+      attemptsCompleted: attemptsCompleted as number,
+      attemptsRemaining: attemptsRemaining as number,
+      exhausted
+    }
+  };
+}
+
+function readExactCourseSupportDecisionRetryBudget(
+  attempt: ExactCourseSupportDecisionAttempts
+):
+  | { status: "NOT_APPLICABLE" }
+  | { status: "AVAILABLE"; budget: CourseSupportDecisionRetryBudget }
+  | { status: "UNAVAILABLE" } {
+  const planned = readCourseSupportDecisionRetryBudgetValue(attempt.planned);
+  const closeout = readCourseSupportDecisionRetryBudgetValue(attempt.closeout);
+  if (
+    planned.status !== closeout.status ||
+    planned.status === "UNAVAILABLE" ||
+    closeout.status === "UNAVAILABLE"
+  ) {
+    return { status: "UNAVAILABLE" };
+  }
+  if (
+    planned.status === "AVAILABLE" &&
+    closeout.status === "AVAILABLE" &&
+    (planned.budget.maximumAttempts !== closeout.budget.maximumAttempts ||
+      planned.budget.attemptsCompleted !== closeout.budget.attemptsCompleted ||
+      planned.budget.attemptsRemaining !== closeout.budget.attemptsRemaining ||
+      planned.budget.exhausted !== closeout.budget.exhausted)
+  ) {
+    return { status: "UNAVAILABLE" };
+  }
+  return planned;
+}
+
+function readExactCourseSupportDecisionCooldown(
+  attempt: ExactCourseSupportDecisionAttempts,
+  now: Date
+):
+  | { status: "NOT_APPLICABLE" }
+  | { status: "AVAILABLE"; active: boolean }
+  | { status: "UNAVAILABLE" } {
+  if (!Object.prototype.hasOwnProperty.call(attempt.closeout, "failureOnlyHandoffCooldownUntil")) {
+    return { status: "UNAVAILABLE" };
+  }
+  const raw = attempt.closeout.failureOnlyHandoffCooldownUntil;
+  if (raw === null) {
+    return { status: "NOT_APPLICABLE" };
+  }
+  if (typeof raw !== "string") {
+    return { status: "UNAVAILABLE" };
+  }
+  const parsed = new Date(raw);
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString() !== raw) {
+    return { status: "UNAVAILABLE" };
+  }
+  return { status: "AVAILABLE", active: parsed.getTime() > now.getTime() };
+}
+
+function readExactPlannedDeferredFailureHandoff(planned: Record<string, unknown>):
+  | { status: "NOT_APPLICABLE" }
+  | {
+      status: "AVAILABLE";
+      signal: DeferredFailureHandoffSignal;
+      admission: NonNullable<ReturnType<typeof parseDeferredFailureHandoffAdmission>>;
+    }
+  | null {
+  const hasSignal = Object.prototype.hasOwnProperty.call(planned, "deferredFailureHandoffSource");
+  const hasAdmission = Object.prototype.hasOwnProperty.call(
+    planned,
+    "deferredFailureHandoffAdmission"
+  );
+  if (!hasSignal && !hasAdmission) {
+    return { status: "NOT_APPLICABLE" };
+  }
+  if (!hasSignal || !hasAdmission) {
+    return null;
+  }
+  const signal = parseDeferredFailureHandoffSignal(planned.deferredFailureHandoffSource);
+  const admission = parseDeferredFailureHandoffAdmission(planned.deferredFailureHandoffAdmission);
+  return signal &&
+    admission &&
+    signal.state === "AVAILABLE" &&
+    !signal.confirmationStarted &&
+    admission.signalDigest === signal.signalDigest &&
+    admission.sourceRecordDigest === signal.recordDigest &&
+    admission.sourceBatchIncidentDigest === signal.sourceBatchIncidentDigest
+    ? { status: "AVAILABLE", signal, admission }
+    : null;
+}
+
+function readExactCourseSupportDecisionDeferredSignal(input: {
+  courseId: string;
+  batchIncidentId: string;
+  attempt: ExactCourseSupportDecisionAttempts;
+  closeoutAttempts: unknown[];
+}):
+  | { status: "AVAILABLE"; signalState: "AVAILABLE" | "CONSUMED" | null }
+  | { status: "UNAVAILABLE" } {
+  const planned = readExactPlannedDeferredFailureHandoff(input.attempt.planned);
+  if (!planned) {
+    return { status: "UNAVAILABLE" };
+  }
+  const closeout = input.attempt.closeout;
+  const hasCloseoutArtifact = [
+    "deferredFailureHandoff",
+    "deferredFailureHandoffAdmission",
+    "deferredFailureHandoffInvalidation"
+  ].some((key) => Object.prototype.hasOwnProperty.call(closeout, key));
+  const hasPlannedArtifact = [
+    "deferredFailureHandoffSource",
+    "deferredFailureHandoffAdmission"
+  ].some((key) => Object.prototype.hasOwnProperty.call(input.attempt.planned, key));
+  if (!hasCloseoutArtifact) {
+    return hasPlannedArtifact || planned.status === "AVAILABLE"
+      ? { status: "UNAVAILABLE" }
+      : { status: "AVAILABLE", signalState: null };
+  }
+  const parsed = readExactDeferredFailureHandoffAttempt({
+    summary: {
+      closeout: { remediationAttempts: input.closeoutAttempts }
+    },
+    courseId: input.courseId
+  });
+  const closeoutMatchesPlannedCarrier =
+    planned.status === "NOT_APPLICABLE"
+      ? parsed?.admission === null
+      : Boolean(
+          parsed?.admission &&
+          parsed.signal.signalDigest === planned.signal.signalDigest &&
+          new Date(parsed.signal.eligibleAt).getTime() >=
+            new Date(planned.signal.eligibleAt).getTime() &&
+          parsed.signal.sourceProofDigest === planned.signal.sourceProofDigest &&
+          parsed.signal.providerFamilyKey === planned.signal.providerFamilyKey &&
+          parsed.signal.canonicalFailureFingerprint ===
+            planned.signal.canonicalFailureFingerprint &&
+          parsed.signal.observedFailureFingerprint === planned.signal.observedFailureFingerprint &&
+          parsed.signal.claimedProviderSnapshotFingerprint ===
+            planned.signal.claimedProviderSnapshotFingerprint &&
+          parsed.signal.observedProviderSnapshotFingerprint ===
+            planned.signal.observedProviderSnapshotFingerprint &&
+          parsed.signal.runtimeVersion === planned.signal.runtimeVersion &&
+          parsed.signal.cooldownExpiresAt === planned.signal.cooldownExpiresAt &&
+          parsed.signal.providerNotBeforeAt === planned.signal.providerNotBeforeAt &&
+          parsed.signal.sourceVerificationWatchMode ===
+            planned.signal.sourceVerificationWatchMode &&
+          parsed.signal.sourceResult === planned.signal.sourceResult &&
+          parsed.admission.admittedAt === planned.admission.admittedAt &&
+          parsed.admission.signalDigest === parsed.signal.signalDigest &&
+          parsed.admission.sourceRecordDigest === parsed.signal.recordDigest &&
+          parsed.admission.sourceBatchIncidentDigest === parsed.signal.sourceBatchIncidentDigest
+        );
+  if (
+    !parsed ||
+    !closeoutMatchesPlannedCarrier ||
+    parsed.signal.sourceBatchIncidentDigest !==
+      createDeferredFailureHandoffBatchIncidentDigest(input.batchIncidentId) ||
+    input.attempt.closeout.failureOnlyHandoffCooldownUntil !== parsed.signal.cooldownExpiresAt ||
+    input.attempt.closeout.failureFingerprint !== parsed.signal.canonicalFailureFingerprint ||
+    input.attempt.closeout.observedFailureFingerprint !==
+      parsed.signal.observedFailureFingerprint ||
+    input.attempt.closeout.providerSnapshotFingerprint !==
+      parsed.signal.claimedProviderSnapshotFingerprint ||
+    input.attempt.closeout.observedProviderSnapshotFingerprint !==
+      parsed.signal.observedProviderSnapshotFingerprint ||
+    (parsed.signal.state === "AVAILABLE" && parsed.signal.confirmationStarted) ||
+    (parsed.signal.state === "CONSUMED" &&
+      (!parsed.admission || parsed.sourceKind !== "CONSUMED_CARRIER"))
+  ) {
+    return { status: "UNAVAILABLE" };
+  }
+  return { status: "AVAILABLE", signalState: parsed.signal.state };
+}
+
+export function buildCourseSupportCloseoutRemediationDecisionBasis(input: {
+  incidents: Array<{ courseId: string; batchIncidentId: string }>;
+  plannedAttempts: unknown[];
+  closeoutAttempts: unknown[];
+  now: Date;
+}) {
+  const expectedCourseRefs = new Set(
+    input.incidents.map((entry) => createCourseSupportRemediationCourseRef(entry.courseId))
+  );
+  const incidentIdentitiesAreExact =
+    input.incidents.every(
+      (entry) =>
+        entry.courseId.trim().length > 0 &&
+        entry.batchIncidentId.trim().length > 0,
+    ) &&
+    new Set(input.incidents.map((entry) => entry.courseId)).size ===
+      input.incidents.length &&
+    new Set(input.incidents.map((entry) => entry.batchIncidentId)).size ===
+      input.incidents.length;
+  const attemptsHaveExactGlobalCardinality = (attempts: unknown[]) =>
+    attempts.length === input.incidents.length &&
+    new Set(attempts.map((entry) => asJsonObject(entry).courseRef)).size ===
+      input.incidents.length &&
+    attempts.every((entry) => expectedCourseRefs.has(String(asJsonObject(entry).courseRef)));
+  const attemptsHaveExactCardinality =
+    incidentIdentitiesAreExact &&
+    expectedCourseRefs.size === input.incidents.length &&
+    attemptsHaveExactGlobalCardinality(input.plannedAttempts) &&
+    attemptsHaveExactGlobalCardinality(input.closeoutAttempts);
+  const exactAttempts = input.incidents.map((entry) => ({
+    ...entry,
+    attempts: attemptsHaveExactCardinality
+      ? readExactCourseSupportDecisionAttempts({
+          courseId: entry.courseId,
+          plannedAttempts: input.plannedAttempts,
+          closeoutAttempts: input.closeoutAttempts
+        })
+      : null
+  }));
+  const executionEvidence = exactAttempts.map((entry) =>
+    entry.attempts ? readExactCourseSupportDecisionExecutionEvidence(entry.attempts) : null
+  );
+  const executionEvidenceAvailableIncidentCount = executionEvidence.filter(
+    (entry) => entry !== null
+  ).length;
+  const executionEvidenceUnavailableIncidentCount =
+    executionEvidence.length - executionEvidenceAvailableIncidentCount;
+  const executionEvidenceComplete = executionEvidenceUnavailableIncidentCount === 0;
+  const remediationEvidenceAvailableIncidentCount = exactAttempts.filter(
+    (entry) => entry.attempts !== null,
+  ).length;
+  const remediationEvidenceUnavailableIncidentCount =
+    exactAttempts.length - remediationEvidenceAvailableIncidentCount;
+
+  const retryBudgets = exactAttempts.map((entry) =>
+    entry.attempts
+      ? readExactCourseSupportDecisionRetryBudget(entry.attempts)
+      : ({ status: "UNAVAILABLE" } as const)
+  );
+  const rawRetryBudgetUnavailableIncidentCount = retryBudgets.filter(
+    (entry) => entry.status === "UNAVAILABLE"
+  ).length;
+  const applicableRetryBudgets = retryBudgets.flatMap((entry) =>
+    entry.status === "AVAILABLE" ? [entry.budget] : []
+  );
+  const retryBudgetAttemptsRemainingTotal = applicableRetryBudgets.reduce(
+    (total, budget) => total + budget.attemptsRemaining,
+    0
+  );
+  const retryBudgetAggregateIsSafe = Number.isSafeInteger(retryBudgetAttemptsRemainingTotal);
+  const retryBudgetUnavailableIncidentCount = retryBudgetAggregateIsSafe
+    ? rawRetryBudgetUnavailableIncidentCount
+    : retryBudgets.length;
+  const retryBudgetEvidenceAvailableIncidentCount =
+    retryBudgets.length - retryBudgetUnavailableIncidentCount;
+  const retryBudgetComplete = retryBudgetUnavailableIncidentCount === 0;
+  const retryBudgetApplicableIncidentCount = retryBudgetComplete
+    ? applicableRetryBudgets.length
+    : null;
+  const retryBudgetNotApplicableIncidentCount = retryBudgetComplete
+    ? retryBudgets.filter((entry) => entry.status === "NOT_APPLICABLE").length
+    : null;
+
+  const cooldowns = exactAttempts.map((entry) =>
+    entry.attempts
+      ? readExactCourseSupportDecisionCooldown(entry.attempts, input.now)
+      : ({ status: "UNAVAILABLE" } as const)
+  );
+  const cooldownEvidenceUnavailableIncidentCount = cooldowns.filter(
+    (entry) => entry.status === "UNAVAILABLE"
+  ).length;
+  const cooldownEvidenceAvailableIncidentCount =
+    cooldowns.length - cooldownEvidenceUnavailableIncidentCount;
+  const cooldownEvidenceComplete = cooldownEvidenceUnavailableIncidentCount === 0;
+  const applicableCooldowns = cooldowns.filter((entry) => entry.status === "AVAILABLE");
+
+  const deferredSignals = exactAttempts.map((entry) =>
+    entry.attempts
+      ? readExactCourseSupportDecisionDeferredSignal({
+          courseId: entry.courseId,
+          batchIncidentId: entry.batchIncidentId,
+          attempt: entry.attempts,
+          closeoutAttempts: input.closeoutAttempts
+        })
+      : ({ status: "UNAVAILABLE" } as const)
+  );
+  const deferredSignalEvidenceUnavailableIncidentCount = deferredSignals.filter(
+    (entry) => entry.status === "UNAVAILABLE"
+  ).length;
+  const deferredSignalEvidenceAvailableIncidentCount =
+    deferredSignals.length - deferredSignalEvidenceUnavailableIncidentCount;
+  const deferredSignalEvidenceComplete = deferredSignalEvidenceUnavailableIncidentCount === 0;
+  const applicableDeferredSignals = deferredSignals.filter(
+    (entry) => entry.status === "AVAILABLE" && entry.signalState !== null
+  );
+
+  return {
+    remediationEvidenceAvailableIncidentCount,
+    remediationEvidenceUnavailableIncidentCount,
+    executionEvidenceAvailableIncidentCount,
+    executionEvidenceUnavailableIncidentCount,
+    providerExecutionStartedIncidentCount: executionEvidenceComplete
+      ? executionEvidence.filter((entry) => entry?.providerExecutionStarted === true).length
+      : null,
+    providerExecutionAttemptRecordedIncidentCount: executionEvidenceComplete
+      ? executionEvidence.filter((entry) => entry?.providerExecutionAttemptRecorded === true).length
+      : null,
+    providerExecutionCompletedIncidentCount: executionEvidenceComplete
+      ? executionEvidence.filter((entry) => entry?.providerAttemptRecorded === true).length
+      : null,
+    retryBudgetEvidenceAvailableIncidentCount,
+    retryBudgetUnavailableIncidentCount,
+    retryBudgetApplicableIncidentCount,
+    retryBudgetNotApplicableIncidentCount,
+    retryBudgetAttemptsRemainingTotal:
+      retryBudgetComplete && applicableRetryBudgets.length > 0
+        ? retryBudgetAttemptsRemainingTotal
+        : null,
+    retryBudgetExhaustedIncidentCount:
+      retryBudgetComplete && applicableRetryBudgets.length > 0
+        ? applicableRetryBudgets.filter((budget) => budget.exhausted).length
+        : null,
+    cooldownEvidenceAvailableIncidentCount,
+    cooldownEvidenceUnavailableIncidentCount,
+    cooldownApplicableIncidentCount: cooldownEvidenceComplete ? applicableCooldowns.length : null,
+    cooldownNotApplicableIncidentCount: cooldownEvidenceComplete
+      ? cooldowns.filter((entry) => entry.status === "NOT_APPLICABLE").length
+      : null,
+    activeCooldownIncidentCount:
+      cooldownEvidenceComplete && applicableCooldowns.length > 0
+        ? applicableCooldowns.filter((entry) => entry.active).length
+        : null,
+    deferredSignalEvidenceAvailableIncidentCount,
+    deferredSignalEvidenceUnavailableIncidentCount,
+    deferredSignalApplicableIncidentCount: deferredSignalEvidenceComplete
+      ? applicableDeferredSignals.length
+      : null,
+    deferredSignalNotApplicableIncidentCount: deferredSignalEvidenceComplete
+      ? deferredSignals.filter(
+          (entry) => entry.status === "AVAILABLE" && entry.signalState === null
+        ).length
+      : null,
+    deferredSignalAvailableIncidentCount:
+      deferredSignalEvidenceComplete && applicableDeferredSignals.length > 0
+        ? applicableDeferredSignals.filter(
+            (entry) => entry.status === "AVAILABLE" && entry.signalState === "AVAILABLE"
+          ).length
+        : null,
+    deferredSignalConsumedIncidentCount:
+      deferredSignalEvidenceComplete && applicableDeferredSignals.length > 0
+        ? applicableDeferredSignals.filter(
+            (entry) => entry.status === "AVAILABLE" && entry.signalState === "CONSUMED"
+          ).length
+        : null
+  };
+}
+
 function getEffectiveCourseSupportRetryFailureClass(input: {
   incidentFailureClass: CourseSupportFailureClass;
   proofSnapshot: unknown;
@@ -8608,6 +9181,8 @@ async function closeoutCourseSupportBatchAttempt(
               deferredFailureHandoff.confirmationStarted,
         })
       : null;
+    const plannedRetryBudget =
+      readCourseSupportDecisionRetryBudgetValue(plannedAttempt);
     return {
       courseRef,
       // Keep the fingerprint that the attempt actually claimed. If provider
@@ -8621,9 +9196,11 @@ async function closeoutCourseSupportBatchAttempt(
         currentFailureIdentityByBatchIncidentId.get(entry.id)
           ?.failureFingerprint ?? entry.incident.failureFingerprint,
       failureOnlyHandoffCooldownUntil:
+        persistedDeferredFailureHandoff?.cooldownExpiresAt ??
         currentFailureIdentityByBatchIncidentId
           .get(entry.id)
-          ?.failureOnlyHandoffCooldown?.expiresAt.toISOString() ?? null,
+          ?.failureOnlyHandoffCooldown?.expiresAt.toISOString() ??
+        null,
       runtimeVersion: batch.releaseSha ?? batch.baseSha,
       activeRealSearchCount: entry.incident.activeRealSearchCount,
       consumed,
@@ -8655,6 +9232,11 @@ async function closeoutCourseSupportBatchAttempt(
               : {}),
           }
         : {}),
+      ...(plannedRetryBudget.status === "AVAILABLE"
+        ? { retryBudget: plannedRetryBudget.budget }
+        : plannedRetryBudget.status === "NOT_APPLICABLE"
+          ? { retryBudget: null }
+          : {}),
       approach: parseCourseSupportRemediationApproach(plannedAttempt.approach),
     } satisfies Prisma.InputJsonObject;
   });
@@ -9132,33 +9714,62 @@ async function closeoutCourseSupportBatchAttempt(
   const orchestrationOnlyCount = closeoutRemediationAttempts.filter(
     (attempt) => attempt.countsTowardOperationalNoProgress === false,
   ).length;
-  const playbookAssessments = normalizedEntries.map((entry) =>
-    assessAutomationPlaybook(entry.incident.attemptLedger, entry.cycle)
+  const playbookAssessments = normalizedEntries.map((entry) => ({
+    cycle: entry.cycle,
+    assessment: assessAutomationPlaybook(
+      entry.incident.attemptLedger,
+      entry.cycle,
+    ),
+  }));
+  const availablePlaybookAssessments = playbookAssessments.filter(
+    ({ cycle, assessment }) => assessment.valid && assessment.cycle === cycle,
   );
-  const playbookExhaustedCount = playbookAssessments.filter((assessment) =>
-    ["TECHNICAL_FINAL", "UNRESOLVED_EXHAUSTED"].includes(
-      assessment.conclusion
-    )
-  ).length;
-  const incompletePlaybookCount = playbookAssessments.filter(
-    (assessment) => assessment.conclusion === "INCOMPLETE"
-  ).length;
-  const zeroAttemptBrowserAdapterRetryCount = playbookAssessments.filter(
-    (assessment) =>
-      assessment.conclusion === "INCOMPLETE" &&
-      assessment.nextStage === "BROWSER_ADAPTER_RETRY" &&
-      getCourseSupportNextStageAttemptCount(assessment) === 0
-  ).length;
+  const playbookAssessmentAvailableIncidentCount =
+    availablePlaybookAssessments.length;
+  const playbookAssessmentInvalidIncidentCount =
+    playbookAssessments.length - playbookAssessmentAvailableIncidentCount;
+  const playbookAssessmentComplete =
+    playbookAssessmentInvalidIncidentCount === 0;
+  const remediationDecisionBasis =
+    buildCourseSupportCloseoutRemediationDecisionBasis({
+      incidents: normalizedEntries.map((entry) => ({
+        courseId: entry.courseId,
+        batchIncidentId: entry.id,
+      })),
+      plannedAttempts: plannedRemediationAttempts,
+      closeoutAttempts: closeoutRemediationAttempts,
+      now,
+    });
   const decisionBasis = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     normalizedIncidentCount: normalizedEntries.length,
     needsHumanCount,
     automationStalledCount,
     operationalRetryBudgetExhaustedCount,
     orchestrationOnlyCount,
-    playbookExhaustedCount,
-    incompletePlaybookCount,
-    zeroAttemptBrowserAdapterRetryCount
+    playbookAssessmentAvailableIncidentCount,
+    playbookAssessmentInvalidIncidentCount,
+    playbookExhaustedCount: playbookAssessmentComplete
+      ? availablePlaybookAssessments.filter(({ assessment }) =>
+          ["TECHNICAL_FINAL", "UNRESOLVED_EXHAUSTED"].includes(
+            assessment.conclusion,
+          ),
+        ).length
+      : null,
+    incompletePlaybookCount: playbookAssessmentComplete
+      ? availablePlaybookAssessments.filter(
+          ({ assessment }) => assessment.conclusion === "INCOMPLETE",
+        ).length
+      : null,
+    zeroAttemptBrowserAdapterRetryCount: playbookAssessmentComplete
+      ? availablePlaybookAssessments.filter(
+          ({ assessment }) =>
+            assessment.conclusion === "INCOMPLETE" &&
+            assessment.nextStage === "BROWSER_ADAPTER_RETRY" &&
+            getCourseSupportNextStageAttemptCount(assessment) === 0,
+        ).length
+      : null,
+    ...remediationDecisionBasis,
   };
   const deferredProbeFenceEntries = baseNormalizedEntries.filter((entry) => {
     const courseRef = createCourseSupportRemediationCourseRef(entry.courseId);
@@ -12735,18 +13346,9 @@ function readExactDeferredFailureHandoffAttempt(input: {
     attempt.deferredFailureHandoffInvalidation,
   );
   const executionEvidenceHasExactShape =
-    Object.keys(executionEvidence).length === 9 &&
-    [
-      "claimedImplementationPaths",
-      "newReleaseRecorded",
-      "deploymentRecorded",
-      "postProbeRecorded",
-      "providerAttemptRecorded",
-      "providerExecutionAttemptRecorded",
-      "playbookAttemptRecorded",
-      "terminalResultRecorded",
-      "providerExecutionStarted",
-    ].every((key) => typeof executionEvidence[key] === "boolean");
+    readExactCourseSupportDecisionExecutionEvidenceShape(
+      attempt.executionEvidence,
+    ) !== null;
   const isExactUnstartedCarrier = Boolean(
     admission &&
       admission.signalDigest === signal.signalDigest &&
@@ -14848,7 +15450,10 @@ function sanitizeResponderCloseoutSummary(value: unknown) {
     "realDemandAgeMinutes",
     "exactRuntimeVerifiedCourseCount",
   ] as const;
-  const result: Record<string, number | boolean> = {};
+  const result: Record<
+    string,
+    number | boolean | string | Record<string, number | boolean | string>
+  > = {};
   for (const key of allowedKeys) {
     const candidate = source[key];
     if (typeof candidate === "boolean") {
@@ -14860,6 +15465,25 @@ function sanitizeResponderCloseoutSummary(value: unknown) {
     ) {
       result[key] = Math.trunc(candidate);
     }
+  }
+  const verificationWatch = asJsonObject(source.verificationWatch);
+  const safeVerificationWatch: Record<string, number | boolean | string> = {};
+  for (const key of ["settled", "stopped"] as const) {
+    if (typeof verificationWatch[key] === "boolean") {
+      safeVerificationWatch[key] = verificationWatch[key];
+    }
+  }
+  for (const key of ["passCount", "preCloseoutExplicitHumanCount"] as const) {
+    const candidate = verificationWatch[key];
+    if (typeof candidate === "number" && Number.isInteger(candidate) && candidate >= 0) {
+      safeVerificationWatch[key] = candidate;
+    }
+  }
+  if (verificationWatch.stopMode === "EARLY_RETRY" || verificationWatch.stopMode === "ENDPOINT") {
+    safeVerificationWatch.stopMode = verificationWatch.stopMode;
+  }
+  if (Object.keys(safeVerificationWatch).length > 0) {
+    result.verificationWatch = safeVerificationWatch;
   }
   return result;
 }
