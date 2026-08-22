@@ -1187,6 +1187,56 @@ function hasCourseSupportProviderExecutionAttemptEvidence(input: {
   );
 }
 
+function hasDurableDetachedProviderExecutionEvidence(
+  request: DetachedVerificationRequestState,
+) {
+  const evidence = asJsonObject(request.evidence);
+  const observedAt =
+    typeof evidence.observedAt === "string"
+      ? new Date(evidence.observedAt)
+      : null;
+  return Boolean(
+    request.startedAt &&
+      (request.status === "SUCCEEDED" ||
+        request.status === "RETRYABLE_FAILED" ||
+        request.status === "STALE") &&
+      request.runtimeVersion === request.releaseSha &&
+      request.outcome &&
+      evidence.providerExecution === true &&
+      (evidence.kind === "PROVIDER_VERIFICATION" ||
+        evidence.kind === "PROVIDER_VERIFICATION_FAILURE") &&
+      evidence.runtimeVersion === request.runtimeVersion &&
+      (evidence.releaseSha === undefined ||
+        evidence.releaseSha === request.releaseSha) &&
+      evidence.outcome === request.outcome &&
+      evidence.failureClass === (request.failureClass ?? undefined) &&
+      typeof request.providerSnapshotFingerprint === "string" &&
+      evidence.providerSnapshotFingerprint ===
+        request.providerSnapshotFingerprint &&
+      observedAt &&
+      Number.isFinite(observedAt.getTime()) &&
+      observedAt.getTime() >= request.startedAt.getTime(),
+  );
+}
+
+function isActiveDetachedVerificationRequest(
+  request: DetachedVerificationRequestState,
+) {
+  return request.status === "QUEUED" || request.status === "CHECKING";
+}
+
+function canTreatDetachedVerificationRequestAsOrchestrationOnly(
+  request: DetachedVerificationRequestState,
+) {
+  return (
+    !isActiveDetachedVerificationRequest(request) &&
+    (request.status === "SUCCEEDED" ||
+      request.status === "RETRYABLE_FAILED" ||
+      request.status === "STALE") &&
+    !hasDurableDetachedProviderExecutionEvidence(request)
+  );
+}
+
 function didCourseSupportCloseoutConsumeRemediationAttempt(input: {
   summary: unknown;
   courseId: string;
@@ -1240,6 +1290,14 @@ function readPersistedCourseSupportRemediationAttemptRecord(input: {
   ) {
     return null;
   }
+  const exactExecutionEvidence =
+    readExactCourseSupportDecisionExecutionEvidenceShape(
+      record.executionEvidence,
+    );
+  const persistedCountsTowardOperationalNoProgress =
+    typeof record.countsTowardOperationalNoProgress === "boolean"
+      ? record.countsTowardOperationalNoProgress
+      : null;
   return {
     courseRef,
     providerSnapshotFingerprint,
@@ -1247,10 +1305,15 @@ function readPersistedCourseSupportRemediationAttemptRecord(input: {
     runtimeVersion,
     activeRealSearchCount,
     consumed: record.consumed,
-    countsTowardOperationalNoProgress:
-      typeof record.countsTowardOperationalNoProgress === "boolean"
-        ? record.countsTowardOperationalNoProgress
-        : null,
+    // `providerExecutionStarted` is the legacy name for PRE_EXECUTION request
+    // attachment. It protects one-shot request admission, but it is not proof
+    // that provider I/O ran and must not consume the operational no-progress
+    // budget. Exact legacy records are normalized from durable execution proof;
+    // malformed/older envelopes retain their conservative persisted tri-state.
+    countsTowardOperationalNoProgress: exactExecutionEvidence
+      ? record.consumed ||
+        exactExecutionEvidence.providerExecutionAttemptRecorded
+      : persistedCountsTowardOperationalNoProgress,
     approach: parseCourseSupportRemediationApproach(record.approach)
   };
 }
@@ -7309,6 +7372,103 @@ function getCourseSupportNextStageAttemptCount(
   )?.attemptCount;
 }
 
+export function buildCourseSupportCloseoutPlaybookDecisionBasis(input: {
+  incidents: Array<{ cycle: number; attemptLedger: unknown }>;
+}) {
+  const assessments = input.incidents.map((entry) => ({
+    cycle: entry.cycle,
+    assessment: assessAutomationPlaybook(entry.attemptLedger, entry.cycle),
+  }));
+  const availableAssessments = assessments.filter(
+    ({ cycle, assessment }) => assessment.valid && assessment.cycle === cycle,
+  );
+  const playbookAssessmentAvailableIncidentCount = availableAssessments.length;
+  const playbookAssessmentInvalidIncidentCount =
+    assessments.length - playbookAssessmentAvailableIncidentCount;
+  const playbookAssessmentComplete =
+    playbookAssessmentInvalidIncidentCount === 0;
+  const incompleteAssessments = availableAssessments.filter(
+    ({ assessment }) => assessment.conclusion === "INCOMPLETE",
+  );
+  const rawIncompleteStageAttempts = incompleteAssessments.map(
+    ({ assessment }) => ({
+      nextStage: assessment.nextStage,
+      attemptCount: getCourseSupportNextStageAttemptCount(assessment),
+    }),
+  );
+  const incompleteStageAttempts = rawIncompleteStageAttempts.flatMap((entry) =>
+    entry.nextStage !== null &&
+    entry.nextStage !== undefined &&
+    Number.isSafeInteger(entry.attemptCount) &&
+    (entry.attemptCount ?? -1) >= 0
+      ? [
+          {
+            nextStage: entry.nextStage,
+            attemptCount: entry.attemptCount as number,
+          },
+        ]
+      : [],
+  );
+  const incompletePlaybookEvidenceComplete =
+    playbookAssessmentComplete &&
+    incompleteStageAttempts.length === rawIncompleteStageAttempts.length;
+  const incompletePlaybookNextStageAttemptHistogram =
+    incompletePlaybookEvidenceComplete
+      ? Array.from(
+          incompleteStageAttempts.reduce(
+            (histogram, entry) => {
+              const key = `${entry.nextStage}:${entry.attemptCount}`;
+              const current = histogram.get(key);
+              histogram.set(key, {
+                nextStage: entry.nextStage,
+                attemptCount: entry.attemptCount,
+                incidentCount: (current?.incidentCount ?? 0) + 1,
+              });
+              return histogram;
+            },
+            new Map<
+              string,
+              {
+                nextStage: AutomationPlaybookStage;
+                attemptCount: number;
+                incidentCount: number;
+              }
+            >(),
+          ).values(),
+        ).sort((left, right) => {
+          const stageOrder =
+            AUTOMATION_PLAYBOOK_STAGES.indexOf(left.nextStage) -
+            AUTOMATION_PLAYBOOK_STAGES.indexOf(right.nextStage);
+          return stageOrder !== 0
+            ? stageOrder
+            : left.attemptCount - right.attemptCount;
+        })
+      : null;
+
+  return {
+    playbookAssessmentAvailableIncidentCount,
+    playbookAssessmentInvalidIncidentCount,
+    playbookExhaustedCount: playbookAssessmentComplete
+      ? availableAssessments.filter(({ assessment }) =>
+          ["TECHNICAL_FINAL", "UNRESOLVED_EXHAUSTED"].includes(
+            assessment.conclusion,
+          ),
+        ).length
+      : null,
+    incompletePlaybookCount: incompletePlaybookEvidenceComplete
+      ? incompleteAssessments.length
+      : null,
+    zeroAttemptBrowserAdapterRetryCount: incompletePlaybookEvidenceComplete
+      ? incompleteStageAttempts.filter(
+          (entry) =>
+            entry.nextStage === "BROWSER_ADAPTER_RETRY" &&
+            entry.attemptCount === 0,
+        ).length
+      : null,
+    incompletePlaybookNextStageAttemptHistogram,
+  };
+}
+
 const COURSE_SUPPORT_DECISION_EXECUTION_EVIDENCE_KEYS = [
   "claimedImplementationPaths",
   "newReleaseRecorded",
@@ -7449,7 +7609,7 @@ function readExactCourseSupportDecisionExecutionEvidence(
     exact.playbookAttemptRecorded ||
     exact.terminalResultRecorded;
   const countsTowardOperationalNoProgress =
-    consumed || exact.providerExecutionAttemptRecorded || exact.providerExecutionStarted;
+    consumed || exact.providerExecutionAttemptRecorded;
   if (
     attempt.closeout.consumed !== consumed ||
     attempt.closeout.countsTowardOperationalNoProgress !== countsTowardOperationalNoProgress ||
@@ -7802,8 +7962,11 @@ export function buildCourseSupportCloseoutRemediationDecisionBasis(input: {
     remediationEvidenceUnavailableIncidentCount,
     executionEvidenceAvailableIncidentCount,
     executionEvidenceUnavailableIncidentCount,
-    providerExecutionStartedIncidentCount: executionEvidenceComplete
+    verificationRequestStartedIncidentCount: executionEvidenceComplete
       ? executionEvidence.filter((entry) => entry?.providerExecutionStarted === true).length
+      : null,
+    providerExecutionObservedIncidentCount: executionEvidenceComplete
+      ? executionEvidence.filter((entry) => entry?.providerExecutionAttemptRecorded === true).length
       : null,
     providerExecutionAttemptRecordedIncidentCount: executionEvidenceComplete
       ? executionEvidence.filter((entry) => entry?.providerExecutionAttemptRecorded === true).length
@@ -8736,6 +8899,13 @@ async function closeoutCourseSupportBatchAttempt(
       },
       select: DETACHED_VERIFICATION_REQUEST_STATE_SELECT,
     });
+  if (
+    detachedRequestStatesAtCloseout.some(isActiveDetachedVerificationRequest)
+  ) {
+    throw new Error(
+      "Detached provider verification is still active; rerun verification before closeout.",
+    );
+  }
   type DeferredFailureHandoffCloseoutSource =
     | {
         kind: "CARRIER";
@@ -9047,9 +9217,16 @@ async function closeoutCourseSupportBatchAttempt(
       throw new Error("A course-support incident changed after verification.");
     }
   }
-  const providerExecutionStartedByBatchIncidentId = new Set(
+  const verificationRequestStartedByBatchIncidentId = new Set(
     detachedRequestStatesAtCloseout.flatMap((request) =>
       request.startedAt !== null ? [request.batchIncidentId] : [],
+    ),
+  );
+  const providerExecutionObservedByBatchIncidentId = new Set(
+    detachedRequestStatesAtCloseout.flatMap((request) =>
+      hasDurableDetachedProviderExecutionEvidence(request)
+        ? [request.batchIncidentId]
+        : [],
     ),
   );
   const releaseHistoryOrdinalByBatchIncidentId = new Map(
@@ -9101,6 +9278,7 @@ async function closeoutCourseSupportBatchAttempt(
     );
     const providerExecutionAttemptRecorded = Boolean(
       historicalExecution.providerExecutionAttemptEverForCourse ||
+      providerExecutionObservedByBatchIncidentId.has(entry.id) ||
       hasCourseSupportProviderExecutionAttemptEvidence({
         proofSnapshot: entry.proofSnapshot,
         baseSha: batch.baseSha,
@@ -9140,9 +9318,7 @@ async function closeoutCourseSupportBatchAttempt(
       playbookAttemptRecorded ||
       terminalResultRecorded;
     const countsTowardOperationalNoProgress = Boolean(
-      consumed ||
-      providerExecutionAttemptRecorded ||
-      providerExecutionStartedByBatchIncidentId.has(entry.id),
+      consumed || providerExecutionAttemptRecorded,
     );
     const deferredFailureHandoff =
       deferredFailureHandoffByBatchIncidentId.get(entry.id);
@@ -9214,7 +9390,9 @@ async function closeoutCourseSupportBatchAttempt(
         providerExecutionAttemptRecorded,
         playbookAttemptRecorded,
         terminalResultRecorded,
-        providerExecutionStarted: providerExecutionStartedByBatchIncidentId.has(
+        // Legacy persisted key: this is PRE_EXECUTION request attachment, not
+        // independently observed provider I/O.
+        providerExecutionStarted: verificationRequestStartedByBatchIncidentId.has(
           entry.id,
         ),
       },
@@ -9294,6 +9472,16 @@ async function closeoutCourseSupportBatchAttempt(
       const entry = baseNormalizedEntries[index];
       if (!entry || attempt.countsTowardOperationalNoProgress !== false)
         return [];
+      const deferredSignal = parseDeferredFailureHandoffSignal(
+        attempt.deferredFailureHandoff,
+      );
+      const executionEvidence =
+        readExactCourseSupportDecisionExecutionEvidenceShape(
+          attempt.executionEvidence,
+        );
+      if (deferredSignal && executionEvidence?.providerExecutionStarted) {
+        return [];
+      }
       const schedule = getCourseSupportOrchestrationRetrySchedule({
         now,
         priorAttemptCount: countCourseSupportCompletedOrchestrationOnlyAttempts(
@@ -9714,22 +9902,13 @@ async function closeoutCourseSupportBatchAttempt(
   const orchestrationOnlyCount = closeoutRemediationAttempts.filter(
     (attempt) => attempt.countsTowardOperationalNoProgress === false,
   ).length;
-  const playbookAssessments = normalizedEntries.map((entry) => ({
-    cycle: entry.cycle,
-    assessment: assessAutomationPlaybook(
-      entry.incident.attemptLedger,
-      entry.cycle,
-    ),
-  }));
-  const availablePlaybookAssessments = playbookAssessments.filter(
-    ({ cycle, assessment }) => assessment.valid && assessment.cycle === cycle,
-  );
-  const playbookAssessmentAvailableIncidentCount =
-    availablePlaybookAssessments.length;
-  const playbookAssessmentInvalidIncidentCount =
-    playbookAssessments.length - playbookAssessmentAvailableIncidentCount;
-  const playbookAssessmentComplete =
-    playbookAssessmentInvalidIncidentCount === 0;
+  const playbookDecisionBasis =
+    buildCourseSupportCloseoutPlaybookDecisionBasis({
+      incidents: normalizedEntries.map((entry) => ({
+        cycle: entry.cycle,
+        attemptLedger: entry.incident.attemptLedger,
+      })),
+    });
   const remediationDecisionBasis =
     buildCourseSupportCloseoutRemediationDecisionBasis({
       incidents: normalizedEntries.map((entry) => ({
@@ -9741,34 +9920,13 @@ async function closeoutCourseSupportBatchAttempt(
       now,
     });
   const decisionBasis = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     normalizedIncidentCount: normalizedEntries.length,
     needsHumanCount,
     automationStalledCount,
     operationalRetryBudgetExhaustedCount,
     orchestrationOnlyCount,
-    playbookAssessmentAvailableIncidentCount,
-    playbookAssessmentInvalidIncidentCount,
-    playbookExhaustedCount: playbookAssessmentComplete
-      ? availablePlaybookAssessments.filter(({ assessment }) =>
-          ["TECHNICAL_FINAL", "UNRESOLVED_EXHAUSTED"].includes(
-            assessment.conclusion,
-          ),
-        ).length
-      : null,
-    incompletePlaybookCount: playbookAssessmentComplete
-      ? availablePlaybookAssessments.filter(
-          ({ assessment }) => assessment.conclusion === "INCOMPLETE",
-        ).length
-      : null,
-    zeroAttemptBrowserAdapterRetryCount: playbookAssessmentComplete
-      ? availablePlaybookAssessments.filter(
-          ({ assessment }) =>
-            assessment.conclusion === "INCOMPLETE" &&
-            assessment.nextStage === "BROWSER_ADAPTER_RETRY" &&
-            getCourseSupportNextStageAttemptCount(assessment) === 0,
-        ).length
-      : null,
+    ...playbookDecisionBasis,
     ...remediationDecisionBasis,
   };
   const deferredProbeFenceEntries = baseNormalizedEntries.filter((entry) => {
@@ -9951,6 +10109,9 @@ async function closeoutCourseSupportBatchAttempt(
         },
         select: DETACHED_VERIFICATION_REQUEST_STATE_SELECT,
       });
+    if (detachedRequestStates.some(isActiveDetachedVerificationRequest)) {
+      throw new CourseSupportCloseoutSnapshotChangedError();
+    }
     const detachedRequestStatesForRuntime = detachedRequestStates.filter(
       (request) => request.releaseSha === closeoutRuntimeVersion,
     );
@@ -9972,12 +10133,20 @@ async function closeoutCourseSupportBatchAttempt(
         (candidate) => candidate.batchIncidentId === entry.id,
       );
       if (
-        snapshotRequests.some((request) => request.startedAt !== null) ||
-        freshRequests.some((request) => request.startedAt !== null) ||
+        !snapshotRequests.every(
+          canTreatDetachedVerificationRequestAsOrchestrationOnly,
+        ) ||
+        !freshRequests.every(
+          canTreatDetachedVerificationRequestAsOrchestrationOnly,
+        ) ||
         freshRequests.length !== snapshotRequests.length ||
         freshRequests.some(
-          (request) =>
-            !snapshotRequests.some((snapshot) => snapshot.id === request.id),
+          (request) => {
+            const snapshot = snapshotRequests.find(
+              (candidate) => candidate.id === request.id,
+            );
+            return !snapshot || snapshot.revision !== request.revision;
+          },
         )
       ) {
         throw new CourseSupportCloseoutSnapshotChangedError();
@@ -9992,7 +10161,7 @@ async function closeoutCourseSupportBatchAttempt(
               status: request.status,
               revision: request.revision,
               attemptCount: request.attemptCount,
-              startedAt: null,
+              startedAt: request.startedAt,
               outcome: request.outcome,
               failureClass: request.failureClass,
               evidence:
@@ -11654,6 +11823,24 @@ export async function recoverCourseSupportBatch(input: {
             "Expired responder incidents no longer match a recoverable lifecycle state.",
           );
         }
+        if (
+          batch.incidents.some((entry) =>
+            (entry.verificationRequests ?? []).some(
+              isActiveDetachedVerificationRequest,
+            ),
+          )
+        ) {
+          return {
+            outcome: "command_failed" as const,
+            recovered: false,
+            reasons: [
+              "Detached provider verification is still active; allow the existing request lifecycle to reclaim or finish it before responder recovery.",
+            ],
+            threadDisposition: "KEEP_VISIBLE" as const,
+            archiveReason:
+              "Responder recovery is waiting for active provider verification.",
+          };
+        }
         const needsHumanCount = terminalIncidents.filter(
           (entry) => entry.incident.status === "NEEDS_HUMAN",
         ).length;
@@ -11733,8 +11920,8 @@ export async function recoverCourseSupportBatch(input: {
                 ),
               });
             if (
-              (entry.verificationRequests ?? []).some(
-                (request) => request.startedAt !== null,
+              !(entry.verificationRequests ?? []).every(
+                canTreatDetachedVerificationRequestAsOrchestrationOnly,
               )
             ) {
               return [];
@@ -12151,6 +12338,7 @@ export async function recoverCourseSupportBatch(input: {
                   deploymentRecorded: false,
                   postProbeRecorded: false,
                   providerAttemptRecorded: false,
+                  providerExecutionAttemptRecorded: false,
                   playbookAttemptRecorded: false,
                   terminalResultRecorded: false,
                   providerExecutionStarted: (
@@ -12229,6 +12417,15 @@ export async function recoverCourseSupportBatch(input: {
               where: { batchIncident: { batchId: batch.id } },
               select: DETACHED_VERIFICATION_REQUEST_STATE_SELECT,
             });
+          if (
+            freshDetachedRequestStates.some(
+              isActiveDetachedVerificationRequest,
+            )
+          ) {
+            throw new Error(
+              "Detached provider verification is still active during safe responder requeue.",
+            );
+          }
           for (const entryId of safeRequeueOrchestrationOnlyEntryIds) {
             const entry = retryIncidents.find(
               (candidate) => candidate.id === entryId,
@@ -12243,14 +12440,20 @@ export async function recoverCourseSupportBatch(input: {
               (candidate) => candidate.batchIncidentId === entry.id,
             );
             if (
-              snapshotRequests.some((request) => request.startedAt !== null) ||
-              freshRequests.some((request) => request.startedAt !== null) ||
+              !snapshotRequests.every(
+                canTreatDetachedVerificationRequestAsOrchestrationOnly,
+              ) ||
+              !freshRequests.every(
+                canTreatDetachedVerificationRequestAsOrchestrationOnly,
+              ) ||
               freshRequests.length !== snapshotRequests.length ||
               freshRequests.some(
-                (request) =>
-                  !snapshotRequests.some(
-                    (snapshot) => snapshot.id === request.id,
-                  ),
+                (request) => {
+                  const snapshot = snapshotRequests.find(
+                    (candidate) => candidate.id === request.id,
+                  );
+                  return !snapshot || snapshot.revision !== request.revision;
+                },
               )
             ) {
               throw new Error(
@@ -12267,12 +12470,29 @@ export async function recoverCourseSupportBatch(input: {
                     status: request.status,
                     revision: request.revision,
                     attemptCount: request.attemptCount,
-                    startedAt: null,
+                    startedAt: request.startedAt,
                     outcome: request.outcome,
                     failureClass: request.failureClass,
+                    evidence:
+                      request.evidence === null
+                        ? { equals: Prisma.AnyNull }
+                        : {
+                            equals:
+                              request.evidence as Prisma.InputJsonValue,
+                          },
                     lastError: request.lastError,
+                    runtimeVersion: request.runtimeVersion,
+                    providerSnapshotFingerprint:
+                      request.providerSnapshotFingerprint,
+                    nextAttemptAt: request.nextAttemptAt,
+                    completedAt: request.completedAt,
+                    createdAt: request.createdAt,
+                    updatedAt: request.updatedAt,
                   },
-                  data: { revision: { increment: 0 } },
+                  data: {
+                    revision: { increment: 0 },
+                    updatedAt: request.updatedAt,
+                  },
                 });
               if (requestAsserted.count !== 1) {
                 throw new Error(
@@ -13377,6 +13597,16 @@ function readExactDeferredFailureHandoffAttempt(input: {
       executionEvidence.playbookAttemptRecorded === true ||
       executionEvidence.terminalResultRecorded === true,
   );
+  const durableOperationalNoProgressRecorded = Boolean(
+    consumedByRecordedExecution ||
+      executionEvidence.providerExecutionAttemptRecorded === true,
+  );
+  const operationalNoProgressMatchesCurrentOrLegacyStartedSemantics =
+    attempt.countsTowardOperationalNoProgress ===
+      durableOperationalNoProgressRecorded ||
+    (attempt.countsTowardOperationalNoProgress === true &&
+      !durableOperationalNoProgressRecorded &&
+      executionEvidence.providerExecutionStarted === true);
   const admissionMatchesSignal = Boolean(
     admission &&
       admission.signalDigest === signal.signalDigest &&
@@ -13403,7 +13633,7 @@ function readExactDeferredFailureHandoffAttempt(input: {
       executionEvidenceHasExactShape &&
       executionEvidence.providerExecutionStarted === true &&
       attempt.consumed === consumedByRecordedExecution &&
-      attempt.countsTowardOperationalNoProgress === true,
+      operationalNoProgressMatchesCurrentOrLegacyStartedSemantics,
   );
   const isExactInvalidatedConsumedCarrier = Boolean(
     admissionMatchesSignal &&
@@ -13415,8 +13645,7 @@ function readExactDeferredFailureHandoffAttempt(input: {
       invalidation.signalDigest === signal.signalDigest &&
       invalidation.customerDataIncluded === false &&
       attempt.consumed === false &&
-      attempt.countsTowardOperationalNoProgress ===
-        signal.confirmationStarted &&
+      operationalNoProgressMatchesCurrentOrLegacyStartedSemantics &&
       executionEvidenceHasExactShape &&
       executionEvidence.providerExecutionStarted ===
         signal.confirmationStarted &&
@@ -13436,7 +13665,7 @@ function readExactDeferredFailureHandoffAttempt(input: {
       !signal.confirmationStarted &&
       signal.sourceResult === "RETRY_SCHEDULED" &&
       attempt.deferredFailureHandoffInvalidation === undefined &&
-      attempt.countsTowardOperationalNoProgress === true &&
+      operationalNoProgressMatchesCurrentOrLegacyStartedSemantics &&
       executionEvidenceHasExactShape &&
       executionEvidence.providerExecutionStarted === true &&
       attempt.consumed === consumedByRecordedExecution,

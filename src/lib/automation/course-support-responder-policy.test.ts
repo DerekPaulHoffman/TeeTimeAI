@@ -141,9 +141,18 @@ describe("course-support responder safeguards", () => {
         verificationWatchPassCount: 3,
         batchId: "private-batch-id",
         decisionBasis: {
-          schemaVersion: 2,
+          schemaVersion: 3,
           needsHumanCount: 2,
-          providerExecutionStartedIncidentCount: 0
+          verificationRequestStartedIncidentCount: 1,
+          providerExecutionObservedIncidentCount: 0,
+          providerExecutionAttemptRecordedIncidentCount: 0,
+          incompletePlaybookNextStageAttemptHistogram: [
+            {
+              nextStage: "BROWSER_ADAPTER_RETRY",
+              attemptCount: 1,
+              incidentCount: 2,
+            },
+          ],
         }
       })
     ).toEqual({
@@ -153,9 +162,18 @@ describe("course-support responder safeguards", () => {
       verificationWatchPassCount: 3,
       batchId: "[redacted]",
       decisionBasis: {
-        schemaVersion: 2,
+        schemaVersion: 3,
         needsHumanCount: 2,
-        providerExecutionStartedIncidentCount: 0
+        verificationRequestStartedIncidentCount: 1,
+        providerExecutionObservedIncidentCount: 0,
+        providerExecutionAttemptRecordedIncidentCount: 0,
+        incompletePlaybookNextStageAttemptHistogram: [
+          {
+            nextStage: "BROWSER_ADAPTER_RETRY",
+            attemptCount: 1,
+            incidentCount: 2,
+          },
+        ],
       }
     });
   });
