@@ -36,6 +36,7 @@ export type RuntimePlaybookTransitionInput = {
   skipReason?: AutomationPlaybookSkipReason;
   factualDisposition?: AutomationPlaybookFactualDisposition;
   technicalReason?: AutomationPlaybookTechnicalReason;
+  expectedProviderSnapshotFingerprint?: string;
   source?: CourseMonitoringEventSource;
   now?: Date;
 };
@@ -110,6 +111,8 @@ export async function recordRuntimePlaybookTransition(
     skipReason: input.skipReason,
     factualDisposition: input.factualDisposition,
     technicalReason: input.technicalReason,
+    expectedProviderSnapshotFingerprint:
+      input.expectedProviderSnapshotFingerprint,
     note: getRuntimePlaybookNote(input.stage, input.transition),
     source: input.source,
     now: input.now,

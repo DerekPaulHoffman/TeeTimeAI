@@ -102,6 +102,8 @@ describe("course monitoring playbook runtime", () => {
           readPath: readPathByStage[stage],
           evidenceKind: "TOOLING",
           runtimeVersion,
+          expectedProviderSnapshotFingerprint:
+            stage === "RENDERED_BROWSER_DISCOVERY" ? "b".repeat(64) : undefined,
           skipReason:
             stage === "LOCAL_READER"
               ? "NO_LOCAL_READER_CAPABILITY"
@@ -123,6 +125,11 @@ describe("course monitoring playbook runtime", () => {
       expect(call.failureFingerprint).toMatch(/^PLAYBOOK:[A-Z_]+:[A-Z_]+$/u);
       expect(call.note).not.toMatch(/https?:|course-1|incident-1/u);
     }
+    expect(
+      monitoringMocks.recordCourseMonitoringPlaybookTransition.mock.calls.find(
+        ([call]) => call.stage === "RENDERED_BROWSER_DISCOVERY",
+      )?.[0],
+    ).toMatchObject({ expectedProviderSnapshotFingerprint: "b".repeat(64) });
   });
 
   it("refuses to invent omitted prior-stage proof", async () => {

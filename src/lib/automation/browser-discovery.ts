@@ -4948,7 +4948,7 @@ function isSensitiveManualUrlKey(value: string) {
     /^(?:sid|cfid|cftoken|oscsid|connectsid|j(?:ava)?sessionid[a-z0-9]*|php(?:sess|session)id[a-z0-9]*|asp(?:net)?sessionid[a-z0-9]*|sessionid[a-z0-9]*)$/.test(
       normalized
     ) ||
-    /^(?:token|secret|nonce|jwt|ticket|loginticket|serviceticket|authorization|signature|signed|sig|credential|password|expires?|expiry|expiration|assertion|relaystate|saml(?:response|art)?|oauth(?:token|code|state|verifier)?|authcode|verificationcode|session(?:id|token|key|state)?|clientid|responsetype|redirecturi|granttype|scope|codechallenge|codeverifier|(?:access|auth|id|api|client)(?:token|key|secret))$/.test(
+    /^(?:token|secret|nonce|jwt|ticket|loginticket|serviceticket|authorization|signature|signed|sig|credential|password|expires?|expiry|expiration|assertion|relaystate|saml(?:response|art)?|oauth(?:token|code|state|verifier)?|authcode|verificationcode|session(?:id|token|key|state)?|clientid|responsetype|redirecturi|granttype|scope|codechallenge|codeverifier|(?:access|refresh|auth|id|api|client)(?:token|key|secret))$/.test(
       normalized
     ) ||
     /^(?:saml|oauth|openid|oidc|auth|authentication|login)[a-z0-9]*$/.test(

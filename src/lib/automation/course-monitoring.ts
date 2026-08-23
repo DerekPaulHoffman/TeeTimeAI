@@ -2109,6 +2109,7 @@ export async function recordCourseMonitoringPlaybookTransition(
     idempotencyKey?: string | null;
     now?: Date;
     browserPersistenceFence?: CourseSupportBrowserPersistenceFence;
+    expectedProviderSnapshotFingerprint?: string;
   },
 ) {
   if (!hasMonitoringModels(prisma)) {
@@ -2128,6 +2129,29 @@ export async function recordCourseMonitoringPlaybookTransition(
           runtimeVersion: input.runtimeVersion,
           mutate: async () => undefined,
         });
+      }
+      if (input.expectedProviderSnapshotFingerprint !== undefined) {
+        if (
+          !/^[a-f0-9]{64}$/u.test(input.expectedProviderSnapshotFingerprint)
+        ) {
+          return null;
+        }
+        await transaction.$queryRaw(
+          Prisma.sql`SELECT "id"
+                     FROM "Course"
+                     WHERE "id" = ${input.courseId}
+                     FOR UPDATE`,
+        );
+        const currentCourse = await transaction.course.findUnique({
+          where: { id: input.courseId },
+        });
+        if (
+          !currentCourse ||
+          buildCourseSupportProviderSnapshotFingerprint(currentCourse) !==
+            input.expectedProviderSnapshotFingerprint
+        ) {
+          return null;
+        }
       }
       const incident = await transaction.courseSupportIncident.findUnique({
         where: { courseId: input.courseId },

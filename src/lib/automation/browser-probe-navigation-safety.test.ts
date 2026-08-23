@@ -77,6 +77,9 @@ describe("rendered browser navigation safety", () => {
       expect(
         evidence.browserInvestigation.sameOriginPages[0]?.interactionBlocked,
       ).toBe(true);
+      expect(evidence.browserInvestigation.restrictedNetworkObserved).toBe(
+        true,
+      );
     } finally {
       await context.close();
       await browser.close();
@@ -247,6 +250,66 @@ describe("rendered browser navigation safety", () => {
       expect(attemptedRestrictedRequests).toEqual(
         expect.arrayContaining(restrictedUrls),
       );
+    } finally {
+      await browser.close();
+    }
+  }, 30_000);
+
+  it("retains a coarse restricted-network signal from an unknown official root with an auth iframe", async () => {
+    const browser = await chromium.launch();
+    try {
+      const page = await browser.newPage({ serviceWorkers: "block" });
+      const officialPageUrl =
+        "https://neutral-golf.example/course-information";
+      const authFrameUrl = "https://booking-provider.example/signin";
+      const attemptedAuthRequests: string[] = [];
+      let authFrameServed = false;
+
+      vi.spyOn(page.request, "get").mockResolvedValue({
+        ok: () => false,
+      } as APIResponse);
+      page.on("request", (request) => {
+        if (request.url() === authFrameUrl) {
+          attemptedAuthRequests.push(request.url());
+        }
+      });
+      await page.route(officialPageUrl, async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "text/html",
+          body: `<html><head><title>Welcome</title></head><body><p>Public golf information.</p><iframe src="${authFrameUrl}"></iframe></body></html>`,
+        });
+      });
+      await page.route(authFrameUrl, async (route) => {
+        authFrameServed = true;
+        await route.fulfill({
+          status: 200,
+          contentType: "text/html",
+          body: "must not be served",
+        });
+      });
+
+      const evidence = await collectBrowserEvidence(page, {
+        courseId: "unknown-identity-course",
+        courseName: "Target Course Golf Club",
+        sourceUrl: officialPageUrl,
+        officialCourseWebsite: officialPageUrl,
+      });
+
+      expect(evidence.browserInvestigation).toMatchObject({
+        restrictedNetworkObserved: true,
+        sameOriginPages: [
+          expect.objectContaining({
+            identityStatus: "UNKNOWN",
+            trustedForCourse: false,
+          }),
+        ],
+      });
+      expect(attemptedAuthRequests).toContain(authFrameUrl);
+      expect(authFrameServed).toBe(false);
+      expect(
+        JSON.stringify(evidence.browserInvestigation.networkContracts),
+      ).not.toContain("signin");
     } finally {
       await browser.close();
     }
@@ -433,7 +496,7 @@ describe("rendered browser navigation safety", () => {
         }
         if (
           request.isNavigationRequest() &&
-          /\/book\/tee-times-\d+$/u.test(new URL(request.url()).pathname)
+          /\/tee-times-\d+$/u.test(new URL(request.url()).pathname)
         ) {
           bookingLandingUrls.push(request.url());
         }
@@ -456,9 +519,26 @@ describe("rendered browser navigation safety", () => {
         const neutralMatch = /^\/golf\/rates-(\d+)$/u.exec(pathname);
         if (neutralMatch) {
           await route.fulfill({
-            status: 302,
-            headers: { location: `/book/tee-times-${neutralMatch[1]}` },
-            body: "",
+            status: 200,
+            contentType: "text/html",
+            body: `<html><title>Redirect Cap Golf Course rates</title><body><h1>Redirect Cap Golf Course rates</h1><script src="/redirect-app.js?index=${neutralMatch[1]}"></script></body></html>`,
+          });
+          return;
+        }
+        if (pathname === "/api/availability") {
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: "{}",
+          });
+          return;
+        }
+        if (pathname === "/redirect-app.js") {
+          const index = new URL(route.request().url()).searchParams.get("index");
+          await route.fulfill({
+            status: 200,
+            contentType: "application/javascript",
+            body: `fetch('/api/availability?authToken=private-canary').finally(() => { location.href = '/tee-times-${index}' })`
           });
           return;
         }
@@ -481,6 +561,10 @@ describe("rendered browser navigation safety", () => {
       expect(neutralNavigationUrls).toHaveLength(3);
       expect(bookingLandingUrls).toHaveLength(3);
       expect(evidence.browserInvestigation.bookingDestinations).toHaveLength(3);
+      expect(evidence.browserInvestigation.restrictedNetworkObserved).toBe(true);
+      expect(
+        JSON.stringify(evidence.browserInvestigation.networkContracts),
+      ).not.toContain("private-canary");
     } finally {
       await context.close();
       await browser.close();
@@ -713,6 +797,9 @@ describe("rendered browser navigation safety", () => {
       expect(contractJson).not.toContain("8675309");
       expect(contractJson).not.toContain("2026-09-01");
       expect(contractJson).not.toContain("analytics.example");
+      expect(
+        persisted.evidence.browserInvestigation.restrictedNetworkObserved,
+      ).toBe(true);
     } finally {
       await context.close();
       await browser.close();

@@ -9,10 +9,12 @@ import {
   buildBrowserProbeDecisionTrace,
   buildRedirectedProviderBookingCandidate,
   buildBrowserWidgetCandidates,
+  classifyBrowserNetworkContractRestriction,
   classifyRenderedOfficialPageCourseIdentity,
   finalizeBrowserInvestigationEvidence,
   finalizeBrowserEvidenceSnapshots,
   hasDistinctProviderBookingCandidate,
+  isRestrictedBrowserNetworkObservation,
   isRelevantBrowserAccessBarrierUrl,
   isRenderedUnprojectedSourceCandidateLocalityCorroborated,
   planBrowserInvestigationLinks,
@@ -915,6 +917,178 @@ describe("browser probe evidence pipeline", () => {
     expect(JSON.stringify(fingerprint)).not.toContain("2026-09-01");
   });
 
+  it("retains only a coarse restriction signal for unsafe actionable network reads", () => {
+    for (const url of [
+      "https://booking.example/signin",
+      "https://booking.example/api/availability?token=private-canary",
+    ]) {
+      expect(
+        isRestrictedBrowserNetworkObservation({
+          url,
+          method: "GET",
+          resourceType: "xhr",
+        }),
+      ).toBe(true);
+    }
+    expect(
+      isRestrictedBrowserNetworkObservation({
+        url: "https://booking.example/api/availability?date=2026-09-01",
+        method: "POST",
+        resourceType: "fetch",
+      }),
+    ).toBe(true);
+    expect(
+      isRestrictedBrowserNetworkObservation({
+        url: "https://booking.example/api/availability?date=2026-09-01",
+        method: "GET",
+        resourceType: "fetch",
+      }),
+    ).toBe(false);
+    for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+      for (const resourceType of [
+        "document",
+        "iframe",
+        "script",
+        "fetch",
+        "xhr",
+      ]) {
+        expect(
+          isRestrictedBrowserNetworkObservation({
+            url: "https://booking.example/api/availability",
+            method,
+            resourceType,
+          }),
+        ).toBe(true);
+      }
+    }
+    for (const resourceType of [
+      "document",
+      "iframe",
+      "script",
+      "stylesheet",
+      "image",
+      "font",
+      "media",
+      "fetch",
+      "xhr",
+      "eventsource",
+      "websocket",
+      "other",
+    ]) {
+      expect(
+        isRestrictedBrowserNetworkObservation({
+          url: "https://booking.example/signin",
+          method: "GET",
+          resourceType,
+        }),
+      ).toBe(true);
+    }
+
+    for (const legacy of [
+      { origin: "http://localhost", pathPattern: "/api/availability", queryKeys: [] },
+      { origin: "http://127.0.0.1", pathPattern: "/api/availability", queryKeys: [] },
+      {
+        origin: "https://user:password@booking.example",
+        pathPattern: "/api/availability",
+        queryKeys: [],
+      },
+      { origin: "file:///private", pathPattern: "/api/availability", queryKeys: [] },
+      { origin: "https://booking.example", pathPattern: "/signin", queryKeys: [] },
+      { origin: "https://booking.example", pathPattern: "/sign-in", queryKeys: [] },
+      { origin: "https://booking.example", pathPattern: "/oauth/callback", queryKeys: [] },
+      { origin: "https://booking.example", pathPattern: "/sso/login", queryKeys: [] },
+      { origin: "https://booking.example", pathPattern: "/challenge", queryKeys: [] },
+      { origin: "https://booking.example", pathPattern: "/waiting-room", queryKeys: [] },
+      ...[
+        "client_secret",
+        "refresh_token",
+        "csrf",
+        "nonce",
+        "authorization",
+        "redirect_uri",
+        "code_challenge",
+        "samlresponse",
+        "paymentintent",
+        "auth_code",
+      ].map((key) => ({
+        origin: "https://booking.example",
+        pathPattern: "/api/availability",
+        queryKeys: [key],
+      })),
+    ]) {
+      expect(
+        classifyBrowserNetworkContractRestriction({
+          ...legacy,
+          method: "GET",
+        }),
+      ).toMatchObject({ unsafeUrlState: true });
+    }
+    expect(
+      classifyBrowserNetworkContractRestriction({
+        origin: "https://booking.example",
+        method: "GET",
+        pathPattern: "/api/availability",
+        queryKeys: ["date", "players"],
+      }),
+    ).toEqual({ unsafeMethod: false, unsafeUrlState: false });
+  });
+
+  it("preserves only the coarse restriction from an exact unknown-identity official root", () => {
+    const rootUrl = "https://courses.example/target-course";
+    const neutral = prepareBrowserPageEvidence({
+      ...emptyPage,
+      visibleText: "Public golf information.",
+    });
+    const finalize = (
+      requestedUrl: string,
+      requiresDirectIdentityMatch = false,
+    ) =>
+      finalizeBrowserInvestigationEvidence({
+        course: {
+          courseId: "target-course",
+          courseName: "Target Course Golf Club",
+          sourceUrl: rootUrl,
+          officialCourseWebsite: rootUrl,
+          stateCode: "IN",
+        },
+        mode: "INDEPENDENT",
+        pageVisits: [
+          {
+            requestedUrl,
+            finalUrl: requestedUrl,
+            label: "Official golf",
+            depth: 0,
+            parentUrl: null,
+            requiresDirectIdentityMatch,
+            interactionBlocked: false,
+            evidence: neutral,
+            restrictedNetworkObserved: true,
+            networkContracts: [],
+          },
+        ],
+        bookingDestinations: [],
+      });
+
+    const retainedRoot = finalize(rootUrl);
+    expect(retainedRoot.browserInvestigation).toMatchObject({
+      restrictedNetworkObserved: true,
+      networkContracts: [],
+      sameOriginPages: [
+        expect.objectContaining({
+          identityStatus: "UNKNOWN",
+          trustedForCourse: false,
+        }),
+      ],
+    });
+    expect(
+      finalize("https://courses.example/unrelated").browserInvestigation
+        .restrictedNetworkObserved,
+    ).toBe(false);
+    expect(
+      finalize(rootUrl, true).browserInvestigation.restrictedNetworkObserved,
+    ).toBe(false);
+  });
+
   it("aggregates only target-course pages and relevant network contracts", () => {
     const rootUrl = "https://courses.example/target-course";
     const neutralUrl = "https://courses.example/golf/rates";
@@ -1019,6 +1193,7 @@ describe("browser probe evidence pipeline", () => {
             ...emptyPage,
             visibleText: "Public tee times",
           }),
+          restrictedNetworkObserved: true,
           networkContracts: [
             {
               origin: "https://booking.example",
@@ -1063,6 +1238,7 @@ describe("browser probe evidence pipeline", () => {
       incidentCycle: 4,
       runtimeVersion: "a".repeat(40),
       observedAt: "2026-08-20T12:00:00.000Z",
+      restrictedNetworkObserved: true,
     });
     expect(
       evidence.browserInvestigation.sameOriginPages.map(

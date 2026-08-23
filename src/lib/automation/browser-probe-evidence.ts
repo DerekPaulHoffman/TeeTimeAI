@@ -96,6 +96,7 @@ export type BrowserInvestigationPageVisit = {
   >;
   accessBarriers?: BrowserAccessBarrier[];
   networkContracts?: BrowserNetworkContractFingerprint[];
+  restrictedNetworkObserved?: boolean;
 };
 
 export type BrowserBookingDestinationVisit = {
@@ -113,6 +114,7 @@ export type BrowserBookingDestinationVisit = {
   >;
   accessBarriers?: BrowserAccessBarrier[];
   networkContracts?: BrowserNetworkContractFingerprint[];
+  restrictedNetworkObserved?: boolean;
 };
 
 export type BrowserNetworkContractFingerprint = {
@@ -129,6 +131,9 @@ export type BrowserInvestigationAudit = {
   incidentCycle: number | null;
   runtimeVersion: string;
   observedAt: string;
+  // Added only at persistence, after the guarded course projection has
+  // produced the exact provider snapshot this observation describes.
+  providerSnapshotFingerprint?: string;
   limits: {
     maxSameOriginPages: typeof MAX_BROWSER_SAME_ORIGIN_PAGE_VISITS;
     maxDepth: typeof MAX_BROWSER_INVESTIGATION_DEPTH;
@@ -164,6 +169,7 @@ export type BrowserInvestigationAudit = {
     courseScoped: boolean;
     interactionBlocked: boolean;
   }>;
+  restrictedNetworkObserved?: boolean;
   networkContracts: BrowserNetworkContractFingerprint[];
 };
 
@@ -733,6 +739,76 @@ export function buildBrowserNetworkContractFingerprint(input: {
   };
 }
 
+export function isRestrictedBrowserNetworkObservation(input: {
+  url: string;
+  method: string;
+  resourceType: string;
+}) {
+  const classification = classifyBrowserNetworkContractRestriction(input);
+  return classification.unsafeMethod || classification.unsafeUrlState;
+}
+
+export function classifyBrowserNetworkContractRestriction(
+  input:
+    | { url: string; method: string }
+    | Pick<
+        BrowserNetworkContractFingerprint,
+        "origin" | "method" | "pathPattern" | "queryKeys"
+      >,
+) {
+  const unsafeMethod = !["GET", "HEAD", "OPTIONS"].includes(
+    input.method.toUpperCase(),
+  );
+  const url = resolveBrowserNetworkRestrictionUrl(input);
+  return {
+    unsafeMethod,
+    unsafeUrlState: !url || !isSafeManualEvidenceUrl(url),
+  };
+}
+
+function resolveBrowserNetworkRestrictionUrl(
+  input:
+    | { url: string; method: string }
+    | Pick<
+        BrowserNetworkContractFingerprint,
+        "origin" | "method" | "pathPattern" | "queryKeys"
+      >,
+) {
+  try {
+    if ("url" in input) {
+      return new URL(input.url);
+    }
+    if (
+      input.queryKeys.length > 20 ||
+      input.queryKeys.some(
+        (key) => !key || key.length > 64 || key.normalize("NFKC") !== key,
+      )
+    ) {
+      return null;
+    }
+    const origin = new URL(input.origin);
+    if (
+      origin.origin !== input.origin ||
+      origin.pathname !== "/" ||
+      origin.search ||
+      origin.hash ||
+      !isSafeManualEvidenceUrl(origin)
+    ) {
+      return null;
+    }
+    const resolved = new URL(input.pathPattern, origin);
+    if (resolved.origin !== origin.origin) {
+      return null;
+    }
+    for (const key of input.queryKeys) {
+      resolved.searchParams.append(key, "1");
+    }
+    return resolved;
+  } catch {
+    return null;
+  }
+}
+
 export function finalizeBrowserInvestigationEvidence(input: {
   course: Pick<
     BrowserDiscoveryEvidence,
@@ -949,6 +1025,21 @@ export function finalizeBrowserInvestigationEvidence(input: {
         isProviderInfrastructureUrl(contract.origin),
     )
     .slice(0, 80);
+  const restrictedNetworkObserved =
+    trustedObservations.some(
+      (visit) =>
+        visit.restrictedNetworkObserved === true || visit.interactionBlocked,
+    ) ||
+    pageAssessments.some(
+      ({ visit }) =>
+        (visit.restrictedNetworkObserved === true ||
+          visit.interactionBlocked) &&
+        visit.parentUrl === null &&
+        visit.requiresDirectIdentityMatch !== true &&
+        [officialWebsite, input.course.sourceUrl].some((retainedUrl) =>
+          haveSameExactBrowserNavigationInput(visit.requestedUrl, retainedUrl),
+        ),
+    );
   const finalUrl =
     [...bookingDestinations]
       .reverse()
@@ -1050,9 +1141,22 @@ export function finalizeBrowserInvestigationEvidence(input: {
         courseScoped: visit.courseScoped,
         interactionBlocked: visit.interactionBlocked,
       })),
+      restrictedNetworkObserved,
       networkContracts,
     },
   };
+}
+
+function haveSameExactBrowserNavigationInput(left: string, right: string) {
+  try {
+    const leftUrl = new URL(left);
+    const rightUrl = new URL(right);
+    leftUrl.hash = "";
+    rightUrl.hash = "";
+    return leftUrl.toString() === rightUrl.toString();
+  } catch {
+    return false;
+  }
 }
 
 function sanitizeNetworkPathSegment(segment: string) {

@@ -9,14 +9,18 @@ import { buildCourseSupportSourceSearchScopeDigest } from "./course-support-sour
 import {
   applyBrowserDiscoveryToCourse,
   applyRecoveredOfficialWebsiteToCourse,
+  bindBrowserDiscoveryToProviderSnapshot,
   listBrowserProbeTargets,
   recordAndApplyBrowserDiscoveryToCourse,
+  recordAndApplyOwnedBrowserDiscoveryToCourse,
   recordBrowserDiscovery,
   retireLegacyPolicyOnlyCourseBlock
 } from "./db-service";
+import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
+    $queryRaw: vi.fn(),
     $queryRawUnsafe: vi.fn(),
     $transaction: vi.fn(),
     course: {
@@ -35,7 +39,11 @@ vi.mock("@/lib/prisma", () => ({
       updateMany: vi.fn()
     },
     courseSupportBatch: {
-      findFirst: vi.fn()
+      findFirst: vi.fn(),
+      updateMany: vi.fn()
+    },
+    courseSupportBatchIncident: {
+      findUnique: vi.fn()
     },
     courseMonitoringStatus: {
       create: vi.fn(),
@@ -145,6 +153,7 @@ describe("browser discovery persistence", () => {
     mockedPrisma.$transaction.mockImplementation(async (worker) =>
       worker(mockedPrisma as never)
     );
+    mockedPrisma.$queryRaw.mockResolvedValue([] as never);
     mockedPrisma.$queryRawUnsafe.mockResolvedValue([] as never);
     mockedPrisma.courseSupportIncident.findMany.mockResolvedValue([]);
     mockedPrisma.courseSupportIncident.findUnique.mockResolvedValue(null);
@@ -3123,6 +3132,281 @@ describe("browser discovery persistence", () => {
         })
       })
     );
+  });
+
+  it("atomically stamps owned browser evidence with the resulting provider snapshot", async () => {
+    const updatedAt = new Date("2026-08-22T12:00:00.000Z");
+    const current = {
+      id: "course-owned-browser",
+      name: "Owned Browser Course",
+      timeZone: "America/New_York",
+      website: "https://course.example.com",
+      detectedBookingUrl:
+        "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes",
+      detectedPlatform: "FOREUP",
+      providerFamilyKey: "FOREUP",
+      bookingMethod: "UNKNOWN",
+      bookingWindowDaysAhead: null,
+      bookingWindowEvidenceUrl: null,
+      bookingReleaseTimeLocal: null,
+      bookingWindowSource: null,
+      bookingWindowConfidence: null,
+      automationEligibility: "NEEDS_REVIEW",
+      automationReason: "UNSUPPORTED_PLATFORM",
+      monitoringMode: "AUTOMATIC",
+      bookingAccessMode: "UNKNOWN",
+      isPublic: true,
+      intelligenceVerifiedAt: null,
+      intelligenceReviewAt: null,
+      intelligenceConfidence: null,
+      bookingMetadata: null,
+      layoutHoleCounts: [],
+      layoutHolesVerifiedAt: null,
+      updatedAt
+    };
+    const bookingMetadata = {
+      scheduleId: 11739,
+      bookingClassId: 22739,
+      bookingBaseUrl:
+        "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes"
+    };
+    const applied = {
+      ...current,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      bookingAccessMode: "PUBLIC_SIGNED_OUT",
+      intelligenceVerifiedAt: new Date("2026-08-22T12:01:00.000Z"),
+      intelligenceConfidence: 0.95,
+      bookingMetadata,
+      updatedAt: new Date("2026-08-22T12:01:00.000Z")
+    };
+    const runtimeVersion = "a".repeat(40);
+    const fence = {
+      batchId: "batch-owned-browser",
+      leaseToken: "lease-owned-browser",
+      ownerThreadId: "thread-owned-browser",
+      releaseSha: runtimeVersion,
+      deployedAt: new Date("2026-08-22T11:55:00.000Z"),
+      runtimeVersion,
+      incidentId: "incident-owned-browser",
+      courseId: current.id,
+      cycle: 1,
+      stage: "RENDERED_BROWSER_DISCOVERY" as const
+    };
+    const discovery = {
+      courseId: current.id,
+      status: "LEARNED" as const,
+      detectedPlatform: "FOREUP" as const,
+      sourceUrl: current.website,
+      bookingUrl: current.detectedBookingUrl,
+      apiMetadata: bookingMetadata,
+      confidence: 0.95,
+      evidence: {
+        learnedFrom: "foreup-api-request",
+        observedUrls: [],
+        browserInvestigation: {
+          mode: "RENDERED",
+          incidentCycle: 1,
+          runtimeVersion,
+          observedAt: "2026-08-22T12:00:30.000Z",
+          networkContracts: []
+        }
+      }
+    };
+    mockedPrisma.courseSupportIncident.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockedPrisma.courseSupportBatch.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockedPrisma.courseSupportBatchIncident.findUnique.mockResolvedValue({
+      courseId: current.id,
+      cycle: 1,
+      result: "PENDING"
+    } as never);
+    mockedPrisma.courseSupportIncident.findUnique
+      .mockResolvedValueOnce({
+        cycle: 1,
+        attemptLedger: browserReadyAttemptLedger()
+      } as never)
+      .mockResolvedValueOnce(null);
+    mockedPrisma.course.findUnique
+      .mockResolvedValueOnce(current as never)
+      .mockResolvedValueOnce(current as never)
+      .mockResolvedValueOnce(applied as never);
+    mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockedPrisma.courseAutomationDiscovery.create.mockResolvedValue({
+      id: "discovery-owned-browser"
+    } as never);
+
+    const result = await recordAndApplyOwnedBrowserDiscoveryToCourse(
+      discovery as never,
+      discovery as never,
+      fence,
+      runtimeVersion,
+      buildCourseSupportProviderSnapshotFingerprint(current as never),
+      new Date("2026-08-22T12:00:30.000Z")
+    );
+
+    const resultingFingerprint = buildCourseSupportProviderSnapshotFingerprint(applied as never);
+    expect(result).toMatchObject({
+      applied,
+      providerSnapshotFingerprint: resultingFingerprint,
+      snapshotBound: true
+    });
+    expect(mockedPrisma.courseAutomationDiscovery.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        evidence: expect.objectContaining({
+          browserInvestigation: expect.objectContaining({
+            providerSnapshotFingerprint: resultingFingerprint
+          })
+        })
+      })
+    });
+    expect(mockedPrisma.$transaction).toHaveBeenCalledOnce();
+    expect(mockedPrisma.course.updateMany.mock.invocationCallOrder[0]).toBeLessThan(
+      mockedPrisma.courseAutomationDiscovery.create.mock.invocationCallOrder[0]
+    );
+  });
+
+  it("keeps contracts unbound when the course drifts after browser observation", async () => {
+    const runtimeVersion = "a".repeat(40);
+    const observedCourse = {
+      id: "course-stale-owned-browser",
+      timeZone: "America/New_York",
+      website: "https://course.example.com",
+      detectedBookingUrl: "https://booking.example.com/tee-times",
+      detectedPlatform: "CUSTOM",
+      providerFamilyKey: "BOOKING_EXAMPLE",
+      bookingMethod: "UNKNOWN",
+      bookingWindowDaysAhead: null,
+      bookingWindowEvidenceUrl: null,
+      bookingReleaseTimeLocal: null,
+      bookingWindowSource: null,
+      bookingWindowConfidence: null,
+      automationEligibility: "NEEDS_REVIEW",
+      automationReason: "UNSUPPORTED_PLATFORM",
+      monitoringMode: "AUTOMATIC",
+      bookingAccessMode: "UNKNOWN",
+      isPublic: true,
+      intelligenceVerifiedAt: null,
+      intelligenceReviewAt: null,
+      intelligenceConfidence: null,
+      bookingMetadata: null,
+      layoutHoleCounts: [],
+      layoutHolesVerifiedAt: null,
+      updatedAt: new Date("2026-08-22T12:00:00.000Z")
+    };
+    const concurrentCourse = {
+      ...observedCourse,
+      detectedBookingUrl: "https://booking.example.com/new-provider-state",
+      updatedAt: new Date("2026-08-22T12:00:15.000Z")
+    };
+    const discovery = {
+      courseId: observedCourse.id,
+      status: "INSPECTED" as const,
+      detectedPlatform: "CUSTOM" as const,
+      sourceUrl: observedCourse.website,
+      bookingUrl: observedCourse.detectedBookingUrl,
+      confidence: 0.8,
+      evidence: {
+        learnedFrom: "rendered-browser",
+        observedUrls: [],
+        browserInvestigation: {
+          mode: "RENDERED",
+          incidentCycle: 1,
+          runtimeVersion,
+          observedAt: "2026-08-22T12:00:10.000Z",
+          restrictedNetworkObserved: true,
+          networkContracts: [
+            {
+              origin: "https://booking.example.com",
+              method: "GET",
+              pathPattern: "/api/availability",
+              queryKeys: ["date"],
+              resourceType: "fetch",
+              status: 200
+            }
+          ]
+        }
+      }
+    };
+    const fence = {
+      batchId: "batch-stale-owned-browser",
+      leaseToken: "lease-stale-owned-browser",
+      ownerThreadId: "thread-stale-owned-browser",
+      releaseSha: runtimeVersion,
+      deployedAt: new Date("2026-08-22T11:55:00.000Z"),
+      runtimeVersion,
+      incidentId: "incident-stale-owned-browser",
+      courseId: observedCourse.id,
+      cycle: 1,
+      stage: "RENDERED_BROWSER_DISCOVERY" as const
+    };
+    mockedPrisma.courseSupportIncident.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockedPrisma.courseSupportBatch.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockedPrisma.courseSupportBatchIncident.findUnique.mockResolvedValue({
+      courseId: observedCourse.id,
+      cycle: 1,
+      result: "PENDING"
+    } as never);
+    mockedPrisma.courseSupportIncident.findUnique.mockResolvedValue({
+      cycle: 1,
+      attemptLedger: browserReadyAttemptLedger()
+    } as never);
+    mockedPrisma.course.findUnique.mockResolvedValueOnce(concurrentCourse as never);
+    mockedPrisma.courseAutomationDiscovery.create.mockResolvedValue({
+      id: "discovery-stale-owned-browser"
+    } as never);
+
+    const result = await recordAndApplyOwnedBrowserDiscoveryToCourse(
+      discovery as never,
+      discovery as never,
+      fence,
+      runtimeVersion,
+      buildCourseSupportProviderSnapshotFingerprint(observedCourse as never),
+      new Date("2026-08-22T12:00:10.000Z")
+    );
+
+    expect(result).toMatchObject({
+      applied: null,
+      providerSnapshotFingerprint: null,
+      snapshotBound: false
+    });
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
+    expect(mockedPrisma.$queryRaw).toHaveBeenCalledOnce();
+    const [courseLock] = mockedPrisma.$queryRaw.mock.calls[0] as [
+      { strings: readonly string[]; values: unknown[] }
+    ];
+    expect(courseLock.strings.join("")).toContain('FROM "Course"');
+    expect(courseLock.strings.join("")).toContain("FOR UPDATE");
+    expect(courseLock.values).toEqual([observedCourse.id]);
+    const persistedEvidence = mockedPrisma.courseAutomationDiscovery.create.mock.calls[0]?.[0]
+      ?.data.evidence as {
+      browserInvestigation?: Record<string, unknown>;
+    };
+    expect(persistedEvidence.browserInvestigation).toEqual(
+      expect.objectContaining({
+        restrictedNetworkObserved: true,
+        networkContracts: expect.any(Array)
+      })
+    );
+    expect(
+      persistedEvidence.browserInvestigation?.providerSnapshotFingerprint
+    ).toBeUndefined();
+  });
+
+  it("requires a valid browser audit when binding a persisted snapshot", () => {
+    expect(() =>
+      bindBrowserDiscoveryToProviderSnapshot(
+        {
+          courseId: "course-legacy-browser",
+          status: "INSPECTED",
+          detectedPlatform: "UNKNOWN",
+          sourceUrl: "https://course.example.com",
+          confidence: 0.5,
+          evidence: { learnedFrom: "official-site", observedUrls: [] }
+        },
+        "b".repeat(64)
+      )
+    ).toThrow("requires a browser investigation audit");
   });
 
   it.each([

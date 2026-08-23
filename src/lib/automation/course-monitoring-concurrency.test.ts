@@ -6695,6 +6695,51 @@ describe("course monitoring write serialization", () => {
     expect(updateData).not.toHaveProperty("lastAttemptAt");
   });
 
+  it("does not append browser playbook proof after the bound provider snapshot changes", async () => {
+    const boundCourse = {
+      detectedPlatform: "CUSTOM" as const,
+      providerFamilyKey: "BOOKING_EXAMPLE",
+      detectedBookingUrl: "https://booking.example/tee-times",
+      bookingMethod: "PUBLIC_ONLINE" as const,
+      automationEligibility: "ALLOWED" as const,
+      automationReason: "NONE" as const,
+    };
+    transactionMocks.course.findUnique.mockResolvedValue({
+      ...boundCourse,
+      detectedBookingUrl: "https://booking.example/concurrent-change",
+    });
+
+    await expect(
+      recordCourseMonitoringPlaybookTransition({
+        courseId: "course-1",
+        stage: "RENDERED_BROWSER_DISCOVERY",
+        transition: "COMPLETED",
+        readPath: "RENDERED_BROWSER",
+        evidenceKind: "RENDERED_PAGE",
+        failureFingerprint: "PLAYBOOK:RENDERED_BROWSER_DISCOVERY:COMPLETED",
+        runtimeVersion: "release-sha",
+        expectedProviderSnapshotFingerprint:
+          buildCourseSupportProviderSnapshotFingerprint(boundCourse),
+      }),
+    ).resolves.toBeNull();
+
+    const courseLock = transactionMocks.$queryRaw.mock.calls.find(([query]) =>
+      (query as { strings?: readonly string[] }).strings
+        ?.join("")
+        .includes('FROM "Course"'),
+    );
+    expect(courseLock?.[0].strings.join("")).toContain("FOR UPDATE");
+    expect(
+      transactionMocks.courseSupportIncident.findUnique,
+    ).not.toHaveBeenCalled();
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).not.toHaveBeenCalled();
+    expect(
+      transactionMocks.courseMonitoringEvent.create,
+    ).not.toHaveBeenCalled();
+  });
+
   it("records a deployment marker without reopening unchanged human-review work", async () => {
     prismaMocks.$transaction.mockReset();
     prismaMocks.$transaction.mockImplementation(async (worker) =>

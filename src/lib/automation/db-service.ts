@@ -202,6 +202,7 @@ export type BrowserProbeTarget = {
     intelligenceReviewAt: Date | null;
     intelligenceConfidence: number | null;
     bookingMetadata: unknown;
+    providerSnapshotFingerprint?: string;
     verifiedLayoutHoleCounts?: CourseLayoutHoleCount[];
     monitoringFailureEvidence?: BrowserProbeCourseInput["monitoringFailureEvidence"];
     incidentConfirmedAt?: Date | null;
@@ -574,6 +575,8 @@ export async function listBrowserProbeTargets(
         intelligenceReviewAt: course.intelligenceReviewAt,
         intelligenceConfidence: course.intelligenceConfidence,
         bookingMetadata: course.bookingMetadata,
+        providerSnapshotFingerprint:
+          buildCourseSupportProviderSnapshotFingerprint(course),
         ...(course.layoutHolesVerifiedAt
           ? {
               verifiedLayoutHoleCounts: normalizeLayoutHoleCounts(course.layoutHoleCounts)
@@ -755,6 +758,8 @@ async function listExactIncidentBrowserProbeTarget(input: {
         intelligenceReviewAt: course.intelligenceReviewAt,
         intelligenceConfidence: course.intelligenceConfidence,
         bookingMetadata: course.bookingMetadata,
+        providerSnapshotFingerprint:
+          buildCourseSupportProviderSnapshotFingerprint(course),
         ...(course.layoutHolesVerifiedAt
           ? {
               verifiedLayoutHoleCounts: normalizeLayoutHoleCounts(course.layoutHoleCounts)
@@ -1086,7 +1091,9 @@ export async function recordBrowserDiscovery(
 
 async function attachParkedCampaignToDiscovery(
   transaction: Prisma.TransactionClient,
-  data: ReturnType<typeof buildBrowserDiscoveryPersistenceData>,
+  data: ReturnType<typeof buildBrowserDiscoveryPersistenceData> & {
+    createdAt?: Date;
+  },
   incidentId: string,
   cycle: number
 ) {
@@ -1428,6 +1435,170 @@ export async function applyBrowserDiscoveryToCourse(
   );
 }
 
+export function bindBrowserDiscoveryToProviderSnapshot(
+  input: BrowserDiscovery,
+  providerSnapshotFingerprint: string
+): BrowserDiscovery {
+  if (!/^[a-f0-9]{64}$/u.test(providerSnapshotFingerprint)) {
+    throw new Error("Browser discovery provider snapshot fingerprint is invalid.");
+  }
+  const evidence = input.evidence as BrowserDiscovery["evidence"] & {
+    browserInvestigation?: unknown;
+  };
+  const browserInvestigation = evidence.browserInvestigation;
+  if (
+    !browserInvestigation ||
+    typeof browserInvestigation !== "object" ||
+    Array.isArray(browserInvestigation)
+  ) {
+    throw new Error("Snapshot-bound browser discovery requires a browser investigation audit.");
+  }
+  const existingFingerprint = (browserInvestigation as Record<string, unknown>)
+    .providerSnapshotFingerprint;
+  if (
+    existingFingerprint !== undefined &&
+    existingFingerprint !== providerSnapshotFingerprint
+  ) {
+    throw new Error("Browser discovery provider snapshot fingerprint does not match.");
+  }
+  return {
+    ...input,
+    evidence: {
+      ...evidence,
+      browserInvestigation: {
+        ...(browserInvestigation as Record<string, unknown>),
+        providerSnapshotFingerprint
+      }
+    }
+  } as BrowserDiscovery;
+}
+
+export async function recordAndApplyOwnedBrowserDiscoveryToCourse(
+  projectionInput: BrowserDiscovery,
+  persistenceInput: BrowserDiscovery,
+  persistenceFence: CourseSupportBrowserPersistenceFence,
+  runtimeVersion: string | null | undefined,
+  observedProviderSnapshotFingerprint: string,
+  observedAtInput?: Date
+) {
+  const projectionIdentity = { ...projectionInput, evidence: undefined };
+  const persistenceIdentity = { ...persistenceInput, evidence: undefined };
+  if (JSON.stringify(projectionIdentity) !== JSON.stringify(persistenceIdentity)) {
+    throw new Error("Browser projection and persistence identities do not match.");
+  }
+  if (!/^[a-f0-9]{64}$/u.test(observedProviderSnapshotFingerprint)) {
+    throw new Error("Observed browser provider snapshot fingerprint is invalid.");
+  }
+  const persistenceEvidence = persistenceInput.evidence as BrowserDiscovery["evidence"] & {
+    browserInvestigation?: unknown;
+  };
+  const persistenceAudit = persistenceEvidence.browserInvestigation;
+  if (
+    !persistenceAudit ||
+    typeof persistenceAudit !== "object" ||
+    Array.isArray(persistenceAudit)
+  ) {
+    throw new Error("Owned browser persistence requires a browser investigation audit.");
+  }
+  if (
+    (persistenceAudit as Record<string, unknown>).providerSnapshotFingerprint !==
+    undefined
+  ) {
+    throw new Error("Caller-supplied browser provider snapshot bindings are not accepted.");
+  }
+  const observedAt = resolveTrustedDiscoveryObservedAt(observedAtInput);
+
+  return runSerializedCourseMonitoringWrite(projectionInput.courseId, (transaction) =>
+    runCourseSupportBrowserPersistenceWrite({
+      transaction,
+      fence: persistenceFence,
+      runtimeVersion,
+      mutate: async (ownedTransaction) => {
+        const persist = async (input: BrowserDiscovery) =>
+          ownedTransaction.courseAutomationDiscovery.create({
+            data: await attachParkedCampaignToDiscovery(
+              ownedTransaction,
+              {
+                ...buildBrowserDiscoveryPersistenceData(input),
+                createdAt: observedAt
+              },
+              persistenceFence.incidentId,
+              persistenceFence.cycle
+            )
+          });
+
+        await ownedTransaction.$queryRaw(
+          Prisma.sql`SELECT "id"
+                     FROM "Course"
+                     WHERE "id" = ${projectionInput.courseId}
+                     FOR UPDATE`
+        );
+        const preProjectionCourse = await ownedTransaction.course.findUnique({
+          where: { id: projectionInput.courseId }
+        });
+        if (!preProjectionCourse) {
+          throw new Error("Browser discovery course no longer exists.");
+        }
+        if (
+          buildCourseSupportProviderSnapshotFingerprint(preProjectionCourse) !==
+          observedProviderSnapshotFingerprint
+        ) {
+          return {
+            applied: null,
+            discovery: await persist(persistenceInput),
+            providerSnapshotFingerprint: null,
+            snapshotBound: false as const
+          };
+        }
+
+        const applied = await applyBrowserDiscoveryToCourseInTransaction(
+          projectionInput,
+          {
+            updatedAt: preProjectionCourse.updatedAt,
+            detectedBookingUrl: preProjectionCourse.detectedBookingUrl,
+            bookingMethod: preProjectionCourse.bookingMethod,
+            automationEligibility: preProjectionCourse.automationEligibility
+          },
+          ownedTransaction,
+          undefined,
+          observedAt,
+          observedProviderSnapshotFingerprint
+        );
+        const resultingCourse =
+          applied ??
+          (await ownedTransaction.course.findUnique({
+            where: { id: projectionInput.courseId }
+          }));
+        if (!resultingCourse) {
+          throw new Error("Browser discovery course no longer exists after projection.");
+        }
+        const providerSnapshotFingerprint =
+          buildCourseSupportProviderSnapshotFingerprint(resultingCourse);
+        if (!applied && providerSnapshotFingerprint !== observedProviderSnapshotFingerprint) {
+          return {
+            applied: null,
+            discovery: await persist(persistenceInput),
+            providerSnapshotFingerprint: null,
+            snapshotBound: false as const
+          };
+        }
+        const discovery = await persist(
+          bindBrowserDiscoveryToProviderSnapshot(
+            persistenceInput,
+            providerSnapshotFingerprint
+          )
+        );
+        return {
+          applied,
+          discovery,
+          providerSnapshotFingerprint,
+          snapshotBound: true as const
+        };
+      }
+    })
+  );
+}
+
 export async function recordAndApplyBrowserDiscoveryToCourse(
   input: BrowserDiscovery,
   expectedCourse: BrowserDiscoveryCourseExpectation | undefined,
@@ -1471,7 +1642,8 @@ async function applyBrowserDiscoveryToCourseInTransaction(
   expectedCourse: BrowserDiscoveryCourseExpectation | undefined,
   transaction: Prisma.TransactionClient,
   expectedUnownedIncident: BrowserDiscoveryUnownedIncidentExpectation | undefined,
-  observedAt: Date
+  observedAt: Date,
+  expectedProviderSnapshotFingerprint?: string
 ) {
   input = normalizeAutomatedTechnicalDiscovery(normalizeBrowserDiscoveryForMonitoring(input));
   const provider = resolveProviderCapability({
@@ -1556,7 +1728,10 @@ async function applyBrowserDiscoveryToCourseInTransaction(
     if (
       !current ||
       hasAuthoritativeFactualCourseFinal(current) ||
-      !matchesBrowserDiscoveryCourseExpectation(current, expectedCourse)
+      !matchesBrowserDiscoveryCourseExpectation(current, expectedCourse) ||
+      (expectedProviderSnapshotFingerprint !== undefined &&
+        buildCourseSupportProviderSnapshotFingerprint(current) !==
+          expectedProviderSnapshotFingerprint)
     ) {
       return null;
     }
@@ -1706,7 +1881,10 @@ async function applyBrowserDiscoveryToCourseInTransaction(
   if (
     !current ||
     hasAuthoritativeFactualCourseFinal(current) ||
-    !matchesBrowserDiscoveryCourseExpectation(current, expectedCourse)
+    !matchesBrowserDiscoveryCourseExpectation(current, expectedCourse) ||
+    (expectedProviderSnapshotFingerprint !== undefined &&
+      buildCourseSupportProviderSnapshotFingerprint(current) !==
+        expectedProviderSnapshotFingerprint)
   ) {
     return null;
   }

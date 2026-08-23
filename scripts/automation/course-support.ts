@@ -63,6 +63,7 @@ import {
   type ResponderFailureDomain,
   type ResponderOutcome
 } from "@/lib/automation/course-support-responder-policy";
+import { inspectOwnedCourseSupportProviderContract } from "@/lib/automation/provider-contract-inspection";
 
 import { runBrowserProbe } from "./browser-probe-needed-adapters";
 
@@ -204,6 +205,9 @@ async function runCommand(command: string, args: string[]) {
     case "packet":
       writeResult(await packet(args));
       return;
+    case "inspect-provider-contract":
+      writeResult(await inspectProviderContract(args));
+      return;
     case "claim-path":
       writeResult(await claimPath(args));
       return;
@@ -235,7 +239,7 @@ async function runCommand(command: string, args: string[]) {
       return;
     default:
       throw new Error(
-        "Unknown course-support command. Use inspect, coverage, claim, packet, claim-path, source-search-context, record-source-search, mark-needs-human, heartbeat, verify, closeout, recover, or backfill."
+        "Unknown course-support command. Use inspect, coverage, claim, packet, inspect-provider-contract, claim-path, source-search-context, record-source-search, mark-needs-human, heartbeat, verify, closeout, recover, or backfill."
       );
   }
 }
@@ -280,6 +284,61 @@ async function packet(args: string[]) {
     leaseToken: await getOwnedCourseSupportLeaseToken({ batchId, ownerThreadId }),
     ownerThreadId
   });
+}
+
+async function inspectProviderContract(args: string[]) {
+  const options = parseCourseSupportProviderContractInspectionOptions(args);
+  const ownerThreadId = requireOwnerThread(args);
+  const batchId = await resolveCourseSupportBatchReference(options.batchRef);
+  return inspectOwnedCourseSupportProviderContract({
+    batchId,
+    leaseToken: await getOwnedCourseSupportLeaseToken({
+      batchId,
+      ownerThreadId
+    }),
+    ownerThreadId,
+    ordinal: options.ordinal
+  });
+}
+
+export function parseCourseSupportProviderContractInspectionOptions(
+  args: readonly string[]
+) {
+  const allowed = new Set(["--batch-ref", "--ordinal", "--owner-thread"]);
+  const seen = new Set<string>();
+  for (let index = 0; index < args.length; index += 2) {
+    const option = args[index];
+    const value = args[index + 1];
+    if (!option || !allowed.has(option)) {
+      throw new Error(
+        "inspect-provider-contract accepts only --batch-ref, --ordinal, and --owner-thread."
+      );
+    }
+    if (seen.has(option)) {
+      throw new Error(`${option} may be provided only once.`);
+    }
+    if (!value || value.startsWith("--")) {
+      throw new Error(`${option} requires a value.`);
+    }
+    seen.add(option);
+  }
+  const batchRef = readSingleOption([...args], "--batch-ref");
+  if (!batchRef) {
+    throw new Error("Missing required --batch-ref value.");
+  }
+  const rawOrdinal = readSingleOption([...args], "--ordinal");
+  if (!rawOrdinal || !/^\d{1,2}$/u.test(rawOrdinal)) {
+    throw new Error(
+      "inspect-provider-contract requires --ordinal from 01 through 20."
+    );
+  }
+  const ordinal = Number(rawOrdinal);
+  if (!Number.isInteger(ordinal) || ordinal < 1 || ordinal > 20) {
+    throw new Error(
+      "inspect-provider-contract requires --ordinal from 01 through 20."
+    );
+  }
+  return { batchRef, ordinal };
 }
 
 async function claimPath(args: string[]) {

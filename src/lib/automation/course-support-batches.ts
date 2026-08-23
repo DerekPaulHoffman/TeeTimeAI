@@ -958,7 +958,15 @@ type PersistedCourseSupportRemediationDirective = CourseSupportRemediationDirect
   retryBudget: CourseSupportRemediationRetryBudget | null;
 };
 
-function readCourseSupportRemediationDirective(
+export type CourseSupportRemediationClaimAttempt = {
+  courseRef: string;
+  providerSnapshotFingerprint: string;
+  failureFingerprint: string;
+  playbookEventCountAtClaim: number;
+  approach: CourseSupportRemediationAttemptSignature;
+};
+
+export function readCourseSupportRemediationDirective(
   summary: unknown
 ): PersistedCourseSupportRemediationDirective | null {
   const remediation = asJsonObject(asJsonObject(summary).remediation);
@@ -1019,6 +1027,66 @@ function readCourseSupportRemediationDirective(
     requiresImplementationPath: remediation.requiresImplementationPath === true,
     reason: typeof remediation.reason === "string" ? remediation.reason : null,
     retryBudget
+  };
+}
+
+export function readCourseSupportRemediationClaimAttempt(input: {
+  summary: unknown;
+  courseId: string;
+  expectedAttemptCount: number;
+}): CourseSupportRemediationClaimAttempt | null {
+  const remediation = asJsonObject(asJsonObject(input.summary).remediation);
+  if (
+    !Array.isArray(remediation.attempts) ||
+    remediation.attempts.length !== input.expectedAttemptCount ||
+    input.expectedAttemptCount < 1
+  ) {
+    return null;
+  }
+  const courseRef = createCourseSupportRemediationCourseRef(input.courseId);
+  const matches = remediation.attempts.filter(
+    (candidate) => asJsonObject(candidate).courseRef === courseRef
+  );
+  const courseRefs = remediation.attempts.map(
+    (candidate) => asJsonObject(candidate).courseRef
+  );
+  const uniqueCourseRefs = new Set(courseRefs);
+  if (
+    matches.length !== 1 ||
+    !courseRefs.every(
+      (candidate): candidate is string =>
+        typeof candidate === "string" && /^[a-f0-9]{24}$/u.test(candidate)
+    ) ||
+    uniqueCourseRefs.size !== remediation.attempts.length
+  ) {
+    return null;
+  }
+  const attempt = asJsonObject(matches[0]);
+  const approachRecord = asJsonObject(attempt.approach);
+  const approach = parseCourseSupportRemediationApproach(attempt.approach);
+  const exactApproachKeys = ["workMode", "strategyAction", "playbookStage"];
+  if (
+    typeof attempt.providerSnapshotFingerprint !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(attempt.providerSnapshotFingerprint) ||
+    typeof attempt.failureFingerprint !== "string" ||
+    attempt.failureFingerprint.length < 1 ||
+    attempt.failureFingerprint.length > 160 ||
+    !Number.isSafeInteger(attempt.playbookEventCountAtClaim) ||
+    (attempt.playbookEventCountAtClaim as number) < 0 ||
+    !approach ||
+    Object.keys(approachRecord).length !== exactApproachKeys.length ||
+    !exactApproachKeys.every((key) =>
+      Object.prototype.hasOwnProperty.call(approachRecord, key)
+    )
+  ) {
+    return null;
+  }
+  return {
+    courseRef,
+    providerSnapshotFingerprint: attempt.providerSnapshotFingerprint,
+    failureFingerprint: attempt.failureFingerprint,
+    playbookEventCountAtClaim: attempt.playbookEventCountAtClaim as number,
+    approach
   };
 }
 

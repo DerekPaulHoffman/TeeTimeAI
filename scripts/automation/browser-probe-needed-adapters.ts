@@ -37,6 +37,7 @@ import {
   buildBrowserWidgetCandidates,
   classifyRenderedOfficialPageCourseIdentity,
   finalizeBrowserInvestigationEvidence,
+  isRestrictedBrowserNetworkObservation,
   isRenderedUnprojectedSourceCandidateLocalityCorroborated,
   isRelevantBrowserAccessBarrierUrl,
   MAX_BROWSER_BOOKING_DESTINATION_VISITS,
@@ -57,6 +58,7 @@ import {
   applyBrowserDiscoveryToCourse,
   finishAutomationRun,
   listBrowserProbeTargets,
+  recordAndApplyOwnedBrowserDiscoveryToCourse,
   recordBrowserDiscovery,
   startAutomationRun,
 } from "@/lib/automation/db-service";
@@ -185,6 +187,17 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
             continue;
           }
           const investigationObservedAt = new Date();
+          const observedProviderSnapshotFingerprint =
+            target.course.providerSnapshotFingerprint;
+          if (
+            !options.dryRun &&
+            options.persistenceFence &&
+            !/^[a-f0-9]{64}$/u.test(observedProviderSnapshotFingerprint ?? "")
+          ) {
+            throw new Error(
+              "Owned browser investigation is missing its pre-observation provider snapshot.",
+            );
+          }
           const previousDiscovery =
             investigationMode === "INDEPENDENT" &&
             options.persistenceFence &&
@@ -321,13 +334,6 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
             continue;
           }
 
-          await persistBrowserMutation(true, () =>
-            recordBrowserDiscovery(
-              persistedDiscovery,
-              options.persistenceFence,
-              runtimeVersion,
-            ),
-          );
           const observedMonitoringGate =
             evaluateBrowserDiscoveryMonitoringGate(actionableDiscovery);
           const accessControlObserved =
@@ -335,14 +341,40 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
           // Shared persistence normalizes one technical browser observation
           // to actionable NEEDS_REVIEW while retaining learned metadata. It
           // never persists a BLOCKED technical final from this observation.
-          const appliedCourse = await persistBrowserMutation(true, () =>
-            applyBrowserDiscoveryToCourse(
-              actionableDiscovery,
-              undefined,
-              options.persistenceFence,
-              runtimeVersion,
-            ),
-          );
+          let appliedCourse: Awaited<
+            ReturnType<typeof applyBrowserDiscoveryToCourse>
+          >;
+          let expectedTransitionProviderSnapshotFingerprint:
+            | string
+            | undefined;
+          if (options.persistenceFence) {
+            const persisted = await persistBrowserMutation(true, () =>
+              recordAndApplyOwnedBrowserDiscoveryToCourse(
+                actionableDiscovery,
+                persistedDiscovery,
+                options.persistenceFence!,
+                runtimeVersion,
+                observedProviderSnapshotFingerprint!,
+                investigationObservedAt,
+              ),
+            );
+            if (!persisted.snapshotBound) {
+              notes.push(
+                `${target.course.name}: provider state changed after observation; sanitized evidence was retained without a reusable snapshot binding.`,
+              );
+              continue;
+            }
+            appliedCourse = persisted.applied;
+            expectedTransitionProviderSnapshotFingerprint =
+              persisted.providerSnapshotFingerprint;
+          } else {
+            await persistBrowserMutation(true, () =>
+              recordBrowserDiscovery(persistedDiscovery),
+            );
+            appliedCourse = await persistBrowserMutation(true, () =>
+              applyBrowserDiscoveryToCourse(actionableDiscovery),
+            );
+          }
           let currentCourseRunnable = false;
           if (!appliedCourse) {
             const currentCourse = await prisma.course.findUnique({
@@ -393,6 +425,12 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
                               ? "RENDERED_BROWSER"
                               : "INDEPENDENT_CONFIRMATION",
                           runtimeVersion,
+                          ...(expectedTransitionProviderSnapshotFingerprint
+                            ? {
+                                expectedProviderSnapshotFingerprint:
+                                  expectedTransitionProviderSnapshotFingerprint,
+                              }
+                            : {}),
                           source: "COURSE_SUPPORT_RESPONDER",
                           ...buildBrowserPlaybookTransition({
                             stage: playbookStage,
@@ -888,7 +926,10 @@ export function isReadOnlyBrowserRequestMethod(method: string) {
 async function createMainFrameInteractionGuard(
   page: Page,
   officialPageUrl: string,
-  options: { deferCrossOriginMainFrame?: boolean } = {},
+  options: {
+    deferCrossOriginMainFrame?: boolean;
+    onRestrictedNetworkRequest?: () => void;
+  } = {},
 ): Promise<MainFrameInteractionGuard> {
   const mainFrame = page.mainFrame();
   let blocked = false;
@@ -920,6 +961,15 @@ async function createMainFrameInteractionGuard(
   page.on("request", onRequest);
   const routeHandler = async (route: Route) => {
     const request = route.request();
+    if (
+      isRestrictedBrowserNetworkObservation({
+        url: request.url(),
+        method: request.method(),
+        resourceType: request.resourceType(),
+      })
+    ) {
+      options.onRestrictedNetworkRequest?.();
+    }
     if (!isReadOnlyBrowserRequestMethod(request.method())) {
       blocked = true;
       await route.abort("blockedbyclient").catch(() => undefined);
@@ -1228,6 +1278,7 @@ export async function collectBrowserEvidence(
             teeItUpFacilityResponses: visit.teeItUpFacilityResponses,
             accessBarriers: visit.accessBarriers,
             networkContracts: visit.networkContracts,
+            restrictedNetworkObserved: visit.restrictedNetworkObserved,
           });
         }
         continue;
@@ -1291,6 +1342,7 @@ type BrowserPageObservation = {
   responseReads: Promise<void>[];
   accessBarriers: Map<string, 401 | 403>;
   networkContracts: Map<string, BrowserNetworkContractFingerprint>;
+  restrictedNetworkObserved: boolean;
 };
 
 async function createAdditionalInvestigationPage(rootPage: Page) {
@@ -1337,6 +1389,7 @@ function observeBrowserPageNetwork(
     responseReads: [],
     accessBarriers: new Map(),
     networkContracts: new Map(),
+    restrictedNetworkObserved: false,
   };
   const retainFingerprint = (
     fingerprint: BrowserNetworkContractFingerprint | null,
@@ -1359,6 +1412,12 @@ function observeBrowserPageNetwork(
 
   page.on("request", (request) => {
     observation.observedUrls.add(request.url());
+    observation.restrictedNetworkObserved ||=
+      isRestrictedBrowserNetworkObservation({
+        url: request.url(),
+        method: request.method(),
+        resourceType: request.resourceType(),
+      });
     retainFingerprint(
       buildBrowserNetworkContractFingerprint({
         url: request.url(),
@@ -1370,6 +1429,12 @@ function observeBrowserPageNetwork(
   page.on("response", (response) => {
     const request = response.request();
     observation.observedUrls.add(response.url());
+    observation.restrictedNetworkObserved ||=
+      isRestrictedBrowserNetworkObservation({
+        url: response.url(),
+        method: request.method(),
+        resourceType: request.resourceType(),
+      });
     retainFingerprint(
       buildBrowserNetworkContractFingerprint({
         url: response.url(),
@@ -1429,6 +1494,7 @@ async function materializeBrowserPageObservation(
       status,
     })),
     networkContracts: [...observation.networkContracts.values()],
+    restrictedNetworkObserved: observation.restrictedNetworkObserved,
   };
 }
 
@@ -1448,7 +1514,12 @@ async function visitOfficialPage(
   const interactionGuard = await createMainFrameInteractionGuard(
     page,
     input.officialPageUrl,
-    { deferCrossOriginMainFrame: true },
+    {
+      deferCrossOriginMainFrame: true,
+      onRestrictedNetworkRequest: () => {
+        observation.restrictedNetworkObserved = true;
+      },
+    },
   );
   await page
     .goto(input.requestedUrl, {
@@ -1505,6 +1576,11 @@ async function visitBookingDestination(
   const interactionGuard = await createMainFrameInteractionGuard(
     page,
     input.officialPageUrl,
+    {
+      onRestrictedNetworkRequest: () => {
+        observation.restrictedNetworkObserved = true;
+      },
+    },
   );
   await page
     .goto(input.url, {

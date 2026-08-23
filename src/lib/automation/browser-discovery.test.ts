@@ -6210,6 +6210,7 @@ describe("buildBrowserDiscovery", () => {
     "https://night-golf.example/rates?x-csrf-token=private",
     "https://night-golf.example/rates?anti_csrf_token=private",
     "https://night-golf.example/rates?verification_token=private",
+    "https://night-golf.example/rates?refresh_token=private",
     "https://night-golf.example/rates?checkout_session_id=private",
     "https://night-golf.example/rates?payment_intent=private",
     "https://night-golf.example/rates?order_id=private",
