@@ -1666,6 +1666,99 @@ describe("browser discovery persistence", () => {
     ).not.toMatchObject({ automationEligibility: "BLOCKED" });
   });
 
+  it("keeps the exact retained booking URL on a first managed-protection observation", async () => {
+    const updatedAt = new Date("2026-08-24T12:00:00.000Z");
+    const sourceUrl = "https://managed-query-course.example/";
+    const retainedBookingUrl =
+      "https://booking.nonrunnable-provider.example/tee-times?course=4477#calendar";
+    const managedMarkerUrl =
+      "https://booking.nonrunnable-provider.example/tee-times";
+    mockedPrisma.course.findUnique
+      .mockResolvedValueOnce({
+        providerFamilyKey: "nonrunnable-provider.example",
+        detectedPlatform: "UNKNOWN",
+        detectedBookingUrl: retainedBookingUrl,
+        website: sourceUrl,
+        bookingMetadata: null,
+        isPublic: true,
+        bookingMethod: "UNKNOWN",
+        automationEligibility: "UNKNOWN",
+        automationReason: "NONE",
+        bookingAccessMode: "UNKNOWN",
+        intelligenceVerifiedAt: null,
+        intelligenceReviewAt: null,
+        intelligenceConfidence: null,
+        monitoringStatus: null,
+        supportIncident: null,
+        updatedAt,
+      } as never)
+      .mockResolvedValueOnce({ id: "managed-query-course" } as never);
+    mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
+
+    const discovery = buildBrowserDiscovery({
+      courseId: "managed-query-course",
+      courseName: "Managed Query Golf Course",
+      sourceUrl,
+      officialCourseWebsite: sourceUrl,
+      finalUrl: sourceUrl,
+      observedUrls: [sourceUrl],
+      retainedBookingTarget: {
+        kind: "RETAINED_COURSE_BOOKING_TARGET",
+        url: retainedBookingUrl,
+      },
+      renderedAccessControls: [
+        {
+          kind: "MANAGED_PROTECTION_DOCUMENT",
+          scope: "RETAINED_ROOT",
+          url: sourceUrl,
+        },
+        {
+          kind: "MANAGED_PROTECTION_DOCUMENT",
+          scope: "COURSE_SCOPED_BOOKING",
+          url: managedMarkerUrl,
+        },
+      ],
+    });
+
+    expect(discovery).toMatchObject({
+      status: "BLOCKED",
+      detectedPlatform: "UNKNOWN",
+      bookingUrl: retainedBookingUrl,
+      automationEligibility: "BLOCKED",
+      automationReason: "CAPTCHA_OR_QUEUE",
+      evidence: {
+        renderedAccessControls: [
+          {
+            kind: "MANAGED_PROTECTION_DOCUMENT",
+            scope: "COURSE_SCOPED_BOOKING",
+            url: managedMarkerUrl,
+          },
+        ],
+      },
+    });
+    expect(JSON.stringify(discovery.evidence)).not.toContain("course=4477");
+    expect(JSON.stringify(discovery.evidence)).not.toContain("#calendar");
+
+    await applyBrowserDiscoveryToCourse(discovery);
+
+    expect(mockedPrisma.course.updateMany).toHaveBeenCalledWith({
+      where: { id: "managed-query-course", updatedAt },
+      data: expect.objectContaining({
+        detectedPlatform: "UNKNOWN",
+        detectedBookingUrl: retainedBookingUrl,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "NEEDS_REVIEW",
+        automationReason: "CAPTCHA_OR_QUEUE",
+      }),
+    });
+    expect(
+      mockedPrisma.course.updateMany.mock.calls[0]?.[0].data.detectedBookingUrl,
+    ).not.toBe(managedMarkerUrl);
+    expect(
+      mockedPrisma.course.updateMany.mock.calls[0]?.[0].data,
+    ).not.toMatchObject({ automationEligibility: "BLOCKED" });
+  });
+
   it("does not let discovery metadata alone overwrite a current technical final", async () => {
     const updatedAt = new Date("2026-07-16T12:05:00.000Z");
     mockedPrisma.course.findUnique.mockResolvedValueOnce({

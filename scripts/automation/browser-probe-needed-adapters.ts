@@ -708,6 +708,64 @@ export function retainOnlyPersistableBrowserUrls(
     .map(sanitizeEvidenceUrl)
     .filter((value, index, values) => values.indexOf(value) === index);
   const browserInvestigation = discovery.evidence.browserInvestigation;
+  const observedRenderedAccessControls = new Set(
+    (evidence.renderedAccessControls ?? []).flatMap((control) => {
+      if (
+        control.kind !== "MANAGED_PROTECTION_DOCUMENT" ||
+        !["RETAINED_ROOT", "COURSE_SCOPED_BOOKING"].includes(control.scope)
+      ) {
+        return [];
+      }
+      const url = canonicalManagedProtectionTargetUrl(control.url);
+      return url ? [`${control.kind}:${control.scope}:${url}`] : [];
+    }),
+  );
+  const renderedAccessControls = (
+    discovery.evidence.renderedAccessControls ?? []
+  ).flatMap((control) => {
+    if (
+      control.kind !== "MANAGED_PROTECTION_DOCUMENT" ||
+      !["RETAINED_ROOT", "COURSE_SCOPED_BOOKING"].includes(control.scope)
+    ) {
+      return [];
+    }
+    const url = canonicalManagedProtectionTargetUrl(control.url);
+    if (
+      !url ||
+      !observedRenderedAccessControls.has(
+        `${control.kind}:${control.scope}:${url}`,
+      )
+    ) {
+      return [];
+    }
+    const targetBound =
+      control.scope === "RETAINED_ROOT"
+        ? [
+            browserInvestigation?.retainedInputs.officialWebsite,
+            browserInvestigation?.retainedInputs.sourceUrl,
+          ].some(
+            (value) =>
+              Boolean(value) &&
+              canonicalManagedProtectionTargetUrl(value as string) === url,
+          )
+        : browserInvestigation?.bookingDestinations.some(
+            (visit) =>
+              visit.courseScoped &&
+              [visit.requestedUrl, visit.finalUrl].some(
+                (value) =>
+                  canonicalManagedProtectionTargetUrl(value) === url,
+              ),
+          ) === true;
+    return targetBound
+      ? [
+          {
+            kind: "MANAGED_PROTECTION_DOCUMENT" as const,
+            scope: control.scope,
+            url,
+          },
+        ]
+      : [];
+  });
   return {
     ...discovery,
     evidence: {
@@ -716,6 +774,9 @@ export function retainOnlyPersistableBrowserUrls(
         ? { finalUrl: sanitizeEvidenceUrl(discovery.evidence.finalUrl) }
         : {}),
       observedUrls,
+      ...(renderedAccessControls.length > 0
+        ? { renderedAccessControls }
+        : { renderedAccessControls: undefined }),
       ...(evidence.persistableVisibleText
         ? { visibleText: evidence.persistableVisibleText.slice(0, 12_000) }
         : { visibleText: undefined }),
@@ -789,6 +850,20 @@ function canonicalBrowserPageOrCtaUrl(value: string) {
     return isSafeRenderedBrowserInteractionDestination(url.toString(), value)
       ? url.toString()
       : null;
+  } catch {
+    return null;
+  }
+}
+
+function canonicalManagedProtectionTargetUrl(value: string) {
+  try {
+    const url = new URL(value);
+    if (!isSafeRenderedBrowserInteractionDestination(url.toString(), value)) {
+      return null;
+    }
+    url.search = "";
+    url.hash = "";
+    return url.toString();
   } catch {
     return null;
   }
@@ -1343,6 +1418,8 @@ type BrowserPageObservation = {
   accessBarriers: Map<string, 401 | 403>;
   networkContracts: Map<string, BrowserNetworkContractFingerprint>;
   restrictedNetworkObserved: boolean;
+  latestMainFrameDocumentStatus: number | null;
+  latestMainFrameDocumentUrl: string | null;
 };
 
 async function createAdditionalInvestigationPage(rootPage: Page) {
@@ -1390,6 +1467,8 @@ function observeBrowserPageNetwork(
     accessBarriers: new Map(),
     networkContracts: new Map(),
     restrictedNetworkObserved: false,
+    latestMainFrameDocumentStatus: null,
+    latestMainFrameDocumentUrl: null,
   };
   const retainFingerprint = (
     fingerprint: BrowserNetworkContractFingerprint | null,
@@ -1428,6 +1507,14 @@ function observeBrowserPageNetwork(
   });
   page.on("response", (response) => {
     const request = response.request();
+    if (
+      request.isNavigationRequest() &&
+      request.frame() === page.mainFrame() &&
+      request.resourceType() === "document"
+    ) {
+      observation.latestMainFrameDocumentStatus = response.status();
+      observation.latestMainFrameDocumentUrl = response.url();
+    }
     observation.observedUrls.add(response.url());
     observation.restrictedNetworkObserved ||=
       isRestrictedBrowserNetworkObservation({
@@ -1541,7 +1628,12 @@ async function visitOfficialPage(
           haveSamePublicWebsiteOrigin(input.officialPageUrl, finalUrl)
             ? input.courseName
             : undefined,
-          { allowStaticPageFetch: !interactionBlocked },
+          {
+            allowStaticPageFetch: !interactionBlocked,
+            latestMainFrameDocumentStatus:
+              observation.latestMainFrameDocumentStatus,
+            latestMainFrameDocumentUrl: observation.latestMainFrameDocumentUrl,
+          },
         ).catch(() => emptyPreparedBrowserPageEvidence());
   const network = await materializeBrowserPageObservation(observation);
   const deferredBookingUrl =
@@ -1597,6 +1689,9 @@ async function visitBookingDestination(
       ? emptyPreparedBrowserPageEvidence()
       : await collectPageEvidence(page, undefined, {
           allowStaticPageFetch: !interactionBlocked,
+          latestMainFrameDocumentStatus:
+            observation.latestMainFrameDocumentStatus,
+          latestMainFrameDocumentUrl: observation.latestMainFrameDocumentUrl,
         }).catch(() => emptyPreparedBrowserPageEvidence());
 
   if (
@@ -1612,9 +1707,11 @@ async function visitBookingDestination(
       .catch(() => undefined);
     interactionBlocked = interactionGuard.isBlocked();
     if (!interactionBlocked) {
-      const preDateEvidence = await collectPageEvidence(page).catch(
-        () => evidence,
-      );
+      const preDateEvidence = await collectPageEvidence(page, undefined, {
+        latestMainFrameDocumentStatus:
+          observation.latestMainFrameDocumentStatus,
+        latestMainFrameDocumentUrl: observation.latestMainFrameDocumentUrl,
+      }).catch(() => evidence);
       if (
         !shouldStopBrowserDiscovery({
           accessBarrierCount: observation.accessBarriers.size,
@@ -1626,7 +1723,11 @@ async function visitBookingDestination(
           .waitForLoadState("networkidle", { timeout: 5_000 })
           .catch(() => undefined);
       }
-      evidence = await collectPageEvidence(page).catch(() => preDateEvidence);
+      evidence = await collectPageEvidence(page, undefined, {
+        latestMainFrameDocumentStatus:
+          observation.latestMainFrameDocumentStatus,
+        latestMainFrameDocumentUrl: observation.latestMainFrameDocumentUrl,
+      }).catch(() => preDateEvidence);
       interactionBlocked = interactionGuard.isBlocked();
     }
   }
@@ -1649,6 +1750,8 @@ async function visitBookingDestination(
 function emptyPreparedBrowserPageEvidence() {
   return prepareBrowserPageEvidence({
     accessControlDetected: false,
+    managedProtectionTemplateDetected: false,
+    managedProtectionDocumentDetected: false,
     anchors: [],
     linkCandidates: [],
     scripts: [],
@@ -1710,7 +1813,11 @@ function parseTeeItUpFacilityResponse(
 async function collectPageEvidence(
   page: Page,
   officialCourseName?: string,
-  options: { allowStaticPageFetch?: boolean } = {},
+  options: {
+    allowStaticPageFetch?: boolean;
+    latestMainFrameDocumentStatus?: number | null;
+    latestMainFrameDocumentUrl?: string | null;
+  } = {},
 ) {
   const evidence = await page.evaluate((maxAnchorCandidates) => {
     const anchorCandidates = Array.from(
@@ -1765,6 +1872,13 @@ async function collectPageEvidence(
       ) ||
       /\b403200\s*client-dependent\s+cps\s+challenge\b/i.test(pageText),
     );
+    const managedProtectionTemplateDetected =
+      /^access denied$/i.test(pageTitle) &&
+      /\byou (?:do not|don't) have permission to access\b/i.test(pageText) &&
+      /\bReference\s*#[A-Za-z0-9._-]+/i.test(pageText) &&
+      /https?:\/\/errors\.edgesuite\.net\/[A-Za-z0-9._~!$&'()*+,;=:@%\/?-]+/i.test(
+        pageText,
+      );
     const frameCandidateInputs =
       /\b(?:book|reserve|reservation|tee.?times?)\b/i.test(pageText)
         ? Array.from(
@@ -1840,7 +1954,9 @@ async function collectPageEvidence(
       .join("\n")
       .slice(0, 8000);
     return {
-      accessControlDetected,
+      accessControlDetected:
+        accessControlDetected || managedProtectionTemplateDetected,
+      managedProtectionTemplateDetected,
       identityCandidates,
       localityCandidates,
       frameCandidateInputs,
@@ -1870,12 +1986,21 @@ async function collectPageEvidence(
   const buttonCandidates = buildBrowserButtonCandidates(buttonCandidateInputs);
   const widgetCandidates = buildBrowserWidgetCandidates(widgetConfigInputs);
   const staticFrameCandidates =
-    options.allowStaticPageFetch === false
+    options.allowStaticPageFetch === false ||
+    pageEvidence.accessControlDetected ||
+    pageEvidence.managedProtectionTemplateDetected
       ? []
       : await collectStaticPageFrameCandidates(page, page.url());
   return prepareBrowserPageEvidence(
     {
       ...pageEvidence,
+      managedProtectionDocumentDetected:
+        options.latestMainFrameDocumentStatus === 200 &&
+        haveSameLatestMainFrameDocumentUrl(
+          options.latestMainFrameDocumentUrl,
+          page.url(),
+        ) &&
+        pageEvidence.managedProtectionTemplateDetected,
       anchors: [
         ...anchorCandidates.map((candidate) => candidate.url),
         ...frameCandidates.map((candidate) => candidate.url),
@@ -1893,6 +2018,24 @@ async function collectPageEvidence(
     },
     officialCourseName,
   );
+}
+
+function haveSameLatestMainFrameDocumentUrl(
+  responseUrl: string | null | undefined,
+  pageUrl: string,
+) {
+  if (!responseUrl) {
+    return false;
+  }
+  try {
+    const response = new URL(responseUrl);
+    const page = new URL(pageUrl);
+    response.hash = "";
+    page.hash = "";
+    return response.toString() === page.toString();
+  } catch {
+    return false;
+  }
 }
 
 async function clickLikelyBookingLink(

@@ -64,6 +64,8 @@ export type BrowserDiscoveryEvidence = {
   accessBarrierUrls?: string[];
   accessBarriers?: BrowserAccessBarrier[];
   corroboratedAccessBarrier?: BrowserAccessBarrier;
+  renderedAccessControls?: BrowserRenderedAccessControl[];
+  retainedBookingTarget?: BrowserRetainedBookingTarget;
   bookingCallToAction?: boolean;
   teeItUpLegacyConfigurations?: TeeItUpLegacyConfigurationEvidence[];
   teeItUpFacilityResponses?: TeeItUpFacilityResponseEvidence[];
@@ -110,6 +112,17 @@ export type TeeItUpFacilityResponseEvidence = {
 export type BrowserAccessBarrier = {
   url: string;
   status: 401 | 403;
+};
+
+export type BrowserRenderedAccessControl = {
+  kind: "MANAGED_PROTECTION_DOCUMENT";
+  scope: "RETAINED_ROOT" | "COURSE_SCOPED_BOOKING";
+  url: string;
+};
+
+export type BrowserRetainedBookingTarget = {
+  kind: "RETAINED_COURSE_BOOKING_TARGET";
+  url: string;
 };
 
 export function extractStructuredPhoneBookingEvidence(
@@ -262,6 +275,7 @@ export type BrowserDiscovery = {
     observedUrls: string[];
     visibleText?: string;
     accessBarriers?: BrowserAccessBarrier[];
+    renderedAccessControls?: BrowserRenderedAccessControl[];
     accessBarrierProviderIds?: {
       scheduleId?: number;
       bookingClassId?: number;
@@ -846,6 +860,16 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
     return withCourseIdentityCorroboration(firstProviderDiscovery, evidence);
   }
 
+  const renderedManagedProtectionClassification =
+    learnRenderedManagedProtectionClassification(unscopedEvidence);
+
+  if (renderedManagedProtectionClassification) {
+    return withCourseIdentityCorroboration(
+      renderedManagedProtectionClassification,
+      unscopedEvidence
+    );
+  }
+
   const nonRunnableOfficialBookingLink =
     learnNonRunnableOfficialBookingLink(unscopedEvidence, unscopedObservedUrls);
   if (nonRunnableOfficialBookingLink) {
@@ -1219,6 +1243,103 @@ function learnKnownProviderAccessBarrierClassification(
       learnedFrom: "known-provider-public-landing-access-barrier"
     }
   };
+}
+
+function learnRenderedManagedProtectionClassification(
+  evidence: BrowserDiscoveryEvidence
+): BrowserDiscovery | null {
+  const rootTargets = [evidence.sourceUrl, evidence.officialCourseWebsite]
+    .flatMap((value) => {
+      const target = normalizeManagedProtectionTargetUrl(value);
+      return target ? [target] : [];
+    });
+  const retainedBookingUrl =
+    evidence.retainedBookingTarget?.kind ===
+    "RETAINED_COURSE_BOOKING_TARGET"
+      ? evidence.retainedBookingTarget.url
+      : undefined;
+  const normalizedRetainedBookingTarget =
+    normalizeManagedProtectionTargetUrl(retainedBookingUrl);
+  const courseScopedTargets = [
+    evidence.finalUrl,
+    evidence.persistedTeeItUpBookingUrl,
+    retainedBookingUrl,
+    ...(evidence.linkCandidates?.map(({ url }) => url) ?? [])
+  ].flatMap((value) => {
+    const target = normalizeManagedProtectionTargetUrl(value);
+    return target ? [target] : [];
+  });
+  const validAccessControls = (evidence.renderedAccessControls ?? []).filter(
+    (control) => {
+      if (control.kind !== "MANAGED_PROTECTION_DOCUMENT") {
+        return false;
+      }
+      const target = normalizeManagedProtectionTargetUrl(control.url);
+      if (!target || target !== control.url) {
+        return false;
+      }
+      return control.scope === "RETAINED_ROOT"
+        ? rootTargets.includes(target)
+        : control.scope === "COURSE_SCOPED_BOOKING" &&
+            courseScopedTargets.includes(target);
+    }
+  );
+  const accessControl =
+    validAccessControls.find(
+      (control) =>
+        control.scope === "COURSE_SCOPED_BOOKING" &&
+        normalizedRetainedBookingTarget === control.url
+    ) ??
+    validAccessControls.find(
+      (control) => control.scope === "COURSE_SCOPED_BOOKING"
+    ) ??
+    validAccessControls.find((control) => control.scope === "RETAINED_ROOT");
+  if (!accessControl) {
+    return null;
+  }
+
+  const target = accessControl.url;
+  const bookingUrl =
+    accessControl.scope === "COURSE_SCOPED_BOOKING" &&
+    retainedBookingUrl &&
+    normalizedRetainedBookingTarget === target
+      ? retainedBookingUrl
+      : target;
+  const bookingTarget =
+    accessControl.scope === "COURSE_SCOPED_BOOKING" ||
+    isProviderPublicBookingLandingUrl(target);
+  return {
+    courseId: evidence.courseId,
+    status: "BLOCKED",
+    detectedPlatform: detectPlatform([bookingUrl]),
+    sourceUrl: evidence.sourceUrl,
+    ...(bookingTarget
+      ? { bookingUrl, bookingMethod: "PUBLIC_ONLINE" as const }
+      : { bookingMethod: "UNKNOWN" as const }),
+    automationEligibility: "BLOCKED",
+    automationReason: "CAPTCHA_OR_QUEUE",
+    bookingAccessMode: "CAPTCHA_OR_QUEUE",
+    policyNotes:
+      "The exact retained course target rendered a managed access-protection document while signed out. Tee Time Spot does not bypass technical access controls, so the surface requires engineering confirmation before any terminal classification.",
+    intelligenceReviewAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    confidence: 0.94,
+    evidence: {
+      finalUrl: target,
+      observedUrls: uniqueUrls([evidence.sourceUrl, target]),
+      renderedAccessControls: [accessControl],
+      learnedFrom: "rendered-managed-protection-document"
+    }
+  };
+}
+
+function normalizeManagedProtectionTargetUrl(value?: string | null) {
+  const url = parseUrl(value);
+  if (!url || !isSafeManualEvidenceUrl(url)) {
+    return null;
+  }
+  url.search = "";
+  url.hash = "";
+  return url.toString();
 }
 
 function getSafeNonProviderBarrierFallback(

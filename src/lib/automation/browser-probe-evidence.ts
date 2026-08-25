@@ -9,6 +9,8 @@ import {
   type BrowserAccessBarrier,
   type BrowserDiscovery,
   type BrowserDiscoveryEvidence,
+  type BrowserRenderedAccessControl,
+  type BrowserRetainedBookingTarget,
 } from "@/lib/automation/browser-discovery";
 import {
   getKnownProviderFamilyForHostname,
@@ -26,6 +28,8 @@ import {
 export type RawBrowserPageEvidence = {
   anchors: string[];
   accessControlDetected: boolean;
+  managedProtectionTemplateDetected: boolean;
+  managedProtectionDocumentDetected: boolean;
   identityCandidates?: string[];
   localityCandidates?: string[];
   providerExtractionText?: string;
@@ -546,31 +550,37 @@ export function prepareBrowserPageEvidence(
   evidence: RawBrowserPageEvidence,
   officialCourseName?: string,
 ): PreparedBrowserPageEvidence {
-  const linkCandidates = prioritizeBrowserDiscoveryLinks(
-    evidence.linkCandidates,
-    100,
-  );
-  const structuredPhoneBookingEvidence = extractStructuredPhoneBookingEvidence(
-    evidence.structuredActionScripts,
-  );
-  const prioritizedVisibleText = prioritizeBrowserPageVisibleText(
-    evidence.visibleText,
-  );
+  const managedProtectionTemplateDetected =
+    evidence.managedProtectionTemplateDetected ||
+    evidence.managedProtectionDocumentDetected;
+  const managedProtectionDocumentDetected =
+    evidence.managedProtectionDocumentDetected;
+  const linkCandidates = managedProtectionTemplateDetected
+    ? []
+    : prioritizeBrowserDiscoveryLinks(evidence.linkCandidates, 100);
+  const structuredPhoneBookingEvidence = managedProtectionTemplateDetected
+    ? ""
+    : extractStructuredPhoneBookingEvidence(evidence.structuredActionScripts);
+  const prioritizedVisibleText = managedProtectionTemplateDetected
+    ? { manualInstructionCandidateFound: false, visibleText: "" }
+    : prioritizeBrowserPageVisibleText(evidence.visibleText);
 
   return {
     anchors: linkCandidates.map(({ url }) => url),
     accessControlDetected: evidence.accessControlDetected,
-    ...(evidence.identityCandidates?.length
+    managedProtectionTemplateDetected,
+    managedProtectionDocumentDetected,
+    ...(!managedProtectionTemplateDetected && evidence.identityCandidates?.length
       ? { identityCandidates: evidence.identityCandidates.slice(0, 50) }
       : {}),
-    ...(evidence.localityCandidates?.length
+    ...(!managedProtectionTemplateDetected && evidence.localityCandidates?.length
       ? { localityCandidates: evidence.localityCandidates.slice(0, 50) }
       : {}),
-    ...(evidence.providerExtractionText
+    ...(!managedProtectionTemplateDetected && evidence.providerExtractionText
       ? { providerExtractionText: evidence.providerExtractionText.slice(0, 16_000) }
       : {}),
     linkCandidates,
-    scripts: evidence.scripts,
+    scripts: managedProtectionTemplateDetected ? [] : evidence.scripts,
     structuredPhoneBookingEvidence,
     visibleText: [
       structuredPhoneBookingEvidence ||
@@ -885,12 +895,16 @@ export function finalizeBrowserInvestigationEvidence(input: {
       ({ visit }) => visit.requiresDirectIdentityMatch !== true,
     );
   const trustedOfficialLinks = trustedPages.flatMap(
-    ({ visit }) => visit.evidence.linkCandidates,
+    ({ visit }) =>
+      visit.evidence.managedProtectionTemplateDetected
+        ? []
+        : visit.evidence.linkCandidates,
   );
   const allRenderedPageLinks = pageAssessments
     .filter(
       ({ visit, trustedForCourse }) =>
-        visit.requiresDirectIdentityMatch !== true || trustedForCourse,
+        !visit.evidence.managedProtectionTemplateDetected &&
+        (visit.requiresDirectIdentityMatch !== true || trustedForCourse),
     )
     .flatMap(
       ({ visit }) => visit.evidence.linkCandidates,
@@ -939,6 +953,10 @@ export function finalizeBrowserInvestigationEvidence(input: {
           .map((text) => `${input.course.courseName}. ${text}`)
           .join("\n")
       : trustedPages
+          .filter(
+            ({ visit }) =>
+              !visit.evidence.managedProtectionTemplateDetected,
+          )
           .map(({ visit }) => visit.evidence.visibleText)
           .filter(
             (text, index, values) =>
@@ -948,7 +966,9 @@ export function finalizeBrowserInvestigationEvidence(input: {
   ).slice(0, 12_000);
   const bookingSurfaceText = bookingDestinations
     .filter(
-      (visit) => !haveSamePublicWebsiteOrigin(officialWebsite, visit.finalUrl),
+      (visit) =>
+        !visit.evidence.managedProtectionTemplateDetected &&
+        !haveSamePublicWebsiteOrigin(officialWebsite, visit.finalUrl),
     )
     .map((visit) => visit.evidence.visibleText)
     .filter(
@@ -957,8 +977,12 @@ export function finalizeBrowserInvestigationEvidence(input: {
     .join("\n")
     .slice(0, 12_000);
   const providerExtractionText = [
-    ...trustedPages.map(({ visit }) => visit.evidence.providerExtractionText),
-    ...bookingDestinations.map((visit) => visit.evidence.providerExtractionText),
+    ...trustedPages
+      .filter(({ visit }) => !visit.evidence.managedProtectionTemplateDetected)
+      .map(({ visit }) => visit.evidence.providerExtractionText),
+    ...bookingDestinations
+      .filter((visit) => !visit.evidence.managedProtectionTemplateDetected)
+      .map((visit) => visit.evidence.providerExtractionText),
   ]
     .filter(
       (text, index, values): text is string =>
@@ -974,21 +998,30 @@ export function finalizeBrowserInvestigationEvidence(input: {
     ...trustedPages.map(({ visit }) => visit),
     ...bookingDestinations,
   ];
+  const contentBearingTrustedObservations = trustedObservations.filter(
+    (visit) => !visit.evidence.managedProtectionTemplateDetected,
+  );
   const observedUrls = uniqueBrowserUrls([
     input.course.sourceUrl,
     officialWebsite,
-    ...trustedObservations.flatMap((visit) => visit.observedUrls ?? []),
-    ...trustedPages.flatMap(({ visit }) => [
-      ...visit.evidence.anchors,
-      ...visit.evidence.scripts,
-    ]),
+    ...contentBearingTrustedObservations.flatMap(
+      (visit) => visit.observedUrls ?? [],
+    ),
+    ...trustedPages
+      .filter(({ visit }) => !visit.evidence.managedProtectionTemplateDetected)
+      .flatMap(({ visit }) => [
+        ...visit.evidence.anchors,
+        ...visit.evidence.scripts,
+      ]),
     ...renderedLinkCandidates.map(({ url }) => url),
   ]);
   const successfulProviderUrls = uniqueBrowserUrls(
-    trustedObservations.flatMap((visit) => visit.successfulProviderUrls ?? []),
+    contentBearingTrustedObservations.flatMap(
+      (visit) => visit.successfulProviderUrls ?? [],
+    ),
   );
   const teeItUpFacilityResponses = deduplicateTeeItUpResponses(
-    trustedObservations.flatMap(
+    contentBearingTrustedObservations.flatMap(
       (visit) => visit.teeItUpFacilityResponses ?? [],
     ),
   );
@@ -1000,8 +1033,8 @@ export function finalizeBrowserInvestigationEvidence(input: {
           (visit.parentUrl === null &&
             visit.requiresDirectIdentityMatch !== true),
       )
-      .flatMap(({ visit }) => visit.accessBarriers ?? []),
-    ...bookingDestinations.flatMap((visit) => visit.accessBarriers ?? []),
+      .flatMap(({ visit }) => retainVisitAccessBarriers(visit)),
+    ...bookingDestinations.flatMap(retainVisitAccessBarriers),
   ]);
   const selectedBookingOrigins = new Set(
     bookingDestinations.flatMap((visit) => {
@@ -1016,7 +1049,9 @@ export function finalizeBrowserInvestigationEvidence(input: {
     }),
   );
   const networkContracts = deduplicateNetworkContracts(
-    trustedObservations.flatMap((visit) => visit.networkContracts ?? []),
+    contentBearingTrustedObservations.flatMap(
+      (visit) => visit.networkContracts ?? [],
+    ),
   )
     .filter(
       (contract) =>
@@ -1028,23 +1063,60 @@ export function finalizeBrowserInvestigationEvidence(input: {
   const restrictedNetworkObserved =
     trustedObservations.some(
       (visit) =>
-        visit.restrictedNetworkObserved === true || visit.interactionBlocked,
+        visit.restrictedNetworkObserved === true ||
+        visit.interactionBlocked ||
+        visit.evidence.managedProtectionTemplateDetected,
     ) ||
     pageAssessments.some(
       ({ visit }) =>
         (visit.restrictedNetworkObserved === true ||
-          visit.interactionBlocked) &&
+          visit.interactionBlocked ||
+          visit.evidence.managedProtectionTemplateDetected) &&
         visit.parentUrl === null &&
         visit.requiresDirectIdentityMatch !== true &&
         [officialWebsite, input.course.sourceUrl].some((retainedUrl) =>
           haveSameExactBrowserNavigationInput(visit.requestedUrl, retainedUrl),
         ),
     );
+  const renderedAccessControls = deduplicateRenderedAccessControls([
+    ...pageAssessments.flatMap(({ visit }) => {
+      if (
+        !visit.evidence.managedProtectionDocumentDetected ||
+        visit.parentUrl !== null ||
+        visit.requiresDirectIdentityMatch === true ||
+        ![officialWebsite, input.course.sourceUrl].some((retainedUrl) =>
+          haveSameExactBrowserNavigationInput(visit.requestedUrl, retainedUrl),
+        )
+      ) {
+        return [];
+      }
+      return buildRenderedAccessControl("RETAINED_ROOT", visit.requestedUrl);
+    }),
+    ...bookingDestinations.flatMap((visit) =>
+      visit.evidence.managedProtectionDocumentDetected
+        ? buildRenderedAccessControl(
+            "COURSE_SCOPED_BOOKING",
+            visit.requestedUrl,
+          )
+        : [],
+    ),
+  ]);
+  const retainedBookingTarget = buildRetainedBookingTarget(
+    input.retainedBookingUrl,
+    bookingDestinations,
+  );
   const finalUrl =
     [...bookingDestinations]
       .reverse()
-      .find((visit) => !visit.interactionBlocked)?.finalUrl ??
-    officialPage?.visit.finalUrl ??
+      .find(
+        (visit) =>
+          !visit.interactionBlocked &&
+          !visit.evidence.managedProtectionTemplateDetected,
+      )?.finalUrl ??
+    (officialPage &&
+    !officialPage.visit.evidence.managedProtectionTemplateDetected
+      ? officialPage.visit.finalUrl
+      : undefined) ??
     input.course.sourceUrl;
 
   return {
@@ -1055,7 +1127,11 @@ export function finalizeBrowserInvestigationEvidence(input: {
           sourceCandidateIdentityVerified,
         }
       : {}),
-    sourceUrl: officialPage?.visit.finalUrl ?? input.course.sourceUrl,
+    sourceUrl:
+      officialPage &&
+      !officialPage.visit.evidence.managedProtectionTemplateDetected
+        ? officialPage.visit.finalUrl
+        : input.course.sourceUrl,
     finalUrl,
     observedUrls,
     successfulProviderUrls,
@@ -1066,7 +1142,9 @@ export function finalizeBrowserInvestigationEvidence(input: {
     ...(officialPage
       ? {
           officialPage: {
-            url: officialPage.visit.finalUrl,
+            url: officialPage.visit.evidence.managedProtectionTemplateDetected
+              ? officialPage.visit.requestedUrl
+              : officialPage.visit.finalUrl,
             linkCandidates: officialLinkCandidates,
             ...(verifiedOfficialPage
               ? { courseName: input.course.courseName }
@@ -1077,6 +1155,8 @@ export function finalizeBrowserInvestigationEvidence(input: {
       : {}),
     accessBarrierUrls: accessBarriers.map(({ url }) => url),
     accessBarriers,
+    ...(retainedBookingTarget ? { retainedBookingTarget } : {}),
+    ...(renderedAccessControls.length > 0 ? { renderedAccessControls } : {}),
     ...(bookingSurfaceText ? { bookingSurfaceText } : {}),
     visibleText: [providerExtractionText, persistableVisibleText]
       .filter(Boolean)
@@ -1122,7 +1202,11 @@ export function finalizeBrowserInvestigationEvidence(input: {
           requestedUrl:
             sanitizeBrowserAuditUrl(visit.requestedUrl) ?? auditOfficialWebsite,
           finalUrl:
-            sanitizeBrowserAuditUrl(visit.finalUrl) ?? auditOfficialWebsite,
+            sanitizeBrowserAuditUrl(
+              visit.evidence.managedProtectionTemplateDetected
+                ? visit.requestedUrl
+                : visit.finalUrl,
+            ) ?? auditOfficialWebsite,
           depth: visit.depth,
           purpose: getBrowserInvestigationPagePurpose(
             `${visit.label} ${visit.requestedUrl}`,
@@ -1137,7 +1221,11 @@ export function finalizeBrowserInvestigationEvidence(input: {
         requestedUrl:
           sanitizeBrowserAuditUrl(visit.requestedUrl) ?? auditOfficialWebsite,
         finalUrl:
-          sanitizeBrowserAuditUrl(visit.finalUrl) ?? auditOfficialWebsite,
+          sanitizeBrowserAuditUrl(
+            visit.evidence.managedProtectionTemplateDetected
+              ? visit.requestedUrl
+              : visit.finalUrl,
+          ) ?? auditOfficialWebsite,
         courseScoped: visit.courseScoped,
         interactionBlocked: visit.interactionBlocked,
       })),
@@ -1145,6 +1233,70 @@ export function finalizeBrowserInvestigationEvidence(input: {
       networkContracts,
     },
   };
+}
+
+function buildRenderedAccessControl(
+  scope: BrowserRenderedAccessControl["scope"],
+  value: string,
+): BrowserRenderedAccessControl[] {
+  try {
+    const url = new URL(value);
+    if (!isSafeManualEvidenceUrl(url)) {
+      return [];
+    }
+    url.search = "";
+    url.hash = "";
+    return [{ kind: "MANAGED_PROTECTION_DOCUMENT", scope, url: url.toString() }];
+  } catch {
+    return [];
+  }
+}
+
+function buildRetainedBookingTarget(
+  retainedBookingUrl: string | null | undefined,
+  bookingDestinations: BrowserBookingDestinationVisit[],
+): BrowserRetainedBookingTarget | null {
+  if (
+    !retainedBookingUrl ||
+    !bookingDestinations.some(
+      (visit) =>
+        visit.courseScoped &&
+        haveSameExactBrowserNavigationInput(
+          visit.requestedUrl,
+          retainedBookingUrl,
+        ),
+    )
+  ) {
+    return null;
+  }
+  try {
+    const url = new URL(retainedBookingUrl);
+    if (!isSafeManualEvidenceUrl(url)) {
+      return null;
+    }
+    return {
+      kind: "RETAINED_COURSE_BOOKING_TARGET",
+      url: retainedBookingUrl,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function deduplicateRenderedAccessControls(
+  controls: BrowserRenderedAccessControl[],
+) {
+  const seen = new Set<string>();
+  return controls
+    .filter((control) => {
+      const key = `${control.kind}:${control.scope}:${control.url}`;
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 4);
 }
 
 function haveSameExactBrowserNavigationInput(left: string, right: string) {
@@ -1301,6 +1453,23 @@ function deduplicateAccessBarriers(barriers: BrowserAccessBarrier[]) {
     seen.add(key);
     return true;
   });
+}
+
+function retainVisitAccessBarriers(visit: {
+  requestedUrl: string;
+  finalUrl: string;
+  evidence: PreparedBrowserPageEvidence;
+  accessBarriers?: BrowserAccessBarrier[];
+}) {
+  const barriers = visit.accessBarriers ?? [];
+  if (!visit.evidence.managedProtectionTemplateDetected) {
+    return barriers;
+  }
+  return barriers.filter((barrier) =>
+    [visit.requestedUrl, visit.finalUrl].some((documentUrl) =>
+      haveSameExactBrowserNavigationInput(barrier.url, documentUrl),
+    ),
+  );
 }
 
 function deduplicateNetworkContracts(

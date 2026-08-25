@@ -794,6 +794,41 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("lets proven ForeUP evidence win over a managed root observation", () => {
+    const rootUrl = "https://managed-course.example/";
+    const bookingUrl =
+      "https://foreupsoftware.com/index.php/booking/22739/11739#/teetimes";
+    const apiUrl =
+      "https://foreupsoftware.com/index.php/api/booking/times?date=07-10-2026&schedule_id=11739&booking_class=22739";
+    const discovery = buildBrowserDiscovery({
+      courseId: "managed-course",
+      courseName: "Managed Course Golf Club",
+      sourceUrl: rootUrl,
+      officialCourseWebsite: rootUrl,
+      finalUrl: bookingUrl,
+      observedUrls: [rootUrl, bookingUrl, apiUrl],
+      linkCandidates: [{ url: bookingUrl, label: "Book tee times" }],
+      renderedAccessControls: [
+        {
+          kind: "MANAGED_PROTECTION_DOCUMENT",
+          scope: "RETAINED_ROOT",
+          url: rootUrl,
+        },
+      ],
+    });
+
+    expect(discovery).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "FOREUP",
+      bookingUrl,
+      apiMetadata: {
+        scheduleId: 11739,
+        bookingClassId: 22739,
+      },
+    });
+    expect(discovery.automationReason).not.toBe("CAPTCHA_OR_QUEUE");
+  });
+
   it("does not infer a ForeUP booking class from route segments without an observed API request", () => {
     const evidence: BrowserDiscoveryEvidence = {
       courseId: "course-1",
@@ -2655,6 +2690,100 @@ describe("buildBrowserDiscovery", () => {
       }
     });
     expect(discovery.apiMetadata).toBeUndefined();
+  });
+
+  it("classifies an exact bounded managed-protection document without retaining denial text", () => {
+    const rootUrl = "https://managed-course.example/";
+    const discovery = buildBrowserDiscovery({
+      courseId: "managed-course",
+      courseName: "Managed Course Golf Club",
+      sourceUrl: rootUrl,
+      officialCourseWebsite: rootUrl,
+      finalUrl: rootUrl,
+      observedUrls: [rootUrl],
+      visibleText: "",
+      renderedAccessControls: [
+        {
+          kind: "MANAGED_PROTECTION_DOCUMENT",
+          scope: "RETAINED_ROOT",
+          url: rootUrl,
+        },
+      ],
+    });
+
+    expect(discovery).toMatchObject({
+      status: "BLOCKED",
+      detectedPlatform: "UNKNOWN",
+      sourceUrl: rootUrl,
+      bookingMethod: "UNKNOWN",
+      automationEligibility: "BLOCKED",
+      automationReason: "CAPTCHA_OR_QUEUE",
+      bookingAccessMode: "CAPTCHA_OR_QUEUE",
+      confidence: 0.94,
+      evidence: {
+        finalUrl: rootUrl,
+        observedUrls: [rootUrl],
+        renderedAccessControls: [
+          {
+            kind: "MANAGED_PROTECTION_DOCUMENT",
+            scope: "RETAINED_ROOT",
+            url: rootUrl,
+          },
+        ],
+        learnedFrom: "rendered-managed-protection-document",
+      },
+    });
+    expect(discovery).not.toHaveProperty("bookingUrl");
+    expect(JSON.stringify(discovery)).not.toContain("Access Denied");
+    expect(JSON.stringify(discovery)).not.toContain("Reference #");
+  });
+
+  it("rejects unbound or noncanonical managed-protection markers", () => {
+    const rootUrl = "https://managed-course.example/";
+    const build = (renderedAccessControls: NonNullable<BrowserDiscoveryEvidence["renderedAccessControls"]>) =>
+      buildBrowserDiscovery({
+        courseId: "managed-course",
+        courseName: "Managed Course Golf Club",
+        sourceUrl: rootUrl,
+        officialCourseWebsite: rootUrl,
+        finalUrl: rootUrl,
+        observedUrls: [rootUrl],
+        retainedBookingTarget: {
+          kind: "RETAINED_COURSE_BOOKING_TARGET",
+          url: "https://booking.example/target",
+        },
+        renderedAccessControls,
+      });
+
+    for (const discovery of [
+      build([
+        {
+          kind: "MANAGED_PROTECTION_DOCUMENT",
+          scope: "RETAINED_ROOT",
+          url: "https://unrelated.example/",
+        },
+      ]),
+      build([
+        {
+          kind: "MANAGED_PROTECTION_DOCUMENT",
+          scope: "COURSE_SCOPED_BOOKING",
+          url: "https://booking.example/unrelated",
+        },
+      ]),
+      build([
+        {
+          kind: "MANAGED_PROTECTION_DOCUMENT",
+          scope: "RETAINED_ROOT",
+          url: `${rootUrl}?reference=raw-secret`,
+        },
+      ]),
+    ]) {
+      expect(discovery.status).not.toBe("BLOCKED");
+      expect(discovery.automationReason).not.toBe("CAPTCHA_OR_QUEUE");
+      expect(discovery.evidence.learnedFrom).not.toBe(
+        "rendered-managed-protection-document",
+      );
+    }
   });
 
   it("keeps a first managed challenge retryable until it is corroborated", () => {

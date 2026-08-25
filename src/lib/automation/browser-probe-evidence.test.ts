@@ -34,6 +34,8 @@ const fictionalCourse = {
 const emptyPage: RawBrowserPageEvidence = {
   anchors: [],
   accessControlDetected: false,
+  managedProtectionTemplateDetected: false,
+  managedProtectionDocumentDetected: false,
   structuredActionScripts: [],
   linkCandidates: [],
   scripts: [],
@@ -1087,6 +1089,168 @@ describe("browser probe evidence pipeline", () => {
     expect(
       finalize(rootUrl, true).browserInvestigation.restrictedNetworkObserved,
     ).toBe(false);
+  });
+
+  it("retains only a bounded managed-protection marker from an exact retained root", () => {
+    const rootUrl = "https://managed-course.example/";
+    const rawReference = "Reference #18.raw-secret.123456";
+    const managedPage = prepareBrowserPageEvidence({
+      ...emptyPage,
+      accessControlDetected: true,
+      managedProtectionTemplateDetected: true,
+      managedProtectionDocumentDetected: true,
+      identityCandidates: ["Access Denied"],
+      localityCandidates: ["raw locality must not persist"],
+      providerExtractionText: "raw-provider-secret",
+      linkCandidates: [
+        {
+          url: "https://errors.edgesuite.net/18.raw-secret.123456",
+          label: rawReference,
+        },
+      ],
+      scripts: ["https://errors.edgesuite.net/raw-script.js"],
+      structuredActionScripts: [
+        `{"actionButton":"${rawReference}","phone":"555-0100"}`,
+      ],
+      visibleText: `Access Denied. You do not have permission to access this server. ${rawReference} https://errors.edgesuite.net/18.raw-secret.123456`,
+    });
+
+    expect(managedPage).toMatchObject({
+      accessControlDetected: true,
+      managedProtectionDocumentDetected: true,
+      anchors: [],
+      linkCandidates: [],
+      scripts: [],
+      structuredPhoneBookingEvidence: "",
+      visibleText: "",
+    });
+    expect(managedPage).not.toHaveProperty("identityCandidates");
+    expect(managedPage).not.toHaveProperty("localityCandidates");
+    expect(managedPage).not.toHaveProperty("providerExtractionText");
+
+    const evidence = finalizeBrowserInvestigationEvidence({
+      course: {
+        courseId: "managed-course",
+        courseName: "Managed Course Golf Club",
+        sourceUrl: rootUrl,
+        officialCourseWebsite: rootUrl,
+      },
+      mode: "RENDERED",
+      pageVisits: [
+        {
+          requestedUrl: rootUrl,
+          finalUrl:
+            "https://managed-course.example/denied?reference=raw-secret",
+          label: "Managed Course Golf Club",
+          depth: 0,
+          parentUrl: null,
+          interactionBlocked: false,
+          evidence: managedPage,
+          observedUrls: [
+            "https://errors.edgesuite.net/18.raw-secret.123456",
+          ],
+          successfulProviderUrls: [
+            "https://errors.edgesuite.net/18.raw-secret.123456",
+          ],
+          restrictedNetworkObserved: true,
+          networkContracts: [
+            {
+              origin: "https://errors.edgesuite.net",
+              method: "GET",
+              pathPattern: "/:id",
+              queryKeys: [],
+              resourceType: "document",
+              status: 200,
+            },
+          ],
+        },
+      ],
+      bookingDestinations: [],
+    });
+    const discovery = buildBrowserDiscovery(evidence);
+    const serialized = JSON.stringify({ evidence, discovery });
+
+    expect(evidence).toMatchObject({
+      sourceUrl: rootUrl,
+      finalUrl: rootUrl,
+      renderedAccessControls: [
+        {
+          kind: "MANAGED_PROTECTION_DOCUMENT",
+          scope: "RETAINED_ROOT",
+          url: rootUrl,
+        },
+      ],
+      visibleText: "",
+      persistableVisibleText: "",
+      browserInvestigation: {
+        restrictedNetworkObserved: true,
+        networkContracts: [],
+        sameOriginPages: [
+          expect.objectContaining({
+            requestedUrl: rootUrl,
+            finalUrl: rootUrl,
+          }),
+        ],
+      },
+    });
+    expect(discovery).toMatchObject({
+      status: "BLOCKED",
+      automationReason: "CAPTCHA_OR_QUEUE",
+      bookingAccessMode: "CAPTCHA_OR_QUEUE",
+      evidence: {
+        renderedAccessControls: evidence.renderedAccessControls,
+        learnedFrom: "rendered-managed-protection-document",
+      },
+    });
+    expect(serialized).not.toContain("raw-secret");
+    expect(serialized).not.toContain("Access Denied");
+    expect(serialized).not.toContain("errors.edgesuite.net");
+    expect(serialized).not.toContain("555-0100");
+  });
+
+  it("does not project a managed-protection marker from nested or unverified pages", () => {
+    const rootUrl = "https://managed-course.example/";
+    const managedPage = prepareBrowserPageEvidence({
+      ...emptyPage,
+      accessControlDetected: true,
+      managedProtectionTemplateDetected: true,
+      managedProtectionDocumentDetected: true,
+    });
+    const finalize = (
+      requestedUrl: string,
+      parentUrl: string | null,
+      requiresDirectIdentityMatch = false,
+    ) =>
+      finalizeBrowserInvestigationEvidence({
+        course: {
+          courseId: "managed-course",
+          courseName: "Managed Course Golf Club",
+          sourceUrl: rootUrl,
+          officialCourseWebsite: rootUrl,
+        },
+        mode: "RENDERED",
+        unprojectedSourceCandidate: requiresDirectIdentityMatch,
+        pageVisits: [
+          {
+            requestedUrl,
+            finalUrl: requestedUrl,
+            label: "Golf information",
+            depth: parentUrl ? 1 : 0,
+            parentUrl,
+            requiresDirectIdentityMatch,
+            interactionBlocked: false,
+            evidence: managedPage,
+          },
+        ],
+        bookingDestinations: [],
+      });
+
+    expect(
+      finalize("https://managed-course.example/news", rootUrl),
+    ).not.toHaveProperty("renderedAccessControls");
+    expect(finalize(rootUrl, null, true)).not.toHaveProperty(
+      "renderedAccessControls",
+    );
   });
 
   it("aggregates only target-course pages and relevant network contracts", () => {

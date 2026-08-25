@@ -10,6 +10,10 @@ import {
 } from "../../../scripts/automation/browser-probe-needed-adapters";
 import { buildBrowserDiscovery } from "./browser-discovery";
 
+function managedProtectionHtml(reference: string, extra = "") {
+  return `<html><head><title>Access Denied</title></head><body><h1>Access Denied</h1><p>You don't have permission to access this server.</p><p>Reference #18.${reference}</p><p>https://errors.edgesuite.net/18.${reference}</p>${extra}</body></html>`;
+}
+
 describe("rendered browser navigation safety", () => {
   it("allows only read-only HTTP methods", () => {
     expect(isReadOnlyBrowserRequestMethod("GET")).toBe(true);
@@ -800,6 +804,458 @@ describe("rendered browser navigation safety", () => {
       expect(
         persisted.evidence.browserInvestigation.restrictedNetworkObserved,
       ).toBe(true);
+    } finally {
+      await context.close();
+      await browser.close();
+    }
+  }, 30_000);
+
+  it("persists only the bounded marker for an HTTP 200 managed root and stops interaction", async () => {
+    const browser = await chromium.launch();
+    const context = await browser.newContext({ serviceWorkers: "block" });
+    try {
+      const page = await context.newPage();
+      const officialPageUrl = "https://managed-root-course.example/";
+      const navigationRequests: string[] = [];
+      const staticPageGet = vi.spyOn(page.request, "get").mockResolvedValue({
+        ok: () => false,
+      } as APIResponse);
+      context.on("request", (request) => {
+        if (
+          request.isNavigationRequest() &&
+          request.frame() === page.mainFrame()
+        ) {
+          navigationRequests.push(request.url());
+        }
+      });
+      await context.route(
+        "https://managed-root-course.example/**",
+        async (route) => {
+          const pathname = new URL(route.request().url()).pathname;
+          if (pathname === "/after-marker") {
+            await route.fulfill({
+              status: 200,
+              contentType: "text/html",
+              body: "<html><body>must-not-visit-after-marker</body></html>",
+            });
+            return;
+          }
+          if (pathname === "/date-interaction") {
+            await route.fulfill({ status: 204, body: "" });
+            return;
+          }
+          await route.fulfill({
+            status: 200,
+            contentType: "text/html",
+            body: managedProtectionHtml(
+              "positive-root-secret",
+              '<a href="/after-marker">Book tee times</a><input type="date" oninput="fetch(\'/date-interaction\', {method: \'POST\'})">',
+            ),
+          });
+        },
+      );
+
+      const evidence = await collectBrowserEvidence(page, {
+        courseId: "managed-root-course",
+        courseName: "Managed Root Golf Course",
+        sourceUrl: officialPageUrl,
+        officialCourseWebsite: officialPageUrl,
+      });
+      const discovery = buildBrowserDiscovery(evidence);
+      const persistenceInput = {
+        ...discovery,
+        evidence: {
+          ...discovery.evidence,
+          renderedAccessControls:
+            discovery.evidence.renderedAccessControls?.map((control) => ({
+              ...control,
+            })),
+          browserInvestigation: evidence.browserInvestigation,
+        },
+      } as Parameters<typeof retainOnlyPersistableBrowserUrls>[0];
+      Object.assign(persistenceInput.evidence.renderedAccessControls?.[0] ?? {}, {
+        runtimeCanary: "must-not-persist-runtime-extra",
+      });
+      const persisted = retainOnlyPersistableBrowserUrls(
+        persistenceInput,
+        evidence,
+      );
+      const serialized = JSON.stringify({ evidence, persisted });
+
+      expect(evidence.renderedAccessControls).toEqual([
+        {
+          kind: "MANAGED_PROTECTION_DOCUMENT",
+          scope: "RETAINED_ROOT",
+          url: officialPageUrl,
+        },
+      ]);
+      expect(evidence.linkCandidates).toEqual([]);
+      expect(evidence.visibleText).toBe("");
+      expect(evidence.persistableVisibleText).toBe("");
+      expect(discovery).toMatchObject({
+        status: "BLOCKED",
+        automationReason: "CAPTCHA_OR_QUEUE",
+        evidence: {
+          learnedFrom: "rendered-managed-protection-document",
+        },
+      });
+      expect(persisted.evidence.renderedAccessControls).toEqual(
+        evidence.renderedAccessControls,
+      );
+      expect(staticPageGet).not.toHaveBeenCalled();
+      expect(navigationRequests).toEqual([officialPageUrl]);
+      expect(serialized).not.toContain("positive-root-secret");
+      expect(serialized).not.toContain("Access Denied");
+      expect(serialized).not.toContain("Reference #");
+      expect(serialized).not.toContain("errors.edgesuite.net");
+      expect(serialized).not.toContain("must-not-persist-runtime-extra");
+      expect(serialized).not.toContain("must-not-visit-after-marker");
+      expect(serialized).not.toContain("date-interaction");
+    } finally {
+      await context.close();
+      await browser.close();
+    }
+  }, 30_000);
+
+  it("prefers a managed retained booking target when both retained targets are protected", async () => {
+    const browser = await chromium.launch();
+    const context = await browser.newContext({ serviceWorkers: "block" });
+    try {
+      const page = await context.newPage();
+      const officialPageUrl = "https://retained-target-course.example/";
+      const retainedBookingUrl =
+        "https://retained-booking.example/tee-times?course=raw-course-id#calendar";
+      const navigationRequests: string[] = [];
+      const staticPageGet = vi.spyOn(page.request, "get").mockResolvedValue({
+        ok: () => false,
+      } as APIResponse);
+      context.on("request", (request) => {
+        if (request.isNavigationRequest()) {
+          navigationRequests.push(request.url());
+        }
+      });
+      await context.route(
+        "https://retained-target-course.example/**",
+        async (route) => {
+          await route.fulfill({
+            status: 200,
+            contentType: "text/html",
+            body: managedProtectionHtml("retained-root-secret"),
+          });
+        },
+      );
+      await context.route(
+        "https://retained-booking.example/**",
+        async (route) => {
+          const pathname = new URL(route.request().url()).pathname;
+          if (pathname === "/after-marker") {
+            await route.fulfill({
+              status: 200,
+              contentType: "text/html",
+              body: "<html><body>must-not-visit-retained-marker-link</body></html>",
+            });
+            return;
+          }
+          if (pathname === "/date-interaction") {
+            await route.fulfill({ status: 204, body: "" });
+            return;
+          }
+          await route.fulfill({
+            status: 200,
+            contentType: "text/html",
+            body: managedProtectionHtml(
+              "retained-booking-secret",
+              '<a href="/after-marker">Book another time</a><input type="date" oninput="fetch(\'/date-interaction\', {method: \'POST\'})">',
+            ),
+          });
+        },
+      );
+
+      const evidence = await collectBrowserEvidence(
+        page,
+        {
+          courseId: "retained-target-course",
+          courseName: "Retained Target Golf Course",
+          sourceUrl: officialPageUrl,
+          officialCourseWebsite: officialPageUrl,
+        },
+        { retainedBookingUrl },
+      );
+      const discovery = buildBrowserDiscovery(evidence);
+      const persisted = retainOnlyPersistableBrowserUrls(
+        {
+          ...discovery,
+          evidence: {
+            ...discovery.evidence,
+            browserInvestigation: evidence.browserInvestigation,
+          },
+        },
+        evidence,
+      );
+      const serialized = JSON.stringify({ evidence, persisted });
+      const persistedEvidenceJson = JSON.stringify(persisted.evidence);
+
+      expect(evidence.linkCandidates).toEqual([]);
+      expect(evidence.retainedBookingTarget).toEqual({
+        kind: "RETAINED_COURSE_BOOKING_TARGET",
+        url: retainedBookingUrl,
+      });
+      expect(evidence.renderedAccessControls).toEqual([
+        {
+          kind: "MANAGED_PROTECTION_DOCUMENT",
+          scope: "RETAINED_ROOT",
+          url: officialPageUrl,
+        },
+        {
+          kind: "MANAGED_PROTECTION_DOCUMENT",
+          scope: "COURSE_SCOPED_BOOKING",
+          url: "https://retained-booking.example/tee-times",
+        },
+      ]);
+      expect(discovery).toMatchObject({
+        status: "BLOCKED",
+        bookingUrl: retainedBookingUrl,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationReason: "CAPTCHA_OR_QUEUE",
+        evidence: {
+          renderedAccessControls: [
+            {
+              kind: "MANAGED_PROTECTION_DOCUMENT",
+              scope: "COURSE_SCOPED_BOOKING",
+              url: "https://retained-booking.example/tee-times",
+            },
+          ],
+          learnedFrom: "rendered-managed-protection-document",
+        },
+      });
+      expect(persisted.evidence.renderedAccessControls).toEqual([
+        {
+          kind: "MANAGED_PROTECTION_DOCUMENT",
+          scope: "COURSE_SCOPED_BOOKING",
+          url: "https://retained-booking.example/tee-times",
+        },
+      ]);
+      expect(persisted.bookingUrl).toBe(retainedBookingUrl);
+      expect(staticPageGet).not.toHaveBeenCalled();
+      expect(navigationRequests).not.toContain(
+        "https://retained-booking.example/after-marker",
+      );
+      expect(
+        JSON.stringify(evidence.renderedAccessControls),
+      ).not.toContain("raw-course-id");
+      expect(persistedEvidenceJson).not.toContain("raw-course-id");
+      expect(persistedEvidenceJson).not.toContain("#calendar");
+      expect(serialized).not.toContain("retained-root-secret");
+      expect(serialized).not.toContain("retained-booking-secret");
+      expect(serialized).not.toContain("Access Denied");
+      expect(serialized).not.toContain("Reference #");
+      expect(serialized).not.toContain("errors.edgesuite.net");
+      expect(serialized).not.toContain("date-interaction");
+      expect(serialized).not.toContain("must-not-visit-retained-marker-link");
+    } finally {
+      await context.close();
+      await browser.close();
+    }
+  }, 30_000);
+
+  it("rejects prose and non-main-document managed-protection lookalikes", async () => {
+    const browser = await chromium.launch();
+    const context = await browser.newContext({ serviceWorkers: "block" });
+    try {
+      const page = await context.newPage();
+      const staticPageGet = vi.spyOn(page.request, "get").mockResolvedValue({
+        ok: () => false,
+      } as APIResponse);
+      await context.route(
+        "https://managed-negative-course.example/**",
+        async (route) => {
+          const pathname = new URL(route.request().url()).pathname;
+          if (pathname === "/xhr-denial") {
+            await route.fulfill({
+              status: 200,
+              contentType: "text/plain",
+              body: managedProtectionHtml("xhr-secret"),
+            });
+            return;
+          }
+          if (pathname === "/frame-denial") {
+            await route.fulfill({
+              status: 200,
+              contentType: "text/html",
+              body: managedProtectionHtml("frame-secret"),
+            });
+            return;
+          }
+          if (pathname === "/denial.js") {
+            await route.fulfill({
+              status: 200,
+              contentType: "application/javascript",
+              body: "/* Access Denied. Reference #18.asset-secret. https://errors.edgesuite.net/18.asset-secret */",
+            });
+            return;
+          }
+          if (pathname === "/prose") {
+            await route.fulfill({
+              status: 200,
+              contentType: "text/html",
+              body: managedProtectionHtml("prose-secret").replace(
+                "<title>Access Denied</title>",
+                "<title>The Challenge</title>",
+              ),
+            });
+            return;
+          }
+          if (pathname === "/title-only") {
+            await route.fulfill({
+              status: 200,
+              contentType: "text/html",
+              body: "<html><head><title>Access Denied</title></head><body><p>Course access information.</p></body></html>",
+            });
+            return;
+          }
+          if (pathname === "/iframe") {
+            await route.fulfill({
+              status: 200,
+              contentType: "text/html",
+              body: '<html><head><title>Managed Negative Golf Course</title></head><body><h1>Managed Negative Golf Course</h1><iframe src="/frame-denial"></iframe></body></html>',
+            });
+            return;
+          }
+          if (pathname === "/xhr") {
+            await route.fulfill({
+              status: 200,
+              contentType: "text/html",
+              body: '<html><head><title>Managed Negative Golf Course</title></head><body><h1>Managed Negative Golf Course</h1><script>fetch("/xhr-denial")</script></body></html>',
+            });
+            return;
+          }
+          await route.fulfill({
+            status: 200,
+            contentType: "text/html",
+            body: '<html><head><title>Managed Negative Golf Course</title></head><body><h1>Managed Negative Golf Course</h1><script src="/denial.js"></script></body></html>',
+          });
+        },
+      );
+
+      for (const pathname of [
+        "/prose",
+        "/title-only",
+        "/iframe",
+        "/xhr",
+        "/asset",
+      ]) {
+        const sourceUrl = `https://managed-negative-course.example${pathname}`;
+        const evidence = await collectBrowserEvidence(page, {
+          courseId: "managed-negative-course",
+          courseName: "Managed Negative Golf Course",
+          sourceUrl,
+          officialCourseWebsite: sourceUrl,
+        });
+        const discovery = buildBrowserDiscovery(evidence);
+
+        expect(evidence.renderedAccessControls).toBeUndefined();
+        expect(discovery.evidence.learnedFrom).not.toBe(
+          "rendered-managed-protection-document",
+        );
+        expect(discovery.automationReason).not.toBe("CAPTCHA_OR_QUEUE");
+      }
+      expect(staticPageGet).toHaveBeenCalled();
+    } finally {
+      await context.close();
+      await browser.close();
+    }
+  }, 30_000);
+
+  it("keeps an HTTP 403 managed response on the existing access-barrier path", async () => {
+    const browser = await chromium.launch();
+    const context = await browser.newContext({ serviceWorkers: "block" });
+    try {
+      const page = await context.newPage();
+      const sourceUrl =
+        "https://managed-course.ezlinksgolf.com/index.html#/search";
+      const scriptCanaryUrl =
+        "https://managed-course.ezlinksgolf.com/raw-script-canary.js?reference=must-not-persist-subresource-403";
+      let scriptCanaryServed = false;
+      const staticPageGet = vi.spyOn(page.request, "get").mockResolvedValue({
+        ok: () => false,
+      } as APIResponse);
+      await context.route(
+        "https://managed-course.ezlinksgolf.com/**",
+        async (route) => {
+          if (new URL(route.request().url()).pathname === "/raw-script-canary.js") {
+            scriptCanaryServed = true;
+            await route.fulfill({
+              status: 403,
+              contentType: "application/javascript",
+              body: "window.rawSubresourceCanary = 'must-not-persist-subresource-body';",
+            });
+            return;
+          }
+          await route.fulfill({
+            status: 403,
+            contentType: "text/html",
+            body: managedProtectionHtml(
+              "existing-403-secret",
+              `<a href="https://errors.edgesuite.net/raw-link-canary">raw-link-canary</a><script>window.property = {"rawProviderCanary":"must-not-persist-403"};</script><script src="${scriptCanaryUrl}"></script>`,
+            ),
+          });
+        },
+      );
+
+      const evidence = await collectBrowserEvidence(page, {
+        courseId: "managed-course",
+        courseName: "Managed Course Golf Club",
+        sourceUrl,
+        officialCourseWebsite: null,
+      });
+      const accessBarrier = evidence.accessBarriers[0];
+      const discovery = buildBrowserDiscovery({
+        ...evidence,
+        linkCandidates: [{ url: sourceUrl, label: "Book tee times" }],
+        corroboratedAccessBarrier: accessBarrier,
+      });
+      const persisted = retainOnlyPersistableBrowserUrls(
+        {
+          ...discovery,
+          evidence: {
+            ...discovery.evidence,
+            browserInvestigation: evidence.browserInvestigation,
+          },
+        },
+        evidence,
+      );
+      const serialized = JSON.stringify({ evidence, persisted });
+
+      expect(evidence.renderedAccessControls).toBeUndefined();
+      expect(scriptCanaryServed).toBe(true);
+      expect(evidence.linkCandidates).toEqual([]);
+      expect(evidence.visibleText).toBe("");
+      expect(evidence.persistableVisibleText).toBe("");
+      expect(evidence.browserInvestigation.networkContracts).toEqual([]);
+      expect(accessBarrier).toEqual({
+        url: "https://managed-course.ezlinksgolf.com/index.html",
+        status: 403,
+      });
+      expect(evidence.accessBarriers).toEqual([accessBarrier]);
+      expect(discovery).toMatchObject({
+        status: "BLOCKED",
+        automationReason: "CAPTCHA_OR_QUEUE",
+        evidence: {
+          learnedFrom: "known-provider-public-landing-access-barrier",
+        },
+      });
+      expect(persisted.evidence.renderedAccessControls).toBeUndefined();
+      expect(persisted.evidence.visibleText).toBeUndefined();
+      expect(serialized).not.toContain("existing-403-secret");
+      expect(serialized).not.toContain("Access Denied");
+      expect(serialized).not.toContain("Reference #");
+      expect(serialized).not.toContain("errors.edgesuite.net");
+      expect(serialized).not.toContain("raw-link-canary");
+      expect(serialized).not.toContain("must-not-persist-403");
+      expect(serialized).not.toContain("raw-script-canary");
+      expect(serialized).not.toContain("must-not-persist-subresource-403");
+      expect(serialized).not.toContain("must-not-persist-subresource-body");
+      expect(staticPageGet).not.toHaveBeenCalled();
     } finally {
       await context.close();
       await browser.close();
