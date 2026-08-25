@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
 
-import { Prisma } from "@prisma/client";
+import { Prisma, type CourseSupportIncidentKind } from "@prisma/client";
 import { parse as parseEcmaScript } from "acorn";
 import {
   parseFragment,
@@ -61,6 +61,13 @@ const ELIGIBLE_PROVIDER_CONTRACT_STAGES = new Set<AutomationPlaybookStage>([
   "RENDERED_BROWSER_DISCOVERY",
   "BROWSER_ADAPTER_RETRY",
 ]);
+
+const ELIGIBLE_PROVIDER_CONTRACT_INCIDENT_KINDS =
+  new Set<CourseSupportIncidentKind>([
+    "NEEDS_ADAPTER",
+    "FETCH_FAILED",
+    "BLOCKED_TOOLING",
+  ]);
 
 const SAFE_PATH_SEGMENTS = new Map<string, string>([
   ["api", "api"],
@@ -664,7 +671,7 @@ function resolveProviderContractBatchMemberAuthority(input: {
     entry.incident.status !== "AUTO_INVESTIGATING" ||
     entry.incident.activeBatchId !== input.batchId ||
     entry.incident.resolution !== null ||
-    !["NEEDS_ADAPTER", "FETCH_FAILED"].includes(entry.incident.kind) ||
+    !ELIGIBLE_PROVIDER_CONTRACT_INCIDENT_KINDS.has(entry.incident.kind) ||
     !courseProjectionMatchesClaimedFamily ||
     input.batchProviderFamily !== incidentProviderFamily ||
     batch.failureFingerprint !== entry.incident.failureFingerprint ||
@@ -1189,47 +1196,47 @@ function analyzeContractFingerprintsFromScript(input: {
     isRestrictedStaticContractCandidate(raw, input),
   );
   const contracts = staticReads.candidates.flatMap((candidate) => {
-      const relative = readSafeStaticRelativePath(candidate.raw);
-      if (
-        (candidate.raw.startsWith("/") && !relative) ||
-        hasDynamicStaticAuthority(candidate.raw)
-      ) {
-        return [];
-      }
-      const dynamicQueryKey = hasDynamicStaticQueryKey(candidate.raw);
-      const raw = candidate.raw.replace(/\$\{[^}]*\}/gu, "value");
-      const parsed = parseStaticContractUrl(raw, input.officialOrigin);
-      if (!parsed) {
-        return [];
-      }
-      const providerSignal = classifyScriptProviderSignal(
-        parsed,
-        input.officialOrigin,
-        input.bookingOrigin,
-        relative,
-        input.providerFamilyKey,
-      );
-      if (!providerSignal) {
-        return [];
-      }
-      if (dynamicQueryKey || !isSafeManualEvidenceUrl(parsed)) {
-        restrictionDetected = true;
-        return [];
-      }
-      const method = normalizeReadMethod(candidate.method);
-      if (!method) {
-        return [];
-      }
-      return [
-        buildSanitizedContract({
-          method,
-          resourceType: normalizeResourceType(candidate.resourceType),
-          statusBand: "UNKNOWN",
-          pathPattern: parsed.pathname,
-          queryKeys: [...parsed.searchParams.keys()],
-          providerSignal,
-        }),
-      ];
+    const relative = readSafeStaticRelativePath(candidate.raw);
+    if (
+      (candidate.raw.startsWith("/") && !relative) ||
+      hasDynamicStaticAuthority(candidate.raw)
+    ) {
+      return [];
+    }
+    const dynamicQueryKey = hasDynamicStaticQueryKey(candidate.raw);
+    const raw = candidate.raw.replace(/\$\{[^}]*\}/gu, "value");
+    const parsed = parseStaticContractUrl(raw, input.officialOrigin);
+    if (!parsed) {
+      return [];
+    }
+    const providerSignal = classifyScriptProviderSignal(
+      parsed,
+      input.officialOrigin,
+      input.bookingOrigin,
+      relative,
+      input.providerFamilyKey,
+    );
+    if (!providerSignal) {
+      return [];
+    }
+    if (dynamicQueryKey || !isSafeManualEvidenceUrl(parsed)) {
+      restrictionDetected = true;
+      return [];
+    }
+    const method = normalizeReadMethod(candidate.method);
+    if (!method) {
+      return [];
+    }
+    return [
+      buildSanitizedContract({
+        method,
+        resourceType: normalizeResourceType(candidate.resourceType),
+        statusBand: "UNKNOWN",
+        pathPattern: parsed.pathname,
+        queryKeys: [...parsed.searchParams.keys()],
+        providerSignal,
+      }),
+    ];
   });
   return { contracts: deduplicateContracts(contracts), restrictionDetected };
 }
@@ -1315,8 +1322,7 @@ function collectProvenStaticReadCandidates(source: string) {
   const visit = (node: ts.Node) => {
     if (ts.isCallExpression(node) && !node.questionDotToken) {
       const fetchCall =
-        ts.isIdentifier(node.expression) &&
-        node.expression.text === "fetch";
+        ts.isIdentifier(node.expression) && node.expression.text === "fetch";
       const axiosMethod = readStaticAxiosMethod(node.expression);
       if (fetchCall || axiosMethod) {
         const raw = readStaticUrlArgument(node.arguments[0]);
@@ -1386,7 +1392,9 @@ function hasExplicitStaticNonReadFetchOptions(
   );
 }
 
-function isSideEffectFreeStaticObjectLiteral(value: ts.ObjectLiteralExpression) {
+function isSideEffectFreeStaticObjectLiteral(
+  value: ts.ObjectLiteralExpression,
+) {
   const names = new Set<string>();
   for (const property of value.properties) {
     if (

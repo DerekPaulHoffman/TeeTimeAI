@@ -1028,11 +1028,11 @@ describe("owner-bound provider-contract inspection", () => {
     ],
     [
       "base-relative sign-in form",
-      '<base href=/signin/><form action=continue><script src=/app.js></script>',
+      "<base href=/signin/><form action=continue><script src=/app.js></script>",
     ],
     [
       "restricted submitter form action",
-      '<form action=/booking><button formaction=/checkout>Continue</button></form><script src=/app.js></script>',
+      "<form action=/booking><button formaction=/checkout>Continue</button></form><script src=/app.js></script>",
     ],
     [
       "restricted meta refresh",
@@ -1040,31 +1040,28 @@ describe("owner-bound provider-contract inspection", () => {
     ],
     [
       "security challenge title",
-      '<title>Security challenge</title><script src=/app.js></script>',
+      "<title>Security challenge</title><script src=/app.js></script>",
     ],
     [
       "captcha required title",
-      '<title>Captcha required</title><script src=/app.js></script>',
+      "<title>Captcha required</title><script src=/app.js></script>",
     ],
     [
       "create account message",
-      '<main>Create account</main><script src=/app.js></script>',
+      "<main>Create account</main><script src=/app.js></script>",
     ],
-    [
-      "register message",
-      '<main>Register</main><script src=/app.js></script>',
-    ],
+    ["register message", "<main>Register</main><script src=/app.js></script>"],
     [
       "authentication required message",
-      '<main>Auth required</main><script src=/app.js></script>',
+      "<main>Auth required</main><script src=/app.js></script>",
     ],
     [
       "identity verification message",
-      '<main>Verify identity</main><script src=/app.js></script>',
+      "<main>Verify identity</main><script src=/app.js></script>",
     ],
     [
       "turnstile element",
-      '<div class=cf-turnstile></div><script src=/app.js></script>',
+      "<div class=cf-turnstile></div><script src=/app.js></script>",
     ],
     [
       "Arkose asset",
@@ -1076,7 +1073,7 @@ describe("owner-bound provider-contract inspection", () => {
     ],
     [
       "challenge frame",
-      '<iframe src=/challenge></iframe><script src=/app.js></script>',
+      "<iframe src=/challenge></iframe><script src=/app.js></script>",
     ],
   ])("fails closed for %s landing HTML", async (_label, html) => {
     const fetch = vi
@@ -1134,12 +1131,12 @@ describe("owner-bound provider-contract inspection", () => {
     "fetch('/sso')",
     "fetch('/challenge')",
     "fetch('/waiting-room')",
-      "fetch('/api/availability?token=private-canary')",
-      "fetch(`/api/availability?${authKey}=private-canary`)",
-      'fetch("/log\\x69n")',
-      'fetch("/sign\\u002din")',
-      'fetch("\\u002flogin")',
-      "fetch('/signin', { headers: authHeaders })",
+    "fetch('/api/availability?token=private-canary')",
+    "fetch(`/api/availability?${authKey}=private-canary`)",
+    'fetch("/log\\x69n")',
+    'fetch("/sign\\u002din")',
+    'fetch("\\u002flogin")',
+    "fetch('/signin', { headers: authHeaders })",
     "axios.get('/api/availability?token=private-canary', requestConfig)",
   ])(
     "makes mixed static evidence restricted for %s",
@@ -1586,7 +1583,7 @@ describe("owner-bound provider-contract inspection", () => {
     });
   });
 
-  it("authorizes every source-missing projection in a four-member claimed cohort", async () => {
+  it("authorizes every tooling-blocked source-missing projection in a four-member claimed cohort", async () => {
     const batch = ownedDatabaseBatch({
       remediationStage: "OFFICIAL_HTTP_DISCOVERY",
     });
@@ -1597,6 +1594,7 @@ describe("owner-bound provider-contract inspection", () => {
       });
     }
     batch.incidents.forEach((entry, index) => {
+      entry.incident.kind = "BLOCKED_TOOLING";
       entry.course.providerFamilyKey = "SOURCE_MISSING";
       const providerSnapshotFingerprint =
         buildCourseSupportProviderSnapshotFingerprint(entry.course);
@@ -1623,6 +1621,29 @@ describe("owner-bound provider-contract inspection", () => {
         }),
       ],
     });
+  });
+
+  it.each(["BLOCKED_AUTH", "READER_CANDIDATE"] as const)(
+    "keeps %s incidents outside provider-contract inspection without provider I/O",
+    async (kind) => {
+      const batch = advanceOwnedBatchToOfficialHttpRetry(
+        ownedDatabaseBatch({
+          remediationStage: "OFFICIAL_HTTP_DISCOVERY",
+        }),
+      );
+      batch.incidents[0].incident.kind = kind;
+
+      await expectRecoveryWithoutProviderIo(batch);
+    },
+  );
+
+  it("rejects an otherwise eligible tooling-blocked cohort when one member is auth-blocked", async () => {
+    const batch = ownedDatabaseBatch();
+    const second = addSecondOwnedBatchMember(batch);
+    batch.incidents[0].incident.kind = "BLOCKED_TOOLING";
+    second.entry.incident.kind = "BLOCKED_AUTH";
+
+    await expectRecoveryWithoutProviderIo(batch);
   });
 
   it.each(["SOURCE_CONFLICT", "FOREUP"])(
@@ -1761,14 +1782,17 @@ describe("owner-bound provider-contract inspection", () => {
       .browserInvestigation.restrictedNetworkObserved;
     prismaMocks.batchFindFirst.mockResolvedValueOnce(batch);
 
-    await expect(loadOwnedProviderContractContext(ownerInput)).resolves.toMatchObject(
-      {
-        restrictionDetected: false,
-        browserContracts: [
-          expect.objectContaining({ method: "GET", pathPattern: "/api/availability" }),
-        ],
-      },
-    );
+    await expect(
+      loadOwnedProviderContractContext(ownerInput),
+    ).resolves.toMatchObject({
+      restrictionDetected: false,
+      browserContracts: [
+        expect.objectContaining({
+          method: "GET",
+          pathPattern: "/api/availability",
+        }),
+      ],
+    });
   });
 
   it("reads the writer's exact snapshot stamp and ignores it after a later re-claimed snapshot", async () => {
@@ -2068,9 +2092,7 @@ describe("owner-bound provider-contract inspection", () => {
       strings: readonly string[];
       values: unknown[];
     };
-    expect(sql.values).toContain(
-      PROVIDER_CONTRACT_REQUIRED_LEASE_HEADROOM_MS,
-    );
+    expect(sql.values).toContain(PROVIDER_CONTRACT_REQUIRED_LEASE_HEADROOM_MS);
   });
 
   it("validates lease headroom against live DB time after a delayed ownership read", async () => {
