@@ -242,6 +242,7 @@ export type CourseSupportVerificationRejectionReason =
   | "lease_lost"
   | "provider_snapshot_changed"
   | "monitoring_not_actionable"
+  | "playbook_stage_handoff_required"
   | "request_horizon_exceeded"
   | "discovery_already_attempted"
   | "discovery_not_attempted"
@@ -2733,6 +2734,15 @@ async function evaluateDetachedEligibility(
   ) {
     return { eligible: true };
   }
+  if (
+    mode === "PROGRESSION" &&
+    requiresBrowserAdapterRetryStageHandoff(input)
+  ) {
+    return {
+      eligible: false,
+      reason: "playbook_stage_handoff_required",
+    };
+  }
   const assignedDetachedStageProgression = isAssignedDetachedProgression(input);
   const ownedAssignedLocalReaderProgression =
     hasOwnedAssignedLocalReaderProgression(input, authority, now);
@@ -2809,6 +2819,31 @@ async function evaluateDetachedEligibility(
   input.incident.updatedAt = reconciledAt;
   input.batchIncidentVerifiedIncidentUpdatedAt = reconciledAt;
   return { eligible: true };
+}
+
+function requiresBrowserAdapterRetryStageHandoff(
+  input: DetachedEligibilityInput,
+) {
+  const playbook = assessAutomationPlaybook(
+    input.incident.attemptLedger,
+    input.incident.cycle,
+  );
+  if (
+    playbook.valid !== true ||
+    playbook.cycle !== input.incident.cycle ||
+    playbook.nextStage !== "BROWSER_ADAPTER_RETRY" ||
+    resolveProviderCapability(input.course).isRunnable
+  ) {
+    return false;
+  }
+
+  const remediation = asJsonRecord(
+    asJsonRecord(input.batchSummary).remediation,
+  );
+  return !isExactAssignedDetachedStageDirective({
+    remediationDirective: remediation,
+    stage: "BROWSER_ADAPTER_RETRY",
+  });
 }
 
 function isAssignedDetachedProgression(input: DetachedEligibilityInput) {

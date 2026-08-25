@@ -263,6 +263,74 @@ function browserAdapterRetryReadyLedger(attempted = false) {
   });
 }
 
+function browserAdapterRetryHandoffRequest(input: {
+  claimedStage: "RENDERED_BROWSER_DISCOVERY" | "BROWSER_ADAPTER_RETRY";
+  runnableProvider: boolean;
+}) {
+  const providerCourse = input.runnableProvider
+    ? course({
+        detectedBookingUrl: "https://public-course.cps.golf/",
+        bookingMetadata: {
+          provider: "CPS",
+          siteName: "public-course",
+          bookingBaseUrl: "https://public-course.cps.golf/",
+          courseIds: [1],
+        },
+      })
+    : course({
+        detectedBookingUrl: null,
+        detectedPlatform: null,
+        providerFamilyKey: "SOURCE_MISSING",
+        bookingMetadata: null,
+      });
+  const baseRequest = request();
+  const ownsBrowserAdapterRetry =
+    input.claimedStage === "BROWSER_ADAPTER_RETRY";
+  return request({
+    runtimeVersion: null,
+    status: "QUEUED",
+    revision: 0,
+    leaseToken: null,
+    leaseExpiresAt: null,
+    nextAttemptAt: now,
+    deadlineAt: new Date("2026-07-21T12:35:00.000Z"),
+    discoveryAttemptedAt: null,
+    discoveryVerifiedAt: null,
+    startedAt: null,
+    providerSnapshotFingerprint: fingerprint(providerCourse),
+    course: providerCourse,
+    batchIncident: {
+      ...baseRequest.batchIncident,
+      batch: {
+        ...baseRequest.batchIncident.batch,
+        summary: {
+          remediation: {
+            workMode: ownsBrowserAdapterRetry
+              ? "VERIFY_TRANSIENT"
+              : "ADVANCE_DISCOVERY",
+            strategyAction: ownsBrowserAdapterRetry
+              ? "RUN_TYPED_ADAPTER"
+              : "DISCOVER_WITH_BROWSER",
+            playbookStage: input.claimedStage,
+            allowUnchangedRuntime: true,
+            requiresImplementationPath: false,
+            reason: ownsBrowserAdapterRetry
+              ? "EXISTING_SUPPORT_READY"
+              : "PLAYBOOK_STAGE_PENDING",
+            retryBudget: {
+              maximumAttempts: 4,
+              attemptsCompleted: 3,
+              attemptsRemaining: 1,
+              exhausted: false,
+            },
+          },
+        },
+      },
+      incident: incident({ attemptLedger: browserAdapterRetryReadyLedger() }),
+    },
+  });
+}
+
 function localReaderReadyLedger(
   attempted = false,
   runtimeVersion = releaseSha,
@@ -1419,6 +1487,60 @@ describe("course-support verification scheduling", () => {
       eligibleCount: 0,
       ineligibleCount: 1,
       ineligibleReasonCounts: { monitoring_not_actionable: 1 },
+      requests: [],
+    });
+    expect(prismaMocks.requestCreateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.activeSearchCount).not.toHaveBeenCalled();
+  });
+
+  it("requires a browser-retry stage handoff before scheduling non-runnable progression", async () => {
+    prismaMocks.batchFindUnique.mockResolvedValue({
+      id: "batch-1",
+      status: "VERIFYING",
+      releaseSha,
+      completedAt: null,
+      summary: {
+        remediation: {
+          workMode: "ADVANCE_DISCOVERY",
+          strategyAction: "DISCOVER_WITH_BROWSER",
+          playbookStage: "RENDERED_BROWSER_DISCOVERY",
+          allowUnchangedRuntime: true,
+          requiresImplementationPath: false,
+          reason: "PLAYBOOK_STAGE_PENDING",
+          retryBudget: null,
+        },
+      },
+      incidents: [
+        {
+          id: "batch-incident-1",
+          incidentId: "incident-1",
+          courseId: "course-1",
+          cycle: 1,
+          verifiedIncidentUpdatedAt: new Date("2026-07-21T11:55:00.000Z"),
+          incident: incident({
+            attemptLedger: browserAdapterRetryReadyLedger(),
+          }),
+          course: course({
+            detectedBookingUrl: null,
+            detectedPlatform: null,
+            providerFamilyKey: "SOURCE_MISSING",
+            bookingMetadata: null,
+          }),
+        },
+      ],
+    });
+
+    await expect(
+      scheduleCourseSupportVerificationRequests({
+        batchId: "batch-1",
+        releaseSha,
+        now,
+      }),
+    ).resolves.toEqual({
+      createdCount: 0,
+      eligibleCount: 0,
+      ineligibleCount: 1,
+      ineligibleReasonCounts: { playbook_stage_handoff_required: 1 },
       requests: [],
     });
     expect(prismaMocks.requestCreateMany).not.toHaveBeenCalled();
@@ -2647,6 +2769,94 @@ describe("course-support verification execution fencing", () => {
       }),
     );
   });
+
+  it.each([
+    {
+      label: "an older rendered-browser claim on a non-runnable provider",
+      claimedStage: "RENDERED_BROWSER_DISCOVERY" as const,
+      runnableProvider: false,
+      malformedDirective: false,
+      expectedClaimed: false,
+    },
+    {
+      label: "a malformed browser-retry claim on a non-runnable provider",
+      claimedStage: "BROWSER_ADAPTER_RETRY" as const,
+      runnableProvider: false,
+      malformedDirective: true,
+      expectedClaimed: false,
+    },
+    {
+      label: "an older rendered-browser claim after capability becomes runnable",
+      claimedStage: "RENDERED_BROWSER_DISCOVERY" as const,
+      runnableProvider: true,
+      malformedDirective: false,
+      expectedClaimed: true,
+    },
+    {
+      label: "an exact browser-retry claim on a non-runnable provider",
+      claimedStage: "BROWSER_ADAPTER_RETRY" as const,
+      runnableProvider: false,
+      malformedDirective: false,
+      expectedClaimed: true,
+    },
+  ])(
+    "handles $label without crossing stage ownership",
+    async ({
+      claimedStage,
+      runnableProvider,
+      malformedDirective,
+      expectedClaimed,
+    }) => {
+      const queuedRequest = browserAdapterRetryHandoffRequest({
+        claimedStage,
+        runnableProvider,
+      });
+      if (malformedDirective) {
+        const summary = queuedRequest.batchIncident.batch.summary as {
+          remediation: { strategyAction: string };
+        };
+        summary.remediation.strategyAction = "DISCOVER_WITH_BROWSER";
+      }
+      prismaMocks.requestFindUnique.mockResolvedValue(queuedRequest);
+
+      const result = await claimCourseSupportVerificationRequest({
+        requestId: "request-1",
+        expectedRevision: 0,
+        runtimeVersion: releaseSha,
+        now,
+      });
+
+      if (expectedClaimed) {
+        expect(result).toMatchObject({
+          claimed: true,
+          revision: 1,
+          runtimeVersion: releaseSha,
+        });
+        expect(prismaMocks.requestUpdateMany).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: expect.objectContaining({
+              status: "CHECKING",
+              attemptCount: { increment: 1 },
+            }),
+          }),
+        );
+      } else {
+        expect(result).toEqual({
+          claimed: false,
+          reason: "playbook_stage_handoff_required",
+        });
+        expect(prismaMocks.requestUpdateMany).toHaveBeenCalledTimes(1);
+        expect(prismaMocks.requestUpdateMany).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: expect.objectContaining({
+              status: "STALE",
+              lastError: "playbook_stage_handoff_required",
+            }),
+          }),
+        );
+      }
+    },
+  );
 
   it.each([
     [

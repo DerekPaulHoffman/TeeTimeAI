@@ -21803,6 +21803,125 @@ describe("detached verification atomic batch fences", () => {
     );
   });
 
+  it("closes a stale browser-stage handoff as a fresh automatic retry", async () => {
+    const batch = closeoutBatch("PENDING");
+    const courseRef = createHash("sha256")
+      .update("course-1")
+      .digest("hex")
+      .slice(0, 24);
+    Object.assign(batch.incidents[0].incident, {
+      activeRealSearchCount: 0,
+      attemptLedger: browserAdapterRetryReadyAttemptLedger(),
+    });
+    batch.summary = {
+      ...batch.summary,
+      remediation: {
+        workMode: "ADVANCE_DISCOVERY",
+        strategyAction: "DISCOVER_WITH_BROWSER",
+        playbookStage: "RENDERED_BROWSER_DISCOVERY",
+        allowUnchangedRuntime: true,
+        requiresImplementationPath: false,
+        reason: "PLAYBOOK_STAGE_PENDING",
+        retryBudget: null,
+        attempts: [
+          {
+            courseRef,
+            providerSnapshotFingerprint: providerFingerprint,
+            failureFingerprint: "fingerprint",
+            runtimeVersion: releaseSha,
+            activeRealSearchCount: 0,
+            playbookEventCountAtClaim: 5,
+            reason: "PLAYBOOK_STAGE_PENDING",
+            retryBudget: null,
+            approach: {
+              workMode: "ADVANCE_DISCOVERY",
+              strategyAction: "DISCOVER_WITH_BROWSER",
+              playbookStage: "RENDERED_BROWSER_DISCOVERY",
+            },
+          },
+        ],
+      },
+    };
+    const staleAt = new Date(now.getTime() - 10_000);
+    const staleHandoffRequest = detachedRequestState("STALE", {
+      id: "request-browser-stage-handoff",
+      revision: 1,
+      attemptCount: 0,
+      runtimeVersion: null,
+      startedAt: null,
+      outcome: null,
+      failureClass: null,
+      evidence: null,
+      lastError: "playbook_stage_handoff_required",
+      nextAttemptAt: null,
+      completedAt: staleAt,
+      createdAt: new Date(now.getTime() - 120_000),
+      updatedAt: staleAt,
+    });
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([
+      staleHandoffRequest,
+    ]);
+    prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.transaction.mockImplementationOnce(
+      async (
+        worker: (
+          transaction: typeof monitoringTransactionClient,
+        ) => Promise<unknown>,
+      ) => worker(monitoringTransactionClient),
+    );
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        verificationWatchMode: "WATCH_SETTLED",
+        now,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "retryable_failed",
+      derivedOutcome: "retryable_failed",
+      batchStatus: "RETRYABLE_FAILED",
+      retryCount: 1,
+      needsHumanCount: 0,
+      automationStalledCount: 0,
+    });
+    expect(prismaMocks.incidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "entry-1",
+          result: "PENDING",
+        }),
+        data: expect.objectContaining({ result: "RETRY_SCHEDULED" }),
+      }),
+    );
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "AUTO_INVESTIGATING",
+          activeBatchId: null,
+          nextAttemptAt: new Date(now.getTime() + 15 * 60_000),
+        }),
+      }),
+    );
+    expect(
+      prismaMocks.monitoringEventCreate.mock.calls.map(
+        ([create]) => create.data.eventType,
+      ),
+    ).not.toContain("HUMAN_REVIEW_REQUESTED");
+    expect(
+      prismaMocks.verificationRequestUpdateMany.mock.calls.some(
+        ([update]) =>
+          update.data?.status === "QUEUED" ||
+          update.data?.status === "CHECKING",
+      ),
+    ).toBe(false);
+  });
+
   it("keeps mixed restored and unfinished structural work automatic", async () => {
     const batch = closeoutBatch("RESTORED");
     const exactFailureFingerprint = "c".repeat(64);

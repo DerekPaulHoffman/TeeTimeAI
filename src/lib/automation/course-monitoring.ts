@@ -3152,51 +3152,38 @@ export async function reconcileCourseMonitoringDeadline(input: {
         });
       }
 
-      if (!currentCycleExhausted && escalationDeadlineReached) {
-        const stalledEndpoint = await persistAutomationStalledEndpoint(
-          transaction,
-          {
-            courseId: input.courseId,
-            incident,
-            monitoringStatus: status,
-            playbookAssessment,
-            expectedActiveBatchId: null,
-            endpointAt: input.now,
-            source: input.source,
-          },
-        );
-        return {
-          outcome: stalledEndpoint.alreadyApplied
-            ? ("RETAINED_HUMAN" as const)
-            : ("NEEDS_HUMAN" as const),
-          incidentId: incident.id,
-          parkedUntilMaterialChange: true as const,
-        };
-      }
-
       if (!currentCycleExhausted) {
+        const attemptLedgerFingerprint =
+          createAutomationPlaybookAttemptLedgerFingerprint(
+            incident.attemptLedger,
+          );
         const idempotencyKey = createDeadlineContinuationIdempotencyKey({
           courseId: input.courseId,
           incidentId: incident.id,
           cycle: incident.cycle,
           escalationDeadlineAt: incident.escalationDeadlineAt,
           nextStage: playbookAssessment.nextStage,
+          attemptLedgerFingerprint,
         });
         const priorContinuation =
           await transaction.courseMonitoringEvent.findUnique({
             where: { idempotencyKey },
-            select: { id: true, occurredAt: true },
+            select: { id: true },
           });
-        const continuationAt = priorContinuation?.occurredAt ?? input.now;
+        const coherentAutomaticRetryAt = getCoherentAutomaticRetryAt({
+          incidentNextAttemptAt: incident.nextAttemptAt,
+          statusNextAutomaticAttemptAt: status.nextAutomaticAttemptAt,
+          statusRevalidationRequestedAt: status.revalidationRequestedAt,
+        });
+        const continuationAt =
+          coherentAutomaticRetryAt && coherentAutomaticRetryAt > input.now
+            ? coherentAutomaticRetryAt
+            : input.now;
         const continuationAlreadyApplied =
           incident.status === "AUTO_INVESTIGATING" &&
           incident.humanReviewReason === null &&
           status.state === "AUTO_INVESTIGATING" &&
-          incident.nextAttemptAt?.getTime() === continuationAt.getTime() &&
-          status.nextAutomaticAttemptAt?.getTime() ===
-            continuationAt.getTime() &&
-          status.revalidationRequestedAt?.getTime() ===
-            continuationAt.getTime();
+          coherentAutomaticRetryAt !== null;
         if (priorContinuation && continuationAlreadyApplied) {
           return {
             outcome: "UNCHANGED" as const,
@@ -3249,7 +3236,7 @@ export async function reconcileCourseMonitoringDeadline(input: {
           await queueActiveRealSearchesForCourse(
             transaction,
             input.courseId,
-            input.now,
+            continuationAt,
           );
         }
         if (!priorContinuation) {
@@ -3264,8 +3251,11 @@ export async function reconcileCourseMonitoringDeadline(input: {
             message:
               "The automation deadline queued the next safe current-cycle playbook stage.",
             idempotencyKey,
-            occurredAt: continuationAt,
+            occurredAt: input.now,
             audit: {
+              action: "playbook_deadline_continuation",
+              cycle: incident.cycle,
+              attemptLedgerFingerprint,
               activeDemand: incident.activeRealSearchCount > 0,
               customerState: "RETRYING_AUTOMATICALLY",
               playbookVersion: playbookAssessment.version,
@@ -3274,6 +3264,7 @@ export async function reconcileCourseMonitoringDeadline(input: {
               priorCycleHumanReviewProof:
                 humanReviewProofEstablished && !currentCycleExhausted,
               nextStage: playbookAssessment.nextStage,
+              continuationAt: continuationAt.toISOString(),
               escalationDeadlineAt:
                 incident.escalationDeadlineAt?.toISOString() ?? null,
               customerDataIncluded: false,
@@ -9744,14 +9735,41 @@ function createDeadlineContinuationIdempotencyKey(input: {
   cycle: number;
   escalationDeadlineAt: Date | null;
   nextStage: string | null;
+  attemptLedgerFingerprint: string;
 }) {
   return `course-deadline-continue:${createHash("sha256")
     .update(
       `${input.courseId}:${input.incidentId}:${input.cycle}:${
         input.escalationDeadlineAt?.toISOString() ?? "missing"
-      }:${input.nextStage ?? "complete"}`,
+      }:${input.nextStage ?? "complete"}:${input.attemptLedgerFingerprint}`,
     )
     .digest("hex")}`;
+}
+
+function createAutomationPlaybookAttemptLedgerFingerprint(
+  attemptLedger: Prisma.JsonValue | null,
+) {
+  return createHash("sha256")
+    .update(stableCourseProviderExecutionEvidenceValue(attemptLedger))
+    .digest("hex");
+}
+
+function getCoherentAutomaticRetryAt(input: {
+  incidentNextAttemptAt: Date | null;
+  statusNextAutomaticAttemptAt: Date | null;
+  statusRevalidationRequestedAt: Date | null;
+}) {
+  const retryAt = input.incidentNextAttemptAt;
+  if (
+    !retryAt ||
+    !input.statusNextAutomaticAttemptAt ||
+    !input.statusRevalidationRequestedAt ||
+    retryAt.getTime() !== input.statusNextAutomaticAttemptAt.getTime() ||
+    retryAt.getTime() !== input.statusRevalidationRequestedAt.getTime()
+  ) {
+    return null;
+  }
+  return retryAt;
 }
 
 function createDeadlineStallIdempotencyKey(input: {
