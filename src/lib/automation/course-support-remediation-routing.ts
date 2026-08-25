@@ -1,6 +1,7 @@
 import type {
   AutomationPlaybookAssessment,
   AutomationPlaybookStage,
+  AutomationPlaybookStageAssessment,
 } from "./course-monitoring-playbook";
 import {
   selectMonitoringStrategy,
@@ -91,6 +92,121 @@ export type CourseSupportRemediationRoute = {
   materialChangeDetected: boolean;
   attemptSignature: CourseSupportRemediationAttemptSignature | null;
 };
+
+type AssignedDetachedStageDirective = {
+  workMode?: unknown;
+  strategyAction?: unknown;
+  playbookStage?: unknown;
+  allowUnchangedRuntime?: unknown;
+  requiresImplementationPath?: unknown;
+  retryBudget?: unknown;
+};
+
+const ASSIGNED_LOCAL_READER_STRATEGY_ACTIONS =
+  new Set<MonitoringStrategyAction>([
+    "DISCOVER_WITH_HTTP",
+    "DISCOVER_WITH_BROWSER",
+    "VERIFY_TECHNICAL_CONSTRAINT",
+    "REPAIR_PROVIDER_ADAPTER",
+  ]);
+
+export function isExactAssignedDetachedStageDirective(input: {
+  remediationDirective: AssignedDetachedStageDirective | null;
+  stage: AutomationPlaybookStage;
+}) {
+  const directive = input.remediationDirective;
+  if (
+    !directive ||
+    directive.playbookStage !== input.stage ||
+    directive.allowUnchangedRuntime !== true ||
+    directive.requiresImplementationPath !== false
+  ) {
+    return false;
+  }
+
+  if (input.stage === "BROWSER_ADAPTER_RETRY") {
+    return (
+      directive.workMode === "VERIFY_TRANSIENT" &&
+      directive.strategyAction === "RUN_TYPED_ADAPTER"
+    );
+  }
+
+  return (
+    input.stage === "LOCAL_READER" &&
+    directive.workMode === "ADVANCE_DISCOVERY" &&
+    ASSIGNED_LOCAL_READER_STRATEGY_ACTIONS.has(
+      directive.strategyAction as MonitoringStrategyAction,
+    )
+  );
+}
+
+export function isAssignedDetachedStageProgression(input: {
+  remediationDirective: AssignedDetachedStageDirective | null;
+  playbookConclusion: AutomationPlaybookAssessment["conclusion"];
+  nextPlaybookStage: AutomationPlaybookStage | null;
+  nextPlaybookStageStatus?: AutomationPlaybookStageAssessment["status"];
+  nextPlaybookStageAttemptCount?: number;
+}) {
+  const stage = input.nextPlaybookStage;
+  if (
+    !stage ||
+    input.playbookConclusion !== "INCOMPLETE" ||
+    !isExactAssignedDetachedStageDirective({
+      remediationDirective: input.remediationDirective,
+      stage,
+    })
+  ) {
+    return false;
+  }
+
+  if (
+    input.nextPlaybookStageStatus === "PENDING" &&
+    input.nextPlaybookStageAttemptCount === 0
+  ) {
+    return hasAvailableAssignedRetryBudget(
+      input.remediationDirective?.retryBudget,
+      true,
+    );
+  }
+
+  return Boolean(
+    input.nextPlaybookStageStatus === "FAILED_RETRYABLE" &&
+    Number.isInteger(input.nextPlaybookStageAttemptCount) &&
+    (input.nextPlaybookStageAttemptCount as number) > 0 &&
+    hasAvailableAssignedRetryBudget(
+      input.remediationDirective?.retryBudget,
+      false,
+    ),
+  );
+}
+
+function hasAvailableAssignedRetryBudget(
+  value: unknown,
+  allowUnbudgeted: boolean,
+) {
+  if (value === null || value === undefined) {
+    return allowUnbudgeted;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const retryBudget = value as Record<string, unknown>;
+  return Boolean(
+    Number.isInteger(retryBudget.maximumAttempts) &&
+    Number.isInteger(retryBudget.attemptsCompleted) &&
+    Number.isInteger(retryBudget.attemptsRemaining) &&
+    (retryBudget.maximumAttempts as number) > 0 &&
+    (retryBudget.attemptsCompleted as number) >= 0 &&
+    (retryBudget.attemptsRemaining as number) ===
+      Math.max(
+        0,
+        (retryBudget.maximumAttempts as number) -
+          (retryBudget.attemptsCompleted as number),
+      ) &&
+    retryBudget.exhausted === false &&
+    (retryBudget.attemptsRemaining as number) > 0,
+  );
+}
 
 const TRANSIENT_FAILURES = new Set<CourseSupportFailureClass>([
   "RATE_LIMIT",

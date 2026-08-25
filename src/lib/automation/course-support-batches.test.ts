@@ -1434,6 +1434,48 @@ function browserAdapterRetryFailedRetryableAttemptLedger(
   return ledger;
 }
 
+function localReaderReadyAttemptLedger(cycle = 1) {
+  return appendAutomationPlaybookEvent(
+    browserAdapterRetryReadyAttemptLedger(cycle),
+    {
+      cycle,
+      stage: "BROWSER_ADAPTER_RETRY",
+      transition: "NOT_APPLICABLE",
+      readPath: "TYPED_PROVIDER_ADAPTER",
+      evidenceKind: "TOOLING",
+      failureFingerprint: "TEST:BROWSER_ADAPTER_RETRY:SKIPPED",
+      runtimeVersion: "test-runtime",
+      skipReason: "NO_RUNNABLE_ADAPTER",
+      observedAt: now,
+    },
+  );
+}
+
+function localReaderFailedRetryableAttemptLedger(cycle = 1) {
+  let ledger: unknown = localReaderReadyAttemptLedger(cycle);
+  ledger = appendAutomationPlaybookEvent(ledger, {
+    cycle,
+    stage: "LOCAL_READER",
+    transition: "STARTED",
+    readPath: "LOCAL_READER",
+    evidenceKind: "LOCAL_READER_RESULT",
+    failureFingerprint: "TEST:LOCAL_READER:NETWORK",
+    runtimeVersion: "test-runtime",
+    observedAt: now,
+  });
+  return appendAutomationPlaybookEvent(ledger, {
+    cycle,
+    stage: "LOCAL_READER",
+    transition: "FAILED_RETRYABLE",
+    readPath: "LOCAL_READER",
+    evidenceKind: "LOCAL_READER_RESULT",
+    failureFingerprint: "TEST:LOCAL_READER:NETWORK",
+    runtimeVersion: "test-runtime",
+    failureClass: "NETWORK",
+    observedAt: now,
+  });
+}
+
 function independentReadyAttemptLedger(cycle = 1) {
   let ledger: unknown = browserAdapterRetryReadyAttemptLedger(cycle);
   ledger = appendAutomationPlaybookEvent(ledger, {
@@ -7389,6 +7431,65 @@ describe("course-support claim demand fencing", () => {
     );
   });
 
+  it("grants an assigned failed-retryable local reader with three attempts remaining", async () => {
+    const verifyStartedAt = new Date("2026-07-21T02:20:23.000Z");
+    prismaMocks.queryRaw.mockResolvedValue([{ now: verifyStartedAt }]);
+    prismaMocks.batchFindFirst.mockResolvedValue(
+      ownedStageDeadlineGrantBatch({
+        attemptLedgers: [localReaderFailedRetryableAttemptLedger()],
+        summary: {
+          remediation: {
+            workMode: "ADVANCE_DISCOVERY",
+            strategyAction: "REPAIR_PROVIDER_ADAPTER",
+            playbookStage: "LOCAL_READER",
+            allowUnchangedRuntime: true,
+            requiresImplementationPath: false,
+            reason: "PLAYBOOK_STAGE_PENDING",
+            retryBudget: {
+              maximumAttempts: 4,
+              attemptsCompleted: 1,
+              attemptsRemaining: 3,
+              exhausted: false,
+            },
+          },
+        },
+      }),
+    );
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      grantOwnedCourseSupportVerificationStageDeadline({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+      }),
+    ).resolves.toMatchObject({
+      granted: true,
+      replayed: false,
+      grantedIncidentCount: 1,
+      grantedAt: verifyStartedAt.toISOString(),
+    });
+    expect(prismaMocks.batchUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          summary: expect.objectContaining({
+            verificationStageDeadlineGrant: expect.objectContaining({
+              incidentCount: 1,
+              stages: [
+                expect.objectContaining({
+                  cycle: 1,
+                  stage: "LOCAL_READER",
+                  incidentCount: 1,
+                }),
+              ],
+            }),
+          }),
+        }),
+      }),
+    );
+  });
+
   it.each([
     [
       "rendered browser discovery",
@@ -7472,16 +7573,6 @@ describe("course-support claim demand fencing", () => {
         attemptsCompleted: 4,
         attemptsRemaining: 0,
         exhausted: true,
-      },
-    ],
-    [
-      "duplicate-attempt",
-      browserAdapterRetryFailedRetryableAttemptLedger(1, 2),
-      {
-        maximumAttempts: 4,
-        attemptsCompleted: 1,
-        attemptsRemaining: 3,
-        exhausted: false,
       },
     ],
   ] as const)(
@@ -14511,6 +14602,19 @@ describe("course-support release heartbeat persistence", () => {
       false,
     ],
     [
+      "local reader",
+      {
+        workMode: "ADVANCE_DISCOVERY" as const,
+        strategyAction: "DISCOVER_WITH_HTTP" as const,
+        playbookStage: "LOCAL_READER" as const,
+        allowUnchangedRuntime: true,
+        requiresImplementationPath: false,
+        reason: "PLAYBOOK_STAGE_PENDING",
+        retryBudget: null,
+      },
+      true,
+    ],
+    [
       "browser adapter retry with a mismatched directive",
       {
         workMode: "DISCOVERY_ONLY" as const,
@@ -14533,6 +14637,7 @@ describe("course-support release heartbeat persistence", () => {
           attemptCount: 4,
           playbookConclusion: "INCOMPLETE",
           nextPlaybookStage: remediationDirective.playbookStage,
+          nextPlaybookStageStatus: "PENDING",
           nextPlaybookStageAttemptCount: 0,
         }),
       ).toBe(expectedAtZeroAttempts);
@@ -14543,11 +14648,39 @@ describe("course-support release heartbeat persistence", () => {
           attemptCount: 4,
           playbookConclusion: "INCOMPLETE",
           nextPlaybookStage: remediationDirective.playbookStage,
+          nextPlaybookStageStatus: "FAILED_RETRYABLE",
           nextPlaybookStageAttemptCount: 1,
         }),
       ).toBe(false);
     },
   );
+
+  it("continues an assigned failed-retryable local reader with a coherent remaining budget", () => {
+    expect(
+      shouldContinueSettledCourseSupportRemediation({
+        remediationDirective: {
+          workMode: "ADVANCE_DISCOVERY",
+          strategyAction: "REPAIR_PROVIDER_ADAPTER",
+          playbookStage: "LOCAL_READER",
+          allowUnchangedRuntime: true,
+          requiresImplementationPath: false,
+          reason: "PLAYBOOK_STAGE_PENDING",
+          retryBudget: {
+            maximumAttempts: 4,
+            attemptsCompleted: 1,
+            attemptsRemaining: 3,
+            exhausted: false,
+          },
+        },
+        failureClass: "UNSUPPORTED_FAMILY",
+        attemptCount: 4,
+        playbookConclusion: "INCOMPLETE",
+        nextPlaybookStage: "LOCAL_READER",
+        nextPlaybookStageStatus: "FAILED_RETRYABLE",
+        nextPlaybookStageAttemptCount: 1,
+      }),
+    ).toBe(true);
+  });
 
   it("renews a no-path operation lease without serializing against a checkout owner", async () => {
     prismaMocks.batchFindFirst.mockResolvedValue({
@@ -17548,6 +17681,64 @@ describe("detached verification atomic batch fences", () => {
         detachedVerificationIneligibleReasonCounts: {
           monitoring_not_actionable: 1,
         },
+      },
+    });
+  });
+
+  it("keeps an assigned failed-retryable local reader unsettled while its remaining budget is unscheduled", async () => {
+    const batch = verificationBatch();
+    Object.assign(batch, {
+      summary: {
+        remediation: {
+          workMode: "ADVANCE_DISCOVERY",
+          strategyAction: "REPAIR_PROVIDER_ADAPTER",
+          playbookStage: "LOCAL_READER",
+          allowUnchangedRuntime: true,
+          requiresImplementationPath: false,
+          reason: "PLAYBOOK_STAGE_PENDING",
+          retryBudget: {
+            maximumAttempts: 4,
+            attemptsCompleted: 1,
+            attemptsRemaining: 3,
+            exhausted: false,
+          },
+        },
+      },
+    });
+    Object.assign(batch.incidents[0].incident, {
+      attemptLedger: localReaderFailedRetryableAttemptLedger(),
+    });
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    verificationMocks.scheduleCourseSupportVerificationRequests.mockResolvedValue(
+      {
+        createdCount: 0,
+        eligibleCount: 0,
+        ineligibleCount: 1,
+        ineligibleReasonCounts: { monitoring_not_actionable: 1 },
+        requests: [],
+      },
+    );
+
+    const result = await verifyCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      releaseSha,
+      now,
+    });
+
+    expect(result).toMatchObject({
+      detachedVerification: {
+        pendingCount: 0,
+        rerunNeeded: true,
+        assignedStageOrchestrationGapCount: 1,
+        schedulerIneligibleReasonCounts: { monitoring_not_actionable: 1 },
+      },
+      recheckDispatch: {
+        detachedVerificationRerunNeeded: true,
+        detachedVerificationAssignedStageOrchestrationGapCount: 1,
       },
     });
   });

@@ -18,6 +18,10 @@ import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-
 import { getAutomationRuntimeVersion } from "./runtime-version";
 import { COURSE_SUPPORT_RESPONDER_PROMPT_VERSION } from "./course-support-responder-policy";
 import { readPersistedCourseSupportSearchExecutionFence } from "./course-support-search-execution-fence";
+import {
+  reconcileLegacyParkedCampaignTerminalEvidence,
+  type LegacyParkedCampaignTerminalBatchEntry,
+} from "./course-support-campaign-terminal-reconciliation";
 import { COURSE_SUPPORT_WRITER_LANE } from "./writer-lanes";
 import {
   assessCourseSupportZeroExecutionHistory,
@@ -500,7 +504,7 @@ type ParkedCourseCampaignDependencies = {
 
 type ParkedCourseCampaignDatabase = Pick<
   Prisma.TransactionClient,
-  "automationRun" | "courseSupportIncident"
+  "automationRun" | "courseSupportIncident" | "courseSupportBatchIncident"
 >;
 
 export function parseParkedCourseCampaignAudit(value: unknown) {
@@ -4358,7 +4362,7 @@ export function createParkedCourseCampaignAttemptLedgerFingerprint(
     .digest("hex");
 }
 
-async function loadCampaignMemberObservations(
+export async function loadCampaignMemberObservations(
   audit: ParkedCourseCampaignAudit,
   parkedCourseIds: ReadonlySet<string>,
   campaignRunId: string,
@@ -4368,8 +4372,9 @@ async function loadCampaignMemberObservations(
   const memberByIncidentId = new Map(
     audit.members.map((member) => [member.incidentId, member]),
   );
+  const incidentIds = audit.members.map((member) => member.incidentId);
   const incidents = await database.courseSupportIncident.findMany({
-    where: { id: { in: audit.members.map((member) => member.incidentId) } },
+    where: { id: { in: incidentIds } },
     select: {
       id: true,
       courseId: true,
@@ -4377,6 +4382,12 @@ async function loadCampaignMemberObservations(
       status: true,
       activeBatchId: true,
       confirmedAt: true,
+      firstSeenAt: true,
+      providerFamilyKey: true,
+      failureClass: true,
+      attemptCount: true,
+      activeRealSearchCount: true,
+      attemptLedger: true,
       resolution: true,
       resolvedAt: true,
       decisionAt: true,
@@ -4401,8 +4412,12 @@ async function loadCampaignMemberObservations(
         orderBy: [{ occurredAt: "asc" }, { id: "asc" }],
         select: {
           id: true,
+          incidentId: true,
+          courseId: true,
           eventType: true,
           source: true,
+          fromState: true,
+          toState: true,
           occurredAt: true,
           outcome: true,
           runtimeVersion: true,
@@ -4412,7 +4427,9 @@ async function loadCampaignMemberObservations(
       },
       course: {
         select: {
-          monitoringStatus: { select: { state: true, stateChangedAt: true } },
+          monitoringStatus: {
+            select: { state: true, stateChangedAt: true },
+          },
           probes: {
             where: { observedAt: { gte: capturedAt } },
             orderBy: [{ observedAt: "desc" }, { id: "desc" }],
@@ -4428,11 +4445,99 @@ async function loadCampaignMemberObservations(
       },
     },
   });
+  const legacyTerminalBatchEntries =
+    incidents.length === 0
+      ? []
+      : await database.courseSupportBatchIncident.findMany({
+          where: {
+            OR: incidents.map((incident) => ({
+              incidentId: incident.id,
+              cycle: incident.cycle,
+            })),
+            result: "FINAL_DISPOSITION",
+            verifiedAt: { not: null },
+            verifiedIncidentUpdatedAt: { not: null },
+            batch: {
+              status: { in: ["SUCCEEDED", "PARTIAL"] },
+              completedAt: { gte: capturedAt },
+              releaseSha: { not: null },
+              deployedAt: { not: null },
+            },
+          },
+          orderBy: [{ batch: { completedAt: "desc" } }, { id: "desc" }],
+          select: {
+            id: true,
+            batchId: true,
+            incidentId: true,
+            courseId: true,
+            cycle: true,
+            result: true,
+            proofSnapshot: true,
+            verifiedAt: true,
+            verifiedIncidentUpdatedAt: true,
+            createdAt: true,
+            updatedAt: true,
+            batch: {
+              select: {
+                id: true,
+                status: true,
+                createdAt: true,
+                completedAt: true,
+                releaseSha: true,
+                deployedAt: true,
+                recheckDispatchStartedAt: true,
+                summary: true,
+              },
+            },
+          },
+        });
+  const legacyEntriesByIncidentId = new Map<
+    string,
+    LegacyParkedCampaignTerminalBatchEntry[]
+  >();
+  for (const entry of legacyTerminalBatchEntries) {
+    const entries = legacyEntriesByIncidentId.get(entry.incidentId) ?? [];
+    entries.push(entry);
+    legacyEntriesByIncidentId.set(entry.incidentId, entries);
+  }
   return incidents.map((incident) => {
     const member = memberByIncidentId.get(incident.id);
-    const terminalEvidence = [...incident.monitoringEvents]
+    const terminalCandidate = [...incident.monitoringEvents]
       .reverse()
-      .find((event) => {
+      .map((event) => {
+        const legacyReconciliation = member
+          ? reconcileLegacyParkedCampaignTerminalEvidence({
+              campaignRunId,
+              campaignMembershipDigest: audit.membershipDigest,
+              campaignCapturedAt: capturedAt,
+              member,
+              incident: {
+                id: incident.id,
+                courseId: incident.courseId,
+                cycle: incident.cycle,
+                status: incident.status,
+                activeBatchId: incident.activeBatchId,
+                confirmedAt: incident.confirmedAt,
+                firstSeenAt: incident.firstSeenAt,
+                resolvedAt: incident.resolvedAt,
+                resolution: incident.resolution,
+                providerFamilyKey: incident.providerFamilyKey,
+                failureClass: incident.failureClass,
+                attemptCount: incident.attemptCount,
+                activeRealSearchCount: incident.activeRealSearchCount,
+                attemptLedger: incident.attemptLedger,
+                monitoringState:
+                  incident.course.monitoringStatus?.state ?? null,
+                monitoringStateChangedAt:
+                  incident.course.monitoringStatus?.stateChangedAt ?? null,
+              },
+              event,
+              batchEntries: legacyEntriesByIncidentId.get(incident.id) ?? [],
+            })
+          : null;
+        return { event, legacyReconciliation };
+      })
+      .find(({ event, legacyReconciliation }) => {
         if (
           event.eventType !== "RECOVERED" &&
           event.eventType !== "STATE_CHANGED"
@@ -4459,8 +4564,13 @@ async function loadCampaignMemberObservations(
           /^[a-f0-9]{40}$/u.test(event.runtimeVersion) &&
           event.deploymentSha === event.runtimeVersion,
         );
-        return campaignAttributed || strictDescendantTerminal;
+        return (
+          campaignAttributed ||
+          strictDescendantTerminal ||
+          legacyReconciliation !== null
+        );
       });
+    const terminalEvidence = terminalCandidate?.event;
     return {
       courseId: incident.courseId,
       incidentId: incident.id,
@@ -4480,7 +4590,8 @@ async function loadCampaignMemberObservations(
       campaignTerminalDeploymentSha: terminalEvidence?.deploymentSha ?? null,
       campaignTerminalOutcome: terminalEvidence?.outcome ?? null,
       campaignTerminalFreshRuntimeProof:
-        asCampaignRecord(terminalEvidence?.audit).freshRuntimeProof === true,
+        asCampaignRecord(terminalEvidence?.audit).freshRuntimeProof === true ||
+        terminalCandidate?.legacyReconciliation?.freshRuntimeProof === true,
       campaignTerminalAutomatedFinal:
         typeof asCampaignRecord(terminalEvidence?.audit).automatedFinal ===
         "boolean"

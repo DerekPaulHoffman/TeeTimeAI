@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { AutomationPlaybookAssessment } from "./course-monitoring-playbook";
 import {
   getCourseSupportRemediationDirective,
+  isAssignedDetachedStageProgression,
   isStructuralCourseSupportFailure,
   isTransientCourseSupportFailure,
   routeCourseSupportRemediation,
@@ -36,6 +37,84 @@ const runnableCourse = {
 } satisfies CourseSupportRemediationRoutingInput;
 
 describe("course-support remediation routing", () => {
+  it.each([
+    "DISCOVER_WITH_HTTP",
+    "DISCOVER_WITH_BROWSER",
+    "VERIFY_TECHNICAL_CONSTRAINT",
+    "REPAIR_PROVIDER_ADAPTER",
+  ] as const)(
+    "recognizes exact pending and retryable LOCAL_READER assignment for %s",
+    (strategyAction) => {
+      const remediationDirective = {
+        workMode: "ADVANCE_DISCOVERY" as const,
+        strategyAction,
+        playbookStage: "LOCAL_READER" as const,
+        allowUnchangedRuntime: true,
+        requiresImplementationPath: false,
+        retryBudget: null,
+      };
+      expect(
+        isAssignedDetachedStageProgression({
+          remediationDirective,
+          playbookConclusion: "INCOMPLETE",
+          nextPlaybookStage: "LOCAL_READER",
+          nextPlaybookStageStatus: "PENDING",
+          nextPlaybookStageAttemptCount: 0,
+        }),
+      ).toBe(true);
+      expect(
+        isAssignedDetachedStageProgression({
+          remediationDirective: {
+            ...remediationDirective,
+            retryBudget: {
+              maximumAttempts: 4,
+              attemptsCompleted: 1,
+              attemptsRemaining: 3,
+              exhausted: false,
+            },
+          },
+          playbookConclusion: "INCOMPLETE",
+          nextPlaybookStage: "LOCAL_READER",
+          nextPlaybookStageStatus: "FAILED_RETRYABLE",
+          nextPlaybookStageAttemptCount: 1,
+        }),
+      ).toBe(true);
+    },
+  );
+
+  it.each([
+    ["missing budget", null],
+    [
+      "exhausted budget",
+      {
+        maximumAttempts: 4,
+        attemptsCompleted: 4,
+        attemptsRemaining: 0,
+        exhausted: true,
+      },
+    ],
+  ] as const)(
+    "rejects retryable LOCAL_READER progression with %s",
+    (_label, retryBudget) => {
+      expect(
+        isAssignedDetachedStageProgression({
+          remediationDirective: {
+            workMode: "ADVANCE_DISCOVERY",
+            strategyAction: "REPAIR_PROVIDER_ADAPTER",
+            playbookStage: "LOCAL_READER",
+            allowUnchangedRuntime: true,
+            requiresImplementationPath: false,
+            retryBudget,
+          },
+          playbookConclusion: "INCOMPLETE",
+          nextPlaybookStage: "LOCAL_READER",
+          nextPlaybookStageStatus: "FAILED_RETRYABLE",
+          nextPlaybookStageAttemptCount: 1,
+        }),
+      ).toBe(false);
+    },
+  );
+
   it("permits only a finite unchanged-runtime budget for transient failures", () => {
     const available = routeCourseSupportRemediation({
       ...runnableCourse,
@@ -83,22 +162,25 @@ describe("course-support remediation routing", () => {
         bookingMetadata: null,
       },
     ],
-  ] as const)("routes structural %s failures to reusable implementation", (failureClass, course) => {
-    const result = routeCourseSupportRemediation({
-      ...course,
-      failureClass,
-      attemptCount: 1,
-      playbookAssessment: incompletePlaybook(),
-    });
+  ] as const)(
+    "routes structural %s failures to reusable implementation",
+    (failureClass, course) => {
+      const result = routeCourseSupportRemediation({
+        ...course,
+        failureClass,
+        attemptCount: 1,
+        playbookAssessment: incompletePlaybook(),
+      });
 
-    expect(result).toMatchObject({
-      workMode: "IMPLEMENT_REUSABLE_SUPPORT",
-      allowUnchangedRuntime: false,
-      requiresImplementationPath: true,
-      retryBudget: null,
-      reason: "IMPLEMENTATION_REQUIRED",
-    });
-  });
+      expect(result).toMatchObject({
+        workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+        allowUnchangedRuntime: false,
+        requiresImplementationPath: true,
+        retryBudget: null,
+        reason: "IMPLEMENTATION_REQUIRED",
+      });
+    },
+  );
 
   it("advances one current discovery stage without calling it a transient retry", () => {
     const result = routeCourseSupportRemediation({
@@ -134,7 +216,8 @@ describe("course-support remediation routing", () => {
       ...runnableCourse,
       detectedPlatform: "CUSTOM",
       providerFamilyKey: "CPS",
-      detectedBookingUrl: "https://public-course.cps.golf/onlineresweb/search-teetime",
+      detectedBookingUrl:
+        "https://public-course.cps.golf/onlineresweb/search-teetime",
       bookingMetadata: null,
       automationEligibility: "NEEDS_REVIEW",
       failureClass: "HTTP_5XX",

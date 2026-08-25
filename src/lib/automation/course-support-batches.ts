@@ -44,6 +44,7 @@ import {
   COURSE_SUPPORT_REMEDIATION_WORK_MODES,
   DEFAULT_COURSE_SUPPORT_TRANSIENT_RETRY_BUDGET,
   getCourseSupportRemediationDirective,
+  isAssignedDetachedStageProgression,
   routeCourseSupportRemediation,
   type ActionableCourseSupportRemediationWorkMode,
   type CourseSupportRemediationAttemptSignature,
@@ -4608,25 +4609,28 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
         const stageAssessment = playbook.stages.find(
           (assessment) => assessment.stage === stage,
         );
+        const assignedDetachedStage = isAssignedDetachedStageProgression({
+          remediationDirective,
+          playbookConclusion: playbook.conclusion,
+          nextPlaybookStage: stage,
+          nextPlaybookStageStatus: stageAssessment?.status,
+          nextPlaybookStageAttemptCount: stageAssessment?.attemptCount,
+        });
         const ownedStage =
           stage === "RENDERED_BROWSER_DISCOVERY" ||
-          stage === "BROWSER_ADAPTER_RETRY" ||
+          assignedDetachedStage ||
           stage === "INDEPENDENT_CONFIRMATION";
-        const retryBudget = remediationDirective?.retryBudget;
         const grantableStageState =
-          (stageAssessment?.status === "PENDING" &&
-            stageAssessment.attemptCount === 0) ||
-          (stage === "BROWSER_ADAPTER_RETRY" &&
-            stageAssessment?.status === "FAILED_RETRYABLE" &&
-            stageAssessment.attemptCount === 1 &&
-            retryBudget !== null &&
-            retryBudget !== undefined &&
-            !retryBudget.exhausted &&
-            retryBudget.attemptsRemaining > 0);
+          assignedDetachedStage ||
+          ((stage === "RENDERED_BROWSER_DISCOVERY" ||
+            stage === "INDEPENDENT_CONFIRMATION") &&
+            stageAssessment?.status === "PENDING" &&
+            stageAssessment.attemptCount === 0);
         return entry.cycle === entry.incident.cycle &&
           entry.incident.status === "AUTO_INVESTIGATING" &&
           entry.incident.activeBatchId === input.batchId &&
           playbook.conclusion === "INCOMPLETE" &&
+          stage !== null &&
           ownedStage &&
           stage === remediationDirective?.playbookStage &&
           grantableStageState &&
@@ -6661,30 +6665,34 @@ export async function verifyCourseSupportBatch(input: {
     ),
     currentFailureBatchIncidentIds: currentDetachedFailureBatchIncidentIds,
   });
-  const assignedStageOrchestrationGapCount =
-    remediationDirective?.playbookStage === "BROWSER_ADAPTER_RETRY"
-      ? recheckVerifications.filter(({ entry }) => {
-          const playbook = assessAutomationPlaybook(
-            entry.incident.attemptLedger,
-            entry.cycle
-          );
-          if (
-            playbook.conclusion !== "INCOMPLETE" ||
-            playbook.nextStage !== "BROWSER_ADAPTER_RETRY" ||
-            getCourseSupportNextStageAttemptCount(playbook) !== 0
-          ) {
-            return false;
-          }
-          return !detachedRequestStates.some(
-            (request) =>
-              request.batchIncidentId === entry.id &&
-              (Boolean(request.startedAt) ||
-                request.status === "QUEUED" ||
-                request.status === "CHECKING" ||
-                request.status === "RETRYABLE_FAILED")
-          );
-        }).length
-      : 0;
+  const assignedStageOrchestrationGapCount = recheckVerifications.filter(
+    ({ entry }) => {
+      const playbook = assessAutomationPlaybook(
+        entry.incident.attemptLedger,
+        entry.cycle
+      );
+      if (
+        !isAssignedDetachedStageProgression({
+          remediationDirective,
+          playbookConclusion: playbook.conclusion,
+          nextPlaybookStage: playbook.nextStage,
+          nextPlaybookStageStatus: getCourseSupportNextStageStatus(playbook),
+          nextPlaybookStageAttemptCount:
+            getCourseSupportNextStageAttemptCount(playbook),
+        })
+      ) {
+        return false;
+      }
+      return !detachedRequestStates.some(
+        (request) =>
+          request.batchIncidentId === entry.id &&
+          (Boolean(request.startedAt) ||
+            request.status === "QUEUED" ||
+            request.status === "CHECKING" ||
+            request.status === "RETRYABLE_FAILED")
+      );
+    }
+  ).length;
   const detachedVerification = {
     ...detachedVerificationRerun,
     rerunNeeded:
@@ -7380,28 +7388,28 @@ export function shouldContinueSettledCourseSupportRemediation(input: {
   attemptCount: number;
   playbookConclusion: ReturnType<typeof assessAutomationPlaybook>["conclusion"];
   nextPlaybookStage: AutomationPlaybookStage | null;
+  nextPlaybookStageStatus?: ReturnType<
+    typeof assessAutomationPlaybook
+  >["stages"][number]["status"];
   nextPlaybookStageAttemptCount?: number;
 }) {
-  const assignedZeroAttemptBrowserAdapterRetry =
-    input.nextPlaybookStage === "BROWSER_ADAPTER_RETRY" &&
-    input.remediationDirective?.workMode === "VERIFY_TRANSIENT" &&
-    input.remediationDirective.strategyAction === "RUN_TYPED_ADAPTER" &&
-    input.remediationDirective.playbookStage === "BROWSER_ADAPTER_RETRY" &&
-    input.remediationDirective.allowUnchangedRuntime === true &&
-    input.remediationDirective.requiresImplementationPath === false &&
-    (input.remediationDirective.retryBudget === null ||
-      (input.remediationDirective.retryBudget.exhausted === false &&
-        input.remediationDirective.retryBudget.attemptsRemaining > 0));
+  const assignedDetachedStage = isAssignedDetachedStageProgression({
+    remediationDirective: input.remediationDirective,
+    playbookConclusion: input.playbookConclusion,
+    nextPlaybookStage: input.nextPlaybookStage,
+    nextPlaybookStageStatus: input.nextPlaybookStageStatus,
+    nextPlaybookStageAttemptCount: input.nextPlaybookStageAttemptCount,
+  });
   if (
     input.playbookConclusion === "INCOMPLETE" &&
-    (input.nextPlaybookStage === "RENDERED_BROWSER_DISCOVERY" ||
-      assignedZeroAttemptBrowserAdapterRetry ||
-      input.nextPlaybookStage === "INDEPENDENT_CONFIRMATION") &&
-    input.nextPlaybookStageAttemptCount === 0
+    (assignedDetachedStage ||
+      ((input.nextPlaybookStage === "RENDERED_BROWSER_DISCOVERY" ||
+        input.nextPlaybookStage === "INDEPENDENT_CONFIRMATION") &&
+        input.nextPlaybookStageAttemptCount === 0))
   ) {
-    // Reaching an assigned stage's endpoint before its first attempt is an
-    // orchestration miss, not unchanged course evidence and not proof that the
-    // safe playbook is exhausted.
+    // Reaching an assigned stage's endpoint before its first attempt or while
+    // an explicit retry budget remains is an orchestration miss, not unchanged
+    // course evidence and not proof that the safe playbook is exhausted.
     return true;
   }
   if (
@@ -7442,12 +7450,24 @@ export function shouldContinueSettledCourseSupportRemediation(input: {
 function getCourseSupportNextStageAttemptCount(
   assessment: ReturnType<typeof assessAutomationPlaybook>,
 ) {
+  return getCourseSupportNextStageAssessment(assessment)?.attemptCount;
+}
+
+function getCourseSupportNextStageStatus(
+  assessment: ReturnType<typeof assessAutomationPlaybook>,
+) {
+  return getCourseSupportNextStageAssessment(assessment)?.status;
+}
+
+function getCourseSupportNextStageAssessment(
+  assessment: ReturnType<typeof assessAutomationPlaybook>,
+) {
   if (!assessment.nextStage) {
     return undefined;
   }
   return assessment.stages.find(
     (stage) => stage.stage === assessment.nextStage,
-  )?.attemptCount;
+  );
 }
 
 export function buildCourseSupportCloseoutPlaybookDecisionBasis(input: {
@@ -8537,6 +8557,8 @@ async function closeoutCourseSupportBatchAttempt(
         attemptCount: entry.incident.attemptCount,
         playbookConclusion: playbookAssessment.conclusion,
         nextPlaybookStage: playbookAssessment.nextStage,
+        nextPlaybookStageStatus:
+          getCourseSupportNextStageStatus(playbookAssessment),
         nextPlaybookStageAttemptCount:
           getCourseSupportNextStageAttemptCount(playbookAssessment),
       });
@@ -8672,6 +8694,8 @@ async function closeoutCourseSupportBatchAttempt(
             attemptCount: entry.incident.attemptCount,
             playbookConclusion: playbookAssessment.conclusion,
             nextPlaybookStage: playbookAssessment.nextStage,
+            nextPlaybookStageStatus:
+              getCourseSupportNextStageStatus(playbookAssessment),
             nextPlaybookStageAttemptCount:
               getCourseSupportNextStageAttemptCount(playbookAssessment),
           })
@@ -9233,6 +9257,8 @@ async function closeoutCourseSupportBatchAttempt(
           attemptCount: entry.incident.attemptCount,
           playbookConclusion: playbookAssessment.conclusion,
           nextPlaybookStage: playbookAssessment.nextStage,
+          nextPlaybookStageStatus:
+            getCourseSupportNextStageStatus(playbookAssessment),
           nextPlaybookStageAttemptCount:
             getCourseSupportNextStageAttemptCount(playbookAssessment),
         }));
@@ -9861,6 +9887,8 @@ async function closeoutCourseSupportBatchAttempt(
         attemptCount: entry.incident.attemptCount,
         playbookConclusion: currentPlaybookAssessment.conclusion,
         nextPlaybookStage: currentPlaybookAssessment.nextStage,
+        nextPlaybookStageStatus:
+          getCourseSupportNextStageStatus(currentPlaybookAssessment),
         nextPlaybookStageAttemptCount:
           getCourseSupportNextStageAttemptCount(currentPlaybookAssessment),
       });
@@ -10971,6 +10999,8 @@ async function closeoutCourseSupportBatchAttempt(
               attemptCount: entry.incident.attemptCount,
               playbookConclusion: playbookAssessment.conclusion,
               nextPlaybookStage: playbookAssessment.nextStage,
+              nextPlaybookStageStatus:
+                getCourseSupportNextStageStatus(playbookAssessment),
               nextPlaybookStageAttemptCount:
                 getCourseSupportNextStageAttemptCount(playbookAssessment),
             }));

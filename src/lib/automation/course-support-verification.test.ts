@@ -214,16 +214,16 @@ function browserAdapterRetryReadyLedger(attempted = false) {
       "TYPED_ADAPTER",
       "TYPED_PROVIDER_ADAPTER",
       "NOT_APPLICABLE",
-      "NO_RUNNABLE_ADAPTER"
+      "NO_RUNNABLE_ADAPTER",
     ],
     ["OFFICIAL_HTTP_DISCOVERY", "OFFICIAL_HTTP", "COMPLETED", null],
     [
       "HTTP_ADAPTER_RETRY",
       "TYPED_PROVIDER_ADAPTER",
       "NOT_APPLICABLE",
-      "NO_METADATA_CHANGE"
+      "NO_METADATA_CHANGE",
     ],
-    ["RENDERED_BROWSER_DISCOVERY", "RENDERED_BROWSER", "COMPLETED", null]
+    ["RENDERED_BROWSER_DISCOVERY", "RENDERED_BROWSER", "COMPLETED", null],
   ] as const;
   for (const [stage, readPath, transition, skipReason] of completedStages) {
     ledger = appendAutomationPlaybookEvent(ledger, {
@@ -236,7 +236,7 @@ function browserAdapterRetryReadyLedger(attempted = false) {
       failureFingerprint: `TEST:${stage}:${transition}`,
       runtimeVersion: releaseSha,
       ...(skipReason ? { skipReason } : {}),
-      observedAt: now
+      observedAt: now,
     });
   }
   if (!attempted) return ledger;
@@ -248,7 +248,7 @@ function browserAdapterRetryReadyLedger(attempted = false) {
     evidenceKind: "TOOLING",
     failureFingerprint: "TEST:BROWSER_ADAPTER_RETRY:NETWORK",
     runtimeVersion: releaseSha,
-    observedAt: now
+    observedAt: now,
   });
   return appendAutomationPlaybookEvent(ledger, {
     cycle: 1,
@@ -259,7 +259,185 @@ function browserAdapterRetryReadyLedger(attempted = false) {
     failureClass: "NETWORK",
     failureFingerprint: "TEST:BROWSER_ADAPTER_RETRY:NETWORK",
     runtimeVersion: releaseSha,
-    observedAt: now
+    observedAt: now,
+  });
+}
+
+function localReaderReadyLedger(
+  attempted = false,
+  runtimeVersion = releaseSha,
+  attemptedAt = now,
+) {
+  const ledger = appendAutomationPlaybookEvent(
+    browserAdapterRetryReadyLedger(),
+    {
+      cycle: 1,
+      stage: "BROWSER_ADAPTER_RETRY",
+      transition: "NOT_APPLICABLE",
+      readPath: "TYPED_PROVIDER_ADAPTER",
+      evidenceKind: "TOOLING",
+      failureFingerprint: "TEST:BROWSER_ADAPTER_RETRY:SKIPPED",
+      runtimeVersion: releaseSha,
+      skipReason: "NO_RUNNABLE_ADAPTER",
+      observedAt: now,
+    },
+  );
+  if (!attempted) return ledger;
+  return appendAutomationPlaybookEvent(ledger, {
+    cycle: 1,
+    stage: "LOCAL_READER",
+    transition: "STARTED",
+    readPath: "LOCAL_READER",
+    evidenceKind: "TOOLING",
+    failureFingerprint: "TEST:LOCAL_READER:STARTED",
+    runtimeVersion,
+    observedAt: attemptedAt,
+  });
+}
+
+function localReaderFailedRetryableLedger(
+  attemptCount = 1,
+  resultRuntimeVersion = releaseSha,
+) {
+  let ledger: unknown = localReaderReadyLedger();
+  for (let attempt = 1; attempt <= attemptCount; attempt += 1) {
+    const observedAt = now;
+    ledger = appendAutomationPlaybookEvent(ledger, {
+      cycle: 1,
+      stage: "LOCAL_READER",
+      transition: "STARTED",
+      readPath: "LOCAL_READER",
+      evidenceKind: "TOOLING",
+      failureFingerprint: "TEST:LOCAL_READER:NETWORK",
+      runtimeVersion: releaseSha,
+      observedAt,
+    });
+    ledger = appendAutomationPlaybookEvent(ledger, {
+      cycle: 1,
+      stage: "LOCAL_READER",
+      transition: "FAILED_RETRYABLE",
+      readPath: "LOCAL_READER",
+      evidenceKind: "TOOLING",
+      failureClass: "NETWORK",
+      failureFingerprint: "TEST:LOCAL_READER:NETWORK",
+      runtimeVersion: resultRuntimeVersion,
+      observedAt,
+    });
+  }
+  return ledger;
+}
+
+function localReaderSucceededLedger(
+  options: {
+    evidenceKind?: "LOCAL_READER_RESULT" | "TOOLING";
+    runtimeVersion?: string;
+  } = {},
+) {
+  return appendAutomationPlaybookEvent(localReaderReadyLedger(), {
+    cycle: 1,
+    stage: "LOCAL_READER",
+    transition: "SUCCEEDED",
+    readPath: "LOCAL_READER",
+    evidenceKind: options.evidenceKind ?? "LOCAL_READER_RESULT",
+    failureFingerprint: "TEST:LOCAL_READER:SUCCEEDED",
+    runtimeVersion: options.runtimeVersion ?? "cps-rendered-v1",
+    observedAt: now,
+  });
+}
+
+function localReaderIndependentHandoffLedger(
+  transition: "NOT_APPLICABLE" | "FAILED_TERMINAL" | "TECHNICAL_LIMITATION",
+  options: {
+    localRuntimeVersion?: string;
+    successorRuntimeVersion?: string;
+  } = {},
+) {
+  const ledger: unknown = appendAutomationPlaybookEvent(
+    localReaderReadyLedger(),
+    {
+      cycle: 1,
+      stage: "LOCAL_READER",
+      transition,
+      readPath: "LOCAL_READER",
+      evidenceKind:
+        transition === "NOT_APPLICABLE" ? "TOOLING" : "LOCAL_READER_RESULT",
+      failureFingerprint: `TEST:LOCAL_READER:${transition}`,
+      runtimeVersion:
+        options.localRuntimeVersion ??
+        (transition === "NOT_APPLICABLE" ? releaseSha : "reader-v1"),
+      ...(transition === "NOT_APPLICABLE"
+        ? { skipReason: "NO_LOCAL_READER_CAPABILITY" as const }
+        : transition === "FAILED_TERMINAL"
+          ? { failureClass: "UNKNOWN" as const }
+          : { technicalReason: "CAPTCHA_OR_QUEUE" as const }),
+      observedAt: now,
+    },
+  );
+  return appendAutomationPlaybookEvent(ledger, {
+    cycle: 1,
+    stage: "INDEPENDENT_CONFIRMATION",
+    transition: "STARTED",
+    readPath: "INDEPENDENT_CONFIRMATION",
+    evidenceKind: "RENDERED_PAGE",
+    failureFingerprint: "TEST:INDEPENDENT_CONFIRMATION:STARTED",
+    runtimeVersion: options.successorRuntimeVersion ?? releaseSha,
+    observedAt: now,
+  });
+}
+
+function assignedLocalReaderRequest(
+  input: {
+    attemptLedger?: unknown;
+    requestOverrides?: Record<string, unknown>;
+    courseOverrides?: Record<string, unknown>;
+    remediationOverrides?: Record<string, unknown>;
+  } = {},
+) {
+  const providerCourse = course({
+    detectedPlatform: null,
+    providerFamilyKey: "SOURCE_MISSING",
+    bookingMetadata: null,
+    automationEligibility: "BLOCKED",
+    automationReason: "ACCOUNT_REQUIRED",
+    ...currentIntelligence(),
+    ...input.courseOverrides,
+  });
+  const baseRequest = request();
+  return request({
+    createdAt: new Date("2026-07-21T11:51:00.000Z"),
+    startedAt: new Date("2026-07-21T11:57:00.000Z"),
+    updatedAt: new Date("2026-07-21T11:59:00.000Z"),
+    completedAt: null,
+    deadlineAt: new Date("2026-07-21T12:35:00.000Z"),
+    providerSnapshotFingerprint: fingerprint(providerCourse),
+    course: providerCourse,
+    batchIncident: {
+      ...baseRequest.batchIncident,
+      batch: {
+        ...baseRequest.batchIncident.batch,
+        summary: {
+          remediation: {
+            workMode: "ADVANCE_DISCOVERY",
+            strategyAction: "REPAIR_PROVIDER_ADAPTER",
+            playbookStage: "LOCAL_READER",
+            allowUnchangedRuntime: true,
+            requiresImplementationPath: false,
+            reason: "PLAYBOOK_STAGE_PENDING",
+            retryBudget: {
+              maximumAttempts: 4,
+              attemptsCompleted: 1,
+              attemptsRemaining: 3,
+              exhausted: false,
+            },
+            ...input.remediationOverrides,
+          },
+        },
+      },
+      incident: incident({
+        attemptLedger: input.attemptLedger ?? localReaderReadyLedger(true),
+      }),
+    },
+    ...input.requestOverrides,
   });
 }
 
@@ -1232,17 +1410,36 @@ describe("course-support verification scheduling", () => {
   });
 
   it.each([
-    ["first stage attempt", browserAdapterRetryReadyLedger(true), false, false],
-    ["exhausted route budget", browserAdapterRetryReadyLedger(), true, false],
+    [
+      "first retryable stage attempt",
+      browserAdapterRetryReadyLedger(true),
+      false,
+      false,
+      true,
+    ],
+    [
+      "exhausted route budget",
+      browserAdapterRetryReadyLedger(),
+      true,
+      false,
+      false,
+    ],
     [
       "a current runnable-provider technical block",
       browserAdapterRetryReadyLedger(),
       false,
       true,
+      false,
     ],
   ] as const)(
-    "keeps blocked browser adapter progression ineligible after %s",
-    async (_case, attemptLedger, exhausted, runnableProvider) => {
+    "handles blocked browser adapter progression after %s",
+    async (
+      _case,
+      attemptLedger,
+      exhausted,
+      runnableProvider,
+      expectedEligible,
+    ) => {
       prismaMocks.batchFindUnique.mockResolvedValue({
         id: "batch-1",
         status: "VERIFYING",
@@ -1288,6 +1485,277 @@ describe("course-support verification scheduling", () => {
                     providerFamilyKey: "SOURCE_MISSING",
                     bookingMetadata: null,
                   }),
+              automationEligibility: "BLOCKED",
+              automationReason: "ACCOUNT_REQUIRED",
+              ...currentIntelligence(),
+            }),
+          },
+        ],
+      });
+
+      await expect(
+        scheduleCourseSupportVerificationRequests({
+          batchId: "batch-1",
+          releaseSha,
+          now,
+        }),
+      ).resolves.toEqual(
+        expectedEligible
+          ? {
+              createdCount: 1,
+              eligibleCount: 1,
+              ineligibleCount: 0,
+              requests: [],
+            }
+          : {
+              createdCount: 0,
+              eligibleCount: 0,
+              ineligibleCount: 1,
+              ineligibleReasonCounts: { monitoring_not_actionable: 1 },
+              requests: [],
+            },
+      );
+      if (expectedEligible) {
+        expect(prismaMocks.requestCreateMany).toHaveBeenCalledOnce();
+      } else {
+        expect(prismaMocks.requestCreateMany).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it("schedules only the assigned zero-attempt local reader while retaining blocked provider evidence", async () => {
+    prismaMocks.batchFindUnique.mockResolvedValue({
+      id: "batch-1",
+      status: "VERIFYING",
+      releaseSha,
+      completedAt: null,
+      summary: {
+        remediation: {
+          workMode: "ADVANCE_DISCOVERY",
+          strategyAction: "DISCOVER_WITH_HTTP",
+          playbookStage: "LOCAL_READER",
+          allowUnchangedRuntime: true,
+          requiresImplementationPath: false,
+          reason: "PLAYBOOK_STAGE_PENDING",
+          retryBudget: null,
+        },
+      },
+      incidents: [
+        {
+          id: "batch-incident-1",
+          incidentId: "incident-1",
+          courseId: "course-1",
+          cycle: 1,
+          verifiedIncidentUpdatedAt: new Date("2026-07-21T11:55:00.000Z"),
+          incident: incident({ attemptLedger: localReaderReadyLedger() }),
+          course: course({
+            detectedPlatform: null,
+            providerFamilyKey: "SOURCE_MISSING",
+            bookingMetadata: null,
+            automationEligibility: "BLOCKED",
+            automationReason: "ACCOUNT_REQUIRED",
+            ...currentIntelligence(),
+          }),
+        },
+      ],
+    });
+
+    await expect(
+      scheduleCourseSupportVerificationRequests({
+        batchId: "batch-1",
+        releaseSha,
+        now,
+      }),
+    ).resolves.toEqual({
+      createdCount: 1,
+      eligibleCount: 1,
+      ineligibleCount: 0,
+      requests: [],
+    });
+    expect(prismaMocks.requestCreateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: [
+          expect.objectContaining({
+            automationEligibilitySnapshot: "BLOCKED",
+            automationReasonSnapshot: "ACCOUNT_REQUIRED",
+          }),
+        ],
+      }),
+    );
+  });
+
+  it("schedules an assigned failed-retryable local reader with three attempts remaining", async () => {
+    prismaMocks.batchFindUnique.mockResolvedValue({
+      id: "batch-1",
+      status: "VERIFYING",
+      releaseSha,
+      completedAt: null,
+      summary: {
+        remediation: {
+          workMode: "ADVANCE_DISCOVERY",
+          strategyAction: "REPAIR_PROVIDER_ADAPTER",
+          playbookStage: "LOCAL_READER",
+          allowUnchangedRuntime: true,
+          requiresImplementationPath: false,
+          reason: "PLAYBOOK_STAGE_PENDING",
+          retryBudget: {
+            maximumAttempts: 4,
+            attemptsCompleted: 1,
+            attemptsRemaining: 3,
+            exhausted: false,
+          },
+        },
+      },
+      incidents: [
+        {
+          id: "batch-incident-1",
+          incidentId: "incident-1",
+          courseId: "course-1",
+          cycle: 1,
+          verifiedIncidentUpdatedAt: new Date("2026-07-21T11:55:00.000Z"),
+          incident: incident({
+            attemptLedger: localReaderFailedRetryableLedger(),
+          }),
+          course: course({
+            detectedPlatform: null,
+            providerFamilyKey: "SOURCE_MISSING",
+            bookingMetadata: null,
+            automationEligibility: "BLOCKED",
+            automationReason: "ACCOUNT_REQUIRED",
+            ...currentIntelligence(),
+          }),
+        },
+      ],
+    });
+
+    await expect(
+      scheduleCourseSupportVerificationRequests({
+        batchId: "batch-1",
+        releaseSha,
+        now,
+      }),
+    ).resolves.toEqual({
+      createdCount: 1,
+      eligibleCount: 1,
+      ineligibleCount: 0,
+      requests: [],
+    });
+    expect(prismaMocks.requestCreateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: [expect.objectContaining({ courseId: "course-1", releaseSha })],
+      }),
+    );
+  });
+
+  it.each([
+    ["private identity", { isPublic: false }],
+    [
+      "manual disposition",
+      {
+        bookingMethod: "PHONE_ONLY",
+        automationEligibility: "BLOCKED",
+        automationReason: "NO_ONLINE_BOOKING",
+        ...currentIntelligence(),
+      },
+    ],
+  ] as const)(
+    "does not let an assigned local reader bypass a current %s gate",
+    async (_label, courseOverrides) => {
+      prismaMocks.batchFindUnique.mockResolvedValue({
+        id: "batch-1",
+        status: "VERIFYING",
+        releaseSha,
+        completedAt: null,
+        summary: {
+          remediation: {
+            workMode: "ADVANCE_DISCOVERY",
+            strategyAction: "REPAIR_PROVIDER_ADAPTER",
+            playbookStage: "LOCAL_READER",
+            allowUnchangedRuntime: true,
+            requiresImplementationPath: false,
+            reason: "PLAYBOOK_STAGE_PENDING",
+            retryBudget: {
+              maximumAttempts: 4,
+              attemptsCompleted: 1,
+              attemptsRemaining: 3,
+              exhausted: false,
+            },
+          },
+        },
+        incidents: [
+          {
+            id: "batch-incident-1",
+            incidentId: "incident-1",
+            courseId: "course-1",
+            cycle: 1,
+            verifiedIncidentUpdatedAt: new Date("2026-07-21T11:55:00.000Z"),
+            incident: incident({
+              attemptLedger: localReaderFailedRetryableLedger(),
+            }),
+            course: course({
+              detectedPlatform: null,
+              providerFamilyKey: "SOURCE_MISSING",
+              bookingMetadata: null,
+              ...courseOverrides,
+            }),
+          },
+        ],
+      });
+
+      await expect(
+        scheduleCourseSupportVerificationRequests({
+          batchId: "batch-1",
+          releaseSha,
+          now,
+        }),
+      ).resolves.toEqual({
+        createdCount: 0,
+        eligibleCount: 0,
+        ineligibleCount: 1,
+        ineligibleReasonCounts: { monitoring_not_actionable: 1 },
+        requests: [],
+      });
+      expect(prismaMocks.requestCreateMany).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["first stage attempt", localReaderReadyLedger(true), "ADVANCE_DISCOVERY"],
+    ["a mismatched route", localReaderReadyLedger(), "VERIFY_TRANSIENT"],
+  ] as const)(
+    "keeps blocked local reader progression ineligible after %s",
+    async (_case, attemptLedger, workMode) => {
+      prismaMocks.batchFindUnique.mockResolvedValue({
+        id: "batch-1",
+        status: "VERIFYING",
+        releaseSha,
+        completedAt: null,
+        summary: {
+          remediation: {
+            workMode,
+            strategyAction:
+              workMode === "ADVANCE_DISCOVERY"
+                ? "DISCOVER_WITH_HTTP"
+                : "RUN_TYPED_ADAPTER",
+            playbookStage: "LOCAL_READER",
+            allowUnchangedRuntime: true,
+            requiresImplementationPath: false,
+            reason: "PLAYBOOK_STAGE_PENDING",
+            retryBudget: null,
+          },
+        },
+        incidents: [
+          {
+            id: "batch-incident-1",
+            incidentId: "incident-1",
+            courseId: "course-1",
+            cycle: 1,
+            verifiedIncidentUpdatedAt: new Date("2026-07-21T11:55:00.000Z"),
+            incident: incident({ attemptLedger }),
+            course: course({
+              detectedPlatform: null,
+              providerFamilyKey: "SOURCE_MISSING",
+              bookingMetadata: null,
               automationEligibility: "BLOCKED",
               automationReason: "ACCOUNT_REQUIRED",
               ...currentIntelligence(),
@@ -2096,6 +2564,64 @@ describe("course-support verification execution fencing", () => {
     );
   });
 
+  it.each([
+    [
+      "due retryable failure",
+      {
+        status: "RETRYABLE_FAILED",
+        leaseToken: null,
+        leaseExpiresAt: null,
+        nextAttemptAt: now,
+      },
+    ],
+    [
+      "expired checking lease",
+      {
+        status: "CHECKING",
+        leaseToken: "expired-lease",
+        leaseExpiresAt: new Date("2026-07-21T11:59:00.000Z"),
+        nextAttemptAt: null,
+      },
+    ],
+  ] as const)(
+    "reclaims assigned local-reader authority after a release-matching STARTED event from a %s",
+    async (_label, state) => {
+      prismaMocks.requestFindUnique.mockResolvedValue(
+        assignedLocalReaderRequest({
+          requestOverrides: { ...state, revision: 4 },
+        }),
+      );
+
+      await expect(
+        claimCourseSupportVerificationRequest({
+          requestId: "request-1",
+          expectedRevision: 4,
+          runtimeVersion: releaseSha,
+          now,
+        }),
+      ).resolves.toMatchObject({
+        claimed: true,
+        revision: 5,
+        runtimeVersion: releaseSha,
+      });
+      expect(prismaMocks.requestUpdateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            id: "request-1",
+            revision: 4,
+            releaseSha,
+            deadlineAt: { gt: now },
+          }),
+          data: expect.objectContaining({
+            status: "CHECKING",
+            runtimeVersion: releaseSha,
+            attemptCount: { increment: 1 },
+          }),
+        }),
+      );
+    },
+  );
+
   it("clears both discovery markers when a claim observes a changed provider snapshot", async () => {
     const changedCourse = course({
       bookingMetadata: { provider: "CPS", facilityId: "changed-before-claim" },
@@ -2237,6 +2763,148 @@ describe("course-support verification execution fencing", () => {
       }),
     );
   });
+
+  it("retains exact local-reader authority when STARTED is recorded before provider attachment", async () => {
+    prismaMocks.requestFindUnique.mockResolvedValue(
+      assignedLocalReaderRequest({
+        requestOverrides: { startedAt: null },
+      }),
+    );
+
+    await expect(
+      attachCourseSupportVerificationProviderSnapshot({
+        requestId: "request-1",
+        expectedRevision: 1,
+        leaseToken: "lease-1",
+        runtimeVersion: releaseSha,
+        purpose: "PRE_EXECUTION",
+        now,
+      }),
+    ).resolves.toMatchObject({ attached: true, revision: 2 });
+    expect(prismaMocks.requestUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ startedAt: now }),
+      }),
+    );
+  });
+
+  it.each([
+    [
+      "another release",
+      localReaderReadyLedger(true, newerReleaseSha, now),
+      undefined,
+    ],
+    [
+      "a retryable control result from a semantic reader runtime",
+      localReaderFailedRetryableLedger(1, "reader-v1"),
+      { retryBudget: null },
+    ],
+    [
+      "a semantic success without reader-result evidence",
+      localReaderSucceededLedger({ evidenceKind: "TOOLING" }),
+      undefined,
+    ],
+    [
+      "a non-result local-reader transition from another release",
+      localReaderIndependentHandoffLedger("NOT_APPLICABLE", {
+        localRuntimeVersion: newerReleaseSha,
+      }),
+      undefined,
+    ],
+    [
+      "an independent-confirmation successor from another release",
+      localReaderIndependentHandoffLedger("FAILED_TERMINAL", {
+        successorRuntimeVersion: newerReleaseSha,
+      }),
+      undefined,
+    ],
+    [
+      "a future timestamp",
+      localReaderReadyLedger(
+        true,
+        releaseSha,
+        new Date("2026-07-21T12:01:00.000Z"),
+      ),
+      undefined,
+    ],
+  ] as const)(
+    "rejects local-reader lifecycle provenance from %s",
+    async (_label, attemptLedger, remediationOverrides) => {
+      prismaMocks.requestFindUnique.mockResolvedValue(
+        assignedLocalReaderRequest({
+          attemptLedger,
+          remediationOverrides,
+          requestOverrides: { startedAt: null },
+        }),
+      );
+
+      await expect(
+        attachCourseSupportVerificationProviderSnapshot({
+          requestId: "request-1",
+          expectedRevision: 1,
+          leaseToken: "lease-1",
+          runtimeVersion: releaseSha,
+          purpose: "PRE_EXECUTION",
+          now,
+        }),
+      ).resolves.toEqual({
+        attached: false,
+        reason: "monitoring_not_actionable",
+      });
+    },
+  );
+
+  it.each([
+    {
+      label: "private identity",
+      courseOverrides: { isPublic: false },
+    },
+    {
+      label: "manual disposition",
+      courseOverrides: {
+        bookingMethod: "PHONE_ONLY",
+        automationEligibility: "BLOCKED",
+        automationReason: "NO_ONLINE_BOOKING",
+      },
+    },
+    {
+      label: "invalid assignment",
+      remediationOverrides: { strategyAction: "RETRY_PROVIDER" },
+    },
+  ])(
+    "does not retain local-reader lifecycle authority through a $label gate",
+    async ({ courseOverrides, remediationOverrides }) => {
+      prismaMocks.requestFindUnique.mockResolvedValue(
+        assignedLocalReaderRequest({
+          courseOverrides,
+          remediationOverrides,
+          requestOverrides: { startedAt: null },
+        }),
+      );
+
+      await expect(
+        attachCourseSupportVerificationProviderSnapshot({
+          requestId: "request-1",
+          expectedRevision: 1,
+          leaseToken: "lease-1",
+          runtimeVersion: releaseSha,
+          purpose: "PRE_EXECUTION",
+          now,
+        }),
+      ).resolves.toEqual({
+        attached: false,
+        reason: "monitoring_not_actionable",
+      });
+      expect(prismaMocks.requestUpdateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            status: "STALE",
+            lastError: "monitoring_not_actionable",
+          }),
+        }),
+      );
+    },
+  );
 
   it("authenticates one deferred confirmation against its exhausted admission without changing the ledger", async () => {
     const ownedRequest = deferredConfirmationRequest();
@@ -3004,6 +3672,67 @@ describe("course-support verification execution fencing", () => {
     expect(prismaMocks.activeSearchCount).not.toHaveBeenCalled();
   });
 
+  it.each([
+    "NOT_APPLICABLE",
+    "FAILED_TERMINAL",
+    "TECHNICAL_LIMITATION",
+  ] as const)(
+    "retains exact local-reader authority after %s hands off to independent confirmation",
+    async (transition) => {
+      prismaMocks.requestFindUnique.mockResolvedValue(
+        assignedLocalReaderRequest({
+          attemptLedger: localReaderIndependentHandoffLedger(transition),
+          requestOverrides: {
+            discoveryAttemptedAt: null,
+            discoveryVerifiedAt: null,
+          },
+        }),
+      );
+
+      await expect(
+        markCourseSupportVerificationDiscoveryAttempted({
+          requestId: "request-1",
+          expectedRevision: 1,
+          leaseToken: "lease-1",
+          runtimeVersion: releaseSha,
+          now,
+        }),
+      ).resolves.toMatchObject({
+        marked: true,
+        revision: 2,
+        discoveryAttemptedAt: now,
+      });
+    },
+  );
+
+  it("retains a same-release STARTED event recorded just before provider attachment persisted startedAt", async () => {
+    const continuedAt = new Date("2026-07-21T12:01:00.000Z");
+    prismaMocks.requestFindUnique.mockResolvedValue(
+      assignedLocalReaderRequest({
+        requestOverrides: {
+          startedAt: new Date("2026-07-21T12:00:30.000Z"),
+          updatedAt: new Date("2026-07-21T12:00:30.000Z"),
+          discoveryAttemptedAt: null,
+          discoveryVerifiedAt: null,
+        },
+      }),
+    );
+
+    await expect(
+      markCourseSupportVerificationDiscoveryAttempted({
+        requestId: "request-1",
+        expectedRevision: 1,
+        leaseToken: "lease-1",
+        runtimeVersion: releaseSha,
+        now: continuedAt,
+      }),
+    ).resolves.toMatchObject({
+      marked: true,
+      revision: 2,
+      discoveryAttemptedAt: continuedAt,
+    });
+  });
+
   it("persists a one-shot discovery attempt under the exact execution lease", async () => {
     prismaMocks.requestFindUnique.mockResolvedValue(
       request({ discoveryAttemptedAt: null, discoveryVerifiedAt: null }),
@@ -3273,6 +4002,48 @@ describe("course-support verification terminal evidence", () => {
     expect(evidence).not.toHaveProperty("slots");
     expect(evidence).not.toHaveProperty("recipient");
     expect(JSON.stringify(evidence)).not.toContain("session=secret");
+  });
+
+  it("completes an owned local-reader request after a direct SUCCEEDED ledger result", async () => {
+    prismaMocks.requestFindUnique.mockResolvedValue(
+      assignedLocalReaderRequest({
+        attemptLedger: localReaderSucceededLedger(),
+        requestOverrides: {
+          discoveryAttemptedAt: new Date("2026-07-21T11:57:30.000Z"),
+          discoveryVerifiedAt: new Date("2026-07-21T11:58:30.000Z"),
+        },
+      }),
+    );
+
+    await expect(
+      completeCourseSupportVerificationRequest({
+        requestId: "request-1",
+        expectedRevision: 1,
+        leaseToken: "lease-1",
+        runtimeVersion: releaseSha,
+        observation: {
+          outcome: "NO_MATCH",
+          observedAt: now,
+          providerExecution: true,
+          adapterKey: "local-reader.public-read",
+          availabilityCount: 0,
+        },
+        now,
+      }),
+    ).resolves.toMatchObject({
+      completed: true,
+      status: "SUCCEEDED",
+      revision: 2,
+      outcome: "NO_MATCH",
+    });
+    expect(prismaMocks.requestUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "SUCCEEDED",
+          completedAt: now,
+        }),
+      }),
+    );
   });
 
   it("rejects completion when the batch completed after provider execution began", async () => {
@@ -3565,6 +4336,45 @@ describe("course-support verification terminal evidence", () => {
     ).not.toHaveProperty("evidence");
   });
 
+  it("persists a retry after an owned local-reader STARTED event under a technical-final gate", async () => {
+    prismaMocks.requestFindUnique.mockResolvedValue(
+      assignedLocalReaderRequest(),
+    );
+    const retryAt = new Date("2026-07-21T12:20:00.000Z");
+
+    await expect(
+      failCourseSupportVerificationRequest({
+        requestId: "request-1",
+        expectedRevision: 1,
+        leaseToken: "lease-1",
+        runtimeVersion: releaseSha,
+        failureClass: "NETWORK",
+        message: "local reader network failure",
+        retryAt,
+        observation: {
+          outcome: "FETCH_FAILED",
+          observedAt: now,
+          providerExecution: false,
+        },
+        now,
+      }),
+    ).resolves.toEqual({
+      failed: true,
+      status: "RETRYABLE_FAILED",
+      revision: 2,
+      nextAttemptAt: retryAt,
+    });
+    expect(prismaMocks.requestUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "RETRYABLE_FAILED",
+          nextAttemptAt: retryAt,
+          completedAt: null,
+        }),
+      }),
+    );
+  });
+
   it("persists a bounded retry without calling it successful", async () => {
     prismaMocks.requestFindUnique.mockResolvedValue(request());
     const retryAt = new Date("2026-07-21T12:30:00.000Z");
@@ -3824,6 +4634,77 @@ describe("course-support verification terminal evidence", () => {
     expect(proof).not.toHaveProperty("courseId");
   });
 
+  it("returns exact owned local-reader proof after a direct SUCCEEDED ledger result", async () => {
+    const successfulRequest = assignedLocalReaderRequest({
+      attemptLedger: localReaderSucceededLedger(),
+      requestOverrides: {
+        status: "SUCCEEDED",
+        revision: 2,
+        leaseToken: null,
+        leaseExpiresAt: null,
+        nextAttemptAt: null,
+        outcome: "NO_MATCH",
+        completedAt: now,
+        updatedAt: now,
+        discoveryAttemptedAt: new Date("2026-07-21T11:57:30.000Z"),
+        discoveryVerifiedAt: new Date("2026-07-21T11:58:30.000Z"),
+      },
+    });
+    successfulRequest.evidence = {
+      ...verificationEvidence(),
+      providerSnapshotFingerprint:
+        successfulRequest.providerSnapshotFingerprint,
+    };
+    prismaMocks.requestFindUnique.mockResolvedValue(successfulRequest);
+
+    await expect(
+      getEligibleCourseSupportVerificationProof({
+        batchIncidentId: "batch-incident-1",
+        releaseSha,
+        now,
+      }),
+    ).resolves.toMatchObject({
+      eligible: true,
+      releaseSha,
+      runtimeVersion: releaseSha,
+      outcome: "NO_MATCH",
+      completedAt: now,
+    });
+  });
+
+  it("keeps active-demand proof fencing for an owned local-reader success", async () => {
+    const successfulRequest = assignedLocalReaderRequest({
+      attemptLedger: localReaderSucceededLedger(),
+      requestOverrides: {
+        status: "SUCCEEDED",
+        revision: 2,
+        leaseToken: null,
+        leaseExpiresAt: null,
+        nextAttemptAt: null,
+        outcome: "NO_MATCH",
+        completedAt: now,
+        updatedAt: now,
+        discoveryAttemptedAt: new Date("2026-07-21T11:57:30.000Z"),
+        discoveryVerifiedAt: new Date("2026-07-21T11:58:30.000Z"),
+      },
+    });
+    successfulRequest.evidence = {
+      ...verificationEvidence(),
+      providerSnapshotFingerprint:
+        successfulRequest.providerSnapshotFingerprint,
+    };
+    prismaMocks.requestFindUnique.mockResolvedValue(successfulRequest);
+    prismaMocks.activeSearchCount.mockResolvedValue(1);
+
+    await expect(
+      getEligibleCourseSupportVerificationProof({
+        batchIncidentId: "batch-incident-1",
+        releaseSha,
+        now,
+      }),
+    ).resolves.toEqual({ eligible: false, reason: "active_demand" });
+  });
+
   it.each([
     {
       label: "private identity",
@@ -3978,6 +4859,43 @@ describe("course-support verification terminal evidence", () => {
       expect(failure).not.toHaveProperty("leaseToken");
     },
   );
+
+  it("returns STALE failure evidence under exact owned local-reader authority", async () => {
+    const failedRequest = assignedLocalReaderRequest({
+      attemptLedger: localReaderFailedRetryableLedger(),
+      requestOverrides: {
+        status: "STALE",
+        revision: 2,
+        leaseToken: null,
+        leaseExpiresAt: null,
+        nextAttemptAt: null,
+        outcome: "FETCH_FAILED",
+        failureClass: "NETWORK",
+        completedAt: now,
+        updatedAt: now,
+      },
+    });
+    failedRequest.evidence = {
+      ...verificationEvidence("FETCH_FAILED", false),
+      failureClass: "NETWORK",
+      providerSnapshotFingerprint: failedRequest.providerSnapshotFingerprint,
+    };
+    prismaMocks.requestFindUnique.mockResolvedValue(failedRequest);
+
+    await expect(
+      getCurrentCourseSupportVerificationFailure({
+        batchIncidentId: "batch-incident-1",
+        releaseSha,
+        now,
+      }),
+    ).resolves.toMatchObject({
+      current: true,
+      status: "STALE",
+      outcome: "FETCH_FAILED",
+      failureClass: "NETWORK",
+      providerExecution: false,
+    });
+  });
 
   it("invalidates current failure evidence after a verified manual disposition", async () => {
     prismaMocks.requestFindUnique.mockResolvedValue(

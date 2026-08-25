@@ -159,7 +159,7 @@ const operationalRepeatImplementationsSchema = z
     status: z.enum(["PASS", "FAIL", "UNKNOWN"]),
   })
   .strict();
-const availableAcceptanceProjectionSchema = z
+const availableAcceptanceProjectionBaseSchema = z
   .object({
     schemaVersion: z.literal(ACCEPTANCE_SCHEMA_VERSION),
     status: z.enum(["PASS", "FAIL", "IN_PROGRESS", "UNKNOWN"]),
@@ -225,14 +225,48 @@ const availableAcceptanceProjectionSchema = z
       })
       .strict(),
   })
-  .strict()
-  .superRefine((projection, context) => {
+  .strict();
+type AvailableAcceptanceProjection = z.infer<
+  typeof availableAcceptanceProjectionBaseSchema
+>;
+const availableAcceptanceProjectionSchema =
+  availableAcceptanceProjectionBaseSchema.superRefine((projection, context) => {
+    if (!hasCoherentAvailableAcceptanceEvidence(projection)) {
+      context.addIssue({
+        code: "custom",
+        path: ["latestCampaign"],
+        message: "Acceptance counters and derived statuses must agree.",
+      });
+    }
+
+    const expectedStatus = getExpectedAcceptanceStatus({
+      campaignLifecycleStatus: projection.latestCampaign.lifecycleStatus,
+      campaignProgressStatus: projection.latestCampaign.progress.status,
+      campaignResultsStatus: projection.latestCampaign.currentResults.status,
+      engineeringBlockerCount:
+        projection.latestCampaign.currentResults.engineeringBlockerCount,
+      fleet: projection.fleet,
+      futureAutomaticStatus:
+        projection.operational.futureAutomaticWithin24Hours.status,
+      repeatImplementationsStatus:
+        projection.operational.repeatImplementations.status,
+      rollingHumanReviewStatus:
+        projection.operational.rollingHumanReview.status,
+    });
+    if (projection.status !== expectedStatus) {
+      context.addIssue({
+        code: "custom",
+        path: ["status"],
+        message: "Acceptance status does not match its gate evidence.",
+      });
+    }
+
     const expectedReason =
-      projection.status === "PASS"
+      expectedStatus === "PASS"
         ? "ALL_GATES_PASS"
-        : projection.status === "FAIL"
+        : expectedStatus === "FAIL"
           ? "ACCEPTANCE_GATE_FAILED"
-          : projection.status === "IN_PROGRESS"
+          : expectedStatus === "IN_PROGRESS"
             ? "BASELINE_OR_OPERATIONAL_IN_PROGRESS"
             : "ACCEPTANCE_EVIDENCE_UNAVAILABLE";
     if (projection.reason !== expectedReason) {
@@ -266,6 +300,249 @@ const courseSupportAcceptanceProjectionSchema = z.union([
 export function parseCourseSupportAcceptanceProjection(value: unknown) {
   const parsed = courseSupportAcceptanceProjectionSchema.safeParse(value);
   return parsed.success ? parsed.data : null;
+}
+
+type AcceptanceStatus = AvailableAcceptanceProjection["status"];
+type AcceptanceGateEvidence = {
+  campaignLifecycleStatus: AvailableAcceptanceProjection["latestCampaign"]["lifecycleStatus"];
+  campaignProgressStatus: AvailableAcceptanceProjection["latestCampaign"]["progress"]["status"];
+  campaignResultsStatus: AvailableAcceptanceProjection["latestCampaign"]["currentResults"]["status"];
+  engineeringBlockerCount: number;
+  fleet: CourseSupportAcceptanceFleet;
+  futureAutomaticStatus: AvailableAcceptanceProjection["operational"]["futureAutomaticWithin24Hours"]["status"];
+  repeatImplementationsStatus: AvailableAcceptanceProjection["operational"]["repeatImplementations"]["status"];
+  rollingHumanReviewStatus: AvailableAcceptanceProjection["operational"]["rollingHumanReview"]["status"];
+};
+
+function getExpectedAcceptanceStatus(
+  evidence: AcceptanceGateEvidence,
+): AcceptanceStatus {
+  const hasUnknownEvidence =
+    evidence.campaignProgressStatus === "UNKNOWN" ||
+    evidence.campaignResultsStatus === "UNKNOWN" ||
+    ["UNKNOWN", "NO_DATA"].includes(evidence.futureAutomaticStatus) ||
+    ["UNKNOWN", "NO_DATA"].includes(evidence.rollingHumanReviewStatus) ||
+    evidence.repeatImplementationsStatus === "UNKNOWN";
+  const hasFailedGate =
+    evidence.campaignLifecycleStatus === "FAILED" ||
+    evidence.futureAutomaticStatus === "FAIL" ||
+    evidence.rollingHumanReviewStatus === "FAIL" ||
+    evidence.repeatImplementationsStatus === "FAIL";
+  const hasIncompleteBaseline =
+    evidence.campaignLifecycleStatus !== "COMPLETED" ||
+    evidence.campaignProgressStatus !== "COMPLETE" ||
+    evidence.engineeringBlockerCount !== 0 ||
+    evidence.fleet.engineeringNeededCount !== 0 ||
+    evidence.futureAutomaticStatus === "IN_PROGRESS";
+
+  return hasFailedGate
+    ? "FAIL"
+    : hasUnknownEvidence
+      ? "UNKNOWN"
+      : hasIncompleteBaseline
+        ? "IN_PROGRESS"
+        : "PASS";
+}
+
+function hasCoherentAvailableAcceptanceEvidence(
+  projection: AvailableAcceptanceProjection,
+) {
+  const campaign = projection.latestCampaign;
+  const progress = campaign.progress;
+  const results = campaign.currentResults;
+  const baseline = campaign.baselineAutomaticWithin24Hours;
+  const evidence = campaign.aggregateEvidenceCategories;
+  const terminalBucketCount =
+    results.monitoredCount +
+    results.bookingNotOpenCount +
+    results.factualLimitationCount +
+    results.technicalLimitationCount +
+    results.sourceUnverifiedCount;
+  const expectedResultCount =
+    progress.terminalCount +
+    results.readyCount +
+    results.activeCount +
+    results.engineeringBlockerCount;
+  const bucketInvariantHolds =
+    terminalBucketCount === progress.terminalCount &&
+    results.accountedCount === results.resultCount + results.missingCount &&
+    results.accountedCount === results.totalCount;
+  const countsAreCoherent =
+    progress.terminalCount + progress.pendingCount === progress.totalCount &&
+    results.resultCount === expectedResultCount &&
+    bucketInvariantHolds &&
+    baseline.automaticCount <= progress.terminalCount;
+  const expectedProgressStatus = !countsAreCoherent
+    ? "UNKNOWN"
+    : progress.terminalCount === progress.totalCount &&
+        progress.remainingGlobalParkedCount === 0
+      ? "COMPLETE"
+      : "IN_PROGRESS";
+  const expectedResultsStatus =
+    countsAreCoherent && results.missingCount === 0 ? "PASS" : "UNKNOWN";
+  const sourcePartitionCount =
+    evidence.sourceMissingCount +
+    evidence.sourceConflictCount +
+    evidence.providerSpecificCount;
+  const priorEvidenceMemberCount =
+    campaign.expectedCount - evidence.noPriorEvidenceCount;
+
+  return (
+    campaign.expectedCount === campaign.totalCount &&
+    progress.totalCount === campaign.totalCount &&
+    results.totalCount === campaign.totalCount &&
+    baseline.totalCount === campaign.totalCount &&
+    sourcePartitionCount === campaign.expectedCount &&
+    evidence.noPriorEvidenceCount <= campaign.expectedCount &&
+    evidence.priorProbeCount <= priorEvidenceMemberCount &&
+    evidence.priorDiscoveryCount <= priorEvidenceMemberCount &&
+    evidence.priorProbeCount + evidence.priorDiscoveryCount >=
+      priorEvidenceMemberCount &&
+    countsAreCoherent &&
+    results.bucketInvariantStatus ===
+      (bucketInvariantHolds ? "PASS" : "UNKNOWN") &&
+    results.status === expectedResultsStatus &&
+    progress.status === expectedProgressStatus &&
+    (campaign.lifecycleStatus !== "COMPLETED" ||
+      (progress.terminalCount === progress.totalCount &&
+        progress.pendingCount === 0)) &&
+    hasCoherentBaselineAutomaticStatus(campaign) &&
+    hasCoherentFutureAutomaticStatus(
+      projection.operational.futureAutomaticWithin24Hours,
+    ) &&
+    hasCoherentRollingHumanReviewStatus(
+      projection.operational.rollingHumanReview,
+    ) &&
+    hasCoherentRepeatImplementationStatus(
+      projection.operational.repeatImplementations,
+    )
+  );
+}
+
+function hasCoherentBaselineAutomaticStatus(
+  campaign: AvailableAcceptanceProjection["latestCampaign"],
+) {
+  const baseline = campaign.baselineAutomaticWithin24Hours;
+  const capturedAt = new Date(campaign.capturedAt).getTime();
+  const deadlineAt = new Date(baseline.deadlineAt).getTime();
+  if (deadlineAt - capturedAt !== 24 * 60 * 60 * 1_000) return false;
+
+  const meetsTarget =
+    baseline.automaticCount * 100 >=
+    baseline.totalCount * baseline.targetPercent;
+  if (meetsTarget) return baseline.status === "PASS";
+
+  const maximumPossibleAutomaticCount =
+    baseline.totalCount -
+    (campaign.progress.terminalCount - baseline.automaticCount);
+  const mustFail =
+    campaign.lifecycleStatus === "FAILED" ||
+    campaign.lifecycleStatus === "COMPLETED" ||
+    maximumPossibleAutomaticCount * 100 <
+      baseline.totalCount * baseline.targetPercent;
+  // The projection omits its observation time, so a still-running campaign can
+  // be either in progress or failed after the fixed deadline has elapsed.
+  return mustFail
+    ? baseline.status === "FAIL"
+    : baseline.status === "FAIL" || baseline.status === "IN_PROGRESS";
+}
+
+function hasCoherentFutureAutomaticStatus(
+  future: AvailableAcceptanceProjection["operational"]["futureAutomaticWithin24Hours"],
+) {
+  const partitionCount =
+    future.automaticCount +
+    future.nonAutomaticCount +
+    future.pendingCount +
+    future.unknownCount;
+  if (partitionCount !== future.eligibleCount) return false;
+  if (future.eligibleCount === 0) {
+    return future.ratePercent === null && future.status === "NO_DATA";
+  }
+  if (future.unknownCount > 0) {
+    return future.ratePercent === null && future.status === "UNKNOWN";
+  }
+
+  const expectedRatePercent = roundRatePercent(
+    future.automaticCount,
+    future.eligibleCount,
+  );
+  const maximumPossibleAutomaticCount =
+    future.automaticCount + future.pendingCount;
+  const expectedStatus =
+    future.automaticCount * 100 >= future.eligibleCount * future.targetPercent
+      ? "PASS"
+      : maximumPossibleAutomaticCount * 100 <
+          future.eligibleCount * future.targetPercent
+        ? "FAIL"
+        : future.pendingCount > 0
+          ? "IN_PROGRESS"
+          : "FAIL";
+  return (
+    future.ratePercent === expectedRatePercent &&
+    future.status === expectedStatus
+  );
+}
+
+function hasCoherentRollingHumanReviewStatus(
+  rolling: AvailableAcceptanceProjection["operational"]["rollingHumanReview"],
+) {
+  // Ambiguity describes endpoint provenance and may overlap the human-review
+  // classification for the same incident cycle; these are not disjoint bins.
+  if (
+    rolling.humanReviewCount > rolling.endpointCount ||
+    rolling.ambiguousEndpointCount > rolling.endpointCount
+  ) {
+    return false;
+  }
+  if (rolling.endpointCount === 0) {
+    return (
+      rolling.humanReviewCount === 0 &&
+      rolling.ambiguousEndpointCount === 0 &&
+      rolling.ratePercent === null &&
+      rolling.status === "NO_DATA"
+    );
+  }
+  if (rolling.ambiguousEndpointCount > 0) {
+    return rolling.ratePercent === null && rolling.status === "UNKNOWN";
+  }
+
+  const expectedRatePercent = roundRatePercent(
+    rolling.humanReviewCount,
+    rolling.endpointCount,
+  );
+  const expectedStatus =
+    rolling.humanReviewCount * 100 <=
+    rolling.endpointCount * rolling.targetPercent
+      ? "PASS"
+      : "FAIL";
+  return (
+    rolling.ratePercent === expectedRatePercent &&
+    rolling.status === expectedStatus
+  );
+}
+
+function hasCoherentRepeatImplementationStatus(
+  repeat: AvailableAcceptanceProjection["operational"]["repeatImplementations"],
+) {
+  if (repeat.implementationGroupCount > repeat.implementationBatchCount) {
+    return false;
+  }
+  if (
+    repeat.repeatImplementationCount !==
+    repeat.implementationBatchCount - repeat.implementationGroupCount
+  ) {
+    return false;
+  }
+  // UNKNOWN distinguishes incomplete provenance that is not present in the
+  // aggregate counters; a positive repeat count is still always a failure.
+  return repeat.repeatImplementationCount > 0
+    ? repeat.status === "FAIL"
+    : repeat.status === "PASS" || repeat.status === "UNKNOWN";
+}
+
+function roundRatePercent(numerator: number, denominator: number) {
+  return Math.round((numerator / denominator) * 1_000) / 10;
 }
 
 export type CourseSupportAcceptanceProjection =
@@ -383,30 +660,17 @@ function buildAvailableCourseSupportAcceptanceProjection(input: {
   const futureAutomatic = input.campaign.futureAutomaticWithin24Hours;
   const rollingHumanReview = input.campaign.rollingHumanReview;
   const repeatImplementations = input.campaign.repeatImplementations;
-  const hasUnknownEvidence =
-    input.campaign.progress.status === "UNKNOWN" ||
-    input.campaign.currentResults.status === "UNKNOWN" ||
-    ["UNKNOWN", "NO_DATA"].includes(futureAutomatic.status) ||
-    ["UNKNOWN", "NO_DATA"].includes(rollingHumanReview.status) ||
-    repeatImplementations.status === "UNKNOWN";
-  const hasFailedGate =
-    input.campaign.status === "FAILED" ||
-    futureAutomatic.status === "FAIL" ||
-    rollingHumanReview.status === "FAIL" ||
-    repeatImplementations.status === "FAIL";
-  const hasIncompleteBaseline =
-    input.campaign.status !== "COMPLETED" ||
-    input.campaign.progress.status !== "COMPLETE" ||
-    input.campaign.currentResults.engineeringBlockerCount !== 0 ||
-    input.fleet.engineeringNeededCount !== 0 ||
-    futureAutomatic.status === "IN_PROGRESS";
-  const status = hasFailedGate
-    ? "FAIL"
-    : hasUnknownEvidence
-      ? "UNKNOWN"
-      : hasIncompleteBaseline
-        ? "IN_PROGRESS"
-        : "PASS";
+  const status = getExpectedAcceptanceStatus({
+    campaignLifecycleStatus: input.campaign.status,
+    campaignProgressStatus: input.campaign.progress.status,
+    campaignResultsStatus: input.campaign.currentResults.status,
+    engineeringBlockerCount:
+      input.campaign.currentResults.engineeringBlockerCount,
+    fleet: input.fleet,
+    futureAutomaticStatus: futureAutomatic.status,
+    repeatImplementationsStatus: repeatImplementations.status,
+    rollingHumanReviewStatus: rollingHumanReview.status,
+  });
 
   return {
     schemaVersion: ACCEPTANCE_SCHEMA_VERSION,

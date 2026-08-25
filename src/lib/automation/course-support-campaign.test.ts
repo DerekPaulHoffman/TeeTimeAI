@@ -9,6 +9,7 @@ import {
   deriveParkedCourseCampaignHumanReviewCycles,
   getReportSafeProviderFamilyCategory,
   inspectActiveParkedCourseCampaign,
+  loadCampaignMemberObservations,
   loadParkedCourseCampaignAdmissionMembers,
   loadParkedCourseCampaignMembers,
   parseParkedCourseCampaignAudit,
@@ -3377,6 +3378,178 @@ describe("parked course campaign", () => {
 
     expect(progress.terminalCount).toBe(0);
     expect(progress.engineeringBlockerCount).toBe(1);
+  });
+
+  it("reconciles only an exact DB-loaded legacy factual terminal carrier", async () => {
+    const campaignRunId = "campaign-run-legacy";
+    const releaseSha = "a".repeat(40);
+    const confirmedAt = new Date("2026-08-20T12:01:00.000Z");
+    const deployedAt = new Date("2026-08-20T12:02:00.000Z");
+    const dispatchStartedAt = new Date("2026-08-20T12:03:00.000Z");
+    const verifiedAt = new Date("2026-08-20T12:06:00.000Z");
+    const closeoutAt = new Date("2026-08-20T12:07:00.000Z");
+    const audit = createParkedCourseCampaignAudit({
+      expectedCount: 1,
+      capturedAt,
+      members: [member(1)],
+    });
+    const courseRef = createHash("sha256")
+      .update("course-1")
+      .digest("hex")
+      .slice(0, 24);
+    const event = {
+      id: "legacy-terminal-event",
+      incidentId: "incident-1",
+      courseId: "course-1",
+      eventType: "STATE_CHANGED",
+      source: "COURSE_SUPPORT_RESPONDER",
+      fromState: "AUTO_INVESTIGATING",
+      toState: "FINAL_IDENTITY",
+      occurredAt: closeoutAt,
+      outcome: null,
+      runtimeVersion: releaseSha,
+      deploymentSha: releaseSha,
+      audit: {
+        automatedFinal: true,
+        finalKind: "identity",
+        customerDataIncluded: false,
+        cycle: 4,
+        confirmedAt: confirmedAt.toISOString(),
+        campaign: {
+          kind: "PARKED_COHORT",
+          runId: campaignRunId,
+          membershipDigest: audit.membershipDigest,
+          cycle: 4,
+        },
+      },
+    };
+    const incident = {
+      id: "incident-1",
+      courseId: "course-1",
+      cycle: 4,
+      status: "RESOLVED",
+      activeBatchId: null,
+      confirmedAt,
+      firstSeenAt: new Date("2026-08-19T12:00:00.000Z"),
+      providerFamilyKey: "CPS",
+      failureClass: "MISSING_METADATA",
+      attemptCount: 1,
+      activeRealSearchCount: 0,
+      attemptLedger: null,
+      resolution: "IDENTITY_CLASSIFIED",
+      resolvedAt: closeoutAt,
+      decisionAt: null,
+      monitoringEvents: [event],
+      course: {
+        monitoringStatus: {
+          state: "FINAL_IDENTITY",
+          stateChangedAt: closeoutAt,
+        },
+        probes: [],
+      },
+    };
+    const entry = {
+      id: "legacy-terminal-entry",
+      batchId: "legacy-terminal-batch",
+      incidentId: "incident-1",
+      courseId: "course-1",
+      cycle: 4,
+      result: "FINAL_DISPOSITION",
+      proofSnapshot: {
+        kind: "EXACT_PLACE_REVIEW",
+        disposition: "VERIFIED_NON_COURSE",
+        classification: "PRIVATE_PRACTICE_GREEN",
+        evidenceOrigin: "https://course.example",
+        reviewedAt: "2026-08-20T00:00:00.000Z",
+        reviewUpdatedAt: "2026-08-20T12:04:00.000Z",
+        automationEligibility: "BLOCKED",
+        automationReason: "OTHER",
+      },
+      verifiedAt,
+      verifiedIncidentUpdatedAt: new Date("2026-08-20T12:05:00.000Z"),
+      createdAt: new Date("2026-08-20T12:00:30.000Z"),
+      updatedAt: verifiedAt,
+      batch: {
+        id: "legacy-terminal-batch",
+        status: "SUCCEEDED",
+        createdAt: new Date("2026-08-20T12:00:30.000Z"),
+        completedAt: closeoutAt,
+        releaseSha,
+        deployedAt,
+        recheckDispatchStartedAt: dispatchStartedAt,
+        summary: {
+          campaign: {
+            kind: "PARKED_COHORT",
+            attempts: [
+              {
+                courseRef,
+                runId: campaignRunId,
+                membershipDigest: audit.membershipDigest,
+                cycle: 4,
+              },
+            ],
+          },
+        },
+      },
+    };
+    const incidentFindMany = vi.fn().mockResolvedValue([incident]);
+    const batchIncidentFindMany = vi.fn();
+    const loadObservations = (batchEntry: typeof entry) => {
+      batchIncidentFindMany.mockResolvedValueOnce([batchEntry]);
+      return loadCampaignMemberObservations(audit, new Set(), campaignRunId, {
+        courseSupportIncident: {
+          findMany: incidentFindMany,
+        },
+        courseSupportBatchIncident: {
+          findMany: batchIncidentFindMany,
+        },
+      } as never);
+    };
+
+    const exactObservations = await loadObservations(entry);
+    expect(batchIncidentFindMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          OR: [{ incidentId: "incident-1", cycle: 4 }],
+          batch: expect.objectContaining({ completedAt: { gte: capturedAt } }),
+        }),
+      }),
+    );
+    expect(exactObservations).toEqual([
+      expect.objectContaining({
+        campaignTerminalFreshRuntimeProof: true,
+        campaignTerminalAutomatedFinal: true,
+      }),
+    ]);
+    expect(
+      summarizeParkedCourseCampaignProgress({
+        audit,
+        observations: exactObservations,
+        remainingGlobalParkedCount: 0,
+      }),
+    ).toMatchObject({
+      terminalCount: 1,
+      factualLimitationCount: 1,
+      engineeringBlockerCount: 0,
+    });
+
+    const mismatchedEntry = structuredClone(entry);
+    mismatchedEntry.batch.releaseSha = "b".repeat(40);
+    const mismatchedObservations = await loadObservations(mismatchedEntry);
+    expect(mismatchedObservations).toEqual([
+      expect.objectContaining({ campaignTerminalFreshRuntimeProof: false }),
+    ]);
+    expect(
+      summarizeParkedCourseCampaignProgress({
+        audit,
+        observations: mismatchedObservations,
+        remainingGlobalParkedCount: 0,
+      }),
+    ).toMatchObject({
+      terminalCount: 0,
+      factualLimitationCount: 0,
+      engineeringBlockerCount: 1,
+    });
   });
 
   it("requires fresh terminal evidence and a current-runtime read for recovery", () => {

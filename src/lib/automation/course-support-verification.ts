@@ -40,6 +40,10 @@ import {
 } from "./provider-capabilities";
 import { sanitizeResponderText } from "./course-support-responder-policy";
 import { getAutomationRuntimeVersion } from "./runtime-version";
+import {
+  isAssignedDetachedStageProgression,
+  isExactAssignedDetachedStageDirective,
+} from "./course-support-remediation-routing";
 
 export const COURSE_SUPPORT_VERIFICATION_LEASE_MS = 10 * 60 * 1000;
 export const COURSE_SUPPORT_VERIFICATION_ACTIVE_BATCH_CAPACITY = 5;
@@ -117,7 +121,9 @@ const requestExecutionSelect = {
   discoveryAttemptedAt: true,
   discoveryVerifiedAt: true,
   startedAt: true,
+  completedAt: true,
   createdAt: true,
+  updatedAt: true,
   lastError: true,
   batchIncident: {
     select: {
@@ -693,6 +699,7 @@ export async function claimCourseSupportVerificationRequest(input: {
         buildDetachedEligibilityInputFromRequest(request),
         now,
         "PROGRESSION",
+        { kind: "RECLAIMABLE_REQUEST", request },
       );
       if (!eligibility.eligible) {
         await markRequestStale(transaction, request, now, eligibility.reason);
@@ -848,6 +855,7 @@ export async function attachCourseSupportVerificationProviderSnapshot(input: {
         buildDetachedEligibilityInputFromRequest(ownedRequest),
         now,
         "PROGRESSION",
+        { kind: "VALIDATED_CHECKING", request: ownedRequest },
       );
       if (!eligibility.eligible) {
         await markRequestStale(
@@ -1001,6 +1009,7 @@ export async function markCourseSupportVerificationDiscoveryAttempted(input: {
         buildDetachedEligibilityInputFromRequest(ownedRequest),
         now,
         "PROGRESSION",
+        { kind: "VALIDATED_CHECKING", request: ownedRequest },
       );
       if (!eligibility.eligible) {
         await markRequestStale(
@@ -1110,6 +1119,7 @@ export async function markCourseSupportVerificationDiscoveryVerified(input: {
         buildDetachedEligibilityInputFromRequest(ownedRequest),
         now,
         "PROGRESSION",
+        { kind: "VALIDATED_CHECKING", request: ownedRequest },
       );
       if (!eligibility.eligible) {
         await markRequestStale(
@@ -1196,6 +1206,7 @@ export async function completeCourseSupportVerificationRequest(input: {
         buildDetachedEligibilityInputFromRequest(ownedRequest),
         now,
         "PROGRESSION",
+        { kind: "VALIDATED_CHECKING", request: ownedRequest },
       );
       if (!eligibility.eligible) {
         await markRequestStale(
@@ -1348,6 +1359,7 @@ export async function completeCourseSupportVerificationFactualFinal(input: {
         buildDetachedEligibilityInputFromRequest(ownedRequest),
         now,
         "PROGRESSION",
+        { kind: "VALIDATED_CHECKING", request: ownedRequest },
       );
       if (!eligibility.eligible) {
         await markRequestStale(
@@ -1516,6 +1528,7 @@ export async function failCourseSupportVerificationRequest(input: {
         buildDetachedEligibilityInputFromRequest(ownedRequest),
         now,
         "PROGRESSION",
+        { kind: "VALIDATED_CHECKING", request: ownedRequest },
       );
       const provider = buildProviderSnapshot(ownedRequest.course);
       const deferredFailureRouteClaimed =
@@ -1706,6 +1719,8 @@ export async function getEligibleCourseSupportVerificationProof(input: {
           transaction,
           buildDetachedEligibilityInputFromRequest(request),
           now,
+          "PROOF",
+          { kind: "DURABLE_RESULT", request },
         );
         if (!eligibility.eligible) {
           await markRequestStale(transaction, request, now, eligibility.reason);
@@ -1752,6 +1767,8 @@ export async function getEligibleCourseSupportVerificationProof(input: {
         transaction,
         buildDetachedEligibilityInputFromRequest(request),
         now,
+        "PROOF",
+        { kind: "DURABLE_RESULT", request },
       );
       if (!eligibility.eligible) {
         await markRequestStale(transaction, request, now, eligibility.reason);
@@ -1845,6 +1862,8 @@ export async function getCurrentCourseSupportVerificationFailure(input: {
         transaction,
         buildDetachedEligibilityInputFromRequest(request),
         now,
+        "PROOF",
+        { kind: "DURABLE_RESULT", request },
       );
       if (!eligibility.eligible) {
         await markRequestStaleIfNeeded(
@@ -2607,6 +2626,20 @@ type DetachedEligibilityInput = {
   };
 };
 
+type DetachedEligibilityAuthority =
+  | {
+      kind: "VALIDATED_CHECKING";
+      request: VerificationExecutionRow;
+    }
+  | {
+      kind: "RECLAIMABLE_REQUEST";
+      request: VerificationExecutionRow;
+    }
+  | {
+      kind: "DURABLE_RESULT";
+      request: VerificationExecutionRow;
+    };
+
 function buildDetachedEligibilityInput(input: {
   batch: {
     id: string;
@@ -2663,6 +2696,7 @@ async function evaluateDetachedEligibility(
   input: DetachedEligibilityInput,
   now: Date,
   mode: "PROGRESSION" | "PROOF" = "PROOF",
+  authority?: DetachedEligibilityAuthority,
 ): Promise<
   | { eligible: true }
   | {
@@ -2697,12 +2731,17 @@ async function evaluateDetachedEligibility(
   ) {
     return { eligible: true };
   }
-  const assignedBrowserAdapterProgression =
-    isAssignedZeroAttemptBrowserAdapterProgression(input);
+  const assignedDetachedStageProgression = isAssignedDetachedProgression(input);
+  const ownedAssignedLocalReaderProgression =
+    hasOwnedAssignedLocalReaderProgression(input, authority, now);
+  const monitoringGate = evaluateMonitoringGate({ ...input.course, now });
+  const assignedTechnicalFinalProgression = Boolean(
+    monitoringGate.disposition === "TECHNICAL_FINAL" &&
+    (assignedDetachedStageProgression || ownedAssignedLocalReaderProgression),
+  );
   if (
-    !assignedBrowserAdapterProgression &&
-    evaluateMonitoringGate({ ...input.course, now }).disposition !==
-      "ACTIONABLE"
+    monitoringGate.disposition !== "ACTIONABLE" &&
+    !assignedTechnicalFinalProgression
   ) {
     return { eligible: false, reason: "monitoring_not_actionable" };
   }
@@ -2770,52 +2809,225 @@ async function evaluateDetachedEligibility(
   return { eligible: true };
 }
 
-function isAssignedZeroAttemptBrowserAdapterProgression(
-  input: DetachedEligibilityInput,
-) {
+function isAssignedDetachedProgression(input: DetachedEligibilityInput) {
   const remediation = asJsonRecord(
     asJsonRecord(input.batchSummary).remediation,
   );
-  const rawRetryBudget = remediation.retryBudget;
-  const retryBudget = asJsonRecord(rawRetryBudget);
-  const retryBudgetAvailable =
-    rawRetryBudget === null ||
-    rawRetryBudget === undefined ||
-    (Number.isInteger(retryBudget.maximumAttempts) &&
-      Number.isInteger(retryBudget.attemptsCompleted) &&
-      Number.isInteger(retryBudget.attemptsRemaining) &&
-      (retryBudget.maximumAttempts as number) > 0 &&
-      (retryBudget.attemptsCompleted as number) >= 0 &&
-      (retryBudget.attemptsRemaining as number) ===
-        Math.max(
-          0,
-          (retryBudget.maximumAttempts as number) -
-            (retryBudget.attemptsCompleted as number),
-        ) &&
-      retryBudget.exhausted === false &&
-      (retryBudget.attemptsRemaining as number) > 0);
   const playbook = assessAutomationPlaybook(
     input.incident.attemptLedger,
     input.incident.cycle,
   );
-  const browserStage = playbook.stages.find(
-    (stage) => stage.stage === "BROWSER_ADAPTER_RETRY",
+  const nextStageAssessment = playbook.stages.find(
+    (stage) => stage.stage === playbook.nextStage,
   );
-  const providerCapability = resolveProviderCapability(input.course);
+  const assigned = isAssignedDetachedStageProgression({
+    remediationDirective: remediation,
+    playbookConclusion: playbook.conclusion,
+    nextPlaybookStage: playbook.nextStage,
+    nextPlaybookStageStatus: nextStageAssessment?.status,
+    nextPlaybookStageAttemptCount: nextStageAssessment?.attemptCount,
+  });
   return Boolean(
-    remediation.workMode === "VERIFY_TRANSIENT" &&
-    remediation.strategyAction === "RUN_TYPED_ADAPTER" &&
-    remediation.playbookStage === "BROWSER_ADAPTER_RETRY" &&
-    remediation.allowUnchangedRuntime === true &&
-    remediation.requiresImplementationPath === false &&
-    retryBudgetAvailable &&
-    !providerCapability.isRunnable &&
     playbook.valid === true &&
     playbook.cycle === input.incident.cycle &&
-    playbook.conclusion === "INCOMPLETE" &&
-    playbook.nextStage === "BROWSER_ADAPTER_RETRY" &&
-    browserStage?.attemptCount === 0,
+    assigned &&
+    (playbook.nextStage !== "BROWSER_ADAPTER_RETRY" ||
+      !resolveProviderCapability(input.course).isRunnable),
   );
+}
+
+const SIGNED_LOCAL_READER_RESULT_TRANSITIONS = new Set<
+  AutomationPlaybookEvent["transition"]
+>(["FAILED_TERMINAL", "SUCCEEDED", "TECHNICAL_LIMITATION"]);
+
+function hasOwnedDetachedLifecycleRuntime(
+  event: AutomationPlaybookEvent,
+  releaseSha: string,
+) {
+  if (event.runtimeVersion === releaseSha) return true;
+
+  // Parsed ledgers already enforce the bounded runtime-version schema. Only
+  // result-bearing transitions written from a validated signed-reader result
+  // carry the reader's semantic version instead of the owning release SHA.
+  return Boolean(
+    event.stage === "LOCAL_READER" &&
+      event.evidenceKind === "LOCAL_READER_RESULT" &&
+      SIGNED_LOCAL_READER_RESULT_TRANSITIONS.has(event.transition),
+  );
+}
+
+function hasOwnedAssignedLocalReaderProgression(
+  input: DetachedEligibilityInput,
+  authority: DetachedEligibilityAuthority | undefined,
+  now: Date,
+) {
+  if (!authority) return false;
+  const request = authority.request;
+  const remediation = asJsonRecord(
+    asJsonRecord(input.batchSummary).remediation,
+  );
+  if (
+    !isExactAssignedDetachedStageDirective({
+      remediationDirective: remediation,
+      stage: "LOCAL_READER",
+    }) ||
+    request.batchIncidentId !== input.batchIncidentId ||
+    request.batchIncident.id !== input.batchIncidentId ||
+    request.batchIncident.incidentId !== input.batchIncidentIncidentId ||
+    request.batchIncident.incident.id !== input.batchIncidentIncidentId ||
+    request.batchIncident.courseId !== input.courseId ||
+    request.courseId !== input.courseId ||
+    request.batchIncident.cycle !== input.batchIncidentCycle ||
+    request.batchIncident.incident.cycle !== input.incident.cycle ||
+    request.batchIncident.batch.id !== input.batchId ||
+    request.batchIncident.incident.activeBatchId !== input.batchId ||
+    request.releaseSha !== input.releaseSha ||
+    request.runtimeVersion !== input.releaseSha ||
+    request.batchIncident.batch.releaseSha !== input.releaseSha ||
+    request.createdAt.getTime() <
+      request.batchIncident.batch.createdAt.getTime() ||
+    request.createdAt.getTime() > now.getTime() ||
+    request.updatedAt.getTime() < request.createdAt.getTime() ||
+    request.updatedAt.getTime() > now.getTime()
+  ) {
+    return false;
+  }
+
+  if (authority.kind === "VALIDATED_CHECKING") {
+    if (
+      request.status !== "CHECKING" ||
+      !request.leaseToken ||
+      !request.leaseExpiresAt ||
+      request.leaseExpiresAt.getTime() <= now.getTime() ||
+      isRequestHorizonExpired(request, now)
+    ) {
+      return false;
+    }
+  } else if (authority.kind === "RECLAIMABLE_REQUEST") {
+    if (
+      (request.status !== "RETRYABLE_FAILED" &&
+        request.status !== "CHECKING") ||
+      !isDueForClaim(request, now) ||
+      isRequestHorizonExpired(request, now)
+    ) {
+      return false;
+    }
+  } else {
+    if (
+      !request.startedAt ||
+      request.startedAt.getTime() < request.createdAt.getTime() ||
+      request.startedAt.getTime() > now.getTime() ||
+      (request.status !== "SUCCEEDED" &&
+        request.status !== "RETRYABLE_FAILED" &&
+        request.status !== "STALE")
+    ) {
+      return false;
+    }
+    if (request.status === "RETRYABLE_FAILED") {
+      if (
+        request.completedAt !== null ||
+        !request.nextAttemptAt ||
+        request.nextAttemptAt.getTime() >=
+          getVerificationDeadline(request).getTime()
+      ) {
+        return false;
+      }
+    } else if (
+      !request.completedAt ||
+      request.completedAt.getTime() < request.startedAt.getTime() ||
+      request.completedAt.getTime() > now.getTime() ||
+      request.completedAt.getTime() > getVerificationDeadline(request).getTime()
+    ) {
+      return false;
+    }
+  }
+
+  const playbook = assessAutomationPlaybook(
+    input.incident.attemptLedger,
+    input.incident.cycle,
+  );
+  const localReader = playbook.stages.find(
+    (stage) => stage.stage === "LOCAL_READER",
+  );
+  if (
+    !playbook.valid ||
+    playbook.cycle !== input.incident.cycle ||
+    !localReader ||
+    ![
+      "STARTED",
+      "FAILED_RETRYABLE",
+      "FAILED_TERMINAL",
+      "NOT_APPLICABLE",
+      "COMPLETED",
+      "SUCCEEDED",
+      "TECHNICAL_LIMITATION",
+    ].includes(localReader.status) ||
+    (localReader.status === "NOT_APPLICABLE"
+      ? localReader.attemptCount !== 0
+      : localReader.attemptCount <= 0)
+  ) {
+    return false;
+  }
+
+  const ledger = parseAutomationPlaybookLedger(input.incident.attemptLedger);
+  if (!ledger) return false;
+  const lifecycleEvents = ledger.events.filter(
+    (event) =>
+      event.cycle === input.incident.cycle &&
+      (event.stage === "LOCAL_READER" ||
+        event.stage === "INDEPENDENT_CONFIRMATION"),
+  );
+  const ownedLocalReaderTransitions = new Set([
+    "STARTED",
+    "FAILED_RETRYABLE",
+    "FAILED_TERMINAL",
+    "NOT_APPLICABLE",
+    "COMPLETED",
+    "SUCCEEDED",
+    "TECHNICAL_LIMITATION",
+  ]);
+  const findFirstOwnedEventIndex = (eventFloor: Date, notAfter?: Date) =>
+    lifecycleEvents.findIndex((event) => {
+      const observedAt = Date.parse(event.observedAt);
+      return (
+        event.stage === "LOCAL_READER" &&
+        ownedLocalReaderTransitions.has(event.transition) &&
+        hasOwnedDetachedLifecycleRuntime(event, input.releaseSha) &&
+        Number.isFinite(observedAt) &&
+        observedAt >= eventFloor.getTime() &&
+        (!notAfter || observedAt <= notAfter.getTime())
+      );
+    });
+  let eventFloor = request.startedAt ?? request.createdAt;
+  let firstOwnedEventIndex = findFirstOwnedEventIndex(eventFloor);
+  if (firstOwnedEventIndex < 0 && request.startedAt) {
+    // A direct reader result can be durably recorded immediately before the
+    // first provider attachment persists startedAt. Prefer post-start events,
+    // but retain that exact owned, post-creation handoff when needed.
+    eventFloor = request.createdAt;
+    firstOwnedEventIndex = findFirstOwnedEventIndex(
+      eventFloor,
+      request.startedAt,
+    );
+  }
+  if (firstOwnedEventIndex < 0) return false;
+
+  const lifecycleUpperBound =
+    authority.kind === "DURABLE_RESULT" && request.completedAt
+      ? request.completedAt.getTime()
+      : now.getTime();
+  let previousObservedAt = eventFloor.getTime();
+  return lifecycleEvents.slice(firstOwnedEventIndex).every((event) => {
+    const observedAt = Date.parse(event.observedAt);
+    const current = Boolean(
+      hasOwnedDetachedLifecycleRuntime(event, input.releaseSha) &&
+      Number.isFinite(observedAt) &&
+      observedAt >= previousObservedAt &&
+      observedAt <= lifecycleUpperBound,
+    );
+    previousObservedAt = observedAt;
+    return current;
+  });
 }
 
 function validateExecutionOwnership(
