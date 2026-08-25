@@ -556,7 +556,7 @@ function resolveOwnedProviderContractContext(
     entry.course.automationDiscoveries,
     entry.cycle,
     entry.incident.firstSeenAt,
-    entry.course.providerFamilyKey,
+    batch.providerFamilyKey,
     currentProviderSnapshotFingerprint,
   );
   const bookingUrl = selectTrustedBookingLandingUrl(
@@ -596,7 +596,7 @@ function resolveOwnedProviderContractContext(
     outcome: "ready",
     authorityDigest,
     evidenceDigest,
-    providerFamilyKey: entry.course.providerFamilyKey,
+    providerFamilyKey: batch.providerFamilyKey,
     officialUrl,
     bookingUrl,
     browserContracts: browserEvidence?.contracts ?? [],
@@ -642,6 +642,12 @@ function resolveProviderContractBatchMemberAuthority(input: {
   const incidentProviderFamily = normalizeProviderContractAuthorityFamily(
     entry.incident.providerFamilyKey,
   );
+  const courseProjectionIsExplicitlySourceMissing =
+    entry.course.providerFamilyKey.trim().toUpperCase() ===
+    SOURCE_MISSING_PROVIDER_FAMILY;
+  const courseProjectionMatchesClaimedFamily =
+    input.batchProviderFamily === courseProviderFamily ||
+    courseProjectionIsExplicitlySourceMissing;
   const authoritativeMonitoringDrift = entry.course.monitoringEvents.some(
     (event) =>
       event.occurredAt.getTime() >= batch.createdAt.getTime() &&
@@ -659,7 +665,7 @@ function resolveProviderContractBatchMemberAuthority(input: {
     entry.incident.activeBatchId !== input.batchId ||
     entry.incident.resolution !== null ||
     !["NEEDS_ADAPTER", "FETCH_FAILED"].includes(entry.incident.kind) ||
-    input.batchProviderFamily !== courseProviderFamily ||
+    !courseProjectionMatchesClaimedFamily ||
     input.batchProviderFamily !== incidentProviderFamily ||
     batch.failureFingerprint !== entry.incident.failureFingerprint ||
     !claimedAttempt ||

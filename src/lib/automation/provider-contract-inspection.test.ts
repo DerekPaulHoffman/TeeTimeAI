@@ -299,18 +299,64 @@ function ownedDatabaseBatch(input?: {
   };
 }
 
+function advanceOwnedBatchToOfficialHttpRetry(
+  batch: ReturnType<typeof ownedDatabaseBatch>,
+) {
+  batch.incidents.forEach((entry, index) => {
+    let ledger = appendAutomationPlaybookEvent(entry.incident.attemptLedger, {
+      cycle: 1,
+      stage: "TYPED_ADAPTER",
+      transition: "NOT_APPLICABLE",
+      readPath: "TYPED_PROVIDER_ADAPTER",
+      evidenceKind: "TOOLING",
+      failureFingerprint: "TEST:TYPED_ADAPTER:SKIPPED",
+      runtimeVersion: "test-runtime",
+      skipReason: "NO_RUNNABLE_ADAPTER",
+      observedAt: new Date(now.getTime() + 1),
+    });
+    ledger = appendAutomationPlaybookEvent(ledger, {
+      cycle: 1,
+      stage: "OFFICIAL_HTTP_DISCOVERY",
+      transition: "STARTED",
+      readPath: "OFFICIAL_HTTP",
+      evidenceKind: "OFFICIAL_SOURCE",
+      failureFingerprint: "TEST:OFFICIAL_HTTP:NETWORK",
+      runtimeVersion: "test-runtime",
+      observedAt: new Date(now.getTime() + 2),
+    });
+    ledger = appendAutomationPlaybookEvent(ledger, {
+      cycle: 1,
+      stage: "OFFICIAL_HTTP_DISCOVERY",
+      transition: "FAILED_RETRYABLE",
+      readPath: "OFFICIAL_HTTP",
+      evidenceKind: "OFFICIAL_SOURCE",
+      failureClass: "NETWORK",
+      failureFingerprint: "TEST:OFFICIAL_HTTP:NETWORK",
+      runtimeVersion: "test-runtime",
+      observedAt: new Date(now.getTime() + 3),
+    });
+    entry.incident.attemptLedger = ledger;
+    batch.summary.remediation.attempts[index].playbookEventCountAtClaim =
+      ledger.events.length;
+  });
+  return batch;
+}
+
 function addSecondOwnedBatchMember(
   batch: ReturnType<typeof ownedDatabaseBatch>,
-  input: { name?: string } = {},
+  input: { name?: string; ordinal?: number } = {},
 ) {
-  const second = ownedDatabaseBatch();
+  const ordinal = input.ordinal ?? 2;
+  const second = ownedDatabaseBatch({
+    remediationStage: batch.summary.remediation.playbookStage,
+  });
   const entry = second.incidents[0];
-  entry.id = "batch-entry-2";
-  entry.course.id = "course-zulu";
-  entry.course.name = input.name ?? "Zulu Course";
-  entry.course.website = "https://zulu-public.example/";
+  entry.id = `batch-entry-${ordinal}`;
+  entry.course.id = `course-member-${ordinal}`;
+  entry.course.name = input.name ?? `Course ${ordinal}`;
+  entry.course.website = `https://course-${ordinal}.example/`;
   entry.course.automationDiscoveries = [];
-  entry.incident.id = "incident-2";
+  entry.incident.id = `incident-${ordinal}`;
   const providerSnapshotFingerprint =
     buildCourseSupportProviderSnapshotFingerprint(entry.course);
   const attempt = {
@@ -1510,6 +1556,98 @@ describe("owner-bound provider-contract inspection", () => {
       loadOwnedProviderContractContext(ownerInput),
     ).resolves.toBeNull();
   });
+
+  it("uses the claimed incident family while a snapshot-bound course projection remains source-missing", async () => {
+    const batch = advanceOwnedBatchToOfficialHttpRetry(
+      ownedDatabaseBatch({
+        remediationStage: "OFFICIAL_HTTP_DISCOVERY",
+      }),
+    );
+    const course = batch.incidents[0].course;
+    course.providerFamilyKey = "SOURCE_MISSING";
+    const providerSnapshotFingerprint =
+      buildCourseSupportProviderSnapshotFingerprint(course);
+    batch.summary.remediation.attempts[0].providerSnapshotFingerprint =
+      providerSnapshotFingerprint;
+    course.automationDiscoveries[0].evidence.browserInvestigation.providerSnapshotFingerprint =
+      providerSnapshotFingerprint;
+    prismaMocks.batchFindFirst.mockResolvedValueOnce(batch);
+
+    await expect(
+      loadOwnedProviderContractContext(ownerInput),
+    ).resolves.toMatchObject({
+      providerFamilyKey: "CUSTOM",
+      browserContracts: [
+        expect.objectContaining({
+          method: "GET",
+          pathPattern: "/api/availability",
+        }),
+      ],
+    });
+  });
+
+  it("authorizes every source-missing projection in a four-member claimed cohort", async () => {
+    const batch = ownedDatabaseBatch({
+      remediationStage: "OFFICIAL_HTTP_DISCOVERY",
+    });
+    for (const ordinal of [2, 3, 4]) {
+      addSecondOwnedBatchMember(batch, {
+        ordinal,
+        name: `Zulu Course ${ordinal}`,
+      });
+    }
+    batch.incidents.forEach((entry, index) => {
+      entry.course.providerFamilyKey = "SOURCE_MISSING";
+      const providerSnapshotFingerprint =
+        buildCourseSupportProviderSnapshotFingerprint(entry.course);
+      batch.summary.remediation.attempts[index].providerSnapshotFingerprint =
+        providerSnapshotFingerprint;
+      const browserInvestigation =
+        entry.course.automationDiscoveries[0]?.evidence.browserInvestigation;
+      if (browserInvestigation) {
+        browserInvestigation.providerSnapshotFingerprint =
+          providerSnapshotFingerprint;
+      }
+    });
+    advanceOwnedBatchToOfficialHttpRetry(batch);
+    prismaMocks.batchFindFirst.mockResolvedValueOnce(batch);
+
+    await expect(
+      loadOwnedProviderContractContext(ownerInput),
+    ).resolves.toMatchObject({
+      providerFamilyKey: "CUSTOM",
+      browserContracts: [
+        expect.objectContaining({
+          method: "GET",
+          pathPattern: "/api/availability",
+        }),
+      ],
+    });
+  });
+
+  it.each(["SOURCE_CONFLICT", "FOREUP"])(
+    "rejects a snapshot-bound %s course projection that conflicts with the claimed family",
+    async (providerFamilyKey) => {
+      const batch = advanceOwnedBatchToOfficialHttpRetry(
+        ownedDatabaseBatch({
+          remediationStage: "OFFICIAL_HTTP_DISCOVERY",
+        }),
+      );
+      const course = batch.incidents[0].course;
+      course.providerFamilyKey = providerFamilyKey;
+      const providerSnapshotFingerprint =
+        buildCourseSupportProviderSnapshotFingerprint(course);
+      batch.summary.remediation.attempts[0].providerSnapshotFingerprint =
+        providerSnapshotFingerprint;
+      course.automationDiscoveries[0].evidence.browserInvestigation.providerSnapshotFingerprint =
+        providerSnapshotFingerprint;
+      prismaMocks.batchFindFirst.mockResolvedValueOnce(batch);
+
+      await expect(
+        loadOwnedProviderContractContext(ownerInput),
+      ).resolves.toBeNull();
+    },
+  );
 
   it("requires exact snapshot-bound browser evidence while retaining stale restrictions", async () => {
     const snapshotMismatch = ownedDatabaseBatch();
