@@ -25,10 +25,14 @@ export type CourseSupportVerificationRecoveryResult = {
 export async function recoverDueCourseSupportVerificationRequests(
   input: { now?: Date; limit?: number } = {},
 ): Promise<CourseSupportVerificationRecoveryResult> {
-  const now = input.now ?? new Date();
+  // An injected time intentionally stays fixed for deterministic callers and
+  // tests. Live recovery can process a full batch sequentially, so refresh the
+  // clock before every deadline-sensitive durable transition.
+  const currentTime = () => input.now ?? new Date();
+  const listTime = currentTime();
   const runtimeVersion = getAutomationRuntimeVersion();
   const due = await listDueCourseSupportVerificationRequests({
-    now,
+    now: listTime,
     limit: input.limit ?? COURSE_SUPPORT_VERIFICATION_MAX_STARTS_PER_PASS,
     runtimeVersion,
   });
@@ -41,11 +45,12 @@ export async function recoverDueCourseSupportVerificationRequests(
 
   for (const request of due) {
     try {
+      const claimTime = currentTime();
       const claim = await claimCourseSupportVerificationRequest({
         requestId: request.id,
         expectedRevision: request.revision,
         runtimeVersion,
-        now,
+        now: claimTime,
       });
       if (!claim.claimed) {
         result.skipped += 1;
@@ -65,7 +70,7 @@ export async function recoverDueCourseSupportVerificationRequests(
         // immutable current deployment. `latest` would cross deployments.
         run = await start(courseSupportVerificationWorkflow, [workflowInput]);
       } catch {
-        await persistStartFailure(claim, now);
+        await persistStartFailure(claim, currentTime());
         result.failed += 1;
         continue;
       }
@@ -76,7 +81,7 @@ export async function recoverDueCourseSupportVerificationRequests(
         leaseToken: claim.leaseToken,
         runtimeVersion: claim.runtimeVersion,
         workflowRunId: run.runId,
-        now,
+        now: currentTime(),
       });
       if (!attachment.attached) {
         result.failed += 1;

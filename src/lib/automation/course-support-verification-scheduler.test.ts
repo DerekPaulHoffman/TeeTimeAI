@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   attachCourseSupportVerificationWorkflow: vi.fn(),
@@ -76,6 +76,10 @@ describe("recoverDueCourseSupportVerificationRequests", () => {
       failed: true,
       status: "RETRYABLE_FAILED",
     });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("claims, starts, and attaches a due verification under exact ownership", async () => {
@@ -227,6 +231,108 @@ describe("recoverDueCourseSupportVerificationRequests", () => {
       runtimeVersion,
       workflowRunId: "workflow-run-2",
       now,
+    });
+  });
+
+  it("refreshes live time before claiming later work in a sequential sweep", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    const deadlineAt = new Date(now.getTime() + 1_000);
+    mocks.listDueCourseSupportVerificationRequests.mockResolvedValue([
+      { ...dueRequest("request-1"), deadlineAt },
+      { ...dueRequest("request-2", 8), deadlineAt },
+    ]);
+    mocks.claimCourseSupportVerificationRequest.mockImplementation(
+      async (input: {
+        requestId: string;
+        expectedRevision: number;
+        now: Date;
+      }) =>
+        input.now.getTime() < deadlineAt.getTime()
+          ? claimedRequest(input.requestId, input.expectedRevision + 1)
+          : { claimed: false as const, reason: "request_horizon_exceeded" },
+    );
+    mocks.start.mockImplementationOnce(async () => {
+      vi.setSystemTime(new Date(deadlineAt.getTime() + 1_000));
+      return { runId: "workflow-run-1" };
+    });
+    mocks.attachCourseSupportVerificationWorkflow.mockImplementationOnce(
+      async (input: { now: Date }) =>
+        input.now.getTime() < deadlineAt.getTime()
+          ? { attached: true as const }
+          : {
+              attached: false as const,
+              reason: "request_horizon_exceeded",
+            },
+    );
+
+    await expect(
+      recoverDueCourseSupportVerificationRequests(),
+    ).resolves.toEqual({ considered: 2, started: 0, skipped: 1, failed: 1 });
+
+    expect(mocks.listDueCourseSupportVerificationRequests).toHaveBeenCalledWith(
+      {
+        now,
+        limit: 25,
+        runtimeVersion,
+      },
+    );
+    expect(mocks.claimCourseSupportVerificationRequest.mock.calls).toEqual([
+      [
+        {
+          requestId: "request-1",
+          expectedRevision: 3,
+          runtimeVersion,
+          now,
+        },
+      ],
+      [
+        {
+          requestId: "request-2",
+          expectedRevision: 8,
+          runtimeVersion,
+          now: new Date("2026-07-21T07:30:02.000Z"),
+        },
+      ],
+    ]);
+    expect(mocks.start).toHaveBeenCalledTimes(1);
+    expect(mocks.attachCourseSupportVerificationWorkflow).toHaveBeenCalledWith({
+      requestId: "request-1",
+      expectedRevision: 4,
+      leaseToken: "lease-request-1",
+      runtimeVersion,
+      workflowRunId: "workflow-run-1",
+      now: new Date("2026-07-21T07:30:02.000Z"),
+    });
+  });
+
+  it("refreshes live time before persisting a Workflow start failure", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    mocks.listDueCourseSupportVerificationRequests.mockResolvedValue([
+      dueRequest("request-1"),
+    ]);
+    mocks.claimCourseSupportVerificationRequest.mockResolvedValue(
+      claimedRequest("request-1"),
+    );
+    mocks.start.mockImplementationOnce(async () => {
+      vi.setSystemTime(new Date(now.getTime() + 30_000));
+      throw new Error("Workflow unavailable");
+    });
+
+    await expect(
+      recoverDueCourseSupportVerificationRequests(),
+    ).resolves.toEqual({ considered: 1, started: 0, skipped: 0, failed: 1 });
+
+    expect(mocks.failCourseSupportVerificationRequest).toHaveBeenCalledWith({
+      requestId: "request-1",
+      expectedRevision: 4,
+      leaseToken: "lease-request-1",
+      runtimeVersion,
+      failureClass: "UNKNOWN",
+      message: "Workflow start failed before verification execution.",
+      retryAt: new Date("2026-07-21T07:32:30.000Z"),
+      now: new Date("2026-07-21T07:30:30.000Z"),
     });
   });
 

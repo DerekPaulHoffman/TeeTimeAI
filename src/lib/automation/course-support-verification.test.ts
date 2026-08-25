@@ -997,6 +997,90 @@ describe("course-support verification scheduling", () => {
     ).toBeNull();
   });
 
+  it.each([
+    [61, "one second"],
+    [90, "thirty seconds"],
+    [119, "fifty-nine seconds"],
+  ])(
+    "rejects an endpoint %i seconds away because it leaves only %s before the next recovery launch",
+    (endpointSeconds) => {
+      expect(
+        getCourseSupportVerificationRequestDeadline({
+          now,
+          escalationDeadlineAt: new Date(
+            now.getTime() + endpointSeconds * 1_000,
+          ),
+        }),
+      ).toBeNull();
+    },
+  );
+
+  it("rejects exactly two minutes of launch runway after the delivery margin", () => {
+    expect(
+      getCourseSupportVerificationRequestDeadline({
+        now,
+        escalationDeadlineAt: new Date(now.getTime() + 3 * 60 * 1_000),
+      }),
+    ).toBeNull();
+  });
+
+  it("accepts more than two minutes of launch runway after the delivery margin", () => {
+    expect(
+      getCourseSupportVerificationRequestDeadline({
+        now,
+        escalationDeadlineAt: new Date(
+          now.getTime() + 3 * 60 * 1_000 + 1,
+        ),
+      }),
+    ).toEqual(new Date(now.getTime() + 2 * 60 * 1_000 + 1));
+  });
+
+  it("does not create a request that cannot survive the next recovery cron", async () => {
+    prismaMocks.batchFindUnique.mockResolvedValue({
+      id: "batch-1",
+      status: "VERIFYING",
+      releaseSha,
+      completedAt: null,
+      incidents: [
+        {
+          id: "batch-incident-1",
+          incidentId: "incident-1",
+          courseId: "course-1",
+          cycle: 1,
+          verifiedIncidentUpdatedAt: new Date("2026-07-21T11:55:00.000Z"),
+          incident: incident({
+            escalationDeadlineAt: new Date(now.getTime() + 90 * 1_000),
+          }),
+          course: course(),
+        },
+      ],
+    });
+
+    await expect(
+      scheduleCourseSupportVerificationRequests({
+        batchId: "batch-1",
+        releaseSha,
+        now,
+      }),
+    ).resolves.toMatchObject({
+      createdCount: 0,
+      eligibleCount: 0,
+      ineligibleCount: 1,
+      ineligibleReasonCounts: { request_horizon_exceeded: 1 },
+      requests: [],
+    });
+
+    expect(prismaMocks.requestCreateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.requestUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "STALE",
+          lastError: "request_horizon_exceeded",
+        }),
+      }),
+    );
+  });
+
   it("creates requests for inactive courses regardless of incident provenance", async () => {
     prismaMocks.batchFindUnique.mockResolvedValue({
       id: "batch-1",

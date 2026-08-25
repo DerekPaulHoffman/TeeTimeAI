@@ -4513,6 +4513,29 @@ export function canAppendCourseSupportBatchPath(input: {
 const COURSE_SUPPORT_VERIFICATION_STAGE_DEADLINE_GRANT_KEY =
   "verificationStageDeadlineGrant";
 
+const CONCLUDED_DETACHED_VERIFICATION_RECOVERY_STAGES =
+  new Set<AutomationPlaybookStage>([
+    "TYPED_ADAPTER",
+    "HTTP_ADAPTER_RETRY",
+    "BROWSER_ADAPTER_RETRY",
+    "LOCAL_READER",
+  ]);
+
+function getConcludedDetachedVerificationRecoveryStage(
+  assessment: ReturnType<typeof assessAutomationPlaybook>,
+): AutomationPlaybookStage | null {
+  if (assessment.conclusion !== "MONITORING_RESTORED") {
+    return null;
+  }
+  return (
+    assessment.stages.find(
+      (stage) =>
+        stage.status === "SUCCEEDED" &&
+        CONCLUDED_DETACHED_VERIFICATION_RECOVERY_STAGES.has(stage.stage),
+    )?.stage ?? null
+  );
+}
+
 export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
   batchId: string;
   leaseToken: string;
@@ -4605,7 +4628,9 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
           entry.incident.attemptLedger,
           entry.incident.cycle,
         );
-        const stage = playbook.nextStage;
+        const concludedRecoveryStage =
+          getConcludedDetachedVerificationRecoveryStage(playbook);
+        const stage = playbook.nextStage ?? concludedRecoveryStage;
         const stageAssessment = playbook.stages.find(
           (assessment) => assessment.stage === stage,
         );
@@ -4619,9 +4644,11 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
         const ownedStage =
           stage === "RENDERED_BROWSER_DISCOVERY" ||
           assignedDetachedStage ||
-          stage === "INDEPENDENT_CONFIRMATION";
+          stage === "INDEPENDENT_CONFIRMATION" ||
+          concludedRecoveryStage !== null;
         const grantableStageState =
           assignedDetachedStage ||
+          concludedRecoveryStage !== null ||
           ((stage === "RENDERED_BROWSER_DISCOVERY" ||
             stage === "INDEPENDENT_CONFIRMATION") &&
             stageAssessment?.status === "PENDING" &&
@@ -4629,7 +4656,8 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
         return entry.cycle === entry.incident.cycle &&
           entry.incident.status === "AUTO_INVESTIGATING" &&
           entry.incident.activeBatchId === input.batchId &&
-          playbook.conclusion === "INCOMPLETE" &&
+          (playbook.conclusion === "INCOMPLETE" ||
+            concludedRecoveryStage !== null) &&
           stage !== null &&
           ownedStage &&
           stage === remediationDirective?.playbookStage &&
@@ -16005,17 +16033,7 @@ function getPendingDetachedContinuationBatchIncidentIds(
         assessment.conclusion === "INCOMPLETE" &&
         assessment.nextStage !== null;
       const concludedRunnableRecovery =
-        assessment.conclusion === "MONITORING_RESTORED" &&
-        assessment.stages.some(
-          (stage) =>
-            stage.status === "SUCCEEDED" &&
-            [
-              "TYPED_ADAPTER",
-              "HTTP_ADAPTER_RETRY",
-              "BROWSER_ADAPTER_RETRY",
-              "LOCAL_READER",
-            ].includes(stage.stage),
-        );
+        getConcludedDetachedVerificationRecoveryStage(assessment) !== null;
       return activeOrderedContinuation || concludedRunnableRecovery
         ? [entry.id]
         : [];

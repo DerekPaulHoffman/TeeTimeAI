@@ -1275,6 +1275,41 @@ function typedAdapterSucceededAttemptLedger(cycle = 1) {
   });
 }
 
+function httpAdapterRetrySucceededAttemptLedger(cycle = 1) {
+  let ledger: unknown = typedAdapterReadyAttemptLedger(cycle);
+  ledger = appendAutomationPlaybookEvent(ledger, {
+    cycle,
+    stage: "TYPED_ADAPTER",
+    transition: "NOT_APPLICABLE",
+    readPath: "TYPED_PROVIDER_ADAPTER",
+    evidenceKind: "TOOLING",
+    failureFingerprint: "TEST:TYPED_ADAPTER:SKIPPED",
+    runtimeVersion: "test-runtime",
+    skipReason: "NO_RUNNABLE_ADAPTER",
+    observedAt: now,
+  });
+  ledger = appendAutomationPlaybookEvent(ledger, {
+    cycle,
+    stage: "OFFICIAL_HTTP_DISCOVERY",
+    transition: "COMPLETED",
+    readPath: "OFFICIAL_HTTP",
+    evidenceKind: "OFFICIAL_SOURCE",
+    failureFingerprint: "TEST:OFFICIAL_HTTP:COMPLETE",
+    runtimeVersion: "test-runtime",
+    observedAt: now,
+  });
+  return appendAutomationPlaybookEvent(ledger, {
+    cycle,
+    stage: "HTTP_ADAPTER_RETRY",
+    transition: "SUCCEEDED",
+    readPath: "TYPED_PROVIDER_ADAPTER",
+    evidenceKind: "PROVIDER_RESPONSE",
+    failureFingerprint: "TEST:HTTP_ADAPTER_RETRY:SUCCEEDED",
+    runtimeVersion: "test-runtime",
+    observedAt: now,
+  });
+}
+
 function sourceUnverifiedAttemptLedger(
   cycle: number,
   observedAt: Date,
@@ -1475,6 +1510,22 @@ function localReaderStartedAttemptLedger(cycle = 1) {
     runtimeVersion: "test-runtime",
     observedAt: now,
   });
+}
+
+function browserAdapterRetrySucceededAttemptLedger(cycle = 1) {
+  return appendAutomationPlaybookEvent(
+    browserAdapterRetryReadyAttemptLedger(cycle),
+    {
+      cycle,
+      stage: "BROWSER_ADAPTER_RETRY",
+      transition: "SUCCEEDED",
+      readPath: "TYPED_PROVIDER_ADAPTER",
+      evidenceKind: "PROVIDER_RESPONSE",
+      failureFingerprint: "TEST:BROWSER_ADAPTER_RETRY:SUCCEEDED",
+      runtimeVersion: "test-runtime",
+      observedAt: now,
+    },
+  );
 }
 
 function localReaderSucceededAttemptLedger(cycle = 1) {
@@ -7516,6 +7567,166 @@ describe("course-support claim demand fencing", () => {
         }),
       }),
     );
+  });
+
+  it.each([
+    [
+      "provider adapter",
+      typedAdapterSucceededAttemptLedger(),
+      {
+        workMode: "VERIFY_TRANSIENT",
+        strategyAction: "RUN_TYPED_ADAPTER",
+        playbookStage: "TYPED_ADAPTER",
+        allowUnchangedRuntime: true,
+        requiresImplementationPath: false,
+        reason: "EXISTING_SUPPORT_READY",
+        retryBudget: null,
+      },
+    ],
+    [
+      "HTTP adapter retry",
+      httpAdapterRetrySucceededAttemptLedger(),
+      {
+        workMode: "VERIFY_TRANSIENT",
+        strategyAction: "RUN_TYPED_ADAPTER",
+        playbookStage: "HTTP_ADAPTER_RETRY",
+        allowUnchangedRuntime: true,
+        requiresImplementationPath: false,
+        reason: "EXISTING_SUPPORT_READY",
+        retryBudget: null,
+      },
+    ],
+    [
+      "browser adapter retry",
+      browserAdapterRetrySucceededAttemptLedger(),
+      {
+        workMode: "VERIFY_TRANSIENT",
+        strategyAction: "RUN_TYPED_ADAPTER",
+        playbookStage: "BROWSER_ADAPTER_RETRY",
+        allowUnchangedRuntime: true,
+        requiresImplementationPath: false,
+        reason: "EXISTING_SUPPORT_READY",
+        retryBudget: null,
+      },
+    ],
+    [
+      "local reader",
+      localReaderSucceededAttemptLedger(),
+      {
+        workMode: "ADVANCE_DISCOVERY",
+        strategyAction: "DISCOVER_WITH_HTTP",
+        playbookStage: "LOCAL_READER",
+        allowUnchangedRuntime: true,
+        requiresImplementationPath: false,
+        reason: "PLAYBOOK_STAGE_PENDING",
+        retryBudget: null,
+      },
+    ],
+  ] as const)(
+    "grants a concluded %s recovery fresh runway before its verification request",
+    async (_recovery, attemptLedger, remediation) => {
+      const verifyStartedAt = new Date("2026-07-21T02:20:23.000Z");
+      expect(assessAutomationPlaybook(attemptLedger, 1)).toMatchObject({
+        conclusion: "MONITORING_RESTORED",
+        nextStage: null,
+        stages: expect.arrayContaining([
+          expect.objectContaining({
+            stage: remediation.playbookStage,
+            status: "SUCCEEDED",
+          }),
+        ]),
+      });
+      prismaMocks.queryRaw.mockResolvedValue([{ now: verifyStartedAt }]);
+      prismaMocks.batchFindFirst.mockResolvedValue(
+        ownedStageDeadlineGrantBatch({
+          attemptLedgers: [attemptLedger],
+          summary: { remediation },
+        }),
+      );
+      prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+      prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+
+      await expect(
+        grantOwnedCourseSupportVerificationStageDeadline({
+          batchId: "batch-1",
+          leaseToken: "lease-1",
+          ownerThreadId: "owner-thread",
+        }),
+      ).resolves.toMatchObject({
+        granted: true,
+        replayed: false,
+        grantedIncidentCount: 1,
+        grantedAt: verifyStartedAt.toISOString(),
+      });
+
+      expect(
+        prismaMocks.supportIncidentUpdateMany.mock.calls[0][0].data
+          .escalationDeadlineAt,
+      ).toEqual(new Date("2026-07-21T02:48:23.000Z"));
+      expect(prismaMocks.batchUpdateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            summary: expect.objectContaining({
+              verificationStageDeadlineGrant: expect.objectContaining({
+                incidentCount: 1,
+                stages: [
+                  expect.objectContaining({
+                    cycle: 1,
+                    stage: remediation.playbookStage,
+                    deadlineAt: "2026-07-21T02:48:23.000Z",
+                    incidentCount: 1,
+                  }),
+                ],
+              }),
+            }),
+          }),
+        }),
+      );
+    },
+  );
+
+  it("does not grant concluded recovery runway after a verification request exists", async () => {
+    const verifyStartedAt = new Date("2026-07-21T02:20:23.000Z");
+    prismaMocks.queryRaw.mockResolvedValue([{ now: verifyStartedAt }]);
+    prismaMocks.batchFindFirst.mockResolvedValue(
+      ownedStageDeadlineGrantBatch({
+        attemptLedgers: [typedAdapterSucceededAttemptLedger()],
+        verificationRequests: [
+          [
+            {
+              id: "verification-request-1",
+              status: "QUEUED",
+              startedAt: null,
+            },
+          ],
+        ],
+        summary: {
+          remediation: {
+            workMode: "VERIFY_TRANSIENT",
+            strategyAction: "RUN_TYPED_ADAPTER",
+            playbookStage: "TYPED_ADAPTER",
+            allowUnchangedRuntime: true,
+            requiresImplementationPath: false,
+            reason: "EXISTING_SUPPORT_READY",
+            retryBudget: null,
+          },
+        },
+      }),
+    );
+
+    await expect(
+      grantOwnedCourseSupportVerificationStageDeadline({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+      }),
+    ).resolves.toEqual({
+      granted: false,
+      replayed: false,
+      grantedIncidentCount: 0,
+    });
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
   });
 
   it.each([

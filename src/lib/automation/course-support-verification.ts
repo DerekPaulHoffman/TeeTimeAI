@@ -54,6 +54,8 @@ export const COURSE_SUPPORT_VERIFICATION_MAX_DUE =
 export const COURSE_SUPPORT_VERIFICATION_REQUEST_HORIZON_MS = 35 * 60 * 1000;
 export const COURSE_SUPPORT_VERIFICATION_ENDPOINT_DELIVERY_MARGIN_MS =
   60 * 1000;
+export const COURSE_SUPPORT_VERIFICATION_MINIMUM_LAUNCH_RUNWAY_MS =
+  2 * 60 * 1000;
 export const COURSE_SUPPORT_VERIFICATION_RUNTIME_MISMATCH_GRACE_MS = 60 * 1000;
 const COURSE_SUPPORT_VERIFICATION_LEGACY_HORIZON_MS = 24 * 60 * 60 * 1000;
 export const COURSE_SUPPORT_VERIFICATION_START_TIME = "06:00";
@@ -3334,7 +3336,10 @@ export function getCourseSupportVerificationRequestDeadline(input: {
     endpointBoundAt.getTime() < horizonAt.getTime()
       ? endpointBoundAt
       : horizonAt;
-  return deadlineAt.getTime() > now.getTime() ? deadlineAt : null;
+  return deadlineAt.getTime() - now.getTime() >
+    COURSE_SUPPORT_VERIFICATION_MINIMUM_LAUNCH_RUNWAY_MS
+    ? deadlineAt
+    : null;
 }
 
 function getCurrentCourseSupportFactualFinalEvent(input: {
