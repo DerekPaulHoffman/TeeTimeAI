@@ -6658,12 +6658,16 @@ export async function verifyCourseSupportBatch(input: {
         select: DETACHED_VERIFICATION_REQUEST_STATE_SELECT,
       })
     : [];
+  const pendingDetachedContinuationBatchIncidentIds =
+    getPendingDetachedContinuationBatchIncidentIds(batch.incidents);
   const detachedVerificationRerun = summarizeDetachedVerificationRerun({
     requests: detachedRequestStates,
     verificationByBatchIncidentId: new Map(
       verifications.map(({ entry, verification }) => [entry.id, verification]),
     ),
     currentFailureBatchIncidentIds: currentDetachedFailureBatchIncidentIds,
+    pendingContinuationBatchIncidentIds:
+      pendingDetachedContinuationBatchIncidentIds,
   });
   const assignedStageOrchestrationGapCount = recheckVerifications.filter(
     ({ entry }) => {
@@ -10387,6 +10391,8 @@ async function closeoutCourseSupportBatchAttempt(
         ),
         currentFailureBatchIncidentIds: currentDetachedFailureBatchIncidentIds,
         supersededBatchIncidentIds,
+        pendingContinuationBatchIncidentIds:
+          getPendingDetachedContinuationBatchIncidentIds(batch.incidents),
       });
     }
 
@@ -15967,10 +15973,61 @@ function detachedSuccessIsReflected(
   );
 }
 
+function isPendingDetachedVerificationContinuation(
+  request: DetachedVerificationRequestState,
+  pendingContinuationBatchIncidentIds: ReadonlySet<string>,
+) {
+  if (
+    request.status !== "RETRYABLE_FAILED" ||
+    request.nextAttemptAt === null ||
+    !pendingContinuationBatchIncidentIds.has(request.batchIncidentId)
+  ) {
+    return false;
+  }
+  const evidence = asJsonObject(request.evidence);
+  return evidence.providerExecution !== true;
+}
+
+function getPendingDetachedContinuationBatchIncidentIds(
+  entries: ReadonlyArray<{
+    id: string;
+    cycle: number;
+    incident: { attemptLedger?: unknown };
+  }>,
+) {
+  return new Set(
+    entries.flatMap((entry) => {
+      const assessment = assessAutomationPlaybook(
+        entry.incident.attemptLedger,
+        entry.cycle,
+      );
+      const activeOrderedContinuation =
+        assessment.conclusion === "INCOMPLETE" &&
+        assessment.nextStage !== null;
+      const concludedRunnableRecovery =
+        assessment.conclusion === "MONITORING_RESTORED" &&
+        assessment.stages.some(
+          (stage) =>
+            stage.status === "SUCCEEDED" &&
+            [
+              "TYPED_ADAPTER",
+              "HTTP_ADAPTER_RETRY",
+              "BROWSER_ADAPTER_RETRY",
+              "LOCAL_READER",
+            ].includes(stage.stage),
+        );
+      return activeOrderedContinuation || concludedRunnableRecovery
+        ? [entry.id]
+        : [];
+    }),
+  );
+}
+
 function summarizeDetachedVerificationRerun(input: {
   requests: DetachedVerificationRequestState[];
   verificationByBatchIncidentId: Map<string, BatchIncidentVerification>;
   currentFailureBatchIncidentIds: Set<string>;
+  pendingContinuationBatchIncidentIds: ReadonlySet<string>;
 }) {
   const relevantRequests = input.requests.filter(
     (request) =>
@@ -15978,7 +16035,13 @@ function summarizeDetachedVerificationRerun(input: {
         ?.result !== "NEEDS_HUMAN",
   );
   const pendingCount = relevantRequests.filter(
-    (request) => request.status === "QUEUED" || request.status === "CHECKING",
+    (request) =>
+      request.status === "QUEUED" ||
+      request.status === "CHECKING" ||
+      isPendingDetachedVerificationContinuation(
+        request,
+        input.pendingContinuationBatchIncidentIds,
+      ),
   ).length;
   const rerunNeeded = relevantRequests.some((request) => {
     const verification = input.verificationByBatchIncidentId.get(
@@ -15989,6 +16052,14 @@ function summarizeDetachedVerificationRerun(input: {
     }
     if (request.status === "SUCCEEDED") {
       return !detachedSuccessIsReflected(verification, request);
+    }
+    if (
+      isPendingDetachedVerificationContinuation(
+        request,
+        input.pendingContinuationBatchIncidentIds,
+      )
+    ) {
+      return true;
     }
     if (request.status === "RETRYABLE_FAILED") {
       return !detachedFailureProofMatchesRequest(
@@ -16011,6 +16082,7 @@ function assertDetachedVerificationReadyForCloseout(input: {
   verificationByBatchIncidentId: Map<string, BatchIncidentVerification>;
   currentFailureBatchIncidentIds: Set<string>;
   supersededBatchIncidentIds: Set<string>;
+  pendingContinuationBatchIncidentIds: ReadonlySet<string>;
 }) {
   for (const request of input.requests) {
     if (input.supersededBatchIncidentIds.has(request.batchIncidentId)) {
@@ -16025,6 +16097,16 @@ function assertDetachedVerificationReadyForCloseout(input: {
     if (request.status === "QUEUED" || request.status === "CHECKING") {
       throw new Error(
         "Detached provider verification is still pending; rerun verification before closeout.",
+      );
+    }
+    if (
+      isPendingDetachedVerificationContinuation(
+        request,
+        input.pendingContinuationBatchIncidentIds,
+      )
+    ) {
+      throw new Error(
+        "Detached provider verification continuation is still pending; rerun verification before closeout.",
       );
     }
     if (

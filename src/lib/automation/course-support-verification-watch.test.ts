@@ -91,6 +91,35 @@ describe("runCourseSupportVerificationWatch", () => {
     expect(sleep).toHaveBeenCalledTimes(2);
   });
 
+  it("cannot settle on clean scans while a zero-execution continuation remains pending", async () => {
+    const pendingContinuation = {
+      browserStages: { eligibleCount: 0, persistedCount: 0 },
+      verification: {
+        detachedVerification: { pendingCount: 1, rerunNeeded: true },
+      },
+    };
+    const pass = vi
+      .fn()
+      .mockResolvedValueOnce(pendingContinuation)
+      .mockResolvedValueOnce(pendingContinuation)
+      .mockResolvedValueOnce(pendingContinuation)
+      .mockResolvedValueOnce(cleanPass())
+      .mockResolvedValueOnce(cleanPass());
+    const closeout = vi.fn(async () => ({ durableCloseoutRecorded: true }));
+    const sleep = vi.fn(async () => undefined);
+
+    const result = await runCourseSupportVerificationWatch({
+      pass,
+      closeout,
+      sleep,
+    });
+
+    expect(result.passCount).toBe(5);
+    expect(pass).toHaveBeenCalledTimes(5);
+    expect(closeout).toHaveBeenCalledOnce();
+    expect(sleep).toHaveBeenCalledTimes(4);
+  });
+
   it("attempts all three owned browser stages before settled closeout", async () => {
     const pass = vi
       .fn()

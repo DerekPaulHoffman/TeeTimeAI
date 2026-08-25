@@ -1262,6 +1262,19 @@ function typedAdapterReadyAttemptLedger(cycle = 1) {
   });
 }
 
+function typedAdapterSucceededAttemptLedger(cycle = 1) {
+  return appendAutomationPlaybookEvent(typedAdapterReadyAttemptLedger(cycle), {
+    cycle,
+    stage: "TYPED_ADAPTER",
+    transition: "SUCCEEDED",
+    readPath: "TYPED_PROVIDER_ADAPTER",
+    evidenceKind: "PROVIDER_RESPONSE",
+    failureFingerprint: "TEST:TYPED_ADAPTER:SUCCEEDED",
+    runtimeVersion: "test-runtime",
+    observedAt: now,
+  });
+}
+
 function sourceUnverifiedAttemptLedger(
   cycle: number,
   observedAt: Date,
@@ -1451,9 +1464,8 @@ function localReaderReadyAttemptLedger(cycle = 1) {
   );
 }
 
-function localReaderFailedRetryableAttemptLedger(cycle = 1) {
-  let ledger: unknown = localReaderReadyAttemptLedger(cycle);
-  ledger = appendAutomationPlaybookEvent(ledger, {
+function localReaderStartedAttemptLedger(cycle = 1) {
+  return appendAutomationPlaybookEvent(localReaderReadyAttemptLedger(cycle), {
     cycle,
     stage: "LOCAL_READER",
     transition: "STARTED",
@@ -1463,7 +1475,23 @@ function localReaderFailedRetryableAttemptLedger(cycle = 1) {
     runtimeVersion: "test-runtime",
     observedAt: now,
   });
-  return appendAutomationPlaybookEvent(ledger, {
+}
+
+function localReaderSucceededAttemptLedger(cycle = 1) {
+  return appendAutomationPlaybookEvent(localReaderStartedAttemptLedger(cycle), {
+    cycle,
+    stage: "LOCAL_READER",
+    transition: "SUCCEEDED",
+    readPath: "LOCAL_READER",
+    evidenceKind: "LOCAL_READER_RESULT",
+    failureFingerprint: "TEST:LOCAL_READER:SUCCEEDED",
+    runtimeVersion: "reader-v1",
+    observedAt: now,
+  });
+}
+
+function localReaderFailedRetryableAttemptLedger(cycle = 1) {
+  return appendAutomationPlaybookEvent(localReaderStartedAttemptLedger(cycle), {
     cycle,
     stage: "LOCAL_READER",
     transition: "FAILED_RETRYABLE",
@@ -15511,6 +15539,56 @@ describe("detached verification atomic batch fences", () => {
     };
   }
 
+  function zeroExecutionContinuation(
+    nextAttemptAt = new Date("2026-07-15T20:02:00.000Z"),
+  ) {
+    const evidence = {
+      ...proofEvidence(),
+      outcome: "FETCH_FAILED",
+      failureClass: "HTTP_5XX",
+      providerExecution: false,
+    };
+    const request = detachedRequestState("RETRYABLE_FAILED", {
+      id: "request-zero-execution-continuation",
+      revision: 2,
+      attemptCount: 1,
+      startedAt: new Date("2026-07-15T19:55:30.000Z"),
+      failureClass: "HTTP_5XX",
+      evidence,
+      lastError: "Bounded verification is awaiting its scheduled continuation.",
+      nextAttemptAt,
+      completedAt: null,
+      createdAt: new Date("2026-07-15T19:55:00.000Z"),
+      updatedAt: observedAt,
+    });
+    return {
+      request,
+      failure: {
+        current: true as const,
+        releaseSha,
+        runtimeVersion: releaseSha,
+        status: "RETRYABLE_FAILED" as const,
+        outcome: "FETCH_FAILED" as const,
+        failureClass: "HTTP_5XX" as const,
+        providerExecution: false,
+        observedAt,
+        completedAt: null,
+        nextAttemptAt,
+        providerRetryNotBeforeAt: null,
+        providerSnapshotFingerprint: providerFingerprint,
+        evidence,
+      },
+      proof: {
+        ...detachedFailureProof({
+          nextAttemptAt: nextAttemptAt.toISOString(),
+          providerRetryNotBeforeAt: null,
+        }),
+        failureClass: "HTTP_5XX",
+        providerExecution: false,
+      },
+    };
+  }
+
   function closeoutBatch(
     result:
       | "RESTORED"
@@ -15699,6 +15777,22 @@ describe("detached verification atomic batch fences", () => {
       failureFingerprint: buildProviderFailureFingerprint({
         providerFamilyKey: "booking.example",
         failureClass: "RATE_LIMIT",
+        operation: "AVAILABILITY",
+      }),
+    });
+    return batch;
+  }
+
+  function sameIdentityZeroExecutionRetryBatch(
+    retryProofSnapshot: Record<string, unknown>,
+  ) {
+    const batch = closeoutBatch("RETRY_SCHEDULED", retryProofSnapshot);
+    Object.assign(batch.incidents[0].incident, {
+      kind: "FETCH_FAILED",
+      failureClass: "HTTP_5XX",
+      failureFingerprint: buildProviderFailureFingerprint({
+        providerFamilyKey: "booking.example",
+        failureClass: "HTTP_5XX",
         operation: "AVAILABILITY",
       }),
     });
@@ -17624,6 +17718,247 @@ describe("detached verification atomic batch fences", () => {
       recheckDispatch: {
         detachedVerificationPendingCount: 1,
         detachedVerificationRerunNeeded: true,
+      },
+    });
+  });
+
+  it("keeps a proof-matched zero-execution retry pending until its continuation runs", async () => {
+    const continuation = zeroExecutionContinuation();
+    const batch = verificationBatch();
+    batch.incidents[0].incident.attemptLedger =
+      localReaderStartedAttemptLedger();
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([
+      continuation.request,
+    ]);
+    verificationMocks.getCurrentCourseSupportVerificationFailure.mockResolvedValue(
+      continuation.failure,
+    );
+
+    const result = await verifyCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      releaseSha,
+      now,
+    });
+
+    expect(result).toMatchObject({
+      detachedVerification: {
+        pendingCount: 1,
+        rerunNeeded: true,
+        assignedStageOrchestrationGapCount: 0,
+      },
+      recheckDispatch: {
+        detachedVerificationPendingCount: 1,
+        detachedVerificationRerunNeeded: true,
+      },
+    });
+  });
+
+  it("keeps an overdue zero-execution retry pending until recovery reclaims it", async () => {
+    const continuation = zeroExecutionContinuation(
+      new Date("2026-07-15T19:59:00.000Z"),
+    );
+    const batch = verificationBatch();
+    batch.incidents[0].incident.attemptLedger =
+      localReaderStartedAttemptLedger();
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([
+      continuation.request,
+    ]);
+    verificationMocks.getCurrentCourseSupportVerificationFailure.mockResolvedValue(
+      continuation.failure,
+    );
+
+    const result = await verifyCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      releaseSha,
+      now,
+    });
+
+    expect(result).toMatchObject({
+      detachedVerification: {
+        pendingCount: 1,
+        rerunNeeded: true,
+      },
+    });
+  });
+
+  it("keeps a concluded local-reader recovery pending until its fresh read is consumed", async () => {
+    const continuation = zeroExecutionContinuation();
+    const batch = verificationBatch();
+    batch.incidents[0].incident.attemptLedger =
+      localReaderSucceededAttemptLedger();
+    expect(
+      assessAutomationPlaybook(
+        batch.incidents[0].incident.attemptLedger,
+        batch.incidents[0].cycle,
+      ),
+    ).toMatchObject({
+      conclusion: "MONITORING_RESTORED",
+      nextStage: null,
+      stages: expect.arrayContaining([
+        expect.objectContaining({
+          stage: "LOCAL_READER",
+          status: "SUCCEEDED",
+        }),
+      ]),
+    });
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([
+      continuation.request,
+    ]);
+    verificationMocks.getCurrentCourseSupportVerificationFailure.mockResolvedValue(
+      continuation.failure,
+    );
+
+    const result = await verifyCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      releaseSha,
+      now,
+    });
+
+    expect(result).toMatchObject({
+      detachedVerification: {
+        pendingCount: 1,
+        rerunNeeded: true,
+        assignedStageOrchestrationGapCount: 0,
+      },
+    });
+  });
+
+  it("keeps a concluded provider-adapter recovery pending after zero execution", async () => {
+    const continuation = zeroExecutionContinuation();
+    const batch = verificationBatch();
+    batch.incidents[0].incident.attemptLedger =
+      typedAdapterSucceededAttemptLedger();
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([
+      continuation.request,
+    ]);
+    verificationMocks.getCurrentCourseSupportVerificationFailure.mockResolvedValue(
+      continuation.failure,
+    );
+
+    const result = await verifyCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      releaseSha,
+      now,
+    });
+
+    expect(result).toMatchObject({
+      detachedVerification: {
+        pendingCount: 1,
+        rerunNeeded: true,
+        assignedStageOrchestrationGapCount: 0,
+      },
+    });
+  });
+
+  it("keeps an active ordered adapter retry pending after zero provider execution", async () => {
+    const continuation = zeroExecutionContinuation();
+    const batch = verificationBatch();
+    batch.incidents[0].incident.attemptLedger =
+      browserAdapterRetryFailedRetryableAttemptLedger();
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([
+      continuation.request,
+    ]);
+    verificationMocks.getCurrentCourseSupportVerificationFailure.mockResolvedValue(
+      continuation.failure,
+    );
+
+    const result = await verifyCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      releaseSha,
+      now,
+    });
+
+    expect(result).toMatchObject({
+      detachedVerification: {
+        pendingCount: 1,
+        rerunNeeded: true,
+        assignedStageOrchestrationGapCount: 0,
+      },
+    });
+  });
+
+  it("settles an exact copied retry after provider execution was recorded", async () => {
+    const request = detachedRequestState("RETRYABLE_FAILED");
+    const batch = verificationBatch();
+    batch.incidents[0].incident.attemptLedger =
+      localReaderStartedAttemptLedger();
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([request]);
+    verificationMocks.getCurrentCourseSupportVerificationFailure.mockResolvedValue(
+      currentDetachedFailure(),
+    );
+
+    const result = await verifyCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      releaseSha,
+      now,
+    });
+
+    expect(result).toMatchObject({
+      detachedVerification: {
+        pendingCount: 0,
+        rerunNeeded: false,
+        assignedStageOrchestrationGapCount: 0,
+      },
+    });
+  });
+
+  it("does not hold an exhausted deferred confirmation as request-local work", async () => {
+    const continuation = zeroExecutionContinuation();
+    const batch = verificationBatch();
+    batch.incidents[0].incident.attemptLedger = exhaustedAttemptLedger();
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([
+      continuation.request,
+    ]);
+    verificationMocks.getCurrentCourseSupportVerificationFailure.mockResolvedValue(
+      continuation.failure,
+    );
+
+    const result = await verifyCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      releaseSha,
+      now,
+    });
+
+    expect(result).toMatchObject({
+      detachedVerification: {
+        pendingCount: 0,
+        rerunNeeded: false,
+        assignedStageOrchestrationGapCount: 0,
       },
     });
   });
@@ -23231,6 +23566,114 @@ describe("detached verification atomic batch fences", () => {
       })
     ).rejects.toThrow("failure changed after the last evidence read");
     expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("refuses settled-watch closeout while a zero-execution continuation is pending", async () => {
+    const continuation = zeroExecutionContinuation();
+    const batch = sameIdentityZeroExecutionRetryBatch(continuation.proof);
+    batch.incidents[0].incident.attemptLedger =
+      localReaderStartedAttemptLedger();
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([
+      continuation.request,
+    ]);
+    verificationMocks.getCurrentCourseSupportVerificationFailure.mockResolvedValue(
+      continuation.failure,
+    );
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        requestedOutcome: "retryable_failed",
+        verificationWatchMode: "WATCH_SETTLED",
+        now,
+      }),
+    ).rejects.toThrow("continuation is still pending");
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("refuses settled-watch closeout while a concluded reader recovery is pending", async () => {
+    const continuation = zeroExecutionContinuation();
+    const batch = sameIdentityZeroExecutionRetryBatch(continuation.proof);
+    batch.incidents[0].incident.attemptLedger =
+      localReaderSucceededAttemptLedger();
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([
+      continuation.request,
+    ]);
+    verificationMocks.getCurrentCourseSupportVerificationFailure.mockResolvedValue(
+      continuation.failure,
+    );
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        requestedOutcome: "retryable_failed",
+        verificationWatchMode: "WATCH_SETTLED",
+        now,
+      }),
+    ).rejects.toThrow("continuation is still pending");
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("allows bounded early release while a zero-execution continuation is pending", async () => {
+    const continuation = zeroExecutionContinuation();
+    const batch = sameIdentityZeroExecutionRetryBatch(continuation.proof);
+    batch.incidents[0].incident.attemptLedger =
+      localReaderStartedAttemptLedger();
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([
+      continuation.request,
+    ]);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        requestedOutcome: "retryable_failed",
+        verificationWatchMode: "EARLY_RETRY",
+        now,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "retryable_failed",
+      durableCloseoutRecorded: true,
+    });
+  });
+
+  it("allows endpoint closeout while a zero-execution continuation is pending", async () => {
+    const continuation = zeroExecutionContinuation();
+    const batch = sameIdentityZeroExecutionRetryBatch(continuation.proof);
+    batch.incidents[0].incident.attemptLedger =
+      localReaderStartedAttemptLedger();
+    batch.escalationDeadlineAt = now;
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([
+      continuation.request,
+    ]);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        requestedOutcome: "retryable_failed",
+        verificationWatchMode: "ENDPOINT",
+        now,
+      }),
+    ).resolves.toMatchObject({
+      durableCloseoutRecorded: true,
+    });
   });
 
   it("refuses closeout until current stale cooldown evidence is copied by verify", async () => {
