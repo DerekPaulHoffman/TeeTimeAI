@@ -131,7 +131,7 @@ For a multi-course source batch whose entries have different retry times, coordi
 
 The responder uses the transaction-scoped Postgres advisory lease `tee-time-spot:course-support-writer` only for short inspect/claim/recovery state transitions. The hourly loop uses its own `tee-time-spot:hourly-improvement-writer` lease. Up to two durable responder batches and unfinished responder `AutomationRun` rows may own different provider groups during their longer classification/verification intervals, matching the global provider I/O ceiling and leaving Codex capacity for unrelated work. Because scheduled tasks share the one approved dispatch checkout, only one active batch may enter `IMPLEMENTING` or own planned code paths at a time; the other batch remains database/browser verification-only. A responder lease lasts 15 minutes and must be heartbeated while work continues. For an investigation expected to outlast one lease, start the bounded `heartbeat --watch` command in a separate process. It renews every four minutes by default, stops after 45 minutes by default, fails immediately if ownership is lost, and never changes the release fence.
 
-An expired batch can be recovered only when branch, expected `HEAD`, owner-task provenance, committed paths, and dirty paths match the saved batch plan. A commit made before release heartbeat is recoverable only when the base is an ancestor and every committed path was already claimed. A different task cannot adopt dirty work. Unplanned paths, another responder writer, an active responder lease, or mismatched provenance require owner attention.
+An expired batch can be recovered only when branch, expected `HEAD`, owner-task provenance, committed paths, and dirty paths match the saved batch plan. A commit made before release heartbeat is recoverable only when the base is an ancestor and every committed path was already claimed. A different task cannot adopt dirty work. Unplanned paths or mismatched provenance require owner attention. The monitoring watchdog may durably close the selected batch after inspect but before recover; when the terminal batch status, closeout counts, incident ownership/results, owner run, and retry timing are coherent, recover reports that existing durable result idempotently instead of treating the stale handoff as a command failure. A lease renewed after inspect and a detached verification request already observed as active before safe requeue are routine `deferred_busy` races owned by their existing automatic lifecycle. A request that changes state during the serializable adoption reread, missing terminal proof, or incoherent terminal proof still fails closed.
 
 Recovery atomically transfers the batch and lease token to the recovering task. After `recover` reports success, continue that same batch directly through heartbeat, verification, and closeout; never claim a fresh batch. A later `inspect` supplies the current task identity and returns `resume_owned_work` only for that task's own healthy batch. Missing or mismatched task identity and another responder batch still fail closed as `deferred_busy`; hourly activity is outside the responder lane.
 
@@ -340,7 +340,9 @@ npm run automation:course-support -- closeout --batch-ref <batch-ref> --outcome 
 # recovery_required, make no provider, implementation, or deployment change;
 # call recover once from the persistent responder checkout. It may adopt only
 # matching clean work and rejects dirty, unplanned, or committed foreign work.
-# Continue a successfully recovered batch directly and stop on rejection.
+# A coherent watchdog closeout that wins after inspect is an idempotent durable
+# result, not a rejection. Continue an adopted batch directly; otherwise stop
+# after that existing closeout or the first concrete rejection.
 npm run automation:course-support -- recover --batch-ref <batch-ref>
 
 # Responder-state backfill is dry-run by default. Existing synthetic cohorts first

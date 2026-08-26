@@ -11540,6 +11540,160 @@ function getFinalDispositionResolution(proofSnapshot: unknown) {
   return "DIRECT_BOOKING_CLASSIFIED" as const;
 }
 
+function readDurablyClosedCourseSupportRecovery(input: {
+  batch: {
+    status: CourseSupportBatchStatus;
+    completedAt: Date | null;
+    ownerAutomationRunId: string | null;
+    ownerAutomationRun: {
+      id: string;
+      kind: string;
+      status: string;
+      completedAt: Date | null;
+      outcome: string | null;
+    } | null;
+    summary: unknown;
+    incidents: Array<{
+      result: CourseSupportBatchIncidentResult;
+      incident: {
+        status: string;
+        resolution: CourseSupportResolution | null;
+        activeBatchId: string | null;
+        nextAttemptAt: Date | null;
+      };
+    }>;
+  };
+  now: Date;
+}) {
+  const { batch, now } = input;
+  if (
+    ACTIVE_BATCH_STATUSES.includes(batch.status) ||
+    !batch.completedAt ||
+    batch.incidents.length === 0
+  ) {
+    return null;
+  }
+
+  const closeout = asJsonObject(asJsonObject(batch.summary).closeout);
+  const derivedOutcome =
+    typeof closeout.derivedOutcome === "string" &&
+    DERIVED_CLOSEOUT_OUTCOMES.has(closeout.derivedOutcome as ResponderOutcome)
+      ? (closeout.derivedOutcome as ResponderOutcome)
+      : null;
+  const reportedOutcome =
+    typeof closeout.outcome === "string" &&
+    (DERIVED_CLOSEOUT_OUTCOMES.has(closeout.outcome as ResponderOutcome) ||
+      FAILURE_CLOSEOUT_OUTCOMES.has(closeout.outcome as ResponderOutcome))
+      ? (closeout.outcome as ResponderOutcome)
+      : null;
+  if (
+    !derivedOutcome ||
+    !reportedOutcome ||
+    (reportedOutcome !== derivedOutcome &&
+      !FAILURE_CLOSEOUT_OUTCOMES.has(reportedOutcome))
+  ) {
+    return null;
+  }
+
+  const expectedBatchStatus: CourseSupportBatchStatus =
+    derivedOutcome === "needs_human" || derivedOutcome === "partial"
+      ? "PARTIAL"
+      : derivedOutcome === "retryable_failed"
+        ? "RETRYABLE_FAILED"
+        : "SUCCEEDED";
+  const terminalCount = batch.incidents.filter(
+    (entry) =>
+      entry.result === "RESTORED" || entry.result === "FINAL_DISPOSITION",
+  ).length;
+  const retryCount = batch.incidents.filter(
+    (entry) => entry.result === "RETRY_SCHEDULED",
+  ).length;
+  const needsHumanCount = batch.incidents.filter(
+    (entry) => entry.result === "NEEDS_HUMAN",
+  ).length;
+  const entriesAreCoherent = batch.incidents.every((entry) => {
+    if (entry.incident.activeBatchId !== null) {
+      return false;
+    }
+    if (entry.result === "RESTORED") {
+      return (
+        entry.incident.status === "RESOLVED" &&
+        entry.incident.resolution === "MONITORING_RESTORED" &&
+        entry.incident.nextAttemptAt === null
+      );
+    }
+    if (entry.result === "FINAL_DISPOSITION") {
+      return (
+        entry.incident.status === "RESOLVED" &&
+        entry.incident.resolution !== null &&
+        entry.incident.resolution !== "MONITORING_RESTORED" &&
+        entry.incident.nextAttemptAt === null
+      );
+    }
+    if (entry.result === "RETRY_SCHEDULED") {
+      return (
+        entry.incident.status === "AUTO_INVESTIGATING" &&
+        entry.incident.resolution === null &&
+        entry.incident.nextAttemptAt !== null &&
+        entry.incident.nextAttemptAt.getTime() > now.getTime()
+      );
+    }
+    if (entry.result === "NEEDS_HUMAN") {
+      return (
+        entry.incident.status === "NEEDS_HUMAN" &&
+        entry.incident.resolution === null &&
+        (entry.incident.nextAttemptAt === null ||
+          entry.incident.nextAttemptAt.getTime() > now.getTime())
+      );
+    }
+    return false;
+  });
+  const ownerRunIsCoherent = batch.ownerAutomationRunId
+    ? Boolean(
+        batch.ownerAutomationRun &&
+          batch.ownerAutomationRun.id === batch.ownerAutomationRunId &&
+          batch.ownerAutomationRun.kind === "COURSE_SUPPORT" &&
+          ["COMPLETED", "FAILED"].includes(
+            batch.ownerAutomationRun.status,
+          ) &&
+          batch.ownerAutomationRun.completedAt?.getTime() ===
+            batch.completedAt.getTime() &&
+          batch.ownerAutomationRun.outcome === reportedOutcome,
+      )
+    : batch.ownerAutomationRun === null;
+  const countsAreCoherent = Boolean(
+    Number.isInteger(closeout.terminalCount) &&
+      closeout.terminalCount === terminalCount &&
+      Number.isInteger(closeout.retryCount) &&
+      closeout.retryCount === retryCount &&
+      Number.isInteger(closeout.needsHumanCount) &&
+      closeout.needsHumanCount === needsHumanCount &&
+      terminalCount + retryCount + needsHumanCount === batch.incidents.length,
+  );
+  if (
+    batch.status !== expectedBatchStatus ||
+    !entriesAreCoherent ||
+    !ownerRunIsCoherent ||
+    !countsAreCoherent
+  ) {
+    return null;
+  }
+
+  const nextAttemptAt = batch.incidents
+    .flatMap((entry) =>
+      entry.result === "RETRY_SCHEDULED" && entry.incident.nextAttemptAt
+        ? [entry.incident.nextAttemptAt]
+        : [],
+    )
+    .sort((left, right) => left.getTime() - right.getTime())[0] ?? null;
+  return {
+    outcome: reportedOutcome,
+    derivedOutcome,
+    nextAttemptAt,
+    requiresHuman: needsHumanCount > 0,
+  };
+}
+
 export async function recoverCourseSupportBatch(input: {
   batchId: string;
   requestingThreadId: string;
@@ -11560,9 +11714,19 @@ export async function recoverCourseSupportBatch(input: {
       select: {
         id: true,
         status: true,
+        completedAt: true,
         leaseExpiresAt: true,
         ownerThreadId: true,
         ownerAutomationRunId: true,
+        ownerAutomationRun: {
+          select: {
+            id: true,
+            kind: true,
+            status: true,
+            completedAt: true,
+            outcome: true,
+          },
+        },
         providerFamilyKey: true,
         failureFingerprint: true,
         baseSha: true,
@@ -11607,6 +11771,7 @@ export async function recoverCourseSupportBatch(input: {
                 failureFingerprint: true,
                 activeRealSearchCount: true,
                 escalationDeadlineAt: true,
+                nextAttemptAt: true,
                 updatedAt: true,
                 monitoringEvents: {
                   where: { eventType: "REVALIDATION_REQUESTED" },
@@ -11638,13 +11803,60 @@ export async function recoverCourseSupportBatch(input: {
         },
       },
     });
-    if (!batch || !ACTIVE_BATCH_STATUSES.includes(batch.status)) {
+    if (!batch) {
       return {
         outcome: "command_failed" as const,
         recovered: false,
         reasons: ["The requested responder batch is not recoverable."],
         threadDisposition: "KEEP_VISIBLE" as const,
         archiveReason: "Responder recovery needs owner attention.",
+      };
+    }
+    if (!ACTIVE_BATCH_STATUSES.includes(batch.status)) {
+      const closedRecovery = readDurablyClosedCourseSupportRecovery({
+        batch,
+        now,
+      });
+      if (closedRecovery) {
+        return {
+          outcome: closedRecovery.outcome,
+          derivedOutcome: closedRecovery.derivedOutcome,
+          recovered: false,
+          alreadyClosed: true,
+          superseded: true,
+          durableCloseoutRecorded: true,
+          nextAttemptAt: closedRecovery.nextAttemptAt?.toISOString() ?? null,
+          reasons: [
+            "The expired responder batch reached a coherent durable closeout before recovery began.",
+          ],
+          ...getResponderThreadPolicy({
+            outcome: closedRecovery.outcome,
+            nextAttemptAt: closedRecovery.nextAttemptAt,
+            requiresHuman: closedRecovery.requiresHuman,
+            durableCloseoutRecorded: true,
+            now,
+          }),
+        };
+      }
+      return {
+        outcome: "command_failed" as const,
+        recovered: false,
+        reasons: [
+          "The requested responder batch has no coherent durable closeout.",
+        ],
+        threadDisposition: "KEEP_VISIBLE" as const,
+        archiveReason: "Responder recovery needs owner attention.",
+      };
+    }
+    if (batch.leaseExpiresAt.getTime() > now.getTime()) {
+      return {
+        outcome: "deferred_busy" as const,
+        recovered: false,
+        reasons: [
+          "The expired-batch handoff was superseded by renewed responder ownership.",
+        ],
+        threadDisposition: "ARCHIVE" as const,
+        archiveReason: "Another responder owns the renewed batch lease.",
       };
     }
     const terminalIncidents = batch.incidents.filter((entry) =>
@@ -11973,12 +12185,12 @@ export async function recoverCourseSupportBatch(input: {
           )
         ) {
           return {
-            outcome: "command_failed" as const,
+            outcome: "deferred_busy" as const,
             recovered: false,
             reasons: [
               "Detached provider verification is still active; allow the existing request lifecycle to reclaim or finish it before responder recovery.",
             ],
-            threadDisposition: "KEEP_VISIBLE" as const,
+            threadDisposition: "ARCHIVE" as const,
             archiveReason:
               "Responder recovery is waiting for active provider verification.",
           };

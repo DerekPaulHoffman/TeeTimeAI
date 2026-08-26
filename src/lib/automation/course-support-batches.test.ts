@@ -10766,7 +10766,410 @@ function expiredPreExecutionRecoveryFixture(input: {
   return { expiredBatch, request };
 }
 
+function durablyClosedRecoveryFixture(input: {
+  batchStatus: "SUCCEEDED" | "PARTIAL" | "RETRYABLE_FAILED";
+  outcome: "success" | "classification_only" | "needs_human" | "retryable_failed";
+  reportedOutcome?: "production_verification_failed";
+  result: "RESTORED" | "FINAL_DISPOSITION" | "NEEDS_HUMAN" | "RETRY_SCHEDULED";
+  incidentStatus: "AUTO_INVESTIGATING" | "NEEDS_HUMAN" | "RESOLVED";
+  resolution:
+    | "MONITORING_RESTORED"
+    | "IDENTITY_CLASSIFIED"
+    | null;
+  nextAttemptAt?: Date | null;
+}) {
+  const completedAt = new Date("2026-07-15T19:59:00.000Z");
+  const batch = expiredRecoveryBatch([input.incidentStatus]);
+  const terminalCount = ["RESTORED", "FINAL_DISPOSITION"].includes(
+    input.result,
+  )
+    ? 1
+    : 0;
+  const retryCount = input.result === "RETRY_SCHEDULED" ? 1 : 0;
+  const needsHumanCount = input.result === "NEEDS_HUMAN" ? 1 : 0;
+  const reportedOutcome = input.reportedOutcome ?? input.outcome;
+  batch.incidents[0].result = input.result;
+  Object.assign(batch.incidents[0].incident, {
+    status: input.incidentStatus,
+    resolution: input.resolution,
+    activeBatchId: null,
+    nextAttemptAt: input.nextAttemptAt ?? null,
+  });
+  return {
+    ...batch,
+    status: input.batchStatus,
+    completedAt,
+    leaseExpiresAt: completedAt,
+    summary: {
+      ...batch.summary,
+      closeout: {
+        outcome: reportedOutcome,
+        derivedOutcome: input.outcome,
+        terminalCount,
+        retryCount,
+        needsHumanCount,
+        failureDomain: "SLA",
+        verificationWatchMode: "ENDPOINT",
+        reason: "stale_endpoint_ownership_released",
+      },
+    },
+    ownerAutomationRun: {
+      id: batch.ownerAutomationRunId,
+      kind: "COURSE_SUPPORT",
+      status: input.outcome === "retryable_failed" ? "FAILED" : "COMPLETED",
+      completedAt,
+      outcome: reportedOutcome,
+    },
+  };
+}
+
 describe("course-support recovery", () => {
+  it.each([
+    {
+      label: "retryable watchdog closeout",
+      batchStatus: "RETRYABLE_FAILED" as const,
+      outcome: "retryable_failed" as const,
+      result: "RETRY_SCHEDULED" as const,
+      incidentStatus: "AUTO_INVESTIGATING" as const,
+      resolution: null,
+      nextAttemptAt: new Date("2026-07-15T20:15:00.000Z"),
+      threadDisposition: "ARCHIVE",
+    },
+    {
+      label: "successful watchdog closeout",
+      batchStatus: "SUCCEEDED" as const,
+      outcome: "success" as const,
+      result: "RESTORED" as const,
+      incidentStatus: "RESOLVED" as const,
+      resolution: "MONITORING_RESTORED" as const,
+      nextAttemptAt: null,
+      threadDisposition: "ARCHIVE",
+    },
+    {
+      label: "human watchdog closeout",
+      batchStatus: "PARTIAL" as const,
+      outcome: "needs_human" as const,
+      result: "NEEDS_HUMAN" as const,
+      incidentStatus: "NEEDS_HUMAN" as const,
+      resolution: null,
+      nextAttemptAt: null,
+      threadDisposition: "KEEP_VISIBLE",
+    },
+    {
+      label: "human watchdog closeout with a future reminder",
+      batchStatus: "PARTIAL" as const,
+      outcome: "needs_human" as const,
+      result: "NEEDS_HUMAN" as const,
+      incidentStatus: "NEEDS_HUMAN" as const,
+      resolution: null,
+      nextAttemptAt: new Date("2026-07-15T20:15:00.000Z"),
+      threadDisposition: "KEEP_VISIBLE",
+    },
+    {
+      label: "owner-visible production verification failure",
+      batchStatus: "RETRYABLE_FAILED" as const,
+      outcome: "retryable_failed" as const,
+      reportedOutcome: "production_verification_failed" as const,
+      result: "RETRY_SCHEDULED" as const,
+      incidentStatus: "AUTO_INVESTIGATING" as const,
+      resolution: null,
+      nextAttemptAt: new Date("2026-07-15T20:15:00.000Z"),
+      threadDisposition: "KEEP_VISIBLE",
+    },
+  ])(
+    "treats a coherent $label that wins after inspect as idempotent",
+    async (scenario) => {
+      const batch = durablyClosedRecoveryFixture(scenario);
+      prismaMocks.batchFindUnique.mockResolvedValue(batch);
+
+      const recover = () =>
+        recoverCourseSupportBatch({
+          batchId: batch.id,
+          requestingThreadId: "new-thread",
+          currentBranch: "automation/course-support-old",
+          currentHeadSha: batch.baseSha,
+          dirtyPaths: [],
+          releaseIsPublished: true,
+          now,
+        });
+      const first = await recover();
+      const second = await recover();
+
+      expect(first).toMatchObject({
+        outcome: scenario.reportedOutcome ?? scenario.outcome,
+        derivedOutcome: scenario.outcome,
+        recovered: false,
+        alreadyClosed: true,
+        superseded: true,
+        durableCloseoutRecorded: true,
+        nextAttemptAt:
+          scenario.result === "RETRY_SCHEDULED"
+            ? (scenario.nextAttemptAt?.toISOString() ?? null)
+            : null,
+        threadDisposition: scenario.threadDisposition,
+      });
+      expect(second).toEqual(first);
+      expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+      expect(prismaMocks.incidentUpdateMany).not.toHaveBeenCalled();
+      expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+      expect(prismaMocks.verificationRequestUpdateMany).not.toHaveBeenCalled();
+      expect(prismaMocks.automationRunUpdateMany).not.toHaveBeenCalled();
+    },
+  );
+
+  it("treats a coherent mixed terminal and retry closeout as idempotent", async () => {
+    const completedAt = new Date("2026-07-15T19:59:00.000Z");
+    const nextAttemptAt = new Date("2026-07-15T20:15:00.000Z");
+    const batch = expiredRecoveryBatch(["RESOLVED", "AUTO_INVESTIGATING"]);
+    batch.incidents[0].result = "RESTORED";
+    Object.assign(batch.incidents[0].incident, {
+      resolution: "MONITORING_RESTORED",
+      activeBatchId: null,
+      nextAttemptAt: null,
+    });
+    batch.incidents[1].result = "RETRY_SCHEDULED";
+    Object.assign(batch.incidents[1].incident, {
+      resolution: null,
+      activeBatchId: null,
+      nextAttemptAt,
+    });
+    const durablyClosedBatch = {
+      ...batch,
+      status: "PARTIAL" as const,
+      completedAt,
+      leaseExpiresAt: completedAt,
+      summary: {
+        ...batch.summary,
+        closeout: {
+          outcome: "partial",
+          derivedOutcome: "partial",
+          terminalCount: 1,
+          retryCount: 1,
+          needsHumanCount: 0,
+          failureDomain: "SLA",
+          verificationWatchMode: "ENDPOINT",
+          reason: "stale_endpoint_ownership_released",
+        },
+      },
+      ownerAutomationRun: {
+        id: batch.ownerAutomationRunId,
+        kind: "COURSE_SUPPORT",
+        status: "COMPLETED",
+        completedAt,
+        outcome: "partial",
+      },
+    };
+    prismaMocks.batchFindUnique.mockResolvedValue(durablyClosedBatch);
+
+    const recover = () =>
+      recoverCourseSupportBatch({
+        batchId: batch.id,
+        requestingThreadId: "new-thread",
+        currentBranch: "automation/course-support-old",
+        currentHeadSha: batch.baseSha,
+        dirtyPaths: [],
+        releaseIsPublished: true,
+        now,
+      });
+    const first = await recover();
+    const second = await recover();
+
+    expect(first).toMatchObject({
+      outcome: "partial",
+      derivedOutcome: "partial",
+      recovered: false,
+      alreadyClosed: true,
+      superseded: true,
+      durableCloseoutRecorded: true,
+      nextAttemptAt: nextAttemptAt.toISOString(),
+      threadDisposition: "ARCHIVE",
+    });
+    expect(second).toEqual(first);
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.incidentUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.verificationRequestUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.automationRunUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when a terminal batch still owns its incident", async () => {
+    const batch = durablyClosedRecoveryFixture({
+      batchStatus: "RETRYABLE_FAILED",
+      outcome: "retryable_failed",
+      result: "RETRY_SCHEDULED",
+      incidentStatus: "AUTO_INVESTIGATING",
+      resolution: null,
+      nextAttemptAt: new Date("2026-07-15T20:15:00.000Z"),
+    });
+    batch.incidents[0].incident.activeBatchId = batch.id;
+    prismaMocks.batchFindUnique.mockResolvedValue(batch);
+
+    await expect(
+      recoverCourseSupportBatch({
+        batchId: batch.id,
+        requestingThreadId: "new-thread",
+        currentBranch: "automation/course-support-old",
+        currentHeadSha: batch.baseSha,
+        dirtyPaths: [],
+        releaseIsPublished: true,
+        now,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "command_failed",
+      recovered: false,
+      threadDisposition: "KEEP_VISIBLE",
+    });
+
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when a durable retry timestamp is absent or no longer future", async () => {
+    for (const nextAttemptAt of [null, new Date(now.getTime() - 1)]) {
+      const batch = durablyClosedRecoveryFixture({
+        batchStatus: "RETRYABLE_FAILED",
+        outcome: "retryable_failed",
+        result: "RETRY_SCHEDULED",
+        incidentStatus: "AUTO_INVESTIGATING",
+        resolution: null,
+        nextAttemptAt,
+      });
+      prismaMocks.batchFindUnique.mockResolvedValue(batch);
+
+      await expect(
+        recoverCourseSupportBatch({
+          batchId: batch.id,
+          requestingThreadId: "new-thread",
+          currentBranch: "automation/course-support-old",
+          currentHeadSha: batch.baseSha,
+          dirtyPaths: [],
+          releaseIsPublished: true,
+          now,
+        }),
+      ).resolves.toMatchObject({
+        outcome: "command_failed",
+        recovered: false,
+        threadDisposition: "KEEP_VISIBLE",
+      });
+    }
+
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when reported and derived routine outcomes contradict", async () => {
+    const batch = durablyClosedRecoveryFixture({
+      batchStatus: "RETRYABLE_FAILED",
+      outcome: "retryable_failed",
+      result: "RETRY_SCHEDULED",
+      incidentStatus: "AUTO_INVESTIGATING",
+      resolution: null,
+      nextAttemptAt: new Date("2026-07-15T20:15:00.000Z"),
+    });
+    batch.summary.closeout.outcome = "success";
+    batch.ownerAutomationRun.outcome = "success";
+    prismaMocks.batchFindUnique.mockResolvedValue(batch);
+
+    await expect(
+      recoverCourseSupportBatch({
+        batchId: batch.id,
+        requestingThreadId: "new-thread",
+        currentBranch: "automation/course-support-old",
+        currentHeadSha: batch.baseSha,
+        dirtyPaths: [],
+        releaseIsPublished: true,
+        now,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "command_failed",
+      recovered: false,
+      threadDisposition: "KEEP_VISIBLE",
+    });
+
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when a human-review reminder is already expired", async () => {
+    const batch = durablyClosedRecoveryFixture({
+      batchStatus: "PARTIAL",
+      outcome: "needs_human",
+      result: "NEEDS_HUMAN",
+      incidentStatus: "NEEDS_HUMAN",
+      resolution: null,
+      nextAttemptAt: new Date(now.getTime() - 1),
+    });
+    prismaMocks.batchFindUnique.mockResolvedValue(batch);
+
+    await expect(
+      recoverCourseSupportBatch({
+        batchId: batch.id,
+        requestingThreadId: "new-thread",
+        currentBranch: "automation/course-support-old",
+        currentHeadSha: batch.baseSha,
+        dirtyPaths: [],
+        releaseIsPublished: true,
+        now,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "command_failed",
+      recovered: false,
+      threadDisposition: "KEEP_VISIBLE",
+    });
+
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("keeps a missing recovery target as a concrete blocker", async () => {
+    prismaMocks.batchFindUnique.mockResolvedValue(null);
+
+    await expect(
+      recoverCourseSupportBatch({
+        batchId: "missing-batch",
+        requestingThreadId: "new-thread",
+        currentBranch: "automation/course-support-old",
+        currentHeadSha: "c".repeat(40),
+        dirtyPaths: [],
+        releaseIsPublished: false,
+        now,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "command_failed",
+      recovered: false,
+      reasons: ["The requested responder batch is not recoverable."],
+      threadDisposition: "KEEP_VISIBLE",
+    });
+  });
+
+  it("treats ownership renewed after inspect as a routine busy race", async () => {
+    const batch = {
+      ...expiredRecoveryBatch(["AUTO_INVESTIGATING"]),
+      leaseExpiresAt: new Date(now.getTime() + 60_000),
+    };
+    prismaMocks.batchFindUnique.mockResolvedValue(batch);
+
+    await expect(
+      recoverCourseSupportBatch({
+        batchId: batch.id,
+        requestingThreadId: "new-thread",
+        currentBranch: "automation/course-support-old",
+        currentHeadSha: batch.baseSha,
+        dirtyPaths: [],
+        releaseIsPublished: true,
+        now,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "deferred_busy",
+      recovered: false,
+      threadDisposition: "ARCHIVE",
+    });
+
+    expect(prismaMocks.batchFindMany).not.toHaveBeenCalled();
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+  });
+
   it("does not recover a persisted implementation reservation beside another checkout owner", async () => {
     const batch = {
       ...expiredRecoveryBatch(["AUTO_INVESTIGATING"]),
@@ -12026,9 +12429,10 @@ describe("course-support recovery", () => {
           now,
         }),
       ).resolves.toMatchObject({
-        outcome: "command_failed",
+        outcome: "deferred_busy",
         recovered: false,
         reasons: [expect.stringContaining("still active")],
+        threadDisposition: "ARCHIVE",
       });
 
       expect(prismaMocks.transaction).not.toHaveBeenCalled();
