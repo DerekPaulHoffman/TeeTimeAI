@@ -907,6 +907,7 @@ model CourseSupportBatch {
   @@index([providerFamilyKey, failureFingerprint, createdAt])
   @@index([ownerAutomationRunId])
   @@index([deployedAt])
+  @@index([completedAt])
 }
 
 model CourseSupportBatchIncident {

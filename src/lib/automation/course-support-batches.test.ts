@@ -17483,7 +17483,15 @@ describe("detached verification atomic batch fences", () => {
     batch.summary = {
       ...healthyDetachedDispatch(),
       searchExecutionFence: emptySearchExecutionFence(),
+      plannedPaths: ["src/lib/tee-times/adapters/example.ts"],
       remediation: {
+        workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+        strategyAction: "REPAIR_PROVIDER_ADAPTER",
+        playbookStage: "TYPED_ADAPTER",
+        allowUnchangedRuntime: false,
+        requiresImplementationPath: true,
+        reason: "IMPLEMENTATION_REQUIRED",
+        retryBudget: null,
         attempts: [
           {
             courseRef: createHash("sha256")
@@ -17491,10 +17499,26 @@ describe("detached verification atomic batch fences", () => {
               .digest("hex")
               .slice(0, 24),
             providerSnapshotFingerprint: claimedProviderFingerprint,
+            failureFingerprint: priorFailureFingerprint,
+            runtimeVersion: batch.baseSha,
+            activeRealSearchCount: 0,
+            playbookEventCountAtClaim: 0,
+            reason: "IMPLEMENTATION_REQUIRED",
+            retryBudget: null,
             approach: {
               workMode: "IMPLEMENT_REUSABLE_SUPPORT",
               strategyAction: "REPAIR_PROVIDER_ADAPTER",
               playbookStage: "TYPED_ADAPTER",
+            },
+            actionPlan: {
+              schemaVersion: 1,
+              primaryAction: "IMPLEMENT_REUSABLE_SUPPORT",
+              allowedActions: ["IMPLEMENT_REUSABLE_SUPPORT"],
+              route: {
+                workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+                strategyAction: "REPAIR_PROVIDER_ADAPTER",
+                playbookStage: "TYPED_ADAPTER",
+              },
             },
           },
         ],
@@ -17505,6 +17529,7 @@ describe("detached verification atomic batch fences", () => {
     );
     prismaMocks.batchFindFirst.mockResolvedValue(batch);
     prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
     prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
     prismaMocks.transaction.mockImplementationOnce(
       async (
@@ -21809,6 +21834,198 @@ describe("detached verification atomic batch fences", () => {
     );
   });
 
+  it("lets an exact implementation action close from a fresh authoritative success probe", async () => {
+    const closeoutAt = new Date("2026-07-15T20:30:00.000Z");
+    const fixture = productionFailureCooldownBatch({
+      incidentFailureClass: "HTTP_5XX",
+      observedFailureClass: "HTTP_5XX",
+      closeoutAt,
+      batchCreatedAt: new Date("2026-07-15T20:29:00.000Z"),
+      priorCycleBatchCreatedAt: new Date("2026-07-15T20:00:00.000Z"),
+      providerExecution: true,
+    });
+    const approach = {
+      workMode: "IMPLEMENT_REUSABLE_SUPPORT" as const,
+      strategyAction: "REPAIR_PROVIDER_ADAPTER" as const,
+      playbookStage: "TYPED_ADAPTER" as const,
+    };
+    fixture.batch.summary = {
+      ...healthyDetachedDispatch(),
+      searchExecutionFence: emptySearchExecutionFence(),
+      plannedPaths: ["src/lib/tee-times/adapters/example.ts"],
+      remediation: {
+        workMode: approach.workMode,
+        strategyAction: approach.strategyAction,
+        playbookStage: approach.playbookStage,
+        allowUnchangedRuntime: false,
+        requiresImplementationPath: true,
+        reason: "IMPLEMENTATION_REQUIRED",
+        retryBudget: null,
+        attempts: [
+          {
+            courseRef: createHash("sha256")
+              .update("course-1")
+              .digest("hex")
+              .slice(0, 24),
+            providerSnapshotFingerprint: providerFingerprint,
+            failureFingerprint:
+              fixture.batch.incidents[0].incident.failureFingerprint,
+            runtimeVersion: fixture.batch.baseSha,
+            activeRealSearchCount: 0,
+            playbookEventCountAtClaim: 0,
+            reason: "IMPLEMENTATION_REQUIRED",
+            retryBudget: null,
+            approach,
+            actionPlan: {
+              schemaVersion: 1,
+              primaryAction: "IMPLEMENT_REUSABLE_SUPPORT",
+              allowedActions: ["IMPLEMENT_REUSABLE_SUPPORT"],
+              route: approach,
+            },
+          },
+        ],
+      },
+    };
+    const successProbe = {
+      id: "fresh-implementation-success-probe",
+      outcome: "NO_MATCH" as const,
+      observedAt: new Date("2026-07-15T20:29:30.000Z"),
+      runtimeVersion: "e".repeat(40),
+      rawSummary: { providerExecution: "RUNNABLE_PROVIDER_CHECK" },
+    };
+    fixture.batch.incidents[0].course.probes = [successProbe];
+    prismaMocks.batchFindFirst.mockResolvedValue(fixture.batch);
+    prismaMocks.courseProbeFindMany.mockResolvedValue([successProbe]);
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([
+      fixture.request,
+    ]);
+    verificationMocks.getCurrentCourseSupportVerificationFailure.mockResolvedValue(
+      fixture.currentFailure,
+    );
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.transaction.mockImplementation(
+      async (
+        worker: (
+          transaction: typeof monitoringTransactionClient,
+        ) => Promise<unknown>,
+      ) => worker(monitoringTransactionClient),
+    );
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        requestedOutcome: "retryable_failed",
+        verificationWatchMode: "EARLY_RETRY",
+        now: closeoutAt,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "success",
+      terminalCount: 1,
+      retryCount: 0,
+    });
+    expect(prismaMocks.incidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          result: "RESTORED",
+          postProbeId: successProbe.id,
+        }),
+      }),
+    );
+  });
+
+  it("still requires implementation when only one entry in a mixed batch has authoritative success", async () => {
+    const batch = closeoutBatch("PENDING");
+    batch.baseSha = "c".repeat(40);
+    batch.releaseSha = null;
+    batch.deployedAt = null;
+    const successProbe = {
+      id: "mixed-batch-success-probe",
+      outcome: "NO_MATCH" as const,
+      observedAt: new Date(now.getTime() - 30_000),
+      runtimeVersion: "e".repeat(40),
+      rawSummary: { providerExecution: "RUNNABLE_PROVIDER_CHECK" },
+    };
+    batch.incidents[0].course.probes = [successProbe];
+    batch.incidents.push({
+      ...batch.incidents[0],
+      id: "entry-2",
+      incidentId: "incident-2",
+      courseId: "course-2",
+      course: {
+        ...batch.incidents[0].course,
+        probes: [],
+      },
+      incident: {
+        ...batch.incidents[0].incident,
+        activeBatchId: "batch-1",
+      },
+    });
+    const approach = {
+      workMode: "IMPLEMENT_REUSABLE_SUPPORT" as const,
+      strategyAction: "REPAIR_PROVIDER_ADAPTER" as const,
+      playbookStage: "TYPED_ADAPTER" as const,
+    };
+    batch.summary = {
+      ...healthyDetachedDispatch(),
+      searchExecutionFence: emptySearchExecutionFenceForCourses([
+        "course-1",
+        "course-2",
+      ]),
+      plannedPaths: ["src/lib/tee-times/adapters/example.ts"],
+      remediation: {
+        workMode: approach.workMode,
+        strategyAction: approach.strategyAction,
+        playbookStage: approach.playbookStage,
+        allowUnchangedRuntime: false,
+        requiresImplementationPath: true,
+        reason: "IMPLEMENTATION_REQUIRED",
+        retryBudget: null,
+        attempts: ["course-1", "course-2"].map((courseId) => ({
+          courseRef: createHash("sha256")
+            .update(courseId)
+            .digest("hex")
+            .slice(0, 24),
+          providerSnapshotFingerprint: providerFingerprint,
+          failureFingerprint: "fingerprint",
+          runtimeVersion: batch.baseSha,
+          activeRealSearchCount: 0,
+          playbookEventCountAtClaim: 0,
+          reason: "IMPLEMENTATION_REQUIRED",
+          retryBudget: null,
+          approach,
+          actionPlan: {
+            schemaVersion: 1,
+            primaryAction: "IMPLEMENT_REUSABLE_SUPPORT",
+            allowedActions: ["IMPLEMENT_REUSABLE_SUPPORT"],
+            route: approach,
+          },
+        })),
+      },
+    };
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        requestedOutcome: "blocked_env",
+        failureDomain: "ENV",
+        verificationWatchMode: "EARLY_RETRY",
+        now,
+      }),
+    ).rejects.toThrow(
+      "requires a runtime-bearing committed implementation path",
+    );
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+  });
+
   it("fails closed when a real success probe appears after the normal closeout snapshot", async () => {
     const closeoutAt = new Date("2026-07-15T20:30:00.000Z");
     const fixture = productionFailureCooldownBatch({
@@ -23225,6 +23442,16 @@ describe("detached verification atomic batch fences", () => {
               strategyAction: "RUN_TYPED_ADAPTER",
               playbookStage: "TYPED_ADAPTER",
             },
+            actionPlan: {
+              schemaVersion: 1,
+              primaryAction: "VERIFY_CURRENT_RUNTIME",
+              allowedActions: ["VERIFY_CURRENT_RUNTIME"],
+              route: {
+                workMode: "ADVANCE_DISCOVERY",
+                strategyAction: "RUN_TYPED_ADAPTER",
+                playbookStage: "TYPED_ADAPTER",
+              },
+            },
           },
         ],
       },
@@ -24469,6 +24696,82 @@ describe("detached verification atomic batch fences", () => {
     );
     expect(prismaMocks.automationRunUpdateMany).not.toHaveBeenCalled();
   });
+
+  it.each([
+    ["standard", undefined],
+    ["early retry", "EARLY_RETRY" as const],
+    ["endpoint", "ENDPOINT" as const],
+  ])(
+    "does not turn skipped claimed implementation into a %s orchestration retry",
+    async (_label, verificationWatchMode) => {
+      const batch = closeoutBatch("PENDING");
+      batch.baseSha = "c".repeat(40);
+      batch.releaseSha = null;
+      batch.deployedAt = null;
+      const courseRef = createHash("sha256")
+        .update("course-1")
+        .digest("hex")
+        .slice(0, 24);
+      const approach = {
+        workMode: "IMPLEMENT_REUSABLE_SUPPORT" as const,
+        strategyAction: "REPAIR_PROVIDER_ADAPTER" as const,
+        playbookStage: "TYPED_ADAPTER" as const,
+      };
+      batch.summary = {
+        ...healthyDetachedDispatch(),
+        searchExecutionFence: emptySearchExecutionFence(),
+        plannedPaths: ["src/lib/tee-times/adapters/example.ts"],
+        remediation: {
+          workMode: approach.workMode,
+          strategyAction: approach.strategyAction,
+          playbookStage: approach.playbookStage,
+          allowUnchangedRuntime: false,
+          requiresImplementationPath: true,
+          reason: "IMPLEMENTATION_REQUIRED",
+          retryBudget: null,
+          attempts: [
+            {
+              courseRef,
+              providerSnapshotFingerprint: providerFingerprint,
+              failureFingerprint:
+                batch.incidents[0].incident.failureFingerprint,
+              runtimeVersion: batch.baseSha,
+              activeRealSearchCount: 0,
+              playbookEventCountAtClaim: 0,
+              reason: "IMPLEMENTATION_REQUIRED",
+              retryBudget: null,
+              approach,
+              actionPlan: {
+                schemaVersion: 1,
+                primaryAction: "IMPLEMENT_REUSABLE_SUPPORT",
+                allowedActions: ["IMPLEMENT_REUSABLE_SUPPORT"],
+                route: approach,
+              },
+            },
+          ],
+        },
+      };
+      prismaMocks.batchFindFirst.mockResolvedValue(batch);
+
+      await expect(
+        closeoutCourseSupportBatch({
+          batchId: "batch-1",
+          leaseToken: "lease-1",
+          ownerThreadId: "owner-thread",
+          requestedOutcome: "blocked_env",
+          failureDomain: "ENV",
+          ...(verificationWatchMode ? { verificationWatchMode } : {}),
+          now,
+        }),
+      ).rejects.toThrow(
+        "requires a runtime-bearing committed implementation path",
+      );
+
+      expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+      expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+      expect(prismaMocks.automationRunUpdateMany).not.toHaveBeenCalled();
+    },
+  );
 
   it("parks the second unchanged operational closeout without scheduling another AI retry", async () => {
     const batch = closeoutBatch("PENDING");

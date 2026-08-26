@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   classifyProviderCoverage,
+  limitProviderCoverageGroups,
+  PROVIDER_COVERAGE_GROUP_LIMIT,
   recommendProviderCoverageAction
 } from "./provider-coverage";
 
@@ -167,5 +169,30 @@ describe("provider coverage classification", () => {
         }
       })
     ).toBe("DISCOVER_WITH_HTTP");
+  });
+
+  it("bounds provider groups and reports how many were omitted", () => {
+    const result = limitProviderCoverageGroups(
+      Array.from({ length: PROVIDER_COVERAGE_GROUP_LIMIT + 3 }, (_, index) => ({
+        providerFamilyKey: `FAMILY_${String(index).padStart(2, "0")}`,
+        courseCount: index + 1,
+        monitoredCount: 0,
+        readyCount: 0,
+        degradedCount: 0,
+        openIncidentCount: 0,
+        activeRealDemandIncidentCount: 0,
+        engineeringIncidentCount: 0
+      }))
+    );
+
+    expect(result).toMatchObject({
+      providerGroupCount: PROVIDER_COVERAGE_GROUP_LIMIT + 3,
+      providerGroupLimit: PROVIDER_COVERAGE_GROUP_LIMIT,
+      omittedProviderGroupCount: 3
+    });
+    expect(result.providerGroups).toHaveLength(PROVIDER_COVERAGE_GROUP_LIMIT);
+    expect(result.providerGroups[0]?.courseCount).toBe(
+      PROVIDER_COVERAGE_GROUP_LIMIT + 3
+    );
   });
 });

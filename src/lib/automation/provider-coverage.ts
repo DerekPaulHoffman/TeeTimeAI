@@ -1,5 +1,9 @@
 import { prisma } from "@/lib/prisma";
 
+import {
+  aggregateCourseSupportActionTelemetry,
+  getCourseSupportActionTelemetryWindowStartedAt
+} from "./course-support-action-telemetry";
 import { evaluateMonitoringGate } from "./policy";
 import {
   type CourseSupportFailureClass,
@@ -22,6 +26,8 @@ export type ProviderCoverageCategory =
   | "UNSUPPORTED_FAMILY"
   | "SOURCE_UNVERIFIED"
   | "PRIVATE_OR_INVALID";
+
+export const PROVIDER_COVERAGE_GROUP_LIMIT = 25;
 
 type CoverageCourse = {
   isPublic: boolean | null;
@@ -48,6 +54,41 @@ type CoverageCourse = {
     firstSeenAt: Date;
   } | null;
 };
+
+export type ProviderCoverageGroup = {
+  providerFamilyKey: string;
+  courseCount: number;
+  monitoredCount: number;
+  readyCount: number;
+  degradedCount: number;
+  openIncidentCount: number;
+  activeRealDemandIncidentCount: number;
+  engineeringIncidentCount: number;
+};
+
+export function limitProviderCoverageGroups(
+  groups: readonly ProviderCoverageGroup[],
+  limit = PROVIDER_COVERAGE_GROUP_LIMIT
+) {
+  const boundedLimit = Math.max(0, Math.floor(limit));
+  const sortedGroups = [...groups].sort(
+    (left, right) =>
+      right.activeRealDemandIncidentCount -
+        left.activeRealDemandIncidentCount ||
+      right.openIncidentCount - left.openIncidentCount ||
+      right.courseCount - left.courseCount ||
+      left.providerFamilyKey.localeCompare(right.providerFamilyKey)
+  );
+  return {
+    providerGroupCount: sortedGroups.length,
+    providerGroupLimit: boundedLimit,
+    omittedProviderGroupCount: Math.max(
+      0,
+      sortedGroups.length - boundedLimit
+    ),
+    providerGroups: sortedGroups.slice(0, boundedLimit)
+  };
+}
 
 export function classifyProviderCoverage(
   course: CoverageCourse,
@@ -116,6 +157,8 @@ export function recommendProviderCoverageAction(
 
 export async function getProviderCoverageDashboard(input?: { now?: Date }) {
   const now = input?.now ?? new Date();
+  const actionWindowStartedAt =
+    getCourseSupportActionTelemetryWindowStartedAt(now);
   const courses = await prisma.course.findMany({
     select: {
       isPublic: true,
@@ -146,6 +189,21 @@ export async function getProviderCoverageDashboard(input?: { now?: Date }) {
           attemptCount: true,
           firstSeenAt: true
         }
+      }
+    }
+  });
+  const completedBatches = await prisma.courseSupportBatch.findMany({
+    where: {
+      completedAt: {
+        gte: actionWindowStartedAt,
+        lte: now
+      }
+    },
+    select: {
+      completedAt: true,
+      summary: true,
+      incidents: {
+        select: { courseId: true }
       }
     }
   });
@@ -223,9 +281,15 @@ export async function getProviderCoverageDashboard(input?: { now?: Date }) {
   ];
   const monitoredCount = categoryCounts.get("MONITORED") ?? 0;
   const eligibleCount = courses.length - (categoryCounts.get("PRIVATE_OR_INVALID") ?? 0);
+  const providerCoverageGroups = limitProviderCoverageGroups(
+    [...familyCounts.entries()].map(([providerFamilyKey, counts]) => ({
+      providerFamilyKey,
+      ...counts
+    }))
+  );
 
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     observedAt: now.toISOString(),
     totalCourseCount: courses.length,
     eligibleCourseCount: eligibleCount,
@@ -242,14 +306,10 @@ export async function getProviderCoverageDashboard(input?: { now?: Date }) {
       ])
     ),
     sourceUnverifiedFinalCandidateCount,
-    providerGroups: [...familyCounts.entries()]
-      .map(([providerFamilyKey, counts]) => ({ providerFamilyKey, ...counts }))
-      .sort(
-        (left, right) =>
-          right.activeRealDemandIncidentCount - left.activeRealDemandIncidentCount ||
-          right.openIncidentCount - left.openIncidentCount ||
-          right.courseCount - left.courseCount ||
-          left.providerFamilyKey.localeCompare(right.providerFamilyKey)
-      )
+    actionTelemetry: aggregateCourseSupportActionTelemetry({
+      now,
+      batches: completedBatches
+    }),
+    ...providerCoverageGroups
   };
 }

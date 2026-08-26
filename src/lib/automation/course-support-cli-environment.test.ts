@@ -1,12 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  buildCourseSupportCoverageMachineRecord,
   buildCourseSupportCommandFailure,
   classifyCommandFailure,
+  COURSE_SUPPORT_COVERAGE_MACHINE_RECORD_TYPE,
   COURSE_SUPPORT_DATABASE_URL_FAILURE_CLASS,
   CourseSupportDatabaseEnvironmentError,
+  parseCourseSupportCoverageOptions,
   requireExplicitCourseSupportDatabaseUrl,
-  runWithExplicitCourseSupportDatabaseUrl
+  runWithExplicitCourseSupportDatabaseUrl,
+  serializeCourseSupportResult
 } from "../../../scripts/automation/course-support";
 
 describe("course-support CLI database environment guard", () => {
@@ -60,5 +64,306 @@ describe("course-support CLI database environment guard", () => {
       threadDisposition: "KEEP_VISIBLE"
     });
     expect(JSON.stringify(result)).not.toContain("postgresql://");
+  });
+});
+
+describe("course-support coverage machine output", () => {
+  it("emits one compact stable aggregate-only schema v3 record", () => {
+    const categoryKeys = [
+      "MONITORED",
+      "SUPPORTED_READY",
+      "SUPPORTED_DEGRADED",
+      "TECHNICAL_CONSTRAINT",
+      "PHONE_OR_WALK_IN",
+      "UNSUPPORTED_FAMILY",
+      "SOURCE_UNVERIFIED",
+      "PRIVATE_OR_INVALID"
+    ];
+    const recommendedActionKeys = [
+      "RUN_TYPED_ADAPTER",
+      "DISCOVER_WITH_HTTP",
+      "DISCOVER_WITH_BROWSER",
+      "VERIFY_TECHNICAL_CONSTRAINT",
+      "RETRY_PROVIDER",
+      "REPAIR_PROVIDER_ADAPTER",
+      "FINAL_TECHNICAL_CONSTRAINT",
+      "FINAL_MANUAL_BOOKING",
+      "FINAL_PRIVATE_OR_INVALID"
+    ];
+    const claimActionKeys = [
+      "VERIFY_CURRENT_RUNTIME",
+      "SEARCH_FOR_OFFICIAL_SOURCE",
+      "INSPECT_PROVIDER_CONTRACT",
+      "IMPLEMENT_REUSABLE_SUPPORT",
+      "COMPLETE_CLASSIFICATION",
+      "WAIT_FOR_MATERIAL_CHANGE"
+    ];
+    const canaries = [
+      "PRIVATE_PROVIDER_NAME_CANARY",
+      "PRIVATE_PROVIDER_FAMILY_CANARY",
+      "Private Course Name Canary",
+      "PRIVATE_COURSE_REFERENCE_CANARY",
+      "private-course-id-canary",
+      "https://private-provider.example/course?id=private-id-canary",
+      "private-batch-reference-canary",
+      "private-task-reference-canary",
+      "private-database-host-canary.neon.tech",
+      "PRIVATE_PAYLOAD_CANARY"
+    ];
+    const actionMetric = {
+      selectedCount: 0,
+      confirmedExecutedCount: 0,
+      executionUnavailableCount: 1,
+      zeroExecutionCount: 0,
+      nonzeroExecutionCount: 0,
+      zeroExecutionUnavailableCount: 1,
+      executedCount: null,
+      executionAvailability: "unavailable",
+      zeroExecutionTotal: null,
+      providerName: canaries[0],
+      taskRef: canaries[7],
+      payload: canaries[9]
+    };
+    const record = buildCourseSupportCoverageMachineRecord({
+      outcome: "ready",
+      coverage: {
+        schemaVersion: 3,
+        observedAt: "2026-08-26T17:00:00.000Z",
+        totalCourseCount: 0,
+        eligibleCourseCount: 0,
+        effectiveMonitoredCourseCount: 0,
+        effectiveCoveragePercent: 0,
+        categories: Object.fromEntries(
+          categoryKeys.map((category) => [category, 0])
+        ),
+        recommendedActions: Object.fromEntries(
+          recommendedActionKeys.map((action) => [action, 0])
+        ),
+        sourceUnverifiedFinalCandidateCount: 0,
+        actionTelemetry: {
+          schemaVersion: 1,
+          windowDays: 30,
+          windowStartedAt: "2026-07-27T17:00:00.000Z",
+          windowEndedAt: "2026-08-26T17:00:00.000Z",
+          completedBatchCount: 0,
+          completedEntryCount: 0,
+          selectedActionCount: 0,
+          selectedActionUnavailableCount: 1,
+          confirmedExecutedActionCount: 0,
+          executedActionCount: null,
+          executionUnavailableCount: 1,
+          zeroExecutionCount: 0,
+          nonzeroExecutionCount: 0,
+          zeroExecutionTotal: null,
+          zeroExecutionUnavailableCount: 1,
+          actions: Object.fromEntries(
+            claimActionKeys.map((action) => [action, actionMetric])
+          ),
+          batchRef: canaries[6],
+          databaseHost: canaries[8],
+          payload: canaries[9]
+        },
+        providerGroupCount: 1,
+        providerGroupLimit: 25,
+        omittedProviderGroupCount: 0,
+        providerGroups: [
+          {
+            providerFamilyKey: canaries[1],
+            courseCount: 1
+          }
+        ],
+        providerName: canaries[0],
+        courseName: canaries[2],
+        courseRef: canaries[3],
+        courseId: canaries[4],
+        id: "private-id-canary",
+        url: canaries[5],
+        batchRef: canaries[6],
+        taskRef: canaries[7],
+        databaseHost: canaries[8],
+        payload: canaries[9]
+      }
+    });
+    const output = serializeCourseSupportResult(record, { machine: true });
+    const parsed = JSON.parse(output);
+
+    expect(output.trim().split("\n")).toHaveLength(1);
+    expect(Object.keys(parsed)).toEqual([
+      "outcome",
+      "recordType",
+      "schemaVersion",
+      "coverage",
+      "failure"
+    ]);
+    expect(parsed).toMatchObject({
+      outcome: "ready",
+      recordType: COURSE_SUPPORT_COVERAGE_MACHINE_RECORD_TYPE,
+      schemaVersion: 1,
+      failure: null
+    });
+    expect(Object.keys(parsed.coverage)).toEqual([
+      "schemaVersion",
+      "observedAt",
+      "totalCourseCount",
+      "eligibleCourseCount",
+      "effectiveMonitoredCourseCount",
+      "effectiveCoveragePercent",
+      "categories",
+      "recommendedActions",
+      "sourceUnverifiedFinalCandidateCount",
+      "actionTelemetry",
+      "providerGroupCount",
+      "providerGroupLimit",
+      "omittedProviderGroupCount"
+    ]);
+    expect(Object.keys(parsed.coverage.categories)).toEqual(categoryKeys);
+    expect(Object.keys(parsed.coverage.recommendedActions)).toEqual(
+      recommendedActionKeys
+    );
+    expect(Object.keys(parsed.coverage.actionTelemetry.actions)).toEqual(
+      claimActionKeys
+    );
+    expect(
+      Object.keys(
+        parsed.coverage.actionTelemetry.actions.VERIFY_CURRENT_RUNTIME
+      )
+    ).toEqual([
+      "selectedCount",
+      "confirmedExecutedCount",
+      "executionUnavailableCount",
+      "zeroExecutionCount",
+      "nonzeroExecutionCount",
+      "zeroExecutionUnavailableCount",
+      "executedCount",
+      "executionAvailability",
+      "zeroExecutionTotal"
+    ]);
+    expect(parsed.coverage).toMatchObject({
+      totalCourseCount: 0,
+      eligibleCourseCount: 0,
+      effectiveMonitoredCourseCount: 0,
+      effectiveCoveragePercent: 0,
+      actionTelemetry: {
+        completedBatchCount: 0,
+        selectedActionCount: 0,
+        executedActionCount: null,
+        zeroExecutionTotal: null,
+        actions: {
+          VERIFY_CURRENT_RUNTIME: {
+            selectedCount: 0,
+            executedCount: null,
+            executionAvailability: "unavailable",
+            zeroExecutionTotal: null
+          }
+        }
+      },
+      providerGroupCount: 1,
+      providerGroupLimit: 25,
+      omittedProviderGroupCount: 0
+    });
+    for (const canary of canaries) {
+      expect(output).not.toContain(canary);
+    }
+    expect(output).not.toContain("private-id-canary");
+    expect(output).not.toContain("providerFamilyKey");
+    expect(output).not.toContain("providerGroups");
+    expect(output).not.toContain("courseRef");
+  });
+
+  it("keeps a stable envelope when coverage is unavailable", () => {
+    expect(
+      buildCourseSupportCoverageMachineRecord({
+        outcome: "paused_by_control_plane"
+      })
+    ).toEqual({
+      outcome: "paused_by_control_plane",
+      recordType: COURSE_SUPPORT_COVERAGE_MACHINE_RECORD_TYPE,
+      schemaVersion: 1,
+      coverage: null,
+      failure: null
+    });
+  });
+
+  it("does not forward an unknown machine outcome", () => {
+    const outcomeCanary = "PRIVATE_COURSE_NAME_OUTCOME_CANARY";
+    const record = buildCourseSupportCoverageMachineRecord({
+      outcome: outcomeCanary
+    });
+
+    expect(record.outcome).toBe("command_failed");
+    expect(JSON.stringify(record)).not.toContain(outcomeCanary);
+  });
+
+  it("projects failures through a strict aggregate-only allowlist", () => {
+    const canaries = [
+      "PRIVATE_PROVIDER_FAMILY_CANARY",
+      "PRIVATE_COURSE_REFERENCE_CANARY",
+      "Private Course Name Canary",
+      "private-course-id-canary",
+      "https://private-provider.example/course?id=private-id-canary",
+      "private-batch-reference-canary",
+      "private-task-reference-canary",
+      "private-database-host-canary.neon.tech"
+    ];
+    const record = buildCourseSupportCoverageMachineRecord({
+      outcome: "blocked_env",
+      failure: {
+        outcome: "blocked_env",
+        failureDomain: "ENV",
+        failureClass: COURSE_SUPPORT_DATABASE_URL_FAILURE_CLASS,
+        durableCloseoutRecorded: false,
+        threadDisposition: "KEEP_VISIBLE",
+        archiveReason: canaries.join(" "),
+        error: canaries.join(" "),
+        providerFamilyKey: canaries[0],
+        courseRef: canaries[1],
+        courseName: canaries[2],
+        courseId: canaries[3],
+        id: "private-id-canary",
+        url: canaries[4],
+        batchRef: canaries[5],
+        taskRef: canaries[6],
+        databaseHost: canaries[7],
+        nested: { payload: canaries }
+      }
+    });
+    const output = serializeCourseSupportResult(record, { machine: true });
+
+    expect(JSON.parse(output).failure).toEqual({
+      failureDomain: "ENV",
+      failureClass: COURSE_SUPPORT_DATABASE_URL_FAILURE_CLASS,
+      durableCloseoutRecorded: false,
+      threadDisposition: "KEEP_VISIBLE"
+    });
+    for (const canary of canaries) {
+      expect(output).not.toContain(canary);
+    }
+    expect(output).not.toContain("private-id-canary");
+  });
+
+  it("preserves the human-readable default and validates machine flags", () => {
+    expect(parseCourseSupportCoverageOptions([])).toEqual({ machine: false });
+    expect(parseCourseSupportCoverageOptions(["--machine"])).toEqual({
+      machine: true
+    });
+    expect(() =>
+      parseCourseSupportCoverageOptions(["--machine", "--machine"])
+    ).toThrow("--machine may be provided only once");
+    const unknownOptionCanary =
+      "--PRIVATE_PROVIDER_FAMILY_CANARY-Private_Course_Name_Canary-" +
+      "private-course-id-canary-https://private.example/private-" +
+      "batch-task-database-canary";
+    expect(() =>
+      parseCourseSupportCoverageOptions([unknownOptionCanary])
+    ).toThrow("Unknown coverage option. Only --machine is supported.");
+    try {
+      parseCourseSupportCoverageOptions([unknownOptionCanary]);
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).not.toContain(unknownOptionCanary);
+    }
+    expect(serializeCourseSupportResult({ outcome: "ready" })).toContain(
+      '\n  "outcome": "ready"\n'
+    );
   });
 });

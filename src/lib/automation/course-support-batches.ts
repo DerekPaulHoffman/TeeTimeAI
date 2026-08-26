@@ -9755,6 +9755,72 @@ async function closeoutCourseSupportBatchAttempt(
       approach,
     } satisfies Prisma.InputJsonObject;
   });
+  const claimedImplementationStillRequired = rawCloseoutRemediationAttempts.some(
+    (attempt, index) => {
+      const entry = baseNormalizedEntries[index];
+      if (!entry) return false;
+      const plannedAttempt = asJsonObject(
+        plannedRemediationAttempts.find(
+          (candidate) =>
+            asJsonObject(candidate).courseRef === attempt.courseRef,
+        ),
+      );
+      const actionPlanWasPersisted = Object.prototype.hasOwnProperty.call(
+        plannedAttempt,
+        "actionPlan",
+      );
+      if (!actionPlanWasPersisted) {
+        // Batches claimed before action plans were introduced retain their
+        // existing closeout behavior until they close or are reclaimed.
+        return false;
+      }
+      const claimedAttempt = readCourseSupportRemediationClaimAttempt({
+        summary: batch.summary,
+        courseId: entry.courseId,
+        expectedAttemptCount: batch.incidents.length,
+      });
+      if (!claimedAttempt?.actionPlan) {
+        throw new Error(
+          "The persisted course-support action plan is invalid or no longer matches the claimed remediation route.",
+        );
+      }
+      if (
+        claimedAttempt.actionPlan.primaryAction !==
+        "IMPLEMENT_REUSABLE_SUPPORT"
+      ) {
+        return false;
+      }
+      const currentFailureIdentity =
+        currentFailureIdentityByBatchIncidentId.get(entry.id);
+      const authoritativeTerminalWinner =
+        authoritativeSuccessProbeByBatchIncidentId.has(entry.id) ||
+        (["RESTORED", "FINAL_DISPOSITION"].includes(
+          entry.normalizedResult,
+        ) && attempt.executionEvidence.terminalResultRecorded === true);
+      return Boolean(
+        !currentFailureIdentity?.materialChange &&
+          !authoritativeTerminalWinner,
+      );
+    },
+  );
+  if (claimedImplementationStillRequired) {
+    if (remediationDirective?.requiresImplementationPath !== true) {
+      throw new Error(
+        "The persisted implementation action no longer matches the batch remediation directive.",
+      );
+    }
+    // A stopped verification watch must not turn skipped implementation into
+    // an orchestration-only retry. Keep the owned batch resumable so the
+    // assigned runtime change can be completed in this launch, while material
+    // provider changes and authoritative terminal evidence retain their
+    // existing handoff paths.
+    assertCourseSupportImplementationVerificationReady({
+      summary: batch.summary,
+      baseSha: batch.baseSha,
+      releaseSha: batch.releaseSha,
+      deployedAt: batch.deployedAt,
+    });
+  }
   if (
     !persistedSearchExecutionFence &&
     rawCloseoutRemediationAttempts.some(

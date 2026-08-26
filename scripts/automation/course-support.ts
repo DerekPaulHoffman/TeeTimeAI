@@ -107,6 +107,350 @@ type CourseSupportDatabaseEnvironment = {
 
 export const COURSE_SUPPORT_DATABASE_URL_FAILURE_CLASS =
   "DATABASE_URL_MISSING";
+export const COURSE_SUPPORT_COVERAGE_MACHINE_RECORD_TYPE =
+  "course_support_coverage";
+export const COURSE_SUPPORT_COVERAGE_MACHINE_SCHEMA_VERSION = 1;
+const COURSE_SUPPORT_COVERAGE_MACHINE_OUTCOMES = new Set<string>([
+  ...RESPONDER_OUTCOMES,
+  "ready",
+  "paused_by_control_plane"
+]);
+
+type CourseSupportCoverageOptions = {
+  machine: boolean;
+};
+
+export type CourseSupportCoverageMachineFailure = {
+  failureDomain: ResponderFailureDomain | null;
+  failureClass: typeof COURSE_SUPPORT_DATABASE_URL_FAILURE_CLASS | null;
+  durableCloseoutRecorded: boolean | null;
+  threadDisposition: "ARCHIVE" | "KEEP_VISIBLE" | null;
+};
+
+const COURSE_SUPPORT_COVERAGE_MACHINE_CATEGORIES = [
+  "MONITORED",
+  "SUPPORTED_READY",
+  "SUPPORTED_DEGRADED",
+  "TECHNICAL_CONSTRAINT",
+  "PHONE_OR_WALK_IN",
+  "UNSUPPORTED_FAMILY",
+  "SOURCE_UNVERIFIED",
+  "PRIVATE_OR_INVALID"
+] as const;
+const COURSE_SUPPORT_COVERAGE_MACHINE_RECOMMENDED_ACTIONS = [
+  "RUN_TYPED_ADAPTER",
+  "DISCOVER_WITH_HTTP",
+  "DISCOVER_WITH_BROWSER",
+  "VERIFY_TECHNICAL_CONSTRAINT",
+  "RETRY_PROVIDER",
+  "REPAIR_PROVIDER_ADAPTER",
+  "FINAL_TECHNICAL_CONSTRAINT",
+  "FINAL_MANUAL_BOOKING",
+  "FINAL_PRIVATE_OR_INVALID"
+] as const;
+const COURSE_SUPPORT_COVERAGE_MACHINE_CLAIM_ACTIONS = [
+  "VERIFY_CURRENT_RUNTIME",
+  "SEARCH_FOR_OFFICIAL_SOURCE",
+  "INSPECT_PROVIDER_CONTRACT",
+  "IMPLEMENT_REUSABLE_SUPPORT",
+  "COMPLETE_CLASSIFICATION",
+  "WAIT_FOR_MATERIAL_CHANGE"
+] as const;
+
+type CourseSupportCoverageMachineActionMetric = {
+  selectedCount: number | null;
+  confirmedExecutedCount: number | null;
+  executionUnavailableCount: number | null;
+  zeroExecutionCount: number | null;
+  nonzeroExecutionCount: number | null;
+  zeroExecutionUnavailableCount: number | null;
+  executedCount: number | null;
+  executionAvailability: "available" | "partial" | "unavailable" | null;
+  zeroExecutionTotal: number | null;
+};
+
+type CourseSupportCoverageMachineActionTelemetry = {
+  schemaVersion: 1 | null;
+  windowDays: number | null;
+  windowStartedAt: string | null;
+  windowEndedAt: string | null;
+  completedBatchCount: number | null;
+  completedEntryCount: number | null;
+  selectedActionCount: number | null;
+  selectedActionUnavailableCount: number | null;
+  confirmedExecutedActionCount: number | null;
+  executedActionCount: number | null;
+  executionUnavailableCount: number | null;
+  zeroExecutionCount: number | null;
+  nonzeroExecutionCount: number | null;
+  zeroExecutionTotal: number | null;
+  zeroExecutionUnavailableCount: number | null;
+  actions: Record<
+    (typeof COURSE_SUPPORT_COVERAGE_MACHINE_CLAIM_ACTIONS)[number],
+    CourseSupportCoverageMachineActionMetric
+  >;
+};
+
+export type CourseSupportCoverageMachineValue = {
+  schemaVersion: 3 | null;
+  observedAt: string | null;
+  totalCourseCount: number | null;
+  eligibleCourseCount: number | null;
+  effectiveMonitoredCourseCount: number | null;
+  effectiveCoveragePercent: number | null;
+  categories: Record<
+    (typeof COURSE_SUPPORT_COVERAGE_MACHINE_CATEGORIES)[number],
+    number | null
+  >;
+  recommendedActions: Record<
+    (typeof COURSE_SUPPORT_COVERAGE_MACHINE_RECOMMENDED_ACTIONS)[number],
+    number | null
+  >;
+  sourceUnverifiedFinalCandidateCount: number | null;
+  actionTelemetry: CourseSupportCoverageMachineActionTelemetry | null;
+  providerGroupCount: number | null;
+  providerGroupLimit: number | null;
+  omittedProviderGroupCount: number | null;
+};
+
+export function parseCourseSupportCoverageOptions(
+  args: readonly string[]
+): CourseSupportCoverageOptions {
+  const unknownArguments = args.filter((argument) => argument !== "--machine");
+  if (unknownArguments.length > 0) {
+    throw new Error("Unknown coverage option. Only --machine is supported.");
+  }
+  if (args.filter((argument) => argument === "--machine").length > 1) {
+    throw new Error("--machine may be provided only once.");
+  }
+  return { machine: args.includes("--machine") };
+}
+
+export function buildCourseSupportCoverageMachineRecord(input: {
+  outcome: string;
+  coverage?: unknown;
+  failure?: unknown;
+}) {
+  return {
+    outcome: COURSE_SUPPORT_COVERAGE_MACHINE_OUTCOMES.has(input.outcome)
+      ? input.outcome
+      : "command_failed",
+    recordType: COURSE_SUPPORT_COVERAGE_MACHINE_RECORD_TYPE,
+    schemaVersion: COURSE_SUPPORT_COVERAGE_MACHINE_SCHEMA_VERSION,
+    coverage:
+      input.coverage === undefined
+        ? null
+        : projectCourseSupportCoverageMachineValue(input.coverage),
+    failure:
+      input.failure === undefined || input.failure === null
+        ? null
+        : projectCourseSupportCoverageMachineFailure(input.failure)
+  };
+}
+
+function projectCourseSupportCoverageMachineFailure(
+  value: unknown
+): CourseSupportCoverageMachineFailure {
+  const failure =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  return {
+    failureDomain:
+      typeof failure.failureDomain === "string" &&
+      FAILURE_DOMAINS.has(failure.failureDomain as ResponderFailureDomain)
+        ? (failure.failureDomain as ResponderFailureDomain)
+        : null,
+    failureClass:
+      failure.failureClass === COURSE_SUPPORT_DATABASE_URL_FAILURE_CLASS
+        ? COURSE_SUPPORT_DATABASE_URL_FAILURE_CLASS
+        : null,
+    durableCloseoutRecorded:
+      typeof failure.durableCloseoutRecorded === "boolean"
+        ? failure.durableCloseoutRecorded
+        : null,
+    threadDisposition:
+      failure.threadDisposition === "ARCHIVE" ||
+      failure.threadDisposition === "KEEP_VISIBLE"
+        ? failure.threadDisposition
+        : null
+  };
+}
+
+function projectCourseSupportCoverageMachineValue(
+  value: unknown
+): CourseSupportCoverageMachineValue {
+  const coverage = courseSupportCoverageMachineRecord(value);
+  return {
+    schemaVersion: coverage.schemaVersion === 3 ? 3 : null,
+    observedAt: courseSupportCoverageMachineTimestamp(coverage.observedAt),
+    totalCourseCount: courseSupportCoverageMachineCount(
+      coverage.totalCourseCount
+    ),
+    eligibleCourseCount: courseSupportCoverageMachineCount(
+      coverage.eligibleCourseCount
+    ),
+    effectiveMonitoredCourseCount: courseSupportCoverageMachineCount(
+      coverage.effectiveMonitoredCourseCount
+    ),
+    effectiveCoveragePercent: courseSupportCoverageMachineFiniteNumber(
+      coverage.effectiveCoveragePercent
+    ),
+    categories: projectCourseSupportCoverageMachineCounts(
+      coverage.categories,
+      COURSE_SUPPORT_COVERAGE_MACHINE_CATEGORIES
+    ),
+    recommendedActions: projectCourseSupportCoverageMachineCounts(
+      coverage.recommendedActions,
+      COURSE_SUPPORT_COVERAGE_MACHINE_RECOMMENDED_ACTIONS
+    ),
+    sourceUnverifiedFinalCandidateCount: courseSupportCoverageMachineCount(
+      coverage.sourceUnverifiedFinalCandidateCount
+    ),
+    actionTelemetry: projectCourseSupportCoverageMachineActionTelemetry(
+      coverage.actionTelemetry
+    ),
+    providerGroupCount: courseSupportCoverageMachineCount(
+      coverage.providerGroupCount
+    ),
+    providerGroupLimit: courseSupportCoverageMachineCount(
+      coverage.providerGroupLimit
+    ),
+    omittedProviderGroupCount: courseSupportCoverageMachineCount(
+      coverage.omittedProviderGroupCount
+    )
+  };
+}
+
+function projectCourseSupportCoverageMachineActionTelemetry(
+  value: unknown
+): CourseSupportCoverageMachineActionTelemetry | null {
+  if (!courseSupportCoverageMachineIsRecord(value)) return null;
+  const telemetry = value;
+  const actions = courseSupportCoverageMachineRecord(telemetry.actions);
+  return {
+    schemaVersion: telemetry.schemaVersion === 1 ? 1 : null,
+    windowDays: courseSupportCoverageMachineCount(telemetry.windowDays),
+    windowStartedAt: courseSupportCoverageMachineTimestamp(
+      telemetry.windowStartedAt
+    ),
+    windowEndedAt: courseSupportCoverageMachineTimestamp(telemetry.windowEndedAt),
+    completedBatchCount: courseSupportCoverageMachineCount(
+      telemetry.completedBatchCount
+    ),
+    completedEntryCount: courseSupportCoverageMachineCount(
+      telemetry.completedEntryCount
+    ),
+    selectedActionCount: courseSupportCoverageMachineCount(
+      telemetry.selectedActionCount
+    ),
+    selectedActionUnavailableCount: courseSupportCoverageMachineCount(
+      telemetry.selectedActionUnavailableCount
+    ),
+    confirmedExecutedActionCount: courseSupportCoverageMachineCount(
+      telemetry.confirmedExecutedActionCount
+    ),
+    executedActionCount: courseSupportCoverageMachineCount(
+      telemetry.executedActionCount
+    ),
+    executionUnavailableCount: courseSupportCoverageMachineCount(
+      telemetry.executionUnavailableCount
+    ),
+    zeroExecutionCount: courseSupportCoverageMachineCount(
+      telemetry.zeroExecutionCount
+    ),
+    nonzeroExecutionCount: courseSupportCoverageMachineCount(
+      telemetry.nonzeroExecutionCount
+    ),
+    zeroExecutionTotal: courseSupportCoverageMachineCount(
+      telemetry.zeroExecutionTotal
+    ),
+    zeroExecutionUnavailableCount: courseSupportCoverageMachineCount(
+      telemetry.zeroExecutionUnavailableCount
+    ),
+    actions: Object.fromEntries(
+      COURSE_SUPPORT_COVERAGE_MACHINE_CLAIM_ACTIONS.map((action) => [
+        action,
+        projectCourseSupportCoverageMachineActionMetric(actions[action])
+      ])
+    ) as CourseSupportCoverageMachineActionTelemetry["actions"]
+  };
+}
+
+function projectCourseSupportCoverageMachineActionMetric(
+  value: unknown
+): CourseSupportCoverageMachineActionMetric {
+  const metric = courseSupportCoverageMachineRecord(value);
+  const executionAvailability = metric.executionAvailability;
+  return {
+    selectedCount: courseSupportCoverageMachineCount(metric.selectedCount),
+    confirmedExecutedCount: courseSupportCoverageMachineCount(
+      metric.confirmedExecutedCount
+    ),
+    executionUnavailableCount: courseSupportCoverageMachineCount(
+      metric.executionUnavailableCount
+    ),
+    zeroExecutionCount: courseSupportCoverageMachineCount(
+      metric.zeroExecutionCount
+    ),
+    nonzeroExecutionCount: courseSupportCoverageMachineCount(
+      metric.nonzeroExecutionCount
+    ),
+    zeroExecutionUnavailableCount: courseSupportCoverageMachineCount(
+      metric.zeroExecutionUnavailableCount
+    ),
+    executedCount: courseSupportCoverageMachineCount(metric.executedCount),
+    executionAvailability:
+      executionAvailability === "available" ||
+      executionAvailability === "partial" ||
+      executionAvailability === "unavailable"
+        ? executionAvailability
+        : null,
+    zeroExecutionTotal: courseSupportCoverageMachineCount(
+      metric.zeroExecutionTotal
+    )
+  };
+}
+
+function projectCourseSupportCoverageMachineCounts<Key extends string>(
+  value: unknown,
+  keys: readonly Key[]
+) {
+  const source = courseSupportCoverageMachineRecord(value);
+  return Object.fromEntries(
+    keys.map((key) => [key, courseSupportCoverageMachineCount(source[key])])
+  ) as Record<Key, number | null>;
+}
+
+function courseSupportCoverageMachineCount(value: unknown) {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0
+    ? value
+    : null;
+}
+
+function courseSupportCoverageMachineFiniteNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function courseSupportCoverageMachineTimestamp(value: unknown) {
+  if (typeof value !== "string") return null;
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value
+    ? value
+    : null;
+}
+
+function courseSupportCoverageMachineRecord(
+  value: unknown
+): Record<string, unknown> {
+  return courseSupportCoverageMachineIsRecord(value) ? value : {};
+}
+
+function courseSupportCoverageMachineIsRecord(
+  value: unknown
+): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
 
 export class CourseSupportDatabaseEnvironmentError extends Error {
   readonly outcome: ResponderOutcome = "blocked_env";
@@ -148,13 +492,23 @@ async function main() {
 
 async function runConfiguredCommand() {
   const [command = "inspect", ...args] = process.argv.slice(2);
+  const coverageOptions =
+    command === "coverage" ? parseCourseSupportCoverageOptions(args) : null;
   const scheduledCycle = shouldRecordAutomationWorkerCycle({ command, args });
   if (!scheduledCycle) {
     if (!(await isAutomationWorkerExecutionAllowed(AUTOMATION_WORKERS.COURSE_SUPPORT))) {
-      writeResult({ outcome: "paused_by_control_plane" });
+      const pausedResult = { outcome: "paused_by_control_plane" };
+      writeResult(
+        coverageOptions?.machine
+          ? buildCourseSupportCoverageMachineRecord({
+              outcome: pausedResult.outcome
+            })
+          : pausedResult,
+        { machine: coverageOptions?.machine }
+      );
       return;
     }
-    await runCommand(command, args);
+    await runCommand(command, args, coverageOptions);
     return;
   }
   const worker = await startAutomationWorker(AUTOMATION_WORKERS.COURSE_SUPPORT, {
@@ -167,7 +521,7 @@ async function runConfiguredCommand() {
   try {
     await runWithAutomationWorkerHeartbeat(
       AUTOMATION_WORKERS.COURSE_SUPPORT,
-      () => runCommand(command, args),
+      () => runCommand(command, args, coverageOptions),
       { intervalMs: COURSE_SUPPORT_OPERATION_HEARTBEAT_INTERVAL_MS }
     );
     await completeAutomationWorker(
@@ -183,7 +537,11 @@ async function runConfiguredCommand() {
   }
 }
 
-async function runCommand(command: string, args: string[]) {
+async function runCommand(
+  command: string,
+  args: string[],
+  coverageOptions: CourseSupportCoverageOptions | null
+) {
   switch (command) {
     case "inspect":
       writeResult(
@@ -196,9 +554,21 @@ async function runCommand(command: string, args: string[]) {
         )
       );
       return;
-    case "coverage":
-      writeResult(await getProviderCoverageDashboard());
+    case "coverage": {
+      const options =
+        coverageOptions ?? parseCourseSupportCoverageOptions(args);
+      const coverage = await getProviderCoverageDashboard();
+      writeResult(
+        options.machine
+          ? buildCourseSupportCoverageMachineRecord({
+              outcome: "ready",
+              coverage
+            })
+          : coverage,
+        { machine: options.machine }
+      );
       return;
+    }
     case "claim":
       writeResult(await claim(args));
       return;
@@ -1122,8 +1492,19 @@ function numberValue(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-function writeResult(value: unknown) {
-  process.stdout.write(`${JSON.stringify(sanitizeResponderValue(value), null, 2)}\n`);
+export function serializeCourseSupportResult(
+  value: unknown,
+  options?: { machine?: boolean }
+) {
+  return `${JSON.stringify(
+    sanitizeResponderValue(value),
+    null,
+    options?.machine ? undefined : 2
+  )}\n`;
+}
+
+function writeResult(value: unknown, options?: { machine?: boolean }) {
+  process.stdout.write(serializeCourseSupportResult(value, options));
 }
 
 const directEntry = process.argv[1]
@@ -1132,7 +1513,19 @@ const directEntry = process.argv[1]
 
 if (directEntry) {
   main().catch((error) => {
-    writeResult(buildCourseSupportCommandFailure(error));
+    const failure = buildCourseSupportCommandFailure(error);
+    const [command = "inspect", ...args] = process.argv.slice(2);
+    const machineCoverage =
+      command === "coverage" && args.includes("--machine");
+    writeResult(
+      machineCoverage
+        ? buildCourseSupportCoverageMachineRecord({
+            outcome: failure.outcome,
+            failure
+          })
+        : failure,
+      { machine: machineCoverage }
+    );
     process.exitCode = 1;
   });
 }
