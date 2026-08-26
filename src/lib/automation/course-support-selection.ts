@@ -14,6 +14,7 @@ import type {
   CourseSupportRemediationDirective,
   CourseSupportRemediationRoute
 } from "./course-support-remediation-routing";
+import type { CourseSupportClaimActionPlan } from "./course-support-action-plan";
 import type { DeferredFailureHandoffSignal } from "./course-support-deferred-failure-handoff";
 
 const NEAR_DATE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -41,6 +42,7 @@ export type CourseSupportCandidate = {
   updatedAt: Date;
   remediationDirective?: CourseSupportRemediationDirective;
   remediationRoute?: CourseSupportRemediationRoute;
+  actionPlan?: CourseSupportClaimActionPlan;
   providerSnapshotFingerprint?: string;
   remediationCourseRef?: string;
   deferredFailureHandoff?: {
@@ -303,12 +305,14 @@ export function selectCourseSupportBatch(input: {
 
 function courseSupportCandidateGroupKey(candidate: CourseSupportCandidate) {
   const directive = candidate.remediationDirective;
+  const actionPlan = candidate.actionPlan;
   return [
     candidate.providerFamilyKey,
     candidate.failureFingerprint,
     directive?.workMode ?? "LEGACY",
     directive?.strategyAction ?? "LEGACY",
-    directive?.playbookStage ?? "NONE"
+    directive?.playbookStage ?? "NONE",
+    actionPlan ? JSON.stringify(actionPlan) : "LEGACY_ACTION_PLAN",
   ].join("\u0000");
 }
 

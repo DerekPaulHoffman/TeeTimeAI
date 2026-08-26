@@ -430,7 +430,7 @@ describe("course-support zero-execution history", () => {
     ).toBe(1);
   });
 
-  it("counts an undeployed candidate release as orchestration-only and backs off the next miss", () => {
+  it("counts an undeployed candidate release without lengthening the control-plane retry", () => {
     const summary = {
       closeout: {
         remediationAttempts: [
@@ -467,7 +467,7 @@ describe("course-support zero-execution history", () => {
       }),
     ).toMatchObject({
       attemptNumber: 3,
-      delayMs: 60 * 60 * 1000,
+      delayMs: 15 * 60 * 1000,
     });
   });
 
@@ -630,7 +630,7 @@ describe("course-support zero-execution history", () => {
     ).toBe(false);
   });
 
-  it("backs orchestration retries off exponentially and caps them at six hours", () => {
+  it("keeps orchestration retries on the responder cadence while retaining attempt count", () => {
     const scheduledAt = new Date("2026-08-20T12:00:00.000Z");
     expect(
       getCourseSupportOrchestrationRetrySchedule({
@@ -649,8 +649,8 @@ describe("course-support zero-execution history", () => {
       }),
     ).toEqual({
       attemptNumber: 21,
-      delayMs: 6 * 60 * 60 * 1000,
-      retryAt: new Date("2026-08-20T18:00:00.000Z"),
+      delayMs: 15 * 60 * 1000,
+      retryAt: new Date("2026-08-20T12:15:00.000Z"),
     });
   });
 });

@@ -119,6 +119,45 @@ describe("course-support remediation-aware selection", () => {
     expect(selected?.remediationDirective).toEqual(remediationDirective);
   });
 
+  it("does not mix different per-entry action contracts", () => {
+    const remediationDirective = {
+      workMode: "ADVANCE_DISCOVERY" as const,
+      strategyAction: "DISCOVER_WITH_HTTP" as const,
+      playbookStage: "OFFICIAL_HTTP_DISCOVERY" as const
+    };
+    const route = {
+      workMode: remediationDirective.workMode,
+      strategyAction: remediationDirective.strategyAction,
+      playbookStage: remediationDirective.playbookStage
+    };
+    const selected = selectCourseSupportBatch({
+      candidates: [
+        candidate("inspection", {
+          remediationDirective,
+          actionPlan: {
+            schemaVersion: 1,
+            primaryAction: "INSPECT_PROVIDER_CONTRACT",
+            allowedActions: ["INSPECT_PROVIDER_CONTRACT", "VERIFY_CURRENT_RUNTIME"],
+            route
+          }
+        }),
+        candidate("verification", {
+          remediationDirective,
+          actionPlan: {
+            schemaVersion: 1,
+            primaryAction: "VERIFY_CURRENT_RUNTIME",
+            allowedActions: ["VERIFY_CURRENT_RUNTIME"],
+            route
+          }
+        })
+      ],
+      maxCourses: 5,
+      now
+    });
+
+    expect(selected?.incidents).toHaveLength(1);
+  });
+
   it("preserves legacy family and fingerprint grouping without a directive", () => {
     const selected = selectCourseSupportBatch({
       candidates: [candidate("first"), candidate("second")],

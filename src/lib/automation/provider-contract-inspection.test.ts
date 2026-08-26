@@ -82,6 +82,7 @@ import {
   inspectOneTrustedScript as inspectOneTrustedScriptImplementation,
   inspectOwnedCourseSupportProviderContract,
   loadOwnedProviderContractContext,
+  loadOwnedProviderContractContextResult,
   PROVIDER_CONTRACT_MAX_DOCUMENT_BYTES,
   PROVIDER_CONTRACT_REQUIRED_LEASE_HEADROOM_MS,
   sanitizeContractPath,
@@ -258,6 +259,16 @@ function ownedDatabaseBatch(input?: {
               strategyAction: remediation.strategyAction,
               playbookStage: remediation.playbookStage,
             },
+            actionPlan: {
+              schemaVersion: 1,
+              primaryAction: "IMPLEMENT_REUSABLE_SUPPORT",
+              allowedActions: ["IMPLEMENT_REUSABLE_SUPPORT", "INSPECT_PROVIDER_CONTRACT"],
+              route: {
+                workMode: remediation.workMode,
+                strategyAction: remediation.strategyAction,
+                playbookStage: remediation.playbookStage
+              }
+            }
           },
         ],
       },
@@ -372,8 +383,9 @@ function addSecondOwnedBatchMember(
   return { entry, attempt };
 }
 
-async function expectRecoveryWithoutProviderIo(
+async function expectControlWithoutProviderIo(
   batch: ReturnType<typeof ownedDatabaseBatch>,
+  outcome: "route_ineligible" | "authority_drift" = "authority_drift",
   label?: string,
 ) {
   const fetch = vi.fn();
@@ -384,16 +396,17 @@ async function expectRecoveryWithoutProviderIo(
     runWithProviderLease,
   });
   expect(result, label).toMatchObject({
-    outcome: "recovery_required",
+    outcome,
     contracts: [],
   });
   expect(fetch).not.toHaveBeenCalled();
   expect(runWithProviderLease).not.toHaveBeenCalled();
+  return result;
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
-  prismaMocks.queryRaw.mockResolvedValue([{ now }]);
+  prismaMocks.queryRaw.mockResolvedValue([{ now, leaseExpiresAt: new Date("2026-08-22T15:00:00.000Z") }]);
 });
 
 describe("owner-bound provider-contract inspection", () => {
@@ -612,9 +625,9 @@ describe("owner-bound provider-contract inspection", () => {
       );
 
       expect(result).toMatchObject({
-        evidenceSource: "NONE",
-        reasonCodes: ["OWNERSHIP_OR_ROUTE_CHANGED"],
-        contracts: [],
+      outcome: "authority_drift",
+      reasonCode: "CLAIMED_TECHNICAL_AUTHORITY_CHANGED",
+      contracts: [],
       });
       expect(fetch).not.toHaveBeenCalled();
     },
@@ -663,8 +676,8 @@ describe("owner-bound provider-contract inspection", () => {
     });
 
     expect(result).toMatchObject({
-      evidenceSource: "NONE",
-      reasonCodes: expect.arrayContaining(["OWNERSHIP_OR_ROUTE_CHANGED"]),
+      outcome: "authority_drift",
+      reasonCode: "CLAIMED_TECHNICAL_AUTHORITY_CHANGED",
       contracts: [],
     });
     expect(fetch).toHaveBeenCalledTimes(1);
@@ -728,7 +741,8 @@ describe("owner-bound provider-contract inspection", () => {
     });
 
     expect(result).toMatchObject({
-      reasonCodes: expect.arrayContaining(["OWNERSHIP_OR_ROUTE_CHANGED"]),
+      outcome: "authority_drift",
+      reasonCode: "CLAIMED_TECHNICAL_AUTHORITY_CHANGED",
       contracts: [],
     });
     expect(fetch).toHaveBeenCalledTimes(1);
@@ -1633,7 +1647,62 @@ describe("owner-bound provider-contract inspection", () => {
       );
       batch.incidents[0].incident.kind = kind;
 
-      await expectRecoveryWithoutProviderIo(batch);
+      const result = await expectControlWithoutProviderIo(batch, "authority_drift");
+      expect(result).toMatchObject({
+        reasonCode: "CLAIMED_TECHNICAL_AUTHORITY_CHANGED",
+        packetRefreshRequired: true
+      });
+    }
+  );
+
+  it("treats current resolved-family drift after an allowing claim as authority drift", async () => {
+    const batch = ownedDatabaseBatch();
+    const course = batch.incidents[0].course;
+    course.detectedPlatform = "FOREUP";
+    const providerSnapshotFingerprint = buildCourseSupportProviderSnapshotFingerprint(course);
+    batch.summary.remediation.attempts[0].providerSnapshotFingerprint = providerSnapshotFingerprint;
+    course.automationDiscoveries[0].evidence.browserInvestigation.providerSnapshotFingerprint =
+      providerSnapshotFingerprint;
+
+    const result = await expectControlWithoutProviderIo(batch);
+    expect(result).toMatchObject({
+      reasonCode: "CLAIMED_TECHNICAL_AUTHORITY_CHANGED",
+      packetRefreshRequired: true
+    });
+  });
+
+  it("returns route_ineligible for a fresh typed-adapter verification plan", async () => {
+    const batch = ownedDatabaseBatch();
+    Object.assign(batch.summary.remediation, {
+      workMode: "VERIFY_TRANSIENT",
+      strategyAction: "RUN_TYPED_ADAPTER",
+      allowUnchangedRuntime: true,
+      requiresImplementationPath: false,
+      reason: "EXISTING_SUPPORT_READY"
+    });
+    Object.assign(batch.summary.remediation.attempts[0], {
+      approach: {
+        workMode: "VERIFY_TRANSIENT",
+        strategyAction: "RUN_TYPED_ADAPTER",
+        playbookStage: "TYPED_ADAPTER"
+      },
+      actionPlan: {
+        schemaVersion: 1,
+        primaryAction: "VERIFY_CURRENT_RUNTIME",
+        allowedActions: ["VERIFY_CURRENT_RUNTIME"],
+        route: {
+          workMode: "VERIFY_TRANSIENT",
+          strategyAction: "RUN_TYPED_ADAPTER",
+          playbookStage: "TYPED_ADAPTER"
+        }
+      }
+    });
+
+    const result = await expectControlWithoutProviderIo(batch, "route_ineligible");
+    expect(result).toMatchObject({
+      reasonCode: "ACTION_PLAN_DISALLOWS_PROVIDER_CONTRACT",
+      assignedAction: "VERIFY_CURRENT_RUNTIME"
+    });
     },
   );
 
@@ -1643,7 +1712,27 @@ describe("owner-bound provider-contract inspection", () => {
     batch.incidents[0].incident.kind = "BLOCKED_TOOLING";
     second.entry.incident.kind = "BLOCKED_AUTH";
 
-    await expectRecoveryWithoutProviderIo(batch);
+    const result = await expectControlWithoutProviderIo(batch);
+    expect(result).toMatchObject({
+      reasonCode: "CLAIMED_TECHNICAL_AUTHORITY_CHANGED",
+      packetRefreshRequired: true
+    });
+  });
+
+  it("keeps an eligible pre-action-plan batch inspectable while its lease remains owned", async () => {
+    const batch = ownedDatabaseBatch();
+    delete batch.summary.remediation.attempts[0].actionPlan;
+    prismaMocks.batchFindFirst.mockResolvedValueOnce(batch);
+
+    await expect(loadOwnedProviderContractContext(ownerInput)).resolves.toMatchObject({
+      providerFamilyKey: "CUSTOM",
+      browserContracts: [
+        expect.objectContaining({
+          method: "GET",
+          pathPattern: "/api/availability"
+        })
+      ]
+    });
   });
 
   it.each(["SOURCE_CONFLICT", "FOREUP"])(
@@ -1912,7 +2001,7 @@ describe("owner-bound provider-contract inspection", () => {
     for (const [, mutate] of cases) {
       const batch = ownedDatabaseBatch();
       mutate(batch);
-      await expectRecoveryWithoutProviderIo(batch);
+      await expectControlWithoutProviderIo(batch);
     }
   });
 
@@ -1931,7 +2020,7 @@ describe("owner-bound provider-contract inspection", () => {
         observedAt: new Date(now.getTime() + 1),
       },
     );
-    await expectRecoveryWithoutProviderIo(batch);
+    await expectControlWithoutProviderIo(batch);
   });
 
   it("binds ordinal selection to exactly one claimed course attempt", async () => {
@@ -2021,7 +2110,7 @@ describe("owner-bound provider-contract inspection", () => {
       const batch = ownedDatabaseBatch();
       const second = addSecondOwnedBatchMember(batch);
       mutate(batch, second);
-      await expectRecoveryWithoutProviderIo(batch, label);
+      await expectControlWithoutProviderIo(batch, "authority_drift", label);
     }
   });
 
@@ -2053,46 +2142,76 @@ describe("owner-bound provider-contract inspection", () => {
       .spyOn(Date, "now")
       .mockReturnValue(new Date("2026-08-21T00:00:00.000Z").getTime());
     prismaMocks.batchFindFirst.mockResolvedValueOnce(ownedDatabaseBatch());
-    // The atomic live-clock query returns no row at the exact-expiry boundary.
-    prismaMocks.queryRaw.mockResolvedValueOnce([]);
+    prismaMocks.queryRaw.mockResolvedValueOnce([{ now, leaseExpiresAt: now }]);
 
-    await expect(
-      loadOwnedProviderContractContext(ownerInput),
-    ).resolves.toBeNull();
+    await expect(loadOwnedProviderContractContextResult(ownerInput),
+    ).resolves.toMatchObject({
+      outcome: "recovery_required",
+      reasonCode: "OWNERSHIP_OR_LEASE_LOST"
+    });
     const sql = prismaMocks.queryRaw.mock.calls[0]?.[0] as {
       strings: readonly string[];
       values: unknown[];
     };
-    expect(sql.strings.join("?")).toMatch(
-      /"leaseExpiresAt"\s*>\s*clock_timestamp\(\)/u,
-    );
+    expect(sql.strings.join("?")).toContain('"leaseExpiresAt" AS "leaseExpiresAt"');
     expect(sql.values).toEqual(
       expect.arrayContaining([
         ownerInput.batchId,
         ownerInput.leaseToken,
-        ownerInput.ownerThreadId,
-        0,
-      ]),
+        ownerInput.ownerThreadId]),
     );
     localClock.mockRestore();
   });
 
-  it("requires the full I/O deadline plus release margin as lease headroom", async () => {
+  it.each([
+    [
+      "database clock",
+      {
+        now: new Date("invalid"),
+        leaseExpiresAt: new Date("2026-08-22T15:00:00.000Z")
+      }
+    ],
+    ["lease timestamp", { now, leaseExpiresAt: new Date("invalid") }]
+  ])("treats a malformed %s authorization row as unavailable", async (_label, row) => {
     prismaMocks.batchFindFirst.mockResolvedValueOnce(ownedDatabaseBatch());
-    // The strict live-clock query excludes exact required headroom.
+    prismaMocks.queryRaw.mockResolvedValueOnce([row]);
+
+    await expect(inspectOwnedCourseSupportProviderContract(ownerInput)).resolves.toMatchObject({
+      evidenceSource: "NONE",
+      reasonCodes: ["AUTHORIZATION_UNAVAILABLE"],
+      contracts: []
+    });
+  });
+
+  it("returns recovery only when the exact database authorization row is absent", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValueOnce(ownedDatabaseBatch());
     prismaMocks.queryRaw.mockResolvedValueOnce([]);
 
+    await expect(inspectOwnedCourseSupportProviderContract(ownerInput)).resolves.toMatchObject({
+      outcome: "recovery_required",
+      reasonCode: "OWNERSHIP_OR_LEASE_LOST",
+      contracts: []
+    });
+    });
+
+  it("requires the full I/O deadline plus release margin as lease headroom", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValueOnce(ownedDatabaseBatch());
+    prismaMocks.queryRaw.mockResolvedValueOnce([
+      {
+        now,
+        leaseExpiresAt: new Date(now.getTime() + PROVIDER_CONTRACT_REQUIRED_LEASE_HEADROOM_MS)
+      }
+    ]);
+
     await expect(
-      loadOwnedProviderContractContext({
+      loadOwnedProviderContractContextResult({
         ...ownerInput,
-        requiredLeaseHeadroomMs: PROVIDER_CONTRACT_REQUIRED_LEASE_HEADROOM_MS,
-      }),
-    ).resolves.toBeNull();
-    const sql = prismaMocks.queryRaw.mock.calls[0]?.[0] as {
-      strings: readonly string[];
-      values: unknown[];
-    };
-    expect(sql.values).toContain(PROVIDER_CONTRACT_REQUIRED_LEASE_HEADROOM_MS);
+        requiredLeaseHeadroomMs: PROVIDER_CONTRACT_REQUIRED_LEASE_HEADROOM_MS
+      })
+    ).resolves.toMatchObject({
+      outcome: "lease_headroom_insufficient",
+      reasonCode: "LEASE_HEADROOM_INSUFFICIENT"
+    });
   });
 
   it("validates lease headroom against live DB time after a delayed ownership read", async () => {

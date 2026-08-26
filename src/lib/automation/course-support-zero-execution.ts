@@ -91,7 +91,6 @@ export type CourseSupportExecutionEverUpdateInput = {
 };
 
 const COURSE_SUPPORT_ORCHESTRATION_RETRY_BASE_MS = 15 * 60 * 1000;
-const COURSE_SUPPORT_ORCHESTRATION_RETRY_MAX_MS = 6 * 60 * 60 * 1000;
 const COURSE_SUPPORT_EXECUTION_EVER_SCHEMA_VERSION = 2;
 const COURSE_SUPPORT_EXECUTION_REF_PATTERN = /^[a-f0-9]{24}$/u;
 
@@ -428,11 +427,12 @@ export function getCourseSupportOrchestrationRetrySchedule(input: {
   priorAttemptCount: number;
 }) {
   const priorAttemptCount = Math.max(0, Math.floor(input.priorAttemptCount));
-  const delayMs = Math.min(
-    COURSE_SUPPORT_ORCHESTRATION_RETRY_MAX_MS,
-    COURSE_SUPPORT_ORCHESTRATION_RETRY_BASE_MS *
-      2 ** Math.min(priorAttemptCount, 10),
-  );
+  // An orchestration-only closeout contains no provider I/O or playbook
+  // progress. Increasing its delay makes a control-plane defect look like
+  // course backoff and can strand the same claimed action for hours. Keep the
+  // retry on the responder cadence while retaining the attempt number for
+  // system-health visibility.
+  const delayMs = COURSE_SUPPORT_ORCHESTRATION_RETRY_BASE_MS;
   return {
     attemptNumber: priorAttemptCount + 1,
     delayMs,

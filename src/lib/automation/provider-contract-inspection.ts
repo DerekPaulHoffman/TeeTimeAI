@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
 
-import { Prisma, type CourseSupportIncidentKind } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { parse as parseEcmaScript } from "acorn";
 import {
   parseFragment,
@@ -18,22 +18,26 @@ import { isSafeManualEvidenceUrl } from "./browser-discovery";
 import { classifyBrowserNetworkContractRestriction } from "./browser-probe-evidence";
 import {
   assessAutomationPlaybook,
-  parseAutomationPlaybookLedger,
-  type AutomationPlaybookStage,
+  parseAutomationPlaybookLedger
 } from "./course-monitoring-playbook";
 import {
   orderCourseSupportBatchIncidents,
   readCourseSupportRemediationClaimAttempt,
   readCourseSupportRemediationDirective,
 } from "./course-support-batches";
+import {
+  courseSupportActionPlanAllows,
+  isCourseSupportProviderContractActionEligible,
+  type CourseSupportClaimAction
+} from "./course-support-action-plan";
 import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
 import {
   getKnownProviderFamilyForHostname,
   isProviderInfrastructureUrl,
   isProviderPublicBookingLandingUrl,
   normalizeProviderFamilyKey,
+  resolveProviderCapability,
   resolveProviderDiscoveryIdentity,
-  SOURCE_CONFLICT_PROVIDER_FAMILY,
   SOURCE_MISSING_PROVIDER_FAMILY,
 } from "./provider-capabilities";
 import { runWithProviderRequestLease } from "./provider-request-lease";
@@ -53,21 +57,6 @@ export const PROVIDER_CONTRACT_REQUIRED_LEASE_HEADROOM_MS =
   PROVIDER_CONTRACT_LEASE_RELEASE_MARGIN_MS;
 export const PROVIDER_CONTRACT_MAX_TOTAL_BYTES =
   PROVIDER_CONTRACT_MAX_DOCUMENT_BYTES + PROVIDER_CONTRACT_MAX_SCRIPT_BYTES;
-
-const ELIGIBLE_PROVIDER_CONTRACT_STAGES = new Set<AutomationPlaybookStage>([
-  "TYPED_ADAPTER",
-  "OFFICIAL_HTTP_DISCOVERY",
-  "HTTP_ADAPTER_RETRY",
-  "RENDERED_BROWSER_DISCOVERY",
-  "BROWSER_ADAPTER_RETRY",
-]);
-
-const ELIGIBLE_PROVIDER_CONTRACT_INCIDENT_KINDS =
-  new Set<CourseSupportIncidentKind>([
-    "NEEDS_ADAPTER",
-    "FETCH_FAILED",
-    "BLOCKED_TOOLING",
-  ]);
 
 const SAFE_PATH_SEGMENTS = new Map<string, string>([
   ["api", "api"],
@@ -180,8 +169,28 @@ type OwnedProviderContractContext = {
   restrictionDetected: boolean;
 };
 
+type OwnedProviderContractContextResult =
+  | OwnedProviderContractContext
+  | {
+      outcome: "recovery_required";
+      reasonCode: "OWNERSHIP_OR_LEASE_LOST";
+    }
+  | {
+      outcome: "route_ineligible";
+      reasonCode: "ACTION_PLAN_DISALLOWS_PROVIDER_CONTRACT" | "PROVIDER_CONTRACT_ROUTE_INELIGIBLE";
+      assignedAction: CourseSupportClaimAction | null;
+    }
+  | {
+      outcome: "authority_drift";
+      reasonCode: "CLAIMED_TECHNICAL_AUTHORITY_CHANGED";
+    }
+  | {
+      outcome: "lease_headroom_insufficient";
+      reasonCode: "LEASE_HEADROOM_INSUFFICIENT";
+    };
+
 type ProviderContractInspectionDependencies = {
-  loadContext?: typeof loadOwnedProviderContractContext;
+  loadContext?: typeof loadOwnedProviderContractContextResult;
   fetch?: typeof fetch;
   runWithProviderLease?: typeof runWithProviderRequestLease;
 };
@@ -322,19 +331,23 @@ async function inspectOwnedCourseSupportProviderContractInternal(
 ) {
   validateProviderContractOrdinal(input.ordinal);
   const loadContext =
-    dependencies.loadContext ?? loadOwnedProviderContractContext;
+    dependencies.loadContext ?? loadOwnedProviderContractContextResult;
   const loadAuthorizedContext = async (
     request: Parameters<typeof loadContext>[0],
-  ) => {
+  ): Promise<OwnedProviderContractContextResult> => {
     try {
-      return await loadContext(request);
+      const loaded = await loadContext(request);
+      if (!loaded) {
+        throw new ProviderContractInspectionError("AUTHORIZATION_UNAVAILABLE");
+      }
+      return loaded;
     } catch {
       throw new ProviderContractInspectionError("AUTHORIZATION_UNAVAILABLE");
     }
   };
   const initial = await loadAuthorizedContext(input);
-  if (!initial) {
-    return recoveryRequiredResult();
+  if (initial.outcome !== "ready") {
+    return providerContractControlResult(input.ordinal, initial);
   }
   if (initial.restrictionDetected) {
     return inspectionResult(
@@ -372,14 +385,14 @@ async function inspectOwnedCourseSupportProviderContractInternal(
         ...input,
         requiredLeaseHeadroomMs: PROVIDER_CONTRACT_REQUIRED_LEASE_HEADROOM_MS,
       });
-      if (!beforeFetch) {
-        return ownershipChangedResult(input.ordinal);
+      if (beforeFetch.outcome !== "ready") {
+        return providerContractControlResult(input.ordinal, beforeFetch);
       }
       if (
         beforeFetch.authorityDigest !== initial.authorityDigest ||
         beforeFetch.officialUrl !== initial.officialUrl
       ) {
-        return ownershipChangedResult(input.ordinal);
+        return authorityDriftResult(input.ordinal);
       }
       if (beforeFetch.restrictionDetected) {
         return inspectionResult(
@@ -400,7 +413,7 @@ async function inspectOwnedCourseSupportProviderContractInternal(
       }
       const landingUrl = beforeFetch.officialUrl;
       if (!landingUrl) {
-        return ownershipChangedResult(input.ordinal);
+        return authorityDriftResult(input.ordinal);
       }
       const authorizeProviderRequest = async () => {
         const current = await loadAuthorizedContext({
@@ -408,7 +421,7 @@ async function inspectOwnedCourseSupportProviderContractInternal(
           requiredLeaseHeadroomMs: PROVIDER_CONTRACT_REQUIRED_LEASE_HEADROOM_MS,
         });
         return Boolean(
-          current &&
+          current.outcome === "ready" &&
           current.authorityDigest === beforeFetch.authorityDigest &&
           current.officialUrl === landingUrl &&
           !current.restrictionDetected &&
@@ -424,11 +437,13 @@ async function inspectOwnedCourseSupportProviderContractInternal(
       });
       const afterFetch = await loadAuthorizedContext(input);
       if (
-        !afterFetch ||
+        afterFetch.outcome !== "ready" ||
         afterFetch.authorityDigest !== beforeFetch.authorityDigest ||
         afterFetch.officialUrl !== beforeFetch.officialUrl
       ) {
-        return ownershipChangedResult(input.ordinal);
+        return afterFetch.outcome === "ready"
+          ? authorityDriftResult(input.ordinal)
+          : providerContractControlResult(input.ordinal, afterFetch);
       }
       if (afterFetch.restrictionDetected) {
         return inspectionResult(
@@ -472,6 +487,17 @@ export async function loadOwnedProviderContractContext(input: {
   ordinal: number;
   requiredLeaseHeadroomMs?: number;
 }): Promise<OwnedProviderContractContext | null> {
+  const resolved = await loadOwnedProviderContractContextResult(input);
+  return resolved.outcome === "ready" ? resolved : null;
+}
+
+export async function loadOwnedProviderContractContextResult(input: {
+  batchId: string;
+  leaseToken: string;
+  ownerThreadId: string;
+  ordinal: number;
+  requiredLeaseHeadroomMs?: number;
+}): Promise<OwnedProviderContractContextResult> {
   validateProviderContractOrdinal(input.ordinal);
   const requiredLeaseHeadroomMs = Math.max(
     0,
@@ -487,24 +513,43 @@ export async function loadOwnedProviderContractContext(input: {
     select: providerContractBatchSelect,
   });
   if (!batch) {
-    return null;
+    return ownershipOrLeaseLostContext();
   }
-  const [authorization] = await prisma.$queryRaw<Array<{ now: Date }>>(
-    Prisma.sql`
-      SELECT clock_timestamp() AS "now"
+  const [authorization] = await prisma.$queryRaw<
+    Array<{ now: Date; leaseExpiresAt: Date }>
+  >(Prisma.sql`
+      SELECT
+        clock_timestamp() AS "now",
+        "leaseExpiresAt" AS "leaseExpiresAt"
       FROM "CourseSupportBatch"
       WHERE "id" = ${input.batchId}
         AND "leaseToken" = ${input.leaseToken}
         AND "ownerThreadId" = ${input.ownerThreadId}
         AND "status"::text IN ('CLAIMED', 'IMPLEMENTING', 'VERIFYING')
-        AND "leaseExpiresAt" >
-          clock_timestamp() +
-          (${requiredLeaseHeadroomMs}::double precision * INTERVAL '1 millisecond')
       LIMIT 1
-    `,
-  );
-  if (!authorization?.now || !Number.isFinite(authorization.now.getTime())) {
-    return null;
+    `);
+  if (!authorization) {
+    return ownershipOrLeaseLostContext();
+  }
+  if (
+    !authorization.now ||
+    !Number.isFinite(authorization.now.getTime()) ||
+    !authorization.leaseExpiresAt ||
+    !Number.isFinite(authorization.leaseExpiresAt.getTime())
+  ) {
+    throw new ProviderContractInspectionError("AUTHORIZATION_UNAVAILABLE");
+  }
+  if (authorization.leaseExpiresAt.getTime() <= authorization.now.getTime()) {
+    return ownershipOrLeaseLostContext();
+  }
+  if (
+    authorization.leaseExpiresAt.getTime() <=
+    authorization.now.getTime() + requiredLeaseHeadroomMs
+  ) {
+    return {
+      outcome: "lease_headroom_insufficient",
+      reasonCode: "LEASE_HEADROOM_INSUFFICIENT",
+    };
   }
   return resolveOwnedProviderContractContext(
     input.batchId,
@@ -517,28 +562,56 @@ function resolveOwnedProviderContractContext(
   batchId: string,
   batch: ProviderContractBatch,
   ordinal: number,
-): OwnedProviderContractContext | null {
+): OwnedProviderContractContextResult {
   const remediation = readCourseSupportRemediationDirective(batch.summary);
-  const implementationContext =
-    remediation?.workMode === "IMPLEMENT_REUSABLE_SUPPORT" &&
-    remediation.requiresImplementationPath === true &&
-    remediation.allowUnchangedRuntime === false;
-  const discoveryContext =
-    remediation?.workMode === "ADVANCE_DISCOVERY" &&
-    remediation.requiresImplementationPath === false;
-  const batchProviderFamily = normalizeProviderContractAuthorityFamily(
-    batch.providerFamilyKey,
-  );
-  if (
-    !remediation?.playbookStage ||
-    batchProviderFamily === SOURCE_MISSING_PROVIDER_FAMILY ||
-    batchProviderFamily === SOURCE_CONFLICT_PROVIDER_FAMILY ||
-    !ELIGIBLE_PROVIDER_CONTRACT_STAGES.has(remediation.playbookStage) ||
-    (!implementationContext && !discoveryContext)
-  ) {
-    return null;
+  if (!remediation) {
+    return authorityDriftContext();
   }
   const orderedEntries = orderCourseSupportBatchIncidents(batch.incidents);
+  const selectedEntry = orderedEntries[ordinal - 1];
+  if (!selectedEntry) {
+    return routeIneligibleContext("PROVIDER_CONTRACT_ROUTE_INELIGIBLE", null);
+  }
+  const selectedAttempt = readCourseSupportRemediationClaimAttempt({
+    summary: batch.summary,
+    courseId: selectedEntry.course.id,
+    expectedAttemptCount: orderedEntries.length,
+  });
+  if (!selectedAttempt) {
+    return authorityDriftContext();
+  }
+  if (
+    selectedAttempt.actionPlan &&
+    !courseSupportActionPlanAllows(
+      selectedAttempt.actionPlan,
+      "INSPECT_PROVIDER_CONTRACT",
+    )
+  ) {
+    return routeIneligibleContext(
+      "ACTION_PLAN_DISALLOWS_PROVIDER_CONTRACT",
+      selectedAttempt.actionPlan.primaryAction,
+    );
+  }
+  const providerContractTechnicallyEligible =
+    isCourseSupportProviderContractActionEligible({
+      workMode: remediation.workMode,
+      playbookStage: remediation.playbookStage,
+      allowUnchangedRuntime: remediation.allowUnchangedRuntime,
+      requiresImplementationPath: remediation.requiresImplementationPath,
+      incidentKind: selectedEntry.incident.kind,
+      incidentProviderFamilyKey: selectedEntry.incident.providerFamilyKey,
+      courseProviderFamilyKey: selectedEntry.course.providerFamilyKey,
+      resolvedProviderFamilyKey: resolveProviderCapability({
+        ...selectedEntry.course,
+        providerFamilyKey: selectedEntry.incident.providerFamilyKey,
+      }).providerFamilyKey,
+    });
+  if (!providerContractTechnicallyEligible) {
+    return selectedAttempt.actionPlan
+      ? authorityDriftContext()
+      : routeIneligibleContext("PROVIDER_CONTRACT_ROUTE_INELIGIBLE", null);
+  }
+  const batchProviderFamily = normalizeProviderContractAuthorityFamily(batch.providerFamilyKey);
   const memberAuthorities = orderedEntries.map((candidate, index) =>
     resolveProviderContractBatchMemberAuthority({
       batchId,
@@ -550,13 +623,15 @@ function resolveOwnedProviderContractContext(
     }),
   );
   if (memberAuthorities.some((candidate) => candidate === null)) {
-    return null;
+    return authorityDriftContext();
   }
   const authorizedMembers = memberAuthorities as Array<
     NonNullable<(typeof memberAuthorities)[number]>
   >;
   const selected = authorizedMembers[ordinal - 1];
-  if (!selected) return null;
+  if (!selected) {
+    return routeIneligibleContext("PROVIDER_CONTRACT_ROUTE_INELIGIBLE", null);
+  }
   const { entry, currentProviderSnapshotFingerprint } = selected;
 
   const browserEvidence = selectCurrentBrowserEvidence(
@@ -649,12 +724,20 @@ function resolveProviderContractBatchMemberAuthority(input: {
   const incidentProviderFamily = normalizeProviderContractAuthorityFamily(
     entry.incident.providerFamilyKey,
   );
-  const courseProjectionIsExplicitlySourceMissing =
-    entry.course.providerFamilyKey.trim().toUpperCase() ===
-    SOURCE_MISSING_PROVIDER_FAMILY;
-  const courseProjectionMatchesClaimedFamily =
-    input.batchProviderFamily === courseProviderFamily ||
-    courseProjectionIsExplicitlySourceMissing;
+  const providerContractTechnicallyEligible =
+    isCourseSupportProviderContractActionEligible({
+      workMode: remediation.workMode,
+      playbookStage: remediation.playbookStage,
+      allowUnchangedRuntime: remediation.allowUnchangedRuntime,
+      requiresImplementationPath: remediation.requiresImplementationPath,
+      incidentKind: entry.incident.kind,
+      incidentProviderFamilyKey: entry.incident.providerFamilyKey,
+      courseProviderFamilyKey: entry.course.providerFamilyKey,
+      resolvedProviderFamilyKey: resolveProviderCapability({
+        ...entry.course,
+        providerFamilyKey: entry.incident.providerFamilyKey,
+      }).providerFamilyKey,
+    });
   const authoritativeMonitoringDrift = entry.course.monitoringEvents.some(
     (event) =>
       event.occurredAt.getTime() >= batch.createdAt.getTime() &&
@@ -671,11 +754,15 @@ function resolveProviderContractBatchMemberAuthority(input: {
     entry.incident.status !== "AUTO_INVESTIGATING" ||
     entry.incident.activeBatchId !== input.batchId ||
     entry.incident.resolution !== null ||
-    !ELIGIBLE_PROVIDER_CONTRACT_INCIDENT_KINDS.has(entry.incident.kind) ||
-    !courseProjectionMatchesClaimedFamily ||
+    !providerContractTechnicallyEligible ||
     input.batchProviderFamily !== incidentProviderFamily ||
     batch.failureFingerprint !== entry.incident.failureFingerprint ||
     !claimedAttempt ||
+    (claimedAttempt.actionPlan !== null &&
+      !courseSupportActionPlanAllows(
+        claimedAttempt.actionPlan,
+        "INSPECT_PROVIDER_CONTRACT",
+      )) ||
     claimedAttempt.providerSnapshotFingerprint !==
       currentProviderSnapshotFingerprint ||
     claimedAttempt.failureFingerprint !== batch.failureFingerprint ||
@@ -720,6 +807,7 @@ function resolveProviderContractBatchMemberAuthority(input: {
       claimedFailureFingerprint: claimedAttempt.failureFingerprint,
       claimedPlaybookEventCount: claimedAttempt.playbookEventCountAtClaim,
       claimedApproach: claimedAttempt.approach,
+      claimedActionPlan: claimedAttempt.actionPlan,
       playbookCycle: playbook.cycle,
       playbookNextStage: playbook.nextStage,
       playbookCurrentStageStatus: currentStage.status,
@@ -944,14 +1032,89 @@ function inspectionResult(
 function recoveryRequiredResult() {
   return {
     outcome: "recovery_required" as const,
+    reasonCode: "OWNERSHIP_OR_LEASE_LOST" as const,
     contracts: [] as SanitizedProviderContract[],
     threadDisposition: "KEEP_VISIBLE" as const,
     archiveReason: "Responder batch ownership or lease freshness was lost.",
   };
 }
 
-function ownershipChangedResult(ordinal: number) {
-  return inspectionResult(ordinal, "NONE", ["OWNERSHIP_OR_ROUTE_CHANGED"], []);
+function authorityDriftResult(ordinal: number) {
+  return {
+    outcome: "authority_drift" as const,
+    ordinal: String(ordinal).padStart(2, "0"),
+    reasonCode: "CLAIMED_TECHNICAL_AUTHORITY_CHANGED" as const,
+    contracts: [] as SanitizedProviderContract[],
+    packetRefreshRequired: true as const,
+    threadDisposition: "KEEP_VISIBLE" as const,
+    archiveReason:
+      "The claimed technical action changed; refresh the owned packet before acting.",
+  };
+}
+
+function providerContractControlResult(
+  ordinal: number,
+  result: Exclude<
+    OwnedProviderContractContextResult,
+    OwnedProviderContractContext
+  >,
+) {
+  switch (result.outcome) {
+    case "recovery_required":
+      return recoveryRequiredResult();
+    case "route_ineligible":
+      return {
+        outcome: "route_ineligible" as const,
+        ordinal: String(ordinal).padStart(2, "0"),
+        reasonCode: result.reasonCode,
+        assignedAction: result.assignedAction,
+        contracts: [] as SanitizedProviderContract[],
+        packetRefreshRequired: false as const,
+        threadDisposition: "KEEP_VISIBLE" as const,
+        archiveReason:
+          "Provider-contract inspection is not part of the claimed action plan.",
+      };
+    case "authority_drift":
+      return authorityDriftResult(ordinal);
+    case "lease_headroom_insufficient":
+      return {
+        outcome: "lease_headroom_insufficient" as const,
+        ordinal: String(ordinal).padStart(2, "0"),
+        reasonCode: result.reasonCode,
+        contracts: [] as SanitizedProviderContract[],
+        leaseRenewalRequired: true as const,
+        threadDisposition: "KEEP_VISIBLE" as const,
+        archiveReason:
+          "Renew the current batch lease before bounded provider-contract inspection.",
+      };
+  }
+}
+
+function ownershipOrLeaseLostContext(): OwnedProviderContractContextResult {
+  return {
+    outcome: "recovery_required",
+    reasonCode: "OWNERSHIP_OR_LEASE_LOST",
+  };
+}
+
+function routeIneligibleContext(
+  reasonCode:
+    | "ACTION_PLAN_DISALLOWS_PROVIDER_CONTRACT"
+    | "PROVIDER_CONTRACT_ROUTE_INELIGIBLE",
+  assignedAction: CourseSupportClaimAction | null,
+): OwnedProviderContractContextResult {
+  return {
+    outcome: "route_ineligible",
+    reasonCode,
+    assignedAction,
+  };
+}
+
+function authorityDriftContext(): OwnedProviderContractContextResult {
+  return {
+    outcome: "authority_drift",
+    reasonCode: "CLAIMED_TECHNICAL_AUTHORITY_CHANGED",
+  };
 }
 
 export function validateProviderContractOrdinal(ordinal: number) {
@@ -1272,9 +1435,7 @@ function isRestrictedStaticContractCandidate(
   ) {
     return false;
   }
-  return (
-    hasDynamicStaticQueryKey(rawCandidate) || !isSafeManualEvidenceUrl(parsed)
-  );
+  return hasDynamicStaticQueryKey(rawCandidate) || !isSafeManualEvidenceUrl(parsed);
 }
 
 type StaticReadCandidate = {
@@ -1498,10 +1659,8 @@ function readHarmlessFetchOptions(
 }
 
 function isStaticPropertyName(name: ts.PropertyName, expected: string) {
-  return (
-    (ts.isIdentifier(name) || ts.isStringLiteral(name)) &&
-    name.text === expected
-  );
+  return (ts.isIdentifier(name) || ts.isStringLiteral(name)) &&
+    name.text === expected;
 }
 
 function readSafeStaticRelativePath(raw: string) {
@@ -1746,10 +1905,8 @@ function readParsedHtmlAttribute(
   element: ParsedLandingElement,
   attribute: string,
 ) {
-  return (
-    element.attrs.find((candidate) => candidate.name === attribute)?.value ??
-    null
-  );
+  return element.attrs.find((candidate) => candidate.name === attribute)?.value ??
+    null;
 }
 
 function isHtmlLandingElement(element: ParsedLandingElement) {

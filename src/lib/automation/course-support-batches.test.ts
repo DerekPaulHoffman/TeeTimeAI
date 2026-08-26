@@ -2579,6 +2579,56 @@ describe("course-support batch selection", () => {
     });
   });
 
+  it("does not combine targeted retry entries whose current action contracts diverged", () => {
+    const remediationDirective = {
+      workMode: "ADVANCE_DISCOVERY" as const,
+      strategyAction: "DISCOVER_WITH_HTTP" as const,
+      playbookStage: "OFFICIAL_HTTP_DISCOVERY" as const,
+    };
+    const route = {
+      workMode: remediationDirective.workMode,
+      strategyAction: remediationDirective.strategyAction,
+      playbookStage: remediationDirective.playbookStage,
+    };
+    const inspection = candidate({
+      id: "retry-inspection",
+      courseId: "retry-course-inspection",
+      remediationDirective,
+      actionPlan: {
+        schemaVersion: 1,
+        primaryAction: "INSPECT_PROVIDER_CONTRACT",
+        allowedActions: [
+          "INSPECT_PROVIDER_CONTRACT",
+          "VERIFY_CURRENT_RUNTIME",
+        ],
+        route,
+      },
+    });
+    const verification = candidate({
+      id: "retry-verification",
+      courseId: "retry-course-verification",
+      remediationDirective,
+      actionPlan: {
+        schemaVersion: 1,
+        primaryAction: "VERIFY_CURRENT_RUNTIME",
+        allowedActions: ["VERIFY_CURRENT_RUNTIME"],
+        route,
+      },
+    });
+    const retryBatch = retryBatchEvidence(inspection, {
+      incidents: [retryBatchEntry(inspection), retryBatchEntry(verification)],
+    });
+
+    expect(() =>
+      selectCourseSupportRetryBatch({
+        candidates: [inspection, verification],
+        retryBatch,
+        maxCourses: 2,
+        now,
+      }),
+    ).toThrow("different claimed action contract");
+  });
+
   it("claims one exact source ordinal without requiring sibling retries to be due", () => {
     const first = candidate({ id: "retry-first", courseId: "retry-course-1" });
     const intended = candidate({
@@ -4983,6 +5033,20 @@ describe("course-support claim demand fencing", () => {
               allowUnchangedRuntime: true,
               requiresImplementationPath: false,
               reason: "PLAYBOOK_STAGE_PENDING",
+              attempts: expect.arrayContaining([
+                expect.objectContaining({
+                  actionPlan: {
+                    schemaVersion: 1,
+                    primaryAction: "VERIFY_CURRENT_RUNTIME",
+                    allowedActions: ["VERIFY_CURRENT_RUNTIME"],
+                    route: {
+                      workMode: "ADVANCE_DISCOVERY",
+                      strategyAction: "REPAIR_PROVIDER_ADAPTER",
+                      playbookStage: "OFFICIAL_IDENTITY"
+                    }
+                  }
+                })
+              ])
             }),
           }),
         }),
@@ -14058,8 +14122,7 @@ describe("course-support batch ordinals", () => {
     const incident = (input: {
       id: string;
       name: string;
-      attemptLedger: unknown;
-    }) => ({
+      attemptLedger: unknown }) => ({
       id: input.id,
       createdAt: now,
       cycle: 1,
@@ -14187,11 +14250,48 @@ describe("course-support batch ordinals", () => {
   function sourceSearchBatch(overrides: Record<string, unknown> = {}) {
     const courseId = "course-source-missing";
     const updatedAt = new Date("2026-07-15T19:45:00.000Z");
+    const failureFingerprint = "v1:MISSING_SOURCE:SOURCE_FREE";
     return {
       status: "CLAIMED",
       revision: 3,
       leaseExpiresAt: new Date("2026-07-15T20:15:00.000Z"),
       summary: {
+        remediation: {
+          workMode: "ADVANCE_DISCOVERY",
+          strategyAction: "DISCOVER_WITH_BROWSER",
+          playbookStage: "RENDERED_BROWSER_DISCOVERY",
+          allowUnchangedRuntime: true,
+          requiresImplementationPath: false,
+          reason: "PLAYBOOK_STAGE_PENDING",
+          retryBudget: null,
+          attempts: [
+            {
+              courseRef: createHash("sha256").update(courseId).digest("hex").slice(0, 24),
+              providerSnapshotFingerprint: "b".repeat(64),
+              failureFingerprint,
+              runtimeVersion: "a".repeat(40),
+              activeRealSearchCount: 0,
+              playbookEventCountAtClaim: 4,
+              reason: "PLAYBOOK_STAGE_PENDING",
+              retryBudget: null,
+              approach: {
+                workMode: "ADVANCE_DISCOVERY",
+                strategyAction: "DISCOVER_WITH_BROWSER",
+                playbookStage: "RENDERED_BROWSER_DISCOVERY"
+              },
+              actionPlan: {
+                schemaVersion: 1,
+                primaryAction: "SEARCH_FOR_OFFICIAL_SOURCE",
+                allowedActions: ["SEARCH_FOR_OFFICIAL_SOURCE"],
+                route: {
+                  workMode: "ADVANCE_DISCOVERY",
+                  strategyAction: "DISCOVER_WITH_BROWSER",
+                  playbookStage: "RENDERED_BROWSER_DISCOVERY"
+                }
+              }
+            }
+          ]
+        },
         campaign: {
           kind: "PARKED_COHORT",
           attempts: [
@@ -14237,9 +14337,17 @@ describe("course-support batch ordinals", () => {
             kind: "NEEDS_ADAPTER",
             providerFamilyKey: "SOURCE_MISSING",
             failureClass: "MISSING_SOURCE",
+            failureFingerprint,
+            engineeringOnly: false,
+            activeRealSearchCount: 0,
+            earliestTargetDate: null,
+            escalationDeadlineAt: null,
             activeBatchId: "batch-1",
             attemptLedger: browserReadyAttemptLedger(),
             attemptCount: 2,
+            latestMessage: null,
+            nextAction: null,
+            firstSeenAt: updatedAt,
             lastSeenAt: updatedAt,
             resolution: null,
             updatedAt,
@@ -14249,6 +14357,84 @@ describe("course-support batch ordinals", () => {
       ...overrides,
     };
   }
+
+  it("exposes the exact per-entry action plan in the owned packet", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue(
+      sourceSearchBatch({
+        reference: "batch-reference",
+        providerFamilyKey: "SOURCE_MISSING",
+        failureFingerprint: "v1:MISSING_SOURCE:SOURCE_FREE",
+        createdAt: now
+      })
+    );
+
+    const result = await getCourseSupportBatchPacket({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      now
+    });
+
+    expect(result).toMatchObject({
+      outcome: "ready",
+      courses: [
+        expect.objectContaining({
+          ordinal: "01",
+          actionPlan: {
+            schemaVersion: 1,
+            primaryAction: "SEARCH_FOR_OFFICIAL_SOURCE",
+            allowedActions: ["SEARCH_FOR_OFFICIAL_SOURCE"],
+            route: {
+              workMode: "ADVANCE_DISCOVERY",
+              strategyAction: "DISCOVER_WITH_BROWSER",
+              playbookStage: "RENDERED_BROWSER_DISCOVERY"
+            }
+          }
+        })
+      ]
+    });
+  });
+
+  it("does not emit unknown persisted action-plan fields in the owned packet", async () => {
+    const batch = sourceSearchBatch({
+      reference: "batch-reference",
+      providerFamilyKey: "SOURCE_MISSING",
+      failureFingerprint: "v1:MISSING_SOURCE:SOURCE_FREE",
+      createdAt: now
+    });
+    const actionPlan = batch.summary.remediation.attempts[0].actionPlan as Record<string, unknown>;
+    actionPlan.privateToken = "private-token-canary";
+    (actionPlan.route as Record<string, unknown>).privateUrl =
+      "https://private-url-canary.example.test/";
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+
+    const result = await getCourseSupportBatchPacket({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      now
+    });
+
+    expect(result).toMatchObject({
+      outcome: "ready",
+      courses: [
+        expect.objectContaining({
+          actionPlan: {
+            schemaVersion: 1,
+            primaryAction: "SEARCH_FOR_OFFICIAL_SOURCE",
+            allowedActions: ["SEARCH_FOR_OFFICIAL_SOURCE"],
+            route: {
+              workMode: "ADVANCE_DISCOVERY",
+              strategyAction: "DISCOVER_WITH_BROWSER",
+              playbookStage: "RENDERED_BROWSER_DISCOVERY"
+            }
+          }
+        })
+      ]
+    });
+    expect(JSON.stringify(result)).not.toContain("private-token-canary");
+    expect(JSON.stringify(result)).not.toContain("private-url-canary");
+  });
 
   it("returns exact public search context only to the current ordinal owner", async () => {
     prismaMocks.batchFindFirst.mockResolvedValue(sourceSearchBatch());
@@ -14304,6 +14490,128 @@ describe("course-support batch ordinals", () => {
       });
     },
   );
+
+  it.each(["FETCH_FAILED", "BLOCKED_TOOLING"] as const)(
+    "keeps the claimed source-search action for source-free %s history",
+    async (kind) => {
+      const batch = sourceSearchBatch();
+      batch.incidents[0].incident.kind = kind;
+      prismaMocks.batchFindFirst.mockResolvedValue(batch);
+
+      await expect(
+        getOwnedCourseSupportSourceSearchContext({
+          batchId: "batch-1",
+          leaseToken: "lease-1",
+          ownerThreadId: "owner-thread",
+          ordinal: 1,
+          now
+        })
+      ).resolves.toMatchObject({
+        outcome: "ready",
+        ordinal: "01",
+        searchBudget: 1
+      });
+    }
+  );
+
+  it("returns the claimed non-search action without asking for recovery", async () => {
+    const batch = sourceSearchBatch();
+    batch.summary.remediation.attempts[0].actionPlan = {
+      schemaVersion: 1,
+      primaryAction: "VERIFY_CURRENT_RUNTIME",
+      allowedActions: ["VERIFY_CURRENT_RUNTIME"],
+      route: {
+        workMode: "ADVANCE_DISCOVERY",
+        strategyAction: "DISCOVER_WITH_BROWSER",
+        playbookStage: "RENDERED_BROWSER_DISCOVERY"
+      }
+    };
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+
+    await expect(
+      getOwnedCourseSupportSourceSearchContext({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        ordinal: 1,
+        now
+      })
+    ).resolves.toMatchObject({
+      outcome: "action_not_applicable",
+      assignedAction: "VERIFY_CURRENT_RUNTIME",
+      packetRefreshRequired: false
+    });
+  });
+
+  it("keeps source-search authority isolated to the exact claimed ordinal", async () => {
+    const batch = sourceSearchBatch();
+    const siblingBatch = sourceSearchBatch();
+    const sibling = siblingBatch.incidents[0];
+    const siblingAttempt = siblingBatch.summary.remediation.attempts[0];
+    batch.incidents[0].course.name = "Alpha Golf Course";
+    batch.summary.remediation.attempts[0].actionPlan = {
+      schemaVersion: 1,
+      primaryAction: "VERIFY_CURRENT_RUNTIME",
+      allowedActions: ["VERIFY_CURRENT_RUNTIME"],
+      route: {
+        workMode: "ADVANCE_DISCOVERY",
+        strategyAction: "DISCOVER_WITH_BROWSER",
+        playbookStage: "RENDERED_BROWSER_DISCOVERY"
+      }
+    };
+    sibling.id = "entry-source-missing-2";
+    sibling.course.id = "course-source-missing-2";
+    sibling.course.name = "Zulu Golf Course";
+    sibling.incident.id = "incident-source-missing-2";
+    siblingAttempt.courseRef = createHash("sha256")
+      .update(sibling.course.id)
+      .digest("hex")
+      .slice(0, 24);
+    batch.incidents.push(sibling);
+    batch.summary.remediation.attempts.push(siblingAttempt);
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+
+    await expect(
+      getOwnedCourseSupportSourceSearchContext({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        ordinal: 1,
+        now
+      })
+    ).resolves.toMatchObject({
+      outcome: "action_not_applicable",
+      assignedAction: "VERIFY_CURRENT_RUNTIME"
+    });
+    await expect(
+      getOwnedCourseSupportSourceSearchContext({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        ordinal: 2,
+        now
+      })
+    ).resolves.toMatchObject({ outcome: "ready", ordinal: "02" });
+  });
+
+  it("refreshes the packet when the claimed provider snapshot drifts", async () => {
+    const batch = sourceSearchBatch();
+    batch.summary.remediation.attempts[0].providerSnapshotFingerprint = "c".repeat(64);
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+
+    await expect(
+      getOwnedCourseSupportSourceSearchContext({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        ordinal: 1,
+        now
+      })
+    ).resolves.toMatchObject({
+      outcome: "route_changed",
+      packetRefreshRequired: true
+    });
+  });
 
   it("persists one candidate as append-only owned evidence without projecting the course", async () => {
     const batch = sourceSearchBatch();
@@ -14478,7 +14786,7 @@ describe("course-support batch ordinals", () => {
     ).toMatchObject({ applicability: "APPLICABLE", attemptCount: 1 });
   });
 
-  it("rejects source search when a route, reader, or all-skipped identity ladder remains", async () => {
+  it("refreshes the packet when the claimed source-free route no longer applies", async () => {
     for (const mutate of [
       (batch: ReturnType<typeof sourceSearchBatch>) => {
         batch.incidents[0].course.website = "https://course.example/";
@@ -14501,8 +14809,91 @@ describe("course-support batch ordinals", () => {
           ordinal: 1,
           now,
         }),
-      ).rejects.toThrow("not eligible");
+      ).resolves.toMatchObject({
+        outcome: "route_changed",
+        reasonCode: "CLAIMED_SOURCE_SEARCH_AUTHORITY_CHANGED",
+        packetRefreshRequired: true
+      });
     }
+  });
+
+  it("rejects a changed action plan before recording an old search context", async () => {
+    const batch = sourceSearchBatch();
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    const context = await getOwnedCourseSupportSourceSearchContext({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      ordinal: 1,
+      now
+    });
+    if (context.outcome !== "ready") throw new Error("Expected source-search context.");
+    batch.summary.remediation.attempts[0].actionPlan.allowedActions.push("VERIFY_CURRENT_RUNTIME");
+    prismaMocks.transaction.mockImplementation(
+      async (worker: (transaction: typeof monitoringTransactionClient) => Promise<unknown>) =>
+        worker(monitoringTransactionClient)
+    );
+
+    await expect(
+      recordOwnedCourseSupportSourceSearchResult({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        ordinal: 1,
+        attemptRef: context.privateContext.attemptRef,
+        candidateUrl: "https://parks.example.gov/golf/pine-ridge",
+        runtimeVersion: "test-runtime",
+        now
+      })
+    ).rejects.toThrow("context changed");
+    expect(prismaMocks.monitoringEventCreate).not.toHaveBeenCalled();
+    });
+
+  it("stops a new write when playbook authority changes after context", async () => {
+    const batch = sourceSearchBatch();
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    const context = await getOwnedCourseSupportSourceSearchContext({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      ordinal: 1,
+      now
+    });
+    if (context.outcome !== "ready") throw new Error("Expected source-search context.");
+    batch.incidents[0].incident.attemptLedger = appendAutomationPlaybookEvent(
+      batch.incidents[0].incident.attemptLedger,
+      {
+        cycle: 1,
+        stage: "RENDERED_BROWSER_DISCOVERY",
+        transition: "STARTED",
+        readPath: "RENDERED_BROWSER",
+        evidenceKind: "RENDERED_PAGE",
+        failureFingerprint: "TEST:RENDERED_BROWSER:STARTED",
+        runtimeVersion: "test-runtime",
+        observedAt: now
+      }
+    );
+    prismaMocks.transaction.mockImplementation(
+      async (worker: (transaction: typeof monitoringTransactionClient) => Promise<unknown>) =>
+        worker(monitoringTransactionClient)
+    );
+
+    await expect(
+      recordOwnedCourseSupportSourceSearchResult({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        ordinal: 1,
+        attemptRef: context.privateContext.attemptRef,
+        candidateUrl: "https://parks.example.gov/golf/pine-ridge",
+        runtimeVersion: "test-runtime",
+        now
+      })
+    ).resolves.toMatchObject({
+      outcome: "route_changed",
+      packetRefreshRequired: true
+    });
+    expect(prismaMocks.monitoringEventCreate).not.toHaveBeenCalled();
   });
 
   it("claims implementation scope only while the shared checkout is otherwise idle", async () => {
@@ -18354,8 +18745,7 @@ describe("detached verification atomic batch fences", () => {
     verificationMocks.buildCourseSupportProviderSnapshotFingerprint.mockImplementation(
       (selectedCourse: {
         layoutHoleCounts?: number[];
-        layoutHolesVerifiedAt?: Date | null;
-      }) =>
+        layoutHolesVerifiedAt?: Date | null }) =>
         selectedCourse.layoutHoleCounts?.length === 1 &&
         selectedCourse.layoutHoleCounts[0] === 18 &&
         selectedCourse.layoutHolesVerifiedAt?.getTime() ===
