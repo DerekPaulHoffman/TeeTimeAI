@@ -9872,6 +9872,13 @@ describe("fresh runtime verification", () => {
       },
       verifiedAt,
       verifiedIncidentUpdatedAt: verifiedAt,
+      course: {
+        detectedPlatform: "UNKNOWN",
+        providerFamilyKey: "SOURCE_MISSING",
+        detectedBookingUrl: null,
+        website: null,
+        bookingMetadata: null,
+      },
       incident: {
         firstSeenAt,
         lastSeenAt: verifiedAt,
@@ -9892,6 +9899,18 @@ describe("fresh runtime verification", () => {
     };
 
     expect(isDurableTerminalProof(entry, batch)).toBe(true);
+    for (const failureClass of ["NETWORK", "MISSING_METADATA"] as const) {
+      expect(
+        isDurableTerminalProof(
+          {
+            ...entry,
+            proofSnapshot: { ...entry.proofSnapshot, failureClass },
+            incident: { ...entry.incident, failureClass },
+          },
+          batch,
+        ),
+      ).toBe(true);
+    }
     expect(
       isDurableTerminalProof(
         {
@@ -13441,6 +13460,13 @@ describe("course-support inspection ownership", () => {
     const evidence = {
       providerFamilyKey: "SOURCE_MISSING",
       failureClass: "MISSING_SOURCE" as const,
+      course: {
+        detectedPlatform: "UNKNOWN",
+        providerFamilyKey: "SOURCE_MISSING",
+        detectedBookingUrl: null,
+        website: null,
+        bookingMetadata: null,
+      },
       attemptCount: 1,
       activeRealSearchCount: 1,
       firstSeenAt: freshCycleStartedAt,
@@ -13455,6 +13481,11 @@ describe("course-support inspection ownership", () => {
       now: new Date("2026-07-22T20:00:00.000Z"),
     };
     expect(shouldFinalizeSourceUnverified(evidence)).toBe(true);
+    for (const failureClass of ["NETWORK", "MISSING_METADATA"] as const) {
+      expect(
+        shouldFinalizeSourceUnverified({ ...evidence, failureClass }),
+      ).toBe(true);
+    }
     expect(
       shouldFinalizeSourceUnverified({
         ...evidence,
@@ -13467,6 +13498,12 @@ describe("course-support inspection ownership", () => {
         attemptCount: 4,
       }),
     ).toBe(true);
+    expect(
+      shouldFinalizeSourceUnverified({
+        ...evidence,
+        course: { ...evidence.course, website: "https://course.example/" },
+      }),
+    ).toBe(false);
     expect(
       shouldFinalizeSourceUnverified({
         ...evidence,
@@ -14244,6 +14281,29 @@ describe("course-support batch ordinals", () => {
       }),
     );
   });
+
+  it.each(["NETWORK", "MISSING_METADATA"] as const)(
+    "returns the exact source-search handoff for source-free %s history",
+    async (failureClass) => {
+      const batch = sourceSearchBatch();
+      batch.incidents[0].incident.failureClass = failureClass;
+      prismaMocks.batchFindFirst.mockResolvedValue(batch);
+
+      await expect(
+        getOwnedCourseSupportSourceSearchContext({
+          batchId: "batch-1",
+          leaseToken: "lease-1",
+          ownerThreadId: "owner-thread",
+          ordinal: 1,
+          now,
+        }),
+      ).resolves.toMatchObject({
+        outcome: "ready",
+        ordinal: "01",
+        searchBudget: 1,
+      });
+    },
+  );
 
   it("persists one candidate as append-only owned evidence without projecting the course", async () => {
     const batch = sourceSearchBatch();
@@ -16844,6 +16904,70 @@ describe("detached verification atomic batch fences", () => {
           }),
         }),
       });
+    },
+  );
+
+  it.each(["NETWORK", "MISSING_METADATA"] as const)(
+    "finalizes a complete NO_UNIQUE source ladder with retained %s history",
+    async (failureClass) => {
+      const batch = closeoutBatch("RETRY_SCHEDULED");
+      Object.assign(batch.incidents[0].course, {
+        website: null,
+        detectedBookingUrl: null,
+        detectedPlatform: "UNKNOWN",
+        providerFamilyKey: "SOURCE_MISSING",
+        bookingMetadata: null,
+      });
+      Object.assign(batch.incidents[0].incident, {
+        kind: "NEEDS_ADAPTER",
+        providerFamilyKey: "SOURCE_MISSING",
+        failureClass,
+        attemptLedger: sourceUnverifiedAttemptLedger(
+          1,
+          new Date("2026-07-15T18:35:00.000Z"),
+        ),
+      });
+      prismaMocks.batchFindFirst.mockResolvedValue(batch);
+      prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+      prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+      prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+      prismaMocks.transaction.mockImplementationOnce(
+        async (
+          worker: (
+            transaction: typeof monitoringTransactionClient,
+          ) => Promise<unknown>,
+        ) => worker(monitoringTransactionClient),
+      );
+
+      await expect(
+        closeoutCourseSupportBatch({
+          batchId: "batch-1",
+          leaseToken: "lease-1",
+          ownerThreadId: "owner-thread",
+          verificationWatchMode: "WATCH_SETTLED",
+          now,
+        }),
+      ).resolves.toMatchObject({
+        terminalCount: 1,
+        leverage: { sourceUnverifiedFinalCount: 1 },
+      });
+      expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            resolution: "SOURCE_UNVERIFIED",
+          }),
+        }),
+      );
+      expect(prismaMocks.incidentUpdateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            proofSnapshot: expect.objectContaining({
+              kind: "SOURCE_UNVERIFIED_FINAL",
+              failureClass,
+            }),
+          }),
+        }),
+      );
     },
   );
 

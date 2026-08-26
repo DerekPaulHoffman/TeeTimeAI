@@ -88,6 +88,24 @@ const missingSourceFingerprint = buildProviderFailureFingerprint({
   operation: "METADATA",
   httpStatus: null
 });
+const sourceMissingNetworkFingerprint = buildProviderFailureFingerprint({
+  providerFamilyKey: "SOURCE_MISSING",
+  failureClass: "NETWORK",
+  operation: "AVAILABILITY",
+  httpStatus: null
+});
+const sourceMissingMetadataFingerprint = buildProviderFailureFingerprint({
+  providerFamilyKey: "SOURCE_MISSING",
+  failureClass: "MISSING_METADATA",
+  operation: "METADATA",
+  httpStatus: null
+});
+const sourceMissingReaderFingerprint = buildProviderFailureFingerprint({
+  providerFamilyKey: "SOURCE_MISSING",
+  failureClass: "READER_PARSER_MISSING",
+  operation: "AVAILABILITY",
+  httpStatus: null
+});
 const unsupportedExampleMetadataFingerprint = buildProviderFailureFingerprint({
   providerFamilyKey: "example.com",
   failureClass: "UNSUPPORTED_FAMILY",
@@ -685,7 +703,10 @@ describe("course support incidents", () => {
         status: "RESOLVED",
         resolution: "SOURCE_UNVERIFIED",
         providerFamilyKey: "SOURCE_MISSING",
+        failureClass: "MISSING_SOURCE",
         failureFingerprint: missingSourceFingerprint,
+        platformSnapshot: "UNKNOWN",
+        bookingUrlSnapshot: null,
         engineeringOnly: true
       })
     );
@@ -697,7 +718,8 @@ describe("course support incidents", () => {
           name: "Synthetic Coverage Course",
           detectedPlatform: "UNKNOWN",
           detectedBookingUrl: null,
-          website: null
+          website: null,
+          providerFamilyKey: "SOURCE_MISSING"
         },
         searchId: "search-multi-cycle",
         kind: "NEEDS_ADAPTER",
@@ -710,6 +732,206 @@ describe("course support incidents", () => {
     });
 
     expect(prismaMocks.courseSupportIncident.update).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["NETWORK", sourceMissingNetworkFingerprint],
+    ["MISSING_METADATA", sourceMissingMetadataFingerprint],
+  ] as const)(
+    "keeps a source-unverified final closed after the same source-free state is reported with retained %s history",
+    async (failureClass, failureFingerprint) => {
+      prismaMocks.teeSearch.findUnique.mockResolvedValue({
+        trafficClass: "TEST",
+        syntheticMultiCycle: true,
+      });
+      prismaMocks.teeSearch.count.mockResolvedValue(1);
+      prismaMocks.teeSearch.aggregate.mockResolvedValue({
+        _count: { id: 0 },
+        _min: { date: null },
+      });
+      prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(
+        incident({
+          status: "RESOLVED",
+          resolution: "SOURCE_UNVERIFIED",
+          providerFamilyKey: "SOURCE_MISSING",
+          failureClass,
+          failureFingerprint,
+          platformSnapshot: "UNKNOWN",
+          bookingUrlSnapshot: null,
+          engineeringOnly: true,
+        }),
+      );
+
+      await expect(
+        reportCourseSupportIssue({
+          course: {
+            id: "course-1",
+            name: "Synthetic Coverage Course",
+            detectedPlatform: "UNKNOWN",
+            detectedBookingUrl: null,
+            website: null,
+            providerFamilyKey: "SOURCE_MISSING",
+          },
+          searchId: "search-multi-cycle",
+          kind: "NEEDS_ADAPTER",
+          now,
+        }),
+      ).resolves.toEqual({
+        incidentId: null,
+        status: "UNRECORDED",
+        ownerAlerted: false,
+      });
+
+      expect(prismaMocks.courseSupportIncident.create).not.toHaveBeenCalled();
+      expect(prismaMocks.courseSupportIncident.update).not.toHaveBeenCalled();
+      expect(prismaMocks.courseSupportIncident.updateMany).not.toHaveBeenCalled();
+    },
+  );
+
+  it("reopens a retained source-unverified final when a material source appears", async () => {
+    const sourceUnverified = incident({
+      status: "RESOLVED",
+      resolution: "SOURCE_UNVERIFIED",
+      providerFamilyKey: "SOURCE_MISSING",
+      failureClass: "NETWORK",
+      failureFingerprint: sourceMissingNetworkFingerprint,
+      platformSnapshot: "UNKNOWN",
+      bookingUrlSnapshot: null,
+      engineeringOnly: true,
+      activeRealSearchCount: 0,
+    });
+    const reopened = incident({
+      cycle: 2,
+      status: "AUTO_INVESTIGATING",
+      providerFamilyKey: "example.com",
+      failureClass: "UNSUPPORTED_FAMILY",
+      failureFingerprint: unsupportedExampleMetadataFingerprint,
+      platformSnapshot: "UNKNOWN",
+      bookingUrlSnapshot: "https://example.com/",
+      engineeringOnly: true,
+      activeRealSearchCount: 0,
+    });
+    prismaMocks.teeSearch.findUnique.mockResolvedValue({
+      trafficClass: "TEST",
+      syntheticMultiCycle: true,
+    });
+    prismaMocks.teeSearch.count.mockResolvedValue(1);
+    prismaMocks.teeSearch.aggregate.mockResolvedValue({
+      _count: { id: 0 },
+      _min: { date: null },
+    });
+    prismaMocks.courseSupportIncident.findUnique
+      .mockResolvedValueOnce(sourceUnverified)
+      .mockResolvedValueOnce(reopened);
+
+    await expect(
+      reportCourseSupportIssue({
+        course: {
+          id: "course-1",
+          name: "Synthetic Coverage Course",
+          detectedPlatform: "UNKNOWN",
+          detectedBookingUrl: null,
+          website: "https://example.com/",
+          providerFamilyKey: "SOURCE_MISSING",
+        },
+        searchId: "search-multi-cycle",
+        kind: "NEEDS_ADAPTER",
+        now,
+      }),
+    ).resolves.toMatchObject({
+      incidentId: "incident-1",
+      status: "AUTO_INVESTIGATING",
+    });
+
+    expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        id: "incident-1",
+        cycle: 1,
+        status: "RESOLVED",
+        resolution: "SOURCE_UNVERIFIED",
+      }),
+      data: expect.objectContaining({
+        cycle: { increment: 1 },
+        status: "AUTO_INVESTIGATING",
+        providerFamilyKey: "example.com",
+        failureClass: "UNSUPPORTED_FAMILY",
+        resolution: null,
+      }),
+    });
+  });
+
+  it("reopens a retained source-unverified final when a local-reader candidate appears", async () => {
+    const sourceUnverified = incident({
+      status: "RESOLVED",
+      resolution: "SOURCE_UNVERIFIED",
+      providerFamilyKey: "SOURCE_MISSING",
+      failureClass: "NETWORK",
+      failureFingerprint: sourceMissingNetworkFingerprint,
+      platformSnapshot: "UNKNOWN",
+      bookingUrlSnapshot: null,
+      engineeringOnly: true,
+      activeRealSearchCount: 0,
+    });
+    const reopened = incident({
+      cycle: 2,
+      status: "AUTO_INVESTIGATING",
+      providerFamilyKey: "SOURCE_MISSING",
+      failureClass: "READER_PARSER_MISSING",
+      failureFingerprint: sourceMissingReaderFingerprint,
+      platformSnapshot: "UNKNOWN",
+      bookingUrlSnapshot: null,
+      engineeringOnly: true,
+      activeRealSearchCount: 0,
+    });
+    prismaMocks.teeSearch.findUnique.mockResolvedValue({
+      trafficClass: "TEST",
+      syntheticMultiCycle: true,
+    });
+    prismaMocks.teeSearch.count.mockResolvedValue(1);
+    prismaMocks.teeSearch.aggregate.mockResolvedValue({
+      _count: { id: 0 },
+      _min: { date: null },
+    });
+    prismaMocks.courseSupportIncident.findUnique
+      .mockResolvedValueOnce(sourceUnverified)
+      .mockResolvedValueOnce(reopened);
+
+    await expect(
+      reportCourseSupportIssue({
+        course: {
+          id: "course-1",
+          name: "Synthetic Coverage Course",
+          detectedPlatform: "UNKNOWN",
+          detectedBookingUrl: null,
+          website: null,
+          providerFamilyKey: "SOURCE_MISSING",
+        },
+        searchId: "search-multi-cycle",
+        kind: "READER_CANDIDATE",
+        readPath: "LOCAL_READER_ALLOWLIST",
+        now,
+      }),
+    ).resolves.toMatchObject({
+      incidentId: "incident-1",
+      status: "AUTO_INVESTIGATING",
+    });
+
+    expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        id: "incident-1",
+        cycle: 1,
+        status: "RESOLVED",
+        resolution: "SOURCE_UNVERIFIED",
+      }),
+      data: expect.objectContaining({
+        cycle: { increment: 1 },
+        status: "AUTO_INVESTIGATING",
+        providerFamilyKey: "SOURCE_MISSING",
+        failureClass: "READER_PARSER_MISSING",
+        failureFingerprint: sourceMissingReaderFingerprint,
+        resolution: null,
+      }),
+    });
   });
 
   it("reopens source-unverified evidence when real customer demand arrives", async () => {

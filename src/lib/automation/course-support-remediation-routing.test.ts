@@ -245,18 +245,118 @@ describe("course-support remediation routing", () => {
     });
   });
 
+  it.each([1, 4])(
+    "keeps a source-free transient failure on discovery after %i provider attempts",
+    (attemptCount) => {
+      const result = routeCourseSupportRemediation({
+        ...runnableCourse,
+        detectedPlatform: "UNKNOWN",
+        providerFamilyKey: "SOURCE_MISSING",
+        detectedBookingUrl: null,
+        website: null,
+        bookingMetadata: null,
+        automationEligibility: "NEEDS_REVIEW",
+        failureClass: "NETWORK",
+        attemptCount,
+        playbookAssessment: incompletePlaybook("OFFICIAL_HTTP_DISCOVERY"),
+      });
+
+      expect(result).toMatchObject({
+        workMode: "ADVANCE_DISCOVERY",
+        allowUnchangedRuntime: true,
+        requiresImplementationPath: false,
+        retryBudget: null,
+        reason: "PLAYBOOK_STAGE_PENDING",
+        strategy: {
+          action: "REPAIR_PROVIDER_ADAPTER",
+          reason: "PROVIDER_ADAPTER_DEFECT",
+        },
+        attemptSignature: {
+          playbookStage: "OFFICIAL_HTTP_DISCOVERY",
+        },
+      });
+      expect(getCourseSupportRemediationDirective(result)).toEqual({
+        workMode: "ADVANCE_DISCOVERY",
+        strategyAction: "REPAIR_PROVIDER_ADAPTER",
+        playbookStage: "OFFICIAL_HTTP_DISCOVERY",
+      });
+    },
+  );
+
+  it("keeps a source-conflict transient failure on the fail-closed implementation route", () => {
+    const result = routeCourseSupportRemediation({
+      ...runnableCourse,
+      detectedPlatform: "UNKNOWN",
+      providerFamilyKey: "SOURCE_CONFLICT",
+      detectedBookingUrl: null,
+      website: null,
+      bookingMetadata: null,
+      automationEligibility: "NEEDS_REVIEW",
+      failureClass: "NETWORK",
+      attemptCount: 1,
+      playbookAssessment: incompletePlaybook("OFFICIAL_HTTP_DISCOVERY"),
+    });
+
+    expect(result).toMatchObject({
+      workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+      allowUnchangedRuntime: false,
+      requiresImplementationPath: true,
+      reason: "IMPLEMENTATION_REQUIRED",
+    });
+  });
+
+  it("does not treat an unknown concrete provider as source-free", () => {
+    const result = routeCourseSupportRemediation({
+      ...runnableCourse,
+      detectedPlatform: "UNKNOWN",
+      providerFamilyKey: "booking.vendor.example",
+      detectedBookingUrl: null,
+      website: null,
+      bookingMetadata: null,
+      automationEligibility: "NEEDS_REVIEW",
+      failureClass: "NETWORK",
+      attemptCount: 1,
+      playbookAssessment: incompletePlaybook("OFFICIAL_HTTP_DISCOVERY"),
+    });
+
+    expect(result).toMatchObject({
+      workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+      allowUnchangedRuntime: false,
+      requiresImplementationPath: true,
+      reason: "IMPLEMENTATION_REQUIRED",
+    });
+  });
+
   it.each([
     {
       label: "unsafe persisted source",
       website: "javascript:alert(1)",
+      failureClass: "MISSING_SOURCE" as const,
       nextStage: "OFFICIAL_IDENTITY" as const,
     },
     {
       label: "post-render adapter retry",
       website: null,
+      failureClass: "MISSING_SOURCE" as const,
       nextStage: "BROWSER_ADAPTER_RETRY" as const,
     },
-  ])("keeps $label on the fail-closed implementation route", ({ website, nextStage }) => {
+    {
+      label: "transient post-render adapter retry",
+      website: null,
+      failureClass: "NETWORK" as const,
+      nextStage: "BROWSER_ADAPTER_RETRY" as const,
+    },
+    {
+      label: "transient local-reader stage",
+      website: null,
+      failureClass: "NETWORK" as const,
+      nextStage: "LOCAL_READER" as const,
+    },
+  ])("keeps $label on the fail-closed implementation route", ({
+    website,
+    failureClass,
+    nextStage,
+  }) => {
     const result = routeCourseSupportRemediation({
       ...runnableCourse,
       detectedPlatform: "UNKNOWN",
@@ -265,7 +365,7 @@ describe("course-support remediation routing", () => {
       website,
       bookingMetadata: null,
       automationEligibility: "NEEDS_REVIEW",
-      failureClass: "MISSING_SOURCE",
+      failureClass,
       playbookAssessment: incompletePlaybook(nextStage),
     });
 

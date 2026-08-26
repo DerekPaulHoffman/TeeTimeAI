@@ -315,8 +315,10 @@ export function routeCourseSupportRemediation(
     playbookAssessment: input.playbookAssessment,
     materialChangeDetected,
     retryBudget,
-    sourceFree:
-      input.website === null && input.detectedBookingUrl === null,
+    sourceFreeProvider:
+      strategy.providerFamilyKey === SOURCE_MISSING_PROVIDER_FAMILY &&
+      input.website === null &&
+      input.detectedBookingUrl === null,
   });
 
   if (candidate.workMode === "WAIT_FOR_MATERIAL_CHANGE") {
@@ -394,8 +396,26 @@ function selectActionableRoute(input: {
   >;
   materialChangeDetected: boolean;
   retryBudget: CourseSupportRemediationRetryBudget | null;
-  sourceFree: boolean;
+  sourceFreeProvider: boolean;
 }): CourseSupportRemediationRoute {
+  // A genuinely source-free course has no provider contract to retry or
+  // implement, even when its incident retains a transient failure class from
+  // an earlier observation. Keep only the pre-provider stages through rendered
+  // discovery on unchanged runtime; every later or unrelated stage remains on
+  // the fail-closed implementation route.
+  if (input.sourceFreeProvider) {
+    if (
+      input.playbookAssessment.nextStage !== null &&
+      SOURCE_FREE_DISCOVERY_STAGES.has(input.playbookAssessment.nextStage)
+    ) {
+      // The transient budget describes provider retries, not the ordered
+      // source-discovery ladder. Dropping it here keeps a new safe stage
+      // executable even when an older provider retry budget was exhausted.
+      return discoveryRoute({ ...input, retryBudget: null });
+    }
+    return implementationRoute(input);
+  }
+
   if (input.strategy.action === "RETRY_PROVIDER") {
     if (!isTransientCourseSupportFailure(input.failureClass)) {
       return routeStructuralFailure(input);
@@ -481,21 +501,7 @@ function routeStructuralFailure(input: {
   >;
   materialChangeDetected: boolean;
   retryBudget: CourseSupportRemediationRetryBudget | null;
-  sourceFree: boolean;
 }) {
-  // A genuinely source-free course has no provider contract to implement yet.
-  // Keep only its stages through rendered discovery on unchanged-runtime
-  // verification so the ordered playbook can establish one without broadening
-  // later retries or unsafe persisted-source handling.
-  if (
-    input.failureClass === "MISSING_SOURCE" &&
-    input.strategy.providerFamilyKey === SOURCE_MISSING_PROVIDER_FAMILY &&
-    input.sourceFree &&
-    input.playbookAssessment.nextStage !== null &&
-    SOURCE_FREE_DISCOVERY_STAGES.has(input.playbookAssessment.nextStage)
-  ) {
-    return discoveryRoute(input);
-  }
   if (input.strategy.action === "REPAIR_PROVIDER_ADAPTER") {
     return implementationRoute(input);
   }

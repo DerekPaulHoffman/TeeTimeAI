@@ -329,6 +329,20 @@ export function resolveProviderCapability(
   };
 }
 
+export function isExactSourceMissingProviderState(
+  input: ProviderCourseInput | null | undefined,
+) {
+  if (!input) return false;
+  const provider = resolveProviderCapability(input);
+  return Boolean(
+    input.providerFamilyKey === SOURCE_MISSING_PROVIDER_FAMILY &&
+    input.website === null &&
+    input.detectedBookingUrl === null &&
+    provider.providerFamilyKey === SOURCE_MISSING_PROVIDER_FAMILY &&
+    !provider.capability,
+  );
+}
+
 export function resolveProviderDiscoveryIdentity(input: {
   detectedPlatform?: string | null;
   bookingUrl?: string | null;

@@ -25,7 +25,9 @@ import {
   buildProviderFailureFingerprint,
   classifyProviderFailure,
   getProviderReadinessFailure,
-  resolveProviderCapability
+  isExactSourceMissingProviderState,
+  resolveProviderCapability,
+  SOURCE_MISSING_PROVIDER_FAMILY,
 } from "./provider-capabilities";
 
 export type CourseSupportIssueInput = {
@@ -308,6 +310,17 @@ async function reportCourseSupportIssueWithLease(
     existing.resolution === "SOURCE_UNVERIFIED" &&
     activeRealSearchCount > 0,
   );
+  const unchangedExactSourceMissingFinal = Boolean(
+    existing?.status === "RESOLVED" &&
+    existing.resolution === "SOURCE_UNVERIFIED" &&
+    activeRealSearchCount === 0 &&
+    input.kind === "NEEDS_ADAPTER" &&
+    failureClass === "MISSING_SOURCE" &&
+    existing.providerFamilyKey === SOURCE_MISSING_PROVIDER_FAMILY &&
+    existing.platformSnapshot === input.course.detectedPlatform &&
+    existing.bookingUrlSnapshot === bookingUrl &&
+    isExactSourceMissingProviderState(input.course),
+  );
   const resolvedFinalDecision = Boolean(
     existing?.status === "RESOLVED" &&
     existing.resolution &&
@@ -335,8 +348,7 @@ async function reportCourseSupportIssueWithLease(
     existing?.status === "RESOLVED" &&
     existing.resolution === "SOURCE_UNVERIFIED" &&
     activeRealSearchCount === 0 &&
-    existing.providerFamilyKey === provider.providerFamilyKey &&
-    existing.failureFingerprint === failureFingerprint
+    (!materialFailureInputChanged || unchangedExactSourceMissingFinal)
   ) {
     return {
       incidentId: null,

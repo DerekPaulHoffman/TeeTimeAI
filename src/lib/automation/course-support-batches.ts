@@ -89,6 +89,7 @@ import {
   buildProviderFailureFingerprint,
   classifyProviderFailure,
   getProviderReadinessFailure,
+  isExactSourceMissingProviderState,
   resolveProviderCapability,
   resolveProviderDiscoveryIdentity,
   SOURCE_CONFLICT_PROVIDER_FAMILY,
@@ -2186,6 +2187,7 @@ export function buildCourseSupportResponderHandoff(input: {
 export function shouldFinalizeSourceUnverified(input: {
   providerFamilyKey: string;
   failureClass: CourseSupportFailureClass;
+  course: Parameters<typeof resolveProviderCapability>[0];
   attemptCount: number;
   activeRealSearchCount: number;
   firstSeenAt: Date;
@@ -2208,15 +2210,28 @@ export function shouldFinalizeSourceUnverified(input: {
       input.freshCycleStartedAt,
     ),
   );
+  const exactSourceMissingState = hasExactSourceMissingProviderState({
+    incidentProviderFamilyKey: input.providerFamilyKey,
+    course: input.course,
+  });
   return Boolean(
     input.result === "RETRY_SCHEDULED" &&
     freshPlaybookComplete &&
     input.verifiedAt &&
     input.verifiedAt.getTime() >= input.freshCycleStartedAt!.getTime() &&
-    ((input.providerFamilyKey === SOURCE_MISSING_PROVIDER_FAMILY &&
-      input.failureClass === "MISSING_SOURCE") ||
+    (exactSourceMissingState ||
       (input.providerFamilyKey === SOURCE_CONFLICT_PROVIDER_FAMILY &&
         input.failureClass === "MISSING_METADATA")),
+  );
+}
+
+function hasExactSourceMissingProviderState(input: {
+  incidentProviderFamilyKey: string;
+  course: Parameters<typeof resolveProviderCapability>[0] | null | undefined;
+}) {
+  return Boolean(
+    input.incidentProviderFamilyKey === SOURCE_MISSING_PROVIDER_FAMILY &&
+    isExactSourceMissingProviderState(input.course),
   );
 }
 
@@ -5302,10 +5317,10 @@ function resolveOwnedCourseSupportSourceSearchEntry(input: {
     entry.incident.activeBatchId !== input.batchId ||
     entry.incident.kind !== "NEEDS_ADAPTER" ||
     entry.incident.providerFamilyKey !== SOURCE_MISSING_PROVIDER_FAMILY ||
-    entry.incident.failureClass !== "MISSING_SOURCE" ||
     entry.course.providerFamilyKey !== SOURCE_MISSING_PROVIDER_FAMILY ||
     entry.course.website !== null ||
     entry.course.detectedBookingUrl !== null ||
+    provider.providerFamilyKey !== SOURCE_MISSING_PROVIDER_FAMILY ||
     provider.capability ||
     entry.course.monitoringMode === "LOCAL_READER_ONLY" ||
     entry.incident.resolution !== null ||
@@ -8716,6 +8731,7 @@ async function closeoutCourseSupportBatchAttempt(
       const sourceUnverifiedFinal = shouldFinalizeSourceUnverified({
         providerFamilyKey: entry.incident.providerFamilyKey,
         failureClass: entry.incident.failureClass,
+        course: entry.course,
         attemptCount: entry.incident.attemptCount,
         activeRealSearchCount: entry.incident.activeRealSearchCount,
         firstSeenAt: entry.incident.firstSeenAt,
@@ -8765,6 +8781,7 @@ async function closeoutCourseSupportBatchAttempt(
       shouldFinalizeSourceUnverified({
         providerFamilyKey: entry.incident.providerFamilyKey,
         failureClass: entry.incident.failureClass,
+        course: entry.course,
         attemptCount: entry.incident.attemptCount,
         activeRealSearchCount: entry.incident.activeRealSearchCount,
         firstSeenAt: entry.incident.firstSeenAt,
@@ -11185,6 +11202,13 @@ async function closeoutCourseSupportBatchAttempt(
       if (entry.result !== entry.normalizedResult) {
         const authoritativeSuccessProbe =
           authoritativeSuccessProbeByBatchIncidentId.get(entry.id);
+        const normalizedProof = asJsonObject(entry.proofSnapshot);
+        const sourceUnverifiedFinalProof =
+          entry.normalizedResult === "FINAL_DISPOSITION" &&
+          normalizedProof.kind === "SOURCE_UNVERIFIED_FINAL";
+        const replacesCapturedProof = Boolean(
+          authoritativeSuccessProbe || sourceUnverifiedFinalProof,
+        );
         const capturedEntry = batch.incidents.find(
           (candidate) => candidate.id === entry.id,
         );
@@ -11197,7 +11221,7 @@ async function closeoutCourseSupportBatchAttempt(
               id: entry.id,
               result: entry.result,
               updatedAt: entry.updatedAt,
-              ...(authoritativeSuccessProbe
+              ...(replacesCapturedProof
                 ? {
                     proofSnapshot: {
                       equals:
@@ -11207,6 +11231,12 @@ async function closeoutCourseSupportBatchAttempt(
                     },
                     verifiedAt: capturedEntry.verifiedAt,
                     postProbeId: capturedEntry.postProbeId,
+                    ...(sourceUnverifiedFinalProof
+                      ? {
+                          verifiedIncidentUpdatedAt:
+                            capturedEntry.verifiedIncidentUpdatedAt,
+                        }
+                      : {}),
                   }
                 : {}),
             },
@@ -11223,6 +11253,11 @@ async function closeoutCourseSupportBatchAttempt(
                         authoritativeSuccessProbe,
                       ),
                   }
+                : sourceUnverifiedFinalProof
+                  ? {
+                      proofSnapshot:
+                        entry.proofSnapshot as Prisma.InputJsonValue,
+                    }
                 : {}),
             },
           });
@@ -15795,6 +15830,7 @@ export function isDurableTerminalProof(
       attemptLedger?: Prisma.JsonValue | null;
       confirmedAt?: Date | null;
     };
+    course?: Parameters<typeof resolveProviderCapability>[0];
   },
   batch: {
     createdAt: Date;
@@ -15887,8 +15923,10 @@ export function isDurableTerminalProof(
         proof.activeRealSearchCount === entry.incident.activeRealSearchCount &&
         proof.cycle === entry.incident.cycle &&
         proof.completedStageCount === AUTOMATION_PLAYBOOK_STAGES.length &&
-        ((entry.incident.providerFamilyKey === SOURCE_MISSING_PROVIDER_FAMILY &&
-          entry.incident.failureClass === "MISSING_SOURCE") ||
+        (hasExactSourceMissingProviderState({
+          incidentProviderFamilyKey: entry.incident.providerFamilyKey,
+          course: entry.course,
+        }) ||
           (entry.incident.providerFamilyKey ===
             SOURCE_CONFLICT_PROVIDER_FAMILY &&
             entry.incident.failureClass === "MISSING_METADATA")) &&
