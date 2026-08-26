@@ -9,7 +9,10 @@ import {
   type MonitoringStrategyDecision,
   type MonitoringStrategyInput,
 } from "./monitoring-strategy";
-import type { CourseSupportFailureClass } from "./provider-capabilities";
+import {
+  SOURCE_MISSING_PROVIDER_FAMILY,
+  type CourseSupportFailureClass,
+} from "./provider-capabilities";
 
 export const COURSE_SUPPORT_REMEDIATION_WORK_MODES = [
   "VERIFY_TRANSIENT",
@@ -243,6 +246,14 @@ const DISCOVERY_ACTIONS = new Set<MonitoringStrategyAction>([
   "VERIFY_TECHNICAL_CONSTRAINT",
 ]);
 
+const SOURCE_FREE_DISCOVERY_STAGES = new Set<AutomationPlaybookStage>([
+  "OFFICIAL_IDENTITY",
+  "TYPED_ADAPTER",
+  "OFFICIAL_HTTP_DISCOVERY",
+  "HTTP_ADAPTER_RETRY",
+  "RENDERED_BROWSER_DISCOVERY",
+]);
+
 export function routeCourseSupportRemediation(
   input: CourseSupportRemediationRoutingInput,
 ): CourseSupportRemediationRoute {
@@ -304,6 +315,8 @@ export function routeCourseSupportRemediation(
     playbookAssessment: input.playbookAssessment,
     materialChangeDetected,
     retryBudget,
+    sourceFree:
+      input.website === null && input.detectedBookingUrl === null,
   });
 
   if (candidate.workMode === "WAIT_FOR_MATERIAL_CHANGE") {
@@ -381,6 +394,7 @@ function selectActionableRoute(input: {
   >;
   materialChangeDetected: boolean;
   retryBudget: CourseSupportRemediationRetryBudget | null;
+  sourceFree: boolean;
 }): CourseSupportRemediationRoute {
   if (input.strategy.action === "RETRY_PROVIDER") {
     if (!isTransientCourseSupportFailure(input.failureClass)) {
@@ -467,7 +481,21 @@ function routeStructuralFailure(input: {
   >;
   materialChangeDetected: boolean;
   retryBudget: CourseSupportRemediationRetryBudget | null;
+  sourceFree: boolean;
 }) {
+  // A genuinely source-free course has no provider contract to implement yet.
+  // Keep only its stages through rendered discovery on unchanged-runtime
+  // verification so the ordered playbook can establish one without broadening
+  // later retries or unsafe persisted-source handling.
+  if (
+    input.failureClass === "MISSING_SOURCE" &&
+    input.strategy.providerFamilyKey === SOURCE_MISSING_PROVIDER_FAMILY &&
+    input.sourceFree &&
+    input.playbookAssessment.nextStage !== null &&
+    SOURCE_FREE_DISCOVERY_STAGES.has(input.playbookAssessment.nextStage)
+  ) {
+    return discoveryRoute(input);
+  }
   if (input.strategy.action === "REPAIR_PROVIDER_ADAPTER") {
     return implementationRoute(input);
   }
@@ -475,7 +503,6 @@ function routeStructuralFailure(input: {
     return discoveryRoute(input);
   }
   if (
-    input.failureClass === "MISSING_SOURCE" ||
     input.failureClass === "MISSING_METADATA" ||
     input.failureClass === "AUTH" ||
     input.failureClass === "CHALLENGE"

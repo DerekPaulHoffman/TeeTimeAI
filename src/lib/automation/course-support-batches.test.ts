@@ -4976,6 +4976,15 @@ describe("course-support claim demand fencing", () => {
         data: expect.objectContaining({
           summary: expect.objectContaining({
             campaign: expect.objectContaining({ kind: "PARKED_COHORT" }),
+            plannedPaths: [],
+            remediation: expect.objectContaining({
+              workMode: "ADVANCE_DISCOVERY",
+              strategyAction: "REPAIR_PROVIDER_ADAPTER",
+              playbookStage: "OFFICIAL_IDENTITY",
+              allowUnchangedRuntime: true,
+              requiresImplementationPath: false,
+              reason: "PLAYBOOK_STAGE_PENDING",
+            }),
           }),
         }),
       }),

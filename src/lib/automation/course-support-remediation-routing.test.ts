@@ -211,6 +211,73 @@ describe("course-support remediation routing", () => {
     });
   });
 
+  it("advances official identity before requiring implementation for a source-free course", () => {
+    const result = routeCourseSupportRemediation({
+      ...runnableCourse,
+      detectedPlatform: "UNKNOWN",
+      providerFamilyKey: "SOURCE_MISSING",
+      detectedBookingUrl: null,
+      website: null,
+      bookingMetadata: null,
+      automationEligibility: "NEEDS_REVIEW",
+      failureClass: "MISSING_SOURCE",
+      playbookAssessment: incompletePlaybook("OFFICIAL_IDENTITY"),
+    });
+
+    expect(result).toMatchObject({
+      workMode: "ADVANCE_DISCOVERY",
+      allowUnchangedRuntime: true,
+      requiresImplementationPath: false,
+      retryBudget: null,
+      reason: "PLAYBOOK_STAGE_PENDING",
+      strategy: {
+        action: "REPAIR_PROVIDER_ADAPTER",
+        reason: "UNSAFE_DISCOVERY_SOURCE",
+      },
+      attemptSignature: {
+        playbookStage: "OFFICIAL_IDENTITY",
+      },
+    });
+    expect(getCourseSupportRemediationDirective(result)).toEqual({
+      workMode: "ADVANCE_DISCOVERY",
+      strategyAction: "REPAIR_PROVIDER_ADAPTER",
+      playbookStage: "OFFICIAL_IDENTITY",
+    });
+  });
+
+  it.each([
+    {
+      label: "unsafe persisted source",
+      website: "javascript:alert(1)",
+      nextStage: "OFFICIAL_IDENTITY" as const,
+    },
+    {
+      label: "post-render adapter retry",
+      website: null,
+      nextStage: "BROWSER_ADAPTER_RETRY" as const,
+    },
+  ])("keeps $label on the fail-closed implementation route", ({ website, nextStage }) => {
+    const result = routeCourseSupportRemediation({
+      ...runnableCourse,
+      detectedPlatform: "UNKNOWN",
+      providerFamilyKey: "SOURCE_MISSING",
+      detectedBookingUrl: null,
+      website,
+      bookingMetadata: null,
+      automationEligibility: "NEEDS_REVIEW",
+      failureClass: "MISSING_SOURCE",
+      playbookAssessment: incompletePlaybook(nextStage),
+    });
+
+    expect(result).toMatchObject({
+      workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+      allowUnchangedRuntime: false,
+      requiresImplementationPath: true,
+      reason: "IMPLEMENTATION_REQUIRED",
+      attemptSignature: { playbookStage: nextStage },
+    });
+  });
+
   it("advances an available local reader instead of repairing a stale platform snapshot", () => {
     const result = routeCourseSupportRemediation({
       ...runnableCourse,
