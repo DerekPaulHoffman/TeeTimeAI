@@ -1672,6 +1672,129 @@ describe("executeCourseSupportVerificationStep", () => {
     ).not.toHaveBeenCalled();
   });
 
+  it("preserves the assigned adapter stage when provider execution cannot begin", async () => {
+    const runtime = installPlaybookRuntime();
+    allowOwnedDiscovery();
+    providerLeaseMocks.runWithProviderRequestLease
+      .mockResolvedValueOnce({ acquired: false })
+      .mockResolvedValueOnce({ acquired: false });
+    verificationMocks.failCourseSupportVerificationRequest.mockResolvedValue({
+      failed: true,
+      status: "RETRYABLE_FAILED",
+    });
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "failed",
+      retryable: true,
+    });
+
+    expect(providerReadMocks.fetchCourseTeeSheet).not.toHaveBeenCalled();
+    expect(
+      verificationMocks.failCourseSupportVerificationRequest,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        failureClass: "RATE_LIMIT",
+        retryAt: new Date("2026-07-21T12:02:00.000Z"),
+        observation: expect.objectContaining({
+          providerExecution: false,
+        }),
+      }),
+    );
+    expect(
+      playbookMocks.recordRuntimePlaybookTransition.mock.calls.some(
+        ([, transition]) => transition.stage === "TYPED_ADAPTER",
+      ),
+    ).toBe(false);
+    expect(runtime.assessment).toMatchObject({
+      conclusion: "INCOMPLETE",
+      nextStage: "TYPED_ADAPTER",
+      stages: expect.arrayContaining([
+        expect.objectContaining({
+          stage: "TYPED_ADAPTER",
+          attemptCount: 0,
+        }),
+      ]),
+    });
+
+    vi.setSystemTime(new Date("2026-07-21T12:02:00.000Z"));
+    allowOwnedDiscovery();
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "failed",
+      retryable: true,
+    });
+    expect(providerReadMocks.fetchCourseTeeSheet).not.toHaveBeenCalled();
+    expect(runtime.assessment).toMatchObject({
+      conclusion: "INCOMPLETE",
+      nextStage: "TYPED_ADAPTER",
+      stages: expect.arrayContaining([
+        expect.objectContaining({
+          stage: "TYPED_ADAPTER",
+          attemptCount: 0,
+        }),
+      ]),
+    });
+
+    vi.setSystemTime(new Date("2026-07-21T12:04:00.000Z"));
+    allowOwnedDiscovery();
+    allowDirectDiscoveryVerification();
+    providerReadMocks.fetchCourseTeeSheet.mockResolvedValue({
+      slots: [],
+      targetDateStatus: "OPEN",
+      bookingWindowEvidence: null,
+    });
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "completed",
+      providerOutcome: "NO_MATCH",
+    });
+    expect(providerReadMocks.fetchCourseTeeSheet).toHaveBeenCalledOnce();
+    expect(runtime.assessment.conclusion).toBe("MONITORING_RESTORED");
+  });
+
+  it("retries a provider-lease exception without recording an adapter-stage failure", async () => {
+    const runtime = installPlaybookRuntime();
+    allowOwnedDiscovery();
+    providerLeaseMocks.runWithProviderRequestLease.mockRejectedValueOnce(
+      new Error("provider lease store unavailable"),
+    );
+    capabilityMocks.classifyProviderFailure.mockReturnValueOnce({
+      failureClass: "UNKNOWN",
+      httpStatus: null,
+      retryAfterSeconds: null,
+    });
+    verificationMocks.failCourseSupportVerificationRequest.mockResolvedValueOnce(
+      {
+        failed: true,
+        status: "RETRYABLE_FAILED",
+      },
+    );
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "failed",
+      retryable: true,
+    });
+
+    expect(providerReadMocks.fetchCourseTeeSheet).not.toHaveBeenCalled();
+    expect(
+      verificationMocks.failCourseSupportVerificationRequest,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        failureClass: "UNKNOWN",
+        retryAt: new Date("2026-07-21T12:02:00.000Z"),
+        observation: expect.objectContaining({ providerExecution: false }),
+      }),
+    );
+    expect(
+      playbookMocks.recordRuntimePlaybookTransition.mock.calls.some(
+        ([, transition]) => transition.stage === "TYPED_ADAPTER",
+      ),
+    ).toBe(false);
+    expect(runtime.assessment).toMatchObject({
+      conclusion: "INCOMPLETE",
+      nextStage: "TYPED_ADAPTER",
+    });
+  });
+
   it("performs no provider I/O when the typed-adapter attempt fence rejects ownership", async () => {
     installPlaybookRuntime();
     allowOwnedDiscovery();

@@ -89,7 +89,6 @@ import {
   appendAutomationPlaybookEvent,
   assessAutomationPlaybook
 } from "./course-monitoring-playbook";
-import { hasDurableAutomationStalledEndpointProof } from "../customer-monitoring-status";
 import { buildProviderFailureFingerprint } from "./provider-capabilities";
 import {
   createParkedCourseCampaignAttemptLedgerFingerprint,
@@ -18857,6 +18856,119 @@ describe("detached verification atomic batch fences", () => {
       },
     });
     expect(JSON.stringify(result)).not.toContain("sensitive scheduler detail");
+    expect(
+      verificationMocks.scheduleCourseSupportVerificationRequests,
+    ).toHaveBeenCalledOnce();
+  });
+
+  it("retries one scheduler write conflict before reporting detached verification health", async () => {
+    const batch = verificationBatch();
+    Object.assign(batch, {
+      summary: {
+        remediation: {
+          workMode: "VERIFY_TRANSIENT",
+          strategyAction: "RUN_TYPED_ADAPTER",
+          playbookStage: "BROWSER_ADAPTER_RETRY",
+          allowUnchangedRuntime: true,
+          requiresImplementationPath: false,
+          reason: "EXISTING_SUPPORT_READY",
+          retryBudget: null,
+        },
+      },
+    });
+    Object.assign(batch.incidents[0].incident, {
+      attemptLedger: browserAdapterRetryReadyAttemptLedger(),
+    });
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    verificationMocks.scheduleCourseSupportVerificationRequests
+      .mockRejectedValueOnce(
+        Object.assign(new Error("write conflict"), { code: "P2034" }),
+      )
+      .mockResolvedValueOnce({
+        createdCount: 1,
+        eligibleCount: 1,
+        ineligibleCount: 0,
+        requests: [],
+      });
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([
+      detachedRequestState("QUEUED"),
+    ]);
+
+    const result = await verifyCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      releaseSha,
+      now,
+    });
+
+    expect(
+      verificationMocks.scheduleCourseSupportVerificationRequests,
+    ).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({
+      detachedVerification: {
+        pendingCount: 1,
+        rerunNeeded: true,
+        assignedStageOrchestrationGapCount: 0,
+        schedulerDispatchError: false,
+      },
+      recheckDispatch: {
+        detachedVerificationDispatchError: false,
+        detachedVerificationRerunNeeded: true,
+      },
+    });
+  });
+
+  it("bounds repeated scheduler write-conflict retries before reporting a privacy-safe error", async () => {
+    const batch = verificationBatch();
+    Object.assign(batch, {
+      summary: {
+        remediation: {
+          workMode: "VERIFY_TRANSIENT",
+          strategyAction: "RUN_TYPED_ADAPTER",
+          playbookStage: "BROWSER_ADAPTER_RETRY",
+          allowUnchangedRuntime: true,
+          requiresImplementationPath: false,
+          reason: "EXISTING_SUPPORT_READY",
+          retryBudget: null,
+        },
+      },
+    });
+    Object.assign(batch.incidents[0].incident, {
+      attemptLedger: browserAdapterRetryReadyAttemptLedger(),
+    });
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    verificationMocks.scheduleCourseSupportVerificationRequests.mockRejectedValue(
+      Object.assign(new Error("sensitive write conflict"), { code: "P2034" }),
+    );
+
+    const result = await verifyCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      releaseSha,
+      now,
+    });
+
+    expect(
+      verificationMocks.scheduleCourseSupportVerificationRequests,
+    ).toHaveBeenCalledTimes(3);
+    expect(result).toMatchObject({
+      detachedVerification: {
+        rerunNeeded: true,
+        assignedStageOrchestrationGapCount: 1,
+        schedulerDispatchError: true,
+      },
+      recheckDispatch: {
+        detachedVerificationDispatchError: true,
+        detachedVerificationRerunNeeded: true,
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("sensitive write conflict");
   });
 
   it("does not schedule or await detached work after human evidence wins", async () => {
@@ -22560,7 +22672,7 @@ describe("detached verification atomic batch fences", () => {
     );
   });
 
-  it("records a truthful endpoint automation stall and releases ownership", async () => {
+  it("reschedules an assigned adapter when endpoint work never reaches provider execution", async () => {
     const batch = {
       ...closeoutBatch("PENDING"),
       ownerAutomationRunId: "run-decision-basis",
@@ -22591,7 +22703,7 @@ describe("detached verification atomic batch fences", () => {
             failureFingerprint: exactFailureFingerprint,
             runtimeVersion: releaseSha,
             activeRealSearchCount: 0,
-            playbookEventCountAtClaim: 1,
+            playbookEventCountAtClaim: 0,
             reason: "PLAYBOOK_STAGE_PENDING",
             retryBudget: null,
             approach: {
@@ -22651,15 +22763,17 @@ describe("detached verification atomic batch fences", () => {
       now
     });
     expect(result).toMatchObject({
-      outcome: "needs_human",
+      outcome: "retryable_failed",
       durableCloseoutRecorded: true,
-      needsHumanCount: 1,
-      automationStalledCount: 1,
+      retryCount: 1,
+      needsHumanCount: 0,
+      automationStalledCount: 0,
+      operationalRetryBudgetExhaustedCount: 0,
       decisionBasis: {
         schemaVersion: 3,
         normalizedIncidentCount: 1,
-        needsHumanCount: 1,
-        automationStalledCount: 1,
+        needsHumanCount: 0,
+        automationStalledCount: 0,
         orchestrationOnlyCount: 1,
         playbookAssessmentAvailableIncidentCount: 1,
         playbookAssessmentInvalidIncidentCount: 0,
@@ -22682,12 +22796,12 @@ describe("detached verification atomic batch fences", () => {
       result.decisionBasis.playbookAssessmentAvailableIncidentCount +
         result.decisionBasis.playbookAssessmentInvalidIncidentCount,
     ).toBe(1);
-    const persistedDecisionBasis = prismaMocks.batchUpdateMany.mock.calls.find(
-      ([update]) => update.data?.status === "PARTIAL"
-    )?.[0]?.data?.summary?.closeout?.decisionBasis;
-    const persistedVerificationWatch = prismaMocks.batchUpdateMany.mock.calls.find(
-      ([update]) => update.data?.status === "PARTIAL"
-    )?.[0]?.data?.summary?.closeout?.summary?.verificationWatch;
+    const persistedCloseout = prismaMocks.batchUpdateMany.mock.calls.find(
+      ([update]) => update.data?.summary?.closeout,
+    )?.[0]?.data?.summary?.closeout;
+    const persistedDecisionBasis = persistedCloseout?.decisionBasis;
+    const persistedVerificationWatch =
+      persistedCloseout?.summary?.verificationWatch;
     expect(persistedVerificationWatch).toEqual({
       settled: true,
       passCount: 3,
@@ -22706,6 +22820,30 @@ describe("detached verification atomic batch fences", () => {
       (sanitizeResponderValue(result) as { decisionBasis: unknown })
         .decisionBasis,
     ).toEqual(returnedDecisionBasis);
+    expect(persistedCloseout?.remediationAttempts?.[0]).toMatchObject({
+      consumed: false,
+      countsTowardOperationalNoProgress: false,
+      orchestrationRetry: {
+        attemptNumber: 1,
+        retryAt: new Date(now.getTime() + 15 * 60_000).toISOString(),
+      },
+      executionEvidence: {
+        claimedImplementationPaths: false,
+        newReleaseRecorded: false,
+        deploymentRecorded: false,
+        postProbeRecorded: false,
+        providerAttemptRecorded: false,
+        providerExecutionAttemptRecorded: false,
+        playbookAttemptRecorded: true,
+        terminalResultRecorded: false,
+        providerExecutionStarted: true,
+      },
+      approach: {
+        workMode: "ADVANCE_DISCOVERY",
+        strategyAction: "RUN_TYPED_ADAPTER",
+        playbookStage: "TYPED_ADAPTER",
+      },
+    });
     expect(prismaMocks.verificationRequestUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
@@ -22725,49 +22863,122 @@ describe("detached verification atomic batch fences", () => {
       expect.objectContaining({
         where: expect.objectContaining({ activeBatchId: "batch-1" }),
         data: expect.objectContaining({
-          status: "NEEDS_HUMAN",
+          status: "AUTO_INVESTIGATING",
           activeBatchId: null,
-          humanReviewReason: "AUTOMATION_STALLED",
-          nextAttemptAt: null
+          escalationDeadlineAt: null,
+          nextAttemptAt: new Date(now.getTime() + 15 * 60_000),
         })
       })
     );
-    expect(prismaMocks.monitoringStatusUpdateMany).toHaveBeenCalledWith(
+    expect(prismaMocks.monitoringEventCreate).not.toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
-          state: "ENGINEERING_VERIFICATION_NEEDED"
-        })
-      })
+          eventType: "HUMAN_REVIEW_REQUESTED",
+        }),
+      }),
     );
-    expect(prismaMocks.monitoringEventCreate).toHaveBeenCalledWith({
-      data: expect.objectContaining({
-        eventType: "HUMAN_REVIEW_REQUESTED",
-        audit: expect.objectContaining({
-          humanReviewReason: "AUTOMATION_STALLED",
-          cycle: 1,
-          customerState: "NEEDS_HUMAN_REVIEW",
-          automationStalled: true,
-          endpointStalled: true,
-          escalationDeadlineAt: now.toISOString(),
-          playbookExhausted: false,
-          customerDataIncluded: false
-        })
-      })
-    });
-    const endpointEvent = prismaMocks.monitoringEventCreate.mock.calls[0][0].data;
-    expect(
-      hasDurableAutomationStalledEndpointProof({
-        incidentId: endpointEvent.incidentId,
-        incidentCycle: 1,
-        incidentStatus: "NEEDS_HUMAN",
-        humanReviewReason: "AUTOMATION_STALLED",
-        incidentEscalatedAt: endpointEvent.occurredAt,
-        escalationDeadlineAt: now,
-        monitoringState: endpointEvent.toState,
-        endpointEvents: [endpointEvent]
-      })
-    ).toBe(true);
     expect(prismaMocks.teeSearchUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("still escalates a pre-execution endpoint stall with a malformed assigned-adapter signature", async () => {
+    const batch = closeoutBatch("PENDING");
+    const exactFailureFingerprint = "d".repeat(64);
+    batch.incidents[0].incident.failureFingerprint = exactFailureFingerprint;
+    batch.incidents[0].incident.activeRealSearchCount = 0;
+    batch.incidents[0].incident.escalationDeadlineAt = now;
+    batch.incidents[0].incident.attemptLedger =
+      typedAdapterReadyAttemptLedger();
+    batch.summary = {
+      ...batch.summary,
+      remediation: {
+        workMode: "ADVANCE_DISCOVERY",
+        strategyAction: "RUN_TYPED_ADAPTER",
+        playbookStage: "TYPED_ADAPTER",
+        allowUnchangedRuntime: true,
+        requiresImplementationPath: false,
+        reason: "PLAYBOOK_STAGE_PENDING",
+        retryBudget: null,
+        attempts: [
+          {
+            courseRef: createHash("sha256")
+              .update("course-1")
+              .digest("hex")
+              .slice(0, 24),
+            providerSnapshotFingerprint: providerFingerprint,
+            failureFingerprint: exactFailureFingerprint,
+            runtimeVersion: releaseSha,
+            activeRealSearchCount: 0,
+            playbookEventCountAtClaim: 0,
+            reason: "PLAYBOOK_STAGE_PENDING",
+            retryBudget: null,
+            approach: {
+              workMode: "ADVANCE_DISCOVERY",
+              strategyAction: "RUN_TYPED_ADAPTER",
+              playbookStage: "TYPED_ADAPTER",
+              unexpectedKey: true,
+            },
+          },
+        ],
+      },
+    };
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    const requestUpdatedAt = new Date(now.getTime() - 20_000);
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([
+      detachedRequestState("STALE", {
+        id: "request-generic-pre-execution",
+        batchIncidentId: "entry-1",
+        releaseSha,
+        runtimeVersion: releaseSha,
+        revision: 2,
+        attemptCount: 1,
+        startedAt: new Date(now.getTime() - 30_000),
+        outcome: null,
+        failureClass: null,
+        evidence: null,
+        lastError: "pre_execution_stopped",
+        providerSnapshotFingerprint: providerFingerprint,
+        nextAttemptAt: null,
+        completedAt: requestUpdatedAt,
+        createdAt: new Date(now.getTime() - 120_000),
+        updatedAt: requestUpdatedAt,
+      }),
+    ]);
+    prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.transaction.mockImplementationOnce(
+      async (
+        worker: (
+          transaction: typeof monitoringTransactionClient,
+        ) => Promise<unknown>,
+      ) => worker(monitoringTransactionClient),
+    );
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        verificationWatchMode: "ENDPOINT",
+        failureDomain: "SLA",
+        now,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "needs_human",
+      durableCloseoutRecorded: true,
+      needsHumanCount: 1,
+      automationStalledCount: 1,
+    });
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "NEEDS_HUMAN",
+          humanReviewReason: "AUTOMATION_STALLED",
+          nextAttemptAt: null,
+        }),
+      }),
+    );
   });
 
   it("continues the next safe playbook stage after the verification endpoint", async () => {

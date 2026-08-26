@@ -3,10 +3,12 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import {
+  areCourseSupportCompletedAttemptsOrchestrationOnly,
   assessCourseSupportZeroExecutionHistory,
   buildCourseSupportExecutionEverSummary,
   countCourseSupportCompletedOrchestrationOnlyAttempts,
   getCourseSupportOrchestrationRetrySchedule,
+  isCourseSupportAssignedAdapterOrchestrationMiss,
   readCourseSupportReleaseExecutionEvidence,
   type CourseSupportZeroExecutionBatchEvidence,
 } from "./course-support-zero-execution";
@@ -467,6 +469,165 @@ describe("course-support zero-execution history", () => {
       attemptNumber: 3,
       delayMs: 60 * 60 * 1000,
     });
+  });
+
+  it("counts an assigned adapter request that never reached provider execution as orchestration-only", () => {
+    const summary = {
+      closeout: {
+        remediationAttempts: [
+          {
+            courseRef,
+            consumed: false,
+            countsTowardOperationalNoProgress: false,
+            approach: {
+              workMode: "VERIFY_TRANSIENT",
+              strategyAction: "RUN_TYPED_ADAPTER",
+              playbookStage: "TYPED_ADAPTER",
+            },
+            executionEvidence: {
+              claimedImplementationPaths: false,
+              newReleaseRecorded: false,
+              deploymentRecorded: false,
+              postProbeRecorded: false,
+              providerAttemptRecorded: false,
+              providerExecutionAttemptRecorded: false,
+              playbookAttemptRecorded: true,
+              terminalResultRecorded: false,
+              providerExecutionStarted: true,
+            },
+          },
+        ],
+      },
+    };
+
+    expect(
+      countCourseSupportCompletedOrchestrationOnlyAttempts({
+        courseId,
+        cycle: 4,
+        entries: [{ cycle: 4, batch: { summary } }],
+      }),
+    ).toBe(1);
+  });
+
+  it.each([
+    "TYPED_ADAPTER",
+    "HTTP_ADAPTER_RETRY",
+    "BROWSER_ADAPTER_RETRY",
+  ])("recognizes an exact zero-execution %s assignment", (playbookStage) => {
+    expect(
+      isCourseSupportAssignedAdapterOrchestrationMiss({
+        approach: {
+          workMode: "VERIFY_TRANSIENT",
+          strategyAction: "RUN_TYPED_ADAPTER",
+          playbookStage,
+        },
+        executionEvidence: {
+          claimedImplementationPaths: false,
+          newReleaseRecorded: false,
+          deploymentRecorded: false,
+          postProbeRecorded: false,
+          providerAttemptRecorded: false,
+          providerExecutionAttemptRecorded: false,
+          playbookAttemptRecorded: true,
+          terminalResultRecorded: false,
+          providerExecutionStarted: true,
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it.each([
+    {
+      label: "an extra approach key",
+      approachOverrides: { extra: true },
+      evidenceOverrides: {},
+    },
+    {
+      label: "an invalid work mode",
+      approachOverrides: { workMode: "WAIT_FOR_MATERIAL_CHANGE" },
+      evidenceOverrides: {},
+    },
+    {
+      label: "a different strategy action",
+      approachOverrides: { strategyAction: "RETRY_PROVIDER" },
+      evidenceOverrides: {},
+    },
+    {
+      label: "an extra evidence key",
+      approachOverrides: {},
+      evidenceOverrides: { extra: false },
+    },
+    {
+      label: "provider execution evidence",
+      approachOverrides: {},
+      evidenceOverrides: { providerExecutionAttemptRecorded: true },
+    },
+    {
+      label: "terminal evidence",
+      approachOverrides: {},
+      evidenceOverrides: { terminalResultRecorded: true },
+    },
+  ])("rejects $label", ({ approachOverrides, evidenceOverrides }) => {
+    expect(
+      isCourseSupportAssignedAdapterOrchestrationMiss({
+        approach: {
+          workMode: "VERIFY_TRANSIENT",
+          strategyAction: "RUN_TYPED_ADAPTER",
+          playbookStage: "TYPED_ADAPTER",
+          ...approachOverrides,
+        },
+        executionEvidence: {
+          claimedImplementationPaths: false,
+          newReleaseRecorded: false,
+          deploymentRecorded: false,
+          postProbeRecorded: false,
+          providerAttemptRecorded: false,
+          providerExecutionAttemptRecorded: false,
+          playbookAttemptRecorded: true,
+          terminalResultRecorded: false,
+          providerExecutionStarted: true,
+          ...evidenceOverrides,
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("does not let a later adapter miss erase prior same-cycle provider execution", () => {
+    const operationalSummary = {
+      closeout: {
+        remediationAttempts: [
+          {
+            courseRef,
+            consumed: true,
+            countsTowardOperationalNoProgress: true,
+            approach: {
+              workMode: "VERIFY_TRANSIENT",
+              strategyAction: "RUN_TYPED_ADAPTER",
+              playbookStage: "TYPED_ADAPTER",
+            },
+            executionEvidence: {
+              claimedImplementationPaths: false,
+              newReleaseRecorded: false,
+              deploymentRecorded: false,
+              postProbeRecorded: false,
+              providerAttemptRecorded: true,
+              providerExecutionAttemptRecorded: true,
+              playbookAttemptRecorded: true,
+              terminalResultRecorded: false,
+              providerExecutionStarted: true,
+            },
+          },
+        ],
+      },
+    };
+
+    expect(
+      areCourseSupportCompletedAttemptsOrchestrationOnly({
+        courseId,
+        cycle: 4,
+        entries: [{ cycle: 4, batch: { summary: operationalSummary } }],
+      }),
+    ).toBe(false);
   });
 
   it("backs orchestration retries off exponentially and caps them at six hours", () => {

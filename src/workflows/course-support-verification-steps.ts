@@ -1670,6 +1670,24 @@ async function executePlaybookAdapterStage(input: {
     failure = classifyProviderFailure({ error });
   }
 
+  if (!providerExecutionStarted) {
+    return {
+      outcome: "returned",
+      value: await failVerification({
+        input: input.input,
+        revision,
+        runtimeVersion: input.runtimeVersion,
+        failureClass: failure!.failureClass,
+        providerExecution: false,
+        httpStatus: failure!.httpStatus,
+        retryAfterSeconds: failure!.retryAfterSeconds,
+        message:
+          "Provider verification was deferred before provider execution could begin.",
+        retryAt: new Date(Date.now() + PLAYBOOK_RETRY_MS),
+      }),
+    };
+  }
+
   if (input.transitionMode === "REUSE_SUCCEEDED") {
     const failedAt = new Date();
     const retryAt =

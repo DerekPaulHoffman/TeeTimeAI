@@ -112,6 +112,7 @@ import {
   buildCourseSupportExecutionEverSummary,
   countCourseSupportCompletedOrchestrationOnlyAttempts,
   getCourseSupportOrchestrationRetrySchedule,
+  isCourseSupportAssignedAdapterOrchestrationMiss,
   isCourseSupportVerificationRequestUnstarted,
   readCourseSupportReleaseExecutionEvidence,
 } from "./course-support-zero-execution";
@@ -6652,12 +6653,14 @@ export async function verifyCourseSupportBatch(input: {
   } | null = null;
   if (releaseSha && deployedAt && recheckBatchIncidentIds.length > 0) {
     try {
-      const scheduled = await scheduleCourseSupportVerificationRequests({
-        batchId: batch.id,
-        releaseSha,
-        batchIncidentIds: recheckBatchIncidentIds,
-        now,
-      });
+      const scheduled = await withCourseSupportWriteConflictRetry(() =>
+        scheduleCourseSupportVerificationRequests({
+          batchId: batch.id,
+          releaseSha,
+          batchIncidentIds: recheckBatchIncidentIds,
+          now,
+        }),
+      );
       detachedDispatch = {
         attempted: true,
         eligibleCount: scheduled.eligibleCount,
@@ -7733,13 +7736,20 @@ function readExactCourseSupportDecisionExecutionEvidence(
   if (!exact) {
     return null;
   }
-  const consumed =
-    exact.deploymentRecorded ||
-    exact.providerAttemptRecorded ||
-    exact.playbookAttemptRecorded ||
-    exact.terminalResultRecorded;
-  const countsTowardOperationalNoProgress =
-    consumed || exact.providerExecutionAttemptRecorded;
+  const assignedAdapterOrchestrationMiss =
+    isCourseSupportAssignedAdapterOrchestrationMiss({
+      approach: attempt.closeout.approach,
+      executionEvidence: exact,
+    });
+  const consumed = assignedAdapterOrchestrationMiss
+    ? false
+    : exact.deploymentRecorded ||
+      exact.providerAttemptRecorded ||
+      exact.playbookAttemptRecorded ||
+      exact.terminalResultRecorded;
+  const countsTowardOperationalNoProgress = assignedAdapterOrchestrationMiss
+    ? false
+    : consumed || exact.providerExecutionAttemptRecorded;
   if (
     attempt.closeout.consumed !== consumed ||
     attempt.closeout.countsTowardOperationalNoProgress !== countsTowardOperationalNoProgress ||
@@ -9448,14 +9458,38 @@ async function closeoutCourseSupportBatchAttempt(
             ) ||
               isDurableTerminalProof(entry, batch))))),
     );
-    const consumed =
-      deploymentRecorded ||
-      providerAttemptRecorded ||
-      playbookAttemptRecorded ||
-      terminalResultRecorded;
-    const countsTowardOperationalNoProgress = Boolean(
-      consumed || providerExecutionAttemptRecorded,
+    const approach = parseCourseSupportRemediationApproach(
+      plannedAttempt.approach,
     );
+    const executionEvidence = {
+      claimedImplementationPaths,
+      newReleaseRecorded,
+      deploymentRecorded,
+      postProbeRecorded,
+      providerAttemptRecorded,
+      providerExecutionAttemptRecorded,
+      playbookAttemptRecorded,
+      terminalResultRecorded,
+      // Legacy persisted key: this is PRE_EXECUTION request attachment, not
+      // independently observed provider I/O.
+      providerExecutionStarted: verificationRequestStartedByBatchIncidentId.has(
+        entry.id,
+      ),
+    } satisfies CourseSupportDecisionExecutionEvidence;
+    const assignedAdapterOrchestrationMiss =
+      isCourseSupportAssignedAdapterOrchestrationMiss({
+        approach: plannedAttempt.approach,
+        executionEvidence,
+      });
+    const consumed = assignedAdapterOrchestrationMiss
+      ? false
+      : deploymentRecorded ||
+        providerAttemptRecorded ||
+        playbookAttemptRecorded ||
+        terminalResultRecorded;
+    const countsTowardOperationalNoProgress = assignedAdapterOrchestrationMiss
+      ? false
+      : Boolean(consumed || providerExecutionAttemptRecorded);
     const deferredFailureHandoff =
       deferredFailureHandoffByBatchIncidentId.get(entry.id);
     const persistedDeferredFailureHandoff = deferredFailureHandoff
@@ -9517,21 +9551,7 @@ async function closeoutCourseSupportBatchAttempt(
       activeRealSearchCount: entry.incident.activeRealSearchCount,
       consumed,
       countsTowardOperationalNoProgress,
-      executionEvidence: {
-        claimedImplementationPaths,
-        newReleaseRecorded,
-        deploymentRecorded,
-        postProbeRecorded,
-        providerAttemptRecorded,
-        providerExecutionAttemptRecorded,
-        playbookAttemptRecorded,
-        terminalResultRecorded,
-        // Legacy persisted key: this is PRE_EXECUTION request attachment, not
-        // independently observed provider I/O.
-        providerExecutionStarted: verificationRequestStartedByBatchIncidentId.has(
-          entry.id,
-        ),
-      },
+      executionEvidence,
       ...(persistedDeferredFailureHandoff
         ? {
             deferredFailureHandoff: persistedDeferredFailureHandoff,
@@ -9551,7 +9571,7 @@ async function closeoutCourseSupportBatchAttempt(
         : plannedRetryBudget.status === "NOT_APPLICABLE"
           ? { retryBudget: null }
           : {}),
-      approach: parseCourseSupportRemediationApproach(plannedAttempt.approach),
+      approach,
     } satisfies Prisma.InputJsonObject;
   });
   if (
@@ -9876,8 +9896,11 @@ async function closeoutCourseSupportBatchAttempt(
     );
     const currentCycleIsOrchestrationOnly = Boolean(
       remediationAttempt?.countsTowardOperationalNoProgress === false &&
-      assessAutomationPlaybook(entry.incident.attemptLedger, entry.cycle)
-        .completedStages.length === 0 &&
+      (currentPlaybookAssessment.completedStages.length === 0 ||
+        isCourseSupportAssignedAdapterOrchestrationMiss({
+          approach: remediationAttempt?.approach,
+          executionEvidence: remediationAttempt?.executionEvidence,
+        })) &&
       areCourseSupportCompletedAttemptsOrchestrationOnly({
         courseId: entry.courseId,
         cycle: entry.cycle,
@@ -11047,8 +11070,12 @@ async function closeoutCourseSupportBatchAttempt(
         const currentCycleIsOrchestrationOnly = Boolean(
           closeoutRemediationAttempt?.countsTowardOperationalNoProgress ===
             false &&
-          assessAutomationPlaybook(entry.incident.attemptLedger, entry.cycle)
-            .completedStages.length === 0 &&
+          (playbookAssessment.completedStages.length === 0 ||
+            isCourseSupportAssignedAdapterOrchestrationMiss({
+              approach: closeoutRemediationAttempt?.approach,
+              executionEvidence:
+                closeoutRemediationAttempt?.executionEvidence,
+            })) &&
           areCourseSupportCompletedAttemptsOrchestrationOnly({
             courseId: entry.courseId,
             cycle: entry.cycle,

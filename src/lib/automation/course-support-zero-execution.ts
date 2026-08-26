@@ -7,6 +7,7 @@ import type {
 } from "@prisma/client";
 
 import { stableCourseProviderExecutionEvidenceValue } from "./course-provider-execution-evidence";
+import { COURSE_SUPPORT_REMEDIATION_WORK_MODES } from "./course-support-remediation-routing";
 
 export type CourseSupportZeroExecutionRequestEvidence = {
   id: string;
@@ -274,6 +275,63 @@ export function buildCourseSupportExecutionEverSummary(
   };
 }
 
+const COURSE_SUPPORT_DECISION_EXECUTION_EVIDENCE_KEYS = [
+  "claimedImplementationPaths",
+  "newReleaseRecorded",
+  "deploymentRecorded",
+  "postProbeRecorded",
+  "providerAttemptRecorded",
+  "providerExecutionAttemptRecorded",
+  "playbookAttemptRecorded",
+  "terminalResultRecorded",
+  "providerExecutionStarted",
+] as const;
+const COURSE_SUPPORT_REMEDIATION_APPROACH_KEYS = [
+  "workMode",
+  "strategyAction",
+  "playbookStage",
+] as const;
+
+export function isCourseSupportAssignedAdapterOrchestrationMiss(input: {
+  approach: unknown;
+  executionEvidence: unknown;
+}) {
+  const approach = asRecord(input.approach);
+  const execution = asRecord(input.executionEvidence);
+  const approachKeys = Object.keys(approach);
+  const executionKeys = Object.keys(execution);
+  return Boolean(
+    approachKeys.length === COURSE_SUPPORT_REMEDIATION_APPROACH_KEYS.length &&
+      COURSE_SUPPORT_REMEDIATION_APPROACH_KEYS.every((key) =>
+        Object.prototype.hasOwnProperty.call(approach, key),
+      ) &&
+      typeof approach.workMode === "string" &&
+      approach.workMode !== "WAIT_FOR_MATERIAL_CHANGE" &&
+      COURSE_SUPPORT_REMEDIATION_WORK_MODES.includes(
+        approach.workMode as (typeof COURSE_SUPPORT_REMEDIATION_WORK_MODES)[number],
+      ) &&
+      approach.strategyAction === "RUN_TYPED_ADAPTER" &&
+      [
+        "TYPED_ADAPTER",
+        "HTTP_ADAPTER_RETRY",
+        "BROWSER_ADAPTER_RETRY",
+      ].includes(String(approach.playbookStage)) &&
+      executionKeys.length ===
+        COURSE_SUPPORT_DECISION_EXECUTION_EVIDENCE_KEYS.length &&
+      COURSE_SUPPORT_DECISION_EXECUTION_EVIDENCE_KEYS.every(
+        (key) => typeof execution[key] === "boolean",
+      ) &&
+      execution.claimedImplementationPaths === false &&
+      execution.newReleaseRecorded === false &&
+      execution.deploymentRecorded === false &&
+      execution.postProbeRecorded === false &&
+      execution.providerAttemptRecorded === false &&
+      execution.providerExecutionAttemptRecorded === false &&
+      execution.terminalResultRecorded === false &&
+      execution.providerExecutionStarted === true
+  );
+}
+
 export function isCourseSupportCompletedBatchOrchestrationOnly(input: {
   courseId: string;
   summary: unknown;
@@ -309,6 +367,14 @@ export function isCourseSupportCompletedBatchOrchestrationOnly(input: {
     return false;
   }
   const execution = asRecord(attempt.executionEvidence);
+  if (
+    isCourseSupportAssignedAdapterOrchestrationMiss({
+      approach: attempt.approach,
+      executionEvidence: execution,
+    })
+  ) {
+    return true;
+  }
   return ![
     "deploymentRecorded",
     "postProbeRecorded",
