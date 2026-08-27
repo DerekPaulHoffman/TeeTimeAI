@@ -6,8 +6,10 @@ import {
   generatedPrismaSetupRequiredResult,
   getResponderCheckoutRefreshPlan,
   inspectGeneratedPrismaClient,
+  inspectPlaywrightChromiumRuntime,
   isApprovedCourseSupportResponderBranch,
   launchFailureResult,
+  playwrightChromiumSetupRequiredResult,
   requiredCourseSupportIncidentScalarFields,
   responderChildLaunchOptions,
   responderInvocation,
@@ -296,5 +298,67 @@ describe("course support preflight generated Prisma parity", () => {
     });
     expect(JSON.stringify(setupRequired)).not.toContain("sensitive loader detail");
     expect(JSON.stringify(setupRequired)).not.toContain("private");
+  });
+});
+
+describe("course support preflight Playwright Chromium readiness", () => {
+  it("keeps a checkout eligible when its resolved Chromium executable exists", () => {
+    const result = inspectPlaywrightChromiumRuntime(
+      "C:\\prepared-responder",
+      () => ({ chromium: { executablePath: () => "C:\\browsers\\chromium.exe" } }),
+      () => true
+    );
+
+    expect(result).toEqual({ status: "current" });
+    expect(playwrightChromiumSetupRequiredResult(result)).toBeNull();
+  });
+
+  it("fails closed without exposing loader details when Playwright cannot be resolved", () => {
+    const result = inspectPlaywrightChromiumRuntime(
+      "C:\\private\\responder-checkout",
+      () => {
+        throw new Error("sensitive module resolution detail");
+      }
+    );
+    const setupRequired = playwrightChromiumSetupRequiredResult(result);
+
+    expect(setupRequired).toEqual({
+      outcome: "setup_required",
+      reason: "The responder checkout's Playwright runtime could not be loaded.",
+      failureClass: "PLAYWRIGHT_MODULE_UNAVAILABLE",
+      nextAction:
+        "Restore the responder checkout's installed dependencies, then rerun the preflight."
+    });
+    expect(JSON.stringify(setupRequired)).not.toContain("sensitive");
+    expect(JSON.stringify(setupRequired)).not.toContain("private");
+  });
+
+  it("fails closed without exposing the configured path when Chromium is missing", () => {
+    const result = inspectPlaywrightChromiumRuntime(
+      "C:\\prepared-responder",
+      () => ({ chromium: { executablePath: () => "C:\\private\\missing.exe" } }),
+      () => false
+    );
+    const setupRequired = playwrightChromiumSetupRequiredResult(result);
+
+    expect(setupRequired).toEqual({
+      outcome: "setup_required",
+      reason: "The responder checkout's configured Chromium executable is unavailable.",
+      failureClass: "PLAYWRIGHT_CHROMIUM_EXECUTABLE_UNAVAILABLE",
+      nextAction:
+        "Install the responder checkout's configured Playwright Chromium browser, then rerun the preflight."
+    });
+    expect(JSON.stringify(setupRequired)).not.toContain("missing.exe");
+    expect(JSON.stringify(setupRequired)).not.toContain("private");
+  });
+
+  it("treats an unusable Chromium runtime API as unavailable", () => {
+    expect(
+      inspectPlaywrightChromiumRuntime(
+        "C:\\prepared-responder",
+        () => ({ chromium: {} }),
+        () => true
+      )
+    ).toEqual({ status: "executable_unavailable" });
   });
 });

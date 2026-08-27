@@ -12,13 +12,17 @@ import {
 import { CourseSupportSearchExecutionFenceRetryError } from "@/lib/automation/course-support-search-execution-fence";
 
 describe("assertCourseSupportVerificationWatchFlags", () => {
-  it("requires the ownership-releasing closeout lane for every watch", () => {
-    expect(() =>
-      assertCourseSupportVerificationWatchFlags({ watch: true, closeout: false })
-    ).toThrow("verify --watch requires --closeout");
-    expect(() =>
-      assertCourseSupportVerificationWatchFlags({ watch: false, closeout: true })
-    ).toThrow("verify --closeout requires --watch");
+  it("requires the owner-bound watch and closeout lane for every persisted verification", () => {
+    for (const flags of [
+      { watch: false, closeout: false },
+      { watch: true, closeout: false },
+      { watch: false, closeout: true }
+    ]) {
+      expect(() => assertCourseSupportVerificationWatchFlags(flags)
+    ).toThrow(
+        "verify --watch --closeout"
+      );
+    }
     expect(() =>
       assertCourseSupportVerificationWatchFlags({ watch: true, closeout: true })
     ).not.toThrow();
@@ -48,6 +52,26 @@ describe("runCourseSupportVerificationPass", () => {
 
     expect(order).toEqual(["browser", "verify"]);
     expect(result.browserStages.persistedCount).toBe(1);
+  });
+
+  it("passes the ownership signal into batch verification", async () => {
+    const controller = new AbortController();
+    const verifyBatch = vi.fn(async (signal?: AbortSignal) => ({
+      signal,
+      detachedVerification: { rerunNeeded: false },
+    }));
+
+    const result = await runCourseSupportVerificationPass({
+      signal: controller.signal,
+      persistBrowserStages: async () => ({
+        eligibleCount: 0,
+        persistedCount: 0,
+      }),
+      verifyBatch,
+    });
+
+    expect(verifyBatch).toHaveBeenCalledWith(controller.signal);
+    expect(result.verification.signal).toBe(controller.signal);
   });
 });
 
@@ -736,6 +760,92 @@ describe("runWithBoundedCourseSupportHeartbeat", () => {
     await expect(running).rejects.toThrow(
       "renewal timed out; ownership is unconfirmed"
     );
+  });
+
+  it("aborts an in-flight operation when ownership renewal fails", async () => {
+    let intervalCallback: (() => void) | undefined;
+    let operationSignal: AbortSignal | undefined;
+    const ownershipFailure = new Error(
+      "Course-support operation heartbeat lost durable batch ownership."
+    );
+    const renew = vi
+      .fn<(signal: AbortSignal) => Promise<void>>()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(ownershipFailure);
+
+    const running = runWithBoundedCourseSupportHeartbeat({
+      renew,
+      operation: (signal) =>
+        new Promise<never>((_resolve, reject) => {
+          operationSignal = signal;
+          signal.addEventListener("abort", () => reject(signal.reason), {
+            once: true
+          });
+        }),
+      intervalMs: 1_000,
+      setIntervalTimer: (callback) => {
+        intervalCallback = callback;
+        return 1;
+      },
+      clearIntervalTimer: vi.fn()
+    });
+
+    await vi.waitFor(() => expect(operationSignal).toBeDefined());
+    intervalCallback?.();
+
+    await expect(running).rejects.toThrow(ownershipFailure.message);
+    expect(operationSignal?.aborted).toBe(true);
+    expect(operationSignal?.reason).toBe(ownershipFailure);
+  });
+
+  it("aborts the verification watch without closeout when ownership renewal fails", async () => {
+    let intervalCallback: (() => void) | undefined;
+    let passSignal: AbortSignal | undefined;
+    const ownershipFailure = new Error(
+      "Course-support operation heartbeat lost durable batch ownership."
+    );
+    const renew = vi
+      .fn<(signal: AbortSignal) => Promise<void>>()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(ownershipFailure);
+    const closeout = vi.fn();
+    const onStopped = vi.fn();
+    const pass = vi.fn(
+      (signal: AbortSignal) =>
+        new Promise<never>((_resolve, reject) => {
+          passSignal = signal;
+          signal.addEventListener("abort", () => reject(signal.reason), {
+            once: true
+          });
+        })
+    );
+
+    const running = runWithBoundedCourseSupportHeartbeat({
+      renew,
+      operation: (signal) =>
+        runCourseSupportVerificationWatch({
+          signal,
+          pass,
+          closeout,
+          onStopped,
+          maxMinutes: 1,
+          pollMs: 5_000
+        }),
+      intervalMs: 1_000,
+      setIntervalTimer: (callback) => {
+        intervalCallback = callback;
+        return 1;
+      },
+      clearIntervalTimer: vi.fn()
+    });
+
+    await vi.waitFor(() => expect(passSignal).toBeDefined());
+    intervalCallback?.();
+
+    await expect(running).rejects.toThrow(ownershipFailure.message);
+    expect(passSignal?.aborted).toBe(true);
+    expect(closeout).not.toHaveBeenCalled();
+    expect(onStopped).not.toHaveBeenCalled();
   });
 });
 

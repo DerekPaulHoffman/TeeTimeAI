@@ -266,6 +266,7 @@ function browserAdapterRetryReadyLedger(attempted = false) {
 function browserAdapterRetryHandoffRequest(input: {
   claimedStage: "RENDERED_BROWSER_DISCOVERY" | "BROWSER_ADAPTER_RETRY";
   runnableProvider: boolean;
+  discoveryRepair?: boolean;
 }) {
   const providerCourse = input.runnableProvider
     ? course({
@@ -286,6 +287,8 @@ function browserAdapterRetryHandoffRequest(input: {
   const baseRequest = request();
   const ownsBrowserAdapterRetry =
     input.claimedStage === "BROWSER_ADAPTER_RETRY";
+  const ownsDiscoveryRepair =
+    ownsBrowserAdapterRetry && input.discoveryRepair === true;
   return request({
     runtimeVersion: null,
     status: "QUEUED",
@@ -306,16 +309,22 @@ function browserAdapterRetryHandoffRequest(input: {
         summary: {
           remediation: {
             workMode: ownsBrowserAdapterRetry
-              ? "VERIFY_TRANSIENT"
+              ? ownsDiscoveryRepair
+                ? "ADVANCE_DISCOVERY"
+                : "VERIFY_TRANSIENT"
               : "ADVANCE_DISCOVERY",
             strategyAction: ownsBrowserAdapterRetry
-              ? "RUN_TYPED_ADAPTER"
+              ? ownsDiscoveryRepair
+                ? "REPAIR_PROVIDER_ADAPTER"
+                : "RUN_TYPED_ADAPTER"
               : "DISCOVER_WITH_BROWSER",
             playbookStage: input.claimedStage,
             allowUnchangedRuntime: true,
             requiresImplementationPath: false,
             reason: ownsBrowserAdapterRetry
-              ? "EXISTING_SUPPORT_READY"
+              ? ownsDiscoveryRepair
+                ? "PLAYBOOK_STAGE_PENDING"
+                : "EXISTING_SUPPORT_READY"
               : "PLAYBOOK_STAGE_PENDING",
             retryBudget: {
               maximumAttempts: 4,
@@ -2796,6 +2805,16 @@ describe("course-support verification execution fencing", () => {
       label: "an exact browser-retry claim on a non-runnable provider",
       claimedStage: "BROWSER_ADAPTER_RETRY" as const,
       runnableProvider: false,
+      discoveryRepair: false,
+      malformedDirective: false,
+      expectedClaimed: true,
+    },
+    {
+      label:
+        "an exact browser-retry discovery repair on a non-runnable provider",
+      claimedStage: "BROWSER_ADAPTER_RETRY" as const,
+      runnableProvider: false,
+      discoveryRepair: true,
       malformedDirective: false,
       expectedClaimed: true,
     },
@@ -2804,12 +2823,14 @@ describe("course-support verification execution fencing", () => {
     async ({
       claimedStage,
       runnableProvider,
+      discoveryRepair,
       malformedDirective,
       expectedClaimed,
     }) => {
       const queuedRequest = browserAdapterRetryHandoffRequest({
         claimedStage,
         runnableProvider,
+        discoveryRepair,
       });
       if (malformedDirective) {
         const summary = queuedRequest.batchIncident.batch.summary as {

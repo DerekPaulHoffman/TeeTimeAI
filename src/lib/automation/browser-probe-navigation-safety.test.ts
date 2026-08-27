@@ -4,9 +4,11 @@ import { describe, expect, it, vi } from "vitest";
 import {
   collectBrowserEvidence,
   collectStaticPageFrameCandidates,
+  getPersistableBrowserOperationFailure,
   isReadOnlyBrowserRequestMethod,
   isSafeRenderedBrowserInteractionDestination,
   retainOnlyPersistableBrowserUrls,
+  runPersistableBrowserOperation,
 } from "../../../scripts/automation/browser-probe-needed-adapters";
 import { buildBrowserDiscovery } from "./browser-discovery";
 
@@ -15,6 +17,124 @@ function managedProtectionHtml(reference: string, extra = "") {
 }
 
 describe("rendered browser navigation safety", () => {
+  it("surfaces a transient navigation failure instead of returning completable evidence", async () => {
+    const browser = await chromium.launch();
+    const context = await browser.newContext({ serviceWorkers: "block" });
+    try {
+      const page = await context.newPage();
+      const officialPageUrl = "https://network-failure-course.example/";
+      await context.route("https://network-failure-course.example/**", (route) =>
+        route.abort("internetdisconnected"),
+      );
+
+      let caught: unknown;
+      try {
+        await runPersistableBrowserOperation(() =>
+          collectBrowserEvidence(page, {
+            courseId: "network-failure-course",
+            courseName: "Network Failure Golf Course",
+            sourceUrl: officialPageUrl,
+            officialCourseWebsite: officialPageUrl,
+          }),
+        );
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(getPersistableBrowserOperationFailure(caught)).toBe("NETWORK");
+    } finally {
+      await context.close();
+      await browser.close();
+    }
+  }, 30_000);
+
+  it("surfaces evidence-collection programming errors without tagging or completing them", async () => {
+    const browser = await chromium.launch();
+    const context = await browser.newContext({ serviceWorkers: "block" });
+    try {
+      const page = await context.newPage();
+      const officialPageUrl = "https://programming-failure-course.example/";
+      const programmingError = new SyntaxError("Unexpected string");
+      await context.route("https://programming-failure-course.example/**", (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "text/html",
+          body: "<html><title>Programming Failure Golf Course</title><body><h1>Programming Failure Golf Course</h1></body></html>",
+        }),
+      );
+      vi.spyOn(page.request, "get").mockResolvedValue({
+        ok: () => false,
+      } as APIResponse);
+      vi.spyOn(page, "evaluate").mockRejectedValueOnce(programmingError);
+
+      let caught: unknown;
+      try {
+        await runPersistableBrowserOperation(() =>
+          collectBrowserEvidence(page, {
+            courseId: "programming-failure-course",
+            courseName: "Programming Failure Golf Course",
+            sourceUrl: officialPageUrl,
+            officialCourseWebsite: officialPageUrl,
+          }),
+        );
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBe(programmingError);
+      expect(getPersistableBrowserOperationFailure(caught)).toBeNull();
+    } finally {
+      await context.close();
+      await browser.close();
+    }
+  }, 30_000);
+
+  it("keeps usable partial evidence after a Playwright navigation timeout", async () => {
+    const browser = await chromium.launch();
+    const context = await browser.newContext({ serviceWorkers: "block" });
+    try {
+      const page = await context.newPage();
+      const officialPageUrl = "https://partial-timeout-course.example/";
+      await context.route("https://partial-timeout-course.example/**", (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "text/html",
+          body: "<html><title>Partial Timeout Golf Course</title><body><h1>Partial Timeout Golf Course</h1></body></html>",
+        }),
+      );
+      vi.spyOn(page.request, "get").mockResolvedValue({
+        ok: () => false,
+      } as APIResponse);
+      await page.goto(officialPageUrl, { waitUntil: "domcontentloaded" });
+      const timeoutError = Object.assign(
+        new Error("page.goto: Timeout 20000ms exceeded."),
+        {
+          name: "TimeoutError",
+          stack:
+            "TimeoutError: page.goto: Timeout 20000ms exceeded.\n    at node_modules/playwright-core/lib/client/frame.js:1:1",
+        },
+      );
+      vi.spyOn(page, "goto").mockRejectedValueOnce(timeoutError);
+
+      const evidence = await runPersistableBrowserOperation(() =>
+        collectBrowserEvidence(page, {
+          courseId: "partial-timeout-course",
+          courseName: "Partial Timeout Golf Course",
+          sourceUrl: officialPageUrl,
+          officialCourseWebsite: officialPageUrl,
+        }),
+      );
+
+      expect(evidence.browserInvestigation.sameOriginPages).toHaveLength(1);
+      expect(evidence.browserInvestigation.sameOriginPages[0]?.finalUrl).toBe(
+        officialPageUrl,
+      );
+    } finally {
+      await context.close();
+      await browser.close();
+    }
+  }, 30_000);
+
   it("allows only read-only HTTP methods", () => {
     expect(isReadOnlyBrowserRequestMethod("GET")).toBe(true);
     expect(isReadOnlyBrowserRequestMethod("head")).toBe(true);

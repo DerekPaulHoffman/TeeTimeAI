@@ -115,6 +115,44 @@ describe("course-support remediation routing", () => {
     },
   );
 
+  it("recognizes an exact pending browser-adapter repair as detached progression", () => {
+    expect(
+      isAssignedDetachedStageProgression({
+        remediationDirective: {
+          workMode: "ADVANCE_DISCOVERY",
+          strategyAction: "REPAIR_PROVIDER_ADAPTER",
+          playbookStage: "BROWSER_ADAPTER_RETRY",
+          allowUnchangedRuntime: true,
+          requiresImplementationPath: false,
+          retryBudget: null,
+        },
+        playbookConclusion: "INCOMPLETE",
+        nextPlaybookStage: "BROWSER_ADAPTER_RETRY",
+        nextPlaybookStageStatus: "PENDING",
+        nextPlaybookStageAttemptCount: 0,
+      }),
+    ).toBe(true);
+  });
+
+  it("does not reinterpret a browser-adapter implementation assignment as detached progression", () => {
+    expect(
+      isAssignedDetachedStageProgression({
+        remediationDirective: {
+          workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+          strategyAction: "REPAIR_PROVIDER_ADAPTER",
+          playbookStage: "BROWSER_ADAPTER_RETRY",
+          allowUnchangedRuntime: false,
+          requiresImplementationPath: true,
+          retryBudget: null,
+        },
+        playbookConclusion: "INCOMPLETE",
+        nextPlaybookStage: "BROWSER_ADAPTER_RETRY",
+        nextPlaybookStageStatus: "PENDING",
+        nextPlaybookStageAttemptCount: 0,
+      }),
+    ).toBe(false);
+  });
+
   it("permits only a finite unchanged-runtime budget for transient failures", () => {
     const available = routeCourseSupportRemediation({
       ...runnableCourse,
@@ -191,6 +229,44 @@ describe("course-support remediation routing", () => {
       retryBudget: null,
       reason: "PLAYBOOK_STAGE_PENDING",
     });
+  });
+
+  it("keeps a non-runnable TenFore browser-adapter retry on the detached repair route", () => {
+    const result = routeCourseSupportRemediation({
+      ...runnableCourse,
+      detectedPlatform: "CUSTOM",
+      providerFamilyKey: "TENFORE",
+      detectedBookingUrl: "https://fox.tenfore.golf/example",
+      bookingMetadata: null,
+      failureClass: "UNSUPPORTED_FAMILY",
+      attemptCount: 1,
+      playbookAssessment: incompletePlaybook("BROWSER_ADAPTER_RETRY"),
+    });
+
+    expect(result).toMatchObject({
+      workMode: "ADVANCE_DISCOVERY",
+      allowUnchangedRuntime: true,
+      requiresImplementationPath: false,
+      reason: "PLAYBOOK_STAGE_PENDING",
+      strategy: { action: "REPAIR_PROVIDER_ADAPTER" },
+      attemptSignature: { playbookStage: "BROWSER_ADAPTER_RETRY" },
+    });
+    expect(
+      isAssignedDetachedStageProgression({
+        remediationDirective: {
+          workMode: result.workMode,
+          strategyAction: result.strategy.action,
+          playbookStage: result.attemptSignature?.playbookStage,
+          allowUnchangedRuntime: result.allowUnchangedRuntime,
+          requiresImplementationPath: result.requiresImplementationPath,
+          retryBudget: result.retryBudget,
+        },
+        playbookConclusion: "INCOMPLETE",
+        nextPlaybookStage: "BROWSER_ADAPTER_RETRY",
+        nextPlaybookStageStatus: "PENDING",
+        nextPlaybookStageAttemptCount: 0,
+      }),
+    ).toBe(true);
   });
 
   it("advances one current discovery stage without calling it a transient retry", () => {

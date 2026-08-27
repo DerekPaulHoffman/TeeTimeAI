@@ -171,8 +171,10 @@ export async function enqueueRemediatedCourseRechecks(
   courseIds: string[],
   dependencies: RemediatedCourseRecheckDependencies =
     defaultRemediatedCourseRecheckDependencies,
-  remediationDispatchKey?: string
+  remediationDispatchKey?: string,
+  signal?: AbortSignal
 ) {
+  signal?.throwIfAborted();
   const uniqueCourseIds = [...new Set(courseIds.filter(Boolean))];
   if (uniqueCourseIds.length === 0) {
     return {
@@ -193,6 +195,7 @@ export async function enqueueRemediatedCourseRechecks(
   }
 
   const searchIds = [...new Set(await dependencies.listSearchIds(uniqueCourseIds))];
+  signal?.throwIfAborted();
   let queuedCount = 0;
   let queueFailureCount = 0;
   const directStartCount = 0;
@@ -206,11 +209,13 @@ export async function enqueueRemediatedCourseRechecks(
     scheduleVersion: number | null;
   }> = [];
   for (const searchId of searchIds) {
+    signal?.throwIfAborted();
     const searchRef = buildSearchScheduleReference(searchId);
     let queued: { scheduleVersion: number };
     try {
       queued = await dependencies.queueSearch(searchId, remediationDispatchKey);
     } catch {
+      signal?.throwIfAborted();
       queueFailureCount += 1;
       affectedSearchRefs.push({ searchRef, scheduleVersion: null });
       continue;
@@ -225,6 +230,7 @@ export async function enqueueRemediatedCourseRechecks(
       scheduleVersion: queued.scheduleVersion
     });
     try {
+      signal?.throwIfAborted();
       const request = {
         searchId,
         scheduleVersion: queued.scheduleVersion,
@@ -235,13 +241,16 @@ export async function enqueueRemediatedCourseRechecks(
       } else {
         await dependencies.enqueue(request);
       }
+      signal?.throwIfAborted();
       queuedCount += 1;
     } catch {
+      signal?.throwIfAborted();
       queueFailureCount += 1;
       // The persisted QUEUED row remains eligible for deployed schedule recovery.
     }
   }
 
+  signal?.throwIfAborted();
   return {
     affectedSearchCount: searchIds.length,
     queuedCount,

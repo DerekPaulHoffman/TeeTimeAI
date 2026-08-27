@@ -90,7 +90,201 @@ export type BrowserProbeOptions = ReturnType<typeof parseOptions> & {
   deferTerminalCloseout?: boolean;
   persistSearchProbe?: boolean;
   mode?: BrowserInvestigationMode;
+  signal?: AbortSignal;
 };
+
+export type PersistableBrowserStageFailure = "TIMEOUT" | "NETWORK";
+
+const TRANSIENT_NETWORK_ERROR_CODES = new Set([
+  "ECONNABORTED",
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ETIMEDOUT",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET"
+]);
+const PLAYWRIGHT_OPERATION_PREFIX =
+  /\b(?:page|frame|locator|browser|browserContext|request|apiRequestContext)\.[A-Za-z]+\s*:/u;
+const PLAYWRIGHT_RUNTIME_STACK = /[/\\](?:playwright|playwright-core)[/\\]/iu;
+const PLAYWRIGHT_NETWORK_FAILURE =
+  /(?:net::ERR_[A-Z_]+|ECONN(?:ABORTED|REFUSED|RESET)|EHOSTUNREACH|ENETUNREACH|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|navigation (?:failed|interrupted)|target page, context or browser has been closed|browser has been closed|socket hang up)/iu;
+
+/**
+ * Browser-stage progress may be recorded only for an identified transient
+ * browser/network failure. Programming, ownership, persistence, invariant,
+ * and otherwise unknown errors must escape to the verification watch.
+ */
+export function classifyPersistableBrowserStageFailure(
+  error: unknown,
+  browserOperationActive = true
+): PersistableBrowserStageFailure | null {
+  if (!browserOperationActive || !(error instanceof Error)) {
+    return null;
+  }
+  if (
+    error instanceof SyntaxError ||
+    error instanceof RangeError ||
+    error instanceof ReferenceError ||
+    error instanceof EvalError ||
+    error instanceof URIError
+  ) {
+    return null;
+  }
+  const details = `${error.name}: ${error.message}\n${error.stack ?? ""}`;
+  const cause = (error as Error & { cause?: unknown }).cause;
+  const networkCode =
+    cause && typeof cause === "object" && "code" in cause
+      ? String((cause as { code?: unknown }).code ?? "")
+      : "code" in error
+        ? String((error as Error & { code?: unknown }).code ?? "")
+        : "";
+  if (TRANSIENT_NETWORK_ERROR_CODES.has(networkCode)) {
+    return networkCode === "ETIMEDOUT" || networkCode.endsWith("TIMEOUT") ? "TIMEOUT" : "NETWORK";
+  }
+  const isRecognizedPlaywrightFailure =
+    PLAYWRIGHT_OPERATION_PREFIX.test(details) || PLAYWRIGHT_RUNTIME_STACK.test(error.stack ?? "");
+  if (!isRecognizedPlaywrightFailure) {
+    return null;
+  }
+  if (error.name === "TimeoutError" && /tim(?:e|ed) ?out/iu.test(details)) {
+    return "TIMEOUT";
+  }
+  return PLAYWRIGHT_NETWORK_FAILURE.test(details) ? "NETWORK" : null;
+}
+
+class PersistableBrowserOperationError extends Error {
+  constructor(
+    readonly failureClass: PersistableBrowserStageFailure,
+    cause: Error
+  ) {
+    super(cause.message, { cause });
+    this.name = "PersistableBrowserOperationError";
+  }
+}
+
+/**
+ * Tag only failures thrown by the actual browser or browser-originated network
+ * operation. Lease acquisition, heartbeat, release, and persistence errors
+ * stay untagged even when they carry the same transient network error codes.
+ */
+export async function runPersistableBrowserOperation<T>(operation: () => Promise<T>) {
+  try {
+    return await operation();
+  } catch (error) {
+    const failureClass = classifyPersistableBrowserStageFailure(error);
+    if (!failureClass || !(error instanceof Error)) {
+      throw error;
+    }
+    throw new PersistableBrowserOperationError(failureClass, error);
+  }
+}
+
+export function getPersistableBrowserOperationFailure(
+  error: unknown
+): PersistableBrowserStageFailure | null {
+  return error instanceof PersistableBrowserOperationError ? error.failureClass : null;
+}
+
+export function throwIfBrowserProbeAborted(signal?: AbortSignal) {
+  signal?.throwIfAborted();
+}
+
+export async function runAbortAwareBrowserOperation<T>(
+  operation: () => Promise<T>,
+  signal?: AbortSignal
+) {
+  throwIfBrowserProbeAborted(signal);
+  const operationResult = Promise.resolve().then(operation);
+  if (!signal) {
+    return operationResult;
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    operationResult.then(
+      (result) => {
+        signal.removeEventListener("abort", onAbort);
+        if (signal.aborted) {
+          reject(signal.reason);
+        } else {
+          resolve(result);
+        }
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      }
+    );
+  });
+}
+
+export function createBrowserProbeResourceCloser(
+  resource: {
+    close: () => Promise<unknown>;
+  },
+  options: { suppressErrors?: boolean } = {}
+) {
+  let closePromise: Promise<void> | null = null;
+  return () => {
+    closePromise ??= Promise.resolve()
+      .then(() => resource.close())
+      .then(
+        () => undefined,
+        (error) => {
+          if (!options.suppressErrors) {
+            throw error;
+          }
+        }
+      );
+    return closePromise;
+  };
+}
+
+export function closeBrowserProbeResourceOnAbort(
+  signal: AbortSignal | undefined,
+  close: () => Promise<void>
+) {
+  if (!signal) return () => undefined;
+  const onAbort = () => {
+    void close().catch(() => undefined);
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+  if (signal.aborted) onAbort();
+  return () => signal.removeEventListener("abort", onAbort);
+}
+
+export async function finishBrowserProbeAutomationRunAfterFailure(
+  input: {
+    runId: string;
+    error: unknown;
+    signal?: AbortSignal;
+  },
+  finish: typeof finishAutomationRun = finishAutomationRun
+) {
+  const ownershipCancelled = input.signal?.aborted === true;
+  const error = input.error instanceof Error ? input.error : null;
+  return finish(input.runId, {
+    outcome: "failed",
+    errors: ownershipCancelled
+      ? {
+          name: "AbortError",
+          message: "Browser probe stopped after responder ownership cancellation."
+        }
+      : error
+        ? { name: error.name, message: error.message }
+        : { message: "Unknown browser probe failure" },
+    notes: ownershipCancelled
+      ? "Browser probe stopped after responder ownership cancellation; no course or playbook writes were permitted after cancellation."
+      : error
+        ? (error.stack ?? error.message)
+        : "Unknown browser probe failure"
+  });
+}
 
 export async function recordOwnedBrowserStageAfterCourseProjection<T>(input: {
   courseProjectionApplied: boolean;
@@ -105,6 +299,7 @@ export async function recordOwnedBrowserStageAfterCourseProjection<T>(input: {
 }
 
 export async function runBrowserProbe(options: BrowserProbeOptions) {
+  throwIfBrowserProbeAborted(options.signal);
   if (
     !options.dryRun &&
     (!options.persistenceFence ||
@@ -128,6 +323,7 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
   let persistedCount = 0;
 
   try {
+    throwIfBrowserProbeAborted(options.signal);
     const selection = resolveBrowserProbeTargetSelection(options);
     const targets = await listBrowserProbeTargets(
       selection.limit,
@@ -142,34 +338,55 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
         throw new Error("The requested browser-probe course was not eligible.");
       }
       if (run) {
+        throwIfBrowserProbeAborted(options.signal);
         await finishAutomationRun(run.id, {
           outcome: "no_op",
           notes: notes.join("\n"),
         });
+        throwIfBrowserProbeAborted(options.signal);
       }
       writeDryRunTrace(options, traces);
       return { targetCount: 0, persistedCount: 0 };
     }
 
     const browser = await chromium.launch();
+    const closeBrowser = createBrowserProbeResourceCloser(browser);
+    const removeBrowserAbortCleanup = closeBrowserProbeResourceOnAbort(
+      options.signal,
+      closeBrowser
+    );
     try {
+      throwIfBrowserProbeAborted(options.signal);
       for (const target of targets) {
         const context = await browser.newContext({ serviceWorkers: "block" });
-        const page = await context.newPage();
+        const closeContext = createBrowserProbeResourceCloser(context, {
+          suppressErrors: true
+        });
+        const removeContextAbortCleanup = closeBrowserProbeResourceOnAbort(
+          options.signal,
+          closeContext
+        );
         let playbookRuntime: Awaited<
           ReturnType<typeof loadCourseMonitoringPlaybookRuntime>
         > = null;
-        const persistBrowserMutation = <T>(
+        const persistBrowserMutation = async <T>(
           requireCurrentStage: boolean,
           mutate: () => Promise<T>,
-        ) =>
-          runGuardedCourseSupportBrowserMutation({
+        ) => {
+          throwIfBrowserProbeAborted(options.signal);
+          const result = await runGuardedCourseSupportBrowserMutation({
             courseId: target.course.id,
             requireCurrentStage,
             beforePersist: options.beforePersist,
             mutate,
           });
+          throwIfBrowserProbeAborted(options.signal);
+          return result;
+        };
         try {
+          throwIfBrowserProbeAborted(options.signal);
+          const page = await runPersistableBrowserOperation(() => context.newPage());
+          throwIfBrowserProbeAborted(options.signal);
           playbookRuntime = options.dryRun
             ? null
             : await loadCourseMonitoringPlaybookRuntime(target.course.id);
@@ -249,31 +466,34 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
           const providerExecution = await runWithProviderRequestLease(
             providerFamilyKey,
             () =>
-              collectBrowserEvidence(
-                page,
-                {
-                  courseId: target.course.id,
-                  courseName: target.course.name,
-                  address: target.course.address,
-                  city: target.course.city,
-                  stateCode: target.course.stateCode,
-                  googlePlaceIdPresent: target.course.googlePlaceIdPresent,
-                  sourceUrl: target.probeUrl,
-                  officialCourseWebsite: target.course.website,
-                  verifiedLayoutHoleCounts:
-                    target.course.verifiedLayoutHoleCounts,
-                },
-                {
-                  mode: investigationMode,
-                  retainedBookingUrl: target.course.detectedBookingUrl,
-                  unprojectedSourceCandidate:
-                    target.unprojectedSourceCandidate === true,
-                  auditContext: {
-                    incidentCycle: options.persistenceFence?.cycle ?? null,
-                    runtimeVersion,
-                    observedAt: investigationObservedAt,
+              runPersistableBrowserOperation(() =>
+                collectBrowserEvidence(
+                  page,
+                  {
+                    courseId: target.course.id,
+                    courseName: target.course.name,
+                    address: target.course.address,
+                    city: target.course.city,
+                    stateCode: target.course.stateCode,
+                    googlePlaceIdPresent: target.course.googlePlaceIdPresent,
+                    sourceUrl: target.probeUrl,
+                    officialCourseWebsite: target.course.website,
+                    verifiedLayoutHoleCounts:
+                      target.course.verifiedLayoutHoleCounts,
                   },
-                },
+                  {
+                    mode: investigationMode,
+                    retainedBookingUrl: target.course.detectedBookingUrl,
+                    unprojectedSourceCandidate:
+                      target.unprojectedSourceCandidate === true,
+                    auditContext: {
+                      incidentCycle: options.persistenceFence?.cycle ?? null,
+                      runtimeVersion,
+                      observedAt: investigationObservedAt,
+                    },
+                    signal: options.signal,
+                  },
+                ),
               ),
           );
           if (!providerExecution.acquired) {
@@ -302,7 +522,10 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
           const enrichment = await enrichBrowserDiscoveryWithProviderLease(
             initialDiscovery,
             target.course.name,
-            runWithProviderRequestLease,
+            (enrichmentProviderFamilyKey, worker) =>
+              runWithProviderRequestLease(enrichmentProviderFamilyKey, () =>
+                runPersistableBrowserOperation(worker)
+              )
           );
           if (!enrichment.acquired) {
             if (options.dryRun) {
@@ -344,8 +567,7 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
           let appliedCourse: Awaited<
             ReturnType<typeof applyBrowserDiscoveryToCourse>
           >;
-          let expectedTransitionProviderSnapshotFingerprint:
-            | string
+          let expectedTransitionProviderSnapshotFingerprint: string
             | undefined;
           if (options.persistenceFence) {
             const persisted = await persistBrowserMutation(true, () =>
@@ -458,6 +680,11 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
             `${target.course.name}: ${actionableDiscovery.status} ${actionableDiscovery.detectedPlatform} confidence=${actionableDiscovery.confidence}`,
           );
         } catch (error) {
+          throwIfBrowserProbeAborted(options.signal);
+          const failureClass = getPersistableBrowserOperationFailure(error);
+          if (!failureClass) {
+            throw error;
+          }
           if (!options.dryRun) {
             playbookRuntime ??= await loadCourseMonitoringPlaybookRuntime(
               target.course.id,
@@ -485,10 +712,7 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
                         ? "RENDERED_BROWSER"
                         : "INDEPENDENT_CONFIRMATION",
                     evidenceKind: "TOOLING",
-                    failureClass:
-                      error instanceof Error && error.name === "TimeoutError"
-                        ? "TIMEOUT"
-                        : "NETWORK",
+                    failureClass,
                     runtimeVersion,
                     source: "COURSE_SUPPORT_RESPONDER",
                   },
@@ -507,11 +731,13 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
             throw error;
           }
         } finally {
-          await context.close().catch(() => undefined);
+          removeContextAbortCleanup();
+          await closeContext();
         }
       }
     } finally {
-      await browser.close();
+      removeBrowserAbortCleanup();
+      await closeBrowser();
     }
 
     if (options.dryRun) {
@@ -521,10 +747,12 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
       );
       writeDryRunTrace(options, traces);
     } else {
+      throwIfBrowserProbeAborted(options.signal);
       await finishAutomationRun(run!.id, {
         outcome: "success",
         notes: notes.join("\n"),
       });
+      throwIfBrowserProbeAborted(options.signal);
     }
     return {
       targetCount: targets.length,
@@ -532,16 +760,10 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
     };
   } catch (error) {
     if (run) {
-      await finishAutomationRun(run.id, {
-        outcome: "failed",
-        errors:
-          error instanceof Error
-            ? { name: error.name, message: error.message }
-            : { message: "Unknown browser probe failure" },
-        notes:
-          error instanceof Error
-            ? (error.stack ?? error.message)
-            : "Unknown browser probe failure",
+      await finishBrowserProbeAutomationRunAfterFailure({
+        runId: run.id,
+        error,
+        signal: options.signal
       });
     }
     throw error;
@@ -609,8 +831,7 @@ export function resolveBrowserProbeTargetSelection(
 }
 
 export function getFreshRenderedCorroborationEvidence(
-  discovery:
-    | { createdAt: Date; evidence: unknown }
+  discovery: { createdAt: Date; evidence: unknown }
     | null
     | undefined,
   context: {
@@ -1094,7 +1315,7 @@ export async function collectBrowserEvidence(
   page: Page,
   input: Pick<
     BrowserDiscoveryEvidence,
-    | "courseId"
+    "courseId"
     | "courseName"
     | "sourceUrl"
     | "officialCourseWebsite"
@@ -1109,6 +1330,7 @@ export async function collectBrowserEvidence(
     mode?: BrowserInvestigationMode;
     retainedBookingUrl?: string | null;
     unprojectedSourceCandidate?: boolean;
+    signal?: AbortSignal;
     auditContext?: {
       incidentCycle: number | null;
       runtimeVersion: string;
@@ -1116,6 +1338,7 @@ export async function collectBrowserEvidence(
     };
   } = {},
 ): Promise<BrowserInvestigationEvidence> {
+  throwIfBrowserProbeAborted(options.signal);
   const mode = options.mode ?? "RENDERED";
   const officialPageUrl = input.officialCourseWebsite ?? input.sourceUrl;
   const pageVisits: BrowserInvestigationPageVisit[] = [];
@@ -1255,15 +1478,22 @@ export async function collectBrowserEvidence(
       bookingDestinations.length < MAX_BROWSER_BOOKING_DESTINATION_VISITS
     ) {
       const candidate = bookingQueue.shift()!;
+      throwIfBrowserProbeAborted(options.signal);
       const destinationPage = await createAdditionalInvestigationPage(page);
       try {
+        throwIfBrowserProbeAborted(options.signal);
         bookingDestinations.push(
-          await visitBookingDestination(destinationPage, {
-            ...candidate,
-            officialPageUrl,
-            courseName: input.courseName,
-          }),
+          await visitBookingDestination(
+            destinationPage,
+            {
+              ...candidate,
+              officialPageUrl,
+              courseName: input.courseName,
+            },
+            options.signal,
+          ),
         );
+        throwIfBrowserProbeAborted(options.signal);
       } finally {
         if (destinationPage !== page) {
           await destinationPage.close().catch(() => undefined);
@@ -1284,6 +1514,7 @@ export async function collectBrowserEvidence(
     bookingDestinations.length < MAX_BROWSER_BOOKING_DESTINATION_VISITS
   ) {
     const candidate = sameOriginQueue.shift()!;
+    throwIfBrowserProbeAborted(options.signal);
     if (visitedSameOriginUrls.has(candidate.url)) {
       continue;
     }
@@ -1294,15 +1525,21 @@ export async function collectBrowserEvidence(
       : await createAdditionalInvestigationPage(page);
     rootPageUsed = true;
     try {
-      const visit = await visitOfficialPage(visitPage, {
-        requestedUrl: candidate.url,
-        label: candidate.label,
-        depth: candidate.depth,
-        parentUrl: candidate.parentUrl,
-        officialPageUrl,
-        courseName: input.courseName,
-        requiresDirectIdentityMatch: candidate.requiresDirectIdentityMatch,
-      });
+      throwIfBrowserProbeAborted(options.signal);
+      const visit = await visitOfficialPage(
+        visitPage,
+        {
+          requestedUrl: candidate.url,
+          label: candidate.label,
+          depth: candidate.depth,
+          parentUrl: candidate.parentUrl,
+          officialPageUrl,
+          courseName: input.courseName,
+          requiresDirectIdentityMatch: candidate.requiresDirectIdentityMatch,
+        },
+        options.signal,
+      );
+      throwIfBrowserProbeAborted(options.signal);
       const identityStatus = classifyRenderedOfficialPageCourseIdentity(
         visit.finalUrl,
         visit.evidence,
@@ -1395,6 +1632,7 @@ export async function collectBrowserEvidence(
   }
 
   await visitQueuedBookingDestinations();
+  throwIfBrowserProbeAborted(options.signal);
 
   return finalizeBrowserInvestigationEvidence({
     course: input,
@@ -1585,6 +1823,56 @@ async function materializeBrowserPageObservation(
   };
 }
 
+async function hasUsableRenderedBrowserDocument(
+  page: Page,
+  signal?: AbortSignal,
+) {
+  if (page.url() === "about:blank") {
+    return false;
+  }
+
+  try {
+    return await runAbortAwareBrowserOperation(
+      () =>
+        page.evaluate(() =>
+          Boolean(
+            document.title?.trim() ||
+              document.body?.innerText?.trim() ||
+              document.querySelector(
+                "a[href], button, iframe[src], script[src], [data-widget-config]",
+              ),
+          ),
+        ),
+      signal,
+    );
+  } catch {
+    throwIfBrowserProbeAborted(signal);
+    return false;
+  }
+}
+
+async function runBrowserNavigationOperation(
+  page: Page,
+  operation: () => Promise<unknown>,
+  signal?: AbortSignal,
+  tolerateExpectedBoundary: () => boolean = () => false,
+) {
+  try {
+    await runAbortAwareBrowserOperation(operation, signal);
+  } catch (error) {
+    throwIfBrowserProbeAborted(signal);
+    if (tolerateExpectedBoundary()) {
+      return;
+    }
+    const partialDocumentIsUsable =
+      classifyPersistableBrowserStageFailure(error) === "TIMEOUT" &&
+      (await hasUsableRenderedBrowserDocument(page, signal));
+    if (!partialDocumentIsUsable) {
+      throw error;
+    }
+  }
+}
+
 async function visitOfficialPage(
   page: Page,
   input: {
@@ -1596,7 +1884,9 @@ async function visitOfficialPage(
     courseName: string;
     requiresDirectIdentityMatch?: boolean;
   },
+  signal?: AbortSignal
 ): Promise<BrowserInvestigationPageVisit> {
+  throwIfBrowserProbeAborted(signal);
   const observation = observeBrowserPageNetwork(page, input.officialPageUrl);
   const interactionGuard = await createMainFrameInteractionGuard(
     page,
@@ -1608,20 +1898,34 @@ async function visitOfficialPage(
       },
     },
   );
-  await page
-    .goto(input.requestedUrl, {
-      waitUntil: "domcontentloaded",
-      timeout: NAVIGATION_TIMEOUT_MS,
-    })
-    .catch(() => undefined);
-  await page
-    .waitForLoadState("networkidle", { timeout: 5_000 })
-    .catch(() => undefined);
+  await runBrowserNavigationOperation(
+    page,
+    () =>
+      page.goto(input.requestedUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: NAVIGATION_TIMEOUT_MS,
+      }),
+    signal,
+    () =>
+      interactionGuard.isBlocked() ||
+      interactionGuard.getDeferredCrossOriginDestination() !== null,
+  );
+  await runBrowserNavigationOperation(
+    page,
+    () =>
+      page.waitForLoadState("networkidle", { timeout: 5_000 }),
+    signal,
+    () =>
+      interactionGuard.isBlocked() ||
+      interactionGuard.getDeferredCrossOriginDestination() !== null,
+  );
   const interactionBlocked = interactionGuard.isBlocked();
+  const deferredBookingUrl =
+    interactionGuard.getDeferredCrossOriginDestination();
   const finalUrl =
     page.url() === "about:blank" ? input.requestedUrl : page.url();
   const evidence =
-    interactionBlocked && page.url() === "about:blank"
+    interactionBlocked || deferredBookingUrl
       ? emptyPreparedBrowserPageEvidence()
       : await collectPageEvidence(
           page,
@@ -1634,11 +1938,10 @@ async function visitOfficialPage(
               observation.latestMainFrameDocumentStatus,
             latestMainFrameDocumentUrl: observation.latestMainFrameDocumentUrl,
           },
-        ).catch(() => emptyPreparedBrowserPageEvidence());
+        );
   const network = await materializeBrowserPageObservation(observation);
-  const deferredBookingUrl =
-    interactionGuard.getDeferredCrossOriginDestination();
   await interactionGuard.dispose();
+  throwIfBrowserProbeAborted(signal);
   return {
     requestedUrl: input.requestedUrl,
     finalUrl,
@@ -1663,7 +1966,9 @@ async function visitBookingDestination(
     officialPageUrl: string;
     courseName: string;
   },
+  signal?: AbortSignal
 ): Promise<BrowserBookingDestinationVisit> {
+  throwIfBrowserProbeAborted(signal);
   const observation = observeBrowserPageNetwork(page, input.officialPageUrl);
   const interactionGuard = await createMainFrameInteractionGuard(
     page,
@@ -1674,25 +1979,33 @@ async function visitBookingDestination(
       },
     },
   );
-  await page
-    .goto(input.url, {
-      waitUntil: "domcontentloaded",
-      timeout: NAVIGATION_TIMEOUT_MS,
-    })
-    .catch(() => undefined);
-  await page
-    .waitForLoadState("networkidle", { timeout: 5_000 })
-    .catch(() => undefined);
+  await runBrowserNavigationOperation(
+    page,
+    () =>
+      page.goto(input.url, {
+        waitUntil: "domcontentloaded",
+        timeout: NAVIGATION_TIMEOUT_MS,
+      }),
+    signal,
+    () => interactionGuard.isBlocked(),
+  );
+  await runBrowserNavigationOperation(
+    page,
+    () =>
+      page.waitForLoadState("networkidle", { timeout: 5_000 }),
+    signal,
+    () => interactionGuard.isBlocked(),
+  );
   let interactionBlocked = interactionGuard.isBlocked();
   let evidence =
-    interactionBlocked && page.url() === "about:blank"
+    interactionBlocked
       ? emptyPreparedBrowserPageEvidence()
       : await collectPageEvidence(page, undefined, {
           allowStaticPageFetch: !interactionBlocked,
           latestMainFrameDocumentStatus:
             observation.latestMainFrameDocumentStatus,
           latestMainFrameDocumentUrl: observation.latestMainFrameDocumentUrl,
-        }).catch(() => emptyPreparedBrowserPageEvidence());
+        });
 
   if (
     !interactionBlocked &&
@@ -1701,17 +2014,22 @@ async function visitBookingDestination(
       accessControlDetected: evidence.accessControlDetected,
     })
   ) {
-    await clickLikelyBookingLink(page, undefined, interactionGuard);
-    await page
-      .waitForLoadState("networkidle", { timeout: 5_000 })
-      .catch(() => undefined);
+    await clickLikelyBookingLink(page, undefined, interactionGuard, signal);
+    throwIfBrowserProbeAborted(signal);
+    await runBrowserNavigationOperation(
+      page,
+      () =>
+        page.waitForLoadState("networkidle", { timeout: 5_000 }),
+      signal,
+      () => interactionGuard.isBlocked(),
+    );
     interactionBlocked = interactionGuard.isBlocked();
     if (!interactionBlocked) {
       const preDateEvidence = await collectPageEvidence(page, undefined, {
         latestMainFrameDocumentStatus:
           observation.latestMainFrameDocumentStatus,
         latestMainFrameDocumentUrl: observation.latestMainFrameDocumentUrl,
-      }).catch(() => evidence);
+      });
       if (
         !shouldStopBrowserDiscovery({
           accessBarrierCount: observation.accessBarriers.size,
@@ -1719,15 +2037,19 @@ async function visitBookingDestination(
         })
       ) {
         await trySelectSearchDate(page, interactionGuard);
-        await page
-          .waitForLoadState("networkidle", { timeout: 5_000 })
-          .catch(() => undefined);
+        throwIfBrowserProbeAborted(signal);
+        await runBrowserNavigationOperation(
+          page,
+          () => page.waitForLoadState("networkidle", { timeout: 5_000 }),
+          signal,
+          () => interactionGuard.isBlocked(),
+        );
       }
       evidence = await collectPageEvidence(page, undefined, {
         latestMainFrameDocumentStatus:
           observation.latestMainFrameDocumentStatus,
         latestMainFrameDocumentUrl: observation.latestMainFrameDocumentUrl,
-      }).catch(() => preDateEvidence);
+      });
       interactionBlocked = interactionGuard.isBlocked();
     }
   }
@@ -1735,6 +2057,7 @@ async function visitBookingDestination(
   const finalUrl = page.url() === "about:blank" ? input.url : page.url();
   const network = await materializeBrowserPageObservation(observation);
   await interactionGuard.dispose();
+  throwIfBrowserProbeAborted(signal);
   return {
     sourcePageUrl: input.sourcePageUrl,
     requestedUrl: input.url,
@@ -1763,8 +2086,7 @@ function emptyPreparedBrowserPageEvidence() {
 function parseTeeItUpFacilityResponse(
   responseUrl: string,
   value: unknown,
-):
-  | NonNullable<BrowserDiscoveryEvidence["teeItUpFacilityResponses"]>[number]
+): NonNullable<BrowserDiscoveryEvidence["teeItUpFacilityResponses"]>[number]
   | null {
   let url: URL;
   try {
@@ -2042,7 +2364,9 @@ async function clickLikelyBookingLink(
   page: Page,
   courseName?: string,
   interactionGuard?: MainFrameInteractionGuard,
+  signal?: AbortSignal
 ) {
+  throwIfBrowserProbeAborted(signal);
   if (interactionGuard?.isBlocked()) {
     return null;
   }
@@ -2109,12 +2433,16 @@ async function clickLikelyBookingLink(
       .map((candidate) => ({ href: candidate.url, text: candidate.label }))
       .find((candidate) => candidate.href === href);
 
-  await page
-    .goto(href, {
-      waitUntil: "domcontentloaded",
-      timeout: NAVIGATION_TIMEOUT_MS,
-    })
-    .catch(() => undefined);
+  await runBrowserNavigationOperation(
+    page,
+    () =>
+      page.goto(href, {
+        waitUntil: "domcontentloaded",
+        timeout: NAVIGATION_TIMEOUT_MS,
+      }),
+    signal,
+    () => interactionGuard?.isBlocked() === true,
+  );
   return selected ?? { href, text: "Book a tee time" };
 }
 

@@ -194,6 +194,48 @@ describe("course-support claimed action plans", () => {
     ).toBe(false);
   });
 
+  it("makes exact browser-adapter repair progression a runtime verification", () => {
+    const browserAdapterRetryRoute = route({
+      workMode: "ADVANCE_DISCOVERY",
+      resumeWorkMode: "ADVANCE_DISCOVERY",
+      allowUnchangedRuntime: true,
+      requiresImplementationPath: false,
+      attemptSignature: {
+        workMode: "ADVANCE_DISCOVERY",
+        strategyAction: "REPAIR_PROVIDER_ADAPTER",
+        playbookStage: "BROWSER_ADAPTER_RETRY",
+      },
+      strategy: {
+        action: "REPAIR_PROVIDER_ADAPTER",
+        reason: "PROVIDER_ADAPTER_DEFECT",
+        providerFamilyKey: "TENFORE",
+        browserAllowed: false,
+      },
+    });
+    const plan = buildCourseSupportClaimActionPlan({
+      route: browserAdapterRetryRoute,
+      incidentKind: "NEEDS_ADAPTER",
+      incidentProviderFamilyKey: "TENFORE",
+      course: course({
+        providerFamilyKey: "TENFORE",
+        website: "https://example.test/",
+      }),
+    });
+
+    expect(plan).toMatchObject({
+      primaryAction: "VERIFY_CURRENT_RUNTIME",
+      allowedActions: ["VERIFY_CURRENT_RUNTIME"],
+      route: {
+        workMode: "ADVANCE_DISCOVERY",
+        strategyAction: "REPAIR_PROVIDER_ADAPTER",
+        playbookStage: "BROWSER_ADAPTER_RETRY",
+      },
+    });
+    expect(
+      courseSupportActionPlanAllows(plan, "INSPECT_PROVIDER_CONTRACT"),
+    ).toBe(false);
+  });
+
   it("round-trips only a plan whose route remains exact", () => {
     const plan = buildCourseSupportClaimActionPlan({
       route: route(),

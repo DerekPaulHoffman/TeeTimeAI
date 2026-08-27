@@ -129,8 +129,10 @@ export function isExactAssignedDetachedStageDirective(input: {
 
   if (input.stage === "BROWSER_ADAPTER_RETRY") {
     return (
-      directive.workMode === "VERIFY_TRANSIENT" &&
-      directive.strategyAction === "RUN_TYPED_ADAPTER"
+      (directive.workMode === "VERIFY_TRANSIENT" &&
+        directive.strategyAction === "RUN_TYPED_ADAPTER") ||
+      (directive.workMode === "ADVANCE_DISCOVERY" &&
+        directive.strategyAction === "REPAIR_PROVIDER_ADAPTER")
     );
   }
 

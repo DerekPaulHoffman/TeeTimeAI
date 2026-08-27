@@ -1,9 +1,10 @@
 import "./load-local-env";
 
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import {
   normalizeGitCommandOutput,
@@ -64,6 +65,11 @@ import {
   type ResponderOutcome
 } from "@/lib/automation/course-support-responder-policy";
 import { inspectOwnedCourseSupportProviderContract } from "@/lib/automation/provider-contract-inspection";
+import type {
+  VercelDeploymentInspection,
+  VercelDeploymentList,
+} from "@/lib/deployments/vercel-git";
+import { waitForGitDeployment } from "@/lib/deployments/wait-for-git-deployment";
 
 import { runBrowserProbe } from "./browser-probe-needed-adapters";
 
@@ -99,6 +105,7 @@ const FAILURE_DOMAINS = new Set<ResponderFailureDomain>([
   "SLA"
 ]);
 const COURSE_SUPPORT_OPERATION_HEARTBEAT_INTERVAL_MS = 4 * 60 * 1_000;
+const execFileAsync = promisify(execFile);
 
 type CourseSupportDatabaseEnvironment = {
   [key: string]: string | undefined;
@@ -596,6 +603,9 @@ async function runCommand(
     case "verify":
       writeResult(await verify(args));
       return;
+    case "verify-release":
+      writeResult(await verifyRelease(args));
+      return;
     case "closeout":
       writeResult(await closeout(args));
       return;
@@ -609,7 +619,7 @@ async function runCommand(
       return;
     default:
       throw new Error(
-        "Unknown course-support command. Use inspect, coverage, claim, packet, inspect-provider-contract, claim-path, source-search-context, record-source-search, mark-needs-human, heartbeat, verify, closeout, recover, or backfill."
+        "Unknown course-support command. Use inspect, coverage, claim, packet, inspect-provider-contract, claim-path, source-search-context, record-source-search, mark-needs-human, heartbeat, verify-release, verify, closeout, recover, or backfill."
       );
   }
 }
@@ -874,7 +884,10 @@ async function heartbeat(args: string[]) {
   });
 }
 
-async function verify(args: string[]) {
+async function verify(
+  args: string[],
+  options?: { allowOwnerBoundChangedReleaseProof?: boolean }
+) {
   const deployedAt = parseCanonicalCourseSupportDeployedAt(args);
   const batchId = await resolveBatchId(args);
   const ownerThreadId = requireOwnerThread(args);
@@ -891,9 +904,13 @@ async function verify(args: string[]) {
   }
   const currentRuntime = args.includes("--current-runtime");
   const requestedReleaseSha = readOption(args, "--release-sha");
-  if (currentRuntime && requestedReleaseSha) {
-    throw new Error("--current-runtime cannot be combined with --release-sha.");
-  }
+  assertCourseSupportVerificationReleaseLane({
+    currentRuntime,
+    requestedReleaseSha,
+    deployedAt,
+    allowOwnerBoundChangedReleaseProof:
+      options?.allowOwnerBoundChangedReleaseProof === true
+  });
   const provenance = currentRuntime
     ? await getCourseSupportBatchRecoveryProvenance(batchId)
     : null;
@@ -909,7 +926,8 @@ async function verify(args: string[]) {
       ownerThreadId,
       allowDurableCloseout: closeoutAfterWatch
     },
-    async (leaseToken) => {
+    async (leaseToken, operationSignal) => {
+      operationSignal.throwIfAborted();
       if (deployedAt) {
         const deploymentProof = await heartbeatCourseSupportBatch({
           batchId,
@@ -924,6 +942,7 @@ async function verify(args: string[]) {
             "Course-support deployment proof could not be persisted before browser verification."
           );
         }
+        operationSignal.throwIfAborted();
       }
       const runPass = (signal?: AbortSignal) =>
         runCourseSupportVerificationPass({
@@ -960,6 +979,7 @@ async function verify(args: string[]) {
                     persistenceFence,
                     deferTerminalCloseout,
                     persistSearchProbe,
+                    signal,
                     beforePersist: ({ requireCurrentStage }) =>
                       signal?.aborted
                         ? Promise.reject(signal.reason)
@@ -967,13 +987,14 @@ async function verify(args: string[]) {
                   })
               }
             ),
-          verifyBatch: () =>
+          verifyBatch: (verificationSignal) =>
             verifyCourseSupportBatch({
               batchId,
               leaseToken,
               ownerThreadId,
               releaseSha,
-              deployedAt
+              deployedAt,
+              signal: verificationSignal
             })
         });
 
@@ -987,11 +1008,13 @@ async function verify(args: string[]) {
         leaseToken,
         ownerThreadId
       });
+      operationSignal.throwIfAborted();
       const initialPacket = await getCourseSupportBatchPacket({
         batchId,
         leaseToken,
         ownerThreadId
       });
+      operationSignal.throwIfAborted();
       if (initialPacket.outcome !== "ready") {
         throw new Error(
           "Course-support verification watch lost ownership before it started."
@@ -1005,6 +1028,7 @@ async function verify(args: string[]) {
         maxMinutes,
         pollMs: pollSeconds === undefined ? undefined : pollSeconds * 1_000,
         deadlineAt: endpointDeadlineAt,
+        signal: operationSignal,
         closeout: closeoutAfterWatch
           ? async ({ passCount, signal }) =>
               closeoutSettledCourseSupportBatch({
@@ -1042,6 +1066,338 @@ async function verify(args: string[]) {
   );
 }
 
+async function verifyRelease(args: string[]) {
+  assertCourseSupportVerifyReleaseOptions(args);
+  const batchRef = requireOption(args, "--batch-ref");
+  const batchId = await resolveCourseSupportBatchReference(batchRef);
+  const ownerThreadId = requireOwnerThread(args);
+  const releaseSha = requireOption(args, "--release-sha");
+  const deploymentTimeoutSeconds =
+    readSingleIntegerOption(args, "--deployment-timeout-seconds") ?? 900;
+  const deploymentPollSeconds =
+    readSingleIntegerOption(args, "--deployment-poll-seconds") ?? 10;
+  if (deploymentTimeoutSeconds < 1 || deploymentTimeoutSeconds > 1_800) {
+    throw new Error(
+      "--deployment-timeout-seconds must be an integer from 1 through 1800."
+    );
+  }
+  if (deploymentPollSeconds < 1 || deploymentPollSeconds > 60) {
+    throw new Error(
+      "--deployment-poll-seconds must be an integer from 1 through 60."
+    );
+  }
+  const releaseProvenance = await getCourseSupportBatchRecoveryProvenance(batchId);
+  assertCourseSupportPersistedReleaseFence({
+    persistedReleaseSha: releaseProvenance.releaseSha,
+    requestedReleaseSha: releaseSha
+  });
+  await assertReleaseGitProvenance(batchId, releaseSha);
+
+  const deploymentProof = await runWithCourseSupportOperationHeartbeat(
+    { batchId, ownerThreadId },
+    async (leaseToken, signal) => {
+      signal.throwIfAborted();
+      const releaseHeartbeat = await heartbeatCourseSupportBatch({
+        batchId,
+        leaseToken,
+        ownerThreadId,
+        status: "VERIFYING",
+        releaseSha
+      });
+      if (!releaseHeartbeat.heartbeatRecorded) {
+        throw new Error(
+          "Course-support release verification lost durable batch ownership."
+        );
+      }
+      signal.throwIfAborted();
+      try {
+        const proof = await waitForGitDeployment(
+          {
+            commitSha: releaseSha,
+            timeoutSeconds: deploymentTimeoutSeconds,
+            pollSeconds: deploymentPollSeconds,
+            signal
+          },
+          {
+            listDeployments: ({ signal: deploymentSignal }) =>
+              runCourseSupportVercelJson<VercelDeploymentList>([
+                "ls",
+                "--environment",
+                "production",
+                "--meta",
+                `githubCommitSha=${releaseSha}`,
+                "--format",
+                "json",
+                "--limit",
+                "20"
+              ], deploymentSignal),
+            inspectAlias: (alias, { signal: deploymentSignal } = {}) =>
+              runCourseSupportVercelJson<VercelDeploymentInspection>([
+                "inspect",
+                alias,
+                "--format",
+                "json"
+              ], deploymentSignal),
+            onStatus: (status) =>
+              writeResult({ outcome: "deployment_wait", status })
+          }
+        );
+        signal.throwIfAborted();
+        const deploymentHeartbeat = await heartbeatCourseSupportBatch({
+          batchId,
+          leaseToken,
+          ownerThreadId,
+          status: "VERIFYING",
+          releaseSha,
+          deployedAt: new Date(proof.deployedAt)
+        });
+        if (!deploymentHeartbeat.heartbeatRecorded) {
+          throw new Error(
+            "Course-support deployment proof could not be persisted."
+          );
+        }
+        signal.throwIfAborted();
+        return proof;
+      } catch (error) {
+        signal.throwIfAborted();
+        try {
+          await recordCourseSupportOwnerFailureCheckpoint({
+            batchId,
+            leaseToken,
+            ownerThreadId,
+            stage: "DEPLOYMENT_WAIT",
+            failureDomain: "DEPLOYMENT",
+            reasonCode: classifyCourseSupportDeploymentWaitFailure(error)
+          });
+        } catch {
+          // Preserve the original deployment failure when ownership or the
+          // database prevents the resumable checkpoint from being written.
+        }
+        throw error;
+      }
+    }
+  );
+
+  const verificationArgs = [
+    "--batch-ref",
+    batchRef,
+    "--release-sha",
+    releaseSha,
+    "--deployed-at",
+    deploymentProof.deployedAt,
+    "--watch",
+    "--closeout"
+  ];
+  const explicitOwnerThread = readSingleOption(args, "--owner-thread");
+  if (explicitOwnerThread) {
+    verificationArgs.push("--owner-thread", explicitOwnerThread);
+  }
+  try {
+    const verification = await verify(verificationArgs, {
+      allowOwnerBoundChangedReleaseProof: true
+    });
+    return {
+      outcome: "release_verification_completed" as const,
+      deployment: {
+        source: deploymentProof.source,
+        state: deploymentProof.state,
+        deployedAt: deploymentProof.deployedAt,
+        verifiedAliasCount: deploymentProof.aliases.length
+      },
+      verification
+    };
+  } catch (error) {
+    await recordCourseSupportOwnerFailureCheckpointIfOwned({
+      batchId,
+      ownerThreadId,
+      stage: "VERIFICATION",
+      failureDomain: "PRODUCTION_VERIFICATION",
+      reasonCode: "VERIFICATION_TOOLING_FAILED"
+    });
+    throw error;
+  }
+}
+
+export function assertCourseSupportVerificationReleaseLane(input: {
+  currentRuntime: boolean;
+  requestedReleaseSha?: string | null;
+  deployedAt?: Date | null;
+  allowOwnerBoundChangedReleaseProof?: boolean;
+}) {
+  if (input.currentRuntime && input.requestedReleaseSha) {
+    throw new Error("--current-runtime cannot be combined with --release-sha.");
+  }
+  const changedReleaseProofRequested = Boolean(
+    input.requestedReleaseSha || (input.deployedAt && !input.currentRuntime)
+  );
+  if (
+    changedReleaseProofRequested &&
+    input.allowOwnerBoundChangedReleaseProof !== true
+  ) {
+    throw new Error(
+      "Changed-release verification requires the owner-bound verify-release command."
+    );
+  }
+  if (
+    input.allowOwnerBoundChangedReleaseProof === true &&
+    !input.requestedReleaseSha
+  ) {
+    throw new Error(
+      "Owner-bound changed-release verification requires an exact release SHA."
+    );
+  }
+}
+
+export function assertCourseSupportPersistedReleaseFence(input: {
+  persistedReleaseSha?: string | null;
+  requestedReleaseSha: string;
+}) {
+  if (input.persistedReleaseSha !== input.requestedReleaseSha) {
+    throw new Error(
+      "verify-release requires the exact release SHA to be persisted by the pre-push heartbeat."
+    );
+  }
+}
+
+export function assertCourseSupportVerifyReleaseOptions(args: readonly string[]) {
+  const valuedOptions = new Set([
+    "--batch-ref",
+    "--release-sha",
+    "--owner-thread",
+    "--deployment-timeout-seconds",
+    "--deployment-poll-seconds"
+  ]);
+  const seen = new Set<string>();
+  for (let index = 0; index < args.length; index += 2) {
+    const option = args[index];
+    const value = args[index + 1];
+    if (!option || !valuedOptions.has(option)) {
+      throw new Error(
+        "verify-release accepts only batch, release, owner, and deployment timing options."
+      );
+    }
+    if (seen.has(option)) {
+      throw new Error(`${option} may be provided only once.`);
+    }
+    if (!value || value.startsWith("--")) {
+      throw new Error(`${option} requires a value.`);
+    }
+    seen.add(option);
+  }
+}
+
+export function classifyCourseSupportDeploymentWaitFailure(error: unknown) {
+  const message = error instanceof Error ? error.message : "";
+  if (message.startsWith("Timed out after")) {
+    return "DEPLOYMENT_TIMEOUT" as const;
+  }
+  if (message.startsWith("Git deployment")) {
+    return "DEPLOYMENT_FAILED" as const;
+  }
+  return "DEPLOYMENT_TOOLING_FAILED" as const;
+}
+
+async function recordCourseSupportOwnerFailureCheckpoint(input: {
+  batchId: string;
+  leaseToken: string;
+  ownerThreadId: string;
+  stage: "DEPLOYMENT_WAIT" | "VERIFICATION";
+  failureDomain: "DEPLOYMENT" | "PRODUCTION_VERIFICATION" | "SLA";
+  reasonCode:
+    | "DEPLOYMENT_FAILED"
+    | "DEPLOYMENT_TIMEOUT"
+    | "DEPLOYMENT_TOOLING_FAILED"
+    | "VERIFICATION_TOOLING_FAILED";
+}) {
+  const result = await heartbeatCourseSupportBatch({
+    batchId: input.batchId,
+    leaseToken: input.leaseToken,
+    ownerThreadId: input.ownerThreadId,
+    status: "VERIFYING",
+    ownerFailureCheckpoint: {
+      stage: input.stage,
+      failureDomain: input.failureDomain,
+      reasonCode: input.reasonCode
+    }
+  });
+  if (!result.heartbeatRecorded) {
+    throw new Error(
+      "Course-support owner failure checkpoint lost durable batch ownership."
+    );
+  }
+}
+
+async function recordCourseSupportOwnerFailureCheckpointIfOwned(input: {
+  batchId: string;
+  ownerThreadId: string;
+  stage: "DEPLOYMENT_WAIT" | "VERIFICATION";
+  failureDomain: "DEPLOYMENT" | "PRODUCTION_VERIFICATION" | "SLA";
+  reasonCode:
+    | "DEPLOYMENT_FAILED"
+    | "DEPLOYMENT_TIMEOUT"
+    | "DEPLOYMENT_TOOLING_FAILED"
+    | "VERIFICATION_TOOLING_FAILED";
+}) {
+  try {
+    const leaseToken = await getOwnedCourseSupportLeaseToken(input);
+    await recordCourseSupportOwnerFailureCheckpoint({
+      ...input,
+      leaseToken
+    });
+  } catch {
+    // The original verification failure remains authoritative. A batch that
+    // already closed or lost ownership cannot accept another checkpoint.
+  }
+}
+
+async function runCourseSupportVercelJson<T>(
+  commandArgs: string[],
+  signal?: AbortSignal
+) {
+  const isWindows = process.platform === "win32";
+  const executable = isWindows ? (process.env.ComSpec ?? "cmd.exe") : "npx";
+  const executableArgs = isWindows
+    ? [
+        "/d",
+        "/s",
+        "/c",
+        ["npx", "vercel", ...commandArgs]
+          .map(quoteCourseSupportVercelToken)
+          .join(" ")
+      ]
+    : ["vercel", ...commandArgs];
+  signal?.throwIfAborted();
+  try {
+    const { stdout } = await execFileAsync(executable, executableArgs, {
+      encoding: "utf8",
+      timeout: 120_000,
+      maxBuffer: 1024 * 1024,
+      signal,
+      windowsHide: true
+    });
+    signal?.throwIfAborted();
+    return JSON.parse(stdout) as T;
+  } catch (error) {
+    signal?.throwIfAborted();
+    const code =
+      typeof error === "object" && error
+        ? "status" in error && error.status !== null
+          ? String(error.status)
+          : "code" in error
+            ? String(error.code)
+            : "unknown"
+        : "unknown";
+    throw new Error(`Vercel CLI command failed with exit code ${code}.`);
+  }
+}
+
+function quoteCourseSupportVercelToken(value: string) {
+  if (!/^[A-Za-z0-9_./:=,-]+$/u.test(value)) {
+    throw new Error("Vercel CLI argument contains unsupported characters.");
+  }
+  return value;
+}
+
 async function closeoutSettledCourseSupportBatch(input: {
   batchId: string;
   leaseToken: string;
@@ -1065,11 +1421,12 @@ async function closeoutSettledCourseSupportBatch(input: {
   const settled = await closeoutSettledCourseSupportVerification({
     courses: packet.courses,
     closeout: (preCloseoutExplicitHumanCount) =>
-      closeoutCourseSupportBatch({
-        batchId: input.batchId,
-        leaseToken: input.leaseToken,
-        ownerThreadId: input.ownerThreadId,
-        verificationWatchMode: "WATCH_SETTLED",
+       closeoutCourseSupportBatch({
+         batchId: input.batchId,
+         leaseToken: input.leaseToken,
+         ownerThreadId: input.ownerThreadId,
+         signal: input.signal,
+         verificationWatchMode: "WATCH_SETTLED",
         summary: {
           verificationWatch: {
             settled: true,
@@ -1106,6 +1463,7 @@ async function closeoutStoppedCourseSupportBatch(input: {
     batchId: input.batchId,
     leaseToken: input.leaseToken,
     ownerThreadId: input.ownerThreadId,
+    signal: input.signal,
     requestedOutcome:
       input.mode === "EARLY_RETRY" ? "command_failed" : undefined,
     failureDomain: "SLA",
@@ -1146,11 +1504,12 @@ async function closeout(args: string[]) {
   const ownerThreadId = requireOwnerThread(args);
   return runWithCourseSupportOperationHeartbeat(
     { batchId, ownerThreadId, allowDurableCloseout: true },
-    (leaseToken) =>
+    (leaseToken, signal) =>
       closeoutCourseSupportBatch({
         batchId,
         leaseToken,
         ownerThreadId,
+        signal,
         requestedOutcome: requestedOutcome as ResponderOutcome | undefined,
         failureDomain: failureDomain as ResponderFailureDomain | undefined,
         retryAfterSeconds:
@@ -1167,7 +1526,7 @@ async function runWithCourseSupportOperationHeartbeat<T>(
     ownerThreadId: string;
     allowDurableCloseout?: boolean;
   },
-  operation: (leaseToken: string) => Promise<T>
+  operation: (leaseToken: string, signal: AbortSignal) => Promise<T>
 ) {
   const leaseToken = await getOwnedCourseSupportLeaseToken(input);
   const renewWithSignal = async (signal?: AbortSignal) => {
@@ -1184,7 +1543,7 @@ async function runWithCourseSupportOperationHeartbeat<T>(
   };
   return runWithBoundedCourseSupportHeartbeat({
     renew: renewWithSignal,
-    operation: () => operation(leaseToken),
+    operation: (signal) => operation(leaseToken, signal),
     intervalMs: COURSE_SUPPORT_OPERATION_HEARTBEAT_INTERVAL_MS,
     allowDurableCloseout: input.allowDurableCloseout
   });

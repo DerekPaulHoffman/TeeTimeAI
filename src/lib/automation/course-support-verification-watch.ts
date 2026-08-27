@@ -6,7 +6,7 @@ export const DEFAULT_COURSE_SUPPORT_HEARTBEAT_RENEWAL_TIMEOUT_MS = 30_000;
 
 export async function runWithBoundedCourseSupportHeartbeat<T>(input: {
   renew: (signal: AbortSignal) => Promise<void>;
-  operation: () => Promise<T>;
+  operation: (signal: AbortSignal) => Promise<T>;
   intervalMs: number;
   renewalTimeoutMs?: number;
   allowDurableCloseout?: boolean;
@@ -80,6 +80,7 @@ export async function runWithBoundedCourseSupportHeartbeat<T>(input: {
 
   await renewWithinBudget();
 
+  const operationController = new AbortController();
   let heartbeatFailure: unknown = null;
   let heartbeatInFlight: Promise<void> | null = null;
   const interval = setIntervalTimer(() => {
@@ -89,6 +90,9 @@ export async function runWithBoundedCourseSupportHeartbeat<T>(input: {
     heartbeatInFlight = renewWithinBudget()
       .catch((error) => {
         heartbeatFailure = error;
+        if (!operationController.signal.aborted) {
+          operationController.abort(error);
+        }
       })
       .finally(() => {
         heartbeatInFlight = null;
@@ -105,7 +109,7 @@ export async function runWithBoundedCourseSupportHeartbeat<T>(input: {
 
   let operationResult: T;
   try {
-    operationResult = await input.operation();
+    operationResult = await input.operation(operationController.signal);
   } finally {
     clearIntervalTimer(interval);
     await heartbeatInFlight;
@@ -129,11 +133,8 @@ export function assertCourseSupportVerificationWatchFlags(input: {
   watch: boolean;
   closeout: boolean;
 }) {
-  if (input.watch && !input.closeout) {
-    throw new Error("verify --watch requires --closeout.");
-  }
-  if (input.closeout && !input.watch) {
-    throw new Error("verify --closeout requires --watch.");
+  if (!input.watch || !input.closeout) {
+    throw new Error("Persisted course-support verification requires verify --watch --closeout.");
   }
 }
 
@@ -233,12 +234,12 @@ export async function runCourseSupportVerificationPass<
 >(input: {
   signal?: AbortSignal;
   persistBrowserStages: () => Promise<TBrowserStages>;
-  verifyBatch: () => Promise<TVerification>;
+  verifyBatch: (signal?: AbortSignal) => Promise<TVerification>;
 }) {
   throwIfVerificationWatchAborted(input.signal);
   const browserStages = await input.persistBrowserStages();
   throwIfVerificationWatchAborted(input.signal);
-  const verification = await input.verifyBatch();
+  const verification = await input.verifyBatch(input.signal);
   throwIfVerificationWatchAborted(input.signal);
   return { browserStages, verification };
 }
@@ -309,12 +310,14 @@ export async function runCourseSupportVerificationWatch<
   maxMinutes?: number;
   pollMs?: number;
   deadlineAt?: number | null;
+  signal?: AbortSignal;
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
   releaseCleanupMs?: number;
   setTimer?: (callback: () => void, milliseconds: number) => unknown;
   clearTimer?: (handle: unknown) => void;
 }) {
+  throwIfVerificationWatchAborted(input.signal);
   const maxMinutes =
     input.maxMinutes ?? DEFAULT_COURSE_SUPPORT_VERIFICATION_WATCH_MINUTES;
   const pollMs = input.pollMs ?? DEFAULT_COURSE_SUPPORT_VERIFICATION_POLL_MS;
@@ -383,6 +386,7 @@ export async function runCourseSupportVerificationWatch<
     if (budgetMs <= 0) {
       return { kind: "timeout" as const };
     }
+    throwIfVerificationWatchAborted(input.signal);
     const controller = new AbortController();
     const operationResult = Promise.resolve()
       .then(() => operation(controller.signal))
@@ -397,11 +401,68 @@ export async function runCourseSupportVerificationWatch<
         resolve({ kind: "timeout" });
       }, budgetMs);
     });
-    const result = await Promise.race([operationResult, timeoutResult]);
-    if (timerHandle !== undefined) {
-      clearTimer(timerHandle);
+    let detachParentAbort: (() => void) | undefined;
+    const parentAbortResult = input.signal
+      ? new Promise<{ kind: "parent-abort"; error: unknown }>((resolve) => {
+          const onAbort = () => {
+            if (!controller.signal.aborted) {
+              controller.abort(input.signal?.reason);
+            }
+            resolve({
+              kind: "parent-abort",
+              error:
+                input.signal?.reason ??
+                new Error("Course-support verification watch ownership was lost."),
+            });
+          };
+          input.signal!.addEventListener("abort", onAbort, { once: true });
+          detachParentAbort = () =>
+            input.signal?.removeEventListener("abort", onAbort);
+          if (input.signal!.aborted) {
+            onAbort();
+          }
+        })
+      : null;
+    try {
+      const result = await Promise.race([
+        operationResult,
+        timeoutResult,
+        ...(parentAbortResult ? [parentAbortResult] : []),
+      ]);
+      if (result.kind === "parent-abort") {
+        throw result.error;
+      }
+      throwIfVerificationWatchAborted(input.signal);
+      return result;
+    } finally {
+      detachParentAbort?.();
+      if (timerHandle !== undefined) {
+        clearTimer(timerHandle);
+      }
     }
-    return result;
+  };
+
+  const sleepWithOwnership = async (milliseconds: number) => {
+    throwIfVerificationWatchAborted(input.signal);
+    if (!input.signal) {
+      await sleep(milliseconds);
+      return;
+    }
+    await new Promise<void>((resolve, reject) => {
+      const onAbort = () =>
+        reject(
+          input.signal?.reason ??
+            new Error("Course-support verification watch ownership was lost."),
+        );
+      input.signal!.addEventListener("abort", onAbort, { once: true });
+      if (input.signal!.aborted) {
+        onAbort();
+      }
+      void sleep(milliseconds).then(resolve, reject).finally(() => {
+        input.signal?.removeEventListener("abort", onAbort);
+      });
+    });
+    throwIfVerificationWatchAborted(input.signal);
   };
 
   const runBounded = <T>(
@@ -417,6 +478,7 @@ export async function runCourseSupportVerificationWatch<
     reason: "endpoint" | "max" | "error",
     error?: unknown
   ) => {
+    throwIfVerificationWatchAborted(input.signal);
     if (!input.onStopped) {
       if (error) {
         throw error;
@@ -454,6 +516,7 @@ export async function runCourseSupportVerificationWatch<
   };
 
   while (true) {
+    throwIfVerificationWatchAborted(input.signal);
     if (now() >= deadline) {
       return stop(deadlineReason);
     }
@@ -527,7 +590,7 @@ export async function runCourseSupportVerificationWatch<
             if (remainingMs <= 0) {
               return stop(deadlineReason);
             }
-            await sleep(Math.min(pollMs, remainingMs));
+            await sleepWithOwnership(Math.min(pollMs, remainingMs));
             continue;
           }
           return stop("error", closeoutResult.error);
@@ -549,7 +612,7 @@ export async function runCourseSupportVerificationWatch<
     if (remainingMs <= 0) {
       return stop(deadlineReason);
     }
-    await sleep(Math.min(pollMs, remainingMs));
+    await sleepWithOwnership(Math.min(pollMs, remainingMs));
   }
 }
 

@@ -6,6 +6,7 @@ import {
 } from "./course-monitoring-playbook";
 import {
   COURSE_SUPPORT_REMEDIATION_WORK_MODES,
+  isExactAssignedDetachedStageDirective,
   type CourseSupportRemediationRoute,
   type CourseSupportRemediationWorkMode,
 } from "./course-support-remediation-routing";
@@ -95,6 +96,18 @@ export function buildCourseSupportClaimActionPlan(input: {
       courseProviderFamilyKey: input.course.providerFamilyKey,
       resolvedProviderFamilyKey: input.route.strategy.providerFamilyKey,
     });
+  const assignedBrowserAdapterRetry = Boolean(
+    route.workMode === "ADVANCE_DISCOVERY" &&
+      isExactAssignedDetachedStageDirective({
+        remediationDirective: {
+          ...route,
+          allowUnchangedRuntime: input.route.allowUnchangedRuntime,
+          requiresImplementationPath: input.route.requiresImplementationPath,
+          retryBudget: input.route.retryBudget,
+        },
+        stage: "BROWSER_ADAPTER_RETRY",
+      }),
+  );
 
   if (route.workMode === "WAIT_FOR_MATERIAL_CHANGE") {
     return actionPlan(route, "WAIT_FOR_MATERIAL_CHANGE");
@@ -111,6 +124,9 @@ export function buildCourseSupportClaimActionPlan(input: {
       "IMPLEMENT_REUSABLE_SUPPORT",
       providerContractEligible ? ["INSPECT_PROVIDER_CONTRACT"] : [],
     );
+  }
+  if (assignedBrowserAdapterRetry) {
+    return actionPlan(route, "VERIFY_CURRENT_RUNTIME");
   }
   if (providerContractEligible) {
     return actionPlan(route, "INSPECT_PROVIDER_CONTRACT", [

@@ -6,6 +6,7 @@ import {
   aggregateCourseSupportActionTelemetry,
   type CompletedCourseSupportActionTelemetryBatch,
 } from "./course-support-action-telemetry";
+import type { CourseSupportActionExecution } from "./course-support-action-execution";
 import type { CourseSupportClaimAction } from "./course-support-action-plan";
 
 const now = new Date("2026-08-26T16:00:00.000Z");
@@ -115,6 +116,94 @@ describe("course-support action telemetry", () => {
       executedCount: null,
       executionUnavailableCount: 1,
       executionAvailability: "unavailable",
+    });
+  });
+
+  it("uses exact new-closeout execution markers before legacy inference", () => {
+    const result = aggregateCourseSupportActionTelemetry({
+      now,
+      batches: [
+        completedBatch([
+          entry("implementation-course", "IMPLEMENT_REUSABLE_SUPPORT", {
+            actionExecution: exactActionExecution(
+              "IMPLEMENT_REUSABLE_SUPPORT",
+              "EXECUTED",
+              "STRICT_RUNTIME_RELEASE_DEPLOYMENT_PROOF",
+            ),
+          }),
+          entry("superseded-course", "IMPLEMENT_REUSABLE_SUPPORT", {
+            claimedImplementationPaths: true,
+            newReleaseRecorded: true,
+            deploymentRecorded: true,
+            actionExecution: exactActionExecution(
+              "IMPLEMENT_REUSABLE_SUPPORT",
+              "NOT_EXECUTED",
+              "SUPERSEDED_BY_AUTHORITATIVE_SUCCESS",
+            ),
+          }),
+          entry("inspection-course", "INSPECT_PROVIDER_CONTRACT", {
+            actionExecution: exactActionExecution(
+              "INSPECT_PROVIDER_CONTRACT",
+              "UNAVAILABLE",
+              "EXACT_ACTION_MARKER_UNAVAILABLE",
+            ),
+          }),
+        ]),
+      ],
+    });
+
+    expect(result).toMatchObject({
+      selectedActionCount: 3,
+      confirmedExecutedActionCount: 1,
+      executedActionCount: null,
+      executionUnavailableCount: 1,
+    });
+    expect(result.actions.IMPLEMENT_REUSABLE_SUPPORT).toMatchObject({
+      selectedCount: 2,
+      confirmedExecutedCount: 1,
+      executedCount: 1,
+      executionUnavailableCount: 0,
+      executionAvailability: "available",
+    });
+    expect(result.actions.INSPECT_PROVIDER_CONTRACT).toMatchObject({
+      selectedCount: 1,
+      confirmedExecutedCount: 0,
+      executedCount: null,
+      executionUnavailableCount: 1,
+      executionAvailability: "unavailable",
+    });
+  });
+
+  it("fails malformed new-closeout execution markers closed", () => {
+    const batch = completedBatch([
+      entry("implementation-course", "IMPLEMENT_REUSABLE_SUPPORT", {
+        actionExecution: exactActionExecution(
+          "IMPLEMENT_REUSABLE_SUPPORT",
+          "EXECUTED",
+          "STRICT_RUNTIME_RELEASE_DEPLOYMENT_PROOF",
+        ),
+      }),
+    ]);
+    const summary = batch.summary as {
+      closeout: {
+        remediationAttempts: Array<{ actionExecution: Record<string, unknown> }>;
+      };
+    };
+    summary.closeout.remediationAttempts[0]!.actionExecution.reason =
+      "SUPERSEDED_BY_AUTHORITATIVE_SUCCESS";
+
+    const result = aggregateCourseSupportActionTelemetry({
+      now,
+      batches: [batch],
+    });
+
+    expect(result).toMatchObject({
+      selectedActionCount: 1,
+      confirmedExecutedActionCount: 0,
+      executedActionCount: null,
+      executionUnavailableCount: 1,
+      zeroExecutionTotal: null,
+      zeroExecutionUnavailableCount: 1,
     });
   });
 
@@ -259,6 +348,7 @@ type EntryOptions = Partial<ExecutionEvidence> & {
   consumed?: boolean;
   countsTowardOperationalNoProgress?: boolean;
   includeCloseout?: boolean;
+  actionExecution?: CourseSupportActionExecution;
 };
 
 type ExecutionEvidence = {
@@ -324,8 +414,19 @@ function entry(
             countsTowardOperationalNoProgress:
               options.countsTowardOperationalNoProgress ?? false,
             executionEvidence,
+            ...(options.actionExecution
+              ? { actionExecution: options.actionExecution }
+              : {}),
           },
   };
+}
+
+function exactActionExecution(
+  action: CourseSupportActionExecution["action"],
+  state: CourseSupportActionExecution["state"],
+  reason: CourseSupportActionExecution["reason"],
+): CourseSupportActionExecution {
+  return { schemaVersion: 1, action, state, reason };
 }
 
 function approachForAction(action: CourseSupportClaimAction | null) {

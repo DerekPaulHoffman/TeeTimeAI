@@ -23,6 +23,7 @@ const prismaMocks = vi.hoisted(() => ({
   courseProbeFindFirst: vi.fn(),
   courseAutomationDiscoveryFindFirst: vi.fn(),
   batchIncidentFindFirst: vi.fn(),
+  courseFindUnique: vi.fn(),
   verificationRequestFindUnique: vi.fn(),
   verificationRequestFindFirst: vi.fn(),
   verificationRequestFindMany: vi.fn(),
@@ -64,6 +65,7 @@ vi.mock("@/lib/prisma", () => ({
       updateMany: prismaMocks.batchUpdateMany
     },
     courseSupportIncident: { findMany: prismaMocks.supportIncidentFindMany },
+    course: { findUnique: prismaMocks.courseFindUnique },
     courseProbe: { findMany: prismaMocks.courseProbeFindMany },
     courseSupportVerificationRequest: {
       findMany: prismaMocks.verificationRequestFindMany
@@ -140,6 +142,7 @@ import {
   getCourseSupportBatchPacket,
   grantOwnedCourseSupportVerificationStageDeadline,
   getOwnedCourseSupportSourceSearchContext,
+  hasCourseSupportImplementationExecutionProofIncludingHistory,
   heartbeatCourseSupportBatch,
   inspectCourseSupportQueue,
   isDurableTerminalProof,
@@ -175,6 +178,41 @@ const decisionRuntimeVersion = "a".repeat(40);
 const decisionProviderFingerprint = "b".repeat(64);
 const decisionFailureFingerprint = "c".repeat(64);
 const decisionObservedFailureFingerprint = "d".repeat(64);
+
+describe("course-support implementation execution history", () => {
+  it("keeps a prior runtime-bearing deployment authoritative after a later release advance", () => {
+    const executionEver = {
+      schemaVersion: 2,
+      changedReleaseDeploymentRecorded: true,
+      providerExecutionCourseRefs: [],
+      providerExecutionAttemptCourseRefs: [],
+      terminalExecutionCourseRefs: []
+    };
+
+    expect(
+      hasCourseSupportImplementationExecutionProofIncludingHistory({
+        summary: {
+          plannedPaths: ["src/lib/tee-times/adapters/example.ts"],
+          executionEver
+        },
+        baseSha: "a".repeat(40),
+        releaseSha: "c".repeat(40),
+        deployedAt: null
+      })
+    ).toBe(true);
+    expect(
+      hasCourseSupportImplementationExecutionProofIncludingHistory({
+        summary: {
+          plannedPaths: ["docs/course-support-responder.md"],
+          executionEver
+        },
+        baseSha: "a".repeat(40),
+        releaseSha: "c".repeat(40),
+        deployedAt: null
+      })
+    ).toBe(false);
+  });
+});
 
 function decisionAttemptPair(input: {
   courseId: string;
@@ -1916,6 +1954,9 @@ const transactionClient = {
     findMany: prismaMocks.supportIncidentFindMany,
     findUnique: prismaMocks.supportIncidentFindUnique,
     updateMany: prismaMocks.supportIncidentUpdateMany,
+  },
+  course: {
+    findUnique: prismaMocks.courseFindUnique,
   },
   courseProbe: {
     findFirst: prismaMocks.courseProbeFindFirst,
@@ -10759,6 +10800,7 @@ function expiredRecoveryBatch(
         proofSnapshot: null,
         updatedAt: new Date(`2026-07-15T19:${40 + index}:00.000Z`),
         course: {
+          probes: [],
           monitoringStatus: {
             state:
               status === "AUTO_INVESTIGATING"
@@ -10772,6 +10814,7 @@ function expiredRecoveryBatch(
           status,
           resolution,
           decisionAt: status === "RESOLVED" ? updatedAt : null,
+          lastSeenAt: new Date("2026-07-15T19:20:00.000Z"),
           cycle: 2,
           activeBatchId: "batch-1",
           updatedAt,
@@ -10857,14 +10900,54 @@ function expiredPreExecutionRecoveryFixture(input: {
   return { expiredBatch, request };
 }
 
+function configureExpiredSchemaV1ImplementationRecovery(
+  expiredBatch: ReturnType<typeof expiredPreExecutionRecoveryFixture>["expiredBatch"]
+) {
+  const entry = expiredBatch.incidents[0];
+  const approach = {
+    workMode: "IMPLEMENT_REUSABLE_SUPPORT" as const,
+    strategyAction: "REPAIR_PROVIDER_ADAPTER" as const,
+    playbookStage: "OFFICIAL_IDENTITY" as const
+  };
+  expiredBatch.summary.remediation = {
+    workMode: approach.workMode,
+    strategyAction: approach.strategyAction,
+    playbookStage: approach.playbookStage,
+    allowUnchangedRuntime: false,
+    requiresImplementationPath: true,
+    reason: "IMPLEMENTATION_REQUIRED",
+    retryBudget: null,
+    attempts: [
+      {
+        courseRef: createHash("sha256").update(entry.courseId).digest("hex").slice(0, 24),
+        providerSnapshotFingerprint: "b".repeat(64),
+        failureFingerprint: expiredBatch.failureFingerprint,
+        runtimeVersion: expiredBatch.baseSha,
+        activeRealSearchCount: 0,
+        playbookEventCountAtClaim: 0,
+        reason: "IMPLEMENTATION_REQUIRED",
+        retryBudget: null,
+        approach,
+        actionPlan: {
+          schemaVersion: 1,
+          primaryAction: "IMPLEMENT_REUSABLE_SUPPORT",
+          allowedActions: ["IMPLEMENT_REUSABLE_SUPPORT"],
+          route: approach
+        }
+      }
+    ]
+  };
+  prismaMocks.courseFindUnique.mockResolvedValue(entry.course);
+  return entry;
+}
+
 function durablyClosedRecoveryFixture(input: {
   batchStatus: "SUCCEEDED" | "PARTIAL" | "RETRYABLE_FAILED";
   outcome: "success" | "classification_only" | "needs_human" | "retryable_failed";
   reportedOutcome?: "production_verification_failed";
   result: "RESTORED" | "FINAL_DISPOSITION" | "NEEDS_HUMAN" | "RETRY_SCHEDULED";
   incidentStatus: "AUTO_INVESTIGATING" | "NEEDS_HUMAN" | "RESOLVED";
-  resolution:
-    | "MONITORING_RESTORED"
+  resolution: "MONITORING_RESTORED"
     | "IDENTITY_CLASSIFIED"
     | null;
   nextAttemptAt?: Date | null;
@@ -12647,6 +12730,509 @@ describe("course-support recovery", () => {
       }),
       orchestrationRetry: expect.objectContaining({ attemptNumber: 1 }),
     });
+  });
+
+  it("persists exact action execution when safely requeueing a schema-v1 verification", async () => {
+    const requestUpdatedAt = new Date(now.getTime() - 30_000);
+    const { expiredBatch, request } = expiredPreExecutionRecoveryFixture({
+      status: "STALE",
+      updatedAt: requestUpdatedAt
+    });
+    const entry = expiredBatch.incidents[0];
+    const approach = {
+      workMode: "VERIFY_TRANSIENT" as const,
+      strategyAction: "RETRY_PROVIDER" as const,
+      playbookStage: null
+    };
+    expiredBatch.summary.remediation = {
+      workMode: approach.workMode,
+      strategyAction: approach.strategyAction,
+      playbookStage: approach.playbookStage,
+      allowUnchangedRuntime: true,
+      requiresImplementationPath: false,
+      reason: "TRANSIENT_RETRY_AVAILABLE",
+      retryBudget: null,
+      attempts: [
+        {
+          courseRef: createHash("sha256").update(entry.courseId).digest("hex").slice(0, 24),
+          providerSnapshotFingerprint: "b".repeat(64),
+          failureFingerprint: expiredBatch.failureFingerprint,
+          runtimeVersion: expiredBatch.baseSha,
+          activeRealSearchCount: 0,
+          playbookEventCountAtClaim: 0,
+          reason: "TRANSIENT_RETRY_AVAILABLE",
+          retryBudget: null,
+          approach,
+          actionPlan: {
+            schemaVersion: 1,
+            primaryAction: "VERIFY_CURRENT_RUNTIME",
+            allowedActions: ["VERIFY_CURRENT_RUNTIME"],
+            route: approach
+          }
+        }
+      ]
+    };
+    prismaMocks.batchFindUnique.mockResolvedValue(expiredBatch);
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([request]);
+    prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      recoverCourseSupportBatch({
+        batchId: expiredBatch.id,
+        requestingThreadId: "new-thread",
+        currentBranch: "fix/unrelated-head",
+        currentHeadSha: "b".repeat(40),
+        dirtyPaths: [],
+        releaseIsPublished: false,
+        baseIsAncestor: false,
+        now
+      })
+    ).resolves.toMatchObject({
+      outcome: "retryable_failed",
+      safelyRequeued: true,
+      durableCloseoutRecorded: true,
+      nextAttemptAt: new Date(now.getTime() + 15 * 60_000).toISOString()
+    });
+
+    const persistedAttempt =
+      prismaMocks.batchUpdateMany.mock.calls[0]?.[0]?.data?.summary?.closeout
+        ?.remediationAttempts?.[0];
+    expect(persistedAttempt?.actionExecution).toEqual({
+      schemaVersion: 1,
+      action: "VERIFY_CURRENT_RUNTIME",
+      state: "NOT_EXECUTED",
+      reason: "CURRENT_RUNTIME_PROOF_MISSING"
+    });
+    expect(persistedAttempt?.orchestrationRetry).toMatchObject({
+      attemptNumber: 1,
+      retryAt: new Date(now.getTime() + 15 * 60_000).toISOString()
+    });
+  });
+
+  it("durably parks expired schema-v1 implementation without scheduling a retry", async () => {
+    const { expiredBatch, request } = expiredPreExecutionRecoveryFixture({
+      status: "STALE",
+      updatedAt: new Date(now.getTime() - 30_000)
+    });
+    configureExpiredSchemaV1ImplementationRecovery(expiredBatch);
+    expiredBatch.ownerAutomationRunId = "run-stopped-implementation";
+    prismaMocks.batchFindUnique.mockResolvedValue(expiredBatch);
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([request]);
+    prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      recoverCourseSupportBatch({
+        batchId: expiredBatch.id,
+        requestingThreadId: "new-thread",
+        currentBranch: "fix/unrelated-head",
+        currentHeadSha: "b".repeat(40),
+        dirtyPaths: [],
+        releaseIsPublished: false,
+        baseIsAncestor: false,
+        now
+      })
+    ).resolves.toMatchObject({
+      outcome: "needs_human",
+      safelyRequeued: false,
+      implementationStoppedCount: 1,
+      durableCloseoutRecorded: true,
+      nextAttemptAt: null
+    });
+
+    expect(prismaMocks.batchUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "PARTIAL",
+          completedAt: now,
+          summary: expect.objectContaining({
+            closeout: expect.objectContaining({
+              outcome: "needs_human",
+              derivedOutcome: "needs_human",
+              retryCount: 0,
+              needsHumanCount: 1,
+              orchestrationOnlyCount: 0,
+              orchestrationOnlyCourseRefs: [],
+              reason: "expired_implementation_stopped_without_proof"
+            })
+          })
+        })
+      })
+    );
+    const persistedAttempt =
+      prismaMocks.batchUpdateMany.mock.calls[0]?.[0]?.data?.summary?.closeout
+        ?.remediationAttempts?.[0];
+    expect(persistedAttempt).toMatchObject({
+      consumed: false,
+      countsTowardOperationalNoProgress: true,
+      orchestrationRetry: null,
+      actionExecution: {
+        schemaVersion: 1,
+        action: "IMPLEMENT_REUSABLE_SUPPORT",
+        state: "NOT_EXECUTED",
+        reason: "IMPLEMENTATION_PROOF_MISSING"
+      }
+    });
+    expect(prismaMocks.incidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          result: "NEEDS_HUMAN"
+        })
+      })
+    );
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "NEEDS_HUMAN",
+          activeBatchId: null,
+          nextAttemptAt: null,
+          humanReviewReason: "AUTOMATION_STALLED"
+        })
+      })
+    );
+    expect(prismaMocks.monitoringStatusUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          state: "ENGINEERING_VERIFICATION_NEEDED",
+          nextAutomaticAttemptAt: null,
+          revalidationRequestedAt: null
+        })
+      })
+    );
+    expect(prismaMocks.automationRunUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          id: "run-stopped-implementation",
+          completedAt: null
+        },
+        data: expect.objectContaining({
+          status: "FAILED",
+          outcome: "needs_human"
+        })
+      })
+    );
+  });
+
+  it("requeues expired schema-v1 implementation when fresh authoritative success supersedes it", async () => {
+    const { expiredBatch, request } = expiredPreExecutionRecoveryFixture({
+      status: "STALE",
+      updatedAt: new Date(now.getTime() - 30_000)
+    });
+    const entry = configureExpiredSchemaV1ImplementationRecovery(expiredBatch);
+    entry.course.probes = [
+      {
+        id: "fresh-recovery-success-probe",
+        outcome: "NO_MATCH",
+        observedAt: new Date(now.getTime() - 10_000),
+        runtimeVersion: expiredBatch.baseSha,
+        rawSummary: { providerExecution: "RUNNABLE_PROVIDER_CHECK" }
+      }
+    ];
+    entry.incident.lastSeenAt = new Date(now.getTime() - 2 * 60_000);
+    prismaMocks.batchFindUnique.mockResolvedValue(expiredBatch);
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([request]);
+    prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      recoverCourseSupportBatch({
+        batchId: expiredBatch.id,
+        requestingThreadId: "new-thread",
+        currentBranch: "fix/unrelated-head",
+        currentHeadSha: "b".repeat(40),
+        dirtyPaths: [],
+        releaseIsPublished: false,
+        baseIsAncestor: false,
+        now
+      })
+    ).resolves.toMatchObject({
+      outcome: "retryable_failed",
+      safelyRequeued: true,
+      implementationStoppedCount: 0,
+      durableCloseoutRecorded: true,
+      nextAttemptAt: new Date(now.getTime() + 60_000).toISOString()
+    });
+
+    const persistedAttempt =
+      prismaMocks.batchUpdateMany.mock.calls[0]?.[0]?.data?.summary?.closeout
+        ?.remediationAttempts?.[0];
+    expect(persistedAttempt).toMatchObject({
+      consumed: false,
+      countsTowardOperationalNoProgress: false,
+      orchestrationRetry: null,
+      actionExecution: {
+        schemaVersion: 1,
+        action: "IMPLEMENT_REUSABLE_SUPPORT",
+        state: "NOT_EXECUTED",
+        reason: "SUPERSEDED_BY_AUTHORITATIVE_SUCCESS"
+      }
+    });
+    expect(prismaMocks.incidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ result: "RETRY_SCHEDULED" })
+      })
+    );
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          activeBatchId: null,
+          nextAttemptAt: new Date(now.getTime() + 60_000)
+        })
+      })
+    );
+    expect(prismaMocks.monitoringStatusUpdateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ state: "ENGINEERING_VERIFICATION_NEEDED" })
+      })
+    );
+  });
+
+  it("requeues expired schema-v1 implementation when a material provider change supersedes it", async () => {
+    const { expiredBatch, request } = expiredPreExecutionRecoveryFixture({
+      status: "STALE",
+      updatedAt: new Date(now.getTime() - 30_000)
+    });
+    configureExpiredSchemaV1ImplementationRecovery(expiredBatch);
+    verificationMocks.buildCourseSupportProviderSnapshotFingerprint.mockReturnValue(
+      "c".repeat(64)
+    );
+    prismaMocks.batchFindUnique.mockResolvedValue(expiredBatch);
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([request]);
+    prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      recoverCourseSupportBatch({
+        batchId: expiredBatch.id,
+        requestingThreadId: "new-thread",
+        currentBranch: "fix/unrelated-head",
+        currentHeadSha: "b".repeat(40),
+        dirtyPaths: [],
+        releaseIsPublished: false,
+        baseIsAncestor: false,
+        now
+      })
+    ).resolves.toMatchObject({
+      outcome: "retryable_failed",
+      safelyRequeued: true,
+      implementationStoppedCount: 0,
+      durableCloseoutRecorded: true,
+      nextAttemptAt: new Date(now.getTime() + 60_000).toISOString()
+    });
+
+    const persistedAttempt =
+      prismaMocks.batchUpdateMany.mock.calls[0]?.[0]?.data?.summary?.closeout
+        ?.remediationAttempts?.[0];
+    expect(persistedAttempt).toMatchObject({
+      consumed: false,
+      countsTowardOperationalNoProgress: false,
+      orchestrationRetry: null,
+      actionExecution: {
+        schemaVersion: 1,
+        action: "IMPLEMENT_REUSABLE_SUPPORT",
+        state: "NOT_EXECUTED",
+        reason: "SUPERSEDED_BY_MATERIAL_CHANGE"
+      }
+    });
+    expect(prismaMocks.incidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ result: "RETRY_SCHEDULED" })
+      })
+    );
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          activeBatchId: null,
+          nextAttemptAt: new Date(now.getTime() + 60_000)
+        })
+      })
+    );
+    expect(prismaMocks.monitoringStatusUpdateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ state: "ENGINEERING_VERIFICATION_NEEDED" })
+      })
+    );
+  });
+
+  it("aborts schema-v1 implementation recovery when authoritative success appears during the transaction reread", async () => {
+    const { expiredBatch, request } = expiredPreExecutionRecoveryFixture({
+      status: "STALE",
+      updatedAt: new Date(now.getTime() - 30_000)
+    });
+    const entry = configureExpiredSchemaV1ImplementationRecovery(expiredBatch);
+    entry.incident.lastSeenAt = new Date(now.getTime() - 2 * 60_000);
+    prismaMocks.courseFindUnique.mockResolvedValue({
+      ...entry.course,
+      probes: [
+        {
+          id: "concurrent-recovery-success-probe",
+          outcome: "NO_MATCH",
+          observedAt: new Date(now.getTime() - 10_000),
+          runtimeVersion: expiredBatch.baseSha,
+          rawSummary: { providerExecution: "RUNNABLE_PROVIDER_CHECK" }
+        }
+      ]
+    });
+    prismaMocks.batchFindUnique.mockResolvedValue(expiredBatch);
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([request]);
+    prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      recoverCourseSupportBatch({
+        batchId: expiredBatch.id,
+        requestingThreadId: "new-thread",
+        currentBranch: "fix/unrelated-head",
+        currentHeadSha: "b".repeat(40),
+        dirtyPaths: [],
+        releaseIsPublished: false,
+        baseIsAncestor: false,
+        now
+      })
+    ).rejects.toThrow(
+      "implementation supersession evidence changed during safe requeue"
+    );
+
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("aborts schema-v1 implementation recovery when material provider supersession changes during the transaction reread", async () => {
+    const { expiredBatch, request } = expiredPreExecutionRecoveryFixture({
+      status: "STALE",
+      updatedAt: new Date(now.getTime() - 30_000)
+    });
+    const entry = configureExpiredSchemaV1ImplementationRecovery(expiredBatch);
+    const currentCourse = {
+      ...entry.course,
+      providerFamilyKey: "CONCURRENT_PROVIDER_FAMILY"
+    };
+    verificationMocks.buildCourseSupportProviderSnapshotFingerprint.mockImplementation(
+      (course: unknown) =>
+        course === currentCourse ? "c".repeat(64) : "b".repeat(64)
+    );
+    prismaMocks.courseFindUnique.mockResolvedValue(currentCourse);
+    prismaMocks.batchFindUnique.mockResolvedValue(expiredBatch);
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([request]);
+    prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      recoverCourseSupportBatch({
+        batchId: expiredBatch.id,
+        requestingThreadId: "new-thread",
+        currentBranch: "fix/unrelated-head",
+        currentHeadSha: "b".repeat(40),
+        dirtyPaths: [],
+        releaseIsPublished: false,
+        baseIsAncestor: false,
+        now
+      })
+    ).rejects.toThrow(
+      "implementation supersession evidence changed during safe requeue"
+    );
+
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("aborts stopped implementation recovery when terminal request evidence changes", async () => {
+    const initialUpdatedAt = new Date(now.getTime() - 60_000);
+    const { expiredBatch, request } = expiredPreExecutionRecoveryFixture({
+      status: "STALE",
+      updatedAt: initialUpdatedAt
+    });
+    configureExpiredSchemaV1ImplementationRecovery(expiredBatch);
+    const freshRequest = {
+      ...request,
+      revision: request.revision + 1,
+      lastError: "new_terminal_evidence",
+      updatedAt: new Date(now.getTime() - 10_000)
+    };
+    prismaMocks.batchFindUnique.mockResolvedValue(expiredBatch);
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([freshRequest]);
+
+    await expect(
+      recoverCourseSupportBatch({
+        batchId: expiredBatch.id,
+        requestingThreadId: "new-thread",
+        currentBranch: "fix/unrelated-head",
+        currentHeadSha: "b".repeat(40),
+        dirtyPaths: [],
+        releaseIsPublished: false,
+        baseIsAncestor: false,
+        now
+      })
+    ).rejects.toThrow("execution changed during safe responder requeue");
+
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("aborts stopped implementation recovery when monitoring CAS loses", async () => {
+    const { expiredBatch, request } = expiredPreExecutionRecoveryFixture({
+      status: "STALE",
+      updatedAt: new Date(now.getTime() - 30_000)
+    });
+    configureExpiredSchemaV1ImplementationRecovery(expiredBatch);
+    prismaMocks.batchFindUnique.mockResolvedValue(expiredBatch);
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([request]);
+    prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.monitoringStatusUpdateMany.mockResolvedValue({ count: 0 });
+
+    await expect(
+      recoverCourseSupportBatch({
+        batchId: expiredBatch.id,
+        requestingThreadId: "new-thread",
+        currentBranch: "fix/unrelated-head",
+        currentHeadSha: "b".repeat(40),
+        dirtyPaths: [],
+        releaseIsPublished: false,
+        baseIsAncestor: false,
+        now
+      })
+    ).rejects.toThrow("Course monitoring changed while stopping unproven implementation work");
+
+    expect(prismaMocks.automationRunUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("aborts stopped implementation recovery when the owner run CAS loses", async () => {
+    const { expiredBatch, request } = expiredPreExecutionRecoveryFixture({
+      status: "STALE",
+      updatedAt: new Date(now.getTime() - 30_000)
+    });
+    configureExpiredSchemaV1ImplementationRecovery(expiredBatch);
+    expiredBatch.ownerAutomationRunId = "run-stopped-implementation-raced";
+    prismaMocks.batchFindUnique.mockResolvedValue(expiredBatch);
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([request]);
+    prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.automationRunUpdateMany.mockResolvedValue({ count: 0 });
+
+    await expect(
+      recoverCourseSupportBatch({
+        batchId: expiredBatch.id,
+        requestingThreadId: "new-thread",
+        currentBranch: "fix/unrelated-head",
+        currentHeadSha: "b".repeat(40),
+        dirtyPaths: [],
+        releaseIsPublished: false,
+        baseIsAncestor: false,
+        now
+      })
+    ).rejects.toThrow("Expired responder automation run changed during safe requeue");
   });
 
   it("aborts safe requeue when a terminal request becomes CHECKING in the serializable reread", async () => {
@@ -16018,6 +16604,67 @@ describe("course-support release heartbeat persistence", () => {
     expect(prismaMocks.queryRaw).not.toHaveBeenCalled();
   });
 
+  it("records a bounded owner failure checkpoint without closing the batch", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue({
+      ...ownedBatch(),
+      status: "VERIFYING",
+      summary: {
+        branch,
+        plannedPaths: ["src/lib/provider.ts"],
+        ownerFailureCheckpoints: [
+          {
+            schemaVersion: 1,
+            recordedAt: "2026-07-15T20:00:00.000Z",
+            stage: "VERIFICATION",
+            failureDomain: "SLA",
+            reasonCode: "VERIFICATION_TOOLING_FAILED"
+          }
+        ]
+      }
+    });
+    prismaMocks.batchFindMany.mockResolvedValue([]);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      heartbeatCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        status: "VERIFYING",
+        ownerFailureCheckpoint: {
+          stage: "DEPLOYMENT_WAIT",
+          failureDomain: "DEPLOYMENT",
+          reasonCode: "DEPLOYMENT_TIMEOUT"
+        },
+        now
+      })
+    ).resolves.toMatchObject({
+      outcome: "ready",
+      heartbeatRecorded: true,
+      status: "VERIFYING"
+    });
+
+    expect(prismaMocks.batchUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "VERIFYING",
+          summary: expect.objectContaining({
+            ownerFailureCheckpoints: [
+              expect.objectContaining({ stage: "VERIFICATION" }),
+              {
+                schemaVersion: 1,
+                recordedAt: now.toISOString(),
+                stage: "DEPLOYMENT_WAIT",
+                failureDomain: "DEPLOYMENT",
+                reasonCode: "DEPLOYMENT_TIMEOUT"
+              }
+            ]
+          })
+        })
+      })
+    );
+  });
+
   it("keeps a no-path verification heartbeat concurrent with a checkout owner", async () => {
     prismaMocks.batchFindFirst.mockResolvedValue({
       ...ownedBatch(),
@@ -16784,6 +17431,125 @@ describe("detached verification atomic batch fences", () => {
       Record<string, unknown> | undefined;
   }
 
+  it("does not persist verification after ownership cancellation reaches an in-flight transaction", async () => {
+    const controller = new AbortController();
+    const ownershipLost = new Error("Responder ownership renewal failed.");
+    let releaseTransaction = () => undefined;
+    const transactionGate = new Promise<void>((resolve) => {
+      releaseTransaction = resolve;
+    });
+    prismaMocks.batchFindFirst.mockResolvedValue(verificationBatch());
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.transaction.mockImplementationOnce(
+      async (
+        worker: (
+          transaction: typeof monitoringTransactionClient,
+        ) => Promise<unknown>,
+      ) => {
+        await transactionGate;
+        return worker(monitoringTransactionClient);
+      },
+    );
+
+    const verification = verifyCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      releaseSha,
+      signal: controller.signal,
+      now,
+    });
+    await vi.waitFor(() => {
+      expect(prismaMocks.transaction).toHaveBeenCalledOnce();
+    });
+
+    controller.abort(ownershipLost);
+    releaseTransaction();
+
+    await expect(verification).rejects.toBe(ownershipLost);
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.incidentUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.monitoringEventCreateMany).not.toHaveBeenCalled();
+    expect(
+      verificationMocks.scheduleCourseSupportVerificationRequests,
+    ).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      verificationWatchMode: "WATCH_SETTLED" as const,
+      result: "RESTORED" as const,
+      requestedOutcome: undefined,
+      failureDomain: undefined,
+    },
+    {
+      verificationWatchMode: "EARLY_RETRY" as const,
+      result: "PENDING" as const,
+      requestedOutcome: "blocked_env" as const,
+      failureDomain: "ENV" as const,
+    },
+  ])(
+    "does not persist $verificationWatchMode closeout after ownership cancellation reaches an in-flight transaction",
+    async (scenario) => {
+      const controller = new AbortController();
+      const ownershipLost = new Error("Responder ownership renewal failed.");
+      let releaseTransaction = () => undefined;
+      const transactionGate = new Promise<void>((resolve) => {
+        releaseTransaction = resolve;
+      });
+      prismaMocks.batchFindFirst.mockResolvedValue(
+        closeoutBatch(scenario.result),
+      );
+      prismaMocks.verificationRequestFindUnique.mockResolvedValue(
+        atomicRequest(),
+      );
+      prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+      prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+      prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+      prismaMocks.transaction.mockImplementationOnce(
+        async (
+          worker: (
+            transaction: typeof monitoringTransactionClient,
+          ) => Promise<unknown>,
+        ) => {
+          await transactionGate;
+          return worker(monitoringTransactionClient);
+        },
+      );
+
+      const closeout = closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        verificationWatchMode: scenario.verificationWatchMode,
+        ...(scenario.requestedOutcome
+          ? {
+              requestedOutcome: scenario.requestedOutcome,
+              failureDomain: scenario.failureDomain,
+            }
+          : {}),
+        signal: controller.signal,
+        now,
+      });
+      await vi.waitFor(() => {
+        expect(prismaMocks.transaction).toHaveBeenCalledOnce();
+      });
+
+      controller.abort(ownershipLost);
+      releaseTransaction();
+
+      await expect(closeout).rejects.toBe(ownershipLost);
+      expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+      expect(prismaMocks.incidentUpdateMany).not.toHaveBeenCalled();
+      expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+      expect(prismaMocks.monitoringStatusUpdateMany).not.toHaveBeenCalled();
+      expect(prismaMocks.monitoringEventCreate).not.toHaveBeenCalled();
+      expect(prismaMocks.verificationRequestUpdateMany).not.toHaveBeenCalled();
+      expect(prismaMocks.automationRunUpdateMany).not.toHaveBeenCalled();
+    },
+  );
+
   function batchSearchDispatch(
     searchRef: string,
     probe: {
@@ -16875,8 +17641,7 @@ describe("detached verification atomic batch fences", () => {
 
   function productionFailureCooldownBatch(input: {
     incidentFailureClass: "MISSING_METADATA" | "HTTP_5XX";
-    observedFailureClass:
-      | "MISSING_SOURCE"
+    observedFailureClass: "MISSING_SOURCE"
       | "MISSING_METADATA"
       | "HTTP_5XX"
       | "SCHEMA";
@@ -17562,6 +18327,12 @@ describe("detached verification atomic batch fences", () => {
       observedProviderSnapshotFingerprint: observedProviderFingerprint,
       failureFingerprint: priorFailureFingerprint,
       observedFailureFingerprint: priorFailureFingerprint,
+      actionExecution: {
+        schemaVersion: 1,
+        action: "IMPLEMENT_REUSABLE_SUPPORT",
+        state: "NOT_EXECUTED",
+        reason: "SUPERSEDED_BY_MATERIAL_CHANGE"
+      }
     });
     expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -21936,6 +22707,15 @@ describe("detached verification atomic batch fences", () => {
         }),
       }),
     );
+    const persistedAttempt =
+      prismaMocks.batchUpdateMany.mock.calls[0]?.[0]?.data?.summary?.closeout
+        ?.remediationAttempts?.[0];
+    expect(persistedAttempt?.actionExecution).toEqual({
+      schemaVersion: 1,
+      action: "IMPLEMENT_REUSABLE_SUPPORT",
+      state: "NOT_EXECUTED",
+      reason: "SUPERSEDED_BY_AUTHORITATIVE_SUCCESS"
+    });
   });
 
   it("still requires implementation when only one entry in a mixed batch has authoritative success", async () => {
@@ -24607,7 +25387,7 @@ describe("detached verification atomic batch fences", () => {
     batch.summary = {
       ...healthyDetachedDispatch(),
       searchExecutionFence: emptySearchExecutionFence(),
-      plannedPaths: ["src/lib/tee-times/adapters/example.ts"],
+      plannedPaths: ["docs/course-support-provider-notes/example.md"],
       remediation: {
         attempts: [
           {
@@ -24672,7 +25452,7 @@ describe("detached verification atomic batch fences", () => {
             retryAt: new Date(now.getTime() + 15 * 60_000).toISOString(),
           }),
           executionEvidence: expect.objectContaining({
-            claimedImplementationPaths: true,
+            claimedImplementationPaths: false,
             newReleaseRecorded: false,
             deploymentRecorded: false,
             providerAttemptRecorded: false,
@@ -24955,21 +25735,55 @@ describe("detached verification atomic batch fences", () => {
 
   it("consumes a deployed implementation that later fails production verification", async () => {
     const batch = closeoutBatch("PENDING");
-    batch.baseSha = "c".repeat(40);
+    const baseSha = "c".repeat(40);
+    const branch = "automation/course-support-example";
+    const runtimePath = "src/lib/tee-times/adapters/example.ts";
+    batch.baseSha = baseSha;
     batch.incidents[0].incident.escalationDeadlineAt = new Date(now.getTime() + 10 * 60_000);
     batch.summary = {
       ...healthyDetachedDispatch(),
-      plannedPaths: ["src/lib/tee-times/adapters/example.ts"],
+      branch,
+      plannedPaths: [runtimePath],
+      releaseProvenance: {
+        schemaVersion: 1,
+        fromSha: baseSha,
+        toSha: releaseSha,
+        branch,
+        committedPaths: [runtimePath],
+        descendantVerified: true
+      },
       remediation: {
+        workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+        strategyAction: "REPAIR_PROVIDER_ADAPTER",
+        playbookStage: "TYPED_ADAPTER",
+        allowUnchangedRuntime: false,
+        requiresImplementationPath: true,
+        reason: "IMPLEMENTATION_REQUIRED",
+        retryBudget: null,
         attempts: [
           {
             courseRef: createHash("sha256").update("course-1").digest("hex").slice(0, 24),
             providerSnapshotFingerprint: providerFingerprint,
+            failureFingerprint: batch.incidents[0].incident.failureFingerprint,
+            runtimeVersion: batch.baseSha,
+            activeRealSearchCount: 0,
             playbookEventCountAtClaim: 0,
+            reason: "IMPLEMENTATION_REQUIRED",
+            retryBudget: null,
             approach: {
               workMode: "IMPLEMENT_REUSABLE_SUPPORT",
               strategyAction: "REPAIR_PROVIDER_ADAPTER",
               playbookStage: "TYPED_ADAPTER"
+            },
+            actionPlan: {
+              schemaVersion: 1,
+              primaryAction: "IMPLEMENT_REUSABLE_SUPPORT",
+              allowedActions: ["IMPLEMENT_REUSABLE_SUPPORT"],
+              route: {
+                workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+                strategyAction: "REPAIR_PROVIDER_ADAPTER",
+                playbookStage: "TYPED_ADAPTER"
+              }
             }
           }
         ]
@@ -25009,7 +25823,13 @@ describe("detached verification atomic batch fences", () => {
             claimedImplementationPaths: true,
             newReleaseRecorded: true,
             deploymentRecorded: true
-          })
+          }),
+          actionExecution: {
+            schemaVersion: 1,
+            action: "IMPLEMENT_REUSABLE_SUPPORT",
+            state: "EXECUTED",
+            reason: "STRICT_RUNTIME_RELEASE_DEPLOYMENT_PROOF"
+          }
         })
       ]
     });
@@ -25019,12 +25839,16 @@ describe("detached verification atomic batch fences", () => {
     {
       label: "does not consume an unrelated newer probe",
       proofRuntimeVersion: "d".repeat(40),
-      expectedConsumed: false
+      expectedConsumed: false,
+      expectedActionState: "NOT_EXECUTED",
+      expectedActionReason: "CURRENT_RUNTIME_PROOF_MISSING"
     },
     {
       label: "consumes current provider execution proof",
       proofRuntimeVersion: "c".repeat(40),
-      expectedConsumed: true
+      expectedConsumed: true,
+      expectedActionState: "EXECUTED",
+      expectedActionReason: "CURRENT_RUNTIME_PROOF_RECORDED"
     }
   ])("$label during an operational closeout", async (testCase) => {
     const batch = closeoutBatch("PENDING");
@@ -25044,15 +25868,37 @@ describe("detached verification atomic batch fences", () => {
     batch.summary = {
       plannedPaths: [],
       remediation: {
+        workMode: "VERIFY_TRANSIENT",
+        strategyAction: "RETRY_PROVIDER",
+        playbookStage: null,
+        allowUnchangedRuntime: true,
+        requiresImplementationPath: false,
+        reason: "TRANSIENT_RETRY_AVAILABLE",
+        retryBudget: null,
         attempts: [
           {
             courseRef: createHash("sha256").update("course-1").digest("hex").slice(0, 24),
             providerSnapshotFingerprint: providerFingerprint,
+            failureFingerprint: batch.incidents[0].incident.failureFingerprint,
+            runtimeVersion: batch.baseSha,
+            activeRealSearchCount: 0,
             playbookEventCountAtClaim: 0,
+            reason: "TRANSIENT_RETRY_AVAILABLE",
+            retryBudget: null,
             approach: {
               workMode: "VERIFY_TRANSIENT",
               strategyAction: "RETRY_PROVIDER",
               playbookStage: null
+            },
+            actionPlan: {
+              schemaVersion: 1,
+              primaryAction: "VERIFY_CURRENT_RUNTIME",
+              allowedActions: ["VERIFY_CURRENT_RUNTIME"],
+              route: {
+                workMode: "VERIFY_TRANSIENT",
+                strategyAction: "RETRY_PROVIDER",
+                playbookStage: null
+              }
             }
           }
         ]
@@ -25086,7 +25932,13 @@ describe("detached verification atomic batch fences", () => {
         postProbeRecorded: true,
         providerAttemptRecorded: testCase.expectedConsumed,
         providerExecutionAttemptRecorded: true,
-      })
+      }),
+      actionExecution: {
+        schemaVersion: 1,
+        action: "VERIFY_CURRENT_RUNTIME",
+        state: testCase.expectedActionState,
+        reason: testCase.expectedActionReason
+      }
     });
     expect(persistedAttempt?.orchestrationRetry).toBeNull();
   });

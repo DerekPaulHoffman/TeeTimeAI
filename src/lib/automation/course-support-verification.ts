@@ -255,13 +255,16 @@ export async function scheduleCourseSupportVerificationRequests(input: {
   batchId: string;
   releaseSha: string;
   batchIncidentIds?: readonly string[];
+  signal?: AbortSignal;
   now?: Date;
 }) {
+  input.signal?.throwIfAborted();
   const now = validDate(input.now ?? new Date(), "schedule time");
   const releaseSha = validateReleaseSha(input.releaseSha);
 
   return prisma.$transaction(
     async (transaction) => {
+      input.signal?.throwIfAborted();
       const batch = await transaction.courseSupportBatch.findUnique({
         where: { id: input.batchId },
         select: {
@@ -418,12 +421,15 @@ export async function scheduleCourseSupportVerificationRequests(input: {
         });
       }
 
-      const created = eligible.length
-        ? await transaction.courseSupportVerificationRequest.createMany({
+      let created = { count: 0 };
+      if (eligible.length) {
+        input.signal?.throwIfAborted();
+        created =
+          await transaction.courseSupportVerificationRequest.createMany({
             data: eligible,
             skipDuplicates: true,
-          })
-        : { count: 0 };
+          });
+      }
 
       for (const entry of deadlineCaps) {
         const ownershipFence = {
@@ -442,6 +448,7 @@ export async function scheduleCourseSupportVerificationRequests(input: {
             },
           },
         };
+        input.signal?.throwIfAborted();
         await transaction.courseSupportVerificationRequest.updateMany({
           where: {
             ...ownershipFence,
@@ -460,6 +467,7 @@ export async function scheduleCourseSupportVerificationRequests(input: {
             updatedAt: now,
           },
         });
+        input.signal?.throwIfAborted();
         await transaction.courseSupportVerificationRequest.updateMany({
           where: {
             ...ownershipFence,
@@ -474,6 +482,7 @@ export async function scheduleCourseSupportVerificationRequests(input: {
       }
 
       for (const entry of endpointExpired) {
+        input.signal?.throwIfAborted();
         await transaction.courseSupportVerificationRequest.updateMany({
           where: {
             batchIncidentId: entry.batchIncidentId,
@@ -525,6 +534,7 @@ export async function scheduleCourseSupportVerificationRequests(input: {
           })
         : [];
 
+      input.signal?.throwIfAborted();
       return {
         createdCount: created.count,
         eligibleCount: eligible.length,

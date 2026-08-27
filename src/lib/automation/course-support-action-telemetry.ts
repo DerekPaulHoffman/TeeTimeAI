@@ -4,6 +4,10 @@ import {
   COURSE_SUPPORT_CLAIM_ACTIONS,
   type CourseSupportClaimAction,
 } from "./course-support-action-plan";
+import {
+  parseCourseSupportActionExecution,
+  type CourseSupportActionExecution,
+} from "./course-support-action-execution";
 import { readCourseSupportRemediationClaimAttempt } from "./course-support-batches";
 import { isCourseSupportCompletedBatchOrchestrationOnly } from "./course-support-zero-execution";
 
@@ -231,6 +235,7 @@ function selectedActionMatchesClaimWorkMode(input: {
 type ExactCloseoutAttempt = {
   value: Record<string, unknown>;
   executionEvidence: ExecutionEvidence;
+  actionExecution: CourseSupportActionExecution | null;
 };
 
 function readExactCloseoutAttempt(
@@ -263,9 +268,20 @@ function readExactCloseoutAttempt(
   ) {
     return null;
   }
+  const actionExecutionWasPersisted = Object.prototype.hasOwnProperty.call(
+    attempt,
+    "actionExecution",
+  );
+  const actionExecution = actionExecutionWasPersisted
+    ? parseCourseSupportActionExecution(attempt.actionExecution)
+    : null;
+  if (actionExecutionWasPersisted && !actionExecution) {
+    return null;
+  }
   return {
     value: attempt,
     executionEvidence: executionEvidence as ExecutionEvidence,
+    actionExecution,
   };
 }
 
@@ -306,6 +322,17 @@ function classifySelectedActionExecution(input: {
   zeroExecution: boolean | null;
 }): boolean | null {
   if (!input.closeout) return null;
+  if (input.closeout.actionExecution) {
+    if (input.closeout.actionExecution.action !== input.action) return null;
+    switch (input.closeout.actionExecution.state) {
+      case "EXECUTED":
+        return true;
+      case "NOT_EXECUTED":
+        return false;
+      case "UNAVAILABLE":
+        return null;
+    }
+  }
   const evidence = input.closeout.executionEvidence;
   switch (input.action) {
     case "VERIFY_CURRENT_RUNTIME":

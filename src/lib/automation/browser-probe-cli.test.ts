@@ -1,14 +1,22 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  classifyPersistableBrowserStageFailure,
+  closeBrowserProbeResourceOnAbort,
+  createBrowserProbeResourceCloser,
+  finishBrowserProbeAutomationRunAfterFailure,
+  getPersistableBrowserOperationFailure,
   getFreshRenderedCorroborationEvidence,
   recordOwnedBrowserStageAfterCourseProjection,
   resolveBrowserInvestigationMode,
   resolveBrowserProbeRuntimeVersion,
   resolveBrowserProbeTargetSelection,
+  runAbortAwareBrowserOperation,
   runBrowserProbeCli,
+  runPersistableBrowserOperation
 } from "../../../scripts/automation/browser-probe-needed-adapters";
 import { getAutomationRuntimeVersion } from "./runtime-version";
+import { runWithProviderRequestLease } from "./provider-request-lease";
 
 const releaseSha = "a".repeat(40);
 const persistenceFence = {
@@ -125,6 +133,200 @@ describe("browser probe direct entry", () => {
     });
 
     expect(recordTransition).toHaveBeenCalledOnce();
+  });
+
+  it("classifies only identified Playwright and network failures as browser-stage attempts", () => {
+    const playwrightTimeout = Object.assign(new Error("page.goto: Timeout 20000ms exceeded."), {
+      name: "TimeoutError",
+      stack:
+        "TimeoutError: page.goto: Timeout 20000ms exceeded.\n    at node_modules/playwright-core/lib/client/frame.js:1:1"
+    });
+    const playwrightNetwork = new Error(
+      "page.goto: net::ERR_NAME_NOT_RESOLVED at https://public.example/"
+    );
+    const nodeNetwork = Object.assign(new TypeError("fetch failed"), {
+      cause: { code: "ECONNRESET" }
+    });
+
+    expect(classifyPersistableBrowserStageFailure(playwrightTimeout)).toBe("TIMEOUT");
+    expect(classifyPersistableBrowserStageFailure(playwrightNetwork)).toBe("NETWORK");
+    expect(classifyPersistableBrowserStageFailure(nodeNetwork)).toBe("NETWORK");
+    expect(classifyPersistableBrowserStageFailure(nodeNetwork, false)).toBeNull();
+  });
+
+  it.each([
+    new SyntaxError("Unexpected string"),
+    Object.assign(new SyntaxError("Unexpected string"), {
+      cause: { code: "ECONNRESET" }
+    }),
+    new TypeError("Cannot read properties of undefined"),
+    new Error("Course-support browser progression lost current ownership."),
+    new Error("Course-support browser persistence violated an invariant."),
+    Object.assign(new Error("Operation exceeded its deadline."), {
+      name: "TimeoutError"
+    }),
+    new Error("page.goto: provider response violated an invariant"),
+    "unknown browser failure"
+  ])("does not turn programming or control-plane errors into progress", (error) => {
+    expect(classifyPersistableBrowserStageFailure(error)).toBeNull();
+  });
+
+  it("does not turn provider-lease persistence network errors into browser progress", async () => {
+    const persistenceError = Object.assign(new Error("Provider lease release failed"), {
+      cause: { code: "ECONNRESET" }
+    });
+    const browserWorker = vi.fn(async () => "browser evidence");
+    let caught: unknown;
+
+    try {
+      await runWithProviderRequestLease(
+        "provider-family",
+        () => runPersistableBrowserOperation(browserWorker),
+        {
+          claim: vi.fn(async () => ({
+            providerFamilyKey: "provider-family",
+            globalSlot: 0,
+            leaseToken: "lease-token"
+          })),
+          renew: vi.fn(async () => true),
+          release: vi.fn(async () => {
+            throw persistenceError;
+          }),
+          wait: vi.fn(async () => undefined)
+        }
+      );
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(browserWorker).toHaveBeenCalledOnce();
+    expect(caught).toBe(persistenceError);
+    expect(getPersistableBrowserOperationFailure(caught)).toBeNull();
+  });
+
+  it("tags a transient failure only when it comes from the browser worker", async () => {
+    const browserFailure = Object.assign(new TypeError("fetch failed"), {
+      cause: { code: "ECONNRESET" }
+    });
+    let caught: unknown;
+
+    try {
+      await runWithProviderRequestLease(
+        "provider-family",
+        () =>
+          runPersistableBrowserOperation(async () => {
+            throw browserFailure;
+          }),
+        {
+          claim: vi.fn(async () => ({
+            providerFamilyKey: "provider-family",
+            globalSlot: 0,
+            leaseToken: "lease-token"
+          })),
+          renew: vi.fn(async () => true),
+          release: vi.fn(async () => undefined),
+          wait: vi.fn(async () => undefined)
+        }
+      );
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(getPersistableBrowserOperationFailure(caught)).toBe("NETWORK");
+  });
+
+  it("closes browser resources exactly once while abort cleanup is repeated", async () => {
+    const browser = { close: vi.fn(async () => undefined) };
+    const context = { close: vi.fn(async () => undefined) };
+    const closeBrowser = createBrowserProbeResourceCloser(browser);
+    const closeContext = createBrowserProbeResourceCloser(context);
+
+    await Promise.all([closeContext(), closeContext(), closeBrowser(), closeBrowser()]);
+
+    expect(context.close).toHaveBeenCalledOnce();
+    expect(browser.close).toHaveBeenCalledOnce();
+  });
+
+  it("rethrows an unknown browser close failure without retrying the close", async () => {
+    const closeError = new Error("browser close invariant failed");
+    const browser = {
+      close: vi.fn(async () => {
+        throw closeError;
+      })
+    };
+    const closeBrowser = createBrowserProbeResourceCloser(browser);
+
+    await expect(closeBrowser()).rejects.toBe(closeError);
+    await expect(closeBrowser()).rejects.toBe(closeError);
+    expect(browser.close).toHaveBeenCalledOnce();
+  });
+
+  it("checks the abort signal both before and after a browser operation", async () => {
+    const controller = new AbortController();
+    const abortReason = new Error("verification deadline reached");
+    const operation = vi.fn(async () => {
+      controller.abort(abortReason);
+      return "partial browser result";
+    });
+
+    await expect(runAbortAwareBrowserOperation(operation, controller.signal)).rejects.toBe(
+      abortReason
+    );
+    expect(operation).toHaveBeenCalledOnce();
+
+    const skippedOperation = vi.fn();
+    await expect(runAbortAwareBrowserOperation(skippedOperation, controller.signal)).rejects.toBe(
+      abortReason
+    );
+    expect(skippedOperation).not.toHaveBeenCalled();
+  });
+
+  it("stops a pending browser operation and closes its resource once on abort", async () => {
+    const controller = new AbortController();
+    const abortReason = new Error("verification watch stopped");
+    const resource = { close: vi.fn(async () => undefined) };
+    const closeResource = createBrowserProbeResourceCloser(resource);
+    const removeAbortCleanup = closeBrowserProbeResourceOnAbort(controller.signal, closeResource);
+    const pendingOperation = runAbortAwareBrowserOperation(
+      () => new Promise<never>(() => undefined),
+      controller.signal
+    );
+
+    controller.abort(abortReason);
+    await expect(pendingOperation).rejects.toBe(abortReason);
+    await closeResource();
+    removeAbortCleanup();
+
+    expect(resource.close).toHaveBeenCalledOnce();
+  });
+
+  it("terminalizes an aborted browser run with a bounded system failure", async () => {
+    const controller = new AbortController();
+    const abortReason = new Error("verification ownership was cancelled");
+    const finishRun = vi.fn(async () => true);
+    controller.abort(abortReason);
+
+    await expect(
+      finishBrowserProbeAutomationRunAfterFailure(
+        {
+          runId: "run-1",
+          error: abortReason,
+          signal: controller.signal
+        },
+        finishRun
+      )
+    ).resolves.toBe(true);
+
+    expect(finishRun).toHaveBeenCalledOnce();
+    expect(finishRun).toHaveBeenCalledWith("run-1", {
+      outcome: "failed",
+      errors: {
+        name: "AbortError",
+        message: "Browser probe stopped after responder ownership cancellation."
+      },
+      notes:
+        "Browser probe stopped after responder ownership cancellation; no course or playbook writes were permitted after cancellation."
+    });
   });
 
   it("accepts corroboration only from a fresh rendered observation in the same cycle and runtime", () => {

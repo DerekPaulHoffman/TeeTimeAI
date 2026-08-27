@@ -3,6 +3,10 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildCourseSupportCoverageMachineRecord,
   buildCourseSupportCommandFailure,
+  assertCourseSupportPersistedReleaseFence,
+  assertCourseSupportVerificationReleaseLane,
+  assertCourseSupportVerifyReleaseOptions,
+  classifyCourseSupportDeploymentWaitFailure,
   classifyCommandFailure,
   COURSE_SUPPORT_COVERAGE_MACHINE_RECORD_TYPE,
   COURSE_SUPPORT_DATABASE_URL_FAILURE_CLASS,
@@ -12,6 +16,93 @@ import {
   runWithExplicitCourseSupportDatabaseUrl,
   serializeCourseSupportResult
 } from "../../../scripts/automation/course-support";
+
+describe("course-support owner-bound release verification options", () => {
+  it("rejects direct changed-release proof outside verify-release", () => {
+    expect(() =>
+      assertCourseSupportVerificationReleaseLane({
+        currentRuntime: false,
+        requestedReleaseSha: "a".repeat(40),
+        deployedAt: new Date("2026-08-27T12:00:00.000Z")
+      })
+    ).toThrow("requires the owner-bound verify-release command");
+    expect(() =>
+      assertCourseSupportVerificationReleaseLane({
+        currentRuntime: false,
+        requestedReleaseSha: "a".repeat(40),
+        deployedAt: new Date("2026-08-27T12:00:00.000Z"),
+        allowOwnerBoundChangedReleaseProof: true
+      })
+    ).not.toThrow();
+    expect(() =>
+      assertCourseSupportVerificationReleaseLane({
+        currentRuntime: true,
+        requestedReleaseSha: null,
+        deployedAt: new Date("2026-08-27T12:00:00.000Z")
+      })
+    ).not.toThrow();
+  });
+
+  it("requires verify-release to consume the exact pre-push release fence", () => {
+    expect(() =>
+      assertCourseSupportPersistedReleaseFence({
+        persistedReleaseSha: null,
+        requestedReleaseSha: "a".repeat(40)
+      })
+    ).toThrow("persisted by the pre-push heartbeat");
+    expect(() =>
+      assertCourseSupportPersistedReleaseFence({
+        persistedReleaseSha: "b".repeat(40),
+        requestedReleaseSha: "a".repeat(40)
+      })
+    ).toThrow("persisted by the pre-push heartbeat");
+    expect(() =>
+      assertCourseSupportPersistedReleaseFence({
+        persistedReleaseSha: "a".repeat(40),
+        requestedReleaseSha: "a".repeat(40)
+      })
+    ).not.toThrow();
+  });
+
+  it("accepts only the bounded owner and deployment wait options", () => {
+    expect(() =>
+      assertCourseSupportVerifyReleaseOptions([
+        "--batch-ref",
+        "private-reference",
+        "--release-sha",
+        "a".repeat(40),
+        "--deployment-timeout-seconds",
+        "900",
+      ]),
+    ).not.toThrow();
+    expect(() =>
+      assertCourseSupportVerifyReleaseOptions([
+        "--batch-ref",
+        "private-reference",
+        "--deployed-at",
+        "2026-08-27T12:00:00.000Z",
+      ]),
+    ).toThrow("accepts only batch, release, owner, and deployment timing");
+  });
+
+  it("maps deployment failures to bounded durable checkpoint reasons", () => {
+    expect(
+      classifyCourseSupportDeploymentWaitFailure(
+        new Error("Timed out after 900s waiting for the Git deployment"),
+      ),
+    ).toBe("DEPLOYMENT_TIMEOUT");
+    expect(
+      classifyCourseSupportDeploymentWaitFailure(
+        new Error("Git deployment for abcdef12 ended with ERROR"),
+      ),
+    ).toBe("DEPLOYMENT_FAILED");
+    expect(
+      classifyCourseSupportDeploymentWaitFailure(
+        new Error("Vercel CLI command failed with exit code 1."),
+      ),
+    ).toBe("DEPLOYMENT_TOOLING_FAILED");
+  });
+});
 
 describe("course-support CLI database environment guard", () => {
   it.each([

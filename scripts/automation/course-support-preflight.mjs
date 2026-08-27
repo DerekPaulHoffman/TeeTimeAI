@@ -80,6 +80,55 @@ export function generatedPrismaSetupRequiredResult(inspection) {
   };
 }
 
+export function inspectPlaywrightChromiumRuntime(
+  checkout,
+  loadPlaywright = loadPlaywrightFromCheckout,
+  executableExists = existsSync
+) {
+  let playwright;
+  try {
+    playwright = loadPlaywright(checkout);
+  } catch {
+    return { status: "module_unavailable" };
+  }
+
+  try {
+    const executablePath = playwright?.chromium?.executablePath?.();
+    return {
+      status:
+        typeof executablePath === "string" &&
+        executablePath.trim().length > 0 &&
+        executableExists(executablePath)
+          ? "current"
+          : "executable_unavailable"
+    };
+  } catch {
+    return { status: "executable_unavailable" };
+  }
+}
+
+export function playwrightChromiumSetupRequiredResult(inspection) {
+  if (inspection.status === "current") {
+    return null;
+  }
+
+  return {
+    outcome: "setup_required",
+    reason:
+      inspection.status === "module_unavailable"
+        ? "The responder checkout's Playwright runtime could not be loaded."
+        : "The responder checkout's configured Chromium executable is unavailable.",
+    failureClass:
+      inspection.status === "module_unavailable"
+        ? "PLAYWRIGHT_MODULE_UNAVAILABLE"
+        : "PLAYWRIGHT_CHROMIUM_EXECUTABLE_UNAVAILABLE",
+    nextAction:
+      inspection.status === "module_unavailable"
+        ? "Restore the responder checkout's installed dependencies, then rerun the preflight."
+        : "Install the responder checkout's configured Playwright Chromium browser, then rerun the preflight."
+  };
+}
+
 export function responderInvocation(
   platform = process.platform,
   commandInterpreter = process.env.ComSpec,
@@ -259,6 +308,10 @@ function main() {
     const generatedPrismaSetupRequired = generatedPrismaSetupRequiredResult(
       generatedPrismaInspection
     );
+    const playwrightChromiumSetupRequired =
+      playwrightChromiumSetupRequiredResult(
+        inspectPlaywrightChromiumRuntime(resolvedCheckout)
+      );
 
     if (!currentMain || checkoutHead !== currentMain) {
       process.stdout.write(
@@ -271,6 +324,9 @@ function main() {
       process.exitCode = 2;
     } else if (generatedPrismaSetupRequired) {
       process.stdout.write(`${JSON.stringify(generatedPrismaSetupRequired)}\n`);
+      process.exitCode = 2;
+    } else if (playwrightChromiumSetupRequired) {
+      process.stdout.write(`${JSON.stringify(playwrightChromiumSetupRequired)}\n`);
       process.exitCode = 2;
     } else if (!process.argv.includes("--run")) {
       process.stdout.write(
@@ -404,6 +460,12 @@ function npmInvocation(args, platform = process.platform, commandInterpreter = p
 function loadPrismaClientFromCheckout(checkout) {
   const requireFromCheckout = createRequire(resolve(checkout, "package.json"));
   return requireFromCheckout("@prisma/client");
+}
+
+function loadPlaywrightFromCheckout(checkout) {
+  const requireFromCheckout = createRequire(resolve(checkout, "package.json"));
+  const playwrightModulePath = requireFromCheckout.resolve("@playwright/test");
+  return requireFromCheckout(playwrightModulePath);
 }
 
 function resolveCheckoutPath(checkout) {
