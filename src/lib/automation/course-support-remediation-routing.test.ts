@@ -152,16 +152,6 @@ describe("course-support remediation routing", () => {
     ["SCHEMA", runnableCourse],
     ["NOT_FOUND", runnableCourse],
     ["READER_PARSER_MISSING", runnableCourse],
-    [
-      "UNSUPPORTED_FAMILY",
-      {
-        ...runnableCourse,
-        detectedPlatform: "CUSTOM",
-        providerFamilyKey: "TENFORE",
-        detectedBookingUrl: "https://tenant.tenfore.golf/tee-times",
-        bookingMetadata: null,
-      },
-    ],
   ] as const)(
     "routes structural %s failures to reusable implementation",
     (failureClass, course) => {
@@ -181,6 +171,27 @@ describe("course-support remediation routing", () => {
       });
     },
   );
+
+  it("advances recognized TenFore work toward its reusable rendered reader", () => {
+    const result = routeCourseSupportRemediation({
+      ...runnableCourse,
+      detectedPlatform: "CUSTOM",
+      providerFamilyKey: "TENFORE",
+      detectedBookingUrl: "https://fox.tenfore.golf/example",
+      bookingMetadata: null,
+      failureClass: "UNSUPPORTED_FAMILY",
+      attemptCount: 1,
+      playbookAssessment: incompletePlaybook("OFFICIAL_IDENTITY"),
+    });
+
+    expect(result).toMatchObject({
+      workMode: "ADVANCE_DISCOVERY",
+      allowUnchangedRuntime: true,
+      requiresImplementationPath: false,
+      retryBudget: null,
+      reason: "PLAYBOOK_STAGE_PENDING",
+    });
+  });
 
   it("advances one current discovery stage without calling it a transient retry", () => {
     const result = routeCourseSupportRemediation({

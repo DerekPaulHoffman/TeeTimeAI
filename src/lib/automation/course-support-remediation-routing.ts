@@ -254,6 +254,13 @@ const SOURCE_FREE_DISCOVERY_STAGES = new Set<AutomationPlaybookStage>([
   "RENDERED_BROWSER_DISCOVERY",
 ]);
 
+// TenFore's public tee sheet is intentionally not a server-runnable provider:
+// its availability request is challenge-bound, while the allowlisted rendered
+// reader already supplies the reusable safe path. Keep its current-cycle
+// ordered stages moving toward that reader instead of repeatedly requesting a
+// server adapter implementation that cannot safely execute.
+const RENDERED_READER_PROVIDER_FAMILIES = new Set(["TENFORE"]);
+
 export function routeCourseSupportRemediation(
   input: CourseSupportRemediationRoutingInput,
 ): CourseSupportRemediationRoute {
@@ -414,6 +421,13 @@ function selectActionableRoute(input: {
       return discoveryRoute({ ...input, retryBudget: null });
     }
     return implementationRoute(input);
+  }
+
+  if (
+    RENDERED_READER_PROVIDER_FAMILIES.has(input.strategy.providerFamilyKey) &&
+    input.playbookAssessment.nextStage !== null
+  ) {
+    return discoveryRoute({ ...input, retryBudget: null });
   }
 
   if (input.strategy.action === "RETRY_PROVIDER") {
