@@ -15,7 +15,6 @@ import {
   Link2,
   MailCheck,
   MessageSquareWarning,
-  Search,
   ShieldAlert,
   UserPlus,
   Users,
@@ -28,7 +27,6 @@ import { getCurrentOperator } from "@/lib/operator/auth";
 import {
   COURSE_STATUS_GUIDE,
   filterCourseInventory,
-  getCourseSummaryCopy,
   listCourseStates,
   parseCourseDiagnosticFilter,
   parseCourseInventoryView,
@@ -605,10 +603,12 @@ function OperatorDashboard({
 
 function CourseFleetSummary({ overview }: { overview: OperatorOverview }) {
   const { counts } = overview.courseFleet;
-  const summaryCopy = getCourseSummaryCopy(counts);
   const attentionCourses = overview.courseFleet.courses.filter(
     (course) => course.priorityGroup === "ACTION" || course.priorityGroup === "WATCH"
   );
+  const attentionCount = counts.action + counts.watch;
+  const automatedCount =
+    counts.dueNow + counts.inProgress + counts.recoveryRequired + counts.scheduledRetry;
   const affectedActiveAlerts = attentionCourses.reduce(
     (total, course) => total + course.activeAlertCount,
     0
@@ -635,104 +635,61 @@ function CourseFleetSummary({ overview }: { overview: OperatorOverview }) {
           </span>
         </div>
       </div>
-      <div className="operator-automation-summary-heading">
-        <strong>1. What state is each course in?</strong>
-        <span>{summaryCopy.lifecycle}</span>
+      <div className="operator-fleet-overview" aria-label="Course monitoring overview">
+        <div className="operator-fleet-lead">
+          <span>Course fleet</span>
+          <strong>{overview.courseFleet.courses.length}</strong>
+          <p>Every course is counted once by its current monitoring state.</p>
+        </div>
+        <div className="operator-attention-lead">
+          <span>Needs attention</span>
+          <strong>{attentionCount}</strong>
+          <p>
+            {counts.action} need a decision or repair; {counts.watch} are in the investigation
+            backlog.
+          </p>
+        </div>
+        <div className="operator-next-owner">
+          <div className="operator-next-owner-heading">
+            <div>
+              <span>Who acts next</span>
+              <strong>{attentionCount} attention courses, split by owner</strong>
+            </div>
+            <small>These add up to {attentionCount}; they are not additional courses.</small>
+          </div>
+          <div className="operator-owner-split">
+            <OwnerCount
+              count={automatedCount}
+              detail={automationOwnerDetail(counts)}
+              icon={<Activity size={18} />}
+              label="Automation"
+              tone={counts.recoveryRequired > 0 ? "critical" : "warning"}
+            />
+            <OwnerCount
+              count={counts.engineeringNeeded}
+              detail="Reusable reader work is needed"
+              icon={<Wrench size={18} />}
+              label="Engineering"
+              tone="warning"
+            />
+            <OwnerCount
+              count={counts.needsHuman}
+              detail="A person must review or decide"
+              icon={<Users size={18} />}
+              label="Human review"
+              tone={affectedActiveAlerts > 0 ? "critical" : "neutral"}
+            />
+          </div>
+        </div>
       </div>
-      <div className="operator-course-summary" aria-label="Monitoring lifecycle totals">
-        <CourseFleetCount
-          count={counts.action}
-          icon={<ShieldAlert size={17} />}
-          label="Needs attention"
-          detail="A decision or repair is needed"
-          tone={affectedActiveAlerts > 0 ? "critical" : "warning"}
-        />
-        <CourseFleetCount
-          count={counts.watch}
-          icon={<Wrench size={17} />}
-          label="Investigation backlog"
-          detail="Includes due, active, and scheduled work"
-          tone="warning"
-        />
-        <CourseFleetCount
-          count={counts.parked}
-          icon={<Clock3 size={17} />}
-          label="Waiting for new evidence"
-          detail="No AI recheck is queued"
-          tone="neutral"
-        />
-        <CourseFleetCount
-          count={counts.limitations}
-          icon={<AlertTriangle size={17} />}
-          label="Known limitations"
-          detail="Finished, evidence-backed outcome"
-          tone="neutral"
-        />
-        <CourseFleetCount
-          count={counts.unchecked}
-          icon={<Search size={17} />}
-          label="Verify when needed"
-          detail="No monitoring result yet"
-          tone="neutral"
-        />
-        <CourseFleetCount
-          count={counts.working}
-          icon={<CheckCircle2 size={17} />}
-          label="Monitoring works"
-          detail="Healthy latest result"
-          tone="positive"
-        />
-      </div>
-      <div className="operator-automation-summary-heading">
-        <strong>2. Who acts next on the attention courses?</strong>
-        <span>{summaryCopy.execution}</span>
-      </div>
-      <div
-        className="operator-course-summary operator-course-summary-automation"
-        aria-label="Next owner totals"
-      >
-        <CourseFleetCount
-          count={counts.dueNow}
-          icon={<ShieldAlert size={17} />}
-          label="Automation ready"
-          detail="Can be claimed now"
-          tone="critical"
-        />
-        <CourseFleetCount
-          count={counts.inProgress}
-          icon={<Activity size={17} />}
-          label="Automation working"
-          detail="Currently owned"
-          tone="warning"
-        />
-        <CourseFleetCount
-          count={counts.recoveryRequired}
-          icon={<ShieldAlert size={17} />}
-          label="Automation recovery"
-          detail="Expired work must be recovered"
-          tone="critical"
-        />
-        <CourseFleetCount
-          count={counts.scheduledRetry}
-          icon={<Clock3 size={17} />}
-          label="Automation waiting"
-          detail="Will retry on schedule"
-          tone="neutral"
-        />
-        <CourseFleetCount
-          count={counts.engineeringNeeded}
-          icon={<Wrench size={17} />}
-          label="Engineering work"
-          detail="Reader implementation needed"
-          tone="warning"
-        />
-        <CourseFleetCount
-          count={counts.needsHuman}
-          icon={<ShieldAlert size={17} />}
-          label="Human review"
-          detail="No automated work is active"
-          tone={affectedActiveAlerts > 0 ? "critical" : "neutral"}
-        />
+      <div className="operator-background-outcomes" aria-label="Courses not needing action">
+        <span>Everything else</span>
+        <dl>
+          <BackgroundOutcome count={counts.working} label="Monitoring works" tone="positive" />
+          <BackgroundOutcome count={counts.parked} label="Waiting for new evidence" />
+          <BackgroundOutcome count={counts.limitations} label="Known limitations" />
+          <BackgroundOutcome count={counts.unchecked} label="Verify when needed" />
+        </dl>
       </div>
     </>
   );
@@ -745,8 +702,8 @@ function CourseSupportCampaignSummary({
 }) {
   if (!campaign) {
     return (
-      <div className="operator-automation-summary-heading">
-        <strong>3. Unfamiliar-course acceptance</strong>
+      <div className="operator-acceptance-heading">
+        <strong>Unfamiliar-course automation</strong>
         <span>No parked-course baseline has been captured.</span>
       </div>
     );
@@ -758,115 +715,180 @@ function CourseSupportCampaignSummary({
   const rollingHuman = campaign.rollingHumanReview;
   const repeats = campaign.repeatImplementations;
   return (
-    <>
-      <div className="operator-automation-summary-heading">
-        <strong>3. Unfamiliar-course acceptance</strong>
-        <span>
-          {formatEnum(campaign.status)} baseline captured {formatDateTime(campaign.capturedAt)}
-          {` · ${campaign.expectedCount} baseline courses`}
+    <section className="operator-acceptance" aria-labelledby="acceptance-heading">
+      <div className="operator-acceptance-heading">
+        <div>
+          <span>Acceptance tracking</span>
+          <strong id="acceptance-heading">Unfamiliar-course automation</strong>
+          <p>
+            Can a newly encountered course reach a useful result without a person stepping in?
+          </p>
+        </div>
+        <span className={`operator-acceptance-status is-${campaignStatusTone(campaign.status)}`}>
+          {formatEnum(campaign.status)}
         </span>
       </div>
-      <div className="operator-course-summary" aria-label="Unfamiliar-course acceptance">
-        <CourseFleetCount
-          count={`${campaign.progress.terminalCount}/${campaign.progress.totalCount}`}
-          icon={
-            campaign.progress.status === "COMPLETE" ? (
-              <CheckCircle2 size={17} />
-            ) : (
-              <Activity size={17} />
-            )
-          }
-          label="Baseline terminal progress"
-          detail={`${formatEnum(campaign.progress.status)} · ${campaign.progress.remainingGlobalParkedCount} parked globally`}
-          tone={campaignMetricTone(campaign.progress.status)}
-        />
-        <CourseFleetCount
-          count={`${current.resultCount}/${current.totalCount}`}
-          icon={current.status === "PASS" ? <CheckCircle2 size={17} /> : <Search size={17} />}
-          label="Baseline current results"
-          detail={
-            current.status === "PASS"
-              ? `Every course has a result · bucket invariant ${current.bucketInvariantStatus}`
-              : `${current.missingCount} unknown · bucket invariant ${current.bucketInvariantStatus}`
-          }
-          tone={campaignMetricTone(current.status)}
-        />
-        <CourseFleetCount
-          count={`${baselineAutomatic.automaticCount}/${baselineAutomatic.totalCount}`}
-          icon={<Clock3 size={17} />}
-          label="Baseline 24h diagnostic"
-          detail={`${formatEnum(baselineAutomatic.status)} against the ${baselineAutomatic.targetPercent}% SLA diagnostic by ${formatDateTime(baselineAutomatic.deadlineAt)} · not a rollout gate`}
-          tone="neutral"
-        />
-        <CourseFleetCount
-          count={
+      <div className="operator-acceptance-grid">
+        <AcceptanceMetric
+          detail={`${futureAutomatic.automaticCount} of ${futureAutomatic.eligibleCount} eligible courses in the last ${futureAutomatic.windowDays} days`}
+          label="Automatically resolved within 24 hours"
+          status={formatEnum(futureAutomatic.status)}
+          target={`Target ${futureAutomatic.targetPercent}%`}
+          tone={campaignMetricTone(futureAutomatic.status)}
+          value={
             futureAutomatic.ratePercent === null
-              ? "—"
+              ? "Not enough data"
               : `${futureAutomatic.ratePercent.toFixed(1)}%`
           }
-          icon={<Clock3 size={17} />}
-          label="Future unfamiliar cycles within 24h"
-          detail={`${formatEnum(futureAutomatic.status)} · ${futureAutomatic.automaticCount} automatic, ${futureAutomatic.nonAutomaticCount} nonautomatic, ${futureAutomatic.pendingCount} pending, ${futureAutomatic.unknownCount} unknown of ${futureAutomatic.eligibleCount} in ${futureAutomatic.windowDays} days · target ${futureAutomatic.targetPercent}%`}
-          tone={campaignMetricTone(futureAutomatic.status)}
         />
-        <CourseFleetCount
-          count={
-            rollingHuman.ratePercent === null ? "—" : `${rollingHuman.ratePercent.toFixed(1)}%`
-          }
-          icon={<Users size={17} />}
-          label="Rolling human review"
+        <AcceptanceMetric
           detail={
-            rollingHuman.ambiguousEndpointCount > 0
-              ? `Unknown · ${rollingHuman.ambiguousEndpointCount} legacy endpoint groups lack cycle proof`
-              : `${formatEnum(rollingHuman.status)} · ${rollingHuman.humanReviewCount}/${rollingHuman.endpointCount} endpoints in ${rollingHuman.windowDays} days · target ≤${rollingHuman.targetPercent}%`
+            current.status === "PASS"
+              ? "Every baseline course has a current result"
+              : `${current.missingCount} baseline courses still have no current result`
           }
-          tone={campaignMetricTone(rollingHuman.status)}
+          label="Current result coverage"
+          status={formatEnum(current.status)}
+          target={`${campaign.expectedCount} course baseline`}
+          tone={campaignMetricTone(current.status)}
+          value={`${current.resultCount}/${current.totalCount}`}
         />
-        <CourseFleetCount
-          count={repeats.repeatImplementationCount}
-          icon={<Wrench size={17} />}
-          label="Repeat implementations since baseline"
+        <AcceptanceMetric
           detail={`${formatEnum(repeats.status)} · ${repeats.implementationBatchCount} implementations across ${repeats.implementationGroupCount} groups`}
+          label="Repeat implementation work"
+          status={formatEnum(repeats.status)}
+          target="Target 0 repeats"
           tone={campaignMetricTone(repeats.status)}
+          value={repeats.repeatImplementationCount}
         />
       </div>
-      <div className="operator-automation-summary-heading">
-        <strong>Baseline result mix</strong>
-        <span>
-          {current.monitoredCount} monitored · {current.bookingNotOpenCount} booking not open ·{" "}
-          {current.factualLimitationCount} factual limitation · {current.technicalLimitationCount}
-          {" technical limitation · "}
-          {current.sourceUnverifiedCount} source unverified · {current.readyCount} ready ·{" "}
-          {current.activeCount} active · {current.engineeringBlockerCount} engineering blocker ·{" "}
-          {current.missingCount} unknown · {current.campaignHumanReviewCount} campaign human-review
-          requests
-        </span>
-      </div>
-    </>
+      <p className="operator-acceptance-explanation">
+        <strong>{campaign.progress.terminalCount}/{campaign.progress.totalCount}</strong> baseline
+        courses have reached a terminal result through this campaign. That is different from the{" "}
+        <strong>{current.resultCount}/{current.totalCount}</strong> courses that have any current
+        result.
+      </p>
+      <details className="operator-acceptance-details">
+        <summary>Show baseline diagnostics and result mix</summary>
+        <div className="operator-acceptance-detail-grid">
+          <div>
+            <span>Baseline 24-hour diagnostic</span>
+            <strong>
+              {baselineAutomatic.automaticCount}/{baselineAutomatic.totalCount} ·{" "}
+              {formatEnum(baselineAutomatic.status)}
+            </strong>
+            <p>
+              Historical diagnostic due {formatDateTime(baselineAutomatic.deadlineAt)}. This is
+              not a rollout gate.
+            </p>
+          </div>
+          <div>
+            <span>Human-review measurement</span>
+            <strong>
+              {rollingHuman.ratePercent === null
+                ? "Not measurable yet"
+                : `${rollingHuman.ratePercent.toFixed(1)}%`}
+            </strong>
+            <p>
+              {rollingHuman.ambiguousEndpointCount > 0
+                ? `${rollingHuman.ambiguousEndpointCount} legacy endpoint groups lack cycle proof.`
+                : `${rollingHuman.humanReviewCount} of ${rollingHuman.endpointCount} endpoints in ${rollingHuman.windowDays} days; target ${rollingHuman.targetPercent}% or less.`}
+            </p>
+          </div>
+        </div>
+        <p className="operator-result-mix">
+          <strong>Baseline result mix:</strong> {current.monitoredCount} monitored, {current.bookingNotOpenCount}{" "}
+          booking not open, {current.factualLimitationCount} factual limitations, {current.technicalLimitationCount}{" "}
+          technical limitations, {current.sourceUnverifiedCount} source unverified, {current.readyCount} ready,{" "}
+          {current.activeCount} active, {current.engineeringBlockerCount} engineering blockers,{" "}
+          {current.missingCount} unknown, and {current.campaignHumanReviewCount} human-review requests.
+        </p>
+      </details>
+      <span className="operator-acceptance-caption">
+        Baseline captured {formatDateTime(campaign.capturedAt)} · {campaign.expectedCount} courses
+      </span>
+    </section>
   );
 }
 
-function CourseFleetCount({
+function OwnerCount({
   count,
+  detail,
   icon,
   label,
-  detail,
   tone
 }: {
-  count: React.ReactNode;
+  count: number;
+  detail: string;
   icon: React.ReactNode;
   label: string;
-  detail: string;
-  tone: "critical" | "warning" | "neutral" | "positive";
+  tone: "critical" | "warning" | "neutral";
 }) {
   return (
-    <div className={`operator-course-count is-${tone}`}>
+    <div className={`operator-owner-count is-${tone}`}>
       <span>{icon}</span>
-      <strong>{count}</strong>
-      <small>{label}</small>
-      <p>{detail}</p>
+      <div>
+        <strong>{count}</strong>
+        <span>{label}</span>
+        <small>{detail}</small>
+      </div>
     </div>
   );
+}
+
+function BackgroundOutcome({
+  count,
+  label,
+  tone = "neutral"
+}: {
+  count: number;
+  label: string;
+  tone?: "neutral" | "positive";
+}) {
+  return (
+    <div className={`is-${tone}`}>
+      <dt>{label}</dt>
+      <dd>{count}</dd>
+    </div>
+  );
+}
+
+function AcceptanceMetric({
+  detail,
+  label,
+  status,
+  target,
+  tone,
+  value
+}: {
+  detail: string;
+  label: string;
+  status: string;
+  target: string;
+  tone: "critical" | "warning" | "positive";
+  value: React.ReactNode;
+}) {
+  return (
+    <article className={`operator-acceptance-metric is-${tone}`}>
+      <div>
+        <span>{label}</span>
+        <small>{status}</small>
+      </div>
+      <strong>{value}</strong>
+      <p>{detail}</p>
+      <small>{target}</small>
+    </article>
+  );
+}
+
+function automationOwnerDetail(counts: OperatorOverview["courseFleet"]["counts"]) {
+  const parts = [
+    counts.dueNow > 0 ? `${counts.dueNow} ready now` : null,
+    counts.inProgress > 0 ? `${counts.inProgress} working` : null,
+    counts.recoveryRequired > 0 ? `${counts.recoveryRequired} need recovery` : null,
+    counts.scheduledRetry > 0 ? `${counts.scheduledRetry} scheduled` : null
+  ].filter(Boolean);
+  return parts.length > 0 ? parts.join(" · ") : "No automated work is queued";
 }
 
 function campaignMetricTone(
@@ -874,6 +896,12 @@ function campaignMetricTone(
 ) {
   if (status === "PASS" || status === "COMPLETE") return "positive" as const;
   if (status === "FAIL") return "critical" as const;
+  return "warning" as const;
+}
+
+function campaignStatusTone(status: "RUNNING" | "COMPLETED" | "FAILED") {
+  if (status === "COMPLETED") return "positive" as const;
+  if (status === "FAILED") return "critical" as const;
   return "warning" as const;
 }
 
