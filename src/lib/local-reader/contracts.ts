@@ -9,6 +9,7 @@ import {
   type DynamicCpsCourseKey,
   type DynamicChronogolfCourseKey,
   type DynamicEzLinksCourseKey,
+  type DynamicMemberSportsCourseKey,
   type DynamicTenForeCourseKey,
   type DynamicWebTracCourseKey
 } from "./course-key";
@@ -46,13 +47,25 @@ const dynamicWebTracCourseKeySchema = z.custom<DynamicWebTracCourseKey>(
   "Expected a safe MyVSCloud WebTrac tenant key"
 );
 
+const dynamicMemberSportsCourseKeySchema = z.custom<DynamicMemberSportsCourseKey>(
+  (value) =>
+    typeof value === "string" &&
+    /^membersports:[1-9]\d{0,9}:[1-9]\d{0,9}$/u.test(value) &&
+    value
+      .slice("membersports:".length)
+      .split(":")
+      .every((part) => Number(part) <= 2_147_483_647),
+  "Expected a safe MemberSports course key"
+);
+
 export const localReaderCourseKeySchema = z.union([
   z.enum(LOCAL_READER_COURSE_KEYS),
   dynamicCpsCourseKeySchema,
   dynamicChronogolfCourseKeySchema,
   dynamicTenForeCourseKeySchema,
   dynamicEzLinksCourseKeySchema,
-  dynamicWebTracCourseKeySchema
+  dynamicWebTracCourseKeySchema,
+  dynamicMemberSportsCourseKeySchema
 ]);
 
 const localDateSchema = z

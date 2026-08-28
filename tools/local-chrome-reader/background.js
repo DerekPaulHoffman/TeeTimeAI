@@ -11,6 +11,7 @@ const READER_CAPABILITIES = Object.freeze([
   ["TENFORE_RENDERED", 1],
   ["EZLINKS_RENDERED", 1],
   ["WEBTRAC_RENDERED", 1],
+  ["MEMBERSPORTS_RENDERED", 1],
   ["PROPHET_FREAR_RENDERED", 4]
 ]);
 const PROPHET_COURSES = Object.freeze({
@@ -276,6 +277,42 @@ function isAllowlistedProphetJob(job) {
   }
 }
 
+function isAllowlistedMemberSportsJob(job) {
+  try {
+    const match = /^membersports:([1-9]\d{0,9}):([1-9]\d{0,9})$/u.exec(
+      job?.courseKey || ""
+    );
+    if (
+      !match ||
+      Number(match[1]) > 2_147_483_647 ||
+      Number(match[2]) > 2_147_483_647 ||
+      typeof job.courseName !== "string" ||
+      job.courseName.trim().length === 0 ||
+      job.courseName.length > 160 ||
+      !Array.isArray(job.cardTextIncludes) ||
+      job.cardTextIncludes.length !== 0
+    ) {
+      return false;
+    }
+    const url = new URL(job.bookingUrl);
+    const path = new RegExp(
+      `^/tee-times/${match[1]}/${match[2]}/(?:0|[1-9]\\d{0,9})(?:/(?:0|[1-9]\\d{0,9})/(?:0|[1-9]\\d{0,9}))?/?$`,
+      "u"
+    );
+    return (
+      url.protocol === "https:" &&
+      url.hostname === "app.membersports.com" &&
+      path.test(url.pathname) &&
+      url.search === "" &&
+      url.hash === "" &&
+      url.username === "" &&
+      url.password === ""
+    );
+  } catch {
+    return false;
+  }
+}
+
 function isAllowlistedJob(job) {
   try {
     const required = job?.requiredCapability;
@@ -296,6 +333,7 @@ function isAllowlistedJob(job) {
       [isAllowlistedTenForeJob, "TENFORE_RENDERED", 1],
       [isAllowlistedEzLinksJob, "EZLINKS_RENDERED", 1],
       [isAllowlistedWebTracJob, "WEBTRAC_RENDERED", 1],
+      [isAllowlistedMemberSportsJob, "MEMBERSPORTS_RENDERED", 1],
       [isAllowlistedProphetJob, "PROPHET_FREAR_RENDERED", 4]
     ].find(([isAllowlisted]) => isAllowlisted(job));
     return Boolean(

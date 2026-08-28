@@ -129,6 +129,22 @@ function dynamicWebTracJob(hostname = "ctguilfordweb.myvscloud.com"): LocalReade
   };
 }
 
+function dynamicMemberSportsJob(
+  courseName = "Arthur B. Sim Golf Course"
+): LocalReaderJob {
+  return {
+    id: "job-membersports",
+    courseKey: "membersports:7128:8903",
+    targetDate: "2026-08-28",
+    players: 2,
+    requestedAt: "2026-08-28T12:00:00.000Z",
+    expiresAt: "2026-08-28T12:05:00.000Z",
+    courseName,
+    bookingUrl: "https://app.membersports.com/tee-times/7128/8903/0/8/0",
+    cardTextIncludes: []
+  };
+}
+
 function loadReader() {
   const source = readFileSync(
     resolve(process.cwd(), "tools", "local-chrome-reader", "cps-reader.js"),
@@ -182,6 +198,17 @@ function loadWebTracReader() {
   context.globalThis = context;
   runInNewContext(source, context);
   return context.TeeTimeSpotWebTracReader as Reader;
+}
+
+function loadMemberSportsReader() {
+  const source = readFileSync(
+    resolve(process.cwd(), "tools", "local-chrome-reader", "membersports-reader.js"),
+    "utf8"
+  );
+  const context: Record<string, unknown> = { URL };
+  context.globalThis = context;
+  runInNewContext(source, context);
+  return context.TeeTimeSpotMemberSportsReader as Reader;
 }
 
 function loadProphetReader() {
@@ -313,7 +340,7 @@ describe("local Chrome reader contract", () => {
     );
     const contentMatches = manifest.content_scripts.flatMap((entry) => entry.matches);
 
-    expect(manifest.version).toBe("1.10.5");
+    expect(manifest.version).toBe("1.11.0");
     expect(manifest.host_permissions).toContain("https://*.cps.golf/*");
     expect(contentMatches).toContain("https://*.cps.golf/onlineresweb/search-teetime*");
     expect(manifest.host_permissions).toContain("https://www.chronogolf.com/*");
@@ -324,12 +351,16 @@ describe("local Chrome reader contract", () => {
     expect(contentMatches).toContain("https://*.ezlinksgolf.com/*");
     expect(manifest.host_permissions).toContain("https://*.myvscloud.com/*");
     expect(contentMatches).toContain("https://*.myvscloud.com/webtrac/web/search.html*");
+    expect(manifest.host_permissions).toContain("https://app.membersports.com/*");
+    expect(contentMatches).toContain("https://app.membersports.com/tee-times/*");
     expect(backgroundSource).toContain("function isAllowlistedCpsJob(job)");
     expect(backgroundSource).toContain("function isAllowlistedTenForeJob(job)");
     expect(backgroundSource).toContain("function isAllowlistedEzLinksJob(job)");
     expect(backgroundSource).toContain("function isAllowlistedWebTracJob(job)");
+    expect(backgroundSource).toContain("function isAllowlistedMemberSportsJob(job)");
     expect(backgroundSource).toContain('["EZLINKS_RENDERED", 1]');
     expect(backgroundSource).toContain('["WEBTRAC_RENDERED", 1]');
+    expect(backgroundSource).toContain('["MEMBERSPORTS_RENDERED", 1]');
     expect(backgroundSource).toContain("async function submitPendingResult(tabId, pending)");
     expect(backgroundSource).toContain("function withPendingJobsLock(operation)");
     expect(backgroundSource).toContain("expectJson: true");
@@ -342,6 +373,7 @@ describe("local Chrome reader contract", () => {
     );
     expect(contentSource).not.toContain("entries.length === 1");
     expect(contentSource).toContain("globalThis.TeeTimeSpotWebTracReader");
+    expect(contentSource).toContain("globalThis.TeeTimeSpotMemberSportsReader");
     expect(contentSource).toContain("waitForPassiveChallengeClearance");
     expect(contentSource).toContain("if (pending.result) return;");
     expect(contentSource).toContain("finally {");
@@ -491,6 +523,84 @@ describe("local Chrome reader contract", () => {
     expect(
       getLocalReaderCourseKey("https://fox.tenfore.golf/gainfieldfarms?token=secret")
     ).toBeNull();
+  });
+
+  it("accepts exact MemberSports course routes and rejects sibling or transaction paths", () => {
+    const job = dynamicMemberSportsJob();
+    expect(getLocalReaderCourseKey(job.bookingUrl)).toBe("membersports:7128:8903");
+    expect(localReaderJobSchema.parse(job)).toMatchObject({
+      courseKey: "membersports:7128:8903"
+    });
+    expect(loadMemberSportsReader().isAllowedPageUrl(job, job.bookingUrl)).toBe(true);
+    expect(
+      isAllowedLocalReaderUrl(
+        "membersports:7128:8903",
+        "https://app.membersports.com/tee-times/7128/9999/0/8/0"
+      )
+    ).toBe(false);
+    expect(
+      getLocalReaderCourseKey("https://app.membersports.com/checkout/7128/8903")
+    ).toBeNull();
+    expect(
+      getLocalReaderCourseKey(
+        "https://app.membersports.com/tee-times/7128/8903/0?token=secret"
+      )
+    ).toBeNull();
+  });
+
+  it("parses signed-out MemberSports cards for the exact course and player count", () => {
+    document.title = "MemberSports";
+    document.body.innerHTML = `
+      <div class="dateFormat">Fri, Aug 28, 2026</div>
+      <div class="teeTime">
+        <div class="timeCol">10:10 AM</div>
+        <div class="teeTimeCard" role="button">
+          <div class="name">Arthur B. Sim Golf Course</div>
+          <div class="iconCell first"><span>1-2</span></div>
+          <div class="amount">$49.00</div>
+        </div>
+        <div class="teeTimeCard" role="button">
+          <div class="name">Tex Consolver</div>
+          <div class="iconCell first"><span>1-1</span></div>
+          <div class="amount">$49.00</div>
+        </div>
+      </div>
+    `;
+    const job = dynamicMemberSportsJob();
+    expect(loadMemberSportsReader().readSnapshot(document, job.bookingUrl, job)).toMatchObject({
+      status: "AVAILABLE",
+      slots: [
+        {
+          startsAtLocal: "2026-08-28T10:10:00",
+          minimumPlayers: 1,
+          availableSpots: 2,
+          priceCents: 4900
+        }
+      ]
+    });
+  });
+
+  it("fails MemberSports closed on challenge, wrong date, or changed matching cards", () => {
+    const reader = loadMemberSportsReader();
+    const job = dynamicMemberSportsJob();
+    document.body.innerHTML = "<main>Verify you are human</main>";
+    expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({
+      status: "ACCESS_CHALLENGE"
+    });
+    document.body.innerHTML = '<div class="dateFormat">Sat, Aug 29, 2026</div>';
+    expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({
+      status: "PAGE_MISMATCH"
+    });
+    document.body.innerHTML = `
+      <div class="dateFormat">Fri, Aug 28, 2026</div>
+      <div class="teeTime"><div class="timeCol">10:10 AM</div>
+        <div class="teeTimeCard" role="button"><div class="name">Arthur B. Sim</div></div>
+      </div>
+    `;
+    expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({
+      status: "READER_ERROR",
+      slots: []
+    });
   });
 
   it("accepts signed EZLinks tenant jobs while rejecting infrastructure and transaction paths", () => {

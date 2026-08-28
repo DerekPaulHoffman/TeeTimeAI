@@ -9,19 +9,28 @@ export type DynamicChronogolfCourseKey = `chronogolf:${string}`;
 export type DynamicTenForeCourseKey = `tenfore:${string}`;
 export type DynamicEzLinksCourseKey = `ezlinks:${string}.ezlinksgolf.com`;
 export type DynamicWebTracCourseKey = `webtrac:${string}.myvscloud.com`;
+export type DynamicMemberSportsCourseKey = `membersports:${string}:${string}`;
 export type LocalReaderCourseKey =
   | StaticLocalReaderCourseKey
   | DynamicCpsCourseKey
   | DynamicChronogolfCourseKey
   | DynamicTenForeCourseKey
   | DynamicEzLinksCourseKey
-  | DynamicWebTracCourseKey;
+  | DynamicWebTracCourseKey
+  | DynamicMemberSportsCourseKey;
 
 export type LocalReaderCourse = {
   courseName: string;
   bookingUrl: string;
   cardTextIncludes: readonly string[];
-  provider: "CPS" | "CHRONOGOLF" | "TENFORE" | "EZLINKS" | "WEBTRAC" | "PROPHET";
+  provider:
+    | "CPS"
+    | "CHRONOGOLF"
+    | "TENFORE"
+    | "EZLINKS"
+    | "WEBTRAC"
+    | "MEMBERSPORTS"
+    | "PROPHET";
   prophetCourseIds?: string;
 };
 
@@ -33,6 +42,8 @@ const EZLINKS_TENANT_HOSTNAME =
   /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.ezlinksgolf\.com$/u;
 const WEBTRAC_TENANT_HOSTNAME = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.myvscloud\.com$/u;
 const WEBTRAC_SEARCH_PATH = /^\/webtrac\/web\/search\.html\/?$/u;
+const MEMBERSPORTS_TEE_TIME_PATH =
+  /^\/tee-times\/([1-9]\d{0,9})\/([1-9]\d{0,9})\/(0|[1-9]\d{0,9})(?:\/(0|[1-9]\d{0,9})\/(0|[1-9]\d{0,9}))?\/?$/u;
 const EZLINKS_BLOCKED_TENANT_LABELS = new Set([
   "admin",
   "api",
@@ -84,6 +95,10 @@ export function getLocalReaderCourseKey(
     }
     if (WEBTRAC_TENANT_HOSTNAME.test(hostname) && isWebTracSearchLanding(url)) {
       return `webtrac:${hostname}` as DynamicWebTracCourseKey;
+    }
+    const memberSportsScope = getMemberSportsScope(url);
+    if (memberSportsScope) {
+      return `membersports:${memberSportsScope.clubId}:${memberSportsScope.courseId}`;
     }
     const tenForeTenant = getTenForeTenant(url);
     if (tenForeTenant) {
@@ -188,6 +203,13 @@ export function isAllowedLocalReaderUrl(courseKey: LocalReaderCourseKey, value: 
         url.hash === ""
       );
     }
+    if (isDynamicMemberSportsCourseKey(courseKey)) {
+      const url = new URL(value);
+      const scope = getMemberSportsScope(url);
+      return Boolean(
+        scope && courseKey === `membersports:${scope.clubId}:${scope.courseId}`
+      );
+    }
     const course = LOCAL_READER_COURSES[courseKey];
     const expected = new URL(course.bookingUrl);
     const url = new URL(value);
@@ -263,6 +285,10 @@ export function getLocalReaderJobUrl(
     url.searchParams.set("search", "yes");
     return url.toString();
   }
+  if (isDynamicMemberSportsCourseKey(courseKey)) {
+    const [, clubId, courseId] = courseKey.split(":");
+    return `https://app.membersports.com/tee-times/${clubId}/${courseId}/0/8/0`;
+  }
   const course = LOCAL_READER_COURSES[courseKey];
   return `${course.bookingUrl}?CourseId=${course.prophetCourseIds}&Date=${targetDate}&Time=AnyTime&Player=${players}&Hole=18`;
 }
@@ -298,6 +324,12 @@ export function isDynamicWebTracCourseKey(value: string): value is DynamicWebTra
   );
 }
 
+export function isDynamicMemberSportsCourseKey(
+  value: string
+): value is DynamicMemberSportsCourseKey {
+  return /^membersports:[1-9]\d{0,9}:[1-9]\d{0,9}$/u.test(value);
+}
+
 export function getLocalReaderCourse(
   courseKey: LocalReaderCourseKey,
   courseName?: string
@@ -307,7 +339,8 @@ export function getLocalReaderCourse(
     isDynamicChronogolfCourseKey(courseKey) ||
     isDynamicTenForeCourseKey(courseKey) ||
     isDynamicEzLinksCourseKey(courseKey) ||
-    isDynamicWebTracCourseKey(courseKey)
+    isDynamicWebTracCourseKey(courseKey) ||
+    isDynamicMemberSportsCourseKey(courseKey)
   ) {
     const normalizedCourseName = courseName?.trim();
     if (!normalizedCourseName) return null;
@@ -325,7 +358,9 @@ export function getLocalReaderCourse(
             ? "TENFORE"
             : isDynamicEzLinksCourseKey(courseKey)
               ? "EZLINKS"
-              : "WEBTRAC"
+              : isDynamicWebTracCourseKey(courseKey)
+                ? "WEBTRAC"
+                : "MEMBERSPORTS"
     };
   }
   return LOCAL_READER_COURSES[courseKey];
@@ -369,6 +404,24 @@ function getChronogolfSlug(url: URL) {
   if (groupSize && !/^[0-4]$/u.test(groupSize)) return null;
   if (deals && deals !== "false") return null;
   return /^\/club\/([a-z0-9][a-z0-9-]{0,127})\/?$/u.exec(url.pathname)?.[1] ?? null;
+}
+
+function getMemberSportsScope(url: URL) {
+  if (
+    url.protocol !== "https:" ||
+    url.hostname !== "app.membersports.com" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.search !== "" ||
+    url.hash !== ""
+  ) {
+    return null;
+  }
+  const match = MEMBERSPORTS_TEE_TIME_PATH.exec(url.pathname);
+  if (!match) return null;
+  const values = match.slice(1).filter((value): value is string => value !== undefined);
+  if (values.some((value) => Number(value) > 2_147_483_647)) return null;
+  return { clubId: match[1], courseId: match[2] };
 }
 
 function isSafeEzLinksTenantHostname(hostname: string) {

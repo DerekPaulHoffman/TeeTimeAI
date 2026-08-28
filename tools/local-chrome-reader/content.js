@@ -89,7 +89,9 @@
         : new Set(["<", "arrow_back", "chevron_left"]);
     const expectedLabel =
       direction > 0 ? /\bnext\b/i : /\bprevious\b|\bprev\b/i;
-    return Array.from(document.querySelectorAll("button")).find((button) => {
+    return Array.from(
+      document.querySelectorAll("button, [role='button'][aria-label]")
+    ).find((button) => {
       const text = String(button.innerText || button.textContent || "").trim();
       const ariaLabel = button.getAttribute("aria-label") || "";
       return (
@@ -464,6 +466,7 @@
       globalThis.TeeTimeSpotTenForeReader,
       globalThis.TeeTimeSpotEzLinksReader,
       globalThis.TeeTimeSpotWebTracReader,
+      globalThis.TeeTimeSpotMemberSportsReader,
       globalThis.TeeTimeSpotProphetReader,
     ];
     const reader =

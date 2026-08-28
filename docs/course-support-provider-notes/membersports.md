@@ -1,8 +1,8 @@
 ---
 schemaVersion: 1
 providerFamily: MEMBERSPORTS
-registrySupport: NON_SERVER
-lastReviewedAt: 2026-08-20
+registrySupport: LOCAL_READER
+lastReviewedAt: 2026-08-28
 lastVerifiedRelease: null
 ---
 
@@ -11,10 +11,21 @@ lastVerifiedRelease: null
 ## Current Support State
 
 - Registry behavior: Recognized as a non-runnable provider family so an exact official booking link is retained instead of being mislabeled as source missing.
-- Required metadata or reader capability: No server adapter schema is approved yet. Provider route identity is limited to positive club and course identifiers plus bounded numeric view-state segments.
+- Required metadata or reader capability: Server dispatch remains disabled. The local reader requires `MEMBERSPORTS_RENDERED` parser version 1 and an exact positive club/course route identity with bounded numeric view-state segments.
 - Safe signed-out read boundary: Public tee-time landing and availability observation only; never authenticate, reserve, hold, purchase, or enter checkout.
 - Known unsupported shapes: Account, profile, payment, checkout, administrative, malformed, ambiguous multi-course, and non-tee-time routes.
-- Current proof level: local tests
+- Current proof level: signed-out rendered observation plus local tests; production exact-runtime proof remains pending
+
+### `exact-course-rendered-reader-v1`
+
+- Applies to: An exact official MemberSports course route with public signed-out availability cards.
+- Result: The reader filters cards to the exact normalized course name, requested player count, and displayed local date while rejecting sibling routes, transaction routes, challenges, and changed card shapes.
+- Why it worked: The route binds positive club/course identifiers and the rendered page exposes stable time, course, capacity, and price fields before any tee-time selection.
+- Implementation paths: `src/lib/local-reader/course-key.ts`, `src/lib/local-reader/capabilities.ts`, `tools/local-chrome-reader/membersports-reader.js`, `tools/local-chrome-reader/background.js`, `tools/local-chrome-reader/content.js`, and `tools/local-chrome-reader/manifest.json`.
+- Focused tests: `src/lib/local-reader/local-reader.test.ts` and `src/lib/local-reader/capabilities.test.ts`.
+- Verified release: `not-production-verified`
+- Exact-runtime outcome: `not-proven`
+- Observed at: 2026-08-28
 
 ## Approaches That Worked
 
@@ -58,4 +69,5 @@ lastVerifiedRelease: null
 
 ## Change Log
 
+- 2026-08-28: Added the first fail-closed rendered reader contract; exact-runtime production proof remains required.
 - 2026-08-20: Registered the family as non-runnable and separated official booking-link retention from adapter readiness.

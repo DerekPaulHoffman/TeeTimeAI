@@ -60,6 +60,18 @@ describe("local reader capabilities", () => {
     });
   });
 
+  it("routes exact MemberSports course scopes to the rendered parser", () => {
+    expect(
+      getRequiredLocalReaderCapability(
+        "membersports:7128:8903",
+        "Future Public Golf Course"
+      )
+    ).toEqual({
+      key: "MEMBERSPORTS_RENDERED",
+      parserVersion: 1
+    });
+  });
+
   it("requires the corrected Prophet redirect parser for both supported courses", () => {
     expect(getRequiredLocalReaderCapability("frear-park")).toEqual({
       key: "PROPHET_FREAR_RENDERED",
