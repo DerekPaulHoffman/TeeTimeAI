@@ -10383,6 +10383,7 @@ describe("fresh runtime verification", () => {
         firstSeenAt,
         lastSeenAt: verifiedAt,
         confirmedAt: freshCycleStartedAt,
+        updatedAt: verifiedAt,
         providerFamilyKey: "SOURCE_MISSING",
         failureClass: "MISSING_SOURCE" as const,
         attemptCount: 1,
@@ -10399,6 +10400,25 @@ describe("fresh runtime verification", () => {
     };
 
     expect(isDurableTerminalProof(entry, batch)).toBe(true);
+    const preLadderVerification = new Date("2026-07-22T19:04:59.000Z");
+    expect(
+      isDurableTerminalProof(
+        {
+          ...entry,
+          proofSnapshot: {
+            ...entry.proofSnapshot,
+            verifiedAt: preLadderVerification.toISOString(),
+          },
+          verifiedAt: preLadderVerification,
+          verifiedIncidentUpdatedAt: preLadderVerification,
+          incident: {
+            ...entry.incident,
+            updatedAt: preLadderVerification,
+          },
+        },
+        batch,
+      ),
+    ).toBe(false);
     for (const failureClass of ["NETWORK", "MISSING_METADATA"] as const) {
       expect(
         isDurableTerminalProof(
@@ -14502,6 +14522,7 @@ describe("course-support inspection ownership", () => {
 
   it("finalizes a fresh complete source gap without parking a future unfamiliar course", () => {
     const freshCycleStartedAt = new Date("2026-07-22T19:00:00.000Z");
+    const incidentUpdatedAt = new Date("2026-07-22T19:55:00.000Z");
     const evidence = {
       providerFamilyKey: "SOURCE_MISSING",
       failureClass: "MISSING_SOURCE" as const,
@@ -14522,10 +14543,36 @@ describe("course-support inspection ownership", () => {
       ),
       cycle: 4,
       verifiedAt: new Date("2026-07-22T20:00:00.000Z"),
+      verifiedIncidentUpdatedAt: incidentUpdatedAt,
+      incidentUpdatedAt,
       result: "RETRY_SCHEDULED" as const,
       now: new Date("2026-07-22T20:00:00.000Z"),
     };
     expect(shouldFinalizeSourceUnverified(evidence)).toBe(true);
+    expect(
+      shouldFinalizeSourceUnverified({
+        ...evidence,
+        result: "STALE_EVIDENCE",
+      }),
+    ).toBe(true);
+    expect(
+      shouldFinalizeSourceUnverified({
+        ...evidence,
+        result: "PENDING",
+      }),
+    ).toBe(false);
+    expect(
+      shouldFinalizeSourceUnverified({
+        ...evidence,
+        verifiedAt: new Date("2026-07-22T19:04:59.000Z"),
+      }),
+    ).toBe(false);
+    expect(
+      shouldFinalizeSourceUnverified({
+        ...evidence,
+        verifiedIncidentUpdatedAt: new Date("2026-07-22T19:54:59.000Z"),
+      }),
+    ).toBe(false);
     for (const failureClass of ["NETWORK", "MISSING_METADATA"] as const) {
       expect(
         shouldFinalizeSourceUnverified({ ...evidence, failureClass }),
@@ -18458,10 +18505,45 @@ describe("detached verification atomic batch fences", () => {
     },
   );
 
-  it.each(["NETWORK", "MISSING_METADATA"] as const)(
-    "finalizes a complete NO_UNIQUE source ladder with retained %s history",
-    async (failureClass) => {
-      const batch = closeoutBatch("RETRY_SCHEDULED");
+  it.each([
+    {
+      failureClass: "NETWORK" as const,
+      verificationResult: "STALE_EVIDENCE" as const,
+      verificationWatchMode: "WATCH_SETTLED" as const,
+      requestedOutcome: undefined,
+      expectedOutcome: "classification_only" as const,
+    },
+    {
+      failureClass: "NETWORK" as const,
+      verificationResult: "STALE_EVIDENCE" as const,
+      verificationWatchMode: "EARLY_RETRY" as const,
+      requestedOutcome: "command_failed" as const,
+      expectedOutcome: "command_failed" as const,
+    },
+    {
+      failureClass: "NETWORK" as const,
+      verificationResult: "STALE_EVIDENCE" as const,
+      verificationWatchMode: "ENDPOINT" as const,
+      requestedOutcome: undefined,
+      expectedOutcome: "classification_only" as const,
+    },
+    {
+      failureClass: "MISSING_METADATA" as const,
+      verificationResult: "RETRY_SCHEDULED" as const,
+      verificationWatchMode: "WATCH_SETTLED" as const,
+      requestedOutcome: undefined,
+      expectedOutcome: "classification_only" as const,
+    },
+  ])(
+    "finalizes a complete NO_UNIQUE source ladder with retained $failureClass history from $verificationResult verification in $verificationWatchMode mode",
+    async ({
+      failureClass,
+      verificationResult,
+      verificationWatchMode,
+      requestedOutcome,
+      expectedOutcome,
+    }) => {
+      const batch = closeoutBatch(verificationResult);
       Object.assign(batch.incidents[0].course, {
         website: null,
         detectedBookingUrl: null,
@@ -18473,6 +18555,9 @@ describe("detached verification atomic batch fences", () => {
         kind: "NEEDS_ADAPTER",
         providerFamilyKey: "SOURCE_MISSING",
         failureClass,
+        ...(verificationWatchMode === "ENDPOINT"
+          ? { escalationDeadlineAt: new Date("2026-07-15T19:59:00.000Z") }
+          : {}),
         attemptLedger: sourceUnverifiedAttemptLedger(
           1,
           new Date("2026-07-15T18:35:00.000Z"),
@@ -18495,11 +18580,19 @@ describe("detached verification atomic batch fences", () => {
           batchId: "batch-1",
           leaseToken: "lease-1",
           ownerThreadId: "owner-thread",
-          verificationWatchMode: "WATCH_SETTLED",
+          verificationWatchMode,
+          requestedOutcome,
           now,
         }),
       ).resolves.toMatchObject({
+        outcome: expectedOutcome,
+        derivedOutcome: "classification_only",
         terminalCount: 1,
+        retryCount: 0,
+        needsHumanCount: 0,
+        nextAttemptAt: null,
+        providerFamilyHandoffCount: 0,
+        decisionBasis: { orchestrationOnlyCount: 0 },
         leverage: { sourceUnverifiedFinalCount: 1 },
       });
       expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
@@ -18521,6 +18614,57 @@ describe("detached verification atomic batch fences", () => {
       );
     },
   );
+
+  it("keeps a zero-pass source closeout retryable when verification predates the final source event", async () => {
+    const batch = closeoutBatch("STALE_EVIDENCE");
+    Object.assign(batch.incidents[0].course, {
+      website: null,
+      detectedBookingUrl: null,
+      detectedPlatform: "UNKNOWN",
+      providerFamilyKey: "SOURCE_MISSING",
+      bookingMetadata: null,
+    });
+    Object.assign(batch.incidents[0].incident, {
+      kind: "NEEDS_ADAPTER",
+      providerFamilyKey: "SOURCE_MISSING",
+      failureClass: "NETWORK",
+      attemptLedger: sourceUnverifiedAttemptLedger(
+        1,
+        new Date("2026-07-15T19:59:00.000Z"),
+      ),
+      updatedAt: new Date("2026-07-15T19:59:00.000Z"),
+    });
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.transaction.mockImplementationOnce(
+      async (
+        worker: (
+          transaction: typeof monitoringTransactionClient,
+        ) => Promise<unknown>,
+      ) => worker(monitoringTransactionClient),
+    );
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        verificationWatchMode: "EARLY_RETRY",
+        requestedOutcome: "command_failed",
+        now,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "command_failed",
+      derivedOutcome: "retryable_failed",
+      terminalCount: 0,
+      retryCount: 1,
+      needsHumanCount: 0,
+      nextAttemptAt: expect.any(String),
+      leverage: { sourceUnverifiedFinalCount: 0 },
+    });
+  });
 
   it("reports exact numeric playbook zeroes for a valid empty ledger", async () => {
     const batch = closeoutBatch("RESTORED");

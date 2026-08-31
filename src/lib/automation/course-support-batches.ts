@@ -2295,6 +2295,8 @@ export function shouldFinalizeSourceUnverified(input: {
   attemptLedger: unknown;
   cycle: number;
   verifiedAt: Date | null;
+  verifiedIncidentUpdatedAt: Date | null;
+  incidentUpdatedAt: Date;
   result: CourseSupportBatchIncidentResult;
   now?: Date;
 }) {
@@ -2314,11 +2316,18 @@ export function shouldFinalizeSourceUnverified(input: {
     incidentProviderFamilyKey: input.providerFamilyKey,
     course: input.course,
   });
+  const latestCompletedStageAt =
+    getLatestCompletedAutomationPlaybookStageTimestamp(playbook);
   return Boolean(
-    input.result === "RETRY_SCHEDULED" &&
+    (input.result === "RETRY_SCHEDULED" ||
+      input.result === "STALE_EVIDENCE") &&
     freshPlaybookComplete &&
     input.verifiedAt &&
-    input.verifiedAt.getTime() >= input.freshCycleStartedAt!.getTime() &&
+    input.verifiedIncidentUpdatedAt &&
+    input.verifiedIncidentUpdatedAt.getTime() ===
+      input.incidentUpdatedAt.getTime() &&
+    latestCompletedStageAt !== null &&
+    input.verifiedAt.getTime() >= latestCompletedStageAt &&
     (exactSourceMissingState ||
       (input.providerFamilyKey === SOURCE_CONFLICT_PROVIDER_FAMILY &&
         input.failureClass === "MISSING_METADATA")),
@@ -2362,6 +2371,18 @@ function hasDurableSourceUnverifiedPlaybookEvidence(
         (stage.applicability !== "APPLICABLE" || stage.attemptCount > 0),
     ),
   );
+}
+
+function getLatestCompletedAutomationPlaybookStageTimestamp(
+  playbook: ReturnType<typeof assessAutomationPlaybook>,
+) {
+  const completedStageTimestamps = playbook.stages.map((stage) =>
+    stage.completedAt ? new Date(stage.completedAt).getTime() : Number.NaN,
+  );
+  return completedStageTimestamps.length === AUTOMATION_PLAYBOOK_STAGES.length &&
+    completedStageTimestamps.every((timestamp) => Number.isFinite(timestamp))
+    ? Math.max(...completedStageTimestamps)
+    : null;
 }
 
 export function assessCourseSupportRecovery(input: {
@@ -4760,6 +4781,7 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
                   escalationDeadlineAt: true,
                   firstSeenAt: true,
                   lastSeenAt: true,
+                  updatedAt: true,
                 },
               },
             },
@@ -5053,6 +5075,7 @@ export async function getCourseSupportBatchPacket(input: {
               nextAction: true,
               firstSeenAt: true,
               lastSeenAt: true,
+              updatedAt: true,
             },
           },
         },
@@ -9040,6 +9063,49 @@ async function closeoutCourseSupportBatchAttempt(
       };
     }
     if (
+      shouldFinalizeSourceUnverified({
+        providerFamilyKey: entry.incident.providerFamilyKey,
+        failureClass: entry.incident.failureClass,
+        course: entry.course,
+        attemptCount: entry.incident.attemptCount,
+        activeRealSearchCount: entry.incident.activeRealSearchCount,
+        firstSeenAt: entry.incident.firstSeenAt,
+        freshCycleStartedAt: entry.incident.confirmedAt,
+        attemptLedger: entry.incident.attemptLedger,
+        cycle: entry.incident.cycle,
+        verifiedAt: entry.verifiedAt,
+        verifiedIncidentUpdatedAt: entry.verifiedIncidentUpdatedAt,
+        incidentUpdatedAt: entry.incident.updatedAt,
+        result: entry.result,
+        now,
+      })
+    ) {
+      const priorProof = asJsonObject(entry.proofSnapshot);
+      return {
+        ...entry,
+        currentProviderSnapshotFingerprint,
+        automationStalled: false,
+        normalizedResult: "FINAL_DISPOSITION" as const,
+        proofSnapshot: {
+          kind: "SOURCE_UNVERIFIED_FINAL",
+          disposition: "SOURCE_UNVERIFIED",
+          providerFamilyKey: entry.incident.providerFamilyKey,
+          failureClass: entry.incident.failureClass,
+          attemptCount: entry.incident.attemptCount,
+          activeRealSearchCount: entry.incident.activeRealSearchCount,
+          firstSeenAt: entry.incident.firstSeenAt.toISOString(),
+          freshCycleStartedAt: entry.incident.confirmedAt!.toISOString(),
+          cycle: entry.incident.cycle,
+          completedStageCount: AUTOMATION_PLAYBOOK_STAGES.length,
+          verifiedAt: entry.verifiedAt!.toISOString(),
+          priorProofKind:
+            typeof priorProof.kind === "string" ? priorProof.kind : "UNKNOWN",
+        } as Prisma.JsonValue,
+        message:
+          "A fresh complete signed-out playbook, including independent confirmation, could not establish one trustworthy public provider source.",
+      };
+    }
+    if (
       verificationWatchMode === "EARLY_RETRY" &&
       (entry.result === "RESTORED" ||
         entry.result === "PENDING" ||
@@ -9120,94 +9186,35 @@ async function closeoutCourseSupportBatchAttempt(
         entry.result === "STALE_EVIDENCE" ||
         entry.result === "RETRY_SCHEDULED")
     ) {
-      const sourceUnverifiedFinal = shouldFinalizeSourceUnverified({
-        providerFamilyKey: entry.incident.providerFamilyKey,
-        failureClass: entry.incident.failureClass,
-        course: entry.course,
-        attemptCount: entry.incident.attemptCount,
-        activeRealSearchCount: entry.incident.activeRealSearchCount,
-        firstSeenAt: entry.incident.firstSeenAt,
-        freshCycleStartedAt: entry.incident.confirmedAt,
-        attemptLedger: entry.incident.attemptLedger,
-        cycle: entry.incident.cycle,
-        verifiedAt: entry.verifiedAt,
-        result: entry.result,
-        now,
-      });
-      if (sourceUnverifiedFinal) {
-        // The complete source-specific proof is normalized by the next branch.
-      } else {
-        if (
-          shouldContinueSettledCourseSupportRemediation({
-            remediationDirective,
-            failureClass: retryFailureClass,
-            attemptCount: entry.incident.attemptCount,
-            playbookConclusion: playbookAssessment.conclusion,
-            nextPlaybookStage: playbookAssessment.nextStage,
-            nextPlaybookStageStatus:
-              getCourseSupportNextStageStatus(playbookAssessment),
-            nextPlaybookStageAttemptCount:
-              getCourseSupportNextStageAttemptCount(playbookAssessment),
-          })
-        ) {
-          return {
-            ...entry,
-            currentProviderSnapshotFingerprint,
-            automationStalled: false,
-            normalizedResult: "RETRY_SCHEDULED" as const,
-            message:
-              "The bounded remediation advanced to a different safe stage or remains within its transient retry budget.",
-          };
-        }
+      if (
+        shouldContinueSettledCourseSupportRemediation({
+          remediationDirective,
+          failureClass: retryFailureClass,
+          attemptCount: entry.incident.attemptCount,
+          playbookConclusion: playbookAssessment.conclusion,
+          nextPlaybookStage: playbookAssessment.nextStage,
+          nextPlaybookStageStatus:
+            getCourseSupportNextStageStatus(playbookAssessment),
+          nextPlaybookStageAttemptCount:
+            getCourseSupportNextStageAttemptCount(playbookAssessment),
+        })
+      ) {
         return {
           ...entry,
           currentProviderSnapshotFingerprint,
-          automationStalled: true,
-          normalizedResult: "NEEDS_HUMAN" as const,
+          automationStalled: false,
+          normalizedResult: "RETRY_SCHEDULED" as const,
           message:
-            "The bounded remediation produced no novel stage or reusable change and was parked until a material input changes.",
+            "The bounded remediation advanced to a different safe stage or remains within its transient retry budget.",
         };
       }
-    }
-    if (
-      shouldFinalizeSourceUnverified({
-        providerFamilyKey: entry.incident.providerFamilyKey,
-        failureClass: entry.incident.failureClass,
-        course: entry.course,
-        attemptCount: entry.incident.attemptCount,
-        activeRealSearchCount: entry.incident.activeRealSearchCount,
-        firstSeenAt: entry.incident.firstSeenAt,
-        freshCycleStartedAt: entry.incident.confirmedAt,
-        attemptLedger: entry.incident.attemptLedger,
-        cycle: entry.incident.cycle,
-        verifiedAt: entry.verifiedAt,
-        result: entry.result,
-        now,
-      })
-    ) {
-      const priorProof = asJsonObject(entry.proofSnapshot);
       return {
         ...entry,
         currentProviderSnapshotFingerprint,
-        automationStalled: false,
-        normalizedResult: "FINAL_DISPOSITION" as const,
-        proofSnapshot: {
-          kind: "SOURCE_UNVERIFIED_FINAL",
-          disposition: "SOURCE_UNVERIFIED",
-          providerFamilyKey: entry.incident.providerFamilyKey,
-          failureClass: entry.incident.failureClass,
-          attemptCount: entry.incident.attemptCount,
-          activeRealSearchCount: entry.incident.activeRealSearchCount,
-          firstSeenAt: entry.incident.firstSeenAt.toISOString(),
-          freshCycleStartedAt: entry.incident.confirmedAt!.toISOString(),
-          cycle: entry.incident.cycle,
-          completedStageCount: AUTOMATION_PLAYBOOK_STAGES.length,
-          verifiedAt: entry.verifiedAt!.toISOString(),
-          priorProofKind:
-            typeof priorProof.kind === "string" ? priorProof.kind : "UNKNOWN",
-        } as Prisma.JsonValue,
+        automationStalled: true,
+        normalizedResult: "NEEDS_HUMAN" as const,
         message:
-          "A fresh complete signed-out playbook, including independent confirmation, could not establish one trustworthy public provider source.",
+          "The bounded remediation produced no novel stage or reusable change and was parked until a material input changes.",
       };
     }
     if (
@@ -16668,6 +16675,7 @@ export function isDurableTerminalProof(
       cycle?: number;
       attemptLedger?: Prisma.JsonValue | null;
       confirmedAt?: Date | null;
+      updatedAt: Date;
     };
     course?: Parameters<typeof resolveProviderCapability>[0];
   },
@@ -16754,6 +16762,8 @@ export function isDurableTerminalProof(
         entry.incident.attemptLedger,
         entry.incident.cycle,
       );
+      const latestCompletedStageAt =
+        getLatestCompletedAutomationPlaybookStageTimestamp(playbook);
       return Boolean(
         proof.disposition === "SOURCE_UNVERIFIED" &&
         proof.providerFamilyKey === entry.incident.providerFamilyKey &&
@@ -16776,7 +16786,10 @@ export function isDurableTerminalProof(
           entry.incident.confirmedAt.getTime() &&
         verifiedAt?.getTime() === entry.verifiedAt.getTime() &&
         verifiedAt &&
-        verifiedAt.getTime() >= freshCycleStartedAt.getTime() &&
+        entry.verifiedIncidentUpdatedAt.getTime() ===
+          entry.incident.updatedAt.getTime() &&
+        latestCompletedStageAt !== null &&
+        verifiedAt.getTime() >= latestCompletedStageAt &&
         playbook.valid &&
         playbook.cycle === entry.incident.cycle &&
         playbook.conclusion === "UNRESOLVED_EXHAUSTED" &&
