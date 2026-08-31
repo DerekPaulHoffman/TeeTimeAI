@@ -1,7 +1,7 @@
 ---
 schemaVersion: 1
 providerFamily: MEMBERSPORTS
-registrySupport: LOCAL_READER
+registrySupport: NON_SERVER
 lastReviewedAt: 2026-08-28
 lastVerifiedRelease: null
 ---
