@@ -16,6 +16,7 @@ import type {
 } from "./course-support-remediation-routing";
 import type { CourseSupportClaimActionPlan } from "./course-support-action-plan";
 import type { DeferredFailureHandoffSignal } from "./course-support-deferred-failure-handoff";
+import type { CourseSupportProviderContractEvidenceMarker } from "./course-support-provider-contract-evidence";
 
 const NEAR_DATE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -43,6 +44,7 @@ export type CourseSupportCandidate = {
   remediationDirective?: CourseSupportRemediationDirective;
   remediationRoute?: CourseSupportRemediationRoute;
   actionPlan?: CourseSupportClaimActionPlan;
+  providerContractEvidence?: CourseSupportProviderContractEvidenceMarker;
   providerSnapshotFingerprint?: string;
   remediationCourseRef?: string;
   deferredFailureHandoff?: {

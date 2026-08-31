@@ -10,6 +10,8 @@ import {
   type MonitoringStrategyInput,
 } from "./monitoring-strategy";
 import {
+  normalizeProviderFamilyKey,
+  SOURCE_CONFLICT_PROVIDER_FAMILY,
   SOURCE_MISSING_PROVIDER_FAMILY,
   type CourseSupportFailureClass,
 } from "./provider-capabilities";
@@ -82,6 +84,7 @@ export type CourseSupportRemediationRoutingInput = MonitoringStrategyInput & {
   priorUnchangedAttempt?: CourseSupportRemediationAttemptSignature | null;
   materialChanges?: CourseSupportMaterialChangeIndicators;
   transientRetryBudget?: number;
+  providerContractEvidenceAvailable?: boolean;
 };
 
 export type CourseSupportRemediationRoute = {
@@ -333,6 +336,8 @@ export function routeCourseSupportRemediation(
       strategy.providerFamilyKey === SOURCE_MISSING_PROVIDER_FAMILY &&
       input.website === null &&
       input.detectedBookingUrl === null,
+    providerContractEvidenceAvailable:
+      input.providerContractEvidenceAvailable === true && input.isPublic === true,
   });
 
   if (candidate.workMode === "WAIT_FOR_MATERIAL_CHANGE") {
@@ -411,6 +416,7 @@ function selectActionableRoute(input: {
   materialChangeDetected: boolean;
   retryBudget: CourseSupportRemediationRetryBudget | null;
   sourceFreeProvider: boolean;
+  providerContractEvidenceAvailable: boolean;
 }): CourseSupportRemediationRoute {
   // A genuinely source-free course has no provider contract to retry or
   // implement, even when its incident retains a transient failure class from
@@ -445,14 +451,25 @@ function selectActionableRoute(input: {
     input.playbookAssessment.nextStage === "BROWSER_ADAPTER_RETRY" &&
     input.strategy.action === "DISCOVER_WITH_BROWSER"
   ) {
-    return discoveryRoute({
+    const repairInput = {
       ...input,
       strategy: {
         ...input.strategy,
-        action: "REPAIR_PROVIDER_ADAPTER",
+        action: "REPAIR_PROVIDER_ADAPTER" as const,
         browserAllowed: false,
       },
-    });
+    };
+    const normalizedProviderFamily = normalizeProviderFamilyKey(
+      input.strategy.providerFamilyKey
+    );
+    if (
+      input.providerContractEvidenceAvailable &&
+      normalizedProviderFamily !== SOURCE_MISSING_PROVIDER_FAMILY &&
+      normalizedProviderFamily !== SOURCE_CONFLICT_PROVIDER_FAMILY
+    ) {
+      return implementationRoute(repairInput);
+    }
+    return discoveryRoute(repairInput);
   }
 
   if (input.strategy.action === "RETRY_PROVIDER") {

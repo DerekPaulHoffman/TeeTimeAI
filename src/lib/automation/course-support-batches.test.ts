@@ -153,6 +153,7 @@ import {
   normalizeCourseSupportObservedGitPaths,
   orderCourseSupportBatchIncidents,
   preserveExplicitHumanVerification,
+  readCourseSupportRemediationClaimAttempt,
   recoverCourseSupportBatch,
   renewCourseSupportBatchOperationLease,
   resolveCourseSupportProviderCapability,
@@ -178,6 +179,93 @@ const decisionRuntimeVersion = "a".repeat(40);
 const decisionProviderFingerprint = "b".repeat(64);
 const decisionFailureFingerprint = "c".repeat(64);
 const decisionObservedFailureFingerprint = "d".repeat(64);
+
+describe("course-support provider-contract claim evidence", () => {
+  const courseId = "course-contract-evidence";
+  const courseRef = createHash("sha256")
+    .update(courseId)
+    .digest("hex")
+    .slice(0, 24);
+  const marker = {
+    schemaVersion: 1,
+    evidenceDigest: "e".repeat(64),
+    contractCount: 2
+  };
+
+  function summary(input: {
+    playbookStage: "BROWSER_ADAPTER_RETRY" | "TYPED_ADAPTER";
+    providerContractEvidence?: unknown;
+  }) {
+    return {
+      remediation: {
+        attempts: [
+          {
+            courseRef,
+            providerSnapshotFingerprint: "b".repeat(64),
+            failureFingerprint: "v1:UNSUPPORTED_FAMILY:AVAILABILITY",
+            playbookEventCountAtClaim: 3,
+            approach: {
+              workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+              strategyAction: "REPAIR_PROVIDER_ADAPTER",
+              playbookStage: input.playbookStage
+            },
+            actionPlan: {
+              schemaVersion: 1,
+              primaryAction: "IMPLEMENT_REUSABLE_SUPPORT",
+              allowedActions: [
+                "IMPLEMENT_REUSABLE_SUPPORT",
+                "INSPECT_PROVIDER_CONTRACT"
+              ],
+              route: {
+                workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+                strategyAction: "REPAIR_PROVIDER_ADAPTER",
+                playbookStage: input.playbookStage
+              }
+            },
+            ...(input.providerContractEvidence !== undefined
+              ? {
+                  providerContractEvidence: input.providerContractEvidence
+                }
+              : {})
+          }
+        ]
+      }
+    };
+  }
+
+  it("reads exact browser-contract evidence for a promoted browser-retry implementation claim", () => {
+    expect(
+      readCourseSupportRemediationClaimAttempt({
+        summary: summary({
+          playbookStage: "BROWSER_ADAPTER_RETRY",
+          providerContractEvidence: marker
+        }),
+        courseId,
+        expectedAttemptCount: 1
+      })
+    ).toMatchObject({ providerContractEvidence: marker });
+    expect(
+      readCourseSupportRemediationClaimAttempt({
+        summary: summary({ playbookStage: "BROWSER_ADAPTER_RETRY" }),
+        courseId,
+        expectedAttemptCount: 1
+      })
+    ).toMatchObject({ providerContractEvidence: null });
+  });
+
+  it("rejects browser-contract markers on unrelated implementation stages", () => {
+    expect(
+      readCourseSupportRemediationClaimAttempt({
+        summary: summary({
+          playbookStage: "TYPED_ADAPTER",
+          providerContractEvidence: marker
+        }),
+        courseId,
+        expectedAttemptCount: 1
+      })
+    ).toBeNull();
+  });
+});
 
 describe("course-support implementation execution history", () => {
   it("keeps a prior runtime-bearing deployment authoritative after a later release advance", () => {
@@ -2980,6 +3068,76 @@ describe("course-support claim demand fencing", () => {
       course: {
         timeZone: "America/Los_Angeles",
         preferences: input.preferences,
+      },
+    };
+  }
+
+  function browserContractClaimIncident(input: {
+    evidence: "PRESENT" | "ABSENT";
+    observedAt?: string;
+  }) {
+    const providerFamilyKey = "booking.provider-contract-canary.example";
+    const bookingUrl =
+      "https://booking.provider-contract-canary.example/tee-times";
+    const incident = {
+      ...incidentRecord({ engineeringOnly: true, preferences: [] }),
+      providerFamilyKey,
+      failureClass: "MISSING_METADATA" as const,
+      failureFingerprint: "v1:MISSING_METADATA:AVAILABILITY",
+      attemptLedger: browserAdapterRetryReadyAttemptLedger(),
+    };
+    return {
+      ...incident,
+      course: {
+        ...incident.course,
+        isPublic: true,
+        website: "https://official-provider-contract-canary.example/",
+        detectedBookingUrl: bookingUrl,
+        detectedPlatform: "UNKNOWN",
+        providerFamilyKey,
+        bookingMethod: "PUBLIC_ONLINE",
+        bookingMetadata: null,
+        automationEligibility: "NEEDS_REVIEW",
+        automationReason: "NONE",
+        monitoringMode: "AUTOMATIC",
+        bookingAccessMode: "PUBLIC",
+        intelligenceVerifiedAt: null,
+        intelligenceReviewAt: null,
+        intelligenceConfidence: null,
+        automationDiscoveries:
+          input.evidence === "PRESENT"
+            ? [
+                {
+                  evidence: {
+                    browserInvestigation: {
+                      incidentCycle: incident.cycle,
+                      observedAt:
+                        input.observedAt ?? "2026-07-15T19:45:00.000Z",
+                      providerSnapshotFingerprint: "b".repeat(64),
+                      networkContracts: [
+                        {
+                          origin:
+                            "https://booking.provider-contract-canary.example",
+                          method: "GET",
+                          pathPattern: "/api/availability",
+                          queryKeys: ["date", "facilityId"],
+                          resourceType: "xhr",
+                          status: 200,
+                        },
+                      ],
+                    },
+                  },
+                  automationReason: "UNSUPPORTED_PLATFORM",
+                  detectedPlatform: "UNKNOWN",
+                  bookingUrl,
+                  apiMetadata: null,
+                  confidence: 0.8,
+                  createdAt: new Date(
+                    input.observedAt ?? "2026-07-15T19:45:00.000Z",
+                  ),
+                },
+              ]
+            : [],
       },
     };
   }
@@ -8825,6 +8983,53 @@ describe("course-support claim demand fencing", () => {
       timeout: 60_000,
     });
   });
+
+  it.each([
+    {
+      label: "added",
+      selected: { evidence: "ABSENT" as const },
+      current: { evidence: "PRESENT" as const },
+    },
+    {
+      label: "removed",
+      selected: { evidence: "PRESENT" as const },
+      current: { evidence: "ABSENT" as const },
+    },
+    {
+      label: "changed",
+      selected: {
+        evidence: "PRESENT" as const,
+        observedAt: "2026-07-15T19:45:00.000Z",
+      },
+      current: {
+        evidence: "PRESENT" as const,
+        observedAt: "2026-07-15T19:46:00.000Z",
+      },
+    },
+  ])(
+    "aborts atomic claim before writes when provider-contract evidence is $label",
+    async ({ selected, current }) => {
+      prismaMocks.supportIncidentFindMany
+        .mockResolvedValueOnce([browserContractClaimIncident(selected)])
+        .mockResolvedValueOnce([browserContractClaimIncident(current)]);
+
+      await expect(
+        claimCourseSupportBatch({
+          ownerThreadId: "owner-provider-contract-canary",
+          branch: "automation/course-support-20260715-200000",
+          baseSha,
+          now,
+        }),
+      ).rejects.toThrow(
+        "provider contract evidence changed during claim; rerun selection",
+      );
+
+      expect(prismaMocks.automationRunCreate).not.toHaveBeenCalled();
+      expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+      expect(prismaMocks.batchIncidentCreateMany).not.toHaveBeenCalled();
+      expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+    },
+  );
 
   it("rolls back claim creation when live demand changes after selection", async () => {
     prismaMocks.supportIncidentFindMany

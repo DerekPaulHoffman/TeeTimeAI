@@ -672,7 +672,7 @@ describe("course-support remediation routing", () => {
     });
   });
 
-  it("hands a provider-specific browser adapter retry to the detached verifier", () => {
+  it("keeps a provider-specific browser adapter retry on detached verification without contract evidence", () => {
     const result = routeCourseSupportRemediation({
       ...runnableCourse,
       detectedPlatform: "CUSTOM",
@@ -683,6 +683,7 @@ describe("course-support remediation routing", () => {
       failureClass: "MISSING_METADATA",
       discoveryAttempt: "HTTP_INCONCLUSIVE",
       playbookAssessment: incompletePlaybook("BROWSER_ADAPTER_RETRY"),
+      providerContractEvidenceAvailable: false,
     });
 
     expect(result).toMatchObject({
@@ -743,6 +744,108 @@ describe("course-support remediation routing", () => {
       reason: "UNCHANGED_ATTEMPT_ALREADY_RECORDED",
     });
   });
+
+  it("promotes public stable provider-contract evidence to reusable implementation", () => {
+    const result = routeCourseSupportRemediation({
+      ...runnableCourse,
+      detectedPlatform: "FOREUP",
+      providerFamilyKey: "FOREUP",
+      detectedBookingUrl:
+        "https://www.foreupsoftware.com/index.php/booking/12345",
+      bookingMetadata: null,
+      automationEligibility: "NEEDS_REVIEW",
+      failureClass: "MISSING_METADATA",
+      discoveryAttempt: "HTTP_INCONCLUSIVE",
+      playbookAssessment: incompletePlaybook("BROWSER_ADAPTER_RETRY"),
+      providerContractEvidenceAvailable: true,
+    });
+
+    expect(result).toMatchObject({
+      workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+      allowUnchangedRuntime: false,
+      requiresImplementationPath: true,
+      reason: "IMPLEMENTATION_REQUIRED",
+      strategy: {
+        action: "REPAIR_PROVIDER_ADAPTER",
+        providerFamilyKey: "FOREUP",
+        browserAllowed: false,
+      },
+      attemptSignature: {
+        workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+        strategyAction: "REPAIR_PROVIDER_ADAPTER",
+        playbookStage: "BROWSER_ADAPTER_RETRY",
+      },
+    });
+  });
+
+  it.each([
+    {
+      label: "private identity",
+      overrides: {
+        isPublic: false,
+        now: new Date("2026-01-01T00:00:00.000Z"),
+        intelligenceVerifiedAt: "2024-01-01T00:00:00.000Z",
+        intelligenceReviewAt: "2025-01-01T00:00:00.000Z",
+        intelligenceConfidence: 0.9,
+      },
+      expectedProviderFamilyKey: "FOREUP",
+    },
+    {
+      label: "source-missing family",
+      overrides: {
+        detectedPlatform: "UNKNOWN",
+        providerFamilyKey: "SOURCE_MISSING",
+        detectedBookingUrl: null,
+        website: "https://official-course/",
+        failureClass: "MISSING_SOURCE",
+      },
+      expectedProviderFamilyKey: "SOURCE_MISSING",
+    },
+    {
+      label: "source-conflict family",
+      overrides: {
+        detectedPlatform: "FOREUP",
+        providerFamilyKey: "SOURCE_CONFLICT",
+        detectedBookingUrl: "https://booking.teeitup.com/tee-times",
+        website: null,
+      },
+      expectedProviderFamilyKey: "SOURCE_CONFLICT",
+    },
+  ])(
+    "does not promote provider-contract evidence for a $label",
+    ({ overrides, expectedProviderFamilyKey }) => {
+      const result = routeCourseSupportRemediation({
+        ...runnableCourse,
+        detectedPlatform: "FOREUP",
+        providerFamilyKey: "FOREUP",
+        detectedBookingUrl:
+          "https://www.foreupsoftware.com/index.php/booking/12345",
+        bookingMetadata: null,
+        automationEligibility: "NEEDS_REVIEW",
+        failureClass: "MISSING_METADATA",
+        discoveryAttempt: "HTTP_INCONCLUSIVE",
+        playbookAssessment: incompletePlaybook("BROWSER_ADAPTER_RETRY"),
+        providerContractEvidenceAvailable: true,
+        ...overrides,
+      });
+
+      expect(result).toMatchObject({
+        workMode: "ADVANCE_DISCOVERY",
+        allowUnchangedRuntime: true,
+        requiresImplementationPath: false,
+        strategy: {
+          action: "REPAIR_PROVIDER_ADAPTER",
+          providerFamilyKey: expectedProviderFamilyKey,
+          browserAllowed: false,
+        },
+        attemptSignature: {
+          workMode: "ADVANCE_DISCOVERY",
+          strategyAction: "REPAIR_PROVIDER_ADAPTER",
+          playbookStage: "BROWSER_ADAPTER_RETRY",
+        },
+      });
+    },
+  );
 
   it("parks an exhausted unresolved playbook and reopens it only for material change", () => {
     const input = {

@@ -15,7 +15,6 @@ import {
   type AddressPinnedPublicFetchDependencies,
 } from "./address-pinned-public-fetch";
 import { isSafeManualEvidenceUrl } from "./browser-discovery";
-import { classifyBrowserNetworkContractRestriction } from "./browser-probe-evidence";
 import {
   assessAutomationPlaybook,
   parseAutomationPlaybookLedger
@@ -26,6 +25,14 @@ import {
   readCourseSupportRemediationDirective,
 } from "./course-support-batches";
 import {
+  courseSupportProviderContractEvidenceMarkersMatch,
+  parseSanitizedProviderContract,
+  projectBrowserProviderContracts,
+  selectCurrentBrowserProviderContractEvidence,
+  selectProviderContractTrustedBookingLandingUrl,
+  selectProviderContractTrustedLandingUrl,
+} from "./course-support-provider-contract-evidence";
+import {
   courseSupportActionPlanAllows,
   isCourseSupportProviderContractActionEligible,
   type CourseSupportClaimAction
@@ -33,11 +40,8 @@ import {
 import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
 import {
   getKnownProviderFamilyForHostname,
-  isProviderInfrastructureUrl,
-  isProviderPublicBookingLandingUrl,
   normalizeProviderFamilyKey,
   resolveProviderCapability,
-  resolveProviderDiscoveryIdentity,
   SOURCE_MISSING_PROVIDER_FAMILY,
 } from "./provider-capabilities";
 import { runWithProviderRequestLease } from "./provider-request-lease";
@@ -165,7 +169,7 @@ type OwnedProviderContractContext = {
   providerFamilyKey: string;
   officialUrl: string | null;
   bookingUrl: string | null;
-  browserContracts: RawBrowserContract[];
+  browserContracts: Array<RawBrowserContract | SanitizedProviderContract>;
   restrictionDetected: boolean;
 };
 
@@ -634,19 +638,22 @@ function resolveOwnedProviderContractContext(
   }
   const { entry, currentProviderSnapshotFingerprint } = selected;
 
-  const browserEvidence = selectCurrentBrowserEvidence(
-    entry.course.automationDiscoveries,
-    entry.cycle,
-    entry.incident.firstSeenAt,
-    batch.providerFamilyKey,
-    currentProviderSnapshotFingerprint,
-  );
-  const bookingUrl = selectTrustedBookingLandingUrl(
+  const bookingUrl = selectProviderContractTrustedBookingLandingUrl(
     entry.course.detectedBookingUrl,
-    batch.providerFamilyKey,
+    batch.providerFamilyKey
   );
   const officialUrl =
-    bookingUrl ?? selectTrustedLandingUrl([entry.course.website]);
+    bookingUrl ??
+    selectProviderContractTrustedLandingUrl([entry.course.website]);
+  const browserEvidence = selectCurrentBrowserProviderContractEvidence({
+    discoveries: entry.course.automationDiscoveries,
+    incidentCycle: entry.cycle,
+    incidentFirstSeenAt: entry.incident.firstSeenAt,
+    providerFamilyKey: batch.providerFamilyKey,
+    providerSnapshotFingerprint: currentProviderSnapshotFingerprint,
+    officialUrl,
+    bookingUrl
+  });
   const authorityDigest = createHash("sha256")
     .update(
       JSON.stringify({
@@ -669,7 +676,9 @@ function resolveOwnedProviderContractContext(
     .update(
       JSON.stringify({
         createdAt: browserEvidence?.createdAt.toISOString() ?? null,
-        contracts: browserEvidence?.contracts ?? [],
+        evidenceDigest: browserEvidence?.marker?.evidenceDigest ?? null,
+        contracts:
+          browserEvidence?.contracts.map((contract) => contract.digest) ?? [],
         restrictionDetected: browserEvidence?.restrictionDetected ?? false,
       }),
     )
@@ -718,6 +727,33 @@ function resolveProviderContractBatchMemberAuthority(input: {
   const monitoringStatus = entry.course.monitoringStatus;
   const currentProviderSnapshotFingerprint =
     buildCourseSupportProviderSnapshotFingerprint(entry.course);
+  const trustedBookingUrl =
+    selectProviderContractTrustedBookingLandingUrl(
+      entry.course.detectedBookingUrl,
+      batch.providerFamilyKey
+    );
+  const trustedOfficialUrl =
+    trustedBookingUrl ??
+    selectProviderContractTrustedLandingUrl([entry.course.website]);
+  const currentProviderContractEvidence =
+    selectCurrentBrowserProviderContractEvidence({
+      discoveries: entry.course.automationDiscoveries,
+      incidentCycle: entry.cycle,
+      incidentFirstSeenAt: entry.incident.firstSeenAt,
+      providerFamilyKey: batch.providerFamilyKey,
+      providerSnapshotFingerprint: currentProviderSnapshotFingerprint,
+      officialUrl: trustedOfficialUrl,
+      bookingUrl: trustedBookingUrl
+    })?.marker ?? null;
+  const providerContractEvidenceValid = claimedAttempt?.providerContractEvidence
+    ? Boolean(
+        currentProviderContractEvidence &&
+          courseSupportProviderContractEvidenceMarkersMatch(
+            claimedAttempt.providerContractEvidence,
+            currentProviderContractEvidence
+          )
+      )
+    : true;
   const courseProviderFamily = normalizeProviderContractAuthorityFamily(
     entry.course.providerFamilyKey,
   );
@@ -758,6 +794,7 @@ function resolveProviderContractBatchMemberAuthority(input: {
     input.batchProviderFamily !== incidentProviderFamily ||
     batch.failureFingerprint !== entry.incident.failureFingerprint ||
     !claimedAttempt ||
+    !providerContractEvidenceValid ||
     (claimedAttempt.actionPlan !== null &&
       !courseSupportActionPlanAllows(
         claimedAttempt.actionPlan,
@@ -826,169 +863,21 @@ function normalizeProviderContractAuthorityFamily(value: string) {
     : SOURCE_MISSING_PROVIDER_FAMILY;
 }
 
-function selectCurrentBrowserEvidence(
-  discoveries: ProviderContractBatch["incidents"][number]["course"]["automationDiscoveries"],
-  incidentCycle: number,
-  incidentFirstSeenAt: Date,
-  providerFamilyKey: string,
-  providerSnapshotFingerprint: string,
-) {
-  for (const discovery of discoveries) {
-    const evidence = asRecord(discovery.evidence);
-    const browser = asRecord(evidence.browserInvestigation);
-    const observedAt =
-      typeof browser.observedAt === "string"
-        ? new Date(browser.observedAt)
-        : null;
-    if (
-      browser.incidentCycle !== incidentCycle ||
-      !observedAt ||
-      !Number.isFinite(observedAt.getTime()) ||
-      observedAt.getTime() < incidentFirstSeenAt.getTime()
-    ) {
-      continue;
-    }
-    const rawContracts = Array.isArray(browser.networkContracts)
-      ? browser.networkContracts.flatMap(readRawBrowserContract)
-      : [];
-    const barriers = Array.isArray(evidence.accessBarriers)
-      ? evidence.accessBarriers
-      : [];
-    const restrictionDetected =
-      browser.restrictedNetworkObserved === true ||
-      discovery.automationReason === "ACCOUNT_REQUIRED" ||
-      discovery.automationReason === "CAPTCHA_OR_QUEUE" ||
-      barriers.length > 0 ||
-      rawContracts.some(isRestrictedPersistedBrowserContract);
-    // Restrictions remain safety evidence even when an older writer omitted the
-    // snapshot fingerprint or the provider projection later changed. Only a
-    // newer, exactly snapshot-bound nonrestricted observation can supersede it.
-    if (restrictionDetected) {
-      return {
-        createdAt: discovery.createdAt,
-        contracts: [],
-        restrictionDetected: true,
-      };
-    }
-    const discoveryProvider = resolveProviderDiscoveryIdentity({
-      detectedPlatform: discovery.detectedPlatform,
-      bookingUrl: discovery.bookingUrl,
-      apiMetadata: discovery.apiMetadata,
-      confidence: discovery.confidence,
-    });
-    if (
-      browser.providerSnapshotFingerprint !== providerSnapshotFingerprint ||
-      (discoveryProvider &&
-        normalizeProviderFamilyKey(discoveryProvider.providerFamilyKey) !==
-          normalizeProviderFamilyKey(providerFamilyKey))
-    ) {
-      continue;
-    }
-    return {
-      createdAt: discovery.createdAt,
-      contracts: rawContracts,
-      restrictionDetected,
-    };
-  }
-  return null;
-}
-
-function isRestrictedPersistedBrowserContract(contract: RawBrowserContract) {
-  const classification = classifyBrowserNetworkContractRestriction(contract);
-  if (
-    contract.status === 401 ||
-    contract.status === 403 ||
-    contract.status === 429
-  ) {
-    return true;
-  }
-  return classification.unsafeMethod || classification.unsafeUrlState;
-}
-
-function readRawBrowserContract(value: unknown): RawBrowserContract[] {
-  const record = asRecord(value);
-  if (
-    typeof record.origin !== "string" ||
-    typeof record.method !== "string" ||
-    typeof record.pathPattern !== "string" ||
-    !Array.isArray(record.queryKeys) ||
-    !record.queryKeys.every((key) => typeof key === "string") ||
-    typeof record.resourceType !== "string" ||
-    !(
-      record.status === null ||
-      (typeof record.status === "number" && Number.isInteger(record.status))
-    )
-  ) {
-    return [];
-  }
-  return [
-    {
-      origin: record.origin,
-      method: record.method,
-      pathPattern: record.pathPattern,
-      queryKeys: record.queryKeys as string[],
-      resourceType: record.resourceType,
-      status: record.status as number | null,
-    },
-  ];
-}
-
 function projectBrowserContracts(context: OwnedProviderContractContext) {
-  const officialOrigin = safeOrigin(context.officialUrl);
-  const bookingOrigin = safeOrigin(context.bookingUrl);
-  return deduplicateContracts(
-    context.browserContracts.flatMap((contract) => {
-      const method = normalizeReadMethod(contract.method);
-      const resourceType = normalizeResourceType(contract.resourceType);
-      if (!method || !contractMatchesProviderFamily(contract, context)) {
-        return [];
-      }
-      // Document and static-asset traffic proves only that a page rendered. It is
-      // not an actionable provider read contract and must not suppress the
-      // bounded script-inspection fallback.
-      if (resourceType !== "FETCH" && resourceType !== "XHR") {
-        return [];
-      }
-      const providerSignal = classifyBrowserProviderSignal(
-        contract.origin,
-        officialOrigin,
-        bookingOrigin,
-      );
-      return [
-        buildSanitizedContract({
-          method,
-          resourceType,
-          statusBand: normalizeStatusBand(contract.status),
-          pathPattern: contract.pathPattern,
-          queryKeys: contract.queryKeys,
-          providerSignal,
-        }),
-      ];
-    }),
-  );
-}
-
-function contractMatchesProviderFamily(
-  contract: RawBrowserContract,
-  context: OwnedProviderContractContext,
-) {
-  try {
-    const origin = parseProviderContractUrl(contract.origin).origin;
-    if (
-      origin === safeOrigin(context.officialUrl) ||
-      origin === safeOrigin(context.bookingUrl)
-    ) {
-      return true;
-    }
-    const family = getKnownProviderFamilyForHostname(new URL(origin).hostname);
-    return Boolean(
-      family &&
-      normalizeProviderFamilyKey(family) ===
-        normalizeProviderFamilyKey(context.providerFamilyKey),
-    );
-  } catch {
-    return false;
-  }
+  const alreadySanitized = context.browserContracts.flatMap((contract) => {
+    const parsed = parseSanitizedProviderContract(contract);
+    return parsed ? [parsed] : [];
+  });
+  const projected = projectBrowserProviderContracts({
+    contracts: context.browserContracts,
+    providerFamilyKey: context.providerFamilyKey,
+    officialUrl: context.officialUrl,
+    bookingUrl: context.bookingUrl
+  });
+  return deduplicateContracts([
+    ...alreadySanitized,
+    ...projected.contracts
+  ]);
 }
 
 function inspectionResult(
@@ -2035,23 +1924,6 @@ function normalizeQueryKeys(keys: string[]) {
   ].sort();
 }
 
-function classifyBrowserProviderSignal(
-  origin: string,
-  officialOrigin: string | null,
-  bookingOrigin: string | null,
-): ProviderContractSignal {
-  if (origin === officialOrigin) return "OFFICIAL_ORIGIN";
-  if (origin === bookingOrigin) return "BOOKING_ORIGIN";
-  try {
-    if (isProviderInfrastructureUrl(origin)) {
-      return "KNOWN_PROVIDER_INFRASTRUCTURE";
-    }
-  } catch {
-    // The persisted browser contract already passed its own URL sanitizer.
-  }
-  return "TRUSTED_BROWSER_ORIGIN";
-}
-
 function classifyScriptProviderSignal(
   url: URL,
   officialOrigin: string,
@@ -2070,47 +1942,6 @@ function classifyScriptProviderSignal(
       normalizeProviderFamilyKey(providerFamilyKey)
     ? "KNOWN_PROVIDER_INFRASTRUCTURE"
     : null;
-}
-
-function selectTrustedLandingUrl(values: Array<string | null>) {
-  for (const value of values) {
-    if (!value) continue;
-    try {
-      const url = parseProviderContractUrl(value);
-      url.hash = "";
-      return url.toString();
-    } catch {
-      // Continue to the next server-derived candidate.
-    }
-  }
-  return null;
-}
-
-function selectTrustedBookingLandingUrl(
-  value: string | null,
-  providerFamilyKey: string,
-) {
-  if (!value) return null;
-  try {
-    const url = parseProviderContractUrl(value);
-    const expectedFamily = normalizeProviderFamilyKey(providerFamilyKey);
-    const knownFamily = getKnownProviderFamilyForHostname(url.hostname);
-    const familyMatches = knownFamily
-      ? normalizeProviderFamilyKey(knownFamily) === expectedFamily
-      : normalizeProviderFamilyKey(url.hostname) === expectedFamily;
-    if (
-      !familyMatches ||
-      (knownFamily
-        ? !isProviderPublicBookingLandingUrl(url)
-        : url.protocol !== "https:" || isProviderInfrastructureUrl(url))
-    ) {
-      return null;
-    }
-    url.hash = "";
-    return url.toString();
-  } catch {
-    return null;
-  }
 }
 
 function parseProviderContractUrl(value: string) {
@@ -2152,17 +1983,6 @@ function normalizeResourceType(value: string): ProviderContractResourceType {
     return normalized as ProviderContractResourceType;
   }
   return "OTHER";
-}
-
-function normalizeStatusBand(
-  status: number | null,
-): ProviderContractStatusBand {
-  if (!status) return "UNKNOWN";
-  if (status >= 200 && status < 300) return "SUCCESS";
-  if (status >= 300 && status < 400) return "REDIRECT";
-  if (status >= 400 && status < 500) return "CLIENT_ERROR";
-  if (status >= 500 && status < 600) return "SERVER_ERROR";
-  return "UNKNOWN";
 }
 
 function normalizeContentType(value: string | null) {

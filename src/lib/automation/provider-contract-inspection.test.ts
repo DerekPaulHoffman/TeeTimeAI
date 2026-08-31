@@ -87,6 +87,7 @@ import {
   PROVIDER_CONTRACT_REQUIRED_LEASE_HEADROOM_MS,
   sanitizeContractPath,
 } from "./provider-contract-inspection";
+import { selectCurrentBrowserProviderContractEvidence } from "./course-support-provider-contract-evidence";
 import { appendAutomationPlaybookEvent } from "./course-monitoring-playbook";
 import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
 import { bindBrowserDiscoveryToProviderSnapshot } from "./db-service";
@@ -350,6 +351,92 @@ function advanceOwnedBatchToOfficialHttpRetry(
     batch.summary.remediation.attempts[index].playbookEventCountAtClaim =
       ledger.events.length;
   });
+  return batch;
+}
+
+function ownedBrowserRetryContractEvidenceBatch() {
+  const bookingUrl =
+    "https://booking.provider-contract-canary.example/tee-times";
+  const providerFamilyKey = "booking.provider-contract-canary.example";
+  const batch = ownedDatabaseBatch({
+    remediationStage: "BROWSER_ADAPTER_RETRY",
+    providerFamilyKey,
+    detectedPlatform: "UNKNOWN",
+    website: "https://official-provider-contract-canary.example/",
+    detectedBookingUrl: bookingUrl,
+  });
+  const entry = batch.incidents[0];
+  const course = entry.course;
+  const discovery = course.automationDiscoveries[0];
+  discovery.detectedPlatform = "UNKNOWN";
+  discovery.bookingUrl = bookingUrl;
+  discovery.evidence.browserInvestigation.networkContracts[0].origin =
+    "https://booking.provider-contract-canary.example";
+
+  let ledger: unknown = entry.incident.attemptLedger;
+  for (const event of [
+    {
+      stage: "TYPED_ADAPTER" as const,
+      transition: "NOT_APPLICABLE" as const,
+      readPath: "TYPED_PROVIDER_ADAPTER" as const,
+      evidenceKind: "TOOLING" as const,
+      failureFingerprint: "TEST:TYPED_ADAPTER:SKIPPED",
+      skipReason: "NO_RUNNABLE_ADAPTER" as const,
+    },
+    {
+      stage: "OFFICIAL_HTTP_DISCOVERY" as const,
+      transition: "COMPLETED" as const,
+      readPath: "OFFICIAL_HTTP" as const,
+      evidenceKind: "OFFICIAL_SOURCE" as const,
+      failureFingerprint: "TEST:OFFICIAL_HTTP:COMPLETE",
+    },
+    {
+      stage: "HTTP_ADAPTER_RETRY" as const,
+      transition: "NOT_APPLICABLE" as const,
+      readPath: "TYPED_PROVIDER_ADAPTER" as const,
+      evidenceKind: "TOOLING" as const,
+      failureFingerprint: "TEST:HTTP_ADAPTER_RETRY:SKIPPED",
+      skipReason: "NO_RUNNABLE_ADAPTER" as const,
+    },
+    {
+      stage: "RENDERED_BROWSER_DISCOVERY" as const,
+      transition: "COMPLETED" as const,
+      readPath: "RENDERED_BROWSER" as const,
+      evidenceKind: "RENDERED_PAGE" as const,
+      failureFingerprint: "TEST:RENDERED_BROWSER:COMPLETE",
+    },
+  ]) {
+    ledger = appendAutomationPlaybookEvent(ledger, {
+      cycle: 1,
+      runtimeVersion: "test-runtime",
+      observedAt: now,
+      ...event,
+    });
+  }
+  entry.incident.attemptLedger = ledger;
+
+  const providerSnapshotFingerprint =
+    buildCourseSupportProviderSnapshotFingerprint(course);
+  discovery.evidence.browserInvestigation.providerSnapshotFingerprint =
+    providerSnapshotFingerprint;
+  const attempt = batch.summary.remediation.attempts[0];
+  attempt.providerSnapshotFingerprint = providerSnapshotFingerprint;
+  attempt.playbookEventCountAtClaim = (
+    ledger as { events: unknown[] }
+  ).events.length;
+  const marker = selectCurrentBrowserProviderContractEvidence({
+    discoveries: course.automationDiscoveries,
+    incidentCycle: entry.cycle,
+    incidentFirstSeenAt: entry.incident.firstSeenAt,
+    providerFamilyKey,
+    providerSnapshotFingerprint,
+    officialUrl: bookingUrl,
+    bookingUrl,
+  })?.marker;
+  if (!marker) {
+    throw new Error("The provider-contract canary marker was unavailable.");
+  }
+  Object.assign(attempt, { providerContractEvidence: marker });
   return batch;
 }
 
@@ -1508,6 +1595,40 @@ describe("owner-bound provider-contract inspection", () => {
     await expect(
       loadOwnedProviderContractContext({ ...ownerInput, ordinal: 2 }),
     ).resolves.toBeNull();
+  });
+
+  it("reauthorizes an exact claimed provider-contract marker and rejects current-evidence drift", async () => {
+    const exact = ownedBrowserRetryContractEvidenceBatch();
+    prismaMocks.batchFindFirst.mockResolvedValueOnce(exact);
+
+    await expect(
+      loadOwnedProviderContractContextResult(ownerInput),
+    ).resolves.toMatchObject({
+      outcome: "ready",
+      restrictionDetected: false,
+      browserContracts: [
+        expect.objectContaining({
+          pathPattern: "/api/availability",
+          statusBand: "SUCCESS",
+        }),
+      ],
+    });
+
+    const drifted = ownedBrowserRetryContractEvidenceBatch();
+    const browser = drifted.incidents[0].course.automationDiscoveries[0]
+      .evidence.browserInvestigation;
+    browser.observedAt = "2026-08-22T14:02:00.000Z";
+    drifted.incidents[0].course.automationDiscoveries[0].createdAt = new Date(
+      browser.observedAt,
+    );
+    prismaMocks.batchFindFirst.mockResolvedValueOnce(drifted);
+
+    await expect(
+      loadOwnedProviderContractContextResult(ownerInput),
+    ).resolves.toMatchObject({
+      outcome: "authority_drift",
+      reasonCode: "CLAIMED_TECHNICAL_AUTHORITY_CHANGED",
+    });
   });
 
   it("prefers a family-consistent public booking landing over the official CMS", async () => {

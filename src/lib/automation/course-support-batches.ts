@@ -54,6 +54,14 @@ import {
   type CourseSupportRemediationRoute
 } from "./course-support-remediation-routing";
 import {
+  courseSupportProviderContractEvidenceMarkersMatch,
+  parseCourseSupportProviderContractEvidenceMarker,
+  selectCurrentBrowserProviderContractEvidence,
+  selectProviderContractTrustedBookingLandingUrl,
+  selectProviderContractTrustedLandingUrl,
+  type CourseSupportProviderContractEvidenceMarker,
+} from "./course-support-provider-contract-evidence";
+import {
   buildCourseSupportClaimActionPlan,
   courseSupportActionPlanAllows,
   courseSupportActionPlanMatchesRoute,
@@ -456,6 +464,19 @@ const COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT = {
           }
         },
         select: { teeSearch: { select: { id: true, date: true } } }
+      },
+      automationDiscoveries: {
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        take: 12,
+        select: {
+          evidence: true,
+          automationReason: true,
+          detectedPlatform: true,
+          bookingUrl: true,
+          apiMetadata: true,
+          confidence: true,
+          createdAt: true
+        }
       }
     }
   }
@@ -981,6 +1002,7 @@ export type CourseSupportRemediationClaimAttempt = {
   playbookEventCountAtClaim: number;
   approach: CourseSupportRemediationAttemptSignature;
   actionPlan: CourseSupportClaimActionPlan | null;
+  providerContractEvidence: CourseSupportProviderContractEvidenceMarker | null;
 };
 
 export function readCourseSupportRemediationDirective(
@@ -1082,6 +1104,17 @@ export function readCourseSupportRemediationClaimAttempt(input: {
   const approachRecord = asJsonObject(attempt.approach);
   const approach = parseCourseSupportRemediationApproach(attempt.approach);
   const actionPlan = parseCourseSupportClaimActionPlan(attempt.actionPlan);
+  const providerContractEvidence =
+    attempt.providerContractEvidence === undefined ||
+    attempt.providerContractEvidence === null
+      ? null
+      : parseCourseSupportProviderContractEvidenceMarker(
+          attempt.providerContractEvidence
+        );
+  const providerContractEvidenceAllowed = Boolean(
+    approach?.workMode === "IMPLEMENT_REUSABLE_SUPPORT" &&
+      approach.playbookStage === "BROWSER_ADAPTER_RETRY"
+  );
   const exactApproachKeys = ["workMode", "strategyAction", "playbookStage"];
   if (
     typeof attempt.providerSnapshotFingerprint !== "string" ||
@@ -1092,6 +1125,10 @@ export function readCourseSupportRemediationClaimAttempt(input: {
     !Number.isSafeInteger(attempt.playbookEventCountAtClaim) ||
     (attempt.playbookEventCountAtClaim as number) < 0 ||
     !approach ||
+    (providerContractEvidence !== null && !providerContractEvidenceAllowed) ||
+    (attempt.providerContractEvidence !== undefined &&
+      attempt.providerContractEvidence !== null &&
+      !providerContractEvidence) ||
     (attempt.actionPlan !== undefined &&
       (!actionPlan ||
         !courseSupportActionPlanMatchesRoute({
@@ -1113,7 +1150,8 @@ export function readCourseSupportRemediationClaimAttempt(input: {
     failureFingerprint: attempt.failureFingerprint,
     playbookEventCountAtClaim: attempt.playbookEventCountAtClaim as number,
     approach,
-    actionPlan
+    actionPlan,
+    providerContractEvidence
   };
 }
 
@@ -3449,6 +3487,8 @@ export async function claimCourseSupportBatch(input: {
             selectedRemediationRoute.attemptSignature ??
             null,
           actionPlan: incident.actionPlan!,
+          providerContractEvidence:
+            incident.providerContractEvidence ?? null,
           ...(incident.deferredFailureHandoff
             ? {
                 deferredFailureHandoffSource:
@@ -3941,6 +3981,38 @@ export async function claimCourseSupportBatch(input: {
             throw new Error(
               "Course-support provider evidence changed during claim; rerun selection.",
             );
+          }
+          if (
+            incident.remediationRoute?.attemptSignature?.playbookStage ===
+            "BROWSER_ADAPTER_RETRY"
+          ) {
+            const rebuilt = buildCourseSupportCandidates(
+              [current],
+              claimDatabaseNow
+            ).find((candidate) => candidate.id === incident.id);
+            const selectedSignature = incident.remediationRoute.attemptSignature;
+            const rebuiltSignature = rebuilt?.remediationRoute?.attemptSignature;
+            if (
+              !rebuilt ||
+              !courseSupportProviderContractEvidenceMarkersMatch(
+                incident.providerContractEvidence,
+                rebuilt.providerContractEvidence
+              ) ||
+              rebuilt.remediationRoute?.workMode !==
+                incident.remediationRoute.workMode ||
+              rebuilt.remediationRoute.requiresImplementationPath !==
+                incident.remediationRoute.requiresImplementationPath ||
+              rebuiltSignature?.strategyAction !==
+                selectedSignature.strategyAction ||
+              rebuiltSignature?.playbookStage !==
+                selectedSignature.playbookStage ||
+              rebuilt.actionPlan?.primaryAction !==
+                incident.actionPlan?.primaryAction
+            ) {
+              throw new Error(
+                "Course-support provider contract evidence changed during claim; rerun selection."
+              );
+            }
           }
           if (
             getAuthoritativeCourseMonitoringResolution(
@@ -15546,6 +15618,26 @@ function buildCourseSupportCandidates(
     );
     const providerSnapshotFingerprint =
       buildCourseSupportProviderSnapshotFingerprint(course);
+    const trustedBookingUrl =
+      selectProviderContractTrustedBookingLandingUrl(
+        course.detectedBookingUrl,
+        incident.providerFamilyKey
+      );
+    const trustedOfficialUrl =
+      trustedBookingUrl ??
+      selectProviderContractTrustedLandingUrl([course.website]);
+    const currentProviderContractEvidence =
+      playbookAssessment.nextStage === "BROWSER_ADAPTER_RETRY"
+        ? selectCurrentBrowserProviderContractEvidence({
+            discoveries: course.automationDiscoveries,
+            incidentCycle: incident.cycle,
+            incidentFirstSeenAt: incident.firstSeenAt,
+            providerFamilyKey: incident.providerFamilyKey,
+            providerSnapshotFingerprint,
+            officialUrl: trustedOfficialUrl,
+            bookingUrl: trustedBookingUrl
+          })?.marker ?? null
+        : null;
     const deferredFailureHandoff = readDeferredFailureHandoffCandidate({
       incident,
       course,
@@ -15626,6 +15718,8 @@ function buildCourseSupportCandidates(
       attemptCount: routingAttemptCount,
       playbookAssessment,
       priorUnchangedAttempt: priorAttempt?.approach ?? null,
+      providerContractEvidenceAvailable:
+        currentProviderContractEvidence !== null,
       materialChanges: deferredFailureHandoff
         ? {
             providerSnapshotChanged: false,
@@ -15715,6 +15809,13 @@ function buildCourseSupportCandidates(
       incidentProviderFamilyKey: incident.providerFamilyKey,
       course
     });
+    const providerContractEvidence =
+      remediationRoute.workMode === "IMPLEMENT_REUSABLE_SUPPORT" &&
+      remediationRoute.attemptSignature?.playbookStage ===
+        "BROWSER_ADAPTER_RETRY" &&
+      actionPlan.primaryAction === "IMPLEMENT_REUSABLE_SUPPORT"
+        ? (currentProviderContractEvidence ?? undefined)
+        : undefined;
     if (
       deferredFailureHandoff &&
       (remediationRoute.workMode !== "VERIFY_TRANSIENT" ||
@@ -15758,6 +15859,7 @@ function buildCourseSupportCandidates(
           getCourseSupportRemediationDirective(remediationRoute),
         remediationRoute,
         actionPlan,
+        ...(providerContractEvidence ? { providerContractEvidence } : {}),
         providerSnapshotFingerprint,
         remediationCourseRef: createCourseSupportRemediationCourseRef(
           incident.courseId,

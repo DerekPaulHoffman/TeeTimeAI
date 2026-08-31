@@ -6,7 +6,10 @@ import {
   courseSupportActionPlanMatchesRoute,
   parseCourseSupportClaimActionPlan,
 } from "./course-support-action-plan";
-import type { CourseSupportRemediationRoute } from "./course-support-remediation-routing";
+import {
+  routeCourseSupportRemediation,
+  type CourseSupportRemediationRoute,
+} from "./course-support-remediation-routing";
 
 function course(overrides: Record<string, unknown> = {}) {
   return {
@@ -92,6 +95,47 @@ describe("course-support claimed action plans", () => {
       }),
     });
 
+    expect(plan.primaryAction).toBe("IMPLEMENT_REUSABLE_SUPPORT");
+    expect(
+      courseSupportActionPlanAllows(plan, "INSPECT_PROVIDER_CONTRACT"),
+    ).toBe(true);
+  });
+
+  it("keeps implementation primary while allowing inspection for a contract-evidence promotion", () => {
+    const promotedRoute = routeCourseSupportRemediation({
+      isPublic: true,
+      detectedPlatform: "FOREUP",
+      providerFamilyKey: "FOREUP",
+      detectedBookingUrl:
+        "https://www.foreupsoftware.com/index.php/booking/12345",
+      website: "https://public-course.example/",
+      bookingMetadata: null,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "NEEDS_REVIEW",
+      automationReason: "NONE",
+      attemptCount: 0,
+      failureClass: "MISSING_METADATA",
+      discoveryAttempt: "HTTP_INCONCLUSIVE",
+      playbookAssessment: {
+        conclusion: "INCOMPLETE",
+        nextStage: "BROWSER_ADAPTER_RETRY",
+      },
+      providerContractEvidenceAvailable: true,
+    });
+    const plan = buildCourseSupportClaimActionPlan({
+      route: promotedRoute,
+      incidentKind: "NEEDS_ADAPTER",
+      incidentProviderFamilyKey: "FOREUP",
+      course: course({
+        detectedPlatform: "FOREUP",
+        providerFamilyKey: "FOREUP",
+        website: "https://public-course.example/",
+        detectedBookingUrl:
+          "https://www.foreupsoftware.com/index.php/booking/12345",
+      }),
+    });
+
+    expect(promotedRoute.workMode).toBe("IMPLEMENT_REUSABLE_SUPPORT");
     expect(plan.primaryAction).toBe("IMPLEMENT_REUSABLE_SUPPORT");
     expect(
       courseSupportActionPlanAllows(plan, "INSPECT_PROVIDER_CONTRACT"),
