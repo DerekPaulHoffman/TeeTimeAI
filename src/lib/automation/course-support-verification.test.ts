@@ -83,6 +83,7 @@ import {
 
 const releaseSha = "a".repeat(40);
 const newerReleaseSha = "b".repeat(40);
+const priorReleaseSha = "c".repeat(40);
 const now = new Date("2026-07-21T12:00:00.000Z");
 const canonicalFailureFingerprint = "1".repeat(64);
 const observedFailureFingerprint = "2".repeat(64);
@@ -344,6 +345,7 @@ function localReaderReadyLedger(
   attempted = false,
   runtimeVersion = releaseSha,
   attemptedAt = now,
+  startedEvidenceKind: "TOOLING" | "LOCAL_READER_RESULT" = "TOOLING",
 ) {
   const ledger = appendAutomationPlaybookEvent(
     browserAdapterRetryReadyLedger(),
@@ -365,7 +367,7 @@ function localReaderReadyLedger(
     stage: "LOCAL_READER",
     transition: "STARTED",
     readPath: "LOCAL_READER",
-    evidenceKind: "TOOLING",
+    evidenceKind: startedEvidenceKind,
     failureFingerprint: "TEST:LOCAL_READER:STARTED",
     runtimeVersion,
     observedAt: attemptedAt,
@@ -1863,6 +1865,150 @@ describe("course-support verification scheduling", () => {
   });
 
   it.each([
+    ["current-release", releaseSha, "TOOLING"],
+    ["prior-release workflow upgrade", priorReleaseSha, "TOOLING"],
+    [
+      "prior-release search-monitoring upgrade",
+      priorReleaseSha,
+      "LOCAL_READER_RESULT",
+    ],
+  ] as const)("schedules, claims, and attaches a %s assigned started local reader", async (_label, startedRuntimeVersion, startedEvidenceKind) => {
+    const priorStartedAt = now;
+    const batchCreatedAt = new Date("2026-07-21T12:00:30.000Z");
+    const requestCreatedAt = new Date("2026-07-21T12:00:31.000Z");
+    const lifecycleNow = new Date("2026-07-21T12:01:00.000Z");
+    const startedLedger = localReaderReadyLedger(
+      true,
+      startedRuntimeVersion,
+      priorStartedAt,
+      startedEvidenceKind,
+    );
+    prismaMocks.batchFindUnique.mockResolvedValue({
+      id: "batch-1",
+      status: "VERIFYING",
+      releaseSha,
+      createdAt: batchCreatedAt,
+      completedAt: null,
+      summary: {
+        remediation: {
+          workMode: "ADVANCE_DISCOVERY",
+          strategyAction: "REPAIR_PROVIDER_ADAPTER",
+          playbookStage: "LOCAL_READER",
+          allowUnchangedRuntime: true,
+          requiresImplementationPath: false,
+          reason: "PLAYBOOK_STAGE_PENDING",
+          retryBudget: {
+            maximumAttempts: 4,
+            attemptsCompleted: 1,
+            attemptsRemaining: 3,
+            exhausted: false,
+          },
+        },
+      },
+      incidents: [
+        {
+          id: "batch-incident-1",
+          incidentId: "incident-1",
+          courseId: "course-1",
+          cycle: 1,
+          verifiedIncidentUpdatedAt: new Date("2026-07-21T11:55:00.000Z"),
+          incident: incident({ attemptLedger: startedLedger }),
+          course: course({
+            detectedPlatform: null,
+            providerFamilyKey: "SOURCE_MISSING",
+            bookingMetadata: null,
+            automationEligibility: "BLOCKED",
+            automationReason: "ACCOUNT_REQUIRED",
+            ...currentIntelligence(),
+          }),
+        },
+      ],
+    });
+
+    await expect(
+      scheduleCourseSupportVerificationRequests({
+        batchId: "batch-1",
+        releaseSha,
+        now: lifecycleNow,
+      }),
+    ).resolves.toEqual({
+      createdCount: 1,
+      eligibleCount: 1,
+      ineligibleCount: 0,
+      requests: [],
+    });
+    expect(prismaMocks.requestCreateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: [expect.objectContaining({ courseId: "course-1", releaseSha })],
+      }),
+    );
+
+    const queuedRequest = assignedLocalReaderRequest({
+      attemptLedger: startedLedger,
+      requestOverrides: {
+        runtimeVersion: null,
+        status: "QUEUED",
+        revision: 0,
+        leaseToken: null,
+        leaseExpiresAt: null,
+        nextAttemptAt: lifecycleNow,
+        discoveryAttemptedAt: null,
+        discoveryVerifiedAt: null,
+        startedAt: null,
+        createdAt: requestCreatedAt,
+        updatedAt: requestCreatedAt,
+      },
+    });
+    queuedRequest.batchIncident.batch.createdAt = batchCreatedAt;
+    prismaMocks.requestFindUnique.mockResolvedValueOnce(queuedRequest);
+
+    const claimed = await claimCourseSupportVerificationRequest({
+      requestId: "request-1",
+      expectedRevision: 0,
+      runtimeVersion: releaseSha,
+      now: lifecycleNow,
+    });
+    expect(claimed).toMatchObject({
+      claimed: true,
+      revision: 1,
+      runtimeVersion: releaseSha,
+    });
+    if (!claimed.claimed) {
+      throw new Error("Expected the scheduled local-reader continuation to claim.");
+    }
+
+    prismaMocks.requestFindUnique.mockResolvedValueOnce({
+      ...queuedRequest,
+      runtimeVersion: releaseSha,
+      status: "CHECKING",
+      revision: claimed.revision,
+      leaseToken: claimed.leaseToken,
+      leaseExpiresAt: claimed.leaseExpiresAt,
+      nextAttemptAt: null,
+      updatedAt: lifecycleNow,
+    });
+
+    await expect(
+      attachCourseSupportVerificationProviderSnapshot({
+        requestId: claimed.requestId,
+        expectedRevision: claimed.revision,
+        leaseToken: claimed.leaseToken,
+        runtimeVersion: claimed.runtimeVersion,
+        purpose: "PRE_EXECUTION",
+        now: lifecycleNow,
+      }),
+    ).resolves.toMatchObject({
+      attached: true,
+      revision: 2,
+    });
+    expect(prismaMocks.requestUpdateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ startedAt: lifecycleNow }),
+      }),
+    );
+  });
+
+  it.each([
     ["private identity", { isPublic: false }],
     [
       "manual disposition",
@@ -1933,6 +2079,31 @@ describe("course-support verification scheduling", () => {
       expect(prismaMocks.requestCreateMany).not.toHaveBeenCalled();
     },
   );
+
+  it("rejects a started local-reader handoff recorded before the incident", async () => {
+    const requestWithPreIncidentHandoff = assignedLocalReaderRequest({
+      requestOverrides: { startedAt: null },
+    });
+    requestWithPreIncidentHandoff.batchIncident.incident.firstSeenAt =
+      new Date("2026-07-21T12:00:01.000Z");
+    prismaMocks.requestFindUnique.mockResolvedValue(
+      requestWithPreIncidentHandoff,
+    );
+
+    await expect(
+      attachCourseSupportVerificationProviderSnapshot({
+        requestId: "request-1",
+        expectedRevision: 1,
+        leaseToken: "lease-1",
+        runtimeVersion: releaseSha,
+        purpose: "PRE_EXECUTION",
+        now: new Date("2026-07-21T12:02:00.000Z"),
+      }),
+    ).resolves.toEqual({
+      attached: false,
+      reason: "monitoring_not_actionable",
+    });
+  });
 
   it.each([
     ["first stage attempt", localReaderReadyLedger(true), "ADVANCE_DISCOVERY"],

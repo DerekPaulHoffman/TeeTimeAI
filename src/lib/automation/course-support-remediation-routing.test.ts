@@ -43,7 +43,7 @@ describe("course-support remediation routing", () => {
     "VERIFY_TECHNICAL_CONSTRAINT",
     "REPAIR_PROVIDER_ADAPTER",
   ] as const)(
-    "recognizes exact pending and retryable LOCAL_READER assignment for %s",
+    "recognizes exact pending, started, and retryable LOCAL_READER assignment for %s",
     (strategyAction) => {
       const remediationDirective = {
         workMode: "ADVANCE_DISCOVERY" as const,
@@ -76,6 +76,23 @@ describe("course-support remediation routing", () => {
           playbookConclusion: "INCOMPLETE",
           nextPlaybookStage: "LOCAL_READER",
           nextPlaybookStageStatus: "FAILED_RETRYABLE",
+          nextPlaybookStageAttemptCount: 1,
+        }),
+      ).toBe(true);
+      expect(
+        isAssignedDetachedStageProgression({
+          remediationDirective: {
+            ...remediationDirective,
+            retryBudget: {
+              maximumAttempts: 4,
+              attemptsCompleted: 1,
+              attemptsRemaining: 3,
+              exhausted: false,
+            },
+          },
+          playbookConclusion: "INCOMPLETE",
+          nextPlaybookStage: "LOCAL_READER",
+          nextPlaybookStageStatus: "STARTED",
           nextPlaybookStageAttemptCount: 1,
         }),
       ).toBe(true);
@@ -115,6 +132,39 @@ describe("course-support remediation routing", () => {
     },
   );
 
+  it.each([
+    ["missing budget", null],
+    [
+      "exhausted budget",
+      {
+        maximumAttempts: 4,
+        attemptsCompleted: 4,
+        attemptsRemaining: 0,
+        exhausted: true,
+      },
+    ],
+  ] as const)(
+    "rejects started LOCAL_READER progression with %s",
+    (_label, retryBudget) => {
+      expect(
+        isAssignedDetachedStageProgression({
+          remediationDirective: {
+            workMode: "ADVANCE_DISCOVERY",
+            strategyAction: "REPAIR_PROVIDER_ADAPTER",
+            playbookStage: "LOCAL_READER",
+            allowUnchangedRuntime: true,
+            requiresImplementationPath: false,
+            retryBudget,
+          },
+          playbookConclusion: "INCOMPLETE",
+          nextPlaybookStage: "LOCAL_READER",
+          nextPlaybookStageStatus: "STARTED",
+          nextPlaybookStageAttemptCount: 1,
+        }),
+      ).toBe(false);
+    },
+  );
+
   it("recognizes an exact pending browser-adapter repair as detached progression", () => {
     expect(
       isAssignedDetachedStageProgression({
@@ -132,6 +182,30 @@ describe("course-support remediation routing", () => {
         nextPlaybookStageAttemptCount: 0,
       }),
     ).toBe(true);
+  });
+
+  it("does not broaden started progression to the browser-adapter stage", () => {
+    expect(
+      isAssignedDetachedStageProgression({
+        remediationDirective: {
+          workMode: "ADVANCE_DISCOVERY",
+          strategyAction: "REPAIR_PROVIDER_ADAPTER",
+          playbookStage: "BROWSER_ADAPTER_RETRY",
+          allowUnchangedRuntime: true,
+          requiresImplementationPath: false,
+          retryBudget: {
+            maximumAttempts: 4,
+            attemptsCompleted: 1,
+            attemptsRemaining: 3,
+            exhausted: false,
+          },
+        },
+        playbookConclusion: "INCOMPLETE",
+        nextPlaybookStage: "BROWSER_ADAPTER_RETRY",
+        nextPlaybookStageStatus: "STARTED",
+        nextPlaybookStageAttemptCount: 1,
+      }),
+    ).toBe(false);
   });
 
   it("does not reinterpret a browser-adapter implementation assignment as detached progression", () => {

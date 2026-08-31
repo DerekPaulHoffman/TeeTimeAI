@@ -1585,7 +1585,7 @@ function localReaderStartedAttemptLedger(cycle = 1) {
     stage: "LOCAL_READER",
     transition: "STARTED",
     readPath: "LOCAL_READER",
-    evidenceKind: "LOCAL_READER_RESULT",
+    evidenceKind: "TOOLING",
     failureFingerprint: "TEST:LOCAL_READER:NETWORK",
     runtimeVersion: "test-runtime",
     observedAt: now,
@@ -7776,6 +7776,72 @@ describe("course-support claim demand fencing", () => {
       grantedIncidentCount: 1,
       grantedAt: verifyStartedAt.toISOString(),
     });
+    expect(prismaMocks.batchUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          summary: expect.objectContaining({
+            verificationStageDeadlineGrant: expect.objectContaining({
+              incidentCount: 1,
+              stages: [
+                expect.objectContaining({
+                  cycle: 1,
+                  stage: "LOCAL_READER",
+                  incidentCount: 1,
+                }),
+              ],
+            }),
+          }),
+        }),
+      }),
+    );
+  });
+
+  it("grants an assigned started local reader with three attempts remaining", async () => {
+    const verifyStartedAt = new Date("2026-07-21T02:20:23.000Z");
+    prismaMocks.queryRaw.mockResolvedValue([{ now: verifyStartedAt }]);
+    prismaMocks.batchFindFirst.mockResolvedValue(
+      ownedStageDeadlineGrantBatch({
+        attemptLedgers: [localReaderStartedAttemptLedger()],
+        summary: {
+          remediation: {
+            workMode: "ADVANCE_DISCOVERY",
+            strategyAction: "REPAIR_PROVIDER_ADAPTER",
+            playbookStage: "LOCAL_READER",
+            allowUnchangedRuntime: true,
+            requiresImplementationPath: false,
+            reason: "PLAYBOOK_STAGE_PENDING",
+            retryBudget: {
+              maximumAttempts: 4,
+              attemptsCompleted: 1,
+              attemptsRemaining: 3,
+              exhausted: false,
+            },
+          },
+        },
+      }),
+    );
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      grantOwnedCourseSupportVerificationStageDeadline({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+      }),
+    ).resolves.toMatchObject({
+      granted: true,
+      replayed: false,
+      grantedIncidentCount: 1,
+      grantedAt: verifyStartedAt.toISOString(),
+    });
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          escalationDeadlineAt: expect.any(Date),
+        }),
+      }),
+    );
     expect(prismaMocks.batchUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({

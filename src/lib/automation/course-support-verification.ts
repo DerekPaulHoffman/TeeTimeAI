@@ -271,6 +271,7 @@ export async function scheduleCourseSupportVerificationRequests(input: {
           id: true,
           status: true,
           releaseSha: true,
+          createdAt: true,
           completedAt: true,
           summary: true,
           incidents: {
@@ -2614,6 +2615,7 @@ type DetachedEligibilityInput = {
   batchId: string;
   batchStatus: string;
   batchReleaseSha: string | null;
+  batchCreatedAt: Date;
   batchCompletedAt: Date | null;
   batchSummary: Prisma.JsonValue | null;
   batchIncidentCourseId: string;
@@ -2658,6 +2660,7 @@ function buildDetachedEligibilityInput(input: {
     id: string;
     status: string;
     releaseSha: string | null;
+    createdAt: Date;
     completedAt: Date | null;
     summary: Prisma.JsonValue | null;
   };
@@ -2677,6 +2680,7 @@ function buildDetachedEligibilityInput(input: {
     batchId: input.batch.id,
     batchStatus: input.batch.status,
     batchReleaseSha: input.batch.releaseSha,
+    batchCreatedAt: input.batch.createdAt,
     batchCompletedAt: input.batch.completedAt,
     batchSummary: input.batch.summary,
     batchIncidentId: input.batchIncident.id,
@@ -2753,7 +2757,10 @@ async function evaluateDetachedEligibility(
       reason: "playbook_stage_handoff_required",
     };
   }
-  const assignedDetachedStageProgression = isAssignedDetachedProgression(input);
+  const assignedDetachedStageProgression = isAssignedDetachedProgression(
+    input,
+    now,
+  );
   const ownedAssignedLocalReaderProgression =
     hasOwnedAssignedLocalReaderProgression(input, authority, now);
   const monitoringGate = evaluateMonitoringGate({ ...input.course, now });
@@ -2856,7 +2863,10 @@ function requiresBrowserAdapterRetryStageHandoff(
   });
 }
 
-function isAssignedDetachedProgression(input: DetachedEligibilityInput) {
+function isAssignedDetachedProgression(
+  input: DetachedEligibilityInput,
+  now: Date,
+) {
   const remediation = asJsonRecord(
     asJsonRecord(input.batchSummary).remediation,
   );
@@ -2874,12 +2884,67 @@ function isAssignedDetachedProgression(input: DetachedEligibilityInput) {
     nextPlaybookStageStatus: nextStageAssessment?.status,
     nextPlaybookStageAttemptCount: nextStageAssessment?.attemptCount,
   });
+  const hasAuthenticatedStartedLocalReaderHandoff =
+    playbook.nextStage !== "LOCAL_READER" ||
+    nextStageAssessment?.status !== "STARTED" ||
+    hasCurrentReleaseStartedLocalReaderHandoff(input, now);
   return Boolean(
     playbook.valid === true &&
     playbook.cycle === input.incident.cycle &&
     assigned &&
+    hasAuthenticatedStartedLocalReaderHandoff &&
     (playbook.nextStage !== "BROWSER_ADAPTER_RETRY" ||
       !resolveProviderCapability(input.course).isRunnable),
+  );
+}
+
+function hasCurrentReleaseStartedLocalReaderHandoff(
+  input: DetachedEligibilityInput,
+  now: Date,
+) {
+  const ledger = parseAutomationPlaybookLedger(input.incident.attemptLedger);
+  if (!ledger) return false;
+
+  let started: AutomationPlaybookEvent | undefined;
+  for (let index = ledger.events.length - 1; index >= 0; index -= 1) {
+    const event = ledger.events[index];
+    if (
+      event.cycle === input.incident.cycle &&
+      event.stage === "LOCAL_READER" &&
+      event.transition === "STARTED"
+    ) {
+      started = event;
+      break;
+    }
+  }
+  if (
+    !started ||
+    started.readPath !== "LOCAL_READER" ||
+    (started.evidenceKind !== "TOOLING" &&
+      started.evidenceKind !== "LOCAL_READER_RESULT")
+  ) {
+    return false;
+  }
+
+  const observedAt = Date.parse(started.observedAt);
+  const batchCreatedAt =
+    input.batchCreatedAt instanceof Date
+      ? input.batchCreatedAt.getTime()
+      : Number.NaN;
+  const ownedByCurrentRelease = started.runtimeVersion === input.releaseSha;
+  const inheritedFromPriorRelease = Boolean(
+    !ownedByCurrentRelease &&
+    FULL_GIT_SHA.test(started.runtimeVersion) &&
+    Number.isFinite(batchCreatedAt) &&
+    batchCreatedAt >= input.incident.firstSeenAt.getTime() &&
+    observedAt <= batchCreatedAt &&
+    batchCreatedAt <= now.getTime(),
+  );
+  return Boolean(
+    Number.isFinite(observedAt) &&
+    observedAt >= input.incident.firstSeenAt.getTime() &&
+    observedAt <= now.getTime() &&
+    (ownedByCurrentRelease || inheritedFromPriorRelease),
   );
 }
 
@@ -3045,13 +3110,23 @@ function hasOwnedAssignedLocalReaderProgression(
         (!notAfter || observedAt <= notAfter.getTime())
       );
     });
-  let eventFloor = request.startedAt ?? request.createdAt;
+  let eventFloor = new Date(
+    Math.max(
+      (request.startedAt ?? request.createdAt).getTime(),
+      input.incident.firstSeenAt.getTime(),
+    ),
+  );
   let firstOwnedEventIndex = findFirstOwnedEventIndex(eventFloor);
   if (firstOwnedEventIndex < 0 && request.startedAt) {
     // A direct reader result can be durably recorded immediately before the
     // first provider attachment persists startedAt. Prefer post-start events,
     // but retain that exact owned, post-creation handoff when needed.
-    eventFloor = request.createdAt;
+    eventFloor = new Date(
+      Math.max(
+        request.createdAt.getTime(),
+        input.incident.firstSeenAt.getTime(),
+      ),
+    );
     firstOwnedEventIndex = findFirstOwnedEventIndex(
       eventFloor,
       request.startedAt,

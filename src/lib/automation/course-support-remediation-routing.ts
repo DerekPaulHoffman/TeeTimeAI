@@ -174,8 +174,13 @@ export function isAssignedDetachedStageProgression(input: {
     );
   }
 
+  const isBudgetedAssignedStageState =
+    input.nextPlaybookStageStatus === "FAILED_RETRYABLE" ||
+    (stage === "LOCAL_READER" &&
+      input.nextPlaybookStageStatus === "STARTED");
+
   return Boolean(
-    input.nextPlaybookStageStatus === "FAILED_RETRYABLE" &&
+    isBudgetedAssignedStageState &&
     Number.isInteger(input.nextPlaybookStageAttemptCount) &&
     (input.nextPlaybookStageAttemptCount as number) > 0 &&
     hasAvailableAssignedRetryBudget(
