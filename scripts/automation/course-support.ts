@@ -1003,11 +1003,12 @@ async function verify(
         return { ...pass.verification, browserStages: pass.browserStages };
       }
 
-      await grantOwnedCourseSupportVerificationStageDeadline({
-        batchId,
-        leaseToken,
-        ownerThreadId
-      });
+      const deadlineGrant =
+        await grantOwnedCourseSupportVerificationStageDeadline({
+          batchId,
+          leaseToken,
+          ownerThreadId
+        });
       operationSignal.throwIfAborted();
       const initialPacket = await getCourseSupportBatchPacket({
         batchId,
@@ -1058,10 +1059,14 @@ async function verify(
       return closeoutAfterWatch
         ? {
             ...watchResult,
+            verificationStageDeadlineGrant: deadlineGrant,
             durableCloseoutRecorded:
               watchResult.closeout?.durableCloseoutRecorded === true
           }
-        : watchResult;
+        : {
+            ...watchResult,
+            verificationStageDeadlineGrant: deadlineGrant
+          };
     }
   );
 }

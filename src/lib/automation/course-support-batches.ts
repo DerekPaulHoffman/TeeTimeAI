@@ -4604,6 +4604,17 @@ const CONCLUDED_DETACHED_VERIFICATION_RECOVERY_STAGES =
     "LOCAL_READER",
   ]);
 
+const DIRECT_SOURCE_VERIFICATION_STAGES = new Set<AutomationPlaybookStage>([
+  "OFFICIAL_IDENTITY",
+  "OFFICIAL_HTTP_DISCOVERY",
+]);
+
+export type CourseSupportVerificationStageDeadlineGrantOutcome =
+  | "GRANTED"
+  | "REPLAYED"
+  | "NO_GRANTABLE_STAGE"
+  | "EXPIRED_UNGRANTABLE_PEER";
+
 function getConcludedDetachedVerificationRecoveryStage(
   assessment: ReturnType<typeof assessAutomationPlaybook>,
 ): AutomationPlaybookStage | null {
@@ -4697,6 +4708,7 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
         )
       ) {
         return {
+          outcome: "REPLAYED" as const,
           granted: false,
           replayed: true,
           grantedIncidentCount: 0,
@@ -4724,25 +4736,39 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
           nextPlaybookStageStatus: stageAssessment?.status,
           nextPlaybookStageAttemptCount: stageAssessment?.attemptCount,
         });
-        const ownedStage =
-          stage === "RENDERED_BROWSER_DISCOVERY" ||
-          assignedDetachedStage ||
-          stage === "INDEPENDENT_CONFIRMATION" ||
-          concludedRecoveryStage !== null;
-        const grantableStageState =
-          assignedDetachedStage ||
-          concludedRecoveryStage !== null ||
-          ((stage === "RENDERED_BROWSER_DISCOVERY" ||
+        const packetAuthorizedUnchangedRuntimeStage = Boolean(
+          playbook.conclusion === "INCOMPLETE" &&
+            stage !== null &&
+            stage === remediationDirective?.playbookStage &&
+            remediationDirective.allowUnchangedRuntime === true &&
+            remediationDirective.requiresImplementationPath === false,
+        );
+        const directSourceStage = Boolean(
+          packetAuthorizedUnchangedRuntimeStage &&
+            stage !== null &&
+            DIRECT_SOURCE_VERIFICATION_STAGES.has(stage) &&
+            ((stageAssessment?.status === "PENDING" &&
+              stageAssessment.attemptCount === 0) ||
+              (stageAssessment?.status === "FAILED_RETRYABLE" &&
+                stageAssessment.attemptCount > 0)),
+        );
+        const unstartedBrowserStage = Boolean(
+          (stage === "RENDERED_BROWSER_DISCOVERY" ||
             stage === "INDEPENDENT_CONFIRMATION") &&
             stageAssessment?.status === "PENDING" &&
-            stageAssessment.attemptCount === 0);
+            stageAssessment.attemptCount === 0,
+        );
+        const grantableStageState =
+          directSourceStage ||
+          unstartedBrowserStage ||
+          assignedDetachedStage ||
+          concludedRecoveryStage !== null;
         return entry.cycle === entry.incident.cycle &&
           entry.incident.status === "AUTO_INVESTIGATING" &&
           entry.incident.activeBatchId === input.batchId &&
           (playbook.conclusion === "INCOMPLETE" ||
             concludedRecoveryStage !== null) &&
           stage !== null &&
-          ownedStage &&
           stage === remediationDirective?.playbookStage &&
           grantableStageState &&
           entry.verificationRequests.length === 0
@@ -4760,6 +4786,7 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
       });
       if (targets.length === 0) {
         return {
+          outcome: "NO_GRANTABLE_STAGE" as const,
           granted: false,
           replayed: false,
           grantedIncidentCount: 0,
@@ -4794,6 +4821,7 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
       });
       if (unsafeEndpointPeer) {
         return {
+          outcome: "EXPIRED_UNGRANTABLE_PEER" as const,
           granted: false,
           replayed: false,
           grantedIncidentCount: 0,
@@ -4884,6 +4912,7 @@ export async function grantOwnedCourseSupportVerificationStageDeadline(input: {
       }
 
       return {
+        outcome: "GRANTED" as const,
         granted: true,
         replayed: false,
         grantedIncidentCount: targets.length,

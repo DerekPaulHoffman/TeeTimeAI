@@ -1312,6 +1312,49 @@ function typedAdapterSucceededAttemptLedger(cycle = 1) {
   });
 }
 
+function officialHttpFailedRetryableAttemptLedger(
+  attempts = 1,
+  cycle = 1,
+) {
+  let ledger: unknown = typedAdapterReadyAttemptLedger(cycle);
+  ledger = appendAutomationPlaybookEvent(ledger, {
+    cycle,
+    stage: "TYPED_ADAPTER",
+    transition: "NOT_APPLICABLE",
+    readPath: "TYPED_PROVIDER_ADAPTER",
+    evidenceKind: "TOOLING",
+    failureFingerprint: "TEST:TYPED_ADAPTER:SKIPPED",
+    runtimeVersion: "test-runtime",
+    skipReason: "NO_RUNNABLE_ADAPTER",
+    observedAt: now,
+  });
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const failureFingerprint = `TEST:OFFICIAL_HTTP:NETWORK_${attempt}`;
+    ledger = appendAutomationPlaybookEvent(ledger, {
+      cycle,
+      stage: "OFFICIAL_HTTP_DISCOVERY",
+      transition: "STARTED",
+      readPath: "OFFICIAL_HTTP",
+      evidenceKind: "OFFICIAL_SOURCE",
+      failureFingerprint,
+      runtimeVersion: "test-runtime",
+      observedAt: now,
+    });
+    ledger = appendAutomationPlaybookEvent(ledger, {
+      cycle,
+      stage: "OFFICIAL_HTTP_DISCOVERY",
+      transition: "FAILED_RETRYABLE",
+      readPath: "OFFICIAL_HTTP",
+      evidenceKind: "OFFICIAL_SOURCE",
+      failureFingerprint,
+      runtimeVersion: "test-runtime",
+      failureClass: "NETWORK",
+      observedAt: now,
+    });
+  }
+  return ledger;
+}
+
 function httpAdapterRetrySucceededAttemptLedger(cycle = 1) {
   let ledger: unknown = typedAdapterReadyAttemptLedger(cycle);
   ledger = appendAutomationPlaybookEvent(ledger, {
@@ -7357,6 +7400,82 @@ describe("course-support claim demand fencing", () => {
     }
   });
 
+  it("grants overdue packet-authorized official HTTP checks fresh atomic runway", async () => {
+    const verifyStartedAt = new Date("2026-07-21T02:20:23.000Z");
+    const expiredDeadline = new Date("2026-07-21T01:51:59.000Z");
+    const attemptLedger = officialHttpFailedRetryableAttemptLedger(29);
+    expect(assessAutomationPlaybook(attemptLedger, 1)).toMatchObject({
+      conclusion: "INCOMPLETE",
+      nextStage: "OFFICIAL_HTTP_DISCOVERY",
+      stages: expect.arrayContaining([
+        expect.objectContaining({
+          stage: "OFFICIAL_HTTP_DISCOVERY",
+          status: "FAILED_RETRYABLE",
+          attemptCount: 29,
+        }),
+      ]),
+    });
+    prismaMocks.queryRaw.mockResolvedValue([{ now: verifyStartedAt }]);
+    prismaMocks.batchFindFirst.mockResolvedValue(
+      ownedStageDeadlineGrantBatch({
+        attemptLedgers: Array.from({ length: 3 }, () => attemptLedger),
+        escalationDeadlines: Array.from(
+          { length: 3 },
+          () => expiredDeadline,
+        ),
+        summary: {
+          remediation: {
+            workMode: "ADVANCE_DISCOVERY",
+            strategyAction: "REPAIR_PROVIDER_ADAPTER",
+            playbookStage: "OFFICIAL_HTTP_DISCOVERY",
+            allowUnchangedRuntime: true,
+            requiresImplementationPath: false,
+            reason: "PLAYBOOK_STAGE_PENDING",
+            retryBudget: null,
+          },
+        },
+      }),
+    );
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      grantOwnedCourseSupportVerificationStageDeadline({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+      }),
+    ).resolves.toMatchObject({
+      outcome: "GRANTED",
+      granted: true,
+      replayed: false,
+      grantedIncidentCount: 3,
+      grantedAt: verifyStartedAt.toISOString(),
+    });
+
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledTimes(3);
+    for (const [update] of prismaMocks.supportIncidentUpdateMany.mock.calls) {
+      expect(update.data.escalationDeadlineAt.getTime()).toBeGreaterThan(
+        verifyStartedAt.getTime(),
+      );
+    }
+    const stageGrants =
+      prismaMocks.batchUpdateMany.mock.calls[0][0].data.summary
+        .verificationStageDeadlineGrant.stages;
+    expect(stageGrants).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ stage: "OFFICIAL_HTTP_DISCOVERY" }),
+      ]),
+    );
+    expect(
+      stageGrants.reduce(
+        (count: number, grant: { incidentCount: number }) =>
+          count + grant.incidentCount,
+        0,
+      ),
+    ).toBe(3);
+  });
+
   it("grants three zero-attempt depth-four browser entries from database time immediately before watch", async () => {
     const verifyStartedAt = new Date("2026-07-21T02:06:00.000Z");
     prismaMocks.queryRaw.mockResolvedValue([{ now: verifyStartedAt }]);
@@ -7834,6 +7953,7 @@ describe("course-support claim demand fencing", () => {
         ownerThreadId: "owner-thread",
       }),
     ).resolves.toEqual({
+      outcome: "NO_GRANTABLE_STAGE",
       granted: false,
       replayed: false,
       grantedIncidentCount: 0,
@@ -7906,6 +8026,7 @@ describe("course-support claim demand fencing", () => {
           ownerThreadId: "owner-thread",
         }),
       ).resolves.toEqual({
+        outcome: "NO_GRANTABLE_STAGE",
         granted: false,
         replayed: false,
         grantedIncidentCount: 0,
@@ -7954,6 +8075,7 @@ describe("course-support claim demand fencing", () => {
           ownerThreadId: "owner-thread",
         }),
       ).resolves.toEqual({
+        outcome: "NO_GRANTABLE_STAGE",
         granted: false,
         replayed: false,
         grantedIncidentCount: 0,
@@ -7996,6 +8118,7 @@ describe("course-support claim demand fencing", () => {
           ownerThreadId: "owner-thread",
         }),
       ).resolves.toEqual({
+        outcome: "NO_GRANTABLE_STAGE",
         granted: false,
         replayed: false,
         grantedIncidentCount: 0,
@@ -8043,6 +8166,7 @@ describe("course-support claim demand fencing", () => {
         ownerThreadId: "owner-thread",
       }),
     ).resolves.toEqual({
+      outcome: "NO_GRANTABLE_STAGE",
       granted: false,
       replayed: false,
       grantedIncidentCount: 0,
@@ -8065,6 +8189,7 @@ describe("course-support claim demand fencing", () => {
         ownerThreadId: "owner-thread",
       }),
     ).resolves.toEqual({
+      outcome: "NO_GRANTABLE_STAGE",
       granted: false,
       replayed: false,
       grantedIncidentCount: 0,
@@ -8107,6 +8232,7 @@ describe("course-support claim demand fencing", () => {
         ownerThreadId: "owner-thread",
       }),
     ).resolves.toEqual({
+      outcome: "EXPIRED_UNGRANTABLE_PEER",
       granted: false,
       replayed: false,
       grantedIncidentCount: 0,
@@ -8175,6 +8301,7 @@ describe("course-support claim demand fencing", () => {
         ownerThreadId: "owner-thread",
       }),
     ).resolves.toEqual({
+      outcome: "EXPIRED_UNGRANTABLE_PEER",
       granted: false,
       replayed: false,
       grantedIncidentCount: 0,
@@ -8274,6 +8401,7 @@ describe("course-support claim demand fencing", () => {
         ownerThreadId: "owner-thread",
       }),
     ).resolves.toEqual({
+      outcome: "REPLAYED",
       granted: false,
       replayed: true,
       grantedIncidentCount: 0,
@@ -8354,6 +8482,7 @@ describe("course-support claim demand fencing", () => {
         ownerThreadId: "owner-thread",
       }),
     ).resolves.toEqual({
+      outcome: "NO_GRANTABLE_STAGE",
       granted: false,
       replayed: false,
       grantedIncidentCount: 0,

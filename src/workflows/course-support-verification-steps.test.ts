@@ -1057,6 +1057,82 @@ describe("executeCourseSupportVerificationStep", () => {
     },
   );
 
+  it("terminalizes a previously retried official HTTP stage before advancing", async () => {
+    const observedAt = new Date("2026-07-21T11:55:00.000Z");
+    const runtime = installPlaybookRuntime([
+      {
+        cycle: 1,
+        stage: "OFFICIAL_IDENTITY",
+        transition: "COMPLETED",
+        readPath: "OFFICIAL_IDENTITY",
+        evidenceKind: "OFFICIAL_SOURCE",
+        failureFingerprint: "PLAYBOOK:OFFICIAL_IDENTITY:COMPLETED",
+        runtimeVersion,
+        observedAt,
+      },
+      {
+        cycle: 1,
+        stage: "TYPED_ADAPTER",
+        transition: "FAILED_TERMINAL",
+        readPath: "TYPED_PROVIDER_ADAPTER",
+        evidenceKind: "PROVIDER_RESPONSE",
+        failureClass: "CHALLENGE",
+        failureFingerprint: "PLAYBOOK:TYPED_ADAPTER:CHALLENGE",
+        runtimeVersion,
+        observedAt,
+      },
+      {
+        cycle: 1,
+        stage: "OFFICIAL_HTTP_DISCOVERY",
+        transition: "STARTED",
+        readPath: "OFFICIAL_HTTP",
+        evidenceKind: "OFFICIAL_SOURCE",
+        failureFingerprint: "PLAYBOOK:OFFICIAL_HTTP_DISCOVERY:NETWORK",
+        runtimeVersion,
+        observedAt,
+      },
+      {
+        cycle: 1,
+        stage: "OFFICIAL_HTTP_DISCOVERY",
+        transition: "FAILED_RETRYABLE",
+        readPath: "OFFICIAL_HTTP",
+        evidenceKind: "OFFICIAL_SOURCE",
+        failureClass: "NETWORK",
+        failureFingerprint: "PLAYBOOK:OFFICIAL_HTTP_DISCOVERY:NETWORK",
+        runtimeVersion,
+        observedAt,
+      },
+    ]);
+    allowOwnedDiscovery();
+    discoveryMocks.prepareCourseSupportVerificationMonitoring.mockResolvedValue({
+      attemptedCourseIds: ["course-1"],
+      appliedCourseIds: [],
+      failedCourseIds: ["course-1"],
+      deferredCourseIds: [],
+      retryCourseIds: ["course-1"],
+    });
+    providerReadMocks.fetchCourseTeeSheet.mockRejectedValue(
+      new Error("provider still unavailable"),
+    );
+
+    await executeCourseSupportVerificationStep(input);
+
+    expect(playbookMocks.recordRuntimePlaybookTransition).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        stage: "OFFICIAL_HTTP_DISCOVERY",
+        transition: "FAILED_TERMINAL",
+        failureClass: "NETWORK",
+      }),
+    );
+    expect(
+      runtime.assessment.stages.find(
+        (stage) => stage.stage === "OFFICIAL_HTTP_DISCOVERY",
+      ),
+    ).toMatchObject({ status: "FAILED_TERMINAL", attemptCount: 2 });
+    expect(runtime.assessment.nextStage).not.toBe("OFFICIAL_HTTP_DISCOVERY");
+  });
+
   it("stops when the authoritative request course changes during discovery", async () => {
     verificationMocks.attachCourseSupportVerificationProviderSnapshot
       .mockResolvedValueOnce({
