@@ -148,7 +148,12 @@ describe("runCourseSupportVerificationWatch", () => {
     const pass = vi
       .fn()
       .mockResolvedValueOnce({
-        browserStages: { eligibleCount: 3, persistedCount: 3 },
+        browserStages: {
+          eligibleCount: 3,
+          persistedCount: 3,
+          renderedDiscoveryCount: 2,
+          independentConfirmationCount: 1,
+        },
         verification: { detachedVerification: { rerunNeeded: false } }
       })
       .mockResolvedValueOnce(cleanPass())
@@ -164,6 +169,59 @@ describe("runCourseSupportVerificationWatch", () => {
     expect(result.passCount).toBe(3);
     expect(pass).toHaveBeenCalledTimes(3);
     expect(closeout).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      browserStages: { eligibleCount: 0, persistedCount: 0 },
+      browserStageTotals: {
+        passCountWithEligibleStages: 1,
+        passCountWithPersistedStages: 1,
+        eligibleCount: 3,
+        persistedCount: 3,
+        renderedDiscoveryCount: 2,
+        independentConfirmationCount: 1,
+      },
+    });
+  });
+
+  it("retains completed-pass browser telemetry when an endpoint stops the watch", async () => {
+    let currentTime = 0;
+    const pass = vi
+      .fn()
+      .mockResolvedValueOnce({
+        browserStages: {
+          eligibleCount: 1,
+          persistedCount: 1,
+          renderedDiscoveryCount: 1,
+          independentConfirmationCount: 0,
+        },
+        verification: { detachedVerification: { rerunNeeded: true } },
+      })
+      .mockImplementationOnce(async () => {
+        currentTime = 60_000;
+        return cleanPass();
+      });
+
+    const result = await runCourseSupportVerificationWatch({
+      maxMinutes: 1,
+      deadlineAt: 60_000,
+      now: () => currentTime,
+      pass,
+      sleep: async () => undefined,
+      onStopped: async () => ({ durableCloseoutRecorded: true }),
+    });
+
+    expect(result).toMatchObject({
+      outcome: "verification_watch_closed",
+      passCount: 2,
+      stoppedReason: "endpoint",
+      browserStageTotals: {
+        passCountWithEligibleStages: 1,
+        passCountWithPersistedStages: 1,
+        eligibleCount: 1,
+        persistedCount: 1,
+        renderedDiscoveryCount: 1,
+        independentConfirmationCount: 0,
+      },
+    });
   });
 
   it("releases an expired zero-pass browser watch as an automatic retry", async () => {
@@ -189,6 +247,14 @@ describe("runCourseSupportVerificationWatch", () => {
     expect(pass).not.toHaveBeenCalled();
     expect(result).toMatchObject({
       stoppedReason: "endpoint",
+      browserStageTotals: {
+        passCountWithEligibleStages: 0,
+        passCountWithPersistedStages: 0,
+        eligibleCount: 0,
+        persistedCount: 0,
+        renderedDiscoveryCount: 0,
+        independentConfirmationCount: 0,
+      },
       closeout: { mode: "EARLY_RETRY" }
     });
   });

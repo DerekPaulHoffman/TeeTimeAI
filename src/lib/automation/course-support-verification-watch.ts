@@ -199,6 +199,17 @@ export function selectCourseSupportVerificationStopMode(input: {
 export type CourseSupportVerificationBrowserStages = {
   eligibleCount: number;
   persistedCount: number;
+  renderedDiscoveryCount?: number;
+  independentConfirmationCount?: number;
+};
+
+export type CourseSupportVerificationBrowserStageTotals = {
+  passCountWithEligibleStages: number;
+  passCountWithPersistedStages: number;
+  eligibleCount: number;
+  persistedCount: number;
+  renderedDiscoveryCount: number;
+  independentConfirmationCount: number;
 };
 
 export type CourseSupportVerificationPassResult<TVerification> = {
@@ -377,6 +388,7 @@ export async function runCourseSupportVerificationWatch<
   let passCount = 0;
   let lastPass: CourseSupportVerificationPassResult<TVerification> | null = null;
   let consecutiveCleanPassCount = 0;
+  let browserStageTotals = emptyCourseSupportVerificationBrowserStageTotals();
 
   const runForBudget = async <T>(
     operation: (signal: AbortSignal) => Promise<T>,
@@ -511,6 +523,7 @@ export async function runCourseSupportVerificationWatch<
       outcome: "verification_watch_closed" as const,
       passCount,
       stoppedReason: reason,
+      browserStageTotals,
       closeout: releaseResult.value
     };
   };
@@ -531,6 +544,10 @@ export async function runCourseSupportVerificationWatch<
     const settledPass = passResult.value;
     passCount += 1;
     lastPass = settledPass;
+    browserStageTotals = addCourseSupportVerificationBrowserStageTotals(
+      browserStageTotals,
+      settledPass.browserStages
+    );
     if (
       settledPass.verification.verified === false ||
       settledPass.verification.outcome === "recovery_required"
@@ -602,7 +619,12 @@ export async function runCourseSupportVerificationWatch<
       return {
         outcome: "verification_watch_settled" as const,
         passCount,
+        // Keep the final pass available for convergence diagnosis while also
+        // exposing every browser-stage action observed during the watch. A
+        // settled watch necessarily ends on clean scans, so final-pass counts
+        // alone otherwise erase successful earlier browser work.
         browserStages: settledPass.browserStages,
+        browserStageTotals,
         verification: settledPass.verification,
         closeout
       };
@@ -614,6 +636,36 @@ export async function runCourseSupportVerificationWatch<
     }
     await sleepWithOwnership(Math.min(pollMs, remainingMs));
   }
+}
+
+function emptyCourseSupportVerificationBrowserStageTotals(): CourseSupportVerificationBrowserStageTotals {
+  return {
+    passCountWithEligibleStages: 0,
+    passCountWithPersistedStages: 0,
+    eligibleCount: 0,
+    persistedCount: 0,
+    renderedDiscoveryCount: 0,
+    independentConfirmationCount: 0
+  };
+}
+
+function addCourseSupportVerificationBrowserStageTotals(
+  totals: CourseSupportVerificationBrowserStageTotals,
+  stages: CourseSupportVerificationBrowserStages
+): CourseSupportVerificationBrowserStageTotals {
+  return {
+    passCountWithEligibleStages:
+      totals.passCountWithEligibleStages + (stages.eligibleCount > 0 ? 1 : 0),
+    passCountWithPersistedStages:
+      totals.passCountWithPersistedStages + (stages.persistedCount > 0 ? 1 : 0),
+    eligibleCount: totals.eligibleCount + stages.eligibleCount,
+    persistedCount: totals.persistedCount + stages.persistedCount,
+    renderedDiscoveryCount:
+      totals.renderedDiscoveryCount + (stages.renderedDiscoveryCount ?? 0),
+    independentConfirmationCount:
+      totals.independentConfirmationCount +
+      (stages.independentConfirmationCount ?? 0)
+  };
 }
 
 function throwIfVerificationWatchAborted(signal?: AbortSignal) {
