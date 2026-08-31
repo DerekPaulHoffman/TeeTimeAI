@@ -336,7 +336,7 @@ export function routeCourseSupportRemediation(
 
   const attemptSignature: CourseSupportRemediationAttemptSignature = {
     workMode: candidate.workMode,
-    strategyAction: strategy.action,
+    strategyAction: candidate.strategy.action,
     playbookStage: input.playbookAssessment.nextStage,
   };
   const repeatsUnchangedAttempt =
@@ -349,7 +349,7 @@ export function routeCourseSupportRemediation(
   ) {
     return waitingRoute({
       reason: "UNCHANGED_ATTEMPT_ALREADY_RECORDED",
-      strategy,
+      strategy: candidate.strategy,
       materialChangeDetected,
       retryBudget,
       resumeWorkMode: candidate.workMode,
@@ -430,6 +430,24 @@ function selectActionableRoute(input: {
     input.playbookAssessment.nextStage !== null
   ) {
     return discoveryRoute({ ...input, retryBudget: null });
+  }
+
+  // Rendered discovery has already completed by the time the ordered
+  // playbook reaches BROWSER_ADAPTER_RETRY. Hand that exact stage to the
+  // detached verifier as an adapter repair progression instead of assigning
+  // another browser-discovery action that cannot own the retry stage.
+  if (
+    input.playbookAssessment.nextStage === "BROWSER_ADAPTER_RETRY" &&
+    input.strategy.action === "DISCOVER_WITH_BROWSER"
+  ) {
+    return discoveryRoute({
+      ...input,
+      strategy: {
+        ...input.strategy,
+        action: "REPAIR_PROVIDER_ADAPTER",
+        browserAllowed: false,
+      },
+    });
   }
 
   if (input.strategy.action === "RETRY_PROVIDER") {

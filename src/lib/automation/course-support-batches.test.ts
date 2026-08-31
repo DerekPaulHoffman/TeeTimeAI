@@ -7545,7 +7545,7 @@ describe("course-support claim demand fencing", () => {
     );
   });
 
-  it("grants a zero-attempt browser adapter retry a fresh deadline immediately before watch", async () => {
+  it("grants a routed browser adapter repair a fresh deadline immediately before watch", async () => {
     const verifyStartedAt = new Date("2026-07-21T02:20:23.000Z");
     prismaMocks.queryRaw.mockResolvedValue([{ now: verifyStartedAt }]);
     prismaMocks.batchFindFirst.mockResolvedValue(
@@ -7553,18 +7553,13 @@ describe("course-support claim demand fencing", () => {
         attemptLedgers: [browserAdapterRetryReadyAttemptLedger()],
         summary: {
           remediation: {
-            workMode: "VERIFY_TRANSIENT",
-            strategyAction: "RUN_TYPED_ADAPTER",
+            workMode: "ADVANCE_DISCOVERY",
+            strategyAction: "REPAIR_PROVIDER_ADAPTER",
             playbookStage: "BROWSER_ADAPTER_RETRY",
             allowUnchangedRuntime: true,
             requiresImplementationPath: false,
-            reason: "EXISTING_SUPPORT_READY",
-            retryBudget: {
-              maximumAttempts: 4,
-              attemptsCompleted: 3,
-              attemptsRemaining: 1,
-              exhausted: false,
-            },
+            reason: "PLAYBOOK_STAGE_PENDING",
+            retryBudget: null,
           },
         },
       }),
@@ -24528,6 +24523,137 @@ describe("detached verification atomic batch fences", () => {
       }),
     );
     expect(prismaMocks.teeSearchUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("counts exact browser adapter progression instead of repeating the orchestration assignment", async () => {
+    const batch = closeoutBatch("PENDING");
+    const courseRef = createHash("sha256")
+      .update("course-1")
+      .digest("hex")
+      .slice(0, 24);
+    let progressedLedger: unknown = browserAdapterRetryReadyAttemptLedger();
+    progressedLedger = appendAutomationPlaybookEvent(progressedLedger, {
+      cycle: 1,
+      stage: "BROWSER_ADAPTER_RETRY",
+      transition: "NOT_APPLICABLE",
+      readPath: "TYPED_PROVIDER_ADAPTER",
+      evidenceKind: "TOOLING",
+      failureFingerprint: "TEST:BROWSER_ADAPTER_RETRY:SKIPPED",
+      runtimeVersion: releaseSha,
+      skipReason: "NO_RUNNABLE_ADAPTER",
+      observedAt: now,
+    });
+    progressedLedger = appendAutomationPlaybookEvent(progressedLedger, {
+      cycle: 1,
+      stage: "LOCAL_READER",
+      transition: "NOT_APPLICABLE",
+      readPath: "LOCAL_READER",
+      evidenceKind: "TOOLING",
+      failureFingerprint: "TEST:LOCAL_READER:SKIPPED",
+      runtimeVersion: releaseSha,
+      skipReason: "NO_LOCAL_READER_CAPABILITY",
+      observedAt: now,
+    });
+    expect(assessAutomationPlaybook(progressedLedger, 1)).toMatchObject({
+      conclusion: "INCOMPLETE",
+      nextStage: "INDEPENDENT_CONFIRMATION",
+    });
+    Object.assign(batch.incidents[0].incident, {
+      activeRealSearchCount: 0,
+      failureClass: "MISSING_METADATA",
+      attemptLedger: progressedLedger,
+    });
+    batch.summary = {
+      ...batch.summary,
+      remediation: {
+        workMode: "ADVANCE_DISCOVERY",
+        strategyAction: "REPAIR_PROVIDER_ADAPTER",
+        playbookStage: "BROWSER_ADAPTER_RETRY",
+        allowUnchangedRuntime: true,
+        requiresImplementationPath: false,
+        reason: "PLAYBOOK_STAGE_PENDING",
+        retryBudget: null,
+        attempts: [
+          {
+            courseRef,
+            providerSnapshotFingerprint: providerFingerprint,
+            failureFingerprint:
+              batch.incidents[0].incident.failureFingerprint,
+            runtimeVersion: releaseSha,
+            activeRealSearchCount: 0,
+            playbookEventCountAtClaim: 5,
+            reason: "PLAYBOOK_STAGE_PENDING",
+            retryBudget: null,
+            approach: {
+              workMode: "ADVANCE_DISCOVERY",
+              strategyAction: "REPAIR_PROVIDER_ADAPTER",
+              playbookStage: "BROWSER_ADAPTER_RETRY",
+            },
+            actionPlan: {
+              schemaVersion: 1,
+              primaryAction: "VERIFY_CURRENT_RUNTIME",
+              allowedActions: ["VERIFY_CURRENT_RUNTIME"],
+              route: {
+                workMode: "ADVANCE_DISCOVERY",
+                strategyAction: "REPAIR_PROVIDER_ADAPTER",
+                playbookStage: "BROWSER_ADAPTER_RETRY",
+              },
+            },
+          },
+        ],
+      },
+    };
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.transaction.mockImplementationOnce(
+      async (
+        worker: (
+          transaction: typeof monitoringTransactionClient,
+        ) => Promise<unknown>,
+      ) => worker(monitoringTransactionClient),
+    );
+
+    const result = await closeoutCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      verificationWatchMode: "WATCH_SETTLED",
+      now,
+    });
+
+    expect(result).toMatchObject({
+      outcome: "retryable_failed",
+      retryCount: 1,
+      needsHumanCount: 0,
+      automationStalledCount: 0,
+      decisionBasis: {
+        orchestrationOnlyCount: 0,
+        incompletePlaybookCount: 1,
+        zeroAttemptBrowserAdapterRetryCount: 0,
+      },
+    });
+    const persistedAttempt =
+      prismaMocks.batchUpdateMany.mock.calls.find(
+        ([update]) => update.data?.summary?.closeout,
+      )?.[0]?.data?.summary?.closeout?.remediationAttempts?.[0];
+    expect(persistedAttempt).toMatchObject({
+      consumed: true,
+      countsTowardOperationalNoProgress: true,
+      executionEvidence: expect.objectContaining({
+        playbookAttemptRecorded: true,
+      }),
+    });
+    expect(persistedAttempt?.orchestrationRetry).toBeNull();
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "AUTO_INVESTIGATING",
+          nextAttemptAt: new Date(now.getTime() + 60_000),
+        }),
+      }),
+    );
   });
 
   it("still escalates a pre-execution endpoint stall with a malformed assigned-adapter signature", async () => {

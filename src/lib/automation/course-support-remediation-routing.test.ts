@@ -598,6 +598,78 @@ describe("course-support remediation routing", () => {
     });
   });
 
+  it("hands a provider-specific browser adapter retry to the detached verifier", () => {
+    const result = routeCourseSupportRemediation({
+      ...runnableCourse,
+      detectedPlatform: "CUSTOM",
+      providerFamilyKey: "booking.public-course.example",
+      detectedBookingUrl: "https://booking.public-course.example/tee-times",
+      bookingMetadata: null,
+      automationEligibility: "NEEDS_REVIEW",
+      failureClass: "MISSING_METADATA",
+      discoveryAttempt: "HTTP_INCONCLUSIVE",
+      playbookAssessment: incompletePlaybook("BROWSER_ADAPTER_RETRY"),
+    });
+
+    expect(result).toMatchObject({
+      workMode: "ADVANCE_DISCOVERY",
+      allowUnchangedRuntime: true,
+      requiresImplementationPath: false,
+      reason: "PLAYBOOK_STAGE_PENDING",
+      strategy: {
+        action: "REPAIR_PROVIDER_ADAPTER",
+        reason: "MISSING_PROVIDER_METADATA",
+        browserAllowed: false,
+      },
+      attemptSignature: {
+        workMode: "ADVANCE_DISCOVERY",
+        strategyAction: "REPAIR_PROVIDER_ADAPTER",
+        playbookStage: "BROWSER_ADAPTER_RETRY",
+      },
+    });
+    expect(
+      isAssignedDetachedStageProgression({
+        remediationDirective: {
+          workMode: result.workMode,
+          strategyAction: result.strategy.action,
+          playbookStage: result.attemptSignature?.playbookStage,
+          allowUnchangedRuntime: result.allowUnchangedRuntime,
+          requiresImplementationPath: result.requiresImplementationPath,
+          retryBudget: result.retryBudget,
+        },
+        playbookConclusion: "INCOMPLETE",
+        nextPlaybookStage: "BROWSER_ADAPTER_RETRY",
+        nextPlaybookStageStatus: "PENDING",
+        nextPlaybookStageAttemptCount: 0,
+      }),
+    ).toBe(true);
+
+    expect(
+      routeCourseSupportRemediation({
+        ...runnableCourse,
+        detectedPlatform: "CUSTOM",
+        providerFamilyKey: "booking.public-course.example",
+        detectedBookingUrl:
+          "https://booking.public-course.example/tee-times",
+        bookingMetadata: null,
+        automationEligibility: "NEEDS_REVIEW",
+        failureClass: "MISSING_METADATA",
+        discoveryAttempt: "HTTP_INCONCLUSIVE",
+        playbookAssessment: incompletePlaybook("BROWSER_ADAPTER_RETRY"),
+        priorUnchangedAttempt: result.attemptSignature,
+      }),
+    ).toMatchObject({
+      workMode: "WAIT_FOR_MATERIAL_CHANGE",
+      resumeWorkMode: "ADVANCE_DISCOVERY",
+      strategy: { action: "REPAIR_PROVIDER_ADAPTER" },
+      attemptSignature: {
+        strategyAction: "REPAIR_PROVIDER_ADAPTER",
+        playbookStage: "BROWSER_ADAPTER_RETRY",
+      },
+      reason: "UNCHANGED_ATTEMPT_ALREADY_RECORDED",
+    });
+  });
+
   it("parks an exhausted unresolved playbook and reopens it only for material change", () => {
     const input = {
       ...runnableCourse,

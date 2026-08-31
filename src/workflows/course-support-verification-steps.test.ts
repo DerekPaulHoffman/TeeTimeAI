@@ -248,7 +248,7 @@ function installPlaybookRuntime(
   return runtime;
 }
 
-function completedPlaybookSeedThroughBrowserAdapter(): AutomationPlaybookEventInput[] {
+function completedPlaybookSeedThroughRenderedBrowser(): AutomationPlaybookEventInput[] {
   const observedAt = new Date("2026-07-21T11:55:00.000Z");
   return [
     {
@@ -305,6 +305,12 @@ function completedPlaybookSeedThroughBrowserAdapter(): AutomationPlaybookEventIn
       runtimeVersion,
       observedAt,
     },
+  ];
+}
+
+function completedPlaybookSeedThroughBrowserAdapter(): AutomationPlaybookEventInput[] {
+  return [
+    ...completedPlaybookSeedThroughRenderedBrowser(),
     {
       cycle: 1,
       stage: "BROWSER_ADAPTER_RETRY",
@@ -2542,6 +2548,67 @@ describe("executeCourseSupportVerificationStep", () => {
     expect(
       supportIncidentMocks.resolveCourseSupportIncident,
     ).not.toHaveBeenCalled();
+  });
+
+  it("advances an assigned non-runnable browser adapter retry in the exact runtime", async () => {
+    const runtime = installPlaybookRuntime(
+      completedPlaybookSeedThroughRenderedBrowser(),
+    );
+    allowOwnedDiscovery();
+    capabilityMocks.resolveProviderCapability.mockReturnValue({
+      providerFamilyKey: "CUSTOM",
+      isRunnable: false,
+      metadataReady: false,
+      evidenceConflict: false,
+    });
+    capabilityMocks.getProviderReadinessFailure.mockReturnValue(
+      "MISSING_METADATA",
+    );
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue(null);
+    verificationMocks.failCourseSupportVerificationRequest.mockResolvedValue({
+      failed: true,
+      status: "RETRYABLE_FAILED",
+    });
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "failed",
+      retryable: true,
+    });
+
+    expect(
+      playbookMocks.recordRuntimePlaybookTransition.mock.calls.map(
+        ([, transition]) => ({
+          stage: transition.stage,
+          transition: transition.transition,
+          skipReason: transition.skipReason,
+          runtimeVersion: transition.runtimeVersion,
+        }),
+      ),
+    ).toEqual([
+      {
+        stage: "BROWSER_ADAPTER_RETRY",
+        transition: "NOT_APPLICABLE",
+        skipReason: "NO_RUNNABLE_ADAPTER",
+        runtimeVersion,
+      },
+      {
+        stage: "LOCAL_READER",
+        transition: "NOT_APPLICABLE",
+        skipReason: "NO_LOCAL_READER_CAPABILITY",
+        runtimeVersion,
+      },
+    ]);
+    expect(runtime.assessment.conclusion).toBe("INCOMPLETE");
+    expect(runtime.assessment.nextStage).toBe("INDEPENDENT_CONFIRMATION");
+    expect(providerReadMocks.fetchCourseTeeSheet).not.toHaveBeenCalled();
+    expect(
+      verificationMocks.failCourseSupportVerificationRequest,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        failureClass: "MISSING_SOURCE",
+        retryAt: new Date("2026-07-21T12:02:00.000Z"),
+      }),
+    );
   });
 
   it.each([
