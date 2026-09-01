@@ -16813,6 +16813,89 @@ describe("course-support recovery", () => {
     );
   });
 
+  it("requeues an expired implementation plan superseded by the current source-discovery route", async () => {
+    const { expiredBatch, request } = expiredPreExecutionRecoveryFixture({
+      status: "STALE",
+      updatedAt: new Date(now.getTime() - 30_000),
+    });
+    const entry = configureExpiredSchemaV1ImplementationRecovery(expiredBatch);
+    Object.assign(entry.incident, { failureClass: "UNKNOWN" });
+    Object.assign(entry.course, {
+      isPublic: true,
+      website: "https://public-course.example/",
+      detectedBookingUrl: null,
+      detectedPlatform: "UNKNOWN",
+      providerFamilyKey: "SOURCE_MISSING",
+      bookingMetadata: null,
+      bookingMethod: "UNKNOWN",
+      automationEligibility: "UNKNOWN",
+      automationReason: "NONE",
+      intelligenceVerifiedAt: null,
+      intelligenceReviewAt: null,
+      intelligenceConfidence: null,
+    });
+    prismaMocks.batchFindUnique.mockResolvedValue(expiredBatch);
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([request]);
+    prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(
+      recoverCourseSupportBatch({
+        batchId: expiredBatch.id,
+        requestingThreadId: "new-thread",
+        currentBranch: "fix/unrelated-head",
+        currentHeadSha: "b".repeat(40),
+        dirtyPaths: [],
+        releaseIsPublished: false,
+        baseIsAncestor: false,
+        now,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "retryable_failed",
+      safelyRequeued: true,
+      implementationStoppedCount: 0,
+      actionPlanSupersededByCurrentSourceCount: 1,
+      durableCloseoutRecorded: true,
+      nextAttemptAt: new Date(now.getTime() + 60_000).toISOString(),
+    });
+
+    const recoveredCloseout =
+      prismaMocks.batchUpdateMany.mock.calls[0]?.[0]?.data?.summary?.closeout;
+    expect(recoveredCloseout).toMatchObject({
+      outcome: "retryable_failed",
+      needsHumanCount: 0,
+      actionPlanSupersededByCurrentSourceCount: 1,
+      reason: "expired_action_plan_superseded_by_current_source",
+    });
+    expect(recoveredCloseout?.remediationAttempts?.[0]).toMatchObject({
+      consumed: false,
+      countsTowardOperationalNoProgress: false,
+      orchestrationRetry: null,
+      actionExecution: {
+        schemaVersion: 1,
+        action: "IMPLEMENT_REUSABLE_SUPPORT",
+        state: "NOT_EXECUTED",
+        reason: "SUPERSEDED_BY_MATERIAL_CHANGE",
+      },
+    });
+    expect(prismaMocks.incidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ result: "RETRY_SCHEDULED" }),
+      }),
+    );
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ status: "AUTO_INVESTIGATING" }),
+        data: expect.objectContaining({
+          activeBatchId: null,
+          nextAttemptAt: new Date(now.getTime() + 60_000),
+        }),
+      }),
+    );
+  });
+
   it("requeues expired schema-v1 implementation when a material provider change supersedes it", async () => {
     const { expiredBatch, request } = expiredPreExecutionRecoveryFixture({
       status: "STALE",

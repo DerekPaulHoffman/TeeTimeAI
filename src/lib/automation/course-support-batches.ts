@@ -175,7 +175,12 @@ import {
   type RecentBatchFairnessEvidence,
   type SelectedCourseSupportBatch
 } from "./course-support-selection";
-import { MONITORING_STRATEGY_ACTIONS, type MonitoringStrategyAction } from "./monitoring-strategy";
+import {
+  MONITORING_STRATEGY_ACTIONS,
+  selectMonitoringStrategy,
+  type MonitoringStrategyAction,
+  type MonitoringStrategyInput,
+} from "./monitoring-strategy";
 
 export {
   classifyCourseSupportCampaignSummary,
@@ -3167,6 +3172,52 @@ export function canSafelyRequeueExpiredCourseSupportBatch(input: {
         result === "STALE_EVIDENCE" ||
         result === "RETRY_SCHEDULED",
     ),
+  );
+}
+
+const CURRENT_SOURCE_DISCOVERY_PLAN_STAGES = new Set<AutomationPlaybookStage>([
+  "OFFICIAL_IDENTITY",
+  "TYPED_ADAPTER",
+  "OFFICIAL_HTTP_DISCOVERY",
+  "HTTP_ADAPTER_RETRY",
+  "RENDERED_BROWSER_DISCOVERY",
+]);
+const CURRENT_SOURCE_PROVIDER_FAMILIES = new Set<string>([
+  SOURCE_MISSING_PROVIDER_FAMILY,
+  SOURCE_CONFLICT_PROVIDER_FAMILY,
+]);
+
+function isExpiredImplementationSupersededByCurrentSource(input: {
+  claimedAttempt: CourseSupportRemediationClaimAttempt | null | undefined;
+  course: MonitoringStrategyInput;
+  failureClass: CourseSupportFailureClass | null | undefined;
+}) {
+  const plan = input.claimedAttempt?.actionPlan;
+  const playbookStage = input.claimedAttempt?.approach.playbookStage ?? null;
+  const currentProviderFamily = input.course.providerFamilyKey
+    ?.trim()
+    .toUpperCase();
+  if (
+    plan?.primaryAction !== "IMPLEMENT_REUSABLE_SUPPORT" ||
+    !playbookStage ||
+    !CURRENT_SOURCE_DISCOVERY_PLAN_STAGES.has(playbookStage) ||
+    !CURRENT_SOURCE_PROVIDER_FAMILIES.has(currentProviderFamily ?? "")
+  ) {
+    return false;
+  }
+
+  const currentStrategy = selectMonitoringStrategy({
+    ...input.course,
+    providerFamilyKey: input.course.providerFamilyKey,
+    failureClass: input.failureClass,
+    discoveryAttempt:
+      playbookStage === "RENDERED_BROWSER_DISCOVERY"
+        ? "HTTP_INCONCLUSIVE"
+        : "NONE",
+  });
+  return (
+    currentStrategy.action === "DISCOVER_WITH_HTTP" ||
+    currentStrategy.action === "DISCOVER_WITH_BROWSER"
   );
 }
 
@@ -13906,6 +13957,7 @@ export async function recoverCourseSupportBatch(input: {
                 resolution: true,
                 decisionAt: true,
                 cycle: true,
+                failureClass: true,
                 attemptLedger: true,
                 activeBatchId: true,
                 lastSeenAt: true,
@@ -14420,16 +14472,28 @@ export async function recoverCourseSupportBatch(input: {
             authoritativeSuccessEntryIds.add(entry.id);
           }
         }
-        const materialProviderChangeEntryIds = new Set(
-          retryIncidents.flatMap((entry) => {
+        const currentSourceActionPlanChangeEntryIds = new Set(
+          retryIncidents.flatMap((entry) =>
+            isExpiredImplementationSupersededByCurrentSource({
+              claimedAttempt: claimedAttemptByRetryEntryId.get(entry.id),
+              course: entry.course,
+              failureClass: entry.incident.failureClass,
+            })
+              ? [entry.id]
+              : [],
+          ),
+        );
+        const materialProviderChangeEntryIds = new Set([
+          ...retryIncidents.flatMap((entry) => {
             const claimedAttempt = claimedAttemptByRetryEntryId.get(entry.id);
             return claimedAttempt?.providerSnapshotFingerprint &&
               claimedAttempt.providerSnapshotFingerprint !==
                 buildCourseSupportProviderSnapshotFingerprint(entry.course)
               ? [entry.id]
               : [];
-          })
-        );
+          }),
+          ...currentSourceActionPlanChangeEntryIds,
+        ]);
         const supersededImplementationEntryIds = new Set([
           ...authoritativeSuccessEntryIds,
           ...materialProviderChangeEntryIds
@@ -14460,6 +14524,8 @@ export async function recoverCourseSupportBatch(input: {
         const closeoutReason =
           stoppedImplementationCount > 0
             ? "expired_implementation_stopped_without_proof"
+            : currentSourceActionPlanChangeEntryIds.size > 0
+              ? "expired_action_plan_superseded_by_current_source"
             : terminalIncidents.length > 0
               ? "expired_mixed_reconciled_without_adoption"
               : "expired_retry_reconciled_without_adoption";
@@ -14495,6 +14561,8 @@ export async function recoverCourseSupportBatch(input: {
         const message =
           stoppedImplementationCount > 0
             ? "Expired responder implementation work lacked required runtime release and deployment proof, so it was parked for human review without another automatic retry."
+            : currentSourceActionPlanChangeEntryIds.size > 0
+              ? "The expired implementation assignment was superseded by the current durable source-discovery route and safely requeued."
             : terminalIncidents.length > 0
             ? "Expired responder terminal decisions were reconciled and unresolved work was safely requeued without adopting local changes."
             : "Expired responder retry evidence was safely requeued without adopting local changes.";
@@ -15216,7 +15284,12 @@ export async function recoverCourseSupportBatch(input: {
                 currentSuccessAssessment.status === "VALID";
               const currentMaterialProviderChange =
                 claimedAttempt.providerSnapshotFingerprint !==
-                buildCourseSupportProviderSnapshotFingerprint(currentCourse);
+                  buildCourseSupportProviderSnapshotFingerprint(currentCourse) ||
+                isExpiredImplementationSupersededByCurrentSource({
+                  claimedAttempt,
+                  course: currentCourse,
+                  failureClass: entry.incident.failureClass,
+                });
               if (
                 currentAuthoritativeSuccess !==
                   authoritativeSuccessEntryIds.has(entryId) ||
@@ -15258,6 +15331,8 @@ export async function recoverCourseSupportBatch(input: {
                   needsHumanCount: totalNeedsHumanCount,
                   remediationAttemptConsumed: false,
                   remediationAttempts: safeRequeueRemediationAttempts,
+                  actionPlanSupersededByCurrentSourceCount:
+                    currentSourceActionPlanChangeEntryIds.size,
                   orchestrationOnlyCount:
                     safeRequeueOrchestrationOnlyEntryIds.size,
                   orchestrationOnlyCourseRefs: retryIncidents
@@ -15529,6 +15604,8 @@ export async function recoverCourseSupportBatch(input: {
                   retryCount: retryableIncidents.length,
                   needsHumanCount: totalNeedsHumanCount,
                   implementationStoppedCount: stoppedImplementationCount,
+                  actionPlanSupersededByCurrentSourceCount:
+                    currentSourceActionPlanChangeEntryIds.size,
                   failureDomain: "GIT",
                   remediationAttemptConsumed: false,
                   operationalNoProgressAttemptCount:
@@ -15552,6 +15629,8 @@ export async function recoverCourseSupportBatch(input: {
           recovered: false,
           safelyRequeued: retryableIncidents.length > 0,
           implementationStoppedCount: stoppedImplementationCount,
+          actionPlanSupersededByCurrentSourceCount:
+            currentSourceActionPlanChangeEntryIds.size,
           superseded: terminalIncidents.length > 0,
           durableCloseoutRecorded: true,
           nextAttemptAt: nextAttemptAt?.toISOString() ?? null,
