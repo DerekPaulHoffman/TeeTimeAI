@@ -35,6 +35,38 @@ function candidate(
   };
 }
 
+function campaign(
+  overrides: Partial<NonNullable<CourseSupportCandidate["campaign"]>> = {},
+): NonNullable<CourseSupportCandidate["campaign"]> {
+  return {
+    runId: "campaign-run",
+    membershipDigest: "a".repeat(64),
+    priorCycle: 1,
+    priorRevision: 1,
+    priorMonitoringRevision: 1,
+    capturedRevision: 1,
+    capturedMonitoringRevision: 1,
+    capturedCycle: 1,
+    capturedKind: "NEEDS_ADAPTER",
+    capturedProviderFamilyKey: "TENFORE",
+    campaignCapturedAt: "2026-08-18T13:00:00.000Z",
+    admissionMode: "FRESH_CYCLE",
+    zeroExecutionHistoryDigest: null,
+    sameCycleRecoveryHistoryDigest: null,
+    playbookNextStage: "OFFICIAL_IDENTITY",
+    playbookCompletedStageCount: 0,
+    expectedMonitoringFailureFingerprint: null,
+    expectedKind: "NEEDS_ADAPTER",
+    expectedFailureClass: "UNSUPPORTED_FAMILY",
+    expectedProviderSnapshotFingerprint: "b".repeat(64),
+    expectedAttemptLedgerFingerprint: "c".repeat(64),
+    expectedPlaybookConclusion: "INCOMPLETE",
+    expectedLatestProbeAt: null,
+    expectedLatestDiscoveryAt: null,
+    ...overrides,
+  };
+}
+
 describe("course-support remediation-aware selection", () => {
   it("does not mix different work modes in one provider batch", () => {
     const implementationDirective = {
@@ -167,5 +199,88 @@ describe("course-support remediation-aware selection", () => {
 
     expect(selected?.incidents).toHaveLength(2);
     expect(selected?.remediationDirective).toBeUndefined();
+  });
+
+  it("finishes a progressed requestless campaign playbook before admitting an untouched member", () => {
+    const selected = selectCourseSupportBatch({
+      candidates: [
+        candidate("untouched", {
+          providerFamilyKey: "UNTOUCHED",
+          failureFingerprint: "untouched-fingerprint",
+          engineeringOnly: true,
+          attemptCount: 0,
+          campaign: campaign(),
+          remediationDirective: {
+            workMode: "ADVANCE_DISCOVERY",
+            strategyAction: "DISCOVER_WITH_HTTP",
+            playbookStage: "OFFICIAL_IDENTITY",
+          },
+        }),
+        candidate("progressed", {
+          providerFamilyKey: "PROGRESSED",
+          failureFingerprint: "progressed-fingerprint",
+          engineeringOnly: true,
+          attemptCount: 4,
+          firstSeenAt: new Date("2026-08-18T15:30:00.000Z"),
+          campaign: campaign({
+            admissionMode: "INCOMPLETE_PLAYBOOK_RECOVERY",
+            playbookNextStage: "BROWSER_ADAPTER_RETRY",
+            playbookCompletedStageCount: 5,
+          }),
+          remediationDirective: {
+            workMode: "ADVANCE_DISCOVERY",
+            strategyAction: "DISCOVER_WITH_BROWSER",
+            playbookStage: "BROWSER_ADAPTER_RETRY",
+          },
+        }),
+      ],
+      maxCourses: 5,
+      now,
+    });
+
+    expect(selected?.incidents.map((incident) => incident.id)).toEqual([
+      "progressed",
+    ]);
+  });
+
+  it("keeps active customer demand ahead of a progressed requestless campaign", () => {
+    const selected = selectCourseSupportBatch({
+      candidates: [
+        candidate("customer", {
+          kind: "FETCH_FAILED",
+          providerFamilyKey: "CUSTOMER",
+          failureClass: "NETWORK",
+          failureFingerprint: "customer-fingerprint",
+          activeRealSearchCount: 1,
+          earliestTargetDate: new Date("2026-08-20T12:00:00.000Z"),
+          remediationDirective: {
+            workMode: "ADVANCE_DISCOVERY",
+            strategyAction: "DISCOVER_WITH_HTTP",
+            playbookStage: "OFFICIAL_IDENTITY",
+          },
+        }),
+        candidate("campaign", {
+          providerFamilyKey: "CAMPAIGN",
+          failureFingerprint: "campaign-fingerprint",
+          engineeringOnly: true,
+          campaign: campaign({
+            admissionMode: "INCOMPLETE_PLAYBOOK_RECOVERY",
+            playbookNextStage: "INDEPENDENT_CONFIRMATION",
+            playbookCompletedStageCount: 7,
+          }),
+          remediationDirective: {
+            workMode: "ADVANCE_DISCOVERY",
+            strategyAction: "DISCOVER_WITH_BROWSER",
+            playbookStage: "INDEPENDENT_CONFIRMATION",
+          },
+        }),
+      ],
+      maxCourses: 5,
+      now,
+    });
+
+    expect(selected?.incidents.map((incident) => incident.id)).toEqual([
+      "customer",
+    ]);
   });
 });

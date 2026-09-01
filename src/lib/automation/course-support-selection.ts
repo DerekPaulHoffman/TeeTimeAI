@@ -9,7 +9,10 @@ import {
   COURSE_SUPPORT_SYNTHETIC_FAIRNESS_WINDOW,
   clampCourseSupportBatchSize,
 } from "./course-support-responder-policy";
-import type { AutomationPlaybookStage } from "./course-monitoring-playbook";
+import {
+  AUTOMATION_PLAYBOOK_STAGES,
+  type AutomationPlaybookStage,
+} from "./course-monitoring-playbook";
 import type {
   CourseSupportRemediationDirective,
   CourseSupportRemediationRoute,
@@ -338,6 +341,21 @@ export function compareCourseSupportCandidates(
   if (priority !== 0) {
     return priority;
   }
+  const leftCampaignCompletionRank =
+    requestlessCampaignCompletionRank(left);
+  const rightCampaignCompletionRank =
+    requestlessCampaignCompletionRank(right);
+  if (
+    leftCampaignCompletionRank !== null &&
+    rightCampaignCompletionRank !== null &&
+    leftCampaignCompletionRank !== rightCampaignCompletionRank
+  ) {
+    // Once an immutable campaign member has advanced, finish its bounded
+    // playbook before admitting another untouched member in the same lane.
+    // Customer-demand ordering above remains authoritative, while equal-stage
+    // members retain the existing attempt/age fairness below.
+    return rightCampaignCompletionRank - leftCampaignCompletionRank;
+  }
   const target =
     (left.earliestTargetDate?.getTime() ?? Number.MAX_SAFE_INTEGER) -
     (right.earliestTargetDate?.getTime() ?? Number.MAX_SAFE_INTEGER);
@@ -349,6 +367,34 @@ export function compareCourseSupportCandidates(
     return attempts;
   }
   return left.firstSeenAt.getTime() - right.firstSeenAt.getTime();
+}
+
+function requestlessCampaignCompletionRank(
+  candidate: CourseSupportCandidate,
+): number | null {
+  if (!candidate.campaign || candidate.activeRealSearchCount !== 0) {
+    return null;
+  }
+  const workMode =
+    candidate.remediationDirective?.workMode ??
+    candidate.actionPlan?.route.workMode ??
+    null;
+  if (workMode === "COMPLETE_CLASSIFICATION") {
+    return AUTOMATION_PLAYBOOK_STAGES.length + 1;
+  }
+  const playbookStage =
+    candidate.remediationDirective?.playbookStage ??
+    candidate.actionPlan?.route.playbookStage ??
+    null;
+  const stageIndex = playbookStage
+    ? AUTOMATION_PLAYBOOK_STAGES.indexOf(playbookStage)
+    : -1;
+  if (stageIndex >= 0) {
+    return stageIndex;
+  }
+  return workMode === "IMPLEMENT_REUSABLE_SUPPORT"
+    ? AUTOMATION_PLAYBOOK_STAGES.length
+    : -1;
 }
 
 export function isCriticalRealDemand(
