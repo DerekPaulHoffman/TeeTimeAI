@@ -11,7 +11,16 @@ const prismaMocks = vi.hoisted(() => ({
     update: vi.fn(),
     updateMany: vi.fn()
   },
-  courseMonitoringStatus: { findUnique: vi.fn() },
+  courseMonitoringStatus: {
+    findUnique: vi.fn(),
+    upsert: vi.fn(),
+    update: vi.fn()
+  },
+  courseMonitoringEvent: null as null | {
+    findFirst: ReturnType<typeof vi.fn>;
+    findMany: ReturnType<typeof vi.fn>;
+    create: ReturnType<typeof vi.fn>;
+  },
   courseSupportBatchIncident: { findFirst: vi.fn() }
 }));
 
@@ -132,6 +141,26 @@ function mockRealDemand(count: number) {
   });
 }
 
+function currentMonitoringFailure(overrides: Record<string, unknown> = {}) {
+  return {
+    courseId: "course-1",
+    reference: "cms_1234567890abcdef12345678",
+    state: "DEGRADED_RETRYING",
+    lastSuccessfulAt: null,
+    lastFailureAt: now,
+    consecutiveFailures: 1,
+    failureFingerprint: authFailureFingerprint.toUpperCase(),
+    firstDegradedAt: now,
+    nextAutomaticAttemptAt: new Date(now.getTime() + 2 * 60 * 1000),
+    revalidationRequestedAt: null,
+    stateChangedAt: now,
+    revision: 1,
+    createdAt: now,
+    updatedAt: now,
+    ...overrides
+  };
+}
+
 describe("course support incidents", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -140,9 +169,11 @@ describe("course support incidents", () => {
         $queryRawUnsafe: vi.fn().mockResolvedValue([{ locked: true }]),
         courseSupportIncident: prismaMocks.courseSupportIncident,
         courseMonitoringStatus: prismaMocks.courseMonitoringStatus,
+        courseMonitoringEvent: prismaMocks.courseMonitoringEvent,
         courseSupportBatchIncident: prismaMocks.courseSupportBatchIncident
       })
     );
+    prismaMocks.courseMonitoringEvent = null;
     prismaMocks.teeSearch.count.mockResolvedValue(1);
     prismaMocks.teeSearch.aggregate.mockResolvedValue({
       _count: { id: 1 },
@@ -254,7 +285,7 @@ describe("course support incidents", () => {
     prismaMocks.courseMonitoringStatus.findUnique.mockResolvedValue({
       lastSuccessfulAt: priorSuccessObservedAt,
       lastFailureAt: failureObservedAt,
-      failureFingerprint: authFailureFingerprint
+      failureFingerprint: authFailureFingerprint.toUpperCase()
     });
     prismaMocks.courseSupportIncident.create.mockResolvedValue(opened);
 
@@ -283,6 +314,182 @@ describe("course support incidents", () => {
       })
     });
   });
+
+  it("creates an incident on the first monitoring write when canonical storage changes fingerprint case", async () => {
+    const initialStatus = currentMonitoringFailure({
+      state: "UNKNOWN",
+      lastFailureAt: null,
+      consecutiveFailures: 0,
+      failureFingerprint: null,
+      firstDegradedAt: null,
+      nextAutomaticAttemptAt: null,
+      revision: 0
+    });
+    const updatedStatus = currentMonitoringFailure({
+      failureFingerprint: authFailureFingerprint
+    });
+    const opened = incident({
+      engineeringOnly: true,
+      firstSeenAt: now,
+      lastSeenAt: now
+    });
+    prismaMocks.courseMonitoringEvent = {
+      findFirst: vi.fn().mockResolvedValue(null),
+      findMany: vi.fn().mockResolvedValue([]),
+      create: vi.fn().mockResolvedValue({})
+    };
+    prismaMocks.courseMonitoringStatus.upsert.mockResolvedValue(initialStatus);
+    prismaMocks.courseMonitoringStatus.update.mockResolvedValue(updatedStatus);
+    prismaMocks.courseMonitoringStatus.findUnique.mockResolvedValue(updatedStatus);
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(null);
+    prismaMocks.courseSupportIncident.create.mockResolvedValue(opened);
+    prismaMocks.teeSearch.findUnique.mockResolvedValue({
+      trafficClass: "TEST",
+      syntheticMultiCycle: true
+    });
+    prismaMocks.teeSearch.count.mockResolvedValue(1);
+    prismaMocks.teeSearch.aggregate.mockResolvedValue({
+      _count: { id: 0 },
+      _min: { date: null }
+    });
+
+    await expect(
+      reportCourseSupportIssue({
+        course: foreupCourse,
+        searchId: "search-multi-cycle",
+        kind: "FETCH_FAILED",
+        error: { status: 401 },
+        providerObservedAt: now,
+        failureObservedAt: now,
+        now
+      })
+    ).resolves.toEqual({
+      incidentId: "incident-1",
+      status: "AUTO_INVESTIGATING",
+      ownerAlerted: false,
+      sourceEvidenceAccepted: true
+    });
+    expect(prismaMocks.courseMonitoringStatus.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          failureFingerprint: authFailureFingerprint
+        })
+      })
+    );
+    expect(prismaMocks.courseSupportIncident.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("materializes an incident from the exact current normalized failure after a split write", async () => {
+    const status = currentMonitoringFailure();
+    const monitoringEvents = {
+      findFirst: vi.fn().mockResolvedValue(null),
+      findMany: vi.fn(),
+      create: vi.fn().mockResolvedValue({})
+    };
+    const opened = incident({
+      engineeringOnly: true,
+      firstSeenAt: now,
+      lastSeenAt: now
+    });
+    prismaMocks.courseMonitoringEvent = monitoringEvents;
+    prismaMocks.courseMonitoringStatus.upsert.mockResolvedValue(status);
+    prismaMocks.courseMonitoringStatus.findUnique.mockResolvedValue(status);
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(null);
+    prismaMocks.courseSupportIncident.create.mockResolvedValue(opened);
+    prismaMocks.teeSearch.findUnique.mockResolvedValue({
+      trafficClass: "TEST",
+      syntheticMultiCycle: true
+    });
+    prismaMocks.teeSearch.count.mockResolvedValue(1);
+    prismaMocks.teeSearch.aggregate.mockResolvedValue({
+      _count: { id: 0 },
+      _min: { date: null }
+    });
+
+    const input = {
+      course: foreupCourse,
+      searchId: "search-multi-cycle",
+      kind: "FETCH_FAILED" as const,
+      error: { status: 401 },
+      providerObservedAt: now,
+      failureObservedAt: now,
+      now
+    };
+
+    await expect(reportCourseSupportIssue(input)).resolves.toEqual({
+      incidentId: "incident-1",
+      status: "AUTO_INVESTIGATING",
+      ownerAlerted: false,
+      sourceEvidenceAccepted: false
+    });
+    expect(prismaMocks.courseMonitoringStatus.update).toHaveBeenCalledWith({
+      where: {
+        courseId: "course-1",
+        revision: 1
+      },
+      data: {
+        failureFingerprint: authFailureFingerprint,
+        revision: { increment: 1 }
+      }
+    });
+    expect(prismaMocks.courseSupportIncident.create).toHaveBeenCalledTimes(1);
+
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(opened);
+    await expect(reportCourseSupportIssue(input)).resolves.toEqual({
+      incidentId: "incident-1",
+      status: "AUTO_INVESTIGATING",
+      ownerAlerted: false,
+      sourceEvidenceAccepted: false
+    });
+    expect(prismaMocks.courseMonitoringStatus.update).toHaveBeenCalledTimes(1);
+    expect(prismaMocks.courseSupportIncident.create).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["a newer success", { lastSuccessfulAt: now }],
+    ["a different fingerprint", { failureFingerprint: "DIFFERENT" }]
+  ])(
+    "does not repair an unmaterialized incident after %s",
+    async (_label, statusOverride) => {
+      const status = currentMonitoringFailure(statusOverride);
+      prismaMocks.courseMonitoringEvent = {
+        findFirst: vi.fn().mockResolvedValue(null),
+        findMany: vi.fn(),
+        create: vi.fn().mockResolvedValue({})
+      };
+      prismaMocks.courseMonitoringStatus.upsert.mockResolvedValue(status);
+      prismaMocks.courseMonitoringStatus.findUnique.mockResolvedValue(status);
+      prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(null);
+      prismaMocks.teeSearch.findUnique.mockResolvedValue({
+        trafficClass: "TEST",
+        syntheticMultiCycle: true
+      });
+      prismaMocks.teeSearch.count.mockResolvedValue(1);
+      prismaMocks.teeSearch.aggregate.mockResolvedValue({
+        _count: { id: 0 },
+        _min: { date: null }
+      });
+
+      await expect(
+        reportCourseSupportIssue({
+          course: foreupCourse,
+          searchId: "search-multi-cycle",
+          kind: "FETCH_FAILED",
+          error: { status: 401 },
+          providerObservedAt: now,
+          failureObservedAt: now,
+          now
+        })
+      ).resolves.toEqual({
+        incidentId: null,
+        status: "UNRECORDED",
+        ownerAlerted: false,
+        sourceEvidenceAccepted: false
+      });
+      expect(prismaMocks.courseSupportIncident.create).not.toHaveBeenCalled();
+      expect(prismaMocks.courseMonitoringStatus.update).not.toHaveBeenCalled();
+    }
+  );
 
   it("does not open support incidents for synthetic searches", async () => {
     prismaMocks.teeSearch.findUnique.mockResolvedValue({

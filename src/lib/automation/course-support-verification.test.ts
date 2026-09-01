@@ -85,7 +85,7 @@ const releaseSha = "a".repeat(40);
 const newerReleaseSha = "b".repeat(40);
 const priorReleaseSha = "c".repeat(40);
 const now = new Date("2026-07-21T12:00:00.000Z");
-const canonicalFailureFingerprint = "1".repeat(64);
+const canonicalFailureFingerprint = "ab".repeat(32);
 const observedFailureFingerprint = "2".repeat(64);
 
 function currentIntelligence() {
@@ -958,7 +958,7 @@ beforeEach(() => {
   prismaMocks.sourceBatchIncidentFindMany.mockResolvedValue([]);
   prismaMocks.monitoringStatusFindUnique.mockResolvedValue({
     state: "AUTO_INVESTIGATING",
-    failureFingerprint: canonicalFailureFingerprint,
+    failureFingerprint: canonicalFailureFingerprint.toUpperCase(),
     stateChangedAt: new Date("2026-07-21T11:45:00.000Z"),
     lastSuccessfulAt: null,
     revision: 3,

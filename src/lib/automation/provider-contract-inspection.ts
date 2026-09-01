@@ -32,6 +32,7 @@ import {
   selectProviderContractTrustedBookingLandingUrl,
   selectProviderContractTrustedLandingUrl,
 } from "./course-support-provider-contract-evidence";
+import { courseSupportFailureFingerprintsMatch } from "./course-support-failure-fingerprint";
 import {
   courseSupportActionPlanAllows,
   isCourseSupportProviderContractActionEligible,
@@ -782,7 +783,10 @@ function resolveProviderContractBatchMemberAuthority(input: {
         event.outcome === "MATCH_FOUND" ||
         event.outcome === "NO_MATCH" ||
         (event.failureFingerprint !== null &&
-          event.failureFingerprint !== batch.failureFingerprint)),
+          !courseSupportFailureFingerprintsMatch(
+            event.failureFingerprint,
+            batch.failureFingerprint,
+          ))),
   );
   if (
     entry.result !== "PENDING" ||
@@ -811,7 +815,11 @@ function resolveProviderContractBatchMemberAuthority(input: {
     !currentStage ||
     currentStage.status === "STARTED" ||
     monitoringStatus?.state !== "AUTO_INVESTIGATING" ||
-    monitoringStatus.failureFingerprint !== batch.failureFingerprint ||
+    !monitoringStatus.failureFingerprint ||
+    !courseSupportFailureFingerprintsMatch(
+      monitoringStatus.failureFingerprint,
+      batch.failureFingerprint,
+    ) ||
     authoritativeMonitoringDrift ||
     !playbook.valid ||
     playbook.cycle !== entry.cycle ||

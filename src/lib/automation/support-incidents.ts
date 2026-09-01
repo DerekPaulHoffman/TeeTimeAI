@@ -22,6 +22,10 @@ import {
   recordCourseMonitoringFailure,
   runSerializedCourseMonitoringWrite,
 } from "./course-monitoring";
+import {
+  courseSupportFailureFingerprintsMatch,
+  normalizeCourseSupportFailureFingerprint,
+} from "./course-support-failure-fingerprint";
 import { withPostgresAdvisoryTextLease } from "./lease";
 import {
   buildProviderFailureFingerprint,
@@ -307,7 +311,10 @@ async function reportCourseSupportIssueWithLease(
   const initialMaterialFailureInputChanged = Boolean(
     initialExisting &&
     (initialExisting.providerFamilyKey !== provider.providerFamilyKey ||
-      initialExisting.failureFingerprint !== failureFingerprint ||
+      !courseSupportFailureFingerprintsMatch(
+        initialExisting.failureFingerprint,
+        failureFingerprint,
+      ) ||
       initialExisting.platformSnapshot !== input.course.detectedPlatform ||
       initialExisting.bookingUrlSnapshot !== bookingUrl),
   );
@@ -400,7 +407,16 @@ async function reportCourseSupportIssueWithLease(
     onSourceAccepted: input.onSourceAccepted,
   });
 
-  if (monitoringFailure.sourceEvidenceAccepted === false) {
+  const canRepairUnmaterializedMonitoringFailure = Boolean(
+    monitoringFailure.sourceEvidenceAccepted === false &&
+      !initialExisting &&
+      !input.onBeforeSourceWrite &&
+      !input.onSourceAccepted,
+  );
+  if (
+    monitoringFailure.sourceEvidenceAccepted === false &&
+    !canRepairUnmaterializedMonitoringFailure
+  ) {
     const current = await prisma.courseSupportIncident.findUnique({
       where: { courseId: input.course.id },
     });
@@ -441,6 +457,7 @@ async function reportCourseSupportIssueWithLease(
             lastSuccessfulAt: true,
             lastFailureAt: true,
             failureFingerprint: true,
+            revision: true,
           },
         }),
       ]);
@@ -448,11 +465,24 @@ async function reportCourseSupportIssueWithLease(
         monitoringStatus &&
         monitoringStatus.lastFailureAt?.getTime() ===
           failureObservedAt.getTime() &&
-        monitoringStatus.failureFingerprint === failureFingerprint &&
+        monitoringStatus.failureFingerprint &&
+        courseSupportFailureFingerprintsMatch(
+          monitoringStatus.failureFingerprint,
+          failureFingerprint,
+        ) &&
         (!monitoringStatus.lastSuccessfulAt ||
           monitoringStatus.lastSuccessfulAt < failureObservedAt),
       );
-      if (monitoringStatus && !monitoringFailureRemainsCurrent) {
+      const repairsUnmaterializedMonitoringFailure = Boolean(
+        canRepairUnmaterializedMonitoringFailure &&
+          !existing &&
+          monitoringFailureRemainsCurrent,
+      );
+      if (
+        monitoringFailure.sourceEvidenceAccepted === false
+          ? !repairsUnmaterializedMonitoringFailure
+          : monitoringStatus && !monitoringFailureRemainsCurrent
+      ) {
         return {
           incidentId: existing?.id ?? null,
           status:
@@ -467,10 +497,34 @@ async function reportCourseSupportIssueWithLease(
           sourceEvidenceAccepted: false,
         } satisfies CourseSupportIssueState;
       }
+      if (
+        repairsUnmaterializedMonitoringFailure &&
+        monitoringStatus?.failureFingerprint
+      ) {
+        const canonicalFingerprint =
+          normalizeCourseSupportFailureFingerprint(
+            monitoringStatus.failureFingerprint,
+          );
+        if (monitoringStatus.failureFingerprint !== canonicalFingerprint) {
+          await transaction.courseMonitoringStatus.update({
+            where: {
+              courseId: input.course.id,
+              revision: monitoringStatus.revision,
+            },
+            data: {
+              failureFingerprint: canonicalFingerprint,
+              revision: { increment: 1 },
+            },
+          });
+        }
+      }
       const materialFailureInputChanged = Boolean(
         existing &&
         (existing.providerFamilyKey !== provider.providerFamilyKey ||
-          existing.failureFingerprint !== failureFingerprint ||
+          !courseSupportFailureFingerprintsMatch(
+            existing.failureFingerprint,
+            failureFingerprint,
+          ) ||
           existing.platformSnapshot !== input.course.detectedPlatform ||
           existing.bookingUrlSnapshot !== bookingUrl),
       );
@@ -932,7 +986,8 @@ async function reportCourseSupportIssueWithLease(
         ownerAlerted: Boolean(
           incident.ownerNotifiedAt || incident.escalationNotifiedAt,
         ),
-        sourceEvidenceAccepted: true,
+        sourceEvidenceAccepted:
+          monitoringFailure.sourceEvidenceAccepted === false ? false : true,
       } satisfies CourseSupportIssueState;
     },
   );

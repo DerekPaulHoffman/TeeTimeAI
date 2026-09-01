@@ -8,6 +8,7 @@ import { syntheticWebsiteTrafficClasses } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
 
 import { stableCourseProviderExecutionEvidenceValue } from "./course-provider-execution-evidence";
+import { courseSupportFailureFingerprintsMatch } from "./course-support-failure-fingerprint";
 import { withPostgresAdvisoryTextLease } from "./lease";
 import {
   AUTOMATION_PLAYBOOK_STAGES,
@@ -1091,8 +1092,14 @@ function isSameCampaignMemberMaterialSnapshot(
     captured.incidentId === current.incidentId &&
     captured.cycle === current.cycle &&
     captured.kind === current.kind &&
-    captured.monitoringFailureFingerprint ===
-      current.monitoringFailureFingerprint &&
+    ((captured.monitoringFailureFingerprint === null &&
+      current.monitoringFailureFingerprint === null) ||
+      (captured.monitoringFailureFingerprint !== null &&
+        current.monitoringFailureFingerprint !== null &&
+        courseSupportFailureFingerprintsMatch(
+          captured.monitoringFailureFingerprint,
+          current.monitoringFailureFingerprint,
+        ))) &&
     captured.providerFamilyKey === current.providerFamilyKey &&
     captured.failureClass === current.failureClass &&
     captured.failureFingerprint === current.failureFingerprint &&
@@ -1749,9 +1756,16 @@ export function assessParkedCourseCampaignRequestlessStaleOwnershipRecovery(inpu
     current.providerFamilyKey !== captured.providerFamilyKey ||
     current.failureClass !== captured.failureClass ||
     current.failureFingerprint !== captured.failureFingerprint ||
-    current.monitoringFailureFingerprint !== current.failureFingerprint ||
-    current.monitoringFailureFingerprint !==
-      captured.monitoringFailureFingerprint ||
+    !current.monitoringFailureFingerprint ||
+    !courseSupportFailureFingerprintsMatch(
+      current.monitoringFailureFingerprint,
+      current.failureFingerprint,
+    ) ||
+    !captured.monitoringFailureFingerprint ||
+    !courseSupportFailureFingerprintsMatch(
+      current.monitoringFailureFingerprint,
+      captured.monitoringFailureFingerprint,
+    ) ||
     current.providerSnapshotFingerprint !==
       captured.providerSnapshotFingerprint ||
     current.attemptLedgerFingerprint !== captured.attemptLedgerFingerprint ||
@@ -2531,7 +2545,12 @@ async function loadParkedCourseCampaignMemberSnapshots(
         incidentEscalatedAt: incident.escalatedAt,
         monitoringState: monitoringStatus.state,
         endpointEvents: incident.monitoringEvents.filter(
-          (event) => event.failureFingerprint === incident.failureFingerprint,
+          (event) =>
+            event.failureFingerprint !== null &&
+            courseSupportFailureFingerprintsMatch(
+              event.failureFingerprint,
+              incident.failureFingerprint,
+            ),
         ),
       })
     ) {
@@ -2623,7 +2642,11 @@ function getParkedCourseCampaignZeroExecutionRecovery(input: {
     current.providerFamilyKey !== captured.providerFamilyKey ||
     current.failureClass !== captured.failureClass ||
     current.failureFingerprint !== captured.failureFingerprint ||
-    current.monitoringFailureFingerprint !== current.failureFingerprint ||
+    !current.monitoringFailureFingerprint ||
+    !courseSupportFailureFingerprintsMatch(
+      current.monitoringFailureFingerprint,
+      current.failureFingerprint,
+    ) ||
     current.providerSnapshotFingerprint !==
       captured.providerSnapshotFingerprint ||
     current.attemptLedgerFingerprint !== captured.attemptLedgerFingerprint ||
@@ -2705,7 +2728,11 @@ function getParkedCourseCampaignIncompletePlaybookRecovery(input: {
     !input.campaignRunId ||
     !isSameParkedCourseCampaignIdentity(captured, current) ||
     current.cycle !== captured.cycle + 1 ||
-    current.monitoringFailureFingerprint !== current.failureFingerprint ||
+    !current.monitoringFailureFingerprint ||
+    !courseSupportFailureFingerprintsMatch(
+      current.monitoringFailureFingerprint,
+      current.failureFingerprint,
+    ) ||
     playbook.valid !== true ||
     playbook.cycle !== current.cycle ||
     playbook.conclusion !== "INCOMPLETE" ||
@@ -2892,7 +2919,11 @@ export function assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery(i
     !Number.isFinite(input.capturedAt.getTime()) ||
     !isSameParkedCourseCampaignIdentity(captured, current) ||
     current.cycle !== captured.cycle + 1 ||
-    current.monitoringFailureFingerprint !== current.failureFingerprint ||
+    !current.monitoringFailureFingerprint ||
+    !courseSupportFailureFingerprintsMatch(
+      current.monitoringFailureFingerprint,
+      current.failureFingerprint,
+    ) ||
     current.providerSnapshotFingerprint !==
       captured.providerSnapshotFingerprint ||
     current.latestProbeAt !== captured.latestProbeAt ||
@@ -3640,7 +3671,11 @@ export function assessParkedCourseCampaignDescendantIncompletePlaybookRecovery(i
   });
   if (
     !lineage ||
-    current.monitoringFailureFingerprint !== current.failureFingerprint ||
+    !current.monitoringFailureFingerprint ||
+    !courseSupportFailureFingerprintsMatch(
+      current.monitoringFailureFingerprint,
+      current.failureFingerprint,
+    ) ||
     playbook.valid !== true ||
     playbook.cycle !== current.cycle ||
     playbook.conclusion !== "INCOMPLETE" ||
@@ -3774,7 +3809,11 @@ export function findParkedCourseCampaignSameIdentityMaterialChangeLineage(input:
     current.providerFamilyKey !== captured.providerFamilyKey ||
     current.failureClass !== captured.failureClass ||
     current.failureFingerprint !== captured.failureFingerprint ||
-    current.monitoringFailureFingerprint !== current.failureFingerprint ||
+    !current.monitoringFailureFingerprint ||
+    !courseSupportFailureFingerprintsMatch(
+      current.monitoringFailureFingerprint,
+      current.failureFingerprint,
+    ) ||
     current.providerSnapshotFingerprint === captured.providerSnapshotFingerprint
   ) {
     return null;
@@ -4269,7 +4308,11 @@ function getParkedCourseCampaignCurrentCycleOrchestrationRecovery(input: {
   if (
     !input.campaignRunId ||
     !lineage ||
-    current.monitoringFailureFingerprint !== current.failureFingerprint ||
+    !current.monitoringFailureFingerprint ||
+    !courseSupportFailureFingerprintsMatch(
+      current.monitoringFailureFingerprint,
+      current.failureFingerprint,
+    ) ||
     playbook.valid !== true ||
     playbook.cycle !== current.cycle ||
     playbook.conclusion !== "INCOMPLETE" ||

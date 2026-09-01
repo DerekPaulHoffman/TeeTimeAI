@@ -2578,11 +2578,14 @@ describe("parked course campaign", () => {
     const parkedAt = new Date("2026-08-20T12:30:00.000Z");
     const providerSnapshotFingerprint =
       buildCourseSupportProviderSnapshotFingerprint(providerCourseSnapshot);
+    const failureFingerprint = "ab".repeat(32);
     const attemptLedger = { version: 1, events: [] };
     const captured = member(1, {
       cycle: 3,
       revision: 5,
       monitoringRevision: 9,
+      monitoringFailureFingerprint: failureFingerprint.toUpperCase(),
+      failureFingerprint,
       providerSnapshotFingerprint,
       attemptLedgerFingerprint:
         createParkedCourseCampaignAttemptLedgerFingerprint(attemptLedger),
@@ -2628,10 +2631,11 @@ describe("parked course campaign", () => {
       retryCount: 0,
       needsHumanCount: 1,
     });
-    const makeRow = () =>
-      campaignParkedRow({
+    const makeRow = () => {
+      const row = campaignParkedRow({
         cycle: 4,
         attemptLedger,
+        failureFingerprint,
         probes: [
           {
             id: "probe-historical",
@@ -2651,7 +2655,7 @@ describe("parked course campaign", () => {
             incidentId: "incident-1",
             eventType: "HUMAN_REVIEW_REQUESTED",
             source: "RECOVERY_CRON",
-            failureFingerprint: "SOURCE:MISSING",
+            failureFingerprint,
             readPath: null,
             occurredAt: parkedAt,
             audit: {
@@ -2675,7 +2679,7 @@ describe("parked course campaign", () => {
             incidentId: "incident-1",
             eventType: "AUTOMATION_ATTEMPTED",
             source: "COURSE_SUPPORT_RESPONDER",
-            failureFingerprint: "SOURCE:MISSING",
+            failureFingerprint,
             readPath: "BOUNDED_RECOVERY_PLAYBOOK",
             occurredAt: attemptedAt,
             audit: {
@@ -2693,7 +2697,7 @@ describe("parked course campaign", () => {
             incidentId: "incident-1",
             eventType: "REVALIDATION_REQUESTED",
             source: "COURSE_SUPPORT_RESPONDER",
-            failureFingerprint: "SOURCE:MISSING",
+            failureFingerprint,
             readPath: null,
             occurredAt: admittedAt,
             audit: {
@@ -2770,6 +2774,10 @@ describe("parked course campaign", () => {
           },
         ],
       });
+      row.course.monitoringStatus.failureFingerprint =
+        failureFingerprint.toUpperCase();
+      return row;
+    };
     const database = (row: ReturnType<typeof makeRow>) =>
       ({
         courseSupportIncident: { findMany: vi.fn().mockResolvedValue([row]) },
@@ -3724,14 +3732,23 @@ describe("parked course campaign", () => {
     expect(dependencies.completeCampaign).not.toHaveBeenCalled();
   });
 
-  it("counts a revision-churned captured row in the global parked invariant", async () => {
-    const captured = member(1);
+  it("counts a revision-churned and case-normalized captured row in the global parked invariant", async () => {
+    const canonicalFingerprint = "ab".repeat(32);
+    const captured = member(1, {
+      monitoringFailureFingerprint: canonicalFingerprint,
+      failureFingerprint: canonicalFingerprint,
+    });
     const audit = createParkedCourseCampaignAudit({
       expectedCount: 1,
       capturedAt,
       members: [captured],
     });
-    const current = member(1, { revision: 9, monitoringRevision: 13 });
+    const current = member(1, {
+      revision: 9,
+      monitoringRevision: 13,
+      monitoringFailureFingerprint: canonicalFingerprint.toUpperCase(),
+      failureFingerprint: canonicalFingerprint,
+    });
     const { dependencies } = campaignDependencies({
       members: [],
       allMembers: [current],
@@ -3763,6 +3780,11 @@ describe("parked course campaign", () => {
     });
     expect(dependencies.loadAllParkedMembers).toHaveBeenCalledTimes(1);
     expect(dependencies.loadGlobalParkedCount).toHaveBeenCalledTimes(1);
+    expect(dependencies.loadMemberObservations).toHaveBeenCalledWith(
+      audit,
+      new Set(["course-1"]),
+      "campaign-run-1",
+    );
     expect(dependencies.completeCampaign).not.toHaveBeenCalled();
   });
 

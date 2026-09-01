@@ -98,6 +98,10 @@ import {
   type DeferredFailureHandoffSignal,
 } from "./course-support-deferred-failure-handoff";
 import {
+  courseSupportFailureFingerprintsMatch,
+  normalizeCourseSupportFailureFingerprint,
+} from "./course-support-failure-fingerprint";
+import {
   enqueueRemediatedCourseRechecks,
   isSearchScheduleWorkflowStartReservation,
 } from "./search-recheck-queue";
@@ -4241,6 +4245,13 @@ export async function claimCourseSupportBatch(input: {
                 );
               }
             }
+            const currentMonitoringFailureFingerprint =
+              current.course.monitoringStatus?.failureFingerprint;
+            if (!currentMonitoringFailureFingerprint) {
+              throw new Error(
+                "Deferred failure confirmation monitoring identity is unavailable.",
+              );
+            }
             const monitoringFence =
               await tx.courseMonitoringStatus.updateMany({
                 where: {
@@ -4249,7 +4260,7 @@ export async function claimCourseSupportBatch(input: {
                   stateChangedAt:
                     provenance.expectedMonitoringStateChangedAt,
                   revision: provenance.expectedMonitoringRevision,
-                  failureFingerprint: incident.failureFingerprint,
+                  failureFingerprint: currentMonitoringFailureFingerprint,
                   nextAutomaticAttemptAt: current.nextAttemptAt,
                 },
                 data: { revision: { increment: 0 } },
@@ -4361,7 +4372,7 @@ export async function claimCourseSupportBatch(input: {
                 data: { updatedAt: sourceEntry.updatedAt },
               });
             const currentMonitoringStatus = current.course.monitoringStatus;
-            if (!currentMonitoringStatus) {
+            if (!currentMonitoringStatus?.failureFingerprint) {
               throw new Error(
                 "Course-support source-complete recovery monitoring evidence is unavailable.",
               );
@@ -4376,7 +4387,8 @@ export async function claimCourseSupportBatch(input: {
                     sourceCompleteFinalizationRecovery.expectedMonitoringStateChangedAt,
                   revision:
                     sourceCompleteFinalizationRecovery.expectedMonitoringRevision,
-                  failureFingerprint: incident.failureFingerprint,
+                  failureFingerprint:
+                    currentMonitoringStatus.failureFingerprint,
                 },
                 data: {
                   state: "AUTO_INVESTIGATING",
@@ -9136,7 +9148,10 @@ function getCurrentCourseSupportMonitoringFailureIdentity(input: {
   const failureFingerprint = input.monitoringStatus?.failureFingerprint;
   if (
     !failureFingerprint ||
-    failureFingerprint === input.incidentFailureFingerprint
+    courseSupportFailureFingerprintsMatch(
+      failureFingerprint,
+      input.incidentFailureFingerprint,
+    )
   ) {
     return null;
   }
@@ -9145,7 +9160,11 @@ function getCurrentCourseSupportMonitoringFailureIdentity(input: {
   const failureClass = audit.failureClass;
   if (
     !event ||
-    event.failureFingerprint !== failureFingerprint ||
+    !event.failureFingerprint ||
+    !courseSupportFailureFingerprintsMatch(
+      event.failureFingerprint,
+      failureFingerprint,
+    ) ||
     event.occurredAt.getTime() < input.batchCreatedAt.getTime() ||
     audit.cycle !== input.incidentCycle ||
     audit.providerFamilyKey !== input.providerFamilyKey ||
@@ -9158,7 +9177,8 @@ function getCurrentCourseSupportMonitoringFailureIdentity(input: {
   }
   return {
     failureClass: failureClass as CourseSupportFailureClass,
-    failureFingerprint,
+    failureFingerprint:
+      normalizeCourseSupportFailureFingerprint(failureFingerprint),
     observedAt: event.occurredAt,
   };
 }
@@ -10971,8 +10991,10 @@ async function closeoutCourseSupportBatchAttempt(
           entry.incident.providerFamilyKey &&
         !currentFailureIdentity.providerSnapshotChanged &&
         (!entry.course.monitoringStatus?.failureFingerprint ||
-          entry.course.monitoringStatus.failureFingerprint ===
-            entry.incident.failureFingerprint),
+          courseSupportFailureFingerprintsMatch(
+            entry.course.monitoringStatus.failureFingerprint,
+            entry.incident.failureFingerprint,
+          )),
     );
     const staleResultAfterMaterialChange =
       !factualMonitoringWinner &&
@@ -11027,8 +11049,10 @@ async function closeoutCourseSupportBatchAttempt(
       currentFailureIdentity.providerFamilyKey ===
         entry.incident.providerFamilyKey &&
       (!entry.course.monitoringStatus?.failureFingerprint ||
-        entry.course.monitoringStatus.failureFingerprint ===
-          entry.incident.failureFingerprint)
+        courseSupportFailureFingerprintsMatch(
+          entry.course.monitoringStatus.failureFingerprint,
+          entry.incident.failureFingerprint,
+        ))
     ) {
       return {
         ...entry,
@@ -16317,8 +16341,11 @@ function readDeferredFailureHandoffCandidate(input: {
       (newest.proofSnapshot !== null || !exactUnstartedCarrierRequest)) ||
     signal.observedFailureFingerprint === input.incident.failureFingerprint ||
     input.course.monitoringStatus?.state !== "AUTO_INVESTIGATING" ||
-    input.course.monitoringStatus.failureFingerprint !==
-      input.incident.failureFingerprint ||
+    !input.course.monitoringStatus.failureFingerprint ||
+    !courseSupportFailureFingerprintsMatch(
+      input.course.monitoringStatus.failureFingerprint,
+      input.incident.failureFingerprint,
+    ) ||
     new Date(signal.eligibleAt).getTime() > input.now.getTime() ||
     input.incident.nextAttemptAt?.getTime() !==
       new Date(signal.eligibleAt).getTime()
@@ -16583,7 +16610,11 @@ function getSourceCompleteFinalizationRecovery(input: {
     monitoringStatus.nextAutomaticAttemptAt === null &&
     monitoringStatus.revalidationRequestedAt === null;
   if (
-    monitoringStatus.failureFingerprint !== incident.failureFingerprint ||
+    !monitoringStatus.failureFingerprint ||
+    !courseSupportFailureFingerprintsMatch(
+      monitoringStatus.failureFingerprint,
+      incident.failureFingerprint,
+    ) ||
     (!dueAutomatic && !parkedByOldCloseout)
   ) {
     return null;
@@ -16884,9 +16915,11 @@ function buildCourseSupportCandidates(
                   incident.failureFingerprint ||
                 (course.monitoringStatus?.failureFingerprint !== null &&
                   course.monitoringStatus?.failureFingerprint !== undefined &&
-                  course.monitoringStatus.failureFingerprint !==
+                  !courseSupportFailureFingerprintsMatch(
+                    course.monitoringStatus.failureFingerprint,
                     exactConsumedDeferredFailureHandoff.signal
-                      .canonicalFailureFingerprint),
+                      .canonicalFailureFingerprint,
+                  )),
               relevantRuntimeChanged: false,
               readerCapabilityChanged: false,
             }

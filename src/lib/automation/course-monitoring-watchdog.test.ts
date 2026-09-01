@@ -508,8 +508,8 @@ function legacyDeferredFailureHandoffScenario(
   } = {},
 ) {
   const cycle = 2;
-  const canonicalFailureFingerprint = "1".repeat(64);
-  const priorFailureFingerprint = "0".repeat(64);
+  const canonicalFailureFingerprint = "ab".repeat(32);
+  const priorFailureFingerprint = "cd".repeat(32);
   const runtimeVersion = "a".repeat(40);
   const lineageAt = new Date("2026-07-27T15:00:00.000Z");
   const sourceBatchCreatedAt = new Date("2026-07-27T15:10:00.000Z");
@@ -2267,6 +2267,9 @@ describe("course monitoring watchdog", () => {
     });
     expect(scenario.batch.incidents[0].proofSnapshot).toBeNull();
     scenario.currentIncident.activeRealSearchCount = 1;
+    const legacyMonitoringFingerprint =
+      scenario.canonicalFailureFingerprint.toUpperCase();
+    scenario.currentMonitoring.failureFingerprint = legacyMonitoringFingerprint;
     useDeferredFailureCarrierScenario(scenario);
 
     await expect(runCourseMonitoringWatchdog(now)).resolves.toMatchObject({
@@ -2285,6 +2288,16 @@ describe("course monitoring watchdog", () => {
         data: expect.objectContaining({
           cycle: { increment: 1 },
           failureClass: "MISSING_SOURCE",
+          failureFingerprint,
+        }),
+      }),
+    );
+    expect(prismaMocks.courseMonitoringStatus.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          failureFingerprint: legacyMonitoringFingerprint,
+        }),
+        data: expect.objectContaining({
           failureFingerprint,
         }),
       }),
@@ -2599,6 +2612,9 @@ describe("course monitoring watchdog", () => {
 
   it("restores the exact parked CHRONOGOLF legacy handoff once at database-clock expiry", async () => {
     const scenario = legacyDeferredFailureHandoffScenario();
+    const legacyMonitoringFingerprint =
+      scenario.canonicalFailureFingerprint.toUpperCase();
+    scenario.currentMonitoring.failureFingerprint = legacyMonitoringFingerprint;
     expect(scenario.currentIncident.batchIncidents).toEqual([
       expect.objectContaining({
         result: "NEEDS_HUMAN",
@@ -2764,7 +2780,7 @@ describe("course monitoring watchdog", () => {
           courseId: "course-1",
           state: "ENGINEERING_VERIFICATION_NEEDED",
           revision: 7,
-          failureFingerprint: scenario.canonicalFailureFingerprint,
+          failureFingerprint: legacyMonitoringFingerprint,
           nextAutomaticAttemptAt: null,
           revalidationRequestedAt: null,
         }),

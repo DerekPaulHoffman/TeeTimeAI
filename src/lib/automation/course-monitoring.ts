@@ -72,6 +72,10 @@ import {
   parseDeferredFailureHandoffSignal,
 } from "./course-support-deferred-failure-handoff";
 import {
+  courseSupportFailureFingerprintsMatch,
+  normalizeCourseSupportFailureFingerprint,
+} from "./course-support-failure-fingerprint";
+import {
   buildCourseSupportExecutionEverSummary,
   areCourseSupportCompletedAttemptsOrchestrationOnly,
   assessCourseSupportZeroExecutionHistory,
@@ -356,14 +360,14 @@ export function decideMonitoringFailureState(
   previousFailures: FailureObservation[],
   current: Required<FailureObservation>,
 ): MonitoringFailureDecision {
-  const currentFingerprint = normalizeFingerprint(
+  const currentFingerprint = normalizeCourseSupportFailureFingerprint(
     current.failureFingerprint ?? "",
   );
   const observations = [
     ...previousFailures.filter(
       (observation) =>
         observation.failureFingerprint !== null &&
-        normalizeFingerprint(observation.failureFingerprint) ===
+        normalizeCourseSupportFailureFingerprint(observation.failureFingerprint) ===
           currentFingerprint,
     ),
     { ...current, failureFingerprint: currentFingerprint },
@@ -494,7 +498,9 @@ export async function recordCourseMonitoringFailure(input: {
   }
   const safeMessage = sanitizeMonitoringMessage(input.message);
   const readPath = normalizeReadPath(input.readPath);
-  const failureFingerprint = normalizeFingerprint(input.failureFingerprint);
+  const failureFingerprint = normalizeCourseSupportFailureFingerprint(
+    input.failureFingerprint,
+  );
   const source = input.source ?? "SEARCH_WORKFLOW";
   if (!hasMonitoringModels(prisma)) {
     const decision = decideMonitoringFailureState([], {
@@ -688,8 +694,15 @@ export async function recordCourseMonitoringFailure(input: {
           Boolean(incident.humanReviewReason) &&
           incident.activeBatchId === null &&
           incident.nextAttemptAt === null &&
-          incident.failureFingerprint === failureFingerprint &&
-          current.failureFingerprint === failureFingerprint &&
+          courseSupportFailureFingerprintsMatch(
+            incident.failureFingerprint,
+            failureFingerprint,
+          ) &&
+          current.failureFingerprint !== null &&
+          courseSupportFailureFingerprintsMatch(
+            current.failureFingerprint,
+            failureFingerprint,
+          ) &&
           current.nextAutomaticAttemptAt === null &&
           current.revalidationRequestedAt === null;
         const parkedEvent = potentiallyParkedUntilMaterialChange
@@ -732,7 +745,11 @@ export async function recordCourseMonitoringFailure(input: {
           data: {
             lastFailureAt: failureObservedAt,
             consecutiveFailures:
-              current.failureFingerprint === failureFingerprint
+              current.failureFingerprint !== null &&
+              courseSupportFailureFingerprintsMatch(
+                current.failureFingerprint,
+                failureFingerprint,
+              )
                 ? { increment: 1 }
                 : 1,
             failureFingerprint,
@@ -812,7 +829,11 @@ export async function recordCourseMonitoringFailure(input: {
       });
       const continuingFailureEpisode =
         !input.materialEvidenceChanged &&
-        current.failureFingerprint === failureFingerprint;
+        current.failureFingerprint !== null &&
+        courseSupportFailureFingerprintsMatch(
+          current.failureFingerprint,
+          failureFingerprint,
+        );
       const firstDegradedAt = continuingFailureEpisode
         ? (current.firstDegradedAt ?? failureObservedAt)
         : failureObservedAt;
@@ -829,7 +850,11 @@ export async function recordCourseMonitoringFailure(input: {
           state: decision.state,
           lastFailureAt: failureObservedAt,
           consecutiveFailures:
-            current.failureFingerprint === failureFingerprint
+            current.failureFingerprint !== null &&
+            courseSupportFailureFingerprintsMatch(
+              current.failureFingerprint,
+              failureFingerprint,
+            )
               ? { increment: 1 }
               : 1,
           failureFingerprint,
@@ -4458,8 +4483,11 @@ async function recoverLegacyDeferredFailureHandoff(
     input.incident.nextAttemptAt !== null ||
     !input.incident.nextReminderAt ||
     input.monitoringStatus.state !== "ENGINEERING_VERIFICATION_NEEDED" ||
-    input.monitoringStatus.failureFingerprint !==
-      input.incident.failureFingerprint ||
+    !input.monitoringStatus.failureFingerprint ||
+    !courseSupportFailureFingerprintsMatch(
+      input.monitoringStatus.failureFingerprint,
+      input.incident.failureFingerprint,
+    ) ||
     input.monitoringStatus.nextAutomaticAttemptAt !== null ||
     input.monitoringStatus.revalidationRequestedAt !== null ||
     playbook.valid !== true ||
@@ -5025,7 +5053,7 @@ async function recoverLegacyDeferredFailureHandoff(
       state: "ENGINEERING_VERIFICATION_NEEDED",
       stateChangedAt: input.monitoringStatus.stateChangedAt,
       revision: input.monitoringStatus.revision,
-      failureFingerprint: input.incident.failureFingerprint,
+      failureFingerprint: input.monitoringStatus.failureFingerprint,
       nextAutomaticAttemptAt: null,
       revalidationRequestedAt: null,
     },
@@ -5910,8 +5938,11 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
         currentProviderSnapshotFingerprint ||
       normalizeProviderFamilyKey(entry.course.providerFamilyKey) !==
         source.providerFamilyKey ||
-      monitoringStatus?.failureFingerprint !==
+      !monitoringStatus?.failureFingerprint ||
+      !courseSupportFailureFingerprintsMatch(
+        monitoringStatus.failureFingerprint,
         source.canonicalFailureFingerprint,
+      ),
     );
     if (mutableCurrentStateChanged) {
       deferredFailureCarrierByIncidentId.set(entry.incidentId, {
@@ -7197,7 +7228,7 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
             state: monitoringStatus.state,
             stateChangedAt: monitoringStatus.stateChangedAt,
             revision: monitoringStatus.revision,
-            failureFingerprint: incident.failureFingerprint,
+            failureFingerprint: monitoringStatus.failureFingerprint,
           },
           data: {
             state: "AUTO_INVESTIGATING",
@@ -9240,7 +9271,11 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
             const campaign = asMonitoringJsonRecord(audit.campaign);
             return (
               event.eventType === "HUMAN_REVIEW_REQUESTED" &&
-              event.failureFingerprint === incident.failureFingerprint &&
+              event.failureFingerprint !== null &&
+              courseSupportFailureFingerprintsMatch(
+                event.failureFingerprint,
+                incident.failureFingerprint,
+              ) &&
               audit.cycle === incident.cycle &&
               audit.automationStalled === true &&
               audit.parkedUntilMaterialChange === true &&
@@ -9793,7 +9828,12 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
         incidentEscalatedAt: incident.escalatedAt,
         monitoringState: status.state,
         endpointEvents: incident.monitoringEvents.filter(
-          (event) => event.failureFingerprint === incident.failureFingerprint,
+          (event) =>
+            event.failureFingerprint !== null &&
+            courseSupportFailureFingerprintsMatch(
+              event.failureFingerprint,
+              incident.failureFingerprint,
+            ),
         ),
       })
     ) {
@@ -10876,15 +10916,6 @@ function normalizeReadPath(value: string) {
     .replace(/[^A-Z0-9:_-]/gu, "_")
     .slice(0, 80);
   return normalized || "UNKNOWN_PUBLIC_READ";
-}
-
-function normalizeFingerprint(value: string) {
-  const normalized = value
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9:._-]/gu, "_")
-    .slice(0, 160);
-  return normalized || "UNKNOWN";
 }
 
 function sanitizeMonitoringMessage(value: string | null | undefined) {

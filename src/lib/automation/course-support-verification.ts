@@ -33,6 +33,7 @@ import {
   parseDeferredFailureHandoffSignal,
   type DeferredFailureHandoffSignal,
 } from "./course-support-deferred-failure-handoff";
+import { courseSupportFailureFingerprintsMatch } from "./course-support-failure-fingerprint";
 import { evaluateMonitoringGate } from "./policy";
 import {
   normalizeProviderFamilyKey,
@@ -2546,8 +2547,11 @@ async function validateDeferredFailureConfirmationCurrentState(input: {
   if (
     !monitoringStatus ||
     monitoringStatus.state !== "AUTO_INVESTIGATING" ||
-    monitoringStatus.failureFingerprint !==
-      input.signal.canonicalFailureFingerprint
+    !monitoringStatus.failureFingerprint ||
+    !courseSupportFailureFingerprintsMatch(
+      monitoringStatus.failureFingerprint,
+      input.signal.canonicalFailureFingerprint,
+    )
   ) {
     return { valid: false, reason: "monitoring_not_actionable" };
   }

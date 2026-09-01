@@ -1569,7 +1569,10 @@ describe("owner-bound provider-contract inspection", () => {
   });
 
   it("accepts only the current-cycle browser evidence and rejects an ineligible route", async () => {
-    prismaMocks.batchFindFirst.mockResolvedValueOnce(ownedDatabaseBatch());
+    const currentBatch = ownedDatabaseBatch();
+    currentBatch.incidents[0].course.monitoringStatus.failureFingerprint =
+      currentBatch.failureFingerprint.toUpperCase();
+    prismaMocks.batchFindFirst.mockResolvedValueOnce(currentBatch);
     const current = await loadOwnedProviderContractContext(ownerInput);
     expect(current?.browserContracts).toHaveLength(1);
 
