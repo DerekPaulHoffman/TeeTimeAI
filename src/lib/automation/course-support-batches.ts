@@ -780,9 +780,13 @@ function isResponderSelectionEligible(input: {
   confirmedAt: Date | null | undefined;
   attemptLedger: unknown;
   cycle: number;
+  engineeringOnly: boolean;
   activeRealSearchCount: number;
 }) {
   if (input.confirmedAt != null) {
+    return true;
+  }
+  if (input.engineeringOnly && input.activeRealSearchCount === 0) {
     return true;
   }
   if (input.activeRealSearchCount <= 0) {
@@ -840,6 +844,7 @@ function buildDueResponderIncidentWhere(now: Date): Prisma.CourseSupportIncident
       {
         OR: [
           { confirmedAt: { not: null } },
+          { engineeringOnly: true },
           {
             course: {
               preferences: {
@@ -3044,6 +3049,7 @@ export async function inspectCourseSupportQueue(input?: {
           confirmedAt: incident.confirmedAt,
           attemptLedger: incident.attemptLedger,
           cycle: incident.cycle,
+          engineeringOnly: incident.engineeringOnly,
           activeRealSearchCount: currentDemand.activeRealSearchCount,
         })
       ) {
@@ -4472,6 +4478,7 @@ export async function claimCourseSupportBatch(input: {
               confirmedAt: current.confirmedAt,
               attemptLedger: current.attemptLedger,
               cycle: current.cycle,
+              engineeringOnly: currentEngineeringOnly,
               activeRealSearchCount: currentDemand.activeRealSearchCount,
             })
           ) {
@@ -4572,6 +4579,7 @@ export async function claimCourseSupportBatch(input: {
                 cycle: true,
                 confirmedAt: true,
                 attemptLedger: true,
+                engineeringOnly: true,
                 course: {
                   select: {
                     timeZone: true,
@@ -4610,6 +4618,7 @@ export async function claimCourseSupportBatch(input: {
                   confirmedAt: incident.confirmedAt,
                   attemptLedger: incident.attemptLedger,
                   cycle: incident.cycle,
+                  engineeringOnly: incident.engineeringOnly,
                   activeRealSearchCount: currentDemand.activeRealSearchCount,
                 }) &&
                 currentDemand.activeRealSearchCount > 0 &&
@@ -16783,6 +16792,7 @@ function buildCourseSupportCandidates(
         confirmedAt: incident.confirmedAt,
         attemptLedger: incident.attemptLedger,
         cycle: incident.cycle,
+        engineeringOnly: incident.engineeringOnly,
         activeRealSearchCount: currentDemand.activeRealSearchCount,
       })
     ) {

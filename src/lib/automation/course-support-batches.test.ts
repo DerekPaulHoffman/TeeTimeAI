@@ -8481,6 +8481,102 @@ describe("course-support claim demand fencing", () => {
     expect(prismaMocks.batchCreate).toHaveBeenCalledTimes(1);
   });
 
+  it("claims an unconfirmed engineering-only incident for bounded responder confirmation", async () => {
+    const incident = {
+      ...incidentRecord({ engineeringOnly: true, preferences: [] }),
+      confirmedAt: null,
+      attemptLedger: null,
+    };
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([incident])
+      .mockResolvedValueOnce([incident]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        now: new Date("2026-07-21T01:37:00.000Z"),
+      }),
+    ).resolves.toMatchObject({
+      outcome: "ready",
+      incidentCount: 1,
+      leverage: { activeRealDemandCount: 0 },
+    });
+
+    expect(prismaMocks.batchCreate).toHaveBeenCalledTimes(1);
+    expect(prismaMocks.batchIncidentCreateMany).toHaveBeenCalledWith({
+      data: [expect.objectContaining({ incidentId: incident.id })],
+    });
+  });
+
+  it("keeps the responder-owned stage gate when real demand appears before engineering-only promotion", async () => {
+    const incident = {
+      ...incidentRecord({
+        engineeringOnly: true,
+        preferences: [
+          {
+            teeSearch: {
+              id: "active-public-search",
+              date: new Date("2026-07-22T00:00:00.000Z"),
+            },
+          },
+        ],
+      }),
+      confirmedAt: null,
+      attemptLedger: null,
+    };
+    prismaMocks.supportIncidentFindMany.mockResolvedValueOnce([incident]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        now: new Date("2026-07-21T01:37:00.000Z"),
+      }),
+    ).resolves.toMatchObject({ outcome: "no_due_work" });
+
+    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unconfirmed engineering-only claim when real demand appears during ownership fencing", async () => {
+    const selected = {
+      ...incidentRecord({ engineeringOnly: true, preferences: [] }),
+      confirmedAt: null,
+      attemptLedger: null,
+    };
+    const promoted = {
+      ...selected,
+      course: {
+        ...selected.course,
+        preferences: [
+          {
+            teeSearch: {
+              id: "new-active-public-search",
+              date: new Date("2026-07-22T00:00:00.000Z"),
+            },
+          },
+        ],
+      },
+    };
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([selected])
+      .mockResolvedValueOnce([promoted]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        now: new Date("2026-07-21T01:37:00.000Z"),
+      }),
+    ).rejects.toThrow("stage eligibility changed during claim");
+
+    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+    expect(prismaMocks.batchIncidentCreateMany).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["rendered browser discovery", browserReadyAttemptLedger()],
     ["independent confirmation", independentReadyAttemptLedger()],
@@ -9771,10 +9867,10 @@ describe("course-support claim demand fencing", () => {
     ).rejects.toThrow("ownership or directive changed");
   });
 
-  it("excludes unconfirmed zero-demand work even when its ledger is browser-ready", async () => {
+  it("excludes unconfirmed zero-demand work without engineering opt-in even when its ledger is browser-ready", async () => {
     prismaMocks.supportIncidentFindMany.mockResolvedValueOnce([
       {
-        ...incidentRecord({ engineeringOnly: true, preferences: [] }),
+        ...incidentRecord({ engineeringOnly: false, preferences: [] }),
         confirmedAt: null,
         attemptLedger: browserReadyAttemptLedger(),
       },
@@ -16302,6 +16398,7 @@ describe("course-support inspection ownership", () => {
             expect.objectContaining({
               OR: expect.arrayContaining([
                 { confirmedAt: { not: null } },
+                { engineeringOnly: true },
                 expect.objectContaining({ course: expect.any(Object) }),
               ]),
             }),
@@ -16352,7 +16449,7 @@ describe("course-support inspection ownership", () => {
         attemptLedger: browserReadyAttemptLedger(),
         providerFamilyKey: "NO_DEMAND_GROUP",
         failureFingerprint: "no-demand",
-        engineeringOnly: true,
+        engineeringOnly: false,
         escalationDeadlineAt: new Date("2026-07-15T20:28:00.000Z"),
         firstSeenAt: new Date("2026-07-15T19:58:00.000Z"),
         course: { timeZone: "America/New_York", preferences: [] },
@@ -16370,6 +16467,38 @@ describe("course-support inspection ownership", () => {
           expect.objectContaining({
             providerFamilyKey: "LIVE_BROWSER_GROUP",
             activeRealDemandCount: 1,
+          }),
+        ],
+      },
+    });
+  });
+
+  it("includes due unconfirmed engineering-only work for responder-owned confirmation", async () => {
+    prismaMocks.supportIncidentFindMany.mockResolvedValueOnce([
+      {
+        cycle: 1,
+        confirmedAt: null,
+        attemptLedger: null,
+        providerFamilyKey: "ENGINEERING_CONFIRMATION_GROUP",
+        failureFingerprint: "engineering-confirmation",
+        engineeringOnly: true,
+        escalationDeadlineAt: new Date("2026-07-15T20:28:00.000Z"),
+        firstSeenAt: new Date("2026-07-15T19:58:00.000Z"),
+        course: { timeZone: "America/New_York", preferences: [] },
+      },
+    ]);
+
+    await expect(inspectCourseSupportQueue({ now })).resolves.toMatchObject({
+      outcome: "ready",
+      dueIncidentCount: 1,
+      dueRealCount: 0,
+      dueHistoricalRealCount: 0,
+      dueEngineeringCount: 1,
+      readOnlyDispatchPlan: {
+        groups: [
+          expect.objectContaining({
+            providerFamilyKey: "ENGINEERING_CONFIRMATION_GROUP",
+            activeRealDemandCount: 0,
           }),
         ],
       },

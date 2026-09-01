@@ -568,6 +568,7 @@ describe("course support incidents", () => {
         firstAffectedSearchId: "search-multi-cycle",
         affectedSearchCount: 1,
         engineeringOnly: true,
+        confirmedAt: null,
         nextAttemptAt: new Date(now.getTime() + 2 * 60 * 1000)
       })
     });
