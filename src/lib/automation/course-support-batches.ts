@@ -17744,7 +17744,13 @@ function buildCourseSupportCandidates(
     const routedRemediation = routeCourseSupportRemediation({
       isPublic: course.isPublic,
       detectedPlatform: course.detectedPlatform,
-      providerFamilyKey: incident.providerFamilyKey,
+      // Route from the current course projection when it exists. The incident
+      // family is historical grouping evidence and may intentionally differ
+      // after a provider/source change; feeding it back into strategy selection
+      // can skip the ordered discovery stages for a current SOURCE_MISSING or
+      // SOURCE_CONFLICT course.
+      providerFamilyKey:
+        course.providerFamilyKey?.trim() || incident.providerFamilyKey,
       detectedBookingUrl: course.detectedBookingUrl,
       website: course.website,
       bookingMetadata: course.bookingMetadata,

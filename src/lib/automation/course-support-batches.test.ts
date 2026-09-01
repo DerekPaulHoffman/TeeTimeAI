@@ -8783,6 +8783,74 @@ describe("course-support claim demand fencing", () => {
     );
   });
 
+  it("routes a current source-missing course through discovery despite a historical incident family", async () => {
+    const incident = {
+      ...incidentRecord({ engineeringOnly: true, preferences: [] }),
+      providerFamilyKey: "historical-provider.example",
+      failureClass: "UNKNOWN" as const,
+      course: {
+        ...incidentRecord({ engineeringOnly: true, preferences: [] }).course,
+        isPublic: true,
+        website: "https://public-course.example/",
+        detectedBookingUrl: null,
+        detectedPlatform: "UNKNOWN",
+        providerFamilyKey: "SOURCE_MISSING",
+        bookingMetadata: null,
+        bookingMethod: "UNKNOWN",
+        automationEligibility: "UNKNOWN",
+        automationReason: "NONE",
+        intelligenceVerifiedAt: null,
+        intelligenceReviewAt: null,
+        intelligenceConfidence: null,
+      },
+    };
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([incident])
+      .mockResolvedValueOnce([incident]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        now,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "ready",
+      incidentCount: 1,
+    });
+
+    expect(prismaMocks.batchCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          summary: expect.objectContaining({
+            remediation: expect.objectContaining({
+              workMode: "ADVANCE_DISCOVERY",
+              strategyAction: "DISCOVER_WITH_HTTP",
+              playbookStage: "OFFICIAL_IDENTITY",
+              allowUnchangedRuntime: true,
+              requiresImplementationPath: false,
+              attempts: [
+                expect.objectContaining({
+                  actionPlan: {
+                    schemaVersion: 1,
+                    primaryAction: "VERIFY_CURRENT_RUNTIME",
+                    allowedActions: ["VERIFY_CURRENT_RUNTIME"],
+                    route: {
+                      workMode: "ADVANCE_DISCOVERY",
+                      strategyAction: "DISCOVER_WITH_HTTP",
+                      playbookStage: "OFFICIAL_IDENTITY",
+                    },
+                  },
+                }),
+              ],
+            }),
+          }),
+        }),
+      }),
+    );
+  });
+
   it("does not consume a second responder slot for implementation before paths are claimed", async () => {
     const incident = incidentRecord({ engineeringOnly: true, preferences: [] });
     prismaMocks.batchFindMany.mockResolvedValueOnce([
