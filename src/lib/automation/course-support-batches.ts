@@ -2588,10 +2588,29 @@ export function buildCourseSupportResponderHandoff(input: {
   };
 }
 
-export function shouldFinalizeSourceUnverified(input: {
+type SourceUnverifiedBrowserDiscovery = {
+  status: string;
+  detectedPlatform?: string | null;
+  bookingUrl?: string | null;
+  apiMetadata?: unknown;
+  confidence: number;
+  evidence: unknown;
+  createdAt: Date;
+};
+
+type SourceUnverifiedProviderSnapshot = Parameters<
+  typeof buildCourseSupportProviderSnapshotFingerprint
+>[0];
+
+type SourceUnverifiedCourse = Parameters<typeof resolveProviderCapability>[0] &
+  Partial<SourceUnverifiedProviderSnapshot> & {
+  automationDiscoveries?: readonly SourceUnverifiedBrowserDiscovery[];
+};
+
+type SourceUnverifiedFinalizationInput = {
   providerFamilyKey: string;
   failureClass: CourseSupportFailureClass;
-  course: Parameters<typeof resolveProviderCapability>[0];
+  course: SourceUnverifiedCourse;
   attemptCount: number;
   activeRealSearchCount: number;
   firstSeenAt: Date;
@@ -2602,14 +2621,47 @@ export function shouldFinalizeSourceUnverified(input: {
   verifiedIncidentUpdatedAt: Date | null;
   incidentUpdatedAt: Date;
   result: CourseSupportBatchIncidentResult;
+  releaseSha?: string | null;
+  deployedAt?: Date | null;
   now?: Date;
-}) {
-  return Boolean(
-    hasFreshCompleteSourceUnverifiedEvidence(input) &&
-      input.verifiedIncidentUpdatedAt &&
-      input.verifiedIncidentUpdatedAt.getTime() ===
-        input.incidentUpdatedAt.getTime(),
-  );
+};
+
+type SourceUnverifiedFinalizationEvidence =
+  | {
+      mode: "PLAYBOOK_SOURCE_GAP";
+      evidenceStartedAt: Date;
+    }
+  | {
+      mode: "INDEPENDENT_BROWSER_SOURCE_CONFLICT";
+      evidenceStartedAt: Date;
+      renderedObservedAt: Date;
+      independentObservedAt: Date;
+      providerSnapshotFingerprint: string;
+    };
+
+export function shouldFinalizeSourceUnverified(
+  input: SourceUnverifiedFinalizationInput,
+) {
+  return getSourceUnverifiedFinalizationEvidence(input) !== null;
+}
+
+function getSourceUnverifiedFinalizationEvidence(
+  input: SourceUnverifiedFinalizationInput,
+): SourceUnverifiedFinalizationEvidence | null {
+  if (
+    !input.verifiedIncidentUpdatedAt ||
+    input.verifiedIncidentUpdatedAt.getTime() !==
+      input.incidentUpdatedAt.getTime()
+  ) {
+    return null;
+  }
+  if (hasFreshCompleteSourceUnverifiedEvidence(input)) {
+    return {
+      mode: "PLAYBOOK_SOURCE_GAP",
+      evidenceStartedAt: input.freshCycleStartedAt!,
+    };
+  }
+  return getIndependentBrowserSourceConflictEvidence(input);
 }
 
 function hasFreshCompleteSourceUnverifiedEvidence(input: {
@@ -2651,6 +2703,201 @@ function hasFreshCompleteSourceUnverifiedEvidence(input: {
       (input.providerFamilyKey === SOURCE_CONFLICT_PROVIDER_FAMILY &&
         input.failureClass === "MISSING_METADATA")),
   );
+}
+
+function getIndependentBrowserSourceConflictEvidence(
+  input: SourceUnverifiedFinalizationInput,
+): Extract<
+  SourceUnverifiedFinalizationEvidence,
+  { mode: "INDEPENDENT_BROWSER_SOURCE_CONFLICT" }
+> | null {
+  const evidenceStartedAt =
+    input.freshCycleStartedAt ?? (input.cycle === 1 ? input.firstSeenAt : null);
+  const releaseSha = input.releaseSha;
+  const deployedAt = input.deployedAt;
+  if (
+    input.failureClass !== "UNSUPPORTED_FAMILY" ||
+    (input.result !== "RETRY_SCHEDULED" && input.result !== "STALE_EVIDENCE") ||
+    !evidenceStartedAt ||
+    !releaseSha ||
+    !/^[a-f0-9]{40}$/iu.test(releaseSha) ||
+    !(deployedAt instanceof Date) ||
+    !Number.isFinite(deployedAt.getTime()) ||
+    !input.verifiedAt
+  ) {
+    return null;
+  }
+
+  const playbook = assessAutomationPlaybook(input.attemptLedger, input.cycle);
+  const latestCompletedStageAt =
+    getLatestCompletedAutomationPlaybookStageTimestamp(playbook);
+  if (
+    !playbook.valid ||
+    playbook.cycle !== input.cycle ||
+    playbook.conclusion !== "UNRESOLVED_EXHAUSTED" ||
+    playbook.completedStages.length !== AUTOMATION_PLAYBOOK_STAGES.length ||
+    latestCompletedStageAt === null ||
+    input.verifiedAt.getTime() < latestCompletedStageAt ||
+    !hasDurableSourceUnverifiedPlaybookEvidence(playbook, evidenceStartedAt)
+  ) {
+    return null;
+  }
+
+  if (!hasSourceUnverifiedProviderSnapshot(input.course)) {
+    return null;
+  }
+  const providerResolution = resolveProviderCapability(input.course);
+  if (
+    providerResolution.capability ||
+    providerResolution.providerFamilyKey !== input.providerFamilyKey ||
+    input.course.bookingMethod !== "UNKNOWN" ||
+    (input.course.bookingAccessMode !== undefined &&
+      input.course.bookingAccessMode !== null &&
+      input.course.bookingAccessMode !== "UNKNOWN") ||
+    (input.course.automationEligibility !== "UNKNOWN" &&
+      input.course.automationEligibility !== "NEEDS_REVIEW") ||
+    (input.course.automationReason !== "NONE" &&
+      input.course.automationReason !== "UNSUPPORTED_PLATFORM")
+  ) {
+    return null;
+  }
+  const providerSnapshotFingerprint =
+    buildCourseSupportProviderSnapshotFingerprint(input.course);
+  if (!/^[a-f0-9]{64}$/iu.test(providerSnapshotFingerprint)) {
+    return null;
+  }
+  const observations = (input.course.automationDiscoveries ?? [])
+    .map((discovery) =>
+      readIndependentBrowserSourceConflictObservation({
+        discovery,
+        incidentCycle: input.cycle,
+        releaseSha,
+        deployedAt,
+        evidenceStartedAt,
+        verifiedAt: input.verifiedAt!,
+        providerSnapshotFingerprint,
+      }),
+    )
+    .filter(
+      (
+        observation,
+      ): observation is {
+        mode: "RENDERED" | "INDEPENDENT";
+        observedAt: Date;
+      } => observation !== null,
+    );
+  const rendered = observations.find(
+    (observation) => observation.mode === "RENDERED",
+  );
+  const independent = observations.find(
+    (observation) => observation.mode === "INDEPENDENT",
+  );
+  if (
+    !rendered ||
+    !independent ||
+    rendered.observedAt.getTime() === independent.observedAt.getTime()
+  ) {
+    return null;
+  }
+  return {
+    mode: "INDEPENDENT_BROWSER_SOURCE_CONFLICT",
+    evidenceStartedAt,
+    renderedObservedAt: rendered.observedAt,
+    independentObservedAt: independent.observedAt,
+    providerSnapshotFingerprint,
+  };
+}
+
+function hasSourceUnverifiedProviderSnapshot(
+  course: SourceUnverifiedCourse,
+): course is SourceUnverifiedCourse & SourceUnverifiedProviderSnapshot {
+  return Boolean(
+    course.detectedPlatform &&
+      course.bookingMethod &&
+      course.automationEligibility &&
+      course.automationReason,
+  );
+}
+
+function readIndependentBrowserSourceConflictObservation(input: {
+  discovery: SourceUnverifiedBrowserDiscovery;
+  incidentCycle: number;
+  releaseSha: string;
+  deployedAt: Date;
+  evidenceStartedAt: Date;
+  verifiedAt: Date;
+  providerSnapshotFingerprint: string;
+}) {
+  const evidence = asJsonObject(input.discovery.evidence as Prisma.JsonValue);
+  const browser = asJsonObject(
+    evidence.browserInvestigation as Prisma.JsonValue,
+  );
+  const authority = asJsonObject(browser.identityAuthority as Prisma.JsonValue);
+  const observedAt = parseProofDate(browser.observedAt);
+  const pages = Array.isArray(browser.sameOriginPages)
+    ? browser.sameOriginPages.map((page) =>
+        asJsonObject(page as Prisma.JsonValue),
+      )
+    : [];
+  const bookingDestinations = Array.isArray(browser.bookingDestinations)
+    ? browser.bookingDestinations
+    : [];
+  const networkContracts = Array.isArray(browser.networkContracts)
+    ? browser.networkContracts
+    : [];
+  const accessBarriers = Array.isArray(evidence.accessBarriers)
+    ? evidence.accessBarriers
+    : [];
+  const renderedAccessControls = Array.isArray(evidence.renderedAccessControls)
+    ? evidence.renderedAccessControls
+    : [];
+  const mode =
+    browser.mode === "RENDERED" || browser.mode === "INDEPENDENT"
+      ? browser.mode
+      : null;
+  if (
+    input.discovery.status !== "INSPECTED" ||
+    input.discovery.detectedPlatform !== "UNKNOWN" ||
+    (input.discovery.apiMetadata !== null &&
+      input.discovery.apiMetadata !== undefined) ||
+    !Number.isFinite(input.discovery.confidence) ||
+    input.discovery.confidence >= 0.8 ||
+    evidence.bookingCallToAction === true ||
+    Object.keys(
+      asJsonObject(evidence.courseIdentityCorroboration as Prisma.JsonValue),
+    ).length > 0 ||
+    evidence.learnedFrom !== "browser-visible-links" ||
+    !mode ||
+    browser.incidentCycle !== input.incidentCycle ||
+    browser.runtimeVersion !== input.releaseSha ||
+    browser.providerSnapshotFingerprint !== input.providerSnapshotFingerprint ||
+    browser.restrictedNetworkObserved !== true ||
+    authority.source === "UNPROJECTED_OWNER_SOURCE_CANDIDATE" ||
+    (authority.source !== "RETAINED_OFFICIAL_WEBSITE" &&
+      authority.source !== "RETAINED_COURSE_SOURCE") ||
+    authority.localityEvidencePresent !== true ||
+    authority.placeEvidencePresent !== true ||
+    pages.length === 0 ||
+    pages.some(
+      (page) =>
+        page.identityStatus !== "CONFLICT" ||
+        page.trustedForCourse !== false ||
+        page.interactionBlocked !== false,
+    ) ||
+    bookingDestinations.length !== 0 ||
+    networkContracts.length !== 0 ||
+    accessBarriers.length !== 0 ||
+    renderedAccessControls.length !== 0 ||
+    !observedAt ||
+    Math.abs(input.discovery.createdAt.getTime() - observedAt.getTime()) >
+      1_000 ||
+    observedAt.getTime() < input.deployedAt.getTime() ||
+    observedAt.getTime() < input.evidenceStartedAt.getTime() ||
+    observedAt.getTime() > input.verifiedAt.getTime()
+  ) {
+    return null;
+  }
+  return { mode, observedAt };
 }
 
 function hasExactSourceMissingProviderState(input: {
@@ -10070,8 +10317,8 @@ async function closeoutCourseSupportBatchAttempt(
         message: authoritativeMonitoringResolution.message,
       };
     }
-    if (
-      shouldFinalizeSourceUnverified({
+    const sourceUnverifiedFinalizationEvidence =
+      getSourceUnverifiedFinalizationEvidence({
         providerFamilyKey: entry.incident.providerFamilyKey,
         failureClass: entry.incident.failureClass,
         course: entry.course,
@@ -10085,9 +10332,11 @@ async function closeoutCourseSupportBatchAttempt(
         verifiedIncidentUpdatedAt: entry.verifiedIncidentUpdatedAt,
         incidentUpdatedAt: entry.incident.updatedAt,
         result: entry.result,
+        releaseSha: batch.releaseSha,
+        deployedAt: batch.deployedAt,
         now,
-      })
-    ) {
+      });
+    if (sourceUnverifiedFinalizationEvidence) {
       const priorProof = asJsonObject(entry.proofSnapshot);
       return {
         ...entry,
@@ -10102,7 +10351,21 @@ async function closeoutCourseSupportBatchAttempt(
           attemptCount: entry.incident.attemptCount,
           activeRealSearchCount: entry.incident.activeRealSearchCount,
           firstSeenAt: entry.incident.firstSeenAt.toISOString(),
-          freshCycleStartedAt: entry.incident.confirmedAt!.toISOString(),
+          freshCycleStartedAt:
+            sourceUnverifiedFinalizationEvidence.evidenceStartedAt.toISOString(),
+          evidenceMode: sourceUnverifiedFinalizationEvidence.mode,
+          sourceResult: entry.result,
+          ...(sourceUnverifiedFinalizationEvidence.mode ===
+          "INDEPENDENT_BROWSER_SOURCE_CONFLICT"
+            ? {
+                renderedObservedAt:
+                  sourceUnverifiedFinalizationEvidence.renderedObservedAt.toISOString(),
+                independentObservedAt:
+                  sourceUnverifiedFinalizationEvidence.independentObservedAt.toISOString(),
+                providerSnapshotFingerprint:
+                  sourceUnverifiedFinalizationEvidence.providerSnapshotFingerprint,
+              }
+            : {}),
           cycle: entry.incident.cycle,
           completedStageCount: AUTOMATION_PLAYBOOK_STAGES.length,
           verifiedAt: entry.verifiedAt!.toISOString(),
@@ -12315,6 +12578,7 @@ async function closeoutCourseSupportBatchAttempt(
       } else if (entry.normalizedResult === "FINAL_DISPOSITION") {
         const resolution = getFinalDispositionResolution(entry.proofSnapshot);
         const proof = asJsonObject(entry.proofSnapshot);
+        const exactReleaseRuntimeProof = isDurableTerminalProof(entry, batch);
         const sourceUnverifiedFinal = proof.kind === "SOURCE_UNVERIFIED_FINAL";
         const finalMonitoringState =
           proof.kind === "EXACT_PLACE_REVIEW" ||
@@ -12387,6 +12651,7 @@ async function closeoutCourseSupportBatchAttempt(
               deploymentSha: batch.releaseSha,
               occurredAt: now,
               audit: {
+                freshRuntimeProof: exactReleaseRuntimeProof,
                 automatedFinal: true,
                 finalKind:
                   finalMonitoringState === "FINAL_IDENTITY"
@@ -18343,7 +18608,7 @@ export function isDurableTerminalProof(
       confirmedAt?: Date | null;
       updatedAt: Date;
     };
-    course?: Parameters<typeof resolveProviderCapability>[0];
+    course?: SourceUnverifiedCourse;
   },
   batch: {
     createdAt: Date;
@@ -18425,6 +18690,58 @@ export function isDurableTerminalProof(
       const firstSeenAt = parseProofDate(proof.firstSeenAt);
       const freshCycleStartedAt = parseProofDate(proof.freshCycleStartedAt);
       const verifiedAt = parseProofDate(proof.verifiedAt);
+      const sourceResult =
+        proof.sourceResult === "RETRY_SCHEDULED" ||
+        proof.sourceResult === "STALE_EVIDENCE"
+          ? proof.sourceResult
+          : null;
+      const browserFinalizationEvidence =
+        proof.evidenceMode === "INDEPENDENT_BROWSER_SOURCE_CONFLICT" &&
+        sourceResult &&
+        entry.course &&
+        entry.incident.cycle
+          ? getSourceUnverifiedFinalizationEvidence({
+              providerFamilyKey: entry.incident.providerFamilyKey,
+              failureClass: entry.incident.failureClass,
+              course: entry.course,
+              attemptCount: entry.incident.attemptCount,
+              activeRealSearchCount: entry.incident.activeRealSearchCount,
+              firstSeenAt: entry.incident.firstSeenAt,
+              freshCycleStartedAt: entry.incident.confirmedAt ?? null,
+              attemptLedger: entry.incident.attemptLedger,
+              cycle: entry.incident.cycle,
+              verifiedAt: entry.verifiedAt,
+              verifiedIncidentUpdatedAt: entry.verifiedIncidentUpdatedAt,
+              incidentUpdatedAt: entry.incident.updatedAt,
+              result: sourceResult,
+              releaseSha: batch.releaseSha,
+              deployedAt: batch.deployedAt,
+              now: entry.verifiedAt,
+            })
+          : null;
+      const browserSourceConflictProofValid = Boolean(
+        browserFinalizationEvidence?.mode ===
+          "INDEPENDENT_BROWSER_SOURCE_CONFLICT" &&
+        parseProofDate(proof.renderedObservedAt)?.getTime() ===
+          browserFinalizationEvidence.renderedObservedAt.getTime() &&
+        parseProofDate(proof.independentObservedAt)?.getTime() ===
+          browserFinalizationEvidence.independentObservedAt.getTime() &&
+        proof.providerSnapshotFingerprint ===
+          browserFinalizationEvidence.providerSnapshotFingerprint,
+      );
+      const legacySourceGapProofValid = Boolean(
+        (proof.evidenceMode === undefined ||
+          proof.evidenceMode === "PLAYBOOK_SOURCE_GAP") &&
+        (hasExactSourceMissingProviderState({
+          incidentProviderFamilyKey: entry.incident.providerFamilyKey,
+          course: entry.course,
+        }) ||
+          (entry.incident.providerFamilyKey ===
+            SOURCE_CONFLICT_PROVIDER_FAMILY &&
+            entry.incident.failureClass === "MISSING_METADATA")) &&
+        entry.incident.confirmedAt &&
+        freshCycleStartedAt?.getTime() === entry.incident.confirmedAt.getTime(),
+      );
       const playbook = assessAutomationPlaybook(
         entry.incident.attemptLedger,
         entry.incident.cycle,
@@ -18439,18 +18756,12 @@ export function isDurableTerminalProof(
         proof.activeRealSearchCount === entry.incident.activeRealSearchCount &&
         proof.cycle === entry.incident.cycle &&
         proof.completedStageCount === AUTOMATION_PLAYBOOK_STAGES.length &&
-        (hasExactSourceMissingProviderState({
-          incidentProviderFamilyKey: entry.incident.providerFamilyKey,
-          course: entry.course,
-        }) ||
-          (entry.incident.providerFamilyKey ===
-            SOURCE_CONFLICT_PROVIDER_FAMILY &&
-            entry.incident.failureClass === "MISSING_METADATA")) &&
+        (legacySourceGapProofValid || browserSourceConflictProofValid) &&
         firstSeenAt?.getTime() === entry.incident.firstSeenAt.getTime() &&
         freshCycleStartedAt &&
-        entry.incident.confirmedAt &&
-        freshCycleStartedAt.getTime() ===
-          entry.incident.confirmedAt.getTime() &&
+        (legacySourceGapProofValid ||
+          freshCycleStartedAt.getTime() ===
+            browserFinalizationEvidence?.evidenceStartedAt.getTime()) &&
         verifiedAt?.getTime() === entry.verifiedAt.getTime() &&
         verifiedAt &&
         entry.verifiedIncidentUpdatedAt.getTime() ===

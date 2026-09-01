@@ -1548,6 +1548,54 @@ function sourceUnverifiedAttemptLedger(
   });
 }
 
+function independentBrowserSourceConflictDiscoveries(input: {
+  releaseSha: string;
+  providerSnapshotFingerprint: string;
+  cycle?: number;
+  renderedObservedAt: Date;
+  independentObservedAt: Date;
+}) {
+  const discovery = (mode: "RENDERED" | "INDEPENDENT", observedAt: Date) => ({
+    status: "INSPECTED",
+    detectedPlatform: "UNKNOWN",
+    bookingUrl: "https://candidate.example/booking",
+    apiMetadata: null,
+    confidence: 0.25,
+    createdAt: observedAt,
+    evidence: {
+      learnedFrom: "browser-visible-links",
+      accessBarriers: [],
+      renderedAccessControls: [],
+      browserInvestigation: {
+        mode,
+        incidentCycle: input.cycle ?? 1,
+        runtimeVersion: input.releaseSha,
+        observedAt: observedAt.toISOString(),
+        providerSnapshotFingerprint: input.providerSnapshotFingerprint,
+        identityAuthority: {
+          source: "RETAINED_OFFICIAL_WEBSITE",
+          localityEvidencePresent: true,
+          placeEvidencePresent: true,
+        },
+        sameOriginPages: [
+          {
+            identityStatus: "CONFLICT",
+            trustedForCourse: false,
+            interactionBlocked: false,
+          },
+        ],
+        bookingDestinations: [],
+        restrictedNetworkObserved: true,
+        networkContracts: [],
+      },
+    },
+  });
+  return [
+    discovery("INDEPENDENT", input.independentObservedAt),
+    discovery("RENDERED", input.renderedObservedAt),
+  ];
+}
+
 function browserReadyAttemptLedger(cycle = 1) {
   let ledger: unknown = null;
   ledger = appendAutomationPlaybookEvent(ledger, {
@@ -13125,6 +13173,94 @@ describe("fresh runtime verification", () => {
     ).toBe(false);
   });
 
+  it("accepts a durable exact-release browser source-conflict final for an unconfirmed first cycle", () => {
+    const releaseSha = "a".repeat(40);
+    const providerSnapshotFingerprint = "b".repeat(64);
+    const firstSeenAt = new Date("2026-07-22T18:00:00.000Z");
+    const deployedAt = new Date("2026-07-22T19:00:00.000Z");
+    const renderedObservedAt = new Date("2026-07-22T19:10:00.000Z");
+    const independentObservedAt = new Date("2026-07-22T19:15:00.000Z");
+    const verifiedAt = new Date("2026-07-22T19:20:00.000Z");
+    const course = {
+      detectedPlatform: "UNKNOWN" as const,
+      providerFamilyKey: "unrunnable.example",
+      detectedBookingUrl: null,
+      website: "https://course.example/",
+      bookingMethod: "UNKNOWN" as const,
+      automationEligibility: "UNKNOWN" as const,
+      automationReason: "UNSUPPORTED_PLATFORM" as const,
+      bookingMetadata: null,
+      automationDiscoveries: independentBrowserSourceConflictDiscoveries({
+        releaseSha,
+        providerSnapshotFingerprint,
+        renderedObservedAt,
+        independentObservedAt,
+      }),
+    };
+    verificationMocks.buildCourseSupportProviderSnapshotFingerprint.mockReturnValue(
+      providerSnapshotFingerprint,
+    );
+    const entry = {
+      normalizedResult: "FINAL_DISPOSITION" as const,
+      proofSnapshot: {
+        kind: "SOURCE_UNVERIFIED_FINAL",
+        disposition: "SOURCE_UNVERIFIED",
+        providerFamilyKey: "unrunnable.example",
+        failureClass: "UNSUPPORTED_FAMILY",
+        attemptCount: 1,
+        activeRealSearchCount: 0,
+        firstSeenAt: firstSeenAt.toISOString(),
+        freshCycleStartedAt: firstSeenAt.toISOString(),
+        evidenceMode: "INDEPENDENT_BROWSER_SOURCE_CONFLICT",
+        sourceResult: "STALE_EVIDENCE",
+        renderedObservedAt: renderedObservedAt.toISOString(),
+        independentObservedAt: independentObservedAt.toISOString(),
+        providerSnapshotFingerprint,
+        cycle: 1,
+        completedStageCount: 8,
+        verifiedAt: verifiedAt.toISOString(),
+      },
+      verifiedAt,
+      verifiedIncidentUpdatedAt: verifiedAt,
+      course,
+      incident: {
+        firstSeenAt,
+        lastSeenAt: firstSeenAt,
+        confirmedAt: null,
+        updatedAt: verifiedAt,
+        providerFamilyKey: "unrunnable.example",
+        failureClass: "UNSUPPORTED_FAMILY" as const,
+        attemptCount: 1,
+        activeRealSearchCount: 0,
+        cycle: 1,
+        attemptLedger: sourceUnverifiedAttemptLedger(
+          1,
+          new Date("2026-07-22T18:05:00.000Z"),
+        ),
+      },
+    };
+    const batch = {
+      createdAt: firstSeenAt,
+      releaseSha,
+      deployedAt,
+      recheckDispatchStartedAt: new Date("2026-07-22T19:05:00.000Z"),
+    };
+
+    expect(isDurableTerminalProof(entry, batch)).toBe(true);
+    expect(
+      isDurableTerminalProof(
+        {
+          ...entry,
+          proofSnapshot: {
+            ...entry.proofSnapshot,
+            providerSnapshotFingerprint: "c".repeat(64),
+          },
+        },
+        batch,
+      ),
+    ).toBe(false);
+  });
+
   it("rejects exact-place terminal proof older than the incident cycle", () => {
     expect(
       isDurableTerminalProof(
@@ -17723,6 +17859,151 @@ describe("course-support inspection ownership", () => {
     ).toBe(false);
   });
 
+  it("finalizes two exact-release browser source conflicts without inventing provider monitoring", () => {
+    const releaseSha = "a".repeat(40);
+    const providerSnapshotFingerprint = "b".repeat(64);
+    const firstSeenAt = new Date("2026-07-22T18:00:00.000Z");
+    const deployedAt = new Date("2026-07-22T19:00:00.000Z");
+    const renderedObservedAt = new Date("2026-07-22T19:10:00.000Z");
+    const independentObservedAt = new Date("2026-07-22T19:15:00.000Z");
+    const verifiedAt = new Date("2026-07-22T19:20:00.000Z");
+    const discoveries = independentBrowserSourceConflictDiscoveries({
+      releaseSha,
+      providerSnapshotFingerprint,
+      renderedObservedAt,
+      independentObservedAt,
+    });
+    const course = {
+      detectedPlatform: "UNKNOWN" as const,
+      providerFamilyKey: "unrunnable.example",
+      detectedBookingUrl: null,
+      website: "https://course.example/",
+      bookingMethod: "UNKNOWN" as const,
+      automationEligibility: "UNKNOWN" as const,
+      automationReason: "UNSUPPORTED_PLATFORM" as const,
+      bookingMetadata: null,
+      automationDiscoveries: discoveries,
+    };
+    verificationMocks.buildCourseSupportProviderSnapshotFingerprint.mockReturnValue(
+      providerSnapshotFingerprint,
+    );
+    const evidence = {
+      providerFamilyKey: "unrunnable.example",
+      failureClass: "UNSUPPORTED_FAMILY" as const,
+      course,
+      attemptCount: 1,
+      activeRealSearchCount: 0,
+      firstSeenAt,
+      freshCycleStartedAt: null,
+      attemptLedger: sourceUnverifiedAttemptLedger(
+        1,
+        new Date("2026-07-22T18:05:00.000Z"),
+      ),
+      cycle: 1,
+      verifiedAt,
+      verifiedIncidentUpdatedAt: verifiedAt,
+      incidentUpdatedAt: verifiedAt,
+      result: "STALE_EVIDENCE" as const,
+      releaseSha,
+      deployedAt,
+      now: verifiedAt,
+    };
+
+    expect(shouldFinalizeSourceUnverified(evidence)).toBe(true);
+    expect(
+      shouldFinalizeSourceUnverified({
+        ...evidence,
+        failureClass: "NETWORK",
+      }),
+    ).toBe(false);
+    expect(
+      shouldFinalizeSourceUnverified({
+        ...evidence,
+        course: { ...course, bookingMethod: "PHONE_ONLY" },
+      }),
+    ).toBe(false);
+    expect(
+      shouldFinalizeSourceUnverified({
+        ...evidence,
+        course: { ...course, automationDiscoveries: discoveries.slice(0, 1) },
+      }),
+    ).toBe(false);
+    expect(
+      shouldFinalizeSourceUnverified({
+        ...evidence,
+        course: {
+          ...course,
+          automationDiscoveries: discoveries.map((discovery, index) =>
+            index === 0
+              ? {
+                  ...discovery,
+                  evidence: {
+                    ...discovery.evidence,
+                    browserInvestigation: {
+                      ...discovery.evidence.browserInvestigation,
+                      runtimeVersion: "c".repeat(40),
+                    },
+                  },
+                }
+              : discovery,
+          ),
+        },
+      }),
+    ).toBe(false);
+    expect(
+      shouldFinalizeSourceUnverified({
+        ...evidence,
+        course: {
+          ...course,
+          automationDiscoveries: discoveries.map((discovery, index) =>
+            index === 0
+              ? {
+                  ...discovery,
+                  evidence: {
+                    ...discovery.evidence,
+                    accessBarriers: [
+                      {
+                        url: "https://candidate.example/account",
+                        status: 401,
+                      },
+                    ],
+                  },
+                }
+              : discovery,
+          ),
+        },
+      }),
+    ).toBe(false);
+    expect(
+      shouldFinalizeSourceUnverified({
+        ...evidence,
+        course: {
+          ...course,
+          automationDiscoveries: discoveries.map((discovery, index) =>
+            index === 0
+              ? {
+                  ...discovery,
+                  evidence: {
+                    ...discovery.evidence,
+                    browserInvestigation: {
+                      ...discovery.evidence.browserInvestigation,
+                      sameOriginPages: [
+                        {
+                          identityStatus: "MATCH",
+                          trustedForCourse: true,
+                          interactionBlocked: false,
+                        },
+                      ],
+                    },
+                  },
+                }
+              : discovery,
+          ),
+        },
+      }),
+    ).toBe(false);
+  });
+
   it("selects the owner internally and resumes only the same task", async () => {
     prismaMocks.batchFindMany.mockResolvedValueOnce([
       {
@@ -21758,6 +22039,101 @@ describe("detached verification atomic batch fences", () => {
       );
     },
   );
+
+  it("closes matching exact-release browser source conflicts as source-unverified instead of automation-stalled", async () => {
+    const batch = closeoutBatch("STALE_EVIDENCE");
+    const renderedObservedAt = new Date("2026-07-15T19:54:00.000Z");
+    const independentObservedAt = new Date("2026-07-15T19:55:00.000Z");
+    Object.assign(batch.incidents[0].course, {
+      isPublic: true,
+      website: "https://course.example/",
+      detectedBookingUrl: null,
+      detectedPlatform: "UNKNOWN",
+      providerFamilyKey: "unrunnable.example",
+      bookingMethod: "UNKNOWN",
+      automationEligibility: "UNKNOWN",
+      automationReason: "NONE",
+      bookingAccessMode: "UNKNOWN",
+      bookingMetadata: null,
+      automationDiscoveries: independentBrowserSourceConflictDiscoveries({
+        releaseSha,
+        providerSnapshotFingerprint: providerFingerprint,
+        renderedObservedAt,
+        independentObservedAt,
+      }),
+    });
+    Object.assign(batch.incidents[0].incident, {
+      kind: "NEEDS_ADAPTER",
+      confirmedAt: null,
+      providerFamilyKey: "unrunnable.example",
+      failureClass: "UNSUPPORTED_FAMILY",
+      attemptLedger: sourceUnverifiedAttemptLedger(
+        1,
+        new Date("2026-07-15T18:35:00.000Z"),
+      ),
+    });
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.transaction.mockImplementationOnce(
+      async (
+        worker: (
+          transaction: typeof monitoringTransactionClient,
+        ) => Promise<unknown>,
+      ) => worker(monitoringTransactionClient),
+    );
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        verificationWatchMode: "WATCH_SETTLED",
+        now,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "classification_only",
+      derivedOutcome: "classification_only",
+      terminalCount: 1,
+      retryCount: 0,
+      needsHumanCount: 0,
+      automationStalledCount: 0,
+      nextAttemptAt: null,
+      leverage: { sourceUnverifiedFinalCount: 1 },
+    });
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "RESOLVED",
+          resolution: "SOURCE_UNVERIFIED",
+        }),
+      }),
+    );
+    expect(prismaMocks.incidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          proofSnapshot: expect.objectContaining({
+            kind: "SOURCE_UNVERIFIED_FINAL",
+            evidenceMode: "INDEPENDENT_BROWSER_SOURCE_CONFLICT",
+            sourceResult: "STALE_EVIDENCE",
+            providerSnapshotFingerprint: providerFingerprint,
+          }),
+        }),
+      }),
+    );
+    expect(prismaMocks.monitoringEventCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        eventType: "STATE_CHANGED",
+        runtimeVersion: releaseSha,
+        deploymentSha: releaseSha,
+        audit: expect.objectContaining({
+          freshRuntimeProof: true,
+          finalKind: "source_unverified",
+        }),
+      }),
+    });
+  });
 
   it("keeps a zero-pass source closeout retryable when verification predates the final source event", async () => {
     const batch = closeoutBatch("STALE_EVIDENCE");
