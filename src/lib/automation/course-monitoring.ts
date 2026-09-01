@@ -96,6 +96,7 @@ import {
 } from "./course-support-search-execution-fence";
 import {
   assessParkedCourseCampaignDescendantIncompletePlaybookRecovery,
+  assessParkedCourseCampaignFailureRefinementIncompletePlaybookRecovery,
   assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery,
   assessParkedCourseCampaignSameIdentityMaterialChangeIncompletePlaybookRecovery,
   assessParkedCourseCampaignRequestlessStaleOwnershipRecovery,
@@ -367,8 +368,9 @@ export function decideMonitoringFailureState(
     ...previousFailures.filter(
       (observation) =>
         observation.failureFingerprint !== null &&
-        normalizeCourseSupportFailureFingerprint(observation.failureFingerprint) ===
-          currentFingerprint,
+        normalizeCourseSupportFailureFingerprint(
+          observation.failureFingerprint,
+        ) === currentFingerprint,
     ),
     { ...current, failureFingerprint: currentFingerprint },
   ];
@@ -1396,11 +1398,11 @@ function hasNewerOrEqualFinalClassificationProviderSource(
 ) {
   return Boolean(
     (snapshot.providerObservation &&
-      snapshot.providerObservation.observationStartedAt >= evidenceObservedAt) ||
-      snapshot.localReaderObservations.some(
-        (observation) =>
-          observation.providerObservedAt >= evidenceObservedAt,
-      ),
+      snapshot.providerObservation.observationStartedAt >=
+        evidenceObservedAt) ||
+    snapshot.localReaderObservations.some(
+      (observation) => observation.providerObservedAt >= evidenceObservedAt,
+    ),
   );
 }
 
@@ -1474,10 +1476,7 @@ function finalCourseIntelligenceUpdateMatchesCurrent(
       update.automationReason === course.automationReason) &&
     (update.policyNotes === undefined ||
       update.policyNotes === course.policyNotes) &&
-    datesMatch(
-      update.intelligenceVerifiedAt,
-      course.intelligenceVerifiedAt,
-    ) &&
+    datesMatch(update.intelligenceVerifiedAt, course.intelligenceVerifiedAt) &&
     (update.intelligenceReviewAt === undefined ||
       datesMatch(update.intelligenceReviewAt, course.intelligenceReviewAt)) &&
     (update.intelligenceConfidence === undefined ||
@@ -1623,21 +1622,20 @@ export async function recordCourseMonitoringFinalClassification(input: {
       );
       const courseHasNewerIntelligence = Boolean(
         input.evidence.kind === "COURSE_INTELLIGENCE" &&
-          course?.intelligenceVerifiedAt instanceof Date &&
-          Number.isFinite(course.intelligenceVerifiedAt.getTime()) &&
-          course.intelligenceVerifiedAt.getTime() >
-             evidenceObservedAt.getTime(),
-       );
+        course?.intelligenceVerifiedAt instanceof Date &&
+        Number.isFinite(course.intelligenceVerifiedAt.getTime()) &&
+        course.intelligenceVerifiedAt.getTime() > evidenceObservedAt.getTime(),
+      );
       const courseHasConflictingEqualIntelligence = Boolean(
         input.evidence.kind === "COURSE_INTELLIGENCE" &&
-          input.courseIntelligenceUpdate &&
-          course?.intelligenceVerifiedAt instanceof Date &&
-          course.intelligenceVerifiedAt.getTime() ===
-            evidenceObservedAt.getTime() &&
-          !finalCourseIntelligenceUpdateMatchesCurrent(
-            course,
-            input.courseIntelligenceUpdate,
-          ),
+        input.courseIntelligenceUpdate &&
+        course?.intelligenceVerifiedAt instanceof Date &&
+        course.intelligenceVerifiedAt.getTime() ===
+          evidenceObservedAt.getTime() &&
+        !finalCourseIntelligenceUpdateMatchesCurrent(
+          course,
+          input.courseIntelligenceUpdate,
+        ),
       );
       if (
         !sourceMatchesCurrentFacts ||
@@ -1863,7 +1861,9 @@ export async function invalidateReviewDerivedIdentityFinal(input: {
     !Number.isFinite(expectedObservedAt.getTime()) ||
     expectedObservedAt.getTime() > now.getTime() + 60_000
   ) {
-    throw new Error("Review-final invalidation requires a valid prior evidence time.");
+    throw new Error(
+      "Review-final invalidation requires a valid prior evidence time.",
+    );
   }
   if (
     input.correction.kind === "VERIFIED_PUBLIC" &&
@@ -1997,8 +1997,8 @@ export async function invalidateReviewDerivedIdentityFinal(input: {
         );
       }
 
-      const statusUpdated =
-        await transaction.courseMonitoringStatus.updateMany({
+      const statusUpdated = await transaction.courseMonitoringStatus.updateMany(
+        {
           where: {
             courseId: input.courseId,
             state: "FINAL_IDENTITY",
@@ -2014,7 +2014,8 @@ export async function invalidateReviewDerivedIdentityFinal(input: {
             stateChangedAt: now,
             revision: { increment: 1 },
           },
-        });
+        },
+      );
       if (statusUpdated.count !== 1) {
         throw new Error(
           "The monitoring final changed while review revalidation was queued.",
@@ -8514,6 +8515,13 @@ async function attachParkedCampaignToMonitoringAudit(
         {
           audit: {
             path: ["action"],
+            equals:
+              "parked_cohort_failure_refinement_incomplete_playbook_recovery",
+          },
+        },
+        {
+          audit: {
+            path: ["action"],
             equals: "parked_cohort_requestless_stale_ownership_recovery",
           },
         },
@@ -8533,6 +8541,9 @@ async function attachParkedCampaignToMonitoringAudit(
   const descendantRecovery =
     admissionAudit.action ===
     "parked_cohort_descendant_incomplete_playbook_recovery";
+  const failureRefinementIncompleteRecovery =
+    admissionAudit.action ===
+    "parked_cohort_failure_refinement_incomplete_playbook_recovery";
   const postMarkerIncompleteRecovery =
     admissionAudit.action ===
     "parked_cohort_post_marker_incomplete_playbook_recovery";
@@ -8565,6 +8576,8 @@ async function attachParkedCampaignToMonitoringAudit(
       admissionAudit.action !==
         "parked_cohort_descendant_incomplete_playbook_recovery" &&
       admissionAudit.action !==
+        "parked_cohort_failure_refinement_incomplete_playbook_recovery" &&
+      admissionAudit.action !==
         "parked_cohort_requestless_stale_ownership_recovery" &&
       admissionAudit.action !==
         "parked_cohort_same_identity_material_change_incomplete_playbook_recovery") ||
@@ -8573,6 +8586,46 @@ async function attachParkedCampaignToMonitoringAudit(
     !admissionAudit.campaignRunId.trim() ||
     typeof admissionAudit.campaignMembershipDigest !== "string" ||
     !/^[a-f0-9]{64}$/u.test(admissionAudit.campaignMembershipDigest) ||
+    (failureRefinementIncompleteRecovery &&
+      (admissionAudit.admissionMode !==
+        "FAILURE_REFINEMENT_INCOMPLETE_PLAYBOOK_RECOVERY" ||
+        typeof admissionAudit.failureRefinementLineageDigest !== "string" ||
+        !/^[a-f0-9]{64}$/u.test(
+          admissionAudit.failureRefinementLineageDigest,
+        ) ||
+        !Number.isInteger(admissionAudit.failureRefinementEventCount) ||
+        Number(admissionAudit.failureRefinementEventCount) < 1 ||
+        typeof admissionAudit.sameCycleRecoveryHistoryDigest !== "string" ||
+        !/^[a-f0-9]{64}$/u.test(
+          admissionAudit.sameCycleRecoveryHistoryDigest,
+        ) ||
+        !Number.isInteger(admissionAudit.startedRequestCount) ||
+        Number(admissionAudit.startedRequestCount) < 1 ||
+        !Number.isInteger(admissionAudit.batchCount) ||
+        Number(admissionAudit.batchCount) < 1 ||
+        !Number.isInteger(admissionAudit.playbookCompletedStageCount) ||
+        Number(admissionAudit.playbookCompletedStageCount) < 1 ||
+        typeof admissionAudit.playbookNextStage !== "string" ||
+        !admissionAudit.playbookNextStage.trim() ||
+        typeof admissionAudit.providerSnapshotFingerprint !== "string" ||
+        !/^[a-f0-9]{64}$/u.test(admissionAudit.providerSnapshotFingerprint) ||
+        typeof admissionAudit.attemptLedgerFingerprint !== "string" ||
+        !/^[a-f0-9]{64}$/u.test(admissionAudit.attemptLedgerFingerprint) ||
+        admissionAudit.customerDataIncluded !== false ||
+        admissionAudit.preservesOperatorEvidence !== true ||
+        asMonitoringJsonRecord(admissionAudit.campaign).kind !==
+          "PARKED_COHORT" ||
+        asMonitoringJsonRecord(admissionAudit.campaign).runId !==
+          admissionAudit.campaignRunId ||
+        asMonitoringJsonRecord(admissionAudit.campaign).membershipDigest !==
+          admissionAudit.campaignMembershipDigest ||
+        asMonitoringJsonRecord(admissionAudit.campaign).cycle !== cycle ||
+        admissionAudit.sameCycleRecovery !== true ||
+        admissionAudit.oneShot !== true ||
+        admissionAudit.preservesAttemptLedger !== true ||
+        admissionAudit.preservesAttemptCounts !== true ||
+        admissionAudit.preservesAttemptTimestamps !== true ||
+        admissionAudit.preservesImmutableCampaignAudit !== true)) ||
     (postMarkerIncompleteRecovery &&
       (admissionAudit.admissionMode !==
         "POST_MARKER_INCOMPLETE_PLAYBOOK_RECOVERY" ||
@@ -8780,6 +8833,7 @@ export type ParkedCourseResponderCampaignReopenInput = {
     | "FRESH_CYCLE"
     | "ZERO_EXECUTION_RECOVERY"
     | "INCOMPLETE_PLAYBOOK_RECOVERY"
+    | "FAILURE_REFINEMENT_INCOMPLETE_PLAYBOOK_RECOVERY"
     | "POST_MARKER_INCOMPLETE_PLAYBOOK_RECOVERY"
     | "DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY"
     | "PARKED_COHORT_REQUESTLESS_STALE_OWNERSHIP_RECOVERY"
@@ -8957,6 +9011,8 @@ export async function reopenParkedCourseForResponderCampaign(
       "PARKED_COHORT_REQUESTLESS_STALE_OWNERSHIP_RECOVERY" ||
       input.admissionMode === "DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY" ||
       input.admissionMode ===
+        "FAILURE_REFINEMENT_INCOMPLETE_PLAYBOOK_RECOVERY" ||
+      input.admissionMode ===
         "SAME_IDENTITY_MATERIAL_CHANGE_INCOMPLETE_PLAYBOOK_RECOVERY" ||
       input.admissionMode === "POST_MARKER_INCOMPLETE_PLAYBOOK_RECOVERY"
       ? { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
@@ -8972,12 +9028,24 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
   const sameIdentityMaterialChangeIncompleteRecoveryRequested =
     input.admissionMode ===
     "SAME_IDENTITY_MATERIAL_CHANGE_INCOMPLETE_PLAYBOOK_RECOVERY";
+  const failureRefinementIncompletePlaybookRecoveryRequested =
+    input.admissionMode === "FAILURE_REFINEMENT_INCOMPLETE_PLAYBOOK_RECOVERY";
   const postMarkerIncompletePlaybookRecoveryRequested =
     input.admissionMode === "POST_MARKER_INCOMPLETE_PLAYBOOK_RECOVERY";
   const exactEvidenceRecoveryRequested =
     input.admissionMode === "DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY" ||
+    failureRefinementIncompletePlaybookRecoveryRequested ||
     sameIdentityMaterialChangeIncompleteRecoveryRequested ||
     postMarkerIncompletePlaybookRecoveryRequested;
+  const campaignCapturedAt = input.campaignCapturedAt
+    ? new Date(input.campaignCapturedAt)
+    : null;
+  const completeCampaignHistorySince =
+    exactEvidenceRecoveryRequested &&
+    campaignCapturedAt &&
+    Number.isFinite(campaignCapturedAt.getTime())
+      ? campaignCapturedAt
+      : null;
   return (async () => {
     const incident = await transaction.courseSupportIncident.findUnique({
       where: { id: input.incidentId },
@@ -9007,8 +9075,14 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
         decisionEvidenceUrl: true,
         decisionIdempotencyKey: true,
         monitoringEvents: {
+          ...(completeCampaignHistorySince
+            ? {
+                where: {
+                  occurredAt: { gte: completeCampaignHistorySince },
+                },
+              }
+            : { take: 50 }),
           orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
-          take: 50,
           select: {
             id: true,
             incidentId: true,
@@ -9246,6 +9320,7 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
       incompletePlaybookRecoveryRequested ||
       postMarkerIncompletePlaybookRecoveryRequested ||
       descendantIncompletePlaybookRecoveryRequested ||
+      failureRefinementIncompletePlaybookRecoveryRequested ||
       requestlessStaleOwnershipRecoveryRequested ||
       sameIdentityMaterialChangeIncompleteRecoveryRequested ||
       currentCycleOrchestrationRecoveryRequested;
@@ -9368,6 +9443,7 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
                       incident.course.automationDiscoveries[0]!.createdAt.getTime(),
                   ).length
                 : 0,
+              monitoringHistoryCompleteSince: completeCampaignHistorySince,
               monitoringEvents: incident.monitoringEvents,
               batchIncidents:
                 exactCurrentCycleBatchIncidents ?? incident.batchIncidents,
@@ -9377,17 +9453,19 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
         : null;
     const sameCycleRecoveryAction = incompletePlaybookRecoveryRequested
       ? "parked_cohort_incomplete_playbook_recovery"
-      : postMarkerIncompletePlaybookRecoveryRequested
-        ? "parked_cohort_post_marker_incomplete_playbook_recovery"
-        : descendantIncompletePlaybookRecoveryRequested
-          ? "parked_cohort_descendant_incomplete_playbook_recovery"
-          : requestlessStaleOwnershipRecoveryRequested
-            ? "parked_cohort_requestless_stale_ownership_recovery"
-            : sameIdentityMaterialChangeIncompleteRecoveryRequested
-              ? "parked_cohort_same_identity_material_change_incomplete_playbook_recovery"
-              : currentCycleOrchestrationRecoveryRequested
-                ? "parked_cohort_current_cycle_orchestration_recovery"
-                : null;
+      : failureRefinementIncompletePlaybookRecoveryRequested
+        ? "parked_cohort_failure_refinement_incomplete_playbook_recovery"
+        : postMarkerIncompletePlaybookRecoveryRequested
+          ? "parked_cohort_post_marker_incomplete_playbook_recovery"
+          : descendantIncompletePlaybookRecoveryRequested
+            ? "parked_cohort_descendant_incomplete_playbook_recovery"
+            : requestlessStaleOwnershipRecoveryRequested
+              ? "parked_cohort_requestless_stale_ownership_recovery"
+              : sameIdentityMaterialChangeIncompleteRecoveryRequested
+                ? "parked_cohort_same_identity_material_change_incomplete_playbook_recovery"
+                : currentCycleOrchestrationRecoveryRequested
+                  ? "parked_cohort_current_cycle_orchestration_recovery"
+                  : null;
     const sameCycleRecoveryAlreadyRecorded = Boolean(
       sameCycleRecoveryAction &&
       incident?.monitoringEvents.some((event) => {
@@ -9400,11 +9478,9 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
         );
       }),
     );
-    const campaignCapturedAt = input.campaignCapturedAt
-      ? new Date(input.campaignCapturedAt)
-      : null;
     const descendantCampaignRun =
       descendantIncompletePlaybookRecoveryRequested ||
+      failureRefinementIncompletePlaybookRecoveryRequested ||
       requestlessStaleOwnershipRecoveryRequested ||
       postMarkerIncompletePlaybookRecoveryRequested ||
       sameIdentityMaterialChangeIncompleteRecoveryRequested
@@ -9450,6 +9526,30 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
         : null;
     const descendantLineage =
       descendantIncompletePlaybookRecovery?.lineage ?? null;
+    const failureRefinementIncompletePlaybookRecovery =
+      failureRefinementIncompletePlaybookRecoveryRequested &&
+      currentCampaignMember &&
+      descendantCampaignRun?.promptVersion ===
+        PARKED_COURSE_CAMPAIGN_PROMPT_VERSION &&
+      descendantCampaignRun.status === "RUNNING" &&
+      descendantCampaignRun.completedAt === null &&
+      descendantCampaignAudit &&
+      descendantCampaignAudit.membershipDigest ===
+        input.campaignMembershipDigest &&
+      descendantCapturedMember &&
+      campaignCapturedAt !== null &&
+      Number.isFinite(campaignCapturedAt.getTime()) &&
+      descendantCampaignAudit.capturedAt === input.campaignCapturedAt
+        ? assessParkedCourseCampaignFailureRefinementIncompletePlaybookRecovery(
+            {
+              captured: descendantCapturedMember,
+              current: currentCampaignMember,
+              capturedAt: campaignCapturedAt,
+              campaignRunId: input.campaignRunId,
+              campaignMembershipDigest: input.campaignMembershipDigest,
+            },
+          )
+        : null;
     const requestlessStaleOwnershipRecovery =
       requestlessStaleOwnershipRecoveryRequested &&
       currentCampaignMember &&
@@ -9556,21 +9656,24 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
       sameCycleRecoveryRequested && incident
         ? requestlessStaleOwnershipRecoveryRequested
           ? requestlessStaleOwnershipRecovery
-          : postMarkerIncompletePlaybookRecoveryRequested
-            ? (postMarkerIncompletePlaybookRecovery?.history ?? null)
-            : sameIdentityMaterialChangeIncompleteRecoveryRequested
-              ? (sameIdentityMaterialChangeIncompleteRecovery?.history ?? null)
-              : descendantIncompletePlaybookRecoveryRequested
-                ? (descendantIncompletePlaybookRecovery?.history ?? null)
-                : assessParkedCourseCampaignSameCycleRecoveryHistory({
-                    courseId: input.courseId,
-                    cycle: incident.cycle,
-                    entries: incident.batchIncidents,
-                    requireOrchestrationOnly:
-                      currentCycleOrchestrationRecoveryRequested,
-                    requireStartedRequest:
-                      sameIdentityMaterialChangeIncompleteRecoveryRequested,
-                  })
+          : failureRefinementIncompletePlaybookRecoveryRequested
+            ? (failureRefinementIncompletePlaybookRecovery?.history ?? null)
+            : postMarkerIncompletePlaybookRecoveryRequested
+              ? (postMarkerIncompletePlaybookRecovery?.history ?? null)
+              : sameIdentityMaterialChangeIncompleteRecoveryRequested
+                ? (sameIdentityMaterialChangeIncompleteRecovery?.history ??
+                  null)
+                : descendantIncompletePlaybookRecoveryRequested
+                  ? (descendantIncompletePlaybookRecovery?.history ?? null)
+                  : assessParkedCourseCampaignSameCycleRecoveryHistory({
+                      courseId: input.courseId,
+                      cycle: incident.cycle,
+                      entries: incident.batchIncidents,
+                      requireOrchestrationOnly:
+                        currentCycleOrchestrationRecoveryRequested,
+                      requireStartedRequest:
+                        sameIdentityMaterialChangeIncompleteRecoveryRequested,
+                    })
         : null;
     if (
       !incident ||
@@ -9628,6 +9731,43 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
               automationStalledEndpoint.occurredAt <
                 originalAdmission.occurredAt ||
               currentPlaybookAssessment.completedStages.length === 0)) ||
+          (failureRefinementIncompletePlaybookRecoveryRequested &&
+            (!descendantCampaignRun ||
+              descendantCampaignRun.promptVersion !==
+                PARKED_COURSE_CAMPAIGN_PROMPT_VERSION ||
+              descendantCampaignRun.status !== "RUNNING" ||
+              descendantCampaignRun.completedAt !== null ||
+              !descendantCampaignAudit ||
+              descendantCampaignAudit.membershipDigest !==
+                input.campaignMembershipDigest ||
+              descendantCampaignAudit.capturedAt !== input.campaignCapturedAt ||
+              !descendantCapturedMember ||
+              descendantCapturedMember.revision !== input.capturedRevision ||
+              descendantCapturedMember.monitoringRevision !==
+                input.capturedMonitoringRevision ||
+              descendantCapturedMember.cycle !== input.capturedCycle ||
+              descendantCapturedMember.kind !== input.capturedKind ||
+              descendantCapturedMember.providerFamilyKey !==
+                input.capturedProviderFamilyKey ||
+              descendantCapturedMember.failureClass ===
+                input.expectedFailureClass ||
+              descendantCapturedMember.failureFingerprint ===
+                input.expectedFailureFingerprint ||
+              input.expectedLatestProbeId === undefined ||
+              input.expectedLatestDiscoveryId === undefined ||
+              (incident.course.probes[0]?.id ?? null) !==
+                input.expectedLatestProbeId ||
+              (incident.course.automationDiscoveries[0]?.id ?? null) !==
+                input.expectedLatestDiscoveryId ||
+              input.expectedCycle !== (input.capturedCycle ?? 0) + 1 ||
+              !failureRefinementIncompletePlaybookRecovery ||
+              failureRefinementIncompletePlaybookRecovery.history
+                .historyDigest !==
+                input.expectedSameCycleRecoveryHistoryDigest ||
+              failureRefinementIncompletePlaybookRecovery.history
+                .startedRequestCount < 1 ||
+              automationStalledEndpoint.occurredAt <
+                failureRefinementIncompletePlaybookRecovery.refinementAt)) ||
           (postMarkerIncompletePlaybookRecoveryRequested &&
             (!descendantCampaignRun ||
               descendantCampaignRun.promptVersion !==
@@ -10242,15 +10382,17 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
             nextAttemptAt: now,
             nextAction: incompletePlaybookRecoveryRequested
               ? "Continue the current campaign cycle at the next incomplete ordered-playbook stage."
-              : postMarkerIncompletePlaybookRecoveryRequested
-                ? "Continue the unfinished rendered-browser stage on the newer exact runtime without discarding current-cycle evidence."
-                : descendantIncompletePlaybookRecoveryRequested
-                  ? "Continue the material-handoff descendant at its next incomplete ordered-playbook stage."
-                  : requestlessStaleOwnershipRecoveryRequested
-                    ? "Resume the current campaign cycle because stale endpoint ownership parked before any provider request or execution evidence existed."
-                    : sameIdentityMaterialChangeIncompleteRecoveryRequested
-                      ? "Continue the exact same-identity material-change cycle at its next incomplete ordered-playbook stage."
-                      : "Retry provider verification in the current material-change cycle because prior orchestration never began execution.",
+              : failureRefinementIncompletePlaybookRecoveryRequested
+                ? "Continue the first campaign cycle at the next incomplete stage after preserving its refined failure evidence."
+                : postMarkerIncompletePlaybookRecoveryRequested
+                  ? "Continue the unfinished rendered-browser stage on the newer exact runtime without discarding current-cycle evidence."
+                  : descendantIncompletePlaybookRecoveryRequested
+                    ? "Continue the material-handoff descendant at its next incomplete ordered-playbook stage."
+                    : requestlessStaleOwnershipRecoveryRequested
+                      ? "Resume the current campaign cycle because stale endpoint ownership parked before any provider request or execution evidence existed."
+                      : sameIdentityMaterialChangeIncompleteRecoveryRequested
+                        ? "Continue the exact same-identity material-change cycle at its next incomplete ordered-playbook stage."
+                        : "Retry provider verification in the current material-change cycle because prior orchestration never began execution.",
             revision: { increment: 1 },
           },
         });
@@ -10294,15 +10436,17 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
           failureFingerprint: input.expectedFailureFingerprint,
           message: incompletePlaybookRecoveryRequested
             ? "The responder resumed the next incomplete playbook stage without discarding current-cycle evidence."
-            : postMarkerIncompletePlaybookRecoveryRequested
-              ? "The responder resumed the unfinished rendered-browser stage once on a newer exact runtime."
-              : descendantIncompletePlaybookRecoveryRequested
-                ? "The responder resumed the next incomplete playbook stage in the exact campaign material-handoff descendant."
-                : requestlessStaleOwnershipRecoveryRequested
-                  ? "The responder resumed the exact requestless campaign member after stale endpoint ownership parked it without execution."
-                  : sameIdentityMaterialChangeIncompleteRecoveryRequested
-                    ? "The responder resumed the next incomplete playbook stage in the exact same-identity operator material-change cycle."
-                    : "The responder retried current-cycle orchestration without discarding the operator material-change evidence.",
+            : failureRefinementIncompletePlaybookRecoveryRequested
+              ? "The responder resumed the next incomplete stage after preserving the first campaign cycle's refined failure evidence."
+              : postMarkerIncompletePlaybookRecoveryRequested
+                ? "The responder resumed the unfinished rendered-browser stage once on a newer exact runtime."
+                : descendantIncompletePlaybookRecoveryRequested
+                  ? "The responder resumed the next incomplete playbook stage in the exact campaign material-handoff descendant."
+                  : requestlessStaleOwnershipRecoveryRequested
+                    ? "The responder resumed the exact requestless campaign member after stale endpoint ownership parked it without execution."
+                    : sameIdentityMaterialChangeIncompleteRecoveryRequested
+                      ? "The responder resumed the next incomplete playbook stage in the exact same-identity operator material-change cycle."
+                      : "The responder retried current-cycle orchestration without discarding the operator material-change evidence.",
           idempotencyKey,
           occurredAt: now,
           audit: {
@@ -10316,11 +10460,18 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
               input.expectedSameCycleRecoveryHistoryDigest,
             descendantLineageDigest: descendantLineage?.lineageDigest ?? null,
             descendantHandoffCount: descendantLineage?.handoffCount ?? null,
+            failureRefinementLineageDigest:
+              failureRefinementIncompletePlaybookRecovery?.lineageDigest ??
+              null,
+            failureRefinementEventCount:
+              failureRefinementIncompletePlaybookRecovery?.refinementEventCount ??
+              null,
             materialChangeLineageDigest:
               sameIdentityMaterialChangeIncompleteRecovery?.lineage
                 .lineageDigest ?? null,
             batchCount: sameCycleRecoveryHistory!.batchCount,
             startedRequestCount:
+              failureRefinementIncompletePlaybookRecoveryRequested ||
               sameIdentityMaterialChangeIncompleteRecoveryRequested ||
               postMarkerIncompletePlaybookRecoveryRequested ||
               descendantIncompletePlaybookRecoveryRequested

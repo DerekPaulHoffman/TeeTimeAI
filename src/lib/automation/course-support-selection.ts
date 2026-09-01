@@ -1,18 +1,18 @@
 import type {
   CourseHumanReviewReason,
   CourseSupportFailureClass,
-  CourseSupportIncidentKind
+  CourseSupportIncidentKind,
 } from "@prisma/client";
 
 import {
   COURSE_SUPPORT_SYNTHETIC_AGING_MS,
   COURSE_SUPPORT_SYNTHETIC_FAIRNESS_WINDOW,
-  clampCourseSupportBatchSize
+  clampCourseSupportBatchSize,
 } from "./course-support-responder-policy";
 import type { AutomationPlaybookStage } from "./course-monitoring-playbook";
 import type {
   CourseSupportRemediationDirective,
-  CourseSupportRemediationRoute
+  CourseSupportRemediationRoute,
 } from "./course-support-remediation-routing";
 import type { CourseSupportClaimActionPlan } from "./course-support-action-plan";
 import type { DeferredFailureHandoffSignal } from "./course-support-deferred-failure-handoff";
@@ -71,6 +71,7 @@ export type CourseSupportCandidate = {
       | "FRESH_CYCLE"
       | "ZERO_EXECUTION_RECOVERY"
       | "INCOMPLETE_PLAYBOOK_RECOVERY"
+      | "FAILURE_REFINEMENT_INCOMPLETE_PLAYBOOK_RECOVERY"
       | "POST_MARKER_INCOMPLETE_PLAYBOOK_RECOVERY"
       | "DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY"
       | "PARKED_COHORT_REQUESTLESS_STALE_OWNERSHIP_RECOVERY"
@@ -100,9 +101,7 @@ export type RecentBatchFairnessEvidence = {
 };
 
 export type CourseSupportCampaignSummaryState =
-  | "CAMPAIGN"
-  | "NON_CAMPAIGN"
-  | "UNKNOWN";
+  "CAMPAIGN" | "NON_CAMPAIGN" | "UNKNOWN";
 
 export type CourseSupportAdmissionLane =
   | {
@@ -190,27 +189,27 @@ export function selectCourseSupportAdmissionLane(input: {
 }): CourseSupportAdmissionLane | null {
   const recentFairnessWindow = (input.recentBatches ?? []).slice(
     0,
-    COURSE_SUPPORT_SYNTHETIC_FAIRNESS_WINDOW
+    COURSE_SUPPORT_SYNTHETIC_FAIRNESS_WINDOW,
   );
   const parkedCampaignReservationDue = Boolean(
     input.priorityCandidateAvailable &&
-      input.requestlessParkedCampaignAvailable &&
-      !input.hasCurrentActiveRealDemand &&
-      (input.activeBatchCampaignSummaryStates ?? []).every(
-        (state) => state === "NON_CAMPAIGN",
-      ) &&
-      recentFairnessWindow.length >= COURSE_SUPPORT_SYNTHETIC_FAIRNESS_WINDOW &&
-      recentFairnessWindow.every(
-        (batch) =>
-          !batch.includedCriticalRealDemand &&
-          batch.campaignSummaryState === "NON_CAMPAIGN",
-      )
+    input.requestlessParkedCampaignAvailable &&
+    !input.hasCurrentActiveRealDemand &&
+    (input.activeBatchCampaignSummaryStates ?? []).every(
+      (state) => state === "NON_CAMPAIGN",
+    ) &&
+    recentFairnessWindow.length >= COURSE_SUPPORT_SYNTHETIC_FAIRNESS_WINDOW &&
+    recentFairnessWindow.every(
+      (batch) =>
+        !batch.includedCriticalRealDemand &&
+        batch.campaignSummaryState === "NON_CAMPAIGN",
+    ),
   );
 
   if (parkedCampaignReservationDue) {
     return {
       lane: "REQUESTLESS_PARKED_CAMPAIGN",
-      parkedCampaignReservation: true
+      parkedCampaignReservation: true,
     };
   }
   if (input.priorityCandidateAvailable) {
@@ -219,7 +218,7 @@ export function selectCourseSupportAdmissionLane(input: {
   if (input.requestlessParkedCampaignAvailable) {
     return {
       lane: "REQUESTLESS_PARKED_CAMPAIGN",
-      parkedCampaignReservation: false
+      parkedCampaignReservation: false,
     };
   }
   return null;
@@ -244,7 +243,9 @@ export function selectCourseSupportBatch(input: {
 
   const rankedGroups = [...groups.values()]
     .map((incidents) =>
-      incidents.sort((left, right) => compareCourseSupportCandidates(left, right, now))
+      incidents.sort((left, right) =>
+        compareCourseSupportCandidates(left, right, now),
+      ),
     )
     .sort((left, right) => compareCourseSupportGroups(left, right, now));
   if (rankedGroups.length === 0) {
@@ -252,28 +253,30 @@ export function selectCourseSupportBatch(input: {
   }
 
   const criticalGroups = rankedGroups.filter((group) =>
-    group.some((candidate) => isCriticalRealDemand(candidate, now))
+    group.some((candidate) => isCriticalRealDemand(candidate, now)),
   );
   const pendingInitialEndpointGroups = rankedGroups.filter(
-    (group) => candidateGroupPriority(group).pendingInitialEndpointCount > 0
+    (group) => candidateGroupPriority(group).pendingInitialEndpointCount > 0,
   );
   const recentFairnessWindow = (input.recentBatches ?? []).slice(
     0,
-    COURSE_SUPPORT_SYNTHETIC_FAIRNESS_WINDOW
+    COURSE_SUPPORT_SYNTHETIC_FAIRNESS_WINDOW,
   );
   const syntheticReservationDue =
     criticalGroups.length === 0 &&
     recentFairnessWindow.length >= COURSE_SUPPORT_SYNTHETIC_FAIRNESS_WINDOW &&
     recentFairnessWindow.every(
-      (batch) => !batch.includedEngineeringOnly && !batch.includedCriticalRealDemand
+      (batch) =>
+        !batch.includedEngineeringOnly && !batch.includedCriticalRealDemand,
     );
   const agedSyntheticGroup = rankedGroups
     .filter((group) =>
       group.some(
         (candidate) =>
           candidate.engineeringOnly &&
-          now.getTime() - candidate.firstSeenAt.getTime() >= COURSE_SUPPORT_SYNTHETIC_AGING_MS
-      )
+          now.getTime() - candidate.firstSeenAt.getTime() >=
+            COURSE_SUPPORT_SYNTHETIC_AGING_MS,
+      ),
     )
     .sort((left, right) => oldestSeenAt(left) - oldestSeenAt(right))[0];
 
@@ -287,7 +290,7 @@ export function selectCourseSupportBatch(input: {
       ? "AGED_SYNTHETIC_RESERVATION"
       : "PRIORITY";
   const containsCriticalRealDemand = selectedGroup.some((candidate) =>
-    isCriticalRealDemand(candidate, now)
+    isCriticalRealDemand(candidate, now),
   );
   const selectedIncidents = containsCriticalRealDemand
     ? selectedGroup.slice(0, maxCourses)
@@ -301,7 +304,7 @@ export function selectCourseSupportBatch(input: {
     containsCriticalRealDemand,
     ...(selectedGroup[0].remediationDirective
       ? { remediationDirective: selectedGroup[0].remediationDirective }
-      : {})
+      : {}),
   };
 }
 
@@ -321,11 +324,11 @@ function courseSupportCandidateGroupKey(candidate: CourseSupportCandidate) {
 export function compareCourseSupportCandidates(
   left: CourseSupportCandidate,
   right: CourseSupportCandidate,
-  now: Date
+  now: Date,
 ) {
   const groupPriority = compareCourseSupportGroupPriority(
     candidateGroupPriority([left]),
-    candidateGroupPriority([right])
+    candidateGroupPriority([right]),
   );
   if (groupPriority !== 0) {
     return groupPriority;
@@ -347,25 +350,30 @@ export function compareCourseSupportCandidates(
   return left.firstSeenAt.getTime() - right.firstSeenAt.getTime();
 }
 
-export function isCriticalRealDemand(candidate: CourseSupportCandidate, now: Date) {
+export function isCriticalRealDemand(
+  candidate: CourseSupportCandidate,
+  now: Date,
+) {
   return Boolean(
     candidate.activeRealSearchCount > 0 &&
     candidate.kind === "FETCH_FAILED" &&
     candidate.earliestTargetDate &&
-    candidate.earliestTargetDate.getTime() <= now.getTime() + NEAR_DATE_WINDOW_MS
+    candidate.earliestTargetDate.getTime() <=
+      now.getTime() + NEAR_DATE_WINDOW_MS,
   );
 }
 
 function reserveAgedSyntheticSlots(
   incidents: CourseSupportCandidate[],
   maxCourses: number,
-  now: Date
+  now: Date,
 ) {
   const real = incidents.filter((candidate) => !candidate.engineeringOnly);
   const agedSynthetic = incidents.filter(
     (candidate) =>
       candidate.engineeringOnly &&
-      now.getTime() - candidate.firstSeenAt.getTime() >= COURSE_SUPPORT_SYNTHETIC_AGING_MS
+      now.getTime() - candidate.firstSeenAt.getTime() >=
+        COURSE_SUPPORT_SYNTHETIC_AGING_MS,
   );
   if (real.length === 0 || agedSynthetic.length === 0 || maxCourses < 4) {
     return incidents.slice(0, maxCourses);
@@ -373,7 +381,7 @@ function reserveAgedSyntheticSlots(
   const reservedSyntheticSlots = Math.max(1, Math.floor(maxCourses / 4));
   const selected = [
     ...real.slice(0, maxCourses - reservedSyntheticSlots),
-    ...agedSynthetic.slice(0, reservedSyntheticSlots)
+    ...agedSynthetic.slice(0, reservedSyntheticSlots),
   ];
   const selectedIds = new Set(selected.map((candidate) => candidate.id));
   for (const candidate of incidents) {
@@ -385,17 +393,19 @@ function reserveAgedSyntheticSlots(
       selectedIds.add(candidate.id);
     }
   }
-  return selected.sort((left, right) => compareCourseSupportCandidates(left, right, now));
+  return selected.sort((left, right) =>
+    compareCourseSupportCandidates(left, right, now),
+  );
 }
 
 function compareCourseSupportGroups(
   left: CourseSupportCandidate[],
   right: CourseSupportCandidate[],
-  now: Date
+  now: Date,
 ) {
   const groupPriority = compareCourseSupportGroupPriority(
     candidateGroupPriority(left),
-    candidateGroupPriority(right)
+    candidateGroupPriority(right),
   );
   if (groupPriority !== 0) {
     return groupPriority;
@@ -404,14 +414,20 @@ function compareCourseSupportGroups(
   if (leadComparison !== 0) {
     return leadComparison;
   }
-  const leftDemand = left.reduce((sum, candidate) => sum + candidate.activeRealSearchCount, 0);
-  const rightDemand = right.reduce((sum, candidate) => sum + candidate.activeRealSearchCount, 0);
+  const leftDemand = left.reduce(
+    (sum, candidate) => sum + candidate.activeRealSearchCount,
+    0,
+  );
+  const rightDemand = right.reduce(
+    (sum, candidate) => sum + candidate.activeRealSearchCount,
+    0,
+  );
   return rightDemand - leftDemand || oldestSeenAt(left) - oldestSeenAt(right);
 }
 
 export function compareCourseSupportGroupPriority(
   left: CourseSupportGroupPriority,
-  right: CourseSupportGroupPriority
+  right: CourseSupportGroupPriority,
 ) {
   const leftHasPendingInitialEndpoint = left.pendingInitialEndpointCount > 0;
   const rightHasPendingInitialEndpoint = right.pendingInitialEndpointCount > 0;
@@ -420,12 +436,15 @@ export function compareCourseSupportGroupPriority(
   }
   if (leftHasPendingInitialEndpoint) {
     const pendingDeadlineOrder =
-      (left.earliestPendingInitialEndpointDeadlineAt?.getTime() ?? Number.MAX_SAFE_INTEGER) -
-      (right.earliestPendingInitialEndpointDeadlineAt?.getTime() ?? Number.MAX_SAFE_INTEGER);
+      (left.earliestPendingInitialEndpointDeadlineAt?.getTime() ??
+        Number.MAX_SAFE_INTEGER) -
+      (right.earliestPendingInitialEndpointDeadlineAt?.getTime() ??
+        Number.MAX_SAFE_INTEGER);
     if (pendingDeadlineOrder !== 0) {
       return pendingDeadlineOrder;
     }
-    const pendingCountOrder = right.pendingInitialEndpointCount - left.pendingInitialEndpointCount;
+    const pendingCountOrder =
+      right.pendingInitialEndpointCount - left.pendingInitialEndpointCount;
     if (pendingCountOrder !== 0) {
       return pendingCountOrder;
     }
@@ -437,12 +456,15 @@ export function compareCourseSupportGroupPriority(
   }
   if (leftHasRealDemand) {
     const deadlineOrder =
-      (left.earliestEscalationDeadlineAt?.getTime() ?? Number.MAX_SAFE_INTEGER) -
-      (right.earliestEscalationDeadlineAt?.getTime() ?? Number.MAX_SAFE_INTEGER);
+      (left.earliestEscalationDeadlineAt?.getTime() ??
+        Number.MAX_SAFE_INTEGER) -
+      (right.earliestEscalationDeadlineAt?.getTime() ??
+        Number.MAX_SAFE_INTEGER);
     if (deadlineOrder !== 0) {
       return deadlineOrder;
     }
-    const demandOrder = right.activeRealDemandCount - left.activeRealDemandCount;
+    const demandOrder =
+      right.activeRealDemandCount - left.activeRealDemandCount;
     if (demandOrder !== 0) {
       return demandOrder;
     }
@@ -451,19 +473,24 @@ export function compareCourseSupportGroupPriority(
 }
 
 function candidateGroupPriority(
-  candidates: readonly CourseSupportCandidate[]
+  candidates: readonly CourseSupportCandidate[],
 ): CourseSupportGroupPriority {
   const activeRealCandidates = candidates.filter(
-    (candidate) => candidate.activeRealSearchCount > 0
+    (candidate) => candidate.activeRealSearchCount > 0,
   );
   const pendingInitialEndpointCandidates = activeRealCandidates.filter(
-    (candidate) => !candidate.endpointHumanReviewProven
+    (candidate) => !candidate.endpointHumanReviewProven,
   );
-  const pendingInitialEndpointDeadlines = pendingInitialEndpointCandidates.flatMap((candidate) =>
-    candidate.escalationDeadlineAt ? [candidate.escalationDeadlineAt.getTime()] : []
-  );
+  const pendingInitialEndpointDeadlines =
+    pendingInitialEndpointCandidates.flatMap((candidate) =>
+      candidate.escalationDeadlineAt
+        ? [candidate.escalationDeadlineAt.getTime()]
+        : [],
+    );
   const deadlines = activeRealCandidates.flatMap((candidate) =>
-    candidate.escalationDeadlineAt ? [candidate.escalationDeadlineAt.getTime()] : []
+    candidate.escalationDeadlineAt
+      ? [candidate.escalationDeadlineAt.getTime()]
+      : [],
   );
   return {
     pendingInitialEndpointCount: pendingInitialEndpointCandidates.length,
@@ -473,9 +500,10 @@ function candidateGroupPriority(
         : null,
     activeRealDemandCount: activeRealCandidates.reduce(
       (sum, candidate) => sum + candidate.activeRealSearchCount,
-      0
+      0,
     ),
-    earliestEscalationDeadlineAt: deadlines.length > 0 ? new Date(Math.min(...deadlines)) : null
+    earliestEscalationDeadlineAt:
+      deadlines.length > 0 ? new Date(Math.min(...deadlines)) : null,
   };
 }
 
@@ -483,7 +511,10 @@ function candidatePriority(candidate: CourseSupportCandidate, now: Date) {
   if (isCriticalRealDemand(candidate, now)) {
     return 0;
   }
-  if (candidate.activeRealSearchCount > 0 && candidate.kind === "FETCH_FAILED") {
+  if (
+    candidate.activeRealSearchCount > 0 &&
+    candidate.kind === "FETCH_FAILED"
+  ) {
     return 1;
   }
   if (candidate.activeRealSearchCount > 0) {
@@ -496,5 +527,7 @@ function candidatePriority(candidate: CourseSupportCandidate, now: Date) {
 }
 
 function oldestSeenAt(candidates: CourseSupportCandidate[]) {
-  return Math.min(...candidates.map((candidate) => candidate.firstSeenAt.getTime()));
+  return Math.min(
+    ...candidates.map((candidate) => candidate.firstSeenAt.getTime()),
+  );
 }

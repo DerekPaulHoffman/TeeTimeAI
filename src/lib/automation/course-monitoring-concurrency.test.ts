@@ -100,6 +100,7 @@ import {
 import { parkCourseSupportCandidatesForMaterialChange } from "./course-support-batches";
 import {
   assessParkedCourseCampaignDescendantIncompletePlaybookRecovery,
+  assessParkedCourseCampaignFailureRefinementIncompletePlaybookRecovery,
   assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery,
   assessParkedCourseCampaignSameIdentityMaterialChangeIncompletePlaybookRecovery,
   assessParkedCourseCampaignSameCycleRecoveryHistory,
@@ -149,8 +150,7 @@ function mockUnconsumedLocalReaderProviderSource(providerObservedAt: Date) {
       status: "NO_AVAILABILITY",
       evidenceAnchor: "SERVER_CLAIM",
       observedAt: providerObservedAt.toISOString(),
-      pageUrl:
-        "https://grassyhill.cps.golf/onlineresweb/search-teetime",
+      pageUrl: "https://grassyhill.cps.golf/onlineresweb/search-teetime",
       pageTitle: "Tee times",
       slots: [],
       readerVersion: "reader-test-1",
@@ -3585,7 +3585,479 @@ describe("course monitoring write serialization", () => {
     );
   });
 
+  it("atomically resumes first-cycle failure refinement without resetting or overstating execution", async () => {
+    const campaignCapturedAt = new Date("2026-08-20T12:00:00.000Z");
+    const admittedAt = new Date("2026-08-20T12:05:00.000Z");
+    const refinementAt = new Date("2026-08-20T12:10:00.000Z");
+    const batchCreatedAt = new Date("2026-08-20T12:12:00.000Z");
+    const entryCreatedAt = new Date("2026-08-20T12:13:00.000Z");
+    const requestStartedAt = new Date("2026-08-20T12:14:00.000Z");
+    const completedAt = new Date("2026-08-20T12:20:00.000Z");
+    const summaryBatchCreatedAt = new Date("2026-08-20T12:21:00.000Z");
+    const summaryEntryCreatedAt = new Date("2026-08-20T12:22:00.000Z");
+    const summaryCompletedAt = new Date("2026-08-20T12:25:00.000Z");
+    const parkedAt = new Date("2026-08-20T12:30:00.000Z");
+    const recoveredAt = new Date("2026-08-20T13:00:00.000Z");
+    const runtimeVersion = "f".repeat(40);
+    const providerCourse = {
+      updatedAt: new Date("2026-08-20T12:11:00.000Z"),
+      timeZone: "America/New_York",
+      website: null,
+      detectedBookingUrl: null,
+      detectedPlatform: "UNKNOWN" as const,
+      providerFamilyKey: "SOURCE_MISSING",
+      bookingMethod: "UNKNOWN" as const,
+      bookingWindowDaysAhead: null,
+      bookingWindowEvidenceUrl: null,
+      bookingReleaseTimeLocal: null,
+      bookingWindowSource: null,
+      bookingWindowConfidence: null,
+      automationEligibility: "UNKNOWN" as const,
+      automationReason: "NONE" as const,
+      monitoringMode: "STANDARD" as const,
+      bookingAccessMode: "UNKNOWN",
+      isPublic: true,
+      intelligenceVerifiedAt: null,
+      intelligenceReviewAt: null,
+      intelligenceConfidence: null,
+      bookingMetadata: null,
+      layoutHoleCounts: [],
+      layoutHolesVerifiedAt: null,
+    };
+    const providerSnapshotFingerprint =
+      buildCourseSupportProviderSnapshotFingerprint(providerCourse);
+    const campaignAudit = createParkedCourseCampaignAudit({
+      expectedCount: 1,
+      capturedAt: campaignCapturedAt,
+      members: [
+        {
+          courseId: "course-1",
+          incidentId: "incident-campaign",
+          cycle: 3,
+          revision: 5,
+          monitoringRevision: 9,
+          monitoringFailureFingerprint: "SOURCE:MISSING",
+          kind: "NEEDS_ADAPTER",
+          providerFamilyKey: "SOURCE_MISSING",
+          failureClass: "MISSING_SOURCE",
+          failureFingerprint: "SOURCE:MISSING",
+          providerSnapshotFingerprint,
+          attemptLedgerFingerprint:
+            createParkedCourseCampaignAttemptLedgerFingerprint(null),
+          playbookConclusion: "INCOMPLETE",
+          latestProbeAt: null,
+          latestDiscoveryAt: null,
+        },
+      ],
+    });
+    const stages = [
+      ["OFFICIAL_IDENTITY", "OFFICIAL_IDENTITY"],
+      ["TYPED_ADAPTER", "TYPED_PROVIDER_ADAPTER"],
+      ["OFFICIAL_HTTP_DISCOVERY", "OFFICIAL_HTTP"],
+      ["HTTP_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER"],
+      ["RENDERED_BROWSER_DISCOVERY", "RENDERED_BROWSER"],
+    ] as const;
+    const attemptLedger = {
+      version: 1,
+      events: stages.map(([stage, readPath], index) => ({
+        sequence: index + 1,
+        cycle: 4,
+        stage,
+        transition: "NOT_APPLICABLE",
+        readPath,
+        evidenceKind: "TOOLING",
+        observedAt:
+          index === 4
+            ? refinementAt.toISOString()
+            : new Date(admittedAt.getTime() + index * 1_000).toISOString(),
+        failureFingerprint: "METADATA:MISSING",
+        runtimeVersion,
+        skipReason: "NO_PROVIDER_METADATA",
+      })),
+    };
+    const courseRef = createHash("sha256")
+      .update("course-1")
+      .digest("hex")
+      .slice(0, 24);
+    const batchIncidents = [
+      {
+        id: "batch-entry-refinement",
+        batchId: "batch-refinement",
+        incidentId: "incident-campaign",
+        courseId: "course-1",
+        cycle: 4,
+        result: "NEEDS_HUMAN",
+        preProbeId: null,
+        postProbeId: null,
+        proofSnapshot: { providerSnapshotFingerprint },
+        verifiedIncidentUpdatedAt: null,
+        verifiedAt: null,
+        createdAt: entryCreatedAt,
+        updatedAt: completedAt,
+        batch: {
+          id: "batch-refinement",
+          status: "RETRYABLE_FAILED",
+          revision: 4,
+          ownerAutomationRunId: null,
+          baseSha: runtimeVersion,
+          releaseSha: runtimeVersion,
+          deployedAt: null,
+          createdAt: batchCreatedAt,
+          updatedAt: completedAt,
+          recheckDispatchKey: null,
+          recheckDispatchStartedAt: null,
+          recheckDispatchedAt: null,
+          completedAt,
+          summary: { closeout: { providerExecutionStarted: false } },
+          ownerAutomationRun: null,
+        },
+        verificationRequests: [
+          {
+            id: "request-refinement",
+            courseId: "course-1",
+            releaseSha: runtimeVersion,
+            providerSnapshotFingerprint,
+            providerSnapshotAt: batchCreatedAt,
+            discoveryAttemptedAt: requestStartedAt,
+            discoveryVerifiedAt: null,
+            createdAt: entryCreatedAt,
+            updatedAt: completedAt,
+            status: "SUCCEEDED" as const,
+            revision: 3,
+            attemptCount: 1,
+            workflowRunId: "workflow-refinement",
+            startedAt: requestStartedAt,
+            outcome: "FETCH_FAILED" as const,
+            failureClass: "MISSING_METADATA" as const,
+            evidence: { providerExecution: false },
+            lastError: "failure refined without provider execution",
+          },
+        ],
+      },
+      {
+        id: "batch-entry-refinement-summary",
+        batchId: "batch-refinement-summary",
+        incidentId: "incident-campaign",
+        courseId: "course-1",
+        cycle: 4,
+        result: "NEEDS_HUMAN",
+        preProbeId: null,
+        postProbeId: null,
+        proofSnapshot: { providerSnapshotFingerprint },
+        verifiedIncidentUpdatedAt: null,
+        verifiedAt: null,
+        createdAt: summaryEntryCreatedAt,
+        updatedAt: summaryCompletedAt,
+        batch: {
+          id: "batch-refinement-summary",
+          status: "RETRYABLE_FAILED",
+          revision: 4,
+          ownerAutomationRunId: null,
+          baseSha: runtimeVersion,
+          releaseSha: runtimeVersion,
+          deployedAt: null,
+          createdAt: summaryBatchCreatedAt,
+          updatedAt: summaryCompletedAt,
+          recheckDispatchKey: null,
+          recheckDispatchStartedAt: null,
+          recheckDispatchedAt: null,
+          completedAt: summaryCompletedAt,
+          summary: {
+            remediation: {
+              attempts: [{ courseRef, providerSnapshotFingerprint }],
+            },
+            closeout: {
+              remediationAttempts: [
+                {
+                  courseRef,
+                  providerSnapshotFingerprint,
+                  observedProviderSnapshotFingerprint:
+                    providerSnapshotFingerprint,
+                  failureFingerprint: "METADATA:MISSING",
+                  observedFailureFingerprint: "METADATA:MISSING",
+                  runtimeVersion,
+                  providerSnapshotChanged: false,
+                },
+              ],
+            },
+          },
+          ownerAutomationRun: null,
+        },
+        verificationRequests: [],
+      },
+    ];
+    const monitoringEvents = [
+      {
+        id: "endpoint-refinement",
+        incidentId: "incident-campaign",
+        eventType: "HUMAN_REVIEW_REQUESTED",
+        source: "RECOVERY_CRON",
+        failureFingerprint: "METADATA:MISSING",
+        readPath: null,
+        occurredAt: parkedAt,
+        audit: {
+          cycle: 4,
+          customerState: "NEEDS_HUMAN_REVIEW",
+          parkedUntilMaterialChange: true,
+          automationStalled: true,
+          playbookExhausted: false,
+          endpointStalled: true,
+          customerDataIncluded: false,
+        },
+      },
+      {
+        id: "attempt-refinement",
+        incidentId: "incident-campaign",
+        eventType: "AUTOMATION_ATTEMPTED",
+        source: "COURSE_SUPPORT_RESPONDER",
+        failureFingerprint: "METADATA:MISSING",
+        readPath: "BOUNDED_RECOVERY_PLAYBOOK",
+        occurredAt: refinementAt,
+        audit: {
+          providerFamilyKey: "SOURCE_MISSING",
+          maxCourses: 5,
+          serializedWriterLane: true,
+          customerDataIncluded: false,
+        },
+      },
+      {
+        id: "admission-refinement",
+        incidentId: "incident-campaign",
+        eventType: "REVALIDATION_REQUESTED",
+        source: "COURSE_SUPPORT_RESPONDER",
+        failureFingerprint: "SOURCE:MISSING",
+        readPath: null,
+        occurredAt: admittedAt,
+        audit: {
+          action: "parked_cohort_admission",
+          campaignRunId: "campaign-run-1",
+          campaignMembershipDigest: campaignAudit.membershipDigest,
+          priorCycle: 3,
+          cycle: 4,
+          preservesPriorAttemptEvents: true,
+          customerDataIncluded: false,
+        },
+      },
+    ];
+    const recovery =
+      assessParkedCourseCampaignFailureRefinementIncompletePlaybookRecovery({
+        captured: campaignAudit.members[0]!,
+        current: {
+          courseId: "course-1",
+          incidentId: "incident-campaign",
+          cycle: 4,
+          revision: 12,
+          monitoringRevision: 16,
+          monitoringFailureFingerprint: "METADATA:MISSING",
+          kind: "NEEDS_ADAPTER",
+          providerFamilyKey: "SOURCE_MISSING",
+          failureClass: "MISSING_METADATA",
+          failureFingerprint: "METADATA:MISSING",
+          providerSnapshotFingerprint,
+          attemptLedgerFingerprint:
+            createParkedCourseCampaignAttemptLedgerFingerprint(attemptLedger),
+          playbookConclusion: "INCOMPLETE",
+          latestProbeAt: null,
+          latestDiscoveryAt: null,
+          activeRealSearchCount: 0,
+          zeroExecutionEvidence: {
+            latestProbe: null,
+            latestDiscovery: null,
+            latestProbeTimestampRowCount: 0,
+            latestDiscoveryTimestampRowCount: 0,
+            monitoringHistoryCompleteSince: campaignCapturedAt,
+            monitoringEvents,
+            batchIncidents,
+            playbookAssessment: assessAutomationPlaybook(attemptLedger, 4),
+          },
+        },
+        capturedAt: campaignCapturedAt,
+        campaignRunId: "campaign-run-1",
+        campaignMembershipDigest: campaignAudit.membershipDigest,
+      });
+    expect(recovery).not.toBeNull();
+    const baseIncident = {
+      id: "incident-campaign",
+      courseId: "course-1",
+      cycle: 4,
+      revision: 12,
+      status: "NEEDS_HUMAN",
+      kind: "NEEDS_ADAPTER",
+      providerFamilyKey: "SOURCE_MISSING",
+      failureClass: "MISSING_METADATA",
+      failureFingerprint: "METADATA:MISSING",
+      attemptLedger,
+      humanReviewReason: "AUTOMATION_STALLED",
+      activeRealSearchCount: 0,
+      attemptCount: 8,
+      lastAttemptAt: completedAt,
+      confirmedAt: admittedAt,
+      activeBatchId: null,
+      nextAttemptAt: null,
+      escalatedAt: parkedAt,
+      resolution: null,
+      resolvedAt: null,
+      resolutionMessage: null,
+      resolutionNotifiedAt: null,
+      decisionActorId: null,
+      decisionAt: null,
+      decisionNote: null,
+      decisionEvidenceUrl: null,
+      decisionIdempotencyKey: null,
+      monitoringEvents,
+      batchIncidents,
+      course: {
+        ...providerCourse,
+        probes: [],
+        automationDiscoveries: [],
+        preferences: [],
+        monitoringStatus: {
+          state: "ENGINEERING_VERIFICATION_NEEDED",
+          revision: 16,
+          failureFingerprint: "METADATA:MISSING",
+          nextAutomaticAttemptAt: null,
+          revalidationRequestedAt: null,
+        },
+      },
+    };
+    transactionMocks.courseSupportIncident.findUnique.mockResolvedValue(
+      baseIncident,
+    );
+    transactionMocks.courseSupportBatchIncident.findMany.mockResolvedValue(
+      batchIncidents,
+    );
+    transactionMocks.automationRun.findUnique.mockResolvedValue({
+      promptVersion: PARKED_COURSE_CAMPAIGN_PROMPT_VERSION,
+      status: "RUNNING",
+      completedAt: null,
+      audit: campaignAudit,
+    });
+    const input = {
+      courseId: "course-1",
+      incidentId: "incident-campaign",
+      expectedCycle: 4,
+      expectedRevision: 12,
+      expectedMonitoringRevision: 16,
+      capturedRevision: 5,
+      capturedMonitoringRevision: 9,
+      capturedCycle: 3,
+      campaignCapturedAt: campaignAudit.capturedAt,
+      admissionMode: "FAILURE_REFINEMENT_INCOMPLETE_PLAYBOOK_RECOVERY" as const,
+      expectedSameCycleRecoveryHistoryDigest: recovery!.history.historyDigest,
+      expectedPlaybookNextStage: "BROWSER_ADAPTER_RETRY",
+      expectedPlaybookCompletedStageCount: 5,
+      currentRuntimeVersion: runtimeVersion,
+      capturedKind: "NEEDS_ADAPTER" as const,
+      capturedProviderFamilyKey: "SOURCE_MISSING",
+      expectedKind: "NEEDS_ADAPTER" as const,
+      expectedFailureClass: "MISSING_METADATA" as const,
+      expectedLatestProbeAt: null,
+      expectedLatestDiscoveryAt: null,
+      expectedLatestProbeId: null,
+      expectedLatestDiscoveryId: null,
+      expectedProviderFamilyKey: "SOURCE_MISSING",
+      expectedFailureFingerprint: "METADATA:MISSING",
+      expectedMonitoringFailureFingerprint: "METADATA:MISSING",
+      expectedProviderSnapshotFingerprint: providerSnapshotFingerprint,
+      expectedAttemptLedgerFingerprint:
+        createParkedCourseCampaignAttemptLedgerFingerprint(attemptLedger),
+      expectedPlaybookConclusion: "INCOMPLETE",
+      campaignRunId: "campaign-run-1",
+      campaignMembershipDigest: campaignAudit.membershipDigest,
+      now: recoveredAt,
+    };
+
+    await expect(
+      reopenParkedCourseForResponderCampaignInTransaction(
+        transactionMocks as never,
+        input,
+      ),
+    ).resolves.toMatchObject({ admitted: true, cycle: 4 });
+    const incidentUpdate =
+      transactionMocks.courseSupportIncident.updateMany.mock.calls[0]?.[0];
+    expect(incidentUpdate.data).toMatchObject({
+      status: "AUTO_INVESTIGATING",
+      nextAttemptAt: recoveredAt,
+    });
+    for (const preserved of [
+      "cycle",
+      "attemptLedger",
+      "attemptCount",
+      "confirmedAt",
+      "lastAttemptAt",
+    ]) {
+      expect(incidentUpdate.data).not.toHaveProperty(preserved);
+    }
+    const createdRecovery =
+      transactionMocks.courseMonitoringEvent.create.mock.calls[0]?.[0];
+    expect(createdRecovery).toEqual(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          audit: expect.objectContaining({
+            action:
+              "parked_cohort_failure_refinement_incomplete_playbook_recovery",
+            admissionMode: "FAILURE_REFINEMENT_INCOMPLETE_PLAYBOOK_RECOVERY",
+            failureRefinementLineageDigest:
+              expect.stringMatching(/^[a-f0-9]{64}$/u),
+            failureRefinementEventCount: 1,
+            sameCycleRecoveryHistoryDigest: recovery!.history.historyDigest,
+            batchCount: 2,
+            startedRequestCount: 1,
+            playbookCompletedStageCount: 5,
+            playbookNextStage: "BROWSER_ADAPTER_RETRY",
+            sameCycleRecovery: true,
+            oneShot: true,
+            preservesAttemptLedger: true,
+            preservesAttemptCounts: true,
+            preservesAttemptTimestamps: true,
+            preservesOperatorEvidence: true,
+            preservesImmutableCampaignAudit: true,
+            customerDataIncluded: false,
+          }),
+        }),
+      }),
+    );
+    expect(createdRecovery.data.audit).not.toHaveProperty("providerExecution");
+    expect(
+      transactionMocks.courseSupportBatch.updateMany,
+    ).not.toHaveBeenCalled();
+    expect(
+      transactionMocks.courseSupportBatchIncident.updateMany,
+    ).not.toHaveBeenCalled();
+    expect(
+      transactionMocks.courseSupportVerificationRequest.updateMany,
+    ).not.toHaveBeenCalled();
+
+    transactionMocks.courseSupportIncident.updateMany.mockClear();
+    transactionMocks.courseMonitoringEvent.findFirst.mockResolvedValueOnce({
+      id: "late-monitoring-event",
+    });
+    await expect(
+      reopenParkedCourseForResponderCampaignInTransaction(
+        transactionMocks as never,
+        input,
+      ),
+    ).resolves.toEqual({ admitted: false });
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).not.toHaveBeenCalled();
+
+    transactionMocks.automationRun.updateMany.mockResolvedValueOnce({
+      count: 0,
+    });
+    await expect(
+      reopenParkedCourseForResponderCampaignInTransaction(
+        transactionMocks as never,
+        input,
+      ),
+    ).resolves.toEqual({ admitted: false });
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).not.toHaveBeenCalled();
+  });
+
   it.each([
+    "FAILURE_REFINEMENT_INCOMPLETE_PLAYBOOK_RECOVERY",
     "SAME_IDENTITY_MATERIAL_CHANGE_INCOMPLETE_PLAYBOOK_RECOVERY",
     "POST_MARKER_INCOMPLETE_PLAYBOOK_RECOVERY",
   ] as const)("uses SERIALIZABLE for %s admission", async (admissionMode) => {
@@ -7311,9 +7783,15 @@ describe("course monitoring write serialization", () => {
 
     expect(transactionMocks.course.update).not.toHaveBeenCalled();
     expect(transactionMocks.teeTimeMatch.updateMany).not.toHaveBeenCalled();
-    expect(transactionMocks.courseMonitoringStatus.update).not.toHaveBeenCalled();
-    expect(transactionMocks.courseSupportIncident.updateMany).not.toHaveBeenCalled();
-    expect(transactionMocks.courseMonitoringEvent.create).not.toHaveBeenCalled();
+    expect(
+      transactionMocks.courseMonitoringStatus.update,
+    ).not.toHaveBeenCalled();
+    expect(
+      transactionMocks.courseSupportIncident.updateMany,
+    ).not.toHaveBeenCalled();
+    expect(
+      transactionMocks.courseMonitoringEvent.create,
+    ).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -7357,7 +7835,10 @@ describe("course monitoring write serialization", () => {
         courseId: "course-1",
         state: "FINAL_IDENTITY",
         outcome: "IDENTITY_FINAL",
-        evidence: { kind: "COURSE_INTELLIGENCE", observedAt: evidenceObservedAt },
+        evidence: {
+          kind: "COURSE_INTELLIGENCE",
+          observedAt: evidenceObservedAt,
+        },
         courseIntelligenceUpdate: {
           isPublic: false,
           automationEligibility: "BLOCKED",
@@ -7420,7 +7901,10 @@ describe("course monitoring write serialization", () => {
         courseId: "course-1",
         state: "FINAL_IDENTITY",
         outcome: "IDENTITY_FINAL",
-        evidence: { kind: "COURSE_INTELLIGENCE", observedAt: evidenceObservedAt },
+        evidence: {
+          kind: "COURSE_INTELLIGENCE",
+          observedAt: evidenceObservedAt,
+        },
         courseIntelligenceUpdate: {
           isPublic: false,
           automationEligibility: "BLOCKED",
@@ -7428,7 +7912,8 @@ describe("course monitoring write serialization", () => {
           intelligenceVerifiedAt: evidenceObservedAt,
           intelligenceConfidence: 1,
         },
-        message: "Unconsumed reader work at the same or a newer source time wins.",
+        message:
+          "Unconsumed reader work at the same or a newer source time wins.",
         now: new Date("2026-07-27T15:50:00.000Z"),
       });
 
@@ -7499,7 +7984,9 @@ describe("course monitoring write serialization", () => {
     });
 
     expect(result).toMatchObject({ sourceEvidenceAccepted: true });
-    expect(transactionMocks.providerRequestLease.deleteMany).toHaveBeenCalledWith({
+    expect(
+      transactionMocks.providerRequestLease.deleteMany,
+    ).toHaveBeenCalledWith({
       where: expect.objectContaining({
         slot: 0,
         updatedAt: providerObservedAt,

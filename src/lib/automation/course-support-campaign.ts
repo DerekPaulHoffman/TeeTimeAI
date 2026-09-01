@@ -150,6 +150,7 @@ export type ParkedCourseCampaignAdmissionMember = ParkedCourseCampaignMember & {
     | "FRESH_CYCLE"
     | "ZERO_EXECUTION_RECOVERY"
     | "INCOMPLETE_PLAYBOOK_RECOVERY"
+    | "FAILURE_REFINEMENT_INCOMPLETE_PLAYBOOK_RECOVERY"
     | "POST_MARKER_INCOMPLETE_PLAYBOOK_RECOVERY"
     | "DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY"
     | "PARKED_COHORT_REQUESTLESS_STALE_OWNERSHIP_RECOVERY"
@@ -269,6 +270,37 @@ export function deriveParkedCourseCampaignHumanReviewCycles(input: {
         audit.campaignMembershipDigest &&
       asCampaignRecord(audit.campaign).cycle === cycle &&
       (descendantProgressedShape || descendantZeroProgressShape);
+    const failureRefinementIncompleteRecovery =
+      event.source === "COURSE_SUPPORT_RESPONDER" &&
+      audit.action ===
+        "parked_cohort_failure_refinement_incomplete_playbook_recovery" &&
+      audit.admissionMode ===
+        "FAILURE_REFINEMENT_INCOMPLETE_PLAYBOOK_RECOVERY" &&
+      typeof audit.failureRefinementLineageDigest === "string" &&
+      /^[a-f0-9]{64}$/u.test(audit.failureRefinementLineageDigest) &&
+      Number.isInteger(audit.failureRefinementEventCount) &&
+      Number(audit.failureRefinementEventCount) >= 1 &&
+      Number.isInteger(audit.startedRequestCount) &&
+      Number(audit.startedRequestCount) >= 1 &&
+      Number.isInteger(audit.batchCount) &&
+      Number(audit.batchCount) >= 1 &&
+      Number.isInteger(audit.playbookCompletedStageCount) &&
+      Number(audit.playbookCompletedStageCount) > 0 &&
+      typeof audit.playbookNextStage === "string" &&
+      audit.playbookNextStage.trim().length > 0 &&
+      audit.customerDataIncluded === false &&
+      audit.preservesOperatorEvidence === true &&
+      audit.preservesAttemptLedger === true &&
+      audit.preservesAttemptCounts === true &&
+      audit.preservesAttemptTimestamps === true &&
+      audit.preservesImmutableCampaignAudit === true &&
+      audit.sameCycleRecovery === true &&
+      audit.oneShot === true &&
+      asCampaignRecord(audit.campaign).kind === "PARKED_COHORT" &&
+      asCampaignRecord(audit.campaign).runId === audit.campaignRunId &&
+      asCampaignRecord(audit.campaign).membershipDigest ===
+        audit.campaignMembershipDigest &&
+      asCampaignRecord(audit.campaign).cycle === cycle;
     const postMarkerIncompleteRecovery =
       event.source === "COURSE_SUPPORT_RESPONDER" &&
       audit.action ===
@@ -297,7 +329,7 @@ export function deriveParkedCourseCampaignHumanReviewCycles(input: {
         nextStage:
           typeof audit.playbookNextStage === "string"
             ? audit.playbookNextStage
-            : null
+            : null,
       }) &&
       typeof audit.supersededEndpointId === "string" &&
       audit.supersededEndpointId.trim().length > 0 &&
@@ -352,6 +384,7 @@ export function deriveParkedCourseCampaignHumanReviewCycles(input: {
     const validIncompletePlaybookRecovery =
       ((audit.action === "parked_cohort_incomplete_playbook_recovery" &&
         audit.admissionMode === "INCOMPLETE_PLAYBOOK_RECOVERY") ||
+        failureRefinementIncompleteRecovery ||
         postMarkerIncompleteRecovery ||
         descendantIncompleteRecovery ||
         sameIdentityMaterialChangeIncompleteRecovery) &&
@@ -544,9 +577,7 @@ export function createParkedCourseCampaignMembershipDigest(
 }
 
 export type CourseSupportProviderFamilyCategory =
-  | "SOURCE_MISSING"
-  | "SOURCE_CONFLICT"
-  | "PROVIDER_SPECIFIC";
+  "SOURCE_MISSING" | "SOURCE_CONFLICT" | "PROVIDER_SPECIFIC";
 
 export function getReportSafeProviderFamilyCategory(
   providerFamilyKey: string,
@@ -1210,6 +1241,7 @@ export async function loadParkedCourseCampaignAdmissionMembers(
       requireZeroDemand: false,
       incidentIds: audit.members.map((member) => member.incidentId),
       requireExactCurrentCycleBatchHistory: true,
+      monitoringEventsNotBefore: new Date(audit.capturedAt),
     },
   );
   return currentMembers.flatMap((current) => {
@@ -1247,11 +1279,27 @@ export async function loadParkedCourseCampaignAdmissionMembers(
             campaignRunId,
             campaignMembershipDigest: audit.membershipDigest,
           });
-    const postMarkerIncompletePlaybookRecovery =
+    const failureRefinementIncompletePlaybookRecovery =
       freshCycle ||
       requestlessStaleOwnershipHistory ||
       zeroExecutionHistory ||
       incompletePlaybookHistory
+        ? null
+        : assessParkedCourseCampaignFailureRefinementIncompletePlaybookRecovery(
+            {
+              captured,
+              current,
+              capturedAt: new Date(audit.capturedAt),
+              campaignRunId,
+              campaignMembershipDigest: audit.membershipDigest,
+            },
+          );
+    const postMarkerIncompletePlaybookRecovery =
+      freshCycle ||
+      requestlessStaleOwnershipHistory ||
+      zeroExecutionHistory ||
+      incompletePlaybookHistory ||
+      failureRefinementIncompletePlaybookRecovery
         ? null
         : assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery({
             captured,
@@ -1266,6 +1314,7 @@ export async function loadParkedCourseCampaignAdmissionMembers(
       requestlessStaleOwnershipHistory ||
       zeroExecutionHistory ||
       incompletePlaybookHistory ||
+      failureRefinementIncompletePlaybookRecovery ||
       postMarkerIncompletePlaybookRecovery
         ? null
         : assessParkedCourseCampaignDescendantIncompletePlaybookRecovery({
@@ -1280,6 +1329,7 @@ export async function loadParkedCourseCampaignAdmissionMembers(
       requestlessStaleOwnershipHistory ||
       zeroExecutionHistory ||
       incompletePlaybookHistory ||
+      failureRefinementIncompletePlaybookRecovery ||
       postMarkerIncompletePlaybookRecovery ||
       descendantIncompletePlaybookRecovery
         ? null
@@ -1297,6 +1347,7 @@ export async function loadParkedCourseCampaignAdmissionMembers(
       requestlessStaleOwnershipHistory ||
       zeroExecutionHistory ||
       incompletePlaybookHistory ||
+      failureRefinementIncompletePlaybookRecovery ||
       postMarkerIncompletePlaybookRecovery ||
       descendantIncompletePlaybookRecovery ||
       sameIdentityMaterialChangeIncompletePlaybookRecovery
@@ -1312,6 +1363,7 @@ export async function loadParkedCourseCampaignAdmissionMembers(
       !requestlessStaleOwnershipHistory &&
       !zeroExecutionHistory &&
       !incompletePlaybookHistory &&
+      !failureRefinementIncompletePlaybookRecovery &&
       !postMarkerIncompletePlaybookRecovery &&
       !descendantIncompletePlaybookRecovery &&
       !sameIdentityMaterialChangeIncompletePlaybookRecovery &&
@@ -1327,13 +1379,15 @@ export async function loadParkedCourseCampaignAdmissionMembers(
           ? ("ZERO_EXECUTION_RECOVERY" as const)
           : incompletePlaybookHistory
             ? ("INCOMPLETE_PLAYBOOK_RECOVERY" as const)
-            : postMarkerIncompletePlaybookRecovery
-              ? ("POST_MARKER_INCOMPLETE_PLAYBOOK_RECOVERY" as const)
-              : descendantIncompletePlaybookRecovery
-                ? ("DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY" as const)
-                : sameIdentityMaterialChangeIncompletePlaybookRecovery
-                  ? ("SAME_IDENTITY_MATERIAL_CHANGE_INCOMPLETE_PLAYBOOK_RECOVERY" as const)
-                  : ("CURRENT_CYCLE_ORCHESTRATION_RECOVERY" as const);
+            : failureRefinementIncompletePlaybookRecovery
+              ? ("FAILURE_REFINEMENT_INCOMPLETE_PLAYBOOK_RECOVERY" as const)
+              : postMarkerIncompletePlaybookRecovery
+                ? ("POST_MARKER_INCOMPLETE_PLAYBOOK_RECOVERY" as const)
+                : descendantIncompletePlaybookRecovery
+                  ? ("DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY" as const)
+                  : sameIdentityMaterialChangeIncompletePlaybookRecovery
+                    ? ("SAME_IDENTITY_MATERIAL_CHANGE_INCOMPLETE_PLAYBOOK_RECOVERY" as const)
+                    : ("CURRENT_CYCLE_ORCHESTRATION_RECOVERY" as const);
     const playbookAssessment = current.zeroExecutionEvidence.playbookAssessment;
     return [
       {
@@ -1349,6 +1403,7 @@ export async function loadParkedCourseCampaignAdmissionMembers(
         sameCycleRecoveryHistoryDigest:
           requestlessStaleOwnershipHistory?.historyDigest ??
           incompletePlaybookHistory?.historyDigest ??
+          failureRefinementIncompletePlaybookRecovery?.history.historyDigest ??
           postMarkerIncompletePlaybookRecovery?.history.historyDigest ??
           descendantIncompletePlaybookRecovery?.history.historyDigest ??
           sameIdentityMaterialChangeIncompletePlaybookRecovery?.history
@@ -1378,6 +1433,7 @@ type ParkedCourseCampaignRecoveryEvidence = {
   } | null;
   latestProbeTimestampRowCount: number;
   latestDiscoveryTimestampRowCount: number;
+  monitoringHistoryCompleteSince?: Date | null;
   monitoringEvents: Array<{
     id?: string;
     incidentId: string | null;
@@ -2298,6 +2354,19 @@ type ParkedCourseCampaignMemberSnapshot = ParkedCourseCampaignMember & {
   zeroExecutionEvidence: ParkedCourseCampaignRecoveryEvidence;
 };
 
+function hasCompleteParkedCourseCampaignMonitoringHistory(input: {
+  current: ParkedCourseCampaignMemberSnapshot;
+  capturedAt: Date;
+}) {
+  const completeSince =
+    input.current.zeroExecutionEvidence.monitoringHistoryCompleteSince;
+  return (
+    completeSince instanceof Date &&
+    Number.isFinite(completeSince.getTime()) &&
+    completeSince <= input.capturedAt
+  );
+}
+
 function hasExactParkedCourseCampaignLatestEvidence(input: {
   current: ParkedCourseCampaignMemberSnapshot;
   strictlyBefore?: Date;
@@ -2330,6 +2399,7 @@ async function loadParkedCourseCampaignMemberSnapshots(
     requireZeroDemand: boolean;
     incidentIds?: readonly string[];
     requireExactCurrentCycleBatchHistory?: boolean;
+    monitoringEventsNotBefore?: Date;
   },
 ): Promise<ParkedCourseCampaignMemberSnapshot[]> {
   const incidents = await database.courseSupportIncident.findMany({
@@ -2400,8 +2470,14 @@ async function loadParkedCourseCampaignMemberSnapshots(
       decisionEvidenceUrl: true,
       decisionIdempotencyKey: true,
       monitoringEvents: {
+        ...(input.monitoringEventsNotBefore
+          ? {
+              where: {
+                occurredAt: { gte: input.monitoringEventsNotBefore },
+              },
+            }
+          : { take: 50 }),
         orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
-        take: 50,
         select: {
           id: true,
           incidentId: true,
@@ -2605,6 +2681,8 @@ async function loadParkedCourseCampaignMemberSnapshots(
                   incident.course.automationDiscoveries[0]!.createdAt.getTime(),
               ).length
             : 0,
+          monitoringHistoryCompleteSince:
+            input.monitoringEventsNotBefore ?? null,
           monitoringEvents: incident.monitoringEvents,
           batchIncidents: currentCycleBatchIncidents ?? incident.batchIncidents,
           playbookAssessment: assessAutomationPlaybook(
@@ -2778,6 +2856,275 @@ function getParkedCourseCampaignIncompletePlaybookRecovery(input: {
   });
 }
 
+export type ParkedCourseCampaignFailureRefinementIncompletePlaybookRecovery = {
+  lineageDigest: string;
+  admissionAt: Date;
+  refinementAt: Date;
+  refinementEventCount: number;
+  history: ParkedCourseCampaignSameCycleRecoveryHistory;
+};
+
+export function assessParkedCourseCampaignFailureRefinementIncompletePlaybookRecovery(input: {
+  captured: ParkedCourseCampaignMember;
+  current: ParkedCourseCampaignMemberSnapshot;
+  capturedAt: Date;
+  campaignRunId: string;
+  campaignMembershipDigest: string;
+}): ParkedCourseCampaignFailureRefinementIncompletePlaybookRecovery | null {
+  const { captured, current } = input;
+  const playbook = current.zeroExecutionEvidence.playbookAssessment;
+  const completeSince =
+    current.zeroExecutionEvidence.monitoringHistoryCompleteSince;
+  if (
+    !input.campaignRunId.trim() ||
+    !/^[a-f0-9]{64}$/u.test(input.campaignMembershipDigest) ||
+    !Number.isFinite(input.capturedAt.getTime()) ||
+    !(completeSince instanceof Date) ||
+    !Number.isFinite(completeSince.getTime()) ||
+    completeSince > input.capturedAt ||
+    current.courseId !== captured.courseId ||
+    current.incidentId !== captured.incidentId ||
+    current.cycle !== captured.cycle + 1 ||
+    current.kind !== captured.kind ||
+    current.providerFamilyKey !== captured.providerFamilyKey ||
+    current.failureClass === captured.failureClass ||
+    courseSupportFailureFingerprintsMatch(
+      current.failureFingerprint,
+      captured.failureFingerprint,
+    ) ||
+    current.providerSnapshotFingerprint !==
+      captured.providerSnapshotFingerprint ||
+    !current.monitoringFailureFingerprint ||
+    !courseSupportFailureFingerprintsMatch(
+      current.monitoringFailureFingerprint,
+      current.failureFingerprint,
+    ) ||
+    playbook.valid !== true ||
+    playbook.cycle !== current.cycle ||
+    playbook.conclusion !== "INCOMPLETE" ||
+    playbook.completedStages.length === 0 ||
+    playbook.nextStage === null ||
+    !hasExactParkedCourseCampaignLatestEvidence({ current })
+  ) {
+    return null;
+  }
+
+  const events = current.zeroExecutionEvidence.monitoringEvents;
+  const admissions = events.filter((event) => {
+    const audit = asCampaignRecord(event.audit);
+    return (
+      event.incidentId === current.incidentId &&
+      event.eventType === "REVALIDATION_REQUESTED" &&
+      event.source === "COURSE_SUPPORT_RESPONDER" &&
+      event.failureFingerprint !== null &&
+      courseSupportFailureFingerprintsMatch(
+        event.failureFingerprint,
+        captured.failureFingerprint,
+      ) &&
+      audit.action === "parked_cohort_admission" &&
+      audit.campaignRunId === input.campaignRunId &&
+      audit.campaignMembershipDigest === input.campaignMembershipDigest &&
+      audit.priorCycle === captured.cycle &&
+      audit.cycle === current.cycle &&
+      audit.preservesPriorAttemptEvents === true &&
+      audit.customerDataIncluded === false
+    );
+  });
+  if (admissions.length !== 1) return null;
+  const admission = admissions[0]!;
+  const endpoints = getParkedCourseCampaignAutomationStalledEndpoints(current);
+  if (
+    endpoints.length !== 1 ||
+    endpoints[0]!.occurredAt < admission.occurredAt
+  ) {
+    return null;
+  }
+  const endpoint = endpoints[0]!;
+
+  const cycleTransitions = events.filter((event) => {
+    const audit = asCampaignRecord(event.audit);
+    return (
+      event.incidentId === current.incidentId &&
+      event.eventType === "REVALIDATION_REQUESTED" &&
+      Number.isInteger(audit.priorCycle) &&
+      Number.isInteger(audit.cycle) &&
+      Number(audit.priorCycle) >= captured.cycle &&
+      Number(audit.cycle) <= current.cycle
+    );
+  });
+  if (cycleTransitions.length !== 1 || cycleTransitions[0] !== admission) {
+    return null;
+  }
+
+  const refinementEvents = events
+    .filter((event) => {
+      const audit = asCampaignRecord(event.audit);
+      return (
+        typeof event.id === "string" &&
+        event.id.trim().length > 0 &&
+        event.incidentId === current.incidentId &&
+        event.eventType === "AUTOMATION_ATTEMPTED" &&
+        event.source === "COURSE_SUPPORT_RESPONDER" &&
+        event.readPath === "BOUNDED_RECOVERY_PLAYBOOK" &&
+        event.failureFingerprint !== null &&
+        courseSupportFailureFingerprintsMatch(
+          event.failureFingerprint,
+          current.failureFingerprint,
+        ) &&
+        event.occurredAt >= admission.occurredAt &&
+        event.occurredAt <= endpoint.occurredAt &&
+        hasExactCampaignRecordKeys(audit, [
+          "customerDataIncluded",
+          "maxCourses",
+          "providerFamilyKey",
+          "serializedWriterLane",
+        ]) &&
+        audit.providerFamilyKey === current.providerFamilyKey &&
+        Number.isInteger(audit.maxCourses) &&
+        Number(audit.maxCourses) >= 1 &&
+        Number(audit.maxCourses) <= 20 &&
+        audit.serializedWriterLane === true &&
+        audit.customerDataIncluded === false
+      );
+    })
+    .sort(
+      (left, right) =>
+        left.occurredAt.getTime() - right.occurredAt.getTime() ||
+        left.id!.localeCompare(right.id!),
+    );
+  if (refinementEvents.length === 0) return null;
+
+  const entries = current.zeroExecutionEvidence.batchIncidents
+    .filter((entry) => entry.cycle === current.cycle)
+    .sort(
+      (left, right) =>
+        left.createdAt.getTime() - right.createdAt.getTime() ||
+        left.id.localeCompare(right.id),
+    );
+  if (
+    entries.length === 0 ||
+    entries.length > 20 ||
+    entries.some(
+      (entry, index) =>
+        entry.incidentId !== current.incidentId ||
+        entry.courseId !== current.courseId ||
+        !entry.batch.completedAt ||
+        !(entry.batch.createdAt instanceof Date) ||
+        !["SUCCEEDED", "PARTIAL", "RETRYABLE_FAILED"].includes(
+          entry.batch.status,
+        ) ||
+        entry.createdAt < admission.occurredAt ||
+        entry.batch.createdAt < admission.occurredAt ||
+        entry.batch.createdAt > entry.createdAt ||
+        entry.batch.completedAt < entry.createdAt ||
+        entry.batch.completedAt > endpoint.occurredAt ||
+        (index > 0 && entry.createdAt < entries[index - 1]!.batch.completedAt!),
+    )
+  ) {
+    return null;
+  }
+
+  const history = assessParkedCourseCampaignSameCycleRecoveryHistory({
+    courseId: current.courseId,
+    cycle: current.cycle,
+    entries,
+    requireOrchestrationOnly: false,
+    requireStartedRequest: true,
+    requireCausalStartedRequest: true,
+    minimumStartedAt: admission.occurredAt,
+  });
+  if (!history) return null;
+  const exactSummaryEntries = entries.filter((entry) =>
+    hasExactSameIdentityMaterialChangeProviderSnapshot({
+      courseId: current.courseId,
+      failureFingerprint: current.failureFingerprint,
+      providerSnapshotFingerprint: current.providerSnapshotFingerprint,
+      entry,
+    }),
+  );
+  const causalRequests = entries.flatMap((entry) =>
+    entry.verificationRequests.flatMap((request) => {
+      const evidence = asCampaignRecord(request.evidence);
+      return request.courseId === current.courseId &&
+        request.failureClass === current.failureClass &&
+        request.outcome === "FETCH_FAILED" &&
+        request.startedAt instanceof Date &&
+        request.startedAt >= admission.occurredAt &&
+        request.startedAt >= entry.createdAt &&
+        request.startedAt >= entry.batch.createdAt &&
+        request.startedAt <= entry.batch.completedAt! &&
+        request.attemptCount > 0 &&
+        request.revision >= 2 &&
+        request.providerSnapshotFingerprint ===
+          current.providerSnapshotFingerprint &&
+        typeof evidence.providerExecution === "boolean"
+        ? [{ entry, request }]
+        : [];
+    }),
+  );
+  const causalRefinementPairs = causalRequests
+    .flatMap(({ entry: requestEntry, request }) =>
+      exactSummaryEntries.flatMap((summaryEntry) =>
+        summaryEntry.id === requestEntry.id ||
+        requestEntry.batch.completedAt! <= summaryEntry.createdAt
+          ? [
+              {
+                requestId: request.id,
+                requestBatchIncidentId: requestEntry.id,
+                summaryBatchIncidentId: summaryEntry.id,
+              },
+            ]
+          : [],
+      ),
+    )
+    .sort(
+      (left, right) =>
+        left.requestId.localeCompare(right.requestId) ||
+        left.summaryBatchIncidentId.localeCompare(right.summaryBatchIncidentId),
+    );
+  if (causalRefinementPairs.length === 0) return null;
+
+  const alreadyRecovered = hasParkedCourseCampaignRecoveryMarker({
+    events,
+    action: "parked_cohort_failure_refinement_incomplete_playbook_recovery",
+    campaignRunId: input.campaignRunId,
+    cycle: current.cycle,
+  });
+  if (alreadyRecovered) return null;
+
+  return {
+    lineageDigest: createHash("sha256")
+      .update(
+        stableCourseProviderExecutionEvidenceValue({
+          captured: {
+            failureClass: captured.failureClass,
+            failureFingerprint: captured.failureFingerprint,
+            providerFamilyKey: captured.providerFamilyKey,
+            providerSnapshotFingerprint: captured.providerSnapshotFingerprint,
+          },
+          admission: canonicalizeParkedCourseCampaignRecoveryEvent(admission),
+          refinementEvents: refinementEvents.map(
+            canonicalizeParkedCourseCampaignRecoveryEvent,
+          ),
+          current: {
+            failureClass: current.failureClass,
+            failureFingerprint: current.failureFingerprint,
+            providerFamilyKey: current.providerFamilyKey,
+            providerSnapshotFingerprint: current.providerSnapshotFingerprint,
+            attemptLedgerFingerprint: current.attemptLedgerFingerprint,
+          },
+          historyDigest: history.historyDigest,
+          causalRefinementPairs,
+        }),
+      )
+      .digest("hex"),
+    admissionAt: admission.occurredAt,
+    refinementAt: refinementEvents.at(-1)!.occurredAt,
+    refinementEventCount: refinementEvents.length,
+    history,
+  };
+}
+
 export type ParkedCourseCampaignPostMarkerIncompletePlaybookRecovery = {
   priorRecoveryMarkerDigest: string;
   priorRecoveryRuntimeVersion: string;
@@ -2816,7 +3163,7 @@ function getParkedCourseCampaignPostMarkerRecoveryRoute(input: {
       completedStageCount: 4,
       playbookStage: "RENDERED_BROWSER_DISCOVERY",
       workMode: "DISCOVERY_ONLY",
-      strategyAction: "DISCOVER_WITH_BROWSER"
+      strategyAction: "DISCOVER_WITH_BROWSER",
     };
   }
   if (
@@ -2827,7 +3174,7 @@ function getParkedCourseCampaignPostMarkerRecoveryRoute(input: {
       completedStageCount: 5,
       playbookStage: "BROWSER_ADAPTER_RETRY",
       workMode: "VERIFY_TRANSIENT",
-      strategyAction: "RUN_TYPED_ADAPTER"
+      strategyAction: "RUN_TYPED_ADAPTER",
     };
   }
   return null;
@@ -2910,7 +3257,7 @@ export function assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery(i
   const playbook = current.zeroExecutionEvidence.playbookAssessment;
   const recoveryRoute = getParkedCourseCampaignPostMarkerRecoveryRoute({
     completedStageCount: playbook.completedStages.length,
-    nextStage: playbook.nextStage
+    nextStage: playbook.nextStage,
   });
   if (
     !input.campaignRunId.trim() ||
@@ -2940,7 +3287,12 @@ export function assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery(i
     (event) => event.occurredAt >= input.capturedAt,
   );
   if (
-    (events.length >= 50 && eventsSinceCapture.length === events.length) ||
+    (!hasCompleteParkedCourseCampaignMonitoringHistory({
+      current,
+      capturedAt: input.capturedAt,
+    }) &&
+      events.length >= 50 &&
+      eventsSinceCapture.length === events.length) ||
     eventsSinceCapture.some(
       (event) => typeof event.id !== "string" || !event.id.trim(),
     )
@@ -3181,7 +3533,7 @@ export function assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery(i
           providerSnapshotFingerprint: current.providerSnapshotFingerprint,
           runtimeVersion: priorRecoveryRuntimeVersion,
           summary: entry.batch.summary,
-          route: recoveryRoute
+          route: recoveryRoute,
         }) ||
         (index > 0 &&
           entry.createdAt < postMarkerEntries[index - 1]!.batch.completedAt!),
@@ -3286,6 +3638,7 @@ export function findParkedCourseCampaignDescendantLineage(input: {
   campaignRunId: string;
   campaignMembershipDigest: string;
   events: readonly ParkedCourseCampaignRecoveryEvidence["monitoringEvents"][number][];
+  monitoringHistoryCompleteSince?: Date | null;
 }): ParkedCourseCampaignDescendantLineage | null {
   const { captured, current } = input;
   const handoffCount = current.cycle - captured.cycle - 1;
@@ -3306,6 +3659,11 @@ export function findParkedCourseCampaignDescendantLineage(input: {
     (event) => event.occurredAt >= input.capturedAt,
   );
   if (
+    !(
+      input.monitoringHistoryCompleteSince instanceof Date &&
+      Number.isFinite(input.monitoringHistoryCompleteSince.getTime()) &&
+      input.monitoringHistoryCompleteSince <= input.capturedAt
+    ) &&
     input.events.length >= 50 &&
     eventsSinceCapture.length === input.events.length
   ) {
@@ -3668,6 +4026,8 @@ export function assessParkedCourseCampaignDescendantIncompletePlaybookRecovery(i
     campaignRunId: input.campaignRunId,
     campaignMembershipDigest: input.campaignMembershipDigest,
     events: current.zeroExecutionEvidence.monitoringEvents,
+    monitoringHistoryCompleteSince:
+      current.zeroExecutionEvidence.monitoringHistoryCompleteSince,
   });
   if (
     !lineage ||
@@ -3796,6 +4156,7 @@ export function findParkedCourseCampaignSameIdentityMaterialChangeLineage(input:
   campaignRunId: string;
   campaignMembershipDigest: string;
   events: readonly ParkedCourseCampaignRecoveryEvidence["monitoringEvents"][number][];
+  monitoringHistoryCompleteSince?: Date | null;
 }): ParkedCourseCampaignSameIdentityMaterialChangeLineage | null {
   const { captured, current } = input;
   if (
@@ -3823,6 +4184,11 @@ export function findParkedCourseCampaignSameIdentityMaterialChangeLineage(input:
     (event) => event.occurredAt >= input.capturedAt,
   );
   if (
+    !(
+      input.monitoringHistoryCompleteSince instanceof Date &&
+      Number.isFinite(input.monitoringHistoryCompleteSince.getTime()) &&
+      input.monitoringHistoryCompleteSince <= input.capturedAt
+    ) &&
     input.events.length >= 50 &&
     eventsSinceCapture.length === input.events.length
   ) {
@@ -3943,7 +4309,12 @@ export function assessParkedCourseCampaignSameIdentityMaterialChangeIncompletePl
     (event) => event.occurredAt >= input.capturedAt,
   );
   if (
-    (events.length >= 50 && eventsSinceCapture.length === events.length) ||
+    (!hasCompleteParkedCourseCampaignMonitoringHistory({
+      current,
+      capturedAt: input.capturedAt,
+    }) &&
+      events.length >= 50 &&
+      eventsSinceCapture.length === events.length) ||
     eventsSinceCapture.some(
       (event) => typeof event.id !== "string" || !event.id.trim(),
     )
@@ -3957,6 +4328,8 @@ export function assessParkedCourseCampaignSameIdentityMaterialChangeIncompletePl
     campaignRunId: input.campaignRunId,
     campaignMembershipDigest: input.campaignMembershipDigest,
     events: current.zeroExecutionEvidence.monitoringEvents,
+    monitoringHistoryCompleteSince:
+      current.zeroExecutionEvidence.monitoringHistoryCompleteSince,
   });
   if (
     !lineage ||
@@ -4362,7 +4735,13 @@ function isSameParkedCourseCampaignIdentity(
 function findParkedCourseCampaignAutomationStalledEndpoint(
   current: ParkedCourseCampaignMemberSnapshot,
 ) {
-  return current.zeroExecutionEvidence.monitoringEvents.find((event) => {
+  return getParkedCourseCampaignAutomationStalledEndpoints(current)[0];
+}
+
+function getParkedCourseCampaignAutomationStalledEndpoints(
+  current: ParkedCourseCampaignMemberSnapshot,
+) {
+  return current.zeroExecutionEvidence.monitoringEvents.filter((event) => {
     const audit = asCampaignRecord(event.audit);
     return (
       event.incidentId === current.incidentId &&
