@@ -2126,6 +2126,8 @@ describe("commitCurrentCourseTeeTimeMatches", () => {
       teeSearchId: "search-1",
       courseId: "course-1",
       scheduleVersion: 1,
+      resumeFromScheduleVersion: 1,
+      resumeScheduleVersion: 2,
       status: "COMPLETED",
       claimedAt: providerObservedAt,
       completedAt,
@@ -2160,7 +2162,7 @@ describe("commitCurrentCourseTeeTimeMatches", () => {
       commit({
         localReaderObservation: {
           jobId: "reader-job-1",
-          scheduleVersion: 1,
+          scheduleVersion: 2,
           resultStatus: "AVAILABLE",
           monitoringOutcome: "MATCH_FOUND",
         },
@@ -2172,7 +2174,9 @@ describe("commitCurrentCourseTeeTimeMatches", () => {
         id: "reader-job-1",
         teeSearchId: "search-1",
         courseId: "course-1",
-        scheduleVersion: { lte: 1 },
+        scheduleVersion: { lte: 2 },
+        resumeFromScheduleVersion: 1,
+        resumeScheduleVersion: 2,
         status: "COMPLETED",
         claimedAt: providerObservedAt,
         completedAt,
@@ -2187,7 +2191,7 @@ describe("commitCurrentCourseTeeTimeMatches", () => {
     );
   });
 
-  it("resumes an equal local-reader source only from its exact accepted monitoring event", async () => {
+  it("resumes an exact prior-generation local-reader source only from its accepted monitoring event", async () => {
     const completedAt = new Date("2026-07-10T12:01:00.000Z");
     mockedPrisma.courseMonitoringStatus.findUnique.mockResolvedValue({
       lastSuccessfulAt: providerObservedAt,
@@ -2199,7 +2203,7 @@ describe("commitCurrentCourseTeeTimeMatches", () => {
           localReaderCanonicalSource: {
             jobId: "reader-job-resume",
             searchId: "search-1",
-            scheduleVersion: 1,
+            scheduleVersion: 2,
             resultStatus: "NO_AVAILABILITY",
             providerObservedAt: providerObservedAt.toISOString(),
           },
@@ -2212,6 +2216,8 @@ describe("commitCurrentCourseTeeTimeMatches", () => {
       teeSearchId: "search-1",
       courseId: "course-1",
       scheduleVersion: 1,
+      resumeFromScheduleVersion: 1,
+      resumeScheduleVersion: 2,
       status: "COMPLETED",
       claimedAt: providerObservedAt,
       completedAt,
@@ -2240,7 +2246,7 @@ describe("commitCurrentCourseTeeTimeMatches", () => {
         matches: [],
         localReaderObservation: {
           jobId: "reader-job-resume",
-          scheduleVersion: 1,
+          scheduleVersion: 2,
           resultStatus: "NO_AVAILABILITY",
           monitoringOutcome: "NO_MATCH",
           resumePreviouslyAcceptedSource: true,
@@ -2251,6 +2257,52 @@ describe("commitCurrentCourseTeeTimeMatches", () => {
       persistedMatchStates: [],
     });
     expect(mockedPrisma.localReaderJob.updateMany).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a local-reader source whose persisted resume targets another generation", async () => {
+    const completedAt = new Date("2026-07-10T12:01:00.000Z");
+    mockedPrisma.courseMonitoringStatus.findUnique.mockResolvedValue({
+      lastSuccessfulAt: providerObservedAt,
+      lastFailureAt: null,
+    } as never);
+    mockedPrisma.$queryRaw.mockResolvedValue([{ id: "search-1" }] as never);
+    mockedPrisma.localReaderJob.findUnique.mockResolvedValue({
+      id: "reader-job-wrong-target",
+      teeSearchId: "search-1",
+      courseId: "course-1",
+      scheduleVersion: 1,
+      resumeFromScheduleVersion: 2,
+      resumeScheduleVersion: 3,
+      status: "COMPLETED",
+      claimedAt: providerObservedAt,
+      completedAt,
+      resultExpiresAt: new Date("2026-07-10T12:11:00.000Z"),
+      result: {
+        jobId: "reader-job-wrong-target",
+        courseKey: "cps:grassyhill.cps.golf",
+        status: "AVAILABLE",
+        evidenceAnchor: "SERVER_CLAIM",
+        observedAt: providerObservedAt.toISOString(),
+        pageUrl: "https://grassyhill.cps.golf/onlineresweb/search-teetime",
+        pageTitle: "Grassy Hill Country Club",
+        slots: [],
+        readerVersion: "reader-v1",
+      },
+    } as never);
+
+    await expect(
+      commit({
+        localReaderObservation: {
+          jobId: "reader-job-wrong-target",
+          scheduleVersion: 2,
+          resultStatus: "AVAILABLE",
+          monitoringOutcome: "MATCH_FOUND",
+        },
+      }),
+    ).rejects.toThrow(
+      "The exact local-reader provider source could not be consumed",
+    );
+    expect(mockedPrisma.localReaderJob.updateMany).not.toHaveBeenCalled();
   });
 
   it("rejects equal-source resume when the accepted event belongs to another reader job", async () => {
@@ -2921,8 +2973,10 @@ describe("recordCourseProbeIfChanged", () => {
 
   it("reuses evidence for the same local-reader observation", async () => {
     const providerObservedAt = "2026-08-11T20:00:00.000Z";
+    const probeObservedAt = new Date("2026-08-11T20:00:01.000Z");
     mockedPrisma.courseProbe.findFirst.mockResolvedValue({
       id: "existing-probe",
+      observedAt: probeObservedAt,
       outcome: "NO_MATCH",
       message: "No qualifying tee times in the requested window",
       runtimeVersion: "same-release",
@@ -2932,7 +2986,7 @@ describe("recordCourseProbeIfChanged", () => {
       },
     } as never);
 
-    await recordCourseProbeIfChanged({
+    const result = await recordCourseProbeIfChanged({
       searchId: "search-1",
       courseId: "fairview-farm",
       outcome: "NO_MATCH",
@@ -2945,6 +2999,12 @@ describe("recordCourseProbeIfChanged", () => {
     });
 
     expect(mockedPrisma.courseProbe.create).not.toHaveBeenCalled();
+    expect(result).toEqual(expect.objectContaining({ observedAt: probeObservedAt }));
+    expect(mockedPrisma.courseProbe.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: expect.objectContaining({ observedAt: true }),
+      }),
+    );
   });
 
   it("records a new local-reader observation with an unchanged outcome", async () => {

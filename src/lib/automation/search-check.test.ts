@@ -550,7 +550,9 @@ describe("runSearchCheck email cadence", () => {
       true,
     );
     localReaderMocks.queueLocalReaderJob.mockResolvedValue(null);
-    dbMocks.recordCourseProbeIfChanged.mockResolvedValue(undefined);
+    dbMocks.recordCourseProbeIfChanged.mockImplementation(async () => ({
+      observedAt: new Date(),
+    }));
     dbMocks.recordTeeTimeMatch.mockImplementation(async (input) => ({
       id: String(input.sourceId).replace(/^slot-/, "match-"),
       alertStatus: "PENDING",
@@ -798,6 +800,25 @@ describe("runSearchCheck email cadence", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("records the claimed schedule version in the completed search-check audit", async () => {
+    const claimedScheduleVersion = 7;
+
+    await runSearchCheck("search-1", "test", {
+      searchId: "search-1",
+      scheduleVersion: claimedScheduleVersion,
+      token: "claimed-check-lease",
+      expiresAt: new Date("2026-07-11T12:25:00.000Z"),
+    });
+
+    const completedRun = dbMocks.finishAutomationRun.mock.calls.at(-1)?.[1];
+    const audit = JSON.parse(completedRun?.notes ?? "null");
+    expect(audit).toEqual(
+      expect.objectContaining({ scheduleVersion: claimedScheduleVersion }),
+    );
+    expect(Number.isInteger(audit.scheduleVersion)).toBe(true);
+    expect(audit.scheduleVersion).toBeGreaterThanOrEqual(0);
   });
 
   it("does not cover or count a pending match omitted from the setup report", async () => {
@@ -1859,6 +1880,16 @@ describe("runSearchCheck email cadence", () => {
         },
       }),
     );
+    expect(
+      dbMocks.recordCourseProbe.mock.calls.filter(
+        ([input]) => input.outcome === "FETCH_FAILED",
+      ),
+    ).toHaveLength(1);
+    expect(
+      dbMocks.recordCourseProbeIfChanged.mock.calls.filter(
+        ([input]) => input.outcome === "FETCH_FAILED",
+      ),
+    ).toHaveLength(0);
     expect(supportIncidentMocks.reportCourseSupportIssue).toHaveBeenCalledWith(
       expect.objectContaining({
         kind: "FETCH_FAILED",
@@ -3922,6 +3953,76 @@ describe("runSearchCheck email cadence", () => {
     });
   });
 
+  it("persists one failure probe when a local-reader precheck has no source timestamp", async () => {
+    const bookingUrl =
+      "https://grassyhill.cps.golf/onlineresweb/search-teetime";
+    const playbook = installPlaybookPersistence({ version: 1, events: [] });
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            name: "Reader Only Public Course",
+            isPublic: true,
+            detectedPlatform: "CUSTOM",
+            providerFamilyKey: "CPS",
+            detectedBookingUrl: bookingUrl,
+            automationEligibility: "BLOCKED",
+            automationReason: "CAPTCHA_OR_QUEUE",
+            monitoringMode: "LOCAL_READER_ONLY",
+            intelligenceVerifiedAt: null,
+            monitoringStatus: null,
+            policyNotes: null,
+            supportIncident: {
+              ...playbook.context(),
+              firstSeenAt: new Date("2026-07-11T12:00:00.000Z"),
+            },
+            bookingMetadata: {
+              provider: "CPS",
+              siteName: "grassyhill",
+              bookingBaseUrl: "https://grassyhill.cps.golf/",
+              courseIds: [1],
+            },
+          },
+        },
+      ],
+    });
+    adapterMocks.isForeupMetadata.mockReturnValue(false);
+    adapterMocks.isCpsMetadata.mockReturnValue(true);
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue(
+      "cps:grassyhill.cps.golf",
+    );
+    localReaderMocks.getFreshLocalReaderObservation.mockRejectedValue(
+      new Error("reader precheck unavailable"),
+    );
+    localReaderMocks.queueLocalReaderJob.mockResolvedValue(null);
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(result.courseResults[0]).toMatchObject({ outcome: "FETCH_FAILED" });
+    expect(
+      dbMocks.recordCourseProbeIfChanged.mock.calls.filter(
+        ([input]) => input.outcome === "FETCH_FAILED",
+      ),
+    ).toHaveLength(1);
+    expect(
+      dbMocks.recordCourseProbe.mock.calls.filter(
+        ([input]) => input.outcome === "FETCH_FAILED",
+      ),
+    ).toHaveLength(0);
+    expect(supportIncidentMocks.reportCourseSupportIssue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: "READER_CANDIDATE",
+        readPath: "LOCAL_READER_ONLY",
+        failureObservedAt: new Date("2026-07-11T12:10:00.000Z"),
+      }),
+    );
+  });
+
   it("resumes an equal accepted local-reader source and atomically clears its booking-window fence", async () => {
     const bookingUrl =
       "https://grassyhill.cps.golf/onlineresweb/search-teetime";
@@ -4503,11 +4604,14 @@ describe("runSearchCheck email cadence", () => {
     ]);
   });
 
-  it("opens a persistent operator incident for unsupported courses", async () => {
+  it("admits first-check multi-cycle support from the persisted current-generation probe", async () => {
     const createdAt = new Date("2026-07-11T12:04:00.000Z");
+    const probeObservedAt = new Date("2026-07-11T12:10:00.000Z");
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
       createdAt,
+      trafficClass: "TEST",
+      syntheticMultiCycle: true,
       preferences: [
         {
           rank: 1,
@@ -4515,10 +4619,15 @@ describe("runSearchCheck email cadence", () => {
             ...search.preferences[0].course,
             createdAt,
             automationEligibility: "UNKNOWN",
+            intelligenceVerifiedAt: null,
+            monitoringStatus: null,
             policyNotes: null,
           },
         },
       ],
+    });
+    dbMocks.recordCourseProbeIfChanged.mockResolvedValue({
+      observedAt: probeObservedAt,
     });
     dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
     dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
@@ -4530,7 +4639,13 @@ describe("runSearchCheck email cadence", () => {
         searchId: "search-1",
         kind: "NEEDS_ADAPTER",
         episodeStartedAt: createdAt,
+        failureObservedAt: probeObservedAt,
       }),
+    );
+    expect(
+      dbMocks.recordCourseProbeIfChanged.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      supportIncidentMocks.reportCourseSupportIssue.mock.invocationCallOrder[0]!,
     );
     expect(result.courseResults[0]).toEqual(
       expect.objectContaining({
@@ -4540,6 +4655,51 @@ describe("runSearchCheck email cadence", () => {
       }),
     );
     expect(result.supportRetryNeeded).toBe(false);
+  });
+
+  it("does not admit a stale probe from before the current alert generation", async () => {
+    const generationStartedAt = new Date("2026-07-11T12:04:00.000Z");
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      createdAt: generationStartedAt,
+      trafficClass: "TEST",
+      syntheticMultiCycle: true,
+      preferences: [
+        {
+          rank: 1,
+          course: {
+            ...search.preferences[0].course,
+            createdAt: generationStartedAt,
+            automationEligibility: "UNKNOWN",
+            intelligenceVerifiedAt: null,
+            monitoringStatus: null,
+            policyNotes: null,
+          },
+        },
+      ],
+    });
+    dbMocks.recordCourseProbeIfChanged.mockResolvedValue({
+      observedAt: new Date(generationStartedAt.getTime() - 1),
+    });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(dbMocks.recordCourseProbeIfChanged).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: "NEEDS_ADAPTER",
+        observedAtOrAfter: generationStartedAt,
+      }),
+    );
+    expect(
+      supportIncidentMocks.reportCourseSupportIssue,
+    ).not.toHaveBeenCalled();
+    expect(result.courseResults[0]).toEqual(
+      expect.objectContaining({
+        outcome: "NEEDS_ADAPTER",
+      }),
+    );
   });
 
   it("anchors a delayed edited generation to its durable generation marker", async () => {

@@ -512,7 +512,7 @@ describe("course-support coverage machine output", () => {
     ).toEqual({
       outcome: "paused_by_control_plane",
       recordType: COURSE_SUPPORT_ACCEPTANCE_HISTORY_MACHINE_RECORD_TYPE,
-      schemaVersion: 1,
+      schemaVersion: 2,
       acceptanceHistory: null,
       failure: null
     });
@@ -547,7 +547,7 @@ describe("course-support coverage machine output", () => {
     expect(JSON.parse(output[0]!)).toEqual({
       outcome: "paused_by_control_plane",
       recordType: COURSE_SUPPORT_ACCEPTANCE_HISTORY_MACHINE_RECORD_TYPE,
-      schemaVersion: 1,
+      schemaVersion: 2,
       acceptanceHistory: null,
       failure: null,
     });
@@ -577,7 +577,7 @@ describe("course-support coverage machine output", () => {
     expect(JSON.parse(child.stdout)).toEqual({
       outcome: "blocked_env",
       recordType: COURSE_SUPPORT_ACCEPTANCE_HISTORY_MACHINE_RECORD_TYPE,
-      schemaVersion: 1,
+      schemaVersion: 2,
       acceptanceHistory: null,
       failure: {
         failureDomain: "ENV",

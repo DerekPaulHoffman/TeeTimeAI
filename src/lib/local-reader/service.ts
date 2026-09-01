@@ -253,11 +253,15 @@ function isCurrentCycleTerminalReaderJob(input: {
     | "completedAt"
     | "resultExpiresAt"
     | "result"
+    | "scheduleVersion"
+    | "resumeFromScheduleVersion"
+    | "resumeScheduleVersion"
   >;
   courseKey: string;
   capabilityKey: string;
   parserVersion: number;
   cycleStartedAt?: Date;
+  resumeScheduleVersion?: number;
   now: Date;
 }) {
   if (
@@ -279,7 +283,19 @@ function isCurrentCycleTerminalReaderJob(input: {
   if (
     input.job.status !== "COMPLETED" ||
     !input.job.completedAt ||
-    input.job.completedAt < input.cycleStartedAt
+    input.job.completedAt < input.cycleStartedAt ||
+    (input.resumeScheduleVersion !== undefined &&
+      (input.job.scheduleVersion === null ||
+        input.job.resumeFromScheduleVersion === null ||
+        input.job.resumeScheduleVersion === null ||
+        !Number.isSafeInteger(input.job.scheduleVersion) ||
+        !Number.isSafeInteger(input.job.resumeFromScheduleVersion) ||
+        !Number.isSafeInteger(input.job.resumeScheduleVersion) ||
+        input.job.scheduleVersion < 0 ||
+        input.job.resumeFromScheduleVersion < input.job.scheduleVersion ||
+        input.job.resumeScheduleVersion !==
+          input.job.resumeFromScheduleVersion + 1 ||
+        input.job.resumeScheduleVersion !== input.resumeScheduleVersion))
   ) {
     return false;
   }
@@ -453,6 +469,8 @@ export async function queueLocalReaderCourseVerification(input: {
         result: undefined,
         resultExpiresAt: null,
         readerVersion: null,
+        resumeFromScheduleVersion: null,
+        resumeScheduleVersion: null,
         completedAt: null,
         requiredCapabilityKey: requiredCapability.key,
         requiredParserVersion: requiredCapability.parserVersion,
@@ -474,6 +492,8 @@ export async function queueLocalReaderCourseVerification(input: {
         jobExpiresAt,
         resultExpiresAt: null,
         readerVersion: null,
+        resumeFromScheduleVersion: null,
+        resumeScheduleVersion: null,
         completedAt: null,
         requiredCapabilityKey: requiredCapability.key,
         requiredParserVersion: requiredCapability.parserVersion,
@@ -536,6 +556,8 @@ export async function queueLocalReaderJob(input: {
           createdAt: { gte: freshnessCutoff },
           completedAt: { gte: freshnessCutoff },
           resultExpiresAt: { gt: now },
+          resumeFromScheduleVersion: { not: null },
+          resumeScheduleVersion: input.scheduleVersion,
         },
       ],
     },
@@ -571,6 +593,8 @@ export async function queueLocalReaderJob(input: {
             {
               status: "COMPLETED",
               completedAt: { gte: input.notBefore },
+              resumeFromScheduleVersion: { not: null },
+              resumeScheduleVersion: input.scheduleVersion,
             },
           ],
         },
@@ -585,6 +609,7 @@ export async function queueLocalReaderJob(input: {
       capabilityKey: requiredCapability.key,
       parserVersion: requiredCapability.parserVersion,
       cycleStartedAt: input.notBefore,
+      resumeScheduleVersion: input.scheduleVersion,
       now,
     })
   ) {
@@ -613,6 +638,7 @@ export async function queueLocalReaderJob(input: {
       capabilityKey: requiredCapability.key,
       parserVersion: requiredCapability.parserVersion,
       cycleStartedAt: input.notBefore,
+      resumeScheduleVersion: input.scheduleVersion,
       now,
     })
   ) {
@@ -640,6 +666,16 @@ export async function queueLocalReaderJob(input: {
         existing.courseKey === courseKey &&
         existing.requiredCapabilityKey === requiredCapability.key &&
         existing.requiredParserVersion === requiredCapability.parserVersion &&
+        existing.scheduleVersion !== null &&
+        Number.isSafeInteger(existing.scheduleVersion) &&
+        existing.scheduleVersion >= 0 &&
+        existing.resumeFromScheduleVersion !== null &&
+        Number.isSafeInteger(existing.resumeFromScheduleVersion) &&
+        existing.resumeFromScheduleVersion >= existing.scheduleVersion &&
+        existing.resumeScheduleVersion !== null &&
+        Number.isSafeInteger(existing.resumeScheduleVersion) &&
+        existing.resumeScheduleVersion ===
+          existing.resumeFromScheduleVersion + 1 &&
         readAnchoredStoredReaderResult(existing) !== null &&
         existing.completedAt !== null &&
         existing.completedAt >= freshnessCutoff &&
@@ -701,6 +737,8 @@ export async function queueLocalReaderJob(input: {
       result: undefined,
       resultExpiresAt: null,
       readerVersion: null,
+      resumeFromScheduleVersion: null,
+      resumeScheduleVersion: null,
       completedAt: null,
       requiredCapabilityKey: requiredCapability.key,
       requiredParserVersion: requiredCapability.parserVersion,
@@ -1189,6 +1227,8 @@ export async function completeLocalReaderJob(input: {
           result: normalizedResult as Prisma.InputJsonValue,
           resultExpiresAt: new Date(databaseNow.getTime() + RESULT_LIFETIME_MS),
           readerVersion: normalizedResult.readerVersion,
+          resumeFromScheduleVersion: null,
+          resumeScheduleVersion: null,
           completedAt: databaseNow,
           leaseToken: null,
           leaseExpiresAt: null,
@@ -1248,7 +1288,37 @@ export async function completeLocalReaderJob(input: {
             },
           });
           if (queued.count === 1) {
-            resumeScheduleVersion = search.scheduleVersion + 1;
+            const resumeFromScheduleVersion = search.scheduleVersion;
+            const nextResumeScheduleVersion = resumeFromScheduleVersion + 1;
+            if (
+              !Number.isSafeInteger(resumeFromScheduleVersion) ||
+              resumeFromScheduleVersion < 0 ||
+              !Number.isSafeInteger(nextResumeScheduleVersion) ||
+              nextResumeScheduleVersion !== resumeFromScheduleVersion + 1
+            ) {
+              throw new Error(
+                "The local reader search generation cannot be advanced safely",
+              );
+            }
+            const stamped = await transaction.localReaderJob.updateMany({
+              where: {
+                id: current.id,
+                status: "COMPLETED",
+                completedAt: databaseNow,
+                resumeFromScheduleVersion: null,
+                resumeScheduleVersion: null,
+              },
+              data: {
+                resumeFromScheduleVersion,
+                resumeScheduleVersion: nextResumeScheduleVersion,
+              },
+            });
+            if (stamped.count !== 1) {
+              throw new Error(
+                "The local reader search resume proof could not be persisted",
+              );
+            }
+            resumeScheduleVersion = nextResumeScheduleVersion;
             break;
           }
           if (attempt === 2) {
@@ -1624,6 +1694,8 @@ export async function getFreshLocalReaderObservation(input: {
       teeSearchId: input.searchId,
       courseId: input.courseId,
       scheduleVersion: { lte: input.scheduleVersion },
+      resumeFromScheduleVersion: { not: null },
+      resumeScheduleVersion: input.scheduleVersion,
       courseKey,
       targetDate: input.targetDate,
       players: input.players,
@@ -1693,6 +1765,8 @@ export async function getExpiredUnconsumedLocalReaderObservationForCanonicalResu
       teeSearchId: input.searchId,
       courseId: input.courseId,
       scheduleVersion: { lte: input.scheduleVersion },
+      resumeFromScheduleVersion: { not: null },
+      resumeScheduleVersion: input.scheduleVersion,
       courseKey,
       targetDate: input.targetDate,
       players: input.players,
@@ -1962,6 +2036,8 @@ export async function markCompletedLocalReaderProviderObservationConsumedInTrans
       teeSearchId: true,
       courseId: true,
       scheduleVersion: true,
+      resumeFromScheduleVersion: true,
+      resumeScheduleVersion: true,
       status: true,
       claimedAt: true,
       completedAt: true,
@@ -1976,7 +2052,13 @@ export async function markCompletedLocalReaderProviderObservationConsumedInTrans
     job.scheduleVersion === null ||
     !Number.isSafeInteger(job.scheduleVersion) ||
     job.scheduleVersion < 0 ||
-    job.scheduleVersion > input.scheduleVersion ||
+    job.resumeFromScheduleVersion === null ||
+    !Number.isSafeInteger(job.resumeFromScheduleVersion) ||
+    job.resumeFromScheduleVersion < job.scheduleVersion ||
+    job.resumeScheduleVersion === null ||
+    !Number.isSafeInteger(job.resumeScheduleVersion) ||
+    job.resumeScheduleVersion !== job.resumeFromScheduleVersion + 1 ||
+    job.resumeScheduleVersion !== input.scheduleVersion ||
     job.status !== "COMPLETED" ||
     job.claimedAt?.getTime() !== input.providerObservedAt.getTime() ||
     !job.completedAt ||
@@ -2003,6 +2085,8 @@ export async function markCompletedLocalReaderProviderObservationConsumedInTrans
       teeSearchId: input.searchId,
       courseId: input.courseId,
       scheduleVersion: { lte: input.scheduleVersion },
+      resumeFromScheduleVersion: job.resumeFromScheduleVersion,
+      resumeScheduleVersion: input.scheduleVersion,
       status: "COMPLETED",
       claimedAt: input.providerObservedAt,
       completedAt: job.completedAt,

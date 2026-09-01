@@ -77,7 +77,7 @@ describe("course-support acceptance history", () => {
         batches: [completeEvidenceBatch()],
       }),
     ).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       releaseSelection: "EXACT_DEPLOYMENT",
       windowBoundary: "HALF_OPEN",
       deployedAt: deployedAt.toISOString(),
@@ -103,6 +103,8 @@ describe("course-support acceptance history", () => {
       syntheticCanaryExternalSendAttemptUnavailableCount: 0,
       syntheticCanaryExternalSendAttemptAvailability: "available",
       localReaderSearchResumeSuccessCount: 1,
+      localReaderSearchResumeUnavailableCount: 0,
+      localReaderSearchResumeAvailability: "available",
       syntheticCanaryLocalReaderResumeSuccessCount: 1,
     });
   });
@@ -137,6 +139,8 @@ describe("course-support acceptance history", () => {
       syntheticCanaryExternalSendAttemptUnavailableCount: 0,
       syntheticCanaryExternalSendAttemptAvailability: "available",
       localReaderSearchResumeSuccessCount: 0,
+      localReaderSearchResumeUnavailableCount: 0,
+      localReaderSearchResumeAvailability: "available",
       syntheticCanaryLocalReaderResumeSuccessCount: 0,
     });
   });
@@ -443,6 +447,8 @@ describe("course-support acceptance history", () => {
     expect(localReaderJobQuery.select).not.toHaveProperty("result");
     expect(localReaderJobQuery.select).not.toHaveProperty("bookingUrl");
     expect(localReaderJobQuery.select).not.toHaveProperty("teeSearchId");
+    expect(localReaderJobQuery.select.resumeFromScheduleVersion).toBe(true);
+    expect(localReaderJobQuery.select.resumeScheduleVersion).toBe(true);
     const probeQuery =
       query.select.searchDispatches.select.teeSearch.select.probes;
     expect(probeQuery.take).toBe(
@@ -885,7 +891,7 @@ describe("course-support acceptance history", () => {
 
   it("rejects a successful run from a different dispatched schedule version", () => {
     const batch = completeEvidenceBatch();
-    batch.searchDispatches[0].teeSearch!.scheduleVersion = 8;
+    batch.searchDispatches[0].teeSearch!.scheduleVersion = 9;
 
     expect(
       aggregateCourseSupportAcceptanceHistory({
@@ -1233,6 +1239,92 @@ describe("course-support acceptance history", () => {
     });
   });
 
+  it("reports legacy consumed reader rows as unavailable instead of false zero proof", () => {
+    const batch = completeEvidenceBatch();
+    const job = batch.searchDispatches[0].teeSearch!.localReaderJobs[0];
+    job.resumeFromScheduleVersion = null;
+    job.resumeScheduleVersion = null;
+
+    expect(
+      aggregateCourseSupportAcceptanceHistory({
+        releaseSha,
+        deployedAt,
+        windowStartedAt,
+        windowEndedAt,
+        batches: [batch],
+      }),
+    ).toMatchObject({
+      localReaderSearchResumeSuccessCount: null,
+      localReaderSearchResumeUnavailableCount: 1,
+      localReaderSearchResumeAvailability: "unavailable",
+      syntheticCanaryLocalReaderResumeSuccessCount: null,
+    });
+  });
+
+  it("fails resume proof closed when the persisted target equals its source", () => {
+    const batch = completeEvidenceBatch();
+    const job = batch.searchDispatches[0].teeSearch!.localReaderJobs[0];
+    job.resumeScheduleVersion = job.resumeFromScheduleVersion;
+
+    expect(
+      aggregateCourseSupportAcceptanceHistory({
+        releaseSha,
+        deployedAt,
+        windowStartedAt,
+        windowEndedAt,
+        batches: [batch],
+      }),
+    ).toMatchObject({
+      localReaderSearchResumeSuccessCount: null,
+      localReaderSearchResumeUnavailableCount: 1,
+      localReaderSearchResumeAvailability: "unavailable",
+    });
+  });
+
+  it("does not count a stale reader source whose persisted resume began at a later generation", () => {
+    const batch = completeEvidenceBatch();
+    const job = batch.searchDispatches[0].teeSearch!.localReaderJobs[0];
+    job.scheduleVersion = 6;
+
+    expect(
+      aggregateCourseSupportAcceptanceHistory({
+        releaseSha,
+        deployedAt,
+        windowStartedAt,
+        windowEndedAt,
+        batches: [batch],
+      }),
+    ).toMatchObject({
+      localReaderSearchResumeSuccessCount: 0,
+      localReaderSearchResumeUnavailableCount: 0,
+      localReaderSearchResumeAvailability: "available",
+      syntheticCanaryLocalReaderResumeSuccessCount: 0,
+    });
+  });
+
+  it("does not count a successful search check from a different target generation", () => {
+    const batch = completeEvidenceBatch();
+    const audit = asRecord(
+      batch.searchDispatches[0].teeSearch!.probes[0].automationRun!.audit,
+    );
+    audit.scheduleVersion = 9;
+
+    expect(
+      aggregateCourseSupportAcceptanceHistory({
+        releaseSha,
+        deployedAt,
+        windowStartedAt,
+        windowEndedAt,
+        batches: [batch],
+      }),
+    ).toMatchObject({
+      localReaderSearchResumeSuccessCount: 0,
+      localReaderSearchResumeUnavailableCount: 0,
+      localReaderSearchResumeAvailability: "available",
+      syntheticCanaryLocalReaderResumeSuccessCount: 0,
+    });
+  });
+
   it("does not count a local-reader probe from a different runtime", () => {
     const batch = completeEvidenceBatch();
     const teeSearch = batch.searchDispatches[0].teeSearch!;
@@ -1494,7 +1586,7 @@ function completeEvidenceBatch(): CourseSupportAcceptanceHistoryBatch {
         scheduleVersion: 7,
         teeSearch: {
           syntheticMultiCycle: true,
-          scheduleVersion: 7,
+          scheduleVersion: 8,
           alertGeneration: 3,
           lastCheckedAt: new Date("2026-08-31T12:26:00.000Z"),
           emailDeliveries: [
@@ -1532,6 +1624,8 @@ function completeEvidenceBatch(): CourseSupportAcceptanceHistoryBatch {
             {
               courseId: "private-course-id",
               scheduleVersion: 7,
+              resumeFromScheduleVersion: 7,
+              resumeScheduleVersion: 8,
               claimedAt: new Date("2026-08-31T12:12:00.000Z"),
               completedAt: new Date("2026-08-31T12:16:00.000Z"),
               resultExpiresAt: new Date("2026-08-31T12:16:00.000Z"),
@@ -1559,6 +1653,7 @@ function completeEvidenceBatch(): CourseSupportAcceptanceHistoryBatch {
                   trigger: "workflow",
                   searchRef: "1".repeat(16),
                   outcome: "success",
+                  scheduleVersion: 8,
                   checkedCourses: 1,
                   courseOutcomes: { MATCH_FOUND: 1 },
                 },

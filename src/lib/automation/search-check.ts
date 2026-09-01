@@ -273,6 +273,25 @@ function getLatestValidEvidenceAt(
     : null;
 }
 
+function getCurrentGenerationProbeEvidenceAt(input: {
+  observedAt: Date | null | undefined;
+  observedAtOrAfter: Date;
+  notAfter: Date;
+}) {
+  const { observedAt, observedAtOrAfter, notAfter } = input;
+  if (
+    !(observedAt instanceof Date) ||
+    !Number.isFinite(observedAt.getTime()) ||
+    !(observedAtOrAfter instanceof Date) ||
+    !Number.isFinite(observedAtOrAfter.getTime()) ||
+    observedAt.getTime() < observedAtOrAfter.getTime() ||
+    observedAt.getTime() > notAfter.getTime()
+  ) {
+    return null;
+  }
+  return new Date(observedAt);
+}
+
 function getUnrecordedCourseSupportIssueState(
   course: AutomationCourse,
 ): CourseSupportIssueState {
@@ -300,8 +319,17 @@ async function reportCourseSupportIssueFromDurableEvidence(
   options: {
     mode: DurableSupportEvidenceMode;
     now: Date;
+    currentGenerationProbe: {
+      observedAt: Date | null | undefined;
+      observedAtOrAfter: Date;
+    };
   },
 ) {
+  const currentGenerationProbeObservedAt =
+    getCurrentGenerationProbeEvidenceAt({
+      ...options.currentGenerationProbe,
+      notAfter: options.now,
+    });
   const priorMonitoringObservedAt = getLatestValidEvidenceAt(
     options.now,
     input.course.monitoringStatus?.lastSuccessfulAt,
@@ -314,11 +342,13 @@ async function reportCourseSupportIssueFromDurableEvidence(
           input.course.intelligenceVerifiedAt,
         )
       : null;
-  const failureObservedAt = getLatestValidEvidenceAt(
+  const preloadedFailureObservedAt = getLatestValidEvidenceAt(
     options.now,
     priorMonitoringObservedAt,
     providerIntelligenceObservedAt,
   );
+  const failureObservedAt =
+    preloadedFailureObservedAt ?? currentGenerationProbeObservedAt;
   if (!failureObservedAt) {
     return getUnrecordedCourseSupportIssueState(input.course);
   }
@@ -348,6 +378,13 @@ async function maintainSearchCheckLease(lease?: SearchCheckLease) {
   }
 }
 
+function getClaimedSearchScheduleVersion(lease: SearchCheckLease) {
+  if (!Number.isInteger(lease.scheduleVersion) || lease.scheduleVersion < 0) {
+    throw new Error("Search check lease schedule version is invalid");
+  }
+  return lease.scheduleVersion;
+}
+
 export async function runSearchCheck(
   searchId: string,
   trigger = "scheduled",
@@ -356,14 +393,17 @@ export async function runSearchCheck(
   const run = await startAutomationRun(PROMPT_VERSION);
 
   try {
+    let claimedScheduleVersion: number | null = null;
+    const executeClaimedSearchCheck = async (lease: SearchCheckLease) => {
+      claimedScheduleVersion = getClaimedSearchScheduleVersion(lease);
+      return checkSearch(searchId, run.id, lease);
+    };
     const execution = existingLease
       ? {
           acquired: true as const,
-          value: await checkSearch(searchId, run.id, existingLease),
+          value: await executeClaimedSearchCheck(existingLease),
         }
-      : await runWithSearchCheckLease(searchId, (lease) =>
-          checkSearch(searchId, run.id, lease),
-        );
+      : await runWithSearchCheckLease(searchId, executeClaimedSearchCheck);
     if (!execution.acquired) {
       const result: SearchCheckResult = {
         searchId,
@@ -385,9 +425,19 @@ export async function runSearchCheck(
       return result;
     }
 
+    if (claimedScheduleVersion === null) {
+      throw new Error("Search check completed without a claimed schedule version");
+    }
+
     await finishAutomationRun(run.id, {
       outcome: execution.value.outcome,
-      notes: JSON.stringify(buildSearchCheckAudit(trigger, execution.value)),
+      notes: JSON.stringify(
+        buildSearchCheckAudit(
+          trigger,
+          execution.value,
+          claimedScheduleVersion,
+        ),
+      ),
     });
     return execution.value;
   } catch (error) {
@@ -926,6 +976,19 @@ async function checkSearch(
       if (incompleteOpenFactualCycle) {
         const message =
           "Current course facts changed while monitoring review was in progress; a fresh identity cycle is required before final classification.";
+        const currentGenerationFailureProbe = await recordCourseProbeIfChanged({
+          searchId: search.id,
+          courseId: course.id,
+          observedAtOrAfter: customerEndpointStartedAt,
+          automationRunId,
+          runtimeVersion,
+          outcome: "IDENTITY_RECHECK",
+          message,
+          rawSummary: {
+            monitoringDisposition: "IDENTITY_RECHECK",
+            playbookConclusion: playbookRuntime?.assessment.conclusion,
+          },
+        });
         const supportIssue = await reportCourseSupportIssueFromDurableEvidence(
           {
             course,
@@ -940,23 +1003,14 @@ async function checkSearch(
           {
             mode: "PROVIDER_INTELLIGENCE",
             now: new Date(),
+            currentGenerationProbe: {
+              observedAt: currentGenerationFailureProbe.observedAt,
+              observedAtOrAfter: customerEndpointStartedAt,
+            },
           },
         );
         supportIssues.push({ courseId: course.id, ...supportIssue });
         monitoringRetryCourseIds.add(course.id);
-        await recordCourseProbeIfChanged({
-          searchId: search.id,
-          courseId: course.id,
-          observedAtOrAfter: customerEndpointStartedAt,
-          automationRunId,
-          runtimeVersion,
-          outcome: "IDENTITY_RECHECK",
-          message,
-          rawSummary: {
-            monitoringDisposition: "IDENTITY_RECHECK",
-            playbookConclusion: playbookRuntime?.assessment.conclusion,
-          },
-        });
         courseResults.push({
           courseId: course.id,
           courseName: course.name,
@@ -1152,7 +1206,7 @@ async function checkSearch(
       if (localReaderOnly && !localReaderEligible) {
         const message =
           "This course is configured for rendered-page monitoring, but its booking page is not allowlisted.";
-        await recordCourseProbeIfChanged({
+        const currentGenerationFailureProbe = await recordCourseProbeIfChanged({
           searchId: search.id,
           courseId: course.id,
           observedAtOrAfter: customerEndpointStartedAt,
@@ -1179,6 +1233,10 @@ async function checkSearch(
           {
             mode: "PRIOR_MONITORING_ONLY",
             now: new Date(),
+            currentGenerationProbe: {
+              observedAt: currentGenerationFailureProbe.observedAt,
+              observedAtOrAfter: customerEndpointStartedAt,
+            },
           },
         );
         supportIssues.push({ courseId: course.id, ...supportIssue });
@@ -1247,7 +1305,7 @@ async function checkSearch(
         const message = browserProbeQueued
           ? "Official booking surface inspected; no reusable public read-only monitoring connection was confirmed."
           : "No public booking surface is currently available for automated monitoring.";
-        await recordCourseProbeIfChanged({
+        const currentGenerationFailureProbe = await recordCourseProbeIfChanged({
           searchId: search.id,
           courseId: course.id,
           observedAtOrAfter: customerEndpointStartedAt,
@@ -1277,6 +1335,10 @@ async function checkSearch(
           {
             mode: "PROVIDER_INTELLIGENCE",
             now: new Date(),
+            currentGenerationProbe: {
+              observedAt: currentGenerationFailureProbe.observedAt,
+              observedAtOrAfter: customerEndpointStartedAt,
+            },
           },
         );
         supportIssues.push({ courseId: course.id, ...supportIssue });
@@ -2188,6 +2250,28 @@ async function checkSearch(
           CourseSupportIssueInput,
           "failureObservedAt" | "providerObservedAt" | "now"
         > & { course: AutomationCourse };
+        const currentGenerationFailureProbe = explicitFailureObservedAt
+          ? null
+          : await recordCourseProbeIfChanged({
+              searchId: search.id,
+              courseId: course.id,
+              observedAtOrAfter: customerEndpointStartedAt,
+              automationRunId,
+              runtimeVersion,
+              outcome: "FETCH_FAILED",
+              message,
+              rawSummary: providerRequestStarted
+                ? {
+                    providerExecution: "RUNNABLE_PROVIDER_CHECK",
+                    ...(providerExecutionObservedAt
+                      ? {
+                          providerObservedAt:
+                            providerExecutionObservedAt.toISOString(),
+                        }
+                      : {}),
+                  }
+                : undefined,
+            });
         const supportIssue = explicitFailureObservedAt
           ? await reportCourseSupportIssue({
               ...supportIssueInput,
@@ -2203,6 +2287,10 @@ async function checkSearch(
               {
                 mode: "PRIOR_MONITORING_ONLY",
                 now: new Date(),
+                currentGenerationProbe: {
+                  observedAt: currentGenerationFailureProbe?.observedAt,
+                  observedAtOrAfter: customerEndpointStartedAt,
+                },
               },
             );
         if (supportIssue.sourceEvidenceAccepted !== true) {
@@ -2218,26 +2306,28 @@ async function checkSearch(
         providerSourceAccepted = true;
         providerObservationReconciled = Boolean(providerObservationLease);
         providerObservationHeartbeat?.assertOwned();
-        await recordCourseProbe({
-          searchId: search.id,
-          courseId: course.id,
-          observedAtOrAfter: customerEndpointStartedAt,
-          automationRunId,
-          runtimeVersion,
-          outcome: "FETCH_FAILED",
-          message,
-          rawSummary: providerRequestStarted
-            ? {
-                providerExecution: "RUNNABLE_PROVIDER_CHECK",
-                ...(providerExecutionObservedAt
-                  ? {
-                      providerObservedAt:
-                        providerExecutionObservedAt.toISOString(),
-                    }
-                  : {}),
-              }
-            : undefined,
-        });
+        if (explicitFailureObservedAt) {
+          await recordCourseProbe({
+            searchId: search.id,
+            courseId: course.id,
+            observedAtOrAfter: customerEndpointStartedAt,
+            automationRunId,
+            runtimeVersion,
+            outcome: "FETCH_FAILED",
+            message,
+            rawSummary: providerRequestStarted
+              ? {
+                  providerExecution: "RUNNABLE_PROVIDER_CHECK",
+                  ...(providerExecutionObservedAt
+                    ? {
+                        providerObservedAt:
+                          providerExecutionObservedAt.toISOString(),
+                      }
+                    : {}),
+                }
+              : undefined,
+          });
+        }
         supportIssues.push({ courseId: course.id, ...supportIssue });
         let currentPlaybook = await loadSearchPlaybookRuntime({
           courseId: course.id,
@@ -3926,7 +4016,11 @@ function isFirstTimeCourseLookup(
   );
 }
 
-function buildSearchCheckAudit(trigger: string, result: SearchCheckResult) {
+function buildSearchCheckAudit(
+  trigger: string,
+  result: SearchCheckResult,
+  scheduleVersion: number,
+) {
   const courseOutcomes = result.courseResults.reduce<Record<string, number>>(
     (counts, course) => {
       counts[course.outcome] = (counts[course.outcome] ?? 0) + 1;
@@ -3937,6 +4031,7 @@ function buildSearchCheckAudit(trigger: string, result: SearchCheckResult) {
   return {
     trigger: sanitizeResponderText(trigger),
     searchRef: createSearchLogReference(result.searchId),
+    scheduleVersion,
     outcome: result.outcome,
     checkedCourses: result.courseResults.length,
     courseOutcomes,

@@ -548,32 +548,34 @@ model TeeSearch {
 }
 
 model LocalReaderJob {
-  id                    String                @id @default(cuid())
-  teeSearchId           String?
-  courseId              String
-  scheduleVersion       Int?
-  purpose               LocalReaderJobPurpose @default(ALERT_CHECK)
-  verificationKey       String?               @unique
-  courseKey             String
-  targetDate            String
-  players               Int
-  bookingUrl            String
-  status                LocalReaderJobStatus  @default(PENDING)
-  leaseToken            String?
-  leaseExpiresAt        DateTime?
-  claimedAt             DateTime?
-  deviceId              String?
-  jobExpiresAt          DateTime
-  result                Json?
-  resultExpiresAt       DateTime?
-  readerVersion         String?
-  requiredCapabilityKey String?
-  requiredParserVersion Int?
-  completedAt           DateTime?
-  createdAt             DateTime              @default(now())
-  updatedAt             DateTime              @updatedAt
-  teeSearch             TeeSearch?            @relation(fields: [teeSearchId], references: [id], onDelete: Cascade)
-  course                Course                @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  id                        String                @id @default(cuid())
+  teeSearchId               String?
+  courseId                  String
+  scheduleVersion           Int?
+  purpose                   LocalReaderJobPurpose @default(ALERT_CHECK)
+  verificationKey           String?               @unique
+  courseKey                 String
+  targetDate                String
+  players                   Int
+  bookingUrl                String
+  status                    LocalReaderJobStatus  @default(PENDING)
+  leaseToken                String?
+  leaseExpiresAt            DateTime?
+  claimedAt                 DateTime?
+  deviceId                  String?
+  jobExpiresAt              DateTime
+  result                    Json?
+  resultExpiresAt           DateTime?
+  readerVersion             String?
+  requiredCapabilityKey     String?
+  requiredParserVersion     Int?
+  resumeFromScheduleVersion Int?
+  resumeScheduleVersion     Int?
+  completedAt               DateTime?
+  createdAt                 DateTime              @default(now())
+  updatedAt                 DateTime              @updatedAt
+  teeSearch                 TeeSearch?            @relation(fields: [teeSearchId], references: [id], onDelete: Cascade)
+  course                    Course                @relation(fields: [courseId], references: [id], onDelete: Cascade)
 
   @@unique([teeSearchId, courseId, scheduleVersion, targetDate, players])
   @@index([status, jobExpiresAt, createdAt])

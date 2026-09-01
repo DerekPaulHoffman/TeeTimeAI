@@ -321,7 +321,7 @@ describe("course support incidents", () => {
     expect(prismaMocks.courseSupportIncident.update).not.toHaveBeenCalled();
   });
 
-  it("opens an engineering-only incident for explicit multi-cycle synthetic coverage", async () => {
+  it("opens a promptly due engineering-only incident for explicit multi-cycle synthetic coverage", async () => {
     const opened = incident({ engineeringOnly: true });
     prismaMocks.teeSearch.findUnique.mockResolvedValue({
       trafficClass: "TEST",
@@ -360,7 +360,8 @@ describe("course support incidents", () => {
       data: expect.objectContaining({
         firstAffectedSearchId: "search-multi-cycle",
         affectedSearchCount: 1,
-        engineeringOnly: true
+        engineeringOnly: true,
+        nextAttemptAt: new Date(now.getTime() + 2 * 60 * 1000)
       })
     });
   });

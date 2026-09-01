@@ -4419,6 +4419,7 @@ export async function recordCourseProbeIfChanged(input: CourseProbeInput) {
     },
     orderBy: { observedAt: "desc" },
     select: {
+      observedAt: true,
       outcome: true,
       message: true,
       runtimeVersion: true,

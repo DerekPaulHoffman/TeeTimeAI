@@ -8,10 +8,10 @@ import { parseCourseSupportActionExecution } from "./course-support-action-execu
 import { hasStrictCourseSupportImplementationExecutionProof } from "./course-support-batches";
 import { getProviderExecutionEvidenceObservedAt } from "./provider-execution-marker";
 
-export const COURSE_SUPPORT_ACCEPTANCE_HISTORY_SCHEMA_VERSION = 1;
+export const COURSE_SUPPORT_ACCEPTANCE_HISTORY_SCHEMA_VERSION = 2;
 export const COURSE_SUPPORT_ACCEPTANCE_HISTORY_MACHINE_RECORD_TYPE =
   "course_support_acceptance_history";
-export const COURSE_SUPPORT_ACCEPTANCE_HISTORY_MACHINE_SCHEMA_VERSION = 1;
+export const COURSE_SUPPORT_ACCEPTANCE_HISTORY_MACHINE_SCHEMA_VERSION = 2;
 export const COURSE_SUPPORT_ACCEPTANCE_HISTORY_MAX_WINDOW_MS =
   24 * 60 * 60 * 1_000;
 export const COURSE_SUPPORT_ACCEPTANCE_HISTORY_MAX_BATCHES = 256;
@@ -93,8 +93,10 @@ export type CourseSupportAcceptanceHistory = {
   syntheticCanaryExternalSendAttemptCount: number | null;
   syntheticCanaryExternalSendAttemptUnavailableCount: number;
   syntheticCanaryExternalSendAttemptAvailability: CourseSupportAcceptanceHistoryAvailability;
-  localReaderSearchResumeSuccessCount: number;
-  syntheticCanaryLocalReaderResumeSuccessCount: number;
+  localReaderSearchResumeSuccessCount: number | null;
+  localReaderSearchResumeUnavailableCount: number;
+  localReaderSearchResumeAvailability: CourseSupportAcceptanceHistoryAvailability;
+  syntheticCanaryLocalReaderResumeSuccessCount: number | null;
 };
 
 export type CourseSupportAcceptanceHistoryMachineValue = {
@@ -124,6 +126,8 @@ export type CourseSupportAcceptanceHistoryMachineValue = {
   syntheticCanaryExternalSendAttemptUnavailableCount: number | null;
   syntheticCanaryExternalSendAttemptAvailability: CourseSupportAcceptanceHistoryAvailability;
   localReaderSearchResumeSuccessCount: number | null;
+  localReaderSearchResumeUnavailableCount: number | null;
+  localReaderSearchResumeAvailability: CourseSupportAcceptanceHistoryAvailability;
   syntheticCanaryLocalReaderResumeSuccessCount: number | null;
 };
 
@@ -171,6 +175,8 @@ export type CourseSupportAcceptanceHistoryBatch = {
       localReaderJobs: ReadonlyArray<{
         courseId: string;
         scheduleVersion: number | null;
+        resumeFromScheduleVersion: number | null;
+        resumeScheduleVersion: number | null;
         claimedAt: Date | null;
         completedAt: Date | null;
         resultExpiresAt: Date | null;
@@ -512,6 +518,8 @@ export async function getCourseSupportAcceptanceHistory(
                 select: {
                   courseId: true,
                   scheduleVersion: true,
+                  resumeFromScheduleVersion: true,
+                  resumeScheduleVersion: true,
                   claimedAt: true,
                   completedAt: true,
                   resultExpiresAt: true,
@@ -680,12 +688,15 @@ export function aggregateCourseSupportAcceptanceHistory(input: {
   let syntheticCanaryExternalSendAttemptUnavailableCount = 0;
   let syntheticCanaryExternalSendAttemptAvailableCount = 0;
   let localReaderSearchResumeSuccessCount = 0;
+  let localReaderSearchResumeAvailableBatchCount = 0;
+  let localReaderSearchResumeUnavailableCount = 0;
   let syntheticCanaryLocalReaderResumeSuccessCount = 0;
   const syntheticSenderBoundaryByDeliveryId = new Map<
     string,
     SyntheticSenderBoundary
   >();
   const observedLocalReaderResumeKeys = new Set<string>();
+  const unavailableLocalReaderResumeKeys = new Set<string>();
 
   for (const batch of input.batches) {
     if (
@@ -735,7 +746,16 @@ export function aggregateCourseSupportAcceptanceHistory(input: {
       nonVacuousSearchRecheck === true &&
       hasCompleteCurrentSearchDispatchRelation(batch);
     if (dispatchRelationIsComplete) {
-      for (const resume of classifyLocalReaderSearchResumes(batch, input)) {
+      const localReaderResumes = classifyLocalReaderSearchResumes(batch, input);
+      if (localReaderResumes.unavailable.length === 0) {
+        localReaderSearchResumeAvailableBatchCount += 1;
+      }
+      for (const unavailableKey of localReaderResumes.unavailable) {
+        if (unavailableLocalReaderResumeKeys.has(unavailableKey)) continue;
+        unavailableLocalReaderResumeKeys.add(unavailableKey);
+        localReaderSearchResumeUnavailableCount += 1;
+      }
+      for (const resume of localReaderResumes.proven) {
         if (observedLocalReaderResumeKeys.has(resume.key)) continue;
         observedLocalReaderResumeKeys.add(resume.key);
         localReaderSearchResumeSuccessCount += 1;
@@ -743,6 +763,15 @@ export function aggregateCourseSupportAcceptanceHistory(input: {
           syntheticCanaryLocalReaderResumeSuccessCount += 1;
         }
       }
+    } else if (
+      batch.searchDispatches.some(
+        (dispatch) =>
+          dispatch.teeSearch?.localReaderJobs.some(
+            (job) => job.resultExpiresAt?.getTime() === job.completedAt?.getTime(),
+          ) === true,
+      )
+    ) {
+      localReaderSearchResumeUnavailableCount += 1;
     }
     for (const dispatch of syntheticDispatches) {
       const providerProofs = dispatchRelationIsComplete
@@ -813,6 +842,11 @@ export function aggregateCourseSupportAcceptanceHistory(input: {
     availableCount: syntheticCanaryExternalSendAttemptAvailableCount,
     unavailableCount: syntheticCanaryExternalSendAttemptUnavailableCount,
   });
+  const localReaderSearchResumeMetric = finalizeMetric({
+    count: localReaderSearchResumeSuccessCount,
+    availableCount: localReaderSearchResumeAvailableBatchCount,
+    unavailableCount: localReaderSearchResumeUnavailableCount,
+  });
 
   return {
     schemaVersion: COURSE_SUPPORT_ACCEPTANCE_HISTORY_SCHEMA_VERSION,
@@ -847,8 +881,15 @@ export function aggregateCourseSupportAcceptanceHistory(input: {
       syntheticExternalSendAttemptMetric.unavailableCount,
     syntheticCanaryExternalSendAttemptAvailability:
       syntheticExternalSendAttemptMetric.availability,
-    localReaderSearchResumeSuccessCount,
-    syntheticCanaryLocalReaderResumeSuccessCount,
+    localReaderSearchResumeSuccessCount: localReaderSearchResumeMetric.count,
+    localReaderSearchResumeUnavailableCount:
+      localReaderSearchResumeMetric.unavailableCount,
+    localReaderSearchResumeAvailability:
+      localReaderSearchResumeMetric.availability,
+    syntheticCanaryLocalReaderResumeSuccessCount:
+      localReaderSearchResumeMetric.count === null
+        ? null
+        : syntheticCanaryLocalReaderResumeSuccessCount,
   };
 }
 
@@ -1055,11 +1096,18 @@ function classifyLocalReaderSearchResumes(
     windowEndedAt: Date;
   },
 ) {
-  const resumes: Array<{ key: string; syntheticMultiCycle: boolean }> = [];
+  const proven: Array<{ key: string; syntheticMultiCycle: boolean }> = [];
+  const unavailable: string[] = [];
   for (const dispatch of batch.searchDispatches) {
     const search = dispatch.teeSearch;
     if (!search) continue;
     for (const job of search.localReaderJobs) {
+      const key = [
+        job.courseId,
+        job.scheduleVersion,
+        job.claimedAt?.toISOString() ?? "UNKNOWN",
+        job.completedAt?.toISOString() ?? "UNKNOWN",
+      ].join(":");
       if (
         typeof job.courseId !== "string" ||
         job.courseId.length === 0 ||
@@ -1078,8 +1126,34 @@ function classifyLocalReaderSearchResumes(
       ) {
         continue;
       }
+      const resumeFromScheduleVersion = job.resumeFromScheduleVersion;
+      const resumeScheduleVersion = job.resumeScheduleVersion;
+      if (
+        resumeFromScheduleVersion === null ||
+        resumeScheduleVersion === null ||
+        !isNonnegativeInteger(resumeFromScheduleVersion) ||
+        !isNonnegativeInteger(resumeScheduleVersion)
+      ) {
+        unavailable.push(key);
+        continue;
+      }
+      if (
+        resumeScheduleVersion !== resumeFromScheduleVersion + 1 ||
+        resumeScheduleVersion <= job.scheduleVersion
+      ) {
+        unavailable.push(key);
+        continue;
+      }
+      if (
+        dispatch.scheduleVersion !== job.scheduleVersion ||
+        resumeFromScheduleVersion !== job.scheduleVersion ||
+        search.scheduleVersion !== resumeScheduleVersion
+      ) {
+        continue;
+      }
       const probe = search.probes.find((candidate) => {
         const automationRun = candidate.automationRun;
+        const automationRunAudit = asRecord(automationRun?.audit);
         const summary = asRecord(candidate.rawSummary);
         const providerObservedAt = parseCanonicalTimestamp(
           summary.providerObservedAt,
@@ -1098,6 +1172,13 @@ function classifyLocalReaderSearchResumes(
           automationRun.status === "COMPLETED" &&
           automationRun.runtimeVersion === input.releaseSha &&
           automationRun.outcome === "success" &&
+          automationRunAudit.scheduleVersion === resumeScheduleVersion &&
+          hasExactSyntheticSearchRunAudit({
+            audit: automationRun.audit,
+            searchRef: dispatch.searchRef,
+            probeOutcome: candidate.outcome,
+            scheduleVersion: resumeScheduleVersion,
+          }) &&
           automationRun.startedAt.getTime() > job.completedAt!.getTime() &&
           automationRun.startedAt.getTime() <= candidate.observedAt.getTime() &&
           automationRun.completedAt &&
@@ -1108,10 +1189,12 @@ function classifyLocalReaderSearchResumes(
         );
       });
       if (!probe) continue;
-      resumes.push({
+      proven.push({
         key: [
           job.courseId,
           job.scheduleVersion,
+          resumeFromScheduleVersion,
+          resumeScheduleVersion,
           job.claimedAt.toISOString(),
           job.completedAt.toISOString(),
         ].join(":"),
@@ -1119,7 +1202,7 @@ function classifyLocalReaderSearchResumes(
       });
     }
   }
-  return resumes;
+  return { proven, unavailable };
 }
 
 function readOrchestrationOnlyCount(summaryValue: unknown) {
@@ -1224,8 +1307,14 @@ function projectCourseSupportAcceptanceHistory(
     syntheticCanaryExternalSendAttemptAvailability: machineAvailability(
       history.syntheticCanaryExternalSendAttemptAvailability,
     ),
-    localReaderSearchResumeSuccessCount: machineCount(
+    localReaderSearchResumeSuccessCount: machineNullableCount(
       history.localReaderSearchResumeSuccessCount,
+    ),
+    localReaderSearchResumeUnavailableCount: machineCount(
+      history.localReaderSearchResumeUnavailableCount,
+    ),
+    localReaderSearchResumeAvailability: machineAvailability(
+      history.localReaderSearchResumeAvailability,
     ),
     syntheticCanaryLocalReaderResumeSuccessCount: machineCount(
       history.syntheticCanaryLocalReaderResumeSuccessCount,
@@ -1281,7 +1370,6 @@ function getExactSyntheticProviderCheckProofs(
     search.syntheticMultiCycle !== true ||
     !/^[a-f0-9]{64}$/.test(dispatch.searchRef) ||
     !isNonnegativeInteger(dispatch.scheduleVersion) ||
-    search.scheduleVersion !== dispatch.scheduleVersion ||
     !isNonnegativeInteger(search.alertGeneration) ||
     !dispatchedAt ||
     !dispatchCompletedAt ||
@@ -1299,6 +1387,11 @@ function getExactSyntheticProviderCheckProofs(
 
   return search.probes.flatMap((probe) => {
     const automationRun = probe.automationRun;
+    const providerExecution = asRecord(probe.rawSummary).providerExecution;
+    const expectedRunScheduleVersion =
+      providerExecution === "LOCAL_BROWSER_READER"
+        ? search.scheduleVersion
+        : dispatch.scheduleVersion;
     const providerObservedAt = getProviderExecutionEvidenceObservedAt({
       rawSummary: probe.rawSummary,
       probeObservedAt: probe.observedAt,
@@ -1327,10 +1420,13 @@ function getExactSyntheticProviderCheckProofs(
       automationRun.completedAt.getTime() > lastCheckedAt.getTime() ||
       automationRun.completedAt.getTime() > completedAt.getTime() ||
       automationRun.completedAt.getTime() >= input.windowEndedAt.getTime() ||
+      (providerExecution !== "LOCAL_BROWSER_READER" &&
+        search.scheduleVersion !== dispatch.scheduleVersion) ||
       !hasExactSyntheticSearchRunAudit({
         audit: automationRun.audit,
         searchRef: dispatch.searchRef,
         probeOutcome: probe.outcome,
+        scheduleVersion: expectedRunScheduleVersion,
       }) ||
       !hasCausalProviderExecutionForSyntheticRun({
         dispatch,
@@ -1358,6 +1454,7 @@ function hasExactSyntheticSearchRunAudit(input: {
   audit: unknown;
   searchRef: string;
   probeOutcome: string;
+  scheduleVersion: number;
 }) {
   const audit = asRecord(input.audit);
   const courseOutcomes = asRecord(audit.courseOutcomes);
@@ -1366,6 +1463,8 @@ function hasExactSyntheticSearchRunAudit(input: {
     audit.trigger === "workflow" &&
     audit.searchRef === input.searchRef.slice(0, 16) &&
     audit.outcome === "success" &&
+    isNonnegativeInteger(audit.scheduleVersion) &&
+    audit.scheduleVersion === input.scheduleVersion &&
     isNonnegativeInteger(audit.checkedCourses) &&
     audit.checkedCourses > 0 &&
     outcomeCounts.length > 0 &&
@@ -1395,6 +1494,10 @@ function hasCausalProviderExecutionForSyntheticRun(input: {
       (job) =>
         job.courseId === input.probe.courseId &&
         job.scheduleVersion === input.dispatch.scheduleVersion &&
+        job.resumeFromScheduleVersion === input.dispatch.scheduleVersion &&
+        job.resumeScheduleVersion ===
+          input.dispatch.teeSearch?.scheduleVersion &&
+        job.resumeScheduleVersion === job.resumeFromScheduleVersion + 1 &&
         typeof job.readerVersion === "string" &&
         job.readerVersion.trim().length > 0 &&
         job.readerVersion.length <= 64 &&
