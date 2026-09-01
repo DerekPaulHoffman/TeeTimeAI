@@ -2645,6 +2645,112 @@ export function shouldFinalizeSourceUnverified(
   return getSourceUnverifiedFinalizationEvidence(input) !== null;
 }
 
+export function hasExactRuntimeBrowserProviderExecutionEvidence(input: {
+  attemptLedger: unknown;
+  cycle: number;
+  claimedAt: Date;
+  deployedAt: Date | null;
+  releaseSha: string | null;
+}) {
+  if (
+    !input.releaseSha ||
+    !/^[a-f0-9]{40}$/iu.test(input.releaseSha) ||
+    !(input.deployedAt instanceof Date) ||
+    !Number.isFinite(input.deployedAt.getTime())
+  ) {
+    return false;
+  }
+  const ledger = parseAutomationPlaybookLedger(input.attemptLedger);
+  return Boolean(
+    ledger?.events.some((event) => {
+      if (
+        event.cycle !== input.cycle ||
+        event.providerExecution !== true ||
+        event.runtimeVersion !== input.releaseSha ||
+        (event.stage !== "RENDERED_BROWSER_DISCOVERY" &&
+          event.stage !== "INDEPENDENT_CONFIRMATION")
+      ) {
+        return false;
+      }
+      const observedAt = new Date(event.observedAt);
+      return (
+        Number.isFinite(observedAt.getTime()) &&
+        observedAt.getTime() >= input.claimedAt.getTime() &&
+        observedAt.getTime() >= input.deployedAt!.getTime()
+      );
+    }),
+  );
+}
+
+export function shouldStartFreshExactRuntimeSourceCycle(input: {
+  failureClass: CourseSupportFailureClass;
+  attemptLedger: unknown;
+  cycle: number;
+  result: CourseSupportBatchIncidentResult;
+  claimedAt: Date;
+  deployedAt: Date | null;
+  releaseSha: string | null;
+  verifiedAt: Date | null;
+  verifiedIncidentUpdatedAt: Date | null;
+  incidentUpdatedAt: Date;
+}) {
+  if (
+    (input.failureClass !== "MISSING_METADATA" &&
+      input.failureClass !== "UNSUPPORTED_FAMILY") ||
+    (input.result !== "NEEDS_HUMAN" &&
+      input.result !== "RETRY_SCHEDULED" &&
+      input.result !== "STALE_EVIDENCE") ||
+    !input.verifiedAt ||
+    !input.verifiedIncidentUpdatedAt ||
+    input.verifiedIncidentUpdatedAt.getTime() !==
+      input.incidentUpdatedAt.getTime() ||
+    !hasExactRuntimeBrowserProviderExecutionEvidence(input)
+  ) {
+    return false;
+  }
+  const ledger = parseAutomationPlaybookLedger(input.attemptLedger);
+  const playbook = assessAutomationPlaybook(input.attemptLedger, input.cycle);
+  if (
+    !ledger ||
+    !playbook.valid ||
+    playbook.cycle !== input.cycle ||
+    playbook.conclusion !== "UNRESOLVED_EXHAUSTED" ||
+    playbook.completedStages.length !== AUTOMATION_PLAYBOOK_STAGES.length ||
+    !input.releaseSha
+  ) {
+    return false;
+  }
+  const terminalBrowserEvent = (
+    stage: "RENDERED_BROWSER_DISCOVERY" | "INDEPENDENT_CONFIRMATION",
+  ) =>
+    [...ledger.events]
+      .reverse()
+      .find(
+        (event) =>
+          event.cycle === input.cycle &&
+          event.stage === stage &&
+          event.transition !== "STARTED" &&
+          event.transition !== "FAILED_RETRYABLE",
+      ) ?? null;
+  const rendered = terminalBrowserEvent("RENDERED_BROWSER_DISCOVERY");
+  const independent = terminalBrowserEvent("INDEPENDENT_CONFIRMATION");
+  if (!rendered || !independent) {
+    return false;
+  }
+  const latestBrowserObservedAt = Math.max(
+    new Date(rendered.observedAt).getTime(),
+    new Date(independent.observedAt).getTime(),
+  );
+  return Boolean(
+    Number.isFinite(latestBrowserObservedAt) &&
+      latestBrowserObservedAt <= input.verifiedAt.getTime() &&
+      (rendered.runtimeVersion === input.releaseSha ||
+        independent.runtimeVersion === input.releaseSha) &&
+      (rendered.runtimeVersion !== input.releaseSha ||
+        independent.runtimeVersion !== input.releaseSha),
+  );
+}
+
 function getSourceUnverifiedFinalizationEvidence(
   input: SourceUnverifiedFinalizationInput,
 ): SourceUnverifiedFinalizationEvidence | null {
@@ -7878,6 +7984,13 @@ export async function verifyCourseSupportBatch(input: {
       (verificationSearchExecutionFence.providerExecutionAttemptCourseIds.includes(
         entry.courseId,
       ) ||
+        hasExactRuntimeBrowserProviderExecutionEvidence({
+          attemptLedger: entry.incident.attemptLedger,
+          cycle: entry.cycle,
+          claimedAt: batch.createdAt,
+          deployedAt,
+          releaseSha,
+        }) ||
         [
           workflowProviderAttempt
             ? buildProbeProofSnapshot(workflowProviderAttempt)
@@ -10376,6 +10489,30 @@ async function closeoutCourseSupportBatchAttempt(
           "A fresh complete signed-out playbook, including independent confirmation, could not establish one trustworthy public provider source.",
       };
     }
+    const freshExactRuntimeSourceCycle =
+      shouldStartFreshExactRuntimeSourceCycle({
+        failureClass: entry.incident.failureClass,
+        attemptLedger: entry.incident.attemptLedger,
+        cycle: entry.incident.cycle,
+        result: entry.result,
+        claimedAt: batch.createdAt,
+        deployedAt: batch.deployedAt,
+        releaseSha: batch.releaseSha,
+        verifiedAt: entry.verifiedAt,
+        verifiedIncidentUpdatedAt: entry.verifiedIncidentUpdatedAt,
+        incidentUpdatedAt: entry.incident.updatedAt,
+      });
+    if (freshExactRuntimeSourceCycle) {
+      return {
+        ...entry,
+        currentProviderSnapshotFingerprint,
+        automationStalled: false,
+        freshExactRuntimeSourceCycle: true as const,
+        normalizedResult: "RETRY_SCHEDULED" as const,
+        message:
+          "Browser source evidence spanned different deployed runtimes, so one fresh exact-runtime playbook cycle is required.",
+      };
+    }
     if (
       verificationWatchMode === "EARLY_RETRY" &&
       (entry.result === "RESTORED" ||
@@ -11061,13 +11198,24 @@ async function closeoutCourseSupportBatchAttempt(
       request.startedAt !== null ? [request.batchIncidentId] : [],
     ),
   );
-  const providerExecutionObservedByBatchIncidentId = new Set(
-    detachedRequestStatesAtCloseout.flatMap((request) =>
+  const providerExecutionObservedByBatchIncidentId = new Set([
+    ...detachedRequestStatesAtCloseout.flatMap((request) =>
       hasDurableDetachedProviderExecutionEvidence(request)
         ? [request.batchIncidentId]
         : [],
     ),
-  );
+    ...batch.incidents.flatMap((entry) =>
+      hasExactRuntimeBrowserProviderExecutionEvidence({
+        attemptLedger: entry.incident.attemptLedger,
+        cycle: entry.cycle,
+        claimedAt: batch.createdAt,
+        deployedAt: batch.deployedAt,
+        releaseSha: batch.releaseSha,
+      })
+        ? [entry.id]
+        : [],
+    ),
+  ]);
   const releaseHistoryOrdinalByBatchIncidentId = new Map(
     batch.incidents.map((entry, index) => [entry.id, index + 1]),
   );
@@ -12886,6 +13034,9 @@ async function closeoutCourseSupportBatchAttempt(
           });
         }
       } else {
+        const freshExactRuntimeSourceCycle =
+          "freshExactRuntimeSourceCycle" in entry &&
+          entry.freshExactRuntimeSourceCycle === true;
         const playbookAssessment = assessAutomationPlaybook(
           entry.incident.attemptLedger,
           entry.incident.cycle,
@@ -12975,25 +13126,30 @@ async function closeoutCourseSupportBatchAttempt(
           !deferredFailureHandoff.confirmationStarted
             ? new Date(deferredFailureHandoff.eligibleAt)
             : null;
-        const retryEscalationDeadline = closeoutRemediationAttempt
-          ? deferredFailureHandoffDueAt
-            ? getDeferredFailureHandoffEscalationDeadline(
-                deferredFailureHandoffDueAt,
-                entry.incident.activeRealSearchCount,
-              )
-            : currentCycleIsOrchestrationOnly
-            ? null
-            : continueIncompletePlaybook
-              ? getCourseMonitoringEscalationDeadline(
-                  now,
+        const retryEscalationDeadline = freshExactRuntimeSourceCycle
+          ? getCourseMonitoringEscalationDeadline(
+              now,
+              entry.incident.activeRealSearchCount,
+            )
+          : closeoutRemediationAttempt
+            ? deferredFailureHandoffDueAt
+              ? getDeferredFailureHandoffEscalationDeadline(
+                  deferredFailureHandoffDueAt,
                   entry.incident.activeRealSearchCount,
                 )
-              : (entry.incident.escalationDeadlineAt ??
-                getCourseMonitoringEscalationDeadline(
-                  now,
-                  entry.incident.activeRealSearchCount,
-                ))
-          : entry.incident.escalationDeadlineAt;
+              : currentCycleIsOrchestrationOnly
+                ? null
+                : continueIncompletePlaybook
+                  ? getCourseMonitoringEscalationDeadline(
+                      now,
+                      entry.incident.activeRealSearchCount,
+                    )
+                  : (entry.incident.escalationDeadlineAt ??
+                    getCourseMonitoringEscalationDeadline(
+                      now,
+                      entry.incident.activeRealSearchCount,
+                    ))
+            : entry.incident.escalationDeadlineAt;
         const operationalRetryAt =
           deferredFailureHandoffDueAt
             ? null
@@ -13006,17 +13162,18 @@ async function closeoutCourseSupportBatchAttempt(
                   closeoutRemediationAttempt.courseRef,
                 )?.retryAt ?? null)
             : null;
-        const normalNextAttemptAt =
-          deferredFailureHandoffDueAt ??
-          operationalRetryAt ??
-          watchContinuationAt ??
-          computeCourseSupportNextAttemptAt({
-            failureClass: effectiveFailureClass,
-            failureFingerprint: effectiveFailureFingerprint,
-            attemptCount: Math.max(1, entry.incident.attemptCount),
-            retryAfterSeconds: input.retryAfterSeconds,
-            now,
-          });
+        const normalNextAttemptAt = freshExactRuntimeSourceCycle
+          ? now
+          : (deferredFailureHandoffDueAt ??
+            operationalRetryAt ??
+            watchContinuationAt ??
+            computeCourseSupportNextAttemptAt({
+              failureClass: effectiveFailureClass,
+              failureFingerprint: effectiveFailureFingerprint,
+              attemptCount: Math.max(1, entry.incident.attemptCount),
+              retryAfterSeconds: input.retryAfterSeconds,
+              now,
+            }));
         const detachedFailureNotBefore = getDetachedFailureRetryNotBefore({
           proofSnapshot: entry.proofSnapshot,
           releaseSha: batch.releaseSha,
@@ -13039,6 +13196,23 @@ async function closeoutCourseSupportBatchAttempt(
             updatedAt: expectedIncidentUpdatedAt,
           },
           data: {
+            ...(freshExactRuntimeSourceCycle
+              ? {
+                  cycle: { increment: 1 },
+                  lastAttemptAt: null,
+                  attemptCount: 0,
+                  occurrenceCount: 1,
+                  firstSeenAt: now,
+                  confirmedAt: now,
+                  humanReviewReason: null,
+                  nextReminderAt: null,
+                  ownerNotifiedAt: null,
+                  escalatedAt: null,
+                  escalationNotifiedAt: null,
+                  nextAction:
+                    "Run every ordered source and reader stage on one exact deployed runtime.",
+                }
+              : {}),
             status: "AUTO_INVESTIGATING",
             activeBatchId: null,
             failureClass: persistedFailureClass,
@@ -13058,10 +13232,41 @@ async function closeoutCourseSupportBatchAttempt(
             state: "AUTO_INVESTIGATING",
             failureFingerprint: persistedFailureFingerprint,
             nextAutomaticAttemptAt: nextAttemptAt,
+            ...(freshExactRuntimeSourceCycle
+              ? { revalidationRequestedAt: now }
+              : {}),
             stateChangedAt: now,
             revision: { increment: 1 },
           },
         });
+        if (freshExactRuntimeSourceCycle) {
+          await tx.courseMonitoringEvent.create({
+            data: {
+              courseId: entry.courseId,
+              incidentId: entry.incidentId,
+              eventType: "REVALIDATION_REQUESTED",
+              source: "COURSE_SUPPORT_RESPONDER",
+              fromState: "AUTO_INVESTIGATING",
+              toState: "AUTO_INVESTIGATING",
+              failureFingerprint: persistedFailureFingerprint,
+              message:
+                "The responder started one fresh cycle because source evidence crossed deployment runtimes.",
+              runtimeVersion: batch.releaseSha ?? batch.baseSha,
+              deploymentSha: batch.releaseSha,
+              idempotencyKey: `course-support-exact-runtime-source-cycle:${entry.incidentId}:${entry.cycle}:${batch.releaseSha ?? batch.baseSha}`,
+              occurredAt: now,
+              audit: {
+                action: "fresh_exact_runtime_source_cycle",
+                priorCycle: entry.cycle,
+                cycle: entry.cycle + 1,
+                exactRuntimeRequired: true,
+                oneShot: true,
+                preservesAttemptLedger: true,
+                customerDataIncluded: false,
+              },
+            },
+          });
+        }
       }
       if (incidentUpdated.count !== 1) {
         throw new CourseSupportCloseoutSnapshotChangedError();

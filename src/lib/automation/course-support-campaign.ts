@@ -13,6 +13,7 @@ import { withPostgresAdvisoryTextLease } from "./lease";
 import {
   AUTOMATION_PLAYBOOK_STAGES,
   assessAutomationPlaybook,
+  parseAutomationPlaybookLedger,
   type AutomationPlaybookStage,
 } from "./course-monitoring-playbook";
 import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
@@ -151,6 +152,7 @@ export type ParkedCourseCampaignAdmissionMember = ParkedCourseCampaignMember & {
     | "ZERO_EXECUTION_RECOVERY"
     | "INCOMPLETE_PLAYBOOK_RECOVERY"
     | "FAILURE_REFINEMENT_INCOMPLETE_PLAYBOOK_RECOVERY"
+    | "EXACT_RUNTIME_SOURCE_CYCLE_RECOVERY"
     | "POST_MARKER_INCOMPLETE_PLAYBOOK_RECOVERY"
     | "DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY"
     | "PARKED_COHORT_REQUESTLESS_STALE_OWNERSHIP_RECOVERY"
@@ -381,6 +383,50 @@ export function deriveParkedCourseCampaignHumanReviewCycles(input: {
       audit.preservesAttemptCounts === true &&
       audit.preservesAttemptTimestamps === true &&
       audit.preservesImmutableCampaignAudit === true;
+    const exactRuntimeSourceCycleRecovery =
+      event.source === "COURSE_SUPPORT_RESPONDER" &&
+      audit.action ===
+        "parked_cohort_exact_runtime_source_cycle_recovery" &&
+      audit.admissionMode === "EXACT_RUNTIME_SOURCE_CYCLE_RECOVERY" &&
+      typeof audit.exactRuntimeLineageDigest === "string" &&
+      /^[a-f0-9]{64}$/u.test(audit.exactRuntimeLineageDigest) &&
+      typeof audit.sameCycleRecoveryHistoryDigest === "string" &&
+      /^[a-f0-9]{64}$/u.test(audit.sameCycleRecoveryHistoryDigest) &&
+      typeof audit.providerSnapshotFingerprint === "string" &&
+      /^[a-f0-9]{64}$/u.test(audit.providerSnapshotFingerprint) &&
+      typeof audit.attemptLedgerFingerprint === "string" &&
+      /^[a-f0-9]{64}$/u.test(audit.attemptLedgerFingerprint) &&
+      typeof audit.sourceRuntimeVersion === "string" &&
+      /^[a-f0-9]{40}$/u.test(audit.sourceRuntimeVersion) &&
+      typeof audit.recoveryRuntimeVersion === "string" &&
+      /^[a-f0-9]{40}$/u.test(audit.recoveryRuntimeVersion) &&
+      audit.sourceRuntimeVersion !== audit.recoveryRuntimeVersion &&
+      Number.isInteger(audit.priorCycle) &&
+      Number(audit.priorCycle) >= 0 &&
+      cycle !== null &&
+      cycle === Number(audit.priorCycle) + 1 &&
+      audit.playbookCompletedStageCount === AUTOMATION_PLAYBOOK_STAGES.length &&
+      audit.playbookNextStage === null &&
+      typeof audit.supersededEndpointId === "string" &&
+      audit.supersededEndpointId.trim().length > 0 &&
+      typeof audit.supersededEndpointAt === "string" &&
+      Number.isFinite(new Date(audit.supersededEndpointAt).getTime()) &&
+      new Date(audit.supersededEndpointAt).getTime() <
+        event.occurredAt.getTime() &&
+      audit.exactRuntimeRequired === true &&
+      audit.freshCycleRecovery === true &&
+      audit.sameCycleRecovery === false &&
+      audit.oneShot === true &&
+      audit.preservesAttemptLedger === true &&
+      audit.preservesOperatorEvidence === true &&
+      audit.preservesImmutableCampaignAudit === true &&
+      audit.resetsCycleAttemptCounters === true &&
+      audit.customerDataIncluded === false &&
+      asCampaignRecord(audit.campaign).kind === "PARKED_COHORT" &&
+      asCampaignRecord(audit.campaign).runId === audit.campaignRunId &&
+      asCampaignRecord(audit.campaign).membershipDigest ===
+        audit.campaignMembershipDigest &&
+      asCampaignRecord(audit.campaign).cycle === cycle;
     const validIncompletePlaybookRecovery =
       ((audit.action === "parked_cohort_incomplete_playbook_recovery" &&
         audit.admissionMode === "INCOMPLETE_PLAYBOOK_RECOVERY") ||
@@ -416,15 +462,27 @@ export function deriveParkedCourseCampaignHumanReviewCycles(input: {
       cycle === null ||
       (!validZeroExecutionRecovery &&
         !validIncompletePlaybookRecovery &&
+        !exactRuntimeSourceCycleRecovery &&
         !validRequestlessStaleOwnershipRecovery) ||
       audit.campaignRunId !== input.campaignRunId ||
       audit.campaignMembershipDigest !== input.campaignMembershipDigest ||
-      audit.sameCycleRecovery !== true ||
+      (exactRuntimeSourceCycleRecovery
+        ? audit.sameCycleRecovery !== false
+        : audit.sameCycleRecovery !== true) ||
       audit.oneShot !== true
     ) {
       continue;
     }
-    if (
+    if (exactRuntimeSourceCycleRecovery) {
+      const priorCycle = Number(audit.priorCycle);
+      const endpoints =
+        supersededEndpointsByCycle.get(priorCycle) ?? new Map<string, number>();
+      endpoints.set(
+        audit.supersededEndpointId as string,
+        new Date(audit.supersededEndpointAt as string).getTime(),
+      );
+      supersededEndpointsByCycle.set(priorCycle, endpoints);
+    } else if (
       sameIdentityMaterialChangeIncompleteRecovery ||
       postMarkerIncompleteRecovery
     ) {
@@ -461,17 +519,19 @@ export function deriveParkedCourseCampaignHumanReviewCycles(input: {
         if (cycle === null) return [];
         const recoveryAt = recoveredAtByCycle.get(cycle);
         const supersededEndpoints = supersededEndpointsByCycle.get(cycle);
+        const explicitlySupersededEndpoint =
+          typeof event.id === "string" &&
+          supersededEndpoints?.get(event.id) === event.occurredAt.getTime();
         const supersededInfrastructureParking =
           event.eventType === "HUMAN_REVIEW_REQUESTED" &&
           event.source !== "OPERATOR_DASHBOARD" &&
           event.source !== "OPERATOR_CLI" &&
           audit.automationStalled === true &&
           audit.parkedUntilMaterialChange === true &&
-          audit.playbookExhausted === false &&
-          ((typeof event.id === "string" &&
-            supersededEndpoints?.get(event.id) ===
-              event.occurredAt.getTime()) ||
-            (recoveryAt !== undefined && event.occurredAt < recoveryAt));
+          (explicitlySupersededEndpoint ||
+            (audit.playbookExhausted === false &&
+              recoveryAt !== undefined &&
+              event.occurredAt < recoveryAt));
         return supersededInfrastructureParking ? [] : [cycle];
       }),
     ),
@@ -1309,13 +1369,30 @@ export async function loadParkedCourseCampaignAdmissionMembers(
             campaignMembershipDigest: audit.membershipDigest,
             currentRuntimeVersion: runtimeVersion,
           });
-    const descendantIncompletePlaybookRecovery =
+    const exactRuntimeSourceCycleRecovery =
       freshCycle ||
       requestlessStaleOwnershipHistory ||
       zeroExecutionHistory ||
       incompletePlaybookHistory ||
       failureRefinementIncompletePlaybookRecovery ||
       postMarkerIncompletePlaybookRecovery
+        ? null
+        : assessParkedCourseCampaignExactRuntimeSourceCycleRecovery({
+            captured,
+            current,
+            capturedAt: new Date(audit.capturedAt),
+            campaignRunId,
+            campaignMembershipDigest: audit.membershipDigest,
+            currentRuntimeVersion: runtimeVersion,
+          });
+    const descendantIncompletePlaybookRecovery =
+      freshCycle ||
+      requestlessStaleOwnershipHistory ||
+      zeroExecutionHistory ||
+      incompletePlaybookHistory ||
+      failureRefinementIncompletePlaybookRecovery ||
+      postMarkerIncompletePlaybookRecovery ||
+      exactRuntimeSourceCycleRecovery
         ? null
         : assessParkedCourseCampaignDescendantIncompletePlaybookRecovery({
             captured,
@@ -1331,6 +1408,7 @@ export async function loadParkedCourseCampaignAdmissionMembers(
       incompletePlaybookHistory ||
       failureRefinementIncompletePlaybookRecovery ||
       postMarkerIncompletePlaybookRecovery ||
+      exactRuntimeSourceCycleRecovery ||
       descendantIncompletePlaybookRecovery
         ? null
         : assessParkedCourseCampaignSameIdentityMaterialChangeIncompletePlaybookRecovery(
@@ -1349,6 +1427,7 @@ export async function loadParkedCourseCampaignAdmissionMembers(
       incompletePlaybookHistory ||
       failureRefinementIncompletePlaybookRecovery ||
       postMarkerIncompletePlaybookRecovery ||
+      exactRuntimeSourceCycleRecovery ||
       descendantIncompletePlaybookRecovery ||
       sameIdentityMaterialChangeIncompletePlaybookRecovery
         ? null
@@ -1365,6 +1444,7 @@ export async function loadParkedCourseCampaignAdmissionMembers(
       !incompletePlaybookHistory &&
       !failureRefinementIncompletePlaybookRecovery &&
       !postMarkerIncompletePlaybookRecovery &&
+      !exactRuntimeSourceCycleRecovery &&
       !descendantIncompletePlaybookRecovery &&
       !sameIdentityMaterialChangeIncompletePlaybookRecovery &&
       !currentCycleOrchestrationHistory
@@ -1383,11 +1463,13 @@ export async function loadParkedCourseCampaignAdmissionMembers(
               ? ("FAILURE_REFINEMENT_INCOMPLETE_PLAYBOOK_RECOVERY" as const)
               : postMarkerIncompletePlaybookRecovery
                 ? ("POST_MARKER_INCOMPLETE_PLAYBOOK_RECOVERY" as const)
-                : descendantIncompletePlaybookRecovery
-                  ? ("DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY" as const)
-                  : sameIdentityMaterialChangeIncompletePlaybookRecovery
-                    ? ("SAME_IDENTITY_MATERIAL_CHANGE_INCOMPLETE_PLAYBOOK_RECOVERY" as const)
-                    : ("CURRENT_CYCLE_ORCHESTRATION_RECOVERY" as const);
+                : exactRuntimeSourceCycleRecovery
+                  ? ("EXACT_RUNTIME_SOURCE_CYCLE_RECOVERY" as const)
+                  : descendantIncompletePlaybookRecovery
+                    ? ("DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY" as const)
+                    : sameIdentityMaterialChangeIncompletePlaybookRecovery
+                      ? ("SAME_IDENTITY_MATERIAL_CHANGE_INCOMPLETE_PLAYBOOK_RECOVERY" as const)
+                      : ("CURRENT_CYCLE_ORCHESTRATION_RECOVERY" as const);
     const playbookAssessment = current.zeroExecutionEvidence.playbookAssessment;
     return [
       {
@@ -1405,6 +1487,7 @@ export async function loadParkedCourseCampaignAdmissionMembers(
           incompletePlaybookHistory?.historyDigest ??
           failureRefinementIncompletePlaybookRecovery?.history.historyDigest ??
           postMarkerIncompletePlaybookRecovery?.history.historyDigest ??
+          exactRuntimeSourceCycleRecovery?.history.historyDigest ??
           descendantIncompletePlaybookRecovery?.history.historyDigest ??
           sameIdentityMaterialChangeIncompletePlaybookRecovery?.history
             .historyDigest ??
@@ -1421,6 +1504,7 @@ export async function loadParkedCourseCampaignAdmissionMembers(
 }
 
 type ParkedCourseCampaignRecoveryEvidence = {
+  attemptLedger?: unknown;
   latestProbe: {
     id: string;
     courseId: string;
@@ -2664,6 +2748,7 @@ async function loadParkedCourseCampaignMemberSnapshots(
           incident.course.preferences.length,
         ),
         zeroExecutionEvidence: {
+          attemptLedger: incident.attemptLedger,
           latestProbe: incident.course.probes[0] ?? null,
           latestDiscovery: incident.course.automationDiscoveries[0] ?? null,
           latestProbeTimestampRowCount: incident.course.probes[0]
@@ -3121,6 +3206,272 @@ export function assessParkedCourseCampaignFailureRefinementIncompletePlaybookRec
     admissionAt: admission.occurredAt,
     refinementAt: refinementEvents.at(-1)!.occurredAt,
     refinementEventCount: refinementEvents.length,
+    history,
+  };
+}
+
+export type ParkedCourseCampaignExactRuntimeSourceCycleRecovery = {
+  lineageDigest: string;
+  sourceRuntimeVersion: string;
+  supersededEndpointId: string;
+  supersededEndpointAt: Date;
+  history: ParkedCourseCampaignSameCycleRecoveryHistory;
+};
+
+export function assessParkedCourseCampaignExactRuntimeSourceCycleRecovery(input: {
+  captured: ParkedCourseCampaignMember;
+  current: ParkedCourseCampaignMemberSnapshot;
+  capturedAt: Date;
+  campaignRunId: string;
+  campaignMembershipDigest: string;
+  currentRuntimeVersion: string;
+}): ParkedCourseCampaignExactRuntimeSourceCycleRecovery | null {
+  const { captured, current } = input;
+  const playbook = current.zeroExecutionEvidence.playbookAssessment;
+  const ledger = parseAutomationPlaybookLedger(
+    current.zeroExecutionEvidence.attemptLedger,
+  );
+  if (
+    !input.campaignRunId.trim() ||
+    !/^[a-f0-9]{64}$/u.test(input.campaignMembershipDigest) ||
+    !/^[a-f0-9]{40}$/u.test(input.currentRuntimeVersion) ||
+    !Number.isFinite(input.capturedAt.getTime()) ||
+    !hasCompleteParkedCourseCampaignMonitoringHistory({
+      current,
+      capturedAt: input.capturedAt,
+    }) ||
+    current.courseId !== captured.courseId ||
+    current.incidentId !== captured.incidentId ||
+    current.cycle !== captured.cycle + 1 ||
+    current.kind !== captured.kind ||
+    current.providerFamilyKey !== captured.providerFamilyKey ||
+    !["MISSING_METADATA", "UNSUPPORTED_FAMILY"].includes(
+      current.failureClass,
+    ) ||
+    current.providerSnapshotFingerprint !==
+      captured.providerSnapshotFingerprint ||
+    !current.monitoringFailureFingerprint ||
+    !courseSupportFailureFingerprintsMatch(
+      current.monitoringFailureFingerprint,
+      current.failureFingerprint,
+    ) ||
+    !ledger ||
+    playbook.valid !== true ||
+    playbook.cycle !== current.cycle ||
+    playbook.conclusion !== "UNRESOLVED_EXHAUSTED" ||
+    playbook.completedStages.length !== AUTOMATION_PLAYBOOK_STAGES.length ||
+    playbook.nextStage !== null ||
+    !hasExactParkedCourseCampaignLatestEvidence({ current })
+  ) {
+    return null;
+  }
+
+  const events = current.zeroExecutionEvidence.monitoringEvents;
+  const admissions = events.filter((event) => {
+    const audit = asCampaignRecord(event.audit);
+    return (
+      event.incidentId === current.incidentId &&
+      event.eventType === "REVALIDATION_REQUESTED" &&
+      event.source === "COURSE_SUPPORT_RESPONDER" &&
+      audit.action === "parked_cohort_admission" &&
+      audit.campaignRunId === input.campaignRunId &&
+      audit.campaignMembershipDigest === input.campaignMembershipDigest &&
+      audit.priorCycle === captured.cycle &&
+      audit.cycle === current.cycle &&
+      audit.preservesPriorAttemptEvents === true &&
+      audit.customerDataIncluded === false
+    );
+  });
+  const failureRefinementMarkers = events.filter((event) => {
+    const audit = asCampaignRecord(event.audit);
+    const campaign = asCampaignRecord(audit.campaign);
+    return (
+      event.incidentId === current.incidentId &&
+      event.eventType === "REVALIDATION_REQUESTED" &&
+      event.source === "COURSE_SUPPORT_RESPONDER" &&
+      audit.action ===
+        "parked_cohort_failure_refinement_incomplete_playbook_recovery" &&
+      audit.admissionMode ===
+        "FAILURE_REFINEMENT_INCOMPLETE_PLAYBOOK_RECOVERY" &&
+      audit.campaignRunId === input.campaignRunId &&
+      audit.campaignMembershipDigest === input.campaignMembershipDigest &&
+      audit.cycle === current.cycle &&
+      audit.sameCycleRecovery === true &&
+      audit.oneShot === true &&
+      audit.preservesAttemptLedger === true &&
+      audit.preservesAttemptCounts === true &&
+      audit.preservesAttemptTimestamps === true &&
+      audit.preservesOperatorEvidence === true &&
+      audit.preservesImmutableCampaignAudit === true &&
+      audit.customerDataIncluded === false &&
+      campaign.kind === "PARKED_COHORT" &&
+      campaign.runId === input.campaignRunId &&
+      campaign.membershipDigest === input.campaignMembershipDigest &&
+      campaign.cycle === current.cycle
+    );
+  });
+  const exhaustedEndpoints = events.filter((event) => {
+    const audit = asCampaignRecord(event.audit);
+    return (
+      typeof event.id === "string" &&
+      event.id.trim().length > 0 &&
+      event.incidentId === current.incidentId &&
+      event.eventType === "HUMAN_REVIEW_REQUESTED" &&
+      event.source === "COURSE_SUPPORT_RESPONDER" &&
+      event.failureFingerprint !== null &&
+      courseSupportFailureFingerprintsMatch(
+        event.failureFingerprint,
+        current.failureFingerprint,
+      ) &&
+      audit.cycle === current.cycle &&
+      audit.automationStalled === true &&
+      audit.parkedUntilMaterialChange === true &&
+      audit.endpointStalled === true &&
+      audit.customerState === "NEEDS_HUMAN_REVIEW" &&
+      audit.playbookExhausted === true
+    );
+  });
+  if (
+    admissions.length !== 1 ||
+    failureRefinementMarkers.length !== 1 ||
+    exhaustedEndpoints.length !== 1
+  ) {
+    return null;
+  }
+  const admission = admissions[0]!;
+  const refinementMarker = failureRefinementMarkers[0]!;
+  const endpoint = exhaustedEndpoints[0]!;
+  if (
+    refinementMarker.occurredAt < admission.occurredAt ||
+    endpoint.occurredAt < refinementMarker.occurredAt ||
+    hasParkedCourseCampaignRecoveryMarker({
+      events,
+      action: "parked_cohort_exact_runtime_source_cycle_recovery",
+      campaignRunId: input.campaignRunId,
+      cycle: current.cycle,
+    })
+  ) {
+    return null;
+  }
+
+  const entries = current.zeroExecutionEvidence.batchIncidents
+    .filter((entry) => entry.cycle === current.cycle)
+    .sort(
+      (left, right) =>
+        left.createdAt.getTime() - right.createdAt.getTime() ||
+        left.id.localeCompare(right.id),
+    );
+  const sourceEntry = entries.find(
+    (entry) =>
+      entry.result === "NEEDS_HUMAN" &&
+      entry.batch.status === "PARTIAL" &&
+      entry.batch.completedAt?.getTime() === endpoint.occurredAt.getTime(),
+  );
+  const sourceRuntimeVersion = sourceEntry
+    ? (sourceEntry.batch.releaseSha ?? sourceEntry.batch.baseSha)
+    : null;
+  if (
+    entries.length === 0 ||
+    entries.length > 20 ||
+    !sourceEntry ||
+    !sourceEntry.batch.deployedAt ||
+    !sourceEntry.batch.completedAt ||
+    !sourceEntry.verifiedAt ||
+    !sourceRuntimeVersion ||
+    !/^[a-f0-9]{40}$/u.test(sourceRuntimeVersion) ||
+    sourceRuntimeVersion === input.currentRuntimeVersion ||
+    sourceEntry.batch.deployedAt > sourceEntry.batch.createdAt ||
+    sourceEntry.batch.createdAt > sourceEntry.createdAt ||
+    sourceEntry.createdAt > sourceEntry.verifiedAt ||
+    sourceEntry.verifiedAt > sourceEntry.batch.completedAt ||
+    sourceEntry.verificationRequests.filter(
+      (request) =>
+        request.startedAt instanceof Date &&
+        request.startedAt >= sourceEntry.createdAt &&
+        request.startedAt <= sourceEntry.batch.completedAt!,
+    ).length !== 1
+  ) {
+    return null;
+  }
+
+  const terminalBrowserEvent = (
+    stage: "RENDERED_BROWSER_DISCOVERY" | "INDEPENDENT_CONFIRMATION",
+  ) =>
+    [...ledger.events]
+      .reverse()
+      .find(
+        (event) =>
+          event.cycle === current.cycle &&
+          event.stage === stage &&
+          event.transition !== "STARTED" &&
+          event.transition !== "FAILED_RETRYABLE",
+      ) ?? null;
+  const rendered = terminalBrowserEvent("RENDERED_BROWSER_DISCOVERY");
+  const independent = terminalBrowserEvent("INDEPENDENT_CONFIRMATION");
+  const independentObservedAt = independent
+    ? new Date(independent.observedAt)
+    : null;
+  const latestDiscoveryAt = current.latestDiscoveryAt
+    ? new Date(current.latestDiscoveryAt)
+    : null;
+  if (
+    !rendered ||
+    !independent ||
+    rendered.providerExecution !== undefined ||
+    independent.providerExecution !== undefined ||
+    rendered.runtimeVersion === sourceRuntimeVersion ||
+    independent.runtimeVersion !== sourceRuntimeVersion ||
+    !independentObservedAt ||
+    !Number.isFinite(independentObservedAt.getTime()) ||
+    independentObservedAt < sourceEntry.batch.createdAt ||
+    independentObservedAt > sourceEntry.verifiedAt ||
+    !latestDiscoveryAt ||
+    !Number.isFinite(latestDiscoveryAt.getTime()) ||
+    Math.abs(
+      latestDiscoveryAt.getTime() - independentObservedAt.getTime(),
+    ) > 2_000
+  ) {
+    return null;
+  }
+
+  const history = assessParkedCourseCampaignSameCycleRecoveryHistory({
+    courseId: current.courseId,
+    cycle: current.cycle,
+    entries,
+    requireOrchestrationOnly: false,
+    requireStartedRequest: true,
+    requireCausalStartedRequest: true,
+    minimumStartedAt: admission.occurredAt,
+  });
+  if (!history) return null;
+
+  return {
+    lineageDigest: createHash("sha256")
+      .update(
+        stableCourseProviderExecutionEvidenceValue({
+          admission: canonicalizeParkedCourseCampaignRecoveryEvent(admission),
+          refinementMarker:
+            canonicalizeParkedCourseCampaignRecoveryEvent(refinementMarker),
+          endpoint: canonicalizeParkedCourseCampaignRecoveryEvent(endpoint),
+          sourceRuntimeVersion,
+          currentRuntimeVersion: input.currentRuntimeVersion,
+          rendered: {
+            observedAt: rendered.observedAt,
+            runtimeVersion: rendered.runtimeVersion,
+          },
+          independent: {
+            observedAt: independent.observedAt,
+            runtimeVersion: independent.runtimeVersion,
+          },
+          providerSnapshotFingerprint: current.providerSnapshotFingerprint,
+          attemptLedgerFingerprint: current.attemptLedgerFingerprint,
+          historyDigest: history.historyDigest,
+        }),
+      )
+      .digest("hex"),
+    sourceRuntimeVersion,
+    supersededEndpointId: endpoint.id!,
+    supersededEndpointAt: endpoint.occurredAt,
     history,
   };
 }

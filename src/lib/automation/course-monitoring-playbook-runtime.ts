@@ -33,6 +33,7 @@ export type RuntimePlaybookTransitionInput = {
   evidenceKind: AutomationPlaybookEvidenceKind;
   runtimeVersion: string;
   failureClass?: AutomationPlaybookFailureClass;
+  providerExecution?: boolean;
   skipReason?: AutomationPlaybookSkipReason;
   factualDisposition?: AutomationPlaybookFactualDisposition;
   technicalReason?: AutomationPlaybookTechnicalReason;
@@ -111,6 +112,7 @@ export async function recordRuntimePlaybookTransition(
     failureFingerprint: buildRuntimePlaybookFingerprint(input),
     runtimeVersion: input.runtimeVersion,
     failureClass: input.failureClass,
+    providerExecution: input.providerExecution,
     skipReason: input.skipReason,
     factualDisposition: input.factualDisposition,
     technicalReason: input.technicalReason,

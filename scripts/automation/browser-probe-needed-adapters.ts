@@ -525,6 +525,7 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
         let playbookRuntime: Awaited<
           ReturnType<typeof loadCourseMonitoringPlaybookRuntime>
         > = null;
+        let browserProviderExecutionStarted = false;
         const persistBrowserMutation = async <T>(
           requireCurrentStage: boolean,
           mutate: () => Promise<T>,
@@ -650,6 +651,7 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
           const providerExecution = await runWithProviderRequestLease(
             providerFamilyKey,
             () => {
+              browserProviderExecutionStarted = true;
               providerObservation?.markProviderExecutionStarted();
               return runPersistableBrowserOperation(() =>
                 collectBrowserEvidence(
@@ -691,6 +693,44 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
             notes.push(
               `${target.course.name}: deferred by the provider concurrency guard.`,
             );
+            const deferredStage = playbookRuntime?.assessment.nextStage;
+            if (
+              playbookRuntime &&
+              (deferredStage === "RENDERED_BROWSER_DISCOVERY" ||
+                deferredStage === "INDEPENDENT_CONFIRMATION")
+            ) {
+              const attemptCount =
+                playbookRuntime.assessment.stages.find(
+                  (stage) => stage.stage === deferredStage,
+                )?.attemptCount ?? 0;
+              const deferred = await persistBrowserMutation(true, () =>
+                recordRuntimePlaybookTransition(
+                  playbookRuntime!,
+                  {
+                    stage: deferredStage,
+                    transition:
+                      attemptCount < 1 ? "FAILED_RETRYABLE" : "FAILED_TERMINAL",
+                    readPath:
+                      deferredStage === "RENDERED_BROWSER_DISCOVERY"
+                        ? "RENDERED_BROWSER"
+                        : "INDEPENDENT_CONFIRMATION",
+                    evidenceKind: "TOOLING",
+                    failureClass: "RATE_LIMIT",
+                    providerExecution: false,
+                    runtimeVersion,
+                    source: "COURSE_SUPPORT_RESPONDER",
+                    onBeforeSourceWrite: (transaction) =>
+                      providerObservation!.assertObservationOwnedInTransaction(
+                        transaction,
+                      ),
+                  },
+                  options.persistenceFence,
+                ),
+              );
+              if (deferred.recorded) {
+                persistedCount += 1;
+              }
+            }
             continue;
           }
           const evidence = {
@@ -722,6 +762,44 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
             notes.push(
               `${target.course.name}: enrichment deferred by the provider concurrency guard.`,
             );
+            const deferredStage = playbookRuntime?.assessment.nextStage;
+            if (
+              playbookRuntime &&
+              (deferredStage === "RENDERED_BROWSER_DISCOVERY" ||
+                deferredStage === "INDEPENDENT_CONFIRMATION")
+            ) {
+              const attemptCount =
+                playbookRuntime.assessment.stages.find(
+                  (stage) => stage.stage === deferredStage,
+                )?.attemptCount ?? 0;
+              const deferred = await persistBrowserMutation(true, () =>
+                recordRuntimePlaybookTransition(
+                  playbookRuntime!,
+                  {
+                    stage: deferredStage,
+                    transition:
+                      attemptCount < 1 ? "FAILED_RETRYABLE" : "FAILED_TERMINAL",
+                    readPath:
+                      deferredStage === "RENDERED_BROWSER_DISCOVERY"
+                        ? "RENDERED_BROWSER"
+                        : "INDEPENDENT_CONFIRMATION",
+                    evidenceKind: "TOOLING",
+                    failureClass: "RATE_LIMIT",
+                    providerExecution: true,
+                    runtimeVersion,
+                    source: "COURSE_SUPPORT_RESPONDER",
+                    onBeforeSourceWrite: (transaction) =>
+                      providerObservation!.assertObservationOwnedInTransaction(
+                        transaction,
+                      ),
+                  },
+                  options.persistenceFence,
+                ),
+              );
+              if (deferred.recorded) {
+                persistedCount += 1;
+              }
+            }
             continue;
           }
           providerObservation?.assertObservationOwned();
@@ -835,6 +913,7 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
                               ? "RENDERED_BROWSER"
                               : "INDEPENDENT_CONFIRMATION",
                           runtimeVersion,
+                          providerExecution: true,
                           ...(expectedTransitionProviderSnapshotFingerprint
                             ? {
                                 expectedProviderSnapshotFingerprint:
@@ -905,6 +984,7 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
                         : "INDEPENDENT_CONFIRMATION",
                     evidenceKind: "TOOLING",
                     failureClass,
+                    providerExecution: browserProviderExecutionStarted,
                     runtimeVersion,
                     source: "COURSE_SUPPORT_RESPONDER",
                     onBeforeSourceWrite: (transaction) =>

@@ -128,6 +128,10 @@ export const automationPlaybookEventSchema = z
     failureFingerprint: automationPlaybookFailureFingerprintSchema,
     runtimeVersion: automationPlaybookRuntimeVersionSchema,
     failureClass: automationPlaybookFailureClassSchema.optional(),
+    // Optional for backward compatibility with append-only ledgers written
+    // before action-specific provider execution was recorded. New browser
+    // stage events always persist an explicit true/false value.
+    providerExecution: z.boolean().optional(),
     skipReason: automationPlaybookSkipReasonSchema.optional(),
     factualDisposition: automationPlaybookFactualDispositionSchema.optional(),
     technicalReason: automationPlaybookTechnicalReasonSchema.optional(),

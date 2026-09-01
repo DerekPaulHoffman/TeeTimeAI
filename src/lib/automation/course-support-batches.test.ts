@@ -153,6 +153,7 @@ import {
   findConflictingResponderPaths,
   getCourseSupportBatchPacket,
   grantOwnedCourseSupportVerificationStageDeadline,
+  hasExactRuntimeBrowserProviderExecutionEvidence,
   getOwnedCourseSupportSourceSearchContext,
   hasCourseSupportImplementationExecutionProofIncludingHistory,
   heartbeatCourseSupportBatch,
@@ -176,6 +177,7 @@ import {
   selectCourseSupportRetryBatch,
   shouldDispatchRemediatedCourseRechecks,
   shouldFinalizeSourceUnverified,
+  shouldStartFreshExactRuntimeSourceCycle,
   shouldContinueSettledCourseSupportRemediation,
   verifyCourseSupportBatch,
   withCourseSupportWriteConflictRetry,
@@ -1546,6 +1548,107 @@ function sourceUnverifiedAttemptLedger(
       : { skipReason: "NO_INDEPENDENT_CONFIRMATION" as const }),
     observedAt,
   });
+}
+
+function mixedRuntimeBrowserAttemptLedger(input: {
+  cycle: number;
+  oldRuntime: string;
+  releaseSha: string;
+  firstObservedAt: Date;
+  currentProviderExecution?: boolean;
+}) {
+  let ledger: unknown = null;
+  const terminal = (
+    stage:
+      | "OFFICIAL_IDENTITY"
+      | "TYPED_ADAPTER"
+      | "OFFICIAL_HTTP_DISCOVERY"
+      | "HTTP_ADAPTER_RETRY"
+      | "RENDERED_BROWSER_DISCOVERY"
+      | "BROWSER_ADAPTER_RETRY"
+      | "LOCAL_READER"
+      | "INDEPENDENT_CONFIRMATION",
+    readPath:
+      | "OFFICIAL_IDENTITY"
+      | "TYPED_PROVIDER_ADAPTER"
+      | "OFFICIAL_HTTP"
+      | "RENDERED_BROWSER"
+      | "LOCAL_READER"
+      | "INDEPENDENT_CONFIRMATION",
+    runtimeVersion: string,
+    index: number,
+    skipReason?:
+      | "NO_RUNNABLE_ADAPTER"
+      | "NO_METADATA_CHANGE"
+      | "NO_LOCAL_READER_CAPABILITY",
+    providerExecution?: boolean
+  ) => {
+    ledger = appendAutomationPlaybookEvent(ledger, {
+      cycle: input.cycle,
+      stage,
+      transition: skipReason ? "NOT_APPLICABLE" : "COMPLETED",
+      readPath,
+      evidenceKind:
+        stage === "RENDERED_BROWSER_DISCOVERY" ||
+        stage === "INDEPENDENT_CONFIRMATION"
+          ? "RENDERED_PAGE"
+          : skipReason
+            ? "TOOLING"
+            : "OFFICIAL_SOURCE",
+      failureFingerprint: `TEST:MIXED_RUNTIME:${stage}`,
+      runtimeVersion,
+      ...(skipReason ? { skipReason } : {}),
+      ...(providerExecution === undefined ? {} : { providerExecution }),
+      observedAt: new Date(input.firstObservedAt.getTime() + index * 1_000),
+    });
+  };
+  terminal("OFFICIAL_IDENTITY", "OFFICIAL_IDENTITY", input.oldRuntime, 0);
+  terminal(
+    "TYPED_ADAPTER",
+    "TYPED_PROVIDER_ADAPTER",
+    input.oldRuntime,
+    1,
+    "NO_RUNNABLE_ADAPTER"
+  );
+  terminal("OFFICIAL_HTTP_DISCOVERY", "OFFICIAL_HTTP", input.oldRuntime, 2);
+  terminal(
+    "HTTP_ADAPTER_RETRY",
+    "TYPED_PROVIDER_ADAPTER",
+    input.oldRuntime,
+    3,
+    "NO_METADATA_CHANGE"
+  );
+  terminal(
+    "RENDERED_BROWSER_DISCOVERY",
+    "RENDERED_BROWSER",
+    input.oldRuntime,
+    4,
+    undefined,
+    true
+  );
+  terminal(
+    "BROWSER_ADAPTER_RETRY",
+    "TYPED_PROVIDER_ADAPTER",
+    input.oldRuntime,
+    5,
+    "NO_METADATA_CHANGE"
+  );
+  terminal(
+    "LOCAL_READER",
+    "LOCAL_READER",
+    input.oldRuntime,
+    6,
+    "NO_LOCAL_READER_CAPABILITY"
+  );
+  terminal(
+    "INDEPENDENT_CONFIRMATION",
+    "INDEPENDENT_CONFIRMATION",
+    input.releaseSha,
+    7,
+    undefined,
+    input.currentProviderExecution ?? true
+  );
+  return ledger;
 }
 
 function independentBrowserSourceConflictDiscoveries(input: {
@@ -17856,6 +17959,80 @@ describe("course-support inspection ownership", () => {
           new Date("2026-07-22T19:05:00.000Z"),
         ),
       }),
+    ).toBe(false);
+  });
+
+  it("starts one fresh cycle when completed browser stages span runtimes", () => {
+    const oldRuntime = "a".repeat(40);
+    const releaseSha = "b".repeat(40);
+    const deployedAt = new Date("2026-07-22T19:00:00.000Z");
+    const claimedAt = new Date("2026-07-22T19:01:00.000Z");
+    const verifiedAt = new Date("2026-07-22T19:10:00.000Z");
+    const incidentUpdatedAt = new Date("2026-07-22T19:09:00.000Z");
+    const attemptLedger = mixedRuntimeBrowserAttemptLedger({
+      cycle: 4,
+      oldRuntime,
+      releaseSha,
+      firstObservedAt: new Date("2026-07-22T19:02:00.000Z"),
+    });
+    const evidence = {
+      failureClass: "UNSUPPORTED_FAMILY" as const,
+      attemptLedger,
+      cycle: 4,
+      result: "STALE_EVIDENCE" as const,
+      claimedAt,
+      deployedAt,
+      releaseSha,
+      verifiedAt,
+      verifiedIncidentUpdatedAt: incidentUpdatedAt,
+      incidentUpdatedAt,
+    };
+
+    expect(hasExactRuntimeBrowserProviderExecutionEvidence(evidence)).toBe(
+      true
+    );
+    expect(shouldStartFreshExactRuntimeSourceCycle(evidence)).toBe(true);
+    expect(
+      shouldStartFreshExactRuntimeSourceCycle({
+        ...evidence,
+        failureClass: "MISSING_METADATA",
+        result: "NEEDS_HUMAN",
+      })
+    ).toBe(true);
+    expect(
+      shouldStartFreshExactRuntimeSourceCycle({
+        ...evidence,
+        attemptLedger: mixedRuntimeBrowserAttemptLedger({
+          cycle: 4,
+          oldRuntime,
+          releaseSha,
+          firstObservedAt: new Date("2026-07-22T19:02:00.000Z"),
+          currentProviderExecution: false,
+        }),
+      })
+    ).toBe(false);
+    expect(
+      shouldStartFreshExactRuntimeSourceCycle({
+        ...evidence,
+        failureClass: "NETWORK",
+      })
+    ).toBe(false);
+    expect(
+      shouldStartFreshExactRuntimeSourceCycle({
+        ...evidence,
+        verifiedIncidentUpdatedAt: new Date(incidentUpdatedAt.getTime() - 1),
+      })
+    ).toBe(false);
+    expect(
+      shouldStartFreshExactRuntimeSourceCycle({
+        ...evidence,
+        attemptLedger: mixedRuntimeBrowserAttemptLedger({
+          cycle: 4,
+          oldRuntime: releaseSha,
+          releaseSha,
+          firstObservedAt: new Date("2026-07-22T19:02:00.000Z"),
+        }),
+      })
     ).toBe(false);
   });
 

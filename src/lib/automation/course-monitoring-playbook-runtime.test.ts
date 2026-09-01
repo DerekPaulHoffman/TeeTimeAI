@@ -66,6 +66,7 @@ describe("course monitoring playbook runtime", () => {
           evidenceKind: input.evidenceKind,
           failureFingerprint: input.failureFingerprint,
           runtimeVersion: input.runtimeVersion,
+          providerExecution: input.providerExecution,
           skipReason: input.skipReason,
           observedAt: input.now ?? new Date("2026-08-10T12:00:00.000Z"),
           note: input.note,
@@ -104,6 +105,8 @@ describe("course monitoring playbook runtime", () => {
           runtimeVersion,
           expectedProviderSnapshotFingerprint:
             stage === "RENDERED_BROWSER_DISCOVERY" ? "b".repeat(64) : undefined,
+          providerExecution:
+            stage === "RENDERED_BROWSER_DISCOVERY" ? false : undefined,
           skipReason:
             stage === "LOCAL_READER"
               ? "NO_LOCAL_READER_CAPABILITY"
@@ -130,6 +133,11 @@ describe("course monitoring playbook runtime", () => {
         ([call]) => call.stage === "RENDERED_BROWSER_DISCOVERY",
       )?.[0],
     ).toMatchObject({ expectedProviderSnapshotFingerprint: "b".repeat(64) });
+    expect(
+      monitoringMocks.recordCourseMonitoringPlaybookTransition.mock.calls.find(
+        ([call]) => call.stage === "RENDERED_BROWSER_DISCOVERY",
+      )?.[0],
+    ).toMatchObject({ providerExecution: false });
   });
 
   it("refuses to invent omitted prior-stage proof", async () => {
