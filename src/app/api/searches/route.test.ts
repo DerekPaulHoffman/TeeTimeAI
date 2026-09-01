@@ -1,7 +1,7 @@
 import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { POST } from "./route";
+import { GET, POST } from "./route";
 
 const mocks = vi.hoisted(() => ({
   after: vi.fn(),
@@ -36,6 +36,32 @@ vi.mock("@/lib/searches/service", () => ({
   createTeeSearchForUser: mocks.createTeeSearchForUser,
   listTeeSearchesForUser: mocks.listTeeSearchesForUser
 }));
+
+describe("GET /api/searches", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.hasDatabaseConfig.mockReturnValue(true);
+    mocks.hasClerkConfig.mockReturnValue(true);
+    mocks.getRequiredAppUser.mockResolvedValue({
+      id: "app-user-1",
+      email: "owner@example.com"
+    });
+  });
+
+  it("returns the customer-safe match projection from the authenticated service", async () => {
+    mocks.listTeeSearchesForUser.mockResolvedValue([
+      { id: "search-1", matches: [] }
+    ]);
+
+    const response = await GET();
+
+    expect(response.status).toBe(200);
+    expect(mocks.listTeeSearchesForUser).toHaveBeenCalledWith("app-user-1");
+    await expect(response.json()).resolves.toEqual({
+      searches: [{ id: "search-1", matches: [] }]
+    });
+  });
+});
 
 describe("POST /api/searches", () => {
   beforeEach(() => {

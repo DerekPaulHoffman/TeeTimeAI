@@ -87,6 +87,7 @@ export async function backfillSyntheticRemediation(options: BackfillOptions) {
       kind: candidate.kind,
       message: candidate.message,
       nextAction: candidate.nextAction,
+      failureObservedAt: candidate.observedAt,
       now: backfilledAt
     });
     result.incidentStates[state.status] =

@@ -97,7 +97,10 @@ import {
   parseDeferredFailureHandoffSignal,
   type DeferredFailureHandoffSignal,
 } from "./course-support-deferred-failure-handoff";
-import { enqueueRemediatedCourseRechecks } from "./search-recheck-queue";
+import {
+  enqueueRemediatedCourseRechecks,
+  isSearchScheduleWorkflowStartReservation,
+} from "./search-recheck-queue";
 import {
   withPostgresAdvisoryTextLease,
   type PostgresAdvisoryLeaseContext,
@@ -113,7 +116,12 @@ import {
   SOURCE_MISSING_PROVIDER_FAMILY
 } from "./provider-capabilities";
 import {
+  getProviderExecutionEvidenceObservedAt,
+  isProviderExecutionMarker,
+} from "./provider-execution-marker";
+import {
   COURSE_SUPPORT_BATCH_LEASE_MS,
+  COURSE_SUPPORT_BATCH_MAX_SIZE,
   COURSE_SUPPORT_RESPONDER_PROMPT_VERSION,
   COURSE_SUPPORT_SYNTHETIC_FAIRNESS_WINDOW,
   clampCourseSupportBatchSize,
@@ -199,6 +207,12 @@ const COURSE_SUPPORT_BATCH_CLAIM_WRITER_LEASE_TIMEOUT_MS =
   COURSE_SUPPORT_BATCH_CLAIM_TRANSACTION_TIMEOUT_MS *
     COURSE_SUPPORT_WRITE_CONFLICT_MAX_ATTEMPTS;
 const COURSE_SUPPORT_ACTIVE_CAMPAIGN_FENCE_LIMIT = 100;
+const COURSE_SUPPORT_CANDIDATE_QUEUE_READ_LIMIT = 256;
+const COURSE_SUPPORT_CANDIDATE_BATCH_HISTORY_READ_LIMIT = 128;
+const COURSE_SUPPORT_CANDIDATE_REQUEST_HISTORY_READ_LIMIT = 64;
+const COURSE_SUPPORT_CANDIDATE_MONITORING_EVENT_READ_LIMIT = 20;
+const COURSE_SUPPORT_CANDIDATE_PREFERENCE_READ_LIMIT = 1_024;
+const COURSE_SUPPORT_AUTHORITATIVE_PROBE_READ_LIMIT = 256;
 const ACTIVE_BATCH_STATUSES: CourseSupportBatchStatus[] = ["CLAIMED", "IMPLEMENTING", "VERIFYING"];
 // Keep long-lived Codex ownership aligned with the global provider I/O limit.
 // Additional owners cannot make provider progress and can starve unrelated
@@ -270,6 +284,7 @@ const COURSE_SUPPORT_PROVIDER_DISCOVERY_STATUS_SET = new Set<string>(
 );
 const DETACHED_VERIFICATION_COURSE_SELECT = {
   id: true,
+  updatedAt: true,
   name: true,
   timeZone: true,
   isPublic: true,
@@ -316,7 +331,6 @@ const DETACHED_VERIFICATION_COURSE_SELECT = {
   },
   probes: {
     where: {
-      outcome: { in: ["MATCH_FOUND", "NO_MATCH"] },
       teeSearch: {
         status: "ACTIVE",
         trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
@@ -380,7 +394,7 @@ const COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT = {
   monitoringEvents: {
     where: { eventType: "REVALIDATION_REQUESTED" },
     orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
-    take: 20,
+    take: COURSE_SUPPORT_CANDIDATE_MONITORING_EVENT_READ_LIMIT + 1,
     select: {
       id: true,
       eventType: true,
@@ -392,6 +406,7 @@ const COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT = {
   batchIncidents: {
     where: { batch: { completedAt: { not: null } } },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: COURSE_SUPPORT_CANDIDATE_BATCH_HISTORY_READ_LIMIT + 1,
     select: {
       id: true,
       batchId: true,
@@ -401,10 +416,12 @@ const COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT = {
       result: true,
       proofSnapshot: true,
       verifiedAt: true,
+      verifiedIncidentUpdatedAt: true,
       createdAt: true,
       updatedAt: true,
       verificationRequests: {
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        take: COURSE_SUPPORT_CANDIDATE_REQUEST_HISTORY_READ_LIMIT + 1,
         select: {
           id: true,
           batchIncidentId: true,
@@ -463,12 +480,14 @@ const COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT = {
             trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] }
           }
         },
+        take: COURSE_SUPPORT_CANDIDATE_PREFERENCE_READ_LIMIT + 1,
         select: { teeSearch: { select: { id: true, date: true } } }
       },
       automationDiscoveries: {
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         take: 12,
         select: {
+          id: true,
           evidence: true,
           automationReason: true,
           detectedPlatform: true,
@@ -486,9 +505,37 @@ type CourseSupportCandidateIncident = Prisma.CourseSupportIncidentGetPayload<{
   select: typeof COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT;
 }>;
 
-type CourseSupportClaimCandidate = CourseSupportCandidate & {
-  playbookEventCountAtClaim: number;
+type SourceCompleteFinalizationCampaignProvenance = {
+  runId: string;
+  membershipDigest: string;
 };
+
+type SourceCompleteFinalizationRecovery = {
+  evidenceDigest: string;
+  sourceBatchId: string;
+  sourceBatchIncidentId: string;
+  priorIncidentStatus: "AUTO_INVESTIGATING" | "NEEDS_HUMAN";
+  priorHumanReviewReason: CourseSupportCandidate["humanReviewReason"];
+  expectedMonitoringState: CourseMonitoringState;
+  expectedMonitoringRevision: number;
+  expectedMonitoringStateChangedAt: Date;
+  expectedLatestDiscoveryId: string | null;
+  expectedLatestDiscoveryCreatedAt: Date | null;
+  campaign: SourceCompleteFinalizationCampaignProvenance | null;
+};
+
+type CourseSupportClaimCandidate = CourseSupportCandidate & {
+  courseUpdatedAt: Date;
+  playbookEventCountAtClaim: number;
+  sourceCompleteFinalizationRecovery?: SourceCompleteFinalizationRecovery;
+};
+
+function readCandidateSourceCompleteFinalizationRecovery(
+  candidate: CourseSupportCandidate,
+) {
+  return (candidate as CourseSupportClaimCandidate)
+    .sourceCompleteFinalizationRecovery;
+}
 
 type DetachedVerificationRequestState = Prisma.CourseSupportVerificationRequestGetPayload<{
   select: typeof DETACHED_VERIFICATION_REQUEST_STATE_SELECT;
@@ -505,6 +552,11 @@ export function deriveCourseSupportCurrentDemand(
   preferences: readonly CourseSupportDemandPreference[],
   context?: { timeZone: string; now: Date }
 ) {
+  if (preferences.length > COURSE_SUPPORT_CANDIDATE_PREFERENCE_READ_LIMIT) {
+    throw new Error(
+      "Course-support candidate demand exceeds the bounded read limit.",
+    );
+  }
   const dateBoundary = context
     ? getCourseLocalDateStorageBoundary(context.timeZone, context.now)
     : null;
@@ -590,10 +642,50 @@ export type FreshProbeEvidence = {
   freshSearchCheckedAt?: Date | null;
   runtimeVersion: string | null;
   providerExecution: boolean;
+  providerExecutionObservedAt?: Date | null;
   runnableCoverageProven?: boolean;
   scheduleVersion?: number | null;
   trafficClass?: string | null;
 };
+
+function getFreshProbeProviderObservedAt(
+  probe: FreshProbeEvidence,
+): Date | null {
+  return probe.providerExecutionObservedAt === undefined
+    ? probe.observedAt
+    : probe.providerExecutionObservedAt;
+}
+
+function getFreshProbeOrderingTime(probe: FreshProbeEvidence) {
+  return getFreshProbeProviderObservedAt(probe) ?? probe.observedAt;
+}
+
+function compareFreshProbeEvidenceDescending(
+  left: FreshProbeEvidence,
+  right: FreshProbeEvidence,
+) {
+  const providerTimeOrder =
+    getFreshProbeOrderingTime(right).getTime() -
+    getFreshProbeOrderingTime(left).getTime();
+  if (providerTimeOrder !== 0) return providerTimeOrder;
+  const rowTimeOrder = right.observedAt.getTime() - left.observedAt.getTime();
+  return rowTimeOrder !== 0
+    ? rowTimeOrder
+    : right.id.localeCompare(left.id);
+}
+
+function haveSameFreshProbeMeaning(
+  left: FreshProbeEvidence,
+  right: FreshProbeEvidence,
+) {
+  return (
+    left.outcome === right.outcome &&
+    left.runtimeVersion === right.runtimeVersion &&
+    left.providerExecution === right.providerExecution &&
+    (getFreshProbeProviderObservedAt(left)?.getTime() ?? null) ===
+      (getFreshProbeProviderObservedAt(right)?.getTime() ?? null)
+  );
+}
 
 export type BatchIncidentVerification = {
   result: CourseSupportBatchIncidentResult;
@@ -761,6 +853,35 @@ function buildDueResponderIncidentWhere(now: Date): Prisma.CourseSupportIncident
   };
 }
 
+function buildParkedSourceCompleteFinalizationRecoveryWhere(): Prisma.CourseSupportIncidentWhereInput {
+  return {
+    status: "NEEDS_HUMAN",
+    humanReviewReason: "AUTOMATION_STALLED",
+    activeBatchId: null,
+    nextAttemptAt: null,
+    resolution: null,
+    resolvedAt: null,
+    batchIncidents: {
+      some: {
+        result: "RETRY_SCHEDULED",
+        batch: {
+          status: "RETRYABLE_FAILED",
+          completedAt: { not: null },
+        },
+      },
+    },
+    course: {
+      monitoringStatus: {
+        is: {
+          state: "ENGINEERING_VERIFICATION_NEEDED",
+          nextAutomaticAttemptAt: null,
+          revalidationRequestedAt: null,
+        },
+      },
+    },
+  };
+}
+
 function runCourseSupportTransactionWithRetry<T>(
   operation: (transaction: Prisma.TransactionClient) => Promise<T>
 ) {
@@ -805,6 +926,31 @@ async function getCourseSupportDatabaseNow(transaction: Prisma.TransactionClient
     throw new Error("Course-support database time is unavailable.");
   }
   return row.now;
+}
+
+async function fenceCourseSupportClaimCourseRows(
+  transaction: Prisma.TransactionClient,
+  courses: readonly { id: string; updatedAt: Date }[],
+) {
+  const stableCourses = [...courses].sort((left, right) =>
+    left.id.localeCompare(right.id),
+  );
+  for (const [index, course] of stableCourses.entries()) {
+    if (index > 0 && stableCourses[index - 1]?.id === course.id) {
+      throw new Error(
+        "Course-support claim contains duplicate course evidence.",
+      );
+    }
+    const fenced = await transaction.course.updateMany({
+      where: { id: course.id, updatedAt: course.updatedAt },
+      data: { updatedAt: course.updatedAt },
+    });
+    if (fenced.count !== 1) {
+      throw new Error(
+        "Course-support course evidence changed during claim; rerun selection.",
+      );
+    }
+  }
 }
 
 export async function getOwnedCourseSupportLeaseToken(input: {
@@ -1174,7 +1320,7 @@ function assertCourseSupportImplementationVerificationReady(input: {
   }
 }
 
-function hasStrictCourseSupportImplementationExecutionProof(input: {
+export function hasStrictCourseSupportImplementationExecutionProof(input: {
   summary: Prisma.JsonValue | null;
   baseSha: string;
   releaseSha: string | null;
@@ -1653,6 +1799,11 @@ export function selectCourseSupportRetryBatch(input: {
   if (retryBatch.incidents.length === 0) {
     throw new Error("A targeted responder retry has no incident evidence.");
   }
+  if (retryBatch.incidents.length > COURSE_SUPPORT_BATCH_MAX_SIZE) {
+    throw new Error(
+      "A targeted responder retry exceeds the bounded batch size.",
+    );
+  }
   const scopedEntries = selectCourseSupportRetrySourceEntries({
     retryBatch,
     retryOrdinal: input.retryOrdinal,
@@ -1854,6 +2005,9 @@ export function classifyFreshBatchEvidence(input: {
   const notBefore = input.recheckDispatchStartedAt;
   const freshSearchCheckedAt =
     newestProbe?.freshSearchCheckedAt ?? newestProbe?.observedAt;
+  const providerExecutionObservedAt = newestProbe
+    ? getFreshProbeProviderObservedAt(newestProbe)
+    : null;
   const providerEvidenceNotBefore = input.deployedAt ?? input.batchCreatedAt;
   const providerExecutionAttemptProof =
     input.releaseSha &&
@@ -1861,9 +2015,13 @@ export function classifyFreshBatchEvidence(input: {
     notBefore &&
     newestProbe?.providerExecution &&
     freshSearchCheckedAt &&
+    providerExecutionObservedAt &&
     freshSearchCheckedAt.getTime() >= notBefore.getTime() &&
-    newestProbe.observedAt.getTime() >= providerEvidenceNotBefore.getTime() &&
-    newestProbe.observedAt.getTime() >= notBefore.getTime()
+    providerExecutionObservedAt.getTime() >=
+      providerEvidenceNotBefore.getTime() &&
+    providerExecutionObservedAt.getTime() >= notBefore.getTime() &&
+    providerExecutionObservedAt.getTime() >=
+      (input.incidentLastSeenAt?.getTime() ?? 0)
       ? buildProbeProofSnapshot(newestProbe)
       : null;
   if (
@@ -1873,9 +2031,12 @@ export function classifyFreshBatchEvidence(input: {
     !newestProbe ||
     newestProbe.id === input.preProbeId ||
     !freshSearchCheckedAt ||
+    !providerExecutionObservedAt ||
     freshSearchCheckedAt.getTime() < notBefore.getTime() ||
-    newestProbe.observedAt.getTime() < providerEvidenceNotBefore.getTime() ||
-    freshSearchCheckedAt.getTime() <
+    providerExecutionObservedAt.getTime() <
+      providerEvidenceNotBefore.getTime() ||
+    providerExecutionObservedAt.getTime() < notBefore.getTime() ||
+    providerExecutionObservedAt.getTime() <
       (input.incidentLastSeenAt?.getTime() ?? 0) ||
     newestProbe.runtimeVersion !== releaseSha ||
     !newestProbe.providerExecution
@@ -2300,6 +2461,24 @@ export function shouldFinalizeSourceUnverified(input: {
   result: CourseSupportBatchIncidentResult;
   now?: Date;
 }) {
+  return Boolean(
+    hasFreshCompleteSourceUnverifiedEvidence(input) &&
+      input.verifiedIncidentUpdatedAt &&
+      input.verifiedIncidentUpdatedAt.getTime() ===
+        input.incidentUpdatedAt.getTime(),
+  );
+}
+
+function hasFreshCompleteSourceUnverifiedEvidence(input: {
+  providerFamilyKey: string;
+  failureClass: CourseSupportFailureClass;
+  course: Parameters<typeof resolveProviderCapability>[0];
+  freshCycleStartedAt: Date | null;
+  attemptLedger: unknown;
+  cycle: number;
+  verifiedAt: Date | null;
+  result: CourseSupportBatchIncidentResult;
+}) {
   const playbook = assessAutomationPlaybook(input.attemptLedger, input.cycle);
   const freshPlaybookComplete = Boolean(
     input.freshCycleStartedAt &&
@@ -2323,9 +2502,6 @@ export function shouldFinalizeSourceUnverified(input: {
       input.result === "STALE_EVIDENCE") &&
     freshPlaybookComplete &&
     input.verifiedAt &&
-    input.verifiedIncidentUpdatedAt &&
-    input.verifiedIncidentUpdatedAt.getTime() ===
-      input.incidentUpdatedAt.getTime() &&
     latestCompletedStageAt !== null &&
     input.verifiedAt.getTime() >= latestCompletedStageAt &&
     (exactSourceMissingState ||
@@ -2753,6 +2929,7 @@ export async function inspectCourseSupportQueue(input?: {
   const dueWhere = buildDueResponderIncidentWhere(now);
   const [
     rawDueIncidents,
+    parkedSourceCompleteFinalizationCandidates,
     activeBatches,
     expiredBatch,
     parkedCampaign,
@@ -2761,6 +2938,8 @@ export async function inspectCourseSupportQueue(input?: {
     await Promise.all([
       prisma.courseSupportIncident.findMany({
         where: dueWhere,
+        orderBy: [{ earliestTargetDate: "asc" }, { firstSeenAt: "asc" }],
+        take: COURSE_SUPPORT_CANDIDATE_QUEUE_READ_LIMIT + 1,
         select: {
           cycle: true,
           confirmedAt: true,
@@ -2783,6 +2962,7 @@ export async function inspectCourseSupportQueue(input?: {
                     },
                   },
                 },
+                take: COURSE_SUPPORT_CANDIDATE_PREFERENCE_READ_LIMIT + 1,
                 select: {
                   teeSearch: { select: { id: true, date: true } },
                 },
@@ -2791,6 +2971,7 @@ export async function inspectCourseSupportQueue(input?: {
           },
         },
       }),
+      listParkedSourceCompleteFinalizationRecoveryCandidates(now),
       prisma.courseSupportBatch.findMany({
         where: {
           status: { in: ACTIVE_BATCH_STATUSES },
@@ -2836,48 +3017,63 @@ export async function inspectCourseSupportQueue(input?: {
     activeBatches.find((batch) => batch.ownerThreadId === requestingThreadId) ??
     activeBatches[0] ??
     null;
+  assertBoundedCourseSupportCandidateQueue(rawDueIncidents);
   const activeProviderGroups = new Set(
     activeBatches.map(
       (batch) => `${batch.providerFamilyKey}\u0000${batch.failureFingerprint}`,
     ),
   );
-  const dueDemand = rawDueIncidents.flatMap((incident) => {
-    const currentDemand = deriveCourseSupportCurrentDemand(
-      incident.course.preferences,
-      {
-        timeZone: incident.course.timeZone,
-        now,
-      },
-    );
-    if (
-      !isResponderSelectionEligible({
-        confirmedAt: incident.confirmedAt,
-        attemptLedger: incident.attemptLedger,
-        cycle: incident.cycle,
-        activeRealSearchCount: currentDemand.activeRealSearchCount,
-      })
-    ) {
-      return [];
-    }
-    return [
-      {
-        incident: {
-          ...incident,
-          endpointHumanReviewProven:
-            incident.escalatedAt != null &&
-            isAutomationHumanReviewProofCurrentOrPrior(
-              incident.attemptLedger,
-              incident.cycle,
-            ),
-          engineeringOnly:
-            currentDemand.activeRealSearchCount > 0
-              ? false
-              : incident.engineeringOnly,
+  const dueDemand = [
+    ...rawDueIncidents.flatMap((incident) => {
+      const currentDemand = deriveCourseSupportCurrentDemand(
+        incident.course.preferences,
+        {
+          timeZone: incident.course.timeZone,
+          now,
         },
-        ...currentDemand,
+      );
+      if (
+        !isResponderSelectionEligible({
+          confirmedAt: incident.confirmedAt,
+          attemptLedger: incident.attemptLedger,
+          cycle: incident.cycle,
+          activeRealSearchCount: currentDemand.activeRealSearchCount,
+        })
+      ) {
+        return [];
+      }
+      return [
+        {
+          incident: {
+            ...incident,
+            endpointHumanReviewProven:
+              incident.escalatedAt != null &&
+              isAutomationHumanReviewProofCurrentOrPrior(
+                incident.attemptLedger,
+                incident.cycle,
+              ),
+            engineeringOnly:
+              currentDemand.activeRealSearchCount > 0
+                ? false
+                : incident.engineeringOnly,
+          },
+          ...currentDemand,
+        },
+      ];
+    }),
+    ...parkedSourceCompleteFinalizationCandidates.map((candidate) => ({
+      incident: {
+        providerFamilyKey: candidate.providerFamilyKey,
+        failureFingerprint: candidate.failureFingerprint,
+        engineeringOnly: candidate.engineeringOnly,
+        escalationDeadlineAt: candidate.escalationDeadlineAt,
+        endpointHumanReviewProven: candidate.endpointHumanReviewProven,
+        firstSeenAt: candidate.firstSeenAt,
       },
-    ];
-  });
+      activeRealSearchCount: candidate.activeRealSearchCount,
+      earliestTargetDate: candidate.earliestTargetDate,
+    })),
+  ];
   const dueIncidents = dueDemand.map(({ incident }) => incident);
   const availableDueIncidents = dueIncidents.filter(
     (incident) =>
@@ -3240,7 +3436,7 @@ export async function claimCourseSupportBatch(input: {
 
     const selectionDatabaseNow = await getCourseSupportDatabaseNow(prisma);
     const [initialCandidates, recentCompletedBatches, retryBatch] = await Promise.all([
-      listDueCourseSupportCandidates(selectionDatabaseNow),
+      listCourseSupportClaimCandidates(selectionDatabaseNow),
       prisma.courseSupportBatch.findMany({
         where: { completedAt: { not: null } },
         orderBy: [{ completedAt: "desc" }, { id: "desc" }],
@@ -3258,6 +3454,7 @@ export async function claimCourseSupportBatch(input: {
               failureFingerprint: true,
               incidents: {
                 orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+                take: COURSE_SUPPORT_BATCH_MAX_SIZE + 1,
                 select: {
                   id: true,
                   incidentId: true,
@@ -3523,20 +3720,52 @@ export async function claimCourseSupportBatch(input: {
             : {}),
         })),
       }) satisfies Prisma.InputJsonObject;
-    const campaignAttempts = selected.incidents.flatMap((incident) =>
-      incident.campaign
+    const campaignAttempts = selected.incidents.flatMap((incident) => {
+      const recoveryCampaign =
+        readCandidateSourceCompleteFinalizationRecovery(incident)?.campaign;
+      const campaign = incident.campaign
+        ? {
+            runId: incident.campaign.runId,
+            membershipDigest: incident.campaign.membershipDigest,
+          }
+        : recoveryCampaign;
+      return campaign
         ? [
             {
               courseRef: createCourseSupportRemediationCourseRef(
                 incident.courseId,
               ),
-              runId: incident.campaign.runId,
-              membershipDigest: incident.campaign.membershipDigest,
+              runId: campaign.runId,
+              membershipDigest: campaign.membershipDigest,
               cycle: incident.cycle,
             },
           ]
-        : [],
-    );
+        : [];
+    });
+    const sourceCompleteFinalizationRecoveryAttempts =
+      selected.incidents.flatMap((incident) => {
+        const recovery = readCandidateSourceCompleteFinalizationRecovery(incident);
+        return recovery
+          ? [
+              {
+                courseRef: createCourseSupportRemediationCourseRef(
+                  incident.courseId,
+                ),
+                evidenceDigest: recovery.evidenceDigest,
+                sourceBatchDigest: createHash("sha256")
+                  .update(recovery.sourceBatchId)
+                  .digest("hex"),
+              },
+            ]
+          : [];
+      });
+    const sourceCompleteFinalizationRecoverySummary =
+      sourceCompleteFinalizationRecoveryAttempts.length > 0
+        ? ({
+            schemaVersion: 1,
+            attempts: sourceCompleteFinalizationRecoveryAttempts,
+          } satisfies Prisma.InputJsonObject)
+        : null;
     const campaignSummary =
       campaignAttempts.length > 0
         ? ({
@@ -3559,11 +3788,19 @@ export async function claimCourseSupportBatch(input: {
     const selectedCourseIds = selected.incidents.map(
       (incident) => incident.courseId,
     );
-    const newestProbes = await prisma.courseProbe.findMany({
-      where: { courseId: { in: selectedCourseIds } },
-      orderBy: { observedAt: "desc" },
-      select: { id: true, courseId: true },
-    });
+    const newestProbes = (
+      await Promise.all(
+        [...new Set(selectedCourseIds)].sort().map((courseId) =>
+          prisma.courseProbe.findFirst({
+            where: { courseId },
+            orderBy: [{ observedAt: "desc" }, { id: "desc" }],
+            select: { id: true, courseId: true },
+          }),
+        ),
+      )
+    ).filter(
+      (probe): probe is { id: string; courseId: string } => probe !== null,
+    );
     const preProbeByCourse = new Map<string, string>();
     for (const probe of newestProbes) {
       if (!preProbeByCourse.has(probe.courseId)) {
@@ -3602,6 +3839,22 @@ export async function claimCourseSupportBatch(input: {
     }
     const created = await runCourseSupportSerializableTransactionWithRetry(
       async (tx) => {
+        await fenceCourseSupportClaimCourseRows(
+          tx,
+          selected.incidents.map((incident) => {
+            const courseUpdatedAt = (incident as CourseSupportClaimCandidate)
+              .courseUpdatedAt;
+            if (
+              !(courseUpdatedAt instanceof Date) ||
+              !Number.isFinite(courseUpdatedAt.getTime())
+            ) {
+              throw new Error(
+                "Course-support course evidence is unavailable during claim.",
+              );
+            }
+            return { id: incident.courseId, updatedAt: courseUpdatedAt };
+          }),
+        );
         const courseMonitoringAvailable = hasCourseMonitoringPersistence(tx);
         if (requestlessParkedCampaignReservationPlanned) {
           const transactionSelectionNow =
@@ -3638,9 +3891,11 @@ export async function claimCourseSupportBatch(input: {
                 { earliestTargetDate: "asc" },
                 { firstSeenAt: "asc" },
               ],
+              take: COURSE_SUPPORT_CANDIDATE_QUEUE_READ_LIMIT + 1,
               select: COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT,
             }),
           ]);
+          assertBoundedCourseSupportCandidateQueue(currentDueIncidents);
           const currentFairnessEvidence =
             buildCourseSupportRecentFairnessEvidence(
               currentRecentCompletedBatches,
@@ -3994,6 +4249,142 @@ export async function claimCourseSupportBatch(input: {
               );
             }
           }
+          const sourceCompleteFinalizationRecovery =
+            readCandidateSourceCompleteFinalizationRecovery(incident);
+          if (sourceCompleteFinalizationRecovery) {
+            const rebuilt = buildCourseSupportCandidates(
+              [current],
+              claimDatabaseNow,
+            ).find((candidate) => candidate.id === incident.id);
+            const rebuiltRecovery = rebuilt
+              ? readCandidateSourceCompleteFinalizationRecovery(rebuilt)
+              : null;
+            const sourceEntry = current.batchIncidents[0];
+            if (
+              !rebuilt ||
+              !rebuiltRecovery ||
+              rebuiltRecovery.evidenceDigest !==
+                sourceCompleteFinalizationRecovery.evidenceDigest ||
+              rebuiltRecovery.sourceBatchId !==
+                sourceCompleteFinalizationRecovery.sourceBatchId ||
+              rebuiltRecovery.sourceBatchIncidentId !==
+                sourceCompleteFinalizationRecovery.sourceBatchIncidentId ||
+              rebuilt.remediationRoute?.workMode !==
+                "COMPLETE_CLASSIFICATION" ||
+              rebuilt.remediationRoute.reason !== "CLASSIFICATION_READY" ||
+              rebuilt.actionPlan?.primaryAction !==
+                "COMPLETE_CLASSIFICATION" ||
+              current.status !==
+                sourceCompleteFinalizationRecovery.priorIncidentStatus ||
+              current.humanReviewReason !==
+                sourceCompleteFinalizationRecovery.priorHumanReviewReason ||
+              !sourceEntry ||
+              sourceEntry.id !==
+                sourceCompleteFinalizationRecovery.sourceBatchIncidentId ||
+              sourceEntry.batch.id !==
+                sourceCompleteFinalizationRecovery.sourceBatchId
+            ) {
+              throw new Error(
+                "Course-support source-complete recovery evidence changed during claim; rerun selection.",
+              );
+            }
+            const latestDiscoveryFence =
+              await tx.courseAutomationDiscovery.findFirst({
+                where: { courseId: incident.courseId },
+                orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+                select: { id: true, createdAt: true },
+              });
+            if (
+              (latestDiscoveryFence?.id ?? null) !==
+                sourceCompleteFinalizationRecovery.expectedLatestDiscoveryId ||
+              (latestDiscoveryFence?.createdAt.getTime() ?? null) !==
+                (sourceCompleteFinalizationRecovery.expectedLatestDiscoveryCreatedAt?.getTime() ??
+                  null)
+            ) {
+              throw new Error(
+                "Course-support source-complete recovery discovery evidence changed during claim; rerun selection.",
+              );
+            }
+            const sourceBatchFence = await tx.courseSupportBatch.updateMany({
+              where: {
+                id: sourceEntry.batch.id,
+                status: "RETRYABLE_FAILED",
+                providerFamilyKey: incident.providerFamilyKey,
+                failureFingerprint: incident.failureFingerprint,
+                baseSha: sourceEntry.batch.baseSha,
+                releaseSha: sourceEntry.batch.releaseSha,
+                deployedAt: sourceEntry.batch.deployedAt,
+                completedAt: sourceEntry.batch.completedAt,
+                revision: sourceEntry.batch.revision,
+                updatedAt: sourceEntry.batch.updatedAt,
+                summary: {
+                  equals: sourceEntry.batch.summary as Prisma.InputJsonValue,
+                },
+              },
+              data: {
+                revision: { increment: 0 },
+                updatedAt: sourceEntry.batch.updatedAt,
+              },
+            });
+            const sourceEntryFence =
+              await tx.courseSupportBatchIncident.updateMany({
+                where: {
+                  id: sourceEntry.id,
+                  batchId: sourceEntry.batchId,
+                  incidentId: sourceEntry.incidentId,
+                  courseId: sourceEntry.courseId,
+                  cycle: sourceEntry.cycle,
+                  result: "RETRY_SCHEDULED",
+                  proofSnapshot: {
+                    equals:
+                      sourceEntry.proofSnapshot === null
+                        ? Prisma.AnyNull
+                        : (sourceEntry.proofSnapshot as Prisma.InputJsonValue),
+                  },
+                  verifiedAt: sourceEntry.verifiedAt,
+                  verifiedIncidentUpdatedAt:
+                    sourceEntry.verifiedIncidentUpdatedAt,
+                  createdAt: sourceEntry.createdAt,
+                  updatedAt: sourceEntry.updatedAt,
+                },
+                data: { updatedAt: sourceEntry.updatedAt },
+              });
+            const currentMonitoringStatus = current.course.monitoringStatus;
+            if (!currentMonitoringStatus) {
+              throw new Error(
+                "Course-support source-complete recovery monitoring evidence is unavailable.",
+              );
+            }
+            const monitoringFence =
+              await tx.courseMonitoringStatus.updateMany({
+                where: {
+                  courseId: incident.courseId,
+                  state:
+                    sourceCompleteFinalizationRecovery.expectedMonitoringState,
+                  stateChangedAt:
+                    sourceCompleteFinalizationRecovery.expectedMonitoringStateChangedAt,
+                  revision:
+                    sourceCompleteFinalizationRecovery.expectedMonitoringRevision,
+                  failureFingerprint: incident.failureFingerprint,
+                },
+                data: {
+                  state: "AUTO_INVESTIGATING",
+                  nextAutomaticAttemptAt: null,
+                  revalidationRequestedAt: null,
+                  stateChangedAt: now,
+                  revision: { increment: 1 },
+                },
+              });
+            if (
+              sourceBatchFence.count !== 1 ||
+              sourceEntryFence.count !== 1 ||
+              monitoringFence.count !== 1
+            ) {
+              throw new Error(
+                "Course-support source-complete recovery evidence changed during claim; rerun selection.",
+              );
+            }
+          }
           if (
             incident.providerSnapshotFingerprint &&
             buildCourseSupportProviderSnapshotFingerprint(current.course) !==
@@ -4121,7 +4512,15 @@ export async function claimCourseSupportBatch(input: {
               nextAction: null,
               nextAttemptAt: null,
               nextReminderAt: null,
-              lastSeenAt: now,
+              lastSeenAt: getCourseSupportIncidentEvidenceObservedAt({
+                proofSnapshot: null,
+                incidentLastSeenAt: current.lastSeenAt,
+                now,
+                additionalProviderObservedAt:
+                  monitoringStatus.state === "HEALTHY"
+                    ? monitoringStatus.lastSuccessfulAt
+                    : null,
+              }),
               revision: { increment: 1 },
             },
           });
@@ -4145,6 +4544,7 @@ export async function claimCourseSupportBatch(input: {
                 },
                 kind: "FETCH_FAILED",
               },
+              take: COURSE_SUPPORT_CANDIDATE_QUEUE_READ_LIMIT + 1,
               select: {
                 cycle: true,
                 confirmedAt: true,
@@ -4161,6 +4561,8 @@ export async function claimCourseSupportBatch(input: {
                           },
                         },
                       },
+                      take:
+                        COURSE_SUPPORT_CANDIDATE_PREFERENCE_READ_LIMIT + 1,
                       select: {
                         teeSearch: { select: { id: true, date: true } },
                       },
@@ -4169,6 +4571,7 @@ export async function claimCourseSupportBatch(input: {
                 },
               },
             });
+          assertBoundedCourseSupportCandidateQueue(outsideDueFetchFailures);
           const outsideCriticalDemandAppeared = outsideDueFetchFailures.some(
             (incident) => {
               const { course } = incident;
@@ -4217,6 +4620,12 @@ export async function claimCourseSupportBatch(input: {
               fairnessReason: selected.fairnessReason,
               remediation: remediationSummary,
               ...(campaignSummary ? { campaign: campaignSummary } : {}),
+              ...(sourceCompleteFinalizationRecoverySummary
+                ? {
+                    sourceCompleteFinalizationRecovery:
+                      sourceCompleteFinalizationRecoverySummary,
+                  }
+                : {}),
               targetedRetry: Boolean(input.retryBatchId),
               ...(input.retryOrdinal !== undefined
                 ? {
@@ -4266,6 +4675,12 @@ export async function claimCourseSupportBatch(input: {
               fairnessReason: selected.fairnessReason,
               remediation: remediationSummary,
               ...(campaignSummary ? { campaign: campaignSummary } : {}),
+              ...(sourceCompleteFinalizationRecoverySummary
+                ? {
+                    sourceCompleteFinalizationRecovery:
+                      sourceCompleteFinalizationRecoverySummary,
+                  }
+                : {}),
               targetedRetry: Boolean(input.retryBatchId),
               ...(input.retryOrdinal !== undefined
                 ? {
@@ -4293,6 +4708,8 @@ export async function claimCourseSupportBatch(input: {
           })),
         });
         for (const incident of selected.incidents) {
+          const sourceCompleteFinalizationRecovery =
+            readCandidateSourceCompleteFinalizationRecovery(incident);
           const retrySourceEntry =
             retryBatch && input.retryOrdinal !== undefined
               ? retryBatch.incidents[input.retryOrdinal - 1]
@@ -4313,7 +4730,16 @@ export async function claimCourseSupportBatch(input: {
               updatedAt:
                 currentIncidentById.get(incident.id)?.updatedAt ??
                 incident.updatedAt,
-              status: "AUTO_INVESTIGATING",
+              status:
+                sourceCompleteFinalizationRecovery?.priorIncidentStatus ??
+                "AUTO_INVESTIGATING",
+              ...(sourceCompleteFinalizationRecovery
+                ? {
+                    revision: currentIncidentById.get(incident.id)?.revision,
+                    humanReviewReason:
+                      sourceCompleteFinalizationRecovery.priorHumanReviewReason,
+                  }
+                : {}),
               activeBatchId: null,
               ...(retrySourceEntry
                 ? {
@@ -4329,7 +4755,17 @@ export async function claimCourseSupportBatch(input: {
                     },
                   }
                 : {}),
-              ...(incident.deferredFailureHandoff
+              ...(sourceCompleteFinalizationRecovery
+                ? sourceCompleteFinalizationRecovery.priorIncidentStatus ===
+                  "NEEDS_HUMAN"
+                  ? { nextAttemptAt: null }
+                  : {
+                      OR: [
+                        { nextAttemptAt: null },
+                        { nextAttemptAt: { lte: now } },
+                      ],
+                    }
+                : incident.deferredFailureHandoff
                 ? {
                     nextAttemptAt: {
                       lte: claimDatabaseNow,
@@ -4350,10 +4786,19 @@ export async function claimCourseSupportBatch(input: {
                     }),
             },
             data: {
+              status: "AUTO_INVESTIGATING",
               activeBatchId: batch.id,
               activeRealSearchCount: incident.activeRealSearchCount,
               earliestTargetDate: incident.earliestTargetDate,
               engineeringOnly: incident.engineeringOnly,
+              ...(sourceCompleteFinalizationRecovery
+                ? {
+                    humanReviewReason: null,
+                    nextReminderAt: null,
+                    nextAction:
+                      "Complete the current-runtime classification from the already complete signed-out source playbook.",
+                  }
+                : {}),
               lastAttemptAt: now,
               attemptCount: { increment: 1 },
               revision: { increment: 1 },
@@ -4367,44 +4812,70 @@ export async function claimCourseSupportBatch(input: {
         }
         if (courseMonitoringAvailable) {
           await tx.courseMonitoringEvent.createMany({
-            data: selected.incidents.map((incident) => ({
-              courseId: incident.courseId,
-              incidentId: incident.id,
-              eventType: "AUTOMATION_ATTEMPTED" as const,
-              source: "COURSE_SUPPORT_RESPONDER" as const,
-              fromState: incident.humanReviewReason
-                ? ("ENGINEERING_VERIFICATION_NEEDED" as const)
-                : ("AUTO_INVESTIGATING" as const),
-              toState: incident.humanReviewReason
-                ? ("ENGINEERING_VERIFICATION_NEEDED" as const)
-                : ("AUTO_INVESTIGATING" as const),
-              failureFingerprint: incident.failureFingerprint,
-              readPath: "BOUNDED_RECOVERY_PLAYBOOK",
-              message:
-                "The responder claimed a bounded provider-family recovery attempt.",
-              occurredAt: now,
-              audit: {
-                providerFamilyKey: selected.providerFamilyKey,
-                maxCourses,
-                serializedWriterLane: true,
-                ...(incident.campaign
-                  ? {
-                      campaignKind: "PARKED_COHORT",
-                      campaignRunId: incident.campaign.runId,
-                      campaignMembershipDigest:
-                        incident.campaign.membershipDigest,
-                      cycle: incident.cycle,
-                    }
-                  : {}),
-                customerDataIncluded: false,
-              },
-            })),
+            data: selected.incidents.map((incident) => {
+              const sourceCompleteFinalizationRecovery =
+                readCandidateSourceCompleteFinalizationRecovery(incident);
+              const campaign = incident.campaign
+                ? {
+                    runId: incident.campaign.runId,
+                    membershipDigest: incident.campaign.membershipDigest,
+                  }
+                : sourceCompleteFinalizationRecovery?.campaign;
+              return {
+                courseId: incident.courseId,
+                incidentId: incident.id,
+                eventType: "AUTOMATION_ATTEMPTED" as const,
+                source: "COURSE_SUPPORT_RESPONDER" as const,
+                fromState:
+                  sourceCompleteFinalizationRecovery?.expectedMonitoringState ??
+                  (incident.humanReviewReason
+                    ? ("ENGINEERING_VERIFICATION_NEEDED" as const)
+                    : ("AUTO_INVESTIGATING" as const)),
+                toState: sourceCompleteFinalizationRecovery
+                  ? ("AUTO_INVESTIGATING" as const)
+                  : incident.humanReviewReason
+                  ? ("ENGINEERING_VERIFICATION_NEEDED" as const)
+                  : ("AUTO_INVESTIGATING" as const),
+                failureFingerprint: incident.failureFingerprint,
+                readPath: "BOUNDED_RECOVERY_PLAYBOOK",
+                message:
+                  sourceCompleteFinalizationRecovery
+                    ? "The responder claimed a current-runtime classification pass for an already complete signed-out source playbook."
+                    : "The responder claimed a bounded provider-family recovery attempt.",
+                occurredAt: now,
+                audit: {
+                  providerFamilyKey: selected.providerFamilyKey,
+                  maxCourses,
+                  serializedWriterLane: true,
+                  ...(sourceCompleteFinalizationRecovery
+                    ? {
+                        sourceCompleteFinalizationRecovery: true,
+                        evidenceDigest:
+                          sourceCompleteFinalizationRecovery.evidenceDigest,
+                        cycle: incident.cycle,
+                      }
+                    : {}),
+                  ...(campaign
+                    ? {
+                        campaignKind: "PARKED_COHORT",
+                        campaignRunId: campaign.runId,
+                        campaignMembershipDigest: campaign.membershipDigest,
+                        cycle: incident.cycle,
+                      }
+                    : {}),
+                  customerDataIncluded: false,
+                },
+              };
+            }),
           });
           const humanReviewCourseIds = selected.incidents.flatMap((incident) =>
             incident.humanReviewReason ? [incident.courseId] : [],
           );
           const automatedCourseIds = selected.incidents.flatMap((incident) =>
-            incident.humanReviewReason ? [] : [incident.courseId],
+            incident.humanReviewReason ||
+            readCandidateSourceCompleteFinalizationRecovery(incident)
+              ? []
+              : [incident.courseId],
           );
           await tx.courseMonitoringStatus.updateMany({
             where: {
@@ -6653,7 +7124,7 @@ export async function verifyCourseSupportBatch(input: {
       ? await assessRemediatedSearchHealth(
           batch.id,
           courseIds,
-          batch.recheckDispatchStartedAt,
+          batch.recheckDispatchedAt,
           now,
           getAffectedSearchRefs(getPersistedRecheckDispatch(batch.summary)),
           releaseSha,
@@ -7333,7 +7804,7 @@ export async function verifyCourseSupportBatch(input: {
     const health = await assessRemediatedSearchHealth(
       batch.id,
       courseIds,
-      recheckDispatchStartedAt,
+      recheckDispatchedAt,
       now,
       getAffectedSearchRefs(recheckDispatch),
       releaseSha,
@@ -7566,10 +8037,28 @@ export function collectFreshRemediatedCourseProof(input: {
   >();
 
   for (const search of input.searches) {
-    const latestProbeByCourse = new Map<string, FreshProbeEvidence>();
+    const probesByCourse = new Map<string, FreshProbeEvidence[]>();
     for (const probe of search.probes) {
-      if (!latestProbeByCourse.has(probe.courseId)) {
-        latestProbeByCourse.set(probe.courseId, probe);
+      const candidates = probesByCourse.get(probe.courseId) ?? [];
+      candidates.push(probe);
+      probesByCourse.set(probe.courseId, candidates);
+    }
+    const latestProbeByCourse = new Map<string, FreshProbeEvidence>();
+    const ambiguousLatestProviderTimeByCourse = new Set<string>();
+    for (const [courseId, candidates] of probesByCourse) {
+      candidates.sort(compareFreshProbeEvidenceDescending);
+      const newest = candidates[0];
+      if (!newest) continue;
+      latestProbeByCourse.set(courseId, newest);
+      if (
+        candidates.some(
+          (candidate) =>
+            getFreshProbeOrderingTime(candidate).getTime() ===
+              getFreshProbeOrderingTime(newest).getTime() &&
+            !haveSameFreshProbeMeaning(candidate, newest),
+        )
+      ) {
+        ambiguousLatestProviderTimeByCourse.add(courseId);
       }
     }
     const freshSearchCheckedAt = search.lastCheckedAt;
@@ -7590,15 +8079,21 @@ export function collectFreshRemediatedCourseProof(input: {
 
       const probe = latestProbeByCourse.get(courseId);
       const freshProviderAttempts = search.probes.filter(
-        (candidate) =>
-          candidate.courseId === courseId &&
-          input.deployedAt &&
-          scheduleIsCurrent &&
-          freshSearchCheckedAt &&
-          freshSearchCheckedAt.getTime() >= input.dispatchedAt.getTime() &&
-          candidate.providerExecution &&
-          candidate.observedAt.getTime() >= input.deployedAt.getTime() &&
-          candidate.observedAt.getTime() >= input.dispatchedAt.getTime(),
+        (candidate) => {
+          const providerObservedAt =
+            getFreshProbeProviderObservedAt(candidate);
+          return Boolean(
+            candidate.courseId === courseId &&
+              input.deployedAt &&
+              scheduleIsCurrent &&
+              freshSearchCheckedAt &&
+              freshSearchCheckedAt.getTime() >= input.dispatchedAt.getTime() &&
+              candidate.providerExecution &&
+              providerObservedAt &&
+              providerObservedAt.getTime() >= input.deployedAt.getTime() &&
+              providerObservedAt.getTime() >= input.dispatchedAt.getTime(),
+          );
+        },
       );
       if (freshProviderAttempts.length > 0 && freshSearchCheckedAt) {
         const attempts = providerAttemptCandidatesByCourse.get(courseId) ?? [];
@@ -7612,6 +8107,9 @@ export function collectFreshRemediatedCourseProof(input: {
         );
         providerAttemptCandidatesByCourse.set(courseId, attempts);
       }
+      const providerExecutionObservedAt = probe
+        ? getFreshProbeProviderObservedAt(probe)
+        : null;
       const hasFreshRunnableProof = Boolean(
         input.releaseSha &&
         input.deployedAt &&
@@ -7620,8 +8118,11 @@ export function collectFreshRemediatedCourseProof(input: {
         freshSearchCheckedAt.getTime() >= input.dispatchedAt.getTime() &&
         probe &&
         probe.runtimeVersion === input.releaseSha &&
-        probe.observedAt.getTime() >= input.deployedAt.getTime() &&
+        providerExecutionObservedAt &&
+        providerExecutionObservedAt.getTime() >= input.deployedAt.getTime() &&
+        providerExecutionObservedAt.getTime() >= input.dispatchedAt.getTime() &&
         probe.providerExecution &&
+        !ambiguousLatestProviderTimeByCourse.has(courseId) &&
         SUCCESSFUL_PROBE_OUTCOMES.has(probe.outcome),
       );
       if (!hasFreshRunnableProof || !probe || !freshSearchCheckedAt) {
@@ -7651,9 +8152,7 @@ export function collectFreshRemediatedCourseProof(input: {
   for (const courseId of input.courseIds) {
     const providerAttempts =
       providerAttemptCandidatesByCourse.get(courseId) ?? [];
-    providerAttempts.sort(
-      (left, right) => right.observedAt.getTime() - left.observedAt.getTime(),
-    );
+    providerAttempts.sort(compareFreshProbeEvidenceDescending);
     if (providerAttempts[0]) {
       freshProviderAttemptByCourse.set(courseId, providerAttempts[0]);
     }
@@ -7664,9 +8163,7 @@ export function collectFreshRemediatedCourseProof(input: {
     if (healthy !== affected || candidates.length === 0) {
       continue;
     }
-    candidates.sort(
-      (left, right) => right.observedAt.getTime() - left.observedAt.getTime(),
-    );
+    candidates.sort(compareFreshProbeEvidenceDescending);
     freshProviderProofByCourse.set(courseId, candidates[0]);
   }
 
@@ -7760,9 +8257,17 @@ async function assessRemediatedSearchHealth(
             outcome: probe.outcome,
             observedAt: probe.observedAt,
             runtimeVersion: probe.runtimeVersion,
-            providerExecution:
-              asJsonObject(probe.rawSummary).providerExecution ===
-              "RUNNABLE_PROVIDER_CHECK",
+            providerExecution: Boolean(
+              getProviderExecutionEvidenceObservedAt({
+                rawSummary: probe.rawSummary,
+                probeObservedAt: probe.observedAt,
+              }),
+            ),
+            providerExecutionObservedAt:
+              getProviderExecutionEvidenceObservedAt({
+                rawSummary: probe.rawSummary,
+                probeObservedAt: probe.observedAt,
+              }),
           })),
         },
       ];
@@ -7812,7 +8317,10 @@ export function isRemediatedSearchSchedulerHealthy(
   if (search.status !== "ACTIVE") {
     return search.updatedAt.getTime() >= dispatchedAt.getTime();
   }
-  if (!search.workflowRunId) {
+  if (
+    !search.workflowRunId ||
+    isSearchScheduleWorkflowStartReservation(search.workflowRunId)
+  ) {
     return false;
   }
   if (search.checkStatus === "WAITING") {
@@ -8640,53 +9148,152 @@ function getCurrentCourseSupportMonitoringFailureIdentity(input: {
   return {
     failureClass: failureClass as CourseSupportFailureClass,
     failureFingerprint,
+    observedAt: event.occurredAt,
   };
 }
 
-type AuthoritativeCourseSupportSuccessProbe = {
+type CourseSupportProbeEvidence = {
   id: string;
-  outcome: Extract<ProbeOutcome, "MATCH_FOUND" | "NO_MATCH">;
+  outcome: ProbeOutcome;
   observedAt: Date;
   runtimeVersion: string | null;
   rawSummary: Prisma.JsonValue | null;
 };
 
+type AuthoritativeCourseSupportSuccessProbe = CourseSupportProbeEvidence & {
+  id: string;
+  outcome: Extract<ProbeOutcome, "MATCH_FOUND" | "NO_MATCH">;
+  providerObservedAt: Date;
+};
+
+async function listAuthoritativeCourseSupportProbeEvidence(
+  reader: Pick<Prisma.TransactionClient, "courseProbe">,
+  input: {
+    courseId: string;
+    incidentLastSeenAt: Date;
+    now: Date;
+  },
+) {
+  return reader.courseProbe.findMany({
+    where: {
+      courseId: input.courseId,
+      observedAt: {
+        gt: input.incidentLastSeenAt,
+        lte: input.now,
+      },
+      teeSearch: {
+        status: "ACTIVE",
+        trafficClass: {
+          notIn: [...syntheticWebsiteTrafficClasses],
+        },
+      },
+    },
+    orderBy: [{ observedAt: "desc" }, { id: "desc" }],
+    take: COURSE_SUPPORT_AUTHORITATIVE_PROBE_READ_LIMIT + 1,
+    select: {
+      id: true,
+      outcome: true,
+      observedAt: true,
+      runtimeVersion: true,
+      rawSummary: true,
+    },
+  });
+}
+
+function getAuthoritativeProbeOrderingTime(
+  probe: CourseSupportProbeEvidence,
+) {
+  return (
+    getProviderExecutionEvidenceObservedAt({
+      rawSummary: probe.rawSummary,
+      probeObservedAt: probe.observedAt,
+    }) ?? probe.observedAt
+  );
+}
+
+function haveSameAuthoritativeProbeMeaning(
+  left: CourseSupportProbeEvidence,
+  right: CourseSupportProbeEvidence,
+) {
+  return (
+    left.outcome === right.outcome &&
+    left.runtimeVersion === right.runtimeVersion &&
+    (getProviderExecutionEvidenceObservedAt({
+      rawSummary: left.rawSummary,
+      probeObservedAt: left.observedAt,
+    })?.getTime() ?? null) ===
+      (getProviderExecutionEvidenceObservedAt({
+        rawSummary: right.rawSummary,
+        probeObservedAt: right.observedAt,
+      })?.getTime() ?? null)
+  );
+}
+
 function assessAuthoritativeCourseSupportSuccessProbe(input: {
-  probes?: ReadonlyArray<{
-    id: string;
-    outcome: ProbeOutcome;
-    observedAt: Date;
-    runtimeVersion: string | null;
-    rawSummary: Prisma.JsonValue | null;
-  }>;
+  probes?: ReadonlyArray<CourseSupportProbeEvidence>;
   incidentLastSeenAt: Date;
   now: Date;
 }) {
-  const newest = input.probes?.[0];
-  const secondNewest = input.probes?.[1];
+  const probes = [...(input.probes ?? [])];
+  if (probes.length > COURSE_SUPPORT_AUTHORITATIVE_PROBE_READ_LIMIT) {
+    return { status: "INVALID" as const, probe: null };
+  }
+  for (const probe of probes) {
+    if (
+      !(probe.observedAt instanceof Date) ||
+      !Number.isFinite(probe.observedAt.getTime()) ||
+      probe.observedAt.getTime() > input.now.getTime()
+    ) {
+      return { status: "INVALID" as const, probe: null };
+    }
+  }
+  probes.sort((left, right) => {
+    const sourceTimeOrder =
+      getAuthoritativeProbeOrderingTime(right).getTime() -
+      getAuthoritativeProbeOrderingTime(left).getTime();
+    if (sourceTimeOrder !== 0) return sourceTimeOrder;
+    const rowTimeOrder = right.observedAt.getTime() - left.observedAt.getTime();
+    return rowTimeOrder !== 0
+      ? rowTimeOrder
+      : right.id.localeCompare(left.id);
+  });
+  const newest = probes[0];
   if (!newest) {
     return { status: "NONE" as const, probe: null };
   }
+  const newestOrderingTime = getAuthoritativeProbeOrderingTime(newest);
   if (
-    !(newest.observedAt instanceof Date) ||
-    !Number.isFinite(newest.observedAt.getTime()) ||
-    newest.observedAt.getTime() > input.now.getTime() ||
-    (secondNewest &&
-      (!(secondNewest.observedAt instanceof Date) ||
-        !Number.isFinite(secondNewest.observedAt.getTime()) ||
-        secondNewest.observedAt.getTime() === newest.observedAt.getTime()))
+    probes.some(
+      (probe) =>
+        getAuthoritativeProbeOrderingTime(probe).getTime() ===
+          newestOrderingTime.getTime() &&
+        !haveSameAuthoritativeProbeMeaning(probe, newest),
+    )
   ) {
     return { status: "INVALID" as const, probe: null };
   }
-  if (newest.observedAt.getTime() <= input.incidentLastSeenAt.getTime()) {
+  if (newestOrderingTime.getTime() <= input.incidentLastSeenAt.getTime()) {
     return { status: "NONE" as const, probe: null };
   }
   if (!SUCCESSFUL_PROBE_OUTCOMES.has(newest.outcome)) {
-    return { status: "INVALID" as const, probe: null };
+    return { status: "NONE" as const, probe: null };
+  }
+  const providerObservedAt = getProviderExecutionEvidenceObservedAt({
+    rawSummary: newest.rawSummary,
+    probeObservedAt: newest.observedAt,
+  });
+  if (
+    !providerObservedAt ||
+    providerObservedAt.getTime() <= input.incidentLastSeenAt.getTime()
+  ) {
+    return { status: "NONE" as const, probe: null };
   }
   return {
     status: "VALID" as const,
-    probe: newest as AuthoritativeCourseSupportSuccessProbe,
+    probe: {
+      ...newest,
+      providerObservedAt,
+    } as AuthoritativeCourseSupportSuccessProbe,
   };
 }
 
@@ -8696,12 +9303,12 @@ function buildAuthoritativeCourseSupportSuccessProbeProof(
   return {
     kind: "PROVIDER_PROBE",
     outcome: probe.outcome,
-    observedAt: probe.observedAt.toISOString(),
+    observedAt: probe.providerObservedAt.toISOString(),
     freshSearchCheckedAt: probe.observedAt.toISOString(),
     runtimeVersion: probe.runtimeVersion,
-    providerExecution:
-      asJsonObject(probe.rawSummary).providerExecution ===
-      "RUNNABLE_PROVIDER_CHECK",
+    providerExecution: isProviderExecutionMarker(
+      asJsonObject(probe.rawSummary).providerExecution,
+    ),
     authoritativeCurrentSuccess: true,
   } satisfies Prisma.InputJsonObject;
 }
@@ -8820,6 +9427,44 @@ class CourseSupportCloseoutSnapshotChangedError extends Error {
     super("A course-support incident changed during closeout.");
     this.name = "CourseSupportCloseoutSnapshotChangedError";
   }
+}
+
+function getCourseSupportIncidentEvidenceObservedAt(input: {
+  proofSnapshot: Prisma.JsonValue | null;
+  incidentLastSeenAt: Date;
+  now: Date;
+  additionalProviderObservedAt?: Date | null;
+}) {
+  const proof = asJsonObject(input.proofSnapshot);
+  const proofObservedAt = parseProofDate(proof.observedAt);
+  const proofKindIsProviderEvidence =
+    proof.kind === "PROVIDER_PROBE" ||
+    proof.kind === "PROVIDER_VERIFICATION" ||
+    proof.kind === "PROVIDER_VERIFICATION_FAILURE";
+  const candidates = [input.incidentLastSeenAt];
+  if (
+    proofKindIsProviderEvidence &&
+    proof.providerExecution === true &&
+    proofObservedAt &&
+    proof.observedAt === proofObservedAt.toISOString() &&
+    proofObservedAt.getTime() >= input.incidentLastSeenAt.getTime() &&
+    proofObservedAt.getTime() <= input.now.getTime()
+  ) {
+    candidates.push(proofObservedAt);
+  }
+  const additionalProviderObservedAt = input.additionalProviderObservedAt;
+  if (
+    additionalProviderObservedAt &&
+    Number.isFinite(additionalProviderObservedAt.getTime()) &&
+    additionalProviderObservedAt.getTime() >=
+      input.incidentLastSeenAt.getTime() &&
+    additionalProviderObservedAt.getTime() <= input.now.getTime()
+  ) {
+    candidates.push(additionalProviderObservedAt);
+  }
+  return candidates.reduce((latest, candidate) =>
+    candidate.getTime() > latest.getTime() ? candidate : latest,
+  );
 }
 
 async function closeoutCourseSupportBatchAttempt(
@@ -9266,8 +9911,13 @@ async function closeoutCourseSupportBatchAttempt(
     AuthoritativeCourseSupportSuccessProbe
   >();
   for (const entry of batch.incidents) {
+    const probes = await listAuthoritativeCourseSupportProbeEvidence(prisma, {
+      courseId: entry.courseId,
+      incidentLastSeenAt: entry.incident.lastSeenAt,
+      now,
+    });
     const assessment = assessAuthoritativeCourseSupportSuccessProbe({
-      probes: entry.course.probes,
+      probes,
       incidentLastSeenAt: entry.incident.lastSeenAt,
       now,
     });
@@ -9434,6 +10084,7 @@ async function closeoutCourseSupportBatchAttempt(
           observedProviderSnapshotFingerprint:
             entry.currentProviderSnapshotFingerprint,
           providerSnapshotChanged,
+          monitoringFailureObservedAt: monitoringFailure?.observedAt ?? null,
           failureOnlyHandoffCooldown,
           deferredFailureHandoffShadow,
           nextAttemptAt: handoffRetryCandidates.reduce((latest, candidate) =>
@@ -10519,9 +11170,15 @@ async function closeoutCourseSupportBatchAttempt(
   const restoredCount = normalizedEntries.filter(
     (entry) => entry.normalizedResult === "RESTORED",
   ).length;
+  const exactReleaseTerminalEntryIds = new Set(
+    normalizedEntries
+      .filter((entry) => isDurableTerminalProof(entry, batch))
+      .map((entry) => entry.id),
+  );
   const reusableFamilyRestoredCount = normalizedEntries.filter(
     (entry) =>
       entry.normalizedResult === "RESTORED" &&
+      exactReleaseTerminalEntryIds.has(entry.id) &&
       resolveProviderCapability(entry.course).providerFamilyKey ===
         batch.providerFamilyKey,
   ).length;
@@ -10674,31 +11331,14 @@ async function closeoutCourseSupportBatchAttempt(
                    FOR UPDATE`,
       );
       for (const entry of deferredProbeFenceEntries) {
-        const currentProbes = await tx.courseProbe.findMany({
-          where: {
+        const currentProbes = await listAuthoritativeCourseSupportProbeEvidence(
+          tx,
+          {
             courseId: entry.courseId,
-            outcome: { in: ["MATCH_FOUND", "NO_MATCH"] },
-            observedAt: {
-              gt: entry.incident.lastSeenAt,
-              lte: now,
-            },
-            teeSearch: {
-              status: "ACTIVE",
-              trafficClass: {
-                notIn: [...syntheticWebsiteTrafficClasses],
-              },
-            },
+            incidentLastSeenAt: entry.incident.lastSeenAt,
+            now,
           },
-          orderBy: [{ observedAt: "desc" }, { id: "desc" }],
-          take: 2,
-          select: {
-            id: true,
-            outcome: true,
-            observedAt: true,
-            runtimeVersion: true,
-            rawSummary: true,
-          },
-        });
+        );
         const currentAssessment =
           assessAuthoritativeCourseSupportSuccessProbe({
             probes: currentProbes,
@@ -11141,6 +11781,12 @@ async function closeoutCourseSupportBatchAttempt(
         currentFailureIdentityByBatchIncidentId.get(entry.id)?.materialChange
           ? entry.incident.updatedAt
           : (entry.verifiedIncidentUpdatedAt ?? entry.incident.updatedAt);
+      const closeoutEvidenceObservedAt =
+        getCourseSupportIncidentEvidenceObservedAt({
+          proofSnapshot: entry.proofSnapshot,
+          incidentLastSeenAt: entry.incident.lastSeenAt,
+          now,
+        });
       let incidentUpdated: { count: number };
       const authoritativeMonitoringResolution = ownershipReleaseMode
         ? getAuthoritativeCourseMonitoringResolution(
@@ -11170,7 +11816,15 @@ async function closeoutCourseSupportBatchAttempt(
             resolution: authoritativeMonitoringResolution.resolution,
             resolutionMessage: message,
             nextAction: null,
-            lastSeenAt: now,
+            lastSeenAt: getCourseSupportIncidentEvidenceObservedAt({
+              proofSnapshot: entry.proofSnapshot,
+              incidentLastSeenAt: entry.incident.lastSeenAt,
+              now,
+              additionalProviderObservedAt:
+                entry.course.monitoringStatus.state === "HEALTHY"
+                  ? entry.course.monitoringStatus.lastSuccessfulAt
+                  : null,
+            }),
             revision: { increment: 1 },
           },
         });
@@ -11181,6 +11835,34 @@ async function closeoutCourseSupportBatchAttempt(
           data: { revision: { increment: 0 } },
         });
       } else if (entry.normalizedResult === "RESTORED") {
+        const restoredProof = asJsonObject(entry.proofSnapshot);
+        const restoredProviderObservedAt = parseProofDate(
+          restoredProof.observedAt,
+        );
+        if (
+          !restoredProviderObservedAt ||
+          restoredProof.observedAt !==
+            restoredProviderObservedAt.toISOString() ||
+          restoredProof.providerExecution !== true ||
+          (restoredProof.outcome !== "MATCH_FOUND" &&
+            restoredProof.outcome !== "NO_MATCH") ||
+          restoredProviderObservedAt.getTime() <
+            entry.incident.lastSeenAt.getTime() ||
+          restoredProviderObservedAt.getTime() > now.getTime()
+        ) {
+          throw new CourseSupportCloseoutSnapshotChangedError();
+        }
+        const restoredRuntimeVersion =
+          typeof restoredProof.runtimeVersion === "string" &&
+          /^[a-f0-9]{40}$/iu.test(restoredProof.runtimeVersion)
+            ? restoredProof.runtimeVersion
+            : null;
+        const exactReleaseRuntimeProof = isDurableTerminalProof(entry, batch);
+        const restoredOutcome =
+          restoredProof.outcome === "MATCH_FOUND" ||
+          restoredProof.outcome === "NO_MATCH"
+            ? restoredProof.outcome
+            : "NO_MATCH";
         input.signal?.throwIfAborted();
         incidentUpdated = await tx.courseSupportIncident.updateMany({
           where: {
@@ -11199,7 +11881,7 @@ async function closeoutCourseSupportBatchAttempt(
             resolution: "MONITORING_RESTORED",
             resolutionMessage: message,
             nextAction: null,
-            lastSeenAt: now,
+            lastSeenAt: restoredProviderObservedAt,
             revision: { increment: 1 },
           },
         });
@@ -11209,7 +11891,7 @@ async function closeoutCourseSupportBatchAttempt(
           targetState: "HEALTHY",
           data: {
             state: "HEALTHY",
-            lastSuccessfulAt: now,
+            lastSuccessfulAt: restoredProviderObservedAt,
             consecutiveFailures: 0,
             failureFingerprint: null,
             firstDegradedAt: null,
@@ -11237,13 +11919,23 @@ async function closeoutCourseSupportBatchAttempt(
               source: "COURSE_SUPPORT_RESPONDER",
               fromState: "AUTO_INVESTIGATING",
               toState: "HEALTHY",
-              outcome: "NO_MATCH",
+              outcome: restoredOutcome,
               message,
-              runtimeVersion: batch.releaseSha,
-              deploymentSha: batch.releaseSha,
-              occurredAt: now,
+              // A fresh customer probe can authoritatively reconcile current
+              // monitoring health even when it was produced by another live
+              // runtime. Preserve that actual runtime without attributing it
+              // to this batch's release unless all exact runtime/deploy/time
+              // fences passed.
+              runtimeVersion: restoredRuntimeVersion,
+              deploymentSha: exactReleaseRuntimeProof
+                ? batch.releaseSha
+                : null,
+              occurredAt: restoredProviderObservedAt,
               audit: {
-                freshRuntimeProof: true,
+                freshRuntimeProof: exactReleaseRuntimeProof,
+                currentStateReconciliation:
+                  restoredProof.authoritativeCurrentSuccess === true &&
+                  !exactReleaseRuntimeProof,
                 automatedFinal: true,
                 customerDataIncluded: false,
                 ...campaignProvenance,
@@ -11286,7 +11978,7 @@ async function closeoutCourseSupportBatchAttempt(
             resolution,
             resolutionMessage: message,
             nextAction: null,
-            lastSeenAt: now,
+            lastSeenAt: closeoutEvidenceObservedAt,
             revision: { increment: 1 },
           },
         });
@@ -11347,6 +12039,15 @@ async function closeoutCourseSupportBatchAttempt(
         }
       } else if (entry.providerFamilyHandoff) {
         const handoff = entry.providerFamilyHandoff;
+        const handoffEvidenceObservedAt =
+          getCourseSupportIncidentEvidenceObservedAt({
+            proofSnapshot: entry.proofSnapshot,
+            incidentLastSeenAt: entry.incident.lastSeenAt,
+            now,
+            additionalProviderObservedAt:
+              currentFailureIdentityByBatchIncidentId.get(entry.id)
+                ?.monitoringFailureObservedAt ?? null,
+          });
         const handoffDeadlineAnchor =
           handoff.nextAttemptAt.getTime() > now.getTime()
             ? handoff.nextAttemptAt
@@ -11372,8 +12073,8 @@ async function closeoutCourseSupportBatchAttempt(
             lastAttemptAt: null,
             attemptCount: 0,
             occurrenceCount: 1,
-            firstSeenAt: now,
-            confirmedAt: now,
+            firstSeenAt: handoffEvidenceObservedAt,
+            confirmedAt: handoffEvidenceObservedAt,
             escalationDeadlineAt: getCourseMonitoringEscalationDeadline(
               handoffDeadlineAnchor,
               entry.incident.activeRealSearchCount,
@@ -11387,7 +12088,7 @@ async function closeoutCourseSupportBatchAttempt(
             escalatedAt: null,
             escalationNotifiedAt: null,
             latestMessage: message,
-            lastSeenAt: now,
+            lastSeenAt: handoffEvidenceObservedAt,
             revision: { increment: 1 },
           },
         });
@@ -11477,7 +12178,7 @@ async function closeoutCourseSupportBatchAttempt(
                     "Wait for a material provider, failure, reader-capability, relevant implementation, or operator change before retrying.",
                 }
               : {}),
-            lastSeenAt: now,
+            lastSeenAt: closeoutEvidenceObservedAt,
             revision: { increment: 1 },
           },
         });
@@ -11713,7 +12414,7 @@ async function closeoutCourseSupportBatchAttempt(
             escalationDeadlineAt: retryEscalationDeadline,
             nextAttemptAt,
             latestMessage: message,
-            lastSeenAt: now,
+            lastSeenAt: closeoutEvidenceObservedAt,
             revision: { increment: 1 },
           },
         });
@@ -11838,7 +12539,6 @@ async function closeoutCourseSupportBatchAttempt(
               attemptCount: 0,
               occurrenceCount: 1,
               firstSeenAt: now,
-              confirmedAt: now,
               escalationDeadlineAt: getCourseMonitoringEscalationDeadline(
                 now,
                 hasActiveRealDemand ? 1 : 0,
@@ -11851,7 +12551,6 @@ async function closeoutCourseSupportBatchAttempt(
               ownerNotifiedAt: null,
               escalatedAt: null,
               escalationNotifiedAt: null,
-              lastSeenAt: now,
               revision: { increment: 1 },
             },
           });
@@ -12071,7 +12770,11 @@ async function closeoutCourseSupportBatchAttempt(
     notificationPendingCount: 0,
     leverage: {
       providerGroupResolvedCount:
-        retryCount === 0 && needsHumanCount === 0 ? 1 : 0,
+        retryCount === 0 &&
+        needsHumanCount === 0 &&
+        exactReleaseTerminalEntryIds.size === normalizedEntries.length
+          ? 1
+          : 0,
       claimedCourseCount: normalizedEntries.length,
       monitoringRestoredCourseCount: restoredCount,
       courseSpecificFinalCount: normalizedEntries.filter(
@@ -12087,7 +12790,7 @@ async function closeoutCourseSupportBatchAttempt(
             "SOURCE_UNVERIFIED",
       ).length,
       futureSiblingApplicability:
-        restoredCount > 0 &&
+        reusableFamilyRestoredCount > 0 &&
         ![
           SOURCE_MISSING_PROVIDER_FAMILY,
           SOURCE_CONFLICT_PROVIDER_FAMILY,
@@ -12856,21 +13559,30 @@ export async function recoverCourseSupportBatch(input: {
               : []
           )
         );
-        const authoritativeSuccessEntryIds = new Set(
-          retryIncidents.flatMap((entry) => {
-            const assessment = assessAuthoritativeCourseSupportSuccessProbe({
-              probes: entry.course.probes,
+        const authoritativeSuccessEntryIds = new Set<string>();
+        for (const entry of retryIncidents) {
+          const probes = await listAuthoritativeCourseSupportProbeEvidence(
+            prisma,
+            {
+              courseId: entry.courseId,
               incidentLastSeenAt: entry.incident.lastSeenAt,
-              now
-            });
-            if (assessment.status === "INVALID") {
-              throw new Error(
-                "Fresh responder success evidence changed during expired ownership recovery."
-              );
-            }
-            return assessment.status === "VALID" ? [entry.id] : [];
-          })
-        );
+              now,
+            },
+          );
+          const assessment = assessAuthoritativeCourseSupportSuccessProbe({
+            probes,
+            incidentLastSeenAt: entry.incident.lastSeenAt,
+            now,
+          });
+          if (assessment.status === "INVALID") {
+            throw new Error(
+              "Fresh responder success evidence changed during expired ownership recovery.",
+            );
+          }
+          if (assessment.status === "VALID") {
+            authoritativeSuccessEntryIds.add(entry.id);
+          }
+        }
         const materialProviderChangeEntryIds = new Set(
           retryIncidents.flatMap((entry) => {
             const claimedAttempt = claimedAttemptByRetryEntryId.get(entry.id);
@@ -13646,9 +14358,15 @@ export async function recoverCourseSupportBatch(input: {
                   "Expired responder implementation supersession evidence changed during safe requeue."
                 );
               }
+              const currentProbes =
+                await listAuthoritativeCourseSupportProbeEvidence(tx, {
+                  courseId: entry.courseId,
+                  incidentLastSeenAt: entry.incident.lastSeenAt,
+                  now,
+                });
               const currentSuccessAssessment =
                 assessAuthoritativeCourseSupportSuccessProbe({
-                  probes: currentCourse.probes,
+                  probes: currentProbes,
                   incidentLastSeenAt: entry.incident.lastSeenAt,
                   now
                 });
@@ -13773,6 +14491,14 @@ export async function recoverCourseSupportBatch(input: {
               }
               continue;
             }
+            const recoveryEvidenceObservedAt =
+              getCourseSupportIncidentEvidenceObservedAt({
+                proofSnapshot: entry.proofSnapshot,
+                incidentLastSeenAt: entry.incident.lastSeenAt,
+                now,
+                additionalProviderObservedAt:
+                  entry.course.monitoringStatus?.lastSuccessfulAt ?? null,
+              });
             if (stoppedImplementationEntryIds.has(entry.id)) {
               const batchEntryUpdated = await tx.courseSupportBatchIncident.updateMany({
                 where: {
@@ -13808,7 +14534,7 @@ export async function recoverCourseSupportBatch(input: {
                   latestMessage: stoppedImplementationMessage,
                   nextAction:
                     "Complete the assigned runtime implementation and deployment under fresh responder ownership before verification.",
-                  lastSeenAt: now,
+                  lastSeenAt: recoveryEvidenceObservedAt,
                   revision: { increment: 1 }
                 }
               });
@@ -13895,7 +14621,7 @@ export async function recoverCourseSupportBatch(input: {
                 escalationDeadlineAt: retryEscalationDeadline,
                 nextAttemptAt: entryNextAttemptAt,
                 latestMessage: message,
-                lastSeenAt: now,
+                lastSeenAt: recoveryEvidenceObservedAt,
                 revision: { increment: 1 },
               },
             });
@@ -14476,10 +15202,11 @@ function getPersistedFinalDisposition(
 function buildProbeProofSnapshot(
   probe: FreshProbeEvidence,
 ): Prisma.InputJsonValue {
+  const providerObservedAt = getFreshProbeProviderObservedAt(probe);
   return {
     kind: "PROVIDER_PROBE",
     outcome: probe.outcome,
-    observedAt: probe.observedAt.toISOString(),
+    observedAt: providerObservedAt?.toISOString() ?? null,
     freshSearchCheckedAt: (
       probe.freshSearchCheckedAt ?? probe.observedAt
     ).toISOString(),
@@ -14537,6 +15264,7 @@ export async function parkCourseSupportCandidatesForMaterialChange(
               activeBatchId: true,
               resolution: true,
               resolvedAt: true,
+              lastSeenAt: true,
               updatedAt: true,
               failureFingerprint: true,
               engineeringOnly: true,
@@ -14605,7 +15333,15 @@ export async function parkCourseSupportCandidatesForMaterialChange(
                   nextAction: null,
                   nextAttemptAt: null,
                   nextReminderAt: null,
-                  lastSeenAt: now,
+                  lastSeenAt: getCourseSupportIncidentEvidenceObservedAt({
+                    proofSnapshot: null,
+                    incidentLastSeenAt: incident.lastSeenAt,
+                    now,
+                    additionalProviderObservedAt:
+                      monitoringStatus.state === "HEALTHY"
+                        ? monitoringStatus.lastSuccessfulAt
+                        : null,
+                  }),
                   revision: { increment: 1 },
                 },
               });
@@ -14639,7 +15375,7 @@ export async function parkCourseSupportCandidatesForMaterialChange(
                   revalidationRequestedAt: null,
                   stateChangedAt: incident.resolvedAt ?? now,
                   ...(authoritativeState === "HEALTHY"
-                    ? { lastSuccessfulAt: incident.resolvedAt ?? now }
+                    ? { lastSuccessfulAt: incident.lastSeenAt }
                     : {}),
                   revision: { increment: 1 },
                 },
@@ -14686,7 +15422,6 @@ export async function parkCourseSupportCandidatesForMaterialChange(
                 "The prior remediation approach has no new material inputs and will not be repeated.",
               nextAction:
                 "Wait for a material provider, failure, reader-capability, relevant implementation, or operator change before retrying.",
-              lastSeenAt: now,
               revision: { increment: 1 },
             },
           });
@@ -14755,12 +15490,34 @@ export async function parkCourseSupportCandidatesForMaterialChange(
   return parkedCount;
 }
 
-async function listDueCourseSupportCandidates(now: Date) {
+async function listParkedSourceCompleteFinalizationRecoveryCandidates(
+  now: Date,
+) {
   const incidents = await prisma.courseSupportIncident.findMany({
-    where: buildDueResponderIncidentWhere(now),
+    where: buildParkedSourceCompleteFinalizationRecoveryWhere(),
     orderBy: [{ earliestTargetDate: "asc" }, { firstSeenAt: "asc" }],
+    take: COURSE_SUPPORT_CANDIDATE_QUEUE_READ_LIMIT + 1,
     select: COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT,
   });
+  assertBoundedCourseSupportCandidateQueue(incidents);
+  return buildCourseSupportCandidates(incidents, now).filter((candidate) =>
+    Boolean(readCandidateSourceCompleteFinalizationRecovery(candidate)),
+  );
+}
+
+async function listCourseSupportClaimCandidates(now: Date) {
+  const incidents = await prisma.courseSupportIncident.findMany({
+    where: {
+      OR: [
+        buildDueResponderIncidentWhere(now),
+        buildParkedSourceCompleteFinalizationRecoveryWhere(),
+      ],
+    },
+    orderBy: [{ earliestTargetDate: "asc" }, { firstSeenAt: "asc" }],
+    take: COURSE_SUPPORT_CANDIDATE_QUEUE_READ_LIMIT + 1,
+    select: COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT,
+  });
+  assertBoundedCourseSupportCandidateQueue(incidents);
   return buildCourseSupportCandidates(incidents, now);
 }
 
@@ -15600,10 +16357,321 @@ function readDeferredFailureHandoffCandidate(input: {
   };
 }
 
+function getSourceCompleteFinalizationCampaignProvenance(input: {
+  summary: unknown;
+  courseId: string;
+  cycle: number;
+  monitoringEvents: readonly { audit: unknown }[];
+}) {
+  const summary = asJsonObject(input.summary);
+  const campaign = asJsonObject(summary.campaign);
+  const courseRef = createCourseSupportRemediationCourseRef(input.courseId);
+  const summaryAttempts = Array.isArray(campaign.attempts)
+    ? campaign.attempts
+        .map((value) => asJsonObject(value))
+        .filter(
+          (attempt) =>
+            attempt.courseRef === courseRef && attempt.cycle === input.cycle,
+        )
+    : [];
+  const summaryProvenance =
+    campaign.kind === "PARKED_COHORT" && summaryAttempts.length === 1
+      ? readSourceCompleteFinalizationCampaignRecord(summaryAttempts[0])
+      : null;
+  if (
+    Object.prototype.hasOwnProperty.call(summary, "campaign") &&
+    !summaryProvenance
+  ) {
+    return { valid: false as const, provenance: null };
+  }
+
+  const admissionProvenances: SourceCompleteFinalizationCampaignProvenance[] = [];
+  for (const event of input.monitoringEvents) {
+    const audit = asJsonObject(event.audit);
+    if (
+      audit.action !== "parked_cohort_admission" ||
+      audit.cycle !== input.cycle
+    ) {
+      continue;
+    }
+    const provenance = readSourceCompleteFinalizationCampaignRecord({
+      runId: audit.campaignRunId,
+      membershipDigest: audit.campaignMembershipDigest,
+    });
+    if (!provenance) {
+      return { valid: false as const, provenance: null };
+    }
+    admissionProvenances.push(provenance);
+  }
+  const distinctAdmissionProvenances = [
+    ...new Map(
+      admissionProvenances.map((provenance) => [
+        `${provenance.runId}\u0000${provenance.membershipDigest}`,
+        provenance,
+      ]),
+    ).values(),
+  ];
+  if (distinctAdmissionProvenances.length > 1) {
+    return { valid: false as const, provenance: null };
+  }
+  const admissionProvenance = distinctAdmissionProvenances[0] ?? null;
+  if (
+    summaryProvenance &&
+    admissionProvenance &&
+    (summaryProvenance.runId !== admissionProvenance.runId ||
+      summaryProvenance.membershipDigest !==
+        admissionProvenance.membershipDigest)
+  ) {
+    return { valid: false as const, provenance: null };
+  }
+  return {
+    valid: true as const,
+    provenance: summaryProvenance ?? admissionProvenance,
+  };
+}
+
+function readSourceCompleteFinalizationCampaignRecord(input: {
+  runId?: unknown;
+  membershipDigest?: unknown;
+}): SourceCompleteFinalizationCampaignProvenance | null {
+  return typeof input.runId === "string" &&
+    input.runId.trim() &&
+    typeof input.membershipDigest === "string" &&
+    /^[a-f0-9]{64}$/u.test(input.membershipDigest)
+    ? {
+        runId: input.runId,
+        membershipDigest: input.membershipDigest,
+      }
+    : null;
+}
+
+function buildSourceCompleteFinalizationRecoveryRoute(
+  waitingRoute: CourseSupportRemediationRoute,
+): CourseSupportRemediationRoute {
+  return {
+    ...waitingRoute,
+    workMode: "COMPLETE_CLASSIFICATION",
+    resumeWorkMode: "COMPLETE_CLASSIFICATION",
+    allowUnchangedRuntime: true,
+    requiresImplementationPath: false,
+    retryBudget: null,
+    reason: "CLASSIFICATION_READY",
+    materialChangeDetected: false,
+    attemptSignature: {
+      workMode: "COMPLETE_CLASSIFICATION",
+      strategyAction: waitingRoute.strategy.action,
+      playbookStage: null,
+    },
+  };
+}
+
+function getSourceCompleteFinalizationRecovery(input: {
+  incident: Omit<CourseSupportCandidateIncident, "course" | "batchIncidents">;
+  course: CourseSupportCandidateIncident["course"];
+  currentCycleBatchIncidents: CourseSupportCandidateIncident["batchIncidents"];
+  providerSnapshotFingerprint: string;
+  routedRemediation: CourseSupportRemediationRoute;
+  now: Date;
+}): SourceCompleteFinalizationRecovery | null {
+  const { incident, course, routedRemediation } = input;
+  const monitoringStatus = course.monitoringStatus;
+  const sourceEntry = input.currentCycleBatchIncidents[0];
+  const latestDiscovery = course.automationDiscoveries?.[0] ?? null;
+  if (
+    !sourceEntry ||
+    sourceEntry.cycle !== incident.cycle ||
+    sourceEntry.incidentId !== incident.id ||
+    sourceEntry.courseId !== incident.courseId ||
+    sourceEntry.result !== "RETRY_SCHEDULED" ||
+    !sourceEntry.verifiedAt ||
+    !sourceEntry.verifiedIncidentUpdatedAt ||
+    sourceEntry.verifiedIncidentUpdatedAt.getTime() >
+      sourceEntry.verifiedAt.getTime() ||
+    sourceEntry.updatedAt.getTime() < sourceEntry.verifiedAt.getTime() ||
+    sourceEntry.batch.status !== "RETRYABLE_FAILED" ||
+    !sourceEntry.batch.completedAt ||
+    sourceEntry.batch.completedAt.getTime() < sourceEntry.updatedAt.getTime() ||
+    sourceEntry.batch.providerFamilyKey !== incident.providerFamilyKey ||
+    sourceEntry.batch.failureFingerprint !== incident.failureFingerprint ||
+    !sourceEntry.batch.releaseSha ||
+    !/^[a-f0-9]{40}$/u.test(sourceEntry.batch.releaseSha) ||
+    !sourceEntry.batch.deployedAt ||
+    sourceEntry.batch.deployedAt.getTime() > sourceEntry.verifiedAt.getTime() ||
+    Object.prototype.hasOwnProperty.call(
+      asJsonObject(sourceEntry.batch.summary),
+      "sourceCompleteFinalizationRecovery",
+    ) ||
+    routedRemediation.workMode !== "WAIT_FOR_MATERIAL_CHANGE" ||
+    routedRemediation.reason !== "PLAYBOOK_EXHAUSTED" ||
+    routedRemediation.materialChangeDetected ||
+    incident.activeBatchId !== null ||
+    !monitoringStatus ||
+    (latestDiscovery &&
+      latestDiscovery.createdAt.getTime() >= sourceEntry.verifiedAt.getTime())
+  ) {
+    return null;
+  }
+  const closeout = asJsonObject(
+    asJsonObject(sourceEntry.batch.summary).closeout,
+  );
+  if (
+    closeout.outcome !== "retryable_failed" ||
+    closeout.derivedOutcome !== "retryable_failed" ||
+    typeof closeout.retryCount !== "number" ||
+    !Number.isInteger(closeout.retryCount) ||
+    closeout.retryCount < 1
+  ) {
+    return null;
+  }
+  const persistedAttempt = readPersistedCourseSupportRemediationAttempt({
+    summary: sourceEntry.batch.summary,
+    courseId: incident.courseId,
+  });
+  if (
+    !persistedAttempt ||
+    persistedAttempt.providerSnapshotFingerprint !==
+      input.providerSnapshotFingerprint ||
+    persistedAttempt.failureFingerprint !== incident.failureFingerprint ||
+    persistedAttempt.runtimeVersion !== sourceEntry.batch.baseSha ||
+    !hasFreshCompleteSourceUnverifiedEvidence({
+      providerFamilyKey: incident.providerFamilyKey,
+      failureClass: incident.failureClass,
+      course,
+      freshCycleStartedAt: incident.confirmedAt,
+      attemptLedger: incident.attemptLedger,
+      cycle: incident.cycle,
+      verifiedAt: sourceEntry.verifiedAt,
+      result: sourceEntry.result,
+    })
+  ) {
+    return null;
+  }
+
+  const dueAutomatic =
+    incident.status === "AUTO_INVESTIGATING" &&
+    incident.humanReviewReason === null &&
+    (incident.nextAttemptAt === null ||
+      incident.nextAttemptAt.getTime() <= input.now.getTime()) &&
+    monitoringStatus.state === "AUTO_INVESTIGATING" &&
+    (monitoringStatus.nextAutomaticAttemptAt === null ||
+      monitoringStatus.nextAutomaticAttemptAt.getTime() <= input.now.getTime()) &&
+    monitoringStatus.revalidationRequestedAt === null;
+  const parkedByOldCloseout =
+    incident.status === "NEEDS_HUMAN" &&
+    incident.humanReviewReason === "AUTOMATION_STALLED" &&
+    incident.nextAttemptAt === null &&
+    monitoringStatus.state === "ENGINEERING_VERIFICATION_NEEDED" &&
+    monitoringStatus.nextAutomaticAttemptAt === null &&
+    monitoringStatus.revalidationRequestedAt === null;
+  if (
+    monitoringStatus.failureFingerprint !== incident.failureFingerprint ||
+    (!dueAutomatic && !parkedByOldCloseout)
+  ) {
+    return null;
+  }
+
+  const campaign = getSourceCompleteFinalizationCampaignProvenance({
+    summary: sourceEntry.batch.summary,
+    courseId: incident.courseId,
+    cycle: incident.cycle,
+    monitoringEvents: incident.monitoringEvents,
+  });
+  if (!campaign.valid) {
+    return null;
+  }
+  const evidenceDigest = createHash("sha256")
+    .update(
+      JSON.stringify({
+        sourceBatchId: sourceEntry.batch.id,
+        sourceBatchIncidentId: sourceEntry.id,
+        sourceBatchStatus: sourceEntry.batch.status,
+        sourceBatchProviderFamilyKey: sourceEntry.batch.providerFamilyKey,
+        sourceBatchFailureFingerprint: sourceEntry.batch.failureFingerprint,
+        sourceBatchBaseSha: sourceEntry.batch.baseSha,
+        sourceBatchReleaseSha: sourceEntry.batch.releaseSha,
+        sourceBatchDeployedAt: sourceEntry.batch.deployedAt.toISOString(),
+        sourceBatchCompletedAt: sourceEntry.batch.completedAt.toISOString(),
+        sourceBatchRevision: sourceEntry.batch.revision,
+        sourceBatchUpdatedAt: sourceEntry.batch.updatedAt.toISOString(),
+        sourceEntryResult: sourceEntry.result,
+        sourceEntryVerifiedAt: sourceEntry.verifiedAt.toISOString(),
+        sourceEntryVerifiedIncidentUpdatedAt:
+          sourceEntry.verifiedIncidentUpdatedAt.toISOString(),
+        sourceEntryCreatedAt: sourceEntry.createdAt.toISOString(),
+        sourceEntryUpdatedAt: sourceEntry.updatedAt.toISOString(),
+        incidentId: incident.id,
+        courseId: incident.courseId,
+        cycle: incident.cycle,
+        incidentStatus: incident.status,
+        incidentRevision: incident.revision,
+        incidentUpdatedAt: incident.updatedAt.toISOString(),
+        providerFamilyKey: incident.providerFamilyKey,
+        failureFingerprint: incident.failureFingerprint,
+        providerSnapshotFingerprint: input.providerSnapshotFingerprint,
+        monitoringState: monitoringStatus.state,
+        monitoringRevision: monitoringStatus.revision,
+        monitoringStateChangedAt: monitoringStatus.stateChangedAt.toISOString(),
+        monitoringFailureFingerprint: monitoringStatus.failureFingerprint,
+        latestDiscoveryId: latestDiscovery?.id ?? null,
+        latestDiscoveryCreatedAt:
+          latestDiscovery?.createdAt.toISOString() ?? null,
+        campaign: campaign.provenance,
+      }),
+    )
+    .digest("hex");
+  return {
+    evidenceDigest,
+    sourceBatchId: sourceEntry.batch.id,
+    sourceBatchIncidentId: sourceEntry.id,
+    priorIncidentStatus: dueAutomatic
+      ? "AUTO_INVESTIGATING"
+      : "NEEDS_HUMAN",
+    priorHumanReviewReason: incident.humanReviewReason,
+    expectedMonitoringState: monitoringStatus.state,
+    expectedMonitoringRevision: monitoringStatus.revision,
+    expectedMonitoringStateChangedAt: monitoringStatus.stateChangedAt,
+    expectedLatestDiscoveryId: latestDiscovery?.id ?? null,
+    expectedLatestDiscoveryCreatedAt: latestDiscovery?.createdAt ?? null,
+    campaign: campaign.provenance,
+  };
+}
+
+function assertBoundedCourseSupportCandidateQueue<T>(rows: readonly T[]) {
+  if (rows.length > COURSE_SUPPORT_CANDIDATE_QUEUE_READ_LIMIT) {
+    throw new Error(
+      "The course-support candidate queue exceeds the bounded read limit.",
+    );
+  }
+}
+
+function assertBoundedCourseSupportCandidateHistory(
+  incidents: readonly CourseSupportCandidateIncident[],
+) {
+  if (
+    incidents.some(
+      (incident) =>
+        (incident.monitoringEvents?.length ?? 0) >
+          COURSE_SUPPORT_CANDIDATE_MONITORING_EVENT_READ_LIMIT ||
+        (incident.batchIncidents?.length ?? 0) >
+          COURSE_SUPPORT_CANDIDATE_BATCH_HISTORY_READ_LIMIT ||
+        (incident.batchIncidents ?? []).some(
+          (entry) =>
+            (entry.verificationRequests?.length ?? 0) >
+            COURSE_SUPPORT_CANDIDATE_REQUEST_HISTORY_READ_LIMIT,
+        ),
+    )
+  ) {
+    throw new Error(
+      "Course-support candidate history exceeds the bounded read limit.",
+    );
+  }
+}
+
 function buildCourseSupportCandidates(
   incidents: readonly CourseSupportCandidateIncident[],
   now: Date,
 ): CourseSupportClaimCandidate[] {
+  assertBoundedCourseSupportCandidateHistory(incidents);
   return incidents.flatMap(({ course, batchIncidents, ...incident }) => {
     const currentDemand = deriveCourseSupportCurrentDemand(course.preferences, {
       timeZone: course.timeZone,
@@ -15769,6 +16837,15 @@ function buildCourseSupportCandidates(
         : undefined,
       now,
     });
+    const sourceCompleteFinalizationRecovery =
+      getSourceCompleteFinalizationRecovery({
+        incident,
+        course,
+        currentCycleBatchIncidents,
+        providerSnapshotFingerprint,
+        routedRemediation,
+        now,
+      });
     const operationalAttemptsCompleted = routedRemediation.attemptSignature
       ? countCourseSupportOperationalNoProgressAttempts({
           batchIncidents: currentCycleBatchIncidents,
@@ -15784,7 +16861,9 @@ function buildCourseSupportCandidates(
             ),
         })
       : 0;
-    const remediationRoute = deferredFailureHandoff
+    const remediationRoute = sourceCompleteFinalizationRecovery
+      ? buildSourceCompleteFinalizationRecoveryRoute(routedRemediation)
+      : deferredFailureHandoff
       ? ({
           ...routedRemediation,
           workMode: "VERIFY_TRANSIENT",
@@ -15841,7 +16920,9 @@ function buildCourseSupportCandidates(
         providerFamilyKey: incident.providerFamilyKey,
         failureClass: incident.failureClass,
         failureFingerprint: incident.failureFingerprint,
-        humanReviewReason: incident.humanReviewReason,
+        humanReviewReason: sourceCompleteFinalizationRecovery
+          ? null
+          : incident.humanReviewReason,
         engineeringOnly:
           currentDemand.activeRealSearchCount > 0
             ? false
@@ -15862,6 +16943,7 @@ function buildCourseSupportCandidates(
         nextAttemptAt: incident.nextAttemptAt,
         attemptCount: incident.attemptCount,
         updatedAt: incident.updatedAt,
+        courseUpdatedAt: course.updatedAt,
         remediationDirective:
           getCourseSupportRemediationDirective(remediationRoute),
         remediationRoute,
@@ -15872,6 +16954,9 @@ function buildCourseSupportCandidates(
           incident.courseId,
         ),
         ...(deferredFailureHandoff ? { deferredFailureHandoff } : {}),
+        ...(sourceCompleteFinalizationRecovery
+          ? { sourceCompleteFinalizationRecovery }
+          : {}),
         playbookEventCountAtClaim: countCourseSupportPlaybookEvents({
           attemptLedger: incident.attemptLedger,
           cycle: incident.cycle,
@@ -16725,9 +17810,10 @@ export function isDurableTerminalProof(
       observedAt &&
       freshSearchCheckedAt &&
       observedAt.getTime() >= notBefore.getTime() &&
+      observedAt.getTime() >= batch.recheckDispatchStartedAt.getTime() &&
+      observedAt.getTime() >= entry.incident.lastSeenAt.getTime() &&
       freshSearchCheckedAt.getTime() >=
-        batch.recheckDispatchStartedAt.getTime() &&
-      freshSearchCheckedAt.getTime() >= entry.incident.lastSeenAt.getTime(),
+        batch.recheckDispatchStartedAt.getTime(),
     );
   }
   if (entry.normalizedResult === "FINAL_DISPOSITION") {

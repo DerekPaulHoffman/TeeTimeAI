@@ -55,6 +55,13 @@ import {
   selectCourseSupportVerificationStopMode
 } from "@/lib/automation/course-support-verification-watch";
 import { getProviderCoverageDashboard } from "@/lib/automation/provider-coverage";
+import {
+  buildCourseSupportAcceptanceHistoryMachineRecord,
+  CourseSupportReleaseLineageError,
+  getCourseSupportAcceptanceHistory,
+  parseCourseSupportAcceptanceHistoryOptions,
+  type CourseSupportAcceptanceHistoryOptions
+} from "@/lib/automation/course-support-acceptance-history";
 import { persistOwnedCourseSupportBrowserPlaybookStages } from "@/lib/automation/course-support-browser-stages";
 import { attachCourseSupportAcceptanceProjectionFromWorker } from "@/lib/operator/course-support-acceptance-process";
 import {
@@ -72,6 +79,14 @@ import type {
 import { waitForGitDeployment } from "@/lib/deployments/wait-for-git-deployment";
 
 import { runBrowserProbe } from "./browser-probe-needed-adapters";
+
+export {
+  buildCourseSupportAcceptanceHistoryMachineRecord,
+  COURSE_SUPPORT_ACCEPTANCE_HISTORY_MACHINE_RECORD_TYPE,
+  COURSE_SUPPORT_RELEASE_LINEAGE_FAILURE_CLASS,
+  CourseSupportReleaseLineageError,
+  parseCourseSupportAcceptanceHistoryOptions
+} from "@/lib/automation/course-support-acceptance-history";
 
 const RESPONDER_OUTCOMES = new Set<ResponderOutcome>([
   "success",
@@ -497,38 +512,65 @@ async function main() {
   );
 }
 
-async function runConfiguredCommand() {
-  const [command = "inspect", ...args] = process.argv.slice(2);
+export async function runConfiguredCommand(input?: {
+  argv?: string[];
+  isWorkerExecutionAllowed?: typeof isAutomationWorkerExecutionAllowed;
+  write?: typeof writeResult;
+}) {
+  const [command = "inspect", ...args] =
+    input?.argv ?? process.argv.slice(2);
+  const checkWorkerExecutionAllowed =
+    input?.isWorkerExecutionAllowed ?? isAutomationWorkerExecutionAllowed;
+  const write = input?.write ?? writeResult;
   const coverageOptions =
     command === "coverage" ? parseCourseSupportCoverageOptions(args) : null;
+  const acceptanceHistoryOptions =
+    command === "acceptance-history"
+      ? parseCourseSupportAcceptanceHistoryOptions(args)
+      : null;
   const scheduledCycle = shouldRecordAutomationWorkerCycle({ command, args });
   if (!scheduledCycle) {
-    if (!(await isAutomationWorkerExecutionAllowed(AUTOMATION_WORKERS.COURSE_SUPPORT))) {
+    if (!(await checkWorkerExecutionAllowed(AUTOMATION_WORKERS.COURSE_SUPPORT))) {
       const pausedResult = { outcome: "paused_by_control_plane" };
-      writeResult(
-        coverageOptions?.machine
+      write(
+        acceptanceHistoryOptions
+          ? buildCourseSupportAcceptanceHistoryMachineRecord({
+              outcome: pausedResult.outcome
+            })
+          : coverageOptions?.machine
           ? buildCourseSupportCoverageMachineRecord({
               outcome: pausedResult.outcome
             })
           : pausedResult,
-        { machine: coverageOptions?.machine }
+        { machine: Boolean(acceptanceHistoryOptions || coverageOptions?.machine) }
       );
       return;
     }
-    await runCommand(command, args, coverageOptions);
+    await runCommand(
+      command,
+      args,
+      coverageOptions,
+      acceptanceHistoryOptions
+    );
     return;
   }
   const worker = await startAutomationWorker(AUTOMATION_WORKERS.COURSE_SUPPORT, {
     runnerVersion: "course-support-v3"
   });
   if (!worker.allowed) {
-    writeResult({ outcome: "paused_by_control_plane" });
+    write({ outcome: "paused_by_control_plane" });
     return;
   }
   try {
     await runWithAutomationWorkerHeartbeat(
       AUTOMATION_WORKERS.COURSE_SUPPORT,
-      () => runCommand(command, args, coverageOptions),
+      () =>
+        runCommand(
+          command,
+          args,
+          coverageOptions,
+          acceptanceHistoryOptions
+        ),
       { intervalMs: COURSE_SUPPORT_OPERATION_HEARTBEAT_INTERVAL_MS }
     );
     await completeAutomationWorker(
@@ -547,7 +589,8 @@ async function runConfiguredCommand() {
 async function runCommand(
   command: string,
   args: string[],
-  coverageOptions: CourseSupportCoverageOptions | null
+  coverageOptions: CourseSupportCoverageOptions | null,
+  acceptanceHistoryOptions: CourseSupportAcceptanceHistoryOptions | null
 ) {
   switch (command) {
     case "inspect":
@@ -573,6 +616,25 @@ async function runCommand(
             })
           : coverage,
         { machine: options.machine }
+      );
+      return;
+    }
+    case "acceptance-history": {
+      const options =
+        acceptanceHistoryOptions ??
+        parseCourseSupportAcceptanceHistoryOptions(args);
+      const acceptanceHistory = await getCourseSupportAcceptanceHistory({
+        releaseSha: options.releaseSha,
+        deployedAt: options.deployedAt,
+        windowStartedAt: options.windowStartedAt,
+        windowEndedAt: options.windowEndedAt
+      });
+      writeResult(
+        buildCourseSupportAcceptanceHistoryMachineRecord({
+          outcome: "ready",
+          acceptanceHistory
+        }),
+        { machine: true }
       );
       return;
     }
@@ -619,7 +681,7 @@ async function runCommand(
       return;
     default:
       throw new Error(
-        "Unknown course-support command. Use inspect, coverage, claim, packet, inspect-provider-contract, claim-path, source-search-context, record-source-search, mark-needs-human, heartbeat, verify-release, verify, closeout, recover, or backfill."
+        "Unknown course-support command. Use inspect, coverage, acceptance-history, claim, packet, inspect-provider-contract, claim-path, source-search-context, record-source-search, mark-needs-human, heartbeat, verify-release, verify, closeout, recover, or backfill."
       );
   }
 }
@@ -1881,14 +1943,20 @@ if (directEntry) {
     const [command = "inspect", ...args] = process.argv.slice(2);
     const machineCoverage =
       command === "coverage" && args.includes("--machine");
+    const machineAcceptanceHistory = command === "acceptance-history";
     writeResult(
-      machineCoverage
+      machineAcceptanceHistory
+        ? buildCourseSupportAcceptanceHistoryMachineRecord({
+            outcome: failure.outcome,
+            failure
+          })
+        : machineCoverage
         ? buildCourseSupportCoverageMachineRecord({
             outcome: failure.outcome,
             failure
           })
         : failure,
-      { machine: machineCoverage }
+      { machine: machineAcceptanceHistory || machineCoverage }
     );
     process.exitCode = 1;
   });
@@ -1898,11 +1966,15 @@ export function buildCourseSupportCommandFailure(error: unknown) {
   const message = sanitizeResponderText(
     error instanceof Error ? error.message : "Unknown course-support command failure."
   );
-  const outcome =
-    error instanceof CourseSupportDatabaseEnvironmentError
-      ? error.outcome
+  const outcome = error instanceof CourseSupportDatabaseEnvironmentError
+    ? error.outcome
+    : error instanceof CourseSupportReleaseLineageError
+      ? "command_failed"
       : classifyCommandFailure(message);
-  const failureDomain = commandFailureDomain(outcome);
+  const failureDomain =
+    error instanceof CourseSupportReleaseLineageError
+      ? error.failureDomain
+      : commandFailureDomain(outcome);
   const policy = getResponderThreadPolicy({
     outcome,
     failureDomain,
@@ -1911,7 +1983,8 @@ export function buildCourseSupportCommandFailure(error: unknown) {
   return {
     outcome,
     ...(failureDomain ? { failureDomain } : {}),
-    ...(error instanceof CourseSupportDatabaseEnvironmentError
+    ...((error instanceof CourseSupportDatabaseEnvironmentError ||
+      error instanceof CourseSupportReleaseLineageError)
       ? { failureClass: error.failureClass }
       : {}),
     error: message,

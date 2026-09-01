@@ -11,6 +11,10 @@ import {
   deriveConsumerDisposition,
   isEffectiveConsumerCoverage
 } from "@/lib/automation/provider-capabilities";
+import {
+  PROVIDER_EXECUTION_EVIDENCE_MAX_LAG_MS,
+  getProviderExecutionEvidenceObservedAt,
+} from "@/lib/automation/provider-execution-marker";
 import { evaluateMonitoringGate } from "@/lib/automation/policy";
 import { isCourseIntelligenceReviewDue } from "@/lib/courses/intelligence";
 import {
@@ -29,7 +33,13 @@ const RECENT_HOURS = 6;
 const WEBSITE_FUNNEL_HOURS = 24;
 const IMPROVEMENT_MEMORY_HOURS = 24;
 const IMPROVEMENT_PROMPT_PREFIX = "tee-time-spot-improvement-loop-";
+const CURRENT_PROBE_CANDIDATE_LIMIT = 16;
+// Local-reader execution evidence is trusted only inside this enforced window.
+// Bound the candidate set to that same window and fail closed on overflow.
+const CURRENT_PROBE_SOURCE_LAG_BOUND_MS =
+  PROVIDER_EXECUTION_EVIDENCE_MAX_LAG_MS;
 type LatestActiveProbeEvidence = {
+  id: string;
   teeSearchId: string;
   courseId: string;
   outcome: ProbeOutcome;
@@ -38,7 +48,7 @@ type LatestActiveProbeEvidence = {
   runtimeVersion: string | null;
 };
 type LatestActiveProbeRow = LatestActiveProbeEvidence & {
-  id: string;
+  rowRank: bigint;
   automationRunId: string | null;
   automationRunOutcome: string | null;
   message: string | null;
@@ -55,6 +65,117 @@ type LatestActiveProbeRow = LatestActiveProbeEvidence & {
   trafficClass: WebsiteTrafficClassValue;
   syntheticMultiCycle: boolean;
 };
+
+export function isCurrentProbeExecutionTrusted(input: {
+  runtimeVersion: string | null | undefined;
+  rawSummary: Prisma.JsonValue | null;
+  observedAt: Date | null | undefined;
+}) {
+  return Boolean(getCurrentProbeExecutionObservedAt(input));
+}
+
+export function getCurrentProbeExecutionObservedAt(input: {
+  runtimeVersion: string | null | undefined;
+  rawSummary: Prisma.JsonValue | null;
+  observedAt: Date | null | undefined;
+}) {
+  return input.runtimeVersion && input.observedAt
+    ? getProviderExecutionEvidenceObservedAt({
+        rawSummary: input.rawSummary,
+        probeObservedAt: input.observedAt
+      })
+    : null;
+}
+
+function getCurrentProbeOrderingTime(probe: LatestActiveProbeEvidence) {
+  return (
+    getProviderExecutionEvidenceObservedAt({
+      rawSummary: probe.rawSummary,
+      probeObservedAt: probe.observedAt,
+    }) ?? probe.observedAt
+  );
+}
+
+function haveSameCurrentProbeMeaning(
+  left: LatestActiveProbeEvidence,
+  right: LatestActiveProbeEvidence,
+) {
+  return (
+    left.outcome === right.outcome &&
+    left.runtimeVersion === right.runtimeVersion &&
+    (getCurrentProbeExecutionObservedAt(left)?.getTime() ?? null) ===
+      (getCurrentProbeExecutionObservedAt(right)?.getTime() ?? null)
+  );
+}
+
+export function selectCurrentProbeWinner(
+  input: ReadonlyArray<LatestActiveProbeEvidence>,
+) {
+  if (
+    input.some(
+      (probe) =>
+        !(probe.observedAt instanceof Date) ||
+        !Number.isFinite(probe.observedAt.getTime()),
+    )
+  ) {
+    return { status: "INVALID" as const, probe: null };
+  }
+  if (
+    input.some((probe) => {
+      const summary =
+        probe.rawSummary &&
+        typeof probe.rawSummary === "object" &&
+        !Array.isArray(probe.rawSummary)
+          ? probe.rawSummary
+          : null;
+      return (
+        (summary?.providerExecution === "LOCAL_BROWSER_READER" ||
+          summary?.providerExecution === "RUNNABLE_PROVIDER_CHECK") &&
+        !getCurrentProbeExecutionObservedAt(probe)
+      );
+    })
+  ) {
+    return { status: "INVALID" as const, probe: null };
+  }
+  const newestRowTime = input.reduce(
+    (latest, probe) => Math.max(latest, probe.observedAt.getTime()),
+    Number.NEGATIVE_INFINITY,
+  );
+  if (!Number.isFinite(newestRowTime)) {
+    return { status: "NONE" as const, probe: null };
+  }
+  const currentWindowStartedAt =
+    newestRowTime - CURRENT_PROBE_SOURCE_LAG_BOUND_MS;
+  const probes = input.filter(
+    (probe) => probe.observedAt.getTime() >= currentWindowStartedAt,
+  );
+  if (probes.length > CURRENT_PROBE_CANDIDATE_LIMIT) {
+    return { status: "INVALID" as const, probe: null };
+  }
+  probes.sort((left, right) => {
+    const sourceTimeOrder =
+      getCurrentProbeOrderingTime(right).getTime() -
+      getCurrentProbeOrderingTime(left).getTime();
+    if (sourceTimeOrder !== 0) return sourceTimeOrder;
+    const rowTimeOrder = right.observedAt.getTime() - left.observedAt.getTime();
+    return rowTimeOrder !== 0
+      ? rowTimeOrder
+      : right.id.localeCompare(left.id);
+  });
+  const newest = probes[0];
+  if (!newest) return { status: "NONE" as const, probe: null };
+  const newestSourceTime = getCurrentProbeOrderingTime(newest).getTime();
+  if (
+    probes.some(
+      (probe) =>
+        getCurrentProbeOrderingTime(probe).getTime() === newestSourceTime &&
+        !haveSameCurrentProbeMeaning(probe, newest),
+    )
+  ) {
+    return { status: "INVALID" as const, probe: null };
+  }
+  return { status: "VALID" as const, probe: newest };
+}
 const activeSearchInspectionQuery = {
   where: {
     status: "ACTIVE"
@@ -331,48 +452,75 @@ async function main() {
       search.preferences.map((preference) => preference.courseId)
     )
   );
-  const latestActiveProbeRows =
+  const latestActiveProbeCandidates =
     activeSearchIds.length > 0 && activePreferenceCourseIds.size > 0
       ? await prisma.$queryRaw<LatestActiveProbeRow[]>(Prisma.sql`
-          SELECT DISTINCT ON (probe."teeSearchId", probe."courseId")
-            probe."id",
-            probe."teeSearchId",
-            probe."courseId",
-            probe."automationRunId",
-            probe."outcome",
-            probe."observedAt",
-            probe."message",
-            probe."rawSummary",
-            probe."runtimeVersion",
-            course."name" AS "courseName",
-            course."detectedPlatform" AS "courseDetectedPlatform",
-            course."automationEligibility" AS "courseAutomationEligibility",
-            course."bookingMethod" AS "courseBookingMethod",
-            course."automationReason" AS "courseAutomationReason",
-            course."isPublic" AS "courseIsPublic",
-            course."intelligenceVerifiedAt" AS "courseIntelligenceVerifiedAt",
-            course."intelligenceReviewAt" AS "courseIntelligenceReviewAt",
-            course."intelligenceConfidence" AS "courseIntelligenceConfidence",
-            account."email" AS "userEmail",
-            search."trafficClass" AS "trafficClass",
-            search."syntheticMultiCycle",
-            run."outcome" AS "automationRunOutcome"
-          FROM "CourseProbe" AS probe
-          INNER JOIN "Course" AS course ON course."id" = probe."courseId"
-          INNER JOIN "TeeSearch" AS search ON search."id" = probe."teeSearchId"
-          INNER JOIN "User" AS account ON account."id" = search."userId"
-          LEFT JOIN "AutomationRun" AS run ON run."id" = probe."automationRunId"
-          WHERE probe."teeSearchId" IN (${Prisma.join(activeSearchIds)})
-            AND probe."courseId" IN (${Prisma.join([...activePreferenceCourseIds])})
-          ORDER BY
-            probe."teeSearchId",
-            probe."courseId",
-            probe."observedAt" DESC,
-            probe."id" DESC
+          WITH probe_history AS (
+            SELECT
+              probe."id",
+              probe."teeSearchId",
+              probe."courseId",
+              probe."automationRunId",
+              probe."outcome",
+              probe."observedAt",
+              probe."message",
+              probe."rawSummary",
+              probe."runtimeVersion",
+              course."name" AS "courseName",
+              course."detectedPlatform" AS "courseDetectedPlatform",
+              course."automationEligibility" AS "courseAutomationEligibility",
+              course."bookingMethod" AS "courseBookingMethod",
+              course."automationReason" AS "courseAutomationReason",
+              course."isPublic" AS "courseIsPublic",
+              course."intelligenceVerifiedAt" AS "courseIntelligenceVerifiedAt",
+              course."intelligenceReviewAt" AS "courseIntelligenceReviewAt",
+              course."intelligenceConfidence" AS "courseIntelligenceConfidence",
+              account."email" AS "userEmail",
+              search."trafficClass" AS "trafficClass",
+              search."syntheticMultiCycle",
+              run."outcome" AS "automationRunOutcome",
+              MAX(probe."observedAt") OVER (
+                PARTITION BY probe."teeSearchId", probe."courseId"
+              ) AS "latestObservedAt"
+            FROM "CourseProbe" AS probe
+            INNER JOIN "Course" AS course ON course."id" = probe."courseId"
+            INNER JOIN "TeeSearch" AS search ON search."id" = probe."teeSearchId"
+            INNER JOIN "User" AS account ON account."id" = search."userId"
+            LEFT JOIN "AutomationRun" AS run ON run."id" = probe."automationRunId"
+            WHERE probe."teeSearchId" IN (${Prisma.join(activeSearchIds)})
+              AND probe."courseId" IN (${Prisma.join([...activePreferenceCourseIds])})
+          ),
+          ranked_probes AS (
+            SELECT
+              probe_history.*,
+              ROW_NUMBER() OVER (
+                PARTITION BY probe_history."teeSearchId", probe_history."courseId"
+                ORDER BY probe_history."observedAt" DESC, probe_history."id" DESC
+              ) AS "rowRank"
+            FROM probe_history
+            WHERE probe_history."observedAt" >=
+              probe_history."latestObservedAt" -
+                (${CURRENT_PROBE_SOURCE_LAG_BOUND_MS} * INTERVAL '1 millisecond')
+          )
+          SELECT *
+          FROM ranked_probes
+          WHERE "rowRank" <= ${CURRENT_PROBE_CANDIDATE_LIMIT + 1}
+          ORDER BY "teeSearchId", "courseId", "rowRank"
         `)
       : [];
+  const probeCandidatesBySearchCourse = new Map<string, LatestActiveProbeRow[]>();
+  for (const probe of latestActiveProbeCandidates) {
+    const key = searchCourseKey(probe.teeSearchId, probe.courseId);
+    const candidates = probeCandidatesBySearchCourse.get(key) ?? [];
+    candidates.push(probe);
+    probeCandidatesBySearchCourse.set(key, candidates);
+  }
+  const latestActiveProbeRows = [...probeCandidatesBySearchCourse.values()]
+    .map((candidates) => selectCurrentProbeWinner(candidates).probe)
+    .filter((probe): probe is LatestActiveProbeRow => Boolean(probe));
   const latestActiveProbeEvidence: LatestActiveProbeEvidence[] =
     latestActiveProbeRows.map((probe) => ({
+      id: probe.id,
       teeSearchId: probe.teeSearchId,
       courseId: probe.courseId,
       outcome: probe.outcome,
@@ -437,15 +585,17 @@ async function main() {
         searchCourseKey(search.id, preference.courseId)
       );
       const rawSummary = asJsonObject(probe?.rawSummary ?? null);
-      const currentEvidenceTrusted = Boolean(
-        probe?.runtimeVersion &&
-          rawSummary.providerExecution === "RUNNABLE_PROVIDER_CHECK"
-      );
+      const providerExecutionObservedAt = getCurrentProbeExecutionObservedAt({
+        runtimeVersion: probe?.runtimeVersion,
+        rawSummary: probe?.rawSummary ?? null,
+        observedAt: probe?.observedAt
+      });
+      const currentEvidenceTrusted = Boolean(providerExecutionObservedAt);
       const activeIncident = activeIncidentByCourse.get(preference.courseId);
       const disposition = deriveConsumerDisposition({
         ...preference.course,
         currentEvidenceTrusted,
-        currentEvidenceObservedAt: probe?.observedAt ?? null,
+        currentEvidenceObservedAt: providerExecutionObservedAt,
         latestOutcome: probe?.outcome ?? null,
         targetDateStatus: getProbeTargetDateStatus(rawSummary),
         availableMatchCount: search.matches.filter(

@@ -422,6 +422,22 @@ export function parseAutomationPlaybookLedger(
   return parsed.success ? parsed.data : null;
 }
 
+export function getAutomationPlaybookFactualFinalEvidence(
+  value: unknown,
+  cycle: number,
+) {
+  const ledger = parseAutomationPlaybookLedger(value);
+  const event = ledger?.events.find(
+    (candidate) =>
+      candidate.cycle === cycle && candidate.transition === "FACTUAL_FINAL",
+  );
+  if (!event?.factualDisposition) return null;
+  return {
+    disposition: event.factualDisposition,
+    observedAt: new Date(event.observedAt),
+  };
+}
+
 export function appendAutomationPlaybookEvent(
   currentValue: unknown,
   rawInput: AutomationPlaybookEventInput,

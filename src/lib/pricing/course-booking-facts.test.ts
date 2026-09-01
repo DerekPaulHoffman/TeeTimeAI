@@ -5,17 +5,21 @@ import { recordCourseBookingFacts } from "./course-booking-facts";
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
-    courseBookingFact: { upsert: vi.fn() },
-    $transaction: vi.fn(async (operations: Promise<unknown>[]) =>
-      Promise.all(operations)
-    )
+    courseBookingFact: { findUnique: vi.fn(), upsert: vi.fn() },
+    $transaction: vi.fn()
   }
 }));
 
 const mockedPrisma = vi.mocked(prisma, { deep: true });
 
 describe("durable course booking facts", () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedPrisma.$transaction.mockImplementation(async (callback) =>
+      (callback as (transaction: typeof prisma) => Promise<unknown>)(prisma)
+    );
+    mockedPrisma.courseBookingFact.findUnique.mockResolvedValue(null);
+  });
 
   it("updates every observed hole option without clearing unobserved facts", async () => {
     const observedAt = new Date("2026-07-23T16:00:00.000Z");
@@ -74,6 +78,43 @@ describe("durable course booking facts", () => {
         bookableHoleCounts: []
       })
     ).resolves.toEqual([]);
+
+    expect(mockedPrisma.courseBookingFact.upsert).not.toHaveBeenCalled();
+  });
+
+  it("does not let older price or bookability evidence overwrite newer facts", async () => {
+    const observedAt = new Date("2026-07-23T16:00:00.000Z");
+    mockedPrisma.courseBookingFact.findUnique.mockResolvedValue({
+      courseId: "course-1",
+      holes: 18,
+      minPriceCents: 9000,
+      maxPriceCents: 9900,
+      priceSampleSize: 4,
+      priceObservedAt: new Date("2026-07-23T16:05:00.000Z"),
+      bookableObservedAt: new Date("2026-07-23T16:05:00.000Z")
+    } as never);
+
+    await expect(
+      recordCourseBookingFacts({
+        courseId: "course-1",
+        observedAt,
+        bookableHoleCounts: [18],
+        pricing: {
+          currency: "USD",
+          observedAt: observedAt.toISOString(),
+          eighteenHoles: {
+            minPriceCents: 5000,
+            maxPriceCents: 6000,
+            sampleSize: 2
+          }
+        }
+      })
+    ).resolves.toEqual([
+      expect.objectContaining({
+        priceObservedAt: new Date("2026-07-23T16:05:00.000Z"),
+        bookableObservedAt: new Date("2026-07-23T16:05:00.000Z")
+      })
+    ]);
 
     expect(mockedPrisma.courseBookingFact.upsert).not.toHaveBeenCalled();
   });

@@ -1,6 +1,10 @@
+import { spawnSync } from "node:child_process";
+import { resolve } from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  buildCourseSupportAcceptanceHistoryMachineRecord,
   buildCourseSupportCoverageMachineRecord,
   buildCourseSupportCommandFailure,
   assertCourseSupportPersistedReleaseFence,
@@ -8,11 +12,16 @@ import {
   assertCourseSupportVerifyReleaseOptions,
   classifyCourseSupportDeploymentWaitFailure,
   classifyCommandFailure,
+  COURSE_SUPPORT_ACCEPTANCE_HISTORY_MACHINE_RECORD_TYPE,
   COURSE_SUPPORT_COVERAGE_MACHINE_RECORD_TYPE,
   COURSE_SUPPORT_DATABASE_URL_FAILURE_CLASS,
+  COURSE_SUPPORT_RELEASE_LINEAGE_FAILURE_CLASS,
   CourseSupportDatabaseEnvironmentError,
+  CourseSupportReleaseLineageError,
+  parseCourseSupportAcceptanceHistoryOptions,
   parseCourseSupportCoverageOptions,
   requireExplicitCourseSupportDatabaseUrl,
+  runConfiguredCommand,
   runWithExplicitCourseSupportDatabaseUrl,
   serializeCourseSupportResult
 } from "../../../scripts/automation/course-support";
@@ -155,6 +164,20 @@ describe("course-support CLI database environment guard", () => {
       threadDisposition: "KEEP_VISIBLE"
     });
     expect(JSON.stringify(result)).not.toContain("postgresql://");
+  });
+
+  it("classifies unverified responder release lineage as a deployment failure", () => {
+    const result = buildCourseSupportCommandFailure(
+      new CourseSupportReleaseLineageError()
+    );
+
+    expect(result).toMatchObject({
+      outcome: "command_failed",
+      failureDomain: "DEPLOYMENT",
+      failureClass: COURSE_SUPPORT_RELEASE_LINEAGE_FAILURE_CLASS,
+      durableCloseoutRecorded: false,
+      threadDisposition: "KEEP_VISIBLE"
+    });
   });
 });
 
@@ -456,5 +479,112 @@ describe("course-support coverage machine output", () => {
     expect(serializeCourseSupportResult({ outcome: "ready" })).toContain(
       '\n  "outcome": "ready"\n'
     );
+  });
+
+  it("exports the acceptance-history machine contract through the CLI", () => {
+    const releaseSha = "a".repeat(40);
+    const deployedAt = "2026-08-31T12:00:00.000Z";
+    const windowEndedAt = "2026-08-31T13:00:00.000Z";
+    expect(
+      parseCourseSupportAcceptanceHistoryOptions([
+        "--machine",
+        "--release-sha",
+        releaseSha,
+        "--deployed-at",
+        deployedAt,
+        "--window-started-at",
+        deployedAt,
+        "--window-ended-at",
+        windowEndedAt
+      ])
+    ).toEqual({
+      machine: true,
+      releaseSha,
+      deployedAt: new Date(deployedAt),
+      windowStartedAt: new Date(deployedAt),
+      windowEndedAt: new Date(windowEndedAt)
+    });
+
+    expect(
+      buildCourseSupportAcceptanceHistoryMachineRecord({
+        outcome: "paused_by_control_plane"
+      })
+    ).toEqual({
+      outcome: "paused_by_control_plane",
+      recordType: COURSE_SUPPORT_ACCEPTANCE_HISTORY_MACHINE_RECORD_TYPE,
+      schemaVersion: 1,
+      acceptanceHistory: null,
+      failure: null
+    });
+  });
+
+  it("dispatches acceptance-history machine output through the paused worker gate", async () => {
+    const releaseSha = "a".repeat(40);
+    const deployedAt = "2026-08-31T12:00:00.000Z";
+    const output: string[] = [];
+
+    await runConfiguredCommand({
+      argv: [
+        "acceptance-history",
+        "--machine",
+        "--release-sha",
+        releaseSha,
+        "--deployed-at",
+        deployedAt,
+        "--window-started-at",
+        deployedAt,
+        "--window-ended-at",
+        "2026-08-31T13:00:00.000Z",
+      ],
+      isWorkerExecutionAllowed: async () => false,
+      write: (value, options) => {
+        output.push(serializeCourseSupportResult(value, options));
+      },
+    });
+
+    expect(output).toHaveLength(1);
+    expect(output[0]?.split(/\r?\n/u).filter(Boolean)).toHaveLength(1);
+    expect(JSON.parse(output[0]!)).toEqual({
+      outcome: "paused_by_control_plane",
+      recordType: COURSE_SUPPORT_ACCEPTANCE_HISTORY_MACHINE_RECORD_TYPE,
+      schemaVersion: 1,
+      acceptanceHistory: null,
+      failure: null,
+    });
+  });
+
+  it("serializes a direct-entry database fence as one privacy-safe machine record", () => {
+    const child = spawnSync(
+      process.execPath,
+      [
+        resolve("node_modules/tsx/dist/cli.mjs"),
+        resolve("scripts/automation/course-support.ts"),
+        "acceptance-history",
+        "--machine",
+      ],
+      {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          DATABASE_URL: " ",
+        },
+      },
+    );
+
+    expect(child.status).toBe(1);
+    expect(child.stdout.split(/\r?\n/u).filter(Boolean)).toHaveLength(1);
+    expect(JSON.parse(child.stdout)).toEqual({
+      outcome: "blocked_env",
+      recordType: COURSE_SUPPORT_ACCEPTANCE_HISTORY_MACHINE_RECORD_TYPE,
+      schemaVersion: 1,
+      acceptanceHistory: null,
+      failure: {
+        failureDomain: "ENV",
+        failureClass: COURSE_SUPPORT_DATABASE_URL_FAILURE_CLASS,
+        durableCloseoutRecorded: false,
+        threadDisposition: "KEEP_VISIBLE",
+      },
+    });
   });
 });

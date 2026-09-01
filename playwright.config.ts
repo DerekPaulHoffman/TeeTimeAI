@@ -36,6 +36,11 @@ export default defineConfig({
   webServer: shouldStartLocalServer
     ? {
         command: `npm run start -- --hostname 127.0.0.1 --port ${localSmokePort}`,
+        env: {
+          CLERK_AUTH_READY: "",
+          CLERK_SECRET_KEY: "",
+          NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ""
+        },
         reuseExistingServer: false,
         timeout: 120_000,
         url: baseURL

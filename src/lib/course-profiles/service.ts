@@ -1,13 +1,30 @@
+import { createHash } from "node:crypto";
+
 import type { CourseProfileStatus, Prisma } from "@prisma/client";
 
 import {
   revalidateCourseMonitoringForProviderEvidenceChangeInTransaction,
   runSerializedCourseMonitoringWrite
 } from "@/lib/automation/course-monitoring";
+import {
+  createAddressPinnedPublicFetchTransport,
+  type AddressPinnedPublicFetchDependencies
+} from "@/lib/automation/address-pinned-public-fetch";
 import { isSafeManualEvidenceUrl } from "@/lib/automation/browser-discovery";
+import {
+  beginCourseProviderObservation,
+  markCourseProviderObservationUnreconciled,
+  releaseCourseProviderObservation,
+  renewCourseProviderObservationInTransaction,
+  startCourseProviderObservationHeartbeat
+} from "@/lib/automation/provider-execution-marker";
 import { buildCourseSupportProviderSnapshotFingerprint } from "@/lib/automation/course-support-verification";
 import { prisma } from "@/lib/prisma";
 import { buildCourseProfileSlug, withStableSlugSuffix } from "@/lib/course-profiles/slug";
+import {
+  haveCompatibleOfficialPageCourseNamesWithVerifiedLayout,
+  normalizeOfficialPagePresentationIdentity
+} from "@/lib/places/course-identity";
 import {
   hashCourseProfileDraft,
   validateCourseProfileDraft,
@@ -175,7 +192,10 @@ export async function getCourseProfileQueueHealth() {
   };
 }
 
-export async function getCourseProfileResearchPacket(courseId: string) {
+export async function getCourseProfileResearchPacket(
+  courseId: string,
+  publicFetch: typeof fetch = courseProfilePublicFetch
+) {
   const course = await prisma.course.findUnique({
     where: { id: courseId },
     include: { profile: { include: { sources: true } } }
@@ -188,11 +208,24 @@ export async function getCourseProfileResearchPacket(courseId: string) {
         .filter((value): value is string => value !== null)
     )
   ];
-  const sourcePages = await Promise.all(sourceUrls.map(fetchResearchPage));
+  const sourcePages = (
+    await Promise.all(
+      sourceUrls.map((sourceUrl) => fetchResearchPage(sourceUrl, publicFetch))
+    )
+  ).map((page) => ({
+    url: page.url,
+    status: page.status,
+    text: page.text,
+    ...(page.error ? { error: page.error } : {})
+  }));
   return { course, sourcePages };
 }
 
-export async function applyCourseProfileDraft(value: unknown, apply = false) {
+export async function applyCourseProfileDraft(
+  value: unknown,
+  apply = false,
+  publicFetch: typeof fetch = courseProfilePublicFetch
+) {
   const validation = validateCourseProfileDraft(value);
   const courseId = validation.draft?.courseId ?? (isRecord(value) && typeof value.courseId === "string" ? value.courseId : null);
   if (!validation.valid || !validation.draft) {
@@ -204,7 +237,18 @@ export async function applyCourseProfileDraft(value: unknown, apply = false) {
   const draft = validation.draft;
   const course = await prisma.course.findUnique({
     where: { id: draft.courseId },
-    select: { id: true, name: true, isPublic: true, automationEligibility: true, profile: { select: { canonicalSlug: true, contentVersion: true } } }
+    select: {
+      id: true,
+      name: true,
+      address: true,
+      city: true,
+      stateCode: true,
+      isPublic: true,
+      automationEligibility: true,
+      layoutHoleCounts: true,
+      updatedAt: true,
+      profile: { select: { canonicalSlug: true, contentVersion: true } }
+    }
   });
   if (!course) return { mode: "dry-run", valid: false, errors: [`Course ${draft.courseId} was not found`] };
   const eligibilityErrors = [
@@ -224,79 +268,216 @@ export async function applyCourseProfileDraft(value: unknown, apply = false) {
   }
   if (!apply) return { mode: "dry-run", valid: true, errors: [], canonicalSlug, draft };
 
-  const verifiedAt = new Date(draft.profileVerifiedAt);
-  const reviewDueAt = new Date(verifiedAt.getTime() + COURSE_PROFILE_REVIEW_DAYS * 86_400_000);
-  const now = new Date();
-  const contentHash = hashCourseProfileDraft(draft);
-  const result = await runSerializedCourseMonitoringWrite(course.id, async (tx) => {
-    const current = await tx.course.findUnique({ where: { id: course.id } });
-    if (!current) {
-      throw new Error(`Course ${course.id} was not found`);
-    }
-    const applied = await tx.course.update({
-      where: {
-        id: course.id,
-        updatedAt: current.updatedAt
-      },
-      data: {
-        ...draft.location,
-        ...(draft.officialWebsiteUrl ? { website: draft.officialWebsiteUrl } : {}),
-        ...(draft.physicalLayout
-          ? {
-              layoutHoleCounts: draft.physicalLayout.holeCounts,
-              layoutHolesEvidenceUrl: draft.physicalLayout.evidenceUrl,
-              layoutHolesVerifiedAt: new Date(draft.physicalLayout.verifiedAt)
+  const providerObservation = await beginCourseProviderObservation({
+    courseId: course.id
+  });
+  if (!providerObservation) {
+    throw new Error(
+      "Another provider observation is already in progress for this course; retry the profile apply."
+    );
+  }
+
+  const heartbeat = startCourseProviderObservationHeartbeat(providerObservation);
+  let providerExecutionStarted = false;
+  let heartbeatStopped = false;
+  let settlementError: unknown = null;
+  try {
+    const sourceUrls = getCourseProfileApplySourceUrls(draft);
+    providerExecutionStarted = true;
+    const freshSources = await Promise.all(
+      sourceUrls.map(async (sourceUrl) => ({
+        sourceUrl,
+        page: await fetchResearchPage(sourceUrl, publicFetch)
+      }))
+    );
+    assertFreshCourseProfileSources(course, draft, freshSources);
+    heartbeat.assertOwned();
+    await heartbeat.stop();
+    heartbeatStopped = true;
+
+    const observedAt = providerObservation.observationStartedAt;
+    const observedAtIso = observedAt.toISOString();
+    const reconciledDraft: CourseProfileDraft = {
+      ...draft,
+      profileVerifiedAt: observedAtIso,
+      ...(draft.physicalLayout
+        ? {
+            physicalLayout: {
+              ...draft.physicalLayout,
+              verifiedAt: observedAtIso
             }
-          : {}),
-        ...(draft.par
-          ? {
-              par: draft.par.value,
-              parEvidenceUrl: draft.par.evidenceUrl,
-              parVerifiedAt: new Date(draft.par.verifiedAt)
+          }
+        : {}),
+      ...(draft.par
+        ? {
+            par: {
+              ...draft.par,
+              verifiedAt: observedAtIso
             }
-          : {})
-      }
-    });
-    await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(
-      tx,
-      {
-        courseId: course.id,
-        before: current,
-        after: applied,
-        providerSnapshotFingerprint:
-          buildCourseSupportProviderSnapshotFingerprint(applied),
-        source: "OPERATOR_CLI",
-        now
+          }
+        : {}),
+      sources: draft.sources.map((source) => ({
+        ...source,
+        accessedAt: observedAtIso
+      }))
+    };
+    const verifiedAt = observedAt;
+    const reviewDueAt = new Date(
+      verifiedAt.getTime() + COURSE_PROFILE_REVIEW_DAYS * 86_400_000
+    );
+    const contentHash = hashFreshCourseProfileEvidence(
+      reconciledDraft,
+      freshSources
+    );
+    const result = await runSerializedCourseMonitoringWrite(
+      course.id,
+      async (tx) => {
+        if (
+          !(await renewCourseProviderObservationInTransaction(
+            tx,
+            providerObservation
+          ))
+        ) {
+          throw new Error(
+            "Provider observation ownership expired before the course profile could be persisted."
+          );
+        }
+        const current = await tx.course.findUnique({ where: { id: course.id } });
+        if (!current) {
+          throw new Error(`Course ${course.id} was not found`);
+        }
+        if (current.updatedAt.getTime() !== course.updatedAt.getTime()) {
+          throw new Error(
+            "Course provider evidence changed during profile verification; rerun the profile apply."
+          );
+        }
+        const applied = await tx.course.update({
+          where: {
+            id: course.id,
+            updatedAt: course.updatedAt
+          },
+          data: {
+            ...reconciledDraft.location,
+            ...(reconciledDraft.officialWebsiteUrl
+              ? { website: reconciledDraft.officialWebsiteUrl }
+              : {}),
+            ...(reconciledDraft.physicalLayout
+              ? {
+                  layoutHoleCounts: reconciledDraft.physicalLayout.holeCounts,
+                  layoutHolesEvidenceUrl:
+                    reconciledDraft.physicalLayout.evidenceUrl,
+                  layoutHolesVerifiedAt: verifiedAt
+                }
+              : {}),
+            ...(reconciledDraft.par
+              ? {
+                  par: reconciledDraft.par.value,
+                  parEvidenceUrl: reconciledDraft.par.evidenceUrl,
+                  parVerifiedAt: verifiedAt
+                }
+              : {})
+          }
+        });
+        await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(
+          tx,
+          {
+            courseId: course.id,
+            before: current,
+            after: applied,
+            providerSnapshotFingerprint:
+              buildCourseSupportProviderSnapshotFingerprint(applied),
+            source: "OPERATOR_CLI",
+            now: observedAt
+          }
+        );
+        const profile = await tx.courseProfile.upsert({
+          where: { courseId: course.id },
+          create: profileCreateData(
+            course.id,
+            canonicalSlug,
+            reconciledDraft,
+            contentHash,
+            verifiedAt,
+            reviewDueAt,
+            observedAt
+          ),
+          update: {
+            courseType: reconciledDraft.courseType,
+            accessSummary: reconciledDraft.accessSummary,
+            overview: reconciledDraft.overview,
+            courseCharacter: reconciledDraft.courseCharacter,
+            notableFacts: reconciledDraft.notableFacts,
+            contentHash,
+            contentVersion: (course.profile?.contentVersion ?? 0) + 1,
+            profileVerifiedAt: verifiedAt,
+            reviewDueAt,
+            publishedAt: observedAt,
+            lastResearchAttemptAt: observedAt,
+            lastRefreshedAt: observedAt,
+            failedResearchAt: null,
+            failureReason: null,
+            status: "PUBLISHED"
+          }
+        });
+        await tx.courseProfileSource.deleteMany({
+          where: { courseProfileId: profile.id }
+        });
+        await tx.courseProfileSource.createMany({
+          data: reconciledDraft.sources.map((source) => ({
+            ...source,
+            accessedAt: observedAt,
+            courseProfileId: profile.id
+          }))
+        });
+
+        return profile;
       }
     );
-    const profile = await tx.courseProfile.upsert({
-      where: { courseId: course.id },
-      create: profileCreateData(course.id, canonicalSlug, draft, contentHash, verifiedAt, reviewDueAt, now),
-      update: {
-        courseType: draft.courseType,
-        accessSummary: draft.accessSummary,
-        overview: draft.overview,
-        courseCharacter: draft.courseCharacter,
-        notableFacts: draft.notableFacts,
-        contentHash,
-        contentVersion: (course.profile?.contentVersion ?? 0) + 1,
-        profileVerifiedAt: verifiedAt,
-        reviewDueAt,
-        publishedAt: now,
-        lastResearchAttemptAt: now,
-        lastRefreshedAt: now,
-        failedResearchAt: null,
-        failureReason: null,
-        status: "PUBLISHED"
+    return {
+      mode: "applied",
+      valid: true,
+      errors: [],
+      canonicalSlug: result.canonicalSlug,
+      courseId: course.id
+    };
+  } finally {
+    if (!heartbeatStopped) {
+      try {
+        await heartbeat.stop();
+      } catch (error) {
+        settlementError = error;
       }
-    });
-    await tx.courseProfileSource.deleteMany({ where: { courseProfileId: profile.id } });
-    await tx.courseProfileSource.createMany({
-      data: draft.sources.map((source) => ({ ...source, accessedAt: new Date(source.accessedAt), courseProfileId: profile.id }))
-    });
-    return profile;
-  });
-  return { mode: "applied", valid: true, errors: [], canonicalSlug: result.canonicalSlug, courseId: course.id };
+    }
+    try {
+      if (providerExecutionStarted) {
+        const retained = await markCourseProviderObservationUnreconciled(
+          providerObservation
+        );
+        if (!retained && !settlementError) {
+          settlementError = new Error(
+            "Course profile provider source could not be retained for reconciliation."
+          );
+        }
+      } else if (
+        providerObservation.supersededUnresolvedObservationStartedAt
+      ) {
+        const retained = await markCourseProviderObservationUnreconciled(
+          providerObservation,
+          { preserveSupersededSource: true }
+        );
+        if (!retained && !settlementError) {
+          settlementError = new Error(
+            "Superseded course profile provider source could not be retained."
+          );
+        }
+      } else {
+        await releaseCourseProviderObservation(providerObservation);
+      }
+    } catch (error) {
+      settlementError ??= error;
+    }
+    if (settlementError) throw settlementError;
+  }
 }
 
 export async function getPublishedCourseProfile(slug: string) {
@@ -504,49 +685,377 @@ function profileCreateData(courseId: string, canonicalSlug: string, draft: Cours
 }
 
 const COURSE_PROFILE_RESEARCH_REDIRECT_LIMIT = 3;
+const COURSE_PROFILE_RESEARCH_MAX_RESPONSE_BYTES = 400_000;
+const COURSE_PROFILE_RESEARCH_TIMEOUT_MS = 10_000;
+
+export function createCourseProfilePublicFetchTransport(
+  dependencies: AddressPinnedPublicFetchDependencies = {}
+) {
+  return createAddressPinnedPublicFetchTransport(
+    {
+      parseUrl: parseCourseProfilePublicUrl,
+      maxResponseBytes: COURSE_PROFILE_RESEARCH_MAX_RESPONSE_BYTES,
+      // The service follows redirects manually so each hop is independently
+      // revalidated and address-pinned before any bytes are read.
+      redirectLimit: 0,
+      timeoutMs: COURSE_PROFILE_RESEARCH_TIMEOUT_MS
+    },
+    dependencies
+  );
+}
+
+const courseProfilePublicFetch = createCourseProfilePublicFetchTransport();
+
+type CourseProfileResearchPage = {
+  url: string;
+  status: number | null;
+  text: string | null;
+  error?: string;
+  evidenceText: string | null;
+  pageIdentities: string[];
+};
+
+type FreshCourseProfileSource = {
+  sourceUrl: string;
+  page: CourseProfileResearchPage;
+};
+
+function getCourseProfileApplySourceUrls(draft: CourseProfileDraft) {
+  const sourceUrls = [
+    ...draft.sources.map((source) => source.url),
+    draft.officialWebsiteUrl,
+    draft.physicalLayout?.evidenceUrl,
+    draft.par?.evidenceUrl
+  ].filter((value): value is string => Boolean(value));
+  const normalized = sourceUrls.map((sourceUrl) => {
+    const safeUrl = getSafeCourseProfileResearchUrl(sourceUrl);
+    if (!safeUrl) {
+      throw new Error(
+        "A course profile source cannot be freshly verified as a public signed-out page."
+      );
+    }
+    return safeUrl;
+  });
+  return [...new Set(normalized)];
+}
+
+function assertFreshCourseProfileSources(
+  course: {
+    name: string;
+    address: string | null;
+    city: string | null;
+    stateCode: string | null;
+    layoutHoleCounts: readonly unknown[];
+  },
+  draft: CourseProfileDraft,
+  sources: readonly FreshCourseProfileSource[]
+) {
+  const pages = new Map(
+    sources.map(({ sourceUrl, page }) => [normalizeCourseProfileSourceUrl(sourceUrl), page])
+  );
+  const unavailable = sources.filter(
+    ({ page }) =>
+      page.status === null ||
+      page.status < 200 ||
+      page.status >= 300 ||
+      typeof page.text !== "string" ||
+      !page.text.trim()
+  );
+  if (unavailable.length > 0) {
+    throw new Error(
+      "Course profile source freshness verification failed for one or more public pages."
+    );
+  }
+
+  if (draft.officialWebsiteUrl) {
+    const page = pages.get(
+      normalizeCourseProfileSourceUrl(draft.officialWebsiteUrl)
+    );
+    if (
+      !page ||
+      !doesFreshOfficialWebsiteCorroborateCourse(course, draft, page)
+    ) {
+      throw new Error(
+        "Fresh official website evidence does not corroborate the selected course identity and locality."
+      );
+    }
+  }
+
+  if (draft.physicalLayout) {
+    const page = pages.get(
+      normalizeCourseProfileSourceUrl(draft.physicalLayout.evidenceUrl)
+    );
+    if (
+      !page?.text ||
+      !draft.physicalLayout.holeCounts.every((holes) =>
+        doesFreshProfileTextCorroborateHoleCount(page.text!, holes)
+      )
+    ) {
+      throw new Error(
+        "Fresh physical-layout evidence no longer corroborates every requested hole count."
+      );
+    }
+  }
+
+  if (draft.par) {
+    const page = pages.get(normalizeCourseProfileSourceUrl(draft.par.evidenceUrl));
+    if (!page?.text || !doesFreshProfileTextCorroboratePar(page.text, draft.par.value)) {
+      throw new Error("Fresh course-profile evidence no longer corroborates the requested par.");
+    }
+  }
+}
+
+function hashFreshCourseProfileEvidence(
+  draft: CourseProfileDraft,
+  sources: readonly FreshCourseProfileSource[]
+) {
+  const sourceEvidence = sources
+    .map(({ sourceUrl, page }) => ({
+      sourceUrl: normalizeCourseProfileSourceUrl(sourceUrl),
+      finalUrl: page.url,
+      status: page.status,
+      textHash: createHash("sha256")
+        .update(page.evidenceText ?? page.text ?? "")
+        .digest("hex")
+    }))
+    .sort((left, right) => left.sourceUrl.localeCompare(right.sourceUrl));
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        draftHash: hashCourseProfileDraft(draft),
+        sourceEvidence
+      })
+    )
+    .digest("hex");
+}
+
+function doesFreshProfileTextCorroborateHoleCount(text: string, holes: 9 | 18) {
+  const word = holes === 9 ? "nine" : "eighteen";
+  return new RegExp(
+    `\\b(?:${holes}|${word})(?:\\s*[- ]?\\s*holes?)\\b`,
+    "iu"
+  ).test(text);
+}
+
+function doesFreshProfileTextCorroboratePar(text: string, par: number) {
+  return new RegExp(
+    `(?:\\bpar\\s*(?:of\\s*)?[-:]?\\s*${par}\\b|\\b${par}\\s*[- ]?\\s*par\\b)`,
+    "iu"
+  ).test(text);
+}
+
+function normalizeCourseProfileSourceUrl(value: string) {
+  const parsed = new URL(value);
+  parsed.hash = "";
+  return parsed.toString();
+}
+
+function doesFreshOfficialWebsiteCorroborateCourse(
+  course: {
+    name: string;
+    city: string | null;
+    stateCode: string | null;
+    layoutHoleCounts: readonly unknown[];
+  },
+  draft: CourseProfileDraft,
+  page: CourseProfileResearchPage
+) {
+  const verifiedLayouts =
+    draft.physicalLayout?.holeCounts ?? course.layoutHoleCounts;
+  const identityCorroborated = page.pageIdentities
+    .flatMap(getCourseProfileIdentityVariants)
+    .some((identity) =>
+      haveCompatibleOfficialPageCourseNamesWithVerifiedLayout(
+        course.name,
+        identity,
+        verifiedLayouts
+      )
+    );
+  if (!identityCorroborated || !page.evidenceText) return false;
+
+  const localityAnchors = [
+    ...(course.city && course.stateCode
+      ? [
+          {
+            city: course.city,
+            stateCode: course.stateCode,
+            stateName:
+              course.stateCode === draft.location.stateCode
+                ? draft.location.stateName
+                : null
+          }
+        ]
+      : []),
+    {
+      city: draft.location.city,
+      stateCode: draft.location.stateCode,
+      stateName: draft.location.stateName
+    }
+  ].filter(
+    (anchor, index, anchors) =>
+      anchors.findIndex(
+        (candidate) =>
+          candidate.city.toLocaleLowerCase("en-US") ===
+            anchor.city.toLocaleLowerCase("en-US") &&
+          candidate.stateCode.toLocaleUpperCase("en-US") ===
+            anchor.stateCode.toLocaleUpperCase("en-US")
+      ) === index
+  );
+
+  return localityAnchors.every(
+    ({ city, stateCode, stateName }) =>
+      freshProfileTextContainsPhrase(page.evidenceText!, city) &&
+      [stateCode, stateName]
+        .filter((value): value is string => Boolean(value))
+        .some((value) =>
+          freshProfileTextContainsPhrase(page.evidenceText!, value)
+        )
+  );
+}
+
+function getCourseProfileIdentityVariants(value: string) {
+  return [value, ...value.split(/\s+(?:\||-|\u2013|\u2014)\s+/gu)]
+    .map(normalizeOfficialPagePresentationIdentity)
+    .map((identity) => identity.trim())
+    .filter(Boolean);
+}
+
+function freshProfileTextContainsPhrase(text: string, phrase: string) {
+  const normalize = (value: string) =>
+    value
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/gu, "")
+      .toLocaleLowerCase("en-US")
+      .replace(/[^a-z0-9]+/gu, " ")
+      .trim();
+  const normalizedPhrase = normalize(phrase);
+  return Boolean(
+    normalizedPhrase &&
+      ` ${normalize(text)} `.includes(` ${normalizedPhrase} `)
+  );
+}
+
+function parseCourseProfilePublicUrl(value: string) {
+  const parsed = new URL(value);
+  if (!isSafeManualEvidenceUrl(parsed)) {
+    throw new Error("Course profile source is not a safe public page.");
+  }
+  return parsed;
+}
 
 function getSafeCourseProfileResearchUrl(value: string | null) {
   if (!value) return null;
   try {
-    const parsed = new URL(value);
-    return isSafeManualEvidenceUrl(parsed) ? parsed.toString() : null;
+    return parseCourseProfilePublicUrl(value).toString();
   } catch {
     return null;
   }
 }
 
-async function fetchResearchPage(url: string) {
+async function fetchResearchPage(
+  url: string,
+  publicFetch: typeof fetch
+): Promise<CourseProfileResearchPage> {
   try {
-    let currentUrl = new URL(url);
+    let currentUrl = parseCourseProfilePublicUrl(url);
     for (let redirectCount = 0; redirectCount <= COURSE_PROFILE_RESEARCH_REDIRECT_LIMIT; redirectCount += 1) {
-      const response = await fetch(currentUrl, {
+      const response = await publicFetch(currentUrl, {
         headers: { "User-Agent": "TeeTimeSpotCourseResearch/1.0 (+https://teetimespot.com/about)" },
         redirect: "manual",
-        signal: AbortSignal.timeout(10_000)
+        signal: AbortSignal.timeout(COURSE_PROFILE_RESEARCH_TIMEOUT_MS)
       });
       if (response.status >= 300 && response.status < 400) {
         const location = response.headers.get("location");
         if (!location || redirectCount === COURSE_PROFILE_RESEARCH_REDIRECT_LIMIT) {
-          return { url: currentUrl.toString(), status: response.status, text: null };
+          return {
+            url: currentUrl.toString(),
+            status: response.status,
+            text: null,
+            evidenceText: null,
+            pageIdentities: []
+          };
         }
-        const redirectUrl = new URL(location, currentUrl);
-        if (!isSafeManualEvidenceUrl(redirectUrl)) {
-          return { url: currentUrl.toString(), status: response.status, text: null };
+        let redirectUrl: URL;
+        try {
+          redirectUrl = parseCourseProfilePublicUrl(
+            new URL(location, currentUrl).toString()
+          );
+        } catch {
+          return {
+            url: currentUrl.toString(),
+            status: response.status,
+            text: null,
+            evidenceText: null,
+            pageIdentities: []
+          };
         }
         currentUrl = redirectUrl;
         continue;
       }
       if (!response.ok) {
-        return { url: currentUrl.toString(), status: response.status, text: null };
+        return {
+          url: currentUrl.toString(),
+          status: response.status,
+          text: null,
+          evidenceText: null,
+          pageIdentities: []
+        };
       }
-      const html = (await response.text()).slice(0, 400_000);
-      const text = html.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&#39;/g, "'").replace(/&quot;/gi, '"').replace(/\s+/g, " ").trim().slice(0, 8_000);
-      return { url: currentUrl.toString(), status: response.status, text };
+      const html = (await response.text()).slice(
+        0,
+        COURSE_PROFILE_RESEARCH_MAX_RESPONSE_BYTES
+      );
+      const evidenceText = getCourseProfileHtmlText(html);
+      return {
+        url: currentUrl.toString(),
+        status: response.status,
+        text: evidenceText.slice(0, 8_000),
+        evidenceText,
+        pageIdentities: getCourseProfilePageIdentities(html)
+      };
     }
-    return { url, status: null, text: null, error: "Redirect limit reached" };
-  } catch (error) {
-    return { url, status: null, text: null, error: error instanceof Error ? error.message : "Fetch failed" };
+    return {
+      url,
+      status: null,
+      text: null,
+      error: "Fresh public source exceeded the redirect limit.",
+      evidenceText: null,
+      pageIdentities: []
+    };
+  } catch {
+    return {
+      url,
+      status: null,
+      text: null,
+      error: "Fresh public source could not be read safely.",
+      evidenceText: null,
+      pageIdentities: []
+    };
   }
+}
+
+function getCourseProfilePageIdentities(html: string) {
+  return [
+    ...html.matchAll(/<title\b[^>]*>([\s\S]*?)<\/title>/giu),
+    ...html.matchAll(/<h1\b[^>]*>([\s\S]*?)<\/h1>/giu)
+  ]
+    .map((match) => getCourseProfileHtmlText(match[1] ?? ""))
+    .filter(Boolean);
+}
+
+function getCourseProfileHtmlText(html: string) {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/giu, " ")
+    .replace(/<style[\s\S]*?<\/style>/giu, " ")
+    .replace(/<[^>]+>/gu, " ")
+    .replace(/&nbsp;|&#160;/giu, " ")
+    .replace(/&amp;|&#38;/giu, "&")
+    .replace(/&#39;|&apos;/giu, "'")
+    .replace(/&quot;|&#34;/giu, '"')
+    .replace(/&lt;|&#60;/giu, "<")
+    .replace(/&gt;|&#62;/giu, ">")
+    .replace(/\s+/gu, " ")
+    .trim();
 }
 
 function haversineMiles(left: { latitude: number; longitude: number }, right: { latitude: number; longitude: number }) {

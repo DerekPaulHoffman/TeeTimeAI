@@ -1,4 +1,4 @@
-import type { CourseMonitoringEventSource } from "@prisma/client";
+import type { CourseMonitoringEventSource, Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 
@@ -39,6 +39,9 @@ export type RuntimePlaybookTransitionInput = {
   expectedProviderSnapshotFingerprint?: string;
   source?: CourseMonitoringEventSource;
   now?: Date;
+  onBeforeSourceWrite?: (
+    transaction: Prisma.TransactionClient,
+  ) => Promise<void>;
 };
 
 export async function loadCourseMonitoringPlaybookRuntime(
@@ -116,6 +119,7 @@ export async function recordRuntimePlaybookTransition(
     note: getRuntimePlaybookNote(input.stage, input.transition),
     source: input.source,
     now: input.now,
+    onBeforeSourceWrite: input.onBeforeSourceWrite,
     browserPersistenceFence,
   });
   if (!result) {

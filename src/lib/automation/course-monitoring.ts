@@ -27,6 +27,7 @@ import {
   hasDurableWaitForMaterialChangeProof,
 } from "@/lib/customer-monitoring-status";
 import { syntheticWebsiteTrafficClasses } from "@/lib/engagement/traffic-class";
+import { localReaderResultSchema } from "@/lib/local-reader/contracts";
 import { prisma } from "@/lib/prisma";
 
 import { sanitizeResponderText } from "./course-support-responder-policy";
@@ -37,11 +38,13 @@ import {
 import {
   appendAutomationPlaybookEvent,
   assessAutomationPlaybook,
+  getAutomationPlaybookFactualFinalEvidence,
   isAutomationHumanReviewProofCurrentOrPrior,
   isAutomationPlaybookExhausted,
   serializeAutomationPlaybookLedger,
   type AutomationPlaybookEventInput,
 } from "./course-monitoring-playbook";
+import { evaluateMonitoringGate } from "./policy";
 import { getCourseLocalDateStorageBoundary } from "./date-boundary";
 import {
   COURSE_PROVIDER_EXECUTION_EVIDENCE_FIELDS,
@@ -161,6 +164,8 @@ type FailureObservation = {
 type DeadlineMonitoringStatusSnapshot = {
   state: CourseMonitoringState;
   stateChangedAt: Date;
+  lastSuccessfulAt?: Date | null;
+  lastFailureAt?: Date | null;
   failureFingerprint?: string | null;
   nextAutomaticAttemptAt: Date | null;
   revalidationRequestedAt: Date | null;
@@ -454,11 +459,39 @@ export async function recordCourseMonitoringFailure(input: {
   source?: CourseMonitoringEventSource;
   activeRealSearchCount: number;
   now?: Date;
+  failureObservedAt: Date;
+  providerObservedAt?: Date;
   episodeStartedAt?: Date;
   runtimeVersion?: string | null;
   materialEvidenceChanged?: boolean;
+  onBeforeSourceWrite?: (
+    transaction: Prisma.TransactionClient,
+  ) => Promise<void>;
+  onSourceAccepted?: (transaction: Prisma.TransactionClient) => Promise<void>;
 }) {
   const now = input.now ?? new Date();
+  const failureObservedAt = input.failureObservedAt;
+  if (
+    !(failureObservedAt instanceof Date) ||
+    !Number.isFinite(failureObservedAt.getTime()) ||
+    failureObservedAt > now
+  ) {
+    throw new Error(
+      "Monitoring failure requires a valid causal observation time",
+    );
+  }
+  const providerObservedAt = input.providerObservedAt ?? null;
+  if (
+    providerObservedAt !== null &&
+    (!(providerObservedAt instanceof Date) ||
+      !Number.isFinite(providerObservedAt.getTime()) ||
+      providerObservedAt > now ||
+      providerObservedAt.getTime() !== failureObservedAt.getTime())
+  ) {
+    throw new Error(
+      "Monitoring failure provider proof must match its causal observation time",
+    );
+  }
   const safeMessage = sanitizeMonitoringMessage(input.message);
   const readPath = normalizeReadPath(input.readPath);
   const failureFingerprint = normalizeFingerprint(input.failureFingerprint);
@@ -472,6 +505,7 @@ export async function recordCourseMonitoringFailure(input: {
       status: null,
       confirmed: decision.confirmed,
       retainedHumanFinal: false,
+      sourceEvidenceAccepted: null,
       independentPathCount: decision.independentPathCount,
       samePathCount: decision.samePathCount,
       nextAttemptAt: getFirstFailureRetryAt(now, input.episodeStartedAt),
@@ -481,6 +515,7 @@ export async function recordCourseMonitoringFailure(input: {
   return runSerializedCourseMonitoringWrite(
     input.courseId,
     async (transaction) => {
+      await input.onBeforeSourceWrite?.(transaction);
       const current = await ensureMonitoringStatus(
         transaction,
         input.courseId,
@@ -501,6 +536,7 @@ export async function recordCourseMonitoringFailure(input: {
           nextAttemptAt: true,
           revision: true,
           activeRealSearchCount: true,
+          lastSeenAt: true,
         },
       });
       const currentFailureIdentityAudit = {
@@ -508,6 +544,59 @@ export async function recordCourseMonitoringFailure(input: {
         failureClass: input.failureClass ?? null,
         providerFamilyKey: input.providerFamilyKey ?? null,
       };
+      const newerMonitoringFenceAt = [
+        current.lastSuccessfulAt,
+        current.lastFailureAt,
+        incident?.status === "RESOLVED" &&
+        incident.resolution === "MONITORING_RESTORED"
+          ? incident.lastSeenAt
+          : null,
+      ].reduce<Date | null>((latest, value) => {
+        if (!(value instanceof Date) || !Number.isFinite(value.getTime())) {
+          return latest;
+        }
+        return !latest || value > latest ? value : latest;
+      }, null);
+      if (
+        newerMonitoringFenceAt &&
+        failureObservedAt <= newerMonitoringFenceAt
+      ) {
+        await appendMonitoringEvent(transaction, {
+          courseId: input.courseId,
+          incidentId: incident?.id ?? null,
+          eventType: "AUTOMATION_ATTEMPTED",
+          source,
+          fromState: current.state,
+          toState: current.state,
+          outcome: input.outcome,
+          failureFingerprint,
+          readPath,
+          message:
+            "An older monitoring failure was retained as audit evidence without superseding newer monitoring evidence.",
+          runtimeVersion: input.runtimeVersion,
+          occurredAt: now,
+          audit: {
+            ...currentFailureIdentityAudit,
+            ignoredForMonitoringState: true,
+            failureObservedAt: failureObservedAt.toISOString(),
+            ...(providerObservedAt
+              ? { providerObservedAt: providerObservedAt.toISOString() }
+              : {}),
+            consumedAt: now.toISOString(),
+            newerMonitoringFenceAt: newerMonitoringFenceAt.toISOString(),
+            customerDataIncluded: false,
+          },
+        });
+        return {
+          status: current,
+          confirmed: false,
+          retainedHumanFinal: false,
+          sourceEvidenceAccepted: false as const,
+          independentPathCount: 0,
+          samePathCount: 0,
+          nextAttemptAt: current.nextAutomaticAttemptAt,
+        };
+      }
 
       const incidentFactualFinalState =
         incident?.status === "RESOLVED" &&
@@ -547,7 +636,7 @@ export async function recordCourseMonitoringFailure(input: {
           },
           data: {
             state: retainedFinalState,
-            lastFailureAt: now,
+            lastFailureAt: failureObservedAt,
             consecutiveFailures: { increment: 1 },
             failureFingerprint,
             nextAutomaticAttemptAt: null,
@@ -570,7 +659,7 @@ export async function recordCourseMonitoringFailure(input: {
             safeMessage ??
             "The existing final monitoring decision was reconfirmed.",
           runtimeVersion: input.runtimeVersion,
-          occurredAt: now,
+          occurredAt: failureObservedAt,
           audit: {
             ...currentFailureIdentityAudit,
             retainedFinalDecision: true,
@@ -578,10 +667,12 @@ export async function recordCourseMonitoringFailure(input: {
             customerDataIncluded: false,
           },
         });
+        await input.onSourceAccepted?.(transaction);
         return {
           status,
           confirmed: true,
           retainedHumanFinal: true,
+          sourceEvidenceAccepted: true as const,
           independentPathCount: 1,
           samePathCount: 1,
           nextAttemptAt: null,
@@ -639,7 +730,7 @@ export async function recordCourseMonitoringFailure(input: {
             revision: current.revision,
           },
           data: {
-            lastFailureAt: now,
+            lastFailureAt: failureObservedAt,
             consecutiveFailures:
               current.failureFingerprint === failureFingerprint
                 ? { increment: 1 }
@@ -658,7 +749,7 @@ export async function recordCourseMonitoringFailure(input: {
             },
             data: {
               nextAttemptAt,
-              lastSeenAt: now,
+              lastSeenAt: failureObservedAt,
               revision: { increment: 1 },
             },
           });
@@ -677,7 +768,7 @@ export async function recordCourseMonitoringFailure(input: {
             safeMessage ??
             "A safe recheck reconfirmed the limitation while human review remains open.",
           runtimeVersion: input.runtimeVersion,
-          occurredAt: now,
+          occurredAt: failureObservedAt,
           audit: {
             ...currentFailureIdentityAudit,
             retainedHumanReview: true,
@@ -686,10 +777,12 @@ export async function recordCourseMonitoringFailure(input: {
             customerDataIncluded: false,
           },
         });
+        await input.onSourceAccepted?.(transaction);
         return {
           status,
           confirmed: true,
           retainedHumanFinal: false,
+          sourceEvidenceAccepted: true as const,
           independentPathCount: 1,
           samePathCount: Math.max(status.consecutiveFailures, 1),
           nextAttemptAt,
@@ -701,8 +794,10 @@ export async function recordCourseMonitoringFailure(input: {
           courseId: input.courseId,
           eventType: "CHECK_FAILED",
           occurredAt: {
-            gte: new Date(now.getTime() - FAILURE_CONFIRMATION_WINDOW_MS),
-            lte: now,
+            gte: new Date(
+              failureObservedAt.getTime() - FAILURE_CONFIRMATION_WINDOW_MS,
+            ),
+            lte: failureObservedAt,
           },
         },
         orderBy: { occurredAt: "desc" },
@@ -719,8 +814,8 @@ export async function recordCourseMonitoringFailure(input: {
         !input.materialEvidenceChanged &&
         current.failureFingerprint === failureFingerprint;
       const firstDegradedAt = continuingFailureEpisode
-        ? (current.firstDegradedAt ?? now)
-        : now;
+        ? (current.firstDegradedAt ?? failureObservedAt)
+        : failureObservedAt;
       const nextAttemptAt = decision.confirmed
         ? now
         : getFirstFailureRetryAt(now, input.episodeStartedAt);
@@ -732,7 +827,7 @@ export async function recordCourseMonitoringFailure(input: {
         },
         data: {
           state: decision.state,
-          lastFailureAt: now,
+          lastFailureAt: failureObservedAt,
           consecutiveFailures:
             current.failureFingerprint === failureFingerprint
               ? { increment: 1 }
@@ -758,7 +853,7 @@ export async function recordCourseMonitoringFailure(input: {
         readPath,
         message: safeMessage,
         runtimeVersion: input.runtimeVersion,
-        occurredAt: now,
+        occurredAt: failureObservedAt,
         audit: {
           ...currentFailureIdentityAudit,
           confirmationWindowMinutes: 15,
@@ -780,14 +875,17 @@ export async function recordCourseMonitoringFailure(input: {
           message: decision.confirmed
             ? "Repeated independent evidence confirmed an automated investigation."
             : "A failure was recorded and a fresh public retry was scheduled.",
-          occurredAt: now,
+          occurredAt: failureObservedAt,
         });
       }
+
+      await input.onSourceAccepted?.(transaction);
 
       return {
         status,
         confirmed: decision.confirmed,
         retainedHumanFinal: false,
+        sourceEvidenceAccepted: true as const,
         independentPathCount: decision.independentPathCount,
         samePathCount: decision.samePathCount,
         nextAttemptAt,
@@ -802,16 +900,50 @@ export async function recordCourseMonitoringSuccess(input: {
   source?: CourseMonitoringEventSource;
   message?: string;
   now?: Date;
+  providerObservedAt: Date;
   runtimeVersion?: string | null;
+  localReaderSource?: {
+    jobId: string;
+    searchId: string;
+    scheduleVersion: number;
+    resultStatus: "AVAILABLE" | "NO_AVAILABILITY";
+  };
+  onBeforeSourceWrite?: (
+    transaction: Prisma.TransactionClient,
+  ) => Promise<void>;
+  onSourceAccepted?: (transaction: Prisma.TransactionClient) => Promise<void>;
 }) {
   const now = input.now ?? new Date();
+  const providerObservedAt = input.providerObservedAt;
+  if (
+    !(providerObservedAt instanceof Date) ||
+    !Number.isFinite(providerObservedAt.getTime()) ||
+    providerObservedAt > now
+  ) {
+    throw new Error(
+      "Monitoring success requires a valid provider observation time",
+    );
+  }
   const source = input.source ?? "SEARCH_WORKFLOW";
+  if (
+    input.localReaderSource &&
+    (source !== "SEARCH_WORKFLOW" ||
+      !input.localReaderSource.jobId.trim() ||
+      !input.localReaderSource.searchId.trim() ||
+      !Number.isSafeInteger(input.localReaderSource.scheduleVersion) ||
+      input.localReaderSource.scheduleVersion < 0)
+  ) {
+    throw new Error(
+      "Monitoring success local-reader evidence requires an exact search source",
+    );
+  }
   if (!hasMonitoringModels(prisma)) {
     return null;
   }
   return runSerializedCourseMonitoringWrite(
     input.courseId,
     async (transaction) => {
+      await input.onBeforeSourceWrite?.(transaction);
       const current = await ensureMonitoringStatus(
         transaction,
         input.courseId,
@@ -824,6 +956,7 @@ export async function recordCourseMonitoringSuccess(input: {
           id: true,
           cycle: true,
           confirmedAt: true,
+          lastSeenAt: true,
           status: true,
           resolution: true,
           decisionAt: true,
@@ -831,6 +964,39 @@ export async function recordCourseMonitoringSuccess(input: {
           revision: true,
         },
       });
+      const recoveryFenceAt = [
+        current.lastSuccessfulAt,
+        current.lastFailureAt,
+        incident?.confirmedAt,
+        incident?.lastSeenAt,
+      ].reduce<Date | null>((latest, value) => {
+        if (!(value instanceof Date) || !Number.isFinite(value.getTime())) {
+          return latest;
+        }
+        return !latest || value > latest ? value : latest;
+      }, null);
+      if (recoveryFenceAt && providerObservedAt <= recoveryFenceAt) {
+        await appendMonitoringEvent(transaction, {
+          courseId: input.courseId,
+          incidentId: incident?.id ?? null,
+          eventType: "CHECK_SUCCEEDED",
+          source,
+          fromState: current.state,
+          toState: current.state,
+          outcome: input.outcome,
+          message:
+            "A successful observation was retained but was too old to supersede the current failure.",
+          runtimeVersion: input.runtimeVersion,
+          occurredAt: providerObservedAt,
+          audit: {
+            ignoredForRecovery: true,
+            providerObservedAt: providerObservedAt.toISOString(),
+            recoveryFenceAt: recoveryFenceAt.toISOString(),
+            customerDataIncluded: false,
+          },
+        });
+        return { ...current, sourceEvidenceAccepted: false as const };
+      }
       const retainedFactualFinalState =
         current.state === "FINAL_MANUAL"
           ? ("FINAL_MANUAL" as const)
@@ -870,9 +1036,10 @@ export async function recordCourseMonitoringSuccess(input: {
           message:
             "A successful observation was recorded without overriding the authoritative factual final.",
           runtimeVersion: input.runtimeVersion,
-          occurredAt: now,
+          occurredAt: providerObservedAt,
         });
-        return status;
+        await input.onSourceAccepted?.(transaction);
+        return { ...status, sourceEvidenceAccepted: true as const };
       }
       let status = await transaction.courseMonitoringStatus.update({
         where: {
@@ -881,7 +1048,7 @@ export async function recordCourseMonitoringSuccess(input: {
         },
         data: {
           state: "HEALTHY",
-          lastSuccessfulAt: now,
+          lastSuccessfulAt: providerObservedAt,
           consecutiveFailures: 0,
           failureFingerprint: null,
           firstDegradedAt: null,
@@ -910,7 +1077,7 @@ export async function recordCourseMonitoringSuccess(input: {
           nextAction: null,
           nextAttemptAt: null,
           nextReminderAt: null,
-          lastSeenAt: now,
+          lastSeenAt: providerObservedAt,
           revision: { increment: 1 },
         };
         const resolved = await transaction.courseSupportIncident.updateMany({
@@ -970,9 +1137,10 @@ export async function recordCourseMonitoringSuccess(input: {
               message:
                 "A successful observation lost a concurrent race to an authoritative factual final.",
               runtimeVersion: input.runtimeVersion,
-              occurredAt: now,
+              occurredAt: providerObservedAt,
             });
-            return status;
+            await input.onSourceAccepted?.(transaction);
+            return { ...status, sourceEvidenceAccepted: true as const };
           }
           if (
             latestIncident &&
@@ -1014,7 +1182,21 @@ export async function recordCourseMonitoringSuccess(input: {
         outcome: input.outcome,
         message: sanitizeMonitoringMessage(input.message),
         runtimeVersion: input.runtimeVersion,
-        occurredAt: now,
+        occurredAt: providerObservedAt,
+        ...(input.localReaderSource
+          ? {
+              audit: {
+                localReaderCanonicalSource: {
+                  jobId: input.localReaderSource.jobId,
+                  searchId: input.localReaderSource.searchId,
+                  scheduleVersion: input.localReaderSource.scheduleVersion,
+                  resultStatus: input.localReaderSource.resultStatus,
+                  providerObservedAt: providerObservedAt.toISOString(),
+                },
+                customerDataIncluded: false,
+              },
+            }
+          : {}),
       });
       if (recovered) {
         await appendMonitoringEvent(transaction, {
@@ -1032,7 +1214,7 @@ export async function recordCourseMonitoringSuccess(input: {
             source,
             input.runtimeVersion,
           ),
-          occurredAt: now,
+          occurredAt: providerObservedAt,
           audit: {
             ...(incident ? { cycle: incident.cycle } : {}),
             confirmedAt: incident?.confirmedAt?.toISOString() ?? null,
@@ -1048,8 +1230,233 @@ export async function recordCourseMonitoringSuccess(input: {
           );
         }
       }
-      return status;
+      await input.onSourceAccepted?.(transaction);
+      return { ...status, sourceEvidenceAccepted: true as const };
     },
+  );
+}
+
+export type CourseMonitoringFinalClassificationEvidence =
+  | {
+      kind: "PLAYBOOK_FACTUAL_FINAL";
+      cycle: number;
+      observedAt: Date;
+    }
+  | {
+      kind: "COURSE_INTELLIGENCE";
+      observedAt: Date;
+    };
+
+export type CourseMonitoringFinalClassificationCourseIntelligenceUpdate = {
+  isPublic?: boolean;
+  bookingMethod?: BookingMethod;
+  automationEligibility?: AutomationEligibility;
+  automationReason?: AutomationReason;
+  policyNotes?: string | null;
+  intelligenceVerifiedAt: Date;
+  intelligenceReviewAt?: Date | null;
+  intelligenceConfidence?: number | null;
+};
+
+const FINAL_CLASSIFICATION_PROVIDER_OBSERVATION_KEY_PREFIX =
+  "__COURSE_PROVIDER_OBSERVATION__:";
+const FINAL_CLASSIFICATION_PROVIDER_OBSERVATION_SLOT = 0;
+
+// Provider-execution-marker imports this module's course-lock primitive. Keep
+// the small persisted key projection here so final classification can inspect
+// that source without introducing a module cycle.
+
+type FinalClassificationProviderSourceSnapshot = {
+  providerObservation: {
+    providerFamilyKey: string;
+    observationStartedAt: Date;
+  } | null;
+  localReaderObservations: Array<{
+    id: string;
+    providerObservedAt: Date;
+    completedAt: Date;
+    resultExpiresAt: Date;
+  }>;
+};
+
+function getFinalClassificationProviderObservationKey(courseId: string) {
+  return `${FINAL_CLASSIFICATION_PROVIDER_OBSERVATION_KEY_PREFIX}${createHash(
+    "sha256",
+  )
+    .update(courseId)
+    .digest("hex")}`;
+}
+
+async function getFinalClassificationProviderSourceSnapshot(
+  transaction: Prisma.TransactionClient,
+  courseId: string,
+): Promise<FinalClassificationProviderSourceSnapshot> {
+  const providerFamilyKey =
+    getFinalClassificationProviderObservationKey(courseId);
+  const [providerObservation, localReaderJobs] = await Promise.all([
+    transaction.providerRequestLease.findUnique({
+      where: {
+        providerFamilyKey_slot: {
+          providerFamilyKey,
+          slot: FINAL_CLASSIFICATION_PROVIDER_OBSERVATION_SLOT,
+        },
+      },
+      select: { updatedAt: true },
+    }),
+    transaction.localReaderJob.findMany({
+      where: {
+        courseId,
+        status: "COMPLETED",
+        claimedAt: { not: null },
+        completedAt: { not: null },
+        resultExpiresAt: { not: null },
+      },
+      orderBy: [{ claimedAt: "desc" }, { completedAt: "desc" }, { id: "desc" }],
+      select: {
+        id: true,
+        result: true,
+        claimedAt: true,
+        completedAt: true,
+        resultExpiresAt: true,
+      },
+    }),
+  ]);
+  if (
+    providerObservation &&
+    (!(providerObservation.updatedAt instanceof Date) ||
+      !Number.isFinite(providerObservation.updatedAt.getTime()))
+  ) {
+    throw new Error("The provider observation source time is invalid.");
+  }
+  const localReaderObservations = localReaderJobs.flatMap((job) => {
+    const parsedResult = localReaderResultSchema.safeParse(job.result);
+    if (
+      !parsedResult.success ||
+      parsedResult.data.evidenceAnchor !== "SERVER_CLAIM" ||
+      !(job.claimedAt instanceof Date) ||
+      !Number.isFinite(job.claimedAt.getTime()) ||
+      !(job.completedAt instanceof Date) ||
+      !Number.isFinite(job.completedAt.getTime()) ||
+      !(job.resultExpiresAt instanceof Date) ||
+      !Number.isFinite(job.resultExpiresAt.getTime()) ||
+      job.claimedAt > job.completedAt ||
+      job.resultExpiresAt <= job.completedAt ||
+      Date.parse(parsedResult.data.observedAt) !== job.claimedAt.getTime()
+    ) {
+      return [];
+    }
+    return [
+      {
+        id: job.id,
+        providerObservedAt: job.claimedAt,
+        completedAt: job.completedAt,
+        resultExpiresAt: job.resultExpiresAt,
+      },
+    ];
+  });
+  return {
+    providerObservation: providerObservation
+      ? {
+          providerFamilyKey,
+          observationStartedAt: providerObservation.updatedAt,
+        }
+      : null,
+    localReaderObservations,
+  };
+}
+
+function hasNewerOrEqualFinalClassificationProviderSource(
+  snapshot: FinalClassificationProviderSourceSnapshot,
+  evidenceObservedAt: Date,
+) {
+  return Boolean(
+    (snapshot.providerObservation &&
+      snapshot.providerObservation.observationStartedAt >= evidenceObservedAt) ||
+      snapshot.localReaderObservations.some(
+        (observation) =>
+          observation.providerObservedAt >= evidenceObservedAt,
+      ),
+  );
+}
+
+async function supersedeOlderFinalClassificationProviderSources(
+  transaction: Prisma.TransactionClient,
+  snapshot: FinalClassificationProviderSourceSnapshot,
+  evidenceObservedAt: Date,
+) {
+  if (
+    snapshot.providerObservation &&
+    snapshot.providerObservation.observationStartedAt < evidenceObservedAt
+  ) {
+    const deleted = await transaction.providerRequestLease.deleteMany({
+      where: {
+        providerFamilyKey: snapshot.providerObservation.providerFamilyKey,
+        slot: FINAL_CLASSIFICATION_PROVIDER_OBSERVATION_SLOT,
+        updatedAt: snapshot.providerObservation.observationStartedAt,
+      },
+    });
+    if (deleted.count !== 1) {
+      throw new Error(
+        "The provider observation changed while applying a factual final classification.",
+      );
+    }
+  }
+  for (const observation of snapshot.localReaderObservations) {
+    if (observation.providerObservedAt >= evidenceObservedAt) continue;
+    const superseded = await transaction.localReaderJob.updateMany({
+      where: {
+        id: observation.id,
+        status: "COMPLETED",
+        claimedAt: observation.providerObservedAt,
+        completedAt: observation.completedAt,
+        resultExpiresAt: observation.resultExpiresAt,
+      },
+      data: { resultExpiresAt: observation.completedAt },
+    });
+    if (superseded.count !== 1) {
+      throw new Error(
+        "The local-reader observation changed while applying a factual final classification.",
+      );
+    }
+  }
+}
+
+function finalCourseIntelligenceUpdateMatchesCurrent(
+  course: {
+    isPublic: boolean | null;
+    bookingMethod: BookingMethod;
+    automationEligibility: AutomationEligibility;
+    automationReason: AutomationReason;
+    policyNotes: string | null;
+    intelligenceVerifiedAt: Date | null;
+    intelligenceReviewAt: Date | null;
+    intelligenceConfidence: number | null;
+  },
+  update: CourseMonitoringFinalClassificationCourseIntelligenceUpdate,
+) {
+  const datesMatch = (left: Date | null, right: Date | null) =>
+    left === right ||
+    (left instanceof Date &&
+      right instanceof Date &&
+      left.getTime() === right.getTime());
+  return (
+    (update.isPublic === undefined || update.isPublic === course.isPublic) &&
+    (update.bookingMethod === undefined ||
+      update.bookingMethod === course.bookingMethod) &&
+    (update.automationEligibility === undefined ||
+      update.automationEligibility === course.automationEligibility) &&
+    (update.automationReason === undefined ||
+      update.automationReason === course.automationReason) &&
+    (update.policyNotes === undefined ||
+      update.policyNotes === course.policyNotes) &&
+    datesMatch(
+      update.intelligenceVerifiedAt,
+      course.intelligenceVerifiedAt,
+    ) &&
+    (update.intelligenceReviewAt === undefined ||
+      datesMatch(update.intelligenceReviewAt, course.intelligenceReviewAt)) &&
+    (update.intelligenceConfidence === undefined ||
+      update.intelligenceConfidence === course.intelligenceConfidence)
   );
 }
 
@@ -1057,14 +1464,40 @@ export async function recordCourseMonitoringFinalClassification(input: {
   courseId: string;
   state: "FINAL_MANUAL" | "FINAL_IDENTITY";
   outcome: "MANUAL_DIRECT" | "IDENTITY_FINAL";
+  evidence: CourseMonitoringFinalClassificationEvidence;
   source?: CourseMonitoringEventSource;
   message: string;
   evidenceUrl?: string | null;
   now?: Date;
   runtimeVersion?: string | null;
+  courseIntelligenceUpdate?: CourseMonitoringFinalClassificationCourseIntelligenceUpdate;
+  onSourceAccepted?: (
+    transaction: Prisma.TransactionClient,
+    evidenceObservedAt: Date,
+  ) => Promise<void>;
 }) {
   const now = input.now ?? new Date();
   const source = input.source ?? "SEARCH_WORKFLOW";
+  const evidenceObservedAt = input.evidence.observedAt;
+  if (
+    !(evidenceObservedAt instanceof Date) ||
+    !Number.isFinite(evidenceObservedAt.getTime()) ||
+    evidenceObservedAt.getTime() > now.getTime() + 60_000
+  ) {
+    throw new Error(
+      "A factual final classification requires a valid non-future evidence source time.",
+    );
+  }
+  if (
+    input.courseIntelligenceUpdate &&
+    (input.evidence.kind !== "COURSE_INTELLIGENCE" ||
+      input.courseIntelligenceUpdate.intelligenceVerifiedAt.getTime() !==
+        evidenceObservedAt.getTime())
+  ) {
+    throw new Error(
+      "A factual final course-intelligence update must match its evidence source time.",
+    );
+  }
   if (!hasMonitoringModels(prisma)) {
     return null;
   }
@@ -1076,19 +1509,162 @@ export async function recordCourseMonitoringFinalClassification(input: {
         input.courseId,
         now,
       );
-      const incident = await transaction.courseSupportIncident.findUnique({
-        where: { courseId: input.courseId },
-        select: {
-          id: true,
-          cycle: true,
-          confirmedAt: true,
-          status: true,
-          resolution: true,
-          decisionAt: true,
-          activeBatchId: true,
-          revision: true,
+      const [course, incident, providerSources] = await Promise.all([
+        transaction.course.findUnique({
+          where: { id: input.courseId },
+          select: {
+            isPublic: true,
+            bookingMethod: true,
+            automationEligibility: true,
+            automationReason: true,
+            policyNotes: true,
+            intelligenceVerifiedAt: true,
+            intelligenceReviewAt: true,
+            intelligenceConfidence: true,
+          },
+        }),
+        transaction.courseSupportIncident.findUnique({
+          where: { courseId: input.courseId },
+          select: {
+            id: true,
+            cycle: true,
+            confirmedAt: true,
+            lastSeenAt: true,
+            status: true,
+            resolution: true,
+            decisionAt: true,
+            activeBatchId: true,
+            revision: true,
+            attemptLedger: true,
+          },
+        }),
+        getFinalClassificationProviderSourceSnapshot(
+          transaction,
+          input.courseId,
+        ),
+      ]);
+      const requestedDisposition =
+        input.outcome === "IDENTITY_FINAL"
+          ? ("IDENTITY_FINAL" as const)
+          : ("MANUAL_DIRECT" as const);
+      const effectiveCourse =
+        course && input.courseIntelligenceUpdate
+          ? { ...course, ...input.courseIntelligenceUpdate }
+          : course;
+      const sourceMatchesCurrentFacts =
+        input.evidence.kind === "PLAYBOOK_FACTUAL_FINAL"
+          ? (() => {
+              if (!incident || incident.cycle !== input.evidence.cycle) {
+                return false;
+              }
+              const factualEvidence = getAutomationPlaybookFactualFinalEvidence(
+                incident.attemptLedger,
+                incident.cycle,
+              );
+              return Boolean(
+                factualEvidence &&
+                factualEvidence.disposition === requestedDisposition &&
+                factualEvidence.observedAt.getTime() ===
+                  evidenceObservedAt.getTime(),
+              );
+            })()
+          : Boolean(
+              effectiveCourse?.intelligenceVerifiedAt &&
+              effectiveCourse.intelligenceVerifiedAt.getTime() ===
+                evidenceObservedAt.getTime() &&
+              evaluateMonitoringGate({ ...effectiveCourse, now })
+                .disposition ===
+                (input.state === "FINAL_IDENTITY"
+                  ? "IDENTITY_FINAL"
+                  : "MANUAL_FINAL"),
+            );
+      const newestMonitoringEvidenceAt = [
+        current.lastSuccessfulAt,
+        current.lastFailureAt,
+      ].reduce<Date | null>((latest, value) => {
+        if (!(value instanceof Date) || !Number.isFinite(value.getTime())) {
+          return latest;
+        }
+        return !latest || value.getTime() > latest.getTime() ? value : latest;
+      }, null);
+      const incidentHasNewerEvidence = [
+        incident?.confirmedAt,
+        incident?.lastSeenAt,
+      ].some(
+        (value) =>
+          value instanceof Date &&
+          Number.isFinite(value.getTime()) &&
+          value.getTime() > evidenceObservedAt.getTime(),
+      );
+      const courseHasNewerIntelligence = Boolean(
+        input.evidence.kind === "COURSE_INTELLIGENCE" &&
+          course?.intelligenceVerifiedAt instanceof Date &&
+          Number.isFinite(course.intelligenceVerifiedAt.getTime()) &&
+          course.intelligenceVerifiedAt.getTime() >
+             evidenceObservedAt.getTime(),
+       );
+      const courseHasConflictingEqualIntelligence = Boolean(
+        input.evidence.kind === "COURSE_INTELLIGENCE" &&
+          input.courseIntelligenceUpdate &&
+          course?.intelligenceVerifiedAt instanceof Date &&
+          course.intelligenceVerifiedAt.getTime() ===
+            evidenceObservedAt.getTime() &&
+          !finalCourseIntelligenceUpdateMatchesCurrent(
+            course,
+            input.courseIntelligenceUpdate,
+          ),
+      );
+      if (
+        !sourceMatchesCurrentFacts ||
+        (newestMonitoringEvidenceAt &&
+          newestMonitoringEvidenceAt.getTime() >=
+            evidenceObservedAt.getTime()) ||
+        incidentHasNewerEvidence ||
+        courseHasNewerIntelligence ||
+        courseHasConflictingEqualIntelligence ||
+        hasNewerOrEqualFinalClassificationProviderSource(
+          providerSources,
+          evidenceObservedAt,
+        )
+      ) {
+        return { ...current, sourceEvidenceAccepted: false as const };
+      }
+      await supersedeOlderFinalClassificationProviderSources(
+        transaction,
+        providerSources,
+        evidenceObservedAt,
+      );
+      if (input.courseIntelligenceUpdate) {
+        await transaction.course.update({
+          where: { id: input.courseId },
+          data: input.courseIntelligenceUpdate,
+        });
+      }
+      await transaction.teeTimeMatch.updateMany({
+        where: {
+          courseId: input.courseId,
+          availabilityStatus: "AVAILABLE",
+          alertStatus: "PENDING",
+        },
+        data: {
+          alertStatus: "SUPPRESSED",
+          availabilityStatus: "GONE",
+          sentAt: null,
+          unavailableAt: now,
         },
       });
+      await transaction.teeTimeMatch.updateMany({
+        where: {
+          courseId: input.courseId,
+          availabilityStatus: "AVAILABLE",
+          alertStatus: { not: "PENDING" },
+        },
+        data: {
+          availabilityStatus: "GONE",
+          unavailableAt: now,
+        },
+      });
+      await input.onSourceAccepted?.(transaction, evidenceObservedAt);
       const stateChanged = current.state !== input.state;
       const snapshotNeedsRepair =
         current.consecutiveFailures !== 0 ||
@@ -1134,7 +1710,7 @@ export async function recordCourseMonitoringFinalClassification(input: {
         nextAction: null,
         nextAttemptAt: null,
         nextReminderAt: null,
-        lastSeenAt: now,
+        lastSeenAt: evidenceObservedAt,
         revision: { increment: 1 },
       };
       if (
@@ -1210,7 +1786,7 @@ export async function recordCourseMonitoringFinalClassification(input: {
             source,
             input.runtimeVersion,
           ),
-          occurredAt: now,
+          occurredAt: evidenceObservedAt,
           ...(incident
             ? {
                 audit: {
@@ -1234,7 +1810,361 @@ export async function recordCourseMonitoringFinalClassification(input: {
           );
         }
       }
-      return status;
+      return { ...status, sourceEvidenceAccepted: true as const };
+    },
+  );
+}
+
+export async function invalidateReviewDerivedIdentityFinal(input: {
+  courseId: string;
+  expectedReview: {
+    observedAt: Date;
+    policyNotes: string;
+  };
+  correction:
+    | {
+        kind: "VERIFIED_PUBLIC";
+        observedAt: Date;
+        policyNotes: string;
+      }
+    | { kind: "DEACTIVATED" };
+  now?: Date;
+  onReviewAccepted: (transaction: Prisma.TransactionClient) => Promise<void>;
+}) {
+  const now = input.now ?? new Date();
+  const expectedObservedAt = input.expectedReview.observedAt;
+  if (
+    !(expectedObservedAt instanceof Date) ||
+    !Number.isFinite(expectedObservedAt.getTime()) ||
+    expectedObservedAt.getTime() > now.getTime() + 60_000
+  ) {
+    throw new Error("Review-final invalidation requires a valid prior evidence time.");
+  }
+  if (
+    input.correction.kind === "VERIFIED_PUBLIC" &&
+    (!(input.correction.observedAt instanceof Date) ||
+      !Number.isFinite(input.correction.observedAt.getTime()) ||
+      input.correction.observedAt.getTime() > now.getTime() + 60_000 ||
+      input.correction.observedAt.getTime() <= expectedObservedAt.getTime())
+  ) {
+    throw new Error(
+      "A verified-public correction must be sourced strictly after the review-derived final.",
+    );
+  }
+  if (!hasMonitoringModels(prisma)) {
+    throw new Error(
+      "Review-derived final invalidation requires course monitoring persistence.",
+    );
+  }
+
+  return runSerializedCourseMonitoringWrite(
+    input.courseId,
+    async (transaction) => {
+      const [course, status, incident] = await Promise.all([
+        transaction.course.findUnique({
+          where: { id: input.courseId },
+          select: {
+            isPublic: true,
+            automationEligibility: true,
+            automationReason: true,
+            policyNotes: true,
+            intelligenceVerifiedAt: true,
+            intelligenceReviewAt: true,
+            intelligenceConfidence: true,
+          },
+        }),
+        transaction.courseMonitoringStatus.findUnique({
+          where: { courseId: input.courseId },
+        }),
+        transaction.courseSupportIncident.findUnique({
+          where: { courseId: input.courseId },
+          select: {
+            id: true,
+            cycle: true,
+            status: true,
+            resolution: true,
+            activeBatchId: true,
+            confirmedAt: true,
+            lastSeenAt: true,
+            activeRealSearchCount: true,
+            revision: true,
+          },
+        }),
+      ]);
+      if (!course) {
+        return {
+          reviewAccepted: false as const,
+          finalInvalidated: false as const,
+          reason: "course_missing" as const,
+          searchesQueued: 0,
+        };
+      }
+
+      const exactReviewDerivedCourseFinal =
+        status?.state === "FINAL_IDENTITY" &&
+        course.isPublic === false &&
+        course.automationEligibility === "BLOCKED" &&
+        course.automationReason === "OTHER" &&
+        course.policyNotes === input.expectedReview.policyNotes &&
+        course.intelligenceVerifiedAt instanceof Date &&
+        course.intelligenceVerifiedAt.getTime() ===
+          expectedObservedAt.getTime() &&
+        course.intelligenceConfidence === 1;
+      const incidentMatchesReviewFinal =
+        !incident ||
+        (incident.status === "RESOLVED" &&
+          incident.resolution === "IDENTITY_CLASSIFIED" &&
+          incident.activeBatchId === null &&
+          incident.lastSeenAt instanceof Date &&
+          incident.lastSeenAt.getTime() === expectedObservedAt.getTime() &&
+          (!(incident.confirmedAt instanceof Date) ||
+            incident.confirmedAt.getTime() <= expectedObservedAt.getTime()));
+
+      await input.onReviewAccepted(transaction);
+      if (!exactReviewDerivedCourseFinal || !incidentMatchesReviewFinal) {
+        return {
+          reviewAccepted: true as const,
+          finalInvalidated: false as const,
+          reason: "unrelated_or_stronger_final" as const,
+          searchesQueued: 0,
+        };
+      }
+
+      const correctionEvidenceAt =
+        input.correction.kind === "VERIFIED_PUBLIC"
+          ? input.correction.observedAt
+          : now;
+
+      const courseUpdated = await transaction.course.updateMany({
+        where: {
+          id: input.courseId,
+          isPublic: false,
+          automationEligibility: "BLOCKED",
+          automationReason: "OTHER",
+          policyNotes: input.expectedReview.policyNotes,
+          intelligenceVerifiedAt: expectedObservedAt,
+          intelligenceConfidence: 1,
+        },
+        data:
+          input.correction.kind === "VERIFIED_PUBLIC"
+            ? {
+                isPublic: true,
+                automationEligibility: "NEEDS_REVIEW",
+                automationReason: "NONE",
+                policyNotes: input.correction.policyNotes,
+                intelligenceVerifiedAt: input.correction.observedAt,
+                intelligenceReviewAt: null,
+                intelligenceConfidence: 1,
+              }
+            : {
+                isPublic: null,
+                automationEligibility: "NEEDS_REVIEW",
+                automationReason: "NONE",
+                policyNotes: null,
+                intelligenceVerifiedAt: null,
+                intelligenceReviewAt: null,
+                intelligenceConfidence: null,
+              },
+      });
+      if (courseUpdated.count !== 1) {
+        throw new Error(
+          "The course intelligence changed while invalidating its review-derived final.",
+        );
+      }
+
+      const statusUpdated =
+        await transaction.courseMonitoringStatus.updateMany({
+          where: {
+            courseId: input.courseId,
+            state: "FINAL_IDENTITY",
+            revision: status.revision,
+          },
+          data: {
+            state: "AUTO_INVESTIGATING",
+            consecutiveFailures: 0,
+            failureFingerprint: null,
+            firstDegradedAt: null,
+            nextAutomaticAttemptAt: now,
+            revalidationRequestedAt: now,
+            stateChangedAt: now,
+            revision: { increment: 1 },
+          },
+        });
+      if (statusUpdated.count !== 1) {
+        throw new Error(
+          "The monitoring final changed while review revalidation was queued.",
+        );
+      }
+
+      if (incident) {
+        const incidentUpdated =
+          await transaction.courseSupportIncident.updateMany({
+            where: {
+              id: incident.id,
+              cycle: incident.cycle,
+              revision: incident.revision,
+              status: "RESOLVED",
+              resolution: "IDENTITY_CLASSIFIED",
+              activeBatchId: null,
+              lastSeenAt: expectedObservedAt,
+            },
+            data: {
+              cycle: { increment: 1 },
+              status: "AUTO_INVESTIGATING",
+              occurrenceCount: 1,
+              lastAttemptAt: null,
+              attemptCount: 0,
+              firstSeenAt: correctionEvidenceAt,
+              confirmedAt: correctionEvidenceAt,
+              lastSeenAt: correctionEvidenceAt,
+              escalationDeadlineAt: getCourseMonitoringEscalationDeadline(
+                now,
+                incident.activeRealSearchCount,
+              ),
+              humanReviewReason: null,
+              nextReminderAt: null,
+              nextAttemptAt: now,
+              nextAction:
+                "Run a fresh automatic check because the exact identity review was corrected.",
+              ownerNotifiedAt: null,
+              escalatedAt: null,
+              escalationNotifiedAt: null,
+              resolvedAt: null,
+              resolution: null,
+              resolutionMessage: null,
+              resolutionNotifiedAt: null,
+              decisionActorId: null,
+              decisionAt: null,
+              decisionNote: null,
+              decisionEvidenceUrl: null,
+              decisionIdempotencyKey: null,
+              revision: { increment: 1 },
+            },
+          });
+        if (incidentUpdated.count !== 1) {
+          throw new Error(
+            "The identity incident changed while review revalidation was queued.",
+          );
+        }
+      }
+
+      const queued = await queueActiveRealSearchesForCourse(
+        transaction,
+        input.courseId,
+        now,
+      );
+      await appendMonitoringEvent(transaction, {
+        courseId: input.courseId,
+        incidentId: incident?.id,
+        eventType: "REVALIDATION_REQUESTED",
+        source: "MAINTENANCE",
+        fromState: "FINAL_IDENTITY",
+        toState: "AUTO_INVESTIGATING",
+        message:
+          input.correction.kind === "VERIFIED_PUBLIC"
+            ? "A newer verified-public place review invalidated the exact review-derived identity final and queued a fresh check."
+            : "Deactivating the exact place review invalidated its identity final and queued a fresh check.",
+        occurredAt: now,
+        audit: {
+          priorEvidenceObservedAt: expectedObservedAt.toISOString(),
+          correctionKind: input.correction.kind,
+          providerEvidenceAdvanced: false,
+          customerDataIncluded: false,
+        },
+      });
+      return {
+        reviewAccepted: true as const,
+        finalInvalidated: true as const,
+        reason: "automatic_revalidation_queued" as const,
+        searchesQueued: queued.count,
+      };
+    },
+  );
+}
+
+export async function runWithAcceptedCourseIntelligenceEvidence(input: {
+  courseId: string;
+  expectedDisposition: "TECHNICAL_FINAL" | "IDENTITY_RECHECK";
+  evidenceObservedAt: Date;
+  now?: Date;
+  onSourceAccepted: (
+    transaction: Prisma.TransactionClient,
+    evidenceObservedAt: Date,
+  ) => Promise<void>;
+}) {
+  const now = input.now ?? new Date();
+  if (
+    !(input.evidenceObservedAt instanceof Date) ||
+    !Number.isFinite(input.evidenceObservedAt.getTime()) ||
+    input.evidenceObservedAt.getTime() > now.getTime() + 60_000
+  ) {
+    throw new Error(
+      "A course-intelligence consequence requires a valid non-future evidence source time.",
+    );
+  }
+  if (!hasMonitoringModels(prisma)) {
+    return null;
+  }
+  return runSerializedCourseMonitoringWrite(
+    input.courseId,
+    async (transaction) => {
+      const current = await ensureMonitoringStatus(
+        transaction,
+        input.courseId,
+        now,
+      );
+      const [course, incident] = await Promise.all([
+        transaction.course.findUnique({
+          where: { id: input.courseId },
+          select: {
+            isPublic: true,
+            bookingMethod: true,
+            automationEligibility: true,
+            automationReason: true,
+            intelligenceVerifiedAt: true,
+            intelligenceReviewAt: true,
+            intelligenceConfidence: true,
+          },
+        }),
+        transaction.courseSupportIncident.findUnique({
+          where: { courseId: input.courseId },
+          select: { confirmedAt: true, lastSeenAt: true },
+        }),
+      ]);
+      const sourceMatchesCurrentFacts = Boolean(
+        course?.intelligenceVerifiedAt &&
+        course.intelligenceVerifiedAt.getTime() ===
+          input.evidenceObservedAt.getTime() &&
+        evaluateMonitoringGate({ ...course, now }).disposition ===
+          input.expectedDisposition,
+      );
+      const monitoringHasNewerOrEqualEvidence = [
+        current.lastSuccessfulAt,
+        current.lastFailureAt,
+      ].some(
+        (value) =>
+          value instanceof Date &&
+          Number.isFinite(value.getTime()) &&
+          value.getTime() >= input.evidenceObservedAt.getTime(),
+      );
+      const incidentHasNewerEvidence = [
+        incident?.confirmedAt,
+        incident?.lastSeenAt,
+      ].some(
+        (value) =>
+          value instanceof Date &&
+          Number.isFinite(value.getTime()) &&
+          value.getTime() > input.evidenceObservedAt.getTime(),
+      );
+      if (
+        !sourceMatchesCurrentFacts ||
+        monitoringHasNewerOrEqualEvidence ||
+        incidentHasNewerEvidence
+      ) {
+        return { sourceEvidenceAccepted: false as const };
+      }
+      await input.onSourceAccepted(transaction, input.evidenceObservedAt);
+      return { sourceEvidenceAccepted: true as const };
     },
   );
 }
@@ -1498,6 +2428,23 @@ export async function revalidateCourseMonitoringForProviderEvidenceChangeInTrans
     };
   }
 
+  // A material provider-evidence change makes any availability observation at
+  // or before that source ambiguous. Advance the match generation while the
+  // course lock is held so an already-created delivery cannot validate the old
+  // generation after this transaction commits. Keep a never-sent match pending:
+  // a later provider check can confirm it again and enqueue the new generation.
+  await transaction.teeTimeMatch.updateMany({
+    where: {
+      courseId: input.courseId,
+      availabilityStatus: "AVAILABLE",
+      lastConfirmedAt: { lte: input.now },
+    },
+    data: {
+      availabilityStatus: "UNKNOWN",
+      availabilityCycle: { increment: 1 },
+    },
+  });
+
   const attemptRevalidation = async (
     attempt: number,
   ): Promise<ProviderEvidenceRevalidationResult> => {
@@ -1536,10 +2483,15 @@ export async function revalidateCourseMonitoringForProviderEvidenceChangeInTrans
       }),
     ]);
     if (!incident) {
+      const queued = await queueActiveRealSearchesForCourse(
+        transaction,
+        input.courseId,
+        input.now,
+      );
       return {
         outcome: "NOT_ACTIONABLE" as const,
         changedFields,
-        searchesQueued: 0,
+        searchesQueued: queued.count,
       };
     }
 
@@ -2110,6 +3062,9 @@ export async function recordCourseMonitoringPlaybookTransition(
     now?: Date;
     browserPersistenceFence?: CourseSupportBrowserPersistenceFence;
     expectedProviderSnapshotFingerprint?: string;
+    onBeforeSourceWrite?: (
+      transaction: Prisma.TransactionClient,
+    ) => Promise<void>;
   },
 ) {
   if (!hasMonitoringModels(prisma)) {
@@ -2122,6 +3077,7 @@ export async function recordCourseMonitoringPlaybookTransition(
   return runSerializedCourseMonitoringWrite(
     input.courseId,
     async (transaction) => {
+      await input.onBeforeSourceWrite?.(transaction);
       if (input.browserPersistenceFence) {
         await runCourseSupportBrowserPersistenceWrite({
           transaction,
@@ -2161,12 +3117,34 @@ export async function recordCourseMonitoringPlaybookTransition(
           revision: true,
           status: true,
           attemptLedger: true,
+          confirmedAt: true,
+          lastSeenAt: true,
         },
       });
       if (!incident || (input.incidentId && input.incidentId !== incident.id)) {
         throw new Error(
           "A current durable course incident is required to record playbook proof.",
         );
+      }
+      if (input.transition === "SUCCEEDED") {
+        const monitoringStatus =
+          await transaction.courseMonitoringStatus.findUnique({
+            where: { courseId: input.courseId },
+            select: { lastFailureAt: true },
+          });
+        const recoveryFenceAt = [
+          monitoringStatus?.lastFailureAt,
+          incident.confirmedAt,
+          incident.lastSeenAt,
+        ].reduce<Date | null>((latest, value) => {
+          if (!(value instanceof Date) || !Number.isFinite(value.getTime())) {
+            return latest;
+          }
+          return !latest || value > latest ? value : latest;
+        }, null);
+        if (recoveryFenceAt && now <= recoveryFenceAt) {
+          return null;
+        }
       }
       if (idempotencyKey) {
         const replay = await transaction.courseMonitoringEvent.findUnique({
@@ -2612,6 +3590,8 @@ export async function reconcileCourseMonitoringDeadline(input: {
                           select: {
                             state: true,
                             stateChangedAt: true,
+                            lastSuccessfulAt: true,
+                            lastFailureAt: true,
                             failureFingerprint: true,
                             nextAutomaticAttemptAt: true,
                             revalidationRequestedAt: true,
@@ -2706,6 +3686,8 @@ export async function reconcileCourseMonitoringDeadline(input: {
           select: {
             state: true,
             stateChangedAt: true,
+            lastSuccessfulAt: true,
+            lastFailureAt: true,
             failureFingerprint: true,
             nextAutomaticAttemptAt: true,
             revalidationRequestedAt: true,
@@ -2829,6 +3811,10 @@ export async function reconcileCourseMonitoringDeadline(input: {
           });
         }
         if (!incident.activeBatchId) {
+          const authoritativeEvidenceAt =
+            status.state === "HEALTHY" && status.lastSuccessfulAt
+              ? status.lastSuccessfulAt
+              : incident.lastSeenAt;
           const incidentUpdated =
             await transaction.courseSupportIncident.updateMany({
               where: {
@@ -2846,7 +3832,7 @@ export async function reconcileCourseMonitoringDeadline(input: {
                 nextAction: null,
                 nextAttemptAt: null,
                 nextReminderAt: null,
-                lastSeenAt: input.now,
+                lastSeenAt: authoritativeEvidenceAt,
                 revision: { increment: 1 },
               },
             });
@@ -2954,7 +3940,7 @@ export async function reconcileCourseMonitoringDeadline(input: {
           message:
             "A durable fresh probe was adopted after monitoring closeout was interrupted.",
           runtimeVersion: freshSuccessProbe.runtimeVersion,
-          occurredAt: input.now,
+          occurredAt: freshSuccessProbe.observedAt,
           audit: {
             recoveredFromProbeCrashBoundary: true,
             customerDataIncluded: false,
@@ -2975,7 +3961,7 @@ export async function reconcileCourseMonitoringDeadline(input: {
             input.source,
             freshSuccessProbe.runtimeVersion,
           ),
-          occurredAt: input.now,
+          occurredAt: freshSuccessProbe.observedAt,
           audit: {
             cycle: incident.cycle,
             confirmedAt: incident.confirmedAt?.toISOString() ?? null,
@@ -3542,7 +4528,8 @@ async function recoverLegacyDeferredFailureHandoff(
     sourceEntry.updatedAt.getTime() > input.incident.updatedAt.getTime() ||
     sourceEntry.batch.completedAt.getTime() >
       sourceEntry.batch.updatedAt.getTime() ||
-    sourceEntry.batch.updatedAt.getTime() > input.incident.updatedAt.getTime() ||
+    sourceEntry.batch.updatedAt.getTime() >
+      input.incident.updatedAt.getTime() ||
     !sourceEntry.verifiedAt ||
     sourceEntry.verifiedAt.getTime() >
       sourceEntry.batch.completedAt.getTime() ||
@@ -3597,26 +4584,26 @@ async function recoverLegacyDeferredFailureHandoff(
     executionEvidence.playbookAttemptRecorded === true;
   const exactLegacyExecutionEvidence = Boolean(
     executionEvidenceKeys.length === 9 &&
-      [
-        "claimedImplementationPaths",
-        "newReleaseRecorded",
-        "deploymentRecorded",
-        "postProbeRecorded",
-        "providerAttemptRecorded",
-        "providerExecutionAttemptRecorded",
-        "playbookAttemptRecorded",
-        "terminalResultRecorded",
-        "providerExecutionStarted",
-      ].every((key) => executionEvidenceKeys.includes(key)) &&
-      executionEvidence.claimedImplementationPaths === false &&
-      executionEvidence.newReleaseRecorded === false &&
-      executionEvidence.deploymentRecorded === false &&
-      executionEvidence.postProbeRecorded === false &&
-      executionEvidence.providerAttemptRecorded === false &&
-      executionEvidence.providerExecutionAttemptRecorded === false &&
-      typeof executionEvidence.playbookAttemptRecorded === "boolean" &&
-      executionEvidence.terminalResultRecorded === false &&
-      executionEvidence.providerExecutionStarted === true,
+    [
+      "claimedImplementationPaths",
+      "newReleaseRecorded",
+      "deploymentRecorded",
+      "postProbeRecorded",
+      "providerAttemptRecorded",
+      "providerExecutionAttemptRecorded",
+      "playbookAttemptRecorded",
+      "terminalResultRecorded",
+      "providerExecutionStarted",
+    ].every((key) => executionEvidenceKeys.includes(key)) &&
+    executionEvidence.claimedImplementationPaths === false &&
+    executionEvidence.newReleaseRecorded === false &&
+    executionEvidence.deploymentRecorded === false &&
+    executionEvidence.postProbeRecorded === false &&
+    executionEvidence.providerAttemptRecorded === false &&
+    executionEvidence.providerExecutionAttemptRecorded === false &&
+    typeof executionEvidence.playbookAttemptRecorded === "boolean" &&
+    executionEvidence.terminalResultRecorded === false &&
+    executionEvidence.providerExecutionStarted === true,
   );
   const cooldownExpiresAt = parseStrictMonitoringIso(
     attempt.failureOnlyHandoffCooldownUntil,
@@ -3631,7 +4618,7 @@ async function recoverLegacyDeferredFailureHandoff(
     typeof historicalActiveRealSearchCount !== "number" ||
     !Number.isInteger(historicalActiveRealSearchCount) ||
     historicalActiveRealSearchCount < 0 ||
-    endpointAudit.activeDemand !== (historicalActiveRealSearchCount > 0) ||
+    endpointAudit.activeDemand !== historicalActiveRealSearchCount > 0 ||
     attempt.operationalRetry !== null ||
     attempt.orchestrationRetry !== null ||
     attempt.deferredFailureHandoff !== undefined ||
@@ -3698,9 +4685,7 @@ async function recoverLegacyDeferredFailureHandoff(
   }
   const requests = sourceEntry.verificationRequests ?? [];
   const sourceRequest = requests[0];
-  const sourceRequestEvidence = asMonitoringJsonRecord(
-    sourceRequest?.evidence,
-  );
+  const sourceRequestEvidence = asMonitoringJsonRecord(sourceRequest?.evidence);
   const evidenceProviderNotBeforeAt =
     sourceRequestEvidence.providerRetryNotBeforeAt === undefined
       ? null
@@ -3718,23 +4703,23 @@ async function recoverLegacyDeferredFailureHandoff(
       : null;
   const sourceRequestWasClosedFromRetryable = Boolean(
     sourceRequest &&
-      proof.status === "RETRYABLE_FAILED" &&
-      sourceRequest.status === "STALE" &&
-      sourceRequest.nextAttemptAt === null &&
-      sourceRequest.completedAt?.getTime() ===
-        sourceEntry.batch.completedAt.getTime() &&
-      sourceRequest.updatedAt.getTime() ===
-        sourceEntry.batch.completedAt.getTime() &&
-      sourceRequest.lastError === "batch_closed",
+    proof.status === "RETRYABLE_FAILED" &&
+    sourceRequest.status === "STALE" &&
+    sourceRequest.nextAttemptAt === null &&
+    sourceRequest.completedAt?.getTime() ===
+      sourceEntry.batch.completedAt.getTime() &&
+    sourceRequest.updatedAt.getTime() ===
+      sourceEntry.batch.completedAt.getTime() &&
+    sourceRequest.lastError === "batch_closed",
   );
   const sourceRequestAlreadyStale = Boolean(
     sourceRequest &&
-      proof.status === "STALE" &&
-      sourceRequest.status === "STALE" &&
-      (sourceRequest.nextAttemptAt?.toISOString() ?? null) ===
-        (proofNextAttemptAt?.toISOString() ?? null) &&
-      (sourceRequest.completedAt?.toISOString() ?? null) ===
-        (proofCompletedAt?.toISOString() ?? null),
+    proof.status === "STALE" &&
+    sourceRequest.status === "STALE" &&
+    (sourceRequest.nextAttemptAt?.toISOString() ?? null) ===
+      (proofNextAttemptAt?.toISOString() ?? null) &&
+    (sourceRequest.completedAt?.toISOString() ?? null) ===
+      (proofCompletedAt?.toISOString() ?? null),
   );
   if (
     requests.length !== 1 ||
@@ -3750,8 +4735,7 @@ async function recoverLegacyDeferredFailureHandoff(
     sourceRequest.startedAt === null ||
     sourceRequest.startedAt.getTime() > proofObservedAt.getTime() ||
     !sourceRequest.createdAt ||
-    sourceRequest.createdAt.getTime() <
-      sourceEntry.batch.createdAt.getTime() ||
+    sourceRequest.createdAt.getTime() < sourceEntry.batch.createdAt.getTime() ||
     sourceRequest.createdAt.getTime() > sourceRequest.startedAt.getTime() ||
     sourceRequest.createdAt.getTime() > sourceRequest.updatedAt.getTime() ||
     sourceRequest.updatedAt.getTime() > input.incident.updatedAt.getTime() ||
@@ -4027,7 +5011,6 @@ async function recoverLegacyDeferredFailureHandoff(
       nextAttemptAt: eligibleAt,
       nextAction:
         "Run one exact verifier-only confirmation after the failure-only cooldown.",
-      lastSeenAt: eligibleAt,
       revision: { increment: 1 },
     },
   });
@@ -4158,7 +5141,6 @@ async function resumeIncompleteAutomationStalledPlaybook(
       nextAttemptAt: input.now,
       nextAction:
         "Continue the next incomplete current-cycle playbook stage before requesting human review.",
-      lastSeenAt: input.now,
       revision: { increment: 1 },
     },
   });
@@ -4796,6 +5778,7 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
     materialFailureHandoff: {
       failureClass: CourseSupportFailureClass;
       failureFingerprint: string;
+      observedAt: Date;
       nextAttemptAt: Date;
     } | null;
     confirmedSuccess: {
@@ -4921,14 +5904,14 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
 
     const mutableCurrentStateChanged = Boolean(
       source.providerFamilyKey !== entry.incident.providerFamilyKey ||
-        source.canonicalFailureFingerprint !==
-          entry.incident.failureFingerprint ||
-        source.claimedProviderSnapshotFingerprint !==
-          currentProviderSnapshotFingerprint ||
-        normalizeProviderFamilyKey(entry.course.providerFamilyKey) !==
-          source.providerFamilyKey ||
-        monitoringStatus?.failureFingerprint !==
-          source.canonicalFailureFingerprint,
+      source.canonicalFailureFingerprint !==
+        entry.incident.failureFingerprint ||
+      source.claimedProviderSnapshotFingerprint !==
+        currentProviderSnapshotFingerprint ||
+      normalizeProviderFamilyKey(entry.course.providerFamilyKey) !==
+        source.providerFamilyKey ||
+      monitoringStatus?.failureFingerprint !==
+        source.canonicalFailureFingerprint,
     );
     if (mutableCurrentStateChanged) {
       deferredFailureCarrierByIncidentId.set(entry.incidentId, {
@@ -4968,62 +5951,62 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
           : undefined;
     const coherentProviderExecutedRequest = Boolean(
       confirmationStarted &&
-        confirmationRequest &&
-        confirmationObservedAt &&
-        confirmationRequest.runtimeVersion === effectiveReleaseSha &&
-        confirmationRequest.providerSnapshotFingerprint ===
-          currentProviderSnapshotFingerprint &&
-        confirmationRequest.providerSnapshotAt instanceof Date &&
-        confirmationRequest.createdAt.getTime() <=
-          confirmationRequest.providerSnapshotAt.getTime() &&
-        confirmationRequest.providerSnapshotAt.getTime() <=
-          confirmationRequest.startedAt!.getTime() &&
-        confirmationRequest.createdAt.getTime() <=
-          confirmationRequest.startedAt!.getTime() &&
-        confirmationRequest.startedAt!.getTime() <=
-          confirmationObservedAt.getTime() &&
-        confirmationObservedAt.getTime() <= input.now.getTime() &&
-        confirmationRequest.createdAt.getTime() <=
-          confirmationRequest.updatedAt.getTime() &&
-        confirmationRequest.updatedAt.getTime() <= input.now.getTime() &&
-        confirmationEvidence.schemaVersion === 1 &&
-        confirmationEvidence.kind === "PROVIDER_VERIFICATION" &&
-        confirmationEvidence.releaseSha === effectiveReleaseSha &&
-        confirmationEvidence.runtimeVersion === effectiveReleaseSha &&
-        confirmationEvidence.outcome === confirmationRequest.outcome &&
-        confirmationEvidence.failureClass ===
-          (confirmationRequest.failureClass ?? undefined) &&
-        confirmationEvidence.providerExecution === true &&
-        confirmationEvidence.providerFamilyKey === source.providerFamilyKey &&
-        confirmationEvidence.providerSnapshotFingerprint ===
-          currentProviderSnapshotFingerprint &&
-        evidenceHttpStatus !== undefined &&
-        (confirmationEvidence.providerRetryNotBeforeAt === undefined ||
-          evidenceProviderNotBeforeAt),
+      confirmationRequest &&
+      confirmationObservedAt &&
+      confirmationRequest.runtimeVersion === effectiveReleaseSha &&
+      confirmationRequest.providerSnapshotFingerprint ===
+        currentProviderSnapshotFingerprint &&
+      confirmationRequest.providerSnapshotAt instanceof Date &&
+      confirmationRequest.createdAt.getTime() <=
+        confirmationRequest.providerSnapshotAt.getTime() &&
+      confirmationRequest.providerSnapshotAt.getTime() <=
+        confirmationRequest.startedAt!.getTime() &&
+      confirmationRequest.createdAt.getTime() <=
+        confirmationRequest.startedAt!.getTime() &&
+      confirmationRequest.startedAt!.getTime() <=
+        confirmationObservedAt.getTime() &&
+      confirmationObservedAt.getTime() <= input.now.getTime() &&
+      confirmationRequest.createdAt.getTime() <=
+        confirmationRequest.updatedAt.getTime() &&
+      confirmationRequest.updatedAt.getTime() <= input.now.getTime() &&
+      confirmationEvidence.schemaVersion === 1 &&
+      confirmationEvidence.kind === "PROVIDER_VERIFICATION" &&
+      confirmationEvidence.releaseSha === effectiveReleaseSha &&
+      confirmationEvidence.runtimeVersion === effectiveReleaseSha &&
+      confirmationEvidence.outcome === confirmationRequest.outcome &&
+      confirmationEvidence.failureClass ===
+        (confirmationRequest.failureClass ?? undefined) &&
+      confirmationEvidence.providerExecution === true &&
+      confirmationEvidence.providerFamilyKey === source.providerFamilyKey &&
+      confirmationEvidence.providerSnapshotFingerprint ===
+        currentProviderSnapshotFingerprint &&
+      evidenceHttpStatus !== undefined &&
+      (confirmationEvidence.providerRetryNotBeforeAt === undefined ||
+        evidenceProviderNotBeforeAt),
     );
     const coherentProviderExecutedSuccess = Boolean(
       coherentProviderExecutedRequest &&
-        confirmationRequest &&
-        confirmationObservedAt &&
-        confirmationRequest.status === "SUCCEEDED" &&
-        (confirmationRequest.outcome === "MATCH_FOUND" ||
-          confirmationRequest.outcome === "NO_MATCH") &&
-        confirmationRequest.failureClass === null &&
-        confirmationRequest.lastError === null &&
-        confirmationRequest.nextAttemptAt === null &&
-        confirmationRequest.completedAt instanceof Date &&
-        confirmationObservedAt.getTime() <=
-          confirmationRequest.completedAt.getTime() &&
-        confirmationRequest.completedAt.getTime() <=
-          confirmationRequest.updatedAt.getTime() &&
-        confirmationRequest.discoveryAttemptedAt instanceof Date &&
-        confirmationRequest.discoveryVerifiedAt instanceof Date &&
-        confirmationRequest.providerSnapshotAt!.getTime() <=
-          confirmationRequest.discoveryAttemptedAt.getTime() &&
-        confirmationRequest.discoveryAttemptedAt.getTime() <=
-          confirmationRequest.discoveryVerifiedAt.getTime() &&
-        confirmationRequest.discoveryVerifiedAt.getTime() <=
-          confirmationRequest.completedAt.getTime(),
+      confirmationRequest &&
+      confirmationObservedAt &&
+      confirmationRequest.status === "SUCCEEDED" &&
+      (confirmationRequest.outcome === "MATCH_FOUND" ||
+        confirmationRequest.outcome === "NO_MATCH") &&
+      confirmationRequest.failureClass === null &&
+      confirmationRequest.lastError === null &&
+      confirmationRequest.nextAttemptAt === null &&
+      confirmationRequest.completedAt instanceof Date &&
+      confirmationObservedAt.getTime() <=
+        confirmationRequest.completedAt.getTime() &&
+      confirmationRequest.completedAt.getTime() <=
+        confirmationRequest.updatedAt.getTime() &&
+      confirmationRequest.discoveryAttemptedAt instanceof Date &&
+      confirmationRequest.discoveryVerifiedAt instanceof Date &&
+      confirmationRequest.providerSnapshotAt!.getTime() <=
+        confirmationRequest.discoveryAttemptedAt.getTime() &&
+      confirmationRequest.discoveryAttemptedAt.getTime() <=
+        confirmationRequest.discoveryVerifiedAt.getTime() &&
+      confirmationRequest.discoveryVerifiedAt.getTime() <=
+        confirmationRequest.completedAt.getTime(),
     );
     const requestFailureClass =
       confirmationRequest?.failureClass &&
@@ -5066,39 +6049,38 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
           : undefined;
     const reflectedFailureProofIsCoherent = Boolean(
       entry.proofSnapshot === null ||
-        (confirmationRequest &&
-          confirmationObservedAt &&
-          proof.kind === "PROVIDER_VERIFICATION_FAILURE" &&
-          proof.providerExecution === true &&
-          proof.status === confirmationRequest.status &&
-          proof.outcome === confirmationRequest.outcome &&
-          proof.failureClass === confirmationRequest.failureClass &&
-          proof.observedAt === confirmationObservedAt.toISOString() &&
-          proof.runtimeVersion === effectiveReleaseSha &&
-          proof.providerSnapshotFingerprint ===
-            currentProviderSnapshotFingerprint &&
-          (proof.nextAttemptAt === null || proofNextAttemptAt) &&
-          (proof.providerRetryNotBeforeAt === null ||
-            proofProviderNotBeforeAt) &&
-          (proof.completedAt === null || proofCompletedAt) &&
-          proofHttpStatus !== undefined &&
-          (confirmationRequest.nextAttemptAt?.toISOString() ?? null) ===
-            (proofNextAttemptAt?.toISOString() ?? null) &&
-          (confirmationRequest.completedAt?.toISOString() ?? null) ===
-            (proofCompletedAt?.toISOString() ?? null) &&
-          (evidenceProviderNotBeforeAt?.toISOString() ?? null) ===
-            (proofProviderNotBeforeAt?.toISOString() ?? null) &&
-          evidenceHttpStatus === proofHttpStatus),
+      (confirmationRequest &&
+        confirmationObservedAt &&
+        proof.kind === "PROVIDER_VERIFICATION_FAILURE" &&
+        proof.providerExecution === true &&
+        proof.status === confirmationRequest.status &&
+        proof.outcome === confirmationRequest.outcome &&
+        proof.failureClass === confirmationRequest.failureClass &&
+        proof.observedAt === confirmationObservedAt.toISOString() &&
+        proof.runtimeVersion === effectiveReleaseSha &&
+        proof.providerSnapshotFingerprint ===
+          currentProviderSnapshotFingerprint &&
+        (proof.nextAttemptAt === null || proofNextAttemptAt) &&
+        (proof.providerRetryNotBeforeAt === null || proofProviderNotBeforeAt) &&
+        (proof.completedAt === null || proofCompletedAt) &&
+        proofHttpStatus !== undefined &&
+        (confirmationRequest.nextAttemptAt?.toISOString() ?? null) ===
+          (proofNextAttemptAt?.toISOString() ?? null) &&
+        (confirmationRequest.completedAt?.toISOString() ?? null) ===
+          (proofCompletedAt?.toISOString() ?? null) &&
+        (evidenceProviderNotBeforeAt?.toISOString() ?? null) ===
+          (proofProviderNotBeforeAt?.toISOString() ?? null) &&
+        evidenceHttpStatus === proofHttpStatus),
     );
     const coherentProviderExecutedFailure = Boolean(
       coherentProviderExecutedRequest &&
-        confirmationRequest &&
-        confirmationObservedAt &&
-        (confirmationRequest.status === "RETRYABLE_FAILED" ||
-          confirmationRequest.status === "STALE") &&
-        confirmationRequest.outcome === "FETCH_FAILED" &&
-        requestFailureClass &&
-        reflectedFailureProofIsCoherent,
+      confirmationRequest &&
+      confirmationObservedAt &&
+      (confirmationRequest.status === "RETRYABLE_FAILED" ||
+        confirmationRequest.status === "STALE") &&
+      confirmationRequest.outcome === "FETCH_FAILED" &&
+      requestFailureClass &&
+      reflectedFailureProofIsCoherent,
     );
     if (coherentProviderExecutedSuccess) {
       deferredFailureCarrierByIncidentId.set(entry.incidentId, {
@@ -5150,6 +6132,7 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
         materialFailureHandoff: {
           failureClass: requestFailureClass!,
           failureFingerprint: requestFailureFingerprint,
+          observedAt: confirmationObservedAt!,
           nextAttemptAt,
         },
         confirmedSuccess: null,
@@ -5167,11 +6150,11 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
       batch.deployedAt === null &&
       (batch.releaseSha === null || batch.releaseSha === batch.baseSha) &&
       !historicalExecution.changedReleaseDeploymentEver &&
-        !historicalExecution.providerExecutionEverForCourse &&
-        !historicalExecution.providerExecutionAttemptEverForCourse &&
-        !historicalExecution.terminalExecutionEverForCourse &&
-        entry.proofSnapshot === null &&
-        proof.providerExecution !== true &&
+      !historicalExecution.providerExecutionEverForCourse &&
+      !historicalExecution.providerExecutionAttemptEverForCourse &&
+      !historicalExecution.terminalExecutionEverForCourse &&
+      entry.proofSnapshot === null &&
+      proof.providerExecution !== true &&
       entry.verificationRequests.every((request) =>
         isCourseSupportVerificationRequestUnstarted(request),
       ) &&
@@ -5314,8 +6297,7 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
         disposition: "MATERIAL_HANDOFF",
         result: "RETRY_SCHEDULED",
         deferredFailureCarrier: "CONSUMED",
-        materialFailureHandoff:
-          deferredFailureCarrier.materialFailureHandoff,
+        materialFailureHandoff: deferredFailureCarrier.materialFailureHandoff,
       });
       continue;
     }
@@ -5327,8 +6309,8 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
         deferredFailureCarrier:
           deferredFailureCarrier.confirmationStarted ||
           deferredFailureCarrier.invalidatedByCurrentState
-          ? "CONSUMED"
-          : "AVAILABLE",
+            ? "CONSUMED"
+            : "AVAILABLE",
       });
       continue;
     }
@@ -5496,8 +6478,7 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
                   : { equals: request.evidence as Prisma.InputJsonValue },
               lastError: request.lastError,
               runtimeVersion: request.runtimeVersion,
-              providerSnapshotFingerprint:
-                request.providerSnapshotFingerprint,
+              providerSnapshotFingerprint: request.providerSnapshotFingerprint,
               nextAttemptAt: request.nextAttemptAt,
               completedAt: request.completedAt,
               createdAt: request.createdAt,
@@ -6021,7 +7002,13 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
         planned.disposition === "AUTHORITATIVE_PROBE") &&
       planned.resolution
     ) {
-      const resolvedAt = planned.successProbe?.observedAt ?? input.now;
+      const providerEvidenceAt =
+        planned.successProbe?.observedAt ??
+        (planned.resolution === "MONITORING_RESTORED"
+          ? monitoringStatus?.lastSuccessfulAt
+          : null) ??
+        incident.lastSeenAt;
+      const resolvedAt = input.now;
       if (planned.disposition === "AUTHORITATIVE_PROBE" && monitoringStatus) {
         const monitoringUpdated =
           await transaction.courseMonitoringStatus.updateMany({
@@ -6033,7 +7020,7 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
             },
             data: {
               state: "HEALTHY",
-              lastSuccessfulAt: resolvedAt,
+              lastSuccessfulAt: providerEvidenceAt,
               consecutiveFailures: 0,
               failureFingerprint: null,
               firstDegradedAt: null,
@@ -6090,7 +7077,7 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
             nextAction: null,
             nextAttemptAt: null,
             nextReminderAt: null,
-            lastSeenAt: resolvedAt,
+            lastSeenAt: providerEvidenceAt,
             revision: { increment: 1 },
           },
         });
@@ -6111,7 +7098,7 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
           message:
             "A durable fresh probe was adopted while stale responder ownership was released.",
           runtimeVersion: planned.successProbe?.runtimeVersion,
-          occurredAt: input.now,
+          occurredAt: providerEvidenceAt,
           audit: {
             recoveredFromProbeCrashBoundary: true,
             customerDataIncluded: false,
@@ -6132,7 +7119,7 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
             input.source,
             planned.successProbe?.runtimeVersion,
           ),
-          occurredAt: input.now,
+          occurredAt: providerEvidenceAt,
           audit: {
             cycle: incident.cycle,
             confirmedAt: incident.confirmedAt?.toISOString() ?? null,
@@ -6178,8 +7165,8 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
             lastAttemptAt: null,
             attemptCount: 0,
             occurrenceCount: 1,
-            firstSeenAt: input.now,
-            confirmedAt: input.now,
+            firstSeenAt: handoff.observedAt,
+            confirmedAt: handoff.observedAt,
             escalationDeadlineAt: getCourseMonitoringEscalationDeadline(
               freshCycleDeadlineAnchor,
               incident.activeRealSearchCount,
@@ -6194,7 +7181,7 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
             escalationNotifiedAt: null,
             latestMessage:
               "A provider-executed confirmation established a new failure identity while stale responder ownership was released.",
-            lastSeenAt: input.now,
+            lastSeenAt: handoff.observedAt,
             revision: { increment: 1 },
           },
         });
@@ -6214,6 +7201,7 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
           },
           data: {
             state: "AUTO_INVESTIGATING",
+            lastFailureAt: handoff.observedAt,
             failureFingerprint: handoff.failureFingerprint,
             nextAutomaticAttemptAt: handoff.nextAttemptAt,
             revalidationRequestedAt: handoff.nextAttemptAt,
@@ -6239,7 +7227,7 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
         message:
           "A provider-executed confirmation established a new failure identity, so a fresh remediation cycle was queued.",
         idempotencyKey: `course-support-stale-deferred-material-handoff:${batch.id}:${entry.id}`,
-        occurredAt: input.now,
+        occurredAt: handoff.observedAt,
         audit: {
           priorCycle: entry.cycle,
           cycle: entry.cycle + 1,
@@ -6474,7 +7462,7 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
                     : "Expired responder ownership was released for a safe automatic retry."
                   : planned.disposition === "MATERIAL_HANDOFF"
                     ? "Expired responder ownership was released after a provider-executed confirmation established a new failure identity."
-                  : "Expired responder ownership was superseded by authoritative course evidence.",
+                    : "Expired responder ownership was superseded by authoritative course evidence.",
         },
       });
     if (batchEntryUpdated.count !== 1) {
@@ -6989,6 +7977,24 @@ export async function runCourseMonitoringWatchdog(now = new Date()) {
     ) {
       const episodeStartedAt =
         status.firstDegradedAt ?? incident?.firstSeenAt ?? now;
+      const providerEvidenceFenceAt = [
+        status.lastSuccessfulAt,
+        status.lastFailureAt,
+        status.firstDegradedAt,
+        incident?.confirmedAt,
+        incident?.lastSeenAt,
+        incident?.firstSeenAt,
+      ].reduce<Date | null>((latest, value) => {
+        if (!(value instanceof Date) || !Number.isFinite(value.getTime())) {
+          return latest;
+        }
+        return !latest || value > latest ? value : latest;
+      }, null);
+      if (!providerEvidenceFenceAt) {
+        throw new Error(
+          "Tooling escalation requires a prior provider-evidence timestamp.",
+        );
+      }
       const escalationDeadlineAt = getCourseMonitoringEscalationDeadline(
         episodeStartedAt,
         activeRealSearchCount,
@@ -7023,7 +8029,7 @@ export async function runCourseMonitoringWatchdog(now = new Date()) {
                 },
                 data: {
                   kind: "BLOCKED_TOOLING",
-                  confirmedAt: incident.confirmedAt ?? now,
+                  confirmedAt: incident.confirmedAt ?? providerEvidenceFenceAt,
                   escalationDeadlineAt:
                     incident.escalationDeadlineAt ?? escalationDeadlineAt,
                   nextAttemptAt: now,
@@ -7064,12 +8070,12 @@ export async function runCourseMonitoringWatchdog(now = new Date()) {
                 affectedSearchCount: Math.max(activeRealSearchCount, 1),
                 engineeringOnly: activeRealSearchCount === 0,
                 nextAttemptAt: now,
-                confirmedAt: now,
+                confirmedAt: providerEvidenceFenceAt,
                 escalationDeadlineAt,
                 activeRealSearchCount,
                 earliestTargetDate: realDemandDates[0] ?? null,
-                firstSeenAt: status.firstDegradedAt ?? now,
-                lastSeenAt: now,
+                firstSeenAt: status.firstDegradedAt ?? providerEvidenceFenceAt,
+                lastSeenAt: providerEvidenceFenceAt,
               },
             });
             incidentId = created.id;
@@ -7392,6 +8398,7 @@ async function appendMonitoringEvent(
     eventType:
       | "CHECK_SUCCEEDED"
       | "CHECK_FAILED"
+      | "AUTOMATION_ATTEMPTED"
       | "STATE_CHANGED"
       | "HUMAN_REVIEW_REQUESTED"
       | "REVALIDATION_REQUESTED"
@@ -7564,12 +8571,12 @@ async function attachParkedCampaignToMonitoringAudit(
         Number(admissionAudit.batchCount) < 1 ||
         !isParkedCourseCampaignPostMarkerRecoveryStageShape({
           completedStageCount: Number(
-            admissionAudit.playbookCompletedStageCount
+            admissionAudit.playbookCompletedStageCount,
           ),
           nextStage:
             typeof admissionAudit.playbookNextStage === "string"
               ? admissionAudit.playbookNextStage
-              : null
+              : null,
         }) ||
         typeof admissionAudit.supersededEndpointId !== "string" ||
         !admissionAudit.supersededEndpointId.trim() ||
@@ -7837,9 +8844,9 @@ async function lockExactParkedCourseCampaignHistoryRows(
   const batchIds = [...new Set(input.batchIds)].sort((left, right) =>
     left.localeCompare(right),
   );
-  const ownerAutomationRunIds = [
-    ...new Set(input.ownerAutomationRunIds),
-  ].sort((left, right) => left.localeCompare(right));
+  const ownerAutomationRunIds = [...new Set(input.ownerAutomationRunIds)].sort(
+    (left, right) => left.localeCompare(right),
+  );
   const batchIncidentIds = [...new Set(input.batchIncidentIds)].sort(
     (left, right) => left.localeCompare(right),
   );
@@ -8622,7 +9629,7 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
               !isParkedCourseCampaignPostMarkerRecoveryStageShape({
                 completedStageCount:
                   currentPlaybookAssessment.completedStages.length,
-                nextStage: currentPlaybookAssessment.nextStage
+                nextStage: currentPlaybookAssessment.nextStage,
               }) ||
               !postMarkerIncompletePlaybookRecovery ||
               postMarkerIncompletePlaybookRecovery.history.historyDigest !==
@@ -9204,7 +10211,6 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
                     : sameIdentityMaterialChangeIncompleteRecoveryRequested
                       ? "Continue the exact same-identity material-change cycle at its next incomplete ordered-playbook stage."
                       : "Retry provider verification in the current material-change cycle because prior orchestration never began execution.",
-            lastSeenAt: now,
             revision: { increment: 1 },
           },
         });
@@ -9450,7 +10456,6 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
             ownerNotifiedAt: null,
             escalatedAt: null,
             escalationNotifiedAt: null,
-            lastSeenAt: now,
             revision: { increment: 1 },
           },
         });
@@ -9555,7 +10560,6 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
         status: "AUTO_INVESTIGATING",
         lastAttemptAt: null,
         attemptCount: 0,
-        confirmedAt: now,
         escalationDeadlineAt: getCourseMonitoringEscalationDeadline(
           now,
           activeRealSearchCount,
@@ -9568,7 +10572,6 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
         ownerNotifiedAt: null,
         escalatedAt: null,
         escalationNotifiedAt: null,
-        lastSeenAt: now,
         revision: { increment: 1 },
       },
     });
@@ -9641,7 +10644,10 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
 export async function runSerializedCourseMonitoringWrite<T>(
   courseId: string,
   worker: (transaction: Prisma.TransactionClient) => Promise<T>,
-  options?: { isolationLevel?: Prisma.TransactionIsolationLevel },
+  options?: {
+    isolationLevel?: Prisma.TransactionIsolationLevel;
+    timeoutMs?: number;
+  },
 ) {
   let lastError: unknown;
   for (
@@ -9652,14 +10658,17 @@ export async function runSerializedCourseMonitoringWrite<T>(
     try {
       return await prisma.$transaction(
         async (transaction) => {
-          await acquireCourseMonitoringWriteLock(transaction, courseId);
+          await acquireCourseMonitoringWriteLockInTransaction(
+            transaction,
+            courseId,
+          );
           return worker(transaction);
         },
         {
           isolationLevel:
             options?.isolationLevel ??
             Prisma.TransactionIsolationLevel.ReadCommitted,
-          timeout: COURSE_MONITORING_WRITE_TIMEOUT_MS,
+          timeout: options?.timeoutMs ?? COURSE_MONITORING_WRITE_TIMEOUT_MS,
         },
       );
     } catch (error) {
@@ -9676,7 +10685,63 @@ export async function runSerializedCourseMonitoringWrite<T>(
   throw lastError;
 }
 
-async function acquireCourseMonitoringWriteLock(
+export async function runSerializedCourseMonitoringWrites<T>(
+  courseIds: readonly string[],
+  worker: (transaction: Prisma.TransactionClient) => Promise<T>,
+  options?: {
+    isolationLevel?: Prisma.TransactionIsolationLevel;
+    timeoutMs?: number;
+    retryWorker?: boolean;
+  },
+) {
+  const uniqueCourseIds = [...new Set(courseIds)].sort();
+  if (uniqueCourseIds.length === 0) {
+    throw new Error(
+      "At least one course is required for a serialized monitoring write",
+    );
+  }
+  let lastError: unknown;
+  for (
+    let attempt = 1;
+    attempt <= COURSE_MONITORING_WRITE_ATTEMPTS;
+    attempt += 1
+  ) {
+    let workerStarted = false;
+    try {
+      return await prisma.$transaction(
+        async (transaction) => {
+          for (const courseId of uniqueCourseIds) {
+            await acquireCourseMonitoringWriteLockInTransaction(
+              transaction,
+              courseId,
+            );
+          }
+          workerStarted = true;
+          return worker(transaction);
+        },
+        {
+          isolationLevel:
+            options?.isolationLevel ??
+            Prisma.TransactionIsolationLevel.ReadCommitted,
+          timeout: options?.timeoutMs ?? COURSE_MONITORING_WRITE_TIMEOUT_MS,
+        },
+      );
+    } catch (error) {
+      lastError = error;
+      if (
+        (workerStarted && options?.retryWorker === false) ||
+        !isRetryableCourseMonitoringWriteError(error) ||
+        attempt === COURSE_MONITORING_WRITE_ATTEMPTS
+      ) {
+        throw error;
+      }
+      await delayCourseMonitoringRetry(attempt * 20);
+    }
+  }
+  throw lastError;
+}
+
+export async function acquireCourseMonitoringWriteLockInTransaction(
   transaction: Prisma.TransactionClient,
   courseId: string,
 ) {

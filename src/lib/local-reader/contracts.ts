@@ -14,6 +14,8 @@ import {
   type DynamicWebTracCourseKey
 } from "./course-key";
 
+export const LOCAL_READER_MAX_CLOCK_SKEW_MS = 60_000;
+
 export { LOCAL_READER_COURSES, isAllowedLocalReaderUrl } from "./course-key";
 
 const dynamicCpsCourseKeySchema = z.custom<DynamicCpsCourseKey>(
@@ -158,6 +160,7 @@ export const localReaderResultSchema = z
       "PAGE_MISMATCH",
       "READER_ERROR"
     ]),
+    evidenceAnchor: z.literal("SERVER_CLAIM").optional(),
     observedAt: z.string().datetime(),
     pageUrl: z.string().url(),
     pageTitle: z.string().min(1).max(200),

@@ -266,6 +266,18 @@ npm run automation:course-support -- coverage
 # details and retains only the total, limit, and omitted counts.
 npm run automation:course-support -- coverage --machine
 
+# Read one exact deployment's completed responder history from a bounded,
+# half-open post-deploy window of at most 24 hours. This command is strictly
+# read-only and emits only aggregate counts, timestamps, and explicit
+# available/partial/unavailable states. It never returns the supplied release
+# SHA or any course, provider, URL, search, batch, request, task, workflow, or
+# database identifier.
+# It fails closed unless an append-only responder deployment-verification event
+# proves the exact release SHA and deployed-at pair. A valid lineage with no
+# completed batches preserves explicit available zeroes; an unproven pair is a
+# deployment-domain command failure, never a quiet release.
+npm run automation:course-support -- acceptance-history --machine --release-sha <full-git-sha> --deployed-at <canonical-utc-timestamp> --window-started-at <canonical-utc-timestamp> --window-ended-at <canonical-utc-timestamp>
+
 # Claim a clean, current task branch. Per-entry command gates enforce the
 # persisted primaryAction and allowedActions; never force a disallowed path.
 # Inspect the ordinal packet and claim paths before edits.

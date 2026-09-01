@@ -19,6 +19,12 @@ import {
   normalizeOfficialPagePresentationIdentity
 } from "@/lib/places/course-identity";
 import { applyCourseProfileDraft, createCourseProfileSlugAlias, getCourseProfileResearchPacket, listCourseProfileQueue } from "@/lib/course-profiles/service";
+import {
+  beginCourseProviderObservation,
+  markCourseProviderObservationUnreconciled,
+  releaseCourseProviderObservation,
+  startCourseProviderObservationHeartbeat
+} from "@/lib/automation/provider-execution-marker";
 import { prisma } from "@/lib/prisma";
 
 export function parseCourseProfileCommand(args: readonly string[]) {
@@ -284,51 +290,120 @@ export async function executeCourseProfileCommand(command: ReturnType<typeof par
     });
     if (!course) throw new Error(`Course ${command.courseId} was not found`);
 
-    const source = await fetchPhysicalLayoutEvidence(
-      command.evidenceUrl,
-      fetchImpl ?? createPhysicalLayoutEvidenceFetch()
-    );
-    if (
-      !doesOfficialPageCorroboratePhysicalLayout(
-        source.html,
-        course.name,
-        command.holeCounts,
-        source.finalUrl
-      )
-    ) {
-      throw new Error(
-        "The physical-layout source title/H1 does not corroborate the exact course and requested hole count"
-      );
-    }
-
-    const proposed = {
-      layoutHoleCounts: command.holeCounts,
-      layoutHolesEvidenceUrl: source.finalUrl,
-      layoutHolesVerifiedAt: command.verifiedAt
-    };
     if (!command.apply) {
+      const source = await fetchPhysicalLayoutEvidence(
+        command.evidenceUrl,
+        fetchImpl ?? createPhysicalLayoutEvidenceFetch()
+      );
+      if (
+        !doesOfficialPageCorroboratePhysicalLayout(
+          source.html,
+          course.name,
+          command.holeCounts,
+          source.finalUrl
+        )
+      ) {
+        throw new Error(
+          "The physical-layout source title/H1 does not corroborate the exact course and requested hole count"
+        );
+      }
+      const proposed = {
+        layoutHoleCounts: command.holeCounts,
+        layoutHolesEvidenceUrl: source.finalUrl,
+        layoutHolesVerifiedAt: command.verifiedAt
+      };
       return { apply: false, course, proposed };
     }
 
-    const updated = await recordCoursePhysicalLayoutEvidence({
-      courseId: command.courseId,
-      holeCounts: command.holeCounts,
-      evidenceUrl: source.finalUrl,
-      verifiedAt: command.verifiedAt,
-      expectedUpdatedAt: course.updatedAt,
-      expectedName: course.name,
-      source: "OPERATOR_CLI"
+    const providerObservation = await beginCourseProviderObservation({
+      courseId: command.courseId
     });
-    return {
-      apply: true,
-      course: {
-        id: updated.id,
-        name: updated.name,
-        layoutHoleCounts: updated.layoutHoleCounts,
-        layoutHolesEvidenceUrl: updated.layoutHolesEvidenceUrl,
-        layoutHolesVerifiedAt: updated.layoutHolesVerifiedAt
+    if (!providerObservation) {
+      throw new Error(
+        "Another provider observation is already in progress; rerun the physical-layout command"
+      );
+    }
+    const heartbeat = startCourseProviderObservationHeartbeat(providerObservation);
+    let providerExecutionStarted = false;
+    let heartbeatError: unknown = null;
+    try {
+      providerExecutionStarted = true;
+      const source = await fetchPhysicalLayoutEvidence(
+        command.evidenceUrl,
+        fetchImpl ?? createPhysicalLayoutEvidenceFetch()
+      );
+      if (
+        !doesOfficialPageCorroboratePhysicalLayout(
+          source.html,
+          course.name,
+          command.holeCounts,
+          source.finalUrl
+        )
+      ) {
+        throw new Error(
+          "The physical-layout source title/H1 does not corroborate the exact course and requested hole count"
+        );
       }
-    };
+      heartbeat.assertOwned();
+      const updated = await recordCoursePhysicalLayoutEvidence({
+        courseId: command.courseId,
+        holeCounts: command.holeCounts,
+        evidenceUrl: source.finalUrl,
+        verifiedAt: command.verifiedAt,
+        expectedUpdatedAt: course.updatedAt,
+        expectedName: course.name,
+        providerObservation,
+        source: "OPERATOR_CLI"
+      });
+      return {
+        apply: true,
+        course: {
+          id: updated.id,
+          name: updated.name,
+          layoutHoleCounts: updated.layoutHoleCounts,
+          layoutHolesEvidenceUrl: updated.layoutHolesEvidenceUrl,
+          layoutHolesVerifiedAt: updated.layoutHolesVerifiedAt
+        }
+      };
+    } finally {
+      try {
+        await heartbeat.stop();
+      } catch (error) {
+        heartbeatError = error;
+      }
+      try {
+        if (providerExecutionStarted) {
+          // Updating profile metadata is not the same as reconciling current
+          // availability. Keep the source fenced until a later search check
+          // advances canonical monitoring and match state.
+          const retained = await markCourseProviderObservationUnreconciled(
+            providerObservation
+          );
+          if (!retained && !heartbeatError) {
+            heartbeatError = new Error(
+              "Physical-layout provider source could not be retained for reconciliation"
+            );
+          }
+        } else if (
+          providerObservation.supersededUnresolvedObservationStartedAt
+        ) {
+          const retained = await markCourseProviderObservationUnreconciled(
+            providerObservation,
+            { preserveSupersededSource: true }
+          );
+          if (!retained && !heartbeatError) {
+            heartbeatError = new Error(
+              "Superseded physical-layout provider source could not be retained"
+            );
+          }
+        } else {
+          await releaseCourseProviderObservation(providerObservation);
+        }
+      } catch (error) {
+        heartbeatError ??= error;
+      }
+      if (heartbeatError) throw heartbeatError;
+    }
   }
   if (command.action === "alias") return createCourseProfileSlugAlias(command.courseId, command.slug, command.apply);
   const input = command.file ? await readFile(command.file, "utf8") : await readStdin(stdin);

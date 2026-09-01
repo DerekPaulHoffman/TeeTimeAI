@@ -34,6 +34,13 @@ import {
   resolveProviderCapability
 } from "@/lib/automation/provider-capabilities";
 import { runProviderFamilyTasks } from "@/lib/automation/provider-concurrency";
+import {
+  beginCourseProviderObservation,
+  markCourseProviderObservationUnreconciled,
+  releaseCourseProviderObservation,
+  startCourseProviderObservationHeartbeat,
+  type CourseProviderObservationLease
+} from "@/lib/automation/provider-execution-marker";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 import {
   createAddressPinnedPublicFetchTransport,
@@ -89,6 +96,76 @@ class ProviderDiscoveryLeaseDeferredError extends Error {
   constructor() {
     super("Provider discovery capacity is temporarily unavailable");
     this.name = "ProviderDiscoveryLeaseDeferredError";
+  }
+}
+
+type MonitoringDiscoveryProviderObservation = {
+  lease: CourseProviderObservationLease;
+  providerObservedAt: Date;
+  markProviderExecutionStarted: () => void;
+  assertObservationOwned: () => void;
+};
+
+async function runWithMonitoringDiscoveryProviderObservation<T>(input: {
+  courseId: string;
+  worker: (observation: MonitoringDiscoveryProviderObservation) => Promise<T>;
+}): Promise<{ acquired: false } | { acquired: true; value: T }> {
+  const lease = await beginCourseProviderObservation({
+    courseId: input.courseId
+  });
+  if (!lease) return { acquired: false };
+
+  const heartbeat = startCourseProviderObservationHeartbeat(lease);
+  let providerExecutionStarted = false;
+  let heartbeatError: unknown = null;
+  try {
+    return {
+      acquired: true,
+      value: await input.worker({
+        lease,
+        providerObservedAt: lease.observationStartedAt,
+        markProviderExecutionStarted: () => {
+          providerExecutionStarted = true;
+        },
+        assertObservationOwned: () => heartbeat.assertOwned()
+      })
+    };
+  } finally {
+    try {
+      await heartbeat.stop();
+    } catch (error) {
+      heartbeatError = error;
+    }
+
+    try {
+      if (providerExecutionStarted) {
+        // Landing-page and directory discovery can update durable provider
+        // metadata, but it does not reconcile current tee-sheet availability.
+        // Keep its source watermark until a later canonical monitoring check
+        // advances match/status state and safely replaces this marker.
+        const retained = await markCourseProviderObservationUnreconciled(lease);
+        if (!retained && !heartbeatError) {
+          heartbeatError = new Error(
+            "Provider discovery source could not be retained for reconciliation."
+          );
+        }
+      } else if (lease.supersededUnresolvedObservationStartedAt) {
+        const retained = await markCourseProviderObservationUnreconciled(lease, {
+          preserveSupersededSource: true
+        });
+        if (!retained && !heartbeatError) {
+          heartbeatError = new Error(
+            "Superseded provider discovery source could not be retained."
+          );
+        }
+      } else {
+        await releaseCourseProviderObservation(lease);
+      }
+    } catch (error) {
+      heartbeatError ??= error;
+    }
+
+    if (heartbeatError) throw heartbeatError;
   }
 }
 
@@ -387,8 +464,20 @@ function retireMonitoringLegacyPolicyBlock(
   preservation: Parameters<typeof retireLegacyPolicyOnlyCourseBlock>[2],
   expectedUnownedIncident: Parameters<
     typeof retireLegacyPolicyOnlyCourseBlock
-  >[3]
+  >[3],
+  observedAt?: Date,
+  providerObservation?: CourseProviderObservationLease
 ) {
+  if (observedAt || providerObservation) {
+    return retireLegacyPolicyOnlyCourseBlock(
+      courseId,
+      expectedCourse,
+      preservation,
+      expectedUnownedIncident,
+      observedAt,
+      providerObservation
+    );
+  }
   return expectedUnownedIncident
     ? retireLegacyPolicyOnlyCourseBlock(
         courseId,
@@ -402,7 +491,6 @@ function retireMonitoringLegacyPolicyBlock(
 async function refreshMissingOfficialWebsites(
   courses: MissingOfficialWebsiteCourse[],
   publicFetch: typeof fetch,
-  observedAt: Date,
   expectedUnownedIncidentsByCourseId:
     SearchMonitoringDiscoveryOptions["expectedUnownedIncidentsByCourseId"]
 ) {
@@ -416,53 +504,63 @@ async function refreshMissingOfficialWebsites(
     if (course.website || course.detectedBookingUrl) {
       continue;
     }
-    const execution = await runWithProviderRequestLease(
-      "SOURCE_MISSING",
-      async () => {
-        if (placeId) {
-          const response = await publicFetch(
-            `https://places.googleapis.com/v1/places/${encodeURIComponent(placeId)}`,
-            {
-              cache: "no-store",
-              headers: {
-                "X-Goog-Api-Key": apiKey,
-                "X-Goog-FieldMask": "websiteUri"
+    await runWithMonitoringDiscoveryProviderObservation({
+      courseId: course.id,
+      worker: async (observation) => {
+        const execution = await runWithProviderRequestLease(
+          "SOURCE_MISSING",
+          async () => {
+            observation.markProviderExecutionStarted();
+            if (placeId) {
+              const response = await publicFetch(
+                `https://places.googleapis.com/v1/places/${encodeURIComponent(placeId)}`,
+                {
+                  cache: "no-store",
+                  headers: {
+                    "X-Goog-Api-Key": apiKey,
+                    "X-Goog-FieldMask": "websiteUri"
+                  }
+                }
+              );
+              if (response.ok) {
+                const place = (await response.json()) as { websiteUri?: unknown };
+                const website = typeof place.websiteUri === "string"
+                  ? readSafePublicUrl(place.websiteUri)
+                  : null;
+                if (website) {
+                  return website;
+                }
               }
             }
-          );
-          if (response.ok) {
-            const place = (await response.json()) as { websiteUri?: unknown };
-            const website = typeof place.websiteUri === "string"
-              ? readSafePublicUrl(place.websiteUri)
-              : null;
-            if (website) {
-              return website;
-            }
+
+            return searchGooglePlacesForExactOfficialWebsite(
+              course,
+              apiKey,
+              publicFetch
+            );
           }
+        );
+        if (!execution.acquired || !execution.value) {
+          return;
         }
 
-        return searchGooglePlacesForExactOfficialWebsite(
-          course,
-          apiKey,
-          publicFetch
-        );
+        observation.assertObservationOwned();
+        const expectedUnownedIncident =
+          expectedUnownedIncidentsByCourseId?.get(course.id);
+        const applied = await applyRecoveredOfficialWebsiteToCourse({
+          courseId: course.id,
+          website: execution.value,
+          expectedUpdatedAt: course.updatedAt,
+          ...(expectedUnownedIncident ? { expectedUnownedIncident } : {}),
+          observedAt: observation.providerObservedAt,
+          providerObservation: observation.lease
+        });
+        if (applied?.website === execution.value) {
+          course.website = applied.website;
+          course.updatedAt = applied.updatedAt;
+        }
       }
-    );
-    if (execution.acquired && execution.value) {
-      const expectedUnownedIncident =
-        expectedUnownedIncidentsByCourseId?.get(course.id);
-      const applied = await applyRecoveredOfficialWebsiteToCourse({
-        courseId: course.id,
-        website: execution.value,
-        expectedUpdatedAt: course.updatedAt,
-        ...(expectedUnownedIncident ? { expectedUnownedIncident } : {}),
-        observedAt
-      });
-      if (applied?.website === execution.value) {
-        course.website = applied.website;
-        course.updatedAt = applied.updatedAt;
-      }
-    }
+    });
   }
 }
 
@@ -678,7 +776,6 @@ export async function prepareSearchMonitoring(
       .map((preference) => preference.course)
       .filter((course) => sourceRefreshCourseIds.has(course.id)),
     publicFetch,
-    now,
     options.expectedUnownedIncidentsByCourseId
   );
   const repeatedFailureEvidenceByCourse = await listRepeatedMonitoringFailureEvidence(
@@ -870,10 +967,6 @@ export async function prepareSearchMonitoring(
       remediationOverrideEligible
     );
   });
-  const evidenceBySource = new Map<string, Promise<CollectedPageEvidence>>();
-  const pageFetches = new Map<string, Promise<Awaited<ReturnType<typeof fetchPublicHtml>>>>();
-  const wordpressContentFetches = new Map<string, Promise<string | null>>();
-
   await runProviderFamilyTasks(
     dueCandidates,
     ({ course, sourceUrl }) =>
@@ -882,160 +975,222 @@ export async function prepareSearchMonitoring(
         detectedBookingUrl: sourceUrl
       }).providerFamilyKey,
     async ({ course, sourceUrl }) => {
-      const leasedFetch = createProviderLeasedDiscoveryFetch(publicFetch);
-      const forcedPolicyReconciliation = forcedPolicyReconciliationCourseIds.has(course.id);
-      const markAttempted = () => {
-        if (!attemptedCourseIds.includes(course.id)) {
-          attemptedCourseIds.push(course.id);
-        }
-      };
-      try {
-        const officialWebsite = readSafePublicUrl(course.website);
-        const verifiedLayoutHoleCounts = course.layoutHolesVerifiedAt
-          ? normalizeLayoutHoleCounts(course.layoutHoleCounts)
-          : [];
-        const sourceKey = `${normalizeSourceKey(
-          sourceUrl
-        )}|${normalizeCourseLinkName(course.name)}|${
-          officialWebsite ? normalizeSourceKey(officialWebsite) : "SOURCE_MISSING"
-        }|layout:${verifiedLayoutHoleCounts.join(",") || "UNVERIFIED"
-        }`;
-        let evidencePromise = evidenceBySource.get(sourceKey);
-        if (!evidencePromise) {
-          evidencePromise = collectOfficialSiteEvidence(
-            sourceUrl,
-            leasedFetch,
-            course.name,
-            pageFetches,
-            wordpressContentFetches,
-            course.website,
-            verifiedLayoutHoleCounts
-          );
-          evidenceBySource.set(sourceKey, evidencePromise);
-        }
-        const collected = await evidencePromise;
-        const collectedWithCorroboration = {
-          ...collected,
-          ...(officialWebsite ? { officialCourseWebsite: officialWebsite } : {}),
-          corroboratedAccessBarrier:
-            findCorroboratingAccessBarrier(
-              previousEvidenceByCourse.get(course.id),
-              collected.accessBarriers
-            ) ?? undefined,
-          courseId: course.id,
-          courseName: course.name,
-          ...(course.detectedPlatform === "TEEITUP" &&
-          readSafePublicUrl(course.detectedBookingUrl)
-            ? {
-                persistedTeeItUpBookingUrl: readSafePublicUrl(
-                  course.detectedBookingUrl
+      const observation = await runWithMonitoringDiscoveryProviderObservation({
+        courseId: course.id,
+        worker: async (providerObservation) => {
+          const observedFetch = (async (
+            input: Parameters<typeof fetch>[0],
+            init?: RequestInit
+          ) => {
+            providerObservation.markProviderExecutionStarted();
+            return publicFetch(input, init);
+          }) as typeof fetch;
+          const leasedFetch = createProviderLeasedDiscoveryFetch(observedFetch);
+          const forcedPolicyReconciliation =
+            forcedPolicyReconciliationCourseIds.has(course.id);
+          const markAttempted = () => {
+            if (!attemptedCourseIds.includes(course.id)) {
+              attemptedCourseIds.push(course.id);
+            }
+          };
+          let discovery: BrowserDiscovery;
+          try {
+            const officialWebsite = readSafePublicUrl(course.website);
+            const verifiedLayoutHoleCounts = course.layoutHolesVerifiedAt
+              ? normalizeLayoutHoleCounts(course.layoutHoleCounts)
+              : [];
+            const collected = await collectOfficialSiteEvidence(
+              sourceUrl,
+              leasedFetch,
+              course.name,
+              new Map<
+                string,
+                Promise<Awaited<ReturnType<typeof fetchPublicHtml>>>
+              >(),
+              new Map<string, Promise<string | null>>(),
+              course.website,
+              verifiedLayoutHoleCounts
+            );
+            const collectedWithCorroboration = {
+              ...collected,
+              ...(officialWebsite
+                ? { officialCourseWebsite: officialWebsite }
+                : {}),
+              corroboratedAccessBarrier:
+                findCorroboratingAccessBarrier(
+                  previousEvidenceByCourse.get(course.id),
+                  collected.accessBarriers
+                ) ?? undefined,
+              courseId: course.id,
+              courseName: course.name,
+              ...(course.detectedPlatform === "TEEITUP" &&
+              readSafePublicUrl(course.detectedBookingUrl)
+                ? {
+                    persistedTeeItUpBookingUrl: readSafePublicUrl(
+                      course.detectedBookingUrl
+                    )
+                  }
+                : {}),
+              ...(verifiedLayoutHoleCounts.length > 0
+                ? { verifiedLayoutHoleCounts }
+                : {})
+            };
+            const initialDiscovery = buildBrowserDiscovery(
+              collectedWithCorroboration
+            );
+            const legacyProphetAwareDiscovery =
+              buildLegacyProphetFallbackDiscovery(
+                initialDiscovery,
+                collectedWithCorroboration
+              );
+            const chronogolfDiscovery = await enrichChronogolfDiscovery(
+              legacyProphetAwareDiscovery,
+              leasedFetch
+            );
+            const cpsDiscovery = await enrichCpsDiscovery(
+              chronogolfDiscovery,
+              course.name,
+              leasedFetch
+            );
+            const reviewableCpsDiscovery =
+              keepIncompleteCpsDiscoveryActionable(cpsDiscovery);
+            const reasonAwareDiscovery = sanitizeBrowserDiscoveryAccessEvidence(
+              keepPolicyOnlyDiscoveryActionable(
+                await enrichTeesnapDiscovery(
+                  reviewableCpsDiscovery,
+                  course.name,
+                  leasedFetch
                 )
-        }
-            : {}),
-          ...(verifiedLayoutHoleCounts.length > 0
-            ? { verifiedLayoutHoleCounts }
-            : {})
-        };
-        const initialDiscovery = buildBrowserDiscovery(collectedWithCorroboration);
-        const legacyProphetAwareDiscovery = buildLegacyProphetFallbackDiscovery(
-          initialDiscovery,
-          collectedWithCorroboration
-        );
-        const chronogolfDiscovery = await enrichChronogolfDiscovery(
-          legacyProphetAwareDiscovery,
-          leasedFetch
-        );
-        const cpsDiscovery = await enrichCpsDiscovery(
-          chronogolfDiscovery,
-          course.name,
-          leasedFetch
-        );
-        const reviewableCpsDiscovery = keepIncompleteCpsDiscoveryActionable(cpsDiscovery);
-        const reasonAwareDiscovery = sanitizeBrowserDiscoveryAccessEvidence(
-          keepPolicyOnlyDiscoveryActionable(
-            await enrichTeesnapDiscovery(reviewableCpsDiscovery, course.name, leasedFetch)
-          ),
-          collected.accessBarriers
-        );
-        const discovery = forcedPolicyReconciliation
-          ? markLegacyPolicyReconciliation(reasonAwareDiscovery)
-          : reasonAwareDiscovery;
-        markAttempted();
-        const expectedCourse = getMonitoringCourseExpectation(course);
-        const expectedUnownedIncident =
-          options.expectedUnownedIncidentsByCourseId?.get(course.id);
-        const replacesLegacyPolicy =
-          isLegacyPolicyOnlyBlock(course) && replacesLegacyPolicyOnlyBlock(discovery);
-        let applied = null;
-        if (
-          isLegacyPolicyOnlyBlock(course) && !replacesLegacyPolicy) {
-          const persisted = expectedUnownedIncident
-            ? await recordBrowserDiscovery(
-                discovery,
-                undefined,
-                undefined,
-                expectedUnownedIncident
-              )
-            : await recordBrowserDiscovery(discovery);
-          if (expectedUnownedIncident && !persisted) {
-            deferredCourseIds.push(course.id);
-            return;
-          }
-        } else if (expectedUnownedIncident) {
-          const persisted = await recordAndApplyBrowserDiscoveryToCourse(
-            discovery, expectedCourse,
-            expectedUnownedIncident);
-          if (!persisted) {
-            deferredCourseIds.push(course.id);
-            return;
-          }
-          applied = persisted.applied;
-        } else { await recordBrowserDiscovery(discovery);
-          applied = await applyMonitoringDiscovery(
-            discovery,
-            expectedCourse,
-            undefined
-          );
-        }
-        if (applied) {
-          appliedCourseIds.push(course.id);
-          if (replacesLegacyPolicy) {
-            resolvedLegacyPolicyCourseIds.add(course.id);
-          }
-        }
-      } catch (error) {
-        if (error instanceof ProviderDiscoveryLeaseDeferredError) {
-          deferredCourseIds.push(course.id);
-          return;
-        }
-        markAttempted();
-        const failedDiscovery = buildFailedDiscovery({
-          courseId: course.id,
-          sourceUrl,
-          detectedPlatform: course.detectedPlatform,
-          message: error instanceof Error ? error.message : "Official-site discovery failed"
-        });
-        const persistenceInput =
-          forcedPolicyReconciliation
-            ? markLegacyPolicyReconciliation(failedDiscovery)
-            : failedDiscovery;
-        const expectedUnownedIncident =
-          options.expectedUnownedIncidentsByCourseId?.get(course.id
-        );
-        const persisted = expectedUnownedIncident
-          ? await recordBrowserDiscovery(
+              ),
+              collected.accessBarriers
+            );
+            discovery = forcedPolicyReconciliation
+              ? markLegacyPolicyReconciliation(reasonAwareDiscovery)
+              : reasonAwareDiscovery;
+          } catch (error) {
+            if (error instanceof ProviderDiscoveryLeaseDeferredError) {
+              deferredCourseIds.push(course.id);
+              return;
+            }
+            markAttempted();
+            providerObservation.assertObservationOwned();
+            const failedDiscovery = buildFailedDiscovery({
+              courseId: course.id,
+              sourceUrl,
+              detectedPlatform: course.detectedPlatform,
+              message:
+                error instanceof Error
+                  ? error.message
+                  : "Official-site discovery failed"
+            });
+            const persistenceInput = forcedPolicyReconciliation
+              ? markLegacyPolicyReconciliation(failedDiscovery)
+              : failedDiscovery;
+            const expectedUnownedIncident =
+              options.expectedUnownedIncidentsByCourseId?.get(course.id);
+            const persisted = await recordBrowserDiscovery(
               persistenceInput,
               undefined,
               undefined,
-              expectedUnownedIncident
-            )
-          : await recordBrowserDiscovery(persistenceInput);
-        if (expectedUnownedIncident && !persisted) {
-          deferredCourseIds.push(course.id);
-          return;
+              expectedUnownedIncident,
+              providerObservation.providerObservedAt,
+              providerObservation.lease
+            );
+            if (expectedUnownedIncident && !persisted) {
+              deferredCourseIds.push(course.id);
+              return;
+            }
+            if (isLegacyPolicyOnlyBlock(course)) {
+              providerObservation.assertObservationOwned();
+              const expectedCourse = getMonitoringCourseExpectation(course);
+              const retired = expectedCourse
+                ? await retireMonitoringLegacyPolicyBlock(
+                    course.id,
+                    expectedCourse,
+                    getLegacyPolicyEvidencePreservation(course),
+                    expectedUnownedIncident,
+                    providerObservation.providerObservedAt,
+                    providerObservation.lease
+                  )
+                : null;
+              if (retired) {
+                appliedCourseIds.push(course.id);
+                resolvedLegacyPolicyCourseIds.add(course.id);
+              } else if (expectedUnownedIncident) {
+                deferredCourseIds.push(course.id);
+              }
+            }
+            failedCourseIds.push(course.id);
+            return;
+          }
+
+          markAttempted();
+          const expectedCourse = getMonitoringCourseExpectation(course);
+          const expectedUnownedIncident =
+            options.expectedUnownedIncidentsByCourseId?.get(course.id);
+          const replacesLegacyPolicy =
+            isLegacyPolicyOnlyBlock(course) &&
+            replacesLegacyPolicyOnlyBlock(discovery);
+          let applied = null;
+          providerObservation.assertObservationOwned();
+          if (isLegacyPolicyOnlyBlock(course) && !replacesLegacyPolicy) {
+            const persisted = await recordBrowserDiscovery(
+              discovery,
+              undefined,
+              undefined,
+              expectedUnownedIncident,
+              providerObservation.providerObservedAt,
+              providerObservation.lease
+            );
+            if (expectedUnownedIncident && !persisted) {
+              deferredCourseIds.push(course.id);
+              return;
+            }
+
+            providerObservation.assertObservationOwned();
+            const retired = expectedCourse
+              ? await retireMonitoringLegacyPolicyBlock(
+                  course.id,
+                  expectedCourse,
+                  getLegacyPolicyEvidencePreservation(course),
+                  expectedUnownedIncident,
+                  providerObservation.providerObservedAt,
+                  providerObservation.lease
+                )
+              : null;
+            if (retired) {
+              applied = retired;
+              resolvedLegacyPolicyCourseIds.add(course.id);
+            } else if (expectedUnownedIncident) {
+              deferredCourseIds.push(course.id);
+            }
+          } else {
+            const persisted = await recordAndApplyBrowserDiscoveryToCourse(
+              discovery,
+              expectedCourse,
+              expectedUnownedIncident,
+              {
+                observedAt: providerObservation.providerObservedAt,
+                providerObservation: providerObservation.lease
+              }
+            );
+            if (expectedUnownedIncident && !persisted) {
+              deferredCourseIds.push(course.id);
+              return;
+            }
+            applied = persisted?.applied ?? null;
+          }
+          if (applied) {
+            appliedCourseIds.push(course.id);
+            if (replacesLegacyPolicy) {
+              resolvedLegacyPolicyCourseIds.add(course.id);
+            }
+          }
+        }
+      });
+      if (!observation.acquired) {
+        deferredCourseIds.push(course.id);
       }
-        failedCourseIds.push(course.id);
-    }
     }
   );
 
@@ -1052,12 +1207,15 @@ export async function prepareSearchMonitoring(
     const expectedCourse = getMonitoringCourseExpectation(course);
     const expectedUnownedIncident =
       options.expectedUnownedIncidentsByCourseId?.get(course.id);
+    const reconciliationObservedAt =
+      recentDiscoveriesByCourse.get(course.id)?.[0]?.createdAt;
     const retired = expectedCourse
       ? await retireMonitoringLegacyPolicyBlock(
           course.id,
           expectedCourse,
           getLegacyPolicyEvidencePreservation(course),
-          expectedUnownedIncident
+          expectedUnownedIncident,
+          reconciliationObservedAt
         )
       : null;
     if (retired && !appliedCourseIds.includes(course.id)) {

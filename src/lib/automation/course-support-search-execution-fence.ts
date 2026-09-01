@@ -2,10 +2,16 @@ import { createHash } from "node:crypto";
 
 import { Prisma, type ProbeOutcome } from "@prisma/client";
 
+import { MAX_COURSE_PREFERENCES } from "@/lib/validation/search-constraints";
+
+import { getProviderExecutionEvidenceObservedAt } from "./provider-execution-marker";
+
 const SEARCH_EXECUTION_FENCE_SCHEMA_VERSION = 1;
-const PROVIDER_EXECUTION_MARKER = "RUNNABLE_PROVIDER_CHECK";
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 const COURSE_REF_PATTERN = /^[a-f0-9]{24}$/u;
+const COURSE_SUPPORT_PROBE_READ_LIMIT_PER_COURSE = 256;
+export const COURSE_SUPPORT_SEARCH_EXECUTION_PROBE_READ_LIMIT =
+  MAX_COURSE_PREFERENCES * COURSE_SUPPORT_PROBE_READ_LIMIT_PER_COURSE;
 
 export type CourseSupportSearchExecutionFenceReason =
   | "DISPATCH_NOT_COMPLETE"
@@ -116,6 +122,13 @@ export type CourseSupportSearchExecutionFenceInput = {
   now: Date;
 };
 
+function getCourseSupportPostDispatchFloor(input: {
+  recheckDispatchStartedAt: Date | null;
+  recheckDispatchedAt: Date | null;
+}) {
+  return input.recheckDispatchedAt ?? input.recheckDispatchStartedAt;
+}
+
 export function createCourseSupportSearchExecutionFenceInput(input: {
   batchId: string;
   courseIds: string[];
@@ -190,7 +203,8 @@ export async function loadCourseSupportSearchExecutionFence(
   input: CourseSupportSearchExecutionFenceInput,
 ) {
   const courseIds = [...new Set(input.courseIds)].sort();
-  const postDispatchFloor = input.recheckDispatchStartedAt ?? new Date(0);
+  const postDispatchFloor =
+    getCourseSupportPostDispatchFloor(input) ?? new Date(0);
   const dispatches = (await client.courseSupportBatchSearch.findMany({
     where: { batchId: input.batchId },
     orderBy: [{ id: "asc" }],
@@ -233,6 +247,7 @@ export async function loadCourseSupportSearchExecutionFence(
               observedAt: { gte: postDispatchFloor },
             },
             orderBy: [{ observedAt: "asc" }, { id: "asc" }],
+            take: COURSE_SUPPORT_SEARCH_EXECUTION_PROBE_READ_LIMIT + 1,
             select: {
               id: true,
               teeSearchId: true,
@@ -250,6 +265,17 @@ export async function loadCourseSupportSearchExecutionFence(
       },
     },
   })) as CourseSupportSearchExecutionFenceDispatch[];
+  if (
+    dispatches.some(
+      (dispatch) =>
+        (dispatch.teeSearch?.probes.length ?? 0) >
+        COURSE_SUPPORT_SEARCH_EXECUTION_PROBE_READ_LIMIT,
+    )
+  ) {
+    throw new CourseSupportSearchExecutionFenceRetryError(
+      "Course-support post-dispatch probe evidence exceeds the bounded read limit.",
+    );
+  }
 
   return {
     dispatches,
@@ -265,10 +291,14 @@ export async function lockCourseSupportSearchExecutionFenceRows(
   transaction: Prisma.TransactionClient,
   input: Pick<
     CourseSupportSearchExecutionFenceInput,
-    "batchId" | "courseIds" | "recheckDispatchStartedAt"
+    | "batchId"
+    | "courseIds"
+    | "recheckDispatchStartedAt"
+    | "recheckDispatchedAt"
   >,
 ) {
-  const postDispatchFloor = input.recheckDispatchStartedAt ?? new Date(0);
+  const postDispatchFloor =
+    getCourseSupportPostDispatchFloor(input) ?? new Date(0);
 
   // Workflow/search writers already establish TeeSearch as the first locked
   // parent. Discover the exact ids without a lock, acquire them in stable
@@ -351,6 +381,7 @@ export function buildCourseSupportSearchExecutionFenceSnapshot(input: {
   dispatches: CourseSupportSearchExecutionFenceDispatch[];
 }): CourseSupportSearchExecutionFenceSnapshot {
   const courseIds = [...new Set(input.courseIds)].sort();
+  const postDispatchFloor = getCourseSupportPostDispatchFloor(input);
   const relevantCourseIds = new Set(courseIds);
   const expectedSearches = [...input.expectedSearches]
     .map((search) => ({
@@ -360,7 +391,7 @@ export function buildCourseSupportSearchExecutionFenceSnapshot(input: {
     .sort(compareExpectedSearch);
   const dispatches = [...input.dispatches]
     .map((dispatch) =>
-      normalizeDispatch(dispatch, input.recheckDispatchStartedAt),
+      normalizeDispatch(dispatch, postDispatchFloor),
     )
     .sort((left, right) => left.id.localeCompare(right.id));
   const reasons = new Set<CourseSupportSearchExecutionFenceReason>();
@@ -405,10 +436,10 @@ export function buildCourseSupportSearchExecutionFenceSnapshot(input: {
     const search = dispatch.teeSearch;
     if (!search) {
       if (
-        !input.recheckDispatchStartedAt ||
+        !postDispatchFloor ||
         !dispatch.removedAt ||
         dispatch.removedAt.getTime() <
-          input.recheckDispatchStartedAt.getTime() ||
+          postDispatchFloor.getTime() ||
         dispatch.removalReason !== "SEARCH_DELETED_BY_OWNER"
       ) {
         reasons.add("SEARCH_REMOVAL_UNVERIFIED");
@@ -436,7 +467,7 @@ export function buildCourseSupportSearchExecutionFenceSnapshot(input: {
     if (search.recheckRequestedAt) {
       reasons.add("SEARCH_RECHECK_PENDING");
     }
-    const dispatchStartedAt = input.recheckDispatchStartedAt;
+    const dispatchStartedAt = postDispatchFloor;
     const freshLastCheckedAt = Boolean(
       dispatchStartedAt &&
       search.lastCheckedAt &&
@@ -500,9 +531,11 @@ export function buildCourseSupportSearchExecutionFenceSnapshot(input: {
       dispatches.flatMap((dispatch) =>
         (dispatch.teeSearch?.probes ?? []).flatMap((probe) =>
           relevantCourseIds.has(probe.courseId) &&
-          isProviderExecutionAttempt(probe.rawSummary) &&
-          input.recheckDispatchStartedAt &&
-          probe.observedAt.getTime() >= input.recheckDispatchStartedAt.getTime()
+          isProviderExecutionAttempt({
+            rawSummary: probe.rawSummary,
+            probeObservedAt: probe.observedAt,
+            notBefore: postDispatchFloor,
+          })
             ? [probe.courseId]
             : [],
         ),
@@ -769,7 +802,7 @@ export function getCourseSupportSearchExecutionMayHaveStartedCourseRefs(
 
 function normalizeDispatch(
   dispatch: CourseSupportSearchExecutionFenceDispatch,
-  recheckDispatchStartedAt: Date | null,
+  postDispatchFloor: Date | null,
 ): CourseSupportSearchExecutionFenceDispatch {
   if (!dispatch.teeSearch) {
     return { ...dispatch, teeSearch: null };
@@ -786,8 +819,8 @@ function normalizeDispatch(
       probes: [...dispatch.teeSearch.probes]
         .filter(
           (probe) =>
-            !recheckDispatchStartedAt ||
-            probe.observedAt.getTime() >= recheckDispatchStartedAt.getTime(),
+            !postDispatchFloor ||
+            probe.observedAt.getTime() >= postDispatchFloor.getTime(),
         )
         .sort(
           (left, right) =>
@@ -870,8 +903,17 @@ function compareExpectedSearch(
   );
 }
 
-function isProviderExecutionAttempt(rawSummary: unknown) {
-  return asRecord(rawSummary).providerExecution === PROVIDER_EXECUTION_MARKER;
+function isProviderExecutionAttempt(input: {
+  rawSummary: unknown;
+  probeObservedAt: Date;
+  notBefore: Date | null;
+}) {
+  const providerObservedAt = getProviderExecutionEvidenceObservedAt(input);
+  return Boolean(
+    providerObservedAt &&
+      input.notBefore &&
+      providerObservedAt.getTime() >= input.notBefore.getTime(),
+  );
 }
 
 function createCourseRef(courseId: string) {

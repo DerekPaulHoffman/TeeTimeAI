@@ -2,10 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   attachSearchWorkflowRun: vi.fn(),
-  failScheduledSearchCheck: vi.fn(),
   getSearchCheckRequestState: vi.fn(),
   queueSearchCheck: vi.fn(),
-  recoverSearchScheduleStartFailure: vi.fn(),
   searchScheduleWorkflow: vi.fn(),
   start: vi.fn()
 }));
@@ -13,13 +11,8 @@ const mocks = vi.hoisted(() => ({
 vi.mock("workflow/api", () => ({ start: mocks.start }));
 vi.mock("@/lib/automation/db-service", () => ({
   attachSearchWorkflowRun: mocks.attachSearchWorkflowRun,
-  failScheduledSearchCheck: mocks.failScheduledSearchCheck,
   getSearchCheckRequestState: mocks.getSearchCheckRequestState,
   queueSearchCheck: mocks.queueSearchCheck
-}));
-vi.mock("@/lib/automation/search-recheck-queue", () => ({
-  buildSearchScheduleReference: vi.fn(),
-  recoverSearchScheduleStartFailure: mocks.recoverSearchScheduleStartFailure
 }));
 vi.mock("@/workflows/search-schedule", () => ({
   searchScheduleWorkflow: mocks.searchScheduleWorkflow
@@ -80,16 +73,23 @@ describe("guarded search schedule start", () => {
       ["search-1", 9],
       { deploymentId: "latest" }
     );
-    expect(mocks.attachSearchWorkflowRun).toHaveBeenCalledWith(
+    expect(mocks.attachSearchWorkflowRun).toHaveBeenCalledTimes(2);
+    expect(mocks.attachSearchWorkflowRun).toHaveBeenNthCalledWith(
+      1,
+      "search-1",
+      9,
+      expect.stringMatching(/^tee-search-schedule-starting:/),
+      null
+    );
+    expect(mocks.attachSearchWorkflowRun).toHaveBeenLastCalledWith(
       "search-1",
       9,
       "run-1",
-      null
+      expect.stringMatching(/^tee-search-schedule-starting:/)
     );
-    expect(mocks.failScheduledSearchCheck).not.toHaveBeenCalled();
   });
 
-  it("does not report a guarded start whose Workflow attachment lost a race", async () => {
+  it("does not start Workflow when the durable reservation loses a race", async () => {
     mocks.queueSearchCheck.mockResolvedValue({
       id: "search-1",
       status: "ACTIVE",
@@ -98,7 +98,6 @@ describe("guarded search schedule start", () => {
       checkStatus: "QUEUED",
       updatedAt: new Date("2026-07-16T18:30:01.000Z")
     });
-    mocks.start.mockResolvedValue({ runId: "stale-run" });
     mocks.attachSearchWorkflowRun.mockResolvedValue({ count: 0 });
 
     await expect(
@@ -108,15 +107,54 @@ describe("guarded search schedule start", () => {
     expect(mocks.attachSearchWorkflowRun).toHaveBeenCalledWith(
       "search-1",
       9,
-      "stale-run",
+      expect.stringMatching(/^tee-search-schedule-starting:/),
       null
     );
-    expect(mocks.failScheduledSearchCheck).not.toHaveBeenCalled();
-    expect(mocks.recoverSearchScheduleStartFailure).not.toHaveBeenCalled();
+    expect(mocks.start).not.toHaveBeenCalled();
   });
 
-  it("recovers a guarded schedule when Workflow start fails", async () => {
+  it("allows only one guarded caller to start the same queued generation", async () => {
+    let workflowRunId: string | null = null;
+    mocks.queueSearchCheck.mockResolvedValue({
+      id: "search-1",
+      status: "ACTIVE",
+      scheduleVersion: 9,
+      workflowRunId: null,
+      checkStatus: "QUEUED",
+      updatedAt: new Date("2026-07-16T18:30:01.000Z")
+    });
+    mocks.start.mockResolvedValue({ runId: "only-run" });
+    mocks.attachSearchWorkflowRun.mockImplementation(
+      async (
+        _searchId: string,
+        _scheduleVersion: number,
+        nextWorkflowRunId: string,
+        expectedWorkflowRunId: string | null
+      ) => {
+        if (workflowRunId !== expectedWorkflowRunId) return { count: 0 };
+        workflowRunId = nextWorkflowRunId;
+        return { count: 1 };
+      }
+    );
+
+    const results = await Promise.all([
+      startSearchSchedule("search-1", { expectedState }),
+      startSearchSchedule("search-1", { expectedState })
+    ]);
+
+    expect(results).toEqual(
+      expect.arrayContaining([
+        { runId: "only-run", scheduleVersion: 9, reused: false },
+        { outcome: "not_eligible", reason: "state_changed" }
+      ])
+    );
+    expect(mocks.start).toHaveBeenCalledTimes(1);
+    expect(workflowRunId).toBe("only-run");
+  });
+
+  it("retains the durable reservation when Workflow start throws ambiguously", async () => {
     const startError = new Error("Workflow start failed");
+    let workflowRunId: string | null = null;
     mocks.queueSearchCheck.mockResolvedValue({
       id: "search-1",
       status: "ACTIVE",
@@ -126,29 +164,28 @@ describe("guarded search schedule start", () => {
       updatedAt: new Date("2026-07-16T18:30:01.000Z")
     });
     mocks.start.mockRejectedValue(startError);
-    mocks.failScheduledSearchCheck.mockResolvedValue({ count: 1 });
-    mocks.recoverSearchScheduleStartFailure.mockResolvedValue({ outcome: "queued" });
+    mocks.attachSearchWorkflowRun.mockImplementation(
+      async (
+        _searchId: string,
+        _scheduleVersion: number,
+        nextWorkflowRunId: string,
+        expectedWorkflowRunId: string | null
+      ) => {
+        if (workflowRunId !== expectedWorkflowRunId) return { count: 0 };
+        workflowRunId = nextWorkflowRunId;
+        return { count: 1 };
+      }
+    );
 
     await expect(
       startSearchSchedule("search-1", { expectedState })
     ).rejects.toBe(startError);
 
-    expect(mocks.attachSearchWorkflowRun).not.toHaveBeenCalled();
-    expect(mocks.failScheduledSearchCheck).toHaveBeenCalledWith({
-      searchId: "search-1",
-      scheduleVersion: 9,
-      message: "Workflow start failed",
-      nextCheckAt: expect.any(Date),
-      expectedWorkflowRunId: null
-    });
-    expect(mocks.recoverSearchScheduleStartFailure).toHaveBeenCalledWith({
-      searchId: "search-1",
-      scheduleVersion: 9,
-      trigger: "START_FAILED"
-    });
+    expect(workflowRunId).toMatch(/^tee-search-schedule-starting:/);
+    expect(mocks.attachSearchWorkflowRun).toHaveBeenCalledTimes(1);
   });
 
-  it("recovers the queued version when attaching a started Workflow fails", async () => {
+  it("retains the reservation when attaching an accepted Workflow throws", async () => {
     const attachError = new Error("Workflow attach failed");
     mocks.queueSearchCheck.mockResolvedValue({
       id: "search-1",
@@ -159,25 +196,21 @@ describe("guarded search schedule start", () => {
       updatedAt: new Date("2026-07-16T18:30:01.000Z")
     });
     mocks.start.mockResolvedValue({ runId: "run-1" });
-    mocks.attachSearchWorkflowRun.mockRejectedValue(attachError);
-    mocks.failScheduledSearchCheck.mockResolvedValue({ count: 1 });
-    mocks.recoverSearchScheduleStartFailure.mockResolvedValue({ outcome: "queued" });
+    mocks.attachSearchWorkflowRun
+      .mockResolvedValueOnce({ count: 1 })
+      .mockRejectedValueOnce(attachError);
 
     await expect(
       startSearchSchedule("search-1", { expectedState })
     ).rejects.toBe(attachError);
 
-    expect(mocks.failScheduledSearchCheck).toHaveBeenCalledWith({
-      searchId: "search-1",
-      scheduleVersion: 9,
-      message: "Workflow attach failed",
-      nextCheckAt: expect.any(Date),
-      expectedWorkflowRunId: null
-    });
-    expect(mocks.recoverSearchScheduleStartFailure).toHaveBeenCalledWith({
-      searchId: "search-1",
-      scheduleVersion: 9,
-      trigger: "START_FAILED"
-    });
+    expect(mocks.attachSearchWorkflowRun).toHaveBeenCalledTimes(2);
+    expect(mocks.attachSearchWorkflowRun).toHaveBeenNthCalledWith(
+      1,
+      "search-1",
+      9,
+      expect.stringMatching(/^tee-search-schedule-starting:/),
+      null
+    );
   });
 });

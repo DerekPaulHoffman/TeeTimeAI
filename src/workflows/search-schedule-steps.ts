@@ -1,11 +1,12 @@
+import { getWorkflowMetadata } from "workflow";
+
 import {
   attachSearchWorkflowRun,
-  failScheduledSearchCheck,
   getSearchScheduleState
 } from "@/lib/automation/db-service";
 import {
   buildSearchScheduleReference,
-  recoverSearchScheduleStartFailure
+  startSearchScheduleWorkflowWithReservation
 } from "@/lib/automation/search-recheck-queue";
 import { executeScheduledSearchCheck } from "@/lib/automation/search-schedule-execution";
 import { launchSearchScheduleWorkflow } from "@/lib/automation/search-schedule-launcher";
@@ -37,8 +38,13 @@ export async function startNextSearchCheckStep(
   console.log(
     `[startNextSearchCheckStep] START searchRef=${searchRef} scheduleVersion=${scheduleVersion}`
   );
+  const parentWorkflowRunId = getWorkflowMetadata().workflowRunId;
   const state = await getSearchScheduleState(searchId, scheduleVersion);
-  if (!state) {
+  if (
+    !state ||
+    !parentWorkflowRunId ||
+    state.workflowRunId !== parentWorkflowRunId
+  ) {
     console.log(
       `[startNextSearchCheckStep] STOPPED searchRef=${searchRef} scheduleVersion=${scheduleVersion}`
     );
@@ -46,44 +52,34 @@ export async function startNextSearchCheckStep(
   }
 
   try {
-    const run = await launchSearchScheduleWorkflow(searchId, scheduleVersion);
-    await attachSearchWorkflowRun(
-      searchId,
-      scheduleVersion,
-      run.runId,
-      state.workflowRunId
+    const started = await startSearchScheduleWorkflowWithReservation(
+      {
+        searchId,
+        scheduleVersion,
+        expectedWorkflowRunId: parentWorkflowRunId,
+      },
+      {
+        startWorkflow: launchSearchScheduleWorkflow,
+        attachWorkflowRun: attachSearchWorkflowRun,
+      },
     );
+    if (started.outcome !== "started") {
+      console.log(
+        `[startNextSearchCheckStep] STOPPED searchRef=${searchRef} scheduleVersion=${scheduleVersion} reason=${started.outcome}`,
+      );
+      return null;
+    }
     console.log(
       `[startNextSearchCheckStep] DONE searchRef=${searchRef} scheduleVersion=${scheduleVersion}`
     );
-    return run.runId;
-  } catch (error) {
-    const message =
-      error instanceof Error
-        ? error.message
-        : "Could not start successor search workflow";
-    const failed = await failScheduledSearchCheck({
-      searchId,
+    return started.runId;
+  } catch {
+    console.error("[startNextSearchCheckStep] START_UNCERTAIN", {
+      searchRef,
       scheduleVersion,
-      message,
-      nextCheckAt: new Date(Date.now() + 5 * 60 * 1000),
-      expectedWorkflowRunId: state.workflowRunId
+      message:
+        "Successor Workflow start outcome is uncertain; generation-fenced deployed recovery remains pending",
     });
-    if (failed.count !== 1) {
-      return null;
-    }
-    const recovery = await recoverSearchScheduleStartFailure({
-      searchId,
-      scheduleVersion,
-      trigger: "START_FAILED"
-    });
-    if (recovery.outcome === "failed") {
-      console.error("[startNextSearchCheckStep] QUEUE_FALLBACK_FAILED", {
-        searchRef,
-        scheduleVersion,
-        message: "Could not enqueue successor recovery; deployed cron recovery remains pending"
-      });
-    }
     return null;
   }
 }

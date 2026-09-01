@@ -6,15 +6,23 @@ import {
   deleteTeeSearchForUser,
   listTeeSearchesForUser,
   updateTeeSearchForUser,
-  updateTeeSearchStatusForUser
+  updateTeeSearchStatusForUser,
 } from "./service";
 
 const deliveryOutboxMocks = vi.hoisted(() => ({
-  lockSearchForAlertMutation: vi.fn()
+  lockSearchForAlertMutation: vi.fn(),
 }));
 
 const courseMonitoringMocks = vi.hoisted(() => ({
-  requestTechnicalFinalRevalidationForDemand: vi.fn()
+  requestTechnicalFinalRevalidationForDemand: vi.fn(),
+}));
+
+const localReaderServiceMocks = vi.hoisted(() => ({
+  getNewestCompletedLocalReaderProviderObservationsInTransaction: vi.fn(),
+}));
+
+const providerObservationMocks = vi.hoisted(() => ({
+  getCourseProviderObservationFencesInTransaction: vi.fn(),
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -24,19 +32,19 @@ vi.mock("@/lib/prisma", () => ({
     course: {
       findMany: vi.fn(),
       findUnique: vi.fn(),
-      update: vi.fn()
+      update: vi.fn(),
     },
     courseProbe: {
-      findMany: vi.fn()
+      findMany: vi.fn(),
     },
     googlePlaceReview: {
-      findMany: vi.fn()
+      findMany: vi.fn(),
     },
     coursePreference: {
-      updateMany: vi.fn()
+      updateMany: vi.fn(),
     },
     courseSupportBatchSearch: {
-      updateMany: vi.fn()
+      updateMany: vi.fn(),
     },
     teeSearch: {
       count: vi.fn(),
@@ -45,27 +53,40 @@ vi.mock("@/lib/prisma", () => ({
       findUnique: vi.fn(),
       findUniqueOrThrow: vi.fn(),
       delete: vi.fn(),
-      update: vi.fn()
-    }
-  }
+      update: vi.fn(),
+    },
+  },
 }));
 vi.mock("@/lib/email/search-delivery-outbox", () => deliveryOutboxMocks);
 vi.mock("@/lib/automation/course-monitoring", () => courseMonitoringMocks);
+vi.mock("@/lib/local-reader/service", () => localReaderServiceMocks);
+vi.mock(
+  "@/lib/automation/provider-execution-marker",
+  () => providerObservationMocks,
+);
 
 const mockedPrisma = vi.mocked(prisma, { deep: true });
 
 beforeEach(() => {
   mockedPrisma.$transaction.mockImplementation(async (callback) =>
-    (callback as (transaction: typeof prisma) => Promise<unknown>)(prisma)
+    (callback as (transaction: typeof prisma) => Promise<unknown>)(prisma),
   );
   deliveryOutboxMocks.lockSearchForAlertMutation.mockResolvedValue({
     id: "search-1",
     status: "ACTIVE",
-    alertGeneration: 2
+    alertGeneration: 2,
   });
-  courseMonitoringMocks.requestTechnicalFinalRevalidationForDemand.mockResolvedValue({
-    requestedCourseIds: []
-  });
+  courseMonitoringMocks.requestTechnicalFinalRevalidationForDemand.mockResolvedValue(
+    {
+      requestedCourseIds: [],
+    },
+  );
+  localReaderServiceMocks.getNewestCompletedLocalReaderProviderObservationsInTransaction.mockResolvedValue(
+    new Map(),
+  );
+  providerObservationMocks.getCourseProviderObservationFencesInTransaction.mockResolvedValue(
+    new Map(),
+  );
 });
 
 describe("listTeeSearchesForUser", () => {
@@ -77,11 +98,11 @@ describe("listTeeSearchesForUser", () => {
           schemaVersion: 1,
           kind: "ALERT_GENERATION_START",
           alertGeneration: 3,
-          generationStartedAt: "2026-08-11T20:00:00.000Z"
+          generationStartedAt: "2026-08-11T20:00:00.000Z",
         },
         preferences: [],
-        matches: []
-      }
+        matches: [],
+      },
     ] as never);
     mockedPrisma.$queryRaw.mockResolvedValue([] as never);
 
@@ -92,7 +113,7 @@ describe("listTeeSearchesForUser", () => {
 
   it("unwraps a durable generation envelope to the legacy public snapshot", async () => {
     const courseSnapshot = [
-      { courseId: "course-1", courseName: "Course", state: "checking" }
+      { courseId: "course-1", courseName: "Course", state: "checking" },
     ];
     mockedPrisma.teeSearch.findMany.mockResolvedValue([
       {
@@ -102,17 +123,299 @@ describe("listTeeSearchesForUser", () => {
           kind: "ALERT_GENERATION_STATUS",
           alertGeneration: 3,
           generationStartedAt: "2026-08-11T20:00:00.000Z",
-          courseSnapshot
+          courseSnapshot,
         },
         preferences: [],
-        matches: []
-      }
+        matches: [],
+      },
     ] as never);
     mockedPrisma.$queryRaw.mockResolvedValue([] as never);
 
     const searches = await listTeeSearchesForUser("user-1");
 
     expect(searches[0]?.statusEmailSnapshot).toEqual(courseSnapshot);
+  });
+
+  it("preserves stale match rows durably while hiding them after newer failure evidence", async () => {
+    const confirmedAt = new Date("2026-08-31T14:00:00.000Z");
+    const failedAt = new Date("2026-08-31T14:01:00.000Z");
+    const currentMatch = {
+      id: "match-current",
+      availabilityStatus: "AVAILABLE",
+      lastConfirmedAt: confirmedAt,
+      course: {
+        id: "course-current",
+        monitoringStatus: {
+          lastSuccessfulAt: confirmedAt,
+          lastFailureAt: new Date("2026-08-31T13:59:00.000Z"),
+        },
+      },
+    };
+    const staleMatch = {
+      id: "match-stale",
+      availabilityStatus: "AVAILABLE",
+      lastConfirmedAt: confirmedAt,
+      course: {
+        id: "course-stale",
+        monitoringStatus: {
+          lastSuccessfulAt: confirmedAt,
+          lastFailureAt: failedAt,
+        },
+      },
+    };
+    const persistedSearch = {
+      id: "search-1",
+      statusEmailSnapshot: null,
+      preferences: [],
+      matches: [currentMatch, staleMatch],
+    };
+    mockedPrisma.teeSearch.findMany.mockResolvedValue([
+      persistedSearch,
+    ] as never);
+    mockedPrisma.$queryRaw.mockResolvedValue([] as never);
+
+    const searches = await listTeeSearchesForUser("user-1");
+
+    expect(persistedSearch.matches).toHaveLength(2);
+    expect(searches[0]?.matches).toEqual([
+      expect.objectContaining({
+        id: "match-current",
+        course: { id: "course-current" },
+      }),
+    ]);
+    expect(searches[0]?.matches[0]?.course).not.toHaveProperty(
+      "monitoringStatus",
+    );
+  });
+
+  it.each(["FINAL_MANUAL", "FINAL_TECHNICAL", "FINAL_IDENTITY"] as const)(
+    "hides a legacy AVAILABLE match after the course reaches %s",
+    async (state) => {
+      const confirmedAt = new Date("2026-08-31T14:00:00.000Z");
+      const persistedMatch = {
+        id: "legacy-final-match",
+        availabilityStatus: "AVAILABLE",
+        lastConfirmedAt: confirmedAt,
+        course: {
+          id: "course-final",
+          monitoringStatus: {
+            state,
+            lastSuccessfulAt: confirmedAt,
+            lastFailureAt: null,
+          },
+        },
+      };
+      mockedPrisma.teeSearch.findMany.mockResolvedValue([
+        {
+          id: "search-1",
+          statusEmailSnapshot: null,
+          preferences: [],
+          matches: [persistedMatch],
+        },
+      ] as never);
+      mockedPrisma.$queryRaw.mockResolvedValue([] as never);
+
+      const searches = await listTeeSearchesForUser("user-1");
+
+      expect(searches[0]?.matches).toEqual([]);
+    },
+  );
+
+  it.each(["FRESH_UNCONSUMED", "EXPIRED_UNCONSUMED"] as const)(
+    "hides a current durable match after a newer %s local-reader completion",
+    async (state) => {
+      const confirmedAt = new Date("2026-08-31T14:00:00.000Z");
+      const providerObservedAt = new Date("2026-08-31T14:01:00.000Z");
+      const persistedMatch = {
+        id: "match-reader-stale",
+        availabilityStatus: "AVAILABLE",
+        lastConfirmedAt: confirmedAt,
+        course: {
+          id: "course-1",
+          monitoringStatus: {
+            lastSuccessfulAt: confirmedAt,
+            lastFailureAt: new Date("2026-08-31T13:59:00.000Z"),
+          },
+        },
+      };
+      const persistedSearch = {
+        id: "search-1",
+        statusEmailSnapshot: null,
+        preferences: [],
+        matches: [persistedMatch],
+      };
+      mockedPrisma.teeSearch.findMany.mockResolvedValue([
+        persistedSearch,
+      ] as never);
+      mockedPrisma.$queryRaw.mockResolvedValue([] as never);
+      localReaderServiceMocks.getNewestCompletedLocalReaderProviderObservationsInTransaction.mockResolvedValue(
+        new Map([
+          [
+            "course-1",
+            {
+              providerObservedAt,
+              resultExpiresAt: new Date("2026-08-31T14:11:00.000Z"),
+              state,
+            },
+          ],
+        ]),
+      );
+
+      const searches = await listTeeSearchesForUser("user-1");
+
+      expect(persistedSearch.matches).toEqual([persistedMatch]);
+      expect(searches[0]?.matches).toEqual([]);
+      expect(
+        localReaderServiceMocks.getNewestCompletedLocalReaderProviderObservationsInTransaction,
+      ).toHaveBeenCalledWith(prisma, ["course-1"]);
+      expect(
+        providerObservationMocks.getCourseProviderObservationFencesInTransaction,
+      ).toHaveBeenCalledWith(prisma, ["course-1"]);
+      expect(mockedPrisma.$transaction.mock.calls[0]?.[1]).toEqual({
+        isolationLevel: "RepeatableRead",
+      });
+    },
+  );
+
+  it.each(["FRESH_UNCONSUMED", "EXPIRED_UNCONSUMED"] as const)(
+    "hides the visible match when an independent equal-millisecond reader source remains %s after a sibling was consumed",
+    async (state) => {
+      const confirmedAt = new Date("2026-08-31T14:00:00.000Z");
+      mockedPrisma.teeSearch.findMany.mockResolvedValue([
+        {
+          id: "search-1",
+          statusEmailSnapshot: null,
+          preferences: [],
+          matches: [
+            {
+              id: "match-reader-equal",
+              availabilityStatus: "AVAILABLE",
+              lastConfirmedAt: confirmedAt,
+              course: {
+                id: "course-1",
+                monitoringStatus: {
+                  lastSuccessfulAt: confirmedAt,
+                  lastFailureAt: null,
+                },
+              },
+            },
+          ],
+        },
+      ] as never);
+      mockedPrisma.$queryRaw.mockResolvedValue([] as never);
+      localReaderServiceMocks.getNewestCompletedLocalReaderProviderObservationsInTransaction.mockResolvedValue(
+        new Map([
+          [
+            "course-1",
+            {
+              providerObservedAt: confirmedAt,
+              resultExpiresAt: new Date("2026-08-31T14:10:00.000Z"),
+              state,
+            },
+          ],
+        ]),
+      );
+
+      const searches = await listTeeSearchesForUser("user-1");
+
+      expect(searches[0]?.matches).toEqual([]);
+    },
+  );
+
+  it("shows the current match after explicit local-reader source consumption", async () => {
+    const confirmedAt = new Date("2026-08-31T14:00:00.000Z");
+    mockedPrisma.teeSearch.findMany.mockResolvedValue([
+      {
+        id: "search-1",
+        statusEmailSnapshot: null,
+        preferences: [],
+        matches: [
+          {
+            id: "match-reader-consumed",
+            availabilityStatus: "AVAILABLE",
+            lastConfirmedAt: confirmedAt,
+            course: {
+              id: "course-1",
+              monitoringStatus: {
+                lastSuccessfulAt: confirmedAt,
+                lastFailureAt: null,
+              },
+            },
+          },
+        ],
+      },
+    ] as never);
+    mockedPrisma.$queryRaw.mockResolvedValue([] as never);
+    localReaderServiceMocks.getNewestCompletedLocalReaderProviderObservationsInTransaction.mockResolvedValue(
+      new Map([
+        [
+          "course-1",
+          {
+            providerObservedAt: new Date("2026-08-31T14:01:00.000Z"),
+            resultExpiresAt: new Date("2026-08-31T14:10:00.000Z"),
+            state: "CONSUMED",
+          },
+        ],
+      ]),
+    );
+
+    const searches = await listTeeSearchesForUser("user-1");
+
+    expect(searches[0]?.matches).toEqual([
+      expect.objectContaining({ id: "match-reader-consumed" }),
+    ]);
+  });
+
+  it("hides a current match for any extant unreleased provider marker", async () => {
+    const confirmedAt = new Date("2026-08-31T14:00:00.000Z");
+    mockedPrisma.teeSearch.findMany.mockResolvedValue([
+      {
+        id: "search-1",
+        statusEmailSnapshot: null,
+        preferences: [],
+        matches: [
+          {
+            id: "match-marker-stale",
+            availabilityStatus: "AVAILABLE",
+            lastConfirmedAt: confirmedAt,
+            course: {
+              id: "course-1",
+              monitoringStatus: {
+                lastSuccessfulAt: confirmedAt,
+                lastFailureAt: null,
+              },
+            },
+          },
+        ],
+      },
+    ] as never);
+    mockedPrisma.$queryRaw.mockResolvedValue([] as never);
+    providerObservationMocks.getCourseProviderObservationFencesInTransaction.mockResolvedValue(
+      new Map([
+        [
+          "course-1",
+          {
+            observationStartedAt: new Date("2026-08-31T13:59:59.999Z"),
+            leaseExpiresAt: new Date("2026-08-31T14:20:00.000Z"),
+            retryUntil: new Date("2026-08-31T14:30:00.000Z"),
+            state: "EXPIRED_TERMINAL",
+          },
+        ],
+      ]),
+    );
+
+    const searches = await listTeeSearchesForUser("user-1");
+
+    expect(searches[0]?.matches).toEqual([]);
+    expect(
+      localReaderServiceMocks.getNewestCompletedLocalReaderProviderObservationsInTransaction,
+    ).toHaveBeenCalledWith(prisma, ["course-1"]);
+    expect(
+      providerObservationMocks.getCourseProviderObservationFencesInTransaction,
+    ).toHaveBeenCalledWith(prisma, ["course-1"]);
+    expect(mockedPrisma.$transaction.mock.calls[0]?.[1]).toEqual({
+      isolationLevel: "RepeatableRead",
+    });
   });
 
   it("returns the newest probe for every selected course after repeated multi-course checks", async () => {
@@ -124,17 +427,17 @@ describe("listTeeSearchesForUser", () => {
           { course: { id: "course-2" } },
           { course: { id: "course-3" } },
           { course: { id: "course-4" } },
-          { course: { id: "course-5" } }
+          { course: { id: "course-5" } },
         ],
-        matches: []
-      }
+        matches: [],
+      },
     ] as never);
     mockedPrisma.$queryRaw.mockResolvedValue([
       { id: "probe-course-1-latest" },
       { id: "probe-course-2-latest" },
       { id: "probe-course-3-latest" },
       { id: "probe-course-4-unchanged" },
-      { id: "probe-course-5-unchanged" }
+      { id: "probe-course-5-unchanged" },
     ] as never);
     mockedPrisma.courseProbe.findMany.mockResolvedValue([
       {
@@ -142,36 +445,36 @@ describe("listTeeSearchesForUser", () => {
         teeSearchId: "search-1",
         courseId: "course-3",
         outcome: "FETCH_FAILED",
-        observedAt: new Date("2026-07-27T17:19:31.000Z")
+        observedAt: new Date("2026-07-27T17:19:31.000Z"),
       },
       {
         id: "probe-course-2-latest",
         teeSearchId: "search-1",
         courseId: "course-2",
         outcome: "MATCH_FOUND",
-        observedAt: new Date("2026-07-27T17:19:30.000Z")
+        observedAt: new Date("2026-07-27T17:19:30.000Z"),
       },
       {
         id: "probe-course-1-latest",
         teeSearchId: "search-1",
         courseId: "course-1",
         outcome: "MATCH_FOUND",
-        observedAt: new Date("2026-07-27T17:19:29.000Z")
+        observedAt: new Date("2026-07-27T17:19:29.000Z"),
       },
       {
         id: "probe-course-5-unchanged",
         teeSearchId: "search-1",
         courseId: "course-5",
         outcome: "NEEDS_ADAPTER",
-        observedAt: new Date("2026-07-27T17:15:27.000Z")
+        observedAt: new Date("2026-07-27T17:15:27.000Z"),
       },
       {
         id: "probe-course-4-unchanged",
         teeSearchId: "search-1",
         courseId: "course-4",
         outcome: "NEEDS_ADAPTER",
-        observedAt: new Date("2026-07-27T17:15:26.000Z")
-      }
+        observedAt: new Date("2026-07-27T17:15:26.000Z"),
+      },
     ] as never);
 
     const searches = await listTeeSearchesForUser("user-1");
@@ -179,8 +482,8 @@ describe("listTeeSearchesForUser", () => {
     expect(mockedPrisma.teeSearch.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { userId: "user-1" },
-        include: expect.objectContaining({ probes: false })
-      })
+        include: expect.objectContaining({ probes: false }),
+      }),
     );
     expect(mockedPrisma.courseProbe.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -191,20 +494,35 @@ describe("listTeeSearchesForUser", () => {
               "probe-course-2-latest",
               "probe-course-3-latest",
               "probe-course-4-unchanged",
-              "probe-course-5-unchanged"
-            ]
-          }
-        }
-      })
+              "probe-course-5-unchanged",
+            ],
+          },
+        },
+      }),
     );
     expect(searches[0]?.probes).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ courseId: "course-1", outcome: "MATCH_FOUND" }),
-        expect.objectContaining({ courseId: "course-2", outcome: "MATCH_FOUND" }),
-        expect.objectContaining({ courseId: "course-3", outcome: "FETCH_FAILED" }),
-        expect.objectContaining({ courseId: "course-4", outcome: "NEEDS_ADAPTER" }),
-        expect.objectContaining({ courseId: "course-5", outcome: "NEEDS_ADAPTER" })
-      ])
+        expect.objectContaining({
+          courseId: "course-1",
+          outcome: "MATCH_FOUND",
+        }),
+        expect.objectContaining({
+          courseId: "course-2",
+          outcome: "MATCH_FOUND",
+        }),
+        expect.objectContaining({
+          courseId: "course-3",
+          outcome: "FETCH_FAILED",
+        }),
+        expect.objectContaining({
+          courseId: "course-4",
+          outcome: "NEEDS_ADAPTER",
+        }),
+        expect.objectContaining({
+          courseId: "course-5",
+          outcome: "NEEDS_ADAPTER",
+        }),
+      ]),
     );
     expect(searches[0]?.probes).toHaveLength(5);
   });
@@ -222,7 +540,7 @@ describe("createTeeSearchForUser", () => {
   it("persists a review-pending direct lookup candidate without marking it public", async () => {
     mockedPrisma.course.findUnique.mockResolvedValue(null);
     mockedPrisma.teeSearch.create.mockResolvedValue({
-      id: "search-1"
+      id: "search-1",
     } as never);
 
     await createTeeSearchForUser("user-1", {
@@ -239,9 +557,9 @@ describe("createTeeSearchForUser", () => {
           website: "https://review-pending.example/",
           latitude: 41.47,
           longitude: -72.8,
-          rank: 1
-        }
-      ]
+          rank: 1,
+        },
+      ],
     });
 
     expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(
@@ -254,15 +572,15 @@ describe("createTeeSearchForUser", () => {
                   connectOrCreate: expect.objectContaining({
                     create: expect.objectContaining({
                       isPublic: null,
-                      website: "https://review-pending.example/"
-                    })
-                  })
-                }
-              })
-            ]
-          }
-        })
-      })
+                      website: "https://review-pending.example/",
+                    }),
+                  }),
+                },
+              }),
+            ],
+          },
+        }),
+      }),
     );
   });
 
@@ -271,12 +589,12 @@ describe("createTeeSearchForUser", () => {
       {
         id: "foreup-course-1",
         name: "Tashua Knolls Golf Course",
-        automationEligibility: "ALLOWED"
-      }
+        automationEligibility: "ALLOWED",
+      },
     ]);
     mockedPrisma.course.findUnique.mockResolvedValue(null);
     mockedPrisma.teeSearch.create.mockResolvedValue({
-      id: "search-1"
+      id: "search-1",
     } as never);
 
     await createTeeSearchForUser("user-1", {
@@ -296,9 +614,9 @@ describe("createTeeSearchForUser", () => {
           latitude: 41.242,
           longitude: -73.209,
           distanceMeters: 2092,
-          rank: 1
-        }
-      ]
+          rank: 1,
+        },
+      ],
     });
 
     expect(mockedPrisma.course.findMany).toHaveBeenCalledWith(
@@ -307,13 +625,13 @@ describe("createTeeSearchForUser", () => {
           OR: expect.arrayContaining([
             {
               automationEligibility: "ALLOWED",
-              detectedPlatform: { not: "UNKNOWN" }
+              detectedPlatform: { not: "UNKNOWN" },
             },
             { automationEligibility: "BLOCKED" },
-            { layoutHolesVerifiedAt: { not: null } }
-          ])
-        })
-      })
+            { layoutHolesVerifiedAt: { not: null } },
+          ]),
+        }),
+      }),
     );
     expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -327,13 +645,13 @@ describe("createTeeSearchForUser", () => {
                 rank: 1,
                 distanceMetersAtSelection: 2092,
                 course: {
-                  connect: { id: "foreup-course-1" }
-                }
-              }
-            ]
-          }
-        })
-      })
+                  connect: { id: "foreup-course-1" },
+                },
+              },
+            ],
+          },
+        }),
+      }),
     );
   });
 
@@ -350,10 +668,10 @@ describe("createTeeSearchForUser", () => {
       isPublic: true,
       automationEligibility: "ALLOWED",
       layoutHoleCounts: [],
-      layoutHolesVerifiedAt: null
+      layoutHolesVerifiedAt: null,
     } as never);
     mockedPrisma.teeSearch.create.mockResolvedValue({
-      id: "search-1"
+      id: "search-1",
     } as never);
 
     await createTeeSearchForUser("user-1", {
@@ -370,17 +688,17 @@ describe("createTeeSearchForUser", () => {
           latitude: 41.2,
           longitude: -72.8,
           rating: 4.6,
-          rank: 1
-        }
-      ]
+          rank: 1,
+        },
+      ],
     });
 
     expect(mockedPrisma.course.update).toHaveBeenCalledWith({
       where: { id: "course-1" },
       data: {
         rating: 4.6,
-        ratingObservedAt: expect.any(Date)
-      }
+        ratingObservedAt: expect.any(Date),
+      },
     });
 
     vi.clearAllMocks();
@@ -396,12 +714,12 @@ describe("createTeeSearchForUser", () => {
       isPublic: true,
       automationEligibility: "ALLOWED",
       layoutHoleCounts: [],
-      layoutHolesVerifiedAt: null
+      layoutHolesVerifiedAt: null,
     } as never);
     mockedPrisma.googlePlaceReview.findMany.mockResolvedValue([]);
     mockedPrisma.teeSearch.count.mockResolvedValue(0);
     mockedPrisma.teeSearch.create.mockResolvedValue({
-      id: "search-2"
+      id: "search-2",
     } as never);
 
     await createTeeSearchForUser("user-1", {
@@ -417,9 +735,9 @@ describe("createTeeSearchForUser", () => {
           address: "1 Main St",
           latitude: 41.2,
           longitude: -72.8,
-          rank: 1
-        }
-      ]
+          rank: 1,
+        },
+      ],
     });
 
     expect(mockedPrisma.course.update).not.toHaveBeenCalled();
@@ -430,12 +748,12 @@ describe("createTeeSearchForUser", () => {
       {
         id: "foreup-course-1",
         name: "Tashua Knolls Golf Course",
-        automationEligibility: "ALLOWED"
-      }
+        automationEligibility: "ALLOWED",
+      },
     ]);
     mockedPrisma.course.findUnique.mockResolvedValue(null);
     mockedPrisma.teeSearch.create.mockResolvedValue({
-      id: "search-1"
+      id: "search-1",
     } as never);
 
     await createTeeSearchForUser("user-1", {
@@ -452,9 +770,9 @@ describe("createTeeSearchForUser", () => {
           address: "40 Tashua Knolls Ln, Trumbull, CT",
           latitude: 41.2888889,
           longitude: -73.2494444,
-          rank: 1
-        }
-      ]
+          rank: 1,
+        },
+      ],
     });
 
     expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(
@@ -465,13 +783,13 @@ describe("createTeeSearchForUser", () => {
               {
                 rank: 1,
                 course: {
-                  connect: { id: "foreup-course-1" }
-                }
-              }
-            ]
-          }
-        })
-      })
+                  connect: { id: "foreup-course-1" },
+                },
+              },
+            ],
+          },
+        }),
+      }),
     );
   });
 
@@ -480,12 +798,12 @@ describe("createTeeSearchForUser", () => {
       {
         id: "foreup-course-1",
         name: "Tashua Knolls Golf Course",
-        automationEligibility: "ALLOWED"
-      }
+        automationEligibility: "ALLOWED",
+      },
     ]);
     mockedPrisma.course.findUnique.mockResolvedValue(null);
     mockedPrisma.teeSearch.create.mockResolvedValue({
-      id: "search-1"
+      id: "search-1",
     } as never);
 
     await createTeeSearchForUser("user-1", {
@@ -502,9 +820,9 @@ describe("createTeeSearchForUser", () => {
           address: "165 Fillow St, Norwalk, CT",
           latitude: 41.242,
           longitude: -73.209,
-          rank: 1
-        }
-      ]
+          rank: 1,
+        },
+      ],
     });
 
     expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(
@@ -516,15 +834,15 @@ describe("createTeeSearchForUser", () => {
                 course: {
                   connectOrCreate: expect.objectContaining({
                     where: {
-                      googlePlaceId: "oak-hills"
-                    }
-                  })
-                }
-              })
-            ]
-          }
-        })
-      })
+                      googlePlaceId: "oak-hills",
+                    },
+                  }),
+                },
+              }),
+            ],
+          },
+        }),
+      }),
     );
   });
 
@@ -532,7 +850,7 @@ describe("createTeeSearchForUser", () => {
     mockedPrisma.course.findMany.mockResolvedValue([]);
     mockedPrisma.course.findUnique.mockResolvedValue(null);
     mockedPrisma.teeSearch.create.mockResolvedValue({
-      id: "search-1"
+      id: "search-1",
     } as never);
 
     await createTeeSearchForUser("user-1", {
@@ -547,9 +865,9 @@ describe("createTeeSearchForUser", () => {
           name: "Manual Public Course",
           latitude: 41.2,
           longitude: -73.2,
-          rank: 1
-        }
-      ]
+          rank: 1,
+        },
+      ],
     });
 
     expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(
@@ -561,29 +879,29 @@ describe("createTeeSearchForUser", () => {
                 course: {
                   connectOrCreate: expect.objectContaining({
                     where: {
-                      googlePlaceId: "manual-Manual Public Course-41.2--73.2"
+                      googlePlaceId: "manual-Manual Public Course-41.2--73.2",
                     },
                     create: expect.objectContaining({
                       googlePlaceId: "manual-Manual Public Course-41.2--73.2",
-                      isManual: true
-                    })
-                  })
-                }
-              })
-            ]
-          }
-        })
-      })
+                      isManual: true,
+                    }),
+                  }),
+                },
+              }),
+            ],
+          },
+        }),
+      }),
     );
   });
 
   it("saves and revalidates a search when every selected course is technical", async () => {
     mockedPrisma.course.findUnique.mockResolvedValue({
       id: "fairview-farm",
-      automationEligibility: "BLOCKED"
+      automationEligibility: "BLOCKED",
     } as never);
     mockedPrisma.teeSearch.create.mockResolvedValue({
-      id: "search-1"
+      id: "search-1",
     } as never);
 
     await expect(
@@ -600,15 +918,17 @@ describe("createTeeSearchForUser", () => {
             name: "Fairview Farm Golf Course",
             latitude: 41.815,
             longitude: -73.071,
-            rank: 1
-          }
-        ]
-      })
+            rank: 1,
+          },
+        ],
+      }),
     ).resolves.toEqual({ id: "search-1" });
 
     expect(mockedPrisma.teeSearch.create).toHaveBeenCalledOnce();
-    expect(courseMonitoringMocks.requestTechnicalFinalRevalidationForDemand).toHaveBeenCalledWith({
-      courseIds: ["fairview-farm"]
+    expect(
+      courseMonitoringMocks.requestTechnicalFinalRevalidationForDemand,
+    ).toHaveBeenCalledWith({
+      courseIds: ["fairview-farm"],
     });
   });
 
@@ -626,10 +946,10 @@ describe("createTeeSearchForUser", () => {
       isPublic: true,
       automationEligibility: "BLOCKED",
       layoutHoleCounts: [],
-      layoutHolesVerifiedAt: null
+      layoutHolesVerifiedAt: null,
     } as never);
     mockedPrisma.teeSearch.create.mockResolvedValue({
-      id: "search-1"
+      id: "search-1",
     } as never);
 
     await expect(
@@ -646,10 +966,10 @@ describe("createTeeSearchForUser", () => {
             name: "Grassy Hill Country Club",
             latitude: 41.27,
             longitude: -73.02,
-            rank: 1
-          }
-        ]
-      })
+            rank: 1,
+          },
+        ],
+      }),
     ).resolves.toEqual({ id: "search-1" });
 
     expect(mockedPrisma.teeSearch.create).toHaveBeenCalledOnce();
@@ -660,12 +980,12 @@ describe("createTeeSearchForUser", () => {
       {
         id: "fairview-farm",
         name: "Fairview Farm Golf Course",
-        automationEligibility: "BLOCKED"
-      }
+        automationEligibility: "BLOCKED",
+      },
     ] as never);
     mockedPrisma.course.findUnique.mockResolvedValue(null);
     mockedPrisma.teeSearch.create.mockResolvedValue({
-      id: "search-1"
+      id: "search-1",
     } as never);
 
     await expect(
@@ -682,10 +1002,10 @@ describe("createTeeSearchForUser", () => {
             name: "Fairview Farm Golf Course",
             latitude: 41.8151,
             longitude: -73.0711,
-            rank: 1
-          }
-        ]
-      })
+            rank: 1,
+          },
+        ],
+      }),
     ).resolves.toEqual({ id: "search-1" });
 
     expect(mockedPrisma.teeSearch.create).toHaveBeenCalledOnce();
@@ -698,12 +1018,12 @@ describe("createTeeSearchForUser", () => {
         name: "Fairview Farm Golf Course",
         latitude: 41.7470436,
         longitude: -73.07518,
-        automationEligibility: "BLOCKED"
-      }
+        automationEligibility: "BLOCKED",
+      },
     ] as never);
     mockedPrisma.course.findUnique.mockResolvedValue(null);
     mockedPrisma.teeSearch.create.mockResolvedValue({
-      id: "search-1"
+      id: "search-1",
     } as never);
 
     await expect(
@@ -720,10 +1040,10 @@ describe("createTeeSearchForUser", () => {
             name: "Golf Course",
             latitude: 41.7478038,
             longitude: -73.074469,
-            rank: 1
-          }
-        ]
-      })
+            rank: 1,
+          },
+        ],
+      }),
     ).resolves.toEqual({ id: "search-1" });
 
     expect(mockedPrisma.teeSearch.create).toHaveBeenCalledOnce();
@@ -736,19 +1056,19 @@ describe("createTeeSearchForUser", () => {
         name: "Bethpage Black Golf Course",
         latitude: 40.7445,
         longitude: -73.455,
-        automationEligibility: "BLOCKED"
+        automationEligibility: "BLOCKED",
       },
       {
         id: "bethpage-red",
         name: "Bethpage Red Golf Course",
         latitude: 40.7435,
         longitude: -73.455,
-        automationEligibility: "BLOCKED"
-      }
+        automationEligibility: "BLOCKED",
+      },
     ] as never);
     mockedPrisma.course.findUnique.mockResolvedValue(null);
     mockedPrisma.teeSearch.create.mockResolvedValue({
-      id: "search-1"
+      id: "search-1",
     } as never);
 
     await createTeeSearchForUser("user-1", {
@@ -763,9 +1083,9 @@ describe("createTeeSearchForUser", () => {
           name: "Golf Course",
           latitude: 40.744,
           longitude: -73.455,
-          rank: 1
-        }
-      ]
+          rank: 1,
+        },
+      ],
     });
 
     expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(
@@ -776,14 +1096,14 @@ describe("createTeeSearchForUser", () => {
               expect.objectContaining({
                 course: {
                   connectOrCreate: expect.objectContaining({
-                    where: { googlePlaceId: "generic-bethpage" }
-                  })
-                }
-              })
-            ]
-          }
-        })
-      })
+                    where: { googlePlaceId: "generic-bethpage" },
+                  }),
+                },
+              }),
+            ],
+          },
+        }),
+      }),
     );
   });
 
@@ -794,12 +1114,12 @@ describe("createTeeSearchForUser", () => {
         name: "Pinehurst No. 4",
         latitude: 35.194,
         longitude: -79.469,
-        automationEligibility: "ALLOWED"
-      }
+        automationEligibility: "ALLOWED",
+      },
     ] as never);
     mockedPrisma.course.findUnique.mockResolvedValue(null);
     mockedPrisma.teeSearch.create.mockResolvedValue({
-      id: "search-1"
+      id: "search-1",
     } as never);
 
     await createTeeSearchForUser("user-1", {
@@ -814,9 +1134,9 @@ describe("createTeeSearchForUser", () => {
           name: "Pinehurst No. 2",
           latitude: 35.195,
           longitude: -79.47,
-          rank: 1
-        }
-      ]
+          rank: 1,
+        },
+      ],
     });
 
     expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(
@@ -827,14 +1147,14 @@ describe("createTeeSearchForUser", () => {
               expect.objectContaining({
                 course: {
                   connectOrCreate: expect.objectContaining({
-                    where: { googlePlaceId: "pinehurst-no-2" }
-                  })
-                }
-              })
-            ]
-          }
-        })
-      })
+                    where: { googlePlaceId: "pinehurst-no-2" },
+                  }),
+                },
+              }),
+            ],
+          },
+        }),
+      }),
     );
   });
 
@@ -843,7 +1163,7 @@ describe("createTeeSearchForUser", () => {
       if ("googlePlaceId" in where && where.googlePlaceId === "fairview-farm") {
         return {
           id: "fairview-farm",
-          automationEligibility: "BLOCKED"
+          automationEligibility: "BLOCKED",
         } as never;
       }
       if ("googlePlaceId" in where && where.googlePlaceId === "timberlin") {
@@ -852,7 +1172,7 @@ describe("createTeeSearchForUser", () => {
       return null;
     });
     mockedPrisma.teeSearch.create.mockResolvedValue({
-      id: "search-1"
+      id: "search-1",
     } as never);
 
     await createTeeSearchForUser("user-1", {
@@ -868,16 +1188,16 @@ describe("createTeeSearchForUser", () => {
           name: "Fairview Farm Golf Course",
           latitude: 41.815,
           longitude: -73.071,
-          rank: 1
+          rank: 1,
         },
         {
           googlePlaceId: "timberlin",
           name: "Timberlin Golf Course",
           latitude: 41.62,
           longitude: -72.77,
-          rank: 2
-        }
-      ]
+          rank: 2,
+        },
+      ],
     });
 
     expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(
@@ -886,28 +1206,31 @@ describe("createTeeSearchForUser", () => {
           preferences: {
             create: [
               expect.objectContaining({
-                course: { connect: { id: "fairview-farm" } }
+                course: { connect: { id: "fairview-farm" } },
               }),
               expect.objectContaining({
-                course: { connect: { id: "timberlin" } }
-              })
-            ]
-          }
-        })
-      })
+                course: { connect: { id: "timberlin" } },
+              }),
+            ],
+          },
+        }),
+      }),
     );
   });
 
   it("rejects a mixed search containing a known private course", async () => {
     mockedPrisma.course.findUnique.mockImplementation(async ({ where }) => {
-      if ("googlePlaceId" in where && where.googlePlaceId === "private-course") {
+      if (
+        "googlePlaceId" in where &&
+        where.googlePlaceId === "private-course"
+      ) {
         return {
           id: "private-course",
           name: "Private Course",
           isPublic: false,
           automationEligibility: "BLOCKED",
           layoutHoleCounts: [],
-          layoutHolesVerifiedAt: null
+          layoutHolesVerifiedAt: null,
         } as never;
       }
       if ("googlePlaceId" in where && where.googlePlaceId === "public-course") {
@@ -917,7 +1240,7 @@ describe("createTeeSearchForUser", () => {
           isPublic: true,
           automationEligibility: "ALLOWED",
           layoutHoleCounts: [],
-          layoutHolesVerifiedAt: null
+          layoutHolesVerifiedAt: null,
         } as never;
       }
       return null;
@@ -936,17 +1259,17 @@ describe("createTeeSearchForUser", () => {
             name: "Private Course",
             latitude: 41.8,
             longitude: -73.1,
-            rank: 1
+            rank: 1,
           },
           {
             googlePlaceId: "public-course",
             name: "Public Course",
             latitude: 41.7,
             longitude: -73,
-            rank: 2
-          }
-        ]
-      })
+            rank: 2,
+          },
+        ],
+      }),
     ).rejects.toThrow("only create alerts for public golf courses");
 
     expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
@@ -959,7 +1282,7 @@ describe("createTeeSearchForUser", () => {
       isPublic: false,
       automationEligibility: "BLOCKED",
       layoutHoleCounts: [],
-      layoutHolesVerifiedAt: null
+      layoutHolesVerifiedAt: null,
     } as never);
     mockedPrisma.course.findMany.mockResolvedValue([
       {
@@ -970,8 +1293,8 @@ describe("createTeeSearchForUser", () => {
         longitude: -73.1,
         automationEligibility: "ALLOWED",
         layoutHoleCounts: [],
-        layoutHolesVerifiedAt: null
-      }
+        layoutHolesVerifiedAt: null,
+      },
     ] as never);
 
     await expect(
@@ -987,10 +1310,10 @@ describe("createTeeSearchForUser", () => {
             name: "Example Golf Course",
             latitude: 41.8,
             longitude: -73.1,
-            rank: 1
-          }
-        ]
-      })
+            rank: 1,
+          },
+        ],
+      }),
     ).rejects.toThrow("only create alerts for public golf courses");
 
     expect(mockedPrisma.course.findMany).not.toHaveBeenCalled();
@@ -1007,10 +1330,13 @@ describe("createTeeSearchForUser", () => {
           isPublic: true,
           automationEligibility: "ALLOWED",
           layoutHoleCounts: [],
-          layoutHolesVerifiedAt: null
+          layoutHolesVerifiedAt: null,
         } as never;
       }
-      if ("googlePlaceId" in where && where.googlePlaceId === "private-course-place") {
+      if (
+        "googlePlaceId" in where &&
+        where.googlePlaceId === "private-course-place"
+      ) {
         return {
           id: "private-course-row",
           name: "Private Course",
@@ -1018,7 +1344,7 @@ describe("createTeeSearchForUser", () => {
           isPublic: false,
           automationEligibility: "BLOCKED",
           layoutHoleCounts: [],
-          layoutHolesVerifiedAt: null
+          layoutHolesVerifiedAt: null,
         } as never;
       }
       return null;
@@ -1038,10 +1364,10 @@ describe("createTeeSearchForUser", () => {
             name: "Private Course",
             latitude: 41.8,
             longitude: -73.1,
-            rank: 1
-          }
-        ]
-      })
+            rank: 1,
+          },
+        ],
+      }),
     ).rejects.toThrow("only create alerts for public golf courses");
 
     expect(mockedPrisma.course.findMany).not.toHaveBeenCalled();
@@ -1064,10 +1390,13 @@ describe("createTeeSearchForUser", () => {
           isPublic: true,
           automationEligibility: "ALLOWED",
           layoutHoleCounts: [],
-          layoutHolesVerifiedAt: null
+          layoutHolesVerifiedAt: null,
         } as never;
       }
-      if ("googlePlaceId" in where && where.googlePlaceId === "google-tashua-facility") {
+      if (
+        "googlePlaceId" in where &&
+        where.googlePlaceId === "google-tashua-facility"
+      ) {
         return {
           id: "course-tashua-unreviewed",
           googlePlaceId: "google-tashua-facility",
@@ -1080,13 +1409,13 @@ describe("createTeeSearchForUser", () => {
           isPublic: true,
           automationEligibility: "UNKNOWN",
           layoutHoleCounts: [],
-          layoutHolesVerifiedAt: null
+          layoutHolesVerifiedAt: null,
         } as never;
       }
       return null;
     });
     mockedPrisma.teeSearch.create.mockResolvedValue({
-      id: "search-1"
+      id: "search-1",
     } as never);
 
     await createTeeSearchForUser("user-1", {
@@ -1103,10 +1432,11 @@ describe("createTeeSearchForUser", () => {
           address: "40 Tashua Knolls Ln, Trumbull, CT 06611, USA",
           latitude: 41.2888889,
           longitude: -73.2494444,
-          website: "https://foreupsoftware.com/index.php/booking/21017#/teetimes",
-          rank: 1
-        }
-      ]
+          website:
+            "https://foreupsoftware.com/index.php/booking/21017#/teetimes",
+          rank: 1,
+        },
+      ],
     });
 
     expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(
@@ -1116,12 +1446,12 @@ describe("createTeeSearchForUser", () => {
             create: [
               {
                 rank: 1,
-                course: { connect: { id: "course-tashua-confirmed" } }
-              }
-            ]
-          }
-        })
-      })
+                course: { connect: { id: "course-tashua-confirmed" } },
+              },
+            ],
+          },
+        }),
+      }),
     );
   });
 
@@ -1145,8 +1475,8 @@ describe("createTeeSearchForUser", () => {
           canonicalPhone: null,
           latitude: null,
           longitude: null,
-          retainWhenCanonicalAbsent: false
-        }
+          retainWhenCanonicalAbsent: false,
+        },
       ] as never);
       mockedPrisma.course.findUnique.mockResolvedValue(null);
 
@@ -1163,15 +1493,15 @@ describe("createTeeSearchForUser", () => {
               name: "Reviewed Place",
               latitude: 41.8,
               longitude: -73.1,
-              rank: 1
-            }
-          ]
-        })
+              rank: 1,
+            },
+          ],
+        }),
       ).rejects.toThrow("only create alerts for public golf courses");
 
       expect(mockedPrisma.course.findUnique).not.toHaveBeenCalled();
       expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
-    }
+    },
   );
 
   it("rejects an alias whose canonical place has an active private review", async () => {
@@ -1192,7 +1522,7 @@ describe("createTeeSearchForUser", () => {
         canonicalPhone: null,
         latitude: null,
         longitude: null,
-        retainWhenCanonicalAbsent: true
+        retainWhenCanonicalAbsent: true,
       },
       {
         googlePlaceId: "canonical-private-place",
@@ -1210,8 +1540,8 @@ describe("createTeeSearchForUser", () => {
         canonicalPhone: null,
         latitude: null,
         longitude: null,
-        retainWhenCanonicalAbsent: false
-      }
+        retainWhenCanonicalAbsent: false,
+      },
     ] as never);
 
     await expect(
@@ -1227,10 +1557,10 @@ describe("createTeeSearchForUser", () => {
             name: "Alias Course",
             latitude: 41.8,
             longitude: -73.1,
-            rank: 1
-          }
-        ]
-      })
+            rank: 1,
+          },
+        ],
+      }),
     ).rejects.toThrow("only create alerts for public golf courses");
 
     expect(mockedPrisma.course.findUnique).not.toHaveBeenCalled();
@@ -1245,10 +1575,10 @@ describe("createTeeSearchForUser", () => {
       isPublic: true,
       automationEligibility: "ALLOWED",
       layoutHoleCounts: [],
-      layoutHolesVerifiedAt: null
+      layoutHolesVerifiedAt: null,
     } as never);
     mockedPrisma.teeSearch.create.mockResolvedValue({
-      id: "search-1"
+      id: "search-1",
     } as never);
 
     await createTeeSearchForUser("user-1", {
@@ -1265,9 +1595,9 @@ describe("createTeeSearchForUser", () => {
           stateCode: "ZZ",
           latitude: -20,
           longitude: 120,
-          rank: 1
-        }
-      ]
+          rank: 1,
+        },
+      ],
     });
 
     expect(mockedPrisma.course.update).not.toHaveBeenCalled();
@@ -1278,12 +1608,12 @@ describe("createTeeSearchForUser", () => {
             create: [
               {
                 rank: 1,
-                course: { connect: { id: "public-course-row" } }
-              }
-            ]
-          }
-        })
-      })
+                course: { connect: { id: "public-course-row" } },
+              },
+            ],
+          },
+        }),
+      }),
     );
   });
 
@@ -1293,10 +1623,10 @@ describe("createTeeSearchForUser", () => {
       name: "Verified Eighteen Golf Course",
       automationEligibility: "ALLOWED",
       layoutHoleCounts: [18],
-      layoutHolesVerifiedAt: new Date("2026-07-11T12:00:00.000Z")
+      layoutHolesVerifiedAt: new Date("2026-07-11T12:00:00.000Z"),
     } as never);
     mockedPrisma.teeSearch.create.mockResolvedValue({
-      id: "search-1"
+      id: "search-1",
     } as never);
 
     await createTeeSearchForUser("user-1", {
@@ -1312,15 +1642,15 @@ describe("createTeeSearchForUser", () => {
           name: "Verified Eighteen Golf Course",
           latitude: 41.2,
           longitude: -73.2,
-          rank: 1
-        }
-      ]
+          rank: 1,
+        },
+      ],
     });
 
     expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ requestedLayoutHoles: 18 })
-      })
+        data: expect.objectContaining({ requestedLayoutHoles: 18 }),
+      }),
     );
   });
 
@@ -1330,7 +1660,7 @@ describe("createTeeSearchForUser", () => {
       name: "Woodhaven Country Club",
       automationEligibility: "UNKNOWN",
       layoutHoleCounts: [9],
-      layoutHolesVerifiedAt: new Date("2026-07-11T12:00:00.000Z")
+      layoutHolesVerifiedAt: new Date("2026-07-11T12:00:00.000Z"),
     } as never);
 
     await expect(
@@ -1347,12 +1677,12 @@ describe("createTeeSearchForUser", () => {
             name: "Woodhaven Country Club",
             latitude: 41.415596,
             longitude: -73.039627,
-            rank: 1
-          }
-        ]
-      })
+            rank: 1,
+          },
+        ],
+      }),
     ).rejects.toThrow(
-      "The selected course layout does not match this 18-hole search: Woodhaven Country Club (9-hole)."
+      "The selected course layout does not match this 18-hole search: Woodhaven Country Club (9-hole).",
     );
 
     expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
@@ -1365,8 +1695,8 @@ describe("createTeeSearchForUser", () => {
         name: "Woodhaven Golf Course",
         automationEligibility: "UNKNOWN",
         layoutHoleCounts: [9],
-        layoutHolesVerifiedAt: new Date("2026-07-11T12:00:00.000Z")
-      }
+        layoutHolesVerifiedAt: new Date("2026-07-11T12:00:00.000Z"),
+      },
     ] as never);
     mockedPrisma.course.findUnique.mockResolvedValue(null);
 
@@ -1384,10 +1714,10 @@ describe("createTeeSearchForUser", () => {
             name: "Woodhaven Country Club",
             latitude: 41.4157,
             longitude: -73.0395,
-            rank: 1
-          }
-        ]
-      })
+            rank: 1,
+          },
+        ],
+      }),
     ).rejects.toThrow(/Woodhaven Golf Course \(9-hole\)/);
 
     expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
@@ -1399,10 +1729,10 @@ describe("createTeeSearchForUser", () => {
       name: "Unverified Public Course",
       automationEligibility: "ALLOWED",
       layoutHoleCounts: [],
-      layoutHolesVerifiedAt: null
+      layoutHolesVerifiedAt: null,
     } as never);
     mockedPrisma.teeSearch.create.mockResolvedValue({
-      id: "search-1"
+      id: "search-1",
     } as never);
 
     await createTeeSearchForUser("user-1", {
@@ -1418,9 +1748,9 @@ describe("createTeeSearchForUser", () => {
           name: "Unverified Public Course",
           latitude: 41.2,
           longitude: -73.2,
-          rank: 1
-        }
-      ]
+          rank: 1,
+        },
+      ],
     });
 
     expect(mockedPrisma.teeSearch.create).toHaveBeenCalledOnce();
@@ -1443,11 +1773,13 @@ describe("createTeeSearchForUser", () => {
             name: "Tashua Knolls Golf Course",
             latitude: 41.242,
             longitude: -73.209,
-            rank: 1
-          }
-        ]
-      })
-    ).rejects.toThrow("You can keep up to 3 active or paused searches in the queue.");
+            rank: 1,
+          },
+        ],
+      }),
+    ).rejects.toThrow(
+      "You can keep up to 3 active or paused searches in the queue.",
+    );
 
     expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
   });
@@ -1466,22 +1798,23 @@ describe("updateTeeSearchStatusForUser", () => {
         schemaVersion: 1,
         kind: "ALERT_GENERATION_START",
         alertGeneration: 3,
-        generationStartedAt: "2026-08-11T20:00:00.000Z"
-      }
+        generationStartedAt: "2026-08-11T20:00:00.000Z",
+      },
+      matches: [],
     } as never);
 
     const updated = await updateTeeSearchStatusForUser(
       "user-1",
       "search-1",
-      "ACTIVE"
+      "ACTIVE",
     );
 
     expect(mockedPrisma.teeSearch.count).toHaveBeenCalledWith({
       where: {
         userId: "user-1",
         status: { in: ["ACTIVE", "PAUSED"] },
-        id: { not: "search-1" }
-      }
+        id: { not: "search-1" },
+      },
     });
     expect(mockedPrisma.teeSearch.update).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1493,12 +1826,54 @@ describe("updateTeeSearchStatusForUser", () => {
             schemaVersion: 1,
             kind: "ALERT_GENERATION_START",
             alertGeneration: 3,
-            generationStartedAt: expect.any(String)
-          })
-        })
-      })
+            generationStartedAt: expect.any(String),
+          }),
+        }),
+      }),
     );
     expect(updated.statusEmailSnapshot).toBeNull();
+  });
+
+  it("hides a current match after a newer unconsumed local-reader completion", async () => {
+    const confirmedAt = new Date("2026-08-31T14:00:00.000Z");
+    mockedPrisma.teeSearch.update.mockResolvedValue({
+      id: "search-1",
+      statusEmailSnapshot: null,
+      matches: [
+        {
+          id: "match-reader-stale",
+          availabilityStatus: "AVAILABLE",
+          lastConfirmedAt: confirmedAt,
+          course: {
+            id: "course-1",
+            monitoringStatus: {
+              lastSuccessfulAt: confirmedAt,
+              lastFailureAt: null,
+            },
+          },
+        },
+      ],
+    } as never);
+    localReaderServiceMocks.getNewestCompletedLocalReaderProviderObservationsInTransaction.mockResolvedValue(
+      new Map([
+        [
+          "course-1",
+          {
+            providerObservedAt: new Date("2026-08-31T14:01:00.000Z"),
+            resultExpiresAt: new Date("2026-08-31T14:11:00.000Z"),
+            state: "FRESH_UNCONSUMED",
+          },
+        ],
+      ]),
+    );
+
+    const updated = await updateTeeSearchStatusForUser(
+      "user-1",
+      "search-1",
+      "PAUSED",
+    );
+
+    expect(updated.matches).toEqual([]);
   });
 });
 
@@ -1509,43 +1884,131 @@ describe("updateTeeSearchForUser", () => {
       .mockResolvedValueOnce({ id: "search-1" } as never)
       .mockResolvedValueOnce({ id: "search-1", preferences: [] } as never);
     mockedPrisma.coursePreference.updateMany.mockResolvedValue({
-      count: 1
+      count: 1,
     } as never);
     mockedPrisma.teeSearch.update.mockResolvedValue({
       id: "search-1",
       status: "ACTIVE",
-      statusEmailSnapshot: null
+      statusEmailSnapshot: null,
+      matches: [],
     } as never);
+  });
+
+  it("hides a persisted match from the mutation response after newer failure evidence", async () => {
+    const successObservedAt = new Date("2026-08-31T14:00:00.000Z");
+    const failureObservedAt = new Date("2026-08-31T14:01:00.000Z");
+    const persistedMatch = {
+      id: "match-stale",
+      availabilityStatus: "AVAILABLE",
+      lastConfirmedAt: successObservedAt,
+      bookingUrl: "https://official.example/book",
+      course: {
+        id: "course-1",
+        monitoringStatus: {
+          lastSuccessfulAt: successObservedAt,
+          lastFailureAt: failureObservedAt,
+        },
+      },
+    };
+    mockedPrisma.teeSearch.update.mockResolvedValue({
+      id: "search-1",
+      status: "PAUSED",
+      statusEmailSnapshot: null,
+      matches: [persistedMatch],
+    } as never);
+
+    const updated = await updateTeeSearchForUser("user-1", "search-1", {
+      status: "PAUSED",
+    });
+
+    expect(persistedMatch.availabilityStatus).toBe("AVAILABLE");
+    expect(updated.matches).toEqual([]);
+  });
+
+  it("hides a current match after a newer expired local-reader completion", async () => {
+    const confirmedAt = new Date("2026-08-31T14:00:00.000Z");
+    mockedPrisma.teeSearch.update.mockResolvedValue({
+      id: "search-1",
+      status: "PAUSED",
+      statusEmailSnapshot: null,
+      matches: [
+        {
+          id: "match-reader-stale",
+          availabilityStatus: "AVAILABLE",
+          lastConfirmedAt: confirmedAt,
+          course: {
+            id: "course-1",
+            monitoringStatus: {
+              lastSuccessfulAt: confirmedAt,
+              lastFailureAt: null,
+            },
+          },
+        },
+      ],
+    } as never);
+    localReaderServiceMocks.getNewestCompletedLocalReaderProviderObservationsInTransaction.mockResolvedValue(
+      new Map([
+        [
+          "course-1",
+          {
+            providerObservedAt: new Date("2026-08-31T14:01:00.000Z"),
+            resultExpiresAt: new Date("2026-08-31T14:11:00.000Z"),
+            state: "EXPIRED_UNCONSUMED",
+          },
+        ],
+      ]),
+    );
+
+    const updated = await updateTeeSearchForUser("user-1", "search-1", {
+      status: "PAUSED",
+    });
+
+    expect(updated.matches).toEqual([]);
   });
 
   it("reorders course preferences without colliding with existing ranks", async () => {
     await updateTeeSearchForUser("user-1", "search-1", {
       coursePreferences: [
         { id: "pref-b", rank: 1 },
-        { id: "pref-a", rank: 2 }
-      ]
+        { id: "pref-a", rank: 2 },
+      ],
     });
 
-    expect(deliveryOutboxMocks.lockSearchForAlertMutation).toHaveBeenCalledWith(prisma, {
-      searchId: "search-1",
-      userId: "user-1"
-    });
-    expect(mockedPrisma.coursePreference.updateMany).toHaveBeenNthCalledWith(1, {
-      where: { id: "pref-b", teeSearchId: "search-1" },
-      data: { rank: -1 }
-    });
-    expect(mockedPrisma.coursePreference.updateMany).toHaveBeenNthCalledWith(2, {
-      where: { id: "pref-a", teeSearchId: "search-1" },
-      data: { rank: -2 }
-    });
-    expect(mockedPrisma.coursePreference.updateMany).toHaveBeenNthCalledWith(3, {
-      where: { id: "pref-b", teeSearchId: "search-1" },
-      data: { rank: 1 }
-    });
-    expect(mockedPrisma.coursePreference.updateMany).toHaveBeenNthCalledWith(4, {
-      where: { id: "pref-a", teeSearchId: "search-1" },
-      data: { rank: 2 }
-    });
+    expect(deliveryOutboxMocks.lockSearchForAlertMutation).toHaveBeenCalledWith(
+      prisma,
+      {
+        searchId: "search-1",
+        userId: "user-1",
+      },
+    );
+    expect(mockedPrisma.coursePreference.updateMany).toHaveBeenNthCalledWith(
+      1,
+      {
+        where: { id: "pref-b", teeSearchId: "search-1" },
+        data: { rank: -1 },
+      },
+    );
+    expect(mockedPrisma.coursePreference.updateMany).toHaveBeenNthCalledWith(
+      2,
+      {
+        where: { id: "pref-a", teeSearchId: "search-1" },
+        data: { rank: -2 },
+      },
+    );
+    expect(mockedPrisma.coursePreference.updateMany).toHaveBeenNthCalledWith(
+      3,
+      {
+        where: { id: "pref-b", teeSearchId: "search-1" },
+        data: { rank: 1 },
+      },
+    );
+    expect(mockedPrisma.coursePreference.updateMany).toHaveBeenNthCalledWith(
+      4,
+      {
+        where: { id: "pref-a", teeSearchId: "search-1" },
+        data: { rank: 2 },
+      },
+    );
     expect(mockedPrisma.teeSearch.update).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
@@ -1553,10 +2016,10 @@ describe("updateTeeSearchForUser", () => {
           statusEmailSentAt: null,
           statusEmailSnapshot: expect.objectContaining({
             kind: "ALERT_GENERATION_START",
-            alertGeneration: 3
-          })
-        })
-      })
+            alertGeneration: 3,
+          }),
+        }),
+      }),
     );
   });
 
@@ -1568,16 +2031,16 @@ describe("updateTeeSearchForUser", () => {
           course: {
             name: "Woodhaven Country Club",
             layoutHoleCounts: [9],
-            layoutHolesVerifiedAt: new Date("2026-07-11T12:00:00.000Z")
-          }
-        }
-      ]
+            layoutHolesVerifiedAt: new Date("2026-07-11T12:00:00.000Z"),
+          },
+        },
+      ],
     } as never);
 
     await expect(
       updateTeeSearchForUser("user-1", "search-1", {
-        requestedLayoutHoles: 18
-      })
+        requestedLayoutHoles: 18,
+      }),
     ).rejects.toThrow("Woodhaven Country Club (9-hole)");
 
     expect(mockedPrisma.teeSearch.update).not.toHaveBeenCalled();
@@ -1587,23 +2050,25 @@ describe("updateTeeSearchForUser", () => {
 describe("deleteTeeSearchForUser", () => {
   it("records an owner-deletion tombstone before the search row is removed", async () => {
     mockedPrisma.courseSupportBatchSearch.updateMany.mockResolvedValue({
-      count: 1
+      count: 1,
     } as never);
     mockedPrisma.teeSearch.delete.mockResolvedValue({
-      id: "search-1"
+      id: "search-1",
     } as never);
 
     await deleteTeeSearchForUser("user-1", "search-1");
 
-    expect(mockedPrisma.courseSupportBatchSearch.updateMany).toHaveBeenCalledWith({
+    expect(
+      mockedPrisma.courseSupportBatchSearch.updateMany,
+    ).toHaveBeenCalledWith({
       where: { teeSearchId: "search-1", removedAt: null },
       data: {
         removedAt: expect.any(Date),
-        removalReason: "SEARCH_DELETED_BY_OWNER"
-      }
+        removalReason: "SEARCH_DELETED_BY_OWNER",
+      },
     });
     expect(mockedPrisma.teeSearch.delete).toHaveBeenCalledWith({
-      where: { id: "search-1", userId: "user-1" }
+      where: { id: "search-1", userId: "user-1" },
     });
   });
 });

@@ -2,10 +2,12 @@ import { createHash } from "node:crypto";
 
 import type {
   CourseMonitoringMode,
-  CourseMonitoringState
+  CourseMonitoringState,
+  Prisma,
 } from "@prisma/client";
 
 import {
+  commitCurrentCourseTeeTimeMatches,
   finishAutomationRun,
   getActiveSearchForAutomation,
   heartbeatSearchCheckLease,
@@ -13,17 +15,13 @@ import {
   listAvailableMatchAlerts,
   listPendingMatchAlerts,
   listSearchCourseVerdictsSince,
-  markCourseBookingWindowChecked,
   markMissingMatchesUnavailable,
   markSearchStatusEmailSent,
-  recordCourseBookingFacts,
-  recordCourseBookingWindowEvidence,
   recordCourseProbe,
   recordCourseProbeIfChanged,
-  recordTeeTimeMatch,
   runWithSearchCheckLease,
   startAutomationRun,
-  type SearchCheckLease
+  type SearchCheckLease,
 } from "@/lib/automation/db-service";
 import {
   ACTIVE_DEMAND_ESCALATION_MS,
@@ -32,37 +30,51 @@ import {
   getCourseMonitoringRetryAt,
   reconcileCourseMonitoringDeadlines,
   recordCourseMonitoringFinalClassification,
-  recordCourseMonitoringSuccess
+  recordCourseMonitoringSuccess,
+  runWithAcceptedCourseIntelligenceEvidence,
 } from "@/lib/automation/course-monitoring";
 import {
   assessAutomationPlaybook,
+  getAutomationPlaybookFactualFinalEvidence,
   isAutomationHumanReviewProofCurrentOrPrior,
-  isAutomationPlaybookExhausted
+  isAutomationPlaybookExhausted,
 } from "@/lib/automation/course-monitoring-playbook";
 import {
   getBestProbeUrl,
-  shouldQueueBrowserProbe
+  shouldQueueBrowserProbe,
 } from "@/lib/automation/browser-discovery";
 import {
   classifyProviderFailure,
-  resolveProviderCapability
+  resolveProviderCapability,
 } from "@/lib/automation/provider-capabilities";
 import {
   fetchCourseTeeSheet,
   type AutomationCourseProviderRead,
-  type CourseTeeSheetResult
+  type CourseTeeSheetResult,
 } from "@/lib/automation/course-provider-read";
 import {
   evaluateMonitoringGate,
-  isCoherentManualDisposition
+  isCoherentManualDisposition,
 } from "@/lib/automation/policy";
 import { runProviderFamilyTasks } from "@/lib/automation/provider-concurrency";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
+import {
+  beginCourseProviderObservation,
+  markCourseProviderObservationUnreconciled,
+  releaseCourseProviderObservation,
+  releaseCourseProviderObservationInTransaction,
+  renewCourseProviderObservationInTransaction,
+  startCourseProviderObservationHeartbeat,
+  type CourseProviderObservationLease,
+  type ProviderExecutionMarker,
+} from "@/lib/automation/provider-execution-marker";
 import { getAutomationRuntimeVersion } from "@/lib/automation/runtime-version";
 import {
+  getExpiredUnconsumedLocalReaderObservationForCanonicalResume,
   getFreshLocalReaderObservation,
   getLocalReaderCourseKey,
-  queueLocalReaderJob
+  markCompletedLocalReaderProviderObservationConsumedInTransaction,
+  queueLocalReaderJob,
 } from "@/lib/local-reader/service";
 import { sanitizeResponderText } from "@/lib/automation/course-support-responder-policy";
 import { prepareSearchMonitoring } from "@/lib/automation/search-monitoring-discovery";
@@ -74,10 +86,12 @@ import {
   recordSearchPlaybookAttemptResult,
   recordSearchPlaybookTransition,
   skipSearchPlaybookStage,
-  type SearchPlaybookRuntime
+  type SearchPlaybookRuntime,
 } from "@/lib/automation/search-playbook-runtime";
 import {
-  reportCourseSupportIssue
+  reportCourseSupportIssue,
+  type CourseSupportIssueInput,
+  type CourseSupportIssueState,
 } from "@/lib/automation/support-incidents";
 import {
   getBookingWindowForTargetDate,
@@ -85,21 +99,21 @@ import {
   shouldRetryBookingWindowDiscovery,
   shouldRefreshBookingWindow,
   type BookingWindowEvidenceSource,
-  type TargetBookingWindow
+  type TargetBookingWindow,
 } from "@/lib/courses/booking-window";
 import type {
   AutomationReason,
   BookingAccessMode,
-  BookingMethod
+  BookingMethod,
 } from "@/lib/courses/intelligence";
 import {
   getCourseLayoutCompatibility,
-  getCourseLayoutLabel
+  getCourseLayoutLabel,
 } from "@/lib/courses/course-layout";
 import { sendSearchStatusEmail, sendTeeTimeAlert } from "@/lib/email/alerts";
 import {
   areSearchStatusEmailsEnabled,
-  isSearchEmailDeliveryEnabled
+  isSearchEmailDeliveryEnabled,
 } from "@/lib/email/delivery-policy";
 import {
   drainSearchEmailDeliveryGroup,
@@ -114,7 +128,7 @@ import {
   prepareRecipientMatchDeliveryGroups,
   prepareSearchEmailDeliveryGroup,
   satisfyPendingDailyStatusReplacementWithMatch,
-  toSearchEmailJson
+  toSearchEmailJson,
 } from "@/lib/email/search-delivery-outbox";
 import {
   buildSearchStatusSnapshot,
@@ -123,34 +137,34 @@ import {
   summarizeSearchStatusAvailability,
   type SearchStatusCourseReport,
   type SearchStatusEmailKind,
-  type SearchStatusTransitionKind
+  type SearchStatusTransitionKind,
 } from "@/lib/email/search-status";
 import {
   buildMonitoringStatusNoticeGroupKey,
   getMonitoringStatusProviderLabel,
   planMonitoringStatusNotices,
-  type MonitoringStatusNoticeCandidate
+  type MonitoringStatusNoticeCandidate,
 } from "@/lib/email/monitoring-status-notices";
 import {
   getCustomerMonitoringStatus,
-  hasDurableAutomationStalledEndpointProof
+  hasDurableAutomationStalledEndpointProof,
 } from "@/lib/customer-monitoring-status";
 import {
   preserveAlertGenerationClockInStatusSnapshot,
-  readAlertGenerationStartedAt
+  readAlertGenerationStartedAt,
 } from "@/lib/searches/generation-clock";
 import { buildCourseFactLine } from "@/lib/email/course-facts";
 import {
   buildCoursePriceEstimate,
   buildObservedBookableHoleSummary,
   summarizeBookableHoleCounts,
-  summarizeCourseSlotPrices
+  summarizeCourseSlotPrices,
 } from "@/lib/pricing/course-prices";
 import {
   dedupeMatches,
   filterSlotsForSearch,
   parseCourseLocalDateTime,
-  rankMatches
+  rankMatches,
 } from "@/lib/tee-times/matching";
 
 const PROMPT_VERSION = "tee-time-spot-event-driven-check-v1";
@@ -161,12 +175,12 @@ const SHORT_SEARCH_RETRY_FAILURES = new Set([
   "HTTP_5XX",
   "TIMEOUT",
   "NETWORK",
-  "UNKNOWN"
+  "UNKNOWN",
 ]);
 const SUCCESSFUL_COURSE_VERDICTS = new Set([
   "MATCH_FOUND",
   "NO_MATCH",
-  "BOOKING_NOT_OPEN"
+  "BOOKING_NOT_OPEN",
 ]);
 
 type AutomationCourse = AutomationCourseProviderRead & {
@@ -196,6 +210,8 @@ type AutomationCourse = AutomationCourseProviderRead & {
     state: CourseMonitoringState;
     firstDegradedAt: Date | null;
     failureFingerprint: string | null;
+    lastSuccessfulAt: Date | null;
+    lastFailureAt: Date | null;
     nextAutomaticAttemptAt: Date | null;
     revalidationRequestedAt: Date | null;
     stateChangedAt: Date;
@@ -239,6 +255,86 @@ export class SearchCheckLeaseLostError extends Error {
   }
 }
 
+type DurableSupportEvidenceMode =
+  "PRIOR_MONITORING_ONLY" | "PROVIDER_INTELLIGENCE";
+
+function getLatestValidEvidenceAt(
+  notAfter: Date,
+  ...candidates: Array<Date | null | undefined>
+) {
+  const valid = candidates.filter(
+    (candidate): candidate is Date =>
+      candidate instanceof Date &&
+      Number.isFinite(candidate.getTime()) &&
+      candidate.getTime() <= notAfter.getTime(),
+  );
+  return valid.length > 0
+    ? new Date(Math.max(...valid.map((candidate) => candidate.getTime())))
+    : null;
+}
+
+function getUnrecordedCourseSupportIssueState(
+  course: AutomationCourse,
+): CourseSupportIssueState {
+  const incident = course.supportIncident;
+  return {
+    incidentId: incident && incident.status !== "RESOLVED" ? incident.id : null,
+    status:
+      incident?.status === "NEEDS_HUMAN"
+        ? "NEEDS_HUMAN"
+        : incident?.status === "AUTO_INVESTIGATING"
+          ? "AUTO_INVESTIGATING"
+          : "UNRECORDED",
+    ownerAlerted: false,
+    sourceEvidenceAccepted: null,
+  };
+}
+
+async function reportCourseSupportIssueFromDurableEvidence(
+  input: Omit<
+    CourseSupportIssueInput,
+    "failureObservedAt" | "providerObservedAt" | "now"
+  > & {
+    course: AutomationCourse;
+  },
+  options: {
+    mode: DurableSupportEvidenceMode;
+    now: Date;
+  },
+) {
+  const priorMonitoringObservedAt = getLatestValidEvidenceAt(
+    options.now,
+    input.course.monitoringStatus?.lastSuccessfulAt,
+    input.course.monitoringStatus?.lastFailureAt,
+  );
+  const providerIntelligenceObservedAt =
+    options.mode === "PROVIDER_INTELLIGENCE"
+      ? getLatestValidEvidenceAt(
+          options.now,
+          input.course.intelligenceVerifiedAt,
+        )
+      : null;
+  const failureObservedAt = getLatestValidEvidenceAt(
+    options.now,
+    priorMonitoringObservedAt,
+    providerIntelligenceObservedAt,
+  );
+  if (!failureObservedAt) {
+    return getUnrecordedCourseSupportIssueState(input.course);
+  }
+  const providerObservedAt =
+    providerIntelligenceObservedAt &&
+    providerIntelligenceObservedAt.getTime() === failureObservedAt.getTime()
+      ? providerIntelligenceObservedAt
+      : null;
+  return reportCourseSupportIssue({
+    ...input,
+    now: options.now,
+    failureObservedAt,
+    ...(providerObservedAt ? { providerObservedAt } : {}),
+  });
+}
+
 async function maintainSearchCheckLease(lease?: SearchCheckLease) {
   if (!lease) {
     return;
@@ -255,7 +351,7 @@ async function maintainSearchCheckLease(lease?: SearchCheckLease) {
 export async function runSearchCheck(
   searchId: string,
   trigger = "scheduled",
-  existingLease?: SearchCheckLease
+  existingLease?: SearchCheckLease,
 ) {
   const run = await startAutomationRun(PROMPT_VERSION);
 
@@ -263,10 +359,10 @@ export async function runSearchCheck(
     const execution = existingLease
       ? {
           acquired: true as const,
-          value: await checkSearch(searchId, run.id, existingLease)
+          value: await checkSearch(searchId, run.id, existingLease),
         }
       : await runWithSearchCheckLease(searchId, (lease) =>
-          checkSearch(searchId, run.id, lease)
+          checkSearch(searchId, run.id, lease),
         );
     if (!execution.acquired) {
       const result: SearchCheckResult = {
@@ -276,22 +372,22 @@ export async function runSearchCheck(
         availableMatches: 0,
         newlyAlertedMatches: 0,
         supportRetryNeeded: false,
-        supportRetryAt: null
+        supportRetryAt: null,
       };
       await finishAutomationRun(run.id, {
         outcome: "no_op",
         notes: JSON.stringify({
           trigger,
           searchRef: createSearchLogReference(searchId),
-          outcome: "busy"
-        })
+          outcome: "busy",
+        }),
       });
       return result;
     }
 
     await finishAutomationRun(run.id, {
       outcome: execution.value.outcome,
-      notes: JSON.stringify(buildSearchCheckAudit(trigger, execution.value))
+      notes: JSON.stringify(buildSearchCheckAudit(trigger, execution.value)),
     });
     return execution.value;
   } catch (error) {
@@ -302,9 +398,9 @@ export async function runSearchCheck(
       outcome: "failed",
       errors: {
         name: error instanceof Error ? error.name : "Error",
-        message: safeMessage
+        message: safeMessage,
       },
-      notes: safeMessage
+      notes: safeMessage,
     });
     throw error;
   }
@@ -313,7 +409,7 @@ export async function runSearchCheck(
 async function checkSearch(
   searchId: string,
   automationRunId: string,
-  lease: SearchCheckLease
+  lease: SearchCheckLease,
 ): Promise<SearchCheckResult> {
   const loadedSearch = await getActiveSearchForAutomation(searchId);
   if (!loadedSearch) {
@@ -324,7 +420,7 @@ async function checkSearch(
       availableMatches: 0,
       newlyAlertedMatches: 0,
       supportRetryNeeded: false,
-      supportRetryAt: null
+      supportRetryAt: null,
     };
   }
   let search = loadedSearch;
@@ -332,26 +428,26 @@ async function checkSearch(
   const generationStartedAt = readAlertGenerationStartedAt({
     alertGeneration: search.alertGeneration,
     createdAt: search.createdAt,
-    statusEmailSnapshot: search.statusEmailSnapshot
+    statusEmailSnapshot: search.statusEmailSnapshot,
   });
   const customerEndpointStartedAt =
     generationStartedAt ?? customerStatusObservedAt;
   const searchCourseIds = search.preferences.map(
-    (preference) => preference.course.id
+    (preference) => preference.course.id,
   );
   const currentGenerationVerdicts = await listSearchCourseVerdictsSince({
     searchId: search.id,
     courseIds: searchCourseIds,
-    observedAtOrAfter: customerEndpointStartedAt
+    observedAtOrAfter: customerEndpointStartedAt,
   });
   const currentGenerationVerdictByCourse = new Map(
-    currentGenerationVerdicts.map((verdict) => [verdict.courseId, verdict])
+    currentGenerationVerdicts.map((verdict) => [verdict.courseId, verdict]),
   );
   const initialDeadlineReconciliation =
     await reconcileCourseMonitoringDeadlines({
       courseIds: searchCourseIds,
       now: customerStatusObservedAt,
-      source: "SEARCH_WORKFLOW"
+      source: "SEARCH_WORKFLOW",
     });
   if (
     initialDeadlineReconciliation.escalated > 0 ||
@@ -368,7 +464,7 @@ async function checkSearch(
     appliedCourseIds: [] as string[],
     failedCourseIds: [] as string[],
     deferredCourseIds: [] as string[],
-    retryCourseIds: [] as string[]
+    retryCourseIds: [] as string[],
   };
   try {
     const officialDiscoveryCourseIds = search.preferences.flatMap(
@@ -377,13 +473,11 @@ async function checkSearch(
         if (!incident || incident.status === "RESOLVED") {
           return [];
         }
-        return assessAutomationPlaybook(
-          incident.attemptLedger,
-          incident.cycle
-        ).nextStage === "OFFICIAL_HTTP_DISCOVERY"
+        return assessAutomationPlaybook(incident.attemptLedger, incident.cycle)
+          .nextStage === "OFFICIAL_HTTP_DISCOVERY"
           ? [preference.course.id]
           : [];
-      }
+      },
     );
     const preparation = await prepareSearchMonitoring(
       search,
@@ -392,9 +486,9 @@ async function checkSearch(
       officialDiscoveryCourseIds.length > 0
         ? {
             includeCourseIds: officialDiscoveryCourseIds,
-            forceFreshCourseIds: officialDiscoveryCourseIds
+            forceFreshCourseIds: officialDiscoveryCourseIds,
           }
-        : undefined
+        : undefined,
     );
     monitoringPreparation = preparation;
     await maintainSearchCheckLease(lease);
@@ -410,7 +504,7 @@ async function checkSearch(
       message:
         error instanceof Error
           ? error.message
-          : "Unknown discovery preparation failure"
+          : "Unknown discovery preparation failure",
     });
   }
 
@@ -420,15 +514,13 @@ async function checkSearch(
       preference.course.monitoringStatus
         ? {
             state: preference.course.monitoringStatus.state,
-            firstDegradedAt:
-              preference.course.monitoringStatus.firstDegradedAt,
+            firstDegradedAt: preference.course.monitoringStatus.firstDegradedAt,
             failureFingerprint:
               preference.course.monitoringStatus.failureFingerprint,
-            stateChangedAt:
-              preference.course.monitoringStatus.stateChangedAt
+            stateChangedAt: preference.course.monitoringStatus.stateChangedAt,
           }
-        : null
-    ])
+        : null,
+    ]),
   );
   const getCourseFailureEpisodeStartedAt = (course: {
     id: string;
@@ -451,9 +543,7 @@ async function checkSearch(
     ) {
       return course.supportIncident.firstSeenAt ?? customerStatusObservedAt;
     }
-    return (
-      priorVerdict.failureEpisodeStartedAt ?? customerEndpointStartedAt
-    );
+    return priorVerdict.failureEpisodeStartedAt ?? customerEndpointStartedAt;
   };
 
   const searchWindow = {
@@ -463,8 +553,8 @@ async function checkSearch(
     players: search.players,
     preferredCourses: search.preferences.map((preference) => ({
       courseId: preference.course.id,
-      rank: preference.rank
-    }))
+      rank: preference.rank,
+    })),
   };
   const courseResults: SearchCheckCourseResult[] = [];
   const observedBookingFactsByCourse = new Map<
@@ -500,18 +590,25 @@ async function checkSearch(
       const persistedPlaybookAssessment = course.supportIncident
         ? assessAutomationPlaybook(
             course.supportIncident.attemptLedger,
-            course.supportIncident.cycle
+            course.supportIncident.cycle,
           )
         : null;
       const persistedPlaybookExhausted = course.supportIncident
         ? isAutomationPlaybookExhausted(
             course.supportIncident.attemptLedger,
-            course.supportIncident.cycle
+            course.supportIncident.cycle,
+          )
+        : null;
+      const persistedPlaybookFinalEvidence = course.supportIncident
+        ? getAutomationPlaybookFactualFinalEvidence(
+            course.supportIncident.attemptLedger,
+            course.supportIncident.cycle,
           )
         : null;
       if (
         persistedPlaybookAssessment?.conclusion === "FACTUAL_FINAL" &&
-        persistedPlaybookAssessment.factualDisposition
+        persistedPlaybookAssessment.factualDisposition &&
+        persistedPlaybookFinalEvidence
       ) {
         const identityFinal =
           persistedPlaybookAssessment.factualDisposition === "IDENTITY_FINAL";
@@ -521,72 +618,83 @@ async function checkSearch(
           : "MANUAL_FINAL";
         const message = getFinalMonitoringMessage(
           course,
-          monitoringDisposition
+          monitoringDisposition,
         );
-        await markMissingMatchesUnavailable({
-          searchId: search.id,
-          alertGeneration: search.alertGeneration,
-          checkLeaseToken: lease.token,
-          courseId: course.id,
-          date: searchWindow.date,
-          timeZone: course.timeZone,
-          confirmedMatches: []
-        });
-        await recordCourseProbeIfChanged({
-          searchId: search.id,
-          courseId: course.id,
-          observedAtOrAfter: customerEndpointStartedAt,
-          automationRunId,
-          runtimeVersion,
-          outcome,
-          message,
-          rawSummary: {
+        const finalClassification =
+          await recordCourseMonitoringFinalClassification({
+            courseId: course.id,
+            state: identityFinal ? "FINAL_IDENTITY" : "FINAL_MANUAL",
+            outcome,
+            evidence: {
+              kind: "PLAYBOOK_FACTUAL_FINAL",
+              cycle: course.supportIncident!.cycle,
+              observedAt: persistedPlaybookFinalEvidence.observedAt,
+            },
+            message,
+            runtimeVersion,
+            onSourceAccepted: async (transaction, evidenceObservedAt) => {
+              await markMissingMatchesUnavailable({
+                searchId: search.id,
+                alertGeneration: search.alertGeneration,
+                checkLeaseToken: lease.token,
+                courseId: course.id,
+                date: searchWindow.date,
+                timeZone: course.timeZone,
+                confirmedMatches: [],
+                observedAt: evidenceObservedAt,
+                transaction,
+              });
+            },
+          });
+        if (finalClassification?.sourceEvidenceAccepted) {
+          await recordCourseProbeIfChanged({
+            searchId: search.id,
+            courseId: course.id,
+            observedAtOrAfter: persistedPlaybookFinalEvidence.observedAt,
+            automationRunId,
+            runtimeVersion,
+            outcome,
+            message,
+            rawSummary: {
+              monitoringDisposition,
+              playbookConclusion: "FACTUAL_FINAL",
+              factualDisposition:
+                persistedPlaybookAssessment.factualDisposition,
+            },
+          });
+          courseResults.push({
+            courseId: course.id,
+            courseName: course.name,
+            timeZone: course.timeZone,
+            outcome,
+            availableMatches: 0,
+            message,
+            bookingUrl: identityFinal ? undefined : customerBookingUrl,
+            phone: identityFinal
+              ? undefined
+              : (course.bookingPhone ?? course.phone ?? undefined),
+            bookingMethod: course.bookingMethod,
+            bookingAccessMode: course.bookingAccessMode,
+            bookingAccess: identityFinal
+              ? undefined
+              : getCourseBookingAccess(course),
+            automationReason: course.automationReason,
             monitoringDisposition,
-            playbookConclusion: "FACTUAL_FINAL",
-            factualDisposition:
-              persistedPlaybookAssessment.factualDisposition
-          }
-        });
-        await recordCourseMonitoringFinalClassification({
-          courseId: course.id,
-          state: identityFinal ? "FINAL_IDENTITY" : "FINAL_MANUAL",
-          outcome,
-          message,
-          runtimeVersion
-        });
-        courseResults.push({
-          courseId: course.id,
-          courseName: course.name,
-          timeZone: course.timeZone,
-          outcome,
-          availableMatches: 0,
-          message,
-          bookingUrl: identityFinal ? undefined : customerBookingUrl,
-          phone: identityFinal
-            ? undefined
-            : (course.bookingPhone ?? course.phone ?? undefined),
-          bookingMethod: course.bookingMethod,
-          bookingAccessMode: course.bookingAccessMode,
-          bookingAccess: identityFinal
-            ? undefined
-            : getCourseBookingAccess(course),
-          automationReason: course.automationReason,
-          monitoringDisposition
-        });
-        return;
+          });
+          return;
+        }
       }
       const waitingForHumanReview =
         getCustomerMonitoringStatus({
           monitoringState: course.monitoringStatus?.state ?? null,
           incidentStatus: course.supportIncident?.status ?? null,
-          humanReviewReason:
-            course.supportIncident?.humanReviewReason ?? null,
+          humanReviewReason: course.supportIncident?.humanReviewReason ?? null,
           escalationDeadlineAt:
             course.supportIncident?.escalationDeadlineAt ?? null,
           automationPlaybookExhausted: persistedPlaybookExhausted,
           automationStalledAtEndpoint:
             hasAutomationStalledEndpointProof(course),
-          now: customerStatusObservedAt
+          now: customerStatusObservedAt,
         }) === "NEEDS_HUMAN_REVIEW";
       if (waitingForHumanReview) {
         const message = HUMAN_REVIEW_CUSTOMER_MESSAGE;
@@ -597,7 +705,7 @@ async function checkSearch(
           courseId: course.id,
           date: searchWindow.date,
           timeZone: course.timeZone,
-          confirmedMatches: []
+          confirmedMatches: [],
         });
         await recordCourseProbeIfChanged({
           searchId: search.id,
@@ -608,8 +716,8 @@ async function checkSearch(
           outcome: "NEEDS_ADAPTER",
           message,
           rawSummary: {
-            monitoringDisposition: "HUMAN_REVIEW_PENDING"
-          }
+            monitoringDisposition: "HUMAN_REVIEW_PENDING",
+          },
         });
         courseResults.push({
           courseId: course.id,
@@ -623,7 +731,7 @@ async function checkSearch(
           bookingMethod: course.bookingMethod,
           bookingAccessMode: course.bookingAccessMode,
           bookingAccess: getCourseBookingAccess(course),
-          supportStatus: "NEEDS_HUMAN_REVIEW"
+          supportStatus: "NEEDS_HUMAN_REVIEW",
         });
         return;
       }
@@ -646,13 +754,13 @@ async function checkSearch(
               requiresRevalidation: false,
               currentEvidence: true,
               reason:
-                "A durable operator decision confirmed the manual booking method."
+                "A durable operator decision confirmed the manual booking method.",
             }
           : evaluateMonitoringGate(course);
       let playbookRuntime = await loadSearchPlaybookRuntime({
         courseId: course.id,
         runtimeVersion,
-        context: course.supportIncident ?? null
+        context: course.supportIncident ?? null,
       });
       if (playbookRuntime?.assessment.nextStage === "OFFICIAL_IDENTITY") {
         if (
@@ -674,49 +782,44 @@ async function checkSearch(
                 monitoringGate.disposition === "MANUAL_FINAL"
                   ? "MANUAL_DIRECT"
                   : "IDENTITY_FINAL",
-              note: "Current authoritative course facts support a direct final action."
-            }
+              note: "Current authoritative course facts support a direct final action.",
+            },
           );
         } else {
           playbookRuntime = customerBookingUrl
             ? await ensureSearchPlaybookOfficialIdentity(playbookRuntime)
             : await recordSearchPlaybookAttempt(playbookRuntime, {
-              stage: "OFFICIAL_IDENTITY",
-              transition: "FAILED_TERMINAL",
-              readPath: "OFFICIAL_IDENTITY",
-              evidenceKind: "OFFICIAL_SOURCE",
-              failureFingerprint:
-                SEARCH_PLAYBOOK_FINGERPRINTS.OFFICIAL_IDENTITY_MISSING,
-              failureClass: "MISSING_SOURCE",
-              note: "No current official booking destination was available."
-            });
+                stage: "OFFICIAL_IDENTITY",
+                transition: "FAILED_TERMINAL",
+                readPath: "OFFICIAL_IDENTITY",
+                evidenceKind: "OFFICIAL_SOURCE",
+                failureFingerprint:
+                  SEARCH_PLAYBOOK_FINGERPRINTS.OFFICIAL_IDENTITY_MISSING,
+                failureClass: "MISSING_SOURCE",
+                note: "No current official booking destination was available.",
+              });
         }
       }
       if (localReaderOnly && playbookRuntime) {
-        playbookRuntime = await skipPlaybookStagesBeforeLocalReader(
-          playbookRuntime
-        );
+        playbookRuntime =
+          await skipPlaybookStagesBeforeLocalReader(playbookRuntime);
       }
-      if (
-        playbookRuntime?.assessment.nextStage ===
-        "OFFICIAL_HTTP_DISCOVERY"
-      ) {
+      if (playbookRuntime?.assessment.nextStage === "OFFICIAL_HTTP_DISCOVERY") {
         playbookRuntime = await recordOfficialDiscoveryResult({
           runtime: playbookRuntime,
           courseId: course.id,
           preparation: monitoringPreparation,
-          preparationFailed: monitoringPreparationFailed
+          preparationFailed: monitoringPreparationFailed,
         });
         if (
-          playbookRuntime.assessment.nextStage ===
-          "OFFICIAL_HTTP_DISCOVERY"
+          playbookRuntime.assessment.nextStage === "OFFICIAL_HTTP_DISCOVERY"
         ) {
           monitoringRetryCourseIds.add(course.id);
           courseResults.push(
             buildPlaybookPendingCourseReport(
               course,
-              "Official booking-source discovery will retry before any browser or local-reader check."
-            )
+              "Official booking-source discovery will retry before any browser or local-reader check.",
+            ),
           );
           return;
         }
@@ -729,21 +832,19 @@ async function checkSearch(
           stage: "HTTP_ADAPTER_RETRY",
           readPath: "TYPED_PROVIDER_ADAPTER",
           evidenceKind: "TOOLING",
-          failureFingerprint:
-            SEARCH_PLAYBOOK_FINGERPRINTS.STAGE_NOT_APPLICABLE,
+          failureFingerprint: SEARCH_PLAYBOOK_FINGERPRINTS.STAGE_NOT_APPLICABLE,
           skipReason: "NO_RUNNABLE_ADAPTER",
-          note: "Official HTTP discovery did not produce a runnable typed adapter."
+          note: "Official HTTP discovery did not produce a runnable typed adapter.",
         });
       }
       if (
-        playbookRuntime?.assessment.nextStage ===
-        "RENDERED_BROWSER_DISCOVERY"
+        playbookRuntime?.assessment.nextStage === "RENDERED_BROWSER_DISCOVERY"
       ) {
         courseResults.push(
           buildPlaybookPendingCourseReport(
             course,
-            "A signed-out rendered-browser review is the next monitoring step."
-          )
+            "A signed-out rendered-browser review is the next monitoring step.",
+          ),
         );
         return;
       }
@@ -755,10 +856,9 @@ async function checkSearch(
           stage: "BROWSER_ADAPTER_RETRY",
           readPath: "TYPED_PROVIDER_ADAPTER",
           evidenceKind: "TOOLING",
-          failureFingerprint:
-            SEARCH_PLAYBOOK_FINGERPRINTS.STAGE_NOT_APPLICABLE,
+          failureFingerprint: SEARCH_PLAYBOOK_FINGERPRINTS.STAGE_NOT_APPLICABLE,
           skipReason: "NO_RUNNABLE_ADAPTER",
-          note: "Rendered-browser discovery did not produce a runnable typed adapter."
+          note: "Rendered-browser discovery did not produce a runnable typed adapter.",
         });
       }
       if (
@@ -769,21 +869,20 @@ async function checkSearch(
           stage: "LOCAL_READER",
           readPath: "LOCAL_READER",
           evidenceKind: "TOOLING",
-          failureFingerprint:
-            SEARCH_PLAYBOOK_FINGERPRINTS.STAGE_NOT_APPLICABLE,
+          failureFingerprint: SEARCH_PLAYBOOK_FINGERPRINTS.STAGE_NOT_APPLICABLE,
           skipReason: "NO_LOCAL_READER_CAPABILITY",
-          note: "No verified local-reader capability exists for this booking page."
+          note: "No verified local-reader capability exists for this booking page.",
         });
         courseResults.push({
           ...buildPlaybookPendingCourseReport(
             course,
-            "Manual review is needed because no verified public-page reader is available."
+            "Manual review is needed because no verified public-page reader is available.",
           ),
           outcome: "NEEDS_ADAPTER",
           supportStatus:
             course.supportIncident?.status === "NEEDS_HUMAN"
               ? "NEEDS_HUMAN_REVIEW"
-              : "IN_OPERATOR_QUEUE"
+              : "IN_OPERATOR_QUEUE",
         });
         return;
       }
@@ -793,13 +892,13 @@ async function checkSearch(
         courseResults.push({
           ...buildPlaybookPendingCourseReport(
             course,
-            "An independent signed-out confirmation is required before monitoring can be finalized."
+            "An independent signed-out confirmation is required before monitoring can be finalized.",
           ),
           outcome: "NEEDS_ADAPTER",
           supportStatus:
             course.supportIncident?.status === "NEEDS_HUMAN"
               ? "NEEDS_HUMAN_REVIEW"
-              : "IN_OPERATOR_QUEUE"
+              : "IN_OPERATOR_QUEUE",
         });
         return;
       }
@@ -820,23 +919,29 @@ async function checkSearch(
         (localReaderOnly || course.automationReason === "CAPTCHA_OR_QUEUE");
       const incompleteOpenFactualCycle = Boolean(
         playbookRuntime &&
-          (monitoringGate.disposition === "MANUAL_FINAL" ||
-            monitoringGate.disposition === "IDENTITY_FINAL") &&
-          playbookRuntime.assessment.conclusion !== "FACTUAL_FINAL"
+        (monitoringGate.disposition === "MANUAL_FINAL" ||
+          monitoringGate.disposition === "IDENTITY_FINAL") &&
+        playbookRuntime.assessment.conclusion !== "FACTUAL_FINAL",
       );
       if (incompleteOpenFactualCycle) {
         const message =
           "Current course facts changed while monitoring review was in progress; a fresh identity cycle is required before final classification.";
-        const supportIssue = await reportCourseSupportIssue({
-          course,
-          searchId: search.id,
-          episodeStartedAt: getCourseFailureEpisodeStartedAt(course),
-          kind: "NEEDS_ADAPTER",
-          message,
-          readPath: "OFFICIAL_LINK_VERIFICATION",
-          nextAction:
-            "Start a fresh current-cycle official identity review before applying a direct final disposition."
-        });
+        const supportIssue = await reportCourseSupportIssueFromDurableEvidence(
+          {
+            course,
+            searchId: search.id,
+            episodeStartedAt: getCourseFailureEpisodeStartedAt(course),
+            kind: "NEEDS_ADAPTER",
+            message,
+            readPath: "OFFICIAL_LINK_VERIFICATION",
+            nextAction:
+              "Start a fresh current-cycle official identity review before applying a direct final disposition.",
+          },
+          {
+            mode: "PROVIDER_INTELLIGENCE",
+            now: new Date(),
+          },
+        );
         supportIssues.push({ courseId: course.id, ...supportIssue });
         monitoringRetryCourseIds.add(course.id);
         await recordCourseProbeIfChanged({
@@ -849,8 +954,8 @@ async function checkSearch(
           message,
           rawSummary: {
             monitoringDisposition: "IDENTITY_RECHECK",
-            playbookConclusion: playbookRuntime?.assessment.conclusion
-          }
+            playbookConclusion: playbookRuntime?.assessment.conclusion,
+          },
         });
         courseResults.push({
           courseId: course.id,
@@ -863,7 +968,7 @@ async function checkSearch(
             ? supportIssue.status === "NEEDS_HUMAN"
               ? "NEEDS_HUMAN_REVIEW"
               : "IN_OPERATOR_QUEUE"
-            : undefined
+            : undefined,
         });
         return;
       }
@@ -886,71 +991,117 @@ async function checkSearch(
           monitoringGate.disposition === "IDENTITY_RECHECK";
         const message = getFinalMonitoringMessage(
           course,
-          monitoringGate.disposition
+          monitoringGate.disposition,
         );
-        await markMissingMatchesUnavailable({
-          searchId: search.id,
-          alertGeneration: search.alertGeneration,
-          checkLeaseToken: lease.token,
-          courseId: course.id,
-          date: searchWindow.date,
-          timeZone: course.timeZone,
-          confirmedMatches: []
-        });
-        await recordCourseProbeIfChanged({
-          searchId: search.id,
-          courseId: course.id,
-          observedAtOrAfter: customerEndpointStartedAt,
-          automationRunId,
-          runtimeVersion,
-          outcome,
-          message,
-          rawSummary: {
-            monitoringDisposition: monitoringGate.disposition,
-            automationReason: course.automationReason
-          }
-        });
-        if (monitoringGate.disposition !== "IDENTITY_RECHECK") {
-          if (monitoringGate.disposition === "MANUAL_FINAL") {
+        const factualFinal =
+          monitoringGate.disposition === "MANUAL_FINAL" ||
+          monitoringGate.disposition === "IDENTITY_FINAL";
+        let sourceEvidenceAccepted = !factualFinal;
+        if (factualFinal && course.intelligenceVerifiedAt) {
+          const finalClassification =
             await recordCourseMonitoringFinalClassification({
               courseId: course.id,
-              state: "FINAL_MANUAL",
-              outcome: "MANUAL_DIRECT",
+              state:
+                monitoringGate.disposition === "IDENTITY_FINAL"
+                  ? "FINAL_IDENTITY"
+                  : "FINAL_MANUAL",
+              outcome:
+                monitoringGate.disposition === "IDENTITY_FINAL"
+                  ? "IDENTITY_FINAL"
+                  : "MANUAL_DIRECT",
+              evidence: {
+                kind: "COURSE_INTELLIGENCE",
+                observedAt: course.intelligenceVerifiedAt,
+              },
               message,
-              runtimeVersion
+              runtimeVersion,
+              onSourceAccepted: async (transaction, evidenceObservedAt) => {
+                await markMissingMatchesUnavailable({
+                  searchId: search.id,
+                  alertGeneration: search.alertGeneration,
+                  checkLeaseToken: lease.token,
+                  courseId: course.id,
+                  date: searchWindow.date,
+                  timeZone: course.timeZone,
+                  confirmedMatches: [],
+                  observedAt: evidenceObservedAt,
+                  transaction,
+                });
+              },
             });
-          } else if (monitoringGate.disposition === "IDENTITY_FINAL") {
-            await recordCourseMonitoringFinalClassification({
-              courseId: course.id,
-              state: "FINAL_IDENTITY",
-              outcome: "IDENTITY_FINAL",
-              message,
-              runtimeVersion
-            });
+          sourceEvidenceAccepted = Boolean(
+            finalClassification?.sourceEvidenceAccepted,
+          );
+        } else if (!factualFinal) {
+          sourceEvidenceAccepted = false;
+          if (course.intelligenceVerifiedAt) {
+            const acceptedIntelligence =
+              await runWithAcceptedCourseIntelligenceEvidence({
+                courseId: course.id,
+                expectedDisposition:
+                  monitoringGate.disposition === "TECHNICAL_FINAL"
+                    ? "TECHNICAL_FINAL"
+                    : "IDENTITY_RECHECK",
+                evidenceObservedAt: course.intelligenceVerifiedAt,
+                onSourceAccepted: async (transaction, evidenceObservedAt) => {
+                  await markMissingMatchesUnavailable({
+                    searchId: search.id,
+                    alertGeneration: search.alertGeneration,
+                    checkLeaseToken: lease.token,
+                    courseId: course.id,
+                    date: searchWindow.date,
+                    timeZone: course.timeZone,
+                    confirmedMatches: [],
+                    observedAt: evidenceObservedAt,
+                    transaction,
+                  });
+                },
+              });
+            sourceEvidenceAccepted = Boolean(
+              acceptedIntelligence?.sourceEvidenceAccepted,
+            );
           }
         }
-        courseResults.push({
-          courseId: course.id,
-          courseName: course.name,
-          timeZone: course.timeZone,
-          outcome,
-          availableMatches: 0,
-          message,
-          bookingUrl: identityBlocked
-            ? undefined
-            : getCustomerBookingUrl(course),
-          phone: identityBlocked
-            ? undefined
-            : (course.bookingPhone ?? course.phone ?? undefined),
-          bookingMethod: course.bookingMethod,
-          bookingAccessMode: course.bookingAccessMode,
-          bookingAccess: identityBlocked
-            ? undefined
-            : getCourseBookingAccess(course),
-          automationReason: course.automationReason,
-          monitoringDisposition: monitoringGate.disposition
-        });
-        return;
+        if (sourceEvidenceAccepted) {
+          await recordCourseProbeIfChanged({
+            searchId: search.id,
+            courseId: course.id,
+            observedAtOrAfter:
+              factualFinal && course.intelligenceVerifiedAt
+                ? course.intelligenceVerifiedAt
+                : customerEndpointStartedAt,
+            automationRunId,
+            runtimeVersion,
+            outcome,
+            message,
+            rawSummary: {
+              monitoringDisposition: monitoringGate.disposition,
+              automationReason: course.automationReason,
+            },
+          });
+          courseResults.push({
+            courseId: course.id,
+            courseName: course.name,
+            timeZone: course.timeZone,
+            outcome,
+            availableMatches: 0,
+            message,
+            bookingUrl: identityBlocked
+              ? undefined
+              : getCustomerBookingUrl(course),
+            phone: identityBlocked
+              ? undefined
+              : (course.bookingPhone ?? course.phone ?? undefined),
+            bookingMethod: course.bookingMethod,
+            bookingAccessMode: course.bookingAccessMode,
+            bookingAccess: identityBlocked
+              ? undefined
+              : getCourseBookingAccess(course),
+            automationReason: course.automationReason,
+            monitoringDisposition: monitoringGate.disposition,
+          });
+          return;
+        }
       }
 
       if (
@@ -958,11 +1109,11 @@ async function checkSearch(
         course.layoutHolesVerifiedAt &&
         getCourseLayoutCompatibility(
           course.layoutHoleCounts,
-          requestedLayoutHoles
+          requestedLayoutHoles,
         ) === "incompatible"
       ) {
         const message = `${course.name} is verified as ${getCourseLayoutLabel(
-          course.layoutHoleCounts
+          course.layoutHoleCounts,
         )} and does not match the requested ${requestedLayoutHoles}-hole physical course layout.`;
         await markMissingMatchesUnavailable({
           searchId: search.id,
@@ -971,7 +1122,7 @@ async function checkSearch(
           courseId: course.id,
           date: searchWindow.date,
           timeZone: course.timeZone,
-          confirmedMatches: []
+          confirmedMatches: [],
         });
         await recordCourseProbeIfChanged({
           searchId: search.id,
@@ -980,7 +1131,7 @@ async function checkSearch(
           automationRunId,
           runtimeVersion,
           outcome: "NO_MATCH",
-          message
+          message,
         });
         courseResults.push({
           courseId: course.id,
@@ -993,7 +1144,7 @@ async function checkSearch(
           phone: course.bookingPhone ?? course.phone ?? undefined,
           bookingMethod: course.bookingMethod,
           bookingAccessMode: course.bookingAccessMode,
-          bookingAccess: getCourseBookingAccess(course)
+          bookingAccess: getCourseBookingAccess(course),
         });
         return;
       }
@@ -1011,19 +1162,25 @@ async function checkSearch(
           message,
           rawSummary: {
             monitoringMode: course.monitoringMode,
-            nextAction: "repair-local-reader-configuration"
-          }
+            nextAction: "repair-local-reader-configuration",
+          },
         });
-        const supportIssue = await reportCourseSupportIssue({
-          course,
-          searchId: search.id,
-          episodeStartedAt: getCourseFailureEpisodeStartedAt(course),
-          kind: "BLOCKED_TOOLING",
-          message,
-          readPath: "LOCAL_READER_CONFIGURATION",
-          nextAction:
-            "Correct the exact local-reader allowlist or return the course to automatic monitoring."
-        });
+        const supportIssue = await reportCourseSupportIssueFromDurableEvidence(
+          {
+            course,
+            searchId: search.id,
+            episodeStartedAt: getCourseFailureEpisodeStartedAt(course),
+            kind: "BLOCKED_TOOLING",
+            message,
+            readPath: "LOCAL_READER_CONFIGURATION",
+            nextAction:
+              "Correct the exact local-reader allowlist or return the course to automatic monitoring.",
+          },
+          {
+            mode: "PRIOR_MONITORING_ONLY",
+            now: new Date(),
+          },
+        );
         supportIssues.push({ courseId: course.id, ...supportIssue });
         courseResults.push({
           courseId: course.id,
@@ -1041,7 +1198,7 @@ async function checkSearch(
             ? supportIssue.status === "NEEDS_HUMAN"
               ? "NEEDS_HUMAN_REVIEW"
               : "IN_OPERATOR_QUEUE"
-            : undefined
+            : undefined,
         });
         return;
       }
@@ -1067,8 +1224,8 @@ async function checkSearch(
             outcome: "NEEDS_ADAPTER",
             message,
             rawSummary: {
-              nextAction: "official-source-discovery-retry"
-            }
+              nextAction: "official-source-discovery-retry",
+            },
           });
           courseResults.push({
             courseId: course.id,
@@ -1081,7 +1238,7 @@ async function checkSearch(
             phone: course.bookingPhone ?? course.phone ?? undefined,
             bookingMethod: course.bookingMethod,
             bookingAccessMode: course.bookingAccessMode,
-            bookingAccess: getCourseBookingAccess(course)
+            bookingAccess: getCourseBookingAccess(course),
           });
           return;
         }
@@ -1100,36 +1257,39 @@ async function checkSearch(
           message,
           rawSummary: {
             nextAction: "automation:adapter-remediation",
-            browserProbeUrl
-          }
+            browserProbeUrl,
+          },
         });
-        const supportIssue = await reportCourseSupportIssue({
-          course,
-          searchId: search.id,
-          episodeStartedAt: getCourseFailureEpisodeStartedAt(course),
-          kind: "NEEDS_ADAPTER",
-          message,
-          readPath: browserProbeQueued
-            ? "SIGNED_OUT_BROWSER_DISCOVERY"
-            : "OFFICIAL_LINK_VERIFICATION",
-          nextAction: browserProbeQueued
-            ? `Build or extend a reusable public read-only adapter from the completed official-site discovery for ${browserProbeUrl}, then verify this search.`
-            : "Autonomously classify the official booking method, find a public read-only retrieval path if one exists, and verify this search."
-        });
+        const supportIssue = await reportCourseSupportIssueFromDurableEvidence(
+          {
+            course,
+            searchId: search.id,
+            episodeStartedAt: getCourseFailureEpisodeStartedAt(course),
+            kind: "NEEDS_ADAPTER",
+            message,
+            readPath: browserProbeQueued
+              ? "SIGNED_OUT_BROWSER_DISCOVERY"
+              : "OFFICIAL_LINK_VERIFICATION",
+            nextAction: browserProbeQueued
+              ? `Build or extend a reusable public read-only adapter from the completed official-site discovery for ${browserProbeUrl}, then verify this search.`
+              : "Autonomously classify the official booking method, find a public read-only retrieval path if one exists, and verify this search.",
+          },
+          {
+            mode: "PROVIDER_INTELLIGENCE",
+            now: new Date(),
+          },
+        );
         supportIssues.push({ courseId: course.id, ...supportIssue });
         let missingAdapterPlaybook = await loadSearchPlaybookRuntime({
           courseId: course.id,
           incidentId: supportIssue.incidentId,
-          runtimeVersion
+          runtimeVersion,
         });
         if (
-          missingAdapterPlaybook?.assessment.nextStage ===
-          "OFFICIAL_IDENTITY"
+          missingAdapterPlaybook?.assessment.nextStage === "OFFICIAL_IDENTITY"
         ) {
           missingAdapterPlaybook = customerBookingUrl
-            ? await ensureSearchPlaybookOfficialIdentity(
-                missingAdapterPlaybook
-              )
+            ? await ensureSearchPlaybookOfficialIdentity(missingAdapterPlaybook)
             : await recordSearchPlaybookAttempt(missingAdapterPlaybook, {
                 stage: "OFFICIAL_IDENTITY",
                 transition: "FAILED_TERMINAL",
@@ -1138,12 +1298,10 @@ async function checkSearch(
                 failureFingerprint:
                   SEARCH_PLAYBOOK_FINGERPRINTS.OFFICIAL_IDENTITY_MISSING,
                 failureClass: "MISSING_SOURCE",
-                note: "No current official booking destination was available."
+                note: "No current official booking destination was available.",
               });
         }
-        if (
-          missingAdapterPlaybook?.assessment.nextStage === "TYPED_ADAPTER"
-        ) {
+        if (missingAdapterPlaybook?.assessment.nextStage === "TYPED_ADAPTER") {
           await skipSearchPlaybookStage(missingAdapterPlaybook, {
             stage: "TYPED_ADAPTER",
             readPath: "TYPED_PROVIDER_ADAPTER",
@@ -1151,7 +1309,7 @@ async function checkSearch(
             failureFingerprint:
               SEARCH_PLAYBOOK_FINGERPRINTS.STAGE_NOT_APPLICABLE,
             skipReason: "NO_RUNNABLE_ADAPTER",
-            note: "No existing runnable typed adapter was available."
+            note: "No existing runnable typed adapter was available.",
           });
         }
         courseResults.push({
@@ -1170,7 +1328,7 @@ async function checkSearch(
             ? supportIssue.status === "NEEDS_HUMAN"
               ? "NEEDS_HUMAN_REVIEW"
               : "IN_OPERATOR_QUEUE"
-            : undefined
+            : undefined,
         });
         return;
       }
@@ -1178,16 +1336,16 @@ async function checkSearch(
       const checkStartedAt = new Date();
       const storedBookingWindow = getBookingWindowForTargetDate(
         search.date,
-        course
+        course,
       );
       const refreshBookingWindow =
         shouldRefreshBookingWindow(
           course.bookingWindowObservedAt,
-          checkStartedAt
+          checkStartedAt,
         ) &&
         shouldRetryBookingWindowDiscovery(
           course.bookingWindowCheckedAt,
-          checkStartedAt
+          checkStartedAt,
         );
       if (
         storedBookingWindow &&
@@ -1201,21 +1359,53 @@ async function checkSearch(
           automationRunId,
           runtimeVersion,
           targetDate: searchWindow.date,
-          bookingWindow: storedBookingWindow
+          bookingWindow: storedBookingWindow,
         });
         courseResults.push(
-          buildBookingWindowCourseReport(course, storedBookingWindow)
+          buildBookingWindowCourseReport(course, storedBookingWindow),
         );
         return;
       }
 
       let providerRequestStarted = false;
-      const activePlaybookStage = getRunnableSearchPlaybookStage(
-        playbookRuntime
-      );
+      let providerExecutionObservedAt: Date | null = null;
+      let providerSourceAccepted = false;
+      let providerObservationReconciled = false;
+      let providerObservationLease: CourseProviderObservationLease | null =
+        null;
+      let providerObservationHeartbeat: ReturnType<
+        typeof startCourseProviderObservationHeartbeat
+      > | null = null;
+      let providerObservationFenceAttempted = false;
+      const assertProviderObservationOwnedInTransaction = async (
+        transaction: Prisma.TransactionClient,
+      ) => {
+        if (
+          providerObservationLease &&
+          !(await renewCourseProviderObservationInTransaction(
+            transaction,
+            providerObservationLease,
+          ))
+        ) {
+          throw new Error(
+            "Provider observation ownership expired before canonical persistence completed.",
+          );
+        }
+      };
+      const releaseProviderObservationInTransaction = async (
+        transaction: Prisma.TransactionClient,
+      ) => {
+        if (!providerObservationLease) return;
+        await releaseCourseProviderObservationInTransaction(
+          transaction,
+          providerObservationLease,
+        );
+      };
+      const activePlaybookStage =
+        getRunnableSearchPlaybookStage(playbookRuntime);
       const browserAdapterRetryCompletedAt =
         playbookRuntime?.assessment.stages.find(
-          (stage) => stage.stage === "BROWSER_ADAPTER_RETRY"
+          (stage) => stage.stage === "BROWSER_ADAPTER_RETRY",
         )?.completedAt ?? null;
       const localReaderNotBefore =
         activePlaybookStage === "LOCAL_READER" && browserAdapterRetryCompletedAt
@@ -1225,58 +1415,134 @@ async function checkSearch(
         const localReaderShouldRun =
           localReaderEligible &&
           playbookRuntime?.assessment.nextStage === "LOCAL_READER";
-        const localReaderObservation = localReaderShouldRun
+        const freshLocalReaderObservation = localReaderShouldRun
           ? await getFreshLocalReaderObservation({
               searchId: search.id,
               courseId: course.id,
+              scheduleVersion: search.scheduleVersion,
               targetDate: searchWindow.date,
               players: search.players,
               bookingUrl: customerBookingUrl!,
-              ...(localReaderNotBefore ? { notBefore: localReaderNotBefore } : {})
+              ...(localReaderNotBefore
+                ? { notBefore: localReaderNotBefore }
+                : {}),
             })
           : null;
+        const expiredLocalReaderResumeObservation =
+          localReaderShouldRun && !freshLocalReaderObservation
+            ? await getExpiredUnconsumedLocalReaderObservationForCanonicalResume(
+                {
+                  searchId: search.id,
+                  courseId: course.id,
+                  scheduleVersion: search.scheduleVersion,
+                  targetDate: searchWindow.date,
+                  players: search.players,
+                  bookingUrl: customerBookingUrl!,
+                  ...(localReaderNotBefore
+                    ? { notBefore: localReaderNotBefore }
+                    : {}),
+                },
+              )
+            : null;
+        const localReaderObservation =
+          freshLocalReaderObservation ?? expiredLocalReaderResumeObservation;
+        const localReaderResumeOnly = Boolean(
+          expiredLocalReaderResumeObservation,
+        );
+        const consumeLocalReaderObservationInTransaction = async (
+          transaction: Prisma.TransactionClient,
+        ) => {
+          if (!localReaderObservation?.jobId) return;
+          if (
+            !(await markCompletedLocalReaderProviderObservationConsumedInTransaction(
+              transaction,
+              {
+                courseId: course.id,
+                searchId: search.id,
+                scheduleVersion: search.scheduleVersion,
+                checkLeaseToken: lease.token,
+                jobId: localReaderObservation.jobId,
+                providerObservedAt: localReaderObservation.observedAt,
+                resultStatus: localReaderObservation.status,
+              },
+            ))
+          ) {
+            throw new Error(
+              "The local-reader provider source could not be marked consumed",
+            );
+          }
+        };
+        providerExecutionObservedAt =
+          localReaderObservation?.observedAt ?? null;
         if (
           localReaderObservation &&
           !localReaderObservation.teeSheet &&
           ["ACCESS_CHALLENGE", "PAGE_MISMATCH", "READER_ERROR"].includes(
-            localReaderObservation.status
+            localReaderObservation.status,
           ) &&
           playbookRuntime?.assessment.nextStage === "LOCAL_READER"
         ) {
           const accessChallenge =
             localReaderObservation.status === "ACCESS_CHALLENGE";
-          playbookRuntime = await recordSearchPlaybookAttemptResult(
-            playbookRuntime,
-            accessChallenge
-              ? {
-                  stage: "LOCAL_READER",
-                  transition: "TECHNICAL_LIMITATION",
-                  readPath: "LOCAL_READER",
-                  evidenceKind: "LOCAL_READER_RESULT",
-                  failureFingerprint:
-                    SEARCH_PLAYBOOK_FINGERPRINTS.LOCAL_READER_CHALLENGE,
-                  technicalReason: "CAPTCHA_OR_QUEUE",
-                  note: "The signed-out local reader observed an access challenge.",
-                  observedAt: localReaderObservation.observedAt
-                }
-              : {
-                  stage: "LOCAL_READER",
-                  transition: "FAILED_TERMINAL",
-                  readPath: "LOCAL_READER",
-                  evidenceKind: "LOCAL_READER_RESULT",
-                  failureFingerprint:
-                    SEARCH_PLAYBOOK_FINGERPRINTS.LOCAL_READER_TERMINAL,
-                  failureClass:
-                    localReaderObservation.status === "PAGE_MISMATCH"
-                      ? "SCHEMA"
-                      : "UNKNOWN",
-                  note: "The bounded local-reader attempt ended without a tee sheet.",
-                  observedAt: localReaderObservation.observedAt
-                }
-          );
+          const localReaderAttemptResult = accessChallenge
+            ? ({
+                stage: "LOCAL_READER",
+                transition: "TECHNICAL_LIMITATION",
+                readPath: "LOCAL_READER",
+                evidenceKind: "LOCAL_READER_RESULT",
+                failureFingerprint:
+                  SEARCH_PLAYBOOK_FINGERPRINTS.LOCAL_READER_CHALLENGE,
+                technicalReason: "CAPTCHA_OR_QUEUE",
+                note: "The signed-out local reader observed an access challenge.",
+                observedAt: localReaderObservation.observedAt,
+              } as const)
+            : ({
+                stage: "LOCAL_READER",
+                transition: "FAILED_TERMINAL",
+                readPath: "LOCAL_READER",
+                evidenceKind: "LOCAL_READER_RESULT",
+                failureFingerprint:
+                  SEARCH_PLAYBOOK_FINGERPRINTS.LOCAL_READER_TERMINAL,
+                failureClass:
+                  localReaderObservation.status === "PAGE_MISMATCH"
+                    ? "SCHEMA"
+                    : "UNKNOWN",
+                note: "The bounded local-reader attempt ended without a tee sheet.",
+                observedAt: localReaderObservation.observedAt,
+              } as const);
           const message = accessChallenge
             ? "The public booking page requires an independent signed-out confirmation before monitoring can be finalized."
             : "The public-page reader ended without a usable tee sheet; manual review is the next step.";
+          const supportIssue = await reportCourseSupportIssue({
+            course,
+            searchId: search.id,
+            episodeStartedAt: getCourseFailureEpisodeStartedAt(course),
+            kind: "READER_CANDIDATE",
+            message,
+            error: new Error(message),
+            providerObservedAt: localReaderObservation.observedAt,
+            failureObservedAt: localReaderObservation.observedAt,
+            readPath: "LOCAL_READER_TERMINAL",
+            onSourceAccepted: consumeLocalReaderObservationInTransaction,
+            nextAction: accessChallenge
+              ? "Preserve the technical access classification and require independent review."
+              : "Inspect the exact reader result and repair the reusable parser before retrying.",
+          });
+          if (supportIssue.sourceEvidenceAccepted !== true) {
+            monitoringRetryCourseIds.add(course.id);
+            courseResults.push(
+              buildPlaybookPendingCourseReport(
+                course,
+                "A newer course observation superseded this local-reader result; a fresh check is queued.",
+              ),
+            );
+            return;
+          }
+          providerSourceAccepted = true;
+          playbookRuntime = await recordSearchPlaybookAttemptResult(
+            playbookRuntime,
+            localReaderAttemptResult,
+          );
           await recordCourseProbeIfChanged({
             searchId: search.id,
             courseId: course.id,
@@ -1287,83 +1553,207 @@ async function checkSearch(
             message,
             rawSummary: {
               providerExecution: "LOCAL_BROWSER_READER",
+              providerObservedAt:
+                localReaderObservation.observedAt.toISOString(),
               readerStatus: localReaderObservation.status,
-              playbookConclusion: playbookRuntime.assessment.conclusion
-            }
+              playbookConclusion: playbookRuntime.assessment.conclusion,
+            },
           });
+          supportIssues.push({ courseId: course.id, ...supportIssue });
           courseResults.push({
             ...buildPlaybookPendingCourseReport(course, message),
             outcome: "FETCH_FAILED",
             supportStatus:
-              course.supportIncident?.status === "NEEDS_HUMAN"
+              supportIssue.status === "NEEDS_HUMAN"
                 ? "NEEDS_HUMAN_REVIEW"
-                : "IN_OPERATOR_QUEUE"
+                : "IN_OPERATOR_QUEUE",
           });
           return;
         }
         const localTeeSheet = localReaderObservation?.teeSheet ?? null;
         let teeSheet: CourseTeeSheetResult | null = localTeeSheet;
-        let providerExecutionLabel = "LOCAL_BROWSER_READER";
+        let providerExecutionLabel: ProviderExecutionMarker =
+          "LOCAL_BROWSER_READER";
         if (!teeSheet && localReaderShouldRun) {
           throw new Error("The required local-reader result is not ready.");
         }
         if (!teeSheet && !supportedAdapterAvailable) {
           throw new Error(
-            "No reusable server adapter is available for this course."
+            "No reusable server adapter is available for this course.",
           );
         }
         if (!teeSheet) {
+          providerObservationFenceAttempted = true;
+          providerObservationLease = await beginCourseProviderObservation({
+            courseId: course.id,
+          });
+          if (!providerObservationLease) {
+            monitoringRetryCourseIds.add(course.id);
+            courseResults.push({
+              courseId: course.id,
+              courseName: course.name,
+              timeZone: course.timeZone,
+              outcome: "CHECK_PENDING",
+              availableMatches: 0,
+              message:
+                "Another fresh provider observation is already in progress; this check will retry.",
+              bookingUrl: getCustomerBookingUrl(course),
+              phone: course.bookingPhone ?? course.phone ?? undefined,
+              bookingMethod: course.bookingMethod,
+              bookingAccessMode: course.bookingAccessMode,
+              bookingAccess: getCourseBookingAccess(course),
+            });
+            return;
+          }
+          providerObservationHeartbeat =
+            startCourseProviderObservationHeartbeat(providerObservationLease);
+          // The database-issued marker start is the conservative provider
+          // source anchor. A skewed application host must not decide ordering.
+          providerExecutionObservedAt =
+            providerObservationLease.observationStartedAt;
           const providerExecution = await runWithProviderRequestLease(
-              providerFamilyKey,
-              () => {
-                providerRequestStarted = true;
-                return fetchCourseTeeSheet(
-                  course,
-                  search.date,
-                  search.players,
-                  refreshBookingWindow
-                );
-              }
-            );
+            providerFamilyKey,
+            async () => {
+              providerRequestStarted = true;
+              return fetchCourseTeeSheet(
+                course,
+                search.date,
+                search.players,
+                refreshBookingWindow,
+              );
+            },
+          );
           if (!providerExecution.acquired) {
-              monitoringRetryCourseIds.add(course.id);
-              courseResults.push({
-                courseId: course.id,
-                courseName: course.name,
-                timeZone: course.timeZone,
-                outcome: "FETCH_FAILED",
-                availableMatches: 0,
-                message:
-                  "This provider check was deferred by the global concurrency guard and will retry.",
-                bookingUrl: getCustomerBookingUrl(course),
-                phone: course.bookingPhone ?? course.phone ?? undefined,
-                bookingMethod: course.bookingMethod,
-                bookingAccessMode: course.bookingAccessMode,
-                bookingAccess: getCourseBookingAccess(course)
-              });
+            monitoringRetryCourseIds.add(course.id);
+            courseResults.push({
+              courseId: course.id,
+              courseName: course.name,
+              timeZone: course.timeZone,
+              outcome: "FETCH_FAILED",
+              availableMatches: 0,
+              message:
+                "This provider check was deferred by the global concurrency guard and will retry.",
+              bookingUrl: getCustomerBookingUrl(course),
+              phone: course.bookingPhone ?? course.phone ?? undefined,
+              bookingMethod: course.bookingMethod,
+              bookingAccessMode: course.bookingAccessMode,
+              bookingAccess: getCourseBookingAccess(course),
+            });
             return;
           }
           teeSheet = providerExecution.value;
+          providerObservationHeartbeat.assertOwned();
           providerExecutionLabel = "RUNNABLE_PROVIDER_CHECK";
         }
+        if (!providerExecutionObservedAt) {
+          throw new Error(
+            "Provider execution completed without a source timestamp.",
+          );
+        }
+        const localReaderSuccessSource =
+          localReaderObservation &&
+          (localReaderObservation.status === "AVAILABLE" ||
+            localReaderObservation.status === "NO_AVAILABILITY")
+            ? {
+                jobId: localReaderObservation.jobId,
+                searchId: search.id,
+                scheduleVersion: search.scheduleVersion,
+                resultStatus: localReaderObservation.status,
+              }
+            : null;
         await maintainSearchCheckLease(lease);
         const rawSlots = teeSheet.slots;
-        let bookingWindow = storedBookingWindow;
-        if (teeSheet.bookingWindowEvidence) {
-          await recordCourseBookingWindowEvidence({
-            courseId: course.id,
-            evidence: teeSheet.bookingWindowEvidence,
-            observedAt: checkStartedAt
-          });
-          bookingWindow = getBookingWindowFromEvidence(
-            search.date,
-            course.timeZone,
-            teeSheet.bookingWindowEvidence
-          );
-        } else if (refreshBookingWindow) {
-          await markCourseBookingWindowChecked(course.id, checkStartedAt);
-        }
+        const bookingWindow = teeSheet.bookingWindowEvidence
+          ? getBookingWindowFromEvidence(
+              search.date,
+              course.timeZone,
+              teeSheet.bookingWindowEvidence,
+            )
+          : storedBookingWindow;
         if (bookingWindow && bookingWindow.opensAt > checkStartedAt) {
+          providerObservationHeartbeat?.assertOwned();
+          const monitoringSuccess = localReaderResumeOnly
+            ? { sourceEvidenceAccepted: false as const }
+            : await recordCourseMonitoringSuccess({
+                courseId: course.id,
+                outcome: "NO_MATCH",
+                message:
+                  "Fresh public monitoring confirmed the booking release window.",
+                runtimeVersion,
+                providerObservedAt: providerExecutionObservedAt,
+                ...(localReaderSuccessSource
+                  ? { localReaderSource: localReaderSuccessSource }
+                  : {}),
+                onBeforeSourceWrite:
+                  assertProviderObservationOwnedInTransaction,
+              });
+          const resumePreviouslyAcceptedLocalReaderSource = Boolean(
+            localReaderSuccessSource &&
+            !monitoringSuccess?.sourceEvidenceAccepted,
+          );
+          if (
+            !monitoringSuccess?.sourceEvidenceAccepted &&
+            !resumePreviouslyAcceptedLocalReaderSource
+          ) {
+            monitoringRetryCourseIds.add(course.id);
+            courseResults.push(
+              buildPlaybookPendingCourseReport(
+                course,
+                "A newer course observation superseded this result; a fresh check is queued.",
+              ),
+            );
+            return;
+          }
+          providerSourceAccepted = Boolean(
+            monitoringSuccess?.sourceEvidenceAccepted,
+          );
+          providerObservationHeartbeat?.assertOwned();
+          const bookingWindowCommit = await commitCurrentCourseTeeTimeMatches({
+            searchId: search.id,
+            alertGeneration: search.alertGeneration,
+            checkLeaseToken: lease.token,
+            courseId: course.id,
+            date: searchWindow.date,
+            timeZone: course.timeZone,
+            providerObservedAt: providerExecutionObservedAt,
+            sourceKind: "SUCCESS",
+            ...(localReaderSuccessSource
+              ? {
+                  localReaderObservation: {
+                    jobId: localReaderSuccessSource.jobId,
+                    scheduleVersion: localReaderSuccessSource.scheduleVersion,
+                    resultStatus: localReaderSuccessSource.resultStatus,
+                    monitoringOutcome: "NO_MATCH" as const,
+                    ...(resumePreviouslyAcceptedLocalReaderSource
+                      ? { resumePreviouslyAcceptedSource: true }
+                      : {}),
+                  },
+                }
+              : {}),
+            ...(providerObservationLease
+              ? { providerObservation: providerObservationLease }
+              : {}),
+            ...(teeSheet.bookingWindowEvidence
+              ? { bookingWindowEvidence: teeSheet.bookingWindowEvidence }
+              : refreshBookingWindow
+                ? { markBookingWindowChecked: true }
+                : {}),
+            reconcileMatches: false,
+            matches: [],
+          });
+          if (!bookingWindowCommit.sourceEvidenceAccepted) {
+            providerSourceAccepted = false;
+            monitoringRetryCourseIds.add(course.id);
+            courseResults.push(
+              buildPlaybookPendingCourseReport(
+                course,
+                "A newer course observation superseded this booking-window result; a fresh check is queued.",
+              ),
+            );
+            return;
+          }
+          providerSourceAccepted = true;
+          providerObservationReconciled = Boolean(providerObservationLease);
           await recordBookingWindowWaitingProbe({
             searchId: search.id,
             courseId: course.id,
@@ -1372,21 +1762,17 @@ async function checkSearch(
             runtimeVersion,
             targetDate: searchWindow.date,
             bookingWindow,
-            providerExecution: true
+            providerExecution: providerExecutionLabel,
+            providerObservedAt: providerExecutionObservedAt,
           });
           await recordSearchPlaybookSuccess(
             playbookRuntime,
             activePlaybookStage,
-            providerExecutionLabel
+            providerExecutionLabel,
+            providerExecutionObservedAt,
           );
-          await recordCourseMonitoringSuccess({
-            courseId: course.id,
-            outcome: "NO_MATCH",
-            message: "Fresh public monitoring confirmed the booking release window.",
-            runtimeVersion
-          });
           courseResults.push(
-            buildBookingWindowCourseReport(course, bookingWindow)
+            buildBookingWindowCourseReport(course, bookingWindow),
           );
           return;
         }
@@ -1397,113 +1783,210 @@ async function checkSearch(
         const unsafeBookingUrlCount = rawSlots.length - safeRawSlots.length;
         const availability = summarizeSearchStatusAvailability(
           searchWindow,
-          safeRawSlots
+          safeRawSlots,
         );
         const bookableHoleCounts = summarizeBookableHoleCounts(safeRawSlots);
         const pricing = summarizeCourseSlotPrices(safeRawSlots);
-        await recordCourseBookingFacts({
-          courseId: course.id,
-          pricing,
-          bookableHoleCounts,
-          observedAt: checkStartedAt
-        });
-        observedBookingFactsByCourse.set(course.id, {
-          pricing,
-          bookableHoleCounts,
-          observedAt: checkStartedAt
-        });
         const currentMatches = rankMatches(
           searchWindow,
-          dedupeMatches(filterSlotsForSearch(searchWindow, safeRawSlots), [])
+          dedupeMatches(filterSlotsForSearch(searchWindow, safeRawSlots), []),
         );
         const normalizedCurrentMatches = currentMatches.map((match) => ({
           match,
-          startsAt: parseCourseLocalDateTime(match.startsAt, course.timeZone)
+          startsAt: parseCourseLocalDateTime(match.startsAt, course.timeZone),
         }));
-        const persistedMatchStates: Array<{
-          matchId?: string;
-          isPending: boolean;
-        }> = [];
-
-        for (const { match, startsAt } of normalizedCurrentMatches) {
-          const persistedMatch = await recordTeeTimeMatch({
+        const outcome = currentMatches.length > 0 ? "MATCH_FOUND" : "NO_MATCH";
+        let acceptedSupportIssue: Awaited<
+          ReturnType<typeof reportCourseSupportIssue>
+        > | null = null;
+        let resumePreviouslyAcceptedLocalReaderSource = false;
+        if (unsafeBookingUrlCount > 0) {
+          providerObservationHeartbeat?.assertOwned();
+          const unsafeBookingMessage =
+            "The provider returned a non-direct or unsafe booking destination; unsafe rows were excluded.";
+          acceptedSupportIssue = await reportCourseSupportIssue({
+            course,
             searchId: search.id,
-            courseId: course.id,
-            sourceId: match.sourceId,
-            startsAt,
-            availableSpots: match.availableSpots,
-            bookingUrl: match.bookingUrl,
-            priceCents: match.priceCents,
-            holes: match.holes,
-            evidenceUrl: match.evidenceUrl
+            episodeStartedAt: getCourseFailureEpisodeStartedAt(course),
+            kind: "FETCH_FAILED",
+            message: unsafeBookingMessage,
+            providerObservedAt: providerExecutionObservedAt,
+            failureObservedAt: providerExecutionObservedAt,
+            readPath: "ADAPTER_OUTPUT_VALIDATION",
+            error: new Error(unsafeBookingMessage),
+            ...(localReaderObservation
+              ? {
+                  onSourceAccepted: consumeLocalReaderObservationInTransaction,
+                }
+              : {}),
+            onBeforeSourceWrite: assertProviderObservationOwnedInTransaction,
+            nextAction:
+              "Verify the provider adapter returns only direct public booking destinations.",
           });
-          persistedMatchStates.push({
-            matchId: persistedMatch?.id,
-            isPending: persistedMatch?.alertStatus === "PENDING"
-          });
+          if (acceptedSupportIssue.sourceEvidenceAccepted !== true) {
+            monitoringRetryCourseIds.add(course.id);
+            courseResults.push(
+              buildPlaybookPendingCourseReport(
+                course,
+                "A newer course observation superseded this result; a fresh check is queued.",
+              ),
+            );
+            return;
+          }
+          providerSourceAccepted = true;
+        } else {
+          providerObservationHeartbeat?.assertOwned();
+          const monitoringSuccess = localReaderResumeOnly
+            ? { sourceEvidenceAccepted: false as const }
+            : await recordCourseMonitoringSuccess({
+                courseId: course.id,
+                outcome,
+                message:
+                  currentMatches.length > 0
+                    ? "Fresh public monitoring found matching availability."
+                    : "Fresh public monitoring completed with no matching availability.",
+                runtimeVersion,
+                providerObservedAt: providerExecutionObservedAt,
+                ...(localReaderSuccessSource
+                  ? { localReaderSource: localReaderSuccessSource }
+                  : {}),
+                onBeforeSourceWrite:
+                  assertProviderObservationOwnedInTransaction,
+              });
+          resumePreviouslyAcceptedLocalReaderSource = Boolean(
+            localReaderSuccessSource &&
+            !monitoringSuccess?.sourceEvidenceAccepted,
+          );
+          if (
+            !monitoringSuccess?.sourceEvidenceAccepted &&
+            !resumePreviouslyAcceptedLocalReaderSource
+          ) {
+            monitoringRetryCourseIds.add(course.id);
+            courseResults.push(
+              buildPlaybookPendingCourseReport(
+                course,
+                "A newer course observation superseded this result; a fresh check is queued.",
+              ),
+            );
+            return;
+          }
+          providerSourceAccepted = Boolean(
+            monitoringSuccess?.sourceEvidenceAccepted,
+          );
         }
-
-        await markMissingMatchesUnavailable({
+        providerObservationHeartbeat?.assertOwned();
+        const matchCommit = await commitCurrentCourseTeeTimeMatches({
           searchId: search.id,
           alertGeneration: search.alertGeneration,
           checkLeaseToken: lease.token,
           courseId: course.id,
           date: searchWindow.date,
           timeZone: course.timeZone,
-          confirmedMatches: normalizedCurrentMatches.map(
-            ({ match, startsAt }) => ({
-              sourceId: match.sourceId,
-              startsAt
-            })
-          )
+          providerObservedAt: providerExecutionObservedAt,
+          sourceKind: unsafeBookingUrlCount > 0 ? "FAILURE" : "SUCCESS",
+          ...(unsafeBookingUrlCount === 0 && localReaderSuccessSource
+            ? {
+                localReaderObservation: {
+                  jobId: localReaderSuccessSource.jobId,
+                  scheduleVersion: localReaderSuccessSource.scheduleVersion,
+                  resultStatus: localReaderSuccessSource.resultStatus,
+                  monitoringOutcome: outcome,
+                  ...(resumePreviouslyAcceptedLocalReaderSource
+                    ? { resumePreviouslyAcceptedSource: true }
+                    : {}),
+                },
+              }
+            : {}),
+          ...(providerObservationLease
+            ? { providerObservation: providerObservationLease }
+            : {}),
+          ...(unsafeBookingUrlCount === 0 && teeSheet.bookingWindowEvidence
+            ? { bookingWindowEvidence: teeSheet.bookingWindowEvidence }
+            : unsafeBookingUrlCount === 0 && refreshBookingWindow
+              ? { markBookingWindowChecked: true }
+              : {}),
+          ...(unsafeBookingUrlCount === 0
+            ? { pricing, bookableHoleCounts }
+            : { reconcileMatches: false }),
+          matches:
+            unsafeBookingUrlCount > 0
+              ? []
+              : normalizedCurrentMatches.map(({ match, startsAt }) => ({
+                  sourceId: match.sourceId,
+                  startsAt,
+                  availableSpots: match.availableSpots,
+                  bookingUrl: match.bookingUrl,
+                  priceCents: match.priceCents,
+                  holes: match.holes,
+                  evidenceUrl: match.evidenceUrl,
+                })),
         });
+        if (!matchCommit.sourceEvidenceAccepted) {
+          providerSourceAccepted = false;
+          monitoringRetryCourseIds.add(course.id);
+          courseResults.push(
+            buildPlaybookPendingCourseReport(
+              course,
+              "A newer course observation superseded this result before customer updates; a fresh check is queued.",
+            ),
+          );
+          return;
+        }
+        providerSourceAccepted = true;
+        providerObservationReconciled = Boolean(providerObservationLease);
+        const persistedMatchStates = matchCommit.persistedMatchStates;
+
+        if (unsafeBookingUrlCount === 0) {
+          observedBookingFactsByCourse.set(course.id, {
+            pricing,
+            bookableHoleCounts,
+            observedAt: providerExecutionObservedAt,
+          });
+        }
 
         if (unsafeBookingUrlCount > 0) {
           const unsafeBookingMessage =
             "The provider returned a non-direct or unsafe booking destination; unsafe rows were excluded.";
-          const supportIssue = await reportCourseSupportIssue({
-            course,
-            searchId: search.id,
-            episodeStartedAt: getCourseFailureEpisodeStartedAt(course),
-            kind: "FETCH_FAILED",
-            message: unsafeBookingMessage,
-            readPath: "ADAPTER_OUTPUT_VALIDATION",
-            error: new Error(unsafeBookingMessage),
-            nextAction:
-              "Verify the provider adapter returns only direct public booking destinations."
-          });
-          supportIssues.push({ courseId: course.id, ...supportIssue });
-          if (safeRawSlots.length === 0) {
-            await recordCourseProbe({
-              searchId: search.id,
-              courseId: course.id,
-              automationRunId,
-              runtimeVersion,
-              outcome: "FETCH_FAILED",
-              message: unsafeBookingMessage,
-              rawSummary: {
-                providerExecution: providerExecutionLabel,
-                unsafeBookingUrlCount
-              }
-            });
-            courseResults.push({
-              courseId: course.id,
-              courseName: course.name,
-              timeZone: course.timeZone,
-              outcome: "FETCH_FAILED",
-              availableMatches: 0,
-              message: unsafeBookingMessage,
-              bookingUrl: getCustomerBookingUrl(course),
-              phone: course.bookingPhone ?? course.phone ?? undefined,
-              bookingMethod: course.bookingMethod,
-              bookingAccessMode: course.bookingAccessMode,
-              bookingAccess: getCourseBookingAccess(course)
-            });
-            return;
+          if (!acceptedSupportIssue) {
+            throw new Error(
+              "Unsafe provider output was not recorded as a support issue.",
+            );
           }
+          providerObservationHeartbeat?.assertOwned();
+          supportIssues.push({
+            courseId: course.id,
+            ...acceptedSupportIssue,
+          });
+          await recordCourseProbe({
+            searchId: search.id,
+            courseId: course.id,
+            automationRunId,
+            runtimeVersion,
+            outcome: "FETCH_FAILED",
+            message: unsafeBookingMessage,
+            rawSummary: {
+              providerExecution: providerExecutionLabel,
+              providerObservedAt: providerExecutionObservedAt.toISOString(),
+              unsafeBookingUrlCount,
+            },
+          });
+          courseResults.push({
+            courseId: course.id,
+            courseName: course.name,
+            timeZone: course.timeZone,
+            outcome: "FETCH_FAILED",
+            availableMatches: 0,
+            message: unsafeBookingMessage,
+            bookingUrl: getCustomerBookingUrl(course),
+            phone: course.bookingPhone ?? course.phone ?? undefined,
+            bookingMethod: course.bookingMethod,
+            bookingAccessMode: course.bookingAccessMode,
+            bookingAccess: getCourseBookingAccess(course),
+          });
+          return;
         }
 
-        const outcome = currentMatches.length > 0 ? "MATCH_FOUND" : "NO_MATCH";
+        providerObservationHeartbeat?.assertOwned();
         await recordCourseProbe({
           searchId: search.id,
           courseId: course.id,
@@ -1517,27 +2000,20 @@ async function checkSearch(
               : "No qualifying tee times in the requested window",
           rawSummary: {
             providerExecution: providerExecutionLabel,
+            providerObservedAt: providerExecutionObservedAt.toISOString(),
             ...availability,
             ...(bookableHoleCounts.length > 0 ? { bookableHoleCounts } : {}),
             ...(pricing ? { pricing } : {}),
-            ...(unsafeBookingUrlCount > 0 ? { unsafeBookingUrlCount } : {})
-          }
+            ...(unsafeBookingUrlCount > 0 ? { unsafeBookingUrlCount } : {}),
+          },
         });
         if (unsafeBookingUrlCount === 0) {
           await recordSearchPlaybookSuccess(
             playbookRuntime,
             activePlaybookStage,
-            providerExecutionLabel
+            providerExecutionLabel,
+            providerExecutionObservedAt,
           );
-          await recordCourseMonitoringSuccess({
-            courseId: course.id,
-            outcome,
-            message:
-              currentMatches.length > 0
-                ? "Fresh public monitoring found matching availability."
-                : "Fresh public monitoring completed with no matching availability.",
-            runtimeVersion
-          });
         }
         courseResults.push({
           courseId: course.id,
@@ -1567,10 +2043,20 @@ async function checkSearch(
             priceCents: match.priceCents,
             holes: match.holes,
             bookableHoleCounts: match.bookableHoleCounts,
-            isNew: persistedMatchStates[index]?.isPending === true
-          }))
+            isNew: persistedMatchStates[index]?.isPending === true,
+          })),
         });
       } catch (error) {
+        // Ownership loss is infrastructure contention, never provider
+        // evidence. Fail closed before the catch path can persist a failure,
+        // probe, or playbook transition after the delivery fence disappeared.
+        providerObservationHeartbeat?.assertOwned();
+        if (providerObservationFenceAttempted && !providerRequestStarted) {
+          throw error;
+        }
+        if (providerSourceAccepted) {
+          throw error;
+        }
         await maintainSearchCheckLease(lease);
         let message =
           error instanceof Error ? error.message : "Unknown adapter error";
@@ -1588,7 +2074,7 @@ async function checkSearch(
                 bookingUrl: customerBookingUrl,
                 ...(localReaderNotBefore
                   ? { notBefore: localReaderNotBefore }
-                  : {})
+                  : {}),
               })
             : null;
         const localReaderQueueDisposition =
@@ -1599,22 +2085,30 @@ async function checkSearch(
           localReaderQueueDisposition === "RETRYING_AFTER_TERMINAL_FAILURE" ||
           localReaderTerminalObservation;
         if (localReaderJob) {
+          if (localReaderQueueDisposition === "SUCCESS") {
+            monitoringRetryCourseIds.add(course.id);
+            courseResults.push(
+              buildPlaybookPendingCourseReport(
+                course,
+                "A fresh public-page result is ready and will be applied on the immediate retry.",
+              ),
+            );
+            return;
+          }
           if (localReaderQueueDisposition === "ACTIVE") {
-            if (
-              playbookRuntime?.assessment.nextStage === "LOCAL_READER"
-            ) {
+            if (playbookRuntime?.assessment.nextStage === "LOCAL_READER") {
               const readerStage = playbookRuntime.assessment.stages.find(
-                (stage) => stage.stage === "LOCAL_READER"
+                (stage) => stage.stage === "LOCAL_READER",
               );
               if (readerStage?.status !== "STARTED") {
                 await recordSearchPlaybookTransition(playbookRuntime, {
-                stage: "LOCAL_READER",
-                transition: "STARTED",
-                readPath: "LOCAL_READER",
-                evidenceKind: "LOCAL_READER_RESULT",
-                failureFingerprint:
-                  SEARCH_PLAYBOOK_FINGERPRINTS.LOCAL_READER_ATTEMPT,
-                note: "A bounded signed-out local-reader attempt was queued."
+                  stage: "LOCAL_READER",
+                  transition: "STARTED",
+                  readPath: "LOCAL_READER",
+                  evidenceKind: "LOCAL_READER_RESULT",
+                  failureFingerprint:
+                    SEARCH_PLAYBOOK_FINGERPRINTS.LOCAL_READER_ATTEMPT,
+                  note: "A bounded signed-out local-reader attempt was queued.",
                 });
               }
             }
@@ -1630,7 +2124,7 @@ async function checkSearch(
               phone: course.bookingPhone ?? course.phone ?? undefined,
               bookingMethod: course.bookingMethod,
               bookingAccessMode: course.bookingAccessMode,
-              bookingAccess: getCourseBookingAccess(course)
+              bookingAccess: getCourseBookingAccess(course),
             });
             return;
           }
@@ -1648,19 +2142,25 @@ async function checkSearch(
                   : "The signed-out public-page reader completed with an error.";
           }
         }
-        await recordCourseProbe({
-            searchId: search.id,
-            courseId: course.id,
-            observedAtOrAfter: customerEndpointStartedAt,
-            automationRunId,
-          runtimeVersion,
-          outcome: "FETCH_FAILED",
-          message,
-          rawSummary: providerRequestStarted
-            ? { providerExecution: "RUNNABLE_PROVIDER_CHECK" }
-            : undefined
-        });
-        const supportIssue = await reportCourseSupportIssue({
+        providerObservationHeartbeat?.assertOwned();
+        const explicitFailureObservedAt =
+          providerRequestStarted && providerExecutionObservedAt
+            ? providerExecutionObservedAt
+            : localReaderTerminalFailure && localReaderJob
+              ? (localReaderJob.failureObservedAt ??
+                localReaderJob.providerObservedAt ??
+                null)
+              : null;
+        const explicitProviderObservedAt =
+          providerRequestStarted && providerExecutionObservedAt
+            ? providerExecutionObservedAt
+            : localReaderTerminalFailure &&
+                localReaderJob?.providerObservedAt &&
+                localReaderJob.providerObservedAt.getTime() ===
+                  explicitFailureObservedAt?.getTime()
+              ? localReaderJob.providerObservedAt
+              : null;
+        const supportIssueInput = {
           course,
           searchId: search.id,
           episodeStartedAt: getCourseFailureEpisodeStartedAt(course),
@@ -1683,15 +2183,69 @@ async function checkSearch(
             ? "Keep the local reader enabled; this course intentionally skips server adapters and browser discovery."
             : localReaderEligible && !supportedAdapterAvailable
               ? "Build and test an exact fail-closed local reader parser and allowlist. If the installed extension bundle must change, request that precise pull and reload action."
-              : "Inspect the adapter failure, repair or reclassify the course, and verify with a focused search check."
+              : "Inspect the adapter failure, repair or reclassify the course, and verify with a focused search check.",
+        } satisfies Omit<
+          CourseSupportIssueInput,
+          "failureObservedAt" | "providerObservedAt" | "now"
+        > & { course: AutomationCourse };
+        const supportIssue = explicitFailureObservedAt
+          ? await reportCourseSupportIssue({
+              ...supportIssueInput,
+              failureObservedAt: explicitFailureObservedAt,
+              onBeforeSourceWrite: assertProviderObservationOwnedInTransaction,
+              onSourceAccepted: releaseProviderObservationInTransaction,
+              ...(explicitProviderObservedAt
+                ? { providerObservedAt: explicitProviderObservedAt }
+                : {}),
+            })
+          : await reportCourseSupportIssueFromDurableEvidence(
+              supportIssueInput,
+              {
+                mode: "PRIOR_MONITORING_ONLY",
+                now: new Date(),
+              },
+            );
+        if (supportIssue.sourceEvidenceAccepted !== true) {
+          monitoringRetryCourseIds.add(course.id);
+          courseResults.push(
+            buildPlaybookPendingCourseReport(
+              course,
+              "A newer course observation superseded this failure; a fresh check is queued.",
+            ),
+          );
+          return;
+        }
+        providerSourceAccepted = true;
+        providerObservationReconciled = Boolean(providerObservationLease);
+        providerObservationHeartbeat?.assertOwned();
+        await recordCourseProbe({
+          searchId: search.id,
+          courseId: course.id,
+          observedAtOrAfter: customerEndpointStartedAt,
+          automationRunId,
+          runtimeVersion,
+          outcome: "FETCH_FAILED",
+          message,
+          rawSummary: providerRequestStarted
+            ? {
+                providerExecution: "RUNNABLE_PROVIDER_CHECK",
+                ...(providerExecutionObservedAt
+                  ? {
+                      providerObservedAt:
+                        providerExecutionObservedAt.toISOString(),
+                    }
+                  : {}),
+              }
+            : undefined,
         });
         supportIssues.push({ courseId: course.id, ...supportIssue });
         let currentPlaybook = await loadSearchPlaybookRuntime({
           courseId: course.id,
           incidentId: supportIssue.incidentId,
-          runtimeVersion
+          runtimeVersion,
         });
         if (currentPlaybook?.assessment.nextStage === "OFFICIAL_IDENTITY") {
+          providerObservationHeartbeat?.assertOwned();
           currentPlaybook = customerBookingUrl
             ? await ensureSearchPlaybookOfficialIdentity(currentPlaybook)
             : await recordSearchPlaybookAttempt(currentPlaybook, {
@@ -1702,18 +2256,18 @@ async function checkSearch(
                 failureFingerprint:
                   SEARCH_PLAYBOOK_FINGERPRINTS.OFFICIAL_IDENTITY_MISSING,
                 failureClass: "MISSING_SOURCE",
-                note: "No current official booking destination was available."
+                note: "No current official booking destination was available.",
               });
         }
         if (localReaderOnly && currentPlaybook) {
-          currentPlaybook = await skipPlaybookStagesBeforeLocalReader(
-            currentPlaybook
-          );
+          providerObservationHeartbeat?.assertOwned();
+          currentPlaybook =
+            await skipPlaybookStagesBeforeLocalReader(currentPlaybook);
         }
         const failedStage = getRunnableSearchPlaybookStage(currentPlaybook);
         if (currentPlaybook && failedStage) {
           const stageAssessment = currentPlaybook.assessment.stages.find(
-            (stage) => stage.stage === failedStage
+            (stage) => stage.stage === failedStage,
           );
           const firstTypedFailure =
             failedStage === "TYPED_ADAPTER" &&
@@ -1723,6 +2277,7 @@ async function checkSearch(
             localReaderTerminalObservation &&
             localReaderJob?.readerResultStatus === "ACCESS_CHALLENGE"
           ) {
+            providerObservationHeartbeat?.assertOwned();
             await recordSearchPlaybookAttemptResult(currentPlaybook, {
               stage: "LOCAL_READER",
               transition: "TECHNICAL_LIMITATION",
@@ -1731,9 +2286,10 @@ async function checkSearch(
               failureFingerprint:
                 SEARCH_PLAYBOOK_FINGERPRINTS.LOCAL_READER_CHALLENGE,
               technicalReason: "CAPTCHA_OR_QUEUE",
-              note: "The signed-out local reader observed an access challenge."
+              note: "The signed-out local reader observed an access challenge.",
             });
           } else if (failedStage === "LOCAL_READER") {
+            providerObservationHeartbeat?.assertOwned();
             await recordSearchPlaybookAttemptResult(currentPlaybook, {
               stage: "LOCAL_READER",
               transition: "FAILED_TERMINAL",
@@ -1742,9 +2298,10 @@ async function checkSearch(
               failureFingerprint:
                 SEARCH_PLAYBOOK_FINGERPRINTS.LOCAL_READER_TERMINAL,
               failureClass: "UNKNOWN",
-              note: "The bounded local-reader attempt ended without a tee sheet."
+              note: "The bounded local-reader attempt ended without a tee sheet.",
             });
           } else {
+            providerObservationHeartbeat?.assertOwned();
             await recordSearchPlaybookAttempt(currentPlaybook, {
               stage: failedStage,
               transition: firstTypedFailure
@@ -1759,13 +2316,15 @@ async function checkSearch(
                     ? SEARCH_PLAYBOOK_FINGERPRINTS.HTTP_ADAPTER_RETRY
                     : SEARCH_PLAYBOOK_FINGERPRINTS.BROWSER_ADAPTER_RETRY,
               failureClass: providerFailure.failureClass,
-              note: "The bounded typed-adapter attempt did not return a usable tee sheet."
+              note: "The bounded typed-adapter attempt did not return a usable tee sheet.",
             });
           }
           if (firstTypedFailure) {
             monitoringRetryCourseIds.add(course.id);
           }
-        } else if (SHORT_SEARCH_RETRY_FAILURES.has(providerFailure.failureClass)) {
+        } else if (
+          SHORT_SEARCH_RETRY_FAILURES.has(providerFailure.failureClass)
+        ) {
           monitoringRetryCourseIds.add(course.id);
         }
         courseResults.push({
@@ -1784,26 +2343,52 @@ async function checkSearch(
             ? supportIssue.status === "NEEDS_HUMAN"
               ? "NEEDS_HUMAN_REVIEW"
               : "IN_OPERATOR_QUEUE"
-            : undefined
+            : undefined,
         });
+      } finally {
+        try {
+          if (providerObservationHeartbeat) {
+            await providerObservationHeartbeat.stop();
+          }
+        } finally {
+          if (providerObservationLease) {
+            if (providerObservationReconciled) {
+              // The canonical source transaction already deleted this exact
+              // marker atomically. Never recreate or reinterpret it here.
+            } else if (providerRequestStarted) {
+              await markCourseProviderObservationUnreconciled(
+                providerObservationLease,
+              );
+            } else if (
+              providerObservationLease.supersededUnresolvedObservationStartedAt
+            ) {
+              await markCourseProviderObservationUnreconciled(
+                providerObservationLease,
+                { preserveSupersededSource: true },
+              );
+            } else {
+              await releaseCourseProviderObservation(providerObservationLease);
+            }
+          }
+        }
       }
-    }
+    },
   );
 
   const preferenceContext = new Map(
     search.preferences.map((preference) => {
       const observedFacts = observedBookingFactsByCourse.get(
-        preference.course.id
+        preference.course.id,
       );
       const storedPriceEstimate = buildCoursePriceEstimate({
         bookingFacts: preference.course.bookingFacts,
         probes: [],
-        matches: []
+        matches: [],
       });
       const storedHoleSummary = buildObservedBookableHoleSummary({
         bookingFacts: preference.course.bookingFacts,
         probes: [],
-        matches: []
+        matches: [],
       });
       return [
         preference.course.id,
@@ -1822,7 +2407,7 @@ async function checkSearch(
             observedFacts && observedFacts.bookableHoleCounts.length > 0
               ? {
                   holeCounts: observedFacts.bookableHoleCounts,
-                  observedAt: observedFacts.observedAt.toISOString()
+                  observedAt: observedFacts.observedAt.toISOString(),
                 }
               : storedHoleSummary,
           courseGuideUrl:
@@ -1832,11 +2417,11 @@ async function checkSearch(
               : undefined,
           firstTimeLookup: isFirstTimeCourseLookup(
             search.createdAt,
-            preference.course.createdAt
-          )
-        }
+            preference.course.createdAt,
+          ),
+        },
       ] as const;
-    })
+    }),
   );
   for (const courseResult of courseResults) {
     const context = preferenceContext.get(courseResult.courseId);
@@ -1862,7 +2447,7 @@ async function checkSearch(
   const deadlineReconciliation = await reconcileCourseMonitoringDeadlines({
     courseIds: searchCourseIds,
     now: retryCalculationStartedAt,
-    source: "SEARCH_WORKFLOW"
+    source: "SEARCH_WORKFLOW",
   });
   if (
     deadlineReconciliation.escalated > 0 ||
@@ -1874,11 +2459,11 @@ async function checkSearch(
     supportIssues.map((issue) => issue.courseId),
     {
       transientRetryCourseIds: [...monitoringRetryCourseIds],
-      now: retryCalculationStartedAt
-    }
+      now: retryCalculationStartedAt,
+    },
   );
   const unrecordedSupportRetryNeeded = supportIssues.some(
-    (issue) => issue.status === "UNRECORDED"
+    (issue) => issue.status === "UNRECORDED",
   );
   let supportRetryAt =
     [
@@ -1886,10 +2471,10 @@ async function checkSearch(
       ...(unrecordedSupportRetryNeeded
         ? [
             new Date(
-              retryCalculationStartedAt.getTime() + FIRST_FAILURE_RETRY_MS
-            )
+              retryCalculationStartedAt.getTime() + FIRST_FAILURE_RETRY_MS,
+            ),
           ]
-        : [])
+        : []),
     ].sort((left, right) => left.getTime() - right.getTime())[0] ?? null;
   let supportRetryNeeded = supportRetryAt !== null;
 
@@ -1902,15 +2487,15 @@ async function checkSearch(
         getSearchStatusEmailKind(
           search.statusEmailSentAt,
           checkedAt,
-          search.userTimeZone
-        )
+          search.userTimeZone,
+        ),
       )
     : null;
   const retriedDeliveries = await retryExistingSearchEmailDeliveryGroups({
     searchId: search.id,
     alertGeneration: search.alertGeneration,
     lease,
-    assertCurrent: () => maintainSearchCheckLease(lease)
+    assertCurrent: () => maintainSearchCheckLease(lease),
   });
   const retriedMatchCoveredDaily =
     statusKindBeforeRetry === "daily" &&
@@ -1925,9 +2510,9 @@ async function checkSearch(
         alertGeneration: search.alertGeneration,
         currentStatusEmailSnapshot: search.statusEmailSnapshot,
         courseSnapshot: toSearchEmailJson(
-          buildSearchStatusSnapshot(courseResults)
-        )
-      })
+          buildSearchStatusSnapshot(courseResults),
+        ),
+      }),
     });
     if (updated.count !== 1) {
       throw new SearchCheckLeaseLostError();
@@ -1937,7 +2522,7 @@ async function checkSearch(
   let pendingStatusReplacement = statusEmailsEnabled
     ? await getPendingStatusEmailReplacement({
         searchId: search.id,
-        alertGeneration: search.alertGeneration
+        alertGeneration: search.alertGeneration,
       })
     : null;
   if (
@@ -1952,7 +2537,7 @@ async function checkSearch(
       alertGeneration: search.alertGeneration,
       checkLeaseToken: lease.token,
       groups: pendingStatusReplacement.groups,
-      now: checkedAt
+      now: checkedAt,
     });
     if (!satisfied.current) {
       throw new SearchCheckLeaseLostError();
@@ -1978,7 +2563,7 @@ async function checkSearch(
         ownerMatchCourseIds: retriedDeliveries.ownerSentMatchCourseIds,
         checkedAt,
         lease,
-        assertCurrent: () => maintainSearchCheckLease(lease)
+        assertCurrent: () => maintainSearchCheckLease(lease),
       });
       monitoringNoticeOutcome = delivered.outcome;
       newlyAlertedMatches += delivered.ownerSentMatchCount;
@@ -2001,7 +2586,7 @@ async function checkSearch(
         message:
           error instanceof Error
             ? error.message
-            : "Unknown monitoring status email failure"
+            : "Unknown monitoring status email failure",
       });
     }
   }
@@ -2015,8 +2600,8 @@ async function checkSearch(
           getSearchStatusEmailKind(
             search.statusEmailSentAt,
             checkedAt,
-            search.userTimeZone
-          )
+            search.userTimeZone,
+          ),
         )
     : null;
   let statusEmailOutcome: SearchCheckResult["statusEmailOutcome"] =
@@ -2028,11 +2613,11 @@ async function checkSearch(
     try {
       const pendingMatches = await listPendingMatchAlerts(
         searchId,
-        getCurrentMatchIds(courseResults)
+        getCurrentMatchIds(courseResults),
       );
       const coveredPendingMatchIds = getCoveredPendingMatchIds(
         pendingMatches,
-        courseResults
+        courseResults,
       );
       const coveredMatchIds = coveredPendingMatchIds;
       const coveredPendingMatchIdSet = new Set(coveredPendingMatchIds);
@@ -2047,11 +2632,11 @@ async function checkSearch(
           .filter((match) => coveredPendingMatchIdSet.has(match.id))
           .map((match) => ({
             matchId: match.id,
-            availabilityCycle: match.availabilityCycle
+            availabilityCycle: match.availabilityCycle,
           })),
         supersededStatusGroups: pendingStatusReplacement.groups,
         lease,
-        assertCurrent: () => maintainSearchCheckLease(lease)
+        assertCurrent: () => maintainSearchCheckLease(lease),
       });
       newlyAlertedMatches =
         coveredMatchIds.length > 0 &&
@@ -2065,7 +2650,7 @@ async function checkSearch(
         message:
           error instanceof Error
             ? error.message
-            : "Unknown status email failure"
+            : "Unknown status email failure",
       });
     }
   } else if (
@@ -2079,7 +2664,7 @@ async function checkSearch(
       requestedLayoutHoles,
       satisfiesStatusReport: false,
       lease,
-      assertCurrent: () => maintainSearchCheckLease(lease)
+      assertCurrent: () => maintainSearchCheckLease(lease),
     });
     newlyAlertedMatches += matchDelivery.ownerSentMatchCount;
     statusEmailOutcome = "skipped";
@@ -2087,11 +2672,11 @@ async function checkSearch(
     try {
       const setupPendingMatches = await listPendingMatchAlerts(
         searchId,
-        getCurrentMatchIds(courseResults)
+        getCurrentMatchIds(courseResults),
       );
       const coveredPendingMatchIds = getCoveredPendingMatchIds(
         setupPendingMatches,
-        courseResults
+        courseResults,
       );
       const coveredPendingMatchIdSet = new Set(coveredPendingMatchIds);
       statusEmailOutcome = await deliverSearchStatusReport({
@@ -2105,10 +2690,10 @@ async function checkSearch(
           .filter((match) => coveredPendingMatchIdSet.has(match.id))
           .map((match) => ({
             matchId: match.id,
-            availabilityCycle: match.availabilityCycle
+            availabilityCycle: match.availabilityCycle,
           })),
         lease,
-        assertCurrent: () => maintainSearchCheckLease(lease)
+        assertCurrent: () => maintainSearchCheckLease(lease),
       });
       newlyAlertedMatches =
         statusEmailOutcome === "sent" || statusEmailOutcome === "dry_run"
@@ -2121,7 +2706,7 @@ async function checkSearch(
         message:
           error instanceof Error
             ? error.message
-            : "Unknown status email failure"
+            : "Unknown status email failure",
       });
     }
   } else {
@@ -2132,7 +2717,7 @@ async function checkSearch(
       requestedLayoutHoles,
       satisfiesStatusReport: statusEmailKind === "daily",
       lease,
-      assertCurrent: () => maintainSearchCheckLease(lease)
+      assertCurrent: () => maintainSearchCheckLease(lease),
     });
     newlyAlertedMatches += matchDelivery.ownerSentMatchCount;
 
@@ -2150,7 +2735,7 @@ async function checkSearch(
           checkedAt,
           kind: statusEmailKind,
           lease,
-          assertCurrent: () => maintainSearchCheckLease(lease)
+          assertCurrent: () => maintainSearchCheckLease(lease),
         });
       } catch (error) {
         statusEmailOutcome = "failed";
@@ -2159,7 +2744,7 @@ async function checkSearch(
           message:
             error instanceof Error
               ? error.message
-              : "Unknown status email failure"
+              : "Unknown status email failure",
         });
       }
     }
@@ -2171,17 +2756,17 @@ async function checkSearch(
     courseResults,
     availableMatches: courseResults.reduce(
       (total, course) => total + course.availableMatches,
-      0
+      0,
     ),
     newlyAlertedMatches,
     supportRetryNeeded,
     supportRetryAt,
-    statusEmailOutcome
+    statusEmailOutcome,
   };
 }
 
 function getEnabledSearchStatusEmailKind(
-  kind: SearchStatusEmailKind | null
+  kind: SearchStatusEmailKind | null,
 ): SearchStatusEmailKind | null {
   if (!kind) {
     return null;
@@ -2196,7 +2781,7 @@ function getCoveredPendingMatchIds(
     id: string;
     course: { id: string };
   }>,
-  courseResults: SearchCheckCourseResult[]
+  courseResults: SearchCheckCourseResult[],
 ) {
   const pendingMatchIds = new Set(pendingMatches.map((match) => match.id));
   return [
@@ -2206,10 +2791,10 @@ function getCoveredPendingMatchIds(
           .map((match) => match.matchId)
           .filter(
             (matchId): matchId is string =>
-              typeof matchId === "string" && pendingMatchIds.has(matchId)
-          )
-      )
-    )
+              typeof matchId === "string" && pendingMatchIds.has(matchId),
+          ),
+      ),
+    ),
   ];
 }
 
@@ -2218,10 +2803,10 @@ function getCurrentMatchIds(courseResults: SearchCheckCourseResult[]) {
     ...new Set(
       courseResults.flatMap((course) =>
         (course.matchingTimes ?? []).flatMap((time) =>
-          typeof time.matchId === "string" ? [time.matchId] : []
-        )
-      )
-    )
+          typeof time.matchId === "string" ? [time.matchId] : [],
+        ),
+      ),
+    ),
   ];
 }
 
@@ -2237,15 +2822,15 @@ async function retryExistingSearchEmailDeliveryGroups(input: {
   for (let pass = 0; pass < 100; pass += 1) {
     const groups = await listRetryableSearchEmailDeliveryGroups({
       searchId: input.searchId,
-      alertGeneration: input.alertGeneration
+      alertGeneration: input.alertGeneration,
     });
     const group = groups.find(
-      (candidate) => !seen.has(`${candidate.kind}\u0000${candidate.groupKey}`)
+      (candidate) => !seen.has(`${candidate.kind}\u0000${candidate.groupKey}`),
     );
     if (!group) {
       return {
         ownerSentMatchCount,
-        ownerSentMatchCourseIds: [...ownerSentMatchCourseIds]
+        ownerSentMatchCourseIds: [...ownerSentMatchCourseIds],
       };
     }
     seen.add(`${group.kind}\u0000${group.groupKey}`);
@@ -2263,14 +2848,14 @@ async function retryExistingSearchEmailDeliveryGroups(input: {
           recipient,
           idempotencyKey,
           payload,
-          assertCurrentDelivery
+          assertCurrentDelivery,
         }) => {
           await input.assertCurrent();
           if (group.kind === "MATCH") {
             const alert = await hydrateMatchAlertPayload({
               searchId: input.searchId,
               alertGeneration: input.alertGeneration,
-              payload
+              payload,
             });
             for (const match of alert.matches) {
               if (match.courseId) {
@@ -2283,7 +2868,7 @@ async function retryExistingSearchEmailDeliveryGroups(input: {
               searchId: input.searchId,
               to: recipient,
               ...alert,
-              stableIdempotencyKey: idempotencyKey
+              stableIdempotencyKey: idempotencyKey,
             });
           }
           const report = await hydrateSearchStatusEmailPayload(payload);
@@ -2293,9 +2878,9 @@ async function retryExistingSearchEmailDeliveryGroups(input: {
             searchId: input.searchId,
             to: recipient,
             ...report,
-            stableIdempotencyKey: idempotencyKey
+            stableIdempotencyKey: idempotencyKey,
           });
-        }
+        },
       });
     } catch (error) {
       if (error instanceof SearchCheckLeaseLostError) {
@@ -2309,7 +2894,7 @@ async function retryExistingSearchEmailDeliveryGroups(input: {
         searchId: input.searchId,
         alertGeneration: input.alertGeneration,
         kind: group.kind,
-        groupKey: group.groupKey
+        groupKey: group.groupKey,
       });
       const ownerFinalized =
         finalized.finalized ||
@@ -2330,7 +2915,7 @@ async function retryExistingSearchEmailDeliveryGroups(input: {
         if (!finalized.finalized) {
           console.warn("[email:additional-recipient-retry-pending]", {
             searchRef: createSearchLogReference(input.searchId),
-            kind: group.kind
+            kind: group.kind,
           });
         }
         continue;
@@ -2344,21 +2929,21 @@ async function retryExistingSearchEmailDeliveryGroups(input: {
     if (deliveryError) {
       console.warn("[email:existing-delivery-pending]", {
         searchRef: createSearchLogReference(input.searchId),
-        kind: group.kind
+        kind: group.kind,
       });
     }
   }
   console.warn("[email:delivery-retry-pass-limit]", {
-    searchRef: createSearchLogReference(input.searchId)
+    searchRef: createSearchLogReference(input.searchId),
   });
   return {
     ownerSentMatchCount,
-    ownerSentMatchCourseIds: [...ownerSentMatchCourseIds]
+    ownerSentMatchCourseIds: [...ownerSentMatchCourseIds],
   };
 }
 
 function getCourseBookingAccess(
-  course: AutomationCourse
+  course: AutomationCourse,
 ): SearchStatusCourseReport["bookingAccess"] {
   if (course.bookingMethod === "PHONE_ONLY") {
     return "PHONE_ONLY";
@@ -2398,21 +2983,20 @@ function hasAutomationStalledEndpointProof(course: AutomationCourse) {
     incidentEscalatedAt: incident.escalatedAt ?? null,
     escalationDeadlineAt: incident.escalationDeadlineAt,
     monitoringState: course.monitoringStatus?.state ?? null,
-    endpointEvents: incident.monitoringEvents
+    endpointEvents: incident.monitoringEvents,
   });
 }
 
 function getLiveCustomerMonitoringStatus(
   course: AutomationCourse,
   result: SearchCheckCourseResult,
-  observedAt: Date
+  observedAt: Date,
 ) {
   return getCustomerMonitoringStatus({
     outcome: result.outcome,
     monitoringDisposition: result.monitoringDisposition,
     monitoringState: course.monitoringStatus?.state ?? null,
-    monitoringStateChangedAt:
-      course.monitoringStatus?.stateChangedAt ?? null,
+    monitoringStateChangedAt: course.monitoringStatus?.stateChangedAt ?? null,
     incidentStatus: course.supportIncident?.status ?? null,
     humanReviewReason: course.supportIncident?.humanReviewReason ?? null,
     incidentEscalatedAt: course.supportIncident?.escalatedAt ?? null,
@@ -2421,23 +3005,22 @@ function getLiveCustomerMonitoringStatus(
     automationPlaybookExhausted: course.supportIncident
       ? isAutomationHumanReviewProofCurrentOrPrior(
           course.supportIncident.attemptLedger,
-          course.supportIncident.cycle
+          course.supportIncident.cycle,
         )
       : null,
-    automationStalledAtEndpoint:
-      hasAutomationStalledEndpointProof(course),
+    automationStalledAtEndpoint: hasAutomationStalledEndpointProof(course),
     now: observedAt,
-    automationReason: result.automationReason
+    automationReason: result.automationReason,
   });
 }
 
 function applyCustomerMonitoringProjection(
   search: NonNullable<Awaited<ReturnType<typeof getActiveSearchForAutomation>>>,
   courseResults: SearchCheckCourseResult[],
-  observedAt: Date
+  observedAt: Date,
 ) {
   const resultByCourse = new Map(
-    courseResults.map((result) => [result.courseId, result])
+    courseResults.map((result) => [result.courseId, result]),
   );
   for (const preference of search.preferences) {
     const result = resultByCourse.get(preference.course.id);
@@ -2445,16 +3028,17 @@ function applyCustomerMonitoringProjection(
     const customerStatus = getLiveCustomerMonitoringStatus(
       preference.course,
       result,
-      observedAt
+      observedAt,
     );
     if (preference.course.supportIncident) {
       result.automationPlaybookExhausted =
         isAutomationHumanReviewProofCurrentOrPrior(
           preference.course.supportIncident.attemptLedger,
-          preference.course.supportIncident.cycle
+          preference.course.supportIncident.cycle,
         );
-      result.automationStalledAtEndpoint =
-        hasAutomationStalledEndpointProof(preference.course);
+      result.automationStalledAtEndpoint = hasAutomationStalledEndpointProof(
+        preference.course,
+      );
     }
     if (
       customerStatus === "NEEDS_HUMAN_REVIEW" &&
@@ -2489,7 +3073,7 @@ type RunnableSearchPlaybookStage =
   | "LOCAL_READER";
 
 function getRunnableSearchPlaybookStage(
-  runtime: SearchPlaybookRuntime | null
+  runtime: SearchPlaybookRuntime | null,
 ): RunnableSearchPlaybookStage | null {
   const stage = runtime?.assessment.nextStage;
   return stage === "TYPED_ADAPTER" ||
@@ -2501,26 +3085,26 @@ function getRunnableSearchPlaybookStage(
 }
 
 async function skipPlaybookStagesBeforeLocalReader(
-  runtime: SearchPlaybookRuntime
+  runtime: SearchPlaybookRuntime,
 ) {
   const stages = [
     {
       stage: "TYPED_ADAPTER",
-      readPath: "TYPED_PROVIDER_ADAPTER"
+      readPath: "TYPED_PROVIDER_ADAPTER",
     },
     { stage: "OFFICIAL_HTTP_DISCOVERY", readPath: "OFFICIAL_HTTP" },
     {
       stage: "HTTP_ADAPTER_RETRY",
-      readPath: "TYPED_PROVIDER_ADAPTER"
+      readPath: "TYPED_PROVIDER_ADAPTER",
     },
     {
       stage: "RENDERED_BROWSER_DISCOVERY",
-      readPath: "RENDERED_BROWSER"
+      readPath: "RENDERED_BROWSER",
     },
     {
       stage: "BROWSER_ADAPTER_RETRY",
-      readPath: "TYPED_PROVIDER_ADAPTER"
-    }
+      readPath: "TYPED_PROVIDER_ADAPTER",
+    },
   ] as const;
   for (const stage of stages) {
     if (runtime.assessment.nextStage !== stage.stage) {
@@ -2530,10 +3114,9 @@ async function skipPlaybookStagesBeforeLocalReader(
       stage: stage.stage,
       readPath: stage.readPath,
       evidenceKind: "TOOLING",
-      failureFingerprint:
-        SEARCH_PLAYBOOK_FINGERPRINTS.STAGE_NOT_APPLICABLE,
+      failureFingerprint: SEARCH_PLAYBOOK_FINGERPRINTS.STAGE_NOT_APPLICABLE,
       skipReason: "MONITORING_MODE_EXCLUDED",
-      note: "Explicit local-reader-only monitoring excludes this stage."
+      note: "Explicit local-reader-only monitoring excludes this stage.",
     });
   }
   return runtime;
@@ -2559,7 +3142,7 @@ async function recordOfficialDiscoveryResult(input: {
   ) {
     const priorAttemptCount =
       input.runtime.assessment.stages.find(
-        (stage) => stage.stage === "OFFICIAL_HTTP_DISCOVERY"
+        (stage) => stage.stage === "OFFICIAL_HTTP_DISCOVERY",
       )?.attemptCount ?? 0;
     const retryExhausted = priorAttemptCount >= 1;
     return recordSearchPlaybookAttempt(input.runtime, {
@@ -2567,12 +3150,11 @@ async function recordOfficialDiscoveryResult(input: {
       transition: retryExhausted ? "FAILED_TERMINAL" : "FAILED_RETRYABLE",
       readPath: "OFFICIAL_HTTP",
       evidenceKind: "OFFICIAL_SOURCE",
-      failureFingerprint:
-        SEARCH_PLAYBOOK_FINGERPRINTS.OFFICIAL_HTTP_DISCOVERY,
+      failureFingerprint: SEARCH_PLAYBOOK_FINGERPRINTS.OFFICIAL_HTTP_DISCOVERY,
       failureClass: "UNKNOWN",
       note: retryExhausted
         ? "The bounded official HTTP discovery retry was unavailable; continue to rendered-browser discovery."
-        : "Official HTTP discovery was deferred and will retry once."
+        : "Official HTTP discovery was deferred and will retry once.",
     });
   }
   if (input.preparation.failedCourseIds.includes(input.courseId)) {
@@ -2581,10 +3163,9 @@ async function recordOfficialDiscoveryResult(input: {
       transition: "FAILED_TERMINAL",
       readPath: "OFFICIAL_HTTP",
       evidenceKind: "OFFICIAL_SOURCE",
-      failureFingerprint:
-        SEARCH_PLAYBOOK_FINGERPRINTS.OFFICIAL_HTTP_DISCOVERY,
+      failureFingerprint: SEARCH_PLAYBOOK_FINGERPRINTS.OFFICIAL_HTTP_DISCOVERY,
       failureClass: "UNKNOWN",
-      note: "Bounded official HTTP discovery completed without runnable metadata."
+      note: "Bounded official HTTP discovery completed without runnable metadata.",
     });
   }
   if (
@@ -2596,26 +3177,25 @@ async function recordOfficialDiscoveryResult(input: {
       transition: "COMPLETED",
       readPath: "OFFICIAL_HTTP",
       evidenceKind: "OFFICIAL_SOURCE",
-      failureFingerprint:
-        SEARCH_PLAYBOOK_FINGERPRINTS.OFFICIAL_HTTP_DISCOVERY,
-      note: "Bounded official HTTP and provider-configuration discovery completed."
+      failureFingerprint: SEARCH_PLAYBOOK_FINGERPRINTS.OFFICIAL_HTTP_DISCOVERY,
+      note: "Bounded official HTTP and provider-configuration discovery completed.",
     });
   }
   return skipSearchPlaybookStage(input.runtime, {
     stage: "OFFICIAL_HTTP_DISCOVERY",
     readPath: "OFFICIAL_HTTP",
     evidenceKind: "TOOLING",
-    failureFingerprint:
-      SEARCH_PLAYBOOK_FINGERPRINTS.STAGE_NOT_APPLICABLE,
+    failureFingerprint: SEARCH_PLAYBOOK_FINGERPRINTS.STAGE_NOT_APPLICABLE,
     skipReason: "NO_PROVIDER_METADATA",
-    note: "No safe official HTTP discovery source was available."
+    note: "No safe official HTTP discovery source was available.",
   });
 }
 
 async function recordSearchPlaybookSuccess(
   runtime: SearchPlaybookRuntime | null,
   stage: RunnableSearchPlaybookStage | null,
-  providerExecution: string
+  providerExecution: string,
+  providerObservedAt: Date,
 ) {
   if (!runtime || !stage || runtime.assessment.nextStage !== stage) {
     return runtime;
@@ -2633,13 +3213,14 @@ async function recordSearchPlaybookSuccess(
         : stage === "HTTP_ADAPTER_RETRY"
           ? SEARCH_PLAYBOOK_FINGERPRINTS.HTTP_ADAPTER_RETRY
           : SEARCH_PLAYBOOK_FINGERPRINTS.BROWSER_ADAPTER_RETRY,
-    note: `Fresh public monitoring succeeded through ${providerExecution}.`
+    note: `Fresh public monitoring succeeded through ${providerExecution}.`,
+    observedAt: providerObservedAt,
   });
 }
 
 function buildPlaybookPendingCourseReport(
   course: AutomationCourse,
-  message: string
+  message: string,
 ): SearchCheckCourseResult {
   return {
     courseId: course.id,
@@ -2651,16 +3232,15 @@ function buildPlaybookPendingCourseReport(
     automationPlaybookExhausted: course.supportIncident
       ? isAutomationHumanReviewProofCurrentOrPrior(
           course.supportIncident.attemptLedger,
-          course.supportIncident.cycle
+          course.supportIncident.cycle,
         )
       : undefined,
-    automationStalledAtEndpoint:
-      hasAutomationStalledEndpointProof(course),
+    automationStalledAtEndpoint: hasAutomationStalledEndpointProof(course),
     bookingUrl: getCustomerBookingUrl(course),
     phone: course.bookingPhone ?? course.phone ?? undefined,
     bookingMethod: course.bookingMethod,
     bookingAccessMode: course.bookingAccessMode,
-    bookingAccess: getCourseBookingAccess(course)
+    bookingAccess: getCourseBookingAccess(course),
   };
 }
 
@@ -2688,7 +3268,7 @@ async function deliverMonitoringStatusNotices(input: {
   assertCurrent: () => Promise<void>;
 }) {
   const resultByCourse = new Map(
-    input.courseResults.map((result) => [result.courseId, result])
+    input.courseResults.map((result) => [result.courseId, result]),
   );
   const candidates: MonitoringStatusNoticeCandidate[] =
     input.search.preferences.flatMap((preference) => {
@@ -2700,12 +3280,12 @@ async function deliverMonitoringStatusNotices(input: {
         input.monitoringBeforeCheck.get(preference.course.id) ?? null;
       const current = preference.course.monitoringStatus;
       const previousStatus = getCustomerMonitoringStatus({
-        monitoringState: previous?.state ?? null
+        monitoringState: previous?.state ?? null,
       });
       const currentStatus = getLiveCustomerMonitoringStatus(
         preference.course,
         result,
-        input.checkedAt
+        input.checkedAt,
       );
       const customerResult =
         currentStatus === "NEEDS_HUMAN_REVIEW" &&
@@ -2713,7 +3293,7 @@ async function deliverMonitoringStatusNotices(input: {
           ? {
               ...result,
               message: HUMAN_REVIEW_CUSTOMER_MESSAGE,
-              supportStatus: "NEEDS_HUMAN_REVIEW" as const
+              supportStatus: "NEEDS_HUMAN_REVIEW" as const,
             }
           : result;
       const endpointDeadlineAt =
@@ -2724,13 +3304,13 @@ async function deliverMonitoringStatusNotices(input: {
         ? new Date(
             endpointDeadlineAt.getTime() -
               (ACTIVE_DEMAND_ESCALATION_MS -
-                CUSTOMER_ENDPOINT_DELIVERY_HEADROOM_MS)
+                CUSTOMER_ENDPOINT_DELIVERY_HEADROOM_MS),
           )
         : null;
       return [
         {
           providerFamilyKey: resolveProviderCapability(
-            preference.course as AutomationCourse
+            preference.course as AutomationCourse,
           ).providerFamilyKey,
           result: customerResult,
           previousStatus,
@@ -2738,36 +3318,36 @@ async function deliverMonitoringStatusNotices(input: {
           endpointDeadlineAt,
           episodeStartedAt:
             currentStatus === "FINAL_DIRECT_ACTION"
-              ? preference.course.supportIncident?.firstSeenAt ??
+              ? (preference.course.supportIncident?.firstSeenAt ??
                 previous?.firstDegradedAt ??
                 input.search.createdAt ??
                 current?.stateChangedAt ??
                 previous?.stateChangedAt ??
-                null
+                null)
               : currentStatus === "RETRYING_AUTOMATICALLY" ||
                   currentStatus === "NEEDS_HUMAN_REVIEW"
-              ? endpointEpisodeStartedAt ??
-                current?.firstDegradedAt ??
-                previous?.firstDegradedAt ??
-                null
-              : previous?.firstDegradedAt ?? null
-        }
+                ? (endpointEpisodeStartedAt ??
+                  current?.firstDegradedAt ??
+                  previous?.firstDegradedAt ??
+                  null)
+                : (previous?.firstDegradedAt ?? null),
+        },
       ];
     });
   const [reachedOutages, reachedFinals] = await Promise.all([
     listReachedMonitoringOutages({
       searchId: input.search.id,
-      alertGeneration: input.search.alertGeneration
+      alertGeneration: input.search.alertGeneration,
     }),
     listReachedMonitoringFinals({
       searchId: input.search.id,
-      alertGeneration: input.search.alertGeneration
-    })
+      alertGeneration: input.search.alertGeneration,
+    }),
   ]);
   const ownerRecipient = input.search.alertEmail ?? input.search.user.email;
   const alertRecipients = getAlertRecipients(
     ownerRecipient,
-    input.search.additionalEmails
+    input.search.additionalEmails,
   );
   const authorizedRecipientSet = new Set(alertRecipients);
   const plan = planMonitoringStatusNotices({
@@ -2775,7 +3355,7 @@ async function deliverMonitoringStatusNotices(input: {
     reachedOutages,
     reachedFinals,
     ownerRecipient,
-    now: input.checkedAt
+    now: input.checkedAt,
   });
   const ownerMatchCourseIds = new Set(input.ownerMatchCourseIds);
   const recoveryCourses = plan.recoveryCourses.filter(
@@ -2783,35 +3363,38 @@ async function deliverMonitoringStatusNotices(input: {
       !(
         course.outcome === "MATCH_FOUND" &&
         ownerMatchCourseIds.has(course.courseId)
-      )
+      ),
   );
   const currentStatusByCourse = new Map(
     candidates.map((candidate) => [
       candidate.result.courseId,
-      candidate.currentStatus
-    ])
+      candidate.currentStatus,
+    ]),
   );
   const customerResultByCourse = new Map(
-    candidates.map((candidate) => [candidate.result.courseId, candidate.result])
+    candidates.map((candidate) => [
+      candidate.result.courseId,
+      candidate.result,
+    ]),
   );
   const customerSnapshotCourseResults = input.courseResults.map(
-    (result) => customerResultByCourse.get(result.courseId) ?? result
+    (result) => customerResultByCourse.get(result.courseId) ?? result,
   );
   const humanReviewCourses = plan.outageCourses.filter(
     (course) =>
-      currentStatusByCourse.get(course.courseId) === "NEEDS_HUMAN_REVIEW"
+      currentStatusByCourse.get(course.courseId) === "NEEDS_HUMAN_REVIEW",
   );
   const consolidatedStatusCourses = [
     ...new Map(
       [...plan.finalCourses, ...humanReviewCourses].map((course) => [
         course.courseId,
-        course
-      ])
-    ).values()
+        course,
+      ]),
+    ).values(),
   ];
   const outageCourses = plan.outageCourses.filter(
     (course) =>
-      currentStatusByCourse.get(course.courseId) !== "NEEDS_HUMAN_REVIEW"
+      currentStatusByCourse.get(course.courseId) !== "NEEDS_HUMAN_REVIEW",
   );
   let outcome: NonNullable<SearchCheckResult["statusEmailOutcome"]> = "skipped";
   let ownerSentMatchCount = 0;
@@ -2819,7 +3402,7 @@ async function deliverMonitoringStatusNotices(input: {
   const deliver = async (
     kind: SearchStatusTransitionKind,
     courses: SearchCheckCourseResult[],
-    recipients: string[]
+    recipients: string[],
   ) => {
     if (courses.length === 0) {
       return;
@@ -2829,7 +3412,7 @@ async function deliverMonitoringStatusNotices(input: {
       kind === "recovery"
         ? await listPendingMatchAlerts(
             input.search.id,
-            getCurrentMatchIds(courses)
+            getCurrentMatchIds(courses),
           )
         : [];
     const coveredMatchIds = getCoveredPendingMatchIds(pendingMatches, courses);
@@ -2839,7 +3422,7 @@ async function deliverMonitoringStatusNotices(input: {
         ? coveredMatchIds.length > 0
           ? alertRecipients
           : recipients.filter((recipient) =>
-              authorizedRecipientSet.has(recipient.trim().toLowerCase())
+              authorizedRecipientSet.has(recipient.trim().toLowerCase()),
             )
         : recipients;
     const delivered = await deliverSearchStatusReport({
@@ -2856,8 +3439,8 @@ async function deliverMonitoringStatusNotices(input: {
         courseIds,
         {
           reachedOutages,
-          ownerRecipient
-        }
+          ownerRecipient,
+        },
       ),
       recipients: deliveryRecipients,
       coveredMatchIds,
@@ -2865,10 +3448,10 @@ async function deliverMonitoringStatusNotices(input: {
         .filter((match) => coveredMatchIdSet.has(match.id))
         .map((match) => ({
           matchId: match.id,
-          availabilityCycle: match.availabilityCycle
+          availabilityCycle: match.availabilityCycle,
         })),
       lease: input.lease,
-      assertCurrent: input.assertCurrent
+      assertCurrent: input.assertCurrent,
     });
     if (
       kind === "recovery" &&
@@ -2886,21 +3469,13 @@ async function deliverMonitoringStatusNotices(input: {
   };
 
   await deliver("recovery", recoveryCourses, plan.recoveryRecipients);
-  await deliver(
-    "status-update",
-    consolidatedStatusCourses,
-    alertRecipients
-  );
-  await deliver(
-    "outage",
-    outageCourses,
-    alertRecipients
-  );
+  await deliver("status-update", consolidatedStatusCourses, alertRecipients);
+  await deliver("outage", outageCourses, alertRecipients);
 
   return {
     outcome,
     ownerSentMatchCount,
-    nextConsolidationAt: plan.nextConsolidationAt
+    nextConsolidationAt: plan.nextConsolidationAt,
   };
 }
 
@@ -2929,7 +3504,7 @@ async function deliverSearchStatusReport(input: {
   assertCurrent?: () => Promise<void>;
 }): Promise<NonNullable<SearchCheckResult["statusEmailOutcome"]>> {
   const snapshot = buildSearchStatusSnapshot(
-    input.snapshotCourseResults ?? input.courseResults
+    input.snapshotCourseResults ?? input.courseResults,
   );
   const persistedStatusReport = toSearchEmailJson({
     kind: input.kind,
@@ -2945,17 +3520,17 @@ async function deliverSearchStatusReport(input: {
         : null,
     userTimeZone: input.search.userTimeZone,
     previousSnapshot: input.search.statusEmailSnapshot,
-    courses: input.courseResults
+    courses: input.courseResults,
   });
   const recipients =
     input.recipients ??
     getAlertRecipients(
       input.search.alertEmail ?? input.search.user.email,
-      input.search.additionalEmails
+      input.search.additionalEmails,
     );
   const availableMatches = await listAvailableMatchAlerts(
     input.search.id,
-    getCurrentMatchIds(input.courseResults)
+    getCurrentMatchIds(input.courseResults),
   );
   // The persisted field keeps its legacy name, but it represents every opening
   // covered by the email. The renderer still shows a concise top set and an
@@ -2963,8 +3538,8 @@ async function deliverSearchStatusReport(input: {
   const displayMatchIds = [
     ...new Set([
       ...getCoveredPendingMatchIds(availableMatches, input.courseResults),
-      ...(input.coveredMatchIds ?? [])
-    ])
+      ...(input.coveredMatchIds ?? []),
+    ]),
   ];
   const basePeriodKey =
     input.periodKey ??
@@ -2977,7 +3552,7 @@ async function deliverSearchStatusReport(input: {
     ? `-replacement-${createEmailSnapshotKey(
         input.supersededStatusGroups
           .map((group) => `${group.kind}:${group.groupKey}`)
-          .sort()
+          .sort(),
       )}`
     : "";
   const periodKey = `${basePeriodKey}${replacementSuffix}`;
@@ -2989,9 +3564,9 @@ async function deliverSearchStatusReport(input: {
         ? "DAILY"
         : input.kind === "status-update"
           ? "MONITORING_STATUS_UPDATE"
-        : input.kind === "outage"
-          ? "MONITORING_OUTAGE"
-          : "MONITORING_RECOVERY";
+          : input.kind === "outage"
+            ? "MONITORING_OUTAGE"
+            : "MONITORING_RECOVERY";
   const prepared = await prepareSearchEmailDeliveryGroup({
     searchId: input.search.id,
     alertGeneration: input.search.alertGeneration,
@@ -3008,8 +3583,8 @@ async function deliverSearchStatusReport(input: {
       statusReport: persistedStatusReport,
       displayMatchIds,
       matchIds: input.coveredMatchIds ?? [],
-      matchRefs: input.coveredMatchRefs ?? []
-    }
+      matchRefs: input.coveredMatchRefs ?? [],
+    },
   });
   if (!prepared.prepared) {
     throw new SearchCheckLeaseLostError();
@@ -3026,13 +3601,13 @@ async function deliverSearchStatusReport(input: {
           recipient,
           idempotencyKey,
           payload,
-          assertCurrentDelivery
+          assertCurrentDelivery,
         }) => {
           await input.assertCurrent?.();
           const alert = await hydrateMatchAlertPayload({
             searchId: input.search.id,
             alertGeneration: input.search.alertGeneration,
-            payload
+            payload,
           });
           await input.assertCurrent?.();
           await assertCurrentDelivery();
@@ -3040,22 +3615,22 @@ async function deliverSearchStatusReport(input: {
             searchId: input.search.id,
             to: recipient,
             ...alert,
-            stableIdempotencyKey: idempotencyKey
+            stableIdempotencyKey: idempotencyKey,
           });
-        }
+        },
       });
       await finalizeSearchEmailDeliveryGroup({
         searchId: input.search.id,
         alertGeneration: input.search.alertGeneration,
         kind: "MATCH",
-        groupKey: continuation.groupKey
+        groupKey: continuation.groupKey,
       });
     } catch (error) {
       if (error instanceof SearchCheckLeaseLostError) {
         throw error;
       }
       console.warn("[email:status-match-continuation-pending]", {
-        searchRef: createSearchLogReference(input.search.id)
+        searchRef: createSearchLogReference(input.search.id),
       });
     }
   }
@@ -3069,7 +3644,7 @@ async function deliverSearchStatusReport(input: {
       recipient,
       idempotencyKey,
       payload,
-      assertCurrentDelivery
+      assertCurrentDelivery,
     }) => {
       await input.assertCurrent?.();
       const report = await hydrateSearchStatusEmailPayload(payload);
@@ -3079,9 +3654,9 @@ async function deliverSearchStatusReport(input: {
         searchId: input.search.id,
         to: recipient,
         ...report,
-        stableIdempotencyKey: idempotencyKey
+        stableIdempotencyKey: idempotencyKey,
       });
-    }
+    },
   });
 
   await input.assertCurrent?.();
@@ -3089,11 +3664,11 @@ async function deliverSearchStatusReport(input: {
     searchId: input.search.id,
     alertGeneration: input.search.alertGeneration,
     kind: deliveryKind,
-    groupKey: periodKey
+    groupKey: periodKey,
   });
   if (!finalized.finalized) {
     throw new Error(
-      "Search status email delivery group did not reach a terminal state"
+      "Search status email delivery group did not reach a terminal state",
     );
   }
 
@@ -3124,11 +3699,11 @@ async function sendPendingMatchAlerts(
     satisfiesStatusReport: boolean;
     lease: SearchCheckLease;
     assertCurrent?: () => Promise<void>;
-  }
+  },
 ) {
   const currentMatchIds = new Set(getCurrentMatchIds(input.courseResults));
   const pendingMatches = await listPendingMatchAlerts(searchId, [
-    ...currentMatchIds
+    ...currentMatchIds,
   ]);
   if (pendingMatches.length === 0) {
     return { ownerSentMatchCount: 0, hasDurableMatchObligation: false };
@@ -3136,27 +3711,27 @@ async function sendPendingMatchAlerts(
   const search = pendingMatches[0].teeSearch;
 
   const allAvailableMatches = await listAvailableMatchAlerts(searchId, [
-    ...currentMatchIds
+    ...currentMatchIds,
   ]);
   const availableMatches = allAvailableMatches.filter((match) =>
-    currentMatchIds.has(match.id)
+    currentMatchIds.has(match.id),
   );
   const currentAvailableIds = new Set(
-    availableMatches.map((match) => match.id)
+    availableMatches.map((match) => match.id),
   );
   const currentPendingMatches = pendingMatches.filter((match) =>
-    currentAvailableIds.has(match.id)
+    currentAvailableIds.has(match.id),
   );
   if (availableMatches.length === 0 || currentPendingMatches.length === 0) {
     return { ownerSentMatchCount: 0, hasDurableMatchObligation: false };
   }
 
   const currentPendingIds = new Set(
-    currentPendingMatches.map((match) => match.id)
+    currentPendingMatches.map((match) => match.id),
   );
   const reportMatches = availableMatches.map((match) => {
     const courseResult = input.courseResults.find(
-      (course) => course.courseId === match.course.id
+      (course) => course.courseId === match.course.id,
     );
     return {
       matchId: match.id,
@@ -3177,7 +3752,7 @@ async function sendPendingMatchAlerts(
       factLine:
         courseResult?.factLine ?? buildCourseFactLine(courseResult ?? {}),
       courseGuideUrl: courseResult?.courseGuideUrl,
-      isNew: currentPendingIds.has(match.id)
+      isNew: currentPendingIds.has(match.id),
     };
   });
   const coveredMatches = reportMatches;
@@ -3189,7 +3764,7 @@ async function sendPendingMatchAlerts(
   const primaryAlertEmail = search.alertEmail ?? search.user.email;
   const recipients = getAlertRecipients(
     primaryAlertEmail,
-    search.additionalEmails
+    search.additionalEmails,
   );
   const batchKey = buildMatchDeliveryGroupKey(coveredPendingMatches);
   await input.assertCurrent?.();
@@ -3206,7 +3781,7 @@ async function sendPendingMatchAlerts(
       matchIds: coveredPendingMatches.map((match) => match.id),
       matchRefs: coveredPendingMatches.map((match) => ({
         matchId: match.id,
-        availabilityCycle: match.availabilityCycle
+        availabilityCycle: match.availabilityCycle,
       })),
       displayMatchIds: coveredMatches.map((match) => match.matchId),
       satisfiesStatusReport: input.satisfiesStatusReport,
@@ -3220,10 +3795,10 @@ async function sendPendingMatchAlerts(
         userTimeZone: search.userTimeZone,
         matches: coveredMatches.map((match) => ({
           ...match,
-          startsAt: match.startsAt.toISOString()
-        }))
-      })
-    }
+          startsAt: match.startsAt.toISOString(),
+        })),
+      }),
+    },
   });
   if (!prepared.prepared) {
     throw new SearchCheckLeaseLostError();
@@ -3243,13 +3818,13 @@ async function sendPendingMatchAlerts(
           recipient,
           idempotencyKey,
           payload,
-          assertCurrentDelivery
+          assertCurrentDelivery,
         }) => {
           await input.assertCurrent?.();
           const alert = await hydrateMatchAlertPayload({
             searchId,
             alertGeneration: search.alertGeneration,
-            payload
+            payload,
           });
           await input.assertCurrent?.();
           await assertCurrentDelivery();
@@ -3257,16 +3832,16 @@ async function sendPendingMatchAlerts(
             searchId,
             to: recipient,
             ...alert,
-            stableIdempotencyKey: idempotencyKey
+            stableIdempotencyKey: idempotencyKey,
           });
-        }
+        },
       });
       await input.assertCurrent?.();
       const finalized = await finalizeSearchEmailDeliveryGroup({
         searchId,
         alertGeneration: search.alertGeneration,
         kind: "MATCH",
-        groupKey: group.groupKey
+        groupKey: group.groupKey,
       });
       if (
         deliveries.some((delivery) => delivery.status === "SENT") ||
@@ -3289,7 +3864,7 @@ async function sendPendingMatchAlerts(
       }
       hasDurableMatchObligation = true;
       console.warn("[email:match-recipient-pending]", {
-        searchRef: createSearchLogReference(searchId)
+        searchRef: createSearchLogReference(searchId),
       });
     }
   }
@@ -3298,14 +3873,14 @@ async function sendPendingMatchAlerts(
 }
 
 export function buildMatchDeliveryGroupKey(
-  matches: Array<{ id: string; availabilityCycle: number }>
+  matches: Array<{ id: string; availabilityCycle: number }>,
 ) {
   return createHash("sha256")
     .update(
       matches
         .map((match) => `${match.id}:${match.availabilityCycle}`)
         .sort()
-        .join(":")
+        .join(":"),
     )
     .digest("hex")
     .slice(0, 24);
@@ -3313,14 +3888,14 @@ export function buildMatchDeliveryGroupKey(
 
 function getAlertRecipients(
   primaryEmail: string,
-  additionalEmails: string[] = []
+  additionalEmails: string[] = [],
 ) {
   return [
     ...new Set(
       [primaryEmail, ...additionalEmails].map((email) =>
-        email.trim().toLowerCase()
-      )
-    )
+        email.trim().toLowerCase(),
+      ),
+    ),
   ];
 }
 
@@ -3337,7 +3912,7 @@ function createSearchLogReference(searchId: string) {
 
 function isFirstTimeCourseLookup(
   searchCreatedAt: Date | undefined,
-  courseCreatedAt: Date | undefined
+  courseCreatedAt: Date | undefined,
 ) {
   if (
     !(searchCreatedAt instanceof Date) ||
@@ -3357,7 +3932,7 @@ function buildSearchCheckAudit(trigger: string, result: SearchCheckResult) {
       counts[course.outcome] = (counts[course.outcome] ?? 0) + 1;
       return counts;
     },
-    {}
+    {},
   );
   return {
     trigger: sanitizeResponderText(trigger),
@@ -3369,7 +3944,7 @@ function buildSearchCheckAudit(trigger: string, result: SearchCheckResult) {
     newlyAlertedMatches: result.newlyAlertedMatches,
     supportRetryNeeded: result.supportRetryNeeded,
     supportRetryAt: result.supportRetryAt?.toISOString() ?? null,
-    statusEmailOutcome: result.statusEmailOutcome
+    statusEmailOutcome: result.statusEmailOutcome,
   };
 }
 
@@ -3379,7 +3954,7 @@ function hasSupportedAdapter(course: AutomationCourse) {
 
 function getFinalMonitoringMessage(
   course: AutomationCourse,
-  disposition: ReturnType<typeof evaluateMonitoringGate>["disposition"]
+  disposition: ReturnType<typeof evaluateMonitoringGate>["disposition"],
 ) {
   if (disposition === "IDENTITY_RECHECK") {
     return `${course.name}'s public-course identity review is due. Automatic availability monitoring remains paused while we verify public access.`;
@@ -3412,7 +3987,8 @@ async function recordBookingWindowWaitingProbe(input: {
   runtimeVersion: string;
   targetDate: string;
   bookingWindow: TargetBookingWindow;
-  providerExecution?: boolean;
+  providerExecution?: ProviderExecutionMarker;
+  providerObservedAt?: Date;
 }) {
   await recordCourseProbeIfChanged({
     searchId: input.searchId,
@@ -3426,7 +4002,10 @@ async function recordBookingWindowWaitingProbe(input: {
       : `Booking for ${input.targetDate} is expected to open on ${input.bookingWindow.releaseDate}; the exact release time is not published.`,
     rawSummary: {
       ...(input.providerExecution
-        ? { providerExecution: "RUNNABLE_PROVIDER_CHECK" }
+        ? { providerExecution: input.providerExecution }
+        : {}),
+      ...(input.providerObservedAt
+        ? { providerObservedAt: input.providerObservedAt.toISOString() }
         : {}),
       bookingWindow: {
         releaseDate: input.bookingWindow.releaseDate,
@@ -3434,15 +4013,15 @@ async function recordBookingWindowWaitingProbe(input: {
         timeZone: input.bookingWindow.timeZone,
         source: input.bookingWindow.source,
         confidence: input.bookingWindow.confidence,
-        evidenceUrl: input.bookingWindow.evidenceUrl
-      }
-    }
+        evidenceUrl: input.bookingWindow.evidenceUrl,
+      },
+    },
   });
 }
 
 function buildBookingWindowCourseReport(
   course: AutomationCourse,
-  bookingWindow: TargetBookingWindow
+  bookingWindow: TargetBookingWindow,
 ): SearchCheckCourseResult {
   return {
     courseId: course.id,
@@ -3460,7 +4039,7 @@ function buildBookingWindowCourseReport(
       releaseTimeLocal: bookingWindow.releaseTimeLocal ?? undefined,
       opensAt: bookingWindow.opensAt.toISOString(),
       timeZone: bookingWindow.timeZone,
-      exactTime: bookingWindow.exactTime
-    }
+      exactTime: bookingWindow.exactTime,
+    },
   };
 }

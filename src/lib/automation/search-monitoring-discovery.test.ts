@@ -13,6 +13,16 @@ const dbMocks = vi.hoisted(() => ({
 const providerLeaseMocks = vi.hoisted(() => ({
   runWithProviderRequestLease: vi.fn()
 }));
+const providerObservationMocks = vi.hoisted(() => ({
+  beginCourseProviderObservation: vi.fn(),
+  markCourseProviderObservationUnreconciled: vi.fn(),
+  releaseCourseProviderObservation: vi.fn(),
+  startCourseProviderObservationHeartbeat: vi.fn()
+}));
+
+function expectedProviderObservation(courseId: string, observedAt: Date) {
+  return expect.objectContaining({ courseId, observationStartedAt: observedAt });
+}
 const prismaMocks = vi.hoisted(() => ({
   course: { findUnique: vi.fn() },
   courseSupportBatchSearch: { findMany: vi.fn() },
@@ -26,6 +36,10 @@ const googlePlacesMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/automation/db-service", () => dbMocks);
+vi.mock(
+  "@/lib/automation/provider-execution-marker",
+  () => providerObservationMocks
+);
 vi.mock("@/lib/automation/provider-request-lease", () => providerLeaseMocks);
 vi.mock("@/lib/local-reader/service", () => localReaderMocks);
 vi.mock("@/lib/places/google", () => googlePlacesMocks);
@@ -139,13 +153,22 @@ function remediationDispatchRow(
   };
 }
 
+function getOrdinaryCombinedDiscoveries() {
+  expect(dbMocks.recordAndApplyBrowserDiscoveryToCourse).toHaveBeenCalled();
+  expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
+  expect(dbMocks.applyBrowserDiscoveryToCourse).not.toHaveBeenCalled();
+  return dbMocks.recordAndApplyBrowserDiscoveryToCourse.mock.calls.map(
+    ([discovery]) => discovery
+  );
+}
+
 describe("search monitoring discovery", () => {
   afterEach(() => {
     vi.useRealTimers();
   });
 
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
     dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([]);
     dbMocks.recordBrowserDiscovery.mockResolvedValue({ id: "discovery-1" });
     dbMocks.recordAndApplyBrowserDiscoveryToCourse.mockResolvedValue({
@@ -166,12 +189,150 @@ describe("search monitoring discovery", () => {
     prismaMocks.course.findUnique.mockResolvedValue(null);
     localReaderMocks.getLocalReaderCourseKey.mockReturnValue(null);
     googlePlacesMocks.getGooglePlacesApiKey.mockReturnValue(undefined);
+    providerObservationMocks.beginCourseProviderObservation.mockImplementation(
+      async ({ courseId }: { courseId: string }) => ({
+        courseId,
+        leaseToken: `observation-${courseId}`,
+        observationStartedAt: now,
+        leaseExpiresAt: new Date(now.getTime() + 20 * 60_000),
+        ttlMs: 20 * 60_000,
+        supersededUnresolvedObservationStartedAt: null
+      })
+    );
+    providerObservationMocks.markCourseProviderObservationUnreconciled.mockResolvedValue(
+      true
+    );
+    providerObservationMocks.releaseCourseProviderObservation.mockResolvedValue(
+      undefined
+    );
+    providerObservationMocks.startCourseProviderObservationHeartbeat.mockReturnValue({
+      assertOwned: vi.fn(),
+      stop: vi.fn().mockResolvedValue(undefined)
+    });
     providerLeaseMocks.runWithProviderRequestLease.mockImplementation(
       async (_providerFamilyKey: string, worker: () => Promise<unknown>) => ({
         acquired: true,
         value: await worker()
       })
     );
+  });
+
+  it("keeps a stale status fenced after a timestamp-only landing apply until a canonical availability check", async () => {
+    const providerObservedAt = new Date("2026-07-13T19:57:00.000Z");
+    const events: string[] = [];
+    let markerPresent = false;
+    providerObservationMocks.beginCourseProviderObservation.mockImplementationOnce(
+      async ({ courseId }: { courseId: string }) => {
+        markerPresent = true;
+        events.push("marker-began");
+        return {
+          courseId,
+          leaseToken: `observation-${courseId}`,
+          observationStartedAt: providerObservedAt,
+          leaseExpiresAt: new Date(providerObservedAt.getTime() + 20 * 60_000),
+          ttlMs: 20 * 60_000,
+          supersededUnresolvedObservationStartedAt: null
+        };
+      }
+    );
+    providerObservationMocks.markCourseProviderObservationUnreconciled.mockImplementationOnce(
+      async () => {
+        expect(markerPresent).toBe(true);
+        events.push("source-retained-unreconciled");
+        return true;
+      }
+    );
+    const fetchImpl = vi.fn(async () => {
+      expect(markerPresent).toBe(true);
+      events.push("provider-read");
+      return new Response("<html><h1>remediated-course Golf Course</h1></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      });
+    });
+    dbMocks.recordAndApplyBrowserDiscoveryToCourse.mockImplementationOnce(
+      async (_discovery, _expectedCourse, _expectedIncident, options) => {
+        expect(markerPresent).toBe(true);
+        events.push("stale-status-deferred");
+        expect(options).toEqual(
+          expect.objectContaining({
+            observedAt: providerObservedAt,
+            providerObservation: expectedProviderObservation(
+              "remediated-course",
+              providerObservedAt
+            )
+          })
+        );
+        events.push("timestamp-only-immaterial-apply");
+        return {
+          applied: { id: "remediated-course" },
+          discovery: { id: "discovery-1" }
+        };
+      }
+    );
+
+    await prepareSearchMonitoring(
+      remediationSearch(),
+      fetchImpl as typeof fetch,
+      now,
+      { includeCourseIds: ["remediated-course"] }
+    );
+
+    expect(events).toEqual([
+      "marker-began",
+      "provider-read",
+      "stale-status-deferred",
+      "timestamp-only-immaterial-apply",
+      "source-retained-unreconciled"
+    ]);
+    expect(markerPresent).toBe(true);
+    expect(
+      providerObservationMocks.markCourseProviderObservationUnreconciled
+    ).toHaveBeenCalledOnce();
+    expect(
+      providerObservationMocks.releaseCourseProviderObservation
+    ).not.toHaveBeenCalled();
+  });
+
+  it("retains a completed official landing read when marker ownership is lost before persistence", async () => {
+    const ownershipError = new Error(
+      "Provider observation ownership expired before persistence completed"
+    );
+    providerObservationMocks.startCourseProviderObservationHeartbeat.mockReturnValueOnce(
+      {
+        assertOwned: vi.fn(() => {
+          throw ownershipError;
+        }),
+        stop: vi.fn().mockResolvedValue(undefined)
+      }
+    );
+    const fetchImpl = vi.fn(async () =>
+      new Response("<html><h1>remediated-course Golf Course</h1></html>", {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      })
+    );
+
+    await expect(
+      prepareSearchMonitoring(
+        remediationSearch(),
+        fetchImpl as typeof fetch,
+        now,
+        { includeCourseIds: ["remediated-course"] }
+      )
+    ).rejects.toBe(ownershipError);
+
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
+    expect(
+      dbMocks.recordAndApplyBrowserDiscoveryToCourse
+    ).not.toHaveBeenCalled();
+    expect(
+      providerObservationMocks.markCourseProviderObservationUnreconciled
+    ).toHaveBeenCalledOnce();
+    expect(
+      providerObservationMocks.releaseCourseProviderObservation
+    ).not.toHaveBeenCalled();
   });
 
   it("refreshes a missing official website from Google Places before remediation discovery", async () => {
@@ -210,14 +371,20 @@ describe("search monitoring discovery", () => {
       }
     });
     expect(fetchImpl.mock.calls[1]?.[0]).toBe(officialWebsite);
-    expect(dbMocks.applyRecoveredOfficialWebsiteToCourse).toHaveBeenCalledWith({
-      courseId: "source-missing-course",
-      website: officialWebsite,
-      expectedUpdatedAt: new Date("2026-07-13T19:00:00.000Z"),
-      observedAt: now
-    });
+    expect(dbMocks.applyRecoveredOfficialWebsiteToCourse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "source-missing-course",
+        website: officialWebsite,
+        expectedUpdatedAt: new Date("2026-07-13T19:00:00.000Z"),
+        observedAt: now,
+        providerObservation: expectedProviderObservation(
+          "source-missing-course",
+          now
+        )
+      })
+    );
     expect(result.attemptedCourseIds).toEqual(["source-missing-course"]);
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledOnce();
+    expect(getOrdinaryCombinedDiscoveries()).toHaveLength(1);
   });
 
   it("does not discover from an unpersisted recovered website after a compare-and-set loss", async () => {
@@ -297,12 +464,18 @@ describe("search monitoring discovery", () => {
     );
 
     expect(fetchImpl).toHaveBeenCalledTimes(2);
-    expect(dbMocks.applyRecoveredOfficialWebsiteToCourse).toHaveBeenCalledWith({
-      courseId: "source-missing-course",
-      website: officialWebsite,
-      expectedUpdatedAt: new Date("2026-07-13T19:00:00.000Z"),
-      observedAt: now
-    });
+    expect(dbMocks.applyRecoveredOfficialWebsiteToCourse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        courseId: "source-missing-course",
+        website: officialWebsite,
+        expectedUpdatedAt: new Date("2026-07-13T19:00:00.000Z"),
+        observedAt: now,
+        providerObservation: expectedProviderObservation(
+          "source-missing-course",
+          now
+        )
+      })
+    );
     expect(result.attemptedCourseIds).toEqual(["source-missing-course"]);
   });
 
@@ -612,8 +785,7 @@ describe("search monitoring discovery", () => {
     await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
 
     expect(fetchImpl).toHaveBeenCalledOnce();
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledOnce();
-    const discovery = dbMocks.recordBrowserDiscovery.mock.calls[0]?.[0];
+    const [discovery] = getOrdinaryCombinedDiscoveries();
     expect(discovery).toMatchObject({
       courseId: "eastwood",
       status: "INSPECTED",
@@ -630,7 +802,6 @@ describe("search monitoring discovery", () => {
     });
     expect(discovery).not.toHaveProperty("bookingUrl");
     expect(JSON.stringify(discovery)).not.toContain("unrelated.example");
-    expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledWith(discovery);
   });
 
   it("does not treat a footer help mention as an initial-page soft 404", async () => {
@@ -731,7 +902,7 @@ describe("search monitoring discovery", () => {
 
     await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
 
-    const discovery = dbMocks.recordBrowserDiscovery.mock.calls[0]?.[0];
+    const [discovery] = getOrdinaryCombinedDiscoveries();
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(discovery.automationReason).not.toBe("TEMPORARILY_UNAVAILABLE");
     expect(discovery.evidence.learnedFrom).toBe("browser-visible-links");
@@ -770,7 +941,7 @@ describe("search monitoring discovery", () => {
 
     await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
 
-    const discovery = dbMocks.recordBrowserDiscovery.mock.calls[0]?.[0];
+    const [discovery] = getOrdinaryCombinedDiscoveries();
     expect(fetchImpl).toHaveBeenCalledOnce();
     expect(discovery.automationReason).not.toBe("TEMPORARILY_UNAVAILABLE");
     expect(discovery.evidence.learnedFrom).toBe("browser-visible-links");
@@ -781,11 +952,12 @@ describe("search monitoring discovery", () => {
 
   it("does not share trusted soft-404 provenance across same-name courses with different official websites", async () => {
     const sharedSource = "https://shared-course.example/";
-    const fetchImpl = vi.fn().mockResolvedValue(
-      new Response(
-        '<html><title>Page Not Found</title><h1>404 Page Not Found</h1><a href="https://casino.example/book-tee-times">Book tee times</a></html>',
-        { status: 200, headers: { "content-type": "text/html" } }
-      )
+    const fetchImpl = vi.fn().mockImplementation(
+      async () =>
+        new Response(
+          '<html><title>Page Not Found</title><h1>404 Page Not Found</h1><a href="https://casino.example/book-tee-times">Book tee times</a></html>',
+          { status: 200, headers: { "content-type": "text/html" } }
+        )
     );
     const baseCourse = {
       name: "Shared Name Golf Course",
@@ -822,10 +994,8 @@ describe("search monitoring discovery", () => {
 
     await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
 
-    expect(fetchImpl).toHaveBeenCalledOnce();
-    const discoveries = dbMocks.recordBrowserDiscovery.mock.calls.map(
-      ([discovery]) => discovery
-    );
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const discoveries = getOrdinaryCombinedDiscoveries();
     expect(discoveries).toHaveLength(2);
     expect(discoveries[0]).toMatchObject({
       courseId: "trusted-shared-source",
@@ -843,7 +1013,9 @@ describe("search monitoring discovery", () => {
   });
 
   it("does not apply one generic shared-site TeeItUp alias to Dennis Highlands and Dennis Pines", async () => {
-    dbMocks.applyBrowserDiscoveryToCourse.mockResolvedValue(null);
+    dbMocks.recordAndApplyBrowserDiscoveryToCourse.mockImplementation(
+      async (discovery) => ({ applied: null, discovery: { id: discovery.courseId } })
+    );
     const fetchImpl = vi.fn(async (url: string | URL | Request) => {
       const value = url.toString();
       if (value === "https://dennis.example/golf") {
@@ -874,16 +1046,19 @@ describe("search monitoring discovery", () => {
 
     const result = await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
 
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
     expect(
       providerLeaseMocks.runWithProviderRequestLease.mock.calls.map(
         ([providerFamilyKey]) => providerFamilyKey
       )
-    ).toEqual(["dennis.example", "TEEITUP"]);
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledTimes(2);
-    const discoveries = dbMocks.recordBrowserDiscovery.mock.calls.map(
-      ([discovery]) => discovery
-    );
+    ).toEqual([
+      "dennis.example",
+      "TEEITUP",
+      "dennis.example",
+      "TEEITUP"
+    ]);
+    const discoveries = getOrdinaryCombinedDiscoveries();
+    expect(discoveries).toHaveLength(2);
     expect(discoveries).toEqual([
       expect.objectContaining({
         courseId: "dennis-highlands",
@@ -962,7 +1137,7 @@ describe("search monitoring discovery", () => {
 
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(result.attemptedCourseIds).toEqual([course.id]);
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledTimes(1);
+    expect(getOrdinaryCombinedDiscoveries()).toHaveLength(1);
   });
 
   it("persists neither evidence nor course changes when an owner appears during a bounded fresh recheck", async () => {
@@ -1007,7 +1182,11 @@ describe("search monitoring discovery", () => {
     expect(dbMocks.recordAndApplyBrowserDiscoveryToCourse).toHaveBeenCalledWith(
       expect.objectContaining({ courseId: course.id }),
       expect.objectContaining({ updatedAt: now }),
-      expectedUnownedIncident
+      expectedUnownedIncident,
+      expect.objectContaining({
+        observedAt: now,
+        providerObservation: expectedProviderObservation(course.id, now)
+      })
     );
     expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
     expect(dbMocks.applyBrowserDiscoveryToCourse).not.toHaveBeenCalled();
@@ -1059,7 +1238,9 @@ describe("search monitoring discovery", () => {
       expect.objectContaining({ courseId: course.id, status: "FAILED" }),
       undefined,
       undefined,
-      expectedUnownedIncident
+      expectedUnownedIncident,
+      now,
+      expectedProviderObservation(course.id, now)
     );
     expect(
       dbMocks.recordAndApplyBrowserDiscoveryToCourse
@@ -1169,7 +1350,7 @@ describe("search monitoring discovery", () => {
       officialUrl,
       observedBookingUrl
     ]);
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+    expect(getOrdinaryCombinedDiscoveries()).toContainEqual(
       expect.objectContaining({
         courseId: "whitney-farms",
         status: "LEARNED",
@@ -1182,7 +1363,6 @@ describe("search monitoring discovery", () => {
         }
       })
     );
-    expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledOnce();
     expect(result).toEqual({
       attemptedCourseIds: ["whitney-farms"],
       appliedCourseIds: ["whitney-farms"],
@@ -1249,7 +1429,7 @@ describe("search monitoring discovery", () => {
       officialUrl,
       teeTimesUrl
     ]);
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+    expect(getOrdinaryCombinedDiscoveries()).toContainEqual(
       expect.objectContaining({
         courseId: "farmingbury-hills",
         status: "LEARNED",
@@ -1262,7 +1442,6 @@ describe("search monitoring discovery", () => {
         }
       })
     );
-    expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledOnce();
     expect(result).toEqual({
       attemptedCourseIds: ["farmingbury-hills"],
       appliedCourseIds: ["farmingbury-hills"],
@@ -1330,7 +1509,7 @@ describe("search monitoring discovery", () => {
       teeTimesUrl,
       legacyProviderUrl
     ]);
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+    expect(getOrdinaryCombinedDiscoveries()).toContainEqual(
       expect.objectContaining({
         courseId: "wampanoag",
         status: "LEARNED",
@@ -1346,7 +1525,6 @@ describe("search monitoring discovery", () => {
         })
       })
     );
-    expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledOnce();
     expect(result).toEqual({
       attemptedCourseIds: ["wampanoag"],
       appliedCourseIds: ["wampanoag"],
@@ -1396,7 +1574,7 @@ describe("search monitoring discovery", () => {
       "https://www.stratfordct.gov/short-beach",
       bookingUrl
     ]);
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+    expect(getOrdinaryCombinedDiscoveries()).toContainEqual(
       expect.objectContaining({
         status: "LEARNED",
         detectedPlatform: "FOREUP",
@@ -1411,7 +1589,7 @@ describe("search monitoring discovery", () => {
         })
       })
     );
-    const discovery = dbMocks.recordBrowserDiscovery.mock.calls[0]?.[0];
+    const [discovery] = getOrdinaryCombinedDiscoveries();
     expect(
       discovery.evidence.observedUrls.some(
         (url: string) => url.includes('\\"') || url.includes("%22")
@@ -1472,7 +1650,7 @@ describe("search monitoring discovery", () => {
       officialUrl,
       profileUrl
     ]);
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+    expect(getOrdinaryCombinedDiscoveries()).toContainEqual(
       expect.objectContaining({
         status: "LEARNED",
         detectedPlatform: "CHRONOGOLF",
@@ -1553,7 +1731,7 @@ describe("search monitoring discovery", () => {
       reservationUrl,
       profileUrl
     ]);
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+    expect(getOrdinaryCombinedDiscoveries()).toContainEqual(
       expect.objectContaining({
         status: "LEARNED",
         detectedPlatform: "CHRONOGOLF",
@@ -1637,7 +1815,7 @@ describe("search monitoring discovery", () => {
       bookingUrl,
       configurationUrl
     ]);
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+    expect(getOrdinaryCombinedDiscoveries()).toContainEqual(
       expect.objectContaining({
         status: "LEARNED",
         bookingUrl: "https://colonie.cps.golf/",
@@ -1663,7 +1841,7 @@ describe("search monitoring discovery", () => {
         })
       })
     );
-    expect(JSON.stringify(dbMocks.recordBrowserDiscovery.mock.calls)).not.toContain(
+    expect(JSON.stringify(getOrdinaryCombinedDiscoveries())).not.toContain(
       "must-not-be-persisted"
     );
     expect(result).toEqual({
@@ -1754,7 +1932,7 @@ describe("search monitoring discovery", () => {
       bookingUrl,
       configurationUrl
     ]);
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+    expect(getOrdinaryCombinedDiscoveries()).toContainEqual(
       expect.objectContaining({
         status: "LEARNED",
         apiMetadata: expect.objectContaining({
@@ -1768,7 +1946,7 @@ describe("search monitoring discovery", () => {
         })
       })
     );
-    expect(JSON.stringify(dbMocks.recordBrowserDiscovery.mock.calls)).not.toContain(
+    expect(JSON.stringify(getOrdinaryCombinedDiscoveries())).not.toContain(
       "must-not-be-persisted"
     );
     expect(result.attemptedCourseIds).toEqual(["capital-hills"]);
@@ -1895,7 +2073,7 @@ describe("search monitoring discovery", () => {
       bookingUrl
     ]);
     expect(fetchImpl).not.toHaveBeenCalledWith(siblingUrl, expect.anything());
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+    expect(getOrdinaryCombinedDiscoveries()).toContainEqual(
       expect.objectContaining({
         status: "LEARNED",
         detectedPlatform: "TEEITUP",
@@ -1951,7 +2129,7 @@ describe("search monitoring discovery", () => {
     await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
 
     expect(fetchImpl).toHaveBeenCalledTimes(4);
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+    expect(getOrdinaryCombinedDiscoveries()).toContainEqual(
       expect.objectContaining({
         status: "LEARNED",
         detectedPlatform: "CUSTOM",
@@ -2002,7 +2180,12 @@ describe("search monitoring discovery", () => {
       expect.objectContaining({
         courseId: "runnable-policy-course",
         status: "FAILED"
-      })
+      }),
+      undefined,
+      undefined,
+      undefined,
+      now,
+      expectedProviderObservation("runnable-policy-course", now)
     );
     expect(dbMocks.applyBrowserDiscoveryToCourse).not.toHaveBeenCalled();
     expect(dbMocks.retireLegacyPolicyOnlyCourseBlock).toHaveBeenCalledWith(
@@ -2017,7 +2200,10 @@ describe("search monitoring discovery", () => {
         preserveWebsite: true,
         preserveDetectedBookingUrl: true,
         preserveBookingMetadata: true
-      }
+      },
+      undefined,
+      now,
+      expectedProviderObservation("runnable-policy-course", now)
     );
     expect(result.appliedCourseIds).toEqual(["runnable-policy-course"]);
     expect(result.failedCourseIds).toEqual(["runnable-policy-course"]);
@@ -2059,7 +2245,12 @@ describe("search monitoring discovery", () => {
         status: "FAILED",
         sourceUrl: safeWebsite,
         evidence: expect.objectContaining({ observedUrls: [safeWebsite] })
-      })
+      }),
+      undefined,
+      undefined,
+      undefined,
+      now,
+      expectedProviderObservation("sensitive-booking-url", now)
     );
     expect(
       JSON.stringify(dbMocks.recordBrowserDiscovery.mock.calls)
@@ -2108,7 +2299,10 @@ describe("search monitoring discovery", () => {
         preserveWebsite: true,
         preserveDetectedBookingUrl: true,
         preserveBookingMetadata: false
-      }
+      },
+      undefined,
+      now,
+      expectedProviderObservation("cross-origin-cps-policy", now)
     );
   });
 
@@ -2303,7 +2497,7 @@ describe("search monitoring discovery", () => {
       "https://yalebulldogs.com/faqs",
       "https://app.whoosh.io/patron/club/yale-golf-course"
     ]);
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+    expect(getOrdinaryCombinedDiscoveries()).toContainEqual(
       expect.objectContaining({
         status: "LEARNED",
         detectedPlatform: "CUSTOM",
@@ -2321,18 +2515,19 @@ describe("search monitoring discovery", () => {
         })
       })
     );
-    expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledWith(
-      expect.objectContaining({
-        status: "LEARNED",
-        automationEligibility: "ALLOWED",
-        automationReason: "NONE"
-      }),
+    expect(dbMocks.recordAndApplyBrowserDiscoveryToCourse).toHaveBeenCalledWith(
+      expect.any(Object),
       {
         updatedAt: new Date("2026-07-14T00:00:00.000Z"),
         detectedBookingUrl: null,
         bookingMethod: "PUBLIC_ONLINE",
         automationEligibility: "BLOCKED"
-      }
+      },
+      undefined,
+      expect.objectContaining({
+        observedAt: now,
+        providerObservation: expectedProviderObservation("yale", now)
+      })
     );
     expect(result.attemptedCourseIds).toEqual(["yale"]);
     expect(result.appliedCourseIds).toEqual(["yale"]);
@@ -2436,7 +2631,10 @@ describe("search monitoring discovery", () => {
         evidence: null
       }
     ]);
-    dbMocks.applyBrowserDiscoveryToCourse.mockResolvedValueOnce(null);
+    dbMocks.recordAndApplyBrowserDiscoveryToCourse.mockResolvedValueOnce({
+      applied: null,
+      discovery: { id: "discovery-second-attempt" }
+    });
     const fetchImpl = vi.fn().mockResolvedValue(
       new Response("<html><body>Public golf course information.</body></html>", {
         status: 200,
@@ -2501,7 +2699,7 @@ describe("search monitoring discovery", () => {
     await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
 
     expect(fetchImpl).toHaveBeenCalledTimes(2);
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+    expect(getOrdinaryCombinedDiscoveries()).toContainEqual(
       expect.objectContaining({
         isPublic: false,
         status: "VERIFIED",
@@ -2517,7 +2715,10 @@ describe("search monitoring discovery", () => {
     dbMocks.listRecentCourseAutomationDiscoveries.mockResolvedValue([
       { courseId: "course-1", createdAt: new Date("2026-07-13T19:00:00.000Z") }
     ]);
-    dbMocks.applyBrowserDiscoveryToCourse.mockResolvedValue(null);
+    dbMocks.recordAndApplyBrowserDiscoveryToCourse.mockResolvedValue({
+      applied: null,
+      discovery: { id: "discovery-course-1" }
+    });
     const fetchImpl = vi.fn().mockResolvedValue(
       new Response("<html><body>Public golf course</body></html>", {
         status: 200,
@@ -4036,7 +4237,10 @@ describe("search monitoring discovery", () => {
         }
       }
     ]);
-    dbMocks.applyBrowserDiscoveryToCourse.mockResolvedValue(null);
+    dbMocks.recordAndApplyBrowserDiscoveryToCourse.mockResolvedValue({
+      applied: null,
+      discovery: { id: "discovery-stale-evidence" }
+    });
     const fetchImpl = vi.fn().mockResolvedValue(
       new Response("<html><body>Example Golf Course</body></html>", {
         status: 200,
@@ -4061,8 +4265,8 @@ describe("search monitoring discovery", () => {
     await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
 
     expect(fetchImpl).toHaveBeenCalledOnce();
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledOnce();
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+    expect(getOrdinaryCombinedDiscoveries()).toHaveLength(1);
+    expect(getOrdinaryCombinedDiscoveries()).toContainEqual(
       expect.objectContaining({ status: "INSPECTED" })
     );
   });
@@ -4098,7 +4302,7 @@ describe("search monitoring discovery", () => {
 
     await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
 
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+    expect(getOrdinaryCombinedDiscoveries()).toContainEqual(
       expect.objectContaining({
         status: "VERIFIED",
         detectedPlatform: "CUSTOM",
@@ -4192,7 +4396,7 @@ describe("search monitoring discovery", () => {
       "https://grassyhill.cps.golf/",
       "https://grassyhill.cps.golf/onlineresweb/Home/Configuration"
     ]);
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+    expect(getOrdinaryCombinedDiscoveries()).toContainEqual(
       expect.objectContaining({
         status: "LEARNED",
         bookingUrl: "https://grassyhill.cps.golf/",
@@ -4250,14 +4454,14 @@ describe("search monitoring discovery", () => {
     await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
 
     expect(fetchImpl).toHaveBeenCalledTimes(2);
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+    expect(getOrdinaryCombinedDiscoveries()).toContainEqual(
       expect.objectContaining({
         evidence: expect.objectContaining({
           visibleText: expect.stringContaining("Status: Private")
         })
       })
     );
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+    expect(getOrdinaryCombinedDiscoveries()).toContainEqual(
       expect.objectContaining({
         isPublic: false,
         status: "VERIFIED",
@@ -4314,7 +4518,7 @@ describe("search monitoring discovery", () => {
       sourceUrl,
       expect.any(Object)
     );
-    expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledWith(
+    expect(getOrdinaryCombinedDiscoveries()).toContainEqual(
       expect.objectContaining({
         isPublic: false,
         status: "VERIFIED",
@@ -4323,10 +4527,21 @@ describe("search monitoring discovery", () => {
         evidence: expect.objectContaining({
           learnedFrom: "official-private-course-profile"
         })
-      }),
+      })
+    );
+    expect(dbMocks.recordAndApplyBrowserDiscoveryToCourse).toHaveBeenCalledWith(
+      expect.any(Object),
       expect.objectContaining({
         updatedAt: new Date("2026-07-01T00:00:00.000Z"),
         automationEligibility: "BLOCKED"
+      }),
+      undefined,
+      expect.objectContaining({
+        observedAt: now,
+        providerObservation: expectedProviderObservation(
+          "expired-private-profile",
+          now
+        )
       })
     );
     expect(result.attemptedCourseIds).toEqual(["expired-private-profile"]);
@@ -4379,7 +4594,7 @@ describe("search monitoring discovery", () => {
 
     const result = await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
 
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+    expect(getOrdinaryCombinedDiscoveries()).toContainEqual(
       expect.objectContaining({
         isPublic: false,
         automationEligibility: "BLOCKED",
@@ -4389,15 +4604,17 @@ describe("search monitoring discovery", () => {
         })
       })
     );
-    expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledWith(
+    expect(dbMocks.recordAndApplyBrowserDiscoveryToCourse).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ automationEligibility: "BLOCKED" }),
+      undefined,
       expect.objectContaining({
-        isPublic: false,
-        evidence: expect.objectContaining({
-          learnedFrom:
-            "official-private-course-profile:legacy-policy-reconciliation"
-        })
-      }),
-      expect.objectContaining({ automationEligibility: "BLOCKED" })
+        observedAt: now,
+        providerObservation: expectedProviderObservation(
+          "legacy-private-profile",
+          now
+        )
+      })
     );
     expect(result.appliedCourseIds).toEqual(["legacy-private-profile"]);
   });
@@ -4462,7 +4679,7 @@ describe("search monitoring discovery", () => {
       legacyRoot,
       legacyLandingUrl
     ]);
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+    expect(getOrdinaryCombinedDiscoveries()).toContainEqual(
       expect.objectContaining({
         courseId: "frear-park",
         status: "INSPECTED",
@@ -4479,7 +4696,7 @@ describe("search monitoring discovery", () => {
       })
     );
     expect(
-      JSON.stringify(dbMocks.recordBrowserDiscovery.mock.calls.at(-1)?.[0])
+      JSON.stringify(getOrdinaryCombinedDiscoveries().at(-1))
     ).not.toContain("anonymous-session-placeholder");
   });
 
@@ -4557,7 +4774,7 @@ describe("search monitoring discovery", () => {
       bookingUrl,
       configurationUrl
     ]);
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+    expect(getOrdinaryCombinedDiscoveries()).toContainEqual(
       expect.objectContaining({
         courseId: "frear-park-modern",
         status: "LEARNED",
@@ -4658,7 +4875,7 @@ describe("search monitoring discovery", () => {
 
     await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now);
 
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+    expect(getOrdinaryCombinedDiscoveries()).toContainEqual(
       expect.objectContaining({
         courseId: "frear-park-sibling",
         status: "INSPECTED",
@@ -4710,7 +4927,7 @@ describe("search monitoring discovery", () => {
       "https://windsorparke.example/",
       bookingUrl
     ]);
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+    expect(getOrdinaryCombinedDiscoveries()).toContainEqual(
       expect.objectContaining({
         status: "LEARNED",
         detectedPlatform: "CUSTOM",
@@ -4851,7 +5068,7 @@ describe("search monitoring discovery", () => {
       bookingUrl,
       configurationUrl
     ]);
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+    expect(getOrdinaryCombinedDiscoveries()).toContainEqual(
       expect.objectContaining({
         courseId: "simsbury-farms",
         status: "LEARNED",
@@ -4869,16 +5086,20 @@ describe("search monitoring discovery", () => {
         })
       })
     );
-    expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledWith(
-      expect.objectContaining({
-        courseId: "simsbury-farms",
-        status: "LEARNED",
-        bookingUrl: "https://simsbury.cps.golf/"
-      }),
+    expect(dbMocks.recordAndApplyBrowserDiscoveryToCourse).toHaveBeenCalledWith(
+      expect.any(Object),
       expect.objectContaining({
         detectedBookingUrl: null,
         bookingMethod: "UNKNOWN",
         automationEligibility: "UNKNOWN"
+      }),
+      undefined,
+      expect.objectContaining({
+        observedAt: now,
+        providerObservation: expectedProviderObservation(
+          "simsbury-farms",
+          now
+        )
       })
     );
     expect(result.attemptedCourseIds).toEqual(["simsbury-farms"]);
@@ -4968,7 +5189,7 @@ describe("search monitoring discovery", () => {
         bookingPageUrl,
         legacyRoot
       ]);
-      expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+      expect(getOrdinaryCombinedDiscoveries()).toContainEqual(
         expect.objectContaining({
           courseId: "simsbury-farms",
           status: "INSPECTED",
@@ -4980,17 +5201,20 @@ describe("search monitoring discovery", () => {
           evidence: expect.objectContaining({ learnedFrom })
         })
       );
-      expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledWith(
-        expect.objectContaining({
-          status: "INSPECTED",
-          detectedPlatform: "CUSTOM",
-          bookingUrl: bookingPageUrl,
-          automationReason
-        }),
+      expect(dbMocks.recordAndApplyBrowserDiscoveryToCourse).toHaveBeenCalledWith(
+        expect.any(Object),
         expect.objectContaining({
           detectedBookingUrl: null,
           bookingMethod: "UNKNOWN",
           automationEligibility: "UNKNOWN"
+        }),
+        undefined,
+        expect.objectContaining({
+          observedAt: now,
+          providerObservation: expectedProviderObservation(
+            "simsbury-farms",
+            now
+          )
         })
       );
     }
@@ -5068,7 +5292,7 @@ describe("search monitoring discovery", () => {
       bookingUrl,
       configurationUrl
     ]);
-    expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+    expect(getOrdinaryCombinedDiscoveries()).toContainEqual(
       expect.objectContaining({
         courseId: "simsbury-farms",
         status: "INSPECTED",
@@ -5086,13 +5310,17 @@ describe("search monitoring discovery", () => {
         })
       })
     );
-    expect(dbMocks.applyBrowserDiscoveryToCourse).toHaveBeenCalledWith(
+    expect(dbMocks.recordAndApplyBrowserDiscoveryToCourse).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.any(Object),
+      undefined,
       expect.objectContaining({
-        status: "INSPECTED",
-        bookingUrl: "https://simsbury.cps.golf/",
-        automationEligibility: "NEEDS_REVIEW"
-      }),
-      expect.any(Object)
+        observedAt: now,
+        providerObservation: expectedProviderObservation(
+          "simsbury-farms",
+          now
+        )
+      })
     );
   });
 

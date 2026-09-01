@@ -34,11 +34,7 @@ type SearchScheduleQueueState = {
   checkStatus?: string;
 };
 
-export type SearchScheduleQueueDependencies = {
-  getScheduleState: (
-    searchId: string,
-    scheduleVersion: number
-  ) => Promise<SearchScheduleQueueState | null>;
+export type SearchScheduleWorkflowStartDependencies = {
   startWorkflow: (
     searchId: string,
     scheduleVersion: number
@@ -50,6 +46,17 @@ export type SearchScheduleQueueDependencies = {
     expectedWorkflowRunId: string | null
   ) => Promise<{ count: number }>;
 };
+
+export type SearchScheduleQueueDependencies =
+  SearchScheduleWorkflowStartDependencies & {
+    getScheduleState: (
+      searchId: string,
+      scheduleVersion: number
+    ) => Promise<SearchScheduleQueueState | null>;
+  };
+
+const SEARCH_SCHEDULE_START_RESERVATION_PREFIX =
+  "tee-search-schedule-starting:";
 
 type SearchScheduleQueueProducerDependencies = {
   sendMessage: (
@@ -273,22 +280,83 @@ export async function consumeSearchScheduleMessage(
   if (!state) {
     return { outcome: "stale" as const };
   }
+  if (isSearchScheduleWorkflowStartReservation(state.workflowRunId)) {
+    // A prior consumer durably won the right to call Workflow but may not have
+    // attached the returned run yet. Treat the reservation as an active start;
+    // the existing attached-QUEUED recovery path generation-fences a crashed
+    // starter instead of allowing an at-least-once delivery to start in parallel.
+    return { outcome: "start_reserved" as const };
+  }
   if (state.workflowRunId && state.checkStatus !== "FAILED") {
     return { outcome: "already_started" as const };
   }
 
-  const run = await dependencies.startWorkflow(message.searchId, message.scheduleVersion);
-  const attached = await dependencies.attachWorkflowRun(
-    message.searchId,
-    message.scheduleVersion,
-    run.runId,
-    state.workflowRunId ?? null
+  const result = await startSearchScheduleWorkflowWithReservation(
+    {
+      searchId: message.searchId,
+      scheduleVersion: message.scheduleVersion,
+      expectedWorkflowRunId: state.workflowRunId ?? null,
+    },
+    dependencies,
   );
-  if (attached.count !== 1) {
-    return { outcome: "stale_after_start" as const };
+  return result.outcome === "started"
+    ? { outcome: "started" as const }
+    : { outcome: result.outcome };
+}
+
+export async function startSearchScheduleWorkflowWithReservation(
+  input: {
+    searchId: string;
+    scheduleVersion: number;
+    expectedWorkflowRunId: string | null;
+  },
+  dependencies: SearchScheduleWorkflowStartDependencies,
+) {
+  if (isSearchScheduleWorkflowStartReservation(input.expectedWorkflowRunId)) {
+    return { outcome: "start_reserved" as const };
+  }
+  const startReservation = buildSearchScheduleWorkflowStartReservation();
+  const reserved = await dependencies.attachWorkflowRun(
+    input.searchId,
+    input.scheduleVersion,
+    startReservation,
+    input.expectedWorkflowRunId,
+  );
+  if (reserved.count !== 1) {
+    return { outcome: "stale_before_start" as const };
   }
 
-  return { outcome: "started" as const };
+  // A thrown Workflow start is ambiguous: the remote service may have accepted
+  // the run before the caller lost the response. Keep the durable reservation
+  // so an at-least-once redelivery cannot start the same generation again. The
+  // existing attached-QUEUED recovery path later generation-fences this work.
+  const run = await dependencies.startWorkflow(
+    input.searchId,
+    input.scheduleVersion,
+  );
+  const attached = await dependencies.attachWorkflowRun(
+    input.searchId,
+    input.scheduleVersion,
+    run.runId,
+    startReservation,
+  );
+  if (attached.count !== 1) {
+    return { outcome: "stale_after_start" as const, runId: run.runId };
+  }
+
+  return { outcome: "started" as const, runId: run.runId };
+}
+
+export function isSearchScheduleWorkflowStartReservation(
+  workflowRunId: string | null | undefined
+) {
+  return Boolean(
+    workflowRunId?.startsWith(SEARCH_SCHEDULE_START_RESERVATION_PREFIX)
+  );
+}
+
+function buildSearchScheduleWorkflowStartReservation() {
+  return `${SEARCH_SCHEDULE_START_RESERVATION_PREFIX}${randomUUID()}`;
 }
 
 export function getSearchScheduleQueueRetryDirective(error: unknown, deliveryCount: number) {

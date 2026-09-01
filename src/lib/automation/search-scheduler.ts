@@ -2,7 +2,6 @@ import { start } from "workflow/api";
 
 import {
   attachSearchWorkflowRun,
-  failScheduledSearchCheck,
   getSearchCheckRequestState,
   queueSearchCheck,
   type QueuedSearchCheck,
@@ -12,7 +11,7 @@ import {
 import { searchScheduleWorkflow } from "@/workflows/search-schedule";
 import {
   buildSearchScheduleReference,
-  recoverSearchScheduleStartFailure
+  startSearchScheduleWorkflowWithReservation
 } from "@/lib/automation/search-recheck-queue";
 
 const MANUAL_CHECK_COOLDOWN_MS = 60_000;
@@ -98,16 +97,30 @@ export async function startSearchSchedule(
   }
 
   try {
-    const run = await start(searchScheduleWorkflow, [searchId, queued.scheduleVersion], {
-      deploymentId: "latest"
-    });
-    const attached = await attachSearchWorkflowRun(
-      searchId,
-      queued.scheduleVersion,
-      run.runId,
-      queued.workflowRunId
+    const started = await startSearchScheduleWorkflowWithReservation(
+      {
+        searchId,
+        scheduleVersion: queued.scheduleVersion,
+        expectedWorkflowRunId: queued.workflowRunId,
+      },
+      {
+        startWorkflow: async (nextSearchId, nextScheduleVersion) => {
+          const run = await start(
+            searchScheduleWorkflow,
+            [nextSearchId, nextScheduleVersion],
+            { deploymentId: "latest" },
+          );
+          return { runId: run.runId };
+        },
+        attachWorkflowRun: attachSearchWorkflowRun,
+      },
     );
-    if (options.expectedState && attached.count !== 1) {
+    if (started.outcome !== "started") {
+      if (!options.expectedState) {
+        throw new Error(
+          "The search schedule changed before its Workflow start could be attached.",
+        );
+      }
       return {
         outcome: "not_eligible",
         reason: "state_changed"
@@ -115,33 +128,17 @@ export async function startSearchSchedule(
     }
 
     return {
-      runId: run.runId,
+      runId: started.runId,
       scheduleVersion: queued.scheduleVersion,
       reused: false
     };
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Could not start search workflow";
-    const failed = await failScheduledSearchCheck({
-      searchId,
+    console.error("[search-schedule:start-uncertain]", {
+      searchRef: buildSearchScheduleReference(searchId),
       scheduleVersion: queued.scheduleVersion,
-      message,
-      nextCheckAt: new Date(Date.now() + 5 * 60 * 1000),
-      expectedWorkflowRunId: queued.workflowRunId
+      message:
+        "Workflow start outcome is uncertain; generation-fenced deployed recovery remains pending",
     });
-    if (failed.count === 1) {
-      const recovery = await recoverSearchScheduleStartFailure({
-        searchId,
-        scheduleVersion: queued.scheduleVersion,
-        trigger: "START_FAILED"
-      });
-      if (recovery.outcome === "failed") {
-        console.error("[search-schedule:queue-fallback-failed]", {
-          searchRef: buildSearchScheduleReference(searchId),
-          scheduleVersion: queued.scheduleVersion,
-          message: "Could not enqueue workflow recovery; deployed cron recovery remains pending"
-        });
-      }
-    }
     throw error;
   }
 }

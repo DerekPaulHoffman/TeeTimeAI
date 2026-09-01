@@ -3,8 +3,11 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildCourseSupportSearchExecutionFenceSnapshot,
   canAdvanceCourseSupportSearchExecutionFence,
+  COURSE_SUPPORT_SEARCH_EXECUTION_PROBE_READ_LIMIT,
+  CourseSupportSearchExecutionFenceRetryError,
   courseSupportSearchExecutionFenceMatches,
   getCourseSupportSearchExecutionMayHaveStartedCourseRefs,
+  loadCourseSupportSearchExecutionFence,
   lockCourseSupportSearchExecutionFenceRows,
   persistCourseSupportSearchExecutionFence,
   readPersistedCourseSupportSearchExecutionFence,
@@ -66,7 +69,10 @@ function dispatch(
           observedAt: completedAt,
           message: null,
           evidenceUrl: null,
-          rawSummary: { providerExecution: "RUNNABLE_PROVIDER_CHECK" },
+          rawSummary: {
+            providerExecution: "RUNNABLE_PROVIDER_CHECK",
+            providerObservedAt: completedAt.toISOString(),
+          },
           runtimeVersion: "wrong-runtime",
         },
         {
@@ -78,7 +84,10 @@ function dispatch(
           observedAt: new Date("2026-08-20T14:00:30.000Z"),
           message: "Provider request failed.",
           evidenceUrl: null,
-          rawSummary: { providerExecution: "RUNNABLE_PROVIDER_CHECK" },
+          rawSummary: {
+            providerExecution: "RUNNABLE_PROVIDER_CHECK",
+            providerObservedAt: "2026-08-20T14:00:30.000Z",
+          },
           runtimeVersion: null,
         },
       ],
@@ -102,6 +111,39 @@ function snapshot(
 }
 
 describe("course-support search execution fence", () => {
+  it("bounds post-dispatch probe reads and fails closed on overflow", async () => {
+    const row = dispatch();
+    row.teeSearch!.probes = Array.from(
+      { length: COURSE_SUPPORT_SEARCH_EXECUTION_PROBE_READ_LIMIT + 1 },
+      (_, index) => ({
+        ...row.teeSearch!.probes[0],
+        id: `overflow-probe-${index + 1}`,
+      }),
+    );
+    const findMany = vi.fn().mockResolvedValue([row]);
+
+    await expect(
+      loadCourseSupportSearchExecutionFence(
+        { courseSupportBatchSearch: { findMany } } as never,
+        {
+          batchId: "batch-1",
+          courseIds: ["course-1", "course-2"],
+          expectedSearches: [
+            { searchRef: "a".repeat(64), scheduleVersion: 7 },
+          ],
+          recheckDispatchKey: "dispatch-1",
+          recheckDispatchStartedAt: dispatchedAt,
+          recheckDispatchedAt: dispatchedAt,
+          now,
+        },
+      ),
+    ).rejects.toBeInstanceOf(CourseSupportSearchExecutionFenceRetryError);
+
+    expect(
+      findMany.mock.calls[0]?.[0]?.select?.teeSearch?.select?.probes?.take,
+    ).toBe(COURSE_SUPPORT_SEARCH_EXECUTION_PROBE_READ_LIMIT + 1);
+  });
+
   it("is canonical across row, preference, and probe ordering", () => {
     const first = dispatch();
     const second = dispatch({
@@ -159,6 +201,92 @@ describe("course-support search execution fence", () => {
     ]);
     expect(result.providerExecutionAttemptCourseRefs).toHaveLength(2);
   });
+
+  it("does not count execution observed after a failed attempt but before successful dispatch", () => {
+    const successfulDispatchAt = new Date("2026-08-20T14:00:45.000Z");
+    const row = dispatch();
+    row.teeSearch!.probes = [
+      {
+        ...row.teeSearch!.probes[0],
+        id: "probe-between-dispatch-attempts",
+        courseId: "course-1",
+        observedAt: new Date("2026-08-20T14:00:30.000Z"),
+        rawSummary: {
+          providerExecution: "LOCAL_BROWSER_READER",
+          providerObservedAt: "2026-08-20T14:00:30.000Z",
+        },
+      },
+    ];
+
+    const result = buildCourseSupportSearchExecutionFenceSnapshot({
+      courseIds: ["course-1"],
+      expectedSearches: [{ searchRef: "a".repeat(64), scheduleVersion: 7 }],
+      recheckDispatchKey: "dispatch-1",
+      recheckDispatchStartedAt: dispatchedAt,
+      recheckDispatchedAt: successfulDispatchAt,
+      now,
+      dispatches: [row],
+    });
+
+    expect(result.settled).toBe(true);
+    expect(result.providerExecutionAttemptCourseIds).toEqual([]);
+    expect(result.providerExecutionAttemptCourseRefs).toEqual([]);
+    expect(result.probeEvidenceRefs).toEqual([]);
+  });
+
+  it("counts the exact local-reader marker and rejects lookalike markers", () => {
+    const candidate = dispatch();
+    candidate.teeSearch!.probes = [
+      {
+        ...candidate.teeSearch!.probes[0],
+        id: "probe-local-reader",
+        courseId: "course-1",
+        rawSummary: {
+          providerExecution: "LOCAL_BROWSER_READER",
+          providerObservedAt: "2026-08-20T14:00:30.000Z",
+        },
+      },
+      {
+        ...candidate.teeSearch!.probes[1],
+        id: "probe-lookalike",
+        courseId: "course-2",
+        rawSummary: { providerExecution: "LOCAL_BROWSER_READER_V2" },
+      },
+    ];
+
+    const result = snapshot([candidate]);
+
+    expect(result.providerExecutionAttemptCourseIds).toEqual(["course-1"]);
+    expect(result.providerExecutionAttemptCourseRefs).toHaveLength(1);
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["malformed", "2026-08-20T14:00:30Z"],
+    ["pre-dispatch", "2026-08-20T13:59:59.999Z"],
+    ["later than its probe", "2026-08-20T14:01:00.001Z"],
+  ])(
+    "rejects a local-reader marker whose source timestamp is %s",
+    (_label, providerObservedAt) => {
+      const candidate = dispatch();
+      candidate.teeSearch!.probes = [
+        {
+          ...candidate.teeSearch!.probes[0],
+          id: "probe-local-reader",
+          courseId: "course-1",
+          observedAt: new Date("2026-08-20T14:01:00.000Z"),
+          rawSummary: {
+            providerExecution: "LOCAL_BROWSER_READER",
+            ...(providerObservedAt ? { providerObservedAt } : {}),
+          },
+        },
+      ];
+
+      expect(snapshot([candidate]).providerExecutionAttemptCourseIds).toEqual(
+        [],
+      );
+    },
+  );
 
   it("fences the complete related-search membership beyond the incident courses", () => {
     const initial = snapshot();
@@ -568,6 +696,7 @@ describe("course-support search execution fence", () => {
       batchId: "batch-1",
       courseIds: ["course-2", "course-1"],
       recheckDispatchStartedAt: dispatchedAt,
+      recheckDispatchedAt: dispatchedAt,
     });
 
     expect(queries).toHaveLength(6);

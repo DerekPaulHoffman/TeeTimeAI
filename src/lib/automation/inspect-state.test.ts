@@ -3,10 +3,216 @@ import { describe, expect, it } from "vitest";
 import {
   activeSearchInspectionQuery,
   extractImprovementRunMemory,
+  getCurrentProbeExecutionObservedAt,
+  isCurrentProbeExecutionTrusted,
   latestCurrentActionableProbes,
+  selectCurrentProbeWinner,
   summarizeCourseDiscoveryOutcomes,
   summarizeWebsiteEventCounts
 } from "../../../scripts/automation/inspect-state";
+
+describe("isCurrentProbeExecutionTrusted", () => {
+  it("trusts only exact server and local-reader provider execution markers", () => {
+    expect(
+      isCurrentProbeExecutionTrusted({
+        runtimeVersion: "runtime-sha",
+        rawSummary: {
+          providerExecution: "RUNNABLE_PROVIDER_CHECK",
+          providerObservedAt: "2026-08-31T23:00:00.000Z"
+        },
+        observedAt: new Date("2026-08-31T23:00:00.000Z")
+      })
+    ).toBe(true);
+    expect(
+      isCurrentProbeExecutionTrusted({
+        runtimeVersion: "runtime-sha",
+        rawSummary: {
+          providerExecution: "LOCAL_BROWSER_READER",
+          providerObservedAt: "2026-08-31T22:59:00.000Z"
+        },
+        observedAt: new Date("2026-08-31T23:00:00.000Z")
+      })
+    ).toBe(true);
+    expect(
+      isCurrentProbeExecutionTrusted({
+        runtimeVersion: "runtime-sha",
+        rawSummary: { providerExecution: true },
+        observedAt: new Date("2026-08-31T23:00:00.000Z")
+      })
+    ).toBe(false);
+    expect(
+      isCurrentProbeExecutionTrusted({
+        runtimeVersion: "runtime-sha",
+        rawSummary: { providerExecution: "RUNNABLE_PROVIDER_CHECK" },
+        observedAt: new Date("2026-08-31T23:00:00.000Z")
+      })
+    ).toBe(false);
+    expect(
+      isCurrentProbeExecutionTrusted({
+        runtimeVersion: null,
+        rawSummary: {
+          providerExecution: "LOCAL_BROWSER_READER",
+          providerObservedAt: "2026-08-31T22:59:00.000Z"
+        },
+        observedAt: new Date("2026-08-31T23:00:00.000Z")
+      })
+    ).toBe(false);
+    expect(
+      isCurrentProbeExecutionTrusted({
+        runtimeVersion: "runtime-sha",
+        rawSummary: { providerExecution: "LOCAL_BROWSER_READER" },
+        observedAt: new Date("2026-08-31T23:00:00.000Z")
+      })
+    ).toBe(false);
+    expect(
+      getCurrentProbeExecutionObservedAt({
+        runtimeVersion: "runtime-sha",
+        rawSummary: {
+          providerExecution: "LOCAL_BROWSER_READER",
+          providerObservedAt: "2026-08-31T22:59:00.000Z"
+        },
+        observedAt: new Date("2026-08-31T23:00:00.000Z")
+      })
+    ).toEqual(new Date("2026-08-31T22:59:00.000Z"));
+    expect(
+      getCurrentProbeExecutionObservedAt({
+        runtimeVersion: "runtime-sha",
+        rawSummary: {
+          providerExecution: "LOCAL_BROWSER_READER",
+          providerObservedAt: "2026-08-31T22:39:59.999Z",
+        },
+        observedAt: new Date("2026-08-31T23:00:00.000Z"),
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("selectCurrentProbeWinner", () => {
+  it("keeps a source-newer failure ahead of a later-written local-reader success", () => {
+    const winner = selectCurrentProbeWinner([
+      {
+        id: "later-local-row",
+        teeSearchId: "search-1",
+        courseId: "course-1",
+        outcome: "NO_MATCH",
+        observedAt: new Date("2026-08-31T23:05:00.000Z"),
+        runtimeVersion: "runtime-sha",
+        rawSummary: {
+          providerExecution: "LOCAL_BROWSER_READER",
+          providerObservedAt: "2026-08-31T22:50:00.000Z",
+        },
+      },
+      {
+        id: "earlier-server-row",
+        teeSearchId: "search-1",
+        courseId: "course-1",
+        outcome: "FETCH_FAILED",
+        observedAt: new Date("2026-08-31T23:00:00.000Z"),
+        runtimeVersion: "runtime-sha",
+        rawSummary: {
+          providerExecution: "RUNNABLE_PROVIDER_CHECK",
+          providerObservedAt: "2026-08-31T23:00:00.000Z",
+        },
+      },
+    ]);
+
+    expect(winner).toMatchObject({
+      status: "VALID",
+      probe: {
+        id: "earlier-server-row",
+        outcome: "FETCH_FAILED",
+      },
+    });
+  });
+
+  it("fails closed when equally new source evidence disagrees", () => {
+    const common = {
+      teeSearchId: "search-1",
+      courseId: "course-1",
+      observedAt: new Date("2026-08-31T23:00:00.000Z"),
+      runtimeVersion: "runtime-sha",
+      rawSummary: {
+        providerExecution: "RUNNABLE_PROVIDER_CHECK",
+        providerObservedAt: "2026-08-31T23:00:00.000Z",
+      },
+    };
+
+    expect(
+      selectCurrentProbeWinner([
+        { ...common, id: "probe-a", outcome: "NO_MATCH" },
+        { ...common, id: "probe-b", outcome: "FETCH_FAILED" },
+      ]),
+    ).toEqual({ status: "INVALID", probe: null });
+  });
+
+  it("does not let historical rows exhaust the bounded current-evidence window", () => {
+    const historical = Array.from({ length: 17 }, (_, index) => {
+      const observedAt = new Date(
+        new Date("2026-08-31T21:00:00.000Z").getTime() + index * 60_000,
+      );
+      return {
+        id: `historical-${index}`,
+        teeSearchId: "search-1",
+        courseId: "course-1",
+        outcome: "FETCH_FAILED" as const,
+        observedAt,
+        runtimeVersion: "runtime-sha",
+        rawSummary: {
+          providerExecution: "RUNNABLE_PROVIDER_CHECK",
+          providerObservedAt: observedAt.toISOString(),
+        },
+      };
+    });
+    const current = {
+      id: "current-proof",
+      teeSearchId: "search-1",
+      courseId: "course-1",
+      outcome: "NO_MATCH" as const,
+      observedAt: new Date("2026-08-31T23:00:00.000Z"),
+      runtimeVersion: "runtime-sha",
+      rawSummary: {
+        providerExecution: "RUNNABLE_PROVIDER_CHECK",
+        providerObservedAt: "2026-08-31T23:00:00.000Z",
+      },
+    };
+
+    expect(selectCurrentProbeWinner([...historical, current])).toEqual({
+      status: "VALID",
+      probe: current,
+    });
+  });
+
+  it("fails closed when a local-reader result is persisted beyond the evidence-lag bound", () => {
+    expect(
+      selectCurrentProbeWinner([
+        {
+          id: "delayed-local-row",
+          teeSearchId: "search-1",
+          courseId: "course-1",
+          outcome: "NO_MATCH",
+          observedAt: new Date("2026-08-31T23:30:00.000Z"),
+          runtimeVersion: "runtime-sha",
+          rawSummary: {
+            providerExecution: "LOCAL_BROWSER_READER",
+            providerObservedAt: "2026-08-31T23:00:00.000Z",
+          },
+        },
+        {
+          id: "source-newer-server-failure",
+          teeSearchId: "search-1",
+          courseId: "course-1",
+          outcome: "FETCH_FAILED",
+          observedAt: new Date("2026-08-31T23:05:00.000Z"),
+          runtimeVersion: "runtime-sha",
+          rawSummary: {
+            providerExecution: "RUNNABLE_PROVIDER_CHECK",
+            providerObservedAt: "2026-08-31T23:05:00.000Z",
+          },
+        },
+      ]),
+    ).toEqual({ status: "INVALID", probe: null });
+  });
+});
 
 describe("extractImprovementRunMemory", () => {
   it("keeps the hourly decision trail without repeating the embedded prompt", () => {

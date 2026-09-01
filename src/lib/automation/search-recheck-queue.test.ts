@@ -135,6 +135,95 @@ describe("search schedule recovery queue", () => {
     expect(dependencies.startWorkflow).not.toHaveBeenCalled();
   });
 
+  it("does not start parallel workflows when two deliveries observe the same unstarted version", async () => {
+    let workflowRunId: string | null = null;
+    let waitingReaders = 0;
+    let releaseReaders!: () => void;
+    const readersReady = new Promise<void>((resolve) => {
+      releaseReaders = resolve;
+    });
+    const dependencies = {
+      getScheduleState: vi.fn(async () => {
+        waitingReaders += 1;
+        if (waitingReaders === 2) releaseReaders();
+        await readersReady;
+        return { workflowRunId: null, checkStatus: "QUEUED" };
+      }),
+      startWorkflow: vi.fn().mockResolvedValue({ runId: "only-run" }),
+      attachWorkflowRun: vi.fn(
+        async (
+          _searchId: string,
+          _scheduleVersion: number,
+          nextWorkflowRunId: string,
+          expectedWorkflowRunId: string | null
+        ) => {
+          if (workflowRunId !== expectedWorkflowRunId) return { count: 0 };
+          workflowRunId = nextWorkflowRunId;
+          return { count: 1 };
+        }
+      )
+    };
+
+    const results = await Promise.all([
+      consumeSearchScheduleMessage(message, dependencies),
+      consumeSearchScheduleMessage(message, dependencies)
+    ]);
+
+    expect(results.map((result) => result.outcome).sort()).toEqual([
+      "stale_before_start",
+      "started"
+    ]);
+    expect(dependencies.startWorkflow).toHaveBeenCalledTimes(1);
+    expect(workflowRunId).toBe("only-run");
+  });
+
+  it("treats a durable crashed-start reservation as attached recovery work", async () => {
+    const dependencies = {
+      getScheduleState: vi.fn().mockResolvedValue({
+        workflowRunId: "tee-search-schedule-starting:reservation-1",
+        checkStatus: "QUEUED"
+      }),
+      startWorkflow: vi.fn(),
+      attachWorkflowRun: vi.fn()
+    };
+
+    await expect(
+      consumeSearchScheduleMessage(message, dependencies)
+    ).resolves.toEqual({ outcome: "start_reserved" });
+    expect(dependencies.startWorkflow).not.toHaveBeenCalled();
+    expect(dependencies.attachWorkflowRun).not.toHaveBeenCalled();
+  });
+
+  it("retains the reservation when Workflow start throws ambiguously", async () => {
+    const startError = new Error("workflow unavailable");
+    let workflowRunId: string | null = null;
+    const dependencies = {
+      getScheduleState: vi.fn().mockResolvedValue({
+        workflowRunId: null,
+        checkStatus: "QUEUED"
+      }),
+      startWorkflow: vi.fn().mockRejectedValue(startError),
+      attachWorkflowRun: vi.fn(
+        async (
+          _searchId: string,
+          _scheduleVersion: number,
+          nextWorkflowRunId: string,
+          expectedWorkflowRunId: string | null
+        ) => {
+          if (workflowRunId !== expectedWorkflowRunId) return { count: 0 };
+          workflowRunId = nextWorkflowRunId;
+          return { count: 1 };
+        }
+      )
+    };
+
+    await expect(
+      consumeSearchScheduleMessage(message, dependencies)
+    ).rejects.toBe(startError);
+    expect(workflowRunId).toMatch(/^tee-search-schedule-starting:/);
+    expect(dependencies.attachWorkflowRun).toHaveBeenCalledTimes(1);
+  });
+
   it("replaces the prior run when starting the next workflow failed", async () => {
     const dependencies = {
       getScheduleState: vi
@@ -148,11 +237,11 @@ describe("search schedule recovery queue", () => {
       outcome: "started"
     });
     expect(dependencies.startWorkflow).toHaveBeenCalledWith("search-1", 7);
-    expect(dependencies.attachWorkflowRun).toHaveBeenCalledWith(
+    expect(dependencies.attachWorkflowRun).toHaveBeenLastCalledWith(
       "search-1",
       7,
       "replacement-run",
-      "completed-prior-run"
+      expect.stringMatching(/^tee-search-schedule-starting:/)
     );
   });
 
@@ -171,11 +260,11 @@ describe("search schedule recovery queue", () => {
       ["search-1", 7],
       { deploymentId: "latest" }
     );
-    expect(mocks.attachSearchWorkflowRun).toHaveBeenCalledWith(
+    expect(mocks.attachSearchWorkflowRun).toHaveBeenLastCalledWith(
       "search-1",
       7,
       "new-run",
-      null
+      expect.stringMatching(/^tee-search-schedule-starting:/)
     );
   });
 
@@ -183,7 +272,10 @@ describe("search schedule recovery queue", () => {
     const dependencies = {
       getScheduleState: vi.fn().mockResolvedValue({ workflowRunId: null }),
       startWorkflow: vi.fn().mockResolvedValue({ runId: "new-run" }),
-      attachWorkflowRun: vi.fn().mockResolvedValue({ count: 0 })
+      attachWorkflowRun: vi
+        .fn()
+        .mockResolvedValueOnce({ count: 1 })
+        .mockResolvedValueOnce({ count: 0 })
     };
 
     await expect(consumeSearchScheduleMessage(message, dependencies)).resolves.toEqual({

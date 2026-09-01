@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  applyRecoveredOfficialWebsiteToCourse,
   attachSearchWorkflowRun,
   classifyAutomationRunKind,
   claimScheduledSearchCheck,
   closeHourlyImprovementRun,
+  commitCurrentCourseTeeTimeMatches,
   completeExpiredSyntheticSearch,
   completeScheduledSearchCheck,
   failScheduledSearchCheck,
@@ -19,32 +21,35 @@ import {
   parseAutomationRunAudit,
   listSearchesNeedingScheduleRecovery,
   queueSearchCheck,
+  recordAndApplyBrowserDiscoveryToCourse,
+  recordBrowserDiscovery,
   recordCourseBookingWindowEvidence,
   recordCoursePhysicalLayoutEvidence,
   recordCourseProbeIfChanged,
   recordTeeTimeMatch,
-  updateHourlyImprovementRunState
+  updateHourlyImprovementRunState,
 } from "./db-service";
 import {
   appendAutomationPlaybookEvent,
-  type AutomationPlaybookEventInput
+  type AutomationPlaybookEventInput,
 } from "./course-monitoring-playbook";
 import {
   ACTIVE_OWNED_COURSE_SUPPORT_BROWSER_RESULTS,
   persistOwnedCourseSupportBrowserPlaybookStages,
   type CourseSupportBrowserPersistenceFence,
-  type CourseSupportBrowserStageBatch
+  type CourseSupportBrowserStageBatch,
 } from "./course-support-browser-stages";
 import {
   buildHourlyImprovementRunProvenance,
   buildImprovementCheckpoints,
-  type HourlyImprovementRunRecord
+  type HourlyImprovementRunRecord,
 } from "./improvement";
 
 const deliveryOutboxMocks = vi.hoisted(() => ({
   lockSearchForAlertMutation: vi.fn(),
   lockSearchForEmailReconciliation: vi.fn(),
-  suppressSearchEmailDeliveriesForMatches: vi.fn()
+  reactivateTerminalUnresolvedMatchDeliveries: vi.fn(),
+  suppressSearchEmailDeliveriesForMatches: vi.fn(),
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -53,47 +58,67 @@ vi.mock("@/lib/prisma", () => ({
       findMany: vi.fn(),
       findUnique: vi.fn(),
       upsert: vi.fn(),
-      updateMany: vi.fn()
+      updateMany: vi.fn(),
     },
     courseProbe: {
       create: vi.fn(),
-      findFirst: vi.fn()
+      findFirst: vi.fn(),
     },
     automationRun: {
-      updateMany: vi.fn()
+      updateMany: vi.fn(),
     },
     teeSearch: {
       findFirst: vi.fn(),
       findMany: vi.fn(),
       findUnique: vi.fn(),
-      updateMany: vi.fn()
+      updateMany: vi.fn(),
     },
     course: {
       findMany: vi.fn(),
       findUnique: vi.fn(),
-      update: vi.fn()
+      update: vi.fn(),
+      updateMany: vi.fn(),
+    },
+    courseBookingFact: {
+      findUnique: vi.fn(),
+      upsert: vi.fn(),
+    },
+    courseAutomationDiscovery: {
+      create: vi.fn(),
     },
     courseSupportIncident: {
       findUnique: vi.fn(),
-      updateMany: vi.fn()
+      updateMany: vi.fn(),
     },
     courseSupportBatch: {
-      findFirst: vi.fn()
+      findFirst: vi.fn(),
+      updateMany: vi.fn(),
+    },
+    courseSupportBatchIncident: {
+      findUnique: vi.fn(),
     },
     courseMonitoringStatus: {
       create: vi.fn(),
       findUnique: vi.fn(),
-      updateMany: vi.fn()
+      updateMany: vi.fn(),
     },
     courseMonitoringEvent: {
       create: vi.fn(),
       findFirst: vi.fn(),
-      findUnique: vi.fn()
+      findMany: vi.fn(),
+      findUnique: vi.fn(),
+    },
+    localReaderJob: {
+      findUnique: vi.fn(),
+      updateMany: vi.fn(),
+    },
+    providerRequestLease: {
+      deleteMany: vi.fn(),
     },
     $queryRaw: vi.fn(),
     $queryRawUnsafe: vi.fn(),
-    $transaction: vi.fn()
-  }
+    $transaction: vi.fn(),
+  },
 }));
 vi.mock("@/lib/email/search-delivery-outbox", () => deliveryOutboxMocks);
 
@@ -101,11 +126,16 @@ import { prisma } from "@/lib/prisma";
 
 const mockedPrisma = vi.mocked(prisma, { deep: true });
 
+beforeEach(() => {
+  mockedPrisma.teeSearch.updateMany.mockResolvedValue({ count: 0 } as never);
+  mockedPrisma.teeTimeMatch.updateMany.mockResolvedValue({ count: 0 } as never);
+});
+
 const browserRuntimeVersion = "a".repeat(40);
 const browserDeployedAt = new Date("2026-07-21T12:00:00.000Z");
 
 function ownedBrowserPersistenceFence(
-  overrides: Partial<CourseSupportBrowserPersistenceFence> = {}
+  overrides: Partial<CourseSupportBrowserPersistenceFence> = {},
 ): CourseSupportBrowserPersistenceFence {
   return {
     batchId: "batch-browser",
@@ -118,7 +148,7 @@ function ownedBrowserPersistenceFence(
     courseId: "course-blocked-tooling",
     cycle: 1,
     stage: "RENDERED_BROWSER_DISCOVERY",
-    ...overrides
+    ...overrides,
   };
 }
 
@@ -131,7 +161,7 @@ function browserPlaybookLedger(includeTerminalReader: boolean) {
       readPath: "OFFICIAL_IDENTITY",
       evidenceKind: "OFFICIAL_SOURCE",
       failureFingerprint: "PLAYBOOK:OFFICIAL_IDENTITY:COMPLETED",
-      runtimeVersion: browserRuntimeVersion
+      runtimeVersion: browserRuntimeVersion,
     },
     {
       cycle: 1,
@@ -141,7 +171,7 @@ function browserPlaybookLedger(includeTerminalReader: boolean) {
       evidenceKind: "TOOLING",
       skipReason: "NO_RUNNABLE_ADAPTER",
       failureFingerprint: "PLAYBOOK:TYPED_ADAPTER:NO_RUNNABLE_ADAPTER",
-      runtimeVersion: browserRuntimeVersion
+      runtimeVersion: browserRuntimeVersion,
     },
     {
       cycle: 1,
@@ -150,7 +180,7 @@ function browserPlaybookLedger(includeTerminalReader: boolean) {
       readPath: "OFFICIAL_HTTP",
       evidenceKind: "OFFICIAL_SOURCE",
       failureFingerprint: "PLAYBOOK:OFFICIAL_HTTP_DISCOVERY:COMPLETED",
-      runtimeVersion: browserRuntimeVersion
+      runtimeVersion: browserRuntimeVersion,
     },
     {
       cycle: 1,
@@ -160,7 +190,7 @@ function browserPlaybookLedger(includeTerminalReader: boolean) {
       evidenceKind: "TOOLING",
       skipReason: "NO_RUNNABLE_ADAPTER",
       failureFingerprint: "PLAYBOOK:HTTP_ADAPTER_RETRY:NO_RUNNABLE_ADAPTER",
-      runtimeVersion: browserRuntimeVersion
+      runtimeVersion: browserRuntimeVersion,
     },
     ...(includeTerminalReader
       ? ([
@@ -170,9 +200,8 @@ function browserPlaybookLedger(includeTerminalReader: boolean) {
             transition: "COMPLETED",
             readPath: "RENDERED_BROWSER",
             evidenceKind: "RENDERED_PAGE",
-            failureFingerprint:
-              "PLAYBOOK:RENDERED_BROWSER_DISCOVERY:COMPLETED",
-            runtimeVersion: browserRuntimeVersion
+            failureFingerprint: "PLAYBOOK:RENDERED_BROWSER_DISCOVERY:COMPLETED",
+            runtimeVersion: browserRuntimeVersion,
           },
           {
             cycle: 1,
@@ -183,7 +212,7 @@ function browserPlaybookLedger(includeTerminalReader: boolean) {
             skipReason: "NO_RUNNABLE_ADAPTER",
             failureFingerprint:
               "PLAYBOOK:BROWSER_ADAPTER_RETRY:NO_RUNNABLE_ADAPTER",
-            runtimeVersion: browserRuntimeVersion
+            runtimeVersion: browserRuntimeVersion,
           },
           {
             cycle: 1,
@@ -193,14 +222,14 @@ function browserPlaybookLedger(includeTerminalReader: boolean) {
             evidenceKind: "LOCAL_READER_RESULT",
             failureClass: "SCHEMA",
             failureFingerprint: "PLAYBOOK:LOCAL_READER:SCHEMA",
-            runtimeVersion: "reader-v1"
-          }
+            runtimeVersion: "reader-v1",
+          },
         ] satisfies AutomationPlaybookEventInput[])
-      : [])
+      : []),
   ];
   return events.reduce<ReturnType<typeof appendAutomationPlaybookEvent> | null>(
     (ledger, event) => appendAutomationPlaybookEvent(ledger, event),
-    null
+    null,
   );
 }
 
@@ -227,16 +256,16 @@ function localReaderOnlyBrowserProbeCourse(attemptLedger: unknown) {
       occurrenceCount: 1,
       lastSeenAt: new Date("2026-07-21T12:00:00.000Z"),
       cycle: 1,
-      attemptLedger
+      attemptLedger,
     },
     probes: [],
-    preferences: []
+    preferences: [],
   };
 }
 
 function blockedToolingBrowserProbeCourse(
   failureClass: "AUTH" | "CHALLENGE",
-  overrides: Record<string, unknown> = {}
+  overrides: Record<string, unknown> = {},
 ) {
   return {
     id: "course-blocked-tooling",
@@ -271,16 +300,16 @@ function blockedToolingBrowserProbeCourse(
       lastSeenAt: new Date("2026-07-21T12:00:00.000Z"),
       cycle: 1,
       confirmedAt: new Date("2026-07-21T11:00:00.000Z"),
-      attemptLedger: browserPlaybookLedger(false)
+      attemptLedger: browserPlaybookLedger(false),
     },
     probes: [],
     preferences: [],
-    ...overrides
+    ...overrides,
   };
 }
 
 function fetchFailedMissingMetadataBrowserProbeCourse(
-  overrides: Record<string, unknown> = {}
+  overrides: Record<string, unknown> = {},
 ) {
   const base = blockedToolingBrowserProbeCourse("AUTH");
   return {
@@ -288,9 +317,9 @@ function fetchFailedMissingMetadataBrowserProbeCourse(
     supportIncident: {
       ...base.supportIncident,
       kind: "FETCH_FAILED",
-      failureClass: "MISSING_METADATA"
+      failureClass: "MISSING_METADATA",
     },
-    ...overrides
+    ...overrides,
   };
 }
 
@@ -298,37 +327,37 @@ describe("automation query payloads", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockedPrisma.courseSupportBatch.findFirst.mockResolvedValue({
-      id: "current-owned-batch"
+      id: "current-owned-batch",
     } as never);
   });
 
   it("selects an exact reader-only course for independent browser confirmation", async () => {
     mockedPrisma.course.findMany.mockResolvedValue([
-      localReaderOnlyBrowserProbeCourse(browserPlaybookLedger(true))
+      localReaderOnlyBrowserProbeCourse(browserPlaybookLedger(true)),
     ] as never);
 
     await expect(
-      listBrowserProbeTargets(1, undefined, "course-reader-only")
+      listBrowserProbeTargets(1, undefined, "course-reader-only"),
     ).resolves.toEqual([
       expect.objectContaining({
         searchId: undefined,
-        course: expect.objectContaining({ id: "course-reader-only" })
-      })
+        course: expect.objectContaining({ id: "course-reader-only" }),
+      }),
     ]);
     expect(mockedPrisma.course.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({ id: "course-reader-only" })
-      })
+        where: expect.objectContaining({ id: "course-reader-only" }),
+      }),
     );
   });
 
   it("still excludes an exact reader-only course from rendered browser discovery", async () => {
     mockedPrisma.course.findMany.mockResolvedValue([
-      localReaderOnlyBrowserProbeCourse(browserPlaybookLedger(false))
+      localReaderOnlyBrowserProbeCourse(browserPlaybookLedger(false)),
     ] as never);
 
     await expect(
-      listBrowserProbeTargets(1, undefined, "course-reader-only")
+      listBrowserProbeTargets(1, undefined, "course-reader-only"),
     ).resolves.toEqual([]);
   });
 
@@ -336,7 +365,7 @@ describe("automation query payloads", () => {
     "selects an owned BLOCKED_TOOLING/%s course for its exact rendered stage",
     async (failureClass) => {
       mockedPrisma.course.findMany.mockResolvedValue([
-        blockedToolingBrowserProbeCourse(failureClass)
+        blockedToolingBrowserProbeCourse(failureClass),
       ] as never);
 
       await expect(
@@ -344,13 +373,13 @@ describe("automation query payloads", () => {
           1,
           undefined,
           "course-blocked-tooling",
-          ownedBrowserPersistenceFence()
-        )
+          ownedBrowserPersistenceFence(),
+        ),
       ).resolves.toEqual([
         expect.objectContaining({
           course: expect.objectContaining({ id: "course-blocked-tooling" }),
-          probeUrl: "https://course.example/tee-times"
-        })
+          probeUrl: "https://course.example/tee-times",
+        }),
       ]);
       expect(mockedPrisma.course.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -359,11 +388,11 @@ describe("automation query payloads", () => {
               select: expect.objectContaining({
                 id: true,
                 status: true,
-                activeBatchId: true
-              })
-            }
-          })
-        })
+                activeBatchId: true,
+              }),
+            },
+          }),
+        }),
       );
       expect(mockedPrisma.courseSupportBatch.findFirst).toHaveBeenCalledWith({
         where: {
@@ -380,32 +409,32 @@ describe("automation query payloads", () => {
               courseId: "course-blocked-tooling",
               cycle: 1,
               result: {
-                in: [...ACTIVE_OWNED_COURSE_SUPPORT_BROWSER_RESULTS]
-              }
-            }
-          }
+                in: [...ACTIVE_OWNED_COURSE_SUPPORT_BROWSER_RESULTS],
+              },
+            },
+          },
         },
-        select: { id: true }
+        select: { id: true },
       });
-    }
+    },
   );
 
   it.each(["AUTH", "CHALLENGE"] as const)(
     "keeps unowned BLOCKED_TOOLING/%s excluded from exact browser selection",
     async (failureClass) => {
       mockedPrisma.course.findMany.mockResolvedValue([
-        blockedToolingBrowserProbeCourse(failureClass)
+        blockedToolingBrowserProbeCourse(failureClass),
       ] as never);
 
       await expect(
-        listBrowserProbeTargets(1, undefined, "course-blocked-tooling")
+        listBrowserProbeTargets(1, undefined, "course-blocked-tooling"),
       ).resolves.toEqual([]);
-    }
+    },
   );
 
   it("selects an owned FETCH_FAILED/MISSING_METADATA course at its exact rendered stage", async () => {
     mockedPrisma.course.findMany.mockResolvedValue([
-      fetchFailedMissingMetadataBrowserProbeCourse()
+      fetchFailedMissingMetadataBrowserProbeCourse(),
     ] as never);
 
     await expect(
@@ -413,30 +442,30 @@ describe("automation query payloads", () => {
         1,
         undefined,
         "course-blocked-tooling",
-        ownedBrowserPersistenceFence()
-      )
+        ownedBrowserPersistenceFence(),
+      ),
     ).resolves.toEqual([
       expect.objectContaining({
         course: expect.objectContaining({ id: "course-blocked-tooling" }),
-        probeUrl: "https://course.example/tee-times"
-      })
+        probeUrl: "https://course.example/tee-times",
+      }),
     ]);
   });
 
   it("keeps an unowned FETCH_FAILED/MISSING_METADATA course out of exact browser selection", async () => {
     mockedPrisma.course.findMany.mockResolvedValue([
-      fetchFailedMissingMetadataBrowserProbeCourse()
+      fetchFailedMissingMetadataBrowserProbeCourse(),
     ] as never);
 
     await expect(
-      listBrowserProbeTargets(1, undefined, "course-blocked-tooling")
+      listBrowserProbeTargets(1, undefined, "course-blocked-tooling"),
     ).resolves.toEqual([]);
     expect(mockedPrisma.courseSupportBatch.findFirst).not.toHaveBeenCalled();
   });
 
   it("keeps FETCH_FAILED/MISSING_METADATA excluded when its owner fence is stale", async () => {
     mockedPrisma.course.findMany.mockResolvedValue([
-      fetchFailedMissingMetadataBrowserProbeCourse()
+      fetchFailedMissingMetadataBrowserProbeCourse(),
     ] as never);
     mockedPrisma.courseSupportBatch.findFirst.mockResolvedValue(null);
 
@@ -445,8 +474,8 @@ describe("automation query payloads", () => {
         1,
         undefined,
         "course-blocked-tooling",
-        ownedBrowserPersistenceFence()
-      )
+        ownedBrowserPersistenceFence(),
+      ),
     ).resolves.toEqual([]);
   });
 
@@ -456,14 +485,14 @@ describe("automation query payloads", () => {
       "an unsafe source",
       {
         website: "http://127.0.0.1/private",
-        detectedBookingUrl: "http://127.0.0.1/private"
-      }
-    ]
+        detectedBookingUrl: "http://127.0.0.1/private",
+      },
+    ],
   ])(
     "does not let an exact owner fence admit FETCH_FAILED/MISSING_METADATA with %s",
     async (_label, overrides) => {
       mockedPrisma.course.findMany.mockResolvedValue([
-        fetchFailedMissingMetadataBrowserProbeCourse(overrides)
+        fetchFailedMissingMetadataBrowserProbeCourse(overrides),
       ] as never);
       mockedPrisma.courseMonitoringEvent.findFirst.mockResolvedValue(null);
 
@@ -472,10 +501,10 @@ describe("automation query payloads", () => {
           1,
           undefined,
           "course-blocked-tooling",
-          ownedBrowserPersistenceFence()
-        )
+          ownedBrowserPersistenceFence(),
+        ),
       ).resolves.toEqual([]);
-    }
+    },
   );
 
   it.each([
@@ -484,51 +513,48 @@ describe("automation query payloads", () => {
     ["cycle", { cycle: 2 }, {}],
     ["active batch", {}, { activeBatchId: "batch-other" }],
     ["incident status", {}, { status: "NEEDS_HUMAN" }],
-    ["stage", { stage: "INDEPENDENT_CONFIRMATION" }, {}]
+    ["stage", { stage: "INDEPENDENT_CONFIRMATION" }, {}],
   ] as const)(
     "excludes an owned blocked-tooling target when the %s fence is stale",
     async (_field, fenceOverrides, incidentOverrides) => {
       const course = blockedToolingBrowserProbeCourse("AUTH");
       course.supportIncident = {
         ...course.supportIncident,
-        ...incidentOverrides
+        ...incidentOverrides,
       };
       mockedPrisma.course.findMany.mockResolvedValue([course] as never);
       const fence = ownedBrowserPersistenceFence(
-        fenceOverrides as Partial<CourseSupportBrowserPersistenceFence>
+        fenceOverrides as Partial<CourseSupportBrowserPersistenceFence>,
       );
 
       await expect(
-        listBrowserProbeTargets(1, undefined, fence.courseId, fence)
+        listBrowserProbeTargets(1, undefined, fence.courseId, fence),
       ).resolves.toEqual([]);
-    }
+    },
   );
 
   it.each([
     ["lease", { leaseToken: "lease-stale" }],
     ["owner", { ownerThreadId: "owner-stale" }],
-    [
-      "release",
-      { releaseSha: "b".repeat(40), runtimeVersion: "b".repeat(40) }
-    ],
+    ["release", { releaseSha: "b".repeat(40), runtimeVersion: "b".repeat(40) }],
     ["deployment", { deployedAt: new Date("2026-07-21T12:01:00.000Z") }],
     ["inactive status", {}],
     ["expired lease", {}],
     ["missing membership", {}],
-    ["completed member", {}]
+    ["completed member", {}],
   ] as const)(
     "excludes an owned target when current batch %s proof is absent",
     async (_field, fenceOverrides) => {
       mockedPrisma.course.findMany.mockResolvedValue([
-        blockedToolingBrowserProbeCourse("AUTH")
+        blockedToolingBrowserProbeCourse("AUTH"),
       ] as never);
       mockedPrisma.courseSupportBatch.findFirst.mockResolvedValue(null);
       const fence = ownedBrowserPersistenceFence(
-        fenceOverrides as Partial<CourseSupportBrowserPersistenceFence>
+        fenceOverrides as Partial<CourseSupportBrowserPersistenceFence>,
       );
 
       await expect(
-        listBrowserProbeTargets(1, undefined, fence.courseId, fence)
+        listBrowserProbeTargets(1, undefined, fence.courseId, fence),
       ).resolves.toEqual([]);
       expect(mockedPrisma.courseSupportBatch.findFirst).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -545,62 +571,62 @@ describe("automation query payloads", () => {
                 courseId: fence.courseId,
                 cycle: fence.cycle,
                 result: {
-                  in: [...ACTIVE_OWNED_COURSE_SUPPORT_BROWSER_RESULTS]
-                }
-              })
-            }
-          })
-        })
+                  in: [...ACTIVE_OWNED_COURSE_SUPPORT_BROWSER_RESULTS],
+                },
+              }),
+            },
+          }),
+        }),
       );
-    }
+    },
   );
 
   it("rejects a persistence fence whose runtime differs from its release", async () => {
     mockedPrisma.course.findMany.mockResolvedValue([
-      blockedToolingBrowserProbeCourse("AUTH")
+      blockedToolingBrowserProbeCourse("AUTH"),
     ] as never);
     const fence = ownedBrowserPersistenceFence({
-      runtimeVersion: "b".repeat(40)
+      runtimeVersion: "b".repeat(40),
     });
 
     await expect(
-      listBrowserProbeTargets(1, undefined, fence.courseId, fence)
+      listBrowserProbeTargets(1, undefined, fence.courseId, fence),
     ).resolves.toEqual([]);
     expect(mockedPrisma.courseSupportBatch.findFirst).not.toHaveBeenCalled();
   });
 
   it("keeps LOCAL_READER_ONLY rendered discovery excluded under a current fence", async () => {
     const course = localReaderOnlyBrowserProbeCourse(
-      browserPlaybookLedger(false)
+      browserPlaybookLedger(false),
     );
     course.supportIncident = {
       ...course.supportIncident,
       id: "incident-reader-only",
       status: "AUTO_INVESTIGATING",
-      activeBatchId: "batch-browser"
+      activeBatchId: "batch-browser",
     } as typeof course.supportIncident;
     mockedPrisma.course.findMany.mockResolvedValue([course] as never);
     const fence = ownedBrowserPersistenceFence({
       courseId: course.id,
-      incidentId: "incident-reader-only"
+      incidentId: "incident-reader-only",
     });
 
     await expect(
-      listBrowserProbeTargets(1, undefined, course.id, fence)
+      listBrowserProbeTargets(1, undefined, course.id, fence),
     ).resolves.toEqual([]);
   });
 
   it.each([
     [null, null],
-    ["http://127.0.0.1/private", "http://127.0.0.1/private"]
+    ["http://127.0.0.1/private", "http://127.0.0.1/private"],
   ])(
     "rejects an owned blocked-tooling target without a safe public probe URL",
     async (website, detectedBookingUrl) => {
       mockedPrisma.course.findMany.mockResolvedValue([
         blockedToolingBrowserProbeCourse("AUTH", {
           website,
-          detectedBookingUrl
-        })
+          detectedBookingUrl,
+        }),
       ] as never);
       mockedPrisma.courseMonitoringEvent.findFirst.mockResolvedValue(null);
 
@@ -609,10 +635,10 @@ describe("automation query payloads", () => {
           1,
           undefined,
           "course-blocked-tooling",
-          ownedBrowserPersistenceFence()
-        )
+          ownedBrowserPersistenceFence(),
+        ),
       ).resolves.toEqual([]);
-    }
+    },
   );
 
   it("runs every exact target when blocked-tooling AUTH entries precede fetch-failed AUTH", async () => {
@@ -625,8 +651,8 @@ describe("automation query payloads", () => {
           ...blocked.supportIncident,
           id: `mixed-incident-${index + 1}`,
           activeBatchId: "batch-1",
-          ...(index === 2 ? { kind: "FETCH_FAILED" } : {})
-        }
+          ...(index === 2 ? { kind: "FETCH_FAILED" } : {}),
+        },
       };
     });
     mockedPrisma.course.findMany.mockImplementation(async (query) => {
@@ -645,9 +671,9 @@ describe("automation query payloads", () => {
           cycle: 1,
           status: "AUTO_INVESTIGATING",
           activeBatchId: "batch-1",
-          attemptLedger: course.supportIncident.attemptLedger
-        }
-      }))
+          attemptLedger: course.supportIncident.attemptLedger,
+        },
+      })),
     };
     const runBrowserProbe = vi.fn(
       async (input: {
@@ -658,11 +684,11 @@ describe("automation query payloads", () => {
           1,
           undefined,
           input.courseId,
-          input.persistenceFence
+          input.persistenceFence,
         );
         expect(targets).toHaveLength(1);
         return { persistedCount: 1 };
-      }
+      },
     );
 
     await expect(
@@ -673,24 +699,22 @@ describe("automation query payloads", () => {
           ownerThreadId: "thread-1",
           requestedReleaseSha: browserRuntimeVersion,
           requestedDeployedAt: browserDeployedAt,
-          now: new Date("2026-07-21T12:05:00.000Z")
+          now: new Date("2026-07-21T12:05:00.000Z"),
         },
         {
           loadBatch: vi.fn().mockResolvedValue(batch),
-          runBrowserProbe
-        }
-      )
+          runBrowserProbe,
+        },
+      ),
     ).resolves.toMatchObject({
       eligibleCount: 3,
       persistedCount: 3,
-      renderedDiscoveryCount: 3
+      renderedDiscoveryCount: 3,
     });
     expect(runBrowserProbe).toHaveBeenCalledTimes(3);
-    expect(runBrowserProbe.mock.calls.map(([input]) => input.courseId)).toEqual([
-      "mixed-course-1",
-      "mixed-course-2",
-      "mixed-course-3"
-    ]);
+    expect(runBrowserProbe.mock.calls.map(([input]) => input.courseId)).toEqual(
+      ["mixed-course-1", "mixed-course-2", "mixed-course-3"],
+    );
   });
 
   it("loads an active check without historical matches or unused user fields", async () => {
@@ -703,12 +727,12 @@ describe("automation query payloads", () => {
         include: expect.objectContaining({
           user: {
             select: {
-              email: true
-            }
+              email: true,
+            },
           },
-          preferences: expect.any(Object)
-        })
-      })
+          preferences: expect.any(Object),
+        }),
+      }),
     );
     const query = mockedPrisma.teeSearch.findFirst.mock.calls[0]?.[0];
     expect(query?.include).not.toHaveProperty("matches");
@@ -723,18 +747,20 @@ describe("automation query payloads", () => {
       date: new Date("2026-07-20T00:00:00.000Z"),
       endTime: "23:00",
       userTimeZone: "America/New_York",
-      preferences: [{ course: { timeZone: "America/New_York" } }]
+      preferences: [{ course: { timeZone: "America/New_York" } }],
     };
     mockedPrisma.teeSearch.findFirst.mockResolvedValue(search as never);
 
     try {
-      await expect(getActiveSearchForAutomation(search.id)).resolves.toBe(search);
+      await expect(getActiveSearchForAutomation(search.id)).resolves.toBe(
+        search,
+      );
       expect(mockedPrisma.teeSearch.findFirst).toHaveBeenCalledWith(
         expect.objectContaining({
           where: expect.objectContaining({
-            date: { gte: new Date("2026-07-20T00:00:00.000Z") }
-          })
-        })
+            date: { gte: new Date("2026-07-20T00:00:00.000Z") },
+          }),
+        }),
       );
     } finally {
       vi.useRealTimers();
@@ -750,11 +776,13 @@ describe("automation query payloads", () => {
       date: new Date("2026-07-20T00:00:00.000Z"),
       endTime: "23:00",
       userTimeZone: "America/New_York",
-      preferences: [{ course: { timeZone: "America/New_York" } }]
+      preferences: [{ course: { timeZone: "America/New_York" } }],
     } as never);
 
     try {
-      await expect(getActiveSearchForAutomation("search-ended")).resolves.toBeNull();
+      await expect(
+        getActiveSearchForAutomation("search-ended"),
+      ).resolves.toBeNull();
     } finally {
       vi.useRealTimers();
     }
@@ -771,8 +799,8 @@ describe("automation query payloads", () => {
           id: { in: ["match-1", "match-2"] },
           teeSearch: {
             status: "ACTIVE",
-            id: "search-1"
-          }
+            id: "search-1",
+          },
         }),
         select: expect.objectContaining({
           id: true,
@@ -781,11 +809,11 @@ describe("automation query payloads", () => {
               id: true,
               name: true,
               address: true,
-              timeZone: true
-            }
-          }
-        })
-      })
+              timeZone: true,
+            },
+          },
+        }),
+      }),
     );
   });
 
@@ -815,10 +843,10 @@ describe("search check row lease", () => {
         where: expect.objectContaining({
           id: "search-1",
           scheduleVersion: 4,
-          status: "ACTIVE"
+          status: "ACTIVE",
         }),
-        data: { recheckRequestedAt: expect.any(Date) }
-      })
+        data: { recheckRequestedAt: expect.any(Date) },
+      }),
     );
   });
 
@@ -831,7 +859,7 @@ describe("search check row lease", () => {
       searchId: "search-1",
       scheduleVersion: 4,
       token: expect.any(String),
-      expiresAt: expect.any(Date)
+      expiresAt: expect.any(Date),
     });
     expect(lease?.token).not.toContain("search-1");
   });
@@ -839,7 +867,7 @@ describe("search check row lease", () => {
   it("lets Workflow completion honor a future durable delivery retry", async () => {
     const retryAt = new Date("2026-07-15T15:01:00.000Z");
     mockedPrisma.$queryRaw.mockResolvedValue([
-      { recheckRequested: true, nextCheckAt: retryAt }
+      { recheckRequested: true, nextCheckAt: retryAt },
     ] as never);
 
     await expect(
@@ -848,8 +876,8 @@ describe("search check row lease", () => {
         scheduleVersion: 4,
         leaseToken: "lease-token",
         outcome: "email retry queued",
-        nextCheckAt: new Date("2026-07-15T17:00:00.000Z")
-      })
+        nextCheckAt: new Date("2026-07-15T17:00:00.000Z"),
+      }),
     ).resolves.toEqual({ recheckRequested: true, nextCheckAt: retryAt });
     const query = mockedPrisma.$queryRaw.mock.calls[0]?.[0] as {
       strings?: string[];
@@ -860,35 +888,37 @@ describe("search check row lease", () => {
 
   it("terminalizes an expired synthetic search and its pending matches", async () => {
     mockedPrisma.$transaction.mockImplementation(async (callback) =>
-      callback(mockedPrisma as never)
+      callback(mockedPrisma as never),
     );
     deliveryOutboxMocks.lockSearchForAlertMutation.mockResolvedValue({
       id: "search-1",
       status: "ACTIVE",
-      checkLeaseToken: "lease-token"
+      checkLeaseToken: "lease-token",
     });
     mockedPrisma.teeSearch.updateMany.mockResolvedValue({ count: 1 } as never);
-    mockedPrisma.teeTimeMatch.updateMany.mockResolvedValue({ count: 2 } as never);
+    mockedPrisma.teeTimeMatch.updateMany.mockResolvedValue({
+      count: 2,
+    } as never);
 
     await expect(
       completeExpiredSyntheticSearch({
         searchId: "search-1",
         scheduleVersion: 4,
         leaseToken: "lease-token",
-        outcome: "synthetic multi-cycle test lifetime ended"
-      })
+        outcome: "synthetic multi-cycle test lifetime ended",
+      }),
     ).resolves.toEqual({ completedAt: expect.any(Date) });
 
     expect(deliveryOutboxMocks.lockSearchForAlertMutation).toHaveBeenCalledWith(
       mockedPrisma,
-      { searchId: "search-1" }
+      { searchId: "search-1" },
     );
     expect(mockedPrisma.teeSearch.updateMany).toHaveBeenCalledWith({
       where: {
         id: "search-1",
         scheduleVersion: 4,
         checkLeaseToken: "lease-token",
-        status: "ACTIVE"
+        status: "ACTIVE",
       },
       data: expect.objectContaining({
         status: "COMPLETED",
@@ -897,24 +927,26 @@ describe("search check row lease", () => {
         checkStatus: "STOPPED",
         nextCheckAt: null,
         workflowRunId: null,
-        lastCheckOutcome: "synthetic multi-cycle test lifetime ended"
-      })
+        lastCheckOutcome: "synthetic multi-cycle test lifetime ended",
+      }),
     });
     expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenCalledWith({
       where: {
         teeSearchId: "search-1",
-        alertStatus: "PENDING"
+        alertStatus: "PENDING",
       },
       data: {
         alertStatus: "SUPPRESSED",
-        sentAt: null
-      }
+        sentAt: null,
+      },
     });
   });
 
   it("keeps the earliest durable delivery retry when a scheduled check fails", async () => {
     const retryAt = new Date("2026-07-15T15:01:00.000Z");
-    mockedPrisma.$queryRaw.mockResolvedValue([{ nextCheckAt: retryAt }] as never);
+    mockedPrisma.$queryRaw.mockResolvedValue([
+      { nextCheckAt: retryAt },
+    ] as never);
 
     await expect(
       failScheduledSearchCheck({
@@ -922,8 +954,8 @@ describe("search check row lease", () => {
         scheduleVersion: 4,
         leaseToken: "lease-token",
         message: "email delivery failed",
-        nextCheckAt: new Date("2026-07-15T15:05:00.000Z")
-      })
+        nextCheckAt: new Date("2026-07-15T15:05:00.000Z"),
+      }),
     ).resolves.toEqual({ count: 1, nextCheckAt: retryAt });
     const query = mockedPrisma.$queryRaw.mock.calls[0]?.[0] as {
       strings?: string[];
@@ -944,11 +976,11 @@ describe("search check row lease", () => {
         id: "search-1",
         scheduleVersion: 4,
         status: "ACTIVE",
-        workflowRunId: "prior-run"
+        workflowRunId: "prior-run",
       },
       data: {
-        workflowRunId: "run-1"
-      }
+        workflowRunId: "run-1",
+      },
     });
   });
 });
@@ -969,17 +1001,19 @@ describe("remediation schedule dispatch", () => {
           remediationDispatchVersion: 9,
           workflowRunId: "newer-run",
           checkStatus: "WAITING",
-          updatedAt: new Date()
+          updatedAt: new Date(),
         }),
-        updateMany: vi.fn()
-      }
+        updateMany: vi.fn(),
+      },
     };
     mockedPrisma.$transaction.mockImplementationOnce(async (worker) =>
-      (worker as (client: typeof tx) => Promise<unknown>)(tx)
+      (worker as (client: typeof tx) => Promise<unknown>)(tx),
     );
 
-    await expect(queueSearchCheck("search-1", "dispatch-1")).resolves.toMatchObject({
-      scheduleVersion: 9
+    await expect(
+      queueSearchCheck("search-1", "dispatch-1"),
+    ).resolves.toMatchObject({
+      scheduleVersion: 9,
     });
     expect(tx.teeSearch.updateMany).not.toHaveBeenCalled();
   });
@@ -993,7 +1027,7 @@ describe("remediation schedule dispatch", () => {
       remediationDispatchVersion: null,
       workflowRunId: null,
       checkStatus: "WAITING",
-      updatedAt: new Date()
+      updatedAt: new Date(),
     };
     const tx = {
       teeSearch: {
@@ -1001,24 +1035,26 @@ describe("remediation schedule dispatch", () => {
           .fn()
           .mockResolvedValueOnce(current)
           .mockResolvedValueOnce({ ...current, scheduleVersion: 9 }),
-        updateMany: vi.fn().mockResolvedValue({ count: 1 })
-      }
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
     };
     mockedPrisma.$transaction.mockImplementationOnce(async (worker) =>
-      (worker as (client: typeof tx) => Promise<unknown>)(tx)
+      (worker as (client: typeof tx) => Promise<unknown>)(tx),
     );
 
-    await expect(queueSearchCheck("search-1", "dispatch-1")).resolves.toMatchObject({
-      scheduleVersion: 9
+    await expect(
+      queueSearchCheck("search-1", "dispatch-1"),
+    ).resolves.toMatchObject({
+      scheduleVersion: 9,
     });
     expect(tx.teeSearch.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           remediationDispatchKey: "dispatch-1",
           remediationDispatchVersion: 9,
-          scheduleVersion: { increment: 1 }
-        })
-      })
+          scheduleVersion: { increment: 1 },
+        }),
+      }),
     );
   });
 
@@ -1040,30 +1076,30 @@ describe("remediation schedule dispatch", () => {
             supportIncident: {
               status: "AUTO_INVESTIGATING",
               humanReviewReason: null,
-              escalationDeadlineAt: new Date("2026-08-11T20:35:26.000Z")
-            }
-          }
-        }
+              escalationDeadlineAt: new Date("2026-08-11T20:35:26.000Z"),
+            },
+          },
+        },
       ],
-      updatedAt: new Date("2026-08-11T20:34:30.000Z")
+      updatedAt: new Date("2026-08-11T20:34:30.000Z"),
     };
     const tx = {
       teeSearch: {
         findUnique: vi.fn().mockResolvedValue(current),
-        updateMany: vi.fn().mockResolvedValue({ count: 1 })
-      }
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
     };
     mockedPrisma.$transaction.mockImplementationOnce(async (worker) =>
-      (worker as (client: typeof tx) => Promise<unknown>)(tx)
+      (worker as (client: typeof tx) => Promise<unknown>)(tx),
     );
 
     try {
       await expect(
-        queueSearchCheck("search-1", "dispatch-before-deadline")
+        queueSearchCheck("search-1", "dispatch-before-deadline"),
       ).resolves.toMatchObject({
         scheduleVersion: 8,
         workflowRunId: "healthy-run",
-        checkStatus: "WAITING"
+        checkStatus: "WAITING",
       });
       expect(tx.teeSearch.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1071,13 +1107,13 @@ describe("remediation schedule dispatch", () => {
             scheduleVersion: 8,
             workflowRunId: "healthy-run",
             checkStatus: "WAITING",
-            nextCheckAt: new Date("2026-08-11T20:34:57.000Z")
+            nextCheckAt: new Date("2026-08-11T20:34:57.000Z"),
           }),
           data: {
             remediationDispatchKey: "dispatch-before-deadline",
-            remediationDispatchVersion: 8
-          }
-        })
+            remediationDispatchVersion: 8,
+          },
+        }),
       );
       const dispatchData = tx.teeSearch.updateMany.mock.calls[0]?.[0]?.data;
       expect(dispatchData).not.toHaveProperty("scheduleVersion");
@@ -1106,12 +1142,12 @@ describe("remediation schedule dispatch", () => {
             supportIncident: {
               status: "AUTO_INVESTIGATING",
               humanReviewReason: null,
-              escalationDeadlineAt: new Date("2026-08-11T20:35:26.000Z")
-            }
-          }
-        }
+              escalationDeadlineAt: new Date("2026-08-11T20:35:26.000Z"),
+            },
+          },
+        },
       ],
-      updatedAt: new Date("2026-08-11T20:34:30.000Z")
+      updatedAt: new Date("2026-08-11T20:34:30.000Z"),
     };
     const queued = {
       ...current,
@@ -1120,7 +1156,7 @@ describe("remediation schedule dispatch", () => {
       remediationDispatchVersion: 9,
       workflowRunId: null,
       checkStatus: "QUEUED",
-      nextCheckAt: new Date("2026-08-11T20:34:44.000Z")
+      nextCheckAt: new Date("2026-08-11T20:34:44.000Z"),
     };
     const tx = {
       teeSearch: {
@@ -1128,29 +1164,29 @@ describe("remediation schedule dispatch", () => {
           .fn()
           .mockResolvedValueOnce(current)
           .mockResolvedValueOnce(queued),
-        updateMany: vi.fn().mockResolvedValue({ count: 1 })
-      }
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
     };
     mockedPrisma.$transaction.mockImplementationOnce(async (worker) =>
-      (worker as (client: typeof tx) => Promise<unknown>)(tx)
+      (worker as (client: typeof tx) => Promise<unknown>)(tx),
     );
 
     try {
       await expect(
-        queueSearchCheck("search-1", "dispatch-overdue-wake")
+        queueSearchCheck("search-1", "dispatch-overdue-wake"),
       ).resolves.toMatchObject({
         scheduleVersion: 9,
         workflowRunId: null,
-        checkStatus: "QUEUED"
+        checkStatus: "QUEUED",
       });
       expect(tx.teeSearch.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
             scheduleVersion: { increment: 1 },
             workflowRunId: null,
-            checkStatus: "QUEUED"
-          })
-        })
+            checkStatus: "QUEUED",
+          }),
+        }),
       );
     } finally {
       vi.useRealTimers();
@@ -1174,17 +1210,17 @@ describe("guarded schedule dispatch", () => {
       scheduleVersion: 9,
       workflowRunId: null,
       checkStatus: "QUEUED",
-      updatedAt: observedAt
-    }
+      updatedAt: observedAt,
+    },
   ) {
     const tx = {
       teeSearch: {
         updateMany: vi.fn().mockResolvedValue({ count: updateCount }),
-        findUnique: vi.fn().mockResolvedValue(findResult)
-      }
+        findUnique: vi.fn().mockResolvedValue(findResult),
+      },
     };
     mockedPrisma.$transaction.mockImplementationOnce(async (worker) =>
-      (worker as (client: typeof tx) => Promise<unknown>)(tx)
+      (worker as (client: typeof tx) => Promise<unknown>)(tx),
     );
     return tx;
   }
@@ -1196,12 +1232,12 @@ describe("guarded schedule dispatch", () => {
       queueSearchCheck("search-1", undefined, {
         scheduleVersion: 8,
         updatedAt,
-        observedAt
-      })
+        observedAt,
+      }),
     ).resolves.toMatchObject({
       status: "ACTIVE",
       scheduleVersion: 9,
-      checkStatus: "QUEUED"
+      checkStatus: "QUEUED",
     });
 
     expect(tx.teeSearch.updateMany).toHaveBeenCalledWith(
@@ -1214,14 +1250,14 @@ describe("guarded schedule dispatch", () => {
           checkStatus: "WAITING",
           OR: [
             { checkLeaseExpiresAt: null },
-            { checkLeaseExpiresAt: { lte: observedAt } }
-          ]
+            { checkLeaseExpiresAt: { lte: observedAt } },
+          ],
         },
         data: expect.objectContaining({
           scheduleVersion: { increment: 1 },
-          checkStatus: "QUEUED"
-        })
-      })
+          checkStatus: "QUEUED",
+        }),
+      }),
     );
     expect(tx.teeSearch.findUnique).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1230,9 +1266,9 @@ describe("guarded schedule dispatch", () => {
           status: "ACTIVE",
           scheduleVersion: 9,
           checkStatus: "QUEUED",
-          workflowRunId: null
-        }
-      })
+          workflowRunId: null,
+        },
+      }),
     );
   });
 
@@ -1243,8 +1279,8 @@ describe("guarded schedule dispatch", () => {
       queueSearchCheck("search-1", undefined, {
         scheduleVersion: 8,
         updatedAt,
-        observedAt
-      })
+        observedAt,
+      }),
     ).resolves.toEqual({ outcome: "not_eligible", reason: "state_changed" });
 
     expect(tx.teeSearch.findUnique).not.toHaveBeenCalled();
@@ -1260,12 +1296,12 @@ describe("guarded schedule dispatch", () => {
         observedAt,
         checkStatus: "QUEUED",
         workflowRunId: "workflow-sleeping",
-        recoveryDispatchKey: "endpoint-deadline:incident-1:2"
-      })
+        recoveryDispatchKey: "endpoint-deadline:incident-1:2",
+      }),
     ).resolves.toMatchObject({
       status: "ACTIVE",
       scheduleVersion: 9,
-      checkStatus: "QUEUED"
+      checkStatus: "QUEUED",
     });
 
     expect(tx.teeSearch.updateMany).toHaveBeenCalledWith(
@@ -1277,14 +1313,14 @@ describe("guarded schedule dispatch", () => {
           workflowRunId: "workflow-sleeping",
           OR: [
             { checkLeaseExpiresAt: null },
-            { checkLeaseExpiresAt: { lte: observedAt } }
-          ]
+            { checkLeaseExpiresAt: { lte: observedAt } },
+          ],
         }),
         data: expect.objectContaining({
           remediationDispatchKey: "endpoint-deadline:incident-1:2",
-          remediationDispatchVersion: 9
-        })
-      })
+          remediationDispatchVersion: 9,
+        }),
+      }),
     );
   });
 
@@ -1297,17 +1333,17 @@ describe("guarded schedule dispatch", () => {
         updatedAt,
         observedAt,
         checkStatus: "QUEUED",
-        workflowRunId: "workflow-sleeping"
-      })
+        workflowRunId: "workflow-sleeping",
+      }),
     ).resolves.toEqual({ outcome: "not_eligible", reason: "state_changed" });
 
     expect(tx.teeSearch.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
           checkStatus: "QUEUED",
-          workflowRunId: "workflow-sleeping"
-        })
-      })
+          workflowRunId: "workflow-sleeping",
+        }),
+      }),
     );
     expect(tx.teeSearch.findUnique).not.toHaveBeenCalled();
   });
@@ -1321,17 +1357,17 @@ describe("guarded schedule dispatch", () => {
         queueSearchCheck("search-1", undefined, {
           scheduleVersion: 8,
           updatedAt,
-          observedAt
-        })
+          observedAt,
+        }),
       ).resolves.toEqual({ outcome: "not_eligible", reason: "state_changed" });
 
       expect(tx.teeSearch.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: expect.objectContaining({ checkStatus: "WAITING" })
-        })
+          where: expect.objectContaining({ checkStatus: "WAITING" }),
+        }),
       );
       expect(tx.teeSearch.findUnique).not.toHaveBeenCalled();
-    }
+    },
   );
 
   it("rejects a schedule-version race without reading a newer state", async () => {
@@ -1341,14 +1377,14 @@ describe("guarded schedule dispatch", () => {
       queueSearchCheck("search-1", undefined, {
         scheduleVersion: 8,
         updatedAt,
-        observedAt
-      })
+        observedAt,
+      }),
     ).resolves.toEqual({ outcome: "not_eligible", reason: "state_changed" });
 
     expect(tx.teeSearch.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({ scheduleVersion: 8 })
-      })
+        where: expect.objectContaining({ scheduleVersion: 8 }),
+      }),
     );
     expect(tx.teeSearch.findUnique).not.toHaveBeenCalled();
   });
@@ -1360,14 +1396,14 @@ describe("guarded schedule dispatch", () => {
       queueSearchCheck("search-1", undefined, {
         scheduleVersion: 8,
         updatedAt,
-        observedAt
-      })
+        observedAt,
+      }),
     ).resolves.toEqual({ outcome: "not_eligible", reason: "state_changed" });
 
     expect(tx.teeSearch.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({ updatedAt })
-      })
+        where: expect.objectContaining({ updatedAt }),
+      }),
     );
     expect(tx.teeSearch.findUnique).not.toHaveBeenCalled();
   });
@@ -1379,8 +1415,8 @@ describe("guarded schedule dispatch", () => {
       queueSearchCheck("search-1", undefined, {
         scheduleVersion: 8,
         updatedAt,
-        observedAt
-      })
+        observedAt,
+      }),
     ).rejects.toThrow("Guarded search schedule changed after it was queued.");
 
     expect(tx.teeSearch.findUnique).toHaveBeenCalledWith(
@@ -1388,9 +1424,9 @@ describe("guarded schedule dispatch", () => {
         where: expect.objectContaining({
           scheduleVersion: 9,
           checkStatus: "QUEUED",
-          workflowRunId: null
-        })
-      })
+          workflowRunId: null,
+        }),
+      }),
     );
   });
 });
@@ -1404,8 +1440,8 @@ describe("schedule recovery fairness", () => {
     expect(mockedPrisma.teeSearch.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
-        take: 50
-      })
+        take: 50,
+      }),
     );
   });
 
@@ -1420,9 +1456,9 @@ describe("schedule recovery fairness", () => {
       expect(mockedPrisma.teeSearch.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: expect.objectContaining({
-            date: { gte: new Date("2026-07-20T00:00:00.000Z") }
-          })
-        })
+            date: { gte: new Date("2026-07-20T00:00:00.000Z") },
+          }),
+        }),
       );
     } finally {
       vi.useRealTimers();
@@ -1444,26 +1480,26 @@ describe("schedule recovery fairness", () => {
               {
                 checkStatus: "QUEUED",
                 workflowRunId: null,
-                updatedAt: { lte: new Date("2026-07-16T11:58:00.000Z") }
+                updatedAt: { lte: new Date("2026-07-16T11:58:00.000Z") },
               },
               {
                 checkStatus: "QUEUED",
                 workflowRunId: { not: null },
-                updatedAt: { lte: new Date("2026-07-16T11:50:00.000Z") }
+                updatedAt: { lte: new Date("2026-07-16T11:50:00.000Z") },
               },
               {
                 checkStatus: "WAITING",
-                nextCheckAt: { lte: new Date("2026-07-16T11:50:00.000Z") }
-              }
-            ])
+                nextCheckAt: { lte: new Date("2026-07-16T11:50:00.000Z") },
+              },
+            ]),
           }),
           select: expect.objectContaining({
             id: true,
             scheduleVersion: true,
             checkStatus: true,
-            workflowRunId: true
-          })
-        })
+            workflowRunId: true,
+          }),
+        }),
       );
     } finally {
       vi.useRealTimers();
@@ -1488,8 +1524,12 @@ describe("schedule recovery fairness", () => {
                     checkStatus: { in: ["WAITING", "FAILED"] },
                     OR: [
                       { checkLeaseExpiresAt: null },
-                      { checkLeaseExpiresAt: { lte: new Date("2026-07-16T12:00:00.000Z") } }
-                    ]
+                      {
+                        checkLeaseExpiresAt: {
+                          lte: new Date("2026-07-16T12:00:00.000Z"),
+                        },
+                      },
+                    ],
                   },
                   {
                     OR: expect.arrayContaining([
@@ -1498,17 +1538,19 @@ describe("schedule recovery fairness", () => {
                           some: {
                             availabilityStatus: "AVAILABLE",
                             alertStatus: "PENDING",
-                            firstSeenAt: { lte: new Date("2026-07-16T11:50:00.000Z") }
-                          }
-                        }
-                      }
-                    ])
-                  }
-                ]
-              }
-            ])
-          })
-        })
+                            firstSeenAt: {
+                              lte: new Date("2026-07-16T11:50:00.000Z"),
+                            },
+                          },
+                        },
+                      },
+                    ]),
+                  },
+                ],
+              },
+            ]),
+          }),
+        }),
       );
     } finally {
       vi.useRealTimers();
@@ -1531,20 +1573,24 @@ describe("schedule recovery fairness", () => {
                 AND: [
                   {
                     statusEmailSentAt: null,
-                    createdAt: { lte: new Date("2026-07-16T11:55:00.000Z") }
+                    createdAt: { lte: new Date("2026-07-16T11:55:00.000Z") },
                   },
                   {
                     checkStatus: { in: ["WAITING", "FAILED"] },
                     OR: [
                       { checkLeaseExpiresAt: null },
-                      { checkLeaseExpiresAt: { lte: new Date("2026-07-16T12:00:00.000Z") } }
-                    ]
-                  }
-                ]
-              }
-            ])
-          })
-        })
+                      {
+                        checkLeaseExpiresAt: {
+                          lte: new Date("2026-07-16T12:00:00.000Z"),
+                        },
+                      },
+                    ],
+                  },
+                ],
+              },
+            ]),
+          }),
+        }),
       );
     } finally {
       vi.useRealTimers();
@@ -1562,28 +1608,26 @@ describe("schedule recovery fairness", () => {
       const query = mockedPrisma.teeSearch.findMany.mock.calls.find(
         ([candidate]) =>
           Array.isArray(candidate?.where?.OR) &&
-          candidate.where.OR.some(
-            (branch) => branch.checkStatus === "IDLE"
-          )
+          candidate.where.OR.some((branch) => branch.checkStatus === "IDLE"),
       )?.[0];
       const recoveryBranches = query?.where?.OR ?? [];
       const deliveryBranch = recoveryBranches.find(
-        (branch) => "AND" in branch && Array.isArray(branch.AND)
+        (branch) => "AND" in branch && Array.isArray(branch.AND),
       );
 
       expect(deliveryBranch).toEqual(
         expect.objectContaining({
           AND: expect.arrayContaining([
             expect.objectContaining({
-              checkStatus: { in: ["WAITING", "FAILED"] }
-            })
-          ])
-        })
+              checkStatus: { in: ["WAITING", "FAILED"] },
+            }),
+          ]),
+        }),
       );
       expect(deliveryBranch?.AND).not.toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ checkStatus: "CHECKING" })
-        ])
+          expect.objectContaining({ checkStatus: "CHECKING" }),
+        ]),
       );
     } finally {
       vi.useRealTimers();
@@ -1598,7 +1642,7 @@ describe("schedule recovery fairness", () => {
 
     try {
       await listSearchesNeedingScheduleRecovery(
-        new Date("2026-08-11T20:23:01.000Z")
+        new Date("2026-08-11T20:23:01.000Z"),
       );
 
       expect(mockedPrisma.teeSearch.findMany).toHaveBeenNthCalledWith(
@@ -1617,18 +1661,18 @@ describe("schedule recovery fairness", () => {
                           status: "AUTO_INVESTIGATING",
                           humanReviewReason: null,
                           escalationDeadlineAt: {
-                            lte: new Date("2026-08-11T20:33:01.000Z")
-                          }
-                        })
-                      }
-                    }
-                  }
-                }
-              }
-            ])
+                            lte: new Date("2026-08-11T20:33:01.000Z"),
+                          },
+                        }),
+                      },
+                    },
+                  },
+                },
+              },
+            ]),
           }),
-          take: 50
-        })
+          take: 50,
+        }),
       );
     } finally {
       vi.useRealTimers();
@@ -1651,11 +1695,11 @@ describe("schedule recovery fairness", () => {
               statusEmailSentAt: null,
               checkStatus: "QUEUED",
               workflowRunId: { not: null },
-              updatedAt: { lte: new Date("2026-08-11T20:21:00.000Z") }
-            }
-          ])
-        })
-      })
+              updatedAt: { lte: new Date("2026-08-11T20:21:00.000Z") },
+            },
+          ]),
+        }),
+      }),
     );
   });
 
@@ -1680,11 +1724,11 @@ describe("schedule recovery fairness", () => {
               status: "AUTO_INVESTIGATING",
               humanReviewReason: null,
               escalationDeadlineAt: deadlineAt,
-              escalatedAt: null
-            }
-          }
-        }
-      ]
+              escalatedAt: null,
+            },
+          },
+        },
+      ],
     };
     mockedPrisma.teeSearch.findMany.mockClear();
     mockedPrisma.teeSearch.findMany
@@ -1693,8 +1737,8 @@ describe("schedule recovery fairness", () => {
       .mockResolvedValueOnce([
         {
           ...candidate,
-          remediationDispatchKey: "endpoint-deadline:incident-1:3"
-        }
+          remediationDispatchKey: "endpoint-deadline:incident-1:3",
+        },
       ] as never)
       .mockResolvedValueOnce([] as never);
 
@@ -1704,8 +1748,8 @@ describe("schedule recovery fairness", () => {
     expect(first).toEqual([
       {
         ...candidate,
-        endpointRecoveryDispatchKey: "endpoint-deadline:incident-1:3"
-      }
+        endpointRecoveryDispatchKey: "endpoint-deadline:incident-1:3",
+      },
     ]);
     expect(repeated).toEqual([]);
     expect(mockedPrisma.teeSearch.findMany).toHaveBeenNthCalledWith(
@@ -1716,11 +1760,11 @@ describe("schedule recovery fairness", () => {
             expect.objectContaining({
               checkStatus: { in: ["QUEUED", "WAITING"] },
               workflowRunId: { not: null },
-              preferences: expect.any(Object)
-            })
-          ])
-        })
-      })
+              preferences: expect.any(Object),
+            }),
+          ]),
+        }),
+      }),
     );
   });
 
@@ -1732,7 +1776,7 @@ describe("schedule recovery fairness", () => {
       checkStatus: "QUEUED",
       workflowRunId: null,
       nextCheckAt: observedAt,
-      updatedAt: observedAt
+      updatedAt: observedAt,
     };
     mockedPrisma.teeSearch.findMany.mockClear();
     mockedPrisma.teeSearch.findMany
@@ -1742,20 +1786,20 @@ describe("schedule recovery fairness", () => {
     const recovered = await listSearchesNeedingScheduleRecovery(observedAt);
 
     expect(recovered).toEqual([justEscalated]);
-    const criticalWhere = mockedPrisma.teeSearch.findMany.mock.calls[0]?.[0]
-      ?.where;
+    const criticalWhere =
+      mockedPrisma.teeSearch.findMany.mock.calls[0]?.[0]?.where;
     expect(criticalWhere).toEqual(
       expect.objectContaining({
         OR: expect.arrayContaining([
           {
             AND: [
               {
-                checkStatus: { in: ["QUEUED", "WAITING"] }
+                checkStatus: { in: ["QUEUED", "WAITING"] },
               },
               {
                 recheckRequestedAt: {
-                  gte: new Date("2026-08-11T20:23:01.000Z")
-                }
+                  gte: new Date("2026-08-11T20:23:01.000Z"),
+                },
               },
               {
                 preferences: {
@@ -1764,29 +1808,29 @@ describe("schedule recovery fairness", () => {
                       supportIncident: {
                         is: {
                           escalatedAt: {
-                            gte: new Date("2026-08-11T20:23:01.000Z")
+                            gte: new Date("2026-08-11T20:23:01.000Z"),
                           },
                           escalationDeadlineAt: { lte: observedAt },
                           OR: [
                             {
                               status: "AUTO_INVESTIGATING",
-                              humanReviewReason: "AUTOMATION_STALLED"
+                              humanReviewReason: "AUTOMATION_STALLED",
                             },
                             {
                               status: "NEEDS_HUMAN",
-                              humanReviewReason: { not: null }
-                            }
-                          ]
+                              humanReviewReason: { not: null },
+                            },
+                          ],
                         },
-                      }
-                    }
-                  }
-                }
-              }
-            ]
-          }
-        ])
-      })
+                      },
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        ]),
+      }),
     );
   });
 
@@ -1798,7 +1842,7 @@ describe("schedule recovery fairness", () => {
       checkStatus: "WAITING",
       workflowRunId: "workflow-sleeping",
       nextCheckAt: new Date("2026-08-11T20:33:00.000Z"),
-      updatedAt: observedAt
+      updatedAt: observedAt,
     };
     mockedPrisma.teeSearch.findMany.mockClear();
     mockedPrisma.teeSearch.findMany
@@ -1808,18 +1852,18 @@ describe("schedule recovery fairness", () => {
     const recovered = await listSearchesNeedingScheduleRecovery(observedAt);
 
     expect(recovered).toEqual([justEscalated]);
-    const criticalWhere = mockedPrisma.teeSearch.findMany.mock.calls[0]?.[0]
-      ?.where;
+    const criticalWhere =
+      mockedPrisma.teeSearch.findMany.mock.calls[0]?.[0]?.where;
     expect(criticalWhere?.OR).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           AND: expect.arrayContaining([
             {
-              checkStatus: { in: ["QUEUED", "WAITING"] }
-            }
-          ])
-        })
-      ])
+              checkStatus: { in: ["QUEUED", "WAITING"] },
+            },
+          ]),
+        }),
+      ]),
     );
   });
 });
@@ -1832,36 +1876,38 @@ function buildHourlyRecord(): HourlyImprovementRunRecord {
     lifecycle: "candidate_selected",
     owner: {
       runId: "run-hourly-1",
-      threadId: "thread-hourly-1"
+      threadId: "thread-hourly-1",
     },
     provenance: buildHourlyImprovementRunProvenance({
       ownerRunId: "run-hourly-1",
       ownerThreadId: "thread-hourly-1",
       branch: "automation/hourly-20260713-120000",
       startingSha: "0123456789abcdef0123456789abcdef01234567",
-      plannedPaths: ["src/lib/automation/improvement.ts"]
+      plannedPaths: ["src/lib/automation/improvement.ts"],
     }),
     checkpoints: buildImprovementCheckpoints({
       queueConfirmed: true,
       candidateSelected: true,
-      provenanceRecorded: true
-    })
+      provenanceRecorded: true,
+    }),
   };
 }
 
 describe("hourly improvement durable state", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockedPrisma.automationRun.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockedPrisma.automationRun.updateMany.mockResolvedValue({
+      count: 1,
+    } as never);
   });
 
   it("refuses to persist outcome_recorded before closeout", async () => {
     const record = buildHourlyRecord();
     record.checkpoints.outcome_recorded = true;
 
-    await expect(updateHourlyImprovementRunState("run-hourly-1", record)).rejects.toThrow(
-      "outcome_recorded may only become true"
-    );
+    await expect(
+      updateHourlyImprovementRunState("run-hourly-1", record),
+    ).rejects.toThrow("outcome_recorded may only become true");
     expect(mockedPrisma.automationRun.updateMany).not.toHaveBeenCalled();
   });
 
@@ -1869,7 +1915,7 @@ describe("hourly improvement durable state", () => {
     await closeHourlyImprovementRun("run-hourly-1", {
       outcome: "success",
       record: buildHourlyRecord(),
-      changedFiles: ["src/lib/automation/improvement.ts"]
+      changedFiles: ["src/lib/automation/improvement.ts"],
     });
 
     expect(mockedPrisma.automationRun.updateMany).toHaveBeenCalledTimes(1);
@@ -1877,11 +1923,11 @@ describe("hourly improvement durable state", () => {
     expect(update?.data).toMatchObject({
       completedAt: expect.any(Date),
       outcome: "success",
-      changedFiles: ["src/lib/automation/improvement.ts"]
+      changedFiles: ["src/lib/automation/improvement.ts"],
     });
     expect(JSON.parse(String(update?.data.notes))).toMatchObject({
       lifecycle: "closeout",
-      checkpoints: { outcome_recorded: true }
+      checkpoints: { outcome_recorded: true },
     });
   });
 });
@@ -1891,7 +1937,12 @@ describe("recordTeeTimeMatch", () => {
     vi.clearAllMocks();
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-10T12:00:00.000Z"));
-    mockedPrisma.teeTimeMatch.upsert.mockResolvedValue({ id: "match-1" } as never);
+    mockedPrisma.teeTimeMatch.upsert.mockResolvedValue({
+      id: "match-1",
+    } as never);
+    deliveryOutboxMocks.reactivateTerminalUnresolvedMatchDeliveries.mockResolvedValue(
+      { count: 0 },
+    );
   });
 
   afterEach(() => {
@@ -1902,39 +1953,44 @@ describe("recordTeeTimeMatch", () => {
     mockedPrisma.teeTimeMatch.findUnique.mockResolvedValue({
       availabilityStatus: "GONE",
       unavailableAt: new Date("2026-07-10T11:45:00.000Z"),
-      availabilityCycle: 0
+      availabilityCycle: 0,
     } as never);
 
     await recordTeeTimeMatch({
       searchId: "search-1",
+      alertGeneration: 3,
       courseId: "course-1",
       sourceId: "slot-1",
       startsAt: new Date("2026-07-11T12:00:00.000Z"),
       availableSpots: 4,
-      bookingUrl: "https://example.com/book"
+      bookingUrl: "https://example.com/book",
     });
 
     expect(mockedPrisma.teeTimeMatch.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
-        update: expect.not.objectContaining({ alertStatus: "PENDING" })
-      })
+        update: expect.not.objectContaining({ alertStatus: "PENDING" }),
+      }),
     );
+    expect(
+      deliveryOutboxMocks.reactivateTerminalUnresolvedMatchDeliveries,
+    ).not.toHaveBeenCalled();
   });
 
   it("re-alerts a tee time that returns after being absent for 30 minutes", async () => {
     mockedPrisma.teeTimeMatch.findUnique.mockResolvedValue({
       availabilityStatus: "GONE",
       unavailableAt: new Date("2026-07-10T11:30:00.000Z"),
-      availabilityCycle: 3
+      availabilityCycle: 3,
     } as never);
 
     await recordTeeTimeMatch({
       searchId: "search-1",
+      alertGeneration: 3,
       courseId: "course-1",
       sourceId: "slot-1",
       startsAt: new Date("2026-07-11T12:00:00.000Z"),
       availableSpots: 4,
-      bookingUrl: "https://example.com/book"
+      bookingUrl: "https://example.com/book",
     });
 
     expect(mockedPrisma.teeTimeMatch.upsert).toHaveBeenCalledWith(
@@ -1942,10 +1998,632 @@ describe("recordTeeTimeMatch", () => {
         update: expect.objectContaining({
           alertStatus: "PENDING",
           sentAt: null,
-          availabilityCycle: { increment: 1 }
-        })
-      })
+          availabilityCycle: { increment: 1 },
+        }),
+      }),
     );
+    expect(
+      deliveryOutboxMocks.reactivateTerminalUnresolvedMatchDeliveries,
+    ).not.toHaveBeenCalled();
+  });
+});
+
+describe("commitCurrentCourseTeeTimeMatches", () => {
+  const providerObservedAt = new Date("2026-07-10T12:00:00.000Z");
+  const providerObservation = {
+    courseId: "course-1",
+    leaseToken: "provider-observation-token",
+    observationStartedAt: providerObservedAt,
+    leaseExpiresAt: new Date("2026-07-10T12:05:00.000Z"),
+    ttlMs: 5 * 60_000,
+    supersededUnresolvedObservationStartedAt: null,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedPrisma.$transaction.mockImplementation(async (callback) =>
+      (callback as (transaction: typeof prisma) => Promise<unknown>)(prisma),
+    );
+    mockedPrisma.$queryRawUnsafe.mockResolvedValue([] as never);
+    mockedPrisma.teeTimeMatch.findUnique.mockResolvedValue(null);
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([]);
+    mockedPrisma.teeTimeMatch.upsert.mockResolvedValue({
+      id: "match-1",
+      alertStatus: "PENDING",
+    } as never);
+    mockedPrisma.teeTimeMatch.updateMany.mockResolvedValue({
+      count: 0,
+    } as never);
+    mockedPrisma.courseBookingFact.findUnique.mockResolvedValue(null);
+    deliveryOutboxMocks.lockSearchForEmailReconciliation.mockResolvedValue({
+      id: "search-1",
+    });
+    deliveryOutboxMocks.suppressSearchEmailDeliveriesForMatches.mockResolvedValue(
+      {
+        count: 0,
+      },
+    );
+    deliveryOutboxMocks.reactivateTerminalUnresolvedMatchDeliveries.mockResolvedValue(
+      { count: 0 },
+    );
+  });
+
+  const commit = (
+    overrides: Partial<
+      Parameters<typeof commitCurrentCourseTeeTimeMatches>[0]
+    > = {},
+  ) =>
+    commitCurrentCourseTeeTimeMatches({
+      searchId: "search-1",
+      alertGeneration: 0,
+      checkLeaseToken: "check-lease",
+      courseId: "course-1",
+      date: "2026-07-11",
+      timeZone: "America/New_York",
+      providerObservedAt,
+      sourceKind: "SUCCESS",
+      matches: [
+        {
+          sourceId: "slot-1",
+          startsAt: new Date("2026-07-11T12:00:00.000Z"),
+          availableSpots: 4,
+          bookingUrl: "https://example.com/book",
+        },
+      ],
+      ...overrides,
+    });
+
+  it("commits matches while the accepted provider source still owns monitoring", async () => {
+    mockedPrisma.courseMonitoringStatus.findUnique.mockResolvedValue({
+      state: "HEALTHY",
+      lastSuccessfulAt: providerObservedAt,
+      lastFailureAt: new Date("2026-07-10T11:59:00.000Z"),
+    } as never);
+
+    await expect(commit()).resolves.toMatchObject({
+      sourceEvidenceAccepted: true,
+      persistedMatchStates: [{ matchId: "match-1", isPending: true }],
+    });
+    expect(mockedPrisma.teeTimeMatch.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.objectContaining({
+          lastSeenAt: providerObservedAt,
+          lastConfirmedAt: providerObservedAt,
+        }),
+      }),
+    );
+  });
+
+  it.each(["FINAL_MANUAL", "FINAL_TECHNICAL", "FINAL_IDENTITY"] as const)(
+    "rejects a late canonical match commit after the course reaches %s",
+    async (state) => {
+      mockedPrisma.courseMonitoringStatus.findUnique.mockResolvedValue({
+        state,
+        lastSuccessfulAt: providerObservedAt,
+        lastFailureAt: null,
+      } as never);
+
+      await expect(commit()).resolves.toEqual({
+        sourceEvidenceAccepted: false,
+        persistedMatchStates: [],
+      });
+      expect(mockedPrisma.teeTimeMatch.upsert).not.toHaveBeenCalled();
+      expect(
+        deliveryOutboxMocks.lockSearchForEmailReconciliation,
+      ).not.toHaveBeenCalled();
+    },
+  );
+
+  it("atomically consumes the exact local-reader source with its canonical match commit", async () => {
+    const completedAt = new Date("2026-07-10T12:01:00.000Z");
+    mockedPrisma.courseMonitoringStatus.findUnique.mockResolvedValue({
+      lastSuccessfulAt: providerObservedAt,
+      lastFailureAt: null,
+    } as never);
+    mockedPrisma.$queryRaw.mockResolvedValue([{ id: "search-1" }] as never);
+    mockedPrisma.localReaderJob.findUnique.mockResolvedValue({
+      id: "reader-job-1",
+      teeSearchId: "search-1",
+      courseId: "course-1",
+      scheduleVersion: 1,
+      status: "COMPLETED",
+      claimedAt: providerObservedAt,
+      completedAt,
+      resultExpiresAt: new Date("2026-07-10T12:11:00.000Z"),
+      result: {
+        jobId: "reader-job-1",
+        courseKey: "cps:grassyhill.cps.golf",
+        status: "AVAILABLE",
+        evidenceAnchor: "SERVER_CLAIM",
+        observedAt: providerObservedAt.toISOString(),
+        pageUrl: "https://grassyhill.cps.golf/onlineresweb/search-teetime",
+        pageTitle: "Grassy Hill Country Club",
+        slots: [
+          {
+            startsAtLocal: "2026-07-11T08:00:00",
+            timeLabel: "8:00 AM",
+            holes: [18],
+            minimumPlayers: 1,
+            availableSpots: 4,
+            priceCents: 7000,
+            cartIncluded: true,
+          },
+        ],
+        readerVersion: "reader-v1",
+      },
+    } as never);
+    mockedPrisma.localReaderJob.updateMany.mockResolvedValue({
+      count: 1,
+    } as never);
+
+    await expect(
+      commit({
+        localReaderObservation: {
+          jobId: "reader-job-1",
+          scheduleVersion: 1,
+          resultStatus: "AVAILABLE",
+          monitoringOutcome: "MATCH_FOUND",
+        },
+      }),
+    ).resolves.toMatchObject({ sourceEvidenceAccepted: true });
+
+    expect(mockedPrisma.localReaderJob.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        id: "reader-job-1",
+        teeSearchId: "search-1",
+        courseId: "course-1",
+        scheduleVersion: 1,
+        claimedAt: providerObservedAt,
+        completedAt,
+      }),
+      data: { resultExpiresAt: completedAt },
+    });
+    expect(
+      mockedPrisma.teeTimeMatch.upsert.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      mockedPrisma.localReaderJob.updateMany.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("resumes an equal local-reader source only from its exact accepted monitoring event", async () => {
+    const completedAt = new Date("2026-07-10T12:01:00.000Z");
+    mockedPrisma.courseMonitoringStatus.findUnique.mockResolvedValue({
+      lastSuccessfulAt: providerObservedAt,
+      lastFailureAt: null,
+    } as never);
+    mockedPrisma.courseMonitoringEvent.findMany.mockResolvedValue([
+      {
+        audit: {
+          localReaderCanonicalSource: {
+            jobId: "reader-job-resume",
+            searchId: "search-1",
+            scheduleVersion: 1,
+            resultStatus: "NO_AVAILABILITY",
+            providerObservedAt: providerObservedAt.toISOString(),
+          },
+        },
+      },
+    ] as never);
+    mockedPrisma.$queryRaw.mockResolvedValue([{ id: "search-1" }] as never);
+    mockedPrisma.localReaderJob.findUnique.mockResolvedValue({
+      id: "reader-job-resume",
+      teeSearchId: "search-1",
+      courseId: "course-1",
+      scheduleVersion: 1,
+      status: "COMPLETED",
+      claimedAt: providerObservedAt,
+      completedAt,
+      // Expiry is operational; an unconsumed exact accepted source remains
+      // resumable after its delivery window closes.
+      resultExpiresAt: new Date("2026-07-10T12:02:00.000Z"),
+      result: {
+        jobId: "reader-job-resume",
+        courseKey: "cps:grassyhill.cps.golf",
+        status: "NO_AVAILABILITY",
+        evidenceAnchor: "SERVER_CLAIM",
+        observedAt: providerObservedAt.toISOString(),
+        pageUrl: "https://grassyhill.cps.golf/onlineresweb/search-teetime",
+        pageTitle: "Grassy Hill Country Club",
+        slots: [],
+        readerVersion: "reader-v1",
+      },
+    } as never);
+    mockedPrisma.localReaderJob.updateMany.mockResolvedValue({
+      count: 1,
+    } as never);
+
+    await expect(
+      commit({
+        reconcileMatches: false,
+        matches: [],
+        localReaderObservation: {
+          jobId: "reader-job-resume",
+          scheduleVersion: 1,
+          resultStatus: "NO_AVAILABILITY",
+          monitoringOutcome: "NO_MATCH",
+          resumePreviouslyAcceptedSource: true,
+        },
+      }),
+    ).resolves.toEqual({
+      sourceEvidenceAccepted: true,
+      persistedMatchStates: [],
+    });
+    expect(mockedPrisma.localReaderJob.updateMany).toHaveBeenCalledOnce();
+  });
+
+  it("rejects equal-source resume when the accepted event belongs to another reader job", async () => {
+    mockedPrisma.courseMonitoringStatus.findUnique.mockResolvedValue({
+      lastSuccessfulAt: providerObservedAt,
+      lastFailureAt: null,
+    } as never);
+    mockedPrisma.courseMonitoringEvent.findMany.mockResolvedValue([
+      {
+        audit: {
+          localReaderCanonicalSource: {
+            jobId: "reader-job-other",
+            searchId: "search-1",
+            scheduleVersion: 1,
+            resultStatus: "NO_AVAILABILITY",
+            providerObservedAt: providerObservedAt.toISOString(),
+          },
+        },
+      },
+    ] as never);
+
+    await expect(
+      commit({
+        reconcileMatches: false,
+        matches: [],
+        localReaderObservation: {
+          jobId: "reader-job-resume",
+          scheduleVersion: 1,
+          resultStatus: "NO_AVAILABILITY",
+          monitoringOutcome: "NO_MATCH",
+          resumePreviouslyAcceptedSource: true,
+        },
+      }),
+    ).resolves.toEqual({
+      sourceEvidenceAccepted: false,
+      persistedMatchStates: [],
+    });
+    expect(mockedPrisma.teeTimeMatch.upsert).not.toHaveBeenCalled();
+    expect(mockedPrisma.localReaderJob.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("rejects all customer writes when provider observation ownership is lost", async () => {
+    mockedPrisma.$queryRaw.mockResolvedValue([] as never);
+    mockedPrisma.courseMonitoringStatus.findUnique.mockResolvedValue({
+      lastSuccessfulAt: providerObservedAt,
+      lastFailureAt: null,
+    } as never);
+
+    await expect(commit({ providerObservation })).rejects.toThrow(
+      "Provider observation ownership expired",
+    );
+
+    expect(
+      mockedPrisma.courseMonitoringStatus.findUnique,
+    ).not.toHaveBeenCalled();
+    expect(mockedPrisma.teeTimeMatch.upsert).not.toHaveBeenCalled();
+    expect(
+      deliveryOutboxMocks.reactivateTerminalUnresolvedMatchDeliveries,
+    ).not.toHaveBeenCalled();
+    expect(mockedPrisma.providerRequestLease.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("releases provider observation ownership atomically after accepted match writes", async () => {
+    mockedPrisma.$queryRaw.mockResolvedValue([
+      { leaseExpiresAt: new Date("2026-07-10T12:10:00.000Z") },
+    ] as never);
+    mockedPrisma.providerRequestLease.deleteMany.mockResolvedValue({
+      count: 1,
+    } as never);
+    mockedPrisma.courseMonitoringStatus.findUnique.mockResolvedValue({
+      lastSuccessfulAt: providerObservedAt,
+      lastFailureAt: null,
+    } as never);
+
+    await expect(commit({ providerObservation })).resolves.toMatchObject({
+      sourceEvidenceAccepted: true,
+    });
+
+    expect(mockedPrisma.providerRequestLease.deleteMany).toHaveBeenCalledWith({
+      where: {
+        providerFamilyKey: expect.any(String),
+        slot: 0,
+        leaseToken: "provider-observation-token",
+      },
+    });
+    expect(
+      mockedPrisma.teeTimeMatch.upsert.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      mockedPrisma.providerRequestLease.deleteMany.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("reactivates cycle 7 obligations when a strictly newer canonical reconfirmation follows terminal unresolved suppression", async () => {
+    const t1 = new Date("2026-07-10T11:40:00.000Z");
+    const t2 = new Date("2026-07-10T11:50:00.000Z");
+    expect(t1 < t2 && t2 < providerObservedAt).toBe(true);
+    mockedPrisma.courseMonitoringStatus.findUnique.mockResolvedValue({
+      lastSuccessfulAt: providerObservedAt,
+      lastFailureAt: null,
+    } as never);
+    mockedPrisma.teeTimeMatch.findUnique.mockResolvedValue({
+      id: "match-1",
+      alertStatus: "PENDING",
+      availabilityStatus: "AVAILABLE",
+      unavailableAt: null,
+      availabilityCycle: 7,
+      lastConfirmedAt: t1,
+    } as never);
+    deliveryOutboxMocks.reactivateTerminalUnresolvedMatchDeliveries.mockResolvedValue(
+      { count: 1 },
+    );
+
+    await expect(commit()).resolves.toMatchObject({
+      sourceEvidenceAccepted: true,
+    });
+
+    expect(
+      deliveryOutboxMocks.reactivateTerminalUnresolvedMatchDeliveries,
+    ).toHaveBeenCalledWith(prisma, {
+      searchId: "search-1",
+      alertGeneration: 0,
+      matchId: "match-1",
+      availabilityCycle: 7,
+      retryAt: providerObservedAt,
+    });
+    expect(mockedPrisma.teeTimeMatch.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.objectContaining({
+          lastConfirmedAt: providerObservedAt,
+        }),
+      }),
+    );
+    expect(mockedPrisma.teeTimeMatch.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.not.objectContaining({
+          availabilityCycle: { increment: 1 },
+        }),
+      }),
+    );
+  });
+
+  it.each([
+    ["equal", providerObservedAt],
+    ["older", new Date("2026-07-10T12:01:00.000Z")],
+  ])(
+    "does not reactivate cycle 7 for an %s canonical reconfirmation",
+    async (_label, lastConfirmedAt) => {
+      mockedPrisma.courseMonitoringStatus.findUnique.mockResolvedValue({
+        lastSuccessfulAt: providerObservedAt,
+        lastFailureAt: null,
+      } as never);
+      mockedPrisma.teeTimeMatch.findUnique.mockResolvedValue({
+        id: "match-1",
+        alertStatus: "PENDING",
+        availabilityStatus: "AVAILABLE",
+        unavailableAt: null,
+        availabilityCycle: 7,
+        lastConfirmedAt,
+      } as never);
+      await expect(commit()).resolves.toMatchObject({
+        sourceEvidenceAccepted: true,
+      });
+
+      expect(
+        deliveryOutboxMocks.reactivateTerminalUnresolvedMatchDeliveries,
+      ).not.toHaveBeenCalled();
+      expect(mockedPrisma.teeTimeMatch.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.not.objectContaining({
+            availabilityCycle: { increment: 1 },
+          }),
+        }),
+      );
+    },
+  );
+
+  it("keeps the cycle stable when a newer confirmation finds no exact terminal unresolved obligation", async () => {
+    mockedPrisma.courseMonitoringStatus.findUnique.mockResolvedValue({
+      lastSuccessfulAt: providerObservedAt,
+      lastFailureAt: null,
+    } as never);
+    mockedPrisma.teeTimeMatch.findUnique.mockResolvedValue({
+      id: "match-1",
+      alertStatus: "PENDING",
+      availabilityStatus: "AVAILABLE",
+      unavailableAt: null,
+      availabilityCycle: 7,
+      lastConfirmedAt: new Date("2026-07-10T11:40:00.000Z"),
+    } as never);
+    await expect(commit()).resolves.toMatchObject({
+      sourceEvidenceAccepted: true,
+    });
+
+    expect(
+      deliveryOutboxMocks.reactivateTerminalUnresolvedMatchDeliveries,
+    ).toHaveBeenCalledOnce();
+    expect(mockedPrisma.teeTimeMatch.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.not.objectContaining({
+          availabilityCycle: { increment: 1 },
+        }),
+      }),
+    );
+  });
+
+  it("rejects customer mutations when a newer provider source wins the lock", async () => {
+    mockedPrisma.courseMonitoringStatus.findUnique.mockResolvedValue({
+      lastSuccessfulAt: providerObservedAt,
+      lastFailureAt: new Date("2026-07-10T12:01:00.000Z"),
+    } as never);
+
+    await expect(commit()).resolves.toEqual({
+      sourceEvidenceAccepted: false,
+      persistedMatchStates: [],
+    });
+    expect(mockedPrisma.teeTimeMatch.upsert).not.toHaveBeenCalled();
+    expect(
+      deliveryOutboxMocks.lockSearchForEmailReconciliation,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("commits booking-window and pricing facts with matches under the exact source fence", async () => {
+    const currentCourse = {
+      id: "course-1",
+      timeZone: "America/New_York",
+      bookingWindowDaysAhead: null,
+      bookingReleaseTimeLocal: null,
+      bookingWindowSource: null,
+      bookingWindowConfidence: null,
+      bookingWindowEvidenceUrl: null,
+      bookingWindowCheckedAt: null,
+      bookingWindowObservedAt: null,
+      updatedAt: new Date("2026-07-10T11:00:00.000Z"),
+    };
+    mockedPrisma.courseMonitoringStatus.findUnique.mockResolvedValue({
+      lastSuccessfulAt: providerObservedAt,
+      lastFailureAt: null,
+    } as never);
+    mockedPrisma.course.findUnique.mockResolvedValue(currentCourse as never);
+    mockedPrisma.course.update.mockResolvedValue({
+      ...currentCourse,
+      bookingWindowDaysAhead: 14,
+      bookingWindowCheckedAt: providerObservedAt,
+      bookingWindowObservedAt: providerObservedAt,
+      updatedAt: providerObservedAt,
+    } as never);
+    mockedPrisma.courseBookingFact.upsert.mockResolvedValue({
+      courseId: "course-1",
+      holes: 18,
+    } as never);
+
+    await expect(
+      commitCurrentCourseTeeTimeMatches({
+        searchId: "search-1",
+        alertGeneration: 0,
+        checkLeaseToken: "check-lease",
+        courseId: "course-1",
+        date: "2026-07-11",
+        timeZone: "America/New_York",
+        providerObservedAt,
+        sourceKind: "SUCCESS",
+        bookingWindowEvidence: {
+          daysAhead: 14,
+          releaseTimeLocal: null,
+          source: "PROVIDER_CONFIG",
+          confidence: 1,
+          evidenceUrl: "https://example.com/book",
+        },
+        pricing: {
+          currency: "USD",
+          observedAt: providerObservedAt.toISOString(),
+          eighteenHoles: {
+            minPriceCents: 6000,
+            maxPriceCents: 7000,
+            sampleSize: 2,
+          },
+        },
+        bookableHoleCounts: [18],
+        reconcileMatches: false,
+        matches: [],
+      }),
+    ).resolves.toEqual({
+      sourceEvidenceAccepted: true,
+      persistedMatchStates: [],
+    });
+
+    expect(mockedPrisma.course.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          bookingWindowDaysAhead: 14,
+          bookingWindowObservedAt: providerObservedAt,
+        }),
+      }),
+    );
+    expect(mockedPrisma.courseBookingFact.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.objectContaining({
+          minPriceCents: 6000,
+          bookableObservedAt: providerObservedAt,
+        }),
+      }),
+    );
+  });
+
+  it("rejects booking metadata before any write when a newer source wins", async () => {
+    mockedPrisma.courseMonitoringStatus.findUnique.mockResolvedValue({
+      lastSuccessfulAt: providerObservedAt,
+      lastFailureAt: new Date("2026-07-10T12:01:00.000Z"),
+    } as never);
+
+    await expect(
+      commitCurrentCourseTeeTimeMatches({
+        searchId: "search-1",
+        alertGeneration: 0,
+        checkLeaseToken: "check-lease",
+        courseId: "course-1",
+        date: "2026-07-11",
+        timeZone: "America/New_York",
+        providerObservedAt,
+        sourceKind: "SUCCESS",
+        bookingWindowEvidence: {
+          daysAhead: 14,
+          releaseTimeLocal: null,
+          source: "PROVIDER_CONFIG",
+          confidence: 1,
+          evidenceUrl: "https://example.com/book",
+        },
+        pricing: {
+          currency: "USD",
+          observedAt: providerObservedAt.toISOString(),
+          eighteenHoles: {
+            minPriceCents: 6000,
+            maxPriceCents: 7000,
+            sampleSize: 2,
+          },
+        },
+        bookableHoleCounts: [18],
+        reconcileMatches: false,
+        matches: [],
+      }),
+    ).resolves.toEqual({
+      sourceEvidenceAccepted: false,
+      persistedMatchStates: [],
+    });
+
+    expect(mockedPrisma.course.findUnique).not.toHaveBeenCalled();
+    expect(mockedPrisma.course.update).not.toHaveBeenCalled();
+    expect(mockedPrisma.courseBookingFact.findUnique).not.toHaveBeenCalled();
+    expect(mockedPrisma.courseBookingFact.upsert).not.toHaveBeenCalled();
+  });
+
+  it("rejects matches attached to a failed provider observation", async () => {
+    await expect(
+      commitCurrentCourseTeeTimeMatches({
+        searchId: "search-1",
+        alertGeneration: 0,
+        checkLeaseToken: "check-lease",
+        courseId: "course-1",
+        date: "2026-07-11",
+        timeZone: "America/New_York",
+        providerObservedAt,
+        sourceKind: "FAILURE",
+        matches: [
+          {
+            sourceId: "slot-unsafe-response",
+            startsAt: new Date("2026-07-11T12:00:00.000Z"),
+            availableSpots: 4,
+            bookingUrl: "https://example.com/book",
+          },
+        ],
+      }),
+    ).rejects.toThrow("Failed provider observations cannot");
+
+    expect(mockedPrisma.$transaction).not.toHaveBeenCalled();
+    expect(mockedPrisma.teeTimeMatch.upsert).not.toHaveBeenCalled();
   });
 });
 
@@ -1960,16 +2638,16 @@ describe("match alert cycle finalization", () => {
       .mockResolvedValueOnce({ count: 1 } as never);
 
     await expect(
-      markMatchAlertSent({ matchId: "match-1", availabilityCycle: 0 })
+      markMatchAlertSent({ matchId: "match-1", availabilityCycle: 0 }),
     ).resolves.toBeNull();
     await expect(
-      markMatchAlertSent({ matchId: "match-1", availabilityCycle: 1 })
+      markMatchAlertSent({ matchId: "match-1", availabilityCycle: 1 }),
     ).resolves.toEqual(
       expect.objectContaining({
         id: "match-1",
         availabilityCycle: 1,
-        alertStatus: "SENT"
-      })
+        alertStatus: "SENT",
+      }),
     );
 
     expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenNthCalledWith(
@@ -1978,9 +2656,9 @@ describe("match alert cycle finalization", () => {
         where: {
           id: "match-1",
           availabilityCycle: 0,
-          alertStatus: "PENDING"
-        }
-      })
+          alertStatus: "PENDING",
+        },
+      }),
     );
     expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenNthCalledWith(
       2,
@@ -1988,35 +2666,37 @@ describe("match alert cycle finalization", () => {
         where: {
           id: "match-1",
           availabilityCycle: 1,
-          alertStatus: "PENDING"
-        }
-      })
+          alertStatus: "PENDING",
+        },
+      }),
     );
   });
 
   it("suppresses only the exact pending availability cycle", async () => {
-    mockedPrisma.teeTimeMatch.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockedPrisma.teeTimeMatch.updateMany.mockResolvedValue({
+      count: 1,
+    } as never);
 
     await expect(
-      markMatchAlertSuppressed({ matchId: "match-1", availabilityCycle: 4 })
+      markMatchAlertSuppressed({ matchId: "match-1", availabilityCycle: 4 }),
     ).resolves.toEqual(
       expect.objectContaining({
         id: "match-1",
         availabilityCycle: 4,
-        alertStatus: "SUPPRESSED"
-      })
+        alertStatus: "SUPPRESSED",
+      }),
     );
 
     expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenCalledWith({
       where: {
         id: "match-1",
         availabilityCycle: 4,
-        alertStatus: "PENDING"
+        alertStatus: "PENDING",
       },
       data: {
         alertStatus: "SUPPRESSED",
-        sentAt: expect.any(Date)
-      }
+        sentAt: expect.any(Date),
+      },
     });
   });
 });
@@ -2025,18 +2705,22 @@ describe("markMissingMatchesUnavailable", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockedPrisma.$transaction.mockImplementation(async (callback) =>
-      (callback as (transaction: typeof prisma) => Promise<unknown>)(prisma)
+      (callback as (transaction: typeof prisma) => Promise<unknown>)(prisma),
     );
     mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
-      { id: "match-1", availabilityCycle: 3 }
+      { id: "match-1", availabilityCycle: 3 },
     ] as never);
-    mockedPrisma.teeTimeMatch.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockedPrisma.teeTimeMatch.updateMany.mockResolvedValue({
+      count: 1,
+    } as never);
     deliveryOutboxMocks.lockSearchForEmailReconciliation.mockResolvedValue({
-      id: "search-1"
+      id: "search-1",
     });
-    deliveryOutboxMocks.suppressSearchEmailDeliveriesForMatches.mockResolvedValue({
-      count: 1
-    });
+    deliveryOutboxMocks.suppressSearchEmailDeliveriesForMatches.mockResolvedValue(
+      {
+        count: 1,
+      },
+    );
   });
 
   it("suppresses pending alerts when their tee times disappear", async () => {
@@ -2050,9 +2734,9 @@ describe("markMissingMatchesUnavailable", () => {
       confirmedMatches: [
         {
           sourceId: "foreup-6654-2026-07-11 08:00",
-          startsAt: new Date("2026-07-11T12:00:00.000Z")
-        }
-      ]
+          startsAt: new Date("2026-07-11T12:00:00.000Z"),
+        },
+      ],
     });
 
     expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenCalledWith(
@@ -2061,43 +2745,47 @@ describe("markMissingMatchesUnavailable", () => {
           alertStatus: "PENDING",
           startsAt: {
             gte: new Date("2026-07-11T04:00:00.000Z"),
-            lt: new Date("2026-07-12T04:00:00.000Z")
+            lt: new Date("2026-07-12T04:00:00.000Z"),
           },
           NOT: [
             {
               sourceId: "foreup-6654-2026-07-11 08:00",
-              startsAt: new Date("2026-07-11T12:00:00.000Z")
-            }
-          ]
+              startsAt: new Date("2026-07-11T12:00:00.000Z"),
+            },
+          ],
         }),
         data: expect.objectContaining({
           alertStatus: "SUPPRESSED",
-          availabilityStatus: "GONE"
-        })
-      })
+          availabilityStatus: "GONE",
+        }),
+      }),
     );
     expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          alertStatus: { not: "PENDING" }
+          alertStatus: { not: "PENDING" },
         }),
         data: expect.not.objectContaining({
-          alertStatus: expect.anything()
-        })
-      })
+          alertStatus: expect.anything(),
+        }),
+      }),
     );
     expect(mockedPrisma.$transaction).toHaveBeenCalledOnce();
-    expect(deliveryOutboxMocks.suppressSearchEmailDeliveriesForMatches).toHaveBeenCalledWith(
+    expect(
+      deliveryOutboxMocks.suppressSearchEmailDeliveriesForMatches,
+    ).toHaveBeenCalledWith(
       expect.objectContaining({
         searchId: "search-1",
         matchRefs: [{ matchId: "match-1", availabilityCycle: 3 }],
-        transaction: prisma
-      })
+        transaction: prisma,
+      }),
     );
   });
 
   it("does not reconcile availability after the generation or check lease becomes stale", async () => {
-    deliveryOutboxMocks.lockSearchForEmailReconciliation.mockResolvedValue(null);
+    deliveryOutboxMocks.lockSearchForEmailReconciliation.mockResolvedValue(
+      null,
+    );
 
     await expect(
       markMissingMatchesUnavailable({
@@ -2107,16 +2795,16 @@ describe("markMissingMatchesUnavailable", () => {
         courseId: "course-1",
         date: "2026-07-11",
         timeZone: "America/New_York",
-        confirmedMatches: []
-      })
+        confirmedMatches: [],
+      }),
     ).rejects.toThrow(
-      "Search check is no longer current during availability reconciliation"
+      "Search check is no longer current during availability reconciliation",
     );
 
     expect(mockedPrisma.teeTimeMatch.findMany).not.toHaveBeenCalled();
     expect(mockedPrisma.teeTimeMatch.updateMany).not.toHaveBeenCalled();
     expect(
-      deliveryOutboxMocks.suppressSearchEmailDeliveriesForMatches
+      deliveryOutboxMocks.suppressSearchEmailDeliveriesForMatches,
     ).not.toHaveBeenCalled();
   });
 });
@@ -2124,7 +2812,9 @@ describe("markMissingMatchesUnavailable", () => {
 describe("recordCourseProbeIfChanged", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockedPrisma.courseProbe.create.mockResolvedValue({ id: "new-probe" } as never);
+    mockedPrisma.courseProbe.create.mockResolvedValue({
+      id: "new-probe",
+    } as never);
   });
 
   it("does not write the same Fairview policy block every five minutes", async () => {
@@ -2132,14 +2822,14 @@ describe("recordCourseProbeIfChanged", () => {
       id: "existing-probe",
       outcome: "BLOCKED_POLICY",
       message: "Course is explicitly marked as blocked for automation.",
-      runtimeVersion: "local"
+      runtimeVersion: "local",
     } as never);
 
     await recordCourseProbeIfChanged({
       searchId: "search-1",
       courseId: "fairview-farm",
       outcome: "BLOCKED_POLICY",
-      message: "Course is explicitly marked as blocked for automation."
+      message: "Course is explicitly marked as blocked for automation.",
     });
 
     expect(mockedPrisma.courseProbe.create).not.toHaveBeenCalled();
@@ -2149,14 +2839,14 @@ describe("recordCourseProbeIfChanged", () => {
     mockedPrisma.courseProbe.findFirst.mockResolvedValue({
       id: "existing-probe",
       outcome: "NEEDS_ADAPTER",
-      message: "No supported adapter yet for UNKNOWN"
+      message: "No supported adapter yet for UNKNOWN",
     } as never);
 
     await recordCourseProbeIfChanged({
       searchId: "search-1",
       courseId: "fairview-farm",
       outcome: "BLOCKED_POLICY",
-      message: "Course is explicitly marked as blocked for automation."
+      message: "Course is explicitly marked as blocked for automation.",
     });
 
     expect(mockedPrisma.courseProbe.create).toHaveBeenCalledOnce();
@@ -2167,7 +2857,7 @@ describe("recordCourseProbeIfChanged", () => {
       id: "old-runtime-probe",
       outcome: "NO_MATCH",
       message: "No qualifying tee times in the requested window",
-      runtimeVersion: "old-release"
+      runtimeVersion: "old-release",
     } as never);
 
     await recordCourseProbeIfChanged({
@@ -2175,13 +2865,13 @@ describe("recordCourseProbeIfChanged", () => {
       courseId: "fairview-farm",
       outcome: "NO_MATCH",
       message: "No qualifying tee times in the requested window",
-      runtimeVersion: "new-release"
+      runtimeVersion: "new-release",
     });
 
     expect(mockedPrisma.courseProbe.create).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ runtimeVersion: "new-release" })
-      })
+        data: expect.objectContaining({ runtimeVersion: "new-release" }),
+      }),
     );
   });
 
@@ -2195,7 +2885,7 @@ describe("recordCourseProbeIfChanged", () => {
       outcome: "NO_MATCH",
       message: "Booking opens next week.",
       runtimeVersion: "same-release",
-      observedAtOrAfter: generationStartedAt
+      observedAtOrAfter: generationStartedAt,
     });
 
     expect(mockedPrisma.courseProbe.findFirst).toHaveBeenCalledWith(
@@ -2203,9 +2893,9 @@ describe("recordCourseProbeIfChanged", () => {
         where: {
           teeSearchId: "search-1",
           courseId: "fairview-farm",
-          observedAt: { gte: generationStartedAt }
-        }
-      })
+          observedAt: { gte: generationStartedAt },
+        },
+      }),
     );
     expect(mockedPrisma.courseProbe.create).toHaveBeenCalledOnce();
   });
@@ -2214,25 +2904,105 @@ describe("recordCourseProbeIfChanged", () => {
     mockedPrisma.courseProbe.findFirst.mockResolvedValue({
       id: "existing-probe",
       outcome: "BLOCKED_POLICY",
-      message: "Older policy reason"
+      message: "Older policy reason",
     } as never);
 
     await recordCourseProbeIfChanged({
       searchId: "search-1",
       courseId: "fairview-farm",
       outcome: "BLOCKED_POLICY",
-      message: "Course is explicitly marked as blocked for automation."
+      message: "Course is explicitly marked as blocked for automation.",
+    });
+
+    expect(mockedPrisma.courseProbe.create).toHaveBeenCalledOnce();
+  });
+
+  it("reuses evidence for the same local-reader observation", async () => {
+    const providerObservedAt = "2026-08-11T20:00:00.000Z";
+    mockedPrisma.courseProbe.findFirst.mockResolvedValue({
+      id: "existing-probe",
+      outcome: "NO_MATCH",
+      message: "No qualifying tee times in the requested window",
+      runtimeVersion: "same-release",
+      rawSummary: {
+        providerExecution: "LOCAL_BROWSER_READER",
+        providerObservedAt,
+      },
+    } as never);
+
+    await recordCourseProbeIfChanged({
+      searchId: "search-1",
+      courseId: "fairview-farm",
+      outcome: "NO_MATCH",
+      message: "No qualifying tee times in the requested window",
+      runtimeVersion: "same-release",
+      rawSummary: {
+        providerExecution: "LOCAL_BROWSER_READER",
+        providerObservedAt,
+      },
+    });
+
+    expect(mockedPrisma.courseProbe.create).not.toHaveBeenCalled();
+  });
+
+  it("records a new local-reader observation with an unchanged outcome", async () => {
+    mockedPrisma.courseProbe.findFirst.mockResolvedValue({
+      id: "existing-probe",
+      outcome: "NO_MATCH",
+      message: "No qualifying tee times in the requested window",
+      runtimeVersion: "same-release",
+      rawSummary: {
+        providerExecution: "LOCAL_BROWSER_READER",
+        providerObservedAt: "2026-08-11T20:00:00.000Z",
+      },
+    } as never);
+
+    await recordCourseProbeIfChanged({
+      searchId: "search-1",
+      courseId: "fairview-farm",
+      outcome: "NO_MATCH",
+      message: "No qualifying tee times in the requested window",
+      runtimeVersion: "same-release",
+      rawSummary: {
+        providerExecution: "LOCAL_BROWSER_READER",
+        providerObservedAt: "2026-08-11T20:05:00.000Z",
+      },
+    });
+
+    expect(mockedPrisma.courseProbe.create).toHaveBeenCalledOnce();
+  });
+
+  it("records every runnable provider check even when its outcome is unchanged", async () => {
+    mockedPrisma.courseProbe.findFirst.mockResolvedValue({
+      id: "existing-probe",
+      outcome: "NO_MATCH",
+      message: "No qualifying tee times in the requested window",
+      runtimeVersion: "same-release",
+      rawSummary: { providerExecution: "RUNNABLE_PROVIDER_CHECK" },
+    } as never);
+
+    await recordCourseProbeIfChanged({
+      searchId: "search-1",
+      courseId: "fairview-farm",
+      outcome: "NO_MATCH",
+      message: "No qualifying tee times in the requested window",
+      runtimeVersion: "same-release",
+      rawSummary: { providerExecution: "RUNNABLE_PROVIDER_CHECK" },
     });
 
     expect(mockedPrisma.courseProbe.create).toHaveBeenCalledOnce();
   });
 
   it("classifies legacy automation runs without relying on free-form notes", () => {
-    expect(classifyAutomationRunKind("hourly-improvement-v2")).toBe("IMPROVEMENT");
-    expect(classifyAutomationRunKind("tee-time-spot-local-codex-loop-v1")).toBe(
-      "IMPROVEMENT"
+    expect(classifyAutomationRunKind("hourly-improvement-v2")).toBe(
+      "IMPROVEMENT",
     );
-    expect(classifyAutomationRunKind("course-support-v3")).toBe("COURSE_SUPPORT");
+    expect(classifyAutomationRunKind("tee-time-spot-local-codex-loop-v1")).toBe(
+      "IMPROVEMENT",
+    );
+    expect(classifyAutomationRunKind("course-support-v3")).toBe(
+      "COURSE_SUPPORT",
+    );
     expect(classifyAutomationRunKind("search-check-v2")).toBe("SEARCH_CHECK");
     expect(classifyAutomationRunKind("browser-probe-v1")).toBe("BROWSER_PROBE");
     expect(classifyAutomationRunKind("legacy")).toBe("OTHER");
@@ -2241,7 +3011,7 @@ describe("recordCourseProbeIfChanged", () => {
   it("copies parseable object notes into structured audit data", () => {
     expect(parseAutomationRunAudit('{"phase":"inspect","count":2}')).toEqual({
       phase: "inspect",
-      count: 2
+      count: 2,
     });
     expect(parseAutomationRunAudit("not json")).toBeNull();
     expect(parseAutomationRunAudit("[1,2]")).toBeNull();
@@ -2273,13 +3043,13 @@ describe("booking-window evidence monitoring revalidation", () => {
     isPublic: true,
     intelligenceConfidence: null,
     bookingMetadata: null,
-    updatedAt: new Date("2026-08-01T12:00:00.000Z")
+    updatedAt: new Date("2026-08-01T12:00:00.000Z"),
   };
 
   beforeEach(() => {
     vi.clearAllMocks();
     mockedPrisma.$transaction.mockImplementation(async (callback) =>
-      (callback as (transaction: typeof prisma) => Promise<unknown>)(prisma)
+      (callback as (transaction: typeof prisma) => Promise<unknown>)(prisma),
     );
   });
 
@@ -2292,7 +3062,7 @@ describe("booking-window evidence monitoring revalidation", () => {
       bookingWindowConfidence: 1,
       bookingWindowCheckedAt: observedAt,
       bookingWindowObservedAt: observedAt,
-      updatedAt: observedAt
+      updatedAt: observedAt,
     };
     mockedPrisma.course.findUnique.mockResolvedValue(currentCourse as never);
     mockedPrisma.course.update.mockResolvedValue(appliedCourse as never);
@@ -2309,15 +3079,19 @@ describe("booking-window evidence monitoring revalidation", () => {
       failureFingerprint: "parked-fingerprint",
       humanReviewReason: "AUTOMATION_STALLED",
       resolution: null,
-      activeBatch: null
+      activeBatch: null,
     } as never);
     mockedPrisma.courseMonitoringStatus.findUnique.mockResolvedValue({
       state: "NEEDS_HUMAN",
-      revision: 5
+      revision: 5,
     } as never);
     mockedPrisma.courseMonitoringEvent.findUnique.mockResolvedValue(null);
-    mockedPrisma.courseSupportIncident.updateMany.mockResolvedValue({ count: 1 } as never);
-    mockedPrisma.courseMonitoringStatus.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockedPrisma.courseSupportIncident.updateMany.mockResolvedValue({
+      count: 1,
+    } as never);
+    mockedPrisma.courseMonitoringStatus.updateMany.mockResolvedValue({
+      count: 1,
+    } as never);
     mockedPrisma.teeSearch.updateMany.mockResolvedValue({ count: 2 } as never);
 
     await recordCourseBookingWindowEvidence({
@@ -2327,15 +3101,15 @@ describe("booking-window evidence monitoring revalidation", () => {
         releaseTimeLocal: "06:30",
         source: "OFFICIAL_BOOKING_PAGE",
         confidence: 1,
-        evidenceUrl: "https://example.com/new-window"
+        evidenceUrl: "https://example.com/new-window",
       },
-      observedAt
+      observedAt,
     });
 
     expect(mockedPrisma.course.update).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: currentCourse.id, updatedAt: currentCourse.updatedAt }
-      })
+        where: { id: currentCourse.id, updatedAt: currentCourse.updatedAt },
+      }),
     );
     expect(mockedPrisma.courseSupportIncident.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -2344,31 +3118,31 @@ describe("booking-window evidence monitoring revalidation", () => {
           cycle: 3,
           revision: 8,
           status: "NEEDS_HUMAN",
-          activeBatchId: null
+          activeBatchId: null,
         }),
         data: expect.objectContaining({
           cycle: { increment: 1 },
           status: "AUTO_INVESTIGATING",
-          nextAttemptAt: observedAt
-        })
-      })
+          nextAttemptAt: observedAt,
+        }),
+      }),
     );
     expect(mockedPrisma.courseMonitoringStatus.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           state: "AUTO_INVESTIGATING",
           nextAutomaticAttemptAt: observedAt,
-          revalidationRequestedAt: observedAt
-        })
-      })
+          revalidationRequestedAt: observedAt,
+        }),
+      }),
     );
     expect(mockedPrisma.teeSearch.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: {
           nextCheckAt: observedAt,
-          recheckRequestedAt: observedAt
-        }
-      })
+          recheckRequestedAt: observedAt,
+        },
+      }),
     );
   });
 
@@ -2377,7 +3151,7 @@ describe("booking-window evidence monitoring revalidation", () => {
       ...currentCourse,
       bookingWindowCheckedAt: observedAt,
       bookingWindowObservedAt: observedAt,
-      updatedAt: observedAt
+      updatedAt: observedAt,
     };
     mockedPrisma.course.findUnique.mockResolvedValue(currentCourse as never);
     mockedPrisma.course.update.mockResolvedValue(appliedCourse as never);
@@ -2389,30 +3163,37 @@ describe("booking-window evidence monitoring revalidation", () => {
         releaseTimeLocal: currentCourse.bookingReleaseTimeLocal,
         source: currentCourse.bookingWindowSource as "OFFICIAL_BOOKING_PAGE",
         confidence: currentCourse.bookingWindowConfidence,
-        evidenceUrl: currentCourse.bookingWindowEvidenceUrl
+        evidenceUrl: currentCourse.bookingWindowEvidenceUrl,
       },
-      observedAt
+      observedAt,
     });
 
-    expect(mockedPrisma.courseSupportIncident.findUnique).not.toHaveBeenCalled();
-    expect(mockedPrisma.courseMonitoringStatus.findUnique).not.toHaveBeenCalled();
+    expect(
+      mockedPrisma.courseSupportIncident.findUnique,
+    ).not.toHaveBeenCalled();
+    expect(
+      mockedPrisma.courseMonitoringStatus.findUnique,
+    ).not.toHaveBeenCalled();
     expect(mockedPrisma.teeSearch.updateMany).not.toHaveBeenCalled();
   });
 
-  it("keeps a checked-at-only write outside the monitoring writer lane", async () => {
+  it("serializes a checked-at-only write in the monitoring writer lane", async () => {
+    mockedPrisma.course.findUnique.mockResolvedValue(currentCourse as never);
     mockedPrisma.course.update.mockResolvedValue({
       ...currentCourse,
-      bookingWindowCheckedAt: observedAt
+      bookingWindowCheckedAt: observedAt,
     } as never);
 
     await markCourseBookingWindowChecked(currentCourse.id, observedAt);
 
     expect(mockedPrisma.course.update).toHaveBeenCalledWith({
-      where: { id: currentCourse.id },
-      data: { bookingWindowCheckedAt: observedAt }
+      where: { id: currentCourse.id, updatedAt: currentCourse.updatedAt },
+      data: { bookingWindowCheckedAt: observedAt },
     });
-    expect(mockedPrisma.$transaction).not.toHaveBeenCalled();
-    expect(mockedPrisma.courseSupportIncident.findUnique).not.toHaveBeenCalled();
+    expect(mockedPrisma.$transaction).toHaveBeenCalledOnce();
+    expect(
+      mockedPrisma.courseSupportIncident.findUnique,
+    ).not.toHaveBeenCalled();
   });
 });
 
@@ -2443,7 +3224,15 @@ describe("physical-layout evidence persistence", () => {
     layoutHoleCounts: [],
     layoutHolesEvidenceUrl: null,
     layoutHolesVerifiedAt: null,
-    updatedAt: new Date("2026-08-18T14:00:00.000Z")
+    updatedAt: new Date("2026-08-18T14:00:00.000Z"),
+  };
+  const providerObservation = {
+    courseId: currentCourse.id,
+    leaseToken: "physical-layout-observation",
+    observationStartedAt: operationTime,
+    leaseExpiresAt: new Date("2026-08-18T15:20:00.000Z"),
+    ttlMs: 20 * 60_000,
+    supersededUnresolvedObservationStartedAt: null,
   };
 
   beforeEach(() => {
@@ -2451,8 +3240,11 @@ describe("physical-layout evidence persistence", () => {
     vi.setSystemTime(operationTime);
     vi.clearAllMocks();
     mockedPrisma.$transaction.mockImplementation(async (callback) =>
-      (callback as (transaction: typeof prisma) => Promise<unknown>)(prisma)
+      (callback as (transaction: typeof prisma) => Promise<unknown>)(prisma),
     );
+    mockedPrisma.$queryRaw.mockResolvedValue([
+      { leaseExpiresAt: new Date("2026-08-18T15:20:00.000Z") },
+    ] as never);
   });
 
   afterEach(() => {
@@ -2463,10 +3255,9 @@ describe("physical-layout evidence persistence", () => {
     const appliedCourse = {
       ...currentCourse,
       layoutHoleCounts: [18],
-      layoutHolesEvidenceUrl:
-        "https://parks.example/aguila-golf-course.html",
+      layoutHolesEvidenceUrl: "https://parks.example/aguila-golf-course.html",
       layoutHolesVerifiedAt: verifiedAt,
-      updatedAt: operationTime
+      updatedAt: operationTime,
     };
     mockedPrisma.course.findUnique.mockResolvedValue(currentCourse as never);
     mockedPrisma.course.update.mockResolvedValue(appliedCourse as never);
@@ -2483,15 +3274,19 @@ describe("physical-layout evidence persistence", () => {
       failureFingerprint: "missing-source",
       humanReviewReason: "AUTOMATION_STALLED",
       resolution: null,
-      activeBatch: null
+      activeBatch: null,
     } as never);
     mockedPrisma.courseMonitoringStatus.findUnique.mockResolvedValue({
       state: "NEEDS_HUMAN",
-      revision: 3
+      revision: 3,
     } as never);
     mockedPrisma.courseMonitoringEvent.findUnique.mockResolvedValue(null);
-    mockedPrisma.courseSupportIncident.updateMany.mockResolvedValue({ count: 1 } as never);
-    mockedPrisma.courseMonitoringStatus.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockedPrisma.courseSupportIncident.updateMany.mockResolvedValue({
+      count: 1,
+    } as never);
+    mockedPrisma.courseMonitoringStatus.updateMany.mockResolvedValue({
+      count: 1,
+    } as never);
     mockedPrisma.teeSearch.updateMany.mockResolvedValue({ count: 1 } as never);
 
     const result = await recordCoursePhysicalLayoutEvidence({
@@ -2501,35 +3296,35 @@ describe("physical-layout evidence persistence", () => {
       verifiedAt,
       expectedUpdatedAt: currentCourse.updatedAt,
       expectedName: currentCourse.name,
-      source: "OPERATOR_CLI"
+      providerObservation,
+      source: "OPERATOR_CLI",
     });
 
     expect(result).toBe(appliedCourse);
     expect(mockedPrisma.$transaction).toHaveBeenCalledWith(
       expect.any(Function),
-      expect.objectContaining({ isolationLevel: "ReadCommitted" })
+      expect.objectContaining({ isolationLevel: "ReadCommitted" }),
     );
     expect(mockedPrisma.$queryRawUnsafe).toHaveBeenCalledWith(
       expect.stringContaining("pg_advisory_xact_lock"),
-      `course-monitoring:${currentCourse.id}`
+      `course-monitoring:${currentCourse.id}`,
     );
     expect(mockedPrisma.course.update).toHaveBeenCalledWith({
       where: {
         id: currentCourse.id,
         updatedAt: currentCourse.updatedAt,
-        name: currentCourse.name
+        name: currentCourse.name,
       },
       data: {
         layoutHoleCounts: [18],
-        layoutHolesEvidenceUrl:
-          "https://parks.example/aguila-golf-course.html",
-        layoutHolesVerifiedAt: verifiedAt
-      }
+        layoutHolesEvidenceUrl: "https://parks.example/aguila-golf-course.html",
+        layoutHolesVerifiedAt: verifiedAt,
+      },
     });
     expect(mockedPrisma.courseSupportIncident.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ nextAttemptAt: operationTime })
-      })
+        data: expect.objectContaining({ nextAttemptAt: operationTime }),
+      }),
     );
     expect(mockedPrisma.courseMonitoringEvent.create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -2538,18 +3333,18 @@ describe("physical-layout evidence persistence", () => {
           audit: expect.objectContaining({
             changedFields: expect.arrayContaining([
               "layoutHoleCounts",
-              "layoutHolesVerifiedAt"
-            ])
-          })
-        })
-      })
+              "layoutHolesVerifiedAt",
+            ]),
+          }),
+        }),
+      }),
     );
   });
 
   it("does not continue after an updatedAt CAS write failure", async () => {
     mockedPrisma.course.findUnique.mockResolvedValue(currentCourse as never);
     mockedPrisma.course.update.mockRejectedValue(
-      new Error("Record to update not found")
+      new Error("Record to update not found"),
     );
 
     await expect(
@@ -2560,10 +3355,39 @@ describe("physical-layout evidence persistence", () => {
         verifiedAt,
         expectedUpdatedAt: currentCourse.updatedAt,
         expectedName: currentCourse.name,
-        source: "OPERATOR_CLI"
-      })
+        providerObservation,
+        source: "OPERATOR_CLI",
+      }),
     ).rejects.toThrow("Record to update not found");
-    expect(mockedPrisma.courseSupportIncident.findUnique).not.toHaveBeenCalled();
+    expect(
+      mockedPrisma.courseSupportIncident.findUnique,
+    ).not.toHaveBeenCalled();
+    expect(mockedPrisma.courseMonitoringEvent.create).not.toHaveBeenCalled();
+  });
+
+  it("does not write when the provider observation cannot be renewed under the course lock", async () => {
+    mockedPrisma.$queryRaw.mockResolvedValueOnce([] as never);
+
+    await expect(
+      recordCoursePhysicalLayoutEvidence({
+        courseId: currentCourse.id,
+        holeCounts: [18],
+        evidenceUrl: "https://parks.example/aguila-golf-course.html",
+        verifiedAt,
+        expectedUpdatedAt: currentCourse.updatedAt,
+        expectedName: currentCourse.name,
+        providerObservation,
+        source: "OPERATOR_CLI",
+      }),
+    ).rejects.toThrow(
+      "Provider observation ownership expired before physical-layout evidence could be persisted",
+    );
+
+    expect(mockedPrisma.course.findUnique).not.toHaveBeenCalled();
+    expect(mockedPrisma.course.update).not.toHaveBeenCalled();
+    expect(
+      mockedPrisma.courseSupportIncident.findUnique,
+    ).not.toHaveBeenCalled();
     expect(mockedPrisma.courseMonitoringEvent.create).not.toHaveBeenCalled();
   });
 
@@ -2576,26 +3400,29 @@ describe("physical-layout evidence persistence", () => {
         verifiedAt,
         expectedUpdatedAt: currentCourse.updatedAt,
         expectedName: currentCourse.name,
-        source: "OPERATOR_CLI"
+        providerObservation,
+        source: "OPERATOR_CLI",
       });
     mockedPrisma.course.findUnique.mockResolvedValueOnce({
       ...currentCourse,
-      updatedAt: new Date("2026-08-18T14:30:00.000Z")
+      updatedAt: new Date("2026-08-18T14:30:00.000Z"),
     } as never);
 
     await expect(write()).rejects.toThrow(
-      "Course identity or layout changed while physical-layout evidence was being verified"
+      "Course identity or layout changed while physical-layout evidence was being verified",
     );
 
     mockedPrisma.course.findUnique.mockResolvedValueOnce({
       ...currentCourse,
-      name: "Aguila 9 Golf Course"
+      name: "Aguila 9 Golf Course",
     } as never);
     await expect(write()).rejects.toThrow(
-      "Course identity or layout changed while physical-layout evidence was being verified"
+      "Course identity or layout changed while physical-layout evidence was being verified",
     );
     expect(mockedPrisma.course.update).not.toHaveBeenCalled();
-    expect(mockedPrisma.courseSupportIncident.findUnique).not.toHaveBeenCalled();
+    expect(
+      mockedPrisma.courseSupportIncident.findUnique,
+    ).not.toHaveBeenCalled();
     expect(mockedPrisma.courseMonitoringEvent.create).not.toHaveBeenCalled();
   });
 
@@ -2608,8 +3435,9 @@ describe("physical-layout evidence persistence", () => {
         verifiedAt: new Date("2026-08-19T00:00:00.000Z"),
         expectedUpdatedAt: currentCourse.updatedAt,
         expectedName: currentCourse.name,
-        source: "OPERATOR_CLI"
-      })
+        providerObservation,
+        source: "OPERATOR_CLI",
+      }),
     ).rejects.toThrow("valid non-future verification date");
     expect(mockedPrisma.$transaction).not.toHaveBeenCalled();
     expect(mockedPrisma.course.update).not.toHaveBeenCalled();
@@ -2624,12 +3452,374 @@ describe("physical-layout evidence persistence", () => {
         verifiedAt,
         expectedUpdatedAt: currentCourse.updatedAt,
         expectedName: currentCourse.name,
-        source: "OPERATOR_CLI"
-      })
+        providerObservation,
+        source: "OPERATOR_CLI",
+      }),
     ).rejects.toThrow(
-      "Physical layout evidence URL must be a credential-free public HTTP(S) URL"
+      "Physical layout evidence URL must be a credential-free public HTTP(S) URL",
     );
     expect(mockedPrisma.$transaction).not.toHaveBeenCalled();
     expect(mockedPrisma.course.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("course automation discovery parent fencing", () => {
+  const fencedCourseUpdatedAt = new Date("2026-08-31T00:00:00.001Z");
+  const discovery = {
+    courseId: "course-discovery-fence",
+    status: "INSPECTED" as const,
+    detectedPlatform: "UNKNOWN",
+    sourceUrl: "https://course.example/tee-times",
+    bookingUrl: null,
+    confidence: 0.75,
+    evidence: {
+      learnedFrom: "rendered-browser",
+      observedUrls: ["https://course.example/tee-times"],
+    },
+  };
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mockedPrisma.$transaction
+      .mockReset()
+      .mockImplementation(async (worker) => worker(mockedPrisma as never));
+    mockedPrisma.$queryRaw
+      .mockReset()
+      .mockResolvedValue([{ updatedAt: fencedCourseUpdatedAt }] as never);
+    mockedPrisma.$queryRawUnsafe.mockReset().mockResolvedValue([] as never);
+    mockedPrisma.courseAutomationDiscovery.create
+      .mockReset()
+      .mockResolvedValue({
+        id: "discovery-fenced",
+      } as never);
+    mockedPrisma.teeSearch.updateMany.mockResolvedValue({ count: 0 } as never);
+    mockedPrisma.teeTimeMatch.updateMany.mockResolvedValue({
+      count: 0,
+    } as never);
+  });
+
+  it("serializes the ordinary writer and touches its parent before appending", async () => {
+    await expect(recordBrowserDiscovery(discovery)).resolves.toEqual({
+      id: "discovery-fenced",
+    });
+
+    expect(mockedPrisma.$transaction).toHaveBeenCalledOnce();
+    expect(mockedPrisma.$queryRaw).toHaveBeenCalledOnce();
+    const [parentFence] = mockedPrisma.$queryRaw.mock.calls[0] as [
+      { strings: readonly string[]; values: unknown[] },
+    ];
+    const parentFenceSql = parentFence.strings.join("");
+    expect(parentFenceSql).toContain('UPDATE "Course"');
+    expect(parentFenceSql).toContain("GREATEST(");
+    expect(parentFenceSql).toContain("INTERVAL '1 millisecond'");
+    expect(parentFenceSql).toContain("clock_timestamp() AT TIME ZONE 'UTC'");
+    expect(parentFenceSql).toContain('RETURNING "updatedAt"');
+    expect(parentFence.values).toEqual([discovery.courseId]);
+    expect(mockedPrisma.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      mockedPrisma.courseAutomationDiscovery.create.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("persists a caller-provided provider source time instead of receipt time", async () => {
+    const providerObservedAt = new Date("2026-08-30T23:57:00.000Z");
+
+    await expect(
+      recordBrowserDiscovery(
+        discovery,
+        undefined,
+        undefined,
+        undefined,
+        providerObservedAt,
+      ),
+    ).resolves.toEqual({ id: "discovery-fenced" });
+
+    expect(mockedPrisma.courseAutomationDiscovery.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        courseId: discovery.courseId,
+        createdAt: providerObservedAt,
+      }),
+    });
+  });
+
+  it("touches the parent after an expected-unowned reservation and before appending", async () => {
+    mockedPrisma.courseSupportIncident.updateMany.mockResolvedValue({
+      count: 1,
+    } as never);
+    mockedPrisma.courseMonitoringEvent.findFirst.mockResolvedValue(null);
+
+    await expect(
+      recordBrowserDiscovery(discovery, undefined, undefined, {
+        id: "incident-discovery-fence",
+        cycle: 2,
+        revision: 4,
+        status: "AUTO_INVESTIGATING",
+      }),
+    ).resolves.toEqual({ id: "discovery-fenced" });
+
+    expect(
+      mockedPrisma.courseSupportIncident.updateMany.mock.invocationCallOrder[0],
+    ).toBeLessThan(mockedPrisma.$queryRaw.mock.invocationCallOrder[0]);
+    expect(mockedPrisma.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      mockedPrisma.courseAutomationDiscovery.create.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("touches the parent after validating an owned persistence fence", async () => {
+    const fence = ownedBrowserPersistenceFence({
+      incidentId: "incident-discovery-fence",
+      courseId: discovery.courseId,
+    });
+    mockedPrisma.courseSupportIncident.updateMany.mockResolvedValue({
+      count: 1,
+    } as never);
+    mockedPrisma.courseSupportBatch.updateMany.mockResolvedValue({
+      count: 1,
+    } as never);
+    mockedPrisma.courseSupportBatchIncident.findUnique.mockResolvedValue({
+      courseId: discovery.courseId,
+      cycle: fence.cycle,
+      result: "PENDING",
+    } as never);
+    mockedPrisma.courseSupportIncident.findUnique.mockResolvedValue({
+      cycle: fence.cycle,
+      attemptLedger: browserPlaybookLedger(false),
+    } as never);
+    mockedPrisma.courseMonitoringEvent.findFirst.mockResolvedValue(null);
+
+    await expect(
+      recordBrowserDiscovery(discovery, fence, browserRuntimeVersion),
+    ).resolves.toEqual({ id: "discovery-fenced" });
+
+    expect(mockedPrisma.courseSupportBatch.updateMany).toHaveBeenCalledOnce();
+    expect(mockedPrisma.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      mockedPrisma.courseAutomationDiscovery.create.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("touches the parent after persisting a recovered official site and before appending", async () => {
+    const expectedUpdatedAt = new Date("2026-08-19T11:00:00.000Z");
+    const observedAt = new Date("2026-08-19T11:01:00.000Z");
+    const current = {
+      id: discovery.courseId,
+      website: null,
+      detectedBookingUrl: null,
+      detectedPlatform: "UNKNOWN",
+      providerFamilyKey: "SOURCE_MISSING",
+      bookingMethod: "UNKNOWN",
+      automationEligibility: "UNKNOWN",
+      automationReason: "NONE",
+      monitoringMode: "AUTOMATIC",
+      bookingAccessMode: "UNKNOWN",
+      isPublic: true,
+      intelligenceConfidence: null,
+      bookingMetadata: null,
+      monitoringStatus: null,
+      supportIncident: null,
+      updatedAt: expectedUpdatedAt,
+    };
+    const applied = {
+      ...current,
+      website: "https://course.example/golf",
+      updatedAt: new Date("2026-08-19T11:01:01.000Z"),
+    };
+    mockedPrisma.course.findUnique
+      .mockResolvedValueOnce(current as never)
+      .mockResolvedValueOnce(applied as never);
+    mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
+
+    await expect(
+      applyRecoveredOfficialWebsiteToCourse({
+        courseId: current.id,
+        website: applied.website,
+        expectedUpdatedAt,
+        observedAt,
+      }),
+    ).resolves.toEqual({ ...applied, updatedAt: fencedCourseUpdatedAt });
+
+    expect(
+      mockedPrisma.course.updateMany.mock.invocationCallOrder[0],
+    ).toBeLessThan(mockedPrisma.$queryRaw.mock.invocationCallOrder[0]);
+    expect(mockedPrisma.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      mockedPrisma.courseAutomationDiscovery.create.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("applies and appends ordinary discovery atomically before returning the parent fence timestamp", async () => {
+    const expectedUpdatedAt = new Date("2026-08-19T11:30:00.000Z");
+    const observedAt = new Date("2026-08-19T11:31:00.000Z");
+    const bookingUrl =
+      "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes";
+    const bookingMetadata = {
+      scheduleId: 6123,
+      bookingBaseUrl: bookingUrl,
+    };
+    const current = {
+      id: discovery.courseId,
+      name: "Discovery Fence Golf Course",
+      timeZone: "America/New_York",
+      website: "https://course.example/golf",
+      detectedBookingUrl: bookingUrl,
+      detectedPlatform: "FOREUP",
+      providerFamilyKey: "FOREUP",
+      bookingMethod: "UNKNOWN",
+      bookingWindowDaysAhead: null,
+      bookingWindowEvidenceUrl: null,
+      bookingReleaseTimeLocal: null,
+      bookingWindowSource: null,
+      bookingWindowConfidence: null,
+      automationEligibility: "NEEDS_REVIEW",
+      automationReason: "UNSUPPORTED_PLATFORM",
+      monitoringMode: "AUTOMATIC",
+      bookingAccessMode: "UNKNOWN",
+      isPublic: true,
+      intelligenceVerifiedAt: null,
+      intelligenceReviewAt: null,
+      intelligenceConfidence: null,
+      bookingMetadata: null,
+      layoutHoleCounts: [],
+      layoutHolesVerifiedAt: null,
+      monitoringStatus: null,
+      supportIncident: null,
+      updatedAt: expectedUpdatedAt,
+    };
+    const applied = {
+      ...current,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      automationReason: "NONE",
+      bookingAccessMode: "PUBLIC_SIGNED_OUT",
+      bookingMetadata,
+      intelligenceVerifiedAt: observedAt,
+      intelligenceConfidence: 0.95,
+      updatedAt: observedAt,
+    };
+    mockedPrisma.course.findUnique
+      .mockResolvedValueOnce(current as never)
+      .mockResolvedValueOnce(applied as never);
+    mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
+
+    await expect(
+      recordAndApplyBrowserDiscoveryToCourse(
+        {
+          ...discovery,
+          status: "LEARNED",
+          detectedPlatform: "FOREUP",
+          sourceUrl: current.website,
+          bookingUrl,
+          bookingMethod: "PUBLIC_ONLINE",
+          automationEligibility: "ALLOWED",
+          automationReason: "NONE",
+          apiMetadata: bookingMetadata,
+          confidence: 0.95,
+        },
+        {
+          updatedAt: expectedUpdatedAt,
+          detectedBookingUrl: bookingUrl,
+          bookingMethod: "UNKNOWN",
+          automationEligibility: "NEEDS_REVIEW",
+        },
+        undefined,
+        { observedAt },
+      ),
+    ).resolves.toEqual({
+      applied: { ...applied, updatedAt: fencedCourseUpdatedAt },
+      discovery: { id: "discovery-fenced" },
+    });
+
+    expect(
+      mockedPrisma.courseSupportIncident.updateMany,
+    ).not.toHaveBeenCalled();
+    expect(
+      mockedPrisma.course.updateMany.mock.invocationCallOrder[0],
+    ).toBeLessThan(mockedPrisma.$queryRaw.mock.invocationCallOrder[0]);
+    expect(mockedPrisma.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      mockedPrisma.courseAutomationDiscovery.create.mock.invocationCallOrder[0],
+    );
+    const [parentFence] = mockedPrisma.$queryRaw.mock.calls[0] as [
+      { values: unknown[] },
+    ];
+    expect(parentFence.values).toEqual([current.id]);
+  });
+
+  it("touches the parent when appending evidence without changing an operator-final projection", async () => {
+    const observedAt = new Date("2026-08-19T12:00:00.000Z");
+    mockedPrisma.courseSupportIncident.updateMany.mockResolvedValue({
+      count: 1,
+    } as never);
+    mockedPrisma.courseMonitoringEvent.findFirst.mockResolvedValue(null);
+    mockedPrisma.course.findUnique.mockResolvedValueOnce({
+      providerFamilyKey: "SOURCE_MISSING",
+      detectedPlatform: "UNKNOWN",
+      detectedBookingUrl: null,
+      website: "https://course.example/golf",
+      bookingMetadata: null,
+      isPublic: true,
+      bookingMethod: "PHONE_ONLY",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      bookingAccessMode: "PHONE_ONLY",
+      intelligenceVerifiedAt: observedAt,
+      intelligenceReviewAt: null,
+      intelligenceConfidence: 1,
+      monitoringStatus: { state: "FINAL_MANUAL" },
+      supportIncident: { resolution: "DIRECT_BOOKING_CLASSIFIED" },
+      updatedAt: observedAt,
+    } as never);
+
+    await expect(
+      recordAndApplyBrowserDiscoveryToCourse(
+        {
+          ...discovery,
+          status: "LEARNED",
+          detectedPlatform: "FOREUP",
+          bookingUrl:
+            "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
+          bookingMethod: "PUBLIC_ONLINE",
+          automationEligibility: "ALLOWED",
+          automationReason: "NONE",
+          apiMetadata: {
+            scheduleId: 6123,
+            bookingBaseUrl:
+              "https://foreupsoftware.com/index.php/booking/22518/6123#/teetimes",
+          },
+          confidence: 0.95,
+        },
+        {
+          updatedAt: observedAt,
+          detectedBookingUrl: null,
+          bookingMethod: "PHONE_ONLY",
+          automationEligibility: "BLOCKED",
+        },
+        {
+          id: "incident-discovery-fence",
+          cycle: 2,
+          revision: 6,
+          status: "RESOLVED",
+        },
+        { observedAt },
+      ),
+    ).resolves.toEqual({
+      applied: null,
+      discovery: { id: "discovery-fenced" },
+    });
+
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
+    expect(mockedPrisma.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      mockedPrisma.courseAutomationDiscovery.create.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("fails clearly without retrying or appending when the parent course is missing", async () => {
+    mockedPrisma.$queryRaw.mockResolvedValue([] as never);
+
+    await expect(recordBrowserDiscovery(discovery)).rejects.toThrow(
+      "Course automation discovery parent course no longer exists.",
+    );
+
+    expect(mockedPrisma.$transaction).toHaveBeenCalledOnce();
+    expect(mockedPrisma.$queryRaw).toHaveBeenCalledOnce();
+    expect(
+      mockedPrisma.courseAutomationDiscovery.create,
+    ).not.toHaveBeenCalled();
   });
 });

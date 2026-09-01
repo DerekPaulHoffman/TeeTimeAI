@@ -5,18 +5,19 @@ import {
   createIncidentReference,
   getHumanReviewRetryAt,
   getCourseMonitoringEscalationDeadline,
+  runSerializedCourseMonitoringWrite,
   sanitizeExactEvidenceUrl,
   sanitizeEvidenceUrl,
-  shouldOpenFreshPlaybookCycleForProviderEvidence
+  shouldOpenFreshPlaybookCycleForProviderEvidence,
 } from "@/lib/automation/course-monitoring";
 import {
   assessAutomationPlaybook,
-  isAutomationPlaybookExhausted
+  isAutomationPlaybookExhausted,
 } from "@/lib/automation/course-monitoring-playbook";
 import {
   buildProviderFailureFingerprint,
   normalizeProviderFamilyKey,
-  resolveProviderCapability
+  resolveProviderCapability,
 } from "@/lib/automation/provider-capabilities";
 import { sanitizeResponderText } from "@/lib/automation/course-support-responder-policy";
 import { getCourseLocalDateStorageBoundary } from "@/lib/automation/date-boundary";
@@ -35,7 +36,9 @@ const idempotencyKeySchema = z
   .max(100)
   .regex(/^[a-zA-Z0-9:_-]+$/u);
 const boundedNoteSchema = z.string().trim().min(3).max(500);
-const safeOperatorNoteSchema = boundedNoteSchema.transform((value) => sanitizeResponderText(value));
+const safeOperatorNoteSchema = boundedNoteSchema.transform((value) =>
+  sanitizeResponderText(value),
+);
 const revisionSchema = z.number().int().nonnegative();
 const cycleSchema = z.number().int().positive().nullable();
 
@@ -46,7 +49,7 @@ export const humanReviewReasonSchema = z.enum([
   "READER_RELOAD_REQUIRED",
   "OFFICIAL_LINK_VERIFICATION_FAILED",
   "AUTOMATION_STALLED",
-  "OTHER_TECHNICAL_LIMITATION"
+  "OTHER_TECHNICAL_LIMITATION",
 ]);
 
 export const operatorCourseDecisionSchema = z.enum([
@@ -56,13 +59,20 @@ export const operatorCourseDecisionSchema = z.enum([
   "PHONE_OR_MANUAL",
   "ACCOUNT_REQUIRED",
   "CAPTCHA_OR_QUEUE",
-  "OTHER_TECHNICAL_LIMITATION"
+  "OTHER_TECHNICAL_LIMITATION",
 ]);
 
-export type OperatorCourseDecision = z.infer<typeof operatorCourseDecisionSchema>;
+export type OperatorCourseDecision = z.infer<
+  typeof operatorCourseDecisionSchema
+>;
 
-export function operatorCourseDecisionRequiresEvidence(decision: OperatorCourseDecision) {
-  return decision !== "LOCAL_READER" && decision !== "WEBSITE_TEMPORARILY_UNAVAILABLE";
+export function operatorCourseDecisionRequiresEvidence(
+  decision: OperatorCourseDecision,
+) {
+  return (
+    decision !== "LOCAL_READER" &&
+    decision !== "WEBSITE_TEMPORARILY_UNAVAILABLE"
+  );
 }
 
 export type OperatorMutationContext = {
@@ -84,11 +94,11 @@ export async function loadOperatorCourseMonitoringDetail(reference: string) {
         {
           course: {
             supportIncident: {
-              reference: parsedReference.data
-            }
-          }
-        }
-      ]
+              reference: parsedReference.data,
+            },
+          },
+        },
+      ],
     },
     include: {
       course: {
@@ -111,12 +121,12 @@ export async function loadOperatorCourseMonitoringDetail(reference: string) {
               deploymentSha: true,
               operatorActorId: true,
               occurredAt: true,
-              audit: true
-            }
-          }
-        }
-      }
-    }
+              audit: true,
+            },
+          },
+        },
+      },
+    },
   });
   if (!status) {
     return null;
@@ -127,17 +137,17 @@ export async function loadOperatorCourseMonitoringDetail(reference: string) {
       where: {
         status: "ACTIVE",
         trafficClass: { notIn: ["AUTOMATION", "TEST"] },
-        preferences: { some: { courseId: status.courseId } }
-      }
+        preferences: { some: { courseId: status.courseId } },
+      },
     }),
     prisma.searchEmailDelivery.count({
       where: {
         status: { in: ["PENDING", "SENDING", "FAILED"] },
         teeSearch: {
-          preferences: { some: { courseId: status.courseId } }
-        }
-      }
-    })
+          preferences: { some: { courseId: status.courseId } },
+        },
+      },
+    }),
   ]);
 
   return {
@@ -167,7 +177,7 @@ export async function loadOperatorCourseMonitoringDetail(reference: string) {
       automationEligibility: status.course.automationEligibility,
       automationReason: status.course.automationReason,
       monitoringMode: status.course.monitoringMode,
-      isPublic: status.course.isPublic
+      isPublic: status.course.isPublic,
     },
     incident: status.course.supportIncident
       ? {
@@ -178,32 +188,42 @@ export async function loadOperatorCourseMonitoringDetail(reference: string) {
           kind: status.course.supportIncident.kind,
           failureClass: status.course.supportIncident.failureClass,
           confirmedAt: status.course.supportIncident.confirmedAt,
-          escalationDeadlineAt: status.course.supportIncident.escalationDeadlineAt,
+          escalationDeadlineAt:
+            status.course.supportIncident.escalationDeadlineAt,
           humanReviewReason: status.course.supportIncident.humanReviewReason,
           nextReminderAt: status.course.supportIncident.nextReminderAt,
-          nextAction: sanitizeOperatorText(status.course.supportIncident.nextAction),
-          latestMessage: sanitizeOperatorText(status.course.supportIncident.latestMessage),
+          nextAction: sanitizeOperatorText(
+            status.course.supportIncident.nextAction,
+          ),
+          latestMessage: sanitizeOperatorText(
+            status.course.supportIncident.latestMessage,
+          ),
           attemptCount: status.course.supportIncident.attemptCount,
           playbook: assessAutomationPlaybook(
             status.course.supportIncident.attemptLedger,
-            status.course.supportIncident.cycle
+            status.course.supportIncident.cycle,
           ),
-          activeRealSearchCount: status.course.supportIncident.activeRealSearchCount,
+          activeRealSearchCount:
+            status.course.supportIncident.activeRealSearchCount,
           resolution: status.course.supportIncident.resolution,
-          resolutionMessage: sanitizeOperatorText(status.course.supportIncident.resolutionMessage),
+          resolutionMessage: sanitizeOperatorText(
+            status.course.supportIncident.resolutionMessage,
+          ),
           decisionAt: status.course.supportIncident.decisionAt,
-          decisionNote: sanitizeOperatorText(status.course.supportIncident.decisionNote),
+          decisionNote: sanitizeOperatorText(
+            status.course.supportIncident.decisionNote,
+          ),
           decisionEvidenceUrl: safeOperatorEvidenceUrl(
             status.course.supportIncident.decisionEvidenceUrl,
-          )
+          ),
         }
       : null,
     timeline: status.course.monitoringEvents.map((event) => ({
       ...event,
       evidenceUrl: safeOperatorEvidenceUrl(event.evidenceUrl),
       operatorActorId: event.operatorActorId ? "[operator]" : null,
-      audit: sanitizeTimelineAudit(event.audit)
-    }))
+      audit: sanitizeTimelineAudit(event.audit),
+    })),
   };
 }
 
@@ -218,7 +238,7 @@ export async function correctOperatorCourseBookingLink(
     note: string;
     idempotencyKey: string;
   },
-  context: OperatorMutationContext
+  context: OperatorMutationContext,
 ) {
   const input = z
     .object({
@@ -229,33 +249,37 @@ export async function correctOperatorCourseBookingLink(
       bookingUrl: z.string().trim().url().max(1000),
       evidenceUrl: z.string().trim().url().max(1000),
       note: safeOperatorNoteSchema,
-      idempotencyKey: idempotencyKeySchema
+      idempotencyKey: idempotencyKeySchema,
     })
     .parse(rawInput);
   const bookingUrl = requireSafeHttpsUrl(input.bookingUrl, "booking link");
-  const evidenceUrl = requireSafeExactEvidenceUrl(input.evidenceUrl, "official evidence link");
+  const evidenceUrl = requireSafeExactEvidenceUrl(
+    input.evidenceUrl,
+    "official evidence link",
+  );
   const current = await requireMutationTarget(
     input.reference,
     input.statusRevision,
     input.incidentCycle,
     input.incidentRevision,
-    input.idempotencyKey
+    input.idempotencyKey,
   );
   const provider = resolveProviderCapability({
-    detectedBookingUrl: bookingUrl
+    detectedBookingUrl: bookingUrl,
   });
   const preview = {
     action: "correct_booking_link" as const,
     courseRef: current.status.reference,
     providerFamilyKey: provider.providerFamilyKey,
-    queuedAlertCount: current.activeSearches.length
+    queuedAlertCount: current.activeSearches.length,
   };
   if (!context.apply || current.replayed) {
     return { ...preview, applied: false, replayed: current.replayed };
   }
 
   const now = new Date();
-  await prisma.$transaction(
+  await runSerializedCourseMonitoringWrite(
+    current.status.courseId,
     async (transaction) => {
       await assertMutationStillCurrent(transaction, current, input);
       const incident = await ensureOperatorIncident(transaction, {
@@ -267,12 +291,12 @@ export async function correctOperatorCourseBookingLink(
           providerFamilyKey: provider.providerFamilyKey,
           failureClass: "MISSING_METADATA",
           operation: "METADATA",
-          httpStatus: null
+          httpStatus: null,
         }),
         providerFamilyKey: provider.providerFamilyKey,
         bookingUrlSnapshot: bookingUrl,
         message:
-          "An operator corrected the official booking link and requested fresh monitoring proof."
+          "An operator corrected the official booking link and requested fresh monitoring proof.",
       });
       await transaction.course.update({
         where: { id: current.status.courseId },
@@ -284,13 +308,13 @@ export async function correctOperatorCourseBookingLink(
           automationReason: "OTHER",
           intelligenceVerifiedAt: null,
           intelligenceReviewAt: null,
-          intelligenceConfidence: null
-        }
+          intelligenceConfidence: null,
+        },
       });
       await transaction.courseMonitoringStatus.update({
         where: {
           courseId: current.status.courseId,
-          revision: current.status.revision
+          revision: current.status.revision,
         },
         data: {
           state: "AUTO_INVESTIGATING",
@@ -299,8 +323,8 @@ export async function correctOperatorCourseBookingLink(
           nextAutomaticAttemptAt: now,
           revalidationRequestedAt: now,
           stateChangedAt: now,
-          revision: { increment: 1 }
-        }
+          revision: { increment: 1 },
+        },
       });
       await transaction.courseMonitoringEvent.create({
         data: {
@@ -321,20 +345,24 @@ export async function correctOperatorCourseBookingLink(
             priorCycle: current.incident?.cycle ?? null,
             cycle: shouldOpenFreshPlaybookCycleForProviderEvidence({
               status: current.incident?.status ?? "",
-              humanReviewReason: current.incident?.humanReviewReason
+              humanReviewReason: current.incident?.humanReviewReason,
             })
               ? (current.incident?.cycle ?? 0) + 1
               : (current.incident?.cycle ?? null),
-            customerDataIncluded: false
-          }
-        }
+            customerDataIncluded: false,
+          },
+        },
+      });
+      await terminalizeAvailableCourseMatches(transaction, {
+        courseId: current.status.courseId,
+        unavailableAt: now,
       });
     },
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
   );
   await dispatchAffectedSearches(
     current.activeSearches.map((search) => search.id),
-    context.dispatchSearches
+    context.dispatchSearches,
   );
   return { ...preview, applied: true, replayed: false };
 }
@@ -350,7 +378,7 @@ export async function updateOperatorCourseOfficialLinks(
     bookingUrl: string | null;
     idempotencyKey: string;
   },
-  context: OperatorMutationContext
+  context: OperatorMutationContext,
 ) {
   const input = z
     .object({
@@ -361,11 +389,14 @@ export async function updateOperatorCourseOfficialLinks(
       providerFamilyKey: z.string().trim().min(1).max(253),
       website: z.string().trim().max(1000).nullable(),
       bookingUrl: z.string().trim().max(1000).nullable(),
-      idempotencyKey: idempotencyKeySchema
+      idempotencyKey: idempotencyKeySchema,
     })
     .parse(rawInput);
   const website = optionalSafeHttpsUrl(input.website, "official course site");
-  const bookingUrl = optionalSafeHttpsUrl(input.bookingUrl, "official booking page");
+  const bookingUrl = optionalSafeHttpsUrl(
+    input.bookingUrl,
+    "official booking page",
+  );
   const providerFamilyKey = normalizeProviderFamilyKey(input.providerFamilyKey);
   if (
     providerFamilyKey === "SOURCE_MISSING" &&
@@ -381,29 +412,31 @@ export async function updateOperatorCourseOfficialLinks(
     input.statusRevision,
     input.incidentCycle,
     input.incidentRevision,
-    input.idempotencyKey
+    input.idempotencyKey,
   );
   if (
     website === current.status.course.website &&
     bookingUrl === current.status.course.detectedBookingUrl &&
     providerFamilyKey === current.status.course.providerFamilyKey
   ) {
-    throw new Error("Change the provider or at least one official link before saving.");
+    throw new Error(
+      "Change the provider or at least one official link before saving.",
+    );
   }
   const provider = resolveProviderCapability(
     providerFamilyKey === "SOURCE_MISSING"
       ? {
           website,
-          detectedBookingUrl: bookingUrl
+          detectedBookingUrl: bookingUrl,
         }
-      : { providerFamilyKey }
+      : { providerFamilyKey },
   );
   const evidenceUrl = bookingUrl ?? website!;
   const preview = {
     action: "update_official_links" as const,
     courseRef: current.status.reference,
     providerFamilyKey: provider.providerFamilyKey,
-    queuedAlertCount: current.activeSearches.length
+    queuedAlertCount: current.activeSearches.length,
   };
   if (!context.apply || current.replayed) {
     return { ...preview, applied: false, replayed: current.replayed };
@@ -412,7 +445,8 @@ export async function updateOperatorCourseOfficialLinks(
   const now = new Date();
   const message =
     "Provider or official links changed. Provider verification and a fresh monitoring check were queued.";
-  await prisma.$transaction(
+  await runSerializedCourseMonitoringWrite(
+    current.status.courseId,
     async (transaction) => {
       await assertMutationStillCurrent(transaction, current, input);
       const incident = await ensureOperatorIncident(transaction, {
@@ -424,11 +458,11 @@ export async function updateOperatorCourseOfficialLinks(
           providerFamilyKey: provider.providerFamilyKey,
           failureClass: "MISSING_METADATA",
           operation: "METADATA",
-          httpStatus: null
+          httpStatus: null,
         }),
         providerFamilyKey: provider.providerFamilyKey,
         bookingUrlSnapshot: bookingUrl ?? website!,
-        message
+        message,
       });
       await transaction.course.update({
         where: { id: current.status.courseId },
@@ -441,13 +475,13 @@ export async function updateOperatorCourseOfficialLinks(
           automationReason: "OTHER",
           intelligenceVerifiedAt: null,
           intelligenceReviewAt: null,
-          intelligenceConfidence: null
-        }
+          intelligenceConfidence: null,
+        },
       });
       await transaction.courseMonitoringStatus.update({
         where: {
           courseId: current.status.courseId,
-          revision: current.status.revision
+          revision: current.status.revision,
         },
         data: {
           state: "AUTO_INVESTIGATING",
@@ -456,8 +490,8 @@ export async function updateOperatorCourseOfficialLinks(
           nextAutomaticAttemptAt: now,
           revalidationRequestedAt: now,
           stateChangedAt: now,
-          revision: { increment: 1 }
-        }
+          revision: { increment: 1 },
+        },
       });
       await transaction.courseMonitoringEvent.create({
         data: {
@@ -478,28 +512,33 @@ export async function updateOperatorCourseOfficialLinks(
             priorCycle: current.incident?.cycle ?? null,
             cycle: shouldOpenFreshPlaybookCycleForProviderEvidence({
               status: current.incident?.status ?? "",
-              humanReviewReason: current.incident?.humanReviewReason
+              humanReviewReason: current.incident?.humanReviewReason,
             })
               ? (current.incident?.cycle ?? 0) + 1
               : (current.incident?.cycle ?? null),
             websiteChanged: website !== current.status.course.website,
-            bookingUrlChanged: bookingUrl !== current.status.course.detectedBookingUrl,
-            customerDataIncluded: false
-          }
-        }
+            bookingUrlChanged:
+              bookingUrl !== current.status.course.detectedBookingUrl,
+            customerDataIncluded: false,
+          },
+        },
+      });
+      await terminalizeAvailableCourseMatches(transaction, {
+        courseId: current.status.courseId,
+        unavailableAt: now,
       });
     },
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
   );
   await dispatchAffectedSearches(
     current.activeSearches.map((search) => search.id),
-    context.dispatchSearches
+    context.dispatchSearches,
   );
   return {
     ...preview,
     localReaderQueued: false,
     applied: true,
-    replayed: false
+    replayed: false,
   };
 }
 
@@ -512,7 +551,7 @@ export async function requestOperatorCourseRecheck(
     note: string;
     idempotencyKey: string;
   },
-  context: OperatorMutationContext
+  context: OperatorMutationContext,
 ) {
   const input = z
     .object({
@@ -521,7 +560,7 @@ export async function requestOperatorCourseRecheck(
       incidentCycle: cycleSchema,
       incidentRevision: revisionSchema.nullable(),
       note: safeOperatorNoteSchema,
-      idempotencyKey: idempotencyKeySchema
+      idempotencyKey: idempotencyKeySchema,
     })
     .parse(rawInput);
   const current = await requireMutationTarget(
@@ -529,10 +568,11 @@ export async function requestOperatorCourseRecheck(
     input.statusRevision,
     input.incidentCycle,
     input.incidentRevision,
-    input.idempotencyKey
+    input.idempotencyKey,
   );
   const authoritativeFinalRetained =
-    current.status.state === "FINAL_MANUAL" || current.status.state === "FINAL_IDENTITY";
+    current.status.state === "FINAL_MANUAL" ||
+    current.status.state === "FINAL_IDENTITY";
   if (authoritativeFinalRetained) {
     throw new Error(
       "A factual final cannot use a generic AI recheck. Submit a new evidence-backed outcome or correct the official provider or links.",
@@ -541,7 +581,7 @@ export async function requestOperatorCourseRecheck(
   const preview = {
     action: "request_recheck" as const,
     courseRef: current.status.reference,
-    queuedAlertCount: current.activeSearches.length
+    queuedAlertCount: current.activeSearches.length,
   };
   if (!context.apply || current.replayed) {
     return { ...preview, applied: false, replayed: current.replayed };
@@ -551,29 +591,30 @@ export async function requestOperatorCourseRecheck(
   const opensFreshPlaybookCycle = Boolean(
     current.incident &&
     !authoritativeFinalRetained &&
-    shouldOpenFreshPlaybookCycleForProviderEvidence(current.incident)
+    shouldOpenFreshPlaybookCycleForProviderEvidence(current.incident),
   );
   const targetState = authoritativeFinalRetained
     ? current.status.state
     : current.status.state === "FINAL_TECHNICAL"
       ? "REVALIDATING_FINAL"
       : "AUTO_INVESTIGATING";
-  await prisma.$transaction(
+  await runSerializedCourseMonitoringWrite(
+    current.status.courseId,
     async (transaction) => {
       await assertMutationStillCurrent(transaction, current, input);
       if (!authoritativeFinalRetained) {
         await transaction.courseMonitoringStatus.update({
           where: {
             courseId: current.status.courseId,
-            revision: current.status.revision
+            revision: current.status.revision,
           },
           data: {
             state: targetState,
             revalidationRequestedAt: now,
             nextAutomaticAttemptAt: now,
             stateChangedAt: now,
-            revision: { increment: 1 }
-          }
+            revision: { increment: 1 },
+          },
         });
       }
       if (current.incident && !authoritativeFinalRetained) {
@@ -581,7 +622,7 @@ export async function requestOperatorCourseRecheck(
           where: {
             id: current.incident.id,
             cycle: current.incident.cycle,
-            revision: current.incident.revision
+            revision: current.incident.revision,
           },
           data: {
             ...(opensFreshPlaybookCycle
@@ -590,7 +631,7 @@ export async function requestOperatorCourseRecheck(
                   status: "AUTO_INVESTIGATING" as const,
                   humanReviewReason: null,
                   nextReminderAt: null,
-                  confirmedAt: now
+                  confirmedAt: now,
                 }
               : {}),
             nextAttemptAt: now,
@@ -598,15 +639,17 @@ export async function requestOperatorCourseRecheck(
               ? {
                   escalationDeadlineAt: getCourseMonitoringEscalationDeadline(
                     now,
-                    current.incident.activeRealSearchCount
-                  )
+                    current.incident.activeRealSearchCount,
+                  ),
                 }
               : {}),
-            ...(hasClosedResponderBatch(current.incident) ? { activeBatchId: null } : {}),
+            ...(hasClosedResponderBatch(current.incident)
+              ? { activeBatchId: null }
+              : {}),
             lastSeenAt: now,
             nextAction: input.note,
-            revision: { increment: 1 }
-          }
+            revision: { increment: 1 },
+          },
         });
       }
       await transaction.courseMonitoringEvent.create({
@@ -629,22 +672,22 @@ export async function requestOperatorCourseRecheck(
               : (current.incident?.cycle ?? null),
             authoritativeFinalRetained,
             preservesPriorAttemptEvents: true,
-            customerDataIncluded: false
-          }
-        }
+            customerDataIncluded: false,
+          },
+        },
       });
     },
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
   );
   await dispatchAffectedSearches(
     current.activeSearches.map((search) => search.id),
-    context.dispatchSearches
+    context.dispatchSearches,
   );
   return {
     ...preview,
     localReaderQueued: false,
     applied: true,
-    replayed: false
+    replayed: false,
   };
 }
 
@@ -659,7 +702,7 @@ export async function applyOperatorCourseDecision(
     note?: string | null;
     idempotencyKey: string;
   },
-  context: OperatorMutationContext
+  context: OperatorMutationContext,
 ) {
   const input = z
     .object({
@@ -670,12 +713,16 @@ export async function applyOperatorCourseDecision(
       decision: operatorCourseDecisionSchema,
       evidenceUrl: z.string().trim().url().max(1000).nullish(),
       note: safeOperatorNoteSchema.nullish(),
-      idempotencyKey: idempotencyKeySchema
+      idempotencyKey: idempotencyKeySchema,
     })
     .parse(rawInput);
-  const finalDecisionRequiresEvidence = operatorCourseDecisionRequiresEvidence(input.decision);
+  const finalDecisionRequiresEvidence = operatorCourseDecisionRequiresEvidence(
+    input.decision,
+  );
   if (finalDecisionRequiresEvidence && (!input.evidenceUrl || !input.note)) {
-    throw new Error("Final outcomes require an official evidence link and decision note.");
+    throw new Error(
+      "Final outcomes require an official evidence link and decision note.",
+    );
   }
   const finalEvidenceUrl = input.evidenceUrl
     ? requireSafeExactEvidenceUrl(input.evidenceUrl, "official evidence link")
@@ -685,16 +732,18 @@ export async function applyOperatorCourseDecision(
     input.statusRevision,
     input.incidentCycle,
     input.incidentRevision,
-    input.idempotencyKey
+    input.idempotencyKey,
   );
   if (!current.incident) {
-    throw new Error("A durable course incident is required before setting the course outcome.");
+    throw new Error(
+      "A durable course incident is required before setting the course outcome.",
+    );
   }
   const incident = current.incident;
   const preview = {
     action: "set_course_outcome" as const,
     courseRef: current.status.reference,
-    decision: input.decision
+    decision: input.decision,
   };
   if (!context.apply || current.replayed) {
     return { ...preview, applied: false, replayed: current.replayed };
@@ -709,9 +758,10 @@ export async function applyOperatorCourseDecision(
       providerFamilyKey: current.status.course.providerFamilyKey,
       failureClass: "UNKNOWN",
       operation: "AVAILABILITY",
-      httpStatus: null
+      httpStatus: null,
     });
-    await prisma.$transaction(
+    await runSerializedCourseMonitoringWrite(
+      current.status.courseId,
       async (transaction) => {
         await assertMutationStillCurrent(transaction, current, input);
         await transaction.course.update({
@@ -721,13 +771,13 @@ export async function applyOperatorCourseDecision(
             automationReason: "TEMPORARILY_UNAVAILABLE",
             intelligenceVerifiedAt: null,
             intelligenceReviewAt: retryAt,
-            intelligenceConfidence: null
-          }
+            intelligenceConfidence: null,
+          },
         });
         await transaction.courseMonitoringStatus.update({
           where: {
             courseId: current.status.courseId,
-            revision: current.status.revision
+            revision: current.status.revision,
           },
           data: {
             state: "DEGRADED_RETRYING",
@@ -738,23 +788,25 @@ export async function applyOperatorCourseDecision(
             nextAutomaticAttemptAt: retryAt,
             revalidationRequestedAt: null,
             stateChangedAt: now,
-            revision: { increment: 1 }
-          }
+            revision: { increment: 1 },
+          },
         });
         await transaction.courseSupportIncident.update({
           where: {
             id: incident.id,
             cycle: incident.cycle,
-            revision: incident.revision
+            revision: incident.revision,
           },
           data: {
-            cycle: incident.status === "RESOLVED" ? { increment: 1 } : undefined,
+            cycle:
+              incident.status === "RESOLVED" ? { increment: 1 } : undefined,
             status: "AUTO_INVESTIGATING",
             kind: "FETCH_FAILED",
             failureClass: "UNKNOWN",
             failureFingerprint,
             latestMessage: message,
-            nextAction: "Check the official course website again after the temporary retry window.",
+            nextAction:
+              "Check the official course website again after the temporary retry window.",
             nextAttemptAt: retryAt,
             confirmedAt: now,
             escalationDeadlineAt: retryAt,
@@ -770,8 +822,8 @@ export async function applyOperatorCourseDecision(
             decisionEvidenceUrl: null,
             decisionIdempotencyKey: null,
             lastSeenAt: now,
-            revision: { increment: 1 }
-          }
+            revision: { increment: 1 },
+          },
         });
         await transaction.courseMonitoringEvent.create({
           data: {
@@ -784,7 +836,9 @@ export async function applyOperatorCourseDecision(
             outcome: "FETCH_FAILED",
             failureFingerprint,
             message,
-            evidenceUrl: current.status.course.detectedBookingUrl ?? current.status.course.website,
+            evidenceUrl:
+              current.status.course.detectedBookingUrl ??
+              current.status.course.website,
             operatorActorId: normalizeActorId(context.actorId),
             idempotencyKey: input.idempotencyKey,
             occurredAt: now,
@@ -792,36 +846,40 @@ export async function applyOperatorCourseDecision(
               action: "set_course_outcome",
               decision: input.decision,
               timerBasedRevalidation: true,
-              customerDataIncluded: false
-            }
-          }
+              customerDataIncluded: false,
+            },
+          },
         });
       },
-      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     );
     return {
       ...preview,
       retryAt,
       applied: true,
-      replayed: false
+      replayed: false,
     };
   }
 
   if (input.decision === "LOCAL_READER") {
     const message = "Use the local tee-time reader for this course.";
-    const localReaderJob = await queueExplicitOperatorLocalReaderRecheck(current, now);
+    const localReaderJob = await queueExplicitOperatorLocalReaderRecheck(
+      current,
+      now,
+    );
     if (!localReaderJob) {
       throw new Error(
-        "The official booking page is not supported by the local tee-time reader yet. Engineering still owns this course, and no monitoring state was changed."
+        "The official booking page is not supported by the local tee-time reader yet. Engineering still owns this course, and no monitoring state was changed.",
       );
     }
     const failureFingerprint = buildProviderFailureFingerprint({
       providerFamilyKey: current.status.course.providerFamilyKey,
       failureClass: "READER_PARSER_MISSING",
       operation: "AVAILABILITY",
-      httpStatus: null
+      httpStatus: null,
     });
-    await prisma.$transaction(
+    await runSerializedCourseMonitoringWrite(
+      current.status.courseId,
       async (transaction) => {
         await assertMutationStillCurrent(transaction, current, input);
         await transaction.course.update({
@@ -832,13 +890,13 @@ export async function applyOperatorCourseDecision(
             automationReason: "OTHER",
             intelligenceVerifiedAt: null,
             intelligenceReviewAt: null,
-            intelligenceConfidence: null
-          }
+            intelligenceConfidence: null,
+          },
         });
         await transaction.courseMonitoringStatus.update({
           where: {
             courseId: current.status.courseId,
-            revision: current.status.revision
+            revision: current.status.revision,
           },
           data: {
             state: "AUTO_INVESTIGATING",
@@ -847,14 +905,14 @@ export async function applyOperatorCourseDecision(
             nextAutomaticAttemptAt: now,
             revalidationRequestedAt: now,
             stateChangedAt: now,
-            revision: { increment: 1 }
-          }
+            revision: { increment: 1 },
+          },
         });
         await transaction.courseSupportIncident.update({
           where: {
             id: current.incident!.id,
             cycle: current.incident!.cycle,
-            revision: current.incident!.revision
+            revision: current.incident!.revision,
           },
           data: {
             cycle:
@@ -872,7 +930,7 @@ export async function applyOperatorCourseDecision(
             confirmedAt: now,
             escalationDeadlineAt: getCourseMonitoringEscalationDeadline(
               now,
-              current.incident!.activeRealSearchCount
+              current.incident!.activeRealSearchCount,
             ),
             humanReviewReason: null,
             nextReminderAt: null,
@@ -886,8 +944,8 @@ export async function applyOperatorCourseDecision(
             decisionEvidenceUrl: null,
             decisionIdempotencyKey: null,
             lastSeenAt: now,
-            revision: { increment: 1 }
-          }
+            revision: { increment: 1 },
+          },
         });
         await transaction.courseMonitoringEvent.create({
           data: {
@@ -899,7 +957,9 @@ export async function applyOperatorCourseDecision(
             toState: "AUTO_INVESTIGATING",
             failureFingerprint,
             message,
-            evidenceUrl: current.status.course.detectedBookingUrl ?? current.status.course.website,
+            evidenceUrl:
+              current.status.course.detectedBookingUrl ??
+              current.status.course.website,
             operatorActorId: normalizeActorId(context.actorId),
             idempotencyKey: input.idempotencyKey,
             occurredAt: now,
@@ -909,40 +969,47 @@ export async function applyOperatorCourseDecision(
               priorCycle: current.incident!.cycle,
               cycle:
                 current.incident!.status === "RESOLVED" ||
-                shouldOpenFreshPlaybookCycleForProviderEvidence(current.incident!)
+                shouldOpenFreshPlaybookCycleForProviderEvidence(
+                  current.incident!,
+                )
                   ? current.incident!.cycle + 1
                   : current.incident!.cycle,
-              customerDataIncluded: false
-            }
-          }
+              customerDataIncluded: false,
+            },
+          },
         });
       },
-      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     );
     await dispatchAffectedSearches(
       current.activeSearches.map((search) => search.id),
-      context.dispatchSearches
+      context.dispatchSearches,
     );
     return {
       ...preview,
       localReaderQueued: true,
       applied: true,
-      replayed: false
+      replayed: false,
     };
   }
 
   const finalDecision = getFinalDecision(input.decision);
   const decisionNote = input.note!;
   const decisionEvidenceUrl = finalEvidenceUrl!;
-  const currentActionUrl = safeOperatorEvidenceUrl(current.status.course.detectedBookingUrl);
+  const currentActionUrl = safeOperatorEvidenceUrl(
+    current.status.course.detectedBookingUrl,
+  );
   const preserveManualActionSurface = Boolean(
-    input.decision === "PHONE_OR_MANUAL" && currentActionUrl === decisionEvidenceUrl,
+    input.decision === "PHONE_OR_MANUAL" &&
+    currentActionUrl === decisionEvidenceUrl,
   );
   const finalCourseUpdate: Prisma.CourseUpdateInput =
     input.decision === "PHONE_OR_MANUAL"
       ? {
           ...finalDecision.course,
-          detectedBookingUrl: preserveManualActionSurface ? currentActionUrl : null,
+          detectedBookingUrl: preserveManualActionSurface
+            ? currentActionUrl
+            : null,
           detectedPlatform: preserveManualActionSurface
             ? current.status.course.detectedPlatform
             : "UNKNOWN",
@@ -952,7 +1019,8 @@ export async function applyOperatorCourseDecision(
           bookingMetadata: Prisma.DbNull,
         }
       : finalDecision.course;
-  await prisma.$transaction(
+  await runSerializedCourseMonitoringWrite(
+    current.status.courseId,
     async (transaction) => {
       await assertMutationStillCurrent(transaction, current, input);
       await transaction.course.update({
@@ -962,27 +1030,27 @@ export async function applyOperatorCourseDecision(
           policyNotes: finalDecision.message,
           intelligenceVerifiedAt: now,
           intelligenceReviewAt: null,
-          intelligenceConfidence: 1
-        }
+          intelligenceConfidence: 1,
+        },
       });
       await transaction.courseMonitoringStatus.update({
         where: {
           courseId: current.status.courseId,
-          revision: current.status.revision
+          revision: current.status.revision,
         },
         data: {
           state: finalDecision.state,
           nextAutomaticAttemptAt: null,
           revalidationRequestedAt: null,
           stateChangedAt: now,
-          revision: { increment: 1 }
-        }
+          revision: { increment: 1 },
+        },
       });
       await transaction.courseSupportIncident.update({
         where: {
           id: current.incident!.id,
           cycle: current.incident!.cycle,
-          revision: current.incident!.revision
+          revision: current.incident!.revision,
         },
         data: {
           status: "RESOLVED",
@@ -998,8 +1066,8 @@ export async function applyOperatorCourseDecision(
           decisionEvidenceUrl,
           decisionIdempotencyKey: input.idempotencyKey,
           lastSeenAt: now,
-          revision: { increment: 1 }
-        }
+          revision: { increment: 1 },
+        },
       });
       await appendOperatorFinalDiscovery(transaction, {
         current,
@@ -1038,12 +1106,16 @@ export async function applyOperatorCourseDecision(
             decision: input.decision,
             officialEvidenceCaptured: true,
             timerBasedRevalidation: false,
-            customerDataIncluded: false
-          }
-        }
+            customerDataIncluded: false,
+          },
+        },
+      });
+      await terminalizeAvailableCourseMatches(transaction, {
+        courseId: current.status.courseId,
+        unavailableAt: now,
       });
     },
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
   );
   return { ...preview, applied: true, replayed: false };
 }
@@ -1059,7 +1131,7 @@ export async function approveOperatorCourseTechnicalFinal(
     note: string;
     idempotencyKey: string;
   },
-  context: OperatorMutationContext
+  context: OperatorMutationContext,
 ) {
   const input = z
     .object({
@@ -1070,34 +1142,45 @@ export async function approveOperatorCourseTechnicalFinal(
       reason: humanReviewReasonSchema,
       evidenceUrl: z.string().trim().url().max(1000),
       note: safeOperatorNoteSchema,
-      idempotencyKey: idempotencyKeySchema
+      idempotencyKey: idempotencyKeySchema,
     })
     .parse(rawInput);
-  const evidenceUrl = requireSafeExactEvidenceUrl(input.evidenceUrl, "official evidence link");
+  const evidenceUrl = requireSafeExactEvidenceUrl(
+    input.evidenceUrl,
+    "official evidence link",
+  );
   const current = await requireMutationTarget(
     input.reference,
     input.statusRevision,
     input.incidentCycle,
     input.incidentRevision,
-    input.idempotencyKey
+    input.idempotencyKey,
   );
   if (!current.incident) {
-    throw new Error("A durable course incident is required before approving a final limitation.");
+    throw new Error(
+      "A durable course incident is required before approving a final limitation.",
+    );
   }
-  const playbook = assessAutomationPlaybook(current.incident.attemptLedger, current.incident.cycle);
+  const playbook = assessAutomationPlaybook(
+    current.incident.attemptLedger,
+    current.incident.cycle,
+  );
   if (
-    !isAutomationPlaybookExhausted(current.incident.attemptLedger, current.incident.cycle) ||
+    !isAutomationPlaybookExhausted(
+      current.incident.attemptLedger,
+      current.incident.cycle,
+    ) ||
     playbook.conclusion !== "TECHNICAL_FINAL" ||
     playbook.technicalReason !== input.reason
   ) {
     throw new Error(
-      "A technical final requires current-cycle terminal local-reader proof and matching independent confirmation."
+      "A technical final requires current-cycle terminal local-reader proof and matching independent confirmation.",
     );
   }
   const preview = {
     action: "approve_technical_final" as const,
     courseRef: current.status.reference,
-    reason: input.reason
+    reason: input.reason,
   };
   if (!context.apply || current.replayed) {
     return { ...preview, applied: false, replayed: current.replayed };
@@ -1105,7 +1188,8 @@ export async function approveOperatorCourseTechnicalFinal(
 
   const now = new Date();
   const technicalFields = technicalCourseFieldsForReason(input.reason);
-  await prisma.$transaction(
+  await runSerializedCourseMonitoringWrite(
+    current.status.courseId,
     async (transaction) => {
       await assertMutationStillCurrent(transaction, current, input);
       await transaction.course.update({
@@ -1116,27 +1200,27 @@ export async function approveOperatorCourseTechnicalFinal(
           policyNotes: input.note,
           intelligenceVerifiedAt: now,
           intelligenceReviewAt: null,
-          intelligenceConfidence: 1
-        }
+          intelligenceConfidence: 1,
+        },
       });
       await transaction.courseMonitoringStatus.update({
         where: {
           courseId: current.status.courseId,
-          revision: current.status.revision
+          revision: current.status.revision,
         },
         data: {
           state: "FINAL_TECHNICAL",
           nextAutomaticAttemptAt: null,
           revalidationRequestedAt: null,
           stateChangedAt: now,
-          revision: { increment: 1 }
-        }
+          revision: { increment: 1 },
+        },
       });
       await transaction.courseSupportIncident.update({
         where: {
           id: current.incident!.id,
           cycle: current.incident!.cycle,
-          revision: current.incident!.revision
+          revision: current.incident!.revision,
         },
         data: {
           status: "RESOLVED",
@@ -1152,8 +1236,8 @@ export async function approveOperatorCourseTechnicalFinal(
           decisionEvidenceUrl: evidenceUrl,
           decisionIdempotencyKey: input.idempotencyKey,
           lastSeenAt: now,
-          revision: { increment: 1 }
-        }
+          revision: { increment: 1 },
+        },
       });
       await appendOperatorFinalDiscovery(transaction, {
         current,
@@ -1165,7 +1249,7 @@ export async function approveOperatorCourseTechnicalFinal(
         bookingAccessMode: technicalFields.bookingAccessMode,
         automationReason: technicalFields.automationReason,
         preserveExistingBookingSurface: true,
-        manualProjectionApplied: false
+        manualProjectionApplied: false,
       });
       await transaction.courseMonitoringEvent.create({
         data: {
@@ -1188,12 +1272,16 @@ export async function approveOperatorCourseTechnicalFinal(
             automatedFinal: false,
             reason: input.reason,
             timerBasedRevalidation: false,
-            customerDataIncluded: false
-          }
-        }
+            customerDataIncluded: false,
+          },
+        },
+      });
+      await terminalizeAvailableCourseMatches(transaction, {
+        courseId: current.status.courseId,
+        unavailableAt: now,
       });
     },
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
   );
   return { ...preview, applied: true, replayed: false };
 }
@@ -1208,7 +1296,7 @@ export async function reopenOperatorCourseTechnicalFinal(
     note: string;
     idempotencyKey: string;
   },
-  context: OperatorMutationContext
+  context: OperatorMutationContext,
 ) {
   const input = z
     .object({
@@ -1218,35 +1306,41 @@ export async function reopenOperatorCourseTechnicalFinal(
       incidentRevision: revisionSchema.nullable(),
       evidenceUrl: z.string().trim().url().max(1000),
       note: safeOperatorNoteSchema,
-      idempotencyKey: idempotencyKeySchema
+      idempotencyKey: idempotencyKeySchema,
     })
     .parse(rawInput);
-  const evidenceUrl = requireSafeExactEvidenceUrl(input.evidenceUrl, "official evidence link");
+  const evidenceUrl = requireSafeExactEvidenceUrl(
+    input.evidenceUrl,
+    "official evidence link",
+  );
   const current = await requireMutationTarget(
     input.reference,
     input.statusRevision,
     input.incidentCycle,
     input.incidentRevision,
-    input.idempotencyKey
+    input.idempotencyKey,
   );
   if (
     current.status.state !== "FINAL_TECHNICAL" ||
     !current.incident ||
     current.incident.resolution !== "HUMAN_VERIFIED_TECHNICAL_LIMITATION"
   ) {
-    throw new Error("Only an engineer-approved technical final can be reopened.");
+    throw new Error(
+      "Only an engineer-approved technical final can be reopened.",
+    );
   }
   const preview = {
     action: "reopen_technical_final" as const,
     courseRef: current.status.reference,
-    queuedAlertCount: current.activeSearches.length
+    queuedAlertCount: current.activeSearches.length,
   };
   if (!context.apply || current.replayed) {
     return { ...preview, applied: false, replayed: current.replayed };
   }
 
   const now = new Date();
-  await prisma.$transaction(
+  await runSerializedCourseMonitoringWrite(
+    current.status.courseId,
     async (transaction) => {
       await assertMutationStillCurrent(transaction, current, input);
       await transaction.course.update({
@@ -1255,13 +1349,13 @@ export async function reopenOperatorCourseTechnicalFinal(
           automationEligibility: "NEEDS_REVIEW",
           intelligenceVerifiedAt: null,
           intelligenceReviewAt: null,
-          intelligenceConfidence: null
-        }
+          intelligenceConfidence: null,
+        },
       });
       await transaction.courseMonitoringStatus.update({
         where: {
           courseId: current.status.courseId,
-          revision: current.status.revision
+          revision: current.status.revision,
         },
         data: {
           state: "AUTO_INVESTIGATING",
@@ -1269,14 +1363,14 @@ export async function reopenOperatorCourseTechnicalFinal(
           nextAutomaticAttemptAt: now,
           revalidationRequestedAt: null,
           stateChangedAt: now,
-          revision: { increment: 1 }
-        }
+          revision: { increment: 1 },
+        },
       });
       await transaction.courseSupportIncident.update({
         where: {
           id: current.incident!.id,
           cycle: current.incident!.cycle,
-          revision: current.incident!.revision
+          revision: current.incident!.revision,
         },
         data: {
           cycle: { increment: 1 },
@@ -1284,7 +1378,7 @@ export async function reopenOperatorCourseTechnicalFinal(
           confirmedAt: now,
           escalationDeadlineAt: getCourseMonitoringEscalationDeadline(
             now,
-            current.incident!.activeRealSearchCount
+            current.incident!.activeRealSearchCount,
           ),
           nextAttemptAt: now,
           humanReviewReason: null,
@@ -1299,8 +1393,8 @@ export async function reopenOperatorCourseTechnicalFinal(
           decisionEvidenceUrl: null,
           decisionIdempotencyKey: null,
           lastSeenAt: now,
-          revision: { increment: 1 }
-        }
+          revision: { increment: 1 },
+        },
       });
       await transaction.courseMonitoringEvent.create({
         data: {
@@ -1318,16 +1412,16 @@ export async function reopenOperatorCourseTechnicalFinal(
           occurredAt: now,
           audit: {
             action: "reopen_technical_final",
-            customerDataIncluded: false
-          }
-        }
+            customerDataIncluded: false,
+          },
+        },
       });
     },
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
   );
   await dispatchAffectedSearches(
     current.activeSearches.map((search) => search.id),
-    context.dispatchSearches
+    context.dispatchSearches,
   );
   return { ...preview, applied: true, replayed: false };
 }
@@ -1337,15 +1431,15 @@ async function requireMutationTarget(
   statusRevision: number,
   incidentCycle: number | null,
   incidentRevision: number | null,
-  idempotencyKey: string
+  idempotencyKey: string,
 ) {
   const replayed = await prisma.courseMonitoringEvent.findUnique({
     where: { idempotencyKey },
-    select: { courseId: true }
+    select: { courseId: true },
   });
   const status = await prisma.courseMonitoringStatus.findFirst({
     where: {
-      OR: [{ reference }, { course: { supportIncident: { reference } } }]
+      OR: [{ reference }, { course: { supportIncident: { reference } } }],
     },
     include: {
       course: {
@@ -1366,12 +1460,12 @@ async function requireMutationTarget(
           bookingMethod: true,
           supportIncident: {
             include: {
-              activeBatch: { select: { status: true } }
-            }
-          }
-        }
-      }
-    }
+              activeBatch: { select: { status: true } },
+            },
+          },
+        },
+      },
+    },
   });
   if (!status) {
     throw new Error("Course monitoring record not found.");
@@ -1386,21 +1480,21 @@ async function requireMutationTarget(
     !incidentVersionMatches(incident, incidentCycle, incidentRevision)
   ) {
     throw new Error(
-      "Course monitoring changed while this form was open. Refresh and review the newest evidence."
+      "Course monitoring changed while this form was open. Refresh and review the newest evidence.",
     );
   }
   const activeSearches = await prisma.teeSearch.findMany({
     where: {
       status: "ACTIVE",
-      preferences: { some: { courseId: status.courseId } }
+      preferences: { some: { courseId: status.courseId } },
     },
-    select: { id: true, date: true, players: true }
+    select: { id: true, date: true, players: true },
   });
   return {
     status,
     incident,
     activeSearches,
-    replayed: Boolean(replayed)
+    replayed: Boolean(replayed),
   };
 }
 
@@ -1411,30 +1505,37 @@ function hasClosedResponderBatch(incident: {
   return Boolean(
     incident.activeBatchId &&
     incident.activeBatch &&
-    !["CLAIMED", "IMPLEMENTING", "VERIFYING"].includes(incident.activeBatch.status)
+    !["CLAIMED", "IMPLEMENTING", "VERIFYING"].includes(
+      incident.activeBatch.status,
+    ),
   );
 }
 
 async function queueExplicitOperatorLocalReaderRecheck(
   current: Awaited<ReturnType<typeof requireMutationTarget>>,
-  now: Date
+  now: Date,
 ) {
   const bookingUrl = current.status.course.detectedBookingUrl;
   if (!bookingUrl) return null;
   const activeSearch = current.activeSearches[0];
-  const fallbackDate = getCourseLocalDateStorageBoundary(current.status.course.timeZone, now);
+  const fallbackDate = getCourseLocalDateStorageBoundary(
+    current.status.course.timeZone,
+    now,
+  );
   fallbackDate.setUTCDate(fallbackDate.getUTCDate() + 1);
   try {
     return await queueLocalReaderCourseVerification({
       courseId: current.status.courseId,
-      targetDate: (activeSearch?.date ?? fallbackDate).toISOString().slice(0, 10),
+      targetDate: (activeSearch?.date ?? fallbackDate)
+        .toISOString()
+        .slice(0, 10),
       players: activeSearch?.players ?? 2,
       bookingUrl,
-      force: true
+      force: true,
     });
   } catch {
     console.error("[operator:course-recheck-local-reader]", {
-      category: "local_reader_queue_failed"
+      category: "local_reader_queue_failed",
     });
     return null;
   }
@@ -1448,31 +1549,65 @@ async function assertMutationStillCurrent(
     incidentCycle: number | null;
     incidentRevision: number | null;
     idempotencyKey: string;
-  }
+  },
 ) {
   const replayed = await transaction.courseMonitoringEvent.findUnique({
     where: { idempotencyKey: input.idempotencyKey },
-    select: { id: true }
+    select: { id: true },
   });
   if (replayed) {
     throw new Error("This operator action has already been applied.");
   }
   const status = await transaction.courseMonitoringStatus.findUnique({
     where: { courseId: current.status.courseId },
-    select: { revision: true }
+    select: { revision: true },
   });
   const incident = current.incident
     ? await transaction.courseSupportIncident.findUnique({
         where: { id: current.incident.id },
-        select: { cycle: true, revision: true }
+        select: { cycle: true, revision: true },
       })
     : null;
   if (
     status?.revision !== input.statusRevision ||
-    !incidentVersionMatches(incident, input.incidentCycle, input.incidentRevision)
+    !incidentVersionMatches(
+      incident,
+      input.incidentCycle,
+      input.incidentRevision,
+    )
   ) {
-    throw new Error("Course monitoring changed while this action was being applied.");
+    throw new Error(
+      "Course monitoring changed while this action was being applied.",
+    );
   }
+}
+
+async function terminalizeAvailableCourseMatches(
+  transaction: Prisma.TransactionClient,
+  input: { courseId: string; unavailableAt: Date },
+) {
+  await transaction.teeTimeMatch.updateMany({
+    where: {
+      courseId: input.courseId,
+      availabilityStatus: "AVAILABLE",
+      alertStatus: "PENDING",
+    },
+    data: {
+      availabilityStatus: "GONE",
+      alertStatus: "SUPPRESSED",
+      unavailableAt: input.unavailableAt,
+    },
+  });
+  await transaction.teeTimeMatch.updateMany({
+    where: {
+      courseId: input.courseId,
+      availabilityStatus: "AVAILABLE",
+    },
+    data: {
+      availabilityStatus: "GONE",
+      unavailableAt: input.unavailableAt,
+    },
+  });
 }
 
 async function ensureOperatorIncident(
@@ -1486,7 +1621,7 @@ async function ensureOperatorIncident(
     providerFamilyKey: string;
     bookingUrlSnapshot: string;
     message: string;
-  }
+  },
 ) {
   const currentIncident = input.current.incident;
   if (currentIncident) {
@@ -1494,7 +1629,7 @@ async function ensureOperatorIncident(
       where: {
         id: currentIncident.id,
         cycle: currentIncident.cycle,
-        revision: currentIncident.revision
+        revision: currentIncident.revision,
       },
       data: {
         cycle:
@@ -1509,12 +1644,13 @@ async function ensureOperatorIncident(
         providerFamilyKey: input.providerFamilyKey,
         bookingUrlSnapshot: input.bookingUrlSnapshot,
         latestMessage: input.message,
-        nextAction: "Run a fresh public signed-out check and require exact runtime proof.",
+        nextAction:
+          "Run a fresh public signed-out check and require exact runtime proof.",
         nextAttemptAt: input.now,
         confirmedAt: input.now,
         escalationDeadlineAt: getCourseMonitoringEscalationDeadline(
           input.now,
-          currentIncident.activeRealSearchCount
+          currentIncident.activeRealSearchCount,
         ),
         humanReviewReason: null,
         nextReminderAt: null,
@@ -1522,8 +1658,8 @@ async function ensureOperatorIncident(
         resolution: null,
         resolutionMessage: null,
         resolutionNotifiedAt: null,
-        revision: { increment: 1 }
-      }
+        revision: { increment: 1 },
+      },
     });
   }
   return transaction.courseSupportIncident.create({
@@ -1539,13 +1675,14 @@ async function ensureOperatorIncident(
       bookingUrlSnapshot: input.bookingUrlSnapshot,
       initialMessage: input.message,
       latestMessage: input.message,
-      nextAction: "Run a fresh public signed-out check and require exact runtime proof.",
+      nextAction:
+        "Run a fresh public signed-out check and require exact runtime proof.",
       nextAttemptAt: input.now,
       confirmedAt: input.now,
       escalationDeadlineAt: getCourseMonitoringEscalationDeadline(input.now, 0),
       firstSeenAt: input.now,
-      lastSeenAt: input.now
-    }
+      lastSeenAt: input.now,
+    },
   });
 }
 
@@ -1555,65 +1692,79 @@ async function dispatchAffectedSearches(searchIds: string[], dispatch = false) {
       where: { id: { in: searchIds }, status: "ACTIVE" },
       data: {
         nextCheckAt: new Date(),
-        recheckRequestedAt: new Date()
-      }
+        recheckRequestedAt: new Date(),
+      },
     });
     return;
   }
   const results = await Promise.allSettled(
-    searchIds.map((searchId) => startSearchSchedule(searchId))
+    searchIds.map((searchId) => startSearchSchedule(searchId)),
   );
   const failures = results.filter((result) => result.status === "rejected");
   if (failures.length > 0) {
     console.error("[operator:course-recheck-dispatch]", {
       attempted: results.length,
-      failed: failures.length
+      failed: failures.length,
     });
   }
 }
 
 function technicalCourseFieldsForReason(reason: CourseHumanReviewReason): {
-  automationReason: "ACCOUNT_REQUIRED" | "CAPTCHA_OR_QUEUE" | "TEMPORARILY_UNAVAILABLE" | "OTHER";
+  automationReason:
+    | "ACCOUNT_REQUIRED"
+    | "CAPTCHA_OR_QUEUE"
+    | "TEMPORARILY_UNAVAILABLE"
+    | "OTHER";
   bookingAccessMode: "ACCOUNT_REQUIRED" | "CAPTCHA_OR_QUEUE" | "UNKNOWN";
 } {
   if (reason === "CAPTCHA_OR_QUEUE") {
     return {
       automationReason: "CAPTCHA_OR_QUEUE",
-      bookingAccessMode: "CAPTCHA_OR_QUEUE"
+      bookingAccessMode: "CAPTCHA_OR_QUEUE",
     };
   }
   if (reason === "ACCOUNT_REQUIRED") {
     return {
       automationReason: "ACCOUNT_REQUIRED",
-      bookingAccessMode: "ACCOUNT_REQUIRED"
+      bookingAccessMode: "ACCOUNT_REQUIRED",
     };
   }
   if (reason === "READER_RELOAD_REQUIRED") {
     return {
       automationReason: "TEMPORARILY_UNAVAILABLE",
-      bookingAccessMode: "UNKNOWN"
+      bookingAccessMode: "UNKNOWN",
     };
   }
   return {
     automationReason: "OTHER",
-    bookingAccessMode: "UNKNOWN"
+    bookingAccessMode: "UNKNOWN",
   };
 }
 
 function getFinalDecision(
-  decision: Exclude<OperatorCourseDecision, "LOCAL_READER" | "WEBSITE_TEMPORARILY_UNAVAILABLE">
+  decision: Exclude<
+    OperatorCourseDecision,
+    "LOCAL_READER" | "WEBSITE_TEMPORARILY_UNAVAILABLE"
+  >,
 ): {
   state: "FINAL_IDENTITY" | "FINAL_MANUAL" | "FINAL_TECHNICAL";
   resolution:
-    "IDENTITY_CLASSIFIED" | "DIRECT_BOOKING_CLASSIFIED" | "HUMAN_VERIFIED_TECHNICAL_LIMITATION";
+    | "IDENTITY_CLASSIFIED"
+    | "DIRECT_BOOKING_CLASSIFIED"
+    | "HUMAN_VERIFIED_TECHNICAL_LIMITATION";
   humanReviewReason: CourseHumanReviewReason | null;
-  outcome: "IDENTITY_FINAL" | "MANUAL_DIRECT" | "BLOCKED_AUTH" | "BLOCKED_TOOLING";
+  outcome:
+    "IDENTITY_FINAL" | "MANUAL_DIRECT" | "BLOCKED_AUTH" | "BLOCKED_TOOLING";
   message: string;
   course: Prisma.CourseUpdateInput;
   discovery: {
     bookingMethod: "UNKNOWN" | "CONTACT_COURSE" | null;
     bookingAccessMode:
-      "CONTACT_COURSE" | "ACCOUNT_REQUIRED" | "CAPTCHA_OR_QUEUE" | "UNKNOWN" | null;
+      | "CONTACT_COURSE"
+      | "ACCOUNT_REQUIRED"
+      | "CAPTCHA_OR_QUEUE"
+      | "UNKNOWN"
+      | null;
     automationReason:
       | "NO_ONLINE_BOOKING"
       | "ACCOUNT_REQUIRED"
@@ -1629,19 +1780,20 @@ function getFinalDecision(
       resolution: "IDENTITY_CLASSIFIED",
       humanReviewReason: null,
       outcome: "IDENTITY_FINAL",
-      message: "This is a private course. Public tee-time monitoring is closed.",
+      message:
+        "This is a private course. Public tee-time monitoring is closed.",
       course: {
         isPublic: false,
         automationEligibility: "BLOCKED",
         automationReason: "OTHER",
-        monitoringMode: "CONTACT_ONLY"
+        monitoringMode: "CONTACT_ONLY",
       },
       discovery: {
         bookingMethod: "UNKNOWN",
         bookingAccessMode: "UNKNOWN",
         automationReason: "OTHER",
-        preserveExistingBookingSurface: false
-      }
+        preserveExistingBookingSurface: false,
+      },
     };
   }
   if (decision === "PHONE_OR_MANUAL") {
@@ -1650,21 +1802,22 @@ function getFinalDecision(
       resolution: "DIRECT_BOOKING_CLASSIFIED",
       humanReviewReason: null,
       outcome: "MANUAL_DIRECT",
-      message: "Tee times use the course's phone, in-person, or another manual process.",
+      message:
+        "Tee times use the course's phone, in-person, or another manual process.",
       course: {
         isPublic: true,
         bookingMethod: "CONTACT_COURSE",
         bookingAccessMode: "CONTACT_COURSE",
         automationEligibility: "BLOCKED",
         automationReason: "NO_ONLINE_BOOKING",
-        monitoringMode: "CONTACT_ONLY"
+        monitoringMode: "CONTACT_ONLY",
       },
       discovery: {
         bookingMethod: "CONTACT_COURSE",
         bookingAccessMode: "CONTACT_COURSE",
         automationReason: "NO_ONLINE_BOOKING",
-        preserveExistingBookingSurface: false
-      }
+        preserveExistingBookingSurface: false,
+      },
     };
   }
   const technicalFields = technicalCourseFieldsForReason(decision);
@@ -1678,18 +1831,19 @@ function getFinalDecision(
     state: "FINAL_TECHNICAL",
     resolution: "HUMAN_VERIFIED_TECHNICAL_LIMITATION",
     humanReviewReason: decision,
-    outcome: decision === "ACCOUNT_REQUIRED" ? "BLOCKED_AUTH" : "BLOCKED_TOOLING",
+    outcome:
+      decision === "ACCOUNT_REQUIRED" ? "BLOCKED_AUTH" : "BLOCKED_TOOLING",
     message,
     course: {
       automationEligibility: "BLOCKED",
-      ...technicalFields
+      ...technicalFields,
     },
     discovery: {
       bookingMethod: null,
       bookingAccessMode: technicalFields.bookingAccessMode,
       automationReason: technicalFields.automationReason,
-      preserveExistingBookingSurface: true
-    }
+      preserveExistingBookingSurface: true,
+    },
   };
 }
 
@@ -1712,10 +1866,12 @@ async function appendOperatorFinalDiscovery(
     >;
     preserveExistingBookingSurface: boolean;
     manualProjectionApplied: boolean;
-  }
+  },
 ) {
   const course = input.current.status.course;
-  const priorBookingMetadata = getHistoricalPublicBookingMetadata(course.bookingMetadata);
+  const priorBookingMetadata = getHistoricalPublicBookingMetadata(
+    course.bookingMetadata,
+  );
   const retainedBookingUrl = input.preserveExistingBookingSurface
     ? safeOperatorEvidenceUrl(course.detectedBookingUrl)
     : null;
@@ -1733,7 +1889,7 @@ async function appendOperatorFinalDiscovery(
     bookingPhone: course.bookingPhone,
     bookingMetadata: priorBookingMetadata.value,
     bookingMetadataDisposition: priorBookingMetadata.disposition,
-    policyNotes: sanitizeOperatorText(course.policyNotes)
+    policyNotes: sanitizeOperatorText(course.policyNotes),
   };
   await transaction.courseAutomationDiscovery.create({
     data: {
@@ -1742,7 +1898,8 @@ async function appendOperatorFinalDiscovery(
       detectedPlatform: projectedDetectedPlatform,
       bookingMethod: input.bookingMethod ?? course.bookingMethod,
       bookingPhone:
-        input.bookingMethod === "CONTACT_COURSE" || input.preserveExistingBookingSurface
+        input.bookingMethod === "CONTACT_COURSE" ||
+        input.preserveExistingBookingSurface
           ? course.bookingPhone
           : null,
       automationEligibility: "BLOCKED",
@@ -1768,14 +1925,15 @@ async function appendOperatorFinalDiscovery(
                 bookingUrl: retainedBookingUrl,
                 bookingMetadata: "CLEARED",
                 bookingMethod: input.bookingMethod ?? course.bookingMethod,
-                bookingAccessMode: input.bookingAccessMode ?? course.bookingAccessMode,
+                bookingAccessMode:
+                  input.bookingAccessMode ?? course.bookingAccessMode,
                 automationReason: input.automationReason,
               },
             }
           : {}),
-        customerDataIncluded: false
-      } as Prisma.InputJsonValue
-    }
+        customerDataIncluded: false,
+      } as Prisma.InputJsonValue,
+    },
   });
 }
 
@@ -1803,7 +1961,10 @@ function isPublicBookingMetadata(
   if (value === null) return true;
   if (typeof value === "boolean" || typeof value === "number") return true;
   if (typeof value === "string") {
-    if (value.length > 4_000 || /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/iu.test(value)) {
+    if (
+      value.length > 4_000 ||
+      /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/iu.test(value)
+    ) {
       return false;
     }
     if (/^https?:\/\//iu.test(value.trim())) {
@@ -1892,7 +2053,7 @@ function normalizeActorId(value: string) {
 function incidentVersionMatches(
   incident: { cycle: number; revision: number } | null,
   cycle: number | null,
-  revision: number | null
+  revision: number | null,
 ) {
   return incident
     ? incident.cycle === cycle && incident.revision === revision
@@ -1908,9 +2069,10 @@ function sanitizeTimelineAudit(value: unknown) {
     Object.entries(record)
       .filter(
         ([key, item]) =>
-          !/(?:email|recipient|searchid|credential|cookie|token|payload|error)/iu.test(key) &&
-          ["string", "number", "boolean"].includes(typeof item)
+          !/(?:email|recipient|searchid|credential|cookie|token|payload|error)/iu.test(
+            key,
+          ) && ["string", "number", "boolean"].includes(typeof item),
       )
-      .slice(0, 20)
+      .slice(0, 20),
   );
 }

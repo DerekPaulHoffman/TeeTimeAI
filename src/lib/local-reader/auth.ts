@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { verifyLocalReaderSignature } from "./contracts";
-
-const MAX_CLOCK_SKEW_MS = 60_000;
+import {
+  LOCAL_READER_MAX_CLOCK_SKEW_MS,
+  verifyLocalReaderSignature
+} from "./contracts";
 
 export function assertLocalReaderRequest(
   request: NextRequest,
@@ -21,7 +22,8 @@ export function assertLocalReaderRequest(
   const signature = request.headers.get("x-local-reader-signature") || "";
   if (
     !/^\d{13}$/u.test(timestamp) ||
-    Math.abs(Date.now() - Number(timestamp)) > MAX_CLOCK_SKEW_MS
+    Math.abs(Date.now() - Number(timestamp)) >
+      LOCAL_READER_MAX_CLOCK_SKEW_MS
   ) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }

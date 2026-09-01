@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 
 const persistence = vi.hoisted(() => ({
   discoveryCreate: vi.fn(),
-  monitoringEventFindFirst: vi.fn()
+  monitoringEventFindFirst: vi.fn(),
+  queryRaw: vi.fn()
 }));
 
 const transaction = vi.hoisted(() => ({
+  $queryRaw: persistence.queryRaw,
   courseAutomationDiscovery: { create: persistence.discoveryCreate },
   courseMonitoringEvent: { findFirst: persistence.monitoringEventFindFirst }
 }));
@@ -41,6 +43,9 @@ describe("parked campaign discovery provenance", () => {
       }
     });
     persistence.discoveryCreate.mockImplementation(async ({ data }) => data);
+    persistence.queryRaw.mockResolvedValue([
+      { updatedAt: new Date("2026-08-20T12:00:00.001Z") }
+    ]);
 
     const result = await recordBrowserDiscovery(
       {
@@ -94,5 +99,8 @@ describe("parked campaign discovery provenance", () => {
         customerDataIncluded: false
       }
     });
+    expect(persistence.queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      persistence.discoveryCreate.mock.invocationCallOrder[0]
+    );
   });
 });

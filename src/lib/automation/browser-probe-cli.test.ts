@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  beginPersistedBrowserProviderObservation,
   classifyPersistableBrowserStageFailure,
   closeBrowserProbeResourceOnAbort,
   createBrowserProbeResourceCloser,
@@ -30,6 +31,15 @@ const persistenceFence = {
   courseId: "course-1",
   cycle: 1,
   stage: "RENDERED_BROWSER_DISCOVERY" as const,
+};
+
+const providerObservationLease = {
+  courseId: "course-1",
+  leaseToken: "provider-observation-1",
+  observationStartedAt: new Date("2026-08-20T12:00:00.000Z"),
+  leaseExpiresAt: new Date("2026-08-20T12:20:00.000Z"),
+  ttlMs: 20 * 60_000,
+  supersededUnresolvedObservationStartedAt: null,
 };
 
 describe("browser probe direct entry", () => {
@@ -100,6 +110,129 @@ describe("browser probe direct entry", () => {
         },
       }),
     ).toBe("INDEPENDENT");
+  });
+
+  it("retains a rendered provider source when execution finishes before canonical apply", async () => {
+    const markUnreconciled = vi.fn(async () => true);
+    const release = vi.fn(async () => undefined);
+    const observation = await beginPersistedBrowserProviderObservation(
+      "course-1",
+      {
+        begin: vi.fn(async () => ({ ...providerObservationLease })),
+        markUnreconciled,
+        release,
+        renewInTransaction: vi.fn(async () => true),
+        startHeartbeat: vi.fn(() => ({
+          assertOwned: vi.fn(),
+          stop: vi.fn(async () => undefined),
+        })),
+      }
+    );
+
+    observation!.markProviderExecutionStarted();
+    await observation!.settle();
+
+    expect(markUnreconciled).toHaveBeenCalledWith(
+      expect.objectContaining({
+        observationStartedAt: providerObservationLease.observationStartedAt,
+      })
+    );
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it("retains a rendered source after snapshot-bound metadata persistence until availability is reconciled", async () => {
+    const markUnreconciled = vi.fn(async () => true);
+    const release = vi.fn(async () => undefined);
+    const observation = await beginPersistedBrowserProviderObservation(
+      "course-1",
+      {
+        begin: vi.fn(async () => ({ ...providerObservationLease })),
+        markUnreconciled,
+        release,
+        renewInTransaction: vi.fn(async () => true),
+        startHeartbeat: vi.fn(() => ({
+          assertOwned: vi.fn(),
+          stop: vi.fn(async () => undefined),
+        })),
+      },
+    );
+
+    observation!.markProviderExecutionStarted();
+    observation!.assertObservationOwned();
+    // A snapshot-bound course/discovery write is metadata persistence. It does
+    // not reconcile the rendered availability source into monitoring/matches.
+    await observation!.settle();
+
+    expect(markUnreconciled).toHaveBeenCalledWith(
+      expect.objectContaining({
+        observationStartedAt: providerObservationLease.observationStartedAt,
+      }),
+    );
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it("rejects persistence when a successor takes the rendered observation lease after the heartbeat check", async () => {
+    const assertOwned = vi.fn();
+    const renewInTransaction = vi.fn(async () => false);
+    const observation = await beginPersistedBrowserProviderObservation(
+      "course-1",
+      {
+        begin: vi.fn(async () => ({ ...providerObservationLease })),
+        markUnreconciled: vi.fn(async () => true),
+        release: vi.fn(async () => undefined),
+        renewInTransaction,
+        startHeartbeat: vi.fn(() => ({
+          assertOwned,
+          stop: vi.fn(async () => undefined),
+        })),
+      },
+    );
+
+    observation!.markProviderExecutionStarted();
+    await expect(
+      observation!.assertObservationOwnedInTransaction({} as never),
+    ).rejects.toThrow(
+      "Rendered provider observation ownership expired before persistence completed",
+    );
+
+    expect(assertOwned).toHaveBeenCalledOnce();
+    expect(renewInTransaction).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({ leaseToken: "provider-observation-1" }),
+    );
+    await observation!.settle();
+  });
+
+  it("preserves a superseded unresolved source when the browser provider never starts", async () => {
+    const supersededAt = new Date("2026-08-20T11:55:00.000Z");
+    const markUnreconciled = vi.fn(async () => true);
+    const release = vi.fn(async () => undefined);
+    const observation = await beginPersistedBrowserProviderObservation(
+      "course-1",
+      {
+        begin: vi.fn(async () => ({
+          ...providerObservationLease,
+          supersededUnresolvedObservationStartedAt: supersededAt,
+        })),
+        markUnreconciled,
+        release,
+        renewInTransaction: vi.fn(async () => true),
+        startHeartbeat: vi.fn(() => ({
+          assertOwned: vi.fn(),
+          stop: vi.fn(async () => undefined),
+        })),
+      }
+    );
+
+    await observation!.settle();
+
+    expect(markUnreconciled).toHaveBeenCalledWith(
+      expect.objectContaining({
+        supersededUnresolvedObservationStartedAt: supersededAt,
+      }),
+      { preserveSupersededSource: true }
+    );
+    expect(release).not.toHaveBeenCalled();
   });
 
   it("passes the exact owned persistence fence into target selection", () => {

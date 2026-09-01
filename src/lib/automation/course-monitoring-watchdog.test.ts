@@ -59,6 +59,7 @@ import {
   FAILURE_CONFIRMATION_WINDOW_MS,
   getDeferredFailureHandoffEscalationDeadline,
   recordCourseMonitoringFailure,
+  recordCourseMonitoringSuccess,
   runCourseMonitoringWatchdog,
 } from "./course-monitoring";
 import {
@@ -180,7 +181,7 @@ function exhaustedLedger(cycle = 1) {
   return ledger;
 }
 
-function renderedBrowserPendingLedger() {
+function renderedBrowserPendingLedger(cycle = 1) {
   const stages: Array<[AutomationPlaybookStage, AutomationPlaybookReadPath]> = [
     ["OFFICIAL_IDENTITY", "OFFICIAL_IDENTITY"],
     ["TYPED_ADAPTER", "TYPED_PROVIDER_ADAPTER"],
@@ -190,7 +191,7 @@ function renderedBrowserPendingLedger() {
   let ledger: AutomationPlaybookLedger | null = null;
   for (const [stage, readPath] of stages) {
     ledger = appendAutomationPlaybookEvent(ledger, {
-      cycle: 1,
+      cycle,
       stage,
       transition:
         stage === "OFFICIAL_IDENTITY" || stage === "OFFICIAL_HTTP_DISCOVERY"
@@ -890,17 +891,24 @@ describe("course monitoring watchdog", () => {
   }
 
   it("turns an unconfirmed fifteen-minute gap into explicit tooling work", async () => {
+    const failureObservedAt = new Date(
+      now.getTime() - FAILURE_CONFIRMATION_WINDOW_MS,
+    );
+    const existingIncident = incident({
+      firstSeenAt: failureObservedAt,
+      lastSeenAt: failureObservedAt,
+    });
     prismaMocks.courseMonitoringStatus.findMany.mockResolvedValue([
       {
         courseId: "course-1",
         state: "DEGRADED_RETRYING",
-        firstDegradedAt: new Date(
-          now.getTime() - FAILURE_CONFIRMATION_WINDOW_MS,
-        ),
+        lastSuccessfulAt: null,
+        lastFailureAt: failureObservedAt,
+        firstDegradedAt: failureObservedAt,
         failureFingerprint: "SOURCE_MISSING:UNKNOWN",
         nextAutomaticAttemptAt: now,
         revision: 0,
-        course: course(incident()),
+        course: course(existingIncident),
       },
     ]);
 
@@ -913,18 +921,120 @@ describe("course monitoring watchdog", () => {
       expect.objectContaining({
         data: expect.objectContaining({
           kind: "BLOCKED_TOOLING",
-          confirmedAt: now,
+          confirmedAt: failureObservedAt,
           escalationDeadlineAt: new Date(now.getTime() + 15 * 60 * 1000),
           nextAttemptAt: now,
         }),
       }),
     );
+    expect(
+      prismaMocks.courseSupportIncident.updateMany.mock.calls[0]?.[0]?.data,
+    ).not.toHaveProperty("lastSeenAt");
     expect(prismaMocks.courseMonitoringEvent.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           eventType: "TOOLING_INCIDENT",
           fromState: "DEGRADED_RETRYING",
           toState: "AUTO_INVESTIGATING",
+        }),
+      }),
+    );
+  });
+
+  it("keeps a delayed local-reader success newer than a watchdog tooling transition", async () => {
+    const failureObservedAt = new Date("2026-07-27T15:40:00.000Z");
+    const successObservedAt = new Date("2026-07-27T15:55:00.000Z");
+    const successConsumedAt = new Date("2026-07-27T16:05:00.000Z");
+    const toolingIncident = incident({
+      id: "incident-tooling",
+      kind: "BLOCKED_TOOLING",
+      confirmedAt: failureObservedAt,
+      firstSeenAt: failureObservedAt,
+      lastSeenAt: failureObservedAt,
+    });
+    const investigatingStatus = {
+      courseId: "course-1",
+      state: "AUTO_INVESTIGATING",
+      lastSuccessfulAt: null,
+      lastFailureAt: failureObservedAt,
+      consecutiveFailures: 1,
+      failureFingerprint: "SOURCE_MISSING:UNKNOWN",
+      firstDegradedAt: failureObservedAt,
+      nextAutomaticAttemptAt: now,
+      revalidationRequestedAt: null,
+      revision: 1,
+    };
+    prismaMocks.courseMonitoringStatus.findMany.mockResolvedValue([
+      {
+        ...investigatingStatus,
+        state: "DEGRADED_RETRYING",
+        revision: 0,
+        course: course(null),
+      },
+    ]);
+    prismaMocks.courseSupportIncident.create.mockResolvedValue(toolingIncident);
+
+    await expect(runCourseMonitoringWatchdog(now)).resolves.toMatchObject({
+      checked: 1,
+      scheduled: 1,
+      escalated: 0,
+    });
+    expect(prismaMocks.courseSupportIncident.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        kind: "BLOCKED_TOOLING",
+        confirmedAt: failureObservedAt,
+        firstSeenAt: failureObservedAt,
+        lastSeenAt: failureObservedAt,
+        nextAttemptAt: now,
+      }),
+    });
+    expect(prismaMocks.courseMonitoringEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          eventType: "TOOLING_INCIDENT",
+          occurredAt: now,
+        }),
+      }),
+    );
+
+    prismaMocks.courseMonitoringStatus.upsert.mockResolvedValue(
+      investigatingStatus,
+    );
+    prismaMocks.courseMonitoringStatus.update.mockResolvedValue({
+      ...investigatingStatus,
+      state: "HEALTHY",
+      lastSuccessfulAt: successObservedAt,
+      consecutiveFailures: 0,
+      failureFingerprint: null,
+      firstDegradedAt: null,
+      nextAutomaticAttemptAt: null,
+      revision: 2,
+    });
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(
+      toolingIncident,
+    );
+
+    await expect(
+      recordCourseMonitoringSuccess({
+        courseId: "course-1",
+        outcome: "NO_MATCH",
+        source: "LOCAL_READER",
+        providerObservedAt: successObservedAt,
+        now: successConsumedAt,
+        runtimeVersion: "reader-runtime",
+      }),
+    ).resolves.toMatchObject({
+      state: "HEALTHY",
+      lastSuccessfulAt: successObservedAt,
+      sourceEvidenceAccepted: true,
+    });
+    expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "RESOLVED",
+          resolution: "MONITORING_RESTORED",
+          resolvedAt: successConsumedAt,
+          lastSeenAt: successObservedAt,
         }),
       }),
     );
@@ -1007,7 +1117,7 @@ describe("course monitoring watchdog", () => {
       humanReviewReason: "CAPTCHA_OR_QUEUE",
       escalatedAt: now,
       escalationDeadlineAt: new Date("2026-07-27T16:30:00.000Z"),
-      attemptLedger: null,
+      attemptLedger: renderedBrowserPendingLedger(),
       activeRealSearchCount: 1,
     });
     prismaMocks.courseSupportIncident.findMany.mockResolvedValue([
@@ -1833,6 +1943,9 @@ describe("course monitoring watchdog", () => {
             failureClass,
             failureFingerprint,
             attemptCount: 0,
+            firstSeenAt: observedAt,
+            confirmedAt: observedAt,
+            lastSeenAt: observedAt,
             nextAttemptAt: now,
           }),
         }),
@@ -1846,9 +1959,11 @@ describe("course monitoring watchdog", () => {
           }),
           data: expect.objectContaining({
             state: "AUTO_INVESTIGATING",
+            lastFailureAt: observedAt,
             failureFingerprint,
             nextAutomaticAttemptAt: now,
             revalidationRequestedAt: now,
+            stateChangedAt: now,
           }),
         }),
       );
@@ -1886,6 +2001,7 @@ describe("course monitoring watchdog", () => {
           data: expect.objectContaining({
             eventType: "REVALIDATION_REQUESTED",
             failureFingerprint,
+            occurredAt: observedAt,
             audit: expect.objectContaining({
               priorCycle: 1,
               cycle: 2,
@@ -1905,6 +2021,78 @@ describe("course monitoring watchdog", () => {
           ([input]) => input.data.eventType === "HUMAN_REVIEW_REQUESTED",
         ),
       ).toBe(false);
+
+      const delayedSuccessObservedAt = new Date(
+        "2026-07-27T15:57:00.000Z",
+      );
+      const delayedSuccessConsumedAt = new Date(
+        "2026-07-27T16:05:00.000Z",
+      );
+      const handedOffMonitoring = {
+        courseId: "course-1",
+        state: "AUTO_INVESTIGATING",
+        lastSuccessfulAt: null,
+        lastFailureAt: observedAt,
+        consecutiveFailures: 1,
+        failureFingerprint,
+        firstDegradedAt: observedAt,
+        nextAutomaticAttemptAt: now,
+        revalidationRequestedAt: now,
+        stateChangedAt: now,
+        revision: 8,
+      };
+      prismaMocks.courseMonitoringStatus.upsert.mockResolvedValue(
+        handedOffMonitoring,
+      );
+      prismaMocks.courseMonitoringStatus.update.mockResolvedValue({
+        ...handedOffMonitoring,
+        state: "HEALTHY",
+        lastSuccessfulAt: delayedSuccessObservedAt,
+        consecutiveFailures: 0,
+        failureFingerprint: null,
+        firstDegradedAt: null,
+        nextAutomaticAttemptAt: null,
+        revalidationRequestedAt: null,
+        stateChangedAt: delayedSuccessConsumedAt,
+        revision: 9,
+      });
+      prismaMocks.courseSupportIncident.findUnique.mockResolvedValue({
+        ...scenario.currentIncident,
+        cycle: 2,
+        revision: 1,
+        status: "AUTO_INVESTIGATING",
+        activeBatchId: null,
+        failureClass,
+        failureFingerprint,
+        confirmedAt: observedAt,
+        lastSeenAt: observedAt,
+      });
+
+      await expect(
+        recordCourseMonitoringSuccess({
+          courseId: "course-1",
+          outcome: "NO_MATCH",
+          source: "LOCAL_READER",
+          providerObservedAt: delayedSuccessObservedAt,
+          now: delayedSuccessConsumedAt,
+          runtimeVersion: "reader-runtime",
+        }),
+      ).resolves.toMatchObject({
+        state: "HEALTHY",
+        lastSuccessfulAt: delayedSuccessObservedAt,
+        sourceEvidenceAccepted: true,
+      });
+      expect(
+        prismaMocks.courseSupportIncident.updateMany,
+      ).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            status: "RESOLVED",
+            resolvedAt: delayedSuccessConsumedAt,
+            lastSeenAt: delayedSuccessObservedAt,
+          }),
+        }),
+      );
     },
   );
 
@@ -2237,7 +2425,8 @@ describe("course monitoring watchdog", () => {
           status: "RESOLVED",
           activeBatchId: null,
           resolution: "MONITORING_RESTORED",
-          resolvedAt: observedAt,
+          resolvedAt: now,
+          lastSeenAt: observedAt,
         }),
       }),
     );
@@ -2554,7 +2743,6 @@ describe("course monitoring watchdog", () => {
           status: "AUTO_INVESTIGATING",
           humanReviewReason: null,
           nextAttemptAt: scenario.cooldownExpiresAt,
-          lastSeenAt: scenario.cooldownExpiresAt,
           revision: { increment: 1 },
         }),
       }),
@@ -2568,6 +2756,7 @@ describe("course monitoring watchdog", () => {
     expect(incidentRecovery?.data).not.toHaveProperty("attemptLedger");
     expect(incidentRecovery?.data).not.toHaveProperty("attemptCount");
     expect(incidentRecovery?.data).not.toHaveProperty("occurrenceCount");
+    expect(incidentRecovery?.data).not.toHaveProperty("lastSeenAt");
 
     expect(prismaMocks.courseMonitoringStatus.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -3961,7 +4150,8 @@ describe("course monitoring watchdog", () => {
           status: "RESOLVED",
           activeBatchId: null,
           resolution: "MONITORING_RESTORED",
-          resolvedAt: freshObservedAt,
+          resolvedAt: now,
+          lastSeenAt: freshObservedAt,
         }),
       }),
     );
@@ -5221,6 +5411,7 @@ describe("course monitoring watchdog", () => {
         failureFingerprint,
         readPath: "TYPED_PROVIDER_ADAPTER",
         activeRealSearchCount: 1,
+        failureObservedAt: now,
         now,
       }),
     ).resolves.toMatchObject({
@@ -5306,11 +5497,14 @@ describe("course monitoring watchdog", () => {
 
   it("repairs the same parked-shaped state when its durable parking proof is missing", async () => {
     const escalatedAt = new Date("2026-07-27T15:30:00.000Z");
+    const failureObservedAt = new Date("2026-07-27T15:25:00.000Z");
     const prooflessIncident = incident({
       cycle: 3,
       status: "NEEDS_HUMAN",
-      attemptLedger: null,
-      escalationDeadlineAt: new Date("2026-07-27T18:00:00.000Z"),
+      attemptLedger: renderedBrowserPendingLedger(3),
+      confirmedAt: failureObservedAt,
+      lastSeenAt: failureObservedAt,
+      escalationDeadlineAt: escalatedAt,
       humanReviewReason: "AUTOMATION_STALLED",
       escalatedAt,
       nextAttemptAt: null,
@@ -5325,6 +5519,8 @@ describe("course monitoring watchdog", () => {
     );
     prismaMocks.courseMonitoringStatus.findUnique.mockResolvedValue({
       state: "ENGINEERING_VERIFICATION_NEEDED",
+      lastSuccessfulAt: null,
+      lastFailureAt: failureObservedAt,
       stateChangedAt: escalatedAt,
       nextAutomaticAttemptAt: null,
       revalidationRequestedAt: null,
@@ -5344,8 +5540,8 @@ describe("course monitoring watchdog", () => {
         automationStalled: true,
         playbookExhausted: false,
         playbookConclusion: "INCOMPLETE",
-        nextStage: "OFFICIAL_IDENTITY",
-        escalationDeadlineAt: "2026-07-27T17:00:00.000Z",
+        nextStage: "RENDERED_BROWSER_DISCOVERY",
+        escalationDeadlineAt: escalatedAt.toISOString(),
       },
     });
     prismaMocks.courseMonitoringStatus.findMany.mockResolvedValue([]);
@@ -5363,6 +5559,9 @@ describe("course monitoring watchdog", () => {
         }),
       }),
     );
+    expect(
+      prismaMocks.courseSupportIncident.updateMany.mock.calls[0]?.[0]?.data,
+    ).not.toHaveProperty("lastSeenAt");
     expect(prismaMocks.courseMonitoringStatus.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
@@ -5372,7 +5571,89 @@ describe("course monitoring watchdog", () => {
         }),
       }),
     );
+    expect(
+      prismaMocks.courseMonitoringStatus.updateMany.mock.calls[0]?.[0]?.data,
+    ).not.toHaveProperty("lastFailureAt");
+    expect(prismaMocks.courseMonitoringEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          occurredAt: now,
+          audit: expect.objectContaining({
+            action: "resume_incomplete_automation_stalled_playbook",
+          }),
+        }),
+      }),
+    );
     expect(prismaMocks.teeSearch.updateMany).toHaveBeenCalled();
+
+    const delayedSuccessObservedAt = new Date(
+      "2026-07-27T15:45:00.000Z",
+    );
+    const delayedSuccessConsumedAt = new Date(
+      "2026-07-27T16:05:00.000Z",
+    );
+    const resumedMonitoring = {
+      courseId: "course-1",
+      state: "AUTO_INVESTIGATING",
+      lastSuccessfulAt: null,
+      lastFailureAt: failureObservedAt,
+      consecutiveFailures: 1,
+      failureFingerprint: prooflessIncident.failureFingerprint,
+      firstDegradedAt: prooflessIncident.firstSeenAt,
+      nextAutomaticAttemptAt: now,
+      revalidationRequestedAt: now,
+      stateChangedAt: now,
+      revision: 4,
+    };
+    prismaMocks.courseMonitoringStatus.upsert.mockResolvedValue(
+      resumedMonitoring,
+    );
+    prismaMocks.courseMonitoringStatus.update.mockResolvedValue({
+      ...resumedMonitoring,
+      state: "HEALTHY",
+      lastSuccessfulAt: delayedSuccessObservedAt,
+      consecutiveFailures: 0,
+      failureFingerprint: null,
+      firstDegradedAt: null,
+      nextAutomaticAttemptAt: null,
+      revalidationRequestedAt: null,
+      stateChangedAt: delayedSuccessConsumedAt,
+      revision: 5,
+    });
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue({
+      ...prooflessIncident,
+      revision: 1,
+      status: "AUTO_INVESTIGATING",
+      humanReviewReason: null,
+      activeBatchId: null,
+      nextAttemptAt: now,
+    });
+
+    await expect(
+      recordCourseMonitoringSuccess({
+        courseId: "course-1",
+        outcome: "NO_MATCH",
+        source: "LOCAL_READER",
+        providerObservedAt: delayedSuccessObservedAt,
+        now: delayedSuccessConsumedAt,
+        runtimeVersion: "reader-runtime",
+      }),
+    ).resolves.toMatchObject({
+      state: "HEALTHY",
+      lastSuccessfulAt: delayedSuccessObservedAt,
+      sourceEvidenceAccepted: true,
+    });
+    expect(
+      prismaMocks.courseSupportIncident.updateMany,
+    ).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "RESOLVED",
+          resolvedAt: delayedSuccessConsumedAt,
+          lastSeenAt: delayedSuccessObservedAt,
+        }),
+      }),
+    );
   });
 
   it.each([

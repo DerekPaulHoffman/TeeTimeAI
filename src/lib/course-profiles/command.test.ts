@@ -11,8 +11,18 @@ const prismaMocks = vi.hoisted(() => ({
   },
   $disconnect: vi.fn()
 }));
+const providerObservationMocks = vi.hoisted(() => ({
+  beginCourseProviderObservation: vi.fn(),
+  markCourseProviderObservationUnreconciled: vi.fn(),
+  releaseCourseProviderObservation: vi.fn(),
+  startCourseProviderObservationHeartbeat: vi.fn()
+}));
 
 vi.mock("@/lib/automation/db-service", () => dbServiceMocks);
+vi.mock(
+  "@/lib/automation/provider-execution-marker",
+  () => providerObservationMocks
+);
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMocks }));
 
 import {
@@ -21,7 +31,35 @@ import {
 } from "../../../scripts/automation/course-profile";
 
 describe("automation:course-profile", () => {
-  beforeEach(() => vi.clearAllMocks());
+  const providerObservation = {
+    courseId: "aguila",
+    leaseToken: "physical-layout-observation",
+    observationStartedAt: new Date("2026-08-18T15:00:00.000Z"),
+    leaseExpiresAt: new Date("2026-08-18T15:20:00.000Z"),
+    ttlMs: 20 * 60_000,
+    supersededUnresolvedObservationStartedAt: null
+  };
+  const heartbeat = {
+    assertOwned: vi.fn(),
+    stop: vi.fn()
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    providerObservationMocks.beginCourseProviderObservation.mockResolvedValue(
+      providerObservation
+    );
+    providerObservationMocks.markCourseProviderObservationUnreconciled.mockResolvedValue(
+      true
+    );
+    providerObservationMocks.releaseCourseProviderObservation.mockResolvedValue(
+      undefined
+    );
+    providerObservationMocks.startCourseProviderObservationHeartbeat.mockReturnValue(
+      heartbeat
+    );
+    heartbeat.stop.mockResolvedValue(undefined);
+  });
 
   it("supports generic profile verification and dry-run profile updates", () => {
     expect(parseCourseProfileCommand(["verify-profiles", "--state", "ct"])).toEqual({
@@ -223,8 +261,90 @@ describe("automation:course-profile", () => {
       verifiedAt: new Date("2026-08-18T00:00:00.000Z"),
       expectedUpdatedAt,
       expectedName: "Aguila Golf Course",
+      providerObservation,
       source: "OPERATOR_CLI"
     });
+    expect(providerObservationMocks.beginCourseProviderObservation).toHaveBeenCalledWith({
+      courseId: "aguila"
+    });
+    expect(heartbeat.assertOwned).toHaveBeenCalledOnce();
+    expect(
+      providerObservationMocks.markCourseProviderObservationUnreconciled
+    ).toHaveBeenCalledWith(
+      providerObservation
+    );
+    expect(providerObservationMocks.releaseCourseProviderObservation).not.toHaveBeenCalled();
+  });
+
+  it("does not fetch physical-layout evidence while another provider observation owns the course", async () => {
+    const expectedUpdatedAt = new Date("2026-08-18T14:00:00.000Z");
+    prismaMocks.course.findUnique.mockResolvedValue({
+      id: "aguila",
+      name: "Aguila Golf Course",
+      layoutHoleCounts: [],
+      layoutHolesEvidenceUrl: null,
+      layoutHolesVerifiedAt: null,
+      updatedAt: expectedUpdatedAt
+    });
+    providerObservationMocks.beginCourseProviderObservation.mockResolvedValue(null);
+    const fetchImpl = vi.fn();
+
+    await expect(
+      executeCourseProfileCommand(
+        parseCourseProfileCommand([
+          "physical-layout",
+          "--course-id", "aguila",
+          "--holes", "18",
+          "--evidence-url", "https://parks.example/aguila-golf-course.html",
+          "--verified-at", "2026-08-18",
+          "--apply"
+        ]),
+        process.stdin,
+        fetchImpl as typeof fetch
+      )
+    ).rejects.toThrow("Another provider observation is already in progress");
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(dbServiceMocks.recordCoursePhysicalLayoutEvidence).not.toHaveBeenCalled();
+  });
+
+  it("retains the provider observation when fetched physical-layout evidence is not reconciled", async () => {
+    const expectedUpdatedAt = new Date("2026-08-18T14:00:00.000Z");
+    prismaMocks.course.findUnique.mockResolvedValue({
+      id: "aguila",
+      name: "Aguila Golf Course",
+      layoutHoleCounts: [],
+      layoutHolesEvidenceUrl: null,
+      layoutHolesVerifiedAt: null,
+      updatedAt: expectedUpdatedAt
+    });
+    const fetchImpl = vi.fn().mockResolvedValue(
+      new Response(
+        "<html><title>A Different Course</title><h1>A Different Course</h1></html>",
+        { status: 200, headers: { "content-type": "text/html" } }
+      )
+    );
+
+    await expect(
+      executeCourseProfileCommand(
+        parseCourseProfileCommand([
+          "physical-layout",
+          "--course-id", "aguila",
+          "--holes", "18",
+          "--evidence-url", "https://parks.example/aguila-golf-course.html",
+          "--verified-at", "2026-08-18",
+          "--apply"
+        ]),
+        process.stdin,
+        fetchImpl as typeof fetch
+      )
+    ).rejects.toThrow("does not corroborate the exact course");
+
+    expect(
+      providerObservationMocks.markCourseProviderObservationUnreconciled
+    ).toHaveBeenCalledWith(providerObservation);
+    expect(providerObservationMocks.releaseCourseProviderObservation).not.toHaveBeenCalled();
+    expect(dbServiceMocks.recordCoursePhysicalLayoutEvidence).not.toHaveBeenCalled();
   });
 
   it("requires exact page-local course and layout corroboration even for dry-run", async () => {
@@ -256,6 +376,7 @@ describe("automation:course-profile", () => {
       )
     ).rejects.toThrow("does not corroborate the exact course");
     expect(dbServiceMocks.recordCoursePhysicalLayoutEvidence).not.toHaveBeenCalled();
+    expect(providerObservationMocks.beginCourseProviderObservation).not.toHaveBeenCalled();
   });
 
   it("never follows a physical-layout evidence redirect to an account route", async () => {

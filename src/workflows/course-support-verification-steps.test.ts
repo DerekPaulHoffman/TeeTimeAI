@@ -43,6 +43,15 @@ const providerLeaseMocks = vi.hoisted(() => ({
   runWithProviderRequestLease: vi.fn(),
 }));
 
+const providerObservationMocks = vi.hoisted(() => ({
+  beginCourseProviderObservation: vi.fn(),
+  markCourseProviderObservationUnreconciled: vi.fn(),
+  releaseCourseProviderObservation: vi.fn(),
+  assertOwned: vi.fn(),
+  stop: vi.fn(),
+  startCourseProviderObservationHeartbeat: vi.fn(),
+}));
+
 const runtimeMocks = vi.hoisted(() => ({
   getAutomationRuntimeVersion: vi.fn(),
 }));
@@ -75,6 +84,10 @@ vi.mock(
 vi.mock("@/lib/automation/search-monitoring-discovery", () => discoveryMocks);
 vi.mock("@/lib/automation/provider-capabilities", () => capabilityMocks);
 vi.mock("@/lib/automation/provider-request-lease", () => providerLeaseMocks);
+vi.mock(
+  "@/lib/automation/provider-execution-marker",
+  () => providerObservationMocks,
+);
 vi.mock("@/lib/automation/runtime-version", () => runtimeMocks);
 vi.mock("@/lib/email/search-delivery-outbox", () => deliveryMocks);
 vi.mock("@/lib/local-reader/service", () => localReaderMocks);
@@ -492,6 +505,27 @@ describe("executeCourseSupportVerificationStep", () => {
         acquired: true,
         value: await worker(),
       }),
+    );
+    providerObservationMocks.beginCourseProviderObservation.mockResolvedValue({
+      courseId: "course-1",
+      leaseToken: "provider-observation-1",
+      observationStartedAt: new Date("2026-07-21T12:00:00.000Z"),
+      leaseExpiresAt: new Date("2026-07-21T12:20:00.000Z"),
+      ttlMs: 20 * 60_000,
+    });
+    providerObservationMocks.assertOwned.mockReturnValue(undefined);
+    providerObservationMocks.stop.mockResolvedValue(undefined);
+    providerObservationMocks.startCourseProviderObservationHeartbeat.mockReturnValue(
+      {
+        assertOwned: providerObservationMocks.assertOwned,
+        stop: providerObservationMocks.stop,
+      },
+    );
+    providerObservationMocks.markCourseProviderObservationUnreconciled.mockResolvedValue(
+      true,
+    );
+    providerObservationMocks.releaseCourseProviderObservation.mockResolvedValue(
+      undefined,
     );
     deliveryMocks.getSafeOfficialBookingUrl.mockImplementation(
       (value: unknown) =>
@@ -1256,6 +1290,110 @@ describe("executeCourseSupportVerificationStep", () => {
     },
   );
 
+  it("holds the course marker across provider I/O and durable verification evidence", async () => {
+    const providerObservedAt = new Date("2026-07-21T12:00:00.123Z");
+    allowOwnedExecution();
+    providerObservationMocks.beginCourseProviderObservation.mockResolvedValueOnce(
+      {
+        courseId: "course-1",
+        leaseToken: "provider-observation-1",
+        observationStartedAt: providerObservedAt,
+        leaseExpiresAt: new Date("2026-07-21T12:20:00.123Z"),
+        ttlMs: 20 * 60_000,
+      },
+    );
+    providerReadMocks.fetchCourseTeeSheet.mockResolvedValue({
+      slots: [],
+      targetDateStatus: "OPEN",
+      bookingWindowEvidence: null,
+    });
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "completed",
+      providerOutcome: "NO_MATCH",
+    });
+
+    expect(
+      providerObservationMocks.beginCourseProviderObservation.mock
+        .invocationCallOrder[0],
+    ).toBeLessThan(
+      providerReadMocks.fetchCourseTeeSheet.mock.invocationCallOrder[0],
+    );
+    expect(
+      verificationMocks.completeCourseSupportVerificationRequest,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        observation: expect.objectContaining({ observedAt: providerObservedAt }),
+      }),
+    );
+    expect(
+      verificationMocks.completeCourseSupportVerificationRequest.mock
+        .invocationCallOrder[0],
+    ).toBeLessThan(
+      providerObservationMocks.markCourseProviderObservationUnreconciled.mock
+        .invocationCallOrder[0],
+    );
+    expect(
+      providerObservationMocks.markCourseProviderObservationUnreconciled,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({ observationStartedAt: providerObservedAt }),
+    );
+    expect(
+      providerObservationMocks.releaseCourseProviderObservation,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("records no verification evidence after provider observation ownership is lost", async () => {
+    allowOwnedExecution();
+    providerReadMocks.fetchCourseTeeSheet.mockResolvedValue({
+      slots: [],
+      targetDateStatus: "OPEN",
+      bookingWindowEvidence: null,
+    });
+    providerObservationMocks.assertOwned.mockImplementationOnce(() => {
+      throw new Error("provider observation ownership lost");
+    });
+
+    await expect(executeCourseSupportVerificationStep(input)).rejects.toThrow(
+      "provider observation ownership lost",
+    );
+
+    expect(providerReadMocks.fetchCourseTeeSheet).toHaveBeenCalledOnce();
+    expect(
+      verificationMocks.completeCourseSupportVerificationRequest,
+    ).not.toHaveBeenCalled();
+    expect(
+      verificationMocks.failCourseSupportVerificationRequest,
+    ).not.toHaveBeenCalled();
+    expect(
+      providerObservationMocks.markCourseProviderObservationUnreconciled,
+    ).toHaveBeenCalledOnce();
+    expect(
+      providerObservationMocks.releaseCourseProviderObservation,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("performs no provider I/O while another course observation owns the marker", async () => {
+    allowOwnedExecution();
+    providerObservationMocks.beginCourseProviderObservation.mockResolvedValueOnce(
+      null,
+    );
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "failed",
+      retryable: false,
+    });
+
+    expect(providerReadMocks.fetchCourseTeeSheet).not.toHaveBeenCalled();
+    expect(
+      verificationMocks.failCourseSupportVerificationRequest,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        observation: expect.objectContaining({ providerExecution: false }),
+      }),
+    );
+  });
+
   it("rechecks the monitoring gate after discovery before provider I/O", async () => {
     allowOwnedExecution();
     prismaMocks.courseFindUnique
@@ -1512,14 +1650,18 @@ describe("executeCourseSupportVerificationStep", () => {
     );
   });
 
-  it("records a completed reader challenge as terminal instead of queuing it again", async () => {
+  it("records a delayed reader challenge at provider source time instead of receipt time", async () => {
+    const readerFailureObservedAt = new Date("2026-07-21T12:00:30.000Z");
+    const delayedSuccessObservedAt = new Date("2026-07-21T12:01:00.000Z");
+    const receiptAt = new Date("2026-07-21T12:10:00.000Z");
+    vi.setSystemTime(receiptAt);
     allowOwnedExecution();
     localReaderMocks.getLocalReaderCourseKey.mockReturnValue(
       "chronogolf:crestbrook-park-golf-course",
     );
     localReaderMocks.getLocalReaderCourseVerification.mockResolvedValue({
       status: "TERMINAL",
-      observedAt: new Date("2026-07-21T12:00:30.000Z"),
+      observedAt: readerFailureObservedAt,
       readerVersion: "reader-v1",
       resultStatus: "ACCESS_CHALLENGE",
     });
@@ -1552,9 +1694,68 @@ describe("executeCourseSupportVerificationStep", () => {
       expect.objectContaining({
         failureClass: "CHALLENGE",
         message: expect.stringContaining("persistent access control"),
-        observation: expect.objectContaining({ providerExecution: true }),
+        observation: expect.objectContaining({
+          observedAt: readerFailureObservedAt,
+          providerExecution: true,
+        }),
       }),
     );
+    expect(readerFailureObservedAt.getTime()).toBeLessThan(
+      delayedSuccessObservedAt.getTime(),
+    );
+    expect(delayedSuccessObservedAt.getTime()).toBeLessThan(receiptAt.getTime());
+  });
+
+  it("keeps an expired reader deadline from fencing a delayed valid provider result", async () => {
+    const readerExpiredAt = new Date("2026-07-21T12:00:30.000Z");
+    const delayedSuccessObservedAt = new Date("2026-07-21T12:01:00.000Z");
+    const receiptAt = new Date("2026-07-21T12:10:00.000Z");
+    vi.setSystemTime(receiptAt);
+    allowOwnedExecution();
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue(
+      "chronogolf:crestbrook-park-golf-course",
+    );
+    localReaderMocks.getLocalReaderCourseVerification.mockResolvedValue({
+      status: "TERMINAL",
+      observedAt: readerExpiredAt,
+      readerVersion: null,
+      resultStatus: "EXPIRED",
+    });
+    capabilityMocks.resolveProviderCapability.mockReturnValue({
+      providerFamilyKey: "CHRONOGOLF",
+      isRunnable: true,
+      metadataReady: true,
+      evidenceConflict: false,
+    });
+    providerReadMocks.fetchCourseTeeSheet.mockRejectedValue(
+      new Error("public adapter challenge"),
+    );
+    capabilityMocks.classifyProviderFailure.mockReturnValue({
+      failureClass: "CHALLENGE",
+      httpStatus: 403,
+      retryAfterSeconds: null,
+    });
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "failed",
+      retryable: false,
+    });
+
+    expect(
+      verificationMocks.failCourseSupportVerificationRequest,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        failureClass: "TIMEOUT",
+        observation: expect.objectContaining({
+          observedAt: receiptAt,
+          providerExecution: false,
+        }),
+      }),
+    );
+    expect(readerExpiredAt.getTime()).toBeLessThan(
+      delayedSuccessObservedAt.getTime(),
+    );
+    expect(delayedSuccessObservedAt.getTime()).toBeLessThan(receiptAt.getTime());
   });
 
   it("bypasses blocked provider and browser paths for local-reader-only verification", async () => {
@@ -2315,6 +2516,110 @@ describe("executeCourseSupportVerificationStep", () => {
     expect(providerReadMocks.fetchCourseTeeSheet).not.toHaveBeenCalled();
   });
 
+  it("records an unsafe concluded reader result at its provider source time", async () => {
+    const readerObservedAt = new Date("2026-07-21T12:00:30.000Z");
+    vi.setSystemTime(new Date("2026-07-21T12:10:00.000Z"));
+    installPlaybookRuntime(completedPlaybookSeedThroughLocalReader());
+    allowOwnedDiscovery();
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("cps:course-1");
+    localReaderMocks.getLocalReaderCourseVerification.mockResolvedValue({
+      status: "COMPLETED",
+      observedAt: readerObservedAt,
+      readerVersion: "reader-v2",
+      slots: [slot({ bookingUrl: "https://booking.example/checkout" })],
+    });
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "failed",
+      retryable: false,
+    });
+
+    expect(
+      verificationMocks.failCourseSupportVerificationRequest,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        failureClass: "SCHEMA",
+        observation: expect.objectContaining({
+          observedAt: readerObservedAt,
+          providerExecution: true,
+        }),
+      }),
+    );
+    expect(
+      verificationMocks.markCourseSupportVerificationDiscoveryVerified,
+    ).not.toHaveBeenCalled();
+  });
+
+  it("records a terminal concluded reader result at its provider source time", async () => {
+    const readerObservedAt = new Date("2026-07-21T12:00:30.000Z");
+    vi.setSystemTime(new Date("2026-07-21T12:10:00.000Z"));
+    installPlaybookRuntime(completedPlaybookSeedThroughLocalReader());
+    allowOwnedDiscovery();
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("cps:course-1");
+    localReaderMocks.getLocalReaderCourseVerification.mockResolvedValue({
+      status: "TERMINAL",
+      observedAt: readerObservedAt,
+      readerVersion: "reader-v2",
+      resultStatus: "ACCESS_CHALLENGE",
+    });
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "failed",
+      retryable: false,
+    });
+
+    expect(
+      verificationMocks.failCourseSupportVerificationRequest,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        failureClass: "CHALLENGE",
+        retryAt: null,
+        observation: expect.objectContaining({
+          observedAt: readerObservedAt,
+          providerExecution: true,
+        }),
+      }),
+    );
+  });
+
+  it("keeps a concluded reader expiry from fencing a delayed valid provider result", async () => {
+    const readerExpiredAt = new Date("2026-07-21T12:00:30.000Z");
+    const delayedSuccessObservedAt = new Date("2026-07-21T12:01:00.000Z");
+    const receiptAt = new Date("2026-07-21T12:10:00.000Z");
+    vi.setSystemTime(receiptAt);
+    installPlaybookRuntime(completedPlaybookSeedThroughLocalReader());
+    allowOwnedDiscovery();
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("cps:course-1");
+    localReaderMocks.getLocalReaderCourseVerification.mockResolvedValue({
+      status: "TERMINAL",
+      observedAt: readerExpiredAt,
+      readerVersion: null,
+      resultStatus: "EXPIRED",
+    });
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "failed",
+      retryable: false,
+    });
+
+    expect(
+      verificationMocks.failCourseSupportVerificationRequest,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        failureClass: "TIMEOUT",
+        retryAt: null,
+        observation: expect.objectContaining({
+          observedAt: receiptAt,
+          providerExecution: false,
+        }),
+      }),
+    );
+    expect(readerExpiredAt.getTime()).toBeLessThan(
+      delayedSuccessObservedAt.getTime(),
+    );
+    expect(delayedSuccessObservedAt.getTime()).toBeLessThan(receiptAt.getTime());
+  });
+
   it("queues one fresh signed read for a concluded local-reader recovery", async () => {
     installPlaybookRuntime(completedPlaybookSeedThroughLocalReader());
     allowOwnedDiscovery();
@@ -2775,7 +3080,43 @@ describe("executeCourseSupportVerificationStep", () => {
     );
   });
 
+  it("records an unsafe ordered reader result at its provider source time", async () => {
+    const readerObservedAt = new Date("2026-07-21T12:00:30.000Z");
+    vi.setSystemTime(new Date("2026-07-21T12:10:00.000Z"));
+    installPlaybookRuntime(completedPlaybookSeedThroughBrowserAdapter());
+    allowOwnedDiscovery();
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue("cps:course-1");
+    localReaderMocks.getLocalReaderCourseVerification.mockResolvedValue({
+      status: "COMPLETED",
+      observedAt: readerObservedAt,
+      readerVersion: "reader-v1",
+      slots: [slot({ bookingUrl: "https://booking.example/checkout" })],
+    });
+
+    await expect(executeCourseSupportVerificationStep(input)).resolves.toEqual({
+      outcome: "failed",
+      retryable: false,
+    });
+
+    expect(
+      verificationMocks.failCourseSupportVerificationRequest,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        failureClass: "SCHEMA",
+        observation: expect.objectContaining({
+          observedAt: readerObservedAt,
+          providerExecution: true,
+        }),
+      }),
+    );
+    expect(
+      verificationMocks.markCourseSupportVerificationDiscoveryVerified,
+    ).not.toHaveBeenCalled();
+  });
+
   it("keeps a terminal reader challenge unresolved until an independent current observation", async () => {
+    const readerObservedAt = new Date("2026-07-21T12:00:30.000Z");
+    vi.setSystemTime(new Date("2026-07-21T12:10:00.000Z"));
     const runtime = installPlaybookRuntime(
       completedPlaybookSeedThroughBrowserAdapter(),
     );
@@ -2783,7 +3124,7 @@ describe("executeCourseSupportVerificationStep", () => {
     localReaderMocks.getLocalReaderCourseKey.mockReturnValue("cps:course-1");
     localReaderMocks.getLocalReaderCourseVerification.mockResolvedValue({
       status: "TERMINAL",
-      observedAt: new Date("2026-07-21T12:00:30.000Z"),
+      observedAt: readerObservedAt,
       readerVersion: "reader-v1",
       resultStatus: "ACCESS_CHALLENGE",
     });
@@ -2817,6 +3158,17 @@ describe("executeCourseSupportVerificationStep", () => {
     expect(
       localReaderMocks.queueLocalReaderCourseVerification,
     ).not.toHaveBeenCalled();
+    expect(
+      verificationMocks.failCourseSupportVerificationRequest,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        failureClass: "CHALLENGE",
+        observation: expect.objectContaining({
+          observedAt: readerObservedAt,
+          providerExecution: true,
+        }),
+      }),
+    );
     expect(
       supportIncidentMocks.resolveCourseSupportIncident,
     ).not.toHaveBeenCalled();

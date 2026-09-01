@@ -18,6 +18,16 @@ import {
 } from "./db-service";
 import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
 
+const providerExecutionMarkerMocks = vi.hoisted(() => ({
+  renewCourseProviderObservationInTransaction: vi.fn(),
+}));
+
+vi.mock("./provider-execution-marker", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./provider-execution-marker")>()),
+  renewCourseProviderObservationInTransaction:
+    providerExecutionMarkerMocks.renewCourseProviderObservationInTransaction,
+}));
+
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     $queryRaw: vi.fn(),
@@ -57,6 +67,9 @@ vi.mock("@/lib/prisma", () => ({
     },
     teeSearch: {
       findMany: vi.fn(),
+      updateMany: vi.fn()
+    },
+    teeTimeMatch: {
       updateMany: vi.fn()
     }
   }
@@ -147,18 +160,159 @@ function browserReadyAttemptLedger(cycle = 1) {
   });
 }
 
+const browserDiscoveryParentUpdatedAt = new Date("2026-08-31T00:00:00.001Z");
+const providerObservationLease = {
+  courseId: "course-owned-browser",
+  leaseToken: "provider-observation-owned-browser",
+  observationStartedAt: new Date("2026-08-22T12:00:00.000Z"),
+  leaseExpiresAt: new Date("2026-08-22T12:20:00.000Z"),
+  ttlMs: 20 * 60_000,
+  supersededUnresolvedObservationStartedAt: null,
+};
+
+function providerDiscoveryFor(courseId: string) {
+  const sourceUrl = `https://${courseId}.example.com/`;
+  return {
+    courseId,
+    status: "FAILED" as const,
+    detectedPlatform: "UNKNOWN" as const,
+    sourceUrl,
+    confidence: 0,
+    evidence: {
+      learnedFrom: "official-site-fetch-failed",
+      observedUrls: [sourceUrl],
+      visibleText: "Provider unavailable",
+    },
+  };
+}
+
 describe("browser discovery persistence", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockedPrisma.$transaction.mockImplementation(async (worker) =>
       worker(mockedPrisma as never)
     );
-    mockedPrisma.$queryRaw.mockResolvedValue([] as never);
+    mockedPrisma.$queryRaw.mockResolvedValue([
+      { updatedAt: browserDiscoveryParentUpdatedAt }
+    ] as never);
     mockedPrisma.$queryRawUnsafe.mockResolvedValue([] as never);
     mockedPrisma.courseSupportIncident.findMany.mockResolvedValue([]);
     mockedPrisma.courseSupportIncident.findUnique.mockResolvedValue(null);
     mockedPrisma.courseMonitoringEvent.findFirst.mockResolvedValue(null);
     mockedPrisma.courseSupportBatch.findFirst.mockResolvedValue(null);
+    mockedPrisma.teeSearch.updateMany.mockResolvedValue({ count: 0 } as never);
+    mockedPrisma.teeTimeMatch.updateMany.mockResolvedValue({ count: 0 } as never);
+    providerExecutionMarkerMocks.renewCourseProviderObservationInTransaction.mockResolvedValue(
+      true,
+    );
+  });
+
+  it("does not record failed landing evidence after a successor takes the provider marker", async () => {
+    const courseId = "lost-failed-discovery-marker";
+    const observation = { ...providerObservationLease, courseId };
+    providerExecutionMarkerMocks.renewCourseProviderObservationInTransaction.mockResolvedValueOnce(
+      false,
+    );
+
+    await expect(
+      recordBrowserDiscovery(
+        providerDiscoveryFor(courseId) as never,
+        undefined,
+        undefined,
+        undefined,
+        observation.observationStartedAt,
+        observation,
+      ),
+    ).rejects.toThrow(
+      "Provider observation ownership expired before discovery persistence completed",
+    );
+
+    expect(mockedPrisma.courseAutomationDiscovery.create).not.toHaveBeenCalled();
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("does not apply landing evidence after a successor takes the provider marker", async () => {
+    const courseId = "lost-landing-apply-marker";
+    const observation = { ...providerObservationLease, courseId };
+    providerExecutionMarkerMocks.renewCourseProviderObservationInTransaction.mockResolvedValueOnce(
+      false,
+    );
+
+    await expect(
+      recordAndApplyBrowserDiscoveryToCourse(
+        providerDiscoveryFor(courseId) as never,
+        undefined,
+        undefined,
+        {
+          observedAt: observation.observationStartedAt,
+          providerObservation: observation,
+        },
+      ),
+    ).rejects.toThrow(
+      "Provider observation ownership expired before discovery persistence completed",
+    );
+
+    expect(mockedPrisma.course.findUnique).not.toHaveBeenCalled();
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
+    expect(mockedPrisma.courseAutomationDiscovery.create).not.toHaveBeenCalled();
+  });
+
+  it("does not retire a legacy policy projection after a successor takes the provider marker", async () => {
+    const courseId = "lost-legacy-retirement-marker";
+    const observation = { ...providerObservationLease, courseId };
+    providerExecutionMarkerMocks.renewCourseProviderObservationInTransaction.mockResolvedValueOnce(
+      false,
+    );
+
+    await expect(
+      retireLegacyPolicyOnlyCourseBlock(
+        courseId,
+        {
+          updatedAt: new Date("2026-08-22T11:00:00.000Z"),
+          detectedBookingUrl: "https://booking.example.com/tee-times",
+          bookingMethod: "PUBLIC_ONLINE",
+          automationEligibility: "BLOCKED",
+        } as never,
+        {
+          preserveWebsite: true,
+          preserveDetectedBookingUrl: true,
+          preserveBookingMetadata: true,
+        },
+        undefined,
+        observation.observationStartedAt,
+        observation,
+      ),
+    ).rejects.toThrow(
+      "Provider observation ownership expired before discovery persistence completed",
+    );
+
+    expect(mockedPrisma.course.findUnique).not.toHaveBeenCalled();
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
+    expect(mockedPrisma.courseAutomationDiscovery.create).not.toHaveBeenCalled();
+  });
+
+  it("does not apply a recovered official website after a successor takes the provider marker", async () => {
+    const courseId = "lost-official-website-marker";
+    const observation = { ...providerObservationLease, courseId };
+    providerExecutionMarkerMocks.renewCourseProviderObservationInTransaction.mockResolvedValueOnce(
+      false,
+    );
+
+    await expect(
+      applyRecoveredOfficialWebsiteToCourse({
+        courseId,
+        website: "https://municipal.example.com/golf",
+        expectedUpdatedAt: new Date("2026-08-22T11:00:00.000Z"),
+        observedAt: observation.observationStartedAt,
+        providerObservation: observation,
+      }),
+    ).rejects.toThrow(
+      "Provider observation ownership expired before discovery persistence completed",
+    );
+
+    expect(mockedPrisma.course.findUnique).not.toHaveBeenCalled();
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
+    expect(mockedPrisma.courseAutomationDiscovery.create).not.toHaveBeenCalled();
   });
 
   it("records browser evidence and learned API metadata", async () => {
@@ -261,7 +415,7 @@ describe("browser discovery persistence", () => {
         },
         observedAt
       })
-    ).resolves.toEqual(applied);
+    ).resolves.toEqual({ ...applied, updatedAt: browserDiscoveryParentUpdatedAt });
 
     expect(mockedPrisma.course.updateMany).toHaveBeenCalledWith({
       where: {
@@ -3335,12 +3489,13 @@ describe("browser discovery persistence", () => {
       fence,
       runtimeVersion,
       buildCourseSupportProviderSnapshotFingerprint(current as never),
+      providerObservationLease,
       new Date("2026-08-22T12:00:30.000Z")
     );
 
     const resultingFingerprint = buildCourseSupportProviderSnapshotFingerprint(applied as never);
     expect(result).toMatchObject({
-      applied,
+      applied: { ...applied, updatedAt: browserDiscoveryParentUpdatedAt },
       providerSnapshotFingerprint: resultingFingerprint,
       snapshotBound: true
     });
@@ -3357,6 +3512,77 @@ describe("browser discovery persistence", () => {
     expect(mockedPrisma.course.updateMany.mock.invocationCallOrder[0]).toBeLessThan(
       mockedPrisma.courseAutomationDiscovery.create.mock.invocationCallOrder[0]
     );
+  });
+
+  it("rejects owned browser persistence before canonical writes when a successor took the provider marker", async () => {
+    const courseId = "course-lost-browser-marker";
+    const runtimeVersion = "a".repeat(40);
+    const fence = {
+      batchId: "batch-lost-browser-marker",
+      leaseToken: "batch-lease-lost-browser-marker",
+      ownerThreadId: "thread-lost-browser-marker",
+      releaseSha: runtimeVersion,
+      deployedAt: new Date("2026-08-22T11:55:00.000Z"),
+      runtimeVersion,
+      incidentId: "incident-lost-browser-marker",
+      courseId,
+      cycle: 1,
+      stage: "RENDERED_BROWSER_DISCOVERY" as const,
+    };
+    const discovery = {
+      courseId,
+      status: "LEARNED" as const,
+      detectedPlatform: "CUSTOM" as const,
+      sourceUrl: "https://course.example.com/",
+      bookingUrl: "https://booking.example.com/tee-times",
+      confidence: 0.8,
+      evidence: {
+        learnedFrom: "rendered-browser",
+        observedUrls: ["https://booking.example.com/tee-times"],
+        browserInvestigation: {
+          mode: "RENDERED",
+          incidentCycle: 1,
+          runtimeVersion,
+          observedAt: "2026-08-22T12:00:00.000Z",
+          networkContracts: [],
+        },
+      },
+    };
+    mockedPrisma.courseSupportIncident.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockedPrisma.courseSupportBatch.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockedPrisma.courseSupportBatchIncident.findUnique.mockResolvedValue({
+      courseId,
+      cycle: 1,
+      result: "PENDING",
+    } as never);
+    mockedPrisma.courseSupportIncident.findUnique.mockResolvedValue({
+      cycle: 1,
+      attemptLedger: browserReadyAttemptLedger(),
+    } as never);
+    providerExecutionMarkerMocks.renewCourseProviderObservationInTransaction.mockResolvedValueOnce(
+      false,
+    );
+
+    await expect(
+      recordAndApplyOwnedBrowserDiscoveryToCourse(
+        discovery as never,
+        discovery as never,
+        fence,
+        runtimeVersion,
+        "b".repeat(64),
+        {
+          ...providerObservationLease,
+          courseId,
+        },
+        new Date("2026-08-22T12:00:00.000Z"),
+      ),
+    ).rejects.toThrow(
+      "Rendered provider observation ownership expired before course persistence completed",
+    );
+
+    expect(mockedPrisma.course.findUnique).not.toHaveBeenCalled();
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
+    expect(mockedPrisma.courseAutomationDiscovery.create).not.toHaveBeenCalled();
   });
 
   it("keeps contracts unbound when the course drifts after browser observation", async () => {
@@ -3455,6 +3681,10 @@ describe("browser discovery persistence", () => {
       fence,
       runtimeVersion,
       buildCourseSupportProviderSnapshotFingerprint(observedCourse as never),
+      {
+        ...providerObservationLease,
+        courseId: observedCourse.id,
+      },
       new Date("2026-08-22T12:00:10.000Z")
     );
 
@@ -3464,13 +3694,18 @@ describe("browser discovery persistence", () => {
       snapshotBound: false
     });
     expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
-    expect(mockedPrisma.$queryRaw).toHaveBeenCalledOnce();
+    expect(mockedPrisma.$queryRaw).toHaveBeenCalledTimes(2);
     const [courseLock] = mockedPrisma.$queryRaw.mock.calls[0] as [
       { strings: readonly string[]; values: unknown[] }
     ];
     expect(courseLock.strings.join("")).toContain('FROM "Course"');
     expect(courseLock.strings.join("")).toContain("FOR UPDATE");
     expect(courseLock.values).toEqual([observedCourse.id]);
+    const [parentFence] = mockedPrisma.$queryRaw.mock.calls[1] as [
+      { strings: readonly string[]; values: unknown[] }
+    ];
+    expect(parentFence.strings.join("")).toContain('UPDATE "Course"');
+    expect(parentFence.values).toEqual([observedCourse.id]);
     const persistedEvidence = mockedPrisma.courseAutomationDiscovery.create.mock.calls[0]?.[0]
       ?.data.evidence as {
       browserInvestigation?: Record<string, unknown>;

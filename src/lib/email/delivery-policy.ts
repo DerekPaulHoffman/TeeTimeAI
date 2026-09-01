@@ -1,5 +1,8 @@
 import type { SearchEmailDeliveryKind } from "@prisma/client";
 
+export const DELIVERY_SYNTHETIC_MULTI_CYCLE_DRY_RUN =
+  "DELIVERY_SYNTHETIC_MULTI_CYCLE_DRY_RUN";
+
 export function areSearchStatusEmailsEnabled() {
   return true;
 }

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma } from "@/lib/prisma";
 import { applyPendingClerkEmailForSearch } from "@/lib/users/pending-email";
 import { EmailDeliveryNotAcceptedError } from "./alerts";
+import { DELIVERY_SYNTHETIC_MULTI_CYCLE_DRY_RUN } from "./delivery-policy";
 import {
   assertSafeSearchEmailPayload,
   drainSearchEmailDeliveryGroup,
@@ -18,63 +19,68 @@ import {
   lockSearchForEmailReconciliation,
   prepareRecipientMatchDeliveryGroups,
   prepareSearchEmailDeliveryGroup,
+  reactivateTerminalUnresolvedMatchDeliveries,
   SearchEmailDeliveryDeferredError,
   SearchEmailDeliveryInProgressError,
-  suppressSearchEmailDeliveriesForMatches
+  suppressSearchEmailDeliveriesForMatches,
 } from "./search-delivery-outbox";
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     $transaction: vi.fn(),
     $queryRaw: vi.fn(),
+    $queryRawUnsafe: vi.fn(),
     $executeRaw: vi.fn(),
     user: { findUnique: vi.fn() },
     course: { findMany: vi.fn() },
+    courseMonitoringStatus: { findMany: vi.fn() },
     courseProbe: { findMany: vi.fn() },
+    localReaderJob: { findMany: vi.fn() },
     searchEmailDelivery: {
       create: vi.fn(),
       findFirst: vi.fn(),
       findMany: vi.fn(),
-      updateMany: vi.fn()
+      updateMany: vi.fn(),
     },
     teeSearch: {
       findFirst: vi.fn(),
       update: vi.fn(),
-      updateMany: vi.fn()
+      updateMany: vi.fn(),
     },
     teeTimeMatch: {
       count: vi.fn(),
       findMany: vi.fn(),
-      updateMany: vi.fn()
-    }
-  }
+      updateMany: vi.fn(),
+    },
+  },
 }));
 
 vi.mock("@/lib/users/pending-email", async () => {
-  const actual = await vi.importActual<typeof import("@/lib/users/pending-email")>(
-    "@/lib/users/pending-email"
-  );
+  const actual = await vi.importActual<
+    typeof import("@/lib/users/pending-email")
+  >("@/lib/users/pending-email");
   return {
     ...actual,
-    applyPendingClerkEmailForSearch: vi.fn()
+    applyPendingClerkEmailForSearch: vi.fn(),
   };
 });
 
 const mockedPrisma = vi.mocked(prisma, { deep: true });
 const mockedApplyPendingClerkEmailForSearch = vi.mocked(
-  applyPendingClerkEmailForSearch
+  applyPendingClerkEmailForSearch,
 );
 const now = new Date("2026-07-15T15:00:00.000Z");
 const currentSearch = {
   id: "search-1",
   userId: "user-1",
   status: "ACTIVE",
+  syntheticMultiCycle: false,
   alertGeneration: 3,
   checkLeaseToken: "check-lease",
   checkLeaseExpiresAt: new Date("2026-07-15T15:15:00.000Z"),
   ownerEmail: "owner@example.com",
   ownerPendingEmail: null,
-  additionalEmails: ["friend@example.com"]
+  additionalEmails: ["friend@example.com"],
 };
 const payload = {
   schemaVersion: 2 as const,
@@ -83,34 +89,36 @@ const payload = {
   matchRefs: [{ matchId: "match-1", availabilityCycle: 7 }],
   displayMatchIds: ["match-1"],
   satisfiesStatusReport: true,
-  statusSnapshot: [{ courseId: "course-1", courseName: "Course", state: "MATCH_FOUND:1" }],
-    matchReport: {
-      targetDate: "2026-07-16",
+  statusSnapshot: [
+    { courseId: "course-1", courseName: "Course", state: "MATCH_FOUND:1" },
+  ],
+  matchReport: {
+    targetDate: "2026-07-16",
     startTime: "07:00",
     endTime: "10:00",
     players: 2,
     requestedLayoutHoles: null,
-      userTimeZone: "America/New_York",
-      matches: [
-        {
-          matchId: "match-1",
-          courseId: "course-1",
-          courseName: "Course",
-          courseRank: 1,
-          courseAddress: "1 Main Street",
-          courseTimeZone: "America/New_York",
-          startsAt: "2026-07-16T12:00:00.000Z",
-          availableSpots: 4,
-          bookingUrl: "https://example.com/tee-times?date=2026-07-16",
-          priceCents: 6500,
-          holes: 18,
-          bookableHoleCounts: [9, 18],
-          factLine: "Public · 4.1 rating · 1.3 mi · 18H · $65",
-          courseGuideUrl: "/courses/course",
-          isNew: true
-        }
-      ]
-  }
+    userTimeZone: "America/New_York",
+    matches: [
+      {
+        matchId: "match-1",
+        courseId: "course-1",
+        courseName: "Course",
+        courseRank: 1,
+        courseAddress: "1 Main Street",
+        courseTimeZone: "America/New_York",
+        startsAt: "2026-07-16T12:00:00.000Z",
+        availableSpots: 4,
+        bookingUrl: "https://example.com/tee-times?date=2026-07-16",
+        priceCents: 6500,
+        holes: 18,
+        bookableHoleCounts: [9, 18],
+        factLine: "Public · 4.1 rating · 1.3 mi · 18H · $65",
+        courseGuideUrl: "/courses/course",
+        isNew: true,
+      },
+    ],
+  },
 };
 
 const currentCourse = {
@@ -127,7 +135,7 @@ const currentCourse = {
   automationReason: "NONE",
   intelligenceVerifiedAt: null,
   intelligenceReviewAt: null,
-  intelligenceConfidence: null
+  intelligenceConfidence: null,
 };
 
 const currentMatch = {
@@ -136,17 +144,18 @@ const currentMatch = {
   alertStatus: "PENDING",
   availabilityStatus: "AVAILABLE",
   availabilityCycle: 7,
+  lastConfirmedAt: now,
   startsAt: new Date("2026-07-16T12:00:00.000Z"),
   availableSpots: 4,
   bookingUrl: "https://example.com/tee-times?date=2026-07-16",
   priceCents: 6500,
-  holes: 18
+  holes: 18,
 };
 
 function delivery(
   id: string,
   recipient: string,
-  overrides: Record<string, unknown> = {}
+  overrides: Record<string, unknown> = {},
 ) {
   return {
     id,
@@ -164,48 +173,214 @@ function delivery(
     nextAttemptAt: null,
     sentAt: null,
     createdAt: new Date("2026-07-15T14:59:00.000Z"),
-    ...overrides
+    ...overrides,
   };
 }
 
 function executeRawCallsContaining(fragment: string) {
   return mockedPrisma.$executeRaw.mock.calls.filter(([sql]) =>
-    (sql as unknown as { strings: string[] }).strings.join(" ").includes(fragment)
+    (sql as unknown as { strings: string[] }).strings
+      .join(" ")
+      .includes(fragment),
   );
+}
+
+function rawSqlText(sql: unknown) {
+  return (sql as { strings?: string[] }).strings?.join(" ") ?? "";
+}
+
+function mockQueryRawForSearch(search: Record<string, unknown>) {
+  mockedPrisma.$queryRaw.mockImplementation(async (sql) => {
+    const text = rawSqlText(sql);
+    if (text.includes('FROM "ProviderRequestLease"')) {
+      return [] as never;
+    }
+    if (text.includes('statement_timestamp() AS "currentTime"')) {
+      return [{ currentTime: now }] as never;
+    }
+    return [search] as never;
+  });
 }
 
 describe("search email delivery outbox", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     mockedPrisma.$transaction.mockImplementation(async (callback) =>
-      (callback as (transaction: typeof prisma) => Promise<unknown>)(prisma)
+      (callback as (transaction: typeof prisma) => Promise<unknown>)(prisma),
     );
-    mockedPrisma.$queryRaw.mockResolvedValue([currentSearch] as never);
+    mockQueryRawForSearch(currentSearch);
+    mockedPrisma.$queryRawUnsafe.mockResolvedValue([{ locked: true }] as never);
     mockedPrisma.$executeRaw.mockResolvedValue(1 as never);
     mockedPrisma.user.findUnique.mockResolvedValue({
       email: "owner@example.com",
-      pendingEmail: null
+      pendingEmail: null,
     } as never);
-    mockedApplyPendingClerkEmailForSearch.mockResolvedValue({ outcome: "none" });
+    mockedApplyPendingClerkEmailForSearch.mockResolvedValue({
+      outcome: "none",
+    });
     mockedPrisma.searchEmailDelivery.findFirst.mockResolvedValue(null);
-    mockedPrisma.searchEmailDelivery.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockedPrisma.searchEmailDelivery.updateMany.mockResolvedValue({
+      count: 1,
+    } as never);
     mockedPrisma.course.findMany.mockResolvedValue([currentCourse] as never);
+    mockedPrisma.courseMonitoringStatus.findMany.mockResolvedValue([
+      {
+        courseId: "course-1",
+        lastSuccessfulAt: now,
+        lastFailureAt: null,
+      },
+    ] as never);
     mockedPrisma.courseProbe.findMany.mockResolvedValue([
       {
         courseId: "course-1",
         outcome: "MATCH_FOUND",
-        observedAt: now
-      }
+        observedAt: now,
+      },
     ] as never);
-    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([currentMatch] as never);
+    mockedPrisma.localReaderJob.findMany.mockResolvedValue([] as never);
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
+      currentMatch,
+    ] as never);
     mockedPrisma.teeTimeMatch.count.mockResolvedValue(1);
-    mockedPrisma.teeTimeMatch.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockedPrisma.teeTimeMatch.updateMany.mockResolvedValue({
+      count: 1,
+    } as never);
     mockedPrisma.teeSearch.findFirst.mockResolvedValue({
       additionalEmails: ["friend@example.com"],
-      user: { email: "owner@example.com" }
+      user: { email: "owner@example.com" },
     } as never);
-    mockedPrisma.teeSearch.update.mockResolvedValue({ id: "search-1" } as never);
+    mockedPrisma.teeSearch.update.mockResolvedValue({
+      id: "search-1",
+    } as never);
     mockedPrisma.teeSearch.updateMany.mockResolvedValue({ count: 1 } as never);
+  });
+
+  it("reactivates only exact current-generation recipients suppressed by an unresolved provider source", async () => {
+    const t2 = new Date("2026-07-15T15:02:00.000Z");
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      {
+        id: "delivery-owner",
+        alertGeneration: 3,
+        kind: "MATCH",
+        payload,
+        status: "SUPPRESSED",
+        sentAt: t2,
+        lastError: "DELIVERY_PROVIDER_SOURCE_UNRESOLVED",
+      },
+      {
+        id: "delivery-friend",
+        alertGeneration: 3,
+        kind: "MATCH",
+        payload,
+        status: "SENT",
+        sentAt: t2,
+        lastError: null,
+      },
+    ] as never);
+
+    await expect(
+      reactivateTerminalUnresolvedMatchDeliveries(prisma, {
+        searchId: "search-1",
+        alertGeneration: 3,
+        matchId: "match-1",
+        availabilityCycle: 7,
+        retryAt: now,
+      }),
+    ).resolves.toEqual({ count: 1 });
+
+    expect(mockedPrisma.searchEmailDelivery.findMany).toHaveBeenCalledWith({
+      where: {
+        teeSearchId: "search-1",
+        alertGeneration: 3,
+        kind: "MATCH",
+        status: "SUPPRESSED",
+        lastError: "DELIVERY_PROVIDER_SOURCE_UNRESOLVED",
+      },
+      select: {
+        id: true,
+        alertGeneration: true,
+        kind: true,
+        status: true,
+        lastError: true,
+        payload: true,
+      },
+    });
+    expect(mockedPrisma.searchEmailDelivery.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: { in: ["delivery-owner"] },
+        teeSearchId: "search-1",
+        alertGeneration: 3,
+        kind: "MATCH",
+        status: "SUPPRESSED",
+        lastError: "DELIVERY_PROVIDER_SOURCE_UNRESOLVED",
+      },
+      data: {
+        status: "PENDING",
+        claimToken: null,
+        claimExpiresAt: null,
+        sentAt: null,
+        nextAttemptAt: null,
+        lastError: null,
+      },
+    });
+    expect(executeRawCallsContaining('"recheckRequestedAt"')).toHaveLength(1);
+  });
+
+  it("does not reactivate a terminal unresolved delivery for a different availability cycle", async () => {
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      {
+        id: "delivery-owner",
+        alertGeneration: 3,
+        kind: "MATCH",
+        status: "SUPPRESSED",
+        lastError: "DELIVERY_PROVIDER_SOURCE_UNRESOLVED",
+        payload,
+      },
+    ] as never);
+
+    await expect(
+      reactivateTerminalUnresolvedMatchDeliveries(prisma, {
+        searchId: "search-1",
+        alertGeneration: 3,
+        matchId: "match-1",
+        availabilityCycle: 8,
+        retryAt: now,
+      }),
+    ).resolves.toEqual({ count: 0 });
+    expect(mockedPrisma.searchEmailDelivery.updateMany).not.toHaveBeenCalled();
+    expect(executeRawCallsContaining('"recheckRequestedAt"')).toHaveLength(0);
+  });
+
+  it("rejects nonterminal, current-fence, and other-generation rows as reactivation authority", async () => {
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      {
+        id: "delivery-pending-source",
+        alertGeneration: 3,
+        kind: "MATCH",
+        status: "FAILED",
+        lastError: "DELIVERY_PROVIDER_SOURCE_PENDING",
+        payload,
+      },
+      {
+        id: "delivery-old-generation",
+        alertGeneration: 2,
+        kind: "MATCH",
+        status: "SUPPRESSED",
+        lastError: "DELIVERY_PROVIDER_SOURCE_UNRESOLVED",
+        payload,
+      },
+    ] as never);
+
+    await expect(
+      reactivateTerminalUnresolvedMatchDeliveries(prisma, {
+        searchId: "search-1",
+        alertGeneration: 3,
+        matchId: "match-1",
+        availabilityCycle: 7,
+        retryAt: now,
+      }),
+    ).resolves.toEqual({ count: 0 });
+    expect(mockedPrisma.searchEmailDelivery.updateMany).not.toHaveBeenCalled();
   });
 
   it("recovers only recipients who received an unavailable customer status", async () => {
@@ -223,16 +398,16 @@ describe("search email delivery outbox", () => {
               courseId: "course-1",
               courseName: "Course",
               state: "NEEDS_ADAPTER:ACTIONABLE:IN_OPERATOR_QUEUE:NONE",
-              customerStatus: "RETRYING_AUTOMATICALLY"
+              customerStatus: "RETRYING_AUTOMATICALLY",
             },
             {
               courseId: "course-2",
               courseName: "Healthy",
               state: "NO_MATCH:DATE_NOT_VISIBLE",
-              customerStatus: "MONITORED"
-            }
-          ]
-        }
+              customerStatus: "MONITORED",
+            },
+          ],
+        },
       },
       {
         recipient: "friend@example.com",
@@ -244,23 +419,23 @@ describe("search email delivery outbox", () => {
           checkedAt: "2026-07-15T15:00:00.000Z",
           statusReport: {
             kind: "status-update",
-            courses: [{ courseId: "course-1" }]
+            courses: [{ courseId: "course-1" }],
           },
           statusSnapshot: [
             {
               courseId: "course-1",
               courseName: "Course",
               state: "NEEDS_ADAPTER:ACTIONABLE:NEEDS_HUMAN_REVIEW:NONE",
-              customerStatus: "NEEDS_HUMAN_REVIEW"
+              customerStatus: "NEEDS_HUMAN_REVIEW",
             },
             {
               courseId: "course-not-in-update",
               courseName: "Unreported retry",
               state: "FETCH_FAILED:ACTIONABLE:IN_OPERATOR_QUEUE:NONE",
-              customerStatus: "RETRYING_AUTOMATICALLY"
-            }
-          ]
-        }
+              customerStatus: "RETRYING_AUTOMATICALLY",
+            },
+          ],
+        },
       },
       {
         recipient: "owner@example.com",
@@ -272,38 +447,38 @@ describe("search email delivery outbox", () => {
           checkedAt: "2026-07-15T15:00:00.000Z",
           statusReport: {
             kind: "status-update",
-            courses: [{ courseId: "course-suppressed" }]
+            courses: [{ courseId: "course-suppressed" }],
           },
           statusSnapshot: [
             {
               courseId: "course-suppressed",
               courseName: "Suppressed",
               state: "NEEDS_ADAPTER:ACTIONABLE:NEEDS_HUMAN_REVIEW:NONE",
-              customerStatus: "NEEDS_HUMAN_REVIEW"
-            }
-          ]
-        }
-      }
+              customerStatus: "NEEDS_HUMAN_REVIEW",
+            },
+          ],
+        },
+      },
     ] as never);
 
     await expect(
       listReachedMonitoringOutages({
         searchId: "search-1",
-        alertGeneration: 3
-      })
+        alertGeneration: 3,
+      }),
     ).resolves.toEqual([
       {
         courseId: "course-1",
         recipient: "owner@example.com",
         sentAt: new Date("2026-07-15T15:01:00.000Z"),
-        customerStatus: "RETRYING_AUTOMATICALLY"
+        customerStatus: "RETRYING_AUTOMATICALLY",
       },
       {
         courseId: "course-1",
         recipient: "friend@example.com",
         sentAt: new Date("2026-07-15T15:02:00.000Z"),
-        customerStatus: "NEEDS_HUMAN_REVIEW"
-      }
+        customerStatus: "NEEDS_HUMAN_REVIEW",
+      },
     ]);
     expect(mockedPrisma.searchEmailDelivery.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -313,11 +488,11 @@ describe("search email delivery outbox", () => {
               "SETUP",
               "DAILY",
               "MONITORING_STATUS_UPDATE",
-              "MONITORING_OUTAGE"
-            ]
-          }
-        })
-      })
+              "MONITORING_OUTAGE",
+            ],
+          },
+        }),
+      }),
     );
   });
 
@@ -333,23 +508,25 @@ describe("search email delivery outbox", () => {
           checkedAt: "2026-07-15T15:00:00.000Z",
           statusReport: {
             kind: "status-update",
-            courses: [{ courseId: "course-final" }]
+            courses: [{ courseId: "course-final" }],
           },
           statusSnapshot: [
             {
               courseId: "course-final",
               courseName: "Final Course",
-              state: "MANUAL_DIRECT:MANUAL_FINAL:NO_SUPPORT_STATUS:NONE:PHONE_ONLY:PHONE_ONLY",
-              customerStatus: "FINAL_DIRECT_ACTION"
+              state:
+                "MANUAL_DIRECT:MANUAL_FINAL:NO_SUPPORT_STATUS:NONE:PHONE_ONLY:PHONE_ONLY",
+              customerStatus: "FINAL_DIRECT_ACTION",
             },
             {
               courseId: "course-not-in-report",
               courseName: "Other Final",
-              state: "IDENTITY_FINAL:IDENTITY_FINAL:NO_SUPPORT_STATUS:NONE:UNKNOWN:UNKNOWN",
-              customerStatus: "FINAL_DIRECT_ACTION"
-            }
-          ]
-        }
+              state:
+                "IDENTITY_FINAL:IDENTITY_FINAL:NO_SUPPORT_STATUS:NONE:UNKNOWN:UNKNOWN",
+              customerStatus: "FINAL_DIRECT_ACTION",
+            },
+          ],
+        },
       },
       {
         recipient: "friend@example.com",
@@ -361,16 +538,17 @@ describe("search email delivery outbox", () => {
           checkedAt: "2026-07-15T15:00:00.000Z",
           statusReport: {
             kind: "setup",
-            courses: [{ courseId: "course-legacy-final" }]
+            courses: [{ courseId: "course-legacy-final" }],
           },
           statusSnapshot: [
             {
               courseId: "course-legacy-final",
               courseName: "Legacy Final",
-              state: "BLOCKED_AUTH:TECHNICAL_FINAL:NO_SUPPORT_STATUS:ACCOUNT_REQUIRED:ACCOUNT_REQUIRED:PUBLIC_ONLINE"
-            }
-          ]
-        }
+              state:
+                "BLOCKED_AUTH:TECHNICAL_FINAL:NO_SUPPORT_STATUS:ACCOUNT_REQUIRED:ACCOUNT_REQUIRED:PUBLIC_ONLINE",
+            },
+          ],
+        },
       },
       {
         recipient: "suppressed@example.com",
@@ -382,45 +560,46 @@ describe("search email delivery outbox", () => {
           checkedAt: "2026-07-15T15:00:00.000Z",
           statusReport: {
             kind: "status-update",
-            courses: [{ courseId: "course-suppressed" }]
+            courses: [{ courseId: "course-suppressed" }],
           },
           statusSnapshot: [
             {
               courseId: "course-suppressed",
               courseName: "Suppressed Final",
-              state: "MANUAL_DIRECT:MANUAL_FINAL:NO_SUPPORT_STATUS:NONE:PHONE_ONLY:PHONE_ONLY",
-              customerStatus: "FINAL_DIRECT_ACTION"
-            }
-          ]
-        }
-      }
+              state:
+                "MANUAL_DIRECT:MANUAL_FINAL:NO_SUPPORT_STATUS:NONE:PHONE_ONLY:PHONE_ONLY",
+              customerStatus: "FINAL_DIRECT_ACTION",
+            },
+          ],
+        },
+      },
     ] as never);
 
     await expect(
       listReachedMonitoringFinals({
         searchId: "search-1",
-        alertGeneration: 3
-      })
+        alertGeneration: 3,
+      }),
     ).resolves.toEqual([
       {
         courseId: "course-final",
         recipient: "owner@example.com",
-        sentAt: new Date("2026-07-15T15:01:00.000Z")
+        sentAt: new Date("2026-07-15T15:01:00.000Z"),
       },
       {
         courseId: "course-legacy-final",
         recipient: "friend@example.com",
-        sentAt: new Date("2026-07-15T15:02:00.000Z")
-      }
+        sentAt: new Date("2026-07-15T15:02:00.000Z"),
+      },
     ]);
     expect(mockedPrisma.searchEmailDelivery.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
           kind: {
-            in: ["SETUP", "DAILY", "MONITORING_STATUS_UPDATE"]
-          }
-        })
-      })
+            in: ["SETUP", "DAILY", "MONITORING_STATUS_UPDATE"],
+          },
+        }),
+      }),
     );
   });
 
@@ -440,13 +619,13 @@ describe("search email delivery outbox", () => {
         searchId: "search-1",
         alertGeneration: 3,
         checkLeaseToken: "check-lease",
-        now
-      })
+        now,
+      }),
     ).resolves.toEqual(
       expect.objectContaining({
         ownerEmail: "new-owner@example.com",
-        ownerPendingEmail: null
-      })
+        ownerPendingEmail: null,
+      }),
     );
 
     expect(callOrder).toEqual(["lock-search", "read-owner"]);
@@ -456,7 +635,7 @@ describe("search email delivery outbox", () => {
     expect(lockSql.strings.join(" ")).not.toContain('JOIN "User"');
     expect(mockedPrisma.user.findUnique).toHaveBeenCalledWith({
       where: { id: "user-1" },
-      select: { email: true, pendingEmail: true }
+      select: { email: true, pendingEmail: true },
     });
   });
 
@@ -471,13 +650,13 @@ describe("search email delivery outbox", () => {
         kind: "MATCH",
         groupKey: "match-group",
         send: vi.fn(),
-        now: () => now
-      })
+        now: () => now,
+      }),
     ).resolves.toEqual([]);
 
     expect(mockedPrisma.$transaction).toHaveBeenCalledWith(
       expect.any(Function),
-      { timeout: 15_000 }
+      { timeout: 15_000 },
     );
   });
 
@@ -499,8 +678,8 @@ describe("search email delivery outbox", () => {
         recipients: ["OWNER@example.com", "friend@example.com"],
         ownerRecipient: "owner@example.com",
         payload,
-        now
-      })
+        now,
+      }),
     ).resolves.toEqual(expect.objectContaining({ prepared: true }));
     expect(mockedPrisma.searchEmailDelivery.create).toHaveBeenCalledTimes(2);
     expect(mockedPrisma.searchEmailDelivery.create).toHaveBeenNthCalledWith(
@@ -509,9 +688,9 @@ describe("search email delivery outbox", () => {
         data: expect.objectContaining({
           recipient: "owner@example.com",
           isOwnerRecipient: true,
-          payload
-        })
-      })
+          payload,
+        }),
+      }),
     );
     expect(mockedPrisma.searchEmailDelivery.create).toHaveBeenNthCalledWith(
       2,
@@ -519,9 +698,9 @@ describe("search email delivery outbox", () => {
         data: expect.objectContaining({
           recipient: "friend@example.com",
           isOwnerRecipient: false,
-          payload
-        })
-      })
+          payload,
+        }),
+      }),
     );
   });
 
@@ -532,14 +711,14 @@ describe("search email delivery outbox", () => {
       checkedAt: now.toISOString(),
       matchIds: [],
       displayMatchIds: [],
-      statusReport: { kind: "daily" }
+      statusReport: { kind: "daily" },
     };
     const oldOwner = delivery("old-owner", "owner@example.com", {
       kind: "DAILY",
       groupKey: "old-status",
       payload: statusPayload,
       status: "SENT",
-      sentAt
+      sentAt,
     });
     const oldFriend = delivery("old-friend", "friend@example.com", {
       kind: "DAILY",
@@ -547,19 +726,19 @@ describe("search email delivery outbox", () => {
       payload: statusPayload,
       status: "SUPPRESSED",
       attemptCount: 1,
-      lastError: "STATUS_CONTENT_STALE_REPLACEMENT_PENDING"
+      lastError: "STATUS_CONTENT_STALE_REPLACEMENT_PENDING",
     });
     const newOwner = delivery("new-owner", "owner@example.com", {
       kind: "DAILY",
       groupKey: "replacement-status",
       payload: statusPayload,
       status: "SUPPRESSED",
-      sentAt
+      sentAt,
     });
     const newFriend = delivery("new-friend", "friend@example.com", {
       kind: "DAILY",
       groupKey: "replacement-status",
-      payload: statusPayload
+      payload: statusPayload,
     });
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([])
@@ -576,7 +755,7 @@ describe("search email delivery outbox", () => {
       ownerRecipient: "owner@example.com",
       payload: statusPayload,
       supersededStatusGroups: [{ kind: "DAILY", groupKey: "old-status" }],
-      now
+      now,
     });
 
     expect(mockedPrisma.searchEmailDelivery.create).toHaveBeenCalledWith(
@@ -585,28 +764,28 @@ describe("search email delivery outbox", () => {
           recipient: "owner@example.com",
           status: "SUPPRESSED",
           sentAt,
-          lastError: "STATUS_RECIPIENT_PRIOR_REACHED"
-        })
-      })
+          lastError: "STATUS_RECIPIENT_PRIOR_REACHED",
+        }),
+      }),
     );
     expect(mockedPrisma.searchEmailDelivery.create).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({
         data: expect.objectContaining({
-          recipient: "friend@example.com"
-        })
-      })
+          recipient: "friend@example.com",
+        }),
+      }),
     );
     expect(
-      mockedPrisma.searchEmailDelivery.create.mock.calls[1]?.[0]?.data
+      mockedPrisma.searchEmailDelivery.create.mock.calls[1]?.[0]?.data,
     ).not.toHaveProperty("status");
     expect(mockedPrisma.searchEmailDelivery.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          lastError: "STATUS_CONTENT_STALE_REPLACEMENT_PENDING"
+          lastError: "STATUS_CONTENT_STALE_REPLACEMENT_PENDING",
         }),
-        data: { lastError: "STATUS_CONTENT_STALE_REPLACED" }
-      })
+        data: { lastError: "STATUS_CONTENT_STALE_REPLACED" },
+      }),
     );
   });
 
@@ -617,45 +796,45 @@ describe("search email delivery outbox", () => {
       checkedAt: now.toISOString(),
       matchIds: [],
       displayMatchIds: [],
-      statusReport: { kind: "daily" }
+      statusReport: { kind: "daily" },
     };
     const setupOwner = delivery("setup-owner", "owner@example.com", {
       kind: "SETUP",
       groupKey: "old-setup",
       payload: statusPayload,
       status: "SENT",
-      sentAt
+      sentAt,
     });
     const setupFriend = delivery("setup-friend", "friend@example.com", {
       kind: "SETUP",
       groupKey: "old-setup",
       payload: statusPayload,
       status: "FAILED",
-      attemptCount: 1
+      attemptCount: 1,
     });
     const dailyOwner = delivery("daily-owner", "owner@example.com", {
       kind: "DAILY",
       groupKey: "old-daily",
       payload: statusPayload,
       status: "FAILED",
-      attemptCount: 1
+      attemptCount: 1,
     });
     const dailyFriend = delivery("daily-friend", "friend@example.com", {
       kind: "DAILY",
       groupKey: "old-daily",
       payload: statusPayload,
       status: "SENT",
-      sentAt
+      sentAt,
     });
     const newOwner = delivery("new-owner", "owner@example.com", {
       kind: "DAILY",
       groupKey: "replacement-status",
-      payload: statusPayload
+      payload: statusPayload,
     });
     const newFriend = delivery("new-friend", "friend@example.com", {
       kind: "DAILY",
       groupKey: "replacement-status",
-      payload: statusPayload
+      payload: statusPayload,
     });
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([])
@@ -663,7 +842,7 @@ describe("search email delivery outbox", () => {
         setupOwner,
         setupFriend,
         dailyOwner,
-        dailyFriend
+        dailyFriend,
       ] as never)
       .mockResolvedValueOnce([newOwner, newFriend] as never);
 
@@ -678,13 +857,13 @@ describe("search email delivery outbox", () => {
       payload: statusPayload,
       supersededStatusGroups: [
         { kind: "SETUP", groupKey: "old-setup" },
-        { kind: "DAILY", groupKey: "old-daily" }
+        { kind: "DAILY", groupKey: "old-daily" },
       ],
-      now
+      now,
     });
 
     expect(mockedPrisma.$transaction.mock.calls.at(-1)?.[1]).toEqual({
-      timeout: 15_000
+      timeout: 15_000,
     });
 
     expect(mockedPrisma.searchEmailDelivery.create).toHaveBeenCalledTimes(2);
@@ -693,8 +872,8 @@ describe("search email delivery outbox", () => {
         expect.objectContaining({
           status: "SUPPRESSED",
           sentAt,
-          lastError: "STATUS_RECIPIENT_PRIOR_REACHED"
-        })
+          lastError: "STATUS_RECIPIENT_PRIOR_REACHED",
+        }),
       );
     }
     expect(mockedPrisma.searchEmailDelivery.updateMany).toHaveBeenCalledWith({
@@ -704,10 +883,10 @@ describe("search email delivery outbox", () => {
         lastError: "STATUS_CONTENT_STALE_REPLACEMENT_PENDING",
         OR: [
           { kind: "SETUP", groupKey: "old-setup" },
-          { kind: "DAILY", groupKey: "old-daily" }
-        ]
+          { kind: "DAILY", groupKey: "old-daily" },
+        ],
       },
-      data: { lastError: "STATUS_CONTENT_STALE_REPLACED" }
+      data: { lastError: "STATUS_CONTENT_STALE_REPLACED" },
     });
   });
 
@@ -719,7 +898,7 @@ describe("search email delivery outbox", () => {
       matchIds: [],
       matchRefs: [],
       displayMatchIds: [],
-      statusReport: { kind: "daily" }
+      statusReport: { kind: "daily" },
     };
     const currentStatusPayload = {
       schemaVersion: 2 as const,
@@ -728,7 +907,11 @@ describe("search email delivery outbox", () => {
       matchRefs: [{ matchId: "match-2", availabilityCycle: 5 }],
       displayMatchIds: ["match-2"],
       statusSnapshot: [
-        { courseId: "course-2", courseName: "Second Course", state: "MATCH_FOUND:1" }
+        {
+          courseId: "course-2",
+          courseName: "Second Course",
+          state: "MATCH_FOUND:1",
+        },
       ],
       statusReport: {
         kind: "daily",
@@ -752,12 +935,12 @@ describe("search email delivery outbox", () => {
                 startsAt: "2026-07-16T08:30:00",
                 availableSpots: 4,
                 priceCents: 5500,
-                holes: 18
-              }
-            ]
-          }
-        ]
-      }
+                holes: 18,
+              },
+            ],
+          },
+        ],
+      },
     };
     const oldOwner = delivery("old-owner", "owner@example.com", {
       kind: "DAILY",
@@ -765,7 +948,7 @@ describe("search email delivery outbox", () => {
       payload: oldStatusPayload,
       status: "SENT",
       attemptCount: 1,
-      sentAt
+      sentAt,
     });
     const oldFriend = delivery("old-friend", "friend@example.com", {
       kind: "DAILY",
@@ -773,23 +956,31 @@ describe("search email delivery outbox", () => {
       payload: oldStatusPayload,
       status: "FAILED",
       attemptCount: 1,
-      lastError: "DELIVERY_OUTCOME_UNKNOWN:timeout"
+      lastError: "DELIVERY_OUTCOME_UNKNOWN:timeout",
     });
-    const replacementOwner = delivery("replacement-owner", "owner@example.com", {
-      kind: "DAILY",
-      groupKey: "replacement-status",
-      payload: currentStatusPayload,
-      status: "SUPPRESSED",
-      sentAt,
-      lastError: "STATUS_RECIPIENT_PRIOR_REACHED"
-    });
-    const replacementFriend = delivery("replacement-friend", "friend@example.com", {
-      kind: "DAILY",
-      groupKey: "replacement-status",
-      payload: currentStatusPayload,
-      status: "SUPPRESSED",
-      lastError: "STATUS_RECIPIENT_AMBIGUOUS_ATTEMPT"
-    });
+    const replacementOwner = delivery(
+      "replacement-owner",
+      "owner@example.com",
+      {
+        kind: "DAILY",
+        groupKey: "replacement-status",
+        payload: currentStatusPayload,
+        status: "SUPPRESSED",
+        sentAt,
+        lastError: "STATUS_RECIPIENT_PRIOR_REACHED",
+      },
+    );
+    const replacementFriend = delivery(
+      "replacement-friend",
+      "friend@example.com",
+      {
+        kind: "DAILY",
+        groupKey: "replacement-status",
+        payload: currentStatusPayload,
+        status: "SUPPRESSED",
+        lastError: "STATUS_RECIPIENT_AMBIGUOUS_ATTEMPT",
+      },
+    );
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([oldOwner, oldFriend] as never)
@@ -807,20 +998,20 @@ describe("search email delivery outbox", () => {
         ownerRecipient: "owner@example.com",
         payload: currentStatusPayload,
         supersededStatusGroups: [{ kind: "DAILY", groupKey: "old-status" }],
-        now
-      })
+        now,
+      }),
     ).resolves.toEqual(
       expect.objectContaining({
         prepared: true,
         continuationGroups: [
           { groupKey: expect.stringMatching(/^catchup-/) },
-          { groupKey: expect.stringMatching(/^catchup-/) }
-        ]
-      })
+          { groupKey: expect.stringMatching(/^catchup-/) },
+        ],
+      }),
     );
 
     const createdRows = mockedPrisma.searchEmailDelivery.create.mock.calls.map(
-      ([call]) => call.data
+      ([call]) => call.data,
     );
     expect(createdRows).toEqual(
       expect.arrayContaining([
@@ -828,13 +1019,13 @@ describe("search email delivery outbox", () => {
           kind: "DAILY",
           recipient: "owner@example.com",
           status: "SUPPRESSED",
-          lastError: "STATUS_RECIPIENT_PRIOR_REACHED"
+          lastError: "STATUS_RECIPIENT_PRIOR_REACHED",
         }),
         expect.objectContaining({
           kind: "DAILY",
           recipient: "friend@example.com",
           status: "SUPPRESSED",
-          lastError: "STATUS_RECIPIENT_AMBIGUOUS_ATTEMPT"
+          lastError: "STATUS_RECIPIENT_AMBIGUOUS_ATTEMPT",
         }),
         expect.objectContaining({
           kind: "MATCH",
@@ -842,8 +1033,8 @@ describe("search email delivery outbox", () => {
           isOwnerRecipient: true,
           payload: expect.objectContaining({
             matchIds: ["match-2"],
-            matchRefs: [{ matchId: "match-2", availabilityCycle: 5 }]
-          })
+            matchRefs: [{ matchId: "match-2", availabilityCycle: 5 }],
+          }),
         }),
         expect.objectContaining({
           kind: "MATCH",
@@ -851,10 +1042,10 @@ describe("search email delivery outbox", () => {
           isOwnerRecipient: false,
           payload: expect.objectContaining({
             matchIds: ["match-2"],
-            matchRefs: [{ matchId: "match-2", availabilityCycle: 5 }]
-          })
-        })
-      ])
+            matchRefs: [{ matchId: "match-2", availabilityCycle: 5 }],
+          }),
+        }),
+      ]),
     );
   });
 
@@ -866,7 +1057,7 @@ describe("search email delivery outbox", () => {
       matchRefs: [{ matchId: "match-2", availabilityCycle: 5 }],
       displayMatchIds: ["match-2"],
       statusSnapshot: [{ courseId: "course-2", state: "MATCH_FOUND:1" }],
-      statusReport: { kind: "daily" }
+      statusReport: { kind: "daily" },
     };
     mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
       delivery("replacement-owner", "owner@example.com", {
@@ -875,8 +1066,8 @@ describe("search email delivery outbox", () => {
         payload: currentStatusPayload,
         status: "SUPPRESSED",
         sentAt: new Date(now.getTime() - 30_000),
-        lastError: "STATUS_RECIPIENT_PRIOR_REACHED"
-      })
+        lastError: "STATUS_RECIPIENT_PRIOR_REACHED",
+      }),
     ] as never);
 
     await expect(
@@ -884,21 +1075,21 @@ describe("search email delivery outbox", () => {
         searchId: "search-1",
         alertGeneration: 3,
         kind: "DAILY",
-        groupKey: "replacement-status"
-      })
+        groupKey: "replacement-status",
+      }),
     ).resolves.toEqual({
       finalized: true,
       status: "SUPPRESSED",
       ownerSent: false,
       ownerDeliveryOutcome: "PRIOR_REACHED",
       retainedMatchCount: 0,
-      sentMatchCount: 0
+      sentMatchCount: 0,
     });
     expect(mockedPrisma.teeTimeMatch.updateMany).not.toHaveBeenCalled();
     expect(mockedPrisma.teeSearch.updateMany).not.toHaveBeenCalled();
     expect(mockedPrisma.$transaction).toHaveBeenCalledWith(
       expect.any(Function),
-      { timeout: 15_000 }
+      { timeout: 15_000 },
     );
   });
 
@@ -907,15 +1098,17 @@ describe("search email delivery outbox", () => {
     const friend = delivery("delivery-2", "friend@example.com");
     const refreshedPayload = {
       ...payload,
-      checkedAt: new Date(now.getTime() + 60_000).toISOString()
+      checkedAt: new Date(now.getTime() + 60_000).toISOString(),
     };
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([owner, friend] as never)
       .mockResolvedValueOnce([
         { ...owner, payload: refreshedPayload },
-        { ...friend, payload: refreshedPayload }
+        { ...friend, payload: refreshedPayload },
       ] as never);
-    mockedPrisma.searchEmailDelivery.updateMany.mockResolvedValue({ count: 2 } as never);
+    mockedPrisma.searchEmailDelivery.updateMany.mockResolvedValue({
+      count: 2,
+    } as never);
 
     await expect(
       prepareSearchEmailDeliveryGroup({
@@ -927,24 +1120,24 @@ describe("search email delivery outbox", () => {
         recipients: ["owner@example.com", "friend@example.com"],
         ownerRecipient: "owner@example.com",
         payload: refreshedPayload,
-        now
-      })
+        now,
+      }),
     ).resolves.toEqual(
       expect.objectContaining({
         prepared: true,
         deliveries: expect.arrayContaining([
-          expect.objectContaining({ payload: refreshedPayload })
-        ])
-      })
+          expect.objectContaining({ payload: refreshedPayload }),
+        ]),
+      }),
     );
 
     expect(mockedPrisma.searchEmailDelivery.updateMany).toHaveBeenCalledWith({
       where: {
         id: { in: ["delivery-1", "delivery-2"] },
         attemptCount: 0,
-        status: { notIn: ["SENDING", "SENT"] }
+        status: { notIn: ["SENDING", "SENT"] },
       },
-      data: { payload: refreshedPayload }
+      data: { payload: refreshedPayload },
     });
     expect(mockedPrisma.searchEmailDelivery.create).not.toHaveBeenCalled();
   });
@@ -952,17 +1145,17 @@ describe("search email delivery outbox", () => {
   it("reactivates only pre-send suppressed recipients for the same immutable group", async () => {
     const owner = delivery("delivery-1", "owner@example.com", {
       status: "SUPPRESSED",
-      sentAt: null
+      sentAt: null,
     });
     const friend = delivery("delivery-2", "friend@example.com", {
       status: "SENT",
-      sentAt: now
+      sentAt: now,
     });
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([owner, friend] as never)
       .mockResolvedValueOnce([
         { ...owner, status: "PENDING" },
-        friend
+        friend,
       ] as never);
 
     await expect(
@@ -976,18 +1169,26 @@ describe("search email delivery outbox", () => {
         ownerRecipient: "owner@example.com",
         payload: {
           ...payload,
-          checkedAt: new Date(now.getTime() + 60_000).toISOString()
+          checkedAt: new Date(now.getTime() + 60_000).toISOString(),
         },
-        now
-      })
+        now,
+      }),
     ).resolves.toEqual(
       expect.objectContaining({
         prepared: true,
         deliveries: expect.arrayContaining([
-          expect.objectContaining({ id: "delivery-1", status: "PENDING", payload }),
-          expect.objectContaining({ id: "delivery-2", status: "SENT", payload })
-        ])
-      })
+          expect.objectContaining({
+            id: "delivery-1",
+            status: "PENDING",
+            payload,
+          }),
+          expect.objectContaining({
+            id: "delivery-2",
+            status: "SENT",
+            payload,
+          }),
+        ]),
+      }),
     );
 
     expect(mockedPrisma.searchEmailDelivery.updateMany).toHaveBeenCalledWith({
@@ -995,15 +1196,15 @@ describe("search email delivery outbox", () => {
         id: { in: ["delivery-1"] },
         status: "SUPPRESSED",
         sentAt: null,
-        attemptCount: 0
+        attemptCount: 0,
       },
       data: {
         status: "PENDING",
         claimToken: null,
         claimExpiresAt: null,
         nextAttemptAt: null,
-        lastError: null
-      }
+        lastError: null,
+      },
     });
     expect(mockedPrisma.searchEmailDelivery.create).not.toHaveBeenCalled();
   });
@@ -1012,7 +1213,7 @@ describe("search email delivery outbox", () => {
     const attempted = delivery("delivery-1", "owner@example.com", {
       status: "SUPPRESSED",
       attemptCount: 1,
-      sentAt: null
+      sentAt: null,
     });
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([attempted] as never)
@@ -1028,13 +1229,15 @@ describe("search email delivery outbox", () => {
         recipients: ["owner@example.com"],
         ownerRecipient: "owner@example.com",
         payload,
-        now
-      })
+        now,
+      }),
     ).resolves.toEqual(
       expect.objectContaining({
         prepared: true,
-        deliveries: [expect.objectContaining({ status: "SUPPRESSED", attemptCount: 1 })]
-      })
+        deliveries: [
+          expect.objectContaining({ status: "SUPPRESSED", attemptCount: 1 }),
+        ],
+      }),
     );
 
     expect(mockedPrisma.searchEmailDelivery.updateMany).not.toHaveBeenCalled();
@@ -1042,25 +1245,25 @@ describe("search email delivery outbox", () => {
 
   it("deduplicates match obligations independently by recipient and exact cycle", async () => {
     const ownerCycleSeven = delivery("old-owner", "owner@example.com", {
-      groupKey: "old-owner-group"
+      groupKey: "old-owner-group",
     });
     const friendCycleEight = delivery("old-friend", "friend@example.com", {
       groupKey: "old-friend-group",
       isOwnerRecipient: false,
       payload: {
         ...payload,
-        matchRefs: [{ matchId: "match-1", availabilityCycle: 8 }]
-      }
+        matchRefs: [{ matchId: "match-1", availabilityCycle: 8 }],
+      },
     });
     mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
       ownerCycleSeven,
-      friendCycleEight
+      friendCycleEight,
     ] as never);
     mockedPrisma.searchEmailDelivery.create.mockResolvedValue(
       delivery("new-friend", "friend@example.com", {
         isOwnerRecipient: false,
-        groupKey: "catchup-new"
-      }) as never
+        groupKey: "catchup-new",
+      }) as never,
     );
 
     await expect(
@@ -1072,12 +1275,17 @@ describe("search email delivery outbox", () => {
         recipients: ["owner@example.com", "friend@example.com"],
         ownerRecipient: "owner@example.com",
         payload,
-        now
-      })
+        now,
+      }),
     ).resolves.toEqual({
       prepared: true,
-      groups: [{ groupKey: expect.stringMatching(/^catchup-/), recipient: "friend@example.com" }],
-      hasExistingObligation: true
+      groups: [
+        {
+          groupKey: expect.stringMatching(/^catchup-/),
+          recipient: "friend@example.com",
+        },
+      ],
+      hasExistingObligation: true,
     });
 
     expect(mockedPrisma.searchEmailDelivery.create).toHaveBeenCalledOnce();
@@ -1087,19 +1295,21 @@ describe("search email delivery outbox", () => {
           recipient: "friend@example.com",
           isOwnerRecipient: false,
           payload: expect.objectContaining({
-            matchRefs: [{ matchId: "match-1", availabilityCycle: 7 }]
-          })
-        })
-      })
+            matchRefs: [{ matchId: "match-1", availabilityCycle: 7 }],
+          }),
+        }),
+      }),
     );
     expect(mockedPrisma.$transaction.mock.calls.at(-1)?.[1]).toEqual({
-      timeout: 15_000
+      timeout: 15_000,
     });
   });
 
   it("rejects a changed recipient set for an existing group", async () => {
     const owner = delivery("delivery-1", "owner@example.com");
-    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([owner] as never);
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      owner,
+    ] as never);
 
     await expect(
       prepareSearchEmailDeliveryGroup({
@@ -1111,14 +1321,14 @@ describe("search email delivery outbox", () => {
         recipients: ["owner@example.com", "friend@example.com"],
         ownerRecipient: "owner@example.com",
         payload,
-        now
-      })
+        now,
+      }),
     ).rejects.toThrow("recipients are immutable");
   });
 
   it("does not prepare rows after the search generation changes", async () => {
     mockedPrisma.$queryRaw.mockResolvedValue([
-      { ...currentSearch, alertGeneration: 4 }
+      { ...currentSearch, alertGeneration: 4 },
     ] as never);
 
     await expect(
@@ -1131,15 +1341,22 @@ describe("search email delivery outbox", () => {
         recipients: ["owner@example.com"],
         ownerRecipient: "owner@example.com",
         payload,
-        now
-      })
-    ).resolves.toEqual({ prepared: false, reason: "stale_search", deliveries: [] });
+        now,
+      }),
+    ).resolves.toEqual({
+      prepared: false,
+      reason: "stale_search",
+      deliveries: [],
+    });
   });
 
   it("claims every retryable recipient atomically under one token before sending", async () => {
     const owner = delivery("delivery-1", "owner@example.com");
     const friend = delivery("delivery-2", "friend@example.com");
-    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([owner, friend] as never);
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      owner,
+      friend,
+    ] as never);
     mockedPrisma.teeTimeMatch.count.mockResolvedValue(1);
     mockedPrisma.searchEmailDelivery.updateMany
       .mockResolvedValueOnce({ count: 2 } as never)
@@ -1154,8 +1371,8 @@ describe("search email delivery outbox", () => {
         kind: "MATCH",
         groupKey: "match-group",
         send,
-        now: () => now
-      })
+        now: () => now,
+      }),
     ).resolves.toHaveLength(2);
     expect(mockedPrisma.searchEmailDelivery.updateMany).toHaveBeenNthCalledWith(
       1,
@@ -1164,33 +1381,1088 @@ describe("search email delivery outbox", () => {
         data: expect.objectContaining({
           status: "SENDING",
           claimToken: expect.any(String),
-          attemptCount: { increment: 1 }
-        })
-      })
+          attemptCount: { increment: 1 },
+        }),
+      }),
     );
     expect(send).toHaveBeenCalledTimes(2);
     expect(send).toHaveBeenCalledWith(
-      expect.objectContaining({ payload, idempotencyKey: expect.stringMatching(/^tee-search-delivery-/) })
+      expect.objectContaining({
+        payload,
+        idempotencyKey: expect.stringMatching(/^tee-search-delivery-/),
+      }),
     );
-    const settlementTokens = mockedPrisma.searchEmailDelivery.updateMany.mock.calls
-      .slice(1)
-      .map(([call]) => call.where?.claimToken);
+    const settlementTokens =
+      mockedPrisma.searchEmailDelivery.updateMany.mock.calls
+        .slice(1)
+        .map(([call]) => call.where?.claimToken);
     expect(new Set(settlementTokens).size).toBe(1);
     expect(mockedApplyPendingClerkEmailForSearch).toHaveBeenCalledTimes(2);
+  });
+
+  it("durably dry-runs every synthetic multi-cycle recipient before the sender boundary", async () => {
+    const owner = delivery("delivery-1", "golfer@real-domain.com", {
+      isOwnerRecipient: true,
+    });
+    const friend = delivery("delivery-2", "friend@another-domain.com", {
+      isOwnerRecipient: false,
+    });
+    mockQueryRawForSearch({
+      ...currentSearch,
+      alertEmail: "golfer@real-domain.com",
+      additionalEmails: ["friend@another-domain.com"],
+      syntheticMultiCycle: true,
+    });
+    mockedPrisma.user.findUnique.mockResolvedValue({
+      email: "golfer@real-domain.com",
+      pendingEmail: null,
+    } as never);
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      owner,
+      friend,
+    ] as never);
+    mockedPrisma.searchEmailDelivery.updateMany
+      .mockResolvedValueOnce({ count: 2 } as never)
+      .mockResolvedValue({ count: 1 } as never);
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" as const });
+
+    await expect(
+      drainSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        checkLeaseToken: "check-lease",
+        kind: "MATCH",
+        groupKey: "match-group",
+        send,
+        now: () => now,
+      }),
+    ).resolves.toEqual([
+      { id: "delivery-1", status: "SUPPRESSED" },
+      { id: "delivery-2", status: "SUPPRESSED" },
+    ]);
+
+    expect(send).not.toHaveBeenCalled();
+    const settlementWrites =
+      mockedPrisma.searchEmailDelivery.updateMany.mock.calls.slice(1);
+    expect(settlementWrites).toHaveLength(2);
+    for (const [write] of settlementWrites) {
+      expect(write).toEqual(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            status: "SUPPRESSED",
+            sentAt: now,
+            lastError: DELIVERY_SYNTHETIC_MULTI_CYCLE_DRY_RUN,
+          }),
+        }),
+      );
+      expect(write.data?.status).not.toBe("SENT");
+    }
+  });
+
+  it("suppresses a claimed match group when a newer course failure supersedes its provider source", async () => {
+    const providerObservedAt = new Date(now.getTime() - 60_000);
+    const failureObservedAt = new Date(now.getTime() - 30_000);
+    const owner = delivery("delivery-1", "owner@example.com");
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      owner,
+    ] as never);
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
+      { ...currentMatch, lastConfirmedAt: providerObservedAt },
+    ] as never);
+    mockedPrisma.courseMonitoringStatus.findMany.mockResolvedValue([
+      {
+        courseId: "course-1",
+        lastSuccessfulAt: providerObservedAt,
+        lastFailureAt: failureObservedAt,
+      },
+    ] as never);
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+
+    await expect(
+      drainSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        checkLeaseToken: "check-lease",
+        kind: "MATCH",
+        groupKey: "match-group",
+        send,
+        now: () => now,
+      }),
+    ).resolves.toEqual([{ id: "delivery-1", status: "SUPPRESSED" }]);
+
+    expect(send).not.toHaveBeenCalled();
+    expect(
+      mockedPrisma.searchEmailDelivery.updateMany,
+    ).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "SUPPRESSED",
+          nextAttemptAt: null,
+          lastError: "MATCH_PROVIDER_SOURCE_SUPERSEDED",
+        }),
+      }),
+    );
+    expect(mockedPrisma.$queryRawUnsafe).toHaveBeenCalledWith(
+      expect.stringContaining("pg_advisory_xact_lock"),
+      "course-monitoring:course-1",
+    );
+    expect(executeRawCallsContaining('"recheckRequestedAt"')).toHaveLength(0);
+  });
+
+  it("sends a match only after exact current provider source proof under the course lock", async () => {
+    const owner = delivery("delivery-1", "owner@example.com");
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      owner,
+    ] as never);
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+
+    await expect(
+      drainSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        checkLeaseToken: "check-lease",
+        kind: "MATCH",
+        groupKey: "match-group",
+        send,
+        now: () => now,
+      }),
+    ).resolves.toContainEqual({ id: "delivery-1", status: "SENT" });
+
+    expect(send).toHaveBeenCalledOnce();
+    expect(mockedPrisma.courseMonitoringStatus.findMany).toHaveBeenCalledWith({
+      where: { courseId: { in: ["course-1"] } },
+      select: {
+        courseId: true,
+        state: true,
+        lastSuccessfulAt: true,
+        lastFailureAt: true,
+      },
+    });
+    expect(mockedPrisma.$transaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      expect.objectContaining({ timeout: 60_000 }),
+    );
+  });
+
+  it("suppresses a claimed match after a course-wide final classification", async () => {
+    const owner = delivery("delivery-1", "owner@example.com");
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      owner,
+    ] as never);
+    mockedPrisma.courseMonitoringStatus.findMany.mockResolvedValue([
+      {
+        courseId: "course-1",
+        state: "FINAL_IDENTITY",
+        lastSuccessfulAt: now,
+        lastFailureAt: null,
+      },
+    ] as never);
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+
+    await expect(
+      drainSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        checkLeaseToken: "check-lease",
+        kind: "MATCH",
+        groupKey: "match-group",
+        send,
+        now: () => now,
+      }),
+    ).resolves.toEqual([{ id: "delivery-1", status: "SUPPRESSED" }]);
+
+    expect(send).not.toHaveBeenCalled();
+    expect(
+      mockedPrisma.searchEmailDelivery.updateMany,
+    ).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "SUPPRESSED",
+          nextAttemptAt: null,
+          lastError: "MATCH_PROVIDER_SOURCE_SUPERSEDED",
+        }),
+      }),
+    );
+  });
+
+  it.each([
+    {
+      finalState: "FINAL_MANUAL",
+      markerState: "ACTIVE",
+      leaseExpiresAt: new Date(now.getTime() + 2 * 60_000),
+      retryUntil: new Date(now.getTime() + 12 * 60_000),
+    },
+    {
+      finalState: "FINAL_TECHNICAL",
+      markerState: "EXPIRED_TERMINAL",
+      leaseExpiresAt: new Date(now.getTime() - 11 * 60_000),
+      retryUntil: new Date(now.getTime() - 60_000),
+    },
+  ] as const)(
+    "terminally suppresses an available match in $finalState despite a $markerState legacy provider marker",
+    async ({ finalState, markerState, leaseExpiresAt, retryUntil }) => {
+      const owner = delivery("delivery-1", "owner@example.com");
+      mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+        owner,
+      ] as never);
+      mockedPrisma.courseMonitoringStatus.findMany.mockResolvedValue([
+        {
+          courseId: "course-1",
+          state: finalState,
+          lastSuccessfulAt: now,
+          lastFailureAt: null,
+        },
+      ] as never);
+      mockedPrisma.$queryRaw.mockImplementation(async (sql) => {
+        const text = rawSqlText(sql);
+        if (text.includes('FROM "ProviderRequestLease"')) {
+          return [
+            {
+              observationStartedAt: now,
+              leaseExpiresAt,
+              retryUntil,
+              state: markerState,
+            },
+          ] as never;
+        }
+        if (text.includes('statement_timestamp() AS "currentTime"')) {
+          return [{ currentTime: now }] as never;
+        }
+        return [currentSearch] as never;
+      });
+      const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+
+      await expect(
+        drainSearchEmailDeliveryGroup({
+          searchId: "search-1",
+          alertGeneration: 3,
+          checkLeaseToken: "check-lease",
+          kind: "MATCH",
+          groupKey: "match-group",
+          send,
+          now: () => now,
+        }),
+      ).resolves.toEqual([{ id: "delivery-1", status: "SUPPRESSED" }]);
+
+      expect(send).not.toHaveBeenCalled();
+      expect(
+        mockedPrisma.searchEmailDelivery.updateMany,
+      ).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            status: "SUPPRESSED",
+            nextAttemptAt: null,
+            lastError: "MATCH_PROVIDER_SOURCE_SUPERSEDED",
+          }),
+        }),
+      );
+      expect(executeRawCallsContaining('"recheckRequestedAt"')).toHaveLength(0);
+    },
+  );
+
+  it("sends only the reactivated owner obligation when the friend already received cycle 7", async () => {
+    const owner = delivery("delivery-owner", "owner@example.com", {
+      attemptCount: 1,
+    });
+    const friend = delivery("delivery-friend", "friend@example.com", {
+      status: "SENT",
+      attemptCount: 1,
+      sentAt: new Date(now.getTime() - 60_000),
+    });
+    mockedPrisma.searchEmailDelivery.findMany
+      .mockResolvedValueOnce([owner, friend] as never)
+      .mockResolvedValueOnce([
+        { ...owner, status: "SENT", sentAt: now },
+        friend,
+      ] as never);
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+
+    await expect(
+      drainSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        checkLeaseToken: "check-lease",
+        kind: "MATCH",
+        groupKey: "match-group",
+        send,
+        now: () => now,
+      }),
+    ).resolves.toEqual(
+      expect.arrayContaining([
+        { id: "delivery-owner", status: "SENT" },
+        { id: "delivery-friend", status: "SENT" },
+      ]),
+    );
+
+    expect(send).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({ recipient: "owner@example.com" }),
+    );
+    expect(send).not.toHaveBeenCalledWith(
+      expect.objectContaining({ recipient: "friend@example.com" }),
+    );
+    expect(mockedPrisma.searchEmailDelivery.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: { in: ["delivery-owner"] } },
+        data: expect.objectContaining({ status: "SENDING" }),
+      }),
+    );
+  });
+
+  it("defers a claimed match while an equal-timestamp provider observation marker is active", async () => {
+    const owner = delivery("delivery-1", "owner@example.com");
+    const markerExpiresAt = new Date(now.getTime() + 2 * 60_000);
+    const retryUntil = new Date(markerExpiresAt.getTime() + 10 * 60_000);
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      owner,
+    ] as never);
+    mockedPrisma.$queryRaw.mockImplementation(async (sql) => {
+      const text = rawSqlText(sql);
+      if (text.includes('FROM "ProviderRequestLease"')) {
+        return [
+          {
+            observationStartedAt: now,
+            leaseExpiresAt: markerExpiresAt,
+            retryUntil,
+            state: "ACTIVE",
+          },
+        ] as never;
+      }
+      if (text.includes('statement_timestamp() AS "currentTime"')) {
+        return [{ currentTime: now }] as never;
+      }
+      return [currentSearch] as never;
+    });
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+
+    await expect(
+      drainSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        checkLeaseToken: "check-lease",
+        kind: "MATCH",
+        groupKey: "match-group",
+        send,
+        now: () => now,
+      }),
+    ).rejects.toMatchObject({ code: "DELIVERY_PROVIDER_SOURCE_PENDING" });
+
+    expect(send).not.toHaveBeenCalled();
+    expect(
+      mockedPrisma.searchEmailDelivery.updateMany,
+    ).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "FAILED",
+          nextAttemptAt: new Date(now.getTime() + 60_000),
+          lastError: "DELIVERY_PROVIDER_SOURCE_PENDING",
+        }),
+      }),
+    );
+    expect(executeRawCallsContaining('"recheckRequestedAt"')).toHaveLength(1);
+  });
+
+  it("terminally suppresses an old claimed match when its provider observation marker expired unresolved", async () => {
+    const owner = delivery("delivery-1", "owner@example.com");
+    const markerExpiresAt = new Date(now.getTime() - 11 * 60_000);
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      owner,
+    ] as never);
+    mockedPrisma.$queryRaw.mockImplementation(async (sql) => {
+      const text = rawSqlText(sql);
+      if (text.includes('FROM "ProviderRequestLease"')) {
+        return [
+          {
+            observationStartedAt: new Date(now.getTime() - 20 * 60_000),
+            leaseExpiresAt: markerExpiresAt,
+            retryUntil: new Date(markerExpiresAt.getTime() + 10 * 60_000),
+            state: "EXPIRED_TERMINAL",
+          },
+        ] as never;
+      }
+      if (text.includes('statement_timestamp() AS "currentTime"')) {
+        return [{ currentTime: now }] as never;
+      }
+      return [currentSearch] as never;
+    });
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+
+    await expect(
+      drainSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        checkLeaseToken: "check-lease",
+        kind: "MATCH",
+        groupKey: "match-group",
+        send,
+        now: () => now,
+      }),
+    ).resolves.toContainEqual({ id: "delivery-1", status: "SUPPRESSED" });
+
+    expect(send).not.toHaveBeenCalled();
+    expect(mockedPrisma.searchEmailDelivery.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "SUPPRESSED",
+          nextAttemptAt: null,
+          lastError: "DELIVERY_PROVIDER_SOURCE_UNRESOLVED",
+        }),
+      }),
+    );
+    expect(executeRawCallsContaining('"recheckRequestedAt"')).toHaveLength(1);
+  });
+
+  it("reactivates settlement when a newer canonical provider success commits after the unresolved decision", async () => {
+    const t1 = new Date(now.getTime() - 20 * 60_000);
+    const t2 = new Date(now.getTime() - 10 * 60_000);
+    const t3 = new Date(now.getTime() - 5 * 60_000);
+    const owner = delivery("delivery-1", "owner@example.com", {
+      attemptCount: 1,
+    });
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      owner,
+    ] as never);
+    let canonicalSourceAt = t1;
+    mockedPrisma.teeTimeMatch.findMany.mockImplementation(async (args) => {
+      const select = (args as { select?: Record<string, unknown> }).select;
+      return [
+        select?.lastConfirmedAt
+          ? { ...currentMatch, lastConfirmedAt: canonicalSourceAt }
+          : currentMatch,
+      ] as never;
+    });
+    mockedPrisma.courseMonitoringStatus.findMany.mockImplementation(
+      async () =>
+        [
+          {
+            courseId: "course-1",
+            lastSuccessfulAt: canonicalSourceAt,
+            lastFailureAt: null,
+          },
+        ] as never,
+    );
+    let providerFenceReads = 0;
+    mockedPrisma.$queryRaw.mockImplementation(async (sql) => {
+      const text = rawSqlText(sql);
+      if (text.includes('FROM "ProviderRequestLease"')) {
+        providerFenceReads += 1;
+        return (
+          providerFenceReads === 1
+            ? [
+                {
+                  observationStartedAt: t2,
+                  leaseExpiresAt: new Date(t2.getTime() + 60_000),
+                  retryUntil: new Date(t2.getTime() + 11 * 60_000),
+                  state: "EXPIRED_TERMINAL",
+                },
+              ]
+            : []
+        ) as never;
+      }
+      if (text.includes('statement_timestamp() AS "currentTime"')) {
+        return [{ currentTime: now }] as never;
+      }
+      return [currentSearch] as never;
+    });
+    let releaseSettlementLock!: () => void;
+    let settlementLockStarted!: () => void;
+    const settlementLockBarrier = new Promise<void>((resolve) => {
+      settlementLockStarted = resolve;
+    });
+    const settlementLockRelease = new Promise<void>((resolve) => {
+      releaseSettlementLock = resolve;
+    });
+    let courseLockCalls = 0;
+    mockedPrisma.$queryRawUnsafe.mockImplementation(async () => {
+      courseLockCalls += 1;
+      if (courseLockCalls === 2) {
+        settlementLockStarted();
+        await settlementLockRelease;
+      }
+      return [] as never;
+    });
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+
+    const drain = drainSearchEmailDeliveryGroup({
+      searchId: "search-1",
+      alertGeneration: 3,
+      checkLeaseToken: "check-lease",
+      kind: "MATCH",
+      groupKey: "match-group",
+      send,
+      now: () => now,
+    });
+    await settlementLockBarrier;
+    canonicalSourceAt = t3;
+    releaseSettlementLock();
+
+    await expect(drain).resolves.toEqual([]);
+    expect(send).not.toHaveBeenCalled();
+    expect(
+      mockedPrisma.searchEmailDelivery.updateMany,
+    ).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "delivery-1",
+          status: "SENDING",
+        }),
+        data: expect.objectContaining({
+          status: "PENDING",
+          sentAt: null,
+          nextAttemptAt: null,
+          lastError: null,
+        }),
+      }),
+    );
+    expect(executeRawCallsContaining('"recheckRequestedAt"')).toHaveLength(1);
+  });
+
+  it("keeps settlement terminal when the unresolved marker disappears without a newer confirmation", async () => {
+    const t1 = new Date(now.getTime() - 20 * 60_000);
+    const t2 = new Date(now.getTime() - 10 * 60_000);
+    const owner = delivery("delivery-1", "owner@example.com");
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      owner,
+    ] as never);
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
+      { ...currentMatch, lastConfirmedAt: t1 },
+    ] as never);
+    mockedPrisma.courseMonitoringStatus.findMany.mockResolvedValue([
+      {
+        courseId: "course-1",
+        lastSuccessfulAt: t1,
+        lastFailureAt: null,
+      },
+    ] as never);
+    let providerFenceReads = 0;
+    mockedPrisma.$queryRaw.mockImplementation(async (sql) => {
+      const text = rawSqlText(sql);
+      if (text.includes('FROM "ProviderRequestLease"')) {
+        providerFenceReads += 1;
+        return (
+          providerFenceReads === 1
+            ? [
+                {
+                  observationStartedAt: t2,
+                  leaseExpiresAt: new Date(t2.getTime() + 60_000),
+                  retryUntil: new Date(t2.getTime() + 11 * 60_000),
+                  state: "EXPIRED_TERMINAL",
+                },
+              ]
+            : []
+        ) as never;
+      }
+      if (text.includes('statement_timestamp() AS "currentTime"')) {
+        return [{ currentTime: now }] as never;
+      }
+      return [currentSearch] as never;
+    });
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+
+    await expect(
+      drainSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        checkLeaseToken: "check-lease",
+        kind: "MATCH",
+        groupKey: "match-group",
+        send,
+        now: () => now,
+      }),
+    ).resolves.toContainEqual({ id: "delivery-1", status: "SUPPRESSED" });
+
+    expect(send).not.toHaveBeenCalled();
+    expect(
+      mockedPrisma.searchEmailDelivery.updateMany,
+    ).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "SUPPRESSED",
+          lastError: "DELIVERY_PROVIDER_SOURCE_UNRESOLVED",
+        }),
+      }),
+    );
+  });
+
+  it("defers a claimed match while an equal-timestamp completed local-reader source awaits reconciliation", async () => {
+    const priorSource = new Date(now.getTime() - 60_000);
+    const readerSource = priorSource;
+    const owner = delivery("delivery-1", "owner@example.com");
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      owner,
+    ] as never);
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
+      { ...currentMatch, lastConfirmedAt: priorSource },
+    ] as never);
+    mockedPrisma.courseMonitoringStatus.findMany.mockResolvedValue([
+      {
+        courseId: "course-1",
+        lastSuccessfulAt: priorSource,
+        lastFailureAt: null,
+      },
+    ] as never);
+    mockedPrisma.localReaderJob.findMany.mockResolvedValue([
+      {
+        claimedAt: readerSource,
+        completedAt: new Date(readerSource.getTime() + 10_000),
+        resultExpiresAt: new Date(now.getTime() + 5 * 60_000),
+        result: {
+          jobId: "reader-job",
+          courseKey: "cps:grassyhill.cps.golf",
+          status: "NO_AVAILABILITY",
+          evidenceAnchor: "SERVER_CLAIM",
+          observedAt: readerSource.toISOString(),
+          pageUrl: "https://grassyhill.cps.golf/onlineresweb/search-teetime",
+          pageTitle: "Tee Times",
+          slots: [],
+          readerVersion: "reader-v1",
+        },
+      },
+    ] as never);
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+
+    await expect(
+      drainSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        checkLeaseToken: "check-lease",
+        kind: "MATCH",
+        groupKey: "match-group",
+        send,
+        now: () => now,
+      }),
+    ).rejects.toMatchObject({ code: "DELIVERY_PROVIDER_SOURCE_PENDING" });
+
+    expect(send).not.toHaveBeenCalled();
+    expect(
+      mockedPrisma.searchEmailDelivery.updateMany,
+    ).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "FAILED",
+          nextAttemptAt: new Date(now.getTime() + 60_000),
+          lastError: "DELIVERY_PROVIDER_SOURCE_PENDING",
+        }),
+      }),
+    );
+  });
+
+  it("sends after the exact completed local-reader source is durably marked consumed", async () => {
+    const providerSource = new Date(now.getTime() - 60_000);
+    const completedAt = new Date(providerSource.getTime() + 10_000);
+    const owner = delivery("delivery-1", "owner@example.com");
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      owner,
+    ] as never);
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
+      { ...currentMatch, lastConfirmedAt: providerSource },
+    ] as never);
+    mockedPrisma.courseMonitoringStatus.findMany.mockResolvedValue([
+      {
+        courseId: "course-1",
+        lastSuccessfulAt: providerSource,
+        lastFailureAt: null,
+      },
+    ] as never);
+    mockedPrisma.localReaderJob.findMany.mockResolvedValue([
+      {
+        claimedAt: providerSource,
+        completedAt,
+        resultExpiresAt: completedAt,
+        result: {
+          jobId: "reader-job",
+          courseKey: "cps:grassyhill.cps.golf",
+          status: "NO_AVAILABILITY",
+          evidenceAnchor: "SERVER_CLAIM",
+          observedAt: providerSource.toISOString(),
+          pageUrl: "https://grassyhill.cps.golf/onlineresweb/search-teetime",
+          pageTitle: "Tee Times",
+          slots: [],
+          readerVersion: "reader-v1",
+        },
+      },
+    ] as never);
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+
+    await expect(
+      drainSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        checkLeaseToken: "check-lease",
+        kind: "MATCH",
+        groupKey: "match-group",
+        send,
+        now: () => now,
+      }),
+    ).resolves.toContainEqual({ id: "delivery-1", status: "SENT" });
+
+    expect(send).toHaveBeenCalledOnce();
+    expect(executeRawCallsContaining('"recheckRequestedAt"')).toHaveLength(0);
+  });
+
+  it("does not let one consumed equal-millisecond reader job mask an independent unconsumed source", async () => {
+    const providerSource = new Date(now.getTime() - 60_000);
+    const consumedAt = new Date(providerSource.getTime() + 20_000);
+    const independentCompletedAt = new Date(providerSource.getTime() + 10_000);
+    const owner = delivery("delivery-1", "owner@example.com");
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      owner,
+    ] as never);
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
+      { ...currentMatch, lastConfirmedAt: providerSource },
+    ] as never);
+    mockedPrisma.courseMonitoringStatus.findMany.mockResolvedValue([
+      {
+        courseId: "course-1",
+        lastSuccessfulAt: providerSource,
+        lastFailureAt: null,
+      },
+    ] as never);
+    const result = (jobId: string) => ({
+      jobId,
+      courseKey: "cps:grassyhill.cps.golf",
+      status: "NO_AVAILABILITY",
+      evidenceAnchor: "SERVER_CLAIM",
+      observedAt: providerSource.toISOString(),
+      pageUrl: "https://grassyhill.cps.golf/onlineresweb/search-teetime",
+      pageTitle: "Tee Times",
+      slots: [],
+      readerVersion: "reader-v1",
+    });
+    mockedPrisma.localReaderJob.findMany.mockResolvedValue([
+      {
+        claimedAt: providerSource,
+        completedAt: consumedAt,
+        resultExpiresAt: consumedAt,
+        result: result("reader-consumed"),
+      },
+      {
+        claimedAt: providerSource,
+        completedAt: independentCompletedAt,
+        resultExpiresAt: new Date(now.getTime() + 5 * 60_000),
+        result: result("reader-independent"),
+      },
+    ] as never);
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+
+    await expect(
+      drainSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        checkLeaseToken: "check-lease",
+        kind: "MATCH",
+        groupKey: "match-group",
+        send,
+        now: () => now,
+      }),
+    ).rejects.toMatchObject({ code: "DELIVERY_PROVIDER_SOURCE_PENDING" });
+
+    expect(send).not.toHaveBeenCalled();
+    expect(
+      mockedPrisma.searchEmailDelivery.updateMany,
+    ).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "FAILED",
+          lastError: "DELIVERY_PROVIDER_SOURCE_PENDING",
+        }),
+      }),
+    );
+  });
+
+  it("sends when a strictly later canonical monitoring success supersedes an unconsumed local-reader source", async () => {
+    const readerSource = new Date(now.getTime() - 2 * 60_000);
+    const monitoringSource = new Date(now.getTime() - 60_000);
+    const owner = delivery("delivery-1", "owner@example.com");
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      owner,
+    ] as never);
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
+      { ...currentMatch, lastConfirmedAt: monitoringSource },
+    ] as never);
+    mockedPrisma.courseMonitoringStatus.findMany.mockResolvedValue([
+      {
+        courseId: "course-1",
+        lastSuccessfulAt: monitoringSource,
+        lastFailureAt: null,
+      },
+    ] as never);
+    mockedPrisma.localReaderJob.findMany.mockResolvedValue([
+      {
+        claimedAt: readerSource,
+        completedAt: new Date(readerSource.getTime() + 10_000),
+        resultExpiresAt: new Date(now.getTime() + 5 * 60_000),
+        result: {
+          jobId: "reader-job",
+          courseKey: "cps:grassyhill.cps.golf",
+          status: "NO_AVAILABILITY",
+          evidenceAnchor: "SERVER_CLAIM",
+          observedAt: readerSource.toISOString(),
+          pageUrl: "https://grassyhill.cps.golf/onlineresweb/search-teetime",
+          pageTitle: "Tee Times",
+          slots: [],
+          readerVersion: "reader-v1",
+        },
+      },
+    ] as never);
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+
+    await expect(
+      drainSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        checkLeaseToken: "check-lease",
+        kind: "MATCH",
+        groupKey: "match-group",
+        send,
+        now: () => now,
+      }),
+    ).resolves.toContainEqual({ id: "delivery-1", status: "SENT" });
+
+    expect(send).toHaveBeenCalledOnce();
+    expect(executeRawCallsContaining('"recheckRequestedAt"')).toHaveLength(0);
+  });
+
+  it("terminally suppresses an old claimed match when a completed local-reader source expired unreconciled", async () => {
+    const priorSource = new Date(now.getTime() - 20 * 60_000);
+    const readerSource = new Date(now.getTime() - 10 * 60_000);
+    const owner = delivery("delivery-1", "owner@example.com");
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      owner,
+    ] as never);
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
+      { ...currentMatch, lastConfirmedAt: priorSource },
+    ] as never);
+    mockedPrisma.courseMonitoringStatus.findMany.mockResolvedValue([
+      {
+        courseId: "course-1",
+        lastSuccessfulAt: priorSource,
+        lastFailureAt: null,
+      },
+    ] as never);
+    mockedPrisma.localReaderJob.findMany.mockResolvedValue([
+      {
+        claimedAt: readerSource,
+        completedAt: new Date(readerSource.getTime() + 10_000),
+        resultExpiresAt: new Date(now.getTime() - 60_000),
+        result: {
+          jobId: "reader-job",
+          courseKey: "cps:grassyhill.cps.golf",
+          status: "NO_AVAILABILITY",
+          evidenceAnchor: "SERVER_CLAIM",
+          observedAt: readerSource.toISOString(),
+          pageUrl: "https://grassyhill.cps.golf/onlineresweb/search-teetime",
+          pageTitle: "Tee Times",
+          slots: [],
+          readerVersion: "reader-v1",
+        },
+      },
+    ] as never);
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+
+    await expect(
+      drainSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        checkLeaseToken: "check-lease",
+        kind: "MATCH",
+        groupKey: "match-group",
+        send,
+        now: () => now,
+      }),
+    ).resolves.toContainEqual({ id: "delivery-1", status: "SUPPRESSED" });
+
+    expect(send).not.toHaveBeenCalled();
+    expect(mockedPrisma.searchEmailDelivery.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "SUPPRESSED",
+          nextAttemptAt: null,
+          lastError: "DELIVERY_PROVIDER_SOURCE_UNRESOLVED",
+        }),
+      }),
+    );
+    expect(executeRawCallsContaining('"recheckRequestedAt"')).toHaveLength(1);
+  });
+
+  it("keeps retrying when an active provider observation coexists with a newer terminal local-reader source", async () => {
+    const priorSource = new Date(now.getTime() - 30 * 60_000);
+    const markerSource = new Date(now.getTime() - 20 * 60_000);
+    const readerSource = new Date(now.getTime() - 10 * 60_000);
+    const markerExpiresAt = new Date(now.getTime() + 2 * 60_000);
+    const owner = delivery("delivery-1", "owner@example.com");
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      owner,
+    ] as never);
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
+      { ...currentMatch, lastConfirmedAt: priorSource },
+    ] as never);
+    mockedPrisma.courseMonitoringStatus.findMany.mockResolvedValue([
+      {
+        courseId: "course-1",
+        lastSuccessfulAt: priorSource,
+        lastFailureAt: null,
+      },
+    ] as never);
+    mockedPrisma.localReaderJob.findMany.mockResolvedValue([
+      {
+        claimedAt: readerSource,
+        completedAt: new Date(readerSource.getTime() + 10_000),
+        resultExpiresAt: new Date(now.getTime() - 60_000),
+        result: {
+          jobId: "reader-job",
+          courseKey: "cps:grassyhill.cps.golf",
+          status: "NO_AVAILABILITY",
+          evidenceAnchor: "SERVER_CLAIM",
+          observedAt: readerSource.toISOString(),
+          pageUrl: "https://grassyhill.cps.golf/onlineresweb/search-teetime",
+          pageTitle: "Tee Times",
+          slots: [],
+          readerVersion: "reader-v1",
+        },
+      },
+    ] as never);
+    mockedPrisma.$queryRaw.mockImplementation(async (sql) => {
+      const text = rawSqlText(sql);
+      if (text.includes('FROM "ProviderRequestLease"')) {
+        return [
+          {
+            observationStartedAt: markerSource,
+            leaseExpiresAt: markerExpiresAt,
+            retryUntil: new Date(markerExpiresAt.getTime() + 10 * 60_000),
+            state: "ACTIVE",
+          },
+        ] as never;
+      }
+      if (text.includes('statement_timestamp() AS "currentTime"')) {
+        return [{ currentTime: now }] as never;
+      }
+      return [currentSearch] as never;
+    });
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+
+    await expect(
+      drainSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        checkLeaseToken: "check-lease",
+        kind: "MATCH",
+        groupKey: "match-group",
+        send,
+        now: () => now,
+      }),
+    ).rejects.toMatchObject({ code: "DELIVERY_PROVIDER_SOURCE_PENDING" });
+
+    expect(send).not.toHaveBeenCalled();
+    expect(
+      mockedPrisma.searchEmailDelivery.updateMany,
+    ).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "FAILED",
+          nextAttemptAt: new Date(now.getTime() + 60_000),
+          lastError: "DELIVERY_PROVIDER_SOURCE_PENDING",
+        }),
+      }),
+    );
+    expect(executeRawCallsContaining('"recheckRequestedAt"')).toHaveLength(1);
+  });
+
+  it("keeps retrying when a fresh local-reader source coexists with a newer terminal provider marker", async () => {
+    const priorSource = new Date(now.getTime() - 40 * 60_000);
+    const readerSource = new Date(now.getTime() - 30 * 60_000);
+    const markerSource = new Date(now.getTime() - 20 * 60_000);
+    const markerExpiresAt = new Date(now.getTime() - 11 * 60_000);
+    const owner = delivery("delivery-1", "owner@example.com");
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      owner,
+    ] as never);
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
+      { ...currentMatch, lastConfirmedAt: priorSource },
+    ] as never);
+    mockedPrisma.courseMonitoringStatus.findMany.mockResolvedValue([
+      {
+        courseId: "course-1",
+        lastSuccessfulAt: priorSource,
+        lastFailureAt: null,
+      },
+    ] as never);
+    mockedPrisma.localReaderJob.findMany.mockResolvedValue([
+      {
+        claimedAt: readerSource,
+        completedAt: new Date(readerSource.getTime() + 10_000),
+        resultExpiresAt: new Date(now.getTime() + 5 * 60_000),
+        result: {
+          jobId: "reader-job",
+          courseKey: "cps:grassyhill.cps.golf",
+          status: "NO_AVAILABILITY",
+          evidenceAnchor: "SERVER_CLAIM",
+          observedAt: readerSource.toISOString(),
+          pageUrl: "https://grassyhill.cps.golf/onlineresweb/search-teetime",
+          pageTitle: "Tee Times",
+          slots: [],
+          readerVersion: "reader-v1",
+        },
+      },
+    ] as never);
+    mockedPrisma.$queryRaw.mockImplementation(async (sql) => {
+      const text = rawSqlText(sql);
+      if (text.includes('FROM "ProviderRequestLease"')) {
+        return [
+          {
+            observationStartedAt: markerSource,
+            leaseExpiresAt: markerExpiresAt,
+            retryUntil: new Date(markerExpiresAt.getTime() + 10 * 60_000),
+            state: "EXPIRED_TERMINAL",
+          },
+        ] as never;
+      }
+      if (text.includes('statement_timestamp() AS "currentTime"')) {
+        return [{ currentTime: now }] as never;
+      }
+      return [currentSearch] as never;
+    });
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+
+    await expect(
+      drainSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        checkLeaseToken: "check-lease",
+        kind: "MATCH",
+        groupKey: "match-group",
+        send,
+        now: () => now,
+      }),
+    ).rejects.toMatchObject({ code: "DELIVERY_PROVIDER_SOURCE_PENDING" });
+
+    expect(send).not.toHaveBeenCalled();
+    expect(
+      mockedPrisma.searchEmailDelivery.updateMany,
+    ).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "FAILED",
+          nextAttemptAt: new Date(now.getTime() + 60_000),
+          lastError: "DELIVERY_PROVIDER_SOURCE_PENDING",
+        }),
+      }),
+    );
+    expect(executeRawCallsContaining('"recheckRequestedAt"')).toHaveLength(1);
   });
 
   it("does not start another old-recipient claim while a Clerk email transition is pending", async () => {
     const retryAt = new Date(now.getTime() + 60_000);
     mockedApplyPendingClerkEmailForSearch.mockResolvedValue({
       outcome: "deferred",
-      retryAt
+      retryAt,
     });
     mockedPrisma.user.findUnique.mockResolvedValue({
       email: "owner@example.com",
-      pendingEmail: "new-owner@example.com"
+      pendingEmail: "new-owner@example.com",
     } as never);
     mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
-      delivery("delivery-1", "owner@example.com")
+      delivery("delivery-1", "owner@example.com"),
     ] as never);
     const send = vi.fn();
 
@@ -1202,11 +2474,11 @@ describe("search email delivery outbox", () => {
         kind: "MATCH",
         groupKey: "match-group",
         send,
-        now: () => now
-      })
+        now: () => now,
+      }),
     ).rejects.toMatchObject({
       code: "SEARCH_EMAIL_DELIVERY_DEFERRED",
-      retryAt
+      retryAt,
     });
 
     expect(mockedPrisma.searchEmailDelivery.updateMany).not.toHaveBeenCalled();
@@ -1215,13 +2487,15 @@ describe("search email delivery outbox", () => {
   });
 
   it("rechecks pending owner state inside the claim transaction after a clean preliminary check", async () => {
-    mockedApplyPendingClerkEmailForSearch.mockResolvedValue({ outcome: "none" });
+    mockedApplyPendingClerkEmailForSearch.mockResolvedValue({
+      outcome: "none",
+    });
     mockedPrisma.user.findUnique.mockResolvedValue({
       email: "owner@example.com",
-      pendingEmail: "new-owner@example.com"
+      pendingEmail: "new-owner@example.com",
     } as never);
     mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
-      delivery("delivery-1", "owner@example.com")
+      delivery("delivery-1", "owner@example.com"),
     ] as never);
     const send = vi.fn();
 
@@ -1233,11 +2507,11 @@ describe("search email delivery outbox", () => {
         kind: "MATCH",
         groupKey: "match-group",
         send,
-        now: () => now
-      })
+        now: () => now,
+      }),
     ).rejects.toMatchObject({
       code: "SEARCH_EMAIL_DELIVERY_DEFERRED",
-      retryAt: new Date(now.getTime() + 60_000)
+      retryAt: new Date(now.getTime() + 60_000),
     });
 
     expect(mockedPrisma.searchEmailDelivery.updateMany).not.toHaveBeenCalled();
@@ -1251,7 +2525,7 @@ describe("search email delivery outbox", () => {
       ...owner,
       status: "FAILED",
       attemptCount: 1,
-      nextAttemptAt: new Date(now.getTime() + 60_000)
+      nextAttemptAt: new Date(now.getTime() + 60_000),
     };
     const retryAt = new Date(now.getTime() + 60_001);
     mockedPrisma.searchEmailDelivery.findMany
@@ -1259,18 +2533,22 @@ describe("search email delivery outbox", () => {
       .mockResolvedValueOnce([failedOwner] as never)
       .mockResolvedValueOnce([failedOwner] as never)
       .mockResolvedValueOnce([
-        { ...failedOwner, status: "SENT", sentAt: retryAt }
+        { ...failedOwner, status: "SENT", sentAt: retryAt },
       ] as never);
-    mockedPrisma.searchEmailDelivery.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockedPrisma.searchEmailDelivery.updateMany.mockResolvedValue({
+      count: 1,
+    } as never);
     const firstError = new Error("temporary delivery failure");
     const attempts: Array<{ idempotencyKey: string; payload: unknown }> = [];
-    const send = vi.fn(async (input: { idempotencyKey: string; payload: unknown }) => {
-      attempts.push(input);
-      if (attempts.length === 1) {
-        throw firstError;
-      }
-      return { deliveryStatus: "sent" as const };
-    });
+    const send = vi.fn(
+      async (input: { idempotencyKey: string; payload: unknown }) => {
+        attempts.push(input);
+        if (attempts.length === 1) {
+          throw firstError;
+        }
+        return { deliveryStatus: "sent" as const };
+      },
+    );
 
     await expect(
       drainSearchEmailDeliveryGroup({
@@ -1280,8 +2558,8 @@ describe("search email delivery outbox", () => {
         kind: "MATCH",
         groupKey: "match-group",
         send,
-        now: () => now
-      })
+        now: () => now,
+      }),
     ).rejects.toBe(firstError);
     await expect(
       drainSearchEmailDeliveryGroup({
@@ -1291,8 +2569,8 @@ describe("search email delivery outbox", () => {
         kind: "MATCH",
         groupKey: "match-group",
         send,
-        now: () => retryAt
-      })
+        now: () => retryAt,
+      }),
     ).resolves.toContainEqual({ id: "delivery-1", status: "SENT" });
 
     expect(attempts).toHaveLength(2);
@@ -1308,7 +2586,7 @@ describe("search email delivery outbox", () => {
       status: "FAILED",
       attemptCount: 1,
       lastError:
-        "DELIVERY_NOT_ACCEPTED:Alert recipient authorization changed before delivery"
+        "DELIVERY_NOT_ACCEPTED:Alert recipient authorization changed before delivery",
     };
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([owner] as never)
@@ -1316,11 +2594,11 @@ describe("search email delivery outbox", () => {
     mockedPrisma.user.findUnique
       .mockResolvedValueOnce({
         email: "owner@example.com",
-        pendingEmail: null
+        pendingEmail: null,
       } as never)
       .mockResolvedValue({
         email: "new-owner@example.com",
-        pendingEmail: null
+        pendingEmail: null,
       } as never);
     const send = vi.fn();
 
@@ -1332,19 +2610,21 @@ describe("search email delivery outbox", () => {
         kind: "MATCH",
         groupKey: "match-group",
         send,
-        now: () => now
-      })
+        now: () => now,
+      }),
     ).rejects.toMatchObject({ code: "EMAIL_DELIVERY_NOT_ACCEPTED" });
 
     expect(send).not.toHaveBeenCalled();
-    expect(mockedPrisma.user.findUnique.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(
+      mockedPrisma.user.findUnique.mock.calls.length,
+    ).toBeGreaterThanOrEqual(2);
     expect(mockedPrisma.searchEmailDelivery.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           status: "FAILED",
-          lastError: expect.stringMatching(/^DELIVERY_NOT_ACCEPTED:/)
-        })
-      })
+          lastError: expect.stringMatching(/^DELIVERY_NOT_ACCEPTED:/),
+        }),
+      }),
     );
   });
 
@@ -1355,7 +2635,7 @@ describe("search email delivery outbox", () => {
       status: "FAILED",
       attemptCount: 1,
       lastError:
-        "DELIVERY_NOT_ACCEPTED:Alert email delivery claim expired before provider delivery"
+        "DELIVERY_NOT_ACCEPTED:Alert email delivery claim expired before provider delivery",
     };
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([owner] as never)
@@ -1370,7 +2650,7 @@ describe("search email delivery outbox", () => {
         await input.assertCurrentDelivery();
         providerSend();
         return { deliveryStatus: "sent" as const };
-      }
+      },
     );
 
     await expect(
@@ -1381,8 +2661,8 @@ describe("search email delivery outbox", () => {
         kind: "MATCH",
         groupKey: "match-group",
         send,
-        now: () => now
-      })
+        now: () => now,
+      }),
     ).rejects.toMatchObject({ code: "EMAIL_DELIVERY_NOT_ACCEPTED" });
 
     expect(send).toHaveBeenCalledOnce();
@@ -1391,25 +2671,25 @@ describe("search email delivery outbox", () => {
       strings: string[];
     };
     const renewalText = renewalSql.strings.join(" ");
+    expect(renewalText).toContain('"claimExpiresAt" > statement_timestamp()');
     expect(renewalText).toContain(
-      '"claimExpiresAt" > statement_timestamp()'
-    );
-    expect(renewalText).toContain(
-      'SET "claimExpiresAt" = statement_timestamp()'
+      'SET "claimExpiresAt" = statement_timestamp()',
     );
     expect(mockedPrisma.searchEmailDelivery.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           status: "FAILED",
-          lastError: expect.stringMatching(/^DELIVERY_NOT_ACCEPTED:/)
-        })
-      })
+          lastError: expect.stringMatching(/^DELIVERY_NOT_ACCEPTED:/),
+        }),
+      }),
     );
   });
 
   it("checks recipient-scoped overlap before sending a match group", async () => {
     const owner = delivery("delivery-1", "owner@example.com");
-    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([owner] as never);
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      owner,
+    ] as never);
     const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
 
     await drainSearchEmailDeliveryGroup({
@@ -1419,7 +2699,7 @@ describe("search email delivery outbox", () => {
       kind: "MATCH",
       groupKey: "match-group",
       send,
-      now: () => now
+      now: () => now,
     });
 
     expect(mockedPrisma.searchEmailDelivery.findFirst).toHaveBeenCalledWith(
@@ -1427,9 +2707,9 @@ describe("search email delivery outbox", () => {
         where: expect.objectContaining({
           kind: "MATCH",
           groupKey: { not: "match-group" },
-          recipient: { in: ["owner@example.com"] }
-        })
-      })
+          recipient: { in: ["owner@example.com"] },
+        }),
+      }),
     );
     expect(send).toHaveBeenCalledOnce();
   });
@@ -1441,19 +2721,19 @@ describe("search email delivery outbox", () => {
       status: "FAILED",
       attemptCount: 1,
       lastError: "DELIVERY_OUTCOME_UNKNOWN:timeout",
-      createdAt: new Date(now.getTime() - 120_000)
+      createdAt: new Date(now.getTime() - 120_000),
     });
     const retiredOwner = {
       ...owner,
       status: "SUPPRESSED",
-      lastError: "MATCH_RECIPIENT_OWNED_BY_OTHER_GROUP"
+      lastError: "MATCH_RECIPIENT_OWNED_BY_OTHER_GROUP",
     };
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([owner] as never)
       .mockResolvedValueOnce([attemptedOwner] as never)
       .mockResolvedValueOnce([retiredOwner] as never);
     mockedPrisma.searchEmailDelivery.findFirst.mockResolvedValueOnce({
-      id: "attempted-delivery"
+      id: "attempted-delivery",
     } as never);
     const send = vi.fn();
 
@@ -1465,8 +2745,8 @@ describe("search email delivery outbox", () => {
         kind: "MATCH",
         groupKey: "match-group",
         send,
-        now: () => now
-      })
+        now: () => now,
+      }),
     ).resolves.toEqual([{ id: "delivery-1", status: "SUPPRESSED" }]);
 
     expect(send).not.toHaveBeenCalled();
@@ -1475,9 +2755,9 @@ describe("search email delivery outbox", () => {
         where: { id: { in: ["delivery-1"] } },
         data: expect.objectContaining({
           status: "SUPPRESSED",
-          lastError: "MATCH_RECIPIENT_OWNED_BY_OTHER_GROUP"
-        })
-      })
+          lastError: "MATCH_RECIPIENT_OWNED_BY_OTHER_GROUP",
+        }),
+      }),
     );
   });
 
@@ -1485,21 +2765,21 @@ describe("search email delivery outbox", () => {
     const ambiguousOwner = delivery("current-ambiguous", "owner@example.com", {
       status: "FAILED",
       attemptCount: 1,
-      lastError: "DELIVERY_OUTCOME_UNKNOWN:timeout"
+      lastError: "DELIVERY_OUTCOME_UNKNOWN:timeout",
     });
     const reachedOwner = delivery("reached-owner", "owner@example.com", {
       groupKey: "reached-group",
       status: "SENT",
       sentAt: new Date(now.getTime() - 60_000),
-      createdAt: new Date(now.getTime() - 120_000)
+      createdAt: new Date(now.getTime() - 120_000),
     });
     const retiredOwner = {
       ...ambiguousOwner,
       status: "SUPPRESSED",
-      lastError: "MATCH_RECIPIENT_OWNED_BY_OTHER_GROUP"
+      lastError: "MATCH_RECIPIENT_OWNED_BY_OTHER_GROUP",
     };
     mockedPrisma.searchEmailDelivery.findFirst.mockResolvedValueOnce({
-      id: "reached-owner"
+      id: "reached-owner",
     } as never);
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([ambiguousOwner] as never)
@@ -1515,20 +2795,18 @@ describe("search email delivery outbox", () => {
         kind: "MATCH",
         groupKey: "match-group",
         send,
-        now: () => now
-      })
-    ).resolves.toEqual([
-      { id: "current-ambiguous", status: "SUPPRESSED" }
-    ]);
+        now: () => now,
+      }),
+    ).resolves.toEqual([{ id: "current-ambiguous", status: "SUPPRESSED" }]);
 
     expect(send).not.toHaveBeenCalled();
     expect(mockedPrisma.searchEmailDelivery.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: { id: { in: ["current-ambiguous"] } },
         data: expect.objectContaining({
-          lastError: "MATCH_RECIPIENT_OWNED_BY_OTHER_GROUP"
-        })
-      })
+          lastError: "MATCH_RECIPIENT_OWNED_BY_OTHER_GROUP",
+        }),
+      }),
     );
   });
 
@@ -1539,11 +2817,11 @@ describe("search email delivery outbox", () => {
       status: "FAILED",
       attemptCount: 1,
       lastError: "DELIVERY_NOT_ACCEPTED:provider rejected",
-      createdAt: new Date(now.getTime() - 120_000)
+      createdAt: new Date(now.getTime() - 120_000),
     });
     const sentOwner = { ...owner, status: "SENT", sentAt: now };
     mockedPrisma.searchEmailDelivery.findFirst.mockResolvedValueOnce({
-      id: "not-accepted"
+      id: "not-accepted",
     } as never);
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([owner] as never)
@@ -1560,8 +2838,8 @@ describe("search email delivery outbox", () => {
         kind: "MATCH",
         groupKey: "match-group",
         send,
-        now: () => now
-      })
+        now: () => now,
+      }),
     ).resolves.toContainEqual({ id: "delivery-1", status: "SENT" });
 
     expect(send).toHaveBeenCalledOnce();
@@ -1572,38 +2850,36 @@ describe("search email delivery outbox", () => {
         claimToken: null,
         claimExpiresAt: null,
         nextAttemptAt: null,
-        lastError: "MATCH_STALE_REKEYED"
-      }
+        lastError: "MATCH_STALE_REKEYED",
+      },
     });
   });
 
   it("retires an unattempted old owner address and prepares the exact-cycle successor for the current owner", async () => {
     const oldOwner = delivery("old-owner", "old-owner@example.com", {
-      isOwnerRecipient: true
+      isOwnerRecipient: true,
     });
     const friend = delivery("friend", "friend@example.com", {
-      isOwnerRecipient: false
+      isOwnerRecipient: false,
     });
     const retiredOwner = {
       ...oldOwner,
       status: "SUPPRESSED",
-      lastError: "DELIVERY_RECIPIENT_REKEYED"
+      lastError: "DELIVERY_RECIPIENT_REKEYED",
     };
     const sentFriend = { ...friend, status: "SENT", sentAt: now };
-    mockedPrisma.$queryRaw.mockResolvedValue([
-      {
-        ...currentSearch,
-        ownerEmail: "new-owner@example.com",
-        additionalEmails: ["friend@example.com"]
-      }
-    ] as never);
+    mockQueryRawForSearch({
+      ...currentSearch,
+      ownerEmail: "new-owner@example.com",
+      additionalEmails: ["friend@example.com"],
+    });
     mockedPrisma.user.findUnique.mockResolvedValue({
       email: "new-owner@example.com",
-      pendingEmail: null
+      pendingEmail: null,
     } as never);
     mockedPrisma.teeSearch.findFirst.mockResolvedValue({
       additionalEmails: ["friend@example.com"],
-      user: { email: "new-owner@example.com" }
+      user: { email: "new-owner@example.com" },
     } as never);
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([oldOwner, friend] as never)
@@ -1611,8 +2887,8 @@ describe("search email delivery outbox", () => {
       .mockResolvedValueOnce([retiredOwner, sentFriend] as never);
     mockedPrisma.searchEmailDelivery.create.mockResolvedValue(
       delivery("successor", "new-owner@example.com", {
-        groupKey: "catchup-current-owner"
-      }) as never
+        groupKey: "catchup-current-owner",
+      }) as never,
     );
     const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
 
@@ -1623,12 +2899,12 @@ describe("search email delivery outbox", () => {
       kind: "MATCH",
       groupKey: "match-group",
       send,
-      now: () => now
+      now: () => now,
     });
 
     expect(send).toHaveBeenCalledOnce();
     expect(send).toHaveBeenCalledWith(
-      expect.objectContaining({ recipient: "friend@example.com" })
+      expect.objectContaining({ recipient: "friend@example.com" }),
     );
     expect(mockedPrisma.searchEmailDelivery.create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1636,10 +2912,10 @@ describe("search email delivery outbox", () => {
           recipient: "new-owner@example.com",
           isOwnerRecipient: true,
           payload: expect.objectContaining({
-            matchRefs: [{ matchId: "match-1", availabilityCycle: 7 }]
-          })
-        })
-      })
+            matchRefs: [{ matchId: "match-1", availabilityCycle: 7 }],
+          }),
+        }),
+      }),
     );
   });
 
@@ -1648,31 +2924,29 @@ describe("search email delivery outbox", () => {
       isOwnerRecipient: true,
       status: "FAILED",
       attemptCount: 1,
-      lastError: "DELIVERY_OUTCOME_UNKNOWN:timeout"
+      lastError: "DELIVERY_OUTCOME_UNKNOWN:timeout",
     });
     const friend = delivery("friend", "friend@example.com", {
-      isOwnerRecipient: false
+      isOwnerRecipient: false,
     });
     const blockedOwner = {
       ...oldOwner,
       status: "SUPPRESSED",
-      lastError: "MATCH_STALE_REKEY_BLOCKED"
+      lastError: "MATCH_STALE_REKEY_BLOCKED",
     };
     const sentFriend = { ...friend, status: "SENT", sentAt: now };
-    mockedPrisma.$queryRaw.mockResolvedValue([
-      {
-        ...currentSearch,
-        ownerEmail: "new-owner@example.com",
-        additionalEmails: ["friend@example.com"]
-      }
-    ] as never);
+    mockQueryRawForSearch({
+      ...currentSearch,
+      ownerEmail: "new-owner@example.com",
+      additionalEmails: ["friend@example.com"],
+    });
     mockedPrisma.user.findUnique.mockResolvedValue({
       email: "new-owner@example.com",
-      pendingEmail: null
+      pendingEmail: null,
     } as never);
     mockedPrisma.teeSearch.findFirst.mockResolvedValue({
       additionalEmails: ["friend@example.com"],
-      user: { email: "new-owner@example.com" }
+      user: { email: "new-owner@example.com" },
     } as never);
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([oldOwner, friend] as never)
@@ -1681,8 +2955,8 @@ describe("search email delivery outbox", () => {
     mockedPrisma.searchEmailDelivery.create.mockResolvedValue(
       delivery("sentinel", "new-owner@example.com", {
         status: "SUPPRESSED",
-        lastError: "MATCH_STALE_REKEY_BLOCKED"
-      }) as never
+        lastError: "MATCH_STALE_REKEY_BLOCKED",
+      }) as never,
     );
     const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
 
@@ -1693,21 +2967,21 @@ describe("search email delivery outbox", () => {
       kind: "MATCH",
       groupKey: "match-group",
       send,
-      now: () => now
+      now: () => now,
     });
 
     expect(send).toHaveBeenCalledOnce();
     expect(send).toHaveBeenCalledWith(
-      expect.objectContaining({ recipient: "friend@example.com" })
+      expect.objectContaining({ recipient: "friend@example.com" }),
     );
     expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
           OR: [{ id: "match-1", availabilityCycle: 7 }],
-          alertStatus: "PENDING"
+          alertStatus: "PENDING",
         }),
-        data: { alertStatus: "SUPPRESSED", sentAt: null }
-      })
+        data: { alertStatus: "SUPPRESSED", sentAt: null },
+      }),
     );
     expect(mockedPrisma.searchEmailDelivery.create).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1715,9 +2989,9 @@ describe("search email delivery outbox", () => {
           recipient: "new-owner@example.com",
           isOwnerRecipient: true,
           status: "SUPPRESSED",
-          lastError: "MATCH_STALE_REKEY_BLOCKED"
-        })
-      })
+          lastError: "MATCH_STALE_REKEY_BLOCKED",
+        }),
+      }),
     );
   });
 
@@ -1726,7 +3000,7 @@ describe("search email delivery outbox", () => {
       schemaVersion: 2 as const,
       checkedAt: now.toISOString(),
       statusSnapshot: [],
-      statusReport: { kind: "daily" }
+      statusReport: { kind: "daily" },
     };
     const oldOwner = delivery("old-owner", "old-owner@example.com", {
       kind: "DAILY",
@@ -1735,12 +3009,12 @@ describe("search email delivery outbox", () => {
       payload: statusPayload,
       status: "FAILED",
       attemptCount: 1,
-      lastError: "DELIVERY_OUTCOME_UNKNOWN:timeout"
+      lastError: "DELIVERY_OUTCOME_UNKNOWN:timeout",
     });
     const blockedOwner = {
       ...oldOwner,
       status: "SUPPRESSED",
-      lastError: "DELIVERY_RECIPIENT_NO_LONGER_AUTHORIZED"
+      lastError: "DELIVERY_RECIPIENT_NO_LONGER_AUTHORIZED",
     };
     const currentOwnerSentinel = delivery(
       "current-owner-sentinel",
@@ -1751,26 +3025,26 @@ describe("search email delivery outbox", () => {
         isOwnerRecipient: true,
         payload: statusPayload,
         status: "SUPPRESSED",
-        lastError: "STATUS_RECIPIENT_AMBIGUOUS_ATTEMPT"
-      }
+        lastError: "STATUS_RECIPIENT_AMBIGUOUS_ATTEMPT",
+      },
     );
     mockedPrisma.$queryRaw.mockResolvedValue([
       {
         ...currentSearch,
         ownerEmail: "new-owner@example.com",
-        additionalEmails: []
-      }
+        additionalEmails: [],
+      },
     ] as never);
     mockedPrisma.user.findUnique.mockResolvedValue({
       email: "new-owner@example.com",
-      pendingEmail: null
+      pendingEmail: null,
     } as never);
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([oldOwner] as never)
       .mockResolvedValueOnce([blockedOwner, currentOwnerSentinel] as never)
       .mockResolvedValueOnce([blockedOwner, currentOwnerSentinel] as never);
     mockedPrisma.searchEmailDelivery.create.mockResolvedValue(
-      currentOwnerSentinel as never
+      currentOwnerSentinel as never,
     );
     const send = vi.fn();
 
@@ -1782,12 +3056,15 @@ describe("search email delivery outbox", () => {
         kind: "DAILY",
         groupKey: "daily-group",
         send,
-        now: () => now
-      })
+        now: () => now,
+      }),
     ).resolves.toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ id: "current-owner-sentinel", status: "SUPPRESSED" })
-      ])
+        expect.objectContaining({
+          id: "current-owner-sentinel",
+          status: "SUPPRESSED",
+        }),
+      ]),
     );
 
     expect(send).not.toHaveBeenCalled();
@@ -1797,8 +3074,8 @@ describe("search email delivery outbox", () => {
         recipient: "new-owner@example.com",
         isOwnerRecipient: true,
         status: "SUPPRESSED",
-        lastError: "STATUS_RECIPIENT_AMBIGUOUS_ATTEMPT"
-      })
+        lastError: "STATUS_RECIPIENT_AMBIGUOUS_ATTEMPT",
+      }),
     });
   });
 
@@ -1810,10 +3087,10 @@ describe("search email delivery outbox", () => {
       payload: legacyPayload,
       status: "FAILED",
       attemptCount: 1,
-      lastError: "DELIVERY_OUTCOME_UNKNOWN:timeout"
+      lastError: "DELIVERY_OUTCOME_UNKNOWN:timeout",
     });
     mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
-      ambiguousLegacyOwner
+      ambiguousLegacyOwner,
     ] as never);
 
     await expect(
@@ -1825,33 +3102,38 @@ describe("search email delivery outbox", () => {
         recipients: ["owner@example.com"],
         ownerRecipient: "owner@example.com",
         payload,
-        now
-      })
+        now,
+      }),
     ).resolves.toEqual({
       prepared: true,
       groups: [],
-      hasExistingObligation: true
+      hasExistingObligation: true,
     });
 
     expect(mockedPrisma.searchEmailDelivery.create).not.toHaveBeenCalled();
     expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          OR: [{ id: "match-1", availabilityCycle: 7 }]
-        })
-      })
+          OR: [{ id: "match-1", availabilityCycle: 7 }],
+        }),
+      }),
     );
 
     vi.clearAllMocks();
     mockedPrisma.$transaction.mockImplementation(async (callback) =>
-      (callback as (transaction: typeof prisma) => Promise<unknown>)(prisma)
+      (callback as (transaction: typeof prisma) => Promise<unknown>)(prisma),
     );
     mockedPrisma.$queryRaw.mockResolvedValue([currentSearch] as never);
     mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
-      { ...ambiguousLegacyOwner, status: "PENDING", attemptCount: 0, lastError: null }
+      {
+        ...ambiguousLegacyOwner,
+        status: "PENDING",
+        attemptCount: 0,
+        lastError: null,
+      },
     ] as never);
     mockedPrisma.searchEmailDelivery.create.mockResolvedValue(
-      delivery("current-owner", "owner@example.com") as never
+      delivery("current-owner", "owner@example.com") as never,
     );
 
     await expect(
@@ -1863,14 +3145,17 @@ describe("search email delivery outbox", () => {
         recipients: ["owner@example.com"],
         ownerRecipient: "owner@example.com",
         payload,
-        now
-      })
+        now,
+      }),
     ).resolves.toEqual({
       prepared: true,
       groups: [
-        { groupKey: expect.stringMatching(/^catchup-/), recipient: "owner@example.com" }
+        {
+          groupKey: expect.stringMatching(/^catchup-/),
+          recipient: "owner@example.com",
+        },
       ],
-      hasExistingObligation: false
+      hasExistingObligation: false,
     });
   });
 
@@ -1878,11 +3163,11 @@ describe("search email delivery outbox", () => {
     mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
       delivery("retired-owner", "owner@example.com", {
         status: "SUPPRESSED",
-        lastError: "MATCH_RECIPIENT_OWNED_BY_OTHER_GROUP"
-      })
+        lastError: "MATCH_RECIPIENT_OWNED_BY_OTHER_GROUP",
+      }),
     ] as never);
     mockedPrisma.searchEmailDelivery.create.mockResolvedValue(
-      delivery("current-owner", "owner@example.com") as never
+      delivery("current-owner", "owner@example.com") as never,
     );
 
     await expect(
@@ -1894,14 +3179,17 @@ describe("search email delivery outbox", () => {
         recipients: ["owner@example.com"],
         ownerRecipient: "owner@example.com",
         payload,
-        now
-      })
+        now,
+      }),
     ).resolves.toEqual({
       prepared: true,
       groups: [
-        { groupKey: expect.stringMatching(/^catchup-/), recipient: "owner@example.com" }
+        {
+          groupKey: expect.stringMatching(/^catchup-/),
+          recipient: "owner@example.com",
+        },
       ],
-      hasExistingObligation: false
+      hasExistingObligation: false,
     });
   });
 
@@ -1909,11 +3197,13 @@ describe("search email delivery outbox", () => {
     const owner = delivery("delivery-1", "owner@example.com", {
       status: "FAILED",
       attemptCount: 1,
-      nextAttemptAt: new Date(now.getTime() - 1)
+      nextAttemptAt: new Date(now.getTime() - 1),
     });
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([owner] as never)
-      .mockResolvedValueOnce([{ ...owner, status: "SENT", sentAt: now }] as never);
+      .mockResolvedValueOnce([
+        { ...owner, status: "SENT", sentAt: now },
+      ] as never);
     mockedPrisma.searchEmailDelivery.findFirst.mockResolvedValue(null);
     const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
 
@@ -1925,8 +3215,8 @@ describe("search email delivery outbox", () => {
         kind: "MATCH",
         groupKey: "match-group",
         send,
-        now: () => now
-      })
+        now: () => now,
+      }),
     ).resolves.toContainEqual({ id: "delivery-1", status: "SENT" });
 
     expect(send).toHaveBeenCalledWith(expect.objectContaining({ payload }));
@@ -1934,10 +3224,14 @@ describe("search email delivery outbox", () => {
 
   it("blocks mutations while any recipient in the group remains SENDING", async () => {
     mockedPrisma.searchEmailDelivery.findFirst.mockResolvedValue({
-      claimExpiresAt: new Date(now.getTime() + 60_000)
+      claimExpiresAt: new Date(now.getTime() + 60_000),
     } as never);
     await expect(
-      lockSearchForAlertMutation(prisma, { searchId: "search-1", userId: "user-1", now })
+      lockSearchForAlertMutation(prisma, {
+        searchId: "search-1",
+        userId: "user-1",
+        now,
+      }),
     ).rejects.toBeInstanceOf(SearchEmailDeliveryInProgressError);
     expect(mockedPrisma.searchEmailDelivery.updateMany).not.toHaveBeenCalled();
   });
@@ -1952,33 +3246,33 @@ describe("search email delivery outbox", () => {
           status: "SENDING",
           attemptCount: 1,
           sentAt: null,
-          lastError: null
-        }
+          lastError: null,
+        },
       ] as never);
 
     await lockSearchForAlertMutation(prisma, {
       searchId: "search-1",
       userId: "user-1",
-      now
+      now,
     });
 
     expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
           OR: [{ id: "match-1", availabilityCycle: 7 }],
-          alertStatus: "PENDING"
+          alertStatus: "PENDING",
         }),
-        data: { alertStatus: "SUPPRESSED", sentAt: null }
-      })
+        data: { alertStatus: "SUPPRESSED", sentAt: null },
+      }),
     );
     expect(mockedPrisma.searchEmailDelivery.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({ status: "SENDING" }),
         data: expect.objectContaining({
           status: "SUPPRESSED",
-          lastError: "DELIVERY_OUTCOME_UNKNOWN_AFTER_SEARCH_MUTATION"
-        })
-      })
+          lastError: "DELIVERY_OUTCOME_UNKNOWN_AFTER_SEARCH_MUTATION",
+        }),
+      }),
     );
   });
 
@@ -1989,7 +3283,7 @@ describe("search email delivery outbox", () => {
       matchIds: ["match-1"],
       matchRefs: [{ matchId: "match-1", availabilityCycle: 7 }],
       displayMatchIds: ["match-1"],
-      statusReport: { kind: "setup" }
+      statusReport: { kind: "setup" },
     };
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([])
@@ -1999,31 +3293,31 @@ describe("search email delivery outbox", () => {
           status: "FAILED",
           attemptCount: 1,
           sentAt: null,
-          lastError: "DELIVERY_OUTCOME_UNKNOWN:timeout"
-        }
+          lastError: "DELIVERY_OUTCOME_UNKNOWN:timeout",
+        },
       ] as never);
 
     await lockSearchForAlertMutation(prisma, {
       searchId: "search-1",
       userId: "user-1",
-      now
+      now,
     });
 
     expect(mockedPrisma.searchEmailDelivery.findMany).toHaveBeenLastCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          alertGeneration: 3
-        })
-      })
+          alertGeneration: 3,
+        }),
+      }),
     );
     expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
           OR: [{ id: "match-1", availabilityCycle: 7 }],
-          alertStatus: "PENDING"
+          alertStatus: "PENDING",
         }),
-        data: { alertStatus: "SUPPRESSED", sentAt: null }
-      })
+        data: { alertStatus: "SUPPRESSED", sentAt: null },
+      }),
     );
   });
 
@@ -2035,7 +3329,7 @@ describe("search email delivery outbox", () => {
     await lockSearchForAlertMutation(prisma, {
       searchId: "search-1",
       userId: "user-1",
-      now
+      now,
     });
 
     expect(mockedPrisma.teeTimeMatch.updateMany).not.toHaveBeenCalled();
@@ -2044,10 +3338,12 @@ describe("search email delivery outbox", () => {
   it("finalizes an owner-sent match before consuming only still-pending attempted evidence", async () => {
     const owner = delivery("delivery-1", "owner@example.com", {
       status: "SENT",
-      sentAt: now
+      sentAt: now,
     });
     mockedPrisma.searchEmailDelivery.findMany
-      .mockResolvedValueOnce([{ kind: "MATCH", groupKey: "match-group" }] as never)
+      .mockResolvedValueOnce([
+        { kind: "MATCH", groupKey: "match-group" },
+      ] as never)
       .mockResolvedValueOnce([owner] as never)
       .mockResolvedValueOnce([
         {
@@ -2055,40 +3351,40 @@ describe("search email delivery outbox", () => {
             ...payload,
             matchIds: ["match-2"],
             matchRefs: [{ matchId: "match-2", availabilityCycle: 4 }],
-            displayMatchIds: ["match-2"]
+            displayMatchIds: ["match-2"],
           },
           status: "FAILED",
           attemptCount: 1,
           sentAt: null,
-          lastError: "DELIVERY_OUTCOME_UNKNOWN:timeout"
-        }
+          lastError: "DELIVERY_OUTCOME_UNKNOWN:timeout",
+        },
       ] as never);
 
     await lockSearchForAlertMutation(prisma, {
       searchId: "search-1",
       userId: "user-1",
-      now
+      now,
     });
 
     expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenNthCalledWith(
       1,
-      expect.objectContaining({ data: { alertStatus: "SENT", sentAt: now } })
+      expect.objectContaining({ data: { alertStatus: "SENT", sentAt: now } }),
     );
     expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({
         where: expect.objectContaining({
           OR: [{ id: "match-2", availabilityCycle: 4 }],
-          alertStatus: "PENDING"
+          alertStatus: "PENDING",
         }),
-        data: { alertStatus: "SUPPRESSED", sentAt: null }
-      })
+        data: { alertStatus: "SUPPRESSED", sentAt: null },
+      }),
     );
   });
 
   it("does not suppress delivery or match state after the generation changes", async () => {
     mockedPrisma.$queryRaw.mockResolvedValue([
-      { ...currentSearch, alertGeneration: 4 }
+      { ...currentSearch, alertGeneration: 4 },
     ] as never);
 
     await expect(
@@ -2097,8 +3393,8 @@ describe("search email delivery outbox", () => {
         alertGeneration: 3,
         checkLeaseToken: "check-lease",
         matchRefs: [{ matchId: "match-1", availabilityCycle: 7 }],
-        now
-      })
+        now,
+      }),
     ).resolves.toEqual({ count: 0, matchCount: 0, current: false });
 
     expect(mockedPrisma.$queryRaw).toHaveBeenCalledOnce();
@@ -2108,7 +3404,7 @@ describe("search email delivery outbox", () => {
 
   it("does not suppress delivery or match state after the check lease changes", async () => {
     mockedPrisma.$queryRaw.mockResolvedValue([
-      { ...currentSearch, checkLeaseToken: "new-check-lease" }
+      { ...currentSearch, checkLeaseToken: "new-check-lease" },
     ] as never);
 
     await expect(
@@ -2117,8 +3413,8 @@ describe("search email delivery outbox", () => {
         alertGeneration: 3,
         checkLeaseToken: "check-lease",
         matchRefs: [{ matchId: "match-1", availabilityCycle: 7 }],
-        now
-      })
+        now,
+      }),
     ).resolves.toEqual({ count: 0, matchCount: 0, current: false });
 
     expect(mockedPrisma.$queryRaw).toHaveBeenCalledOnce();
@@ -2133,17 +3429,17 @@ describe("search email delivery outbox", () => {
         alertGeneration: 3,
         checkLeaseToken: "check-lease",
         matchRefs: [{ matchId: "match-1", availabilityCycle: 7 }],
-        now
-      })
+        now,
+      }),
     ).resolves.toEqual({ count: 1, matchCount: 1, current: true });
 
     expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenCalledWith({
       where: {
         teeSearchId: "search-1",
         OR: [{ id: "match-1", availabilityCycle: 7 }],
-        alertStatus: "PENDING"
+        alertStatus: "PENDING",
       },
-      data: { alertStatus: "SUPPRESSED", sentAt: null }
+      data: { alertStatus: "SUPPRESSED", sentAt: null },
     });
   });
 
@@ -2151,12 +3447,12 @@ describe("search email delivery outbox", () => {
     const owner = delivery("delivery-1", "owner@example.com", {
       status: "FAILED",
       attemptCount: 1,
-      nextAttemptAt: new Date(now.getTime() - 1)
+      nextAttemptAt: new Date(now.getTime() - 1),
     });
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([owner] as never)
       .mockResolvedValueOnce([
-        { ...owner, status: "SUPPRESSED", nextAttemptAt: null }
+        { ...owner, status: "SUPPRESSED", nextAttemptAt: null },
       ] as never);
     mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([]);
     const send = vi.fn();
@@ -2169,8 +3465,8 @@ describe("search email delivery outbox", () => {
         kind: "MATCH",
         groupKey: "match-group",
         send,
-        now: () => now
-      })
+        now: () => now,
+      }),
     ).resolves.toEqual([{ id: "delivery-1", status: "SUPPRESSED" }]);
     expect(send).not.toHaveBeenCalled();
   });
@@ -2179,12 +3475,12 @@ describe("search email delivery outbox", () => {
     const owner = delivery("delivery-1", "owner@example.com", {
       status: "FAILED",
       attemptCount: 1,
-      nextAttemptAt: new Date(now.getTime() - 1)
+      nextAttemptAt: new Date(now.getTime() - 1),
     });
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([owner] as never)
       .mockResolvedValueOnce([
-        { ...owner, status: "SUPPRESSED", nextAttemptAt: null }
+        { ...owner, status: "SUPPRESSED", nextAttemptAt: null },
       ] as never);
     mockedPrisma.course.findMany.mockResolvedValue([
       {
@@ -2195,8 +3491,8 @@ describe("search email delivery outbox", () => {
         automationReason: "OTHER",
         intelligenceVerifiedAt: now,
         intelligenceReviewAt: new Date("2026-08-15T00:00:00.000Z"),
-        intelligenceConfidence: 0.99
-      }
+        intelligenceConfidence: 0.99,
+      },
     ] as never);
     const send = vi.fn();
 
@@ -2208,12 +3504,12 @@ describe("search email delivery outbox", () => {
         kind: "MATCH",
         groupKey: "match-group",
         send,
-        now: () => now
-      })
+        now: () => now,
+      }),
     ).resolves.toEqual([{ id: "delivery-1", status: "SUPPRESSED" }]);
 
     expect(mockedPrisma.course.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: { in: ["course-1"] } } })
+      expect.objectContaining({ where: { id: { in: ["course-1"] } } }),
     );
     expect(send).not.toHaveBeenCalled();
   });
@@ -2228,21 +3524,23 @@ describe("search email delivery outbox", () => {
         matches: payload.matchReport.matches.map((match) => ({
           ...match,
           courseName: "Grassy Hill Country Club",
-          bookingUrl
-        }))
-      }
+          bookingUrl,
+        })),
+      },
     };
     const owner = delivery("delivery-1", "owner@example.com", {
       payload: grassyPayload,
       status: "FAILED",
       attemptCount: 1,
-      nextAttemptAt: new Date(now.getTime() - 1)
+      nextAttemptAt: new Date(now.getTime() - 1),
     });
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([owner] as never)
-      .mockResolvedValueOnce([{ ...owner, status: "SENT", sentAt: now }] as never);
+      .mockResolvedValueOnce([
+        { ...owner, status: "SENT", sentAt: now },
+      ] as never);
     mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
-      { ...currentMatch, bookingUrl }
+      { ...currentMatch, bookingUrl },
     ] as never);
     mockedPrisma.course.findMany.mockResolvedValue([
       {
@@ -2252,8 +3550,8 @@ describe("search email delivery outbox", () => {
         automationReason: "CAPTCHA_OR_QUEUE",
         intelligenceVerifiedAt: new Date("2026-07-11T12:00:00.000Z"),
         intelligenceReviewAt: new Date("2026-08-11T12:00:00.000Z"),
-        intelligenceConfidence: 0.95
-      }
+        intelligenceConfidence: 0.95,
+      },
     ] as never);
     const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
 
@@ -2265,12 +3563,12 @@ describe("search email delivery outbox", () => {
         kind: "MATCH",
         groupKey: "match-group",
         send,
-        now: () => now
-      })
+        now: () => now,
+      }),
     ).resolves.toContainEqual({ id: "delivery-1", status: "SENT" });
 
     expect(send).toHaveBeenCalledWith(
-      expect.objectContaining({ payload: grassyPayload })
+      expect.objectContaining({ payload: grassyPayload }),
     );
   });
 
@@ -2280,20 +3578,20 @@ describe("search email delivery outbox", () => {
       ...validRow,
       matchId: "match-2",
       courseId: "course-2",
-      courseName: "Private Course"
+      courseName: "Private Course",
     };
     const multiCoursePayload = {
       ...payload,
       matchIds: ["match-1", "match-2"],
       matchRefs: [
         { matchId: "match-1", availabilityCycle: 7 },
-        { matchId: "match-2", availabilityCycle: 4 }
+        { matchId: "match-2", availabilityCycle: 4 },
       ],
       displayMatchIds: ["match-1", "match-2"],
       matchReport: {
         ...payload.matchReport,
-        matches: [validRow, terminalRow]
-      }
+        matches: [validRow, terminalRow],
+      },
     };
     const reconciledPayload = {
       ...multiCoursePayload,
@@ -2303,33 +3601,40 @@ describe("search email delivery outbox", () => {
       satisfiesStatusReport: false,
       matchReport: {
         ...payload.matchReport,
-        matches: [validRow]
-      }
+        matches: [validRow],
+      },
     };
     const owner = delivery("delivery-1", "owner@example.com", {
-      payload: multiCoursePayload
+      payload: multiCoursePayload,
     });
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([owner] as never)
       .mockResolvedValueOnce([
-        { ...owner, payload: reconciledPayload, status: "SENT", sentAt: now }
+        { ...owner, payload: reconciledPayload, status: "SENT", sentAt: now },
       ] as never);
-    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
-      {
-        id: "match-1",
-        courseId: "course-1",
-        alertStatus: "PENDING",
-        availabilityStatus: "AVAILABLE",
-        availabilityCycle: 7
-      },
-      {
-        id: "match-2",
-        courseId: "course-2",
-        alertStatus: "PENDING",
-        availabilityStatus: "AVAILABLE",
-        availabilityCycle: 4
-      }
-    ] as never);
+    mockedPrisma.teeTimeMatch.findMany
+      .mockResolvedValueOnce([
+        {
+          id: "match-1",
+          courseId: "course-1",
+          alertStatus: "PENDING",
+          availabilityStatus: "AVAILABLE",
+          availabilityCycle: 7,
+        },
+        {
+          id: "match-2",
+          courseId: "course-2",
+          alertStatus: "PENDING",
+          availabilityStatus: "AVAILABLE",
+          availabilityCycle: 4,
+        },
+      ] as never)
+      .mockResolvedValue([
+        {
+          ...currentMatch,
+          lastConfirmedAt: now,
+        },
+      ] as never);
     mockedPrisma.course.findMany.mockResolvedValue([
       {
         id: "course-1",
@@ -2339,7 +3644,7 @@ describe("search email delivery outbox", () => {
         automationReason: "NONE",
         intelligenceVerifiedAt: null,
         intelligenceReviewAt: null,
-        intelligenceConfidence: null
+        intelligenceConfidence: null,
       },
       {
         id: "course-2",
@@ -2349,11 +3654,11 @@ describe("search email delivery outbox", () => {
         automationReason: "OTHER",
         intelligenceVerifiedAt: now,
         intelligenceReviewAt: new Date("2026-08-15T00:00:00.000Z"),
-        intelligenceConfidence: 0.99
-      }
+        intelligenceConfidence: 0.99,
+      },
     ] as never);
     mockedPrisma.courseProbe.findMany.mockResolvedValue([
-      { courseId: "course-1", outcome: "MATCH_FOUND", observedAt: now }
+      { courseId: "course-1", outcome: "MATCH_FOUND", observedAt: now },
     ] as never);
     const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
 
@@ -2365,31 +3670,31 @@ describe("search email delivery outbox", () => {
         kind: "MATCH",
         groupKey: "match-group",
         send,
-        now: () => now
-      })
+        now: () => now,
+      }),
     ).resolves.toContainEqual({ id: "delivery-1", status: "SENT" });
 
     expect(send).toHaveBeenCalledWith(
-      expect.objectContaining({ payload: reconciledPayload })
+      expect.objectContaining({ payload: reconciledPayload }),
     );
     expect(mockedPrisma.searchEmailDelivery.updateMany).toHaveBeenCalledWith({
       where: {
         id: { in: ["delivery-1"] },
         attemptCount: 0,
-        status: { notIn: ["SENDING", "SENT"] }
+        status: { notIn: ["SENDING", "SENT"] },
       },
-      data: { payload: reconciledPayload }
+      data: { payload: reconciledPayload },
     });
     expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          OR: [{ id: "match-2", availabilityCycle: 4 }]
+          OR: [{ id: "match-2", availabilityCycle: 4 }],
         }),
         data: expect.objectContaining({
           alertStatus: "SUPPRESSED",
-          availabilityStatus: "GONE"
-        })
-      })
+          availabilityStatus: "GONE",
+        }),
+      }),
     );
   });
 
@@ -2399,31 +3704,31 @@ describe("search email delivery outbox", () => {
       ...validRow,
       matchId: "match-2",
       courseId: "course-2",
-      courseName: "Private Course"
+      courseName: "Private Course",
     };
     const multiCoursePayload = {
       ...payload,
       matchIds: ["match-1", "match-2"],
       matchRefs: [
         { matchId: "match-1", availabilityCycle: 7 },
-        { matchId: "match-2", availabilityCycle: 4 }
+        { matchId: "match-2", availabilityCycle: 4 },
       ],
       displayMatchIds: ["match-1", "match-2"],
       matchReport: {
         ...payload.matchReport,
-        matches: [validRow, privateRow]
-      }
+        matches: [validRow, privateRow],
+      },
     };
     const owner = delivery("delivery-1", "owner@example.com", {
       status: "FAILED",
       attemptCount: 1,
       nextAttemptAt: new Date(now.getTime() - 1),
-      payload: multiCoursePayload
+      payload: multiCoursePayload,
     });
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([owner] as never)
       .mockResolvedValueOnce([
-        { ...owner, status: "SUPPRESSED", nextAttemptAt: null }
+        { ...owner, status: "SUPPRESSED", nextAttemptAt: null },
       ] as never);
     mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
       {
@@ -2431,15 +3736,15 @@ describe("search email delivery outbox", () => {
         courseId: "course-1",
         alertStatus: "PENDING",
         availabilityStatus: "AVAILABLE",
-        availabilityCycle: 7
+        availabilityCycle: 7,
       },
       {
         id: "match-2",
         courseId: "course-2",
         alertStatus: "PENDING",
         availabilityStatus: "AVAILABLE",
-        availabilityCycle: 4
-      }
+        availabilityCycle: 4,
+      },
     ] as never);
     mockedPrisma.course.findMany.mockResolvedValue([
       {
@@ -2450,7 +3755,7 @@ describe("search email delivery outbox", () => {
         automationReason: "NONE",
         intelligenceVerifiedAt: null,
         intelligenceReviewAt: null,
-        intelligenceConfidence: null
+        intelligenceConfidence: null,
       },
       {
         id: "course-2",
@@ -2460,11 +3765,11 @@ describe("search email delivery outbox", () => {
         automationReason: "OTHER",
         intelligenceVerifiedAt: now,
         intelligenceReviewAt: new Date("2026-08-15T00:00:00.000Z"),
-        intelligenceConfidence: 0.99
-      }
+        intelligenceConfidence: 0.99,
+      },
     ] as never);
     mockedPrisma.courseProbe.findMany.mockResolvedValue([
-      { courseId: "course-1", outcome: "FETCH_FAILED", observedAt: now }
+      { courseId: "course-1", outcome: "FETCH_FAILED", observedAt: now },
     ] as never);
     const send = vi.fn();
 
@@ -2476,32 +3781,32 @@ describe("search email delivery outbox", () => {
         kind: "MATCH",
         groupKey: "match-group",
         send,
-        now: () => now
-      })
+        now: () => now,
+      }),
     ).resolves.toEqual([{ id: "delivery-1", status: "SUPPRESSED" }]);
 
     expect(send).not.toHaveBeenCalled();
     expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          OR: [{ id: "match-2", availabilityCycle: 4 }]
+          OR: [{ id: "match-2", availabilityCycle: 4 }],
         }),
         data: expect.objectContaining({
           alertStatus: "SUPPRESSED",
-          availabilityStatus: "GONE"
-        })
-      })
+          availabilityStatus: "GONE",
+        }),
+      }),
     );
     expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenCalledWith({
       where: {
         teeSearchId: "search-1",
         OR: [
           { id: "match-1", availabilityCycle: 7 },
-          { id: "match-2", availabilityCycle: 4 }
+          { id: "match-2", availabilityCycle: 4 },
         ],
-        alertStatus: "PENDING"
+        alertStatus: "PENDING",
       },
-      data: { alertStatus: "SUPPRESSED", sentAt: null }
+      data: { alertStatus: "SUPPRESSED", sentAt: null },
     });
   });
 
@@ -2511,14 +3816,14 @@ describe("search email delivery outbox", () => {
       ...confirmedRow,
       matchId: "match-0",
       courseId: "course-0",
-      courseName: "Removed Course"
+      courseName: "Removed Course",
     };
     const transientRow = {
       ...confirmedRow,
       matchId: "match-2",
       courseId: "course-2",
       courseName: "Second Course",
-      startsAt: "2026-07-16T13:00:00.000Z"
+      startsAt: "2026-07-16T13:00:00.000Z",
     };
     const mixedPayload = {
       ...payload,
@@ -2526,20 +3831,20 @@ describe("search email delivery outbox", () => {
       matchRefs: [
         { matchId: "match-0", availabilityCycle: 3 },
         { matchId: "match-1", availabilityCycle: 7 },
-        { matchId: "match-2", availabilityCycle: 4 }
+        { matchId: "match-2", availabilityCycle: 4 },
       ],
       displayMatchIds: ["match-0", "match-1", "match-2"],
       matchReport: {
         ...payload.matchReport,
-        matches: [terminalRow, confirmedRow, transientRow]
-      }
+        matches: [terminalRow, confirmedRow, transientRow],
+      },
     };
     const frozenOwner = delivery("delivery-1", "owner@example.com", {
       payload: mixedPayload,
       status: "FAILED",
       attemptCount: 1,
       nextAttemptAt: new Date(now.getTime() - 1),
-      lastError: "DELIVERY_NOT_ACCEPTED:provider rejected"
+      lastError: "DELIVERY_NOT_ACCEPTED:provider rejected",
     });
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([frozenOwner] as never)
@@ -2548,8 +3853,8 @@ describe("search email delivery outbox", () => {
           ...frozenOwner,
           status: "SUPPRESSED",
           nextAttemptAt: null,
-          lastError: "MATCH_STALE_REKEYED"
-        }
+          lastError: "MATCH_STALE_REKEYED",
+        },
       ] as never);
     mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
       currentMatch,
@@ -2558,20 +3863,20 @@ describe("search email delivery outbox", () => {
         id: "match-2",
         courseId: "course-2",
         availabilityCycle: 4,
-        startsAt: new Date("2026-07-16T13:00:00.000Z")
-      }
+        startsAt: new Date("2026-07-16T13:00:00.000Z"),
+      },
     ] as never);
     mockedPrisma.course.findMany.mockResolvedValue([
       currentCourse,
       {
         ...currentCourse,
         id: "course-2",
-        name: "Second Course"
-      }
+        name: "Second Course",
+      },
     ] as never);
     mockedPrisma.courseProbe.findMany.mockResolvedValue([
       { courseId: "course-1", outcome: "MATCH_FOUND", observedAt: now },
-      { courseId: "course-2", outcome: "FETCH_FAILED", observedAt: now }
+      { courseId: "course-2", outcome: "FETCH_FAILED", observedAt: now },
     ] as never);
 
     await expect(
@@ -2582,46 +3887,47 @@ describe("search email delivery outbox", () => {
         kind: "MATCH",
         groupKey: "match-group",
         send: vi.fn(),
-        now: () => now
-      })
+        now: () => now,
+      }),
     ).resolves.toEqual([{ id: "delivery-1", status: "SUPPRESSED" }]);
 
-    const continuationPayloads = mockedPrisma.searchEmailDelivery.create.mock.calls.map(
-      ([call]) => call.data.payload
-    );
+    const continuationPayloads =
+      mockedPrisma.searchEmailDelivery.create.mock.calls.map(
+        ([call]) => call.data.payload,
+      );
     expect(continuationPayloads).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           recipientCatchup: true,
           matchIds: ["match-1"],
-          matchRefs: [{ matchId: "match-1", availabilityCycle: 7 }]
+          matchRefs: [{ matchId: "match-1", availabilityCycle: 7 }],
         }),
         expect.objectContaining({
           recipientCatchup: true,
           matchIds: ["match-2"],
-          matchRefs: [{ matchId: "match-2", availabilityCycle: 4 }]
-        })
-      ])
+          matchRefs: [{ matchId: "match-2", availabilityCycle: 4 }],
+        }),
+      ]),
     );
     expect(mockedPrisma.searchEmailDelivery.create).toHaveBeenCalledTimes(2);
     expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          OR: [{ id: "match-0", availabilityCycle: 3 }]
+          OR: [{ id: "match-0", availabilityCycle: 3 }],
         }),
-        data: expect.objectContaining({ availabilityStatus: "GONE" })
-      })
+        data: expect.objectContaining({ availabilityStatus: "GONE" }),
+      }),
     );
     expect(mockedPrisma.teeTimeMatch.updateMany).not.toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
           OR: expect.arrayContaining([
             { id: "match-1", availabilityCycle: 7 },
-            { id: "match-2", availabilityCycle: 4 }
-          ])
+            { id: "match-2", availabilityCycle: 4 },
+          ]),
         }),
-        data: { alertStatus: "SUPPRESSED", sentAt: null }
-      })
+        data: { alertStatus: "SUPPRESSED", sentAt: null },
+      }),
     );
   });
 
@@ -2631,26 +3937,26 @@ describe("search email delivery outbox", () => {
       ...currentRow,
       matchId: "match-2",
       courseId: "course-2",
-      courseName: "Gone Course"
+      courseName: "Gone Course",
     };
     const retryPayload = {
       ...payload,
       displayMatchIds: ["match-1", "match-2"],
       matchReport: {
         ...payload.matchReport,
-        matches: [currentRow, staleRow]
-      }
+        matches: [currentRow, staleRow],
+      },
     };
     const owner = delivery("delivery-1", "owner@example.com", {
       status: "FAILED",
       attemptCount: 1,
       nextAttemptAt: new Date(now.getTime() - 1),
-      payload: retryPayload
+      payload: retryPayload,
     });
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([owner] as never)
       .mockResolvedValueOnce([
-        { ...owner, status: "SUPPRESSED", nextAttemptAt: null }
+        { ...owner, status: "SUPPRESSED", nextAttemptAt: null },
       ] as never);
     mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
       {
@@ -2658,15 +3964,15 @@ describe("search email delivery outbox", () => {
         courseId: "course-1",
         alertStatus: "PENDING",
         availabilityStatus: "AVAILABLE",
-        availabilityCycle: 7
+        availabilityCycle: 7,
       },
       {
         id: "match-2",
         courseId: "course-2",
         alertStatus: "SENT",
         availabilityStatus: "GONE",
-        availabilityCycle: 2
-      }
+        availabilityCycle: 2,
+      },
     ] as never);
     mockedPrisma.course.findMany.mockResolvedValue([
       {
@@ -2677,7 +3983,7 @@ describe("search email delivery outbox", () => {
         automationReason: "NONE",
         intelligenceVerifiedAt: null,
         intelligenceReviewAt: null,
-        intelligenceConfidence: null
+        intelligenceConfidence: null,
       },
       {
         id: "course-2",
@@ -2687,8 +3993,8 @@ describe("search email delivery outbox", () => {
         automationReason: "NONE",
         intelligenceVerifiedAt: null,
         intelligenceReviewAt: null,
-        intelligenceConfidence: null
-      }
+        intelligenceConfidence: null,
+      },
     ] as never);
     const send = vi.fn();
 
@@ -2700,8 +4006,8 @@ describe("search email delivery outbox", () => {
         kind: "MATCH",
         groupKey: "match-group",
         send,
-        now: () => now
-      })
+        now: () => now,
+      }),
     ).resolves.toEqual([{ id: "delivery-1", status: "SUPPRESSED" }]);
 
     expect(send).not.toHaveBeenCalled();
@@ -2709,9 +4015,9 @@ describe("search email delivery outbox", () => {
       where: {
         teeSearchId: "search-1",
         OR: [{ id: "match-1", availabilityCycle: 7 }],
-        alertStatus: "PENDING"
+        alertStatus: "PENDING",
       },
-      data: { alertStatus: "SUPPRESSED", sentAt: null }
+      data: { alertStatus: "SUPPRESSED", sentAt: null },
     });
   });
 
@@ -2719,11 +4025,13 @@ describe("search email delivery outbox", () => {
     const owner = delivery("delivery-1", "owner@example.com", {
       status: "FAILED",
       attemptCount: 1,
-      nextAttemptAt: new Date(now.getTime() - 1)
+      nextAttemptAt: new Date(now.getTime() - 1),
     });
-    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([owner] as never);
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      owner,
+    ] as never);
     mockedPrisma.courseProbe.findMany.mockResolvedValue([
-      { courseId: "course-1", outcome: "FETCH_FAILED", observedAt: now }
+      { courseId: "course-1", outcome: "FETCH_FAILED", observedAt: now },
     ] as never);
     const send = vi.fn();
 
@@ -2734,7 +4042,7 @@ describe("search email delivery outbox", () => {
       kind: "MATCH",
       groupKey: "match-group",
       send,
-      now: () => now
+      now: () => now,
     }).catch((caught) => caught);
 
     expect(error).toBeInstanceOf(SearchEmailDeliveryDeferredError);
@@ -2751,25 +4059,31 @@ describe("search email delivery outbox", () => {
       reportKind: "setup",
       reportOutcome: "NO_MATCH",
       currentOutcome: "MATCH_FOUND",
-      monitoringDisposition: undefined
+      monitoringDisposition: undefined,
     },
     {
       kind: "DAILY" as const,
       reportKind: "daily",
       reportOutcome: "MATCH_FOUND",
       currentOutcome: "MATCH_FOUND",
-      monitoringDisposition: "TECHNICAL_FINAL"
+      monitoringDisposition: "TECHNICAL_FINAL",
     },
     {
       kind: "SETUP" as const,
       reportKind: "setup",
       reportOutcome: "BLOCKED_POLICY",
       currentOutcome: "BLOCKED_POLICY",
-      monitoringDisposition: undefined
-    }
+      monitoringDisposition: undefined,
+    },
   ])(
     "suppresses stale $kind status evidence before send",
-    async ({ kind, reportKind, reportOutcome, currentOutcome, monitoringDisposition }) => {
+    async ({
+      kind,
+      reportKind,
+      reportOutcome,
+      currentOutcome,
+      monitoringDisposition,
+    }) => {
       const statusPayload = {
         schemaVersion: 2 as const,
         checkedAt: now.toISOString(),
@@ -2790,23 +4104,23 @@ describe("search email delivery outbox", () => {
               timeZone: "America/New_York",
               outcome: reportOutcome,
               availableMatches: reportOutcome === "MATCH_FOUND" ? 1 : 0,
-              ...(monitoringDisposition ? { monitoringDisposition } : {})
-            }
-          ]
-        }
+              ...(monitoringDisposition ? { monitoringDisposition } : {}),
+            },
+          ],
+        },
       };
       const owner = delivery("delivery-1", "owner@example.com", {
         kind,
         groupKey: "status-group",
-        payload: statusPayload
+        payload: statusPayload,
       });
       mockedPrisma.searchEmailDelivery.findMany
         .mockResolvedValueOnce([owner] as never)
         .mockResolvedValueOnce([
-          { ...owner, status: "SUPPRESSED", nextAttemptAt: null }
+          { ...owner, status: "SUPPRESSED", nextAttemptAt: null },
         ] as never);
       mockedPrisma.courseProbe.findMany.mockResolvedValue([
-        { courseId: "course-1", outcome: currentOutcome, observedAt: now }
+        { courseId: "course-1", outcome: currentOutcome, observedAt: now },
       ] as never);
       const send = vi.fn();
 
@@ -2818,11 +4132,11 @@ describe("search email delivery outbox", () => {
           kind,
           groupKey: "status-group",
           send,
-          now: () => now
-        })
+          now: () => now,
+        }),
       ).resolves.toEqual([{ id: "delivery-1", status: "SUPPRESSED" }]);
       expect(send).not.toHaveBeenCalled();
-    }
+    },
   );
 
   it("sends a pending reader status when the latest durable probe predates it", async () => {
@@ -2845,25 +4159,27 @@ describe("search email delivery outbox", () => {
             courseName: "Course",
             timeZone: "America/New_York",
             outcome: "CHECK_PENDING",
-            availableMatches: 0
-          }
-        ]
-      }
+            availableMatches: 0,
+          },
+        ],
+      },
     };
     const owner = delivery("delivery-1", "owner@example.com", {
       kind: "SETUP",
       groupKey: "status-group",
-      payload: statusPayload
+      payload: statusPayload,
     });
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([owner] as never)
-      .mockResolvedValueOnce([{ ...owner, status: "SENT", sentAt: now }] as never);
+      .mockResolvedValueOnce([
+        { ...owner, status: "SENT", sentAt: now },
+      ] as never);
     mockedPrisma.courseProbe.findMany.mockResolvedValue([
       {
         courseId: "course-1",
         outcome: "NO_MATCH",
-        observedAt: new Date(now.getTime() - 60_000)
-      }
+        observedAt: new Date(now.getTime() - 60_000),
+      },
     ] as never);
     mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([] as never);
     const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
@@ -2875,7 +4191,7 @@ describe("search email delivery outbox", () => {
       kind: "SETUP",
       groupKey: "status-group",
       send,
-      now: () => now
+      now: () => now,
     });
 
     expect(send).toHaveBeenCalledOnce();
@@ -2901,10 +4217,10 @@ describe("search email delivery outbox", () => {
             courseName: "Course",
             timeZone: "America/New_York",
             outcome: "NO_MATCH",
-            availableMatches: 0
-          }
-        ]
-      }
+            availableMatches: 0,
+          },
+        ],
+      },
     };
     const owner = delivery("delivery-1", "owner@example.com", {
       kind: "DAILY",
@@ -2912,15 +4228,15 @@ describe("search email delivery outbox", () => {
       payload: statusPayload,
       status: "FAILED",
       attemptCount: 1,
-      nextAttemptAt: new Date(now.getTime() - 1)
+      nextAttemptAt: new Date(now.getTime() - 1),
     });
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([owner] as never)
       .mockResolvedValueOnce([
-        { ...owner, status: "SUPPRESSED", nextAttemptAt: null }
+        { ...owner, status: "SUPPRESSED", nextAttemptAt: null },
       ] as never);
     mockedPrisma.courseProbe.findMany.mockResolvedValue([
-      { courseId: "course-1", outcome: "MATCH_FOUND", observedAt: now }
+      { courseId: "course-1", outcome: "MATCH_FOUND", observedAt: now },
     ] as never);
     const send = vi.fn();
 
@@ -2932,8 +4248,8 @@ describe("search email delivery outbox", () => {
         kind: "DAILY",
         groupKey: "status-group",
         send,
-        now: () => now
-      })
+        now: () => now,
+      }),
     ).resolves.toEqual([{ id: "delivery-1", status: "SUPPRESSED" }]);
 
     expect(send).not.toHaveBeenCalled();
@@ -2941,9 +4257,9 @@ describe("search email delivery outbox", () => {
       expect.objectContaining({
         data: expect.objectContaining({
           status: "SUPPRESSED",
-          lastError: "STATUS_CONTENT_STALE_REPLACEMENT_PENDING_AMBIGUOUS"
-        })
-      })
+          lastError: "STATUS_CONTENT_STALE_REPLACEMENT_PENDING_AMBIGUOUS",
+        }),
+      }),
     );
     expect(mockedPrisma.$executeRaw).toHaveBeenCalledOnce();
   });
@@ -2969,10 +4285,10 @@ describe("search email delivery outbox", () => {
             courseName: "Course",
             timeZone: "America/New_York",
             outcome: "NO_MATCH",
-            availableMatches: 0
-          }
-        ]
-      }
+            availableMatches: 0,
+          },
+        ],
+      },
     };
     const owner = delivery("delivery-1", "owner@example.com", {
       kind: "DAILY",
@@ -2980,12 +4296,12 @@ describe("search email delivery outbox", () => {
       payload: statusPayload,
       status: "SUPPRESSED",
       sentAt,
-      lastError: "STATUS_RECIPIENT_PRIOR_REACHED"
+      lastError: "STATUS_RECIPIENT_PRIOR_REACHED",
     });
     const friend = delivery("delivery-2", "friend@example.com", {
       kind: "DAILY",
       groupKey: "replacement-status",
-      payload: statusPayload
+      payload: statusPayload,
     });
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([owner, friend] as never)
@@ -2994,11 +4310,11 @@ describe("search email delivery outbox", () => {
         {
           ...friend,
           status: "SUPPRESSED",
-          lastError: "STATUS_CONTENT_STALE_REPLACEMENT_PENDING"
-        }
+          lastError: "STATUS_CONTENT_STALE_REPLACEMENT_PENDING",
+        },
       ] as never);
     mockedPrisma.courseProbe.findMany.mockResolvedValue([
-      { courseId: "course-1", outcome: "MATCH_FOUND", observedAt: now }
+      { courseId: "course-1", outcome: "MATCH_FOUND", observedAt: now },
     ] as never);
     const send = vi.fn();
 
@@ -3010,11 +4326,11 @@ describe("search email delivery outbox", () => {
         kind: "DAILY",
         groupKey: "replacement-status",
         send,
-        now: () => now
-      })
+        now: () => now,
+      }),
     ).resolves.toEqual([
       expect.objectContaining({ id: "delivery-1", status: "SUPPRESSED" }),
-      expect.objectContaining({ id: "delivery-2", status: "SUPPRESSED" })
+      expect.objectContaining({ id: "delivery-2", status: "SUPPRESSED" }),
     ]);
 
     expect(send).not.toHaveBeenCalled();
@@ -3023,9 +4339,9 @@ describe("search email delivery outbox", () => {
         where: expect.objectContaining({ id: { in: ["delivery-2"] } }),
         data: expect.objectContaining({
           status: "SUPPRESSED",
-          lastError: "STATUS_CONTENT_STALE_REPLACEMENT_PENDING"
-        })
-      })
+          lastError: "STATUS_CONTENT_STALE_REPLACEMENT_PENDING",
+        }),
+      }),
     );
     expect(mockedPrisma.$executeRaw).toHaveBeenCalledOnce();
   });
@@ -3050,21 +4366,23 @@ describe("search email delivery outbox", () => {
             courseName: "Course",
             timeZone: "America/New_York",
             outcome: "NO_MATCH",
-            availableMatches: 0
-          }
-        ]
-      }
+            availableMatches: 0,
+          },
+        ],
+      },
     };
     const owner = delivery("delivery-1", "owner@example.com", {
       kind: "DAILY",
       groupKey: "status-group",
-      payload: statusPayload
+      payload: statusPayload,
     });
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([owner] as never)
-      .mockResolvedValueOnce([{ ...owner, status: "SENT", sentAt: now }] as never);
+      .mockResolvedValueOnce([
+        { ...owner, status: "SENT", sentAt: now },
+      ] as never);
     mockedPrisma.courseProbe.findMany.mockResolvedValue([
-      { courseId: "course-1", outcome: "NO_MATCH", observedAt: now }
+      { courseId: "course-1", outcome: "NO_MATCH", observedAt: now },
     ] as never);
     mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([]);
     const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
@@ -3077,13 +4395,94 @@ describe("search email delivery outbox", () => {
         kind: "DAILY",
         groupKey: "status-group",
         send,
-        now: () => now
-      })
+        now: () => now,
+      }),
     ).resolves.toContainEqual({ id: "delivery-1", status: "SENT" });
 
     expect(send).toHaveBeenCalledWith(
-      expect.objectContaining({ payload: statusPayload })
+      expect.objectContaining({ payload: statusPayload }),
     );
+  });
+
+  it("defers an unchanged no-match status while an equal-timestamp provider observation is active", async () => {
+    const statusPayload = {
+      schemaVersion: 2 as const,
+      checkedAt: now.toISOString(),
+      displayMatchIds: [],
+      statusSnapshot: [{ courseId: "course-1", state: "NO_MATCH" }],
+      statusReport: {
+        kind: "daily",
+        targetDate: "2026-07-16",
+        startTime: "07:00",
+        endTime: "10:00",
+        players: 2,
+        requestedLayoutHoles: null,
+        userTimeZone: "America/New_York",
+        courses: [
+          {
+            courseId: "course-1",
+            courseName: "Course",
+            timeZone: "America/New_York",
+            outcome: "NO_MATCH",
+            availableMatches: 0,
+          },
+        ],
+      },
+    };
+    const owner = delivery("delivery-1", "owner@example.com", {
+      kind: "DAILY",
+      groupKey: "status-group",
+      payload: statusPayload,
+    });
+    const markerExpiresAt = new Date(now.getTime() + 2 * 60_000);
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      owner,
+    ] as never);
+    mockedPrisma.courseProbe.findMany.mockResolvedValue([
+      { courseId: "course-1", outcome: "NO_MATCH", observedAt: now },
+    ] as never);
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([]);
+    mockedPrisma.$queryRaw.mockImplementation(async (sql) => {
+      const text = rawSqlText(sql);
+      if (text.includes('FROM "ProviderRequestLease"')) {
+        return [
+          {
+            observationStartedAt: now,
+            leaseExpiresAt: markerExpiresAt,
+            retryUntil: new Date(markerExpiresAt.getTime() + 10 * 60_000),
+            state: "ACTIVE",
+          },
+        ] as never;
+      }
+      if (text.includes('statement_timestamp() AS "currentTime"')) {
+        return [{ currentTime: now }] as never;
+      }
+      return [currentSearch] as never;
+    });
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+
+    await expect(
+      drainSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        checkLeaseToken: "check-lease",
+        kind: "DAILY",
+        groupKey: "status-group",
+        send,
+        now: () => now,
+      }),
+    ).rejects.toMatchObject({ code: "DELIVERY_PROVIDER_SOURCE_PENDING" });
+
+    expect(send).not.toHaveBeenCalled();
+    expect(mockedPrisma.searchEmailDelivery.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "FAILED",
+          lastError: "DELIVERY_PROVIDER_SOURCE_PENDING",
+        }),
+      }),
+    );
+    expect(executeRawCallsContaining('"recheckRequestedAt"')).toHaveLength(1);
   });
 
   it("sends a Grassy Hill local-reader status through a stored technical final", async () => {
@@ -3109,19 +4508,21 @@ describe("search email delivery outbox", () => {
             timeZone: "America/New_York",
             bookingAccessMode: "PUBLIC_SIGNED_OUT",
             outcome: "NO_MATCH",
-            availableMatches: 0
-          }
-        ]
-      }
+            availableMatches: 0,
+          },
+        ],
+      },
     };
     const owner = delivery("delivery-1", "owner@example.com", {
       kind: "SETUP",
       groupKey: "status-group",
-      payload: statusPayload
+      payload: statusPayload,
     });
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([owner] as never)
-      .mockResolvedValueOnce([{ ...owner, status: "SENT", sentAt: now }] as never);
+      .mockResolvedValueOnce([
+        { ...owner, status: "SENT", sentAt: now },
+      ] as never);
     mockedPrisma.course.findMany.mockResolvedValue([
       {
         ...currentCourse,
@@ -3132,11 +4533,11 @@ describe("search email delivery outbox", () => {
         automationReason: "CAPTCHA_OR_QUEUE",
         intelligenceVerifiedAt: new Date("2026-07-11T12:00:00.000Z"),
         intelligenceReviewAt: new Date("2026-08-11T12:00:00.000Z"),
-        intelligenceConfidence: 0.95
-      }
+        intelligenceConfidence: 0.95,
+      },
     ] as never);
     mockedPrisma.courseProbe.findMany.mockResolvedValue([
-      { courseId: "course-1", outcome: "NO_MATCH", observedAt: now }
+      { courseId: "course-1", outcome: "NO_MATCH", observedAt: now },
     ] as never);
     mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([]);
     const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
@@ -3149,33 +4550,146 @@ describe("search email delivery outbox", () => {
         kind: "SETUP",
         groupKey: "status-group",
         send,
-        now: () => now
-      })
+        now: () => now,
+      }),
     ).resolves.toContainEqual({ id: "delivery-1", status: "SENT" });
 
     expect(send).toHaveBeenCalledWith(
-      expect.objectContaining({ payload: statusPayload })
+      expect.objectContaining({ payload: statusPayload }),
     );
   });
 
   it.each([
     {
-      description: "sends a current status when optional provider details are omitted",
+      description:
+        "sends a current status when optional provider details are omitted",
       optionalDetails: {},
       terminalStatus: "SENT" as const,
-      shouldSend: true
+      shouldSend: true,
     },
     {
       description: "retires a status when a supplied provider price changed",
       optionalDetails: { priceCents: 4000 },
       terminalStatus: "SUPPRESSED" as const,
-      shouldSend: false
-    }
-  ])("$description", async ({ optionalDetails, terminalStatus, shouldSend }) => {
+      shouldSend: false,
+    },
+  ])(
+    "$description",
+    async ({ optionalDetails, terminalStatus, shouldSend }) => {
+      const statusPayload = {
+        schemaVersion: 2 as const,
+        checkedAt: now.toISOString(),
+        matchIds: [],
+        displayMatchIds: ["match-1"],
+        statusSnapshot: [{ courseId: "course-1", state: "MATCH_FOUND" }],
+        statusReport: {
+          kind: "daily",
+          targetDate: "2026-07-16",
+          startTime: "07:00",
+          endTime: "10:00",
+          players: 2,
+          requestedLayoutHoles: null,
+          userTimeZone: "America/New_York",
+          courses: [
+            {
+              courseId: "course-1",
+              courseName: "Course",
+              timeZone: "America/New_York",
+              outcome: "MATCH_FOUND",
+              availableMatches: 1,
+              matchingTimes: [
+                {
+                  matchId: "match-1",
+                  startsAt: "2026-07-16T08:30",
+                  availableSpots: 4,
+                  ...optionalDetails,
+                },
+              ],
+            },
+          ],
+        },
+      };
+      const owner = delivery("delivery-1", "owner@example.com", {
+        kind: "DAILY",
+        groupKey: "status-group",
+        payload: statusPayload,
+      });
+      mockedPrisma.searchEmailDelivery.findMany
+        .mockResolvedValueOnce([owner] as never)
+        .mockResolvedValueOnce([
+          {
+            ...owner,
+            status: terminalStatus,
+            sentAt: shouldSend ? now : null,
+          },
+        ] as never);
+      mockedPrisma.course.findMany.mockResolvedValue([
+        {
+          id: "course-1",
+          name: "Course",
+          address: null,
+          timeZone: "America/New_York",
+          updatedAt: new Date("2026-07-15T14:00:00.000Z"),
+          website: "https://course.example/",
+          detectedBookingUrl: "https://course.example/tee-times",
+          isPublic: true,
+          bookingMethod: "PUBLIC_ONLINE",
+          automationEligibility: "ALLOWED",
+          automationReason: "NONE",
+          intelligenceVerifiedAt: null,
+          intelligenceReviewAt: null,
+          intelligenceConfidence: null,
+        },
+      ] as never);
+      mockedPrisma.courseProbe.findMany.mockResolvedValue([
+        { courseId: "course-1", outcome: "MATCH_FOUND", observedAt: now },
+      ] as never);
+      mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
+        {
+          id: "match-1",
+          courseId: "course-1",
+          startsAt: new Date("2026-07-16T12:30:00.000Z"),
+          availableSpots: 4,
+          priceCents: 5000,
+          holes: 18,
+          alertStatus: "SENT",
+          availabilityStatus: "AVAILABLE",
+          availabilityCycle: 1,
+          lastConfirmedAt: now,
+        },
+      ] as never);
+      const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+
+      await expect(
+        drainSearchEmailDeliveryGroup({
+          searchId: "search-1",
+          alertGeneration: 3,
+          checkLeaseToken: "check-lease",
+          kind: "DAILY",
+          groupKey: "status-group",
+          send,
+          now: () => now,
+        }),
+      ).resolves.toContainEqual({ id: "delivery-1", status: terminalStatus });
+
+      if (shouldSend) {
+        expect(send).toHaveBeenCalledWith(
+          expect.objectContaining({ payload: statusPayload }),
+        );
+      } else {
+        expect(send).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it("suppresses a claimed daily report when a newer provider failure supersedes its displayed opening", async () => {
+    const providerObservedAt = new Date(now.getTime() - 60_000);
+    const failureObservedAt = new Date(now.getTime() - 30_000);
     const statusPayload = {
       schemaVersion: 2 as const,
-      checkedAt: now.toISOString(),
+      checkedAt: providerObservedAt.toISOString(),
       matchIds: [],
+      matchRefs: [],
       displayMatchIds: ["match-1"],
       statusSnapshot: [{ courseId: "course-1", state: "MATCH_FOUND" }],
       statusReport: {
@@ -3196,61 +4710,46 @@ describe("search email delivery outbox", () => {
             matchingTimes: [
               {
                 matchId: "match-1",
-                startsAt: "2026-07-16T08:30",
+                startsAt: "2026-07-16T08:00",
                 availableSpots: 4,
-                ...optionalDetails
-              }
-            ]
-          }
-        ]
-      }
+                priceCents: 6500,
+                holes: 18,
+              },
+            ],
+          },
+        ],
+      },
     };
     const owner = delivery("delivery-1", "owner@example.com", {
       kind: "DAILY",
       groupKey: "status-group",
-      payload: statusPayload
+      payload: statusPayload,
     });
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([owner] as never)
       .mockResolvedValueOnce([
         {
           ...owner,
-          status: terminalStatus,
-          sentAt: shouldSend ? now : null
-        }
+          status: "SUPPRESSED",
+          lastError: "MATCH_PROVIDER_SOURCE_SUPERSEDED",
+        },
       ] as never);
-    mockedPrisma.course.findMany.mockResolvedValue([
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
+      { ...currentMatch, lastConfirmedAt: providerObservedAt },
+    ] as never);
+    mockedPrisma.courseMonitoringStatus.findMany.mockResolvedValue([
       {
-        id: "course-1",
-        name: "Course",
-        address: null,
-        timeZone: "America/New_York",
-        updatedAt: new Date("2026-07-15T14:00:00.000Z"),
-        website: "https://course.example/",
-        detectedBookingUrl: "https://course.example/tee-times",
-        isPublic: true,
-        bookingMethod: "PUBLIC_ONLINE",
-        automationEligibility: "ALLOWED",
-        automationReason: "NONE",
-        intelligenceVerifiedAt: null,
-        intelligenceReviewAt: null,
-        intelligenceConfidence: null
-      }
+        courseId: "course-1",
+        lastSuccessfulAt: providerObservedAt,
+        lastFailureAt: failureObservedAt,
+      },
     ] as never);
     mockedPrisma.courseProbe.findMany.mockResolvedValue([
-      { courseId: "course-1", outcome: "MATCH_FOUND", observedAt: now }
-    ] as never);
-    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
       {
-        id: "match-1",
         courseId: "course-1",
-        startsAt: new Date("2026-07-16T12:30:00.000Z"),
-        availableSpots: 4,
-        priceCents: 5000,
-        holes: 18,
-        alertStatus: "SENT",
-        availabilityCycle: 1
-      }
+        outcome: "MATCH_FOUND",
+        observedAt: providerObservedAt,
+      },
     ] as never);
     const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
 
@@ -3262,17 +4761,26 @@ describe("search email delivery outbox", () => {
         kind: "DAILY",
         groupKey: "status-group",
         send,
-        now: () => now
-      })
-    ).resolves.toContainEqual({ id: "delivery-1", status: terminalStatus });
+        now: () => now,
+      }),
+    ).resolves.toEqual([{ id: "delivery-1", status: "SUPPRESSED" }]);
 
-    if (shouldSend) {
-      expect(send).toHaveBeenCalledWith(
-        expect.objectContaining({ payload: statusPayload })
-      );
-    } else {
-      expect(send).not.toHaveBeenCalled();
-    }
+    expect(send).not.toHaveBeenCalled();
+    expect(mockedPrisma.$queryRawUnsafe).toHaveBeenCalledWith(
+      expect.stringContaining("pg_advisory_xact_lock"),
+      "course-monitoring:course-1",
+    );
+    expect(
+      mockedPrisma.searchEmailDelivery.updateMany,
+    ).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "SUPPRESSED",
+          nextAttemptAt: null,
+          lastError: "MATCH_PROVIDER_SOURCE_SUPERSEDED",
+        }),
+      }),
+    );
   });
 
   it("retires an unattempted daily report when the exact rendered opening changed", async () => {
@@ -3295,15 +4803,15 @@ describe("search email delivery outbox", () => {
             courseName: "Course",
             timeZone: "America/New_York",
             outcome: "MATCH_FOUND",
-            availableMatches: 1
-          }
-        ]
-      }
+            availableMatches: 1,
+          },
+        ],
+      },
     };
     const owner = delivery("delivery-1", "owner@example.com", {
       kind: "DAILY",
       groupKey: "status-group",
-      payload: statusPayload
+      payload: statusPayload,
     });
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([owner] as never)
@@ -3321,11 +4829,11 @@ describe("search email delivery outbox", () => {
         automationReason: "NONE",
         intelligenceVerifiedAt: null,
         intelligenceReviewAt: null,
-        intelligenceConfidence: null
-      }
+        intelligenceConfidence: null,
+      },
     ] as never);
     mockedPrisma.courseProbe.findMany.mockResolvedValue([
-      { courseId: "course-1", outcome: "MATCH_FOUND", observedAt: now }
+      { courseId: "course-1", outcome: "MATCH_FOUND", observedAt: now },
     ] as never);
     mockedPrisma.teeTimeMatch.findMany
       .mockResolvedValueOnce([
@@ -3333,8 +4841,8 @@ describe("search email delivery outbox", () => {
           id: "match-old",
           courseId: "course-1",
           alertStatus: "SENT",
-          availabilityStatus: "AVAILABLE"
-        }
+          availabilityStatus: "AVAILABLE",
+        },
       ] as never)
       .mockResolvedValueOnce([
         {
@@ -3344,8 +4852,8 @@ describe("search email delivery outbox", () => {
           availableSpots: 4,
           priceCents: 5000,
           holes: 18,
-          alertStatus: "PENDING"
-        }
+          alertStatus: "PENDING",
+        },
       ] as never);
     const send = vi.fn();
 
@@ -3357,8 +4865,8 @@ describe("search email delivery outbox", () => {
         kind: "DAILY",
         groupKey: "status-group",
         send,
-        now: () => now
-      })
+        now: () => now,
+      }),
     ).resolves.toEqual([{ id: "delivery-1", status: "SUPPRESSED" }]);
     expect(send).not.toHaveBeenCalled();
   });
@@ -3383,19 +4891,21 @@ describe("search email delivery outbox", () => {
             courseName: "Course",
             timeZone: "America/New_York",
             outcome: "NO_MATCH",
-            availableMatches: 0
-          }
-        ]
-      }
+            availableMatches: 0,
+          },
+        ],
+      },
     };
     const owner = delivery("delivery-1", "owner@example.com", {
       kind: "DAILY",
       groupKey: "status-group",
-      payload: statusPayload
+      payload: statusPayload,
     });
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([owner] as never)
-      .mockResolvedValueOnce([{ ...owner, status: "SENT", sentAt: now }] as never);
+      .mockResolvedValueOnce([
+        { ...owner, status: "SENT", sentAt: now },
+      ] as never);
     mockedPrisma.course.findMany.mockResolvedValue([
       {
         id: "course-1",
@@ -3409,11 +4919,11 @@ describe("search email delivery outbox", () => {
         automationReason: "NONE",
         intelligenceVerifiedAt: null,
         intelligenceReviewAt: null,
-        intelligenceConfidence: null
-      }
+        intelligenceConfidence: null,
+      },
     ] as never);
     mockedPrisma.courseProbe.findMany.mockResolvedValue([
-      { courseId: "course-1", outcome: "NO_MATCH", observedAt: now }
+      { courseId: "course-1", outcome: "NO_MATCH", observedAt: now },
     ] as never);
     mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
       {
@@ -3423,8 +4933,8 @@ describe("search email delivery outbox", () => {
         availableSpots: 4,
         priceCents: 5000,
         holes: 18,
-        alertStatus: "SENT"
-      }
+        alertStatus: "SENT",
+      },
     ] as never);
     const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
 
@@ -3435,7 +4945,7 @@ describe("search email delivery outbox", () => {
       kind: "DAILY",
       groupKey: "status-group",
       send,
-      now: () => now
+      now: () => now,
     });
 
     expect(send).toHaveBeenCalledOnce();
@@ -3461,19 +4971,21 @@ describe("search email delivery outbox", () => {
             courseName: "Course",
             timeZone: "America/New_York",
             outcome: "FETCH_FAILED",
-            availableMatches: 0
-          }
-        ]
-      }
+            availableMatches: 0,
+          },
+        ],
+      },
     };
     const owner = delivery("delivery-1", "owner@example.com", {
       kind: "DAILY",
       groupKey: "status-group",
-      payload: statusPayload
+      payload: statusPayload,
     });
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([owner] as never)
-      .mockResolvedValueOnce([{ ...owner, status: "SENT", sentAt: now }] as never);
+      .mockResolvedValueOnce([
+        { ...owner, status: "SENT", sentAt: now },
+      ] as never);
     mockedPrisma.course.findMany.mockResolvedValue([
       {
         id: "course-1",
@@ -3487,11 +4999,11 @@ describe("search email delivery outbox", () => {
         automationReason: "NONE",
         intelligenceVerifiedAt: null,
         intelligenceReviewAt: null,
-        intelligenceConfidence: null
-      }
+        intelligenceConfidence: null,
+      },
     ] as never);
     mockedPrisma.courseProbe.findMany.mockResolvedValue([
-      { courseId: "course-1", outcome: "FETCH_FAILED", observedAt: now }
+      { courseId: "course-1", outcome: "FETCH_FAILED", observedAt: now },
     ] as never);
     mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
       {
@@ -3501,8 +5013,8 @@ describe("search email delivery outbox", () => {
         availableSpots: 4,
         priceCents: 5000,
         holes: 18,
-        alertStatus: "SUPPRESSED"
-      }
+        alertStatus: "SUPPRESSED",
+      },
     ] as never);
     const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
 
@@ -3513,7 +5025,7 @@ describe("search email delivery outbox", () => {
       kind: "DAILY",
       groupKey: "status-group",
       send,
-      now: () => now
+      now: () => now,
     });
 
     expect(send).toHaveBeenCalledOnce();
@@ -3523,8 +5035,8 @@ describe("search email delivery outbox", () => {
     mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
       delivery("delivery-1", "owner@example.com", {
         status: "SUPPRESSED",
-        sentAt: null
-      })
+        sentAt: null,
+      }),
     ] as never);
 
     await expect(
@@ -3532,15 +5044,15 @@ describe("search email delivery outbox", () => {
         searchId: "search-1",
         alertGeneration: 3,
         kind: "MATCH",
-        groupKey: "match-group"
-      })
+        groupKey: "match-group",
+      }),
     ).resolves.toEqual({
       finalized: true,
       status: "SUPPRESSED",
       ownerSent: false,
       ownerDeliveryOutcome: "SAFETY_SUPPRESSED",
       retainedMatchCount: 0,
-      sentMatchCount: 0
+      sentMatchCount: 0,
     });
 
     expect(mockedPrisma.teeTimeMatch.updateMany).not.toHaveBeenCalled();
@@ -3549,10 +5061,14 @@ describe("search email delivery outbox", () => {
 
   it("persists a one-minute Workflow recheck after a group send failure", async () => {
     const owner = delivery("delivery-1", "owner@example.com");
-    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([owner] as never);
-    mockedPrisma.searchEmailDelivery.updateMany.mockResolvedValue({ count: 1 } as never);
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      owner,
+    ] as never);
+    mockedPrisma.searchEmailDelivery.updateMany.mockResolvedValue({
+      count: 1,
+    } as never);
     const sendError = new Error(
-      "Provider failed for owner@example.com at https://provider.example/send?token=secret"
+      "Provider failed for owner@example.com at https://provider.example/send?token=secret",
     );
 
     await expect(
@@ -3563,25 +5079,34 @@ describe("search email delivery outbox", () => {
         kind: "MATCH",
         groupKey: "match-group",
         send: vi.fn().mockRejectedValue(sendError),
-        now: () => now
-      })
+        now: () => now,
+      }),
     ).rejects.toBe(sendError);
-    expect(mockedPrisma.searchEmailDelivery.updateMany).toHaveBeenLastCalledWith(
+    expect(
+      mockedPrisma.searchEmailDelivery.updateMany,
+    ).toHaveBeenLastCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           status: "FAILED",
           nextAttemptAt: new Date(now.getTime() + 60_000),
-          lastError: "DELIVERY_OUTCOME_UNKNOWN:Provider failed for [email] at [url]"
-        })
-      })
+          lastError:
+            "DELIVERY_OUTCOME_UNKNOWN:Provider failed for [email] at [url]",
+        }),
+      }),
     );
     expect(executeRawCallsContaining('"recheckRequestedAt"')).toHaveLength(1);
   });
 
   it("caps exponential delivery retries at ten minutes", async () => {
-    const owner = delivery("delivery-1", "owner@example.com", { attemptCount: 12 });
-    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([owner] as never);
-    mockedPrisma.searchEmailDelivery.updateMany.mockResolvedValue({ count: 1 } as never);
+    const owner = delivery("delivery-1", "owner@example.com", {
+      attemptCount: 12,
+    });
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      owner,
+    ] as never);
+    mockedPrisma.searchEmailDelivery.updateMany.mockResolvedValue({
+      count: 1,
+    } as never);
     const sendError = new Error("provider unavailable");
 
     await expect(
@@ -3592,28 +5117,36 @@ describe("search email delivery outbox", () => {
         kind: "MATCH",
         groupKey: "match-group",
         send: vi.fn().mockRejectedValue(sendError),
-        now: () => now
-      })
+        now: () => now,
+      }),
     ).rejects.toBe(sendError);
 
-    expect(mockedPrisma.searchEmailDelivery.updateMany).toHaveBeenLastCalledWith(
+    expect(
+      mockedPrisma.searchEmailDelivery.updateMany,
+    ).toHaveBeenLastCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           status: "FAILED",
-          nextAttemptAt: new Date(now.getTime() + 10 * 60_000)
-        })
-      })
+          nextAttemptAt: new Date(now.getTime() + 10 * 60_000),
+        }),
+      }),
     );
     expect(executeRawCallsContaining('"recheckRequestedAt"')).toHaveLength(1);
   });
 
   it("backs off a typed daily quota failure for 24 hours", async () => {
-    const owner = delivery("delivery-1", "owner@example.com", { attemptCount: 12 });
-    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([owner] as never);
-    mockedPrisma.searchEmailDelivery.updateMany.mockResolvedValue({ count: 1 } as never);
+    const owner = delivery("delivery-1", "owner@example.com", {
+      attemptCount: 12,
+    });
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      owner,
+    ] as never);
+    mockedPrisma.searchEmailDelivery.updateMany.mockResolvedValue({
+      count: 1,
+    } as never);
     const sendError = new EmailDeliveryNotAcceptedError(
       "You have reached your daily email sending quota.",
-      "daily_quota_exceeded"
+      "daily_quota_exceeded",
     );
 
     await expect(
@@ -3624,19 +5157,21 @@ describe("search email delivery outbox", () => {
         kind: "MATCH",
         groupKey: "match-group",
         send: vi.fn().mockRejectedValue(sendError),
-        now: () => now
-      })
+        now: () => now,
+      }),
     ).rejects.toBe(sendError);
 
-    expect(mockedPrisma.searchEmailDelivery.updateMany).toHaveBeenLastCalledWith(
+    expect(
+      mockedPrisma.searchEmailDelivery.updateMany,
+    ).toHaveBeenLastCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           status: "FAILED",
           nextAttemptAt: new Date(now.getTime() + 24 * 60 * 60_000),
           lastError:
-            "DELIVERY_NOT_ACCEPTED:You have reached your daily email sending quota."
-        })
-      })
+            "DELIVERY_NOT_ACCEPTED:You have reached your daily email sending quota.",
+        }),
+      }),
     );
     expect(executeRawCallsContaining('"recheckRequestedAt"')).toHaveLength(1);
   });
@@ -3649,7 +5184,11 @@ describe("search email delivery outbox", () => {
       .mockResolvedValueOnce([owner, friend] as never)
       .mockResolvedValueOnce([
         { ...owner, status: "SENT", sentAt: now },
-        { ...friend, status: "FAILED", nextAttemptAt: new Date(now.getTime() + 60_000) }
+        {
+          ...friend,
+          status: "FAILED",
+          nextAttemptAt: new Date(now.getTime() + 60_000),
+        },
       ] as never);
     mockedPrisma.searchEmailDelivery.updateMany
       .mockResolvedValueOnce({ count: 2 } as never)
@@ -3668,11 +5207,11 @@ describe("search email delivery outbox", () => {
           }
           return { deliveryStatus: "sent" as const };
         }),
-        now: () => now
-      })
+        now: () => now,
+      }),
     ).rejects.toBe(friendError);
     expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({ data: { alertStatus: "SENT", sentAt: now } })
+      expect.objectContaining({ data: { alertStatus: "SENT", sentAt: now } }),
     );
     expect(executeRawCallsContaining('"recheckRequestedAt"')).toHaveLength(1);
   });
@@ -3684,39 +5223,39 @@ describe("search email delivery outbox", () => {
       matchId: "match-2",
       courseId: "course-2",
       courseName: "Second Course",
-      startsAt: "2026-07-16T13:00:00.000Z"
+      startsAt: "2026-07-16T13:00:00.000Z",
     };
     const partialPayload = {
       ...payload,
       matchIds: ["match-1", "match-2"],
       matchRefs: [
         { matchId: "match-1", availabilityCycle: 7 },
-        { matchId: "match-2", availabilityCycle: 7 }
+        { matchId: "match-2", availabilityCycle: 7 },
       ],
       displayMatchIds: ["match-1", "match-2"],
       matchReport: {
         ...payload.matchReport,
-        matches: [oldRow, survivingRow]
-      }
+        matches: [oldRow, survivingRow],
+      },
     };
     const owner = delivery("delivery-1", "owner@example.com", {
       payload: partialPayload,
       status: "SENT",
       sentAt: now,
-      attemptCount: 1
+      attemptCount: 1,
     });
     const friend = delivery("delivery-2", "friend@example.com", {
       payload: partialPayload,
       status: "FAILED",
       attemptCount: 1,
       lastError: "DELIVERY_NOT_ACCEPTED:provider rejected",
-      nextAttemptAt: new Date(now.getTime() - 1)
+      nextAttemptAt: new Date(now.getTime() - 1),
     });
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([owner, friend] as never)
       .mockResolvedValueOnce([
         owner,
-        { ...friend, status: "SUPPRESSED", nextAttemptAt: null }
+        { ...friend, status: "SUPPRESSED", nextAttemptAt: null },
       ] as never);
     mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
       {
@@ -3724,8 +5263,8 @@ describe("search email delivery outbox", () => {
         courseId: "course-2",
         alertStatus: "SENT",
         availabilityStatus: "AVAILABLE",
-        availabilityCycle: 7
-      }
+        availabilityCycle: 7,
+      },
     ] as never);
     mockedPrisma.course.findMany.mockResolvedValue([
       {
@@ -3736,11 +5275,11 @@ describe("search email delivery outbox", () => {
         automationReason: "NONE",
         intelligenceVerifiedAt: null,
         intelligenceReviewAt: null,
-        intelligenceConfidence: null
-      }
+        intelligenceConfidence: null,
+      },
     ] as never);
     mockedPrisma.courseProbe.findMany.mockResolvedValue([
-      { courseId: "course-2", outcome: "MATCH_FOUND", observedAt: now }
+      { courseId: "course-2", outcome: "MATCH_FOUND", observedAt: now },
     ] as never);
     const send = vi.fn();
 
@@ -3752,11 +5291,11 @@ describe("search email delivery outbox", () => {
         kind: "MATCH",
         groupKey: "match-group",
         send,
-        now: () => now
-      })
+        now: () => now,
+      }),
     ).resolves.toEqual([
       { id: "delivery-1", status: "SENT" },
-      { id: "delivery-2", status: "SUPPRESSED" }
+      { id: "delivery-2", status: "SUPPRESSED" },
     ]);
 
     expect(send).not.toHaveBeenCalled();
@@ -3769,10 +5308,10 @@ describe("search email delivery outbox", () => {
           payload: expect.objectContaining({
             recipientCatchup: true,
             matchIds: ["match-2"],
-            displayMatchIds: ["match-2"]
-          })
-        })
-      })
+            displayMatchIds: ["match-2"],
+          }),
+        }),
+      }),
     );
     expect(mockedPrisma.$executeRaw).toHaveBeenCalledOnce();
   });
@@ -3783,7 +5322,7 @@ describe("search email delivery outbox", () => {
       ...firstRow,
       matchId: "match-2",
       courseId: "course-2",
-      courseName: "Second Course"
+      courseName: "Second Course",
     };
     const catchupPayload = {
       ...payload,
@@ -3791,10 +5330,10 @@ describe("search email delivery outbox", () => {
       matchIds: ["match-1", "match-2"],
       matchRefs: [
         { matchId: "match-1", availabilityCycle: 7 },
-        { matchId: "match-2", availabilityCycle: 8 }
+        { matchId: "match-2", availabilityCycle: 8 },
       ],
       displayMatchIds: ["match-1", "match-2"],
-      matchReport: { ...payload.matchReport, matches: [firstRow, secondRow] }
+      matchReport: { ...payload.matchReport, matches: [firstRow, secondRow] },
     };
     const friend = delivery("delivery-2", "friend@example.com", {
       isOwnerRecipient: false,
@@ -3802,7 +5341,7 @@ describe("search email delivery outbox", () => {
       status: "FAILED",
       nextAttemptAt: new Date(now.getTime() - 1),
       attemptCount: 1,
-      lastError: "DELIVERY_NOT_ACCEPTED:provider rejected"
+      lastError: "DELIVERY_NOT_ACCEPTED:provider rejected",
     });
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([friend] as never)
@@ -3813,8 +5352,8 @@ describe("search email delivery outbox", () => {
         courseId: "course-2",
         alertStatus: "SENT",
         availabilityStatus: "AVAILABLE",
-        availabilityCycle: 8
-      }
+        availabilityCycle: 8,
+      },
     ] as never);
     mockedPrisma.course.findMany.mockResolvedValue([
       {
@@ -3825,11 +5364,11 @@ describe("search email delivery outbox", () => {
         automationReason: "NONE",
         intelligenceVerifiedAt: null,
         intelligenceReviewAt: null,
-        intelligenceConfidence: null
-      }
+        intelligenceConfidence: null,
+      },
     ] as never);
     mockedPrisma.courseProbe.findMany.mockResolvedValue([
-      { courseId: "course-2", outcome: "MATCH_FOUND", observedAt: now }
+      { courseId: "course-2", outcome: "MATCH_FOUND", observedAt: now },
     ] as never);
 
     await drainSearchEmailDeliveryGroup({
@@ -3839,7 +5378,7 @@ describe("search email delivery outbox", () => {
       kind: "MATCH",
       groupKey: "catchup-old",
       send: vi.fn(),
-      now: () => now
+      now: () => now,
     });
 
     expect(mockedPrisma.searchEmailDelivery.create).toHaveBeenCalledWith(
@@ -3848,10 +5387,10 @@ describe("search email delivery outbox", () => {
           recipient: "friend@example.com",
           payload: expect.objectContaining({
             recipientCatchup: true,
-            matchIds: ["match-2"]
-          })
-        })
-      })
+            matchIds: ["match-2"],
+          }),
+        }),
+      }),
     );
     expect(mockedPrisma.searchEmailDelivery.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -3859,16 +5398,19 @@ describe("search email delivery outbox", () => {
         data: expect.objectContaining({
           status: "SUPPRESSED",
           claimToken: null,
-          claimExpiresAt: null
-        })
-      })
+          claimExpiresAt: null,
+        }),
+      }),
     );
   });
 
   it("finalizes the owner outcome while an additional recipient remains retryable", async () => {
     mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
-      delivery("delivery-1", "owner@example.com", { status: "SENT", sentAt: now }),
-      delivery("delivery-2", "friend@example.com", { status: "FAILED" })
+      delivery("delivery-1", "owner@example.com", {
+        status: "SENT",
+        sentAt: now,
+      }),
+      delivery("delivery-2", "friend@example.com", { status: "FAILED" }),
     ] as never);
 
     await expect(
@@ -3876,24 +5418,24 @@ describe("search email delivery outbox", () => {
         searchId: "search-1",
         alertGeneration: 3,
         kind: "MATCH",
-        groupKey: "match-group"
-      })
+        groupKey: "match-group",
+      }),
     ).resolves.toEqual({
       finalized: false,
       reason: "not_terminal",
-      ownerFinalized: true
+      ownerFinalized: true,
     });
     expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          alertStatus: { in: ["PENDING", "SUPPRESSED"] }
+          alertStatus: { in: ["PENDING", "SUPPRESSED"] },
         }),
-        data: { alertStatus: "SENT", sentAt: now }
-      })
+        data: { alertStatus: "SENT", sentAt: now },
+      }),
     );
-    expect(mockedPrisma.teeTimeMatch.updateMany.mock.calls[0]?.[0].where).not.toHaveProperty(
-      "availabilityStatus"
-    );
+    expect(
+      mockedPrisma.teeTimeMatch.updateMany.mock.calls[0]?.[0].where,
+    ).not.toHaveProperty("availabilityStatus");
   });
 
   it("does not record a match send timestamp for a dry-run owner outcome", async () => {
@@ -3901,22 +5443,22 @@ describe("search email delivery outbox", () => {
       delivery("delivery-1", "owner@example.com", {
         status: "SUPPRESSED",
         sentAt: now,
-        lastError: "DELIVERY_DRY_RUN"
-      })
+        lastError: "DELIVERY_DRY_RUN",
+      }),
     ] as never);
 
     await finalizeSearchEmailDeliveryGroup({
       searchId: "search-1",
       alertGeneration: 3,
       kind: "MATCH",
-      groupKey: "match-group"
+      groupKey: "match-group",
     });
 
     expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({ alertStatus: "PENDING" }),
-        data: { alertStatus: "SUPPRESSED", sentAt: null }
-      })
+        data: { alertStatus: "SUPPRESSED", sentAt: null },
+      }),
     );
   });
 
@@ -3925,9 +5467,9 @@ describe("search email delivery outbox", () => {
       delivery("delivery-1", "owner@example.com", {
         status: "SUPPRESSED",
         sentAt: now,
-        lastError: "STATUS_RECIPIENT_PRIOR_REACHED"
+        lastError: "STATUS_RECIPIENT_PRIOR_REACHED",
       }),
-      delivery("delivery-2", "friend@example.com", { status: "FAILED" })
+      delivery("delivery-2", "friend@example.com", { status: "FAILED" }),
     ] as never);
 
     await expect(
@@ -3935,12 +5477,12 @@ describe("search email delivery outbox", () => {
         searchId: "search-1",
         alertGeneration: 3,
         kind: "MATCH",
-        groupKey: "match-group"
-      })
+        groupKey: "match-group",
+      }),
     ).resolves.toEqual({
       finalized: false,
       reason: "not_terminal",
-      ownerFinalized: true
+      ownerFinalized: true,
     });
     expect(mockedPrisma.teeTimeMatch.updateMany).not.toHaveBeenCalled();
   });
@@ -3949,7 +5491,7 @@ describe("search email delivery outbox", () => {
     const catchupPayload = {
       ...payload,
       recipientCatchup: true,
-      satisfiesStatusReport: false
+      satisfiesStatusReport: false,
     };
     mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
       delivery("friend-catchup", "friend@example.com", {
@@ -3957,8 +5499,8 @@ describe("search email delivery outbox", () => {
         groupKey: "catchup-group",
         payload: catchupPayload,
         status: "SENT",
-        sentAt: now
-      })
+        sentAt: now,
+      }),
     ] as never);
 
     await expect(
@@ -3966,15 +5508,15 @@ describe("search email delivery outbox", () => {
         searchId: "search-1",
         alertGeneration: 3,
         kind: "MATCH",
-        groupKey: "catchup-group"
-      })
+        groupKey: "catchup-group",
+      }),
     ).resolves.toEqual({
       finalized: true,
       status: "SENT",
       ownerSent: false,
       ownerDeliveryOutcome: null,
       retainedMatchCount: 0,
-      sentMatchCount: 0
+      sentMatchCount: 0,
     });
     expect(mockedPrisma.teeTimeMatch.updateMany).not.toHaveBeenCalled();
     expect(mockedPrisma.teeSearch.updateMany).not.toHaveBeenCalled();
@@ -3982,8 +5524,14 @@ describe("search email delivery outbox", () => {
 
   it("requires the owner recipient SENT before marking matches or status globally sent", async () => {
     mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
-      delivery("delivery-1", "owner@example.com", { status: "SUPPRESSED", sentAt: now }),
-      delivery("delivery-2", "friend@example.com", { status: "SENT", sentAt: now })
+      delivery("delivery-1", "owner@example.com", {
+        status: "SUPPRESSED",
+        sentAt: now,
+      }),
+      delivery("delivery-2", "friend@example.com", {
+        status: "SENT",
+        sentAt: now,
+      }),
     ] as never);
 
     await expect(
@@ -3991,15 +5539,15 @@ describe("search email delivery outbox", () => {
         searchId: "search-1",
         alertGeneration: 3,
         kind: "MATCH",
-        groupKey: "match-group"
-      })
+        groupKey: "match-group",
+      }),
     ).resolves.toEqual({
       finalized: true,
       status: "SUPPRESSED",
       ownerSent: false,
       ownerDeliveryOutcome: "SAFETY_SUPPRESSED",
       retainedMatchCount: 0,
-      sentMatchCount: 0
+      sentMatchCount: 0,
     });
     expect(mockedPrisma.teeTimeMatch.updateMany).not.toHaveBeenCalled();
     expect(mockedPrisma.teeSearch.update).not.toHaveBeenCalled();
@@ -4007,8 +5555,14 @@ describe("search email delivery outbox", () => {
 
   it("atomically satisfies the status report from the MATCH payload after all recipients finish", async () => {
     mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
-      delivery("delivery-1", "owner@example.com", { status: "SENT", sentAt: now }),
-      delivery("delivery-2", "friend@example.com", { status: "SUPPRESSED", sentAt: now })
+      delivery("delivery-1", "owner@example.com", {
+        status: "SENT",
+        sentAt: now,
+      }),
+      delivery("delivery-2", "friend@example.com", {
+        status: "SUPPRESSED",
+        sentAt: now,
+      }),
     ] as never);
 
     await expect(
@@ -4016,26 +5570,26 @@ describe("search email delivery outbox", () => {
         searchId: "search-1",
         alertGeneration: 3,
         kind: "MATCH",
-        groupKey: "match-group"
-      })
+        groupKey: "match-group",
+      }),
     ).resolves.toEqual({
       finalized: true,
       status: "SENT",
       ownerSent: true,
       ownerDeliveryOutcome: "SENT",
       retainedMatchCount: 1,
-      sentMatchCount: 1
+      sentMatchCount: 1,
     });
     expect(mockedPrisma.teeTimeMatch.updateMany).toHaveBeenCalledWith(
-      expect.objectContaining({ data: { alertStatus: "SENT", sentAt: now } })
+      expect.objectContaining({ data: { alertStatus: "SENT", sentAt: now } }),
     );
     expect(mockedPrisma.teeSearch.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: {
           statusEmailSentAt: now,
-          statusEmailSnapshot: payload.statusSnapshot
-        }
-      })
+          statusEmailSnapshot: payload.statusSnapshot,
+        },
+      }),
     );
   });
 
@@ -4047,9 +5601,10 @@ describe("search email delivery outbox", () => {
         {
           courseId: "course-1",
           courseName: "Course",
-          state: "MANUAL_DIRECT:MANUAL_FINAL:NO_SUPPORT_STATUS:NONE:PHONE_ONLY:PHONE_ONLY",
-          customerStatus: "FINAL_DIRECT_ACTION"
-        }
+          state:
+            "MANUAL_DIRECT:MANUAL_FINAL:NO_SUPPORT_STATUS:NONE:PHONE_ONLY:PHONE_ONLY",
+          customerStatus: "FINAL_DIRECT_ACTION",
+        },
       ],
       statusReport: {
         kind: "status-update",
@@ -4058,8 +5613,8 @@ describe("search email delivery outbox", () => {
         endTime: "10:00",
         players: 2,
         userTimeZone: "America/New_York",
-        courses: []
-      }
+        courses: [],
+      },
     };
     mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
       delivery("delivery-1", "owner@example.com", {
@@ -4067,15 +5622,15 @@ describe("search email delivery outbox", () => {
         groupKey: "status-update-group",
         payload: statusPayload,
         status: "SENT",
-        sentAt: now
+        sentAt: now,
       }),
       delivery("delivery-2", "friend@example.com", {
         kind: "MONITORING_STATUS_UPDATE",
         groupKey: "status-update-group",
         payload: statusPayload,
         status: "SUPPRESSED",
-        sentAt: now
-      })
+        sentAt: now,
+      }),
     ] as never);
 
     await expect(
@@ -4083,23 +5638,23 @@ describe("search email delivery outbox", () => {
         searchId: "search-1",
         alertGeneration: 3,
         kind: "MONITORING_STATUS_UPDATE",
-        groupKey: "status-update-group"
-      })
+        groupKey: "status-update-group",
+      }),
     ).resolves.toEqual({
       finalized: true,
       status: "SENT",
       ownerSent: true,
       ownerDeliveryOutcome: "SENT",
       retainedMatchCount: 0,
-      sentMatchCount: 0
+      sentMatchCount: 0,
     });
     expect(mockedPrisma.teeSearch.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: {
           statusEmailSentAt: now,
-          statusEmailSnapshot: statusPayload.statusSnapshot
-        }
-      })
+          statusEmailSnapshot: statusPayload.statusSnapshot,
+        },
+      }),
     );
   });
 
@@ -4109,8 +5664,8 @@ describe("search email delivery outbox", () => {
       {
         courseId: "course-1",
         courseName: "Course",
-        state: "NEEDS_ADAPTER:ACTIONABLE:IN_OPERATOR_QUEUE:NONE"
-      }
+        state: "NEEDS_ADAPTER:ACTIONABLE:IN_OPERATOR_QUEUE:NONE",
+      },
     ];
     const setupPayload = {
       schemaVersion: 2 as const,
@@ -4123,8 +5678,8 @@ describe("search email delivery outbox", () => {
         endTime: "10:00",
         players: 2,
         userTimeZone: "America/New_York",
-        courses: []
-      }
+        courses: [],
+      },
     };
     mockedPrisma.$queryRaw.mockResolvedValue([
       {
@@ -4133,9 +5688,9 @@ describe("search email delivery outbox", () => {
           schemaVersion: 1,
           kind: "ALERT_GENERATION_START",
           alertGeneration: 3,
-          generationStartedAt
-        }
-      }
+          generationStartedAt,
+        },
+      },
     ] as never);
     mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
       delivery("delivery-1", "owner@example.com", {
@@ -4143,15 +5698,15 @@ describe("search email delivery outbox", () => {
         groupKey: "setup-group",
         payload: setupPayload,
         status: "SENT",
-        sentAt: now
+        sentAt: now,
       }),
       delivery("delivery-2", "friend@example.com", {
         kind: "SETUP",
         groupKey: "setup-group",
         payload: setupPayload,
         status: "SUPPRESSED",
-        sentAt: now
-      })
+        sentAt: now,
+      }),
     ] as never);
 
     await expect(
@@ -4159,10 +5714,10 @@ describe("search email delivery outbox", () => {
         searchId: "search-1",
         alertGeneration: 3,
         kind: "SETUP",
-        groupKey: "setup-group"
-      })
+        groupKey: "setup-group",
+      }),
     ).resolves.toEqual(
-      expect.objectContaining({ finalized: true, ownerSent: true })
+      expect.objectContaining({ finalized: true, ownerSent: true }),
     );
     expect(mockedPrisma.teeSearch.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -4173,10 +5728,10 @@ describe("search email delivery outbox", () => {
             kind: "ALERT_GENERATION_STATUS",
             alertGeneration: 3,
             generationStartedAt,
-            courseSnapshot: statusSnapshot
-          }
-        }
-      })
+            courseSnapshot: statusSnapshot,
+          },
+        },
+      }),
     );
   });
 
@@ -4185,22 +5740,24 @@ describe("search email delivery outbox", () => {
       assertSafeSearchEmailPayload({
         schemaVersion: 2,
         checkedAt: now.toISOString(),
-        statusReport: { bookingUrl: "https://example.com/signed?token=value" }
-      })
+        statusReport: { bookingUrl: "https://example.com/signed?token=value" },
+      }),
     ).toThrow("booking URL contains session-specific data");
     expect(() =>
       assertSafeSearchEmailPayload({
         schemaVersion: 2,
         checkedAt: now.toISOString(),
-        statusReport: { bookingUrl: "https://example.com/tee-times?date=2026-07-16" }
-      })
+        statusReport: {
+          bookingUrl: "https://example.com/tee-times?date=2026-07-16",
+        },
+      }),
     ).not.toThrow();
     expect(() =>
       assertSafeSearchEmailPayload({
         schemaVersion: 2,
         checkedAt: now.toISOString(),
-        statusSnapshot: { token: "value" }
-      })
+        statusSnapshot: { token: "value" },
+      }),
     ).toThrow("payload cannot contain token");
   });
 
@@ -4208,18 +5765,26 @@ describe("search email delivery outbox", () => {
     const first = await hydrateMatchAlertPayload({
       searchId: "search-1",
       alertGeneration: 3,
-      payload
+      payload,
     });
     mockedPrisma.course.findMany.mockResolvedValue([
-      { id: "course-1", detectedBookingUrl: "https://changed.example", website: null }
+      {
+        id: "course-1",
+        detectedBookingUrl: "https://changed.example",
+        website: null,
+      },
     ] as never);
     mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([
-      { id: "match-1", availableSpots: 1, bookingUrl: "https://changed.example" }
+      {
+        id: "match-1",
+        availableSpots: 1,
+        bookingUrl: "https://changed.example",
+      },
     ] as never);
     const retry = await hydrateMatchAlertPayload({
       searchId: "search-1",
       alertGeneration: 3,
-      payload
+      payload,
     });
 
     expect(retry).toEqual(first);
@@ -4229,8 +5794,8 @@ describe("search email delivery outbox", () => {
         bookingUrl: "https://example.com/tee-times?date=2026-07-16",
         priceCents: 6500,
         factLine: "Public · 4.1 rating · 1.3 mi · 18H · $65",
-        courseGuideUrl: "/courses/course"
-      })
+        courseGuideUrl: "/courses/course",
+      }),
     );
     expect(mockedPrisma.course.findMany).not.toHaveBeenCalled();
     expect(mockedPrisma.teeTimeMatch.findMany).not.toHaveBeenCalled();
@@ -4258,21 +5823,23 @@ describe("search email delivery outbox", () => {
             outcome: "NO_MATCH",
             availableMatches: 0,
             message: "No matching public tee times were found.",
-            bookingUrl: "https://example.com/tee-times?date=2026-07-16"
-          }
-        ]
-      }
+            bookingUrl: "https://example.com/tee-times?date=2026-07-16",
+          },
+        ],
+      },
     };
 
     const first = await hydrateSearchStatusEmailPayload(statusPayload);
-    mockedPrisma.course.findMany.mockResolvedValue([{
-      id: "course-1",
-      name: "Changed Course",
-      website: "https://changed.example"
-    }] as never);
+    mockedPrisma.course.findMany.mockResolvedValue([
+      {
+        id: "course-1",
+        name: "Changed Course",
+        website: "https://changed.example",
+      },
+    ] as never);
     mockedPrisma.teeSearch.findFirst.mockResolvedValue({
       id: "search-1",
-      players: 4
+      players: 4,
     } as never);
     const retry = await hydrateSearchStatusEmailPayload(statusPayload);
 
@@ -4285,10 +5852,10 @@ describe("search email delivery outbox", () => {
         courses: [
           expect.objectContaining({
             courseName: "Course",
-            bookingUrl: "https://example.com/tee-times?date=2026-07-16"
-          })
-        ]
-      })
+            bookingUrl: "https://example.com/tee-times?date=2026-07-16",
+          }),
+        ],
+      }),
     );
     expect(mockedPrisma.course.findMany).not.toHaveBeenCalled();
     expect(mockedPrisma.teeSearch.findFirst).not.toHaveBeenCalled();
@@ -4303,9 +5870,10 @@ describe("search email delivery outbox", () => {
         {
           courseId: "course-1",
           courseName: "Course",
-          state: "MANUAL_DIRECT:MANUAL_FINAL:NO_SUPPORT_STATUS:NONE:PHONE_ONLY:PHONE_ONLY",
-          customerStatus: "FINAL_DIRECT_ACTION"
-        }
+          state:
+            "MANUAL_DIRECT:MANUAL_FINAL:NO_SUPPORT_STATUS:NONE:PHONE_ONLY:PHONE_ONLY",
+          customerStatus: "FINAL_DIRECT_ACTION",
+        },
       ],
       statusReport: {
         kind: "status-update",
@@ -4322,57 +5890,69 @@ describe("search email delivery outbox", () => {
             timeZone: "America/New_York",
             outcome: "MANUAL_DIRECT",
             availableMatches: 0,
-            phone: "555-0100"
-          }
-        ]
-      }
+            phone: "555-0100",
+          },
+        ],
+      },
     };
 
-    await expect(hydrateSearchStatusEmailPayload(statusPayload)).resolves.toEqual(
+    await expect(
+      hydrateSearchStatusEmailPayload(statusPayload),
+    ).resolves.toEqual(
       expect.objectContaining({
         kind: "status-update",
         players: 2,
         courses: [
           expect.objectContaining({
             courseId: "course-1",
-            outcome: "MANUAL_DIRECT"
-          })
-        ]
-      })
+            outcome: "MANUAL_DIRECT",
+          }),
+        ],
+      }),
     );
   });
 
   it("accepts only public official booking URLs and rejects restricted or signed flows", () => {
     expect(
-      getSafeOfficialBookingUrl("https://course.example/tee-times?date=2026-07-16")
+      getSafeOfficialBookingUrl(
+        "https://course.example/tee-times?date=2026-07-16",
+      ),
     ).toBe("https://course.example/tee-times?date=2026-07-16");
-    expect(getSafeOfficialBookingUrl("https://course.example/checkout")).toBeUndefined();
-    expect(getSafeOfficialBookingUrl("https://course.example/queue/wait")).toBeUndefined();
     expect(
-      getSafeOfficialBookingUrl("https://course.example/tee-times?session=private")
+      getSafeOfficialBookingUrl("https://course.example/checkout"),
     ).toBeUndefined();
     expect(
-      getSafeOfficialBookingUrl("https://course.example/tee-times?bookingToken=private")
-    ).toBeUndefined();
-    expect(
-      getSafeOfficialBookingUrl(
-        "https://course.example/tee-times?next=/hop-one?next=/hop-two?next=http://127.0.0.1/private"
-      )
+      getSafeOfficialBookingUrl("https://course.example/queue/wait"),
     ).toBeUndefined();
     expect(
       getSafeOfficialBookingUrl(
-        "https://course.example/tee-times?redirect=https://provider.example/tee-times"
-      )
+        "https://course.example/tee-times?session=private",
+      ),
     ).toBeUndefined();
     expect(
       getSafeOfficialBookingUrl(
-        "https://course.example/tee-times#https://evil.example/login"
-      )
+        "https://course.example/tee-times?bookingToken=private",
+      ),
     ).toBeUndefined();
     expect(
       getSafeOfficialBookingUrl(
-        "https://course.example/tee-times?redirect=https:%5C%5Cevil.example%2Fpath"
-      )
+        "https://course.example/tee-times?next=/hop-one?next=/hop-two?next=http://127.0.0.1/private",
+      ),
+    ).toBeUndefined();
+    expect(
+      getSafeOfficialBookingUrl(
+        "https://course.example/tee-times?redirect=https://provider.example/tee-times",
+      ),
+    ).toBeUndefined();
+    expect(
+      getSafeOfficialBookingUrl(
+        "https://course.example/tee-times#https://evil.example/login",
+      ),
+    ).toBeUndefined();
+    expect(
+      getSafeOfficialBookingUrl(
+        "https://course.example/tee-times?redirect=https:%5C%5Cevil.example%2Fpath",
+      ),
     ).toBeUndefined();
     for (const sessionUrl of [
       "https://course.example/tee-times?JSESSIONID=private",
@@ -4381,28 +5961,58 @@ describe("search email delivery outbox", () => {
       "https://course.example/tee-times?sid=private",
       "https://course.example/tee-times?CFID=private&CFTOKEN=private",
       "https://course.example/tee-times?osCsid=private",
-      "https://course.example/tee-times?connect.sid=private"
+      "https://course.example/tee-times?connect.sid=private",
     ]) {
       expect(getSafeOfficialBookingUrl(sessionUrl)).toBeUndefined();
     }
     expect(
-      getSafeOfficialBookingUrl("https://user:password@course.example/tee-times")
+      getSafeOfficialBookingUrl(
+        "https://user:password@course.example/tee-times",
+      ),
     ).toBeUndefined();
     expect(getSafeOfficialBookingUrl("javascript:alert(1)")).toBeUndefined();
   });
 
   it("lists retryable setup, match, and monitoring transition groups", async () => {
     mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
-      { kind: "MATCH", groupKey: "group-1", createdAt: new Date(now.getTime() - 2_000), isOwnerRecipient: true },
-      { kind: "MATCH", groupKey: "group-1", createdAt: new Date(now.getTime() - 2_000), isOwnerRecipient: false },
-      { kind: "SETUP", groupKey: "group-2", createdAt: new Date(now.getTime() - 1_000), isOwnerRecipient: true }
+      {
+        kind: "MATCH",
+        groupKey: "group-1",
+        createdAt: new Date(now.getTime() - 2_000),
+        isOwnerRecipient: true,
+      },
+      {
+        kind: "MATCH",
+        groupKey: "group-1",
+        createdAt: new Date(now.getTime() - 2_000),
+        isOwnerRecipient: false,
+      },
+      {
+        kind: "SETUP",
+        groupKey: "group-2",
+        createdAt: new Date(now.getTime() - 1_000),
+        isOwnerRecipient: true,
+      },
     ] as never);
 
     await expect(
-      listRetryableSearchEmailDeliveryGroups({ searchId: "search-1", alertGeneration: 3 })
+      listRetryableSearchEmailDeliveryGroups({
+        searchId: "search-1",
+        alertGeneration: 3,
+      }),
     ).resolves.toEqual([
-      { kind: "MATCH", groupKey: "group-1", createdAt: new Date(now.getTime() - 2_000), ownerRetryable: true },
-      { kind: "SETUP", groupKey: "group-2", createdAt: new Date(now.getTime() - 1_000), ownerRetryable: true }
+      {
+        kind: "MATCH",
+        groupKey: "group-1",
+        createdAt: new Date(now.getTime() - 2_000),
+        ownerRetryable: true,
+      },
+      {
+        kind: "SETUP",
+        groupKey: "group-2",
+        createdAt: new Date(now.getTime() - 1_000),
+        ownerRetryable: true,
+      },
     ]);
     expect(mockedPrisma.searchEmailDelivery.findMany).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -4413,11 +6023,11 @@ describe("search email delivery outbox", () => {
               "MATCH",
               "MONITORING_STATUS_UPDATE",
               "MONITORING_OUTAGE",
-              "MONITORING_RECOVERY"
-            ]
-          }
-        })
-      })
+              "MONITORING_RECOVERY",
+            ],
+          },
+        }),
+      }),
     );
   });
 
@@ -4427,37 +6037,40 @@ describe("search email delivery outbox", () => {
         {
           kind: "DAILY",
           groupKey: "status-group-2",
-          createdAt: now
+          createdAt: now,
         },
         {
           kind: "DAILY",
           groupKey: "status-group-1",
-          createdAt: new Date(now.getTime() - 60_000)
+          createdAt: new Date(now.getTime() - 60_000),
         },
         {
           kind: "SETUP",
           groupKey: "setup-group",
-          createdAt: new Date(now.getTime() - 120_000)
-        }
+          createdAt: new Date(now.getTime() - 120_000),
+        },
       ] as never)
       .mockResolvedValueOnce([
         { isOwnerRecipient: true, status: "SENT", sentAt: now },
         { isOwnerRecipient: false, status: "SUPPRESSED", sentAt: null },
         { isOwnerRecipient: true, status: "SUPPRESSED", sentAt: now },
-        { isOwnerRecipient: false, status: "SUPPRESSED", sentAt: null }
+        { isOwnerRecipient: false, status: "SUPPRESSED", sentAt: null },
       ] as never);
 
     await expect(
-      getPendingStatusEmailReplacement({ searchId: "search-1", alertGeneration: 3 })
+      getPendingStatusEmailReplacement({
+        searchId: "search-1",
+        alertGeneration: 3,
+      }),
     ).resolves.toEqual({
       kind: "DAILY",
       groups: [
         { kind: "DAILY", groupKey: "status-group-2" },
         { kind: "DAILY", groupKey: "status-group-1" },
-        { kind: "SETUP", groupKey: "setup-group" }
+        { kind: "SETUP", groupKey: "setup-group" },
       ],
       anyRecipientReached: true,
-      ownerSent: true
+      ownerSent: true,
     });
   });
 });

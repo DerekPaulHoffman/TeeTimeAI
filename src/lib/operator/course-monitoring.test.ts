@@ -2,46 +2,50 @@ import { Prisma } from "@prisma/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const transactionMocks = vi.hoisted(() => ({
+  $queryRawUnsafe: vi.fn(),
   course: {
-    update: vi.fn()
+    update: vi.fn(),
   },
   courseAutomationDiscovery: {
-    create: vi.fn()
+    create: vi.fn(),
   },
   courseMonitoringEvent: {
     create: vi.fn(),
-    findUnique: vi.fn()
+    findUnique: vi.fn(),
   },
   courseMonitoringStatus: {
     findUnique: vi.fn(),
-    update: vi.fn()
+    update: vi.fn(),
   },
   courseSupportIncident: {
     findUnique: vi.fn(),
-    update: vi.fn()
-  }
+    update: vi.fn(),
+  },
+  teeTimeMatch: {
+    updateMany: vi.fn(),
+  },
 }));
 
 const prismaMocks = vi.hoisted(() => ({
   $transaction: vi.fn(),
   courseMonitoringEvent: {
-    findUnique: vi.fn()
+    findUnique: vi.fn(),
   },
   courseMonitoringStatus: {
-    findFirst: vi.fn()
+    findFirst: vi.fn(),
   },
   teeSearch: {
     findMany: vi.fn(),
-    updateMany: vi.fn()
-  }
+    updateMany: vi.fn(),
+  },
 }));
 
 const localReaderMocks = vi.hoisted(() => ({
-  queueLocalReaderCourseVerification: vi.fn()
+  queueLocalReaderCourseVerification: vi.fn(),
 }));
 
 const schedulerMocks = vi.hoisted(() => ({
-  startSearchSchedule: vi.fn()
+  startSearchSchedule: vi.fn(),
 }));
 
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMocks }));
@@ -52,14 +56,14 @@ import {
   appendAutomationPlaybookEvent,
   type AutomationPlaybookLedger,
   type AutomationPlaybookReadPath,
-  type AutomationPlaybookStage
+  type AutomationPlaybookStage,
 } from "@/lib/automation/course-monitoring-playbook";
 import {
   applyOperatorCourseDecision,
   approveOperatorCourseTechnicalFinal,
   correctOperatorCourseBookingLink,
   requestOperatorCourseRecheck,
-  updateOperatorCourseOfficialLinks
+  updateOperatorCourseOfficialLinks,
 } from "./course-monitoring";
 
 const reference = "cm_123456789012345678901234";
@@ -93,20 +97,22 @@ function status() {
         activeRealSearchCount: 1,
         attemptLedger: null,
         resolution: null,
-        failureFingerprint: "SOURCE_MISSING:UNKNOWN"
-      }
-    }
+        failureFingerprint: "SOURCE_MISSING:UNKNOWN",
+      },
+    },
   };
 }
 
 function technicalFinalLedger(cycle = 2) {
-  const priorStages: Array<[AutomationPlaybookStage, AutomationPlaybookReadPath]> = [
+  const priorStages: Array<
+    [AutomationPlaybookStage, AutomationPlaybookReadPath]
+  > = [
     ["OFFICIAL_IDENTITY", "OFFICIAL_IDENTITY"],
     ["TYPED_ADAPTER", "TYPED_PROVIDER_ADAPTER"],
     ["OFFICIAL_HTTP_DISCOVERY", "OFFICIAL_HTTP"],
     ["HTTP_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER"],
     ["RENDERED_BROWSER_DISCOVERY", "RENDERED_BROWSER"],
-    ["BROWSER_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER"]
+    ["BROWSER_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER"],
   ];
   let ledger: AutomationPlaybookLedger | null = null;
   for (const [stage, readPath] of priorStages) {
@@ -118,7 +124,7 @@ function technicalFinalLedger(cycle = 2) {
       evidenceKind: "TOOLING",
       skipReason: "MONITORING_MODE_EXCLUDED",
       failureFingerprint: "PLAYBOOK:NOT_APPLICABLE",
-      runtimeVersion: "operator-test"
+      runtimeVersion: "operator-test",
     });
   }
   ledger = appendAutomationPlaybookEvent(ledger, {
@@ -129,7 +135,7 @@ function technicalFinalLedger(cycle = 2) {
     evidenceKind: "LOCAL_READER_RESULT",
     technicalReason: "CAPTCHA_OR_QUEUE",
     failureFingerprint: "LOCAL_READER:CHALLENGE",
-    runtimeVersion: "operator-test"
+    runtimeVersion: "operator-test",
   });
   return appendAutomationPlaybookEvent(ledger, {
     cycle,
@@ -139,7 +145,7 @@ function technicalFinalLedger(cycle = 2) {
     evidenceKind: "RENDERED_PAGE",
     technicalReason: "CAPTCHA_OR_QUEUE",
     failureFingerprint: "CONFIRMATION:CHALLENGE",
-    runtimeVersion: "operator-test"
+    runtimeVersion: "operator-test",
   });
 }
 
@@ -147,8 +153,16 @@ const context = {
   actorId: "user_clerk_operator",
   source: "OPERATOR_DASHBOARD" as const,
   apply: true,
-  dispatchSearches: true
+  dispatchSearches: true,
 };
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolver) => {
+    resolve = resolver;
+  });
+  return { promise, resolve };
+}
 
 describe("operator course monitoring mutations", () => {
   beforeEach(() => {
@@ -158,21 +172,23 @@ describe("operator course monitoring mutations", () => {
     prismaMocks.teeSearch.findMany.mockResolvedValue([]);
     schedulerMocks.startSearchSchedule.mockResolvedValue(undefined);
     localReaderMocks.queueLocalReaderCourseVerification.mockResolvedValue(null);
+    transactionMocks.$queryRawUnsafe.mockResolvedValue([{ locked: true }]);
     transactionMocks.courseMonitoringEvent.findUnique.mockResolvedValue(null);
     transactionMocks.courseMonitoringStatus.findUnique.mockResolvedValue({
-      revision: 4
+      revision: 4,
     });
     transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
       cycle: 2,
-      revision: 7
+      revision: 7,
     });
     transactionMocks.courseSupportIncident.update.mockResolvedValue({
       id: "incident-1",
-      failureFingerprint: "updated-fingerprint"
+      failureFingerprint: "updated-fingerprint",
     });
     prismaMocks.$transaction.mockImplementation(
-      async (callback: (transaction: typeof transactionMocks) => Promise<unknown>) =>
-        callback(transactionMocks)
+      async (
+        callback: (transaction: typeof transactionMocks) => Promise<unknown>,
+      ) => callback(transactionMocks),
     );
   });
 
@@ -187,10 +203,10 @@ describe("operator course monitoring mutations", () => {
           bookingUrl: "https://user:secret@course.example/book",
           evidenceUrl: "https://course.example/evidence",
           note: "Verified from the official course website.",
-          idempotencyKey: "operator-link-1234567890"
+          idempotencyKey: "operator-link-1234567890",
         },
-        context
-      )
+        context,
+      ),
     ).rejects.toThrow("without credentials");
     expect(prismaMocks.courseMonitoringStatus.findFirst).not.toHaveBeenCalled();
   });
@@ -204,17 +220,17 @@ describe("operator course monitoring mutations", () => {
           incidentCycle: 2,
           incidentRevision: 6,
           note: "Retry the current public signed-out course surface.",
-          idempotencyKey: "operator-recheck-123456"
+          idempotencyKey: "operator-recheck-123456",
         },
-        context
-      )
+        context,
+      ),
     ).rejects.toThrow("changed while this form was open");
     expect(prismaMocks.$transaction).not.toHaveBeenCalled();
   });
 
   it("treats an existing same-course idempotency key as a replay", async () => {
     prismaMocks.courseMonitoringEvent.findUnique.mockResolvedValue({
-      courseId: "course-1"
+      courseId: "course-1",
     });
 
     await expect(
@@ -225,21 +241,21 @@ describe("operator course monitoring mutations", () => {
           incidentCycle: 2,
           incidentRevision: 7,
           note: "Retry the current public signed-out course surface.",
-          idempotencyKey: "operator-recheck-123456"
+          idempotencyKey: "operator-recheck-123456",
         },
-        context
-      )
+        context,
+      ),
     ).resolves.toMatchObject({
       action: "request_recheck",
       applied: false,
-      replayed: true
+      replayed: true,
     });
     expect(prismaMocks.$transaction).not.toHaveBeenCalled();
   });
 
   it("rejects an idempotency key already used by another course", async () => {
     prismaMocks.courseMonitoringEvent.findUnique.mockResolvedValue({
-      courseId: "course-2"
+      courseId: "course-2",
     });
 
     await expect(
@@ -250,10 +266,10 @@ describe("operator course monitoring mutations", () => {
           incidentCycle: 2,
           incidentRevision: 7,
           note: "Retry the current public signed-out course surface.",
-          idempotencyKey: "operator-recheck-123456"
+          idempotencyKey: "operator-recheck-123456",
         },
-        context
-      )
+        context,
+      ),
     ).rejects.toThrow("another course");
   });
 
@@ -266,22 +282,23 @@ describe("operator course monitoring mutations", () => {
           incidentCycle: 2,
           incidentRevision: 7,
           note: "Verify https://course.example/book?id=customer-1 and reply to golfer@example.com.",
-          idempotencyKey: "operator-recheck-123456"
+          idempotencyKey: "operator-recheck-123456",
         },
-        context
-      )
+        context,
+      ),
     ).resolves.toMatchObject({
       action: "request_recheck",
       applied: true,
-      replayed: false
+      replayed: false,
     });
 
-    const safeNote = "Verify https://course.example and reply to [redacted-email].";
+    const safeNote =
+      "Verify https://course.example and reply to [redacted-email].";
     expect(transactionMocks.courseSupportIncident.update).toHaveBeenCalledWith({
       where: {
         id: "incident-1",
         cycle: 2,
-        revision: 7
+        revision: 7,
       },
       data: {
         cycle: { increment: 1 },
@@ -293,27 +310,29 @@ describe("operator course monitoring mutations", () => {
         escalationDeadlineAt: expect.any(Date),
         lastSeenAt: expect.any(Date),
         nextAction: safeNote,
-        revision: { increment: 1 }
-      }
-    });
-    expect(transactionMocks.courseMonitoringStatus.update).toHaveBeenCalledWith({
-      where: {
-        courseId: "course-1",
-        revision: 4
+        revision: { increment: 1 },
       },
-      data: {
-        state: "AUTO_INVESTIGATING",
-        revalidationRequestedAt: expect.any(Date),
-        nextAutomaticAttemptAt: expect.any(Date),
-        stateChangedAt: expect.any(Date),
-        revision: { increment: 1 }
-      }
     });
+    expect(transactionMocks.courseMonitoringStatus.update).toHaveBeenCalledWith(
+      {
+        where: {
+          courseId: "course-1",
+          revision: 4,
+        },
+        data: {
+          state: "AUTO_INVESTIGATING",
+          revalidationRequestedAt: expect.any(Date),
+          nextAutomaticAttemptAt: expect.any(Date),
+          stateChangedAt: expect.any(Date),
+          revision: { increment: 1 },
+        },
+      },
+    );
     expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         eventType: "REVALIDATION_REQUESTED",
-        message: safeNote
-      })
+        message: safeNote,
+      }),
     });
   });
 
@@ -325,9 +344,9 @@ describe("operator course monitoring mutations", () => {
         supportIncident: {
           ...status().course.supportIncident,
           activeBatchId: "batch-closed",
-          activeBatch: { status: "PARTIAL" }
-        }
-      }
+          activeBatch: { status: "PARTIAL" },
+        },
+      },
     });
 
     await requestOperatorCourseRecheck(
@@ -337,15 +356,15 @@ describe("operator course monitoring mutations", () => {
         incidentCycle: 2,
         incidentRevision: 7,
         note: "Retry the current public signed-out course surface.",
-        idempotencyKey: "operator-recheck-closed-batch"
+        idempotencyKey: "operator-recheck-closed-batch",
       },
-      context
+      context,
     );
 
     expect(transactionMocks.courseSupportIncident.update).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ activeBatchId: null })
-      })
+        data: expect.objectContaining({ activeBatchId: null }),
+      }),
     );
   });
 
@@ -357,9 +376,9 @@ describe("operator course monitoring mutations", () => {
         supportIncident: {
           ...status().course.supportIncident,
           activeBatchId: "batch-live",
-          activeBatch: { status: "VERIFYING" }
-        }
-      }
+          activeBatch: { status: "VERIFYING" },
+        },
+      },
     });
 
     await requestOperatorCourseRecheck(
@@ -369,12 +388,13 @@ describe("operator course monitoring mutations", () => {
         incidentCycle: 2,
         incidentRevision: 7,
         note: "Retry the current public signed-out course surface.",
-        idempotencyKey: "operator-recheck-live-batch"
+        idempotencyKey: "operator-recheck-live-batch",
       },
-      context
+      context,
     );
 
-    const update = transactionMocks.courseSupportIncident.update.mock.calls.at(-1)?.[0];
+    const update =
+      transactionMocks.courseSupportIncident.update.mock.calls.at(-1)?.[0];
     expect(update.data).not.toHaveProperty("activeBatchId");
   });
 
@@ -386,9 +406,9 @@ describe("operator course monitoring mutations", () => {
         ...status().course,
         supportIncident: {
           ...status().course.supportIncident,
-          status: "RESOLVED"
-        }
-      }
+          status: "RESOLVED",
+        },
+      },
     });
 
     await requestOperatorCourseRecheck(
@@ -398,23 +418,24 @@ describe("operator course monitoring mutations", () => {
         incidentCycle: 2,
         incidentRevision: 7,
         note: "Revalidate the prior technical decision against the public surface.",
-        idempotencyKey: "operator-final-recheck-123456"
+        idempotencyKey: "operator-final-recheck-123456",
       },
-      context
+      context,
     );
 
     expect(transactionMocks.courseSupportIncident.update).toHaveBeenCalledWith({
       where: {
         id: "incident-1",
         cycle: 2,
-        revision: 7
+        revision: 7,
       },
       data: {
         nextAttemptAt: expect.any(Date),
         lastSeenAt: expect.any(Date),
-        nextAction: "Revalidate the prior technical decision against the public surface.",
-        revision: { increment: 1 }
-      }
+        nextAction:
+          "Revalidate the prior technical decision against the public surface.",
+        revision: { increment: 1 },
+      },
     });
   });
 
@@ -424,16 +445,17 @@ describe("operator course monitoring mutations", () => {
       course: {
         ...status().course,
         detectedPlatform: "CUSTOM",
-        detectedBookingUrl: "https://future-course.cps.golf/onlineresweb/search-teetime",
-        providerFamilyKey: "CPS"
-      }
+        detectedBookingUrl:
+          "https://future-course.cps.golf/onlineresweb/search-teetime",
+        providerFamilyKey: "CPS",
+      },
     });
     prismaMocks.teeSearch.findMany.mockResolvedValue([
       {
         id: "search-1",
         date: new Date("2026-08-02T00:00:00.000Z"),
-        players: 3
-      }
+        players: 3,
+      },
     ]);
     await expect(
       requestOperatorCourseRecheck(
@@ -443,17 +465,19 @@ describe("operator course monitoring mutations", () => {
           incidentCycle: 2,
           incidentRevision: 7,
           note: "Retry the rendered public CPS tee sheet.",
-          idempotencyKey: "operator-recheck-cps-123456"
+          idempotencyKey: "operator-recheck-cps-123456",
         },
-        context
-      )
+        context,
+      ),
     ).resolves.toMatchObject({
       action: "request_recheck",
       localReaderQueued: false,
-      applied: true
+      applied: true,
     });
 
-    expect(localReaderMocks.queueLocalReaderCourseVerification).not.toHaveBeenCalled();
+    expect(
+      localReaderMocks.queueLocalReaderCourseVerification,
+    ).not.toHaveBeenCalled();
   });
 
   it("opens a fresh ordered cycle when an automatic investigation stalled", async () => {
@@ -466,16 +490,16 @@ describe("operator course monitoring mutations", () => {
           ...status().course.supportIncident,
           status: "AUTO_INVESTIGATING",
           humanReviewReason: "AUTOMATION_STALLED",
-          nextReminderAt: new Date("2026-08-11T18:00:00.000Z")
-        }
-      }
+          nextReminderAt: new Date("2026-08-11T18:00:00.000Z"),
+        },
+      },
     });
     prismaMocks.teeSearch.findMany.mockResolvedValue([
       {
         id: "search-stalled",
         date: new Date("2026-08-12T00:00:00.000Z"),
-        players: 2
-      }
+        players: 2,
+      },
     ]);
 
     await requestOperatorCourseRecheck(
@@ -485,9 +509,9 @@ describe("operator course monitoring mutations", () => {
         incidentCycle: 2,
         incidentRevision: 7,
         note: "Restart the ordered public signed-out verification.",
-        idempotencyKey: "operator-recheck-stalled"
+        idempotencyKey: "operator-recheck-stalled",
       },
-      context
+      context,
     );
 
     expect(transactionMocks.courseSupportIncident.update).toHaveBeenCalledWith({
@@ -497,17 +521,19 @@ describe("operator course monitoring mutations", () => {
         status: "AUTO_INVESTIGATING",
         humanReviewReason: null,
         nextReminderAt: null,
-        nextAttemptAt: expect.any(Date)
-      })
+        nextAttemptAt: expect.any(Date),
+      }),
     });
-    expect(transactionMocks.courseMonitoringStatus.update).toHaveBeenCalledWith({
-      where: { courseId: "course-1", revision: 4 },
-      data: expect.objectContaining({
-        state: "AUTO_INVESTIGATING",
-        revalidationRequestedAt: expect.any(Date),
-        nextAutomaticAttemptAt: expect.any(Date)
-      })
-    });
+    expect(transactionMocks.courseMonitoringStatus.update).toHaveBeenCalledWith(
+      {
+        where: { courseId: "course-1", revision: 4 },
+        data: expect.objectContaining({
+          state: "AUTO_INVESTIGATING",
+          revalidationRequestedAt: expect.any(Date),
+          nextAutomaticAttemptAt: expect.any(Date),
+        }),
+      },
+    );
     expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         fromState: "AUTO_INVESTIGATING",
@@ -515,12 +541,16 @@ describe("operator course monitoring mutations", () => {
         audit: expect.objectContaining({
           priorCycle: 2,
           cycle: 3,
-          authoritativeFinalRetained: false
-        })
-      })
+          authoritativeFinalRetained: false,
+        }),
+      }),
     });
-    expect(schedulerMocks.startSearchSchedule).toHaveBeenCalledWith("search-stalled");
-    expect(localReaderMocks.queueLocalReaderCourseVerification).not.toHaveBeenCalled();
+    expect(schedulerMocks.startSearchSchedule).toHaveBeenCalledWith(
+      "search-stalled",
+    );
+    expect(
+      localReaderMocks.queueLocalReaderCourseVerification,
+    ).not.toHaveBeenCalled();
   });
 
   it.each(["FINAL_MANUAL", "FINAL_IDENTITY"] as const)(
@@ -533,9 +563,9 @@ describe("operator course monitoring mutations", () => {
           ...status().course,
           supportIncident: {
             ...status().course.supportIncident,
-            status: "RESOLVED"
-          }
-        }
+            status: "RESOLVED",
+          },
+        },
       });
 
       await expect(
@@ -546,39 +576,56 @@ describe("operator course monitoring mutations", () => {
             incidentCycle: 2,
             incidentRevision: 7,
             note: "Retain the authoritative factual classification.",
-            idempotencyKey: `operator-recheck-${state.toLowerCase()}`
+            idempotencyKey: `operator-recheck-${state.toLowerCase()}`,
           },
-          context
-        )
+          context,
+        ),
       ).rejects.toThrow("factual final");
 
       expect(prismaMocks.$transaction).not.toHaveBeenCalled();
-      expect(transactionMocks.courseMonitoringStatus.update).not.toHaveBeenCalled();
-      expect(transactionMocks.courseSupportIncident.update).not.toHaveBeenCalled();
-      expect(transactionMocks.courseMonitoringEvent.create).not.toHaveBeenCalled();
-      expect(localReaderMocks.queueLocalReaderCourseVerification).not.toHaveBeenCalled();
-    }
+      expect(
+        transactionMocks.courseMonitoringStatus.update,
+      ).not.toHaveBeenCalled();
+      expect(
+        transactionMocks.courseSupportIncident.update,
+      ).not.toHaveBeenCalled();
+      expect(
+        transactionMocks.courseMonitoringEvent.create,
+      ).not.toHaveBeenCalled();
+      expect(
+        localReaderMocks.queueLocalReaderCourseVerification,
+      ).not.toHaveBeenCalled();
+    },
   );
 
   it("saves changed official links and starts ordered verification without a reader shortcut", async () => {
-    await expect(
-      updateOperatorCourseOfficialLinks(
-        {
-          reference,
-          statusRevision: 4,
-          incidentCycle: 2,
-          incidentRevision: 7,
-          providerFamilyKey: "FOREUP",
-          website: "https://new-course.example",
-          bookingUrl: "https://new-course.example/tee-times",
-          idempotencyKey: "operator-links-123456789"
-        },
-        context
-      )
-    ).resolves.toMatchObject({
+    const courseLock = createDeferred<Array<{ locked: boolean }>>();
+    transactionMocks.$queryRawUnsafe.mockReturnValueOnce(courseLock.promise);
+    const mutation = updateOperatorCourseOfficialLinks(
+      {
+        reference,
+        statusRevision: 4,
+        incidentCycle: 2,
+        incidentRevision: 7,
+        providerFamilyKey: "FOREUP",
+        website: "https://new-course.example",
+        bookingUrl: "https://new-course.example/tee-times",
+        idempotencyKey: "operator-links-123456789",
+      },
+      context,
+    );
+
+    await vi.waitFor(() =>
+      expect(transactionMocks.$queryRawUnsafe).toHaveBeenCalledOnce(),
+    );
+    expect(transactionMocks.course.update).not.toHaveBeenCalled();
+    expect(transactionMocks.teeTimeMatch.updateMany).not.toHaveBeenCalled();
+    courseLock.resolve([{ locked: true }]);
+
+    await expect(mutation).resolves.toMatchObject({
       action: "update_official_links",
       applied: true,
-      replayed: false
+      replayed: false,
     });
 
     expect(transactionMocks.course.update).toHaveBeenCalledWith({
@@ -587,33 +634,69 @@ describe("operator course monitoring mutations", () => {
         website: "https://new-course.example/",
         detectedBookingUrl: "https://new-course.example/tee-times",
         providerFamilyKey: "FOREUP",
-        automationEligibility: "NEEDS_REVIEW"
-      })
+        automationEligibility: "NEEDS_REVIEW",
+      }),
     });
-    expect(transactionMocks.courseMonitoringStatus.update).toHaveBeenCalledWith({
-      where: {
-        courseId: "course-1",
-        revision: 4
+    expect(transactionMocks.courseMonitoringStatus.update).toHaveBeenCalledWith(
+      {
+        where: {
+          courseId: "course-1",
+          revision: 4,
+        },
+        data: expect.objectContaining({
+          state: "AUTO_INVESTIGATING",
+          revalidationRequestedAt: expect.any(Date),
+          nextAutomaticAttemptAt: expect.any(Date),
+        }),
       },
-      data: expect.objectContaining({
-        state: "AUTO_INVESTIGATING",
-        revalidationRequestedAt: expect.any(Date),
-        nextAutomaticAttemptAt: expect.any(Date)
-      })
-    });
+    );
     expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
         eventType: "REVALIDATION_REQUESTED",
         evidenceUrl: "https://new-course.example/tee-times",
-        audit: expect.objectContaining({ priorCycle: 2, cycle: 3 })
-      })
+        audit: expect.objectContaining({ priorCycle: 2, cycle: 3 }),
+      }),
     });
     expect(transactionMocks.courseSupportIncident.update).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ cycle: { increment: 1 } })
-      })
+        data: expect.objectContaining({ cycle: { increment: 1 } }),
+      }),
     );
-    expect(localReaderMocks.queueLocalReaderCourseVerification).not.toHaveBeenCalled();
+    expect(transactionMocks.$queryRawUnsafe).toHaveBeenCalledWith(
+      expect.stringContaining("pg_advisory_xact_lock"),
+      "course-monitoring:course-1",
+    );
+    expect(transactionMocks.teeTimeMatch.updateMany).toHaveBeenNthCalledWith(
+      1,
+      {
+        where: {
+          courseId: "course-1",
+          availabilityStatus: "AVAILABLE",
+          alertStatus: "PENDING",
+        },
+        data: {
+          availabilityStatus: "GONE",
+          alertStatus: "SUPPRESSED",
+          unavailableAt: expect.any(Date),
+        },
+      },
+    );
+    expect(transactionMocks.teeTimeMatch.updateMany).toHaveBeenNthCalledWith(
+      2,
+      {
+        where: {
+          courseId: "course-1",
+          availabilityStatus: "AVAILABLE",
+        },
+        data: {
+          availabilityStatus: "GONE",
+          unavailableAt: expect.any(Date),
+        },
+      },
+    );
+    expect(
+      localReaderMocks.queueLocalReaderCourseVerification,
+    ).not.toHaveBeenCalled();
   });
 
   it("keeps a manually selected provider and queues verification when only it changes", async () => {
@@ -627,14 +710,14 @@ describe("operator course monitoring mutations", () => {
           providerFamilyKey: "CPS",
           website: "https://course.example",
           bookingUrl: "https://course.example/book",
-          idempotencyKey: "operator-provider-123456"
+          idempotencyKey: "operator-provider-123456",
         },
-        context
-      )
+        context,
+      ),
     ).resolves.toMatchObject({
       action: "update_official_links",
       providerFamilyKey: "CPS",
-      applied: true
+      applied: true,
     });
 
     expect(transactionMocks.course.update).toHaveBeenCalledWith({
@@ -642,40 +725,51 @@ describe("operator course monitoring mutations", () => {
       data: expect.objectContaining({
         providerFamilyKey: "CPS",
         detectedPlatform: "CUSTOM",
-        automationEligibility: "NEEDS_REVIEW"
-      })
+        automationEligibility: "NEEDS_REVIEW",
+      }),
     });
-    expect(transactionMocks.courseMonitoringStatus.update).toHaveBeenCalledWith({
-      where: {
-        courseId: "course-1",
-        revision: 4
+    expect(transactionMocks.courseMonitoringStatus.update).toHaveBeenCalledWith(
+      {
+        where: {
+          courseId: "course-1",
+          revision: 4,
+        },
+        data: expect.objectContaining({
+          state: "AUTO_INVESTIGATING",
+          revalidationRequestedAt: expect.any(Date),
+        }),
       },
-      data: expect.objectContaining({
-        state: "AUTO_INVESTIGATING",
-        revalidationRequestedAt: expect.any(Date)
-      })
-    });
+    );
   });
 
   it("records a private course as a final identity outcome", async () => {
-    await expect(
-      applyOperatorCourseDecision(
-        {
-          reference,
-          statusRevision: 4,
-          incidentCycle: 2,
-          incidentRevision: 7,
-          decision: "PRIVATE_COURSE",
-          evidenceUrl: "https://course.example/private-membership",
-          note: "The official course page confirms that public play is not available.",
-          idempotencyKey: "operator-private-123456"
-        },
-        context
-      )
-    ).resolves.toMatchObject({
+    const courseLock = createDeferred<Array<{ locked: boolean }>>();
+    transactionMocks.$queryRawUnsafe.mockReturnValueOnce(courseLock.promise);
+    const mutation = applyOperatorCourseDecision(
+      {
+        reference,
+        statusRevision: 4,
+        incidentCycle: 2,
+        incidentRevision: 7,
+        decision: "PRIVATE_COURSE",
+        evidenceUrl: "https://course.example/private-membership",
+        note: "The official course page confirms that public play is not available.",
+        idempotencyKey: "operator-private-123456",
+      },
+      context,
+    );
+
+    await vi.waitFor(() =>
+      expect(transactionMocks.$queryRawUnsafe).toHaveBeenCalledOnce(),
+    );
+    expect(transactionMocks.course.update).not.toHaveBeenCalled();
+    expect(transactionMocks.teeTimeMatch.updateMany).not.toHaveBeenCalled();
+    courseLock.resolve([{ locked: true }]);
+
+    await expect(mutation).resolves.toMatchObject({
       action: "set_course_outcome",
       decision: "PRIVATE_COURSE",
-      applied: true
+      applied: true,
     });
 
     expect(transactionMocks.course.update).toHaveBeenCalledWith({
@@ -683,32 +777,43 @@ describe("operator course monitoring mutations", () => {
       data: expect.objectContaining({
         isPublic: false,
         automationEligibility: "BLOCKED",
-        monitoringMode: "CONTACT_ONLY"
-      })
+        monitoringMode: "CONTACT_ONLY",
+      }),
     });
-    expect(transactionMocks.courseMonitoringStatus.update).toHaveBeenCalledWith({
-      where: {
-        courseId: "course-1",
-        revision: 4
+    expect(transactionMocks.courseMonitoringStatus.update).toHaveBeenCalledWith(
+      {
+        where: {
+          courseId: "course-1",
+          revision: 4,
+        },
+        data: expect.objectContaining({
+          state: "FINAL_IDENTITY",
+          nextAutomaticAttemptAt: null,
+        }),
       },
-      data: expect.objectContaining({
-        state: "FINAL_IDENTITY",
-        nextAutomaticAttemptAt: null
-      })
-    });
+    );
     expect(transactionMocks.courseSupportIncident.update).toHaveBeenCalledWith({
       where: {
         id: "incident-1",
         cycle: 2,
-        revision: 7
+        revision: 7,
       },
       data: expect.objectContaining({
         status: "RESOLVED",
         resolution: "IDENTITY_CLASSIFIED",
-        humanReviewReason: null
-      })
+        humanReviewReason: null,
+      }),
     });
-    expect(transactionMocks.courseAutomationDiscovery.create).toHaveBeenCalledWith({
+    expect(transactionMocks.teeTimeMatch.updateMany).toHaveBeenCalledTimes(2);
+    expect(
+      transactionMocks.courseMonitoringStatus.update.mock
+        .invocationCallOrder[0],
+    ).toBeLessThan(
+      transactionMocks.teeTimeMatch.updateMany.mock.invocationCallOrder[0],
+    );
+    expect(
+      transactionMocks.courseAutomationDiscovery.create,
+    ).toHaveBeenCalledWith({
       data: expect.objectContaining({
         status: "VERIFIED",
         sourceUrl: "https://course.example/private-membership",
@@ -720,9 +825,9 @@ describe("operator course monitoring mutations", () => {
         evidence: expect.objectContaining({
           action: "set_course_outcome",
           classification: "PRIVATE_COURSE",
-          note: "The official course page confirms that public play is not available."
-        })
-      })
+          note: "The official course page confirms that public play is not available.",
+        }),
+      }),
     });
   });
 
@@ -737,10 +842,10 @@ describe("operator course monitoring mutations", () => {
           decision: "PHONE_OR_MANUAL",
           evidenceUrl: "https://user:secret@course.example/tee-time-faq",
           note: "The official FAQ confirms the manual reservation process.",
-          idempotencyKey: "operator-manual-unsafe"
+          idempotencyKey: "operator-manual-unsafe",
         },
-        context
-      )
+        context,
+      ),
     ).rejects.toThrow("without credentials");
     expect(prismaMocks.courseMonitoringStatus.findFirst).not.toHaveBeenCalled();
   });
@@ -754,12 +859,13 @@ describe("operator course monitoring mutations", () => {
           incidentCycle: 2,
           incidentRevision: 7,
           decision: "PHONE_OR_MANUAL",
-          evidenceUrl: "https://course.example/tee-time-faq#access_token=secret",
+          evidenceUrl:
+            "https://course.example/tee-time-faq#access_token=secret",
           note: "The official FAQ confirms the manual reservation process.",
-          idempotencyKey: "operator-manual-fragment"
+          idempotencyKey: "operator-manual-fragment",
         },
-        context
-      )
+        context,
+      ),
     ).rejects.toThrow("sensitive fragment data");
     expect(prismaMocks.courseMonitoringStatus.findFirst).not.toHaveBeenCalled();
   });
@@ -767,7 +873,7 @@ describe("operator course monitoring mutations", () => {
   it("records a manual course with exact evidence without discarding known provider data", async () => {
     const publicBookingMetadata = {
       bookingBaseUrl: "https://booking.course.example/",
-      facilityId: "public-facility-17"
+      facilityId: "public-facility-17",
     };
     prismaMocks.courseMonitoringStatus.findFirst.mockResolvedValue({
       ...status(),
@@ -776,8 +882,8 @@ describe("operator course monitoring mutations", () => {
         detectedPlatform: "CUSTOM",
         providerFamilyKey: "DRIVERPOS",
         bookingMetadata: publicBookingMetadata,
-        policyNotes: "Prior public provider evidence."
-      }
+        policyNotes: "Prior public provider evidence.",
+      },
     });
 
     await expect(
@@ -790,14 +896,14 @@ describe("operator course monitoring mutations", () => {
           decision: "PHONE_OR_MANUAL",
           evidenceUrl: cabqFaqUrl,
           note: "The official FAQ says reservations alternate between in-person and phone requests.",
-          idempotencyKey: "operator-manual-1234567"
+          idempotencyKey: "operator-manual-1234567",
         },
-        context
-      )
+        context,
+      ),
     ).resolves.toMatchObject({
       action: "set_course_outcome",
       decision: "PHONE_OR_MANUAL",
-      applied: true
+      applied: true,
     });
 
     const courseUpdate = transactionMocks.course.update.mock.calls.at(-1)?.[0];
@@ -808,30 +914,32 @@ describe("operator course monitoring mutations", () => {
         bookingAccessMode: "CONTACT_COURSE",
         automationEligibility: "BLOCKED",
         automationReason: "NO_ONLINE_BOOKING",
-        monitoringMode: "CONTACT_ONLY"
-      })
+        monitoringMode: "CONTACT_ONLY",
+      }),
     });
     expect(courseUpdate.data).toMatchObject({
       detectedBookingUrl: null,
       detectedPlatform: "UNKNOWN",
-      providerFamilyKey: "SOURCE_MISSING"
+      providerFamilyKey: "SOURCE_MISSING",
     });
     expect(courseUpdate.data.bookingMetadata).toBe(Prisma.DbNull);
     expect(transactionMocks.courseSupportIncident.update).toHaveBeenCalledWith({
       where: {
         id: "incident-1",
         cycle: 2,
-        revision: 7
+        revision: 7,
       },
       data: expect.objectContaining({
         status: "RESOLVED",
         resolution: "DIRECT_BOOKING_CLASSIFIED",
         decisionEvidenceUrl: cabqFaqUrl,
         decisionNote:
-          "The official FAQ says reservations alternate between in-person and phone requests."
-      })
+          "The official FAQ says reservations alternate between in-person and phone requests.",
+      }),
     });
-    expect(transactionMocks.courseAutomationDiscovery.create).toHaveBeenCalledWith({
+    expect(
+      transactionMocks.courseAutomationDiscovery.create,
+    ).toHaveBeenCalledWith({
       data: expect.objectContaining({
         status: "VERIFIED",
         sourceUrl: cabqFaqUrl,
@@ -850,16 +958,16 @@ describe("operator course monitoring mutations", () => {
             detectedBookingUrl: "https://course.example/book",
             providerFamilyKey: "DRIVERPOS",
             bookingMetadata: publicBookingMetadata,
-            bookingMetadataDisposition: "PRESERVED_PUBLIC"
+            bookingMetadataDisposition: "PRESERVED_PUBLIC",
           }),
           currentProjection: expect.objectContaining({
             detectedPlatform: "UNKNOWN",
             providerFamilyKey: "SOURCE_MISSING",
             bookingUrl: null,
-            bookingMetadata: "CLEARED"
-          })
-        })
-      })
+            bookingMetadata: "CLEARED",
+          }),
+        }),
+      }),
     });
     expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
@@ -872,9 +980,9 @@ describe("operator course monitoring mutations", () => {
           action: "set_course_outcome",
           cycle: 2,
           confirmedAt: "2026-08-20T12:00:00.000Z",
-          automatedFinal: false
-        })
-      })
+          automatedFinal: false,
+        }),
+      }),
     });
   });
 
@@ -889,9 +997,9 @@ describe("operator course monitoring mutations", () => {
         providerFamilyKey: "COURSE_EXAMPLE",
         bookingMetadata: {
           bookingBaseUrl: "https://course.example/manual-request",
-          facilityId: "public-facility-17"
-        }
-      }
+          facilityId: "public-facility-17",
+        },
+      },
     });
 
     await applyOperatorCourseDecision(
@@ -903,9 +1011,9 @@ describe("operator course monitoring mutations", () => {
         decision: "PHONE_OR_MANUAL",
         evidenceUrl: manualActionUrl,
         note: "The official request page confirms that the course handles reservations directly.",
-        idempotencyKey: "operator-manual-action-page"
+        idempotencyKey: "operator-manual-action-page",
       },
-      context
+      context,
     );
 
     const courseUpdate = transactionMocks.course.update.mock.calls.at(-1)?.[0];
@@ -914,17 +1022,19 @@ describe("operator course monitoring mutations", () => {
       detectedPlatform: "CUSTOM",
       providerFamilyKey: "COURSE_EXAMPLE",
       bookingMethod: "CONTACT_COURSE",
-      bookingAccessMode: "CONTACT_COURSE"
+      bookingAccessMode: "CONTACT_COURSE",
     });
     expect(courseUpdate.data.bookingMetadata).toBe(Prisma.DbNull);
-    expect(transactionMocks.courseAutomationDiscovery.create).toHaveBeenCalledWith({
+    expect(
+      transactionMocks.courseAutomationDiscovery.create,
+    ).toHaveBeenCalledWith({
       data: expect.objectContaining({
         detectedPlatform: "CUSTOM",
         bookingUrl: manualActionUrl,
         bookingPhone: "555-0100",
         bookingMethod: "CONTACT_COURSE",
-        bookingAccessMode: "CONTACT_COURSE"
-      })
+        bookingAccessMode: "CONTACT_COURSE",
+      }),
     });
   });
 
@@ -935,9 +1045,9 @@ describe("operator course monitoring mutations", () => {
         ...status().course,
         bookingMetadata: {
           bookingBaseUrl: "https://course.example/manual-request",
-          accessToken: "must-not-be-retained"
-        }
-      }
+          accessToken: "must-not-be-retained",
+        },
+      },
     });
 
     await applyOperatorCourseDecision(
@@ -949,26 +1059,28 @@ describe("operator course monitoring mutations", () => {
         decision: "PHONE_OR_MANUAL",
         evidenceUrl: cabqFaqUrl,
         note: "The official FAQ confirms the manual reservation process.",
-        idempotencyKey: "operator-manual-private-metadata"
+        idempotencyKey: "operator-manual-private-metadata",
       },
-      context
+      context,
     );
 
-    expect(transactionMocks.courseAutomationDiscovery.create).toHaveBeenCalledWith({
+    expect(
+      transactionMocks.courseAutomationDiscovery.create,
+    ).toHaveBeenCalledWith({
       data: expect.objectContaining({
         evidence: expect.objectContaining({
           priorCourseSnapshot: expect.objectContaining({
             bookingMetadata: null,
-            bookingMetadataDisposition: "OMITTED_NON_PUBLIC"
-          })
-        })
-      })
+            bookingMetadataDisposition: "OMITTED_NON_PUBLIC",
+          }),
+        }),
+      }),
     });
   });
 
   it("does not append duplicate final evidence for an idempotent replay", async () => {
     prismaMocks.courseMonitoringEvent.findUnique.mockResolvedValue({
-      courseId: "course-1"
+      courseId: "course-1",
     });
 
     await expect(
@@ -981,14 +1093,16 @@ describe("operator course monitoring mutations", () => {
           decision: "PHONE_OR_MANUAL",
           evidenceUrl: cabqFaqUrl,
           note: "The official FAQ confirms the manual reservation process.",
-          idempotencyKey: "operator-manual-idempotent"
+          idempotencyKey: "operator-manual-idempotent",
         },
-        context
-      )
+        context,
+      ),
     ).resolves.toMatchObject({ applied: false, replayed: true });
 
     expect(prismaMocks.$transaction).not.toHaveBeenCalled();
-    expect(transactionMocks.courseAutomationDiscovery.create).not.toHaveBeenCalled();
+    expect(
+      transactionMocks.courseAutomationDiscovery.create,
+    ).not.toHaveBeenCalled();
   });
 
   it("rejects a technical final when the current incident cycle lacks playbook proof", async () => {
@@ -1002,10 +1116,10 @@ describe("operator course monitoring mutations", () => {
           reason: "CAPTCHA_OR_QUEUE",
           evidenceUrl: "https://course.example/evidence",
           note: "Confirmed the current signed-out technical limitation.",
-          idempotencyKey: "operator-technical-final-reject"
+          idempotencyKey: "operator-technical-final-reject",
         },
-        context
-      )
+        context,
+      ),
     ).rejects.toThrow(/terminal local-reader proof/i);
     expect(prismaMocks.$transaction).not.toHaveBeenCalled();
   });
@@ -1017,9 +1131,9 @@ describe("operator course monitoring mutations", () => {
         ...status().course,
         supportIncident: {
           ...status().course.supportIncident,
-          attemptLedger: technicalFinalLedger()
-        }
-      }
+          attemptLedger: technicalFinalLedger(),
+        },
+      },
     });
 
     await expect(
@@ -1032,28 +1146,30 @@ describe("operator course monitoring mutations", () => {
           reason: "CAPTCHA_OR_QUEUE",
           evidenceUrl: "https://course.example/evidence",
           note: "Confirmed the current signed-out technical limitation.",
-          idempotencyKey: "operator-technical-final-accept"
+          idempotencyKey: "operator-technical-final-accept",
         },
-        context
-      )
+        context,
+      ),
     ).resolves.toMatchObject({
       action: "approve_technical_final",
-      applied: true
+      applied: true,
     });
     expect(transactionMocks.courseMonitoringStatus.update).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ state: "FINAL_TECHNICAL" })
-      })
+        data: expect.objectContaining({ state: "FINAL_TECHNICAL" }),
+      }),
     );
     expect(transactionMocks.courseSupportIncident.update).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           status: "RESOLVED",
-          resolution: "HUMAN_VERIFIED_TECHNICAL_LIMITATION"
-        })
-      })
+          resolution: "HUMAN_VERIFIED_TECHNICAL_LIMITATION",
+        }),
+      }),
     );
-    expect(transactionMocks.courseAutomationDiscovery.create).toHaveBeenCalledWith({
+    expect(
+      transactionMocks.courseAutomationDiscovery.create,
+    ).toHaveBeenCalledWith({
       data: expect.objectContaining({
         status: "VERIFIED",
         sourceUrl: "https://course.example/evidence",
@@ -1064,9 +1180,9 @@ describe("operator course monitoring mutations", () => {
         evidence: expect.objectContaining({
           action: "approve_technical_final",
           classification: "CAPTCHA_OR_QUEUE",
-          note: "Confirmed the current signed-out technical limitation."
-        })
-      })
+          note: "Confirmed the current signed-out technical limitation.",
+        }),
+      }),
     });
     expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
@@ -1076,9 +1192,9 @@ describe("operator course monitoring mutations", () => {
           action: "approve_technical_final",
           cycle: 2,
           confirmedAt: "2026-08-20T12:00:00.000Z",
-          automatedFinal: false
-        })
-      })
+          automatedFinal: false,
+        }),
+      }),
     });
   });
 
@@ -1093,15 +1209,15 @@ describe("operator course monitoring mutations", () => {
           incidentCycle: 2,
           incidentRevision: 7,
           decision: "WEBSITE_TEMPORARILY_UNAVAILABLE",
-          idempotencyKey: "operator-temporary-123456"
+          idempotencyKey: "operator-temporary-123456",
         },
-        context
-      )
+        context,
+      ),
     ).resolves.toMatchObject({
       action: "set_course_outcome",
       decision: "WEBSITE_TEMPORARILY_UNAVAILABLE",
       retryAt: expect.any(Date),
-      applied: true
+      applied: true,
     });
 
     expect(transactionMocks.course.update).toHaveBeenCalledWith({
@@ -1109,36 +1225,41 @@ describe("operator course monitoring mutations", () => {
       data: expect.objectContaining({
         automationEligibility: "NEEDS_REVIEW",
         automationReason: "TEMPORARILY_UNAVAILABLE",
-        intelligenceReviewAt: expect.any(Date)
-      })
+        intelligenceReviewAt: expect.any(Date),
+      }),
     });
-    expect(transactionMocks.courseMonitoringStatus.update).toHaveBeenCalledWith({
-      where: {
-        courseId: "course-1",
-        revision: 4
+    expect(transactionMocks.courseMonitoringStatus.update).toHaveBeenCalledWith(
+      {
+        where: {
+          courseId: "course-1",
+          revision: 4,
+        },
+        data: expect.objectContaining({
+          state: "DEGRADED_RETRYING",
+          nextAutomaticAttemptAt: expect.any(Date),
+          revalidationRequestedAt: null,
+        }),
       },
-      data: expect.objectContaining({
-        state: "DEGRADED_RETRYING",
-        nextAutomaticAttemptAt: expect.any(Date),
-        revalidationRequestedAt: null
-      })
-    });
-    const retryAt = transactionMocks.courseMonitoringStatus.update.mock.calls.at(-1)?.[0].data
-      .nextAutomaticAttemptAt as Date;
-    expect(retryAt.getTime()).toBeGreaterThanOrEqual(retryStartedAt + 6 * 60 * 60 * 1000);
+    );
+    const retryAt =
+      transactionMocks.courseMonitoringStatus.update.mock.calls.at(-1)?.[0].data
+        .nextAutomaticAttemptAt as Date;
+    expect(retryAt.getTime()).toBeGreaterThanOrEqual(
+      retryStartedAt + 6 * 60 * 60 * 1000,
+    );
     expect(transactionMocks.courseSupportIncident.update).toHaveBeenCalledWith({
       where: {
         id: "incident-1",
         cycle: 2,
-        revision: 7
+        revision: 7,
       },
       data: expect.objectContaining({
         status: "AUTO_INVESTIGATING",
         kind: "FETCH_FAILED",
         nextAttemptAt: retryAt,
         resolvedAt: null,
-        resolution: null
-      })
+        resolution: null,
+      }),
     });
     expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
@@ -1147,15 +1268,15 @@ describe("operator course monitoring mutations", () => {
         outcome: "FETCH_FAILED",
         audit: expect.objectContaining({
           decision: "WEBSITE_TEMPORARILY_UNAVAILABLE",
-          timerBasedRevalidation: true
-        })
-      })
+          timerBasedRevalidation: true,
+        }),
+      }),
     });
   });
 
   it("routes the course to the local reader and queues a fresh reader check", async () => {
     localReaderMocks.queueLocalReaderCourseVerification.mockResolvedValue({
-      id: "local-reader-job-2"
+      id: "local-reader-job-2",
     });
 
     await expect(
@@ -1166,43 +1287,45 @@ describe("operator course monitoring mutations", () => {
           incidentCycle: 2,
           incidentRevision: 7,
           decision: "LOCAL_READER",
-          idempotencyKey: "operator-reader-1234567"
+          idempotencyKey: "operator-reader-1234567",
         },
-        context
-      )
+        context,
+      ),
     ).resolves.toMatchObject({
       action: "set_course_outcome",
       decision: "LOCAL_READER",
       localReaderQueued: true,
-      applied: true
+      applied: true,
     });
 
     expect(transactionMocks.course.update).toHaveBeenCalledWith({
       where: { id: "course-1" },
       data: expect.objectContaining({
         monitoringMode: "LOCAL_READER_ONLY",
-        automationEligibility: "NEEDS_REVIEW"
-      })
+        automationEligibility: "NEEDS_REVIEW",
+      }),
     });
     expect(transactionMocks.courseSupportIncident.update).toHaveBeenCalledWith({
       where: {
         id: "incident-1",
         cycle: 2,
-        revision: 7
+        revision: 7,
       },
       data: expect.objectContaining({
         cycle: { increment: 1 },
         status: "AUTO_INVESTIGATING",
         kind: "READER_CANDIDATE",
-        failureClass: "READER_PARSER_MISSING"
-      })
+        failureClass: "READER_PARSER_MISSING",
+      }),
     });
-    expect(localReaderMocks.queueLocalReaderCourseVerification).toHaveBeenCalledWith({
+    expect(
+      localReaderMocks.queueLocalReaderCourseVerification,
+    ).toHaveBeenCalledWith({
       courseId: "course-1",
       targetDate: expect.any(String),
       players: 2,
       bookingUrl: "https://course.example/book",
-      force: true
+      force: true,
     });
   });
 
@@ -1217,22 +1340,28 @@ describe("operator course monitoring mutations", () => {
           incidentCycle: 2,
           incidentRevision: 7,
           decision: "LOCAL_READER",
-          idempotencyKey: "operator-reader-unsupported"
+          idempotencyKey: "operator-reader-unsupported",
         },
-        context
-      )
+        context,
+      ),
     ).rejects.toThrow("not supported by the local tee-time reader yet");
 
-    expect(localReaderMocks.queueLocalReaderCourseVerification).toHaveBeenCalledWith({
+    expect(
+      localReaderMocks.queueLocalReaderCourseVerification,
+    ).toHaveBeenCalledWith({
       courseId: "course-1",
       targetDate: expect.any(String),
       players: 2,
       bookingUrl: "https://course.example/book",
-      force: true
+      force: true,
     });
     expect(prismaMocks.$transaction).not.toHaveBeenCalled();
     expect(transactionMocks.course.update).not.toHaveBeenCalled();
-    expect(transactionMocks.courseMonitoringStatus.update).not.toHaveBeenCalled();
-    expect(transactionMocks.courseSupportIncident.update).not.toHaveBeenCalled();
+    expect(
+      transactionMocks.courseMonitoringStatus.update,
+    ).not.toHaveBeenCalled();
+    expect(
+      transactionMocks.courseSupportIncident.update,
+    ).not.toHaveBeenCalled();
   });
 });

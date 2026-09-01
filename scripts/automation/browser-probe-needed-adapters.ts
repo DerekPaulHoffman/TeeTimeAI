@@ -10,6 +10,7 @@ import {
   type Request,
   type Route,
 } from "@playwright/test";
+import type { Prisma } from "@prisma/client";
 
 import {
   buildBrowserDiscovery,
@@ -73,6 +74,14 @@ import {
   type CourseSupportBrowserPersistenceGuard,
 } from "@/lib/automation/course-support-browser-stages";
 import { resolveProviderCapability } from "@/lib/automation/provider-capabilities";
+import {
+  beginCourseProviderObservation,
+  markCourseProviderObservationUnreconciled,
+  releaseCourseProviderObservation,
+  renewCourseProviderObservationInTransaction,
+  startCourseProviderObservationHeartbeat,
+  type CourseProviderObservationLease,
+} from "@/lib/automation/provider-execution-marker";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 import { getAutomationRuntimeVersion } from "@/lib/automation/runtime-version";
 import { sanitizeResponderText } from "@/lib/automation/course-support-responder-policy";
@@ -94,6 +103,109 @@ export type BrowserProbeOptions = ReturnType<typeof parseOptions> & {
 };
 
 export type PersistableBrowserStageFailure = "TIMEOUT" | "NETWORK";
+
+type BrowserProviderObservationDependencies = {
+  begin: typeof beginCourseProviderObservation;
+  markUnreconciled: typeof markCourseProviderObservationUnreconciled;
+  release: typeof releaseCourseProviderObservation;
+  renewInTransaction: typeof renewCourseProviderObservationInTransaction;
+  startHeartbeat: typeof startCourseProviderObservationHeartbeat;
+};
+
+const browserProviderObservationDependencies: BrowserProviderObservationDependencies = {
+  begin: beginCourseProviderObservation,
+  markUnreconciled: markCourseProviderObservationUnreconciled,
+  release: releaseCourseProviderObservation,
+  renewInTransaction: renewCourseProviderObservationInTransaction,
+  startHeartbeat: startCourseProviderObservationHeartbeat
+};
+
+export type PersistedBrowserProviderObservation = {
+  lease: CourseProviderObservationLease;
+  observationStartedAt: Date;
+  markProviderExecutionStarted: () => void;
+  assertObservationOwned: () => void;
+  assertObservationOwnedInTransaction: (
+    transaction: Prisma.TransactionClient,
+  ) => Promise<void>;
+  settle: () => Promise<void>;
+};
+
+/**
+ * Holds the per-course delivery fence from before rendered provider I/O until
+ * that exact source is either projected into canonical course state or left as
+ * a durable unresolved source for a later search check to reconcile.
+ */
+export async function beginPersistedBrowserProviderObservation(
+  courseId: string,
+  dependencies: BrowserProviderObservationDependencies =
+    browserProviderObservationDependencies
+): Promise<PersistedBrowserProviderObservation | null> {
+  const lease = await dependencies.begin({ courseId });
+  if (!lease) return null;
+
+  const heartbeat = dependencies.startHeartbeat(lease);
+  let providerExecutionStarted = false;
+  let settlement: Promise<void> | null = null;
+
+  const settle = async () => {
+    let settlementError: unknown = null;
+    try {
+      await heartbeat.stop();
+    } catch (error) {
+      settlementError = error;
+    }
+
+    try {
+      if (providerExecutionStarted) {
+        const retained = await dependencies.markUnreconciled(lease);
+        if (!retained) {
+          throw new Error(
+            "Rendered provider source could not be retained for reconciliation."
+          );
+        }
+      } else if (lease.supersededUnresolvedObservationStartedAt) {
+        const retained = await dependencies.markUnreconciled(lease, {
+          preserveSupersededSource: true
+        });
+        if (!retained) {
+          throw new Error(
+            "Superseded rendered provider source could not be retained."
+          );
+        }
+      } else {
+        await dependencies.release(lease);
+      }
+    } catch (error) {
+      settlementError ??= error;
+    }
+
+    if (settlementError) throw settlementError;
+  };
+
+  return {
+    lease,
+    observationStartedAt: lease.observationStartedAt,
+    markProviderExecutionStarted() {
+      providerExecutionStarted = true;
+    },
+    assertObservationOwned() {
+      heartbeat.assertOwned();
+    },
+    async assertObservationOwnedInTransaction(transaction) {
+      heartbeat.assertOwned();
+      if (!(await dependencies.renewInTransaction(transaction, lease))) {
+        throw new Error(
+          "Rendered provider observation ownership expired before persistence completed."
+        );
+      }
+    },
+    settle() {
+      settlement ??= settle();
+      return settlement;
+    }
+  };
+}
 
 const TRANSIENT_NETWORK_ERROR_CODES = new Set([
   "ECONNABORTED",
@@ -366,6 +478,8 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
           options.signal,
           closeContext
         );
+        let providerObservation: PersistedBrowserProviderObservation | null =
+          null;
         let playbookRuntime: Awaited<
           ReturnType<typeof loadCourseMonitoringPlaybookRuntime>
         > = null;
@@ -374,6 +488,7 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
           mutate: () => Promise<T>,
         ) => {
           throwIfBrowserProbeAborted(options.signal);
+          providerObservation?.assertObservationOwned();
           const result = await runGuardedCourseSupportBrowserMutation({
             courseId: target.course.id,
             requireCurrentStage,
@@ -403,7 +518,18 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
             );
             continue;
           }
-          const investigationObservedAt = new Date();
+          if (!options.dryRun) {
+            providerObservation =
+              await beginPersistedBrowserProviderObservation(target.course.id);
+            if (!providerObservation) {
+              notes.push(
+                `${target.course.name}: deferred because another fresh provider observation is already in progress.`
+              );
+              continue;
+            }
+          }
+          const investigationObservedAt =
+            providerObservation?.observationStartedAt ?? new Date();
           const observedProviderSnapshotFingerprint =
             target.course.providerSnapshotFingerprint;
           if (
@@ -465,8 +591,9 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
           }).providerFamilyKey;
           const providerExecution = await runWithProviderRequestLease(
             providerFamilyKey,
-            () =>
-              runPersistableBrowserOperation(() =>
+            () => {
+              providerObservation?.markProviderExecutionStarted();
+              return runPersistableBrowserOperation(() =>
                 collectBrowserEvidence(
                   page,
                   {
@@ -493,8 +620,9 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
                     },
                     signal: options.signal,
                   },
-                ),
-              ),
+                )
+              );
+            }
           );
           if (!providerExecution.acquired) {
             if (options.dryRun) {
@@ -538,6 +666,7 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
             );
             continue;
           }
+          providerObservation?.assertObservationOwned();
           const actionableDiscovery = attachBrowserInvestigationAudit(
             sanitizeBrowserDiscoveryAccessEvidence(
               keepPolicyOnlyDiscoveryActionable(enrichment.discovery),
@@ -577,6 +706,7 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
                 options.persistenceFence!,
                 runtimeVersion,
                 observedProviderSnapshotFingerprint!,
+                providerObservation!.lease,
                 investigationObservedAt,
               ),
             );
@@ -654,6 +784,10 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
                               }
                             : {}),
                           source: "COURSE_SUPPORT_RESPONDER",
+                          onBeforeSourceWrite: (transaction) =>
+                            providerObservation!.assertObservationOwnedInTransaction(
+                              transaction,
+                            ),
                           ...buildBrowserPlaybookTransition({
                             stage: playbookStage,
                             technicalReason: browserTechnicalReason,
@@ -715,6 +849,10 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
                     failureClass,
                     runtimeVersion,
                     source: "COURSE_SUPPORT_RESPONDER",
+                    onBeforeSourceWrite: (transaction) =>
+                      providerObservation!.assertObservationOwnedInTransaction(
+                        transaction,
+                      ),
                   },
                   options.persistenceFence,
                 ),
@@ -731,8 +869,12 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
             throw error;
           }
         } finally {
-          removeContextAbortCleanup();
-          await closeContext();
+          try {
+            await providerObservation?.settle();
+          } finally {
+            removeContextAbortCleanup();
+            await closeContext();
+          }
         }
       }
     } finally {

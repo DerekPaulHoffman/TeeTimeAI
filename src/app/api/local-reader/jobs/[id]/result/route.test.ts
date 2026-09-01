@@ -4,8 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   assertLocalReaderRequest: vi.fn(),
   completeLocalReaderJob: vi.fn(),
-  hasDatabaseConfig: vi.fn(),
-  startSearchSchedule: vi.fn()
+  hasDatabaseConfig: vi.fn()
 }));
 
 vi.mock("@/lib/env", () => ({
@@ -16,9 +15,6 @@ vi.mock("@/lib/local-reader/auth", () => ({
 }));
 vi.mock("@/lib/local-reader/service", () => ({
   completeLocalReaderJob: mocks.completeLocalReaderJob
-}));
-vi.mock("@/lib/automation/search-scheduler", () => ({
-  startSearchSchedule: mocks.startSearchSchedule
 }));
 
 import { POST } from "./route";
@@ -39,7 +35,10 @@ function request() {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      "x-local-reader-lease": "lease-1"
+      "x-local-reader-lease": "lease-1",
+      "x-local-reader-timestamp": String(
+        Date.parse("2026-07-27T16:00:00.000Z")
+      )
     },
     body: JSON.stringify(result)
   });
@@ -52,12 +51,12 @@ describe("local reader result route", () => {
     mocks.hasDatabaseConfig.mockReturnValue(true);
     mocks.completeLocalReaderJob.mockResolvedValue({
       searchId: "search-1",
-      completedAt: new Date("2026-07-27T16:00:00.000Z")
+      completedAt: new Date("2026-07-27T16:00:00.000Z"),
+      resumeScheduleVersion: 8
     });
-    mocks.startSearchSchedule.mockResolvedValue({ runId: "run-1" });
   });
 
-  it("resumes the owning search after durable result completion", async () => {
+  it("acknowledges only after result completion durably queues the owning search", async () => {
     const response = await POST(request(), {
       params: Promise.resolve({ id: "job-1" })
     });
@@ -67,11 +66,16 @@ describe("local reader result route", () => {
       status: "COMPLETED",
       completedAt: "2026-07-27T16:00:00.000Z"
     });
-    expect(mocks.startSearchSchedule).toHaveBeenCalledWith("search-1");
+    expect(mocks.completeLocalReaderJob).toHaveBeenCalledWith({
+      jobId: "job-1",
+      leaseToken: "lease-1",
+      result,
+      receivedAt: expect.any(Date),
+      deviceRequestAt: new Date("2026-07-27T16:00:00.000Z")
+    });
   });
 
-  it("keeps a completed result durable when workflow restart is temporarily unavailable", async () => {
-    mocks.startSearchSchedule.mockRejectedValue(new Error("workflow unavailable"));
+  it("does not perform a second best-effort scheduler mutation after durable completion", async () => {
 
     const response = await POST(request(), {
       params: Promise.resolve({ id: "job-1" })

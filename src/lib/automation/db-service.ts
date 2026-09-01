@@ -3,23 +3,32 @@ import { randomUUID } from "node:crypto";
 import {
   Prisma,
   type CourseMonitoringEventSource,
-  type CourseSupportIncidentStatus
+  type CourseSupportIncidentStatus,
 } from "@prisma/client";
 
 import type { BookingWindowEvidence } from "@/lib/courses/booking-window";
-import { normalizeLayoutHoleCounts, type CourseLayoutHoleCount } from "@/lib/courses/course-layout";
+import {
+  normalizeLayoutHoleCounts,
+  type CourseLayoutHoleCount,
+} from "@/lib/courses/course-layout";
 import { resolveBookingAccessMode } from "@/lib/courses/intelligence";
 import {
   lockSearchForAlertMutation,
   lockSearchForEmailReconciliation,
-  suppressSearchEmailDeliveriesForMatches
+  reactivateTerminalUnresolvedMatchDeliveries,
+  suppressSearchEmailDeliveriesForMatches,
 } from "@/lib/email/search-delivery-outbox";
 import { prisma } from "@/lib/prisma";
 import {
   haveCompatibleCourseNames,
-  haveCompatibleOfficialPageCourseNames
+  haveCompatibleOfficialPageCourseNames,
 } from "@/lib/places/course-identity";
+import { markCompletedLocalReaderProviderObservationConsumedInTransaction } from "@/lib/local-reader/service";
 import { recordCourseBookingFacts } from "@/lib/pricing/course-booking-facts";
+import type {
+  BookableHoleCount,
+  CoursePriceEstimate,
+} from "@/lib/pricing/course-prices";
 import { zonedDateTimeToDate } from "@/lib/timezones";
 
 import {
@@ -31,32 +40,43 @@ import {
   OFFICIAL_SITE_SOFT_NOT_FOUND_POLICY_NOTES,
   shouldQueueBrowserProbe,
   type BrowserDiscovery,
-  type BrowserProbeCourseInput
+  type BrowserProbeCourseInput,
 } from "./browser-discovery";
 import {
   revalidateCourseMonitoringForProviderEvidenceChangeInTransaction,
-  runSerializedCourseMonitoringWrite
+  runSerializedCourseMonitoringWrite,
 } from "./course-monitoring";
+import {
+  releaseCourseProviderObservationInTransaction,
+  renewCourseProviderObservationInTransaction,
+  type CourseProviderObservationLease,
+} from "./provider-execution-marker";
 import {
   ACTIVE_OWNED_COURSE_SUPPORT_BROWSER_RESULTS,
   isActiveOwnedCourseSupportBrowserResult,
   runCourseSupportBrowserPersistenceWrite,
-  type CourseSupportBrowserPersistenceFence
+  type CourseSupportBrowserPersistenceFence,
 } from "./course-support-browser-stages";
 import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
 import { assessAutomationPlaybook } from "./course-monitoring-playbook";
 import {
   buildCourseSupportSourceSearchScopeDigest,
-  normalizeCourseSupportSourceSearchResult
+  normalizeCourseSupportSourceSearchResult,
 } from "./course-support-source-search";
-import { earliestPotentiallyActiveSearchDate, isSearchWindowActive } from "./date-boundary";
+import {
+  earliestPotentiallyActiveSearchDate,
+  isSearchWindowActive,
+} from "./date-boundary";
 import {
   hasCompletePreEditProvenance,
   HOURLY_IMPROVEMENT_AUTOMATION_ID,
   markImprovementOutcomeRecorded,
-  type HourlyImprovementRunRecord
+  type HourlyImprovementRunRecord,
 } from "./improvement";
-import { withPostgresAdvisoryLease, withPostgresAdvisoryTextLease } from "./lease";
+import {
+  withPostgresAdvisoryLease,
+  withPostgresAdvisoryTextLease,
+} from "./lease";
 import { HOURLY_IMPROVEMENT_WRITER_LANE } from "./writer-lanes";
 import {
   getProviderPublicBookingLandingIdentity,
@@ -64,7 +84,7 @@ import {
   normalizeProviderFamilyKey,
   resolveProviderCapability,
   resolveProviderDiscoveryIdentity,
-  SOURCE_MISSING_PROVIDER_FAMILY
+  SOURCE_MISSING_PROVIDER_FAMILY,
 } from "./provider-capabilities";
 import { evaluateMonitoringGate } from "./policy";
 import { getAutomationRuntimeVersion } from "./runtime-version";
@@ -78,7 +98,7 @@ const TRUSTED_DISCOVERY_FUTURE_TOLERANCE_MS = 60_000;
 
 const activeSearchCourseInclude = {
   bookingFacts: {
-    orderBy: { holes: "asc" }
+    orderBy: { holes: "asc" },
   },
   monitoringStatus: true,
   supportIncident: {
@@ -99,17 +119,17 @@ const activeSearchCourseInclude = {
           incidentId: true,
           eventType: true,
           occurredAt: true,
-          audit: true
-        }
-      }
-    }
+          audit: true,
+        },
+      },
+    },
   },
   profile: {
     select: {
       canonicalSlug: true,
-      status: true
-    }
-  }
+      status: true,
+    },
+  },
 } satisfies Prisma.CourseInclude;
 
 const activeSearchInclude = {
@@ -118,27 +138,27 @@ const activeSearchInclude = {
     orderBy: { rank: "asc" },
     include: {
       course: {
-        include: activeSearchCourseInclude
-      }
-    }
+        include: activeSearchCourseInclude,
+      },
+    },
   },
-  matches: true
+  matches: true,
 } satisfies Prisma.TeeSearchInclude;
 
 const activeSearchCheckInclude = {
   user: {
     select: {
-      email: true
-    }
+      email: true,
+    },
   },
   preferences: {
     orderBy: { rank: "asc" },
     include: {
       course: {
-        include: activeSearchCourseInclude
-      }
-    }
-  }
+        include: activeSearchCourseInclude,
+      },
+    },
+  },
 } satisfies Prisma.TeeSearchInclude;
 
 export type ActiveAutomationSearch = Prisma.TeeSearchGetPayload<{
@@ -158,8 +178,8 @@ const pendingAlertSelect = {
       id: true,
       name: true,
       address: true,
-      timeZone: true
-    }
+      timeZone: true,
+    },
   },
   teeSearch: {
     select: {
@@ -169,11 +189,11 @@ const pendingAlertSelect = {
       userTimeZone: true,
       user: {
         select: {
-          email: true
-        }
-      }
-    }
-  }
+          email: true,
+        },
+      },
+    },
+  },
 } satisfies Prisma.TeeTimeMatchSelect;
 
 export type PendingAlertMatch = Prisma.TeeTimeMatchGetPayload<{
@@ -224,7 +244,7 @@ export type SearchCheckLease = {
 
 export async function runWithSearchCheckLease<T>(
   searchId: string,
-  worker: (lease: SearchCheckLease) => Promise<T>
+  worker: (lease: SearchCheckLease) => Promise<T>,
 ) {
   const lease = await claimDirectSearchCheckLease(searchId);
   if (!lease) {
@@ -239,35 +259,43 @@ export async function runWithSearchCheckLease<T>(
 }
 
 export function runWithHourlyImprovementLease<T>(worker: () => Promise<T>) {
-  return withPostgresAdvisoryTextLease(prisma, HOURLY_IMPROVEMENT_WRITER_LANE, worker);
+  return withPostgresAdvisoryTextLease(
+    prisma,
+    HOURLY_IMPROVEMENT_WRITER_LANE,
+    worker,
+  );
 }
 
-export async function listActiveSearchesForAutomation(): Promise<ActiveAutomationSearch[]> {
+export async function listActiveSearchesForAutomation(): Promise<
+  ActiveAutomationSearch[]
+> {
   const now = new Date();
   const searches = await prisma.teeSearch.findMany({
     where: {
       status: "ACTIVE",
       date: {
-        gte: earliestPotentiallyActiveSearchDate(now)
+        gte: earliestPotentiallyActiveSearchDate(now),
       },
-      OR: [{ nextCheckAt: null }, { nextCheckAt: { lte: now } }]
+      OR: [{ nextCheckAt: null }, { nextCheckAt: { lte: now } }],
     },
     orderBy: [{ date: "asc" }, { createdAt: "asc" }],
-    include: activeSearchInclude
+    include: activeSearchInclude,
   });
   return searches.filter((search) =>
     isSearchWindowActive({
       date: search.date,
       endTime: search.endTime,
-      courseTimeZones: search.preferences.map((preference) => preference.course.timeZone),
+      courseTimeZones: search.preferences.map(
+        (preference) => preference.course.timeZone,
+      ),
       fallbackTimeZone: search.userTimeZone,
-      now
-    })
+      now,
+    }),
   );
 }
 
 export async function getActiveSearchForAutomation(
-  searchId: string
+  searchId: string,
 ): Promise<ActiveAutomationSearch | null> {
   const now = new Date();
   const search = await prisma.teeSearch.findFirst({
@@ -275,10 +303,10 @@ export async function getActiveSearchForAutomation(
       id: searchId,
       status: "ACTIVE",
       date: {
-        gte: earliestPotentiallyActiveSearchDate(now)
-      }
+        gte: earliestPotentiallyActiveSearchDate(now),
+      },
     },
-    include: activeSearchCheckInclude
+    include: activeSearchCheckInclude,
   });
   if (!search) {
     return null;
@@ -286,9 +314,11 @@ export async function getActiveSearchForAutomation(
   return isSearchWindowActive({
     date: search.date,
     endTime: search.endTime,
-    courseTimeZones: search.preferences.map((preference) => preference.course.timeZone),
+    courseTimeZones: search.preferences.map(
+      (preference) => preference.course.timeZone,
+    ),
     fallbackTimeZone: search.userTimeZone,
-    now
+    now,
   })
     ? search
     : null;
@@ -364,8 +394,8 @@ export async function getCourseMonitoringPlaybookContext(courseId: string) {
       id: true,
       cycle: true,
       status: true,
-      attemptLedger: true
-    }
+      attemptLedger: true,
+    },
   });
 }
 
@@ -373,12 +403,14 @@ export async function listBrowserProbeTargets(
   limit = 5,
   courseName?: string,
   courseId?: string,
-  persistenceFence?: CourseSupportBrowserPersistenceFence
+  persistenceFence?: CourseSupportBrowserPersistenceFence,
 ): Promise<BrowserProbeTarget[]> {
   const requestedCourseName = courseName?.trim().toLocaleLowerCase("en-US");
   const requestedCourseId = courseId?.trim();
   if (requestedCourseName && requestedCourseId) {
-    throw new Error("A browser probe may select a course by name or id, not both.");
+    throw new Error(
+      "A browser probe may select a course by name or id, not both.",
+    );
   }
   if (
     persistenceFence &&
@@ -392,7 +424,7 @@ export async function listBrowserProbeTargets(
     return listExactIncidentBrowserProbeTarget({
       requestedCourseName,
       requestedCourseId,
-      persistenceFence
+      persistenceFence,
     });
   }
   const [searches, openIncidents] = await Promise.all([
@@ -400,16 +432,16 @@ export async function listBrowserProbeTargets(
       where: {
         status: "ACTIVE",
         date: {
-          gte: earliestPotentiallyActiveSearchDate()
-        }
+          gte: earliestPotentiallyActiveSearchDate(),
+        },
       },
       orderBy: [{ date: "asc" }, { createdAt: "asc" }],
       include: {
         preferences: {
           orderBy: { rank: "asc" },
-          include: { course: true }
-        }
-      }
+          include: { course: true },
+        },
+      },
     }),
     prisma.courseSupportIncident.findMany({
       where: { status: { not: "RESOLVED" } },
@@ -452,12 +484,12 @@ export async function listBrowserProbeTargets(
             probes: {
               orderBy: { observedAt: "desc" },
               take: 1,
-              select: { outcome: true, observedAt: true }
-            }
-          }
-        }
-      }
-    })
+              select: { outcome: true, observedAt: true },
+            },
+          },
+        },
+      },
+    }),
   ]);
   const browserReadyIncidentByCourse = new Map(
     openIncidents
@@ -465,29 +497,31 @@ export async function listBrowserProbeTargets(
         if (incident.status !== "AUTO_INVESTIGATING") return false;
         const nextStage = assessAutomationPlaybook(
           incident.attemptLedger,
-          incident.cycle
+          incident.cycle,
         ).nextStage;
         return (
-          nextStage === "RENDERED_BROWSER_DISCOVERY" || nextStage === "INDEPENDENT_CONFIRMATION"
+          nextStage === "RENDERED_BROWSER_DISCOVERY" ||
+          nextStage === "INDEPENDENT_CONFIRMATION"
         );
       })
-      .map((incident) => [incident.courseId, incident])
+      .map((incident) => [incident.courseId, incident]),
   );
   const incidentPriority = new Map(
     [...browserReadyIncidentByCourse.values()].map((incident) => [
       incident.courseId,
-      incident.activeRealSearchCount > 0 ? 0 : 1
-    ])
+      incident.activeRealSearchCount > 0 ? 0 : 1,
+    ]),
   );
   const monitoringFailureByCourse = new Map(
     openIncidents.map((incident) => [
       incident.courseId,
-      getIncidentMonitoringFailureEvidence(incident)
-    ])
+      getIncidentMonitoringFailureEvidence(incident),
+    ]),
   );
 
-  const targets: Array<BrowserProbeTarget & { supportPriority: number; episodeStartedAt: Date }> =
-    [];
+  const targets: Array<
+    BrowserProbeTarget & { supportPriority: number; episodeStartedAt: Date }
+  > = [];
   const queuedCourseIds = new Set<string>();
 
   for (const search of searches) {
@@ -495,11 +529,17 @@ export async function listBrowserProbeTargets(
       const course = preference.course;
       const readyIncident = browserReadyIncidentByCourse.get(course.id);
       if (!readyIncident) continue;
-      const monitoringFailureEvidence = monitoringFailureByCourse.get(course.id);
+      const monitoringFailureEvidence = monitoringFailureByCourse.get(
+        course.id,
+      );
       const probeCourse = { ...course, monitoringFailureEvidence };
       const probeUrl = getBestProbeUrl(probeCourse);
 
-      if (!probeUrl || queuedCourseIds.has(course.id) || !shouldQueueBrowserProbe(probeCourse)) {
+      if (
+        !probeUrl ||
+        queuedCourseIds.has(course.id) ||
+        !shouldQueueBrowserProbe(probeCourse)
+      ) {
         continue;
       }
 
@@ -527,15 +567,17 @@ export async function listBrowserProbeTargets(
           bookingMetadata: course.bookingMetadata,
           ...(course.layoutHolesVerifiedAt
             ? {
-                verifiedLayoutHoleCounts: normalizeLayoutHoleCounts(course.layoutHoleCounts)
+                verifiedLayoutHoleCounts: normalizeLayoutHoleCounts(
+                  course.layoutHoleCounts,
+                ),
               }
             : {}),
           monitoringFailureEvidence,
-          incidentConfirmedAt: readyIncident.confirmedAt
+          incidentConfirmedAt: readyIncident.confirmedAt,
         },
         probeUrl,
         supportPriority: incidentPriority.get(course.id) ?? 1,
-        episodeStartedAt: readyIncident.firstSeenAt
+        episodeStartedAt: readyIncident.firstSeenAt,
       });
       queuedCourseIds.add(course.id);
     }
@@ -579,15 +621,17 @@ export async function listBrowserProbeTargets(
           buildCourseSupportProviderSnapshotFingerprint(course),
         ...(course.layoutHolesVerifiedAt
           ? {
-              verifiedLayoutHoleCounts: normalizeLayoutHoleCounts(course.layoutHoleCounts)
+              verifiedLayoutHoleCounts: normalizeLayoutHoleCounts(
+                course.layoutHoleCounts,
+              ),
             }
           : {}),
         monitoringFailureEvidence,
-        incidentConfirmedAt: readyIncident.confirmedAt
+        incidentConfirmedAt: readyIncident.confirmedAt,
       },
       probeUrl,
       supportPriority: incidentPriority.get(course.id) ?? 1,
-      episodeStartedAt: readyIncident.firstSeenAt
+      episodeStartedAt: readyIncident.firstSeenAt,
     });
     queuedCourseIds.add(course.id);
   }
@@ -596,13 +640,13 @@ export async function listBrowserProbeTargets(
     (left, right) =>
       left.supportPriority - right.supportPriority ||
       left.episodeStartedAt.getTime() - right.episodeStartedAt.getTime() ||
-      left.rank - right.rank
+      left.rank - right.rank,
   );
   return orderedTargets.slice(0, limit).map((target) => ({
     searchId: target.searchId,
     rank: target.rank,
     course: target.course,
-    probeUrl: target.probeUrl
+    probeUrl: target.probeUrl,
   }));
 }
 
@@ -618,10 +662,10 @@ async function listExactIncidentBrowserProbeTarget(input: {
         : {
             name: {
               equals: input.requestedCourseName!,
-              mode: "insensitive" as const
-            }
+              mode: "insensitive" as const,
+            },
           }),
-      supportIncident: { is: { status: { not: "RESOLVED" } } }
+      supportIncident: { is: { status: { not: "RESOLVED" } } },
     },
     include: {
       supportIncident: {
@@ -635,26 +679,26 @@ async function listExactIncidentBrowserProbeTarget(input: {
           lastSeenAt: true,
           cycle: true,
           confirmedAt: true,
-          attemptLedger: true
-        }
+          attemptLedger: true,
+        },
       },
       probes: {
         orderBy: { observedAt: "desc" },
         take: 1,
-        select: { outcome: true, observedAt: true }
+        select: { outcome: true, observedAt: true },
       },
       preferences: {
         where: {
           teeSearch: {
             status: "ACTIVE",
-            date: { gte: earliestPotentiallyActiveSearchDate() }
-          }
+            date: { gte: earliestPotentiallyActiveSearchDate() },
+          },
         },
         orderBy: { rank: "asc" },
         take: 1,
-        include: { teeSearch: { select: { id: true } } }
-      }
-    }
+        include: { teeSearch: { select: { id: true } } },
+      },
+    },
   });
   if (!input.requestedCourseId && courses.length > 1) {
     throw new Error("The requested browser-probe course name is ambiguous.");
@@ -665,20 +709,22 @@ async function listExactIncidentBrowserProbeTarget(input: {
         kind: course.supportIncident?.kind,
         occurrenceCount: course.supportIncident?.occurrenceCount,
         lastSeenAt: course.supportIncident?.lastSeenAt,
-        course: { probes: course.probes ?? [] }
+        course: { probes: course.probes ?? [] },
       })
     : undefined;
   const probeCourse = course ? { ...course, monitoringFailureEvidence } : null;
   const nextPlaybookStage = course?.supportIncident
-    ? assessAutomationPlaybook(course.supportIncident.attemptLedger, course.supportIncident.cycle)
-        .nextStage
+    ? assessAutomationPlaybook(
+        course.supportIncident.attemptLedger,
+        course.supportIncident.cycle,
+      ).nextStage
     : null;
   const currentOwnedIncidentFence = input.persistenceFence
     ? isCurrentOwnedBrowserProbeIncidentFence({
         courseId: course?.id,
         incident: course?.supportIncident,
         nextPlaybookStage,
-        fence: input.persistenceFence
+        fence: input.persistenceFence,
       })
     : false;
   const currentOwnedFence =
@@ -690,18 +736,18 @@ async function listExactIncidentBrowserProbeTarget(input: {
   }
   const hasCurrentTechnicalAccessFailure = Boolean(
     course?.supportIncident?.kind === "FETCH_FAILED" &&
-    ["AUTH", "CHALLENGE"].includes(course.supportIncident.failureClass ?? "")
+    ["AUTH", "CHALLENGE"].includes(course.supportIncident.failureClass ?? ""),
   );
   const hasOwnedBlockedToolingAccessFailure = Boolean(
     currentOwnedFence &&
-      course?.supportIncident?.kind === "BLOCKED_TOOLING" &&
-      ["AUTH", "CHALLENGE"].includes(course.supportIncident.failureClass ?? "")
+    course?.supportIncident?.kind === "BLOCKED_TOOLING" &&
+    ["AUTH", "CHALLENGE"].includes(course.supportIncident.failureClass ?? ""),
   );
   const hasCurrentUnsupportedCoverageFailure = Boolean(
     course?.supportIncident?.kind === "NEEDS_ADAPTER" &&
     ["MISSING_SOURCE", "MISSING_METADATA", "UNSUPPORTED_FAMILY"].includes(
-      course.supportIncident.failureClass ?? ""
-    )
+      course.supportIncident.failureClass ?? "",
+    ),
   );
   const currentCourseProbeUrl = probeCourse
     ? hasCurrentUnsupportedCoverageFailure
@@ -715,16 +761,17 @@ async function listExactIncidentBrowserProbeTarget(input: {
   const probeUrl = currentCourseProbeUrl ?? ownedSourceCandidate;
   const readerOnlyIndependentConfirmation = Boolean(
     course?.monitoringMode === "LOCAL_READER_ONLY" &&
-    nextPlaybookStage === "INDEPENDENT_CONFIRMATION"
+    nextPlaybookStage === "INDEPENDENT_CONFIRMATION",
   );
   const currentOwnedBrowserStageEligible = Boolean(
-    currentOwnedFence && course?.isPublic !== false
+    currentOwnedFence && course?.isPublic !== false,
   );
   if (
     !course ||
     !probeUrl ||
     !probeCourse ||
-    (course.monitoringMode === "LOCAL_READER_ONLY" && !readerOnlyIndependentConfirmation) ||
+    (course.monitoringMode === "LOCAL_READER_ONLY" &&
+      !readerOnlyIndependentConfirmation) ||
     (!shouldQueueBrowserProbe(probeCourse) &&
       !currentOwnedBrowserStageEligible &&
       !hasCurrentTechnicalAccessFailure &&
@@ -762,17 +809,19 @@ async function listExactIncidentBrowserProbeTarget(input: {
           buildCourseSupportProviderSnapshotFingerprint(course),
         ...(course.layoutHolesVerifiedAt
           ? {
-              verifiedLayoutHoleCounts: normalizeLayoutHoleCounts(course.layoutHoleCounts)
+              verifiedLayoutHoleCounts: normalizeLayoutHoleCounts(
+                course.layoutHoleCounts,
+              ),
             }
           : {}),
         monitoringFailureEvidence,
-        incidentConfirmedAt: course.supportIncident?.confirmedAt ?? null
+        incidentConfirmedAt: course.supportIncident?.confirmedAt ?? null,
       },
       probeUrl,
       ...(!currentCourseProbeUrl && ownedSourceCandidate
         ? { unprojectedSourceCandidate: true as const }
-        : {})
-    }
+        : {}),
+    },
   ];
 }
 
@@ -789,16 +838,16 @@ function isCurrentOwnedBrowserProbeIncidentFence(input: {
 }) {
   return Boolean(
     input.courseId === input.fence.courseId &&
-      input.incident?.id === input.fence.incidentId &&
-      input.incident.cycle === input.fence.cycle &&
-      input.incident.status === "AUTO_INVESTIGATING" &&
-      input.incident.activeBatchId === input.fence.batchId &&
-      input.nextPlaybookStage === input.fence.stage
+    input.incident?.id === input.fence.incidentId &&
+    input.incident.cycle === input.fence.cycle &&
+    input.incident.status === "AUTO_INVESTIGATING" &&
+    input.incident.activeBatchId === input.fence.batchId &&
+    input.nextPlaybookStage === input.fence.stage,
   );
 }
 
 async function hasCurrentOwnedBrowserProbeBatchFence(
-  fence: CourseSupportBrowserPersistenceFence
+  fence: CourseSupportBrowserPersistenceFence,
 ) {
   if (
     fence.runtimeVersion !== fence.releaseSha ||
@@ -821,23 +870,23 @@ async function hasCurrentOwnedBrowserProbeBatchFence(
           courseId: fence.courseId,
           cycle: fence.cycle,
           result: {
-            in: [...ACTIVE_OWNED_COURSE_SUPPORT_BROWSER_RESULTS]
-          }
-        }
-      }
+            in: [...ACTIVE_OWNED_COURSE_SUPPORT_BROWSER_RESULTS],
+          },
+        },
+      },
     },
-    select: { id: true }
+    select: { id: true },
   });
   return Boolean(batch);
 }
 
 async function getOwnedCourseSupportSourceSearchCandidate(
-  fence: CourseSupportBrowserPersistenceFence
+  fence: CourseSupportBrowserPersistenceFence,
 ) {
   const ownershipScopeDigest = buildCourseSupportSourceSearchScopeDigest({
     batchId: fence.batchId,
     incidentId: fence.incidentId,
-    cycle: fence.cycle
+    cycle: fence.cycle,
   });
   const event = await prisma.courseMonitoringEvent.findFirst({
     where: {
@@ -847,13 +896,18 @@ async function getOwnedCourseSupportSourceSearchCandidate(
       source: "COURSE_SUPPORT_RESPONDER",
       readPath: "CODEX_EXACT_SOURCE_SEARCH",
       evidenceUrl: { not: null },
-      audit: { path: ["ownershipScopeDigest"], equals: ownershipScopeDigest }
+      audit: { path: ["ownershipScopeDigest"], equals: ownershipScopeDigest },
     },
     orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
-    select: { evidenceUrl: true, audit: true }
+    select: { evidenceUrl: true, audit: true },
   });
   const audit = event?.audit;
-  if (!event?.evidenceUrl || !audit || typeof audit !== "object" || Array.isArray(audit)) {
+  if (
+    !event?.evidenceUrl ||
+    !audit ||
+    typeof audit !== "object" ||
+    Array.isArray(audit)
+  ) {
     return null;
   }
   const record = audit as Record<string, unknown>;
@@ -874,7 +928,7 @@ async function getOwnedCourseSupportSourceSearchCandidate(
       status: { in: ["CLAIMED", "IMPLEMENTING", "VERIFYING"] },
       leaseExpiresAt: { gte: new Date() },
       releaseSha: fence.releaseSha,
-      deployedAt: fence.deployedAt
+      deployedAt: fence.deployedAt,
     },
     select: {
       releaseSha: true,
@@ -883,7 +937,7 @@ async function getOwnedCourseSupportSourceSearchCandidate(
         where: {
           incidentId: fence.incidentId,
           courseId: fence.courseId,
-          cycle: fence.cycle
+          cycle: fence.cycle,
         },
         take: 1,
         select: {
@@ -893,8 +947,8 @@ async function getOwnedCourseSupportSourceSearchCandidate(
           course: {
             select: {
               website: true,
-              detectedBookingUrl: true
-            }
+              detectedBookingUrl: true,
+            },
           },
           incident: {
             select: {
@@ -902,12 +956,12 @@ async function getOwnedCourseSupportSourceSearchCandidate(
               cycle: true,
               status: true,
               activeBatchId: true,
-              attemptLedger: true
-            }
-          }
-        }
-      }
-    }
+              attemptLedger: true,
+            },
+          },
+        },
+      },
+    },
   });
   const entry = batch?.incidents[0];
   if (
@@ -924,16 +978,14 @@ async function getOwnedCourseSupportSourceSearchCandidate(
     entry.incident.cycle !== fence.cycle ||
     entry.incident.status !== "AUTO_INVESTIGATING" ||
     entry.incident.activeBatchId !== fence.batchId ||
-    assessAutomationPlaybook(
-      entry.incident.attemptLedger,
-      entry.incident.cycle
-    ).nextStage !== fence.stage
+    assessAutomationPlaybook(entry.incident.attemptLedger, entry.incident.cycle)
+      .nextStage !== fence.stage
   ) {
     return null;
   }
   try {
     return normalizeCourseSupportSourceSearchResult({
-      candidateUrl: event.evidenceUrl
+      candidateUrl: event.evidenceUrl,
     }).candidateUrl;
   } catch {
     return null;
@@ -957,20 +1009,22 @@ function getIncidentMonitoringFailureEvidence(incident: {
   }
   const latestProbe = incident.course?.probes?.[0];
   const latestSuccessfulAt =
-    latestProbe && (latestProbe.outcome === "MATCH_FOUND" || latestProbe.outcome === "NO_MATCH")
+    latestProbe &&
+    (latestProbe.outcome === "MATCH_FOUND" ||
+      latestProbe.outcome === "NO_MATCH")
       ? latestProbe.observedAt
       : null;
   return {
     kind: "FETCH_FAILED",
     occurrenceCount: incident.occurrenceCount ?? 0,
     latestFailureAt: incident.lastSeenAt,
-    latestSuccessfulAt
+    latestSuccessfulAt,
   };
 }
 
 export async function listPendingMatchAlerts(
   searchId?: string,
-  matchIds?: readonly string[]
+  matchIds?: readonly string[],
 ): Promise<PendingAlertMatch[]> {
   if (matchIds?.length === 0) {
     return [];
@@ -983,13 +1037,13 @@ export async function listPendingMatchAlerts(
       availabilityStatus: "AVAILABLE",
       teeSearch: {
         status: "ACTIVE",
-        ...(searchId ? { id: searchId } : {})
-      }
+        ...(searchId ? { id: searchId } : {}),
+      },
     },
     orderBy: {
-      firstSeenAt: "asc"
+      firstSeenAt: "asc",
     },
-    select: pendingAlertSelect
+    select: pendingAlertSelect,
   });
 }
 
@@ -1025,41 +1079,129 @@ export async function recordCourseProbe(input: CourseProbeInput) {
       evidenceUrl: input.evidenceUrl,
       rawSummary: input.rawSummary,
       automationRunId: input.automationRunId,
-      runtimeVersion: input.runtimeVersion ?? getAutomationRuntimeVersion()
-    }
+      runtimeVersion: input.runtimeVersion ?? getAutomationRuntimeVersion(),
+    },
   });
+}
+
+async function createCourseAutomationDiscoveryWithCourseFence(
+  transaction: Prisma.TransactionClient,
+  data: Prisma.CourseAutomationDiscoveryUncheckedCreateInput,
+) {
+  const touched = await transaction.$queryRaw<Array<{ updatedAt: Date }>>(
+    Prisma.sql`UPDATE "Course"
+               SET "updatedAt" = GREATEST(
+                 "updatedAt" + INTERVAL '1 millisecond',
+                 clock_timestamp() AT TIME ZONE 'UTC'
+               )
+               WHERE "id" = ${data.courseId}
+               RETURNING "updatedAt"`,
+  );
+  if (touched.length === 0) {
+    throw new Error(
+      "Course automation discovery parent course no longer exists.",
+    );
+  }
+  const courseUpdatedAt = touched.length === 1 ? touched[0]?.updatedAt : null;
+  if (
+    !(courseUpdatedAt instanceof Date) ||
+    !Number.isFinite(courseUpdatedAt.getTime())
+  ) {
+    throw new Error(
+      "Course automation discovery parent fence returned invalid evidence.",
+    );
+  }
+  return {
+    discovery: await transaction.courseAutomationDiscovery.create({ data }),
+    courseUpdatedAt,
+  };
+}
+
+async function assertCourseProviderObservationOwnedForWrite(
+  transaction: Prisma.TransactionClient,
+  courseId: string,
+  providerObservation?: CourseProviderObservationLease,
+) {
+  if (!providerObservation) return;
+  if (providerObservation.courseId !== courseId) {
+    throw new Error(
+      "Provider observation ownership does not match the discovery course.",
+    );
+  }
+  if (
+    !(await renewCourseProviderObservationInTransaction(
+      transaction,
+      providerObservation,
+    ))
+  ) {
+    throw new Error(
+      "Provider observation ownership expired before discovery persistence completed.",
+    );
+  }
 }
 
 export async function recordBrowserDiscovery(
   input: BrowserDiscovery,
   persistenceFence?: CourseSupportBrowserPersistenceFence,
   runtimeVersion?: string | null,
-  expectedUnownedIncident?: BrowserDiscoveryUnownedIncidentExpectation
+  expectedUnownedIncident?: BrowserDiscoveryUnownedIncidentExpectation,
+  observedAtInput?: Date,
+  providerObservation?: CourseProviderObservationLease,
 ) {
-  const data = buildBrowserDiscoveryPersistenceData(input);
+  const observedAt = resolveTrustedDiscoveryObservedAt(observedAtInput);
+  const data = {
+    ...buildBrowserDiscoveryPersistenceData(input),
+    ...(observedAtInput ? { createdAt: observedAt } : {}),
+  };
   if (!persistenceFence) {
     if (!expectedUnownedIncident) {
-      return prisma.courseAutomationDiscovery.create({ data });
+      return runSerializedCourseMonitoringWrite(
+        input.courseId,
+        async (transaction) => {
+          await assertCourseProviderObservationOwnedForWrite(
+            transaction,
+            input.courseId,
+            providerObservation,
+          );
+          return (
+            await createCourseAutomationDiscoveryWithCourseFence(
+              transaction,
+              data,
+            )
+          ).discovery;
+        },
+      );
     }
-    return runSerializedCourseMonitoringWrite(input.courseId, async (transaction) => {
-      if (
-        !(await reserveUnownedIncidentForBrowserDiscovery(
+    return runSerializedCourseMonitoringWrite(
+      input.courseId,
+      async (transaction) => {
+        await assertCourseProviderObservationOwnedForWrite(
           transaction,
           input.courseId,
-          expectedUnownedIncident
-        ))
-      ) {
-        return null;
-      }
-      return transaction.courseAutomationDiscovery.create({
-        data: await attachParkedCampaignToDiscovery(
-          transaction,
-          data,
-          expectedUnownedIncident.id,
-          expectedUnownedIncident.cycle
-        )
-      });
-    });
+          providerObservation,
+        );
+        if (
+          !(await reserveUnownedIncidentForBrowserDiscovery(
+            transaction,
+            input.courseId,
+            expectedUnownedIncident,
+          ))
+        ) {
+          return null;
+        }
+        return (
+          await createCourseAutomationDiscoveryWithCourseFence(
+            transaction,
+            await attachParkedCampaignToDiscovery(
+              transaction,
+              data,
+              expectedUnownedIncident.id,
+              expectedUnownedIncident.cycle,
+            ),
+          )
+        ).discovery;
+      },
+    );
   }
   return runSerializedCourseMonitoringWrite(input.courseId, (transaction) =>
     runCourseSupportBrowserPersistenceWrite({
@@ -1067,25 +1209,33 @@ export async function recordBrowserDiscovery(
       fence: persistenceFence,
       runtimeVersion,
       mutate: async (ownedTransaction) => {
+        await assertCourseProviderObservationOwnedForWrite(
+          ownedTransaction,
+          input.courseId,
+          providerObservation,
+        );
         if (
           !(await reserveUnownedIncidentForBrowserDiscovery(
             ownedTransaction,
             input.courseId,
-            expectedUnownedIncident
+            expectedUnownedIncident,
           ))
         ) {
           return null;
         }
-        return ownedTransaction.courseAutomationDiscovery.create({
-          data: await attachParkedCampaignToDiscovery(
+        return (
+          await createCourseAutomationDiscoveryWithCourseFence(
             ownedTransaction,
-            data,
-            persistenceFence.incidentId,
-            persistenceFence.cycle
+            await attachParkedCampaignToDiscovery(
+              ownedTransaction,
+              data,
+              persistenceFence.incidentId,
+              persistenceFence.cycle,
+            ),
           )
-        });
-      }
-    })
+        ).discovery;
+      },
+    }),
   );
 }
 
@@ -1095,7 +1245,7 @@ async function attachParkedCampaignToDiscovery(
     createdAt?: Date;
   },
   incidentId: string,
-  cycle: number
+  cycle: number,
 ) {
   const admission = await transaction.courseMonitoringEvent.findFirst({
     where: {
@@ -1106,22 +1256,24 @@ async function attachParkedCampaignToDiscovery(
         {
           audit: {
             path: ["action"],
-            equals: "parked_cohort_admission"
-          }
+            equals: "parked_cohort_admission",
+          },
         },
         {
           audit: {
             path: ["cycle"],
-            equals: cycle
-          }
-        }
-      ]
+            equals: cycle,
+          },
+        },
+      ],
     },
     orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
-    select: { audit: true }
+    select: { audit: true },
   });
   const audit =
-    admission?.audit && typeof admission.audit === "object" && !Array.isArray(admission.audit)
+    admission?.audit &&
+    typeof admission.audit === "object" &&
+    !Array.isArray(admission.audit)
       ? (admission.audit as Record<string, unknown>)
       : null;
   if (
@@ -1135,7 +1287,9 @@ async function attachParkedCampaignToDiscovery(
     return data;
   }
   const evidence =
-    data.evidence && typeof data.evidence === "object" && !Array.isArray(data.evidence)
+    data.evidence &&
+    typeof data.evidence === "object" &&
+    !Array.isArray(data.evidence)
       ? (data.evidence as Prisma.InputJsonObject)
       : {};
   return {
@@ -1146,16 +1300,17 @@ async function attachParkedCampaignToDiscovery(
         kind: "PARKED_COHORT",
         runId: audit.campaignRunId,
         membershipDigest: audit.campaignMembershipDigest,
-        cycle
+        cycle,
       },
-      customerDataIncluded: false
-    } satisfies Prisma.InputJsonObject
+      customerDataIncluded: false,
+    } satisfies Prisma.InputJsonObject,
   };
 }
 
 function buildBrowserDiscoveryPersistenceData(input: BrowserDiscovery) {
   const normalized = normalizeBrowserDiscoveryForMonitoring(input);
-  const learnedOnline = normalized.status === "LEARNED" && Boolean(normalized.apiMetadata);
+  const learnedOnline =
+    normalized.status === "LEARNED" && Boolean(normalized.apiMetadata);
   const automationEligibility =
     normalized.automationEligibility ?? (learnedOnline ? "ALLOWED" : "UNKNOWN");
   const bookingMethod =
@@ -1173,14 +1328,14 @@ function buildBrowserDiscoveryPersistenceData(input: BrowserDiscovery) {
       automationEligibility,
       automationReason: normalized.automationReason,
       bookingMethod,
-      bookingAccessMode: normalized.bookingAccessMode
+      bookingAccessMode: normalized.bookingAccessMode,
     }),
     sourceUrl: normalized.sourceUrl,
     bookingUrl: normalized.bookingUrl,
     apiEndpoint: normalized.apiEndpoint,
     apiMetadata: normalized.apiMetadata as Prisma.InputJsonValue | undefined,
     confidence: normalized.confidence,
-    evidence: normalized.evidence as Prisma.InputJsonValue
+    evidence: normalized.evidence as Prisma.InputJsonValue,
   };
 }
 
@@ -1206,7 +1361,7 @@ function hasAuthoritativeFactualCourseFinal(input: {
     input.monitoringStatus?.state === "FINAL_MANUAL" ||
     input.monitoringStatus?.state === "FINAL_IDENTITY" ||
     input.supportIncident?.resolution === "DIRECT_BOOKING_CLASSIFIED" ||
-    input.supportIncident?.resolution === "IDENTITY_CLASSIFIED"
+    input.supportIncident?.resolution === "IDENTITY_CLASSIFIED",
   );
 }
 
@@ -1220,7 +1375,9 @@ function resolveTrustedDiscoveryObservedAt(value?: Date) {
     !Number.isFinite(value.getTime()) ||
     value.getTime() > now.getTime() + TRUSTED_DISCOVERY_FUTURE_TOLERANCE_MS
   ) {
-    throw new Error("Browser discovery observedAt must be a valid non-future date");
+    throw new Error(
+      "Browser discovery observedAt must be a valid non-future date",
+    );
   }
   return new Date(value.getTime());
 }
@@ -1231,93 +1388,111 @@ export async function applyRecoveredOfficialWebsiteToCourse(input: {
   expectedUpdatedAt: Date;
   expectedUnownedIncident?: BrowserDiscoveryUnownedIncidentExpectation;
   observedAt?: Date;
+  providerObservation?: CourseProviderObservationLease;
 }) {
   const website = parseSafePublicUrl(input.website);
   if (!website || !isSafeManualEvidenceUrl(website)) {
-    throw new Error("Recovered official website must be a credential-free public HTTP(S) URL");
+    throw new Error(
+      "Recovered official website must be a credential-free public HTTP(S) URL",
+    );
   }
   if (
     !(input.expectedUpdatedAt instanceof Date) ||
     !Number.isFinite(input.expectedUpdatedAt.getTime())
   ) {
-    throw new Error("Recovered official website requires a valid pre-fetch course snapshot");
+    throw new Error(
+      "Recovered official website requires a valid pre-fetch course snapshot",
+    );
   }
   const observedAt = resolveTrustedDiscoveryObservedAt(input.observedAt);
 
-  return runSerializedCourseMonitoringWrite(input.courseId, async (transaction) => {
-    const current = await transaction.course.findUnique({
-      where: { id: input.courseId },
-      include: {
-        monitoringStatus: { select: { state: true } },
-        supportIncident: { select: { resolution: true } }
-      }
-    });
-    if (
-      !current ||
-      current.website !== null ||
-      current.updatedAt.getTime() !== input.expectedUpdatedAt.getTime() ||
-      hasAuthoritativeFactualCourseFinal(current)
-    ) {
-      return null;
-    }
-    if (
-      !(await reserveUnownedIncidentForBrowserDiscovery(
+  return runSerializedCourseMonitoringWrite(
+    input.courseId,
+    async (transaction) => {
+      await assertCourseProviderObservationOwnedForWrite(
         transaction,
         input.courseId,
-        input.expectedUnownedIncident
-      ))
-    ) {
-      return null;
-    }
-
-    const updated = await transaction.course.updateMany({
-      where: {
-        id: input.courseId,
-        updatedAt: input.expectedUpdatedAt,
-        website: null
-      },
-      data: { website: website.toString() }
-    });
-    if (updated.count !== 1) {
-      return null;
-    }
-    const applied = await transaction.course.findUnique({
-      where: { id: input.courseId }
-    });
-    if (!applied) {
-      return null;
-    }
-    await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(transaction, {
-      courseId: input.courseId,
-      before: current,
-      after: applied,
-      providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(applied),
-      source: "SEARCH_WORKFLOW",
-      now: observedAt
-    });
-    await transaction.courseAutomationDiscovery.create({
-      data: {
-        courseId: input.courseId,
-        status: "INSPECTED",
-        detectedPlatform: "UNKNOWN",
-        bookingMethod: "UNKNOWN",
-        automationEligibility: "UNKNOWN",
-        automationReason: "NONE",
-        bookingAccessMode: "UNKNOWN",
-        sourceUrl: website.toString(),
-        bookingUrl: null,
-        confidence: 0.9,
-        createdAt: observedAt,
-        evidence: {
-          learnedFrom: "google-places-official-website",
-          observedUrls: [website.toString()],
-          courseProjectionApplied: true,
-          customerDataIncluded: false
-        }
+        input.providerObservation,
+      );
+      const current = await transaction.course.findUnique({
+        where: { id: input.courseId },
+        include: {
+          monitoringStatus: { select: { state: true } },
+          supportIncident: { select: { resolution: true } },
+        },
+      });
+      if (
+        !current ||
+        current.website !== null ||
+        current.updatedAt.getTime() !== input.expectedUpdatedAt.getTime() ||
+        hasAuthoritativeFactualCourseFinal(current)
+      ) {
+        return null;
       }
-    });
-    return applied;
-  });
+      if (
+        !(await reserveUnownedIncidentForBrowserDiscovery(
+          transaction,
+          input.courseId,
+          input.expectedUnownedIncident,
+        ))
+      ) {
+        return null;
+      }
+
+      const updated = await transaction.course.updateMany({
+        where: {
+          id: input.courseId,
+          updatedAt: input.expectedUpdatedAt,
+          website: null,
+        },
+        data: { website: website.toString() },
+      });
+      if (updated.count !== 1) {
+        return null;
+      }
+      const applied = await transaction.course.findUnique({
+        where: { id: input.courseId },
+      });
+      if (!applied) {
+        return null;
+      }
+      await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(
+        transaction,
+        {
+          courseId: input.courseId,
+          before: current,
+          after: applied,
+          providerSnapshotFingerprint:
+            buildCourseSupportProviderSnapshotFingerprint(applied),
+          source: "SEARCH_WORKFLOW",
+          now: observedAt,
+        },
+      );
+      const persisted = await createCourseAutomationDiscoveryWithCourseFence(
+        transaction,
+        {
+          courseId: input.courseId,
+          status: "INSPECTED",
+          detectedPlatform: "UNKNOWN",
+          bookingMethod: "UNKNOWN",
+          automationEligibility: "UNKNOWN",
+          automationReason: "NONE",
+          bookingAccessMode: "UNKNOWN",
+          sourceUrl: website.toString(),
+          bookingUrl: null,
+          confidence: 0.9,
+          createdAt: observedAt,
+          evidence: {
+            learnedFrom: "google-places-official-website",
+            observedUrls: [website.toString()],
+            courseProjectionApplied: true,
+            customerDataIncluded: false,
+          },
+        },
+      );
+      return { ...applied, updatedAt: persisted.courseUpdatedAt };
+    },
+  );
 }
 
 export async function retireLegacyPolicyOnlyCourseBlock(
@@ -1328,26 +1503,35 @@ export async function retireLegacyPolicyOnlyCourseBlock(
     preserveDetectedBookingUrl: boolean;
     preserveBookingMetadata: boolean;
   },
-  expectedUnownedIncident?: BrowserDiscoveryUnownedIncidentExpectation
+  expectedUnownedIncident?: BrowserDiscoveryUnownedIncidentExpectation,
+  observedAtInput?: Date,
+  providerObservation?: CourseProviderObservationLease,
 ) {
+  const observedAt = resolveTrustedDiscoveryObservedAt(observedAtInput);
   return runSerializedCourseMonitoringWrite(courseId, async (transaction) => {
+    await assertCourseProviderObservationOwnedForWrite(
+      transaction,
+      courseId,
+      providerObservation,
+    );
     const current = await transaction.course.findUnique({
       where: { id: courseId },
       include: {
         monitoringStatus: { select: { state: true } },
-        supportIncident: { select: { resolution: true } }
-      }
+        supportIncident: { select: { resolution: true } },
+      },
     });
     if (!current || hasAuthoritativeFactualCourseFinal(current)) {
       return null;
     }
     const preserveProviderAccess =
-      preservation.preserveDetectedBookingUrl || preservation.preserveBookingMetadata;
+      preservation.preserveDetectedBookingUrl ||
+      preservation.preserveBookingMetadata;
     if (
       !(await reserveUnownedIncidentForBrowserDiscovery(
         transaction,
         courseId,
-        expectedUnownedIncident
+        expectedUnownedIncident,
       ))
     ) {
       return null;
@@ -1358,19 +1542,25 @@ export async function retireLegacyPolicyOnlyCourseBlock(
         updatedAt: expectedCourse.updatedAt,
         detectedBookingUrl: expectedCourse.detectedBookingUrl,
         automationEligibility: "BLOCKED",
-        automationReason: "AUTOMATION_PROHIBITED"
+        automationReason: "AUTOMATION_PROHIBITED",
       },
       data: {
         ...(!preserveProviderAccess
           ? {
               providerFamilyKey: "SOURCE_MISSING",
-              detectedPlatform: "UNKNOWN" as const
+              detectedPlatform: "UNKNOWN" as const,
             }
           : {}),
         ...(!preservation.preserveWebsite ? { website: null } : {}),
-        ...(!preservation.preserveDetectedBookingUrl ? { detectedBookingUrl: null } : {}),
-        ...(!preservation.preserveBookingMetadata ? { bookingMetadata: Prisma.DbNull } : {}),
-        ...(!preserveProviderAccess ? { bookingMethod: "UNKNOWN" as const } : {}),
+        ...(!preservation.preserveDetectedBookingUrl
+          ? { detectedBookingUrl: null }
+          : {}),
+        ...(!preservation.preserveBookingMetadata
+          ? { bookingMetadata: Prisma.DbNull }
+          : {}),
+        ...(!preserveProviderAccess
+          ? { bookingMethod: "UNKNOWN" as const }
+          : {}),
         automationEligibility: "NEEDS_REVIEW",
         automationReason: "OTHER",
         bookingAccessMode: "UNKNOWN",
@@ -1378,24 +1568,28 @@ export async function retireLegacyPolicyOnlyCourseBlock(
           "Legacy booking-policy text is not a technical monitoring blocker. Current public monitoring support requires fresh verification.",
         intelligenceVerifiedAt: null,
         intelligenceReviewAt: null,
-        intelligenceConfidence: null
-      }
+        intelligenceConfidence: null,
+      },
     });
     if (updated.count !== 1) {
       return null;
     }
     const applied = await transaction.course.findUnique({
-      where: { id: courseId }
+      where: { id: courseId },
     });
     if (applied) {
-      await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(transaction, {
-        courseId,
-        before: current,
-        after: applied,
-        providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(applied),
-        source: "COURSE_SUPPORT_RESPONDER",
-        now: new Date()
-      });
+      await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(
+        transaction,
+        {
+          courseId,
+          before: current,
+          after: applied,
+          providerSnapshotFingerprint:
+            buildCourseSupportProviderSnapshotFingerprint(applied),
+          source: "COURSE_SUPPORT_RESPONDER",
+          now: observedAt,
+        },
+      );
     }
     return applied;
   });
@@ -1407,7 +1601,7 @@ export async function applyBrowserDiscoveryToCourse(
   persistenceFence?: CourseSupportBrowserPersistenceFence,
   runtimeVersion?: string | null,
   expectedUnownedIncident?: BrowserDiscoveryUnownedIncidentExpectation,
-  observedAtInput?: Date
+  observedAtInput?: Date,
 ) {
   const observedAt = resolveTrustedDiscoveryObservedAt(observedAtInput);
   return runSerializedCourseMonitoringWrite(input.courseId, (transaction) =>
@@ -1422,25 +1616,27 @@ export async function applyBrowserDiscoveryToCourse(
               expectedCourse,
               ownedTransaction,
               expectedUnownedIncident,
-              observedAt
-            )
+              observedAt,
+            ),
         })
       : applyBrowserDiscoveryToCourseInTransaction(
           input,
           expectedCourse,
           transaction,
           expectedUnownedIncident,
-          observedAt
-        )
+          observedAt,
+        ),
   );
 }
 
 export function bindBrowserDiscoveryToProviderSnapshot(
   input: BrowserDiscovery,
-  providerSnapshotFingerprint: string
+  providerSnapshotFingerprint: string,
 ): BrowserDiscovery {
   if (!/^[a-f0-9]{64}$/u.test(providerSnapshotFingerprint)) {
-    throw new Error("Browser discovery provider snapshot fingerprint is invalid.");
+    throw new Error(
+      "Browser discovery provider snapshot fingerprint is invalid.",
+    );
   }
   const evidence = input.evidence as BrowserDiscovery["evidence"] & {
     browserInvestigation?: unknown;
@@ -1451,7 +1647,9 @@ export function bindBrowserDiscoveryToProviderSnapshot(
     typeof browserInvestigation !== "object" ||
     Array.isArray(browserInvestigation)
   ) {
-    throw new Error("Snapshot-bound browser discovery requires a browser investigation audit.");
+    throw new Error(
+      "Snapshot-bound browser discovery requires a browser investigation audit.",
+    );
   }
   const existingFingerprint = (browserInvestigation as Record<string, unknown>)
     .providerSnapshotFingerprint;
@@ -1459,7 +1657,9 @@ export function bindBrowserDiscoveryToProviderSnapshot(
     existingFingerprint !== undefined &&
     existingFingerprint !== providerSnapshotFingerprint
   ) {
-    throw new Error("Browser discovery provider snapshot fingerprint does not match.");
+    throw new Error(
+      "Browser discovery provider snapshot fingerprint does not match.",
+    );
   }
   return {
     ...input,
@@ -1467,9 +1667,9 @@ export function bindBrowserDiscoveryToProviderSnapshot(
       ...evidence,
       browserInvestigation: {
         ...(browserInvestigation as Record<string, unknown>),
-        providerSnapshotFingerprint
-      }
-    }
+        providerSnapshotFingerprint,
+      },
+    },
   } as BrowserDiscovery;
 }
 
@@ -1479,178 +1679,232 @@ export async function recordAndApplyOwnedBrowserDiscoveryToCourse(
   persistenceFence: CourseSupportBrowserPersistenceFence,
   runtimeVersion: string | null | undefined,
   observedProviderSnapshotFingerprint: string,
-  observedAtInput?: Date
+  providerObservation: CourseProviderObservationLease,
+  observedAtInput?: Date,
 ) {
   const projectionIdentity = { ...projectionInput, evidence: undefined };
   const persistenceIdentity = { ...persistenceInput, evidence: undefined };
-  if (JSON.stringify(projectionIdentity) !== JSON.stringify(persistenceIdentity)) {
-    throw new Error("Browser projection and persistence identities do not match.");
+  if (
+    JSON.stringify(projectionIdentity) !== JSON.stringify(persistenceIdentity)
+  ) {
+    throw new Error(
+      "Browser projection and persistence identities do not match.",
+    );
   }
   if (!/^[a-f0-9]{64}$/u.test(observedProviderSnapshotFingerprint)) {
-    throw new Error("Observed browser provider snapshot fingerprint is invalid.");
+    throw new Error(
+      "Observed browser provider snapshot fingerprint is invalid.",
+    );
   }
-  const persistenceEvidence = persistenceInput.evidence as BrowserDiscovery["evidence"] & {
-    browserInvestigation?: unknown;
-  };
+  const persistenceEvidence =
+    persistenceInput.evidence as BrowserDiscovery["evidence"] & {
+      browserInvestigation?: unknown;
+    };
   const persistenceAudit = persistenceEvidence.browserInvestigation;
   if (
     !persistenceAudit ||
     typeof persistenceAudit !== "object" ||
     Array.isArray(persistenceAudit)
   ) {
-    throw new Error("Owned browser persistence requires a browser investigation audit.");
+    throw new Error(
+      "Owned browser persistence requires a browser investigation audit.",
+    );
   }
   if (
-    (persistenceAudit as Record<string, unknown>).providerSnapshotFingerprint !==
-    undefined
+    (persistenceAudit as Record<string, unknown>)
+      .providerSnapshotFingerprint !== undefined
   ) {
-    throw new Error("Caller-supplied browser provider snapshot bindings are not accepted.");
+    throw new Error(
+      "Caller-supplied browser provider snapshot bindings are not accepted.",
+    );
   }
   const observedAt = resolveTrustedDiscoveryObservedAt(observedAtInput);
 
-  return runSerializedCourseMonitoringWrite(projectionInput.courseId, (transaction) =>
-    runCourseSupportBrowserPersistenceWrite({
-      transaction,
-      fence: persistenceFence,
-      runtimeVersion,
-      mutate: async (ownedTransaction) => {
-        const persist = async (input: BrowserDiscovery) =>
-          ownedTransaction.courseAutomationDiscovery.create({
-            data: await attachParkedCampaignToDiscovery(
+  return runSerializedCourseMonitoringWrite(
+    projectionInput.courseId,
+    (transaction) =>
+      runCourseSupportBrowserPersistenceWrite({
+        transaction,
+        fence: persistenceFence,
+        runtimeVersion,
+        mutate: async (ownedTransaction) => {
+          if (
+            !(await renewCourseProviderObservationInTransaction(
               ownedTransaction,
-              {
-                ...buildBrowserDiscoveryPersistenceData(input),
-                createdAt: observedAt
-              },
-              persistenceFence.incidentId,
-              persistenceFence.cycle
-            )
-          });
+              providerObservation,
+            ))
+          ) {
+            throw new Error(
+              "Rendered provider observation ownership expired before course persistence completed.",
+            );
+          }
+          const persist = async (input: BrowserDiscovery) =>
+            createCourseAutomationDiscoveryWithCourseFence(
+              ownedTransaction,
+              await attachParkedCampaignToDiscovery(
+                ownedTransaction,
+                {
+                  ...buildBrowserDiscoveryPersistenceData(input),
+                  createdAt: observedAt,
+                },
+                persistenceFence.incidentId,
+                persistenceFence.cycle,
+              ),
+            );
 
-        await ownedTransaction.$queryRaw(
-          Prisma.sql`SELECT "id"
+          await ownedTransaction.$queryRaw(
+            Prisma.sql`SELECT "id"
                      FROM "Course"
                      WHERE "id" = ${projectionInput.courseId}
-                     FOR UPDATE`
-        );
-        const preProjectionCourse = await ownedTransaction.course.findUnique({
-          where: { id: projectionInput.courseId }
-        });
-        if (!preProjectionCourse) {
-          throw new Error("Browser discovery course no longer exists.");
-        }
-        if (
-          buildCourseSupportProviderSnapshotFingerprint(preProjectionCourse) !==
-          observedProviderSnapshotFingerprint
-        ) {
-          return {
-            applied: null,
-            discovery: await persist(persistenceInput),
-            providerSnapshotFingerprint: null,
-            snapshotBound: false as const
-          };
-        }
+                     FOR UPDATE`,
+          );
+          const preProjectionCourse = await ownedTransaction.course.findUnique({
+            where: { id: projectionInput.courseId },
+          });
+          if (!preProjectionCourse) {
+            throw new Error("Browser discovery course no longer exists.");
+          }
+          if (
+            buildCourseSupportProviderSnapshotFingerprint(
+              preProjectionCourse,
+            ) !== observedProviderSnapshotFingerprint
+          ) {
+            return {
+              applied: null,
+              discovery: (await persist(persistenceInput)).discovery,
+              providerSnapshotFingerprint: null,
+              snapshotBound: false as const,
+            };
+          }
 
-        const applied = await applyBrowserDiscoveryToCourseInTransaction(
-          projectionInput,
-          {
-            updatedAt: preProjectionCourse.updatedAt,
-            detectedBookingUrl: preProjectionCourse.detectedBookingUrl,
-            bookingMethod: preProjectionCourse.bookingMethod,
-            automationEligibility: preProjectionCourse.automationEligibility
-          },
-          ownedTransaction,
-          undefined,
-          observedAt,
-          observedProviderSnapshotFingerprint
-        );
-        const resultingCourse =
-          applied ??
-          (await ownedTransaction.course.findUnique({
-            where: { id: projectionInput.courseId }
-          }));
-        if (!resultingCourse) {
-          throw new Error("Browser discovery course no longer exists after projection.");
-        }
-        const providerSnapshotFingerprint =
-          buildCourseSupportProviderSnapshotFingerprint(resultingCourse);
-        if (!applied && providerSnapshotFingerprint !== observedProviderSnapshotFingerprint) {
+          const applied = await applyBrowserDiscoveryToCourseInTransaction(
+            projectionInput,
+            {
+              updatedAt: preProjectionCourse.updatedAt,
+              detectedBookingUrl: preProjectionCourse.detectedBookingUrl,
+              bookingMethod: preProjectionCourse.bookingMethod,
+              automationEligibility: preProjectionCourse.automationEligibility,
+            },
+            ownedTransaction,
+            undefined,
+            observedAt,
+            observedProviderSnapshotFingerprint,
+          );
+          const resultingCourse =
+            applied ??
+            (await ownedTransaction.course.findUnique({
+              where: { id: projectionInput.courseId },
+            }));
+          if (!resultingCourse) {
+            throw new Error(
+              "Browser discovery course no longer exists after projection.",
+            );
+          }
+          const providerSnapshotFingerprint =
+            buildCourseSupportProviderSnapshotFingerprint(resultingCourse);
+          if (
+            !applied &&
+            providerSnapshotFingerprint !== observedProviderSnapshotFingerprint
+          ) {
+            return {
+              applied: null,
+              discovery: (await persist(persistenceInput)).discovery,
+              providerSnapshotFingerprint: null,
+              snapshotBound: false as const,
+            };
+          }
+          const persisted = await persist(
+            bindBrowserDiscoveryToProviderSnapshot(
+              persistenceInput,
+              providerSnapshotFingerprint,
+            ),
+          );
           return {
-            applied: null,
-            discovery: await persist(persistenceInput),
-            providerSnapshotFingerprint: null,
-            snapshotBound: false as const
+            applied: applied
+              ? { ...applied, updatedAt: persisted.courseUpdatedAt }
+              : null,
+            discovery: persisted.discovery,
+            providerSnapshotFingerprint,
+            snapshotBound: true as const,
           };
-        }
-        const discovery = await persist(
-          bindBrowserDiscoveryToProviderSnapshot(
-            persistenceInput,
-            providerSnapshotFingerprint
-          )
-        );
-        return {
-          applied,
-          discovery,
-          providerSnapshotFingerprint,
-          snapshotBound: true as const
-        };
-      }
-    })
+        },
+      }),
   );
 }
 
 export async function recordAndApplyBrowserDiscoveryToCourse(
   input: BrowserDiscovery,
   expectedCourse: BrowserDiscoveryCourseExpectation | undefined,
-  expectedUnownedIncident: BrowserDiscoveryUnownedIncidentExpectation,
-  options: { recordIfNotApplied?: boolean; observedAt?: Date } = {}
+  expectedUnownedIncident?: BrowserDiscoveryUnownedIncidentExpectation,
+  options: {
+    recordIfNotApplied?: boolean;
+    observedAt?: Date;
+    providerObservation?: CourseProviderObservationLease;
+  } = {},
 ) {
   const observedAt = resolveTrustedDiscoveryObservedAt(options.observedAt);
   const data = {
     ...buildBrowserDiscoveryPersistenceData(input),
-    ...(options.observedAt ? { createdAt: observedAt } : {})
+    ...(options.observedAt ? { createdAt: observedAt } : {}),
   };
-  return runSerializedCourseMonitoringWrite(input.courseId, async (transaction) => {
-    if (
-      !(await reserveUnownedIncidentForBrowserDiscovery(
+  return runSerializedCourseMonitoringWrite(
+    input.courseId,
+    async (transaction) => {
+      await assertCourseProviderObservationOwnedForWrite(
         transaction,
         input.courseId,
-        expectedUnownedIncident
-      ))
-    ) {
-      return null;
-    }
-    const applied = await applyBrowserDiscoveryToCourseInTransaction(
-      input,
-      expectedCourse,
-      transaction,
-      undefined,
-      observedAt
-    );
-    if (!applied && options.recordIfNotApplied === false) {
-      return { applied: null, discovery: null };
-    }
-    const discovery = await transaction.courseAutomationDiscovery.create({
-      data
-    });
-    return { applied, discovery };
-  });
+        options.providerObservation,
+      );
+      if (
+        !(await reserveUnownedIncidentForBrowserDiscovery(
+          transaction,
+          input.courseId,
+          expectedUnownedIncident,
+        ))
+      ) {
+        return null;
+      }
+      const applied = await applyBrowserDiscoveryToCourseInTransaction(
+        input,
+        expectedCourse,
+        transaction,
+        undefined,
+        observedAt,
+      );
+      if (!applied && options.recordIfNotApplied === false) {
+        return { applied: null, discovery: null };
+      }
+      const persisted = await createCourseAutomationDiscoveryWithCourseFence(
+        transaction,
+        data,
+      );
+      return {
+        applied: applied
+          ? { ...applied, updatedAt: persisted.courseUpdatedAt }
+          : null,
+        discovery: persisted.discovery,
+      };
+    },
+  );
 }
 
 async function applyBrowserDiscoveryToCourseInTransaction(
   input: BrowserDiscovery,
   expectedCourse: BrowserDiscoveryCourseExpectation | undefined,
   transaction: Prisma.TransactionClient,
-  expectedUnownedIncident: BrowserDiscoveryUnownedIncidentExpectation | undefined,
+  expectedUnownedIncident:
+    BrowserDiscoveryUnownedIncidentExpectation | undefined,
   observedAt: Date,
-  expectedProviderSnapshotFingerprint?: string
+  expectedProviderSnapshotFingerprint?: string,
 ) {
-  input = normalizeAutomatedTechnicalDiscovery(normalizeBrowserDiscoveryForMonitoring(input));
+  input = normalizeAutomatedTechnicalDiscovery(
+    normalizeBrowserDiscoveryForMonitoring(input),
+  );
   const provider = resolveProviderCapability({
     detectedPlatform: input.detectedPlatform,
     detectedBookingUrl: input.bookingUrl,
     website: input.sourceUrl,
-    bookingMetadata: input.apiMetadata
+    bookingMetadata: input.apiMetadata,
   });
   const inspectedProviderIdentity =
     input.status === "INSPECTED"
@@ -1658,13 +1912,16 @@ async function applyBrowserDiscoveryToCourseInTransaction(
           detectedPlatform: input.detectedPlatform,
           bookingUrl: input.bookingUrl,
           apiMetadata: input.apiMetadata,
-          confidence: input.confidence
+          confidence: input.confidence,
         })
       : null;
-  const learnedOnlineAdapter = input.status === "LEARNED" && provider.isRunnable;
-  const nonRunnableOfficialBookingLink = resolveNonRunnableOfficialCourseBookingLinkIdentity(input);
+  const learnedOnlineAdapter =
+    input.status === "LEARNED" && provider.isRunnable;
+  const nonRunnableOfficialBookingLink =
+    resolveNonRunnableOfficialCourseBookingLinkIdentity(input);
   const claimsNonRunnableOfficialBookingLink =
-    input.evidence.learnedFrom === "official-course-non-runnable-booking-link" ||
+    input.evidence.learnedFrom ===
+      "official-course-non-runnable-booking-link" ||
     input.evidence.courseIdentityCorroboration?.kind ===
       "OFFICIAL_COURSE_NON_RUNNABLE_BOOKING_LINK";
   const inspectedProviderRequiresOfficialCourseCorroboration =
@@ -1679,15 +1936,26 @@ async function applyBrowserDiscoveryToCourseInTransaction(
       input.bookingMethod !== "UNKNOWN" &&
       input.automationEligibility &&
       input.automationEligibility !== "UNKNOWN" &&
-      input.confidence >= 0.8
+      input.confidence >= 0.8,
     );
-  const sourceUnavailableClassification = isSourceUnavailableClassification(input);
+  const sourceUnavailableClassification =
+    isSourceUnavailableClassification(input);
 
-  if (!learnedOnlineAdapter && !verifiedClassification && !sourceUnavailableClassification) {
-    if (claimsNonRunnableOfficialBookingLink && !nonRunnableOfficialBookingLink) {
+  if (
+    !learnedOnlineAdapter &&
+    !verifiedClassification &&
+    !sourceUnavailableClassification
+  ) {
+    if (
+      claimsNonRunnableOfficialBookingLink &&
+      !nonRunnableOfficialBookingLink
+    ) {
       return null;
     }
-    if (inspectedProviderRequiresOfficialCourseCorroboration && !nonRunnableOfficialBookingLink) {
+    if (
+      inspectedProviderRequiresOfficialCourseCorroboration &&
+      !nonRunnableOfficialBookingLink
+    ) {
       return null;
     }
     if (!inspectedProviderIdentity && !nonRunnableOfficialBookingLink) {
@@ -1722,8 +1990,8 @@ async function applyBrowserDiscoveryToCourseInTransaction(
         intelligenceConfidence: true,
         monitoringStatus: { select: { state: true } },
         supportIncident: { select: { resolution: true } },
-        updatedAt: true
-      }
+        updatedAt: true,
+      },
     });
     if (
       !current ||
@@ -1742,7 +2010,7 @@ async function applyBrowserDiscoveryToCourseInTransaction(
         !canApplyNonRunnableOfficialCourseBookingLink({
           current,
           identity: nonRunnableOfficialBookingLink,
-          persistedProviderIsRunnable: persistedProvider.isRunnable
+          persistedProviderIsRunnable: persistedProvider.isRunnable,
         })
       ) {
         return null;
@@ -1752,7 +2020,7 @@ async function applyBrowserDiscoveryToCourseInTransaction(
         !(await reserveUnownedIncidentForBrowserDiscovery(
           transaction,
           input.courseId,
-          expectedUnownedIncident
+          expectedUnownedIncident,
         ))
       ) {
         return null;
@@ -1763,25 +2031,29 @@ async function applyBrowserDiscoveryToCourseInTransaction(
         data: {
           detectedPlatform: nonRunnableOfficialBookingLink.detectedPlatform,
           providerFamilyKey: nonRunnableOfficialBookingLink.providerFamilyKey,
-          detectedBookingUrl: nonRunnableOfficialBookingLink.bookingUrl
-        }
+          detectedBookingUrl: nonRunnableOfficialBookingLink.bookingUrl,
+        },
       });
       if (updated.count !== 1) {
         return null;
       }
 
       const applied = await transaction.course.findUnique({
-        where: { id: input.courseId }
+        where: { id: input.courseId },
       });
       if (applied) {
-        await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(transaction, {
-          courseId: input.courseId,
-          before: current,
-          after: applied,
-          providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(applied),
-          source: "COURSE_SUPPORT_RESPONDER",
-          now: observedAt
-        });
+        await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(
+          transaction,
+          {
+            courseId: input.courseId,
+            before: current,
+            after: applied,
+            providerSnapshotFingerprint:
+              buildCourseSupportProviderSnapshotFingerprint(applied),
+            source: "COURSE_SUPPORT_RESPONDER",
+            now: observedAt,
+          },
+        );
       }
       return applied;
     }
@@ -1794,7 +2066,8 @@ async function applyBrowserDiscoveryToCourseInTransaction(
       persistedProvider.evidenceConflict ||
       persistedProvider.isRunnable ||
       (persistedProvider.capability &&
-        persistedProvider.providerFamilyKey !== inspectedProviderIdentity.providerFamilyKey)
+        persistedProvider.providerFamilyKey !==
+          inspectedProviderIdentity.providerFamilyKey)
     ) {
       return null;
     }
@@ -1803,7 +2076,7 @@ async function applyBrowserDiscoveryToCourseInTransaction(
       !(await reserveUnownedIncidentForBrowserDiscovery(
         transaction,
         input.courseId,
-        expectedUnownedIncident
+        expectedUnownedIncident,
       ))
     ) {
       return null;
@@ -1814,25 +2087,29 @@ async function applyBrowserDiscoveryToCourseInTransaction(
       data: {
         detectedPlatform: inspectedProviderIdentity.detectedPlatform,
         providerFamilyKey: inspectedProviderIdentity.providerFamilyKey,
-        ...(input.bookingUrl ? { detectedBookingUrl: input.bookingUrl } : {})
-      }
+        ...(input.bookingUrl ? { detectedBookingUrl: input.bookingUrl } : {}),
+      },
     });
     if (updated.count !== 1) {
       return null;
     }
 
     const applied = await transaction.course.findUnique({
-      where: { id: input.courseId }
+      where: { id: input.courseId },
     });
     if (applied) {
-      await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(transaction, {
-        courseId: input.courseId,
-        before: current,
-        after: applied,
-        providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(applied),
-        source: "COURSE_SUPPORT_RESPONDER",
-        now: observedAt
-      });
+      await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(
+        transaction,
+        {
+          courseId: input.courseId,
+          before: current,
+          after: applied,
+          providerSnapshotFingerprint:
+            buildCourseSupportProviderSnapshotFingerprint(applied),
+          source: "COURSE_SUPPORT_RESPONDER",
+          now: observedAt,
+        },
+      );
     }
     return applied;
   }
@@ -1843,7 +2120,9 @@ async function applyBrowserDiscoveryToCourseInTransaction(
     automationEligibility === "BLOCKED" &&
     ["PHONE_ONLY", "CONTACT_COURSE", "WALK_IN"].includes(bookingMethod);
   const officialRequestUrl =
-    bookingMethod === "CONTACT_COURSE" && input.bookingUrl && input.bookingUrl !== input.sourceUrl
+    bookingMethod === "CONTACT_COURSE" &&
+    input.bookingUrl &&
+    input.bookingUrl !== input.sourceUrl
       ? input.bookingUrl
       : null;
 
@@ -1875,8 +2154,8 @@ async function applyBrowserDiscoveryToCourseInTransaction(
       intelligenceConfidence: true,
       monitoringStatus: { select: { state: true } },
       supportIncident: { select: { resolution: true } },
-      updatedAt: true
-    }
+      updatedAt: true,
+    },
   });
   if (
     !current ||
@@ -1893,7 +2172,7 @@ async function applyBrowserDiscoveryToCourseInTransaction(
   const differentKnownProvider = Boolean(
     persistedProvider.capability &&
     provider.capability &&
-    persistedProvider.providerFamilyKey !== provider.providerFamilyKey
+    persistedProvider.providerFamilyKey !== provider.providerFamilyKey,
   );
   const replacingLegacyPolicyOnlyBlock = Boolean(
     expectedCourse &&
@@ -1901,7 +2180,7 @@ async function applyBrowserDiscoveryToCourseInTransaction(
     verifiedClassification &&
     current.automationEligibility === "BLOCKED" &&
     current.automationReason === "AUTOMATION_PROHIBITED" &&
-    input.automationReason !== "AUTOMATION_PROHIBITED"
+    input.automationReason !== "AUTOMATION_PROHIBITED",
   );
   const persistedMetadataStale =
     persistedGate.requiresRevalidation || !persistedGate.currentEvidence;
@@ -1909,17 +2188,30 @@ async function applyBrowserDiscoveryToCourseInTransaction(
     learnedOnlineAdapter &&
     persistedGate.adapterAllowed &&
     persistedMetadataStale &&
-    hasPersistedOfficialCourseProviderCorroboration(input, current.website, current.name)
+    hasPersistedOfficialCourseProviderCorroboration(
+      input,
+      current.website,
+      current.name,
+    ),
   );
   const corroboratedPrivateReopening = Boolean(
     learnedOnlineAdapter &&
     current.isPublic === false &&
-    hasPersistedOfficialCourseProviderCorroboration(input, current.website, current.name)
+    hasPersistedOfficialCourseProviderCorroboration(
+      input,
+      current.website,
+      current.name,
+    ),
   );
   const corroboratedPendingPublicCourse = Boolean(
     current.isPublic === null &&
-    (learnedOnlineAdapter || (verifiedClassification && input.bookingMethod === "PUBLIC_ONLINE")) &&
-    hasPersistedOfficialCourseProviderCorroboration(input, current.website, current.name)
+    (learnedOnlineAdapter ||
+      (verifiedClassification && input.bookingMethod === "PUBLIC_ONLINE")) &&
+    hasPersistedOfficialCourseProviderCorroboration(
+      input,
+      current.website,
+      current.name,
+    ),
   );
   const trustedPersistedReplacement =
     replacingLegacyPolicyOnlyBlock ||
@@ -1933,19 +2225,25 @@ async function applyBrowserDiscoveryToCourseInTransaction(
       discovery: input,
       persistedProviderFamilyKey: persistedProvider.providerFamilyKey,
       persistedProviderKnown: Boolean(persistedProvider.capability),
-      persistedProviderConflict: persistedProvider.evidenceConflict
-    })
+      persistedProviderConflict: persistedProvider.evidenceConflict,
+    }),
   );
   const lowerAuthorityManualWouldReplaceRunnableProvider = Boolean(
-    manualOnly && persistedProvider.isRunnable && !isAuthoritativeManualReplacement(input)
+    manualOnly &&
+    persistedProvider.isRunnable &&
+    !isAuthoritativeManualReplacement(input),
   );
   if (
     provider.evidenceConflict ||
     (persistedProvider.evidenceConflict && !trustedPersistedReplacement) ||
-    (current.isPublic === false && !verifiedPrivateIdentity && !corroboratedPrivateReopening) ||
+    (current.isPublic === false &&
+      !verifiedPrivateIdentity &&
+      !corroboratedPrivateReopening) ||
     sourceUnavailableWouldReplaceProviderState ||
     lowerAuthorityManualWouldReplaceRunnableProvider ||
-    (learnedOnlineAdapter && !persistedGate.adapterAllowed && !corroboratedPrivateReopening) ||
+    (learnedOnlineAdapter &&
+      !persistedGate.adapterAllowed &&
+      !corroboratedPrivateReopening) ||
     (!learnedOnlineAdapter &&
       !incomingTerminal &&
       persistedProvider.isRunnable &&
@@ -1959,7 +2257,7 @@ async function applyBrowserDiscoveryToCourseInTransaction(
     !(await reserveUnownedIncidentForBrowserDiscovery(
       transaction,
       input.courseId,
-      expectedUnownedIncident
+      expectedUnownedIncident,
     ))
   ) {
     return null;
@@ -1975,7 +2273,7 @@ async function applyBrowserDiscoveryToCourseInTransaction(
           policyNotes: input.policyNotes,
           intelligenceVerifiedAt: observedAt,
           intelligenceReviewAt: new Date(input.intelligenceReviewAt!),
-          intelligenceConfidence: input.confidence
+          intelligenceConfidence: input.confidence,
         }
       : verifiedPrivateIdentity
         ? {
@@ -1987,7 +2285,7 @@ async function applyBrowserDiscoveryToCourseInTransaction(
             policyNotes: input.policyNotes,
             intelligenceVerifiedAt: observedAt,
             intelligenceReviewAt: new Date(input.intelligenceReviewAt!),
-            intelligenceConfidence: input.confidence
+            intelligenceConfidence: input.confidence,
           }
         : {
             ...(corroboratedPrivateReopening || corroboratedPendingPublicCourse
@@ -1996,7 +2294,9 @@ async function applyBrowserDiscoveryToCourseInTransaction(
             detectedPlatform: input.detectedPlatform,
             providerFamilyKey: provider.providerFamilyKey,
             automationEligibility,
-            detectedBookingUrl: manualOnly ? officialRequestUrl : input.bookingUrl,
+            detectedBookingUrl: manualOnly
+              ? officialRequestUrl
+              : input.bookingUrl,
             bookingMetadata: manualOnly
               ? Prisma.DbNull
               : (input.apiMetadata as Prisma.InputJsonValue),
@@ -2005,7 +2305,7 @@ async function applyBrowserDiscoveryToCourseInTransaction(
               automationEligibility,
               automationReason: input.automationReason,
               bookingMethod,
-              bookingAccessMode: input.bookingAccessMode
+              bookingAccessMode: input.bookingAccessMode,
             }),
             bookingPhone: corroboratedPrivateReopening
               ? (input.bookingPhone ?? null)
@@ -2015,25 +2315,29 @@ async function applyBrowserDiscoveryToCourseInTransaction(
             intelligenceReviewAt: input.intelligenceReviewAt
               ? new Date(input.intelligenceReviewAt)
               : null,
-            intelligenceConfidence: input.confidence
-          }
+            intelligenceConfidence: input.confidence,
+          },
   });
   if (updated.count !== 1) {
     return null;
   }
 
   const applied = await transaction.course.findUnique({
-    where: { id: input.courseId }
+    where: { id: input.courseId },
   });
   if (applied) {
-    await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(transaction, {
-      courseId: input.courseId,
-      before: current,
-      after: applied,
-      providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(applied),
-      source: "COURSE_SUPPORT_RESPONDER",
-      now: observedAt
-    });
+    await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(
+      transaction,
+      {
+        courseId: input.courseId,
+        before: current,
+        after: applied,
+        providerSnapshotFingerprint:
+          buildCourseSupportProviderSnapshotFingerprint(applied),
+        source: "COURSE_SUPPORT_RESPONDER",
+        now: observedAt,
+      },
+    );
   }
   return applied;
 }
@@ -2042,7 +2346,7 @@ const AUTHORITATIVE_MANUAL_REPLACEMENT_SOURCES = new Set([
   "official-phone-only-tee-time-access",
   "official-public-play-request-form",
   "official-walk-in-only-tee-time-access",
-  "chronogolf-public-club-profile"
+  "chronogolf-public-club-profile",
 ]);
 
 function isAuthoritativeManualReplacement(input: BrowserDiscovery) {
@@ -2051,7 +2355,9 @@ function isAuthoritativeManualReplacement(input: BrowserDiscovery) {
     input.automationEligibility !== "BLOCKED" ||
     input.automationReason !== "NO_ONLINE_BOOKING" ||
     !input.bookingMethod ||
-    !["PHONE_ONLY", "CONTACT_COURSE", "WALK_IN"].includes(input.bookingMethod) ||
+    !["PHONE_ONLY", "CONTACT_COURSE", "WALK_IN"].includes(
+      input.bookingMethod,
+    ) ||
     input.confidence < 0.95 ||
     !AUTHORITATIVE_MANUAL_REPLACEMENT_SOURCES.has(input.evidence.learnedFrom)
   ) {
@@ -2066,7 +2372,9 @@ function isAuthoritativeManualReplacement(input: BrowserDiscovery) {
   }
 
   const source = parseSafePublicUrl(input.sourceUrl);
-  const finalUrl = parseSafePublicUrl(input.evidence.finalUrl ?? input.sourceUrl);
+  const finalUrl = parseSafePublicUrl(
+    input.evidence.finalUrl ?? input.sourceUrl,
+  );
   return Boolean(
     source &&
     finalUrl &&
@@ -2074,14 +2382,14 @@ function isAuthoritativeManualReplacement(input: BrowserDiscovery) {
     input.evidence.observedUrls.some((url) => {
       const observed = parseSafePublicUrl(url);
       return Boolean(observed && haveSameCourseWebsiteOrigin(source, observed));
-    })
+    }),
   );
 }
 
 async function reserveUnownedIncidentForBrowserDiscovery(
   transaction: Prisma.TransactionClient,
   courseId: string,
-  expected: BrowserDiscoveryUnownedIncidentExpectation | undefined
+  expected: BrowserDiscoveryUnownedIncidentExpectation | undefined,
 ) {
   if (!expected) return true;
   const reserved = await transaction.courseSupportIncident.updateMany({
@@ -2091,14 +2399,16 @@ async function reserveUnownedIncidentForBrowserDiscovery(
       cycle: expected.cycle,
       revision: expected.revision,
       status: expected.status,
-      activeBatchId: null
+      activeBatchId: null,
     },
-    data: { revision: { increment: 0 } }
+    data: { revision: { increment: 0 } },
   });
   return reserved.count === 1;
 }
 
-function normalizeAutomatedTechnicalDiscovery(discovery: BrowserDiscovery): BrowserDiscovery {
+function normalizeAutomatedTechnicalDiscovery(
+  discovery: BrowserDiscovery,
+): BrowserDiscovery {
   const gate = evaluateBrowserDiscoveryMonitoringGate(discovery);
   if (gate.disposition !== "TECHNICAL_FINAL") {
     return discovery;
@@ -2111,15 +2421,17 @@ function normalizeAutomatedTechnicalDiscovery(discovery: BrowserDiscovery): Brow
     confidence: Math.min(discovery.confidence, 0.99),
     evidence: {
       ...discovery.evidence,
-      learnedFrom: `${discovery.evidence.learnedFrom}:engineering-approval-required`
-    }
+      learnedFrom: `${discovery.evidence.learnedFrom}:engineering-approval-required`,
+    },
   };
 }
 
 function isSourceUnavailableClassification(input: BrowserDiscovery) {
   const source = parseSafePublicUrl(input.sourceUrl);
   const finalUrl = parseSafePublicUrl(input.evidence.finalUrl ?? "");
-  const reviewAt = input.intelligenceReviewAt ? new Date(input.intelligenceReviewAt) : null;
+  const reviewAt = input.intelligenceReviewAt
+    ? new Date(input.intelligenceReviewAt)
+    : null;
   const now = Date.now();
   if (
     input.status !== "INSPECTED" ||
@@ -2152,7 +2464,7 @@ function isSourceUnavailableClassification(input: BrowserDiscovery) {
   }
   if (
     Object.keys(input.evidence).some(
-      (key) => !["finalUrl", "learnedFrom", "observedUrls"].includes(key)
+      (key) => !["finalUrl", "learnedFrom", "observedUrls"].includes(key),
     )
   ) {
     return false;
@@ -2160,7 +2472,7 @@ function isSourceUnavailableClassification(input: BrowserDiscovery) {
   const expectedUrls = new Set([source.toString(), finalUrl.toString()]);
   return Boolean(
     input.evidence.observedUrls.length === expectedUrls.size &&
-    input.evidence.observedUrls.every((value) => expectedUrls.has(value))
+    input.evidence.observedUrls.every((value) => expectedUrls.has(value)),
   );
 }
 
@@ -2197,7 +2509,8 @@ function canApplySourceUnavailableClassification(input: {
   const officialFamily = normalizeProviderFamilyKey(website.hostname);
   const currentFamily = normalizeProviderFamilyKey(current.providerFamilyKey);
   const currentFamilyIsOfficialPlaceholder =
-    currentFamily === SOURCE_MISSING_PROVIDER_FAMILY || currentFamily === officialFamily;
+    currentFamily === SOURCE_MISSING_PROVIDER_FAMILY ||
+    currentFamily === officialFamily;
 
   return Boolean(
     currentFamilyIsOfficialPlaceholder &&
@@ -2211,56 +2524,63 @@ function canApplySourceUnavailableClassification(input: {
     current.isPublic !== false &&
     (!current.detectedPlatform || current.detectedPlatform === "UNKNOWN") &&
     !current.detectedBookingUrl &&
-    (current.bookingMetadata === null || current.bookingMetadata === undefined) &&
+    (current.bookingMetadata === null ||
+      current.bookingMetadata === undefined) &&
     (!current.bookingMethod || current.bookingMethod === "UNKNOWN") &&
     (!current.automationEligibility ||
       ["UNKNOWN", "NEEDS_REVIEW"].includes(current.automationEligibility)) &&
     (!current.automationReason ||
-      ["NONE", "TEMPORARILY_UNAVAILABLE"].includes(current.automationReason))
+      ["NONE", "TEMPORARILY_UNAVAILABLE"].includes(current.automationReason)),
   );
 }
 
 function matchesBrowserDiscoveryCourseExpectation(
   current: BrowserDiscoveryCourseExpectation,
-  expected?: BrowserDiscoveryCourseExpectation
+  expected?: BrowserDiscoveryCourseExpectation,
 ) {
   return Boolean(
     !expected ||
     (current.updatedAt.getTime() === expected.updatedAt.getTime() &&
       current.detectedBookingUrl === expected.detectedBookingUrl &&
       current.bookingMethod === expected.bookingMethod &&
-      current.automationEligibility === expected.automationEligibility)
+      current.automationEligibility === expected.automationEligibility),
   );
 }
 
 const VERIFIED_PRIVATE_IDENTITY_POLICY_NOTES = new Map([
   [
     "official-private-course-profile",
-    "The official course profile identifies this course as private. Tee Time Spot must not present public tee-time monitoring for member-controlled inventory."
+    "The official course profile identifies this course as private. Tee Time Spot must not present public tee-time monitoring for member-controlled inventory.",
   ],
   [
     "official-private-club-access",
-    "The course's official site identifies it as a private club and limits access to members and their guests. Tee Time Spot must not present automated public tee-time monitoring for this course."
+    "The course's official site identifies it as a private club and limits access to members and their guests. Tee Time Spot must not present automated public tee-time monitoring for this course.",
   ],
   [
     "official-resident-member-access",
-    "The official site identifies this as a neighborhood social club for residents and says the golf course is a member amenity. Tee Time Spot must not present automated public tee-time monitoring for this course."
-  ]
+    "The official site identifies this as a neighborhood social club for residents and says the golf course is a member amenity. Tee Time Spot must not present automated public tee-time monitoring for this course.",
+  ],
 ]);
 
-function isVerifiedPrivateIdentityDiscovery(discovery: BrowserDiscovery, now = new Date()) {
+function isVerifiedPrivateIdentityDiscovery(
+  discovery: BrowserDiscovery,
+  now = new Date(),
+) {
   const learnedFrom = discovery.evidence.learnedFrom;
   const [baseLearnedFrom, ...provenanceMarkers] = learnedFrom.split(":");
   const validProvenance =
     provenanceMarkers.length === 0 ||
-    (provenanceMarkers.length === 1 && provenanceMarkers[0] === "legacy-policy-reconciliation");
+    (provenanceMarkers.length === 1 &&
+      provenanceMarkers[0] === "legacy-policy-reconciliation");
   const expectedPolicyNotes = validProvenance
     ? VERIFIED_PRIVATE_IDENTITY_POLICY_NOTES.get(baseLearnedFrom)
     : undefined;
   const source = parseSafePublicUrl(discovery.sourceUrl);
   const booking = parseSafePublicUrl(discovery.bookingUrl ?? "");
   const finalUrl = parseSafePublicUrl(discovery.evidence.finalUrl ?? "");
-  const reviewAt = discovery.intelligenceReviewAt ? new Date(discovery.intelligenceReviewAt) : null;
+  const reviewAt = discovery.intelligenceReviewAt
+    ? new Date(discovery.intelligenceReviewAt)
+    : null;
   const maximumReviewAt = new Date(now.getTime() + 181 * 24 * 60 * 60 * 1000);
   return Boolean(
     discovery.isPublic === false &&
@@ -2285,24 +2605,36 @@ function isVerifiedPrivateIdentityDiscovery(discovery: BrowserDiscovery, now = n
     reviewAt &&
     !Number.isNaN(reviewAt.getTime()) &&
     reviewAt.getTime() > now.getTime() &&
-    reviewAt.getTime() <= maximumReviewAt.getTime()
+    reviewAt.getTime() <= maximumReviewAt.getTime(),
   );
 }
 
-function normalizeBrowserDiscoveryForMonitoring(discovery: BrowserDiscovery): BrowserDiscovery {
+function normalizeBrowserDiscoveryForMonitoring(
+  discovery: BrowserDiscovery,
+): BrowserDiscovery {
   const normalized = keepPolicyOnlyDiscoveryActionable(discovery);
   const gate = evaluateBrowserDiscoveryMonitoringGate(normalized);
   const manualFieldsPresent =
-    ["PHONE_ONLY", "CONTACT_COURSE", "WALK_IN"].includes(normalized.bookingMethod ?? "") ||
-    normalized.automationReason === "NO_ONLINE_BOOKING";
+    ["PHONE_ONLY", "CONTACT_COURSE", "WALK_IN"].includes(
+      normalized.bookingMethod ?? "",
+    ) || normalized.automationReason === "NO_ONLINE_BOOKING";
   const verifiedPrivateIdentity =
-    isVerifiedPrivateIdentityDiscovery(normalized) && gate.disposition === "IDENTITY_FINAL";
-  const incoherentPrivateIdentity = normalized.isPublic === false && !verifiedPrivateIdentity;
+    isVerifiedPrivateIdentityDiscovery(normalized) &&
+    gate.disposition === "IDENTITY_FINAL";
+  const incoherentPrivateIdentity =
+    normalized.isPublic === false && !verifiedPrivateIdentity;
   const incoherentManualDisposition =
-    manualFieldsPresent && gate.disposition !== "MANUAL_FINAL" && !verifiedPrivateIdentity;
+    manualFieldsPresent &&
+    gate.disposition !== "MANUAL_FINAL" &&
+    !verifiedPrivateIdentity;
   const nonTerminalBlock =
-    normalized.automationEligibility === "BLOCKED" && gate.disposition === "ACTIONABLE";
-  if (!incoherentPrivateIdentity && !incoherentManualDisposition && !nonTerminalBlock) {
+    normalized.automationEligibility === "BLOCKED" &&
+    gate.disposition === "ACTIONABLE";
+  if (
+    !incoherentPrivateIdentity &&
+    !incoherentManualDisposition &&
+    !nonTerminalBlock
+  ) {
     return normalized;
   }
 
@@ -2323,15 +2655,15 @@ function normalizeBrowserDiscoveryForMonitoring(discovery: BrowserDiscovery): Br
           : incoherentManualDisposition
             ? "incoherent-manual-disposition"
             : "non-terminal-block"
-      }`
-    }
+      }`,
+    },
   };
 }
 
 function hasPersistedOfficialCourseProviderCorroboration(
   discovery: BrowserDiscovery,
   persistedWebsite: string | null,
-  persistedCourseName?: string
+  persistedCourseName?: string,
 ) {
   const proof = discovery.evidence.courseIdentityCorroboration;
   if (
@@ -2339,7 +2671,8 @@ function hasPersistedOfficialCourseProviderCorroboration(
     !persistedWebsite ||
     !discovery.bookingUrl ||
     (persistedCourseName !== undefined &&
-      (!proof.courseName || !haveCompatibleCourseNames(persistedCourseName, proof.courseName)))
+      (!proof.courseName ||
+        !haveCompatibleCourseNames(persistedCourseName, proof.courseName)))
   ) {
     return false;
   }
@@ -2356,7 +2689,8 @@ function hasPersistedOfficialCourseProviderCorroboration(
     !proofPage ||
     !proofProvider ||
     !discoveredProvider ||
-    resolveProviderCapability({ detectedBookingUrl: persisted.toString() }).capability
+    resolveProviderCapability({ detectedBookingUrl: persisted.toString() })
+      .capability
   ) {
     return false;
   }
@@ -2368,22 +2702,27 @@ function hasPersistedOfficialCourseProviderCorroboration(
   );
 }
 
-function resolveNonRunnableOfficialCourseBookingLinkIdentity(discovery: BrowserDiscovery) {
+function resolveNonRunnableOfficialCourseBookingLinkIdentity(
+  discovery: BrowserDiscovery,
+) {
   const proof = discovery.evidence.courseIdentityCorroboration;
   const bookingUrl = parseSafePublicUrl(discovery.bookingUrl ?? "");
   const sourceUrl = parseSafePublicUrl(discovery.sourceUrl);
-  const officialWebsiteUrl = parseSafePublicUrl(proof?.officialWebsiteUrl ?? "");
+  const officialWebsiteUrl = parseSafePublicUrl(
+    proof?.officialWebsiteUrl ?? "",
+  );
   const officialPageUrl = parseSafePublicUrl(proof?.officialPageUrl ?? "");
   const providerUrl = parseSafePublicUrl(proof?.providerUrl ?? "");
   const provider = resolveProviderCapability({
     detectedPlatform: discovery.detectedPlatform,
     detectedBookingUrl: discovery.bookingUrl,
     website: discovery.sourceUrl,
-    bookingMetadata: discovery.apiMetadata
+    bookingMetadata: discovery.apiMetadata,
   });
   if (
     discovery.status !== "INSPECTED" ||
-    discovery.evidence.learnedFrom !== "official-course-non-runnable-booking-link" ||
+    discovery.evidence.learnedFrom !==
+      "official-course-non-runnable-booking-link" ||
     discovery.evidence.bookingCallToAction !== true ||
     proof?.kind !== "OFFICIAL_COURSE_NON_RUNNABLE_BOOKING_LINK" ||
     !proof.courseName ||
@@ -2431,7 +2770,7 @@ function resolveNonRunnableOfficialCourseBookingLinkIdentity(discovery: BrowserD
     providerFamilyKey: provider.providerFamilyKey,
     courseName: proof.courseName,
     officialWebsiteUrl,
-    officialPageUrl
+    officialPageUrl,
   };
 }
 
@@ -2449,18 +2788,26 @@ function canApplyNonRunnableOfficialCourseBookingLink(input: {
     automationReason: string | null;
     bookingAccessMode: string | null;
   };
-  identity: NonNullable<ReturnType<typeof resolveNonRunnableOfficialCourseBookingLinkIdentity>>;
+  identity: NonNullable<
+    ReturnType<typeof resolveNonRunnableOfficialCourseBookingLinkIdentity>
+  >;
   persistedProviderIsRunnable: boolean;
 }) {
   const { current, identity } = input;
   const persistedWebsite = parseSafePublicUrl(current.website ?? "");
-  const currentBookingUrl = parseSafePublicUrl(current.detectedBookingUrl ?? "");
+  const currentBookingUrl = parseSafePublicUrl(
+    current.detectedBookingUrl ?? "",
+  );
   if (!persistedWebsite || !isSafeManualEvidenceUrl(persistedWebsite)) {
     return false;
   }
 
-  const currentProviderFamily = normalizeProviderFamilyKey(current.providerFamilyKey);
-  const officialProviderFamily = normalizeProviderFamilyKey(persistedWebsite.hostname);
+  const currentProviderFamily = normalizeProviderFamilyKey(
+    current.providerFamilyKey,
+  );
+  const officialProviderFamily = normalizeProviderFamilyKey(
+    persistedWebsite.hostname,
+  );
   const currentFamilyIsSafePlaceholder =
     currentProviderFamily === SOURCE_MISSING_PROVIDER_FAMILY ||
     normalizeProviderHostnameFamily(currentProviderFamily) ===
@@ -2471,20 +2818,26 @@ function canApplyNonRunnableOfficialCourseBookingLink(input: {
     currentFamilyIsSafePlaceholder &&
     !input.persistedProviderIsRunnable &&
     current.isPublic !== false &&
-    (!current.detectedPlatform || ["UNKNOWN", "CUSTOM"].includes(current.detectedPlatform)) &&
-    (!currentBookingUrl || currentBookingUrl.toString() === identity.bookingUrl) &&
-    (current.bookingMetadata === null || current.bookingMetadata === undefined) &&
+    (!current.detectedPlatform ||
+      ["UNKNOWN", "CUSTOM"].includes(current.detectedPlatform)) &&
+    (!currentBookingUrl ||
+      currentBookingUrl.toString() === identity.bookingUrl) &&
+    (current.bookingMetadata === null ||
+      current.bookingMetadata === undefined) &&
     (!current.bookingMethod || current.bookingMethod === "UNKNOWN") &&
     (!current.automationEligibility ||
       ["UNKNOWN", "NEEDS_REVIEW"].includes(current.automationEligibility)) &&
     (!current.bookingAccessMode || current.bookingAccessMode === "UNKNOWN") &&
     (!current.automationReason ||
-      ["NONE", "UNSUPPORTED_PLATFORM", "TEMPORARILY_UNAVAILABLE", "OTHER"].includes(
-        current.automationReason
-      )) &&
+      [
+        "NONE",
+        "UNSUPPORTED_PLATFORM",
+        "TEMPORARILY_UNAVAILABLE",
+        "OTHER",
+      ].includes(current.automationReason)) &&
     haveCompatibleOfficialPageCourseNames(current.name, identity.courseName) &&
     persistedWebsite.toString() === identity.officialWebsiteUrl.toString() &&
-    haveSameCourseWebsiteOrigin(persistedWebsite, identity.officialPageUrl)
+    haveSameCourseWebsiteOrigin(persistedWebsite, identity.officialPageUrl),
   );
 }
 
@@ -2495,7 +2848,9 @@ function normalizeProviderHostnameFamily(value: string) {
 function parseSafePublicUrl(value: string) {
   try {
     const url = new URL(value);
-    return ["http:", "https:"].includes(url.protocol) && !url.username && !url.password
+    return ["http:", "https:"].includes(url.protocol) &&
+      !url.username &&
+      !url.password
       ? url
       : null;
   } catch {
@@ -2504,7 +2859,8 @@ function parseSafePublicUrl(value: string) {
 }
 
 function haveSameCourseWebsiteOrigin(left: URL, right: URL) {
-  const normalizeHostname = (hostname: string) => hostname.toLowerCase().replace(/^www\./u, "");
+  const normalizeHostname = (hostname: string) =>
+    hostname.toLowerCase().replace(/^www\./u, "");
   return (
     (left.protocol === right.protocol ||
       (left.protocol === "http:" && right.protocol === "https:")) &&
@@ -2513,8 +2869,9 @@ function haveSameCourseWebsiteOrigin(left: URL, right: URL) {
   );
 }
 
-export async function recordTeeTimeMatch(input: {
+export type TeeTimeMatchObservationInput = {
   searchId: string;
+  alertGeneration?: number;
   courseId: string;
   sourceId: string;
   startsAt: Date;
@@ -2523,37 +2880,62 @@ export async function recordTeeTimeMatch(input: {
   priceCents?: number;
   holes?: number;
   evidenceUrl?: string;
-}) {
-  const existing = await prisma.teeTimeMatch.findUnique({
+  observedAt?: Date;
+  transaction?: Prisma.TransactionClient;
+};
+
+export async function recordTeeTimeMatch(input: TeeTimeMatchObservationInput) {
+  const client = input.transaction ?? prisma;
+  const existing = await client.teeTimeMatch.findUnique({
     where: {
       teeSearchId_courseId_sourceId_startsAt: {
         teeSearchId: input.searchId,
         courseId: input.courseId,
         sourceId: input.sourceId,
-        startsAt: input.startsAt
-      }
+        startsAt: input.startsAt,
+      },
     },
     select: {
+      id: true,
+      alertStatus: true,
       availabilityStatus: true,
       unavailableAt: true,
-      availabilityCycle: true
-    }
+      availabilityCycle: true,
+      lastConfirmedAt: true,
+    },
   });
 
-  const confirmedAt = new Date();
+  const confirmedAt = input.observedAt ?? new Date();
   const shouldAlertReopenedMatch = Boolean(
     existing?.availabilityStatus === "GONE" &&
     (!existing.unavailableAt ||
-      confirmedAt.getTime() - existing.unavailableAt.getTime() >= REOPEN_ALERT_MINIMUM_ABSENCE_MS)
+      confirmedAt.getTime() - existing.unavailableAt.getTime() >=
+        REOPEN_ALERT_MINIMUM_ABSENCE_MS),
   );
-  return prisma.teeTimeMatch.upsert({
+  if (
+    input.alertGeneration !== undefined &&
+    existing &&
+    ["PENDING", "SENT"].includes(existing.alertStatus) &&
+    existing.availabilityStatus === "AVAILABLE" &&
+    existing.lastConfirmedAt instanceof Date &&
+    confirmedAt > existing.lastConfirmedAt
+  ) {
+    await reactivateTerminalUnresolvedMatchDeliveries(client, {
+      searchId: input.searchId,
+      alertGeneration: input.alertGeneration,
+      matchId: existing.id,
+      availabilityCycle: existing.availabilityCycle,
+      retryAt: confirmedAt,
+    });
+  }
+  return client.teeTimeMatch.upsert({
     where: {
       teeSearchId_courseId_sourceId_startsAt: {
         teeSearchId: input.searchId,
         courseId: input.courseId,
         sourceId: input.sourceId,
-        startsAt: input.startsAt
-      }
+        startsAt: input.startsAt,
+      },
     },
     update: {
       lastSeenAt: confirmedAt,
@@ -2564,14 +2946,14 @@ export async function recordTeeTimeMatch(input: {
         ? {
             alertStatus: "PENDING",
             sentAt: null,
-            availabilityCycle: { increment: 1 }
+            availabilityCycle: { increment: 1 },
           }
         : {}),
       availableSpots: input.availableSpots,
       bookingUrl: input.bookingUrl,
       priceCents: input.priceCents,
       holes: input.holes,
-      evidenceUrl: input.evidenceUrl
+      evidenceUrl: input.evidenceUrl,
     },
     create: {
       teeSearchId: input.searchId,
@@ -2582,8 +2964,8 @@ export async function recordTeeTimeMatch(input: {
       bookingUrl: input.bookingUrl,
       priceCents: input.priceCents,
       holes: input.holes,
-      evidenceUrl: input.evidenceUrl
-    }
+      evidenceUrl: input.evidenceUrl,
+    },
   });
 }
 
@@ -2595,9 +2977,17 @@ export async function markMissingMatchesUnavailable(input: {
   date: string;
   timeZone: string;
   confirmedMatches: Array<{ sourceId: string; startsAt: Date }>;
+  observedAt?: Date;
+  transaction?: Prisma.TransactionClient;
 }) {
-  const dayStart = zonedDateTimeToDate(`${input.date}T00:00:00`, input.timeZone);
-  const dayEnd = zonedDateTimeToDate(`${addIsoDateDays(input.date, 1)}T00:00:00`, input.timeZone);
+  const dayStart = zonedDateTimeToDate(
+    `${input.date}T00:00:00`,
+    input.timeZone,
+  );
+  const dayEnd = zonedDateTimeToDate(
+    `${addIsoDateDays(input.date, 1)}T00:00:00`,
+    input.timeZone,
+  );
 
   const missingMatchWhere: Prisma.TeeTimeMatchWhereInput = {
     teeSearchId: input.searchId,
@@ -2605,35 +2995,37 @@ export async function markMissingMatchesUnavailable(input: {
     availabilityStatus: "AVAILABLE" as const,
     startsAt: {
       gte: dayStart,
-      lt: dayEnd
+      lt: dayEnd,
     },
     ...(input.confirmedMatches.length > 0
       ? {
           NOT: input.confirmedMatches.map((match) => ({
             sourceId: match.sourceId,
-            startsAt: match.startsAt
-          }))
+            startsAt: match.startsAt,
+          })),
         }
-      : {})
+      : {}),
   };
-  const unavailableAt = new Date();
+  const unavailableAt = input.observedAt ?? new Date();
 
-  return prisma.$transaction(async (transaction) => {
+  const reconcile = async (transaction: Prisma.TransactionClient) => {
     const search = await lockSearchForEmailReconciliation(transaction, {
       searchId: input.searchId,
       alertGeneration: input.alertGeneration,
       checkLeaseToken: input.checkLeaseToken,
-      now: unavailableAt
+      now: unavailableAt,
     });
     if (!search) {
-      throw new Error("Search check is no longer current during availability reconciliation");
+      throw new Error(
+        "Search check is no longer current during availability reconciliation",
+      );
     }
     const pendingMatches = await transaction.teeTimeMatch.findMany({
       where: {
         ...missingMatchWhere,
-        alertStatus: "PENDING"
+        alertStatus: "PENDING",
       },
-      select: { id: true, availabilityCycle: true }
+      select: { id: true, availabilityCycle: true },
     });
     await suppressSearchEmailDeliveriesForMatches({
       searchId: input.searchId,
@@ -2641,35 +3033,325 @@ export async function markMissingMatchesUnavailable(input: {
       checkLeaseToken: input.checkLeaseToken,
       matchRefs: pendingMatches.map((match) => ({
         matchId: match.id,
-        availabilityCycle: match.availabilityCycle
+        availabilityCycle: match.availabilityCycle,
       })),
       now: unavailableAt,
-      transaction
+      transaction,
     });
     const suppressed = await transaction.teeTimeMatch.updateMany({
       where: {
         ...missingMatchWhere,
-        alertStatus: "PENDING"
+        alertStatus: "PENDING",
       },
       data: {
         alertStatus: "SUPPRESSED",
         availabilityStatus: "GONE",
         sentAt: unavailableAt,
-        unavailableAt
-      }
+        unavailableAt,
+      },
     });
     const reconciled = await transaction.teeTimeMatch.updateMany({
       where: {
         ...missingMatchWhere,
-        alertStatus: { not: "PENDING" }
+        alertStatus: { not: "PENDING" },
       },
       data: {
         availabilityStatus: "GONE",
-        unavailableAt
-      }
+        unavailableAt,
+      },
     });
     return [suppressed, reconciled];
+  };
+
+  return input.transaction
+    ? reconcile(input.transaction)
+    : prisma.$transaction(reconcile);
+}
+
+export async function commitCurrentCourseTeeTimeMatches(input: {
+  searchId: string;
+  alertGeneration: number;
+  checkLeaseToken: string;
+  courseId: string;
+  date: string;
+  timeZone: string;
+  providerObservedAt: Date;
+  providerObservation?: CourseProviderObservationLease;
+  localReaderObservation?: {
+    jobId: string;
+    scheduleVersion: number;
+    resultStatus: "AVAILABLE" | "NO_AVAILABILITY";
+    monitoringOutcome: "MATCH_FOUND" | "NO_MATCH";
+    resumePreviouslyAcceptedSource?: boolean;
+  };
+  sourceKind: "SUCCESS" | "FAILURE";
+  bookingWindowEvidence?: BookingWindowEvidence;
+  markBookingWindowChecked?: boolean;
+  pricing?: CoursePriceEstimate;
+  bookableHoleCounts?: readonly BookableHoleCount[];
+  reconcileMatches?: boolean;
+  matches: Array<
+    Omit<
+      TeeTimeMatchObservationInput,
+      "searchId" | "courseId" | "observedAt" | "transaction"
+    >
+  >;
+}) {
+  if (
+    !(input.providerObservedAt instanceof Date) ||
+    !Number.isFinite(input.providerObservedAt.getTime())
+  ) {
+    throw new Error(
+      "Course match persistence requires a valid provider observation time",
+    );
+  }
+  if (
+    input.sourceKind === "FAILURE" &&
+    (input.matches.length > 0 ||
+      input.reconcileMatches !== false ||
+      input.bookingWindowEvidence !== undefined ||
+      input.markBookingWindowChecked !== undefined ||
+      input.pricing !== undefined ||
+      input.bookableHoleCounts !== undefined)
+  ) {
+    throw new Error(
+      "Failed provider observations cannot mutate customer matches or booking facts",
+    );
+  }
+  if (input.bookingWindowEvidence && input.markBookingWindowChecked) {
+    throw new Error(
+      "Course observation persistence cannot apply booking-window evidence and a checked-only update together",
+    );
+  }
+  if (
+    input.providerObservation &&
+    input.providerObservation.courseId !== input.courseId
+  ) {
+    throw new Error(
+      "Course match persistence provider observation does not match the course",
+    );
+  }
+  if (
+    input.localReaderObservation &&
+    (input.sourceKind !== "SUCCESS" ||
+      !input.localReaderObservation.jobId.trim() ||
+      input.localReaderObservation.scheduleVersion < 0 ||
+      !Number.isSafeInteger(input.localReaderObservation.scheduleVersion))
+  ) {
+    throw new Error(
+      "Course match persistence local-reader observation is invalid",
+    );
+  }
+
+  return runSerializedCourseMonitoringWrite(
+    input.courseId,
+    async (transaction) => {
+      if (
+        input.providerObservation &&
+        !(await renewCourseProviderObservationInTransaction(
+          transaction,
+          input.providerObservation,
+        ))
+      ) {
+        throw new Error(
+          "Provider observation ownership expired before course match persistence completed",
+        );
+      }
+      const expectedSourceIsCurrent = await isCurrentCourseMonitoringSource(
+        transaction,
+        {
+          courseId: input.courseId,
+          providerObservedAt: input.providerObservedAt,
+          sourceKind: input.sourceKind,
+        },
+      );
+      if (!expectedSourceIsCurrent) {
+        return {
+          sourceEvidenceAccepted: false as const,
+          persistedMatchStates: [] as Array<{
+            matchId?: string;
+            isPending: boolean;
+          }>,
+        };
+      }
+      if (
+        input.localReaderObservation?.resumePreviouslyAcceptedSource &&
+        !(await hasExactAcceptedLocalReaderMonitoringSource(transaction, {
+          courseId: input.courseId,
+          searchId: input.searchId,
+          providerObservedAt: input.providerObservedAt,
+          jobId: input.localReaderObservation.jobId,
+          scheduleVersion: input.localReaderObservation.scheduleVersion,
+          resultStatus: input.localReaderObservation.resultStatus,
+          monitoringOutcome: input.localReaderObservation.monitoringOutcome,
+        }))
+      ) {
+        return {
+          sourceEvidenceAccepted: false as const,
+          persistedMatchStates: [] as Array<{
+            matchId?: string;
+            isPending: boolean;
+          }>,
+        };
+      }
+
+      if (input.bookingWindowEvidence) {
+        await recordCourseBookingWindowEvidenceInTransaction(transaction, {
+          courseId: input.courseId,
+          evidence: input.bookingWindowEvidence,
+          observedAt: input.providerObservedAt,
+          source: "SEARCH_WORKFLOW",
+        });
+      } else if (input.markBookingWindowChecked) {
+        await markCourseBookingWindowCheckedInTransaction(
+          transaction,
+          input.courseId,
+          input.providerObservedAt,
+        );
+      }
+      if (input.bookableHoleCounts !== undefined) {
+        await recordCourseBookingFacts({
+          courseId: input.courseId,
+          pricing: input.pricing,
+          bookableHoleCounts: input.bookableHoleCounts,
+          observedAt: input.providerObservedAt,
+          transaction,
+        });
+      }
+
+      const persistedMatchStates: Array<{
+        matchId?: string;
+        isPending: boolean;
+      }> = [];
+      for (const match of input.matches) {
+        const persistedMatch = await recordTeeTimeMatch({
+          ...match,
+          searchId: input.searchId,
+          alertGeneration: input.alertGeneration,
+          courseId: input.courseId,
+          observedAt: input.providerObservedAt,
+          transaction,
+        });
+        persistedMatchStates.push({
+          matchId: persistedMatch?.id,
+          isPending: persistedMatch?.alertStatus === "PENDING",
+        });
+      }
+      if (input.reconcileMatches !== false) {
+        await markMissingMatchesUnavailable({
+          searchId: input.searchId,
+          alertGeneration: input.alertGeneration,
+          checkLeaseToken: input.checkLeaseToken,
+          courseId: input.courseId,
+          date: input.date,
+          timeZone: input.timeZone,
+          confirmedMatches: input.matches.map((match) => ({
+            sourceId: match.sourceId,
+            startsAt: match.startsAt,
+          })),
+          observedAt: input.providerObservedAt,
+          transaction,
+        });
+      }
+      if (
+        input.localReaderObservation &&
+        !(await markCompletedLocalReaderProviderObservationConsumedInTransaction(
+          transaction,
+          {
+            courseId: input.courseId,
+            searchId: input.searchId,
+            scheduleVersion: input.localReaderObservation.scheduleVersion,
+            checkLeaseToken: input.checkLeaseToken,
+            jobId: input.localReaderObservation.jobId,
+            providerObservedAt: input.providerObservedAt,
+            resultStatus: input.localReaderObservation.resultStatus,
+          },
+        ))
+      ) {
+        throw new Error(
+          "The exact local-reader provider source could not be consumed with its canonical course commit",
+        );
+      }
+      if (input.providerObservation) {
+        await releaseCourseProviderObservationInTransaction(
+          transaction,
+          input.providerObservation,
+        );
+      }
+      return {
+        sourceEvidenceAccepted: true as const,
+        persistedMatchStates,
+      };
+    },
+  );
+}
+
+async function hasExactAcceptedLocalReaderMonitoringSource(
+  transaction: Prisma.TransactionClient,
+  input: {
+    courseId: string;
+    searchId: string;
+    providerObservedAt: Date;
+    jobId: string;
+    scheduleVersion: number;
+    resultStatus: "AVAILABLE" | "NO_AVAILABILITY";
+    monitoringOutcome: "MATCH_FOUND" | "NO_MATCH";
+  },
+) {
+  const events = await transaction.courseMonitoringEvent.findMany({
+    where: {
+      courseId: input.courseId,
+      eventType: "CHECK_SUCCEEDED",
+      source: "SEARCH_WORKFLOW",
+      toState: "HEALTHY",
+      outcome: input.monitoringOutcome,
+      occurredAt: input.providerObservedAt,
+    },
+    orderBy: { id: "desc" },
+    take: 20,
+    select: { audit: true },
   });
+  return events.some((event) => {
+    const audit = asProviderExecutionSummary(event.audit);
+    const source = asProviderExecutionSummary(audit.localReaderCanonicalSource);
+    return (
+      source?.jobId === input.jobId &&
+      source.searchId === input.searchId &&
+      source.scheduleVersion === input.scheduleVersion &&
+      source.resultStatus === input.resultStatus &&
+      source.providerObservedAt === input.providerObservedAt.toISOString()
+    );
+  });
+}
+
+async function isCurrentCourseMonitoringSource(
+  transaction: Prisma.TransactionClient,
+  input: {
+    courseId: string;
+    providerObservedAt: Date;
+    sourceKind: "SUCCESS" | "FAILURE";
+  },
+) {
+  const monitoring = await transaction.courseMonitoringStatus.findUnique({
+    where: { courseId: input.courseId },
+    select: { state: true, lastSuccessfulAt: true, lastFailureAt: true },
+  });
+  if (
+    !monitoring ||
+    ["FINAL_MANUAL", "FINAL_TECHNICAL", "FINAL_IDENTITY"].includes(
+      monitoring.state,
+    )
+  ) {
+    return false;
+  }
+  const sourceTime = input.providerObservedAt.getTime();
+  return input.sourceKind === "SUCCESS"
+    ? monitoring.lastSuccessfulAt?.getTime() === sourceTime &&
+        (monitoring.lastFailureAt?.getTime() ?? Number.NEGATIVE_INFINITY) <
+          sourceTime
+    : monitoring.lastFailureAt?.getTime() === sourceTime &&
+        (monitoring.lastSuccessfulAt?.getTime() ?? Number.NEGATIVE_INFINITY) <
+          sourceTime;
 }
 
 function addIsoDateDays(value: string, days: number) {
@@ -2684,7 +3366,7 @@ const queuedSearchCheckSelect = {
   scheduleVersion: true,
   workflowRunId: true,
   checkStatus: true,
-  updatedAt: true
+  updatedAt: true,
 } satisfies Prisma.TeeSearchSelect;
 
 export type QueuedSearchCheck = Prisma.TeeSearchGetPayload<{
@@ -2707,26 +3389,31 @@ export type SearchScheduleNotEligible = {
 
 export function queueSearchCheck(
   searchId: string,
-  remediationDispatchKey?: string
+  remediationDispatchKey?: string,
 ): Promise<QueuedSearchCheck | null>;
 export function queueSearchCheck(
   searchId: string,
   remediationDispatchKey: string | undefined,
-  expectedState: SearchScheduleExpectedState
+  expectedState: SearchScheduleExpectedState,
 ): Promise<QueuedSearchCheck | SearchScheduleNotEligible>;
 
 export async function queueSearchCheck(
   searchId: string,
   remediationDispatchKey?: string,
-  expectedState?: SearchScheduleExpectedState
+  expectedState?: SearchScheduleExpectedState,
 ): Promise<QueuedSearchCheck | SearchScheduleNotEligible | null> {
   if (remediationDispatchKey && remediationDispatchKey.length > 128) {
     throw new Error("Remediation dispatch key is too long.");
   }
   if (remediationDispatchKey && expectedState) {
-    throw new Error("Expected-state guards cannot be combined with remediation dispatch.");
+    throw new Error(
+      "Expected-state guards cannot be combined with remediation dispatch.",
+    );
   }
-  if (expectedState?.recoveryDispatchKey && expectedState.recoveryDispatchKey.length > 128) {
+  if (
+    expectedState?.recoveryDispatchKey &&
+    expectedState.recoveryDispatchKey.length > 128
+  ) {
     throw new Error("Recovery dispatch key is too long.");
   }
   return prisma.$transaction(async (tx) => {
@@ -2734,7 +3421,7 @@ export async function queueSearchCheck(
       const expectedCheckStatus = expectedState.checkStatus ?? "WAITING";
       const hasExpectedWorkflowRunId = Object.prototype.hasOwnProperty.call(
         expectedState,
-        "workflowRunId"
+        "workflowRunId",
       );
       const updated = await tx.teeSearch.updateMany({
         where: {
@@ -2743,11 +3430,13 @@ export async function queueSearchCheck(
           scheduleVersion: expectedState.scheduleVersion,
           updatedAt: expectedState.updatedAt,
           checkStatus: expectedCheckStatus,
-          ...(hasExpectedWorkflowRunId ? { workflowRunId: expectedState.workflowRunId } : {}),
+          ...(hasExpectedWorkflowRunId
+            ? { workflowRunId: expectedState.workflowRunId }
+            : {}),
           OR: [
             { checkLeaseExpiresAt: null },
-            { checkLeaseExpiresAt: { lte: expectedState.observedAt } }
-          ]
+            { checkLeaseExpiresAt: { lte: expectedState.observedAt } },
+          ],
         },
         data: {
           scheduleVersion: { increment: 1 },
@@ -2761,15 +3450,15 @@ export async function queueSearchCheck(
           ...(expectedState.recoveryDispatchKey
             ? {
                 remediationDispatchKey: expectedState.recoveryDispatchKey,
-                remediationDispatchVersion: expectedState.scheduleVersion + 1
+                remediationDispatchVersion: expectedState.scheduleVersion + 1,
               }
-            : {})
-        }
+            : {}),
+        },
       });
       if (updated.count === 0) {
         return {
           outcome: "not_eligible" as const,
-          reason: "state_changed" as const
+          reason: "state_changed" as const,
         };
       }
       const queued = await tx.teeSearch.findUnique({
@@ -2778,9 +3467,9 @@ export async function queueSearchCheck(
           status: "ACTIVE",
           scheduleVersion: expectedState.scheduleVersion + 1,
           checkStatus: "QUEUED",
-          workflowRunId: null
+          workflowRunId: null,
         },
-        select: queuedSearchCheckSelect
+        select: queuedSearchCheckSelect,
       });
       if (!queued) {
         throw new Error("Guarded search schedule changed after it was queued.");
@@ -2809,15 +3498,15 @@ export async function queueSearchCheck(
                       select: {
                         status: true,
                         humanReviewReason: true,
-                        escalationDeadlineAt: true
-                      }
-                    }
-                  }
-                }
-              }
+                        escalationDeadlineAt: true,
+                      },
+                    },
+                  },
+                },
+              },
             },
-            updatedAt: true
-          }
+            updatedAt: true,
+          },
         });
         if (!current || current.status !== "ACTIVE") {
           return current;
@@ -2828,7 +3517,7 @@ export async function queueSearchCheck(
           }
           return {
             ...current,
-            scheduleVersion: current.remediationDispatchVersion
+            scheduleVersion: current.remediationDispatchVersion,
           };
         }
 
@@ -2838,7 +3527,7 @@ export async function queueSearchCheck(
             (incident) =>
               incident?.status === "AUTO_INVESTIGATING" &&
               !incident.humanReviewReason &&
-              incident.escalationDeadlineAt
+              incident.escalationDeadlineAt,
           )
           .map((incident) => incident!.escalationDeadlineAt!)
           .sort((left, right) => left.getTime() - right.getTime())[0];
@@ -2850,7 +3539,7 @@ export async function queueSearchCheck(
           earliestEndpointDeadlineAt &&
           earliestEndpointDeadlineAt > remediationObservedAt &&
           current.nextCheckAt > remediationObservedAt &&
-          current.nextCheckAt <= earliestEndpointDeadlineAt
+          current.nextCheckAt <= earliestEndpointDeadlineAt,
         );
         if (preserveAttachedEndpointWake) {
           const preserved = await tx.teeSearch.updateMany({
@@ -2863,13 +3552,13 @@ export async function queueSearchCheck(
               nextCheckAt: current.nextCheckAt,
               OR: [
                 { remediationDispatchKey: null },
-                { remediationDispatchKey: { not: remediationDispatchKey } }
-              ]
+                { remediationDispatchKey: { not: remediationDispatchKey } },
+              ],
             },
             data: {
               remediationDispatchKey,
-              remediationDispatchVersion: current.scheduleVersion
-            }
+              remediationDispatchVersion: current.scheduleVersion,
+            },
           });
           if (preserved.count === 1) {
             return current;
@@ -2885,8 +3574,8 @@ export async function queueSearchCheck(
             scheduleVersion: current.scheduleVersion,
             OR: [
               { remediationDispatchKey: null },
-              { remediationDispatchKey: { not: remediationDispatchKey } }
-            ]
+              { remediationDispatchKey: { not: remediationDispatchKey } },
+            ],
           },
           data: {
             scheduleVersion: { increment: 1 },
@@ -2898,18 +3587,20 @@ export async function queueSearchCheck(
             workflowRunId: null,
             checkLeaseToken: null,
             checkLeaseExpiresAt: null,
-            recheckRequestedAt: null
-          }
+            recheckRequestedAt: null,
+          },
         });
         if (updated.count === 1) {
           return tx.teeSearch.findUnique({
             where: { id: searchId },
-            select: queuedSearchCheckSelect
+            select: queuedSearchCheckSelect,
           });
         }
       }
 
-      throw new Error("Remediation dispatch could not claim the search schedule.");
+      throw new Error(
+        "Remediation dispatch could not claim the search schedule.",
+      );
     }
 
     await tx.teeSearch.updateMany({
@@ -2922,12 +3613,12 @@ export async function queueSearchCheck(
         workflowRunId: null,
         checkLeaseToken: null,
         checkLeaseExpiresAt: null,
-        recheckRequestedAt: null
-      }
+        recheckRequestedAt: null,
+      },
     });
     return tx.teeSearch.findUnique({
       where: { id: searchId },
-      select: queuedSearchCheckSelect
+      select: queuedSearchCheckSelect,
     });
   });
 }
@@ -2941,8 +3632,8 @@ export async function getSearchCheckRequestState(searchId: string) {
       checkStatus: true,
       workflowRunId: true,
       lastCheckedAt: true,
-      nextCheckAt: true
-    }
+      nextCheckAt: true,
+    },
   });
 }
 
@@ -2950,22 +3641,25 @@ export async function attachSearchWorkflowRun(
   searchId: string,
   scheduleVersion: number,
   workflowRunId: string,
-  expectedWorkflowRunId: string | null
+  expectedWorkflowRunId: string | null,
 ) {
   return prisma.teeSearch.updateMany({
     where: {
       id: searchId,
       scheduleVersion,
       status: "ACTIVE",
-      workflowRunId: expectedWorkflowRunId
+      workflowRunId: expectedWorkflowRunId,
     },
     data: {
-      workflowRunId
-    }
+      workflowRunId,
+    },
   });
 }
 
-export async function claimScheduledSearchCheck(searchId: string, scheduleVersion: number) {
+export async function claimScheduledSearchCheck(
+  searchId: string,
+  scheduleVersion: number,
+) {
   const now = new Date();
   const token = randomUUID();
   const expiresAt = new Date(now.getTime() + SEARCH_CHECK_LEASE_MS);
@@ -2977,16 +3671,16 @@ export async function claimScheduledSearchCheck(searchId: string, scheduleVersio
       OR: [
         { checkLeaseToken: null },
         { checkLeaseExpiresAt: null },
-        { checkLeaseExpiresAt: { lte: now } }
-      ]
+        { checkLeaseExpiresAt: { lte: now } },
+      ],
     },
     data: {
       checkStatus: "CHECKING",
       nextCheckAt: null,
       checkLeaseToken: token,
       checkLeaseExpiresAt: expiresAt,
-      recheckRequestedAt: null
-    }
+      recheckRequestedAt: null,
+    },
   });
 
   if (result.count === 1) {
@@ -2994,7 +3688,7 @@ export async function claimScheduledSearchCheck(searchId: string, scheduleVersio
       searchId,
       scheduleVersion,
       token,
-      expiresAt
+      expiresAt,
     } satisfies SearchCheckLease;
   }
 
@@ -3005,7 +3699,7 @@ export async function claimScheduledSearchCheck(searchId: string, scheduleVersio
 async function claimDirectSearchCheckLease(searchId: string) {
   const state = await prisma.teeSearch.findFirst({
     where: { id: searchId, status: "ACTIVE" },
-    select: { scheduleVersion: true }
+    select: { scheduleVersion: true },
   });
   if (!state) {
     return null;
@@ -3022,13 +3716,13 @@ async function claimDirectSearchCheckLease(searchId: string) {
       OR: [
         { checkLeaseToken: null },
         { checkLeaseExpiresAt: null },
-        { checkLeaseExpiresAt: { lte: now } }
-      ]
+        { checkLeaseExpiresAt: { lte: now } },
+      ],
     },
     data: {
       checkLeaseToken: token,
-      checkLeaseExpiresAt: expiresAt
-    }
+      checkLeaseExpiresAt: expiresAt,
+    },
   });
   if (claimed.count !== 1) {
     await requestSearchRecheck(searchId, state.scheduleVersion, now);
@@ -3039,28 +3733,31 @@ async function claimDirectSearchCheckLease(searchId: string) {
     searchId,
     scheduleVersion: state.scheduleVersion,
     token,
-    expiresAt
+    expiresAt,
   } satisfies SearchCheckLease;
 }
 
 export async function requestSearchRecheck(
   searchId: string,
   scheduleVersion: number,
-  requestedAt = new Date()
+  requestedAt = new Date(),
 ) {
   return prisma.teeSearch.updateMany({
     where: {
       id: searchId,
       scheduleVersion,
-      status: "ACTIVE"
+      status: "ACTIVE",
     },
     data: {
-      recheckRequestedAt: requestedAt
-    }
+      recheckRequestedAt: requestedAt,
+    },
   });
 }
 
-export async function heartbeatSearchCheckLease(lease: SearchCheckLease, now = new Date()) {
+export async function heartbeatSearchCheckLease(
+  lease: SearchCheckLease,
+  now = new Date(),
+) {
   const expiresAt = new Date(now.getTime() + SEARCH_CHECK_LEASE_MS);
   const result = await prisma.teeSearch.updateMany({
     where: {
@@ -3068,9 +3765,9 @@ export async function heartbeatSearchCheckLease(lease: SearchCheckLease, now = n
       scheduleVersion: lease.scheduleVersion,
       status: "ACTIVE",
       checkLeaseToken: lease.token,
-      checkLeaseExpiresAt: { gt: now }
+      checkLeaseExpiresAt: { gt: now },
     },
-    data: { checkLeaseExpiresAt: expiresAt }
+    data: { checkLeaseExpiresAt: expiresAt },
   });
   if (result.count === 1) {
     lease.expiresAt = expiresAt;
@@ -3078,16 +3775,19 @@ export async function heartbeatSearchCheckLease(lease: SearchCheckLease, now = n
   return result.count === 1;
 }
 
-export async function isSearchCheckLeaseCurrent(lease: SearchCheckLease, now = new Date()) {
+export async function isSearchCheckLeaseCurrent(
+  lease: SearchCheckLease,
+  now = new Date(),
+) {
   const current = await prisma.teeSearch.findFirst({
     where: {
       id: lease.searchId,
       scheduleVersion: lease.scheduleVersion,
       status: "ACTIVE",
       checkLeaseToken: lease.token,
-      checkLeaseExpiresAt: { gt: now }
+      checkLeaseExpiresAt: { gt: now },
     },
-    select: { id: true }
+    select: { id: true },
   });
   return Boolean(current);
 }
@@ -3097,12 +3797,12 @@ async function releaseSearchCheckLease(lease: SearchCheckLease) {
     where: {
       id: lease.searchId,
       scheduleVersion: lease.scheduleVersion,
-      checkLeaseToken: lease.token
+      checkLeaseToken: lease.token,
     },
     data: {
       checkLeaseToken: null,
-      checkLeaseExpiresAt: null
-    }
+      checkLeaseExpiresAt: null,
+    },
   });
 }
 
@@ -3159,7 +3859,7 @@ export async function completeScheduledSearchCheck(input: {
       RETURNING
         (current."recheckRequestedAt" IS NOT NULL) AS "recheckRequested",
         search."nextCheckAt" AS "nextCheckAt"
-    `
+    `,
   );
 
   return rows[0] ?? null;
@@ -3173,9 +3873,12 @@ export async function completeExpiredSyntheticSearch(input: {
 }) {
   return prisma.$transaction(async (transaction) => {
     const search = await lockSearchForAlertMutation(transaction, {
-      searchId: input.searchId
+      searchId: input.searchId,
     });
-    if (search.status !== "ACTIVE" || search.checkLeaseToken !== input.leaseToken) {
+    if (
+      search.status !== "ACTIVE" ||
+      search.checkLeaseToken !== input.leaseToken
+    ) {
       return null;
     }
 
@@ -3185,7 +3888,7 @@ export async function completeExpiredSyntheticSearch(input: {
         id: input.searchId,
         scheduleVersion: input.scheduleVersion,
         checkLeaseToken: input.leaseToken,
-        status: "ACTIVE"
+        status: "ACTIVE",
       },
       data: {
         status: "COMPLETED",
@@ -3198,8 +3901,8 @@ export async function completeExpiredSyntheticSearch(input: {
         checkLeaseExpiresAt: null,
         recheckRequestedAt: null,
         lastCheckedAt: completedAt,
-        lastCheckOutcome: input.outcome
-      }
+        lastCheckOutcome: input.outcome,
+      },
     });
     if (updated.count !== 1) {
       return null;
@@ -3208,12 +3911,12 @@ export async function completeExpiredSyntheticSearch(input: {
     await transaction.teeTimeMatch.updateMany({
       where: {
         teeSearchId: input.searchId,
-        alertStatus: "PENDING"
+        alertStatus: "PENDING",
       },
       data: {
         alertStatus: "SUPPRESSED",
-        sentAt: null
-      }
+        sentAt: null,
+      },
     });
     return { completedAt };
   });
@@ -3229,7 +3932,7 @@ export async function failScheduledSearchCheck(input: {
 }) {
   const hasExpectedWorkflowRunId = Object.prototype.hasOwnProperty.call(
     input,
-    "expectedWorkflowRunId"
+    "expectedWorkflowRunId",
   );
   const failedAt = new Date();
   const ownershipPredicate = input.leaseToken
@@ -3271,7 +3974,7 @@ export async function failScheduledSearchCheck(input: {
   `);
   return {
     count: rows.length,
-    nextCheckAt: rows[0]?.nextCheckAt ?? null
+    nextCheckAt: rows[0]?.nextCheckAt ?? null,
   };
 }
 
@@ -3285,17 +3988,20 @@ export async function stopSearchSchedule(searchId: string) {
       workflowRunId: null,
       checkLeaseToken: null,
       checkLeaseExpiresAt: null,
-      recheckRequestedAt: null
-    }
+      recheckRequestedAt: null,
+    },
   });
 }
 
-export async function getSearchScheduleState(searchId: string, scheduleVersion: number) {
+export async function getSearchScheduleState(
+  searchId: string,
+  scheduleVersion: number,
+) {
   return prisma.teeSearch.findFirst({
     where: {
       id: searchId,
       scheduleVersion,
-      status: "ACTIVE"
+      status: "ACTIVE",
     },
     select: {
       id: true,
@@ -3303,17 +4009,20 @@ export async function getSearchScheduleState(searchId: string, scheduleVersion: 
       status: true,
       nextCheckAt: true,
       workflowRunId: true,
-      checkStatus: true
-    }
+      checkStatus: true,
+    },
   });
 }
 
-export async function getSearchScheduleTiming(searchId: string, scheduleVersion: number) {
+export async function getSearchScheduleTiming(
+  searchId: string,
+  scheduleVersion: number,
+) {
   return prisma.teeSearch.findFirst({
     where: {
       id: searchId,
       scheduleVersion,
-      status: "ACTIVE"
+      status: "ACTIVE",
     },
     select: {
       id: true,
@@ -3341,21 +4050,21 @@ export async function getSearchScheduleTiming(searchId: string, scheduleVersion:
                 select: {
                   state: true,
                   nextAutomaticAttemptAt: true,
-                  revalidationRequestedAt: true
-                }
+                  revalidationRequestedAt: true,
+                },
               },
               supportIncident: {
                 select: {
                   status: true,
                   humanReviewReason: true,
-                  escalationDeadlineAt: true
-                }
-              }
-            }
-          }
-        }
-      }
-    }
+                  escalationDeadlineAt: true,
+                },
+              },
+            },
+          },
+        },
+      },
+    },
   });
 }
 
@@ -3389,20 +4098,20 @@ export async function listSearchesNeedingScheduleRecovery(now = new Date()) {
                 status: true,
                 humanReviewReason: true,
                 escalationDeadlineAt: true,
-                escalatedAt: true
-              }
-            }
-          }
-        }
-      }
-    }
+                escalatedAt: true,
+              },
+            },
+          },
+        },
+      },
+    },
   } satisfies Prisma.TeeSearchSelect;
   const sharedWhere = {
     status: "ACTIVE" as const,
     // Exact multi-course expiry is enforced by executeScheduledSearchCheck.
     // This indexed floor keeps every possibly-current local calendar date in
     // the recovery cohort without reviving older searches.
-    date: { gte: earliestPotentiallyActiveSearchDate(now) }
+    date: { gte: earliestPotentiallyActiveSearchDate(now) },
   };
   const criticalEndpointSearches = await prisma.teeSearch.findMany({
     where: {
@@ -3418,18 +4127,18 @@ export async function listSearchesNeedingScheduleRecovery(now = new Date()) {
                   is: {
                     status: "AUTO_INVESTIGATING",
                     humanReviewReason: null,
-                    escalationDeadlineAt: { lte: endpointRecoveryHorizon }
-                  }
-                }
-              }
-            }
-          }
+                    escalationDeadlineAt: { lte: endpointRecoveryHorizon },
+                  },
+                },
+              },
+            },
+          },
         },
         {
           statusEmailSentAt: null,
           checkStatus: "QUEUED",
           workflowRunId: { not: null },
-          updatedAt: { lte: attachedSetupRecoveryBefore }
+          updatedAt: { lte: attachedSetupRecoveryBefore },
         },
         {
           checkStatus: { in: ["QUEUED", "WAITING"] },
@@ -3441,17 +4150,17 @@ export async function listSearchesNeedingScheduleRecovery(now = new Date()) {
                   is: {
                     status: "AUTO_INVESTIGATING",
                     humanReviewReason: null,
-                    escalationDeadlineAt: { lte: endpointRecoveryHorizon }
-                  }
-                }
-              }
-            }
-          }
+                    escalationDeadlineAt: { lte: endpointRecoveryHorizon },
+                  },
+                },
+              },
+            },
+          },
         },
         {
           AND: [
             {
-              checkStatus: { in: ["QUEUED", "WAITING"] }
+              checkStatus: { in: ["QUEUED", "WAITING"] },
             },
             { recheckRequestedAt: { gte: recentEndpointEscalationAfter } },
             {
@@ -3465,26 +4174,26 @@ export async function listSearchesNeedingScheduleRecovery(now = new Date()) {
                         OR: [
                           {
                             status: "AUTO_INVESTIGATING",
-                            humanReviewReason: "AUTOMATION_STALLED"
+                            humanReviewReason: "AUTOMATION_STALLED",
                           },
                           {
                             status: "NEEDS_HUMAN",
-                            humanReviewReason: { not: null }
-                          }
-                        ]
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          ]
-        }
-      ]
+                            humanReviewReason: { not: null },
+                          },
+                        ],
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          ],
+        },
+      ],
     },
     select: recoverySelect,
     orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
-    take: 50
+    take: 50,
   });
   const standardRecoverySearches = await prisma.teeSearch.findMany({
     where: {
@@ -3494,16 +4203,19 @@ export async function listSearchesNeedingScheduleRecovery(now = new Date()) {
         {
           checkStatus: "QUEUED",
           workflowRunId: null,
-          updatedAt: { lte: queuedOverdueBefore }
+          updatedAt: { lte: queuedOverdueBefore },
         },
         {
           checkStatus: "QUEUED",
           workflowRunId: { not: null },
-          updatedAt: { lte: overdueBefore }
+          updatedAt: { lte: overdueBefore },
         },
         {
           checkStatus: "CHECKING",
-          OR: [{ checkLeaseExpiresAt: null }, { checkLeaseExpiresAt: { lte: now } }]
+          OR: [
+            { checkLeaseExpiresAt: null },
+            { checkLeaseExpiresAt: { lte: now } },
+          ],
         },
         { checkStatus: "FAILED", nextCheckAt: { lte: now } },
         { checkStatus: "WAITING", nextCheckAt: { lte: overdueBefore } },
@@ -3511,19 +4223,25 @@ export async function listSearchesNeedingScheduleRecovery(now = new Date()) {
           AND: [
             {
               statusEmailSentAt: null,
-              createdAt: { lte: missingInitialVerdictBefore }
+              createdAt: { lte: missingInitialVerdictBefore },
             },
             {
               checkStatus: { in: ["WAITING", "FAILED"] },
-              OR: [{ checkLeaseExpiresAt: null }, { checkLeaseExpiresAt: { lte: now } }]
-            }
-          ]
+              OR: [
+                { checkLeaseExpiresAt: null },
+                { checkLeaseExpiresAt: { lte: now } },
+              ],
+            },
+          ],
         },
         {
           AND: [
             {
               checkStatus: { in: ["WAITING", "FAILED"] },
-              OR: [{ checkLeaseExpiresAt: null }, { checkLeaseExpiresAt: { lte: now } }]
+              OR: [
+                { checkLeaseExpiresAt: null },
+                { checkLeaseExpiresAt: { lte: now } },
+              ],
             },
             {
               OR: [
@@ -3534,32 +4252,32 @@ export async function listSearchesNeedingScheduleRecovery(now = new Date()) {
                       OR: [
                         {
                           status: "PENDING",
-                          createdAt: { lte: overdueBefore }
+                          createdAt: { lte: overdueBefore },
                         },
                         { status: "FAILED", nextAttemptAt: { lte: now } },
-                        { status: "SENDING", claimExpiresAt: { lte: now } }
-                      ]
-                    }
-                  }
+                        { status: "SENDING", claimExpiresAt: { lte: now } },
+                      ],
+                    },
+                  },
                 },
                 {
                   matches: {
                     some: {
                       availabilityStatus: "AVAILABLE",
                       alertStatus: "PENDING",
-                      firstSeenAt: { lte: overdueBefore }
-                    }
-                  }
-                }
-              ]
-            }
-          ]
-        }
-      ]
+                      firstSeenAt: { lte: overdueBefore },
+                    },
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      ],
     },
     select: recoverySelect,
     orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
-    take: 50
+    take: 50,
   });
   type RecoverySearch = (typeof criticalEndpointSearches)[number] & {
     endpointRecoveryDispatchKey?: string;
@@ -3575,11 +4293,12 @@ export async function listSearchesNeedingScheduleRecovery(now = new Date()) {
             incident?.status === "AUTO_INVESTIGATING" &&
             !incident.humanReviewReason &&
             incident.escalationDeadlineAt &&
-            incident.escalationDeadlineAt <= endpointRecoveryHorizon
+            incident.escalationDeadlineAt <= endpointRecoveryHorizon,
         )
         .sort(
           (left, right) =>
-            left!.escalationDeadlineAt!.getTime() - right!.escalationDeadlineAt!.getTime()
+            left!.escalationDeadlineAt!.getTime() -
+            right!.escalationDeadlineAt!.getTime(),
         )[0];
       const recentlyEscalated = incidents.some(
         (incident) =>
@@ -3588,7 +4307,8 @@ export async function listSearchesNeedingScheduleRecovery(now = new Date()) {
           incident.escalationDeadlineAt &&
           incident.escalationDeadlineAt <= now &&
           (incident.humanReviewReason === "AUTOMATION_STALLED" ||
-            (incident.status === "NEEDS_HUMAN" && Boolean(incident.humanReviewReason)))
+            (incident.status === "NEEDS_HUMAN" &&
+              Boolean(incident.humanReviewReason))),
       );
       const attachedSetupRecovery =
         search.statusEmailSentAt === null &&
@@ -3598,23 +4318,27 @@ export async function listSearchesNeedingScheduleRecovery(now = new Date()) {
       const attachedEndpointRecovery = Boolean(
         imminentIncident &&
         search.workflowRunId &&
-        (search.checkStatus === "QUEUED" || search.checkStatus === "WAITING")
+        (search.checkStatus === "QUEUED" || search.checkStatus === "WAITING"),
       );
       if (!attachedEndpointRecovery || !imminentIncident) {
         return [search];
       }
       const recoveryDispatchKey = `endpoint-deadline:${imminentIncident.id}:${imminentIncident.cycle}`;
-      const alreadyDispatched = search.remediationDispatchKey === recoveryDispatchKey;
+      const alreadyDispatched =
+        search.remediationDispatchKey === recoveryDispatchKey;
       if (alreadyDispatched && !attachedSetupRecovery && !recentlyEscalated) {
         return [];
       }
       return alreadyDispatched
         ? [search]
         : [{ ...search, endpointRecoveryDispatchKey: recoveryDispatchKey }];
-    }
+    },
   );
   const selected = new Map<string, RecoverySearch>();
-  for (const search of [...filteredCriticalEndpointSearches, ...standardRecoverySearches]) {
+  for (const search of [
+    ...filteredCriticalEndpointSearches,
+    ...standardRecoverySearches,
+  ]) {
     if (!selected.has(search.id)) {
       selected.set(search.id, search);
     }
@@ -3630,22 +4354,25 @@ type MatchAlertCycleRef = {
   availabilityCycle: number;
 };
 
-async function markMatchAlertStatus(input: MatchAlertCycleRef, alertStatus: "SENT" | "SUPPRESSED") {
+async function markMatchAlertStatus(
+  input: MatchAlertCycleRef,
+  alertStatus: "SENT" | "SUPPRESSED",
+) {
   const sentAt = new Date();
   const updated = await prisma.teeTimeMatch.updateMany({
     where: {
       id: input.matchId,
       availabilityCycle: input.availabilityCycle,
-      alertStatus: "PENDING"
+      alertStatus: "PENDING",
     },
-    data: { alertStatus, sentAt }
+    data: { alertStatus, sentAt },
   });
   return updated.count === 1
     ? {
         id: input.matchId,
         availabilityCycle: input.availabilityCycle,
         alertStatus,
-        sentAt
+        sentAt,
       }
     : null;
 }
@@ -3671,12 +4398,12 @@ export async function markSearchStatusEmailSent(input: {
       alertGeneration: input.alertGeneration,
       checkLeaseToken: input.checkLeaseToken,
       checkLeaseExpiresAt: { gt: input.sentAt },
-      status: "ACTIVE"
+      status: "ACTIVE",
     },
     data: {
       statusEmailSentAt: input.sentAt,
-      statusEmailSnapshot: input.snapshot
-    }
+      statusEmailSnapshot: input.snapshot,
+    },
   });
 }
 
@@ -3686,22 +4413,24 @@ export async function recordCourseProbeIfChanged(input: CourseProbeInput) {
     where: {
       teeSearchId: input.searchId,
       courseId: input.courseId,
-      ...(input.observedAtOrAfter ? { observedAt: { gte: input.observedAtOrAfter } } : {})
+      ...(input.observedAtOrAfter
+        ? { observedAt: { gte: input.observedAtOrAfter } }
+        : {}),
     },
     orderBy: { observedAt: "desc" },
     select: {
       outcome: true,
       message: true,
       runtimeVersion: true,
-      rawSummary: true
-    }
+      rawSummary: true,
+    },
   });
 
   if (
     latest?.outcome === input.outcome &&
     latest.message === (input.message ?? null) &&
     latest.runtimeVersion === runtimeVersion &&
-    getProviderExecutionMarker(latest.rawSummary) === getProviderExecutionMarker(input.rawSummary)
+    canReuseProviderExecutionEvidence(latest.rawSummary, input.rawSummary)
   ) {
     return latest;
   }
@@ -3709,16 +4438,52 @@ export async function recordCourseProbeIfChanged(input: CourseProbeInput) {
   return recordCourseProbe({ ...input, runtimeVersion });
 }
 
-function getProviderExecutionMarker(value: unknown) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
+function canReuseProviderExecutionEvidence(
+  latestValue: unknown,
+  nextValue: unknown,
+) {
+  const latest = asProviderExecutionSummary(latestValue);
+  const next = asProviderExecutionSummary(nextValue);
+
+  // Each server-adapter invocation is a new synchronous provider observation,
+  // even when its normalized outcome is unchanged.
+  if (next.providerExecution === "RUNNABLE_PROVIDER_CHECK") {
+    return false;
   }
-  return (value as Record<string, unknown>).providerExecution ?? null;
+
+  if (next.providerExecution === "LOCAL_BROWSER_READER") {
+    const latestObservedAt = getCanonicalProviderObservedAt(latest);
+    const nextObservedAt = getCanonicalProviderObservedAt(next);
+    return (
+      latest.providerExecution === "LOCAL_BROWSER_READER" &&
+      latestObservedAt !== null &&
+      latestObservedAt === nextObservedAt
+    );
+  }
+
+  return (
+    (latest.providerExecution ?? null) === (next.providerExecution ?? null)
+  );
+}
+
+function getCanonicalProviderObservedAt(summary: Record<string, unknown>) {
+  if (typeof summary.providerObservedAt !== "string") return null;
+  const observedAt = new Date(summary.providerObservedAt);
+  return Number.isFinite(observedAt.getTime()) &&
+    observedAt.toISOString() === summary.providerObservedAt
+    ? summary.providerObservedAt
+    : null;
+}
+
+function asProviderExecutionSummary(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
 }
 
 export async function listAvailableMatchAlerts(
   searchId: string,
-  matchIds?: readonly string[]
+  matchIds?: readonly string[],
 ): Promise<PendingAlertMatch[]> {
   if (matchIds?.length === 0) {
     return [];
@@ -3730,24 +4495,34 @@ export async function listAvailableMatchAlerts(
       ...(matchIds ? { id: { in: [...matchIds] } } : {}),
       availabilityStatus: "AVAILABLE",
       teeSearch: {
-        status: "ACTIVE"
-      }
+        status: "ACTIVE",
+      },
     },
     orderBy: [{ course: { name: "asc" } }, { startsAt: "asc" }],
-    select: pendingAlertSelect
+    select: pendingAlertSelect,
   });
 }
 
 export function classifyAutomationRunKind(promptVersion: string) {
-  if (promptVersion.includes("event-driven-check") || promptVersion.includes("search-check")) {
+  if (
+    promptVersion.includes("event-driven-check") ||
+    promptVersion.includes("search-check")
+  ) {
     return "SEARCH_CHECK" as const;
   }
-  if (promptVersion.includes("course-support")) return "COURSE_SUPPORT" as const;
-  if (promptVersion.includes("improvement") || promptVersion.includes("local-codex-loop")) {
+  if (promptVersion.includes("course-support"))
+    return "COURSE_SUPPORT" as const;
+  if (
+    promptVersion.includes("improvement") ||
+    promptVersion.includes("local-codex-loop")
+  ) {
     return "IMPROVEMENT" as const;
   }
   if (promptVersion.includes("browser")) return "BROWSER_PROBE" as const;
-  if (promptVersion.includes("maintenance") || promptVersion.includes("backfill")) {
+  if (
+    promptVersion.includes("maintenance") ||
+    promptVersion.includes("backfill")
+  ) {
     return "MAINTENANCE" as const;
   }
   return "OTHER" as const;
@@ -3767,7 +4542,7 @@ export function parseAutomationRunAudit(notes?: string | null) {
 
 export async function startAutomationRun(
   promptVersion: string,
-  input: { ownerThreadId?: string | null } = {}
+  input: { ownerThreadId?: string | null } = {},
 ) {
   const now = new Date();
   return prisma.automationRun.create({
@@ -3776,13 +4551,17 @@ export async function startAutomationRun(
       kind: classifyAutomationRunKind(promptVersion),
       status: "RUNNING",
       runtimeVersion: getAutomationRuntimeVersion(),
-      ownerThreadId: input.ownerThreadId ?? process.env.CODEX_THREAD_ID?.trim() ?? null,
-      heartbeatAt: now
-    }
+      ownerThreadId:
+        input.ownerThreadId ?? process.env.CODEX_THREAD_ID?.trim() ?? null,
+      heartbeatAt: now,
+    },
   });
 }
 
-export async function listRecentCourseAutomationDiscoveries(courseIds: string[], since: Date) {
+export async function listRecentCourseAutomationDiscoveries(
+  courseIds: string[],
+  since: Date,
+) {
   if (courseIds.length === 0) {
     return [];
   }
@@ -3790,7 +4569,7 @@ export async function listRecentCourseAutomationDiscoveries(courseIds: string[],
   return prisma.courseAutomationDiscovery.findMany({
     where: {
       courseId: { in: courseIds },
-      createdAt: { gt: since }
+      createdAt: { gt: since },
     },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     select: {
@@ -3798,8 +4577,8 @@ export async function listRecentCourseAutomationDiscoveries(courseIds: string[],
       status: true,
       sourceUrl: true,
       createdAt: true,
-      evidence: true
-    }
+      evidence: true,
+    },
   });
 }
 
@@ -3810,39 +4589,64 @@ export async function recordCourseBookingWindowEvidence(input: {
   source?: CourseMonitoringEventSource;
 }) {
   const observedAt = input.observedAt ?? new Date();
-  return runSerializedCourseMonitoringWrite(input.courseId, async (transaction) => {
-    const current = await transaction.course.findUnique({
-      where: { id: input.courseId }
-    });
-    if (!current) {
-      throw new Error(`Course ${input.courseId} was not found`);
-    }
+  return runSerializedCourseMonitoringWrite(input.courseId, (transaction) =>
+    recordCourseBookingWindowEvidenceInTransaction(transaction, {
+      ...input,
+      observedAt,
+    }),
+  );
+}
 
-    const applied = await transaction.course.update({
-      where: {
-        id: input.courseId,
-        updatedAt: current.updatedAt
-      },
-      data: {
-        bookingWindowDaysAhead: input.evidence.daysAhead,
-        bookingReleaseTimeLocal: input.evidence.releaseTimeLocal,
-        bookingWindowSource: input.evidence.source,
-        bookingWindowConfidence: input.evidence.confidence,
-        bookingWindowEvidenceUrl: input.evidence.evidenceUrl,
-        bookingWindowCheckedAt: observedAt,
-        bookingWindowObservedAt: observedAt
-      }
-    });
-    await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(transaction, {
+async function recordCourseBookingWindowEvidenceInTransaction(
+  transaction: Prisma.TransactionClient,
+  input: {
+    courseId: string;
+    evidence: BookingWindowEvidence;
+    observedAt: Date;
+    source?: CourseMonitoringEventSource;
+  },
+) {
+  const current = await transaction.course.findUnique({
+    where: { id: input.courseId },
+  });
+  if (!current) {
+    throw new Error(`Course ${input.courseId} was not found`);
+  }
+  if (
+    current.bookingWindowObservedAt instanceof Date &&
+    current.bookingWindowObservedAt > input.observedAt
+  ) {
+    return current;
+  }
+
+  const applied = await transaction.course.update({
+    where: {
+      id: input.courseId,
+      updatedAt: current.updatedAt,
+    },
+    data: {
+      bookingWindowDaysAhead: input.evidence.daysAhead,
+      bookingReleaseTimeLocal: input.evidence.releaseTimeLocal,
+      bookingWindowSource: input.evidence.source,
+      bookingWindowConfidence: input.evidence.confidence,
+      bookingWindowEvidenceUrl: input.evidence.evidenceUrl,
+      bookingWindowCheckedAt: input.observedAt,
+      bookingWindowObservedAt: input.observedAt,
+    },
+  });
+  await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(
+    transaction,
+    {
       courseId: input.courseId,
       before: current,
       after: applied,
-      providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(applied),
+      providerSnapshotFingerprint:
+        buildCourseSupportProviderSnapshotFingerprint(applied),
       source: input.source ?? "SEARCH_WORKFLOW",
-      now: observedAt
-    });
-    return applied;
-  });
+      now: input.observedAt,
+    },
+  );
+  return applied;
 }
 
 export async function recordCoursePhysicalLayoutEvidence(input: {
@@ -3852,93 +4656,154 @@ export async function recordCoursePhysicalLayoutEvidence(input: {
   verifiedAt: Date;
   expectedUpdatedAt: Date;
   expectedName: string;
+  providerObservation: CourseProviderObservationLease;
   source?: CourseMonitoringEventSource;
 }) {
-  const operationTime = new Date();
+  const operationTime = input.providerObservation.observationStartedAt;
   const holeCounts = normalizeLayoutHoleCounts(input.holeCounts);
   if (
     holeCounts.length === 0 ||
     holeCounts.length !== input.holeCounts.length ||
+    !(operationTime instanceof Date) ||
+    !Number.isFinite(operationTime.getTime()) ||
     !Number.isFinite(input.verifiedAt.getTime()) ||
     input.verifiedAt.getTime() > operationTime.getTime()
   ) {
     throw new Error(
-      "Physical layout evidence must contain unique 9- and/or 18-hole values and a valid non-future verification date"
+      "Physical layout evidence must contain unique 9- and/or 18-hole values and a valid non-future verification date",
     );
   }
-  if (!Number.isFinite(input.expectedUpdatedAt.getTime()) || !input.expectedName.trim()) {
-    throw new Error("Physical layout evidence requires a valid pre-fetch course snapshot");
+  if (
+    input.providerObservation.courseId !== input.courseId ||
+    !Number.isFinite(input.expectedUpdatedAt.getTime()) ||
+    !input.expectedName.trim()
+  ) {
+    throw new Error(
+      "Physical layout evidence requires its owned provider observation and a valid pre-fetch course snapshot",
+    );
   }
   let evidenceUrl: URL;
   try {
     evidenceUrl = new URL(input.evidenceUrl);
   } catch {
-    throw new Error("Physical layout evidence URL must be a credential-free public HTTP(S) URL");
+    throw new Error(
+      "Physical layout evidence URL must be a credential-free public HTTP(S) URL",
+    );
   }
   if (
     !["http:", "https:"].includes(evidenceUrl.protocol) ||
     evidenceUrl.username ||
     evidenceUrl.password ||
-    /^(?:localhost|127\.|0\.0\.0\.0$|\[?::1\]?$)/iu.test(evidenceUrl.hostname) ||
+    /^(?:localhost|127\.|0\.0\.0\.0$|\[?::1\]?$)/iu.test(
+      evidenceUrl.hostname,
+    ) ||
     !isSafeManualEvidenceUrl(evidenceUrl)
   ) {
-    throw new Error("Physical layout evidence URL must be a credential-free public HTTP(S) URL");
+    throw new Error(
+      "Physical layout evidence URL must be a credential-free public HTTP(S) URL",
+    );
   }
 
-  return runSerializedCourseMonitoringWrite(input.courseId, async (transaction) => {
-    const current = await transaction.course.findUnique({
-      where: { id: input.courseId }
-    });
-    if (!current) {
-      throw new Error(`Course ${input.courseId} was not found`);
-    }
-    if (
-      current.updatedAt.getTime() !== input.expectedUpdatedAt.getTime() ||
-      current.name !== input.expectedName
-    ) {
-      throw new Error(
-        "Course identity or layout changed while physical-layout evidence was being verified; rerun the command"
-      );
-    }
-
-    const applied = await transaction.course.update({
-      where: {
-        id: input.courseId,
-        updatedAt: input.expectedUpdatedAt,
-        name: input.expectedName
-      },
-      data: {
-        layoutHoleCounts: holeCounts,
-        layoutHolesEvidenceUrl: evidenceUrl.toString(),
-        layoutHolesVerifiedAt: input.verifiedAt
+  return runSerializedCourseMonitoringWrite(
+    input.courseId,
+    async (transaction) => {
+      if (
+        !(await renewCourseProviderObservationInTransaction(
+          transaction,
+          input.providerObservation,
+        ))
+      ) {
+        throw new Error(
+          "Provider observation ownership expired before physical-layout evidence could be persisted",
+        );
       }
-    });
-    await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(transaction, {
-      courseId: input.courseId,
-      before: current,
-      after: applied,
-      providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(applied),
-      source: input.source ?? "OPERATOR_CLI",
-      now: operationTime
-    });
-    return applied;
-  });
+      const current = await transaction.course.findUnique({
+        where: { id: input.courseId },
+      });
+      if (!current) {
+        throw new Error(`Course ${input.courseId} was not found`);
+      }
+      if (
+        current.updatedAt.getTime() !== input.expectedUpdatedAt.getTime() ||
+        current.name !== input.expectedName
+      ) {
+        throw new Error(
+          "Course identity or layout changed while physical-layout evidence was being verified; rerun the command",
+        );
+      }
+
+      const applied = await transaction.course.update({
+        where: {
+          id: input.courseId,
+          updatedAt: input.expectedUpdatedAt,
+          name: input.expectedName,
+        },
+        data: {
+          layoutHoleCounts: holeCounts,
+          layoutHolesEvidenceUrl: evidenceUrl.toString(),
+          layoutHolesVerifiedAt: input.verifiedAt,
+        },
+      });
+      await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(
+        transaction,
+        {
+          courseId: input.courseId,
+          before: current,
+          after: applied,
+          providerSnapshotFingerprint:
+            buildCourseSupportProviderSnapshotFingerprint(applied),
+          source: input.source ?? "OPERATOR_CLI",
+          now: operationTime,
+        },
+      );
+      return applied;
+    },
+  );
 }
 
-export async function markCourseBookingWindowChecked(courseId: string, checkedAt = new Date()) {
-  return prisma.course.update({
+export async function markCourseBookingWindowChecked(
+  courseId: string,
+  checkedAt = new Date(),
+) {
+  return runSerializedCourseMonitoringWrite(courseId, (transaction) =>
+    markCourseBookingWindowCheckedInTransaction(
+      transaction,
+      courseId,
+      checkedAt,
+    ),
+  );
+}
+
+async function markCourseBookingWindowCheckedInTransaction(
+  transaction: Prisma.TransactionClient,
+  courseId: string,
+  checkedAt: Date,
+) {
+  const current = await transaction.course.findUnique({
     where: { id: courseId },
-    data: { bookingWindowCheckedAt: checkedAt }
+  });
+  if (!current) {
+    throw new Error(`Course ${courseId} was not found`);
+  }
+  if (
+    current.bookingWindowCheckedAt instanceof Date &&
+    current.bookingWindowCheckedAt > checkedAt
+  ) {
+    return current;
+  }
+  return transaction.course.update({
+    where: { id: courseId, updatedAt: current.updatedAt },
+    data: { bookingWindowCheckedAt: checkedAt },
   });
 }
 
 export async function updateHourlyImprovementRunState(
   id: string,
-  record: HourlyImprovementRunRecord
+  record: HourlyImprovementRunRecord,
 ) {
   if (record.checkpoints.outcome_recorded) {
     throw new Error(
-      "outcome_recorded may only become true in the atomic hourly improvement closeout"
+      "outcome_recorded may only become true in the atomic hourly improvement closeout",
     );
   }
   if (
@@ -3946,18 +4811,23 @@ export async function updateHourlyImprovementRunState(
     record.owner.runId !== id ||
     record.provenance.ownerRunId !== id
   ) {
-    throw new Error("Hourly improvement state does not match its durable owner run");
-  }
-  if (record.checkpoints.provenance_recorded && !hasCompletePreEditProvenance(record.provenance)) {
     throw new Error(
-      "provenance_recorded requires owner, branch, SHA, thread, and planned-path evidence"
+      "Hourly improvement state does not match its durable owner run",
+    );
+  }
+  if (
+    record.checkpoints.provenance_recorded &&
+    !hasCompletePreEditProvenance(record.provenance)
+  ) {
+    throw new Error(
+      "provenance_recorded requires owner, branch, SHA, thread, and planned-path evidence",
     );
   }
 
   const result = await prisma.automationRun.updateMany({
     where: {
       id,
-      completedAt: null
+      completedAt: null,
     },
     data: {
       kind: "IMPROVEMENT",
@@ -3965,8 +4835,8 @@ export async function updateHourlyImprovementRunState(
       heartbeatAt: new Date(),
       auditSchemaVersion: 1,
       audit: record as unknown as Prisma.InputJsonValue,
-      notes: JSON.stringify(record)
-    }
+      notes: JSON.stringify(record),
+    },
   });
 
   return result.count === 1;
@@ -3979,24 +4849,26 @@ export async function closeHourlyImprovementRun(
     record: HourlyImprovementRunRecord;
     errors?: Prisma.InputJsonValue;
     changedFiles?: Prisma.InputJsonValue;
-  }
+  },
 ) {
   if (
     input.record.automationId !== HOURLY_IMPROVEMENT_AUTOMATION_ID ||
     input.record.owner.runId !== id ||
     input.record.provenance.ownerRunId !== id
   ) {
-    throw new Error("Hourly improvement closeout does not match its durable owner run");
+    throw new Error(
+      "Hourly improvement closeout does not match its durable owner run",
+    );
   }
   const closeoutRecord: HourlyImprovementRunRecord = {
     ...input.record,
     lifecycle: input.record.blocker ? "blocked" : "closeout",
-    checkpoints: markImprovementOutcomeRecorded(input.record.checkpoints)
+    checkpoints: markImprovementOutcomeRecorded(input.record.checkpoints),
   };
   const result = await prisma.automationRun.updateMany({
     where: {
       id,
-      completedAt: null
+      completedAt: null,
     },
     data: {
       completedAt: new Date(),
@@ -4007,8 +4879,8 @@ export async function closeHourlyImprovementRun(
       heartbeatAt: new Date(),
       auditSchemaVersion: 1,
       audit: closeoutRecord as unknown as Prisma.InputJsonValue,
-      notes: JSON.stringify(closeoutRecord)
-    }
+      notes: JSON.stringify(closeoutRecord),
+    },
   });
 
   return result.count === 1;
@@ -4021,7 +4893,7 @@ export async function finishAutomationRun(
     errors?: Prisma.InputJsonValue;
     changedFiles?: Prisma.InputJsonValue;
     notes?: string;
-  }
+  },
 ) {
   return prisma.automationRun.update({
     where: { id },
@@ -4034,7 +4906,7 @@ export async function finishAutomationRun(
       heartbeatAt: new Date(),
       auditSchemaVersion: parseAutomationRunAudit(input.notes) ? 1 : undefined,
       audit: parseAutomationRunAudit(input.notes) ?? undefined,
-      notes: input.notes
-    }
+      notes: input.notes,
+    },
   });
 }

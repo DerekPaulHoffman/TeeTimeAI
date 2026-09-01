@@ -777,7 +777,7 @@ describe("rendered browser navigation safety", () => {
       const page = await context.newPage();
       const officialPageUrl = "https://button-course.example/";
       const safeButtonUrl =
-        "https://button-course.example/book/tee-times?course=8675309&date=2026-09-01";
+        "https://button-course.example/book/tee-times?course=8675309&date=private-date-canary";
       const servedFormMethods: string[] = [];
       vi.spyOn(page.request, "get").mockResolvedValue({
         ok: () => false,
@@ -818,7 +818,7 @@ describe("rendered browser navigation safety", () => {
         "8675309",
       );
       expect(JSON.stringify(evidence.browserInvestigation)).not.toContain(
-        "2026-09-01",
+        "private-date-canary",
       );
       const persisted = retainOnlyPersistableBrowserUrls(
         {
@@ -863,7 +863,7 @@ describe("rendered browser navigation safety", () => {
       const page = await context.newPage();
       const officialPageUrl = "https://privacy-course.example/";
       const availabilityUrl =
-        "https://privacy-course.example/api/availability?course=8675309&date=2026-09-01";
+        "https://privacy-course.example/api/availability?course=8675309&date=private-date-canary";
       const credentialUrl =
         "https://analytics.example/collect?authToken=must-not-persist";
       vi.spyOn(page.request, "get").mockResolvedValue({
@@ -913,13 +913,13 @@ describe("rendered browser navigation safety", () => {
       expect(evidence.observedUrls).toContain(availabilityUrl);
       expect(persisted.evidence.observedUrls).not.toContain(availabilityUrl);
       expect(persistedJson).not.toContain("8675309");
-      expect(persistedJson).not.toContain("2026-09-01");
+      expect(persistedJson).not.toContain("private-date-canary");
       expect(persistedJson).not.toContain("must-not-persist");
       expect(persistedJson).not.toContain("secretPayload");
       expect(persistedJson).not.toContain("widget-secret");
       expect(contractJson).toContain('"queryKeys":["course","date"]');
       expect(contractJson).not.toContain("8675309");
-      expect(contractJson).not.toContain("2026-09-01");
+      expect(contractJson).not.toContain("private-date-canary");
       expect(contractJson).not.toContain("analytics.example");
       expect(
         persisted.evidence.browserInvestigation.restrictedNetworkObserved,

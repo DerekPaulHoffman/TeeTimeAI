@@ -4,23 +4,23 @@ import { requestTechnicalFinalRevalidationForDemand } from "@/lib/automation/cou
 import {
   getCourseLayoutCompatibility,
   getCourseLayoutLabel,
-  type CourseLayoutHoleCount
+  type CourseLayoutHoleCount,
 } from "@/lib/courses/course-layout";
 import { lockSearchForAlertMutation } from "@/lib/email/search-delivery-outbox";
 import {
   findUniqueGenericCourseMatch,
   haveCompatibleCourseNames,
   haveStrongCourseIdentityLink,
-  isGenericCourseName
+  isGenericCourseName,
 } from "@/lib/places/course-identity";
 import {
   loadActiveGooglePlaceReviewIndex,
-  type GooglePlaceReviewIndex
+  type GooglePlaceReviewIndex,
 } from "@/lib/places/google-place-reviews";
 import { prisma } from "@/lib/prisma";
 import {
   buildAlertGenerationStartMarker,
-  unwrapAlertGenerationStatusSnapshot
+  unwrapAlertGenerationStatusSnapshot,
 } from "@/lib/searches/generation-clock";
 import { getTimeZoneForCoordinates, normalizeTimeZone } from "@/lib/timezones";
 import {
@@ -28,15 +28,31 @@ import {
   MAX_QUEUED_SEARCHES_PER_USER,
   type SelectedCourseInput,
   type TeeSearchDetailsInput,
-  type TeeSearchInput
+  type TeeSearchInput,
 } from "@/lib/validation/search";
 import { parseLocalDate } from "@/lib/validation/search";
 import { getLocalReaderCourseKey } from "@/lib/local-reader/course-key";
+import {
+  getNewestCompletedLocalReaderProviderObservationsInTransaction,
+  type CompletedLocalReaderProviderObservation,
+} from "@/lib/local-reader/service";
+import {
+  getCourseProviderObservationFencesInTransaction,
+  type CourseProviderObservationFence,
+} from "@/lib/automation/provider-execution-marker";
 import { isSyntheticWebsiteTrafficClass } from "@/lib/engagement/traffic-class";
 
 const SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE = 0.06;
 const QUEUED_SEARCH_STATUSES = ["ACTIVE", "PAUSED"] as const;
 type SearchStatus = "ACTIVE" | "PAUSED" | "COMPLETED" | "CANCELLED";
+
+function runCustomerProjectionTransaction<T>(
+  worker: (transaction: Prisma.TransactionClient) => Promise<T>,
+) {
+  return prisma.$transaction(worker, {
+    isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
+  });
+}
 
 export type CoursePreferenceRankUpdateInput = {
   id: string;
@@ -52,7 +68,7 @@ export async function createTeeSearchForUser(
   userId: string,
   input: TeeSearchInput,
   trafficClass: WebsiteTrafficClass = "UNCLASSIFIED",
-  syntheticMultiCycle = false
+  syntheticMultiCycle = false,
 ) {
   await assertQueueCapacity(userId);
 
@@ -62,15 +78,26 @@ export async function createTeeSearchForUser(
     .sort((a, b) => a.rank - b.rank);
   const observedAt = new Date();
   const resolvedPreferences = await Promise.all(
-    sortedCourses.map((course) => buildCoursePreferenceCreate(course, observedAt))
+    sortedCourses.map((course) =>
+      buildCoursePreferenceCreate(course, observedAt),
+    ),
   );
-  if (resolvedPreferences.some((preference) => preference.course.isPublic === false)) {
+  if (
+    resolvedPreferences.some(
+      (preference) => preference.course.isPublic === false,
+    )
+  ) {
     throw new Error(
-      "Tee Time Spot can only create alerts for public golf courses. Remove the private or non-public course and try again."
+      "Tee Time Spot can only create alerts for public golf courses. Remove the private or non-public course and try again.",
     );
   }
-  assertCourseLayoutsCompatible(resolvedPreferences, input.requestedLayoutHoles);
-  const coursePreferences = resolvedPreferences.map((preference) => preference.create);
+  assertCourseLayoutsCompatible(
+    resolvedPreferences,
+    input.requestedLayoutHoles,
+  );
+  const coursePreferences = resolvedPreferences.map(
+    (preference) => preference.create,
+  );
 
   const teeSearch = await prisma.$transaction(async (transaction) => {
     for (const preference of resolvedPreferences) {
@@ -79,8 +106,8 @@ export async function createTeeSearchForUser(
           where: { id: preference.ratingUpdate.courseId },
           data: {
             rating: preference.ratingUpdate.rating,
-            ratingObservedAt: preference.ratingUpdate.observedAt
-          }
+            ratingObservedAt: preference.ratingUpdate.observedAt,
+          },
         });
       }
     }
@@ -100,10 +127,10 @@ export async function createTeeSearchForUser(
         trafficClass,
         syntheticMultiCycle,
         preferences: {
-          create: coursePreferences
-        }
+          create: coursePreferences,
+        },
       },
-      include: searchInclude
+      include: searchInclude,
     });
   });
 
@@ -111,14 +138,14 @@ export async function createTeeSearchForUser(
     try {
       await requestTechnicalFinalRevalidationForDemand({
         courseIds: resolvedPreferences.flatMap((preference) =>
-          "id" in preference.course ? [preference.course.id] : []
-        )
+          "id" in preference.course ? [preference.course.id] : [],
+        ),
       });
     } catch {
       // The saved alert remains authoritative. The five-minute invariant
       // watchdog independently requests any missed final-state revalidation.
       console.error("[course-monitoring:revalidation-request-failed]", {
-        selectedCourseCount: resolvedPreferences.length
+        selectedCourseCount: resolvedPreferences.length,
       });
     }
   }
@@ -126,7 +153,10 @@ export async function createTeeSearchForUser(
   return teeSearch;
 }
 
-async function buildCoursePreferenceCreate(course: SelectedCourseInput, observedAt: Date) {
+async function buildCoursePreferenceCreate(
+  course: SelectedCourseInput,
+  observedAt: Date,
+) {
   const reusableCourse = await findReusableCourse(course);
 
   if (reusableCourse) {
@@ -142,7 +172,7 @@ async function buildCoursePreferenceCreate(course: SelectedCourseInput, observed
           ? {
               courseId: reusableCourse.id,
               rating: course.rating,
-              observedAt
+              observedAt,
             }
           : null,
       create: {
@@ -151,9 +181,9 @@ async function buildCoursePreferenceCreate(course: SelectedCourseInput, observed
           ? { distanceMetersAtSelection: course.distanceMeters }
           : {}),
         course: {
-          connect: { id: reusableCourse.id }
-        }
-      }
+          connect: { id: reusableCourse.id },
+        },
+      },
     };
   }
 
@@ -167,7 +197,7 @@ async function buildCoursePreferenceCreate(course: SelectedCourseInput, observed
       name: course.name,
       isPublic: course.publicAccessStatus === "UNVERIFIED" ? null : true,
       layoutHoleCounts: [] as number[],
-      layoutHolesVerifiedAt: null
+      layoutHolesVerifiedAt: null,
     },
     create: {
       rank: course.rank,
@@ -177,7 +207,7 @@ async function buildCoursePreferenceCreate(course: SelectedCourseInput, observed
       course: {
         connectOrCreate: {
           where: {
-            googlePlaceId: placeId
+            googlePlaceId: placeId,
           },
           create: {
             googlePlaceId: placeId,
@@ -192,15 +222,16 @@ async function buildCoursePreferenceCreate(course: SelectedCourseInput, observed
             longitude: course.longitude,
             timeZone,
             rating: course.rating,
-            ratingObservedAt: typeof course.rating === "number" ? observedAt : undefined,
+            ratingObservedAt:
+              typeof course.rating === "number" ? observedAt : undefined,
             phone: course.phone,
             website: course.website,
             isPublic: course.publicAccessStatus === "UNVERIFIED" ? null : true,
-            isManual: !course.googlePlaceId
-          }
-        }
-      }
-    }
+            isManual: !course.googlePlaceId,
+          },
+        },
+      },
+    },
   };
 }
 
@@ -221,13 +252,13 @@ async function findReusableCourse(course: SelectedCourseInput) {
           isPublic: true,
           automationEligibility: true,
           layoutHoleCounts: true,
-          layoutHolesVerifiedAt: true
-        }
+          layoutHolesVerifiedAt: true,
+        },
       })
     : null;
   if (course.courseId && !existingById) {
     throw new Error(
-      "The selected course is no longer available. Refresh the course list and try again."
+      "The selected course is no longer available. Refresh the course list and try again.",
     );
   }
 
@@ -247,8 +278,8 @@ async function findReusableCourse(course: SelectedCourseInput) {
           isPublic: true,
           automationEligibility: true,
           layoutHoleCounts: true,
-          layoutHolesVerifiedAt: true
-        }
+          layoutHolesVerifiedAt: true,
+        },
       })
     : null;
   if (exactCourse?.isPublic === false) {
@@ -272,7 +303,7 @@ async function findReusableCourse(course: SelectedCourseInput) {
           !isConfirmedPersistedCourseAlias(existingById, exactCourse)))
     ) {
       throw new Error(
-        "The selected course details do not match. Refresh the course list and try again."
+        "The selected course details do not match. Refresh the course list and try again.",
       );
     }
     return existingById;
@@ -282,21 +313,21 @@ async function findReusableCourse(course: SelectedCourseInput) {
     where: {
       latitude: {
         gte: course.latitude - SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE,
-        lte: course.latitude + SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE
+        lte: course.latitude + SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE,
       },
       longitude: {
         gte: course.longitude - SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE,
-        lte: course.longitude + SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE
+        lte: course.longitude + SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE,
       },
       OR: [
         {
           automationEligibility: "ALLOWED",
-          detectedPlatform: { not: "UNKNOWN" }
+          detectedPlatform: { not: "UNKNOWN" },
         },
         { automationEligibility: "BLOCKED" },
         { isPublic: false },
-        { layoutHolesVerifiedAt: { not: null } }
-      ]
+        { layoutHolesVerifiedAt: { not: null } },
+      ],
     },
     orderBy: { updatedAt: "desc" },
     select: {
@@ -311,13 +342,13 @@ async function findReusableCourse(course: SelectedCourseInput) {
       isPublic: true,
       automationEligibility: true,
       layoutHoleCounts: true,
-      layoutHolesVerifiedAt: true
-    }
+      layoutHolesVerifiedAt: true,
+    },
   });
   const supportedNearbyCourse = reusableNearbyCourses.find(
     (candidate) =>
       candidate.automationEligibility === "ALLOWED" &&
-      haveCompatibleCourseNames(course.name, candidate.name)
+      haveCompatibleCourseNames(course.name, candidate.name),
   );
 
   if (supportedNearbyCourse) {
@@ -331,14 +362,14 @@ async function findReusableCourse(course: SelectedCourseInput) {
   const verifiedNearbyCourse = reusableNearbyCourses.find(
     (candidate) =>
       Boolean(candidate.layoutHolesVerifiedAt) &&
-      haveCompatibleCourseNames(course.name, candidate.name)
+      haveCompatibleCourseNames(course.name, candidate.name),
   );
   if (verifiedNearbyCourse) {
     return verifiedNearbyCourse;
   }
 
   const blockedNearbyCourses = reusableNearbyCourses.filter(
-    (candidate) => candidate.automationEligibility === "BLOCKED"
+    (candidate) => candidate.automationEligibility === "BLOCKED",
   );
   if (isGenericCourseName(course.name)) {
     return findUniqueGenericCourseMatch(course, blockedNearbyCourses) ?? null;
@@ -346,14 +377,14 @@ async function findReusableCourse(course: SelectedCourseInput) {
 
   return (
     blockedNearbyCourses.find((candidate) =>
-      haveCompatibleCourseNames(course.name, candidate.name)
+      haveCompatibleCourseNames(course.name, candidate.name),
     ) ?? null
   );
 }
 
 function applyActivePlaceReview(
   course: SelectedCourseInput,
-  reviews: GooglePlaceReviewIndex
+  reviews: GooglePlaceReviewIndex,
 ): SelectedCourseInput {
   if (!course.googlePlaceId) {
     return course;
@@ -367,7 +398,7 @@ function applyActivePlaceReview(
     isRejectedPlaceReview(canonicalReview?.accessOverride)
   ) {
     throw new Error(
-      "Tee Time Spot can only create alerts for public golf courses. Remove the private or non-public course and try again."
+      "Tee Time Spot can only create alerts for public golf courses. Remove the private or non-public course and try again.",
     );
   }
   if (!review) {
@@ -384,7 +415,7 @@ function applyActivePlaceReview(
     website: review.canonicalWebsiteUrl ?? course.website,
     phone: review.canonicalPhone ?? course.phone,
     latitude: review.latitude ?? course.latitude,
-    longitude: review.longitude ?? course.longitude
+    longitude: review.longitude ?? course.longitude,
   };
 }
 
@@ -398,12 +429,14 @@ function isConfirmedCourseAlias(
     name: string;
     latitude: number;
     longitude: number;
-  }
+  },
 ) {
   return (
     haveCompatibleCourseNames(input.name, canonical.name) &&
-    Math.abs(input.latitude - canonical.latitude) <= SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE &&
-    Math.abs(input.longitude - canonical.longitude) <= SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE
+    Math.abs(input.latitude - canonical.latitude) <=
+      SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE &&
+    Math.abs(input.longitude - canonical.longitude) <=
+      SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE
   );
 }
 
@@ -423,91 +456,116 @@ function isConfirmedPersistedCourseAlias(
     longitude: number;
     website: string | null;
     phone: string | null;
-  }
+  },
 ) {
   return Boolean(
     haveCompatibleCourseNames(canonical.name, exact.name) &&
-    Math.abs(canonical.latitude - exact.latitude) <= SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE &&
+    Math.abs(canonical.latitude - exact.latitude) <=
+      SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE &&
     Math.abs(canonical.longitude - exact.longitude) <=
       SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE &&
-    haveStrongCourseIdentityLink(canonical, exact)
+    haveStrongCourseIdentityLink(canonical, exact),
   );
 }
 
 function getStablePlaceId(course: SelectedCourseInput) {
-  return course.googlePlaceId ?? `manual-${course.name}-${course.latitude}-${course.longitude}`;
+  return (
+    course.googlePlaceId ??
+    `manual-${course.name}-${course.latitude}-${course.longitude}`
+  );
 }
 
 export async function listTeeSearchesForUser(userId: string) {
-  const searches = await prisma.teeSearch.findMany({
-    where: { userId },
-    orderBy: [{ status: "asc" }, { date: "asc" }, { createdAt: "desc" }],
-    include: searchListInclude
-  });
+  return runCustomerProjectionTransaction(async (transaction) => {
+    const searches = await transaction.teeSearch.findMany({
+      where: { userId },
+      orderBy: [{ status: "asc" }, { date: "asc" }, { createdAt: "desc" }],
+      include: searchListInclude,
+    });
 
-  if (searches.length === 0) {
+    if (searches.length === 0) {
+      return [];
+    }
+
+    const matchCourseIds = searches.flatMap((search) =>
+      search.matches.map((match) => match.course.id),
+    );
+    const completedLocalReaderSources =
+      await getNewestCompletedLocalReaderProviderObservationsInTransaction(
+        transaction,
+        matchCourseIds,
+      );
+    const providerObservationFences =
+      await getCourseProviderObservationFencesInTransaction(
+        transaction,
+        matchCourseIds,
+      );
+
+    const latestProbeIds = await transaction.$queryRaw<Array<{ id: string }>>(
+      Prisma.sql`
+        SELECT DISTINCT ON ("teeSearchId", "courseId") id
+        FROM "CourseProbe"
+        WHERE "teeSearchId" IN (${Prisma.join(searches.map((search) => search.id))})
+        ORDER BY "teeSearchId", "courseId", "observedAt" DESC, id DESC
+      `,
+    );
+    const latestProbes =
+      latestProbeIds.length === 0
+        ? []
+        : await transaction.courseProbe.findMany({
+            where: { id: { in: latestProbeIds.map((probe) => probe.id) } },
+            orderBy: { observedAt: "desc" },
+            include: { course: true },
+          });
+    const probesBySearch = new Map<string, typeof latestProbes>();
+
+    for (const probe of latestProbes) {
+      const probes = probesBySearch.get(probe.teeSearchId) ?? [];
+      probes.push(probe);
+      probesBySearch.set(probe.teeSearchId, probes);
+    }
+
     return searches.map((search) => ({
-      ...hideInternalGenerationMarker(search),
-      probes: []
+      ...projectCurrentCustomerMatches(
+        search,
+        completedLocalReaderSources,
+        providerObservationFences,
+      ),
+      probes: probesBySearch.get(search.id) ?? [],
     }));
-  }
-
-  const latestProbeIds = await prisma.$queryRaw<Array<{ id: string }>>(
-    Prisma.sql`
-      SELECT DISTINCT ON ("teeSearchId", "courseId") id
-      FROM "CourseProbe"
-      WHERE "teeSearchId" IN (${Prisma.join(searches.map((search) => search.id))})
-      ORDER BY "teeSearchId", "courseId", "observedAt" DESC, id DESC
-    `
-  );
-  const latestProbes =
-    latestProbeIds.length === 0
-      ? []
-      : await prisma.courseProbe.findMany({
-          where: { id: { in: latestProbeIds.map((probe) => probe.id) } },
-          orderBy: { observedAt: "desc" },
-          include: { course: true }
-        });
-  const probesBySearch = new Map<string, typeof latestProbes>();
-
-  for (const probe of latestProbes) {
-    const probes = probesBySearch.get(probe.teeSearchId) ?? [];
-    probes.push(probe);
-    probesBySearch.set(probe.teeSearchId, probes);
-  }
-
-  return searches.map((search) => ({
-    ...hideInternalGenerationMarker(search),
-    probes: probesBySearch.get(search.id) ?? []
-  }));
+  });
 }
 
 export async function getTeeSearchForUser(userId: string, searchId: string) {
   return prisma.teeSearch.findUnique({
     where: { id: searchId, userId },
-    select: { id: true, status: true }
+    select: { id: true, status: true },
   });
 }
 
 export async function updateTeeSearchStatusForUser(
   userId: string,
   searchId: string,
-  status: SearchStatus
+  status: SearchStatus,
 ) {
-  if (QUEUED_SEARCH_STATUSES.includes(status as (typeof QUEUED_SEARCH_STATUSES)[number])) {
+  if (
+    QUEUED_SEARCH_STATUSES.includes(
+      status as (typeof QUEUED_SEARCH_STATUSES)[number],
+    )
+  ) {
     await assertQueueCapacity(userId, searchId);
   }
 
-  const updatedSearch = await prisma.$transaction(async (transaction) => {
+  return runCustomerProjectionTransaction(async (transaction) => {
     const lockedSearch = await lockSearchForAlertMutation(transaction, {
       searchId,
-      userId
+      userId,
     });
     const nextAlertGeneration = lockedSearch.alertGeneration + 1;
-    return transaction.teeSearch.update({
+    const updatedSearch = await transaction.teeSearch.update({
       where: {
         id: searchId,
-        userId
+        userId,
       },
       data: {
         status,
@@ -517,34 +575,39 @@ export async function updateTeeSearchStatusForUser(
           ? {
               statusEmailSentAt: null,
               statusEmailSnapshot: buildAlertGenerationStartMarker({
-                alertGeneration: nextAlertGeneration
-              })
+                alertGeneration: nextAlertGeneration,
+              }),
             }
           : {}),
         workflowRunId: null,
         checkLeaseToken: null,
         checkLeaseExpiresAt: null,
-        recheckRequestedAt: null
+        recheckRequestedAt: null,
       },
-      include: searchInclude
+      include: searchInclude,
     });
+    return projectCurrentCustomerSearch(transaction, updatedSearch);
   });
-  return hideInternalGenerationMarker(updatedSearch);
 }
 
 export async function updateTeeSearchForUser(
   userId: string,
   searchId: string,
-  input: TeeSearchUpdateInput
+  input: TeeSearchUpdateInput,
 ) {
   if (
     input.status &&
-    QUEUED_SEARCH_STATUSES.includes(input.status as (typeof QUEUED_SEARCH_STATUSES)[number])
+    QUEUED_SEARCH_STATUSES.includes(
+      input.status as (typeof QUEUED_SEARCH_STATUSES)[number],
+    )
   ) {
     await assertQueueCapacity(userId, searchId);
   }
 
-  if (input.requestedLayoutHoles !== undefined && input.requestedLayoutHoles !== null) {
+  if (
+    input.requestedLayoutHoles !== undefined &&
+    input.requestedLayoutHoles !== null
+  ) {
     const existingSearch = await prisma.teeSearch.findUniqueOrThrow({
       where: { id: searchId, userId },
       select: {
@@ -554,14 +617,17 @@ export async function updateTeeSearchForUser(
               select: {
                 name: true,
                 layoutHoleCounts: true,
-                layoutHolesVerifiedAt: true
-              }
-            }
-          }
-        }
-      }
+                layoutHolesVerifiedAt: true,
+              },
+            },
+          },
+        },
+      },
     });
-    assertCourseLayoutsCompatible(existingSearch.preferences, input.requestedLayoutHoles);
+    assertCourseLayoutsCompatible(
+      existingSearch.preferences,
+      input.requestedLayoutHoles,
+    );
   }
 
   const buildTeeSearchData = (lockedSearch: {
@@ -581,8 +647,8 @@ export async function updateTeeSearchForUser(
         ? {
             statusEmailSentAt: null,
             statusEmailSnapshot: buildAlertGenerationStartMarker({
-              alertGeneration: nextAlertGeneration
-            })
+              alertGeneration: nextAlertGeneration,
+            }),
           }
         : {}),
       ...(input.date ? { date: parseLocalDate(input.date) } : {}),
@@ -595,86 +661,176 @@ export async function updateTeeSearchForUser(
       ...(input.requestedLayoutHoles !== undefined
         ? { requestedLayoutHoles: input.requestedLayoutHoles }
         : {}),
-      ...(input.cadenceMinutes
-        ? { cadenceMinutes: input.cadenceMinutes }
-        : {}),
+      ...(input.cadenceMinutes ? { cadenceMinutes: input.cadenceMinutes } : {}),
       ...(input.alertEmail
         ? { alertEmail: normalizeAlertEmail(input.alertEmail) }
         : {}),
       ...(input.additionalEmails
-        ? { additionalEmails: normalizeAdditionalEmails(input.additionalEmails) }
+        ? {
+            additionalEmails: normalizeAdditionalEmails(input.additionalEmails),
+          }
         : {}),
-      ...(input.status ? { status: input.status } : {})
+      ...(input.status ? { status: input.status } : {}),
     };
   };
-  const coursePreferences = normalizeCoursePreferenceRankUpdates(input.coursePreferences);
+  const coursePreferences = normalizeCoursePreferenceRankUpdates(
+    input.coursePreferences,
+  );
 
   if (coursePreferences.length === 0) {
-    const updatedSearch = await prisma.$transaction(async (transaction) => {
+    return runCustomerProjectionTransaction(async (transaction) => {
       const lockedSearch = await lockSearchForAlertMutation(transaction, {
         searchId,
-        userId
+        userId,
       });
-      return transaction.teeSearch.update({
+      const updatedSearch = await transaction.teeSearch.update({
         where: {
           id: searchId,
-          userId
+          userId,
         },
         data: buildTeeSearchData(lockedSearch),
-        include: searchInclude
+        include: searchInclude,
       });
+      return projectCurrentCustomerSearch(transaction, updatedSearch);
     });
-    return hideInternalGenerationMarker(updatedSearch);
   }
 
-  const updatedSearch = await prisma.$transaction(async (transaction) => {
+  return runCustomerProjectionTransaction(async (transaction) => {
     const lockedSearch = await lockSearchForAlertMutation(transaction, {
       searchId,
-      userId
+      userId,
     });
     for (const [index, preference] of coursePreferences.entries()) {
       await transaction.coursePreference.updateMany({
         where: {
           id: preference.id,
-          teeSearchId: searchId
+          teeSearchId: searchId,
         },
-        data: { rank: -(index + 1) }
+        data: { rank: -(index + 1) },
       });
     }
     for (const preference of coursePreferences) {
       await transaction.coursePreference.updateMany({
         where: {
           id: preference.id,
-          teeSearchId: searchId
+          teeSearchId: searchId,
         },
-        data: { rank: preference.rank }
+        data: { rank: preference.rank },
       });
     }
-    return transaction.teeSearch.update({
+    const updatedSearch = await transaction.teeSearch.update({
       where: {
         id: searchId,
-        userId
+        userId,
       },
       data: buildTeeSearchData(lockedSearch),
-      include: searchInclude
+      include: searchInclude,
     });
+    return projectCurrentCustomerSearch(transaction, updatedSearch);
   });
-  return hideInternalGenerationMarker(updatedSearch);
 }
 
-function hideInternalGenerationMarker<T extends { statusEmailSnapshot?: unknown }>(
-  search: T
-) {
+async function projectCurrentCustomerSearch<
+  T extends Parameters<typeof projectCurrentCustomerMatches>[0],
+>(transaction: Prisma.TransactionClient, search: T) {
+  const courseIds = search.matches.map((match) => match.course.id);
+  const completedLocalReaderSources =
+    await getNewestCompletedLocalReaderProviderObservationsInTransaction(
+      transaction,
+      courseIds,
+    );
+  const providerObservationFences =
+    await getCourseProviderObservationFencesInTransaction(
+      transaction,
+      courseIds,
+    );
+  return projectCurrentCustomerMatches(
+    search,
+    completedLocalReaderSources,
+    providerObservationFences,
+  );
+}
+
+function hideInternalGenerationMarker<
+  T extends { statusEmailSnapshot?: unknown },
+>(search: T) {
   const publicSnapshot = unwrapAlertGenerationStatusSnapshot(
-    search.statusEmailSnapshot
+    search.statusEmailSnapshot,
   );
   return publicSnapshot === search.statusEmailSnapshot
     ? search
     : { ...search, statusEmailSnapshot: publicSnapshot };
 }
 
+function projectCurrentCustomerMatches<
+  T extends {
+    statusEmailSnapshot?: unknown;
+    matches: Array<{
+      availabilityStatus: string;
+      lastConfirmedAt: Date | null;
+      course: {
+        id: string;
+        monitoringStatus?: {
+          state: string;
+          lastSuccessfulAt: Date | null;
+          lastFailureAt: Date | null;
+        } | null;
+      };
+    }>;
+  },
+>(
+  search: T,
+  completedLocalReaderSources: ReadonlyMap<
+    string,
+    CompletedLocalReaderProviderObservation
+  >,
+  providerObservationFences: ReadonlyMap<
+    string,
+    CourseProviderObservationFence
+  >,
+) {
+  return {
+    ...hideInternalGenerationMarker(search),
+    matches: search.matches.flatMap((match) => {
+      const { monitoringStatus: monitoring, ...course } = match.course;
+      const lastConfirmedAt = match.lastConfirmedAt;
+      const completedLocalReaderSource = completedLocalReaderSources.get(
+        match.course.id,
+      );
+      const providerObservationFence = providerObservationFences.get(
+        match.course.id,
+      );
+      const latestMonitoringSourceAt = Math.max(
+        monitoring?.lastSuccessfulAt instanceof Date
+          ? monitoring.lastSuccessfulAt.getTime()
+          : Number.NEGATIVE_INFINITY,
+        monitoring?.lastFailureAt instanceof Date
+          ? monitoring.lastFailureAt.getTime()
+          : Number.NEGATIVE_INFINITY,
+      );
+      const sourceIsCurrent =
+        match.availabilityStatus === "AVAILABLE" &&
+        !["FINAL_MANUAL", "FINAL_TECHNICAL", "FINAL_IDENTITY"].includes(
+          monitoring?.state ?? "",
+        ) &&
+        lastConfirmedAt instanceof Date &&
+        Number.isFinite(lastConfirmedAt.getTime()) &&
+        monitoring?.lastSuccessfulAt instanceof Date &&
+        monitoring.lastSuccessfulAt.getTime() === lastConfirmedAt.getTime() &&
+        (!(monitoring.lastFailureAt instanceof Date) ||
+          monitoring.lastFailureAt < lastConfirmedAt) &&
+        !providerObservationFence &&
+        (!completedLocalReaderSource ||
+          completedLocalReaderSource.state === "CONSUMED" ||
+          latestMonitoringSourceAt >
+            completedLocalReaderSource.providerObservedAt.getTime());
+      return sourceIsCurrent ? [{ ...match, course }] : [];
+    }),
+  };
+}
+
 function normalizeCoursePreferenceRankUpdates(
-  preferences: CoursePreferenceRankUpdateInput[] | undefined
+  preferences: CoursePreferenceRankUpdateInput[] | undefined,
 ) {
   if (!preferences || preferences.length === 0) {
     return [];
@@ -716,14 +872,14 @@ export async function deleteTeeSearchForUser(userId: string, searchId: string) {
       where: { teeSearchId: searchId, removedAt: null },
       data: {
         removedAt,
-        removalReason: "SEARCH_DELETED_BY_OWNER"
-      }
+        removalReason: "SEARCH_DELETED_BY_OWNER",
+      },
     });
     return transaction.teeSearch.delete({
       where: {
         id: searchId,
-        userId
-      }
+        userId,
+      },
     });
   });
 }
@@ -733,19 +889,23 @@ async function assertQueueCapacity(userId: string, excludeSearchId?: string) {
     where: {
       userId,
       status: { in: [...QUEUED_SEARCH_STATUSES] },
-      ...(excludeSearchId ? { id: { not: excludeSearchId } } : {})
-    }
+      ...(excludeSearchId ? { id: { not: excludeSearchId } } : {}),
+    },
   });
 
   if (queuedCount >= MAX_QUEUED_SEARCHES_PER_USER) {
     throw new Error(
-      `You can keep up to ${MAX_QUEUED_SEARCHES_PER_USER} active or paused searches in the queue.`
+      `You can keep up to ${MAX_QUEUED_SEARCHES_PER_USER} active or paused searches in the queue.`,
     );
   }
 }
 
 function normalizeAdditionalEmails(emails: string[] = []) {
-  return [...new Set(emails.map((email) => email.trim().toLowerCase()).filter(Boolean))];
+  return [
+    ...new Set(
+      emails.map((email) => email.trim().toLowerCase()).filter(Boolean),
+    ),
+  ];
 }
 
 function normalizeAlertEmail(email: string | undefined) {
@@ -760,7 +920,7 @@ function assertCourseLayoutsCompatible(
       layoutHolesVerifiedAt: Date | null;
     };
   }>,
-  requestedLayoutHoles: CourseLayoutHoleCount | null | undefined
+  requestedLayoutHoles: CourseLayoutHoleCount | null | undefined,
 ) {
   if (!requestedLayoutHoles) {
     return;
@@ -771,8 +931,10 @@ function assertCourseLayoutsCompatible(
     .filter(
       (course) =>
         Boolean(course.layoutHolesVerifiedAt) &&
-        getCourseLayoutCompatibility(course.layoutHoleCounts, requestedLayoutHoles) ===
-          "incompatible"
+        getCourseLayoutCompatibility(
+          course.layoutHoleCounts,
+          requestedLayoutHoles,
+        ) === "incompatible",
     );
 
   if (incompatibleCourses.length === 0) {
@@ -780,48 +942,79 @@ function assertCourseLayoutsCompatible(
   }
 
   const details = incompatibleCourses
-    .map((course) => `${course.name} (${getCourseLayoutLabel(course.layoutHoleCounts)})`)
+    .map(
+      (course) =>
+        `${course.name} (${getCourseLayoutLabel(course.layoutHoleCounts)})`,
+    )
     .join(", ");
   throw new Error(
-    `The selected course layout does not match this ${requestedLayoutHoles}-hole search: ${details}.`
+    `The selected course layout does not match this ${requestedLayoutHoles}-hole search: ${details}.`,
   );
 }
 
 export const searchInclude = {
   preferences: {
     orderBy: { rank: "asc" },
-    include: { course: true }
+    include: { course: true },
   },
   matches: {
     orderBy: { startsAt: "asc" },
-    include: { course: true }
+    include: {
+      course: {
+        include: {
+          monitoringStatus: {
+            select: {
+              state: true,
+              lastSuccessfulAt: true,
+              lastFailureAt: true,
+            },
+          },
+        },
+      },
+    },
   },
   probes: {
     orderBy: { observedAt: "desc" },
     take: 5,
-    include: { course: true }
-  }
+    include: { course: true },
+  },
 } satisfies Prisma.TeeSearchInclude;
 
 const searchListInclude = {
   ...searchInclude,
   probes: false,
+  matches: {
+    orderBy: { startsAt: "asc" },
+    include: {
+      course: {
+        include: {
+          monitoringStatus: {
+            select: {
+              state: true,
+              lastSuccessfulAt: true,
+              lastFailureAt: true,
+            },
+          },
+        },
+      },
+    },
+  },
   preferences: {
     orderBy: { rank: "asc" },
     include: {
       course: {
         include: {
           bookingFacts: {
-            orderBy: { holes: "asc" }
+            orderBy: { holes: "asc" },
           },
           monitoringStatus: {
-            select: { state: true, stateChangedAt: true }
+            select: { state: true, stateChangedAt: true },
           },
           profile: {
             select: {
               canonicalSlug: true,
-              status: true
-            }
+              status: true,
+            },
           },
           supportIncident: {
             select: {
@@ -841,16 +1034,16 @@ const searchListInclude = {
                   incidentId: true,
                   eventType: true,
                   occurredAt: true,
-                  audit: true
-                }
-              }
-            }
-          }
-        }
-      }
-    }
+                  audit: true,
+                },
+              },
+            },
+          },
+        },
+      },
+    },
   },
   user: {
-    select: { email: true }
-  }
+    select: { email: true },
+  },
 } satisfies Prisma.TeeSearchInclude;
