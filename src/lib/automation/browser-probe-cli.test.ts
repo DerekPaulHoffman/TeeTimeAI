@@ -8,6 +8,7 @@ import {
   finishBrowserProbeAutomationRunAfterFailure,
   getPersistableBrowserOperationFailure,
   getFreshRenderedCorroborationEvidence,
+  prepareBrowserProbeTargetResources,
   recordOwnedBrowserStageAfterCourseProjection,
   resolveBrowserInvestigationMode,
   resolveBrowserProbeRuntimeVersion,
@@ -366,6 +367,102 @@ describe("browser probe direct entry", () => {
     }
 
     expect(getPersistableBrowserOperationFailure(caught)).toBe("NETWORK");
+  });
+
+  it("acquires the persisted observation before opening target browser resources", async () => {
+    const order: string[] = [];
+    const page = {} as never;
+    const context = {
+      newPage: vi.fn(async () => {
+        order.push("page");
+        return page;
+      }),
+    };
+    const observation = {
+      lease: providerObservationLease,
+      observationStartedAt: providerObservationLease.observationStartedAt,
+      markProviderExecutionStarted: vi.fn(),
+      assertObservationOwned: vi.fn(),
+      assertObservationOwnedInTransaction: vi.fn(async () => undefined),
+      settle: vi.fn(async () => undefined),
+    };
+
+    const result = await prepareBrowserProbeTargetResources({
+      courseId: "course-1",
+      dryRun: false,
+      beginObservation: vi.fn(async () => {
+        order.push("observation");
+        return observation;
+      }),
+      createContext: vi.fn(async () => {
+        order.push("context");
+        return context;
+      }),
+    });
+
+    expect(result).toMatchObject({
+      outcome: "ready",
+      providerObservation: observation,
+      context,
+      page,
+      error: null,
+    });
+    expect(order).toEqual(["observation", "context", "page"]);
+  });
+
+  it("retains the observation fence when target resource creation fails", async () => {
+    const browserFailure = Object.assign(
+      new Error("browserContext.newPage: Target page, context or browser has been closed"),
+      {
+        stack:
+          "Error: browserContext.newPage: Target page, context or browser has been closed\n    at node_modules/playwright-core/lib/client/browserContext.js:1:1",
+      },
+    );
+    const observation = {
+      lease: providerObservationLease,
+      observationStartedAt: providerObservationLease.observationStartedAt,
+      markProviderExecutionStarted: vi.fn(),
+      assertObservationOwned: vi.fn(),
+      assertObservationOwnedInTransaction: vi.fn(async () => undefined),
+      settle: vi.fn(async () => undefined),
+    };
+
+    const result = await prepareBrowserProbeTargetResources({
+      courseId: "course-1",
+      dryRun: false,
+      beginObservation: vi.fn(async () => observation),
+      createContext: vi.fn(async () => ({
+        newPage: vi.fn(async () => {
+          throw browserFailure;
+        }),
+      })),
+    });
+
+    expect(result.outcome).toBe("failed");
+    expect(result.providerObservation).toBe(observation);
+    expect(getPersistableBrowserOperationFailure(result.error)).toBe("NETWORK");
+    expect(observation.markProviderExecutionStarted).not.toHaveBeenCalled();
+  });
+
+  it("defers before creating browser resources when another observation owns the course", async () => {
+    const createContext = vi.fn();
+
+    await expect(
+      prepareBrowserProbeTargetResources({
+        courseId: "course-1",
+        dryRun: false,
+        beginObservation: vi.fn(async () => null),
+        createContext,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "deferred",
+      providerObservation: null,
+      context: null,
+      page: null,
+      error: null,
+    });
+
+    expect(createContext).not.toHaveBeenCalled();
   });
 
   it("closes browser resources exactly once while abort cleanup is repeated", async () => {

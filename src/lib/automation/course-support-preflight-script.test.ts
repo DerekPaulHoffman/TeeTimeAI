@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   approvedCourseSupportResponderCheckout,
@@ -10,9 +10,12 @@ import {
   isApprovedCourseSupportResponderBranch,
   launchFailureResult,
   playwrightChromiumSetupRequiredResult,
+  playwrightChromiumRuntimeSmokeTimeoutMs,
   requiredCourseSupportIncidentScalarFields,
   responderChildLaunchOptions,
   responderInvocation,
+  runPlaywrightChromiumRuntimeSmoke,
+  runPlaywrightChromiumRuntimeSmokeProcess,
   selectedResponderCheckoutContext,
   selectApprovedCourseSupportResponderCheckout
 } from "../../../scripts/automation/course-support-preflight.mjs";
@@ -303,13 +306,18 @@ describe("course support preflight generated Prisma parity", () => {
 
 describe("course support preflight Playwright Chromium readiness", () => {
   it("keeps a checkout eligible when its resolved Chromium executable exists", () => {
+    const runRuntimeSmoke = vi.fn(() => true);
     const result = inspectPlaywrightChromiumRuntime(
       "C:\\prepared-responder",
       () => ({ chromium: { executablePath: () => "C:\\browsers\\chromium.exe" } }),
-      () => true
+      () => true,
+      runRuntimeSmoke
     );
 
     expect(result).toEqual({ status: "current" });
+    expect(runRuntimeSmoke).toHaveBeenCalledExactlyOnceWith(
+      "C:\\prepared-responder"
+    );
     expect(playwrightChromiumSetupRequiredResult(result)).toBeNull();
   });
 
@@ -360,5 +368,110 @@ describe("course support preflight Playwright Chromium readiness", () => {
         () => true
       )
     ).toEqual({ status: "executable_unavailable" });
+  });
+
+  it("fails closed with a distinct safe result when the launch smoke fails", () => {
+    const result = inspectPlaywrightChromiumRuntime(
+      "C:\\private\\prepared-responder",
+      () => ({ chromium: { executablePath: () => "C:\\browsers\\chromium.exe" } }),
+      () => true,
+      () => {
+        throw new Error("sensitive browser launch detail");
+      }
+    );
+    const setupRequired = playwrightChromiumSetupRequiredResult(result);
+
+    expect(result).toEqual({ status: "runtime_smoke_failed" });
+    expect(setupRequired).toEqual({
+      outcome: "setup_required",
+      reason:
+        "The responder checkout's Chromium runtime could not complete its private headless readiness check.",
+      failureClass: "PLAYWRIGHT_CHROMIUM_RUNTIME_SMOKE_FAILED",
+      nextAction:
+        "Repair the responder checkout's headless Chromium runtime, then rerun the preflight."
+    });
+    expect(JSON.stringify(setupRequired)).not.toContain("sensitive");
+    expect(JSON.stringify(setupRequired)).not.toContain("private\\prepared");
+  });
+
+  it("launches a network-blocked headless browser and closes the blank page cleanly", async () => {
+    const events: string[] = [];
+    const route = { abort: vi.fn(async () => undefined) };
+    const page = {
+      url: vi.fn(() => "about:blank"),
+      close: vi.fn(async () => {
+        events.push("page.close");
+      })
+    };
+    const context = {
+      route: vi.fn(async (_pattern, handler) => {
+        events.push("context.route");
+        await handler(route);
+      }),
+      newPage: vi.fn(async () => {
+        events.push("context.newPage");
+        return page;
+      }),
+      close: vi.fn(async () => {
+        events.push("context.close");
+      })
+    };
+    const browser = {
+      newContext: vi.fn(async () => {
+        events.push("browser.newContext");
+        return context;
+      }),
+      close: vi.fn(async () => {
+        events.push("browser.close");
+      })
+    };
+    const playwright = {
+      chromium: {
+        launch: vi.fn(async () => {
+          events.push("chromium.launch");
+          return browser;
+        })
+      }
+    };
+
+    await expect(runPlaywrightChromiumRuntimeSmoke(playwright)).resolves.toBe(
+      true
+    );
+    expect(playwright.chromium.launch).toHaveBeenCalledWith({
+      headless: true,
+      timeout: 8_000
+    });
+    expect(browser.newContext).toHaveBeenCalledWith({ serviceWorkers: "block" });
+    expect(context.route).toHaveBeenCalledWith("**/*", expect.any(Function));
+    expect(route.abort).toHaveBeenCalledTimes(1);
+    expect(page.url).toHaveBeenCalledTimes(1);
+    expect(events).toEqual([
+      "chromium.launch",
+      "browser.newContext",
+      "context.route",
+      "context.newPage",
+      "page.close",
+      "context.close",
+      "browser.close"
+    ]);
+  });
+
+  it("runs the smoke in a silent child process with a hard timeout", () => {
+    const spawn = vi.fn(() => ({ status: 0, error: undefined }));
+
+    expect(
+      runPlaywrightChromiumRuntimeSmokeProcess(
+        "C:\\prepared-responder",
+        spawn
+      )
+    ).toBe(true);
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(spawn.mock.calls[0]?.[2]).toMatchObject({
+      cwd: "C:\\prepared-responder",
+      timeout: playwrightChromiumRuntimeSmokeTimeoutMs,
+      windowsHide: true,
+      shell: false,
+      stdio: ["ignore", "ignore", "ignore"]
+    });
   });
 });

@@ -210,7 +210,7 @@ const COURSE_SUPPORT_ACTIVE_CAMPAIGN_FENCE_LIMIT = 100;
 const COURSE_SUPPORT_CANDIDATE_QUEUE_READ_LIMIT = 256;
 const COURSE_SUPPORT_CANDIDATE_BATCH_HISTORY_READ_LIMIT = 128;
 const COURSE_SUPPORT_CANDIDATE_REQUEST_HISTORY_READ_LIMIT = 64;
-const COURSE_SUPPORT_CANDIDATE_MONITORING_EVENT_READ_LIMIT = 20;
+const COURSE_SUPPORT_CANDIDATE_CURRENT_CYCLE_EVENT_READ_LIMIT = 20;
 const COURSE_SUPPORT_CANDIDATE_PREFERENCE_READ_LIMIT = 1_024;
 const COURSE_SUPPORT_AUTHORITATIVE_PROBE_READ_LIMIT = 256;
 const ACTIVE_BATCH_STATUSES: CourseSupportBatchStatus[] = ["CLAIMED", "IMPLEMENTING", "VERIFYING"];
@@ -394,7 +394,10 @@ const COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT = {
   monitoringEvents: {
     where: { eventType: "REVALIDATION_REQUESTED" },
     orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
-    take: COURSE_SUPPORT_CANDIDATE_MONITORING_EVENT_READ_LIMIT + 1,
+    // Keep a bounded newest-first provenance view for routing. The exact
+    // current-cycle cap is validated separately so prior-cycle rows cannot
+    // consume this window and hide a current-cycle overflow.
+    take: COURSE_SUPPORT_CANDIDATE_CURRENT_CYCLE_EVENT_READ_LIMIT + 1,
     select: {
       id: true,
       eventType: true,
@@ -3896,6 +3899,10 @@ export async function claimCourseSupportBatch(input: {
             }),
           ]);
           assertBoundedCourseSupportCandidateQueue(currentDueIncidents);
+          await assertBoundedCourseSupportCandidateCurrentCycleHistory(
+            tx,
+            currentDueIncidents,
+          );
           const currentFairnessEvidence =
             buildCourseSupportRecentFairnessEvidence(
               currentRecentCompletedBatches,
@@ -4086,6 +4093,10 @@ export async function claimCourseSupportBatch(input: {
           },
           select: COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT,
         });
+        await assertBoundedCourseSupportCandidateCurrentCycleHistory(
+          tx,
+          currentIncidents,
+        );
         const currentIncidentById = new Map(
           currentIncidents.map((incident) => [incident.id, incident]),
         );
@@ -15500,6 +15511,10 @@ async function listParkedSourceCompleteFinalizationRecoveryCandidates(
     select: COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT,
   });
   assertBoundedCourseSupportCandidateQueue(incidents);
+  await assertBoundedCourseSupportCandidateCurrentCycleHistory(
+    prisma,
+    incidents,
+  );
   return buildCourseSupportCandidates(incidents, now).filter((candidate) =>
     Boolean(readCandidateSourceCompleteFinalizationRecovery(candidate)),
   );
@@ -15518,6 +15533,10 @@ async function listCourseSupportClaimCandidates(now: Date) {
     select: COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT,
   });
   assertBoundedCourseSupportCandidateQueue(incidents);
+  await assertBoundedCourseSupportCandidateCurrentCycleHistory(
+    prisma,
+    incidents,
+  );
   return buildCourseSupportCandidates(incidents, now);
 }
 
@@ -16644,14 +16663,65 @@ function assertBoundedCourseSupportCandidateQueue<T>(rows: readonly T[]) {
   }
 }
 
+async function assertBoundedCourseSupportCandidateCurrentCycleHistory(
+  client: Pick<Prisma.TransactionClient, "courseMonitoringEvent">,
+  incidents: readonly CourseSupportCandidateIncident[],
+) {
+  if (incidents.length === 0) return;
+  const maximumAllowedEvents =
+    COURSE_SUPPORT_CANDIDATE_CURRENT_CYCLE_EVENT_READ_LIMIT * incidents.length;
+  const events = await client.courseMonitoringEvent.findMany({
+    where: {
+      eventType: "REVALIDATION_REQUESTED",
+      OR: incidents.map((incident) => ({
+        incidentId: incident.id,
+        audit: { path: ["cycle"], equals: incident.cycle },
+      })),
+    },
+    orderBy: [{ incidentId: "asc" }, { occurredAt: "desc" }, { id: "desc" }],
+    take: maximumAllowedEvents + 1,
+    select: { id: true, incidentId: true, occurredAt: true },
+  });
+  if (events.length > maximumAllowedEvents) {
+    throw new Error(
+      "Course-support candidate history exceeds the bounded read limit.",
+    );
+  }
+  const incidentById = new Map(
+    incidents.map((incident) => [incident.id, incident]),
+  );
+  const eventCountByIncidentId = new Map<string, number>();
+  for (const event of events) {
+    const incident = event.incidentId
+      ? incidentById.get(event.incidentId)
+      : undefined;
+    if (
+      !incident ||
+      event.occurredAt.getTime() <
+        (incident.confirmedAt ?? incident.firstSeenAt).getTime()
+    ) {
+      throw new Error(
+        "Course-support candidate history exceeds the bounded read limit.",
+      );
+    }
+    const eventCount = (eventCountByIncidentId.get(incident.id) ?? 0) + 1;
+    if (
+      eventCount > COURSE_SUPPORT_CANDIDATE_CURRENT_CYCLE_EVENT_READ_LIMIT
+    ) {
+      throw new Error(
+        "Course-support candidate history exceeds the bounded read limit.",
+      );
+    }
+    eventCountByIncidentId.set(incident.id, eventCount);
+  }
+}
+
 function assertBoundedCourseSupportCandidateHistory(
   incidents: readonly CourseSupportCandidateIncident[],
 ) {
   if (
     incidents.some(
       (incident) =>
-        (incident.monitoringEvents?.length ?? 0) >
-          COURSE_SUPPORT_CANDIDATE_MONITORING_EVENT_READ_LIMIT ||
         (incident.batchIncidents?.length ?? 0) >
           COURSE_SUPPORT_CANDIDATE_BATCH_HISTORY_READ_LIMIT ||
         (incident.batchIncidents ?? []).some(
@@ -16981,37 +17051,42 @@ async function listParkedCourseCampaignCandidates(
     orderBy: [{ firstSeenAt: "asc" }, { id: "asc" }],
     select: COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT,
   });
+  const reopenedCycleIncidents = incidents.flatMap((incident) => {
+    const member = memberByIncidentId.get(incident.id);
+    if (
+      !member ||
+      incident.courseId !== member.courseId ||
+      incident.cycle !== member.cycle ||
+      incident.kind !== member.kind ||
+      incident.failureClass !== member.failureClass ||
+      incident.providerFamilyKey !== member.providerFamilyKey ||
+      incident.failureFingerprint !== member.failureFingerprint
+    ) {
+      return [];
+    }
+    return [
+      {
+        ...incident,
+        cycle:
+          member.admissionMode === "FRESH_CYCLE"
+            ? incident.cycle + 1
+            : incident.cycle,
+        confirmedAt:
+          member.admissionMode === "FRESH_CYCLE" ? now : incident.confirmedAt,
+        humanReviewReason: null,
+        lastAttemptAt: null,
+        nextAttemptAt: now,
+        attemptCount: 0,
+        batchIncidents: [],
+      },
+    ];
+  });
+  await assertBoundedCourseSupportCandidateCurrentCycleHistory(
+    prisma,
+    reopenedCycleIncidents,
+  );
   const reopenedCycleCandidates = buildCourseSupportCandidates(
-    incidents.flatMap((incident) => {
-      const member = memberByIncidentId.get(incident.id);
-      if (
-        !member ||
-        incident.courseId !== member.courseId ||
-        incident.cycle !== member.cycle ||
-        incident.kind !== member.kind ||
-        incident.failureClass !== member.failureClass ||
-        incident.providerFamilyKey !== member.providerFamilyKey ||
-        incident.failureFingerprint !== member.failureFingerprint
-      ) {
-        return [];
-      }
-      return [
-        {
-          ...incident,
-          cycle:
-            member.admissionMode === "FRESH_CYCLE"
-              ? incident.cycle + 1
-              : incident.cycle,
-          confirmedAt:
-            member.admissionMode === "FRESH_CYCLE" ? now : incident.confirmedAt,
-          humanReviewReason: null,
-          lastAttemptAt: null,
-          nextAttemptAt: now,
-          attemptCount: 0,
-          batchIncidents: [],
-        },
-      ];
-    }),
+    reopenedCycleIncidents,
     now,
   );
   return reopenedCycleCandidates.flatMap((candidate) => {
@@ -18412,10 +18487,20 @@ function parseProofDate(value: unknown) {
 function hasCourseMonitoringPersistence(client: unknown) {
   const candidate = client as {
     courseMonitoringStatus?: unknown;
-    courseMonitoringEvent?: unknown;
+    courseMonitoringEvent?: {
+      create?: unknown;
+      createMany?: unknown;
+      findFirst?: unknown;
+      findUnique?: unknown;
+    };
   };
   return Boolean(
-    candidate.courseMonitoringStatus && candidate.courseMonitoringEvent,
+    candidate.courseMonitoringStatus &&
+      candidate.courseMonitoringEvent &&
+      typeof candidate.courseMonitoringEvent.create === "function" &&
+      typeof candidate.courseMonitoringEvent.createMany === "function" &&
+      typeof candidate.courseMonitoringEvent.findFirst === "function" &&
+      typeof candidate.courseMonitoringEvent.findUnique === "function",
   );
 }
 

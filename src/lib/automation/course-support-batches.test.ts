@@ -34,6 +34,7 @@ const prismaMocks = vi.hoisted(() => ({
   monitoringEventCreate: vi.fn(),
   monitoringEventCreateMany: vi.fn(),
   monitoringEventFindFirst: vi.fn(),
+  monitoringEventFindMany: vi.fn(),
   monitoringEventFindUnique: vi.fn(),
   automationRunUpdateMany: vi.fn(),
   teeSearchCount: vi.fn(),
@@ -84,6 +85,9 @@ vi.mock("@/lib/prisma", () => ({
       findFirst: prismaMocks.automationRunFindFirst,
       create: prismaMocks.automationRunCreate,
       updateMany: prismaMocks.automationRunUpdateMany
+    },
+    courseMonitoringEvent: {
+      findMany: prismaMocks.monitoringEventFindMany,
     },
     $queryRaw: prismaMocks.queryRaw,
     $transaction: prismaMocks.transaction
@@ -2117,6 +2121,9 @@ const transactionClient = {
     findUnique: prismaMocks.monitoringStatusFindUnique,
     updateMany: prismaMocks.monitoringStatusUpdateMany,
   },
+  courseMonitoringEvent: {
+    findMany: prismaMocks.monitoringEventFindMany,
+  },
   teeSearch: {
     count: prismaMocks.teeSearchCount,
     updateMany: prismaMocks.teeSearchUpdateMany,
@@ -2126,6 +2133,7 @@ const transactionClient = {
 const monitoringTransactionClient = {
   ...transactionClient,
   courseMonitoringEvent: {
+    ...transactionClient.courseMonitoringEvent,
     create: prismaMocks.monitoringEventCreate,
     createMany: prismaMocks.monitoringEventCreateMany,
     findFirst: prismaMocks.monitoringEventFindFirst,
@@ -2176,6 +2184,7 @@ beforeEach(() => {
   });
   prismaMocks.monitoringEventCreateMany.mockResolvedValue({ count: 1 });
   prismaMocks.monitoringEventFindFirst.mockResolvedValue(null);
+  prismaMocks.monitoringEventFindMany.mockResolvedValue([]);
   prismaMocks.monitoringEventFindUnique.mockResolvedValue(null);
   prismaMocks.automationRunUpdateMany.mockResolvedValue({ count: 1 });
   prismaMocks.teeSearchCount.mockResolvedValue(0);
@@ -3596,7 +3605,7 @@ describe("course-support claim demand fencing", () => {
       },
     ],
     [
-      "revalidation event history",
+      "current-cycle revalidation event history",
       (incident: ReturnType<typeof sourceCompleteFinalizationRecoveryIncident>) => {
         incident.monitoringEvents = Array.from(
           { length: 21 },
@@ -3605,8 +3614,15 @@ describe("course-support claim demand fencing", () => {
             eventType: "REVALIDATION_REQUESTED",
             occurredAt: new Date(now.getTime() - index),
             failureFingerprint: incident.failureFingerprint,
-            audit: {},
+            audit: { cycle: incident.cycle },
           }),
+        );
+        prismaMocks.monitoringEventFindMany.mockResolvedValue(
+          incident.monitoringEvents.map((event) => ({
+            id: event.id,
+            incidentId: incident.id,
+            occurredAt: event.occurredAt,
+          })),
         );
       },
     ],
@@ -3630,6 +3646,155 @@ describe("course-support claim demand fencing", () => {
     expect(prismaMocks.incidentUpdateMany).not.toHaveBeenCalled();
     expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
     expect(prismaMocks.monitoringStatusUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("ignores large auditless and prior-cycle accumulation when exact current-cycle history is valid", async () => {
+    const incident = sourceCompleteFinalizationRecoveryIncident({
+      status: "AUTO_INVESTIGATING",
+    });
+    const currentCycleEvents = Array.from({ length: 2 }, (_, index) => ({
+      id: `current-event-${index}`,
+      eventType: "REVALIDATION_REQUESTED" as const,
+      occurredAt: new Date(incident.confirmedAt.getTime() + index),
+      failureFingerprint: incident.failureFingerprint,
+      audit: { cycle: incident.cycle },
+    }));
+    const priorCycleEvents = Array.from({ length: 50 }, (_, index) => ({
+      id: `prior-event-${index}`,
+      eventType: "REVALIDATION_REQUESTED" as const,
+      occurredAt: new Date(now.getTime() - index),
+      failureFingerprint: incident.failureFingerprint,
+      audit: index % 2 === 0 ? { cycle: incident.cycle - 1 } : {},
+    }));
+    incident.monitoringEvents = priorCycleEvents;
+    prismaMocks.monitoringEventFindMany.mockResolvedValue(
+      currentCycleEvents.map((event) => ({
+        id: event.id,
+        incidentId: incident.id,
+        occurredAt: event.occurredAt,
+      })),
+    );
+    prismaMocks.supportIncidentFindMany.mockResolvedValue([incident]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "source-complete-owner",
+        branch: "automation/course-support-source-complete",
+        baseSha,
+        now,
+      }),
+    ).resolves.toMatchObject({ outcome: "ready", incidentCount: 1 });
+    expect(prismaMocks.batchCreate).toHaveBeenCalledTimes(1);
+    expect(prismaMocks.monitoringEventFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          eventType: "REVALIDATION_REQUESTED",
+          OR: [
+            {
+              incidentId: incident.id,
+              audit: { path: ["cycle"], equals: incident.cycle },
+            },
+          ],
+        }),
+        take: 21,
+      }),
+    );
+  });
+
+  it("does not let newer prior-cycle markers hide a current-cycle overflow", async () => {
+    const incident = sourceCompleteFinalizationRecoveryIncident({
+      status: "AUTO_INVESTIGATING",
+    });
+    incident.monitoringEvents = Array.from({ length: 21 }, (_, index) => ({
+      id: `newer-prior-event-${index}`,
+      eventType: "REVALIDATION_REQUESTED" as const,
+      occurredAt: new Date(now.getTime() - index),
+      failureFingerprint: incident.failureFingerprint,
+      audit: { cycle: incident.cycle - 1 },
+    }));
+    prismaMocks.monitoringEventFindMany.mockResolvedValue(
+      Array.from({ length: 21 }, (_, index) => ({
+        id: `hidden-current-event-${index}`,
+        incidentId: incident.id,
+        occurredAt: new Date(incident.confirmedAt.getTime() + index),
+      })),
+    );
+    prismaMocks.supportIncidentFindMany.mockResolvedValue([incident]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "source-complete-owner",
+        branch: "automation/course-support-source-complete",
+        baseSha,
+        now,
+      }),
+    ).rejects.toThrow("candidate history exceeds the bounded read limit");
+    expect(prismaMocks.monitoringEventFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({ take: 21 }),
+    );
+    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+  });
+
+  it("fails a per-incident current-cycle overflow below the aggregate sentinel", async () => {
+    const overflowing = sourceCompleteFinalizationRecoveryIncident({
+      status: "AUTO_INVESTIGATING",
+    });
+    const control = sourceCompleteFinalizationRecoveryIncident({
+      status: "AUTO_INVESTIGATING",
+    });
+    control.id = "current-cycle-control-incident";
+    control.courseId = "current-cycle-control-course";
+    control.course.id = control.courseId;
+    prismaMocks.monitoringEventFindMany.mockResolvedValue(
+      Array.from({ length: 21 }, (_, index) => ({
+        id: `overflowing-current-event-${index}`,
+        incidentId: overflowing.id,
+        occurredAt: new Date(overflowing.confirmedAt.getTime() + index),
+      })),
+    );
+    prismaMocks.supportIncidentFindMany.mockResolvedValue([
+      overflowing,
+      control,
+    ]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "source-complete-owner",
+        branch: "automation/course-support-source-complete",
+        baseSha,
+        now,
+      }),
+    ).rejects.toThrow("candidate history exceeds the bounded read limit");
+    expect(prismaMocks.monitoringEventFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({ take: 41 }),
+    );
+    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+  });
+
+  it("does not count an unscoped current-window marker as current-cycle execution", async () => {
+    const incident = sourceCompleteFinalizationRecoveryIncident({
+      status: "AUTO_INVESTIGATING",
+    });
+    incident.monitoringEvents = [
+      {
+        id: "ambiguous-current-event",
+        eventType: "REVALIDATION_REQUESTED",
+        occurredAt: new Date(incident.confirmedAt.getTime() + 1),
+        failureFingerprint: incident.failureFingerprint,
+        audit: {},
+      },
+    ];
+    prismaMocks.supportIncidentFindMany.mockResolvedValue([incident]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "source-complete-owner",
+        branch: "automation/course-support-source-complete",
+        baseSha,
+        now,
+      }),
+    ).resolves.toMatchObject({ outcome: "ready", incidentCount: 1 });
+    expect(prismaMocks.batchCreate).toHaveBeenCalledTimes(1);
   });
 
   it.each([

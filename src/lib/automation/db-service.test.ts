@@ -2172,9 +2172,11 @@ describe("commitCurrentCourseTeeTimeMatches", () => {
         id: "reader-job-1",
         teeSearchId: "search-1",
         courseId: "course-1",
-        scheduleVersion: 1,
+        scheduleVersion: { lte: 1 },
+        status: "COMPLETED",
         claimedAt: providerObservedAt,
         completedAt,
+        resultExpiresAt: { gt: completedAt },
       }),
       data: { resultExpiresAt: completedAt },
     });

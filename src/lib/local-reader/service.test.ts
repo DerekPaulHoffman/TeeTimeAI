@@ -2076,18 +2076,20 @@ describe("local reader job service", () => {
     });
   });
 
-  it("atomically queues a newer generation when reusable reader work completes during CHECKING", async () => {
+  it("completes generation 7, queues generation 8, and consumes the exact reusable proof", async () => {
+    const providerObservedAt = new Date("2026-07-24T15:59:30.000Z");
+    const completedAt = new Date("2026-07-24T16:00:00.000Z");
     prismaMocks.localReaderJob.findUnique.mockResolvedValue({
       id: "job-1",
       teeSearchId: "search-1",
-      scheduleVersion: 5,
+      scheduleVersion: 7,
       purpose: "ALERT_CHECK",
       courseId: "course-1",
       courseKey: "cps:grassyhill.cps.golf",
       targetDate: "2026-07-25",
       players: 2,
       createdAt: new Date("2026-07-24T15:59:00.000Z"),
-      claimedAt: new Date("2026-07-24T15:59:30.000Z"),
+      claimedAt: providerObservedAt,
       jobExpiresAt: new Date("2026-07-24T16:09:00.000Z"),
       status: "LEASED",
       leaseToken: "lease-1",
@@ -2108,8 +2110,8 @@ describe("local reader job service", () => {
       completeLocalReaderJob({
         jobId: "job-1",
         leaseToken: "lease-1",
-        receivedAt: new Date("2026-07-24T16:00:00.000Z"),
-        deviceRequestAt: new Date("2026-07-24T16:00:00.000Z"),
+        receivedAt: completedAt,
+        deviceRequestAt: completedAt,
         result: {
           jobId: "job-1",
           courseKey: "cps:grassyhill.cps.golf",
@@ -2133,7 +2135,7 @@ describe("local reader job service", () => {
       }),
     ).resolves.toMatchObject({
       searchId: "search-1",
-      completedAt: new Date("2026-07-24T16:00:00.000Z"),
+      completedAt,
       resumeScheduleVersion: 8,
     });
     const completedCallIndex =
@@ -2190,6 +2192,98 @@ describe("local reader job service", () => {
         leaseToken: null,
         leaseExpiresAt: null,
       },
+    });
+
+    const persistedResult =
+      prismaMocks.localReaderJob.updateMany.mock.calls[completedCallIndex]?.[0]
+        ?.data?.result;
+    const resultExpiresAt = new Date("2026-07-24T16:10:00.000Z");
+    prismaMocks.localReaderJob.findFirst.mockResolvedValue({
+      id: "job-1",
+      scheduleVersion: 7,
+      claimedAt: providerObservedAt,
+      completedAt,
+      resultExpiresAt,
+      result: persistedResult,
+    });
+
+    const observation = await getFreshLocalReaderObservation({
+      searchId: "search-1",
+      courseId: "course-1",
+      scheduleVersion: 8,
+      targetDate: "2026-07-25",
+      players: 2,
+      bookingUrl,
+      notBefore: providerObservedAt,
+    });
+
+    expect(observation).toMatchObject({
+      jobId: "job-1",
+      scheduleVersion: 8,
+      status: "AVAILABLE",
+      observedAt: providerObservedAt,
+    });
+    expect(prismaMocks.localReaderJob.findFirst).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          teeSearchId: "search-1",
+          courseId: "course-1",
+          scheduleVersion: { lte: 8 },
+          courseKey: "cps:grassyhill.cps.golf",
+          targetDate: "2026-07-25",
+          players: 2,
+          status: "COMPLETED",
+          requiredCapabilityKey: "CPS_RENDERED",
+          requiredParserVersion: 1,
+          claimedAt: { gte: providerObservedAt },
+          completedAt: { gte: providerObservedAt },
+          resultExpiresAt: { gt: completedAt },
+        }),
+      }),
+    );
+
+    prismaMocks.$queryRaw.mockResolvedValue([{ id: "search-1" }]);
+    prismaMocks.localReaderJob.findUnique.mockResolvedValue({
+      id: "job-1",
+      teeSearchId: "search-1",
+      courseId: "course-1",
+      scheduleVersion: 7,
+      status: "COMPLETED",
+      claimedAt: providerObservedAt,
+      completedAt,
+      result: persistedResult,
+      resultExpiresAt,
+    });
+    prismaMocks.localReaderJob.updateMany.mockClear().mockResolvedValue({
+      count: 1,
+    });
+
+    await expect(
+      markCompletedLocalReaderProviderObservationConsumedInTransaction(
+        prismaMocks as never,
+        {
+          courseId: "course-1",
+          searchId: "search-1",
+          scheduleVersion: 8,
+          checkLeaseToken: "generation-8-check-lease",
+          jobId: observation!.jobId,
+          providerObservedAt: observation!.observedAt,
+          resultStatus: observation!.status,
+        },
+      ),
+    ).resolves.toBe(true);
+    expect(prismaMocks.localReaderJob.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: "job-1",
+        teeSearchId: "search-1",
+        courseId: "course-1",
+        scheduleVersion: { lte: 8 },
+        status: "COMPLETED",
+        claimedAt: providerObservedAt,
+        completedAt,
+        resultExpiresAt: { gt: completedAt },
+      },
+      data: { resultExpiresAt: completedAt },
     });
   });
 
@@ -2439,7 +2533,7 @@ describe("local reader job service", () => {
         id: "job-consumed",
         teeSearchId: "search-1",
         courseId: "course-1",
-        scheduleVersion: 7,
+        scheduleVersion: { lte: 7 },
         claimedAt: providerObservedAt,
         completedAt,
       }),
@@ -2447,7 +2541,7 @@ describe("local reader job service", () => {
     });
   });
 
-  it("returns an expired unconsumed exact-schedule result only as canonical resume evidence", async () => {
+  it("returns an expired unconsumed compatible-generation result only as canonical resume evidence", async () => {
     const providerObservedAt = new Date("2026-07-24T15:45:00.000Z");
     const completedAt = new Date("2026-07-24T15:46:00.000Z");
     prismaMocks.localReaderJob.findFirst.mockResolvedValue({
@@ -2489,7 +2583,7 @@ describe("local reader job service", () => {
         where: expect.objectContaining({
           teeSearchId: "search-1",
           courseId: "course-1",
-          scheduleVersion: 7,
+          scheduleVersion: { lte: 7 },
           resultExpiresAt: { lte: new Date("2026-07-24T16:00:00.000Z") },
         }),
       }),
@@ -3190,7 +3284,7 @@ describe("local reader job service", () => {
     expect(monitoringMocks.resolveCourseSupportIncident).not.toHaveBeenCalled();
   });
 
-  it("reuses fresh availability only for the exact schedule and builds provider-compatible slots", async () => {
+  it("reuses fresh availability from a compatible generation and builds provider-compatible slots", async () => {
     prismaMocks.localReaderJob.findFirst.mockResolvedValue({
       claimedAt: new Date("2026-07-24T16:00:00.000Z"),
       completedAt: new Date("2026-07-24T16:00:30.000Z"),
@@ -3250,7 +3344,7 @@ describe("local reader job service", () => {
     );
     expect(
       prismaMocks.localReaderJob.findFirst.mock.calls[0]?.[0]?.where,
-    ).toHaveProperty("scheduleVersion", 7);
+    ).toHaveProperty("scheduleVersion", { lte: 7 });
   });
 
   it("returns a fresh access challenge as a terminal reader observation", async () => {

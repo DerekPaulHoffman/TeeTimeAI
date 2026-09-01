@@ -1617,11 +1617,13 @@ export async function getFreshLocalReaderObservation(input: {
     input.courseId,
     courseKey,
   );
+  // Completion advances the active search to N+1 while the reusable proof
+  // remains durably stamped with the generation N that requested it.
   const row = await prisma.localReaderJob.findFirst({
     where: {
       teeSearchId: input.searchId,
       courseId: input.courseId,
-      scheduleVersion: input.scheduleVersion,
+      scheduleVersion: { lte: input.scheduleVersion },
       courseKey,
       targetDate: input.targetDate,
       players: input.players,
@@ -1683,12 +1685,14 @@ export async function getExpiredUnconsumedLocalReaderObservationForCanonicalResu
     input.courseId,
     courseKey,
   );
+  // An expired proof can still drive the one canonical resume that completion
+  // queued, so include compatible prior generations but never a future one.
   const now = new Date();
   const row = await prisma.localReaderJob.findFirst({
     where: {
       teeSearchId: input.searchId,
       courseId: input.courseId,
-      scheduleVersion: input.scheduleVersion,
+      scheduleVersion: { lte: input.scheduleVersion },
       courseKey,
       targetDate: input.targetDate,
       players: input.players,
@@ -1969,7 +1973,10 @@ export async function markCompletedLocalReaderProviderObservationConsumedInTrans
     !job ||
     job.teeSearchId !== input.searchId ||
     job.courseId !== input.courseId ||
-    job.scheduleVersion !== input.scheduleVersion ||
+    job.scheduleVersion === null ||
+    !Number.isSafeInteger(job.scheduleVersion) ||
+    job.scheduleVersion < 0 ||
+    job.scheduleVersion > input.scheduleVersion ||
     job.status !== "COMPLETED" ||
     job.claimedAt?.getTime() !== input.providerObservedAt.getTime() ||
     !job.completedAt ||
@@ -1995,7 +2002,7 @@ export async function markCompletedLocalReaderProviderObservationConsumedInTrans
       id: input.jobId,
       teeSearchId: input.searchId,
       courseId: input.courseId,
-      scheduleVersion: input.scheduleVersion,
+      scheduleVersion: { lte: input.scheduleVersion },
       status: "COMPLETED",
       claimedAt: input.providerObservedAt,
       completedAt: job.completedAt,

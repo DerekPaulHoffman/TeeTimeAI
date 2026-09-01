@@ -25,6 +25,11 @@ export const approvedCourseSupportResponderCheckouts = Object.freeze([
   approvedCourseSupportResponderCheckout,
   "C:\\dev\\TeeTimeAI-responder-self-healing"
 ]);
+export const playwrightChromiumRuntimeSmokeTimeoutMs = 12_000;
+
+const playwrightChromiumLaunchTimeoutMs = 8_000;
+const playwrightChromiumRuntimeSmokeFlag =
+  "--internal-playwright-chromium-runtime-smoke";
 
 export const requiredCourseSupportIncidentScalarFields = Object.freeze([
   "attemptLedger",
@@ -83,7 +88,8 @@ export function generatedPrismaSetupRequiredResult(inspection) {
 export function inspectPlaywrightChromiumRuntime(
   checkout,
   loadPlaywright = loadPlaywrightFromCheckout,
-  executableExists = existsSync
+  executableExists = existsSync,
+  runRuntimeSmoke = runPlaywrightChromiumRuntimeSmokeProcess
 ) {
   let playwright;
   try {
@@ -94,22 +100,101 @@ export function inspectPlaywrightChromiumRuntime(
 
   try {
     const executablePath = playwright?.chromium?.executablePath?.();
-    return {
-      status:
-        typeof executablePath === "string" &&
-        executablePath.trim().length > 0 &&
-        executableExists(executablePath)
-          ? "current"
-          : "executable_unavailable"
-    };
+    if (
+      typeof executablePath !== "string" ||
+      executablePath.trim().length === 0 ||
+      !executableExists(executablePath)
+    ) {
+      return { status: "executable_unavailable" };
+    }
   } catch {
     return { status: "executable_unavailable" };
+  }
+
+  try {
+    return runRuntimeSmoke(checkout)
+      ? { status: "current" }
+      : { status: "runtime_smoke_failed" };
+  } catch {
+    return { status: "runtime_smoke_failed" };
+  }
+}
+
+export async function runPlaywrightChromiumRuntimeSmoke(playwright) {
+  let browser;
+  try {
+    browser = await playwright?.chromium?.launch?.({
+      headless: true,
+      timeout: playwrightChromiumLaunchTimeoutMs
+    });
+    if (!browser) return false;
+
+    const context = await browser.newContext({ serviceWorkers: "block" });
+    try {
+      await context.route("**/*", (route) => route.abort());
+      const page = await context.newPage();
+      try {
+        if (page.url() !== "about:blank") return false;
+      } finally {
+        await page.close();
+      }
+    } finally {
+      await context.close();
+    }
+
+    await browser.close();
+    browser = undefined;
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (browser) {
+      try {
+        await browser.close();
+      } catch {
+        // The parent process applies the hard timeout and reports only a safe class.
+      }
+    }
+  }
+}
+
+export function runPlaywrightChromiumRuntimeSmokeProcess(
+  checkout,
+  spawn = spawnSync,
+  timeoutMs = playwrightChromiumRuntimeSmokeTimeoutMs
+) {
+  try {
+    const command = spawn(
+      process.execPath,
+      [fileURLToPath(import.meta.url), playwrightChromiumRuntimeSmokeFlag, checkout],
+      {
+        cwd: checkout,
+        timeout: timeoutMs,
+        windowsHide: true,
+        shell: false,
+        stdio: ["ignore", "ignore", "ignore"]
+      }
+    );
+    return !command.error && command.status === 0;
+  } catch {
+    return false;
   }
 }
 
 export function playwrightChromiumSetupRequiredResult(inspection) {
   if (inspection.status === "current") {
     return null;
+  }
+
+  if (inspection.status === "runtime_smoke_failed") {
+    return {
+      outcome: "setup_required",
+      reason:
+        "The responder checkout's Chromium runtime could not complete its private headless readiness check.",
+      failureClass: "PLAYWRIGHT_CHROMIUM_RUNTIME_SMOKE_FAILED",
+      nextAction:
+        "Repair the responder checkout's headless Chromium runtime, then rerun the preflight."
+    };
   }
 
   return {
@@ -468,6 +553,19 @@ function loadPlaywrightFromCheckout(checkout) {
   return requireFromCheckout(playwrightModulePath);
 }
 
+async function runInternalPlaywrightChromiumRuntimeSmoke(checkout) {
+  if (typeof checkout !== "string" || checkout.trim().length === 0) {
+    return false;
+  }
+  try {
+    return await runPlaywrightChromiumRuntimeSmoke(
+      loadPlaywrightFromCheckout(checkout)
+    );
+  } catch {
+    return false;
+  }
+}
+
 function resolveCheckoutPath(checkout) {
   try {
     return realpathSync(checkout);
@@ -487,5 +585,16 @@ function git(args, cwd) {
 }
 
 if (resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
-  main();
+  if (process.argv[2] === playwrightChromiumRuntimeSmokeFlag) {
+    void runInternalPlaywrightChromiumRuntimeSmoke(process.argv[3]).then(
+      (ready) => {
+        process.exitCode = ready ? 0 : 1;
+      },
+      () => {
+        process.exitCode = 1;
+      }
+    );
+  } else {
+    main();
+  }
 }

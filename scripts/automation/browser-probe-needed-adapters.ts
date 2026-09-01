@@ -296,6 +296,54 @@ export async function runPersistableBrowserOperation<T>(operation: () => Promise
   }
 }
 
+export async function prepareBrowserProbeTargetResources<
+  TContext extends { newPage: () => Promise<Page> },
+>(input: {
+  courseId: string;
+  dryRun: boolean;
+  createContext: () => Promise<TContext>;
+  beginObservation?: typeof beginPersistedBrowserProviderObservation;
+}) {
+  const providerObservation = input.dryRun
+    ? null
+    : await (input.beginObservation ??
+        beginPersistedBrowserProviderObservation)(input.courseId);
+  if (!input.dryRun && !providerObservation) {
+    return {
+      outcome: "deferred" as const,
+      providerObservation: null,
+      context: null,
+      page: null,
+      error: null,
+    };
+  }
+
+  let context: TContext | null = null;
+  try {
+    // Acquire the durable provider-observation fence before any target-scoped
+    // browser resource is opened. If context/page creation itself fails, the
+    // caller can now record that exact browser-stage tooling attempt without
+    // pretending provider I/O ran.
+    context = await runPersistableBrowserOperation(input.createContext);
+    const page = await runPersistableBrowserOperation(() => context!.newPage());
+    return {
+      outcome: "ready" as const,
+      providerObservation,
+      context,
+      page,
+      error: null,
+    };
+  } catch (error) {
+    return {
+      outcome: "failed" as const,
+      providerObservation,
+      context,
+      page: null,
+      error,
+    };
+  }
+}
+
 export function getPersistableBrowserOperationFailure(
   error: unknown
 ): PersistableBrowserStageFailure | null {
@@ -470,14 +518,8 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
     try {
       throwIfBrowserProbeAborted(options.signal);
       for (const target of targets) {
-        const context = await browser.newContext({ serviceWorkers: "block" });
-        const closeContext = createBrowserProbeResourceCloser(context, {
-          suppressErrors: true
-        });
-        const removeContextAbortCleanup = closeBrowserProbeResourceOnAbort(
-          options.signal,
-          closeContext
-        );
+        let closeContext: () => Promise<void> = async () => undefined;
+        let removeContextAbortCleanup: () => void = () => undefined;
         let providerObservation: PersistedBrowserProviderObservation | null =
           null;
         let playbookRuntime: Awaited<
@@ -500,8 +542,6 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
         };
         try {
           throwIfBrowserProbeAborted(options.signal);
-          const page = await runPersistableBrowserOperation(() => context.newPage());
-          throwIfBrowserProbeAborted(options.signal);
           playbookRuntime = options.dryRun
             ? null
             : await loadCourseMonitoringPlaybookRuntime(target.course.id);
@@ -518,16 +558,34 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
             );
             continue;
           }
-          if (!options.dryRun) {
-            providerObservation =
-              await beginPersistedBrowserProviderObservation(target.course.id);
-            if (!providerObservation) {
-              notes.push(
-                `${target.course.name}: deferred because another fresh provider observation is already in progress.`
-              );
-              continue;
-            }
+          const targetResources = await prepareBrowserProbeTargetResources({
+            courseId: target.course.id,
+            dryRun: options.dryRun,
+            createContext: () =>
+              browser.newContext({ serviceWorkers: "block" }),
+          });
+          providerObservation = targetResources.providerObservation;
+          if (targetResources.context) {
+            closeContext = createBrowserProbeResourceCloser(
+              targetResources.context,
+              { suppressErrors: true },
+            );
+            removeContextAbortCleanup = closeBrowserProbeResourceOnAbort(
+              options.signal,
+              closeContext,
+            );
           }
+          if (targetResources.outcome === "deferred") {
+            notes.push(
+              `${target.course.name}: deferred because another fresh provider observation is already in progress.`,
+            );
+            continue;
+          }
+          if (targetResources.outcome === "failed") {
+            throw targetResources.error;
+          }
+          const page = targetResources.page;
+          throwIfBrowserProbeAborted(options.signal);
           const investigationObservedAt =
             providerObservation?.observationStartedAt ?? new Date();
           const observedProviderSnapshotFingerprint =
