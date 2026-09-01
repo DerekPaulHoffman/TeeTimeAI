@@ -71,6 +71,7 @@ import {
 } from "./course-support-action-plan";
 import { buildCourseSupportActionExecution } from "./course-support-action-execution";
 import {
+  acquireCourseMonitoringWriteLockInTransaction,
   ACTIVE_DEMAND_ESCALATION_MS,
   getDeferredFailureHandoffEscalationDeadline,
   getCourseMonitoringEscalationDeadline,
@@ -965,6 +966,52 @@ async function fenceCourseSupportClaimCourseRows(
   }
 }
 
+async function lockCourseSupportClaimIncidentRows(
+  transaction: Prisma.TransactionClient,
+  incidents: readonly { id: string }[],
+) {
+  const stableIncidentIds = incidents
+    .map((incident) => incident.id)
+    .sort((left, right) => left.localeCompare(right));
+  if (
+    stableIncidentIds.some(
+      (incidentId, index) =>
+        index > 0 && stableIncidentIds[index - 1] === incidentId,
+    )
+  ) {
+    throw new Error(
+      "Course-support claim contains duplicate incident evidence.",
+    );
+  }
+  const locked = await transaction.$queryRawUnsafe<Array<{ id: string }>>(
+    `SELECT "id"
+       FROM "CourseSupportIncident"
+      WHERE "id" = ANY($1::text[])
+      ORDER BY "id"
+      FOR UPDATE`,
+    stableIncidentIds,
+  );
+  if (
+    locked.length !== stableIncidentIds.length ||
+    locked.some((row, index) => row.id !== stableIncidentIds[index])
+  ) {
+    throw new Error(
+      "Course-support incident ownership changed before claim; rerun selection.",
+    );
+  }
+}
+
+async function acquireCourseSupportClaimMonitoringLocks(
+  transaction: Prisma.TransactionClient,
+  courseIds: readonly string[],
+) {
+  for (const courseId of [...new Set(courseIds)].sort((left, right) =>
+    left.localeCompare(right),
+  )) {
+    await acquireCourseMonitoringWriteLockInTransaction(transaction, courseId);
+  }
+}
+
 export async function getOwnedCourseSupportLeaseToken(input: {
   batchId: string;
   ownerThreadId: string;
@@ -1144,6 +1191,72 @@ function serializeCourseSupportRemediationRoute(route: CourseSupportRemediationR
     playbookStage: route.attemptSignature?.playbookStage ?? null,
     retryBudget: serializeCourseSupportRemediationRetryBudget(route.retryBudget)
   } satisfies Prisma.InputJsonObject;
+}
+
+function courseSupportClaimActionPlansMatch(
+  left: CourseSupportClaimActionPlan | null | undefined,
+  right: CourseSupportClaimActionPlan | null | undefined,
+) {
+  if (!left || !right) return !left && !right;
+  return (
+    left.schemaVersion === right.schemaVersion &&
+    left.primaryAction === right.primaryAction &&
+    left.allowedActions.length === right.allowedActions.length &&
+    left.allowedActions.every(
+      (action, index) => action === right.allowedActions[index],
+    ) &&
+    left.route.workMode === right.route.workMode &&
+    left.route.strategyAction === right.route.strategyAction &&
+    left.route.playbookStage === right.route.playbookStage
+  );
+}
+
+function courseSupportRemediationAttemptSignaturesMatch(
+  left: CourseSupportRemediationAttemptSignature | null | undefined,
+  right: CourseSupportRemediationAttemptSignature | null | undefined,
+) {
+  if (!left || !right) return !left && !right;
+  return (
+    left.workMode === right.workMode &&
+    left.strategyAction === right.strategyAction &&
+    left.playbookStage === right.playbookStage
+  );
+}
+
+function courseSupportRemediationRoutesMatch(
+  left: CourseSupportRemediationRoute | null | undefined,
+  right: CourseSupportRemediationRoute | null | undefined,
+) {
+  if (!left || !right) return !left && !right;
+  return (
+    JSON.stringify(serializeCourseSupportRemediationRoute(left)) ===
+      JSON.stringify(serializeCourseSupportRemediationRoute(right)) &&
+    left.materialChangeDetected === right.materialChangeDetected &&
+    left.strategy.providerFamilyKey === right.strategy.providerFamilyKey &&
+    left.strategy.browserAllowed === right.strategy.browserAllowed &&
+    courseSupportRemediationAttemptSignaturesMatch(
+      left.attemptSignature,
+      right.attemptSignature,
+    )
+  );
+}
+
+function courseSupportClaimAuthorityMatches(
+  selected: CourseSupportClaimCandidate,
+  current: CourseSupportClaimCandidate,
+) {
+  return (
+    courseSupportRemediationRoutesMatch(
+      selected.remediationRoute,
+      current.remediationRoute,
+    ) &&
+    courseSupportClaimActionPlansMatch(selected.actionPlan, current.actionPlan) &&
+    courseSupportProviderContractEvidenceMarkersMatch(
+      selected.providerContractEvidence,
+      current.providerContractEvidence,
+    ) &&
+    selected.playbookEventCountAtClaim === current.playbookEventCountAtClaim
+  );
 }
 
 type PersistedCourseSupportRemediationDirective = CourseSupportRemediationDirective & {
@@ -3629,7 +3742,7 @@ export async function claimCourseSupportBatch(input: {
           retryBatch,
           retryOrdinal: input.retryOrdinal,
           maxCourses,
-          now,
+          now: selectionDatabaseNow,
         })
       : admissionLane?.lane === "REQUESTLESS_PARKED_CAMPAIGN"
         ? requestlessCampaignSelection && {
@@ -3687,11 +3800,8 @@ export async function claimCourseSupportBatch(input: {
         "Course-support remediation routing or its claimed action plan was unavailable; no batch was claimed.",
       );
     }
-    const playbookEventCountAtClaimByIncidentId = new Map(
-      candidates.map((candidate) => [
-        candidate.id,
-        candidate.playbookEventCountAtClaim,
-      ]),
+    const claimCandidateByIncidentId = new Map(
+      candidates.map((candidate) => [candidate.id, candidate]),
     );
     const buildRemediationSummary = (admittedAt: Date) =>
       ({
@@ -3706,7 +3816,8 @@ export async function claimCourseSupportBatch(input: {
           runtimeVersion: input.baseSha,
           activeRealSearchCount: incident.activeRealSearchCount,
           playbookEventCountAtClaim:
-            playbookEventCountAtClaimByIncidentId.get(incident.id) ?? 0,
+            claimCandidateByIncidentId.get(incident.id)
+              ?.playbookEventCountAtClaim ?? 0,
           reason:
             incident.remediationRoute?.reason ??
             selectedRemediationRoute.reason,
@@ -3852,11 +3963,21 @@ export async function claimCourseSupportBatch(input: {
     }
     const created = await runCourseSupportSerializableTransactionWithRetry(
       async (tx) => {
+        await acquireCourseSupportClaimMonitoringLocks(
+          tx,
+          selected.incidents.map((incident) => incident.courseId),
+        );
+        await lockCourseSupportClaimIncidentRows(
+          tx,
+          selected.incidents.map((incident) => ({ id: incident.id })),
+        );
+        const claimDatabaseNow = await getCourseSupportDatabaseNow(tx);
         await fenceCourseSupportClaimCourseRows(
           tx,
           selected.incidents.map((incident) => {
-            const courseUpdatedAt = (incident as CourseSupportClaimCandidate)
-              .courseUpdatedAt;
+            const courseUpdatedAt = claimCandidateByIncidentId.get(
+              incident.id,
+            )?.courseUpdatedAt;
             if (
               !(courseUpdatedAt instanceof Date) ||
               !Number.isFinite(courseUpdatedAt.getTime())
@@ -3870,8 +3991,7 @@ export async function claimCourseSupportBatch(input: {
         );
         const courseMonitoringAvailable = hasCourseMonitoringPersistence(tx);
         if (requestlessParkedCampaignReservationPlanned) {
-          const transactionSelectionNow =
-            await getCourseSupportDatabaseNow(tx);
+          const transactionSelectionNow = claimDatabaseNow;
           const [
             currentRecentCompletedBatches,
             currentActiveBatches,
@@ -3990,10 +4110,6 @@ export async function claimCourseSupportBatch(input: {
         const deferredSelectedIncidents = selected.incidents.filter(
           (incident) => incident.deferredFailureHandoff,
         );
-        const claimDatabaseNow =
-          deferredSelectedIncidents.length > 0
-            ? await getCourseSupportDatabaseNow(tx)
-            : now;
         const remediationSummary = buildRemediationSummary(claimDatabaseNow);
         if (deferredSelectedIncidents.some((incident) => incident.campaign)) {
           throw new Error(
@@ -4111,21 +4227,57 @@ export async function claimCourseSupportBatch(input: {
           currentIncidents.map((incident) => [incident.id, incident]),
         );
         for (const incident of selected.incidents) {
+          const selectedClaimCandidate = claimCandidateByIncidentId.get(
+            incident.id,
+          );
+          if (
+            !selectedClaimCandidate ||
+            selectedClaimCandidate.courseId !== incident.courseId ||
+            selectedClaimCandidate.cycle !== incident.cycle
+          ) {
+            throw new Error(
+              "Course-support claim evidence changed before atomic batch admission.",
+            );
+          }
           const current = currentIncidentById.get(incident.id);
           if (!current) {
             throw new Error(
               "Course-support demand changed during claim; rerun selection.",
             );
           }
+          const rebuilt = buildCourseSupportCandidates(
+            [current],
+            claimDatabaseNow,
+          ).find((candidate) => candidate.id === incident.id);
+          if (!rebuilt) {
+            throw new Error(
+              "Course-support stage eligibility changed during claim; rerun selection.",
+            );
+          }
+          if (
+            !courseSupportProviderContractEvidenceMarkersMatch(
+              selectedClaimCandidate.providerContractEvidence,
+              rebuilt.providerContractEvidence,
+            )
+          ) {
+            throw new Error(
+              "Course-support provider contract evidence changed during claim; rerun selection.",
+            );
+          }
+          if (
+            !courseSupportClaimAuthorityMatches(
+              selectedClaimCandidate,
+              rebuilt,
+            )
+          ) {
+            throw new Error(
+              "Course-support claimed action authority changed during claim; rerun selection.",
+            );
+          }
           if (incident.deferredFailureHandoff) {
             const provenance = incident.deferredFailureHandoff;
-            const rebuilt = buildCourseSupportCandidates(
-              [current],
-              claimDatabaseNow,
-            ).find((candidate) => candidate.id === incident.id);
-            const rebuiltProvenance = rebuilt?.deferredFailureHandoff;
+            const rebuiltProvenance = rebuilt.deferredFailureHandoff;
             if (
-              !rebuilt ||
               !rebuiltProvenance ||
               current.status !== "AUTO_INVESTIGATING" ||
               current.activeBatchId !== null ||
@@ -4280,16 +4432,10 @@ export async function claimCourseSupportBatch(input: {
           const sourceCompleteFinalizationRecovery =
             readCandidateSourceCompleteFinalizationRecovery(incident);
           if (sourceCompleteFinalizationRecovery) {
-            const rebuilt = buildCourseSupportCandidates(
-              [current],
-              claimDatabaseNow,
-            ).find((candidate) => candidate.id === incident.id);
-            const rebuiltRecovery = rebuilt
-              ? readCandidateSourceCompleteFinalizationRecovery(rebuilt)
-              : null;
+            const rebuiltRecovery =
+              readCandidateSourceCompleteFinalizationRecovery(rebuilt);
             const sourceEntry = current.batchIncidents[0];
             if (
-              !rebuilt ||
               !rebuiltRecovery ||
               rebuiltRecovery.evidenceDigest !==
                 sourceCompleteFinalizationRecovery.evidenceDigest ||
@@ -4424,38 +4570,6 @@ export async function claimCourseSupportBatch(input: {
             );
           }
           if (
-            incident.remediationRoute?.attemptSignature?.playbookStage ===
-            "BROWSER_ADAPTER_RETRY"
-          ) {
-            const rebuilt = buildCourseSupportCandidates(
-              [current],
-              claimDatabaseNow
-            ).find((candidate) => candidate.id === incident.id);
-            const selectedSignature = incident.remediationRoute.attemptSignature;
-            const rebuiltSignature = rebuilt?.remediationRoute?.attemptSignature;
-            if (
-              !rebuilt ||
-              !courseSupportProviderContractEvidenceMarkersMatch(
-                incident.providerContractEvidence,
-                rebuilt.providerContractEvidence
-              ) ||
-              rebuilt.remediationRoute?.workMode !==
-                incident.remediationRoute.workMode ||
-              rebuilt.remediationRoute.requiresImplementationPath !==
-                incident.remediationRoute.requiresImplementationPath ||
-              rebuiltSignature?.strategyAction !==
-                selectedSignature.strategyAction ||
-              rebuiltSignature?.playbookStage !==
-                selectedSignature.playbookStage ||
-              rebuilt.actionPlan?.primaryAction !==
-                incident.actionPlan?.primaryAction
-            ) {
-              throw new Error(
-                "Course-support provider contract evidence changed during claim; rerun selection."
-              );
-            }
-          }
-          if (
             getAuthoritativeCourseMonitoringResolution(
               current.course.monitoringStatus?.state,
             )
@@ -4466,7 +4580,7 @@ export async function claimCourseSupportBatch(input: {
             current.course.preferences,
             {
               timeZone: current.course.timeZone,
-              now,
+              now: claimDatabaseNow,
             },
           );
           const currentEngineeringOnly =
@@ -4564,11 +4678,11 @@ export async function claimCourseSupportBatch(input: {
         if (reconciledAuthoritativeFinalCount > 0) {
           return { reconciledAuthoritativeFinalCount };
         }
-        if (input.retryOrdinal !== undefined) {
+        if (input.retryBatchId !== undefined) {
           const outsideDueFetchFailures =
             await tx.courseSupportIncident.findMany({
               where: {
-                ...buildDueResponderIncidentWhere(now),
+                ...buildDueResponderIncidentWhere(claimDatabaseNow),
                 id: {
                   notIn: selected.incidents.map((incident) => incident.id),
                 },
@@ -4610,7 +4724,7 @@ export async function claimCourseSupportBatch(input: {
                 course.preferences,
                 {
                   timeZone: course.timeZone,
-                  now,
+                  now: claimDatabaseNow,
                 },
               );
               return Boolean(
@@ -4624,7 +4738,7 @@ export async function claimCourseSupportBatch(input: {
                 currentDemand.activeRealSearchCount > 0 &&
                 currentDemand.earliestTargetDate &&
                 currentDemand.earliestTargetDate.getTime() <=
-                  now.getTime() + NEAR_DATE_WINDOW_MS,
+                  claimDatabaseNow.getTime() + NEAR_DATE_WINDOW_MS,
               );
             },
           );
@@ -4752,22 +4866,15 @@ export async function claimCourseSupportBatch(input: {
               cycle: incident.cycle,
               providerFamilyKey: incident.providerFamilyKey,
               failureFingerprint: incident.failureFingerprint,
-              ...(incident.deferredFailureHandoff
-                ? {
-                    revision:
-                      incident.deferredFailureHandoff
-                        .expectedIncidentRevision,
-                  }
-                : {}),
-              updatedAt:
-                currentIncidentById.get(incident.id)?.updatedAt ??
-                incident.updatedAt,
+              revision:
+                incident.deferredFailureHandoff?.expectedIncidentRevision ??
+                currentIncidentById.get(incident.id)!.revision,
+              updatedAt: currentIncidentById.get(incident.id)!.updatedAt,
               status:
                 sourceCompleteFinalizationRecovery?.priorIncidentStatus ??
                 "AUTO_INVESTIGATING",
               ...(sourceCompleteFinalizationRecovery
                 ? {
-                    revision: currentIncidentById.get(incident.id)?.revision,
                     humanReviewReason:
                       sourceCompleteFinalizationRecovery.priorHumanReviewReason,
                   }
@@ -4794,7 +4901,7 @@ export async function claimCourseSupportBatch(input: {
                   : {
                       OR: [
                         { nextAttemptAt: null },
-                        { nextAttemptAt: { lte: now } },
+                        { nextAttemptAt: { lte: claimDatabaseNow } },
                       ],
                     }
                 : incident.deferredFailureHandoff
@@ -4807,13 +4914,13 @@ export async function claimCourseSupportBatch(input: {
                   ? {
                       nextAttemptAt: {
                         gt: retryBatch.completedAt,
-                        lte: now,
+                        lte: claimDatabaseNow,
                       },
                     }
                   : {
                       OR: [
                         { nextAttemptAt: null },
-                        { nextAttemptAt: { lte: now } },
+                        { nextAttemptAt: { lte: claimDatabaseNow } },
                       ],
                     }),
             },
