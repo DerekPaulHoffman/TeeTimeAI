@@ -1789,7 +1789,10 @@ function independentFailedRetryableAttemptLedger(cycle = 1) {
   });
 }
 
-function factualFinalLedger(disposition: "MANUAL_DIRECT" | "IDENTITY_FINAL") {
+function factualFinalLedger(
+  disposition: "MANUAL_DIRECT" | "IDENTITY_FINAL",
+  cycle = 1,
+) {
   let ledger: unknown = null;
   const stages = [
     ["OFFICIAL_IDENTITY", "OFFICIAL_IDENTITY", "NO_PROVIDER_METADATA"],
@@ -1802,7 +1805,7 @@ function factualFinalLedger(disposition: "MANUAL_DIRECT" | "IDENTITY_FINAL") {
   ] as const;
   for (const [stage, readPath, skipReason] of stages) {
     ledger = appendAutomationPlaybookEvent(ledger, {
-      cycle: 1,
+      cycle,
       stage,
       transition: "NOT_APPLICABLE",
       readPath,
@@ -1814,7 +1817,7 @@ function factualFinalLedger(disposition: "MANUAL_DIRECT" | "IDENTITY_FINAL") {
     });
   }
   return appendAutomationPlaybookEvent(ledger, {
-    cycle: 1,
+    cycle,
     stage: "INDEPENDENT_CONFIRMATION",
     transition: "FACTUAL_FINAL",
     readPath: "INDEPENDENT_CONFIRMATION",
@@ -3109,13 +3112,80 @@ describe("course-support claim demand fencing", () => {
     const incident = candidate({ engineeringOnly: input.engineeringOnly });
     return {
       ...incident,
+      status: "AUTO_INVESTIGATING" as const,
+      activeBatchId: null,
+      revision: 1,
       confirmedAt: now,
       attemptLedger: null,
+      monitoringEvents: [],
+      batchIncidents: [],
       course: {
         id: incident.courseId,
         updatedAt: now,
         timeZone: "America/Los_Angeles",
         preferences: input.preferences,
+      },
+    };
+  }
+
+  function targetedRetryIncidentRecord(input: {
+    candidate: CourseSupportCandidate;
+    retryBatch: CourseSupportRetryBatchEvidence;
+    preferences?: Array<{ teeSearch: { id: string; date: Date } }>;
+    sourceBatchId?: string;
+  }) {
+    const sourceBatchId = input.sourceBatchId ?? "private-source-batch-id";
+    const sourceEntry = input.retryBatch.incidents.find(
+      (entry) =>
+        entry.incidentId === input.candidate.id &&
+        entry.courseId === input.candidate.courseId,
+    );
+    if (!sourceEntry || !input.retryBatch.completedAt) {
+      throw new Error("The targeted retry fixture is incomplete.");
+    }
+    return {
+      ...input.candidate,
+      status: "AUTO_INVESTIGATING" as const,
+      activeBatchId: null,
+      revision: 1,
+      confirmedAt: now,
+      attemptLedger: null,
+      monitoringEvents: [],
+      batchIncidents: [
+        {
+          id: sourceEntry.id,
+          batchId: sourceBatchId,
+          incidentId: input.candidate.id,
+          courseId: input.candidate.courseId,
+          cycle: input.candidate.cycle,
+          result: "RETRY_SCHEDULED" as const,
+          proofSnapshot: null,
+          verifiedAt: null,
+          verifiedIncidentUpdatedAt: null,
+          createdAt: input.retryBatch.completedAt,
+          updatedAt: input.retryBatch.completedAt,
+          verificationRequests: [],
+          batch: {
+            id: sourceBatchId,
+            status: "RETRYABLE_FAILED" as const,
+            providerFamilyKey: input.retryBatch.providerFamilyKey,
+            failureFingerprint: input.retryBatch.failureFingerprint,
+            baseSha,
+            summary: input.retryBatch.summary,
+            releaseSha: null,
+            deployedAt: null,
+            createdAt: input.retryBatch.completedAt,
+            completedAt: input.retryBatch.completedAt,
+            revision: 1,
+            updatedAt: input.retryBatch.completedAt,
+          },
+        },
+      ],
+      course: {
+        id: input.candidate.courseId,
+        updatedAt: input.candidate.updatedAt,
+        timeZone: "America/Los_Angeles",
+        preferences: input.preferences ?? [],
       },
     };
   }
@@ -3421,6 +3491,35 @@ describe("course-support claim demand fencing", () => {
       },
     };
   }
+
+  it("stops an ordinary classification claim when the locked row enters source-complete recovery", async () => {
+    const lockedRecovery = sourceCompleteFinalizationRecoveryIncident({
+      status: "AUTO_INVESTIGATING",
+    });
+    const initiallyOrdinary = structuredClone(lockedRecovery);
+    initiallyOrdinary.batchIncidents = [];
+    initiallyOrdinary.attemptLedger = factualFinalLedger(
+      "MANUAL_DIRECT",
+      initiallyOrdinary.cycle,
+    );
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([initiallyOrdinary])
+      .mockResolvedValueOnce([lockedRecovery]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "source-complete-lane-race",
+        branch: "automation/course-support-self-healing",
+        baseSha,
+        now,
+      }),
+    ).rejects.toThrow(
+      "Course-support special claim lane changed during locked claim",
+    );
+
+    expectClaimLocksBeforeCurrentIncidentRead();
+    expectNoClaimWrites();
+  });
 
   it.each([
     ["due automatic", "AUTO_INVESTIGATING"],
@@ -4551,7 +4650,7 @@ describe("course-support claim demand fencing", () => {
           cycle: fixture.incident.cycle,
           revision: fixture.incident.revision,
           failureFingerprint: fixture.canonicalFailureFingerprint,
-          nextAttemptAt: { lte: fixture.dueAt },
+          nextAttemptAt: fixture.dueAt,
         }),
         data: expect.objectContaining({
           activeBatchId: "batch-1",
@@ -4956,6 +5055,7 @@ describe("course-support claim demand fencing", () => {
         },
       ];
     }
+    prismaMocks.queryRaw.mockResolvedValue([{ now: fixture.dueAt }]);
     prismaMocks.supportIncidentFindMany
       .mockResolvedValueOnce([fixture.incident])
       .mockResolvedValueOnce([fixture.incident]);
@@ -6082,6 +6182,7 @@ describe("course-support claim demand fencing", () => {
       history: ReturnType<typeof ordinaryFairnessBatch>[],
     ) => unknown[];
     transactionActiveBatches?: unknown[];
+    initialDueIncidents?: (ordinaryIncident: unknown) => unknown[];
     transactionDueIncidents?: (ordinaryIncident: unknown) => unknown[];
   }) {
     const fixture = parkedCampaignFixture();
@@ -6115,7 +6216,9 @@ describe("course-support claim demand fencing", () => {
       audit: fixture.audit,
     });
     prismaMocks.supportIncidentFindMany
-      .mockResolvedValueOnce([ordinaryIncident])
+      .mockResolvedValueOnce(
+        input?.initialDueIncidents?.(ordinaryIncident) ?? [ordinaryIncident],
+      )
       .mockResolvedValueOnce([fixture.parkedMember])
       .mockResolvedValueOnce([
         {
@@ -6125,10 +6228,10 @@ describe("course-support claim demand fencing", () => {
         },
       ])
       .mockResolvedValueOnce([fixture.candidateIncident])
-      .mockResolvedValueOnce(
-        input?.transactionDueIncidents?.(ordinaryIncident) ??
-          [ordinaryIncident],
-      )
+      .mockResolvedValueOnce([
+        fixture.currentIncident,
+        ...(input?.transactionDueIncidents?.(ordinaryIncident) ?? [ordinaryIncident]),
+      ])
       .mockResolvedValue([fixture.currentIncident]);
     prismaMocks.supportIncidentFindUnique.mockResolvedValue(
       fixture.reopenIncident,
@@ -6335,7 +6438,11 @@ describe("course-support claim demand fencing", () => {
     expect(prismaMocks.courseUpdateMany).toHaveBeenCalled();
     expect(prismaMocks.automationRunCreate).not.toHaveBeenCalled();
     expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
-    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ activeBatchId: expect.any(String) }),
+      }),
+    );
   });
 
   it("atomically reserves a requestless campaign member after three ordinary completions", async () => {
@@ -6616,6 +6723,57 @@ describe("course-support claim demand fencing", () => {
       "The requestless parked-campaign reservation changed during atomic claim; rerun selection.",
     );
     expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+  });
+
+  it("rolls back a non-reserved campaign when real demand appears in the locked queue", async () => {
+    const preferences = [
+      {
+        teeSearch: {
+          id: "newly-due-real-search",
+          date: new Date("2026-07-20T00:00:00.000Z"),
+        },
+      },
+    ];
+    const newlyDueRealDemand = {
+      ...incidentRecord({ engineeringOnly: false, preferences }),
+      id: "newly-due-real-incident",
+      courseId: "newly-due-real-course",
+      providerFamilyKey: "NEWLY_DUE_REAL",
+      failureFingerprint: "newly-due-real-fingerprint",
+      course: {
+        ...incidentRecord({ engineeringOnly: false, preferences }).course,
+        id: "newly-due-real-course",
+      },
+    };
+    configureRequestlessCampaignReservationClaim({
+      initialDueIncidents: () => [],
+      transactionDueIncidents: () => [newlyDueRealDemand],
+    });
+    prismaMocks.batchFindMany
+      .mockReset()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread-non-reserved-real-demand-race",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        now,
+        maxCourses: 5,
+      }),
+    ).rejects.toThrow("selection changed during locked claim");
+
+    expect(prismaMocks.automationRunCreate).not.toHaveBeenCalled();
+    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+    expect(prismaMocks.batchIncidentCreateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ activeBatchId: expect.any(String) }),
+      }),
+    );
   });
 
   it("fails a reserved campaign claim closed when its admission evidence drifts", async () => {
@@ -8581,21 +8739,30 @@ describe("course-support claim demand fencing", () => {
     prismaMocks.supportIncidentUpdateMany.mockImplementation(
       async (args: {
         where?: {
+          id?: string;
+          cycle?: number;
+          providerFamilyKey?: string;
+          failureFingerprint?: string;
           revision?: number;
           updatedAt?: Date;
-          OR?: Array<{ nextAttemptAt?: null | { lte?: Date } }>;
+          status?: string;
+          humanReviewReason?: string | null;
+          activeBatchId?: string | null;
+          nextAttemptAt?: Date | null;
         };
       }) => {
-        const dueAt = args.where?.OR?.find(
-          (entry) => entry.nextAttemptAt && typeof entry.nextAttemptAt === "object",
-        )?.nextAttemptAt;
         return {
           count:
+            args.where?.id === refreshed.id &&
+            args.where.cycle === refreshed.cycle &&
+            args.where.providerFamilyKey === refreshed.providerFamilyKey &&
+            args.where.failureFingerprint === refreshed.failureFingerprint &&
             args.where?.revision === refreshed.revision &&
             args.where.updatedAt?.getTime() === refreshedAt.getTime() &&
-            dueAt &&
-            typeof dueAt === "object" &&
-            dueAt.lte?.getTime() === now.getTime()
+            args.where.status === refreshed.status &&
+            args.where.humanReviewReason === refreshed.humanReviewReason &&
+            args.where.activeBatchId === null &&
+            args.where.nextAttemptAt?.getTime() === nextAttemptAt.getTime()
               ? 1
               : 0,
         };
@@ -8628,16 +8795,391 @@ describe("course-support claim demand fencing", () => {
       where: expect.objectContaining({
         revision: 9,
         updatedAt: refreshedAt,
-        OR: [
-          { nextAttemptAt: null },
-          { nextAttemptAt: { lte: now } },
-        ],
+        nextAttemptAt,
       }),
       data: expect.objectContaining({
         activeBatchId: "batch-1",
         revision: { increment: 1 },
       }),
     });
+  });
+
+  it("claims a reopened cycle entirely from the successful locked transaction snapshot", async () => {
+    const selectedAt = new Date("2026-07-15T19:58:00.000Z");
+    const firstAttemptAt = new Date("2026-07-15T19:59:30.000Z");
+    const committedAt = new Date("2026-07-15T19:59:45.000Z");
+    const initialFingerprint = "v1:UNSUPPORTED_FAMILY:NEEDS_ADAPTER";
+    const firstAttemptFingerprint = "v2:UNSUPPORTED_FAMILY:NEEDS_ADAPTER";
+    const committedFingerprint = "v3:UNSUPPORTED_FAMILY:NEEDS_ADAPTER";
+    const initiallySelected = {
+      ...incidentRecord({ engineeringOnly: true, preferences: [] }),
+      cycle: 1,
+      failureFingerprint: initialFingerprint,
+      revision: 8,
+      updatedAt: selectedAt,
+    };
+    const firstAttemptCurrent = {
+      ...initiallySelected,
+      cycle: 2,
+      failureFingerprint: firstAttemptFingerprint,
+      revision: 9,
+      updatedAt: firstAttemptAt,
+      occurrenceCount: 2,
+      lastSeenAt: firstAttemptAt,
+    };
+    const committedCurrent = {
+      ...firstAttemptCurrent,
+      cycle: 3,
+      failureFingerprint: committedFingerprint,
+      revision: 10,
+      updatedAt: committedAt,
+      occurrenceCount: 3,
+      lastSeenAt: committedAt,
+    };
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([initiallySelected])
+      .mockResolvedValueOnce([firstAttemptCurrent])
+      .mockResolvedValueOnce([committedCurrent]);
+    const conflict = Object.assign(new Error("write conflict"), {
+      code: "P2034",
+    });
+    prismaMocks.transaction
+      .mockImplementationOnce(
+        async (
+          worker: (
+            transaction: typeof monitoringTransactionClient,
+          ) => Promise<unknown>,
+        ) => {
+          await worker(monitoringTransactionClient);
+          throw conflict;
+        },
+      )
+      .mockImplementationOnce(
+        async (
+          worker: (
+            transaction: typeof monitoringTransactionClient,
+          ) => Promise<unknown>,
+        ) => worker(monitoringTransactionClient),
+      );
+    prismaMocks.supportIncidentUpdateMany.mockImplementation(
+      async (
+        args: {
+        where?: {
+          id?: string;
+          cycle?: number;
+          providerFamilyKey?: string;
+          failureFingerprint?: string;
+          revision?: number;
+          updatedAt?: Date;
+          status?: string;
+          humanReviewReason?: string | null;
+          activeBatchId?: string | null;
+          nextAttemptAt?: Date | null;
+        };
+        },
+      ) => {
+        const matches = (current: typeof firstAttemptCurrent) =>
+          args.where?.id === current.id &&
+          args.where.cycle === current.cycle &&
+          args.where.providerFamilyKey === current.providerFamilyKey &&
+          args.where.failureFingerprint === current.failureFingerprint &&
+          args.where.revision === current.revision &&
+          args.where.updatedAt?.getTime() === current.updatedAt.getTime() &&
+          args.where.status === current.status &&
+          args.where.humanReviewReason === current.humanReviewReason &&
+          args.where.activeBatchId === null &&
+          args.where.nextAttemptAt?.getTime() ===
+            current.nextAttemptAt?.getTime();
+        return {
+          count:
+            matches(firstAttemptCurrent) || matches(committedCurrent) ? 1 : 0,
+        };
+      },
+    );
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        now,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "ready",
+      incidentCount: 1,
+      failureFingerprint: committedFingerprint,
+    });
+
+    expectClaimLocksBeforeCurrentIncidentRead();
+    expect(prismaMocks.transaction).toHaveBeenCalledTimes(2);
+    expect(prismaMocks.batchCreate).toHaveBeenCalledTimes(2);
+    expect(prismaMocks.batchCreate).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          providerFamilyKey: committedCurrent.providerFamilyKey,
+          failureFingerprint: committedFingerprint,
+          summary: expect.objectContaining({
+            remediation: expect.objectContaining({
+              attempts: [
+                expect.objectContaining({
+                  failureFingerprint: committedFingerprint,
+                }),
+              ],
+            }),
+          }),
+        }),
+      }),
+    );
+    expect(prismaMocks.batchIncidentCreateMany).toHaveBeenCalledTimes(2);
+    expect(prismaMocks.batchIncidentCreateMany).toHaveBeenLastCalledWith({
+      data: [
+        expect.objectContaining({
+          incidentId: committedCurrent.id,
+          courseId: committedCurrent.courseId,
+          cycle: 3,
+        }),
+      ],
+    });
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          cycle: 3,
+          failureFingerprint: committedFingerprint,
+          revision: 10,
+          updatedAt: committedAt,
+          nextAttemptAt: committedCurrent.nextAttemptAt,
+        }),
+      }),
+    );
+    expect(prismaMocks.monitoringEventCreateMany).toHaveBeenCalledTimes(2);
+    expect(prismaMocks.monitoringEventCreateMany).toHaveBeenLastCalledWith({
+      data: [
+        expect.objectContaining({
+          incidentId: committedCurrent.id,
+          failureFingerprint: committedFingerprint,
+          audit: expect.objectContaining({
+            providerFamilyKey: committedCurrent.providerFamilyKey,
+          }),
+        }),
+      ],
+    });
+    expect(JSON.stringify(prismaMocks.batchCreate.mock.calls.at(-1))).not.toContain(
+      firstAttemptFingerprint,
+    );
+  });
+
+  it("uses locked database time when the incident becomes not yet due", async () => {
+    const callerNow = new Date("2026-07-15T20:00:00.000Z");
+    const selectionDatabaseNow = new Date("2026-07-15T19:59:00.000Z");
+    const claimDatabaseNow = new Date("2026-07-15T19:59:15.000Z");
+    const initiallySelected = incidentRecord({
+      engineeringOnly: true,
+      preferences: [],
+    });
+    const lockedCurrent = {
+      ...initiallySelected,
+      revision: initiallySelected.revision + 1,
+      updatedAt: new Date("2026-07-15T19:59:45.000Z"),
+      nextAttemptAt: new Date("2026-07-15T19:59:30.000Z"),
+    };
+    prismaMocks.queryRaw
+      .mockResolvedValueOnce([{ now: selectionDatabaseNow }])
+      .mockResolvedValueOnce([{ now: claimDatabaseNow }]);
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([initiallySelected])
+      .mockResolvedValueOnce([lockedCurrent]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        now: callerNow,
+      }),
+    ).rejects.toThrow("due time changed during locked claim");
+
+    expectClaimLocksBeforeCurrentIncidentRead();
+    const incidentLockCallIndex = prismaMocks.queryRawUnsafe.mock.calls.findIndex(
+      ([sql]) =>
+        typeof sql === "string" && sql.includes('FROM "CourseSupportIncident"'),
+    );
+    expect(prismaMocks.queryRaw.mock.invocationCallOrder[1]).toBeGreaterThan(
+      prismaMocks.queryRawUnsafe.mock.invocationCallOrder[incidentLockCallIndex]!,
+    );
+    expect(prismaMocks.queryRaw.mock.invocationCallOrder[1]).toBeLessThan(
+      prismaMocks.supportIncidentFindMany.mock.invocationCallOrder[1]!,
+    );
+    expectNoClaimWrites();
+  });
+
+  it("stops a stale ordinary claim when critical work appears in the locked queue", async () => {
+    const initiallySelected = incidentRecord({
+      engineeringOnly: true,
+      preferences: [],
+    });
+    const critical = {
+      ...incidentRecord({
+        engineeringOnly: false,
+        preferences: [
+          {
+            teeSearch: {
+              id: "new-critical-search",
+              date: new Date("2026-07-16T00:00:00.000Z"),
+            },
+          },
+        ],
+      }),
+      id: "new-critical-incident",
+      courseId: "new-critical-course",
+      kind: "FETCH_FAILED" as const,
+      providerFamilyKey: "NEW_CRITICAL_PROVIDER",
+      failureClass: "NETWORK" as const,
+      failureFingerprint: "new-critical-fingerprint",
+      course: {
+        ...incidentRecord({
+          engineeringOnly: false,
+          preferences: [
+            {
+              teeSearch: {
+                id: "new-critical-search",
+                date: new Date("2026-07-16T00:00:00.000Z"),
+              },
+            },
+          ],
+        }).course,
+        id: "new-critical-course",
+      },
+    };
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([initiallySelected])
+      .mockResolvedValueOnce([initiallySelected, critical]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        now,
+      }),
+    ).rejects.toThrow("selection changed during locked claim");
+
+    expectClaimLocksBeforeCurrentIncidentRead();
+    expectNoClaimWrites();
+  });
+
+  it("stops stale ordinary work when source-complete recovery gains priority under lock", async () => {
+    const initiallySelected = incidentRecord({
+      engineeringOnly: true,
+      preferences: [],
+    });
+    const recovery = sourceCompleteFinalizationRecoveryIncident({
+      status: "NEEDS_HUMAN",
+    });
+    const recoveryPreferences = [
+      {
+        teeSearch: {
+          id: "source-complete-real-search",
+          date: new Date("2026-07-16T00:00:00.000Z"),
+        },
+      },
+    ];
+    const currentRecovery = {
+      ...recovery,
+      engineeringOnly: false,
+      course: {
+        ...recovery.course,
+        preferences: recoveryPreferences,
+      },
+    };
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([initiallySelected])
+      .mockResolvedValueOnce([initiallySelected, currentRecovery]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        now,
+      }),
+    ).rejects.toThrow("selection changed during locked claim");
+
+    expectClaimLocksBeforeCurrentIncidentRead();
+    expect(
+      prismaMocks.supportIncidentFindMany.mock.calls[1]?.[0]?.where,
+    ).toEqual(
+      expect.objectContaining({
+        OR: expect.arrayContaining([
+          expect.objectContaining({
+            status: "NEEDS_HUMAN",
+            humanReviewReason: "AUTOMATION_STALLED",
+            activeBatchId: null,
+            nextAttemptAt: null,
+            resolution: null,
+            resolvedAt: null,
+            batchIncidents: expect.objectContaining({
+              some: expect.objectContaining({
+                result: "RETRY_SCHEDULED",
+                batch: expect.objectContaining({
+                  status: "RETRYABLE_FAILED",
+                  completedAt: { not: null },
+                }),
+              }),
+            }),
+            course: expect.objectContaining({
+              monitoringStatus: {
+                is: expect.objectContaining({
+                  state: "ENGINEERING_VERIFICATION_NEEDED",
+                  nextAutomaticAttemptAt: null,
+                  revalidationRequestedAt: null,
+                }),
+              },
+            }),
+          }),
+        ]),
+      }),
+    );
+    expectNoClaimWrites();
+  });
+
+  it.each([
+    {
+      label: "a terminal status",
+      current: { status: "RESOLVED" as const, activeBatchId: null },
+    },
+    {
+      label: "another active owner",
+      current: {
+        status: "AUTO_INVESTIGATING" as const,
+        activeBatchId: "another-batch",
+      },
+    },
+  ])("stops before claim writes after $label appears under lock", async ({ current }) => {
+    const initiallySelected = incidentRecord({
+      engineeringOnly: true,
+      preferences: [],
+    });
+    const lockedCurrent = {
+      ...initiallySelected,
+      ...current,
+      revision: initiallySelected.revision + 1,
+      updatedAt: new Date("2026-07-15T19:59:45.000Z"),
+    };
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([initiallySelected])
+      .mockResolvedValueOnce([lockedCurrent]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        now,
+      }),
+    ).rejects.toThrow("ownership changed during locked claim");
+
+    expectClaimLocksBeforeCurrentIncidentRead();
+    expectNoClaimWrites();
   });
 
   it("fails closed when a locked refresh changes the same-cycle action authority", async () => {
@@ -10624,17 +11166,10 @@ describe("course-support claim demand fencing", () => {
         retryBatchEntry(last),
       ],
     });
-    const incident = {
-      ...intended,
-      confirmedAt: now,
-      attemptLedger: null,
-      course: {
-        id: intended.courseId,
-        updatedAt: intended.updatedAt,
-        timeZone: "America/Los_Angeles",
-        preferences: [],
-      },
-    };
+    const incident = targetedRetryIncidentRecord({
+      candidate: intended,
+      retryBatch,
+    });
     prismaMocks.batchFindUnique.mockResolvedValue(retryBatch);
     prismaMocks.supportIncidentFindMany
       .mockResolvedValueOnce([incident])
@@ -10700,6 +11235,209 @@ describe("course-support claim demand fencing", () => {
     expect(JSON.stringify(summary)).not.toContain("private-source-batch-id");
   });
 
+  it("claims every member of a current multi-entry whole-batch retry", async () => {
+    const first = candidate({
+      id: "whole-retry-first",
+      courseId: "whole-retry-course-1",
+      engineeringOnly: false,
+    });
+    const second = candidate({
+      id: "whole-retry-second",
+      courseId: "whole-retry-course-2",
+      engineeringOnly: false,
+    });
+    const retryBatch = retryBatchEvidence(first, {
+      incidents: [retryBatchEntry(first), retryBatchEntry(second)],
+    });
+    const incidents = [first, second].map((entry) =>
+      targetedRetryIncidentRecord({ candidate: entry, retryBatch }),
+    );
+    prismaMocks.batchFindUnique.mockResolvedValue(retryBatch);
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce(incidents)
+      .mockResolvedValueOnce(incidents);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        retryBatchId: "private-source-batch-id",
+        maxCourses: 2,
+        now,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "ready",
+      incidentCount: 2,
+      fairnessReason: "TARGETED_RETRY",
+    });
+
+    expect(prismaMocks.batchIncidentCreateMany).toHaveBeenCalledWith({
+      data: expect.arrayContaining(
+        incidents.map((incident) =>
+          expect.objectContaining({
+            incidentId: incident.id,
+            courseId: incident.courseId,
+            cycle: incident.cycle,
+          }),
+        ),
+      ),
+    });
+    const claimWrites = prismaMocks.supportIncidentUpdateMany.mock.calls.filter(
+      ([call]) => call.data?.activeBatchId === "batch-1",
+    );
+    expect(claimWrites).toHaveLength(2);
+    for (const incident of incidents) {
+      expect(claimWrites).toContainEqual([
+        expect.objectContaining({
+          where: expect.objectContaining({
+            id: incident.id,
+            batchIncidents: {
+              some: expect.objectContaining({
+                batchId: "private-source-batch-id",
+                incidentId: incident.id,
+                courseId: incident.courseId,
+                result: "RETRY_SCHEDULED",
+              }),
+            },
+          }),
+        }),
+      ]);
+    }
+  });
+
+  it("rolls back a whole-batch retry when one sibling source changes under lock", async () => {
+    const first = candidate({
+      id: "whole-retry-first",
+      courseId: "whole-retry-course-1",
+      engineeringOnly: false,
+    });
+    const second = candidate({
+      id: "whole-retry-second",
+      courseId: "whole-retry-course-2",
+      engineeringOnly: false,
+    });
+    const retryBatch = retryBatchEvidence(first, {
+      incidents: [retryBatchEntry(first), retryBatchEntry(second)],
+    });
+    const initiallySelected = [first, second].map((entry) =>
+      targetedRetryIncidentRecord({ candidate: entry, retryBatch }),
+    );
+    const siblingSource = initiallySelected[1]!.batchIncidents[0]!;
+    const changedAt = new Date(retryBatch.completedAt!.getTime() + 30_000);
+    const lockedCurrent = [
+      initiallySelected[0]!,
+      {
+        ...initiallySelected[1]!,
+        revision: initiallySelected[1]!.revision + 1,
+        updatedAt: changedAt,
+        batchIncidents: [
+          {
+            ...siblingSource,
+            id: "newer-sibling-entry",
+            batchId: "newer-sibling-batch",
+            createdAt: changedAt,
+            updatedAt: changedAt,
+            batch: {
+              ...siblingSource.batch,
+              id: "newer-sibling-batch",
+              createdAt: changedAt,
+              completedAt: changedAt,
+              updatedAt: changedAt,
+            },
+          },
+          siblingSource,
+        ],
+      },
+    ];
+    prismaMocks.batchFindUnique.mockResolvedValue(retryBatch);
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce(initiallySelected)
+      .mockResolvedValueOnce(lockedCurrent);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        retryBatchId: "private-source-batch-id",
+        maxCourses: 2,
+        now,
+      }),
+    ).rejects.toThrow(
+      "targeted retry provenance changed during locked claim",
+    );
+
+    expectClaimLocksBeforeCurrentIncidentRead();
+    expectNoClaimWrites();
+  });
+
+  it.each([
+    ["whole-batch", undefined],
+    ["exact-entry", 1],
+  ] as const)(
+    "rejects a superseded %s targeted retry before ownership writes",
+    async (_retryScope, retryOrdinal) => {
+      const intended = candidate({
+        id: "retry-intended",
+        courseId: "retry-course",
+        engineeringOnly: false,
+      });
+      const retryBatch = retryBatchEvidence(intended);
+      const initiallySelected = targetedRetryIncidentRecord({
+        candidate: intended,
+        retryBatch,
+      });
+      const sourceEntry = initiallySelected.batchIncidents[0]!;
+      const newerCompletedAt = new Date(
+        retryBatch.completedAt!.getTime() + 30_000,
+      );
+      const lockedCurrent = {
+        ...initiallySelected,
+        revision: initiallySelected.revision + 1,
+        updatedAt: newerCompletedAt,
+        batchIncidents: [
+          {
+            ...sourceEntry,
+            id: "newer-retry-entry",
+            batchId: "newer-retry-batch",
+            createdAt: newerCompletedAt,
+            updatedAt: newerCompletedAt,
+            batch: {
+              ...sourceEntry.batch,
+              id: "newer-retry-batch",
+              createdAt: newerCompletedAt,
+              completedAt: newerCompletedAt,
+              updatedAt: newerCompletedAt,
+            },
+          },
+          sourceEntry,
+        ],
+      };
+      prismaMocks.batchFindUnique.mockResolvedValue(retryBatch);
+      prismaMocks.supportIncidentFindMany
+        .mockResolvedValueOnce([initiallySelected])
+        .mockResolvedValueOnce([lockedCurrent]);
+
+      await expect(
+        claimCourseSupportBatch({
+          ownerThreadId: "owner-thread",
+          branch: "automation/course-support-20260715-200000",
+          baseSha,
+          retryBatchId: "private-source-batch-id",
+          ...(retryOrdinal === undefined ? {} : { retryOrdinal }),
+          maxCourses: 1,
+          now,
+        }),
+      ).rejects.toThrow(
+        "targeted retry provenance changed during locked claim",
+      );
+
+      expectClaimLocksBeforeCurrentIncidentRead();
+      expectNoClaimWrites();
+    },
+  );
+
   it("bounds an exact targeted retry source before ownership writes", async () => {
     const retryCandidates = Array.from({ length: 21 }, (_, index) =>
       candidate({
@@ -10754,40 +11492,26 @@ describe("course-support claim demand fencing", () => {
       engineeringOnly: false,
     });
     const retryBatch = retryBatchEvidence(intended);
+    const initiallySelected = targetedRetryIncidentRecord({
+      candidate: intended,
+      retryBatch,
+    });
     prismaMocks.batchFindUnique.mockResolvedValue(retryBatch);
     prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([initiallySelected])
       .mockResolvedValueOnce([
-        {
-          ...intended,
-          confirmedAt: now,
-          attemptLedger: null,
-          course: {
-            id: intended.courseId,
-            updatedAt: intended.updatedAt,
-            timeZone: "America/Los_Angeles",
-            preferences: [],
-          },
-        },
-      ])
-      .mockResolvedValueOnce([
-        {
-          ...intended,
-          confirmedAt: now,
-          attemptLedger: null,
-          course: {
-            id: intended.courseId,
-            updatedAt: intended.updatedAt,
-            timeZone: "America/Los_Angeles",
-            preferences: [
-              {
-                teeSearch: {
-                  id: "new-real-demand",
-                  date: new Date("2026-07-20T00:00:00.000Z"),
-                },
+        targetedRetryIncidentRecord({
+          candidate: intended,
+          retryBatch,
+          preferences: [
+            {
+              teeSearch: {
+                id: "new-real-demand",
+                date: new Date("2026-07-20T00:00:00.000Z"),
               },
-            ],
-          },
-        },
+            },
+          ],
+        }),
       ]);
 
     await expect(
@@ -10813,18 +11537,12 @@ describe("course-support claim demand fencing", () => {
       courseId: "retry-course",
       engineeringOnly: false,
     });
-    const incident = {
-      ...intended,
-      confirmedAt: now,
-      attemptLedger: null,
-      course: {
-        id: intended.courseId,
-        updatedAt: intended.updatedAt,
-        timeZone: "America/Los_Angeles",
-        preferences: [],
-      },
-    };
-    prismaMocks.batchFindUnique.mockResolvedValue(retryBatchEvidence(intended));
+    const retryBatch = retryBatchEvidence(intended);
+    const incident = targetedRetryIncidentRecord({
+      candidate: intended,
+      retryBatch,
+    });
+    prismaMocks.batchFindUnique.mockResolvedValue(retryBatch);
     prismaMocks.supportIncidentFindMany
       .mockResolvedValueOnce([incident])
       .mockResolvedValueOnce([incident])
@@ -10877,17 +11595,11 @@ describe("course-support claim demand fencing", () => {
         courseId: "retry-course",
         engineeringOnly: false,
       });
-      const incident = {
-        ...intended,
-        confirmedAt: now,
-        attemptLedger: null,
-        course: {
-          id: intended.courseId,
-          updatedAt: intended.updatedAt,
-          timeZone: "America/Los_Angeles",
-          preferences: [],
-        },
-      };
+      const retryBatch = retryBatchEvidence(intended);
+      const incident = targetedRetryIncidentRecord({
+        candidate: intended,
+        retryBatch,
+      });
       const outsideCritical = {
         cycle: 1,
         confirmedAt: now,
@@ -10910,9 +11622,7 @@ describe("course-support claim demand fencing", () => {
       prismaMocks.queryRaw
         .mockResolvedValueOnce([{ now: callerNow }])
         .mockResolvedValueOnce([{ now }]);
-      prismaMocks.batchFindUnique.mockResolvedValue(
-        retryBatchEvidence(intended),
-      );
+      prismaMocks.batchFindUnique.mockResolvedValue(retryBatch);
       prismaMocks.supportIncidentFindMany
         .mockResolvedValueOnce([incident])
         .mockResolvedValueOnce([incident])
@@ -10973,18 +11683,12 @@ describe("course-support claim demand fencing", () => {
       courseId: "retry-course",
       engineeringOnly: false,
     });
-    const incident = {
-      ...intended,
-      confirmedAt: now,
-      attemptLedger: null,
-      course: {
-        id: intended.courseId,
-        updatedAt: intended.updatedAt,
-        timeZone: "America/Los_Angeles",
-        preferences: [],
-      },
-    };
-    prismaMocks.batchFindUnique.mockResolvedValue(retryBatchEvidence(intended));
+    const retryBatch = retryBatchEvidence(intended);
+    const incident = targetedRetryIncidentRecord({
+      candidate: intended,
+      retryBatch,
+    });
+    prismaMocks.batchFindUnique.mockResolvedValue(retryBatch);
     prismaMocks.supportIncidentFindMany
       .mockResolvedValueOnce([incident])
       .mockResolvedValueOnce([incident])
@@ -11025,18 +11729,12 @@ describe("course-support claim demand fencing", () => {
       courseId: "retry-course",
       engineeringOnly: false,
     });
-    const incident = {
-      ...intended,
-      confirmedAt: now,
-      attemptLedger: null,
-      course: {
-        id: intended.courseId,
-        updatedAt: intended.updatedAt,
-        timeZone: "America/Los_Angeles",
-        preferences: [],
-      },
-    };
-    prismaMocks.batchFindUnique.mockResolvedValue(retryBatchEvidence(intended));
+    const retryBatch = retryBatchEvidence(intended);
+    const incident = targetedRetryIncidentRecord({
+      candidate: intended,
+      retryBatch,
+    });
+    prismaMocks.batchFindUnique.mockResolvedValue(retryBatch);
     prismaMocks.supportIncidentFindMany
       .mockResolvedValueOnce([incident])
       .mockResolvedValueOnce([incident])
@@ -14523,8 +15221,12 @@ describe("course-support recovery", () => {
         failureClass: "SCHEMA",
         failureFingerprint: expiredBatch.failureFingerprint,
       }),
+      status: "AUTO_INVESTIGATING" as const,
+      activeBatchId: null,
+      revision: 3,
       confirmedAt: now,
       attemptLedger: null,
+      monitoringEvents: [],
       batchIncidents: [
         { cycle: 2, batch: { summary: recoveredSummary } },
         { cycle: 2, batch: { summary: recoveredSummary } },

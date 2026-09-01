@@ -3480,7 +3480,6 @@ export async function claimCourseSupportBatch(input: {
   retryOrdinal?: number;
   now?: Date;
 }) {
-  const now = input.now ?? new Date();
   validateOwnerThread(input.ownerThreadId);
   validateTaskBranch(input.branch);
   validateGitSha(input.baseSha, "base SHA");
@@ -3505,10 +3504,11 @@ export async function claimCourseSupportBatch(input: {
 
   const lease = await runWithCourseSupportWriterTransitionLease(
     async (writerLease) => {
+    const selectionDatabaseNow = await getCourseSupportDatabaseNow(prisma);
     const activeBatches = await prisma.courseSupportBatch.findMany({
       where: {
         status: { in: ACTIVE_BATCH_STATUSES },
-        leaseExpiresAt: { gt: now },
+        leaseExpiresAt: { gt: selectionDatabaseNow },
       },
       orderBy: { heartbeatAt: "desc" },
       take: MAX_CONCURRENT_COURSE_SUPPORT_BATCHES,
@@ -3524,7 +3524,7 @@ export async function claimCourseSupportBatch(input: {
     if (activeBatches.length >= MAX_CONCURRENT_COURSE_SUPPORT_BATCHES) {
       const recorded = await recordRoutineResponderObservation({
         outcome: "deferred_busy",
-        now,
+        now: selectionDatabaseNow,
         summary: {
           activeBatchCount: activeBatches.length,
         },
@@ -3544,7 +3544,7 @@ export async function claimCourseSupportBatch(input: {
     if (plannedPaths.length > 0 && sharedCheckoutImplementationReserved) {
       const recorded = await recordRoutineResponderObservation({
         outcome: "deferred_busy",
-        now,
+        now: selectionDatabaseNow,
         summary: {
           activeBatchCount: activeBatches.length,
           sharedCheckoutImplementationBusy: true,
@@ -3560,7 +3560,6 @@ export async function claimCourseSupportBatch(input: {
       };
     }
 
-    const selectionDatabaseNow = await getCourseSupportDatabaseNow(prisma);
     const [initialCandidates, recentCompletedBatches, retryBatch] = await Promise.all([
       listCourseSupportClaimCandidates(selectionDatabaseNow),
       prisma.courseSupportBatch.findMany({
@@ -3615,7 +3614,7 @@ export async function claimCourseSupportBatch(input: {
           membershipDigest: null,
         }
       : await planNextParkedCourseCampaignCohort({
-          now,
+          now: selectionDatabaseNow,
           maxCourses: Math.min(maxCourses, 5),
           runtimeVersion: input.baseSha,
           hasDueRealDemand: initialCandidates.some(
@@ -3625,7 +3624,7 @@ export async function claimCourseSupportBatch(input: {
         });
     const campaignCandidates = await listParkedCourseCampaignCandidates(
       campaignPlan,
-      now,
+      selectionDatabaseNow,
     );
     const allCandidates = [...campaignCandidates, ...initialCandidates];
     const providerEligibleCandidates = allCandidates.filter(
@@ -3656,7 +3655,7 @@ export async function claimCourseSupportBatch(input: {
       ? 0
       : await parkCourseSupportCandidatesForMaterialChange(
           waitingCandidates,
-          now,
+          selectionDatabaseNow,
         );
     const candidates = eligibleCandidates.filter(
       (candidate) =>
@@ -3676,7 +3675,7 @@ export async function claimCourseSupportBatch(input: {
     if (targetedRetryBlockedByCheckout) {
       const recorded = await recordRoutineResponderObservation({
         outcome: "deferred_busy",
-        now,
+        now: selectionDatabaseNow,
         summary: {
           activeBatchCount: activeBatches.length,
           sharedCheckoutImplementationBusy: true,
@@ -3696,7 +3695,7 @@ export async function claimCourseSupportBatch(input: {
     }
     const fairnessEvidence = buildCourseSupportRecentFairnessEvidence(
       recentCompletedBatches,
-      now,
+      selectionDatabaseNow,
     );
     const prioritySelection = input.retryBatchId
       ? null
@@ -3707,7 +3706,7 @@ export async function claimCourseSupportBatch(input: {
           ),
           recentBatches: fairnessEvidence,
           maxCourses,
-          now,
+          now: selectionDatabaseNow,
         });
     const requestlessCampaignSelection = input.retryBatchId
       ? null
@@ -3719,7 +3718,7 @@ export async function claimCourseSupportBatch(input: {
           ),
           recentBatches: fairnessEvidence,
           maxCourses: Math.min(maxCourses, 5),
-          now,
+          now: selectionDatabaseNow,
         });
     const admissionLane = input.retryBatchId
       ? null
@@ -3762,7 +3761,7 @@ export async function claimCourseSupportBatch(input: {
         : "no_due_work";
       const recorded = await recordRoutineResponderObservation({
         outcome,
-        now,
+        now: selectionDatabaseNow,
         summary: {
           dueIncidentCount: 0,
           parkedForMaterialChangeCount,
@@ -3790,9 +3789,8 @@ export async function claimCourseSupportBatch(input: {
       };
     }
 
-    const selectedRemediationRoute = selected.incidents[0]?.remediationRoute;
     if (
-      !selectedRemediationRoute ||
+      !selected.incidents[0]?.remediationRoute ||
       !selected.remediationDirective ||
       selected.incidents.some((incident) => !incident.actionPlan)
     ) {
@@ -3800,13 +3798,22 @@ export async function claimCourseSupportBatch(input: {
         "Course-support remediation routing or its claimed action plan was unavailable; no batch was claimed.",
       );
     }
-    const claimCandidateByIncidentId = new Map(
+    const preselectedClaimCandidateByIncidentId = new Map(
       candidates.map((candidate) => [candidate.id, candidate]),
     );
-    const buildRemediationSummary = (admittedAt: Date) =>
-      ({
-        ...serializeCourseSupportRemediationRoute(selectedRemediationRoute),
-        attempts: selected.incidents.map((incident) => ({
+    const buildRemediationSummary = (
+      selection: SelectedCourseSupportBatch,
+      admittedAt: Date,
+    ) => {
+      const remediationRoute = selection.incidents[0]?.remediationRoute;
+      if (!remediationRoute) {
+        throw new Error(
+          "Course-support remediation routing changed during locked claim; rerun selection.",
+        );
+      }
+      return ({
+        ...serializeCourseSupportRemediationRoute(remediationRoute),
+        attempts: selection.incidents.map((incident) => ({
           courseRef:
             incident.remediationCourseRef ??
             createCourseSupportRemediationCourseRef(incident.courseId),
@@ -3816,17 +3823,17 @@ export async function claimCourseSupportBatch(input: {
           runtimeVersion: input.baseSha,
           activeRealSearchCount: incident.activeRealSearchCount,
           playbookEventCountAtClaim:
-            claimCandidateByIncidentId.get(incident.id)
-              ?.playbookEventCountAtClaim ?? 0,
+            (incident as CourseSupportClaimCandidate)
+              .playbookEventCountAtClaim ?? 0,
           reason:
             incident.remediationRoute?.reason ??
-            selectedRemediationRoute.reason,
+            remediationRoute.reason,
           retryBudget: serializeCourseSupportRemediationRetryBudget(
             incident.remediationRoute?.retryBudget ?? null,
           ),
           approach:
             incident.remediationRoute?.attemptSignature ??
-            selectedRemediationRoute.attemptSignature ??
+            remediationRoute.attemptSignature ??
             null,
           actionPlan: incident.actionPlan!,
           providerContractEvidence:
@@ -3844,30 +3851,41 @@ export async function claimCourseSupportBatch(input: {
             : {}),
         })),
       }) satisfies Prisma.InputJsonObject;
-    const campaignAttempts = selected.incidents.flatMap((incident) => {
-      const recoveryCampaign =
-        readCandidateSourceCompleteFinalizationRecovery(incident)?.campaign;
-      const campaign = incident.campaign
-        ? {
-            runId: incident.campaign.runId,
-            membershipDigest: incident.campaign.membershipDigest,
-          }
-        : recoveryCampaign;
-      return campaign
-        ? [
-            {
-              courseRef: createCourseSupportRemediationCourseRef(
-                incident.courseId,
-              ),
-              runId: campaign.runId,
-              membershipDigest: campaign.membershipDigest,
-              cycle: incident.cycle,
-            },
-          ]
-        : [];
-    });
-    const sourceCompleteFinalizationRecoveryAttempts =
-      selected.incidents.flatMap((incident) => {
+    };
+    const buildCampaignSummary = (selection: SelectedCourseSupportBatch) => {
+      const campaignAttempts = selection.incidents.flatMap((incident) => {
+        const recoveryCampaign =
+          readCandidateSourceCompleteFinalizationRecovery(incident)?.campaign;
+        const campaign = incident.campaign
+          ? {
+              runId: incident.campaign.runId,
+              membershipDigest: incident.campaign.membershipDigest,
+            }
+          : recoveryCampaign;
+        return campaign
+          ? [
+              {
+                courseRef: createCourseSupportRemediationCourseRef(
+                  incident.courseId,
+                ),
+                runId: campaign.runId,
+                membershipDigest: campaign.membershipDigest,
+                cycle: incident.cycle,
+              },
+            ]
+          : [];
+      });
+      return campaignAttempts.length > 0
+        ? ({
+            kind: "PARKED_COHORT",
+            attempts: campaignAttempts,
+          } satisfies Prisma.InputJsonObject)
+        : null;
+    };
+    const buildSourceCompleteFinalizationRecoverySummary = (
+      selection: SelectedCourseSupportBatch,
+    ) => {
+      const recoveryAttempts = selection.incidents.flatMap((incident) => {
         const recovery = readCandidateSourceCompleteFinalizationRecovery(incident);
         return recovery
           ? [
@@ -3883,59 +3901,19 @@ export async function claimCourseSupportBatch(input: {
             ]
           : [];
       });
-    const sourceCompleteFinalizationRecoverySummary =
-      sourceCompleteFinalizationRecoveryAttempts.length > 0
+      return recoveryAttempts.length > 0
         ? ({
             schemaVersion: 1,
-            attempts: sourceCompleteFinalizationRecoveryAttempts,
+            attempts: recoveryAttempts,
           } satisfies Prisma.InputJsonObject)
         : null;
-    const campaignSummary =
-      campaignAttempts.length > 0
-        ? ({
-            kind: "PARKED_COHORT",
-            attempts: campaignAttempts,
-          } satisfies Prisma.InputJsonObject)
-        : null;
-    const requestlessParkedCampaignReservationPlanned = Boolean(
-      admissionLane?.lane === "REQUESTLESS_PARKED_CAMPAIGN" &&
-        admissionLane.parkedCampaignReservation &&
-        selected.incidents.length > 0 &&
-        selected.incidents.every(
-          (incident) =>
-            Boolean(incident.campaign) && incident.activeRealSearchCount === 0,
-        ),
-    );
+    };
     const preplannedFairnessHistoryFence =
-      buildCourseSupportFairnessHistoryFence(recentCompletedBatches, now);
-
-    const selectedCourseIds = selected.incidents.map(
-      (incident) => incident.courseId,
-    );
-    const newestProbes = (
-      await Promise.all(
-        [...new Set(selectedCourseIds)].sort().map((courseId) =>
-          prisma.courseProbe.findFirst({
-            where: { courseId },
-            orderBy: [{ observedAt: "desc" }, { id: "desc" }],
-            select: { id: true, courseId: true },
-          }),
-        ),
-      )
-    ).filter(
-      (probe): probe is { id: string; courseId: string } => probe !== null,
-    );
-    const preProbeByCourse = new Map<string, string>();
-    for (const probe of newestProbes) {
-      if (!preProbeByCourse.has(probe.courseId)) {
-        preProbeByCourse.set(probe.courseId, probe.id);
-      }
-    }
-
+      buildCourseSupportFairnessHistoryFence(
+        recentCompletedBatches,
+        selectionDatabaseNow,
+      );
     const leaseToken = randomUUID();
-    const leaseExpiresAt = new Date(
-      now.getTime() + COURSE_SUPPORT_BATCH_LEASE_MS,
-    );
     const conflictingInitialPaths = findConflictingResponderPaths(
       plannedPaths,
       activeBatches.flatMap((activeBatch) =>
@@ -3945,7 +3923,7 @@ export async function claimCourseSupportBatch(input: {
     if (conflictingInitialPaths.length > 0) {
       const recorded = await recordRoutineResponderObservation({
         outcome: "deferred_busy",
-        now,
+        now: selectionDatabaseNow,
         summary: {
           activeBatchCount: activeBatches.length,
           scopeConflictCount: conflictingInitialPaths.length,
@@ -3972,10 +3950,13 @@ export async function claimCourseSupportBatch(input: {
           selected.incidents.map((incident) => ({ id: incident.id })),
         );
         const claimDatabaseNow = await getCourseSupportDatabaseNow(tx);
+        const leaseExpiresAt = new Date(
+          claimDatabaseNow.getTime() + COURSE_SUPPORT_BATCH_LEASE_MS,
+        );
         await fenceCourseSupportClaimCourseRows(
           tx,
           selected.incidents.map((incident) => {
-            const courseUpdatedAt = claimCandidateByIncidentId.get(
+            const courseUpdatedAt = preselectedClaimCandidateByIncidentId.get(
               incident.id,
             )?.courseUpdatedAt;
             if (
@@ -3990,127 +3971,9 @@ export async function claimCourseSupportBatch(input: {
           }),
         );
         const courseMonitoringAvailable = hasCourseMonitoringPersistence(tx);
-        if (requestlessParkedCampaignReservationPlanned) {
-          const transactionSelectionNow = claimDatabaseNow;
-          const [
-            currentRecentCompletedBatches,
-            currentActiveBatches,
-            currentDueIncidents,
-          ] = await Promise.all([
-            tx.courseSupportBatch.findMany({
-              where: { completedAt: { not: null } },
-              orderBy: [{ completedAt: "desc" }, { id: "desc" }],
-              take: COURSE_SUPPORT_SYNTHETIC_FAIRNESS_WINDOW,
-              select: COURSE_SUPPORT_RECENT_FAIRNESS_BATCH_SELECT,
-            }),
-            tx.courseSupportBatch.findMany({
-              where: {
-                status: { in: ACTIVE_BATCH_STATUSES },
-                leaseExpiresAt: { gt: transactionSelectionNow },
-              },
-              orderBy: { heartbeatAt: "desc" },
-              take: MAX_CONCURRENT_COURSE_SUPPORT_BATCHES,
-              select: {
-                id: true,
-                status: true,
-                providerFamilyKey: true,
-                failureFingerprint: true,
-                summary: true,
-              },
-            }),
-            tx.courseSupportIncident.findMany({
-              where: buildDueResponderIncidentWhere(transactionSelectionNow),
-              orderBy: [
-                { earliestTargetDate: "asc" },
-                { firstSeenAt: "asc" },
-              ],
-              take: COURSE_SUPPORT_CANDIDATE_QUEUE_READ_LIMIT + 1,
-              select: COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT,
-            }),
-          ]);
-          assertBoundedCourseSupportCandidateQueue(currentDueIncidents);
-          await assertBoundedCourseSupportCandidateCurrentCycleHistory(
-            tx,
-            currentDueIncidents,
-          );
-          const currentFairnessEvidence =
-            buildCourseSupportRecentFairnessEvidence(
-              currentRecentCompletedBatches,
-              transactionSelectionNow,
-            );
-          const currentFairnessHistoryFence =
-            buildCourseSupportFairnessHistoryFence(
-              currentRecentCompletedBatches,
-              transactionSelectionNow,
-            );
-          const currentDueCandidates = buildCourseSupportCandidates(
-            currentDueIncidents,
-            transactionSelectionNow,
-          );
-          const currentActiveProviderGroups = new Set(
-            currentActiveBatches.map(
-              (batch) =>
-                `${batch.providerFamilyKey}\u0000${batch.failureFingerprint}`,
-            ),
-          );
-          const currentSharedCheckoutImplementationReserved =
-            currentActiveBatches.some((batch) =>
-              courseSupportBatchReservesCheckout(batch),
-            );
-          const currentPrioritySelection = selectCourseSupportBatch({
-            candidates: currentDueCandidates.filter(
-              (candidate) =>
-                !currentActiveProviderGroups.has(
-                  `${candidate.providerFamilyKey}\u0000${candidate.failureFingerprint}`,
-                ) &&
-                candidate.remediationRoute?.workMode !==
-                  "WAIT_FOR_MATERIAL_CHANGE" &&
-                (!currentSharedCheckoutImplementationReserved ||
-                  candidate.remediationRoute?.requiresImplementationPath !==
-                    true),
-            ),
-            recentBatches: currentFairnessEvidence,
-            maxCourses,
-            now: transactionSelectionNow,
-          });
-          const selectedCampaignStillAvailable = Boolean(
-            !currentActiveProviderGroups.has(
-              `${selected.providerFamilyKey}\u0000${selected.failureFingerprint}`,
-            ) &&
-              (!currentSharedCheckoutImplementationReserved ||
-                selectedRemediationRoute.requiresImplementationPath !== true),
-          );
-          const currentAdmissionLane = selectCourseSupportAdmissionLane({
-            priorityCandidateAvailable: Boolean(currentPrioritySelection),
-            requestlessParkedCampaignAvailable:
-              selectedCampaignStillAvailable,
-            hasCurrentActiveRealDemand: currentDueCandidates.some(
-              (candidate) => candidate.activeRealSearchCount > 0,
-            ),
-            activeBatchCampaignSummaryStates: currentActiveBatches.map(
-              (batch) =>
-                classifyCourseSupportCampaignSummary(batch.summary),
-            ),
-            recentBatches: currentFairnessEvidence,
-          });
-          if (
-            JSON.stringify(currentFairnessHistoryFence) !==
-              JSON.stringify(preplannedFairnessHistoryFence) ||
-            currentActiveBatches.length >=
-              MAX_CONCURRENT_COURSE_SUPPORT_BATCHES ||
-            currentAdmissionLane?.lane !==
-              "REQUESTLESS_PARKED_CAMPAIGN" ||
-            !currentAdmissionLane.parkedCampaignReservation
-          ) {
-            throw new Error(
-              "The requestless parked-campaign reservation changed during atomic claim; rerun selection.",
-            );
-          }
-        }
         const deferredSelectedIncidents = selected.incidents.filter(
           (incident) => incident.deferredFailureHandoff,
         );
-        const remediationSummary = buildRemediationSummary(claimDatabaseNow);
         if (deferredSelectedIncidents.some((incident) => incident.campaign)) {
           throw new Error(
             "Deferred failure confirmation cannot overlap parked-campaign ownership.",
@@ -4205,7 +4068,7 @@ export async function claimCourseSupportBatch(input: {
                 incident.campaign.expectedPlaybookConclusion,
               campaignRunId: incident.campaign.runId,
               campaignMembershipDigest: incident.campaign.membershipDigest,
-              now,
+              now: claimDatabaseNow,
             });
           if (!reopened.admitted || reopened.cycle !== incident.cycle) {
             throw new Error(
@@ -4213,27 +4076,47 @@ export async function claimCourseSupportBatch(input: {
             );
           }
         }
-        const currentIncidents = await tx.courseSupportIncident.findMany({
-          where: {
-            id: { in: selected.incidents.map((incident) => incident.id) },
-          },
-          select: COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT,
-        });
-        await assertBoundedCourseSupportCandidateCurrentCycleHistory(
-          tx,
+        const [
           currentIncidents,
-        );
+          currentRecentCompletedBatches,
+          currentActiveBatches,
+        ] = await Promise.all([
+          listCourseSupportClaimCandidateIncidents(claimDatabaseNow, tx),
+          tx.courseSupportBatch.findMany({
+            where: { completedAt: { not: null } },
+            orderBy: [{ completedAt: "desc" }, { id: "desc" }],
+            take: COURSE_SUPPORT_SYNTHETIC_FAIRNESS_WINDOW,
+            select: COURSE_SUPPORT_RECENT_FAIRNESS_BATCH_SELECT,
+          }),
+          tx.courseSupportBatch.findMany({
+            where: {
+              status: { in: ACTIVE_BATCH_STATUSES },
+              leaseExpiresAt: { gt: claimDatabaseNow },
+            },
+            orderBy: { heartbeatAt: "desc" },
+            take: MAX_CONCURRENT_COURSE_SUPPORT_BATCHES,
+            select: {
+              id: true,
+              status: true,
+              providerFamilyKey: true,
+              failureFingerprint: true,
+              summary: true,
+            },
+          }),
+        ]);
         const currentIncidentById = new Map(
           currentIncidents.map((incident) => [incident.id, incident]),
         );
+        const lockedClaimCandidateByIncidentId = new Map<
+          string,
+          CourseSupportClaimCandidate
+        >();
         for (const incident of selected.incidents) {
-          const selectedClaimCandidate = claimCandidateByIncidentId.get(
-            incident.id,
-          );
+          const selectedClaimCandidate =
+            preselectedClaimCandidateByIncidentId.get(incident.id);
           if (
             !selectedClaimCandidate ||
-            selectedClaimCandidate.courseId !== incident.courseId ||
-            selectedClaimCandidate.cycle !== incident.cycle
+            selectedClaimCandidate.courseId !== incident.courseId
           ) {
             throw new Error(
               "Course-support claim evidence changed before atomic batch admission.",
@@ -4274,30 +4157,73 @@ export async function claimCourseSupportBatch(input: {
               "Course-support claimed action authority changed during claim; rerun selection.",
             );
           }
-          if (incident.deferredFailureHandoff) {
-            const provenance = incident.deferredFailureHandoff;
-            const rebuiltProvenance = rebuilt.deferredFailureHandoff;
+          const selectedDeferredFailureHandoff =
+            selectedClaimCandidate.deferredFailureHandoff;
+          const lockedDeferredFailureHandoff = rebuilt.deferredFailureHandoff;
+          const selectedSourceCompleteFinalizationRecovery =
+            readCandidateSourceCompleteFinalizationRecovery(
+              selectedClaimCandidate,
+            );
+          const lockedSourceCompleteFinalizationRecovery =
+            readCandidateSourceCompleteFinalizationRecovery(rebuilt);
+          if (
+            Boolean(selectedDeferredFailureHandoff) !==
+              Boolean(lockedDeferredFailureHandoff) ||
+            Boolean(selectedSourceCompleteFinalizationRecovery) !==
+              Boolean(lockedSourceCompleteFinalizationRecovery) ||
+            Boolean(
+              selectedDeferredFailureHandoff &&
+                selectedSourceCompleteFinalizationRecovery,
+            ) ||
+            Boolean(
+              lockedDeferredFailureHandoff &&
+                lockedSourceCompleteFinalizationRecovery,
+            )
+          ) {
+            throw new Error(
+              "Course-support special claim lane changed during locked claim; rerun selection.",
+            );
+          }
+          const lockedClaimCandidate: CourseSupportClaimCandidate =
+            selectedClaimCandidate.campaign
+              ? { ...rebuilt, campaign: selectedClaimCandidate.campaign }
+              : rebuilt;
+          lockedClaimCandidateByIncidentId.set(
+            incident.id,
+            lockedClaimCandidate,
+          );
+          if (lockedDeferredFailureHandoff) {
+            const provenance = lockedDeferredFailureHandoff;
+            const selectedProvenance = selectedDeferredFailureHandoff;
             if (
-              !rebuiltProvenance ||
+              !selectedProvenance ||
               current.status !== "AUTO_INVESTIGATING" ||
               current.activeBatchId !== null ||
-              current.cycle !== incident.cycle ||
+              selectedClaimCandidate.cycle !== rebuilt.cycle ||
+              selectedClaimCandidate.providerFamilyKey !==
+                rebuilt.providerFamilyKey ||
+              selectedClaimCandidate.failureFingerprint !==
+                rebuilt.failureFingerprint ||
+              selectedProvenance.expectedIncidentRevision !==
+                provenance.expectedIncidentRevision ||
+              selectedProvenance.expectedMonitoringRevision !==
+                provenance.expectedMonitoringRevision ||
+              selectedProvenance.expectedMonitoringStateChangedAt.getTime() !==
+                provenance.expectedMonitoringStateChangedAt.getTime() ||
+              selectedProvenance.sourceBatchIncidentId !==
+                provenance.sourceBatchIncidentId ||
+              selectedProvenance.sourceBatchId !== provenance.sourceBatchId ||
+              selectedProvenance.signal.recordDigest !==
+                provenance.signal.recordDigest ||
+              selectedProvenance.signal.signalDigest !==
+                provenance.signal.signalDigest ||
               current.revision !== provenance.expectedIncidentRevision ||
-              current.providerFamilyKey !== incident.providerFamilyKey ||
-              current.failureFingerprint !== incident.failureFingerprint ||
               current.nextAttemptAt === null ||
               current.nextAttemptAt.getTime() > claimDatabaseNow.getTime() ||
               current.course.monitoringStatus?.revision !==
                 provenance.expectedMonitoringRevision ||
               current.course.monitoringStatus.stateChangedAt.getTime() !==
                 provenance.expectedMonitoringStateChangedAt.getTime() ||
-              rebuiltProvenance.sourceBatchIncidentId !==
-                provenance.sourceBatchIncidentId ||
-              rebuiltProvenance.sourceBatchId !== provenance.sourceBatchId ||
-              rebuiltProvenance.signal.recordDigest !==
-                provenance.signal.recordDigest ||
-              rebuiltProvenance.signal.signalDigest !==
-                provenance.signal.signalDigest ||
               rebuilt.remediationRoute?.workMode !== "VERIFY_TRANSIENT" ||
               rebuilt.remediationRoute.requiresImplementationPath ||
               rebuilt.remediationRoute.reason !== "MATERIAL_CHANGE_REOPENED" ||
@@ -4321,8 +4247,8 @@ export async function claimCourseSupportBatch(input: {
               where: {
                 id: sourceEntry.batch.id,
                 status: sourceEntry.batch.status,
-                providerFamilyKey: incident.providerFamilyKey,
-                failureFingerprint: incident.failureFingerprint,
+                providerFamilyKey: rebuilt.providerFamilyKey,
+                failureFingerprint: rebuilt.failureFingerprint,
                 baseSha: sourceEntry.batch.baseSha,
                 releaseSha: sourceEntry.batch.releaseSha,
                 deployedAt: sourceEntry.batch.deployedAt,
@@ -4413,7 +4339,7 @@ export async function claimCourseSupportBatch(input: {
             const monitoringFence =
               await tx.courseMonitoringStatus.updateMany({
                 where: {
-                  courseId: incident.courseId,
+                  courseId: rebuilt.courseId,
                   state: "AUTO_INVESTIGATING",
                   stateChangedAt:
                     provenance.expectedMonitoringStateChangedAt,
@@ -4430,18 +4356,18 @@ export async function claimCourseSupportBatch(input: {
             }
           }
           const sourceCompleteFinalizationRecovery =
-            readCandidateSourceCompleteFinalizationRecovery(incident);
+            lockedSourceCompleteFinalizationRecovery;
           if (sourceCompleteFinalizationRecovery) {
-            const rebuiltRecovery =
-              readCandidateSourceCompleteFinalizationRecovery(rebuilt);
+            const selectedRecovery =
+              selectedSourceCompleteFinalizationRecovery;
             const sourceEntry = current.batchIncidents[0];
             if (
-              !rebuiltRecovery ||
-              rebuiltRecovery.evidenceDigest !==
+              !selectedRecovery ||
+              selectedRecovery.evidenceDigest !==
                 sourceCompleteFinalizationRecovery.evidenceDigest ||
-              rebuiltRecovery.sourceBatchId !==
+              selectedRecovery.sourceBatchId !==
                 sourceCompleteFinalizationRecovery.sourceBatchId ||
-              rebuiltRecovery.sourceBatchIncidentId !==
+              selectedRecovery.sourceBatchIncidentId !==
                 sourceCompleteFinalizationRecovery.sourceBatchIncidentId ||
               rebuilt.remediationRoute?.workMode !==
                 "COMPLETE_CLASSIFICATION" ||
@@ -4452,6 +4378,12 @@ export async function claimCourseSupportBatch(input: {
                 sourceCompleteFinalizationRecovery.priorIncidentStatus ||
               current.humanReviewReason !==
                 sourceCompleteFinalizationRecovery.priorHumanReviewReason ||
+              current.activeBatchId !== null ||
+              (sourceCompleteFinalizationRecovery.priorIncidentStatus ===
+              "NEEDS_HUMAN"
+                ? current.nextAttemptAt !== null
+                : current.nextAttemptAt !== null &&
+                  current.nextAttemptAt.getTime() > claimDatabaseNow.getTime()) ||
               !sourceEntry ||
               sourceEntry.id !==
                 sourceCompleteFinalizationRecovery.sourceBatchIncidentId ||
@@ -4464,7 +4396,7 @@ export async function claimCourseSupportBatch(input: {
             }
             const latestDiscoveryFence =
               await tx.courseAutomationDiscovery.findFirst({
-                where: { courseId: incident.courseId },
+                where: { courseId: rebuilt.courseId },
                 orderBy: [{ createdAt: "desc" }, { id: "desc" }],
                 select: { id: true, createdAt: true },
               });
@@ -4483,8 +4415,8 @@ export async function claimCourseSupportBatch(input: {
               where: {
                 id: sourceEntry.batch.id,
                 status: "RETRYABLE_FAILED",
-                providerFamilyKey: incident.providerFamilyKey,
-                failureFingerprint: incident.failureFingerprint,
+                providerFamilyKey: rebuilt.providerFamilyKey,
+                failureFingerprint: rebuilt.failureFingerprint,
                 baseSha: sourceEntry.batch.baseSha,
                 releaseSha: sourceEntry.batch.releaseSha,
                 deployedAt: sourceEntry.batch.deployedAt,
@@ -4532,7 +4464,7 @@ export async function claimCourseSupportBatch(input: {
             const monitoringFence =
               await tx.courseMonitoringStatus.updateMany({
                 where: {
-                  courseId: incident.courseId,
+                  courseId: rebuilt.courseId,
                   state:
                     sourceCompleteFinalizationRecovery.expectedMonitoringState,
                   stateChangedAt:
@@ -4546,7 +4478,7 @@ export async function claimCourseSupportBatch(input: {
                   state: "AUTO_INVESTIGATING",
                   nextAutomaticAttemptAt: null,
                   revalidationRequestedAt: null,
-                  stateChangedAt: now,
+                  stateChangedAt: claimDatabaseNow,
                   revision: { increment: 1 },
                 },
               });
@@ -4557,6 +4489,75 @@ export async function claimCourseSupportBatch(input: {
             ) {
               throw new Error(
                 "Course-support source-complete recovery evidence changed during claim; rerun selection.",
+              );
+            }
+          }
+          if (
+            !lockedDeferredFailureHandoff &&
+            !lockedSourceCompleteFinalizationRecovery
+          ) {
+            if (
+              current.status !== "AUTO_INVESTIGATING" ||
+              current.activeBatchId !== null
+            ) {
+              throw new Error(
+                "Course-support incident ownership changed during locked claim; rerun selection.",
+              );
+            }
+            if (retryBatch?.completedAt) {
+              if (
+                current.nextAttemptAt === null ||
+                current.nextAttemptAt.getTime() <=
+                  retryBatch.completedAt.getTime() ||
+                current.nextAttemptAt.getTime() > claimDatabaseNow.getTime()
+              ) {
+                throw new Error(
+                  "Course-support targeted retry eligibility changed during locked claim; rerun selection.",
+                );
+              }
+            } else if (
+              current.nextAttemptAt !== null &&
+              current.nextAttemptAt.getTime() > claimDatabaseNow.getTime()
+            ) {
+              throw new Error(
+                "Course-support incident due time changed during locked claim; rerun selection.",
+              );
+            }
+          }
+          if (retryBatch?.completedAt) {
+            const selectedRetrySourceEntry =
+              input.retryOrdinal !== undefined
+                ? retryBatch.incidents[input.retryOrdinal - 1]
+                : retryBatch.incidents.find(
+                    (entry) =>
+                      entry.incidentId === current.id &&
+                      entry.courseId === current.courseId,
+                  );
+            const currentRetrySourceEntry = current.batchIncidents[0];
+            if (
+              !selectedRetrySourceEntry ||
+              selectedRetrySourceEntry.incidentId !== current.id ||
+              selectedRetrySourceEntry.courseId !== current.courseId ||
+              selectedRetrySourceEntry.cycle !== current.cycle ||
+              selectedRetrySourceEntry.result !== "RETRY_SCHEDULED" ||
+              !currentRetrySourceEntry ||
+              currentRetrySourceEntry.id !== selectedRetrySourceEntry.id ||
+              currentRetrySourceEntry.batchId !== input.retryBatchId ||
+              currentRetrySourceEntry.incidentId !== current.id ||
+              currentRetrySourceEntry.courseId !== current.courseId ||
+              currentRetrySourceEntry.cycle !== current.cycle ||
+              currentRetrySourceEntry.result !== "RETRY_SCHEDULED" ||
+              currentRetrySourceEntry.batch.id !== input.retryBatchId ||
+              currentRetrySourceEntry.batch.status !== "RETRYABLE_FAILED" ||
+              currentRetrySourceEntry.batch.providerFamilyKey !==
+                retryBatch.providerFamilyKey ||
+              currentRetrySourceEntry.batch.failureFingerprint !==
+                retryBatch.failureFingerprint ||
+              currentRetrySourceEntry.batch.completedAt?.getTime() !==
+                retryBatch.completedAt.getTime()
+            ) {
+              throw new Error(
+                "Course-support targeted retry provenance changed during locked claim; rerun selection.",
               );
             }
           }
@@ -4612,8 +4613,168 @@ export async function claimCourseSupportBatch(input: {
             );
           }
         }
+        const currentFairnessEvidence =
+          buildCourseSupportRecentFairnessEvidence(
+            currentRecentCompletedBatches,
+            claimDatabaseNow,
+          );
+        if (
+          admissionLane?.lane === "REQUESTLESS_PARKED_CAMPAIGN" &&
+          admissionLane.parkedCampaignReservation &&
+          JSON.stringify(
+            buildCourseSupportFairnessHistoryFence(
+              currentRecentCompletedBatches,
+              claimDatabaseNow,
+            ),
+          ) !== JSON.stringify(preplannedFairnessHistoryFence)
+        ) {
+          throw new Error(
+            "The requestless parked-campaign reservation changed during atomic claim; rerun selection.",
+          );
+        }
+        const currentActiveProviderGroups = new Set(
+          currentActiveBatches.map(
+            (batch) =>
+              `${batch.providerFamilyKey}\u0000${batch.failureFingerprint}`,
+          ),
+        );
+        const currentSharedCheckoutImplementationReserved =
+          currentActiveBatches.some((batch) =>
+            courseSupportBatchReservesCheckout(batch),
+          );
+        const currentConflictingPaths = findConflictingResponderPaths(
+          plannedPaths,
+          currentActiveBatches.flatMap((activeBatch) =>
+            readBatchPlannedPaths(activeBatch.summary),
+          ),
+        );
+        if (
+          currentActiveBatches.length >= MAX_CONCURRENT_COURSE_SUPPORT_BATCHES ||
+          currentConflictingPaths.length > 0
+        ) {
+          throw new Error(
+            "Course-support active ownership changed during locked claim; rerun selection.",
+          );
+        }
+        const lockedCandidatePool = buildCourseSupportCandidates(
+          currentIncidents,
+          claimDatabaseNow,
+        )
+          .map(
+            (candidate) =>
+              lockedClaimCandidateByIncidentId.get(candidate.id) ?? candidate,
+          )
+          .filter(
+            (candidate) =>
+              !currentActiveProviderGroups.has(
+                `${candidate.providerFamilyKey}\u0000${candidate.failureFingerprint}`,
+              ) &&
+              candidate.remediationRoute?.workMode !==
+                "WAIT_FOR_MATERIAL_CHANGE" &&
+              (!currentSharedCheckoutImplementationReserved ||
+                candidate.remediationRoute?.requiresImplementationPath !== true),
+          );
+        const currentPrioritySelection = retryBatch
+          ? null
+          : selectCourseSupportBatch({
+              candidates: lockedCandidatePool.filter(
+                (candidate) =>
+                  !candidate.campaign || candidate.activeRealSearchCount > 0,
+              ),
+              recentBatches: currentFairnessEvidence,
+              maxCourses,
+              now: claimDatabaseNow,
+            });
+        const currentRequestlessCampaignSelection = retryBatch
+          ? null
+          : selectCourseSupportBatch({
+              candidates: lockedCandidatePool.filter(
+                (candidate) =>
+                  Boolean(candidate.campaign) &&
+                  candidate.activeRealSearchCount === 0,
+              ),
+              recentBatches: currentFairnessEvidence,
+              maxCourses: Math.min(maxCourses, 5),
+              now: claimDatabaseNow,
+            });
+        const currentAdmissionLane = retryBatch
+          ? null
+          : selectCourseSupportAdmissionLane({
+              priorityCandidateAvailable: Boolean(currentPrioritySelection),
+              requestlessParkedCampaignAvailable: Boolean(
+                currentRequestlessCampaignSelection,
+              ),
+              hasCurrentActiveRealDemand: lockedCandidatePool.some(
+                (candidate) => candidate.activeRealSearchCount > 0,
+              ),
+              activeBatchCampaignSummaryStates: currentActiveBatches.map(
+                (batch) =>
+                  classifyCourseSupportCampaignSummary(batch.summary),
+              ),
+              recentBatches: currentFairnessEvidence,
+            });
+        let currentSelection: SelectedCourseSupportBatch | null;
+        if (retryBatch) {
+          currentSelection = selectCourseSupportRetryBatch({
+            candidates: lockedCandidatePool,
+            retryBatch,
+            retryOrdinal: input.retryOrdinal,
+            maxCourses,
+            now: claimDatabaseNow,
+          });
+        } else if (
+          currentAdmissionLane?.lane === "REQUESTLESS_PARKED_CAMPAIGN"
+        ) {
+          currentSelection = currentRequestlessCampaignSelection
+            ? {
+                ...currentRequestlessCampaignSelection,
+                fairnessReason: currentAdmissionLane.parkedCampaignReservation
+                  ? "PARKED_CAMPAIGN_RESERVATION"
+                  : currentRequestlessCampaignSelection.fairnessReason,
+              }
+            : null;
+        } else if (currentAdmissionLane?.lane === "PRIORITY") {
+          currentSelection = currentPrioritySelection;
+        } else {
+          currentSelection = null;
+        }
+        const plannedSelectionMembers = selected.incidents
+          .map((incident) => `${incident.id}\u0000${incident.courseId}`)
+          .sort();
+        const currentSelectionMembers = (currentSelection?.incidents ?? [])
+          .map((incident) => `${incident.id}\u0000${incident.courseId}`)
+          .sort();
+        if (
+          !currentSelection ||
+          JSON.stringify(currentSelectionMembers) !==
+            JSON.stringify(plannedSelectionMembers)
+        ) {
+          if (
+            admissionLane?.lane === "REQUESTLESS_PARKED_CAMPAIGN" &&
+            admissionLane.parkedCampaignReservation
+          ) {
+            throw new Error(
+              "The requestless parked-campaign reservation changed during atomic claim; rerun selection.",
+            );
+          }
+          throw new Error(
+            "Course-support selection changed during locked claim; rerun selection.",
+          );
+        }
+        const lockedSelection = currentSelection;
+        const lockedRemediationRoute =
+          lockedSelection.incidents[0]?.remediationRoute;
+        if (
+          !lockedRemediationRoute ||
+          !lockedSelection.remediationDirective ||
+          lockedSelection.incidents.some((incident) => !incident.actionPlan)
+        ) {
+          throw new Error(
+            "Course-support remediation routing or its claimed action plan changed during locked claim; rerun selection.",
+          );
+        }
         let reconciledAuthoritativeFinalCount = 0;
-        for (const incident of selected.incidents) {
+        for (const incident of lockedSelection.incidents) {
           const current = currentIncidentById.get(incident.id);
           if (!current) {
             throw new Error(
@@ -4650,7 +4811,7 @@ export async function claimCourseSupportBatch(input: {
             },
             data: {
               status: "RESOLVED",
-              resolvedAt: now,
+              resolvedAt: claimDatabaseNow,
               resolution: authoritativeResolution.resolution,
               resolutionMessage: authoritativeResolution.message,
               nextAction: null,
@@ -4659,7 +4820,7 @@ export async function claimCourseSupportBatch(input: {
               lastSeenAt: getCourseSupportIncidentEvidenceObservedAt({
                 proofSnapshot: null,
                 incidentLastSeenAt: current.lastSeenAt,
-                now,
+                now: claimDatabaseNow,
                 additionalProviderObservedAt:
                   monitoringStatus.state === "HEALTHY"
                     ? monitoringStatus.lastSuccessfulAt
@@ -4684,7 +4845,7 @@ export async function claimCourseSupportBatch(input: {
               where: {
                 ...buildDueResponderIncidentWhere(claimDatabaseNow),
                 id: {
-                  notIn: selected.incidents.map((incident) => incident.id),
+                  notIn: lockedSelection.incidents.map((incident) => incident.id),
                 },
                 kind: "FETCH_FAILED",
               },
@@ -4748,6 +4909,34 @@ export async function claimCourseSupportBatch(input: {
             );
           }
         }
+        const remediationSummary = buildRemediationSummary(
+          lockedSelection,
+          claimDatabaseNow,
+        );
+        const campaignSummary = buildCampaignSummary(lockedSelection);
+        const sourceCompleteFinalizationRecoverySummary =
+          buildSourceCompleteFinalizationRecoverySummary(lockedSelection);
+        const newestProbes = (
+          await Promise.all(
+            [...new Set(lockedSelection.incidents.map((incident) => incident.courseId))]
+              .sort()
+              .map((courseId) =>
+                tx.courseProbe.findFirst({
+                  where: { courseId },
+                  orderBy: [{ observedAt: "desc" }, { id: "desc" }],
+                  select: { id: true, courseId: true },
+                }),
+              ),
+          )
+        ).filter(
+          (probe): probe is { id: string; courseId: string } => probe !== null,
+        );
+        const preProbeByCourse = new Map<string, string>();
+        for (const probe of newestProbes) {
+          if (!preProbeByCourse.has(probe.courseId)) {
+            preProbeByCourse.set(probe.courseId, probe.id);
+          }
+        }
         const automationRun = await tx.automationRun.create({
           data: {
             promptVersion: COURSE_SUPPORT_RESPONDER_PROMPT_VERSION,
@@ -4755,15 +4944,15 @@ export async function claimCourseSupportBatch(input: {
             status: "RUNNING",
             runtimeVersion: input.baseSha,
             ownerThreadId: input.ownerThreadId,
-            heartbeatAt: now,
+            heartbeatAt: claimDatabaseNow,
             notes: JSON.stringify({
               schemaVersion: 1,
               lifecycle: "claimed",
               branch: input.branch,
               baseSha: input.baseSha,
               plannedPaths,
-              incidentCount: selected.incidents.length,
-              fairnessReason: selected.fairnessReason,
+              incidentCount: lockedSelection.incidents.length,
+              fairnessReason: lockedSelection.fairnessReason,
               remediation: remediationSummary,
               ...(campaignSummary ? { campaign: campaignSummary } : {}),
               ...(sourceCompleteFinalizationRecoverySummary
@@ -4789,15 +4978,15 @@ export async function claimCourseSupportBatch(input: {
         });
         const batch = await tx.courseSupportBatch.create({
           data: {
-            reference: createCourseSupportBatchReference(now),
-            providerFamilyKey: selected.providerFamilyKey,
-            failureFingerprint: selected.failureFingerprint,
+            reference: createCourseSupportBatchReference(claimDatabaseNow),
+            providerFamilyKey: lockedSelection.providerFamilyKey,
+            failureFingerprint: lockedSelection.failureFingerprint,
             status: plannedPaths.length > 0 ? "IMPLEMENTING" : "CLAIMED",
             ownerAutomationRunId: automationRun.id,
             ownerThreadId: input.ownerThreadId,
             leaseToken,
             leaseExpiresAt,
-            heartbeatAt: now,
+            heartbeatAt: claimDatabaseNow,
             baseSha: input.baseSha,
             maxCourses,
             summary: {
@@ -4805,20 +4994,20 @@ export async function claimCourseSupportBatch(input: {
               branch: input.branch,
               searchExecutionFence: persistCourseSupportSearchExecutionFence(
                 buildCourseSupportSearchExecutionFenceSnapshot({
-                  courseIds: selected.incidents.map(
+                  courseIds: lockedSelection.incidents.map(
                     (incident) => incident.courseId,
                   ),
                   expectedSearches: [],
                   recheckDispatchKey: null,
                   recheckDispatchStartedAt: null,
                   recheckDispatchedAt: null,
-                  now,
+                  now: claimDatabaseNow,
                   dispatches: [],
                 }),
-                now,
+                claimDatabaseNow,
               ),
               plannedPaths,
-              fairnessReason: selected.fairnessReason,
+              fairnessReason: lockedSelection.fairnessReason,
               remediation: remediationSummary,
               ...(campaignSummary ? { campaign: campaignSummary } : {}),
               ...(sourceCompleteFinalizationRecoverySummary
@@ -4838,14 +5027,15 @@ export async function claimCourseSupportBatch(input: {
                   }
                 : {}),
               ...(retrySourceBatchDigest ? { retrySourceBatchDigest } : {}),
-              containsCriticalRealDemand: selected.containsCriticalRealDemand,
-              selectedIncidentCount: selected.incidents.length,
+              containsCriticalRealDemand:
+                lockedSelection.containsCriticalRealDemand,
+              selectedIncidentCount: lockedSelection.incidents.length,
             },
           },
           select: { id: true, reference: true },
         });
         await tx.courseSupportBatchIncident.createMany({
-          data: selected.incidents.map((incident) => ({
+          data: lockedSelection.incidents.map((incident) => ({
             batchId: batch.id,
             incidentId: incident.id,
             courseId: incident.courseId,
@@ -4853,33 +5043,37 @@ export async function claimCourseSupportBatch(input: {
             preProbeId: preProbeByCourse.get(incident.courseId) ?? null,
           })),
         });
-        for (const incident of selected.incidents) {
+        for (const incident of lockedSelection.incidents) {
+          const currentIncident = currentIncidentById.get(incident.id);
+          if (!currentIncident) {
+            throw new Error(
+              "Course-support incident ownership changed during locked claim; rerun selection.",
+            );
+          }
           const sourceCompleteFinalizationRecovery =
             readCandidateSourceCompleteFinalizationRecovery(incident);
           const retrySourceEntry =
             retryBatch && input.retryOrdinal !== undefined
               ? retryBatch.incidents[input.retryOrdinal - 1]
-              : null;
+              : retryBatch
+                ? retryBatch.incidents.find(
+                    (entry) =>
+                      entry.incidentId === incident.id &&
+                      entry.courseId === incident.courseId,
+                  )
+                : null;
           const claimed = await tx.courseSupportIncident.updateMany({
             where: {
-              id: incident.id,
-              cycle: incident.cycle,
-              providerFamilyKey: incident.providerFamilyKey,
-              failureFingerprint: incident.failureFingerprint,
-              revision:
-                incident.deferredFailureHandoff?.expectedIncidentRevision ??
-                currentIncidentById.get(incident.id)!.revision,
-              updatedAt: currentIncidentById.get(incident.id)!.updatedAt,
-              status:
-                sourceCompleteFinalizationRecovery?.priorIncidentStatus ??
-                "AUTO_INVESTIGATING",
-              ...(sourceCompleteFinalizationRecovery
-                ? {
-                    humanReviewReason:
-                      sourceCompleteFinalizationRecovery.priorHumanReviewReason,
-                  }
-                : {}),
-              activeBatchId: null,
+              id: currentIncident.id,
+              cycle: currentIncident.cycle,
+              providerFamilyKey: currentIncident.providerFamilyKey,
+              failureFingerprint: currentIncident.failureFingerprint,
+              revision: currentIncident.revision,
+              updatedAt: currentIncident.updatedAt,
+              status: currentIncident.status,
+              humanReviewReason: currentIncident.humanReviewReason,
+              activeBatchId: currentIncident.activeBatchId,
+              nextAttemptAt: currentIncident.nextAttemptAt,
               ...(retrySourceEntry
                 ? {
                     batchIncidents: {
@@ -4894,35 +5088,6 @@ export async function claimCourseSupportBatch(input: {
                     },
                   }
                 : {}),
-              ...(sourceCompleteFinalizationRecovery
-                ? sourceCompleteFinalizationRecovery.priorIncidentStatus ===
-                  "NEEDS_HUMAN"
-                  ? { nextAttemptAt: null }
-                  : {
-                      OR: [
-                        { nextAttemptAt: null },
-                        { nextAttemptAt: { lte: claimDatabaseNow } },
-                      ],
-                    }
-                : incident.deferredFailureHandoff
-                ? {
-                    nextAttemptAt: {
-                      lte: claimDatabaseNow,
-                    },
-                  }
-                : retryBatch?.completedAt
-                  ? {
-                      nextAttemptAt: {
-                        gt: retryBatch.completedAt,
-                        lte: claimDatabaseNow,
-                      },
-                    }
-                  : {
-                      OR: [
-                        { nextAttemptAt: null },
-                        { nextAttemptAt: { lte: claimDatabaseNow } },
-                      ],
-                    }),
             },
             data: {
               status: "AUTO_INVESTIGATING",
@@ -4938,7 +5103,7 @@ export async function claimCourseSupportBatch(input: {
                       "Complete the current-runtime classification from the already complete signed-out source playbook.",
                   }
                 : {}),
-              lastAttemptAt: now,
+              lastAttemptAt: claimDatabaseNow,
               attemptCount: { increment: 1 },
               revision: { increment: 1 },
             },
@@ -4951,7 +5116,7 @@ export async function claimCourseSupportBatch(input: {
         }
         if (courseMonitoringAvailable) {
           await tx.courseMonitoringEvent.createMany({
-            data: selected.incidents.map((incident) => {
+            data: lockedSelection.incidents.map((incident) => {
               const sourceCompleteFinalizationRecovery =
                 readCandidateSourceCompleteFinalizationRecovery(incident);
               const campaign = incident.campaign
@@ -4981,9 +5146,9 @@ export async function claimCourseSupportBatch(input: {
                   sourceCompleteFinalizationRecovery
                     ? "The responder claimed a current-runtime classification pass for an already complete signed-out source playbook."
                     : "The responder claimed a bounded provider-family recovery attempt.",
-                occurredAt: now,
+                occurredAt: claimDatabaseNow,
                 audit: {
-                  providerFamilyKey: selected.providerFamilyKey,
+                  providerFamilyKey: lockedSelection.providerFamilyKey,
                   maxCourses,
                   serializedWriterLane: true,
                   ...(sourceCompleteFinalizationRecovery
@@ -5007,10 +5172,10 @@ export async function claimCourseSupportBatch(input: {
               };
             }),
           });
-          const humanReviewCourseIds = selected.incidents.flatMap((incident) =>
+          const humanReviewCourseIds = lockedSelection.incidents.flatMap((incident) =>
             incident.humanReviewReason ? [incident.courseId] : [],
           );
-          const automatedCourseIds = selected.incidents.flatMap((incident) =>
+          const automatedCourseIds = lockedSelection.incidents.flatMap((incident) =>
             incident.humanReviewReason ||
             readCandidateSourceCompleteFinalizationRecovery(incident)
               ? []
@@ -5026,7 +5191,7 @@ export async function claimCourseSupportBatch(input: {
             data: {
               state: "AUTO_INVESTIGATING",
               nextAutomaticAttemptAt: null,
-              stateChangedAt: now,
+              stateChangedAt: claimDatabaseNow,
               revision: { increment: 1 },
             },
           });
@@ -5053,6 +5218,8 @@ export async function claimCourseSupportBatch(input: {
           automationRunId: automationRun.id,
           batchId: batch.id,
           batchRef: batch.reference,
+          leaseExpiresAt,
+          selection: lockedSelection,
         };
       },
       COURSE_SUPPORT_BATCH_CLAIM_TRANSACTION_TIMEOUT_MS,
@@ -5075,40 +5242,42 @@ export async function claimCourseSupportBatch(input: {
       };
     }
 
+    const claimedSelection = created.selection;
     return {
       outcome: "ready" as const,
       batchRef: created.batchRef,
-      leaseExpiresAt: leaseExpiresAt.toISOString(),
-      providerFamilyKey: selected.providerFamilyKey,
+      leaseExpiresAt: created.leaseExpiresAt.toISOString(),
+      providerFamilyKey: claimedSelection.providerFamilyKey,
       providerFamilyCategory: getReportSafeProviderFamilyCategory(
-        selected.providerFamilyKey,
+        claimedSelection.providerFamilyKey,
       ),
-      failureFingerprint: selected.failureFingerprint,
-      incidentCount: selected.incidents.length,
+      failureFingerprint: claimedSelection.failureFingerprint,
+      incidentCount: claimedSelection.incidents.length,
       leverage: {
         providerGroupCount: 1,
-        currentAffectedCourseCount: selected.incidents.length,
-        activeRealDemandCount: selected.incidents.reduce(
+        currentAffectedCourseCount: claimedSelection.incidents.length,
+        activeRealDemandCount: claimedSelection.incidents.reduce(
           (total, incident) => total + incident.activeRealSearchCount,
           0,
         ),
         futureSiblingApplicability: ![
           SOURCE_MISSING_PROVIDER_FAMILY,
           SOURCE_CONFLICT_PROVIDER_FAMILY,
-        ].includes(selected.providerFamilyKey as never),
+        ].includes(claimedSelection.providerFamilyKey as never),
       },
-      fairnessReason: selected.fairnessReason,
-      containsCriticalRealDemand: selected.containsCriticalRealDemand,
-      remediation: selected.remediationDirective
+      fairnessReason: claimedSelection.fairnessReason,
+      containsCriticalRealDemand: claimedSelection.containsCriticalRealDemand,
+      remediation: claimedSelection.remediationDirective
         ? {
-            ...selected.remediationDirective,
+            ...claimedSelection.remediationDirective,
             allowUnchangedRuntime:
-              selected.incidents[0]?.remediationRoute?.allowUnchangedRuntime ??
-              false,
+              claimedSelection.incidents[0]?.remediationRoute
+                ?.allowUnchangedRuntime ?? false,
             requiresImplementationPath:
-              selected.incidents[0]?.remediationRoute
+              claimedSelection.incidents[0]?.remediationRoute
                 ?.requiresImplementationPath ?? false,
-            reason: selected.incidents[0]?.remediationRoute?.reason ?? null,
+            reason:
+              claimedSelection.incidents[0]?.remediationRoute?.reason ?? null,
           }
         : null,
       parkedForMaterialChangeCount,
@@ -15660,8 +15829,16 @@ async function listParkedSourceCompleteFinalizationRecoveryCandidates(
   );
 }
 
-async function listCourseSupportClaimCandidates(now: Date) {
-  const incidents = await prisma.courseSupportIncident.findMany({
+type CourseSupportClaimCandidateReadClient = Pick<
+  Prisma.TransactionClient,
+  "courseSupportIncident" | "courseMonitoringEvent"
+>;
+
+async function listCourseSupportClaimCandidateIncidents(
+  now: Date,
+  client: CourseSupportClaimCandidateReadClient = prisma,
+) {
+  const incidents = await client.courseSupportIncident.findMany({
     where: {
       OR: [
         buildDueResponderIncidentWhere(now),
@@ -15674,10 +15851,17 @@ async function listCourseSupportClaimCandidates(now: Date) {
   });
   assertBoundedCourseSupportCandidateQueue(incidents);
   await assertBoundedCourseSupportCandidateCurrentCycleHistory(
-    prisma,
+    client,
     incidents,
   );
-  return buildCourseSupportCandidates(incidents, now);
+  return incidents;
+}
+
+async function listCourseSupportClaimCandidates(now: Date) {
+  return buildCourseSupportCandidates(
+    await listCourseSupportClaimCandidateIncidents(now),
+    now,
+  );
 }
 
 function readExactDeferredFailureHandoffAttempt(input: {
