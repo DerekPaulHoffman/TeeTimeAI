@@ -65,10 +65,22 @@ describe("dynamic monitoring strategy", () => {
     expect(
       selectMonitoringStrategy({
         ...unknownCourse,
+        failureClass: "UNKNOWN"
+      })
+    ).toMatchObject({
+      action: "DISCOVER_WITH_HTTP",
+      reason: "MISSING_PROVIDER_SOURCE",
+      browserAllowed: false
+    });
+    expect(
+      selectMonitoringStrategy({
+        ...unknownCourse,
+        failureClass: "UNKNOWN",
         discoveryAttempt: "HTTP_INCONCLUSIVE"
       })
     ).toMatchObject({
       action: "DISCOVER_WITH_BROWSER",
+      reason: "MISSING_PROVIDER_SOURCE",
       browserAllowed: true
     });
   });

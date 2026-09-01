@@ -182,15 +182,28 @@ export function selectMonitoringStrategy(
     );
   }
 
+  const persistedProviderFamily = input.providerFamilyKey
+    ?.trim()
+    .toUpperCase();
   const discoveryReason =
-    providerFamilyKey === SOURCE_MISSING_PROVIDER_FAMILY
+    providerFamilyKey === SOURCE_MISSING_PROVIDER_FAMILY ||
+    persistedProviderFamily === SOURCE_MISSING_PROVIDER_FAMILY
       ? "MISSING_PROVIDER_SOURCE"
-      : providerFamilyKey === SOURCE_CONFLICT_PROVIDER_FAMILY
+      : providerFamilyKey === SOURCE_CONFLICT_PROVIDER_FAMILY ||
+          persistedProviderFamily === SOURCE_CONFLICT_PROVIDER_FAMILY
         ? "CONFLICTING_PROVIDER_EVIDENCE"
         : provider.capability || input.failureClass === "MISSING_METADATA"
           ? "MISSING_PROVIDER_METADATA"
           : "UNKNOWN_PROVIDER_FAMILY";
+  const safeDiscoverySource = hasSafePublicDiscoverySource(input);
+  const providerIdentityRequiresDiscovery =
+    safeDiscoverySource &&
+    (persistedProviderFamily === SOURCE_MISSING_PROVIDER_FAMILY ||
+      persistedProviderFamily === SOURCE_CONFLICT_PROVIDER_FAMILY ||
+      providerFamilyKey === SOURCE_MISSING_PROVIDER_FAMILY ||
+      providerFamilyKey === SOURCE_CONFLICT_PROVIDER_FAMILY);
   const needsDiscovery =
+    providerIdentityRequiresDiscovery ||
     !input.failureClass ||
     DISCOVERY_FAILURES.has(input.failureClass) ||
     input.failureClass === "UNSUPPORTED_FAMILY";
@@ -203,7 +216,6 @@ export function selectMonitoringStrategy(
     );
   }
 
-  const safeDiscoverySource = hasSafePublicDiscoverySource(input);
   if (!safeDiscoverySource) {
     return decision(
       "REPAIR_PROVIDER_ADAPTER",
