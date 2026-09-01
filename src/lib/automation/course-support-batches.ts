@@ -213,6 +213,8 @@ const COURSE_SUPPORT_BATCH_CLAIM_WRITER_LEASE_TIMEOUT_MS =
     COURSE_SUPPORT_WRITE_CONFLICT_MAX_ATTEMPTS;
 const COURSE_SUPPORT_ACTIVE_CAMPAIGN_FENCE_LIMIT = 100;
 const COURSE_SUPPORT_CANDIDATE_QUEUE_READ_LIMIT = 256;
+const COURSE_SUPPORT_PARKED_RECOVERY_SCAN_LIMIT =
+  COURSE_SUPPORT_CANDIDATE_QUEUE_READ_LIMIT * 4;
 const COURSE_SUPPORT_CANDIDATE_BATCH_HISTORY_READ_LIMIT = 128;
 const COURSE_SUPPORT_CANDIDATE_REQUEST_HISTORY_READ_LIMIT = 64;
 const COURSE_SUPPORT_CANDIDATE_CURRENT_CYCLE_EVENT_READ_LIMIT = 20;
@@ -537,6 +539,22 @@ type CourseSupportClaimCandidate = CourseSupportCandidate & {
   playbookEventCountAtClaim: number;
   sourceCompleteFinalizationRecovery?: SourceCompleteFinalizationRecovery;
 };
+
+export class CourseSupportClaimReplanRequired extends Error {
+  constructor(readonly originalError: Error) {
+    super(originalError.message);
+    this.name = "CourseSupportClaimReplanRequired";
+  }
+}
+
+function isCourseSupportClaimSnapshotDrift(error: unknown) {
+  return (
+    error instanceof Error &&
+    (error.message.endsWith("rerun selection.") ||
+      error.message ===
+        "A parked-course campaign member changed before atomic batch admission.")
+  );
+}
 
 function readCandidateSourceCompleteFinalizationRecovery(
   candidate: CourseSupportCandidate,
@@ -3626,7 +3644,10 @@ export async function claimCourseSupportBatch(input: {
       campaignPlan,
       selectionDatabaseNow,
     );
-    const allCandidates = [...campaignCandidates, ...initialCandidates];
+    const allCandidates = mergeCourseSupportClaimCandidatePools({
+      campaignCandidates,
+      currentCandidates: initialCandidates,
+    });
     const providerEligibleCandidates = allCandidates.filter(
       (candidate) =>
         !activeProviderGroups.has(
@@ -4656,7 +4677,7 @@ export async function claimCourseSupportBatch(input: {
             "Course-support active ownership changed during locked claim; rerun selection.",
           );
         }
-        const lockedCandidatePool = buildCourseSupportCandidates(
+        const lockedCandidatePool = buildSelectableCourseSupportClaimCandidates(
           currentIncidents,
           claimDatabaseNow,
         )
@@ -5286,7 +5307,12 @@ export async function claimCourseSupportBatch(input: {
     };
     },
     { timeout: COURSE_SUPPORT_BATCH_CLAIM_WRITER_LEASE_TIMEOUT_MS },
-  );
+  ).catch((error: unknown) => {
+    if (isCourseSupportClaimSnapshotDrift(error)) {
+      throw new CourseSupportClaimReplanRequired(error as Error);
+    }
+    throw error;
+  });
 
   if (!lease.acquired) {
     return {
@@ -5299,6 +5325,27 @@ export async function claimCourseSupportBatch(input: {
     };
   }
   return lease.value;
+}
+
+export async function recordCourseSupportClaimStateChurn() {
+  const now = await getCourseSupportDatabaseNow(prisma);
+  const durableCloseoutRecorded = await recordRoutineResponderObservation({
+    outcome: "deferred_busy",
+    now,
+    summary: {
+      claimStateChurn: true,
+      planningAttemptCount: 2,
+    },
+  });
+  return {
+    outcome: "deferred_busy" as const,
+    durableCloseoutRecorded,
+    claimStateChurn: true,
+    ...getResponderThreadPolicy({
+      outcome: "deferred_busy",
+      durableCloseoutRecorded,
+    }),
+  };
 }
 
 export async function appendCourseSupportBatchPath(input: {
@@ -15838,18 +15885,69 @@ async function listCourseSupportClaimCandidateIncidents(
   now: Date,
   client: CourseSupportClaimCandidateReadClient = prisma,
 ) {
-  const incidents = await client.courseSupportIncident.findMany({
+  const firstPage = await client.courseSupportIncident.findMany({
     where: {
       OR: [
         buildDueResponderIncidentWhere(now),
         buildParkedSourceCompleteFinalizationRecoveryWhere(),
       ],
     },
-    orderBy: [{ earliestTargetDate: "asc" }, { firstSeenAt: "asc" }],
+    orderBy: [
+      { status: "asc" },
+      { earliestTargetDate: "asc" },
+      { firstSeenAt: "asc" },
+    ],
     take: COURSE_SUPPORT_CANDIDATE_QUEUE_READ_LIMIT + 1,
     select: COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT,
   });
-  assertBoundedCourseSupportCandidateQueue(incidents);
+  if (firstPage.length <= COURSE_SUPPORT_CANDIDATE_QUEUE_READ_LIMIT) {
+    await assertBoundedCourseSupportCandidateCurrentCycleHistory(
+      client,
+      firstPage,
+    );
+    return firstPage;
+  }
+
+  const dueIncidents = firstPage.filter(
+    (incident) => incident.status === "AUTO_INVESTIGATING",
+  );
+  assertBoundedCourseSupportCandidateQueue(dueIncidents);
+  if (
+    firstPage[COURSE_SUPPORT_CANDIDATE_QUEUE_READ_LIMIT]?.status ===
+    "AUTO_INVESTIGATING"
+  ) {
+    assertBoundedCourseSupportCandidateQueue(firstPage);
+  }
+
+  const parkedSuperset = await client.courseSupportIncident.findMany({
+    where: buildParkedSourceCompleteFinalizationRecoveryWhere(),
+    orderBy: [{ earliestTargetDate: "asc" }, { firstSeenAt: "asc" }],
+    take: COURSE_SUPPORT_PARKED_RECOVERY_SCAN_LIMIT + 1,
+    select: COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT,
+  });
+  if (parkedSuperset.length > COURSE_SUPPORT_PARKED_RECOVERY_SCAN_LIMIT) {
+    if (dueIncidents.length === 0) {
+      throw new Error(
+        "The parked course-support recovery queue exceeds the bounded scan limit.",
+      );
+    }
+    await assertBoundedCourseSupportCandidateCurrentCycleHistory(
+      client,
+      dueIncidents,
+    );
+    return dueIncidents;
+  }
+  const exactParkedIds = new Set(
+    buildSelectableCourseSupportClaimCandidates(parkedSuperset, now)
+      .filter((candidate) =>
+        Boolean(readCandidateSourceCompleteFinalizationRecovery(candidate)),
+      )
+      .map((candidate) => candidate.id),
+  );
+  const incidents = [
+    ...dueIncidents,
+    ...parkedSuperset.filter((incident) => exactParkedIds.has(incident.id)),
+  ];
   await assertBoundedCourseSupportCandidateCurrentCycleHistory(
     client,
     incidents,
@@ -15858,7 +15956,7 @@ async function listCourseSupportClaimCandidateIncidents(
 }
 
 async function listCourseSupportClaimCandidates(now: Date) {
-  return buildCourseSupportCandidates(
+  return buildSelectableCourseSupportClaimCandidates(
     await listCourseSupportClaimCandidateIncidents(now),
     now,
   );
@@ -17370,6 +17468,78 @@ function buildCourseSupportCandidates(
   });
 }
 
+function buildSelectableCourseSupportClaimCandidates(
+  incidents: readonly CourseSupportCandidateIncident[],
+  now: Date,
+) {
+  const incidentById = new Map(
+    incidents.map((incident) => [incident.id, incident] as const),
+  );
+  return buildCourseSupportCandidates(incidents, now).filter((candidate) => {
+    const incident = incidentById.get(candidate.id);
+    if (!incident || incident.activeBatchId !== null) return false;
+    if (readCandidateSourceCompleteFinalizationRecovery(candidate)) return true;
+    return (
+      incident.status === "AUTO_INVESTIGATING" &&
+      (incident.nextAttemptAt === null ||
+        incident.nextAttemptAt.getTime() <= now.getTime())
+    );
+  });
+}
+
+export function mergeCourseSupportClaimCandidatePools(input: {
+  campaignCandidates: readonly CourseSupportClaimCandidate[];
+  currentCandidates: readonly CourseSupportClaimCandidate[];
+}) {
+  const merged: CourseSupportClaimCandidate[] = [];
+  const indexByIncidentId = new Map<string, number>();
+  for (const candidate of input.campaignCandidates) {
+    const existingIndex = indexByIncidentId.get(candidate.id);
+    if (existingIndex !== undefined) {
+      if (merged[existingIndex]?.courseId !== candidate.courseId) {
+        throw new Error(
+          "Course-support candidate pools disagree on incident identity.",
+        );
+      }
+      continue;
+    }
+    indexByIncidentId.set(candidate.id, merged.length);
+    merged.push(candidate);
+  }
+  for (const candidate of input.currentCandidates) {
+    const existingIndex = indexByIncidentId.get(candidate.id);
+    if (existingIndex === undefined) {
+      indexByIncidentId.set(candidate.id, merged.length);
+      merged.push(candidate);
+      continue;
+    }
+    const existing = merged[existingIndex];
+    if (!existing || existing.courseId !== candidate.courseId) {
+      throw new Error(
+        "Course-support candidate pools disagree on incident identity.",
+      );
+    }
+    const existingCampaign = candidate.campaign ? null : existing.campaign;
+    const currentRecovery = readCandidateSourceCompleteFinalizationRecovery(
+      candidate,
+    );
+    if (
+      existingCampaign &&
+      (!currentRecovery?.campaign ||
+        currentRecovery.campaign.runId !== existingCampaign.runId ||
+        currentRecovery.campaign.membershipDigest !==
+          existingCampaign.membershipDigest)
+    ) {
+      continue;
+    }
+    // Current persisted authority wins over the campaign's synthetic reopened
+    // projection only when it is not campaign-owned or when exact recovery
+    // already carries the same cohort provenance.
+    merged[existingIndex] = candidate;
+  }
+  return merged;
+}
+
 async function listParkedCourseCampaignCandidates(
   plan: Awaited<ReturnType<typeof planNextParkedCourseCampaignCohort>>,
   now: Date,
@@ -17401,6 +17571,8 @@ async function listParkedCourseCampaignCandidates(
     return [
       {
         ...incident,
+        status: "AUTO_INVESTIGATING" as const,
+        activeBatchId: null,
         cycle:
           member.admissionMode === "FRESH_CYCLE"
             ? incident.cycle + 1
@@ -17419,7 +17591,7 @@ async function listParkedCourseCampaignCandidates(
     prisma,
     reopenedCycleIncidents,
   );
-  const reopenedCycleCandidates = buildCourseSupportCandidates(
+  const reopenedCycleCandidates = buildSelectableCourseSupportClaimCandidates(
     reopenedCycleIncidents,
     now,
   );

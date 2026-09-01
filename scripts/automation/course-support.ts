@@ -17,6 +17,7 @@ import {
   appendCourseSupportBatchPath,
   backfillCourseSupportResponderState,
   claimCourseSupportBatch,
+  CourseSupportClaimReplanRequired,
   chooseCourseSupportReleaseDiffBase,
   closeoutCourseSupportBatch,
   canVerifyUnchangedCourseSupportRuntime,
@@ -30,6 +31,7 @@ import {
   markCourseSupportBatchNeedsHuman,
   recordOwnedCourseSupportSourceSearchResult,
   recoverCourseSupportBatch,
+  recordCourseSupportClaimStateChurn,
   renewCourseSupportBatchOperationLease,
   resolveCourseSupportBatchReference,
   verifyCourseSupportBatch,
@@ -705,7 +707,7 @@ async function claim(args: string[]) {
   if (retryOrdinal !== undefined && !retryBatchRef) {
     throw new Error("--retry-ordinal requires --retry-batch-ref.");
   }
-  return claimCourseSupportBatch({
+  const claimInput = {
     ownerThreadId: requireOwnerThread(args),
     branch: git.branch,
     baseSha: git.headSha,
@@ -715,7 +717,32 @@ async function claim(args: string[]) {
       ? await resolveCourseSupportBatchReference(retryBatchRef)
       : undefined,
     retryOrdinal
-  });
+  };
+  return runCourseSupportClaimWithImmediateReplan(
+    () => claimCourseSupportBatch(claimInput),
+    () => recordCourseSupportClaimStateChurn()
+  );
+}
+
+export function isCourseSupportClaimReplanRequired(error: unknown) {
+  return error instanceof CourseSupportClaimReplanRequired;
+}
+
+export async function runCourseSupportClaimWithImmediateReplan<T, U>(
+  operation: () => Promise<T>,
+  recordRepeatedChurn: () => Promise<U>
+) {
+  try {
+    return await operation();
+  } catch (error) {
+    if (!isCourseSupportClaimReplanRequired(error)) throw error;
+    try {
+      return await operation();
+    } catch (retryError) {
+      if (!isCourseSupportClaimReplanRequired(retryError)) throw retryError;
+      return recordRepeatedChurn();
+    }
+  }
 }
 
 async function packet(args: string[]) {

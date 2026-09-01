@@ -22,9 +22,70 @@ import {
   parseCourseSupportCoverageOptions,
   requireExplicitCourseSupportDatabaseUrl,
   runConfiguredCommand,
+  runCourseSupportClaimWithImmediateReplan,
   runWithExplicitCourseSupportDatabaseUrl,
   serializeCourseSupportResult
 } from "../../../scripts/automation/course-support";
+import { CourseSupportClaimReplanRequired } from "./course-support-batches";
+
+describe("course-support claim replanning", () => {
+  it("replans one snapshot-drift failure immediately", async () => {
+    const operation = vi
+      .fn<() => Promise<{ outcome: string }>>()
+      .mockRejectedValueOnce(
+        new CourseSupportClaimReplanRequired(
+          new Error(
+            "Course-support incident ownership changed during locked claim; rerun selection.",
+          ),
+        ),
+      )
+      .mockResolvedValueOnce({ outcome: "ready" });
+    const recordRepeatedChurn = vi.fn();
+
+    await expect(
+      runCourseSupportClaimWithImmediateReplan(
+        operation,
+        recordRepeatedChurn,
+      ),
+    ).resolves.toEqual({ outcome: "ready" });
+    expect(operation).toHaveBeenCalledTimes(2);
+    expect(recordRepeatedChurn).not.toHaveBeenCalled();
+  });
+
+  it("does not retry invariant failures or retry more than once", async () => {
+    const invariantFailure = vi
+      .fn<() => Promise<never>>()
+      .mockRejectedValue(new Error("Malformed course-support evidence."));
+    await expect(
+      runCourseSupportClaimWithImmediateReplan(
+        invariantFailure,
+        vi.fn(),
+      ),
+    ).rejects.toThrow("Malformed course-support evidence.");
+    expect(invariantFailure).toHaveBeenCalledOnce();
+
+    const repeatedDrift = vi
+      .fn<() => Promise<never>>()
+      .mockRejectedValue(
+        new CourseSupportClaimReplanRequired(
+          new Error(
+            "Course-support demand changed during claim; rerun selection.",
+          ),
+        ),
+      );
+    const recordRepeatedChurn = vi
+      .fn<() => Promise<{ outcome: string }>>()
+      .mockResolvedValue({ outcome: "deferred_busy" });
+    await expect(
+      runCourseSupportClaimWithImmediateReplan(
+        repeatedDrift,
+        recordRepeatedChurn,
+      ),
+    ).resolves.toEqual({ outcome: "deferred_busy" });
+    expect(repeatedDrift).toHaveBeenCalledTimes(2);
+    expect(recordRepeatedChurn).toHaveBeenCalledOnce();
+  });
+});
 
 describe("course-support owner-bound release verification options", () => {
   it("rejects direct changed-release proof outside verify-release", () => {

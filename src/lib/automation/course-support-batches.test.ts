@@ -161,6 +161,8 @@ import {
   isRetryableCourseSupportWriteConflict,
   isRemediatedSearchSchedulerHealthy,
   markCourseSupportBatchNeedsHuman,
+  mergeCourseSupportClaimCandidatePools,
+  recordCourseSupportClaimStateChurn,
   recordOwnedCourseSupportSourceSearchResult,
   normalizeCourseSupportObservedGitPaths,
   orderCourseSupportBatchIncidents,
@@ -3091,6 +3093,88 @@ describe("course-support batch selection", () => {
 describe("course-support claim demand fencing", () => {
   const baseSha = "a".repeat(40);
 
+  it("preserves campaign admission when duplicate current recovery lacks matching provenance", () => {
+    type ClaimCandidate = Parameters<
+      typeof mergeCourseSupportClaimCandidatePools
+    >[0]["campaignCandidates"][number];
+    const base = {
+      ...candidate({ id: "duplicate-incident", courseId: "duplicate-course" }),
+      courseUpdatedAt: now,
+      playbookEventCountAtClaim: 0,
+    };
+    const campaign = {
+      ...base,
+      campaign: {
+        runId: "campaign-run",
+        membershipDigest: "d".repeat(64),
+      },
+    } as ClaimCandidate;
+    const recovery = {
+      ...base,
+      sourceCompleteFinalizationRecovery: {
+        evidenceDigest: "e".repeat(64),
+        sourceBatchId: "source-batch",
+        sourceBatchIncidentId: "source-entry",
+        priorIncidentStatus: "NEEDS_HUMAN",
+        priorHumanReviewReason: "AUTOMATION_STALLED",
+        expectedMonitoringState: "ENGINEERING_VERIFICATION_NEEDED",
+        expectedMonitoringRevision: 1,
+        expectedMonitoringStateChangedAt: now,
+        expectedLatestDiscoveryId: null,
+        expectedLatestDiscoveryCreatedAt: null,
+        campaign: null,
+      },
+    } as ClaimCandidate;
+
+    expect(
+      mergeCourseSupportClaimCandidatePools({
+        campaignCandidates: [campaign],
+        currentCandidates: [recovery],
+      }),
+    ).toEqual([campaign]);
+
+    const matchingRecovery = {
+      ...recovery,
+      sourceCompleteFinalizationRecovery: {
+        ...recovery.sourceCompleteFinalizationRecovery,
+        campaign: {
+          runId: campaign.campaign!.runId,
+          membershipDigest: campaign.campaign!.membershipDigest,
+        },
+      },
+    } as ClaimCandidate;
+    expect(
+      mergeCourseSupportClaimCandidatePools({
+        campaignCandidates: [campaign],
+        currentCandidates: [matchingRecovery],
+      }),
+    ).toEqual([matchingRecovery]);
+  });
+
+  it("records repeated claim-state churn as aggregate system health", async () => {
+    await expect(recordCourseSupportClaimStateChurn()).resolves.toMatchObject({
+      outcome: "deferred_busy",
+      durableCloseoutRecorded: true,
+      claimStateChurn: true,
+    });
+    const create = prismaMocks.automationRunCreate.mock.calls[0]?.[0];
+    expect(create).toMatchObject({
+      data: expect.objectContaining({
+        status: "COMPLETED",
+        outcome: "deferred_busy",
+      }),
+    });
+    expect(JSON.parse(create.data.notes)).toEqual({
+      schemaVersion: 1,
+      lifecycle: "closeout",
+      outcome: "deferred_busy",
+      summary: {
+        claimStateChurn: true,
+        planningAttemptCount: 2,
+      },
+    });
+  });
+
   function activeBatch(index: number, overrides: Record<string, unknown> = {}) {
     return {
       id: `active-batch-${index}`,
@@ -3971,6 +4055,39 @@ describe("course-support claim demand fencing", () => {
     } else {
       expect(result).toMatchObject({ outcome: "ready" });
     }
+  });
+
+  it("does not convert a coarse parked source-complete row into ordinary actionable work", async () => {
+    const incident = sourceCompleteFinalizationRecoveryIncident({
+      status: "NEEDS_HUMAN",
+      campaign: true,
+      persistedProviderSnapshotFingerprint: "f".repeat(64),
+    });
+    prismaMocks.supportIncidentFindMany.mockResolvedValue([incident]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "source-complete-owner",
+        branch: "automation/course-support-source-complete",
+        baseSha,
+        now,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "no_due_work",
+      durableCloseoutRecorded: true,
+    });
+
+    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+    expect(prismaMocks.batchIncidentCreateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.automationRunCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "COMPLETED",
+          outcome: "no_due_work",
+        }),
+      }),
+    );
   });
 
   const sourceCompleteRecoveryEvidenceMismatches: Array<
@@ -6809,6 +6926,8 @@ describe("course-support claim demand fencing", () => {
       ...fixture.candidateIncident,
       id: "ordinary-while-campaign-active",
       courseId: "ordinary-course-while-campaign-active",
+      status: "AUTO_INVESTIGATING" as const,
+      activeBatchId: null,
       providerFamilyKey: "ORDINARY_WHILE_CAMPAIGN_ACTIVE",
       failureFingerprint: "ordinary-while-campaign-active-fingerprint",
       course: {
@@ -9140,6 +9259,84 @@ describe("course-support claim demand fencing", () => {
       }),
     );
     expectNoClaimWrites();
+  });
+
+  it("ignores a coarse parked source-complete row in the locked queue", async () => {
+    const initiallySelected = incidentRecord({
+      engineeringOnly: true,
+      preferences: [],
+    });
+    const coarseParked = sourceCompleteFinalizationRecoveryIncident({
+      status: "NEEDS_HUMAN",
+      campaign: true,
+      persistedProviderSnapshotFingerprint: "f".repeat(64),
+    });
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([initiallySelected])
+      .mockResolvedValueOnce([initiallySelected, coarseParked]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        now,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "ready",
+      incidentCount: 1,
+      providerFamilyKey: initiallySelected.providerFamilyKey,
+    });
+
+    expectClaimLocksBeforeCurrentIncidentRead();
+    expect(prismaMocks.batchIncidentCreateMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          incidentId: initiallySelected.id,
+          courseId: initiallySelected.courseId,
+        }),
+      ],
+    });
+  });
+
+  it("does not let a coarse parked recovery overflow fence due automatic work", async () => {
+    const due = incidentRecord({
+      engineeringOnly: true,
+      preferences: [],
+    });
+    const coarseTemplate = sourceCompleteFinalizationRecoveryIncident({
+      status: "NEEDS_HUMAN",
+      campaign: true,
+      persistedProviderSnapshotFingerprint: "f".repeat(64),
+    });
+    const coarseParked = Array.from({ length: 256 }, (_, index) => {
+      const incident = structuredClone(coarseTemplate);
+      incident.id = `coarse-parked-${index}`;
+      incident.courseId = `coarse-course-${index}`;
+      incident.course.id = incident.courseId;
+      return incident;
+    });
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([due, ...coarseParked])
+      .mockResolvedValueOnce(coarseParked)
+      .mockResolvedValueOnce([due]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-thread",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        now,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "ready",
+      incidentCount: 1,
+      providerFamilyKey: due.providerFamilyKey,
+    });
+
+    expect(prismaMocks.batchIncidentCreateMany).toHaveBeenCalledWith({
+      data: [expect.objectContaining({ incidentId: due.id })],
+    });
   });
 
   it.each([
