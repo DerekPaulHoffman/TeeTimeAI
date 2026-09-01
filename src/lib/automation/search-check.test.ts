@@ -49,6 +49,7 @@ const deliveryOutboxMocks = vi.hoisted(() => ({
   ),
   hydrateMatchAlertPayload: vi.fn(),
   hydrateSearchStatusEmailPayload: vi.fn(),
+  isExpectedSearchEmailDeliveryControlFlow: vi.fn(),
   listReachedMonitoringFinals: vi.fn(),
   listReachedMonitoringOutages: vi.fn(),
   listRetryableSearchEmailDeliveryGroups: vi.fn(),
@@ -647,6 +648,9 @@ describe("runSearchCheck email cadence", () => {
     deliveryOutboxMocks.toSearchEmailJson.mockImplementation((value) =>
       JSON.parse(JSON.stringify(value)),
     );
+    deliveryOutboxMocks.isExpectedSearchEmailDeliveryControlFlow.mockReturnValue(
+      false,
+    );
     deliveryOutboxMocks.getSafeOfficialBookingUrl.mockImplementation(
       (value: unknown) => (typeof value === "string" ? value : undefined),
     );
@@ -819,6 +823,81 @@ describe("runSearchCheck email cadence", () => {
     );
     expect(Number.isInteger(audit.scheduleVersion)).toBe(true);
     expect(audit.scheduleVersion).toBeGreaterThanOrEqual(0);
+  });
+
+  it("logs a typed status delivery deferral as pending rather than failed", async () => {
+    const deferred = new Error("delivery is waiting on durable reconciliation");
+    deliveryOutboxMocks.isExpectedSearchEmailDeliveryControlFlow.mockImplementation(
+      (error) => error === deferred,
+    );
+    deliveryOutboxMocks.drainSearchEmailDeliveryGroup.mockRejectedValue(
+      deferred,
+    );
+    const warning = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    const failure = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+
+    try {
+      await expect(runSearchCheck("search-1", "test")).resolves.toEqual(
+        expect.objectContaining({ statusEmailOutcome: "failed" }),
+      );
+      expect(warning).toHaveBeenCalledWith(
+        "[email:status-pending]",
+        expect.objectContaining({
+          message: "delivery is waiting on durable reconciliation",
+        }),
+      );
+      expect(failure).not.toHaveBeenCalled();
+    } finally {
+      warning.mockRestore();
+      failure.mockRestore();
+    }
+  });
+
+  it("retains error severity for a genuine status delivery failure", async () => {
+    const rejected = new Error("provider rejected delivery");
+    deliveryOutboxMocks.drainSearchEmailDeliveryGroup.mockRejectedValue(
+      rejected,
+    );
+    const warning = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    const failure = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+
+    try {
+      await expect(runSearchCheck("search-1", "test")).resolves.toEqual(
+        expect.objectContaining({ statusEmailOutcome: "failed" }),
+      );
+      expect(failure).toHaveBeenCalledWith(
+        "[email:status-failed]",
+        expect.objectContaining({ message: "provider rejected delivery" }),
+      );
+      expect(warning).not.toHaveBeenCalled();
+    } finally {
+      warning.mockRestore();
+      failure.mockRestore();
+    }
+  });
+
+  it("does not swallow a status delivery lease loss", async () => {
+    deliveryOutboxMocks.prepareSearchEmailDeliveryGroup.mockResolvedValue({
+      prepared: false,
+      deliveries: [],
+      continuationGroups: [],
+    });
+
+    await expect(runSearchCheck("search-1", "test")).rejects.toThrow(
+      "Search check lease is no longer current",
+    );
+    expect(dbMocks.finishAutomationRun).toHaveBeenLastCalledWith(
+      "run-1",
+      expect.objectContaining({ outcome: "failed" }),
+    );
   });
 
   it("does not cover or count a pending match omitted from the setup report", async () => {

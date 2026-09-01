@@ -233,6 +233,38 @@ describe("executeScheduledSearchCheck", () => {
     });
   });
 
+  it("stops without a successor wake when failure persistence rejects the stale lease", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-15T12:00:00.000Z"));
+    dbMocks.getSearchScheduleTiming.mockResolvedValue({
+      date: new Date("2026-07-18T00:00:00.000Z"),
+      endTime: "18:00",
+      userTimeZone: "America/New_York",
+      cadenceMinutes: 15,
+      trafficClass: "PUBLIC",
+      syntheticMultiCycle: false,
+      preferences: [{ course: { timeZone: "America/New_York" } }]
+    });
+    runSearchCheck.mockRejectedValue(new Error("search check lease lost"));
+    dbMocks.failScheduledSearchCheck.mockResolvedValue({
+      count: 0,
+      nextCheckAt: null
+    });
+
+    await expect(executeScheduledSearchCheck("search-1", 3)).resolves.toEqual({
+      outcome: "stopped",
+      nextCheckAt: null,
+      availableMatches: 0,
+      newlyAlertedMatches: 0,
+      courseResults: []
+    });
+    expect(dbMocks.failScheduledSearchCheck).toHaveBeenCalledWith(
+      expect.objectContaining({
+        nextCheckAt: new Date("2026-07-15T12:05:00.000Z")
+      })
+    );
+  });
+
   it("keeps a successful long-cadence check awake for the earliest unresolved endpoint", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-11T20:20:00.000Z"));
@@ -361,10 +393,164 @@ describe("executeScheduledSearchCheck", () => {
       nextCheckAt: "2026-08-11T22:20:00.000Z"
     });
   });
+
+  it("keeps an engineering-only overdue endpoint on the bounded support cadence", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-11T20:20:00.000Z"));
+    dbMocks.getSearchScheduleTiming.mockResolvedValue({
+      createdAt: new Date("2026-08-11T18:00:00.000Z"),
+      date: new Date("2026-08-15T00:00:00.000Z"),
+      endTime: "18:00",
+      userTimeZone: "America/New_York",
+      cadenceMinutes: 15,
+      trafficClass: "AUTOMATION",
+      syntheticMultiCycle: true,
+      preferences: [
+        {
+          course: {
+            timeZone: "America/New_York",
+            supportIncident: {
+              status: "AUTO_INVESTIGATING",
+              humanReviewReason: null,
+              escalationDeadlineAt: new Date("2026-08-11T20:15:00.000Z")
+            }
+          }
+        }
+      ]
+    });
+    runSearchCheck.mockResolvedValue({
+      outcome: "success",
+      availableMatches: 0,
+      newlyAlertedMatches: 0,
+      supportRetryNeeded: true,
+      statusEmailOutcome: "failed",
+      courseResults: []
+    });
+
+    await expect(executeScheduledSearchCheck("search-1", 3)).resolves.toMatchObject({
+      outcome: "success",
+      nextCheckAt: "2026-08-11T20:35:00.000Z"
+    });
+    expect(dbMocks.completeScheduledSearchCheck).toHaveBeenCalledWith(
+      expect.objectContaining({
+        nextCheckAt: new Date("2026-08-11T20:35:00.000Z")
+      })
+    );
+  });
+
+  it("keeps an already-consumed real-demand endpoint on the bounded support cadence", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-11T20:20:00.000Z"));
+    dbMocks.getSearchScheduleTiming.mockResolvedValue({
+      date: new Date("2026-08-15T00:00:00.000Z"),
+      endTime: "18:00",
+      userTimeZone: "America/New_York",
+      cadenceMinutes: 15,
+      trafficClass: "PUBLIC",
+      syntheticMultiCycle: false,
+      preferences: [
+        {
+          course: {
+            timeZone: "America/New_York",
+            supportIncident: {
+              status: "AUTO_INVESTIGATING",
+              humanReviewReason: null,
+              escalationDeadlineAt: new Date("2026-08-11T20:15:00.000Z")
+            }
+          }
+        }
+      ]
+    });
+    runSearchCheck.mockResolvedValue({
+      outcome: "success",
+      availableMatches: 0,
+      newlyAlertedMatches: 0,
+      supportRetryNeeded: true,
+      courseResults: []
+    });
+
+    await expect(executeScheduledSearchCheck("search-1", 3)).resolves.toMatchObject({
+      outcome: "success",
+      nextCheckAt: "2026-08-11T20:35:00.000Z"
+    });
+  });
+
+  it("schedules one immediate catch-up when a real-demand endpoint crosses during the check", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-11T20:20:00.000Z"));
+    dbMocks.getSearchScheduleTiming.mockResolvedValue({
+      date: new Date("2026-08-15T00:00:00.000Z"),
+      endTime: "18:00",
+      userTimeZone: "America/New_York",
+      cadenceMinutes: 120,
+      trafficClass: "PUBLIC",
+      syntheticMultiCycle: false,
+      preferences: [
+        {
+          course: {
+            timeZone: "America/New_York",
+            supportIncident: {
+              status: "AUTO_INVESTIGATING",
+              humanReviewReason: null,
+              escalationDeadlineAt: new Date("2026-08-11T20:22:00.000Z")
+            }
+          }
+        }
+      ]
+    });
+    runSearchCheck.mockImplementation(async () => {
+      vi.setSystemTime(new Date("2026-08-11T20:25:00.000Z"));
+      return {
+        outcome: "success",
+        availableMatches: 0,
+        newlyAlertedMatches: 0,
+        supportRetryNeeded: false,
+        courseResults: []
+      };
+    });
+
+    await expect(executeScheduledSearchCheck("search-1", 3)).resolves.toMatchObject({
+      outcome: "success",
+      nextCheckAt: "2026-08-11T20:25:00.000Z"
+    });
+  });
+
+  it("uses the failed-check backoff for an engineering-only overdue endpoint", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-11T20:20:00.000Z"));
+    dbMocks.getSearchScheduleTiming.mockResolvedValue({
+      createdAt: new Date("2026-08-11T18:00:00.000Z"),
+      date: new Date("2026-08-15T00:00:00.000Z"),
+      endTime: "18:00",
+      userTimeZone: "America/New_York",
+      cadenceMinutes: 15,
+      trafficClass: "AUTOMATION",
+      syntheticMultiCycle: true,
+      preferences: [
+        {
+          course: {
+            timeZone: "America/New_York",
+            supportIncident: {
+              status: "AUTO_INVESTIGATING",
+              humanReviewReason: null,
+              escalationDeadlineAt: new Date("2026-08-11T20:15:00.000Z")
+            }
+          }
+        }
+      ]
+    });
+    runSearchCheck.mockRejectedValue(new Error("check failed"));
+
+    await expect(executeScheduledSearchCheck("search-1", 3)).resolves.toMatchObject({
+      outcome: "failed",
+      nextCheckAt: "2026-08-11T20:25:00.000Z"
+    });
+  });
 });
 
 describe("calculateNextCheckAt", () => {
   it("keeps the persisted customer endpoint as a hard workflow wake", () => {
+    const checkStartedAt = new Date("2026-08-11T20:20:00.000Z");
     const now = new Date("2026-08-11T20:25:00.000Z");
     const deadline = new Date("2026-08-11T20:28:00.000Z");
 
@@ -379,9 +565,55 @@ describe("calculateNextCheckAt", () => {
             }
           }
         ],
+        "PUBLIC",
+        checkStartedAt,
         now
       )
     ).toEqual(deadline);
+  });
+
+  it("returns one immediate catch-up when a real-demand endpoint crosses during a check", () => {
+    const checkStartedAt = new Date("2026-08-11T20:15:00.000Z");
+    const now = new Date("2026-08-11T20:25:00.000Z");
+
+    expect(
+      selectSearchEndpointWakeAt(
+        [
+          {
+            supportIncident: {
+              status: "AUTO_INVESTIGATING",
+              humanReviewReason: null,
+              escalationDeadlineAt: new Date("2026-08-11T20:20:00.000Z")
+            }
+          }
+        ],
+        "PUBLIC",
+        checkStartedAt,
+        now
+      )
+    ).toEqual(now);
+  });
+
+  it("ignores a real-demand endpoint that was already overdue when the check started", () => {
+    const checkStartedAt = new Date("2026-08-11T20:21:00.000Z");
+    const now = new Date("2026-08-11T20:25:00.000Z");
+
+    expect(
+      selectSearchEndpointWakeAt(
+        [
+          {
+            supportIncident: {
+              status: "AUTO_INVESTIGATING",
+              humanReviewReason: null,
+              escalationDeadlineAt: new Date("2026-08-11T20:20:00.000Z")
+            }
+          }
+        ],
+        "PUBLIC",
+        checkStartedAt,
+        now
+      )
+    ).toBeNull();
   });
 
   it("uses configured cadence when a booking window is unknown", () => {

@@ -31,6 +31,7 @@ export async function executeScheduledSearchCheck(searchId: string, scheduleVers
     return { outcome: "stopped", nextCheckAt: null };
   }
 
+  let checkStartedAt: Date | null = null;
   try {
     const now = new Date();
     const syntheticExpiresAt = getSyntheticMultiCycleExpiresAt(timing);
@@ -74,7 +75,7 @@ export async function executeScheduledSearchCheck(searchId: string, scheduleVers
       };
     }
 
-    const checkStartedAt = new Date();
+    checkStartedAt = new Date();
     const result = await runSearchCheck(searchId, "workflow", claimed);
     const schedulingNow = new Date();
     const refreshedTiming = await getSearchScheduleTiming(searchId, scheduleVersion);
@@ -104,6 +105,8 @@ export async function executeScheduledSearchCheck(searchId: string, scheduleVers
               }
             ),
             schedulingCourses,
+            timing.trafficClass,
+            checkStartedAt,
             schedulingNow
           ),
           syntheticExpiresAt
@@ -133,6 +136,8 @@ export async function executeScheduledSearchCheck(searchId: string, scheduleVers
     );
     const endpointWakeAt = selectSearchEndpointWakeAt(
       timing.preferences.map((preference) => preference.course),
+      timing.trafficClass,
+      checkStartedAt ?? failedAt,
       failedAt
     );
     const nextCheckAt =
@@ -146,6 +151,15 @@ export async function executeScheduledSearchCheck(searchId: string, scheduleVers
       message,
       nextCheckAt
     });
+    if (failed.count !== 1) {
+      return {
+        outcome: "stopped",
+        nextCheckAt: null,
+        availableMatches: 0,
+        newlyAlertedMatches: 0,
+        courseResults: []
+      };
+    }
     const persistedNextCheckAt = failed.nextCheckAt ?? nextCheckAt;
     return {
       outcome: "failed",
@@ -165,8 +179,13 @@ export function selectSearchEndpointWakeAt(
       escalationDeadlineAt: Date | null;
     } | null;
   }>,
+  trafficClass: WebsiteTrafficClass,
+  checkStartedAt: Date,
   now = new Date()
 ) {
+  if (isSyntheticWebsiteTrafficClass(trafficClass)) {
+    return null;
+  }
   const deadlines = courses.flatMap((course) => {
     const incident = course.supportIncident;
     return incident?.status === "AUTO_INVESTIGATING" &&
@@ -175,8 +194,9 @@ export function selectSearchEndpointWakeAt(
       ? [incident.escalationDeadlineAt]
       : [];
   });
-  deadlines.sort((left, right) => left.getTime() - right.getTime());
-  const deadline = deadlines[0];
+  const deadline = deadlines
+    .filter((candidate) => candidate > checkStartedAt)
+    .sort((left, right) => left.getTime() - right.getTime())[0];
   return deadline && deadline <= now ? now : deadline ?? null;
 }
 
@@ -204,12 +224,19 @@ function capAtSyntheticExpiration(
 function capAtSearchEndpoint(
   nextCheckAt: Date | null,
   courses: Parameters<typeof selectSearchEndpointWakeAt>[0],
+  trafficClass: WebsiteTrafficClass,
+  checkStartedAt: Date,
   now: Date
 ) {
   if (!nextCheckAt) {
     return null;
   }
-  const endpointWakeAt = selectSearchEndpointWakeAt(courses, now);
+  const endpointWakeAt = selectSearchEndpointWakeAt(
+    courses,
+    trafficClass,
+    checkStartedAt,
+    now
+  );
   return endpointWakeAt && endpointWakeAt < nextCheckAt
     ? endpointWakeAt
     : nextCheckAt;

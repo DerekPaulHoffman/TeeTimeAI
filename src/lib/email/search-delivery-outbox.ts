@@ -256,6 +256,14 @@ export class SearchEmailDeliveryDeferredError extends Error {
   }
 }
 
+export function isExpectedSearchEmailDeliveryControlFlow(error: unknown) {
+  return (
+    error instanceof SearchEmailDeliveryDeferredError ||
+    error instanceof SearchEmailDeliveryInProgressError ||
+    error instanceof DeliveryProviderSourcePendingError
+  );
+}
+
 export async function reactivateTerminalUnresolvedMatchDeliveries(
   transaction: DeliveryTransaction,
   input: {

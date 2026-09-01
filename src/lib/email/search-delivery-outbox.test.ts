@@ -12,6 +12,7 @@ import {
   getSafeOfficialBookingUrl,
   hydrateMatchAlertPayload,
   hydrateSearchStatusEmailPayload,
+  isExpectedSearchEmailDeliveryControlFlow,
   listReachedMonitoringFinals,
   listReachedMonitoringOutages,
   listRetryableSearchEmailDeliveryGroups,
@@ -253,6 +254,25 @@ describe("search email delivery outbox", () => {
       id: "search-1",
     } as never);
     mockedPrisma.teeSearch.updateMany.mockResolvedValue({ count: 1 } as never);
+  });
+
+  it("recognizes only typed durable delivery control flow", () => {
+    expect(
+      isExpectedSearchEmailDeliveryControlFlow(
+        new SearchEmailDeliveryDeferredError(now),
+      ),
+    ).toBe(true);
+    expect(
+      isExpectedSearchEmailDeliveryControlFlow(
+        new SearchEmailDeliveryInProgressError(now),
+      ),
+    ).toBe(true);
+    expect(isExpectedSearchEmailDeliveryControlFlow(new Error("failed"))).toBe(
+      false,
+    );
+    expect(isExpectedSearchEmailDeliveryControlFlow({ retryable: true })).toBe(
+      false,
+    );
   });
 
   it("reactivates only exact current-generation recipients suppressed by an unresolved provider source", async () => {
@@ -1735,17 +1755,18 @@ describe("search email delivery outbox", () => {
     });
     const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
 
-    await expect(
-      drainSearchEmailDeliveryGroup({
-        searchId: "search-1",
-        alertGeneration: 3,
-        checkLeaseToken: "check-lease",
-        kind: "MATCH",
-        groupKey: "match-group",
-        send,
-        now: () => now,
-      }),
-    ).rejects.toMatchObject({ code: "DELIVERY_PROVIDER_SOURCE_PENDING" });
+    const error = await drainSearchEmailDeliveryGroup({
+      searchId: "search-1",
+      alertGeneration: 3,
+      checkLeaseToken: "check-lease",
+      kind: "MATCH",
+      groupKey: "match-group",
+      send,
+      now: () => now,
+    }).catch((caught) => caught);
+
+    expect(error).toMatchObject({ code: "DELIVERY_PROVIDER_SOURCE_PENDING" });
+    expect(isExpectedSearchEmailDeliveryControlFlow(error)).toBe(true);
 
     expect(send).not.toHaveBeenCalled();
     expect(

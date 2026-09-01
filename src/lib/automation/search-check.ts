@@ -122,6 +122,7 @@ import {
   getSafeOfficialBookingUrl,
   hydrateMatchAlertPayload,
   hydrateSearchStatusEmailPayload,
+  isExpectedSearchEmailDeliveryControlFlow,
   listReachedMonitoringFinals,
   listReachedMonitoringOutages,
   listRetryableSearchEmailDeliveryGroups,
@@ -2671,12 +2672,12 @@ async function checkSearch(
         throw error;
       }
       monitoringNoticeOutcome = "failed";
-      console.error("[email:monitoring-status-failed]", {
-        searchRef: createSearchLogReference(search.id),
-        message:
-          error instanceof Error
-            ? error.message
-            : "Unknown monitoring status email failure",
+      logSearchEmailDeliveryProblem({
+        error,
+        searchId: search.id,
+        pendingEvent: "[email:monitoring-status-pending]",
+        failureEvent: "[email:monitoring-status-failed]",
+        fallbackMessage: "Unknown monitoring status email failure",
       });
     }
   }
@@ -2734,13 +2735,16 @@ async function checkSearch(
           ? coveredMatchIds.length
           : 0;
     } catch (error) {
+      if (error instanceof SearchCheckLeaseLostError) {
+        throw error;
+      }
       statusEmailOutcome = "failed";
-      console.error("[email:status-replacement-failed]", {
-        searchRef: createSearchLogReference(search.id),
-        message:
-          error instanceof Error
-            ? error.message
-            : "Unknown status email failure",
+      logSearchEmailDeliveryProblem({
+        error,
+        searchId: search.id,
+        pendingEvent: "[email:status-replacement-pending]",
+        failureEvent: "[email:status-replacement-failed]",
+        fallbackMessage: "Unknown status email failure",
       });
     }
   } else if (
@@ -2790,13 +2794,16 @@ async function checkSearch(
           ? coveredPendingMatchIds.length
           : 0;
     } catch (error) {
+      if (error instanceof SearchCheckLeaseLostError) {
+        throw error;
+      }
       statusEmailOutcome = "failed";
-      console.error("[email:status-failed]", {
-        searchRef: createSearchLogReference(search.id),
-        message:
-          error instanceof Error
-            ? error.message
-            : "Unknown status email failure",
+      logSearchEmailDeliveryProblem({
+        error,
+        searchId: search.id,
+        pendingEvent: "[email:status-pending]",
+        failureEvent: "[email:status-failed]",
+        fallbackMessage: "Unknown status email failure",
       });
     }
   } else {
@@ -2828,13 +2835,16 @@ async function checkSearch(
           assertCurrent: () => maintainSearchCheckLease(lease),
         });
       } catch (error) {
+        if (error instanceof SearchCheckLeaseLostError) {
+          throw error;
+        }
         statusEmailOutcome = "failed";
-        console.error("[email:status-failed]", {
-          searchRef: createSearchLogReference(search.id),
-          message:
-            error instanceof Error
-              ? error.message
-              : "Unknown status email failure",
+        logSearchEmailDeliveryProblem({
+          error,
+          searchId: search.id,
+          pendingEvent: "[email:status-pending]",
+          failureEvent: "[email:status-failed]",
+          fallbackMessage: "Unknown status email failure",
         });
       }
     }
@@ -2864,6 +2874,33 @@ function getEnabledSearchStatusEmailKind(
   return isSearchEmailDeliveryEnabled(kind === "setup" ? "SETUP" : "DAILY")
     ? kind
     : null;
+}
+
+function logSearchEmailDeliveryProblem(input: {
+  error: unknown;
+  searchId: string;
+  pendingEvent: string;
+  failureEvent: string;
+  fallbackMessage: string;
+  context?: Record<string, unknown>;
+}) {
+  const expectedControlFlow = isExpectedSearchEmailDeliveryControlFlow(input.error);
+  const event = expectedControlFlow
+    ? input.pendingEvent
+    : input.failureEvent;
+  const details = {
+    searchRef: createSearchLogReference(input.searchId),
+    ...input.context,
+    message:
+      input.error instanceof Error
+        ? input.error.message
+        : input.fallbackMessage,
+  };
+  if (expectedControlFlow) {
+    console.warn(event, details);
+    return;
+  }
+  console.error(event, details);
 }
 
 function getCoveredPendingMatchIds(
@@ -3017,9 +3054,13 @@ async function retryExistingSearchEmailDeliveryGroups(input: {
       deliveryError ??= error;
     }
     if (deliveryError) {
-      console.warn("[email:existing-delivery-pending]", {
-        searchRef: createSearchLogReference(input.searchId),
-        kind: group.kind,
+      logSearchEmailDeliveryProblem({
+        error: deliveryError,
+        searchId: input.searchId,
+        pendingEvent: "[email:existing-delivery-pending]",
+        failureEvent: "[email:existing-delivery-failed]",
+        fallbackMessage: "Unknown existing delivery failure",
+        context: { kind: group.kind },
       });
     }
   }
@@ -3719,8 +3760,12 @@ async function deliverSearchStatusReport(input: {
       if (error instanceof SearchCheckLeaseLostError) {
         throw error;
       }
-      console.warn("[email:status-match-continuation-pending]", {
-        searchRef: createSearchLogReference(input.search.id),
+      logSearchEmailDeliveryProblem({
+        error,
+        searchId: input.search.id,
+        pendingEvent: "[email:status-match-continuation-pending]",
+        failureEvent: "[email:status-match-continuation-failed]",
+        fallbackMessage: "Unknown status match continuation failure",
       });
     }
   }
@@ -3953,8 +3998,12 @@ async function sendPendingMatchAlerts(
         throw error;
       }
       hasDurableMatchObligation = true;
-      console.warn("[email:match-recipient-pending]", {
-        searchRef: createSearchLogReference(searchId),
+      logSearchEmailDeliveryProblem({
+        error,
+        searchId,
+        pendingEvent: "[email:match-recipient-pending]",
+        failureEvent: "[email:match-recipient-failed]",
+        fallbackMessage: "Unknown match recipient delivery failure",
       });
     }
   }
