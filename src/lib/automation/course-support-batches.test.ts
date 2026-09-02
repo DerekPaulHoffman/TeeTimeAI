@@ -28900,7 +28900,7 @@ describe("detached verification atomic batch fences", () => {
     ).toBe(false);
   });
 
-  it("hands exhausted public discovery to reusable implementation without human escalation", async () => {
+  it.each(["MISSING_SOURCE", "MISSING_METADATA"] as const)("hands exhausted public %s discovery to reusable implementation without human escalation", async (failureClass) => {
     const batch = closeoutBatch("PENDING");
     const courseRef = createHash("sha256")
       .update("course-1")
@@ -28911,11 +28911,14 @@ describe("detached verification atomic batch fences", () => {
         "https://foreupsoftware.com/index.php/booking/12345#/teetimes",
       detectedPlatform: "FOREUP",
       providerFamilyKey: "FOREUP",
+      bookingMethod: "UNKNOWN",
+      bookingAccessMode: "UNKNOWN",
+      automationEligibility: "NEEDS_REVIEW",
       bookingMetadata: null,
     });
     Object.assign(batch.incidents[0].incident, {
       providerFamilyKey: "FOREUP",
-      failureClass: "MISSING_METADATA",
+      failureClass,
       attemptLedger: exhaustedAttemptLedger(),
     });
     batch.summary = {

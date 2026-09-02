@@ -9885,6 +9885,31 @@ function getEffectiveCourseSupportRetryFailureClass(input: {
     : input.incidentFailureClass;
 }
 
+function shouldHandoffExhaustedDiscoveryToImplementation(input: {
+  incidentFailureClass: CourseSupportFailureClass;
+  proofSnapshot: unknown;
+  course: Parameters<
+    typeof shouldImplementReusableSupportAfterExhaustedDiscovery
+  >[0];
+}) {
+  const effectiveFailureClass =
+    getEffectiveCourseSupportRetryFailureClass(input);
+  // A detached confirmation can observe MISSING_SOURCE after a transient
+  // canonical failure. That failure has its own one-shot handoff lifecycle and
+  // must not be reinterpreted as a fresh implementation assignment. The
+  // production discovery gap starts from a structural source/metadata failure.
+  if (
+    effectiveFailureClass === "MISSING_SOURCE" &&
+    isTransientCourseSupportFailure(input.incidentFailureClass)
+  ) {
+    return false;
+  }
+  return shouldImplementReusableSupportAfterExhaustedDiscovery({
+    ...input.course,
+    failureClass: effectiveFailureClass,
+  });
+}
+
 function getCurrentCourseSupportMonitoringFailureIdentity(input: {
   incidentCycle: number;
   incidentFailureFingerprint: string;
@@ -10654,9 +10679,10 @@ async function closeoutCourseSupportBatchAttempt(
       (entry.result === "PENDING" ||
         entry.result === "STALE_EVIDENCE" ||
         entry.result === "RETRY_SCHEDULED") &&
-      shouldImplementReusableSupportAfterExhaustedDiscovery({
-        ...entry.course,
-        failureClass: retryFailureClass,
+      shouldHandoffExhaustedDiscoveryToImplementation({
+        incidentFailureClass: entry.incident.failureClass,
+        proofSnapshot: entry.proofSnapshot,
+        course: entry.course,
       })
     ) {
       return {
@@ -11220,12 +11246,10 @@ async function closeoutCourseSupportBatchAttempt(
     const exhaustedDiscoveryImplementationHandoff = Boolean(
       playbookAssessment.conclusion === "UNRESOLVED_EXHAUSTED" &&
         entry.normalizedResult === "RETRY_SCHEDULED" &&
-        shouldImplementReusableSupportAfterExhaustedDiscovery({
-          ...entry.course,
-          failureClass: getEffectiveCourseSupportRetryFailureClass({
-            incidentFailureClass: entry.incident.failureClass,
-            proofSnapshot: entry.proofSnapshot,
-          }),
+        shouldHandoffExhaustedDiscoveryToImplementation({
+          incidentFailureClass: entry.incident.failureClass,
+          proofSnapshot: entry.proofSnapshot,
+          course: entry.course,
         }),
     );
     if (

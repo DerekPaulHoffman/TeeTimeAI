@@ -242,6 +242,11 @@ const STRUCTURAL_FAILURES = new Set<CourseSupportFailureClass>([
 ]);
 
 const EXHAUSTED_DISCOVERY_IMPLEMENTATION_FAILURES = new Set<CourseSupportFailureClass>([
+  // Detached verification can report MISSING_SOURCE after the ordered
+  // discovery ladder even while a safe official or booking URL remains.
+  // `hasSafePublicDiscoverySource` below keeps genuinely source-free work out
+  // of implementation.
+  "MISSING_SOURCE",
   "MISSING_METADATA",
   "UNSUPPORTED_FAMILY",
   "READER_PARSER_MISSING",

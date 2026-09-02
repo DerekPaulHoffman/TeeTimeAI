@@ -873,14 +873,14 @@ describe("course-support remediation routing", () => {
     });
   });
 
-  it("hands an exhausted public discovery ladder to reusable support implementation", () => {
+  it.each(["MISSING_SOURCE", "MISSING_METADATA"] as const)("hands an exhausted public %s discovery ladder to reusable support implementation", (failureClass) => {
     const result = routeCourseSupportRemediation({
       ...runnableCourse,
       detectedBookingUrl:
         "https://foreupsoftware.com/index.php/booking/12345#/teetimes",
       bookingMetadata: null,
       automationEligibility: "NEEDS_REVIEW",
-      failureClass: "MISSING_METADATA",
+      failureClass,
       playbookAssessment: {
         conclusion: "UNRESOLVED_EXHAUSTED",
         nextStage: null,
