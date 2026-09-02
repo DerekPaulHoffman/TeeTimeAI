@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   assertCourseSupportVerificationWatchFlags,
   closeoutSettledCourseSupportVerification,
+  getCourseSupportVerificationWatchFailureCode,
+  isCourseSupportVerificationWatchShortRetryEligible,
   runCourseSupportVerificationPass,
   runCourseSupportVerificationWatch,
   runWithBoundedCourseSupportHeartbeat,
@@ -73,6 +75,86 @@ describe("runCourseSupportVerificationPass", () => {
     expect(verifyBatch).toHaveBeenCalledWith(controller.signal);
     expect(result.verification.signal).toBe(controller.signal);
   });
+
+  it.each([
+    ["browser persistence", "BROWSER_STAGE_PERSIST_FAILED" as const],
+    ["batch verification", "BATCH_VERIFICATION_FAILED" as const],
+  ])("tags %s failures at their origin", async (origin, expectedCode) => {
+    const privateCanary = "https://private.invalid/provider?payload=secret";
+    let thrown: unknown;
+    try {
+      await runCourseSupportVerificationPass({
+        persistBrowserStages: async () => {
+          if (origin === "browser persistence") {
+            throw new Error(privateCanary);
+          }
+          return { eligibleCount: 0, persistedCount: 0 };
+        },
+        verifyBatch: async () => {
+          if (origin === "batch verification") {
+            throw new Error(privateCanary);
+          }
+          return { detachedVerification: { rerunNeeded: false } };
+        },
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(getCourseSupportVerificationWatchFailureCode(thrown)).toBe(
+      expectedCode,
+    );
+    expect(JSON.stringify(thrown)).not.toContain(privateCanary);
+  });
+
+  it.each([
+    ["NETWORK" as const, "BROWSER_STAGE_NETWORK_FAILED" as const],
+    ["TIMEOUT" as const, "BROWSER_STAGE_TIMEOUT" as const],
+  ])(
+    "maps a browser-origin %s failure to the exact short-retry code",
+    async (transientKind, expectedCode) => {
+      const privateCanary = "https://private.invalid/provider?payload=secret";
+      const rawError = new Error(privateCanary);
+      const classifyBrowserStageFailure = vi.fn(() => transientKind);
+      let thrown: unknown;
+
+      try {
+        await runCourseSupportVerificationPass({
+          persistBrowserStages: async () => {
+            throw rawError;
+          },
+          classifyBrowserStageFailure,
+          verifyBatch: async () => ({
+            detachedVerification: { rerunNeeded: false },
+          }),
+        });
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(classifyBrowserStageFailure).toHaveBeenCalledOnce();
+      expect(classifyBrowserStageFailure).toHaveBeenCalledWith(rawError);
+      expect(getCourseSupportVerificationWatchFailureCode(thrown)).toBe(
+        expectedCode,
+      );
+      expect(
+        isCourseSupportVerificationWatchShortRetryEligible(expectedCode),
+      ).toBe(true);
+      expect(JSON.stringify(thrown)).not.toContain(privateCanary);
+    },
+  );
+
+  it.each([
+    "BROWSER_STAGE_PERSIST_FAILED",
+    "BATCH_VERIFICATION_FAILED",
+    "BATCH_VERIFICATION_RECOVERY_REQUIRED",
+    "ASSIGNED_STAGE_ORCHESTRATION_GAP",
+    "SETTLED_CLOSEOUT_FAILED",
+  ] as const)("does not short-retry the generic %s failure", (failureCode) => {
+    expect(isCourseSupportVerificationWatchShortRetryEligible(failureCode)).toBe(
+      false,
+    );
+  });
 });
 
 describe("runCourseSupportVerificationWatch", () => {
@@ -96,6 +178,35 @@ describe("runCourseSupportVerificationWatch", () => {
       })
     ).rejects.toThrow("integer from 1 through 18");
   });
+
+  it.each(["endpoint", "max"] as const)(
+    "reports a null failure code when the %s deadline stops the watch",
+    async (reason) => {
+      let nowCallCount = 0;
+      const onStopped = vi.fn(async () => ({ durableCloseoutRecorded: true }));
+
+      const result = await runCourseSupportVerificationWatch({
+        maxMinutes: 1,
+        ...(reason === "endpoint" ? { deadlineAt: 0 } : {}),
+        now: () => {
+          const value = nowCallCount === 0 ? 0 : 60_000;
+          nowCallCount += 1;
+          return value;
+        },
+        pass: async () => cleanPass(),
+        onStopped,
+      });
+
+      expect(result).toMatchObject({
+        outcome: "verification_watch_closed",
+        stoppedReason: reason,
+        failureCode: null,
+      });
+      expect(onStopped).toHaveBeenCalledWith(
+        expect.objectContaining({ reason, failureCode: null }),
+      );
+    },
+  );
 
   it("waits while detached verification is pending", async () => {
     const pass = vi
@@ -471,6 +582,74 @@ describe("runCourseSupportVerificationWatch", () => {
     expect(closeout).not.toHaveBeenCalled();
   });
 
+  it("propagates a parent abort through the verification pass without stopped closeout", async () => {
+    const controller = new AbortController();
+    const ownershipFailure = new Error(
+      "Course-support verification watch ownership was lost.",
+    );
+    const onStopped = vi.fn(async () => ({ durableCloseoutRecorded: true }));
+    let browserStageStarted = false;
+
+    const running = runCourseSupportVerificationWatch({
+      signal: controller.signal,
+      pass: (signal) =>
+        runCourseSupportVerificationPass({
+          signal,
+          persistBrowserStages: () =>
+            new Promise<never>((_resolve, reject) => {
+              browserStageStarted = true;
+              signal.addEventListener("abort", () => reject(signal.reason), {
+                once: true,
+              });
+            }),
+          classifyBrowserStageFailure: () => "NETWORK",
+          verifyBatch: async () => ({
+            detachedVerification: { rerunNeeded: false },
+          }),
+        }),
+      onStopped,
+    });
+
+    await vi.waitFor(() => expect(browserStageStarted).toBe(true));
+    controller.abort(ownershipFailure);
+
+    await expect(running).rejects.toThrow(ownershipFailure.message);
+    expect(onStopped).not.toHaveBeenCalled();
+  });
+
+  it("releases a tagged pass failure without exposing its raw cause", async () => {
+    const privateCanary = "https://private.invalid/provider?payload=secret";
+    const onStopped = vi.fn(async () => ({ durableCloseoutRecorded: true }));
+
+    const result = await runCourseSupportVerificationWatch({
+      pass: () =>
+        runCourseSupportVerificationPass({
+          persistBrowserStages: async () => ({
+            eligibleCount: 0,
+            persistedCount: 0,
+          }),
+          verifyBatch: async () => {
+            throw new Error(privateCanary);
+          },
+        }),
+      onStopped,
+    });
+
+    expect(result).toMatchObject({
+      outcome: "verification_watch_closed",
+      stoppedReason: "error",
+      failureCode: "BATCH_VERIFICATION_FAILED",
+    });
+    expect(JSON.stringify(result)).not.toContain(privateCanary);
+    expect(onStopped).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reason: "error",
+        failureCode: "BATCH_VERIFICATION_FAILED",
+      }),
+    );
+    expect(onStopped.mock.calls[0]?.[0]).not.toHaveProperty("error");
+  });
+
   it("treats a recovery-required pass as lost ownership", async () => {
     const onStopped = vi.fn(async () => ({ durableCloseoutRecorded: true }));
 
@@ -488,11 +667,16 @@ describe("runCourseSupportVerificationWatch", () => {
     ).resolves.toMatchObject({
       outcome: "verification_watch_closed",
       stoppedReason: "error",
+      failureCode: "BATCH_VERIFICATION_RECOVERY_REQUIRED",
       closeout: { durableCloseoutRecorded: true }
     });
     expect(onStopped).toHaveBeenCalledOnce();
     expect(onStopped).toHaveBeenCalledWith(
-      expect.objectContaining({ reason: "error", passCount: 1 })
+      expect.objectContaining({
+        reason: "error",
+        passCount: 1,
+        failureCode: "BATCH_VERIFICATION_RECOVERY_REQUIRED",
+      })
     );
   });
 
@@ -544,12 +728,17 @@ describe("runCourseSupportVerificationWatch", () => {
       ).resolves.toMatchObject({
         outcome: "verification_watch_closed",
         stoppedReason: "error",
+        failureCode: "ASSIGNED_STAGE_ORCHESTRATION_GAP",
         passCount: 1,
         closeout: { durableCloseoutRecorded: true }
       });
       expect(closeout).not.toHaveBeenCalled();
       expect(onStopped).toHaveBeenCalledWith(
-        expect.objectContaining({ reason: "error", passCount: 1 })
+        expect.objectContaining({
+          reason: "error",
+          passCount: 1,
+          failureCode: "ASSIGNED_STAGE_ORCHESTRATION_GAP",
+        })
       );
     }
   );
@@ -569,6 +758,7 @@ describe("runCourseSupportVerificationWatch", () => {
     ).resolves.toMatchObject({
       outcome: "verification_watch_closed",
       stoppedReason: "error",
+      failureCode: "SETTLED_CLOSEOUT_FAILED",
       closeout: { durableCloseoutRecorded: true }
     });
     expect(onStopped).toHaveBeenCalledOnce();

@@ -221,7 +221,7 @@ const TRANSIENT_NETWORK_ERROR_CODES = new Set([
   "UND_ERR_SOCKET"
 ]);
 const PLAYWRIGHT_OPERATION_PREFIX =
-  /\b(?:page|frame|locator|browser|browserContext|request|apiRequestContext)\.[A-Za-z]+\s*:/u;
+  /\b(?:page|frame|locator|browser|browserType|browserContext|request|apiRequestContext)\.[A-Za-z]+\s*:/u;
 const PLAYWRIGHT_RUNTIME_STACK = /[/\\](?:playwright|playwright-core)[/\\]/iu;
 const PLAYWRIGHT_NETWORK_FAILURE =
   /(?:net::ERR_[A-Z_]+|ECONN(?:ABORTED|REFUSED|RESET)|EHOSTUNREACH|ENETUNREACH|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|navigation (?:failed|interrupted)|target page, context or browser has been closed|browser has been closed|socket hang up)/iu;
@@ -509,7 +509,9 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
       return { targetCount: 0, persistedCount: 0 };
     }
 
-    const browser = await chromium.launch();
+    const browser = await runPersistableBrowserOperation(() =>
+      chromium.launch()
+    );
     const closeBrowser = createBrowserProbeResourceCloser(browser);
     const removeBrowserAbortCleanup = closeBrowserProbeResourceOnAbort(
       options.signal,

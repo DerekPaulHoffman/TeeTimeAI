@@ -105,6 +105,10 @@ import {
   normalizeCourseSupportFailureFingerprint,
 } from "./course-support-failure-fingerprint";
 import {
+  isCourseSupportVerificationWatchFailureCode,
+  isCourseSupportVerificationWatchShortRetryEligible,
+} from "./course-support-verification-watch";
+import {
   enqueueRemediatedCourseRechecks,
   isSearchScheduleWorkflowStartReservation,
 } from "./search-recheck-queue";
@@ -12139,6 +12143,8 @@ async function closeoutCourseSupportBatchAttempt(
     : (input.requestedOutcome ?? derivedOutcome);
   const retryTimes: Date[] = [];
   const safeSummary = sanitizeResponderCloseoutSummary(input.summary);
+  const verificationWatchToolingFailure =
+    readCourseSupportVerificationWatchToolingFailure(safeSummary);
   const remediationAttemptConsumed = closeoutRemediationAttempts.some(
     (attempt) => attempt.consumed,
   );
@@ -13211,6 +13217,63 @@ async function closeoutCourseSupportBatchAttempt(
               nextPlaybookStageAttemptCount:
                 getCourseSupportNextStageAttemptCount(playbookAssessment),
             }));
+        const verificationWatchShortRetryCandidate = Boolean(
+          verificationWatchMode === "EARLY_RETRY" &&
+            verificationWatchToolingFailure &&
+            isCourseSupportVerificationWatchShortRetryEligible(
+              verificationWatchToolingFailure.failureCode,
+            ) &&
+            continueIncompletePlaybook,
+        );
+        const verificationWatchShortRetryMarker =
+          verificationWatchShortRetryCandidate &&
+          verificationWatchToolingFailure
+            ? await tx.courseMonitoringEvent.createMany({
+                data: [
+                  {
+                    courseId: entry.courseId,
+                    incidentId: entry.incidentId,
+                    eventType: "TOOLING_INCIDENT",
+                    source: "COURSE_SUPPORT_RESPONDER",
+                    fromState:
+                      entry.course.monitoringStatus?.state ??
+                      "AUTO_INVESTIGATING",
+                    toState:
+                      entry.course.monitoringStatus?.state ??
+                      "AUTO_INVESTIGATING",
+                    message:
+                      "The verification watch recorded one bounded automatic tooling retry.",
+                    runtimeVersion: batch.releaseSha ?? batch.baseSha,
+                    deploymentSha: batch.releaseSha,
+                    idempotencyKey:
+                      buildCourseSupportVerificationWatchShortRetryIdempotencyKey(
+                        {
+                          incidentId: entry.incidentId,
+                          cycle: entry.cycle,
+                        },
+                      ),
+                    occurredAt: now,
+                    audit: {
+                      schemaVersion: 1,
+                      failureCode:
+                        verificationWatchToolingFailure.failureCode,
+                      toolingFailureFingerprint:
+                        verificationWatchToolingFailure.toolingFailureFingerprint,
+                      attempt: 1,
+                      maximumAttempts: 1,
+                      oneShot: true,
+                      cycle: entry.cycle,
+                      customerDataIncluded: false,
+                    },
+                  },
+                ],
+                skipDuplicates: true,
+              })
+            : { count: 0 };
+        const verificationWatchShortRetryAt =
+          verificationWatchShortRetryMarker.count === 1
+            ? new Date(now.getTime() + 60 * 1000)
+            : null;
         const watchContinuationAt =
           (verificationWatchMode === "WATCH_SETTLED" ||
             verificationWatchMode === "ENDPOINT") &&
@@ -13267,7 +13330,7 @@ async function closeoutCourseSupportBatchAttempt(
                     ))
             : entry.incident.escalationDeadlineAt;
         const operationalRetryAt =
-          deferredFailureHandoffDueAt
+          verificationWatchShortRetryAt || deferredFailureHandoffDueAt
             ? null
             : closeoutRemediationAttempt && !closeoutRemediationAttempt.consumed
             ? closeoutRemediationAttempt.countsTowardOperationalNoProgress
@@ -13278,7 +13341,7 @@ async function closeoutCourseSupportBatchAttempt(
                   closeoutRemediationAttempt.courseRef,
                 )?.retryAt ?? null)
             : null;
-        const normalNextAttemptAt = freshExactRuntimeSourceCycle
+        const regularNextAttemptAt = freshExactRuntimeSourceCycle
           ? now
           : (deferredFailureHandoffDueAt ??
             operationalRetryAt ??
@@ -13290,6 +13353,13 @@ async function closeoutCourseSupportBatchAttempt(
               retryAfterSeconds: input.retryAfterSeconds,
               now,
             }));
+        const normalNextAttemptAt = verificationWatchShortRetryAt
+          ? deferredFailureHandoffDueAt &&
+            deferredFailureHandoffDueAt.getTime() >
+              verificationWatchShortRetryAt.getTime()
+            ? deferredFailureHandoffDueAt
+            : verificationWatchShortRetryAt
+          : regularNextAttemptAt;
         const detachedFailureNotBefore = getDetachedFailureRetryNotBefore({
           proofSnapshot: entry.proofSnapshot,
           releaseSha: batch.releaseSha,
@@ -19366,10 +19436,56 @@ function sanitizeResponderCloseoutSummary(value: unknown) {
   if (verificationWatch.stopMode === "EARLY_RETRY" || verificationWatch.stopMode === "ENDPOINT") {
     safeVerificationWatch.stopMode = verificationWatch.stopMode;
   }
+  if (
+    isCourseSupportVerificationWatchFailureCode(
+      verificationWatch.failureCode,
+    )
+  ) {
+    safeVerificationWatch.failureCode = verificationWatch.failureCode;
+  }
+  if (
+    isCourseSupportVerificationWatchFailureCode(
+      verificationWatch.failureCode,
+    ) &&
+    typeof verificationWatch.toolingFailureFingerprint === "string" &&
+    /^[a-f0-9]{64}$/u.test(verificationWatch.toolingFailureFingerprint)
+  ) {
+    safeVerificationWatch.toolingFailureFingerprint =
+      verificationWatch.toolingFailureFingerprint;
+  }
   if (Object.keys(safeVerificationWatch).length > 0) {
     result.verificationWatch = safeVerificationWatch;
   }
   return result;
+}
+
+function readCourseSupportVerificationWatchToolingFailure(value: unknown) {
+  const verificationWatch = asJsonObject(
+    asJsonObject(value).verificationWatch,
+  );
+  if (
+    !isCourseSupportVerificationWatchFailureCode(
+      verificationWatch.failureCode,
+    ) ||
+    typeof verificationWatch.toolingFailureFingerprint !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(verificationWatch.toolingFailureFingerprint)
+  ) {
+    return null;
+  }
+  return {
+    failureCode: verificationWatch.failureCode,
+    toolingFailureFingerprint: verificationWatch.toolingFailureFingerprint,
+  };
+}
+
+export function buildCourseSupportVerificationWatchShortRetryIdempotencyKey(
+  input: { incidentId: string; cycle: number },
+) {
+  return `course-support-verification-watch-short-retry:${createHash("sha256")
+    .update(
+      `v1:${input.incidentId}:${input.cycle}:verification-watch-short-retry`,
+    )
+    .digest("hex")}`;
 }
 
 function finiteCount(value: unknown) {

@@ -4,6 +4,106 @@ export const DEFAULT_COURSE_SUPPORT_VERIFICATION_POLL_MS = 20_000;
 export const DEFAULT_COURSE_SUPPORT_VERIFICATION_RELEASE_CLEANUP_MS = 60_000;
 export const DEFAULT_COURSE_SUPPORT_HEARTBEAT_RENEWAL_TIMEOUT_MS = 30_000;
 
+export const COURSE_SUPPORT_VERIFICATION_WATCH_FAILURE_CODES = [
+  "BROWSER_STAGE_PERSIST_FAILED",
+  "BROWSER_STAGE_NETWORK_FAILED",
+  "BROWSER_STAGE_TIMEOUT",
+  "BATCH_VERIFICATION_FAILED",
+  "BATCH_VERIFICATION_RECOVERY_REQUIRED",
+  "ASSIGNED_STAGE_ORCHESTRATION_GAP",
+  "SETTLED_CLOSEOUT_FAILED"
+] as const;
+
+export const COURSE_SUPPORT_VERIFICATION_BROWSER_TRANSIENT_KINDS = [
+  "NETWORK",
+  "TIMEOUT"
+] as const;
+
+export type CourseSupportVerificationBrowserTransientKind =
+  (typeof COURSE_SUPPORT_VERIFICATION_BROWSER_TRANSIENT_KINDS)[number];
+
+export type CourseSupportVerificationWatchFailureCode =
+  (typeof COURSE_SUPPORT_VERIFICATION_WATCH_FAILURE_CODES)[number];
+
+const COURSE_SUPPORT_VERIFICATION_WATCH_FAILURE_CODE_SET = new Set<string>(
+  COURSE_SUPPORT_VERIFICATION_WATCH_FAILURE_CODES
+);
+const COURSE_SUPPORT_VERIFICATION_WATCH_SHORT_RETRY_CODES = new Set<
+  CourseSupportVerificationWatchFailureCode
+>([
+  "BROWSER_STAGE_NETWORK_FAILED",
+  "BROWSER_STAGE_TIMEOUT"
+]);
+
+const courseSupportVerificationWatchFailureCauses = new WeakMap<Error, unknown>();
+
+class CourseSupportVerificationWatchFailure extends Error {
+  readonly failureCode: CourseSupportVerificationWatchFailureCode;
+
+  constructor(
+    failureCode: CourseSupportVerificationWatchFailureCode,
+    cause: unknown
+  ) {
+    super(`Course-support verification step failed with ${failureCode}.`);
+    this.name = "CourseSupportVerificationWatchFailure";
+    this.failureCode = failureCode;
+    courseSupportVerificationWatchFailureCauses.set(this, cause);
+  }
+}
+
+export function isCourseSupportVerificationWatchFailureCode(
+  value: unknown
+): value is CourseSupportVerificationWatchFailureCode {
+  return (
+    typeof value === "string" &&
+    COURSE_SUPPORT_VERIFICATION_WATCH_FAILURE_CODE_SET.has(value)
+  );
+}
+
+export function isCourseSupportVerificationWatchShortRetryEligible(
+  value: unknown
+): value is CourseSupportVerificationWatchFailureCode {
+  return (
+    isCourseSupportVerificationWatchFailureCode(value) &&
+    COURSE_SUPPORT_VERIFICATION_WATCH_SHORT_RETRY_CODES.has(value)
+  );
+}
+
+export function getCourseSupportVerificationWatchFailureCode(
+  error: unknown
+): CourseSupportVerificationWatchFailureCode | null {
+  return error instanceof CourseSupportVerificationWatchFailure
+    ? error.failureCode
+    : null;
+}
+
+function createCourseSupportVerificationWatchFailure(
+  failureCode: CourseSupportVerificationWatchFailureCode,
+  cause: unknown
+) {
+  return cause instanceof CourseSupportVerificationWatchFailure
+    ? cause
+    : new CourseSupportVerificationWatchFailure(failureCode, cause);
+}
+
+function selectBrowserStageFailureCode(
+  kind: CourseSupportVerificationBrowserTransientKind | null | undefined
+): CourseSupportVerificationWatchFailureCode {
+  if (kind === "NETWORK") {
+    return "BROWSER_STAGE_NETWORK_FAILED";
+  }
+  if (kind === "TIMEOUT") {
+    return "BROWSER_STAGE_TIMEOUT";
+  }
+  return "BROWSER_STAGE_PERSIST_FAILED";
+}
+
+function unwrapCourseSupportVerificationWatchFailure(error: unknown) {
+  return error instanceof CourseSupportVerificationWatchFailure
+    ? courseSupportVerificationWatchFailureCauses.get(error) ?? error
+    : error;
+}
+
 export async function runWithBoundedCourseSupportHeartbeat<T>(input: {
   renew: (signal: AbortSignal) => Promise<void>;
   operation: (signal: AbortSignal) => Promise<T>;
@@ -245,12 +345,35 @@ export async function runCourseSupportVerificationPass<
 >(input: {
   signal?: AbortSignal;
   persistBrowserStages: () => Promise<TBrowserStages>;
+  classifyBrowserStageFailure?: (
+    error: unknown
+  ) => CourseSupportVerificationBrowserTransientKind | null;
   verifyBatch: (signal?: AbortSignal) => Promise<TVerification>;
 }) {
   throwIfVerificationWatchAborted(input.signal);
-  const browserStages = await input.persistBrowserStages();
+  let browserStages: TBrowserStages;
+  try {
+    browserStages = await input.persistBrowserStages();
+  } catch (error) {
+    throwIfVerificationWatchAborted(input.signal);
+    throw createCourseSupportVerificationWatchFailure(
+      selectBrowserStageFailureCode(
+        input.classifyBrowserStageFailure?.(error)
+      ),
+      error
+    );
+  }
   throwIfVerificationWatchAborted(input.signal);
-  const verification = await input.verifyBatch(input.signal);
+  let verification: TVerification;
+  try {
+    verification = await input.verifyBatch(input.signal);
+  } catch (error) {
+    throwIfVerificationWatchAborted(input.signal);
+    throw createCourseSupportVerificationWatchFailure(
+      "BATCH_VERIFICATION_FAILED",
+      error
+    );
+  }
   throwIfVerificationWatchAborted(input.signal);
   return { browserStages, verification };
 }
@@ -313,7 +436,7 @@ export async function runCourseSupportVerificationWatch<
   }) => Promise<TCloseout>;
   onStopped?: (input: {
     reason: "endpoint" | "max" | "error";
-    error?: unknown;
+    failureCode: CourseSupportVerificationWatchFailureCode | null;
     passCount: number;
     lastPass: CourseSupportVerificationPassResult<TVerification> | null;
     signal: AbortSignal;
@@ -488,12 +611,19 @@ export async function runCourseSupportVerificationWatch<
 
   const stop = async (
     reason: "endpoint" | "max" | "error",
-    error?: unknown
+    error?: unknown,
+    failureCode?: CourseSupportVerificationWatchFailureCode
   ) => {
     throwIfVerificationWatchAborted(input.signal);
+    const safeFailureCode =
+      reason === "error"
+        ? (failureCode ??
+          getCourseSupportVerificationWatchFailureCode(error) ??
+          "BATCH_VERIFICATION_FAILED")
+        : null;
     if (!input.onStopped) {
       if (error) {
-        throw error;
+        throw unwrapCourseSupportVerificationWatchFailure(error);
       }
       throw new Error(
         "Course-support verification watch timed out before a final clean pass."
@@ -503,7 +633,7 @@ export async function runCourseSupportVerificationWatch<
       (signal) =>
         input.onStopped!({
           reason,
-          error,
+          failureCode: safeFailureCode,
           passCount,
           lastPass,
           signal
@@ -523,6 +653,7 @@ export async function runCourseSupportVerificationWatch<
       outcome: "verification_watch_closed" as const,
       passCount,
       stoppedReason: reason,
+      failureCode: safeFailureCode,
       browserStageTotals,
       closeout: releaseResult.value
     };
@@ -539,7 +670,12 @@ export async function runCourseSupportVerificationWatch<
       return stop(deadlineReason);
     }
     if (passResult.kind === "error") {
-      return stop("error", passResult.error);
+      return stop(
+        "error",
+        passResult.error,
+        getCourseSupportVerificationWatchFailureCode(passResult.error) ??
+          "BATCH_VERIFICATION_FAILED"
+      );
     }
     const settledPass = passResult.value;
     passCount += 1;
@@ -556,7 +692,8 @@ export async function runCourseSupportVerificationWatch<
         "error",
         new Error(
           "Course-support verification watch lost durable batch ownership."
-        )
+        ),
+        "BATCH_VERIFICATION_RECOVERY_REQUIRED"
       );
     }
     if (now() >= deadline) {
@@ -571,7 +708,8 @@ export async function runCourseSupportVerificationWatch<
         "error",
         new Error(
           "Course-support verification scheduling did not start the assigned remediation stage."
-        )
+        ),
+        "ASSIGNED_STAGE_ORCHESTRATION_GAP"
       );
     }
 
@@ -610,7 +748,11 @@ export async function runCourseSupportVerificationWatch<
             await sleepWithOwnership(Math.min(pollMs, remainingMs));
             continue;
           }
-          return stop("error", closeoutResult.error);
+          return stop(
+            "error",
+            closeoutResult.error,
+            "SETTLED_CLOSEOUT_FAILED"
+          );
         }
         closeout = closeoutResult.value;
       } else {

@@ -129,6 +129,7 @@ import {
   assessCourseSupportReleaseTransition,
   buildCourseSupportCloseoutRemediationDecisionBasis,
   buildCourseSupportCloseoutPlaybookDecisionBasis,
+  buildCourseSupportVerificationWatchShortRetryIdempotencyKey,
   buildFailureFingerprint,
   buildCourseSupportResponderHandoff,
   buildCourseSupportReleaseHistory,
@@ -29752,6 +29753,16 @@ describe("detached verification atomic batch fences", () => {
         ownerThreadId: "owner-thread",
         verificationWatchMode: "ENDPOINT",
         failureDomain: "SLA",
+        summary: {
+          verificationWatch: {
+            settled: false,
+            stopped: true,
+            stopMode: "ENDPOINT",
+            passCount: 1,
+            failureCode: "BROWSER_STAGE_NETWORK_FAILED",
+            toolingFailureFingerprint: "f".repeat(64),
+          },
+        },
         now,
       }),
     ).resolves.toMatchObject({
@@ -29827,11 +29838,16 @@ describe("detached verification atomic batch fences", () => {
         data: expect.objectContaining({ eventType: "HUMAN_REVIEW_REQUESTED" }),
       }),
     );
+    const toolingMarkers = prismaMocks.monitoringEventCreateMany.mock.calls
+      .flatMap(([input]) => input.data ?? [])
+      .filter((event) => event.eventType === "TOOLING_INCIDENT");
+    expect(toolingMarkers).toEqual([]);
   });
 
-  it("releases early watch stops as retry without claiming endpoint finality", async () => {
+  it("releases one recognized browser network stop for a bounded retry without claiming endpoint finality", async () => {
     const batch = closeoutBatch("PENDING");
     batch.incidents[0].incident.escalationDeadlineAt = new Date(now.getTime() + 10 * 60_000);
+    batch.incidents[0].incident.attemptLedger = browserReadyAttemptLedger();
     prismaMocks.batchFindFirst.mockResolvedValue(batch);
     prismaMocks.verificationRequestFindMany.mockResolvedValue([
       detachedRequestState("STALE", {
@@ -29843,6 +29859,13 @@ describe("detached verification atomic batch fences", () => {
     prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
     prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
     prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.transaction.mockImplementationOnce(
+      async (
+        worker: (
+          transaction: typeof monitoringTransactionClient,
+        ) => Promise<unknown>,
+      ) => worker(monitoringTransactionClient),
+    );
 
     await expect(
       closeoutCourseSupportBatch({
@@ -29852,6 +29875,17 @@ describe("detached verification atomic batch fences", () => {
         requestedOutcome: "command_failed",
         failureDomain: "SLA",
         verificationWatchMode: "EARLY_RETRY",
+        summary: {
+          verificationWatch: {
+            settled: false,
+            stopped: true,
+            stopMode: "EARLY_RETRY",
+            passCount: 0,
+            failureCode: "BROWSER_STAGE_NETWORK_FAILED",
+            toolingFailureFingerprint: "e".repeat(64),
+            privatePayload: "https://private.invalid/provider?payload=secret",
+          },
+        },
         now
       })
     ).resolves.toMatchObject({
@@ -29865,9 +29899,304 @@ describe("detached verification atomic batch fences", () => {
       expect.objectContaining({
         data: expect.objectContaining({
           status: "AUTO_INVESTIGATING",
-          activeBatchId: null
+          activeBatchId: null,
+          nextAttemptAt: new Date(now.getTime() + 60_000),
         })
       })
+    );
+    expect(prismaMocks.monitoringEventCreateMany).toHaveBeenCalledWith({
+      data: [
+        expect.objectContaining({
+          eventType: "TOOLING_INCIDENT",
+          source: "COURSE_SUPPORT_RESPONDER",
+          runtimeVersion: releaseSha,
+          audit: expect.objectContaining({
+            failureCode: "BROWSER_STAGE_NETWORK_FAILED",
+            toolingFailureFingerprint: "e".repeat(64),
+            attempt: 1,
+            maximumAttempts: 1,
+            oneShot: true,
+            customerDataIncluded: false,
+          }),
+        }),
+      ],
+      skipDuplicates: true,
+    });
+    const persistedVerificationWatch =
+      prismaMocks.batchUpdateMany.mock.calls.find(
+        ([update]) => update.data?.summary?.closeout,
+      )?.[0]?.data?.summary?.closeout?.summary?.verificationWatch;
+    expect(persistedVerificationWatch).toEqual({
+      settled: false,
+      stopped: true,
+      stopMode: "EARLY_RETRY",
+      passCount: 0,
+      failureCode: "BROWSER_STAGE_NETWORK_FAILED",
+      toolingFailureFingerprint: "e".repeat(64),
+    });
+    expect(JSON.stringify(persistedVerificationWatch)).not.toContain(
+      "private.invalid",
+    );
+  });
+
+  it("preserves the fixed orchestration cadence after the one same-cycle browser tooling retry", async () => {
+    const batch = closeoutBatch("PENDING");
+    batch.baseSha = "c".repeat(40);
+    batch.releaseSha = null;
+    batch.deployedAt = null;
+    batch.incidents[0].incident.failureClass = "RATE_LIMIT";
+    batch.incidents[0].incident.failureFingerprint =
+      "v1:RATE_LIMIT:FETCH_FAILED";
+    batch.incidents[0].incident.attemptLedger = browserReadyAttemptLedger();
+    const remediationSummary = operationalRemediationSummary();
+    remediationSummary.remediation.attempts[0].playbookEventCountAtClaim = 4;
+    batch.summary = remediationSummary;
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.monitoringEventCreateMany.mockResolvedValueOnce({ count: 0 });
+    prismaMocks.transaction.mockImplementationOnce(
+      async (
+        worker: (
+          transaction: typeof monitoringTransactionClient,
+        ) => Promise<unknown>,
+      ) => worker(monitoringTransactionClient),
+    );
+
+    await closeoutCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      requestedOutcome: "command_failed",
+      failureDomain: "SLA",
+      verificationWatchMode: "EARLY_RETRY",
+      summary: {
+        verificationWatch: {
+          settled: false,
+          stopped: true,
+          stopMode: "EARLY_RETRY",
+          passCount: 0,
+          failureCode: "BROWSER_STAGE_NETWORK_FAILED",
+          toolingFailureFingerprint: "f".repeat(64),
+        },
+      },
+      now,
+    });
+
+    const persistedAttempt =
+      prismaMocks.batchUpdateMany.mock.calls.find(
+        ([update]) => update.data?.summary?.closeout,
+      )?.[0]?.data?.summary?.closeout?.remediationAttempts?.[0];
+    expect(persistedAttempt).toMatchObject({
+      consumed: false,
+      countsTowardOperationalNoProgress: false,
+      operationalRetry: expect.objectContaining({
+        attemptsCompleted: 0,
+        exhausted: false,
+      }),
+    });
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "AUTO_INVESTIGATING",
+          activeBatchId: null,
+          nextAttemptAt: new Date(now.getTime() + 15 * 60_000),
+        }),
+      }),
+    );
+  });
+
+  it("does not grant the tooling retry to an ownership-recovery result", async () => {
+    const batch = closeoutBatch("PENDING");
+    batch.incidents[0].incident.attemptLedger = browserReadyAttemptLedger();
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.transaction.mockImplementationOnce(
+      async (
+        worker: (
+          transaction: typeof monitoringTransactionClient,
+        ) => Promise<unknown>,
+      ) => worker(monitoringTransactionClient),
+    );
+
+    await closeoutCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      requestedOutcome: "command_failed",
+      failureDomain: "SLA",
+      verificationWatchMode: "EARLY_RETRY",
+      summary: {
+        verificationWatch: {
+          settled: false,
+          stopped: true,
+          stopMode: "EARLY_RETRY",
+          passCount: 1,
+          failureCode: "BATCH_VERIFICATION_RECOVERY_REQUIRED",
+          toolingFailureFingerprint: "f".repeat(64),
+        },
+      },
+      now,
+    });
+
+    const toolingMarkers = prismaMocks.monitoringEventCreateMany.mock.calls
+      .flatMap(([input]) => input.data ?? [])
+      .filter((event) => event.eventType === "TOOLING_INCIDENT");
+    expect(toolingMarkers).toEqual([]);
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          nextAttemptAt: computeCourseSupportNextAttemptAt({
+            failureClass: "UNSUPPORTED_FAMILY",
+            failureFingerprint: "fingerprint",
+            attemptCount: 1,
+            now,
+          }),
+        }),
+      }),
+    );
+  });
+
+  it("keys the one-shot retry only by incident cycle", () => {
+    const firstCycle =
+      buildCourseSupportVerificationWatchShortRetryIdempotencyKey({
+        incidentId: "incident-1",
+        cycle: 1,
+      });
+    const sameCycleAfterFailureOrRuntimeChange =
+      buildCourseSupportVerificationWatchShortRetryIdempotencyKey({
+        incidentId: "incident-1",
+        cycle: 1,
+      });
+    const nextCycle =
+      buildCourseSupportVerificationWatchShortRetryIdempotencyKey({
+        incidentId: "incident-1",
+        cycle: 2,
+      });
+
+    expect(firstCycle).toBe(sameCycleAfterFailureOrRuntimeChange);
+    expect(nextCycle).not.toBe(firstCycle);
+    expect(firstCycle).toMatch(
+      /^course-support-verification-watch-short-retry:[a-f0-9]{64}$/u,
+    );
+  });
+
+  it("keeps a provider retry-not-before fence above the one-shot tooling retry", async () => {
+    const providerNotBeforeAt = new Date(now.getTime() + 20 * 60_000);
+    const batch = sameIdentityRateLimitRetryBatch(
+      detachedFailureProof({
+        providerRetryNotBeforeAt: providerNotBeforeAt.toISOString(),
+      }),
+    );
+    batch.incidents[0].incident.attemptLedger = browserReadyAttemptLedger();
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.transaction.mockImplementationOnce(
+      async (
+        worker: (
+          transaction: typeof monitoringTransactionClient,
+        ) => Promise<unknown>,
+      ) => worker(monitoringTransactionClient),
+    );
+
+    await closeoutCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      requestedOutcome: "command_failed",
+      failureDomain: "SLA",
+      verificationWatchMode: "EARLY_RETRY",
+      summary: {
+        verificationWatch: {
+          settled: false,
+          stopped: true,
+          stopMode: "EARLY_RETRY",
+          passCount: 0,
+          failureCode: "BROWSER_STAGE_NETWORK_FAILED",
+          toolingFailureFingerprint: "f".repeat(64),
+        },
+      },
+      now,
+    });
+
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          nextAttemptAt: providerNotBeforeAt,
+        }),
+      }),
+    );
+    expect(prismaMocks.monitoringEventCreateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: [
+          expect.objectContaining({
+            eventType: "TOOLING_INCIDENT",
+            audit: expect.objectContaining({
+              failureCode: "BROWSER_STAGE_NETWORK_FAILED",
+              oneShot: true,
+            }),
+          }),
+        ],
+        skipDuplicates: true,
+      }),
+    );
+  });
+
+  it("keeps the one-shot delay when the provider floor is earlier", async () => {
+    const providerNotBeforeAt = new Date(now.getTime() + 30_000);
+    const batch = sameIdentityRateLimitRetryBatch(
+      detachedFailureProof({
+        providerRetryNotBeforeAt: providerNotBeforeAt.toISOString(),
+      }),
+    );
+    batch.incidents[0].incident.attemptLedger = browserReadyAttemptLedger();
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.transaction.mockImplementationOnce(
+      async (
+        worker: (
+          transaction: typeof monitoringTransactionClient,
+        ) => Promise<unknown>,
+      ) => worker(monitoringTransactionClient),
+    );
+
+    await closeoutCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      requestedOutcome: "command_failed",
+      failureDomain: "SLA",
+      verificationWatchMode: "EARLY_RETRY",
+      summary: {
+        verificationWatch: {
+          settled: false,
+          stopped: true,
+          stopMode: "EARLY_RETRY",
+          passCount: 0,
+          failureCode: "BROWSER_STAGE_TIMEOUT",
+          toolingFailureFingerprint: "f".repeat(64),
+        },
+      },
+      now,
+    });
+
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          nextAttemptAt: new Date(now.getTime() + 60_000),
+        }),
+      }),
     );
   });
 

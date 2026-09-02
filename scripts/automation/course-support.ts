@@ -1,6 +1,7 @@
 import "./load-local-env";
 
 import { execFile, execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -54,7 +55,8 @@ import {
   runCourseSupportVerificationPass,
   runCourseSupportVerificationWatch,
   selectCourseSupportVerificationEndpointDeadline,
-  selectCourseSupportVerificationStopMode
+  selectCourseSupportVerificationStopMode,
+  type CourseSupportVerificationWatchFailureCode
 } from "@/lib/automation/course-support-verification-watch";
 import { getProviderCoverageDashboard } from "@/lib/automation/provider-coverage";
 import {
@@ -80,7 +82,10 @@ import type {
 } from "@/lib/deployments/vercel-git";
 import { waitForGitDeployment } from "@/lib/deployments/wait-for-git-deployment";
 
-import { runBrowserProbe } from "./browser-probe-needed-adapters";
+import {
+  getPersistableBrowserOperationFailure,
+  runBrowserProbe
+} from "./browser-probe-needed-adapters";
 
 export {
   buildCourseSupportAcceptanceHistoryMachineRecord,
@@ -1036,6 +1041,7 @@ async function verify(
       const runPass = (signal?: AbortSignal) =>
         runCourseSupportVerificationPass({
           signal,
+          classifyBrowserStageFailure: getPersistableBrowserOperationFailure,
           persistBrowserStages: () =>
             persistOwnedCourseSupportBrowserPlaybookStages(
               {
@@ -1130,13 +1136,15 @@ async function verify(
               })
           : undefined,
         onStopped: closeoutAfterWatch
-          ? ({ reason, passCount, signal }) =>
+          ? ({ reason, failureCode, passCount, signal }) =>
               closeoutStoppedCourseSupportBatch({
                 batchId,
                 leaseToken,
                 ownerThreadId,
                 passCount,
                 signal,
+                failureCode,
+                runtimeVersion: releaseSha ?? getAutomationRuntimeVersion(),
                 mode: selectCourseSupportVerificationStopMode({
                   reason,
                   passCount,
@@ -1550,6 +1558,8 @@ async function closeoutStoppedCourseSupportBatch(input: {
   ownerThreadId: string;
   passCount: number;
   mode: "EARLY_RETRY" | "ENDPOINT";
+  failureCode: CourseSupportVerificationWatchFailureCode | null;
+  runtimeVersion: string;
   signal?: AbortSignal;
 }) {
   input.signal?.throwIfAborted();
@@ -1567,7 +1577,17 @@ async function closeoutStoppedCourseSupportBatch(input: {
         settled: false,
         stopped: true,
         stopMode: input.mode,
-        passCount: input.passCount
+        passCount: input.passCount,
+        ...(input.failureCode
+          ? {
+              failureCode: input.failureCode,
+              toolingFailureFingerprint:
+                buildCourseSupportVerificationWatchToolingFingerprint({
+                  failureCode: input.failureCode,
+                  runtimeVersion: input.runtimeVersion
+                })
+            }
+          : {})
       }
     }
   });
@@ -1578,6 +1598,23 @@ async function closeoutStoppedCourseSupportBatch(input: {
     );
   }
   return result;
+}
+
+export function buildCourseSupportVerificationWatchToolingFingerprint(input: {
+  failureCode: CourseSupportVerificationWatchFailureCode;
+  runtimeVersion: string;
+}) {
+  return createHash("sha256")
+    .update(
+      [
+        "course-support-verification-watch-tooling",
+        "v1",
+        input.failureCode,
+        input.runtimeVersion
+      ].join(":"),
+      "utf8"
+    )
+    .digest("hex");
 }
 
 async function closeout(args: string[]) {

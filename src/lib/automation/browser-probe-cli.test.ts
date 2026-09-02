@@ -289,6 +289,54 @@ describe("browser probe direct entry", () => {
   });
 
   it.each([
+    [
+      Object.assign(
+        new Error("browserType.launch: Timeout 20000ms exceeded."),
+        { name: "TimeoutError" },
+      ),
+      "TIMEOUT",
+    ],
+    [new Error("browserType.launch: socket hang up"), "NETWORK"],
+  ] as const)(
+    "tags recognized transient browser launch failures as %s",
+    async (launchError, expectedFailureClass) => {
+      let caught: unknown;
+
+      try {
+        await runPersistableBrowserOperation(async () => {
+          throw launchError;
+        });
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(getPersistableBrowserOperationFailure(caught)).toBe(
+        expectedFailureClass,
+      );
+    },
+  );
+
+  it.each([
+    new Error(
+      "browserType.launch: Executable doesn't exist at C:\\playwright\\chromium.exe",
+    ),
+    new Error("browserType.launch: Failed to launch chromium"),
+  ])("leaves deterministic or generic browser launch failures untyped", async (launchError) => {
+    let caught: unknown;
+
+    try {
+      await runPersistableBrowserOperation(async () => {
+        throw launchError;
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBe(launchError);
+    expect(getPersistableBrowserOperationFailure(caught)).toBeNull();
+  });
+
+  it.each([
     new SyntaxError("Unexpected string"),
     Object.assign(new SyntaxError("Unexpected string"), {
       cause: { code: "ECONNRESET" }

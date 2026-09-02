@@ -7,6 +7,7 @@ import {
   buildCourseSupportAcceptanceHistoryMachineRecord,
   buildCourseSupportCoverageMachineRecord,
   buildCourseSupportCommandFailure,
+  buildCourseSupportVerificationWatchToolingFingerprint,
   assertCourseSupportPersistedReleaseFence,
   assertCourseSupportVerificationReleaseLane,
   assertCourseSupportVerifyReleaseOptions,
@@ -171,6 +172,28 @@ describe("course-support owner-bound release verification options", () => {
         new Error("Vercel CLI command failed with exit code 1."),
       ),
     ).toBe("DEPLOYMENT_TOOLING_FAILED");
+  });
+
+  it("builds stable privacy-safe verification tooling fingerprints", () => {
+    const fingerprint =
+      buildCourseSupportVerificationWatchToolingFingerprint({
+        failureCode: "BATCH_VERIFICATION_FAILED",
+        runtimeVersion: "a".repeat(40)
+      });
+
+    expect(fingerprint).toMatch(/^[a-f0-9]{64}$/u);
+    expect(
+      buildCourseSupportVerificationWatchToolingFingerprint({
+        failureCode: "BATCH_VERIFICATION_FAILED",
+        runtimeVersion: "a".repeat(40)
+      })
+    ).toBe(fingerprint);
+    expect(
+      buildCourseSupportVerificationWatchToolingFingerprint({
+        failureCode: "BATCH_VERIFICATION_FAILED",
+        runtimeVersion: "b".repeat(40)
+      })
+    ).not.toBe(fingerprint);
   });
 });
 
