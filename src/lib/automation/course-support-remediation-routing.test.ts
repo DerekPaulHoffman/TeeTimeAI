@@ -873,6 +873,32 @@ describe("course-support remediation routing", () => {
     });
   });
 
+  it("hands an exhausted public discovery ladder to reusable support implementation", () => {
+    const result = routeCourseSupportRemediation({
+      ...runnableCourse,
+      detectedBookingUrl:
+        "https://foreupsoftware.com/index.php/booking/12345#/teetimes",
+      bookingMetadata: null,
+      automationEligibility: "NEEDS_REVIEW",
+      failureClass: "MISSING_METADATA",
+      playbookAssessment: {
+        conclusion: "UNRESOLVED_EXHAUSTED",
+        nextStage: null,
+      },
+    });
+
+    expect(result).toMatchObject({
+      workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+      allowUnchangedRuntime: false,
+      requiresImplementationPath: true,
+      reason: "IMPLEMENTATION_REQUIRED",
+      attemptSignature: {
+        workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+        playbookStage: null,
+      },
+    });
+  });
+
   it.each(["FACTUAL_FINAL", "TECHNICAL_FINAL", "MONITORING_RESTORED"] as const)(
     "completes a terminal %s playbook instead of retrying it",
     (conclusion) => {

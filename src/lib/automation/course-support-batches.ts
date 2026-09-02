@@ -46,6 +46,7 @@ import {
   getCourseSupportRemediationDirective,
   isAssignedDetachedStageProgression,
   routeCourseSupportRemediation,
+  shouldImplementReusableSupportAfterExhaustedDiscovery,
   type ActionableCourseSupportRemediationWorkMode,
   type CourseSupportRemediationAttemptSignature,
   type CourseSupportRemediationDirective,
@@ -10641,6 +10642,26 @@ async function closeoutCourseSupportBatchAttempt(
     }
     if (
       verificationWatchMode === "WATCH_SETTLED" &&
+      playbookAssessment.conclusion === "UNRESOLVED_EXHAUSTED" &&
+      (entry.result === "PENDING" ||
+        entry.result === "STALE_EVIDENCE" ||
+        entry.result === "RETRY_SCHEDULED") &&
+      shouldImplementReusableSupportAfterExhaustedDiscovery({
+        ...entry.course,
+        failureClass: retryFailureClass,
+      })
+    ) {
+      return {
+        ...entry,
+        currentProviderSnapshotFingerprint,
+        automationStalled: false,
+        normalizedResult: "RETRY_SCHEDULED" as const,
+        message:
+          "The safe discovery playbook completed and handed the public provider to reusable support implementation.",
+      };
+    }
+    if (
+      verificationWatchMode === "WATCH_SETTLED" &&
       (entry.result === "PENDING" ||
         entry.result === "STALE_EVIDENCE" ||
         entry.result === "RETRY_SCHEDULED")
@@ -11188,6 +11209,17 @@ async function closeoutCourseSupportBatchAttempt(
     const sourceUnverifiedHumanReview =
       normalizedProof.kind === "HUMAN_REVIEW_REQUIRED" &&
       normalizedProof.disposition === "SOURCE_UNVERIFIED";
+    const exhaustedDiscoveryImplementationHandoff = Boolean(
+      playbookAssessment.conclusion === "UNRESOLVED_EXHAUSTED" &&
+        entry.normalizedResult === "RETRY_SCHEDULED" &&
+        shouldImplementReusableSupportAfterExhaustedDiscovery({
+          ...entry.course,
+          failureClass: getEffectiveCourseSupportRetryFailureClass({
+            incidentFailureClass: entry.incident.failureClass,
+            proofSnapshot: entry.proofSnapshot,
+          }),
+        }),
+    );
     if (
       entry.normalizedResult === "NEEDS_HUMAN" &&
       !entry.automationStalled &&
@@ -11209,6 +11241,7 @@ async function closeoutCourseSupportBatchAttempt(
       !currentFailureIdentityByBatchIncidentId.get(entry.id)?.materialChange &&
       !deferredFailureHandoffByBatchIncidentId.has(entry.id) &&
       !canContinueIncompletePlaybook &&
+      !exhaustedDiscoveryImplementationHandoff &&
       !canCloseCourseSupportRetry(
         getEffectiveCourseSupportRetryFailureClass({
           incidentFailureClass: entry.incident.failureClass,

@@ -1558,6 +1558,61 @@ describe("course-support verification scheduling", () => {
     expect(prismaMocks.activeSearchCount).not.toHaveBeenCalled();
   });
 
+  it("requires reusable implementation before scheduling an exhausted discovery ledger", async () => {
+    prismaMocks.batchFindUnique.mockResolvedValue({
+      id: "batch-1",
+      status: "VERIFYING",
+      releaseSha,
+      completedAt: null,
+      summary: {
+        remediation: {
+          workMode: "ADVANCE_DISCOVERY",
+          strategyAction: "REPAIR_PROVIDER_ADAPTER",
+          playbookStage: "BROWSER_ADAPTER_RETRY",
+          allowUnchangedRuntime: true,
+          requiresImplementationPath: false,
+          reason: "PLAYBOOK_STAGE_PENDING",
+          retryBudget: null,
+        },
+      },
+      incidents: [
+        {
+          id: "batch-incident-1",
+          incidentId: "incident-1",
+          courseId: "course-1",
+          cycle: 1,
+          verifiedIncidentUpdatedAt: new Date("2026-07-21T11:55:00.000Z"),
+          incident: incident({
+            attemptLedger: unresolvedExhaustedLedger(),
+          }),
+          course: course({
+            detectedBookingUrl:
+              "https://foreupsoftware.com/index.php/booking/12345#/teetimes",
+            detectedPlatform: "FOREUP",
+            providerFamilyKey: "FOREUP",
+            bookingMetadata: null,
+          }),
+        },
+      ],
+    });
+
+    await expect(
+      scheduleCourseSupportVerificationRequests({
+        batchId: "batch-1",
+        releaseSha,
+        now,
+      }),
+    ).resolves.toEqual({
+      createdCount: 0,
+      eligibleCount: 0,
+      ineligibleCount: 1,
+      ineligibleReasonCounts: { playbook_stage_handoff_required: 1 },
+      requests: [],
+    });
+    expect(prismaMocks.requestCreateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.activeSearchCount).not.toHaveBeenCalled();
+  });
+
   it("schedules only the assigned zero-attempt browser adapter progression while retaining blocked provider evidence", async () => {
     prismaMocks.batchFindUnique.mockResolvedValue({
       id: "batch-1",
@@ -3904,7 +3959,8 @@ describe("course-support verification execution fencing", () => {
   it.each([
     {
       label: "absent",
-      terminal: false,
+      terminal: true,
+      expectedReason: "playbook_stage_handoff_required" as const,
       mutate: (
         ownedRequest: ReturnType<typeof deferredConfirmationRequest>,
       ) => {
@@ -4009,7 +4065,7 @@ describe("course-support verification execution fencing", () => {
     },
   ])(
     "does not authenticate a $label deferred intent",
-    async ({ mutate, terminal }) => {
+    async ({ mutate, terminal, expectedReason = "invalid_evidence" }) => {
       const ownedRequest = deferredConfirmationRequest();
       mutate(ownedRequest);
       prismaMocks.requestFindUnique.mockResolvedValue(ownedRequest);
@@ -4030,14 +4086,14 @@ describe("course-support verification execution fencing", () => {
         });
         return;
       }
-      expect(result).toEqual({ attached: false, reason: "invalid_evidence" });
+      expect(result).toEqual({ attached: false, reason: expectedReason });
       expect(prismaMocks.requestUpdateMany).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
             status: "STALE",
             nextAttemptAt: null,
             completedAt: now,
-            lastError: "invalid_evidence",
+            lastError: expectedReason,
           }),
         }),
       );

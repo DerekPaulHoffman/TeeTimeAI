@@ -4,6 +4,7 @@ import type {
   AutomationPlaybookStageAssessment,
 } from "./course-monitoring-playbook";
 import {
+  hasSafePublicDiscoverySource,
   selectMonitoringStrategy,
   type MonitoringStrategyAction,
   type MonitoringStrategyDecision,
@@ -240,6 +241,21 @@ const STRUCTURAL_FAILURES = new Set<CourseSupportFailureClass>([
   "UNKNOWN",
 ]);
 
+const EXHAUSTED_DISCOVERY_IMPLEMENTATION_FAILURES = new Set<CourseSupportFailureClass>([
+  "MISSING_METADATA",
+  "UNSUPPORTED_FAMILY",
+  "READER_PARSER_MISSING",
+  "NOT_FOUND",
+  "SCHEMA",
+  "UNKNOWN",
+]);
+
+const EXHAUSTED_DISCOVERY_IMPLEMENTATION_ACTIONS = new Set<MonitoringStrategyAction>([
+  "DISCOVER_WITH_HTTP",
+  "DISCOVER_WITH_BROWSER",
+  "REPAIR_PROVIDER_ADAPTER",
+]);
+
 const TERMINAL_PLAYBOOK_CONCLUSIONS = new Set<
   AutomationPlaybookAssessment["conclusion"]
 >(["MONITORING_RESTORED", "FACTUAL_FINAL", "TECHNICAL_FINAL"]);
@@ -299,6 +315,14 @@ export function routeCourseSupportRemediation(
     input.playbookAssessment.conclusion === "UNRESOLVED_EXHAUSTED" &&
     !materialChangeDetected
   ) {
+    if (shouldImplementReusableSupportAfterExhaustedDiscovery(input)) {
+      return implementationRoute({
+        strategy,
+        playbookAssessment: input.playbookAssessment,
+        materialChangeDetected,
+        retryBudget: null,
+      });
+    }
     return waitingRoute({
       reason: "PLAYBOOK_EXHAUSTED",
       strategy,
@@ -394,6 +418,21 @@ export function isStructuralCourseSupportFailure(
   failureClass: CourseSupportFailureClass | null | undefined,
 ) {
   return Boolean(failureClass && STRUCTURAL_FAILURES.has(failureClass));
+}
+
+export function shouldImplementReusableSupportAfterExhaustedDiscovery(
+  input: MonitoringStrategyInput,
+) {
+  if (
+    !input.failureClass ||
+    !EXHAUSTED_DISCOVERY_IMPLEMENTATION_FAILURES.has(input.failureClass) ||
+    !hasSafePublicDiscoverySource(input)
+  ) {
+    return false;
+  }
+
+  const strategy = selectMonitoringStrategy(input);
+  return EXHAUSTED_DISCOVERY_IMPLEMENTATION_ACTIONS.has(strategy.action);
 }
 
 export function getCourseSupportRemediationDirective(

@@ -2754,6 +2754,15 @@ async function evaluateDetachedEligibility(
   }
   if (
     mode === "PROGRESSION" &&
+    requiresExhaustedPlaybookImplementationHandoff(input)
+  ) {
+    return {
+      eligible: false,
+      reason: "playbook_stage_handoff_required",
+    };
+  }
+  if (
+    mode === "PROGRESSION" &&
     requiresBrowserAdapterRetryStageHandoff(input)
   ) {
     return {
@@ -2840,6 +2849,55 @@ async function evaluateDetachedEligibility(
   input.incident.updatedAt = reconciledAt;
   input.batchIncidentVerifiedIncidentUpdatedAt = reconciledAt;
   return { eligible: true };
+}
+
+function requiresExhaustedPlaybookImplementationHandoff(
+  input: DetachedEligibilityInput,
+) {
+  const playbook = assessAutomationPlaybook(
+    input.incident.attemptLedger,
+    input.incident.cycle,
+  );
+  if (
+    playbook.valid !== true ||
+    playbook.cycle !== input.incident.cycle ||
+    playbook.conclusion !== "UNRESOLVED_EXHAUSTED" ||
+    playbook.nextStage !== null
+  ) {
+    return false;
+  }
+
+  const summary = asJsonRecord(input.batchSummary);
+  const remediation = asJsonRecord(summary.remediation);
+  if (!Array.isArray(remediation.attempts)) return true;
+  const courseRef = createHash("sha256")
+    .update(input.courseId)
+    .digest("hex")
+    .slice(0, 24);
+  const matchingAttempts = remediation.attempts.filter(
+    (candidate) => asJsonRecord(candidate).courseRef === courseRef,
+  );
+  if (matchingAttempts.length !== 1) return true;
+  const attempt = asJsonRecord(matchingAttempts[0]);
+  const approach = asJsonRecord(attempt.approach);
+  const deferredRouteClaimed = Boolean(
+    attempt.deferredFailureHandoffSource !== undefined ||
+      attempt.deferredFailureHandoffAdmission !== undefined ||
+      (Array.isArray(summary.plannedPaths) &&
+        summary.plannedPaths.length === 0 &&
+        remediation.workMode === "VERIFY_TRANSIENT" &&
+        remediation.strategyAction === "RETRY_PROVIDER" &&
+        remediation.playbookStage === null &&
+        remediation.allowUnchangedRuntime === true &&
+        remediation.requiresImplementationPath === false &&
+        remediation.retryBudget === null &&
+        remediation.reason === "MATERIAL_CHANGE_REOPENED" &&
+        approach.workMode === "VERIFY_TRANSIENT" &&
+        approach.strategyAction === "RETRY_PROVIDER" &&
+        approach.playbookStage === null),
+  );
+
+  return !deferredRouteClaimed;
 }
 
 function requiresBrowserAdapterRetryStageHandoff(

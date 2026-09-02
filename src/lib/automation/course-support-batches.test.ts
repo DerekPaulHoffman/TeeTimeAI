@@ -28851,6 +28851,102 @@ describe("detached verification atomic batch fences", () => {
     ).toBe(false);
   });
 
+  it("hands exhausted public discovery to reusable implementation without human escalation", async () => {
+    const batch = closeoutBatch("PENDING");
+    const courseRef = createHash("sha256")
+      .update("course-1")
+      .digest("hex")
+      .slice(0, 24);
+    Object.assign(batch.incidents[0].course, {
+      detectedBookingUrl:
+        "https://foreupsoftware.com/index.php/booking/12345#/teetimes",
+      detectedPlatform: "FOREUP",
+      providerFamilyKey: "FOREUP",
+      bookingMetadata: null,
+    });
+    Object.assign(batch.incidents[0].incident, {
+      providerFamilyKey: "FOREUP",
+      failureClass: "MISSING_METADATA",
+      attemptLedger: exhaustedAttemptLedger(),
+    });
+    batch.summary = {
+      ...batch.summary,
+      plannedPaths: [],
+      remediation: {
+        workMode: "ADVANCE_DISCOVERY",
+        strategyAction: "REPAIR_PROVIDER_ADAPTER",
+        playbookStage: "BROWSER_ADAPTER_RETRY",
+        allowUnchangedRuntime: true,
+        requiresImplementationPath: false,
+        reason: "PLAYBOOK_STAGE_PENDING",
+        retryBudget: null,
+        attempts: [
+          {
+            courseRef,
+            providerSnapshotFingerprint: providerFingerprint,
+            failureFingerprint: "fingerprint",
+            runtimeVersion: releaseSha,
+            activeRealSearchCount: 0,
+            playbookEventCountAtClaim: 8,
+            approach: {
+              workMode: "ADVANCE_DISCOVERY",
+              strategyAction: "REPAIR_PROVIDER_ADAPTER",
+              playbookStage: "BROWSER_ADAPTER_RETRY",
+            },
+          },
+        ],
+      },
+    };
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([]);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.transaction.mockImplementationOnce(
+      async (
+        worker: (
+          transaction: typeof monitoringTransactionClient,
+        ) => Promise<unknown>,
+      ) => worker(monitoringTransactionClient),
+    );
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        verificationWatchMode: "WATCH_SETTLED",
+        now,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "retryable_failed",
+      derivedOutcome: "retryable_failed",
+      batchStatus: "RETRYABLE_FAILED",
+      retryCount: 1,
+      needsHumanCount: 0,
+      automationStalledCount: 0,
+    });
+    expect(prismaMocks.incidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ result: "RETRY_SCHEDULED" }),
+      }),
+    );
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "AUTO_INVESTIGATING",
+          activeBatchId: null,
+          nextAttemptAt: new Date(now.getTime() + 15 * 60_000),
+        }),
+      }),
+    );
+    expect(
+      prismaMocks.monitoringEventCreate.mock.calls.map(
+        ([create]) => create.data.eventType,
+      ),
+    ).not.toContain("HUMAN_REVIEW_REQUESTED");
+  });
+
   it("keeps mixed restored and unfinished structural work automatic", async () => {
     const batch = closeoutBatch("RESTORED");
     const exactFailureFingerprint = "c".repeat(64);
