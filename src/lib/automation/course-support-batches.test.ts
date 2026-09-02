@@ -3258,6 +3258,7 @@ describe("course-support claim demand fencing", () => {
         batchIncidents: [{ id: "prior-cycle-entry" }],
       },
       admissionMode: "EXACT_RUNTIME_SOURCE_CYCLE_RECOVERY",
+      activeRealSearchCount: 0,
       now,
     });
 
@@ -3267,6 +3268,11 @@ describe("course-support claim demand fencing", () => {
       activeBatchId: null,
       cycle: 5,
       confirmedAt: now,
+      occurrenceCount: 1,
+      firstSeenAt: now,
+      lastSeenAt: now,
+      escalatedAt: null,
+      escalationDeadlineAt: expect.any(Date),
       humanReviewReason: null,
       lastAttemptAt: null,
       nextAttemptAt: now,
@@ -3274,6 +3280,29 @@ describe("course-support claim demand fencing", () => {
       batchIncidents: [],
     });
     expect(parkedConfirmedAt).not.toEqual(now);
+  });
+
+  it("keeps ordinary fresh-cycle confirmation while clearing endpoint state", () => {
+    const parkedConfirmedAt = new Date("2026-07-15T19:00:00.000Z");
+    const projected = projectParkedCourseCampaignIncidentForClaim({
+      incident: {
+        id: "ordinary-fresh-cycle",
+        cycle: 4,
+        confirmedAt: parkedConfirmedAt,
+        escalatedAt: new Date("2026-07-15T19:30:00.000Z"),
+        escalationDeadlineAt: new Date("2026-07-15T19:45:00.000Z"),
+      },
+      admissionMode: "FRESH_CYCLE",
+      activeRealSearchCount: 0,
+      now,
+    });
+
+    expect(projected).toMatchObject({
+      cycle: 5,
+      confirmedAt: parkedConfirmedAt,
+      escalatedAt: null,
+      escalationDeadlineAt: expect.any(Date),
+    });
   });
 
   it("keeps same-cycle route evidence in the projected atomic claim", () => {
@@ -3310,9 +3339,12 @@ describe("course-support claim demand fencing", () => {
         confirmedAt: parkedConfirmedAt,
         lastAttemptAt: priorAttemptAt,
         attemptCount: 3,
+        escalatedAt: new Date("2026-07-15T19:30:00.000Z"),
+        escalationDeadlineAt: new Date("2026-07-15T19:45:00.000Z"),
         batchIncidents: currentCycleHistory,
       },
       admissionMode: "FAILURE_REFINEMENT_INCOMPLETE_PLAYBOOK_RECOVERY",
+      activeRealSearchCount: 0,
       now,
     });
 
@@ -3321,6 +3353,8 @@ describe("course-support claim demand fencing", () => {
       confirmedAt: parkedConfirmedAt,
       lastAttemptAt: priorAttemptAt,
       attemptCount: 3,
+      escalatedAt: new Date("2026-07-15T19:30:00.000Z"),
+      escalationDeadlineAt: expect.any(Date),
     });
     expect(projected.batchIncidents).toBe(currentCycleHistory);
   });
@@ -3338,6 +3372,7 @@ describe("course-support claim demand fencing", () => {
         batchIncidents: currentCycleHistory,
       },
       admissionMode: "ZERO_EXECUTION_RECOVERY",
+      activeRealSearchCount: 0,
       now,
     });
 
@@ -3346,6 +3381,8 @@ describe("course-support claim demand fencing", () => {
       confirmedAt: parkedConfirmedAt,
       lastAttemptAt: null,
       attemptCount: 0,
+      escalatedAt: null,
+      escalationDeadlineAt: expect.any(Date),
     });
     expect(projected.batchIncidents).toBe(currentCycleHistory);
   });

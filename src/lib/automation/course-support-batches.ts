@@ -18192,6 +18192,10 @@ async function listParkedCourseCampaignCandidates(
       projectParkedCourseCampaignIncidentForClaim({
         incident,
         admissionMode: member.admissionMode,
+        activeRealSearchCount: Math.max(
+          incident.activeRealSearchCount,
+          incident.course.preferences.length > 0 ? 1 : 0,
+        ),
         now,
       }),
     ];
@@ -18254,17 +18258,27 @@ export function projectParkedCourseCampaignIncidentForClaim<
     lastAttemptAt?: Date | null;
     attemptCount?: number;
     batchIncidents?: readonly unknown[];
+    escalatedAt?: Date | null;
+    escalationDeadlineAt?: Date | null;
+    firstSeenAt?: Date;
+    lastSeenAt?: Date;
+    occurrenceCount?: number;
   },
 >(input: {
   incident: T;
   admissionMode: ParkedCourseCampaignAdmissionMember["admissionMode"];
+  activeRealSearchCount: number;
   now: Date;
 }) {
-  const startsFreshCycle =
-    input.admissionMode === "FRESH_CYCLE" ||
+  const exactRuntimeFreshCycle =
     input.admissionMode === "EXACT_RUNTIME_SOURCE_CYCLE_RECOVERY";
+  const startsFreshCycle =
+    input.admissionMode === "FRESH_CYCLE" || exactRuntimeFreshCycle;
+  const zeroExecutionRecovery =
+    input.admissionMode === "ZERO_EXECUTION_RECOVERY";
   const resetsAttemptCounters =
-    startsFreshCycle || input.admissionMode === "ZERO_EXECUTION_RECOVERY";
+    startsFreshCycle || zeroExecutionRecovery;
+  const clearsEscalation = startsFreshCycle || zeroExecutionRecovery;
   return {
     ...input.incident,
     status: "AUTO_INVESTIGATING" as const,
@@ -18272,10 +18286,22 @@ export function projectParkedCourseCampaignIncidentForClaim<
     cycle: startsFreshCycle
       ? input.incident.cycle + 1
       : input.incident.cycle,
-    confirmedAt: startsFreshCycle
+    confirmedAt: exactRuntimeFreshCycle
       ? input.now
       : input.incident.confirmedAt,
+    ...(exactRuntimeFreshCycle
+      ? {
+          occurrenceCount: 1,
+          firstSeenAt: input.now,
+          lastSeenAt: input.now,
+        }
+      : {}),
     humanReviewReason: null,
+    escalationDeadlineAt: getCourseMonitoringEscalationDeadline(
+      input.now,
+      input.activeRealSearchCount,
+    ),
+    ...(clearsEscalation ? { escalatedAt: null } : {}),
     ...(resetsAttemptCounters ? { lastAttemptAt: null } : {}),
     nextAttemptAt: input.now,
     ...(resetsAttemptCounters ? { attemptCount: 0 } : {}),
