@@ -168,6 +168,7 @@ import {
   normalizeCourseSupportObservedGitPaths,
   orderCourseSupportBatchIncidents,
   preserveExplicitHumanVerification,
+  projectParkedCourseCampaignIncidentForClaim,
   readCourseSupportRemediationClaimAttempt,
   recoverCourseSupportBatch,
   renewCourseSupportBatchOperationLease,
@@ -3244,6 +3245,51 @@ describe("course-support batch selection", () => {
 describe("course-support claim demand fencing", () => {
   const baseSha = "a".repeat(40);
 
+  it("projects exact-runtime source recovery into the fresh cycle used by atomic admission", () => {
+    const parkedConfirmedAt = new Date("2026-07-15T19:00:00.000Z");
+    const projected = projectParkedCourseCampaignIncidentForClaim({
+      incident: {
+        id: "exact-runtime-source-recovery",
+        cycle: 4,
+        confirmedAt: parkedConfirmedAt,
+      },
+      admissionMode: "EXACT_RUNTIME_SOURCE_CYCLE_RECOVERY",
+      now,
+    });
+
+    expect(projected).toMatchObject({
+      id: "exact-runtime-source-recovery",
+      status: "AUTO_INVESTIGATING",
+      activeBatchId: null,
+      cycle: 5,
+      confirmedAt: now,
+      humanReviewReason: null,
+      lastAttemptAt: null,
+      nextAttemptAt: now,
+      attemptCount: 0,
+      batchIncidents: [],
+    });
+    expect(parkedConfirmedAt).not.toEqual(now);
+  });
+
+  it("keeps same-cycle campaign recovery on its existing evidence cycle", () => {
+    const parkedConfirmedAt = new Date("2026-07-15T19:00:00.000Z");
+    const projected = projectParkedCourseCampaignIncidentForClaim({
+      incident: {
+        id: "same-cycle-recovery",
+        cycle: 4,
+        confirmedAt: parkedConfirmedAt,
+      },
+      admissionMode: "FAILURE_REFINEMENT_INCOMPLETE_PLAYBOOK_RECOVERY",
+      now,
+    });
+
+    expect(projected).toMatchObject({
+      cycle: 4,
+      confirmedAt: parkedConfirmedAt,
+    });
+  });
+
   it("preserves campaign admission when duplicate current recovery lacks matching provenance", () => {
     type ClaimCandidate = Parameters<
       typeof mergeCourseSupportClaimCandidatePools
@@ -3307,6 +3353,9 @@ describe("course-support claim demand fencing", () => {
       outcome: "deferred_busy",
       durableCloseoutRecorded: true,
       claimStateChurn: true,
+      threadDisposition: "ARCHIVE",
+      archiveReason:
+        "Atomic course-support claim state changed twice; durable aggregate evidence was recorded for the next scheduled cycle.",
     });
     const create = prismaMocks.automationRunCreate.mock.calls[0]?.[0];
     expect(create).toMatchObject({

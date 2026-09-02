@@ -88,6 +88,7 @@ import {
   inspectActiveParkedCourseCampaign,
   PARKED_COURSE_CAMPAIGN_PROMPT_VERSION,
   parseParkedCourseCampaignAudit,
+  type ParkedCourseCampaignAdmissionMember,
 } from "./course-support-campaign";
 import {
   createDeferredFailureHandoffAdmission,
@@ -5742,14 +5743,21 @@ export async function recordCourseSupportClaimStateChurn() {
       planningAttemptCount: 2,
     },
   });
+  const policy = getResponderThreadPolicy({
+    outcome: "deferred_busy",
+    durableCloseoutRecorded,
+  });
   return {
     outcome: "deferred_busy" as const,
     durableCloseoutRecorded,
     claimStateChurn: true,
-    ...getResponderThreadPolicy({
-      outcome: "deferred_busy",
-      durableCloseoutRecorded,
-    }),
+    ...policy,
+    ...(policy.threadDisposition === "ARCHIVE"
+      ? {
+          archiveReason:
+            "Atomic course-support claim state changed twice; durable aggregate evidence was recorded for the next scheduled cycle.",
+        }
+      : {}),
   };
 }
 
@@ -18157,22 +18165,11 @@ async function listParkedCourseCampaignCandidates(
       return [];
     }
     return [
-      {
-        ...incident,
-        status: "AUTO_INVESTIGATING" as const,
-        activeBatchId: null,
-        cycle:
-          member.admissionMode === "FRESH_CYCLE"
-            ? incident.cycle + 1
-            : incident.cycle,
-        confirmedAt:
-          member.admissionMode === "FRESH_CYCLE" ? now : incident.confirmedAt,
-        humanReviewReason: null,
-        lastAttemptAt: null,
-        nextAttemptAt: now,
-        attemptCount: 0,
-        batchIncidents: [],
-      },
+      projectParkedCourseCampaignIncidentForClaim({
+        incident,
+        admissionMode: member.admissionMode,
+        now,
+      }),
     ];
   });
   await assertBoundedCourseSupportCandidateCurrentCycleHistory(
@@ -18224,6 +18221,37 @@ async function listParkedCourseCampaignCandidates(
       },
     ];
   });
+}
+
+export function projectParkedCourseCampaignIncidentForClaim<
+  T extends {
+    cycle: number;
+    confirmedAt: Date | null;
+  },
+>(input: {
+  incident: T;
+  admissionMode: ParkedCourseCampaignAdmissionMember["admissionMode"];
+  now: Date;
+}) {
+  const startsFreshCycle =
+    input.admissionMode === "FRESH_CYCLE" ||
+    input.admissionMode === "EXACT_RUNTIME_SOURCE_CYCLE_RECOVERY";
+  return {
+    ...input.incident,
+    status: "AUTO_INVESTIGATING" as const,
+    activeBatchId: null,
+    cycle: startsFreshCycle
+      ? input.incident.cycle + 1
+      : input.incident.cycle,
+    confirmedAt: startsFreshCycle
+      ? input.now
+      : input.incident.confirmedAt,
+    humanReviewReason: null,
+    lastAttemptAt: null,
+    nextAttemptAt: input.now,
+    attemptCount: 0,
+    batchIncidents: [],
+  };
 }
 async function recordRoutineResponderObservation(input: {
   outcome: "no_due_work" | "deferred_busy" | "deferred_engineering_cadence";
