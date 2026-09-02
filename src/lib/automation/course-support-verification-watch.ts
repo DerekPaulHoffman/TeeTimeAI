@@ -6,6 +6,13 @@ export const DEFAULT_COURSE_SUPPORT_HEARTBEAT_RENEWAL_TIMEOUT_MS = 30_000;
 
 export const COURSE_SUPPORT_VERIFICATION_WATCH_FAILURE_CODES = [
   "BROWSER_STAGE_PERSIST_FAILED",
+  "BROWSER_STAGE_BATCH_LOAD_FAILED",
+  "BROWSER_STAGE_RELEASE_FENCE_FAILED",
+  "BROWSER_STAGE_TARGET_SELECTION_FAILED",
+  "BROWSER_STAGE_PROVENANCE_FAILED",
+  "BROWSER_STAGE_CURRENT_TARGET_FAILED",
+  "BROWSER_STAGE_PROBE_SETUP_FAILED",
+  "BROWSER_STAGE_RUN_CREATE_FAILED",
   "BROWSER_STAGE_NETWORK_FAILED",
   "BROWSER_STAGE_TIMEOUT",
   "BATCH_VERIFICATION_FAILED",
@@ -25,6 +32,17 @@ export type CourseSupportVerificationBrowserTransientKind =
 export type CourseSupportVerificationWatchFailureCode =
   (typeof COURSE_SUPPORT_VERIFICATION_WATCH_FAILURE_CODES)[number];
 
+export type CourseSupportBrowserStageControlFailureCode = Extract<
+  CourseSupportVerificationWatchFailureCode,
+  | "BROWSER_STAGE_BATCH_LOAD_FAILED"
+  | "BROWSER_STAGE_RELEASE_FENCE_FAILED"
+  | "BROWSER_STAGE_TARGET_SELECTION_FAILED"
+  | "BROWSER_STAGE_PROVENANCE_FAILED"
+  | "BROWSER_STAGE_CURRENT_TARGET_FAILED"
+  | "BROWSER_STAGE_PROBE_SETUP_FAILED"
+  | "BROWSER_STAGE_RUN_CREATE_FAILED"
+>;
+
 const COURSE_SUPPORT_VERIFICATION_WATCH_FAILURE_CODE_SET = new Set<string>(
   COURSE_SUPPORT_VERIFICATION_WATCH_FAILURE_CODES
 );
@@ -35,7 +53,14 @@ const COURSE_SUPPORT_VERIFICATION_WATCH_SHORT_RETRY_CODES = new Set<
   "BROWSER_STAGE_TIMEOUT"
 ]);
 
-const courseSupportVerificationWatchFailureCauses = new WeakMap<Error, unknown>();
+const courseSupportVerificationWatchFailureCauses = new WeakMap<
+  Error,
+  unknown
+>();
+const courseSupportBrowserStageControlFailureCodes = new WeakMap<
+  Error,
+  CourseSupportBrowserStageControlFailureCode
+>();
 
 class CourseSupportVerificationWatchFailure extends Error {
   readonly failureCode: CourseSupportVerificationWatchFailureCode;
@@ -77,6 +102,18 @@ export function getCourseSupportVerificationWatchFailureCode(
     : null;
 }
 
+export function tagCourseSupportBrowserStageControlFailure(
+  failureCode: CourseSupportBrowserStageControlFailureCode,
+  cause: unknown
+) {
+  const error =
+    cause instanceof Error
+      ? cause
+      : new Error("Course-support browser control phase failed.");
+  courseSupportBrowserStageControlFailureCodes.set(error, failureCode);
+  return error;
+}
+
 function createCourseSupportVerificationWatchFailure(
   failureCode: CourseSupportVerificationWatchFailureCode,
   cause: unknown
@@ -87,8 +124,16 @@ function createCourseSupportVerificationWatchFailure(
 }
 
 function selectBrowserStageFailureCode(
-  kind: CourseSupportVerificationBrowserTransientKind | null | undefined
+  kind: CourseSupportVerificationBrowserTransientKind | null | undefined,
+  error: unknown
 ): CourseSupportVerificationWatchFailureCode {
+  if (error instanceof Error) {
+    const controlFailureCode =
+      courseSupportBrowserStageControlFailureCodes.get(error);
+    if (controlFailureCode) {
+      return controlFailureCode;
+    }
+  }
   if (kind === "NETWORK") {
     return "BROWSER_STAGE_NETWORK_FAILED";
   }
@@ -358,7 +403,8 @@ export async function runCourseSupportVerificationPass<
     throwIfVerificationWatchAborted(input.signal);
     throw createCourseSupportVerificationWatchFailure(
       selectBrowserStageFailureCode(
-        input.classifyBrowserStageFailure?.(error)
+        input.classifyBrowserStageFailure?.(error),
+        error
       ),
       error
     );

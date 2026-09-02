@@ -46,6 +46,7 @@ export type BrowserDiscoveryEvidence = {
   sourcePageAvailability?: "SOFT_NOT_FOUND";
   observedUrls: string[];
   linkCandidates?: Array<{ url: string; label: string }>;
+  evidenceOnlyBookingLinks?: Array<{ url: string; label: string }>;
   officialCourseWebsite?: string | null;
   persistedTeeItUpBookingUrl?: string | null;
   verifiedLayoutHoleCounts?: Array<9 | 18>;
@@ -66,6 +67,7 @@ export type BrowserDiscoveryEvidence = {
   corroboratedAccessBarrier?: BrowserAccessBarrier;
   renderedAccessControls?: BrowserRenderedAccessControl[];
   retainedBookingTarget?: BrowserRetainedBookingTarget;
+  nonHtmlDocuments?: BrowserNonHtmlDocumentEvidence[];
   bookingCallToAction?: boolean;
   teeItUpLegacyConfigurations?: TeeItUpLegacyConfigurationEvidence[];
   teeItUpFacilityResponses?: TeeItUpFacilityResponseEvidence[];
@@ -112,6 +114,11 @@ export type TeeItUpFacilityResponseEvidence = {
 export type BrowserAccessBarrier = {
   url: string;
   status: 401 | 403;
+};
+
+export type BrowserNonHtmlDocumentEvidence = {
+  url: string;
+  reason: "KNOWN_SUFFIX" | "DOWNLOAD_RESPONSE";
 };
 
 export type BrowserRenderedAccessControl = {
@@ -657,7 +664,31 @@ export type BrowserProbeCourseInput = {
   };
 };
 
-export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): BrowserDiscovery {
+export function buildBrowserDiscovery(
+  evidence: BrowserDiscoveryEvidence
+): BrowserDiscovery {
+  const nonHtmlScope = excludeNonHtmlDocumentProviderEvidence(evidence);
+  if (nonHtmlScope.onlyNonHtmlPrimaryEvidence) {
+    const safeSourceUrl =
+      browserNonHtmlDocumentComparisonKey(evidence.sourceUrl) ?? "about:blank";
+    const safeFinalUrl = evidence.finalUrl
+      ? (browserNonHtmlDocumentComparisonKey(evidence.finalUrl) ??
+        safeSourceUrl)
+      : undefined;
+    return {
+      courseId: evidence.courseId,
+      status: "INSPECTED",
+      detectedPlatform: "UNKNOWN",
+      sourceUrl: safeSourceUrl,
+      confidence: 0,
+      evidence: {
+        finalUrl: safeFinalUrl,
+        observedUrls: [],
+        learnedFrom: "non-html-document-only"
+      }
+    };
+  }
+  evidence = nonHtmlScope.evidence;
   evidence = sanitizeClubCaddieDiscoveryEvidence(evidence);
   if (
     evidence.unprojectedSourceCandidate === true &&
@@ -898,27 +929,39 @@ export function buildBrowserDiscovery(evidence: BrowserDiscoveryEvidence): Brows
       candidate.label === "Embedded tee-time booking" &&
       isLegacyProphetPublicBookingLandingUrl(candidate.url)
   );
+  const evidenceOnlyDetectedPlatform = detectPlatform(
+    (evidence.evidenceOnlyBookingLinks ?? []).map(({ url }) => url)
+  );
 
-  return withCourseIdentityCorroboration({
-    courseId: evidence.courseId,
-    status: "INSPECTED",
-    detectedPlatform: embeddedLegacyProphetBooking
-      ? "CUSTOM"
-      : detectPlatform(observedUrls),
-    sourceUrl: providerEvidence.sourceUrl,
-    bookingUrl,
-    confidence: !bookingUrl || bookingUrl === evidence.sourceUrl ? 0.25 : 0.45,
-    evidence: {
-      finalUrl: providerEvidence.finalUrl,
-      observedUrls: providerObservedUrls,
-      visibleText: summarizeVisibleText(providerEvidence.visibleText),
-      ...(hasBookingCallToActionEvidence(providerEvidence) ||
-      hasPositiveOnlineBookingText(providerEvidence.visibleText ?? "")
-        ? { bookingCallToAction: true }
-        : {}),
-      learnedFrom: "browser-visible-links"
-    }
-  }, evidence);
+  return withCourseIdentityCorroboration(
+    {
+      courseId: evidence.courseId,
+      status: "INSPECTED",
+      detectedPlatform: embeddedLegacyProphetBooking
+        ? "CUSTOM"
+        : detectPlatform(observedUrls),
+      sourceUrl: providerEvidence.sourceUrl,
+      bookingUrl,
+      confidence:
+        !bookingUrl || bookingUrl === evidence.sourceUrl ? 0.25 : 0.45,
+      evidence: {
+        finalUrl: providerEvidence.finalUrl,
+        observedUrls: providerObservedUrls,
+        visibleText: summarizeVisibleText(providerEvidence.visibleText),
+        ...(hasBookingCallToActionEvidence(providerEvidence) ||
+        hasPositiveOnlineBookingText(providerEvidence.visibleText ?? "")
+          ? { bookingCallToAction: true }
+          : {}),
+        learnedFrom:
+          evidenceOnlyDetectedPlatform === "TEEITUP"
+            ? "teeitup-target-scope-unconfirmed"
+            : evidenceOnlyDetectedPlatform !== "UNKNOWN"
+              ? "provider-target-scope-unconfirmed"
+              : "browser-visible-links"
+      }
+    },
+    evidence
+  );
 }
 
 export function pickLikelyBookingHref(
@@ -1243,6 +1286,118 @@ function learnKnownProviderAccessBarrierClassification(
       learnedFrom: "known-provider-public-landing-access-barrier"
     }
   };
+}
+
+function excludeNonHtmlDocumentProviderEvidence(
+  evidence: BrowserDiscoveryEvidence
+): {
+  evidence: BrowserDiscoveryEvidence;
+  onlyNonHtmlPrimaryEvidence: boolean;
+} {
+  const excludedKeys = new Set(
+    (evidence.nonHtmlDocuments ?? []).flatMap(({ url }) => {
+      const key = browserNonHtmlDocumentComparisonKey(url);
+      return key ? [key] : [];
+    })
+  );
+  if (excludedKeys.size === 0) {
+    return { evidence, onlyNonHtmlPrimaryEvidence: false };
+  }
+
+  const isExcluded = (value: string | null | undefined) => {
+    const key = value ? browserNonHtmlDocumentComparisonKey(value) : null;
+    return Boolean(key && excludedKeys.has(key));
+  };
+  const sourceExcluded = isExcluded(evidence.sourceUrl);
+  const finalExcluded = isExcluded(evidence.finalUrl ?? evidence.sourceUrl);
+  const safePrimaryUrl = [
+    evidence.officialPage?.url,
+    evidence.officialCourseWebsite,
+    evidence.finalUrl,
+    evidence.sourceUrl
+  ].find((value): value is string => Boolean(value && !isExcluded(value)));
+
+  if ((sourceExcluded || finalExcluded) && !safePrimaryUrl) {
+    return { evidence, onlyNonHtmlPrimaryEvidence: true };
+  }
+
+  return {
+    onlyNonHtmlPrimaryEvidence: false,
+    evidence: {
+      ...evidence,
+      sourceUrl: sourceExcluded ? safePrimaryUrl! : evidence.sourceUrl,
+      ...(evidence.finalUrl
+        ? {
+            finalUrl: finalExcluded ? safePrimaryUrl! : evidence.finalUrl
+          }
+        : {}),
+      observedUrls: evidence.observedUrls.filter((url) => !isExcluded(url)),
+      linkCandidates: evidence.linkCandidates?.filter(
+        ({ url }) => !isExcluded(url)
+      ),
+      evidenceOnlyBookingLinks: evidence.evidenceOnlyBookingLinks?.filter(
+        ({ url }) => !isExcluded(url)
+      ),
+      successfulProviderUrls: evidence.successfulProviderUrls?.filter(
+        (url) => !isExcluded(url)
+      ),
+      persistedTeeItUpBookingUrl: isExcluded(
+        evidence.persistedTeeItUpBookingUrl
+      )
+        ? null
+        : evidence.persistedTeeItUpBookingUrl,
+      providerPolicyUrl: isExcluded(evidence.providerPolicyUrl)
+        ? undefined
+        : evidence.providerPolicyUrl,
+      accessBarrierUrls: evidence.accessBarrierUrls?.filter(
+        (url) => !isExcluded(url)
+      ),
+      accessBarriers: evidence.accessBarriers?.filter(
+        ({ url }) => !isExcluded(url)
+      ),
+      corroboratedAccessBarrier: isExcluded(
+        evidence.corroboratedAccessBarrier?.url
+      )
+        ? undefined
+        : evidence.corroboratedAccessBarrier,
+      retainedBookingTarget: isExcluded(evidence.retainedBookingTarget?.url)
+        ? undefined
+        : evidence.retainedBookingTarget,
+      teeItUpFacilityResponses: evidence.teeItUpFacilityResponses?.filter(
+        ({ url }) => !isExcluded(url)
+      ),
+      officialCourseWebsite: isExcluded(evidence.officialCourseWebsite)
+        ? (safePrimaryUrl ?? null)
+        : evidence.officialCourseWebsite,
+      officialPage:
+        evidence.officialPage && !isExcluded(evidence.officialPage.url)
+          ? {
+              ...evidence.officialPage,
+              linkCandidates: evidence.officialPage.linkCandidates.filter(
+                ({ url }) => !isExcluded(url)
+              ),
+              observedUrls: evidence.officialPage.observedUrls?.filter(
+                (url) => !isExcluded(url)
+              )
+            }
+          : undefined
+    }
+  };
+}
+
+function browserNonHtmlDocumentComparisonKey(value: string) {
+  try {
+    const url = new URL(value);
+    const queryKeys = [...new Set(url.searchParams.keys())].sort();
+    url.search = "";
+    url.hash = "";
+    for (const key of queryKeys) {
+      url.searchParams.append(key, "");
+    }
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
 
 function learnRenderedManagedProtectionClassification(
@@ -1647,7 +1802,13 @@ function sanitizeClubCaddieDiscoveryEvidence(
     linkCandidates: evidence.linkCandidates?.map((candidate) => ({
       ...candidate,
       url: sanitizeClubCaddieEvidenceUrl(candidate.url)
-    }))
+    })),
+    evidenceOnlyBookingLinks: evidence.evidenceOnlyBookingLinks?.map(
+      (candidate) => ({
+        ...candidate,
+        url: sanitizeClubCaddieEvidenceUrl(candidate.url)
+      })
+    )
   };
 }
 
@@ -2744,7 +2905,11 @@ function getOfficialBookingAccountLandingEvidence(
     return null;
   }
 
-  const accountCandidates = evidence.officialPage.linkCandidates.filter(
+  const officialBookingEvidenceLinks = uniqueLinkCandidates([
+    ...evidence.officialPage.linkCandidates,
+    ...(evidence.evidenceOnlyBookingLinks ?? [])
+  ]);
+  const accountCandidates = officialBookingEvidenceLinks.filter(
     (link) =>
       isEvidenceOnlyOfficialBookingAccountLink(link, officialPageUrl) &&
       doesOfficialBookingCandidateLabelMatchTarget(
@@ -2784,7 +2949,7 @@ function getOfficialBookingAccountLandingEvidence(
   );
   if (
     !followedAccountLanding &&
-    evidence.officialPage.linkCandidates.some((link) => {
+    officialBookingEvidenceLinks.some((link) => {
       const url = parseUrl(link.url);
       return Boolean(
         url &&
@@ -7549,18 +7714,20 @@ function learnNonRunnableOfficialBookingLink(
     return null;
   }
 
-  const externalBookingCallsToAction =
-    evidence.officialPage.linkCandidates.filter((candidate) => {
-      const destination = parseUrl(candidate.url);
-      return Boolean(
-        destination &&
-          !haveSamePublicWebsiteOrigin(
-            destination.toString(),
-            officialPage.toString()
-          ) &&
-          isBookingCallToActionCandidate(candidate)
-      );
-    });
+  const externalBookingCallsToAction = uniqueLinkCandidates([
+    ...evidence.officialPage.linkCandidates,
+    ...(evidence.evidenceOnlyBookingLinks ?? [])
+  ]).filter((candidate) => {
+    const destination = parseUrl(candidate.url);
+    return Boolean(
+      destination &&
+      !haveSamePublicWebsiteOrigin(
+        destination.toString(),
+        officialPage.toString()
+      ) &&
+      isBookingCallToActionCandidate(candidate)
+    );
+  });
   if (externalBookingCallsToAction.length === 0) {
     return null;
   }
@@ -8635,6 +8802,20 @@ function detectPlatform(urls: string[]): BrowserDiscovery["detectedPlatform"] {
     }
   }
   return "UNKNOWN";
+}
+
+function uniqueLinkCandidates(
+  candidates: Array<{ url: string; label: string }>
+) {
+  const retained = new Map<string, { url: string; label: string }>();
+  for (const candidate of candidates) {
+    const parsed = parseUrl(candidate.url);
+    const key = parsed?.toString() ?? candidate.url;
+    if (!retained.has(key)) {
+      retained.set(key, candidate);
+    }
+  }
+  return [...retained.values()];
 }
 
 function pickBookingLikeUrl(

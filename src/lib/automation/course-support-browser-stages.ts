@@ -4,6 +4,10 @@ import { prisma } from "@/lib/prisma";
 
 import { assessAutomationPlaybook } from "./course-monitoring-playbook";
 import type { BrowserInvestigationMode } from "./browser-probe-evidence";
+import {
+  tagCourseSupportBrowserStageControlFailure,
+  type CourseSupportBrowserStageControlFailureCode
+} from "./course-support-verification-watch";
 
 export type CourseSupportBrowserStageTarget = {
   ordinal: number;
@@ -46,6 +50,27 @@ type BrowserReleaseFence = {
   releaseSha: string;
   deployedAt: Date;
 };
+
+async function runBrowserStageControlPhase<T>(
+  failureCode: CourseSupportBrowserStageControlFailureCode,
+  operation: () => T | Promise<T>
+) {
+  try {
+    return await operation();
+  } catch (error) {
+    throw tagCourseSupportBrowserStageControlFailure(failureCode, error);
+  }
+}
+
+function browserStageControlFailure(
+  failureCode: CourseSupportBrowserStageControlFailureCode,
+  message: string
+) {
+  return tagCourseSupportBrowserStageControlFailure(
+    failureCode,
+    new Error(message)
+  );
+}
 
 export type CourseSupportBrowserPersistenceFence = {
   batchId: string;
@@ -225,28 +250,42 @@ export async function persistOwnedCourseSupportBrowserPlaybookStages(
       ownerThreadId: input.ownerThreadId,
       now: currentTime(),
     });
-  const initialBatch = await loadCurrentBatch();
+  const initialBatch = await runBrowserStageControlPhase(
+    "BROWSER_STAGE_BATCH_LOAD_FAILED",
+    loadCurrentBatch
+  );
   if (!initialBatch) {
-    throw new Error(
-      "Course-support browser progression requires current batch ownership.",
+    throw browserStageControlFailure(
+      "BROWSER_STAGE_CURRENT_TARGET_FAILED",
+      "Course-support browser progression requires current batch ownership."
     );
   }
-  const releaseFence = resolvePersistedBrowserReleaseFence({
-    batch: initialBatch,
-    requestedReleaseSha: input.requestedReleaseSha,
-    requestedDeployedAt: input.requestedDeployedAt,
-  });
+  const releaseFence = await runBrowserStageControlPhase(
+    "BROWSER_STAGE_RELEASE_FENCE_FAILED",
+    () =>
+      resolvePersistedBrowserReleaseFence({
+        batch: initialBatch,
+        requestedReleaseSha: input.requestedReleaseSha,
+        requestedDeployedAt: input.requestedDeployedAt
+      })
+  );
   if (!releaseFence) {
     return emptyBrowserStageResult(false);
   }
-  const targets = selectOwnedCourseSupportBrowserStageTargets({
-    batchId: input.batchId,
-    entries: initialBatch.incidents,
-  });
+  const targets = await runBrowserStageControlPhase(
+    "BROWSER_STAGE_TARGET_SELECTION_FAILED",
+    () =>
+      selectOwnedCourseSupportBrowserStageTargets({
+        batchId: input.batchId,
+        entries: initialBatch.incidents
+      })
+  );
   if (targets.length === 0) {
     return emptyBrowserStageResult(true);
   }
-  await dependencies.validateReleaseFence?.(releaseFence);
+  await runBrowserStageControlPhase("BROWSER_STAGE_PROVENANCE_FAILED", () =>
+    dependencies.validateReleaseFence?.(releaseFence)
+  );
 
   let persistedCount = 0;
   for (const target of targets) {
@@ -254,20 +293,28 @@ export async function persistOwnedCourseSupportBrowserPlaybookStages(
       (entry) => entry.courseId === target.courseId,
     );
     if (!initialEntry) {
-      throw new Error(
-        "Course-support browser progression lost its initial course evidence.",
+      throw browserStageControlFailure(
+        "BROWSER_STAGE_TARGET_SELECTION_FAILED",
+        "Course-support browser progression lost its initial course evidence."
       );
     }
     const assertCurrentTarget = async (
       options: { requireCurrentStage?: boolean } = {},
     ) => {
-      const currentBatch = await loadCurrentBatch();
+      const currentBatch = await runBrowserStageControlPhase(
+        "BROWSER_STAGE_BATCH_LOAD_FAILED",
+        loadCurrentBatch
+      );
       if (!currentBatch) {
-        throw new Error(
-          "Course-support browser progression lost current batch ownership.",
+        throw browserStageControlFailure(
+          "BROWSER_STAGE_CURRENT_TARGET_FAILED",
+          "Course-support browser progression lost current batch ownership."
         );
       }
-      assertPersistedBrowserReleaseFence(currentBatch, releaseFence);
+      await runBrowserStageControlPhase(
+        "BROWSER_STAGE_RELEASE_FENCE_FAILED",
+        () => assertPersistedBrowserReleaseFence(currentBatch, releaseFence)
+      );
       const currentEntry = currentBatch.incidents.find(
         (entry) =>
           entry.courseId === target.courseId &&
@@ -278,8 +325,9 @@ export async function persistOwnedCourseSupportBrowserPlaybookStages(
           entry.incident.cycle === entry.cycle,
       );
       if (!currentEntry) {
-        throw new Error(
-          "Course-support browser progression lost current course ownership.",
+        throw browserStageControlFailure(
+          "BROWSER_STAGE_CURRENT_TARGET_FAILED",
+          "Course-support browser progression lost current course ownership."
         );
       }
       if (
@@ -289,8 +337,9 @@ export async function persistOwnedCourseSupportBrowserPlaybookStages(
           currentEntry.incident.cycle,
         ).nextStage !== target.stage
       ) {
-        throw new Error(
-          "Course-support browser stage ownership changed before persistence.",
+        throw browserStageControlFailure(
+          "BROWSER_STAGE_CURRENT_TARGET_FAILED",
+          "Course-support browser stage ownership changed before persistence."
         );
       }
     };

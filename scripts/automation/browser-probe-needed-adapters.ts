@@ -1,14 +1,17 @@
 import "./load-local-env";
 
+import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
   chromium,
+  type Download,
   type Frame,
   type Page,
   type Request,
-  type Route,
+  type Response,
+  type Route
 } from "@playwright/test";
 import type { Prisma } from "@prisma/client";
 
@@ -38,6 +41,7 @@ import {
   buildBrowserWidgetCandidates,
   classifyRenderedOfficialPageCourseIdentity,
   finalizeBrowserInvestigationEvidence,
+  isKnownNonHtmlBrowserDocumentUrl,
   isRestrictedBrowserNetworkObservation,
   isRenderedUnprojectedSourceCandidateLocalityCorroborated,
   isRelevantBrowserAccessBarrierUrl,
@@ -85,6 +89,7 @@ import {
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 import { getAutomationRuntimeVersion } from "@/lib/automation/runtime-version";
 import { sanitizeResponderText } from "@/lib/automation/course-support-responder-policy";
+import { tagCourseSupportBrowserStageControlFailure } from "@/lib/automation/course-support-verification-watch";
 import { shouldStopBrowserDiscovery } from "@/lib/automation/monitoring-strategy";
 import { prisma } from "@/lib/prisma";
 
@@ -428,6 +433,21 @@ export async function finishBrowserProbeAutomationRunAfterFailure(
 ) {
   const ownershipCancelled = input.signal?.aborted === true;
   const error = input.error instanceof Error ? input.error : null;
+  const failureClass = error
+    ? (getPersistableBrowserOperationFailure(error) ??
+      classifyPersistableBrowserStageFailure(error))
+    : null;
+  const failureFingerprint = createHash("sha256")
+    .update(
+      error
+        ? `${error.name}\n${error.message}\n${error.stack ?? ""}`
+        : String(input.error)
+    )
+    .digest("hex")
+    .slice(0, 16);
+  const safeFailureMessage = failureClass
+    ? `Browser provider operation failed with a ${failureClass.toLowerCase()} condition.`
+    : "Browser probe failed before a safe provider outcome was available.";
   return finish(input.runId, {
     outcome: "failed",
     errors: ownershipCancelled
@@ -435,14 +455,10 @@ export async function finishBrowserProbeAutomationRunAfterFailure(
           name: "AbortError",
           message: "Browser probe stopped after responder ownership cancellation."
         }
-      : error
-        ? { name: error.name, message: error.message }
-        : { message: "Unknown browser probe failure" },
+      : { name: "BrowserProbeError", message: safeFailureMessage },
     notes: ownershipCancelled
       ? "Browser probe stopped after responder ownership cancellation; no course or playbook writes were permitted after cancellation."
-      : error
-        ? (error.stack ?? error.message)
-        : "Unknown browser probe failure"
+      : `Browser probe failed; class=${failureClass ?? "UNCLASSIFIED"}; fingerprint=${failureFingerprint}.`
   });
 }
 
@@ -458,6 +474,18 @@ export async function recordOwnedBrowserStageAfterCourseProjection<T>(input: {
   };
 }
 
+async function runBrowserProbeSetupPhase<T>(
+  failureCode:
+    "BROWSER_STAGE_PROBE_SETUP_FAILED" | "BROWSER_STAGE_RUN_CREATE_FAILED",
+  operation: () => T | Promise<T>
+) {
+  try {
+    return await operation();
+  } catch (error) {
+    throw tagCourseSupportBrowserStageControlFailure(failureCode, error);
+  }
+}
+
 export async function runBrowserProbe(options: BrowserProbeOptions) {
   throwIfBrowserProbeAborted(options.signal);
   if (
@@ -466,18 +494,32 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
       options.deferTerminalCloseout !== true ||
       options.persistSearchProbe !== false)
   ) {
-    throw new Error(
-      "Persisted browser progression requires an owned responder batch and deferred closeout.",
+    throw tagCourseSupportBrowserStageControlFailure(
+      "BROWSER_STAGE_PROBE_SETUP_FAILED",
+      new Error(
+        "Persisted browser progression requires an owned responder batch and deferred closeout."
+      )
     );
   }
   const requestedCourseName = options.courseName;
   const requestedCourseId = options.courseId;
-  const runtimeVersion = resolveBrowserProbeRuntimeVersion(
-    getAutomationRuntimeVersion(),
-    options.persistenceFence,
+  const runtimeVersion = await runBrowserProbeSetupPhase(
+    "BROWSER_STAGE_PROBE_SETUP_FAILED",
+    () =>
+      resolveBrowserProbeRuntimeVersion(
+        getAutomationRuntimeVersion(),
+        options.persistenceFence
+      )
   );
-  const investigationMode = resolveBrowserInvestigationMode(options);
-  const run = options.dryRun ? null : await startAutomationRun(PROMPT_VERSION);
+  const investigationMode = await runBrowserProbeSetupPhase(
+    "BROWSER_STAGE_PROBE_SETUP_FAILED",
+    () => resolveBrowserInvestigationMode(options)
+  );
+  const run = options.dryRun
+    ? null
+    : await runBrowserProbeSetupPhase("BROWSER_STAGE_RUN_CREATE_FAILED", () =>
+        startAutomationRun(PROMPT_VERSION)
+      );
   const notes: string[] = [];
   const traces: BrowserProbeDecisionTrace[] = [];
   let persistedCount = 0;
@@ -652,10 +694,8 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
           }).providerFamilyKey;
           const providerExecution = await runWithProviderRequestLease(
             providerFamilyKey,
-            () => {
-              browserProviderExecutionStarted = true;
-              providerObservation?.markProviderExecutionStarted();
-              return runPersistableBrowserOperation(() =>
+            () =>
+              runPersistableBrowserOperation(() =>
                 collectBrowserEvidence(
                   page,
                   {
@@ -681,10 +721,14 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
                       observedAt: investigationObservedAt,
                     },
                     signal: options.signal,
-                  },
+                    onProviderRequest: () => {
+                      if (browserProviderExecutionStarted) return;
+                      browserProviderExecutionStarted = true;
+                      providerObservation?.markProviderExecutionStarted();
+                    }
+                  }
                 )
-              );
-            }
+              )
           );
           if (!providerExecution.acquired) {
             if (options.dryRun) {
@@ -787,7 +831,7 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
                         : "INDEPENDENT_CONFIRMATION",
                     evidenceKind: "TOOLING",
                     failureClass: "RATE_LIMIT",
-                    providerExecution: true,
+                    providerExecution: browserProviderExecutionStarted,
                     runtimeVersion,
                     source: "COURSE_SUPPORT_RESPONDER",
                     onBeforeSourceWrite: (transaction) =>
@@ -915,7 +959,7 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
                               ? "RENDERED_BROWSER"
                               : "INDEPENDENT_CONFIRMATION",
                           runtimeVersion,
-                          providerExecution: true,
+                          providerExecution: browserProviderExecutionStarted,
                           ...(expectedTransitionProviderSnapshotFingerprint
                             ? {
                                 expectedProviderSnapshotFingerprint:
@@ -1337,9 +1381,20 @@ export function retainOnlyPersistableBrowserUrls(
                 browserInvestigation.bookingDestinations.map((visit) => ({
                   ...visit,
                   requestedUrl: sanitizeEvidenceUrl(visit.requestedUrl),
-                  finalUrl: sanitizeEvidenceUrl(visit.finalUrl),
-                })),
-            },
+                  finalUrl: sanitizeEvidenceUrl(visit.finalUrl)
+                })
+              ),
+              ...(browserInvestigation.nonHtmlDocuments?.length
+                ? {
+                    nonHtmlDocuments: browserInvestigation.nonHtmlDocuments.map(
+                      (document) => ({
+                        ...document,
+                        url: sanitizeEvidenceUrl(document.url)
+                      })
+                    )
+                  }
+                : {})
+            }
           }
         : {}),
     },
@@ -1618,7 +1673,8 @@ export async function collectBrowserEvidence(
       runtimeVersion: string;
       observedAt: Date;
     };
-  } = {},
+    onProviderRequest?: () => void;
+  } = {}
 ): Promise<BrowserInvestigationEvidence> {
   throwIfBrowserProbeAborted(options.signal);
   const mode = options.mode ?? "RENDERED";
@@ -1628,6 +1684,17 @@ export async function collectBrowserEvidence(
   const queuedSameOriginUrls = new Set<string>();
   const visitedSameOriginUrls = new Set<string>();
   const queuedBookingUrls = new Set<string>();
+  const nonHtmlNavigationBoundaries = new Set<string>();
+  let bookingNavigationAttempts = 0;
+  let providerRequestObserved = false;
+  const markProviderRequestObserved = () => {
+    if (providerRequestObserved) return;
+    providerRequestObserved = true;
+    options.onProviderRequest?.();
+  };
+  const recordNonHtmlNavigationBoundary = (url: string) => {
+    nonHtmlNavigationBoundaries.add(url);
+  };
   const sameOriginQueue: Array<{
     url: string;
     label: string;
@@ -1757,24 +1824,28 @@ export async function collectBrowserEvidence(
   const visitQueuedBookingDestinations = async () => {
     while (
       bookingQueue.length > 0 &&
-      bookingDestinations.length < MAX_BROWSER_BOOKING_DESTINATION_VISITS
+      bookingNavigationAttempts < MAX_BROWSER_BOOKING_DESTINATION_VISITS
     ) {
       const candidate = bookingQueue.shift()!;
+      bookingNavigationAttempts += 1;
       throwIfBrowserProbeAborted(options.signal);
       const destinationPage = await createAdditionalInvestigationPage(page);
       try {
         throwIfBrowserProbeAborted(options.signal);
-        bookingDestinations.push(
-          await visitBookingDestination(
-            destinationPage,
-            {
-              ...candidate,
-              officialPageUrl,
-              courseName: input.courseName,
-            },
-            options.signal,
-          ),
+        const visit = await visitBookingDestination(
+          destinationPage,
+          {
+            ...candidate,
+            officialPageUrl,
+            courseName: input.courseName
+          },
+          options.signal,
+          markProviderRequestObserved,
+          recordNonHtmlNavigationBoundary
         );
+        if (visit) {
+          bookingDestinations.push(visit);
+        }
         throwIfBrowserProbeAborted(options.signal);
       } finally {
         if (destinationPage !== page) {
@@ -1793,7 +1864,7 @@ export async function collectBrowserEvidence(
   while (
     sameOriginQueue.length > 0 &&
     sameOriginNavigationAttempts < MAX_BROWSER_SAME_ORIGIN_PAGE_VISITS &&
-    bookingDestinations.length < MAX_BROWSER_BOOKING_DESTINATION_VISITS
+    bookingNavigationAttempts < MAX_BROWSER_BOOKING_DESTINATION_VISITS
   ) {
     const candidate = sameOriginQueue.shift()!;
     throwIfBrowserProbeAborted(options.signal);
@@ -1820,8 +1891,13 @@ export async function collectBrowserEvidence(
           requiresDirectIdentityMatch: candidate.requiresDirectIdentityMatch,
         },
         options.signal,
+        markProviderRequestObserved,
+        recordNonHtmlNavigationBoundary
       );
       throwIfBrowserProbeAborted(options.signal);
+      if (!visit) {
+        continue;
+      }
       const identityStatus = classifyRenderedOfficialPageCourseIdentity(
         visit.finalUrl,
         visit.evidence,
@@ -1855,8 +1931,9 @@ export async function collectBrowserEvidence(
         finalUrlIsBookingDestination
       ) {
         if (
-          bookingDestinations.length < MAX_BROWSER_BOOKING_DESTINATION_VISITS
+          bookingNavigationAttempts < MAX_BROWSER_BOOKING_DESTINATION_VISITS
         ) {
+          bookingNavigationAttempts += 1;
           bookingDestinations.push({
             sourcePageUrl: candidate.parentUrl,
             requestedUrl: visit.requestedUrl,
@@ -1924,6 +2001,9 @@ export async function collectBrowserEvidence(
     unprojectedSourceCandidate: options.unprojectedSourceCandidate,
     pageVisits,
     bookingDestinations,
+    nonHtmlNavigationBoundaries: [...nonHtmlNavigationBoundaries],
+    providerRequestObserved,
+    bookingNavigationAttempts
   });
 }
 
@@ -1940,6 +2020,10 @@ type BrowserPageObservation = {
   restrictedNetworkObserved: boolean;
   latestMainFrameDocumentStatus: number | null;
   latestMainFrameDocumentUrl: string | null;
+  latestMainFrameNavigationRequest: Request | null;
+  mainFrameNavigationRequestStarted: boolean;
+  nonHtmlMainFrameDocumentObserved: boolean;
+  dispose: () => void;
 };
 
 async function createAdditionalInvestigationPage(rootPage: Page) {
@@ -1964,6 +2048,9 @@ function normalizeSafeBrowserVisitUrl(value: string, officialPageUrl: string) {
   try {
     const url = new URL(value);
     url.hash = "";
+    if (isKnownNonHtmlBrowserDocumentUrl(url.toString())) {
+      return null;
+    }
     return isSafeRenderedBrowserInteractionDestination(
       url.toString(),
       officialPageUrl,
@@ -1978,6 +2065,8 @@ function normalizeSafeBrowserVisitUrl(value: string, officialPageUrl: string) {
 function observeBrowserPageNetwork(
   page: Page,
   officialSourceUrl: string,
+  onProviderRequest?: () => void,
+  onNonHtmlNavigationBoundary?: (url: string) => void
 ): BrowserPageObservation {
   const observation: BrowserPageObservation = {
     observedUrls: new Set<string>(),
@@ -1989,6 +2078,10 @@ function observeBrowserPageNetwork(
     restrictedNetworkObserved: false,
     latestMainFrameDocumentStatus: null,
     latestMainFrameDocumentUrl: null,
+    latestMainFrameNavigationRequest: null,
+    mainFrameNavigationRequestStarted: false,
+    nonHtmlMainFrameDocumentObserved: false,
+    dispose: () => undefined
   };
   const retainFingerprint = (
     fingerprint: BrowserNetworkContractFingerprint | null,
@@ -2009,7 +2102,11 @@ function observeBrowserPageNetwork(
     }
   };
 
-  page.on("request", (request) => {
+  const handleRequest = (request: Request) => {
+    if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+      observation.latestMainFrameNavigationRequest = request;
+      observation.mainFrameNavigationRequestStarted = true;
+    }
     observation.observedUrls.add(request.url());
     observation.restrictedNetworkObserved ||=
       isRestrictedBrowserNetworkObservation({
@@ -2024,9 +2121,31 @@ function observeBrowserPageNetwork(
         resourceType: request.resourceType(),
       }),
     );
-  });
-  page.on("response", (response) => {
+  };
+  const handleDownload = (download: Download) => {
+    const downloadUrl = download.url();
+    const request = observation.latestMainFrameNavigationRequest;
+    if (request) {
+      const redirectChainUrls = browserNavigationRedirectChainUrls(request);
+      if (
+        redirectChainUrls.some((url) =>
+          haveSameBrowserDownloadNavigationUrl(url, downloadUrl)
+        )
+      ) {
+        for (const url of redirectChainUrls) {
+          onNonHtmlNavigationBoundary?.(url);
+        }
+      }
+    }
+    onNonHtmlNavigationBoundary?.(downloadUrl);
+  };
+  const handleResponse = (response: Response) => {
     const request = response.request();
+    const nonHtmlBoundaryUrls =
+      getNonHtmlBrowserDocumentResponseBoundaryUrls(response);
+    for (const url of nonHtmlBoundaryUrls) {
+      onNonHtmlNavigationBoundary?.(url);
+    }
     if (
       request.isNavigationRequest() &&
       request.frame() === page.mainFrame() &&
@@ -2034,6 +2153,14 @@ function observeBrowserPageNetwork(
     ) {
       observation.latestMainFrameDocumentStatus = response.status();
       observation.latestMainFrameDocumentUrl = response.url();
+      observation.nonHtmlMainFrameDocumentObserved ||=
+        nonHtmlBoundaryUrls.length > 0;
+      if (
+        nonHtmlBoundaryUrls.length === 0 &&
+        response.request().redirectedTo() === null
+      ) {
+        onProviderRequest?.();
+      }
     }
     observation.observedUrls.add(response.url());
     observation.restrictedNetworkObserved ||=
@@ -2082,8 +2209,76 @@ function observeBrowserPageNetwork(
         response.status() as 401 | 403,
       );
     }
-  });
+  };
+  page.on("request", handleRequest);
+  page.on("download", handleDownload);
+  page.on("response", handleResponse);
+  observation.dispose = () => {
+    page.off("request", handleRequest);
+    page.off("download", handleDownload);
+    page.off("response", handleResponse);
+  };
   return observation;
+}
+
+const NON_HTML_BROWSER_DOCUMENT_CONTENT_TYPES = new Set([
+  "application/msword",
+  "application/pdf",
+  "application/rtf",
+  "application/vnd.ms-excel",
+  "application/vnd.ms-powerpoint",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/zip",
+  "text/calendar",
+  "text/csv",
+  "text/rtf"
+]);
+
+export function getNonHtmlBrowserDocumentResponseBoundaryUrls(
+  response: Pick<Response, "headers" | "request" | "url">
+) {
+  const headers = response.headers();
+  const contentDisposition = headers["content-disposition"] ?? "";
+  const contentType = (headers["content-type"] ?? "")
+    .split(";", 1)[0]
+    ?.trim()
+    .toLocaleLowerCase("en-US");
+  const isNonHtmlDocument = Boolean(
+    /(?:^|;)\s*attachment(?:\s*;|$)/iu.test(contentDisposition) ||
+    isKnownNonHtmlBrowserDocumentUrl(response.url()) ||
+    (contentType && NON_HTML_BROWSER_DOCUMENT_CONTENT_TYPES.has(contentType))
+  );
+  if (!isNonHtmlDocument) {
+    return [];
+  }
+  return [
+    ...browserNavigationRedirectChainUrls(response.request()),
+    response.url()
+  ].filter((url, index, values) => values.indexOf(url) === index);
+}
+
+function browserNavigationRedirectChainUrls(request: Request) {
+  const urls: string[] = [];
+  let current: Request | null = request;
+  for (let depth = 0; current && depth < 12; depth += 1) {
+    urls.push(current.url());
+    current = current.redirectedFrom();
+  }
+  return urls;
+}
+
+function haveSameBrowserDownloadNavigationUrl(left: string, right: string) {
+  try {
+    const leftUrl = new URL(left);
+    const rightUrl = new URL(right);
+    leftUrl.hash = "";
+    rightUrl.hash = "";
+    return leftUrl.toString() === rightUrl.toString();
+  } catch {
+    return left === right;
+  }
 }
 
 async function materializeBrowserPageObservation(
@@ -2141,10 +2336,14 @@ async function runBrowserNavigationOperation(
 ) {
   try {
     await runAbortAwareBrowserOperation(operation, signal);
+    return "COMPLETED" as const;
   } catch (error) {
     throwIfBrowserProbeAborted(signal);
+    if (isExpectedBrowserDownloadNavigationBoundary(error)) {
+      return "DOWNLOAD_SKIPPED" as const;
+    }
     if (tolerateExpectedBoundary()) {
-      return;
+      return "COMPLETED" as const;
     }
     const partialDocumentIsUsable =
       classifyPersistableBrowserStageFailure(error) === "TIMEOUT" &&
@@ -2152,7 +2351,15 @@ async function runBrowserNavigationOperation(
     if (!partialDocumentIsUsable) {
       throw error;
     }
+    return "COMPLETED" as const;
   }
+}
+
+function isExpectedBrowserDownloadNavigationBoundary(error: unknown) {
+  return Boolean(
+    error instanceof Error &&
+    /^page\.goto: Download is starting(?:\r?\n|$)/u.test(error.message)
+  );
 }
 
 async function visitOfficialPage(
@@ -2166,10 +2373,17 @@ async function visitOfficialPage(
     courseName: string;
     requiresDirectIdentityMatch?: boolean;
   },
-  signal?: AbortSignal
-): Promise<BrowserInvestigationPageVisit> {
+  signal?: AbortSignal,
+  onProviderRequest?: () => void,
+  onNonHtmlNavigationBoundary?: (url: string) => void
+): Promise<BrowserInvestigationPageVisit | null> {
   throwIfBrowserProbeAborted(signal);
-  const observation = observeBrowserPageNetwork(page, input.officialPageUrl);
+  const observation = observeBrowserPageNetwork(
+    page,
+    input.officialPageUrl,
+    onProviderRequest,
+    onNonHtmlNavigationBoundary
+  );
   const interactionGuard = await createMainFrameInteractionGuard(
     page,
     input.officialPageUrl,
@@ -2177,65 +2391,88 @@ async function visitOfficialPage(
       deferCrossOriginMainFrame: true,
       onRestrictedNetworkRequest: () => {
         observation.restrictedNetworkObserved = true;
-      },
-    },
-  );
-  await runBrowserNavigationOperation(
-    page,
-    () =>
-      page.goto(input.requestedUrl, {
-        waitUntil: "domcontentloaded",
-        timeout: NAVIGATION_TIMEOUT_MS,
-      }),
-    signal,
-    () =>
-      interactionGuard.isBlocked() ||
-      interactionGuard.getDeferredCrossOriginDestination() !== null,
-  );
-  await runBrowserNavigationOperation(
-    page,
-    () =>
-      page.waitForLoadState("networkidle", { timeout: 5_000 }),
-    signal,
-    () =>
-      interactionGuard.isBlocked() ||
-      interactionGuard.getDeferredCrossOriginDestination() !== null,
-  );
-  const interactionBlocked = interactionGuard.isBlocked();
-  const deferredBookingUrl =
-    interactionGuard.getDeferredCrossOriginDestination();
-  const finalUrl =
-    page.url() === "about:blank" ? input.requestedUrl : page.url();
-  const evidence =
-    interactionBlocked || deferredBookingUrl
-      ? emptyPreparedBrowserPageEvidence()
-      : await collectPageEvidence(
-          page,
-          haveSamePublicWebsiteOrigin(input.officialPageUrl, finalUrl)
-            ? input.courseName
-            : undefined,
-          {
-            allowStaticPageFetch: !interactionBlocked,
-            latestMainFrameDocumentStatus:
-              observation.latestMainFrameDocumentStatus,
-            latestMainFrameDocumentUrl: observation.latestMainFrameDocumentUrl,
-          },
-        );
-  const network = await materializeBrowserPageObservation(observation);
-  await interactionGuard.dispose();
-  throwIfBrowserProbeAborted(signal);
-  return {
-    requestedUrl: input.requestedUrl,
-    finalUrl,
-    label: input.label,
-    depth: input.depth,
-    parentUrl: input.parentUrl,
-    requiresDirectIdentityMatch: input.requiresDirectIdentityMatch,
-    interactionBlocked,
-    deferredBookingUrl,
-    evidence,
-    ...network,
-  };
+      }
+    }
+  ).catch((error) => {
+    observation.dispose();
+    throw error;
+  });
+  try {
+    let navigation: Awaited<ReturnType<typeof runBrowserNavigationOperation>>;
+    try {
+      navigation = await runBrowserNavigationOperation(
+        page,
+        () =>
+          page.goto(input.requestedUrl, {
+            waitUntil: "domcontentloaded",
+            timeout: NAVIGATION_TIMEOUT_MS
+          }),
+        signal,
+        () =>
+          interactionGuard.isBlocked() ||
+          interactionGuard.getDeferredCrossOriginDestination() !== null
+      );
+    } catch (error) {
+      if (
+        observation.mainFrameNavigationRequestStarted &&
+        !observation.nonHtmlMainFrameDocumentObserved
+      ) {
+        onProviderRequest?.();
+      }
+      throw error;
+    }
+    if (navigation === "DOWNLOAD_SKIPPED") {
+      onNonHtmlNavigationBoundary?.(input.requestedUrl);
+      await materializeBrowserPageObservation(observation);
+      throwIfBrowserProbeAborted(signal);
+      return null;
+    }
+    await runBrowserNavigationOperation(
+      page,
+      () => page.waitForLoadState("networkidle", { timeout: 5_000 }),
+      signal,
+      () =>
+        interactionGuard.isBlocked() ||
+        interactionGuard.getDeferredCrossOriginDestination() !== null
+    );
+    const interactionBlocked = interactionGuard.isBlocked();
+    const deferredBookingUrl =
+      interactionGuard.getDeferredCrossOriginDestination();
+    const finalUrl =
+      page.url() === "about:blank" ? input.requestedUrl : page.url();
+    const evidence =
+      interactionBlocked || deferredBookingUrl
+        ? emptyPreparedBrowserPageEvidence()
+        : await collectPageEvidence(
+            page,
+            haveSamePublicWebsiteOrigin(input.officialPageUrl, finalUrl)
+              ? input.courseName
+              : undefined,
+            {
+              allowStaticPageFetch: !interactionBlocked,
+              latestMainFrameDocumentStatus:
+                observation.latestMainFrameDocumentStatus,
+              latestMainFrameDocumentUrl: observation.latestMainFrameDocumentUrl
+            }
+          );
+    const network = await materializeBrowserPageObservation(observation);
+    throwIfBrowserProbeAborted(signal);
+    return {
+      requestedUrl: input.requestedUrl,
+      finalUrl,
+      label: input.label,
+      depth: input.depth,
+      parentUrl: input.parentUrl,
+      requiresDirectIdentityMatch: input.requiresDirectIdentityMatch,
+      interactionBlocked,
+      deferredBookingUrl,
+      evidence,
+      ...network
+    };
+  } finally {
+    observation.dispose();
+    await interactionGuard.dispose();
+  }
 }
 
 async function visitBookingDestination(
@@ -2248,56 +2485,57 @@ async function visitBookingDestination(
     officialPageUrl: string;
     courseName: string;
   },
-  signal?: AbortSignal
-): Promise<BrowserBookingDestinationVisit> {
+  signal?: AbortSignal,
+  onProviderRequest?: () => void,
+  onNonHtmlNavigationBoundary?: (url: string) => void
+): Promise<BrowserBookingDestinationVisit | null> {
   throwIfBrowserProbeAborted(signal);
-  const observation = observeBrowserPageNetwork(page, input.officialPageUrl);
+  const observation = observeBrowserPageNetwork(
+    page,
+    input.officialPageUrl,
+    onProviderRequest,
+    onNonHtmlNavigationBoundary
+  );
   const interactionGuard = await createMainFrameInteractionGuard(
     page,
     input.officialPageUrl,
     {
       onRestrictedNetworkRequest: () => {
         observation.restrictedNetworkObserved = true;
-      },
-    },
-  );
-  await runBrowserNavigationOperation(
-    page,
-    () =>
-      page.goto(input.url, {
-        waitUntil: "domcontentloaded",
-        timeout: NAVIGATION_TIMEOUT_MS,
-      }),
-    signal,
-    () => interactionGuard.isBlocked(),
-  );
-  await runBrowserNavigationOperation(
-    page,
-    () =>
-      page.waitForLoadState("networkidle", { timeout: 5_000 }),
-    signal,
-    () => interactionGuard.isBlocked(),
-  );
-  let interactionBlocked = interactionGuard.isBlocked();
-  let evidence =
-    interactionBlocked
-      ? emptyPreparedBrowserPageEvidence()
-      : await collectPageEvidence(page, undefined, {
-          allowStaticPageFetch: !interactionBlocked,
-          latestMainFrameDocumentStatus:
-            observation.latestMainFrameDocumentStatus,
-          latestMainFrameDocumentUrl: observation.latestMainFrameDocumentUrl,
-        });
-
-  if (
-    !interactionBlocked &&
-    !shouldStopBrowserDiscovery({
-      accessBarrierCount: observation.accessBarriers.size,
-      accessControlDetected: evidence.accessControlDetected,
-    })
-  ) {
-    await clickLikelyBookingLink(page, undefined, interactionGuard, signal);
-    throwIfBrowserProbeAborted(signal);
+      }
+    }
+  ).catch((error) => {
+    observation.dispose();
+    throw error;
+  });
+  try {
+    let navigation: Awaited<ReturnType<typeof runBrowserNavigationOperation>>;
+    try {
+      navigation = await runBrowserNavigationOperation(
+        page,
+        () =>
+          page.goto(input.url, {
+            waitUntil: "domcontentloaded",
+            timeout: NAVIGATION_TIMEOUT_MS
+          }),
+        signal,
+        () => interactionGuard.isBlocked()
+      );
+    } catch (error) {
+      if (
+        observation.mainFrameNavigationRequestStarted &&
+        !observation.nonHtmlMainFrameDocumentObserved
+      ) {
+        onProviderRequest?.();
+      }
+      throw error;
+    }
+    if (navigation === "DOWNLOAD_SKIPPED") {
+      onNonHtmlNavigationBoundary?.(input.url);
+      await materializeBrowserPageObservation(observation);
+      throwIfBrowserProbeAborted(signal);
+      return null;
+    }
     await runBrowserNavigationOperation(
       page,
       () =>
@@ -2305,51 +2543,85 @@ async function visitBookingDestination(
       signal,
       () => interactionGuard.isBlocked(),
     );
-    interactionBlocked = interactionGuard.isBlocked();
-    if (!interactionBlocked) {
-      const preDateEvidence = await collectPageEvidence(page, undefined, {
-        latestMainFrameDocumentStatus:
-          observation.latestMainFrameDocumentStatus,
-        latestMainFrameDocumentUrl: observation.latestMainFrameDocumentUrl,
-      });
-      if (
-        !shouldStopBrowserDiscovery({
-          accessBarrierCount: observation.accessBarriers.size,
-          accessControlDetected: preDateEvidence.accessControlDetected,
-        })
-      ) {
-        await trySelectSearchDate(page, interactionGuard);
-        throwIfBrowserProbeAborted(signal);
-        await runBrowserNavigationOperation(
-          page,
-          () => page.waitForLoadState("networkidle", { timeout: 5_000 }),
-          signal,
-          () => interactionGuard.isBlocked(),
-        );
-      }
-      evidence = await collectPageEvidence(page, undefined, {
-        latestMainFrameDocumentStatus:
-          observation.latestMainFrameDocumentStatus,
-        latestMainFrameDocumentUrl: observation.latestMainFrameDocumentUrl,
-      });
-      interactionBlocked = interactionGuard.isBlocked();
-    }
-  }
+    let interactionBlocked = interactionGuard.isBlocked();
+    let evidence = interactionBlocked
+      ? emptyPreparedBrowserPageEvidence()
+      : await collectPageEvidence(page, undefined, {
+          allowStaticPageFetch: !interactionBlocked,
+          latestMainFrameDocumentStatus:
+            observation.latestMainFrameDocumentStatus,
+          latestMainFrameDocumentUrl: observation.latestMainFrameDocumentUrl
+        });
 
-  const finalUrl = page.url() === "about:blank" ? input.url : page.url();
-  const network = await materializeBrowserPageObservation(observation);
-  await interactionGuard.dispose();
-  throwIfBrowserProbeAborted(signal);
-  return {
-    sourcePageUrl: input.sourcePageUrl,
-    requestedUrl: input.url,
-    finalUrl,
-    label: input.label,
-    courseScoped: input.courseScoped,
-    interactionBlocked,
-    evidence,
-    ...network,
-  };
+    if (
+      !interactionBlocked &&
+      !shouldStopBrowserDiscovery({
+        accessBarrierCount: observation.accessBarriers.size,
+        accessControlDetected: evidence.accessControlDetected
+      })
+    ) {
+      await clickLikelyBookingLink(
+        page,
+        undefined,
+        interactionGuard,
+        signal,
+        onNonHtmlNavigationBoundary
+      );
+      throwIfBrowserProbeAborted(signal);
+      await runBrowserNavigationOperation(
+        page,
+        () => page.waitForLoadState("networkidle", { timeout: 5_000 }),
+        signal,
+        () => interactionGuard.isBlocked()
+      );
+      interactionBlocked = interactionGuard.isBlocked();
+      if (!interactionBlocked) {
+        const preDateEvidence = await collectPageEvidence(page, undefined, {
+          latestMainFrameDocumentStatus:
+            observation.latestMainFrameDocumentStatus,
+          latestMainFrameDocumentUrl: observation.latestMainFrameDocumentUrl
+        });
+        if (
+          !shouldStopBrowserDiscovery({
+            accessBarrierCount: observation.accessBarriers.size,
+            accessControlDetected: preDateEvidence.accessControlDetected
+          })
+        ) {
+          await trySelectSearchDate(page, interactionGuard);
+          throwIfBrowserProbeAborted(signal);
+          await runBrowserNavigationOperation(
+            page,
+            () => page.waitForLoadState("networkidle", { timeout: 5_000 }),
+            signal,
+            () => interactionGuard.isBlocked()
+          );
+        }
+        evidence = await collectPageEvidence(page, undefined, {
+          latestMainFrameDocumentStatus:
+            observation.latestMainFrameDocumentStatus,
+          latestMainFrameDocumentUrl: observation.latestMainFrameDocumentUrl
+        });
+        interactionBlocked = interactionGuard.isBlocked();
+      }
+    }
+
+    const finalUrl = page.url() === "about:blank" ? input.url : page.url();
+    const network = await materializeBrowserPageObservation(observation);
+    throwIfBrowserProbeAborted(signal);
+    return {
+      sourcePageUrl: input.sourcePageUrl,
+      requestedUrl: input.url,
+      finalUrl,
+      label: input.label,
+      courseScoped: input.courseScoped,
+      interactionBlocked,
+      evidence,
+      ...network
+    };
+  } finally {
+    observation.dispose();
+    await interactionGuard.dispose();
+  }
 }
 
 function emptyPreparedBrowserPageEvidence() {
@@ -2646,7 +2918,8 @@ async function clickLikelyBookingLink(
   page: Page,
   courseName?: string,
   interactionGuard?: MainFrameInteractionGuard,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onNonHtmlNavigationBoundary?: (url: string) => void
 ) {
   throwIfBrowserProbeAborted(signal);
   if (interactionGuard?.isBlocked()) {
@@ -2690,15 +2963,16 @@ async function clickLikelyBookingLink(
   const staticFrameCandidates = interactionGuard?.isBlocked()
     ? []
     : await collectStaticPageFrameCandidates(page, currentPageUrl);
+  const navigableCandidates = [
+    ...anchorCandidates,
+    ...frameCandidates,
+    ...staticFrameCandidates.map((candidate) => ({
+      href: candidate.url,
+      text: candidate.label
+    }))
+  ].filter((candidate) => !isKnownNonHtmlBrowserDocumentUrl(candidate.href));
   const href = pickLikelyBookingHref(
-    [
-      ...anchorCandidates,
-      ...frameCandidates,
-      ...staticFrameCandidates.map((candidate) => ({
-        href: candidate.url,
-        text: candidate.label,
-      })),
-    ],
+    navigableCandidates,
     currentPageUrl,
     courseName,
   );
@@ -2707,15 +2981,11 @@ async function clickLikelyBookingLink(
     return null;
   }
 
-  const selected =
-    [...anchorCandidates, ...frameCandidates].find(
-      (candidate) => candidate.href === href,
-    ) ??
-    staticFrameCandidates
-      .map((candidate) => ({ href: candidate.url, text: candidate.label }))
-      .find((candidate) => candidate.href === href);
+  const selected = navigableCandidates.find(
+    (candidate) => candidate.href === href
+  );
 
-  await runBrowserNavigationOperation(
+  const navigation = await runBrowserNavigationOperation(
     page,
     () =>
       page.goto(href, {
@@ -2725,6 +2995,10 @@ async function clickLikelyBookingLink(
     signal,
     () => interactionGuard?.isBlocked() === true,
   );
+  if (navigation === "DOWNLOAD_SKIPPED") {
+    onNonHtmlNavigationBoundary?.(href);
+    return null;
+  }
   return selected ?? { href, text: "Book a tee time" };
 }
 

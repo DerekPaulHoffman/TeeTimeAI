@@ -757,7 +757,9 @@ describe("browser probe evidence pipeline", () => {
         },
         { url: "/account/login", label: "Member login" },
         { url: "/book/tee-times", label: "View tee times" },
-      ],
+        { url: "/golf/rates.pdf", label: "Golf rates PDF" },
+        { url: "/book/tee-times.pdf", label: "Book tee times PDF" }
+      ]
     });
 
     expect(planned.sameOriginPages.map(({ url }) => url)).toEqual([
@@ -774,6 +776,7 @@ describe("browser probe evidence pipeline", () => {
         purpose: "BOOKING",
       }),
     ]);
+    expect(JSON.stringify(planned)).not.toContain(".pdf");
   });
 
   it("requires locality corroboration before a rendered identity can match", () => {

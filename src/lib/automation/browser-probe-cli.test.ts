@@ -344,6 +344,9 @@ describe("browser probe direct entry", () => {
     new TypeError("Cannot read properties of undefined"),
     new Error("Course-support browser progression lost current ownership."),
     new Error("Course-support browser persistence violated an invariant."),
+    new Error(
+      "page.goto: Download is starting\nCall log:\n  - navigating to a public document"
+    ),
     Object.assign(new Error("Operation exceeded its deadline."), {
       name: "TimeoutError"
     }),
@@ -605,6 +608,33 @@ describe("browser probe direct entry", () => {
       notes:
         "Browser probe stopped after responder ownership cancellation; no course or playbook writes were permitted after cancellation."
     });
+  });
+
+  it("persists a bounded fingerprint instead of a browser failure URL", async () => {
+    const privateMarker = "must-not-persist-browser-query-value";
+    const finishRun = vi.fn(async () => true);
+    const error = new Error(
+      `page.goto: net::ERR_CONNECTION_RESET at https://provider.example/tee-times?token=${privateMarker}`
+    );
+
+    await finishBrowserProbeAutomationRunAfterFailure(
+      { runId: "run-1", error },
+      finishRun
+    );
+
+    const persisted = finishRun.mock.calls[0]?.[1];
+    expect(persisted).toMatchObject({
+      outcome: "failed",
+      errors: {
+        name: "BrowserProbeError",
+        message: "Browser provider operation failed with a network condition."
+      }
+    });
+    expect(persisted?.notes).toMatch(
+      /^Browser probe failed; class=NETWORK; fingerprint=[0-9a-f]{16}\.$/
+    );
+    expect(JSON.stringify(persisted)).not.toContain(privateMarker);
+    expect(JSON.stringify(persisted)).not.toContain("provider.example");
   });
 
   it("accepts corroboration only from a fresh rendered observation in the same cycle and runtime", () => {

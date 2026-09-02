@@ -9,6 +9,7 @@ import {
   type BrowserAccessBarrier,
   type BrowserDiscovery,
   type BrowserDiscoveryEvidence,
+  type BrowserNonHtmlDocumentEvidence,
   type BrowserRenderedAccessControl,
   type BrowserRetainedBookingTarget,
 } from "@/lib/automation/browser-discovery";
@@ -51,6 +52,31 @@ export const MAX_BROWSER_INVESTIGATION_DEPTH = 2;
 export const MAX_BROWSER_BOOKING_DESTINATION_VISITS = 3;
 
 export type BrowserInvestigationMode = "RENDERED" | "INDEPENDENT";
+
+const NON_HTML_BROWSER_DOCUMENT_SUFFIXES = [
+  ".csv",
+  ".doc",
+  ".docx",
+  ".ics",
+  ".pdf",
+  ".ppt",
+  ".pptx",
+  ".rtf",
+  ".xls",
+  ".xlsx",
+  ".zip"
+] as const;
+
+export function isKnownNonHtmlBrowserDocumentUrl(value: string) {
+  try {
+    const pathname = new URL(value).pathname.toLocaleLowerCase("en-US");
+    return NON_HTML_BROWSER_DOCUMENT_SUFFIXES.some((suffix) =>
+      pathname.endsWith(suffix)
+    );
+  } catch {
+    return false;
+  }
+}
 
 export type BrowserCourseIdentityContext = {
   address?: string | null;
@@ -135,6 +161,8 @@ export type BrowserInvestigationAudit = {
   incidentCycle: number | null;
   runtimeVersion: string;
   observedAt: string;
+  providerRequestObserved: boolean;
+  bookingNavigationAttempts: number;
   // Added only at persistence, after the guarded course projection has
   // produced the exact provider snapshot this observation describes.
   providerSnapshotFingerprint?: string;
@@ -173,6 +201,10 @@ export type BrowserInvestigationAudit = {
     courseScoped: boolean;
     interactionBlocked: boolean;
   }>;
+  evidenceOnlyBookingLinks?: Array<{
+    url: string;
+  }>;
+  nonHtmlDocuments?: BrowserNonHtmlDocumentEvidence[];
   restrictedNetworkObserved?: boolean;
   networkContracts: BrowserNetworkContractFingerprint[];
 };
@@ -615,6 +647,7 @@ export function planBrowserInvestigationLinks(input: {
     if (
       seen.has(normalizedUrl) ||
       !isSafeManualEvidenceUrl(url) ||
+      isKnownNonHtmlBrowserDocumentUrl(normalizedUrl) ||
       isEvidenceOnlyOfficialBookingAccountLink(
         { url: normalizedUrl, label: candidate.label },
         input.officialPageUrl,
@@ -835,6 +868,9 @@ export function finalizeBrowserInvestigationEvidence(input: {
   unprojectedSourceCandidate?: boolean;
   pageVisits: BrowserInvestigationPageVisit[];
   bookingDestinations: BrowserBookingDestinationVisit[];
+  nonHtmlNavigationBoundaries?: string[];
+  providerRequestObserved?: boolean;
+  bookingNavigationAttempts?: number;
 }): BrowserInvestigationEvidence {
   const officialWebsite =
     input.course.officialCourseWebsite ?? input.course.sourceUrl;
@@ -848,6 +884,91 @@ export function finalizeBrowserInvestigationEvidence(input: {
   const bookingDestinations = input.bookingDestinations
     .filter((visit) => visit.courseScoped)
     .slice(0, MAX_BROWSER_BOOKING_DESTINATION_VISITS);
+  const rawNonHtmlDocuments: BrowserNonHtmlDocumentEvidence[] = [
+    ...[
+      input.course.sourceUrl,
+      input.course.officialCourseWebsite,
+      input.retainedBookingUrl,
+      ...pageVisits.flatMap(({ evidence }) =>
+        evidence.linkCandidates.map(({ url }) => url)
+      ),
+      ...bookingDestinations.flatMap(({ evidence }) =>
+        evidence.linkCandidates.map(({ url }) => url)
+      )
+    ].flatMap((url) =>
+      url && isKnownNonHtmlBrowserDocumentUrl(url)
+        ? [{ url, reason: "KNOWN_SUFFIX" as const }]
+        : []
+    ),
+    ...(input.nonHtmlNavigationBoundaries ?? []).map((url) => ({
+      url,
+      reason: "DOWNLOAD_RESPONSE" as const
+    }))
+  ];
+  const nonHtmlDocuments = deduplicateNonHtmlDocuments(rawNonHtmlDocuments);
+  const nonHtmlDocumentUrlKeys = new Set(
+    rawNonHtmlDocuments.flatMap(({ url }) => {
+      const key = canonicalBrowserNavigationInput(url);
+      return key ? [key] : [];
+    })
+  );
+  const isNonHtmlDocumentUrl = (value: string) => {
+    const key = canonicalBrowserNavigationInput(value);
+    return Boolean(
+      isKnownNonHtmlBrowserDocumentUrl(value) ||
+      (key && nonHtmlDocumentUrlKeys.has(key))
+    );
+  };
+  const auditProviderWebsite = isNonHtmlDocumentUrl(officialWebsite)
+    ? "about:blank"
+    : auditOfficialWebsite;
+  const nonHtmlBoundaryNetworkKeys = new Set(
+    (input.nonHtmlNavigationBoundaries ?? []).flatMap((url) => {
+      const contract = buildBrowserNetworkContractFingerprint({
+        url,
+        method: "GET",
+        resourceType: "document"
+      });
+      return contract ? [browserNetworkContractUrlShapeKey(contract)] : [];
+    })
+  );
+  const retainedHtmlNavigationKeys = new Set(
+    [...pageVisits, ...bookingDestinations].flatMap((visit) =>
+      [visit.requestedUrl, visit.finalUrl].flatMap((url) => {
+        const key = isNonHtmlDocumentUrl(url)
+          ? null
+          : canonicalBrowserNavigationInput(url);
+        return key ? [key] : [];
+      })
+    )
+  );
+  const requiresRetainedHtmlNavigation = (candidate: {
+    url: string;
+    label: string;
+  }) => {
+    try {
+      const url = new URL(candidate.url);
+      return Boolean(
+        !haveSamePublicWebsiteOrigin(officialWebsite, url.toString()) ||
+        getKnownProviderFamilyForHostname(url.hostname) ||
+        isProviderInfrastructureUrl(url.toString()) ||
+        looksLikeSafeBookingDestination(
+          url.toString(),
+          candidate.label,
+          officialWebsite
+        )
+      );
+    } catch {
+      return true;
+    }
+  };
+  const hasRetainedHtmlNavigation = (candidate: {
+    url: string;
+    label: string;
+  }) => {
+    const key = canonicalBrowserNavigationInput(candidate.url);
+    return Boolean(key && retainedHtmlNavigationKeys.has(key));
+  };
   const trustedByUrl = new Map<string, boolean>();
   const pageAssessments = pageVisits.map((visit) => {
     const identityStatus = classifyRenderedOfficialPageCourseIdentity(
@@ -894,21 +1015,43 @@ export function finalizeBrowserInvestigationEvidence(input: {
     pageAssessments.find(
       ({ visit }) => visit.requiresDirectIdentityMatch !== true,
     );
-  const trustedOfficialLinks = trustedPages.flatMap(
-    ({ visit }) =>
-      visit.evidence.managedProtectionTemplateDetected
-        ? []
-        : visit.evidence.linkCandidates,
+  const allTrustedOfficialLinks = trustedPages.flatMap(({ visit }) =>
+    visit.evidence.managedProtectionTemplateDetected
+      ? []
+      : visit.evidence.linkCandidates.filter(
+          ({ url }) => !isNonHtmlDocumentUrl(url)
+        )
   );
-  const allRenderedPageLinks = pageAssessments
+  const allRenderedPageLinksIncludingEvidenceOnly = pageAssessments
     .filter(
       ({ visit, trustedForCourse }) =>
         !visit.evidence.managedProtectionTemplateDetected &&
         (visit.requiresDirectIdentityMatch !== true || trustedForCourse),
     )
-    .flatMap(
-      ({ visit }) => visit.evidence.linkCandidates,
+    .flatMap(({ visit }) =>
+      visit.evidence.linkCandidates.filter(
+        ({ url }) => !isNonHtmlDocumentUrl(url)
+      )
     );
+  const evidenceOnlyBookingLinks = deduplicateBrowserLinks(
+    allRenderedPageLinksIncludingEvidenceOnly.filter(
+      (candidate) =>
+        requiresRetainedHtmlNavigation(candidate) &&
+        !hasRetainedHtmlNavigation(candidate)
+    )
+  ).slice(0, 20);
+  const isActionableRenderedLink = (candidate: {
+    url: string;
+    label: string;
+  }) =>
+    !requiresRetainedHtmlNavigation(candidate) ||
+    hasRetainedHtmlNavigation(candidate);
+  const trustedOfficialLinks = allTrustedOfficialLinks.filter(
+    isActionableRenderedLink
+  );
+  const allRenderedPageLinks = allRenderedPageLinksIncludingEvidenceOnly.filter(
+    isActionableRenderedLink
+  );
   const redirectedBookingLinks = bookingDestinations.flatMap((visit) => {
     const sourceTrusted = visit.sourcePageUrl
       ? trustedByUrl.get(visit.sourcePageUrl) === true
@@ -916,6 +1059,7 @@ export function finalizeBrowserInvestigationEvidence(input: {
     if (
       !sourceTrusted ||
       visit.interactionBlocked ||
+      isNonHtmlDocumentUrl(visit.finalUrl) ||
       !looksLikeSafeBookingDestination(
         visit.finalUrl,
         visit.label,
@@ -1010,21 +1154,26 @@ export function finalizeBrowserInvestigationEvidence(input: {
     ...trustedPages
       .filter(({ visit }) => !visit.evidence.managedProtectionTemplateDetected)
       .flatMap(({ visit }) => [
-        ...visit.evidence.anchors,
-        ...visit.evidence.scripts,
+        ...visit.evidence.anchors.filter((url) => {
+          const candidate = visit.evidence.linkCandidates.find((link) =>
+            haveSameExactBrowserNavigationInput(link.url, url)
+          );
+          return !candidate || isActionableRenderedLink(candidate);
+        }),
+        ...visit.evidence.scripts
       ]),
-    ...renderedLinkCandidates.map(({ url }) => url),
-  ]);
+    ...renderedLinkCandidates.map(({ url }) => url)
+  ]).filter((url) => !isNonHtmlDocumentUrl(url));
   const successfulProviderUrls = uniqueBrowserUrls(
     contentBearingTrustedObservations.flatMap(
-      (visit) => visit.successfulProviderUrls ?? [],
-    ),
-  );
+      (visit) => visit.successfulProviderUrls ?? []
+    )
+  ).filter((url) => !isNonHtmlDocumentUrl(url));
   const teeItUpFacilityResponses = deduplicateTeeItUpResponses(
     contentBearingTrustedObservations.flatMap(
-      (visit) => visit.teeItUpFacilityResponses ?? [],
-    ),
-  );
+      (visit) => visit.teeItUpFacilityResponses ?? []
+    )
+  ).filter(({ url }) => !isNonHtmlDocumentUrl(url));
   const accessBarriers = deduplicateAccessBarriers([
     ...pageAssessments
       .filter(
@@ -1039,10 +1188,9 @@ export function finalizeBrowserInvestigationEvidence(input: {
   const selectedBookingOrigins = new Set(
     bookingDestinations.flatMap((visit) => {
       try {
-        return [
-          new URL(visit.finalUrl).origin,
-          new URL(visit.requestedUrl).origin,
-        ];
+        return [visit.finalUrl, visit.requestedUrl]
+          .filter((url) => !isNonHtmlDocumentUrl(url))
+          .map((url) => new URL(url).origin);
       } catch {
         return [];
       }
@@ -1055,9 +1203,12 @@ export function finalizeBrowserInvestigationEvidence(input: {
   )
     .filter(
       (contract) =>
-        haveSamePublicWebsiteOrigin(officialWebsite, contract.origin) ||
-        selectedBookingOrigins.has(contract.origin) ||
-        isProviderInfrastructureUrl(contract.origin),
+        !nonHtmlBoundaryNetworkKeys.has(
+          browserNetworkContractUrlShapeKey(contract)
+        ) &&
+        (haveSamePublicWebsiteOrigin(officialWebsite, contract.origin) ||
+          selectedBookingOrigins.has(contract.origin) ||
+          isProviderInfrastructureUrl(contract.origin))
     )
     .slice(0, 80);
   const restrictedNetworkObserved =
@@ -1102,22 +1253,39 @@ export function finalizeBrowserInvestigationEvidence(input: {
     ),
   ]);
   const retainedBookingTarget = buildRetainedBookingTarget(
-    input.retainedBookingUrl,
-    bookingDestinations,
+    input.retainedBookingUrl && !isNonHtmlDocumentUrl(input.retainedBookingUrl)
+      ? input.retainedBookingUrl
+      : null,
+    bookingDestinations
   );
+  const safeCourseSourceUrl = isNonHtmlDocumentUrl(input.course.sourceUrl)
+    ? (sanitizeBrowserAuditUrl(input.course.sourceUrl) ?? "about:blank")
+    : input.course.sourceUrl;
+  const safeOfficialCourseWebsite = input.course.officialCourseWebsite
+    ? isNonHtmlDocumentUrl(input.course.officialCourseWebsite)
+      ? sanitizeBrowserAuditUrl(input.course.officialCourseWebsite)
+      : input.course.officialCourseWebsite
+    : input.course.officialCourseWebsite;
   const finalUrl =
-    [...bookingDestinations]
-      .reverse()
-      .find(
-        (visit) =>
-          !visit.interactionBlocked &&
-          !visit.evidence.managedProtectionTemplateDetected,
-      )?.finalUrl ??
+    [...bookingDestinations].reverse().flatMap((visit) => {
+      if (
+        visit.interactionBlocked ||
+        visit.evidence.managedProtectionTemplateDetected
+      ) {
+        return [];
+      }
+      if (!isNonHtmlDocumentUrl(visit.finalUrl)) {
+        return [visit.finalUrl];
+      }
+      return !isNonHtmlDocumentUrl(visit.requestedUrl)
+        ? [visit.requestedUrl]
+        : [];
+    })[0] ??
     (officialPage &&
     !officialPage.visit.evidence.managedProtectionTemplateDetected
       ? officialPage.visit.finalUrl
       : undefined) ??
-    input.course.sourceUrl;
+    safeCourseSourceUrl;
 
   return {
     ...input.course,
@@ -1131,10 +1299,15 @@ export function finalizeBrowserInvestigationEvidence(input: {
       officialPage &&
       !officialPage.visit.evidence.managedProtectionTemplateDetected
         ? officialPage.visit.finalUrl
-        : input.course.sourceUrl,
+        : safeCourseSourceUrl,
+    officialCourseWebsite: safeOfficialCourseWebsite,
     finalUrl,
     observedUrls,
     successfulProviderUrls,
+    ...(nonHtmlDocuments.length > 0 ? { nonHtmlDocuments } : {}),
+    ...(evidenceOnlyBookingLinks.length > 0
+      ? { evidenceOnlyBookingLinks }
+      : {}),
     ...(teeItUpFacilityResponses.length > 0
       ? { teeItUpFacilityResponses }
       : {}),
@@ -1171,21 +1344,34 @@ export function finalizeBrowserInvestigationEvidence(input: {
       observedAt: normalizeBrowserAuditObservedAt(
         input.auditContext?.observedAt,
       ),
+      providerRequestObserved: input.providerRequestObserved === true,
+      bookingNavigationAttempts: Math.min(
+        Math.max(
+          input.bookingNavigationAttempts ?? bookingDestinations.length,
+          0
+        ),
+        MAX_BROWSER_BOOKING_DESTINATION_VISITS
+      ),
       limits: {
         maxSameOriginPages: MAX_BROWSER_SAME_ORIGIN_PAGE_VISITS,
         maxDepth: MAX_BROWSER_INVESTIGATION_DEPTH,
         maxBookingDestinations: MAX_BROWSER_BOOKING_DESTINATION_VISITS,
       },
       retainedInputs: {
-        officialWebsite: input.course.officialCourseWebsite
-          ? sanitizeBrowserAuditUrl(input.course.officialCourseWebsite)
-          : null,
+        officialWebsite:
+          input.course.officialCourseWebsite &&
+          !isNonHtmlDocumentUrl(input.course.officialCourseWebsite)
+            ? sanitizeBrowserAuditUrl(input.course.officialCourseWebsite)
+            : null,
         sourceUrl:
-          sanitizeBrowserAuditUrl(input.course.sourceUrl) ??
-          auditOfficialWebsite,
-        bookingUrl: input.retainedBookingUrl
-          ? sanitizeBrowserAuditUrl(input.retainedBookingUrl)
-          : null,
+          (!isNonHtmlDocumentUrl(input.course.sourceUrl)
+            ? sanitizeBrowserAuditUrl(input.course.sourceUrl)
+            : null) ?? auditProviderWebsite,
+        bookingUrl:
+          input.retainedBookingUrl &&
+          !isNonHtmlDocumentUrl(input.retainedBookingUrl)
+            ? sanitizeBrowserAuditUrl(input.retainedBookingUrl)
+            : null
       },
       identityAuthority: {
         source: input.unprojectedSourceCandidate
@@ -1203,7 +1389,8 @@ export function finalizeBrowserInvestigationEvidence(input: {
             sanitizeBrowserAuditUrl(visit.requestedUrl) ?? auditOfficialWebsite,
           finalUrl:
             sanitizeBrowserAuditUrl(
-              visit.evidence.managedProtectionTemplateDetected
+              visit.evidence.managedProtectionTemplateDetected ||
+                isNonHtmlDocumentUrl(visit.finalUrl)
                 ? visit.requestedUrl
                 : visit.finalUrl,
             ) ?? auditOfficialWebsite,
@@ -1219,16 +1406,30 @@ export function finalizeBrowserInvestigationEvidence(input: {
       ),
       bookingDestinations: bookingDestinations.map((visit) => ({
         requestedUrl:
-          sanitizeBrowserAuditUrl(visit.requestedUrl) ?? auditOfficialWebsite,
+          (!isNonHtmlDocumentUrl(visit.requestedUrl)
+            ? sanitizeBrowserAuditUrl(visit.requestedUrl)
+            : null) ?? auditProviderWebsite,
         finalUrl:
           sanitizeBrowserAuditUrl(
-            visit.evidence.managedProtectionTemplateDetected
+            visit.evidence.managedProtectionTemplateDetected ||
+              isNonHtmlDocumentUrl(visit.finalUrl)
               ? visit.requestedUrl
-              : visit.finalUrl,
-          ) ?? auditOfficialWebsite,
+              : visit.finalUrl
+          ) ?? auditProviderWebsite,
         courseScoped: visit.courseScoped,
         interactionBlocked: visit.interactionBlocked,
       })),
+      ...(evidenceOnlyBookingLinks.length > 0
+        ? {
+            evidenceOnlyBookingLinks: evidenceOnlyBookingLinks.flatMap(
+              ({ url }) => {
+                const sanitized = sanitizeBrowserAuditUrl(url);
+                return sanitized ? [{ url: sanitized }] : [];
+              }
+            )
+          }
+        : {}),
+      ...(nonHtmlDocuments.length > 0 ? { nonHtmlDocuments } : {}),
       restrictedNetworkObserved,
       networkContracts,
     },
@@ -1300,15 +1501,44 @@ function deduplicateRenderedAccessControls(
 }
 
 function haveSameExactBrowserNavigationInput(left: string, right: string) {
+  const leftUrl = canonicalBrowserNavigationInput(left);
+  const rightUrl = canonicalBrowserNavigationInput(right);
+  return Boolean(leftUrl && rightUrl && leftUrl === rightUrl);
+}
+
+function canonicalBrowserNavigationInput(value: string) {
   try {
-    const leftUrl = new URL(left);
-    const rightUrl = new URL(right);
-    leftUrl.hash = "";
-    rightUrl.hash = "";
-    return leftUrl.toString() === rightUrl.toString();
+    const url = new URL(value);
+    url.hash = "";
+    return url.toString();
   } catch {
-    return false;
+    return null;
   }
+}
+
+function deduplicateNonHtmlDocuments(
+  documents: BrowserNonHtmlDocumentEvidence[]
+) {
+  const retained = new Map<string, BrowserNonHtmlDocumentEvidence>();
+  for (const document of documents) {
+    const url = sanitizeBrowserAuditUrl(document.url);
+    if (!url) continue;
+    const current = retained.get(url);
+    if (!current || document.reason === "DOWNLOAD_RESPONSE") {
+      retained.set(url, { ...document, url });
+    }
+  }
+  return [...retained.values()].slice(0, 20);
+}
+
+function browserNetworkContractUrlShapeKey(
+  contract: BrowserNetworkContractFingerprint
+) {
+  return JSON.stringify({
+    origin: contract.origin,
+    pathPattern: contract.pathPattern,
+    queryKeys: contract.queryKeys
+  });
 }
 
 function sanitizeNetworkPathSegment(segment: string) {

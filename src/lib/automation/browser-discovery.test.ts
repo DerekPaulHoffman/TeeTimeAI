@@ -553,6 +553,51 @@ describe("browser discovery monitoring gate", () => {
 });
 
 describe("buildBrowserDiscovery", () => {
+  it("does not enrich an unvisited Chronogolf CTA into runnable support", async () => {
+    const officialPageUrl = "https://unvisited-cta-course.example/";
+    const unvisitedBookingUrl = "https://www.chronogolf.com/club/12345";
+    const discovery = buildBrowserDiscovery({
+      courseId: "unvisited-cta-course",
+      courseName: "Unvisited CTA Golf Course",
+      sourceUrl: officialPageUrl,
+      finalUrl: officialPageUrl,
+      observedUrls: [officialPageUrl],
+      linkCandidates: [],
+      evidenceOnlyBookingLinks: [
+        { url: unvisitedBookingUrl, label: "Book tee times" }
+      ],
+      officialPage: {
+        url: officialPageUrl,
+        courseName: "Unvisited CTA Golf Course",
+        linkCandidates: [],
+        visibleText:
+          "Unvisited CTA Golf Course public information. clubId: 12345."
+      },
+      visibleText:
+        "Unvisited CTA Golf Course public information. clubId: 12345."
+    });
+    const runWithLease = vi.fn();
+    const fetchImpl = vi.fn();
+
+    const enriched = await enrichBrowserDiscoveryWithProviderLease(
+      discovery,
+      "Unvisited CTA Golf Course",
+      runWithLease,
+      fetchImpl as unknown as typeof fetch
+    );
+
+    expect(discovery).toMatchObject({
+      status: "INSPECTED",
+      detectedPlatform: "UNKNOWN",
+      evidence: { learnedFrom: "provider-target-scope-unconfirmed" }
+    });
+    expect(enriched).toEqual({ acquired: true, discovery });
+    expect(runWithLease).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(enriched.discovery).not.toHaveProperty("apiMetadata");
+    expect(enriched.discovery.status).not.toBe("LEARNED");
+  });
+
   it("learns reusable Golf with Access metadata from an official provider link and public API request", () => {
     const bookingUrl =
       "https://golfwithaccess.com/course/example-public-course/reserve-tee-time";

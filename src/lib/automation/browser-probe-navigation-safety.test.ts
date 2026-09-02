@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   collectBrowserEvidence,
   collectStaticPageFrameCandidates,
+  getNonHtmlBrowserDocumentResponseBoundaryUrls,
   getPersistableBrowserOperationFailure,
   isReadOnlyBrowserRequestMethod,
   isSafeRenderedBrowserInteractionDestination,
@@ -11,6 +12,7 @@ import {
   runPersistableBrowserOperation,
 } from "../../../scripts/automation/browser-probe-needed-adapters";
 import { buildBrowserDiscovery } from "./browser-discovery";
+import { resolveProviderCapability } from "./provider-capabilities";
 
 function managedProtectionHtml(reference: string, extra = "") {
   return `<html><head><title>Access Denied</title></head><body><h1>Access Denied</h1><p>You don't have permission to access this server.</p><p>Reference #18.${reference}</p><p>https://errors.edgesuite.net/18.${reference}</p>${extra}</body></html>`;
@@ -23,25 +25,45 @@ describe("rendered browser navigation safety", () => {
     try {
       const page = await context.newPage();
       const officialPageUrl = "https://network-failure-course.example/";
-      await context.route("https://network-failure-course.example/**", (route) =>
-        route.abort("internetdisconnected"),
+      const onProviderRequest = vi.fn();
+      const listenerTarget = page as unknown as {
+        listenerCount: (event: string) => number;
+      };
+      const listenerBaseline = {
+        request: listenerTarget.listenerCount("request"),
+        response: listenerTarget.listenerCount("response"),
+        download: listenerTarget.listenerCount("download")
+      };
+      await context.route(
+        "https://network-failure-course.example/**",
+        (route) => route.abort("internetdisconnected")
       );
 
       let caught: unknown;
       try {
         await runPersistableBrowserOperation(() =>
-          collectBrowserEvidence(page, {
-            courseId: "network-failure-course",
-            courseName: "Network Failure Golf Course",
-            sourceUrl: officialPageUrl,
-            officialCourseWebsite: officialPageUrl,
-          }),
+          collectBrowserEvidence(
+            page,
+            {
+              courseId: "network-failure-course",
+              courseName: "Network Failure Golf Course",
+              sourceUrl: officialPageUrl,
+              officialCourseWebsite: officialPageUrl
+            },
+            { onProviderRequest }
+          )
         );
       } catch (error) {
         caught = error;
       }
 
       expect(getPersistableBrowserOperationFailure(caught)).toBe("NETWORK");
+      expect(onProviderRequest).toHaveBeenCalledTimes(1);
+      expect({
+        request: listenerTarget.listenerCount("request"),
+        response: listenerTarget.listenerCount("response"),
+        download: listenerTarget.listenerCount("download")
+      }).toEqual(listenerBaseline);
     } finally {
       await context.close();
       await browser.close();
@@ -134,6 +156,658 @@ describe("rendered browser navigation safety", () => {
       await browser.close();
     }
   }, 30_000);
+
+  it("keeps document links as evidence without navigating them", async () => {
+    const browser = await chromium.launch();
+    const context = await browser.newContext({ serviceWorkers: "block" });
+    try {
+      const page = await context.newPage();
+      const officialPageUrl = "https://document-link-course.example/";
+      const documentUrl =
+        "https://document-link-course.example/golf/rates.PDF?download=private-canary#details";
+      const sanitizedDocumentUrl =
+        "https://document-link-course.example/golf/rates.PDF?download=";
+      const htmlSiblingUrl =
+        "https://document-link-course.example/golf/course-information";
+      const navigationUrls: string[] = [];
+      vi.spyOn(page.request, "get").mockResolvedValue({
+        ok: () => false
+      } as APIResponse);
+      context.on("request", (request) => {
+        if (request.isNavigationRequest()) {
+          navigationUrls.push(request.url());
+        }
+      });
+      await context.route(
+        "https://document-link-course.example/**",
+        async (route) => {
+          const pathname = new URL(route.request().url()).pathname;
+          if (pathname === "/golf/rates.PDF") {
+            await route.fulfill({
+              status: 200,
+              headers: {
+                "content-disposition": 'attachment; filename="rates.pdf"',
+                "content-type": "application/pdf"
+              },
+              body: "%PDF-1.4"
+            });
+            return;
+          }
+          await route.fulfill({
+            status: 200,
+            contentType: "text/html",
+            body:
+              pathname === "/"
+                ? `<html><title>Document Link Golf Course</title><body><h1>Document Link Golf Course</h1><a href="${documentUrl}">Golf rates PDF</a><a href="${htmlSiblingUrl}">Golf course information</a></body></html>`
+                : "<html><title>Document Link Golf Course</title><body><h1>Document Link Golf Course</h1><p>Golf course information.</p></body></html>"
+          });
+        }
+      );
+
+      const evidence = await runPersistableBrowserOperation(() =>
+        collectBrowserEvidence(page, {
+          courseId: "document-link-course",
+          courseName: "Document Link Golf Course",
+          sourceUrl: officialPageUrl,
+          officialCourseWebsite: officialPageUrl
+        })
+      );
+
+      expect(navigationUrls).toContain(officialPageUrl);
+      expect(navigationUrls).toContain(htmlSiblingUrl);
+      expect(navigationUrls).not.toContain(documentUrl.split("#")[0]);
+      expect(evidence.linkCandidates).not.toContainEqual(
+        expect.objectContaining({ label: "Golf rates PDF" })
+      );
+      expect(
+        evidence.browserInvestigation.sameOriginPages.map(
+          ({ requestedUrl }) => requestedUrl
+        )
+      ).not.toContain(documentUrl);
+      expect(evidence.browserInvestigation.bookingDestinations).toEqual([]);
+      expect(evidence.browserInvestigation.nonHtmlDocuments).toEqual([
+        { url: sanitizedDocumentUrl, reason: "KNOWN_SUFFIX" }
+      ]);
+      expect(JSON.stringify(evidence)).not.toContain("private-canary");
+    } finally {
+      await context.close();
+      await browser.close();
+    }
+  }, 30_000);
+
+  it("skips an extensionless attachment boundary and continues HTML traversal", async () => {
+    const browser = await chromium.launch();
+    const context = await browser.newContext({ serviceWorkers: "block" });
+    try {
+      const page = await context.newPage();
+      const officialPageUrl = "https://attachment-course.example/";
+      const attachmentUrl =
+        "https://attachment-course.example/golf/rates-download";
+      const htmlSiblingUrl =
+        "https://attachment-course.example/golf/course-information";
+      const navigationUrls: string[] = [];
+      vi.spyOn(page.request, "get").mockResolvedValue({
+        ok: () => false
+      } as APIResponse);
+      context.on("request", (request) => {
+        if (request.isNavigationRequest()) {
+          navigationUrls.push(request.url());
+        }
+      });
+      await context.route(
+        "https://attachment-course.example/**",
+        async (route) => {
+          const pathname = new URL(route.request().url()).pathname;
+          if (pathname === "/golf/rates-download") {
+            await route.fulfill({
+              status: 200,
+              headers: {
+                "content-disposition": 'attachment; filename="rates.pdf"',
+                "content-type": "application/pdf"
+              },
+              body: "%PDF-1.4"
+            });
+            return;
+          }
+          await route.fulfill({
+            status: 200,
+            contentType: "text/html",
+            body:
+              pathname === "/"
+                ? `<html><title>Attachment Golf Course</title><body><h1>Attachment Golf Course</h1><a href="${attachmentUrl}">Golf rates download</a><a href="${htmlSiblingUrl}">Golf course information</a></body></html>`
+                : "<html><title>Attachment Golf Course</title><body><h1>Attachment Golf Course</h1><p>Golf course information.</p></body></html>"
+          });
+        }
+      );
+
+      const evidence = await runPersistableBrowserOperation(() =>
+        collectBrowserEvidence(page, {
+          courseId: "attachment-course",
+          courseName: "Attachment Golf Course",
+          sourceUrl: officialPageUrl,
+          officialCourseWebsite: officialPageUrl
+        })
+      );
+
+      expect(navigationUrls).toContain(attachmentUrl);
+      expect(navigationUrls).toContain(htmlSiblingUrl);
+      expect(evidence.linkCandidates).not.toContainEqual(
+        expect.objectContaining({ url: attachmentUrl })
+      );
+      expect(
+        evidence.browserInvestigation.sameOriginPages.map(
+          ({ requestedUrl }) => requestedUrl
+        )
+      ).not.toContain(attachmentUrl);
+      expect(
+        evidence.browserInvestigation.sameOriginPages.map(
+          ({ requestedUrl }) => requestedUrl
+        )
+      ).toContain(htmlSiblingUrl);
+      expect(evidence.browserInvestigation.bookingDestinations).toEqual([]);
+      expect(evidence.browserInvestigation.nonHtmlDocuments).toEqual([
+        { url: attachmentUrl, reason: "DOWNLOAD_RESPONSE" }
+      ]);
+      expect(evidence.browserInvestigation.providerRequestObserved).toBe(true);
+    } finally {
+      await context.close();
+      await browser.close();
+    }
+  }, 30_000);
+
+  it("keeps an HTML root usable when an iframe downloads an attachment", async () => {
+    const browser = await chromium.launch();
+    const context = await browser.newContext({ serviceWorkers: "block" });
+    try {
+      const page = await context.newPage();
+      const officialPageUrl = "https://iframe-download-course.example/";
+      const attachmentUrl =
+        "https://iframe-download-course.example/golf/rates-download";
+      await context.route(
+        "https://iframe-download-course.example/**",
+        async (route) => {
+          const pathname = new URL(route.request().url()).pathname;
+          if (pathname === "/golf/rates-download") {
+            await route.fulfill({
+              status: 200,
+              headers: {
+                "content-disposition": 'attachment; filename="rates.pdf"',
+                "content-type": "application/pdf"
+              },
+              body: "%PDF-1.4"
+            });
+            return;
+          }
+          await route.fulfill({
+            status: 200,
+            contentType: "text/html",
+            body: `<html><title>Iframe Download Golf Course</title><body><h1>Iframe Download Golf Course</h1><p>Public golf course information.</p><iframe src="${attachmentUrl}"></iframe></body></html>`
+          });
+        }
+      );
+
+      const evidence = await runPersistableBrowserOperation(() =>
+        collectBrowserEvidence(page, {
+          courseId: "iframe-download-course",
+          courseName: "Iframe Download Golf Course",
+          sourceUrl: officialPageUrl,
+          officialCourseWebsite: officialPageUrl
+        })
+      );
+      const discovery = buildBrowserDiscovery(evidence);
+
+      expect(evidence.browserInvestigation.nonHtmlDocuments).toEqual([
+        { url: attachmentUrl, reason: "DOWNLOAD_RESPONSE" }
+      ]);
+      expect(evidence.browserInvestigation.sameOriginPages[0]).toMatchObject({
+        requestedUrl: officialPageUrl,
+        finalUrl: officialPageUrl
+      });
+      expect(evidence.browserInvestigation.providerRequestObserved).toBe(true);
+      expect(evidence.observedUrls).toContain(officialPageUrl);
+      expect(evidence.observedUrls).not.toContain(attachmentUrl);
+      expect(discovery.sourceUrl).toBe(officialPageUrl);
+      expect(discovery.evidence.learnedFrom).not.toBe(
+        "non-html-document-only"
+      );
+    } finally {
+      await context.close();
+      await browser.close();
+    }
+  }, 30_000);
+
+  it("does not count a known document-only target as provider execution", async () => {
+    const browser = await chromium.launch();
+    const context = await browser.newContext({ serviceWorkers: "block" });
+    try {
+      const page = await context.newPage();
+      const documentUrl = "https://document-only-course.example/golf/rates.pdf";
+      const navigationUrls: string[] = [];
+      context.on("request", (request) => {
+        if (request.isNavigationRequest()) {
+          navigationUrls.push(request.url());
+        }
+      });
+
+      const evidence = await runPersistableBrowserOperation(() =>
+        collectBrowserEvidence(page, {
+          courseId: "document-only-course",
+          courseName: "Document Only Golf Course",
+          sourceUrl: documentUrl,
+          officialCourseWebsite: documentUrl
+        })
+      );
+      const discovery = buildBrowserDiscovery(evidence);
+
+      expect(navigationUrls).toEqual([]);
+      expect(evidence.browserInvestigation.providerRequestObserved).toBe(false);
+      expect(evidence.browserInvestigation.nonHtmlDocuments).toEqual([
+        { url: documentUrl, reason: "KNOWN_SUFFIX" }
+      ]);
+      expect(discovery).toMatchObject({
+        status: "INSPECTED",
+        detectedPlatform: "UNKNOWN",
+        confidence: 0
+      });
+      expect(discovery).not.toHaveProperty("apiMetadata");
+    } finally {
+      await context.close();
+      await browser.close();
+    }
+  }, 30_000);
+
+  it("removes private query values from document-only persisted evidence", async () => {
+    const browser = await chromium.launch();
+    const context = await browser.newContext({ serviceWorkers: "block" });
+    try {
+      const page = await context.newPage();
+      const privateMarker = "must-not-persist-document-query-value";
+      const documentUrl = `https://document-only-course.example/golf/rates.pdf?download=${privateMarker}`;
+
+      const evidence = await collectBrowserEvidence(page, {
+        courseId: "private-document-course",
+        courseName: "Private Document Golf Course",
+        sourceUrl: documentUrl,
+        officialCourseWebsite: documentUrl
+      });
+      const discovery = buildBrowserDiscovery(evidence);
+      const persisted = retainOnlyPersistableBrowserUrls(
+        {
+          ...discovery,
+          evidence: {
+            ...discovery.evidence,
+            browserInvestigation: evidence.browserInvestigation
+          }
+        },
+        evidence
+      );
+      const serialized = JSON.stringify({ evidence, discovery, persisted });
+
+      expect(serialized).not.toContain(privateMarker);
+      expect(discovery).toMatchObject({
+        status: "INSPECTED",
+        detectedPlatform: "UNKNOWN",
+        evidence: { learnedFrom: "non-html-document-only" }
+      });
+      expect(discovery.sourceUrl).toBe(
+        "https://document-only-course.example/golf/rates.pdf?download="
+      );
+      expect(persisted.sourceUrl).toBe(discovery.sourceUrl);
+    } finally {
+      await context.close();
+      await browser.close();
+    }
+  }, 30_000);
+
+  it("does not count an extensionless document-only target as provider execution", async () => {
+    const browser = await chromium.launch();
+    const context = await browser.newContext({ serviceWorkers: "block" });
+    try {
+      const page = await context.newPage();
+      const documentUrl =
+        "https://document-only-course.example/golf/rates-download";
+      const onProviderRequest = vi.fn();
+      await context.route(documentUrl, (route) =>
+        route.fulfill({
+          status: 200,
+          headers: {
+            "content-disposition": 'attachment; filename="rates.pdf"',
+            "content-type": "application/pdf"
+          },
+          body: "%PDF-1.4"
+        })
+      );
+
+      const evidence = await runPersistableBrowserOperation(() =>
+        collectBrowserEvidence(
+          page,
+          {
+            courseId: "extensionless-document-only-course",
+            courseName: "Extensionless Document Only Golf Course",
+            sourceUrl: documentUrl,
+            officialCourseWebsite: documentUrl
+          },
+          { onProviderRequest }
+        )
+      );
+
+      expect(onProviderRequest).not.toHaveBeenCalled();
+      expect(evidence.browserInvestigation.providerRequestObserved).toBe(false);
+      expect(evidence.browserInvestigation.nonHtmlDocuments).toContainEqual({
+        url: documentUrl,
+        reason: "DOWNLOAD_RESPONSE"
+      });
+    } finally {
+      await context.close();
+      await browser.close();
+    }
+  }, 30_000);
+
+  it("caps booking navigation attempts even when every destination downloads", async () => {
+    const browser = await chromium.launch();
+    const context = await browser.newContext({ serviceWorkers: "block" });
+    try {
+      const page = await context.newPage();
+      const officialPageUrl = "https://download-cap-course.example/";
+      const attachmentUrls = [1, 2, 3, 4].map(
+        (index) =>
+          `https://foreupsoftware.com/index.php/booking/${10000 + index}/${20000 + index}`
+      );
+      const attemptedAttachments: string[] = [];
+      await context.route(officialPageUrl, (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "text/html",
+          body: `<html><title>Download Cap Golf Course</title><body><h1>Download Cap Golf Course</h1>${attachmentUrls
+            .map(
+              (url, index) =>
+                `<a href="${url}">Book Download Cap Golf Course ${index + 1}</a>`
+            )
+            .join("")}</body></html>`
+        })
+      );
+      await context.route("https://foreupsoftware.com/**", (route) => {
+        attemptedAttachments.push(route.request().url());
+        return route.fulfill({
+          status: 200,
+          headers: {
+            "content-disposition": 'attachment; filename="booking.pdf"',
+            "content-type": "application/pdf"
+          },
+          body: "%PDF-1.4"
+        });
+      });
+
+      const evidence = await collectBrowserEvidence(page, {
+        courseId: "download-cap-course",
+        courseName: "Download Cap Golf Course",
+        sourceUrl: officialPageUrl,
+        officialCourseWebsite: officialPageUrl
+      });
+
+      expect(attemptedAttachments).toHaveLength(3);
+      expect(new Set(attemptedAttachments).size).toBe(3);
+      expect(evidence.browserInvestigation.bookingNavigationAttempts).toBe(3);
+      expect(evidence.browserInvestigation.bookingDestinations).toEqual([]);
+      expect(evidence.browserInvestigation.nonHtmlDocuments).toHaveLength(3);
+      expect(
+        evidence.browserInvestigation.evidenceOnlyBookingLinks
+      ).toHaveLength(1);
+      expect(context.pages()).toEqual([page]);
+    } finally {
+      await context.close();
+      await browser.close();
+    }
+  }, 30_000);
+
+  it("keeps a capped provider CTA as evidence without promoting it", async () => {
+    const browser = await chromium.launch();
+    const context = await browser.newContext({ serviceWorkers: "block" });
+    try {
+      const page = await context.newPage();
+      const officialPageUrl = "https://capped-provider-course.example/";
+      const ordinaryBookingUrls = [1, 2, 3].map(
+        (index) => `https://booking-${index}.example/tee-times`
+      );
+      const cappedProviderUrl =
+        "https://foreupsoftware.com/index.php/booking/40004/50004";
+      let cappedProviderRequested = false;
+      vi.spyOn(page.request, "get").mockResolvedValue({
+        ok: () => false
+      } as APIResponse);
+      await context.route(officialPageUrl, (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "text/html",
+          body: `<html><title>Capped Provider Golf Course</title><body><h1>Capped Provider Golf Course</h1>${[
+            ...ordinaryBookingUrls,
+            cappedProviderUrl
+          ]
+            .map(
+              (url, index) =>
+                `<a href="${url}">Book Capped Provider Golf Course ${index + 1}</a>`
+            )
+            .join("")}</body></html>`
+        })
+      );
+      for (const url of ordinaryBookingUrls) {
+        await context.route(url, (route) =>
+          route.fulfill({
+            status: 200,
+            contentType: "text/html",
+            body: "<html><body><p>Public tee-time search page</p></body></html>"
+          })
+        );
+      }
+      await context.route(cappedProviderUrl, (route) => {
+        cappedProviderRequested = true;
+        return route.fulfill({
+          status: 200,
+          headers: {
+            "content-disposition": 'attachment; filename="booking.pdf"',
+            "content-type": "application/pdf"
+          },
+          body: "%PDF-1.4"
+        });
+      });
+
+      const evidence = await collectBrowserEvidence(page, {
+        courseId: "capped-provider-course",
+        courseName: "Capped Provider Golf Course",
+        sourceUrl: officialPageUrl,
+        officialCourseWebsite: officialPageUrl
+      });
+      const discovery = buildBrowserDiscovery(evidence);
+      const capability = resolveProviderCapability({
+        detectedPlatform: discovery.detectedPlatform,
+        providerFamilyKey: null,
+        detectedBookingUrl: discovery.bookingUrl ?? null,
+        website: officialPageUrl,
+        bookingMetadata: discovery.apiMetadata ?? null
+      });
+
+      expect(evidence.browserInvestigation.bookingNavigationAttempts).toBe(3);
+      expect(evidence.browserInvestigation.bookingDestinations).toHaveLength(3);
+      expect(cappedProviderRequested).toBe(false);
+      expect(evidence.linkCandidates).not.toContainEqual(
+        expect.objectContaining({ url: cappedProviderUrl })
+      );
+      expect(evidence.observedUrls).not.toContain(cappedProviderUrl);
+      expect(evidence.evidenceOnlyBookingLinks).toContainEqual(
+        expect.objectContaining({ url: cappedProviderUrl })
+      );
+      expect(discovery.status).not.toBe("LEARNED");
+      expect(discovery).not.toHaveProperty("apiMetadata");
+      expect(capability.isRunnable).toBe(false);
+      expect(context.pages()).toEqual([page]);
+    } finally {
+      await context.close();
+      await browser.close();
+    }
+  }, 30_000);
+
+  it("does not promote a known-provider-shaped attachment into runnable support", async () => {
+    const browser = await chromium.launch();
+    const context = await browser.newContext({ serviceWorkers: "block" });
+    try {
+      const page = await context.newPage();
+      const officialPageUrl = "https://attachment-provider-course.example/";
+      const attachmentUrl =
+        "https://foreupsoftware.com/index.php/booking/12345/67890";
+      vi.spyOn(page.request, "get").mockResolvedValue({
+        ok: () => false
+      } as APIResponse);
+      await context.route(
+        "https://attachment-provider-course.example/**",
+        async (route) => {
+          await route.fulfill({
+            status: 200,
+            contentType: "text/html",
+            body: `<html><title>Attachment Provider Golf Course</title><body><h1>Attachment Provider Golf Course</h1><a href="${attachmentUrl}">Book Attachment Provider Golf Course tee times</a></body></html>`
+          });
+        }
+      );
+      await context.route(attachmentUrl, async (route) => {
+        await route.fulfill({
+          status: 200,
+          headers: {
+            "content-disposition": 'attachment; filename="booking.pdf"',
+            "content-type": "application/pdf"
+          },
+          body: "%PDF-1.4"
+        });
+      });
+
+      const evidence = await runPersistableBrowserOperation(() =>
+        collectBrowserEvidence(page, {
+          courseId: "attachment-provider-course",
+          courseName: "Attachment Provider Golf Course",
+          sourceUrl: officialPageUrl,
+          officialCourseWebsite: officialPageUrl
+        })
+      );
+      const discovery = buildBrowserDiscovery(evidence);
+      const capability = resolveProviderCapability({
+        detectedPlatform: discovery.detectedPlatform,
+        providerFamilyKey: null,
+        detectedBookingUrl: discovery.bookingUrl ?? null,
+        website: officialPageUrl,
+        bookingMetadata: discovery.apiMetadata ?? null
+      });
+
+      expect(evidence.linkCandidates).not.toContainEqual(
+        expect.objectContaining({ url: attachmentUrl })
+      );
+      expect(evidence.observedUrls).not.toContain(attachmentUrl);
+      expect(evidence.browserInvestigation.nonHtmlDocuments).toEqual([
+        { url: attachmentUrl, reason: "DOWNLOAD_RESPONSE" }
+      ]);
+      expect(evidence.browserInvestigation.networkContracts).not.toContainEqual(
+        expect.objectContaining({
+          origin: "https://foreupsoftware.com",
+          resourceType: "document"
+        })
+      );
+      expect(discovery.status).not.toBe("LEARNED");
+      expect(discovery).not.toHaveProperty("apiMetadata");
+      expect(capability.isRunnable).toBe(false);
+    } finally {
+      await context.close();
+      await browser.close();
+    }
+  }, 30_000);
+
+  it("excludes an extensionless document fetched by an HTML booking page", async () => {
+    const browser = await chromium.launch();
+    const context = await browser.newContext({ serviceWorkers: "block" });
+    try {
+      const page = await context.newPage();
+      const officialPageUrl = "https://pdf-fetch-course.example/";
+      const documentUrl =
+        "https://foreupsoftware.com/index.php/booking/61001/62001";
+      let documentServed = false;
+      vi.spyOn(page.request, "get").mockResolvedValue({
+        ok: () => false
+      } as APIResponse);
+      await context.route(officialPageUrl, (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "text/html",
+          body: `<html><title>PDF Fetch Golf Course</title><body><h1>PDF Fetch Golf Course</h1><script>fetch(${JSON.stringify(documentUrl)}).catch(() => undefined)</script></body></html>`
+        })
+      );
+      await context.route(documentUrl, (route) => {
+        documentServed = true;
+        return route.fulfill({
+          status: 200,
+          headers: {
+            "access-control-allow-origin": "*",
+            "content-type": "application/pdf"
+          },
+          body: "%PDF-1.4"
+        });
+      });
+
+      const evidence = await collectBrowserEvidence(page, {
+        courseId: "pdf-fetch-course",
+        courseName: "PDF Fetch Golf Course",
+        sourceUrl: officialPageUrl,
+        officialCourseWebsite: officialPageUrl
+      });
+      const discovery = buildBrowserDiscovery(evidence);
+      const capability = resolveProviderCapability({
+        detectedPlatform: discovery.detectedPlatform,
+        providerFamilyKey: null,
+        detectedBookingUrl: discovery.bookingUrl ?? null,
+        website: officialPageUrl,
+        bookingMetadata: discovery.apiMetadata ?? null
+      });
+
+      expect(documentServed).toBe(true);
+      expect(evidence.browserInvestigation.nonHtmlDocuments).toContainEqual({
+        url: documentUrl,
+        reason: "DOWNLOAD_RESPONSE"
+      });
+      expect(evidence.observedUrls).not.toContain(documentUrl);
+      expect(evidence.browserInvestigation.networkContracts).not.toContainEqual(
+        expect.objectContaining({
+          origin: "https://foreupsoftware.com",
+          pathPattern: "/index.php/booking/:number/:number"
+        })
+      );
+      expect(discovery.detectedPlatform).toBe("UNKNOWN");
+      expect(discovery.status).not.toBe("LEARNED");
+      expect(discovery).not.toHaveProperty("apiMetadata");
+      expect(capability.isRunnable).toBe(false);
+    } finally {
+      await context.close();
+      await browser.close();
+    }
+  }, 30_000);
+
+  it("retains every URL in a non-HTML redirect chain as a document boundary", () => {
+    const redirectUrl = "https://course.example/book-online";
+    const attachmentUrl = "https://provider.example/download";
+    const redirectRequest = {
+      url: () => redirectUrl,
+      redirectedFrom: () => null
+    };
+    const attachmentRequest = {
+      url: () => attachmentUrl,
+      redirectedFrom: () => redirectRequest
+    };
+
+    expect(
+      getNonHtmlBrowserDocumentResponseBoundaryUrls({
+        headers: () => ({
+          "content-disposition": 'attachment; filename="booking.pdf"',
+          "content-type": "application/pdf"
+        }),
+        request: () => attachmentRequest,
+        url: () => attachmentUrl
+      } as Parameters<typeof getNonHtmlBrowserDocumentResponseBoundaryUrls>[0])
+    ).toEqual([attachmentUrl, redirectUrl]);
+  });
 
   it("allows only read-only HTTP methods", () => {
     expect(isReadOnlyBrowserRequestMethod("GET")).toBe(true);
@@ -509,7 +1183,7 @@ describe("rendered browser navigation safety", () => {
       expect(evidence.officialPage?.courseName).toBeUndefined();
       expect(discovery).toMatchObject({
         status: "INSPECTED",
-        detectedPlatform: "TEEITUP",
+        detectedPlatform: "UNKNOWN",
         evidence: { learnedFrom: "teeitup-target-scope-unconfirmed" },
       });
       expect(discovery.apiMetadata).toBeUndefined();

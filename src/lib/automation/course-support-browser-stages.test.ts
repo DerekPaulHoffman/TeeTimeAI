@@ -15,6 +15,7 @@ import {
   type CourseSupportBrowserStageBatch,
 } from "./course-support-browser-stages";
 import {
+  getCourseSupportVerificationWatchFailureCode,
   runCourseSupportVerificationPass,
   runCourseSupportVerificationWatch,
 } from "./course-support-verification-watch";
@@ -303,6 +304,57 @@ describe("persistOwnedCourseSupportBrowserPlaybookStages", () => {
     requestedDeployedAt: new Date("2026-07-21T11:50:00.000Z"),
     now: new Date("2026-07-21T12:00:00.000Z"),
   };
+
+  it("preserves the batch-load failure origin through the verification pass", async () => {
+    const privateCanary = "must-not-persist-batch-load-cause";
+    let thrown: unknown;
+
+    try {
+      await runCourseSupportVerificationPass({
+        persistBrowserStages: () =>
+          persistOwnedCourseSupportBrowserPlaybookStages(input, {
+            loadBatch: vi.fn().mockRejectedValue(new Error(privateCanary)),
+            runBrowserProbe: vi.fn()
+          }),
+        verifyBatch: vi.fn()
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(getCourseSupportVerificationWatchFailureCode(thrown)).toBe(
+      "BROWSER_STAGE_BATCH_LOAD_FAILED"
+    );
+    expect(JSON.stringify(thrown)).not.toContain(privateCanary);
+  });
+
+  it("preserves the release-provenance failure origin through the verification pass", async () => {
+    const privateCanary = "must-not-persist-provenance-cause";
+    const runBrowserProbe = vi.fn();
+    let thrown: unknown;
+
+    try {
+      await runCourseSupportVerificationPass({
+        persistBrowserStages: () =>
+          persistOwnedCourseSupportBrowserPlaybookStages(input, {
+            loadBatch: vi.fn().mockResolvedValue(ownedBrowserBatch()),
+            validateReleaseFence: vi
+              .fn()
+              .mockRejectedValue(new Error(privateCanary)),
+            runBrowserProbe
+          }),
+        verifyBatch: vi.fn()
+      });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(getCourseSupportVerificationWatchFailureCode(thrown)).toBe(
+      "BROWSER_STAGE_PROVENANCE_FAILED"
+    );
+    expect(JSON.stringify(thrown)).not.toContain(privateCanary);
+    expect(runBrowserProbe).not.toHaveBeenCalled();
+  });
 
   it("runs every rendered stage in a three-entry depth-four owned batch", async () => {
     const current = ownedBrowserBatch({

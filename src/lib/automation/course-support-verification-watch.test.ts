@@ -9,7 +9,8 @@ import {
   runCourseSupportVerificationWatch,
   runWithBoundedCourseSupportHeartbeat,
   selectCourseSupportVerificationEndpointDeadline,
-  selectCourseSupportVerificationStopMode
+  selectCourseSupportVerificationStopMode,
+  tagCourseSupportBrowserStageControlFailure
 } from "@/lib/automation/course-support-verification-watch";
 import { CourseSupportSearchExecutionFenceRetryError } from "@/lib/automation/course-support-search-execution-fence";
 
@@ -146,6 +147,13 @@ describe("runCourseSupportVerificationPass", () => {
 
   it.each([
     "BROWSER_STAGE_PERSIST_FAILED",
+    "BROWSER_STAGE_BATCH_LOAD_FAILED",
+    "BROWSER_STAGE_RELEASE_FENCE_FAILED",
+    "BROWSER_STAGE_TARGET_SELECTION_FAILED",
+    "BROWSER_STAGE_PROVENANCE_FAILED",
+    "BROWSER_STAGE_CURRENT_TARGET_FAILED",
+    "BROWSER_STAGE_PROBE_SETUP_FAILED",
+    "BROWSER_STAGE_RUN_CREATE_FAILED",
     "BATCH_VERIFICATION_FAILED",
     "BATCH_VERIFICATION_RECOVERY_REQUIRED",
     "ASSIGNED_STAGE_ORCHESTRATION_GAP",
@@ -155,6 +163,43 @@ describe("runCourseSupportVerificationPass", () => {
       false,
     );
   });
+
+  it.each([
+    "BROWSER_STAGE_BATCH_LOAD_FAILED",
+    "BROWSER_STAGE_RELEASE_FENCE_FAILED",
+    "BROWSER_STAGE_TARGET_SELECTION_FAILED",
+    "BROWSER_STAGE_PROVENANCE_FAILED",
+    "BROWSER_STAGE_CURRENT_TARGET_FAILED",
+    "BROWSER_STAGE_PROBE_SETUP_FAILED",
+    "BROWSER_STAGE_RUN_CREATE_FAILED"
+  ] as const)(
+    "preserves the privacy-safe %s control-plane origin",
+    async (failureCode) => {
+      const privateCanary = "https://private.invalid/provider?payload=secret";
+      let thrown: unknown;
+
+      try {
+        await runCourseSupportVerificationPass({
+          persistBrowserStages: async () => {
+            throw tagCourseSupportBrowserStageControlFailure(
+              failureCode,
+              new Error(privateCanary)
+            );
+          },
+          verifyBatch: async () => ({
+            detachedVerification: { rerunNeeded: false }
+          })
+        });
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(getCourseSupportVerificationWatchFailureCode(thrown)).toBe(
+        failureCode
+      );
+      expect(JSON.stringify(thrown)).not.toContain(privateCanary);
+    }
+  );
 });
 
 describe("runCourseSupportVerificationWatch", () => {
