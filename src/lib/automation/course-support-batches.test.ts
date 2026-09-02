@@ -3247,11 +3247,15 @@ describe("course-support claim demand fencing", () => {
 
   it("projects exact-runtime source recovery into the fresh cycle used by atomic admission", () => {
     const parkedConfirmedAt = new Date("2026-07-15T19:00:00.000Z");
+    const priorAttemptAt = new Date("2026-07-15T19:15:00.000Z");
     const projected = projectParkedCourseCampaignIncidentForClaim({
       incident: {
         id: "exact-runtime-source-recovery",
         cycle: 4,
         confirmedAt: parkedConfirmedAt,
+        lastAttemptAt: priorAttemptAt,
+        attemptCount: 3,
+        batchIncidents: [{ id: "prior-cycle-entry" }],
       },
       admissionMode: "EXACT_RUNTIME_SOURCE_CYCLE_RECOVERY",
       now,
@@ -3272,13 +3276,41 @@ describe("course-support claim demand fencing", () => {
     expect(parkedConfirmedAt).not.toEqual(now);
   });
 
-  it("keeps same-cycle campaign recovery on its existing evidence cycle", () => {
+  it("keeps same-cycle route evidence in the projected atomic claim", () => {
     const parkedConfirmedAt = new Date("2026-07-15T19:00:00.000Z");
+    const priorAttemptAt = new Date("2026-07-15T19:15:00.000Z");
+    const currentCycleHistory = [
+      {
+        id: "pre-refinement-current-cycle-entry",
+        cycle: 4,
+        batch: {
+          summary: {
+            closeout: {
+              remediationAttempts: [
+                {
+                  consumed: true,
+                  providerSnapshotFingerprint: "b".repeat(64),
+                  failureFingerprint: "v1:UNSUPPORTED_FAMILY:NEEDS_ADAPTER",
+                  approach: {
+                    workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+                    strategyAction: "REPAIR_PROVIDER_ADAPTER",
+                    playbookStage: "OFFICIAL_HTTP_DISCOVERY",
+                  },
+                },
+              ],
+            },
+          },
+        },
+      },
+    ];
     const projected = projectParkedCourseCampaignIncidentForClaim({
       incident: {
         id: "same-cycle-recovery",
         cycle: 4,
         confirmedAt: parkedConfirmedAt,
+        lastAttemptAt: priorAttemptAt,
+        attemptCount: 3,
+        batchIncidents: currentCycleHistory,
       },
       admissionMode: "FAILURE_REFINEMENT_INCOMPLETE_PLAYBOOK_RECOVERY",
       now,
@@ -3287,7 +3319,35 @@ describe("course-support claim demand fencing", () => {
     expect(projected).toMatchObject({
       cycle: 4,
       confirmedAt: parkedConfirmedAt,
+      lastAttemptAt: priorAttemptAt,
+      attemptCount: 3,
     });
+    expect(projected.batchIncidents).toBe(currentCycleHistory);
+  });
+
+  it("keeps zero-execution history while resetting only its attempt counters", () => {
+    const parkedConfirmedAt = new Date("2026-07-15T19:00:00.000Z");
+    const currentCycleHistory = [{ id: "zero-execution-entry" }];
+    const projected = projectParkedCourseCampaignIncidentForClaim({
+      incident: {
+        id: "zero-execution-recovery",
+        cycle: 4,
+        confirmedAt: parkedConfirmedAt,
+        lastAttemptAt: new Date("2026-07-15T19:15:00.000Z"),
+        attemptCount: 3,
+        batchIncidents: currentCycleHistory,
+      },
+      admissionMode: "ZERO_EXECUTION_RECOVERY",
+      now,
+    });
+
+    expect(projected).toMatchObject({
+      cycle: 4,
+      confirmedAt: parkedConfirmedAt,
+      lastAttemptAt: null,
+      attemptCount: 0,
+    });
+    expect(projected.batchIncidents).toBe(currentCycleHistory);
   });
 
   it("preserves campaign admission when duplicate current recovery lacks matching provenance", () => {

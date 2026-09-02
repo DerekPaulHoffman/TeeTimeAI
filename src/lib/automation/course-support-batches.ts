@@ -18251,6 +18251,9 @@ export function projectParkedCourseCampaignIncidentForClaim<
   T extends {
     cycle: number;
     confirmedAt: Date | null;
+    lastAttemptAt?: Date | null;
+    attemptCount?: number;
+    batchIncidents?: readonly unknown[];
   },
 >(input: {
   incident: T;
@@ -18260,6 +18263,8 @@ export function projectParkedCourseCampaignIncidentForClaim<
   const startsFreshCycle =
     input.admissionMode === "FRESH_CYCLE" ||
     input.admissionMode === "EXACT_RUNTIME_SOURCE_CYCLE_RECOVERY";
+  const resetsAttemptCounters =
+    startsFreshCycle || input.admissionMode === "ZERO_EXECUTION_RECOVERY";
   return {
     ...input.incident,
     status: "AUTO_INVESTIGATING" as const,
@@ -18271,10 +18276,10 @@ export function projectParkedCourseCampaignIncidentForClaim<
       ? input.now
       : input.incident.confirmedAt,
     humanReviewReason: null,
-    lastAttemptAt: null,
+    ...(resetsAttemptCounters ? { lastAttemptAt: null } : {}),
     nextAttemptAt: input.now,
-    attemptCount: 0,
-    batchIncidents: [],
+    ...(resetsAttemptCounters ? { attemptCount: 0 } : {}),
+    ...(startsFreshCycle ? { batchIncidents: [] } : {}),
   };
 }
 async function recordRoutineResponderObservation(input: {
