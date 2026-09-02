@@ -142,6 +142,52 @@ describe("course-support claimed action plans", () => {
     ).toBe(true);
   });
 
+  it("keeps only the exact exhausted implementation handoff executable", () => {
+    const exhaustedRoute = route({
+      workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+      resumeWorkMode: "IMPLEMENT_REUSABLE_SUPPORT",
+      allowUnchangedRuntime: false,
+      requiresImplementationPath: true,
+      attemptSignature: {
+        workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+        strategyAction: "REPAIR_PROVIDER_ADAPTER",
+        playbookStage: null,
+      },
+      strategy: {
+        action: "REPAIR_PROVIDER_ADAPTER",
+        reason: "PROVIDER_ADAPTER_DEFECT",
+        providerFamilyKey: "FOREUP",
+        browserAllowed: false,
+      },
+      reason: "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF",
+    });
+    const input = {
+      route: exhaustedRoute,
+      incidentKind: "NEEDS_ADAPTER" as const,
+      incidentProviderFamilyKey: "FOREUP",
+      course: course({
+        providerFamilyKey: "FOREUP",
+        website: "https://public-course.example/",
+      }),
+    };
+
+    const plan = buildCourseSupportClaimActionPlan(input);
+    expect(plan).toMatchObject({
+      primaryAction: "IMPLEMENT_REUSABLE_SUPPORT",
+      allowedActions: [
+        "IMPLEMENT_REUSABLE_SUPPORT",
+        "INSPECT_PROVIDER_CONTRACT",
+      ],
+      route: { playbookStage: null },
+    });
+    expect(
+      buildCourseSupportClaimActionPlan({
+        ...input,
+        route: { ...exhaustedRoute, reason: "IMPLEMENTATION_REQUIRED" },
+      }).allowedActions,
+    ).toEqual(["IMPLEMENT_REUSABLE_SUPPORT"]);
+  });
+
   it("does not authorize inspection when the current resolved family differs from the claim", () => {
     const implementationRoute = route({
       workMode: "IMPLEMENT_REUSABLE_SUPPORT",

@@ -881,6 +881,7 @@ describe("course-support remediation routing", () => {
       bookingMetadata: null,
       automationEligibility: "NEEDS_REVIEW",
       failureClass,
+      providerContractEvidenceAvailable: true,
       playbookAssessment: {
         conclusion: "UNRESOLVED_EXHAUSTED",
         nextStage: null,
@@ -891,11 +892,69 @@ describe("course-support remediation routing", () => {
       workMode: "IMPLEMENT_REUSABLE_SUPPORT",
       allowUnchangedRuntime: false,
       requiresImplementationPath: true,
-      reason: "IMPLEMENTATION_REQUIRED",
+      reason: "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF",
       attemptSignature: {
         workMode: "IMPLEMENT_REUSABLE_SUPPORT",
         playbookStage: null,
       },
+    });
+  });
+
+  it.each(["MISSING_SOURCE", "MISSING_METADATA"] as const)("keeps the bounded exhausted public %s implementation handoff available without a preexisting contract marker", (failureClass) => {
+    const result = routeCourseSupportRemediation({
+      ...runnableCourse,
+      detectedBookingUrl:
+        "https://foreupsoftware.com/index.php/booking/12345#/teetimes",
+      bookingMetadata: null,
+      automationEligibility: "NEEDS_REVIEW",
+      failureClass,
+      providerContractEvidenceAvailable: false,
+      playbookAssessment: {
+        conclusion: "UNRESOLVED_EXHAUSTED",
+        nextStage: null,
+      },
+    });
+
+    expect(result).toMatchObject({
+      workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+      allowUnchangedRuntime: false,
+      requiresImplementationPath: true,
+      reason: "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF",
+      attemptSignature: {
+        workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+        playbookStage: null,
+      },
+    });
+  });
+
+  it("does not assign the same exhausted implementation handoff twice without material change", () => {
+    const priorUnchangedAttempt = {
+      workMode: "IMPLEMENT_REUSABLE_SUPPORT" as const,
+      strategyAction: "DISCOVER_WITH_HTTP" as const,
+      playbookStage: null,
+    };
+    const result = routeCourseSupportRemediation({
+      ...runnableCourse,
+      detectedBookingUrl:
+        "https://foreupsoftware.com/index.php/booking/12345#/teetimes",
+      bookingMetadata: null,
+      automationEligibility: "NEEDS_REVIEW",
+      failureClass: "MISSING_METADATA",
+      providerContractEvidenceAvailable: true,
+      priorUnchangedAttempt,
+      playbookAssessment: {
+        conclusion: "UNRESOLVED_EXHAUSTED",
+        nextStage: null,
+      },
+    });
+
+    expect(result).toMatchObject({
+      workMode: "WAIT_FOR_MATERIAL_CHANGE",
+      resumeWorkMode: "IMPLEMENT_REUSABLE_SUPPORT",
+      allowUnchangedRuntime: false,
+      requiresImplementationPath: false,
+      reason: "UNCHANGED_ATTEMPT_ALREADY_RECORDED",
+      attemptSignature: priorUnchangedAttempt,
     });
   });
 

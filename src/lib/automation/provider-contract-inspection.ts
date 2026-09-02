@@ -16,6 +16,7 @@ import {
 } from "./address-pinned-public-fetch";
 import { isSafeManualEvidenceUrl } from "./browser-discovery";
 import {
+  AUTOMATION_PLAYBOOK_STAGES,
   assessAutomationPlaybook,
   parseAutomationPlaybookLedger
 } from "./course-monitoring-playbook";
@@ -610,6 +611,13 @@ function resolveOwnedProviderContractContext(
         ...selectedEntry.course,
         providerFamilyKey: selectedEntry.incident.providerFamilyKey,
       }).providerFamilyKey,
+      exhaustedDiscoveryImplementationHandoff:
+        remediation.workMode === "IMPLEMENT_REUSABLE_SUPPORT" &&
+        remediation.playbookStage === null &&
+        remediation.reason ===
+          "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF" &&
+        !remediation.allowUnchangedRuntime &&
+        remediation.requiresImplementationPath,
     });
   if (!providerContractTechnicallyEligible) {
     return selectedAttempt.actionPlan
@@ -774,7 +782,34 @@ function resolveProviderContractBatchMemberAuthority(input: {
         ...entry.course,
         providerFamilyKey: entry.incident.providerFamilyKey,
       }).providerFamilyKey,
+      exhaustedDiscoveryImplementationHandoff:
+        remediation.workMode === "IMPLEMENT_REUSABLE_SUPPORT" &&
+        remediation.playbookStage === null &&
+        remediation.reason ===
+          "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF" &&
+        !remediation.allowUnchangedRuntime &&
+        remediation.requiresImplementationPath,
     });
+  const exhaustedImplementationContractHandoff = Boolean(
+    playbook.valid &&
+      playbook.cycle === entry.cycle &&
+      playbook.conclusion === "UNRESOLVED_EXHAUSTED" &&
+      playbook.nextStage === null &&
+      playbook.completedStages.length === AUTOMATION_PLAYBOOK_STAGES.length &&
+      remediation.workMode === "IMPLEMENT_REUSABLE_SUPPORT" &&
+      remediation.playbookStage === null &&
+      remediation.reason ===
+        "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF" &&
+      !remediation.allowUnchangedRuntime &&
+      remediation.requiresImplementationPath &&
+      claimedAttempt?.exhaustedDiscoveryImplementationHandoff === true,
+  );
+  const assignedPlaybookStageAuthoritative = Boolean(
+    exhaustedImplementationContractHandoff ||
+      (currentStage &&
+        currentStage.status !== "STARTED" &&
+        remediation.playbookStage === playbook.nextStage),
+  );
   const authoritativeMonitoringDrift = entry.course.monitoringEvents.some(
     (event) =>
       event.occurredAt.getTime() >= batch.createdAt.getTime() &&
@@ -812,8 +847,7 @@ function resolveProviderContractBatchMemberAuthority(input: {
     claimedAttempt.approach.playbookStage !== remediation.playbookStage ||
     claimedAttempt.playbookEventCountAtClaim !==
       currentCyclePlaybookEventCount ||
-    !currentStage ||
-    currentStage.status === "STARTED" ||
+    !assignedPlaybookStageAuthoritative ||
     monitoringStatus?.state !== "AUTO_INVESTIGATING" ||
     !monitoringStatus.failureFingerprint ||
     !courseSupportFailureFingerprintsMatch(
@@ -822,8 +856,7 @@ function resolveProviderContractBatchMemberAuthority(input: {
     ) ||
     authoritativeMonitoringDrift ||
     !playbook.valid ||
-    playbook.cycle !== entry.cycle ||
-    remediation.playbookStage !== playbook.nextStage
+    playbook.cycle !== entry.cycle
   ) {
     return null;
   }
@@ -855,7 +888,7 @@ function resolveProviderContractBatchMemberAuthority(input: {
       claimedActionPlan: claimedAttempt.actionPlan,
       playbookCycle: playbook.cycle,
       playbookNextStage: playbook.nextStage,
-      playbookCurrentStageStatus: currentStage.status,
+      playbookCurrentStageStatus: currentStage?.status ?? null,
       monitoringState: monitoringStatus.state,
       monitoringFailureFingerprint: monitoringStatus.failureFingerprint,
     },

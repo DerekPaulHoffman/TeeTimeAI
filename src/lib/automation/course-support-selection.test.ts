@@ -190,6 +190,67 @@ describe("course-support remediation-aware selection", () => {
     expect(selected?.incidents).toHaveLength(1);
   });
 
+  it("does not mix an exhausted implementation handoff with an ordinary null-stage implementation route", () => {
+    const remediationDirective = {
+      workMode: "IMPLEMENT_REUSABLE_SUPPORT" as const,
+      strategyAction: "DISCOVER_WITH_BROWSER" as const,
+      playbookStage: null,
+    };
+    const actionPlan = {
+      schemaVersion: 1 as const,
+      primaryAction: "IMPLEMENT_REUSABLE_SUPPORT" as const,
+      allowedActions: ["IMPLEMENT_REUSABLE_SUPPORT" as const],
+      route: remediationDirective,
+    };
+    const routeBase = {
+      workMode: "IMPLEMENT_REUSABLE_SUPPORT" as const,
+      resumeWorkMode: "IMPLEMENT_REUSABLE_SUPPORT" as const,
+      strategy: {
+        action: "DISCOVER_WITH_BROWSER" as const,
+        reason: "UNKNOWN_PROVIDER_FAMILY" as const,
+        providerFamilyKey: "TENFORE",
+        browserAllowed: true,
+      },
+      materialChangeDetected: false,
+      attemptSignature: {
+        workMode: "IMPLEMENT_REUSABLE_SUPPORT" as const,
+        strategyAction: "DISCOVER_WITH_BROWSER" as const,
+        playbookStage: null,
+      },
+    };
+    const selected = selectCourseSupportBatch({
+      candidates: [
+        candidate("exhausted", {
+          remediationDirective,
+          remediationRoute: {
+            ...routeBase,
+            allowUnchangedRuntime: false,
+            requiresImplementationPath: true,
+            retryBudget: null,
+            reason: "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF",
+          },
+          actionPlan,
+        }),
+        candidate("material-change", {
+          remediationDirective,
+          remediationRoute: {
+            ...routeBase,
+            allowUnchangedRuntime: false,
+            requiresImplementationPath: true,
+            retryBudget: null,
+            reason: "MATERIAL_CHANGE_REOPENED",
+            materialChangeDetected: true,
+          },
+          actionPlan,
+        }),
+      ],
+      maxCourses: 5,
+      now,
+    });
+
+    expect(selected?.incidents).toHaveLength(1);
+  });
+
   it("preserves legacy family and fingerprint grouping without a directive", () => {
     const selected = selectCourseSupportBatch({
       candidates: [candidate("first"), candidate("second")],

@@ -211,7 +211,7 @@ describe("course-support provider-contract claim evidence", () => {
   };
 
   function summary(input: {
-    playbookStage: "BROWSER_ADAPTER_RETRY" | "TYPED_ADAPTER";
+    playbookStage: "BROWSER_ADAPTER_RETRY" | "TYPED_ADAPTER" | null;
     providerContractEvidence?: unknown;
   }) {
     return {
@@ -222,6 +222,10 @@ describe("course-support provider-contract claim evidence", () => {
             providerSnapshotFingerprint: "b".repeat(64),
             failureFingerprint: "v1:UNSUPPORTED_FAMILY:AVAILABILITY",
             playbookEventCountAtClaim: 3,
+            reason:
+              input.playbookStage === null
+                ? "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF"
+                : "IMPLEMENTATION_REQUIRED",
             approach: {
               workMode: "IMPLEMENT_REUSABLE_SUPPORT",
               strategyAction: "REPAIR_PROVIDER_ADAPTER",
@@ -269,6 +273,38 @@ describe("course-support provider-contract claim evidence", () => {
         expectedAttemptCount: 1
       })
     ).toMatchObject({ providerContractEvidence: null });
+  });
+
+  it("reads current browser-contract evidence for an exhausted implementation handoff", () => {
+    expect(
+      readCourseSupportRemediationClaimAttempt({
+        summary: summary({
+          playbookStage: null,
+          providerContractEvidence: marker,
+        }),
+        courseId,
+        expectedAttemptCount: 1,
+      }),
+    ).toMatchObject({
+      approach: {
+        workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+        playbookStage: null,
+      },
+      providerContractEvidence: marker,
+    });
+
+    const wrongReason = summary({
+      playbookStage: null,
+      providerContractEvidence: marker,
+    });
+    wrongReason.remediation.attempts[0].reason = "IMPLEMENTATION_REQUIRED";
+    expect(
+      readCourseSupportRemediationClaimAttempt({
+        summary: wrongReason,
+        courseId,
+        expectedAttemptCount: 1,
+      }),
+    ).toBeNull();
   });
 
   it("rejects browser-contract markers on unrelated implementation stages", () => {
@@ -3575,6 +3611,8 @@ describe("course-support claim demand fencing", () => {
   function browserContractClaimIncident(input: {
     evidence: "PRESENT" | "ABSENT";
     observedAt?: string;
+    exhausted?: boolean;
+    incidentKind?: "READER_CANDIDATE";
   }) {
     const providerFamilyKey = "booking.provider-contract-canary.example";
     const bookingUrl =
@@ -3584,10 +3622,13 @@ describe("course-support claim demand fencing", () => {
       providerFamilyKey,
       failureClass: "MISSING_METADATA" as const,
       failureFingerprint: "v1:MISSING_METADATA:AVAILABILITY",
-      attemptLedger: browserAdapterRetryReadyAttemptLedger(),
+      attemptLedger: input.exhausted
+        ? exhaustedAttemptLedger()
+        : browserAdapterRetryReadyAttemptLedger(),
     };
     return {
       ...incident,
+      kind: input.incidentKind ?? incident.kind,
       course: {
         ...incident.course,
         isPublic: true,
@@ -5412,6 +5453,103 @@ describe("course-support claim demand fencing", () => {
     });
     },
   );
+
+  it.each(["PRESENT", "ABSENT"] as const)(
+    "claims the exact exhausted provider-support handoff with %s retained contract evidence",
+    async (evidence) => {
+      const incident = browserContractClaimIncident({
+        evidence,
+        exhausted: true,
+      });
+      prismaMocks.supportIncidentFindMany.mockResolvedValue([incident]);
+
+      await expect(
+        claimCourseSupportBatch({
+          ownerThreadId: "owner-exhausted-provider-support",
+          branch: "automation/course-support-20260715-200000",
+          baseSha,
+          now,
+        }),
+      ).resolves.toMatchObject({ outcome: "ready", incidentCount: 1 });
+
+      const summary = prismaMocks.batchCreate.mock.calls[0]?.[0]?.data?.summary;
+      expect(summary).toMatchObject({
+        remediation: {
+          workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+          playbookStage: null,
+          reason: "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF",
+          attempts: [
+            expect.objectContaining({
+              reason: "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF",
+              approach: {
+                workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+                strategyAction: "DISCOVER_WITH_BROWSER",
+                playbookStage: null,
+              },
+              actionPlan: {
+                schemaVersion: 1,
+                primaryAction: "IMPLEMENT_REUSABLE_SUPPORT",
+                allowedActions: [
+                  "IMPLEMENT_REUSABLE_SUPPORT",
+                  "INSPECT_PROVIDER_CONTRACT",
+                ],
+                route: {
+                  workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+                  strategyAction: "DISCOVER_WITH_BROWSER",
+                  playbookStage: null,
+                },
+              },
+              providerContractEvidence:
+                evidence === "PRESENT"
+                  ? expect.objectContaining({
+                      schemaVersion: 1,
+                      evidenceDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+                      contractCount: 1,
+                    })
+                  : null,
+            }),
+          ],
+        },
+      });
+    },
+  );
+
+  it("omits retained contract evidence when the exact exhausted handoff cannot inspect the provider contract", async () => {
+    const incident = browserContractClaimIncident({
+      evidence: "PRESENT",
+      exhausted: true,
+      incidentKind: "READER_CANDIDATE",
+    });
+    prismaMocks.supportIncidentFindMany.mockResolvedValue([incident]);
+
+    await expect(
+      claimCourseSupportBatch({
+        ownerThreadId: "owner-exhausted-reader-candidate",
+        branch: "automation/course-support-20260715-200000",
+        baseSha,
+        now,
+      }),
+    ).resolves.toMatchObject({ outcome: "ready", incidentCount: 1 });
+
+    const summary = prismaMocks.batchCreate.mock.calls[0]?.[0]?.data?.summary;
+    const attempt = summary?.remediation?.attempts?.[0];
+    expect(attempt).toMatchObject({
+      reason: "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF",
+      actionPlan: {
+        schemaVersion: 1,
+        primaryAction: "IMPLEMENT_REUSABLE_SUPPORT",
+        allowedActions: ["IMPLEMENT_REUSABLE_SUPPORT"],
+      },
+    });
+    expect(attempt).toHaveProperty("providerContractEvidence", null);
+    expect(
+      readCourseSupportRemediationClaimAttempt({
+        summary,
+        courseId: incident.courseId,
+        expectedAttemptCount: 1,
+      }),
+    ).not.toBeNull();
+  });
 
   it.each([
     {
@@ -9787,7 +9925,10 @@ describe("course-support claim demand fencing", () => {
   it("fails closed when only the locked claim action plan changes", async () => {
     const selectedAt = new Date("2026-07-15T19:58:00.000Z");
     const refreshedAt = new Date("2026-07-15T19:59:45.000Z");
-    const baseIncident = browserContractClaimIncident({ evidence: "PRESENT" });
+    const baseIncident = browserContractClaimIncident({
+      evidence: "ABSENT",
+      exhausted: true,
+    });
     const selected = {
       ...baseIncident,
       kind: "NEEDS_ADAPTER" as const,
@@ -28839,6 +28980,101 @@ describe("detached verification atomic batch fences", () => {
     expect(prismaMocks.teeSearchUpdateMany).not.toHaveBeenCalled();
   });
 
+  it("closes an explicitly escalated exhausted implementation handoff without fabricating implementation proof", async () => {
+    const batch = closeoutBatch("NEEDS_HUMAN");
+    batch.baseSha = "c".repeat(40);
+    batch.releaseSha = null;
+    batch.deployedAt = null;
+    const courseRef = createHash("sha256")
+      .update("course-1")
+      .digest("hex")
+      .slice(0, 24);
+    const approach = {
+      workMode: "IMPLEMENT_REUSABLE_SUPPORT" as const,
+      strategyAction: "DISCOVER_WITH_BROWSER" as const,
+      playbookStage: null,
+    };
+    batch.summary = {
+      ...healthyDetachedDispatch(),
+      searchExecutionFence: emptySearchExecutionFence(),
+      plannedPaths: [],
+      remediation: {
+        workMode: approach.workMode,
+        strategyAction: approach.strategyAction,
+        playbookStage: approach.playbookStage,
+        allowUnchangedRuntime: false,
+        requiresImplementationPath: true,
+        reason: "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF",
+        retryBudget: null,
+        attempts: [
+          {
+            courseRef,
+            providerSnapshotFingerprint: providerFingerprint,
+            failureFingerprint:
+              batch.incidents[0].incident.failureFingerprint,
+            runtimeVersion: batch.baseSha,
+            activeRealSearchCount: 0,
+            playbookEventCountAtClaim: 8,
+            reason: "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF",
+            retryBudget: null,
+            approach,
+            actionPlan: {
+              schemaVersion: 1,
+              primaryAction: "IMPLEMENT_REUSABLE_SUPPORT",
+              allowedActions: [
+                "IMPLEMENT_REUSABLE_SUPPORT",
+                "INSPECT_PROVIDER_CONTRACT",
+              ],
+              route: approach,
+            },
+          },
+        ],
+      },
+    };
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.transaction.mockImplementationOnce(
+      async (
+        worker: (
+          transaction: typeof monitoringTransactionClient,
+        ) => Promise<unknown>,
+      ) => worker(monitoringTransactionClient),
+    );
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        requestedOutcome: "needs_human",
+        now,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "needs_human",
+      derivedOutcome: "needs_human",
+      batchStatus: "PARTIAL",
+      durableCloseoutRecorded: true,
+      retryCount: 0,
+      needsHumanCount: 1,
+    });
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "NEEDS_HUMAN",
+          activeBatchId: null,
+          nextAttemptAt: new Date(now.getTime() + 6 * 60 * 60_000),
+        }),
+      }),
+    );
+    expect(prismaMocks.automationRunUpdateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: "FAILED" }),
+      }),
+    );
+  });
+
   it("derives retry closeout for a clean watch pass without marking human", async () => {
     const batch = closeoutBatch("RETRY_SCHEDULED");
     batch.incidents[0].incident.attemptLedger = independentReadyAttemptLedger();
@@ -28998,7 +29234,22 @@ describe("detached verification atomic batch fences", () => {
     ).toBe(false);
   });
 
-  it.each(["MISSING_SOURCE", "MISSING_METADATA"] as const)("hands exhausted public %s discovery to reusable implementation without human escalation", async (failureClass) => {
+  it.each([
+    {
+      failureClass: "MISSING_SOURCE" as const,
+      verificationWatchMode: "WATCH_SETTLED" as const,
+    },
+    {
+      failureClass: "MISSING_METADATA" as const,
+      verificationWatchMode: "WATCH_SETTLED" as const,
+    },
+    {
+      failureClass: "MISSING_METADATA" as const,
+      verificationWatchMode: "ENDPOINT" as const,
+    },
+  ])(
+    "hands exhausted public $failureClass discovery to reusable implementation during $verificationWatchMode closeout",
+    async ({ failureClass, verificationWatchMode }) => {
     const batch = closeoutBatch("PENDING");
     const courseRef = createHash("sha256")
       .update("course-1")
@@ -29013,11 +29264,44 @@ describe("detached verification atomic batch fences", () => {
       bookingAccessMode: "UNKNOWN",
       automationEligibility: "NEEDS_REVIEW",
       bookingMetadata: null,
+      automationDiscoveries: [
+        {
+          evidence: {
+            browserInvestigation: {
+              incidentCycle: 1,
+              observedAt: observedAt.toISOString(),
+              providerSnapshotFingerprint: providerFingerprint,
+              networkContracts: [
+                {
+                  origin: "https://foreupsoftware.com",
+                  method: "GET",
+                  pathPattern: "/api/availability",
+                  queryKeys: ["date", "facilityId"],
+                  resourceType: "xhr",
+                  status: 200,
+                },
+              ],
+            },
+          },
+          automationReason: "UNSUPPORTED_PLATFORM",
+          detectedPlatform: "FOREUP",
+          bookingUrl:
+            "https://foreupsoftware.com/index.php/booking/12345#/teetimes",
+          apiMetadata: null,
+          confidence: 0.8,
+          createdAt: observedAt,
+        },
+      ],
     });
     Object.assign(batch.incidents[0].incident, {
       providerFamilyKey: "FOREUP",
       failureClass,
+      attemptCount: 2,
       attemptLedger: exhaustedAttemptLedger(),
+      escalationDeadlineAt:
+        verificationWatchMode === "ENDPOINT"
+          ? new Date(now.getTime() - 1)
+          : null,
     });
     batch.summary = {
       ...batch.summary,
@@ -29065,7 +29349,7 @@ describe("detached verification atomic batch fences", () => {
         batchId: "batch-1",
         leaseToken: "lease-1",
         ownerThreadId: "owner-thread",
-        verificationWatchMode: "WATCH_SETTLED",
+        verificationWatchMode,
         now,
       }),
     ).resolves.toMatchObject({
@@ -29086,7 +29370,8 @@ describe("detached verification atomic batch fences", () => {
         data: expect.objectContaining({
           status: "AUTO_INVESTIGATING",
           activeBatchId: null,
-          nextAttemptAt: new Date(now.getTime() + 15 * 60_000),
+          nextAttemptAt: new Date(now.getTime() + 60_000),
+          escalationDeadlineAt: new Date(now.getTime() + 30 * 60_000),
         }),
       }),
     );
@@ -29095,6 +29380,113 @@ describe("detached verification atomic batch fences", () => {
         ([create]) => create.data.eventType,
       ),
     ).not.toContain("HUMAN_REVIEW_REQUESTED");
+  });
+
+  it("does not recycle a failed exhausted implementation into another one-minute handoff", async () => {
+    const batch = closeoutBatch("PENDING");
+    const implementationBaseSha = "c".repeat(40);
+    const implementationBranch = "automation/course-support-exhausted-provider";
+    const implementationPath =
+      "src/lib/tee-times/adapters/exhausted-provider.ts";
+    const courseRef = createHash("sha256")
+      .update("course-1")
+      .digest("hex")
+      .slice(0, 24);
+    const approach = {
+      workMode: "IMPLEMENT_REUSABLE_SUPPORT" as const,
+      strategyAction: "DISCOVER_WITH_BROWSER" as const,
+      playbookStage: null,
+    };
+    batch.baseSha = implementationBaseSha;
+    batch.incidents[0].incident.attemptLedger = exhaustedAttemptLedger();
+    batch.summary = {
+      ...healthyDetachedDispatch(),
+      searchExecutionFence: emptySearchExecutionFence(),
+      branch: implementationBranch,
+      plannedPaths: [implementationPath],
+      releaseProvenance: {
+        schemaVersion: 1,
+        fromSha: implementationBaseSha,
+        toSha: releaseSha,
+        branch: implementationBranch,
+        committedPaths: [implementationPath],
+        descendantVerified: true,
+      },
+      remediation: {
+        workMode: approach.workMode,
+        strategyAction: approach.strategyAction,
+        playbookStage: approach.playbookStage,
+        allowUnchangedRuntime: false,
+        requiresImplementationPath: true,
+        reason: "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF",
+        retryBudget: null,
+        attempts: [
+          {
+            courseRef,
+            providerSnapshotFingerprint: providerFingerprint,
+            failureFingerprint:
+              batch.incidents[0].incident.failureFingerprint,
+            runtimeVersion: implementationBaseSha,
+            activeRealSearchCount: 0,
+            playbookEventCountAtClaim: 8,
+            reason: "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF",
+            retryBudget: null,
+            approach,
+            actionPlan: {
+              schemaVersion: 1,
+              primaryAction: "IMPLEMENT_REUSABLE_SUPPORT",
+              allowedActions: [
+                "IMPLEMENT_REUSABLE_SUPPORT",
+                "INSPECT_PROVIDER_CONTRACT",
+              ],
+              route: approach,
+            },
+          },
+        ],
+      },
+    };
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.transaction.mockImplementationOnce(
+      async (
+        worker: (
+          transaction: typeof monitoringTransactionClient,
+        ) => Promise<unknown>,
+      ) => worker(monitoringTransactionClient),
+    );
+
+    await expect(
+      closeoutCourseSupportBatch({
+        batchId: "batch-1",
+        leaseToken: "lease-1",
+        ownerThreadId: "owner-thread",
+        verificationWatchMode: "WATCH_SETTLED",
+        now,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "needs_human",
+      derivedOutcome: "needs_human",
+      batchStatus: "PARTIAL",
+      retryCount: 0,
+      needsHumanCount: 1,
+      automationStalledCount: 1,
+    });
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "NEEDS_HUMAN",
+          activeBatchId: null,
+          nextAttemptAt: null,
+        }),
+      }),
+    );
+    expect(prismaMocks.incidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ result: "NEEDS_HUMAN" }),
+      }),
+    );
   });
 
   it("keeps mixed restored and unfinished structural work automatic", async () => {

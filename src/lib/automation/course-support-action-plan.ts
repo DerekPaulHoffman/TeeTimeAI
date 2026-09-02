@@ -79,6 +79,13 @@ export function buildCourseSupportClaimActionPlan(input: {
     strategyAction: input.route.strategy.action,
     playbookStage: input.route.attemptSignature?.playbookStage ?? null,
   };
+  const exhaustedDiscoveryImplementationHandoff = Boolean(
+    input.route.workMode === "IMPLEMENT_REUSABLE_SUPPORT" &&
+      route.playbookStage === null &&
+      input.route.reason === "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF" &&
+      !input.route.allowUnchangedRuntime &&
+      input.route.requiresImplementationPath,
+  );
   const sourceSearchEligible = isCourseSupportSourceSearchActionEligible({
     workMode: route.workMode,
     playbookStage: route.playbookStage,
@@ -95,6 +102,7 @@ export function buildCourseSupportClaimActionPlan(input: {
       incidentProviderFamilyKey: input.incidentProviderFamilyKey,
       courseProviderFamilyKey: input.course.providerFamilyKey,
       resolvedProviderFamilyKey: input.route.strategy.providerFamilyKey,
+      exhaustedDiscoveryImplementationHandoff,
     });
   const assignedBrowserAdapterRetry = Boolean(
     route.workMode === "ADVANCE_DISCOVERY" &&
@@ -160,6 +168,7 @@ export function isCourseSupportProviderContractActionEligible(input: {
   incidentProviderFamilyKey: string;
   courseProviderFamilyKey?: string | null;
   resolvedProviderFamilyKey: string;
+  exhaustedDiscoveryImplementationHandoff?: boolean;
 }) {
   const incidentProviderFamily = normalizeActionProviderFamily(
     input.incidentProviderFamilyKey,
@@ -179,6 +188,12 @@ export function isCourseSupportProviderContractActionEligible(input: {
     !input.allowUnchangedRuntime;
   const discoveryContext =
     input.workMode === "ADVANCE_DISCOVERY" && !input.requiresImplementationPath;
+  const providerContractStageEligible = Boolean(
+    (input.playbookStage && PROVIDER_CONTRACT_STAGES.has(input.playbookStage)) ||
+      (implementationContext &&
+        input.playbookStage === null &&
+        input.exhaustedDiscoveryImplementationHandoff === true),
+  );
   const resolvedProviderMatchesIncident = Boolean(
     resolvedProviderFamily === incidentProviderFamily ||
     (incidentProviderFamily === "CUSTOM" &&
@@ -194,8 +209,7 @@ export function isCourseSupportProviderContractActionEligible(input: {
     (incidentProviderFamily === courseProviderFamily ||
       courseProjectionIsExplicitlySourceMissing) &&
     resolvedProviderMatchesIncident &&
-    input.playbookStage &&
-    PROVIDER_CONTRACT_STAGES.has(input.playbookStage) &&
+    providerContractStageEligible &&
     (implementationContext || discoveryContext),
   );
 }

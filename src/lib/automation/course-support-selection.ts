@@ -314,6 +314,7 @@ export function selectCourseSupportBatch(input: {
 
 function courseSupportCandidateGroupKey(candidate: CourseSupportCandidate) {
   const directive = candidate.remediationDirective;
+  const route = candidate.remediationRoute;
   const actionPlan = candidate.actionPlan;
   return [
     candidate.providerFamilyKey,
@@ -321,6 +322,18 @@ function courseSupportCandidateGroupKey(candidate: CourseSupportCandidate) {
     directive?.workMode ?? "LEGACY",
     directive?.strategyAction ?? "LEGACY",
     directive?.playbookStage ?? "NONE",
+    route
+      ? JSON.stringify({
+          workMode: route.workMode,
+          resumeWorkMode: route.resumeWorkMode,
+          allowUnchangedRuntime: route.allowUnchangedRuntime,
+          requiresImplementationPath: route.requiresImplementationPath,
+          reason: route.reason,
+          strategy: route.strategy,
+          materialChangeDetected: route.materialChangeDetected,
+          attemptSignature: route.attemptSignature,
+        })
+      : "LEGACY_ROUTE",
     actionPlan ? JSON.stringify(actionPlan) : "LEGACY_ACTION_PLAN",
   ].join("\u0000");
 }

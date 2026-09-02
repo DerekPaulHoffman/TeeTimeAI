@@ -70,6 +70,7 @@ export type CourseSupportRemediationRoutingReason =
   | "PLAYBOOK_EXHAUSTED"
   | "NO_PLAYBOOK_STAGE_AVAILABLE"
   | "IMPLEMENTATION_REQUIRED"
+  | "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF"
   | "CLASSIFICATION_READY"
   | "UNCHANGED_ATTEMPT_ALREADY_RECORDED"
   | "OPERATIONAL_RETRY_BUDGET_EXHAUSTED"
@@ -321,10 +322,32 @@ export function routeCourseSupportRemediation(
     !materialChangeDetected
   ) {
     if (shouldImplementReusableSupportAfterExhaustedDiscovery(input)) {
-      return implementationRoute({
+      const exhaustedImplementationAttempt = {
+        workMode: "IMPLEMENT_REUSABLE_SUPPORT" as const,
+        strategyAction: strategy.action,
+        playbookStage: null,
+      };
+      if (
+        isSameAttempt(
+          input.priorUnchangedAttempt,
+          exhaustedImplementationAttempt,
+        )
+      ) {
+        return waitingRoute({
+          reason: "UNCHANGED_ATTEMPT_ALREADY_RECORDED",
+          strategy,
+          materialChangeDetected,
+          retryBudget: null,
+          resumeWorkMode: "IMPLEMENT_REUSABLE_SUPPORT",
+          attemptSignature: exhaustedImplementationAttempt,
+        });
+      }
+      return actionableRoute({
+        workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+        reason: "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF",
         strategy,
-        playbookAssessment: input.playbookAssessment,
         materialChangeDetected,
+        playbookStage: null,
         retryBudget: null,
       });
     }

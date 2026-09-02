@@ -440,6 +440,74 @@ function ownedBrowserRetryContractEvidenceBatch() {
   return batch;
 }
 
+function ownedExhaustedProviderSupportHandoffBatch() {
+  const batch = ownedBrowserRetryContractEvidenceBatch();
+  const entry = batch.incidents[0];
+  let ledger: unknown = entry.incident.attemptLedger;
+  for (const event of [
+    {
+      stage: "BROWSER_ADAPTER_RETRY" as const,
+      readPath: "TYPED_PROVIDER_ADAPTER" as const,
+      skipReason: "NO_METADATA_CHANGE" as const,
+    },
+    {
+      stage: "LOCAL_READER" as const,
+      readPath: "LOCAL_READER" as const,
+      skipReason: "NO_LOCAL_READER_CAPABILITY" as const,
+    },
+    {
+      stage: "INDEPENDENT_CONFIRMATION" as const,
+      readPath: "INDEPENDENT_CONFIRMATION" as const,
+      skipReason: "NO_INDEPENDENT_CONFIRMATION" as const,
+    },
+  ]) {
+    ledger = appendAutomationPlaybookEvent(ledger, {
+      cycle: 1,
+      stage: event.stage,
+      transition: "NOT_APPLICABLE",
+      readPath: event.readPath,
+      evidenceKind: "TOOLING",
+      failureFingerprint: `TEST:${event.stage}:SKIPPED`,
+      runtimeVersion: "test-runtime",
+      skipReason: event.skipReason,
+      observedAt: now,
+    });
+  }
+  entry.incident.attemptLedger = ledger;
+  Object.assign(batch.summary.remediation, {
+    workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+    resumeWorkMode: "IMPLEMENT_REUSABLE_SUPPORT",
+    playbookStage: null,
+    allowUnchangedRuntime: false,
+    requiresImplementationPath: true,
+    reason: "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF",
+  });
+  const attempt = batch.summary.remediation.attempts[0];
+  Object.assign(attempt, {
+    reason: "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF",
+    playbookEventCountAtClaim: (ledger as { events: unknown[] }).events.length,
+    approach: {
+      workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+      strategyAction: "REPAIR_PROVIDER_ADAPTER",
+      playbookStage: null,
+    },
+    actionPlan: {
+      schemaVersion: 1,
+      primaryAction: "IMPLEMENT_REUSABLE_SUPPORT",
+      allowedActions: [
+        "IMPLEMENT_REUSABLE_SUPPORT",
+        "INSPECT_PROVIDER_CONTRACT",
+      ],
+      route: {
+        workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+        strategyAction: "REPAIR_PROVIDER_ADAPTER",
+        playbookStage: null,
+      },
+    },
+  });
+  return batch;
+}
+
 function addSecondOwnedBatchMember(
   batch: ReturnType<typeof ownedDatabaseBatch>,
   input: { name?: string; ordinal?: number } = {},
@@ -1632,6 +1700,46 @@ describe("owner-bound provider-contract inspection", () => {
       outcome: "authority_drift",
       reasonCode: "CLAIMED_TECHNICAL_AUTHORITY_CHANGED",
     });
+  });
+
+  it("authorizes persisted browser contracts for the exact exhausted provider-support handoff", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValueOnce(
+      ownedExhaustedProviderSupportHandoffBatch(),
+    );
+
+    await expect(
+      loadOwnedProviderContractContextResult(ownerInput),
+    ).resolves.toMatchObject({
+      outcome: "ready",
+      restrictionDetected: false,
+      browserContracts: [
+        expect.objectContaining({
+          pathPattern: "/api/availability",
+          statusBand: "SUCCESS",
+        }),
+      ],
+    });
+  });
+
+  it("keeps the bounded inspector available when the exact exhausted handoff has no retained contract marker", async () => {
+    const batch = ownedExhaustedProviderSupportHandoffBatch();
+    batch.incidents[0].course.automationDiscoveries = [];
+    delete batch.summary.remediation.attempts[0].providerContractEvidence;
+    prismaMocks.batchFindFirst.mockResolvedValueOnce(batch);
+
+    await expect(
+      loadOwnedProviderContractContextResult(ownerInput),
+    ).resolves.toMatchObject({
+      outcome: "ready",
+      restrictionDetected: false,
+      browserContracts: [],
+    });
+
+    const wrongReason = ownedExhaustedProviderSupportHandoffBatch();
+    wrongReason.summary.remediation.reason = "IMPLEMENTATION_REQUIRED";
+    wrongReason.summary.remediation.attempts[0].reason =
+      "IMPLEMENTATION_REQUIRED";
+    await expectControlWithoutProviderIo(wrongReason);
   });
 
   it("prefers a family-consistent public booking landing over the official CMS", async () => {

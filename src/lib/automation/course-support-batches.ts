@@ -1303,6 +1303,7 @@ export type CourseSupportRemediationClaimAttempt = {
   approach: CourseSupportRemediationAttemptSignature;
   actionPlan: CourseSupportClaimActionPlan | null;
   providerContractEvidence: CourseSupportProviderContractEvidenceMarker | null;
+  exhaustedDiscoveryImplementationHandoff: boolean;
 };
 
 export function readCourseSupportRemediationDirective(
@@ -1411,9 +1412,17 @@ export function readCourseSupportRemediationClaimAttempt(input: {
       : parseCourseSupportProviderContractEvidenceMarker(
           attempt.providerContractEvidence
         );
+  const exhaustedDiscoveryImplementationHandoff = Boolean(
+    approach?.workMode === "IMPLEMENT_REUSABLE_SUPPORT" &&
+      approach.playbookStage === null &&
+      attempt.reason === "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF" &&
+      actionPlan?.primaryAction === "IMPLEMENT_REUSABLE_SUPPORT" &&
+      courseSupportActionPlanAllows(actionPlan, "INSPECT_PROVIDER_CONTRACT"),
+  );
   const providerContractEvidenceAllowed = Boolean(
     approach?.workMode === "IMPLEMENT_REUSABLE_SUPPORT" &&
-      approach.playbookStage === "BROWSER_ADAPTER_RETRY"
+      (approach.playbookStage === "BROWSER_ADAPTER_RETRY" ||
+        exhaustedDiscoveryImplementationHandoff),
   );
   const exactApproachKeys = ["workMode", "strategyAction", "playbookStage"];
   if (
@@ -1451,7 +1460,8 @@ export function readCourseSupportRemediationClaimAttempt(input: {
     playbookEventCountAtClaim: attempt.playbookEventCountAtClaim as number,
     approach,
     actionPlan,
-    providerContractEvidence
+    providerContractEvidence,
+    exhaustedDiscoveryImplementationHandoff,
   };
 }
 
@@ -9339,6 +9349,7 @@ const COURSE_SUPPORT_DECISION_ROUTING_REASONS = new Set<
   "PLAYBOOK_EXHAUSTED",
   "NO_PLAYBOOK_STAGE_AVAILABLE",
   "IMPLEMENTATION_REQUIRED",
+  "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF",
   "CLASSIFICATION_READY",
   "UNCHANGED_ATTEMPT_ALREADY_RECORDED",
   "OPERATIONAL_RETRY_BUDGET_EXHAUSTED",
@@ -10621,6 +10632,38 @@ async function closeoutCourseSupportBatchAttempt(
       };
     }
     if (
+      (verificationWatchMode === "WATCH_SETTLED" ||
+        (verificationWatchMode === "ENDPOINT" && endpointReached)) &&
+      playbookAssessment.conclusion === "UNRESOLVED_EXHAUSTED" &&
+      !(
+        remediationDirective?.workMode ===
+          "IMPLEMENT_REUSABLE_SUPPORT" &&
+        remediationDirective.playbookStage === null &&
+        remediationDirective.reason ===
+          "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF" &&
+        remediationDirective.allowUnchangedRuntime === false &&
+        remediationDirective.requiresImplementationPath === true
+      ) &&
+      (entry.result === "PENDING" ||
+        entry.result === "STALE_EVIDENCE" ||
+        entry.result === "RETRY_SCHEDULED") &&
+      shouldHandoffExhaustedDiscoveryToImplementation({
+        incidentFailureClass: entry.incident.failureClass,
+        proofSnapshot: entry.proofSnapshot,
+        course: entry.course,
+      })
+    ) {
+      return {
+        ...entry,
+        currentProviderSnapshotFingerprint,
+        automationStalled: false,
+        exhaustedDiscoveryImplementationHandoff: true as const,
+        normalizedResult: "RETRY_SCHEDULED" as const,
+        message:
+          "The safe discovery playbook completed and handed the public provider to reusable support implementation.",
+      };
+    }
+    if (
       verificationWatchMode === "ENDPOINT" &&
       endpointReached &&
       continueIncompletePlaybook &&
@@ -10675,27 +10718,6 @@ async function closeoutCourseSupportBatchAttempt(
         message: playbookExhausted
           ? "Every safe signed-out read path was exhausted without current reusable provider proof."
           : "The automatic verification endpoint elapsed before every safe signed-out read path could finish.",
-      };
-    }
-    if (
-      verificationWatchMode === "WATCH_SETTLED" &&
-      playbookAssessment.conclusion === "UNRESOLVED_EXHAUSTED" &&
-      (entry.result === "PENDING" ||
-        entry.result === "STALE_EVIDENCE" ||
-        entry.result === "RETRY_SCHEDULED") &&
-      shouldHandoffExhaustedDiscoveryToImplementation({
-        incidentFailureClass: entry.incident.failureClass,
-        proofSnapshot: entry.proofSnapshot,
-        course: entry.course,
-      })
-    ) {
-      return {
-        ...entry,
-        currentProviderSnapshotFingerprint,
-        automationStalled: false,
-        normalizedResult: "RETRY_SCHEDULED" as const,
-        message:
-          "The safe discovery playbook completed and handed the public provider to reusable support implementation.",
       };
     }
     if (
@@ -11248,13 +11270,8 @@ async function closeoutCourseSupportBatchAttempt(
       normalizedProof.kind === "HUMAN_REVIEW_REQUIRED" &&
       normalizedProof.disposition === "SOURCE_UNVERIFIED";
     const exhaustedDiscoveryImplementationHandoff = Boolean(
-      playbookAssessment.conclusion === "UNRESOLVED_EXHAUSTED" &&
-        entry.normalizedResult === "RETRY_SCHEDULED" &&
-        shouldHandoffExhaustedDiscoveryToImplementation({
-          incidentFailureClass: entry.incident.failureClass,
-          proofSnapshot: entry.proofSnapshot,
-          course: entry.course,
-        }),
+      "exhaustedDiscoveryImplementationHandoff" in entry &&
+        entry.exhaustedDiscoveryImplementationHandoff === true,
     );
     if (
       entry.normalizedResult === "NEEDS_HUMAN" &&
@@ -11617,6 +11634,27 @@ async function closeoutCourseSupportBatchAttempt(
         claimedAttempt.actionPlan.primaryAction !==
         "IMPLEMENT_REUSABLE_SUPPORT"
       ) {
+        return false;
+      }
+      const exhaustedImplementationHumanEscalation = Boolean(
+        entry.result === "NEEDS_HUMAN" &&
+          entry.normalizedResult === "NEEDS_HUMAN" &&
+          isAutomationPlaybookExhausted(
+            entry.incident.attemptLedger,
+            entry.cycle,
+          ) &&
+          remediationDirective?.workMode ===
+            "IMPLEMENT_REUSABLE_SUPPORT" &&
+          remediationDirective.playbookStage === null &&
+          remediationDirective.reason ===
+            "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF" &&
+          remediationDirective.allowUnchangedRuntime === false &&
+          remediationDirective.requiresImplementationPath === true &&
+          claimedAttempt.approach.workMode ===
+            "IMPLEMENT_REUSABLE_SUPPORT" &&
+          claimedAttempt.approach.playbookStage === null,
+      );
+      if (exhaustedImplementationHumanEscalation) {
         return false;
       }
       const currentFailureIdentity =
@@ -13217,6 +13255,10 @@ async function closeoutCourseSupportBatchAttempt(
               nextPlaybookStageAttemptCount:
                 getCourseSupportNextStageAttemptCount(playbookAssessment),
             }));
+        const exhaustedDiscoveryImplementationHandoff = Boolean(
+          "exhaustedDiscoveryImplementationHandoff" in entry &&
+            entry.exhaustedDiscoveryImplementationHandoff === true,
+        );
         const verificationWatchShortRetryCandidate = Boolean(
           verificationWatchMode === "EARLY_RETRY" &&
             verificationWatchToolingFailure &&
@@ -13277,7 +13319,7 @@ async function closeoutCourseSupportBatchAttempt(
         const watchContinuationAt =
           (verificationWatchMode === "WATCH_SETTLED" ||
             verificationWatchMode === "ENDPOINT") &&
-          continueIncompletePlaybook
+          (continueIncompletePlaybook || exhaustedDiscoveryImplementationHandoff)
             ? new Date(now.getTime() + 60 * 1000)
             : null;
         const currentCycleIsOrchestrationOnly = Boolean(
@@ -13310,6 +13352,11 @@ async function closeoutCourseSupportBatchAttempt(
               now,
               entry.incident.activeRealSearchCount,
             )
+          : exhaustedDiscoveryImplementationHandoff
+            ? getCourseMonitoringEscalationDeadline(
+                now,
+                entry.incident.activeRealSearchCount,
+              )
           : closeoutRemediationAttempt
             ? deferredFailureHandoffDueAt
               ? getDeferredFailureHandoffEscalationDeadline(
@@ -13330,7 +13377,9 @@ async function closeoutCourseSupportBatchAttempt(
                     ))
             : entry.incident.escalationDeadlineAt;
         const operationalRetryAt =
-          verificationWatchShortRetryAt || deferredFailureHandoffDueAt
+          verificationWatchShortRetryAt ||
+          deferredFailureHandoffDueAt ||
+          exhaustedDiscoveryImplementationHandoff
             ? null
             : closeoutRemediationAttempt && !closeoutRemediationAttempt.consumed
             ? closeoutRemediationAttempt.countsTowardOperationalNoProgress
@@ -13367,6 +13416,7 @@ async function closeoutCourseSupportBatchAttempt(
         });
         const nextAttemptAt =
           !operationalRetryAt &&
+          !exhaustedDiscoveryImplementationHandoff &&
           detachedFailureNotBefore &&
           detachedFailureNotBefore.getTime() > normalNextAttemptAt.getTime()
             ? detachedFailureNotBefore
@@ -17886,9 +17936,10 @@ function buildCourseSupportCandidates(
       trustedBookingUrl ??
       selectProviderContractTrustedLandingUrl([course.website]);
     const currentProviderContractEvidence =
-      playbookAssessment.nextStage === "BROWSER_ADAPTER_RETRY"
+      playbookAssessment.nextStage === "BROWSER_ADAPTER_RETRY" ||
+      playbookAssessment.conclusion === "UNRESOLVED_EXHAUSTED"
         ? selectCurrentBrowserProviderContractEvidence({
-            discoveries: course.automationDiscoveries,
+            discoveries: course.automationDiscoveries ?? [],
             incidentCycle: incident.cycle,
             incidentFirstSeenAt: incident.firstSeenAt,
             providerFamilyKey: incident.providerFamilyKey,
@@ -18085,13 +18136,16 @@ function buildCourseSupportCandidates(
       route: remediationRoute,
       incidentKind: incident.kind,
       incidentProviderFamilyKey: incident.providerFamilyKey,
-      course
+      course,
     });
     const providerContractEvidence =
       remediationRoute.workMode === "IMPLEMENT_REUSABLE_SUPPORT" &&
-      remediationRoute.attemptSignature?.playbookStage ===
-        "BROWSER_ADAPTER_RETRY" &&
-      actionPlan.primaryAction === "IMPLEMENT_REUSABLE_SUPPORT"
+      actionPlan.primaryAction === "IMPLEMENT_REUSABLE_SUPPORT" &&
+      courseSupportActionPlanAllows(
+        actionPlan,
+        "INSPECT_PROVIDER_CONTRACT",
+      ) &&
+      currentProviderContractEvidence !== null
         ? (currentProviderContractEvidence ?? undefined)
         : undefined;
     if (
