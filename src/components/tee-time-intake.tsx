@@ -51,6 +51,7 @@ import {
   type CourseLayoutHoleCount
 } from "@/lib/courses/course-layout";
 import { trackWebsiteEvent } from "@/lib/engagement/client";
+import { fireAlertCreatedConfetti } from "@/lib/celebration/alert-confetti";
 import {
   detectSyntheticMultiCycle,
   detectWebsiteTrafficClass,
@@ -1173,6 +1174,9 @@ function TeeTimeIntakeContent({
         search?: { id?: string };
       } | null;
       const createdSearchId = responseBody?.search?.id;
+      if (createdSearchId) {
+        fireAlertCreatedConfetti();
+      }
       clearSearchDraft();
       router.push(
         createdSearchId

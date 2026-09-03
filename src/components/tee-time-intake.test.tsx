@@ -29,6 +29,7 @@ const signedInAccountProps = {
 
 describe("TeeTimeIntake", () => {
   afterEach(() => {
+    document.querySelectorAll("[data-alert-confetti]").forEach((element) => element.remove());
     pushMock.mockReset();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
@@ -106,6 +107,7 @@ describe("TeeTimeIntake", () => {
     await waitFor(() =>
       expect(pushMock).toHaveBeenCalledWith("/dashboard?created=search-123")
     );
+    expect(document.querySelector('[data-alert-confetti="alert-created"]')).not.toBeNull();
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/searches",
       expect.objectContaining({
@@ -610,6 +612,7 @@ describe("TeeTimeIntake", () => {
     expect(toastTitle.closest('[role="alert"]')?.textContent).toContain(
       "Something went wrong, and we're working on it."
     );
+    expect(document.querySelector("[data-alert-confetti]")).toBeNull();
     expect(screen.queryByText("Internal course classification mismatch")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Send feedback" }));

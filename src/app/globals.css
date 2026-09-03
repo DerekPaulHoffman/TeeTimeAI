@@ -2244,6 +2244,74 @@ button {
   }
 }
 
+/* A brief event-driven celebration after a golfer successfully saves an alert. */
+.alert-created-confetti {
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  position: fixed;
+  z-index: 1000;
+}
+
+.alert-created-confetti-particle {
+  animation: alert-created-confetti-flight var(--confetti-duration) cubic-bezier(0.15, 0.7, 0.25, 1)
+    var(--confetti-delay) both;
+  background: var(--confetti-color);
+  border-radius: 2px;
+  bottom: 5vh;
+  height: 11px;
+  position: absolute;
+  width: 6px;
+}
+
+.alert-created-confetti-particle:nth-child(3n) {
+  border-radius: 50%;
+  height: 8px;
+  width: 8px;
+}
+
+.alert-created-confetti-particle:nth-child(4n) {
+  height: 5px;
+  width: 13px;
+}
+
+.alert-created-confetti-emoji {
+  background: transparent;
+  font-size: clamp(1rem, 2vw, 1.45rem);
+  height: auto;
+  line-height: 1;
+  width: auto;
+}
+
+@keyframes alert-created-confetti-flight {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 0, 0) rotate(0deg) scale(0.7);
+  }
+
+  10% {
+    opacity: 1;
+  }
+
+  58% {
+    opacity: 1;
+    transform: translate3d(var(--confetti-peak-x), var(--confetti-peak-y), 0)
+      rotate(var(--confetti-spin)) scale(1);
+  }
+
+  100% {
+    opacity: 0;
+    transform: translate3d(var(--confetti-end-x), -12vh, 0)
+      rotate(calc(var(--confetti-spin) * 1.7)) scale(0.85);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .alert-created-confetti {
+    display: none;
+  }
+}
+
 /* Private operator overview */
 .operator-page {
   margin: 0 auto;
