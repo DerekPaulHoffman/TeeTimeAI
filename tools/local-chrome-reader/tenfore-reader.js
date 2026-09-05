@@ -1,13 +1,14 @@
 (function initializeTenForeReader(root) {
   "use strict";
 
-  const READER_VERSION = "tenfore-rendered-v1";
+  const READER_VERSION = "tenfore-rendered-v2";
   const SKIP_PLAYER_SELECTION = true;
   const SKIP_DATE_SELECTION = true;
   const TENANT_PATH = /^\/([a-z0-9][a-z0-9-]{0,127})\/?$/;
   const LOCAL_DATE = /^\d{4}-\d{2}-\d{2}$/;
   const TIME_PATTERN = /^(\d{1,2}):(\d{2})\s*(AM|PM)$/i;
   const CAPACITY_PATTERN = /^([1-4])(?:\s*-\s*([1-4]))?$/;
+  const CARD_SELECTOR = ".bg-white.text-xl.font-medium.leading-none";
   const CHALLENGE_TEXT =
     /\b(?:just a moment|verify you are human|checking your browser|captcha|turnstile|waiting room)\b/i;
   const MONTH_SHORT = [
@@ -70,21 +71,32 @@
   function toLocalDateTime(targetDate, timeLabel) {
     const match = TIME_PATTERN.exec(normalizeText(timeLabel));
     if (!match) return null;
+    if (Number(match[1]) < 1 || Number(match[1]) > 12 || Number(match[2]) > 59) {
+      return null;
+    }
     let hour = Number(match[1]) % 12;
     if (match[3].toUpperCase() === "PM") hour += 12;
     return `${targetDate}T${String(hour).padStart(2, "0")}:${match[2]}:00`;
   }
 
   function findCard(timeElement) {
-    const knownCard = timeElement.closest(
-      ".bg-white.text-xl.font-medium.leading-none",
-    );
+    const knownCard = timeElement.closest(CARD_SELECTOR);
     if (knownCard) return knownCard;
+    if (timeElement.closest("header, nav, footer")) return null;
 
     let candidate = timeElement.parentElement;
     for (let depth = 0; candidate && depth < 6; depth += 1) {
+      if (candidate === timeElement.ownerDocument.body || candidate === timeElement.ownerDocument.documentElement) {
+        return null;
+      }
+      if (candidate.querySelector(CARD_SELECTOR)) return null;
       const text = normalizeText(candidate.textContent || candidate.innerText);
-      if (/\bOnline Booking\b/i.test(text) && text.length < 500) {
+      const hasBookingLabel = /\bOnline Booking\b/i.test(text) ||
+        Array.from(candidate.querySelectorAll("*")).some((element) =>
+          element.children.length === 0 && isRendered(element) &&
+          /^Online Booking$/i.test(normalizeText(element.textContent)),
+        );
+      if (hasBookingLabel && text.length < 500) {
         return candidate;
       }
       candidate = candidate.parentElement;
@@ -92,16 +104,45 @@
     return null;
   }
 
-  function parseCard(timeElement, job) {
-    const timeLabel = normalizeText(timeElement.textContent);
-    const startsAtLocal = toLocalDateTime(job.targetDate, timeLabel);
-    const card = findCard(timeElement);
-    if (!startsAtLocal || !card) return null;
+  function isRendered(element) {
+    if (element.closest("template, [hidden]")) return false;
+    const view = element.ownerDocument?.defaultView;
+    const ownStyle = view?.getComputedStyle(element);
+    if (ownStyle?.visibility === "hidden" || ownStyle?.visibility === "collapse") {
+      return false;
+    }
+    for (let ancestor = element; ancestor; ancestor = ancestor.parentElement) {
+      const style = view?.getComputedStyle(ancestor);
+      if (style?.display === "none" || style?.contentVisibility === "hidden") {
+        return false;
+      }
+    }
+    return true;
+  }
 
+  function parseCard(card, job) {
     const lines = Array.from(card.querySelectorAll("*"))
-      .filter((element) => element.children.length === 0)
+      .filter((element) => element.children.length === 0 && isRendered(element))
       .map((element) => normalizeText(element.textContent))
       .filter(Boolean);
+    const timeLabels = [
+      ...Array.from(card.querySelectorAll(".text-2xl.font-bold"))
+        .filter(isRendered)
+        .map((element) => normalizeText(element.textContent)),
+      ...Array.from(card.querySelectorAll("*"))
+        .filter((element) => element.children.length > 0 && isRendered(element))
+        .flatMap((element) => Array.from(element.childNodes)
+          .filter((node) => node.nodeType === 3)
+          .map((node) => normalizeText(node.textContent))),
+      ...lines,
+    ].filter((label) => TIME_PATTERN.test(label));
+    const starts = timeLabels.map((label) => toLocalDateTime(job.targetDate, label));
+    if (starts.length === 0 || starts.some((value) => value === null) || new Set(starts).size !== 1) {
+      return null;
+    }
+    const timeLabel = timeLabels[0];
+    const startsAtLocal = starts[0];
+
     const timeIndex = lines.findIndex((line) => TIME_PATTERN.test(line));
     const details = timeIndex >= 0 ? lines.slice(timeIndex + 1) : lines;
     const holesIndex = details.findIndex(
@@ -116,7 +157,9 @@
     const price = details
       .map((line) => /^\$(\d{1,4})(?:\.(\d{2}))?$/u.exec(line))
       .find(Boolean);
-    if (holesIndex < 0 || !capacity) return null;
+    if (holesIndex < 0 || !capacity || Number(capacity[1]) > Number(capacity[2] || capacity[1])) {
+      return null;
+    }
 
     return {
       startsAtLocal,
@@ -134,13 +177,14 @@
   function getTimeElements(documentRoot) {
     const preferred = Array.from(
       documentRoot.querySelectorAll(".text-2xl.font-bold"),
-    ).filter((element) => TIME_PATTERN.test(normalizeText(element.textContent)));
-    if (preferred.length > 0) return preferred;
-    return Array.from(documentRoot.querySelectorAll("body *")).filter(
+    ).filter((element) => isRendered(element) && TIME_PATTERN.test(normalizeText(element.textContent)));
+    const fallback = Array.from(documentRoot.querySelectorAll("body *")).filter(
       (element) =>
         element.children.length === 0 &&
-        TIME_PATTERN.test(normalizeText(element.textContent)),
+        TIME_PATTERN.test(normalizeText(element.textContent)) &&
+        isRendered(element),
     );
+    return [...new Set([...preferred, ...fallback])];
   }
 
   function countRenderedSlots(documentRoot) {
@@ -188,11 +232,21 @@
     }
 
     const timeElements = getTimeElements(documentRoot);
-    const cards = timeElements.filter((element) => findCard(element));
-    const parsed = cards.map((element) => parseCard(element, job));
+    // Collect known cards before parsing: an unfinished time or capacity field
+    // must not disappear into an otherwise successful or empty tee sheet.
+    const cards = [...new Set([
+      ...Array.from(documentRoot.querySelectorAll(CARD_SELECTOR)).filter(isRendered),
+      ...timeElements.map(findCard).filter((card) => card && isRendered(card)),
+    ])];
+    const parsed = cards.map((card) => parseCard(card, job));
+    if (
+      parsed.some((slot) => slot === null) ||
+      (timeElements.length > 0 && cards.length === 0)
+    ) {
+      return result(courseKey, "READER_ERROR", pageUrl, pageTitle, []);
+    }
     const seen = new Set();
     const slots = parsed
-      .filter(Boolean)
       .filter(
         (slot) =>
           Number(job.players) >= slot.minimumPlayers &&
@@ -207,13 +261,7 @@
       .sort((left, right) =>
         left.startsAtLocal.localeCompare(right.startsAtLocal),
       );
-    const status =
-      slots.length > 0
-        ? "AVAILABLE"
-        : (cards.length > 0 && parsed.every((slot) => slot === null)) ||
-            (timeElements.length > 0 && cards.length === 0)
-          ? "READER_ERROR"
-          : "NO_AVAILABILITY";
+    const status = slots.length > 0 ? "AVAILABLE" : "NO_AVAILABILITY";
     return result(courseKey, status, pageUrl, pageTitle, slots);
   }
 

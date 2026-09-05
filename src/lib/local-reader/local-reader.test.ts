@@ -301,6 +301,65 @@ function loadBackgroundHarness(initialPendingJobs: Record<string, unknown> = {})
   };
 }
 
+describe("complete rendered card evidence", () => {
+  function card(options: { time?: string; holes?: string; capacity?: string; fallback?: boolean } = {}) {
+    const { time = "1:20 PM", holes = "18", capacity = "1-4", fallback = false } = options;
+    return `<section${fallback ? "" : ' class="bg-white text-xl font-medium leading-none"'}>
+      <span${fallback ? "" : ' class="text-2xl font-bold"'}>${time}</span>
+      <span>${holes}</span><span>${capacity}</span><span>Online Booking</span>
+    </section>`;
+  }
+
+  function read(cards: string, players = 3) {
+    document.body.innerHTML = `<div class="filter-section" data-filter-key="selectedDate"><span class="filter-value">Jul 29, 2026</span></div>${cards}`;
+    const job = { ...dynamicTenForeJob("offline-fixture"), courseName: "Offline fixture", players };
+    return loadTenForeReader().readSnapshot(document, job.bookingUrl, job);
+  }
+
+  it.each([
+    { time: "" }, { time: "0:20 PM" }, { time: "13:20 PM" }, { time: "1:60 PM" },
+    { holes: "" }, { holes: "12" }, { capacity: "" }, { capacity: "4-1" }
+  ])("does not drop a malformed card before player filtering: %j", (malformed) => {
+    expect(read(card({ capacity: "1-2" }) + card({ time: "2:10 PM", ...malformed }))).toMatchObject({ status: "READER_ERROR", slots: [] });
+  });
+
+  it("includes fallback cards even when a preferred time element exists", () => {
+    expect(read(card() + card({ time: "2:10 PM", fallback: true })).slots).toHaveLength(2);
+    expect(read(card() + card({ time: "2:10 PM", capacity: "", fallback: true }))).toMatchObject({ status: "READER_ERROR", slots: [] });
+  });
+
+  it("does not turn unrelated page clocks into booking-card ancestors", () => {
+    const page = `<div><header><span>8:00 AM</span></header><div><span>9:00 AM</span></div>${card()}</div>`;
+    expect(read(page)).toMatchObject({ status: "AVAILABLE", slots: [{ startsAtLocal: "2026-07-29T13:20:00" }] });
+  });
+
+  it.each([
+    (body: string) => `<div hidden>${body}</div>`,
+    (body: string) => `<div style="display:none">${body}</div>`,
+    (body: string) => `<div style="visibility:hidden">${body}</div>`,
+    (body: string) => `<style>.hidden-card{display:none}</style><div class="hidden-card">${body}</div>`,
+    (body: string) => `<template>${body}</template>`
+  ])("ignores explicitly hidden card clones", (hide) => {
+    expect(read(card() + hide(card({ time: "2:10 PM", capacity: "" })))).toMatchObject({ status: "AVAILABLE", slots: [{ startsAtLocal: "2026-07-29T13:20:00" }] });
+  });
+
+  it("does not treat aria-hidden or absent layout geometry as proof a visible card is hidden", () => {
+    expect(read(card() + `<div aria-hidden="true">${card({ capacity: "" })}</div>`)).toMatchObject({ status: "READER_ERROR", slots: [] });
+  });
+
+  it("keeps valid duplicate times, player filtering, and AM/PM conversion", () => {
+    const snapshot = read(card({ time: "12:00 AM" }) + card({ time: "12:00 PM" }) + card({ time: "12:00 PM" }) + card({ time: "2:10 PM", capacity: "1-2" }));
+    expect(snapshot.status).toBe("AVAILABLE");
+    expect(snapshot.slots.map((slot) => slot.startsAtLocal)).toEqual(["2026-07-29T00:00:00", "2026-07-29T12:00:00"]);
+    expect(read(card({ capacity: "1-2" }))).toMatchObject({ status: "NO_AVAILABILITY", slots: [] });
+  });
+
+  it("keeps nested clock text but rejects two different times in one card", () => {
+    expect(read(card({ time: "<span>1:20</span><span>PM</span>" }))).toMatchObject({ status: "AVAILABLE", slots: [{ startsAtLocal: "2026-07-29T13:20:00" }] });
+    expect(read(card({ time: "1:20 PM<span>2:10 PM</span>" }))).toMatchObject({ status: "READER_ERROR", slots: [] });
+  });
+});
+
 describe("local Chrome reader contract", () => {
   it("accepts every exact allowlisted reader route and rejects other routes", () => {
     for (const courseKey of LOCAL_READER_COURSE_KEYS) {
@@ -340,7 +399,7 @@ describe("local Chrome reader contract", () => {
     );
     const contentMatches = manifest.content_scripts.flatMap((entry) => entry.matches);
 
-    expect(manifest.version).toBe("1.11.0");
+    expect(manifest.version).toBe("1.11.1");
     expect(manifest.host_permissions).toContain("https://*.cps.golf/*");
     expect(contentMatches).toContain("https://*.cps.golf/onlineresweb/search-teetime*");
     expect(manifest.host_permissions).toContain("https://www.chronogolf.com/*");
@@ -523,6 +582,19 @@ describe("local Chrome reader contract", () => {
     expect(
       getLocalReaderCourseKey("https://fox.tenfore.golf/gainfieldfarms?token=secret")
     ).toBeNull();
+  });
+
+  it("lets the corrected reader finish existing jobs before the backend version gate advances", () => {
+    const { context } = loadBackgroundHarness();
+    const isAllowlistedJob = context.isAllowlistedJob as (job: LocalReaderJob) => boolean;
+    const job = dynamicTenForeJob("future-public-course");
+    for (const parserVersion of [1, 2]) {
+      expect(isAllowlistedJob({ ...job, requiredCapability: { key: "TENFORE_RENDERED", parserVersion } })).toBe(true);
+    }
+    for (const parserVersion of [0, -1, 1.5, 3]) {
+      expect(isAllowlistedJob({ ...job, requiredCapability: { key: "TENFORE_RENDERED", parserVersion } })).toBe(false);
+    }
+    expect(isAllowlistedJob({ ...job, requiredCapability: { key: "CPS_RENDERED", parserVersion: 1 } })).toBe(false);
   });
 
   it("accepts exact MemberSports course routes and rejects sibling or transaction paths", () => {
@@ -1180,7 +1252,7 @@ describe("local Chrome reader contract", () => {
     expect(reader.countRenderedSlots(document)).toBe(2);
     expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({
       status: "AVAILABLE",
-      readerVersion: "tenfore-rendered-v1",
+      readerVersion: "tenfore-rendered-v2",
       slots: [
         {
           startsAtLocal: "2026-07-29T13:20:00",

@@ -60,6 +60,15 @@ describe("local reader capabilities", () => {
     });
   });
 
+  it("requires complete-card parsing without upgrading the legacy reader handshake", () => {
+    const required = getRequiredLocalReaderCapability("tenfore:future-public-course", "Future Public Course");
+    expect(required).toEqual({ key: "TENFORE_RENDERED", parserVersion: 2 });
+    expect(readerSupportsCapability(parseLocalReaderCapabilities(null), required.key, required.parserVersion)).toBe(false);
+    expect(readerSupportsCapability([{ key: "TENFORE_RENDERED", parserVersion: 1 }], required.key, required.parserVersion)).toBe(false);
+    expect(readerSupportsCapability([{ key: "TENFORE_RENDERED", parserVersion: 2 }], required.key, required.parserVersion)).toBe(true);
+    expect(parseLocalReaderCapabilities(null)).toContainEqual({ key: "TENFORE_RENDERED", parserVersion: 1 });
+  });
+
   it("routes exact MemberSports course scopes to the rendered parser", () => {
     expect(
       getRequiredLocalReaderCapability(

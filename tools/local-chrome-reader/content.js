@@ -393,9 +393,8 @@
     throw new Error(`Group size ${players} did not become selectable.`);
   }
 
-  async function waitForTargetPage(targetDate, reader) {
+  async function waitForTargetPage(targetDate, reader, deadline) {
     const expectedLabel = targetDateLabel(targetDate);
-    const deadline = Date.now() + 25_000;
     let slotCount = 0;
     let slotsStableSince = null;
     let emptyStableSince = null;
@@ -447,6 +446,18 @@
       await delay(250);
     }
     throw new Error(`The public page did not render ${targetDate} in time.`);
+  }
+
+  async function readSettledSnapshot(reader, job, deadline) {
+    while (true) {
+      const snapshot = reader.readSnapshot(document, location.href, job);
+      // A stable time label is not proof its card details have finished rendering.
+      // Keep malformed evidence unresolved, and never extend the original budget.
+      if (snapshot.status !== "READER_ERROR" || Date.now() >= deadline) {
+        return snapshot;
+      }
+      await delay(Math.min(250, deadline - Date.now()));
+    }
   }
 
   async function readPendingJob() {
@@ -512,15 +523,12 @@
       if (reader.SKIP_DATE_SELECTION !== true) {
         await chooseTargetDate(pending.job.targetDate);
       }
-      await waitForTargetPage(pending.job.targetDate, reader);
+      const snapshotDeadline = Date.now() + 25_000;
+      await waitForTargetPage(pending.job.targetDate, reader, snapshotDeadline);
       if (typeof reader.prepareRenderedResults === "function") {
         await reader.prepareRenderedResults(document, window);
       }
-      const snapshot = reader.readSnapshot(
-        document,
-        location.href,
-        pending.job,
-      );
+      const snapshot = await readSettledSnapshot(reader, pending.job, snapshotDeadline);
       await chrome.runtime.sendMessage({
         type: "LOCAL_READER_RESULT",
         result: snapshot,
