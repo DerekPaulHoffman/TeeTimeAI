@@ -2961,6 +2961,8 @@ export async function recordTeeTimeMatch(input: TeeTimeMatchObservationInput) {
       courseId: input.courseId,
       sourceId: input.sourceId,
       startsAt: input.startsAt,
+      lastSeenAt: confirmedAt,
+      lastConfirmedAt: confirmedAt,
       availableSpots: input.availableSpots,
       bookingUrl: input.bookingUrl,
       priceCents: input.priceCents,

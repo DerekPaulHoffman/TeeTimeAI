@@ -1949,6 +1949,39 @@ describe("recordTeeTimeMatch", () => {
     vi.useRealTimers();
   });
 
+  it.each([
+    ["an earlier provider observation", new Date("2026-07-10T11:59:00.000Z")],
+    ["the current time when no observation is supplied", undefined],
+  ] as const)(
+    "uses %s for both new and existing match confirmations",
+    async (_, observedAt) => {
+      mockedPrisma.teeTimeMatch.findUnique.mockResolvedValue(null);
+
+      await recordTeeTimeMatch({
+        searchId: "search-1",
+        courseId: "course-1",
+        sourceId: "slot-1",
+        startsAt: new Date("2026-07-11T12:00:00.000Z"),
+        availableSpots: 4,
+        bookingUrl: "https://example.com/book",
+        observedAt,
+      });
+
+      const confirmedAt = observedAt ?? new Date("2026-07-10T12:00:00.000Z");
+      const persisted = mockedPrisma.teeTimeMatch.upsert.mock.calls[0]?.[0];
+      expect(persisted?.create).toMatchObject({
+        lastSeenAt: confirmedAt,
+        lastConfirmedAt: confirmedAt,
+      });
+      expect(persisted?.update).toMatchObject({
+        lastSeenAt: confirmedAt,
+        lastConfirmedAt: confirmedAt,
+      });
+      // First discovery remains the database insertion time, not the source time.
+      expect(persisted?.create).not.toHaveProperty("firstSeenAt");
+    },
+  );
+
   it("does not re-alert a tee time that briefly disappears and returns", async () => {
     mockedPrisma.teeTimeMatch.findUnique.mockResolvedValue({
       availabilityStatus: "GONE",
