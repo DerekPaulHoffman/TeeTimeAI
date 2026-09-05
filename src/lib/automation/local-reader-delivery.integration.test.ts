@@ -375,6 +375,10 @@ describe("completed reader source through ordinary match delivery", () => {
       firstSeenAt: priorSuccess, lastSeenAt: priorSuccess, lastConfirmedAt: priorSuccess,
       sentAt: null, unavailableAt: null
     });
+    rows.courseProbe.push({
+      id: "historical-probe", teeSearchId: lease.searchId, courseId: "offline-course",
+      outcome: "MATCH_FOUND", observedAt: new Date(priorSuccess.getTime() - 1_000), details: {}
+    });
     const payload = {
       schemaVersion: 2 as const, checkedAt: now.toISOString(), matchIds: ["historical-match"],
       matchRefs: [{ matchId: "historical-match", availabilityCycle: 0 }],
@@ -391,9 +395,9 @@ describe("completed reader source through ordinary match delivery", () => {
     expect(await prepareSearchEmailDeliveryGroup({ ...group, recipients: [owner, friend], ownerRecipient: owner, payload })).toMatchObject({ prepared: true });
     const beforeConsumptionSend = vi.fn();
     await expect(drainSearchEmailDeliveryGroup({ ...group, send: beforeConsumptionSend }))
-      .rejects.toMatchObject({ code: "SEARCH_EMAIL_DELIVERY_DEFERRED" });
+      .rejects.toMatchObject({ code: "DELIVERY_PROVIDER_SOURCE_PENDING" });
     expect(beforeConsumptionSend).not.toHaveBeenCalled();
-    expect(rows.searchEmailDelivery.every((row) => row.attemptCount === 0)).toBe(true);
+    expect(rows.searchEmailDelivery.every((row) => row.lastError === "DELIVERY_PROVIDER_SOURCE_PENDING")).toBe(true);
     expect(rows.localReaderJob[0].resultExpiresAt).not.toEqual(completedAt);
 
     const attempts: { recipient: string; key: string; snapshot: unknown }[] = [];
