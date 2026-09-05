@@ -34,6 +34,7 @@ vi.mock("@/lib/automation/course-monitoring", async (importOriginal) => ({
 
 import { runSearchCheck } from "./search-check";
 import { getFreshLocalReaderObservation } from "@/lib/local-reader/service";
+import { getRequiredLocalReaderCapability } from "@/lib/local-reader/capabilities";
 import {
   drainSearchEmailDeliveryGroup,
   hydrateMatchAlertPayload,
@@ -47,6 +48,8 @@ const sourceAt = new Date("2026-07-29T12:09:00Z");
 const completedAt = new Date("2026-07-29T12:09:20Z");
 const priorSuccess = new Date("2026-07-28T12:00:00Z");
 const bookingUrl = "https://fox.tenfore.golf/offline-fixture?date=2026-07-30";
+// This tests delivery from an accepted source, not a particular parser release.
+const readerCapability = getRequiredLocalReaderCapability("tenfore:offline-fixture", "Offline public course");
 // Reserved .example addresses exercise the real send wrapper, not its dry-run path.
 const owner = "owner@delivery.example";
 const friend = "friend@delivery.example";
@@ -321,12 +324,12 @@ beforeEach(() => {
     courseKey: "tenfore:offline-fixture", purpose: "ALERT_CHECK", status: "COMPLETED",
     scheduleVersion: 1, resumeFromScheduleVersion: 1, resumeScheduleVersion: 2,
     targetDate: "2026-07-30", players: 2, bookingUrl,
-    requiredCapabilityKey: "TENFORE_RENDERED", requiredParserVersion: 2,
+    requiredCapabilityKey: readerCapability.key, requiredParserVersion: readerCapability.parserVersion,
     claimedAt: sourceAt, completedAt, resultExpiresAt: new Date("2026-07-29T12:19:20Z"),
     result: {
       jobId: "offline-reader-job", courseKey: "tenfore:offline-fixture", status: "AVAILABLE",
       evidenceAnchor: "SERVER_CLAIM", observedAt: sourceAt.toISOString(), pageUrl: bookingUrl,
-      pageTitle: "Offline fixture", readerVersion: "tenfore-rendered-v2",
+      pageTitle: "Offline fixture", readerVersion: `tenfore-rendered-v${readerCapability.parserVersion}`,
       slots: [{ startsAtLocal: "2026-07-30T08:10:00", timeLabel: "8:10 AM", holes: [18],
         minimumPlayers: 1, availableSpots: 4, priceCents: 4200, cartIncluded: false }]
     }
