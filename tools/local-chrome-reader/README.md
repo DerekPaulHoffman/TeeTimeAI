@@ -31,6 +31,23 @@ job URL remains on `fox.tenfore.golf`, contains one safe tenant path, and render
 the requested date. The local reader never generates, reads, or replays
 TenFore's underlying CAPTCHA token.
 
+Parser capability `TENFORE_RENDERED:2` requires every visible recognized card to
+parse before player filtering or duplicate-time removal. A partially rendered
+card must not disappear into partial availability or a false empty result.
+Known cards are identified even before their time/details render; recognized
+fallback cards are included alongside the current layout. Explicitly hidden
+clones are ignored, while accessibility attributes or missing layout geometry
+alone do not prove that a card is hidden.
+
+The shared content script preserves each reader's existing preparation hook and
+then passively rechecks `READER_ERROR` snapshots using the time remaining from
+the original 25-second readiness deadline. It does not restart that deadline.
+Valid, empty, route-mismatch and challenge results return immediately; a malformed
+snapshot remains `READER_ERROR` at the deadline. Existing preparation hooks keep
+their own separate bounded execution limits, so 25 seconds is not a new total
+deadline for the entire job. No additional provider request or control action is
+performed by snapshot settlement.
+
 Chronogolf pages are accepted only on the public `chronogolf.com/club/<slug>`
 route with one safe slug. Those pages are opened with a date, tee-time step,
 and public player-count selection; unrelated paths and unexpected page shapes
@@ -111,6 +128,15 @@ allowlist entry or extension release.
 An actual parser or manifest change to this unpacked development extension
 still requires Chrome's **Reload** action; unattended binary updates require a
 separately signed Web Store or enterprise-managed extension package.
+
+For the complete-card parser rollout, update and reload the actual installed
+extension first, then require a fresh signed heartbeat reporting build
+`chrome-extension-1.11.1` and `TENFORE_RENDERED:2` before publishing the backend's
+minimum-version change. This worker can finish existing version-1 jobs during
+that transition. The newer backend requires version 2 for new/reused evidence;
+historical legacy handshakes remain version 1, and older completed results must
+not become proof of the new parser. Git/Vercel readiness alone does not establish
+that the installed Chrome extension changed.
 
 The production backend persists short-lived jobs and leases in Neon. The
 extension signs every request with HMAC-SHA256 and accepts only jobs whose

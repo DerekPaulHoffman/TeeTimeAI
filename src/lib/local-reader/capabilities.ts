@@ -49,7 +49,7 @@ export function getRequiredLocalReaderCapability(
     case "CHRONOGOLF":
       return { key: "CHRONOGOLF_RENDERED", parserVersion: 1 };
     case "TENFORE":
-      return { key: "TENFORE_RENDERED", parserVersion: 1 };
+      return { key: "TENFORE_RENDERED", parserVersion: 2 };
     case "EZLINKS":
       return { key: "EZLINKS_RENDERED", parserVersion: 1 };
     case "WEBTRAC":
