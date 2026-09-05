@@ -7,6 +7,7 @@ const transactionMocks = vi.hoisted(() => ({
   $queryRawUnsafe: vi.fn(),
   courseMonitoringEvent: {
     create: vi.fn(),
+    createMany: vi.fn(),
     findFirst: vi.fn(),
     findMany: vi.fn(),
     findUnique: vi.fn(),
@@ -7705,6 +7706,9 @@ describe("course monitoring write serialization", () => {
 
     await expect(success).resolves.toMatchObject({ state: "HEALTHY" });
     await expect(parking).resolves.toBe(0);
+    expect(
+      transactionMocks.courseSupportIncident.findUnique,
+    ).toHaveBeenCalledTimes(2);
     expect(monitoringStatus).toMatchObject({
       state: "HEALTHY",
       lastSuccessfulAt: succeededAt,

@@ -13,6 +13,7 @@ import {
   tagCourseSupportBrowserStageControlFailure
 } from "@/lib/automation/course-support-verification-watch";
 import { CourseSupportSearchExecutionFenceRetryError } from "@/lib/automation/course-support-search-execution-fence";
+import { CourseSupportEvidenceRefreshRequiredError } from "./course-support-closeout-errors";
 
 describe("assertCourseSupportVerificationWatchFlags", () => {
   it("requires the owner-bound watch and closeout lane for every persisted verification", () => {
@@ -810,6 +811,141 @@ describe("runCourseSupportVerificationWatch", () => {
     expect(onStopped).toHaveBeenCalledWith(
       expect.objectContaining({ reason: "error", passCount: 2 })
     );
+  });
+
+  it("reverifies a typed evidence refresh under the same owner and requires two new clean passes", async () => {
+    const controller = new AbortController();
+    const pass = vi.fn(async (signal: AbortSignal) => {
+      expect(signal.aborted).toBe(false);
+      return cleanPass();
+    });
+    const closeout = vi.fn()
+      .mockRejectedValueOnce(new CourseSupportEvidenceRefreshRequiredError("INCIDENT_VERIFICATION_STALE"))
+      .mockResolvedValueOnce({ durableCloseoutRecorded: true });
+    const onStopped = vi.fn();
+
+    const result = await runCourseSupportVerificationWatch({
+      pass,
+      closeout,
+      onStopped,
+      signal: controller.signal,
+      sleep: async () => undefined,
+    });
+
+    expect(result).toMatchObject({
+      outcome: "verification_watch_settled",
+      passCount: 4,
+      evidenceRefreshRetryCount: 1,
+      lastEvidenceRefreshReason: "INCIDENT_VERIFICATION_STALE",
+    });
+    expect(closeout).toHaveBeenCalledTimes(2);
+    expect(closeout).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      evidenceRefreshRetryCount: 0,
+      lastEvidenceRefreshReason: null,
+    }));
+    expect(closeout).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      evidenceRefreshRetryCount: 1,
+      lastEvidenceRefreshReason: "INCIDENT_VERIFICATION_STALE",
+    }));
+    expect(onStopped).not.toHaveBeenCalled();
+  });
+
+  it("bounds repeated freshness failures and releases through one visible error lane", async () => {
+    const closeout = vi.fn(async () => {
+      throw new CourseSupportEvidenceRefreshRequiredError("DETACHED_FAILURE_UNCONSUMED");
+    });
+    const onStopped = vi.fn(async () => ({ durableCloseoutRecorded: true }));
+
+    const result = await runCourseSupportVerificationWatch({
+      pass: async () => cleanPass(),
+      closeout,
+      onStopped,
+      sleep: async () => undefined,
+    });
+
+    expect(result).toMatchObject({
+      outcome: "verification_watch_closed",
+      stoppedReason: "error",
+      failureCode: "SETTLED_CLOSEOUT_FAILED",
+      evidenceRefreshRetryCount: 3,
+      lastEvidenceRefreshReason: "DETACHED_FAILURE_UNCONSUMED",
+    });
+    expect(closeout).toHaveBeenCalledTimes(4);
+    expect(onStopped).toHaveBeenCalledOnce();
+    expect(onStopped).toHaveBeenCalledWith(expect.objectContaining({
+      reason: "error",
+      evidenceRefreshRetryCount: 3,
+      lastEvidenceRefreshReason: "DETACHED_FAILURE_UNCONSUMED",
+    }));
+  });
+
+  it("does not retry an untyped error that copies a freshness guard message", async () => {
+    const guard = new CourseSupportEvidenceRefreshRequiredError("INCIDENT_VERIFICATION_STALE");
+    const closeout = vi.fn(async () => { throw new Error(guard.message); });
+    const onStopped = vi.fn(async () => ({ durableCloseoutRecorded: true }));
+
+    const result = await runCourseSupportVerificationWatch({
+      pass: async () => cleanPass(), closeout, onStopped, sleep: async () => undefined,
+    });
+
+    expect(result).toMatchObject({
+      stoppedReason: "error", evidenceRefreshRetryCount: 0, lastEvidenceRefreshReason: null,
+    });
+    expect(closeout).toHaveBeenCalledOnce();
+    expect(onStopped).toHaveBeenCalledOnce();
+  });
+
+  it("does not reverify or close out after ownership aborts during an evidence refresh wait", async () => {
+    const controller = new AbortController();
+    const pass = vi.fn(async () => cleanPass());
+    const closeout = vi.fn(async () => {
+      throw new CourseSupportEvidenceRefreshRequiredError("DETACHED_CONTINUATION_PENDING");
+    });
+    const onStopped = vi.fn();
+
+    await expect(runCourseSupportVerificationWatch({
+      pass, closeout, onStopped, signal: controller.signal,
+      sleep: async () => {
+        if (closeout.mock.calls.length > 0) controller.abort(new Error("ownership lost"));
+      },
+    })).rejects.toThrow("ownership lost");
+
+    expect(pass).toHaveBeenCalledTimes(2);
+    expect(closeout).toHaveBeenCalledOnce();
+    expect(onStopped).not.toHaveBeenCalled();
+  });
+
+  it("keeps the original endpoint when evidence refresh consumes the remaining watch time", async () => {
+    let currentTime = 0;
+    const pass = vi.fn(async () => cleanPass());
+    const closeout = vi.fn(async () => {
+      throw new CourseSupportEvidenceRefreshRequiredError(
+        "DETACHED_REQUEST_ACTIVE",
+      );
+    });
+    const onStopped = vi.fn(async () => ({ durableCloseoutRecorded: true }));
+
+    const result = await runCourseSupportVerificationWatch({
+      pass,
+      closeout,
+      onStopped,
+      deadlineAt: 10_000,
+      pollMs: 5_000,
+      now: () => currentTime,
+      sleep: async (milliseconds) => { currentTime += milliseconds; },
+    });
+
+    expect(result).toMatchObject({
+      outcome: "verification_watch_closed",
+      stoppedReason: "endpoint",
+      passCount: 2,
+      evidenceRefreshRetryCount: 1,
+      lastEvidenceRefreshReason: "DETACHED_REQUEST_ACTIVE",
+    });
+    expect(currentTime).toBe(10_000);
+    expect(pass).toHaveBeenCalledTimes(2);
+    expect(closeout).toHaveBeenCalledOnce();
+    expect(onStopped).toHaveBeenCalledOnce();
   });
 
   it("aborts a never-resolving pass at the endpoint and releases once", async () => {

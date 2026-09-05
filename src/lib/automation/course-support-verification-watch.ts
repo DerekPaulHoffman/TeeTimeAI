@@ -1,8 +1,13 @@
 import { isCourseSupportSearchExecutionFenceRetryError } from "./course-support-search-execution-fence";
+import {
+  getCourseSupportEvidenceRefreshReason,
+  type CourseSupportEvidenceRefreshReason,
+} from "./course-support-closeout-errors";
 export const DEFAULT_COURSE_SUPPORT_VERIFICATION_WATCH_MINUTES = 18;
 export const DEFAULT_COURSE_SUPPORT_VERIFICATION_POLL_MS = 20_000;
 export const DEFAULT_COURSE_SUPPORT_VERIFICATION_RELEASE_CLEANUP_MS = 60_000;
 export const DEFAULT_COURSE_SUPPORT_HEARTBEAT_RENEWAL_TIMEOUT_MS = 30_000;
+export const MAX_COURSE_SUPPORT_EVIDENCE_REFRESH_RETRIES = 3;
 
 export const COURSE_SUPPORT_VERIFICATION_WATCH_FAILURE_CODES = [
   "BROWSER_STAGE_PERSIST_FAILED",
@@ -477,12 +482,16 @@ export async function runCourseSupportVerificationWatch<
   ) => Promise<CourseSupportVerificationPassResult<TVerification>>;
   closeout?: (input: {
     passCount: number;
+    evidenceRefreshRetryCount: number;
+    lastEvidenceRefreshReason: CourseSupportEvidenceRefreshReason | null;
     settledPass: CourseSupportVerificationPassResult<TVerification>;
     signal: AbortSignal;
   }) => Promise<TCloseout>;
   onStopped?: (input: {
     reason: "endpoint" | "max" | "error";
     failureCode: CourseSupportVerificationWatchFailureCode | null;
+    evidenceRefreshRetryCount: number;
+    lastEvidenceRefreshReason: CourseSupportEvidenceRefreshReason | null;
     passCount: number;
     lastPass: CourseSupportVerificationPassResult<TVerification> | null;
     signal: AbortSignal;
@@ -555,6 +564,8 @@ export async function runCourseSupportVerificationWatch<
       ? ("endpoint" as const)
       : ("max" as const);
   let passCount = 0;
+  let evidenceRefreshRetryCount = 0;
+  let lastEvidenceRefreshReason: CourseSupportEvidenceRefreshReason | null = null;
   let lastPass: CourseSupportVerificationPassResult<TVerification> | null = null;
   let consecutiveCleanPassCount = 0;
   let browserStageTotals = emptyCourseSupportVerificationBrowserStageTotals();
@@ -680,6 +691,8 @@ export async function runCourseSupportVerificationWatch<
         input.onStopped!({
           reason,
           failureCode: safeFailureCode,
+          evidenceRefreshRetryCount,
+          lastEvidenceRefreshReason,
           passCount,
           lastPass,
           signal
@@ -700,6 +713,8 @@ export async function runCourseSupportVerificationWatch<
       passCount,
       stoppedReason: reason,
       failureCode: safeFailureCode,
+      evidenceRefreshRetryCount,
+      lastEvidenceRefreshReason,
       browserStageTotals,
       closeout: releaseResult.value
     };
@@ -777,19 +792,36 @@ export async function runCourseSupportVerificationWatch<
       let closeout: TCloseout | null;
       if (input.closeout) {
         const closeoutResult = await runBounded((signal) =>
-          input.closeout!({ passCount, settledPass, signal })
+          input.closeout!({
+            passCount,
+            evidenceRefreshRetryCount,
+            lastEvidenceRefreshReason,
+            settledPass,
+            signal,
+          })
         );
         if (closeoutResult.kind === "timeout") {
           return stop(deadlineReason);
         }
         if (closeoutResult.kind === "error") {
+          const evidenceRefreshReason = getCourseSupportEvidenceRefreshReason(
+            closeoutResult.error,
+          );
+          if (evidenceRefreshReason) {
+            lastEvidenceRefreshReason = evidenceRefreshReason;
+          }
           if (
-            isCourseSupportSearchExecutionFenceRetryError(closeoutResult.error)
+            isCourseSupportSearchExecutionFenceRetryError(closeoutResult.error) ||
+            (evidenceRefreshReason !== null &&
+              evidenceRefreshRetryCount < MAX_COURSE_SUPPORT_EVIDENCE_REFRESH_RETRIES)
           ) {
             consecutiveCleanPassCount = 0;
             const remainingMs = deadline - now();
             if (remainingMs <= 0) {
               return stop(deadlineReason);
+            }
+            if (evidenceRefreshReason) {
+              evidenceRefreshRetryCount += 1;
             }
             await sleepWithOwnership(Math.min(pollMs, remainingMs));
             continue;
@@ -807,6 +839,8 @@ export async function runCourseSupportVerificationWatch<
       return {
         outcome: "verification_watch_settled" as const,
         passCount,
+        evidenceRefreshRetryCount,
+        lastEvidenceRefreshReason,
         // Keep the final pass available for convergence diagnosis while also
         // exposing every browser-stage action observed during the watch. A
         // settled watch necessarily ends on clean scans, so final-pass counts

@@ -72,6 +72,10 @@ import {
 } from "./course-support-action-plan";
 import { buildCourseSupportActionExecution } from "./course-support-action-execution";
 import {
+  CourseSupportEvidenceRefreshRequiredError,
+  isCourseSupportEvidenceRefreshReason,
+} from "./course-support-closeout-errors";
+import {
   acquireCourseMonitoringWriteLockInTransaction,
   ACTIVE_DEMAND_ESCALATION_MS,
   getDeferredFailureHandoffEscalationDeadline,
@@ -11008,8 +11012,8 @@ async function closeoutCourseSupportBatchAttempt(
   if (
     detachedRequestStatesAtCloseout.some(isActiveDetachedVerificationRequest)
   ) {
-    throw new Error(
-      "Detached provider verification is still active; rerun verification before closeout.",
+    throw new CourseSupportEvidenceRefreshRequiredError(
+      "DETACHED_REQUEST_ACTIVE",
     );
   }
   type DeferredFailureHandoffCloseoutSource =
@@ -11327,7 +11331,9 @@ async function closeoutCourseSupportBatchAttempt(
         entry.verifiedIncidentUpdatedAt.getTime() &&
       !currentFailureIdentityByBatchIncidentId.get(entry.id)?.materialChange
     ) {
-      throw new Error("A course-support incident changed after verification.");
+      throw new CourseSupportEvidenceRefreshRequiredError(
+        "INCIDENT_VERIFICATION_STALE",
+      );
     }
   }
   const verificationRequestStartedByBatchIncidentId = new Set(
@@ -16372,6 +16378,7 @@ export async function parkCourseSupportCandidatesForMaterialChange(
               activeRealSearchCount: true,
               earliestTargetDate: true,
               escalatedAt: true,
+              attemptLedger: true,
             },
           }),
           transaction.courseMonitoringStatus.findUnique({
@@ -16499,6 +16506,13 @@ export async function parkCourseSupportCandidatesForMaterialChange(
           return false;
         }
 
+        const playbook = assessAutomationPlaybook(
+          incident.attemptLedger,
+          incident.cycle,
+        );
+        const playbookAssessmentAvailable =
+          playbook.valid && playbook.cycle === incident.cycle;
+
         const incidentUpdated =
           await transaction.courseSupportIncident.updateMany({
             where: {
@@ -16571,6 +16585,21 @@ export async function parkCourseSupportCandidatesForMaterialChange(
               parkedUntilMaterialChange: true,
               reason: route.reason,
               resumeWorkMode: route.resumeWorkMode,
+              playbookAssessmentStatus: playbookAssessmentAvailable
+                ? "AVAILABLE"
+                : "UNAVAILABLE",
+              playbookConclusion: playbookAssessmentAvailable
+                ? playbook.conclusion
+                : null,
+              playbookExhausted: playbookAssessmentAvailable
+                ? isAutomationPlaybookExhausted(
+                    incident.attemptLedger,
+                    incident.cycle,
+                  )
+                : null,
+              nextStage: playbookAssessmentAvailable
+                ? playbook.nextStage
+                : null,
               repeatedApproachSuppressed:
                 route.reason === "UNCHANGED_ATTEMPT_ALREADY_RECORDED",
               transientBudgetExhausted:
@@ -19460,7 +19489,7 @@ function sanitizeResponderCloseoutSummary(value: unknown) {
   ] as const;
   const result: Record<
     string,
-    number | boolean | string | Record<string, number | boolean | string>
+    number | boolean | string | Record<string, number | boolean | string | null>
   > = {};
   for (const key of allowedKeys) {
     const candidate = source[key];
@@ -19475,13 +19504,15 @@ function sanitizeResponderCloseoutSummary(value: unknown) {
     }
   }
   const verificationWatch = asJsonObject(source.verificationWatch);
-  const safeVerificationWatch: Record<string, number | boolean | string> = {};
+  const safeVerificationWatch: Record<string, number | boolean | string | null> = {};
   for (const key of ["settled", "stopped"] as const) {
     if (typeof verificationWatch[key] === "boolean") {
       safeVerificationWatch[key] = verificationWatch[key];
     }
   }
-  for (const key of ["passCount", "preCloseoutExplicitHumanCount"] as const) {
+  for (const key of [
+    "passCount", "preCloseoutExplicitHumanCount", "evidenceRefreshRetryCount",
+  ] as const) {
     const candidate = verificationWatch[key];
     if (typeof candidate === "number" && Number.isInteger(candidate) && candidate >= 0) {
       safeVerificationWatch[key] = candidate;
@@ -19489,6 +19520,12 @@ function sanitizeResponderCloseoutSummary(value: unknown) {
   }
   if (verificationWatch.stopMode === "EARLY_RETRY" || verificationWatch.stopMode === "ENDPOINT") {
     safeVerificationWatch.stopMode = verificationWatch.stopMode;
+  }
+  if (
+    verificationWatch.lastEvidenceRefreshReason === null ||
+    isCourseSupportEvidenceRefreshReason(verificationWatch.lastEvidenceRefreshReason)
+  ) {
+    safeVerificationWatch.lastEvidenceRefreshReason = verificationWatch.lastEvidenceRefreshReason;
   }
   if (
     isCourseSupportVerificationWatchFailureCode(
@@ -19796,8 +19833,8 @@ function assertDetachedVerificationReadyForCloseout(input: {
       continue;
     }
     if (request.status === "QUEUED" || request.status === "CHECKING") {
-      throw new Error(
-        "Detached provider verification is still pending; rerun verification before closeout.",
+      throw new CourseSupportEvidenceRefreshRequiredError(
+        "DETACHED_REQUEST_PENDING",
       );
     }
     if (
@@ -19806,16 +19843,16 @@ function assertDetachedVerificationReadyForCloseout(input: {
         input.pendingContinuationBatchIncidentIds,
       )
     ) {
-      throw new Error(
-        "Detached provider verification continuation is still pending; rerun verification before closeout.",
+      throw new CourseSupportEvidenceRefreshRequiredError(
+        "DETACHED_CONTINUATION_PENDING",
       );
     }
     if (
       request.status === "SUCCEEDED" &&
       !detachedSuccessIsReflected(verification, request)
     ) {
-      throw new Error(
-        "Detached provider verification completed after the last evidence read; rerun verification before closeout.",
+      throw new CourseSupportEvidenceRefreshRequiredError(
+        "DETACHED_SUCCESS_UNCONSUMED",
       );
     }
     if (
@@ -19826,8 +19863,8 @@ function assertDetachedVerificationReadyForCloseout(input: {
           request,
         ))
     ) {
-      throw new Error(
-        "Detached provider failure changed after the last evidence read; rerun verification before closeout.",
+      throw new CourseSupportEvidenceRefreshRequiredError(
+        "DETACHED_FAILURE_UNCONSUMED",
       );
     }
     if (
@@ -19836,8 +19873,8 @@ function assertDetachedVerificationReadyForCloseout(input: {
         detachedStaleRequestCarriesCooldownEvidence(request)) &&
       !detachedFailureProofMatchesRequest(verification?.proofSnapshot, request)
     ) {
-      throw new Error(
-        "Detached provider cooldown evidence has not been recorded; rerun verification before closeout.",
+      throw new CourseSupportEvidenceRefreshRequiredError(
+        "DETACHED_COOLDOWN_UNCONSUMED",
       );
     }
   }

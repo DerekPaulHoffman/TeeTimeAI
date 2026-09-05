@@ -48,6 +48,7 @@ import {
   startAutomationWorker
 } from "@/lib/automation/worker-state";
 import { runCourseSupportLeaseWatch } from "@/lib/automation/course-support-lease-watch";
+import type { CourseSupportEvidenceRefreshReason } from "@/lib/automation/course-support-closeout-errors";
 import {
   assertCourseSupportVerificationWatchFlags,
   closeoutSettledCourseSupportVerification,
@@ -519,11 +520,16 @@ async function main() {
   );
 }
 
+type CourseSupportVerificationCommandDependencies = {
+  write?: typeof writeResult;
+  verify?: (args: string[]) => Promise<unknown>;
+  verifyRelease?: (args: string[]) => Promise<unknown>;
+};
+
 export async function runConfiguredCommand(input?: {
   argv?: string[];
   isWorkerExecutionAllowed?: typeof isAutomationWorkerExecutionAllowed;
-  write?: typeof writeResult;
-}) {
+} & CourseSupportVerificationCommandDependencies) {
   const [command = "inspect", ...args] =
     input?.argv ?? process.argv.slice(2);
   const checkWorkerExecutionAllowed =
@@ -557,7 +563,8 @@ export async function runConfiguredCommand(input?: {
       command,
       args,
       coverageOptions,
-      acceptanceHistoryOptions
+      acceptanceHistoryOptions,
+      input
     );
     return;
   }
@@ -576,7 +583,8 @@ export async function runConfiguredCommand(input?: {
           command,
           args,
           coverageOptions,
-          acceptanceHistoryOptions
+          acceptanceHistoryOptions,
+          input
         ),
       { intervalMs: COURSE_SUPPORT_OPERATION_HEARTBEAT_INTERVAL_MS }
     );
@@ -597,7 +605,8 @@ async function runCommand(
   command: string,
   args: string[],
   coverageOptions: CourseSupportCoverageOptions | null,
-  acceptanceHistoryOptions: CourseSupportAcceptanceHistoryOptions | null
+  acceptanceHistoryOptions: CourseSupportAcceptanceHistoryOptions | null,
+  verificationCommands?: CourseSupportVerificationCommandDependencies
 ) {
   switch (command) {
     case "inspect":
@@ -670,11 +679,22 @@ async function runCommand(
       writeResult(await heartbeat(args));
       return;
     case "verify":
-      writeResult(await verify(args));
+    case "verify-release": {
+      const result = await (command === "verify"
+        ? verificationCommands?.verify ?? verify
+        : verificationCommands?.verifyRelease ?? verifyRelease)(args);
+      const failed = isCourseSupportVerificationCommandFailure(result);
+      (verificationCommands?.write ?? writeResult)(
+        command === "verify-release" && failed && isVerificationResultRecord(result)
+          ? { ...result, outcome: "release_verification_failed" }
+          : result
+      );
+      // Releasing ownership is independent from successful verification. Keep
+      // the durable cleanup evidence, but do not report a failed watch as a
+      // successful command merely because its cleanup promise resolved.
+      if (failed) process.exitCode = 1;
       return;
-    case "verify-release":
-      writeResult(await verifyRelease(args));
-      return;
+    }
     case "closeout":
       writeResult(await closeout(args));
       return;
@@ -1126,22 +1146,33 @@ async function verify(
         deadlineAt: endpointDeadlineAt,
         signal: operationSignal,
         closeout: closeoutAfterWatch
-          ? async ({ passCount, signal }) =>
+          ? async ({ passCount, evidenceRefreshRetryCount, lastEvidenceRefreshReason, signal }) =>
               closeoutSettledCourseSupportBatch({
                 batchId,
                 leaseToken,
                 ownerThreadId,
                 passCount,
+                evidenceRefreshRetryCount,
+                lastEvidenceRefreshReason,
                 signal
               })
           : undefined,
         onStopped: closeoutAfterWatch
-          ? ({ reason, failureCode, passCount, signal }) =>
+          ? ({
+              reason,
+              failureCode,
+              passCount,
+              evidenceRefreshRetryCount,
+              lastEvidenceRefreshReason,
+              signal
+            }) =>
               closeoutStoppedCourseSupportBatch({
                 batchId,
                 leaseToken,
                 ownerThreadId,
                 passCount,
+                evidenceRefreshRetryCount,
+                lastEvidenceRefreshReason,
                 signal,
                 failureCode,
                 runtimeVersion: releaseSha ?? getAutomationRuntimeVersion(),
@@ -1505,6 +1536,8 @@ async function closeoutSettledCourseSupportBatch(input: {
   leaseToken: string;
   ownerThreadId: string;
   passCount: number;
+  evidenceRefreshRetryCount: number;
+  lastEvidenceRefreshReason: CourseSupportEvidenceRefreshReason | null;
   signal?: AbortSignal;
 }) {
   input.signal?.throwIfAborted();
@@ -1533,6 +1566,8 @@ async function closeoutSettledCourseSupportBatch(input: {
           verificationWatch: {
             settled: true,
             passCount: input.passCount,
+            evidenceRefreshRetryCount: input.evidenceRefreshRetryCount,
+            lastEvidenceRefreshReason: input.lastEvidenceRefreshReason,
             preCloseoutExplicitHumanCount
           }
         }
@@ -1559,6 +1594,8 @@ async function closeoutStoppedCourseSupportBatch(input: {
   passCount: number;
   mode: "EARLY_RETRY" | "ENDPOINT";
   failureCode: CourseSupportVerificationWatchFailureCode | null;
+  evidenceRefreshRetryCount: number;
+  lastEvidenceRefreshReason: CourseSupportEvidenceRefreshReason | null;
   runtimeVersion: string;
   signal?: AbortSignal;
 }) {
@@ -1578,6 +1615,8 @@ async function closeoutStoppedCourseSupportBatch(input: {
         stopped: true,
         stopMode: input.mode,
         passCount: input.passCount,
+        evidenceRefreshRetryCount: input.evidenceRefreshRetryCount,
+        lastEvidenceRefreshReason: input.lastEvidenceRefreshReason,
         ...(input.failureCode
           ? {
               failureCode: input.failureCode,
@@ -1980,6 +2019,35 @@ function stringValue(value: unknown) {
 
 function numberValue(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function isVerificationResultRecord(
+  value: unknown
+): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+export function isCourseSupportVerificationCommandFailure(value: unknown) {
+  if (!isVerificationResultRecord(value)) return false;
+  const verification =
+    value.outcome === "release_verification_completed" ||
+    value.outcome === "release_verification_failed"
+      ? value.verification
+      : value;
+  if (value.outcome === "release_verification_failed") return true;
+  if (!isVerificationResultRecord(verification)) return false;
+  if (
+    verification.outcome === "command_failed" ||
+    verification.outcome === "production_verification_failed"
+  ) {
+    return true;
+  }
+  return (
+    verification.outcome === "verification_watch_closed" &&
+    (verification.stoppedReason === "error" ||
+      (isVerificationResultRecord(verification.closeout) &&
+        verification.closeout.outcome === "command_failed"))
+  );
 }
 
 export function serializeCourseSupportResult(
