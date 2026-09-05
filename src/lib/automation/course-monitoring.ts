@@ -42,9 +42,20 @@ import {
   getAutomationPlaybookFactualFinalEvidence,
   isAutomationHumanReviewProofCurrentOrPrior,
   isAutomationPlaybookExhausted,
+  parseAutomationPlaybookLedger,
   serializeAutomationPlaybookLedger,
   type AutomationPlaybookEventInput,
 } from "./course-monitoring-playbook";
+import {
+  courseSupportActionPlanMatchesRoute,
+  parseCourseSupportClaimActionPlan,
+} from "./course-support-action-plan";
+import { buildCourseSupportActionExecution } from "./course-support-action-execution";
+import {
+  isTransientCourseSupportFailure,
+  routeCourseSupportRemediation,
+} from "./course-support-remediation-routing";
+import { MONITORING_STRATEGY_ACTIONS } from "./monitoring-strategy";
 import { evaluateMonitoringGate } from "./policy";
 import { getCourseLocalDateStorageBoundary } from "./date-boundary";
 import {
@@ -203,6 +214,7 @@ type DeadlineIncidentSnapshot = {
   lastSeenAt: Date;
   resolvedAt: Date | null;
   resolution: CourseSupportResolution | null;
+  _count?: { batchIncidents: number };
   batchIncidents?: Array<{
     id?: string;
     incidentId?: string;
@@ -3563,10 +3575,26 @@ export async function reconcileCourseMonitoringDeadline(input: {
                         batchIncidents: {
                           where: { batch: { completedAt: { not: null } } },
                           orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-                          take: 20,
+                          take: 21,
                           select: {
+                            id: true,
+                            incidentId: true,
+                            courseId: true,
                             cycle: true,
-                            batch: { select: { summary: true } },
+                            batch: {
+                              select: {
+                                id: true,
+                                completedAt: true,
+                                summary: true,
+                              },
+                            },
+                          },
+                        },
+                        _count: {
+                          select: {
+                            batchIncidents: {
+                              where: { batch: { completedAt: { not: null } } },
+                            },
                           },
                         },
                       },
@@ -5575,6 +5603,289 @@ async function fenceAndLoadFreshBatchSuccessProbes(
   return probeByIncidentId;
 }
 
+function getDeadlineProviderSnapshotFingerprint(
+  course: DeadlineBatchIncidentSnapshot["course"],
+) {
+  if (
+    !course.detectedPlatform ||
+    !course.bookingMethod ||
+    !course.automationEligibility
+  ) {
+    return null;
+  }
+  return buildCourseSupportProviderSnapshotFingerprint({
+    ...course,
+    detectedPlatform: course.detectedPlatform,
+    bookingMethod: course.bookingMethod,
+    automationEligibility: course.automationEligibility,
+  });
+}
+
+function assessStaleDiscoveryImplementationHandoff(input: {
+  batch: DeadlineBatchSnapshot;
+  entry: DeadlineBatchIncidentSnapshot;
+  now: Date;
+}): "NOT_APPLICABLE" | "UNPROVEN" | "AVAILABLE" | "CONSUMED" {
+  const { batch, entry, now } = input;
+  const incident = entry.incident;
+  const summary = asMonitoringJsonRecord(batch.summary);
+  const remediation = asMonitoringJsonRecord(summary.remediation);
+  // Recover only the crash gap after this exact owned discovery action. This
+  // is not an admission path for old, unowned, or already-human incidents.
+  if (
+    remediation.workMode !== "ADVANCE_DISCOVERY" ||
+    remediation.playbookStage !== "INDEPENDENT_CONFIRMATION" ||
+    incident.activeBatchId !== batch.id ||
+    incident.status !== "AUTO_INVESTIGATING" ||
+    entry.course.monitoringStatus?.state !== "AUTO_INVESTIGATING" ||
+    incident.humanReviewReason !== null ||
+    incident.escalatedAt !== null ||
+    incident.resolvedAt !== null ||
+    incident.resolution !== null ||
+    !["PENDING", "STALE_EVIDENCE", "RETRY_SCHEDULED"].includes(entry.result)
+  ) {
+    return "NOT_APPLICABLE";
+  }
+  const assessment = assessAutomationPlaybook(
+    incident.attemptLedger,
+    incident.cycle,
+  );
+  if (!assessment.valid || assessment.cycle !== incident.cycle) {
+    return "UNPROVEN";
+  }
+  if (assessment.conclusion !== "UNRESOLVED_EXHAUSTED") {
+    return "NOT_APPLICABLE";
+  }
+  if (
+    !COURSE_SUPPORT_FAILURE_CLASSES.has(
+      incident.failureClass as CourseSupportFailureClass,
+    )
+  ) {
+    return "UNPROVEN";
+  }
+  const proof = asMonitoringJsonRecord(entry.proofSnapshot);
+  const observedFailureClass = proof.failureClass;
+  if (
+    observedFailureClass !== undefined &&
+    observedFailureClass !== null &&
+    !COURSE_SUPPORT_FAILURE_CLASSES.has(
+      observedFailureClass as CourseSupportFailureClass,
+    )
+  ) {
+    return "UNPROVEN";
+  }
+  if (
+    (observedFailureClass ?? incident.failureClass) === "MISSING_SOURCE" &&
+    isTransientCourseSupportFailure(incident.failureClass as CourseSupportFailureClass)
+  ) {
+    // This refinement belongs to the existing one-shot deferred failure
+    // confirmation lane, not to a new reusable implementation handoff.
+    return "NOT_APPLICABLE";
+  }
+  const route = routeCourseSupportRemediation({
+    ...entry.course,
+    failureClass: (observedFailureClass ??
+      incident.failureClass) as CourseSupportFailureClass,
+    discoveryAttempt: "HTTP_INCONCLUSIVE",
+    attemptCount: 0,
+    playbookAssessment: assessment,
+    now,
+  });
+  if (
+    route.reason !== "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF" ||
+    route.workMode !== "IMPLEMENT_REUSABLE_SUPPORT" ||
+    route.allowUnchangedRuntime ||
+    !route.requiresImplementationPath
+  ) {
+    return "NOT_APPLICABLE";
+  }
+  const courseRef = createHash("sha256")
+    .update(entry.courseId)
+    .digest("hex")
+    .slice(0, 24);
+  const attempts = remediation.attempts;
+  if (
+    !Array.isArray(attempts) ||
+    attempts.length !== batch.incidents.length ||
+    new Set(
+      attempts.map((attempt) => asMonitoringJsonRecord(attempt).courseRef),
+    ).size !== attempts.length ||
+    !attempts.every((attempt) =>
+      batch.incidents.some((member) =>
+        createHash("sha256").update(member.courseId).digest("hex").slice(0, 24) ===
+        asMonitoringJsonRecord(attempt).courseRef,
+      ),
+    )
+  ) {
+    return "UNPROVEN";
+  }
+  const attempt = asMonitoringJsonRecord(
+    attempts.find(
+      (candidate) => asMonitoringJsonRecord(candidate).courseRef === courseRef,
+    ),
+  );
+  const plan = parseCourseSupportClaimActionPlan(attempt.actionPlan);
+  const approach = asMonitoringJsonRecord(attempt.approach);
+  const ledger = parseAutomationPlaybookLedger(incident.attemptLedger);
+  const currentCycleEvents = ledger?.events.filter(
+    (event) => event.cycle === incident.cycle,
+  ) ?? [];
+  const claimEventCount = attempt.playbookEventCountAtClaim;
+  const snapshot = getDeadlineProviderSnapshotFingerprint(entry.course);
+  if (
+    !snapshot ||
+    !plan ||
+    plan.primaryAction !== "VERIFY_CURRENT_RUNTIME" ||
+    plan.allowedActions.length !== 1 ||
+    plan.route.workMode !== "ADVANCE_DISCOVERY" ||
+    plan.route.playbookStage !== "INDEPENDENT_CONFIRMATION" ||
+    !courseSupportActionPlanMatchesRoute({
+      plan,
+      workMode: "ADVANCE_DISCOVERY",
+      strategyAction: plan.route.strategyAction,
+      playbookStage: "INDEPENDENT_CONFIRMATION",
+    }) ||
+    approach.workMode !== plan.route.workMode ||
+    approach.strategyAction !== plan.route.strategyAction ||
+    approach.playbookStage !== plan.route.playbookStage ||
+    Object.keys(approach).length !== 3 ||
+    remediation.strategyAction !== plan.route.strategyAction ||
+    remediation.allowUnchangedRuntime !== true ||
+    remediation.requiresImplementationPath !== false ||
+    remediation.retryBudget !== null ||
+    !Array.isArray(summary.plannedPaths) ||
+    summary.plannedPaths.length !== 0 ||
+    attempt.providerSnapshotFingerprint !== snapshot ||
+    attempt.failureFingerprint !== incident.failureFingerprint ||
+    batch.failureFingerprint !== incident.failureFingerprint ||
+    batch.providerFamilyKey !== incident.providerFamilyKey ||
+    entry.course.monitoringStatus.failureFingerprint !== incident.failureFingerprint ||
+    batch.releaseSha !== batch.baseSha ||
+    !/^[a-f0-9]{40}$/u.test(batch.baseSha) ||
+    attempt.runtimeVersion !== batch.baseSha ||
+    !(batch.deployedAt instanceof Date) ||
+    !ledger ||
+    ledger.events.at(-1)?.cycle !== incident.cycle ||
+    !Number.isSafeInteger(claimEventCount) ||
+    (claimEventCount as number) < 1 ||
+    (claimEventCount as number) >= currentCycleEvents.length
+  ) {
+    return "UNPROVEN";
+  }
+  const atClaim = assessAutomationPlaybook(
+    {
+      ...ledger,
+      events: ledger.events.slice(
+        0,
+        currentCycleEvents[(claimEventCount as number) - 1].sequence,
+      ),
+    },
+    incident.cycle,
+  );
+  const afterClaim = currentCycleEvents.slice(claimEventCount as number);
+  if (
+    !atClaim.valid ||
+    atClaim.cycle !== incident.cycle ||
+    atClaim.conclusion !== "INCOMPLETE" ||
+    atClaim.nextStage !== "INDEPENDENT_CONFIRMATION" ||
+    !afterClaim.every((event) =>
+      event.cycle === incident.cycle &&
+      event.stage === "INDEPENDENT_CONFIRMATION" &&
+      event.runtimeVersion === batch.baseSha &&
+      // Runtime playbook events identify the stage result, not the incident
+      // grouping failure. The claimed snapshot and incident CAS bind the latter.
+      event.failureFingerprint === `PLAYBOOK:${event.stage}:${
+        event.technicalReason ?? event.factualDisposition ?? event.skipReason ??
+        event.failureClass ?? event.transition
+      }` &&
+      new Date(event.observedAt).getTime() >= entry.createdAt.getTime() &&
+      new Date(event.observedAt).getTime() >= batch.deployedAt!.getTime() &&
+      new Date(event.observedAt).getTime() <= now.getTime(),
+    ) ||
+    !afterClaim.some((event) =>
+      event.transition === "COMPLETED" &&
+      event.providerExecution === true &&
+      event.evidenceKind === "RENDERED_PAGE",
+    )
+  ) {
+    return "UNPROVEN";
+  }
+  // A capped array alone cannot establish that implementation was never
+  // claimed. The filtered count must prove that this is the complete history.
+  const history = incident.batchIncidents;
+  if (
+    !Array.isArray(history) ||
+    history.length > 20 ||
+    incident._count?.batchIncidents !== history.length ||
+    new Set(history.map((prior) => prior.id)).size !== history.length
+  ) {
+    return "UNPROVEN";
+  }
+  for (const prior of history) {
+    if (
+      !prior.id ||
+      prior.incidentId !== incident.id ||
+      prior.courseId !== entry.courseId ||
+      !Number.isSafeInteger(prior.cycle) ||
+      prior.cycle < 1 ||
+      prior.cycle > incident.cycle ||
+      !prior.batch.id ||
+      prior.batch.id === batch.id ||
+      !(prior.batch.completedAt instanceof Date) ||
+      prior.batch.completedAt > now
+    ) {
+      return "UNPROVEN";
+    }
+    if (prior.cycle !== incident.cycle) continue;
+    const priorSummary = asMonitoringJsonRecord(prior.batch.summary);
+    for (const [index, records] of [
+      asMonitoringJsonRecord(priorSummary.remediation).attempts,
+      asMonitoringJsonRecord(priorSummary.closeout).remediationAttempts,
+    ].entries()) {
+      if (!Array.isArray(records)) return "UNPROVEN";
+      const matches = records.filter((record) => asMonitoringJsonRecord(record).courseRef === courseRef);
+      if (matches.length !== 1) return "UNPROVEN";
+      const record = asMonitoringJsonRecord(matches[0]);
+      const priorApproach = asMonitoringJsonRecord(record.approach);
+      const priorPlan = parseCourseSupportClaimActionPlan(record.actionPlan);
+      if (
+        typeof record.providerSnapshotFingerprint !== "string" ||
+        !/^[a-f0-9]{64}$/u.test(record.providerSnapshotFingerprint) ||
+        typeof record.failureFingerprint !== "string" ||
+        !record.failureFingerprint ||
+        !["ADVANCE_DISCOVERY", "VERIFY_TRANSIENT", "IMPLEMENT_REUSABLE_SUPPORT", "COMPLETE_CLASSIFICATION"].includes(String(priorApproach.workMode)) ||
+        Object.keys(priorApproach).length !== 3 ||
+        !MONITORING_STRATEGY_ACTIONS.includes(
+          priorApproach.strategyAction as typeof MONITORING_STRATEGY_ACTIONS[number],
+        ) ||
+        !(priorApproach.playbookStage === null ||
+          AUTOMATION_PLAYBOOK_STAGES.includes(priorApproach.playbookStage as typeof AUTOMATION_PLAYBOOK_STAGES[number])) ||
+        (index === 0 && (
+          !priorPlan ||
+          priorPlan.route.workMode !== priorApproach.workMode ||
+          priorPlan.route.strategyAction !== priorApproach.strategyAction ||
+          priorPlan.route.playbookStage !== priorApproach.playbookStage ||
+          !Number.isSafeInteger(record.playbookEventCountAtClaim) ||
+          (record.playbookEventCountAtClaim as number) < 0
+        )) ||
+        (index === 1 && (
+          typeof record.consumed !== "boolean" ||
+          typeof record.runtimeVersion !== "string" ||
+          !/^[a-f0-9]{40}$/u.test(record.runtimeVersion) ||
+          !Number.isSafeInteger(record.activeRealSearchCount) ||
+          (record.activeRealSearchCount as number) < 0
+        ))
+      ) return "UNPROVEN";
+      if (
+        record.providerSnapshotFingerprint === snapshot &&
+        record.failureFingerprint === incident.failureFingerprint &&
+        priorApproach.workMode === "IMPLEMENT_REUSABLE_SUPPORT"
+      ) return "CONSUMED";
+    }
+  }
+  return "AVAILABLE";
+}
+
 async function reconcileStaleBatchOwnershipAtEndpoint(
   transaction: Prisma.TransactionClient,
   input: {
@@ -6233,6 +6544,7 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
       result: CourseSupportBatchIncidentResult;
       orchestrationOnly?: boolean;
       incompletePlaybook?: boolean;
+      exhaustedDiscoveryImplementationHandoff?: boolean;
       deferredFailureCarrier?: "AVAILABLE" | "CONSUMED";
       materialFailureHandoff?: NonNullable<
         StaleDeferredFailureCarrier["materialFailureHandoff"]
@@ -6389,6 +6701,14 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
           allowEmpty: true,
         }),
       );
+      const implementationHandoff = assessStaleDiscoveryImplementationHandoff({
+        batch,
+        entry,
+        now: input.now,
+      });
+      if (implementationHandoff === "UNPROVEN") {
+        return { outcome: "OWNED" as const, incidentId: input.currentIncidentId };
+      }
       if (
         playbookAssessment.valid === true &&
         playbookAssessment.cycle === incident.cycle &&
@@ -6408,6 +6728,14 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
           disposition: "RETRY",
           result: "RETRY_SCHEDULED",
           orchestrationOnly: true,
+        });
+        continue;
+      }
+      if (implementationHandoff === "AVAILABLE") {
+        dispositionByIncidentId.set(incident.id, {
+          disposition: "RETRY",
+          result: "RETRY_SCHEDULED",
+          exhaustedDiscoveryImplementationHandoff: true,
         });
         continue;
       }
@@ -6436,6 +6764,81 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
         : entry.result,
     ]),
   );
+  const implementationHandoffEntries = batch.incidents.filter((entry) =>
+    dispositionByIncidentId.get(entry.incidentId)?.exhaustedDiscoveryImplementationHandoff,
+  );
+  for (const entry of implementationHandoffEntries) {
+    const lockedCourse = await transaction.course.findUnique({
+      where: { id: entry.courseId },
+    });
+    if (
+      !lockedCourse ||
+      buildCourseSupportProviderSnapshotFingerprint(lockedCourse) !==
+        getDeadlineProviderSnapshotFingerprint(entry.course)
+    ) {
+      return { outcome: "OWNED" as const, incidentId: input.currentIncidentId };
+    }
+    // The incident parent lock prevents new history memberships; the bounded
+    // batch/history locks also catch a formerly unfinished older owner that
+    // completed after the initial filtered history read.
+    await transaction.$queryRaw(Prisma.sql`
+      SELECT "id" FROM "CourseSupportIncident"
+      WHERE "id" = ${entry.incidentId} FOR UPDATE
+    `);
+    const lockedHistory = await transaction.$queryRaw<Array<{
+      id: string;
+      incidentId: string;
+      courseId: string;
+      cycle: number;
+      batchId: string;
+      completedAt: Date | null;
+      summary: Prisma.JsonValue | null;
+    }>>(Prisma.sql`
+      /* course_support_exhausted_handoff_history */
+      SELECT history."id", history."incidentId", history."courseId", history."cycle",
+             batch."id" AS "batchId", batch."completedAt", batch."summary"
+      FROM "CourseSupportBatchIncident" AS history
+      JOIN "CourseSupportBatch" AS batch ON batch."id" = history."batchId"
+      WHERE history."incidentId" = ${entry.incidentId}
+      ORDER BY batch."id", history."id"
+      LIMIT 22
+      FOR UPDATE OF batch, history
+    `);
+    const expectedHistory = [
+      ...entry.incident.batchIncidents!.map((prior) => ({
+        id: prior.id,
+        incidentId: prior.incidentId,
+        courseId: prior.courseId,
+        cycle: prior.cycle,
+        batchId: prior.batch.id,
+        completedAt: prior.batch.completedAt,
+        summary: prior.batch.summary,
+      })),
+      {
+        id: entry.id,
+        incidentId: entry.incidentId,
+        courseId: entry.courseId,
+        cycle: entry.cycle,
+        batchId: batch.id,
+        completedAt: batch.completedAt,
+        summary: batch.summary,
+      },
+    ];
+    if (
+      lockedHistory.length !== expectedHistory.length ||
+      lockedHistory.length > 21 ||
+      new Set(lockedHistory.map((row) => row.id)).size !== lockedHistory.length ||
+      !lockedHistory.every((row) => expectedHistory.some((expected) =>
+        row.id === expected.id && row.incidentId === expected.incidentId &&
+        row.courseId === expected.courseId && row.cycle === expected.cycle &&
+        row.batchId === expected.batchId &&
+        (row.completedAt?.getTime() ?? null) === (expected.completedAt?.getTime() ?? null) &&
+        JSON.stringify(row.summary) === JSON.stringify(expected.summary),
+      ))
+    ) {
+      return { outcome: "OWNED" as const, incidentId: input.currentIncidentId };
+    }
+  }
   const finalResults = [...finalResultByEntryId.values()];
   if (
     finalResults.some(
@@ -6456,7 +6859,8 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
     : [];
   if (shouldCloseBatch) {
     const deferredCarrierBatchIncidentIds = batch.incidents.flatMap((entry) =>
-      deferredFailureCarrierByIncidentId.has(entry.incidentId)
+      deferredFailureCarrierByIncidentId.has(entry.incidentId) ||
+      dispositionByIncidentId.get(entry.incidentId)?.exhaustedDiscoveryImplementationHandoff
         ? [entry.id]
         : [],
     );
@@ -6477,7 +6881,10 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
       );
     }
     for (const entry of batch.incidents) {
-      if (!deferredFailureCarrierByIncidentId.has(entry.incidentId)) {
+      if (
+        !deferredFailureCarrierByIncidentId.has(entry.incidentId) &&
+        !dispositionByIncidentId.get(entry.incidentId)?.exhaustedDiscoveryImplementationHandoff
+      ) {
         continue;
       }
       if (
@@ -6746,6 +7153,72 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
         ];
       })
     : [];
+  const discoveryHandoffCloseoutAttempts = implementationHandoffEntries.map(
+    (entry) => {
+      const courseRef = createHash("sha256")
+        .update(entry.courseId)
+        .digest("hex")
+        .slice(0, 24);
+      const plannedAttempt = asMonitoringJsonRecord(
+        plannedRemediationAttempts.find(
+          (attempt) => asMonitoringJsonRecord(attempt).courseRef === courseRef,
+        ),
+      );
+      const plan = parseCourseSupportClaimActionPlan(plannedAttempt.actionPlan)!;
+      const historicalExecution = readCourseSupportReleaseExecutionEvidence({
+        summary: batch.summary,
+        baseSha: batch.baseSha,
+        courseRef,
+        legacyOrdinal: releaseHistoryOrdinalByBatchIncidentId.get(entry.id),
+      });
+      // Record the completed discovery action so the next selector compares
+      // against this exact source, not an older consumed attempt. This receipt
+      // does not claim implementation, release, or monitoring success.
+      return {
+        courseRef,
+        providerSnapshotFingerprint: plannedAttempt.providerSnapshotFingerprint,
+        observedProviderSnapshotFingerprint: getDeadlineProviderSnapshotFingerprint(entry.course),
+        failureFingerprint: entry.incident.failureFingerprint,
+        observedFailureFingerprint: entry.incident.failureFingerprint,
+        failureOnlyHandoffCooldownUntil: null,
+        runtimeVersion: effectiveReleaseSha,
+        activeRealSearchCount: entry.incident.activeRealSearchCount,
+        consumed: true,
+        countsTowardOperationalNoProgress: true,
+        approach: plan.route,
+        retryBudget: null,
+        operationalRetry: null,
+        orchestrationRetry: null,
+        executionEvidence: {
+          claimedImplementationPaths: false,
+          newReleaseRecorded: false,
+          deploymentRecorded: historicalExecution.changedReleaseDeploymentEver,
+          postProbeRecorded: false,
+          providerAttemptRecorded: historicalExecution.providerExecutionEverForCourse,
+          providerExecutionAttemptRecorded: true,
+          playbookAttemptRecorded: true,
+          terminalResultRecorded: historicalExecution.terminalExecutionEverForCourse,
+          // This legacy key records PRE_EXECUTION request attachment, not I/O.
+          providerExecutionStarted: entry.verificationRequests.some(
+            (request) => request.startedAt !== null,
+          ),
+        },
+        actionExecution: buildCourseSupportActionExecution({
+          action: plan.primaryAction,
+          strictImplementationProofRecorded: false,
+          authoritativeSuccessSuperseded: false,
+          materialChangeSuperseded: false,
+          authoritativeTerminalResultSuperseded: false,
+          currentRuntimeProofRecorded: true,
+          currentClassificationProofRecorded: false,
+        }),
+      };
+    },
+  );
+  const staleOwnershipCloseoutAttempts = [
+    ...deferredFailureCloseoutAttempts,
+    ...discoveryHandoffCloseoutAttempts,
+  ];
   const needsHumanCount = finalResults.filter(
     (result) => result === "NEEDS_HUMAN",
   ).length;
@@ -6908,6 +7381,9 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
             endpointCount,
             automationStalledCount,
             exhaustedEndpointCount,
+            ...(implementationHandoffEntries.length > 0
+              ? { exhaustedDiscoveryImplementationHandoffCount: implementationHandoffEntries.length }
+              : {}),
             orchestrationRetryCount,
             orchestrationOnlyCourseRefs: batch.incidents.flatMap((entry) => {
               const disposition = dispositionByIncidentId.get(entry.incidentId);
@@ -6920,10 +7396,14 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
                   ]
                 : [];
             }),
+            ...(staleOwnershipCloseoutAttempts.length > 0
+              ? {
+                  remediationAttemptConsumed: discoveryHandoffCloseoutAttempts.length > 0,
+                  remediationAttempts: staleOwnershipCloseoutAttempts,
+                }
+              : {}),
             ...(deferredFailureCloseoutAttempts.length > 0
               ? {
-                  remediationAttemptConsumed: false,
-                  remediationAttempts: deferredFailureCloseoutAttempts,
                   deferredFailureHandoffAvailableCount:
                     deferredFailureCloseoutAttempts.filter((attempt) => {
                       const signal = parseDeferredFailureHandoffSignal(
@@ -7339,7 +7819,7 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
                           input.now,
                           incident.activeRealSearchCount,
                         )
-                      : planned.incompletePlaybook
+                      : planned.incompletePlaybook || planned.exhaustedDiscoveryImplementationHandoff
                         ? getCourseMonitoringEscalationDeadline(
                             input.now,
                             incident.activeRealSearchCount,
@@ -7353,6 +7833,8 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
                           ?.invalidatedByCurrentState
                         ? "Retry from current monitoring and provider evidence after invalidating the superseded deferred confirmation."
                         : "Retry the unchanged failure after the deferred confirmation started without durable current-failure proof."
+                      : planned.exhaustedDiscoveryImplementationHandoff
+                        ? "Implement reusable public monitoring support after the exhausted discovery watch lost ownership."
                       : planned.incompletePlaybook
                         ? "Continue the next incomplete current-cycle playbook stage after stale responder ownership was released."
                         : planned.orchestrationOnly
@@ -7408,9 +7890,9 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
       }
       if (
         retryable &&
-        (planned.orchestrationOnly || planned.incompletePlaybook)
+        (planned.orchestrationOnly || planned.incompletePlaybook || planned.exhaustedDiscoveryImplementationHandoff)
       ) {
-        const nextDeadlineAt = planned.incompletePlaybook
+        const nextDeadlineAt = planned.incompletePlaybook || planned.exhaustedDiscoveryImplementationHandoff
           ? getCourseMonitoringEscalationDeadline(
               input.now,
               incident.activeRealSearchCount,
@@ -7424,18 +7906,31 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
           fromState: monitoringStatus?.state ?? null,
           toState: "AUTO_INVESTIGATING",
           failureFingerprint: incident.failureFingerprint,
-          message: planned.incompletePlaybook
+          message: planned.exhaustedDiscoveryImplementationHandoff
+            ? "The exhausted discovery watch handed the public source to its unused reusable implementation action after stale ownership was released."
+          : planned.incompletePlaybook
             ? "The next incomplete playbook stage was rescheduled after stale responder ownership was released."
             : "Provider verification was rescheduled because the prior responder ownership expired before execution began.",
-          idempotencyKey: planned.incompletePlaybook
+          idempotencyKey: planned.exhaustedDiscoveryImplementationHandoff
+            ? `course-support-exhausted-implementation-handoff:${batch.id}:${entry.id}`
+          : planned.incompletePlaybook
             ? `course-support-incomplete-playbook-retry:${batch.id}:${entry.id}`
             : `course-support-orchestration-retry:${batch.id}:${entry.id}`,
           occurredAt: input.now,
           audit: {
-            action: planned.incompletePlaybook
+            action: planned.exhaustedDiscoveryImplementationHandoff
+              ? "exhausted_discovery_implementation_handoff_after_stale_ownership"
+            : planned.incompletePlaybook
               ? "continue_incomplete_playbook_after_stale_ownership"
               : "course_support_orchestration_retry",
             cycle: incident.cycle,
+            ...(planned.exhaustedDiscoveryImplementationHandoff
+              ? {
+                  reason: "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF",
+                  implementationExecuted: false,
+                  executionEvidenceSource: "PERSISTED_INDEPENDENT_CONFIRMATION",
+                }
+              : {}),
             executionStarted: planned.orchestrationOnly ? false : true,
             countsTowardOperationalNoProgress: planned.orchestrationOnly
               ? false
@@ -7445,7 +7940,9 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
               (retrySchedule?.delayMs ?? 15 * 60 * 1000) / 1000,
             ),
             retryAt: retryAt.toISOString(),
-            playbookConclusion: planned.incompletePlaybook
+            playbookConclusion: planned.exhaustedDiscoveryImplementationHandoff
+              ? "UNRESOLVED_EXHAUSTED"
+            : planned.incompletePlaybook
               ? "INCOMPLETE"
               : null,
             nextStage: planned.incompletePlaybook
@@ -7453,8 +7950,8 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
                   .nextStage
               : null,
             nextEscalationDeadlineAt: nextDeadlineAt?.toISOString() ?? null,
-            preservesAttemptLedger: planned.incompletePlaybook === true,
-            preservesOperatorEvidence: planned.incompletePlaybook === true,
+            preservesAttemptLedger: planned.incompletePlaybook === true || planned.exhaustedDiscoveryImplementationHandoff === true,
+            preservesOperatorEvidence: planned.incompletePlaybook === true || planned.exhaustedDiscoveryImplementationHandoff === true,
             customerDataIncluded: false,
           },
         });
@@ -7473,7 +7970,7 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
           cycle: entry.cycle,
           result: entry.result,
           updatedAt: entry.updatedAt,
-          ...(planned.disposition === "MATERIAL_HANDOFF"
+          ...(planned.disposition === "MATERIAL_HANDOFF" || planned.exhaustedDiscoveryImplementationHandoff
             ? {
                 proofSnapshot: {
                   equals:
@@ -7493,7 +7990,9 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
               : planned.disposition === "EXHAUSTED_ENDPOINT"
                 ? "The responder lease expired after the bounded automation playbook was exhausted."
                 : planned.disposition === "RETRY"
-                  ? planned.orchestrationOnly
+                  ? planned.exhaustedDiscoveryImplementationHandoff
+                    ? "Expired discovery ownership handed the trusted public source to its unused reusable implementation action."
+                  : planned.orchestrationOnly
                     ? "Expired responder ownership was released because provider verification never began execution."
                     : "Expired responder ownership was released for a safe automatic retry."
                   : planned.disposition === "MATERIAL_HANDOFF"

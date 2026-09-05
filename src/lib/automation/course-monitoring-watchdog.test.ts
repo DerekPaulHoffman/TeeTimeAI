@@ -58,12 +58,15 @@ vi.mock("@/lib/prisma", () => ({ prisma: prismaMocks }));
 import {
   FAILURE_CONFIRMATION_WINDOW_MS,
   getDeferredFailureHandoffEscalationDeadline,
+  reconcileCourseMonitoringDeadline,
   recordCourseMonitoringFailure,
   recordCourseMonitoringSuccess,
   runCourseMonitoringWatchdog,
 } from "./course-monitoring";
 import {
   appendAutomationPlaybookEvent,
+  assessAutomationPlaybook,
+  type AutomationPlaybookEventInput,
   type AutomationPlaybookLedger,
   type AutomationPlaybookReadPath,
   type AutomationPlaybookStage,
@@ -82,6 +85,11 @@ import {
 } from "./course-support-deferred-failure-handoff";
 import { buildProviderFailureFingerprint } from "./provider-capabilities";
 import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
+import { buildCourseSupportClaimActionPlan } from "./course-support-action-plan";
+import { readCourseSupportRemediationClaimAttempt } from "./course-support-batches";
+import { routeCourseSupportRemediation } from "./course-support-remediation-routing";
+import * as courseMonitoring from "./course-monitoring";
+import { recordRuntimePlaybookTransition } from "./course-monitoring-playbook-runtime";
 
 const now = new Date("2026-07-27T16:00:00.000Z");
 
@@ -350,6 +358,127 @@ function responderBatch(
         overrideSummary.searchExecutionFence ?? searchExecutionFence,
     },
   };
+}
+
+function expiredIndependentDiscoveryScenario() {
+  const runtimeVersion = "a".repeat(40);
+  const failureFingerprint = "SOURCE_MISSING:MISSING_SOURCE";
+  const providerCourse = {
+    timeZone: "America/New_York",
+    isPublic: true,
+    detectedPlatform: "UNKNOWN" as const,
+    providerFamilyKey: "SOURCE_MISSING",
+    website: "https://course.example",
+    detectedBookingUrl: "https://course.example/public-tee-sheet",
+    bookingMethod: "UNKNOWN" as const,
+    bookingAccessMode: "UNKNOWN",
+    bookingMetadata: null,
+    automationEligibility: "NEEDS_REVIEW" as const,
+    automationReason: "OTHER" as const,
+    monitoringMode: "AUTOMATIC" as const,
+    intelligenceVerifiedAt: null,
+    intelligenceReviewAt: null,
+    intelligenceConfidence: null,
+    layoutHoleCounts: [] as number[],
+    layoutHolesVerifiedAt: null,
+  };
+  const stages: Array<Pick<AutomationPlaybookEventInput,
+    "stage" | "readPath" | "transition" | "evidenceKind" | "skipReason" | "providerExecution"
+  >> = [
+    { stage: "OFFICIAL_IDENTITY", readPath: "OFFICIAL_IDENTITY", transition: "COMPLETED", evidenceKind: "OFFICIAL_SOURCE" },
+    { stage: "TYPED_ADAPTER", readPath: "TYPED_PROVIDER_ADAPTER", transition: "NOT_APPLICABLE", evidenceKind: "TOOLING", skipReason: "NO_RUNNABLE_ADAPTER" },
+    { stage: "OFFICIAL_HTTP_DISCOVERY", readPath: "OFFICIAL_HTTP", transition: "COMPLETED", evidenceKind: "OFFICIAL_SOURCE" },
+    { stage: "HTTP_ADAPTER_RETRY", readPath: "TYPED_PROVIDER_ADAPTER", transition: "NOT_APPLICABLE", evidenceKind: "TOOLING", skipReason: "NO_RUNNABLE_ADAPTER" },
+    { stage: "RENDERED_BROWSER_DISCOVERY", readPath: "RENDERED_BROWSER", transition: "COMPLETED", evidenceKind: "RENDERED_PAGE", providerExecution: true },
+    { stage: "BROWSER_ADAPTER_RETRY", readPath: "TYPED_PROVIDER_ADAPTER", transition: "NOT_APPLICABLE", evidenceKind: "TOOLING", skipReason: "NO_RUNNABLE_ADAPTER" },
+    { stage: "LOCAL_READER", readPath: "LOCAL_READER", transition: "NOT_APPLICABLE", evidenceKind: "TOOLING", skipReason: "NO_LOCAL_READER_CAPABILITY" },
+    { stage: "INDEPENDENT_CONFIRMATION", readPath: "INDEPENDENT_CONFIRMATION", transition: "COMPLETED", evidenceKind: "RENDERED_PAGE", providerExecution: true },
+  ];
+  let ledger: AutomationPlaybookLedger | null = null;
+  let claimLedger: AutomationPlaybookLedger | null = null;
+  for (const stage of stages) {
+    if (stage.stage === "INDEPENDENT_CONFIRMATION") claimLedger = ledger;
+    const event: AutomationPlaybookEventInput = {
+      ...stage, cycle: 1, runtimeVersion,
+      failureFingerprint: `PLAYBOOK:${stage.stage}:${stage.skipReason ?? stage.transition}`,
+      observedAt: new Date(stage.stage === "INDEPENDENT_CONFIRMATION"
+        ? "2026-07-27T15:58:00.000Z" : "2026-07-27T15:48:00.000Z"),
+    };
+    if (stage.transition !== "NOT_APPLICABLE" && stage.stage !== "OFFICIAL_IDENTITY") {
+      ledger = appendAutomationPlaybookEvent(ledger, { ...event, transition: "STARTED",
+        failureFingerprint: `PLAYBOOK:${stage.stage}:STARTED` });
+    }
+    ledger = appendAutomationPlaybookEvent(ledger, event);
+  }
+  const routingInput = {
+    ...providerCourse,
+    failureClass: "MISSING_SOURCE" as const,
+    discoveryAttempt: "HTTP_INCONCLUSIVE" as const,
+    attemptCount: 0,
+    materialChanges: { providerSnapshotChanged: false, failureFingerprintChanged: false,
+      relevantRuntimeChanged: false, readerCapabilityChanged: false },
+  };
+  const assignedRoute = routeCourseSupportRemediation({
+    ...routingInput, playbookAssessment: assessAutomationPlaybook(claimLedger, 1),
+  });
+  const actionPlan = buildCourseSupportClaimActionPlan({
+    route: assignedRoute, incidentKind: "NEEDS_ADAPTER",
+    incidentProviderFamilyKey: "SOURCE_MISSING", course: providerCourse,
+  });
+  const currentIncident = incident({
+    kind: "NEEDS_ADAPTER", failureClass: "MISSING_SOURCE", failureFingerprint,
+    activeBatchId: "batch-1", attemptLedger: ledger, attemptCount: 1,
+    confirmedAt: new Date("2026-07-27T15:20:00.000Z"),
+    escalationDeadlineAt: new Date("2026-07-27T15:59:00.000Z"),
+    lastSeenAt: new Date("2026-07-27T15:48:00.000Z"),
+    batchIncidents: [], _count: { batchIncidents: 0 },
+  });
+  const currentMonitoring = monitoringSnapshot("AUTO_INVESTIGATING", { failureFingerprint });
+  const remediation = {
+    workMode: assignedRoute.workMode, strategyAction: assignedRoute.strategy.action,
+    playbookStage: assignedRoute.attemptSignature?.playbookStage,
+    reason: assignedRoute.reason, allowUnchangedRuntime: assignedRoute.allowUnchangedRuntime,
+    requiresImplementationPath: assignedRoute.requiresImplementationPath,
+    retryBudget: assignedRoute.retryBudget,
+    attempts: [{
+      courseRef: createHash("sha256").update("course-1").digest("hex").slice(0, 24),
+      providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(providerCourse),
+      failureFingerprint, runtimeVersion, activeRealSearchCount: 0,
+      playbookEventCountAtClaim: claimLedger!.events.length,
+      approach: assignedRoute.attemptSignature, actionPlan,
+    }],
+  };
+  const batch = responderBatch([{ incident: currentIncident, monitoringStatus: currentMonitoring,
+    course: providerCourse, verificationRequests: [] }], {
+    providerFamilyKey: "SOURCE_MISSING", failureFingerprint,
+    summary: { plannedPaths: [], remediation },
+  });
+  return {
+    batch: { ...batch, incidents: batch.incidents.map((entry) => ({
+      ...entry, createdAt: new Date("2026-07-27T15:55:00.000Z"),
+    })) },
+    currentIncident, currentMonitoring, providerCourse, routingInput, ledger, remediation,
+  };
+}
+
+function mockExpiredIndependentDiscovery(scenario: ReturnType<typeof expiredIndependentDiscoveryScenario>) {
+  const { batch, currentIncident, currentMonitoring, providerCourse } = scenario;
+  prismaMocks.courseSupportIncident.findUnique.mockResolvedValue({ ...currentIncident, activeBatch: batch });
+  prismaMocks.courseMonitoringStatus.findUnique.mockResolvedValue(currentMonitoring);
+  prismaMocks.course.findUnique.mockResolvedValue(providerCourse);
+  const entry = batch.incidents[0]!;
+  const historyRows: Array<{
+    id: string; incidentId: string; courseId: string; cycle: number;
+    batchId: string; completedAt: Date | null; summary: Record<string, unknown>;
+  }> = [{
+    id: entry.id, incidentId: entry.incidentId, courseId: entry.courseId,
+    cycle: entry.cycle, batchId: batch.id, completedAt: batch.completedAt,
+    summary: batch.summary,
+  }];
+  prismaMocks.$queryRaw.mockImplementation(async (query: { sql?: string }) =>
+    query.sql?.includes("course_support_exhausted_handoff_history") ? historyRows : [],
+  );
+  return historyRows;
 }
 
 function deferredFailureCarrierScenario(startedAt: Date | null) {
@@ -3953,6 +4082,311 @@ describe("course monitoring watchdog", () => {
     ).not.toHaveBeenCalled();
     expect(prismaMocks.courseSupportIncident.updateMany).not.toHaveBeenCalled();
     expect(prismaMocks.automationRun.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("preserves the unused implementation handoff after an independent-discovery owner stops", async () => {
+    const scenario = expiredIndependentDiscoveryScenario();
+    const { batch, routingInput, ledger } = scenario;
+    expect(readCourseSupportRemediationClaimAttempt({
+      summary: batch.summary, courseId: "course-1", expectedAttemptCount: 1,
+    })?.actionPlan).toMatchObject({ schemaVersion: 1, primaryAction: "VERIFY_CURRENT_RUNTIME" });
+    expect(routeCourseSupportRemediation({
+      ...routingInput, playbookAssessment: assessAutomationPlaybook(ledger, 1),
+    })).toMatchObject({ workMode: "IMPLEMENT_REUSABLE_SUPPORT", reason: "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF" });
+    mockExpiredIndependentDiscovery(scenario);
+
+    await expect(reconcileCourseMonitoringDeadline({ courseId: "course-1", source: "RECOVERY_CRON", now }))
+      .resolves.toMatchObject({ outcome: "RETRYING" });
+    expect(prismaMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ status: "AUTO_INVESTIGATING", revision: 0 }),
+      data: expect.objectContaining({ activeBatchId: null,
+        nextAttemptAt: new Date(now.getTime() + 60_000),
+        escalationDeadlineAt: new Date(now.getTime() + 30 * 60_000),
+      }),
+    }));
+    expect(prismaMocks.courseSupportBatch.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ status: "RETRYABLE_FAILED", summary: expect.objectContaining({
+        closeout: expect.objectContaining({ exhaustedEndpointCount: 0, retryCount: 1, needsHumanCount: 0,
+          exhaustedDiscoveryImplementationHandoffCount: 1, remediationAttemptConsumed: true,
+          remediationAttempts: [expect.objectContaining({
+            providerSnapshotFingerprint: scenario.remediation.attempts[0]!.providerSnapshotFingerprint,
+            failureFingerprint: scenario.currentIncident.failureFingerprint,
+            runtimeVersion: batch.baseSha, activeRealSearchCount: 0,
+            consumed: true, countsTowardOperationalNoProgress: true,
+            approach: scenario.remediation.attempts[0]!.approach,
+            executionEvidence: {
+              claimedImplementationPaths: false, newReleaseRecorded: false, deploymentRecorded: false,
+              postProbeRecorded: false, providerAttemptRecorded: false,
+              providerExecutionAttemptRecorded: true, playbookAttemptRecorded: true,
+              terminalResultRecorded: false, providerExecutionStarted: false,
+            },
+            actionExecution: expect.objectContaining({
+              action: "VERIFY_CURRENT_RUNTIME", state: "EXECUTED",
+            }),
+          })],
+        }),
+      }) }),
+    }));
+    expect(prismaMocks.courseMonitoringEvent.create).not.toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ eventType: "HUMAN_REVIEW_REQUESTED" }),
+    }));
+    expect(prismaMocks.courseMonitoringEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ audit: expect.objectContaining({
+        action: "exhausted_discovery_implementation_handoff_after_stale_ownership",
+        reason: "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF",
+        preservesAttemptLedger: true, preservesOperatorEvidence: true,
+        retryDelaySeconds: 60, implementationExecuted: false,
+      }) }),
+    }));
+    for (const [call] of prismaMocks.courseSupportIncident.updateMany.mock.calls) {
+      expect(call.data).not.toHaveProperty("attemptLedger");
+      expect(call.data).not.toHaveProperty("cycle");
+      expect(call.data).not.toHaveProperty("attemptCount");
+    }
+    expect(prismaMocks.teeSearch.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("recovers a current-cycle handoff without counting retained prior-cycle events", async () => {
+    const scenario = expiredIndependentDiscoveryScenario();
+    const previousEvents = scenario.ledger!.events.map((event) => ({
+      ...event, observedAt: "2026-07-26T15:48:00.000Z",
+    }));
+    const currentEvents = scenario.ledger!.events.map((event) => ({
+      ...event, cycle: 2, sequence: previousEvents.length + event.sequence,
+    }));
+    scenario.ledger!.events = [...previousEvents, ...currentEvents];
+    scenario.currentIncident.cycle = 2;
+    scenario.batch.incidents[0]!.cycle = 2;
+    expect(assessAutomationPlaybook(scenario.ledger, 2)).toMatchObject({
+      valid: true, conclusion: "UNRESOLVED_EXHAUSTED",
+    });
+    mockExpiredIndependentDiscovery(scenario);
+    await expect(reconcileCourseMonitoringDeadline({ courseId: "course-1", source: "RECOVERY_CRON", now }))
+      .resolves.toMatchObject({ outcome: "RETRYING" });
+    expect(scenario.ledger!.events).toHaveLength(previousEvents.length + currentEvents.length);
+    for (const [call] of prismaMocks.courseSupportIncident.updateMany.mock.calls) {
+      expect(call.where.cycle).toBe(2);
+      expect(call.data).not.toHaveProperty("attemptLedger");
+      expect(call.data).not.toHaveProperty("cycle");
+    }
+  });
+
+  it("accepts actual browser-runtime completion markers after the owner stops", async () => {
+    const scenario = expiredIndependentDiscoveryScenario();
+    let canonicalLedger = { ...scenario.ledger!, events: scenario.ledger!.events.filter(
+      (event) => event.stage !== "INDEPENDENT_CONFIRMATION",
+    ) };
+    const persistence = vi.spyOn(courseMonitoring, "recordCourseMonitoringPlaybookTransition")
+      .mockImplementation(async (input) => {
+        canonicalLedger = appendAutomationPlaybookEvent(canonicalLedger, {
+          cycle: 1, stage: input.stage, transition: input.transition,
+          readPath: input.readPath, evidenceKind: input.evidenceKind,
+          failureFingerprint: input.failureFingerprint, runtimeVersion: input.runtimeVersion,
+          providerExecution: input.providerExecution, observedAt: input.now!,
+        });
+        return { replayed: false, incidentId: "incident-1", incidentRevision: 1,
+          ledger: canonicalLedger, assessment: assessAutomationPlaybook(canonicalLedger, 1) };
+      });
+    try {
+      const runtime = { courseId: "course-1", incidentId: "incident-1", cycle: 1,
+        assessment: assessAutomationPlaybook(canonicalLedger, 1), localReaderTechnicalReason: null };
+      for (const transition of ["STARTED", "COMPLETED"] as const) {
+        await expect(recordRuntimePlaybookTransition(runtime, {
+          stage: "INDEPENDENT_CONFIRMATION", transition, readPath: "INDEPENDENT_CONFIRMATION",
+          evidenceKind: "RENDERED_PAGE", runtimeVersion: scenario.batch.baseSha,
+          providerExecution: true, now: new Date("2026-07-27T15:58:00.000Z"),
+        })).resolves.toMatchObject({ recorded: true });
+      }
+    } finally {
+      persistence.mockRestore();
+    }
+    scenario.ledger!.events = canonicalLedger.events;
+    expect(scenario.ledger!.events.at(-1)?.failureFingerprint)
+      .toBe("PLAYBOOK:INDEPENDENT_CONFIRMATION:COMPLETED");
+    mockExpiredIndependentDiscovery(scenario);
+    await expect(reconcileCourseMonitoringDeadline({ courseId: "course-1", source: "RECOVERY_CRON", now }))
+      .resolves.toMatchObject({ outcome: "RETRYING" });
+  });
+
+  it.each([false, true])("does not repeat an unchanged implementation selection with consumed=%s", async (consumed) => {
+    const scenario = expiredIndependentDiscoveryScenario();
+    const implementationRoute = routeCourseSupportRemediation({
+      ...scenario.routingInput, playbookAssessment: assessAutomationPlaybook(scenario.ledger, 1),
+    });
+    const priorAttempt = {
+      ...scenario.remediation.attempts[0], approach: implementationRoute.attemptSignature,
+      actionPlan: buildCourseSupportClaimActionPlan({ route: implementationRoute,
+        incidentKind: "NEEDS_ADAPTER", incidentProviderFamilyKey: "SOURCE_MISSING",
+        course: scenario.providerCourse }),
+    };
+    Object.assign(scenario.currentIncident, {
+      _count: { batchIncidents: 1 },
+      batchIncidents: [{ id: "prior-entry", incidentId: "incident-1", courseId: "course-1", cycle: 1,
+        batch: { id: "prior-batch", completedAt: new Date("2026-07-27T15:40:00.000Z"),
+          summary: { remediation: { attempts: [priorAttempt] },
+            closeout: { remediationAttempts: [{ ...priorAttempt, consumed }] } } } }],
+    });
+    mockExpiredIndependentDiscovery(scenario);
+    await expect(reconcileCourseMonitoringDeadline({ courseId: "course-1", source: "RECOVERY_CRON", now }))
+      .resolves.toMatchObject({ outcome: "NEEDS_HUMAN" });
+    expect(prismaMocks.courseMonitoringEvent.create).not.toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ audit: expect.objectContaining({
+        action: "exhausted_discovery_implementation_handoff_after_stale_ownership",
+      }) }),
+    }));
+  });
+
+  it("anchors recovered discovery to the current source despite older different-source history", async () => {
+    const scenario = expiredIndependentDiscoveryScenario();
+    const olderAttempt = {
+      ...scenario.remediation.attempts[0], providerSnapshotFingerprint: "c".repeat(64),
+    };
+    const previous = { id: "prior-entry", incidentId: "incident-1", courseId: "course-1", cycle: 1,
+      batch: { id: "prior-batch", completedAt: new Date("2026-07-27T15:40:00.000Z"),
+        summary: { remediation: { attempts: [olderAttempt] },
+          closeout: { remediationAttempts: [{ ...olderAttempt, consumed: true }] } } } };
+    Object.assign(scenario.currentIncident, {
+      _count: { batchIncidents: 1 }, batchIncidents: [previous],
+    });
+    const lockedHistory = mockExpiredIndependentDiscovery(scenario);
+    lockedHistory.unshift({ id: previous.id, incidentId: previous.incidentId,
+      courseId: previous.courseId, cycle: previous.cycle, batchId: previous.batch.id,
+      completedAt: previous.batch.completedAt, summary: previous.batch.summary });
+    await expect(reconcileCourseMonitoringDeadline({ courseId: "course-1", source: "RECOVERY_CRON", now }))
+      .resolves.toMatchObject({ outcome: "RETRYING" });
+    expect(prismaMocks.courseSupportBatch.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ summary: expect.objectContaining({
+        closeout: expect.objectContaining({ remediationAttempts: [expect.objectContaining({
+          consumed: true, providerSnapshotFingerprint: scenario.remediation.attempts[0]!.providerSnapshotFingerprint,
+          failureFingerprint: scenario.currentIncident.failureFingerprint,
+          approach: scenario.remediation.attempts[0]!.approach,
+        })] }),
+      }) }),
+    }));
+  });
+
+  it.each([
+    { label: "a live owner", mutate: (s: ReturnType<typeof expiredIndependentDiscoveryScenario>) => {
+      s.batch.leaseExpiresAt = new Date(now.getTime() + 60_000);
+    } },
+    { label: "a late verification request", mutate: () => {
+      prismaMocks.courseSupportVerificationRequest.findFirst.mockResolvedValue({ id: "late-request" });
+    } },
+    { label: "an unfenced history row", mutate: () => {
+      prismaMocks.$queryRaw.mockResolvedValue([]);
+    } },
+    { label: "a changed locked history receipt", mutate: (s: ReturnType<typeof expiredIndependentDiscoveryScenario>) => {
+      const entry = s.batch.incidents[0]!;
+      prismaMocks.$queryRaw.mockImplementation(async (query: { sql?: string }) =>
+        query.sql?.includes("course_support_exhausted_handoff_history") ? [{
+          id: entry.id, incidentId: entry.incidentId, courseId: entry.courseId,
+          cycle: entry.cycle, batchId: s.batch.id, completedAt: now, summary: s.batch.summary,
+        }] : [],
+      );
+    } },
+    { label: "a newly completed older owner", mutate: (s: ReturnType<typeof expiredIndependentDiscoveryScenario>) => {
+      const entry = s.batch.incidents[0]!;
+      const currentRow = { id: entry.id, incidentId: entry.incidentId, courseId: entry.courseId,
+        cycle: entry.cycle, batchId: s.batch.id, completedAt: null, summary: s.batch.summary };
+      prismaMocks.$queryRaw.mockImplementation(async (query: { sql?: string }) =>
+        query.sql?.includes("course_support_exhausted_handoff_history") ? [currentRow, {
+          ...currentRow, id: "late-entry", batchId: "prior-owner", completedAt: now,
+        }] : [],
+      );
+    } },
+    { label: "a changed course after its row lock", mutate: () => {
+      prismaMocks.course.findUnique.mockResolvedValue({
+        ...expiredIndependentDiscoveryScenario().providerCourse, website: "https://changed-course.example",
+      });
+    } },
+  ])("keeps the modern handoff owned for $label", async ({ mutate }) => {
+    const scenario = expiredIndependentDiscoveryScenario();
+    mockExpiredIndependentDiscovery(scenario);
+    mutate(scenario);
+    await expect(reconcileCourseMonitoringDeadline({ courseId: "course-1", source: "RECOVERY_CRON", now }))
+      .resolves.toMatchObject({ outcome: "OWNED" });
+    expect(prismaMocks.courseSupportBatch.updateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportBatchIncident.updateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportIncident.updateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseMonitoringStatus.updateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseMonitoringEvent.create).not.toHaveBeenCalled();
+    expect(prismaMocks.teeSearch.updateMany).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: "missing history completeness", mutate: (s: ReturnType<typeof expiredIndependentDiscoveryScenario>) => {
+      delete (s.currentIncident as Record<string, unknown>)._count;
+    } },
+    { label: "truncated completed history", mutate: (s: ReturnType<typeof expiredIndependentDiscoveryScenario>) => {
+      Object.assign(s.currentIncident, { _count: { batchIncidents: 21 } });
+    } },
+    { label: "malformed completed history", mutate: (s: ReturnType<typeof expiredIndependentDiscoveryScenario>) => {
+      Object.assign(s.currentIncident, { _count: { batchIncidents: 1 }, batchIncidents: [{ cycle: 1, batch: { summary: {} } }] });
+    } },
+    { label: "changed provider identity", mutate: (s: ReturnType<typeof expiredIndependentDiscoveryScenario>) => {
+      s.batch.incidents[0]!.course.website = "https://different-course.example";
+    } },
+    { label: "wrong completion runtime", mutate: (s: ReturnType<typeof expiredIndependentDiscoveryScenario>) => {
+      s.ledger!.events.at(-1)!.runtimeVersion = "b".repeat(40);
+    } },
+    { label: "a substituted stage-result marker", mutate: (s: ReturnType<typeof expiredIndependentDiscoveryScenario>) => {
+      s.ledger!.events.at(-1)!.failureFingerprint = s.currentIncident.failureFingerprint;
+    } },
+    { label: "explicit zero provider execution", mutate: (s: ReturnType<typeof expiredIndependentDiscoveryScenario>) => {
+      s.ledger!.events.at(-1)!.providerExecution = false;
+    } },
+    { label: "unavailable provider execution", mutate: (s: ReturnType<typeof expiredIndependentDiscoveryScenario>) => {
+      delete s.ledger!.events.at(-1)!.providerExecution;
+    } },
+    { label: "a completion dated in the future", mutate: (s: ReturnType<typeof expiredIndependentDiscoveryScenario>) => {
+      s.ledger!.events.at(-1)!.observedAt = new Date(now.getTime() + 60_000).toISOString();
+    } },
+    { label: "a completion predating deployment", mutate: (s: ReturnType<typeof expiredIndependentDiscoveryScenario>) => {
+      s.batch.deployedAt = new Date("2026-07-27T15:59:00.000Z");
+    } },
+    { label: "completion predating the claim", mutate: (s: ReturnType<typeof expiredIndependentDiscoveryScenario>) => {
+      for (const event of s.ledger!.events.filter((event) => event.stage === "INDEPENDENT_CONFIRMATION")) {
+        event.observedAt = "2026-07-27T15:49:00.000Z";
+      }
+    } },
+    { label: "wrong claim-time playbook stage", mutate: (s: ReturnType<typeof expiredIndependentDiscoveryScenario>) => {
+      s.remediation.attempts[0]!.playbookEventCountAtClaim = 8;
+    } },
+    { label: "malformed assigned action", mutate: (s: ReturnType<typeof expiredIndependentDiscoveryScenario>) => {
+      s.remediation.attempts[0]!.actionPlan.primaryAction = "IMPLEMENT_REUSABLE_SUPPORT";
+    } },
+  ])("keeps modern exhausted crash recovery owned with $label", async ({ mutate }) => {
+    const scenario = expiredIndependentDiscoveryScenario();
+    mutate(scenario);
+    mockExpiredIndependentDiscovery(scenario);
+
+    await expect(reconcileCourseMonitoringDeadline({ courseId: "course-1", source: "RECOVERY_CRON", now }))
+      .resolves.toMatchObject({ outcome: "OWNED" });
+    expect(prismaMocks.courseSupportBatch.updateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportBatchIncident.updateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportIncident.updateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseMonitoringStatus.updateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseMonitoringEvent.create).not.toHaveBeenCalled();
+    expect(prismaMocks.teeSearch.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("does not turn historical unowned human review into an implementation replay", async () => {
+    const scenario = expiredIndependentDiscoveryScenario();
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue({
+      ...scenario.currentIncident, activeBatchId: null, activeBatch: null,
+      status: "NEEDS_HUMAN", humanReviewReason: "SOURCE_UNVERIFIED", escalatedAt: now,
+      nextAttemptAt: new Date(now.getTime() + 6 * 60 * 60_000),
+    });
+    prismaMocks.courseMonitoringStatus.findUnique.mockResolvedValue({
+      ...scenario.currentMonitoring, state: "ENGINEERING_VERIFICATION_NEEDED",
+      nextAutomaticAttemptAt: new Date(now.getTime() + 6 * 60 * 60_000),
+    });
+    prismaMocks.course.findUnique.mockResolvedValue(scenario.providerCourse);
+
+    await expect(reconcileCourseMonitoringDeadline({ courseId: "course-1", source: "RECOVERY_CRON", now }))
+      .resolves.toMatchObject({ outcome: "RETAINED_HUMAN" });
+    expect(prismaMocks.courseSupportIncident.updateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseMonitoringEvent.create).not.toHaveBeenCalled();
   });
 
   it("closes a mixed expired batch with stalled, exhausted, and later retry outcomes in one pass", async () => {

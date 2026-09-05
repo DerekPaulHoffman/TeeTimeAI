@@ -192,6 +192,7 @@ import {
   buildCourseSupportSearchExecutionFenceSnapshot,
   persistCourseSupportSearchExecutionFence,
 } from "./course-support-search-execution-fence";
+import { buildCourseSupportActionExecution } from "./course-support-action-execution";
 
 const now = new Date("2026-07-15T20:00:00.000Z");
 
@@ -5459,6 +5460,243 @@ describe("course-support claim demand fencing", () => {
     });
     },
   );
+
+  function recoveredIndependentDiscoveryClaimFixture(includeReceipt: boolean) {
+    const current = browserContractClaimIncident({
+      evidence: "PRESENT",
+      exhausted: true,
+    });
+    const courseRef = createHash("sha256")
+      .update(current.courseId)
+      .digest("hex")
+      .slice(0, 24);
+    const approach = {
+      workMode: "ADVANCE_DISCOVERY" as const,
+      strategyAction: "DISCOVER_WITH_BROWSER" as const,
+      playbookStage: "INDEPENDENT_CONFIRMATION" as const,
+    };
+    const plannedAttempt = {
+      courseRef,
+      providerSnapshotFingerprint: "b".repeat(64),
+      failureFingerprint: current.failureFingerprint,
+      runtimeVersion: baseSha,
+      activeRealSearchCount: 0,
+      playbookEventCountAtClaim: 7,
+      reason: "PLAYBOOK_STAGE_PENDING",
+      retryBudget: null,
+      approach,
+      actionPlan: {
+        schemaVersion: 1,
+        primaryAction: "VERIFY_CURRENT_RUNTIME" as const,
+        allowedActions: ["VERIFY_CURRENT_RUNTIME"],
+        route: approach,
+      },
+    };
+    // Mirrors the recovery producer's exact browser-only receipt. The watchdog
+    // regression checks that reconcileCourseMonitoringDeadline persists it;
+    // this test checks the public claim consumer rather than exporting internals.
+    const discoveryReceipt = {
+      courseRef,
+      providerSnapshotFingerprint: "b".repeat(64),
+      observedProviderSnapshotFingerprint: "b".repeat(64),
+      failureFingerprint: current.failureFingerprint,
+      observedFailureFingerprint: current.failureFingerprint,
+      failureOnlyHandoffCooldownUntil: null,
+      runtimeVersion: baseSha,
+      activeRealSearchCount: 0,
+      consumed: true,
+      countsTowardOperationalNoProgress: true,
+      approach,
+      retryBudget: null,
+      operationalRetry: null,
+      orchestrationRetry: null,
+      executionEvidence: {
+        claimedImplementationPaths: false,
+        newReleaseRecorded: false,
+        deploymentRecorded: false,
+        postProbeRecorded: false,
+        providerAttemptRecorded: false,
+        providerExecutionAttemptRecorded: true,
+        playbookAttemptRecorded: true,
+        terminalResultRecorded: false,
+        providerExecutionStarted: false,
+      },
+      actionExecution: buildCourseSupportActionExecution({
+        action: "VERIFY_CURRENT_RUNTIME",
+        strictImplementationProofRecorded: false,
+        authoritativeSuccessSuperseded: false,
+        materialChangeSuperseded: false,
+        authoritativeTerminalResultSuperseded: false,
+        currentRuntimeProofRecorded: true,
+        currentClassificationProofRecorded: false,
+      }),
+    };
+    const recoveredSummary = {
+      schemaVersion: 1,
+      remediation: {
+        ...approach,
+        allowUnchangedRuntime: true,
+        requiresImplementationPath: false,
+        reason: "PLAYBOOK_STAGE_PENDING",
+        retryBudget: null,
+        attempts: [plannedAttempt],
+      },
+      closeout: {
+        outcome: "retryable_failed",
+        derivedOutcome: "retryable_failed",
+        reason: "stale_endpoint_ownership_released",
+        verificationWatchMode: "ENDPOINT",
+        retryCount: 1,
+        needsHumanCount: 0,
+        exhaustedEndpointCount: 0,
+        exhaustedDiscoveryImplementationHandoffCount: 1,
+        ...(includeReceipt
+          ? {
+              remediationAttemptConsumed: true,
+              remediationAttempts: [discoveryReceipt],
+            }
+          : {}),
+      },
+    };
+    return {
+      ...current,
+      confirmedAt: new Date("2026-07-15T18:00:00.000Z"),
+      updatedAt: new Date("2026-07-15T19:50:00.000Z"),
+      nextAttemptAt: new Date("2026-07-15T19:51:00.000Z"),
+      attemptLedger: mixedRuntimeBrowserAttemptLedger({
+        cycle: current.cycle,
+        oldRuntime: baseSha,
+        releaseSha: baseSha,
+        firstObservedAt: new Date("2026-07-15T19:40:00.000Z"),
+      }),
+      batchIncidents: [
+        {
+          cycle: current.cycle,
+          result: "RETRY_SCHEDULED",
+          batch: {
+            status: "RETRYABLE_FAILED",
+            baseSha,
+            releaseSha: baseSha,
+            createdAt: new Date("2026-07-15T19:40:06.500Z"),
+            completedAt: new Date("2026-07-15T19:50:00.000Z"),
+            summary: recoveredSummary,
+          },
+        },
+        {
+          cycle: current.cycle,
+          result: "RETRY_SCHEDULED",
+          batch: {
+            status: "RETRYABLE_FAILED",
+            baseSha,
+            releaseSha: baseSha,
+            createdAt: new Date("2026-07-15T18:00:00.000Z"),
+            completedAt: new Date("2026-07-15T18:30:00.000Z"),
+            summary: {
+              closeout: {
+                outcome: "retryable_failed",
+                derivedOutcome: "retryable_failed",
+                remediationAttempts: [{
+                  ...discoveryReceipt,
+                  providerSnapshotFingerprint: "a".repeat(64),
+                  observedProviderSnapshotFingerprint: "a".repeat(64),
+                }],
+              },
+            },
+          },
+        },
+      ],
+    };
+  }
+
+  it.each([
+    { includeReceipt: false, workMode: "ADVANCE_DISCOVERY", reason: "MATERIAL_CHANGE_REOPENED" },
+    { includeReceipt: true, workMode: "IMPLEMENT_REUSABLE_SUPPORT", reason: "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF" },
+  ])("routes recovered independent discovery with receipt=$includeReceipt to $workMode", async ({ includeReceipt, workMode, reason }) => {
+    const incident = recoveredIndependentDiscoveryClaimFixture(includeReceipt);
+    prismaMocks.supportIncidentFindMany.mockResolvedValue([incident]);
+
+    await expect(claimCourseSupportBatch({
+      ownerThreadId: "owner-recovered-independent-discovery",
+      branch: "automation/course-support-20260715-200000",
+      baseSha,
+      now,
+    })).resolves.toMatchObject({ outcome: "ready", incidentCount: 1 });
+
+    const summary = prismaMocks.batchCreate.mock.calls[0]?.[0]?.data?.summary;
+    expect(summary.remediation).toMatchObject({ workMode, reason });
+    if (includeReceipt) {
+      expect(summary.remediation.attempts[0]).toMatchObject({
+        providerSnapshotFingerprint: "b".repeat(64),
+        failureFingerprint: incident.failureFingerprint,
+        reason: "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF",
+        approach: {
+          workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+          strategyAction: "DISCOVER_WITH_BROWSER",
+          playbookStage: null,
+        },
+        actionPlan: {
+          schemaVersion: 1,
+          primaryAction: "IMPLEMENT_REUSABLE_SUPPORT",
+          allowedActions: ["IMPLEMENT_REUSABLE_SUPPORT", "INSPECT_PROVIDER_CONTRACT"],
+          route: {
+            workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+            strategyAction: "DISCOVER_WITH_BROWSER",
+            playbookStage: null,
+          },
+        },
+      });
+    }
+  });
+
+  it("does not repeat the recovered independent-discovery handoff after its unchanged implementation is consumed", async () => {
+    const incident = recoveredIndependentDiscoveryClaimFixture(true);
+    prismaMocks.supportIncidentFindMany.mockResolvedValue([incident]);
+    await expect(claimCourseSupportBatch({
+      ownerThreadId: "owner-first-recovered-implementation",
+      branch: "automation/course-support-20260715-200000",
+      baseSha,
+      now,
+    })).resolves.toMatchObject({ outcome: "ready", incidentCount: 1 });
+    const implementationSummary = prismaMocks.batchCreate.mock.calls[0]?.[0]?.data?.summary;
+    expect(implementationSummary.remediation.workMode).toBe("IMPLEMENT_REUSABLE_SUPPORT");
+    const consumedImplementation = {
+      cycle: incident.cycle,
+      batch: {
+        summary: {
+          ...implementationSummary,
+          closeout: {
+            outcome: "retryable_failed",
+            derivedOutcome: "retryable_failed",
+            remediationAttemptConsumed: true,
+            remediationAttempts: [{
+              ...implementationSummary.remediation.attempts[0],
+              consumed: true,
+              countsTowardOperationalNoProgress: true,
+            }],
+          },
+        },
+      },
+    };
+    const unchanged = {
+      ...incident,
+      batchIncidents: [consumedImplementation, ...incident.batchIncidents],
+    };
+    vi.clearAllMocks();
+    prismaMocks.supportIncidentFindMany.mockResolvedValue([unchanged]);
+    mockMaterialChangeParking(unchanged);
+
+    await expect(claimCourseSupportBatch({
+      ownerThreadId: "owner-unchanged-recovered-implementation",
+      branch: "automation/course-support-20260715-200000",
+      baseSha,
+      now,
+    })).resolves.toMatchObject({
+      outcome: "no_due_work",
+      parkedForMaterialChangeCount: 1,
+    });
+    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+    expect(prismaMocks.teeSearchUpdateMany).not.toHaveBeenCalled();
+  });
 
   it.each(["PRESENT", "ABSENT"] as const)(
     "claims the exact exhausted provider-support handoff with %s retained contract evidence",
