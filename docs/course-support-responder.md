@@ -124,6 +124,10 @@ Accepted course evidence is append-only. Never update or delete an existing `Cou
 
 If a required stage cannot run, the watchdog records the failure and advances to the next different safe stage in the same cycle when one exists. It requests human judgment only after the bounded evidence paths can no longer progress safely or explicit operator evidence requires it; it never invents exhaustion from elapsed time. A successful ordinary alert read still restores `HEALTHY` automatically. Material changes to the official link, provider family, platform, access evidence, reader capability, operator decision, or failure fingerprint may reopen automated investigation. A deployment reopens only work owned and verified by its active remediation batch; unrelated releases never scan and restart parked incidents.
 
+Closing an investigation with `MONITORING_RESTORED` must not disable ordinary checks through its existing local reader. A resolved, `HEALTHY` course may reuse an eligible reader when its accepted success is valid, its accepted intelligence and failure evidence are not newer, and no revalidation or source-preparation work is pending. A runnable server adapter keeps precedence unless the course explicitly requires the local reader. This path does not reopen an incident, fabricate a playbook stage, consume an investigation attempt, or treat an old success as current execution proof. Open or exhausted investigations still follow their ordered playbook; manual, identity, and current technical final gates remain intact.
+
+A fresh result on that ordinary-reader path still uses the existing generation, source-time, atomic consumption, and match-persistence fences. A genuinely new accepted challenge or reader failure goes through canonical support recovery without writing to the old resolved playbook. One challenge is not a conclusive technical final. Queueing, a missing result, or an expired job is never counted as provider execution.
+
 ## Claim, Lease, And Repository Safety
 
 Claiming requires all of the following:

@@ -106,6 +106,7 @@ const activeSearchCourseInclude = {
       id: true,
       cycle: true,
       status: true,
+      resolution: true,
       attemptLedger: true,
       humanReviewReason: true,
       escalatedAt: true,

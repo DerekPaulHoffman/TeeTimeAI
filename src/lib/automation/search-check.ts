@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type {
   CourseMonitoringMode,
   CourseMonitoringState,
+  CourseSupportResolution,
   Prisma,
 } from "@prisma/client";
 
@@ -221,6 +222,7 @@ type AutomationCourse = AutomationCourseProviderRead & {
     id: string;
     cycle: number;
     status: "AUTO_INVESTIGATING" | "NEEDS_HUMAN" | "RESOLVED";
+    resolution?: CourseSupportResolution | null;
     attemptLedger: unknown;
     humanReviewReason: string | null;
     escalatedAt?: Date | null;
@@ -813,6 +815,16 @@ async function checkSearch(
         runtimeVersion,
         context: course.supportIncident ?? null,
       });
+      // Successful investigation closes its ledger, not the reusable reader.
+      // This is ordinary monitoring of accepted support, never a new stage or
+      // permission to restart unresolved/exhausted investigation work.
+      const reuseRestoredLocalReader =
+        localReaderEligible &&
+        (!supportedAdapterAvailable || localReaderOnly) &&
+        !playbookRuntime &&
+        !monitoringPreparationFailed &&
+        !monitoringDeferredCourseIds.has(course.id) &&
+        canReuseRestoredLocalReader(course, customerStatusObservedAt);
       if (playbookRuntime?.assessment.nextStage === "OFFICIAL_IDENTITY") {
         if (
           monitoringGate.disposition === "MANUAL_FINAL" ||
@@ -964,7 +976,8 @@ async function checkSearch(
         !technicalRevalidationRunning;
       const localReaderCanOverrideGate =
         localReaderEligible &&
-        playbookRuntime?.assessment.nextStage === "LOCAL_READER" &&
+        (playbookRuntime?.assessment.nextStage === "LOCAL_READER" ||
+          reuseRestoredLocalReader) &&
         !engineerApprovedTechnicalFinal &&
         monitoringGate.disposition === "TECHNICAL_FINAL" &&
         (localReaderOnly || course.automationReason === "CAPTCHA_OR_QUEUE");
@@ -1265,6 +1278,7 @@ async function checkSearch(
       if (
         !supportedAdapterAvailable &&
         !localReaderOnly &&
+        !reuseRestoredLocalReader &&
         playbookRuntime?.assessment.nextStage !== "LOCAL_READER"
       ) {
         if (
@@ -1477,7 +1491,8 @@ async function checkSearch(
       try {
         const localReaderShouldRun =
           localReaderEligible &&
-          playbookRuntime?.assessment.nextStage === "LOCAL_READER";
+          (playbookRuntime?.assessment.nextStage === "LOCAL_READER" ||
+            reuseRestoredLocalReader);
         const freshLocalReaderObservation = localReaderShouldRun
           ? await getFreshLocalReaderObservation({
               searchId: search.id,
@@ -1543,7 +1558,7 @@ async function checkSearch(
           ["ACCESS_CHALLENGE", "PAGE_MISMATCH", "READER_ERROR"].includes(
             localReaderObservation.status,
           ) &&
-          playbookRuntime?.assessment.nextStage === "LOCAL_READER"
+          localReaderShouldRun
         ) {
           const accessChallenge =
             localReaderObservation.status === "ACCESS_CHALLENGE";
@@ -1602,10 +1617,12 @@ async function checkSearch(
             return;
           }
           providerSourceAccepted = true;
-          playbookRuntime = await recordSearchPlaybookAttemptResult(
-            playbookRuntime,
-            localReaderAttemptResult,
-          );
+          if (playbookRuntime?.assessment.nextStage === "LOCAL_READER") {
+            playbookRuntime = await recordSearchPlaybookAttemptResult(
+              playbookRuntime,
+              localReaderAttemptResult,
+            );
+          }
           await recordCourseProbeIfChanged({
             searchId: search.id,
             courseId: course.id,
@@ -1619,7 +1636,7 @@ async function checkSearch(
               providerObservedAt:
                 localReaderObservation.observedAt.toISOString(),
               readerStatus: localReaderObservation.status,
-              playbookConclusion: playbookRuntime.assessment.conclusion,
+              playbookConclusion: playbookRuntime?.assessment.conclusion ?? null,
             },
           });
           supportIssues.push({ courseId: course.id, ...supportIssue });
@@ -2125,7 +2142,8 @@ async function checkSearch(
           error instanceof Error ? error.message : "Unknown adapter error";
         const providerFailure = classifyProviderFailure({ error });
         const localReaderStageActive =
-          localReaderEligible && activePlaybookStage === "LOCAL_READER";
+          localReaderEligible &&
+          (activePlaybookStage === "LOCAL_READER" || reuseRestoredLocalReader);
         const localReaderJob =
           customerBookingUrl && localReaderStageActive
             ? await queueLocalReaderJob({
@@ -2330,11 +2348,15 @@ async function checkSearch(
           });
         }
         supportIssues.push({ courseId: course.id, ...supportIssue });
-        let currentPlaybook = await loadSearchPlaybookRuntime({
-          courseId: course.id,
-          incidentId: supportIssue.incidentId,
-          runtimeVersion,
-        });
+        // An ordinary reader failure may legitimately reopen investigation,
+        // but this check did not execute any stage of that new playbook.
+        let currentPlaybook = reuseRestoredLocalReader
+          ? null
+          : await loadSearchPlaybookRuntime({
+              courseId: course.id,
+              incidentId: supportIssue.incidentId,
+              runtimeVersion,
+            });
         if (currentPlaybook?.assessment.nextStage === "OFFICIAL_IDENTITY") {
           providerObservationHeartbeat?.assertOwned();
           currentPlaybook = customerBookingUrl
@@ -4094,6 +4116,29 @@ function buildSearchCheckAudit(
 
 function hasSupportedAdapter(course: AutomationCourse) {
   return resolveProviderCapability(course).isRunnable;
+}
+
+function canReuseRestoredLocalReader(course: AutomationCourse, now: Date) {
+  const status = course.monitoringStatus;
+  const successfulAt = status?.lastSuccessfulAt;
+  const intelligenceAt = course.intelligenceVerifiedAt;
+  const failureAt = status?.lastFailureAt;
+  return Boolean(
+    course.supportIncident?.status === "RESOLVED" &&
+      course.supportIncident.resolution === "MONITORING_RESTORED" &&
+      status?.state === "HEALTHY" &&
+      status.revalidationRequestedAt === null &&
+      successfulAt instanceof Date &&
+      Number.isFinite(successfulAt.getTime()) &&
+      successfulAt <= now &&
+      intelligenceAt instanceof Date &&
+      Number.isFinite(intelligenceAt.getTime()) &&
+      intelligenceAt <= successfulAt &&
+      (failureAt === null ||
+        (failureAt instanceof Date &&
+          Number.isFinite(failureAt.getTime()) &&
+          failureAt <= successfulAt)),
+  );
 }
 
 function getFinalMonitoringMessage(

@@ -174,6 +174,8 @@ import {
   type AutomationPlaybookLedger,
 } from "./course-monitoring-playbook";
 import { preserveAlertGenerationClockInStatusSnapshot } from "@/lib/searches/generation-clock";
+import { getLocalReaderCourseKey } from "@/lib/local-reader/course-key";
+import { resolveProviderCapability } from "./provider-capabilities";
 
 const search = {
   id: "search-1",
@@ -419,6 +421,97 @@ function installPlaybookPersistence(initialLedger: AutomationPlaybookLedger) {
     context,
     getLedger: () => ledger,
   };
+}
+
+function buildResolvedLocalReaderCourse() {
+  const lastSuccessfulAt = new Date("2026-06-30T12:00:00.000Z");
+  const intelligenceVerifiedAt = new Date("2026-06-29T12:00:00.000Z");
+  const completedStages = buildPlaybookThroughBrowserRetry();
+  const resolvedLedger = appendAutomationPlaybookEvent(
+    {
+      ...completedStages,
+      events: completedStages.events.map((event) => ({
+        ...event,
+        observedAt: lastSuccessfulAt.toISOString(),
+      })),
+    },
+    {
+      cycle: 1,
+      observedAt: lastSuccessfulAt,
+      runtimeVersion: "prior-reader-runtime",
+      stage: "LOCAL_READER",
+      transition: "SUCCEEDED",
+      readPath: "LOCAL_READER",
+      evidenceKind: "LOCAL_READER_RESULT",
+      failureFingerprint: "LOCAL_READER:SUCCEEDED",
+    },
+  );
+  return {
+    ...search.preferences[0].course,
+    name: "Reusable Reader Public Course",
+    isPublic: true,
+    detectedPlatform: "CUSTOM" as const,
+    providerFamilyKey: "CPS",
+    detectedBookingUrl:
+      "https://steady-state-reader.cps.golf/onlineresweb/search-teetime",
+    automationEligibility: "UNKNOWN" as const,
+    automationReason: "OTHER" as const,
+    monitoringMode: "AUTOMATIC" as const,
+    intelligenceVerifiedAt,
+    policyNotes: null,
+    bookingMetadata: null,
+    supportIncident: {
+      id: "incident-1",
+      cycle: 1,
+      status: "RESOLVED" as const,
+      resolution: "MONITORING_RESTORED" as const,
+      firstSeenAt: intelligenceVerifiedAt,
+      attemptLedger: resolvedLedger,
+    },
+    monitoringStatus: {
+      state: "HEALTHY" as const,
+      firstDegradedAt: null,
+      failureFingerprint: null,
+      lastSuccessfulAt,
+      lastFailureAt: null,
+      nextAutomaticAttemptAt: null,
+      revalidationRequestedAt: null,
+      stateChangedAt: lastSuccessfulAt,
+    },
+  };
+}
+
+function installResolvedLocalReaderMonitoring(
+  course = buildResolvedLocalReaderCourse(),
+) {
+  dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+    ...search,
+    status: "ACTIVE",
+    trafficClass: "PUBLIC",
+    syntheticMultiCycle: false,
+    preferences: [{ rank: 1, course }],
+  });
+  dbMocks.getCourseMonitoringPlaybookContext.mockResolvedValue(
+    course.supportIncident,
+  );
+  localReaderMocks.getLocalReaderCourseKey.mockImplementation(
+    getLocalReaderCourseKey,
+  );
+  localReaderMocks.queueLocalReaderJob.mockResolvedValue({
+    id: "steady-state-reader-job",
+    queueDisposition: "ACTIVE",
+  });
+  // A new check receipt cannot turn older provider intelligence into a new
+  // failure source or reopen this already successful investigation.
+  supportIncidentMocks.reportCourseSupportIssue.mockResolvedValue({
+    incidentId: course.supportIncident.id,
+    status: "RESOLVED",
+    ownerAlerted: false,
+    sourceEvidenceAccepted: false,
+  });
+  dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+  dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+  return course;
 }
 
 describe("buildMatchDeliveryGroupKey", () => {
@@ -3561,6 +3654,538 @@ describe("runSearchCheck email cadence", () => {
       supportIncidentMocks.reportCourseSupportIssue.mock.calls.at(-1)?.[0]
         .failureObservedAt,
     ).not.toEqual(receiptAt);
+  });
+
+  it.each([false, true])("queues ordinary local-reader monitoring after a successful investigation is resolved (superseded challenge: %s)", async (supersededChallenge) => {
+    const course = installResolvedLocalReaderMonitoring();
+    if (supersededChallenge) {
+      Object.assign(course, {
+        automationEligibility: "NEEDS_REVIEW",
+        automationReason: "CAPTCHA_OR_QUEUE",
+        intelligenceConfidence: 0.95,
+        intelligenceReviewAt: new Date("2026-07-31T12:00:00.000Z"),
+      });
+    }
+    const bookingUrl = course.detectedBookingUrl;
+    const resolvedIncident = course.supportIncident;
+    const lastSuccessfulAt = course.monitoringStatus.lastSuccessfulAt;
+    const incidentBeforeCheck = structuredClone(resolvedIncident);
+    expect(
+      assessAutomationPlaybook(resolvedIncident.attemptLedger, 1).conclusion,
+    ).toBe("MONITORING_RESTORED");
+    expect(getLocalReaderCourseKey(bookingUrl)).not.toBeNull();
+    expect(resolveProviderCapability(course).isRunnable).toBe(false);
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect.soft(result.courseResults[0]).toMatchObject({
+      outcome: "CHECK_PENDING",
+      availableMatches: 0,
+    });
+    expect
+      .soft(localReaderMocks.getFreshLocalReaderObservation)
+      .toHaveBeenCalledOnce();
+    expect
+      .soft(localReaderMocks.queueLocalReaderJob)
+      .toHaveBeenCalledExactlyOnceWith({
+        searchId: "search-1",
+        courseId: "course-1",
+        scheduleVersion: 1,
+        targetDate: "2026-07-12",
+        players: 2,
+        bookingUrl,
+      });
+    expect
+      .soft(supportIncidentMocks.reportCourseSupportIssue)
+      .not.toHaveBeenCalled();
+    expect(
+      courseMonitoringMocks.recordCourseMonitoringPlaybookTransition,
+    ).not.toHaveBeenCalled();
+    expect(
+      courseMonitoringMocks.recordCourseMonitoringSuccess,
+    ).not.toHaveBeenCalled();
+    expect(dbMocks.commitCurrentCourseTeeTimeMatches).not.toHaveBeenCalled();
+    expect(
+      providerRequestLeaseMocks.runWithProviderRequestLease,
+    ).not.toHaveBeenCalled();
+    expect(resolvedIncident).toEqual(incidentBeforeCheck);
+    expect(course.monitoringStatus.lastSuccessfulAt).toEqual(lastSuccessfulAt);
+  });
+
+  it.each(["NO_AVAILABILITY", "AVAILABLE"] as const)(
+    "consumes %s through ordinary local-reader monitoring without rewriting a resolved investigation",
+    async (readerStatus) => {
+      const course = installResolvedLocalReaderMonitoring();
+      const incidentBeforeCheck = structuredClone(course.supportIncident);
+      const providerObservedAt = new Date("2026-07-11T12:09:00.000Z");
+      const outcome = readerStatus === "AVAILABLE" ? "MATCH_FOUND" : "NO_MATCH";
+      localReaderMocks.getFreshLocalReaderObservation.mockResolvedValue({
+        jobId: "steady-state-reader-job",
+        status: readerStatus,
+        observedAt: providerObservedAt,
+        readerVersion: "cps-rendered-v1",
+        teeSheet: {
+          slots:
+            readerStatus === "AVAILABLE"
+              ? [
+                  {
+                    sourceId: "steady-state-reader-slot",
+                    courseId: course.id,
+                    startsAt: "2026-07-12T08:10:00",
+                    availableSpots: 4,
+                    bookingUrl: course.detectedBookingUrl,
+                    priceCents: 6200,
+                    holes: 18,
+                    bookableHoleCounts: [18],
+                  },
+                ]
+              : [],
+          targetDateStatus: "OPEN",
+          bookingWindowEvidence: null,
+        },
+      });
+
+      const result = await runSearchCheck("search-1", "test");
+
+      expect(result.courseResults[0]).toMatchObject({
+        outcome,
+        availableMatches: readerStatus === "AVAILABLE" ? 1 : 0,
+      });
+      expect(localReaderMocks.getFreshLocalReaderObservation)
+        .toHaveBeenCalledExactlyOnceWith({
+          searchId: "search-1",
+          courseId: "course-1",
+          scheduleVersion: 1,
+          targetDate: "2026-07-12",
+          players: 2,
+          bookingUrl: course.detectedBookingUrl,
+        });
+      expect(localReaderMocks.queueLocalReaderJob).not.toHaveBeenCalled();
+      expect(
+        courseMonitoringMocks.recordCourseMonitoringSuccess,
+      ).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          courseId: course.id,
+          outcome,
+          providerObservedAt,
+          localReaderSource: {
+            jobId: "steady-state-reader-job",
+            searchId: "search-1",
+            scheduleVersion: 1,
+            resultStatus: readerStatus,
+          },
+        }),
+      );
+      expect(dbMocks.commitCurrentCourseTeeTimeMatches)
+        .toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({
+            searchId: "search-1",
+            courseId: course.id,
+            checkLeaseToken: "check-lease",
+            providerObservedAt,
+            sourceKind: "SUCCESS",
+            localReaderObservation: {
+              jobId: "steady-state-reader-job",
+              scheduleVersion: 1,
+              resultStatus: readerStatus,
+              monitoringOutcome: outcome,
+            },
+          }),
+        );
+      expect(dbMocks.recordCourseProbe).toHaveBeenCalledWith(
+        expect.objectContaining({
+          outcome,
+          rawSummary: expect.objectContaining({
+            providerExecution: "LOCAL_BROWSER_READER",
+            providerObservedAt: providerObservedAt.toISOString(),
+          }),
+        }),
+      );
+      expect(supportIncidentMocks.reportCourseSupportIssue).not.toHaveBeenCalled();
+      expect(
+        courseMonitoringMocks.recordCourseMonitoringPlaybookTransition,
+      ).not.toHaveBeenCalled();
+      expect(
+        providerRequestLeaseMocks.runWithProviderRequestLease,
+      ).not.toHaveBeenCalled();
+      expect(course.supportIncident).toEqual(incidentBeforeCheck);
+    },
+  );
+
+  it.each([
+    {
+      reason: "newer provider intelligence",
+      coursePatch: { intelligenceVerifiedAt: new Date("2026-07-01T12:00:00Z") },
+    },
+    {
+      reason: "newer accepted CAPTCHA intelligence",
+      coursePatch: {
+        automationEligibility: "NEEDS_REVIEW",
+        automationReason: "CAPTCHA_OR_QUEUE",
+        intelligenceVerifiedAt: new Date("2026-07-01T12:00:00Z"),
+        intelligenceReviewAt: new Date("2026-07-31T12:00:00Z"),
+        intelligenceConfidence: 0.95,
+      },
+    },
+    {
+      reason: "a current technical-final state",
+      coursePatch: {
+        automationEligibility: "NEEDS_REVIEW",
+        automationReason: "CAPTCHA_OR_QUEUE",
+        intelligenceVerifiedAt: new Date("2026-07-01T12:00:00Z"),
+        intelligenceReviewAt: new Date("2026-07-31T12:00:00Z"),
+        intelligenceConfidence: 0.95,
+      },
+      monitoringPatch: { state: "FINAL_TECHNICAL" },
+      incidentPatch: { resolution: "HUMAN_VERIFIED_TECHNICAL_LIMITATION" },
+    },
+    {
+      reason: "missing provider intelligence time",
+      coursePatch: { intelligenceVerifiedAt: null },
+    },
+    {
+      reason: "newer failure evidence",
+      monitoringPatch: { lastFailureAt: new Date("2026-07-01T12:00:00Z") },
+    },
+    {
+      reason: "pending revalidation",
+      monitoringPatch: {
+        revalidationRequestedAt: new Date("2026-07-01T12:00:00Z"),
+      },
+    },
+    {
+      reason: "a non-restored resolution",
+      incidentPatch: { resolution: "TECHNICAL_LIMITATION_CLASSIFIED" },
+    },
+    {
+      reason: "missing resolution proof",
+      incidentPatch: { resolution: null },
+    },
+    {
+      reason: "non-healthy monitoring",
+      monitoringPatch: { state: "DEGRADED_RETRYING" },
+    },
+    {
+      reason: "missing past success",
+      monitoringPatch: { lastSuccessfulAt: null },
+    },
+    {
+      reason: "a future success timestamp",
+      monitoringPatch: { lastSuccessfulAt: new Date("2026-07-12T12:00:00Z") },
+    },
+    {
+      reason: "an unresolved investigation before browser discovery",
+      incidentPatch: {
+        status: "AUTO_INVESTIGATING",
+        resolution: null,
+        attemptLedger: buildPlaybookThroughTypedAdapter(),
+      },
+    },
+  ])(
+    "does not reuse ordinary local-reader monitoring with $reason",
+    async ({ coursePatch, monitoringPatch, incidentPatch }) => {
+      const previousCourse = installResolvedLocalReaderMonitoring();
+      const course = {
+        ...previousCourse,
+        ...coursePatch,
+        monitoringStatus: {
+          ...previousCourse.monitoringStatus,
+          ...monitoringPatch,
+        },
+        supportIncident: {
+          ...previousCourse.supportIncident,
+          ...incidentPatch,
+        },
+      };
+      dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+        ...search,
+        status: "ACTIVE",
+        trafficClass: "PUBLIC",
+        syntheticMultiCycle: false,
+        preferences: [{ rank: 1, course }],
+      });
+      dbMocks.getCourseMonitoringPlaybookContext.mockResolvedValue(
+        course.supportIncident,
+      );
+
+      await runSearchCheck("search-1", "test");
+
+      expect(
+        localReaderMocks.getFreshLocalReaderObservation,
+      ).not.toHaveBeenCalled();
+      expect(localReaderMocks.queueLocalReaderJob).not.toHaveBeenCalled();
+      expect(
+        courseMonitoringMocks.recordCourseMonitoringSuccess,
+      ).not.toHaveBeenCalled();
+      expect(dbMocks.commitCurrentCourseTeeTimeMatches).not.toHaveBeenCalled();
+      expect(
+        providerRequestLeaseMocks.runWithProviderRequestLease,
+      ).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["failed", "deferred"])(
+    "does not reuse ordinary local-reader monitoring when preparation is %s",
+    async (preparation) => {
+      installResolvedLocalReaderMonitoring();
+      if (preparation === "failed") {
+        monitoringDiscoveryMocks.prepareSearchMonitoring.mockRejectedValue(
+          new Error("Monitoring preparation is unavailable"),
+        );
+      } else {
+        monitoringDiscoveryMocks.prepareSearchMonitoring.mockResolvedValue({
+          attemptedCourseIds: [],
+          appliedCourseIds: [],
+          failedCourseIds: [],
+          deferredCourseIds: ["course-1"],
+          retryCourseIds: ["course-1"],
+        });
+      }
+
+      await runSearchCheck("search-1", "test");
+
+      expect(
+        localReaderMocks.getFreshLocalReaderObservation,
+      ).not.toHaveBeenCalled();
+      expect(localReaderMocks.queueLocalReaderJob).not.toHaveBeenCalled();
+      expect(
+        courseMonitoringMocks.recordCourseMonitoringSuccess,
+      ).not.toHaveBeenCalled();
+      expect(dbMocks.commitCurrentCourseTeeTimeMatches).not.toHaveBeenCalled();
+      expect(
+        courseMonitoringMocks.recordCourseMonitoringPlaybookTransition,
+      ).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["AUTOMATIC", "LOCAL_READER_ONLY"] as const)(
+    "keeps %s routing authoritative during ordinary local-reader monitoring with a runnable server adapter",
+    async (monitoringMode) => {
+      const priorCourse = installResolvedLocalReaderMonitoring();
+      const course = {
+        ...priorCourse,
+        monitoringMode,
+        bookingMetadata: {
+          provider: "CPS",
+          siteName: "steady-state-reader",
+          bookingBaseUrl: "https://steady-state-reader.cps.golf/",
+          courseIds: [1],
+        },
+      };
+      adapterMocks.isForeupMetadata.mockReturnValue(false);
+      adapterMocks.isCpsMetadata.mockReturnValue(true);
+      expect(resolveProviderCapability(course).isRunnable).toBe(true);
+      dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+        ...search,
+        status: "ACTIVE",
+        trafficClass: "PUBLIC",
+        syntheticMultiCycle: false,
+        preferences: [{ rank: 1, course }],
+      });
+      const result = await runSearchCheck("search-1", "test");
+
+      if (monitoringMode === "AUTOMATIC") {
+        expect(
+          localReaderMocks.getFreshLocalReaderObservation,
+        ).not.toHaveBeenCalled();
+        expect(localReaderMocks.queueLocalReaderJob).not.toHaveBeenCalled();
+        expect(adapterMocks.fetchCpsTeeSheet).toHaveBeenCalledOnce();
+        expect(result.courseResults[0]).toMatchObject({ outcome: "NO_MATCH" });
+      } else {
+        expect(localReaderMocks.getFreshLocalReaderObservation)
+          .toHaveBeenCalledOnce();
+        expect(localReaderMocks.queueLocalReaderJob).toHaveBeenCalledOnce();
+        expect(adapterMocks.fetchCpsTeeSheet).not.toHaveBeenCalled();
+        expect(result.courseResults[0]).toMatchObject({ outcome: "CHECK_PENDING" });
+      }
+      expect(
+        courseMonitoringMocks.recordCourseMonitoringPlaybookTransition,
+      ).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["ACCESS_CHALLENGE", "PAGE_MISMATCH", "READER_ERROR"] as const)("consumes a fresh ordinary-reader %s without requeueing or rewriting its closed playbook", async (readerStatus) => {
+    const course = installResolvedLocalReaderMonitoring();
+    const incidentBeforeCheck = structuredClone(course.supportIncident);
+    const providerObservedAt = new Date("2026-07-11T12:09:00.000Z");
+    const sourceTransaction = { transaction: "accepted-reader-source" };
+    localReaderMocks.getFreshLocalReaderObservation.mockResolvedValue({
+      jobId: "steady-state-reader-job",
+      status: readerStatus,
+      observedAt: providerObservedAt,
+      readerVersion: "cps-rendered-v1",
+      teeSheet: null,
+    });
+    supportIncidentMocks.reportCourseSupportIssue.mockImplementation(
+      async (input) => {
+        await input.onSourceAccepted?.(sourceTransaction);
+        return {
+          incidentId: course.supportIncident.id,
+          status: "AUTO_INVESTIGATING",
+          ownerAlerted: false,
+          sourceEvidenceAccepted: true,
+        };
+      },
+    );
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(result.courseResults[0]).toMatchObject({ outcome: "FETCH_FAILED" });
+    expect(localReaderMocks.queueLocalReaderJob).not.toHaveBeenCalled();
+    expect(supportIncidentMocks.reportCourseSupportIssue)
+      .toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          kind: "READER_CANDIDATE",
+          readPath: "LOCAL_READER_TERMINAL",
+          providerObservedAt,
+          failureObservedAt: providerObservedAt,
+          onSourceAccepted: expect.any(Function),
+        }),
+      );
+    expect(
+      localReaderMocks.markCompletedLocalReaderProviderObservationConsumedInTransaction,
+    ).toHaveBeenCalledExactlyOnceWith(sourceTransaction, {
+      courseId: "course-1",
+      searchId: "search-1",
+      scheduleVersion: 1,
+      checkLeaseToken: "check-lease",
+      jobId: "steady-state-reader-job",
+      providerObservedAt,
+      resultStatus: readerStatus,
+    });
+    expect(dbMocks.recordCourseProbeIfChanged).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: "FETCH_FAILED",
+        rawSummary: expect.objectContaining({
+          providerExecution: "LOCAL_BROWSER_READER",
+          providerObservedAt: providerObservedAt.toISOString(),
+          readerStatus,
+          playbookConclusion: null,
+        }),
+      }),
+    );
+    expect(
+      courseMonitoringMocks.recordCourseMonitoringPlaybookTransition,
+    ).not.toHaveBeenCalled();
+    expect(
+      courseMonitoringMocks.confirmCourseMonitoringTechnicalFinal,
+    ).not.toHaveBeenCalled();
+    expect(
+      courseMonitoringMocks.recordCourseMonitoringFinalClassification,
+    ).not.toHaveBeenCalled();
+    expect(
+      courseMonitoringMocks.recordCourseMonitoringSuccess,
+    ).not.toHaveBeenCalled();
+    expect(dbMocks.commitCurrentCourseTeeTimeMatches).not.toHaveBeenCalled();
+    expect(
+      providerRequestLeaseMocks.runWithProviderRequestLease,
+    ).not.toHaveBeenCalled();
+    expect(course.supportIncident).toEqual(incidentBeforeCheck);
+  });
+
+  it.each([false, true])("does not invent playbook execution after ordinary-reader terminal handling (anchored result: %s)", async (anchoredResult) => {
+    const course = installResolvedLocalReaderMonitoring();
+    const closedIncident = structuredClone(course.supportIncident);
+    let newCycleLedger: AutomationPlaybookLedger = { version: 1, events: [] };
+    dbMocks.getCourseMonitoringPlaybookContext.mockImplementation(async () => ({
+      id: course.supportIncident.id,
+      cycle: 2,
+      status: "AUTO_INVESTIGATING",
+      attemptLedger: newCycleLedger,
+    }));
+    courseMonitoringMocks.recordCourseMonitoringPlaybookTransition.mockImplementation(
+      async (input) => {
+        newCycleLedger = appendAutomationPlaybookEvent(newCycleLedger, {
+          cycle: 2,
+          observedAt: new Date(),
+          stage: input.stage,
+          transition: input.transition,
+          readPath: input.readPath,
+          evidenceKind: input.evidenceKind,
+          failureFingerprint: input.failureFingerprint,
+          runtimeVersion: input.runtimeVersion,
+          failureClass: input.failureClass,
+          skipReason: input.skipReason,
+          factualDisposition: input.factualDisposition,
+          technicalReason: input.technicalReason,
+          note: input.note,
+        });
+        return {
+          replayed: false,
+          incidentId: course.supportIncident.id,
+          incidentRevision: newCycleLedger.events.length,
+          ledger: newCycleLedger,
+          assessment: assessAutomationPlaybook(newCycleLedger, 2),
+        };
+      },
+    );
+    // A result can finish between the first observation lookup and queue
+    // lookup. That anchored failure can legitimately open a new cycle. The
+    // null-source variant is a defensive callee-boundary control, not proof
+    // that an expired job may override the existing successful source.
+    const terminalObservedAt = anchoredResult
+      ? new Date("2026-07-11T12:09:00.000Z")
+      : null;
+    localReaderMocks.queueLocalReaderJob.mockResolvedValue({
+      id: "expired-ordinary-reader-job",
+      status: anchoredResult ? "COMPLETED" : "EXPIRED",
+      queueDisposition: "TERMINAL",
+      readerResultStatus: anchoredResult ? "READER_ERROR" : "EXPIRED",
+      failureObservedAt: terminalObservedAt,
+      providerObservedAt: terminalObservedAt,
+    });
+    supportIncidentMocks.reportCourseSupportIssue.mockResolvedValue({
+      incidentId: course.supportIncident.id,
+      status: "AUTO_INVESTIGATING",
+      ownerAlerted: false,
+      sourceEvidenceAccepted: true,
+    });
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(result.courseResults[0]).toMatchObject({
+      outcome: "FETCH_FAILED",
+      supportStatus: "IN_OPERATOR_QUEUE",
+    });
+    expect(localReaderMocks.queueLocalReaderJob).toHaveBeenCalledOnce();
+    expect(supportIncidentMocks.reportCourseSupportIssue)
+      .toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          kind: "READER_CANDIDATE",
+          readPath: "LOCAL_READER_TERMINAL",
+          failureObservedAt: terminalObservedAt ?? course.monitoringStatus.lastSuccessfulAt,
+        }),
+      );
+    expect(
+      supportIncidentMocks.reportCourseSupportIssue.mock.calls[0][0]
+        .providerObservedAt,
+    ).toEqual(terminalObservedAt ?? undefined);
+    const recordedProbes = [
+      ...dbMocks.recordCourseProbe.mock.calls,
+      ...dbMocks.recordCourseProbeIfChanged.mock.calls,
+    ];
+    expect(recordedProbes.some(([probe]) => probe.outcome === "FETCH_FAILED")).toBe(true);
+    for (const [probe] of [
+      ...dbMocks.recordCourseProbe.mock.calls,
+      ...dbMocks.recordCourseProbeIfChanged.mock.calls,
+    ]) {
+      expect(probe.rawSummary?.providerExecution).toBeUndefined();
+    }
+    expect(
+      providerRequestLeaseMocks.runWithProviderRequestLease,
+    ).not.toHaveBeenCalled();
+    expect(
+      localReaderMocks.markCompletedLocalReaderProviderObservationConsumedInTransaction,
+    ).not.toHaveBeenCalled();
+    expect(
+      courseMonitoringMocks.recordCourseMonitoringSuccess,
+    ).not.toHaveBeenCalled();
+    expect(dbMocks.commitCurrentCourseTeeTimeMatches).not.toHaveBeenCalled();
+    expect
+      .soft(courseMonitoringMocks.recordCourseMonitoringPlaybookTransition)
+      .not.toHaveBeenCalled();
+    expect.soft(newCycleLedger.events).toHaveLength(0);
+    expect(course.supportIncident).toEqual(closedIncident);
   });
 
   it("does not let a local reader bypass browser stages for a stored technical block", async () => {
