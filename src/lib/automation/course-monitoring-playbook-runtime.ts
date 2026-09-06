@@ -105,6 +105,9 @@ export async function recordRuntimePlaybookTransition(
   const result = await recordCourseMonitoringPlaybookTransition({
     courseId: runtime.courseId,
     incidentId: runtime.incidentId,
+    ...(input.transition === "FACTUAL_FINAL"
+      ? { expectedIncidentCycle: runtime.cycle }
+      : {}),
     stage: input.stage,
     transition: input.transition,
     readPath: input.readPath,

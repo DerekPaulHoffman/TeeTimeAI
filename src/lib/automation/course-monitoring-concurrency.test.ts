@@ -112,7 +112,10 @@ import {
   PARKED_COURSE_CAMPAIGN_PROMPT_VERSION,
 } from "./course-support-campaign";
 import { persistCourseSupportSearchExecutionFence } from "./course-support-search-execution-fence";
-import { assessAutomationPlaybook } from "./course-monitoring-playbook";
+import {
+  appendAutomationPlaybookEvent,
+  assessAutomationPlaybook,
+} from "./course-monitoring-playbook";
 import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
 import { COURSE_SUPPORT_RESPONDER_PROMPT_VERSION } from "./course-support-responder-policy";
 import { assessCourseSupportZeroExecutionHistory } from "./course-support-zero-execution";
@@ -8960,6 +8963,7 @@ describe("course monitoring write serialization", () => {
       consecutiveFailures: 0,
       revision: 9,
     });
+    // Prisma returns selected nullable decision fields explicitly, not omitted.
     transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
       id: "incident-1",
       cycle: 7,
@@ -8967,6 +8971,10 @@ describe("course monitoring write serialization", () => {
       status: "RESOLVED",
       resolution: "DIRECT_BOOKING_CLASSIFIED",
       decisionAt: null,
+      decisionActorId: null,
+      decisionNote: null,
+      decisionEvidenceUrl: null,
+      decisionIdempotencyKey: null,
       activeBatchId: null,
       revision: 4,
     });
@@ -9080,6 +9088,103 @@ describe("course monitoring write serialization", () => {
 
     expect(transactionMocks.teeSearch.updateMany).not.toHaveBeenCalled();
   });
+
+  it.each([
+    "advanced cycle",
+    "source before confirmation",
+    "source before last seen",
+    "source equal to monitoring success",
+    "source equal to monitoring failure",
+    "source before monitoring failure",
+    "source before full ledger tail",
+    "malformed ledger",
+    "unconfirmed descendant",
+    "missing selected cycle",
+    "future source time",
+  ])("does not append a factual stage with %s", async (scenario) => {
+    prismaMocks.$transaction.mockReset();
+    prismaMocks.$transaction.mockImplementation(async (worker) => worker(transactionMocks));
+    const sourceAt = new Date("2026-07-27T15:55:00.000Z");
+    const laterAt = new Date(sourceAt.getTime() + 1_000);
+    const incident = {
+      id: "incident-1", cycle: 2, revision: 7, status: "AUTO_INVESTIGATING",
+      confirmedAt: new Date("2026-07-27T15:40:00.000Z") as Date | null,
+      firstSeenAt: new Date("2026-07-27T15:30:00.000Z"),
+      lastSeenAt: new Date("2026-07-27T15:45:00.000Z"),
+      attemptLedger: null as Prisma.JsonValue | null,
+    };
+    const monitoring = {
+      lastSuccessfulAt: null as Date | null,
+      lastFailureAt: null as Date | null,
+    };
+    if (scenario === "advanced cycle") incident.cycle = 3;
+    if (scenario === "source before confirmation") incident.confirmedAt = laterAt;
+    if (scenario === "source before last seen") incident.lastSeenAt = laterAt;
+    if (scenario === "source equal to monitoring success") monitoring.lastSuccessfulAt = sourceAt;
+    if (scenario === "source equal to monitoring failure") monitoring.lastFailureAt = sourceAt;
+    if (scenario === "source before monitoring failure") monitoring.lastFailureAt = laterAt;
+    if (scenario === "unconfirmed descendant") incident.confirmedAt = null;
+    if (scenario === "malformed ledger") incident.attemptLedger = { invalid: true };
+    if (scenario === "source before full ledger tail") {
+      incident.attemptLedger = appendAutomationPlaybookEvent(null, {
+        cycle: 2, stage: "OFFICIAL_IDENTITY", transition: "STARTED",
+        readPath: "OFFICIAL_IDENTITY", evidenceKind: "OFFICIAL_SOURCE",
+        failureFingerprint: "PLAYBOOK:OFFICIAL_IDENTITY:STARTED",
+        runtimeVersion: "release-sha", observedAt: laterAt,
+      });
+    }
+    transactionMocks.courseSupportIncident.findUnique.mockResolvedValue(incident);
+    transactionMocks.courseMonitoringStatus.findUnique.mockResolvedValue(monitoring);
+    await expect(recordCourseMonitoringPlaybookTransition({
+      courseId: "course-1", incidentId: "incident-1",
+      expectedIncidentCycle: scenario === "missing selected cycle" ? undefined : 2,
+      stage: "OFFICIAL_IDENTITY", transition: "FACTUAL_FINAL",
+      readPath: "OFFICIAL_IDENTITY", evidenceKind: "OFFICIAL_SOURCE",
+      factualDisposition: "MANUAL_DIRECT",
+      failureFingerprint: "PLAYBOOK:OFFICIAL_IDENTITY:MANUAL_DIRECT",
+      runtimeVersion: "release-sha",
+      now: scenario === "future source time" ? new Date(Date.now() + 30_000) : sourceAt,
+    })).resolves.toBeNull();
+    expect(transactionMocks.courseSupportIncident.updateMany).not.toHaveBeenCalled();
+    expect(transactionMocks.courseMonitoringEvent.create).not.toHaveBeenCalled();
+  });
+
+  it.each(["confirmed cycle", "first unconfirmed cycle"])(
+    "preserves the real factual source time for a current %s",
+    async (scenario) => {
+      prismaMocks.$transaction.mockReset();
+      prismaMocks.$transaction.mockImplementation(async (worker) => worker(transactionMocks));
+      const sourceAt = new Date("2026-07-27T15:55:00.000Z");
+      const cycle = scenario === "first unconfirmed cycle" ? 1 : 2;
+      transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
+        id: "incident-1", cycle, revision: 7, status: "AUTO_INVESTIGATING",
+        confirmedAt: cycle === 1 ? null : sourceAt,
+        firstSeenAt: sourceAt, lastSeenAt: sourceAt, attemptLedger: null,
+      });
+      const result = await recordCourseMonitoringPlaybookTransition({
+        courseId: "course-1", incidentId: "incident-1", expectedIncidentCycle: cycle,
+        stage: "OFFICIAL_IDENTITY", transition: "FACTUAL_FINAL",
+        readPath: "OFFICIAL_IDENTITY", evidenceKind: "OFFICIAL_SOURCE",
+        factualDisposition: "MANUAL_DIRECT",
+        failureFingerprint: "PLAYBOOK:OFFICIAL_IDENTITY:MANUAL_DIRECT",
+        runtimeVersion: "release-sha", now: sourceAt,
+      });
+      expect(result?.assessment.conclusion).toBe("FACTUAL_FINAL");
+      expect(transactionMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ cycle, revision: 7 }),
+          data: expect.objectContaining({
+            attemptLedger: expect.objectContaining({
+              events: [expect.objectContaining({ cycle, observedAt: sourceAt.toISOString() })],
+            }),
+          }),
+        }),
+      );
+      expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ occurredAt: sourceAt }) }),
+      );
+    },
+  );
 
   it("appends playbook proof without consuming the legacy responder attempt ladder", async () => {
     prismaMocks.$transaction.mockReset();

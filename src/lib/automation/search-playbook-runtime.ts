@@ -104,6 +104,9 @@ export async function recordSearchPlaybookTransition(
   const recorded = await recordCourseMonitoringPlaybookTransition({
     courseId: runtime.courseId,
     incidentId: runtime.incidentId,
+    ...(input.transition === "FACTUAL_FINAL"
+      ? { expectedIncidentCycle: runtime.cycle }
+      : {}),
     source: runtime.source,
     idempotencyKey: buildSearchPlaybookIdempotencyKey({
       incidentId: runtime.incidentId,

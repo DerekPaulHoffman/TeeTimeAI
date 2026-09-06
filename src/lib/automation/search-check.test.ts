@@ -380,11 +380,14 @@ function buildIndependentFactualFinalPlaybook() {
   });
 }
 
-function installPlaybookPersistence(initialLedger: AutomationPlaybookLedger) {
+function installPlaybookPersistence(
+  initialLedger: AutomationPlaybookLedger,
+  cycle = 1,
+) {
   let ledger = initialLedger;
   const context = () => ({
     id: "incident-1",
-    cycle: 1,
+    cycle,
     status: "AUTO_INVESTIGATING" as const,
     attemptLedger: ledger,
   });
@@ -394,8 +397,8 @@ function installPlaybookPersistence(initialLedger: AutomationPlaybookLedger) {
   courseMonitoringMocks.recordCourseMonitoringPlaybookTransition.mockImplementation(
     async (input) => {
       ledger = appendAutomationPlaybookEvent(ledger, {
-        cycle: 1,
-        observedAt: PLAYBOOK_OBSERVED_AT,
+        cycle,
+        observedAt: input.now ?? PLAYBOOK_OBSERVED_AT,
         stage: input.stage,
         transition: input.transition,
         readPath: input.readPath,
@@ -413,7 +416,7 @@ function installPlaybookPersistence(initialLedger: AutomationPlaybookLedger) {
         incidentId: "incident-1",
         incidentRevision: ledger.events.length,
         ledger,
-        assessment: assessAutomationPlaybook(ledger, 1),
+        assessment: assessAutomationPlaybook(ledger, cycle),
       };
     },
   );
@@ -6414,6 +6417,145 @@ describe("runSearchCheck email cadence", () => {
 
     expect(adapterMocks.fetchForeupTeeSheet).toHaveBeenCalledTimes(1);
     expect(result.courseResults[0]).toMatchObject({ outcome: "NO_MATCH" });
+  });
+
+  function installOfficialContactOnlySource(input: {
+    cycle?: number;
+    sourceAt?: Date | null;
+    confirmedAt?: Date | null;
+    lastSeenAt?: Date;
+    lastSuccessfulAt?: Date | null;
+    lastFailureAt?: Date | null;
+    alreadyFinal?: boolean;
+    ledger?: AutomationPlaybookLedger;
+  } = {}) {
+    const cycle = input.cycle ?? 2;
+    const sourceAt = input.sourceAt === undefined
+      ? new Date("2026-07-11T12:04:00.000Z") : input.sourceAt;
+    const confirmedAt = input.confirmedAt === undefined
+      ? new Date("2026-07-11T12:02:00.000Z") : input.confirmedAt;
+    const firstSeenAt = new Date("2026-07-11T12:01:00.000Z");
+    const playbook = installPlaybookPersistence(
+      input.ledger ?? { version: 1, events: [] }, cycle,
+    );
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [{
+        rank: 1,
+        course: {
+          ...search.preferences[0].course,
+          isPublic: true,
+          website: "https://official-contact-course.example/",
+          detectedBookingUrl: "https://official-contact-course.example/contact",
+          detectedPlatform: "UNKNOWN",
+          providerFamilyKey: "official-contact-course.example",
+          monitoringMode: "CONTACT_ONLY",
+          bookingMethod: "PHONE_ONLY",
+          bookingPhone: "203-555-0100",
+          automationEligibility: "BLOCKED",
+          automationReason: "NO_ONLINE_BOOKING",
+          policyNotes: "Current official course facts confirm telephone booking only.",
+          intelligenceVerifiedAt: sourceAt,
+          intelligenceReviewAt: new Date("2026-08-11T12:00:00.000Z"),
+          intelligenceConfidence: 0.95,
+          monitoringStatus: {
+            state: input.alreadyFinal ? "FINAL_MANUAL" : "AUTO_INVESTIGATING",
+            firstDegradedAt: firstSeenAt,
+            lastSuccessfulAt: input.lastSuccessfulAt ?? null,
+            lastFailureAt: input.lastFailureAt ?? firstSeenAt,
+            failureFingerprint: "OFFICIAL_CONTACT_ONLY",
+            stateChangedAt: firstSeenAt,
+            nextAutomaticAttemptAt: null,
+            revalidationRequestedAt: null,
+          },
+          supportIncident: {
+            ...playbook.context(),
+            firstSeenAt,
+            confirmedAt,
+            lastSeenAt: input.lastSeenAt ?? firstSeenAt,
+            humanReviewReason: null,
+          },
+        },
+      }],
+    });
+    dbMocks.listPendingMatchAlerts.mockResolvedValue([]);
+    dbMocks.listAvailableMatchAlerts.mockResolvedValue([]);
+    return { playbook, sourceAt, cycle };
+  }
+
+  it.each([
+    { label: "confirmed current cycle", cycle: 2 },
+    { label: "unconfirmed first cycle", cycle: 1, confirmedAt: null },
+    { label: "equal incident last-seen time", cycle: 2, lastSeenAt: new Date("2026-07-11T12:04:00.000Z") },
+  ])("preserves the actual official factual source time for a $label", async (input) => {
+    const { playbook, sourceAt, cycle } = installOfficialContactOnlySource(input);
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(courseMonitoringMocks.recordCourseMonitoringPlaybookTransition)
+      .toHaveBeenCalledWith(expect.objectContaining({
+        stage: "OFFICIAL_IDENTITY",
+        transition: "FACTUAL_FINAL",
+        factualDisposition: "MANUAL_DIRECT",
+        now: sourceAt,
+      }));
+    expect(playbook.getLedger().events.at(-1)).toMatchObject({
+      cycle,
+      transition: "FACTUAL_FINAL",
+      observedAt: sourceAt!.toISOString(),
+    });
+    expect(courseMonitoringMocks.recordCourseMonitoringFinalClassification)
+      .toHaveBeenCalledWith(expect.objectContaining({
+        state: "FINAL_MANUAL",
+        outcome: "MANUAL_DIRECT",
+        evidence: { kind: "COURSE_INTELLIGENCE", observedAt: sourceAt },
+      }));
+    expect(sourceAt?.getTime()).toBeLessThan(Date.now());
+    expect(result.courseResults[0]).toMatchObject({ outcome: "MANUAL_DIRECT" });
+    expect(providerRequestLeaseMocks.runWithProviderRequestLease).not.toHaveBeenCalled();
+    expect(localReaderMocks.queueLocalReaderJob).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: "missing source behind retained manual state", sourceAt: null, alreadyFinal: true },
+    { label: "future source inside the generic intelligence grace", sourceAt: new Date("2026-07-11T12:10:30.000Z") },
+    { label: "source older than current-cycle confirmation", sourceAt: new Date("2026-07-11T12:01:30.000Z") },
+    { label: "later cycle without confirmation", confirmedAt: null },
+    { label: "source older than incident last-seen evidence", lastSeenAt: new Date("2026-07-11T12:04:00.001Z") },
+    { label: "source equal to monitoring success", lastSuccessfulAt: new Date("2026-07-11T12:04:00.000Z") },
+    { label: "source older than monitoring success", lastSuccessfulAt: new Date("2026-07-11T12:04:00.001Z") },
+    { label: "source equal to monitoring failure", lastFailureAt: new Date("2026-07-11T12:04:00.000Z") },
+    { label: "source older than monitoring failure", lastFailureAt: new Date("2026-07-11T12:04:00.001Z") },
+    {
+      label: "source preceding the full prior-cycle ledger tail",
+      ledger: appendAutomationPlaybookEvent(null, {
+        cycle: 1,
+        observedAt: new Date("2026-07-11T12:06:00.000Z"),
+        runtimeVersion: "prior-source-runtime",
+        stage: "OFFICIAL_IDENTITY",
+        transition: "COMPLETED",
+        readPath: "OFFICIAL_IDENTITY",
+        evidenceKind: "OFFICIAL_SOURCE",
+        failureFingerprint: "PRIOR_CYCLE:OFFICIAL_IDENTITY",
+      }),
+    },
+  ])("does not consume the official factual stage with $label", async (input) => {
+    const { playbook, cycle } = installOfficialContactOnlySource(input);
+    const before = structuredClone(playbook.getLedger());
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(courseMonitoringMocks.recordCourseMonitoringPlaybookTransition)
+      .not.toHaveBeenCalled();
+    expect(playbook.getLedger()).toEqual(before);
+    expect(assessAutomationPlaybook(playbook.getLedger(), cycle)).toMatchObject({
+      conclusion: "INCOMPLETE", nextStage: "OFFICIAL_IDENTITY",
+    });
+    expect(courseMonitoringMocks.recordCourseMonitoringFinalClassification)
+      .not.toHaveBeenCalled();
+    expect(result.courseResults[0]).toMatchObject({ outcome: "IDENTITY_RECHECK" });
+    expect(providerRequestLeaseMocks.runWithProviderRequestLease).not.toHaveBeenCalled();
+    expect(localReaderMocks.queueLocalReaderJob).not.toHaveBeenCalled();
   });
 
   it("records a manual final without calling an adapter", async () => {

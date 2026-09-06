@@ -190,6 +190,17 @@ If `origin/main` advances concurrently before the first responder release is fen
 
 An older success, a local check, a Workflow id by itself, or a new probe from a different runtime cannot resolve the incident. A persisted factual classification uses the classification-only path and does not pretend an adapter ran. A technical classification also requires the current-cycle local-reader and independent-confirmation proof described above.
 
+An automatic factual final may supply fresh terminal acceptance only when the
+accepted current-cycle factual ledger source has the same original observation
+time, disposition, and full commit SHA as the current deployed runtime, and the
+writer successfully resolves that unowned incident. Append the idempotent
+terminal receipt even if the monitoring state was already final; do not restamp
+an older state-change time or replay an already-resolved record to manufacture
+acceptance. Cached course facts alone, missing runtime provenance, changed
+incident ownership or evidence, and operator decisions cannot create this proof.
+Search checks preserve the source observation time when recording an official
+factual finding and reject stale or backdated evidence before concluding a ledger.
+
 ## Worker Health And Deadlines
 
 - Only the gated 15-minute scheduled responder invocation with `inspect --scheduled-cycle` updates responder worker health. Manual commands must remain diagnostically read-only with respect to worker health.

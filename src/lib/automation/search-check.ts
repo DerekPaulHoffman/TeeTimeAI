@@ -39,6 +39,7 @@ import {
   getAutomationPlaybookFactualFinalEvidence,
   isAutomationHumanReviewProofCurrentOrPrior,
   isAutomationPlaybookExhausted,
+  parseAutomationPlaybookLedger,
 } from "@/lib/automation/course-monitoring-playbook";
 import {
   getBestProbeUrl,
@@ -228,6 +229,8 @@ type AutomationCourse = AutomationCourseProviderRead & {
     escalatedAt?: Date | null;
     escalationDeadlineAt: Date | null;
     firstSeenAt: Date;
+    confirmedAt?: Date | null;
+    lastSeenAt?: Date | null;
     monitoringEvents?: Array<{
       incidentId: string | null;
       eventType: string;
@@ -260,6 +263,46 @@ export class SearchCheckLeaseLostError extends Error {
 
 type DurableSupportEvidenceMode =
   "PRIOR_MONITORING_ONLY" | "PROVIDER_INTELLIGENCE";
+
+function getCurrentFactualSourceObservedAt(
+  course: AutomationCourse,
+  runtime: SearchPlaybookRuntime,
+): Date | null {
+  const incident = course.supportIncident;
+  const observedAt = course.intelligenceVerifiedAt;
+  if (
+    !incident ||
+    incident.id !== runtime.incidentId ||
+    incident.cycle !== runtime.cycle ||
+    !observedAt ||
+    !Number.isFinite(observedAt.getTime()) ||
+    observedAt.getTime() > Date.now()
+  ) {
+    return null;
+  }
+  const confirmedAt =
+    incident.confirmedAt ?? (incident.cycle === 1 ? incident.firstSeenAt : null);
+  const ledger = parseAutomationPlaybookLedger(runtime.ledger);
+  if (
+    !confirmedAt ||
+    !Number.isFinite(confirmedAt.getTime()) ||
+    observedAt < confirmedAt ||
+    (incident.lastSeenAt && observedAt < incident.lastSeenAt) ||
+    (course.monitoringStatus?.lastSuccessfulAt &&
+      observedAt <= course.monitoringStatus.lastSuccessfulAt) ||
+    (course.monitoringStatus?.lastFailureAt &&
+      observedAt <= course.monitoringStatus.lastFailureAt) ||
+    (runtime.ledger !== null && !ledger)
+  ) {
+    return null;
+  }
+  // Preserve source time without backdating the append-only ledger, including
+  // prior-cycle observations. Processing cached facts is not a fresh observation.
+  const lastObservedAt = ledger?.events.at(-1)?.observedAt;
+  return lastObservedAt && observedAt < new Date(lastObservedAt)
+    ? null
+    : observedAt;
+}
 
 function getLatestValidEvidenceAt(
   notAfter: Date,
@@ -830,24 +873,31 @@ async function checkSearch(
           monitoringGate.disposition === "MANUAL_FINAL" ||
           monitoringGate.disposition === "IDENTITY_FINAL"
         ) {
-          playbookRuntime = await recordSearchPlaybookTransition(
+          const factualSourceObservedAt = getCurrentFactualSourceObservedAt(
+            course,
             playbookRuntime,
-            {
-              stage: "OFFICIAL_IDENTITY",
-              transition: "FACTUAL_FINAL",
-              readPath: "OFFICIAL_IDENTITY",
-              evidenceKind: "OFFICIAL_SOURCE",
-              failureFingerprint:
-                monitoringGate.disposition === "MANUAL_FINAL"
-                  ? SEARCH_PLAYBOOK_FINGERPRINTS.OFFICIAL_IDENTITY_MANUAL_FINAL
-                  : SEARCH_PLAYBOOK_FINGERPRINTS.OFFICIAL_IDENTITY_IDENTITY_FINAL,
-              factualDisposition:
-                monitoringGate.disposition === "MANUAL_FINAL"
-                  ? "MANUAL_DIRECT"
-                  : "IDENTITY_FINAL",
-              note: "Current authoritative course facts support a direct final action.",
-            },
           );
+          if (factualSourceObservedAt) {
+            playbookRuntime = await recordSearchPlaybookTransition(
+              playbookRuntime,
+              {
+                stage: "OFFICIAL_IDENTITY",
+                transition: "FACTUAL_FINAL",
+                observedAt: factualSourceObservedAt,
+                readPath: "OFFICIAL_IDENTITY",
+                evidenceKind: "OFFICIAL_SOURCE",
+                failureFingerprint:
+                  monitoringGate.disposition === "MANUAL_FINAL"
+                    ? SEARCH_PLAYBOOK_FINGERPRINTS.OFFICIAL_IDENTITY_MANUAL_FINAL
+                    : SEARCH_PLAYBOOK_FINGERPRINTS.OFFICIAL_IDENTITY_IDENTITY_FINAL,
+                factualDisposition:
+                  monitoringGate.disposition === "MANUAL_FINAL"
+                    ? "MANUAL_DIRECT"
+                    : "IDENTITY_FINAL",
+                note: "Current authoritative course facts support a direct final action.",
+              },
+            );
+          }
         } else {
           playbookRuntime = customerBookingUrl
             ? await ensureSearchPlaybookOfficialIdentity(playbookRuntime)

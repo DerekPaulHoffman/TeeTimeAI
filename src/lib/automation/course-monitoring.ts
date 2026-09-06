@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 
 import {
   Prisma,
@@ -57,6 +58,7 @@ import {
 } from "./course-support-remediation-routing";
 import { MONITORING_STRATEGY_ACTIONS } from "./monitoring-strategy";
 import { evaluateMonitoringGate } from "./policy";
+import { getAutomationRuntimeVersion } from "./runtime-version";
 import { getCourseLocalDateStorageBoundary } from "./date-boundary";
 import {
   COURSE_PROVIDER_EXECUTION_EVIDENCE_FIELDS,
@@ -1498,6 +1500,78 @@ function finalCourseIntelligenceUpdateMatchesCurrent(
   );
 }
 
+function getFreshAutomaticFactualFinalProof(input: {
+  incident: {
+    id: string;
+    cycle: number;
+    confirmedAt: Date | null;
+    lastSeenAt: Date;
+    decisionAt: Date | null;
+    decisionActorId: string | null;
+    decisionNote: string | null;
+    decisionEvidenceUrl: string | null;
+    decisionIdempotencyKey: string | null;
+    attemptLedger: Prisma.JsonValue | null;
+  };
+  evidence: CourseMonitoringFinalClassificationEvidence;
+  disposition: "MANUAL_DIRECT" | "IDENTITY_FINAL";
+  source: CourseMonitoringEventSource;
+  runtimeVersion: string | null | undefined;
+  now: Date;
+}) {
+  const { incident } = input;
+  const runtimeVersion = getAutomationRuntimeVersion();
+  if (
+    !["SEARCH_WORKFLOW", "RECOVERY_CRON"].includes(input.source) ||
+    !/^[a-f0-9]{40}$/u.test(runtimeVersion) ||
+    normalizeRuntimeVersion(input.runtimeVersion) !== runtimeVersion ||
+    getAutomaticDeploymentSha(input.source, input.runtimeVersion) !== runtimeVersion ||
+    incident.decisionAt !== null ||
+    incident.decisionActorId !== null ||
+    incident.decisionNote !== null ||
+    incident.decisionEvidenceUrl !== null ||
+    incident.decisionIdempotencyKey !== null ||
+    !(incident.confirmedAt instanceof Date) ||
+    !Number.isFinite(incident.confirmedAt.getTime()) ||
+    (input.evidence.kind === "PLAYBOOK_FACTUAL_FINAL" &&
+      input.evidence.cycle !== incident.cycle)
+  ) {
+    return null;
+  }
+  const ledger = parseAutomationPlaybookLedger(incident.attemptLedger);
+  const assessment = assessAutomationPlaybook(ledger, incident.cycle);
+  const event = ledger?.events.find(
+    (candidate) =>
+      candidate.cycle === incident.cycle &&
+      candidate.transition === "FACTUAL_FINAL",
+  );
+  if (
+    !assessment.valid || assessment.cycle !== incident.cycle ||
+    assessment.conclusion !== "FACTUAL_FINAL" ||
+    assessment.factualDisposition !== input.disposition ||
+    ledger?.events.at(-1)?.cycle !== incident.cycle ||
+    !event || event.factualDisposition !== input.disposition ||
+    event.runtimeVersion !== runtimeVersion ||
+    !["OFFICIAL_SOURCE", "RENDERED_PAGE"].includes(event.evidenceKind) ||
+    Date.parse(event.observedAt) !== input.evidence.observedAt.getTime() ||
+    input.evidence.observedAt < incident.confirmedAt ||
+    incident.lastSeenAt > input.evidence.observedAt ||
+    input.evidence.observedAt > input.now
+  ) {
+    return null;
+  }
+  return {
+    runtimeVersion,
+    sourceSequence: event.sequence,
+    idempotencyKey: `course-factual-terminal:${createHash("sha256")
+      .update(JSON.stringify([
+        incident.id, incident.cycle, event.sequence, event.observedAt,
+        input.disposition, runtimeVersion,
+      ]))
+      .digest("hex")}`,
+  };
+}
+
 export async function recordCourseMonitoringFinalClassification(input: {
   courseId: string;
   state: "FINAL_MANUAL" | "FINAL_IDENTITY";
@@ -1571,6 +1645,10 @@ export async function recordCourseMonitoringFinalClassification(input: {
             status: true,
             resolution: true,
             decisionAt: true,
+            decisionActorId: true,
+            decisionNote: true,
+            decisionEvidenceUrl: true,
+            decisionIdempotencyKey: true,
             activeBatchId: true,
             revision: true,
             attemptLedger: true,
@@ -1750,6 +1828,7 @@ export async function recordCourseMonitoringFinalClassification(input: {
         lastSeenAt: evidenceObservedAt,
         revision: { increment: 1 },
       };
+      let resolvedFactualIncident: typeof incident = null;
       if (
         incident &&
         !incident.activeBatchId &&
@@ -1768,16 +1847,28 @@ export async function recordCourseMonitoringFinalClassification(input: {
             },
             data: factualResolutionData,
           });
+        if (resolvedIncident.count === 1) {
+          resolvedFactualIncident = incident;
+        }
         if (resolvedIncident.count === 0) {
           const latestIncident =
             await transaction.courseSupportIncident.findUnique({
               where: { courseId: input.courseId },
               select: {
                 id: true,
+                cycle: true,
+                confirmedAt: true,
+                lastSeenAt: true,
                 status: true,
                 resolution: true,
+                decisionAt: true,
+                decisionActorId: true,
+                decisionNote: true,
+                decisionEvidenceUrl: true,
+                decisionIdempotencyKey: true,
                 activeBatchId: true,
                 revision: true,
+                attemptLedger: true,
               },
             });
           const latestRevalidatableTechnicalResolution =
@@ -1788,11 +1879,17 @@ export async function recordCourseMonitoringFinalClassification(input: {
                 "HUMAN_VERIFIED_TECHNICAL_LIMITATION");
           if (
             latestIncident &&
+            // A revision-only retry may reuse the accepted source. A changed
+            // cycle, source ledger, decision, or endpoint must be assessed anew.
+            isDeepStrictEqual(
+              { ...incident, revision: 0 },
+              { ...latestIncident, revision: 0 },
+            ) &&
             !latestIncident.activeBatchId &&
             (latestIncident.status !== "RESOLVED" ||
               latestRevalidatableTechnicalResolution)
           ) {
-            await transaction.courseSupportIncident.updateMany({
+            const retriedResolution = await transaction.courseSupportIncident.updateMany({
               where: {
                 id: latestIncident.id,
                 status: latestIncident.status,
@@ -1804,13 +1901,28 @@ export async function recordCourseMonitoringFinalClassification(input: {
               },
               data: factualResolutionData,
             });
+            if (retriedResolution.count === 1) {
+              resolvedFactualIncident = latestIncident;
+            }
           }
         }
       }
-      if (stateChanged) {
+      const freshFactualProof = resolvedFactualIncident &&
+        (input.state === "FINAL_IDENTITY") === (input.outcome === "IDENTITY_FINAL")
+        ? getFreshAutomaticFactualFinalProof({
+            incident: resolvedFactualIncident,
+            evidence: input.evidence,
+            disposition: requestedDisposition,
+            source,
+            runtimeVersion: input.runtimeVersion,
+            now,
+          })
+        : null;
+      const eventIncident = resolvedFactualIncident ?? incident;
+      if (stateChanged || freshFactualProof) {
         await appendMonitoringEvent(transaction, {
           courseId: input.courseId,
-          incidentId: incident?.id,
+          incidentId: eventIncident?.id,
           eventType: "STATE_CHANGED",
           source,
           fromState: current.state,
@@ -1823,23 +1935,36 @@ export async function recordCourseMonitoringFinalClassification(input: {
             source,
             input.runtimeVersion,
           ),
+          ...(freshFactualProof
+            ? { idempotencyKey: freshFactualProof.idempotencyKey }
+            : {}),
           occurredAt: evidenceObservedAt,
-          ...(incident
+          ...(eventIncident
             ? {
                 audit: {
-                  cycle: incident.cycle,
-                  confirmedAt: incident.confirmedAt?.toISOString() ?? null,
+                  cycle: eventIncident.cycle,
+                  confirmedAt: eventIncident.confirmedAt?.toISOString() ?? null,
                   automatedFinal:
-                    incident.decisionAt === null &&
+                    eventIncident.decisionAt === null &&
+                    eventIncident.decisionActorId === null &&
+                    eventIncident.decisionNote === null &&
+                    eventIncident.decisionEvidenceUrl === null &&
+                    eventIncident.decisionIdempotencyKey === null &&
                     source !== "OPERATOR_DASHBOARD" &&
                     source !== "OPERATOR_CLI" &&
                     source !== "MAINTENANCE",
+                  ...(freshFactualProof
+                    ? {
+                        freshRuntimeProof: true,
+                        factualSourceSequence: freshFactualProof.sourceSequence,
+                      }
+                    : {}),
                   customerDataIncluded: false,
                 },
               }
             : {}),
         });
-        if (source !== "SEARCH_WORKFLOW") {
+        if (stateChanged && source !== "SEARCH_WORKFLOW") {
           await queueActiveRealSearchesForCourse(
             transaction,
             input.courseId,
@@ -3102,6 +3227,7 @@ export async function recordCourseMonitoringPlaybookTransition(
     now?: Date;
     browserPersistenceFence?: CourseSupportBrowserPersistenceFence;
     expectedProviderSnapshotFingerprint?: string;
+    expectedIncidentCycle?: number;
     onBeforeSourceWrite?: (
       transaction: Prisma.TransactionClient,
     ) => Promise<void>;
@@ -3158,6 +3284,7 @@ export async function recordCourseMonitoringPlaybookTransition(
           status: true,
           attemptLedger: true,
           confirmedAt: true,
+          firstSeenAt: true,
           lastSeenAt: true,
         },
       });
@@ -3183,6 +3310,39 @@ export async function recordCourseMonitoringPlaybookTransition(
           return !latest || value > latest ? value : latest;
         }, null);
         if (recoveryFenceAt && now <= recoveryFenceAt) {
+          return null;
+        }
+      }
+      if (input.transition === "FACTUAL_FINAL") {
+        const confirmationAt = incident.confirmedAt ??
+          (incident.cycle === 1 ? incident.firstSeenAt : null);
+        const currentLedger = parseAutomationPlaybookLedger(incident.attemptLedger);
+        const latestLedgerAt = currentLedger?.events.at(-1)?.observedAt;
+        if (
+          !Number.isSafeInteger(input.expectedIncidentCycle) ||
+          (input.expectedIncidentCycle ?? 0) <= 0 ||
+          input.expectedIncidentCycle !== incident.cycle ||
+          !Number.isFinite(now.getTime()) ||
+          now.getTime() > Date.now() ||
+          !(confirmationAt instanceof Date) ||
+          !Number.isFinite(confirmationAt.getTime()) ||
+          !(incident.lastSeenAt instanceof Date) ||
+          !Number.isFinite(incident.lastSeenAt.getTime()) ||
+          now < confirmationAt || now < incident.lastSeenAt ||
+          (incident.attemptLedger !== null && !currentLedger) ||
+          (latestLedgerAt && now.getTime() < Date.parse(latestLedgerAt))
+        ) {
+          return null;
+        }
+        const monitoringStatus =
+          await transaction.courseMonitoringStatus.findUnique({
+            where: { courseId: input.courseId },
+            select: { lastSuccessfulAt: true, lastFailureAt: true },
+          });
+        if (
+          [monitoringStatus?.lastSuccessfulAt, monitoringStatus?.lastFailureAt]
+            .some((observedAt) => observedAt instanceof Date && now <= observedAt)
+        ) {
           return null;
         }
       }
