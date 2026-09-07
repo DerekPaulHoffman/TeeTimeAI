@@ -3894,6 +3894,11 @@ export async function reconcileCourseMonitoringDeadline(input: {
             nextReminderAt: true,
             resolution: true,
             resolvedAt: true,
+            decisionAt: true,
+            decisionActorId: true,
+            decisionNote: true,
+            decisionEvidenceUrl: true,
+            decisionIdempotencyKey: true,
             lastSeenAt: true,
             revision: true,
             updatedAt: true,
@@ -4211,6 +4216,11 @@ export async function reconcileCourseMonitoringDeadline(input: {
               select: {
                 incidentId: true,
                 eventType: true,
+                source: true,
+                fromState: true,
+                toState: true,
+                failureFingerprint: true,
+                operatorActorId: true,
                 occurredAt: true,
                 audit: true,
               },
@@ -4354,6 +4364,193 @@ export async function reconcileCourseMonitoringDeadline(input: {
           now: input.now,
           source: input.source,
         });
+      }
+
+      // Exhausting discovery does not consume a different, proven-unused
+      // implementation action. Keep that native handoff ahead of deadline
+      // escalation, including recovery of this exact automatic endpoint only.
+      const endpointAudit = asMonitoringJsonRecord(humanReviewEndpointEvent?.audit);
+      const automaticDiscoveryDeadlineEndpoint = Boolean(
+        incident.status === "NEEDS_HUMAN" &&
+        status.state === "ENGINEERING_VERIFICATION_NEEDED" &&
+        incident.humanReviewReason === inferHumanReviewReason({
+          kind: incident.kind,
+          failureClass: incident.failureClass,
+          bookingAccessMode: course.bookingAccessMode,
+          automationReason: course.automationReason,
+        }) &&
+        humanReviewEndpointEvent?.incidentId === incident.id &&
+        humanReviewEndpointEvent.eventType === "HUMAN_REVIEW_REQUESTED" &&
+        ["RECOVERY_CRON", "SEARCH_WORKFLOW"].includes(humanReviewEndpointEvent.source) &&
+        humanReviewEndpointEvent.fromState === "AUTO_INVESTIGATING" &&
+        humanReviewEndpointEvent.toState === "ENGINEERING_VERIFICATION_NEEDED" &&
+        humanReviewEndpointEvent.operatorActorId === null &&
+        humanReviewEndpointEvent.failureFingerprint === incident.failureFingerprint &&
+        endpointAudit.action === undefined &&
+        endpointAudit.operatorAction === undefined &&
+        endpointAudit.operatorActorId === undefined &&
+        endpointAudit.cycle === incident.cycle &&
+        endpointAudit.playbookVersion === playbookAssessment.version &&
+        endpointAudit.playbookConclusion === "UNRESOLVED_EXHAUSTED" &&
+        endpointAudit.playbookExhausted === true &&
+        endpointAudit.automationStalled === false &&
+        endpointAudit.nextStage === null &&
+        endpointAudit.automaticRecheckHours === 6 &&
+        endpointAudit.escalationDeadlineAt === incident.escalationDeadlineAt?.toISOString() &&
+        incident.escalatedAt?.getTime() === humanReviewEndpointEvent.occurredAt.getTime() &&
+        status.stateChangedAt.getTime() === humanReviewEndpointEvent.occurredAt.getTime() &&
+        humanReviewEndpointEvent.occurredAt <= input.now &&
+        status.revalidationRequestedAt === null &&
+        incident.nextAttemptAt?.getTime() ===
+          getHumanReviewRetryAt(humanReviewEndpointEvent.occurredAt, incident.activeRealSearchCount).getTime() &&
+        status.nextAutomaticAttemptAt?.getTime() === incident.nextAttemptAt?.getTime(),
+      );
+      const automaticUnusedHandoffCandidate =
+        currentCycleExhausted &&
+        playbookAssessment.valid === true &&
+        playbookAssessment.cycle === incident.cycle &&
+        playbookAssessment.conclusion === "UNRESOLVED_EXHAUSTED" &&
+        incident.resolution === null && incident.resolvedAt === null &&
+        incident.decisionAt === null && incident.decisionActorId === null &&
+        incident.decisionNote === null && incident.decisionEvidenceUrl === null &&
+        incident.decisionIdempotencyKey === null &&
+        ((incident.status === "AUTO_INVESTIGATING" &&
+          incident.humanReviewReason === null && status.state === "AUTO_INVESTIGATING") ||
+          automaticDiscoveryDeadlineEndpoint);
+      if (automaticUnusedHandoffCandidate) {
+        const { readUnusedCompletedDiscoveryImplementationHandoff } =
+          await import("./course-support-batches");
+        const handoff = await readUnusedCompletedDiscoveryImplementationHandoff(transaction, {
+          courseId: input.courseId,
+          incidentId: incident.id,
+          incidentRevision: incident.revision,
+          cycle: incident.cycle,
+          now: input.now,
+        });
+        if (
+          handoff.available && handoff.sourceCompletedAt &&
+          Number.isFinite(handoff.sourceCompletedAt.getTime()) &&
+          handoff.sourceCompletedAt <= input.now &&
+          (!automaticDiscoveryDeadlineEndpoint ||
+            (humanReviewEndpointEvent &&
+              humanReviewEndpointEvent.occurredAt >= handoff.sourceCompletedAt))
+        ) {
+          const idempotencyKey = `course-unused-implementation-deadline:${createHash("sha256")
+            .update(`${incident.id}:${incident.cycle}:${handoff.sourceCompletedAt.toISOString()}:${createAutomationPlaybookAttemptLedgerFingerprint(incident.attemptLedger)}`)
+            .digest("hex")}`;
+          const priorContinuation = await transaction.courseMonitoringEvent.findUnique({
+            where: { idempotencyKey },
+            select: {
+              courseId: true, incidentId: true, eventType: true, source: true,
+              fromState: true, toState: true, failureFingerprint: true,
+              operatorActorId: true, occurredAt: true, audit: true,
+            },
+          });
+          // Native closeout intentionally leaves revalidationRequestedAt null:
+          // the two persisted due clocks still describe the same scheduled retry.
+          const coherentRetryAt = incident.nextAttemptAt &&
+            status.nextAutomaticAttemptAt?.getTime() === incident.nextAttemptAt.getTime() &&
+            (status.revalidationRequestedAt === null ||
+              status.revalidationRequestedAt?.getTime() === incident.nextAttemptAt.getTime())
+            ? incident.nextAttemptAt : null;
+          if (priorContinuation) {
+            const continuationAudit = asMonitoringJsonRecord(priorContinuation.audit);
+            const priorRecoveredEndpoint = continuationAudit.recoveredAutomaticDeadlineEndpoint;
+            const continuationStillCoherent =
+              !automaticDiscoveryDeadlineEndpoint &&
+              incident.status === "AUTO_INVESTIGATING" &&
+              incident.humanReviewReason === null &&
+              status.state === "AUTO_INVESTIGATING" &&
+              coherentRetryAt !== null &&
+              incident.escalatedAt === null &&
+              priorContinuation.courseId === input.courseId &&
+              priorContinuation.incidentId === incident.id &&
+              priorContinuation.eventType === "REVALIDATION_REQUESTED" &&
+              ["RECOVERY_CRON", "SEARCH_WORKFLOW"].includes(priorContinuation.source) &&
+              priorContinuation.fromState ===
+                (priorRecoveredEndpoint === true ? "ENGINEERING_VERIFICATION_NEEDED" : "AUTO_INVESTIGATING") &&
+              priorContinuation.toState === "AUTO_INVESTIGATING" &&
+              priorContinuation.operatorActorId === null &&
+              priorContinuation.failureFingerprint === incident.failureFingerprint &&
+              priorContinuation.occurredAt >= handoff.sourceCompletedAt &&
+              priorContinuation.occurredAt <= input.now &&
+              continuationAudit.action === "unused_completed_discovery_implementation_deadline_continuation" &&
+              continuationAudit.cycle === incident.cycle &&
+              continuationAudit.sourceCompletedAt === handoff.sourceCompletedAt.toISOString() &&
+              typeof priorRecoveredEndpoint === "boolean" &&
+              continuationAudit.continuationAt === coherentRetryAt.toISOString() &&
+              continuationAudit.escalationDeadlineAt === incident.escalationDeadlineAt?.toISOString() &&
+              continuationAudit.playbookExhausted === true &&
+              continuationAudit.nextStage === null &&
+              continuationAudit.oneShot === true &&
+              continuationAudit.providerExecution === false &&
+              continuationAudit.implementationExecuted === false &&
+              continuationAudit.customerDataIncluded === false;
+            if (!continuationStillCoherent) {
+              throw new Error("The recorded unused implementation continuation no longer matches its automatic state.");
+            }
+            // The one-shot marker bounds writes, not the lifetime of a genuinely
+            // unused action. Time passing alone must not erase that next action.
+            return { outcome: "UNCHANGED" as const, incidentId: incident.id };
+          }
+          if (!priorContinuation) {
+            const continuationAt = !automaticDiscoveryDeadlineEndpoint && coherentRetryAt
+              ? coherentRetryAt : input.now;
+            const nextDeadlineAt = getCourseMonitoringEscalationDeadline(
+              continuationAt > input.now ? continuationAt : input.now,
+              incident.activeRealSearchCount,
+            );
+            const updated = await transaction.courseSupportIncident.updateMany({
+              where: {
+                id: incident.id, courseId: input.courseId, cycle: incident.cycle,
+                revision: incident.revision, status: incident.status, activeBatchId: null,
+                decisionAt: null, decisionActorId: null, decisionNote: null,
+                decisionEvidenceUrl: null, decisionIdempotencyKey: null,
+              },
+              data: {
+                status: "AUTO_INVESTIGATING", humanReviewReason: null,
+                escalatedAt: null, nextReminderAt: null,
+                nextAttemptAt: continuationAt, escalationDeadlineAt: nextDeadlineAt,
+                nextAction: "Claim the proven unused reusable implementation handoff without replaying discovery.",
+                revision: { increment: 1 },
+              },
+            });
+            if (updated.count !== 1) {
+              throw new Error("The course incident changed while its unused implementation handoff was continued.");
+            }
+            const statusUpdated = await transaction.courseMonitoringStatus.updateMany({
+              where: { courseId: input.courseId, revision: status.revision, state: status.state },
+              data: {
+                state: "AUTO_INVESTIGATING", nextAutomaticAttemptAt: continuationAt,
+                revalidationRequestedAt: continuationAt,
+                ...(status.state !== "AUTO_INVESTIGATING" ? { stateChangedAt: input.now } : {}),
+                revision: { increment: 1 },
+              },
+            });
+            if (statusUpdated.count !== 1) {
+              throw new Error("The monitoring state changed while its unused implementation handoff was continued.");
+            }
+            await appendMonitoringEvent(transaction, {
+              courseId: input.courseId, incidentId: incident.id,
+              eventType: "REVALIDATION_REQUESTED", source: input.source,
+              fromState: status.state, toState: "AUTO_INVESTIGATING",
+              failureFingerprint: incident.failureFingerprint,
+              message: "Completed discovery retained its proven unused implementation handoff before human review.",
+              idempotencyKey, occurredAt: input.now,
+              audit: {
+                action: "unused_completed_discovery_implementation_deadline_continuation",
+                cycle: incident.cycle, sourceCompletedAt: handoff.sourceCompletedAt.toISOString(),
+                recoveredAutomaticDeadlineEndpoint: automaticDiscoveryDeadlineEndpoint,
+                continuationAt: continuationAt.toISOString(),
+                escalationDeadlineAt: nextDeadlineAt.toISOString(),
+                playbookExhausted: true, nextStage: null, oneShot: true,
+                providerExecution: false, implementationExecuted: false,
+                customerDataIncluded: false,
+              },
+            });
+            return { outcome: "RETRYING" as const, incidentId: incident.id };
+          }
+        }
       }
 
       if (!currentCycleExhausted) {

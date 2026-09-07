@@ -17929,6 +17929,243 @@ function assertBoundedCourseSupportCandidateHistory(
   }
 }
 
+function isCompletedDiscoveryFailureRefinement(input: {
+  incident: Omit<CourseSupportCandidateIncident, "course" | "batchIncidents">;
+  course: CourseSupportCandidateIncident["course"];
+  currentCycleBatchIncidents: CourseSupportCandidateIncident["batchIncidents"];
+  providerSnapshotFingerprint: string;
+  playbookAssessment: ReturnType<typeof assessAutomationPlaybook>;
+}) {
+  if (
+    input.playbookAssessment.conclusion !== "UNRESOLVED_EXHAUSTED" ||
+    !shouldImplementReusableSupportAfterExhaustedDiscovery({
+      ...input.course,
+      providerFamilyKey:
+        input.course.providerFamilyKey?.trim() || input.incident.providerFamilyKey,
+      failureClass: input.incident.failureClass,
+      discoveryAttempt: "HTTP_INCONCLUSIVE",
+    })
+  ) {
+    return false;
+  }
+  // The source is the newest consumed attempt, but every current-cycle receipt
+  // must remain readable: an older unknown entry could hide an implementation.
+  let entry: CourseSupportCandidateIncident["batchIncidents"][number] | undefined;
+  for (const candidate of input.currentCycleBatchIncidents) {
+    const summary = asJsonObject(candidate.batch.summary);
+    const plannedAttempts = asJsonObject(summary.remediation).attempts;
+    const closeoutAttempts = asJsonObject(summary.closeout).remediationAttempts;
+    if (!Array.isArray(plannedAttempts) || !Array.isArray(closeoutAttempts)) {
+      return false;
+    }
+    const claimed = readCourseSupportRemediationClaimAttempt({
+      summary,
+      courseId: input.incident.courseId,
+      expectedAttemptCount: plannedAttempts.length,
+    });
+    const attempts = readExactCourseSupportDecisionAttempts({
+      courseId: input.incident.courseId,
+      plannedAttempts,
+      closeoutAttempts,
+    });
+    const execution = attempts
+      ? readExactCourseSupportDecisionExecutionEvidence(attempts)
+      : null;
+    if (
+      candidate.cycle !== input.incident.cycle ||
+      !claimed?.actionPlan || !attempts || !execution
+    ) return false;
+    if (entry) continue;
+    if (didCourseSupportCloseoutConsumeRemediationAttempt({
+      summary: candidate.batch.summary,
+      courseId: input.incident.courseId,
+    })) {
+      entry = candidate;
+      continue;
+    }
+    // A failed assignment that provably performed no execution does not erase
+    // the prior discovery receipt. Missing or malformed history is not zero.
+    if (
+      candidate.cycle !== input.incident.cycle ||
+      candidate.result !== "RETRY_SCHEDULED" ||
+      candidate.batch.status !== "RETRYABLE_FAILED" ||
+      !candidate.batch.completedAt ||
+      !claimed || !attempts || !execution ||
+      claimed.actionPlan?.primaryAction !== "VERIFY_CURRENT_RUNTIME" ||
+      claimed.approach.workMode !== "ADVANCE_DISCOVERY" ||
+      attempts.closeout.consumed !== false ||
+      attempts.closeout.countsTowardOperationalNoProgress !== false ||
+      claimed.providerSnapshotFingerprint !== input.providerSnapshotFingerprint ||
+      attempts.closeout.observedProviderSnapshotFingerprint !== input.providerSnapshotFingerprint ||
+      claimed.failureFingerprint !== input.incident.failureFingerprint ||
+      attempts.closeout.observedFailureFingerprint !== input.incident.failureFingerprint
+    ) {
+      return false;
+    }
+  }
+  if (
+    !entry || entry.cycle !== input.incident.cycle ||
+    entry.result !== "RETRY_SCHEDULED" ||
+    entry.batch.status !== "RETRYABLE_FAILED" ||
+    !entry.batch.completedAt || !entry.verifiedAt ||
+    !entry.batch.releaseSha || !entry.batch.deployedAt ||
+    !Number.isFinite(entry.batch.deployedAt.getTime()) ||
+    entry.batch.deployedAt > entry.verifiedAt ||
+    entry.verifiedAt < entry.batch.createdAt ||
+    entry.verifiedAt > entry.batch.completedAt
+  ) {
+    return false;
+  }
+  const summary = asJsonObject(entry.batch.summary);
+  const plannedAttempts = asJsonObject(summary.remediation).attempts;
+  const closeoutAttempts = asJsonObject(summary.closeout).remediationAttempts;
+  if (!Array.isArray(plannedAttempts) || !Array.isArray(closeoutAttempts)) {
+    return false;
+  }
+  const claimed = readCourseSupportRemediationClaimAttempt({
+    summary,
+    courseId: input.incident.courseId,
+    expectedAttemptCount: plannedAttempts.length,
+  });
+  const attempts = readExactCourseSupportDecisionAttempts({
+    courseId: input.incident.courseId,
+    plannedAttempts,
+    closeoutAttempts,
+  });
+  const execution = attempts
+    ? readExactCourseSupportDecisionExecutionEvidence(attempts)
+    : null;
+  const runtimeVersion = entry.batch.releaseSha;
+  if (
+    !claimed || !attempts || !execution?.playbookAttemptRecorded ||
+    attempts.closeout.consumed !== true ||
+    claimed.actionPlan?.primaryAction !== "VERIFY_CURRENT_RUNTIME" ||
+    claimed.approach.workMode !== "ADVANCE_DISCOVERY" ||
+    claimed.approach.playbookStage === null ||
+    !["DISCOVER_WITH_HTTP", "DISCOVER_WITH_BROWSER", "REPAIR_PROVIDER_ADAPTER"].includes(
+      claimed.approach.strategyAction,
+    ) ||
+    claimed.providerSnapshotFingerprint !== input.providerSnapshotFingerprint ||
+    attempts.closeout.observedProviderSnapshotFingerprint !== input.providerSnapshotFingerprint ||
+    claimed.failureFingerprint === input.incident.failureFingerprint ||
+    attempts.closeout.observedFailureFingerprint !== input.incident.failureFingerprint ||
+    attempts.closeout.runtimeVersion !== runtimeVersion ||
+    !/^[a-f0-9]{40}$/u.test(runtimeVersion)
+  ) {
+    return false;
+  }
+  const events = parseAutomationPlaybookLedger(input.incident.attemptLedger)
+    ?.events.filter((event) => event.cycle === input.incident.cycle);
+  const progressed = events?.slice(claimed.playbookEventCountAtClaim);
+  const last = progressed?.at(-1);
+  return Boolean(
+    last?.stage === "INDEPENDENT_CONFIRMATION" &&
+    progressed?.length &&
+    progressed.every((event) =>
+      event.runtimeVersion === runtimeVersion &&
+      new Date(event.observedAt) >= entry.batch.createdAt &&
+      new Date(event.observedAt) >= entry.batch.deployedAt! &&
+      new Date(event.observedAt) <= entry.verifiedAt! &&
+      new Date(event.observedAt) <= entry.batch.completedAt!,
+    ),
+  );
+}
+
+/**
+ * Read the same unused discovery handoff used by claim while the caller holds
+ * the course-monitoring transaction lock. This is evidence, not admission:
+ * the deadline reconciler must independently authorize its state transition.
+ */
+export async function readUnusedCompletedDiscoveryImplementationHandoff(
+  transaction: Prisma.TransactionClient,
+  input: {
+    courseId: string;
+    incidentId: string;
+    incidentRevision: number;
+    cycle: number;
+    now: Date;
+  },
+): Promise<{ available: boolean; sourceCompletedAt?: Date }> {
+  // Parent locks prevent a late history membership/provider projection from
+  // appearing between the evidence read and the caller's revision-bound write.
+  await transaction.$queryRaw(Prisma.sql`
+    SELECT "id" FROM "Course" WHERE "id" = ${input.courseId} FOR UPDATE
+  `);
+  const lockedIncidents = await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+    /* course_support_completed_discovery_handoff_incident */
+    SELECT "id" FROM "CourseSupportIncident"
+    WHERE "id" = ${input.incidentId} AND "courseId" = ${input.courseId}
+      AND "cycle" = ${input.cycle} AND "revision" = ${input.incidentRevision}
+      AND "activeBatchId" IS NULL
+    FOR UPDATE
+  `);
+  if (lockedIncidents.length !== 1) return { available: false };
+  const lockedHistory = await transaction.$queryRaw<Array<{
+    id: string; batchId: string; completedAt: Date | null;
+  }>>(Prisma.sql`
+    /* course_support_completed_discovery_handoff_history */
+    SELECT history."id", batch."id" AS "batchId", batch."completedAt"
+    FROM "CourseSupportBatchIncident" AS history
+    JOIN "CourseSupportBatch" AS batch ON batch."id" = history."batchId"
+    WHERE history."incidentId" = ${input.incidentId}
+      AND history."courseId" = ${input.courseId} AND history."cycle" = ${input.cycle}
+    ORDER BY batch."id", history."id"
+    LIMIT ${COURSE_SUPPORT_CANDIDATE_BATCH_HISTORY_READ_LIMIT + 1}
+    FOR UPDATE OF batch, history
+  `);
+  if (
+    lockedHistory.length === 0 ||
+    lockedHistory.length > COURSE_SUPPORT_CANDIDATE_BATCH_HISTORY_READ_LIMIT ||
+    lockedHistory.some((row) => !row.completedAt || row.completedAt > input.now) ||
+    new Set(lockedHistory.map((row) => row.id)).size !== lockedHistory.length
+  ) return { available: false };
+  const candidate = await transaction.courseSupportIncident.findUnique({
+    where: { id: input.incidentId },
+    select: COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT,
+  });
+  if (
+    !candidate || candidate.id !== input.incidentId ||
+    candidate.courseId !== input.courseId || candidate.cycle !== input.cycle ||
+    candidate.revision !== input.incidentRevision || candidate.activeBatchId !== null
+  ) return { available: false };
+  const currentCycleBatchIncidents = candidate.batchIncidents.filter(
+    (entry) => entry.cycle === input.cycle,
+  );
+  if (
+    currentCycleBatchIncidents.length !== lockedHistory.length ||
+    !lockedHistory.every((row) => currentCycleBatchIncidents.some((entry) =>
+      entry.id === row.id && entry.batchId === row.batchId &&
+      entry.batch.completedAt?.getTime() === row.completedAt?.getTime(),
+    ))
+  ) return { available: false };
+  const { course, ...incident } = candidate;
+  if (!isCompletedDiscoveryFailureRefinement({
+    incident,
+    course,
+    currentCycleBatchIncidents,
+    providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(course),
+    playbookAssessment: assessAutomationPlaybook(candidate.attemptLedger, input.cycle),
+  })) return { available: false };
+  await assertBoundedCourseSupportCandidateCurrentCycleHistory(transaction, [candidate]);
+  const route = buildCourseSupportCandidates([candidate], input.now)[0];
+  if (
+    !route?.actionPlan || !route.remediationRoute ||
+    route.actionPlan.primaryAction !== "IMPLEMENT_REUSABLE_SUPPORT" ||
+    route.remediationRoute.reason !== "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF" ||
+    route.remediationRoute.workMode !== "IMPLEMENT_REUSABLE_SUPPORT" ||
+    !route.remediationRoute.requiresImplementationPath ||
+    route.remediationRoute.allowUnchangedRuntime
+  ) return { available: false };
+  const source = currentCycleBatchIncidents.find((entry) =>
+    didCourseSupportCloseoutConsumeRemediationAttempt({
+      summary: entry.batch.summary, courseId: input.courseId,
+    }),
+  );
+  return source?.batch.completedAt
+    ? { available: true, sourceCompletedAt: source.batch.completedAt }
+    : { available: false };
+}
+
 function buildCourseSupportCandidates(
   incidents: readonly CourseSupportCandidateIncident[],
   now: Date,
@@ -18029,6 +18266,22 @@ function buildCourseSupportCandidates(
       currentEpisodeAttempts.push(attempt);
     }
     const priorAttempt = currentEpisodeAttempts[0] ?? consumedAttempts[0];
+    const completedDiscoveryFailureRefinement =
+      isCompletedDiscoveryFailureRefinement({
+        incident,
+        course,
+        currentCycleBatchIncidents,
+        providerSnapshotFingerprint,
+        playbookAssessment,
+      });
+    const priorRefinedImplementationAttempt = completedDiscoveryFailureRefinement
+      ? consumedAttempts.find((attempt) =>
+          attempt.providerSnapshotFingerprint === providerSnapshotFingerprint &&
+          attempt.failureFingerprint === incident.failureFingerprint &&
+          attempt.approach?.workMode === "IMPLEMENT_REUSABLE_SUPPORT" &&
+          attempt.approach.playbookStage === null,
+        )
+      : undefined;
     const routingAttemptCount =
       currentCycleBatchIncidents.length > 0
         ? currentEpisodeAttempts.length
@@ -18062,7 +18315,8 @@ function buildCourseSupportCandidates(
         : "NONE",
       attemptCount: routingAttemptCount,
       playbookAssessment,
-      priorUnchangedAttempt: priorAttempt?.approach ?? null,
+      priorUnchangedAttempt:
+        priorRefinedImplementationAttempt?.approach ?? priorAttempt?.approach ?? null,
       providerContractEvidenceAvailable:
         currentProviderContractEvidence !== null,
       materialChanges: deferredFailureHandoff
@@ -18098,7 +18352,8 @@ function buildCourseSupportCandidates(
               priorAttempt.providerSnapshotFingerprint !==
               providerSnapshotFingerprint,
             failureFingerprintChanged:
-              priorAttempt.failureFingerprint !== incident.failureFingerprint,
+              priorAttempt.failureFingerprint !== incident.failureFingerprint &&
+              !completedDiscoveryFailureRefinement,
             // A different repository SHA is not automatically relevant. Explicit
             // provider/reader/operator reopeners increment the incident cycle, so
             // their prior-cycle attempts were filtered above. Demand only changes

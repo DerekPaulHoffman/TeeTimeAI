@@ -193,6 +193,11 @@ import {
   persistCourseSupportSearchExecutionFence,
 } from "./course-support-search-execution-fence";
 import { buildCourseSupportActionExecution } from "./course-support-action-execution";
+import {
+  getHumanReviewRetryAt,
+  inferHumanReviewReason,
+  reconcileCourseMonitoringDeadline,
+} from "./course-monitoring";
 
 const now = new Date("2026-07-15T20:00:00.000Z");
 
@@ -5696,6 +5701,302 @@ describe("course-support claim demand fencing", () => {
     });
     expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
     expect(prismaMocks.teeSearchUpdateMany).not.toHaveBeenCalled();
+  });
+
+  function completedDiscoveryFailureTransitionFixture() {
+    const incident = recoveredIndependentDiscoveryClaimFixture(true);
+    const claimedFailure = buildProviderFailureFingerprint({
+      providerFamilyKey: incident.providerFamilyKey,
+      failureClass: "MISSING_METADATA",
+      operation: "AVAILABILITY",
+    });
+    const observedFailure = buildProviderFailureFingerprint({
+      providerFamilyKey: incident.providerFamilyKey,
+      failureClass: "MISSING_SOURCE",
+      operation: "AVAILABILITY",
+    });
+    const summary = incident.batchIncidents[0].batch.summary;
+    const receipt = summary.closeout.remediationAttempts![0];
+    // The same owned discovery observed a different structural failure without
+    // changing its source snapshot. Retain the original claim rather than
+    // rewriting F1 to make it resemble the current F2 incident.
+    Object.assign(summary.remediation!.attempts[0], { failureFingerprint: claimedFailure });
+    Object.assign(receipt, {
+      failureFingerprint: claimedFailure,
+      observedFailureFingerprint: observedFailure,
+    });
+    Object.assign(incident.batchIncidents[0], {
+      id: "completed-discovery-entry",
+      courseId: incident.courseId,
+      incidentId: incident.id,
+      verifiedAt: new Date("2026-07-15T19:40:08.000Z"),
+    });
+    Object.assign(incident.batchIncidents[0].batch, {
+      deployedAt: new Date("2026-07-15T19:40:06.600Z"),
+    });
+    const olderSummary = incident.batchIncidents[1].batch.summary;
+    Object.assign(olderSummary, {
+      schemaVersion: 1,
+      remediation: {
+        ...summary.remediation!,
+        attempts: [{
+          ...summary.remediation!.attempts[0],
+          providerSnapshotFingerprint: "a".repeat(64),
+        }],
+      },
+    });
+    Object.assign(olderSummary.closeout.remediationAttempts![0], {
+      failureFingerprint: claimedFailure,
+      observedFailureFingerprint: claimedFailure,
+    });
+    Object.assign(incident, {
+      failureClass: "MISSING_SOURCE",
+      failureFingerprint: observedFailure,
+    });
+    return { incident, summary, receipt, claimedFailure, observedFailure };
+  }
+
+  it("hands completed discovery's observed failure transition to one nonrepeating implementation", async () => {
+    const { incident, summary, receipt, claimedFailure, observedFailure } =
+      completedDiscoveryFailureTransitionFixture();
+    const originalLedger = structuredClone(incident.attemptLedger);
+    const originalSummary = structuredClone(summary);
+    expect(assessAutomationPlaybook(incident.attemptLedger, incident.cycle)).toMatchObject({
+      valid: true,
+      conclusion: "UNRESOLVED_EXHAUSTED",
+      nextStage: null,
+    });
+    prismaMocks.supportIncidentFindMany.mockResolvedValue([incident]);
+
+    await expect(claimCourseSupportBatch({
+      ownerThreadId: "owner-observed-failure-handoff",
+      branch: "automation/course-support-20260715-200000",
+      baseSha,
+      now,
+    })).resolves.toMatchObject({ outcome: "ready", incidentCount: 1 });
+
+    const implementationSummary = prismaMocks.batchCreate.mock.calls[0][0].data.summary;
+    expect(implementationSummary.remediation).toMatchObject({
+      workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+      reason: "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF",
+      playbookStage: null,
+      requiresImplementationPath: true,
+      allowUnchangedRuntime: false,
+      attempts: [expect.objectContaining({
+        providerSnapshotFingerprint: "b".repeat(64),
+        failureFingerprint: observedFailure,
+        actionPlan: expect.objectContaining({
+          primaryAction: "IMPLEMENT_REUSABLE_SUPPORT",
+          route: {
+            workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+            strategyAction: "DISCOVER_WITH_BROWSER",
+            playbookStage: null,
+          },
+        }),
+      })],
+    });
+    expect(summary).toEqual(originalSummary);
+    expect(receipt).toMatchObject({
+      failureFingerprint: claimedFailure,
+      observedFailureFingerprint: observedFailure,
+      providerSnapshotFingerprint: "b".repeat(64),
+      observedProviderSnapshotFingerprint: "b".repeat(64),
+      consumed: true,
+    });
+    expect(incident.attemptLedger).toEqual(originalLedger);
+    expect(prismaMocks.supportIncidentUpdateMany.mock.calls.every(
+      ([update]) => !Object.hasOwn(update.data, "cycle") &&
+        !Object.hasOwn(update.data, "attemptLedger"),
+    )).toBe(true);
+
+    const unchanged = {
+      ...incident,
+      batchIncidents: [{
+        cycle: incident.cycle,
+        batch: {
+          summary: {
+            ...implementationSummary,
+            closeout: {
+              outcome: "retryable_failed",
+              derivedOutcome: "retryable_failed",
+              remediationAttemptConsumed: true,
+              remediationAttempts: [{
+                ...implementationSummary.remediation.attempts[0],
+                observedProviderSnapshotFingerprint: "b".repeat(64),
+                observedFailureFingerprint: observedFailure,
+                consumed: true,
+                countsTowardOperationalNoProgress: true,
+              }],
+            },
+          },
+        },
+      }, ...incident.batchIncidents],
+    };
+    vi.clearAllMocks();
+    prismaMocks.supportIncidentFindMany.mockResolvedValue([unchanged]);
+    mockMaterialChangeParking(unchanged);
+    await expect(claimCourseSupportBatch({
+      ownerThreadId: "owner-consumed-observed-failure-handoff",
+      branch: "automation/course-support-20260715-200000",
+      baseSha,
+      now,
+    })).resolves.toMatchObject({ outcome: "no_due_work", parkedForMaterialChangeCount: 1 });
+    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+    expect(prismaMocks.teeSearchUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "provider snapshot drift",
+    "failure newer than observed",
+    "absent receipt",
+    "unconsumed receipt",
+    "malformed receipt",
+    "missing claim",
+    "duplicate claim",
+    "duplicate receipt",
+    "wrong incident cycle",
+    "missing verification time",
+    "missing release",
+    "missing deployment",
+    "independent confirmation before deployment",
+    "missing execution marker",
+    "independent confirmation after closeout",
+    "newer missing receipt",
+    "newer malformed receipt",
+    "older missing runtime",
+    "older malformed approach",
+    "older duplicate consumed receipt",
+  ] as const)("does not treat %s as a completed discovery failure transition", async (scenario) => {
+    const { incident, summary, receipt } = completedDiscoveryFailureTransitionFixture();
+    if (scenario === "provider snapshot drift") {
+      verificationMocks.buildCourseSupportProviderSnapshotFingerprint.mockReturnValue("c".repeat(64));
+    } else if (scenario === "failure newer than observed") {
+      incident.failureFingerprint = buildProviderFailureFingerprint({
+        providerFamilyKey: incident.providerFamilyKey,
+        failureClass: "HTTP_5XX",
+        operation: "AVAILABILITY",
+      });
+    } else if (scenario === "absent receipt") {
+      delete summary.closeout.remediationAttempts;
+      delete summary.closeout.remediationAttemptConsumed;
+    } else if (scenario === "unconsumed receipt") {
+      receipt.consumed = false;
+      summary.closeout.remediationAttemptConsumed = false;
+    } else if (scenario === "malformed receipt") {
+      Object.assign(receipt, { observedFailureFingerprint: null });
+    } else if (scenario === "missing claim") {
+      Object.assign(summary, { remediation: undefined });
+    } else if (scenario === "duplicate claim") {
+      summary.remediation!.attempts.push(structuredClone(summary.remediation!.attempts[0]));
+    } else if (scenario === "duplicate receipt") {
+      summary.closeout.remediationAttempts!.push(structuredClone(receipt));
+    } else if (scenario === "wrong incident cycle") {
+      incident.batchIncidents[0].cycle -= 1;
+    } else if (scenario === "missing verification time") {
+      Object.assign(incident.batchIncidents[0], { verifiedAt: null });
+    } else if (scenario === "missing release") {
+      Object.assign(incident.batchIncidents[0].batch, { releaseSha: null });
+    } else if (scenario === "missing deployment") {
+      Object.assign(incident.batchIncidents[0].batch, { deployedAt: null });
+    } else if (scenario === "independent confirmation before deployment") {
+      Object.assign(incident.batchIncidents[0].batch, {
+        deployedAt: new Date("2026-07-15T19:40:07.500Z"),
+      });
+    } else if (scenario === "missing execution marker") {
+      Object.assign(receipt.executionEvidence, { playbookAttemptRecorded: undefined });
+    } else if (scenario === "newer missing receipt" || scenario === "newer malformed receipt") {
+      const newer = structuredClone(incident.batchIncidents[0]);
+      const newerSummary = newer.batch.summary;
+      const cleanupApproach = { ...receipt.approach, playbookStage: null };
+      const cleanupAttempt = {
+        ...summary.remediation!.attempts[0],
+        failureFingerprint: incident.failureFingerprint,
+        playbookEventCountAtClaim: 8,
+        reason: "MATERIAL_CHANGE_REOPENED",
+        approach: cleanupApproach,
+        actionPlan: {
+          schemaVersion: 1,
+          primaryAction: "VERIFY_CURRENT_RUNTIME",
+          allowedActions: ["VERIFY_CURRENT_RUNTIME"],
+          route: cleanupApproach,
+        },
+      };
+      Object.assign(newer, { id: "newer-incomplete-cleanup-entry", verifiedAt: null });
+      Object.assign(newer.batch, {
+        releaseSha: null,
+        deployedAt: null,
+        createdAt: new Date("2026-07-15T19:51:00.000Z"),
+        completedAt: new Date("2026-07-15T19:55:00.000Z"),
+      });
+      Object.assign(newerSummary.remediation!, {
+        ...cleanupApproach,
+        reason: "MATERIAL_CHANGE_REOPENED",
+        attempts: [cleanupAttempt],
+      });
+      Object.assign(newerSummary.closeout, {
+        outcome: "command_failed",
+        derivedOutcome: "retryable_failed",
+        verificationWatchMode: "STANDARD",
+        remediationAttemptConsumed: false,
+        remediationAttempts: [{
+          ...receipt,
+          failureFingerprint: incident.failureFingerprint,
+          consumed: false,
+          countsTowardOperationalNoProgress: false,
+          approach: cleanupApproach,
+          executionEvidence: {
+            ...receipt.executionEvidence,
+            providerExecutionAttemptRecorded: false,
+            playbookAttemptRecorded: false,
+          },
+          actionExecution: buildCourseSupportActionExecution({
+            action: "VERIFY_CURRENT_RUNTIME",
+            strictImplementationProofRecorded: false,
+            authoritativeSuccessSuperseded: false,
+            materialChangeSuperseded: false,
+            authoritativeTerminalResultSuperseded: false,
+            currentRuntimeProofRecorded: false,
+            currentClassificationProofRecorded: false,
+          }),
+        }],
+      });
+      if (scenario === "newer missing receipt") {
+        delete newerSummary.closeout.remediationAttempts;
+      } else {
+        Object.assign(newerSummary.closeout.remediationAttempts![0], {
+          observedFailureFingerprint: null,
+        });
+      }
+      incident.batchIncidents.unshift(newer);
+    } else if (scenario === "older missing runtime" || scenario === "older malformed approach" || scenario === "older duplicate consumed receipt") {
+      const olderReceipts = incident.batchIncidents[1].batch.summary.closeout.remediationAttempts!;
+      if (scenario === "older missing runtime") {
+        Object.assign(olderReceipts[0], { runtimeVersion: undefined });
+      } else if (scenario === "older malformed approach") {
+        Object.assign(olderReceipts[0], { approach: { workMode: "IMPLEMENT_REUSABLE_SUPPORT" } });
+      } else {
+        olderReceipts.push(structuredClone(olderReceipts[0]));
+      }
+    } else {
+      incident.attemptLedger = mixedRuntimeBrowserAttemptLedger({
+        cycle: incident.cycle,
+        oldRuntime: baseSha,
+        releaseSha: baseSha,
+        firstObservedAt: new Date("2026-07-15T19:55:00.000Z"),
+      });
+    }
+    prismaMocks.supportIncidentFindMany.mockResolvedValue([incident]);
+
+    await expect(claimCourseSupportBatch({
+      ownerThreadId: "owner-unproven-failure-transition",
+      branch: "automation/course-support-20260715-200000",
+      baseSha,
+      now,
+    })).resolves.toMatchObject({ outcome: "ready", incidentCount: 1 });
+    expect(prismaMocks.batchCreate.mock.calls[0][0].data.summary.remediation).toMatchObject({
+      workMode: "ADVANCE_DISCOVERY",
+      reason: "MATERIAL_CHANGE_REOPENED",
+    });
   });
 
   it.each(["PRESENT", "ABSENT"] as const)(
@@ -30002,6 +30303,441 @@ describe("detached verification atomic batch fences", () => {
       });
     },
   );
+
+  it.each([
+    { claimedControlPlanePaths: 0, deadlineState: "automatic" },
+    { claimedControlPlanePaths: 2, deadlineState: "automatic" },
+    { claimedControlPlanePaths: 2, deadlineState: "automatic endpoint" },
+    { claimedControlPlanePaths: 2, deadlineState: "operator endpoint" },
+    { claimedControlPlanePaths: 2, deadlineState: "unknown endpoint" },
+    { claimedControlPlanePaths: 2, deadlineState: "consumed implementation" },
+  ] as const)("preserves a native completed discovery failure transition through STANDARD cleanup with $claimedControlPlanePaths claimed paths and $deadlineState", async ({ claimedControlPlanePaths, deadlineState }) => {
+    const discoveryClosedAt = new Date(now.getTime() + 10 * 60_000);
+    const ledger = mixedRuntimeBrowserAttemptLedger({
+      cycle: 17,
+      oldRuntime: releaseSha,
+      releaseSha,
+      firstObservedAt: new Date("2026-07-15T20:04:00.000Z"),
+    });
+    const fixture = productionFailureCooldownBatch({
+      incidentFailureClass: "MISSING_METADATA",
+      observedFailureClass: "MISSING_SOURCE",
+      closeoutAt: discoveryClosedAt,
+      batchCreatedAt: new Date("2026-07-15T20:04:06.500Z"),
+      providerExecution: false,
+      attemptLedger: ledger,
+      playbookEventCountAtClaim: 7,
+    });
+    let batch = fixture.batch;
+    const incident = {
+      ...candidate(),
+      ...batch.incidents[0].incident,
+      id: "incident-1",
+      courseId: "course-1",
+      revision: 1,
+      activeRealSearchCount: 0,
+      monitoringEvents: [],
+      escalationDeadlineAt: new Date("2026-07-15T20:05:00.000Z"),
+      resolvedAt: null,
+      resolution: null,
+      decisionAt: null,
+      decisionActorId: null,
+      decisionNote: null,
+      decisionEvidenceUrl: null,
+      decisionIdempotencyKey: null,
+    };
+    const course = {
+      ...batch.incidents[0].course,
+      id: "course-1",
+      updatedAt: incidentUpdatedAt,
+      preferences: [],
+      automationDiscoveries: [],
+    };
+    batch.incidents[0].incident = incident;
+    batch.incidents[0].course = course;
+    const monitoringStatus = {
+      ...course.monitoringStatus!,
+      state: "AUTO_INVESTIGATING",
+      stateChangedAt: incidentUpdatedAt,
+      nextAutomaticAttemptAt: null as Date | null,
+      revalidationRequestedAt: null as Date | null,
+    };
+    course.monitoringStatus = monitoringStatus;
+    batch.deployedAt = new Date("2026-07-15T20:04:06.600Z");
+    const courseRef = createHash("sha256").update(incident.courseId).digest("hex").slice(0, 24);
+    const discoveryApproach = {
+      workMode: "ADVANCE_DISCOVERY" as const,
+      strategyAction: "DISCOVER_WITH_BROWSER" as const,
+      playbookStage: "INDEPENDENT_CONFIRMATION" as const,
+    };
+    const claimedFailure = incident.failureFingerprint;
+    batch.summary = {
+      ...batch.summary,
+      schemaVersion: 1,
+      plannedPaths: [],
+      remediation: {
+        ...discoveryApproach,
+        allowUnchangedRuntime: true,
+        requiresImplementationPath: false,
+        reason: "PLAYBOOK_STAGE_PENDING",
+        retryBudget: null,
+        attempts: [{
+          courseRef,
+          providerSnapshotFingerprint: providerFingerprint,
+          failureFingerprint: claimedFailure,
+          runtimeVersion: releaseSha,
+          activeRealSearchCount: 0,
+          playbookEventCountAtClaim: 7,
+          reason: "PLAYBOOK_STAGE_PENDING",
+          retryBudget: null,
+          approach: discoveryApproach,
+          actionPlan: {
+            schemaVersion: 1,
+            primaryAction: "VERIFY_CURRENT_RUNTIME",
+            allowedActions: ["VERIFY_CURRENT_RUNTIME"],
+            route: discoveryApproach,
+          },
+        }],
+      },
+    };
+    prismaMocks.batchFindFirst.mockImplementation(async () => batch);
+    prismaMocks.transaction.mockImplementation(async (worker) => worker(monitoringTransactionClient));
+    prismaMocks.batchUpdateMany.mockImplementation(async ({ data }) => {
+      const { revision, ...fields } = data;
+      Object.assign(batch, fields);
+      batch.revision += revision?.increment ?? 0;
+      return { count: 1 };
+    });
+    prismaMocks.incidentUpdateMany.mockImplementation(async ({ data }) => {
+      Object.assign(batch.incidents[0], data);
+      return { count: 1 };
+    });
+    prismaMocks.supportIncidentUpdateMany.mockImplementation(async ({ data }) => {
+      const { revision, ...fields } = data;
+      Object.assign(incident, fields);
+      incident.revision += revision?.increment ?? 0;
+      return { count: 1 };
+    });
+    prismaMocks.monitoringStatusUpdateMany.mockImplementation(async ({ data }) => {
+      const { revision, ...fields } = data;
+      Object.assign(monitoringStatus, fields);
+      monitoringStatus.revision += revision?.increment ?? 0;
+      return { count: 1 };
+    });
+    const idempotencyEvents = new Map<string, Record<string, unknown>>();
+    prismaMocks.monitoringEventCreate.mockImplementation(async ({ data }: {
+      data: Record<string, unknown> & { idempotencyKey?: string | null };
+    }) => {
+      const event = {
+        operatorActorId: null,
+        ...structuredClone(data),
+        id: `offline-event-${idempotencyEvents.size}`,
+      };
+      if (data.idempotencyKey) idempotencyEvents.set(data.idempotencyKey, event);
+      return event;
+    });
+    prismaMocks.monitoringEventFindUnique.mockImplementation(async ({ where }) =>
+      idempotencyEvents.get(where.idempotencyKey) ?? null,
+    );
+    const owner = { batchId: "batch-1", leaseToken: "lease-1", ownerThreadId: "owner-thread" };
+    prismaMocks.queryRaw.mockResolvedValue([{ now: discoveryClosedAt }]);
+    await expect(closeoutCourseSupportBatch({
+      ...owner, verificationWatchMode: "WATCH_SETTLED", now: discoveryClosedAt,
+    })).resolves.toMatchObject({ durableCloseoutRecorded: true, retryCount: 1, needsHumanCount: 0 });
+    const discoveryReceipt = batch.summary.closeout.remediationAttempts[0];
+    expect(discoveryReceipt).toMatchObject({
+      failureFingerprint: claimedFailure,
+      observedFailureFingerprint: fixture.observedFailureFingerprint,
+      providerSnapshotFingerprint: providerFingerprint,
+      observedProviderSnapshotFingerprint: providerFingerprint,
+      consumed: true,
+      executionEvidence: { playbookAttemptRecorded: true },
+    });
+    expect(incident.failureFingerprint).toBe(fixture.observedFailureFingerprint);
+    expect(incident.cycle).toBe(17);
+    expect(incident.attemptLedger).toEqual(ledger);
+    const completedDiscovery = structuredClone({
+      ...batch.incidents[0],
+      batchId: batch.id,
+      createdAt: batch.createdAt,
+      verificationRequests: [],
+      batch,
+    });
+
+    // Preserve the already-owned bad assignment verbatim. Its cleanup may not
+    // pretend to execute a provider or retroactively change its action plan.
+    const cleanupAt = new Date(discoveryClosedAt.getTime() + 2 * 60_000);
+    const cleanupApproach = { ...discoveryApproach, playbookStage: null };
+    const cleanupAttempt = {
+      ...batch.summary.remediation.attempts[0],
+      failureFingerprint: incident.failureFingerprint,
+      playbookEventCountAtClaim: 8,
+      reason: "MATERIAL_CHANGE_REOPENED",
+      approach: cleanupApproach,
+      actionPlan: {
+        schemaVersion: 1,
+        primaryAction: "VERIFY_CURRENT_RUNTIME",
+        allowedActions: ["VERIFY_CURRENT_RUNTIME"],
+        route: cleanupApproach,
+      },
+    };
+    const freshBatch = closeoutBatch("PENDING");
+    Object.assign(freshBatch, {
+      id: "cleanup-batch",
+      baseSha: releaseSha,
+      releaseSha: null,
+      deployedAt: null,
+      recheckDispatchStartedAt: null,
+      recheckDispatchedAt: null,
+      createdAt: new Date(discoveryClosedAt.getTime() + 60_000),
+      providerFamilyKey: incident.providerFamilyKey,
+      summary: {
+        schemaVersion: 1,
+        searchExecutionFence: emptySearchExecutionFence(),
+        plannedPaths: claimedControlPlanePaths > 0 ? [
+          "src/lib/automation/course-support-batches.ts",
+          "src/lib/automation/course-support-batches.test.ts",
+        ] : [],
+        remediation: {
+          ...cleanupApproach,
+          allowUnchangedRuntime: true,
+          requiresImplementationPath: false,
+          reason: "MATERIAL_CHANGE_REOPENED",
+          retryBudget: null,
+          attempts: [cleanupAttempt],
+        },
+      },
+    });
+    Object.assign(incident, { activeBatchId: freshBatch.id, batchIncidents: [completedDiscovery] });
+    Object.assign(freshBatch.incidents[0], {
+      id: "cleanup-entry",
+      batchId: freshBatch.id,
+      cycle: incident.cycle,
+      incident,
+      course,
+      verifiedAt: null,
+      verifiedIncidentUpdatedAt: null,
+      proofSnapshot: null,
+    });
+    batch = freshBatch;
+    const originalPlan = structuredClone(cleanupAttempt);
+    prismaMocks.queryRaw.mockResolvedValue([{ now: cleanupAt }]);
+    await expect(closeoutCourseSupportBatch({
+      ...owner,
+      batchId: batch.id,
+      requestedOutcome: "command_failed",
+      failureDomain: "SLA",
+      now: cleanupAt,
+    })).resolves.toMatchObject({
+      outcome: "command_failed",
+      durableCloseoutRecorded: true,
+      retryCount: 1,
+      needsHumanCount: 0,
+    });
+    expect(batch.summary.remediation.attempts[0]).toEqual(originalPlan);
+    expect(batch.summary.plannedPaths).toHaveLength(claimedControlPlanePaths);
+    expect(batch.summary.closeout.remediationAttempts[0]).toMatchObject({
+      consumed: false,
+      countsTowardOperationalNoProgress: false,
+      executionEvidence: {
+        claimedImplementationPaths: claimedControlPlanePaths > 0,
+        newReleaseRecorded: false,
+        deploymentRecorded: false,
+        postProbeRecorded: false,
+        providerAttemptRecorded: false,
+        providerExecutionStarted: false,
+        providerExecutionAttemptRecorded: false,
+        playbookAttemptRecorded: false,
+        terminalResultRecorded: false,
+      },
+    });
+    expect(batch.summary.closeout.verificationWatchMode).toBe("STANDARD");
+    expect(incident.cycle).toBe(17);
+    expect(incident.attemptLedger).toEqual(ledger);
+    const cleanupDueAt = incident.nextAttemptAt!;
+    expect(incident.escalationDeadlineAt).toBeInstanceOf(Date);
+    const reconciliationAt = new Date(incident.escalationDeadlineAt!.getTime() + 1_000);
+    const nextCandidate = {
+      ...incident,
+      course,
+      batchIncidents: [{ ...batch.incidents[0], verificationRequests: [], batch }, completedDiscovery],
+    };
+    if (deadlineState.endsWith("endpoint")) {
+      const endpointAt = new Date(reconciliationAt.getTime() - 1_000);
+      const retryAt = getHumanReviewRetryAt(endpointAt, incident.activeRealSearchCount);
+      const humanReviewReason = inferHumanReviewReason({
+        kind: incident.kind,
+        failureClass: incident.failureClass,
+        bookingAccessMode: course.bookingAccessMode,
+        automationReason: course.automationReason,
+      });
+      Object.assign(incident, {
+        status: "NEEDS_HUMAN", humanReviewReason,
+        escalatedAt: endpointAt, nextAttemptAt: retryAt,
+        nextReminderAt: endpointAt,
+        ...(deadlineState === "operator endpoint" ? {
+          decisionAt: endpointAt, decisionActorId: "offline-operator",
+        } : {}),
+      });
+      Object.assign(monitoringStatus, {
+        state: "ENGINEERING_VERIFICATION_NEEDED",
+        stateChangedAt: endpointAt,
+        nextAutomaticAttemptAt: retryAt,
+        revalidationRequestedAt: null,
+      });
+      // Exact historical output from the old automatic deadline branch. A
+      // human/unknown source must not receive this machine-recovery authority.
+      prismaMocks.monitoringEventFindFirst.mockResolvedValue({
+        incidentId: incident.id,
+        eventType: "HUMAN_REVIEW_REQUESTED",
+        source: deadlineState === "unknown endpoint" ? "COURSE_SUPPORT_RESPONDER" : "RECOVERY_CRON",
+        fromState: "AUTO_INVESTIGATING",
+        toState: "ENGINEERING_VERIFICATION_NEEDED",
+        operatorActorId: deadlineState === "operator endpoint" ? "offline-operator" : null,
+        failureFingerprint: incident.failureFingerprint,
+        occurredAt: endpointAt,
+        audit: {
+          cycle: incident.cycle,
+          activeDemand: false,
+          customerState: "NEEDS_HUMAN_REVIEW",
+          playbookVersion: assessAutomationPlaybook(ledger, incident.cycle).version,
+          playbookConclusion: "UNRESOLVED_EXHAUSTED",
+          playbookExhausted: true,
+          automationStalled: false,
+          nextStage: null,
+          escalationDeadlineAt: incident.escalationDeadlineAt!.toISOString(),
+          automaticRecheckHours: 6,
+          customerDataIncluded: false,
+        },
+      });
+    } else if (deadlineState === "consumed implementation") {
+      const implementation = structuredClone(completedDiscovery);
+      const approach = { ...cleanupApproach, workMode: "IMPLEMENT_REUSABLE_SUPPORT" };
+      const implementationAttempt = {
+        ...cleanupAttempt,
+        reason: "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF",
+        approach,
+        actionPlan: {
+          schemaVersion: 1,
+          primaryAction: "IMPLEMENT_REUSABLE_SUPPORT",
+          allowedActions: ["IMPLEMENT_REUSABLE_SUPPORT", "INSPECT_PROVIDER_CONTRACT"],
+          route: approach,
+        },
+      };
+      Object.assign(implementation, { id: "consumed-implementation-entry", batchId: "consumed-implementation-batch" });
+      Object.assign(implementation.batch, {
+        id: implementation.batchId,
+        baseSha: releaseSha,
+        releaseSha: "d".repeat(40),
+        createdAt: new Date(cleanupAt.getTime() + 60_000),
+        deployedAt: new Date(cleanupAt.getTime() + 120_000),
+        completedAt: new Date(cleanupAt.getTime() + 180_000),
+        summary: {
+          schemaVersion: 1,
+          remediation: { ...approach, attempts: [implementationAttempt] },
+          closeout: {
+            outcome: "retryable_failed", derivedOutcome: "retryable_failed",
+            remediationAttemptConsumed: true,
+            remediationAttempts: [{
+              ...implementationAttempt,
+              runtimeVersion: "d".repeat(40),
+              observedProviderSnapshotFingerprint: providerFingerprint,
+              observedFailureFingerprint: incident.failureFingerprint,
+              consumed: true, countsTowardOperationalNoProgress: true,
+              executionEvidence: {
+                ...batch.summary.closeout.remediationAttempts[0].executionEvidence,
+                claimedImplementationPaths: true, newReleaseRecorded: true, deploymentRecorded: true,
+              },
+              actionExecution: buildCourseSupportActionExecution({
+                action: "IMPLEMENT_REUSABLE_SUPPORT", strictImplementationProofRecorded: true,
+                authoritativeSuccessSuperseded: false, materialChangeSuperseded: false,
+                authoritativeTerminalResultSuperseded: false, currentRuntimeProofRecorded: false,
+                currentClassificationProofRecorded: false,
+              }),
+            }],
+          },
+        },
+      });
+      nextCandidate.batchIncidents.unshift(implementation);
+    }
+    Object.assign(incident, { batchIncidents: nextCandidate.batchIncidents });
+    prismaMocks.supportIncidentFindMany.mockResolvedValue([nextCandidate]);
+    prismaMocks.supportIncidentFindUnique.mockImplementation(async ({ select }) =>
+      structuredClone(select?.course ? { ...incident, course } : incident),
+    );
+    prismaMocks.monitoringStatusFindUnique.mockImplementation(async () => structuredClone(monitoringStatus));
+    prismaMocks.courseFindUnique.mockResolvedValue(course);
+    prismaMocks.batchFindFirst.mockResolvedValue(null);
+    prismaMocks.queryRaw.mockImplementation(async (query) => {
+      const sql = query.strings?.join("") ?? "";
+      if (sql.includes("course_support_completed_discovery_handoff_incident")) {
+        return [{ id: incident.id }];
+      }
+      if (sql.includes("course_support_completed_discovery_handoff_history")) {
+        return nextCandidate.batchIncidents.map((entry) => ({
+          id: entry.id,
+          batchId: entry.batchId,
+          completedAt: entry.batch.completedAt,
+        }));
+      }
+      return [{ now: reconciliationAt }];
+    });
+    const deadlineInput = { courseId: incident.courseId, source: "RECOVERY_CRON" as const, now: reconciliationAt };
+    const writesBeforeDeadline = prismaMocks.supportIncidentUpdateMany.mock.calls.length;
+    const deadlineResult = await reconcileCourseMonitoringDeadline(deadlineInput);
+    if (["operator endpoint", "unknown endpoint", "consumed implementation"].includes(deadlineState)) {
+      expect(deadlineResult).toMatchObject({
+        outcome: deadlineState === "consumed implementation" ? "NEEDS_HUMAN" : "RETAINED_HUMAN",
+      });
+      if (deadlineState !== "consumed implementation") {
+        expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledTimes(writesBeforeDeadline);
+      }
+      expect(incident.status).toBe("NEEDS_HUMAN");
+      expect(incident.cycle).toBe(17);
+      expect(incident.attemptLedger).toEqual(ledger);
+      expect(completedDiscovery.batch.summary.closeout.remediationAttempts[0]).toEqual(discoveryReceipt);
+      expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+      return;
+    }
+    expect(deadlineResult).toMatchObject({ outcome: "RETRYING" });
+    expect(incident).toMatchObject({ status: "AUTO_INVESTIGATING", activeBatchId: null, humanReviewReason: null });
+    expect(incident.nextAttemptAt).toEqual(deadlineState === "automatic endpoint" ? reconciliationAt : cleanupDueAt);
+    expect(incident.cycle).toBe(17);
+    expect(incident.attemptLedger).toEqual(ledger);
+    expect(prismaMocks.monitoringEventCreate.mock.calls.some(
+      ([create]) => create.data.eventType === "HUMAN_REVIEW_REQUESTED",
+    )).toBe(false);
+    const continuedDueAt = incident.nextAttemptAt;
+    const continuedDeadlineAt = incident.escalationDeadlineAt;
+    const eventCount = prismaMocks.monitoringEventCreate.mock.calls.length;
+    await reconcileCourseMonitoringDeadline({ ...deadlineInput, now: new Date(reconciliationAt.getTime() + 1_000) });
+    expect(incident.nextAttemptAt).toEqual(continuedDueAt);
+    expect(incident.escalationDeadlineAt).toEqual(continuedDeadlineAt);
+    expect(prismaMocks.monitoringEventCreate).toHaveBeenCalledTimes(eventCount);
+    const afterContinuedDeadline = new Date(continuedDeadlineAt!.getTime() + 1_000);
+    await reconcileCourseMonitoringDeadline({ ...deadlineInput, now: afterContinuedDeadline });
+    expect(incident).toMatchObject({ status: "AUTO_INVESTIGATING", humanReviewReason: null });
+    expect(incident.nextAttemptAt).toEqual(continuedDueAt);
+    expect(incident.escalationDeadlineAt).toEqual(continuedDeadlineAt);
+    expect(prismaMocks.monitoringEventCreate).toHaveBeenCalledTimes(eventCount);
+    Object.assign(nextCandidate, incident, { course });
+    const nextClaimAt = new Date(Math.max(afterContinuedDeadline.getTime(), incident.nextAttemptAt!.getTime()));
+    prismaMocks.queryRaw.mockResolvedValue([{ now: nextClaimAt }]);
+    await expect(claimCourseSupportBatch({
+      ownerThreadId: "next-owner-after-standard-cleanup",
+      branch: "automation/course-support-next-cycle",
+      baseSha: releaseSha,
+      now: nextClaimAt,
+    })).resolves.toMatchObject({ outcome: "ready", incidentCount: 1 });
+    expect(prismaMocks.batchCreate.mock.calls[0][0].data.summary.remediation).toMatchObject({
+      workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+      reason: "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF",
+      playbookStage: null,
+    });
+    expect(completedDiscovery.batch.summary.closeout.remediationAttempts[0]).toEqual(discoveryReceipt);
+    expect(incident.cycle).toBe(17);
+    expect(incident.attemptLedger).toEqual(ledger);
+  });
 
   it("does not recycle a failed exhausted implementation into another one-minute handoff", async () => {
     const batch = closeoutBatch("PENDING");

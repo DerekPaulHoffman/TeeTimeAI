@@ -5586,6 +5586,11 @@ describe("course monitoring watchdog", () => {
       select: {
         incidentId: true,
         eventType: true,
+        source: true,
+        fromState: true,
+        toState: true,
+        failureFingerprint: true,
+        operatorActorId: true,
         occurredAt: true,
         audit: true,
       },
