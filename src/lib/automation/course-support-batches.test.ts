@@ -30308,11 +30308,18 @@ describe("detached verification atomic batch fences", () => {
     { claimedControlPlanePaths: 0, deadlineState: "automatic" },
     { claimedControlPlanePaths: 2, deadlineState: "automatic" },
     { claimedControlPlanePaths: 2, deadlineState: "automatic endpoint" },
+    { claimedControlPlanePaths: 2, deadlineState: "automatic retained escalation endpoint" },
+    { claimedControlPlanePaths: 2, deadlineState: "null escalation endpoint" },
+    { claimedControlPlanePaths: 2, deadlineState: "invalid escalation endpoint" },
+    { claimedControlPlanePaths: 2, deadlineState: "future escalation endpoint" },
     { claimedControlPlanePaths: 2, deadlineState: "operator endpoint" },
     { claimedControlPlanePaths: 2, deadlineState: "unknown endpoint" },
     { claimedControlPlanePaths: 2, deadlineState: "consumed implementation" },
   ] as const)("preserves a native completed discovery failure transition through STANDARD cleanup with $claimedControlPlanePaths claimed paths and $deadlineState", async ({ claimedControlPlanePaths, deadlineState }) => {
     const discoveryClosedAt = new Date(now.getTime() + 10 * 60_000);
+    const retainedEscalatedAt = deadlineState === "automatic retained escalation endpoint"
+      ? new Date("2026-07-01T12:00:00.000Z")
+      : null;
     const ledger = mixedRuntimeBrowserAttemptLedger({
       cycle: 17,
       oldRuntime: releaseSha,
@@ -30338,6 +30345,7 @@ describe("detached verification atomic batch fences", () => {
       activeRealSearchCount: 0,
       monitoringEvents: [],
       escalationDeadlineAt: new Date("2026-07-15T20:05:00.000Z"),
+      escalatedAt: retainedEscalatedAt,
       resolvedAt: null,
       resolution: null,
       decisionAt: null,
@@ -30454,6 +30462,7 @@ describe("detached verification atomic batch fences", () => {
       executionEvidence: { playbookAttemptRecorded: true },
     });
     expect(incident.failureFingerprint).toBe(fixture.observedFailureFingerprint);
+    expect(incident.escalatedAt).toEqual(retainedEscalatedAt);
     expect(incident.cycle).toBe(17);
     expect(incident.attemptLedger).toEqual(ledger);
     const completedDiscovery = structuredClone({
@@ -30552,6 +30561,7 @@ describe("detached verification atomic batch fences", () => {
       },
     });
     expect(batch.summary.closeout.verificationWatchMode).toBe("STANDARD");
+    expect(incident.escalatedAt).toEqual(retainedEscalatedAt);
     expect(incident.cycle).toBe(17);
     expect(incident.attemptLedger).toEqual(ledger);
     const cleanupDueAt = incident.nextAttemptAt!;
@@ -30573,7 +30583,13 @@ describe("detached verification atomic batch fences", () => {
       });
       Object.assign(incident, {
         status: "NEEDS_HUMAN", humanReviewReason,
-        escalatedAt: endpointAt, nextAttemptAt: retryAt,
+        // The native automatic deadline producer retains an earlier escalation
+        // clock; only the current event and monitoring state use endpointAt.
+        escalatedAt: deadlineState === "null escalation endpoint" ? null
+          : deadlineState === "invalid escalation endpoint" ? new Date(Number.NaN)
+          : deadlineState === "future escalation endpoint" ? new Date(endpointAt.getTime() + 1)
+          : incident.escalatedAt ?? endpointAt,
+        nextAttemptAt: retryAt,
         nextReminderAt: endpointAt,
         ...(deadlineState === "operator endpoint" ? {
           decisionAt: endpointAt, decisionActorId: "offline-operator",
@@ -30585,6 +30601,11 @@ describe("detached verification atomic batch fences", () => {
         nextAutomaticAttemptAt: retryAt,
         revalidationRequestedAt: null,
       });
+      if (retainedEscalatedAt) {
+        expect(incident.escalatedAt).toEqual(retainedEscalatedAt);
+        expect(incident.escalatedAt!.getTime()).toBeLessThan(endpointAt.getTime());
+        expect(monitoringStatus.stateChangedAt).toEqual(endpointAt);
+      }
       // Exact historical output from the old automatic deadline branch. A
       // human/unknown source must not receive this machine-recovery authority.
       prismaMocks.monitoringEventFindFirst.mockResolvedValue({
@@ -30685,7 +30706,10 @@ describe("detached verification atomic batch fences", () => {
     const deadlineInput = { courseId: incident.courseId, source: "RECOVERY_CRON" as const, now: reconciliationAt };
     const writesBeforeDeadline = prismaMocks.supportIncidentUpdateMany.mock.calls.length;
     const deadlineResult = await reconcileCourseMonitoringDeadline(deadlineInput);
-    if (["operator endpoint", "unknown endpoint", "consumed implementation"].includes(deadlineState)) {
+    if ([
+      "operator endpoint", "unknown endpoint", "consumed implementation",
+      "null escalation endpoint", "invalid escalation endpoint", "future escalation endpoint",
+    ].includes(deadlineState)) {
       expect(deadlineResult).toMatchObject({
         outcome: deadlineState === "consumed implementation" ? "NEEDS_HUMAN" : "RETAINED_HUMAN",
       });
@@ -30701,9 +30725,26 @@ describe("detached verification atomic batch fences", () => {
     }
     expect(deadlineResult).toMatchObject({ outcome: "RETRYING" });
     expect(incident).toMatchObject({ status: "AUTO_INVESTIGATING", activeBatchId: null, humanReviewReason: null });
-    expect(incident.nextAttemptAt).toEqual(deadlineState === "automatic endpoint" ? reconciliationAt : cleanupDueAt);
+    expect(incident.nextAttemptAt).toEqual(deadlineState.endsWith("endpoint") ? reconciliationAt : cleanupDueAt);
     expect(incident.cycle).toBe(17);
     expect(incident.attemptLedger).toEqual(ledger);
+    if (retainedEscalatedAt) {
+      expect(incident.escalatedAt).toBeNull();
+      expect(completedDiscovery.incident.escalatedAt).toEqual(retainedEscalatedAt);
+      expect(completedDiscovery.batch.summary.closeout.remediationAttempts[0]).toEqual(discoveryReceipt);
+      expect(prismaMocks.monitoringEventCreate).toHaveBeenCalledWith({
+        data: expect.objectContaining({
+          eventType: "REVALIDATION_REQUESTED",
+          audit: expect.objectContaining({
+            action: "unused_completed_discovery_implementation_deadline_continuation",
+            recoveredAutomaticDeadlineEndpoint: true,
+            priorEscalatedAt: retainedEscalatedAt.toISOString(),
+            providerExecution: false,
+            implementationExecuted: false,
+          }),
+        }),
+      });
+    }
     expect(prismaMocks.monitoringEventCreate.mock.calls.some(
       ([create]) => create.data.eventType === "HUMAN_REVIEW_REQUESTED",
     )).toBe(false);

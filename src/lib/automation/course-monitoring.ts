@@ -4397,7 +4397,11 @@ export async function reconcileCourseMonitoringDeadline(input: {
         endpointAudit.nextStage === null &&
         endpointAudit.automaticRecheckHours === 6 &&
         endpointAudit.escalationDeadlineAt === incident.escalationDeadlineAt?.toISOString() &&
-        incident.escalatedAt?.getTime() === humanReviewEndpointEvent.occurredAt.getTime() &&
+        // The native deadline writer preserves the first escalation timestamp.
+        // The current event and state clock, not that historical scalar, prove freshness.
+        incident.escalatedAt !== null &&
+        Number.isFinite(incident.escalatedAt.getTime()) &&
+        incident.escalatedAt <= humanReviewEndpointEvent.occurredAt &&
         status.stateChangedAt.getTime() === humanReviewEndpointEvent.occurredAt.getTime() &&
         humanReviewEndpointEvent.occurredAt <= input.now &&
         status.revalidationRequestedAt === null &&
@@ -4494,6 +4498,7 @@ export async function reconcileCourseMonitoringDeadline(input: {
             return { outcome: "UNCHANGED" as const, incidentId: incident.id };
           }
           if (!priorContinuation) {
+            const priorEscalatedAt = incident.escalatedAt?.toISOString() ?? null;
             const continuationAt = !automaticDiscoveryDeadlineEndpoint && coherentRetryAt
               ? coherentRetryAt : input.now;
             const nextDeadlineAt = getCourseMonitoringEscalationDeadline(
@@ -4541,6 +4546,7 @@ export async function reconcileCourseMonitoringDeadline(input: {
                 action: "unused_completed_discovery_implementation_deadline_continuation",
                 cycle: incident.cycle, sourceCompletedAt: handoff.sourceCompletedAt.toISOString(),
                 recoveredAutomaticDeadlineEndpoint: automaticDiscoveryDeadlineEndpoint,
+                priorEscalatedAt,
                 continuationAt: continuationAt.toISOString(),
                 escalationDeadlineAt: nextDeadlineAt.toISOString(),
                 playbookExhausted: true, nextStage: null, oneShot: true,
