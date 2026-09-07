@@ -667,10 +667,10 @@ async function runCommand(
       writeResult(await claimPath(args));
       return;
     case "source-search-context":
-      writeResult(await sourceSearchContext(args));
+      (verificationCommands?.write ?? writeResult)(await sourceSearchContext(args));
       return;
     case "record-source-search":
-      writeResult(await recordSourceSearch(args));
+      (verificationCommands?.write ?? writeResult)(await recordSourceSearch(args));
       return;
     case "mark-needs-human":
       writeResult(await markNeedsHuman(args));
@@ -857,9 +857,11 @@ async function sourceSearchContext(args: string[]) {
   if (!ordinal || ordinal < 1) {
     throw new Error("source-search-context requires a positive --ordinal.");
   }
+  const leaseToken = await getOwnedCourseSupportLeaseToken({ batchId, ownerThreadId });
+  await resolveSourceSearchRuntimeVersion(batchId);
   return getOwnedCourseSupportSourceSearchContext({
     batchId,
-    leaseToken: await getOwnedCourseSupportLeaseToken({ batchId, ownerThreadId }),
+    leaseToken,
     ownerThreadId,
     ordinal
   });
@@ -869,16 +871,40 @@ async function recordSourceSearch(args: string[]) {
   const ownerThreadId = requireOwnerThread(args);
   const batchId = await resolveBatchId(args);
   const options = parseCourseSupportSourceSearchResultOptions(args);
+  const leaseToken = await getOwnedCourseSupportLeaseToken({ batchId, ownerThreadId });
+  const runtimeVersion = await resolveSourceSearchRuntimeVersion(batchId);
   return recordOwnedCourseSupportSourceSearchResult({
     batchId,
-    leaseToken: await getOwnedCourseSupportLeaseToken({ batchId, ownerThreadId }),
+    leaseToken,
     ownerThreadId,
     ordinal: options.ordinal,
     attemptRef: options.attemptRef,
     candidateUrl: options.candidateUrl,
     noUnique: options.noUnique,
-    runtimeVersion: getAutomationRuntimeVersion()
+    runtimeVersion
   });
+}
+
+async function resolveSourceSearchRuntimeVersion(batchId: string) {
+  const provenance = await getCourseSupportBatchRecoveryProvenance(batchId);
+  const git = readGitState();
+  const expectedRuntimeVersion = provenance.releaseSha ?? provenance.baseSha;
+  if (git.dirtyPaths.length > 0) {
+    throw new Error("Source research requires a clean responder checkout.");
+  }
+  if (!provenance.branch || git.branch !== provenance.branch) {
+    throw new Error("Source research checkout branch does not match the claimed batch.");
+  }
+  if (
+    !/^[a-f0-9]{40}$/u.test(git.headSha) ||
+    git.headSha !== expectedRuntimeVersion
+  ) {
+    throw new Error("Source research requires the exact claimed runtime checkout.");
+  }
+  // The local environment wrapper does not supply Vercel runtime variables.
+  // Identify the executing CLI from fenced Git, without claiming provider or
+  // deployment execution. The native result writer still fences current state.
+  return git.headSha;
 }
 
 export function parseCourseSupportSourceSearchResultOptions(args: string[]) {
