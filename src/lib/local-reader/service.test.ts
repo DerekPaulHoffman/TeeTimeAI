@@ -1902,6 +1902,342 @@ describe("local reader job service", () => {
     expect(prismaMocks.courseMonitoringEvent.create).not.toHaveBeenCalled();
   });
 
+  it.each(["incident lookup", "second incident transaction"] as const)(
+    "retries an identical reader heartbeat after interrupted %s without duplicate reopens",
+    async (failurePoint) => {
+      const firstPollAt = new Date("2026-07-24T16:00:00.000Z");
+      const retryAt = new Date("2026-07-24T16:01:00.000Z");
+      const handshake = {
+        deviceId: "offline-reader",
+        readerVersion: "1.11.1",
+        buildId: "chrome-extension-1.11.1",
+        capabilities: [{ key: "TENFORE_RENDERED" as const, parserVersion: 2 }],
+      };
+      let storedAgent = {
+        readerVersion: "1.11.0",
+        buildId: "chrome-extension-1.11.0",
+        capabilities: [{ key: "TENFORE_RENDERED" as const, parserVersion: 1 }],
+        lastSeenAt: new Date("2026-07-24T15:59:00.000Z"),
+      };
+      const incidents = Array.from(
+        { length: failurePoint === "incident lookup" ? 1 : 2 },
+        (_, index) => ({
+          id: `offline-incident-${index}`,
+          courseId: `offline-course-${index}`,
+          cycle: 7,
+          revision: 83,
+          status: "NEEDS_HUMAN",
+          humanReviewReason: "READER_RELOAD_REQUIRED" as string | null,
+          activeBatchId: null,
+          activeRealSearchCount: 0,
+          course: {
+            name: "Offline public course",
+            detectedBookingUrl: `https://fox.tenfore.golf/offline-reader-${index}`,
+            website: null,
+            monitoringStatus: { revision: 91 },
+          },
+        }),
+      );
+      const events: Array<{
+        incidentId: string;
+        occurredAt: Date;
+        audit: { priorCycle: number; cycle: number; parserVersion: number };
+      }> = [];
+      const overridden = [
+        prismaMocks.localReaderAgent.findUnique,
+        prismaMocks.localReaderAgent.upsert,
+        prismaMocks.courseSupportIncident.findMany,
+        prismaMocks.courseSupportIncident.updateMany,
+        prismaMocks.courseMonitoringStatus.updateMany,
+        prismaMocks.courseMonitoringEvent.create,
+        prismaMocks.$transaction,
+      ];
+      const originalImplementations = overridden.map((mock) =>
+        mock.getMockImplementation(),
+      );
+      let injectedFailure = false;
+      const interruption = new Error("Offline injected reader requeue failure");
+
+      try {
+        prismaMocks.localReaderAgent.findUnique.mockImplementation(async () =>
+          structuredClone(storedAgent),
+        );
+        prismaMocks.localReaderAgent.upsert.mockImplementation(
+          async ({ update }: { update: Partial<typeof storedAgent> }) => {
+            storedAgent = { ...storedAgent, ...structuredClone(update) };
+            return structuredClone(storedAgent);
+          },
+        );
+        prismaMocks.courseSupportIncident.findMany.mockImplementation(async () => {
+          if (failurePoint === "incident lookup" && !injectedFailure) {
+            injectedFailure = true;
+            throw interruption;
+          }
+          return structuredClone(
+            incidents.filter((incident) => incident.status === "NEEDS_HUMAN"),
+          );
+        });
+        prismaMocks.courseSupportIncident.updateMany.mockImplementation(
+          async ({ where, data }: {
+            where: { id: string; revision: number; status: string; activeBatchId: null };
+            data: { cycle: { increment: number }; revision: { increment: number }; status: string; humanReviewReason: null };
+          }) => {
+            const incident = incidents.find((row) => row.id === where.id);
+            if (!incident || incident.revision !== where.revision ||
+              incident.status !== where.status || incident.activeBatchId !== where.activeBatchId) {
+              return { count: 0 };
+            }
+            incident.cycle += data.cycle.increment;
+            incident.revision += data.revision.increment;
+            incident.status = data.status;
+            incident.humanReviewReason = data.humanReviewReason;
+            return { count: 1 };
+          },
+        );
+        prismaMocks.courseMonitoringStatus.updateMany.mockResolvedValue({ count: 1 });
+        prismaMocks.courseMonitoringEvent.create.mockImplementation(
+          async ({ data }: { data: (typeof events)[number] }) => {
+            events.push(structuredClone(data));
+            return data;
+          },
+        );
+        prismaMocks.$transaction.mockImplementation(async (callback) => {
+          if (failurePoint === "second incident transaction" && !injectedFailure && events.length === 1) {
+            injectedFailure = true;
+            throw interruption;
+          }
+          return callback(prismaMocks);
+        });
+
+        await expect(claimNextLocalReaderJob(handshake)).rejects.toThrow(interruption);
+        expect(injectedFailure).toBe(true);
+        expect(prismaMocks.courseSupportIncident.findMany).toHaveBeenCalledTimes(1);
+        expect(events).toHaveLength(failurePoint === "incident lookup" ? 0 : 1);
+        expect(workerMocks.completeAutomationWorker).not.toHaveBeenCalled();
+        expect(prismaMocks.localReaderJob.findMany).not.toHaveBeenCalled();
+
+        vi.setSystemTime(retryAt);
+        await expect(claimNextLocalReaderJob(handshake)).resolves.toBeNull();
+
+        expect.soft(prismaMocks.courseSupportIncident.findMany).toHaveBeenCalledTimes(2);
+        expect.soft(events).toHaveLength(incidents.length);
+        for (const incident of incidents) {
+          expect.soft(incident).toMatchObject({
+            cycle: 8, revision: 84, status: "AUTO_INVESTIGATING", humanReviewReason: null,
+          });
+          const matchingEvents = events.filter((event) => event.incidentId === incident.id);
+          expect.soft(matchingEvents).toHaveLength(1);
+          expect.soft(matchingEvents[0]).toMatchObject({
+            occurredAt: failurePoint === "second incident transaction" && incident.id === incidents[0].id
+              ? firstPollAt : retryAt,
+            audit: { priorCycle: 7, cycle: 8, parserVersion: 2 },
+          });
+        }
+        expect(storedAgent).toMatchObject({
+          readerVersion: handshake.readerVersion,
+          buildId: handshake.buildId,
+          capabilities: handshake.capabilities,
+          lastSeenAt: retryAt,
+        });
+        expect(workerMocks.completeAutomationWorker).toHaveBeenCalledTimes(1);
+
+        // Once the remaining work is committed, later unchanged polls stay quiet.
+        vi.setSystemTime(new Date("2026-07-24T16:02:00.000Z"));
+        await expect(claimNextLocalReaderJob(handshake)).resolves.toBeNull();
+        expect.soft(prismaMocks.courseSupportIncident.findMany).toHaveBeenCalledTimes(2);
+        expect.soft(events).toHaveLength(incidents.length);
+        expect(workerMocks.completeAutomationWorker).toHaveBeenCalledTimes(2);
+        expect(prismaMocks.localReaderJob.upsert).not.toHaveBeenCalled();
+        expect(prismaMocks.localReaderJob.updateMany).not.toHaveBeenCalled();
+        expect(providerObservationMocks.beginCourseProviderObservationInTransaction).not.toHaveBeenCalled();
+      } finally {
+        overridden.forEach((mock, index) => {
+          mock.mockReset();
+          const original = originalImplementations[index];
+          if (original) mock.mockImplementation(original);
+        });
+      }
+    },
+  );
+
+  it.each([
+    { label: "older poll with P2002", newerOffsetMs: 60_000, identical: false, conflictCode: "P2002" },
+    { label: "older poll with P2025", newerOffsetMs: 60_000, identical: false, conflictCode: "P2025" },
+    { label: "conflicting same-tick poll", newerOffsetMs: 0, identical: false, conflictCode: "P2002" },
+    { label: "identical same-tick poll", newerOffsetMs: 0, identical: true, conflictCode: "P2002" },
+  ])("preserves newer reader registration against an overlapping $label", async ({ newerOffsetMs, identical, conflictCode }) => {
+    const olderAt = new Date("2026-07-24T16:00:00.000Z");
+    const newerAt = new Date(olderAt.getTime() + newerOffsetMs);
+    const olderHandshake = {
+      deviceId: "offline-overlapping-reader",
+      readerVersion: "1.11.1",
+      buildId: "chrome-extension-1.11.1",
+      capabilities: [{ key: "TENFORE_RENDERED" as const, parserVersion: 2 }],
+    };
+    const newerHandshake = identical ? olderHandshake : {
+      ...olderHandshake,
+      readerVersion: "1.11.2",
+      buildId: "chrome-extension-1.11.2",
+      capabilities: [{ key: "TENFORE_RENDERED" as const, parserVersion: 3 }],
+    };
+    const successfulAt = new Date("2026-07-24T15:58:00.000Z");
+    let storedAgent = {
+      readerVersion: "1.11.0",
+      buildId: "chrome-extension-1.11.0",
+      capabilities: [{ key: "TENFORE_RENDERED" as const, parserVersion: 1 }],
+      lastSeenAt: new Date("2026-07-24T15:59:00.000Z"),
+      lastSuccessfulAt: successfulAt,
+      lastSuccessfulCapability: "TENFORE_RENDERED",
+    };
+    type Registration = Pick<typeof storedAgent, "readerVersion" | "buildId" | "capabilities" | "lastSeenAt">;
+    type Acknowledgment = {
+      where: {
+        deviceId: string;
+        OR: [
+          { lastSeenAt: { lt: Date } },
+          { lastSeenAt: Date; readerVersion: string; buildId: string; capabilities: { equals: Registration["capabilities"] } },
+        ];
+      };
+      create: Registration & { deviceId: string };
+      update: Registration;
+    };
+    const overridden = [
+      prismaMocks.localReaderAgent.findUnique,
+      prismaMocks.localReaderAgent.upsert,
+      prismaMocks.courseSupportIncident.findMany,
+    ];
+    const originalImplementations = overridden.map((mock) => mock.getMockImplementation());
+    let releaseOlderScan!: () => void;
+    let markOlderScanStarted!: () => void;
+    const olderScanStarted = new Promise<void>((resolve) => { markOlderScanStarted = resolve; });
+    const olderScan = new Promise<never[]>((resolve) => { releaseOlderScan = () => resolve([]); });
+    let olderPoll: ReturnType<typeof claimNextLocalReaderJob> | undefined;
+
+    try {
+      prismaMocks.localReaderAgent.findUnique.mockImplementation(async () => structuredClone(storedAgent));
+      prismaMocks.localReaderAgent.upsert.mockImplementation(async ({ where, create, update }: Acknowledgment) => {
+        expect(where).toEqual({
+          deviceId: olderHandshake.deviceId,
+          OR: [
+            { lastSeenAt: { lt: update.lastSeenAt } },
+            { lastSeenAt: update.lastSeenAt, readerVersion: update.readerVersion,
+              buildId: update.buildId, capabilities: { equals: update.capabilities } },
+          ],
+        });
+        expect(create).toEqual({ deviceId: olderHandshake.deviceId, ...update });
+        expect(Object.keys(update).sort()).toEqual(["buildId", "capabilities", "lastSeenAt", "readerVersion"]);
+        const [earlier, sameTick] = where.OR;
+        const matches = storedAgent.lastSeenAt < earlier.lastSeenAt.lt ||
+          (+storedAgent.lastSeenAt === +sameTick.lastSeenAt &&
+            storedAgent.readerVersion === sameTick.readerVersion && storedAgent.buildId === sameTick.buildId &&
+            JSON.stringify(storedAgent.capabilities) === JSON.stringify(sameTick.capabilities.equals));
+        if (!matches) throw Object.assign(new Error("Offline stale reader acknowledgment"), { code: conflictCode });
+        storedAgent = { ...storedAgent, ...structuredClone(update) };
+        return structuredClone(storedAgent);
+      });
+      prismaMocks.courseSupportIncident.findMany
+        .mockImplementationOnce(() => { markOlderScanStarted(); return olderScan; })
+        .mockResolvedValue([]);
+
+      olderPoll = claimNextLocalReaderJob(olderHandshake);
+      await olderScanStarted;
+      expect(prismaMocks.localReaderAgent.upsert).not.toHaveBeenCalled();
+      vi.setSystemTime(newerAt);
+      await expect(claimNextLocalReaderJob(newerHandshake)).resolves.toBeNull();
+      expect(storedAgent).toMatchObject({
+        readerVersion: newerHandshake.readerVersion,
+        buildId: newerHandshake.buildId,
+        capabilities: newerHandshake.capabilities,
+        lastSeenAt: newerAt,
+      });
+      const jobReadsAfterNewer = prismaMocks.localReaderJob.findMany.mock.calls.length;
+      expect(jobReadsAfterNewer).toBeGreaterThan(0);
+      expect(workerMocks.completeAutomationWorker).toHaveBeenCalledTimes(1);
+
+      releaseOlderScan();
+      await expect(olderPoll).resolves.toBeNull();
+
+      expect(prismaMocks.courseSupportIncident.findMany).toHaveBeenCalledTimes(2);
+      expect(prismaMocks.localReaderAgent.upsert).toHaveBeenCalledTimes(2);
+      expect(prismaMocks.localReaderAgent.upsert.mock.calls[0]?.[0].update.lastSeenAt).toEqual(newerAt);
+      expect(prismaMocks.localReaderAgent.upsert.mock.calls[1]?.[0].update.lastSeenAt).toEqual(olderAt);
+      expect(storedAgent).toEqual({
+        readerVersion: newerHandshake.readerVersion,
+        buildId: newerHandshake.buildId,
+        capabilities: newerHandshake.capabilities,
+        lastSeenAt: newerAt,
+        lastSuccessfulAt: successfulAt,
+        lastSuccessfulCapability: "TENFORE_RENDERED",
+      });
+      expect(workerMocks.completeAutomationWorker).toHaveBeenCalledTimes(identical ? 2 : 1);
+      expect(prismaMocks.localReaderJob.findMany).toHaveBeenCalledTimes(jobReadsAfterNewer * (identical ? 2 : 1));
+      expect(prismaMocks.localReaderJob.upsert).not.toHaveBeenCalled();
+      expect(prismaMocks.localReaderJob.updateMany).not.toHaveBeenCalled();
+      expect(providerObservationMocks.beginCourseProviderObservationInTransaction).not.toHaveBeenCalled();
+      expect(prismaMocks.courseMonitoringEvent.create).not.toHaveBeenCalled();
+    } finally {
+      releaseOlderScan();
+      await olderPoll?.catch(() => undefined);
+      overridden.forEach((mock, index) => {
+        mock.mockReset();
+        const original = originalImplementations[index];
+        if (original) mock.mockImplementation(original);
+      });
+    }
+  });
+
+  it("propagates non-conflict reader acknowledgment failures and retries the identical handshake", async () => {
+    const handshake = {
+      deviceId: "offline-ack-reader",
+      readerVersion: "1.11.1",
+      buildId: "chrome-extension-1.11.1",
+      capabilities: [{ key: "TENFORE_RENDERED" as const, parserVersion: 2 }],
+    };
+    let storedAgent = {
+      readerVersion: "1.11.0", buildId: "chrome-extension-1.11.0",
+      capabilities: [{ key: "TENFORE_RENDERED" as const, parserVersion: 1 }],
+      lastSeenAt: new Date("2026-07-24T15:59:00.000Z"),
+    };
+    const originalAgent = structuredClone(storedAgent);
+    const overridden = [prismaMocks.localReaderAgent.findUnique, prismaMocks.localReaderAgent.upsert];
+    const originalImplementations = overridden.map((mock) => mock.getMockImplementation());
+    const connectionFailure = Object.assign(new Error("Offline acknowledgment connection failure"), { code: "P1001" });
+    try {
+      prismaMocks.localReaderAgent.findUnique.mockImplementation(async () => structuredClone(storedAgent));
+      prismaMocks.localReaderAgent.upsert
+        .mockRejectedValueOnce(connectionFailure)
+        .mockImplementation(async ({ update }: { update: Partial<typeof storedAgent> }) => {
+          storedAgent = { ...storedAgent, ...structuredClone(update) };
+          return storedAgent;
+        });
+      await expect(claimNextLocalReaderJob(handshake)).rejects.toBe(connectionFailure);
+      expect(storedAgent).toEqual(originalAgent);
+      expect(prismaMocks.courseSupportIncident.findMany).toHaveBeenCalledTimes(1);
+      expect(workerMocks.completeAutomationWorker).not.toHaveBeenCalled();
+      expect(prismaMocks.localReaderJob.findMany).not.toHaveBeenCalled();
+
+      const retryAt = new Date("2026-07-24T16:01:00.000Z");
+      vi.setSystemTime(retryAt);
+      await expect(claimNextLocalReaderJob(handshake)).resolves.toBeNull();
+      expect(prismaMocks.courseSupportIncident.findMany).toHaveBeenCalledTimes(2);
+      expect(prismaMocks.localReaderAgent.upsert).toHaveBeenCalledTimes(2);
+      expect(storedAgent).toEqual({
+        readerVersion: handshake.readerVersion, buildId: handshake.buildId,
+        capabilities: handshake.capabilities, lastSeenAt: retryAt,
+      });
+      expect(workerMocks.completeAutomationWorker).toHaveBeenCalledTimes(1);
+      expect(prismaMocks.localReaderJob.upsert).not.toHaveBeenCalled();
+      expect(prismaMocks.localReaderJob.updateMany).not.toHaveBeenCalled();
+      expect(prismaMocks.courseMonitoringEvent.create).not.toHaveBeenCalled();
+    } finally {
+      overridden.forEach((mock, index) => {
+        mock.mockReset();
+        const original = originalImplementations[index];
+        if (original) mock.mockImplementation(original);
+      });
+    }
+  });
+
   it("gives a new compatible reader build a fresh investigation deadline", async () => {
     const capabilities = [
       { key: "EZLINKS_RENDERED" as const, parserVersion: 1 },

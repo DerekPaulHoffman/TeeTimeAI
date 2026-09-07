@@ -1430,22 +1430,6 @@ async function recordReaderHeartbeat(
       capabilities: true,
     },
   });
-  await model.upsert({
-    where: { deviceId: handshake.deviceId },
-    create: {
-      deviceId: handshake.deviceId,
-      readerVersion: handshake.readerVersion,
-      buildId: handshake.buildId,
-      capabilities: handshake.capabilities as Prisma.InputJsonValue,
-      lastSeenAt: now,
-    },
-    update: {
-      readerVersion: handshake.readerVersion,
-      buildId: handshake.buildId,
-      capabilities: handshake.capabilities as Prisma.InputJsonValue,
-      lastSeenAt: now,
-    },
-  });
   const previousCapabilities = previous
     ? localReaderCapabilitiesSchema.safeParse(previous.capabilities)
     : null;
@@ -1454,27 +1438,59 @@ async function recordReaderHeartbeat(
     previous.readerVersion !== handshake.readerVersion ||
     previous.buildId !== handshake.buildId;
   if (
-    !readerDeploymentChanged &&
-    previousCapabilities?.success &&
-    haveSameCapabilities(previousCapabilities.data, handshake.capabilities)
+    readerDeploymentChanged ||
+    !previousCapabilities?.success ||
+    !haveSameCapabilities(previousCapabilities.data, handshake.capabilities)
   ) {
-    await completeAutomationWorker(
-      AUTOMATION_WORKERS.LOCAL_READER,
-      "reader_heartbeat",
+    await requeueReaderBlockedIncidents({
+      capabilities: handshake.capabilities,
+      previousCapabilities: previousCapabilities?.success
+        ? previousCapabilities.data
+        : null,
+      readerDeploymentChanged,
+      readerVersion: handshake.readerVersion,
+      buildId: handshake.buildId,
       now,
-    );
-    return true;
+    });
   }
-  await requeueReaderBlockedIncidents({
-    capabilities: handshake.capabilities,
-    previousCapabilities: previousCapabilities?.success
-      ? previousCapabilities.data
-      : null,
-    readerDeploymentChanged,
-    readerVersion: handshake.readerVersion,
-    buildId: handshake.buildId,
-    now,
-  });
+  // Acknowledge a changed reader only after its handoff succeeds. On failure,
+  // the next ordinary poll retries; already requeued incidents remain fenced.
+  try {
+    await model.upsert({
+      where: {
+        deviceId: handshake.deviceId,
+        OR: [
+          { lastSeenAt: { lt: now } },
+          {
+            lastSeenAt: now,
+            readerVersion: handshake.readerVersion,
+            buildId: handshake.buildId,
+            capabilities: { equals: handshake.capabilities as Prisma.InputJsonValue },
+          },
+        ],
+      },
+      create: {
+        deviceId: handshake.deviceId,
+        readerVersion: handshake.readerVersion,
+        buildId: handshake.buildId,
+        capabilities: handshake.capabilities as Prisma.InputJsonValue,
+        lastSeenAt: now,
+      },
+      update: {
+        readerVersion: handshake.readerVersion,
+        buildId: handshake.buildId,
+        capabilities: handshake.capabilities as Prisma.InputJsonValue,
+        lastSeenAt: now,
+      },
+    } satisfies Prisma.LocalReaderAgentUpsertArgs);
+  } catch (error) {
+    // A later heartbeat/result may win while requeueing runs. Its registration
+    // must not be overwritten, and this superseded poll must not claim a job.
+    const code = typeof error === "object" && error && "code" in error
+      ? error.code : null;
+    if (code === "P2002" || code === "P2025") return false;
+    throw error;
+  }
   await completeAutomationWorker(
     AUTOMATION_WORKERS.LOCAL_READER,
     "reader_heartbeat",

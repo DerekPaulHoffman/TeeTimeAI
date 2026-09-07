@@ -125,6 +125,12 @@ EZLinks, and WebTrac course identity and booking URLs come from the signed
 database-backed job and are checked against provider-family host and route
 rules. Courses that fit an existing parser do not require a course-specific
 allowlist entry or extension release.
+The backend acknowledges a changed reader build/capability only after its
+incident-requeue handoff succeeds. An interrupted handoff is retried by the
+next ordinary signed poll without duplicating already-requeued incidents;
+successfully acknowledged unchanged polls do not repeat the scan. A delayed
+older heartbeat cannot overwrite a newer accepted reader registration or claim
+work under that superseded heartbeat.
 An actual parser or manifest change to this unpacked development extension
 still requires Chrome's **Reload** action; unattended binary updates require a
 separately signed Web Store or enterprise-managed extension package.
