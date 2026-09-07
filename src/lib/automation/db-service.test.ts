@@ -324,12 +324,29 @@ function fetchFailedMissingMetadataBrowserProbeCourse(
 }
 
 describe("automation query payloads", () => {
+  const providerFetch = vi.fn<typeof fetch>(async () => {
+    throw new Error("Unexpected provider I/O during target selection");
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
-    mockedPrisma.courseSupportBatch.findFirst.mockResolvedValue({
-      id: "current-owned-batch",
-    } as never);
+    vi.stubGlobal("fetch", providerFetch);
+    mockedPrisma.courseSupportBatch.findFirst.mockImplementation(async (query) => {
+      if (query?.select?.incidents) {
+        return {
+          summary: null,
+          _count: { incidents: 0 },
+          releaseSha: browserRuntimeVersion,
+          deployedAt: browserDeployedAt,
+          incidents: [],
+        } as never;
+      }
+      expect(query?.select).toEqual({ id: true });
+      return { id: "current-owned-batch" } as never;
+    });
   });
+
+  afterEach(() => vi.unstubAllGlobals());
 
   it("selects an exact reader-only course for independent browser confirmation", async () => {
     mockedPrisma.course.findMany.mockResolvedValue([
@@ -504,6 +521,10 @@ describe("automation query payloads", () => {
           ownedBrowserPersistenceFence(),
         ),
       ).resolves.toEqual([]);
+      expect(mockedPrisma.courseMonitoringEvent.findFirst).not.toHaveBeenCalled();
+      expect(mockedPrisma.courseAutomationDiscovery.create).not.toHaveBeenCalled();
+      expect(mockedPrisma.courseProbe.create).not.toHaveBeenCalled();
+      expect(providerFetch).not.toHaveBeenCalled();
     },
   );
 
@@ -638,6 +659,24 @@ describe("automation query payloads", () => {
           ownedBrowserPersistenceFence(),
         ),
       ).resolves.toEqual([]);
+      expect(mockedPrisma.courseSupportBatch.findFirst).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          select: expect.objectContaining({
+            incidents: expect.objectContaining({
+              where: {
+                incidentId: "incident-blocked-tooling",
+                courseId: "course-blocked-tooling",
+                cycle: 1,
+              },
+              take: 1,
+            }),
+          }),
+        }),
+      );
+      expect(mockedPrisma.courseMonitoringEvent.findFirst).not.toHaveBeenCalled();
+      expect(mockedPrisma.courseAutomationDiscovery.create).not.toHaveBeenCalled();
+      expect(mockedPrisma.courseProbe.create).not.toHaveBeenCalled();
+      expect(providerFetch).not.toHaveBeenCalled();
     },
   );
 
