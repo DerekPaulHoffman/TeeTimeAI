@@ -101,6 +101,13 @@ const providerCourseSelect = {
   bookingMetadata: true,
   layoutHoleCounts: true,
   layoutHolesVerifiedAt: true,
+  monitoringStatus: { select: { state: true } },
+  automationDiscoveries: {
+    orderBy: { createdAt: "desc" },
+    take: 12,
+    select: { status: true, detectedPlatform: true, apiMetadata: true, automationReason: true,
+      confidence: true, evidence: true, createdAt: true },
+  },
 } satisfies Prisma.CourseSelect;
 
 const requestExecutionSelect = {
@@ -164,6 +171,7 @@ const requestExecutionSelect = {
           earliestTargetDate: true,
           escalationDeadlineAt: true,
           firstSeenAt: true,
+          confirmedAt: true,
           attemptLedger: true,
           revision: true,
           updatedAt: true,
@@ -295,6 +303,7 @@ export async function scheduleCourseSupportVerificationRequests(input: {
                   earliestTargetDate: true,
                   escalationDeadlineAt: true,
                   firstSeenAt: true,
+                  confirmedAt: true,
                   attemptLedger: true,
                   revision: true,
                   updatedAt: true,
@@ -2638,6 +2647,7 @@ type DetachedEligibilityInput = {
     activeRealSearchCount: number;
     earliestTargetDate: Date | null;
     firstSeenAt: Date;
+    confirmedAt: Date | null;
     attemptLedger: Prisma.JsonValue | null;
     revision: number;
     updatedAt: Date;
@@ -2769,6 +2779,12 @@ async function evaluateDetachedEligibility(
       eligible: false,
       reason: "playbook_stage_handoff_required",
     };
+  }
+  if (mode === "PROGRESSION") {
+    const { getCourseSupportRetainedSourceRecovery } = await import("./course-support-retained-source-recovery");
+    if (getCourseSupportRetainedSourceRecovery({ course: input.course, incident: input.incident, now })) {
+      return { eligible: false, reason: "playbook_stage_handoff_required" };
+    }
   }
   const assignedDetachedStageProgression = isAssignedDetachedProgression(
     input,

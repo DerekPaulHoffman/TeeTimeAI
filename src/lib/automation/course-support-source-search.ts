@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 
+import type { CourseSupportClaimActionPlan } from "./course-support-action-plan";
+
 import {
   isKnownPublicSearchSurfaceUrl,
   isSafeManualEvidenceUrl,
@@ -93,8 +95,9 @@ export function buildCourseSupportSourceSearchScopeDigest(input: {
   batchId: string;
   incidentId: string;
   cycle: number;
+  actionPlan?: CourseSupportClaimActionPlan | null;
 }) {
-  return sha256(
+  const baseScopeDigest = sha256(
     [
       "course-support-source-search-v1",
       input.batchId,
@@ -102,6 +105,11 @@ export function buildCourseSupportSourceSearchScopeDigest(input: {
       input.cycle,
     ].join("\0"),
   );
+  // Modern candidates are bound to the canonical persisted assignment, not
+  // just the batch and cycle. Keep the legacy digest only for legacy claims.
+  return input.actionPlan
+    ? sha256([baseScopeDigest, JSON.stringify(input.actionPlan)].join("\0"))
+    : baseScopeDigest;
 }
 
 export function buildCourseSupportSourceSearchAttemptRef(input: {
@@ -120,6 +128,27 @@ export function buildCourseSupportSourceSearchAttemptRef(input: {
       input.courseUpdatedAt.toISOString(),
     ].join("\0"),
   );
+}
+
+/** One immutable research result per rejected source, independent of batch ownership. */
+export function buildCourseSupportRetainedSourceSearchKey(input: {
+  incidentId: string;
+  cycle: number;
+  rejectionEvidenceDigest: string;
+}) {
+  if (
+    !input.incidentId ||
+    !Number.isInteger(input.cycle) || input.cycle < 1 ||
+    !/^[a-f0-9]{64}$/u.test(input.rejectionEvidenceDigest)
+  ) {
+    throw new Error("Retained-source research scope is invalid.");
+  }
+  return `course-support-retained-source-search:${sha256([
+    "course-support-retained-source-search-v1",
+    input.incidentId,
+    input.cycle,
+    input.rejectionEvidenceDigest,
+  ].join("\0"))}`;
 }
 
 function normalizeSearchPart(value: string | null | undefined) {

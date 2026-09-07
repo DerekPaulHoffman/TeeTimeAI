@@ -1,4 +1,5 @@
 import type { CourseSupportIncidentKind } from "@prisma/client";
+import { getCourseSupportRetainedSourceRecovery } from "./course-support-retained-source-recovery";
 
 import {
   AUTOMATION_PLAYBOOK_STAGES,
@@ -64,7 +65,9 @@ const PROVIDER_CONTRACT_INCIDENT_KINDS = new Set<CourseSupportIncidentKind>([
 
 const KNOWN_PROVIDER_FAMILY_SET = new Set<string>(KNOWN_PROVIDER_FAMILIES);
 
-type CourseSupportActionPlanCourse = ProviderCourseInput & {
+type CourseSupportActionPlanCourse = ProviderCourseInput & Partial<Parameters<
+  typeof getCourseSupportRetainedSourceRecovery
+>[0]["course"]> & {
   monitoringMode?: string | null;
 };
 
@@ -73,6 +76,8 @@ export function buildCourseSupportClaimActionPlan(input: {
   incidentKind: CourseSupportIncidentKind;
   incidentProviderFamilyKey: string;
   course: CourseSupportActionPlanCourse;
+  retainedSourceIncident?: Parameters<typeof getCourseSupportRetainedSourceRecovery>[0]["incident"];
+  now?: Date;
 }): CourseSupportClaimActionPlan {
   const route = {
     workMode: input.route.workMode,
@@ -91,6 +96,8 @@ export function buildCourseSupportClaimActionPlan(input: {
     playbookStage: route.playbookStage,
     incidentProviderFamilyKey: input.incidentProviderFamilyKey,
     course: input.course,
+    retainedSourceIncident: input.retainedSourceIncident,
+    now: input.now,
   });
   const providerContractEligible =
     isCourseSupportProviderContractActionEligible({
@@ -149,7 +156,20 @@ export function isCourseSupportSourceSearchActionEligible(input: {
   playbookStage: AutomationPlaybookStage | null;
   incidentProviderFamilyKey: string;
   course: CourseSupportActionPlanCourse;
+  retainedSourceIncident?: Parameters<typeof getCourseSupportRetainedSourceRecovery>[0]["incident"];
+  now?: Date;
 }) {
+  if (
+    input.workMode === "ADVANCE_DISCOVERY" &&
+    input.playbookStage === "INDEPENDENT_CONFIRMATION" &&
+    input.retainedSourceIncident
+  ) {
+    return getCourseSupportRetainedSourceRecovery({
+      course: input.course,
+      incident: input.retainedSourceIncident,
+      now: input.now,
+    }) !== null;
+  }
   return Boolean(
     input.workMode === "ADVANCE_DISCOVERY" &&
     input.playbookStage === "RENDERED_BROWSER_DISCOVERY" &&

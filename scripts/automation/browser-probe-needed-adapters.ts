@@ -1677,6 +1677,12 @@ export async function collectBrowserEvidence(
   } = {}
 ): Promise<BrowserInvestigationEvidence> {
   throwIfBrowserProbeAborted(options.signal);
+  if (options.unprojectedSourceCandidate) {
+    // A researched replacement is a new, untrusted official root. Neither the
+    // rejected website nor its retained booking URL may lend it course scope.
+    input = { ...input, officialCourseWebsite: input.sourceUrl };
+    options = { ...options, retainedBookingUrl: null };
+  }
   const mode = options.mode ?? "RENDERED";
   const officialPageUrl = input.officialCourseWebsite ?? input.sourceUrl;
   const pageVisits: BrowserInvestigationPageVisit[] = [];

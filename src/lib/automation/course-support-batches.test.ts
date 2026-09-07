@@ -89,6 +89,7 @@ vi.mock("@/lib/prisma", () => ({
     },
     courseMonitoringEvent: {
       findMany: prismaMocks.monitoringEventFindMany,
+      findUnique: prismaMocks.monitoringEventFindUnique,
     },
     $queryRaw: prismaMocks.queryRaw,
     $transaction: prismaMocks.transaction
@@ -101,10 +102,14 @@ vi.mock("./support-incidents", () => supportIncidentMocks);
 
 import {
   appendAutomationPlaybookEvent,
-  assessAutomationPlaybook
+  assessAutomationPlaybook,
+  parseAutomationPlaybookLedger,
 } from "./course-monitoring-playbook";
 import { buildProviderFailureFingerprint } from "./provider-capabilities";
 import { runCourseSupportVerificationWatch } from "./course-support-verification-watch";
+import { buildCourseSupportClaimActionPlan } from "./course-support-action-plan";
+import { retainedSourceRecoveryFixture } from "./course-support-retained-source-recovery.test-fixtures";
+import { hasUnresolvedCourseSupportSourceResearch } from "./course-support-source-research-outcome";
 import { CourseSupportEvidenceRefreshRequiredError } from "./course-support-closeout-errors";
 import {
   createParkedCourseCampaignAttemptLedgerFingerprint,
@@ -10683,6 +10688,32 @@ describe("course-support claim demand fencing", () => {
     expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
   });
 
+  it("claims a fresh rejected retained source as independent research instead of provider implementation", async () => {
+    const native = retainedSourceRecoveryFixture().input;
+    const previousQuery = prismaMocks.queryRaw.getMockImplementation()!;
+    prismaMocks.queryRaw.mockImplementation(async (query) => {
+      const result = await previousQuery(query);
+      return result?.[0]?.now ? [{ now: native.now }] : result;
+    });
+    const existing = incidentRecord({ engineeringOnly: true, preferences: [] });
+    const incident = {
+      ...existing, ...native.incident,
+      providerFamilyKey: native.course.providerFamilyKey,
+      failureClass: "MISSING_SOURCE", status: "AUTO_INVESTIGATING", activeBatchId: null,
+      nextAttemptAt: native.now, escalationDeadlineAt: new Date(native.now!.getTime() + 30 * 60_000),
+      course: { ...existing.course, ...native.course },
+    };
+    prismaMocks.supportIncidentFindMany.mockResolvedValue([incident]);
+    await expect(claimCourseSupportBatch({
+      ownerThreadId: "owner-thread", branch: "automation/course-support-source-recovery", baseSha, now: native.now,
+    })).resolves.toMatchObject({ outcome: "ready", incidentCount: 1 });
+    const remediation = prismaMocks.batchCreate.mock.calls[0][0].data.summary.remediation;
+    expect(remediation).toMatchObject({ workMode: "ADVANCE_DISCOVERY", playbookStage: "INDEPENDENT_CONFIRMATION", requiresImplementationPath: false,
+      attempts: [expect.objectContaining({ actionPlan: expect.objectContaining({ primaryAction: "SEARCH_FOR_OFFICIAL_SOURCE", allowedActions: ["SEARCH_FOR_OFFICIAL_SOURCE"] }) })],
+    });
+    expect(prismaMocks.courseUpdateMany.mock.calls.every(([update]) => Object.keys(update.data).every((key) => key === "updatedAt"))).toBe(true);
+  });
+
   it("keeps the responder-owned stage gate when real demand appears before engineering-only promotion", async () => {
     const incident = {
       ...incidentRecord({
@@ -19966,6 +19997,142 @@ describe("course-support batch ordinals", () => {
       ...overrides,
     };
   }
+
+  function retainedSourceSearchBatch() {
+    const fixture = retainedSourceRecoveryFixture().input;
+    const previous = sourceSearchBatch();
+    const entry = previous.incidents[0];
+    const course = { ...entry.course, ...fixture.course };
+    const incident = { ...entry.incident, ...fixture.incident, humanReviewReason: null, decisionAt: null,
+      decisionActorId: null, decisionNote: null, decisionEvidenceUrl: null, decisionIdempotencyKey: null };
+    const route = {
+      workMode: "ADVANCE_DISCOVERY" as const,
+      resumeWorkMode: "ADVANCE_DISCOVERY" as const,
+      allowUnchangedRuntime: true,
+      requiresImplementationPath: false,
+      retryBudget: null,
+      reason: "PLAYBOOK_STAGE_PENDING" as const,
+      strategy: {
+        action: "DISCOVER_WITH_BROWSER" as const,
+        reason: "MISSING_PROVIDER_SOURCE" as const,
+        providerFamilyKey: course.providerFamilyKey!,
+        browserAllowed: true,
+      },
+      materialChangeDetected: false,
+      attemptSignature: {
+        workMode: "ADVANCE_DISCOVERY" as const,
+        strategyAction: "DISCOVER_WITH_BROWSER" as const,
+        playbookStage: "INDEPENDENT_CONFIRMATION" as const,
+      },
+    };
+    const actionPlan = buildCourseSupportClaimActionPlan({
+      route, incidentKind: "NEEDS_ADAPTER", incidentProviderFamilyKey: incident.providerFamilyKey,
+      course, retainedSourceIncident: incident, now: fixture.now,
+    });
+    expect(actionPlan.primaryAction).toBe("SEARCH_FOR_OFFICIAL_SOURCE");
+    return {
+      ...previous,
+      baseSha: "a".repeat(40),
+      releaseSha: null,
+      leaseExpiresAt: new Date(fixture.now!.getTime() + 15 * 60_000),
+      summary: {
+        remediation: {
+          ...previous.summary.remediation,
+          playbookStage: "INDEPENDENT_CONFIRMATION",
+          attempts: [{
+            ...previous.summary.remediation.attempts[0],
+            approach: route.attemptSignature,
+            actionPlan,
+            playbookEventCountAtClaim: (incident.attemptLedger as { events: unknown[] }).events.length,
+          }],
+        },
+      },
+      incidents: [{ ...entry, cycle: incident.cycle, course, incident }],
+      fixtureNow: fixture.now!,
+    };
+  }
+
+  function useRetainedSourceTransaction(batch: ReturnType<typeof retainedSourceSearchBatch>) {
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.transaction.mockImplementation(async (worker: (transaction: typeof monitoringTransactionClient) => Promise<unknown>) => worker(monitoringTransactionClient));
+  }
+
+  it("records native retained-identity research without clearing the saved source or completing independent confirmation", async () => {
+    const batch = retainedSourceSearchBatch();
+    useRetainedSourceTransaction(batch);
+    const before = structuredClone(batch.incidents[0]);
+    const context = await getOwnedCourseSupportSourceSearchContext({
+      batchId: "batch-1", leaseToken: "lease-1", ownerThreadId: "owner-thread", ordinal: 1, now: batch.fixtureNow,
+    });
+    if (context.outcome !== "ready" || !("privateContext" in context)) throw new Error("Expected fresh research context");
+    const result = await recordOwnedCourseSupportSourceSearchResult({
+      batchId: "batch-1", leaseToken: "lease-1", ownerThreadId: "owner-thread", ordinal: 1,
+      attemptRef: context.privateContext.attemptRef, candidateUrl: "https://replacement-source.example/golf",
+      runtimeVersion: "a".repeat(40), now: batch.fixtureNow,
+    });
+    expect(result).toMatchObject({ outcome: "ready", candidateRecorded: true, browserVerificationRequired: true });
+    expect(prismaMocks.monitoringEventCreate).toHaveBeenCalledWith({ data: expect.objectContaining({
+      idempotencyKey: expect.stringMatching(/^course-support-retained-source-search:[a-f0-9]{64}$/u),
+      audit: expect.objectContaining({ sourceSearchMode: "RETAINED_SOURCE_IDENTITY_RESEARCH", providerSnapshotFingerprint: "b".repeat(64), incidentCycle: 2, courseProjectionApplied: false }),
+    }) });
+    expect(prismaMocks.courseUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+    expect(batch.incidents[0]).toEqual(before);
+    expect(assessAutomationPlaybook(before.incident.attemptLedger, 2).nextStage).toBe("INDEPENDENT_CONFIRMATION");
+  });
+
+  it("records only the attempted independent research after a retained-source NO_UNIQUE result", async () => {
+    const batch = retainedSourceSearchBatch();
+    useRetainedSourceTransaction(batch);
+    const before = structuredClone(batch.incidents[0].incident.attemptLedger) as { events: unknown[] };
+    const context = await getOwnedCourseSupportSourceSearchContext({
+      batchId: "batch-1", leaseToken: "lease-1", ownerThreadId: "owner-thread", ordinal: 1, now: batch.fixtureNow,
+    });
+    if (context.outcome !== "ready" || !("privateContext" in context)) throw new Error("Expected fresh research context");
+    await recordOwnedCourseSupportSourceSearchResult({
+      batchId: "batch-1", leaseToken: "lease-1", ownerThreadId: "owner-thread", ordinal: 1,
+      attemptRef: context.privateContext.attemptRef, noUnique: true, runtimeVersion: "a".repeat(40), now: batch.fixtureNow,
+    });
+    const after = prismaMocks.supportIncidentUpdateMany.mock.calls[0][0].data.attemptLedger;
+    expect(after.events).toHaveLength(before.events.length + 1);
+    expect(after.events.slice(0, -1)).toEqual(before.events);
+    expect(after.events.at(-1)).toMatchObject({ stage: "INDEPENDENT_CONFIRMATION", transition: "FAILED_TERMINAL", evidenceKind: "TOOLING", providerExecution: false,
+      failureFingerprint: `RETAINED_SOURCE:EXACT_SEARCH:NO_UNIQUE:${"B".repeat(64)}` });
+    expect(assessAutomationPlaybook(after, 2)).toMatchObject({ conclusion: "UNRESOLVED_EXHAUSTED", nextStage: null });
+    expect(hasUnresolvedCourseSupportSourceResearch({ course: batch.incidents[0].course,
+      incident: { ...batch.incidents[0].incident, attemptLedger: after }, now: batch.fixtureNow })).toBe(true);
+    expect(prismaMocks.courseUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("reuses the recorded candidate across owners without granting another source search", async () => {
+    const batch = retainedSourceSearchBatch();
+    useRetainedSourceTransaction(batch);
+    const request = { batchId: "batch-1", leaseToken: "lease-1", ownerThreadId: "owner-thread", ordinal: 1, now: batch.fixtureNow };
+    const context = await getOwnedCourseSupportSourceSearchContext(request);
+    if (context.outcome !== "ready" || !("privateContext" in context)) throw new Error("Expected fresh research context");
+    await recordOwnedCourseSupportSourceSearchResult({ ...request, attemptRef: context.privateContext.attemptRef,
+      candidateUrl: "https://replacement-source.example/golf", runtimeVersion: "a".repeat(40) });
+    const event = prismaMocks.monitoringEventCreate.mock.calls[0][0].data;
+    prismaMocks.monitoringEventFindUnique.mockImplementation(async ({ where }) => where.idempotencyKey === event.idempotencyKey ? event : null);
+    batch.incidents[0].incident.activeBatchId = "batch-next";
+    const next = await getOwnedCourseSupportSourceSearchContext({ ...request, batchId: "batch-next", ownerThreadId: "next-owner" });
+    expect(next).toMatchObject({ outcome: "ready", searchBudget: 0, resultRecorded: true, browserVerificationRequired: true });
+    expect(next).not.toHaveProperty("privateContext");
+    expect(prismaMocks.monitoringEventCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects repeating the identical retained URL as a replacement candidate", async () => {
+    const batch = retainedSourceSearchBatch();
+    useRetainedSourceTransaction(batch);
+    const request = { batchId: "batch-1", leaseToken: "lease-1", ownerThreadId: "owner-thread", ordinal: 1, now: batch.fixtureNow };
+    const context = await getOwnedCourseSupportSourceSearchContext(request);
+    if (context.outcome !== "ready" || !("privateContext" in context)) throw new Error("Expected fresh research context");
+    await expect(recordOwnedCourseSupportSourceSearchResult({ ...request, attemptRef: context.privateContext.attemptRef,
+      candidateUrl: batch.incidents[0].course.website, runtimeVersion: "a".repeat(40) })).rejects.toThrow("cannot repeat");
+    expect(prismaMocks.monitoringEventCreate).not.toHaveBeenCalled();
+  });
 
   it("exposes the exact per-entry action plan in the owned packet", async () => {
     prismaMocks.batchFindFirst.mockResolvedValue(
@@ -29658,6 +29825,213 @@ describe("detached verification atomic batch fences", () => {
         })
       })
     );
+  });
+
+  it("durably yields retained-source research without consuming independent confirmation or requesting implementation", async () => {
+    const native = retainedSourceRecoveryFixture().input;
+    const batch = closeoutBatch("PENDING");
+    const entry = batch.incidents[0];
+    Object.assign(entry.course, native.course);
+    Object.assign(entry.incident, native.incident, { activeRealSearchCount: 0 });
+    entry.cycle = native.incident.cycle;
+    const before = structuredClone(entry.incident.attemptLedger);
+    const approach = { workMode: "ADVANCE_DISCOVERY", strategyAction: "DISCOVER_WITH_BROWSER", playbookStage: "LOCAL_READER" };
+    batch.summary = { ...batch.summary, remediation: {
+      ...approach, allowUnchangedRuntime: true, requiresImplementationPath: false,
+      reason: "PLAYBOOK_STAGE_PENDING", retryBudget: null,
+      attempts: [{ courseRef: createHash("sha256").update(entry.courseId).digest("hex").slice(0,24),
+        providerSnapshotFingerprint: providerFingerprint, failureFingerprint: entry.incident.failureFingerprint,
+        runtimeVersion: releaseSha, activeRealSearchCount: 0, playbookEventCountAtClaim: (before as { events: unknown[] }).events.length - 1,
+        reason: "PLAYBOOK_STAGE_PENDING", retryBudget: null, approach,
+        actionPlan: { schemaVersion: 1, primaryAction: "VERIFY_CURRENT_RUNTIME", allowedActions: ["VERIFY_CURRENT_RUNTIME"], route: approach },
+      }],
+    } };
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.transaction.mockImplementation(async (worker: (tx: typeof monitoringTransactionClient) => Promise<unknown>) => worker(monitoringTransactionClient));
+    const result = await closeoutCourseSupportBatch({ batchId: "batch-1", leaseToken: "lease-1", ownerThreadId: "owner-thread",
+      verificationWatchMode: "WATCH_SETTLED", now: native.now });
+    expect(result).toMatchObject({ outcome: "retryable_failed", retryCount: 1, needsHumanCount: 0, automationStalledCount: 0 });
+    expect(prismaMocks.batchUpdateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ summary: expect.objectContaining({
+      closeout: expect.objectContaining({ sourceResearchHandoffCount: 1 }),
+    }) }) }));
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      activeBatchId: null, status: "AUTO_INVESTIGATING", nextAttemptAt: new Date(native.now!.getTime() + 60_000),
+    }) }));
+    const handoff = prismaMocks.monitoringEventCreateMany.mock.calls.flatMap(([write]) => write.data).find((event) => event.audit?.action === "RETAINED_SOURCE_RESEARCH_HANDOFF");
+    expect(handoff).toMatchObject({ audit: { incidentCycle: 2, assignedAction: "SEARCH_FOR_OFFICIAL_SOURCE", nextStage: "INDEPENDENT_CONFIRMATION", providerExecution: false, preservesAttemptLedger: true } });
+    expect(entry.incident.attemptLedger).toEqual(before);
+    expect(assessAutomationPlaybook(before, 2).nextStage).toBe("INDEPENDENT_CONFIRMATION");
+  });
+
+  it("closes exhausted retained-source research as unresolved without another old-source implementation", async () => {
+    const native = retainedSourceRecoveryFixture().input;
+    const batch = closeoutBatch("PENDING");
+    const entry = batch.incidents[0];
+    const completed = appendAutomationPlaybookEvent(native.incident.attemptLedger, {
+      cycle: native.incident.cycle, stage: "INDEPENDENT_CONFIRMATION", transition: "FAILED_TERMINAL",
+      readPath: "INDEPENDENT_CONFIRMATION", evidenceKind: "TOOLING", providerExecution: false,
+      failureClass: "MISSING_SOURCE", failureFingerprint: `RETAINED_SOURCE:EXACT_SEARCH:NO_UNIQUE:${providerFingerprint.toUpperCase()}`,
+      runtimeVersion: releaseSha, observedAt: native.now!,
+    });
+    Object.assign(entry.course, native.course);
+    Object.assign(entry.incident, native.incident, { activeRealSearchCount: 0, attemptLedger: completed, providerFamilyKey: native.course.providerFamilyKey });
+    entry.cycle = native.incident.cycle;
+    const approach = { workMode: "ADVANCE_DISCOVERY", strategyAction: "DISCOVER_WITH_BROWSER", playbookStage: "INDEPENDENT_CONFIRMATION" };
+    batch.summary = { ...batch.summary, remediation: {
+      ...approach, allowUnchangedRuntime: true, requiresImplementationPath: false, reason: "PLAYBOOK_STAGE_PENDING", retryBudget: null,
+      attempts: [{ courseRef: createHash("sha256").update(entry.courseId).digest("hex").slice(0,24),
+        providerSnapshotFingerprint: providerFingerprint, failureFingerprint: entry.incident.failureFingerprint,
+        runtimeVersion: releaseSha, activeRealSearchCount: 0, playbookEventCountAtClaim: completed.events.length - 1,
+        reason: "PLAYBOOK_STAGE_PENDING", retryBudget: null, approach,
+        actionPlan: { schemaVersion: 1, primaryAction: "SEARCH_FOR_OFFICIAL_SOURCE", allowedActions: ["SEARCH_FOR_OFFICIAL_SOURCE"], route: approach },
+      }],
+    } };
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.transaction.mockImplementation(async (worker: (tx: typeof monitoringTransactionClient) => Promise<unknown>) => worker(monitoringTransactionClient));
+    const result = await closeoutCourseSupportBatch({ batchId: "batch-1", leaseToken: "lease-1", ownerThreadId: "owner-thread",
+      verificationWatchMode: "WATCH_SETTLED", now: native.now });
+    expect(result).toMatchObject({ outcome: "needs_human", retryCount: 0, terminalCount: 0, needsHumanCount: 1, automationStalledCount: 0 });
+    expect(prismaMocks.batchUpdateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ summary: expect.objectContaining({
+      closeout: expect.objectContaining({ sourceResearchUnresolvedCount: 1, sourceResearchHandoffCount: 0 }),
+    }) }) }));
+    expect(prismaMocks.incidentUpdateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ result: "NEEDS_HUMAN" }) }));
+    expect(entry.incident.attemptLedger).toEqual(completed);
+  });
+
+  it.each([
+    ["no unique", "none"], ["browser completed", "none"], ["browser completed", "mixed sibling"],
+    ...["missing receipt", "duplicate receipt", "malformed execution", "unconsumed receipt", "different observed snapshot", "different current snapshot",
+      "different action", "different cycle", "completed before claim", "missing deployment", "missing verification", "success winner", "newer strong evidence"].map((scenario) => ["browser completed", scenario]),
+  ])("preserves the immutable %s research receipt after neutral discovery-window eviction (%s)", async (mode, scenario) => {
+    const native = retainedSourceRecoveryFixture().input;
+    const clock = native.now!;
+    const at = (seconds: number) => new Date(clock.getTime() + seconds * 1000);
+    const batch = closeoutBatch("PENDING");
+    const entry = batch.incidents[0];
+    const sourceEvents = parseAutomationPlaybookLedger(native.incident.attemptLedger)!;
+    const completed = appendAutomationPlaybookEvent(sourceEvents, {
+      cycle: native.incident.cycle, stage: "INDEPENDENT_CONFIRMATION", readPath: "INDEPENDENT_CONFIRMATION",
+      ...(mode === "no unique" ? {
+        transition: "FAILED_TERMINAL" as const, evidenceKind: "TOOLING" as const, providerExecution: false,
+        failureClass: "MISSING_SOURCE" as const,
+        failureFingerprint: `RETAINED_SOURCE:EXACT_SEARCH:NO_UNIQUE:${providerFingerprint.toUpperCase()}`,
+      } : { transition: "COMPLETED" as const, evidenceKind: "RENDERED_PAGE" as const, providerExecution: true,
+        failureFingerprint: "PLAYBOOK:INDEPENDENT_CONFIRMATION:COMPLETED" }),
+      runtimeVersion: releaseSha, observedAt: at(-10),
+    });
+    const neutralRows = Array.from({ length: 12 }, (_, index) => ({
+      status: "INSPECTED", detectedPlatform: "UNKNOWN", apiMetadata: null, confidence: 0.2,
+      createdAt: at(-2 - index / 2), evidence: { learnedFrom: "browser-visible-links", bookingCallToAction: true },
+    }));
+    Object.assign(entry.course, native.course, { automationDiscoveries: neutralRows });
+    Object.assign(entry.incident, native.incident, {
+      activeRealSearchCount: 0, attemptLedger: completed, providerFamilyKey: native.course.providerFamilyKey,
+      failureClass: "MISSING_SOURCE", failureFingerprint: "c".repeat(64), updatedAt: at(-10), lastSeenAt: at(-10),
+    });
+    Object.assign(entry, { cycle: native.incident.cycle, verifiedAt: at(-1), verifiedIncidentUpdatedAt: at(-10), updatedAt: at(-1) });
+    Object.assign(batch, { createdAt: at(-12), deployedAt: at(-20), leaseExpiresAt: at(60) });
+    const approach = { workMode: "ADVANCE_DISCOVERY", strategyAction: "DISCOVER_WITH_BROWSER", playbookStage: "INDEPENDENT_CONFIRMATION" };
+    batch.summary = { ...batch.summary, remediation: {
+      ...approach, allowUnchangedRuntime: true, requiresImplementationPath: false, reason: "PLAYBOOK_STAGE_PENDING", retryBudget: null,
+      attempts: [{ courseRef: createHash("sha256").update(entry.courseId).digest("hex").slice(0, 24),
+        providerSnapshotFingerprint: providerFingerprint, failureFingerprint: entry.incident.failureFingerprint,
+        runtimeVersion: releaseSha, activeRealSearchCount: 0, playbookEventCountAtClaim: sourceEvents.events.length,
+        reason: "PLAYBOOK_STAGE_PENDING", retryBudget: null, approach,
+        actionPlan: { schemaVersion: 1, primaryAction: "SEARCH_FOR_OFFICIAL_SOURCE", allowedActions: ["SEARCH_FOR_OFFICIAL_SOURCE"], route: approach },
+      }],
+    } };
+    if (scenario === "mixed sibling") {
+      const sibling = structuredClone(entry);
+      Object.assign(sibling, { id: "entry-2", incidentId: "incident-2", courseId: "course-2" });
+      batch.incidents.push(sibling);
+      const siblingAttempt = structuredClone(batch.summary.remediation.attempts[0]);
+      siblingAttempt.courseRef = createHash("sha256").update(sibling.courseId).digest("hex").slice(0, 24);
+      Object.assign(siblingAttempt.actionPlan, { primaryAction: "VERIFY_CURRENT_RUNTIME", allowedActions: ["VERIFY_CURRENT_RUNTIME"] });
+      batch.summary.remediation.attempts.push(siblingAttempt);
+      batch.summary.searchExecutionFence = emptySearchExecutionFenceForCourses([entry.courseId, sibling.courseId]);
+    }
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.transaction.mockImplementation(async (worker: (tx: typeof monitoringTransactionClient) => Promise<unknown>) => worker(monitoringTransactionClient));
+    await expect(closeoutCourseSupportBatch({ batchId: "batch-1", leaseToken: "lease-1", ownerThreadId: "owner-thread",
+      verificationWatchMode: "WATCH_SETTLED", now: clock })).resolves.toMatchObject({ outcome: "needs_human", needsHumanCount: 1, terminalCount: 0 });
+    const batchCloseoutWrite = prismaMocks.batchUpdateMany.mock.calls.map(([write]) => write.data).find((data) => data.summary?.closeout);
+    const savedSummary = batchCloseoutWrite.summary;
+    const memberCloseoutWrite = prismaMocks.incidentUpdateMany.mock.calls.map(([write]) => write.data).find((data) => data.result === "NEEDS_HUMAN");
+    expect(batchCloseoutWrite).toMatchObject({ status: "PARTIAL", completedAt: clock });
+    expect(memberCloseoutWrite).toMatchObject({ result: "NEEDS_HUMAN", updatedAt: clock });
+    expect(savedSummary.closeout).toMatchObject({ sourceResearchUnresolvedCount: 1 });
+    expect(savedSummary.closeout.remediationAttempts).toEqual(expect.arrayContaining([expect.objectContaining({
+      courseRef: createHash("sha256").update(entry.courseId).digest("hex").slice(0, 24),
+      consumed: true, providerSnapshotFingerprint: providerFingerprint, observedProviderSnapshotFingerprint: providerFingerprint,
+      executionEvidence: expect.objectContaining({ playbookAttemptRecorded: true }),
+    })]));
+    if (scenario === "mixed sibling") {
+      expect(savedSummary.closeout.remediationAttempts).toHaveLength(2);
+      expect(prismaMocks.incidentUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({ id: "entry-2" }), data: expect.objectContaining({ result: "RETRY_SCHEDULED" }),
+      }));
+    }
+    const current = {
+      ...entry.incident, id: entry.incidentId, courseId: entry.courseId, kind: "NEEDS_ADAPTER", revision: 3,
+      activeBatchId: null, status: "AUTO_INVESTIGATING", resolution: null, resolvedAt: null,
+      humanReviewReason: null, earliestTargetDate: null, nextAttemptAt: clock, escalationDeadlineAt: at(3600),
+      decisionAt: null, decisionActorId: null, decisionReason: null, decisionSource: null, decisionEvidenceUrl: null,
+      course: { ...entry.course, id: entry.courseId, name: "Fixture course", preferences: [], probes: [], updatedAt: at(-10),
+        monitoringStatus: { ...entry.course.monitoringStatus, state: "AUTO_INVESTIGATING", stateChangedAt: clock,
+          failureFingerprint: entry.incident.failureFingerprint, nextAutomaticAttemptAt: clock, revalidationRequestedAt: null },
+      },
+      monitoringEvents: [],
+      batchIncidents: [{ ...entry, ...memberCloseoutWrite, createdAt: batch.createdAt, updatedAt: memberCloseoutWrite.updatedAt, verificationRequests: [],
+        batch: { ...batch, baseSha: releaseSha, status: batchCloseoutWrite.status, completedAt: batchCloseoutWrite.completedAt,
+          updatedAt: batchCloseoutWrite.updatedAt ?? clock, summary: savedSummary },
+      }],
+    };
+    const historical = current.batchIncidents[0];
+    const historicalReceipt = savedSummary.closeout.remediationAttempts[0];
+    if (scenario === "missing receipt") delete savedSummary.closeout.remediationAttempts;
+    if (scenario === "duplicate receipt") savedSummary.closeout.remediationAttempts.push(structuredClone(historicalReceipt));
+    if (scenario === "malformed execution") delete historicalReceipt.executionEvidence.playbookAttemptRecorded;
+    if (scenario === "unconsumed receipt") historicalReceipt.consumed = false;
+    if (scenario === "different observed snapshot") historicalReceipt.observedProviderSnapshotFingerprint = "d".repeat(64);
+    if (scenario === "different current snapshot") verificationMocks.buildCourseSupportProviderSnapshotFingerprint.mockReturnValue("d".repeat(64));
+    if (scenario === "different action") Object.assign(savedSummary.remediation.attempts[0].actionPlan, { primaryAction: "VERIFY_CURRENT_RUNTIME", allowedActions: ["VERIFY_CURRENT_RUNTIME"] });
+    if (scenario === "different cycle") historical.cycle -= 1;
+    if (scenario === "completed before claim") historical.batch.createdAt = at(-9);
+    if (scenario === "missing deployment") Object.assign(historical.batch, { deployedAt: null });
+    if (scenario === "missing verification") Object.assign(historical, { verifiedAt: null });
+    if (scenario === "success winner") Object.assign(current.course.monitoringStatus, { state: "HEALTHY", lastSuccessfulAt: clock });
+    if (scenario === "newer strong evidence") Object.assign(current.course.automationDiscoveries[0], { confidence: 0.95, status: "LEARNED" });
+    prismaMocks.batchFindFirst.mockResolvedValue(null);
+    prismaMocks.supportIncidentFindMany.mockResolvedValue([current]);
+    prismaMocks.supportIncidentFindUnique.mockResolvedValue(current);
+    prismaMocks.monitoringStatusFindUnique.mockResolvedValue(current.course.monitoringStatus);
+    const previousQuery = prismaMocks.queryRaw.getMockImplementation()!;
+    prismaMocks.queryRaw.mockImplementation(async (query) => {
+      const result = await previousQuery(query);
+      return result?.[0]?.now ? [{ now: clock }] : result;
+    });
+    const searchWritesBeforeClaim = prismaMocks.teeSearchUpdateMany.mock.calls.length;
+    const nextClaim = await claimCourseSupportBatch({ ownerThreadId: "owner-thread", branch: "automation/course-support-source-window",
+      baseSha: releaseSha, now: clock });
+    if (scenario === "none" || scenario === "mixed sibling") {
+      expect(nextClaim).toMatchObject({ outcome: "no_due_work", parkedForMaterialChangeCount: 1 });
+      expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+    } else {
+      // The immutable-research veto must not use missing/contradictory receipts
+      // or overwrite a newer winner. Ordinary routing remains independently gated.
+      expect(nextClaim).not.toMatchObject({ parkedForMaterialChangeCount: 1 });
+    }
+    expect(prismaMocks.teeSearchUpdateMany).toHaveBeenCalledTimes(searchWritesBeforeClaim);
+    expect(entry.incident.attemptLedger).toEqual(completed);
   });
 
   it("closes a stale browser-stage handoff as a fresh automatic retry", async () => {

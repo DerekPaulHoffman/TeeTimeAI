@@ -1,13 +1,57 @@
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
+
+import type { CourseSupportClaimActionPlan } from "./course-support-action-plan";
 
 import {
   buildCourseSupportSourceSearchAttemptRef,
+  buildCourseSupportRetainedSourceSearchKey,
   buildCourseSupportSourceSearchContext,
   buildCourseSupportSourceSearchScopeDigest,
   normalizeCourseSupportSourceSearchResult,
 } from "./course-support-source-search";
 
 describe("course-support exact source search", () => {
+  it("binds retained-source research to the incident, cycle and rejected evidence, not a new owner", () => {
+    const scope = { incidentId: "incident-source", cycle: 2, rejectionEvidenceDigest: "a".repeat(64) };
+    const key = buildCourseSupportRetainedSourceSearchKey(scope);
+    expect(buildCourseSupportRetainedSourceSearchKey({ ...scope })).toBe(key);
+    expect(key).toMatch(/^course-support-retained-source-search:[a-f0-9]{64}$/u);
+    expect(buildCourseSupportRetainedSourceSearchKey({ ...scope, cycle: 3 })).not.toBe(key);
+    expect(buildCourseSupportRetainedSourceSearchKey({ ...scope, incidentId: "different-incident" })).not.toBe(key);
+    expect(buildCourseSupportRetainedSourceSearchKey({ ...scope, rejectionEvidenceDigest: "b".repeat(64) })).not.toBe(key);
+    expect(() => buildCourseSupportRetainedSourceSearchKey({ ...scope, cycle: 0 })).toThrow();
+    expect(() => buildCourseSupportRetainedSourceSearchKey({ ...scope, rejectionEvidenceDigest: "UNKNOWN" })).toThrow();
+  });
+  it("preserves the released action-plan-bound ownership digest", () => {
+    const scope = { batchId: "batch-source", incidentId: "incident-source", cycle: 2 };
+    const plan: CourseSupportClaimActionPlan = {
+      schemaVersion: 1,
+      primaryAction: "SEARCH_FOR_OFFICIAL_SOURCE",
+      allowedActions: ["SEARCH_FOR_OFFICIAL_SOURCE"],
+      route: {
+        workMode: "ADVANCE_DISCOVERY",
+        strategyAction: "DISCOVER_WITH_BROWSER",
+        playbookStage: "RENDERED_BROWSER_DISCOVERY",
+      },
+    };
+    const legacy = buildCourseSupportSourceSearchScopeDigest(scope);
+    const releasedWriterDigest = createHash("sha256")
+      .update(legacy)
+      .update("\0")
+      .update(JSON.stringify(plan))
+      .digest("hex");
+    expect(buildCourseSupportSourceSearchScopeDigest({ ...scope, actionPlan: plan }))
+      .toBe(releasedWriterDigest);
+    expect(releasedWriterDigest).not.toBe(legacy);
+    expect(buildCourseSupportSourceSearchScopeDigest({ ...scope, actionPlan: null }))
+      .toBe(legacy);
+    expect(buildCourseSupportSourceSearchScopeDigest({
+      ...scope,
+      actionPlan: { ...plan, allowedActions: [...plan.allowedActions, "VERIFY_CURRENT_RUNTIME"] },
+    })).not.toBe(releasedWriterDigest);
+  });
+
   it("builds one deterministic exact name, address, and locality query", () => {
     const context = buildCourseSupportSourceSearchContext({
       name: "  Pine   Ridge “Golf” Course ",

@@ -58,9 +58,17 @@ import {
   type CourseSupportBrowserPersistenceFence,
 } from "./course-support-browser-stages";
 import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
-import { assessAutomationPlaybook } from "./course-monitoring-playbook";
+import { assessAutomationPlaybook, parseAutomationPlaybookLedger } from "./course-monitoring-playbook";
+import { getCourseSupportRetainedSourceRecovery } from "./course-support-retained-source-recovery";
+import { sanitizeBrowserAuditUrl } from "./browser-probe-evidence";
+import {
+  courseSupportActionPlanAllows,
+  type CourseSupportClaimActionPlan,
+} from "./course-support-action-plan";
 import {
   buildCourseSupportSourceSearchScopeDigest,
+  buildCourseSupportSourceSearchContext,
+  buildCourseSupportRetainedSourceSearchKey,
   normalizeCourseSupportSourceSearchResult,
 } from "./course-support-source-search";
 import {
@@ -682,8 +690,14 @@ async function listExactIncidentBrowserProbeTarget(input: {
           lastSeenAt: true,
           cycle: true,
           confirmedAt: true,
+          firstSeenAt: true,
           attemptLedger: true,
         },
+      },
+      automationDiscoveries: {
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        take: 12,
+        select: { status: true, detectedPlatform: true, apiMetadata: true, automationReason: true, confidence: true, evidence: true, createdAt: true },
       },
       probes: {
         orderBy: { observedAt: "desc" },
@@ -757,11 +771,18 @@ async function listExactIncidentBrowserProbeTarget(input: {
       ? getBestUnsupportedCoverageProbeUrl(probeCourse)
       : getBestProbeUrl(probeCourse)
     : null;
+  const retainedSourceResearchRequired = Boolean(input.persistenceFence && course?.supportIncident &&
+    getCourseSupportRetainedSourceRecovery({ course, incident: course.supportIncident }));
   const ownedSourceCandidate =
-    !currentCourseProbeUrl && input.persistenceFence
+    input.persistenceFence && (!currentCourseProbeUrl || retainedSourceResearchRequired)
       ? await getOwnedCourseSupportSourceSearchCandidate(input.persistenceFence)
       : null;
-  const probeUrl = currentCourseProbeUrl ?? ownedSourceCandidate;
+  // Never repeat the rejected source when a retained-source research assignment
+  // has no valid immutable candidate to investigate.
+  if ((retainedSourceResearchRequired || ownedSourceCandidate?.retainedSourceRecovery) && !ownedSourceCandidate?.candidateUrl) {
+    return [];
+  }
+  const probeUrl = ownedSourceCandidate?.candidateUrl ?? currentCourseProbeUrl;
   const readerOnlyIndependentConfirmation = Boolean(
     course?.monitoringMode === "LOCAL_READER_ONLY" &&
     nextPlaybookStage === "INDEPENDENT_CONFIRMATION",
@@ -821,7 +842,7 @@ async function listExactIncidentBrowserProbeTarget(input: {
         incidentConfirmedAt: course.supportIncident?.confirmedAt ?? null,
       },
       probeUrl,
-      ...(!currentCourseProbeUrl && ownedSourceCandidate
+      ...(ownedSourceCandidate?.candidateUrl
         ? { unprojectedSourceCandidate: true as const }
         : {}),
     },
@@ -883,15 +904,20 @@ async function hasCurrentOwnedBrowserProbeBatchFence(
   return Boolean(batch);
 }
 
-async function getOwnedCourseSupportSourceSearchCandidate(
+export async function hasOwnedCourseSupportSourceSearchCandidate(
   fence: CourseSupportBrowserPersistenceFence,
 ) {
-  const ownershipScopeDigest = buildCourseSupportSourceSearchScopeDigest({
-    batchId: fence.batchId,
-    incidentId: fence.incidentId,
-    cycle: fence.cycle,
-  });
-  const event = await prisma.courseMonitoringEvent.findFirst({
+  return Boolean((await getOwnedCourseSupportSourceSearchCandidate(fence))?.candidateUrl);
+}
+
+async function getOwnedCourseSupportSourceSearchCandidate(
+  fence: CourseSupportBrowserPersistenceFence,
+  transaction: Prisma.TransactionClient = prisma,
+) {
+  const scope = await readOwnedCourseSupportSourceSearchScope(fence, transaction);
+  if (!scope) return null;
+  const absent = { candidateUrl: null, retainedSourceRecovery: scope.retainedSourceRecovery };
+  const event = await transaction.courseMonitoringEvent.findFirst({
     where: {
       courseId: fence.courseId,
       incidentId: fence.incidentId,
@@ -899,31 +925,45 @@ async function getOwnedCourseSupportSourceSearchCandidate(
       source: "COURSE_SUPPORT_RESPONDER",
       readPath: "CODEX_EXACT_SOURCE_SEARCH",
       evidenceUrl: { not: null },
-      audit: { path: ["ownershipScopeDigest"], equals: ownershipScopeDigest },
+      ...(scope.retainedSourceRecovery
+        ? { idempotencyKey: buildCourseSupportRetainedSourceSearchKey({
+            incidentId: fence.incidentId, cycle: fence.cycle,
+            rejectionEvidenceDigest: scope.retainedSourceRecovery.rejectionEvidenceDigest,
+          }) }
+        : { audit: { path: ["ownershipScopeDigest"], equals: scope.ownershipScopeDigest } }),
     },
     orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
     select: { evidenceUrl: true, audit: true },
   });
   const audit = event?.audit;
-  if (
-    !event?.evidenceUrl ||
-    !audit ||
-    typeof audit !== "object" ||
-    Array.isArray(audit)
-  ) {
-    return null;
-  }
+  if (!event?.evidenceUrl || !audit || typeof audit !== "object" || Array.isArray(audit)) return absent;
   const record = audit as Record<string, unknown>;
-  if (
-    record.result !== "CANDIDATE" ||
-    record.incidentCycle !== fence.cycle ||
-    record.ownershipScopeDigest !== ownershipScopeDigest ||
-    record.courseProjectionApplied !== false ||
-    record.browserVerificationRequired !== true
-  ) {
-    return null;
+  if (record.result !== "CANDIDATE" || record.incidentCycle !== fence.cycle ||
+      record.courseProjectionApplied !== false || record.browserVerificationRequired !== true ||
+      (scope.retainedSourceRecovery
+        ? record.sourceSearchMode !== scope.retainedSourceRecovery.mode ||
+          record.rejectionEvidenceDigest !== scope.retainedSourceRecovery.rejectionEvidenceDigest ||
+          record.providerSnapshotFingerprint !== scope.retainedSourceRecovery.providerSnapshotFingerprint ||
+          record.queryDigest !== scope.queryDigest
+        : record.ownershipScopeDigest !== scope.ownershipScopeDigest)) return absent;
+  // Candidate history is not navigation authority. Re-read the current owner,
+  // release, canonical claim and exact rejection proof after retrieving it.
+  if (JSON.stringify(await readOwnedCourseSupportSourceSearchScope(fence, transaction)) !== JSON.stringify(scope)) return absent;
+  try {
+    return {
+      candidateUrl: normalizeCourseSupportSourceSearchResult({ candidateUrl: event.evidenceUrl }).candidateUrl,
+      retainedSourceRecovery: scope.retainedSourceRecovery,
+    };
+  } catch {
+    return absent;
   }
-  const batch = await prisma.courseSupportBatch.findFirst({
+}
+
+async function readOwnedCourseSupportSourceSearchScope(
+  fence: CourseSupportBrowserPersistenceFence,
+  transaction: Prisma.TransactionClient,
+) {
+  const batch = await transaction.courseSupportBatch.findFirst({
     where: {
       id: fence.batchId,
       leaseToken: fence.leaseToken,
@@ -934,6 +974,8 @@ async function getOwnedCourseSupportSourceSearchCandidate(
       deployedAt: fence.deployedAt,
     },
     select: {
+      summary: true,
+      _count: { select: { incidents: true } },
       releaseSha: true,
       deployedAt: true,
       incidents: {
@@ -948,9 +990,13 @@ async function getOwnedCourseSupportSourceSearchCandidate(
           cycle: true,
           result: true,
           course: {
-            select: {
-              website: true,
-              detectedBookingUrl: true,
+            include: {
+              monitoringStatus: true,
+              automationDiscoveries: {
+                orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+                take: 12,
+                select: { status: true, detectedPlatform: true, apiMetadata: true, automationReason: true, confidence: true, evidence: true, createdAt: true },
+              },
             },
           },
           incident: {
@@ -960,6 +1006,16 @@ async function getOwnedCourseSupportSourceSearchCandidate(
               status: true,
               activeBatchId: true,
               attemptLedger: true,
+              firstSeenAt: true,
+              confirmedAt: true,
+              failureFingerprint: true,
+              resolution: true,
+              humanReviewReason: true,
+              decisionAt: true,
+              decisionActorId: true,
+              decisionNote: true,
+              decisionEvidenceUrl: true,
+              decisionIdempotencyKey: true,
             },
           },
         },
@@ -976,7 +1032,6 @@ async function getOwnedCourseSupportSourceSearchCandidate(
     entry.courseId !== fence.courseId ||
     entry.cycle !== fence.cycle ||
     !isActiveOwnedCourseSupportBrowserResult(entry.result) ||
-    Boolean(entry.course.website || entry.course.detectedBookingUrl) ||
     entry.incident.id !== fence.incidentId ||
     entry.incident.cycle !== fence.cycle ||
     entry.incident.status !== "AUTO_INVESTIGATING" ||
@@ -986,13 +1041,76 @@ async function getOwnedCourseSupportSourceSearchCandidate(
   ) {
     return null;
   }
-  try {
-    return normalizeCourseSupportSourceSearchResult({
-      candidateUrl: event.evidenceUrl,
-    }).candidateUrl;
-  } catch {
-    return null;
+  const summary =
+    batch.summary &&
+    typeof batch.summary === "object" &&
+    !Array.isArray(batch.summary)
+      ? batch.summary
+      : {};
+  const remediationValue = summary.remediation;
+  const remediation =
+    remediationValue &&
+    typeof remediationValue === "object" &&
+    !Array.isArray(remediationValue)
+      ? remediationValue
+      : {};
+  let actionPlan: CourseSupportClaimActionPlan | null = null;
+  let retainedSourceRecovery: ReturnType<typeof getCourseSupportRetainedSourceRecovery> = null;
+  let queryDigest: string | null = null;
+  if (Object.prototype.hasOwnProperty.call(remediation, "attempts")) {
+    // Reuse the writer's canonical per-course claim parser. A malformed modern
+    // claim must never fall back to the legacy, plan-free lookup key.
+    const { readCourseSupportRemediationClaimAttempt } =
+      await import("./course-support-batches");
+    const claim = readCourseSupportRemediationClaimAttempt({
+      summary: batch.summary,
+      courseId: fence.courseId,
+      expectedAttemptCount: batch._count?.incidents ?? 0,
+    });
+    if (!claim) {
+      return null;
+    }
+    actionPlan = claim.actionPlan;
+    if (entry.course.website || entry.course.detectedBookingUrl) {
+      retainedSourceRecovery = getCourseSupportRetainedSourceRecovery({ course: entry.course, incident: entry.incident });
+      try {
+        queryDigest = buildCourseSupportSourceSearchContext(entry.course).queryDigest;
+      } catch {
+        return null;
+      }
+      const currentEvents = parseAutomationPlaybookLedger(entry.incident.attemptLedger)?.events.filter(
+        (event) => event.cycle === fence.cycle,
+      );
+      const decisions = [entry.incident.decisionAt, entry.incident.decisionActorId, entry.incident.decisionNote,
+        entry.incident.decisionEvidenceUrl, entry.incident.decisionIdempotencyKey];
+      if (!retainedSourceRecovery || fence.stage !== "INDEPENDENT_CONFIRMATION" ||
+          claim.providerSnapshotFingerprint !== retainedSourceRecovery.providerSnapshotFingerprint ||
+          claim.failureFingerprint !== entry.incident.failureFingerprint ||
+          claim.playbookEventCountAtClaim !== currentEvents?.length ||
+          decisions.some((value) => value !== null) || entry.incident.resolution !== null ||
+          entry.incident.humanReviewReason !== null ||
+          entry.course.monitoringStatus?.state !== "AUTO_INVESTIGATING" ||
+          (entry.course.monitoringStatus.lastSuccessfulAt &&
+            entry.course.monitoringStatus.lastSuccessfulAt >= new Date(retainedSourceRecovery.renderedObservedAt))) return null;
+    }
+    if (
+      actionPlan &&
+      (!courseSupportActionPlanAllows(actionPlan, "SEARCH_FOR_OFFICIAL_SOURCE") ||
+        actionPlan.route.workMode !== "ADVANCE_DISCOVERY" ||
+        actionPlan.route.playbookStage !== (retainedSourceRecovery ? "INDEPENDENT_CONFIRMATION" : "RENDERED_BROWSER_DISCOVERY"))
+    ) {
+      return null;
+    }
   }
+  if ((entry.course.website || entry.course.detectedBookingUrl) &&
+      (!retainedSourceRecovery || actionPlan?.primaryAction !== "SEARCH_FOR_OFFICIAL_SOURCE")) return null;
+  return {
+    ownershipScopeDigest: buildCourseSupportSourceSearchScopeDigest({
+      batchId: fence.batchId, incidentId: fence.incidentId, cycle: fence.cycle, actionPlan,
+    }),
+    retainedSourceRecovery,
+    queryDigest,
+  };
 }
 
 function getIncidentMonitoringFailureEvidence(incident: {
@@ -1676,6 +1794,71 @@ export function bindBrowserDiscoveryToProviderSnapshot(
   } as BrowserDiscovery;
 }
 
+const CLEARED_REJECTED_SOURCE_BOOKING_WINDOW = {
+  bookingWindowDaysAhead: null, bookingWindowEvidenceUrl: null, bookingReleaseTimeLocal: null,
+  bookingWindowSource: null, bookingWindowConfidence: null, bookingWindowCheckedAt: null, bookingWindowObservedAt: null,
+} as const;
+
+function priorRetainedSourceBookingWindow(course: {
+  bookingWindowDaysAhead: number | null; bookingWindowEvidenceUrl: string | null;
+  bookingReleaseTimeLocal: string | null; bookingWindowSource: string | null; bookingWindowConfidence: number | null;
+}) {
+  const evidenceUrl = course.bookingWindowEvidenceUrl ? parseSafePublicUrl(course.bookingWindowEvidenceUrl) : null;
+  return {
+    daysAhead: course.bookingWindowDaysAhead === null ? null :
+      Number.isInteger(course.bookingWindowDaysAhead) && course.bookingWindowDaysAhead >= 0 && course.bookingWindowDaysAhead <= 90
+        ? course.bookingWindowDaysAhead : "UNKNOWN",
+    releaseTimeLocal: course.bookingReleaseTimeLocal === null ? null :
+      /^(?:[01]\d|2[0-3]):[0-5]\d$/u.test(course.bookingReleaseTimeLocal) ? course.bookingReleaseTimeLocal : "UNKNOWN",
+    source: course.bookingWindowSource === null ? null :
+      ["PROVIDER_CONFIG", "PROVIDER_MESSAGE", "OFFICIAL_BOOKING_PAGE"].includes(course.bookingWindowSource) ? course.bookingWindowSource : "UNKNOWN",
+    confidence: course.bookingWindowConfidence === null ? null :
+      Number.isFinite(course.bookingWindowConfidence) && course.bookingWindowConfidence >= 0 && course.bookingWindowConfidence <= 1
+        ? course.bookingWindowConfidence : "UNKNOWN",
+    evidenceUrl: evidenceUrl && isSafeManualEvidenceUrl(evidenceUrl) ? sanitizeBrowserAuditUrl(evidenceUrl.toString()) : null,
+  };
+}
+
+function hasIndependentStrongBookingWindow(course: {
+  website: string | null; detectedBookingUrl: string | null; bookingWindowEvidenceUrl: string | null;
+  bookingWindowDaysAhead: number | null; bookingWindowConfidence: number | null;
+}) {
+  if (course.bookingWindowDaysAhead === null || (course.bookingWindowConfidence ?? 0) < 0.8) return false;
+  const evidence = course.bookingWindowEvidenceUrl ? parseSafePublicUrl(course.bookingWindowEvidenceUrl) : null;
+  if (!evidence || !isSafeManualEvidenceUrl(evidence)) return false;
+  return ![course.website, course.detectedBookingUrl].some((url) => {
+    const rejected = url ? parseSafePublicUrl(url) : null;
+    return rejected && haveSameCourseWebsiteOrigin(rejected, evidence);
+  });
+}
+
+function hasDirectOwnedReplacementSourceProof(
+  input: BrowserDiscovery,
+  fence: CourseSupportBrowserPersistenceFence,
+  candidateUrl: string,
+  observedAt: Date,
+) {
+  const browser = asProviderExecutionSummary(asProviderExecutionSummary(input.evidence).browserInvestigation);
+  const authority = asProviderExecutionSummary(browser.identityAuthority);
+  const retained = asProviderExecutionSummary(browser.retainedInputs);
+  const candidate = parseSafePublicUrl(candidateUrl);
+  const source = parseSafePublicUrl(input.sourceUrl);
+  if (!candidate || !source || !isSafeManualEvidenceUrl(source) ||
+      !haveSameCourseWebsiteOrigin(candidate, source) ||
+      browser.mode !== "INDEPENDENT" || browser.incidentCycle !== fence.cycle ||
+      browser.runtimeVersion !== fence.runtimeVersion || browser.observedAt !== observedAt.toISOString() ||
+      browser.providerRequestObserved !== true ||
+      authority.source !== "UNPROJECTED_OWNER_SOURCE_CANDIDATE" ||
+      authority.localityEvidencePresent !== true ||
+      retained.sourceUrl !== sanitizeBrowserAuditUrl(candidateUrl) ||
+      retained.officialWebsite !== sanitizeBrowserAuditUrl(candidateUrl) || retained.bookingUrl !== null ||
+      !Array.isArray(browser.sameOriginPages)) return false;
+  const roots = browser.sameOriginPages.map(asProviderExecutionSummary).filter((page) => page.depth === 0);
+  return roots.some((page) => page.requestedUrl === sanitizeBrowserAuditUrl(candidateUrl) &&
+    page.finalUrl === sanitizeBrowserAuditUrl(input.sourceUrl) && page.identityStatus === "MATCH" &&
+    page.localityCorroborated === true && page.trustedForCourse === true && page.interactionBlocked === false);
+}
+
 export async function recordAndApplyOwnedBrowserDiscoveryToCourse(
   projectionInput: BrowserDiscovery,
   persistenceInput: BrowserDiscovery,
@@ -1780,7 +1963,21 @@ export async function recordAndApplyOwnedBrowserDiscoveryToCourse(
             };
           }
 
-          const applied = await applyBrowserDiscoveryToCourseInTransaction(
+          const retainedCandidateObservation = Boolean(
+            (preProjectionCourse.website || preProjectionCourse.detectedBookingUrl) &&
+            asProviderExecutionSummary(asProviderExecutionSummary(persistenceAudit).identityAuthority).source === "UNPROJECTED_OWNER_SOURCE_CANDIDATE",
+          );
+          const sourceCandidate =
+            retainedCandidateObservation && persistenceFence.stage === "INDEPENDENT_CONFIRMATION"
+              ? await getOwnedCourseSupportSourceSearchCandidate(persistenceFence, ownedTransaction)
+              : null;
+          const recoveredSourceWebsite = sourceCandidate?.retainedSourceRecovery &&
+            sourceCandidate.candidateUrl &&
+            !hasIndependentStrongBookingWindow(preProjectionCourse) &&
+            hasDirectOwnedReplacementSourceProof(projectionInput, persistenceFence, sourceCandidate.candidateUrl, observedAt)
+              ? projectionInput.sourceUrl : undefined;
+
+          const applied = retainedCandidateObservation && !recoveredSourceWebsite ? null : await applyBrowserDiscoveryToCourseInTransaction(
             projectionInput,
             {
               updatedAt: preProjectionCourse.updatedAt,
@@ -1792,6 +1989,7 @@ export async function recordAndApplyOwnedBrowserDiscoveryToCourse(
             undefined,
             observedAt,
             observedProviderSnapshotFingerprint,
+            recoveredSourceWebsite,
           );
           const resultingCourse =
             applied ??
@@ -1816,9 +2014,17 @@ export async function recordAndApplyOwnedBrowserDiscoveryToCourse(
               snapshotBound: false as const,
             };
           }
+          const replacementHistoryInput = applied && recoveredSourceWebsite ? {
+            ...persistenceInput,
+            evidence: { ...persistenceInput.evidence, retainedSourceReplacement: {
+              mode: "RETAINED_SOURCE_IDENTITY_RESEARCH",
+              priorProviderSnapshotFingerprint: observedProviderSnapshotFingerprint,
+              priorBookingWindow: priorRetainedSourceBookingWindow(preProjectionCourse),
+            } },
+          } : persistenceInput;
           const persisted = await persist(
             bindBrowserDiscoveryToProviderSnapshot(
-              persistenceInput,
+              replacementHistoryInput,
               providerSnapshotFingerprint,
             ),
           );
@@ -1899,6 +2105,7 @@ async function applyBrowserDiscoveryToCourseInTransaction(
     BrowserDiscoveryUnownedIncidentExpectation | undefined,
   observedAt: Date,
   expectedProviderSnapshotFingerprint?: string,
+  recoveredSourceWebsite?: string,
 ) {
   input = normalizeAutomatedTechnicalDiscovery(
     normalizeBrowserDiscoveryForMonitoring(input),
@@ -1961,7 +2168,7 @@ async function applyBrowserDiscoveryToCourseInTransaction(
     ) {
       return null;
     }
-    if (!inspectedProviderIdentity && !nonRunnableOfficialBookingLink) {
+    if (!inspectedProviderIdentity && !nonRunnableOfficialBookingLink && !recoveredSourceWebsite) {
       return null;
     }
 
@@ -2008,6 +2215,42 @@ async function applyBrowserDiscoveryToCourseInTransaction(
     }
 
     const persistedProvider = resolveProviderCapability(current);
+    if (recoveredSourceWebsite) {
+      // This private authority is created only by the owned candidate/history
+      // recheck above. An identity-verified page is reusable source knowledge,
+      // but an unconfirmed CTA is never executable provider support.
+      if (persistedProvider.isRunnable || current.isPublic !== true ||
+          current.monitoringMode !== "AUTOMATIC" || incomingTerminal) return null;
+      const safeIdentity = nonRunnableOfficialBookingLink ?? inspectedProviderIdentity;
+      const updated = await transaction.course.updateMany({
+        where: { id: input.courseId, updatedAt: current.updatedAt },
+        data: {
+          website: recoveredSourceWebsite,
+          ...CLEARED_REJECTED_SOURCE_BOOKING_WINDOW,
+          detectedPlatform: safeIdentity?.detectedPlatform ?? "UNKNOWN",
+          providerFamilyKey: safeIdentity?.providerFamilyKey ?? resolveProviderCapability({ website: recoveredSourceWebsite }).providerFamilyKey,
+          detectedBookingUrl: safeIdentity ? input.bookingUrl ?? null : null,
+          bookingMetadata: Prisma.DbNull,
+          bookingMethod: "UNKNOWN",
+          bookingAccessMode: "UNKNOWN",
+          automationEligibility: "NEEDS_REVIEW",
+          automationReason: "UNSUPPORTED_PLATFORM",
+          intelligenceVerifiedAt: null,
+          intelligenceReviewAt: null,
+          intelligenceConfidence: null,
+        },
+      });
+      if (updated.count !== 1) return null;
+      const applied = await transaction.course.findUnique({ where: { id: input.courseId } });
+      if (applied) {
+        await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(transaction, {
+          courseId: input.courseId, before: current, after: applied,
+          providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(applied),
+          source: "COURSE_SUPPORT_RESPONDER", now: observedAt,
+        });
+      }
+      return applied;
+    }
     if (nonRunnableOfficialBookingLink) {
       if (
         !canApplyNonRunnableOfficialCourseBookingLink({
@@ -2217,7 +2460,7 @@ async function applyBrowserDiscoveryToCourseInTransaction(
     ),
   );
   const trustedPersistedReplacement =
-    replacingLegacyPolicyOnlyBlock ||
+    Boolean(recoveredSourceWebsite) || replacingLegacyPolicyOnlyBlock ||
     corroboratedLearnedReplacement ||
     corroboratedPrivateReopening ||
     corroboratedPendingPublicCourse;
@@ -2291,6 +2534,7 @@ async function applyBrowserDiscoveryToCourseInTransaction(
             intelligenceConfidence: input.confidence,
           }
         : {
+            ...(recoveredSourceWebsite ? { website: recoveredSourceWebsite, ...CLEARED_REJECTED_SOURCE_BOOKING_WINDOW } : {}),
             ...(corroboratedPrivateReopening || corroboratedPendingPublicCourse
               ? { isPublic: true, policyNotes: null }
               : { policyNotes: input.policyNotes }),

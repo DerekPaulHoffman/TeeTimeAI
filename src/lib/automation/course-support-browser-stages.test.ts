@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import type { Prisma } from "@prisma/client";
 import { describe, expect, it, vi } from "vitest";
+import { prisma } from "@/lib/prisma";
 
 import {
   appendAutomationPlaybookEvent,
@@ -19,6 +21,8 @@ import {
   runCourseSupportVerificationPass,
   runCourseSupportVerificationWatch,
 } from "./course-support-verification-watch";
+import { getCourseSupportRetainedSourceRecovery } from "./course-support-retained-source-recovery";
+import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
 
 const runtimeVersion = "a".repeat(40);
 
@@ -102,6 +106,78 @@ function browserPersistenceFence() {
     cycle: 1,
     stage: "RENDERED_BROWSER_DISCOVERY" as const,
   };
+}
+
+function retainedSourceResearchBatch(sourceSearchAssigned = false) {
+  const renderedAt = new Date("2026-07-21T11:55:00.000Z");
+  const course = {
+    website: "https://retained.example.test/",
+    detectedBookingUrl: null,
+    detectedPlatform: "UNKNOWN" as const,
+    providerFamilyKey: "unknown",
+    bookingMethod: "PUBLIC_ONLINE" as const,
+    automationEligibility: "NEEDS_REVIEW" as const,
+    automationReason: "UNSUPPORTED_PLATFORM" as const,
+    monitoringMode: "AUTOMATIC" as const,
+    bookingAccessMode: "PUBLIC_SIGNED_OUT",
+    isPublic: true,
+  };
+  const providerSnapshotFingerprint = buildCourseSupportProviderSnapshotFingerprint(course);
+  const attemptLedger = ledger([
+    ...throughHttpRetry.map((event) => ({ ...event, observedAt: new Date("2026-07-21T11:51:00.000Z") })),
+    {
+      ...completedStage("RENDERED_BROWSER_DISCOVERY", "RENDERED_BROWSER"),
+      transition: "STARTED", observedAt: new Date("2026-07-21T11:54:00.000Z"),
+    },
+    {
+      ...completedStage("RENDERED_BROWSER_DISCOVERY", "RENDERED_BROWSER"),
+      providerExecution: true, observedAt: renderedAt,
+    },
+    {
+      ...completedStage("BROWSER_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER"),
+      transition: "NOT_APPLICABLE", evidenceKind: "TOOLING",
+      skipReason: "NO_RUNNABLE_ADAPTER", observedAt: new Date("2026-07-21T11:56:00.000Z"),
+    },
+    {
+      ...completedStage("LOCAL_READER", "LOCAL_READER"),
+      transition: "NOT_APPLICABLE", evidenceKind: "TOOLING",
+      skipReason: "NO_LOCAL_READER_CAPABILITY", observedAt: new Date("2026-07-21T11:57:00.000Z"),
+    },
+  ]);
+  const approach = {
+    workMode: "ADVANCE_DISCOVERY",
+    strategyAction: sourceSearchAssigned ? "DISCOVER_WITH_BROWSER" : "REPAIR_PROVIDER_ADAPTER",
+    playbookStage: sourceSearchAssigned ? "INDEPENDENT_CONFIRMATION" : "BROWSER_ADAPTER_RETRY",
+  };
+  const primaryAction = sourceSearchAssigned ? "SEARCH_FOR_OFFICIAL_SOURCE" : "VERIFY_CURRENT_RUNTIME";
+  return ownedBrowserBatch({
+    summary: { remediation: { attempts: [{
+      courseRef: createHash("sha256").update("course-1").digest("hex").slice(0, 24),
+      providerSnapshotFingerprint, failureFingerprint: "PLAYBOOK:UNSUPPORTED",
+      playbookEventCountAtClaim: attemptLedger!.events.length,
+      approach, actionPlan: { schemaVersion: 1, primaryAction, allowedActions: [primaryAction], route: approach },
+    }] } },
+    incidents: [{
+      courseId: "course-1", cycle: 1, result: "PENDING",
+      incident: {
+        id: "incident-1", cycle: 1, status: "AUTO_INVESTIGATING", activeBatchId: "batch-1",
+        confirmedAt: new Date("2026-07-21T11:50:00.000Z"), firstSeenAt: new Date("2026-07-21T11:50:00.000Z"), attemptLedger,
+      },
+      course: { ...course, automationDiscoveries: [{
+        status: "INSPECTED", detectedPlatform: "UNKNOWN", apiMetadata: null, confidence: 0.2, createdAt: renderedAt,
+        evidence: {
+          learnedFrom: "provider-target-scope-unconfirmed", bookingCallToAction: true,
+          browserInvestigation: {
+            mode: "RENDERED", incidentCycle: 1, runtimeVersion, providerSnapshotFingerprint, observedAt: renderedAt.toISOString(),
+            identityAuthority: { source: "RETAINED_OFFICIAL_WEBSITE", localityEvidencePresent: true, placeEvidencePresent: true, renderedSignals: ["TITLE", "H1", "URL_PATH"] },
+            retainedInputs: { officialWebsite: course.website, bookingUrl: null, sourceUrl: course.website },
+            sameOriginPages: [{ requestedUrl: course.website, finalUrl: course.website, depth: 0, purpose: "ROOT", identityStatus: "CONFLICT", trustedForCourse: false, interactionBlocked: false, localityCorroborated: false }],
+            bookingDestinations: [], networkContracts: [], providerRequestObserved: false, restrictedNetworkObserved: true,
+          },
+        },
+      }] },
+    }],
+  });
 }
 
 function ownedBrowserPersistenceTransaction(result: string) {
@@ -305,6 +381,116 @@ describe("persistOwnedCourseSupportBrowserPlaybookStages", () => {
     now: new Date("2026-07-21T12:00:00.000Z"),
   };
 
+  it("loads the same bounded rejection history as the source-search producer", async () => {
+    const query = vi.spyOn(prisma.courseSupportBatch, "findFirst").mockResolvedValue(null);
+    const runBrowserProbe = vi.fn();
+    try {
+      await expect(persistOwnedCourseSupportBrowserPlaybookStages(input, { runBrowserProbe }))
+        .rejects.toThrow("current batch ownership");
+      expect(query).toHaveBeenCalledOnce();
+      expect(query.mock.calls[0][0]).toMatchObject({ select: { incidents: { select: { course: { select: {
+        automationDiscoveries: { take: 12, orderBy: [{ createdAt: "desc" }, { id: "desc" }] },
+      } } } } } });
+      expect(runBrowserProbe).not.toHaveBeenCalled();
+    } finally {
+      query.mockRestore();
+    }
+  });
+
+  it("yields retained-source research without independently revisiting the rejected site", async () => {
+    const batch = retainedSourceResearchBatch();
+    const entry = batch.incidents[0];
+    const originalLedger = structuredClone(entry.incident.attemptLedger);
+    expect(getCourseSupportRetainedSourceRecovery({
+      course: entry.course!, incident: { ...entry.incident, confirmedAt: entry.incident.confirmedAt!, firstSeenAt: entry.incident.firstSeenAt! }, now: input.now,
+    })).toMatchObject({ mode: "RETAINED_SOURCE_IDENTITY_RESEARCH" });
+    const runBrowserProbe = vi.fn();
+    const hasOwnedSourceSearchCandidate = vi.fn();
+    const closeout = vi.fn().mockResolvedValue({ durableCloseoutRecorded: true });
+    const verifyBatch = vi.fn().mockResolvedValue({ verified: true, detachedVerification: { rerunNeeded: false } });
+    const result = await runCourseSupportVerificationWatch({
+      pass: () => runCourseSupportVerificationPass({
+        persistBrowserStages: () => persistOwnedCourseSupportBrowserPlaybookStages(input, {
+          loadBatch: vi.fn().mockResolvedValue(batch), runBrowserProbe, hasOwnedSourceSearchCandidate,
+        }),
+        verifyBatch,
+      }),
+      closeout,
+    });
+    expect(result).toMatchObject({
+      outcome: "verification_watch_action_handoff", passCount: 1,
+      browserStageTotals: { eligibleCount: 0, persistedCount: 0, renderedDiscoveryCount: 0, independentConfirmationCount: 0, sourceResearchHandoffCount: 1 },
+      closeout: { durableCloseoutRecorded: true },
+    });
+    expect(runBrowserProbe).not.toHaveBeenCalled();
+    expect(hasOwnedSourceSearchCandidate).not.toHaveBeenCalled();
+    expect(verifyBatch).toHaveBeenCalledOnce();
+    expect(closeout).toHaveBeenCalledOnce();
+    expect(entry.incident.attemptLedger).toEqual(originalLedger);
+    expect(assessAutomationPlaybook(entry.incident.attemptLedger, 1).nextStage).toBe("INDEPENDENT_CONFIRMATION");
+  });
+
+  it("runs independent confirmation for the next exact owned source-search candidate", async () => {
+    const batch = retainedSourceResearchBatch(true);
+    const hasOwnedSourceSearchCandidate = vi.fn().mockResolvedValue(true);
+    const runBrowserProbe = vi.fn().mockResolvedValue({ persistedCount: 1 });
+    await expect(persistOwnedCourseSupportBrowserPlaybookStages(input, {
+      loadBatch: vi.fn().mockResolvedValue(batch), runBrowserProbe, hasOwnedSourceSearchCandidate,
+    })).resolves.toMatchObject({
+      eligibleCount: 1, persistedCount: 1, independentConfirmationCount: 1, sourceResearchHandoffCount: 0,
+    });
+    expect(hasOwnedSourceSearchCandidate).toHaveBeenCalledOnce();
+    expect(hasOwnedSourceSearchCandidate).toHaveBeenCalledWith({
+      ...browserPersistenceFence(), stage: "INDEPENDENT_CONFIRMATION",
+    });
+    expect(runBrowserProbe).toHaveBeenCalledOnce();
+    expect(runBrowserProbe).toHaveBeenCalledWith(expect.objectContaining({ mode: "INDEPENDENT", persistSearchProbe: false, deferTerminalCloseout: true }));
+  });
+
+  it.each([false, true])("never falls back to the old site without the owned candidate (independent started: %s)", async (started) => {
+    const batch = retainedSourceResearchBatch(true);
+    if (started) {
+      batch.incidents[0].incident.attemptLedger = appendAutomationPlaybookEvent(batch.incidents[0].incident.attemptLedger, {
+        ...completedStage("INDEPENDENT_CONFIRMATION", "INDEPENDENT_CONFIRMATION"),
+        transition: "STARTED", observedAt: new Date("2026-07-21T11:58:00.000Z"),
+      });
+    }
+    const runBrowserProbe = vi.fn();
+    const hasOwnedSourceSearchCandidate = vi.fn().mockResolvedValue(false);
+    await expect(persistOwnedCourseSupportBrowserPlaybookStages(input, {
+      loadBatch: vi.fn().mockResolvedValue(batch), runBrowserProbe, hasOwnedSourceSearchCandidate,
+    })).rejects.toThrow("exact recorded candidate");
+    expect(hasOwnedSourceSearchCandidate).toHaveBeenCalledOnce();
+    expect(runBrowserProbe).not.toHaveBeenCalled();
+  });
+
+  it("rechecks ownership after candidate resolution before independent browser I/O", async () => {
+    const batch = retainedSourceResearchBatch(true);
+    const runBrowserProbe = vi.fn();
+    const hasOwnedSourceSearchCandidate = vi.fn(async () => {
+      batch.incidents[0].incident.activeBatchId = null;
+      return true;
+    });
+    await expect(persistOwnedCourseSupportBrowserPlaybookStages(input, {
+      loadBatch: vi.fn().mockResolvedValue(batch), runBrowserProbe, hasOwnedSourceSearchCandidate,
+    })).rejects.toThrow("current course ownership");
+    expect(runBrowserProbe).not.toHaveBeenCalled();
+  });
+
+  it.each(["plan", "source evidence"])("rechecks %s after candidate resolution before independent browser I/O", async (change) => {
+    const batch = retainedSourceResearchBatch(true);
+    const runBrowserProbe = vi.fn();
+    const hasOwnedSourceSearchCandidate = vi.fn(async () => {
+      if (change === "plan") batch.summary = retainedSourceResearchBatch(false).summary;
+      else batch.incidents[0].course!.automationDiscoveries = [];
+      return true;
+    });
+    await expect(persistOwnedCourseSupportBrowserPlaybookStages(input, {
+      loadBatch: vi.fn().mockResolvedValue(batch), runBrowserProbe, hasOwnedSourceSearchCandidate,
+    })).rejects.toThrow("source research changed");
+    expect(runBrowserProbe).not.toHaveBeenCalled();
+  });
+
   it("preserves the batch-load failure origin through the verification pass", async () => {
     const privateCanary = "must-not-persist-batch-load-cause";
     let thrown: unknown;
@@ -500,6 +686,7 @@ describe("persistOwnedCourseSupportBrowserPlaybookStages", () => {
       persistedCount: 0,
       renderedDiscoveryCount: 0,
       independentConfirmationCount: 0,
+      sourceResearchHandoffCount: 0,
     });
     expect(runBrowserProbe).toHaveBeenCalledTimes(2);
   });
@@ -693,6 +880,7 @@ describe("persistOwnedCourseSupportBrowserPlaybookStages", () => {
       persistedCount: 0,
       renderedDiscoveryCount: 0,
       independentConfirmationCount: 0,
+      sourceResearchHandoffCount: 0,
     });
     expect(runBrowserProbe).not.toHaveBeenCalled();
   });

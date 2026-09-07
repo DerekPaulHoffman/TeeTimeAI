@@ -3,6 +3,8 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 
 import { assessAutomationPlaybook } from "./course-monitoring-playbook";
+import { courseSupportActionPlanAllows } from "./course-support-action-plan";
+import { getCourseSupportRetainedSourceRecovery } from "./course-support-retained-source-recovery";
 import type { BrowserInvestigationMode } from "./browser-probe-evidence";
 import {
   tagCourseSupportBrowserStageControlFailure,
@@ -19,18 +21,22 @@ export type CourseSupportBrowserStageEntry = {
   courseId: string;
   cycle: number;
   result: string;
+  course?: Parameters<typeof getCourseSupportRetainedSourceRecovery>[0]["course"];
   incident: {
     id: string;
     cycle: number;
     status: string;
     activeBatchId: string | null;
     attemptLedger: unknown;
+    confirmedAt?: Date | null;
+    firstSeenAt?: Date;
   };
 };
 
 export type CourseSupportBrowserStageBatch = {
   releaseSha: string | null;
   deployedAt: Date | null;
+  summary?: unknown;
   incidents: CourseSupportBrowserStageEntry[];
 };
 
@@ -237,6 +243,9 @@ export async function persistOwnedCourseSupportBrowserPlaybookStages(
     runBrowserProbe: BrowserProbeRunner;
     validateReleaseFence?: (fence: BrowserReleaseFence) => Promise<void>;
     loadBatch?: typeof loadOwnedCourseSupportBrowserStageBatch;
+    hasOwnedSourceSearchCandidate?: (
+      fence: CourseSupportBrowserPersistenceFence,
+    ) => Promise<boolean>;
   },
 ) {
   const loadBatch =
@@ -288,6 +297,8 @@ export async function persistOwnedCourseSupportBrowserPlaybookStages(
   );
 
   let persistedCount = 0;
+  let sourceResearchHandoffCount = 0;
+  const executedTargets: CourseSupportBrowserStageTarget[] = [];
   for (const target of targets) {
     const initialEntry = initialBatch.incidents.find(
       (entry) => entry.courseId === target.courseId,
@@ -342,6 +353,7 @@ export async function persistOwnedCourseSupportBrowserPlaybookStages(
           "Course-support browser stage ownership changed before persistence."
         );
       }
+      return { currentBatch, currentEntry };
     };
 
     const persistenceFence: CourseSupportBrowserPersistenceFence = {
@@ -357,31 +369,104 @@ export async function persistOwnedCourseSupportBrowserPlaybookStages(
       stage: target.stage,
     };
 
-    await assertCurrentTarget();
+    const { currentBatch, currentEntry } = await assertCurrentTarget();
+    const sourceRecovery =
+      target.stage === "INDEPENDENT_CONFIRMATION" &&
+      currentEntry.course && currentEntry.incident.firstSeenAt
+        ? getCourseSupportRetainedSourceRecovery({
+            course: currentEntry.course,
+            incident: {
+              ...currentEntry.incident,
+              confirmedAt: currentEntry.incident.confirmedAt ?? null,
+              firstSeenAt: currentEntry.incident.firstSeenAt,
+            },
+            now: currentTime(),
+          })
+        : null;
+    if (target.stage === "INDEPENDENT_CONFIRMATION") {
+      const { readCourseSupportRemediationClaimAttempt } =
+        await import("./course-support-batches");
+      const claim = readCourseSupportRemediationClaimAttempt({
+        summary: currentBatch.summary,
+        courseId: target.courseId,
+        expectedAttemptCount: currentBatch.incidents.length,
+      });
+      const sourceSearchAssigned = Boolean(
+        claim?.actionPlan?.primaryAction === "SEARCH_FOR_OFFICIAL_SOURCE" &&
+        courseSupportActionPlanAllows(claim.actionPlan, "SEARCH_FOR_OFFICIAL_SOURCE") &&
+        claim.actionPlan.route.workMode === "ADVANCE_DISCOVERY" &&
+        claim.actionPlan.route.playbookStage === "INDEPENDENT_CONFIRMATION",
+      );
+      if (sourceRecovery && !sourceSearchAssigned) {
+        // The retained page has no trustworthy course identity. A fresh claim
+        // must own the different research action before independent browsing.
+        sourceResearchHandoffCount += 1;
+        continue;
+      }
+      if (sourceSearchAssigned) {
+        const hasCandidate = dependencies.hasOwnedSourceSearchCandidate ??
+          (await import("./db-service")).hasOwnedCourseSupportSourceSearchCandidate;
+        if (!(await hasCandidate(persistenceFence))) {
+          throw browserStageControlFailure(
+            "BROWSER_STAGE_CURRENT_TARGET_FAILED",
+            "Owned source research requires its exact recorded candidate before browser verification.",
+          );
+        }
+        const refreshed = await assertCurrentTarget();
+        const refreshedClaim = readCourseSupportRemediationClaimAttempt({
+          summary: refreshed.currentBatch.summary,
+          courseId: target.courseId,
+          expectedAttemptCount: refreshed.currentBatch.incidents.length,
+        });
+        const refreshedRecovery = sourceRecovery && refreshed.currentEntry.course &&
+          refreshed.currentEntry.incident.firstSeenAt
+          ? getCourseSupportRetainedSourceRecovery({
+              course: refreshed.currentEntry.course,
+              incident: {
+                ...refreshed.currentEntry.incident,
+                confirmedAt: refreshed.currentEntry.incident.confirmedAt ?? null,
+                firstSeenAt: refreshed.currentEntry.incident.firstSeenAt,
+              },
+              now: currentTime(),
+            })
+          : null;
+        if (JSON.stringify(refreshedClaim) !== JSON.stringify(claim) ||
+          (sourceRecovery && refreshedRecovery?.rejectionEvidenceDigest !== sourceRecovery.rejectionEvidenceDigest)) {
+          throw browserStageControlFailure(
+            "BROWSER_STAGE_CURRENT_TARGET_FAILED",
+            "Owned source research changed before browser verification.",
+          );
+        }
+      }
+    }
     const result = await dependencies.runBrowserProbe({
       courseId: target.courseId,
       mode:
         target.stage === "INDEPENDENT_CONFIRMATION"
           ? "INDEPENDENT"
           : "RENDERED",
-      beforePersist: assertCurrentTarget,
+      beforePersist: async (options) => {
+        await assertCurrentTarget(options);
+      },
       persistenceFence,
       deferTerminalCloseout: true,
       persistSearchProbe: false,
     });
+    executedTargets.push(target);
     persistedCount += result.persistedCount;
   }
 
   return {
     releaseFenceReady: true,
-    eligibleCount: targets.length,
+    eligibleCount: executedTargets.length,
     persistedCount,
-    renderedDiscoveryCount: targets.filter(
+    renderedDiscoveryCount: executedTargets.filter(
       (target) => target.stage === "RENDERED_BROWSER_DISCOVERY",
     ).length,
-    independentConfirmationCount: targets.filter(
+    independentConfirmationCount: executedTargets.filter(
       (target) => target.stage === "INDEPENDENT_CONFIRMATION",
     ).length,
+    sourceResearchHandoffCount,
   };
 }
 
@@ -448,6 +533,7 @@ function emptyBrowserStageResult(releaseFenceReady: boolean) {
     persistedCount: 0,
     renderedDiscoveryCount: 0,
     independentConfirmationCount: 0,
+    sourceResearchHandoffCount: 0,
   };
 }
 
@@ -468,12 +554,53 @@ async function loadOwnedCourseSupportBrowserStageBatch(input: {
     select: {
       releaseSha: true,
       deployedAt: true,
+      summary: true,
       incidents: {
         orderBy: [{ createdAt: "asc" }, { id: "asc" }],
         select: {
           courseId: true,
           cycle: true,
           result: true,
+          course: {
+            select: {
+              timeZone: true,
+              website: true,
+              detectedBookingUrl: true,
+              detectedPlatform: true,
+              providerFamilyKey: true,
+              bookingMethod: true,
+              bookingWindowDaysAhead: true,
+              bookingWindowEvidenceUrl: true,
+              bookingReleaseTimeLocal: true,
+              bookingWindowSource: true,
+              bookingWindowConfidence: true,
+              automationEligibility: true,
+              automationReason: true,
+              monitoringMode: true,
+              bookingAccessMode: true,
+              isPublic: true,
+              intelligenceVerifiedAt: true,
+              intelligenceReviewAt: true,
+              intelligenceConfidence: true,
+              bookingMetadata: true,
+              layoutHoleCounts: true,
+              layoutHolesVerifiedAt: true,
+              monitoringStatus: { select: { state: true } },
+              automationDiscoveries: {
+                orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+                take: 12,
+                select: {
+                  status: true,
+                  detectedPlatform: true,
+                  apiMetadata: true,
+                  automationReason: true,
+                  confidence: true,
+                  evidence: true,
+                  createdAt: true,
+                },
+              },
+            },
+          },
           incident: {
             select: {
               id: true,
@@ -481,6 +608,8 @@ async function loadOwnedCourseSupportBrowserStageBatch(input: {
               status: true,
               activeBatchId: true,
               attemptLedger: true,
+              confirmedAt: true,
+              firstSeenAt: true,
             },
           },
         },

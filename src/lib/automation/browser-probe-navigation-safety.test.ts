@@ -2148,6 +2148,62 @@ describe("rendered browser navigation safety", () => {
     }
   }, 30_000);
 
+  it.each([true, false])("does not inherit retained-source authority while researching a replacement (identity match: %s)", async (identityMatches) => {
+    const browser = await chromium.launch();
+    const context = await browser.newContext({ serviceWorkers: "block" });
+    try {
+      const page = await context.newPage();
+      const sourceUrl = "https://new-source.example/golf";
+      const navigations: string[] = [];
+      vi.spyOn(page.request, "get").mockResolvedValue({ ok: () => false } as APIResponse);
+      await context.route("**/*", async (route) => {
+        const url = route.request().url();
+        navigations.push(url);
+        if (url !== sourceUrl) {
+          await route.abort();
+          return;
+        }
+        const name = identityMatches ? "Target Golf Club" : "Different Golf Club";
+        await route.fulfill({
+          status: 200,
+          contentType: "text/html",
+          body: `<html><title>${name}</title><body><h1>${name}</h1><p>100 Main Street, Targetville, MA</p></body></html>`,
+        });
+      });
+      const evidence = await collectBrowserEvidence(page, {
+        courseId: "replacement-course",
+        courseName: "Target Golf Club",
+        address: "100 Main Street",
+        city: "Targetville",
+        stateCode: "MA",
+        sourceUrl,
+        officialCourseWebsite: "https://old-source.example/golf",
+      }, {
+        mode: "INDEPENDENT",
+        unprojectedSourceCandidate: true,
+        retainedBookingUrl: "https://old-booking.example/tee-times",
+      });
+      expect(navigations).toEqual([sourceUrl]);
+      expect(evidence.sourceUrl).toBe(sourceUrl);
+      expect(evidence.officialCourseWebsite).toBe(sourceUrl);
+      expect(evidence.browserInvestigation.sameOriginPages).toEqual([
+        expect.objectContaining({
+          identityStatus: identityMatches ? "MATCH" : "CONFLICT",
+          trustedForCourse: identityMatches,
+        }),
+      ]);
+      expect(evidence.browserInvestigation.identityAuthority.source).toBe("UNPROJECTED_OWNER_SOURCE_CANDIDATE");
+      expect(evidence.browserInvestigation.bookingDestinations).toEqual([]);
+      expect(evidence.browserInvestigation.networkContracts.filter(
+        (contract) => ["fetch", "xhr"].includes(contract.resourceType),
+      )).toEqual([]);
+      expect(buildBrowserDiscovery(evidence).status).not.toBe("LEARNED");
+    } finally {
+      await context.close();
+      await browser.close();
+    }
+  }, 30_000);
+
   it("trusts a known-provider owner source candidate after exact identity and locality match", async () => {
     const browser = await chromium.launch();
     const context = await browser.newContext({ serviceWorkers: "block" });

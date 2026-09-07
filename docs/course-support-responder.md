@@ -75,6 +75,18 @@ Rendered and independent investigations attempt at most 12 prioritized same-orig
 
 Durable browser evidence is append-only and sanitized. It may retain verified official/booking destinations, coarse evidence categories, investigation mode/cycle/runtime/time provenance, the exact provider-snapshot fingerprint produced after its guarded course projection, a boolean restricted-network signal, and value-free safe network contract fingerprints. Owned browser observation carries its exact pre-I/O provider fingerprint into one fenced projection-and-create transaction. Only a transaction-proven projection from that base may bind evidence to the resulting snapshot; unrelated concurrent drift leaves the evidence unbound and unable to provide contracts, while its coarse restriction signal remains fail-closed. Legacy or mismatched stamps likewise cannot provide contracts until coherently superseded. Persisted URL shapes retain query-key names without query values except for a necessary safe selector on a top-level verified official/booking destination. Never persist raw inline or widget configuration, cookies, headers, credentials, request/response bodies, full HTML, screenshots, search-result payloads, or checkout state.
 
+### Rejected Retained-Source Recovery
+
+`RETAINED_SOURCE_IDENTITY_RESEARCH` is a separate, narrow source-research mode. A fresh current-cycle rendered investigation must reject every observed identity, contain no trusted course page or scoped contract, and match the current provider snapshot. The complete ordered prefix must leave `INDEPENDENT_CONFIRMATION` pending with no attempt. Runnable support, stronger success or factual/access evidence, an operator decision, stale or malformed evidence, and reader-only courses remain excluded. An unconfirmed CTA or coarse restricted-network flag is not proof of an account/challenge limitation and does not by itself prevent replacement-source research.
+
+Before repeating that rejected site, the owner-bound watch yields `verification_watch_action_handoff`. Ordinary closeout independently rechecks the evidence and persists a same-cycle different-action handoff; the next normal claim assigns `SEARCH_FOR_OFFICIAL_SOURCE`. No new automation, cycle reset, invented stage completion or provider execution is involved. Detached provider progression yields too; already captured honest verification evidence remains available for closeout.
+
+The existing exact-name/address/locality context and result commands enforce the live claim, lease, operator decision, ledger, source snapshot and runtime fences. One result is keyed to the incident cycle and rejection evidence across batches. If context returns `searchBudget=0`, no further web search is allowed: continue the stored candidate through the owned browser verifier. Changed query/identity, assignment or source evidence must not silently reuse an old result.
+
+A candidate appends evidence only and keeps independent confirmation pending. The native browser uses it as an untrusted navigation root even while the retained URLs remain stored; it does not visit or inherit trust from the rejected old booking link. Only direct identity and locality corroboration can authorize a coherent replacement under the current transactional fences. Superseded source and bounded booking-window facts remain in append-only evidence, while rejected provider metadata/windows are not inherited. A verified source or booking CTA is still not runnable monitoring: reusable provider support and fresh deployed-runtime execution must follow.
+
+`NO_UNIQUE` appends only the actual independent research attempt, preserving earlier stages. A failed replacement candidate or no-unique result cannot reauthorize implementation against the unchanged rejected source. Such exhausted research remains unresolved engineering work, not an automatic factual limitation or original-cohort acceptance. This repair does not reset or retrospectively resolve already-exhausted cases; reopening them requires the documented relevant material-change path.
+
 ## Provider Learning Notes And Retry Novelty
 
 Postgres remains the machine source of truth. `CourseSupportIncident.attemptLedger`, append-only `CourseMonitoringEvent` rows, current provider evidence, and batch proof decide whether work is due, safe, restored, or final. Repository Markdown never changes runtime eligibility and must never be used instead of a current observation.
@@ -335,7 +347,7 @@ npm run automation:course-support -- claim-path --batch-ref <batch-ref> --path s
 # confirms is eligible: retrieve one private exact query and its attemptRef.
 npm run automation:course-support -- source-search-context --batch-ref <batch-ref> --ordinal 01
 
-# Perform at most the returned searchBudget of one, then record exactly one
+# Perform at most the returned searchBudget (zero means reuse, not another search), then record exactly one
 # direct safe public candidate OR the no-unique outcome with that attemptRef.
 npm run automation:course-support -- record-source-search --batch-ref <batch-ref> --ordinal 01 --attempt-ref <attempt-ref> --candidate-url <direct-public-url>
 npm run automation:course-support -- record-source-search --batch-ref <batch-ref> --ordinal 01 --attempt-ref <attempt-ref> --no-unique

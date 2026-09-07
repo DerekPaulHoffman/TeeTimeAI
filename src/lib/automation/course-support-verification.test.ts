@@ -73,6 +73,7 @@ import {
   scheduleCourseSupportVerificationRequests,
 } from "./course-support-verification";
 import { appendAutomationPlaybookEvent } from "./course-monitoring-playbook";
+import { retainedSourceRecoveryFixture } from "./course-support-retained-source-recovery.test-fixtures";
 import {
   createDeferredFailureHandoffAdmission,
   createDeferredFailureHandoffBatchIncidentDigest,
@@ -1150,6 +1151,9 @@ describe("course-support verification scheduling", () => {
     });
 
     expect(prismaMocks.requestCreateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.batchFindUnique.mock.calls[0][0]).toMatchObject({ select: { incidents: { select: { course: { select: {
+      automationDiscoveries: { take: 12, orderBy: { createdAt: "desc" } },
+    } } } } } });
     expect(prismaMocks.requestUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
@@ -1556,6 +1560,39 @@ describe("course-support verification scheduling", () => {
     });
     expect(prismaMocks.requestCreateMany).not.toHaveBeenCalled();
     expect(prismaMocks.activeSearchCount).not.toHaveBeenCalled();
+  });
+
+  it("yields detached progression to retained-source identity research without creating a provider request", async () => {
+    const { input } = retainedSourceRecoveryFixture();
+    prismaMocks.batchFindUnique.mockResolvedValue({
+      id: "batch-1", status: "VERIFYING", releaseSha, completedAt: null, summary: null,
+      incidents: [{ id: "batch-incident-1", incidentId: "incident-1", courseId: "course-1", cycle: input.incident.cycle,
+        verifiedIncidentUpdatedAt: now, incident: incident(input.incident),
+        course: { ...input.course, id: "course-1", timeZone: "America/New_York" } }],
+    });
+    await expect(scheduleCourseSupportVerificationRequests({ batchId: "batch-1", releaseSha, now: input.now })).resolves.toEqual({
+      createdCount: 0, eligibleCount: 0, ineligibleCount: 1,
+      ineligibleReasonCounts: { playbook_stage_handoff_required: 1 }, requests: [],
+    });
+    expect(prismaMocks.requestCreateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.activeSearchCount).not.toHaveBeenCalled();
+  });
+
+  it("retains honest current failure evidence for closeout when source research blocks new progression", async () => {
+    const { input } = retainedSourceRecoveryFixture();
+    const failedRequest = request({ status: "RETRYABLE_FAILED", revision: 2, leaseToken: null, leaseExpiresAt: null,
+      outcome: "FETCH_FAILED", failureClass: "NETWORK", completedAt: null });
+    failedRequest.batchIncident.cycle = input.incident.cycle;
+    failedRequest.batchIncident.incident = incident(input.incident);
+    Object.assign(failedRequest.course, input.course);
+    failedRequest.providerSnapshotFingerprint = fingerprint(failedRequest.course);
+    Object.assign(failedRequest, { evidence: { ...verificationEvidence("FETCH_FAILED", false),
+      failureClass: "NETWORK", observedAt: input.now!.toISOString(),
+      providerSnapshotFingerprint: failedRequest.providerSnapshotFingerprint } });
+    prismaMocks.requestFindUnique.mockResolvedValue(failedRequest);
+    await expect(getCurrentCourseSupportVerificationFailure({ batchIncidentId: "batch-incident-1", releaseSha, now: input.now }))
+      .resolves.toMatchObject({ current: true, status: "RETRYABLE_FAILED", outcome: "FETCH_FAILED", providerExecution: false });
+    expect(prismaMocks.requestUpdateMany).not.toHaveBeenCalled();
   });
 
   it("requires reusable implementation before scheduling an exhausted discovery ledger", async () => {

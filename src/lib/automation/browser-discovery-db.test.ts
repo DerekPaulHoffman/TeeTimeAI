@@ -1,10 +1,11 @@
+import { createHash } from "node:crypto";
 import { Prisma } from "@prisma/client";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 import { prisma } from "@/lib/prisma";
 import { buildBrowserDiscovery } from "./browser-discovery";
 import { COURSE_PROVIDER_EXECUTION_EVIDENCE_FIELDS } from "./course-provider-execution-evidence";
-import { appendAutomationPlaybookEvent } from "./course-monitoring-playbook";
+import { appendAutomationPlaybookEvent, parseAutomationPlaybookLedger } from "./course-monitoring-playbook";
 import { buildCourseSupportSourceSearchScopeDigest } from "./course-support-source-search";
 import {
   applyBrowserDiscoveryToCourse,
@@ -17,6 +18,9 @@ import {
   retireLegacyPolicyOnlyCourseBlock
 } from "./db-service";
 import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
+import { finalizeBrowserInvestigationEvidence, prepareBrowserPageEvidence } from "./browser-probe-evidence";
+import { retainedSourceRecoveryFixture } from "./course-support-retained-source-recovery.test-fixtures";
+import { getCourseSupportRetainedSourceRecovery } from "./course-support-retained-source-recovery";
 
 const providerExecutionMarkerMocks = vi.hoisted(() => ({
   renewCourseProviderObservationInTransaction: vi.fn(),
@@ -3379,6 +3383,541 @@ describe("browser discovery persistence", () => {
         })
       })
     );
+  });
+
+  it.each([
+    "current rendered assignment",
+    "current independent confirmation",
+    "malformed modern plan",
+    "disallowed modern plan",
+    "incomplete batch membership",
+    "plan changes after event read",
+    "owner changes after event read",
+  ])("loads the plan-bound candidate written by the native modern source-search action: %s", async (scenario) => {
+    const now = new Date("2026-08-20T12:01:00.000Z");
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    onTestFinished(() => vi.useRealTimers());
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(
+      new Error("Offline source-search handoff test must not use the network"),
+    );
+    onTestFinished(() => fetchMock.mockRestore());
+    const {
+      getOwnedCourseSupportSourceSearchContext,
+      recordOwnedCourseSupportSourceSearchResult,
+    } = await import("./course-support-batches");
+    const fence = {
+      batchId: "modern-source-batch",
+      leaseToken: "modern-source-lease",
+      ownerThreadId: "modern-source-owner",
+      releaseSha: "a".repeat(40),
+      deployedAt: new Date("2026-08-20T12:00:00.000Z"),
+      runtimeVersion: "a".repeat(40),
+      incidentId: "modern-source-incident",
+      courseId: "modern-source-course",
+      cycle: 2,
+      stage: "RENDERED_BROWSER_DISCOVERY" as const,
+    };
+    const incident = {
+      id: fence.incidentId,
+      cycle: fence.cycle,
+      revision: 4,
+      status: "AUTO_INVESTIGATING",
+      kind: "NEEDS_ADAPTER",
+      providerFamilyKey: "SOURCE_MISSING",
+      failureClass: "MISSING_SOURCE",
+      failureFingerprint: "v1:MISSING_SOURCE:SOURCE_FREE",
+      activeBatchId: fence.batchId,
+      occurrenceCount: 2,
+      attemptLedger: browserReadyAttemptLedger(fence.cycle),
+      attemptCount: 2,
+      firstSeenAt: new Date("2026-08-10T12:00:00.000Z"),
+      lastSeenAt: fence.deployedAt,
+      resolution: null,
+      updatedAt: fence.deployedAt,
+    };
+    const course = {
+      id: fence.courseId,
+      name: "Synthetic Source Golf Course",
+      address: "100 Fairway Drive",
+      city: "Springfield",
+      stateCode: "MA",
+      timeZone: "America/New_York",
+      isPublic: true,
+      website: null,
+      detectedBookingUrl: null,
+      detectedPlatform: "UNKNOWN",
+      providerFamilyKey: "SOURCE_MISSING",
+      bookingMethod: "UNKNOWN",
+      automationEligibility: "UNKNOWN",
+      automationReason: "NONE",
+      bookingAccessMode: "UNKNOWN",
+      monitoringMode: "AUTOMATIC",
+      bookingMetadata: null,
+      intelligenceVerifiedAt: null,
+      intelligenceReviewAt: null,
+      intelligenceConfidence: null,
+      layoutHoleCounts: [],
+      layoutHolesVerifiedAt: null,
+      updatedAt: fence.deployedAt,
+      monitoringStatus: { state: "AUTO_INVESTIGATING" },
+      supportIncident: incident,
+      probes: [],
+      preferences: [],
+    };
+    const approach = {
+      workMode: "ADVANCE_DISCOVERY",
+      strategyAction: "DISCOVER_WITH_BROWSER",
+      playbookStage: fence.stage,
+    };
+    const actionPlan = {
+      schemaVersion: 1,
+      primaryAction: "SEARCH_FOR_OFFICIAL_SOURCE",
+      allowedActions: ["SEARCH_FOR_OFFICIAL_SOURCE"],
+      route: approach,
+    };
+    const batch = {
+      id: fence.batchId,
+      _count: { incidents: 1 },
+      status: "CLAIMED",
+      revision: 3,
+      leaseExpiresAt: new Date(now.getTime() + 15 * 60_000),
+      releaseSha: fence.releaseSha,
+      deployedAt: fence.deployedAt,
+      summary: {
+        remediation: {
+          ...approach,
+          allowUnchangedRuntime: true,
+          requiresImplementationPath: false,
+          reason: "PLAYBOOK_STAGE_PENDING",
+          retryBudget: null,
+          attempts: [{
+            courseRef: createHash("sha256").update(course.id).digest("hex").slice(0, 24),
+            providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(course),
+            failureFingerprint: incident.failureFingerprint,
+            runtimeVersion: fence.runtimeVersion,
+            activeRealSearchCount: 0,
+            playbookEventCountAtClaim: 4,
+            reason: "PLAYBOOK_STAGE_PENDING",
+            retryBudget: null,
+            approach,
+            actionPlan,
+          }],
+        },
+      },
+      incidents: [{
+        id: "modern-source-entry",
+        courseId: course.id,
+        createdAt: fence.deployedAt,
+        updatedAt: fence.deployedAt,
+        cycle: fence.cycle,
+        result: "PENDING",
+        course,
+        incident,
+      }],
+    };
+    const persistedEvents: Prisma.CourseMonitoringEventUncheckedCreateInput[] = [];
+    let sourceReadStarted = false;
+    let sourceEventLookups = 0;
+    mockedPrisma.course.findMany.mockResolvedValue([course] as never);
+    mockedPrisma.courseSupportBatch.findFirst.mockResolvedValue(batch as never);
+    mockedPrisma.courseSupportBatch.updateMany.mockResolvedValue({ count: 1 });
+    mockedPrisma.$queryRaw.mockResolvedValue([{ locked: 1 }] as never);
+    mockedPrisma.courseMonitoringEvent.findUnique.mockResolvedValue(null);
+    mockedPrisma.courseMonitoringEvent.create.mockImplementation(async ({ data }) => {
+      if (!("courseId" in data) || typeof data.courseId !== "string") {
+        throw new Error("Expected native scalar course-event persistence");
+      }
+      persistedEvents.push(data);
+      return { ...data, id: "modern-source-event" } as never;
+    });
+    mockedPrisma.courseMonitoringEvent.findFirst.mockImplementation(async (args) => {
+      const where = args?.where;
+      const filter = where?.audit;
+      if (!filter || !Array.isArray(filter.path) ||
+          filter.path.join(".") !== "ownershipScopeDigest") return null;
+      // Honor the exact predicate. Returning any stored candidate here would
+      // hide the writer's plan-bound digest versus the legacy reader's digest.
+      sourceEventLookups += 1;
+      const event = persistedEvents.find((event) => {
+        const audit = event.audit;
+        return event.courseId === where?.courseId &&
+          event.incidentId === where?.incidentId &&
+          event.eventType === where?.eventType &&
+          event.source === where?.source &&
+          event.readPath === where?.readPath &&
+          audit !== null && typeof audit === "object" && !Array.isArray(audit) &&
+          "ownershipScopeDigest" in audit &&
+          audit.ownershipScopeDigest === filter.equals;
+      });
+      if (event && sourceReadStarted) {
+        if (scenario === "plan changes after event read") {
+          actionPlan.allowedActions.push("VERIFY_CURRENT_RUNTIME");
+        } else if (scenario === "owner changes after event read") {
+          incident.activeBatchId = "successor-source-batch";
+        }
+      }
+      return event as never ?? null;
+    });
+    onTestFinished(() => {
+      mockedPrisma.courseMonitoringEvent.create.mockReset();
+      mockedPrisma.courseMonitoringEvent.findUnique.mockReset();
+      mockedPrisma.courseSupportBatch.updateMany.mockReset();
+    });
+    const sourceInput = {
+      batchId: fence.batchId,
+      leaseToken: fence.leaseToken,
+      ownerThreadId: fence.ownerThreadId,
+      ordinal: 1,
+      now,
+    };
+    const context = await getOwnedCourseSupportSourceSearchContext(sourceInput);
+    expect(context.outcome).toBe("ready");
+    if (context.outcome !== "ready") throw new Error("Expected exact source context");
+    const candidateUrl = "https://parks.example.gov/golf/synthetic-source";
+    await expect(recordOwnedCourseSupportSourceSearchResult({
+      ...sourceInput,
+      attemptRef: context.privateContext.attemptRef,
+      candidateUrl,
+      runtimeVersion: fence.runtimeVersion,
+    })).resolves.toMatchObject({
+      outcome: "ready", candidateRecorded: true, browserVerificationRequired: true,
+    });
+    expect(persistedEvents).toHaveLength(1);
+    const storedAudit = persistedEvents[0].audit;
+    const bareScopeDigest = buildCourseSupportSourceSearchScopeDigest(fence);
+    expect(storedAudit).toMatchObject({
+      ownershipScopeDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      courseProjectionApplied: false,
+      browserVerificationRequired: true,
+    });
+    expect(storedAudit).not.toMatchObject({ ownershipScopeDigest: bareScopeDigest });
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
+    expect(mockedPrisma.courseSupportIncident.updateMany).not.toHaveBeenCalled();
+
+    if (scenario === "malformed modern plan") {
+      actionPlan.schemaVersion = 2;
+    } else if (scenario === "disallowed modern plan") {
+      actionPlan.primaryAction = "VERIFY_CURRENT_RUNTIME";
+      actionPlan.allowedActions = ["VERIFY_CURRENT_RUNTIME"];
+    } else if (scenario === "incomplete batch membership") {
+      batch._count.incidents = 2;
+    } else if (scenario === "current independent confirmation") {
+      incident.attemptLedger = appendAutomationPlaybookEvent(incident.attemptLedger, {
+        cycle: fence.cycle,
+        stage: "RENDERED_BROWSER_DISCOVERY",
+        transition: "COMPLETED",
+        readPath: "RENDERED_BROWSER",
+        evidenceKind: "RENDERED_PAGE",
+        failureFingerprint: "BROWSER:SOURCE_RETAINED",
+        runtimeVersion: fence.runtimeVersion,
+        observedAt: now,
+      });
+      incident.attemptLedger = appendAutomationPlaybookEvent(incident.attemptLedger, {
+        cycle: fence.cycle,
+        stage: "BROWSER_ADAPTER_RETRY",
+        transition: "NOT_APPLICABLE",
+        readPath: "TYPED_PROVIDER_ADAPTER",
+        evidenceKind: "PROVIDER_RESPONSE",
+        skipReason: "NO_RUNNABLE_ADAPTER",
+        failureFingerprint: "ADAPTER:NOT_RUNNABLE",
+        runtimeVersion: fence.runtimeVersion,
+        observedAt: now,
+      });
+      incident.attemptLedger = appendAutomationPlaybookEvent(incident.attemptLedger, {
+        cycle: fence.cycle,
+        stage: "LOCAL_READER",
+        transition: "NOT_APPLICABLE",
+        readPath: "LOCAL_READER",
+        evidenceKind: "LOCAL_READER_RESULT",
+        skipReason: "NO_LOCAL_READER_CAPABILITY",
+        failureFingerprint: "READER:NOT_AVAILABLE",
+        runtimeVersion: fence.runtimeVersion,
+        observedAt: now,
+      });
+    }
+    const ledgerBeforeRead = structuredClone(incident.attemptLedger);
+    sourceReadStarted = true;
+    const targets = await listBrowserProbeTargets(1, undefined, course.id, {
+      ...fence,
+      stage: scenario === "current independent confirmation"
+        ? "INDEPENDENT_CONFIRMATION" : fence.stage,
+    });
+    const shouldAccept = scenario === "current rendered assignment" ||
+      scenario === "current independent confirmation";
+    expect(targets).toHaveLength(shouldAccept ? 1 : 0);
+    if (shouldAccept) {
+      expect(targets[0]).toMatchObject({
+        probeUrl: candidateUrl,
+        unprojectedSourceCandidate: true,
+        course: { website: null, detectedBookingUrl: null },
+      });
+    }
+    if (["malformed modern plan", "disallowed modern plan", "incomplete batch membership"].includes(scenario)) {
+      // Invalid modern ownership must stop before any event lookup, rather than
+      // silently trying the legacy digest after the canonical claim is rejected.
+      expect(sourceEventLookups).toBe(0);
+    } else {
+      expect(sourceEventLookups).toBe(1);
+    }
+    expect(persistedEvents).toHaveLength(1);
+    expect(incident.cycle).toBe(fence.cycle);
+    expect(incident.attemptLedger).toEqual(ledgerBeforeRead);
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
+    expect(mockedPrisma.courseSupportIncident.updateMany).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "verified source", "later owned batch", "wrong course", "wrong locality",
+    "operator wins", "new success wins", "source snapshot changes", "plan changes",
+    "candidate unavailable", "candidate digest differs", "claim snapshot differs", "owner changes during candidate read",
+    "rejected booking window", "independent strong booking window",
+    "course identity changes", "course locality changes",
+    "two neutral observations", "three neutral observations",
+  ])("composes native retained-source research through owned candidate promotion: %s", async (scenario) => {
+    const fixture = retainedSourceRecoveryFixture();
+    const now = fixture.input.now!;
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    onTestFinished(() => vi.useRealTimers());
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Offline retained-source fixture forbids network"));
+    onTestFinished(() => fetchMock.mockRestore());
+    const { getOwnedCourseSupportSourceSearchContext, recordOwnedCourseSupportSourceSearchResult } = await import("./course-support-batches");
+    const fence = {
+      batchId: "retained-batch", leaseToken: "retained-lease", ownerThreadId: "retained-owner",
+      releaseSha: "a".repeat(40), runtimeVersion: "a".repeat(40),
+      deployedAt: new Date(now.getTime() - 120_000),
+      incidentId: "retained-incident", courseId: "retained-course", cycle: 2,
+      stage: "INDEPENDENT_CONFIRMATION" as const,
+    };
+    const incident = {
+      ...fixture.input.incident, id: fence.incidentId, courseId: fence.courseId,
+      revision: 7, status: "AUTO_INVESTIGATING", kind: "NEEDS_ADAPTER", failureClass: "UNSUPPORTED_FAMILY",
+      failureFingerprint: "v1:UNSUPPORTED_FAMILY:RETAINED_SOURCE", providerFamilyKey: "retained-course.example",
+      activeBatchId: fence.batchId, resolution: null, humanReviewReason: null,
+      decisionAt: null as Date | null, decisionActorId: null, decisionNote: null,
+      decisionEvidenceUrl: null, decisionIdempotencyKey: null,
+      lastSeenAt: fixture.input.incident.confirmedAt, updatedAt: new Date(now.getTime() - 10_000),
+      occurrenceCount: 2, attemptCount: 1,
+    };
+    const course = {
+      ...fixture.input.course, id: fence.courseId, name: "Target Harbor Golf Club",
+      address: "100 Fairway Lane", city: "Mesa", stateCode: "AZ", googlePlaceId: "synthetic-place",
+      detectedPlatform: "UNKNOWN" as const, bookingMethod: "PUBLIC_ONLINE" as const,
+      automationEligibility: "NEEDS_REVIEW" as const, automationReason: "UNSUPPORTED_PLATFORM" as const,
+      timeZone: null,
+      bookingWindowDaysAhead: scenario.includes("booking window") ? 7 : null,
+      bookingWindowEvidenceUrl: scenario.includes("booking window")
+        ? scenario === "independent strong booking window" ? "https://independent-official.example/booking" : "https://retained-course.example/golf"
+        : null,
+      bookingReleaseTimeLocal: scenario.includes("booking window") ? "07:00" : null,
+      bookingWindowSource: scenario.includes("booking window") ? "OFFICIAL_BOOKING_PAGE" : null,
+      bookingWindowConfidence: scenario.includes("booking window") ? 0.95 : null,
+      bookingWindowCheckedAt: scenario.includes("booking window") ? now : null,
+      bookingWindowObservedAt: scenario.includes("booking window") ? now : null,
+      intelligenceVerifiedAt: null, intelligenceReviewAt: null, intelligenceConfidence: null,
+      layoutHoleCounts: [], layoutHolesVerifiedAt: null,
+      updatedAt: new Date(now.getTime() - 10_000),
+      monitoringStatus: { state: "AUTO_INVESTIGATING", lastSuccessfulAt: null as Date | null },
+      supportIncident: incident, probes: [], preferences: [],
+    };
+    const originalSource = course.website;
+    const originalBooking = course.detectedBookingUrl;
+    if (scenario === "two neutral observations" || scenario === "three neutral observations") {
+      const count = scenario === "two neutral observations" ? 2 : 3;
+      course.automationDiscoveries = [
+        ...Array.from({ length: count }, (_, index) => ({
+          status: "INSPECTED", detectedPlatform: "UNKNOWN", apiMetadata: null, automationReason: "NONE",
+          confidence: 0, evidence: { learnedFrom: "official-site-fetch-failed" },
+          createdAt: new Date(now.getTime() - (index + 2) * 1000),
+        })), ...course.automationDiscoveries!,
+      ];
+    }
+    const originalLedger = structuredClone(incident.attemptLedger);
+    const originalFingerprint = buildCourseSupportProviderSnapshotFingerprint(course);
+    if (scenario.includes("booking window")) {
+      // The native persisted rejection describes this complete starting course
+      // snapshot, including the provider window carried by that old source.
+      const bound = bindBrowserDiscoveryToProviderSnapshot({
+        ...buildBrowserDiscovery(fixture.native), evidence: { ...fixture.evidence, browserInvestigation: fixture.native.browserInvestigation },
+      }, originalFingerprint);
+      course.automationDiscoveries = course.automationDiscoveries!.map((row) => ({ ...row, evidence: bound.evidence }));
+    }
+    const originalDiscoveries = structuredClone(course.automationDiscoveries);
+    expect(getCourseSupportRetainedSourceRecovery({ course, incident, now })).not.toBeNull();
+    const approach = { workMode: "ADVANCE_DISCOVERY", strategyAction: "DISCOVER_WITH_BROWSER", playbookStage: fence.stage };
+    const actionPlan = { schemaVersion: 1, primaryAction: "SEARCH_FOR_OFFICIAL_SOURCE", allowedActions: ["SEARCH_FOR_OFFICIAL_SOURCE"], route: approach };
+    const batch = {
+      id: fence.batchId, status: "VERIFYING", revision: 3, _count: { incidents: 1 },
+      leaseExpiresAt: new Date(now.getTime() + 900_000), releaseSha: fence.releaseSha, deployedAt: fence.deployedAt,
+      summary: { remediation: { ...approach, allowUnchangedRuntime: true, requiresImplementationPath: false,
+        reason: "PLAYBOOK_STAGE_PENDING", retryBudget: null, attempts: [{
+          courseRef: createHash("sha256").update(course.id).digest("hex").slice(0, 24),
+          providerSnapshotFingerprint: originalFingerprint, failureFingerprint: incident.failureFingerprint,
+          runtimeVersion: fence.runtimeVersion, activeRealSearchCount: 0,
+          playbookEventCountAtClaim: parseAutomationPlaybookLedger(incident.attemptLedger)!.events.filter((event) => event.cycle === incident.cycle).length,
+          reason: "PLAYBOOK_STAGE_PENDING", retryBudget: null, approach, actionPlan,
+        }],
+      } },
+      incidents: [{ id: "retained-entry", courseId: course.id, cycle: 2, result: "PENDING", createdAt: course.updatedAt,
+        updatedAt: course.updatedAt, course, incident }],
+    };
+    const storedEvents: Prisma.CourseMonitoringEventUncheckedCreateInput[] = [];
+    let candidateReadStarted = false;
+    const queryRecord = (value: unknown): Record<string, unknown> =>
+      value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+    const limitedCourse = (fields: unknown) => {
+      const take = queryRecord(queryRecord(fields).automationDiscoveries).take;
+      return { ...course, automationDiscoveries: typeof take === "number"
+        ? course.automationDiscoveries?.slice(0, take) : course.automationDiscoveries };
+    };
+    mockedPrisma.course.findMany.mockImplementation(async (args) => [limitedCourse(args?.include)] as never);
+    mockedPrisma.course.findUnique.mockImplementation(async () => structuredClone(course) as never);
+    mockedPrisma.courseSupportBatch.findFirst.mockImplementation(async (args) => {
+      const entries = queryRecord(queryRecord(args?.select).incidents ?? queryRecord(args?.include).incidents);
+      const courseQuery = queryRecord(queryRecord(entries.select ?? entries.include).course);
+      return { ...batch, incidents: batch.incidents.map((entry) => ({ ...entry,
+        course: limitedCourse(courseQuery.select ?? courseQuery.include),
+      })) } as never;
+    });
+    mockedPrisma.courseSupportBatch.updateMany.mockResolvedValue({ count: 1 });
+    mockedPrisma.courseSupportIncident.updateMany.mockResolvedValue({ count: 1 });
+    mockedPrisma.courseSupportIncident.findUnique.mockImplementation(async () => structuredClone(incident) as never);
+    mockedPrisma.courseSupportBatchIncident.findUnique.mockResolvedValue({ courseId: course.id, cycle: 2, result: "PENDING" } as never);
+    mockedPrisma.$queryRaw.mockResolvedValue([{ locked: 1, updatedAt: now }] as never);
+    mockedPrisma.courseMonitoringEvent.create.mockImplementation(async ({ data }) => {
+      if (!("courseId" in data) || typeof data.courseId !== "string") throw new Error("Expected scalar native event");
+      storedEvents.push(data);
+      return { ...data, id: "retained-event" } as never;
+    });
+    mockedPrisma.courseMonitoringEvent.findUnique.mockImplementation(async ({ where }) =>
+      storedEvents.find((event) => event.idempotencyKey === where.idempotencyKey) as never ?? null);
+    mockedPrisma.courseMonitoringEvent.findFirst.mockImplementation(async ({ where } = {}) => {
+      const event = storedEvents.find((event) => event.idempotencyKey === where?.idempotencyKey &&
+        event.courseId === where?.courseId && event.incidentId === where?.incidentId &&
+        event.eventType === where?.eventType && event.source === where?.source && event.readPath === where?.readPath);
+      if (event && candidateReadStarted) {
+        if (scenario === "candidate unavailable") return null;
+        if (scenario === "owner changes during candidate read") incident.activeBatchId = "successor-source-batch";
+      }
+      return event as never ?? null;
+    });
+    mockedPrisma.course.updateMany.mockImplementation(async ({ where, data }) => {
+      if (!(where.updatedAt instanceof Date) || where.updatedAt.getTime() !== course.updatedAt.getTime()) return { count: 0 };
+      Object.assign(course, Object.fromEntries(Object.entries(data).map(([key, value]) => [key, value === Prisma.DbNull ? null : value])));
+      return { count: 1 };
+    });
+    mockedPrisma.courseAutomationDiscovery.create.mockResolvedValue({ id: "replacement-discovery" } as never);
+    onTestFinished(() => {
+      mockedPrisma.course.findUnique.mockReset(); mockedPrisma.course.updateMany.mockReset();
+      mockedPrisma.courseMonitoringEvent.create.mockReset(); mockedPrisma.courseMonitoringEvent.findUnique.mockReset();
+      mockedPrisma.courseSupportBatch.updateMany.mockReset(); mockedPrisma.courseSupportIncident.updateMany.mockReset();
+    });
+    const sourceInput = { batchId: fence.batchId, leaseToken: fence.leaseToken, ownerThreadId: fence.ownerThreadId, ordinal: 1, now };
+    const context = await getOwnedCourseSupportSourceSearchContext(sourceInput);
+    expect(context.outcome).toBe("ready");
+    if (context.outcome !== "ready" || !context.privateContext) throw new Error("Expected fresh owned research context");
+    const candidateUrl = "https://replacement-course.example/golf";
+    await expect(recordOwnedCourseSupportSourceSearchResult({ ...sourceInput, attemptRef: context.privateContext.attemptRef,
+      candidateUrl, runtimeVersion: fence.runtimeVersion })).resolves.toMatchObject({ outcome: "ready", candidateRecorded: true });
+    expect(storedEvents).toHaveLength(1);
+    expect(course.website).toBe(originalSource);
+    expect(course.detectedBookingUrl).toBe(originalBooking);
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
+    if (scenario === "later owned batch") {
+      fence.batchId = "later-retained-batch";
+      batch.id = fence.batchId;
+      incident.activeBatchId = fence.batchId;
+      await expect(getOwnedCourseSupportSourceSearchContext({ ...sourceInput, batchId: fence.batchId })).resolves.toMatchObject({
+        outcome: "ready", resultRecorded: true, searchBudget: 0, browserVerificationRequired: true,
+      });
+    }
+    if (scenario === "candidate digest differs") {
+      const audit = storedEvents[0].audit;
+      if (!audit || typeof audit !== "object" || Array.isArray(audit)) throw new Error("Expected native source audit");
+      storedEvents[0].audit = { ...audit, rejectionEvidenceDigest: "b".repeat(64) };
+    }
+    if (scenario === "claim snapshot differs") batch.summary.remediation.attempts[0].providerSnapshotFingerprint = "b".repeat(64);
+    candidateReadStarted = true;
+    const targets = await listBrowserProbeTargets(1, undefined, course.id, fence);
+    if (["candidate unavailable", "candidate digest differs", "claim snapshot differs", "owner changes during candidate read"].includes(scenario)) {
+      expect(targets).toEqual([]);
+      expect(course.website).toBe(originalSource);
+      expect(course.detectedBookingUrl).toBe(originalBooking);
+      expect(incident.attemptLedger).toEqual(originalLedger);
+      expect(storedEvents).toHaveLength(1);
+      expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
+      expect(mockedPrisma.courseAutomationDiscovery.create).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+      return;
+    }
+    expect(targets).toHaveLength(1);
+    expect(targets[0]).toMatchObject({ probeUrl: candidateUrl, unprojectedSourceCandidate: true,
+      course: { website: originalSource, detectedBookingUrl: originalBooking } });
+    const identityMatches = scenario !== "wrong course";
+    const localityMatches = scenario !== "wrong locality";
+    const native = finalizeBrowserInvestigationEvidence({
+      course: { courseId: course.id, courseName: course.name, sourceUrl: candidateUrl, officialCourseWebsite: candidateUrl,
+        address: course.address, city: course.city, stateCode: course.stateCode, googlePlaceIdPresent: true },
+      mode: "INDEPENDENT", unprojectedSourceCandidate: true,
+      auditContext: { incidentCycle: fence.cycle, runtimeVersion: fence.runtimeVersion, observedAt: now },
+      providerRequestObserved: true, bookingDestinations: [],
+      pageVisits: [{ requestedUrl: candidateUrl, finalUrl: candidateUrl, label: course.name, depth: 0, parentUrl: null,
+        requiresDirectIdentityMatch: true, interactionBlocked: false,
+        evidence: prepareBrowserPageEvidence({ anchors: [], scripts: [], structuredActionScripts: [], linkCandidates: [],
+          identityCandidates: [identityMatches ? course.name : "Different Desert Golf Club"],
+          localityCandidates: [localityMatches ? "100 Fairway Lane Mesa AZ" : "900 Other Road Elsewhere CA"],
+          visibleText: identityMatches ? course.name : "Different Desert Golf Club" }),
+      }],
+    });
+    const discovery = buildBrowserDiscovery(native);
+    const observed = { ...discovery, evidence: { ...discovery.evidence, browserInvestigation: native.browserInvestigation } };
+    if (scenario === "operator wins") incident.decisionAt = now;
+    if (scenario === "new success wins") course.monitoringStatus.lastSuccessfulAt = now;
+    if (scenario === "source snapshot changes") course.website = "https://newer-authoritative.example/golf";
+    if (scenario === "plan changes") actionPlan.allowedActions = ["VERIFY_CURRENT_RUNTIME"];
+    if (scenario === "course identity changes") course.name = "New Authoritative Course Name";
+    if (scenario === "course locality changes") course.city = "New Authoritative Locality";
+    const result = await recordAndApplyOwnedBrowserDiscoveryToCourse(observed, observed, fence, fence.runtimeVersion,
+      originalFingerprint, { ...providerObservationLease, courseId: course.id, observationStartedAt: now,
+        leaseExpiresAt: new Date(now.getTime() + 900_000) }, now);
+    const shouldApply = ["verified source", "later owned batch", "rejected booking window", "two neutral observations", "three neutral observations"].includes(scenario);
+    expect(Boolean(result.applied)).toBe(shouldApply);
+    if (shouldApply) {
+      expect(course).toMatchObject({ website: candidateUrl, detectedBookingUrl: null, bookingMetadata: null,
+        detectedPlatform: "UNKNOWN", automationEligibility: "NEEDS_REVIEW", bookingMethod: "UNKNOWN",
+        bookingWindowDaysAhead: null, bookingWindowEvidenceUrl: null, bookingReleaseTimeLocal: null,
+        bookingWindowSource: null, bookingWindowConfidence: null, bookingWindowCheckedAt: null, bookingWindowObservedAt: null });
+      expect(result.providerSnapshotFingerprint).not.toBe(originalFingerprint);
+    } else {
+      expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
+      expect(course.website).toBe(scenario === "source snapshot changes" ? "https://newer-authoritative.example/golf" : originalSource);
+      expect(course.detectedBookingUrl).toBe(originalBooking);
+    }
+    expect(incident.attemptLedger).toEqual(originalLedger);
+    expect(incident.cycle).toBe(2);
+    expect(course.automationDiscoveries).toEqual(originalDiscoveries);
+    expect(storedEvents).toHaveLength(1);
+    expect(mockedPrisma.courseAutomationDiscovery.create).toHaveBeenCalledWith({ data: expect.objectContaining({
+      evidence: expect.objectContaining({ browserInvestigation: expect.objectContaining({
+        identityAuthority: expect.objectContaining({ source: "UNPROJECTED_OWNER_SOURCE_CANDIDATE" }),
+      }) }),
+    }) });
+    if (scenario === "rejected booking window") {
+      expect(mockedPrisma.courseAutomationDiscovery.create).toHaveBeenCalledWith({ data: expect.objectContaining({
+        evidence: expect.objectContaining({ retainedSourceReplacement: {
+          mode: "RETAINED_SOURCE_IDENTITY_RESEARCH", priorProviderSnapshotFingerprint: originalFingerprint,
+          priorBookingWindow: { daysAhead: 7, releaseTimeLocal: "07:00", source: "OFFICIAL_BOOKING_PAGE",
+            confidence: 0.95, evidenceUrl: originalSource },
+        } }),
+      }) });
+    }
+    if (scenario === "independent strong booking window") {
+      expect(course.bookingWindowDaysAhead).toBe(7);
+      expect(course.bookingWindowEvidenceUrl).toBe("https://independent-official.example/booking");
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("atomically stamps owned browser evidence with the resulting provider snapshot", async () => {

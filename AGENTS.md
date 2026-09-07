@@ -413,6 +413,12 @@ Important behavior:
 - Backfill is dry-run by default and must not call providers. Apply the additive migration before dependent code, inspect backfill output, then use `backfill --apply`.
 - The full contract and command syntax are in `docs/course-support-responder.md`.
 
+#### Recovering A Retained Source With Rejected Identity
+
+Fresh current-cycle rendered evidence that rejects every observed course identity may authorize one replacement-source investigation at still-unattempted `INDEPENDENT_CONFIRMATION`. This is separate from exact `SOURCE_MISSING`: preserve the saved URLs, the ordered ledger and the cycle. The owned verification watch yields an explicit action handoff; the next ordinary claim must assign `SEARCH_FOR_OFFICIAL_SOURCE`. Current runnable support, a stronger factual/access outcome, an operator decision, stale evidence or a reader-only route cannot use this authority.
+
+The research result is bound to the incident cycle and exact rejection evidence across batches. Obey `searchBudget=0` when a candidate already exists: resume guarded browser verification without searching again. A candidate is an untrusted replacement root and never inherits trust from retained website or booking links. Only direct current identity/locality corroboration under the same ownership, source and incident fences can replace the coherent source snapshot. Retain superseded facts as append-only evidence; do not inherit rejected provider metadata or booking windows, and do not manufacture runnable support from a link. A no-unique result records only the actual independent research attempt. Exhausted unresolved replacement research must not authorize another implementation against the rejected old source, and is not a conclusive limitation or monitoring success. Already-exhausted older cases still require the documented material-change revalidation path.
+
 ### Hourly Improvement Loop
 
 The hourly improvement loop owns its independent `tee-time-spot:hourly-improvement-writer` state-transition lane and may improve the product while a responder batch is active or awaiting recovery. Responder state is informational context only; course-support incidents remain excluded from the hourly candidate portfolio.

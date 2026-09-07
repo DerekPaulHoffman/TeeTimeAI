@@ -204,6 +204,59 @@ describe("runCourseSupportVerificationPass", () => {
 });
 
 describe("runCourseSupportVerificationWatch", () => {
+  it("closes a source-research action handoff without calling it a settled browser pass", async () => {
+    const pass = vi.fn(async () => ({
+      browserStages: {
+        eligibleCount: 0,
+        persistedCount: 0,
+        renderedDiscoveryCount: 0,
+        independentConfirmationCount: 0,
+        sourceResearchHandoffCount: 1,
+      },
+      verification: { verified: true, detachedVerification: { rerunNeeded: false } },
+    }));
+    const closeout = vi.fn(async () => ({ durableCloseoutRecorded: true }));
+    const sleep = vi.fn(async () => undefined);
+    const result = await runCourseSupportVerificationWatch({ pass, closeout, sleep });
+
+    expect(result).toMatchObject({
+      outcome: "verification_watch_action_handoff",
+      passCount: 1,
+      browserStages: { sourceResearchHandoffCount: 1, eligibleCount: 0, persistedCount: 0 },
+      browserStageTotals: {
+        eligibleCount: 0,
+        persistedCount: 0,
+        independentConfirmationCount: 0,
+        sourceResearchHandoffCount: 1,
+      },
+      closeout: { durableCloseoutRecorded: true },
+    });
+    expect(pass).toHaveBeenCalledOnce();
+    expect(closeout).toHaveBeenCalledOnce();
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("does not turn a source-research handoff with lost verification ownership into success", async () => {
+    const closeout = vi.fn();
+    const onStopped = vi.fn(async () => ({ durableCloseoutRecorded: true }));
+    const result = await runCourseSupportVerificationWatch({
+      pass: async () => ({
+        browserStages: { eligibleCount: 0, persistedCount: 0, sourceResearchHandoffCount: 1 },
+        verification: { verified: false },
+      }),
+      closeout,
+      onStopped,
+      sleep: async () => undefined,
+    });
+    expect(result).toMatchObject({
+      outcome: "verification_watch_closed",
+      stoppedReason: "error",
+      failureCode: "BATCH_VERIFICATION_RECOVERY_REQUIRED",
+    });
+    expect(closeout).not.toHaveBeenCalled();
+    expect(onStopped).toHaveBeenCalledOnce();
+  });
+
   function fastDeadlineTimer(advance: (milliseconds: number) => void) {
     return {
       setTimer: (callback: () => void, milliseconds: number) =>

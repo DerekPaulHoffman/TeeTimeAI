@@ -351,6 +351,7 @@ export type CourseSupportVerificationBrowserStages = {
   persistedCount: number;
   renderedDiscoveryCount?: number;
   independentConfirmationCount?: number;
+  sourceResearchHandoffCount?: number;
 };
 
 export type CourseSupportVerificationBrowserStageTotals = {
@@ -360,6 +361,7 @@ export type CourseSupportVerificationBrowserStageTotals = {
   persistedCount: number;
   renderedDiscoveryCount: number;
   independentConfirmationCount: number;
+  sourceResearchHandoffCount: number;
 };
 
 export type CourseSupportVerificationPassResult<TVerification> = {
@@ -774,6 +776,8 @@ export async function runCourseSupportVerificationWatch<
       );
     }
 
+    const sourceResearchHandoff =
+      (settledPass.browserStages.sourceResearchHandoffCount ?? 0) > 0;
     const needsAnotherPass =
       settledPass.browserStages.eligibleCount > 0 ||
       settledPass.browserStages.persistedCount > 0 ||
@@ -788,7 +792,10 @@ export async function runCourseSupportVerificationWatch<
     } else {
       consecutiveCleanPassCount += 1;
     }
-    if (!needsAnotherPass && consecutiveCleanPassCount >= 2) {
+    // Research is a different owner-assigned action, not a browser execution
+    // or a clean convergence scan. Closeout revalidates the durable source
+    // evidence before releasing this batch for an ordinary fresh claim.
+    if (sourceResearchHandoff || (!needsAnotherPass && consecutiveCleanPassCount >= 2)) {
       let closeout: TCloseout | null;
       if (input.closeout) {
         const closeoutResult = await runBounded((signal) =>
@@ -837,7 +844,9 @@ export async function runCourseSupportVerificationWatch<
         closeout = null;
       }
       return {
-        outcome: "verification_watch_settled" as const,
+        outcome: sourceResearchHandoff
+          ? ("verification_watch_action_handoff" as const)
+          : ("verification_watch_settled" as const),
         passCount,
         evidenceRefreshRetryCount,
         lastEvidenceRefreshReason,
@@ -867,7 +876,8 @@ function emptyCourseSupportVerificationBrowserStageTotals(): CourseSupportVerifi
     eligibleCount: 0,
     persistedCount: 0,
     renderedDiscoveryCount: 0,
-    independentConfirmationCount: 0
+    independentConfirmationCount: 0,
+    sourceResearchHandoffCount: 0,
   };
 }
 
@@ -886,7 +896,9 @@ function addCourseSupportVerificationBrowserStageTotals(
       totals.renderedDiscoveryCount + (stages.renderedDiscoveryCount ?? 0),
     independentConfirmationCount:
       totals.independentConfirmationCount +
-      (stages.independentConfirmationCount ?? 0)
+      (stages.independentConfirmationCount ?? 0),
+    sourceResearchHandoffCount:
+      totals.sourceResearchHandoffCount + (stages.sourceResearchHandoffCount ?? 0),
   };
 }
 
