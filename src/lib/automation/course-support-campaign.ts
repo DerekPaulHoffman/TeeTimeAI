@@ -581,6 +581,7 @@ type ParkedCourseCampaignDependencies = {
   loadAdmissionMembers?: (
     audit: ParkedCourseCampaignAudit,
     campaignRunId: string,
+    admissionRuntimeVersion?: string,
   ) => Promise<ParkedCourseCampaignAdmissionMember[]>;
   loadGlobalParkedCount?: () => Promise<number>;
   loadMemberObservations: (
@@ -911,13 +912,25 @@ export async function runParkedCourseCampaignCommand(
 }
 
 export async function inspectActiveParkedCourseCampaign(
-  input?: { completeIfDone?: boolean },
+  input?: { completeIfDone?: boolean; admissionRuntimeVersion?: string },
   dependencies: ParkedCourseCampaignDependencies = defaultDependencies,
 ) {
+  if (
+    input?.admissionRuntimeVersion !== undefined &&
+    (typeof input.admissionRuntimeVersion !== "string" ||
+      !/^[a-f0-9]{40}$/.test(input.admissionRuntimeVersion))
+  ) {
+    throw new Error("Campaign admission selection requires a full commit SHA.");
+  }
   const run = await dependencies.loadActiveCampaign();
   if (!run) return null;
   const audit = requireCampaignAudit(run);
-  const progress = await loadCampaignProgress(run.id, audit, dependencies);
+  const progress = await loadCampaignProgress(
+    run.id,
+    audit,
+    dependencies,
+    input?.admissionRuntimeVersion,
+  );
   let status = run.status;
   if (
     input?.completeIfDone &&
@@ -1147,6 +1160,7 @@ async function loadCampaignProgress(
   campaignRunId: string,
   audit: ParkedCourseCampaignAudit,
   dependencies: ParkedCourseCampaignDependencies,
+  admissionRuntimeVersion?: string,
 ) {
   const parkedMembers = await (dependencies.loadAllParkedMembers?.() ??
     dependencies.loadParkedMembers());
@@ -1157,7 +1171,9 @@ async function loadCampaignProgress(
     audit.members.map((member) => [member.courseId, member]),
   );
   const admissionMembers = dependencies.loadAdmissionMembers
-    ? await dependencies.loadAdmissionMembers(audit, campaignRunId)
+    ? await dependencies.loadAdmissionMembers(
+        audit, campaignRunId, admissionRuntimeVersion,
+      )
     : [];
   const parkedCourseIds = new Set([
     ...admissionMembers.map((member) => member.courseId),
@@ -5652,12 +5668,12 @@ const defaultDependencies: ParkedCourseCampaignDependencies = {
     }),
   loadParkedMembers: loadParkedCourseCampaignMembers,
   loadAllParkedMembers: loadAllParkedCourseCampaignMembers,
-  loadAdmissionMembers: (audit, campaignRunId) =>
+  loadAdmissionMembers: (audit, campaignRunId, admissionRuntimeVersion) =>
     loadParkedCourseCampaignAdmissionMembers(
       audit,
       prisma,
       campaignRunId,
-      getAutomationRuntimeVersion(),
+      admissionRuntimeVersion ?? getAutomationRuntimeVersion(),
     ),
   loadGlobalParkedCount: loadGlobalParkedCourseCampaignCount,
   loadMemberObservations: loadCampaignMemberObservations,

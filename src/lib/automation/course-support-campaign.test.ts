@@ -783,6 +783,45 @@ function campaignDependencies(input: {
 }
 
 describe("parked course campaign", () => {
+  it.each([
+    "",
+    "local",
+    "synthetic-deployment",
+    "a".repeat(39),
+    "a".repeat(41),
+    "g".repeat(40),
+    "A".repeat(40),
+    ` ${"a".repeat(40)}`,
+    `${"a".repeat(40)}\n`,
+    null,
+    1,
+    ["a".repeat(40)],
+  ])("rejects invalid inspection admission runtime before reading campaign state: %j", async (admissionRuntimeVersion) => {
+    const { dependencies } = campaignDependencies({ members: [] });
+
+    await expect(inspectActiveParkedCourseCampaign(
+      { admissionRuntimeVersion } as never,
+      dependencies,
+    )).rejects.toThrow("full commit SHA");
+
+    expect(dependencies.loadActiveCampaign).not.toHaveBeenCalled();
+    expect(dependencies.loadParkedMembers).not.toHaveBeenCalled();
+    expect(dependencies.loadAllParkedMembers).not.toHaveBeenCalled();
+    expect(dependencies.createCampaign).not.toHaveBeenCalled();
+    expect(dependencies.completeCampaign).not.toHaveBeenCalled();
+  });
+
+  it("preserves absent-runtime inspection when no campaign is active", async () => {
+    const { dependencies } = campaignDependencies({ members: [] });
+
+    await expect(inspectActiveParkedCourseCampaign(undefined, dependencies)).resolves.toBeNull();
+
+    expect(dependencies.loadActiveCampaign).toHaveBeenCalledOnce();
+    expect(dependencies.loadAllParkedMembers).not.toHaveBeenCalled();
+    expect(dependencies.createCampaign).not.toHaveBeenCalled();
+    expect(dependencies.completeCampaign).not.toHaveBeenCalled();
+  });
+
   it("captures a stale monitoring fingerprint only with matching durable incident proof", async () => {
     const parkedAt = new Date("2026-08-19T12:00:00.000Z");
     const parkedRow = {
@@ -2935,6 +2974,85 @@ describe("parked course campaign", () => {
         }),
       }),
     );
+
+    // Compose the real native inspection and admission loader. Selection may
+    // use a checked local commit without forging deployed provider provenance.
+    const nativeInspectionRow = makeNativeClaimRow();
+    const unchangedInspectionRow = structuredClone(nativeInspectionRow);
+    const { dependencies: baseInspectionDependencies } = campaignDependencies({
+      members: [],
+      globalParkedCount: 1,
+    });
+    baseInspectionDependencies.loadActiveCampaign.mockResolvedValue({
+      id: "campaign-run-1",
+      status: "RUNNING",
+      completedAt: null,
+      outcome: null,
+      audit,
+    });
+    const nativeAdmission = vi.fn((
+      currentAudit: typeof audit,
+      campaignRunId: string,
+      admissionRuntimeVersion?: string,
+    ) => loadParkedCourseCampaignAdmissionMembers(
+      currentAudit,
+      database(nativeInspectionRow).database,
+      campaignRunId,
+      admissionRuntimeVersion,
+    ));
+    const inspectionDependencies = {
+      ...baseInspectionDependencies,
+      loadAdmissionMembers: nativeAdmission,
+      loadMemberObservations: (
+        currentAudit: typeof audit,
+        parkedCourseIds: ReadonlySet<string>,
+        campaignRunId: string,
+      ) => loadCampaignMemberObservations(
+        currentAudit,
+        parkedCourseIds,
+        campaignRunId,
+        {
+          courseSupportIncident: { findMany: vi.fn().mockResolvedValue([nativeInspectionRow]) },
+          // This unresolved fixture has no legacy terminal-acceptance rows.
+          courseSupportBatchIncident: { findMany: vi.fn().mockResolvedValue([]) },
+        } as never,
+      ),
+    };
+    try {
+      for (const ambient of [
+        { commit: undefined, deployment: undefined },
+        { commit: priorRuntime, deployment: "synthetic-deployment" },
+        { commit: undefined, deployment: "synthetic-deployment" },
+      ]) {
+        vi.stubEnv("VERCEL_GIT_COMMIT_SHA", ambient.commit);
+        vi.stubEnv("VERCEL_DEPLOYMENT_ID", ambient.deployment);
+        const selectionInput = {
+          completeIfDone: false,
+          admissionRuntimeVersion: currentRuntime,
+        };
+        const nativeInspection = await inspectActiveParkedCourseCampaign(
+          selectionInput,
+          inspectionDependencies,
+        );
+        expect(nativeInspection).toMatchObject({
+          readyCount: 1,
+          terminalCount: 0,
+          activeCount: 0,
+        });
+        expect(nativeAdmission).toHaveBeenLastCalledWith(audit, "campaign-run-1", currentRuntime);
+        const defaultInspection = await inspectActiveParkedCourseCampaign(
+          { completeIfDone: false },
+          inspectionDependencies,
+        );
+        expect(defaultInspection).toMatchObject({ readyCount: 0, terminalCount: 0 });
+        expect(process.env.VERCEL_GIT_COMMIT_SHA).toBe(ambient.commit);
+        expect(process.env.VERCEL_DEPLOYMENT_ID).toBe(ambient.deployment);
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(nativeInspectionRow).toEqual(unchangedInspectionRow);
+    expect(baseInspectionDependencies.completeCampaign).not.toHaveBeenCalled();
 
     const nativeClaimRow = makeNativeClaimRow();
     const unchangedNativeClaimRow = structuredClone(nativeClaimRow);

@@ -112,6 +112,7 @@ import { routeCourseSupportRemediation } from "./course-support-remediation-rout
 import { retainedSourceRecoveryFixture } from "./course-support-retained-source-recovery.test-fixtures";
 import { hasUnresolvedCourseSupportSourceResearch } from "./course-support-source-research-outcome";
 import { CourseSupportEvidenceRefreshRequiredError } from "./course-support-closeout-errors";
+import * as campaignInspection from "./course-support-campaign";
 import {
   assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery,
   assessParkedCourseCampaignSameCycleRecoveryHistory,
@@ -19733,6 +19734,55 @@ describe("course-support inspection ownership", () => {
       inspectCourseSupportQueue({ requestingThreadId: " ", now }),
     ).rejects.toThrow("current task id");
     expect(prismaMocks.batchFindFirst).not.toHaveBeenCalled();
+  });
+});
+
+describe("course-support queue inspection admission runtime", () => {
+  it("forwards the exact selection runtime to native campaign inspection", async () => {
+    const admissionRuntimeVersion = "a".repeat(40);
+    const inspection = vi.spyOn(campaignInspection, "inspectActiveParkedCourseCampaign").mockResolvedValue(null);
+    try {
+      await inspectCourseSupportQueue({ now, admissionRuntimeVersion });
+
+      expect(inspection).toHaveBeenCalledExactlyOnceWith({
+        completeIfDone: false,
+        admissionRuntimeVersion,
+      });
+    } finally {
+      inspection.mockRestore();
+    }
+  });
+
+  it("omits a selection override when none was provided", async () => {
+    const inspection = vi.spyOn(campaignInspection, "inspectActiveParkedCourseCampaign").mockResolvedValue(null);
+    try {
+      await inspectCourseSupportQueue({ now });
+
+      expect(inspection).toHaveBeenCalledExactlyOnceWith({ completeIfDone: false });
+    } finally {
+      inspection.mockRestore();
+    }
+  });
+
+  it.each([
+    "",
+    "local",
+    "synthetic-deployment",
+    "a".repeat(39),
+    "a".repeat(41),
+    "g".repeat(40),
+    "A".repeat(40),
+    ` ${"a".repeat(40)}`,
+    `${"a".repeat(40)}\n`,
+    null,
+    1,
+    ["a".repeat(40)],
+  ])("rejects malformed selection runtime before any queue read: %j", async (admissionRuntimeVersion) => {
+    await expect(inspectCourseSupportQueue({ now, admissionRuntimeVersion } as never)).rejects.toThrow("full commit SHA");
+
+    for (const dependency of Object.values(prismaMocks)) {
+      expect(dependency).not.toHaveBeenCalled();
+    }
   });
 });
 

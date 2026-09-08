@@ -3505,7 +3505,15 @@ export async function inspectCourseSupportQueue(input?: {
   now?: Date;
   requestingThreadId?: string;
   completeParkedCampaignIfDone?: boolean;
+  admissionRuntimeVersion?: string;
 }) {
+  if (
+    input?.admissionRuntimeVersion !== undefined &&
+    (typeof input.admissionRuntimeVersion !== "string" ||
+      !/^[a-f0-9]{40}$/.test(input.admissionRuntimeVersion))
+  ) {
+    throw new Error("Course-support admission selection requires a full commit SHA.");
+  }
   const now = input?.now ?? new Date();
   const requestingThreadId = input?.requestingThreadId?.trim() || null;
   if (input?.requestingThreadId !== undefined) {
@@ -3590,6 +3598,9 @@ export async function inspectCourseSupportQueue(input?: {
       }),
       inspectActiveParkedCourseCampaign({
         completeIfDone: input?.completeParkedCampaignIfDone === true,
+        ...(input?.admissionRuntimeVersion
+          ? { admissionRuntimeVersion: input.admissionRuntimeVersion }
+          : {}),
       }),
       prisma.courseSupportBatch.findMany({
         where: { completedAt: { not: null } },

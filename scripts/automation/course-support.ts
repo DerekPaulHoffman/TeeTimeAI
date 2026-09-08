@@ -609,17 +609,20 @@ async function runCommand(
   verificationCommands?: CourseSupportVerificationCommandDependencies
 ) {
   switch (command) {
-    case "inspect":
+    case "inspect": {
+      const admissionRuntimeVersion = resolveInspectionAdmissionRuntimeVersion();
       writeResult(
         await attachCourseSupportAcceptanceProjectionFromWorker(
           await inspectCourseSupportQueue({
             requestingThreadId: optionalOwnerThread(args),
             completeParkedCampaignIfDone:
-              shouldCompleteParkedCampaignForInspection(args)
+              shouldCompleteParkedCampaignForInspection(args),
+            ...(admissionRuntimeVersion ? { admissionRuntimeVersion } : {})
           })
         )
       );
       return;
+    }
     case "coverage": {
       const options =
         coverageOptions ?? parseCourseSupportCoverageOptions(args);
@@ -1882,6 +1885,24 @@ function readCommittedPaths(fromSha: string, toSha: string) {
       `${fromSha}..${toSha}`
     ])
   );
+}
+
+/** Local selection identity only; never deployed provider-execution proof. */
+function resolveInspectionAdmissionRuntimeVersion() {
+  try {
+    const git = readGitState();
+    const prefix = "automation/course-support-";
+    return git.branch.startsWith(prefix) &&
+      git.branch.length > prefix.length &&
+      /^[a-f0-9]{40}$/.test(git.headSha) &&
+      git.headSha === git.originMainSha &&
+      git.dirtyPaths.length === 0
+      ? git.headSha
+      : undefined;
+  } catch {
+    // Manual diagnosis remains available outside a claim-eligible checkout.
+    return undefined;
+  }
 }
 
 function readGitState() {
