@@ -6,6 +6,15 @@ import { z } from "zod";
 import { hasDurableWaitForMaterialChangeProof } from "@/lib/customer-monitoring-status";
 import { syntheticWebsiteTrafficClasses } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
+import { getLocalReaderCourseKey } from "@/lib/local-reader/course-key";
+import {
+  getRequiredLocalReaderCapability,
+  localReaderCapabilitiesSchema,
+  readerSupportsCapability,
+} from "@/lib/local-reader/capabilities";
+import { readCourseSupportRemediationClaimAttempt } from "./course-support-claim-evidence";
+import { evaluateMonitoringGate, type MonitoringGateInput } from "./policy";
+import { resolveProviderCapability, type ProviderCourseInput } from "./provider-capabilities";
 
 import { stableCourseProviderExecutionEvidenceValue } from "./course-provider-execution-evidence";
 import { courseSupportFailureFingerprintsMatch } from "./course-support-failure-fingerprint";
@@ -162,7 +171,8 @@ export type ParkedCourseCampaignAdmissionMember = ParkedCourseCampaignMember & {
     | "DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY"
     | "PARKED_COHORT_REQUESTLESS_STALE_OWNERSHIP_RECOVERY"
     | "SAME_IDENTITY_MATERIAL_CHANGE_INCOMPLETE_PLAYBOOK_RECOVERY"
-    | "CURRENT_CYCLE_ORCHESTRATION_RECOVERY";
+    | "CURRENT_CYCLE_ORCHESTRATION_RECOVERY"
+    | "STARTED_LOCAL_READER_CONTINUATION";
   zeroExecutionHistoryDigest: string | null;
   sameCycleRecoveryHistoryDigest: string | null;
   playbookNextStage: AutomationPlaybookStage | null;
@@ -438,7 +448,11 @@ export function deriveParkedCourseCampaignHumanReviewCycles(input: {
         failureRefinementIncompleteRecovery ||
         postMarkerIncompleteRecovery ||
         descendantIncompleteRecovery ||
-        sameIdentityMaterialChangeIncompleteRecovery) &&
+        sameIdentityMaterialChangeIncompleteRecovery ||
+        isParkedCourseStartedLocalReaderContinuationReceipt({
+          event, cycle, campaignRunId: input.campaignRunId,
+          campaignMembershipDigest: input.campaignMembershipDigest,
+        })) &&
       typeof audit.sameCycleRecoveryHistoryDigest === "string" &&
       /^[a-f0-9]{64}$/u.test(audit.sameCycleRecoveryHistoryDigest) &&
       typeof audit.providerSnapshotFingerprint === "string" &&
@@ -489,7 +503,11 @@ export function deriveParkedCourseCampaignHumanReviewCycles(input: {
       supersededEndpointsByCycle.set(priorCycle, endpoints);
     } else if (
       sameIdentityMaterialChangeIncompleteRecovery ||
-      postMarkerIncompleteRecovery
+      postMarkerIncompleteRecovery ||
+      isParkedCourseStartedLocalReaderContinuationReceipt({
+        event, cycle, campaignRunId: input.campaignRunId,
+        campaignMembershipDigest: input.campaignMembershipDigest,
+      })
     ) {
       const endpoints =
         supersededEndpointsByCycle.get(cycle) ?? new Map<string, number>();
@@ -605,7 +623,7 @@ type ParkedCourseCampaignDependencies = {
 type ParkedCourseCampaignDatabase = Pick<
   Prisma.TransactionClient,
   "automationRun" | "courseSupportIncident" | "courseSupportBatchIncident"
->;
+> & Partial<Pick<Prisma.TransactionClient, "localReaderAgent" | "teeSearch">>;
 
 export function parseParkedCourseCampaignAudit(value: unknown) {
   const parsed = parkedCourseCampaignAuditSchema.safeParse(value);
@@ -1270,8 +1288,9 @@ export async function loadParkedCourseCampaignMembers(
     requireZeroDemand: true,
   });
   return snapshots.map(
-    ({ activeRealSearchCount, zeroExecutionEvidence, ...member }) => {
+    ({ activeRealSearchCount, zeroExecutionEvidence, readerCourse, ...member }) => {
       void zeroExecutionEvidence;
+      void readerCourse;
       if (activeRealSearchCount !== 0) {
         throw new Error(
           "The immutable parked-course campaign cannot capture active demand.",
@@ -1288,8 +1307,9 @@ async function loadAllParkedCourseCampaignMembers(
   const snapshots = await loadParkedCourseCampaignMemberSnapshots(database, {
     requireZeroDemand: false,
   });
-  return snapshots.map(({ zeroExecutionEvidence, ...member }) => {
+  return snapshots.map(({ zeroExecutionEvidence, readerCourse, ...member }) => {
     void zeroExecutionEvidence;
+    void readerCourse;
     return member;
   });
 }
@@ -1312,6 +1332,7 @@ export async function loadParkedCourseCampaignAdmissionMembers(
   database: ParkedCourseCampaignDatabase = prisma,
   campaignRunId = "",
   runtimeVersion = getAutomationRuntimeVersion(),
+  now = new Date(),
 ): Promise<ParkedCourseCampaignAdmissionMember[]> {
   const capturedByIncidentId = new Map(
     audit.members.map((member) => [member.incidentId, member]),
@@ -1325,7 +1346,7 @@ export async function loadParkedCourseCampaignAdmissionMembers(
       monitoringEventsNotBefore: new Date(audit.capturedAt),
     },
   );
-  return currentMembers.flatMap((current) => {
+  const admitted = await Promise.all(currentMembers.map(async (current) => {
     const captured = capturedByIncidentId.get(current.incidentId);
     if (!captured) {
       return [];
@@ -1458,6 +1479,25 @@ export async function loadParkedCourseCampaignAdmissionMembers(
             capturedAt: new Date(audit.capturedAt),
             campaignRunId,
           });
+    const priorAdmission = Boolean(freshCycle || requestlessStaleOwnershipHistory || zeroExecutionHistory ||
+      incompletePlaybookHistory || failureRefinementIncompletePlaybookRecovery || postMarkerIncompletePlaybookRecovery ||
+      exactRuntimeSourceCycleRecovery || descendantIncompletePlaybookRecovery ||
+      sameIdentityMaterialChangeIncompletePlaybookRecovery || currentCycleOrchestrationHistory);
+    let startedLocalReaderContinuation = null;
+    if (!priorAdmission && current.readerCourse && database.teeSearch &&
+      current.zeroExecutionEvidence.playbookAssessment.nextStage === "LOCAL_READER") {
+      const activeSearchCount = await database.teeSearch.count({
+        where: { status: "ACTIVE", preferences: { some: { courseId: current.courseId } } },
+      });
+      const readerReadiness = activeSearchCount === 0
+        ? await readParkedCourseStartedLocalReaderReadiness(database, { course: current.readerCourse, now })
+        : null;
+      startedLocalReaderContinuation = assessParkedCourseStartedLocalReaderContinuation({
+        captured, current, capturedAt: new Date(audit.capturedAt), campaignRunId,
+        campaignMembershipDigest: audit.membershipDigest, currentRuntimeVersion: runtimeVersion,
+        now, activeSearchCount, readerReadiness,
+      });
+    }
     if (
       !freshCycle &&
       !requestlessStaleOwnershipHistory &&
@@ -1468,7 +1508,8 @@ export async function loadParkedCourseCampaignAdmissionMembers(
       !exactRuntimeSourceCycleRecovery &&
       !descendantIncompletePlaybookRecovery &&
       !sameIdentityMaterialChangeIncompletePlaybookRecovery &&
-      !currentCycleOrchestrationHistory
+      !currentCycleOrchestrationHistory &&
+      !startedLocalReaderContinuation
     ) {
       return [];
     }
@@ -1490,7 +1531,9 @@ export async function loadParkedCourseCampaignAdmissionMembers(
                     ? ("DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY" as const)
                     : sameIdentityMaterialChangeIncompletePlaybookRecovery
                       ? ("SAME_IDENTITY_MATERIAL_CHANGE_INCOMPLETE_PLAYBOOK_RECOVERY" as const)
-                      : ("CURRENT_CYCLE_ORCHESTRATION_RECOVERY" as const);
+                      : currentCycleOrchestrationHistory
+                        ? ("CURRENT_CYCLE_ORCHESTRATION_RECOVERY" as const)
+                        : ("STARTED_LOCAL_READER_CONTINUATION" as const);
     const playbookAssessment = current.zeroExecutionEvidence.playbookAssessment;
     return [
       {
@@ -1513,6 +1556,7 @@ export async function loadParkedCourseCampaignAdmissionMembers(
           sameIdentityMaterialChangeIncompletePlaybookRecovery?.history
             .historyDigest ??
           currentCycleOrchestrationHistory?.historyDigest ??
+          startedLocalReaderContinuation?.history.historyDigest ??
           null,
         playbookNextStage: playbookAssessment.nextStage,
         playbookCompletedStageCount: playbookAssessment.completedStages.length,
@@ -1521,7 +1565,8 @@ export async function loadParkedCourseCampaignAdmissionMembers(
           current.zeroExecutionEvidence.latestDiscovery?.id ?? null,
       },
     ];
-  });
+  }));
+  return admitted.flat();
 }
 
 type ParkedCourseCampaignRecoveryEvidence = {
@@ -1579,6 +1624,7 @@ export type ParkedCourseCampaignBatchEvidence = Omit<
     }
   >;
   batch: CourseSupportZeroExecutionBatchEvidence["batch"] & {
+    _count?: { incidents: number };
     id: string;
     status: string;
     revision: number;
@@ -1618,6 +1664,7 @@ const parkedCourseCampaignBatchIncidentSelect = {
   updatedAt: true,
   batch: {
     select: {
+      _count: { select: { incidents: true } },
       id: true,
       status: true,
       revision: true,
@@ -1700,6 +1747,269 @@ export type ParkedCourseCampaignSameCycleRecoveryHistory = {
     batchIncidentId: string;
   }>;
 };
+
+export const PARKED_COURSE_STARTED_LOCAL_READER_FRESHNESS_MS = 5 * 60_000;
+export type ParkedCourseStartedLocalReaderCourse = MonitoringGateInput & ProviderCourseInput & {
+  name: string;
+  website: string | null;
+  detectedBookingUrl: string | null;
+};
+type ParkedCourseStartedLocalReaderAgent = {
+  deviceId: string;
+  readerVersion: string;
+  buildId: string;
+  capabilities: unknown;
+  lastSeenAt: Date;
+};
+export type ParkedCourseStartedLocalReaderReadiness = {
+  deviceId: string;
+  readerVersion: string;
+  buildId: string;
+  capabilitiesFingerprint: string;
+  requiredCapabilityKey: string;
+  requiredParserVersion: number;
+  lastSeenAt: Date;
+};
+
+export function assessParkedCourseStartedLocalReaderReadiness(input: {
+  course: ParkedCourseStartedLocalReaderCourse;
+  agents: readonly ParkedCourseStartedLocalReaderAgent[];
+  now: Date;
+}): ParkedCourseStartedLocalReaderReadiness | null {
+  const courseKey = getLocalReaderCourseKey(
+    input.course.detectedBookingUrl ?? input.course.website,
+  );
+  const gate = evaluateMonitoringGate({ ...input.course, now: input.now });
+  if (!courseKey || !Number.isFinite(input.now.getTime()) ||
+    gate.disposition !== "ACTIONABLE" || !gate.adapterAllowed ||
+    !resolveProviderCapability(input.course).isRunnable) return null;
+  const required = getRequiredLocalReaderCapability(courseKey, input.course.name);
+  for (const agent of [...input.agents].sort((a, b) => a.deviceId.localeCompare(b.deviceId))) {
+    const capabilities = localReaderCapabilitiesSchema.safeParse(agent.capabilities);
+    if (
+      !agent.deviceId || !agent.readerVersion || !agent.buildId ||
+      !(agent.lastSeenAt instanceof Date) ||
+      !Number.isFinite(agent.lastSeenAt.getTime()) ||
+      agent.lastSeenAt > input.now ||
+      input.now.getTime() - agent.lastSeenAt.getTime() > PARKED_COURSE_STARTED_LOCAL_READER_FRESHNESS_MS ||
+      !capabilities.success ||
+      !readerSupportsCapability(capabilities.data, required.key, required.parserVersion)
+    ) continue;
+    return {
+      deviceId: agent.deviceId,
+      readerVersion: agent.readerVersion,
+      buildId: agent.buildId,
+      capabilitiesFingerprint: createHash("sha256").update(stableCourseProviderExecutionEvidenceValue(
+        [...capabilities.data].sort((a, b) => a.key.localeCompare(b.key) || a.parserVersion - b.parserVersion),
+      )).digest("hex"),
+      requiredCapabilityKey: required.key,
+      requiredParserVersion: required.parserVersion,
+      lastSeenAt: agent.lastSeenAt,
+    };
+  }
+  return null;
+}
+
+export async function readParkedCourseStartedLocalReaderReadiness(
+  database: Partial<Pick<Prisma.TransactionClient, "localReaderAgent">>,
+  input: { course: ParkedCourseStartedLocalReaderCourse; now: Date },
+) {
+  if (!database.localReaderAgent || !getLocalReaderCourseKey(input.course.detectedBookingUrl ?? input.course.website)) return null;
+  const agents = await database.localReaderAgent.findMany({
+    where: { lastSeenAt: { gte: new Date(input.now.getTime() - PARKED_COURSE_STARTED_LOCAL_READER_FRESHNESS_MS), lte: input.now } },
+    orderBy: { deviceId: "asc" },
+    take: 21,
+    select: { deviceId: true, readerVersion: true, buildId: true, capabilities: true, lastSeenAt: true },
+  });
+  return agents.length > 20 ? null : assessParkedCourseStartedLocalReaderReadiness({ ...input, agents });
+}
+
+const STARTED_LOCAL_READER_CONTINUATION_ACTION = "parked_cohort_started_local_reader_continuation";
+
+export function isParkedCourseStartedLocalReaderContinuationReceipt(input: {
+  event: ParkedCourseCampaignReviewEvent;
+  cycle: number | null;
+  campaignRunId: string;
+  campaignMembershipDigest: string;
+}) {
+  const audit = asCampaignRecord(input.event.audit);
+  const campaign = asCampaignRecord(audit.campaign);
+  return Boolean(
+    input.event.eventType === "REVALIDATION_REQUESTED" &&
+    input.event.source === "COURSE_SUPPORT_RESPONDER" &&
+    input.cycle !== null && Number.isSafeInteger(input.cycle) && input.cycle > 0 &&
+    audit.action === STARTED_LOCAL_READER_CONTINUATION_ACTION &&
+    audit.admissionMode === "STARTED_LOCAL_READER_CONTINUATION" &&
+    audit.cycle === input.cycle && audit.priorCycle === input.cycle &&
+    audit.campaignRunId === input.campaignRunId &&
+    audit.campaignMembershipDigest === input.campaignMembershipDigest &&
+    campaign.kind === "PARKED_COHORT" && campaign.runId === input.campaignRunId &&
+    campaign.membershipDigest === input.campaignMembershipDigest && campaign.cycle === input.cycle &&
+    [audit.continuationDigest, audit.sameCycleRecoveryHistoryDigest, audit.providerSnapshotFingerprint, audit.attemptLedgerFingerprint].every(
+      (value) => typeof value === "string" && /^[a-f0-9]{64}$/u.test(value),
+    ) &&
+    audit.playbookNextStage === "LOCAL_READER" && audit.playbookCompletedStageCount === 6 &&
+    typeof audit.supersededEndpointId === "string" && audit.supersededEndpointId.length > 0 &&
+    typeof audit.supersededEndpointAt === "string" && Number.isFinite(Date.parse(audit.supersededEndpointAt)) &&
+    Date.parse(audit.supersededEndpointAt) < input.event.occurredAt.getTime() &&
+    audit.playbookStageStatus === "STARTED" && audit.sameCycleRecovery === true && audit.oneShot === true &&
+    Number.isSafeInteger(audit.batchCount) && Number(audit.batchCount) >= 1 && Number(audit.batchCount) <= 20 &&
+    Number.isSafeInteger(audit.requestCount) && Number(audit.requestCount) >= 1 &&
+    Number.isSafeInteger(audit.startedRequestCount) && Number(audit.startedRequestCount) >= 1 &&
+    Number(audit.startedRequestCount) <= Number(audit.requestCount) &&
+    audit.preservesAttemptLedger === true && audit.preservesAttemptCounts === true &&
+    audit.preservesAttemptTimestamps === true && audit.preservesOperatorEvidence === true &&
+    audit.preservesImmutableCampaignAudit === true && audit.customerDataIncluded === false
+  );
+}
+
+/** A new permission to finish current work, not a reconstruction of old lineage. */
+export function assessParkedCourseStartedLocalReaderContinuation(input: {
+  captured: ParkedCourseCampaignMember;
+  current: ParkedCourseCampaignMemberSnapshot;
+  capturedAt: Date;
+  campaignRunId: string;
+  campaignMembershipDigest: string;
+  currentRuntimeVersion: string;
+  now: Date;
+  activeSearchCount: number;
+  readerReadiness: ParkedCourseStartedLocalReaderReadiness | null;
+}) {
+  const { captured, current, readerReadiness: reader } = input;
+  const evidence = current.zeroExecutionEvidence;
+  const ledger = parseAutomationPlaybookLedger(evidence.attemptLedger);
+  const assessment = assessAutomationPlaybook(evidence.attemptLedger, current.cycle);
+  const readerCourse = current.readerCourse;
+  const readerCourseKey = readerCourse && getLocalReaderCourseKey(readerCourse.detectedBookingUrl ?? readerCourse.website);
+  const requiredReader = readerCourseKey ? getRequiredLocalReaderCapability(readerCourseKey, readerCourse!.name) : null;
+  if (
+    !Number.isFinite(input.now.getTime()) || !Number.isFinite(input.capturedAt.getTime()) || input.capturedAt > input.now ||
+    !input.campaignRunId || !/^[a-f0-9]{64}$/u.test(input.campaignMembershipDigest) ||
+    !/^[a-f0-9]{40}$/u.test(input.currentRuntimeVersion) ||
+    current.courseId !== captured.courseId || current.incidentId !== captured.incidentId ||
+    current.kind !== captured.kind || current.cycle <= captured.cycle ||
+    current.activeRealSearchCount !== 0 || input.activeSearchCount !== 0 ||
+    !current.monitoringFailureFingerprint || !courseSupportFailureFingerprintsMatch(current.monitoringFailureFingerprint, current.failureFingerprint) ||
+    !hasCompleteParkedCourseCampaignMonitoringHistory({ current, capturedAt: input.capturedAt }) ||
+    !hasExactParkedCourseCampaignLatestEvidence({ current }) ||
+    !ledger || ledger.events.at(-1)?.cycle !== current.cycle || !assessment.valid || assessment.conclusion !== "INCOMPLETE" ||
+    current.playbookConclusion !== "INCOMPLETE" || assessment.completedStages.length !== 6 ||
+    assessment.nextStage !== "LOCAL_READER" || assessment.stages[6]?.status !== "STARTED" ||
+    current.attemptLedgerFingerprint !== createParkedCourseCampaignAttemptLedgerFingerprint(ledger) ||
+    !readerCourse || !requiredReader ||
+    evaluateMonitoringGate({ ...readerCourse, now: input.now }).disposition !== "ACTIONABLE" ||
+    !resolveProviderCapability(readerCourse).isRunnable ||
+    !reader || reader.requiredCapabilityKey !== requiredReader.key || reader.requiredParserVersion !== requiredReader.parserVersion ||
+    !reader.deviceId || !reader.readerVersion || !reader.buildId ||
+    !/^[a-f0-9]{64}$/u.test(reader.capabilitiesFingerprint) || !reader.requiredCapabilityKey ||
+    !Number.isSafeInteger(reader.requiredParserVersion) || reader.requiredParserVersion < 1 ||
+    !(reader.lastSeenAt instanceof Date) || !Number.isFinite(reader.lastSeenAt.getTime()) ||
+    reader.lastSeenAt > input.now || input.now.getTime() - reader.lastSeenAt.getTime() > PARKED_COURSE_STARTED_LOCAL_READER_FRESHNESS_MS
+  ) return null;
+  const events = evidence.monitoringEvents;
+  if (events.some((event) => {
+    const audit = asCampaignRecord(event.audit);
+    return event.incidentId === current.incidentId && audit.cycle === current.cycle &&
+      (audit.action === STARTED_LOCAL_READER_CONTINUATION_ACTION || audit.admissionMode === "STARTED_LOCAL_READER_CONTINUATION");
+  })) return null;
+  const entries = [...evidence.batchIncidents].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  if (entries.length < 1 || entries.length > 20 || entries.some((entry) =>
+    entry.courseId !== current.courseId || entry.incidentId !== current.incidentId || entry.cycle !== current.cycle ||
+    entry.batchId !== entry.batch.id || !entry.batch.completedAt || entry.batch.completedAt > input.now ||
+    !Number.isFinite(entry.createdAt.getTime()) || !Number.isFinite(entry.batch.createdAt.getTime()) ||
+    !Number.isFinite(entry.batch.completedAt.getTime()) || entry.batch.createdAt > entry.createdAt || entry.createdAt > entry.batch.completedAt ||
+    !["SUCCEEDED", "PARTIAL", "RETRYABLE_FAILED"].includes(entry.batch.status) ||
+    (entry.batch.ownerAutomationRunId === null ? entry.batch.ownerAutomationRun !== null :
+      !entry.batch.ownerAutomationRun || entry.batch.ownerAutomationRun.id !== entry.batch.ownerAutomationRunId ||
+      !["COMPLETED", "FAILED"].includes(entry.batch.ownerAutomationRun.status) ||
+      !entry.batch.ownerAutomationRun.completedAt || !Number.isFinite(entry.batch.ownerAutomationRun.completedAt.getTime()) ||
+      entry.batch.ownerAutomationRun.completedAt > input.now) ||
+    !isNonterminalStartedReaderContinuationProof(entry.proofSnapshot),
+  )) return null;
+  const chronological = [...entries].sort((a, b) => a.batch.createdAt.getTime() - b.batch.createdAt.getTime());
+  if (chronological.some((entry, index) => index > 0 && entry.batch.createdAt < chronological[index - 1]!.batch.completedAt!)) return null;
+  const latest = entries[0]!;
+  if (entries[1]?.createdAt.getTime() === latest.createdAt.getTime() ||
+    latest.batch.status !== "RETRYABLE_FAILED" || latest.result !== "RETRY_SCHEDULED" ||
+    latest.verificationRequests.length !== 1 || !latest.batch._count ||
+    !Number.isSafeInteger(latest.batch._count.incidents) || latest.batch._count.incidents < 1 || latest.batch._count.incidents > 20
+  ) return null;
+  const claim = readCourseSupportRemediationClaimAttempt({
+    summary: latest.batch.summary, courseId: current.courseId, expectedAttemptCount: latest.batch._count.incidents,
+  });
+  const request = latest.verificationRequests[0]!;
+  const requestEvidence = asCampaignRecord(request.evidence);
+  const batchRuntime = latest.batch.releaseSha ?? latest.batch.baseSha;
+  // The native claim producer counts this cycle, while ledger sequences span
+  // every retained cycle. Keep the original sequence and prior evidence intact.
+  const currentCycleEvents = ledger.events.filter((event) => event.cycle === current.cycle);
+  const lastClaimedEvent = claim ? currentCycleEvents[claim.playbookEventCountAtClaim - 1] : undefined;
+  const claimPrefix = lastClaimedEvent ? ledger.events.slice(0, lastClaimedEvent.sequence) : [];
+  if (!claim || claim.actionPlan !== null || claim.approach.playbookStage !== "LOCAL_READER" ||
+    claim.providerSnapshotFingerprint !== current.providerSnapshotFingerprint || claim.failureFingerprint !== current.failureFingerprint ||
+    !lastClaimedEvent || claim.playbookEventCountAtClaim > currentCycleEvents.length ||
+    claimPrefix.some((event) => new Date(event.observedAt) > latest.createdAt) ||
+    assessAutomationPlaybook({ version: ledger.version, events: claimPrefix }, current.cycle).nextStage !== "LOCAL_READER" ||
+    !/^[a-f0-9]{40}$/u.test(batchRuntime) || batchRuntime === input.currentRuntimeVersion ||
+    request.courseId !== current.courseId || request.providerSnapshotFingerprint !== current.providerSnapshotFingerprint ||
+    request.releaseSha !== batchRuntime || request.status !== "STALE" || request.outcome !== "FETCH_FAILED" || requestEvidence.providerExecution !== false ||
+    !(request.createdAt instanceof Date) || !(request.updatedAt instanceof Date) ||
+    request.createdAt < latest.createdAt || request.updatedAt < request.createdAt || request.updatedAt > input.now
+    || !request.startedAt || !Number.isFinite(request.startedAt.getTime()) ||
+    request.startedAt < request.createdAt || request.startedAt > latest.batch.completedAt! ||
+    request.revision < 2 || request.attemptCount < 1
+  ) return null;
+  const endpoints = events.filter((event) => {
+    const audit = asCampaignRecord(event.audit);
+    return event.incidentId === current.incidentId && event.eventType === "HUMAN_REVIEW_REQUESTED" &&
+      event.source === "COURSE_SUPPORT_RESPONDER" && event.failureFingerprint === current.failureFingerprint && audit.cycle === current.cycle &&
+      audit.automationStalled === true && audit.parkedUntilMaterialChange === true && audit.customerState === "NEEDS_HUMAN_REVIEW" &&
+      !Object.prototype.hasOwnProperty.call(audit, "playbookExhausted") &&
+      event.occurredAt >= latest.batch.completedAt! && event.occurredAt >= request.updatedAt! && event.occurredAt <= input.now;
+  });
+  if (endpoints.length !== 1) return null;
+  const endpoint = endpoints[0]!;
+  const started = [...ledger.events].reverse().find((event) => event.cycle === current.cycle && event.stage === "LOCAL_READER" && event.transition === "STARTED");
+  if (!started || !entries.some((entry) =>
+    started.runtimeVersion === (entry.batch.releaseSha ?? entry.batch.baseSha) &&
+    new Date(started.observedAt) >= entry.batch.createdAt && new Date(started.observedAt) <= entry.batch.completedAt!,
+  )) return null;
+  if (!endpoint.id || endpoint.occurredAt < input.capturedAt ||
+    events.some((event) => event.incidentId === current.incidentId && event.occurredAt > endpoint.occurredAt) ||
+    !hasExactParkedCourseCampaignLatestEvidence({ current, strictlyBefore: endpoint.occurredAt }) ||
+    ledger.events.some((event) => new Date(event.observedAt) > endpoint.occurredAt)
+  ) return null;
+  const history = assessParkedCourseCampaignSameCycleRecoveryHistory({
+    courseId: current.courseId, cycle: current.cycle, entries,
+    requireOrchestrationOnly: false, requireStartedRequest: true, requireCausalStartedRequest: true,
+    minimumStartedAt: input.capturedAt,
+  });
+  if (!history) return null;
+  const { lastSeenAt, ...stableReader } = reader;
+  void lastSeenAt;
+  const continuationDigest = createHash("sha256").update(stableCourseProviderExecutionEvidenceValue({
+    courseId: current.courseId, incidentId: current.incidentId, cycle: current.cycle,
+    stage: "LOCAL_READER", campaignRunId: input.campaignRunId, campaignMembershipDigest: input.campaignMembershipDigest,
+    providerSnapshotFingerprint: current.providerSnapshotFingerprint, failureFingerprint: current.failureFingerprint,
+    attemptLedgerFingerprint: current.attemptLedgerFingerprint, historyDigest: history.historyDigest,
+    latestBatchIncidentId: latest.id, latestRequestId: request.id, claim,
+    endpoint: canonicalizeParkedCourseCampaignRecoveryEvent(endpoint), reader: stableReader,
+  })).digest("hex");
+  return {
+    history: { ...history, historyDigest: continuationDigest }, continuationDigest,
+    latestBatchIncidentId: latest.id, latestRequestId: request.id, parkedEventId: endpoint.id,
+    readerReadiness: reader,
+  };
+}
+
+function isNonterminalStartedReaderContinuationProof(value: unknown) {
+  if (value === null) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const proof = asCampaignRecord(value);
+  if (!["PROVIDER_VERIFICATION_FAILURE", "PROVIDER_PROBE", "HUMAN_REVIEW_REQUIRED"].includes(String(proof.kind))) return false;
+  return ["FETCH_FAILED", "NEEDS_ADAPTER"].includes(String(proof.outcome)) &&
+    proof.disposition === undefined;
+}
 
 export function assessParkedCourseCampaignSameCycleRecoveryHistory(input: {
   courseId: string;
@@ -2454,8 +2764,9 @@ function canonicalizeParkedCourseCampaignRecoveryEvent(
   };
 }
 
-type ParkedCourseCampaignMemberSnapshot = ParkedCourseCampaignMember & {
+export type ParkedCourseCampaignMemberSnapshot = ParkedCourseCampaignMember & {
   activeRealSearchCount: number;
+  readerCourse?: ParkedCourseStartedLocalReaderCourse;
   zeroExecutionEvidence: ParkedCourseCampaignRecoveryEvidence;
 };
 
@@ -2601,6 +2912,7 @@ async function loadParkedCourseCampaignMemberSnapshots(
       },
       course: {
         select: {
+          name: true,
           timeZone: true,
           isPublic: true,
           website: true,
@@ -2768,6 +3080,7 @@ async function loadParkedCourseCampaignMemberSnapshots(
           incident.activeRealSearchCount,
           incident.course.preferences.length,
         ),
+        readerCourse: incident.course,
         zeroExecutionEvidence: {
           attemptLedger: incident.attemptLedger,
           latestProbe: incident.course.probes[0] ?? null,
@@ -2804,8 +3117,9 @@ async function loadParkedCourseCampaignMemberSnapshots(
 function stripParkedCourseCampaignRecoveryEvidence(
   snapshot: ParkedCourseCampaignMemberSnapshot,
 ) {
-  const { zeroExecutionEvidence, ...member } = snapshot;
+  const { zeroExecutionEvidence, readerCourse, ...member } = snapshot;
   void zeroExecutionEvidence;
+  void readerCourse;
   return member;
 }
 

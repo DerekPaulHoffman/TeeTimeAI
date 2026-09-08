@@ -80,6 +80,7 @@ export type CourseSupportCandidate = {
       | "DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY"
       | "PARKED_COHORT_REQUESTLESS_STALE_OWNERSHIP_RECOVERY"
       | "SAME_IDENTITY_MATERIAL_CHANGE_INCOMPLETE_PLAYBOOK_RECOVERY"
+      | "STARTED_LOCAL_READER_CONTINUATION"
       | "CURRENT_CYCLE_ORCHESTRATION_RECOVERY";
     zeroExecutionHistoryDigest: string | null;
     sameCycleRecoveryHistoryDigest: string | null;

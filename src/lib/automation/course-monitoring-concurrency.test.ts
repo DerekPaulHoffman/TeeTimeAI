@@ -46,6 +46,8 @@ const transactionMocks = vi.hoisted(() => ({
   courseAutomationDiscovery: {
     findFirst: vi.fn(),
   },
+  coursePreference: { findFirst: vi.fn() },
+  localReaderAgent: { findMany: vi.fn() },
   automationRun: {
     findFirst: vi.fn(),
     findMany: vi.fn(),
@@ -63,6 +65,7 @@ const transactionMocks = vi.hoisted(() => ({
     deleteMany: vi.fn(),
   },
   localReaderJob: {
+    findFirst: vi.fn(),
     findMany: vi.fn(),
     updateMany: vi.fn(),
   },
@@ -73,6 +76,7 @@ const prismaMocks = vi.hoisted(() => ({
   courseMonitoringEvent: {},
   courseMonitoringStatus: {},
   courseSupportIncident: {
+    findUnique: vi.fn(),
     findMany: vi.fn(),
   },
   automationRun: {
@@ -121,6 +125,9 @@ import { COURSE_SUPPORT_RESPONDER_PROMPT_VERSION } from "./course-support-respon
 import { assessCourseSupportZeroExecutionHistory } from "./course-support-zero-execution";
 import type { CourseSupportCandidate } from "./course-support-selection";
 import { buildProviderFailureFingerprint } from "./provider-capabilities";
+import { loadCourseMonitoringPlaybookRuntime } from "./course-monitoring-playbook-runtime";
+import { routeCourseSupportRemediation } from "./course-support-remediation-routing";
+import { buildCourseSupportClaimActionPlan } from "./course-support-action-plan";
 
 function mockCourseIntelligenceFinalEvidence(
   state: "FINAL_MANUAL" | "FINAL_IDENTITY",
@@ -163,6 +170,277 @@ function mockUnconsumedLocalReaderProviderSource(providerObservedAt: Date) {
 }
 
 describe("course monitoring write serialization", () => {
+  describe("started local-reader continuation", () => {
+    async function arrangeContinuation() {
+      const capturedAt = new Date("2026-08-20T10:00:00.000Z");
+      const batchAt = new Date("2026-08-22T10:00:00.000Z");
+      const completedAt = new Date("2026-08-22T10:20:00.000Z");
+      const parkedAt = new Date("2026-08-22T10:30:00.000Z");
+      const now = new Date("2026-09-08T17:00:00.000Z");
+      const oldRuntime = "a".repeat(40);
+      const currentRuntime = "b".repeat(40);
+      const course = {
+        name: "Standalone reader fixture", timeZone: "America/New_York", isPublic: true,
+        website: "https://fixture.invalid",
+        detectedBookingUrl: "https://fixture.cps.golf/onlineresweb/search-teetime",
+        detectedPlatform: "CUSTOM" as const, providerFamilyKey: "CPS", bookingMethod: "PUBLIC_ONLINE" as const,
+        bookingWindowDaysAhead: null, bookingReleaseTimeLocal: null, bookingWindowSource: null,
+        bookingWindowConfidence: null, bookingWindowEvidenceUrl: null,
+        automationEligibility: "ALLOWED" as const, automationReason: "NONE" as const,
+        monitoringMode: "AUTOMATIC" as const, bookingAccessMode: "PUBLIC_SIGNED_OUT" as const,
+        intelligenceVerifiedAt: null, intelligenceReviewAt: null, intelligenceConfidence: null,
+        bookingMetadata: { provider: "CPS", siteName: "fixture", bookingBaseUrl: "https://fixture.cps.golf/", courseIds: [1] },
+        layoutHoleCounts: [], layoutHolesVerifiedAt: null,
+      };
+      const agent = {
+        deviceId: "fixture-device", readerVersion: "2.0.0", buildId: "fixture-build",
+        capabilities: [{ key: "CPS_RENDERED", parserVersion: 1 }], lastSeenAt: now,
+      };
+      const stages = [
+        ["OFFICIAL_IDENTITY", "OFFICIAL_IDENTITY"], ["TYPED_ADAPTER", "TYPED_PROVIDER_ADAPTER"],
+        ["OFFICIAL_HTTP_DISCOVERY", "OFFICIAL_HTTP"], ["HTTP_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER"],
+        ["RENDERED_BROWSER_DISCOVERY", "RENDERED_BROWSER"], ["BROWSER_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER"],
+        ["LOCAL_READER", "LOCAL_READER"],
+      ] as const;
+      const attemptLedger = {
+        version: 1,
+        events: stages.map(([stage, readPath], index) => ({
+          sequence: index + 1, cycle: 8, stage, readPath,
+          transition: index === 6 ? "STARTED" : "COMPLETED", evidenceKind: "TOOLING",
+          observedAt: new Date(batchAt.getTime() + index * 1000).toISOString(),
+          failureFingerprint: "HTTP:FETCH_FAILED", runtimeVersion: oldRuntime,
+        })),
+      };
+      const providerSnapshotFingerprint = buildCourseSupportProviderSnapshotFingerprint(course);
+      const attemptLedgerFingerprint = createParkedCourseCampaignAttemptLedgerFingerprint(attemptLedger);
+      const latestDiscovery = {
+        id: "fixture-discovery", courseId: "fixture-course", createdAt: new Date(batchAt.getTime() - 60_000),
+      };
+      const request = {
+        id: "fixture-request", courseId: "fixture-course", releaseSha: oldRuntime,
+        providerSnapshotFingerprint, providerSnapshotAt: batchAt,
+        discoveryAttemptedAt: null, discoveryVerifiedAt: null,
+        createdAt: new Date(batchAt.getTime() + 10_000), updatedAt: completedAt,
+        status: "STALE", revision: 4, attemptCount: 1, workflowRunId: null,
+        startedAt: new Date(batchAt.getTime() + 20_000), outcome: "FETCH_FAILED", failureClass: "HTTP_5XX",
+        evidence: { providerExecution: false }, lastError: null,
+      };
+      const entry = {
+        id: "fixture-entry", batchId: "fixture-batch", incidentId: "fixture-incident",
+        courseId: "fixture-course", cycle: 8, result: "RETRY_SCHEDULED",
+        preProbeId: null, postProbeId: null, proofSnapshot: null,
+        verifiedIncidentUpdatedAt: completedAt, verifiedAt: completedAt,
+        createdAt: new Date(batchAt.getTime() + 8000), updatedAt: completedAt,
+        batch: {
+          id: "fixture-batch", _count: { incidents: 1 }, status: "RETRYABLE_FAILED", revision: 3,
+          ownerAutomationRunId: null, ownerAutomationRun: null,
+          baseSha: oldRuntime, releaseSha: oldRuntime, createdAt: batchAt, updatedAt: completedAt,
+          completedAt, deployedAt: batchAt, recheckDispatchKey: null,
+          recheckDispatchStartedAt: null, recheckDispatchedAt: null,
+          summary: { remediation: { attempts: [{
+            courseRef: createHash("sha256").update("fixture-course").digest("hex").slice(0, 24),
+            providerSnapshotFingerprint, failureFingerprint: "HTTP:FETCH_FAILED", playbookEventCountAtClaim: 7,
+            approach: { workMode: "VERIFY_TRANSIENT", strategyAction: "RUN_TYPED_ADAPTER", playbookStage: "LOCAL_READER" },
+          }] } },
+        },
+        verificationRequests: [request],
+      };
+      const endpoint = {
+        id: "fixture-endpoint", incidentId: "fixture-incident", eventType: "HUMAN_REVIEW_REQUESTED",
+        source: "COURSE_SUPPORT_RESPONDER", failureFingerprint: "HTTP:FETCH_FAILED", readPath: null,
+        occurredAt: parkedAt, audit: { cycle: 8, automationStalled: true,
+          parkedUntilMaterialChange: true, customerState: "NEEDS_HUMAN_REVIEW" },
+      };
+      const captured = {
+        courseId: "fixture-course", incidentId: "fixture-incident", cycle: 1, revision: 1,
+        monitoringRevision: 1, monitoringFailureFingerprint: "HTTP:FETCH_FAILED",
+        kind: "FETCH_FAILED" as const, providerFamilyKey: "CPS", failureClass: "HTTP_5XX" as const,
+        failureFingerprint: "HTTP:FETCH_FAILED", providerSnapshotFingerprint, attemptLedgerFingerprint,
+        playbookConclusion: "UNRESOLVED_EXHAUSTED" as const, latestProbeAt: null,
+        latestDiscoveryAt: latestDiscovery.createdAt.toISOString(),
+      };
+      const audit = createParkedCourseCampaignAudit({ expectedCount: 1, capturedAt, members: [captured] });
+      const incident = {
+        id: captured.incidentId, courseId: captured.courseId, cycle: 8, revision: 12,
+        status: "NEEDS_HUMAN", kind: captured.kind, providerFamilyKey: "CPS", failureClass: "HTTP_5XX",
+        failureFingerprint: captured.failureFingerprint, attemptLedger, humanReviewReason: "AUTOMATION_STALLED",
+        activeRealSearchCount: 0, attemptCount: 6, lastAttemptAt: batchAt, confirmedAt: batchAt,
+        activeBatchId: null as string | null, nextAttemptAt: null, escalatedAt: parkedAt,
+        resolution: null, resolvedAt: null, resolutionMessage: null, resolutionNotifiedAt: null,
+        decisionActorId: null, decisionAt: null, decisionNote: null, decisionEvidenceUrl: null,
+        decisionIdempotencyKey: null, monitoringEvents: [endpoint], batchIncidents: [entry],
+        course: { ...course, updatedAt: batchAt, probes: [], automationDiscoveries: [latestDiscovery],
+          preferences: [] as { id: string }[], monitoringStatus: {
+            state: "ENGINEERING_VERIFICATION_NEEDED", revision: 16, failureFingerprint: captured.failureFingerprint,
+            nextAutomaticAttemptAt: null, revalidationRequestedAt: null,
+          } },
+      };
+      const campaignRun = { promptVersion: PARKED_COURSE_CAMPAIGN_PROMPT_VERSION,
+        status: "RUNNING", completedAt: null, audit };
+      const plannerDatabase = {
+        courseSupportIncident: { findMany: vi.fn().mockResolvedValue([incident]) },
+        teeSearch: { count: vi.fn().mockResolvedValue(0) },
+        localReaderAgent: { findMany: vi.fn().mockResolvedValue([agent]) },
+      };
+      const members = await loadParkedCourseCampaignAdmissionMembers(
+        audit, plannerDatabase as never, "fixture-campaign", currentRuntime, now,
+      );
+      expect(members).toEqual([expect.objectContaining({
+        admissionMode: "STARTED_LOCAL_READER_CONTINUATION", playbookNextStage: "LOCAL_READER",
+        playbookCompletedStageCount: 6,
+      })]);
+      expect(plannerDatabase.teeSearch.count).toHaveBeenCalledWith({
+        where: { status: "ACTIVE", preferences: { some: { courseId: captured.courseId } } },
+      });
+      const planned = members[0]!;
+      if (planned.kind !== "FETCH_FAILED" || planned.failureClass !== "HTTP_5XX") {
+        throw new Error("The native planner changed the fixture failure contract.");
+      }
+      const input: Parameters<typeof reopenParkedCourseForResponderCampaignInTransaction>[1] = {
+        courseId: planned.courseId, incidentId: planned.incidentId,
+        expectedCycle: planned.cycle, expectedRevision: planned.revision,
+        expectedMonitoringRevision: planned.monitoringRevision,
+        capturedRevision: planned.capturedRevision, capturedMonitoringRevision: planned.capturedMonitoringRevision,
+        capturedCycle: planned.capturedCycle, campaignCapturedAt: planned.campaignCapturedAt,
+        admissionMode: planned.admissionMode,
+        expectedSameCycleRecoveryHistoryDigest: planned.sameCycleRecoveryHistoryDigest,
+        expectedPlaybookNextStage: planned.playbookNextStage,
+        expectedPlaybookCompletedStageCount: planned.playbookCompletedStageCount,
+        currentRuntimeVersion: currentRuntime, capturedKind: planned.capturedKind,
+        capturedProviderFamilyKey: planned.capturedProviderFamilyKey,
+        expectedKind: planned.kind, expectedFailureClass: planned.failureClass,
+        expectedLatestProbeAt: planned.latestProbeAt, expectedLatestDiscoveryAt: planned.latestDiscoveryAt,
+        expectedLatestProbeId: planned.latestProbeId, expectedLatestDiscoveryId: planned.latestDiscoveryId,
+        expectedProviderFamilyKey: planned.providerFamilyKey, expectedFailureFingerprint: planned.failureFingerprint,
+        expectedMonitoringFailureFingerprint: planned.monitoringFailureFingerprint,
+        expectedProviderSnapshotFingerprint: planned.providerSnapshotFingerprint,
+        expectedAttemptLedgerFingerprint: planned.attemptLedgerFingerprint,
+        expectedPlaybookConclusion: planned.playbookConclusion,
+        campaignRunId: "fixture-campaign", campaignMembershipDigest: audit.membershipDigest, now,
+      };
+      const fallbackQuery = transactionMocks.$queryRaw.getMockImplementation()!;
+      transactionMocks.$queryRaw.mockImplementation((query: { strings?: string[]; values?: unknown[] }) => {
+        const sql = query.strings?.join(" ") ?? "";
+        if (sql.includes('clock_timestamp() AS "now"')) return Promise.resolve([{ now }]);
+        if (sql.includes('FROM "LocalReaderAgent"')) return Promise.resolve([agent]);
+        return fallbackQuery(query);
+      });
+      transactionMocks.courseSupportIncident.findUnique.mockResolvedValue(incident);
+      transactionMocks.automationRun.findUnique.mockResolvedValue(campaignRun);
+      transactionMocks.courseSupportBatchIncident.findMany.mockResolvedValue([entry]);
+      transactionMocks.courseSupportBatchIncident.findFirst.mockResolvedValue(null);
+      transactionMocks.courseMonitoringEvent.findMany.mockResolvedValue([endpoint]);
+      transactionMocks.courseMonitoringEvent.findFirst.mockResolvedValue(null);
+      transactionMocks.courseSupportVerificationRequest.findFirst.mockResolvedValue(null);
+      transactionMocks.courseProbe.findFirst.mockResolvedValue(null);
+      transactionMocks.courseAutomationDiscovery.findFirst.mockResolvedValue(latestDiscovery);
+      transactionMocks.localReaderAgent.findMany.mockResolvedValue([agent]);
+      transactionMocks.automationRun.updateMany.mockResolvedValue({ count: 1 });
+      transactionMocks.course.updateMany.mockResolvedValue({ count: 1 });
+      transactionMocks.courseSupportIncident.updateMany.mockResolvedValue({ count: 1 });
+      transactionMocks.courseMonitoringStatus.updateMany.mockResolvedValue({ count: 1 });
+      return { input, course, incident, entry, request, endpoint, agent, plannerDatabase, audit, currentRuntime, now };
+    }
+
+    it("loads and atomically admits a prior-release started reader without replaying completed stages", async () => {
+      const fixture = await arrangeContinuation();
+      const before = structuredClone(fixture.incident);
+      await expect(reopenParkedCourseForResponderCampaignInTransaction(transactionMocks as never, fixture.input))
+        .resolves.toMatchObject({ admitted: true, cycle: 8 });
+      const incidentWrite = transactionMocks.courseSupportIncident.updateMany.mock.calls[0]![0];
+      expect(incidentWrite.data).toMatchObject({ status: "AUTO_INVESTIGATING", revision: { increment: 1 } });
+      for (const field of ["cycle", "attemptLedger", "attemptCount", "confirmedAt", "lastAttemptAt"]) {
+        expect(incidentWrite.data).not.toHaveProperty(field);
+      }
+      expect(transactionMocks.course.updateMany).toHaveBeenCalledWith({
+        where: { id: fixture.incident.courseId, updatedAt: fixture.incident.course.updatedAt },
+        data: { updatedAt: fixture.incident.course.updatedAt },
+      });
+      expect(transactionMocks.courseSupportBatch.updateMany).not.toHaveBeenCalled();
+      expect(transactionMocks.courseSupportBatchIncident.updateMany).not.toHaveBeenCalled();
+      expect(transactionMocks.courseSupportVerificationRequest.updateMany).not.toHaveBeenCalled();
+      expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledTimes(1);
+      const receipt = transactionMocks.courseMonitoringEvent.create.mock.calls[0]![0].data;
+      expect(receipt.audit).toMatchObject({
+        action: "parked_cohort_started_local_reader_continuation", admissionMode: "STARTED_LOCAL_READER_CONTINUATION",
+        cycle: 8, priorCycle: 8, playbookNextStage: "LOCAL_READER", playbookCompletedStageCount: 6,
+        playbookStageStatus: "STARTED", sameCycleRecovery: true, oneShot: true,
+        preservesAttemptLedger: true, preservesAttemptCounts: true, preservesAttemptTimestamps: true,
+        preservesOperatorEvidence: true, preservesImmutableCampaignAudit: true, customerDataIncluded: false,
+      });
+      expect(fixture.incident).toEqual(before);
+      const sql = transactionMocks.$queryRaw.mock.calls.map(([query]) => query.strings.join(" ")).join("\n");
+      for (const table of ["CourseSupportBatch", "CourseSupportBatchIncident", "CourseSupportVerificationRequest", "CourseAutomationDiscovery", "LocalReaderAgent"]) {
+        expect(sql).toContain(`FROM "${table}"`);
+      }
+      expect(transactionMocks.coursePreference.findFirst).toHaveBeenCalledWith({
+        where: { courseId: fixture.incident.courseId, teeSearch: { status: "ACTIVE" } }, select: { id: true },
+      });
+      prismaMocks.courseSupportIncident.findUnique.mockResolvedValue({ ...fixture.incident, status: "AUTO_INVESTIGATING" });
+      const runtime = await loadCourseMonitoringPlaybookRuntime(fixture.incident.courseId);
+      expect(runtime).toMatchObject({ cycle: 8, assessment: { conclusion: "INCOMPLETE", nextStage: "LOCAL_READER" } });
+      expect(runtime!.assessment.completedStages).toHaveLength(6);
+      expect(runtime!.assessment.stages.find((stage) => stage.stage === "LOCAL_READER")?.status).toBe("STARTED");
+      // Current-cycle stage history is independent of unchanged remediation retry accounting.
+      const route = routeCourseSupportRemediation({
+        ...fixture.incident.course, failureClass: "HTTP_5XX", attemptCount: 0,
+        playbookAssessment: runtime!.assessment, now: fixture.now,
+      });
+      expect(route).toMatchObject({ workMode: "VERIFY_TRANSIENT", strategy: { action: "RETRY_PROVIDER" },
+        allowUnchangedRuntime: true, requiresImplementationPath: false });
+      expect(buildCourseSupportClaimActionPlan({ route, incidentKind: "FETCH_FAILED",
+        incidentProviderFamilyKey: "CPS", course: fixture.course, now: fixture.now }))
+        .toMatchObject({ primaryAction: "VERIFY_CURRENT_RUNTIME" });
+    });
+
+    it.each([
+      "owner", "source", "request-evidence-unavailable", "request-executed", "terminal-stage",
+      "active-synthetic-demand", "late-demand", "late-request", "late-reader-job", "late-source",
+      "missing-reader", "reader-changed-after-selection", "reader-changed-at-lock", "missing-history-lock",
+      "duplicate-receipt", "incident-cas",
+    ])("rejects %s without changing incident history or appending a continuation receipt", async (fault) => {
+      const fixture = await arrangeContinuation();
+      const clone = structuredClone(fixture.incident);
+      switch (fault) {
+        case "owner": clone.activeBatchId = "other-owner"; break;
+        case "source": clone.course.detectedBookingUrl += "?changed=1"; break;
+        case "request-evidence-unavailable": delete (clone.batchIncidents[0]!.verificationRequests[0]!.evidence as Partial<{ providerExecution: boolean }>).providerExecution; break;
+        case "request-executed": clone.batchIncidents[0]!.verificationRequests[0]!.evidence.providerExecution = true; break;
+        case "terminal-stage": clone.attemptLedger.events[6]!.transition = "COMPLETED"; break;
+        case "active-synthetic-demand": clone.course.preferences.push({ id: "synthetic-preference" }); break;
+        case "late-demand": transactionMocks.coursePreference.findFirst.mockResolvedValue({ id: "new-active-preference" }); break;
+        case "late-request": transactionMocks.courseSupportVerificationRequest.findFirst.mockResolvedValue({ id: "new-request" }); break;
+        case "late-reader-job": transactionMocks.localReaderJob.findFirst.mockResolvedValue({ id: "new-reader-job" }); break;
+        case "late-source": transactionMocks.courseAutomationDiscovery.findFirst.mockResolvedValue({ ...clone.course.automationDiscoveries[0], id: "new-source" }); break;
+        case "missing-reader": transactionMocks.localReaderAgent.findMany.mockResolvedValue([]); break;
+        case "reader-changed-after-selection": transactionMocks.localReaderAgent.findMany.mockResolvedValue([{ ...fixture.agent, buildId: "other-build" }]); break;
+        case "reader-changed-at-lock": {
+          const prior = transactionMocks.$queryRaw.getMockImplementation()!;
+          transactionMocks.$queryRaw.mockImplementation((query) => query.strings.join(" ").includes('FROM "LocalReaderAgent"')
+            ? Promise.resolve([{ ...fixture.agent, buildId: "other-build" }]) : prior(query));
+          break;
+        }
+        case "missing-history-lock": {
+          const prior = transactionMocks.$queryRaw.getMockImplementation()!;
+          transactionMocks.$queryRaw.mockImplementation((query) => query.strings.join(" ").includes('FROM "CourseSupportVerificationRequest"')
+            ? Promise.resolve([]) : prior(query));
+          break;
+        }
+        case "duplicate-receipt": transactionMocks.courseMonitoringEvent.findFirst.mockResolvedValue({ id: "existing-receipt" }); break;
+        case "incident-cas": transactionMocks.courseSupportIncident.updateMany.mockResolvedValue({ count: 0 }); break;
+      }
+      transactionMocks.courseSupportIncident.findUnique.mockResolvedValue(clone);
+      transactionMocks.courseSupportBatchIncident.findMany.mockResolvedValue(clone.batchIncidents);
+      await expect(reopenParkedCourseForResponderCampaignInTransaction(transactionMocks as never, fixture.input))
+        .resolves.toEqual({ admitted: false });
+      expect(transactionMocks.courseMonitoringEvent.create).not.toHaveBeenCalled();
+      if (fault !== "incident-cas") expect(transactionMocks.courseSupportIncident.updateMany).not.toHaveBeenCalled();
+      expect(transactionMocks.courseSupportBatch.updateMany).not.toHaveBeenCalled();
+      expect(transactionMocks.courseSupportBatchIncident.updateMany).not.toHaveBeenCalled();
+      expect(transactionMocks.courseSupportVerificationRequest.updateMany).not.toHaveBeenCalled();
+    });
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     transactionMocks.$queryRaw.mockImplementation(
@@ -252,6 +530,10 @@ describe("course monitoring write serialization", () => {
     transactionMocks.courseAutomationDiscovery.findFirst.mockResolvedValue(
       null,
     );
+    transactionMocks.coursePreference.findFirst.mockResolvedValue(null);
+    transactionMocks.localReaderAgent.findMany.mockResolvedValue([]);
+    transactionMocks.localReaderJob.findFirst.mockResolvedValue(null);
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(null);
     transactionMocks.automationRun.findFirst.mockResolvedValue(null);
     transactionMocks.automationRun.findMany.mockResolvedValue([]);
     transactionMocks.automationRun.findUnique.mockResolvedValue(null);
