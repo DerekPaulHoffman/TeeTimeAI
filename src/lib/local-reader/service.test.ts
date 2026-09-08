@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createLocalReaderCourseVerificationKey } from "./course-verification-key";
 
 const prismaMocks = vi.hoisted(() => ({
   course: {
@@ -944,6 +945,44 @@ describe("local reader job service", () => {
       }),
       update: {},
     });
+  });
+
+  it("rejects renewal of the historical tuple before reading or changing jobs", async () => {
+    await expect(queueLocalReaderCourseVerification({
+      courseId: "renewal-course", targetDate: "2026-07-26", players: 1, bookingUrl,
+      evidenceRenewal: { historicalVerificationKey: createLocalReaderCourseVerificationKey("renewal-course", "2026-07-26", 1) },
+    })).rejects.toThrow("cannot reuse the historical verification identity");
+    expect(prismaMocks.localReaderJob.findUnique).not.toHaveBeenCalled();
+    expect(prismaMocks.localReaderJob.updateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.localReaderJob.upsert).not.toHaveBeenCalled();
+  });
+
+  it("preserves an existing new-tuple row during renewal even with force", async () => {
+    const existing = { id: "renewal-existing", status: "COMPLETED", result: { status: "NO_AVAILABILITY" } };
+    prismaMocks.localReaderJob.findUnique.mockResolvedValue(existing);
+    await expect(queueLocalReaderCourseVerification({
+      courseId: "renewal-course", targetDate: "2026-07-26", players: 1, bookingUrl, force: true,
+      evidenceRenewal: { historicalVerificationKey: createLocalReaderCourseVerificationKey("renewal-course", "2026-07-25", 1) },
+    })).resolves.toBe(existing);
+    expect(prismaMocks.localReaderJob.findUnique).toHaveBeenCalledWith({
+      where: { verificationKey: createLocalReaderCourseVerificationKey("renewal-course", "2026-07-26", 1) },
+    });
+    expect(prismaMocks.localReaderJob.updateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.localReaderJob.upsert).not.toHaveBeenCalled();
+  });
+
+  it("creates only a distinct renewal tuple without an upsert overwrite", async () => {
+    prismaMocks.localReaderJob.upsert.mockResolvedValue({ id: "renewal-new" });
+    await queueLocalReaderCourseVerification({
+      courseId: "renewal-course", targetDate: "2026-07-26", players: 1, bookingUrl,
+      evidenceRenewal: { historicalVerificationKey: createLocalReaderCourseVerificationKey("renewal-course", "2026-07-25", 1) },
+    });
+    expect(prismaMocks.localReaderJob.upsert).toHaveBeenCalledWith({
+      where: { verificationKey: createLocalReaderCourseVerificationKey("renewal-course", "2026-07-26", 1) },
+      create: expect.objectContaining({ courseId: "renewal-course", targetDate: "2026-07-26", players: 1, purpose: "COURSE_VERIFICATION" }),
+      update: {},
+    });
+    expect(prismaMocks.localReaderJob.updateMany).not.toHaveBeenCalled();
   });
 
   it("forces an explicit operator retry after a completed verification", async () => {

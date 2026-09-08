@@ -42,6 +42,7 @@ import {
   startCourseProviderObservationHeartbeat,
 } from "@/lib/automation/provider-execution-marker";
 import { getAutomationRuntimeVersion } from "@/lib/automation/runtime-version";
+import { readCourseSupportReaderRenewalQueueGuard } from "@/lib/automation/course-support-reader-evidence-renewal";
 import { getSafeOfficialBookingUrl } from "@/lib/email/search-delivery-outbox";
 import {
   getLocalReaderCourseKey,
@@ -1586,12 +1587,17 @@ async function executeOrderedCourseSupportVerification(input: {
         });
       }
       if (readerVerification?.status !== "PENDING") {
+        const evidenceRenewal = await readCourseSupportReaderRenewalQueueGuard(prisma, {
+          courseId: course.id, incidentId: runtime.incidentId, cycle: runtime.cycle,
+          targetDate: input.ownedIntent.targetDateLocal, players: input.ownedIntent.players, bookingUrl,
+        });
         await queueLocalReaderCourseVerification({
           courseId: course.id,
           targetDate: input.ownedIntent.targetDateLocal,
           players: input.ownedIntent.players,
           bookingUrl,
           notBefore,
+          ...(evidenceRenewal ? { evidenceRenewal } : {}),
         });
       }
       return failVerification({

@@ -120,6 +120,7 @@ import {
   assessParkedCourseStartedLocalReaderReadiness,
   isParkedCourseStartedLocalReaderContinuationReceipt,
   readParkedCourseStartedLocalReaderReadiness,
+  readParkedCourseStartedLocalReaderRenewalJobs,
   findParkedCourseCampaignCurrentCycleOrchestrationLineage,
   isParkedCourseCampaignPostMarkerRecoveryStageShape,
   PARKED_COURSE_CAMPAIGN_MAX_DESCENDANT_HANDOFFS,
@@ -10205,6 +10206,8 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
                   id: true,
                   courseId: true,
                   releaseSha: true,
+                  targetDateLocal: true,
+                  players: true,
                   providerSnapshotFingerprint: true,
                   providerSnapshotAt: true,
                   discoveryAttemptedAt: true,
@@ -10651,6 +10654,7 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
             now: await getCourseMonitoringDatabaseNow(transaction),
             activeSearchCount: activeRealSearchCount,
             readerReadiness,
+            readerRenewalJobs: await readParkedCourseStartedLocalReaderRenewalJobs(transaction, currentCampaignMember),
           })
         : null;
     const sameCycleRecoveryHistory =
@@ -11612,6 +11616,21 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
         if (activeSearch || activeRequest || activeReaderJob) {
           return { admitted: false as const };
         }
+        if (startedLocalReaderContinuation?.readerEvidenceRenewal) {
+          const proof = startedLocalReaderContinuation.readerEvidenceRenewal;
+          const lockedJobs = await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+            SELECT "id" FROM "LocalReaderJob" WHERE "id" = ${proof.historicalJobId} FOR UPDATE
+          `);
+          if (lockedJobs.length !== 1 || lockedJobs[0]!.id !== proof.historicalJobId) return { admitted: false as const };
+          const rederived = assessParkedCourseStartedLocalReaderContinuation({
+            captured: descendantCapturedMember!, current: currentCampaignMember!, capturedAt: campaignCapturedAt!,
+            campaignRunId: input.campaignRunId, campaignMembershipDigest: input.campaignMembershipDigest,
+            currentRuntimeVersion: input.currentRuntimeVersion!, now: await getCourseMonitoringDatabaseNow(transaction),
+            activeSearchCount: activeRealSearchCount, readerReadiness: currentReader,
+            readerRenewalJobs: await readParkedCourseStartedLocalReaderRenewalJobs(transaction, currentCampaignMember!),
+          });
+          if (!rederived || rederived.continuationDigest !== startedLocalReaderContinuation.continuationDigest) return { admitted: false as const };
+        }
       }
       // This permission belongs to one unfinished stage, not one deployment or
       // campaign label. A new release must never mint another continuation.
@@ -11740,6 +11759,11 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
                     startedLocalReaderContinuation.continuationDigest,
                   priorCycle: incident.cycle,
                   playbookStageStatus: "STARTED",
+                  proofBasis: startedLocalReaderContinuation.proofBasis,
+                  priorRequestOutcome: startedLocalReaderContinuation.priorRequestOutcome,
+                  priorRequestProviderExecution: startedLocalReaderContinuation.priorRequestProviderExecution,
+                  ...(startedLocalReaderContinuation.readerEvidenceRenewal
+                    ? { readerEvidenceRenewal: startedLocalReaderContinuation.readerEvidenceRenewal } : {}),
                 }
               : {}),
             descendantLineageDigest: descendantLineage?.lineageDigest ?? null,

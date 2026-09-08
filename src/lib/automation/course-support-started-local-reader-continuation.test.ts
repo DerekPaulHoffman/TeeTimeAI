@@ -12,9 +12,11 @@ import {
   loadParkedCourseCampaignMembers,
   readParkedCourseStartedLocalReaderReadiness,
   type ParkedCourseCampaignMemberSnapshot,
+  type ParkedCourseStartedLocalReaderCourse,
 } from "./course-support-campaign";
 import { assessAutomationPlaybook } from "./course-monitoring-playbook";
 import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
+import { resolveProviderCapability } from "./provider-capabilities";
 
 const oldRuntime = "a".repeat(40);
 const currentRuntime = "b".repeat(40);
@@ -37,8 +39,14 @@ const agent = {
   deviceId: "fixture-device", readerVersion: "2.0.0", buildId: "fixture-build",
   capabilities: [{ key: "CPS_RENDERED", parserVersion: 1 }], lastSeenAt: now,
 };
+const readerOnlyCourse = {
+  ...course, providerFamilyKey: "EZLINKS", bookingMetadata: null,
+  detectedBookingUrl: "https://fixture.ezlinksgolf.com/index.html#!/search",
+};
+const readerOnlyAgent = { ...agent, capabilities: [{ key: "EZLINKS_RENDERED", parserVersion: 1 }] };
+type ReaderAgent = Parameters<typeof assessParkedCourseStartedLocalReaderReadiness>[0]["agents"][number];
 
-function fixture() {
+function fixture(currentCourse: ParkedCourseStartedLocalReaderCourse = course, currentAgent: ReaderAgent = agent) {
   const cycle = 8;
   const stages = [
     ["OFFICIAL_IDENTITY", "OFFICIAL_IDENTITY"], ["TYPED_ADAPTER", "TYPED_PROVIDER_ADAPTER"],
@@ -55,15 +63,15 @@ function fixture() {
       failureFingerprint: "HTTP:FETCH_FAILED", runtimeVersion: oldRuntime,
     })),
   };
-  const fingerprint = buildCourseSupportProviderSnapshotFingerprint(course);
+  const fingerprint = buildCourseSupportProviderSnapshotFingerprint(currentCourse);
   const current: ParkedCourseCampaignMemberSnapshot = {
     courseId: "fixture-course", incidentId: "fixture-incident", cycle, revision: 12,
     monitoringRevision: 16, monitoringFailureFingerprint: "HTTP:FETCH_FAILED",
-    kind: "FETCH_FAILED", providerFamilyKey: "CPS", failureClass: "HTTP_5XX",
+    kind: "FETCH_FAILED", providerFamilyKey: resolveProviderCapability(currentCourse).providerFamilyKey, failureClass: "HTTP_5XX",
     failureFingerprint: "HTTP:FETCH_FAILED", providerSnapshotFingerprint: fingerprint,
     attemptLedgerFingerprint: createParkedCourseCampaignAttemptLedgerFingerprint(ledger),
     playbookConclusion: "INCOMPLETE", latestProbeAt: null, latestDiscoveryAt: null,
-    activeRealSearchCount: 0, readerCourse: course,
+    activeRealSearchCount: 0, readerCourse: currentCourse,
     zeroExecutionEvidence: {
       attemptLedger: ledger, playbookAssessment: assessAutomationPlaybook(ledger, cycle),
       latestProbe: null, latestDiscovery: null, latestProbeTimestampRowCount: 0, latestDiscoveryTimestampRowCount: 0,
@@ -104,7 +112,7 @@ function fixture() {
   return {
     captured, current, capturedAt, campaignRunId: "fixture-campaign", campaignMembershipDigest: "d".repeat(64),
     currentRuntimeVersion: currentRuntime, now, activeSearchCount: 0,
-    readerReadiness: assessParkedCourseStartedLocalReaderReadiness({ course, agents: [agent], now }),
+    readerReadiness: assessParkedCourseStartedLocalReaderReadiness({ course: currentCourse, agents: [currentAgent], now }),
   };
 }
 
@@ -137,8 +145,8 @@ function changeLedger(input: ReturnType<typeof fixture>, change: (events: Array<
   input.current.zeroExecutionEvidence.playbookAssessment = assessAutomationPlaybook(ledger, input.current.cycle);
 }
 
-function loaderFixture() {
-  const input = fixture();
+function loaderFixture(currentCourse: ParkedCourseStartedLocalReaderCourse = course, currentAgent: ReaderAgent = agent) {
+  const input = fixture(currentCourse, currentAgent);
   const { zeroExecutionEvidence, activeRealSearchCount, readerCourse, ...captured } = input.captured;
   void zeroExecutionEvidence; void activeRealSearchCount; void readerCourse;
   const audit = createParkedCourseCampaignAudit({ expectedCount: 1, capturedAt, members: [captured] });
@@ -152,7 +160,7 @@ function loaderFixture() {
     resolution: null, resolvedAt: null, resolutionMessage: null, resolutionNotifiedAt: null,
     decisionActorId: null, decisionAt: null, decisionNote: null, decisionEvidenceUrl: null, decisionIdempotencyKey: null,
     monitoringEvents: evidence.monitoringEvents, batchIncidents: evidence.batchIncidents,
-    course: { ...course, preferences: [], probes: [], automationDiscoveries: [], monitoringStatus: {
+    course: { ...currentCourse, preferences: [], probes: [], automationDiscoveries: [], monitoringStatus: {
       state: "ENGINEERING_VERIFICATION_NEEDED", revision: input.current.monitoringRevision,
       failureFingerprint: input.current.failureFingerprint, nextAutomaticAttemptAt: null, revalidationRequestedAt: null,
     } },
@@ -161,7 +169,7 @@ function loaderFixture() {
     automationRun: {}, courseSupportBatchIncident: {},
     courseSupportIncident: { findMany: vi.fn().mockResolvedValue([row]) },
     teeSearch: { count: vi.fn().mockResolvedValue(0) },
-    localReaderAgent: { findMany: vi.fn().mockResolvedValue([agent]) },
+    localReaderAgent: { findMany: vi.fn().mockResolvedValue([currentAgent]) },
   };
   return { input, audit, row, database,
     load: () => loadParkedCourseCampaignAdmissionMembers(audit, database as unknown as Parameters<typeof loadParkedCourseCampaignAdmissionMembers>[1], input.campaignRunId, currentRuntime, now),
@@ -169,6 +177,21 @@ function loaderFixture() {
 }
 
 describe("current started local-reader continuation", () => {
+  it("accepts a public native reader even when its provider has no server adapter", async () => {
+    expect(resolveProviderCapability(readerOnlyCourse)).toMatchObject({ isRunnable: false, evidenceConflict: false });
+    const input = fixture(readerOnlyCourse, readerOnlyAgent);
+    expect(input.readerReadiness).toMatchObject({ requiredCapabilityKey: "EZLINKS_RENDERED", requiredParserVersion: 1 });
+    expect(assessParkedCourseStartedLocalReaderContinuation(input)).not.toBeNull();
+    const scenario = loaderFixture(readerOnlyCourse, readerOnlyAgent);
+    expect(await scenario.load()).toMatchObject([{ admissionMode: "STARTED_LOCAL_READER_CONTINUATION", playbookNextStage: "LOCAL_READER" }]);
+  });
+
+  it("does not require server-only metadata for a supported native reader", () => {
+    const input = fixture({ ...course, bookingMetadata: null });
+    expect(input.readerReadiness).not.toBeNull();
+    expect(assessParkedCourseStartedLocalReaderContinuation(input)).not.toBeNull();
+  });
+
   it("authorizes one unchanged-source unfinished stage without reconstructing ancestor handoffs", () => {
     const input = fixture();
     const before = JSON.stringify(input);
@@ -178,6 +201,20 @@ describe("current started local-reader continuation", () => {
     });
     expect(JSON.stringify(input)).toBe(before);
   });
+
+  it.each(["RECOVERY_CRON", "SEARCH_WORKFLOW", "COURSE_SUPPORT_RESPONDER"])(
+    "uses only the latest settled native deadline from %s", (source) => {
+      const input = fixture();
+      const events = input.current.zeroExecutionEvidence.monitoringEvents;
+      const endpoint = events[0]!;
+      endpoint.source = source;
+      endpoint.audit = { ...endpointAudit(input), playbookExhausted: false };
+      events.push({ ...endpoint, id: "older-deadline", occurredAt: new Date(batchAt.getTime() - 1000) });
+      expect(assessParkedCourseStartedLocalReaderContinuation(input)).toMatchObject({ parkedEventId: endpoint.id });
+      endpoint.audit = { ...record(endpoint.audit), playbookExhausted: true };
+      expect(assessParkedCourseStartedLocalReaderContinuation(input)).toBeNull();
+    },
+  );
 
   it.each<[string, (input: ReturnType<typeof fixture>) => void]>([
     ["invalid current time", (x) => { x.now = new Date(Number.NaN); }],
@@ -231,7 +268,9 @@ describe("current started local-reader continuation", () => {
     ["missing complete history", (x) => { delete x.current.zeroExecutionEvidence.monitoringHistoryCompleteSince; }],
     ["missing legacy parking flag", (x) => { delete endpointAudit(x).automationStalled; }],
     ["explicit exhausted endpoint", (x) => { endpointAudit(x).playbookExhausted = true; }],
-    ["modern explicit incomplete endpoint", (x) => { endpointAudit(x).playbookExhausted = false; }],
+    ["untrusted modern endpoint", (x) => { endpointAudit(x).playbookExhausted = false; x.current.zeroExecutionEvidence.monitoringEvents[0]!.source = "OPERATOR_CLI"; }],
+    ["unknown modern producer", (x) => { endpointAudit(x).playbookExhausted = false; x.current.zeroExecutionEvidence.monitoringEvents[0]!.source = "UNKNOWN"; }],
+    ["cron endpoint without explicit exhaustion", (x) => { x.current.zeroExecutionEvidence.monitoringEvents[0]!.source = "RECOVERY_CRON"; }],
     ["null exhaustion is not omission", (x) => { endpointAudit(x).playbookExhausted = null; }],
     ["operator parking", (x) => { x.current.zeroExecutionEvidence.monitoringEvents[0]!.source = "OPERATOR_ACTION"; }],
     ["duplicate endpoint", (x) => { x.current.zeroExecutionEvidence.monitoringEvents.push(structuredClone(x.current.zeroExecutionEvidence.monitoringEvents[0]!)); }],
@@ -365,11 +404,27 @@ describe("current started local-reader continuation", () => {
 
   it.each([
     { isPublic: false }, { detectedBookingUrl: "https://unrecognized.invalid" },
-    { bookingMetadata: null },
+    { monitoringMode: "SERVER_ONLY" }, { monitoringMode: "CONTACT_ONLY" },
+    { providerFamilyKey: "CHRONOGOLF" },
     { bookingMethod: "PHONE_ONLY", automationEligibility: "BLOCKED", automationReason: "NO_ONLINE_BOOKING", intelligenceVerifiedAt: now, intelligenceReviewAt: new Date(now.getTime() + 86_400_000), intelligenceConfidence: 1 },
     { automationEligibility: "BLOCKED", automationReason: "ACCOUNT_REQUIRED", intelligenceVerifiedAt: now, intelligenceReviewAt: new Date(now.getTime() + 86_400_000), intelligenceConfidence: 1 },
-  ])("preserves current identity/access/runnable gates %#", (change) => {
+  ])("preserves current identity/access/mode/conflict gates %#", (change) => {
     expect(assessParkedCourseStartedLocalReaderReadiness({ course: { ...course, ...change }, agents: [agent], now })).toBeNull();
+  });
+
+  it.each([
+    { monitoringMode: "SERVER_ONLY" }, { monitoringMode: "CONTACT_ONLY" },
+    { detectedBookingUrl: "https://unrecognized.invalid" },
+    { providerFamilyKey: "CHRONOGOLF" },
+  ])("rechecks local-reader eligibility after readiness was captured %#", (change) => {
+    const input = fixture();
+    input.current.readerCourse = { ...course, ...change };
+    expect(assessParkedCourseStartedLocalReaderContinuation(input)).toBeNull();
+  });
+
+  it("still rejects a stale compatible worker for a provider without a server adapter", () => {
+    expect(assessParkedCourseStartedLocalReaderReadiness({ course: readerOnlyCourse,
+      agents: [{ ...readerOnlyAgent, lastSeenAt: new Date(now.getTime() - 300_001) }], now })).toBeNull();
   });
 
   it("accepts only a full truthful same-cycle continuation receipt", () => {

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { Prisma } from "@prisma/client";
+import { Prisma, type LocalReaderJob } from "@prisma/client";
 import { z } from "zod";
 
 import { hasDurableWaitForMaterialChangeProof } from "@/lib/customer-monitoring-status";
@@ -25,7 +25,8 @@ import {
   parseAutomationPlaybookLedger,
   type AutomationPlaybookStage,
 } from "./course-monitoring-playbook";
-import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
+import { buildCourseSupportProviderSnapshotFingerprint, buildCourseSupportVerificationIntent } from "./course-support-verification";
+import { assessCourseSupportReaderEvidenceRenewal, readCourseSupportReaderRenewalJobs, READER_EVIDENCE_RENEWAL_BASIS } from "./course-support-reader-evidence-renewal";
 import { getAutomationRuntimeVersion } from "./runtime-version";
 import { COURSE_SUPPORT_RESPONDER_PROMPT_VERSION } from "./course-support-responder-policy";
 import { parseCourseSupportClaimActionPlan } from "./course-support-action-plan";
@@ -623,7 +624,7 @@ type ParkedCourseCampaignDependencies = {
 type ParkedCourseCampaignDatabase = Pick<
   Prisma.TransactionClient,
   "automationRun" | "courseSupportIncident" | "courseSupportBatchIncident"
-> & Partial<Pick<Prisma.TransactionClient, "localReaderAgent" | "teeSearch">>;
+> & Partial<Pick<Prisma.TransactionClient, "localReaderAgent" | "localReaderJob" | "teeSearch">>;
 
 export function parseParkedCourseCampaignAudit(value: unknown) {
   const parsed = parkedCourseCampaignAuditSchema.safeParse(value);
@@ -1492,10 +1493,12 @@ export async function loadParkedCourseCampaignAdmissionMembers(
       const readerReadiness = activeSearchCount === 0
         ? await readParkedCourseStartedLocalReaderReadiness(database, { course: current.readerCourse, now })
         : null;
+      const readerRenewalJobs = readerReadiness
+        ? await readParkedCourseStartedLocalReaderRenewalJobs(database, current) : null;
       startedLocalReaderContinuation = assessParkedCourseStartedLocalReaderContinuation({
         captured, current, capturedAt: new Date(audit.capturedAt), campaignRunId,
         campaignMembershipDigest: audit.membershipDigest, currentRuntimeVersion: runtimeVersion,
-        now, activeSearchCount, readerReadiness,
+        now, activeSearchCount, readerReadiness, readerRenewalJobs,
       });
     }
     if (
@@ -1621,6 +1624,8 @@ export type ParkedCourseCampaignBatchEvidence = Omit<
       discoveryVerifiedAt?: Date | null;
       createdAt?: Date;
       updatedAt?: Date;
+      targetDateLocal?: string;
+      players?: number;
     }
   >;
   batch: CourseSupportZeroExecutionBatchEvidence["batch"] & {
@@ -1698,6 +1703,8 @@ const parkedCourseCampaignBatchIncidentSelect = {
       id: true,
       courseId: true,
       releaseSha: true,
+      targetDateLocal: true,
+      players: true,
       providerSnapshotFingerprint: true,
       providerSnapshotAt: true,
       discoveryAttemptedAt: true,
@@ -1753,6 +1760,8 @@ export type ParkedCourseStartedLocalReaderCourse = MonitoringGateInput & Provide
   name: string;
   website: string | null;
   detectedBookingUrl: string | null;
+  monitoringMode?: string | null;
+  timeZone?: string | null;
 };
 type ParkedCourseStartedLocalReaderAgent = {
   deviceId: string;
@@ -1771,19 +1780,28 @@ export type ParkedCourseStartedLocalReaderReadiness = {
   lastSeenAt: Date;
 };
 
+function getParkedCourseStartedLocalReaderCapability(
+  course: ParkedCourseStartedLocalReaderCourse,
+  now: Date,
+) {
+  const courseKey = getLocalReaderCourseKey(course.detectedBookingUrl ?? course.website);
+  const gate = evaluateMonitoringGate({ ...course, now });
+  // Match the native verifier's LOCAL_READER key/mode eligibility. Server
+  // adapter metadata is not required for a supported signed public reader.
+  if (!courseKey || !Number.isFinite(now.getTime()) ||
+    course.monitoringMode === "SERVER_ONLY" || course.monitoringMode === "CONTACT_ONLY" ||
+    gate.disposition !== "ACTIONABLE" || !gate.adapterAllowed ||
+    resolveProviderCapability(course).evidenceConflict) return null;
+  return getRequiredLocalReaderCapability(courseKey, course.name);
+}
+
 export function assessParkedCourseStartedLocalReaderReadiness(input: {
   course: ParkedCourseStartedLocalReaderCourse;
   agents: readonly ParkedCourseStartedLocalReaderAgent[];
   now: Date;
 }): ParkedCourseStartedLocalReaderReadiness | null {
-  const courseKey = getLocalReaderCourseKey(
-    input.course.detectedBookingUrl ?? input.course.website,
-  );
-  const gate = evaluateMonitoringGate({ ...input.course, now: input.now });
-  if (!courseKey || !Number.isFinite(input.now.getTime()) ||
-    gate.disposition !== "ACTIONABLE" || !gate.adapterAllowed ||
-    !resolveProviderCapability(input.course).isRunnable) return null;
-  const required = getRequiredLocalReaderCapability(courseKey, input.course.name);
+  const required = getParkedCourseStartedLocalReaderCapability(input.course, input.now);
+  if (!required) return null;
   for (const agent of [...input.agents].sort((a, b) => a.deviceId.localeCompare(b.deviceId))) {
     const capabilities = localReaderCapabilitiesSchema.safeParse(agent.capabilities);
     if (
@@ -1825,6 +1843,19 @@ export async function readParkedCourseStartedLocalReaderReadiness(
 }
 
 const STARTED_LOCAL_READER_CONTINUATION_ACTION = "parked_cohort_started_local_reader_continuation";
+
+export async function readParkedCourseStartedLocalReaderRenewalJobs(
+  database: Partial<Pick<Prisma.TransactionClient, "localReaderJob">>,
+  current: ParkedCourseCampaignMemberSnapshot,
+) {
+  const latest = [...current.zeroExecutionEvidence.batchIncidents].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
+  const claim = latest && readCourseSupportRemediationClaimAttempt({ summary: latest.batch.summary, courseId: current.courseId, expectedAttemptCount: latest.batch._count?.incidents ?? 0 });
+  if (!latest || !current.readerCourse || claim?.approach.playbookStage !== "BROWSER_ADAPTER_RETRY" || claim.actionPlan !== null) return null;
+  return readCourseSupportReaderRenewalJobs(database, {
+    courseId: current.courseId, bookingUrl: current.readerCourse.detectedBookingUrl ?? current.readerCourse.website,
+    batchCreatedAt: latest.batch.createdAt,
+  });
+}
 
 export function isParkedCourseStartedLocalReaderContinuationReceipt(input: {
   event: ParkedCourseCampaignReviewEvent;
@@ -1874,14 +1905,14 @@ export function assessParkedCourseStartedLocalReaderContinuation(input: {
   now: Date;
   activeSearchCount: number;
   readerReadiness: ParkedCourseStartedLocalReaderReadiness | null;
+  readerRenewalJobs?: readonly LocalReaderJob[] | null;
 }) {
   const { captured, current, readerReadiness: reader } = input;
   const evidence = current.zeroExecutionEvidence;
   const ledger = parseAutomationPlaybookLedger(evidence.attemptLedger);
   const assessment = assessAutomationPlaybook(evidence.attemptLedger, current.cycle);
   const readerCourse = current.readerCourse;
-  const readerCourseKey = readerCourse && getLocalReaderCourseKey(readerCourse.detectedBookingUrl ?? readerCourse.website);
-  const requiredReader = readerCourseKey ? getRequiredLocalReaderCapability(readerCourseKey, readerCourse!.name) : null;
+  const requiredReader = readerCourse ? getParkedCourseStartedLocalReaderCapability(readerCourse, input.now) : null;
   if (
     !Number.isFinite(input.now.getTime()) || !Number.isFinite(input.capturedAt.getTime()) || input.capturedAt > input.now ||
     !input.campaignRunId || !/^[a-f0-9]{64}$/u.test(input.campaignMembershipDigest) ||
@@ -1897,8 +1928,6 @@ export function assessParkedCourseStartedLocalReaderContinuation(input: {
     assessment.nextStage !== "LOCAL_READER" || assessment.stages[6]?.status !== "STARTED" ||
     current.attemptLedgerFingerprint !== createParkedCourseCampaignAttemptLedgerFingerprint(ledger) ||
     !readerCourse || !requiredReader ||
-    evaluateMonitoringGate({ ...readerCourse, now: input.now }).disposition !== "ACTIONABLE" ||
-    !resolveProviderCapability(readerCourse).isRunnable ||
     !reader || reader.requiredCapabilityKey !== requiredReader.key || reader.requiredParserVersion !== requiredReader.parserVersion ||
     !reader.deviceId || !reader.readerVersion || !reader.buildId ||
     !/^[a-f0-9]{64}$/u.test(reader.capabilitiesFingerprint) || !reader.requiredCapabilityKey ||
@@ -1945,26 +1974,55 @@ export function assessParkedCourseStartedLocalReaderContinuation(input: {
   const currentCycleEvents = ledger.events.filter((event) => event.cycle === current.cycle);
   const lastClaimedEvent = claim ? currentCycleEvents[claim.playbookEventCountAtClaim - 1] : undefined;
   const claimPrefix = lastClaimedEvent ? ledger.events.slice(0, lastClaimedEvent.sequence) : [];
-  if (!claim || claim.actionPlan !== null || claim.approach.playbookStage !== "LOCAL_READER" ||
+  if (!claim || claim.actionPlan !== null ||
     claim.providerSnapshotFingerprint !== current.providerSnapshotFingerprint || claim.failureFingerprint !== current.failureFingerprint ||
     !lastClaimedEvent || claim.playbookEventCountAtClaim > currentCycleEvents.length ||
     claimPrefix.some((event) => new Date(event.observedAt) > latest.createdAt) ||
-    assessAutomationPlaybook({ version: ledger.version, events: claimPrefix }, current.cycle).nextStage !== "LOCAL_READER" ||
     !/^[a-f0-9]{40}$/u.test(batchRuntime) || batchRuntime === input.currentRuntimeVersion ||
     request.courseId !== current.courseId || request.providerSnapshotFingerprint !== current.providerSnapshotFingerprint ||
-    request.releaseSha !== batchRuntime || request.status !== "STALE" || request.outcome !== "FETCH_FAILED" || requestEvidence.providerExecution !== false ||
+    request.releaseSha !== batchRuntime || request.status !== "STALE" ||
     !(request.createdAt instanceof Date) || !(request.updatedAt instanceof Date) ||
     request.createdAt < latest.createdAt || request.updatedAt < request.createdAt || request.updatedAt > input.now
     || !request.startedAt || !Number.isFinite(request.startedAt.getTime()) ||
     request.startedAt < request.createdAt || request.startedAt > latest.batch.completedAt! ||
     request.revision < 2 || request.attemptCount < 1
   ) return null;
+  const prefixAssessment = assessAutomationPlaybook({ version: ledger.version, events: claimPrefix }, current.cycle);
+  const directStartedReader = claim.approach.playbookStage === "LOCAL_READER" &&
+    prefixAssessment.nextStage === "LOCAL_READER" && request.outcome === "FETCH_FAILED" && requestEvidence.providerExecution === false;
+  const suffix = currentCycleEvents.slice(claim.playbookEventCountAtClaim);
+  const [adapterSkipped, readerStarted] = suffix;
+  const nativeReaderHandoff = claim.approach.workMode === "ADVANCE_DISCOVERY" &&
+    claim.approach.strategyAction === "DISCOVER_WITH_BROWSER" && claim.approach.playbookStage === "BROWSER_ADAPTER_RETRY" &&
+    prefixAssessment.valid && prefixAssessment.conclusion === "INCOMPLETE" && prefixAssessment.completedStages.length === 5 &&
+    prefixAssessment.nextStage === "BROWSER_ADAPTER_RETRY" && suffix.length === 2 &&
+    adapterSkipped?.stage === "BROWSER_ADAPTER_RETRY" && adapterSkipped.transition === "NOT_APPLICABLE" &&
+    adapterSkipped.readPath === "TYPED_PROVIDER_ADAPTER" && adapterSkipped.evidenceKind === "TOOLING" && adapterSkipped.skipReason === "NO_RUNNABLE_ADAPTER" &&
+    readerStarted?.stage === "LOCAL_READER" && readerStarted.transition === "STARTED" && readerStarted.readPath === "LOCAL_READER" && readerStarted.evidenceKind === "TOOLING" &&
+    suffix.every((event) => event.providerExecution === undefined && event.runtimeVersion === batchRuntime &&
+      new Date(event.observedAt) >= request.startedAt! && new Date(event.observedAt) >= latest.createdAt &&
+      new Date(event.observedAt) <= request.updatedAt! && new Date(event.observedAt) <= latest.batch.completedAt!) &&
+    request.outcome === null && request.evidence === null;
+  const readerEvidenceRenewal = nativeReaderHandoff
+    ? assessCourseSupportReaderEvidenceRenewal({
+        jobs: input.readerRenewalJobs, courseId: current.courseId, courseName: readerCourse.name,
+        bookingUrl: readerCourse.detectedBookingUrl ?? readerCourse.website,
+        requiredCapabilityKey: requiredReader.key, requiredParserVersion: requiredReader.parserVersion,
+        targetDateLocal: request.targetDateLocal, players: request.players,
+        startedReaderAt: new Date(readerStarted.observedAt), requestUpdatedAt: request.updatedAt!, batchCompletedAt: latest.batch.completedAt!,
+        currentIntent: buildCourseSupportVerificationIntent(readerCourse.timeZone, input.now), now: input.now,
+      }) : null;
+  if (!directStartedReader && !readerEvidenceRenewal) return null;
   const endpoints = events.filter((event) => {
     const audit = asCampaignRecord(event.audit);
+    // Deadline reconciliation records explicit incomplete work. Older responder
+    // closeouts omitted this flag; keep that legacy shape limited to its producer.
+    const unfinishedEndpoint = audit.playbookExhausted === false
+      ? ["COURSE_SUPPORT_RESPONDER", "RECOVERY_CRON", "SEARCH_WORKFLOW"].includes(event.source)
+      : event.source === "COURSE_SUPPORT_RESPONDER" && !Object.prototype.hasOwnProperty.call(audit, "playbookExhausted");
     return event.incidentId === current.incidentId && event.eventType === "HUMAN_REVIEW_REQUESTED" &&
-      event.source === "COURSE_SUPPORT_RESPONDER" && event.failureFingerprint === current.failureFingerprint && audit.cycle === current.cycle &&
+      unfinishedEndpoint && event.failureFingerprint === current.failureFingerprint && audit.cycle === current.cycle &&
       audit.automationStalled === true && audit.parkedUntilMaterialChange === true && audit.customerState === "NEEDS_HUMAN_REVIEW" &&
-      !Object.prototype.hasOwnProperty.call(audit, "playbookExhausted") &&
       event.occurredAt >= latest.batch.completedAt! && event.occurredAt >= request.updatedAt! && event.occurredAt <= input.now;
   });
   if (endpoints.length !== 1) return null;
@@ -1992,13 +2050,17 @@ export function assessParkedCourseStartedLocalReaderContinuation(input: {
     stage: "LOCAL_READER", campaignRunId: input.campaignRunId, campaignMembershipDigest: input.campaignMembershipDigest,
     providerSnapshotFingerprint: current.providerSnapshotFingerprint, failureFingerprint: current.failureFingerprint,
     attemptLedgerFingerprint: current.attemptLedgerFingerprint, historyDigest: history.historyDigest,
-    latestBatchIncidentId: latest.id, latestRequestId: request.id, claim,
+    latestBatchIncidentId: latest.id, latestRequestId: request.id, claim, readerEvidenceRenewal,
     endpoint: canonicalizeParkedCourseCampaignRecoveryEvent(endpoint), reader: stableReader,
   })).digest("hex");
   return {
     history: { ...history, historyDigest: continuationDigest }, continuationDigest,
     latestBatchIncidentId: latest.id, latestRequestId: request.id, parkedEventId: endpoint.id,
     readerReadiness: reader,
+    readerEvidenceRenewal,
+    proofBasis: readerEvidenceRenewal ? READER_EVIDENCE_RENEWAL_BASIS : "DIRECT_STARTED_LOCAL_READER_CONTINUATION",
+    priorRequestOutcome: request.outcome,
+    priorRequestProviderExecution: readerEvidenceRenewal ? "UNKNOWN" as const : false as const,
   };
 }
 

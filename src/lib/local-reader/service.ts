@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
 import { Prisma, type LocalReaderJob } from "@prisma/client";
 
@@ -20,6 +20,7 @@ import {
   startAutomationWorker,
 } from "@/lib/automation/worker-state";
 import { prisma } from "@/lib/prisma";
+import { createLocalReaderCourseVerificationKey } from "./course-verification-key";
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
 
 import {
@@ -379,6 +380,7 @@ export async function queueLocalReaderCourseVerification(input: {
   bookingUrl: string;
   force?: boolean;
   notBefore?: Date;
+  evidenceRenewal?: { historicalVerificationKey: string };
 }) {
   const courseKey = getLocalReaderCourseKey(input.bookingUrl);
   if (!courseKey) return null;
@@ -387,16 +389,11 @@ export async function queueLocalReaderCourseVerification(input: {
     courseKey,
   );
   const now = new Date();
-  const verificationKey = createHash("sha256")
-    .update(
-      [
-        "local-reader-course-verification",
-        input.courseId,
-        input.targetDate,
-        input.players,
-      ].join("\n"),
-    )
-    .digest("hex");
+  const verificationKey = createLocalReaderCourseVerificationKey(input.courseId, input.targetDate, input.players);
+  if (input.evidenceRenewal && (!/^[a-f0-9]{64}$/u.test(input.evidenceRenewal.historicalVerificationKey) ||
+    verificationKey === input.evidenceRenewal.historicalVerificationKey)) {
+    throw new Error("Reader evidence renewal cannot reuse the historical verification identity.");
+  }
   let existing = await prisma.localReaderJob.findUnique({
     where: { verificationKey },
   });
@@ -426,6 +423,9 @@ export async function queueLocalReaderCourseVerification(input: {
       update: {},
     });
   }
+  // Renewal is append-only even if another request populated the new tuple.
+  // Ordinary verification retains its existing reuse/reset behavior below.
+  if (input.evidenceRenewal) return existing;
 
   for (
     let attempt = 0;

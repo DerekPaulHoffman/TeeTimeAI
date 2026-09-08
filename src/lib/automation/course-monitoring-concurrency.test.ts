@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { Prisma } from "@prisma/client";
+import { Prisma, type LocalReaderJob } from "@prisma/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const transactionMocks = vi.hoisted(() => ({
@@ -128,6 +128,8 @@ import { buildProviderFailureFingerprint } from "./provider-capabilities";
 import { loadCourseMonitoringPlaybookRuntime } from "./course-monitoring-playbook-runtime";
 import { routeCourseSupportRemediation } from "./course-support-remediation-routing";
 import { buildCourseSupportClaimActionPlan } from "./course-support-action-plan";
+import { createLocalReaderCourseVerificationKey } from "../local-reader/course-verification-key";
+import { getLocalReaderJobUrl } from "../local-reader/course-key";
 
 function mockCourseIntelligenceFinalEvidence(
   state: "FINAL_MANUAL" | "FINAL_IDENTITY",
@@ -171,7 +173,7 @@ function mockUnconsumedLocalReaderProviderSource(providerObservedAt: Date) {
 
 describe("course monitoring write serialization", () => {
   describe("started local-reader continuation", () => {
-    async function arrangeContinuation() {
+    async function arrangeContinuation(deadlineSource?: "RECOVERY_CRON" | "SEARCH_WORKFLOW" | "COURSE_SUPPORT_RESPONDER") {
       const capturedAt = new Date("2026-08-20T10:00:00.000Z");
       const batchAt = new Date("2026-08-22T10:00:00.000Z");
       const completedAt = new Date("2026-08-22T10:20:00.000Z");
@@ -247,9 +249,12 @@ describe("course monitoring write serialization", () => {
       };
       const endpoint = {
         id: "fixture-endpoint", incidentId: "fixture-incident", eventType: "HUMAN_REVIEW_REQUESTED",
-        source: "COURSE_SUPPORT_RESPONDER", failureFingerprint: "HTTP:FETCH_FAILED", readPath: null,
+        source: deadlineSource ?? "COURSE_SUPPORT_RESPONDER", failureFingerprint: "HTTP:FETCH_FAILED", readPath: null,
         occurredAt: parkedAt, audit: { cycle: 8, automationStalled: true,
-          parkedUntilMaterialChange: true, customerState: "NEEDS_HUMAN_REVIEW" },
+          parkedUntilMaterialChange: true, customerState: "NEEDS_HUMAN_REVIEW",
+          ...(deadlineSource ? { playbookExhausted: false, playbookVersion: 1,
+            playbookConclusion: "INCOMPLETE", nextStage: "LOCAL_READER",
+            escalationDeadlineAt: parkedAt.toISOString(), customerDataIncluded: false } : {}) },
       };
       const captured = {
         courseId: "fixture-course", incidentId: "fixture-incident", cycle: 1, revision: 1,
@@ -341,6 +346,169 @@ describe("course monitoring write serialization", () => {
       transactionMocks.courseMonitoringStatus.updateMany.mockResolvedValue({ count: 1 });
       return { input, course, incident, entry, request, endpoint, agent, plannerDatabase, audit, currentRuntime, now };
     }
+
+    async function arrangeLegacyReaderRenewal(deadlineSource?: "RECOVERY_CRON" | "SEARCH_WORKFLOW" | "COURSE_SUPPORT_RESPONDER") {
+      const fixture = await arrangeContinuation(deadlineSource);
+      const batchAt = fixture.entry.batch.createdAt;
+      const at = (seconds: number) => new Date(batchAt.getTime() + seconds * 1000);
+      const request = { ...fixture.request, outcome: null, evidence: null,
+        targetDateLocal: "2026-08-22", players: 1 };
+      const attemptLedger = { ...fixture.incident.attemptLedger,
+        events: fixture.incident.attemptLedger.events.map((event, index) => index < 5 ? event : {
+          ...event, observedAt: at(index === 5 ? 20 : 21).toISOString(),
+          transition: index === 5 ? "NOT_APPLICABLE" : "STARTED",
+          ...(index === 5 ? { skipReason: "NO_RUNNABLE_ADAPTER" } : {}),
+        }),
+      };
+      const entry = { ...fixture.entry, verificationRequests: [request], batch: {
+        ...fixture.entry.batch, summary: { remediation: { attempts: [{
+          ...fixture.entry.batch.summary.remediation.attempts[0], playbookEventCountAtClaim: 5,
+          approach: { workMode: "ADVANCE_DISCOVERY", strategyAction: "DISCOVER_WITH_BROWSER",
+            playbookStage: "BROWSER_ADAPTER_RETRY" },
+        }] } },
+      } };
+      const incident = { ...fixture.incident, attemptLedger, batchIncidents: [entry] };
+      const oldJob: LocalReaderJob = {
+        id: "fixture-historical-reader-job", courseId: incident.courseId, teeSearchId: null,
+        scheduleVersion: null, purpose: "COURSE_VERIFICATION", courseKey: "cps:fixture.cps.golf",
+        targetDate: request.targetDateLocal, players: request.players,
+        verificationKey: createLocalReaderCourseVerificationKey(incident.courseId, request.targetDateLocal, request.players),
+        bookingUrl: getLocalReaderJobUrl("cps:fixture.cps.golf", request.targetDateLocal, request.players),
+        status: "COMPLETED", leaseToken: null,
+        leaseExpiresAt: null, claimedAt: at(30), deviceId: "fixture-historical-device",
+        createdAt: at(22), updatedAt: at(40), completedAt: at(40), jobExpiresAt: at(600),
+        resultExpiresAt: at(640), readerVersion: "cps-rendered-v1",
+        requiredCapabilityKey: "CPS_RENDERED", requiredParserVersion: 1,
+        resumeFromScheduleVersion: null, resumeScheduleVersion: null,
+        result: { jobId: "fixture-historical-reader-job", courseKey: "cps:fixture.cps.golf",
+          status: "NO_AVAILABILITY", observedAt: at(35).toISOString(),
+          pageUrl: fixture.course.detectedBookingUrl, pageTitle: fixture.course.name,
+          slots: [], readerVersion: "cps-rendered-v1" },
+      };
+      fixture.plannerDatabase.courseSupportIncident.findMany.mockResolvedValue([incident] as never);
+      const plannerDatabase = { ...fixture.plannerDatabase,
+        localReaderJob: { findMany: vi.fn().mockResolvedValue([oldJob]) } };
+      const members = await loadParkedCourseCampaignAdmissionMembers(
+        fixture.audit, plannerDatabase as never, "fixture-campaign", fixture.currentRuntime, fixture.now,
+      );
+      expect(members).toEqual([expect.objectContaining({ admissionMode: "STARTED_LOCAL_READER_CONTINUATION" })]);
+      const planned = members[0]!;
+      const input = { ...fixture.input,
+        expectedAttemptLedgerFingerprint: planned.attemptLedgerFingerprint,
+        expectedSameCycleRecoveryHistoryDigest: planned.sameCycleRecoveryHistoryDigest,
+      };
+      transactionMocks.courseSupportIncident.findUnique.mockResolvedValue(incident);
+      transactionMocks.courseSupportBatchIncident.findMany.mockResolvedValue([entry]);
+      transactionMocks.localReaderJob.findMany.mockResolvedValue([oldJob]);
+      const fallbackQuery = transactionMocks.$queryRaw.getMockImplementation()!;
+      transactionMocks.$queryRaw.mockImplementation((query: { strings?: string[]; values?: unknown[] }) => {
+        if (query.strings?.join(" ").includes('FROM "LocalReaderJob"')) return Promise.resolve([oldJob]);
+        return fallbackQuery(query);
+      });
+      return { ...fixture, input, incident, entry, request, oldJob };
+    }
+
+    it.each([undefined, "RECOVERY_CRON", "SEARCH_WORKFLOW", "COURSE_SUPPORT_RESPONDER"] as const)(
+      "renews after native deadline %s while preserving the unanchored legacy result and UNKNOWN execution", async (source) => {
+      const fixture = await arrangeLegacyReaderRenewal(source);
+      const before = structuredClone({ incident: fixture.incident, job: fixture.oldJob });
+      await expect(reopenParkedCourseForResponderCampaignInTransaction(transactionMocks as never, fixture.input))
+        .resolves.toMatchObject({ admitted: true, cycle: 8 });
+      const receipt = transactionMocks.courseMonitoringEvent.create.mock.calls[0]![0].data.audit;
+      expect(receipt).toMatchObject({
+        proofBasis: "LEGACY_UNANCHORED_READER_EVIDENCE_RENEWAL", priorRequestOutcome: null,
+        priorRequestProviderExecution: "UNKNOWN", oneShot: true, cycle: 8, priorCycle: 8,
+        readerEvidenceRenewal: { historicalJobId: fixture.oldJob.id,
+          historicalVerificationKey: fixture.oldJob.verificationKey,
+          historicalTargetDate: fixture.oldJob.targetDate, historicalPlayers: fixture.oldJob.players },
+      });
+      expect(receipt.readerEvidenceRenewal.historicalJobFingerprint).toMatch(/^[a-f0-9]{64}$/u);
+      for (const field of ["cycle", "attemptLedger", "attemptCount", "lastAttemptAt", "confirmedAt"]) {
+        expect(transactionMocks.courseSupportIncident.updateMany.mock.calls[0]![0].data).not.toHaveProperty(field);
+      }
+      expect(transactionMocks.localReaderJob.updateMany).not.toHaveBeenCalled();
+      expect(transactionMocks.courseSupportVerificationRequest.updateMany).not.toHaveBeenCalled();
+      expect(transactionMocks.courseSupportBatchIncident.updateMany).not.toHaveBeenCalled();
+      expect({ incident: fixture.incident, job: fixture.oldJob }).toEqual(before);
+    });
+
+    it.each(["missing-old-job", "changed-old-result", "anchored-late-result", "different-old-key",
+      "second-historical-job", "changed-at-old-job-lock", "missing-old-job-lock",
+      "claim-prefix-changed", "suffix-runtime-changed", "request-evidence-object", "reader-before-request",
+      "active-reader-job", "late-request", "source-changed", "already-used"])(
+      "rejects renewal after %s without overwriting any historical row", async (fault) => {
+        const fixture = await arrangeLegacyReaderRenewal();
+        const changed = structuredClone(fixture.oldJob);
+        switch (fault) {
+          case "missing-old-job": transactionMocks.localReaderJob.findMany.mockResolvedValue([]); break;
+          case "changed-old-result": {
+            changed.result = { ...(changed.result as Record<string, Prisma.JsonValue>), pageTitle: "Changed historical title" };
+            transactionMocks.localReaderJob.findMany.mockResolvedValue([changed]); break;
+          }
+          case "anchored-late-result": {
+            changed.result = { ...(changed.result as Record<string, Prisma.JsonValue>), evidenceAnchor: "SERVER_CLAIM",
+              observedAt: changed.claimedAt!.toISOString() };
+            transactionMocks.localReaderJob.findMany.mockResolvedValue([changed]); break;
+          }
+          case "different-old-key": changed.verificationKey = "f".repeat(64);
+            transactionMocks.localReaderJob.findMany.mockResolvedValue([changed]); break;
+          case "claim-prefix-changed": fixture.entry.batch.summary.remediation.attempts[0]!.playbookEventCountAtClaim = 6; break;
+          case "suffix-runtime-changed": fixture.incident.attemptLedger.events[6]!.runtimeVersion = "c".repeat(40); break;
+          case "reader-before-request": fixture.incident.attemptLedger.events[6]!.observedAt =
+            new Date(fixture.request.startedAt.getTime() - 1).toISOString(); break;
+          case "request-evidence-object": {
+            const entry = { ...fixture.entry, verificationRequests: [{ ...fixture.request, evidence: {} }] };
+            transactionMocks.courseSupportBatchIncident.findMany.mockResolvedValue([entry]);
+            transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({ ...fixture.incident, batchIncidents: [entry] });
+            break;
+          }
+          case "second-historical-job": transactionMocks.localReaderJob.findMany.mockResolvedValue([
+            fixture.oldJob, { ...fixture.oldJob, id: "second-job" }]); break;
+          case "changed-at-old-job-lock":
+          case "missing-old-job-lock": {
+            const prior = transactionMocks.$queryRaw.getMockImplementation()!;
+            transactionMocks.$queryRaw.mockImplementation((query: { strings?: string[]; values?: unknown[] }) => {
+              if (query.strings?.join(" ").includes('FROM "LocalReaderJob"')) {
+                if (fault === "missing-old-job-lock") return Promise.resolve([]);
+                changed.updatedAt = new Date(changed.updatedAt.getTime() + 1);
+                transactionMocks.localReaderJob.findMany.mockResolvedValue([changed]);
+              }
+              return prior(query);
+            });
+            break;
+          }
+          case "active-reader-job": transactionMocks.localReaderJob.findFirst.mockResolvedValue({ id: "new-live-job" }); break;
+          case "late-request": transactionMocks.courseSupportVerificationRequest.findFirst.mockResolvedValue({ id: "new-request" }); break;
+          case "source-changed": transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({ ...fixture.incident,
+            course: { ...fixture.incident.course, detectedBookingUrl: fixture.course.detectedBookingUrl + "?changed=1" } }); break;
+          case "already-used": transactionMocks.courseMonitoringEvent.findFirst.mockResolvedValue({ id: "existing-receipt" }); break;
+        }
+        await expect(reopenParkedCourseForResponderCampaignInTransaction(transactionMocks as never, fixture.input))
+          .resolves.toEqual({ admitted: false });
+        expect(transactionMocks.courseMonitoringEvent.create).not.toHaveBeenCalled();
+        expect(transactionMocks.courseSupportIncident.updateMany).not.toHaveBeenCalled();
+        expect(transactionMocks.localReaderJob.updateMany).not.toHaveBeenCalled();
+        expect(transactionMocks.courseSupportVerificationRequest.updateMany).not.toHaveBeenCalled();
+        expect(transactionMocks.courseSupportBatchIncident.updateMany).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(["exhausted", "operator", "later-evidence"])(
+      "rejects native deadline drift after planning: %s", async (fault) => {
+        const fixture = await arrangeLegacyReaderRenewal("RECOVERY_CRON");
+        if (fault === "exhausted") Object.assign(fixture.endpoint.audit, { playbookExhausted: true });
+        if (fault === "operator") fixture.endpoint.source = "OPERATOR_CLI";
+        if (fault === "later-evidence") fixture.incident.monitoringEvents.push({
+          ...fixture.endpoint, id: "later-evidence", eventType: "STATE_CHANGED",
+          occurredAt: new Date(fixture.endpoint.occurredAt.getTime() + 1),
+        });
+        await expect(reopenParkedCourseForResponderCampaignInTransaction(transactionMocks as never, fixture.input))
+          .resolves.toEqual({ admitted: false });
+        expect(transactionMocks.courseMonitoringEvent.create).not.toHaveBeenCalled();
+        expect(transactionMocks.courseSupportIncident.updateMany).not.toHaveBeenCalled();
+        expect(transactionMocks.localReaderJob.updateMany).not.toHaveBeenCalled();
+      },
+    );
 
     it("loads and atomically admits a prior-release started reader without replaying completed stages", async () => {
       const fixture = await arrangeContinuation();

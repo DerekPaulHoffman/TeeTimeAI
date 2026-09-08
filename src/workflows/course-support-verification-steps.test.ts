@@ -68,6 +68,7 @@ const localReaderMocks = vi.hoisted(() => ({
 
 const prismaMocks = vi.hoisted(() => ({
   courseFindUnique: vi.fn(),
+  renewalReceiptFindUnique: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock("@/lib/automation/course-provider-read", () => providerReadMocks);
@@ -92,7 +93,7 @@ vi.mock("@/lib/automation/runtime-version", () => runtimeMocks);
 vi.mock("@/lib/email/search-delivery-outbox", () => deliveryMocks);
 vi.mock("@/lib/local-reader/service", () => localReaderMocks);
 vi.mock("@/lib/prisma", () => ({
-  prisma: { course: { findUnique: prismaMocks.courseFindUnique } },
+  prisma: { course: { findUnique: prismaMocks.courseFindUnique }, courseMonitoringEvent: { findUnique: prismaMocks.renewalReceiptFindUnique } },
 }));
 
 import { executeCourseSupportVerificationStep } from "./course-support-verification-steps";
@@ -488,6 +489,7 @@ describe("executeCourseSupportVerificationStep", () => {
       },
     );
     prismaMocks.courseFindUnique.mockResolvedValue(course);
+    prismaMocks.renewalReceiptFindUnique.mockResolvedValue(null);
     capabilityMocks.resolveProviderCapability.mockReturnValue({
       providerFamilyKey: "CPS",
       isRunnable: true,
