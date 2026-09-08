@@ -108,10 +108,13 @@ import {
 import { buildProviderFailureFingerprint } from "./provider-capabilities";
 import { runCourseSupportVerificationWatch } from "./course-support-verification-watch";
 import { buildCourseSupportClaimActionPlan } from "./course-support-action-plan";
+import { routeCourseSupportRemediation } from "./course-support-remediation-routing";
 import { retainedSourceRecoveryFixture } from "./course-support-retained-source-recovery.test-fixtures";
 import { hasUnresolvedCourseSupportSourceResearch } from "./course-support-source-research-outcome";
 import { CourseSupportEvidenceRefreshRequiredError } from "./course-support-closeout-errors";
 import {
+  assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery,
+  assessParkedCourseCampaignSameCycleRecoveryHistory,
   createParkedCourseCampaignAttemptLedgerFingerprint,
   createParkedCourseCampaignAudit,
   PARKED_COURSE_CAMPAIGN_PROMPT_VERSION,
@@ -22613,6 +22616,165 @@ describe("detached verification atomic batch fences", () => {
       },
     };
   }
+
+  it.each([
+    ["technical rendered", "RENDERED_BROWSER_DISCOVERY", "CHALLENGE", false],
+    ["technical rendered", "RENDERED_BROWSER_DISCOVERY", "CHALLENGE", true],
+    ["browser rendered", "RENDERED_BROWSER_DISCOVERY", "MISSING_SOURCE", true],
+    ["http rendered", "RENDERED_BROWSER_DISCOVERY", "MISSING_SOURCE", true],
+    ["typed adapter", "BROWSER_ADAPTER_RETRY", "MISSING_METADATA", true],
+    ["repair adapter", "BROWSER_ADAPTER_RETRY", "UNSUPPORTED_FAMILY", true],
+  ] as const)("preserves native %s claim and zero-execution closeout for campaign recovery (%s, %s, plan %s)", async (label, stage, failureClass, withPlan) => {
+    const at = (minutes: number) => new Date(now.getTime() + minutes * 60_000);
+    const cycle = 2;
+    const batch = closeoutBatch("PENDING");
+    const entry = batch.incidents[0];
+    const sourceCourse = {
+      ...entry.course,
+      isPublic: true,
+      detectedPlatform: label === "typed adapter" ? "FOREUP" : label === "repair adapter" ? "CUSTOM" : "UNKNOWN",
+      providerFamilyKey: label === "typed adapter" ? "FOREUP" : label === "repair adapter" ? "TENFORE" : "public-course.example",
+      website: "https://public-course.example/",
+      detectedBookingUrl: label === "typed adapter" ? "https://foreupsoftware.com/index.php/booking/1/2#/teetimes" : label === "repair adapter" ? "https://fixture.tenfore.golf/example" : null,
+      bookingMetadata: label === "typed adapter" ? { scheduleId: 2, bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/1/2#/teetimes" } : null,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "NEEDS_REVIEW",
+      automationReason: "NONE",
+    };
+    const templateLedger = stage === "RENDERED_BROWSER_DISCOVERY" ? browserReadyAttemptLedger(cycle) : browserAdapterRetryReadyAttemptLedger(cycle);
+    let ledger: ReturnType<typeof appendAutomationPlaybookEvent> | null = null;
+    for (const event of parseAutomationPlaybookLedger(templateLedger)!.events) {
+      ledger = appendAutomationPlaybookEvent(ledger, { ...event, observedAt: at(-60) });
+    }
+    const assessment = assessAutomationPlaybook(ledger, cycle);
+    expect(assessment.nextStage).toBe(stage);
+    const route = routeCourseSupportRemediation({
+      ...sourceCourse, failureClass, attemptCount: 0,
+      discoveryAttempt: label === "http rendered" ? "NONE" : "HTTP_INCONCLUSIVE", playbookAssessment: assessment,
+    });
+    const plan = buildCourseSupportClaimActionPlan({
+      route, incidentKind: "NEEDS_ADAPTER", incidentProviderFamilyKey: sourceCourse.providerFamilyKey, course: sourceCourse,
+    });
+    expect(route.attemptSignature).toMatchObject({ playbookStage: stage });
+    expect(plan.primaryAction).toBe(stage === "RENDERED_BROWSER_DISCOVERY" ? "INSPECT_PROVIDER_CONTRACT" : "VERIFY_CURRENT_RUNTIME");
+    expect(plan.allowedActions).toContain("VERIFY_CURRENT_RUNTIME");
+    const expectedPair = label === "typed adapter" ? ["VERIFY_TRANSIENT", "RUN_TYPED_ADAPTER"] :
+      ["ADVANCE_DISCOVERY", label === "technical rendered" ? "VERIFY_TECHNICAL_CONSTRAINT" : label === "repair adapter" ? "REPAIR_PROVIDER_ADAPTER" : label === "http rendered" ? "DISCOVER_WITH_HTTP" : "DISCOVER_WITH_BROWSER"];
+    expect([route.workMode, route.strategy.action]).toEqual(expectedPair);
+    const courseRef = createHash("sha256").update(entry.courseId).digest("hex").slice(0, 24);
+    const campaignRunId = "native-zero-campaign";
+    const captured = {
+      courseId: entry.courseId, incidentId: entry.incidentId, cycle: 1, revision: 5, monitoringRevision: 9,
+      kind: "NEEDS_ADAPTER" as const, providerFamilyKey: sourceCourse.providerFamilyKey, failureClass,
+      failureFingerprint: "fingerprint", monitoringFailureFingerprint: "fingerprint", providerSnapshotFingerprint: providerFingerprint,
+      attemptLedgerFingerprint: createParkedCourseCampaignAttemptLedgerFingerprint(null), playbookConclusion: "INCOMPLETE" as const,
+      latestProbeAt: null, latestDiscoveryAt: null,
+    };
+    const campaignAudit = createParkedCourseCampaignAudit({ expectedCount: 1, capturedAt: at(-120), members: [captured] });
+    const claimAttempt = {
+      courseRef, providerSnapshotFingerprint: providerFingerprint, failureFingerprint: captured.failureFingerprint,
+      runtimeVersion: releaseSha, activeRealSearchCount: 0, playbookEventCountAtClaim: ledger!.events.length,
+      reason: route.reason, retryBudget: route.retryBudget, approach: route.attemptSignature,
+      ...(withPlan ? { actionPlan: plan } : {}),
+    };
+    Object.assign(batch, { baseSha: releaseSha, createdAt: at(-34), deployedAt: at(-40), recheckDispatchKey: null, recheckDispatchStartedAt: null, recheckDispatchedAt: null });
+    Object.assign(entry, { cycle, createdAt: at(-33), preProbeId: null, postProbeId: null, proofSnapshot: null, verifiedAt: null, verifiedIncidentUpdatedAt: null });
+    Object.assign(entry.course, sourceCourse, { probes: [], automationDiscoveries: [] });
+    Object.assign(entry.incident, { cycle, kind: "NEEDS_ADAPTER", confirmedAt: at(-110), firstSeenAt: at(-110), lastSeenAt: at(-60), updatedAt: at(-60), providerFamilyKey: sourceCourse.providerFamilyKey, failureClass, attemptLedger: ledger, activeRealSearchCount: 0 });
+    batch.summary = {
+      ...batch.summary, plannedPaths: [],
+      campaign: { kind: "PARKED_COHORT", attempts: [{ courseRef, runId: campaignRunId, membershipDigest: campaignAudit.membershipDigest, cycle }] },
+      remediation: { workMode: route.workMode, strategyAction: route.strategy.action, playbookStage: stage,
+        allowUnchangedRuntime: route.allowUnchangedRuntime, requiresImplementationPath: route.requiresImplementationPath,
+        reason: route.reason, retryBudget: route.retryBudget, attempts: [claimAttempt] },
+    };
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.transaction.mockImplementation(async (worker: (tx: typeof monitoringTransactionClient) => Promise<unknown>) => worker(monitoringTransactionClient));
+    await expect(closeoutCourseSupportBatch({ batchId: "batch-1", leaseToken: "lease-1", ownerThreadId: "owner-thread",
+      requestedOutcome: "retryable_failed", verificationWatchMode: "EARLY_RETRY", now })).resolves.toMatchObject({ derivedOutcome: "retryable_failed", durableCloseoutRecorded: true });
+    const batchWrite = prismaMocks.batchUpdateMany.mock.calls.map(([write]) => write.data).find((data) => data.summary?.closeout);
+    const memberWrite = prismaMocks.incidentUpdateMany.mock.calls.map(([write]) => write.data).find((data) => data.result);
+    expect(batchWrite).toMatchObject({ status: "RETRYABLE_FAILED", completedAt: now });
+    expect(memberWrite).toMatchObject({ result: "RETRY_SCHEDULED" });
+    const receipt = batchWrite.summary.closeout.remediationAttempts[0];
+    expect(receipt).toMatchObject({ approach: route.attemptSignature, consumed: false, countsTowardOperationalNoProgress: false,
+      failureFingerprint: captured.failureFingerprint, observedFailureFingerprint: captured.failureFingerprint,
+      providerSnapshotFingerprint: providerFingerprint, observedProviderSnapshotFingerprint: providerFingerprint,
+      executionEvidence: { claimedImplementationPaths: false, newReleaseRecorded: false, deploymentRecorded: false,
+        postProbeRecorded: false, providerAttemptRecorded: false, providerExecutionAttemptRecorded: false,
+        playbookAttemptRecorded: false, terminalResultRecorded: false, providerExecutionStarted: false } });
+    expect(batchWrite.summary.remediation.attempts[0].actionPlan).toEqual(withPlan ? plan : undefined);
+    const postEntry = {
+      ...entry, ...memberWrite, batchId: batch.id, verificationRequests: [],
+      batch: { ...batch, ...batchWrite, updatedAt: batchWrite.updatedAt ?? now, ownerAutomationRun: null },
+    };
+    const preEntry = {
+      ...postEntry, id: "native-pre-entry", batchId: "native-pre-batch", result: "NEEDS_HUMAN", proofSnapshot: { providerExecution: true },
+      createdAt: at(-105), updatedAt: at(-50),
+      batch: { ...postEntry.batch, id: "native-pre-batch", createdAt: at(-106), deployedAt: at(-111),
+        updatedAt: at(-50), completedAt: at(-50), status: "PARTIAL", summary: { closeout: { providerExecutionStarted: true } } },
+      verificationRequests: [{ id: "native-pre-request", releaseSha, updatedAt: at(-50), status: "SUCCEEDED", revision: 2, attemptCount: 1,
+        workflowRunId: "native-pre-workflow", startedAt: at(-100), outcome: "FETCH_FAILED", failureClass, evidence: { providerExecution: true }, lastError: "unchanged source" }],
+    };
+    const priorHistory = assessParkedCourseCampaignSameCycleRecoveryHistory({ courseId: entry.courseId, cycle, entries: [preEntry] as never,
+      requireOrchestrationOnly: false, requireStartedRequest: true, requireCausalStartedRequest: true, minimumStartedAt: at(-110) });
+    expect(priorHistory).not.toBeNull();
+    const campaign = { kind: "PARKED_COHORT", runId: campaignRunId, membershipDigest: campaignAudit.membershipDigest, cycle };
+    const endpointAudit = { cycle, customerState: "NEEDS_HUMAN_REVIEW", playbookConclusion: "INCOMPLETE", playbookExhausted: false,
+      automationStalled: true, parkedUntilMaterialChange: true, nextStage: stage, campaign, customerDataIncluded: false };
+    const event = (id: string, eventType: string, source: string, occurredAt: Date, audit: Record<string, unknown>, readPath: string | null = null) => ({
+      id, incidentId: entry.incidentId, eventType, source, failureFingerprint: captured.failureFingerprint, readPath, occurredAt, audit,
+    });
+    const ledgerFingerprint = createParkedCourseCampaignAttemptLedgerFingerprint(ledger);
+    const current = {
+      ...captured, cycle, revision: 10, monitoringRevision: 12, attemptLedgerFingerprint: ledgerFingerprint, activeRealSearchCount: 0,
+      zeroExecutionEvidence: { attemptLedger: ledger, latestProbe: null, latestDiscovery: null,
+        latestProbeTimestampRowCount: 0, latestDiscoveryTimestampRowCount: 0, playbookAssessment: assessment, batchIncidents: [preEntry, postEntry],
+        monitoringEvents: [
+          event("native-admission", "REVALIDATION_REQUESTED", "COURSE_SUPPORT_RESPONDER", at(-110), {
+            action: "parked_cohort_admission", campaignRunId, campaignMembershipDigest: campaignAudit.membershipDigest, cycle, priorCycle: 1,
+            capturedIncidentRevision: captured.revision, capturedMonitoringRevision: captured.monitoringRevision, preservesPriorAttemptEvents: true, customerDataIncluded: false }),
+          event("native-prior-endpoint", "HUMAN_REVIEW_REQUESTED", "RECOVERY_CRON", at(-45), endpointAudit),
+          event("native-marker", "REVALIDATION_REQUESTED", "COURSE_SUPPORT_RESPONDER", at(-35), {
+            action: "parked_cohort_incomplete_playbook_recovery", admissionMode: "INCOMPLETE_PLAYBOOK_RECOVERY", campaignRunId,
+            campaignMembershipDigest: campaignAudit.membershipDigest, capturedCycle: 1, cycle, sameCycleRecoveryHistoryDigest: priorHistory!.historyDigest,
+            providerSnapshotFingerprint: providerFingerprint, attemptLedgerFingerprint: ledgerFingerprint, latestProbeAt: null, latestDiscoveryAt: null,
+            playbookCompletedStageCount: assessment.completedStages.length, playbookNextStage: stage, recoveryRuntimeVersion: releaseSha,
+            sameCycleRecovery: true, oneShot: true, preservesAttemptLedger: true, preservesAttemptCounts: true, preservesAttemptTimestamps: true,
+            preservesOperatorEvidence: true, preservesImmutableCampaignAudit: true, campaign, customerDataIncluded: false }),
+          event("native-claim", "AUTOMATION_ATTEMPTED", "COURSE_SUPPORT_RESPONDER", at(-35), {
+            providerFamilyKey: sourceCourse.providerFamilyKey, maxCourses: 5, serializedWriterLane: true, campaignKind: "PARKED_COHORT",
+            campaignRunId, campaignMembershipDigest: campaignAudit.membershipDigest, cycle, customerDataIncluded: false }, "BOUNDED_RECOVERY_PLAYBOOK"),
+          event("native-post-endpoint", "HUMAN_REVIEW_REQUESTED", "RECOVERY_CRON", at(1), endpointAudit),
+        ],
+      },
+    };
+    const input = { captured, current, capturedAt: at(-120), campaignRunId,
+      campaignMembershipDigest: campaignAudit.membershipDigest, currentRuntimeVersion: "b".repeat(40) };
+    const recovered = assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery(input as never);
+    expect(recovered, "native closeout must remain readable by campaign admission").not.toBeNull();
+    const crossed = structuredClone(input);
+    crossed.current.zeroExecutionEvidence.batchIncidents[1]!.batch.summary.closeout.remediationAttempts[0].approach = {
+      ...route.attemptSignature,
+      ...(stage === "BROWSER_ADAPTER_RETRY"
+        ? label === "typed adapter" ? { workMode: "ADVANCE_DISCOVERY", strategyAction: "REPAIR_PROVIDER_ADAPTER" }
+          : { workMode: "VERIFY_TRANSIENT", strategyAction: "RUN_TYPED_ADAPTER" }
+        : { strategyAction: route.strategy.action === "DISCOVER_WITH_BROWSER" ? "VERIFY_TECHNICAL_CONSTRAINT" : "DISCOVER_WITH_BROWSER" }),
+    };
+    expect(assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery(crossed as never)).toBeNull();
+    const opposingPlan = structuredClone(input);
+    opposingPlan.current.zeroExecutionEvidence.batchIncidents[1]!.batch.summary.remediation.attempts[0].actionPlan = {
+      ...plan, primaryAction: "IMPLEMENT_REUSABLE_SUPPORT", allowedActions: ["IMPLEMENT_REUSABLE_SUPPORT"],
+    };
+    expect(assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery(opposingPlan as never)).toBeNull();
+    const unknownPlan = structuredClone(input);
+    unknownPlan.current.zeroExecutionEvidence.batchIncidents[1]!.batch.summary.remediation.attempts[0].actionPlan = null;
+    expect(assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery(unknownPlan as never)).toBeNull();
+    expect(entry.incident.attemptLedger).toEqual(ledger);
+  });
 
   function verificationProofSnapshot(kind: string) {
     return prismaMocks.incidentUpdateMany.mock.calls

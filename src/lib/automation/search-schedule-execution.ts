@@ -15,10 +15,12 @@ import {
 } from "@/lib/courses/booking-window";
 import { isSyntheticWebsiteTrafficClass } from "@/lib/engagement/traffic-class";
 import { calculateSearchWindowEnd } from "@/lib/automation/date-boundary";
+import { getSyntheticMultiCycleExpiresAt } from "@/lib/automation/synthetic-test-window";
+
+export { SYNTHETIC_MULTI_CYCLE_LIFETIME_MS } from "@/lib/automation/synthetic-test-window";
 
 const FAILED_CHECK_RETRY_MINUTES = 5;
 const SUPPORT_DISCOVERY_RETRY_MINUTES = 15;
-export const SYNTHETIC_MULTI_CYCLE_LIFETIME_MS = 18 * 60 * 60 * 1000;
 
 export async function executeScheduledSearchCheck(searchId: string, scheduleVersion: number) {
   const claimed = await claimScheduledSearchCheck(searchId, scheduleVersion);
@@ -34,7 +36,7 @@ export async function executeScheduledSearchCheck(searchId: string, scheduleVers
   let checkStartedAt: Date | null = null;
   try {
     const now = new Date();
-    const syntheticExpiresAt = getSyntheticMultiCycleExpiresAt(timing);
+    const syntheticExpiresAt = getSyntheticMultiCycleExpiresAt(timing, now);
     if (syntheticExpiresAt && now >= syntheticExpiresAt) {
       const completed = await completeExpiredSyntheticSearch({
         searchId,
@@ -140,10 +142,14 @@ export async function executeScheduledSearchCheck(searchId: string, scheduleVers
       checkStartedAt ?? failedAt,
       failedAt
     );
-    const nextCheckAt =
+    const retryAt =
       endpointWakeAt && endpointWakeAt < defaultRetryAt
         ? endpointWakeAt
         : defaultRetryAt;
+    const nextCheckAt = capAtSyntheticExpiration(
+      retryAt,
+      getSyntheticMultiCycleExpiresAt(timing, failedAt)
+    ) ?? retryAt;
     const failed = await failScheduledSearchCheck({
       searchId,
       scheduleVersion,
@@ -198,17 +204,6 @@ export function selectSearchEndpointWakeAt(
     .filter((candidate) => candidate > checkStartedAt)
     .sort((left, right) => left.getTime() - right.getTime())[0];
   return deadline && deadline <= now ? now : deadline ?? null;
-}
-
-function getSyntheticMultiCycleExpiresAt(timing: {
-  createdAt: Date;
-  trafficClass: WebsiteTrafficClass;
-  syntheticMultiCycle: boolean;
-}) {
-  return isSyntheticWebsiteTrafficClass(timing.trafficClass) &&
-    timing.syntheticMultiCycle
-    ? new Date(timing.createdAt.getTime() + SYNTHETIC_MULTI_CYCLE_LIFETIME_MS)
-    : null;
 }
 
 function capAtSyntheticExpiration(

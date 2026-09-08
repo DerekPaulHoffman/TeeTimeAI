@@ -22,6 +22,8 @@ import {
 import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
 import { COURSE_SUPPORT_RESPONDER_PROMPT_VERSION } from "./course-support-responder-policy";
 import { persistCourseSupportSearchExecutionFence } from "./course-support-search-execution-fence";
+import { buildCourseSupportClaimActionPlan } from "./course-support-action-plan";
+import { routeCourseSupportRemediation } from "./course-support-remediation-routing";
 
 const capturedAt = new Date("2026-08-20T12:00:00.000Z");
 
@@ -2843,6 +2845,66 @@ describe("parked course campaign", () => {
       approach.playbookStage = "BROWSER_ADAPTER_RETRY";
       return row;
     };
+    const makeNativeClaimRow = (inputRow = makeRow()) => {
+      const row = structuredClone(inputRow);
+      const postEntry = row.batchIncidents[1]!;
+      const claimApproach = structuredClone(
+        (
+          postEntry.batch.summary as {
+            closeout: { remediationAttempts: Array<Record<string, unknown>> };
+          }
+        ).closeout.remediationAttempts[0]!.approach,
+      );
+      postEntry.batch.summary = {
+        ...postEntry.batch.summary,
+        campaign: {
+          kind: "PARKED_COHORT",
+          attempts: [
+            {
+              courseRef,
+              runId: "campaign-run-1",
+              membershipDigest: audit.membershipDigest,
+              cycle: 4,
+            },
+          ],
+        },
+        remediation: {
+          attempts: [
+            {
+              courseRef,
+              providerSnapshotFingerprint,
+              failureFingerprint: "SOURCE:MISSING",
+              runtimeVersion: priorRuntime,
+              activeRealSearchCount: 0,
+              approach: claimApproach,
+            },
+          ],
+        },
+      };
+      // The native same-cycle recovery claim emits this event alongside the
+      // recovery marker, using the same claimDatabaseNow. The later batch and
+      // entry timestamps retain the existing proven chronology unchanged.
+      row.monitoringEvents.push({
+        id: "native-claim-at-recovery-marker",
+        incidentId: "incident-1",
+        eventType: "AUTOMATION_ATTEMPTED",
+        source: "COURSE_SUPPORT_RESPONDER",
+        failureFingerprint: "SOURCE:MISSING",
+        readPath: "BOUNDED_RECOVERY_PLAYBOOK",
+        occurredAt: priorMarkerAt,
+        audit: {
+          providerFamilyKey: "SOURCE_MISSING",
+          maxCourses: 5,
+          serializedWriterLane: true,
+          campaignKind: "PARKED_COHORT",
+          campaignRunId: "campaign-run-1",
+          campaignMembershipDigest: audit.membershipDigest,
+          cycle: 4,
+          customerDataIncluded: false,
+        },
+      });
+      return row;
+    };
 
     const positive = database(makeRow());
     const planned = await loadParkedCourseCampaignAdmissionMembers(
@@ -2873,6 +2935,223 @@ describe("parked course campaign", () => {
         }),
       }),
     );
+
+    const nativeClaimRow = makeNativeClaimRow();
+    const unchangedNativeClaimRow = structuredClone(nativeClaimRow);
+    const nativeClaimPlan = await loadParkedCourseCampaignAdmissionMembers(
+      audit,
+      database(nativeClaimRow).database,
+      "campaign-run-1",
+      currentRuntime,
+    );
+    expect(nativeClaimPlan).toEqual([
+      expect.objectContaining({
+        admissionMode: "POST_MARKER_INCOMPLETE_PLAYBOOK_RECOVERY",
+        cycle: 4,
+        playbookNextStage: "RENDERED_BROWSER_DISCOVERY",
+      }),
+    ]);
+    expect(nativeClaimRow).toEqual(unchangedNativeClaimRow);
+    expect(nativeClaimPlan[0]?.sameCycleRecoveryHistoryDigest).not.toBe(
+      planned[0]?.sameCycleRecoveryHistoryDigest,
+    );
+    await expect(
+      loadParkedCourseCampaignAdmissionMembers(
+        audit,
+        database(makeNativeClaimRow(makeBrowserAdapterRow())).database,
+        "campaign-run-1",
+        currentRuntime,
+      ),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        admissionMode: "POST_MARKER_INCOMPLETE_PLAYBOOK_RECOVERY",
+        cycle: 4,
+        playbookNextStage: "BROWSER_ADAPTER_RETRY",
+      }),
+    ]);
+    const nativeClaimEvent = (row: ReturnType<typeof makeNativeClaimRow>) =>
+      row.monitoringEvents.find(
+        (event) => event.id === "native-claim-at-recovery-marker",
+      )!;
+    const nativeClaimAudit = (row: ReturnType<typeof makeNativeClaimRow>) =>
+      nativeClaimEvent(row).audit as Record<string, unknown>;
+    const nativeClaimSummary = (row: ReturnType<typeof makeNativeClaimRow>) =>
+      row.batchIncidents[1]!.batch.summary as {
+        campaign: { attempts: Array<Record<string, unknown>> };
+        remediation: { attempts: Array<Record<string, unknown>> };
+        closeout: { remediationAttempts: Array<Record<string, unknown>> };
+      };
+    // These approach/plan values come from the native producers, not from the
+    // historical fixture's non-canonical DISCOVERY_ONLY spelling. The separate
+    // batch composition test exercises the actual transactional closeout writer.
+    for (const withActionPlan of [false, true]) {
+      const row = makeNativeClaimRow();
+      const route = routeCourseSupportRemediation({
+        ...providerCourseSnapshot,
+        failureClass: "CHALLENGE",
+        attemptCount: 0,
+        playbookAssessment: {
+          conclusion: "INCOMPLETE",
+          nextStage: "RENDERED_BROWSER_DISCOVERY",
+        },
+      });
+      expect(route.attemptSignature).toEqual({
+        workMode: "ADVANCE_DISCOVERY",
+        strategyAction: "VERIFY_TECHNICAL_CONSTRAINT",
+        playbookStage: "RENDERED_BROWSER_DISCOVERY",
+      });
+      const actionPlan = buildCourseSupportClaimActionPlan({
+        route,
+        incidentKind: "NEEDS_ADAPTER",
+        incidentProviderFamilyKey: providerCourseSnapshot.providerFamilyKey,
+        course: providerCourseSnapshot,
+      });
+      const summary = nativeClaimSummary(row);
+      summary.remediation.attempts[0]!.approach = route.attemptSignature;
+      summary.closeout.remediationAttempts[0]!.approach = route.attemptSignature;
+      if (withActionPlan) summary.remediation.attempts[0]!.actionPlan = actionPlan;
+      await expect(
+        loadParkedCourseCampaignAdmissionMembers(
+          audit, database(row).database, "campaign-run-1", currentRuntime,
+        ),
+        `native technical discovery with action plan ${withActionPlan}`,
+      ).resolves.toHaveLength(1);
+      const mismatched = structuredClone(row);
+      nativeClaimSummary(mismatched).closeout.remediationAttempts[0]!.approach = {
+        ...route.attemptSignature, strategyAction: "DISCOVER_WITH_BROWSER",
+      };
+      await expect(loadParkedCourseCampaignAdmissionMembers(
+        audit, database(mismatched).database, "campaign-run-1", currentRuntime,
+      )).resolves.toEqual([]);
+    }
+    const nativeClaimFailures: Array<{
+      name: string;
+      mutate: (row: ReturnType<typeof makeNativeClaimRow>) => void;
+    }> = [
+      {
+        name: "duplicate native claim event",
+        mutate: (row) => {
+          row.monitoringEvents.push({
+            ...structuredClone(nativeClaimEvent(row)),
+            id: "duplicate-native-claim",
+          });
+        },
+      },
+      ...[
+        ["campaignRunId", "other-campaign"],
+        ["campaignMembershipDigest", "f".repeat(64)],
+        ["campaignKind", "OTHER"],
+        ["cycle", 5],
+        ["providerFamilyKey", "OTHER_PROVIDER"],
+        ["maxCourses", 21],
+        ["serializedWriterLane", false],
+        ["customerDataIncluded", true],
+        ["unexpectedAuthority", true],
+      ].map(([key, value]) => ({
+        name: `unproven native claim audit ${key}`,
+        mutate: (row: ReturnType<typeof makeNativeClaimRow>) => {
+          nativeClaimAudit(row)[String(key)] = value;
+        },
+      })),
+      ...[
+        ["incidentId", "other-incident"],
+        ["failureFingerprint", "SOURCE:CHANGED"],
+        ["source", "RECOVERY_CRON"],
+        ["eventType", "STATE_CHANGED"],
+        ["readPath", "OTHER_PATH"],
+        ["occurredAt", new Date(priorMarkerAt.getTime() + 1)],
+      ].map(([key, value]) => ({
+        name: `unproven native claim event ${key}`,
+        mutate: (row: ReturnType<typeof makeNativeClaimRow>) => {
+          nativeClaimEvent(row)[String(key)] = value;
+        },
+      })),
+      {
+        name: "missing native claim audit key",
+        mutate: (row) => {
+          delete nativeClaimAudit(row).serializedWriterLane;
+        },
+      },
+      {
+        name: "consumed post-marker action",
+        mutate: (row) => {
+          nativeClaimSummary(row).closeout.remediationAttempts[0]!.consumed =
+            true;
+        },
+      },
+      {
+        name: "post-marker verification request",
+        mutate: (row) => {
+          row.batchIncidents[1]!.verificationRequests.push({
+            ...row.batchIncidents[0]!.verificationRequests[0]!,
+            id: "request-after-native-claim",
+            startedAt: new Date("2026-08-20T12:21:00.000Z"),
+          });
+        },
+      },
+      {
+        name: "unmatched closed-batch campaign receipt",
+        mutate: (row) => {
+          nativeClaimSummary(row).campaign.attempts[0]!.runId =
+            "other-campaign";
+        },
+      },
+      {
+        name: "duplicate closed-batch campaign receipt",
+        mutate: (row) => {
+          const attempts = nativeClaimSummary(row).campaign.attempts;
+          attempts.push(structuredClone(attempts[0]!));
+        },
+      },
+      ...[
+        ["providerSnapshotFingerprint", "f".repeat(64)],
+        ["failureFingerprint", "SOURCE:CHANGED"],
+        ["runtimeVersion", currentRuntime],
+      ].map(([key, value]) => ({
+        name: `unmatched closed-batch claim ${key}`,
+        mutate: (row: ReturnType<typeof makeNativeClaimRow>) => {
+          nativeClaimSummary(row).remediation.attempts[0]![key] = value;
+        },
+      })),
+      {
+        name: "duplicate closed-batch remediation receipt",
+        mutate: (row) => {
+          const attempts = nativeClaimSummary(row).remediation.attempts;
+          attempts.push(structuredClone(attempts[0]!));
+        },
+      },
+      {
+        name: "different claimed playbook stage",
+        mutate: (row) => {
+          const approach = nativeClaimSummary(row).remediation.attempts[0]!
+            .approach as Record<string, unknown>;
+          approach.playbookStage = "LOCAL_READER";
+        },
+      },
+      {
+        name: "missing closed-batch claim receipt",
+        mutate: (row) => {
+          nativeClaimSummary(row).remediation.attempts = [];
+        },
+      },
+      {
+        name: "provider proof after native claim",
+        mutate: (row) => {
+          row.batchIncidents[1]!.proofSnapshot = { providerExecution: true };
+        },
+      },
+    ];
+    for (const { name, mutate } of nativeClaimFailures) {
+      const row = makeNativeClaimRow();
+      mutate(row);
+      const rejected = await loadParkedCourseCampaignAdmissionMembers(
+        audit,
+        database(row).database,
+        "campaign-run-1",
+        currentRuntime,
+      );
+      expect(rejected, name).toEqual([]);
+    }
 
     const browserAdapter = database(makeBrowserAdapterRow());
     await expect(

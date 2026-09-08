@@ -105,7 +105,17 @@ An unchanged attempt is not progress. The same strategy against the same failure
 
 Parking events record the playbook assessment from the current incident ledger read under the existing monitoring lock: assessment availability, conclusion, exhausted flag, and next stage. Invalid or wrong-cycle evidence stays unavailable/null, never an inferred `false`. This metadata does not authorize recovery, reset an attempt budget, or rewrite older parking events; ordinary admission and locked claim checks still apply.
 
+Post-marker incomplete-stage recovery retains the native claim event written at the recovery marker's exact database time. That event is permitted only once, with exact campaign, incident, failure and provider-source attribution and a matching claim receipt in the unique closed zero-execution batch. Its selected approach must match the unchanged recovery stage and the exact closeout tuple. Recovery uses the canonical discovery-action and assigned browser-adapter tuple checks, while retaining only the original exact legacy receipt shape. A present action plan must match the tuple and its allowed action semantics. The event is included in the recovery history digest; it is not provider execution or an intervening material change. Unknown, duplicate, later, mismatched or executed work remains fenced, as do the existing source, ledger, request, timestamp and one-shot guards.
+
 `MISSING_SOURCE`, `MISSING_METADATA`, `UNSUPPORTED_FAMILY`, `READER_PARSER_MISSING`, `SCHEMA`, and `UNKNOWN` are discovery or repair work, not generic transient failures. An unchanged-runtime verification can classify current evidence, but it cannot count as repairing one of those classes. A `retryable_failed` closeout must state the material condition that can make the next attempt different; otherwise the work advances to the next safe playbook stage or the truthful endpoint instead of returning to the same queue.
+
+## Explicit Controlled Synthetic Reactivation
+
+An operator may reactivate one existing paused `TEST` or `AUTOMATION` multi-cycle search only with explicit user authorization. `automation:reactivate-synthetic-search` reads its private single-search request from standard input, is dry-run by default, and requires the exact wrapped environment plus `--apply` for the guarded write. Never put search identifiers or request payloads into reports or shell arguments.
+
+The operation preserves creation time, course preferences, prior probes, matches and delivery history. It records an append-only idempotent receipt, increments the search and alert generations, and queues deployed recovery without starting local Workflow, calling a provider or sending email. Search, course, reader, responder and delivery ownership must be clear under the native locks and current database clock. A different play date must be future in every selected course's timezone.
+
+An explicit `syntheticTestWindow` grants the new alert generation one bounded window (one hour by default, never more than eighteen hours). Ordinary edits cannot renew it; stale, expired or malformed authority cannot reactivate a test. The existing `syntheticMultiCycle` outbox guard dry-runs every recipient before the sender boundary. `TEST` traffic classification alone is not a no-email safeguard. A successful controlled test proves only synthetic scheduler/provider behavior, not new customer demand, original-cohort completion, actual email transport or inbox delivery.
 
 ## Provider Registry And Consumer Outcomes
 

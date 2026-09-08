@@ -19,6 +19,11 @@ import {
 import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
 import { getAutomationRuntimeVersion } from "./runtime-version";
 import { COURSE_SUPPORT_RESPONDER_PROMPT_VERSION } from "./course-support-responder-policy";
+import { parseCourseSupportClaimActionPlan } from "./course-support-action-plan";
+import {
+  isCourseSupportDiscoveryAction,
+  isExactAssignedDetachedStageDirective,
+} from "./course-support-remediation-routing";
 import { readPersistedCourseSupportSearchExecutionFence } from "./course-support-search-execution-fence";
 import {
   reconcileLegacyParkedCampaignTerminalEvidence,
@@ -3570,6 +3575,20 @@ function hasExactPostMarkerOrchestrationOnlyAttempt(input: {
   const attempt = matchingAttempts[0]!;
   const execution = asCampaignRecord(attempt.executionEvidence);
   const approach = asCampaignRecord(attempt.approach);
+  const legacyApproach = approach.workMode === input.route.workMode &&
+    approach.strategyAction === input.route.strategyAction &&
+    approach.playbookStage === input.route.playbookStage;
+  const claims = asCampaignRecord(asCampaignRecord(input.summary).remediation).attempts;
+  const matchingClaims = Array.isArray(claims)
+    ? claims.map(asCampaignRecord).filter((claim) => claim.courseRef === courseRef)
+    : [];
+  // Legacy receipts without a claim section keep their original exact tuple.
+  // New canonical tuples must be attributed to one matching native claim.
+  const claimMatches = matchingClaims.length === 1 &&
+    matchingClaims[0]!.providerSnapshotFingerprint === input.providerSnapshotFingerprint &&
+    matchingClaims[0]!.failureFingerprint === input.failureFingerprint &&
+    matchingClaims[0]!.runtimeVersion === input.runtimeVersion &&
+    isExactPostMarkerClaimApproach(matchingClaims[0]!, approach, input.route);
   return (
     attempt.providerSnapshotFingerprint === input.providerSnapshotFingerprint &&
     attempt.observedProviderSnapshotFingerprint ===
@@ -3580,9 +3599,8 @@ function hasExactPostMarkerOrchestrationOnlyAttempt(input: {
     attempt.consumed === false &&
     attempt.countsTowardOperationalNoProgress === false &&
     execution.claimedImplementationPaths === false &&
-    approach.workMode === input.route.workMode &&
-    approach.strategyAction === input.route.strategyAction &&
-    approach.playbookStage === input.route.playbookStage &&
+    isPostMarkerRecoveryApproach(approach, input.route) &&
+    (claims === undefined ? legacyApproach : claimMatches) &&
     [
       "newReleaseRecorded",
       "deploymentRecorded",
@@ -3594,6 +3612,114 @@ function hasExactPostMarkerOrchestrationOnlyAttempt(input: {
       "providerExecutionStarted",
     ].every((key) => execution[key] === false)
   );
+}
+
+function isPostMarkerRecoveryApproach(
+  approach: Record<string, unknown>,
+  route: ParkedCourseCampaignPostMarkerRecoveryRoute,
+) {
+  if (
+    !hasExactCampaignRecordKeys(approach, ["workMode", "strategyAction", "playbookStage"]) ||
+    approach.playbookStage !== route.playbookStage
+  ) return false;
+  if (route.playbookStage === "RENDERED_BROWSER_DISCOVERY") {
+    return (approach.workMode === "DISCOVERY_ONLY" &&
+      approach.strategyAction === "DISCOVER_WITH_BROWSER") ||
+      (approach.workMode === "ADVANCE_DISCOVERY" &&
+        isCourseSupportDiscoveryAction(approach.strategyAction));
+  }
+  // Reuse the native tuple catalogue. These constants classify the tuple;
+  // the persisted zero-execution receipt above remains the execution proof.
+  return isExactAssignedDetachedStageDirective({
+    stage: route.playbookStage,
+    remediationDirective: {
+      ...approach, allowUnchangedRuntime: true, requiresImplementationPath: false,
+    },
+  });
+}
+
+function isExactPostMarkerClaimApproach(
+  claim: Record<string, unknown>,
+  closeoutApproach: Record<string, unknown>,
+  route: ParkedCourseCampaignPostMarkerRecoveryRoute,
+) {
+  const approach = asCampaignRecord(claim.approach);
+  if (
+    !isPostMarkerRecoveryApproach(approach, route) ||
+    approach.workMode !== closeoutApproach.workMode ||
+    approach.strategyAction !== closeoutApproach.strategyAction ||
+    approach.playbookStage !== closeoutApproach.playbookStage
+  ) return false;
+  if (claim.actionPlan === undefined) return true;
+  const plan = parseCourseSupportClaimActionPlan(claim.actionPlan);
+  if (!plan || plan.route.workMode !== approach.workMode ||
+    plan.route.strategyAction !== approach.strategyAction ||
+    plan.route.playbookStage !== approach.playbookStage) return false;
+  if (plan.primaryAction === "VERIFY_CURRENT_RUNTIME") {
+    return plan.allowedActions.length === 1;
+  }
+  if (route.playbookStage !== "RENDERED_BROWSER_DISCOVERY" ||
+    approach.workMode !== "ADVANCE_DISCOVERY") return false;
+  return (plan.primaryAction === "SEARCH_FOR_OFFICIAL_SOURCE" &&
+    plan.allowedActions.length === 1) ||
+    (plan.primaryAction === "INSPECT_PROVIDER_CONTRACT" &&
+      plan.allowedActions.length === 2 &&
+      plan.allowedActions.includes("VERIFY_CURRENT_RUNTIME"));
+}
+
+function isExactPostMarkerRecoveryClaimEvent(input: {
+  event: ParkedCourseCampaignRecoveryEvidence["monitoringEvents"][number];
+  markerAt: Date;
+  current: ParkedCourseCampaignMemberSnapshot;
+  campaignRunId: string;
+  campaignMembershipDigest: string;
+  entry: ParkedCourseCampaignBatchEvidence;
+  route: ParkedCourseCampaignPostMarkerRecoveryRoute;
+}) {
+  const { event, current, entry } = input;
+  const audit = asCampaignRecord(event.audit);
+  if (
+    event.eventType !== "AUTOMATION_ATTEMPTED" ||
+    event.source !== "COURSE_SUPPORT_RESPONDER" ||
+    event.incidentId !== current.incidentId ||
+    event.failureFingerprint !== current.failureFingerprint ||
+    event.readPath !== "BOUNDED_RECOVERY_PLAYBOOK" ||
+    event.occurredAt.getTime() !== input.markerAt.getTime() ||
+    !hasExactCampaignRecordKeys(audit, [
+      "providerFamilyKey", "maxCourses", "serializedWriterLane", "campaignKind",
+      "campaignRunId", "campaignMembershipDigest", "cycle", "customerDataIncluded",
+    ]) ||
+    audit.providerFamilyKey !== current.providerFamilyKey ||
+    !Number.isInteger(audit.maxCourses) || Number(audit.maxCourses) < 1 ||
+    Number(audit.maxCourses) > 20 || audit.serializedWriterLane !== true ||
+    audit.campaignKind !== "PARKED_COHORT" ||
+    audit.campaignRunId !== input.campaignRunId ||
+    audit.campaignMembershipDigest !== input.campaignMembershipDigest ||
+    audit.cycle !== current.cycle || audit.customerDataIncluded !== false ||
+    entry.batchId !== entry.batch.id
+  ) return false;
+
+  const courseRef = createHash("sha256").update(current.courseId).digest("hex").slice(0, 24);
+  const summary = asCampaignRecord(entry.batch.summary);
+  const campaign = asCampaignRecord(summary.campaign);
+  const remediation = asCampaignRecord(summary.remediation);
+  const closeout = asCampaignRecord(summary.closeout);
+  const matching = (value: unknown) => Array.isArray(value)
+    ? value.map(asCampaignRecord).filter((attempt) => attempt.courseRef === courseRef)
+    : [];
+  const campaignAttempts = matching(campaign.attempts);
+  const claimAttempts = matching(remediation.attempts);
+  const closeoutAttempts = matching(closeout.remediationAttempts);
+  if (claimAttempts.length !== 1 || closeoutAttempts.length !== 1 ||
+    !isExactPostMarkerClaimApproach(claimAttempts[0]!,
+      asCampaignRecord(closeoutAttempts[0]!.approach), input.route)) return false;
+  return campaign.kind === "PARKED_COHORT" && campaignAttempts.length === 1 &&
+    campaignAttempts[0]!.runId === input.campaignRunId &&
+    campaignAttempts[0]!.membershipDigest === input.campaignMembershipDigest &&
+    campaignAttempts[0]!.cycle === current.cycle && claimAttempts.length === 1 &&
+    claimAttempts[0]!.providerSnapshotFingerprint === current.providerSnapshotFingerprint &&
+    claimAttempts[0]!.failureFingerprint === current.failureFingerprint &&
+    claimAttempts[0]!.runtimeVersion === entry.batch.baseSha;
 }
 
 export function assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery(input: {
@@ -3819,9 +3945,7 @@ export function assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery(i
     !hasExactParkedCourseCampaignLatestEvidence({
       current,
       strictlyBefore: priorMarker.occurredAt,
-    }) ||
-    postMarkerEvents.length !== 1 ||
-    postMarkerEvents[0]!.id !== endpoint.id
+    })
   ) {
     return null;
   }
@@ -3933,6 +4057,22 @@ export function assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery(i
     return null;
   }
 
+  // Native claim writes its attempt event at the recovery marker's database
+  // time. It is orchestration evidence, not an intervening provider action.
+  // Retain it only when the unique closed, zero-execution post-marker entry
+  // above independently proves the same campaign, course and source receipt.
+  const claimEvents = postMarkerEvents.filter((event) => event.id !== endpoint.id);
+  if (
+    postMarkerEvents.filter((event) => event.id === endpoint.id).length !== 1 ||
+    claimEvents.length > 1 ||
+    (claimEvents.length === 1 && !isExactPostMarkerRecoveryClaimEvent({
+      event: claimEvents[0]!, markerAt: priorMarker.occurredAt, current,
+      campaignRunId: input.campaignRunId,
+      campaignMembershipDigest: input.campaignMembershipDigest,
+      entry: postMarkerEntries[0]!, route: recoveryRoute,
+    }))
+  ) return null;
+
   const failedRuntimeVersions = [
     ...new Set(postMarkerEntries.map((entry) => entry.batch.releaseSha!)),
   ].sort();
@@ -3955,6 +4095,9 @@ export function assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery(i
         recoveryRuntimeVersion: input.currentRuntimeVersion,
         failedRuntimeVersions,
         endpoint: canonicalizeParkedCourseCampaignRecoveryEvent(endpoint),
+        ...(claimEvents.length === 1 ? {
+          recoveryClaim: canonicalizeParkedCourseCampaignRecoveryEvent(claimEvents[0]!),
+        } : {}),
         attemptLedgerFingerprint: current.attemptLedgerFingerprint,
         fullHistoryDigest: fullHistory.historyDigest,
         preMarkerHistoryDigest: preMarkerHistory.historyDigest,

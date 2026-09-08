@@ -209,6 +209,128 @@ describe("executeScheduledSearchCheck", () => {
     );
   });
 
+  const explicitSyntheticWindow = {
+    schemaVersion: 1, alertGeneration: 7,
+    activatedAt: "2026-07-15T12:00:00.000Z",
+    expiresAt: "2026-07-15T18:00:00.000Z",
+  };
+  function reactivatedSyntheticTiming() {
+    return {
+      createdAt: new Date("2026-07-01T12:00:00.000Z"),
+      date: new Date("2026-07-18T00:00:00.000Z"),
+      endTime: "18:00", userTimeZone: "America/New_York", cadenceMinutes: 15,
+      trafficClass: "TEST" as const, syntheticMultiCycle: true, alertGeneration: 7,
+      syntheticTestWindow: explicitSyntheticWindow,
+      preferences: [{ course: { timeZone: "America/New_York" } }],
+    };
+  }
+
+  it("allows an old synthetic row only within its explicit matching generation window", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-15T17:55:00.000Z"));
+    const timing = reactivatedSyntheticTiming();
+    dbMocks.getSearchScheduleTiming.mockResolvedValue(timing);
+    runSearchCheck.mockResolvedValue({ outcome: "success", availableMatches: 0, newlyAlertedMatches: 0, supportRetryNeeded: false, courseResults: [] });
+
+    await expect(executeScheduledSearchCheck("search-1", 3)).resolves.toMatchObject({
+      outcome: "success", nextCheckAt: explicitSyntheticWindow.expiresAt,
+    });
+
+    expect(runSearchCheck).toHaveBeenCalledOnce();
+    expect(dbMocks.completeExpiredSyntheticSearch).not.toHaveBeenCalled();
+    expect(dbMocks.completeScheduledSearchCheck).toHaveBeenCalledWith(expect.objectContaining({ nextCheckAt: new Date(explicitSyntheticWindow.expiresAt) }));
+    expect(timing.createdAt).toEqual(new Date("2026-07-01T12:00:00.000Z"));
+    expect(timing.syntheticTestWindow).toEqual(explicitSyntheticWindow);
+  });
+
+  it.each([
+    { name: "exact deadline", now: explicitSyntheticWindow.expiresAt, overrides: {} },
+    { name: "after deadline", now: "2026-07-15T18:00:00.001Z", overrides: {} },
+    { name: "ordinary generation edit", now: "2026-07-15T13:00:00.000Z", overrides: { alertGeneration: 8 } },
+    { name: "missing window", now: "2026-07-15T13:00:00.000Z", overrides: { syntheticTestWindow: null } },
+    { name: "malformed window", now: "2026-07-15T13:00:00.000Z", overrides: { syntheticTestWindow: { ...explicitSyntheticWindow, schemaVersion: 2 } } },
+    { name: "not yet activated", now: "2026-07-15T11:59:59.999Z", overrides: {} },
+  ])("stops a reactivated synthetic search before provider work at $name", async ({ now, overrides }) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(now));
+    dbMocks.getSearchScheduleTiming.mockResolvedValue({ ...reactivatedSyntheticTiming(), ...overrides });
+
+    await expect(executeScheduledSearchCheck("search-1", 3)).resolves.toMatchObject({ outcome: "completed", nextCheckAt: null });
+
+    expect(runSearchCheck).not.toHaveBeenCalled();
+    expect(dbMocks.completeScheduledSearchCheck).not.toHaveBeenCalled();
+    expect(dbMocks.failScheduledSearchCheck).not.toHaveBeenCalled();
+    expect(dbMocks.completeExpiredSyntheticSearch).toHaveBeenCalledExactlyOnceWith({
+      searchId: "search-1", scheduleVersion: 3, leaseToken: "lease-1",
+      outcome: "synthetic multi-cycle test lifetime ended",
+    });
+  });
+
+  it("does not extend a valid synthetic window past the golfer's requested search window", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-15T15:59:00.000Z"));
+    dbMocks.getSearchScheduleTiming.mockResolvedValue({ ...reactivatedSyntheticTiming(), date: new Date("2026-07-15T00:00:00.000Z"), endTime: "12:00" });
+    runSearchCheck.mockResolvedValue({ outcome: "success", availableMatches: 0, newlyAlertedMatches: 0, supportRetryNeeded: false, courseResults: [] });
+
+    await expect(executeScheduledSearchCheck("search-1", 3)).resolves.toMatchObject({ outcome: "success", nextCheckAt: "2026-07-15T16:00:00.000Z" });
+  });
+
+  it("caps an explicit synthetic failure retry at expiry and stops its successor before provider work", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-15T17:59:00.000Z"));
+    dbMocks.getSearchScheduleTiming.mockResolvedValue(reactivatedSyntheticTiming());
+    runSearchCheck.mockRejectedValue(new Error("Synthetic check failed"));
+
+    await expect(executeScheduledSearchCheck("search-1", 3)).resolves.toMatchObject({
+      outcome: "failed", nextCheckAt: explicitSyntheticWindow.expiresAt,
+    });
+    expect(dbMocks.failScheduledSearchCheck).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      nextCheckAt: new Date(explicitSyntheticWindow.expiresAt),
+    }));
+    expect(runSearchCheck).toHaveBeenCalledOnce();
+
+    vi.setSystemTime(new Date(explicitSyntheticWindow.expiresAt));
+    await expect(executeScheduledSearchCheck("search-1", 3)).resolves.toMatchObject({
+      outcome: "completed", nextCheckAt: null,
+    });
+    expect(runSearchCheck).toHaveBeenCalledOnce();
+    expect(dbMocks.failScheduledSearchCheck).toHaveBeenCalledOnce();
+    expect(dbMocks.completeScheduledSearchCheck).not.toHaveBeenCalled();
+    expect(dbMocks.completeExpiredSyntheticSearch).toHaveBeenCalledExactlyOnceWith({
+      searchId: "search-1", scheduleVersion: 3, leaseToken: "lease-1",
+      outcome: "synthetic multi-cycle test lifetime ended",
+    });
+  });
+
+  it.each([
+    { name: "public", trafficClass: "PUBLIC", syntheticMultiCycle: true },
+    { name: "synthetic one-check", trafficClass: "TEST", syntheticMultiCycle: false },
+  ])("does not impose explicit synthetic expiry on a $name failed check", async (overrides) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-15T17:59:00.000Z"));
+    dbMocks.getSearchScheduleTiming.mockResolvedValue({ ...reactivatedSyntheticTiming(), ...overrides });
+    runSearchCheck.mockRejectedValue(new Error("Check failed"));
+
+    await expect(executeScheduledSearchCheck("search-1", 3)).resolves.toMatchObject({
+      outcome: "failed", nextCheckAt: "2026-07-15T18:04:00.000Z",
+    });
+    expect(dbMocks.completeExpiredSyntheticSearch).not.toHaveBeenCalled();
+    expect(dbMocks.failScheduledSearchCheck).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      nextCheckAt: new Date("2026-07-15T18:04:00.000Z"),
+    }));
+  });
+
+  it("retains synthetic one-check completion even when an explicit window exists", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-15T13:00:00.000Z"));
+    dbMocks.getSearchScheduleTiming.mockResolvedValue({ ...reactivatedSyntheticTiming(), syntheticMultiCycle: false });
+    runSearchCheck.mockResolvedValue({ outcome: "success", availableMatches: 0, newlyAlertedMatches: 0, supportRetryNeeded: false, courseResults: [] });
+
+    await expect(executeScheduledSearchCheck("search-1", 3)).resolves.toMatchObject({ outcome: "success", nextCheckAt: null });
+    expect(dbMocks.completeExpiredSyntheticSearch).not.toHaveBeenCalled();
+    expect(dbMocks.completeScheduledSearchCheck).toHaveBeenCalledWith(expect.objectContaining({ completeSearch: true }));
+  });
+
   it("returns an earlier durable delivery retry when the check fails", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-15T12:00:00.000Z"));

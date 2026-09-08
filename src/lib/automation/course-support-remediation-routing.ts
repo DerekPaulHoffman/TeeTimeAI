@@ -278,6 +278,13 @@ const DISCOVERY_ACTIONS = new Set<MonitoringStrategyAction>([
   "VERIFY_TECHNICAL_CONSTRAINT",
 ]);
 
+export function isCourseSupportDiscoveryAction(
+  action: unknown,
+): action is MonitoringStrategyAction {
+  return typeof action === "string" &&
+    DISCOVERY_ACTIONS.has(action as MonitoringStrategyAction);
+}
+
 const SOURCE_FREE_DISCOVERY_STAGES = new Set<AutomationPlaybookStage>([
   "OFFICIAL_IDENTITY",
   "TYPED_ADAPTER",
@@ -601,7 +608,7 @@ function selectActionableRoute(input: {
     return implementationRoute(input);
   }
 
-  if (DISCOVERY_ACTIONS.has(input.strategy.action)) {
+  if (isCourseSupportDiscoveryAction(input.strategy.action)) {
     return discoveryRoute(input);
   }
 
@@ -628,7 +635,7 @@ function routeStructuralFailure(input: {
   if (input.strategy.action === "REPAIR_PROVIDER_ADAPTER") {
     return implementationRoute(input);
   }
-  if (DISCOVERY_ACTIONS.has(input.strategy.action)) {
+  if (isCourseSupportDiscoveryAction(input.strategy.action)) {
     return discoveryRoute(input);
   }
   if (

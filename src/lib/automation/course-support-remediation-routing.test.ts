@@ -4,6 +4,7 @@ import type { AutomationPlaybookAssessment } from "./course-monitoring-playbook"
 import {
   getCourseSupportRemediationDirective,
   isAssignedDetachedStageProgression,
+  isCourseSupportDiscoveryAction,
   isStructuralCourseSupportFailure,
   isTransientCourseSupportFailure,
   routeCourseSupportRemediation,
@@ -37,6 +38,21 @@ const runnableCourse = {
 } satisfies CourseSupportRemediationRoutingInput;
 
 describe("course-support remediation routing", () => {
+  it("shares exactly the native discovery action set with recovery readers", () => {
+    for (const action of [
+      "DISCOVER_WITH_HTTP", "DISCOVER_WITH_BROWSER", "VERIFY_TECHNICAL_CONSTRAINT",
+    ]) {
+      expect(isCourseSupportDiscoveryAction(action)).toBe(true);
+    }
+    for (const action of [
+      "RUN_TYPED_ADAPTER", "RETRY_PROVIDER", "REPAIR_PROVIDER_ADAPTER",
+      "FINAL_TECHNICAL_CONSTRAINT", "FINAL_MANUAL_BOOKING", "FINAL_PRIVATE_OR_INVALID",
+      "UNKNOWN", "", null, undefined, {}, 1,
+    ]) {
+      expect(isCourseSupportDiscoveryAction(action)).toBe(false);
+    }
+  });
+
   it.each([
     "DISCOVER_WITH_HTTP",
     "DISCOVER_WITH_BROWSER",

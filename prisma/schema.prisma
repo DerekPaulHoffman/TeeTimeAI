@@ -515,6 +515,7 @@ model TeeSearch {
   additionalEmails           String[]                   @default([])
   trafficClass               WebsiteTrafficClass        @default(UNCLASSIFIED)
   syntheticMultiCycle        Boolean                    @default(false)
+  syntheticTestWindow        Json?
   status                     SearchStatus               @default(ACTIVE)
   checkStatus                SearchCheckStatus          @default(IDLE)
   scheduleVersion            Int                        @default(0)

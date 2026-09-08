@@ -4281,8 +4281,10 @@ export async function getSearchScheduleTiming(
       userTimeZone: true,
       cadenceMinutes: true,
       scheduleVersion: true,
+      alertGeneration: true,
       trafficClass: true,
       syntheticMultiCycle: true,
+      syntheticTestWindow: true,
       preferences: {
         select: {
           course: {
