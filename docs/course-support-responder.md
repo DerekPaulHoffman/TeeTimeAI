@@ -495,6 +495,12 @@ Do not paste task ids, batch references, database ids, or workflow ids into cust
 The bounded discovery recheck is a producer-validation and canonical-evidence
 repair tool, not a replacement scheduler. It performs ordinary signed-out HTTP
 discovery through the shared provider leases and serialized course writer. It
+starts from a safe retained official website for unsupported courses so stale
+booking overrides cannot hide changed official navigation. Routine provider
+verification and runnable-provider source selection are unchanged. Missing or
+unsafe official websites retain the existing safe source fallback. A new
+observation alone does not reset an exhausted cycle or prove monitoring; only
+accepted material evidence changes may reopen work through the existing guards. It
 never submits a login form, enters checkout, or bypasses an access control. An
 account-gated official booking CTA is retained as technical evidence but is not
 treated as a runnable tee-time reader. Courses still requiring rendered-browser

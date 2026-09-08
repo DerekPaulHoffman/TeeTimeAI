@@ -361,7 +361,7 @@ describe("exact private course-reference discovery recheck", () => {
       "--course-ref", firstRef, "--apply"
     ]));
     expect(native.recheck).toHaveBeenCalledExactlyOnceWith("private-exact-id", undefined,
-      expect.any(Date), { forceFresh: true, expectedUnownedIncident: {
+      expect.any(Date), { forceFresh: true, preferOfficialWebsiteForUnsupported: true, expectedUnownedIncident: {
         id: "incident-private-exact-id", cycle: 2, revision: 4, status: "NEEDS_HUMAN"
       } });
     expect(result).toMatchObject({ mode: "apply", requestedCount: 1, readyCount: 1,

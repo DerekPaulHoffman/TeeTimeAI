@@ -15,6 +15,7 @@ import {
   enrichTeesnapDiscovery,
   findCorroboratingAccessBarrier,
   getBestProbeUrl,
+  getBestUnsupportedCoverageProbeUrl,
   hasCurrentRepeatedMonitoringFailure,
   isEvidenceOnlyOfficialBookingAccountLink,
   isLegacyTeeItUpPlayUrl,
@@ -405,6 +406,7 @@ export type SearchMonitoringDiscoveryResult = {
 type SearchMonitoringDiscoveryOptions = {
   includeCourseIds?: readonly string[];
   forceFreshCourseIds?: readonly string[];
+  preferOfficialWebsiteForUnsupportedCourseIds?: readonly string[];
   expectedUnownedIncidentsByCourseId?: ReadonlyMap<
     string,
     BrowserDiscoveryUnownedIncidentExpectation
@@ -765,6 +767,9 @@ export async function prepareSearchMonitoring(
   const publicFetch = fetchImpl ?? addressPinnedPublicFetch;
   const includeCourseIds = new Set(options.includeCourseIds ?? []);
   const forceFreshCourseIds = new Set(options.forceFreshCourseIds ?? []);
+  const officialWebsiteFirstCourseIds = new Set(
+    options.preferOfficialWebsiteForUnsupportedCourseIds ?? []
+  );
   const remediationContext = await resolveRemediationDiscoveryContext(search, now);
   const sourceRefreshCourseIds = new Set([
     ...includeCourseIds,
@@ -813,7 +818,8 @@ export async function prepareSearchMonitoring(
         ? getSafePrivateIdentityRevalidationUrl(course)
         : shouldRediscoverFailedRunnableProvider(course, repeatedFailureEvidence, now)
           ? getSafeRunnableProviderRediscoveryUrl(course)
-          : getSafeMonitoringProbeUrl(course)
+          : getSafeMonitoringProbeUrl(course,
+              forceFreshCourseIds.has(course.id) && officialWebsiteFirstCourseIds.has(course.id))
     };
   });
   const appliedCourseIds: string[] = [];
@@ -1411,8 +1417,16 @@ function getLegacyProphetFallbackEvidenceKind(
   }[followup.outcome];
 }
 
-function getSafeMonitoringProbeUrl(course: MonitoringDiscoveryCandidate["course"]) {
-  const safeUrl = readSafePublicUrl(getBestProbeUrl(course));
+function getSafeMonitoringProbeUrl(
+  course: MonitoringDiscoveryCandidate["course"],
+  preferOfficialWebsiteForUnsupported = false
+) {
+  // Explicit source rediscovery starts from retained official navigation; it
+  // must not redirect routine verification or already runnable providers.
+  const probeUrl = preferOfficialWebsiteForUnsupported && !resolveProviderCapability(course).isRunnable
+    ? getBestUnsupportedCoverageProbeUrl(course)
+    : getBestProbeUrl(course);
+  const safeUrl = readSafePublicUrl(probeUrl);
   return safeUrl ? parseSafePublicUrl(safeUrl).toString() : null;
 }
 
@@ -3537,6 +3551,7 @@ export async function prepareCourseSupportVerificationMonitoring(
   fetchImpl: typeof fetch | undefined = undefined,
   now = new Date(),
   options: { forceFresh?: boolean;
+    preferOfficialWebsiteForUnsupported?: boolean;
     expectedUnownedIncident?: BrowserDiscoveryUnownedIncidentExpectation; } = {}
 ): Promise<SearchMonitoringDiscoveryResult> {
   const course = await prisma.course.findUnique({ where: { id: courseId } });
@@ -3584,6 +3599,9 @@ export async function prepareCourseSupportVerificationMonitoring(
   return prepareSearchMonitoring(detachedSearch, fetchImpl, now, {
     includeCourseIds: [courseId],
     forceFreshCourseIds: forceFresh ? [courseId] : [],
+    ...(forceFresh && options.preferOfficialWebsiteForUnsupported === true
+      ? { preferOfficialWebsiteForUnsupportedCourseIds: [courseId] }
+      : {}),
     ...(options.expectedUnownedIncident
       ? {
           expectedUnownedIncidentsByCourseId: new Map([

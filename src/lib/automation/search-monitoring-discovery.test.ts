@@ -1140,6 +1140,145 @@ describe("search monitoring discovery", () => {
     expect(getOrdinaryCombinedDiscoveries()).toHaveLength(1);
   });
 
+  describe("explicit official-first unsupported discovery", () => {
+    const officialUrl = "https://official-recheck.example/";
+    const bookingOverride = "https://old-booking.example/tee-times";
+    const navigationUrl = "https://official-recheck.example/tee-times";
+    const course = () => ({
+      id: "official-first-course", name: "Official Recheck Golf Course",
+      website: officialUrl, detectedBookingUrl: bookingOverride,
+      detectedPlatform: "UNKNOWN", providerFamilyKey: "old-booking.example",
+      automationEligibility: "UNKNOWN", automationReason: "NONE",
+      bookingMethod: "UNKNOWN", bookingAccessMode: "UNKNOWN", bookingMetadata: null,
+      isPublic: true, monitoringMode: "AUTOMATIC", updatedAt: now
+    });
+    const expectedUnownedIncident = { id: "official-first-incident", cycle: 2,
+      revision: 4, status: "NEEDS_HUMAN" as const };
+    function mockPages() {
+      return vi.fn(async (input: string | URL | Request) => {
+        const url = input.toString();
+        if (url === officialUrl) return new Response(
+          '<html><title>Official Recheck Golf Course</title><h1>Official Recheck Golf Course</h1><a href="/tee-times">Book a tee time</a></html>',
+          { headers: { "content-type": "text/html" } }
+        );
+        if (url === navigationUrl) return new Response(
+          "<html><h1>Official Recheck Golf Course</h1><p>Public tee times</p></html>",
+          { headers: { "content-type": "text/html" } }
+        );
+        if (url === bookingOverride) return new Response("<html>Old booking landing</html>",
+          { headers: { "content-type": "text/html" } });
+        throw new Error("UNEXPECTED_OFFLINE_FETCH");
+      });
+    }
+
+    it("starts a forced explicit recheck at the retained official root and follows its navigation", async () => {
+      const snapshot = course();
+      prismaMocks.course.findUnique.mockResolvedValue(snapshot);
+      const fetchImpl = mockPages();
+      await prepareCourseSupportVerificationMonitoring(snapshot.id, fetchImpl as typeof fetch, now, {
+        forceFresh: true, preferOfficialWebsiteForUnsupported: true, expectedUnownedIncident
+      });
+      expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([officialUrl, navigationUrl]);
+      expect(getOrdinaryCombinedDiscoveries()).toEqual([expect.objectContaining({
+        sourceUrl: officialUrl, bookingUrl: navigationUrl, evidence: expect.objectContaining({
+          observedUrls: expect.arrayContaining([officialUrl, navigationUrl]),
+          finalUrl: officialUrl, bookingCallToAction: true
+        })
+      })]);
+      expect(dbMocks.recordAndApplyBrowserDiscoveryToCourse).toHaveBeenCalledWith(
+        expect.any(Object), expect.objectContaining({ updatedAt: now, detectedBookingUrl: bookingOverride }),
+        expectedUnownedIncident, expect.objectContaining({
+          observedAt: now, providerObservation: expectedProviderObservation(snapshot.id, now)
+        })
+      );
+      expect(snapshot.detectedBookingUrl).toBe(bookingOverride);
+    });
+
+    it.each([
+      { forceFresh: true },
+      { forceFresh: false, preferOfficialWebsiteForUnsupported: true }
+    ])("preserves ordinary booking precedence without both explicit and forced selection", async (options) => {
+      prismaMocks.course.findUnique.mockResolvedValue(course());
+      const fetchImpl = mockPages();
+      await prepareCourseSupportVerificationMonitoring(course().id, fetchImpl as typeof fetch, now, options);
+      expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([bookingOverride]);
+    });
+
+    it("does not redirect an already runnable provider to the official website", async () => {
+      const providerUrl = "https://fixture.book.teeitup.golf/";
+      const metadata = { aliases: ["fixture"], bookingBaseUrl: providerUrl };
+      const snapshot = { ...course(), detectedPlatform: "TEEITUP", providerFamilyKey: "TEEITUP",
+        detectedBookingUrl: providerUrl, bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "ALLOWED", bookingMetadata: metadata };
+      prismaMocks.course.findUnique.mockResolvedValue(snapshot);
+      const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+        expect(input.toString()).not.toBe(officialUrl);
+        return new Response("<html>Public booking landing</html>",
+          { headers: { "content-type": "text/html" } });
+      });
+      await prepareCourseSupportVerificationMonitoring(snapshot.id, fetchImpl as typeof fetch, now, {
+        forceFresh: true, preferOfficialWebsiteForUnsupported: true
+      });
+      expect(fetchImpl.mock.calls[0][0].toString()).toBe(providerUrl);
+      expect(fetchImpl.mock.calls.map(([url]) => url.toString())).not.toContain(officialUrl);
+      expect(snapshot.bookingMetadata).toEqual(metadata);
+    });
+
+    it("keeps private-identity revalidation ahead of the new preference and its booking fallback", async () => {
+      prismaMocks.course.findUnique.mockResolvedValue({ ...course(), website: "http://127.0.0.1/",
+        isPublic: false, automationEligibility: "BLOCKED", automationReason: "OTHER",
+        intelligenceVerifiedAt: new Date("2025-12-01T00:00:00.000Z"),
+        intelligenceReviewAt: new Date("2026-07-01T00:00:00.000Z"), intelligenceConfidence: 0.98 });
+      const fetchImpl = mockPages();
+      const result = await prepareCourseSupportVerificationMonitoring(course().id, fetchImpl as typeof fetch, now, {
+        forceFresh: true, preferOfficialWebsiteForUnsupported: true
+      });
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(result.attemptedCourseIds).toEqual([]);
+      expect(dbMocks.recordAndApplyBrowserDiscoveryToCourse).not.toHaveBeenCalled();
+    });
+
+    it.each([null, "http://127.0.0.1/", "https://official-recheck.example/checkout?token=private"])(
+      "uses the existing safe booking fallback when no safe official root exists", async (website) => {
+        prismaMocks.course.findUnique.mockResolvedValue({ ...course(), website });
+        const fetchImpl = mockPages();
+        await prepareCourseSupportVerificationMonitoring(course().id, fetchImpl as typeof fetch, now, {
+          forceFresh: true, preferOfficialWebsiteForUnsupported: true
+        });
+        expect(fetchImpl.mock.calls.map(([url]) => url.toString())).toEqual([bookingOverride]);
+      }
+    );
+
+    it("keeps a lost owner fence from applying or independently persisting the new source", async () => {
+      prismaMocks.course.findUnique.mockResolvedValue(course());
+      dbMocks.recordAndApplyBrowserDiscoveryToCourse.mockResolvedValueOnce(null);
+      const fetchImpl = mockPages();
+      const result = await prepareCourseSupportVerificationMonitoring(course().id, fetchImpl as typeof fetch, now, {
+        forceFresh: true, preferOfficialWebsiteForUnsupported: true, expectedUnownedIncident
+      });
+      expect(fetchImpl.mock.calls[0][0].toString()).toBe(officialUrl);
+      expect(result).toMatchObject({ appliedCourseIds: [], failedCourseIds: [], deferredCourseIds: [course().id] });
+      expect(dbMocks.recordBrowserDiscovery).not.toHaveBeenCalled();
+      expect(dbMocks.applyBrowserDiscoveryToCourse).not.toHaveBeenCalled();
+      expect(dbMocks.recordAndApplyBrowserDiscoveryToCourse.mock.calls[0][2]).toEqual(expectedUnownedIncident);
+    });
+
+    it("does not add a second source retry when the selected official root fails", async () => {
+      prismaMocks.course.findUnique.mockResolvedValue(course());
+      const fetchImpl = vi.fn<typeof fetch>().mockRejectedValue(new Error("OFFLINE_FETCH_FAILED"));
+      const result = await prepareCourseSupportVerificationMonitoring(course().id, fetchImpl as typeof fetch, now, {
+        forceFresh: true, preferOfficialWebsiteForUnsupported: true, expectedUnownedIncident
+      });
+      expect(fetchImpl).toHaveBeenCalledOnce();
+      expect(fetchImpl.mock.calls[0][0].toString()).toBe(officialUrl);
+      expect(result.failedCourseIds).toEqual([course().id]);
+      expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+        expect.objectContaining({ sourceUrl: officialUrl, status: "FAILED" }), undefined, undefined,
+        expectedUnownedIncident, now, expectedProviderObservation(course().id, now)
+      );
+    });
+  });
+
   it("persists neither evidence nor course changes when an owner appears during a bounded fresh recheck", async () => {
     const course = {
       id: "bounded-race-course",

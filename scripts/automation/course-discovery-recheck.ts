@@ -375,6 +375,7 @@ const defaultDependencies: DiscoveryRecheckDependencies = {
   recheck: (target) =>
     prepareCourseSupportVerificationMonitoring(target.id, undefined, new Date(), {
       forceFresh: true,
+      preferOfficialWebsiteForUnsupported: true,
       expectedUnownedIncident: {
         id: target.supportIncident!.id,
         cycle: target.supportIncident!.cycle,
