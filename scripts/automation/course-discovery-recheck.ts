@@ -4,13 +4,11 @@ import { pathToFileURL } from "node:url";
 
 import type { Prisma } from "@prisma/client";
 
-import { runParkedCourseCampaignCommand } from "@/lib/automation/course-support-campaign";
-import { finishAutomationRun, startAutomationRun } from "@/lib/automation/db-service";
 import {
-  KNOWN_PROVIDER_FAMILIES,
-  SOURCE_CONFLICT_PROVIDER_FAMILY,
-  SOURCE_MISSING_PROVIDER_FAMILY
-} from "@/lib/automation/provider-capabilities";
+  getReportSafeProviderFamilyCategory,
+  runParkedCourseCampaignCommand
+} from "@/lib/automation/course-support-campaign";
+import { finishAutomationRun, startAutomationRun } from "@/lib/automation/db-service";
 import { prepareCourseSupportVerificationMonitoring } from "@/lib/automation/search-monitoring-discovery";
 import { prisma } from "@/lib/prisma";
 
@@ -21,6 +19,7 @@ type RecheckTarget = {
   id: string;
   name: string;
   website: string | null;
+  monitoringStatus?: { reference: string } | null;
   supportIncident: {
     id: string;
     cycle: number;
@@ -31,7 +30,6 @@ type RecheckTarget = {
 };
 
 type RecheckSnapshot = {
-  detectedPlatform: string;
   providerFamilyKey: string;
   bookingMethod: string;
   automationEligibility: string;
@@ -45,7 +43,7 @@ type RecheckSnapshot = {
 };
 
 type DiscoveryRecheckDependencies = {
-  loadTargets: (courseNames: readonly string[]) => Promise<RecheckTarget[]>;
+  loadTargets: (courseNames: readonly string[], courseRefs?: readonly string[]) => Promise<RecheckTarget[]>;
   recheck: (target: RecheckTarget) => Promise<{
     attemptedCourseIds: string[];
     appliedCourseIds: string[];
@@ -65,11 +63,13 @@ export type CourseDiscoveryRecheckOptions =
   | {
       apply: boolean;
       courseNames: string[];
+      courseRefs?: string[];
       parkedCohort?: false;
     }
   | {
       apply: boolean;
       courseNames: [];
+      courseRefs?: string[];
       parkedCohort: true;
       expectCount: number;
       expectDigest?: string | null;
@@ -91,8 +91,7 @@ export type CourseDiscoveryRecheckResult = {
       | "PROVIDER_BUSY"
       | "FETCH_FAILED"
       | "NO_ACTION";
-    detectedPlatform?: string;
-    providerFamilyKey?: string;
+    providerFamilyCategory?: ReturnType<typeof getReportSafeProviderFamilyCategory>;
     bookingMethod?: string;
     automationEligibility?: string;
     automationReason?: string;
@@ -108,6 +107,10 @@ export async function runCourseDiscoveryRecheck(
 ): Promise<
   CourseDiscoveryRecheckResult | Awaited<ReturnType<typeof runParkedCourseCampaignCommand>>
 > {
+  const hasReferences = options.courseRefs !== undefined;
+  if (hasReferences && (options.parkedCohort || options.courseNames.length > 0)) {
+    throw new Error("--course-ref cannot be combined with --course-name or --parked-cohort.");
+  }
   if (options.parkedCohort) {
     const runner = dependencies.runParkedCohort ?? runParkedCourseCampaignCommand;
     return runner({
@@ -116,9 +119,18 @@ export async function runCourseDiscoveryRecheck(
       expectedDigest: options.expectDigest
     });
   }
-  const courseNames = normalizeCourseNames(options.courseNames);
-  const loadedTargets = await dependencies.loadTargets(courseNames);
-  const targets = orderTargets(courseNames, loadedTargets);
+  const selectors = hasReferences
+    ? normalizeCourseReferences(options.courseRefs!)
+    : normalizeCourseNames(options.courseNames);
+  let loadedTargets: RecheckTarget[];
+  try {
+    loadedTargets = hasReferences
+      ? await dependencies.loadTargets([], selectors)
+      : await dependencies.loadTargets(selectors);
+  } catch {
+    throw new Error("Unable to load course discovery recheck targets.");
+  }
+  const targets = orderTargets(selectors, loadedTargets, hasReferences);
   const readiness = targets.map(getTargetReadiness);
   const readyCount = readiness.filter((item) => item === "READY").length;
 
@@ -189,6 +201,7 @@ export async function runCourseDiscoveryRecheck(
 
 export function parseCourseDiscoveryRecheckArgs(argv: readonly string[]) {
   const courseNames: string[] = [];
+  const courseRefs: string[] = [];
   let parkedCohort = false;
   let expectCount: number | null = null;
   let expectDigest: string | null = null;
@@ -219,15 +232,21 @@ export function parseCourseDiscoveryRecheckArgs(argv: readonly string[]) {
       index += 1;
       continue;
     }
-    if (argument !== "--course-name") {
-      throw new Error(`Unknown argument: ${argument}`);
+    if (argument !== "--course-name" && argument !== "--course-ref") {
+      throw new Error("Unknown course discovery recheck argument.");
     }
     const value = argv[index + 1]?.trim();
     if (!value || value.startsWith("--")) {
-      throw new Error("--course-name requires a value.");
+      throw new Error(argument === "--course-ref"
+        ? "--course-ref requires a value."
+        : "--course-name requires a value.");
     }
-    courseNames.push(value);
+    if (argument === "--course-ref") courseRefs.push(value);
+    else courseNames.push(value);
     index += 1;
+  }
+  if (courseRefs.length > 0 && (courseNames.length > 0 || parkedCohort)) {
+    throw new Error("--course-ref cannot be combined with --course-name or --parked-cohort.");
   }
   if (parkedCohort) {
     if (courseNames.length > 0) {
@@ -247,7 +266,10 @@ export function parseCourseDiscoveryRecheckArgs(argv: readonly string[]) {
   if (expectCount !== null || expectDigest !== null) {
     throw new Error("--expect-count and --expect-digest require --parked-cohort.");
   }
-  return { apply: argv.includes("--apply"), courseNames };
+  return {
+    apply: argv.includes("--apply"), courseNames,
+    ...(courseRefs.length > 0 ? { courseRefs: normalizeCourseReferences(courseRefs) } : {})
+  };
 }
 
 function normalizeCourseNames(courseNames: readonly string[]) {
@@ -264,24 +286,46 @@ function normalizeCourseNames(courseNames: readonly string[]) {
   return normalized;
 }
 
-function orderTargets(courseNames: readonly string[], loadedTargets: readonly RecheckTarget[]) {
-  const targetsByName = new Map<string, RecheckTarget[]>();
-  for (const target of loadedTargets) {
-    const matches = targetsByName.get(target.name) ?? [];
-    matches.push(target);
-    targetsByName.set(target.name, matches);
+function normalizeCourseReferences(courseRefs: readonly string[]) {
+  const normalized = courseRefs.map((reference) => reference.trim());
+  if (normalized.length === 0 || normalized.some((reference) => !/^cm_[a-f0-9]{24}$/u.test(reference))) {
+    throw new Error("Supply valid course references from monitoring status.");
   }
-  return courseNames.map((courseName) => {
-    const matches = targetsByName.get(courseName) ?? [];
+  if (normalized.length > MAX_COURSES) {
+    throw new Error(`At most ${MAX_COURSES} courses may be rechecked at once.`);
+  }
+  if (new Set(normalized).size !== normalized.length) {
+    throw new Error("Course references must be unique.");
+  }
+  return normalized;
+}
+
+function orderTargets(selectors: readonly string[], loadedTargets: readonly RecheckTarget[], byReference = false) {
+  const targetsBySelector = new Map<string, RecheckTarget[]>();
+  for (const target of loadedTargets) {
+    const selector = byReference ? target.monitoringStatus?.reference : target.name;
+    if (!selector) continue;
+    const matches = targetsBySelector.get(selector) ?? [];
+    matches.push(target);
+    targetsBySelector.set(selector, matches);
+  }
+  const targets = selectors.map((selector) => {
+    const matches = targetsBySelector.get(selector) ?? [];
     if (matches.length !== 1) {
       throw new Error(
         matches.length === 0
           ? "A requested course was not found."
-          : "A requested course name was ambiguous."
+          : byReference
+            ? "A requested course reference was ambiguous."
+            : "A requested course name was ambiguous."
       );
     }
     return matches[0];
   });
+  if (byReference && new Set(targets.map((target) => target.id)).size !== targets.length) {
+    throw new Error("A requested course reference was ambiguous.");
+  }
+  return targets;
 }
 
 function getTargetReadiness(target: RecheckTarget) {
@@ -296,8 +340,7 @@ function getTargetReadiness(target: RecheckTarget) {
 function sanitizeSnapshot(snapshot: RecheckSnapshot | null) {
   if (!snapshot) return {};
   return {
-    detectedPlatform: snapshot.detectedPlatform,
-    providerFamilyKey: sanitizeProviderFamilyKey(snapshot.providerFamilyKey),
+    providerFamilyCategory: getReportSafeProviderFamilyCategory(snapshot.providerFamilyKey),
     bookingMethod: snapshot.bookingMethod,
     automationEligibility: snapshot.automationEligibility,
     automationReason: snapshot.automationReason,
@@ -307,23 +350,17 @@ function sanitizeSnapshot(snapshot: RecheckSnapshot | null) {
   };
 }
 
-function sanitizeProviderFamilyKey(value: string) {
-  const normalized = value.trim().toUpperCase();
-  return KNOWN_PROVIDER_FAMILIES.includes(normalized as (typeof KNOWN_PROVIDER_FAMILIES)[number]) ||
-    normalized === SOURCE_MISSING_PROVIDER_FAMILY ||
-    normalized === SOURCE_CONFLICT_PROVIDER_FAMILY
-    ? normalized
-    : "CUSTOM";
-}
-
 const defaultDependencies: DiscoveryRecheckDependencies = {
-  loadTargets: (courseNames) =>
+  loadTargets: (courseNames, courseRefs) =>
     prisma.course.findMany({
-      where: { name: { in: [...courseNames] } },
+      where: courseRefs
+        ? { monitoringStatus: { is: { reference: { in: [...courseRefs] } } } }
+        : { name: { in: [...courseNames] } },
       select: {
         id: true,
         name: true,
         website: true,
+        monitoringStatus: { select: { reference: true } },
         supportIncident: {
           select: {
             id: true,
@@ -349,7 +386,6 @@ const defaultDependencies: DiscoveryRecheckDependencies = {
     prisma.course.findUnique({
       where: { id: courseId },
       select: {
-        detectedPlatform: true,
         providerFamilyKey: true,
         bookingMethod: true,
         automationEligibility: true,
@@ -380,8 +416,8 @@ const isMain = process.argv[1] ? import.meta.url === pathToFileURL(process.argv[
 
 if (isMain) {
   main()
-    .catch((error) => {
-      console.error(error instanceof Error ? error.message : error);
+    .catch(() => {
+      console.error("Course discovery recheck failed. Review bounded command arguments and durable aggregate outcomes.");
       process.exitCode = 1;
     })
     .finally(() => prisma.$disconnect());

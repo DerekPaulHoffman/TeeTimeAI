@@ -455,11 +455,15 @@ npm run automation:course-support -- backfill
 npm run automation:course-support -- backfill --apply
 
 # Re-run fresh signed-out official-site discovery for an explicit bounded cohort.
-# Supply each public course name separately. The command accepts at most ten,
+# Supply exact public names or private monitoring references, never both.
+# References distinguish separate courses that share a public name. The command accepts at most ten,
 # defaults to a read-only eligibility check, skips active owners/resolved rows,
-# and returns only ordinal plus normalized classification fields.
+# and returns only ordinal plus normalized classification fields and provider-family categories.
+# Names, references, provider keys/hosts and platform identities are never persisted in its report.
 npm run automation:course-discovery-recheck -- --course-name "<exact public course name>"
 npm run automation:course-discovery-recheck -- --course-name "<exact public course name>" --course-name "<another exact public course name>" --apply
+npm run automation:course-discovery-recheck -- --course-ref <private-monitoring-reference>
+npm run automation:course-discovery-recheck -- --course-ref <private-monitoring-reference> --apply
 
 # Capture the immutable parked baseline through a dry-run/count/digest fence.
 # Apply only the exact dry-run digest; later responder inspections admit at most
