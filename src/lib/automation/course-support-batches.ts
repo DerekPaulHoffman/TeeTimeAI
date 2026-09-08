@@ -13033,7 +13033,18 @@ async function closeoutCourseSupportBatchAttempt(
             revision: { increment: 1 },
           },
         });
-        if (monitoringUpdated) {
+        // State preservation and proof publication are separate decisions. A
+        // search may already have recorded this exact successful observation;
+        // keep its authoritative row unchanged while publishing the batch's
+        // independently verified release receipt after the same-row CAS above.
+        const reconfirmedCurrentSuccess =
+          !monitoringUpdated &&
+          courseMonitoringAvailable &&
+          exactReleaseRuntimeProof &&
+          entry.course.monitoringStatus?.state === "HEALTHY" &&
+          entry.course.monitoringStatus.lastSuccessfulAt?.getTime() ===
+            restoredProviderObservedAt.getTime();
+        if (monitoringUpdated || reconfirmedCurrentSuccess) {
           const campaignProvenance = await readCourseSupportCampaignProvenance(
             tx,
             batch.summary,
@@ -13049,10 +13060,12 @@ async function closeoutCourseSupportBatchAttempt(
               incidentId: entry.incidentId,
               eventType: "RECOVERED",
               source: "COURSE_SUPPORT_RESPONDER",
-              fromState: "AUTO_INVESTIGATING",
+              fromState: reconfirmedCurrentSuccess ? "HEALTHY" : "AUTO_INVESTIGATING",
               toState: "HEALTHY",
               outcome: restoredOutcome,
-              message,
+              message: reconfirmedCurrentSuccess
+                ? "Exact deployed provider proof confirmed the existing successful monitoring observation."
+                : message,
               // A fresh customer probe can authoritatively reconcile current
               // monitoring health even when it was produced by another live
               // runtime. Preserve that actual runtime without attributing it
@@ -13065,6 +13078,9 @@ async function closeoutCourseSupportBatchAttempt(
               occurredAt: restoredProviderObservedAt,
               audit: {
                 freshRuntimeProof: exactReleaseRuntimeProof,
+                ...(reconfirmedCurrentSuccess
+                  ? { reconfirmedExistingSuccess: true }
+                  : {}),
                 currentStateReconciliation:
                   restoredProof.authoritativeCurrentSuccess === true &&
                   !exactReleaseRuntimeProof,

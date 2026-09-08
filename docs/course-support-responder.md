@@ -217,6 +217,8 @@ If `origin/main` advances concurrently before the first responder release is fen
 
 An older success, a local check, a Workflow id by itself, or a new probe from a different runtime cannot resolve the incident. A persisted factual classification uses the classification-only path and does not pretend an adapter ran. A technical classification also requires the current-cycle local-reader and independent-confirmation proof described above.
 
+When a search has already recorded the same successful provider observation as `HEALTHY`, an exact-release `RESTORED` closeout still appends its verified completion receipt after asserting that unchanged authoritative row. It preserves the original observation time, state timestamps, revision and earlier events, and identifies the receipt as confirmation rather than another state transition. A newer success, missing persistence, unverified runtime or ownership-only retry cannot create this confirmation receipt. This completes evidence accounting; it does not represent another provider execution or another resolved course.
+
 An automatic factual final may supply fresh terminal acceptance only when the
 accepted current-cycle factual ledger source has the same original observation
 time, disposition, and full commit SHA as the current deployed runtime, and the
