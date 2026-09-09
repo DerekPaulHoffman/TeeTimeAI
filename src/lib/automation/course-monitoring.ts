@@ -117,6 +117,8 @@ import {
   assessParkedCourseCampaignRequestlessStaleOwnershipRecovery,
   assessParkedCourseCampaignSameCycleRecoveryHistory,
   assessParkedCourseStartedLocalReaderContinuation,
+  assessParkedCourseIncompleteStageContinuation,
+  hasConsumedIncompletePlaybookContinuation,
   assessParkedCourseStartedLocalReaderReadiness,
   isParkedCourseStartedLocalReaderContinuationReceipt,
   readParkedCourseStartedLocalReaderReadiness,
@@ -9748,6 +9750,7 @@ export type ParkedCourseResponderCampaignReopenInput = {
     | "PARKED_COHORT_REQUESTLESS_STALE_OWNERSHIP_RECOVERY"
     | "SAME_IDENTITY_MATERIAL_CHANGE_INCOMPLETE_PLAYBOOK_RECOVERY"
     | "STARTED_LOCAL_READER_CONTINUATION"
+    | "UNFINISHED_STAGE_CONTINUATION"
     | "CURRENT_CYCLE_ORCHESTRATION_RECOVERY";
   capturedCycle?: number;
   capturedKind?: string;
@@ -9926,7 +9929,8 @@ export async function reopenParkedCourseForResponderCampaign(
       input.admissionMode ===
         "SAME_IDENTITY_MATERIAL_CHANGE_INCOMPLETE_PLAYBOOK_RECOVERY" ||
       input.admissionMode === "POST_MARKER_INCOMPLETE_PLAYBOOK_RECOVERY" ||
-      input.admissionMode === "STARTED_LOCAL_READER_CONTINUATION"
+      input.admissionMode === "STARTED_LOCAL_READER_CONTINUATION" ||
+      input.admissionMode === "UNFINISHED_STAGE_CONTINUATION"
       ? { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
       : undefined,
   );
@@ -9939,6 +9943,7 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
   const now = input.now ?? new Date();
   const startedLocalReaderContinuationRequested =
     input.admissionMode === "STARTED_LOCAL_READER_CONTINUATION";
+  const stageContinuationRequested = input.admissionMode === "UNFINISHED_STAGE_CONTINUATION";
   const sameIdentityMaterialChangeIncompleteRecoveryRequested =
     input.admissionMode ===
     "SAME_IDENTITY_MATERIAL_CHANGE_INCOMPLETE_PLAYBOOK_RECOVERY";
@@ -9949,6 +9954,7 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
   const postMarkerIncompletePlaybookRecoveryRequested =
     input.admissionMode === "POST_MARKER_INCOMPLETE_PLAYBOOK_RECOVERY";
   const exactEvidenceRecoveryRequested =
+    stageContinuationRequested ||
     input.admissionMode === "DESCENDANT_INCOMPLETE_PLAYBOOK_RECOVERY" ||
     exactRuntimeSourceCycleRecoveryRequested ||
     failureRefinementIncompletePlaybookRecoveryRequested ||
@@ -10174,7 +10180,7 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
                   status: true,
                   revision: true,
                   ownerAutomationRunId: true,
-                  ...(startedLocalReaderContinuationRequested
+                  ...(startedLocalReaderContinuationRequested || stageContinuationRequested
                     ? { _count: { select: { incidents: true } } }
                     : {}),
                   baseSha: true,
@@ -10247,6 +10253,7 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
     const currentCycleOrchestrationRecoveryRequested =
       input.admissionMode === "CURRENT_CYCLE_ORCHESTRATION_RECOVERY";
     const sameCycleRecoveryRequested =
+      stageContinuationRequested ||
       incompletePlaybookRecoveryRequested ||
       postMarkerIncompletePlaybookRecoveryRequested ||
       descendantIncompletePlaybookRecoveryRequested ||
@@ -10391,7 +10398,9 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
             },
           }
         : null;
-    const sameCycleRecoveryAction = startedLocalReaderContinuationRequested
+    const sameCycleRecoveryAction = stageContinuationRequested
+      ? "parked_cohort_unfinished_stage_continuation"
+      : startedLocalReaderContinuationRequested
       ? "parked_cohort_started_local_reader_continuation"
       : incompletePlaybookRecoveryRequested
         ? "parked_cohort_incomplete_playbook_recovery"
@@ -10408,7 +10417,15 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
                 : currentCycleOrchestrationRecoveryRequested
                   ? "parked_cohort_current_cycle_orchestration_recovery"
                   : null;
-    const sameCycleRecoveryAlreadyRecorded = Boolean(
+    const sameCycleRecoveryAlreadyRecorded = stageContinuationRequested && currentPlaybookAssessment
+      ? hasConsumedIncompletePlaybookContinuation({
+          events: incident?.monitoringEvents ?? [],
+          campaignRunId: input.campaignRunId,
+          cycle: input.expectedCycle,
+          stage: currentPlaybookAssessment.nextStage ?? "",
+          attemptCount: currentPlaybookAssessment.stages.find(stage => stage.stage === currentPlaybookAssessment.nextStage)?.attemptCount ?? -1,
+        })
+      : Boolean(
       sameCycleRecoveryAction &&
       incident?.monitoringEvents.some((event) => {
         const audit = asMonitoringJsonRecord(event.audit);
@@ -10422,6 +10439,7 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
       }),
     );
     const descendantCampaignRun =
+      stageContinuationRequested ||
       descendantIncompletePlaybookRecoveryRequested ||
       failureRefinementIncompletePlaybookRecoveryRequested ||
       exactRuntimeSourceCycleRecoveryRequested ||
@@ -10657,9 +10675,27 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
             readerRenewalJobs: await readParkedCourseStartedLocalReaderRenewalJobs(transaction, currentCampaignMember),
           })
         : null;
+    const incompletePlaybookRecovery = stageContinuationRequested && currentCampaignMember &&
+      descendantCampaignRun?.promptVersion === PARKED_COURSE_CAMPAIGN_PROMPT_VERSION &&
+      descendantCampaignRun.status === "RUNNING" && descendantCampaignRun.completedAt === null &&
+      descendantCampaignAudit?.membershipDigest === input.campaignMembershipDigest &&
+      descendantCampaignAudit.capturedAt === input.campaignCapturedAt &&
+      descendantCapturedMember && campaignCapturedAt &&
+      descendantCapturedMember.revision === input.capturedRevision &&
+      descendantCapturedMember.monitoringRevision === input.capturedMonitoringRevision &&
+      descendantCapturedMember.cycle === input.capturedCycle &&
+      descendantCapturedMember.kind === input.capturedKind &&
+      descendantCapturedMember.providerFamilyKey === input.capturedProviderFamilyKey
+      ? assessParkedCourseIncompleteStageContinuation({
+          captured: descendantCapturedMember, current: currentCampaignMember,
+          capturedAt: campaignCapturedAt, campaignRunId: input.campaignRunId,
+          campaignMembershipDigest: input.campaignMembershipDigest,
+        }) : null;
     const sameCycleRecoveryHistory =
       sameCycleRecoveryRequested && incident
-        ? startedLocalReaderContinuationRequested
+        ? stageContinuationRequested
+          ? incompletePlaybookRecovery
+          : startedLocalReaderContinuationRequested
           ? (startedLocalReaderContinuation?.history ?? null)
           : requestlessStaleOwnershipRecoveryRequested
           ? requestlessStaleOwnershipRecovery
@@ -10791,11 +10827,15 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
               input.expectedLatestDiscoveryId === undefined ||
               automationStalledEndpoint.id !==
                 startedLocalReaderContinuation.parkedEventId)) ||
+          (stageContinuationRequested &&
+            (!incompletePlaybookRecovery ||
+              input.expectedLatestProbeId === undefined ||
+              input.expectedLatestDiscoveryId === undefined ||
+              (incident.course.probes[0]?.id ?? null) !== input.expectedLatestProbeId ||
+              (incident.course.automationDiscoveries[0]?.id ?? null) !== input.expectedLatestDiscoveryId)) ||
           (incompletePlaybookRecoveryRequested &&
             (input.expectedCycle !== (input.capturedCycle ?? 0) + 1 ||
-              !originalAdmission ||
-              automationStalledEndpoint.occurredAt <
-                originalAdmission.occurredAt ||
+              !originalAdmission || automationStalledEndpoint.occurredAt < originalAdmission.occurredAt ||
               currentPlaybookAssessment.completedStages.length === 0)) ||
           (failureRefinementIncompletePlaybookRecoveryRequested &&
             (!descendantCampaignRun ||
@@ -11636,6 +11676,8 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
       // campaign label. A new release must never mint another continuation.
       const idempotencyKey = startedLocalReaderContinuationRequested
         ? `course-support-started-local-reader-continuation:${incident.id}:${incident.cycle}:LOCAL_READER`
+        : stageContinuationRequested
+          ? `course-support-incomplete-stage:${input.campaignRunId}:${incident.id}:${incident.cycle}:${currentPlaybookAssessment!.nextStage}:${currentPlaybookAssessment!.stages.find(stage => stage.stage === currentPlaybookAssessment!.nextStage)!.attemptCount}`
         : `course-support-${action.replaceAll("_", "-")}:${input.campaignRunId}:${incident.id}:${incident.cycle}`;
       const incidentUpdated =
         await transaction.courseSupportIncident.updateMany({
@@ -11671,7 +11713,9 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
             humanReviewReason: null,
             nextReminderAt: null,
             nextAttemptAt: now,
-            nextAction: startedLocalReaderContinuationRequested
+            nextAction: stageContinuationRequested
+              ? "Continue the unfinished stage once without resetting the current cycle or retained attempts."
+              : startedLocalReaderContinuationRequested
               ? "Continue the unfinished signed local-reader stage once, preserving the current cycle and all earlier evidence."
               : incompletePlaybookRecoveryRequested
               ? "Continue the current campaign cycle at the next incomplete ordered-playbook stage."
@@ -11747,6 +11791,9 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
           audit: {
             action,
             admissionMode: input.admissionMode,
+            ...(stageContinuationRequested ? {
+              playbookStageAttemptCount: currentPlaybookAssessment!.stages.find(stage => stage.stage === currentPlaybookAssessment!.nextStage)!.attemptCount,
+            } : {}),
             campaignRunId: input.campaignRunId,
             campaignMembershipDigest: input.campaignMembershipDigest,
             capturedCycle: input.capturedCycle,

@@ -336,6 +336,7 @@ export function buildBrowserFrameCandidates(
         !["http:", "https:"].includes(url.protocol) ||
         url.username ||
         url.password ||
+        isKnownVideoEmbed(url) ||
         seen.has(url.toString())
       ) {
         return [];
@@ -354,6 +355,15 @@ export function buildBrowserFrameCandidates(
       return [];
     }
   });
+}
+
+function isKnownVideoEmbed(url: URL) {
+  const host = url.hostname.replace(/^www\./u, "");
+  return (
+    ((host === "youtube.com" || host === "youtube-nocookie.com") &&
+      url.pathname.startsWith("/embed/")) ||
+    (host === "player.vimeo.com" && url.pathname.startsWith("/video/"))
+  );
 }
 
 export function buildBrowserButtonCandidates(

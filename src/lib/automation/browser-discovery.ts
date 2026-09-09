@@ -34,6 +34,7 @@ import {
   normalizeCourseIdentityName
 } from "@/lib/places/course-identity";
 import { selectMonitoringStrategy } from "@/lib/automation/monitoring-strategy";
+import { enrichTeeItUpFromPublicDirectory, type TeeItUpPublicSourceContext } from "./teeitup-public-directory";
 
 export const OFFICIAL_SITE_SOFT_NOT_FOUND_POLICY_NOTES =
   "The saved official course site currently serves a not-found page and exposes no trustworthy public booking surface. Tee Time Spot will retry discovery without following unrelated page links.";
@@ -414,7 +415,8 @@ export async function enrichBrowserDiscoveryWithProviderLease(
   discovery: BrowserDiscovery,
   courseName: string,
   runWithLease: BrowserDiscoveryProviderLeaseRunner,
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: typeof fetch = fetch,
+  publicSourceContext?: TeeItUpPublicSourceContext,
 ): Promise<BrowserDiscoveryEnrichmentResult> {
   const leasedFetch = (async (
     input: Parameters<typeof fetch>[0],
@@ -434,8 +436,11 @@ export async function enrichBrowserDiscoveryWithProviderLease(
   }) as typeof fetch;
 
   try {
+    const directoryDiscovery = publicSourceContext
+      ? await enrichTeeItUpFromPublicDirectory(discovery, publicSourceContext, leasedFetch)
+      : discovery;
     const teeItUpDiscovery = await enrichTeeItUpDiscovery(
-      discovery,
+      directoryDiscovery,
       courseName,
       leasedFetch
     );

@@ -797,7 +797,29 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
             (enrichmentProviderFamilyKey, worker) =>
               runWithProviderRequestLease(enrichmentProviderFamilyKey, () =>
                 runPersistableBrowserOperation(worker)
-              )
+              ),
+            fetch,
+            evidence.officialPage && target.course.website && target.course.address &&
+              target.course.city && target.course.stateCode && target.course.timeZone
+              ? {
+                  course: {
+                    id: target.course.id,
+                    name: target.course.name,
+                    address: target.course.address,
+                    city: target.course.city,
+                    stateCode: target.course.stateCode,
+                    timeZone: target.course.timeZone,
+                    website: target.course.website,
+                  },
+                  observation: {
+                    courseId: target.course.id,
+                    pageUrl: evidence.officialPage.url,
+                    observedAt: investigationObservedAt,
+                    visibleText: evidence.officialPage.visibleText ?? "",
+                    links: evidence.officialPage.linkCandidates,
+                  },
+                }
+              : undefined
           );
           if (!enrichment.acquired) {
             if (options.dryRun) {

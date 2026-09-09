@@ -220,6 +220,7 @@ export type BrowserProbeTarget = {
     address: string | null;
     city: string | null;
     stateCode: string | null;
+    timeZone?: string | null;
     googlePlaceIdPresent: boolean;
     website: string | null;
     detectedBookingUrl: string | null;
@@ -476,6 +477,7 @@ export async function listBrowserProbeTargets(
             address: true,
             city: true,
             stateCode: true,
+            timeZone: true,
             website: true,
             detectedBookingUrl: true,
             detectedPlatform: true,
@@ -563,6 +565,7 @@ export async function listBrowserProbeTargets(
           address: course.address,
           city: course.city,
           stateCode: course.stateCode,
+          timeZone: course.timeZone,
           googlePlaceIdPresent: Boolean(course.googlePlaceId),
           website: course.website,
           detectedBookingUrl: course.detectedBookingUrl,
@@ -615,6 +618,7 @@ export async function listBrowserProbeTargets(
         address: course.address,
         city: course.city,
         stateCode: course.stateCode,
+        timeZone: course.timeZone,
         googlePlaceIdPresent: Boolean(course.googlePlaceId),
         website: course.website,
         detectedBookingUrl: course.detectedBookingUrl,
@@ -816,6 +820,7 @@ async function listExactIncidentBrowserProbeTarget(input: {
         address: course.address,
         city: course.city,
         stateCode: course.stateCode,
+        timeZone: course.timeZone,
         googlePlaceIdPresent: Boolean(course.googlePlaceId),
         website: course.website,
         detectedBookingUrl: course.detectedBookingUrl,

@@ -70,6 +70,16 @@ describe("browser probe evidence pipeline", () => {
     ).toBeNull();
   });
 
+  it("keeps video embeds out of the bounded booking investigation", () => {
+    expect(buildBrowserFrameCandidatesFromHtml(
+      `<iframe src="https://www.youtube.com/embed/k4vgCFHNTkw?rel=0"></iframe>
+       <iframe src="https://www.youtube-nocookie.com/embed/course-video"></iframe>
+       <iframe src="https://player.vimeo.com/video/123"></iframe>
+       <iframe src="https://unfamiliar-provider.example/public-tee-times/"></iframe>`,
+      "https://course.example/",
+    )).toEqual([{ url: "https://unfamiliar-provider.example/public-tee-times/", label: "Embedded tee-time booking" }]);
+  });
+
   it("collects a public booking URL from a lazy iframe data source", () => {
     expect(
       buildBrowserFrameCandidates([
