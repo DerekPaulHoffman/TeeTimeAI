@@ -399,7 +399,7 @@ describe("local Chrome reader contract", () => {
     );
     const contentMatches = manifest.content_scripts.flatMap((entry) => entry.matches);
 
-    expect(manifest.version).toBe("1.11.1");
+    expect(manifest.version).toBe("1.11.2");
     expect(manifest.host_permissions).toContain("https://*.cps.golf/*");
     expect(contentMatches).toContain("https://*.cps.golf/onlineresweb/search-teetime*");
     expect(manifest.host_permissions).toContain("https://www.chronogolf.com/*");
@@ -1224,6 +1224,16 @@ describe("local Chrome reader contract", () => {
       status: "PAGE_MISMATCH",
       slots: []
     });
+  });
+
+  it("recognizes the CPS visitor security check without treating ordinary security copy as a challenge", () => {
+    const reader = loadReader();
+    const job = dynamicCpsJob();
+    document.title = "Club Prophet";
+    document.body.innerHTML = "<main>Club Prophet Security check · Verifying One quick check before you continue. To keep automated traffic away from tee sheets, point of sale, and member data, we sometimes confirm a visitor is human. Security by Cloudflare</main>";
+    expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({ status: "ACCESS_CHALLENGE", slots: [] });
+    document.body.innerHTML = `<main>Security information: we sometimes confirm a visitor is human.</main> <button class="btn-teesheet"><time datetime="2026-07-25T09:10:00">9:10 AM</time> <div>18 HOLES | 1 - 4 GOLFERS</div></button>`;
+    expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({ status: "AVAILABLE" });
   });
 
   it("parses rendered TenFore cards without reading challenge-protected requests", () => {

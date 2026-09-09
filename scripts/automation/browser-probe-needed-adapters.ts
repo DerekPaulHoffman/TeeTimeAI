@@ -2761,6 +2761,10 @@ async function collectPageEvidence(
         .slice(0, 25),
       pageText.slice(0, 100_000),
     ];
+    const visitorVerificationTemplateDetected =
+      /^[a-z0-9-]+\.cps\.golf$/i.test(location.hostname) &&
+      /\bsecurity check\s*[·:]?\s*verifying\b/i.test(pageText) &&
+      /\bconfirm a visitor is human\b/i.test(pageText);
     const accessControlDetected = Boolean(
       document.querySelector(
         [
@@ -2774,15 +2778,16 @@ async function collectPageEvidence(
       /^(?:just a moment|attention required|security check)$/i.test(
         pageTitle,
       ) ||
-      /\b403200\s*client-dependent\s+cps\s+challenge\b/i.test(pageText),
+      /\b403200\s*client-dependent\s+cps\s+challenge\b/i.test(pageText) ||
+      visitorVerificationTemplateDetected,
     );
-    const managedProtectionTemplateDetected =
+    const managedProtectionTemplateDetected = visitorVerificationTemplateDetected || (
       /^access denied$/i.test(pageTitle) &&
       /\byou (?:do not|don't) have permission to access\b/i.test(pageText) &&
       /\bReference\s*#[A-Za-z0-9._-]+/i.test(pageText) &&
       /https?:\/\/errors\.edgesuite\.net\/[A-Za-z0-9._~!$&'()*+,;=:@%\/?-]+/i.test(
         pageText,
-      );
+      ));
     const frameCandidateInputs =
       /\b(?:book|reserve|reservation|tee.?times?)\b/i.test(pageText)
         ? Array.from(
@@ -2861,6 +2866,7 @@ async function collectPageEvidence(
       accessControlDetected:
         accessControlDetected || managedProtectionTemplateDetected,
       managedProtectionTemplateDetected,
+      visitorVerificationTemplateDetected,
       identityCandidates,
       localityCandidates,
       frameCandidateInputs,
@@ -2899,7 +2905,8 @@ async function collectPageEvidence(
     {
       ...pageEvidence,
       managedProtectionDocumentDetected:
-        options.latestMainFrameDocumentStatus === 200 &&
+        (options.latestMainFrameDocumentStatus === 200 ||
+          (options.latestMainFrameDocumentStatus === 403 && pageEvidence.visitorVerificationTemplateDetected)) &&
         haveSameLatestMainFrameDocumentUrl(
           options.latestMainFrameDocumentUrl,
           page.url(),

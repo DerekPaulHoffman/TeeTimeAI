@@ -516,6 +516,9 @@
           "The public page did not return to the allowlisted search route.",
         );
       }
+      if (reader.isAccessChallenge?.(document)) {
+        throw new Error("The public page displayed an access challenge.");
+      }
       await chooseCourse(pending.job);
       if (reader.SKIP_PLAYER_SELECTION !== true) {
         await choosePlayers(pending.job.players);
@@ -539,7 +542,7 @@
           ? error.message
           : String(error || "Unknown error");
       const body = document.body?.innerText || "";
-      const status = CHALLENGE_TEXT.test(body)
+      const status = CHALLENGE_TEXT.test(body) || reader.isAccessChallenge?.(document)
         ? "ACCESS_CHALLENGE"
         : location.pathname.includes("/auth/")
           ? "PAGE_MISMATCH"

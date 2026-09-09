@@ -19,6 +19,29 @@ function managedProtectionHtml(reference: string, extra = "") {
 }
 
 describe("rendered browser navigation safety", () => {
+  it.each([200, 403])("records a CPS visitor security check from HTTP %i before following page controls", async (status) => {
+    const browser = await chromium.launch();
+    const context = await browser.newContext({ serviceWorkers: "block" });
+    try {
+      const page = await context.newPage();
+      const url = "https://visitor-check.cps.golf/";
+      const officialUrl = "https://visitor-check-course.example/";
+      const requestedPaths: string[] = [];
+      vi.spyOn(page.request, "get").mockResolvedValue({ ok: () => false } as APIResponse);
+      await context.route("https://visitor-check-course.example/**", route => route.fulfill({ status: 200, contentType: "text/html", body: `<html><title>Visitor Check Golf Course</title><body><h1>Visitor Check Golf Course</h1><a href='${url}'>Book tee times</a></body></html>` }));
+      await context.route("https://visitor-check.cps.golf/**", async route => {
+        requestedPaths.push(new URL(route.request().url()).pathname);
+        await route.fulfill({ status, contentType: "text/html; charset=utf-8", body: "<html><title>Club Prophet</title><body><h1>Security check · Verifying</h1> <p>We sometimes confirm a visitor is human.</p> <a href='/booking'>Book tee times</a></body></html>" });
+      });
+      const evidence = await collectBrowserEvidence(page, { courseId: "visitor-check", courseName: "Visitor Check Golf Course", sourceUrl: url, officialCourseWebsite: officialUrl });
+      expect(buildBrowserDiscovery(evidence)).toMatchObject({ automationReason: "CAPTCHA_OR_QUEUE", bookingUrl: url,
+        evidence: { renderedAccessControls: [{ kind: "MANAGED_PROTECTION_DOCUMENT", scope: "COURSE_SCOPED_BOOKING", url }] } });
+      expect(requestedPaths).not.toContain("/booking");
+    } finally {
+      await context.close();
+      await browser.close();
+    }
+  }, 30_000);
   it("surfaces a transient navigation failure instead of returning completable evidence", async () => {
     const browser = await chromium.launch();
     const context = await browser.newContext({ serviceWorkers: "block" });

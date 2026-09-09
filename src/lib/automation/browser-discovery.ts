@@ -891,13 +891,19 @@ export function buildBrowserDiscovery(
   const firstProviderDiscovery = providerDiscoveries.find(
     (discovery): discovery is BrowserDiscovery => Boolean(discovery)
   );
-
-  if (firstProviderDiscovery) {
-    return withCourseIdentityCorroboration(firstProviderDiscovery, evidence);
-  }
-
   const renderedManagedProtectionClassification =
     learnRenderedManagedProtectionClassification(unscopedEvidence);
+  const inspectedTargetHasRenderedProtection = Boolean(
+    firstProviderDiscovery?.status === "INSPECTED" &&
+    firstProviderDiscovery.bookingUrl &&
+    renderedManagedProtectionClassification?.bookingUrl &&
+    normalizeManagedProtectionTargetUrl(firstProviderDiscovery.bookingUrl) ===
+      normalizeManagedProtectionTargetUrl(renderedManagedProtectionClassification.bookingUrl)
+  );
+
+  if (firstProviderDiscovery && !inspectedTargetHasRenderedProtection) {
+    return withCourseIdentityCorroboration(firstProviderDiscovery, evidence);
+  }
 
   if (renderedManagedProtectionClassification) {
     return withCourseIdentityCorroboration(

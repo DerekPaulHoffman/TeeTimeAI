@@ -13,6 +13,13 @@
       .trim();
   }
 
+  function isAccessChallenge(documentRoot) {
+    const text = normalizeText(documentRoot.body?.innerText || documentRoot.body?.textContent);
+    return CHALLENGE_TEXT.test(text) ||
+      (/\bsecurity check\s*[·:]?\s*verifying\b/i.test(text) &&
+       /\bconfirm a visitor is human\b/i.test(text));
+  }
+
   function isAllowedPageUrl(job, value) {
     try {
       if (!job?.courseKey || !Array.isArray(job.cardTextIncludes)) return false;
@@ -123,10 +130,7 @@
       };
     }
 
-    const bodyText = normalizeText(
-      documentRoot.body?.innerText || documentRoot.body?.textContent,
-    );
-    if (CHALLENGE_TEXT.test(bodyText)) {
+    if (isAccessChallenge(documentRoot)) {
       return {
         courseKey,
         status: "ACCESS_CHALLENGE",
@@ -195,6 +199,7 @@
 
   root.TeeTimeSpotCpsReader = {
     READER_VERSION,
+    isAccessChallenge,
     isAllowedPageUrl,
     readSnapshot,
   };

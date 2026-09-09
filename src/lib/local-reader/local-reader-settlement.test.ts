@@ -51,6 +51,7 @@ function details(capacity = "1-4") {
 
 async function runContent(options: {
   cards: string;
+  cps?: boolean;
   emptyText?: string;
   changeAtMs?: number;
   change?: (control: FixtureControl) => void;
@@ -73,7 +74,8 @@ async function runContent(options: {
       return this.textContent;
     }
   });
-  const location = new URL(job.bookingUrl);
+  const activeJob = options.cps ? { ...job, courseKey: "cps:offline-fixture.cps.golf", bookingUrl: "https://offline-fixture.cps.golf/onlineresweb/search-teetime" } : job;
+  const location = new URL(activeJob.bookingUrl);
   const control = { document, location };
   let clockMs = 0;
   let changeApplied = false;
@@ -129,7 +131,7 @@ async function runContent(options: {
     window: { getComputedStyle: window.getComputedStyle.bind(window), setTimeout },
     chrome: {
       storage: {
-        local: { get: async () => ({ pendingJobs: { "1": { job } } }) }
+        local: { get: async () => ({ pendingJobs: { "1": { job: activeJob } } }) }
       },
       runtime: {
         onMessage: { addListener: () => undefined },
@@ -146,8 +148,8 @@ async function runContent(options: {
     }
   };
   context.globalThis = context;
-  runInNewContext(readerSource, context);
-  const reader = context.TeeTimeSpotTenForeReader as Reader;
+  runInNewContext(options.cps ? readFileSync(resolve(process.cwd(), "tools/local-chrome-reader/cps-reader.js"), "utf8") : readerSource, context);
+  const reader = (options.cps ? context.TeeTimeSpotCpsReader : context.TeeTimeSpotTenForeReader) as Reader;
   const readSnapshot = reader.readSnapshot;
   reader.readSnapshot = (...args) => {
     events.push({ event: "snapshot", atMs: clockMs });
@@ -176,6 +178,11 @@ async function runContent(options: {
 }
 
 describe("rendered reader snapshot settlement", () => {
+  it("reports the CPS visitor challenge before touching player or date controls", async () => {
+    const result = await runContent({ cps: true, cards: "<h1>Security check · Verifying</h1> <p>We sometimes confirm a visitor is human.</p> <button class='mat-button-toggle-button' name='fontStyle'>4</button>" });
+    expect(result.snapshot.status).toBe("ACCESS_CHALLENGE");
+    expect(result.submittedAtMs).toBe(0);
+  });
   it("keeps the existing fast path when all card details are already valid", async () => {
     const result = await runContent({ cards: card("ready", "1-4") });
 

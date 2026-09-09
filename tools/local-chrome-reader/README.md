@@ -135,6 +135,13 @@ An actual parser or manifest change to this unpacked development extension
 still requires Chrome's **Reload** action; unattended binary updates require a
 separately signed Web Store or enterprise-managed extension package.
 
+Version 1.11.2 recognizes the CPS visitor-verification protection page before
+player/date selection. It reports ACCESS_CHALLENGE rather than a selector error
+or empty availability. Require a fresh signed chrome-extension-1.11.2 heartbeat
+after reloading the installed extension; a Git or Vercel release alone is not
+evidence that the reader has updated. The backend still requires independent
+current evidence before any conclusive course limitation.
+
 For the complete-card parser rollout, update and reload the actual installed
 extension first, then require a fresh signed heartbeat reporting build
 `chrome-extension-1.11.1` and `TENFORE_RENDERED:2` before publishing the backend's
