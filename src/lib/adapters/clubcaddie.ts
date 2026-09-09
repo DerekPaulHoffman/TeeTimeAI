@@ -128,11 +128,28 @@ export async function fetchClubCaddieTeeSheet(
   },
   fetchImpl: typeof fetch = fetch
 ): Promise<ClubCaddieTeeSheetResult> {
-  if (!isClubCaddieMetadata(input.metadata)) {
+  const { bookingUrl, interaction, publicForm } = await fetchClubCaddiePublicPage(input.metadata, fetchImpl);
+
+  return fetchClubCaddieAvailability(input, bookingUrl, interaction, publicForm, fetchImpl);
+}
+
+/** Read only the public course identity; transient form/session values stay here. */
+export async function fetchClubCaddiePublicCourseIdentity(
+  metadata: ClubCaddieMetadata,
+  fetchImpl: typeof fetch = fetch
+): Promise<string | null> {
+  const { bookingPageHtml } = await fetchClubCaddiePublicPage(metadata, fetchImpl);
+  const headings = [...new Set([...bookingPageHtml.matchAll(/<h1\b[^>]*>([\s\S]*?)<\/h1>/gi)]
+    .map((match) => htmlText(match[1]).trim()).filter((value) => value && value.length <= 160))];
+  return headings.length === 1 ? headings[0] : null;
+}
+
+async function fetchClubCaddiePublicPage(metadata: ClubCaddieMetadata, fetchImpl: typeof fetch) {
+  if (!isClubCaddieMetadata(metadata)) {
     throw new ClubCaddieResponseError("Club Caddie metadata is not valid");
   }
 
-  const bookingUrl = new URL(input.metadata.bookingBaseUrl);
+  const bookingUrl = new URL(metadata.bookingBaseUrl);
   const bootstrapUrl = new URL(bookingUrl);
   bootstrapUrl.searchParams.set("SetSessionIdInLocalStorage", "true");
   const bootstrapResponse = await fetchClubCaddiePublicResponse(
@@ -197,7 +214,16 @@ export async function fetchClubCaddieTeeSheet(
   );
   assertNoAccessChallenge(bookingPageResponse, bookingPageHtml);
   const publicForm = parsePublicSearchForm(bookingPageHtml);
+  return { bookingUrl, bookingPageHtml, interaction, publicForm };
+}
 
+async function fetchClubCaddieAvailability(
+  input: Parameters<typeof fetchClubCaddieTeeSheet>[0],
+  bookingUrl: URL,
+  interaction: string,
+  publicForm: ReturnType<typeof parsePublicSearchForm>,
+  fetchImpl: typeof fetch
+): Promise<ClubCaddieTeeSheetResult> {
   const availabilityUrl = new URL("/webapi/TeeTimes", bookingUrl);
   const availabilityResponse = await fetchClubCaddiePublicResponse(
     availabilityUrl,

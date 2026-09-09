@@ -7,7 +7,7 @@ import {
   getAgilysysBookingIdentity,
   normalizeAgilysysBookingUrl
 } from "@/lib/adapters/agilysys";
-import { isClubCaddieMetadata } from "@/lib/adapters/clubcaddie";
+import { fetchClubCaddiePublicCourseIdentity, isClubCaddieMetadata } from "@/lib/adapters/clubcaddie";
 import { isGolfWithAccessMetadata } from "@/lib/adapters/golf-with-access";
 import {
   getGolfNowFacilityId,
@@ -289,6 +289,13 @@ export type BrowserDiscovery = {
       bookingClassId?: number;
     };
     bookingCallToAction?: boolean;
+    clubCaddieIdentityCandidate?: {
+      courseName: string;
+      officialWebsiteUrl: string;
+      officialPageUrl: string;
+      providerUrl: string;
+    };
+    publicProviderCourseName?: string;
     courseIdentityCorroboration?: {
       kind:
         | "OFFICIAL_COURSE_PROVIDER_LINK"
@@ -439,8 +446,9 @@ export async function enrichBrowserDiscoveryWithProviderLease(
     const directoryDiscovery = publicSourceContext
       ? await enrichTeeItUpFromPublicDirectory(discovery, publicSourceContext, leasedFetch)
       : discovery;
+    const clubCaddieDiscovery = await enrichClubCaddieDiscovery(directoryDiscovery, courseName, leasedFetch);
     const teeItUpDiscovery = await enrichTeeItUpDiscovery(
-      directoryDiscovery,
+      clubCaddieDiscovery,
       courseName,
       leasedFetch
     );
@@ -911,6 +919,9 @@ export function buildBrowserDiscovery(
       unscopedEvidence
     );
   }
+
+  const pendingClubCaddieIdentity = learnPendingClubCaddieIdentity(evidence);
+  if (pendingClubCaddieIdentity) return pendingClubCaddieIdentity;
 
   const nonRunnableOfficialBookingLink =
     learnNonRunnableOfficialBookingLink(unscopedEvidence, unscopedObservedUrls);
@@ -1580,6 +1591,69 @@ function learnUnavailableOfficialSiteClassification(
       observedUrls: uniqueUrls([canonicalSource, firstPartyFinal]),
       learnedFrom: "official-site-soft-not-found"
     }
+  };
+}
+
+function learnPendingClubCaddieIdentity(evidence: BrowserDiscoveryEvidence): BrowserDiscovery | null {
+  const officialWebsite = parseUrl(evidence.officialCourseWebsite);
+  const source = parseUrl(evidence.sourceUrl);
+  const final = parseUrl(evidence.finalUrl ?? evidence.sourceUrl);
+  if (!officialWebsite || !source || !final ||
+      !isSafeManualEvidenceUrl(officialWebsite) || !isSafeManualEvidenceUrl(source) ||
+      getKnownProviderFamilyForHostname(officialWebsite.hostname) ||
+      !haveSameWebsiteOrigin(officialWebsite, source) ||
+      !haveSameExactUrl(source.toString(), final.toString()) ||
+      evidence.sourcePageAvailability || evidence.unprojectedSourceCandidate ||
+      evidence.accessBarriers?.length || evidence.renderedAccessControls?.length) return null;
+
+  // Inspecting a single official call to action is provisional. The provider's
+  // actual course identity must match before this becomes runnable metadata.
+  const links = uniqueLinkCandidates(evidence.linkCandidates ?? []).filter(isBookingCallToActionCandidate);
+  const destinations = new Set(links.map(link => link.url));
+  const candidates = getClubCaddieCandidates({ ...evidence, linkCandidates: links }, []);
+  if (destinations.size !== 1 || candidates.length !== 1 ||
+      !isSafeClubCaddieLinkLabel(candidates[0].label)) return null;
+  const providerUrl = candidates[0].url;
+  return {
+    courseId: evidence.courseId, status: "INSPECTED", detectedPlatform: "CLUB_CADDIE",
+    sourceUrl: source.toString(), bookingUrl: providerUrl, confidence: 0.45,
+    evidence: {
+      finalUrl: final.toString(), observedUrls: uniqueUrls([source.toString(), providerUrl]),
+      learnedFrom: "club-caddie-public-course-identity-pending",
+      clubCaddieIdentityCandidate: { courseName: evidence.courseName,
+        officialWebsiteUrl: officialWebsite.toString(), officialPageUrl: source.toString(), providerUrl }
+    }
+  };
+}
+
+export async function enrichClubCaddieDiscovery(
+  discovery: BrowserDiscovery,
+  courseName: string,
+  fetchImpl: typeof fetch = fetch
+): Promise<BrowserDiscovery> {
+  const candidate = discovery.evidence.clubCaddieIdentityCandidate;
+  if (discovery.status !== "INSPECTED" ||
+      discovery.evidence.learnedFrom !== "club-caddie-public-course-identity-pending" ||
+      !candidate || candidate.courseName !== courseName ||
+      candidate.providerUrl !== discovery.bookingUrl ||
+      candidate.officialPageUrl !== discovery.sourceUrl ||
+      canonicalizeClubCaddieBookingUrl(candidate.providerUrl) !== candidate.providerUrl) return discovery;
+  const source = parseUrl(candidate.officialPageUrl), official = parseUrl(candidate.officialWebsiteUrl);
+  if (!source || !official || !haveSameWebsiteOrigin(source, official) ||
+      getKnownProviderFamilyForHostname(official.hostname)) return discovery;
+  const metadata = { provider: "CLUB_CADDIE" as const, bookingBaseUrl: candidate.providerUrl };
+  const providerCourseName = await fetchClubCaddiePublicCourseIdentity(metadata, fetchImpl);
+  if (!providerCourseName || normalizeCourseIdentityName(courseName).split(" ").length < 2 ||
+      !haveSameOfficialCourseIdentityCore(courseName, providerCourseName) ||
+      hasConflictingOfficialCourseIdentityDiscriminator(courseName, providerCourseName)) return discovery;
+  return {
+    ...discovery, status: "LEARNED", bookingMethod: "PUBLIC_ONLINE",
+    automationEligibility: "ALLOWED", automationReason: "NONE", confidence: 0.95,
+    apiEndpoint: `${new URL(candidate.providerUrl).origin}/webapi/TeeTimes`, apiMetadata: metadata,
+    policyNotes: "The official course link and public provider course identity agree. Read public availability only; the golfer books on the official site.",
+    evidence: { ...discovery.evidence, learnedFrom: "club-caddie-public-course-identity",
+      publicProviderCourseName: providerCourseName,
+      courseIdentityCorroboration: { kind: "OFFICIAL_COURSE_PROVIDER_LINK", ...candidate } }
   };
 }
 

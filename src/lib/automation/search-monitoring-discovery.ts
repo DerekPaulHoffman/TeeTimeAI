@@ -10,6 +10,7 @@ import {
 } from "@/lib/automation/db-service";
 import {
   buildBrowserDiscovery,
+  enrichClubCaddieDiscovery,
   enrichCpsDiscovery,
   enrichChronogolfDiscovery,
   enrichTeesnapDiscovery,
@@ -1049,8 +1050,11 @@ export async function prepareSearchMonitoring(
                 initialDiscovery,
                 collectedWithCorroboration
               );
+            const clubCaddieDiscovery = await enrichClubCaddieDiscovery(
+              legacyProphetAwareDiscovery, course.name, leasedFetch
+            );
             const chronogolfDiscovery = await enrichChronogolfDiscovery(
-              legacyProphetAwareDiscovery,
+              clubCaddieDiscovery,
               leasedFetch
             );
             const cpsDiscovery = await enrichCpsDiscovery(
