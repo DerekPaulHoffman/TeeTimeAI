@@ -22706,8 +22706,8 @@ describe("detached verification atomic batch fences", () => {
       route, incidentKind: "NEEDS_ADAPTER", incidentProviderFamilyKey: sourceCourse.providerFamilyKey, course: sourceCourse,
     });
     expect(route.attemptSignature).toMatchObject({ playbookStage: stage });
-    expect(plan.primaryAction).toBe(stage === "RENDERED_BROWSER_DISCOVERY" ? "INSPECT_PROVIDER_CONTRACT" : "VERIFY_CURRENT_RUNTIME");
-    expect(plan.allowedActions).toContain("VERIFY_CURRENT_RUNTIME");
+    expect(plan.primaryAction).toBe("VERIFY_CURRENT_RUNTIME");
+    expect(plan.allowedActions).toEqual(["VERIFY_CURRENT_RUNTIME"]);
     const expectedPair = label === "typed adapter" ? ["VERIFY_TRANSIENT", "RUN_TYPED_ADAPTER"] :
       ["ADVANCE_DISCOVERY", label === "technical rendered" ? "VERIFY_TECHNICAL_CONSTRAINT" : label === "repair adapter" ? "REPAIR_PROVIDER_ADAPTER" : label === "http rendered" ? "DISCOVER_WITH_HTTP" : "DISCOVER_WITH_BROWSER"];
     expect([route.workMode, route.strategy.action]).toEqual(expectedPair);
