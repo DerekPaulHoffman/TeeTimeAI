@@ -32,7 +32,8 @@ describe("official Club Caddie destination identity", () => {
     ["Rapid City Executive Golf", "Rapid City Executive Course"],
     ["Lake Meadow Golf", "Lake Meadow Course"],
     ["River Oaks Golf Club", "River Oaks Golf Course"],
-    ["Meadowbrook Golf Club", "Meadowbrook Golf Club"]
+    ["Meadowbrook Golf Club", "Meadowbrook Golf Club"],
+    ["Meadowbrook Golf Course", "Meadowbrook Golf Club"]
   ])("learns %s from its public destination without a course-specific rule", async (courseName, heading) => {
     const initial = buildBrowserDiscovery(source(courseName));
     expect(initial.apiMetadata).toBeUndefined();
@@ -77,6 +78,20 @@ describe("official Club Caddie destination identity", () => {
     const initial = buildBrowserDiscovery(source("Golf Course"));
     const result = await enrichClubCaddieDiscovery(initial, "Golf Course", publicIdentityFetch("<h1>Golf Course</h1>"));
     expect(result.apiMetadata).toBeUndefined();
+  });
+
+  it("records the inspected official page after an HTTPS upgrade and booking-page followup", async () => {
+    const input = { ...source("Meadowbrook Golf Course"),
+      sourceUrl: "http://www.golfatmeadowbrook.com/",
+      officialCourseWebsite: "http://www.golfatmeadowbrook.com/",
+      finalUrl: "https://www.golfatmeadowbrook.com/tee-times" };
+    const result = await enrichClubCaddieDiscovery(buildBrowserDiscovery(input), input.courseName,
+      publicIdentityFetch("<h1>Meadowbrook Golf Club</h1>"));
+    expect(result).toMatchObject({ status: "LEARNED", sourceUrl: input.finalUrl,
+      evidence: { courseIdentityCorroboration: { officialWebsiteUrl: input.officialCourseWebsite, officialPageUrl: input.finalUrl } } });
+    const downgrade = buildBrowserDiscovery({ ...input, sourceUrl: input.finalUrl,
+      officialCourseWebsite: input.finalUrl, finalUrl: input.sourceUrl });
+    expect(downgrade.evidence.clubCaddieIdentityCandidate).toBeUndefined();
   });
 
   it("rejects target changes and leaves access challenges unaccepted", async () => {

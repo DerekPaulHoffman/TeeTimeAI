@@ -1599,10 +1599,10 @@ function learnPendingClubCaddieIdentity(evidence: BrowserDiscoveryEvidence): Bro
   const source = parseUrl(evidence.sourceUrl);
   const final = parseUrl(evidence.finalUrl ?? evidence.sourceUrl);
   if (!officialWebsite || !source || !final ||
-      !isSafeManualEvidenceUrl(officialWebsite) || !isSafeManualEvidenceUrl(source) ||
+      !isSafeManualEvidenceUrl(officialWebsite) || !isSafeManualEvidenceUrl(source) || !isSafeManualEvidenceUrl(final) ||
       getKnownProviderFamilyForHostname(officialWebsite.hostname) ||
       !haveSameWebsiteOrigin(officialWebsite, source) ||
-      !haveSameExactUrl(source.toString(), final.toString()) ||
+      !haveSameWebsiteOrigin(source, final) ||
       evidence.sourcePageAvailability || evidence.unprojectedSourceCandidate ||
       evidence.accessBarriers?.length || evidence.renderedAccessControls?.length) return null;
 
@@ -1616,12 +1616,12 @@ function learnPendingClubCaddieIdentity(evidence: BrowserDiscoveryEvidence): Bro
   const providerUrl = candidates[0].url;
   return {
     courseId: evidence.courseId, status: "INSPECTED", detectedPlatform: "CLUB_CADDIE",
-    sourceUrl: source.toString(), bookingUrl: providerUrl, confidence: 0.45,
+    sourceUrl: final.toString(), bookingUrl: providerUrl, confidence: 0.45,
     evidence: {
-      finalUrl: final.toString(), observedUrls: uniqueUrls([source.toString(), providerUrl]),
+      finalUrl: final.toString(), observedUrls: uniqueUrls([source.toString(), final.toString(), providerUrl]),
       learnedFrom: "club-caddie-public-course-identity-pending",
       clubCaddieIdentityCandidate: { courseName: evidence.courseName,
-        officialWebsiteUrl: officialWebsite.toString(), officialPageUrl: source.toString(), providerUrl }
+        officialWebsiteUrl: officialWebsite.toString(), officialPageUrl: final.toString(), providerUrl }
     }
   };
 }
@@ -1639,13 +1639,12 @@ export async function enrichClubCaddieDiscovery(
       candidate.officialPageUrl !== discovery.sourceUrl ||
       canonicalizeClubCaddieBookingUrl(candidate.providerUrl) !== candidate.providerUrl) return discovery;
   const source = parseUrl(candidate.officialPageUrl), official = parseUrl(candidate.officialWebsiteUrl);
-  if (!source || !official || !haveSameWebsiteOrigin(source, official) ||
+  if (!source || !official || !haveSameWebsiteOrigin(official, source) ||
       getKnownProviderFamilyForHostname(official.hostname)) return discovery;
   const metadata = { provider: "CLUB_CADDIE" as const, bookingBaseUrl: candidate.providerUrl };
   const providerCourseName = await fetchClubCaddiePublicCourseIdentity(metadata, fetchImpl);
   const identityCore = normalizeCourseIdentityName(courseName);
   if (!providerCourseName || !identityCore ||
-      (!haveCompatibleOfficialPageCourseNames(courseName, providerCourseName) && identityCore.split(" ").length < 2) ||
       !haveSameOfficialCourseIdentityCore(courseName, providerCourseName) ||
       hasConflictingOfficialCourseIdentityDiscriminator(courseName, providerCourseName)) return discovery;
   return {
