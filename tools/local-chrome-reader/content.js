@@ -346,18 +346,33 @@
     }
     const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
-      const button = Array.from(
+      const playerButtons = Array.from(
         document.querySelectorAll(
           "button.mat-button-toggle-button[name='fontStyle']",
         ),
-      ).find(
+      );
+      const exactButton = playerButtons.find(
         (candidate) =>
           String(candidate.textContent || "").trim() === String(players),
       );
+      // CPS can omit the single-player filter while showing single openings
+      // under Any. The CPS parser still enforces each card's player bounds.
+      const anyButton = location.hostname.endsWith(".cps.golf")
+        ? playerButtons.find((candidate) =>
+            String(candidate.textContent || "").trim() === "Any" &&
+            candidate.disabled !== true &&
+            candidate.getAttribute("aria-disabled") !== "true",
+          )
+        : null;
+      const button = exactButton || anyButton;
       if (button) {
         if (button.getAttribute("aria-pressed") !== "true") {
           button.click();
           await delay(500);
+        }
+        if (button === anyButton && button.getAttribute("aria-pressed") !== "true") {
+          await delay(100);
+          continue;
         }
         return;
       }

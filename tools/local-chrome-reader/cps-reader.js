@@ -1,7 +1,7 @@
 (function initializeCpsReader(root) {
   "use strict";
 
-  const READER_VERSION = "cps-rendered-v1";
+  const READER_VERSION = "cps-rendered-v2";
   const ALLOWED_PATH = /^\/onlineresweb\/search-teetime\/?$/;
   const LOCAL_DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/;
   const CHALLENGE_TEXT =

@@ -6,7 +6,7 @@ const POLL_PERIOD_MINUTES = 1;
 const MAX_CONCURRENT_JOBS = 2;
 const BACKEND_FETCH_TIMEOUT_MS = 10_000;
 const READER_CAPABILITIES = Object.freeze([
-  ["CPS_RENDERED", 1],
+  ["CPS_RENDERED", 2],
   ["CHRONOGOLF_RENDERED", 1],
   ["TENFORE_RENDERED", 2],
   ["EZLINKS_RENDERED", 1],
@@ -328,7 +328,7 @@ function isAllowlistedJob(job) {
       return false;
     }
     const expectedCapability = [
-      [isAllowlistedCpsJob, "CPS_RENDERED", 1],
+      [isAllowlistedCpsJob, "CPS_RENDERED", 1, 2],
       [isAllowlistedChronogolfJob, "CHRONOGOLF_RENDERED", 1],
       // Parser v2 can safely finish v1 jobs during an extension-first rollout.
       [isAllowlistedTenForeJob, "TENFORE_RENDERED", 1, 2],

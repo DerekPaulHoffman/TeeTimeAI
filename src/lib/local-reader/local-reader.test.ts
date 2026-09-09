@@ -399,7 +399,7 @@ describe("local Chrome reader contract", () => {
     );
     const contentMatches = manifest.content_scripts.flatMap((entry) => entry.matches);
 
-    expect(manifest.version).toBe("1.11.2");
+    expect(manifest.version).toBe("1.11.3");
     expect(manifest.host_permissions).toContain("https://*.cps.golf/*");
     expect(contentMatches).toContain("https://*.cps.golf/onlineresweb/search-teetime*");
     expect(manifest.host_permissions).toContain("https://www.chronogolf.com/*");
@@ -1513,7 +1513,7 @@ describe("local Chrome reader contract", () => {
     expect(loadReader().readSnapshot(document, job.bookingUrl, job)).toMatchObject({
       status: "READER_ERROR",
       slots: [],
-      readerVersion: "cps-rendered-v1"
+      readerVersion: "cps-rendered-v2"
     });
   });
 
