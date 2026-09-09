@@ -77,8 +77,8 @@ describe("course-support claimed action plans", () => {
       expect(plan.primaryAction).toBe("VERIFY_CURRENT_RUNTIME");
       expect(plan.allowedActions).toEqual([
         "VERIFY_CURRENT_RUNTIME",
-        "INSPECT_PROVIDER_CONTRACT",
       ]);
+      expect(courseSupportActionPlanAllows(plan, "INSPECT_PROVIDER_CONTRACT")).toBe(false);
       expect(courseSupportActionPlanMatchesRoute({
         plan,
         workMode: "ADVANCE_DISCOVERY",
