@@ -204,6 +204,11 @@ export function selectMonitoringStrategy(
       providerFamilyKey === SOURCE_CONFLICT_PROVIDER_FAMILY);
   const needsDiscovery =
     providerIdentityRequiresDiscovery ||
+    // A retained failure cannot identify an adapter defect when the adapter
+    // has no usable configuration. Discover that configuration first.
+    (provider.capability?.supportsAutomation === true &&
+      !provider.metadataReady &&
+      !provider.evidenceConflict) ||
     !input.failureClass ||
     DISCOVERY_FAILURES.has(input.failureClass) ||
     input.failureClass === "UNSUPPORTED_FAMILY";

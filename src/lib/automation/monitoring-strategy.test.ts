@@ -5,6 +5,13 @@ import {
   selectMonitoringStrategy,
   shouldStopBrowserDiscovery
 } from "./monitoring-strategy";
+import {
+  getCourseSupportRemediationDirective,
+  isAssignedDetachedStageProgression,
+  routeCourseSupportRemediation,
+} from "./course-support-remediation-routing";
+import { buildCourseSupportClaimActionPlan } from "./course-support-action-plan";
+import { canVerifyUnchangedCourseSupportRuntime } from "./course-support-batches";
 
 const runnableCourse = {
   isPublic: true,
@@ -24,6 +31,92 @@ const runnableCourse = {
 };
 
 describe("dynamic monitoring strategy", () => {
+  it("keeps the ordered missing-configuration path executable through the rendered reader", () => {
+    const course = {
+      ...runnableCourse, detectedPlatform: "CUSTOM", providerFamilyKey: "CPS",
+      detectedBookingUrl: "https://jamesestewart.cps.golf/", bookingMetadata: null,
+    };
+    const stages = ["OFFICIAL_IDENTITY", "TYPED_ADAPTER", "OFFICIAL_HTTP_DISCOVERY", "HTTP_ADAPTER_RETRY", "RENDERED_BROWSER_DISCOVERY", "BROWSER_ADAPTER_RETRY", "LOCAL_READER"] as const;
+    for (const [index, stage] of stages.entries()) {
+      const route = routeCourseSupportRemediation({
+        ...course, failureClass: "HTTP_5XX", attemptCount: 0,
+        discoveryAttempt: index > 2 ? "HTTP_INCONCLUSIVE" : "NONE",
+        playbookAssessment: { conclusion: "INCOMPLETE", nextStage: stage },
+      });
+      const plan = buildCourseSupportClaimActionPlan({
+        route, course, incidentKind: "BLOCKED_TOOLING", incidentProviderFamilyKey: "CPS",
+      });
+      expect(plan.allowedActions).toEqual(["VERIFY_CURRENT_RUNTIME"]);
+      expect(route.allowUnchangedRuntime).toBe(true);
+      expect(route.requiresImplementationPath).toBe(false);
+      if (stage === "BROWSER_ADAPTER_RETRY" || stage === "LOCAL_READER") {
+        expect(isAssignedDetachedStageProgression({
+          remediationDirective: {
+            ...getCourseSupportRemediationDirective(route),
+            allowUnchangedRuntime: route.allowUnchangedRuntime,
+            requiresImplementationPath: route.requiresImplementationPath,
+            retryBudget: route.retryBudget,
+          },
+          playbookConclusion: "INCOMPLETE", nextPlaybookStage: stage,
+          nextPlaybookStageStatus: "PENDING", nextPlaybookStageAttemptCount: 0,
+        })).toBe(true);
+      }
+    }
+  });
+
+  it.each(["HTTP_5XX", "NETWORK", "TIMEOUT", "RATE_LIMIT"] as const)(
+    "discovers missing configuration through the normal verifier despite retained %s",
+    (failureClass) => {
+      const courses = [
+        { ...runnableCourse, bookingMetadata: null },
+        {
+          ...runnableCourse,
+          detectedPlatform: "CUSTOM",
+          providerFamilyKey: "CPS",
+          website: "http://www.okcgolf.com/golf/proto/okcgolf/stewart/stewart.htm",
+          detectedBookingUrl: "https://jamesestewart.cps.golf/",
+          bookingMetadata: null,
+          automationEligibility: "NEEDS_REVIEW",
+          automationReason: "CAPTCHA_OR_QUEUE",
+        },
+      ];
+      for (const course of courses) {
+        const route = routeCourseSupportRemediation({
+          ...course,
+          failureClass,
+          attemptCount: 0,
+          playbookAssessment: { conclusion: "INCOMPLETE", nextStage: "OFFICIAL_IDENTITY" },
+        });
+        const plan = buildCourseSupportClaimActionPlan({
+          route, course, incidentKind: "BLOCKED_TOOLING",
+          incidentProviderFamilyKey: course.providerFamilyKey,
+        });
+        expect(route).toMatchObject({
+          workMode: "ADVANCE_DISCOVERY", requiresImplementationPath: false,
+          strategy: { action: "DISCOVER_WITH_HTTP", reason: "MISSING_PROVIDER_METADATA" },
+        });
+        expect(plan.allowedActions).toEqual(["VERIFY_CURRENT_RUNTIME"]);
+        expect(canVerifyUnchangedCourseSupportRuntime({
+          allowUnchangedRuntime: plan.allowedActions.includes("VERIFY_CURRENT_RUNTIME"),
+          remediationAllowsUnchangedRuntime: route.allowUnchangedRuntime,
+          baseSha: "a".repeat(40), requestedReleaseSha: "a".repeat(40),
+          persistedReleaseSha: null, plannedPaths: [],
+        })).toBe(true);
+        const exhausted = routeCourseSupportRemediation({
+          ...course, failureClass, attemptCount: 4,
+          playbookAssessment: { conclusion: "UNRESOLVED_EXHAUSTED", nextStage: null },
+        });
+        expect(exhausted.workMode).toBe("WAIT_FOR_MATERIAL_CHANGE");
+        const repeated = routeCourseSupportRemediation({
+          ...course, failureClass, attemptCount: 1,
+          playbookAssessment: { conclusion: "INCOMPLETE", nextStage: "OFFICIAL_IDENTITY" },
+          priorUnchangedAttempt: route.attemptSignature,
+        });
+        expect(repeated.workMode).toBe("WAIT_FOR_MATERIAL_CHANGE");
+      }
+    },
+  );
+
   it("runs a typed adapter when current provider metadata is runnable", () => {
     expect(selectMonitoringStrategy(runnableCourse)).toMatchObject({
       action: "RUN_TYPED_ADAPTER",

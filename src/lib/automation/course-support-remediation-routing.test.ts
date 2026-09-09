@@ -580,10 +580,22 @@ describe("course-support remediation routing", () => {
       requiresImplementationPath: false,
       reason: "MATERIAL_CHANGE_REOPENED",
       attemptSignature: {
-        strategyAction: "REPAIR_PROVIDER_ADAPTER",
+        strategyAction: "DISCOVER_WITH_HTTP",
         playbookStage: "LOCAL_READER",
       },
     });
+    expect(isAssignedDetachedStageProgression({
+      remediationDirective: {
+        ...getCourseSupportRemediationDirective(result),
+        allowUnchangedRuntime: result.allowUnchangedRuntime,
+        requiresImplementationPath: result.requiresImplementationPath,
+        retryBudget: result.retryBudget,
+      },
+      playbookConclusion: "INCOMPLETE",
+      nextPlaybookStage: "LOCAL_READER",
+      nextPlaybookStageStatus: "PENDING",
+      nextPlaybookStageAttemptCount: 0,
+    })).toBe(true);
   });
 
   it("reuses newly runnable support for a sibling with a stale unsupported failure", () => {
