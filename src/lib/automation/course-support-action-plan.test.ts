@@ -49,6 +49,46 @@ function route(
 }
 
 describe("course-support claimed action plans", () => {
+  it.each(["CUSTOM", "parks.cityofomaha.org"])(
+    "assigns durable discovery verification before diagnostic inspection for %s",
+    (providerFamilyKey) => {
+      const discoveryRoute = route({
+        strategy: {
+          action: "DISCOVER_WITH_HTTP",
+          reason: "MISSING_PROVIDER_SOURCE",
+          providerFamilyKey,
+          browserAllowed: false,
+        },
+        attemptSignature: {
+          workMode: "ADVANCE_DISCOVERY",
+          strategyAction: "DISCOVER_WITH_HTTP",
+          playbookStage: "OFFICIAL_HTTP_DISCOVERY",
+        },
+      });
+      // Historical incident grouping can retain a concrete family while the
+      // current course projection has lost its usable booking source.
+      const plan = buildCourseSupportClaimActionPlan({
+        route: discoveryRoute,
+        incidentKind: "FETCH_FAILED",
+        incidentProviderFamilyKey: providerFamilyKey,
+        course: course({ website: "https://public-course.example/" }),
+      });
+
+      expect(plan.primaryAction).toBe("VERIFY_CURRENT_RUNTIME");
+      expect(plan.allowedActions).toEqual([
+        "VERIFY_CURRENT_RUNTIME",
+        "INSPECT_PROVIDER_CONTRACT",
+      ]);
+      expect(courseSupportActionPlanMatchesRoute({
+        plan,
+        workMode: "ADVANCE_DISCOVERY",
+        strategyAction: "DISCOVER_WITH_HTTP",
+        playbookStage: "OFFICIAL_HTTP_DISCOVERY",
+      })).toBe(true);
+      expect(courseSupportActionPlanAllows(plan, "IMPLEMENT_REUSABLE_SUPPORT")).toBe(false);
+    },
+  );
+
   it("makes exact source search authoritative for a source-free rendered stage", () => {
     const plan = buildCourseSupportClaimActionPlan({
       route: route(),

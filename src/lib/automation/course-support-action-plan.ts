@@ -144,8 +144,11 @@ export function buildCourseSupportClaimActionPlan(input: {
     return actionPlan(route, "VERIFY_CURRENT_RUNTIME");
   }
   if (providerContractEligible) {
-    return actionPlan(route, "INSPECT_PROVIDER_CONTRACT", [
-      "VERIFY_CURRENT_RUNTIME",
+    // Discovery must run through the owner-bound verifier so negative reads
+    // advance the playbook and reach durable closeout. Contract inspection is
+    // diagnostic and cannot satisfy a stage, even when it exits successfully.
+    return actionPlan(route, "VERIFY_CURRENT_RUNTIME", [
+      "INSPECT_PROVIDER_CONTRACT",
     ]);
   }
   return actionPlan(route, "VERIFY_CURRENT_RUNTIME");

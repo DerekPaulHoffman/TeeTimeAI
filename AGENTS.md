@@ -2,6 +2,14 @@
 
 This file is the operating contract for Codex and other coding agents working in this repo.
 
+## Installed Local Reader
+
+- The user's Chrome extension is **Tee Time Spot Local Reader**, loaded unpacked from `C:\dev\TeeTimeAI\tools\local-chrome-reader`.
+- Extension ID: `haiifpkpedmfbjdakfaanockdnebbpjn`.
+- Use this known installation path when inspecting or updating the reader; do not ask the user for it again unless current evidence shows the installation has moved.
+- A reader release in another checkout or a Vercel deployment does not update this installed copy. Compare files and preserve local changes before updating it, then reload the existing extension and verify its fresh signed version/build heartbeat.
+- Preserve the existing extension identity, setup, and permissions. An inactive service worker alone is not proof of a failure.
+
 ## Repo Guardrails
 
 - Work in the existing repo folder: `C:\dev\TeeTimeAI`.
