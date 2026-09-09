@@ -252,10 +252,11 @@ describe("course support preflight generated Prisma parity", () => {
           requiredCourseSupportIncidentScalarFields.map((field) => [field, field])
         )
       }
-    }));
+    }), () => "model Current {}");
 
     expect(result).toEqual({
       status: "current",
+      schemaMatches: true,
       requiredScalarFieldCount: requiredCourseSupportIncidentScalarFields.length,
       missingScalarFieldCount: 0
     });
@@ -271,7 +272,7 @@ describe("course support preflight generated Prisma parity", () => {
           status: "status"
         }
       }
-    }));
+    }), () => "model Current {}");
 
     expect(generatedPrismaSetupRequiredResult(result)).toEqual({
       outcome: "setup_required",
@@ -301,6 +302,19 @@ describe("course support preflight generated Prisma parity", () => {
     });
     expect(JSON.stringify(setupRequired)).not.toContain("sensitive loader detail");
     expect(JSON.stringify(setupRequired)).not.toContain("private");
+  });
+
+  it("detects a new reader enum despite unchanged legacy fields, then accepts regenerated schema", () => {
+    const current = "enum LocalReaderJobPurpose {\n  AVAILABILITY\n  OFFICIAL_SOURCE_DISCOVERY\n}\n";
+    let generated = "enum LocalReaderJobPurpose {\n  AVAILABILITY\n}\n";
+    const loadClient = () => ({ Prisma: { CourseSupportIncidentScalarFieldEnum: Object.fromEntries(
+      requiredCourseSupportIncidentScalarFields.map(field => [field, field])) } });
+    const readSchema = (path: string) => path.includes("node_modules") ? generated : current;
+    const stale = inspectGeneratedPrismaClient("C:\\prepared-responder", loadClient, readSchema);
+    expect(stale).toMatchObject({ status: "stale", missingScalarFieldCount: 0, schemaMatches: false });
+    expect(generatedPrismaSetupRequiredResult(stale)).toMatchObject({ failureClass: "STALE_GENERATED_PRISMA_CLIENT" });
+    generated = current.replace(/\n/g, "\r\n");
+    expect(inspectGeneratedPrismaClient("C:\\prepared-responder", loadClient, readSchema)).toMatchObject({ status: "current", schemaMatches: true });
   });
 });
 

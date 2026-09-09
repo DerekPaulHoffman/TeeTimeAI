@@ -39,7 +39,8 @@ export const requiredCourseSupportIncidentScalarFields = Object.freeze([
 
 export function inspectGeneratedPrismaClient(
   checkout,
-  loadClient = loadPrismaClientFromCheckout
+  loadClient = loadPrismaClientFromCheckout,
+  readSchema = readFileSync
 ) {
   try {
     const client = loadClient(checkout);
@@ -47,9 +48,15 @@ export function inspectGeneratedPrismaClient(
     const missingScalarFieldCount = requiredCourseSupportIncidentScalarFields.filter(
       (field) => scalarFields?.[field] !== field
     ).length;
+    // A few legacy fields do not prove that newly added models, fields or enum
+    // values are usable. Compare the actual generator input across Git pulls.
+    const normalizeSchema = value => value.toString().replace(/\r\n/g, "\n").trim();
+    const schemaMatches = normalizeSchema(readSchema(resolve(checkout, "prisma", "schema.prisma"))) ===
+      normalizeSchema(readSchema(resolve(checkout, "node_modules", ".prisma", "client", "schema.prisma")));
 
     return {
-      status: missingScalarFieldCount === 0 ? "current" : "stale",
+      status: missingScalarFieldCount === 0 && schemaMatches ? "current" : "stale",
+      schemaMatches,
       requiredScalarFieldCount: requiredCourseSupportIncidentScalarFields.length,
       missingScalarFieldCount
     };
