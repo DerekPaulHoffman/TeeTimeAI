@@ -147,13 +147,14 @@ async function claimedObservation(state: ReturnType<typeof fixture>) {
   expect(await getOwnedOfficialSourceObservation(state.input)).toEqual({ status: "PENDING" });
   expect(state.jobs).toHaveLength(1);
   const wire = await claimNextLocalReaderJob({ deviceId: "controlled-reader", readerVersion: "1.12.0", buildId: "controlled-1.12.0",
-    capabilities: [{ key: "OFFICIAL_SOURCE_RENDERED", parserVersion: 1 }] });
+    capabilities: [{ key: "OFFICIAL_SOURCE_RENDERED", parserVersion: 2 }] });
   if (!wire || !("purpose" in wire)) throw new Error("Source claim missing");
   vi.setSystemTime(new Date(now.getTime() + 1_000));
   const context = { URL, document, TeeTimeOfficialSourceReader: undefined as unknown as {
     readPage: (document: Document, url: string, expected: typeof wire.course) => OfficialSourcePage } };
   runInNewContext(parser, context);
-  document.body.innerHTML = `<h1>${state.selected.heading}</h1><p>${state.selected.street}</p><footer>Omaha, NE</footer>
+  document.body.innerHTML = `<span class="elementor-heading-title">${state.selected.heading.toLowerCase()}</span>
+    <span class="elementor-heading-title">${state.selected.heading}</span><p>${state.selected.street}</p><footer>Omaha, NE</footer>
     <a href="https://city-of-omaha.book.teeitup.com/?course=${state.selected.oldFacility}">Book a Tee Time</a>`;
   const result = { purpose: "OFFICIAL_SOURCE_DISCOVERY", jobId: wire.id, contextKey: wire.contextKey, readerVersion: "official-source-v1",
     observedAt: new Date().toISOString(), pages: [context.TeeTimeOfficialSourceReader.readPage(document, wire.sourceUrl, wire.course)] };
@@ -161,7 +162,7 @@ async function claimedObservation(state: ReturnType<typeof fixture>) {
 }
 
 const sourceHandshake = { deviceId: "controlled-reader", readerVersion: "1.12.0", buildId: "build-1",
-  capabilities: [{ key: "OFFICIAL_SOURCE_RENDERED" as const, parserVersion: 1 }] };
+  capabilities: [{ key: "OFFICIAL_SOURCE_RENDERED" as const, parserVersion: 2 }] };
 
 function exhaustedSource(selected = courses[0]) {
   const state = fixture(selected);
@@ -241,8 +242,9 @@ describe("new signed source capability revalidation", () => {
       await revalidateForOfficialSourceReader(sourceHandshake); expect(state.events).toHaveLength(0);
       expect(db.courseSupportIncident.updateMany).not.toHaveBeenCalled();
     });
-  it("does not inspect or mutate courses without the new capability", async () => {
-    exhaustedSource(); await revalidateForOfficialSourceReader({ ...sourceHandshake, capabilities: [{ key: "CPS_RENDERED", parserVersion: 2 }] });
+  it.each([{ key: "CPS_RENDERED" as const, parserVersion: 2 }, { key: "OFFICIAL_SOURCE_RENDERED" as const, parserVersion: 1 }])(
+    "does not inspect or mutate courses without the new parser: %j", async capability => {
+    exhaustedSource(); await revalidateForOfficialSourceReader({ ...sourceHandshake, capabilities: [capability] });
     expect(db.courseSupportIncident.findMany).not.toHaveBeenCalled(); expect(db.$transaction).not.toHaveBeenCalled();
   });
 });

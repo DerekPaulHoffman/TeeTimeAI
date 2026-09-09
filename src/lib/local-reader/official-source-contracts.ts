@@ -6,6 +6,7 @@ import { haveCompatibleTeeItUpCourseNames } from "@/lib/adapters/teeitup-facilit
 
 export const OFFICIAL_SOURCE_ORIGIN = "https://parks.cityofomaha.org";
 export const OFFICIAL_SOURCE_CAPABILITY = "OFFICIAL_SOURCE_RENDERED";
+export const OFFICIAL_SOURCE_PARSER_VERSION = 2;
 export const OFFICIAL_SOURCE_LIFETIME_MS = 5 * 60_000;
 
 export function normalizeOfficialSourceUrl(value: string) {

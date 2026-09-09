@@ -6,7 +6,7 @@ import { runSerializedCourseMonitoringWrite } from "@/lib/automation/course-moni
 import { runCourseSupportBrowserPersistenceWrite, type CourseSupportBrowserPersistenceFence } from "@/lib/automation/course-support-browser-stages";
 import { buildCourseSupportProviderSnapshotFingerprint } from "@/lib/automation/course-support-verification";
 import { prisma } from "@/lib/prisma";
-import { createOfficialSourceContextKey, normalizeOfficialSourceUrl, OFFICIAL_SOURCE_CAPABILITY, OFFICIAL_SOURCE_LIFETIME_MS,
+import { createOfficialSourceContextKey, normalizeOfficialSourceUrl, OFFICIAL_SOURCE_CAPABILITY, OFFICIAL_SOURCE_LIFETIME_MS, OFFICIAL_SOURCE_PARSER_VERSION,
   officialSourceJobSchema, officialSourceResultSchema, validateOfficialSourceResult, type OfficialSourceJob } from "./official-source-contracts";
 
 const storedContextSchema = z.object({
@@ -25,7 +25,7 @@ function readContext(row: LocalReaderJob) {
   if (row.purpose !== "OFFICIAL_SOURCE_DISCOVERY" || row.teeSearchId !== null || row.scheduleVersion !== null ||
     row.id !== stored.job.id || row.courseId !== stored.job.course.id || row.bookingUrl !== stored.job.sourceUrl ||
     row.courseKey !== stored.job.courseKey || row.requiredCapabilityKey !== OFFICIAL_SOURCE_CAPABILITY ||
-    row.requiredParserVersion !== 1 || row.jobExpiresAt.toISOString() !== stored.job.expiresAt ||
+    ![1, OFFICIAL_SOURCE_PARSER_VERSION].includes(row.requiredParserVersion ?? 0) || row.jobExpiresAt.toISOString() !== stored.job.expiresAt ||
     stored.job.contextKey !== createOfficialSourceContextKey({ ...stored, fence, course: stored.job.course })) {
     throw new Error("Official source job binding changed");
   }
@@ -66,7 +66,7 @@ export async function buildOwnedOfficialSourceClaim(row: LocalReaderJob, leaseTo
     transaction => assertOwnedOfficialSourceJobInTransaction(transaction, row));
   return { ...job, leaseToken, leaseExpiresAt: leaseExpiresAt.toISOString(),
     bookingUrl: job.sourceUrl, courseName: job.course.name, cardTextIncludes: [],
-    requiredCapability: { key: OFFICIAL_SOURCE_CAPABILITY, parserVersion: 1 } };
+    requiredCapability: { key: OFFICIAL_SOURCE_CAPABILITY, parserVersion: row.requiredParserVersion! } };
 }
 
 /** Pending returns without a stage attempt. The existing owned verification
@@ -100,7 +100,7 @@ export async function getOwnedOfficialSourceObservation(input: {
         id: job.id, purpose: "OFFICIAL_SOURCE_DISCOVERY", courseId: input.course.id, courseKey: job.courseKey,
         verificationKey: `official-source:${contextKey}`, targetDate: now.toISOString().slice(0, 10), players: 1,
         bookingUrl: sourceUrl, jobExpiresAt: new Date(job.expiresAt), createdAt: now,
-        requiredCapabilityKey: OFFICIAL_SOURCE_CAPABILITY, requiredParserVersion: 1,
+        requiredCapabilityKey: OFFICIAL_SOURCE_CAPABILITY, requiredParserVersion: OFFICIAL_SOURCE_PARSER_VERSION,
         sourceContext: { job, providerSnapshotFingerprint: input.providerSnapshotFingerprint,
           fence: { ...input.fence, deployedAt: input.fence.deployedAt.toISOString() } } as Prisma.InputJsonValue,
       } });

@@ -69,10 +69,12 @@ globalThis.TeeTimeOfficialSourceReader = (() => {
     }
     const core = nameCore(expected.name);
     if (!core) throw new Error("Official source course identity is missing");
-    const names = [...document.querySelectorAll("h1,h2,h3")].filter(visible)
+    // Elementor renders both the breadcrumb and hero heading as spans.
+    const headings = [...document.querySelectorAll("h1,h2,h3,.elementor-heading-title")].filter(visible)
       .map(node => (node.innerText || node.textContent || "").replace(/\s+/gu, " ").trim())
-      .filter(name => name.length <= 160 && nameCore(name) === core);
-    const uniqueNames = [...new Set(names)];
+      .filter(name => name.length <= 160);
+    const names = headings.filter(name => nameCore(name) === core);
+    const uniqueNames = [...new Map(names.map(name => [normalize(name), name])).values()];
     const observed = (value) => {
       const key = normalize(value);
       return key && text.includes(` ${key} `) ? key : null;
@@ -80,15 +82,35 @@ globalThis.TeeTimeOfficialSourceReader = (() => {
     const street = observed(expected.address.split(",")[0]);
     const city = observed(expected.city);
     const stateCode = observed(expected.stateCode);
-    const courseName = uniqueNames.length === 1 ? uniqueNames[0] : null;
+    let courseName = uniqueNames.length === 1 ? uniqueNames[0] : null;
+    if (!courseName && street) {
+      // An official address link can spell out a longer course name than its
+      // hero (e.g. Championship). Retain that observed full name, and require
+      // both the exact street label and a compatible visible course heading.
+      const shortCore = value => nameCore(value).replace(/\bchampionship\b/gu, " ").replace(/\s+/gu, " ").trim();
+      const mappedNames = [];
+      for (const link of [...document.querySelectorAll("a[href]")].filter(visible)) {
+        if (normalize(link.innerText || link.textContent) !== street) continue;
+        try {
+          const map = new URL(link.getAttribute("href"), pageUrl);
+          if (map.protocol !== "https:" || !["www.google.com", "google.com"].includes(map.hostname) || map.username || map.password) continue;
+          const match = /^\/maps\/place\/([^/]+)\//u.exec(map.pathname);
+          const name = match && decodeURIComponent(match[1].replace(/\+/gu, " "));
+          if (name && name.length <= 160 && nameCore(name) === core &&
+            headings.some(heading => shortCore(heading) && shortCore(heading) === shortCore(name))) mappedNames.push(name);
+        } catch { /* An invalid map link supplies no identity. */ }
+      }
+      const unique = [...new Map(mappedNames.map(name => [normalize(name), name])).values()];
+      if (unique.length === 1) courseName = unique[0];
+    }
     const bookingLinks = [];
     const nextUrls = [];
     for (const link of [...document.querySelectorAll("a[href]")].filter(visible)) {
       let href;
       try { href = new URL(link.getAttribute("href"), pageUrl).href; }
       catch { continue; }
-      const label = (link.innerText || link.textContent || link.getAttribute("aria-label") ||
-        link.querySelector("img")?.getAttribute("alt") || "").replace(/\s+/gu, " ").trim();
+      const label = [link.innerText, link.textContent, link.getAttribute("aria-label"),
+        link.querySelector("img")?.getAttribute("alt")].map(value => (value || "").replace(/\s+/gu, " ").trim()).find(Boolean) || "";
       const booking = bookingUrl(href);
       if (courseName && street && city && stateCode && booking && /\b(?:book|reserve|tee\s*times?)\b/iu.test(label)) {
         // Persist a category, never arbitrary link text or query parameters.

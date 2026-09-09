@@ -5,10 +5,10 @@ import { getCourseMonitoringEscalationDeadline, runSerializedCourseMonitoringWri
 import { assessAutomationPlaybook } from "@/lib/automation/course-monitoring-playbook";
 import { resolveProviderCapability } from "@/lib/automation/provider-capabilities";
 import { prisma } from "@/lib/prisma";
-import { normalizeOfficialSourceUrl, OFFICIAL_SOURCE_CAPABILITY } from "./official-source-contracts";
+import { normalizeOfficialSourceUrl, OFFICIAL_SOURCE_CAPABILITY, OFFICIAL_SOURCE_PARSER_VERSION } from "./official-source-contracts";
 import { readerSupportsCapability, type LocalReaderAgentHandshake } from "./capabilities";
 
-const parserVersion = 1;
+const parserVersion = OFFICIAL_SOURCE_PARSER_VERSION;
 type Candidate = Prisma.CourseSupportIncidentGetPayload<{ include: { course: { include: { monitoringStatus: true } } } }>;
 
 export function canRevalidateOfficialSource(incident: Candidate) {
