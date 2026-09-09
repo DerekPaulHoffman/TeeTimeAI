@@ -31,7 +31,8 @@ describe("official Club Caddie destination identity", () => {
   it.each([
     ["Rapid City Executive Golf", "Rapid City Executive Course"],
     ["Lake Meadow Golf", "Lake Meadow Course"],
-    ["River Oaks Golf Club", "River Oaks Golf Course"]
+    ["River Oaks Golf Club", "River Oaks Golf Course"],
+    ["Meadowbrook Golf Club", "Meadowbrook Golf Club"]
   ])("learns %s from its public destination without a course-specific rule", async (courseName, heading) => {
     const initial = buildBrowserDiscovery(source(courseName));
     expect(initial.apiMetadata).toBeUndefined();
@@ -70,6 +71,12 @@ describe("official Club Caddie destination identity", () => {
       expect(result.apiMetadata).toBeUndefined();
     }
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not accept a generic identity with no distinctive course name", async () => {
+    const initial = buildBrowserDiscovery(source("Golf Course"));
+    const result = await enrichClubCaddieDiscovery(initial, "Golf Course", publicIdentityFetch("<h1>Golf Course</h1>"));
+    expect(result.apiMetadata).toBeUndefined();
   });
 
   it("rejects target changes and leaves access challenges unaccepted", async () => {

@@ -1643,7 +1643,9 @@ export async function enrichClubCaddieDiscovery(
       getKnownProviderFamilyForHostname(official.hostname)) return discovery;
   const metadata = { provider: "CLUB_CADDIE" as const, bookingBaseUrl: candidate.providerUrl };
   const providerCourseName = await fetchClubCaddiePublicCourseIdentity(metadata, fetchImpl);
-  if (!providerCourseName || normalizeCourseIdentityName(courseName).split(" ").length < 2 ||
+  const identityCore = normalizeCourseIdentityName(courseName);
+  if (!providerCourseName || !identityCore ||
+      (!haveCompatibleOfficialPageCourseNames(courseName, providerCourseName) && identityCore.split(" ").length < 2) ||
       !haveSameOfficialCourseIdentityCore(courseName, providerCourseName) ||
       hasConflictingOfficialCourseIdentityDiscriminator(courseName, providerCourseName)) return discovery;
   return {
