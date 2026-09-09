@@ -4684,6 +4684,84 @@ describe("parked course campaign", () => {
     }
   });
 
+  it("retains real-shaped scheduled monitoring across a deployment only with connected provider proof", async () => {
+    const oldRuntime = "e".repeat(40);
+    const runtime = "a".repeat(40);
+    const audit = createParkedCourseCampaignAudit({ expectedCount: 2, capturedAt, members: [member(1), member(2)] });
+    // Two original courses: separate normal closeouts, followed by the same newer release.
+    const fixtures = [
+      ["15:01:08.486", "15:29:49.917", "15:30:20.249", "16:35:14.873", "16:35:18.173"],
+      ["15:38:49.897", "15:44:48.825", "15:45:17.064", "16:35:18.203", "16:35:20.346"],
+    ].map(([confirmed, terminal, resolved, provider, probe], index) => {
+      const date = (time: string) => new Date(`2026-09-09T${time}Z`);
+      const incident = {
+        id: `incident-${index + 1}`, courseId: `course-${index + 1}`, cycle: 4,
+        status: "RESOLVED", activeBatchId: null, confirmedAt: date(confirmed),
+        resolvedAt: date(resolved), resolution: "MONITORING_RESTORED", decisionAt: null,
+        monitoringEvents: [{
+          eventType: "RECOVERED", source: "COURSE_SUPPORT_RESPONDER", occurredAt: date(terminal),
+          runtimeVersion: oldRuntime, deploymentSha: oldRuntime, outcome: "MATCH_FOUND",
+          audit: { cycle: 4, confirmedAt: date(confirmed).toISOString(), automatedFinal: true, freshRuntimeProof: true },
+        }],
+        course: {
+          monitoringStatus: { state: "HEALTHY", stateChangedAt: date(resolved) },
+          probes: [{
+            outcome: "MATCH_FOUND", observedAt: date(probe), runtimeVersion: runtime,
+            rawSummary: { providerExecution: "RUNNABLE_PROVIDER_CHECK", providerObservedAt: date(provider).toISOString(), visibleSlotCount: 33 },
+          }],
+        },
+      };
+      return {
+        incident,
+        check: { incidentId: incident.id, courseId: incident.courseId, occurredAt: date(provider), runtimeVersion: runtime, outcome: "MATCH_FOUND", audit: null as unknown },
+        deployment: { id: `cm_deploy_${runtime}`, runtimeVersion: runtime, startedAt: date("16:25:05.644") },
+      };
+    });
+    const load = async (rows = fixtures, omitCheck = false, omitDeployment = false) => {
+      const checks = vi.fn().mockResolvedValue(omitCheck ? [] : rows.map((row) => row.check));
+      const deployments = vi.fn().mockResolvedValue(omitDeployment ? [] : rows.map((row) => row.deployment));
+      const observations = await loadCampaignMemberObservations(audit, new Set(), "campaign", {
+        courseSupportIncident: { findMany: vi.fn().mockResolvedValue(rows.map((row) => row.incident)) },
+        courseSupportBatchIncident: { findMany: vi.fn().mockResolvedValue([]) },
+        courseMonitoringEvent: { findMany: checks }, automationRun: { findMany: deployments },
+      } as never);
+      return { observations, checks, deployments, progress: summarizeParkedCourseCampaignProgress({ audit, observations, remainingGlobalParkedCount: 0 }) };
+    };
+    const result = await load();
+    expect(result.progress.monitoredCount).toBe(2);
+    expect(result.observations.every((row) => row.campaignTerminalRuntimeVersion === oldRuntime)).toBe(true);
+    expect(result.checks).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({
+      eventType: "CHECK_SUCCEEDED", source: "SEARCH_WORKFLOW", toState: "HEALTHY",
+      OR: fixtures.map(({ incident, check }) => ({ incidentId: incident.id, courseId: incident.courseId, occurredAt: check.occurredAt, runtimeVersion: runtime })),
+    }) }));
+    expect(result.deployments).toHaveBeenCalledWith(expect.objectContaining({ where: {
+      id: { in: [`cm_deploy_${runtime}`] }, promptVersion: "course-monitoring-deployment-revalidation-v1",
+      kind: "MAINTENANCE", status: "COMPLETED", outcome: "deployment_observed",
+    } }));
+    expect((await load(fixtures, true)).progress.monitoredCount).toBe(0);
+    expect((await load(fixtures, false, true)).progress.monitoredCount).toBe(0);
+    const mutations: Array<(row: typeof fixtures[number]) => void> = [
+      (row) => { row.check.audit = { ignoredForRecovery: true }; },
+      (row) => { row.check.incidentId = "another-incident"; },
+      (row) => { row.check.outcome = "NO_MATCH"; },
+      (row) => { row.check.occurredAt = new Date("2026-09-09T16:30:00Z"); },
+      (row) => { row.deployment.startedAt = new Date("2026-09-09T16:40:00Z"); },
+      (row) => { row.deployment.runtimeVersion = oldRuntime; },
+      (row) => { row.incident.course.probes[0].rawSummary.providerExecution = "BOOKING_WINDOW_SKIP"; },
+      (row) => { row.incident.course.probes[0].rawSummary.providerObservedAt = "invalid"; },
+      (row) => { row.incident.course.probes[0].rawSummary.providerObservedAt = "2026-09-09T15:00:00Z"; },
+      (row) => { row.incident.course.probes[0].outcome = "FETCH_FAILED"; },
+      (row) => { row.incident.monitoringEvents[0].audit.freshRuntimeProof = false; },
+      (row) => { row.incident.cycle = 5; },
+      (row) => { row.incident.status = "AUTO_INVESTIGATING"; },
+    ];
+    for (const mutate of mutations) {
+      const rows = structuredClone(fixtures);
+      rows.forEach(mutate);
+      expect((await load(rows)).progress.monitoredCount).toBe(0);
+    }
+  });
+
   it("accepts an exact fresh responder terminal read when no CourseProbe row was needed", () => {
     const audit = createParkedCourseCampaignAudit({
       expectedCount: 1,

@@ -219,6 +219,8 @@ export type ParkedCourseCampaignMemberObservation = {
   campaignTerminalOutcome: string | null;
   campaignTerminalFreshRuntimeProof: boolean;
   campaignTerminalAutomatedFinal: boolean | null;
+  // A later deployment must independently prove the latest provider execution.
+  latestProbeContinuationVerified?: boolean;
   currentlyParked: boolean;
   humanReviewCycles: number[];
 };
@@ -626,7 +628,10 @@ type ParkedCourseCampaignDependencies = {
 
 type ParkedCourseCampaignDatabase = Pick<
   Prisma.TransactionClient,
-  "automationRun" | "courseSupportIncident" | "courseSupportBatchIncident"
+  | "automationRun"
+  | "courseSupportIncident"
+  | "courseSupportBatchIncident"
+  | "courseMonitoringEvent"
 > & Partial<Pick<Prisma.TransactionClient, "localReaderAgent" | "localReaderJob" | "teeSearch">>;
 
 export function parseParkedCourseCampaignAudit(value: unknown) {
@@ -1087,9 +1092,14 @@ function getFreshTerminalKind(
     if (
       observation.monitoringState !== "HEALTHY" ||
       (!freshProbe && !freshTerminalRead) ||
+      (observation.latestProbe &&
+        observation.latestProbe.observedAt >=
+          observation.campaignTerminalEvidenceAt &&
+        !freshProbe) ||
       (freshProbe &&
         observation.latestProbe?.runtimeVersion !==
-          observation.campaignTerminalRuntimeVersion)
+          observation.campaignTerminalRuntimeVersion &&
+        observation.latestProbeContinuationVerified !== true)
     ) {
       return null;
     }
@@ -5879,7 +5889,7 @@ export async function loadCampaignMemberObservations(
     entries.push(entry);
     legacyEntriesByIncidentId.set(entry.incidentId, entries);
   }
-  return incidents.map((incident) => {
+  const observations = incidents.map((incident) => {
     const member = memberByIncidentId.get(incident.id);
     const terminalCandidate = [...incident.monitoringEvents]
       .reverse()
@@ -5985,6 +5995,94 @@ export async function loadCampaignMemberObservations(
       }),
     };
   });
+  const continuations = observations.flatMap((observation) => {
+    const probe = observation.latestProbe;
+    const summary = asCampaignRecord(probe?.rawSummary);
+    const providerObservedAt =
+      typeof summary.providerObservedAt === "string"
+        ? new Date(summary.providerObservedAt)
+        : null;
+    if (
+      observation.resolution !== "MONITORING_RESTORED" ||
+      observation.monitoringState !== "HEALTHY" ||
+      !probe ||
+      !observation.confirmedAt ||
+      !observation.campaignTerminalEvidenceAt ||
+      !isFreshSuccessfulProbe(probe, observation.confirmedAt) ||
+      !probe.runtimeVersion ||
+      !/^[a-f0-9]{40}$/u.test(probe.runtimeVersion) ||
+      probe.runtimeVersion === observation.campaignTerminalRuntimeVersion ||
+      summary.providerExecution !== "RUNNABLE_PROVIDER_CHECK" ||
+      !providerObservedAt ||
+      !Number.isFinite(providerObservedAt.getTime()) ||
+      providerObservedAt < observation.confirmedAt ||
+      providerObservedAt < observation.campaignTerminalEvidenceAt ||
+      providerObservedAt > probe.observedAt
+    ) {
+      return [];
+    }
+    return [{ observation, probe, providerObservedAt }];
+  });
+  if (continuations.length === 0) return observations;
+  const [checks, deployments] = await Promise.all([
+    database.courseMonitoringEvent.findMany({
+      where: {
+        eventType: "CHECK_SUCCEEDED",
+        source: "SEARCH_WORKFLOW",
+        toState: "HEALTHY",
+        OR: continuations.map(({ observation, probe, providerObservedAt }) => ({
+          incidentId: observation.incidentId,
+          courseId: observation.courseId,
+          occurredAt: providerObservedAt,
+          runtimeVersion: probe.runtimeVersion,
+        })),
+      },
+      select: {
+        incidentId: true,
+        courseId: true,
+        occurredAt: true,
+        runtimeVersion: true,
+        outcome: true,
+        audit: true,
+      },
+    }),
+    database.automationRun.findMany({
+      where: {
+        id: {
+          in: [...new Set(continuations.map(({ probe }) => `cm_deploy_${probe.runtimeVersion}`))],
+        },
+        promptVersion: "course-monitoring-deployment-revalidation-v1",
+        kind: "MAINTENANCE",
+        status: "COMPLETED",
+        outcome: "deployment_observed",
+      },
+      select: { id: true, runtimeVersion: true, startedAt: true },
+    }),
+  ]);
+  return observations.map((observation) => ({
+    ...observation,
+    latestProbeContinuationVerified: continuations.some(
+      (candidate) =>
+        candidate.observation === observation &&
+        deployments.some(
+          (deployment) =>
+            deployment.id === `cm_deploy_${candidate.probe.runtimeVersion}` &&
+            deployment.runtimeVersion === candidate.probe.runtimeVersion &&
+            deployment.startedAt <= candidate.providerObservedAt,
+        ) &&
+        checks.some(
+          (check) =>
+            check.incidentId === observation.incidentId &&
+            check.courseId === observation.courseId &&
+            check.runtimeVersion === candidate.probe.runtimeVersion &&
+            check.outcome === candidate.probe.outcome &&
+            check.occurredAt.getTime() === candidate.providerObservedAt.getTime() &&
+            // Ordinary server successes have no audit. Do not accept ignored,
+            // retained-final or separately audited reader observations here.
+            check.audit === null,
+        ),
+    ),
+  }));
 }
 
 async function loadCampaignProgressFromDatabase(
