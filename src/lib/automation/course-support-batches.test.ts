@@ -30039,6 +30039,33 @@ describe("detached verification atomic batch fences", () => {
     );
   });
 
+  it("closes mixed-runtime source evidence through its derived fresh-cycle route without a tooling failure", async () => {
+    const batch = closeoutBatch("RETRY_SCHEDULED", {
+      kind: "PROVIDER_VERIFICATION_FAILURE", status: "STALE", outcome: "FETCH_FAILED", failureClass: "MISSING_SOURCE",
+      observedAt: observedAt.toISOString(), completedAt: completedAt.toISOString(), runtimeVersion: releaseSha,
+      providerExecution: false, providerSnapshotFingerprint: providerFingerprint, nextAttemptAt: null,
+      providerRetryNotBeforeAt: null,
+    });
+    const entry = batch.incidents[0];
+    entry.incident.failureClass = "MISSING_METADATA";
+    entry.incident.attemptLedger = mixedRuntimeBrowserAttemptLedger({ cycle: entry.cycle, oldRuntime: "c".repeat(40),
+      releaseSha, firstObservedAt: new Date("2026-07-15T19:52:00.000Z") });
+    const history = JSON.stringify(entry.incident.attemptLedger);
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.transaction.mockImplementation(async (worker: (tx: typeof monitoringTransactionClient) => Promise<unknown>) =>
+      worker(monitoringTransactionClient));
+    await expect(closeoutCourseSupportBatch({ batchId: "batch-1", leaseToken: "lease-1", ownerThreadId: "owner-thread",
+      verificationWatchMode: "WATCH_SETTLED", now })).resolves.toMatchObject({ durableCloseoutRecorded: true,
+      outcome: "retryable_failed", retryCount: 1, needsHumanCount: 0, terminalCount: 0, reusableFamilyRestoredCount: 0 });
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      cycle: { increment: 1 }, status: "AUTO_INVESTIGATING", activeBatchId: null,
+    }) }));
+    expect(JSON.stringify(entry.incident.attemptLedger)).toBe(history);
+  });
+
   it("durably yields retained-source research without consuming independent confirmation or requesting implementation", async () => {
     const native = retainedSourceRecoveryFixture().input;
     const batch = closeoutBatch("PENDING");

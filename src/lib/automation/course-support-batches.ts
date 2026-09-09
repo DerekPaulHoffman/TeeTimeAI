@@ -11346,6 +11346,9 @@ async function closeoutCourseSupportBatchAttempt(
       !deferredFailureHandoffByBatchIncidentId.has(entry.id) &&
       !canContinueIncompletePlaybook &&
       !exhaustedDiscoveryImplementationHandoff &&
+      // This route was derived above from fresh, owned mixed-runtime evidence;
+      // it is not an unchanged retry against a non-transient provider failure.
+      !("freshExactRuntimeSourceCycle" in entry && entry.freshExactRuntimeSourceCycle === true) &&
       !canCloseCourseSupportRetry(
         getEffectiveCourseSupportRetryFailureClass({
           incidentFailureClass: entry.incident.failureClass,
