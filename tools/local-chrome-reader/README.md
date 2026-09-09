@@ -187,6 +187,14 @@ other reader jobs.
 
 ## Security and product boundary
 
+Official-source reader 1.12.2 records a visibly restricted parks page after a
+same-origin `bm-verify` redirect as `ACCESS_RESTRICTED`, without retaining the
+verification query. That URL remains forbidden for navigation and successful
+discovery. The owned responder consumes the signed restriction as one bounded
+stage observation and does not launch a second browser for it. Existing
+independent-confirmation requirements still govern a final technical outcome;
+this observation does not establish monitoring or reopen exhausted courses.
+
 The home machine polls outbound; the backend never opens an inbound connection
 to the machine or submits arbitrary URLs, prompts, or commands. The reader does
 not inspect cookies or browser storage, sign in, choose a tee time, enter a cart,

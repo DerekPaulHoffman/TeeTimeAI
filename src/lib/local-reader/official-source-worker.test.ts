@@ -32,7 +32,8 @@ describe("official-source extension worker and content transport", () => {
     wake({ type: "LOCAL_READER_WAKE" }); await vi.advanceTimersByTimeAsync(60_000);
     expect(sends).toHaveLength(1); expect(vi.getTimerCount()).toBe(0);
   });
-  it.each([0, 2500])("waits through %i ms of empty rendering, follows the directory and submits a signed result", async renderDelay => {
+  it.each([0, 2500, "restricted root", "restricted child"] as const)("transports the actual reader result: %s", async scenario => {
+    const renderDelay = typeof scenario === "number" ? scenario : 0;
     const now = new Date("2026-09-09T19:00:00Z");
     vi.useFakeTimers(); vi.setSystemTime(now);
     const job: OfficialSourceJob = { id: "controlled-source", purpose: "OFFICIAL_SOURCE_DISCOVERY",
@@ -91,15 +92,30 @@ describe("official-source extension worker and content transport", () => {
         for (let i = 0; i < 8; i++) { await Promise.all(pending); await Promise.resolve(); }
       }
     }
+    if (scenario === "restricted root") {
+      pageUrl = "https://parks.cityofomaha.org/golf?bm-verify=opaque-test-value";
+      await visit(`<h1>403 - Access Denied</h1><p>This service is not available in your region.</p>`);
+    } else {
     await visit(`<h2>Omaha Golf Courses</h2><a href="/elmwoodgolf-course"> <img alt="Elmwoodgolf Course"> </a>
       <a href="/johnny-goodman-golf-course">Johnny Goodman Golf Course</a>
       <a href="https://other.example/elmwood">Elmwood Golf Course</a>`);
     expect(navigations).toEqual(["https://parks.cityofomaha.org/elmwoodgolf-course"]); expect(writes).toEqual([]);
-    await visit(`<span class="elementor-heading-title">elmwood golf course</span>
+    if (scenario === "restricted child") {
+      pageUrl += "?bm-verify=opaque-test-value";
+      await visit(`<h1>403 - Access Denied</h1><p>This service is not available in your region.</p>`);
+    } else await visit(`<span class="elementor-heading-title">elmwood golf course</span>
       <span class="elementor-heading-title">Elmwood Golf Course</span><p>6232 Pacific St.</p><footer>Omaha, NE</footer>
       <a href="https://city-of-omaha.book.teeitup.com/?course=8336">Book A Tee Time</a>`);
+    }
     expect(writes).toHaveLength(1); validateOfficialSourceResult(job, writes[0], new Date());
-    expect(writes[0].pages).toHaveLength(2); expect(navigations).toHaveLength(1);
+    expect(writes[0].pages).toHaveLength(scenario === "restricted root" ? 1 : 2);
+    expect(navigations).toHaveLength(scenario === "restricted root" ? 0 : 1);
+    if (typeof scenario === "string") {
+      expect(writes[0].pages.at(-1)).toMatchObject({ status: "ACCESS_RESTRICTED", courseName: null, bookingLinks: [], nextUrls: [] });
+      expect(JSON.stringify(writes)).not.toContain("opaque-test-value");
+      expect(JSON.stringify(writes)).not.toContain("bm-verify");
+      expect(vi.getTimerCount()).toBe(0);
+    }
     expect(storage.pendingJobs).toEqual({}); expect(chrome.tabs.remove).toHaveBeenCalledWith(1);
     expect(storage.lastStatus).toBe("COMPLETED");
   });

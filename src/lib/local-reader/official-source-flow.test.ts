@@ -142,7 +142,7 @@ beforeEach(() => {
 });
 afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); document.body.innerHTML = ""; });
 
-async function claimedObservation(state: ReturnType<typeof fixture>) {
+async function claimedObservation(state: ReturnType<typeof fixture>, restricted = false) {
   expect(await getOwnedOfficialSourceObservation(state.input)).toEqual({ status: "PENDING" });
   expect(await getOwnedOfficialSourceObservation(state.input)).toEqual({ status: "PENDING" });
   expect(state.jobs).toHaveLength(1);
@@ -156,8 +156,10 @@ async function claimedObservation(state: ReturnType<typeof fixture>) {
   document.body.innerHTML = `<span class="elementor-heading-title">${state.selected.heading.toLowerCase()}</span>
     <span class="elementor-heading-title">${state.selected.heading}</span><p>${state.selected.street}</p><footer>Omaha, NE</footer>
     <a href="https://city-of-omaha.book.teeitup.com/?course=${state.selected.oldFacility}">Book a Tee Time</a>`;
+  if (restricted) document.body.innerHTML = `<h1>403 - Access Denied</h1><p>This service is not available in your region.</p>`;
   const result = { purpose: "OFFICIAL_SOURCE_DISCOVERY", jobId: wire.id, contextKey: wire.contextKey, readerVersion: "official-source-v1",
-    observedAt: new Date().toISOString(), pages: [context.TeeTimeOfficialSourceReader.readPage(document, wire.sourceUrl, wire.course)] };
+    observedAt: new Date().toISOString(), pages: [context.TeeTimeOfficialSourceReader.readPage(document,
+      wire.sourceUrl + (restricted ? "?bm-verify=opaque-test-value" : ""), wire.course)] };
   return { wire, result };
 }
 
@@ -258,6 +260,18 @@ async function submit(wire: { id: string; leaseToken: string }, result: unknown,
 }
 
 describe("native owned official-source flow", () => {
+  it("accepts and retains a signed denial without projecting course identity or sending alerts", async () => {
+    const state = fixture(); const { wire, result } = await claimedObservation(state, true);
+    expect((await submit(wire, result)).status).toBe(200);
+    const ready = await getOwnedOfficialSourceObservation(state.input);
+    expect(ready.status).toBe("READY");
+    if (ready.status !== "READY") throw new Error("Missing completed restriction");
+    expect(ready.result.pages[0]).toMatchObject({ pageUrl: wire.sourceUrl, status: "ACCESS_RESTRICTED",
+      courseName: null, street: null, city: null, stateCode: null, bookingLinks: [], nextUrls: [] });
+    expect(JSON.stringify(state.jobs[0].result)).not.toContain("opaque-test-value");
+    expect(db.course.updateMany).not.toHaveBeenCalled(); expect(db.teeSearch.updateMany).not.toHaveBeenCalled();
+    expect(db.teeTimeMatch.updateMany).not.toHaveBeenCalled();
+  });
   it.each(courses)("queues, authenticates, consumes and projects $name without sending alerts", async selected => {
     const state = fixture(selected); const originalLedger = JSON.stringify(state.incident.attemptLedger);
     const { wire, result } = await claimedObservation(state);

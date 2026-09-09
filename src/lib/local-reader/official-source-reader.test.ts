@@ -44,6 +44,18 @@ function result(job: OfficialSourceJob, pages: OfficialSourcePage[]): OfficialSo
 afterEach(() => { document.body.innerHTML = ""; vi.useRealTimers(); });
 
 describe("official-page reading through signed source validation and existing directory discovery", () => {
+  it.each([
+    ["https://parks.cityofomaha.org/golf?bm-verify=opaque", "Public course"],
+    ["https://other.example/golf?bm-verify=opaque", "Access Denied"],
+    ["http://parks.cityofomaha.org/golf?bm-verify=opaque", "Access Denied"],
+    ["https://parks.cityofomaha.org/account?bm-verify=opaque", "Access Denied"],
+    ["https://parks.cityofomaha.org/golf?token=opaque", "Access Denied"],
+    ["https://parks.cityofomaha.org/golf?bm-verify=one&bm-verify=two", "Access Denied"],
+    ["https://parks.cityofomaha.org/golf?bm-verify=opaque#private", "Access Denied"],
+  ])("keeps disallowed navigation and successful observation blocked for %s", (url, text) => {
+    document.body.innerHTML = `<h1>${text}</h1>`;
+    expect(() => context.TeeTimeOfficialSourceReader.readPage(document, url, fixture().job.course)).toThrow();
+  });
   it.each(cases)("resolves $name including its historical visible selector", async row => {
     vi.useFakeTimers(); vi.setSystemTime(now);
     const { job } = fixture(row);

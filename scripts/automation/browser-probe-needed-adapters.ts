@@ -626,8 +626,9 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
           const targetResources = await prepareBrowserProbeTargetResources({
             courseId: target.course.id,
             dryRun: options.dryRun,
-            skipBrowser: officialSource?.status === "READY" && officialSource.result.pages.filter(page =>
-              isCorroboratedOfficialSourcePage(page, officialSource.job.course) && page.bookingLinks.length > 0).length === 1,
+            skipBrowser: officialSource?.status === "READY" && (officialSource.result.pages.some(page => page.status === "ACCESS_RESTRICTED") ||
+              officialSource.result.pages.filter(page =>
+                isCorroboratedOfficialSourcePage(page, officialSource.job.course) && page.bookingLinks.length > 0).length === 1),
             createContext: async () =>
               (await getBrowser()).newContext({ serviceWorkers: "block" }),
           });
@@ -653,6 +654,25 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
           }
           const page = targetResources.page;
           throwIfBrowserProbeAborted(options.signal);
+          if (officialSource?.status === "READY" && officialSource.result.pages.some(page => page.status === "ACCESS_RESTRICTED") &&
+            playbookRuntime && options.persistenceFence) {
+            // The signed, owner/cycle/source-fenced result is already durable.
+            // Record this bounded stage's restriction; do not launch another
+            // browser, infer an HTTP status, or declare monitoring restored.
+            providerObservation?.markProviderExecutionStarted();
+            const stage = options.persistenceFence.stage;
+            const recorded = await persistBrowserMutation(true, () => recordRuntimePlaybookTransition(playbookRuntime!, {
+              stage, readPath: stage === "RENDERED_BROWSER_DISCOVERY" ? "RENDERED_BROWSER" : "INDEPENDENT_CONFIRMATION",
+              runtimeVersion, providerExecution: true, source: "COURSE_SUPPORT_RESPONDER",
+              expectedProviderSnapshotFingerprint: target.course.providerSnapshotFingerprint!,
+              ...buildBrowserPlaybookTransition({ stage, technicalReason: "OTHER_TECHNICAL_LIMITATION",
+                localReaderTechnicalReason: playbookRuntime!.localReaderTechnicalReason }),
+              onBeforeSourceWrite: transaction => providerObservation!.assertObservationOwnedInTransaction(transaction),
+            }, options.persistenceFence));
+            if (recorded.recorded) persistedCount += 1;
+            notes.push(`${target.course.name}: signed official-source access restriction recorded; no additional browser request.`);
+            continue;
+          }
           const investigationObservedAt =
             providerObservation?.observationStartedAt ?? new Date();
           const observedProviderSnapshotFingerprint =

@@ -58,12 +58,23 @@ globalThis.TeeTimeOfficialSourceReader = (() => {
   }
 
   function readPage(document, pageUrl, expected) {
-    const url = sourceUrl(pageUrl);
-    if (!url) throw new Error("Official source origin or route is not allowed");
     const raw = pageText(document);
     const text = ` ${normalize(raw)} `;
     const blocked = /\b(?:access denied|verify you are human|checking your browser|just a moment|security verification|sign in to continue|log in to continue)\b/iu.test(raw);
-    if (blocked || [...document.querySelectorAll('iframe[src*="challenges.cloudflare"],input[type="password"]')].some(visible)) {
+    const restricted = blocked || [...document.querySelectorAll('iframe[src*="challenges.cloudflare"],input[type="password"]')].some(visible);
+    let url = sourceUrl(pageUrl);
+    if (!url && restricted) {
+      // Observe a denial reached by the provider's redirect, without following
+      // or persisting its opaque verification token. Navigation stays strict.
+      const denied = new URL(pageUrl);
+      if (denied.searchParams.getAll("bm-verify").length === 1 &&
+        [...denied.searchParams.keys()].every(key => key === "bm-verify")) {
+        denied.search = "";
+        url = sourceUrl(denied.href);
+      }
+    }
+    if (!url) throw new Error("Official source origin or route is not allowed");
+    if (restricted) {
       return { pageUrl: url, status: "ACCESS_RESTRICTED", courseName: null,
         street: null, city: null, stateCode: null, bookingLinks: [], nextUrls: [] };
     }

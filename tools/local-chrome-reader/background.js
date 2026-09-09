@@ -647,20 +647,33 @@ async function finishJob(tabId, result) {
 }
 
 async function observeOfficialSourcePage(tabId, senderUrl, message) {
+  let observedUrl = senderUrl;
+  if (message.page?.status === "ACCESS_RESTRICTED" && !isSafeOfficialSourceUrl(senderUrl)) {
+    try {
+      const denied = new URL(senderUrl);
+      if (denied.searchParams.getAll("bm-verify").length === 1 &&
+        [...denied.searchParams.keys()].every(key => key === "bm-verify")) {
+        denied.search = "";
+        observedUrl = denied.href;
+      }
+    } catch { return; }
+  }
   const action = await mutatePendingJobs(jobs => {
     const pending = jobs[String(tabId)];
     if (!pending || pending.result || pending.job.id !== message.jobId ||
-      !isAllowlistedOfficialSourceJob(pending.job) || !isSafeOfficialSourceUrl(senderUrl) ||
-      message.page?.pageUrl !== senderUrl) return { changed: false, value: null };
+      !isAllowlistedOfficialSourceJob(pending.job) || !isSafeOfficialSourceUrl(observedUrl) ||
+      message.page?.pageUrl !== observedUrl) return { changed: false, value: null };
     const key = value => value.replace(/\/$/u, "");
     const traversal = pending.sourceTraversal || { pages: [], queue: [], depth: 0, requestedUrl: pending.job.sourceUrl };
     // A retained root may redirect within this origin; later navigation may
     // only canonicalize a trailing slash on the course-specific chosen link.
-    if ((traversal.pages.length && key(traversal.requestedUrl) !== key(senderUrl)) ||
-      traversal.pages.some(page => key(page.pageUrl) === key(senderUrl)) || traversal.pages.length >= 12) {
+    if ((traversal.pages.length && key(traversal.requestedUrl) !== key(observedUrl)) ||
+      traversal.pages.some(page => key(page.pageUrl) === key(observedUrl)) || traversal.pages.length >= 12) {
       return { changed: false, value: null };
     }
     const page = message.page;
+    if (page.status === "ACCESS_RESTRICTED" && (page.courseName || page.street || page.city || page.stateCode ||
+      page.bookingLinks?.length || page.nextUrls?.length)) return { changed: false, value: null };
     if (!Array.isArray(page.nextUrls) || page.nextUrls.length > 12 ||
       !page.nextUrls.every(isSafeOfficialSourceUrl) || !Array.isArray(page.bookingLinks)) {
       return { changed: false, value: null };
