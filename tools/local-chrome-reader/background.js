@@ -6,6 +6,7 @@ const POLL_PERIOD_MINUTES = 1;
 const MAX_CONCURRENT_JOBS = 2;
 const BACKEND_FETCH_TIMEOUT_MS = 10_000;
 const READER_CAPABILITIES = Object.freeze([
+  ["OFFICIAL_SOURCE_RENDERED", 1],
   ["CPS_RENDERED", 2],
   ["CHRONOGOLF_RENDERED", 1],
   ["TENFORE_RENDERED", 2],
@@ -313,6 +314,31 @@ function isAllowlistedMemberSportsJob(job) {
   }
 }
 
+function isSafeOfficialSourceUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.origin === "https://parks.cityofomaha.org" && !url.username && !url.password &&
+      !url.search && !url.hash && /^\/[a-z0-9/-]*$/u.test(url.pathname) &&
+      !/(?:login|signin|account|checkout|reserve|payment|captcha|challenge)/iu.test(url.pathname);
+  } catch { return false; }
+}
+
+function isAllowlistedOfficialSourceJob(job) {
+  try {
+    const retained = new URL(job.course.website);
+    if (retained.protocol === "http:") retained.protocol = "https:";
+    return job.purpose === "OFFICIAL_SOURCE_DISCOVERY" &&
+      job.courseKey === "official-source:parks.cityofomaha.org" &&
+      /^[a-f0-9]{64}$/u.test(job.contextKey) && isSafeOfficialSourceUrl(job.sourceUrl) &&
+      job.bookingUrl === job.sourceUrl && retained.href === job.sourceUrl &&
+      ["id", "name", "address", "city", "stateCode", "timeZone"].every(key =>
+        typeof job.course[key] === "string" && job.course[key].trim().length > 0 && job.course[key].length <= 500) &&
+      Date.parse(job.expiresAt) > Date.now() &&
+      Date.parse(job.requestedAt) <= Date.now() && Date.parse(job.expiresAt) > Date.parse(job.requestedAt) &&
+      Date.parse(job.expiresAt) - Date.parse(job.requestedAt) <= 300_000;
+  } catch { return false; }
+}
+
 function isAllowlistedJob(job) {
   try {
     const required = job?.requiredCapability;
@@ -328,6 +354,7 @@ function isAllowlistedJob(job) {
       return false;
     }
     const expectedCapability = [
+      [isAllowlistedOfficialSourceJob, "OFFICIAL_SOURCE_RENDERED", 1],
       [isAllowlistedCpsJob, "CPS_RENDERED", 1, 2],
       [isAllowlistedChronogolfJob, "CHRONOGOLF_RENDERED", 1],
       // Parser v2 can safely finish v1 jobs during an extension-first rollout.
@@ -574,12 +601,13 @@ async function submitPendingResult(tabId, pending) {
       delete jobs[String(tabId)];
       return { changed: true, value: true };
     });
-    const resultDetail =
+    const sourceResult = result.purpose === "OFFICIAL_SOURCE_DISCOVERY";
+    const resultDetail = sourceResult ? "Official course source observation submitted." :
       result.status === "AVAILABLE" || result.status === "NO_AVAILABILITY"
         ? `${pending.job.courseKey} ${pending.job.targetDate}: ${result.slots.length} slots`
         : `${pending.job.courseKey} ${pending.job.targetDate}: ${result.pageTitle}`;
     await setLastStatus(
-      result.status === "AVAILABLE" || result.status === "NO_AVAILABILITY"
+      sourceResult || result.status === "AVAILABLE" || result.status === "NO_AVAILABILITY"
         ? "COMPLETED"
         : result.status,
       resultDetail
@@ -616,6 +644,50 @@ async function finishJob(tabId, result) {
   } finally {
     if (pending.closeTabOnFinish !== false) await closePendingTab(tabId);
   }
+}
+
+async function observeOfficialSourcePage(tabId, senderUrl, message) {
+  const action = await mutatePendingJobs(jobs => {
+    const pending = jobs[String(tabId)];
+    if (!pending || pending.result || pending.job.id !== message.jobId ||
+      !isAllowlistedOfficialSourceJob(pending.job) || !isSafeOfficialSourceUrl(senderUrl) ||
+      message.page?.pageUrl !== senderUrl) return { changed: false, value: null };
+    const key = value => value.replace(/\/$/u, "");
+    const traversal = pending.sourceTraversal || { pages: [], queue: [], depth: 0, requestedUrl: pending.job.sourceUrl };
+    // A retained root may redirect within this origin; later navigation may
+    // only canonicalize a trailing slash on the course-specific chosen link.
+    if ((traversal.pages.length && key(traversal.requestedUrl) !== key(senderUrl)) ||
+      traversal.pages.some(page => key(page.pageUrl) === key(senderUrl)) || traversal.pages.length >= 12) {
+      return { changed: false, value: null };
+    }
+    const page = message.page;
+    if (!Array.isArray(page.nextUrls) || page.nextUrls.length > 12 ||
+      !page.nextUrls.every(isSafeOfficialSourceUrl) || !Array.isArray(page.bookingLinks)) {
+      return { changed: false, value: null };
+    }
+    traversal.pages.push(page);
+    if (page.status !== "ACCESS_RESTRICTED" && traversal.depth < 2) {
+      for (const url of page.nextUrls) {
+        if (!traversal.pages.some(seen => key(seen.pageUrl) === key(url)) &&
+          !traversal.queue.some(queued => key(queued.url) === key(url))) {
+          traversal.queue.push({ url, depth: traversal.depth + 1 });
+        }
+      }
+    }
+    const next = page.status !== "ACCESS_RESTRICTED" && page.bookingLinks.length === 0 &&
+      traversal.pages.length < 12 ? traversal.queue.shift() : null;
+    if (next) {
+      traversal.depth = next.depth; traversal.requestedUrl = next.url;
+      pending.sourceTraversal = traversal;
+      return { changed: true, value: { url: next.url } };
+    }
+    pending.sourceTraversal = traversal;
+    return { changed: true, value: { result: { purpose: "OFFICIAL_SOURCE_DISCOVERY",
+      jobId: pending.job.id, contextKey: pending.job.contextKey, readerVersion: "official-source-v1",
+      observedAt: new Date().toISOString(), pages: traversal.pages } } };
+  });
+  if (action?.url) await chrome.tabs.update(tabId, { url: action.url });
+  else if (action?.result) await finishJob(tabId, action.result);
 }
 
 async function poll() {
@@ -765,6 +837,9 @@ chrome.runtime.onMessage.addListener((message, sender) => {
   }
   if (message?.type === "LOCAL_READER_RESULT" && sender.tab?.id) {
     return finishJob(sender.tab.id, message.result);
+  }
+  if (message?.type === "LOCAL_READER_SOURCE_PAGE" && sender.tab?.id && sender.url) {
+    return observeOfficialSourcePage(sender.tab.id, sender.url, message);
   }
   if (message?.type === "LOCAL_READER_POLL_NOW") {
     void poll();

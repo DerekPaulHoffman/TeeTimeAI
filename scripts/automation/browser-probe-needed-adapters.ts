@@ -78,6 +78,9 @@ import {
   type CourseSupportBrowserPersistenceGuard,
 } from "@/lib/automation/course-support-browser-stages";
 import { resolveProviderCapability } from "@/lib/automation/provider-capabilities";
+import { isCorroboratedOfficialSourcePage, normalizeOfficialSourceUrl } from "@/lib/local-reader/official-source-contracts";
+import { getOwnedOfficialSourceObservation } from "@/lib/local-reader/official-source-jobs";
+import { discoverFromOfficialSource } from "@/lib/local-reader/official-source-discovery";
 import {
   beginCourseProviderObservation,
   markCourseProviderObservationUnreconciled,
@@ -307,6 +310,7 @@ export async function prepareBrowserProbeTargetResources<
   courseId: string;
   dryRun: boolean;
   createContext: () => Promise<TContext>;
+  skipBrowser?: boolean;
   beginObservation?: typeof beginPersistedBrowserProviderObservation;
 }) {
   const providerObservation = input.dryRun
@@ -325,6 +329,7 @@ export async function prepareBrowserProbeTargetResources<
 
   let context: TContext | null = null;
   try {
+    if (input.skipBrowser) return { outcome: "ready" as const, providerObservation, context: null, page: null, error: null };
     // Acquire the durable provider-observation fence before any target-scoped
     // browser resource is opened. If context/page creation itself fails, the
     // caller can now record that exact browser-stage tooling attempt without
@@ -551,10 +556,12 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
       return { targetCount: 0, persistedCount: 0 };
     }
 
-    const browser = await runPersistableBrowserOperation(() =>
-      chromium.launch()
-    );
-    const closeBrowser = createBrowserProbeResourceCloser(browser);
+    let browser: ReturnType<typeof chromium.launch> | null = null;
+    const getBrowser = () => {
+      throwIfBrowserProbeAborted(options.signal);
+      return browser ??= runPersistableBrowserOperation(() => chromium.launch());
+    };
+    const closeBrowser = createBrowserProbeResourceCloser({ close: async () => { if (browser) await (await browser).close(); } });
     const removeBrowserAbortCleanup = closeBrowserProbeResourceOnAbort(
       options.signal,
       closeBrowser
@@ -603,11 +610,26 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
             );
             continue;
           }
+          const sourceCourse = target.course;
+          const officialSource = !options.dryRun && options.persistenceFence && !target.unprojectedSourceCandidate &&
+            sourceCourse.website && normalizeOfficialSourceUrl(sourceCourse.website) && sourceCourse.address &&
+            sourceCourse.city && sourceCourse.stateCode && sourceCourse.timeZone && sourceCourse.providerSnapshotFingerprint
+            ? await getOwnedOfficialSourceObservation({ fence: options.persistenceFence,
+                providerSnapshotFingerprint: sourceCourse.providerSnapshotFingerprint,
+                course: { id: sourceCourse.id, name: sourceCourse.name, website: sourceCourse.website,
+                  address: sourceCourse.address, city: sourceCourse.city, stateCode: sourceCourse.stateCode, timeZone: sourceCourse.timeZone } })
+            : null;
+          if (officialSource?.status === "PENDING") {
+            notes.push(`${target.course.name}: waiting for the current owned official-source reader job.`);
+            continue;
+          }
           const targetResources = await prepareBrowserProbeTargetResources({
             courseId: target.course.id,
             dryRun: options.dryRun,
-            createContext: () =>
-              browser.newContext({ serviceWorkers: "block" }),
+            skipBrowser: officialSource?.status === "READY" && officialSource.result.pages.filter(page =>
+              isCorroboratedOfficialSourcePage(page, officialSource.job.course) && page.bookingLinks.length > 0).length === 1,
+            createContext: async () =>
+              (await getBrowser()).newContext({ serviceWorkers: "block" }),
           });
           providerObservation = targetResources.providerObservation;
           if (targetResources.context) {
@@ -692,11 +714,29 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
             website: target.course.website,
             bookingMetadata: target.course.bookingMetadata,
           }).providerFamilyKey;
-          const providerExecution = await runWithProviderRequestLease(
+          const nativeSourceDiscovery = officialSource?.status === "READY" && options.persistenceFence
+            ? await discoverFromOfficialSource({ job: officialSource.job, result: officialSource.result,
+                cycle: options.persistenceFence.cycle, runtimeVersion, stage: options.persistenceFence.stage,
+                now: new Date(), runWithProviderLease: (family, worker) =>
+                  runWithProviderRequestLease(family, () => runPersistableBrowserOperation(worker)),
+                fetchImpl: (...args) => {
+                  browserProviderExecutionStarted = true;
+                  providerObservation?.markProviderExecutionStarted();
+                  return fetch(...args);
+                } })
+            : null;
+          if (nativeSourceDiscovery?.status === "DEFERRED") {
+            notes.push(`${target.course.name}: official-source directory read deferred by provider concurrency.`);
+            continue;
+          }
+          const providerExecution = nativeSourceDiscovery?.status === "OBSERVED"
+            ? { acquired: true as const, value: nativeSourceDiscovery.evidence }
+            : await runWithProviderRequestLease(
             providerFamilyKey,
             () =>
-              runPersistableBrowserOperation(() =>
-                collectBrowserEvidence(
+              runPersistableBrowserOperation(() => {
+                if (!page) throw new Error("Official source discovery unexpectedly required another browser read");
+                return collectBrowserEvidence(
                   page,
                   {
                     courseId: target.course.id,
@@ -727,8 +767,8 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
                       providerObservation?.markProviderExecutionStarted();
                     }
                   }
-                )
-              )
+                );
+              })
           );
           if (!providerExecution.acquired) {
             if (options.dryRun) {
@@ -788,10 +828,12 @@ export async function runBrowserProbe(options: BrowserProbeOptions) {
               ) ?? undefined,
           };
           const initialDiscovery = attachBrowserInvestigationAudit(
-            buildBrowserDiscovery(evidence),
+            nativeSourceDiscovery?.status === "OBSERVED" ? nativeSourceDiscovery.discovery : buildBrowserDiscovery(evidence),
             evidence.browserInvestigation,
           );
-          const enrichment = await enrichBrowserDiscoveryWithProviderLease(
+          const enrichment = nativeSourceDiscovery?.status === "OBSERVED"
+            ? { acquired: true as const, discovery: initialDiscovery }
+            : await enrichBrowserDiscoveryWithProviderLease(
             initialDiscovery,
             target.course.name,
             (enrichmentProviderFamilyKey, worker) =>

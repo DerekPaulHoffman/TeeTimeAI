@@ -420,7 +420,7 @@ describe("browser probe direct entry", () => {
     expect(getPersistableBrowserOperationFailure(caught)).toBe("NETWORK");
   });
 
-  it("acquires the persisted observation before opening target browser resources", async () => {
+  it.each([false, true])("retains observation ownership with source-reader browser skipping=%s", async (skipBrowser) => {
     const order: string[] = [];
     const page = {} as never;
     const context = {
@@ -441,6 +441,7 @@ describe("browser probe direct entry", () => {
     const result = await prepareBrowserProbeTargetResources({
       courseId: "course-1",
       dryRun: false,
+      skipBrowser,
       beginObservation: vi.fn(async () => {
         order.push("observation");
         return observation;
@@ -454,11 +455,11 @@ describe("browser probe direct entry", () => {
     expect(result).toMatchObject({
       outcome: "ready",
       providerObservation: observation,
-      context,
-      page,
+      context: skipBrowser ? null : context,
+      page: skipBrowser ? null : page,
       error: null,
     });
-    expect(order).toEqual(["observation", "context", "page"]);
+    expect(order).toEqual(skipBrowser ? ["observation"] : ["observation", "context", "page"]);
   });
 
   it("retains the observation fence when target resource creation fails", async () => {

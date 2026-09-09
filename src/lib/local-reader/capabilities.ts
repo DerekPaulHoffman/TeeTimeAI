@@ -6,6 +6,7 @@ export const localReaderCapabilitySchema = z
   .object({
     key: z.enum([
       "CPS_RENDERED",
+      "OFFICIAL_SOURCE_RENDERED",
       "CHRONOGOLF_RENDERED",
       "TENFORE_RENDERED",
       "EZLINKS_RENDERED",

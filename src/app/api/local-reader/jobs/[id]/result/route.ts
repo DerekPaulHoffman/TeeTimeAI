@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { hasDatabaseConfig } from "@/lib/env";
 import { assertLocalReaderRequest } from "@/lib/local-reader/auth";
 import { localReaderResultSchema } from "@/lib/local-reader/contracts";
+import { officialSourceResultSchema } from "@/lib/local-reader/official-source-contracts";
 import { completeLocalReaderJob } from "@/lib/local-reader/service";
 
 export async function POST(
@@ -17,7 +18,7 @@ export async function POST(
     return NextResponse.json({ error: "Local reader jobs are unavailable." }, { status: 503 });
   }
   const { id } = await context.params;
-  const result = localReaderResultSchema.parse(JSON.parse(body));
+  const result = localReaderResultSchema.or(officialSourceResultSchema).parse(JSON.parse(body));
   if (result.jobId !== id) {
     return NextResponse.json({ error: "Job mismatch" }, { status: 409 });
   }

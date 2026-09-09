@@ -399,7 +399,9 @@ describe("local Chrome reader contract", () => {
     );
     const contentMatches = manifest.content_scripts.flatMap((entry) => entry.matches);
 
-    expect(manifest.version).toBe("1.11.3");
+    expect(manifest.version).toBe("1.12.0");
+    expect(manifest.host_permissions).toContain("https://parks.cityofomaha.org/*");
+    expect(contentMatches).toContain("https://parks.cityofomaha.org/*");
     expect(manifest.host_permissions).toContain("https://*.cps.golf/*");
     expect(contentMatches).toContain("https://*.cps.golf/onlineresweb/search-teetime*");
     expect(manifest.host_permissions).toContain("https://www.chronogolf.com/*");

@@ -21,6 +21,9 @@ import {
 } from "@/lib/automation/worker-state";
 import { prisma } from "@/lib/prisma";
 import { createLocalReaderCourseVerificationKey } from "./course-verification-key";
+import { buildOwnedOfficialSourceClaim, assertOwnedOfficialSourceJobInTransaction, expireInvalidOfficialSourceClaim } from "./official-source-jobs";
+import { validateOfficialSourceResult, type OfficialSourceResult, OFFICIAL_SOURCE_CAPABILITY } from "./official-source-contracts";
+import { revalidateForOfficialSourceReader } from "./official-source-revalidation";
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
 
 import {
@@ -1002,6 +1005,9 @@ export async function claimNextLocalReaderJob(
   if (!claimed) return null;
   const { candidate, leaseToken, leaseExpiresAt, observationLease } = claimed;
   try {
+    if (candidate.purpose === "OFFICIAL_SOURCE_DISCOVERY") {
+      return await buildOwnedOfficialSourceClaim(candidate, leaseToken, leaseExpiresAt);
+    }
     const courseKey = localReaderCourseKeySchema.parse(candidate.courseKey);
     const course = await prisma.course.findUnique({
       where: { id: candidate.courseId },
@@ -1039,6 +1045,9 @@ export async function claimNextLocalReaderJob(
       leaseToken,
       observationLease,
     );
+    if (candidate.purpose === "OFFICIAL_SOURCE_DISCOVERY") {
+      await expireInvalidOfficialSourceClaim(candidate.id);
+    }
     throw error;
   }
 }
@@ -1080,7 +1089,7 @@ async function returnUnstartedLocalReaderClaim(
 export async function completeLocalReaderJob(input: {
   jobId: string;
   leaseToken: string;
-  result: LocalReaderResult;
+  result: LocalReaderResult | OfficialSourceResult;
   receivedAt: Date;
   deviceRequestAt: Date;
 }) {
@@ -1108,6 +1117,11 @@ export async function completeLocalReaderJob(input: {
   }
   const claimedAt = current.claimedAt;
   const leaseExpiresAt = current.leaseExpiresAt;
+  if (current.purpose === "OFFICIAL_SOURCE_DISCOVERY") {
+    if (!("purpose" in input.result)) throw new Error("Official source result purpose mismatch");
+    return completeOfficialSourceJob({ ...input, result: input.result }, current);
+  }
+  if ("purpose" in input.result) throw new Error("Availability result purpose mismatch");
   const normalizedResult = {
     ...input.result,
     // The authenticated device clock is useful only for validating ordering.
@@ -1374,6 +1388,47 @@ export async function completeLocalReaderJob(input: {
   };
 }
 
+async function completeOfficialSourceJob(input: {
+  jobId: string; leaseToken: string; result: OfficialSourceResult; receivedAt: Date; deviceRequestAt: Date;
+}, current: LocalReaderJob) {
+  const completedAt = await runSerializedCourseMonitoringWrite(current.courseId, async transaction => {
+    const row = await transaction.localReaderJob.findUnique({ where: { id: current.id } });
+    if (!row || row.status !== "LEASED" || row.leaseToken !== input.leaseToken ||
+      !row.claimedAt || !row.leaseExpiresAt || row.claimedAt.getTime() !== current.claimedAt?.getTime()) {
+      throw new Error("Official source reader lease changed");
+    }
+    const { job, now } = await assertOwnedOfficialSourceJobInTransaction(transaction, row);
+    if (row.leaseExpiresAt <= now || !hasCausallyValidAuthenticatedLocalReaderObservation({
+      observedAtValue: input.result.observedAt, deviceRequestAt: input.deviceRequestAt,
+      claimedAt: row.claimedAt, databaseCompletedAt: now,
+    })) throw new Error("Official source result has invalid authenticated timing");
+    const normalized: OfficialSourceResult = { ...input.result, observedAt: row.claimedAt.toISOString() };
+    validateOfficialSourceResult(job, normalized, now);
+    const observationLease: CourseProviderObservationLease = {
+      courseId: row.courseId, leaseToken: input.leaseToken, observationStartedAt: row.claimedAt,
+      leaseExpiresAt: row.leaseExpiresAt, ttlMs: Math.max(1, row.leaseExpiresAt.getTime() - row.claimedAt.getTime()),
+      supersededUnresolvedObservationStartedAt: null,
+    };
+    if (!(await renewCourseProviderObservationInTransaction(transaction, observationLease))) {
+      throw new Error("Official source observation ownership expired");
+    }
+    const updated = await transaction.localReaderJob.updateMany({ where: {
+      id: row.id, purpose: "OFFICIAL_SOURCE_DISCOVERY", status: "LEASED", leaseToken: input.leaseToken,
+      leaseExpiresAt: { gt: now }, jobExpiresAt: { gt: now },
+    }, data: { status: "COMPLETED", result: normalized as Prisma.InputJsonValue,
+      resultExpiresAt: row.jobExpiresAt, readerVersion: normalized.readerVersion, completedAt: now,
+      leaseToken: null, leaseExpiresAt: null } });
+    if (updated.count !== 1) throw new Error("Official source result lost its lease");
+    await releaseCourseProviderObservationInTransaction(transaction, observationLease);
+    return now;
+  });
+  await recordReaderSuccess({ deviceId: current.deviceId, readerVersion: input.result.readerVersion,
+    capability: OFFICIAL_SOURCE_CAPABILITY, now: completedAt });
+  // Source discovery never queues a customer search or reconciles availability.
+  // The exact owner-bound verifier consumes the result and owns the next stage.
+  return { searchId: null, completedAt, resumeScheduleVersion: null };
+}
+
 function normalizeReaderHandshake(
   input: string | LocalReaderAgentHandshake,
 ): LocalReaderAgentHandshake {
@@ -1491,6 +1546,7 @@ async function recordReaderHeartbeat(
     if (code === "P2002" || code === "P2025") return false;
     throw error;
   }
+  await revalidateForOfficialSourceReader(handshake);
   await completeAutomationWorker(
     AUTOMATION_WORKERS.LOCAL_READER,
     "reader_heartbeat",

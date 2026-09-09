@@ -37,20 +37,23 @@ export function resolveTeeItUpFacilityIdentity(
     ids.add(id);
     facilities.push({ id, name: row.name, address: row.address, timeZone: row.timeZone });
   }
-  const expectedName = nameIdentity(course.name);
   const matches = facilities.filter((facility) => {
-    const candidateName = nameIdentity(facility.name);
     return facility.timeZone === course.timeZone &&
       addressKey(facility.address) === addressKey(course.address) &&
-      expectedName.core.length > 0 && expectedName.core === candidateName.core &&
-      expectedName.holes.size <= 1 && candidateName.holes.size <= 1 &&
-      (!expectedName.holes.size || !candidateName.holes.size ||
-        [...expectedName.holes][0] === [...candidateName.holes][0]);
+      haveCompatibleTeeItUpCourseNames(course.name, facility.name);
   });
   if (matches.length !== 1) {
     return { status: "UNRESOLVED", reason: matches.length ? "AMBIGUOUS" : "NO_MATCH" };
   }
   return { status: "MATCHED", facility: matches[0] };
+}
+
+/** A name clue only; callers must also corroborate address and unique identity. */
+export function haveCompatibleTeeItUpCourseNames(expected: string, observed: string) {
+  const left = nameIdentity(expected);
+  const right = nameIdentity(observed);
+  return left.core.length > 0 && left.core === right.core && left.holes.size <= 1 && right.holes.size <= 1 &&
+    (!left.holes.size || !right.holes.size || [...left.holes][0] === [...right.holes][0]);
 }
 
 function validIdentity(value: unknown): value is CourseIdentity {

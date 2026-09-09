@@ -290,6 +290,7 @@ enum LocalReaderJobStatus {
 enum LocalReaderJobPurpose {
   ALERT_CHECK
   COURSE_VERIFICATION
+  OFFICIAL_SOURCE_DISCOVERY
 }
 
 enum CourseProfileStatus {
@@ -566,6 +567,7 @@ model LocalReaderJob {
   deviceId                  String?
   jobExpiresAt              DateTime
   result                    Json?
+  sourceContext             Json?
   resultExpiresAt           DateTime?
   readerVersion             String?
   requiredCapabilityKey     String?

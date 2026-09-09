@@ -1,0 +1,2 @@
+ALTER TYPE "LocalReaderJobPurpose" ADD VALUE 'OFFICIAL_SOURCE_DISCOVERY';
+ALTER TABLE "LocalReaderJob" ADD COLUMN "sourceContext" JSONB;

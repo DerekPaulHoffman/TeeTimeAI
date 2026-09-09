@@ -1,5 +1,18 @@
 # Local Chrome tee-time reader
 
+Version 1.12 adds an owner-bound official-source observation purpose for the
+approved `https://parks.cityofomaha.org/*` origin. It reads visible course
+identity, address and public booking links, following only matching course
+links within the origin (at most 12 pages through depth two). It does not open
+the booking destination. The server validates the signed job, current batch,
+incident cycle, source snapshot and expiry before the normal verifier resolves
+the provider directory and applies course knowledge. Source observations never
+count as availability or send email; a fresh provider check is still required.
+
+Rollout requires the additive official-source migration and compatible backend
+before this installed extension is reloaded. Preserve the existing extension ID
+and settings. Adding this origin does not grant access to arbitrary websites.
+
 This worker separates a backend job from a local, rendered-page read:
 
 ```text
