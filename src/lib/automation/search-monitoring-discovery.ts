@@ -94,6 +94,54 @@ export function createAddressPinnedPublicFetch(
 
 const addressPinnedPublicFetch = createAddressPinnedPublicFetch();
 
+/** Scope the provider's public bootstrap state to this one identity read. */
+export function createClubCaddieIdentityPublicFetch(
+  bookingUrl: string,
+  dependencies: AddressPinnedPublicFetchDependencies = {}
+): typeof fetch {
+  if (!isProviderPublicBookingLandingUrl(bookingUrl) ||
+      resolveProviderCapability({ detectedBookingUrl: bookingUrl }).providerFamilyKey !== "CLUB_CADDIE") {
+    throw new Error("Identity read requires a public Club Caddie landing");
+  }
+  const base = new URL(bookingUrl);
+  if (base.search || base.hash) throw new Error("Identity read requires a canonical landing");
+  const scope = getProviderPublicBookingLandingIdentity(base);
+  let publicInteraction: string | null = null;
+  const pinned = createAddressPinnedPublicFetchTransport({
+    maxResponseBytes: MAX_HTML_BYTES, redirectLimit: 0, timeoutMs: FETCH_TIMEOUT_MS,
+    parseUrl: (value) => {
+      const url = new URL(value);
+      const canonical = new URL(url);
+      canonical.search = "";
+      if (!isProviderPublicBookingLandingUrl(canonical) ||
+          getProviderPublicBookingLandingIdentity(canonical) !== scope || url.hash) {
+        throw new Error("Public identity request changed provider scope");
+      }
+      const entries = [...url.searchParams.entries()];
+      const isBootstrap = entries.length === 1 && entries[0][0] === "SetSessionIdInLocalStorage" && entries[0][1] === "true";
+      const isCurrentPublicSession = publicInteraction !== null &&
+        url.searchParams.get("Interaction") === publicInteraction &&
+        new Set(entries.map(([key]) => key)).size === entries.length &&
+        entries.every(([key, entry]) => key === "Interaction" ||
+          (key === "date" && /^(?:\d{4}-\d{2}-\d{2}|\d{2}\/\d{2}\/\d{4})$/.test(entry)) ||
+          (key === "player" && /^[0-4]$/.test(entry)) ||
+          (key === "ratetype" && /^[a-z0-9_-]{1,40}$/i.test(entry)));
+      if (!isBootstrap && !isCurrentPublicSession) throw new Error("Public identity request has unverified session state");
+      return url;
+    }
+  }, dependencies);
+  return (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    if (init?.redirect !== "manual") throw new Error("Identity redirects must be checked by the provider reader");
+    const response = await pinned(input, init);
+    const requestUrl = new URL(input instanceof Request ? input.url : String(input));
+    if (requestUrl.searchParams.get("SetSessionIdInLocalStorage") === "true" && response.ok) {
+      const received = response.headers.get("session-id");
+      publicInteraction = received && /^[a-z0-9_-]{8,128}$/i.test(received) ? received : null;
+    }
+    return response;
+  }) as typeof fetch;
+}
+
 class ProviderDiscoveryLeaseDeferredError extends Error {
   constructor() {
     super("Provider discovery capacity is temporarily unavailable");
@@ -985,14 +1033,14 @@ export async function prepareSearchMonitoring(
       const observation = await runWithMonitoringDiscoveryProviderObservation({
         courseId: course.id,
         worker: async (providerObservation) => {
-          const observedFetch = (async (
+          const bindObservedFetch = (transport: typeof fetch) => createProviderLeasedDiscoveryFetch((async (
             input: Parameters<typeof fetch>[0],
             init?: RequestInit
           ) => {
             providerObservation.markProviderExecutionStarted();
-            return publicFetch(input, init);
-          }) as typeof fetch;
-          const leasedFetch = createProviderLeasedDiscoveryFetch(observedFetch);
+            return transport(input, init);
+          }) as typeof fetch);
+          const leasedFetch = bindObservedFetch(publicFetch);
           const forcedPolicyReconciliation =
             forcedPolicyReconciliationCourseIds.has(course.id);
           const markAttempted = () => {
@@ -1051,7 +1099,12 @@ export async function prepareSearchMonitoring(
                 collectedWithCorroboration
               );
             const clubCaddieDiscovery = await enrichClubCaddieDiscovery(
-              legacyProphetAwareDiscovery, course.name, leasedFetch
+              legacyProphetAwareDiscovery, course.name,
+              legacyProphetAwareDiscovery.evidence.clubCaddieIdentityCandidate
+                ? bindObservedFetch(fetchImpl ?? createClubCaddieIdentityPublicFetch(
+                    legacyProphetAwareDiscovery.evidence.clubCaddieIdentityCandidate.providerUrl
+                  ))
+                : leasedFetch
             );
             const chronogolfDiscovery = await enrichChronogolfDiscovery(
               clubCaddieDiscovery,
