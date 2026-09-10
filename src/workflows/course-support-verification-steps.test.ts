@@ -429,6 +429,48 @@ function allowDeferredFailureConfirmation() {
 }
 
 describe("executeCourseSupportVerificationStep", () => {
+  it.each(["ready", "changed snapshot", "reader only", "ownership lost"])(
+    "verifies freshly discovered support after independent completion: %s", async (scenario) => {
+      const runtime = installPlaybookRuntime([
+        ...completedPlaybookSeedThroughBrowserAdapter(),
+        { cycle: 1, stage: "LOCAL_READER", transition: "NOT_APPLICABLE", readPath: "LOCAL_READER",
+          evidenceKind: "TOOLING", skipReason: "NO_LOCAL_READER_CAPABILITY",
+          failureFingerprint: "PLAYBOOK:LOCAL_READER:NO_LOCAL_READER_CAPABILITY", runtimeVersion,
+          observedAt: new Date("2026-07-21T11:58:00Z") },
+        { cycle: 1, stage: "INDEPENDENT_CONFIRMATION", transition: "COMPLETED",
+          readPath: "INDEPENDENT_CONFIRMATION", evidenceKind: "RENDERED_PAGE", providerExecution: true,
+          failureFingerprint: "PLAYBOOK:INDEPENDENT_CONFIRMATION:COMPLETED", runtimeVersion,
+          observedAt: new Date("2026-07-21T11:59:00Z") },
+      ]);
+      expect(runtime.assessment.conclusion).toBe("UNRESOLVED_EXHAUSTED");
+      verificationMocks.attachCourseSupportVerificationProviderSnapshot.mockResolvedValueOnce({
+        attached: true, revision: 4, providerFamilyKeySnapshot: "CPS",
+        providerSnapshotFingerprint: "current-provider-snapshot", discoveryAttemptedAt: null,
+        discoveryVerifiedAt: null, courseId: "course-1", intent,
+        deferredFailureConfirmation: false, runnableDiscoveryVerification: true,
+      });
+      if (scenario === "changed snapshot") verificationMocks.buildCourseSupportProviderSnapshotFingerprint.mockReturnValue("changed");
+      if (scenario === "reader only") prismaMocks.courseFindUnique.mockResolvedValue({ ...course, monitoringMode: "LOCAL_READER_ONLY" });
+      if (scenario === "ownership lost") verificationMocks.markCourseSupportVerificationDiscoveryAttempted.mockResolvedValueOnce({ marked: false, reason: "lease_lost" });
+      providerReadMocks.fetchCourseTeeSheet.mockResolvedValue({ slots: [] });
+      const result = await executeCourseSupportVerificationStep(input);
+      if (scenario === "ready") {
+        expect(result).toEqual({ outcome: "completed", providerOutcome: "NO_MATCH" });
+        expect(providerReadMocks.fetchCourseTeeSheet).toHaveBeenCalledOnce();
+        expect(verificationMocks.completeCourseSupportVerificationRequest).toHaveBeenCalledWith(expect.objectContaining({
+          observation: expect.objectContaining({ outcome: "NO_MATCH", providerExecution: true }),
+        }));
+      } else {
+        expect(result).toMatchObject({ outcome: "stopped" });
+        expect(providerReadMocks.fetchCourseTeeSheet).not.toHaveBeenCalled();
+        expect(verificationMocks.completeCourseSupportVerificationRequest).not.toHaveBeenCalled();
+      }
+      expect(discoveryMocks.prepareCourseSupportVerificationMonitoring).not.toHaveBeenCalled();
+      expect(playbookMocks.recordRuntimePlaybookTransition).not.toHaveBeenCalled();
+      expect(localReaderMocks.queueLocalReaderCourseVerification).not.toHaveBeenCalled();
+    },
+  );
+
   beforeEach(() => {
     vi.clearAllMocks();
     verificationMocks.attachCourseSupportVerificationProviderSnapshot.mockReset();

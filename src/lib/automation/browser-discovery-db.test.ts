@@ -3,7 +3,7 @@ import { Prisma } from "@prisma/client";
 import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 import { prisma } from "@/lib/prisma";
-import { buildBrowserDiscovery } from "./browser-discovery";
+import { buildBrowserDiscovery, enrichChronogolfDiscovery } from "./browser-discovery";
 import { COURSE_PROVIDER_EXECUTION_EVIDENCE_FIELDS } from "./course-provider-execution-evidence";
 import { appendAutomationPlaybookEvent, parseAutomationPlaybookLedger } from "./course-monitoring-playbook";
 import { buildCourseSupportSourceSearchScopeDigest } from "./course-support-source-search";
@@ -21,6 +21,15 @@ import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-
 import { finalizeBrowserInvestigationEvidence, prepareBrowserPageEvidence } from "./browser-probe-evidence";
 import { retainedSourceRecoveryFixture } from "./course-support-retained-source-recovery.test-fixtures";
 import { getCourseSupportRetainedSourceRecovery } from "./course-support-retained-source-recovery";
+import { buildBrowserPlaybookTransition } from "./course-monitoring-playbook-runtime";
+import {
+  scheduleCourseSupportVerificationRequests, claimCourseSupportVerificationRequest,
+  attachCourseSupportVerificationProviderSnapshot, markCourseSupportVerificationDiscoveryAttempted,
+  markCourseSupportVerificationDiscoveryVerified, completeCourseSupportVerificationRequest,
+  getEligibleCourseSupportVerificationProof,
+} from "./course-support-verification";
+import { resolveProviderCapability } from "./provider-capabilities";
+import { fetchChronogolfSlots, isChronogolfMetadata } from "@/lib/adapters/chronogolf";
 
 const providerExecutionMarkerMocks = vi.hoisted(() => ({
   renewCourseProviderObservationInTransaction: vi.fn(),
@@ -53,11 +62,18 @@ vi.mock("@/lib/prisma", () => ({
       updateMany: vi.fn()
     },
     courseSupportBatch: {
+      findUnique: vi.fn(),
       findFirst: vi.fn(),
       updateMany: vi.fn()
     },
     courseSupportBatchIncident: {
       findUnique: vi.fn()
+    },
+    courseSupportVerificationRequest: {
+      findUnique: vi.fn(),
+      createMany: vi.fn(),
+      findMany: vi.fn(),
+      updateMany: vi.fn(),
     },
     courseMonitoringStatus: {
       create: vi.fn(),
@@ -70,6 +86,7 @@ vi.mock("@/lib/prisma", () => ({
       findUnique: vi.fn()
     },
     teeSearch: {
+      count: vi.fn(),
       findMany: vi.fn(),
       updateMany: vi.fn()
     },
@@ -3674,7 +3691,10 @@ describe("browser discovery persistence", () => {
     "candidate unavailable", "candidate digest differs", "claim snapshot differs", "owner changes during candidate read",
     "rejected booking window", "independent strong booking window",
     "course identity changes", "course locality changes",
-    "two neutral observations", "three neutral observations",
+    "two neutral observations", "three neutral observations", "runnable retained source",
+    "runnable retained source unchanged snapshot", "runnable retained source stale discovery",
+    "runnable retained source unbound evidence", "runnable retained source prior runtime",
+    "runnable retained source incomplete provider", "runnable retained source successor owner",
   ])("composes native retained-source research through owned candidate promotion: %s", async (scenario) => {
     const fixture = retainedSourceRecoveryFixture();
     const now = fixture.input.now!;
@@ -3700,6 +3720,7 @@ describe("browser discovery persistence", () => {
       decisionEvidenceUrl: null, decisionIdempotencyKey: null,
       lastSeenAt: fixture.input.incident.confirmedAt, updatedAt: new Date(now.getTime() - 10_000),
       occurrenceCount: 2, attemptCount: 1,
+      activeRealSearchCount: 0, earliestTargetDate: null,
     };
     const course = {
       ...fixture.input.course, id: fence.courseId, name: "Target Harbor Golf Club",
@@ -3818,7 +3839,9 @@ describe("browser discovery persistence", () => {
     const context = await getOwnedCourseSupportSourceSearchContext(sourceInput);
     expect(context.outcome).toBe("ready");
     if (context.outcome !== "ready" || !context.privateContext) throw new Error("Expected fresh owned research context");
-    const candidateUrl = "https://replacement-course.example/golf";
+    const runnableSource = scenario.startsWith("runnable retained source");
+    const candidateUrl = runnableSource ? originalSource! : "https://replacement-course.example/golf";
+    const providerUrl = "https://www.chronogolf.com/club/3286";
     await expect(recordOwnedCourseSupportSourceSearchResult({ ...sourceInput, attemptRef: context.privateContext.attemptRef,
       candidateUrl, runtimeVersion: fence.runtimeVersion })).resolves.toMatchObject({ outcome: "ready", candidateRecorded: true });
     expect(storedEvents).toHaveLength(1);
@@ -3862,17 +3885,33 @@ describe("browser discovery persistence", () => {
         address: course.address, city: course.city, stateCode: course.stateCode, googlePlaceIdPresent: true },
       mode: "INDEPENDENT", unprojectedSourceCandidate: true,
       auditContext: { incidentCycle: fence.cycle, runtimeVersion: fence.runtimeVersion, observedAt: now },
-      providerRequestObserved: true, bookingDestinations: [],
+      providerRequestObserved: true,
+      bookingDestinations: runnableSource ? [{ sourcePageUrl: candidateUrl, requestedUrl: providerUrl, finalUrl: providerUrl,
+        label: "Book a Tee Time", courseScoped: true, interactionBlocked: false,
+        evidence: prepareBrowserPageEvidence({ anchors: [], scripts: [], structuredActionScripts: [], linkCandidates: [],
+          identityCandidates: [course.name], localityCandidates: ["100 Fairway Lane Mesa AZ"], visibleText: course.name }),
+      }] : [],
       pageVisits: [{ requestedUrl: candidateUrl, finalUrl: candidateUrl, label: course.name, depth: 0, parentUrl: null,
         requiresDirectIdentityMatch: true, interactionBlocked: false,
-        evidence: prepareBrowserPageEvidence({ anchors: [], scripts: [], structuredActionScripts: [], linkCandidates: [],
+        evidence: prepareBrowserPageEvidence({ anchors: [], scripts: [], structuredActionScripts: [],
+          linkCandidates: runnableSource ? [{ url: providerUrl, label: "Book a Tee Time" }] : [],
           identityCandidates: [identityMatches ? course.name : "Different Desert Golf Club"],
-          localityCandidates: [localityMatches ? "100 Fairway Lane Mesa AZ" : "900 Other Road Elsewhere CA"],
+          localityCandidates: [localityMatches ? "Cookie notice, course information. 100 Fairway Lane Mesa AZ" : "900 Other Road Elsewhere CA"],
           visibleText: identityMatches ? course.name : "Different Desert Golf Club" }),
       }],
     });
     const discovery = buildBrowserDiscovery(native);
-    const observed = { ...discovery, evidence: { ...discovery.evidence, browserInvestigation: native.browserInvestigation } };
+    // Replay the public profile shape observed for Copper Creek through the real
+    // enrichment and owned persistence services. Network and database remain local.
+    const fetchProfile = vi.fn().mockResolvedValue({ ok: true, url: providerUrl,
+      text: async () => `<script id="__NEXT_DATA__">${JSON.stringify({ props: { pageProps: { club: {
+        id: 3286, features: { onlineBookingEnabled: true },
+        courses: [{ uuid: "1c76a6e4-eb77-4aeb-88cb-2e7457cc56cf" }],
+      } } } })}</script>`,
+    });
+    const learned = runnableSource ? await enrichChronogolfDiscovery(discovery, fetchProfile) : discovery;
+    if (runnableSource) expect(discovery).toMatchObject({ detectedPlatform: "CHRONOGOLF" });
+    const observed = { ...learned, evidence: { ...learned.evidence, browserInvestigation: native.browserInvestigation } };
     if (scenario === "operator wins") incident.decisionAt = now;
     if (scenario === "new success wins") course.monitoringStatus.lastSuccessfulAt = now;
     if (scenario === "source snapshot changes") course.website = "https://newer-authoritative.example/golf";
@@ -3882,8 +3921,121 @@ describe("browser discovery persistence", () => {
     const result = await recordAndApplyOwnedBrowserDiscoveryToCourse(observed, observed, fence, fence.runtimeVersion,
       originalFingerprint, { ...providerObservationLease, courseId: course.id, observationStartedAt: now,
         leaseExpiresAt: new Date(now.getTime() + 900_000) }, now);
-    const shouldApply = ["verified source", "later owned batch", "rejected booking window", "two neutral observations", "three neutral observations"].includes(scenario);
+    const shouldApply = runnableSource || ["verified source", "later owned batch", "rejected booking window", "two neutral observations", "three neutral observations"].includes(scenario);
     expect(Boolean(result.applied)).toBe(shouldApply);
+    if (runnableSource) {
+      expect(fetchProfile).toHaveBeenCalledTimes(1);
+      expect(resolveProviderCapability(course).isRunnable).toBe(true);
+      expect(course.website).toBe(originalSource);
+      expect(course.detectedBookingUrl).toBe(providerUrl);
+      expect(result.snapshotBound).toBe(true);
+      expect(result.providerSnapshotFingerprint).not.toBe(originalFingerprint);
+      expect(incident.cycle).toBe(fence.cycle);
+      expect(incident.activeBatchId).toBe(fence.batchId);
+      expect(course.automationDiscoveries).toEqual(originalDiscoveries);
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      const persistedData = mockedPrisma.courseAutomationDiscovery.create.mock.calls.at(-1)![0].data;
+      course.automationDiscoveries = [{ ...persistedData, createdAt: now }, ...originalDiscoveries!] as typeof course.automationDiscoveries;
+
+      // The normal browser writer appends this completion before the same watch
+      // calls verification. A discovered adapter is still awaiting execution.
+      incident.attemptLedger = appendAutomationPlaybookEvent(incident.attemptLedger, {
+        cycle: fence.cycle, stage: fence.stage, readPath: "INDEPENDENT_CONFIRMATION",
+        runtimeVersion: fence.runtimeVersion, observedAt: now, providerExecution: true,
+        failureFingerprint: "PLAYBOOK:INDEPENDENT_CONFIRMATION:COMPLETED",
+        ...buildBrowserPlaybookTransition({ stage: fence.stage, technicalReason: null, localReaderTechnicalReason: null }),
+      }) as typeof incident.attemptLedger;
+      const latestDiscovery = course.automationDiscoveries![0];
+      const latestBrowser = queryRecord(queryRecord(latestDiscovery.evidence).browserInvestigation);
+      if (scenario.endsWith("unchanged snapshot")) batch.summary.remediation.attempts[0].providerSnapshotFingerprint = result.providerSnapshotFingerprint!;
+      if (scenario.endsWith("stale discovery")) {
+        latestDiscovery.createdAt = new Date(now.getTime() - 120_000);
+        latestBrowser.observedAt = latestDiscovery.createdAt.toISOString();
+      }
+      if (scenario.endsWith("unbound evidence")) latestBrowser.providerSnapshotFingerprint = "f".repeat(64);
+      if (scenario.endsWith("prior runtime")) latestBrowser.runtimeVersion = "b".repeat(40);
+      if (scenario.endsWith("incomplete provider")) course.bookingMetadata = null;
+      if (scenario.endsWith("successor owner")) incident.activeBatchId = "successor-batch";
+      mockedPrisma.courseSupportBatch.findUnique.mockResolvedValue({ ...batch, completedAt: null,
+        createdAt: new Date(now.getTime() - 60_000),
+        incidents: batch.incidents.map((entry) => ({ ...entry, incidentId: incident.id,
+          verifiedIncidentUpdatedAt: incident.updatedAt })),
+      } as never);
+      mockedPrisma.teeSearch.count.mockResolvedValue(0);
+      mockedPrisma.courseSupportVerificationRequest.createMany.mockResolvedValue({ count: 1 });
+      mockedPrisma.courseSupportVerificationRequest.findMany.mockResolvedValue([]);
+      mockedPrisma.courseSupportVerificationRequest.updateMany.mockResolvedValue({ count: 0 });
+      const scheduled = await scheduleCourseSupportVerificationRequests({
+        batchId: fence.batchId, releaseSha: fence.releaseSha, now,
+      });
+      if (scenario !== "runnable retained source") {
+        expect(scheduled).toMatchObject({ eligibleCount: 0, ineligibleCount: 1,
+          ineligibleReasonCounts: { [scenario.endsWith("successor owner") ? "batch_ownership_changed" : "playbook_stage_handoff_required"]: 1 } });
+        expect(mockedPrisma.courseSupportVerificationRequest.createMany).not.toHaveBeenCalled();
+        return;
+      }
+      expect(scheduled).toMatchObject({ eligibleCount: 1, ineligibleCount: 0 });
+      expect(mockedPrisma.courseSupportVerificationRequest.createMany).toHaveBeenCalledWith({
+        data: [expect.objectContaining({ courseId: course.id, providerSnapshotFingerprint: result.providerSnapshotFingerprint })],
+        skipDuplicates: true,
+      });
+      const createdRequests = mockedPrisma.courseSupportVerificationRequest.createMany.mock.calls[0][0].data;
+      if (!Array.isArray(createdRequests)) throw new Error("Expected scheduled request array");
+      const requestState: Record<string, unknown> = { ...createdRequests[0], id: "learned-provider-request",
+        status: "QUEUED", revision: 0, runtimeVersion: null, startedAt: null, attemptCount: 0,
+        leaseToken: null, leaseExpiresAt: null, discoveryAttemptedAt: null, discoveryVerifiedAt: null,
+        completedAt: null, lastError: null, evidence: null,
+      };
+      const currentBatch = { ...batch, createdAt: new Date(now.getTime() - 60_000), completedAt: null };
+      mockedPrisma.courseSupportVerificationRequest.findUnique.mockImplementation(async () => structuredClone({
+        ...requestState, course, batchIncident: { ...batch.incidents[0], incidentId: incident.id,
+          batchId: batch.id, batch: currentBatch, verifiedIncidentUpdatedAt: incident.updatedAt },
+      }) as never);
+      mockedPrisma.courseSupportVerificationRequest.updateMany.mockImplementation(async ({ where, data }) => {
+        if (where.id !== requestState.id || where.revision !== requestState.revision ||
+            (where.leaseToken !== undefined && where.leaseToken !== requestState.leaseToken)) return { count: 0 };
+        for (const [key, value] of Object.entries(data)) {
+          requestState[key] = value === Prisma.JsonNull || value === Prisma.DbNull ? null :
+            typeof queryRecord(value).increment === "number" ? Number(requestState[key]) + Number(queryRecord(value).increment) : value;
+        }
+        return { count: 1 };
+      });
+      const claimed = await claimCourseSupportVerificationRequest({ requestId: String(requestState.id),
+        expectedRevision: 0, runtimeVersion: fence.releaseSha, now });
+      expect(claimed.claimed).toBe(true);
+      if (!claimed.claimed) throw new Error(claimed.reason);
+      const ownedInput = () => ({ requestId: claimed.requestId, expectedRevision: Number(requestState.revision),
+        leaseToken: claimed.leaseToken, runtimeVersion: fence.releaseSha, now });
+      expect(await attachCourseSupportVerificationProviderSnapshot({ ...ownedInput(), purpose: "PRE_EXECUTION" }))
+        .toMatchObject({ attached: true, runnableDiscoveryVerification: true, deferredFailureConfirmation: false });
+      expect(requestState.startedAt).toEqual(now);
+      expect(await markCourseSupportVerificationDiscoveryAttempted(ownedInput())).toMatchObject({ marked: true });
+      expect(await attachCourseSupportVerificationProviderSnapshot({ ...ownedInput(), purpose: "POST_DISCOVERY" }))
+        .toMatchObject({ attached: true });
+      expect(await markCourseSupportVerificationDiscoveryVerified(ownedInput())).toMatchObject({ marked: true });
+
+      if (!isChronogolfMetadata(course.bookingMetadata)) throw new Error("Expected learned public metadata");
+      const readAvailability = vi.fn().mockResolvedValue({ total: 1, perPage: 24, payload: { status: "open", teetimes: [{
+        uuid: "public-slot", date: "2026-09-07", start_time: "12:51", max_player_size: 2, frozen: false,
+        course: { uuid: course.bookingMetadata.courseIds[0], holes: 18 }, default_price: { green_fee: 40, bookable_holes: 9 },
+      }] } });
+      const slots = await fetchChronogolfSlots({ courseId: course.id, date: new Date("2026-09-07T00:00:00Z"),
+        players: 1, metadata: course.bookingMetadata }, readAvailability);
+      expect(readAvailability).toHaveBeenCalledTimes(1);
+      expect(slots).toHaveLength(1);
+      expect(await completeCourseSupportVerificationRequest({ ...ownedInput(), observation: {
+        outcome: "MATCH_FOUND", observedAt: now, providerExecution: true, adapterKey: "chronogolf", availabilityCount: slots.length,
+      } })).toMatchObject({ completed: true });
+      expect(requestState).toMatchObject({ status: "SUCCEEDED", outcome: "MATCH_FOUND", leaseToken: null, leaseExpiresAt: null });
+      expect(await getEligibleCourseSupportVerificationProof({ batchIncidentId: "retained-entry", releaseSha: fence.releaseSha, now }))
+        .toMatchObject({ eligible: true, outcome: "MATCH_FOUND", providerExecution: true,
+          providerSnapshotFingerprint: result.providerSnapshotFingerprint });
+      expect(incident.cycle).toBe(fence.cycle);
+      expect(incident.activeBatchId).toBe(fence.batchId);
+      expect(fetchMock).not.toHaveBeenCalled();
+      return;
+    }
     if (shouldApply) {
       expect(course).toMatchObject({ website: candidateUrl, detectedBookingUrl: null, bookingMetadata: null,
         detectedPlatform: "UNKNOWN", automationEligibility: "NEEDS_REVIEW", bookingMethod: "UNKNOWN",

@@ -20214,15 +20214,18 @@ describe("course-support batch ordinals", () => {
     expect(prismaMocks.monitoringEventCreate).toHaveBeenCalledTimes(1);
   });
 
-  it("rejects repeating the identical retained URL as a replacement candidate", async () => {
+  it("records a corroborated retained URL for independent verification without accepting its identity", async () => {
     const batch = retainedSourceSearchBatch();
     useRetainedSourceTransaction(batch);
     const request = { batchId: "batch-1", leaseToken: "lease-1", ownerThreadId: "owner-thread", ordinal: 1, now: batch.fixtureNow };
     const context = await getOwnedCourseSupportSourceSearchContext(request);
     if (context.outcome !== "ready" || !("privateContext" in context)) throw new Error("Expected fresh research context");
     await expect(recordOwnedCourseSupportSourceSearchResult({ ...request, attemptRef: context.privateContext.attemptRef,
-      candidateUrl: batch.incidents[0].course.website, runtimeVersion: "a".repeat(40) })).rejects.toThrow("cannot repeat");
-    expect(prismaMocks.monitoringEventCreate).not.toHaveBeenCalled();
+      candidateUrl: batch.incidents[0].course.website, runtimeVersion: "a".repeat(40) })).resolves.toMatchObject({
+        outcome: "ready", candidateRecorded: true,
+      });
+    expect(prismaMocks.monitoringEventCreate).toHaveBeenCalledTimes(1);
+    expect(prismaMocks.courseUpdateMany).not.toHaveBeenCalled();
   });
 
   it("exposes the exact per-entry action plan in the owned packet", async () => {

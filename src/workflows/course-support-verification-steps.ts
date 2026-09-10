@@ -223,7 +223,8 @@ export async function executeCourseSupportVerificationStep(
       message: "Course-support verification timezone changed during execution.",
     });
   }
-  if (beforeDiscovery.deferredFailureConfirmation === true) {
+  if (beforeDiscovery.deferredFailureConfirmation === true ||
+      beforeDiscovery.runnableDiscoveryVerification === true) {
     const currentProviderSnapshotFingerprint =
       buildCourseSupportProviderSnapshotFingerprint(courseBeforeDiscovery);
     const currentProviderFamilyKey = normalizeProviderFamilyKey(
@@ -250,7 +251,7 @@ export async function executeCourseSupportVerificationStep(
         reason: "monitoring_not_actionable" as const,
       };
     }
-    return executeDeferredFailureConfirmation({
+    return executeOwnedProviderConfirmation({
       input,
       runtimeVersion,
       revision,
@@ -826,7 +827,7 @@ export async function executeCourseSupportVerificationStep(
   });
 }
 
-async function executeDeferredFailureConfirmation(input: {
+async function executeOwnedProviderConfirmation(input: {
   input: CourseSupportVerificationWorkflowInput;
   revision: number;
   runtimeVersion: string;
@@ -844,7 +845,7 @@ async function executeDeferredFailureConfirmation(input: {
         getProviderReadinessFailure(capability) ?? "UNSUPPORTED_FAMILY",
       providerExecution: false,
       message:
-        "The exact deferred confirmation no longer has a runnable public adapter.",
+        "The owned confirmation no longer has a runnable public adapter.",
     });
   }
 
@@ -915,7 +916,7 @@ async function executeDeferredFailureConfirmation(input: {
           retryAt: TRANSIENT_PROVIDER_FAILURES.has(failure.failureClass)
             ? getTransientProviderRetryAt(failedAt, failure.retryAfterSeconds)
             : null,
-          message: "The exact deferred provider confirmation failed.",
+          message: "The owned provider confirmation failed.",
         });
       }
       if (!execution.acquired) {
@@ -927,7 +928,7 @@ async function executeDeferredFailureConfirmation(input: {
           failureClass: "RATE_LIMIT",
           providerExecution: false,
           message:
-            "The exact deferred confirmation could not acquire its provider read lease.",
+            "The owned confirmation could not acquire its provider read lease.",
           retryAt: new Date(Date.now() + LEASE_BUSY_RETRY_MS),
         });
       }

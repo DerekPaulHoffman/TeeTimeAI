@@ -6565,12 +6565,10 @@ export async function recordOwnedCourseSupportSourceSearchResult(input: {
             input.runtimeVersion !== (batch.releaseSha ?? batch.baseSha)) {
           throw new Error("Retained-source research requires current runtime provenance.");
         }
-        const retainedUrls = [resolved.entry.course.website, resolved.entry.course.detectedBookingUrl]
-          .filter((value): value is string => Boolean(value))
-          .flatMap((value) => { try { const url = new URL(value); url.hash = ""; return [url.toString()]; } catch { return []; } });
-        if (result.result === "CANDIDATE" && retainedUrls.includes(result.candidateUrl)) {
-          throw new Error("Replacement-source research cannot repeat the rejected retained URL.");
-        }
+        // Exact research may corroborate the retained official URL after an
+        // earlier identity misclassification. Recording one candidate does not
+        // accept its identity: the owned independent browser stage must still
+        // establish fresh course/locality evidence before any projection.
       }
       const idempotencyKey = resolved.resultKey;
       const existing = await transaction.courseMonitoringEvent.findUnique({

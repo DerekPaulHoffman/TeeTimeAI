@@ -48,6 +48,11 @@ function matches(row: Row | null, where: Row): boolean {
     const value = row[key];
     if (wanted && typeof wanted === "object" && !(wanted instanceof Date)) {
       const filter = wanted as Row;
+      if (Array.isArray(filter.path)) {
+        const nested = filter.path.reduce((current: unknown, part: string) =>
+          current && typeof current === "object" ? (current as Row)[part] : undefined, value);
+        return JSON.stringify(nested) === JSON.stringify(filter.equals);
+      }
       return Object.entries(filter).every(([op, bound]) => {
         if (op === "in") return (bound as unknown[]).includes(value);
         if (op === "not") return value !== bound;
@@ -121,6 +126,9 @@ function fixture(selected = courses[0]) {
     const found = jobs.find(row => matches(row, where)); return found ? { ...found } : null;
   });
   db.localReaderJob.findMany.mockImplementation(async ({ where }) => jobs.filter(row => matches(row, where)).map(row => ({ ...row })));
+  db.localReaderJob.findFirst.mockImplementation(async ({ where }) => {
+    const found = jobs.find(row => matches(row, where)); return found ? { ...found } : null;
+  });
   db.localReaderJob.updateMany.mockImplementation(async ({ where, data }) => {
     const matching = jobs.filter(row => matches(row, where)); matching.forEach(row => update(row, data)); return { count: matching.length };
   });
@@ -166,8 +174,8 @@ async function claimedObservation(state: ReturnType<typeof fixture>, restricted 
 const sourceHandshake = { deviceId: "controlled-reader", readerVersion: "1.12.0", buildId: "build-1",
   capabilities: [{ key: "OFFICIAL_SOURCE_RENDERED" as const, parserVersion: 2 }] };
 
-function exhaustedSource(selected = courses[0]) {
-  const state = fixture(selected);
+function exhaustedSource(selected = courses[0], existing?: ReturnType<typeof fixture>) {
+  const state = existing ?? fixture(selected);
   let ledger: unknown = null;
   const paths = ["OFFICIAL_IDENTITY", "TYPED_PROVIDER_ADAPTER", "OFFICIAL_HTTP", "TYPED_PROVIDER_ADAPTER",
     "RENDERED_BROWSER", "TYPED_PROVIDER_ADAPTER", "LOCAL_READER", "INDEPENDENT_CONFIRMATION"] as const;
@@ -193,6 +201,44 @@ function exhaustedSource(selected = courses[0]) {
 }
 
 describe("new signed source capability revalidation", () => {
+  it("does not reopen discovery when the current reader already returned a signed source result", async () => {
+    const original = fixture(courses[1]);
+    const { wire, result } = await claimedObservation(original, true);
+    expect((await submit(wire, result)).status).toBe(200);
+    expect((await getOwnedOfficialSourceObservation(original.input)).status).toBe("READY");
+    expect(original.jobs[0]).toMatchObject({ status: "COMPLETED", requiredParserVersion: 2 });
+
+    // Model normal closeout after this accepted observation; the heartbeat
+    // must not treat a parser already exercised in that cycle as newly available.
+    const state = exhaustedSource(courses[1], original);
+    const history = JSON.stringify(state.incident.attemptLedger);
+    await revalidateForOfficialSourceReader({ ...sourceHandshake, readerVersion: "1.12.2", buildId: "chrome-extension-1.12.2" });
+    expect(state.incident.cycle).toBe(14);
+    expect(state.events.filter(event => event.eventType === "REVALIDATION_REQUESTED")).toHaveLength(0);
+    expect(JSON.stringify(state.incident.attemptLedger)).toBe(history);
+    expect(state.jobs).toHaveLength(1);
+    expect(db.teeSearch.updateMany).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: "pending", changes: { status: "PENDING" } },
+    { label: "expired", changes: { status: "EXPIRED" } },
+    { label: "an older parser", changes: { requiredParserVersion: 1 } },
+    { label: "another course", changes: { courseId: "another-course" } },
+    { label: "missing its server claim", changes: { claimedAt: null } },
+    { label: "missing its result", changes: { result: null } },
+  ])("keeps the capability retry available when an earlier job is $label", async ({ changes }) => {
+    const original = fixture();
+    const { wire, result } = await claimedObservation(original, true);
+    expect((await submit(wire, result)).status).toBe(200);
+    Object.assign(original.jobs[0], changes);
+    const state = exhaustedSource(courses[0], original);
+
+    await revalidateForOfficialSourceReader(sourceHandshake);
+    expect(state.incident.cycle).toBe(15);
+    expect(state.events.filter(event => event.eventType === "REVALIDATION_REQUESTED")).toHaveLength(1);
+  });
+
   it.each(courses)("reopens $name once with preserved history and an actionable normal discovery route", async selected => {
     const state = exhaustedSource(selected);
     const history = JSON.stringify(state.incident.attemptLedger);

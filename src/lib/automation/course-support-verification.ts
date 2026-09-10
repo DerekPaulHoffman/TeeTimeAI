@@ -858,11 +858,10 @@ export async function attachCourseSupportVerificationProviderSnapshot(input: {
   purpose: "PRE_EXECUTION" | "POST_DISCOVERY";
   now?: Date;
 }) {
-  const now = validDate(input.now ?? new Date(), "provider snapshot time");
   validateReleaseSha(input.runtimeVersion);
 
-  return prisma.$transaction(
-    async (transaction) => {
+  return runVerificationExecutionTransaction(
+    async (transaction, now) => {
       const request =
         await transaction.courseSupportVerificationRequest.findUnique({
           where: { id: input.requestId },
@@ -999,9 +998,11 @@ export async function attachCourseSupportVerificationProviderSnapshot(input: {
           players: ownedRequest.players,
         },
         deferredFailureConfirmation,
+        runnableDiscoveryVerification: input.purpose === "PRE_EXECUTION" &&
+          hasFreshOwnedRunnableDiscovery(buildDetachedEligibilityInputFromRequest(ownedRequest), now),
       };
     },
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    input.now,
   );
 }
 
@@ -1012,11 +1013,10 @@ export async function markCourseSupportVerificationDiscoveryAttempted(input: {
   runtimeVersion: string;
   now?: Date;
 }) {
-  const now = validDate(input.now ?? new Date(), "discovery attempt time");
   validateReleaseSha(input.runtimeVersion);
 
-  return prisma.$transaction(
-    async (transaction) => {
+  return runVerificationExecutionTransaction(
+    async (transaction, now) => {
       const request =
         await transaction.courseSupportVerificationRequest.findUnique({
           where: { id: input.requestId },
@@ -1111,7 +1111,7 @@ export async function markCourseSupportVerificationDiscoveryAttempted(input: {
         discoveryVerifiedAt: ownedRequest.discoveryVerifiedAt,
       };
     },
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    input.now,
   );
 }
 
@@ -1122,11 +1122,10 @@ export async function markCourseSupportVerificationDiscoveryVerified(input: {
   runtimeVersion: string;
   now?: Date;
 }) {
-  const now = validDate(input.now ?? new Date(), "discovery verification time");
   validateReleaseSha(input.runtimeVersion);
 
-  return prisma.$transaction(
-    async (transaction) => {
+  return runVerificationExecutionTransaction(
+    async (transaction, now) => {
       const request =
         await transaction.courseSupportVerificationRequest.findUnique({
           where: { id: input.requestId },
@@ -1197,7 +1196,7 @@ export async function markCourseSupportVerificationDiscoveryVerified(input: {
         discoveryVerifiedAt: now,
       };
     },
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    input.now,
   );
 }
 
@@ -1209,11 +1208,10 @@ export async function completeCourseSupportVerificationRequest(input: {
   observation: CourseSupportVerificationObservation;
   now?: Date;
 }) {
-  const now = validDate(input.now ?? new Date(), "completion time");
   validateReleaseSha(input.runtimeVersion);
 
-  return prisma.$transaction(
-    async (transaction) => {
+  return runVerificationExecutionTransaction(
+    async (transaction, now) => {
       const request =
         await transaction.courseSupportVerificationRequest.findUnique({
           where: { id: input.requestId },
@@ -1350,7 +1348,7 @@ export async function completeCourseSupportVerificationRequest(input: {
         evidence,
       };
     },
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    input.now,
   );
 }
 
@@ -1363,11 +1361,10 @@ export async function completeCourseSupportVerificationFactualFinal(input: {
   message: string;
   now?: Date;
 }) {
-  const now = validDate(input.now ?? new Date(), "factual completion time");
   validateReleaseSha(input.runtimeVersion);
 
-  return prisma.$transaction(
-    async (transaction) => {
+  return runVerificationExecutionTransaction(
+    async (transaction, now) => {
       const request =
         await transaction.courseSupportVerificationRequest.findUnique({
           where: { id: input.requestId },
@@ -1501,7 +1498,7 @@ export async function completeCourseSupportVerificationFactualFinal(input: {
         evidence: proof,
       };
     },
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    input.now,
   );
 }
 
@@ -1534,8 +1531,8 @@ export async function failCourseSupportVerificationRequest(input: {
     now,
   });
 
-  return prisma.$transaction(
-    async (transaction) => {
+  return runVerificationExecutionTransaction(
+    async (transaction, now) => {
       const request =
         await transaction.courseSupportVerificationRequest.findUnique({
           where: { id: input.requestId },
@@ -1675,7 +1672,7 @@ export async function failCourseSupportVerificationRequest(input: {
         nextAttemptAt: retryable ? retryAt : null,
       };
     },
-    { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    input.now,
   );
 }
 
@@ -2764,7 +2761,7 @@ async function evaluateDetachedEligibility(
   }
   if (
     mode === "PROGRESSION" &&
-    requiresExhaustedPlaybookImplementationHandoff(input)
+    requiresExhaustedPlaybookImplementationHandoff(input, now)
   ) {
     return {
       eligible: false,
@@ -2869,6 +2866,7 @@ async function evaluateDetachedEligibility(
 
 function requiresExhaustedPlaybookImplementationHandoff(
   input: DetachedEligibilityInput,
+  now: Date,
 ) {
   const playbook = assessAutomationPlaybook(
     input.incident.attemptLedger,
@@ -2896,6 +2894,7 @@ function requiresExhaustedPlaybookImplementationHandoff(
   if (matchingAttempts.length !== 1) return true;
   const attempt = asJsonRecord(matchingAttempts[0]);
   const approach = asJsonRecord(attempt.approach);
+  if (hasFreshOwnedRunnableDiscovery(input, now)) return false;
   const deferredRouteClaimed = Boolean(
     attempt.deferredFailureHandoffSource !== undefined ||
       attempt.deferredFailureHandoffAdmission !== undefined ||
@@ -2914,6 +2913,47 @@ function requiresExhaustedPlaybookImplementationHandoff(
   );
 
   return !deferredRouteClaimed;
+}
+
+function hasFreshOwnedRunnableDiscovery(
+  input: DetachedEligibilityInput,
+  now: Date,
+) {
+  const attempts = asJsonRecord(asJsonRecord(input.batchSummary).remediation).attempts;
+  if (!Array.isArray(attempts)) return false;
+  const courseRef = createHash("sha256").update(input.courseId).digest("hex").slice(0, 24);
+  const matching = attempts.filter((value) => asJsonRecord(value).courseRef === courseRef);
+  if (matching.length !== 1) return false;
+  const attempt = asJsonRecord(matching[0]);
+  const actionPlan = asJsonRecord(attempt.actionPlan);
+  const route = asJsonRecord(actionPlan.route);
+  const fingerprint = buildCourseSupportProviderSnapshotFingerprint(input.course);
+  if (actionPlan.schemaVersion !== 1 || actionPlan.primaryAction !== "SEARCH_FOR_OFFICIAL_SOURCE" ||
+      !Array.isArray(actionPlan.allowedActions) || !actionPlan.allowedActions.includes("SEARCH_FOR_OFFICIAL_SOURCE") ||
+      route.workMode !== "ADVANCE_DISCOVERY" || route.strategyAction !== "DISCOVER_WITH_BROWSER" ||
+      route.playbookStage !== "INDEPENDENT_CONFIRMATION" || attempt.runtimeVersion !== input.releaseSha ||
+      typeof attempt.providerSnapshotFingerprint !== "string" || !/^[a-f0-9]{64}$/u.test(attempt.providerSnapshotFingerprint) ||
+      attempt.providerSnapshotFingerprint === fingerprint || !resolveProviderCapability(input.course).isRunnable ||
+      !(input.batchCreatedAt instanceof Date)) return false;
+
+  const final = parseAutomationPlaybookLedger(input.incident.attemptLedger)?.events.at(-1);
+  if (!final || final.cycle !== input.incident.cycle || final.stage !== "INDEPENDENT_CONFIRMATION" ||
+      final.transition !== "COMPLETED" || final.readPath !== "INDEPENDENT_CONFIRMATION" ||
+      final.evidenceKind !== "RENDERED_PAGE" || final.providerExecution !== true ||
+      final.runtimeVersion !== input.releaseSha) return false;
+  const completedAt = Date.parse(final.observedAt);
+  if (!Number.isFinite(completedAt) || completedAt < input.batchCreatedAt.getTime() || completedAt > now.getTime()) return false;
+
+  // Owned browser persistence binds this new snapshot after projecting its
+  // learned metadata. It authorizes verification, never monitoring success.
+  const discovery = input.course.automationDiscoveries?.[0];
+  const browser = asJsonRecord(asJsonRecord(discovery?.evidence).browserInvestigation);
+  const observedAt = discovery?.createdAt;
+  return Boolean(discovery?.status === "LEARNED" && observedAt instanceof Date &&
+    observedAt.getTime() >= input.batchCreatedAt.getTime() && observedAt.getTime() <= completedAt &&
+    browser.mode === "INDEPENDENT" && browser.incidentCycle === input.incident.cycle &&
+    browser.runtimeVersion === input.releaseSha && browser.providerRequestObserved === true &&
+    browser.observedAt === observedAt.toISOString() && browser.providerSnapshotFingerprint === fingerprint);
 }
 
 function requiresBrowserAdapterRetryStageHandoff(
@@ -3228,6 +3268,44 @@ function hasOwnedAssignedLocalReaderProgression(
     previousObservedAt = observedAt;
     return current;
   });
+}
+
+// Retry only a database transaction known to have rolled back. Retrying the
+// entire Workflow step would replay its original revision after earlier writes
+// committed, stranding the current lease. Each attempt rereads all ownership
+// and evidence fences; provider reads and committed writes are outside this loop.
+async function runVerificationExecutionTransaction<T>(
+  operation: (transaction: Prisma.TransactionClient, now: Date) => Promise<T>,
+  suppliedNow?: Date,
+): Promise<T> {
+  const startedAt = performance.now();
+  const initialNow = suppliedNow
+    ? validDate(suppliedNow, "verification transaction time")
+    : null;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await prisma.$transaction(
+        (transaction) => operation(
+          transaction,
+          initialNow
+            ? new Date(initialNow.getTime() + (attempt === 0
+              ? 0
+              : Math.max(0, performance.now() - startedAt)))
+            : new Date(),
+        ),
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      );
+    } catch (error) {
+      if (
+        attempt >= 2 ||
+        !error || typeof error !== "object" ||
+        !("code" in error) || error.code !== "P2034"
+      ) {
+        throw error;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+    }
+  }
 }
 
 function validateExecutionOwnership(

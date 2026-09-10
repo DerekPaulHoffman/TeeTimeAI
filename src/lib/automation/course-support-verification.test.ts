@@ -2599,6 +2599,133 @@ describe("course-support verification scheduling", () => {
 });
 
 describe("course-support verification execution fencing", () => {
+  it.each([
+    { phase: "discovery", ownerChanged: false },
+    { phase: "discovery", ownerChanged: true },
+    { phase: "closeout", ownerChanged: false },
+    { phase: "closeout", ownerChanged: true },
+  ])(
+    "retries a rolled-back $phase write after attachment without replaying it (new owner: $ownerChanged)",
+    async ({ phase, ownerChanged }) => {
+      let stored = request({ discoveryAttemptedAt: null, discoveryVerifiedAt: null });
+      prismaMocks.requestFindUnique.mockImplementation(async () => structuredClone(stored));
+      prismaMocks.requestUpdateMany.mockImplementation(async ({ where, data }) => {
+        if (where.revision !== stored.revision || where.leaseToken !== stored.leaseToken) {
+          return { count: 0 };
+        }
+        stored = {
+          ...stored,
+          ...data,
+          revision: stored.revision + (data.revision?.increment ?? 0),
+        };
+        return { count: 1 };
+      });
+
+      const execution = {
+        requestId: stored.id, expectedRevision: 1, leaseToken: "lease-1",
+        runtimeVersion: releaseSha, now,
+      };
+      await expect(attachCourseSupportVerificationProviderSnapshot({
+        ...execution, purpose: "PRE_EXECUTION",
+      })).resolves.toMatchObject({ attached: true, revision: 2 });
+
+      if (phase === "closeout") {
+        await expect(markCourseSupportVerificationDiscoveryAttempted({
+          ...execution, expectedRevision: 2,
+        })).resolves.toMatchObject({ marked: true, revision: 3 });
+      }
+      const expectedRevision = stored.revision;
+      const priorDiscoveryAttemptedAt = stored.discoveryAttemptedAt;
+      const priorWrites = prismaMocks.requestUpdateMany.mock.calls.length;
+      const fail = () => failCourseSupportVerificationRequest({
+        ...execution, expectedRevision: phase === "closeout" ? expectedRevision : 3,
+        failureClass: "NETWORK", message: "Controlled provider failure",
+        retryAt: new Date(now.getTime() + 120_000),
+      });
+
+      // The first transaction is already committed. The next write rolls back;
+      // replaying the entire Workflow step with revision 1 would strand its lease.
+      prismaMocks.requestUpdateMany.mockImplementationOnce(async () => {
+        if (ownerChanged) {
+          stored = { ...stored, revision: expectedRevision + 1, leaseToken: "lease-2" };
+        }
+        throw Object.assign(new Error("Transaction write conflict"), { code: "P2034" });
+      });
+      const result = phase === "closeout" ? fail() : markCourseSupportVerificationDiscoveryAttempted({
+        ...execution, expectedRevision,
+      });
+      if (ownerChanged) {
+        await expect(result).resolves.toMatchObject({ reason: "stale_revision" });
+        expect(stored.leaseToken).toBe("lease-2");
+        expect(stored.discoveryAttemptedAt).toEqual(priorDiscoveryAttemptedAt);
+        expect(prismaMocks.requestUpdateMany).toHaveBeenCalledTimes(priorWrites + 1);
+      } else {
+        if (phase === "closeout") {
+          await expect(result).resolves.toMatchObject({ failed: true, status: "RETRYABLE_FAILED" });
+          expect(prismaMocks.requestUpdateMany).toHaveBeenCalledTimes(priorWrites + 2);
+        } else {
+          await expect(result).resolves.toMatchObject({ marked: true, revision: 3 });
+          await expect(fail()).resolves.toMatchObject({ failed: true, status: "RETRYABLE_FAILED" });
+        }
+        if (phase === "closeout") {
+          expect(stored.discoveryAttemptedAt).toEqual(priorDiscoveryAttemptedAt);
+        } else {
+          expect(stored.discoveryAttemptedAt?.getTime()).toBeGreaterThan(now.getTime());
+        }
+        expect(stored.status).toBe("RETRYABLE_FAILED");
+        expect(stored.leaseToken).toBeNull();
+      }
+    },
+  );
+
+  it.each([
+    { code: "P2034", attempts: 3 },
+    { code: "P2028", attempts: 1 },
+    { code: "P2002", attempts: 1 },
+  ])("bounds transaction retries and preserves $code failures", async ({ code, attempts }) => {
+    const stored = request({ discoveryAttemptedAt: null, discoveryVerifiedAt: null });
+    const conflict = Object.assign(new Error("Controlled database failure"), { code });
+    prismaMocks.requestFindUnique.mockResolvedValue(stored);
+    prismaMocks.requestUpdateMany.mockRejectedValue(conflict);
+
+    await expect(markCourseSupportVerificationDiscoveryAttempted({
+      requestId: stored.id, expectedRevision: stored.revision, leaseToken: "lease-1",
+      runtimeVersion: releaseSha, now,
+    })).rejects.toBe(conflict);
+    expect(prismaMocks.transaction).toHaveBeenCalledTimes(attempts);
+    expect(prismaMocks.requestFindUnique).toHaveBeenCalledTimes(attempts);
+    expect(prismaMocks.requestUpdateMany).toHaveBeenCalledTimes(attempts);
+    expect(stored.discoveryAttemptedAt).toBeNull();
+    expect(stored.leaseToken).toBe("lease-1");
+  });
+
+  it.each([false, true])("rechecks the clock when the lease expires during transaction backoff (explicit clock: %s)", async (explicitClock) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    try {
+      const stored = request({
+        discoveryAttemptedAt: null, discoveryVerifiedAt: null,
+        leaseExpiresAt: new Date(now.getTime() + 50),
+      });
+      prismaMocks.requestFindUnique.mockResolvedValue(stored);
+      prismaMocks.requestUpdateMany.mockRejectedValueOnce(
+        Object.assign(new Error("Transaction write conflict"), { code: "P2034" }),
+      );
+      const result = markCourseSupportVerificationDiscoveryAttempted({
+        requestId: stored.id, expectedRevision: stored.revision, leaseToken: "lease-1",
+        runtimeVersion: releaseSha,
+        ...(explicitClock ? { now } : {}),
+      });
+      const assertion = expect(result).resolves.toMatchObject({ marked: false, reason: "lease_lost" });
+      await Promise.all([assertion, vi.runAllTimersAsync()]);
+      expect(prismaMocks.requestFindUnique).toHaveBeenCalledTimes(2);
+      expect(prismaMocks.requestUpdateMany).toHaveBeenCalledTimes(1);
+      expect(stored.discoveryAttemptedAt).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("stales a request at its absolute 24-hour execution horizon", async () => {
     prismaMocks.requestFindUnique.mockResolvedValue(
       request({

@@ -9,6 +9,18 @@ import { normalizeOfficialSourceUrl, OFFICIAL_SOURCE_CAPABILITY, OFFICIAL_SOURCE
 import { readerSupportsCapability, type LocalReaderAgentHandshake } from "./capabilities";
 
 const parserVersion = OFFICIAL_SOURCE_PARSER_VERSION;
+// A completed, signed source job proves this parser has already been exercised,
+// including when it returned an access restriction. It is not monitoring proof.
+const exercisedCapability = {
+  purpose: "OFFICIAL_SOURCE_DISCOVERY",
+  teeSearchId: null,
+  requiredCapabilityKey: OFFICIAL_SOURCE_CAPABILITY,
+  requiredParserVersion: parserVersion,
+  status: "COMPLETED",
+  claimedAt: { not: null },
+  completedAt: { not: null },
+  result: { path: ["purpose"], equals: "OFFICIAL_SOURCE_DISCOVERY" },
+} satisfies Prisma.LocalReaderJobWhereInput;
 type Candidate = Prisma.CourseSupportIncidentGetPayload<{ include: { course: { include: { monitoringStatus: true } } } }>;
 
 export function canRevalidateOfficialSource(incident: Candidate) {
@@ -34,7 +46,7 @@ export async function revalidateForOfficialSourceReader(handshake: LocalReaderAg
   const candidates = await prisma.courseSupportIncident.findMany({
     where: { status: { in: ["NEEDS_HUMAN", "AUTO_INVESTIGATING"] }, activeBatchId: null, decisionAt: null,
       resolvedAt: null, resolution: null,
-      course: { is: { isPublic: true, monitoringMode: "AUTOMATIC", OR: [
+      course: { is: { isPublic: true, monitoringMode: "AUTOMATIC", localReaderJobs: { none: exercisedCapability }, OR: [
         { website: { startsWith: "https://parks.cityofomaha.org/" } }, { website: { startsWith: "http://parks.cityofomaha.org/" } },
       ] } },
       monitoringEvents: { none: { eventType: "REVALIDATION_REQUESTED", source: "LOCAL_READER", readPath: OFFICIAL_SOURCE_CAPABILITY,
@@ -55,6 +67,10 @@ export async function revalidateForOfficialSourceReader(handshake: LocalReaderAg
       if (!incident || !canRevalidateOfficialSource(incident)) return;
       const key = `official-source-capability:${createHash("sha256").update(`${incident.courseId}:${parserVersion}`).digest("hex")}`;
       if (await transaction.courseMonitoringEvent.findUnique({ where: { idempotencyKey: key }, select: { id: true } })) return;
+      // Recheck under the course lock in case a job completed after selection.
+      if (await transaction.localReaderJob.findFirst({
+        where: { courseId: incident.courseId, ...exercisedCapability }, select: { id: true },
+      })) return;
       const status = incident.course.monitoringStatus!;
       const changed = await transaction.courseSupportIncident.updateMany({ where: {
         id: incident.id, cycle: incident.cycle, revision: incident.revision, status: incident.status,
