@@ -46,14 +46,17 @@ describe("browser probe evidence pipeline", () => {
   it("recognizes Copper Creek's observed name and locality decoration through discovery", async () => {
     const sourceUrl = "https://golfcoppercreek.com/";
     const bookingUrl = "https://chronogolf.com/club/3286";
+    // Relevant actual collectPageEvidence segments, with intervening copy
+    // omitted: no separate address element, and an earlier cookie-banner comma.
+    const renderedText = "We use cookies to enhance your browsing experience, ... 4825 Copper Creek Dr Pleasant Hill, Iowa 50327";
     const page = prepareBrowserPageEvidence({
       ...emptyPage,
       identityCandidates: [
         "Copper Creek Golf Club - Golf Club in Pleasant Hill, IA",
         "Copper Creek Golf Club",
       ],
-      localityCandidates: ["4825 Copper Creek Dr Pleasant Hill, Iowa 50327"],
-      visibleText: "Copper Creek Golf Club. 4825 Copper Creek Dr Pleasant Hill, Iowa 50327. Book a Tee Time.",
+      localityCandidates: [renderedText],
+      visibleText: renderedText,
       linkCandidates: [{url: bookingUrl, label: "Book a Tee Time"}],
     });
     const course = {
@@ -122,7 +125,7 @@ describe("browser probe evidence pipeline", () => {
     const course = {courseName: "Desert Canyon Golf Course & Event Venue", address: "24 Mesa Road", city: "Mesa", stateCode: "AZ"};
     const page = prepareBrowserPageEvidence({...emptyPage,
       identityCandidates: ["Desert Canyon Golf Course - Golf Course in Mesa, Arizona", "Desert Canyon Golf Course"],
-      visibleText: "24 Mesa Road, Mesa, Arizona",
+      visibleText: "Browse courses, view tee times. 24 Mesa Road, Mesa, Arizona",
     });
     expect(classifyRenderedOfficialPageCourseIdentity("https://course.example/", page, course)).toBe("MATCH");
     expect(classifyRenderedOfficialPageCourseIdentity("https://course.example/", {...page,

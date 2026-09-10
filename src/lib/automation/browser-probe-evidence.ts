@@ -2071,7 +2071,8 @@ export function isRenderedUnprojectedSourceCandidateLocalityCorroborated(
     return false;
   }
 
-  const street = normalizeBrowserStreetText(course.address ?? "");
+  // Extract the retained street, but never truncate the rendered page evidence.
+  const street = normalizeBrowserStreetText((course.address ?? "").split(",", 1)[0] ?? "");
   if (!street) {
     return true;
   }
@@ -2138,7 +2139,7 @@ function containsNormalizedBrowserLocality(candidate: string, signal: string) {
 }
 
 function normalizeBrowserStreetText(value: string) {
-  return normalizeBrowserLocalityText(value.split(",", 1)[0] ?? "")
+  return normalizeBrowserLocalityText(value)
     .replace(/\b(?:st|street)\b/gu, "street")
     .replace(/\b(?:rd|road)\b/gu, "road")
     .replace(/\b(?:ave|avenue)\b/gu, "avenue")
