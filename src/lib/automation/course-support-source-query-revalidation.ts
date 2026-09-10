@@ -23,7 +23,7 @@ export const sourceQueryRevalidationInclude = {
     ] },
     orderBy: { occurredAt: "desc" as const }, take: 100,
   },
-} as const;
+} satisfies Prisma.CourseSupportIncidentInclude;
 type Candidate = Prisma.CourseSupportIncidentGetPayload<{ include: typeof sourceQueryRevalidationInclude }>;
 
 /** Recognize the actual obsolete negative search, not merely a new deployment. */
