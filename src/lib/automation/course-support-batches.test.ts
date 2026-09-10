@@ -20323,7 +20323,7 @@ describe("course-support batch ordinals", () => {
       searchBudget: 1,
       privateContext: {
         query:
-          '"Pine Ridge Golf Course" "10 Main Street" "Springfield, MA" "official golf course"',
+          "Pine Ridge Golf Course 10 Main Street Springfield MA official golf course",
         attemptRef: expect.stringMatching(/^[a-f0-9]{64}$/u),
       },
     });

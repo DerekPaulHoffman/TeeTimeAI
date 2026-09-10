@@ -52,7 +52,7 @@ describe("course-support exact source search", () => {
     })).not.toBe(releasedWriterDigest);
   });
 
-  it("builds one deterministic exact name, address, and locality query", () => {
+  it("builds one deterministic name, address, and locality query without mandatory phrases", () => {
     const context = buildCourseSupportSourceSearchContext({
       name: "  Pine   Ridge “Golf” Course ",
       address: "10 Main Street",
@@ -61,7 +61,7 @@ describe("course-support exact source search", () => {
     });
 
     expect(context.query).toBe(
-      '"Pine Ridge Golf Course" "10 Main Street" "Springfield, MA" "official golf course"',
+      "Pine Ridge Golf Course 10 Main Street Springfield MA official golf course",
     );
     expect(context.queryDigest).toMatch(/^[a-f0-9]{64}$/u);
     expect(context.missingIdentityFields).toEqual([]);
@@ -84,7 +84,7 @@ describe("course-support exact source search", () => {
         stateCode: "MA",
       }),
     ).toMatchObject({
-      query: '"Pine Ridge Golf Course" "Springfield, MA" "official golf course"',
+      query: "Pine Ridge Golf Course Springfield MA official golf course",
       missingIdentityFields: ["ADDRESS"],
     });
     expect(
@@ -95,9 +95,23 @@ describe("course-support exact source search", () => {
         stateCode: null,
       }),
     ).toMatchObject({
-      query: '"Pine Ridge Golf Course" "official golf course"',
+      query: "Pine Ridge Golf Course official golf course",
       missingIdentityFields: ["ADDRESS", "CITY", "STATE"],
     });
+  });
+
+  it("uses historical full-address shapes as search terms and removes query-control punctuation", () => {
+    const context = buildCourseSupportSourceSearchContext({
+      name: 'Lakeside Golf Club and Event Center "site:example.com"',
+      address: "4825 Lake Dr, Pleasant Hill, IA 50327, USA",
+      city: "Pleasant Hill",
+      stateCode: "IA",
+    });
+    expect(context.query).toBe(
+      "Lakeside Golf Club and Event Center site example com 4825 Lake Dr Pleasant Hill IA 50327 USA Pleasant Hill IA official golf course",
+    );
+    expect(context.query).not.toMatch(/[":]/u);
+    expect(context.missingIdentityFields).toEqual([]);
   });
 
   it("still fails closed when the course name is absent", () => {

@@ -44,10 +44,12 @@ export function buildCourseSupportSourceSearchContext(input: {
     ...(city ? [] : (["CITY"] as const)),
     ...(stateCode ? [] : (["STATE"] as const)),
   ];
-  const locality = [city, stateCode].filter(Boolean).join(", ");
+  const locality = [city, stateCode].filter(Boolean).join(" ");
+  // Retrieval needs to tolerate official name/address formatting differences.
+  // Identity is established by the owned browser verifier, not exact phrases
+  // (especially the generic words "official golf course") in a search index.
   const query = [name, address, locality || null, "official golf course"]
     .filter((part): part is string => Boolean(part))
-    .map((part) => `"${escapeQuotedSearchPart(part)}"`)
     .join(" ");
   return {
     query,
@@ -152,15 +154,11 @@ export function buildCourseSupportRetainedSourceSearchKey(input: {
 }
 
 function normalizeSearchPart(value: string | null | undefined) {
-  const normalized = value?.replace(/\s+/gu, " ").trim();
-  return normalized || null;
-}
-
-function escapeQuotedSearchPart(value: string) {
-  return value
-    .replace(/["“”]+/gu, " ")
+  const normalized = value
+    ?.replace(/[^\p{L}\p{M}\p{N}\s]/gu, " ")
     .replace(/\s+/gu, " ")
     .trim();
+  return normalized || null;
 }
 
 function sha256(value: string) {
