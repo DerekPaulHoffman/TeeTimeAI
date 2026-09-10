@@ -9319,6 +9319,44 @@ describe("course-support claim demand fencing", () => {
     });
   });
 
+  it.each([[2, 0], [2, 1], [1, 0]])("orders reopened courses by current-cycle claims, including unsuccessful claims (cycle %i, claims %i)", async (cycle, priorClaims) => {
+    const older = {
+      ...incidentRecord({ engineeringOnly: true, preferences: [] }),
+      id: "older-incident", courseId: "older-course", cycle,
+      attemptCount: 9,
+      firstSeenAt: new Date(now.getTime() - 120_000),
+      batchIncidents: [
+        { cycle: 1, batch: { summary: {} } },
+        ...Array.from({ length: priorClaims }, () => ({ cycle: 2, batch: { summary: {} } })),
+      ],
+    };
+    older.course.id = older.courseId;
+    const newer = {
+      ...incidentRecord({ engineeringOnly: true, preferences: [] }),
+      id: "newer-incident", courseId: "newer-course", cycle,
+      attemptCount: 0,
+      firstSeenAt: new Date(now.getTime() - 60_000),
+    };
+    newer.course.id = newer.courseId;
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([older, newer])
+      .mockResolvedValueOnce([older, newer]);
+
+    await expect(claimCourseSupportBatch({
+      ownerThreadId: "owner-thread", branch: "automation/course-support-20260715-200000",
+      baseSha, maxCourses: 1, now,
+    })).resolves.toMatchObject({ outcome: "ready", incidentCount: 1 });
+
+    expect(prismaMocks.batchIncidentCreateMany).toHaveBeenCalledWith({
+      data: [expect.objectContaining({ incidentId: cycle > 1 && priorClaims === 0 ? older.id : newer.id })],
+    });
+    const claim = prismaMocks.supportIncidentUpdateMany.mock.calls
+      .map(([call]) => call).find(call => call.data?.activeBatchId === "batch-1");
+    expect(claim.data.attemptCount).toEqual({ increment: 1 });
+    expect(claim.data).not.toHaveProperty("attemptLedger");
+    expect(claim.data).not.toHaveProperty("cycle");
+  });
+
   it("does not let a prior-cycle attempt suppress an explicit material reopen", async () => {
     const reopened = {
       ...incidentRecord({ engineeringOnly: true, preferences: [] }),

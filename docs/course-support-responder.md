@@ -21,6 +21,8 @@ Discovery entries use `VERIFY_CURRENT_RUNTIME` unless their exact source-search 
 
 `CourseSupportIncident` is the durable per-course problem. `CourseSupportBatch` is the short-lived provider-family/fingerprint engineering claim. `CourseSupportBatchIncident` preserves the per-course pre-remediation evidence and final batch result.
 
+For queue fairness after a material reopen, compare the number of batch claims in the current incident cycle, including unsuccessful claims. Historical incident counters remain unchanged and must not delay an untried approach in a new cycle. Legacy first-cycle ordering, customer-demand priority, campaign reservations, ownership, and action eligibility retain their existing rules.
+
 ## Ordered Attempt Playbook And Deadlines
 
 Every new or materially changed course uses this exact stage order. A skipped stage must be recorded as not applicable; absence of an attempt is never proof that the playbook was exhausted.

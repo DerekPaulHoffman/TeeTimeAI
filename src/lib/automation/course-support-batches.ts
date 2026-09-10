@@ -18709,7 +18709,13 @@ function buildCourseSupportCandidates(
         lastSeenAt: incident.lastSeenAt,
         lastAttemptAt: incident.lastAttemptAt,
         nextAttemptAt: incident.nextAttemptAt,
-        attemptCount: incident.attemptCount,
+        // Queue fairness counts claims in this cycle, including unsuccessful
+        // claims. A material reopen may retain its historical incident counter;
+        // those older attempts must not penalize the newly available approach.
+        // Keep the stored counter and legacy first-cycle ordering unchanged.
+        attemptCount: incident.cycle > 1
+          ? currentCycleBatchIncidents.length
+          : incident.attemptCount,
         updatedAt: incident.updatedAt,
         courseUpdatedAt: course.updatedAt,
         remediationDirective:
