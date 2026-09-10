@@ -32,6 +32,7 @@ import { localReaderResultSchema } from "@/lib/local-reader/contracts";
 import { prisma } from "@/lib/prisma";
 
 import { sanitizeResponderText } from "./course-support-responder-policy";
+import { revalidateCoursesForSourceQueryChange as revalidateSourceQueries } from "./course-support-source-query-revalidation";
 import {
   runCourseSupportBrowserPersistenceWrite,
   type CourseSupportBrowserPersistenceFence,
@@ -3555,6 +3556,12 @@ async function revalidateRenderedVenueIdentityForDeployment(deploymentSha: strin
   return {considered: eligible.length, requeued, retainedAuthoritativeFinals: 0};
 }
 
+export async function revalidateCoursesForSourceQueryChange(deploymentSha: string) {
+  return revalidateSourceQueries(deploymentSha, {
+    getCourseMonitoringEscalationDeadline, runSerializedCourseMonitoringWrite,
+  });
+}
+
 export async function revalidateHumanReviewCoursesForDeployment(input: {
   deploymentSha?: string | null;
   now?: Date;
@@ -3590,7 +3597,13 @@ export async function revalidateHumanReviewCoursesForDeployment(input: {
     update: {},
     select: { id: true },
   });
-  return revalidateRenderedVenueIdentityForDeployment(deploymentSha);
+  const identity = await revalidateRenderedVenueIdentityForDeployment(deploymentSha);
+  const sourceQuery = await revalidateCoursesForSourceQueryChange(deploymentSha);
+  return {
+    considered: identity.considered + sourceQuery.considered,
+    requeued: identity.requeued + sourceQuery.requeued,
+    retainedAuthoritativeFinals: identity.retainedAuthoritativeFinals + sourceQuery.retainedAuthoritativeFinals,
+  };
 }
 
 export async function reconcileCourseMonitoringDeadlines(input: {

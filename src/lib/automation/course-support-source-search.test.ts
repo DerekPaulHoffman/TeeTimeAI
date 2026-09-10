@@ -8,10 +8,26 @@ import {
   buildCourseSupportRetainedSourceSearchKey,
   buildCourseSupportSourceSearchContext,
   buildCourseSupportSourceSearchScopeDigest,
+  getCourseSupportSourceQueryChange,
   normalizeCourseSupportSourceSearchResult,
 } from "./course-support-source-search";
 
 describe("course-support exact source search", () => {
+  it("proves a query capability change only for an unchanged identity's obsolete negative result", () => {
+    const identity = { name: "Pine Ridge Golf Course", address: "10 Main Street", city: "Springfield", stateCode: "MA" };
+    const priorQueryDigest = createHash("sha256")
+      .update('"pine ridge golf course" "10 main street" "springfield, ma" "official golf course"').digest("hex");
+    const input = { identity, priorResult: "NO_UNIQUE", priorQueryDigest };
+    const proof = getCourseSupportSourceQueryChange(input);
+    expect(proof).toEqual({ priorRecipe: "QUOTED_IDENTITIES_V1", currentRecipe: "IDENTITY_TERMS_V2",
+      priorQueryDigest, currentQueryDigest: buildCourseSupportSourceSearchContext(identity).queryDigest });
+    expect(getCourseSupportSourceQueryChange({ ...input, priorResult: "CANDIDATE" })).toBeNull();
+    expect(getCourseSupportSourceQueryChange({ ...input, priorQueryDigest: proof!.currentQueryDigest })).toBeNull();
+    expect(getCourseSupportSourceQueryChange({ ...input, priorQueryDigest: "unproven" })).toBeNull();
+    expect(getCourseSupportSourceQueryChange({ ...input, identity: { ...identity, address: "12 Main Street" } })).toBeNull();
+    expect(getCourseSupportSourceQueryChange({ ...input, identity: { ...identity, city: "Another Town" } })).toBeNull();
+  });
+
   it("binds retained-source research to the incident, cycle and rejected evidence, not a new owner", () => {
     const scope = { incidentId: "incident-source", cycle: 2, rejectionEvidenceDigest: "a".repeat(64) };
     const key = buildCourseSupportRetainedSourceSearchKey(scope);

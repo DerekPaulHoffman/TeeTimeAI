@@ -26,12 +26,16 @@ export type CourseSupportSourceSearchResult =
   | { result: "CANDIDATE"; candidateUrl: string }
   | { result: "NO_UNIQUE"; candidateUrl: null };
 
-export function buildCourseSupportSourceSearchContext(input: {
+export type CourseSupportSourceSearchIdentity = {
   name: string;
   address: string | null;
   city: string | null;
   stateCode: string | null;
-}): CourseSupportSourceSearchContext {
+};
+
+export function buildCourseSupportSourceSearchContext(
+  input: CourseSupportSourceSearchIdentity,
+): CourseSupportSourceSearchContext {
   const name = normalizeSearchPart(input.name);
   const address = normalizeSearchPart(input.address);
   const city = normalizeSearchPart(input.city);
@@ -55,6 +59,37 @@ export function buildCourseSupportSourceSearchContext(input: {
     query,
     queryDigest: sha256(query.toLocaleLowerCase("en-US")),
     missingIdentityFields,
+  };
+}
+
+/** Capability-change evidence only; this never authorizes or performs reopening. */
+export function getCourseSupportSourceQueryChange(input: {
+  identity: CourseSupportSourceSearchIdentity;
+  priorResult: unknown;
+  priorQueryDigest: unknown;
+}) {
+  if (input.priorResult !== "NO_UNIQUE" || typeof input.priorQueryDigest !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(input.priorQueryDigest)) return null;
+  const normalizeLegacyPart = (value: string | null) => value?.replace(/\s+/gu, " ").trim() || null;
+  const name = normalizeLegacyPart(input.identity.name);
+  if (!name) return null;
+  const locality = [normalizeLegacyPart(input.identity.city),
+    normalizeLegacyPart(input.identity.stateCode)?.toUpperCase()].filter(Boolean).join(", ");
+  // Reconstruct only the released defective recipe. Arbitrary query changes or
+  // changed course facts cannot turn another negative result into this proof.
+  const legacyQuery = [name, normalizeLegacyPart(input.identity.address), locality || null, "official golf course"]
+    .filter((part): part is string => Boolean(part))
+    .map(part => `"${part.replace(/["“”]+/gu, " ").replace(/\s+/gu, " ").trim()}"`)
+    .join(" ");
+  if (sha256(legacyQuery.toLocaleLowerCase("en-US")) !== input.priorQueryDigest) return null;
+  let current: CourseSupportSourceSearchContext;
+  try { current = buildCourseSupportSourceSearchContext(input.identity); } catch { return null; }
+  if (current.queryDigest === input.priorQueryDigest) return null;
+  return {
+    priorRecipe: "QUOTED_IDENTITIES_V1" as const,
+    currentRecipe: "IDENTITY_TERMS_V2" as const,
+    priorQueryDigest: input.priorQueryDigest,
+    currentQueryDigest: current.queryDigest,
   };
 }
 

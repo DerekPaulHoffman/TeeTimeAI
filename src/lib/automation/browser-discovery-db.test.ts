@@ -67,8 +67,16 @@ vi.mock("@/lib/prisma", () => ({
       updateMany: vi.fn()
     },
     courseSupportBatchIncident: {
-      findUnique: vi.fn()
+      findUnique: vi.fn(),
+      findFirst: vi.fn(),
+      findMany: vi.fn(),
+      updateMany: vi.fn()
     },
+    courseSupportBatchSearch: { findMany: vi.fn() },
+    coursePreference: { findMany: vi.fn() },
+    courseProbe: { findMany: vi.fn(), findFirst: vi.fn() },
+    googlePlaceReview: { findMany: vi.fn() },
+    automationRun: { findFirst: vi.fn(), findMany: vi.fn(), findUnique: vi.fn(), updateMany: vi.fn() },
     courseSupportVerificationRequest: {
       findUnique: vi.fn(),
       createMany: vi.fn(),
@@ -82,8 +90,10 @@ vi.mock("@/lib/prisma", () => ({
     },
     courseMonitoringEvent: {
       create: vi.fn(),
+      createMany: vi.fn(),
       findFirst: vi.fn(),
-      findUnique: vi.fn()
+      findUnique: vi.fn(),
+      findMany: vi.fn()
     },
     teeSearch: {
       count: vi.fn(),
@@ -3698,7 +3708,7 @@ describe("browser discovery persistence", () => {
   ])("composes native retained-source research through owned candidate promotion: %s", async (scenario) => {
     const fixture = retainedSourceRecoveryFixture();
     const now = fixture.input.now!;
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(now);
     onTestFinished(() => vi.useRealTimers());
     const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Offline retained-source fixture forbids network"));
@@ -3990,17 +4000,32 @@ describe("browser discovery persistence", () => {
       const currentBatch = { ...batch, createdAt: new Date(now.getTime() - 60_000), completedAt: null };
       mockedPrisma.courseSupportVerificationRequest.findUnique.mockImplementation(async () => structuredClone({
         ...requestState, course, batchIncident: { ...batch.incidents[0], incidentId: incident.id,
-          batchId: batch.id, batch: currentBatch, verifiedIncidentUpdatedAt: incident.updatedAt },
+          batchId: batch.id, batch, verifiedIncidentUpdatedAt: incident.updatedAt },
       }) as never);
       mockedPrisma.courseSupportVerificationRequest.updateMany.mockImplementation(async ({ where, data }) => {
-        if (where.id !== requestState.id || where.revision !== requestState.revision ||
+        if ((where.id !== undefined && where.id !== requestState.id) ||
+            (where.revision !== undefined && where.revision !== requestState.revision) ||
             (where.leaseToken !== undefined && where.leaseToken !== requestState.leaseToken)) return { count: 0 };
+        for (const key of ["status", "deadlineAt", "nextAttemptAt"] as const) {
+          const condition = where[key];
+          if (condition === undefined) continue;
+          const value = requestState[key];
+          if (condition === null || typeof condition === "string" || condition instanceof Date) {
+            if (condition instanceof Date && value instanceof Date ? condition.getTime() !== value.getTime() : condition !== value) return { count: 0 };
+          } else {
+            const filter = queryRecord(condition);
+            if (Array.isArray(filter.in) && !filter.in.includes(value)) return { count: 0 };
+            if (filter.gt instanceof Date && (!(value instanceof Date) || value <= filter.gt)) return { count: 0 };
+            if (filter.gte instanceof Date && (!(value instanceof Date) || value < filter.gte)) return { count: 0 };
+          }
+        }
         for (const [key, value] of Object.entries(data)) {
           requestState[key] = value === Prisma.JsonNull || value === Prisma.DbNull ? null :
             typeof queryRecord(value).increment === "number" ? Number(requestState[key]) + Number(queryRecord(value).increment) : value;
         }
         return { count: 1 };
       });
+      await prepareNativeBatchVerification();
       const claimed = await claimCourseSupportVerificationRequest({ requestId: String(requestState.id),
         expectedRevision: 0, runtimeVersion: fence.releaseSha, now });
       expect(claimed.claimed).toBe(true);
@@ -4033,6 +4058,83 @@ describe("browser discovery persistence", () => {
           providerSnapshotFingerprint: result.providerSnapshotFingerprint });
       expect(incident.cycle).toBe(fence.cycle);
       expect(incident.activeBatchId).toBe(fence.batchId);
+      // Carry the actual verification request through the normal batch verifier
+      // and durable closeout. No preclassified RESTORED row or email path is injected.
+      async function prepareNativeBatchVerification() {
+      const { verifyCourseSupportBatch } = await import("./course-support-batches");
+      Object.assign(incident, { engineeringOnly: true, monitoringEvents: [], batchIncidents: [],
+        resolvedAt: null, resolutionMessage: null, resolutionNotifiedAt: null });
+      Object.assign(course.monitoringStatus, { revision: 4, stateChangedAt: now, nextAutomaticAttemptAt: null });
+      Object.assign(batch, { baseSha: fence.releaseSha, createdAt: currentBatch.createdAt,
+        ownerThreadId: fence.ownerThreadId, leaseToken: fence.leaseToken, completedAt: null,
+        ownerAutomationRunId: null, recheckDispatchKey: null, recheckDispatchStartedAt: null, recheckDispatchedAt: null });
+      Object.assign(batch.incidents[0], { incidentId: incident.id, batchId: batch.id,
+        preProbeId: null, postProbeId: null, proofSnapshot: null, verifiedAt: null, verifiedIncidentUpdatedAt: null });
+      const applyData = (target: object, data: object) => {
+        const record = target as Record<string, unknown>;
+        for (const [key, value] of Object.entries(data)) record[key] =
+          typeof queryRecord(value).increment === "number" ? Number(record[key]) + Number(queryRecord(value).increment) : value;
+      };
+      mockedPrisma.googlePlaceReview.findMany.mockResolvedValue([]);
+      mockedPrisma.courseSupportBatchSearch.findMany.mockResolvedValue([]);
+      mockedPrisma.coursePreference.findMany.mockResolvedValue([]);
+      mockedPrisma.courseProbe.findMany.mockResolvedValue([]);
+      mockedPrisma.courseProbe.findFirst.mockResolvedValue(null);
+      mockedPrisma.teeSearch.findMany.mockResolvedValue([]);
+      mockedPrisma.courseMonitoringEvent.findMany.mockResolvedValue([]);
+      mockedPrisma.courseMonitoringEvent.createMany.mockResolvedValue({ count: 1 });
+      mockedPrisma.courseSupportIncident.findMany.mockImplementation(async () => [structuredClone(incident)] as never);
+      mockedPrisma.courseSupportBatchIncident.findFirst.mockResolvedValue(null);
+      mockedPrisma.courseSupportBatchIncident.findMany.mockImplementation(async () => [structuredClone(batch.incidents[0])] as never);
+      mockedPrisma.courseSupportVerificationRequest.findMany.mockImplementation(async () => [structuredClone(requestState)] as never);
+      mockedPrisma.automationRun.findMany.mockResolvedValue([]);
+      mockedPrisma.automationRun.findFirst.mockResolvedValue(null);
+      mockedPrisma.automationRun.findUnique.mockResolvedValue(null);
+      mockedPrisma.courseSupportBatch.updateMany.mockImplementation(async ({ where, data }) => {
+        if (where.revision !== undefined && where.revision !== batch.revision) return { count: 0 };
+        applyData(batch, data); return { count: 1 };
+      });
+      mockedPrisma.courseSupportBatchIncident.updateMany.mockImplementation(async ({ data }) => {
+        applyData(batch.incidents[0], data); return { count: 1 };
+      });
+      mockedPrisma.courseSupportIncident.updateMany.mockImplementation(async ({ data }) => {
+        applyData(incident, data); return { count: 1 };
+      });
+      mockedPrisma.courseMonitoringStatus.updateMany.mockImplementation(async ({ data }) => {
+        applyData(course.monitoringStatus, data); return { count: 1 };
+      });
+      mockedPrisma.$queryRaw.mockImplementation(async query => {
+        const sql = "strings" in query ? query.strings.join("") : "";
+        if (sql.includes("FOR UPDATE")) return [batch.id, incident.id, course.id, "retained-entry", String(requestState.id)]
+          .map(id => ({ id, locked: 1, updatedAt: now })) as never;
+        return [{ now, locked: 1, updatedAt: now }] as never;
+      });
+      await expect(verifyCourseSupportBatch({ batchId: batch.id, leaseToken: fence.leaseToken,
+        ownerThreadId: fence.ownerThreadId, releaseSha: fence.releaseSha, deployedAt: fence.deployedAt, now,
+      })).resolves.toMatchObject({ verified: true });
+      expect(batch).toMatchObject({ recheckDispatchStartedAt: now });
+      expect(queryRecord(queryRecord(batch.summary).recheckDispatch).error).toBeUndefined();
+      expect(queryRecord(batch.summary).recheckDispatch).toMatchObject({ dispatchError: false });
+      }
+      const { verifyCourseSupportBatch, closeoutCourseSupportBatch } = await import("./course-support-batches");
+      await expect(verifyCourseSupportBatch({ batchId: batch.id, leaseToken: fence.leaseToken,
+        ownerThreadId: fence.ownerThreadId, releaseSha: fence.releaseSha, deployedAt: fence.deployedAt, now,
+      })).resolves.toMatchObject({ verified: true });
+      expect(batch.incidents[0]).toMatchObject({ result: "RESTORED", proofSnapshot: expect.objectContaining({ providerExecution: true }) });
+      const fenceApi = await import("./course-support-search-execution-fence");
+      const closeoutBatch = batch as typeof batch & { recheckDispatchKey: string | null; recheckDispatchStartedAt: Date | null; recheckDispatchedAt: Date | null };
+      const actualSearchFence = await fenceApi.readCourseSupportSearchExecutionFence(prisma,
+        fenceApi.createCourseSupportSearchExecutionFenceInput({ batchId: batch.id, courseIds: [course.id], summary: batch.summary,
+          recheckDispatchKey: closeoutBatch.recheckDispatchKey, recheckDispatchStartedAt: closeoutBatch.recheckDispatchStartedAt,
+          recheckDispatchedAt: closeoutBatch.recheckDispatchedAt, now }));
+      expect(queryRecord(batch.summary).searchExecutionFence).toEqual(fenceApi.persistCourseSupportSearchExecutionFence(actualSearchFence, now));
+      await expect(closeoutCourseSupportBatch({ batchId: batch.id, leaseToken: fence.leaseToken,
+        ownerThreadId: fence.ownerThreadId, now,
+      })).resolves.toMatchObject({ durableCloseoutRecorded: true, outcome: "success" });
+      expect(incident).toMatchObject({ status: "RESOLVED", resolution: "MONITORING_RESTORED", activeBatchId: null, nextAttemptAt: null });
+      expect(course.monitoringStatus).toMatchObject({ state: "HEALTHY", lastSuccessfulAt: now });
+      expect(mockedPrisma.teeSearch.updateMany).not.toHaveBeenCalled();
+      expect(mockedPrisma.teeTimeMatch.updateMany.mock.calls.every(([call]) => !("alertStatus" in call.data))).toBe(true);
       expect(fetchMock).not.toHaveBeenCalled();
       return;
     }

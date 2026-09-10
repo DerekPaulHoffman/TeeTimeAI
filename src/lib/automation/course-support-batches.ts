@@ -11933,6 +11933,21 @@ async function closeoutCourseSupportBatchAttempt(
       (entry.normalizedResult === "FINAL_DISPOSITION" &&
         asJsonObject(entry.proofSnapshot).kind === "PLAYBOOK_FACTUAL_FINAL" &&
         isDurableTerminalProof(entry, batch));
+    const currentProviderProof = asJsonObject(entry.proofSnapshot);
+    const currentProviderObservedAt = parseProofDate(currentProviderProof.observedAt);
+    // Learning provider metadata changes the claim snapshot by design. A fresh
+    // verification bound to the resulting snapshot proves that change worked;
+    // it must not be discarded just because the old incident named another
+    // provider. The normal atomic proof read below still checks live ownership,
+    // request success, the current provider fingerprint and absence of demand.
+    const verifiedCurrentProviderWinner = Boolean(
+      entry.normalizedResult === "RESTORED" &&
+      currentProviderProof.kind === "PROVIDER_VERIFICATION" &&
+      isDurableTerminalProof(entry, batch) && currentProviderObservedAt &&
+      currentProviderObservedAt <= now &&
+      (!currentFailureIdentity.monitoringFailureObservedAt ||
+        currentProviderObservedAt >= currentFailureIdentity.monitoringFailureObservedAt),
+    );
     const deferredCloseoutSource =
       deferredFailureHandoffByBatchIncidentId.get(entry.id);
     const deferredConfirmationStartedWithoutProviderExecution = Boolean(
@@ -11953,6 +11968,7 @@ async function closeoutCourseSupportBatchAttempt(
     );
     const staleResultAfterMaterialChange =
       !factualMonitoringWinner &&
+      !verifiedCurrentProviderWinner &&
       currentFailureIdentity.materialChange &&
       !unconfirmedVerifierOnlyMaterialChange &&
       [
