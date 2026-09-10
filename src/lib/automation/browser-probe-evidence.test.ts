@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   assertBrowserProbeExpectedDisposition,
@@ -22,7 +22,7 @@ import {
   sanitizeBrowserAuditUrl,
   type RawBrowserPageEvidence,
 } from "@/lib/automation/browser-probe-evidence";
-import { buildBrowserDiscovery } from "@/lib/automation/browser-discovery";
+import { buildBrowserDiscovery, enrichChronogolfDiscovery } from "@/lib/automation/browser-discovery";
 
 const fictionalCourse = {
   courseId: "fixture-course",
@@ -43,6 +43,93 @@ const emptyPage: RawBrowserPageEvidence = {
 };
 
 describe("browser probe evidence pipeline", () => {
+  it("recognizes Copper Creek's observed name and locality decoration through discovery", async () => {
+    const sourceUrl = "https://golfcoppercreek.com/";
+    const bookingUrl = "https://chronogolf.com/club/3286";
+    const page = prepareBrowserPageEvidence({
+      ...emptyPage,
+      identityCandidates: [
+        "Copper Creek Golf Club - Golf Club in Pleasant Hill, IA",
+        "Copper Creek Golf Club",
+      ],
+      localityCandidates: ["4825 Copper Creek Dr Pleasant Hill, Iowa 50327"],
+      visibleText: "Copper Creek Golf Club. 4825 Copper Creek Dr Pleasant Hill, Iowa 50327. Book a Tee Time.",
+      linkCandidates: [{url: bookingUrl, label: "Book a Tee Time"}],
+    });
+    const course = {
+      courseId: "cmsy7d3y700053015i6qt57o7",
+      courseName: "Copper Creek Golf Club and Event Center",
+      sourceUrl,
+      officialCourseWebsite: sourceUrl,
+      address: "4825 Copper Creek Dr, Pleasant Hill, IA 50327, USA",
+      city: "Pleasant Hill",
+      stateCode: "IA",
+    };
+    expect(classifyRenderedOfficialPageCourseIdentity(sourceUrl, page, course)).toBe("MATCH");
+    const evidence = finalizeBrowserEvidenceSnapshots({
+      course, finalUrl: sourceUrl, observedUrls: [sourceUrl],
+      successfulProviderUrls: [], accessBarrierUrls: [], accessBarriers: [],
+      landingPageUrl: sourceUrl, landingPageEvidence: page,
+      firstDestinationPageUrl: sourceUrl, firstDestinationPageEvidence: page,
+      destinationPageUrl: sourceUrl, destinationPageEvidence: page,
+    });
+    expect(evidence.officialPage?.courseName).toBe(course.courseName);
+    expect(buildBrowserDiscovery(evidence)).toMatchObject({detectedPlatform: "CHRONOGOLF"});
+    const investigation = finalizeBrowserInvestigationEvidence({
+      course, mode: "RENDERED",
+      pageVisits: [{requestedUrl: sourceUrl, finalUrl: sourceUrl, label: "Official course", depth: 0,
+        parentUrl: null, interactionBlocked: false, evidence: page}],
+      bookingDestinations: [{sourcePageUrl: sourceUrl, requestedUrl: bookingUrl, finalUrl: bookingUrl,
+        label: "Book a Tee Time", courseScoped: true, interactionBlocked: false,
+        evidence: prepareBrowserPageEvidence({...emptyPage, identityCandidates: ["Copper Creek Golf Club"],
+          visibleText: "Copper Creek Golf Club, 4825 Copper Creek Drive, Pleasant Hill, Iowa, 50327"})}],
+      providerRequestObserved: true, bookingNavigationAttempts: 1,
+    });
+    expect(investigation.browserInvestigation.sameOriginPages).toEqual([
+      expect.objectContaining({identityStatus: "MATCH", trustedForCourse: true}),
+    ]);
+    expect(buildBrowserDiscovery(investigation)).toMatchObject({detectedPlatform: "CHRONOGOLF"});
+    const fetchProfile = vi.fn().mockResolvedValue({
+      ok: true,
+      url: "https://www.chronogolf.com/club/copper-creek-golf-club",
+      text: async () => `<script id="__NEXT_DATA__">${JSON.stringify({props:{pageProps:{club:{
+        id: 3286, features: {onlineBookingEnabled: true},
+        courses: [{uuid: "1c76a6e4-eb77-4aeb-88cb-2e7457cc56cf"}],
+      }}}})}</script>`,
+    });
+    expect(await enrichChronogolfDiscovery(buildBrowserDiscovery(investigation), fetchProfile)).toMatchObject({
+      status: "LEARNED", detectedPlatform: "CHRONOGOLF", automationEligibility: "ALLOWED",
+      apiMetadata: {clubId: 3286, courseIds: ["1c76a6e4-eb77-4aeb-88cb-2e7457cc56cf"]},
+    });
+    expect(fetchProfile).toHaveBeenCalledTimes(1);
+
+    for (const override of [
+      {address: "27925 Golf Pointe Blvd", city: "Farmington Hills", stateCode: "MI"},
+      {address: undefined},
+      {address: "100 Other Road"},
+      {city: "Des Moines"},
+      {courseName: "Copper Creek North Golf Club and Event Center"},
+    ]) {
+      expect(classifyRenderedOfficialPageCourseIdentity(sourceUrl, page, {...course, ...override})).not.toBe("MATCH");
+    }
+    for (const identity of ["Copper Creek 9 Golf Club", "Copper Creek North Golf Club", "Davis Golf Course"]) {
+      expect(classifyRenderedOfficialPageCourseIdentity(sourceUrl,
+        {...page, identityCandidates: [...page.identityCandidates!, identity]}, course)).toBe("CONFLICT");
+    }
+  });
+
+  it("uses the same locality rule for another event venue without accepting a different city description", () => {
+    const course = {courseName: "Desert Canyon Golf Course & Event Venue", address: "24 Mesa Road", city: "Mesa", stateCode: "AZ"};
+    const page = prepareBrowserPageEvidence({...emptyPage,
+      identityCandidates: ["Desert Canyon Golf Course - Golf Course in Mesa, Arizona", "Desert Canyon Golf Course"],
+      visibleText: "24 Mesa Road, Mesa, Arizona",
+    });
+    expect(classifyRenderedOfficialPageCourseIdentity("https://course.example/", page, course)).toBe("MATCH");
+    expect(classifyRenderedOfficialPageCourseIdentity("https://course.example/", {...page,
+      identityCandidates: ["Desert Canyon Golf Course - Golf Course in Phoenix, Arizona", "Desert Canyon Golf Course"],
+    }, course)).toBe("CONFLICT");
+  });
+
   it("preserves an official booking-subdomain redirect to a public provider landing", () => {
     expect(
       buildRedirectedProviderBookingCandidate({

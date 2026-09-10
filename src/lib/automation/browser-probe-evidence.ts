@@ -1890,6 +1890,18 @@ export function classifyRenderedOfficialPageCourseIdentity(
   );
   const permitIdentityMatch =
     !hasBrowserCourseLocality(course) || localityCorroborated;
+  const exactLocalityCorroborated = Boolean(
+    course.address?.trim() &&
+      isRenderedUnprojectedSourceCandidateLocalityCorroborated(evidence, course),
+  );
+  // Venue services may decorate the retained business name, but only a fully
+  // corroborated local page may establish the shorter golf-course identity.
+  const comparableCourseName = exactLocalityCorroborated
+    ? course.courseName.replace(
+        /(golf\s+(?:club|course))\s+(?:and|&)\s+event\s+(?:center|centre|venue)$/iu,
+        "$1",
+      )
+    : course.courseName;
   const identityStatuses = (evidence.identityCandidates ?? []).map(
     (identity) => {
       const exactIdentityCandidates =
@@ -1897,12 +1909,21 @@ export function classifyRenderedOfficialPageCourseIdentity(
       const statuses = exactIdentityCandidates.map((candidate) => {
         if (
           haveCompatibleOfficialPageCourseNamesWithVerifiedLayout(
-            course.courseName,
+            comparableCourseName,
             candidate,
             course.verifiedLayoutHoleCounts,
           )
         ) {
           return "MATCH" as const;
+        }
+        if (
+          exactLocalityCorroborated &&
+          exactIdentityCandidates.some((other) =>
+            haveCompatibleOfficialPageCourseNames(comparableCourseName, other),
+          ) &&
+          isRenderedCourseLocalityDescriptor(candidate, course)
+        ) {
+          return "ABSENT" as const;
         }
         if (
           isOfficialOrganizationIdentityCorroboratedByUrl(candidate, pageUrl)
@@ -1949,6 +1970,21 @@ export function classifyRenderedOfficialPageCourseIdentity(
   } catch {
     return "UNKNOWN";
   }
+}
+
+function isRenderedCourseLocalityDescriptor(
+  candidate: string,
+  course: BrowserCourseIdentityContext,
+) {
+  const city = course.city?.trim();
+  const stateCode = course.stateCode?.trim().toLocaleUpperCase("en-US");
+  if (!city || !stateCode) return false;
+  const normalized = normalizeBrowserLocalityText(candidate);
+  return [stateCode, US_STATE_NAMES_BY_CODE[stateCode]].some(
+    (state) => state && ["golf club", "golf course"].some(
+      (kind) => normalized === normalizeBrowserLocalityText(`${kind} in ${city} ${state}`),
+    ),
+  );
 }
 
 export function hasBrowserCourseLocality(
