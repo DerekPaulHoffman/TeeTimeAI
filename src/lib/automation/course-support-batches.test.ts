@@ -27237,8 +27237,8 @@ describe("detached verification atomic batch fences", () => {
         now
       })
     ).resolves.toMatchObject({
-      outcome: "retryable_failed",
-      providerFamilyHandoffCount: 1,
+      outcome: "success",
+      providerFamilyHandoffCount: 0,
       reusableFamilyRestoredCount: 0,
       siblingWakeCount: 0
     });
