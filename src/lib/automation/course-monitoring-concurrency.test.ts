@@ -88,6 +88,7 @@ const prismaMocks = vi.hoisted(() => ({
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMocks }));
 
 import {
+  canRevalidateRenderedVenueIdentity,
   getMaterialProviderEvidenceChanges,
   invalidateReviewDerivedIdentityFinal,
   recordCourseMonitoringFailure,
@@ -9725,6 +9726,84 @@ describe("course monitoring write serialization", () => {
     ).not.toHaveBeenCalled();
   });
 
+  it("requeues the observed exhausted venue identity failure once across deployments without changing its ledger or sending email", async () => {
+    const now = new Date("2026-09-10T00:20:00Z");
+    const course = {
+      id: "copper-creek", name: "Copper Creek Golf Club and Event Center",
+      address: "4825 Copper Creek Dr, Pleasant Hill, IA 50327, USA", city: "Pleasant Hill", stateCode: "IA",
+      timeZone: "America/Chicago", website: "https://golfcoppercreek.com/", isPublic: true,
+      monitoringMode: "AUTOMATIC", detectedPlatform: "UNKNOWN", detectedBookingUrl: null,
+      providerFamilyKey: "golfcoppercreek.com", bookingMethod: "UNKNOWN", bookingMetadata: null,
+      automationEligibility: "NEEDS_REVIEW", automationReason: "UNSUPPORTED_PLATFORM",
+      monitoringStatus: {state: "ENGINEERING_VERIFICATION_NEEDED", revision: 4},
+      automationDiscoveries: [] as unknown[],
+    };
+    const stages = ["OFFICIAL_IDENTITY", "TYPED_ADAPTER", "OFFICIAL_HTTP_DISCOVERY", "HTTP_ADAPTER_RETRY",
+      "RENDERED_BROWSER_DISCOVERY", "BROWSER_ADAPTER_RETRY", "LOCAL_READER", "INDEPENDENT_CONFIRMATION"] as const;
+    let ledger: unknown = null;
+    for (const [index, stage] of stages.entries()) {
+      ledger = appendAutomationPlaybookEvent(ledger, {cycle: 8, stage,
+        transition: stage === "INDEPENDENT_CONFIRMATION" ? "FAILED_TERMINAL" : "COMPLETED",
+        evidenceKind: stage === "RENDERED_BROWSER_DISCOVERY" ? "RENDERED_PAGE" : "TOOLING",
+        readPath: stage === "OFFICIAL_HTTP_DISCOVERY" ? "OFFICIAL_HTTP" :
+          stage === "RENDERED_BROWSER_DISCOVERY" ? "RENDERED_BROWSER" :
+          ["TYPED_ADAPTER", "HTTP_ADAPTER_RETRY", "BROWSER_ADAPTER_RETRY"].includes(stage) ? "TYPED_PROVIDER_ADAPTER" : stage,
+        runtimeVersion: "a".repeat(40), failureFingerprint: "SOURCE:MISSING",
+        ...(stage === "INDEPENDENT_CONFIRMATION" ? {failureClass: "MISSING_SOURCE" as const} : {}),
+        observedAt: new Date(Date.parse("2026-09-07T20:10:00Z") + index * 1000),
+        providerExecution: stage === "RENDERED_BROWSER_DISCOVERY",
+      });
+    }
+    const fingerprint = buildCourseSupportProviderSnapshotFingerprint(course as never);
+    course.automationDiscoveries = [{id: "observed-rejection", createdAt: new Date("2026-09-07T20:17:21Z"),
+      status: "INSPECTED", detectedPlatform: "UNKNOWN", apiMetadata: null,
+      evidence: {finalUrl: course.website, browserInvestigation: {mode: "RENDERED", incidentCycle: 8,
+        providerSnapshotFingerprint: fingerprint,
+        sameOriginPages: [{identityStatus: "CONFLICT", localityCorroborated: true, trustedForCourse: false, interactionBlocked: false}]}}}];
+    const incident = {id: "venue-incident", courseId: course.id, status: "NEEDS_HUMAN", cycle: 8, revision: 9,
+      activeBatchId: null, decisionAt: null, resolvedAt: null, resolution: null, confirmedAt: new Date("2026-09-07T20:04:20Z"),
+      activeRealSearchCount: 0, failureClass: "MISSING_SOURCE", failureFingerprint: "SOURCE:MISSING", attemptLedger: ledger, course,
+    } as unknown as Parameters<typeof canRevalidateRenderedVenueIdentity>[0];
+    expect(canRevalidateRenderedVenueIdentity(incident)).toBe(true);
+    for (const changed of [
+      {...incident, activeBatchId: "other-owner"},
+      {...incident, decisionAt: now},
+      {...incident, course: {...incident.course, name: "Other Golf Club"}},
+      {...incident, course: {...incident.course, website: "https://changed.example/"}},
+      {...incident, course: {...incident.course, monitoringStatus: {...incident.course.monitoringStatus!, state: "FINAL_TECHNICAL" as const}}},
+    ]) expect(canRevalidateRenderedVenueIdentity(changed)).toBe(false);
+    const originalLedger = structuredClone(incident.attemptLedger);
+    prismaMocks.$transaction.mockImplementation(async worker => worker(transactionMocks));
+    prismaMocks.automationRun.upsert.mockResolvedValue({id: "deployment"});
+    prismaMocks.courseSupportIncident.findMany.mockResolvedValue([incident]);
+    transactionMocks.courseSupportIncident.findUnique.mockResolvedValue(incident);
+    transactionMocks.$queryRaw.mockResolvedValue([{now}]);
+    transactionMocks.courseMonitoringEvent.findUnique.mockResolvedValue(null);
+    transactionMocks.courseSupportIncident.updateMany.mockResolvedValue({count: 1});
+    transactionMocks.courseMonitoringStatus.updateMany.mockResolvedValue({count: 1});
+    await expect(revalidateHumanReviewCoursesForDeployment({deploymentSha: "b".repeat(40), now})).resolves.toMatchObject({considered: 1, requeued: 1});
+    expect(transactionMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({activeBatchId: null, cycle: 8, revision: 9}),
+      data: expect.objectContaining({cycle: {increment: 1}, confirmedAt: now, status: "AUTO_INVESTIGATING"}),
+    }));
+    expect(transactionMocks.courseSupportIncident.updateMany.mock.calls[0]![0].data).not.toHaveProperty("attemptLedger");
+    expect(incident.attemptLedger).toEqual(originalLedger);
+    expect(assessAutomationPlaybook(incident.attemptLedger, 9).nextStage).toBe("OFFICIAL_IDENTITY");
+    expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith(expect.objectContaining({data: expect.objectContaining({
+      source: "RECOVERY_CRON", readPath: "rendered-venue-identity-v1",
+      audit: expect.objectContaining({priorCycle: 8, cycle: 9, preservesPriorAttemptEvents: true}),
+    })}));
+    transactionMocks.courseMonitoringEvent.findUnique.mockResolvedValue({id: "consumed"});
+    await expect(revalidateHumanReviewCoursesForDeployment({deploymentSha: "c".repeat(40), now})).resolves.toMatchObject({requeued: 0});
+    expect(transactionMocks.courseSupportIncident.updateMany).toHaveBeenCalledTimes(1);
+    expect(transactionMocks.teeSearch.updateMany).not.toHaveBeenCalled();
+    expect(transactionMocks.teeTimeMatch.updateMany).not.toHaveBeenCalled();
+    transactionMocks.courseMonitoringEvent.findUnique.mockResolvedValue(null);
+    transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({...incident, activeBatchId: "new-owner"});
+    await expect(revalidateHumanReviewCoursesForDeployment({deploymentSha: "d".repeat(40), now})).resolves.toMatchObject({requeued: 0});
+    expect(transactionMocks.courseSupportIncident.updateMany).toHaveBeenCalledTimes(1);
+  });
+
   it("records a deployment marker without reopening unchanged human-review work", async () => {
     prismaMocks.$transaction.mockReset();
     prismaMocks.$transaction.mockImplementation(async (worker) =>
@@ -9794,7 +9873,7 @@ describe("course monitoring write serialization", () => {
         update: {},
       }),
     );
-    expect(prismaMocks.courseSupportIncident.findMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportIncident.findMany).toHaveBeenCalledWith(expect.objectContaining({take: 5}));
     expect(
       transactionMocks.courseSupportIncident.updateMany,
     ).not.toHaveBeenCalled();
@@ -9852,7 +9931,7 @@ describe("course monitoring write serialization", () => {
       retainedAuthoritativeFinals: 0,
     });
 
-    expect(prismaMocks.courseSupportIncident.findMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportIncident.findMany).toHaveBeenCalledWith(expect.objectContaining({take: 5}));
     expect(
       transactionMocks.courseSupportIncident.updateMany,
     ).not.toHaveBeenCalled();
@@ -9862,7 +9941,7 @@ describe("course monitoring write serialization", () => {
     ).not.toHaveBeenCalled();
   });
 
-  it("does not scan or batch parked incidents after deployment", async () => {
+  it("limits deployment inspection to the affected discovery class without batching unrelated parked incidents", async () => {
     prismaMocks.$transaction.mockReset();
     prismaMocks.$transaction.mockImplementation(async (worker) =>
       worker(transactionMocks),
@@ -9920,7 +9999,7 @@ describe("course monitoring write serialization", () => {
       retainedAuthoritativeFinals: 0,
     });
 
-    expect(prismaMocks.courseSupportIncident.findMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportIncident.findMany).toHaveBeenCalledWith(expect.objectContaining({take: 5}));
     expect(
       transactionMocks.courseSupportIncident.updateMany,
     ).not.toHaveBeenCalled();

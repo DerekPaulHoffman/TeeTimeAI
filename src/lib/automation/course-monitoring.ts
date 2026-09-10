@@ -3452,6 +3452,109 @@ export async function recordCourseMonitoringPlaybookTransition(
   );
 }
 
+const RENDERED_VENUE_IDENTITY_REVALIDATION = "rendered-venue-identity-v1";
+const renderedIdentityRevalidationInclude = {
+  course: { include: {
+    monitoringStatus: true,
+    automationDiscoveries: { orderBy: { createdAt: "desc" }, take: 1 },
+  } },
+} as const;
+type RenderedIdentityRevalidationIncident = Prisma.CourseSupportIncidentGetPayload<{
+  include: typeof renderedIdentityRevalidationInclude;
+}>;
+
+export function canRevalidateRenderedVenueIdentity(incident: RenderedIdentityRevalidationIncident) {
+  if (!incident.course) return false;
+  const course = incident.course;
+  const state = course.monitoringStatus;
+  const discovery = course.automationDiscoveries[0];
+  const evidence = asMonitoringJsonRecord(discovery?.evidence);
+  const browser = asMonitoringJsonRecord(evidence?.browserInvestigation);
+  const pages = browser?.sameOriginPages;
+  if (incident.status !== "NEEDS_HUMAN" || incident.activeBatchId !== null ||
+    incident.decisionAt !== null || incident.resolvedAt !== null || incident.resolution !== null ||
+    incident.confirmedAt === null || course.isPublic !== true || course.monitoringMode !== "AUTOMATIC" ||
+    !course.address || !course.city || !course.stateCode || !course.timeZone ||
+    !/golf\s+(?:club|course)\s+(?:and|&)\s+event\s+(?:center|centre|venue)$/iu.test(course.name) ||
+    state?.state !== "ENGINEERING_VERIFICATION_NEEDED" ||
+    !["MISSING_SOURCE", "MISSING_METADATA"].includes(incident.failureClass) ||
+    !discovery || discovery.createdAt < incident.confirmedAt || discovery.status !== "INSPECTED" ||
+    discovery.detectedPlatform !== "UNKNOWN" || discovery.apiMetadata !== null ||
+    browser?.mode !== "RENDERED" || browser.incidentCycle !== incident.cycle ||
+    browser.providerSnapshotFingerprint !== buildCourseSupportProviderSnapshotFingerprint(course) ||
+    !Array.isArray(pages) || pages.length === 0 ||
+    !pages.every((page) => {
+      const item = asMonitoringJsonRecord(page);
+      return item?.identityStatus === "CONFLICT" && item.localityCorroborated === true &&
+        item.trustedForCourse === false && item.interactionBlocked === false;
+    }) ||
+    assessAutomationPlaybook(incident.attemptLedger, incident.cycle).conclusion !== "UNRESOLVED_EXHAUSTED") {
+    return false;
+  }
+  try {
+    const website = new URL(course.website ?? "");
+    const observed = new URL(String(evidence?.finalUrl ?? ""));
+    return website.protocol === "https:" && observed.origin === website.origin &&
+      !website.username && !website.password && !observed.username && !observed.password;
+  } catch { return false; }
+}
+
+async function revalidateRenderedVenueIdentityForDeployment(deploymentSha: string) {
+  const candidates = await prisma.courseSupportIncident.findMany({
+    where: { status: "NEEDS_HUMAN", activeBatchId: null, decisionAt: null, resolvedAt: null, resolution: null,
+      failureClass: { in: ["MISSING_SOURCE", "MISSING_METADATA"] },
+      course: { is: { isPublic: true, monitoringMode: "AUTOMATIC", OR:
+        ["Event Center", "Event Centre", "Event Venue"].map(suffix => ({ name: { endsWith: suffix, mode: "insensitive" as const } })),
+      } },
+      monitoringEvents: { none: { eventType: "REVALIDATION_REQUESTED", readPath: RENDERED_VENUE_IDENTITY_REVALIDATION } },
+    },
+    include: renderedIdentityRevalidationInclude,
+    orderBy: [{ activeRealSearchCount: "desc" }, { createdAt: "asc" }], take: 5,
+  });
+  let requeued = 0;
+  const eligible = candidates.filter(canRevalidateRenderedVenueIdentity);
+  for (const candidate of eligible) {
+    const changed = await runSerializedCourseMonitoringWrite(candidate.courseId, async transaction => {
+      await transaction.$queryRaw(Prisma.sql`SELECT "id" FROM "Course" WHERE "id" = ${candidate.courseId} FOR UPDATE`);
+      const incident = await transaction.courseSupportIncident.findUnique({where: {id: candidate.id}, include: renderedIdentityRevalidationInclude});
+      if (!incident || !canRevalidateRenderedVenueIdentity(incident)) return false;
+      const idempotencyKey = `${RENDERED_VENUE_IDENTITY_REVALIDATION}:${incident.courseId}`;
+      if (await transaction.courseMonitoringEvent.findUnique({where: {idempotencyKey}, select: {id: true}})) return false;
+      const [clock] = await transaction.$queryRaw<Array<{now: Date}>>(Prisma.sql`SELECT clock_timestamp() AS "now"`);
+      if (!(clock?.now instanceof Date) || !Number.isFinite(clock.now.getTime())) throw new Error("Discovery revalidation database clock unavailable");
+      const now = clock.now;
+      const status = incident.course.monitoringStatus!;
+      const updated = await transaction.courseSupportIncident.updateMany({where: {
+        id: incident.id, cycle: incident.cycle, revision: incident.revision, status: "NEEDS_HUMAN",
+        activeBatchId: null, decisionAt: null, resolvedAt: null, resolution: null,
+      }, data: {cycle: {increment: 1}, revision: {increment: 1}, status: "AUTO_INVESTIGATING", confirmedAt: now,
+        humanReviewReason: null, nextReminderAt: null, nextAttemptAt: now,
+        escalationDeadlineAt: getCourseMonitoringEscalationDeadline(now, incident.activeRealSearchCount),
+        latestMessage: "An improved official course identity check is available; normal discovery is queued.",
+      }});
+      if (updated.count !== 1) return false;
+      const updatedStatus = await transaction.courseMonitoringStatus.updateMany({where: {
+        courseId: incident.courseId, revision: status.revision, state: status.state,
+      }, data: {state: "AUTO_INVESTIGATING", stateChangedAt: now, nextAutomaticAttemptAt: now,
+        revalidationRequestedAt: now, revision: {increment: 1},
+      }});
+      if (updatedStatus.count !== 1) throw new Error("Discovery revalidation lost monitoring ownership");
+      await transaction.courseMonitoringEvent.create({data: {
+        courseId: incident.courseId, incidentId: incident.id, eventType: "REVALIDATION_REQUESTED", source: "RECOVERY_CRON",
+        readPath: RENDERED_VENUE_IDENTITY_REVALIDATION, idempotencyKey, failureFingerprint: incident.failureFingerprint,
+        fromState: status.state, toState: "AUTO_INVESTIGATING", occurredAt: now,
+        message: "The deployed identity parser now handles locally corroborated event-venue course names.",
+        audit: {action: "relevant_discovery_implementation_changed", implementation: RENDERED_VENUE_IDENTITY_REVALIDATION,
+          deploymentSha, discoveryId: incident.course.automationDiscoveries[0]!.id,
+          priorCycle: incident.cycle, cycle: incident.cycle + 1, preservesPriorAttemptEvents: true, customerDataIncluded: false},
+      }});
+      return true;
+    });
+    if (changed) requeued += 1;
+  }
+  return {considered: eligible.length, requeued, retainedAuthoritativeFinals: 0};
+}
+
 export async function revalidateHumanReviewCoursesForDeployment(input: {
   deploymentSha?: string | null;
   now?: Date;
@@ -3487,11 +3590,7 @@ export async function revalidateHumanReviewCoursesForDeployment(input: {
     update: {},
     select: { id: true },
   });
-  return {
-    considered: 0,
-    requeued: 0,
-    retainedAuthoritativeFinals: 0,
-  };
+  return revalidateRenderedVenueIdentityForDeployment(deploymentSha);
 }
 
 export async function reconcileCourseMonitoringDeadlines(input: {
