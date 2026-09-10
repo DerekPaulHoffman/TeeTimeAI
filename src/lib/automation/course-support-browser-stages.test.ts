@@ -381,6 +381,35 @@ describe("persistOwnedCourseSupportBrowserPlaybookStages", () => {
     now: new Date("2026-07-21T12:00:00.000Z"),
   };
 
+  it.each([[false, false], [true, false], [true, true]])("hands a missing source to research, then accepts only its owned candidate (assigned: %s, candidate: %s)", async (assigned, candidate) => {
+    const batch = retainedSourceResearchBatch(assigned);
+    const entry = batch.incidents[0];
+    entry.incident.attemptLedger = ledger(throughHttpRetry);
+    entry.incident.providerFamilyKey = "SOURCE_MISSING";
+    Object.assign(entry.course!, { website: null, detectedBookingUrl: null, detectedPlatform: "UNKNOWN",
+      providerFamilyKey: "SOURCE_MISSING", bookingMetadata: null, bookingMethod: "UNKNOWN", bookingAccessMode: "UNKNOWN" });
+    const summary = batch.summary as { remediation: { attempts: Array<{ approach: { playbookStage: string }; actionPlan: { route: { playbookStage: string } } }> } };
+    summary.remediation.attempts[0].approach.playbookStage = assigned ? "RENDERED_BROWSER_DISCOVERY" : "OFFICIAL_IDENTITY";
+    summary.remediation.attempts[0].actionPlan.route.playbookStage = summary.remediation.attempts[0].approach.playbookStage;
+    const before = structuredClone(entry.incident.attemptLedger);
+    const runBrowserProbe = vi.fn().mockResolvedValue({ persistedCount: 1 });
+    const hasOwnedSourceSearchCandidate = vi.fn().mockResolvedValue(candidate);
+    const progression = persistOwnedCourseSupportBrowserPlaybookStages(input, {
+      loadBatch: vi.fn().mockResolvedValue(batch), runBrowserProbe, hasOwnedSourceSearchCandidate,
+    });
+    if (assigned && !candidate) {
+      await expect(progression).rejects.toThrow("exact recorded candidate");
+      expect(runBrowserProbe).not.toHaveBeenCalled();
+      expect(entry.incident.attemptLedger).toEqual(before);
+      return;
+    }
+    const result = await progression;
+    expect(result).toMatchObject({ sourceResearchHandoffCount: assigned ? 0 : 1, persistedCount: assigned ? 1 : 0 });
+    expect(runBrowserProbe).toHaveBeenCalledTimes(assigned ? 1 : 0);
+    expect(hasOwnedSourceSearchCandidate).toHaveBeenCalledTimes(assigned ? 1 : 0);
+    expect(entry.incident.attemptLedger).toEqual(before);
+  });
+
   it("loads the same bounded rejection history as the source-search producer", async () => {
     const query = vi.spyOn(prisma.courseSupportBatch, "findFirst").mockResolvedValue(null);
     const runBrowserProbe = vi.fn();

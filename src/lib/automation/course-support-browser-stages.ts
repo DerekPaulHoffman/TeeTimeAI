@@ -3,7 +3,7 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 
 import { assessAutomationPlaybook } from "./course-monitoring-playbook";
-import { courseSupportActionPlanAllows } from "./course-support-action-plan";
+import { courseSupportActionPlanAllows, isCourseSupportSourceSearchActionEligible } from "./course-support-action-plan";
 import { getCourseSupportRetainedSourceRecovery } from "./course-support-retained-source-recovery";
 import type { BrowserInvestigationMode } from "./browser-probe-evidence";
 import {
@@ -27,6 +27,7 @@ export type CourseSupportBrowserStageEntry = {
     cycle: number;
     status: string;
     activeBatchId: string | null;
+    providerFamilyKey?: string;
     attemptLedger: unknown;
     confirmedAt?: Date | null;
     firstSeenAt?: Date;
@@ -383,7 +384,10 @@ export async function persistOwnedCourseSupportBrowserPlaybookStages(
             now: currentTime(),
           })
         : null;
-    if (target.stage === "INDEPENDENT_CONFIRMATION") {
+    const missingSourceResearch = Boolean(target.stage === "RENDERED_BROWSER_DISCOVERY" && currentEntry.course &&
+      isCourseSupportSourceSearchActionEligible({ workMode: "ADVANCE_DISCOVERY", playbookStage: target.stage,
+        incidentProviderFamilyKey: currentEntry.incident.providerFamilyKey ?? "", course: currentEntry.course }));
+    if (target.stage === "INDEPENDENT_CONFIRMATION" || missingSourceResearch) {
       const { readCourseSupportRemediationClaimAttempt } =
         await import("./course-support-batches");
       const claim = readCourseSupportRemediationClaimAttempt({
@@ -395,11 +399,11 @@ export async function persistOwnedCourseSupportBrowserPlaybookStages(
         claim?.actionPlan?.primaryAction === "SEARCH_FOR_OFFICIAL_SOURCE" &&
         courseSupportActionPlanAllows(claim.actionPlan, "SEARCH_FOR_OFFICIAL_SOURCE") &&
         claim.actionPlan.route.workMode === "ADVANCE_DISCOVERY" &&
-        claim.actionPlan.route.playbookStage === "INDEPENDENT_CONFIRMATION",
+        claim.actionPlan.route.playbookStage === target.stage,
       );
-      if (sourceRecovery && !sourceSearchAssigned) {
-        // The retained page has no trustworthy course identity. A fresh claim
-        // must own the different research action before independent browsing.
+      if ((sourceRecovery || missingSourceResearch) && !sourceSearchAssigned) {
+        // A fresh claim must own source research before a browser can read a
+        // missing source or independently revisit a rejected source.
         sourceResearchHandoffCount += 1;
         continue;
       }
@@ -607,6 +611,7 @@ async function loadOwnedCourseSupportBrowserStageBatch(input: {
               cycle: true,
               status: true,
               activeBatchId: true,
+              providerFamilyKey: true,
               attemptLedger: true,
               confirmedAt: true,
               firstSeenAt: true,

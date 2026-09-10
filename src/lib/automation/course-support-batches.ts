@@ -10613,11 +10613,27 @@ async function closeoutCourseSupportBatchAttempt(
         message: "Bounded replacement-source research did not establish the course identity; the rejected retained source cannot authorize provider implementation.",
       };
     }
-    const sourceResearchHandoff = getCourseSupportRetainedSourceRecovery({
+    const retainedSourceHandoff = getCourseSupportRetainedSourceRecovery({
       course: entry.course,
       incident: entry.incident,
       now,
     });
+    const missingSourceHandoff = entry.incident.status === "AUTO_INVESTIGATING" &&
+      entry.incident.activeBatchId === batch.id && entry.incident.cycle === entry.cycle &&
+      [entry.incident.decisionAt, entry.incident.decisionActorId, entry.incident.decisionNote,
+        entry.incident.decisionEvidenceUrl, entry.incident.decisionIdempotencyKey,
+        entry.incident.resolvedAt, entry.incident.resolution].every(value => value == null) &&
+      isCourseSupportSourceSearchActionEligible({
+      workMode: "ADVANCE_DISCOVERY",
+      playbookStage: assessAutomationPlaybook(entry.incident.attemptLedger, entry.cycle).nextStage,
+      incidentProviderFamilyKey: entry.incident.providerFamilyKey,
+      course: entry.course,
+    });
+    const sourceResearchHandoff = retainedSourceHandoff ?? (missingSourceHandoff ? {
+      mode: "MISSING_SOURCE_RESEARCH" as const,
+      providerSnapshotFingerprint: currentProviderSnapshotFingerprint,
+      rejectionEvidenceDigest: null,
+    } : null);
     const sourceResearchClaim = readCourseSupportRemediationClaimAttempt({
       summary: batch.summary,
       courseId: entry.courseId,
@@ -10635,7 +10651,9 @@ async function closeoutCourseSupportBatchAttempt(
         automationStalled: false,
         sourceResearchHandoff,
         normalizedResult: "RETRY_SCHEDULED" as const,
-        message: "Fresh rendered evidence rejected the retained course identity; the unattempted independent stage now requires one replacement-source investigation.",
+        message: retainedSourceHandoff
+          ? "Fresh rendered evidence rejected the retained course identity; the unattempted independent stage now requires one replacement-source investigation."
+          : "Official discovery reached a course with no source URL; a fresh owned source search is required before browser discovery.",
       };
     }
     const freshExactRuntimeSourceCycle =
@@ -13608,16 +13626,16 @@ async function closeoutCourseSupportBatchAttempt(
             incidentId: entry.incidentId,
             eventType: "AUTOMATION_ATTEMPTED",
             source: "COURSE_SUPPORT_RESPONDER",
-            message: "Independent confirmation handed off to replacement-source research without repeating the rejected site.",
+            message: "Course discovery handed off to an owned official-source search before further browser work.",
             runtimeVersion: closeoutRuntimeVersion,
-            idempotencyKey: `course-support-source-research-handoff:${entry.incidentId}:${entry.cycle}:${entry.sourceResearchHandoff.rejectionEvidenceDigest}`,
+            idempotencyKey: `course-support-source-research-handoff:${entry.incidentId}:${entry.cycle}:${entry.sourceResearchHandoff.rejectionEvidenceDigest ?? entry.sourceResearchHandoff.providerSnapshotFingerprint}`,
             audit: {
-              action: "RETAINED_SOURCE_RESEARCH_HANDOFF",
+              action: entry.sourceResearchHandoff.mode === "MISSING_SOURCE_RESEARCH" ? "MISSING_SOURCE_RESEARCH_HANDOFF" : "RETAINED_SOURCE_RESEARCH_HANDOFF",
               incidentCycle: entry.cycle,
               providerSnapshotFingerprint: entry.sourceResearchHandoff.providerSnapshotFingerprint,
-              rejectionEvidenceDigest: entry.sourceResearchHandoff.rejectionEvidenceDigest,
+              ...(entry.sourceResearchHandoff.rejectionEvidenceDigest ? { rejectionEvidenceDigest: entry.sourceResearchHandoff.rejectionEvidenceDigest } : {}),
               assignedAction: "SEARCH_FOR_OFFICIAL_SOURCE",
-              nextStage: "INDEPENDENT_CONFIRMATION",
+              nextStage: entry.sourceResearchHandoff.mode === "MISSING_SOURCE_RESEARCH" ? "RENDERED_BROWSER_DISCOVERY" : "INDEPENDENT_CONFIRMATION",
               providerExecution: false,
               preservesAttemptLedger: true,
             },
