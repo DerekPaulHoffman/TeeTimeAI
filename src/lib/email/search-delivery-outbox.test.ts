@@ -4535,7 +4535,12 @@ describe("search email delivery outbox", () => {
     expect(executeRawCallsContaining('"recheckRequestedAt"')).toHaveLength(1);
   });
 
-  it("sends a Grassy Hill local-reader status through a stored technical final", async () => {
+  it.each([
+    { staleAccess: false, knownReader: true, outcome: "NO_MATCH", sends: true },
+    { staleAccess: true, knownReader: true, outcome: "NO_MATCH", sends: true },
+    { staleAccess: true, knownReader: false, outcome: "NO_MATCH", sends: false },
+    { staleAccess: true, knownReader: true, outcome: "NEEDS_ADAPTER", sends: false },
+  ])("validates a public reader status against stored access ($staleAccess, $knownReader, $outcome)", async ({ staleAccess, knownReader, outcome, sends }) => {
     const bookingUrl =
       "https://grassyhill.cps.golf/onlineresweb/search-teetime";
     const statusPayload = {
@@ -4571,23 +4576,23 @@ describe("search email delivery outbox", () => {
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([owner] as never)
       .mockResolvedValueOnce([
-        { ...owner, status: "SENT", sentAt: now },
+        { ...owner, status: sends ? "SENT" : "SUPPRESSED", sentAt: sends ? now : null },
       ] as never);
     mockedPrisma.course.findMany.mockResolvedValue([
       {
         ...currentCourse,
         name: "Grassy Hill Country Club",
-        detectedBookingUrl: bookingUrl,
+        detectedBookingUrl: knownReader ? bookingUrl : "https://booking.example/tee-times",
         bookingAccessMode: "CAPTCHA_OR_QUEUE",
-        automationEligibility: "BLOCKED",
-        automationReason: "CAPTCHA_OR_QUEUE",
-        intelligenceVerifiedAt: new Date("2026-07-11T12:00:00.000Z"),
+        automationEligibility: staleAccess ? "NEEDS_REVIEW" : "BLOCKED",
+        automationReason: staleAccess ? "OTHER" : "CAPTCHA_OR_QUEUE",
+        intelligenceVerifiedAt: staleAccess ? null : new Date("2026-07-11T12:00:00.000Z"),
         intelligenceReviewAt: new Date("2026-08-11T12:00:00.000Z"),
         intelligenceConfidence: 0.95,
       },
     ] as never);
     mockedPrisma.courseProbe.findMany.mockResolvedValue([
-      { courseId: "course-1", outcome: "NO_MATCH", observedAt: now },
+      { courseId: "course-1", outcome, observedAt: now },
     ] as never);
     mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([]);
     const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
@@ -4602,11 +4607,13 @@ describe("search email delivery outbox", () => {
         send,
         now: () => now,
       }),
-    ).resolves.toContainEqual({ id: "delivery-1", status: "SENT" });
+    ).resolves.toContainEqual({ id: "delivery-1", status: sends ? "SENT" : "SUPPRESSED" });
 
-    expect(send).toHaveBeenCalledWith(
-      expect.objectContaining({ payload: statusPayload }),
-    );
+    if (sends) {
+      expect(send).toHaveBeenCalledWith(expect.objectContaining({ payload: statusPayload }));
+    } else {
+      expect(send).not.toHaveBeenCalled();
+    }
   });
 
   it.each([

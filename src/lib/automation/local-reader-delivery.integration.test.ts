@@ -356,15 +356,23 @@ afterEach(() => {
 });
 
 describe("completed reader source through ordinary match delivery", () => {
-  it.each([null, "DELIVERY_PROVIDER_SOURCE_UNRESOLVED", "STATUS_CONTENT_STALE_REPLACEMENT_PENDING"])(
-    "sends a missed no-match recovery once to both recipients (prior rejection=%s)", async (priorRejection) => {
+  it.each([null, "DELIVERY_PROVIDER_SOURCE_UNRESOLVED", "STATUS_CONTENT_STALE_REPLACEMENT_PENDING"].flatMap(
+    priorRejection => [false, true].map(staleAccess => ({ priorRejection, staleAccess })),
+  ))(
+    "sends a missed no-match recovery once to both recipients (prior rejection=$priorRejection, stale access=$staleAccess)", async ({ priorRejection, staleAccess }) => {
     boundary.statusEmailsEnabled = true;
+    if (staleAccess) Object.assign(rows.course[0], {
+      bookingAccessMode: "CAPTCHA_OR_QUEUE", automationEligibility: "NEEDS_REVIEW",
+      automationReason: "OTHER", intelligenceVerifiedAt: null,
+      intelligenceReviewAt: null, intelligenceConfidence: null,
+    });
     rows.teeSearch[0].statusEmailSentAt = priorSuccess;
     const recoveredAt = new Date("2026-07-29T12:00:00Z");
     Object.assign(rows.courseSupportIncident[0], { firstSeenAt: priorSuccess, resolvedAt: recoveredAt });
     rows.courseMonitoringStatus[0].stateChangedAt = recoveredAt;
-    object(rows.localReaderJob[0].result).slots = [];
-    object(rows.localReaderJob[0].result).status = "NO_AVAILABILITY";
+    const outsideWindowSlot = object((object(rows.localReaderJob[0].result).slots as unknown[])[0]);
+    outsideWindowSlot.startsAtLocal = "2026-07-30T18:10:00";
+    outsideWindowSlot.timeLabel = "6:10 PM";
     // The global course is already healthy. A suppressed outage with a legacy
     // sentAt is not an accepted message and must not suppress the recovery.
     rows.searchEmailDelivery.push({ id: "suppressed-outage", teeSearchId: lease.searchId,

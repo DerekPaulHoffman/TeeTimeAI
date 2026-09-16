@@ -4271,6 +4271,19 @@ async function validateCurrentStatusDeliveryPayload(
   for (const course of persistedCourses) {
     const courseId = course.courseId as string;
     const currentCourse = currentCourseById.get(courseId);
+    const latestProbe = latestProbeByCourse.get(courseId);
+    // A successful public reader result can supersede an old technical-access
+    // label even when that label is no longer a verified terminal disposition.
+    // Keep the ordinary freshness and serialized provider-source checks below.
+    const observedPublicReaderAccess = Boolean(
+      currentCourse &&
+      course.bookingAccessMode === "PUBLIC_SIGNED_OUT" &&
+      ["CAPTCHA_OR_QUEUE", "ACCOUNT_REQUIRED"].includes(currentCourse.bookingAccessMode) &&
+      currentDispositionByCourse.get(courseId) === "ACTIONABLE" &&
+      (course.outcome === "NO_MATCH" || course.outcome === "MATCH_FOUND") &&
+      latestProbe?.outcome === course.outcome &&
+      getLocalReaderCourseKey(currentCourse.detectedBookingUrl || currentCourse.website),
+    );
     if (
       !currentCourse ||
       currentCourse.updatedAt > payloadCheckedAt ||
@@ -4281,12 +4294,12 @@ async function validateCurrentStatusDeliveryPayload(
         currentCourse.bookingMethod !== course.bookingMethod) ||
       (course.bookingAccessMode !== undefined &&
         currentCourse.bookingAccessMode !== course.bookingAccessMode &&
-        !localReaderOverrideByCourse.get(courseId)) ||
+        !localReaderOverrideByCourse.get(courseId) &&
+        !observedPublicReaderAccess) ||
       currentDispositionByCourse.get(courseId) !== course.monitoringDisposition
     ) {
       return "stale";
     }
-    const latestProbe = latestProbeByCourse.get(courseId);
     const latestOutcome = latestProbe?.outcome;
     if (course.outcome === "CHECK_PENDING") {
       if (latestProbe && latestProbe.observedAt > payloadCheckedAt) {
