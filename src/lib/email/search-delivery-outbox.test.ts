@@ -4243,7 +4243,8 @@ describe("search email delivery outbox", () => {
     expect(send).toHaveBeenCalledOnce();
   });
 
-  it("retires an ambiguously attempted stale status without issuing a new status key", async () => {
+  it.each([null, "DELIVERY_PROVIDER_SOURCE_PENDING"])(
+    "distinguishes uncertain transport from a provider hold before stale status replacement (%s)", async (lastError) => {
     const statusPayload = {
       schemaVersion: 2 as const,
       checkedAt: now.toISOString(),
@@ -4274,6 +4275,7 @@ describe("search email delivery outbox", () => {
       payload: statusPayload,
       status: "FAILED",
       attemptCount: 1,
+      lastError,
       nextAttemptAt: new Date(now.getTime() - 1),
     });
     mockedPrisma.searchEmailDelivery.findMany
@@ -4303,7 +4305,9 @@ describe("search email delivery outbox", () => {
       expect.objectContaining({
         data: expect.objectContaining({
           status: "SUPPRESSED",
-          lastError: "STATUS_CONTENT_STALE_REPLACEMENT_PENDING_AMBIGUOUS",
+          lastError: lastError === "DELIVERY_PROVIDER_SOURCE_PENDING"
+            ? "STATUS_CONTENT_STALE_REPLACEMENT_PENDING"
+            : "STATUS_CONTENT_STALE_REPLACEMENT_PENDING_AMBIGUOUS",
         }),
       }),
     );

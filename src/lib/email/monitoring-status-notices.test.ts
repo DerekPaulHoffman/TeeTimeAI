@@ -217,6 +217,9 @@ describe("monitoring status notices", () => {
       candidates: [{ ...recovered, recoveredAt: new Date(recoveredAt.getTime() + 1) }]
     }).recoveryCourses).toEqual([recovered.result]);
     expect(planMonitoringStatusNotices({ ...input, candidates: [{ ...recovered, recoveredAt: null }] }).recoveryCourses).toEqual([]);
+    expect(planMonitoringStatusNotices({ ...input, candidates: [{ ...recovered,
+      result: { ...recovered.result, outcome: "CHECK_PENDING" }
+    }] }).recoveryCourses).toEqual([]);
     expect(buildMonitoringStatusNoticeGroupKey("recovery", [recovered], ["course-1"])).toBe(
       buildMonitoringStatusNoticeGroupKey("recovery", [{ ...recovered, previousStatus: "NEEDS_HUMAN_REVIEW", episodeStartedAt: new Date("2026-08-10T14:00:00Z") }], ["course-1"])
     );

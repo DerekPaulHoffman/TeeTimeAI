@@ -104,6 +104,7 @@ export function planMonitoringStatusNotices(input: {
         : null);
     if (
       candidate.currentStatus !== "MONITORED" ||
+      !["NO_MATCH", "MATCH_FOUND"].includes(candidate.result.outcome) ||
       !recoveredAt ||
       hasReachedRecipientStatusSince(
         (input.reachedRecoveries ?? []).filter(

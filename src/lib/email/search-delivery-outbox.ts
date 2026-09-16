@@ -186,7 +186,8 @@ function isDeliveryDryRun(delivery: DeliveryState) {
 function wasDeliveryNotAccepted(delivery: DeliveryState) {
   return (
     delivery.status === "FAILED" &&
-    delivery.lastError?.startsWith(DELIVERY_NOT_ACCEPTED_PREFIX) === true
+    (delivery.lastError?.startsWith(DELIVERY_NOT_ACCEPTED_PREFIX) === true ||
+      delivery.lastError === DELIVERY_PROVIDER_SOURCE_PENDING)
   );
 }
 
