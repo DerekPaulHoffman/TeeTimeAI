@@ -18,6 +18,7 @@ Tee Time Spot does not book, hold, reserve, pay for, bypass controls, or enter a
 - App runtime: Next.js on Vercel with Neon Postgres
 - Worker runtime: local or scheduled Codex automation using repo scripts and Postgres state
 - POC notification channel: email only
+- Optional private operator texts for new customer alerts and their five-minute status: [setup and recovery](docs/operator-alert-texts.md)
 - Initial supported booking platform: ForeUP public tee sheets
 - Initial known adapters/data: Tashua Knolls, H. Smith Richardson, and Oak Hills style ForeUP metadata
 

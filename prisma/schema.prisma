@@ -541,12 +541,55 @@ model TeeSearch {
   emailDeliveries            SearchEmailDelivery[]
   courseSupportRechecks      CourseSupportBatchSearch[]
   localReaderJobs            LocalReaderJob[]
+  operatorSmsDeliveries       OperatorSmsDelivery[]
 
   @@index([status, date])
   @@index([status, nextCheckAt])
   @@index([checkLeaseExpiresAt])
   @@index([userId, status])
   @@index([trafficClass, status, date])
+}
+
+enum OperatorSmsKind {
+  CREATED
+  FOLLOWUP
+}
+
+enum OperatorSmsStatus {
+  PENDING
+  SENDING
+  ACCEPTED
+  FAILED
+  UNCERTAIN
+  SUPPRESSED
+}
+
+model OperatorSmsDelivery {
+  id               String            @id @default(cuid())
+  sourceSearchId   String
+  teeSearchId      String?
+  kind            OperatorSmsKind
+  status          OperatorSmsStatus @default(PENDING)
+  recipient       String
+  summary         String
+  body            String?
+  dueAt           DateTime
+  nextAttemptAt   DateTime
+  attemptCount    Int               @default(0)
+  claimToken      String?
+  claimExpiresAt  DateTime?
+  providerSid     String?           @unique
+  providerStatus  String?
+  acceptedAt      DateTime?
+  lastError       String?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  teeSearch       TeeSearch?        @relation(fields: [teeSearchId], references: [id], onDelete: SetNull)
+
+  @@unique([sourceSearchId, kind])
+  @@index([status, nextAttemptAt])
+  @@index([claimExpiresAt])
+  @@index([createdAt])
 }
 
 model LocalReaderJob {

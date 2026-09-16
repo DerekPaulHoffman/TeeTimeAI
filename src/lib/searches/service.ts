@@ -18,6 +18,7 @@ import {
   type GooglePlaceReviewIndex,
 } from "@/lib/places/google-place-reviews";
 import { prisma } from "@/lib/prisma";
+import { enqueueOperatorSms } from "@/lib/operator-sms/queue";
 import {
   buildAlertGenerationStartMarker,
   unwrapAlertGenerationStatusSnapshot,
@@ -112,7 +113,7 @@ export async function createTeeSearchForUser(
       }
     }
 
-    return transaction.teeSearch.create({
+    const created = await transaction.teeSearch.create({
       data: {
         userId,
         date: parseLocalDate(input.date),
@@ -132,6 +133,8 @@ export async function createTeeSearchForUser(
       },
       include: searchInclude,
     });
+    await enqueueOperatorSms(transaction, created);
+    return created;
   });
 
   if (!isSyntheticWebsiteTrafficClass(trafficClass)) {

@@ -7,6 +7,7 @@ import {
   runCourseMonitoringWatchdog
 } from "@/lib/automation/course-monitoring";
 import { hasDatabaseConfig } from "@/lib/env";
+import { recoverOperatorSms } from "@/lib/operator-sms/launcher";
 import { expireOverdueLocalReaderJobs } from "@/lib/local-reader/service";
 import { recoverPendingClerkEmailUpdates } from "@/lib/users/pending-email";
 
@@ -24,6 +25,13 @@ export async function GET(request: Request) {
   }
 
   const pendingEmailRecovery = await recoverPendingClerkEmailUpdates();
+
+  try {
+    await recoverOperatorSms();
+  } catch {
+    // Operator text failures must never prevent customer search recovery.
+    console.error("[operator-sms:recovery-failed]");
+  }
 
   let courseMonitoring = {
     checked: 0,
