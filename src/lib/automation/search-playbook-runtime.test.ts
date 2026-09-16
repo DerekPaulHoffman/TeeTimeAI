@@ -177,5 +177,8 @@ describe("search playbook runtime", () => {
       conclusion: "INCOMPLETE",
       nextStage: "INDEPENDENT_CONFIRMATION"
     });
+    expect(monitoringMocks.recordCourseMonitoringPlaybookTransition.mock.calls.every(
+      ([input]) => input.expectedIncidentCycle === 3
+    )).toBe(true);
   });
 });

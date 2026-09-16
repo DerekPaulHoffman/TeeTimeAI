@@ -9637,6 +9637,27 @@ describe("course monitoring write serialization", () => {
     },
   );
 
+  it.each(["FAILED_TERMINAL", "TECHNICAL_LIMITATION", "SUCCEEDED"] as const)(
+    "ignores a stale local-reader %s after failure reporting advances the incident cycle",
+    async (transition) => {
+      prismaMocks.$transaction.mockReset();
+      prismaMocks.$transaction.mockImplementation(async (worker) => worker(transactionMocks));
+      transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
+        id: "incident-1", cycle: 8, revision: 31, status: "AUTO_INVESTIGATING",
+        attemptLedger: null,
+      });
+      await expect(recordCourseMonitoringPlaybookTransition({
+        courseId: "course-1", incidentId: "incident-1", expectedIncidentCycle: 7,
+        stage: "LOCAL_READER", transition, readPath: "LOCAL_READER",
+        evidenceKind: "LOCAL_READER_RESULT", failureFingerprint: "LOCAL_READER:TERMINAL",
+        runtimeVersion: "release-sha",
+        ...(transition === "TECHNICAL_LIMITATION" ? {technicalReason: "CAPTCHA_OR_QUEUE" as const} : {}),
+      })).resolves.toBeNull();
+      expect(transactionMocks.courseSupportIncident.updateMany).not.toHaveBeenCalled();
+      expect(transactionMocks.courseMonitoringEvent.create).not.toHaveBeenCalled();
+    },
+  );
+
   it("appends playbook proof without consuming the legacy responder attempt ladder", async () => {
     prismaMocks.$transaction.mockReset();
     prismaMocks.$transaction.mockImplementation(async (worker) =>

@@ -3301,6 +3301,12 @@ export async function recordCourseMonitoringPlaybookTransition(
           "A current durable course incident is required to record playbook proof.",
         );
       }
+      // A result can reopen an incident before its caller records the stage.
+      // Never append an old attempt to the newly opened cycle's ledger.
+      if (input.expectedIncidentCycle !== undefined &&
+          input.expectedIncidentCycle !== incident.cycle) {
+        return null;
+      }
       if (input.transition === "SUCCEEDED") {
         const monitoringStatus =
           await transaction.courseMonitoringStatus.findUnique({
