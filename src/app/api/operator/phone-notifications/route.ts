@@ -141,7 +141,13 @@ export async function POST(request: Request) {
       return json({ enabled: false });
     }
     if (input.action !== "test" || !row)
-      return json({ error: "Enable notifications on this device first." }, 400);
+      return json(
+        {
+          code: "DEVICE_NOT_REGISTERED",
+          error: "This phone needs to reconnect. Tap Enable on this phone, then send a test.",
+        },
+        400,
+      );
     const now = new Date();
     const claim = await prisma.operatorPushSubscription.updateMany({
       where: {
@@ -177,7 +183,10 @@ export async function POST(request: Request) {
         },
       });
       return json(
-        { error: "This subscription expired. Enable notifications again." },
+        {
+          code: "SUBSCRIPTION_EXPIRED",
+          error: "This phone's registration expired. Tap Enable on this phone to reconnect.",
+        },
         410,
       );
     }

@@ -186,13 +186,20 @@ describe("private operator phone setup", () => {
     ).toBe(429);
     expect(mocks.send).toHaveBeenCalledTimes(1);
   });
+  it("identifies a missing device so the page can return to setup", async () => {
+    mocks.findFirst.mockResolvedValue(null);
+    const response = await POST(req({ action: "test", endpoint: row.endpoint }));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ code: "DEVICE_NOT_REGISTERED" });
+    expect(mocks.send).not.toHaveBeenCalled();
+  });
   it("removes an expired subscription without exposing provider details", async () => {
     mocks.send.mockRejectedValueOnce(
       new OperatorNotificationSendError("failed", "410"),
     );
-    expect(
-      (await POST(req({ action: "test", endpoint: row.endpoint }))).status,
-    ).toBe(410);
+    const response = await POST(req({ action: "test", endpoint: row.endpoint }));
+    expect(response.status).toBe(410);
+    expect(await response.json()).toMatchObject({ code: "SUBSCRIPTION_EXPIRED" });
     expect(mocks.deleteMany).toHaveBeenCalledWith({
       where: {
         ownerEmail: row.ownerEmail,

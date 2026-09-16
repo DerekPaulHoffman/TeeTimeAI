@@ -1,9 +1,19 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const api = "/api/operator/phone-notifications";
 const worker = "/operator-notifications-sw.js";
+
+class PhoneNotificationRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+  ) {
+    super(message);
+  }
+}
 
 async function request(data?: unknown) {
   const response = await fetch(
@@ -18,8 +28,10 @@ async function request(data?: unknown) {
   );
   const result = await response.json();
   if (!response.ok)
-    throw new Error(
+    throw new PhoneNotificationRequestError(
       result.error ?? "Phone notifications are temporarily unavailable.",
+      response.status,
+      result.code,
     );
   return result;
 }
@@ -45,6 +57,7 @@ export function OperatorPhoneNotifications() {
   );
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const renewSubscription = useRef(false);
   useEffect(() => {
     let active = true;
     void Promise.resolve(
@@ -111,9 +124,11 @@ export function OperatorPhoneNotifications() {
         const existingKey = subscription?.options.applicationServerKey;
         if (
           subscription &&
-          (!existingKey ||
+          (renewSubscription.current ||
+            !existingKey ||
             new Uint8Array(existingKey).toString() !==
-              applicationKey.toString())
+              applicationKey.toString() ||
+            config.endpointHash !== (await endpointHash(subscription.endpoint)))
         ) {
           await subscription.unsubscribe();
           subscription = null;
@@ -126,6 +141,7 @@ export function OperatorPhoneNotifications() {
           action: "subscribe",
           subscription: subscription.toJSON(),
         });
+        renewSubscription.current = false;
         setState("on");
         setMessage(
           "Enabled on this device. Send a test, then you can close the website.",
@@ -137,10 +153,24 @@ export function OperatorPhoneNotifications() {
           setState("off");
           throw new Error("Enable notifications on this device first.");
         }
-        await request({
-          action: action === "disable" ? "unsubscribe" : "test",
-          endpoint: subscription.endpoint,
-        });
+        try {
+          await request({
+            action: action === "disable" ? "unsubscribe" : "test",
+            endpoint: subscription.endpoint,
+          });
+        } catch (error) {
+          if (
+            error instanceof PhoneNotificationRequestError &&
+            (error.status === 410 || error.code === "DEVICE_NOT_REGISTERED")
+          ) {
+            setState("off");
+            // A previously expired or replaced endpoint can remain in Chrome
+            // after the server removes it. The next explicit opt-in must renew it.
+            renewSubscription.current = true;
+            await subscription.unsubscribe().catch(() => {});
+          }
+          throw error;
+        }
         if (action === "disable") {
           await subscription.unsubscribe();
           setState("off");
