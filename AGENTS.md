@@ -134,7 +134,7 @@ discover public courses -> save ranked demand -> check official availability
 - Canonical domain: `teetimespot.com`.
 - The repo folder and GitHub repo can still be named `TeeTimeAI`.
 - V1 notification channel: email only.
-- Customer notifications remain email-only. Explicitly configured private operator SMS for new customer alerts and a five-minute status follow-up is supported; see `docs/operator-alert-texts.md`.
+- Customer notifications remain email-only. Explicitly configured private operator Web Push for new customer alerts and a five-minute status follow-up is supported; see `docs/operator-alert-notifications.md`.
 - No payments or marketplace checkout in the POC.
 - Clerk is the account system, but `CLERK_AUTH_READY` gates production account mode.
 - Signed-out visitors may browse courses, but creating, changing, pausing, or stopping alerts requires a Clerk account.

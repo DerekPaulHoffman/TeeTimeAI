@@ -5,7 +5,7 @@ import {
 } from "@/lib/courses/course-layout";
 import { getProviderExecutionEvidenceObservedAt } from "@/lib/automation/provider-execution-marker";
 
-export function isEligibleOperatorSmsSearch(
+export function isEligibleOperatorNotificationSearch(
   search: {
     trafficClass: string;
     syntheticMultiCycle: boolean;
@@ -45,7 +45,7 @@ function clean(value: string, max: number) {
     .slice(0, max);
 }
 
-export function buildOperatorSmsSummary(search: {
+export function buildOperatorNotificationSummary(search: {
   user: { email: string };
   date: Date;
   startTime: string;
@@ -60,7 +60,7 @@ export function buildOperatorSmsSummary(search: {
   return `${clean(search.user.email, 254)} | ${search.date.toISOString().slice(0, 10)} ${search.startTime}-${search.endTime} (course local) | ${search.players} players | ${courses}`;
 }
 
-export type OperatorSmsHealthSearch = {
+export type OperatorNotificationHealthSearch = {
   status: string;
   checkStatus: string;
   createdAt: Date;
@@ -91,8 +91,8 @@ export type OperatorSmsHealthSearch = {
   }>;
 };
 
-export function assessOperatorSmsHealth(
-  search: OperatorSmsHealthSearch | null,
+export function assessOperatorNotificationHealth(
+  search: OperatorNotificationHealthSearch | null,
   now: Date,
 ) {
   if (!search)
@@ -160,7 +160,8 @@ export function assessOperatorSmsHealth(
       probe?.outcome === "NO_MATCH" &&
       typeof summary?.bookingWindow?.evidenceUrl === "string" &&
       /^https?:\/\//.test(summary.bookingWindow.evidenceUrl) &&
-      typeof summary.bookingWindow.releaseDate === "string";
+      typeof summary.bookingWindow.releaseDate === "string" &&
+      Date.parse(summary.bookingWindow.releaseDate) > now.getTime();
     const failureAt = preference.course.monitoringStatus?.lastFailureAt;
     const currentEvidence =
       evidenceAt &&

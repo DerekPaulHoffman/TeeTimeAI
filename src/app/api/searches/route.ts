@@ -1,7 +1,7 @@
 import { after, NextRequest, NextResponse } from "next/server";
 
 import { getRequiredAppUser } from "@/lib/auth/current-user";
-import { startOperatorSmsForSearch } from "@/lib/operator-sms/launcher";
+import { startOperatorNotificationForSearch } from "@/lib/operator-notifications/launcher";
 import { startSearchSchedule } from "@/lib/automation/search-scheduler";
 import { hasClerkConfig, hasDatabaseConfig } from "@/lib/env";
 import { queuePendingCourseProfiles } from "@/lib/course-profiles/service";
@@ -107,7 +107,7 @@ export async function POST(request: NextRequest) {
       syntheticMultiCycle
     );
     after(() => queuePendingCourseProfiles(search.preferences.map((preference) => preference.courseId)));
-    after(() => startOperatorSmsForSearch(search.id));
+    after(() => startOperatorNotificationForSearch(search.id));
     let schedule: Awaited<ReturnType<typeof startSearchSchedule>> | null = null;
     try {
       schedule = await startSearchSchedule(search.id);

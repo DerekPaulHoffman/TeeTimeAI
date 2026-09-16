@@ -1,22 +1,20 @@
 import { randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { getOperatorSmsConfig } from "./config";
+import { getOperatorNotificationConfig } from "./config";
 import {
-  assessOperatorSmsHealth,
-  buildOperatorSmsSummary,
-  isEligibleOperatorSmsSearch,
+  assessOperatorNotificationHealth,
+  buildOperatorNotificationSummary,
+  isEligibleOperatorNotificationSearch,
 } from "./content";
-import { sendOperatorSms, SmsSendError } from "./twilio";
+import {
+  sendOperatorNotification,
+  OperatorNotificationSendError,
+} from "./push";
 
 const FOLLOWUP_DELAY_MS = 5 * 60_000;
 const CLAIM_MS = 60_000;
 const MAX_ATTEMPTS = 5;
-const TERMINAL_PROVIDER_STATUSES = new Set([
-  "delivered",
-  "failed",
-  "undelivered",
-]);
 
 async function loadSearch(searchId: string | null) {
   if (!searchId) return null;
@@ -76,39 +74,37 @@ async function loadSearch(searchId: string | null) {
   );
 }
 
-export async function recordOperatorSmsAcceptance(input: {
+export async function recordOperatorNotificationAcceptance(input: {
   id: string;
   token: string;
-  sid: string;
+  messageId: string;
   providerStatus: string;
   now?: Date;
 }) {
   const now = input.now ?? new Date();
   return prisma.$transaction(async (tx) => {
-    const claimed = await tx.operatorSmsDelivery.updateMany({
+    const claimed = await tx.operatorNotificationDelivery.updateMany({
       where: {
         id: input.id,
         claimToken: input.token,
-        status: { in: ["SENDING", "UNCERTAIN"] },
+        status: "SENDING",
       },
       data: {
         status: "ACCEPTED",
         acceptedAt: now,
-        providerSid: input.sid,
+        providerMessageId: input.messageId,
         providerStatus: input.providerStatus,
         claimExpiresAt: null,
-        lastError: ["failed", "undelivered"].includes(input.providerStatus)
-          ? `provider_${input.providerStatus}`
-          : null,
+        lastError: null,
       },
     });
     if (!claimed.count) return false;
-    const delivery = await tx.operatorSmsDelivery.findUniqueOrThrow({
+    const delivery = await tx.operatorNotificationDelivery.findUniqueOrThrow({
       where: { id: input.id },
     });
     if (delivery.kind === "CREATED") {
       const dueAt = new Date(now.getTime() + FOLLOWUP_DELAY_MS);
-      await tx.operatorSmsDelivery.createMany({
+      await tx.operatorNotificationDelivery.createMany({
         data: [
           {
             sourceSearchId: delivery.sourceSearchId,
@@ -127,58 +123,13 @@ export async function recordOperatorSmsAcceptance(input: {
   });
 }
 
-export async function recordOperatorSmsCallback(input: {
-  id: string;
-  token: string;
-  sid: string;
-  status: string;
-}) {
-  if (
-    ![
-      "accepted",
-      "queued",
-      "sending",
-      "sent",
-      "delivered",
-      "failed",
-      "undelivered",
-    ].includes(input.status)
-  )
-    return;
-  const newlyAccepted = await recordOperatorSmsAcceptance({
-    ...input,
-    providerStatus: input.status,
-  });
-  // Terminal receipts win over an earlier queued/sent receipt arriving late.
-  await prisma.operatorSmsDelivery.updateMany({
-    where: {
-      id: input.id,
-      claimToken: input.token,
-      providerSid: input.sid,
-      providerStatus: { notIn: [...TERMINAL_PROVIDER_STATUSES] },
-    },
-    data: {
-      providerStatus: input.status,
-      ...(["failed", "undelivered"].includes(input.status)
-        ? { lastError: `provider_${input.status}` }
-        : {}),
-    },
-  });
-  if (!newlyAccepted) return null;
-  const delivery = await prisma.operatorSmsDelivery.findUnique({
-    where: { id: input.id },
-    select: { sourceSearchId: true },
-  });
-  return delivery?.sourceSearchId ?? null;
-}
-
-export async function processOperatorSms(
+export async function processOperatorNotification(
   id: string,
 ): Promise<{ id: string; dueAt: string } | null> {
-  const config = getOperatorSmsConfig();
+  const config = getOperatorNotificationConfig();
   if (!config) return null;
   const now = new Date();
-  const delivery = await prisma.operatorSmsDelivery.findUnique({
+  const delivery = await prisma.operatorNotificationDelivery.findUnique({
     where: { id },
   });
   if (!delivery) return null;
@@ -188,28 +139,36 @@ export async function processOperatorSms(
   if (delivery.nextAttemptAt > now)
     return { id, dueAt: delivery.nextAttemptAt.toISOString() };
   const search = await loadSearch(delivery.teeSearchId);
+  const subscription = await prisma.operatorPushSubscription.findUnique({
+    where: { id: delivery.recipient },
+  });
   if (
-    delivery.recipient !== config.to ||
-    (search && !isEligibleOperatorSmsSearch(search, config.excludedEmails)) ||
+    !subscription ||
+    subscription.ownerEmail !== config.ownerEmail ||
+    subscription.publicKey !== config.publicKey ||
+    (search &&
+      !isEligibleOperatorNotificationSearch(search, config.excludedEmails)) ||
     (!search && delivery.kind === "CREATED")
   ) {
-    await prisma.operatorSmsDelivery.updateMany({
+    await prisma.operatorNotificationDelivery.updateMany({
       where: { id, status: "PENDING" },
       data: { status: "SUPPRESSED" },
     });
     return null;
   }
   const health =
-    delivery.kind === "FOLLOWUP" ? assessOperatorSmsHealth(search, now) : null;
+    delivery.kind === "FOLLOWUP"
+      ? assessOperatorNotificationHealth(search, now)
+      : null;
   const summary =
     delivery.kind === "FOLLOWUP" && search
-      ? buildOperatorSmsSummary(search)
+      ? buildOperatorNotificationSummary(search)
       : delivery.summary;
   const body =
     delivery.body ??
     `${delivery.kind === "CREATED" ? "Tee Time Spot: new customer alert" : "Tee Time Spot: 5-minute update"}\n${summary}\n${health ? `${health.text}\n` : ""}${config.origin}/operator`;
   const token = randomUUID();
-  const claim = await prisma.operatorSmsDelivery.updateMany({
+  const claim = await prisma.operatorNotificationDelivery.updateMany({
     where: { id, status: "PENDING", nextAttemptAt: { lte: now } },
     data: {
       status: "SENDING",
@@ -220,25 +179,34 @@ export async function processOperatorSms(
     },
   });
   if (!claim.count) return null;
-  let result: Awaited<ReturnType<typeof sendOperatorSms>>;
+  let result: Awaited<ReturnType<typeof sendOperatorNotification>>;
   try {
-    result = await sendOperatorSms(config, {
+    result = await sendOperatorNotification(config, {
       id,
-      token,
       body,
-      to: delivery.recipient,
+      subscription,
     });
   } catch (error) {
     const failure =
-      error instanceof SmsSendError
+      error instanceof OperatorNotificationSendError
         ? error
-        : new SmsSendError("uncertain", "transport");
+        : new OperatorNotificationSendError("uncertain", "transport");
     const retry =
       failure.outcome === "retry" && delivery.attemptCount + 1 < MAX_ATTEMPTS;
+    if (failure.code === "404" || failure.code === "410") {
+      await prisma.operatorPushSubscription.deleteMany({
+        where: { id: subscription.id },
+      });
+    }
     const nextAttemptAt = new Date(
-      Date.now() + Math.min(5, 2 ** delivery.attemptCount) * 60_000,
+      Date.now() +
+        Math.max(
+          Math.min(5, 2 ** delivery.attemptCount) * 60,
+          failure.retryAfterSeconds ?? 0,
+        ) *
+          1000,
     );
-    await prisma.operatorSmsDelivery.updateMany({
+    await prisma.operatorNotificationDelivery.updateMany({
       where: { id, status: "SENDING", claimToken: token },
       data: {
         status: retry
@@ -251,18 +219,18 @@ export async function processOperatorSms(
         lastError: failure.code,
       },
     });
-    console.error("[operator-sms:send-incomplete]", {
+    console.error("[operator-notifications:send-incomplete]", {
       outcome: failure.outcome,
       code: failure.code,
     });
     return retry ? { id, dueAt: nextAttemptAt.toISOString() } : null;
   }
-  // If persistence fails after acceptance, retain the in-flight claim. A signed
-  // callback can reconcile it; an automatic resend could text twice.
-  await recordOperatorSmsAcceptance({
+  // If persistence fails after acceptance, retain the in-flight claim for
+  // operator review; an automatic resend could notify twice.
+  await recordOperatorNotificationAcceptance({
     id,
     token,
-    sid: result.sid,
+    messageId: result.messageId,
     providerStatus: result.status,
   });
   return delivery.kind === "CREATED"
@@ -271,7 +239,7 @@ export async function processOperatorSms(
 }
 
 async function nextFollowup(sourceSearchId: string) {
-  const row = await prisma.operatorSmsDelivery.findUnique({
+  const row = await prisma.operatorNotificationDelivery.findUnique({
     where: { sourceSearchId_kind: { sourceSearchId, kind: "FOLLOWUP" } },
   });
   return row?.status === "PENDING"
@@ -279,10 +247,10 @@ async function nextFollowup(sourceSearchId: string) {
     : null;
 }
 
-export async function listOperatorSmsForRecovery() {
-  if (!getOperatorSmsConfig()) return [];
+export async function listOperatorNotificationForRecovery() {
+  if (!getOperatorNotificationConfig()) return [];
   const now = new Date();
-  await prisma.operatorSmsDelivery.updateMany({
+  await prisma.operatorNotificationDelivery.updateMany({
     where: { status: "SENDING", claimExpiresAt: { lt: now } },
     data: {
       status: "UNCERTAIN",
@@ -290,7 +258,7 @@ export async function listOperatorSmsForRecovery() {
       lastError: "send_receipt_missing",
     },
   });
-  return prisma.operatorSmsDelivery.findMany({
+  return prisma.operatorNotificationDelivery.findMany({
     where: { status: "PENDING", nextAttemptAt: { lte: now } },
     orderBy: { nextAttemptAt: "asc" },
     take: 20,

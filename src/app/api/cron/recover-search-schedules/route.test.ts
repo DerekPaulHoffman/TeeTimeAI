@@ -15,13 +15,13 @@ const mocks = vi.hoisted(() => ({
   recoverPendingClerkEmailUpdates: vi.fn(),
   consumeSearchScheduleQueueMessage: vi.fn(),
   startSearchSchedule: vi.fn(),
-  recoverOperatorSms: vi.fn()
+  recoverOperatorNotification: vi.fn()
 }));
 
 vi.mock("@/lib/automation/db-service", () => ({
   listSearchesNeedingScheduleRecovery: mocks.listSearchesNeedingScheduleRecovery
 }));
-vi.mock("@/lib/operator-sms/launcher", () => ({ recoverOperatorSms: mocks.recoverOperatorSms }));
+vi.mock("@/lib/operator-notifications/launcher", () => ({ recoverOperatorNotification: mocks.recoverOperatorNotification }));
 
 vi.mock("@/lib/automation/search-scheduler", () => ({
   startSearchSchedule: mocks.startSearchSchedule
@@ -190,7 +190,7 @@ describe("GET /api/cron/recover-search-schedules", () => {
       failed: 1
     });
     expect(mocks.startSearchSchedule).toHaveBeenCalledTimes(3);
-    expect(mocks.recoverOperatorSms).toHaveBeenCalledOnce();
+    expect(mocks.recoverOperatorNotification).toHaveBeenCalledOnce();
     expect(mocks.startSearchSchedule).toHaveBeenNthCalledWith(1, "search-1");
     expect(mocks.startSearchSchedule).toHaveBeenNthCalledWith(2, "search-2");
     expect(mocks.startSearchSchedule).toHaveBeenNthCalledWith(3, "search-3");
@@ -524,7 +524,7 @@ describe("GET /api/cron/recover-search-schedules", () => {
   });
   it("continues customer recovery when operator SMS recovery fails", async () => {
     mocks.hasDatabaseConfig.mockReturnValue(true);
-    mocks.recoverOperatorSms.mockRejectedValueOnce(new Error("SMS unavailable"));
+    mocks.recoverOperatorNotification.mockRejectedValueOnce(new Error("SMS unavailable"));
     mocks.listSearchesNeedingScheduleRecovery.mockResolvedValue([{ id: "search-1" }]);
     mocks.startSearchSchedule.mockResolvedValue({ runId: "run-1" });
     const response = await GET(new Request("http://localhost/api/cron/recover-search-schedules", { headers: { authorization: "Bearer test-cron-secret" } }));

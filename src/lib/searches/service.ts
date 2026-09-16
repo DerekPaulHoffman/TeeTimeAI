@@ -18,7 +18,7 @@ import {
   type GooglePlaceReviewIndex,
 } from "@/lib/places/google-place-reviews";
 import { prisma } from "@/lib/prisma";
-import { enqueueOperatorSms } from "@/lib/operator-sms/queue";
+import { enqueueOperatorNotification } from "@/lib/operator-notifications/queue";
 import {
   buildAlertGenerationStartMarker,
   unwrapAlertGenerationStatusSnapshot,
@@ -133,7 +133,7 @@ export async function createTeeSearchForUser(
       },
       include: searchInclude,
     });
-    await enqueueOperatorSms(transaction, created);
+    await enqueueOperatorNotification(transaction, created);
     return created;
   });
 

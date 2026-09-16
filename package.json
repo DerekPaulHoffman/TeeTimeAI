@@ -60,7 +60,7 @@
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "resend": "^6.18.0",
-    "twilio": "^6.1.1",
+    "web-push": "^3.6.7",
     "workflow": "4.6.0",
     "zod": "^4.4.3"
   },
@@ -70,6 +70,7 @@
     "@types/node": "^24.10.1",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
+    "@types/web-push": "^3.6.4",
     "eslint": "^9.39.5",
     "eslint-config-next": "^16.2.12",
     "jsdom": "^27.2.0",

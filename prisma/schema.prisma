@@ -503,45 +503,45 @@ model GooglePlaceReview {
 }
 
 model TeeSearch {
-  id                         String                     @id @default(cuid())
-  userId                     String
-  date                       DateTime
-  startTime                  String
-  endTime                    String
-  userTimeZone               String                     @default("America/New_York")
-  players                    Int
-  requestedLayoutHoles       Int?
-  cadenceMinutes             Int                        @default(5)
-  alertEmail                 String?
-  additionalEmails           String[]                   @default([])
-  trafficClass               WebsiteTrafficClass        @default(UNCLASSIFIED)
-  syntheticMultiCycle        Boolean                    @default(false)
-  syntheticTestWindow        Json?
-  status                     SearchStatus               @default(ACTIVE)
-  checkStatus                SearchCheckStatus          @default(IDLE)
-  scheduleVersion            Int                        @default(0)
-  alertGeneration            Int                        @default(0)
-  workflowRunId              String?
-  checkLeaseToken            String?
-  checkLeaseExpiresAt        DateTime?
-  recheckRequestedAt         DateTime?
-  remediationDispatchKey     String?
-  remediationDispatchVersion Int?
-  nextCheckAt                DateTime?
-  lastCheckedAt              DateTime?
-  lastCheckOutcome           String?
-  statusEmailSentAt          DateTime?
-  statusEmailSnapshot        Json?
-  createdAt                  DateTime                   @default(now())
-  updatedAt                  DateTime                   @updatedAt
-  user                       User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  preferences                CoursePreference[]
-  probes                     CourseProbe[]
-  matches                    TeeTimeMatch[]
-  emailDeliveries            SearchEmailDelivery[]
-  courseSupportRechecks      CourseSupportBatchSearch[]
-  localReaderJobs            LocalReaderJob[]
-  operatorSmsDeliveries       OperatorSmsDelivery[]
+  id                             String                         @id @default(cuid())
+  userId                         String
+  date                           DateTime
+  startTime                      String
+  endTime                        String
+  userTimeZone                   String                         @default("America/New_York")
+  players                        Int
+  requestedLayoutHoles           Int?
+  cadenceMinutes                 Int                            @default(5)
+  alertEmail                     String?
+  additionalEmails               String[]                       @default([])
+  trafficClass                   WebsiteTrafficClass            @default(UNCLASSIFIED)
+  syntheticMultiCycle            Boolean                        @default(false)
+  syntheticTestWindow            Json?
+  status                         SearchStatus                   @default(ACTIVE)
+  checkStatus                    SearchCheckStatus              @default(IDLE)
+  scheduleVersion                Int                            @default(0)
+  alertGeneration                Int                            @default(0)
+  workflowRunId                  String?
+  checkLeaseToken                String?
+  checkLeaseExpiresAt            DateTime?
+  recheckRequestedAt             DateTime?
+  remediationDispatchKey         String?
+  remediationDispatchVersion     Int?
+  nextCheckAt                    DateTime?
+  lastCheckedAt                  DateTime?
+  lastCheckOutcome               String?
+  statusEmailSentAt              DateTime?
+  statusEmailSnapshot            Json?
+  createdAt                      DateTime                       @default(now())
+  updatedAt                      DateTime                       @updatedAt
+  user                           User                           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  preferences                    CoursePreference[]
+  probes                         CourseProbe[]
+  matches                        TeeTimeMatch[]
+  emailDeliveries                SearchEmailDelivery[]
+  courseSupportRechecks          CourseSupportBatchSearch[]
+  localReaderJobs                LocalReaderJob[]
+  operatorNotificationDeliveries OperatorNotificationDelivery[]
 
   @@index([status, date])
   @@index([status, nextCheckAt])
@@ -550,12 +550,12 @@ model TeeSearch {
   @@index([trafficClass, status, date])
 }
 
-enum OperatorSmsKind {
+enum OperatorNotificationKind {
   CREATED
   FOLLOWUP
 }
 
-enum OperatorSmsStatus {
+enum OperatorNotificationStatus {
   PENDING
   SENDING
   ACCEPTED
@@ -564,27 +564,40 @@ enum OperatorSmsStatus {
   SUPPRESSED
 }
 
-model OperatorSmsDelivery {
-  id               String            @id @default(cuid())
-  sourceSearchId   String
-  teeSearchId      String?
-  kind            OperatorSmsKind
-  status          OperatorSmsStatus @default(PENDING)
-  recipient       String
-  summary         String
-  body            String?
-  dueAt           DateTime
-  nextAttemptAt   DateTime
-  attemptCount    Int               @default(0)
-  claimToken      String?
-  claimExpiresAt  DateTime?
-  providerSid     String?           @unique
-  providerStatus  String?
-  acceptedAt      DateTime?
-  lastError       String?
-  createdAt       DateTime          @default(now())
-  updatedAt       DateTime          @updatedAt
-  teeSearch       TeeSearch?        @relation(fields: [teeSearchId], references: [id], onDelete: SetNull)
+model OperatorPushSubscription {
+  id          String    @id @default(cuid())
+  ownerEmail  String    @unique
+  clerkUserId String
+  endpoint    String    @unique
+  p256dh      String
+  auth        String
+  publicKey   String
+  lastTestAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+model OperatorNotificationDelivery {
+  id                String                     @id @default(cuid())
+  sourceSearchId    String
+  teeSearchId       String?
+  kind              OperatorNotificationKind
+  status            OperatorNotificationStatus @default(PENDING)
+  recipient         String
+  summary           String
+  body              String?
+  dueAt             DateTime
+  nextAttemptAt     DateTime
+  attemptCount      Int                        @default(0)
+  claimToken        String?
+  claimExpiresAt    DateTime?
+  providerMessageId String?                    @unique
+  providerStatus    String?
+  acceptedAt        DateTime?
+  lastError         String?
+  createdAt         DateTime                   @default(now())
+  updatedAt         DateTime                   @updatedAt
+  teeSearch         TeeSearch?                 @relation(fields: [teeSearchId], references: [id], onDelete: SetNull)
 
   @@unique([sourceSearchId, kind])
   @@index([status, nextAttemptAt])

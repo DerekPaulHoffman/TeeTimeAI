@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
   listTeeSearchesForUser: vi.fn(),
   queuePendingCourseProfiles: vi.fn(),
   startSearchSchedule: vi.fn(),
-  startOperatorSmsForSearch: vi.fn()
+  startOperatorNotificationForSearch: vi.fn()
 }));
 
 vi.mock("next/server", async (importOriginal) => ({
@@ -23,7 +23,7 @@ vi.mock("next/server", async (importOriginal) => ({
 vi.mock("@/lib/auth/current-user", () => ({
   getRequiredAppUser: mocks.getRequiredAppUser
 }));
-vi.mock("@/lib/operator-sms/launcher", () => ({ startOperatorSmsForSearch: mocks.startOperatorSmsForSearch }));
+vi.mock("@/lib/operator-notifications/launcher", () => ({ startOperatorNotificationForSearch: mocks.startOperatorNotificationForSearch }));
 vi.mock("@/lib/automation/search-scheduler", () => ({
   startSearchSchedule: mocks.startSearchSchedule
 }));
@@ -120,7 +120,7 @@ describe("POST /api/searches", () => {
       false
     );
     expect(mocks.startSearchSchedule).toHaveBeenCalledWith("search-1");
-    expect(mocks.startOperatorSmsForSearch).toHaveBeenCalledWith("search-1");
+    expect(mocks.startOperatorNotificationForSearch).toHaveBeenCalledWith("search-1");
     expect(mocks.queuePendingCourseProfiles).toHaveBeenCalledWith(["course-1"]);
   });
 

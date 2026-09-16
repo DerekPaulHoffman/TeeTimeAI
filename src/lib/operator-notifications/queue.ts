@@ -1,11 +1,11 @@
 import type { Prisma } from "@prisma/client";
-import { getOperatorSmsConfig } from "./config";
+import { getOperatorNotificationConfig } from "./config";
 import {
-  buildOperatorSmsSummary,
-  isEligibleOperatorSmsSearch,
+  buildOperatorNotificationSummary,
+  isEligibleOperatorNotificationSearch,
 } from "./content";
 
-export async function enqueueOperatorSms(
+export async function enqueueOperatorNotification(
   transaction: Prisma.TransactionClient,
   search: {
     id: string;
@@ -22,22 +22,31 @@ export async function enqueueOperatorSms(
     preferences: Array<{ rank: number; course: { name: string } }>;
   },
 ) {
-  const config = getOperatorSmsConfig();
+  const config = getOperatorNotificationConfig();
   if (!config) return;
+  const subscription = await transaction.operatorPushSubscription.findUnique({
+    where: { ownerEmail: config.ownerEmail },
+  });
+  if (!subscription || subscription.publicKey !== config.publicKey) return;
   const user = await transaction.user.findUniqueOrThrow({
     where: { id: search.userId },
     select: { email: true },
   });
-  if (!isEligibleOperatorSmsSearch({ ...search, user }, config.excludedEmails))
+  if (
+    !isEligibleOperatorNotificationSearch(
+      { ...search, user },
+      config.excludedEmails,
+    )
+  )
     return;
-  await transaction.operatorSmsDelivery.createMany({
+  await transaction.operatorNotificationDelivery.createMany({
     data: [
       {
         sourceSearchId: search.id,
         teeSearchId: search.id,
         kind: "CREATED",
-        recipient: config.to,
-        summary: buildOperatorSmsSummary({ ...search, user }),
+        recipient: subscription.id,
+        summary: buildOperatorNotificationSummary({ ...search, user }),
         dueAt: search.createdAt,
         nextAttemptAt: search.createdAt,
       },

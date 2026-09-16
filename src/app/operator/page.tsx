@@ -22,6 +22,8 @@ import {
 } from "lucide-react";
 
 import { OperatorRecentUsers } from "@/components/operator-recent-users";
+import { OperatorPhoneNotifications } from "@/components/operator-phone-notifications";
+import { getOperatorNotificationConfig } from "@/lib/operator-notifications/config";
 import { hasClerkConfig } from "@/lib/env";
 import { getCurrentOperator } from "@/lib/operator/auth";
 import {
@@ -88,12 +90,20 @@ export default async function OperatorPage({ searchParams }: OperatorPageProps) 
     view: parseCourseInventoryView(params.courseView)
   };
 
-  return <OperatorDashboard filters={filters} overview={overview} />;
+  const phoneConfig = getOperatorNotificationConfig();
+  return (
+    <OperatorDashboard
+      filters={filters}
+      overview={overview}
+      phoneNotifications={phoneConfig?.ownerEmail === operator.email}
+    />
+  );
 }
 
 function OperatorDashboard({
   filters,
-  overview
+  overview,
+  phoneNotifications = false
 }: {
   filters: {
     diagnostic: ReturnType<typeof parseCourseDiagnosticFilter>;
@@ -102,6 +112,7 @@ function OperatorDashboard({
     view: ReturnType<typeof parseCourseInventoryView>;
   };
   overview: OperatorOverview;
+  phoneNotifications?: boolean;
 }) {
   const maximumPageViews = Math.max(...overview.dailyActivity.map((day) => day.pageViews), 1);
   const filteredCourses = filterCourseInventory(overview.courseFleet.courses, {
@@ -129,6 +140,8 @@ function OperatorDashboard({
           <span className="operator-freshness">Updated {formatDateTime(overview.generatedAt)}</span>
         </div>
       </header>
+
+      {phoneNotifications ? <OperatorPhoneNotifications /> : null}
 
       {overview.operations.courseSupportAlert ? (
         <aside className="operator-responder-alert" role="alert">

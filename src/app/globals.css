@@ -2351,6 +2351,12 @@ button {
   max-width: 560px;
 }
 
+.operator-phone-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
 .operator-header-tools {
   align-items: flex-end;
   display: flex;
