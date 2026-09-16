@@ -11,6 +11,7 @@ export type MonitoringStatusNoticeCandidate = {
   previousStatus: CustomerMonitoringStatus;
   currentStatus: CustomerMonitoringStatus;
   episodeStartedAt: Date | null;
+  recoveredAt?: Date | null;
   endpointDeadlineAt?: Date | null;
 };
 
@@ -31,6 +32,8 @@ export function planMonitoringStatusNotices(input: {
   candidates: MonitoringStatusNoticeCandidate[];
   reachedOutages: ReachedMonitoringOutage[];
   reachedFinals?: ReachedMonitoringFinal[];
+  reachedRecoveries?: ReachedMonitoringFinal[];
+  currentRecipients?: string[];
   ownerRecipient: string;
   now?: Date;
 }): {
@@ -95,21 +98,27 @@ export function planMonitoringStatusNotices(input: {
 
   const recoveryRecipients = new Set<string>();
   const recoveryCourses = input.candidates.flatMap((candidate) => {
+    const recoveredAt = candidate.recoveredAt ??
+      (isUnavailableCustomerStatus(candidate.previousStatus)
+        ? candidate.episodeStartedAt
+        : null);
     if (
       candidate.currentStatus !== "MONITORED" ||
-      !isUnavailableCustomerStatus(candidate.previousStatus) ||
-      !candidate.episodeStartedAt
+      !recoveredAt ||
+      hasReachedRecipientStatusSince(
+        (input.reachedRecoveries ?? []).filter(
+          (notice) => notice.courseId === candidate.result.courseId
+        ),
+        ownerRecipient,
+        recoveredAt
+      )
     ) {
       return [];
     }
-    const reached = (
-      reachedByCourse.get(candidate.result.courseId) ?? []
-    ).filter((notice) => notice.sentAt >= candidate.episodeStartedAt!);
-    if (reached.length === 0) {
-      return [];
-    }
-    for (const notice of reached) {
-      recoveryRecipients.add(normalizeRecipient(notice.recipient));
+    // Recovery is owed by restored monitoring, not by successful delivery of
+    // an earlier outage. The outbox still enforces current recipient authority.
+    for (const recipient of input.currentRecipients ?? [ownerRecipient]) {
+      recoveryRecipients.add(normalizeRecipient(recipient));
     }
     return [candidate.result];
   });
@@ -169,6 +178,12 @@ export function buildMonitoringStatusNoticeGroupKey(
   const episodes = candidates
     .filter((candidate) => selected.has(candidate.result.courseId))
     .map((candidate) => {
+      if (kind === "recovery") {
+        return {
+          courseId: candidate.result.courseId,
+          recoveredAt: (candidate.recoveredAt ?? candidate.episodeStartedAt)?.toISOString() ?? "unknown"
+        };
+      }
       const latestOwnerVisibleStatus =
         visibility && ownerRecipient && candidate.episodeStartedAt
           ? getLatestReachedOutageSince(

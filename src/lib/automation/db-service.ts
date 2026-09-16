@@ -121,6 +121,7 @@ const activeSearchCourseInclude = {
       escalationDeadlineAt: true,
       firstSeenAt: true,
       confirmedAt: true,
+      resolvedAt: true,
       lastSeenAt: true,
       monitoringEvents: {
         where: { eventType: "HUMAN_REVIEW_REQUESTED" },

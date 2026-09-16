@@ -127,6 +127,7 @@ import {
   isExpectedSearchEmailDeliveryControlFlow,
   listReachedMonitoringFinals,
   listReachedMonitoringOutages,
+  listReachedMonitoringRecoveries,
   listRetryableSearchEmailDeliveryGroups,
   prepareRecipientMatchDeliveryGroups,
   prepareSearchEmailDeliveryGroup,
@@ -3529,6 +3530,22 @@ async function deliverMonitoringStatusNotices(input: {
                 CUSTOMER_ENDPOINT_DELIVERY_HEADROOM_MS),
           )
         : null;
+      const resolvedAt =
+        preference.course.supportIncident?.status === "RESOLVED" &&
+        preference.course.supportIncident.resolution === "MONITORING_RESTORED"
+          ? preference.course.supportIncident.resolvedAt
+          : null;
+      // Global course recovery can occur in a sibling search or detached reader
+      // before this check starts. Keep the obligation until this alert is told.
+      const recoveredAt =
+        currentStatus === "MONITORED" &&
+        resolvedAt && resolvedAt >= input.search.createdAt
+          ? resolvedAt
+          : currentStatus === "MONITORED" &&
+              (previousStatus === "RETRYING_AUTOMATICALLY" ||
+                previousStatus === "NEEDS_HUMAN_REVIEW")
+            ? (current?.stateChangedAt ?? previous?.firstDegradedAt ?? null)
+            : null;
       return [
         {
           providerFamilyKey: resolveProviderCapability(
@@ -3537,6 +3554,7 @@ async function deliverMonitoringStatusNotices(input: {
           result: customerResult,
           previousStatus,
           currentStatus,
+          recoveredAt,
           endpointDeadlineAt,
           episodeStartedAt:
             currentStatus === "FINAL_DIRECT_ACTION"
@@ -3556,12 +3574,16 @@ async function deliverMonitoringStatusNotices(input: {
         },
       ];
     });
-  const [reachedOutages, reachedFinals] = await Promise.all([
+  const [reachedOutages, reachedFinals, reachedRecoveries] = await Promise.all([
     listReachedMonitoringOutages({
       searchId: input.search.id,
       alertGeneration: input.search.alertGeneration,
     }),
     listReachedMonitoringFinals({
+      searchId: input.search.id,
+      alertGeneration: input.search.alertGeneration,
+    }),
+    listReachedMonitoringRecoveries({
       searchId: input.search.id,
       alertGeneration: input.search.alertGeneration,
     }),
@@ -3576,6 +3598,8 @@ async function deliverMonitoringStatusNotices(input: {
     candidates,
     reachedOutages,
     reachedFinals,
+    reachedRecoveries,
+    currentRecipients: alertRecipients,
     ownerRecipient,
     now: input.checkedAt,
   });

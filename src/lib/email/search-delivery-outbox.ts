@@ -35,9 +35,10 @@ import {
   type SearchEmailDeliveryPayload,
   type SearchEmailMatchRef as MatchRef,
 } from "@/lib/email/search-delivery-payload";
-import type {
-  SearchStatusCourseReport,
-  SearchStatusEmailInput,
+import {
+  getCustomerCourseMonitoringStatus,
+  type SearchStatusCourseReport,
+  type SearchStatusEmailInput,
 } from "@/lib/email/search-status";
 import { zonedDateTimeToDate } from "@/lib/timezones";
 import {
@@ -488,9 +489,36 @@ export async function prepareSearchEmailDeliveryGroup(input: {
         throw new Error("Delivery payload match references are incomplete");
       }
 
-      const existing = await transaction.searchEmailDelivery.findMany({
+      let existing = await transaction.searchEmailDelivery.findMany({
         where: groupWhere(input),
       });
+      // A recovery rejected before transport remains owed. Refresh only a
+      // wholly unsent, match-free group after its current source is verified;
+      // never rewrite an accepted or ambiguous transport attempt.
+      if (
+        input.kind === "MONITORING_RECOVERY" &&
+        existing.length > 0 &&
+        inputMatchIds.length === 0 &&
+        existing.every((delivery) => delivery.status === "SUPPRESSED" &&
+          [DELIVERY_PROVIDER_SOURCE_UNRESOLVED, STALE_STATUS_REPLACEMENT_PENDING].includes(delivery.lastError ?? "") &&
+          (parseSearchEmailPayload(delivery.payload)?.matchIds?.length ?? 0) === 0) &&
+        (await validateCurrentStatusDeliveryPayload(
+          transaction, input.searchId, input.payload, now,
+        )) === "current"
+      ) {
+        const data = { status: "PENDING" as const, payload: input.payload,
+          sentAt: null, lastError: null, nextAttemptAt: null };
+        const refreshed = await transaction.searchEmailDelivery.updateMany({
+          where: { id: { in: existing.map((delivery) => delivery.id) }, status: "SUPPRESSED" },
+          data,
+        });
+        if (refreshed.count !== existing.length) {
+          throw new SearchEmailDeliveryInProgressError(new Date(now.getTime() + DELIVERY_RETRY_BASE_MS));
+        }
+        existing = await transaction.searchEmailDelivery.findMany({
+          where: groupWhere(input),
+        });
+      }
       const supersededStatusGroups =
         input.kind === "SETUP" || input.kind === "DAILY"
           ? (input.supersededStatusGroups ?? [])
@@ -1828,6 +1856,45 @@ export async function hydrateSearchStatusEmailPayload(
     courses,
     previousSnapshot: report.previousSnapshot,
   };
+}
+
+/** Actual visible monitored courses, independent of full-search snapshots. */
+export async function listReachedMonitoringRecoveries(input: {
+  searchId: string;
+  alertGeneration: number;
+}) {
+  const deliveries = await prisma.searchEmailDelivery.findMany({
+    where: {
+      teeSearchId: input.searchId,
+      alertGeneration: input.alertGeneration,
+      status: { in: ["SENT", "SUPPRESSED"] },
+      sentAt: { not: null },
+    },
+    select: { recipient: true, sentAt: true, status: true, lastError: true, payload: true },
+  });
+  return deliveries.flatMap((delivery) => {
+    if (!delivery.sentAt || !(delivery.status === "SENT" || isDeliveryDryRun({
+      ...delivery, attemptCount: 0,
+    }))) return [];
+    const payload = parseSearchEmailPayload(delivery.payload);
+    const statusReport = optionalJsonRecord(payload?.statusReport);
+    const matchReport = optionalJsonRecord(payload?.matchReport);
+    const statusCourses = statusReport && Array.isArray(statusReport.courses)
+      ? statusReport.courses : [];
+    const matches = matchReport && Array.isArray(matchReport.matches)
+      ? matchReport.matches : [];
+    const courseIds = new Set([
+      ...statusCourses.flatMap((value) => {
+        const course = optionalJsonRecord(value);
+        return course && getCustomerCourseMonitoringStatus(course as SearchStatusCourseReport) === "MONITORED"
+          ? [optionalString(course?.courseId)] : [];
+      }),
+      ...matches.map((value) => optionalString(optionalJsonRecord(value)?.courseId)),
+    ]);
+    return [...courseIds].flatMap((courseId) => courseId ? [{
+      courseId, recipient: delivery.recipient, sentAt: delivery.sentAt!,
+    }] : []);
+  });
 }
 
 export async function listReachedMonitoringOutages(input: {

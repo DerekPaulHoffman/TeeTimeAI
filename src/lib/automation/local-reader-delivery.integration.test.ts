@@ -7,6 +7,7 @@ type Sql = { strings: readonly string[]; values: unknown[] };
 const boundary = vi.hoisted(() => ({
   prisma: {} as Record<string, unknown>,
   send: vi.fn(),
+  statusEmailsEnabled: false,
   forbidden: vi.fn(() => { throw new Error("Unexpected external work in isolated delivery proof"); })
 }));
 
@@ -18,7 +19,7 @@ vi.mock("resend", () => ({
 }));
 vi.mock("@/lib/email/delivery-policy", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/email/delivery-policy")>()),
-  areSearchStatusEmailsEnabled: () => false
+  areSearchStatusEmailsEnabled: () => boundary.statusEmailsEnabled
 }));
 vi.mock("@/lib/automation/search-monitoring-discovery", () => ({
   prepareSearchMonitoring: async () => ({
@@ -49,6 +50,7 @@ import {
   prepareSearchEmailDeliveryGroup
 } from "@/lib/email/search-delivery-outbox";
 import { sendTeeTimeAlert } from "@/lib/email/alerts";
+import { buildMonitoringStatusNoticeGroupKey } from "@/lib/email/monitoring-status-notices";
 
 const now = new Date("2026-07-29T12:10:00Z");
 const sourceAt = new Date("2026-07-29T12:09:00Z");
@@ -294,6 +296,7 @@ beforeEach(() => {
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   events = []; sequence = 0;
+  boundary.statusEmailsEnabled = false;
   rows = Object.fromEntries([
     "user", "teeSearch", "course", "courseMonitoringStatus", "courseMonitoringEvent",
     "courseSupportIncident", "courseBookingFact", "courseProbe", "teeTimeMatch",
@@ -353,6 +356,53 @@ afterEach(() => {
 });
 
 describe("completed reader source through ordinary match delivery", () => {
+  it.each([null, "DELIVERY_PROVIDER_SOURCE_UNRESOLVED", "STATUS_CONTENT_STALE_REPLACEMENT_PENDING"])(
+    "sends a missed no-match recovery once to both recipients (prior rejection=%s)", async (priorRejection) => {
+    boundary.statusEmailsEnabled = true;
+    rows.teeSearch[0].statusEmailSentAt = priorSuccess;
+    const recoveredAt = new Date("2026-07-29T12:00:00Z");
+    Object.assign(rows.courseSupportIncident[0], { firstSeenAt: priorSuccess, resolvedAt: recoveredAt });
+    rows.courseMonitoringStatus[0].stateChangedAt = recoveredAt;
+    object(rows.localReaderJob[0].result).slots = [];
+    object(rows.localReaderJob[0].result).status = "NO_AVAILABILITY";
+    // The global course is already healthy. A suppressed outage with a legacy
+    // sentAt is not an accepted message and must not suppress the recovery.
+    rows.searchEmailDelivery.push({ id: "suppressed-outage", teeSearchId: lease.searchId,
+      alertGeneration: 0, kind: "MONITORING_OUTAGE", groupKey: "old-outage", recipient: owner,
+      isOwnerRecipient: true, status: "SUPPRESSED", sentAt: priorSuccess,
+      lastError: "DELIVERY_PROVIDER_SOURCE_UNRESOLVED", attemptCount: 1,
+      createdAt: priorSuccess, payload: { schemaVersion: 2, checkedAt: priorSuccess.toISOString(),
+        matchIds: [], matchRefs: [], statusReport: { courses: [] } } });
+    if (priorRejection) {
+      const groupKey = buildMonitoringStatusNoticeGroupKey("recovery", [{
+        providerFamilyKey: "TENFORE", previousStatus: "MONITORED", currentStatus: "MONITORED",
+        recoveredAt, episodeStartedAt: null,
+        result: { courseId: "offline-course", courseName: "Offline public course", outcome: "NO_MATCH", availableMatches: 0 },
+      }], ["offline-course"]);
+      for (const recipient of [owner, friend]) rows.searchEmailDelivery.push({
+        ...clone(rows.searchEmailDelivery[0]), id: `rejected-${recipient}`, kind: "MONITORING_RECOVERY",
+        groupKey, recipient, isOwnerRecipient: recipient === owner, lastError: priorRejection,
+      });
+    }
+    boundary.send.mockResolvedValue({ data: { id: "recovery-accepted" }, error: null });
+    const checked = await runSearchCheck(lease.searchId, "test", lease);
+    expect(checked.courseResults[0].outcome).toBe("NO_MATCH");
+    expect(boundary.send).toHaveBeenCalledTimes(2);
+    expect(boundary.send.mock.calls.map(([email]) => email.to).sort()).toEqual([friend, owner]);
+    expect(boundary.send.mock.calls.every(([email]) => email.subject === "Automatic tee-time checks have resumed")).toBe(true);
+    expect(rows.searchEmailDelivery.filter(row => row.kind === "MONITORING_RECOVERY").map(row => row.status)).toEqual(["SENT", "SENT"]);
+    vi.setSystemTime(new Date(now.getTime() + 1_000));
+    const nextSourceAt = new Date();
+    const nextJob = { ...clone(rows.localReaderJob[0]), id: "next-recovery-job",
+      claimedAt: nextSourceAt, completedAt: nextSourceAt, createdAt: nextSourceAt,
+      resultExpiresAt: new Date(nextSourceAt.getTime() + 300_000) };
+    nextJob.result = { ...object(nextJob.result), jobId: nextJob.id, observedAt: nextSourceAt.toISOString() };
+    rows.localReaderJob.push(nextJob);
+    const repeated = await runSearchCheck(lease.searchId, "test", lease);
+    expect(repeated.courseResults[0].outcome).toBe("NO_MATCH");
+    expect(boundary.send).toHaveBeenCalledTimes(2);
+  });
+
   it.each([false, true])("replaces a superseded reader source and delivers its fresh result (expired=%s)", async (expired) => {
     const canonicalAt = new Date("2026-07-29T12:09:30Z");
     rows.courseMonitoringStatus[0].lastSuccessfulAt = canonicalAt;

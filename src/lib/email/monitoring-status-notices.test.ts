@@ -125,7 +125,7 @@ describe("monitoring status notices", () => {
     expect(repeated.outageCourses).toEqual([]);
   });
 
-  it("recovers only recipients reached by the outage and keeps same-check matches", () => {
+  it("recovers current recipients and keeps same-check matches", () => {
     const recovery = candidate({
       previousStatus: "RETRYING_AUTOMATICALLY",
       currentStatus: "MONITORED",
@@ -146,6 +146,7 @@ describe("monitoring status notices", () => {
     });
     const planned = planMonitoringStatusNotices({
       candidates: [recovery],
+      currentRecipients: ["owner@example.com", "friend@example.com"],
       reachedOutages: [
         {
           courseId: "course-1",
@@ -171,7 +172,7 @@ describe("monitoring status notices", () => {
     expect(planned.recoveryCourses[0]?.matchingTimes).toHaveLength(1);
   });
 
-  it("never sends recovery when the owner did not receive the outage", () => {
+  it("sends recovery immediately even when no outage reached the owner", () => {
     const recovery = candidate({
       previousStatus: "NEEDS_HUMAN_REVIEW",
       currentStatus: "MONITORED",
@@ -196,8 +197,29 @@ describe("monitoring status notices", () => {
       now: new Date("2026-08-10T15:00:00.000Z")
     });
 
-    expect(planned.recoveryCourses).toEqual([]);
-    expect(planned.recoveryRecipients).toEqual([]);
+    expect(planned.recoveryCourses).toEqual([recovery.result]);
+    expect(planned.recoveryRecipients).toEqual(["owner@example.com"]);
+  });
+
+  it("retains a sibling-check recovery until this alert receives it, once per episode", () => {
+    const recoveredAt = new Date("2026-08-10T15:00:00Z");
+    const recovered = candidate({ previousStatus: "MONITORED", currentStatus: "MONITORED",
+      episodeStartedAt: null, recoveredAt,
+      result: { courseId: "course-1", courseName: "Pine Oaks", outcome: "NO_MATCH", availableMatches: 0 }
+    });
+    const input = { candidates: [recovered], reachedOutages: [],
+      ownerRecipient: "owner@example.com", currentRecipients: ["owner@example.com", "new@example.com"] };
+    expect(planMonitoringStatusNotices(input).recoveryCourses).toEqual([recovered.result]);
+    expect(planMonitoringStatusNotices(input).recoveryRecipients).toEqual(["new@example.com", "owner@example.com"]);
+    const reachedRecoveries = [{ courseId: "course-1", recipient: "owner@example.com", sentAt: recoveredAt }];
+    expect(planMonitoringStatusNotices({ ...input, reachedRecoveries }).recoveryCourses).toEqual([]);
+    expect(planMonitoringStatusNotices({ ...input, reachedRecoveries,
+      candidates: [{ ...recovered, recoveredAt: new Date(recoveredAt.getTime() + 1) }]
+    }).recoveryCourses).toEqual([recovered.result]);
+    expect(planMonitoringStatusNotices({ ...input, candidates: [{ ...recovered, recoveredAt: null }] }).recoveryCourses).toEqual([]);
+    expect(buildMonitoringStatusNoticeGroupKey("recovery", [recovered], ["course-1"])).toBe(
+      buildMonitoringStatusNoticeGroupKey("recovery", [{ ...recovered, previousStatus: "NEEDS_HUMAN_REVIEW", episodeStartedAt: new Date("2026-08-10T14:00:00Z") }], ["course-1"])
+    );
   });
 
   it("does not let a reached automatic-retry update suppress later human review", () => {

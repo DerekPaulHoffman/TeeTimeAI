@@ -15,6 +15,7 @@ import {
   isExpectedSearchEmailDeliveryControlFlow,
   listReachedMonitoringFinals,
   listReachedMonitoringOutages,
+  listReachedMonitoringRecoveries,
   listRetryableSearchEmailDeliveryGroups,
   lockSearchForAlertMutation,
   lockSearchForEmailReconciliation,
@@ -403,7 +404,7 @@ describe("search email delivery outbox", () => {
     expect(mockedPrisma.searchEmailDelivery.updateMany).not.toHaveBeenCalled();
   });
 
-  it("recovers only recipients who received an unavailable customer status", async () => {
+  it("reads outage recipients without counting safety suppression as delivery", async () => {
     mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
       {
         recipient: "owner@example.com",
@@ -514,6 +515,30 @@ describe("search email delivery outbox", () => {
         }),
       }),
     );
+  });
+
+  it("deduplicates recovery from visible accepted courses, not unrelated snapshots or suppressed sends", async () => {
+    const sentAt = new Date("2026-07-15T15:00:00Z");
+    const payload = { schemaVersion: 2, checkedAt: sentAt.toISOString(),
+      statusReport: { courses: [
+        { courseId: "recovered", outcome: "NO_MATCH", availableMatches: 0 },
+        { courseId: "pending", outcome: "CHECK_PENDING", availableMatches: 0 },
+      ] },
+      statusSnapshot: [{ courseId: "not-in-email", customerStatus: "MONITORED" }],
+    };
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      { recipient: "owner@example.com", sentAt, status: "SENT", lastError: null, payload },
+      { recipient: "suppressed@example.com", sentAt, status: "SUPPRESSED", lastError: "DELIVERY_PROVIDER_SOURCE_UNRESOLVED", payload },
+      { recipient: "match@example.com", sentAt, status: "SENT", lastError: null,
+        payload: { schemaVersion: 2, checkedAt: sentAt.toISOString(), matchReport: { matches: [{ courseId: "matched" }] } } },
+    ] as never);
+    await expect(listReachedMonitoringRecoveries({ searchId: "search-1", alertGeneration: 3 })).resolves.toEqual([
+      { courseId: "recovered", recipient: "owner@example.com", sentAt },
+      { courseId: "matched", recipient: "match@example.com", sentAt },
+    ]);
+    expect(mockedPrisma.searchEmailDelivery.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ teeSearchId: "search-1", alertGeneration: 3 }),
+    }));
   });
 
   it("reads reached factual-final status deliveries for course-level dedupe", async () => {

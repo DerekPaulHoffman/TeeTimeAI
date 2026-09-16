@@ -52,6 +52,7 @@ const deliveryOutboxMocks = vi.hoisted(() => ({
   isExpectedSearchEmailDeliveryControlFlow: vi.fn(),
   listReachedMonitoringFinals: vi.fn(),
   listReachedMonitoringOutages: vi.fn(),
+  listReachedMonitoringRecoveries: vi.fn(),
   listRetryableSearchEmailDeliveryGroups: vi.fn(),
   prepareRecipientMatchDeliveryGroups: vi.fn(),
   prepareSearchEmailDeliveryGroup: vi.fn(),
@@ -754,6 +755,7 @@ describe("runSearchCheck email cadence", () => {
       [],
     );
     deliveryOutboxMocks.listReachedMonitoringOutages.mockResolvedValue([]);
+    deliveryOutboxMocks.listReachedMonitoringRecoveries.mockResolvedValue([]);
     deliveryOutboxMocks.listReachedMonitoringFinals.mockResolvedValue([]);
     deliveryOutboxMocks.getPendingStatusEmailReplacement.mockResolvedValue(
       null,
@@ -2338,7 +2340,7 @@ describe("runSearchCheck email cadence", () => {
     );
   });
 
-  it("records monitoring recovery without sending a recovery email", async () => {
+  it("sends recovery to current recipients without requiring a reached outage", async () => {
     const firstDegradedAt = new Date("2026-07-11T11:30:00.000Z");
     const degraded = {
       ...search,
@@ -2404,10 +2406,10 @@ describe("runSearchCheck email cadence", () => {
 
     expect(
       deliveryOutboxMocks.prepareSearchEmailDeliveryGroup,
-    ).not.toHaveBeenCalledWith(
-      expect.objectContaining({ kind: "MONITORING_RECOVERY" }),
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "MONITORING_RECOVERY", recipients: ["friend@resend.dev", "new@resend.dev", "player@resend.dev"] }),
     );
-    expect(emailMocks.sendSearchStatusEmail).not.toHaveBeenCalledWith(
+    expect(emailMocks.sendSearchStatusEmail).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "recovery" }),
     );
   });
