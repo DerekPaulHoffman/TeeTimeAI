@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   assertLocalReaderRequest: vi.fn(),
   completeLocalReaderJob: vi.fn(),
+  consumeSearchScheduleQueueMessage: vi.fn(),
   hasDatabaseConfig: vi.fn()
 }));
 
@@ -15,6 +16,9 @@ vi.mock("@/lib/local-reader/auth", () => ({
 }));
 vi.mock("@/lib/local-reader/service", () => ({
   completeLocalReaderJob: mocks.completeLocalReaderJob
+}));
+vi.mock("@/lib/automation/search-schedule-consumer", () => ({
+  consumeSearchScheduleQueueMessage: mocks.consumeSearchScheduleQueueMessage
 }));
 
 import { POST } from "./route";
@@ -49,6 +53,8 @@ describe("local reader result route", () => {
     vi.clearAllMocks();
     mocks.assertLocalReaderRequest.mockReturnValue(null);
     mocks.hasDatabaseConfig.mockReturnValue(true);
+    mocks.consumeSearchScheduleQueueMessage.mockReset();
+    mocks.consumeSearchScheduleQueueMessage.mockResolvedValue({ outcome: "started" });
     mocks.completeLocalReaderJob.mockResolvedValue({
       searchId: "search-1",
       completedAt: new Date("2026-07-27T16:00:00.000Z"),
@@ -75,7 +81,7 @@ describe("local reader result route", () => {
     });
   });
 
-  it("does not perform a second best-effort scheduler mutation after durable completion", async () => {
+  it("starts the durably queued generation without creating another schedule", async () => {
 
     const response = await POST(request(), {
       params: Promise.resolve({ id: "job-1" })
@@ -83,5 +89,44 @@ describe("local reader result route", () => {
 
     expect(response.status).toBe(200);
     expect(mocks.completeLocalReaderJob).toHaveBeenCalledOnce();
+    expect(mocks.consumeSearchScheduleQueueMessage).toHaveBeenCalledExactlyOnceWith({
+      searchId: "search-1", scheduleVersion: 8, trigger: "START_FAILED"
+    });
+    expect(mocks.completeLocalReaderJob.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.consumeSearchScheduleQueueMessage.mock.invocationCallOrder[0]
+    );
+  });
+
+  it("keeps a completed result acknowledged when Workflow start is uncertain", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    mocks.consumeSearchScheduleQueueMessage.mockRejectedValueOnce(new Error("Start response lost"));
+    try {
+      const response = await POST(request(), { params: Promise.resolve({ id: "job-1" }) });
+      expect(response.status).toBe(200);
+      expect(mocks.completeLocalReaderJob).toHaveBeenCalledOnce();
+      expect(mocks.consumeSearchScheduleQueueMessage).toHaveBeenCalledOnce();
+      expect(warning).toHaveBeenCalledOnce();
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  it.each([
+    { searchId: null, resumeScheduleVersion: null },
+    { searchId: "search-1", resumeScheduleVersion: null }
+  ])("does not start a detached or no-longer-current search: %j", async (resume) => {
+    mocks.completeLocalReaderJob.mockResolvedValueOnce({
+      ...resume, completedAt: new Date("2026-07-27T16:00:00.000Z")
+    });
+    const response = await POST(request(), { params: Promise.resolve({ id: "job-1" }) });
+    expect(response.status).toBe(200);
+    expect(mocks.consumeSearchScheduleQueueMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not start an uncommitted reader result", async () => {
+    mocks.completeLocalReaderJob.mockRejectedValueOnce(new Error("Reader lease changed"));
+    const response = await POST(request(), { params: Promise.resolve({ id: "job-1" }) });
+    expect(response.status).toBe(409);
+    expect(mocks.consumeSearchScheduleQueueMessage).not.toHaveBeenCalled();
   });
 });

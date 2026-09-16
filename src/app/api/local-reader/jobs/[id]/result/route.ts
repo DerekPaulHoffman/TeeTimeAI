@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
+import { consumeSearchScheduleQueueMessage } from "@/lib/automation/search-schedule-consumer";
 import { hasDatabaseConfig } from "@/lib/env";
 import { assertLocalReaderRequest } from "@/lib/local-reader/auth";
 import { localReaderResultSchema } from "@/lib/local-reader/contracts";
@@ -34,6 +35,22 @@ export async function POST(
       receivedAt,
       deviceRequestAt
     });
+    if (completed.searchId && completed.resumeScheduleVersion !== null) {
+      try {
+        // Completion already queued and generation-fenced this search. Use the
+        // deployed recovery consumer to start that exact generation immediately;
+        // starting a new schedule would invalidate the saved reader proof.
+        await consumeSearchScheduleQueueMessage({
+          searchId: completed.searchId,
+          scheduleVersion: completed.resumeScheduleVersion,
+          trigger: "START_FAILED"
+        });
+      } catch {
+        // The result and QUEUED row are durable. A failed or uncertain start
+        // must retain its reservation for recovery, not reject the reader result.
+        console.warn("[local-reader:resume-pending] Deployed recovery will resume the completed result.");
+      }
+    }
     return NextResponse.json({
       status: "COMPLETED",
       completedAt: completed.completedAt.toISOString()
