@@ -601,7 +601,12 @@ export async function requestOperatorCourseRecheck(
   const opensFreshPlaybookCycle = Boolean(
     current.incident &&
     !authoritativeFinalRetained &&
-    shouldOpenFreshPlaybookCycleForProviderEvidence(current.incident),
+    (shouldOpenFreshPlaybookCycleForProviderEvidence(current.incident) ||
+      // An explicit operator retry after a repair must not inherit the old
+      // cycle's skipped or exhausted stages. An active responder keeps ownership.
+      (current.incident.status === "AUTO_INVESTIGATING" &&
+        (!current.incident.activeBatchId ||
+          hasClosedResponderBatch(current.incident)))),
   );
   const targetState = authoritativeFinalRetained
     ? current.status.state

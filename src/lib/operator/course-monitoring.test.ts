@@ -54,6 +54,7 @@ vi.mock("@/lib/local-reader/service", () => localReaderMocks);
 
 import {
   appendAutomationPlaybookEvent,
+  assessAutomationPlaybook,
   type AutomationPlaybookLedger,
   type AutomationPlaybookReadPath,
   type AutomationPlaybookStage,
@@ -480,7 +481,8 @@ describe("operator course monitoring mutations", () => {
     ).not.toHaveBeenCalled();
   });
 
-  it("opens a fresh ordered cycle when an automatic investigation stalled", async () => {
+  it.each(["AUTOMATION_STALLED", null])("opens a fresh ordered cycle for an explicit retry with review reason %s", async (humanReviewReason) => {
+    const previousLedger = technicalFinalLedger();
     prismaMocks.courseMonitoringStatus.findFirst.mockResolvedValue({
       ...status(),
       state: "AUTO_INVESTIGATING",
@@ -489,7 +491,9 @@ describe("operator course monitoring mutations", () => {
         supportIncident: {
           ...status().course.supportIncident,
           status: "AUTO_INVESTIGATING",
-          humanReviewReason: "AUTOMATION_STALLED",
+          humanReviewReason,
+          attemptLedger: previousLedger,
+          activeBatchId: null,
           nextReminderAt: new Date("2026-08-11T18:00:00.000Z"),
         },
       },
@@ -524,6 +528,10 @@ describe("operator course monitoring mutations", () => {
         nextAttemptAt: expect.any(Date),
       }),
     });
+    const incidentWrite = transactionMocks.courseSupportIncident.update.mock.calls[0][0].data;
+    expect(incidentWrite).not.toHaveProperty("attemptLedger");
+    expect(assessAutomationPlaybook(previousLedger, 2 + incidentWrite.cycle.increment).nextStage)
+      .toBe("OFFICIAL_IDENTITY");
     expect(transactionMocks.courseMonitoringStatus.update).toHaveBeenCalledWith(
       {
         where: { courseId: "course-1", revision: 4 },
@@ -742,6 +750,24 @@ describe("operator course monitoring mutations", () => {
         }),
       },
     );
+  });
+
+  it("keeps an active responder's investigation cycle when an operator requests a recheck", async () => {
+    const current = status();
+    prismaMocks.courseMonitoringStatus.findFirst.mockResolvedValue({
+      ...current,
+      state: "AUTO_INVESTIGATING",
+      course: {...current.course, supportIncident: {...current.course.supportIncident,
+        status: "AUTO_INVESTIGATING", humanReviewReason: null,
+        activeBatchId: "active-batch", activeBatch: {status: "VERIFYING"}}},
+    });
+    await requestOperatorCourseRecheck({reference, statusRevision: 4, incidentCycle: 2,
+      incidentRevision: 7, note: "Recheck after the current responder finishes.",
+      idempotencyKey: "operator-active-batch-recheck"}, context);
+    const write = transactionMocks.courseSupportIncident.update.mock.calls[0][0].data;
+    expect(write).not.toHaveProperty("cycle");
+    expect(write).not.toHaveProperty("activeBatchId");
+    expect(write).not.toHaveProperty("attemptLedger");
   });
 
   it("preserves provider metadata when only the official website changes", async () => {
