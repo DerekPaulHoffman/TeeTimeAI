@@ -1,5 +1,9 @@
 import { expect, test } from "@playwright/test";
 
+// Chrome's headless shell disables notifications. Use full Chromium's modern
+// headless mode so this test exercises the real notification implementation.
+test.use({ channel: "chromium" });
+
 test("operator push is displayed after the website is closed", async ({ page, context, baseURL }) => {
   await context.grantPermissions(["notifications"], { origin: baseURL });
   const devtools = await context.newCDPSession(page);
