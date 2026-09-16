@@ -1911,10 +1911,19 @@ function sanitizeClubCaddieEvidenceUrl(value: string) {
   );
   const hasOnlyKnownRequestLocalState = Boolean(
     !url.hash &&
-      (nonTrackingEntries.length === 0 ||
-        (nonTrackingEntries.length === 1 &&
-          nonTrackingEntries[0][0].toLocaleLowerCase("en-US") ===
-            "interaction"))
+      new Set(nonTrackingEntries.map(([key]) => key.toLowerCase())).size === nonTrackingEntries.length &&
+      nonTrackingEntries.every(([key, value]) => {
+        // Official course CTAs can carry stale public search defaults. These
+        // select a date/group, never a course identity, and must not turn the
+        // otherwise reusable landing into redacted/unsupported evidence.
+        switch (key.toLowerCase()) {
+          case "interaction": return true;
+          case "date": return /^(?:0[1-9]|1[0-2])\/(?:0[1-9]|[12]\d|3[01])\/\d{4}$/.test(value);
+          case "player": return /^[1-4]$/.test(value);
+          case "ratetype": return value.toLowerCase() === "any";
+          default: return false;
+        }
+      })
   );
   url.search = "";
   url.hash = "";

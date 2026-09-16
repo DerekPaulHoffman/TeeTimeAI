@@ -304,6 +304,12 @@ export async function correctOperatorCourseBookingLink(
           detectedBookingUrl: bookingUrl,
           detectedPlatform: provider.detectedPlatform,
           providerFamilyKey: provider.providerFamilyKey,
+          // A corrected destination must not keep executing metadata for the
+          // prior provider/course (including a sibling on the same provider).
+          ...(bookingUrl !== current.status.course.detectedBookingUrl ||
+          provider.providerFamilyKey !== current.status.course.providerFamilyKey
+            ? { bookingMetadata: Prisma.DbNull }
+            : {}),
           automationEligibility: "NEEDS_REVIEW",
           automationReason: "OTHER",
           intelligenceVerifiedAt: null,
@@ -471,6 +477,10 @@ export async function updateOperatorCourseOfficialLinks(
           detectedBookingUrl: bookingUrl,
           detectedPlatform: provider.detectedPlatform,
           providerFamilyKey: provider.providerFamilyKey,
+          ...(bookingUrl !== current.status.course.detectedBookingUrl ||
+          provider.providerFamilyKey !== current.status.course.providerFamilyKey
+            ? { bookingMetadata: Prisma.DbNull }
+            : {}),
           automationEligibility: "NEEDS_REVIEW",
           automationReason: "OTHER",
           intelligenceVerifiedAt: null,

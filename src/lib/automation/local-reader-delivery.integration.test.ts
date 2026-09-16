@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 type Row = Record<string, unknown>;
-type Query = { where?: Row; data?: Row; create?: Row; update?: Row; orderBy?: Row | Row[]; take?: number };
+type Query = { where?: Row; data?: Row; create?: Row; update?: Row; orderBy?: Row | Row[]; take?: number; select?: Row };
 type Sql = { strings: readonly string[]; values: unknown[] };
 
 const boundary = vi.hoisted(() => ({
@@ -31,9 +31,16 @@ vi.mock("@/lib/automation/course-monitoring", async (importOriginal) => ({
   // Endpoint reconciliation is unrelated to this already restored reader path.
   reconcileCourseMonitoringDeadlines: async () => ({ escalated: 0, retrying: 0, humanReviewIncidentIds: [] })
 }));
+vi.mock("@/lib/automation/provider-execution-marker", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/automation/provider-execution-marker")>()),
+  // Reader authentication/claim ownership is the entry boundary of this fixture.
+  // Completion, generation transitions, source consumption and delivery are real.
+  renewCourseProviderObservationInTransaction: async () => true,
+  releaseCourseProviderObservationInTransaction: async () => undefined,
+}));
 
 import { runSearchCheck } from "./search-check";
-import { getFreshLocalReaderObservation } from "@/lib/local-reader/service";
+import { completeLocalReaderJob, getFreshLocalReaderObservation } from "@/lib/local-reader/service";
 import { getRequiredLocalReaderCapability } from "@/lib/local-reader/capabilities";
 import {
   drainSearchEmailDeliveryGroup,
@@ -129,11 +136,11 @@ function project(model: string, row: Row): Row {
   };
   if (model === "teeSearch") return {
     ...row, user: rows.user[0],
-    preferences: [{ rank: 1, course: project("course", rows.course[0]) }],
-    matches: rows.teeTimeMatch.map((match) => ({ ...match, course: project("course", rows.course[0]) }))
+    preferences: rows.course.map((course, index) => ({ rank: index + 1, courseId: course.id, course: project("course", course) })),
+    matches: rows.teeTimeMatch.map((match) => ({ ...match, course: project("course", rows.course.find(course => course.id === match.courseId)!) }))
   };
   if (model === "teeTimeMatch") return {
-    ...row, course: project("course", rows.course[0]), teeSearch: project("teeSearch", rows.teeSearch[0])
+    ...row, course: project("course", rows.course.find(course => course.id === row.courseId)!), teeSearch: project("teeSearch", rows.teeSearch[0])
   };
   return row;
 }
@@ -155,6 +162,10 @@ function apply(row: Row, data: Row) {
 function installModel(model: string) {
   function read(query: Query = {}) {
     let selected = rows[model].map((row) => project(model, row)).filter((row) => matches(row, query.where));
+    if (model === "teeSearch" && object(query.select?.preferences).where) {
+      selected = selected.map(row => ({...row, preferences: (row.preferences as Row[])
+        .filter(preference => matches(preference, object(object(query.select?.preferences).where)))}));
+    }
     const ordering = query.orderBy ? Array.isArray(query.orderBy) ? query.orderBy : [query.orderBy] : [];
     selected = [...selected].sort((left, right) => {
       for (const order of ordering) for (const [key, direction] of Object.entries(order)) {
@@ -217,7 +228,7 @@ function installSql() {
   });
   boundary.prisma.$queryRawUnsafe = vi.fn(async (text: string, key: unknown) => {
     if (!text.includes("pg_advisory_xact_lock(hashtextextended($1::text, 0))") ||
-      key !== `course-monitoring:${rows.course[0].id}`) throw new Error("Unhandled isolated raw SQL query");
+      !rows.course.some(course => key === `course-monitoring:${course.id}`)) throw new Error("Unhandled isolated raw SQL query");
     return [{ locked: true }];
   });
   boundary.prisma.$queryRaw = vi.fn(async (sql: Sql) => {
@@ -342,6 +353,56 @@ afterEach(() => {
 });
 
 describe("completed reader source through ordinary match delivery", () => {
+  it("keeps both course results when they finish before the queued alert resumes", async () => {
+    const search = rows.teeSearch[0];
+    rows.course[0].intelligenceVerifiedAt = null;
+    search.scheduleVersion = 7;
+    const firstJob = rows.localReaderJob[0];
+    Object.assign(firstJob, {scheduleVersion: 7, status: "LEASED", leaseToken: "reader-lease-1",
+      leaseExpiresAt: new Date(now.getTime() + 120_000), jobExpiresAt: new Date(now.getTime() + 600_000),
+      createdAt: sourceAt, resumeFromScheduleVersion: null, resumeScheduleVersion: null});
+    const secondCourse = {...clone(rows.course[0]), id: "sibling-course", name: "Offline sibling course",
+      website: "https://fox.tenfore.golf/offline-sibling", detectedBookingUrl: "https://fox.tenfore.golf/offline-sibling"};
+    rows.course.push(secondCourse);
+    rows.courseMonitoringStatus.push({...clone(rows.courseMonitoringStatus[0]), courseId: secondCourse.id});
+    rows.courseSupportIncident.push({...clone(rows.courseSupportIncident[0]), id: "sibling-incident", courseId: secondCourse.id});
+    const secondJob = {...clone(firstJob), id: "sibling-job", courseId: secondCourse.id,
+      courseKey: "tenfore:offline-sibling", bookingUrl: secondCourse.detectedBookingUrl, leaseToken: "reader-lease-2"};
+    rows.localReaderJob.push(secondJob);
+    const firstResult = clone(object(firstJob.result));
+    const secondResult = {...clone(firstResult), jobId: secondJob.id, courseKey: secondJob.courseKey,
+      pageUrl: secondJob.bookingUrl, pageTitle: secondCourse.name};
+    // Prior owner changes, another alert and a different date/group must not
+    // acquire new authority as sibling results arrive.
+    const excluded = [
+      {...clone(firstJob), id: "prior-owner-generation", status: "COMPLETED", resumeFromScheduleVersion: 5, resumeScheduleVersion: 6},
+      {...clone(firstJob), id: "other-alert", teeSearchId: "another-search", status: "COMPLETED", resumeFromScheduleVersion: 6, resumeScheduleVersion: 7},
+      {...clone(firstJob), id: "other-date", targetDate: "2026-07-31", status: "COMPLETED", resumeFromScheduleVersion: 6, resumeScheduleVersion: 7},
+      {...clone(firstJob), id: "other-group", players: 4, status: "COMPLETED", resumeFromScheduleVersion: 6, resumeScheduleVersion: 7},
+    ];
+    rows.localReaderJob.push(...excluded);
+    const excludedBefore = clone(excluded);
+    for (const [job, result] of [[firstJob, firstResult], [secondJob, secondResult]]) {
+      await completeLocalReaderJob({jobId: String(job.id), leaseToken: String(job.leaseToken),
+        receivedAt: now, deviceRequestAt: now, result: {...result, observedAt: now.toISOString()} as never});
+    }
+    expect(search.scheduleVersion).toBe(9);
+    expect([firstJob, secondJob].map(job => job.resumeScheduleVersion)).toEqual([9, 9]);
+    expect(excluded).toEqual(excludedBefore);
+    rows.localReaderJob = [firstJob, secondJob];
+    Object.assign(search, {checkStatus: "CHECKING", checkLeaseToken: lease.token, checkLeaseExpiresAt: lease.expiresAt});
+    boundary.send.mockResolvedValue({data: {id: "offline-provider-acceptance"}, error: null});
+    const checked = await runSearchCheck(lease.searchId, "test", {...lease, scheduleVersion: 9});
+    expect(checked.courseResults.map(result => result.outcome)).toEqual(["MATCH_FOUND", "MATCH_FOUND"]);
+    expect(rows.teeTimeMatch).toHaveLength(2);
+    expect(rows.courseProbe).toHaveLength(2);
+    expect(rows.courseMonitoringStatus.every(row => row.lastSuccessfulAt instanceof Date && equal(row.lastSuccessfulAt, sourceAt))).toBe(true);
+    expect([firstJob, secondJob].every(job => equal(job.resultExpiresAt, job.completedAt))).toBe(true);
+    expect(boundary.send).toHaveBeenCalledTimes(2);
+    expect(rows.searchEmailDelivery.map(row => row.status)).toEqual(["SENT", "SENT"]);
+    expect(boundary.forbidden).not.toHaveBeenCalled();
+  });
+
   it("delivers a newly created match using the consumed provider observation time", async () => {
     expect(rows.teeTimeMatch).toHaveLength(0);
     expect(rows.searchEmailDelivery).toHaveLength(0);

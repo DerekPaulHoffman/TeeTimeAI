@@ -635,6 +635,7 @@ describe("operator course monitoring mutations", () => {
         detectedBookingUrl: "https://new-course.example/tee-times",
         providerFamilyKey: "FOREUP",
         automationEligibility: "NEEDS_REVIEW",
+        bookingMetadata: Prisma.DbNull,
       }),
     });
     expect(transactionMocks.courseMonitoringStatus.update).toHaveBeenCalledWith(
@@ -726,6 +727,7 @@ describe("operator course monitoring mutations", () => {
         providerFamilyKey: "CPS",
         detectedPlatform: "CUSTOM",
         automationEligibility: "NEEDS_REVIEW",
+        bookingMetadata: Prisma.DbNull,
       }),
     });
     expect(transactionMocks.courseMonitoringStatus.update).toHaveBeenCalledWith(
@@ -740,6 +742,19 @@ describe("operator course monitoring mutations", () => {
         }),
       },
     );
+  });
+
+  it("preserves provider metadata when only the official website changes", async () => {
+    const current = status();
+    current.course.providerFamilyKey = "CPS";
+    current.course.detectedPlatform = "CUSTOM";
+    prismaMocks.courseMonitoringStatus.findFirst.mockResolvedValue(current);
+    await updateOperatorCourseOfficialLinks({reference, statusRevision: 4, incidentCycle: 2,
+      incidentRevision: 7, providerFamilyKey: current.course.providerFamilyKey,
+      website: "https://updated-official.example/", bookingUrl: current.course.detectedBookingUrl,
+      idempotencyKey: "operator-website-only-update"}, context);
+    const write = transactionMocks.course.update.mock.calls[0][0].data;
+    expect(write).not.toHaveProperty("bookingMetadata");
   });
 
   it("records a private course as a final identity outcome", async () => {

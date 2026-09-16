@@ -1332,6 +1332,27 @@ export async function completeLocalReaderJob(input: {
                 "The local reader search resume proof could not be persisted",
               );
             }
+            // A second course can finish before the queued check runs. Carry
+            // only proofs authorized for the immediately preceding generation
+            // across this reader-owned transition, in the same search CAS
+            // transaction. An owner edit/pause/recheck creates a gap and must
+            // never revive an older proof. Expiry/consumption stay unchanged.
+            await transaction.localReaderJob.updateMany({
+              where: {
+                teeSearchId: lockedCurrent.teeSearchId,
+                purpose: "ALERT_CHECK",
+                status: "COMPLETED",
+                scheduleVersion: { lte: resumeFromScheduleVersion },
+                resumeFromScheduleVersion: resumeFromScheduleVersion - 1,
+                resumeScheduleVersion: resumeFromScheduleVersion,
+                targetDate: lockedCurrent.targetDate,
+                players: lockedCurrent.players,
+              },
+              data: {
+                resumeFromScheduleVersion,
+                resumeScheduleVersion: nextResumeScheduleVersion,
+              },
+            });
             resumeScheduleVersion = nextResumeScheduleVersion;
             break;
           }

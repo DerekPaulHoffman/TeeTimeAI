@@ -1026,7 +1026,7 @@ async function checkSearch(
         !technicalRevalidationRunning;
       const localReaderCanOverrideGate =
         localReaderEligible &&
-        (playbookRuntime?.assessment.nextStage === "LOCAL_READER" ||
+        (localReaderOnly || playbookRuntime?.assessment.nextStage === "LOCAL_READER" ||
           reuseRestoredLocalReader) &&
         !engineerApprovedTechnicalFinal &&
         monitoringGate.disposition === "TECHNICAL_FINAL" &&
@@ -1541,7 +1541,7 @@ async function checkSearch(
       try {
         const localReaderShouldRun =
           localReaderEligible &&
-          (playbookRuntime?.assessment.nextStage === "LOCAL_READER" ||
+          (localReaderOnly || playbookRuntime?.assessment.nextStage === "LOCAL_READER" ||
             reuseRestoredLocalReader);
         const freshLocalReaderObservation = localReaderShouldRun
           ? await getFreshLocalReaderObservation({
@@ -2193,7 +2193,7 @@ async function checkSearch(
         const providerFailure = classifyProviderFailure({ error });
         const localReaderStageActive =
           localReaderEligible &&
-          (activePlaybookStage === "LOCAL_READER" || reuseRestoredLocalReader);
+          (localReaderOnly || activePlaybookStage === "LOCAL_READER" || reuseRestoredLocalReader);
         const localReaderJob =
           customerBookingUrl && localReaderStageActive
             ? await queueLocalReaderJob({

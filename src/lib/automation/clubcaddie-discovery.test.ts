@@ -28,6 +28,33 @@ function publicIdentityFetch(heading: string) {
 }
 
 describe("official Club Caddie destination identity", () => {
+  it("separates the live Amherst and Ponemah links with public search defaults", () => {
+    const acc = "https://apimanager-cc28.clubcaddie.com/webapi/view/edfdabab/slots";
+    const pg = "https://apimanager-cc28.clubcaddie.com/webapi/view/fdfdabab/slots";
+    const query = "?date=03%2F31%2F2024&player=1&ratetype=any";
+    const input = { courseId: "observed-official-links", sourceUrl: "https://www.playamherst.com/",
+      officialCourseWebsite: "https://www.playamherst.com/", observedUrls: [acc + query, pg + query],
+      linkCandidates: [{url: acc + query, label: "Book a Tee Time @ ACC"},
+        {url: pg + query, label: "Book a Tee Time @ PG"},
+        {url: "https://apimanager-cc28.clubcaddie.com/webapi/activities/view/ddfdabab", label: "Book Golf Simulator"}] };
+    for (const [courseName, expected] of [["Amherst Country Club", acc], ["Ponemah Green Family Golf Center", pg]]) {
+      const result = buildBrowserDiscovery({...input, courseName});
+      expect(result).toMatchObject({status: "LEARNED", apiMetadata: {provider: "CLUB_CADDIE", bookingBaseUrl: expected}});
+      expect(JSON.stringify(result)).not.toContain("03%2F31");
+      expect(JSON.stringify(result)).not.toContain("ratetype");
+    }
+  });
+
+  it.each(["token=private", "player=9", "ratetype=member", "date=private", "player=1&player=4", "next=checkout"])(
+    "keeps unknown or restricted query state non-runnable: %s", query => {
+      const url = `${bookingUrl}?${query}`;
+      const result = buildBrowserDiscovery({...source("Rapid City Executive Golf"),
+        observedUrls: [url], linkCandidates: [{url, label: "Rapid City Executive Golf Tee Times"}]});
+      expect(result.apiMetadata).toBeUndefined();
+      expect(JSON.stringify(result)).not.toContain(query);
+    }
+  );
+
   it.each([
     ["Rapid City Executive Golf", "Rapid City Executive Course"],
     ["Lake Meadow Golf", "Lake Meadow Course"],

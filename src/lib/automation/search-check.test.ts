@@ -4007,6 +4007,22 @@ describe("runSearchCheck email cadence", () => {
     },
   );
 
+  it("keeps an operator-selected reader after recovery without typed-provider intelligence", async () => {
+    const priorCourse = installResolvedLocalReaderMonitoring();
+    const course = {...priorCourse, monitoringMode: "LOCAL_READER_ONLY", intelligenceVerifiedAt: null,
+      bookingMetadata: {provider: "CPS", siteName: "steady-state-reader",
+        bookingBaseUrl: "https://steady-state-reader.cps.golf/", courseIds: [1]}};
+    adapterMocks.isForeupMetadata.mockReturnValue(false);
+    adapterMocks.isCpsMetadata.mockReturnValue(true);
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({...search,
+      preferences: [{rank: 1, course}]});
+    const result = await runSearchCheck("search-1", "test");
+    expect(result.courseResults[0].outcome).toBe("CHECK_PENDING");
+    expect(localReaderMocks.queueLocalReaderJob).toHaveBeenCalledOnce();
+    expect(adapterMocks.fetchCpsTeeSheet).not.toHaveBeenCalled();
+    expect(providerRequestLeaseMocks.runWithProviderRequestLease).not.toHaveBeenCalled();
+  });
+
   it.each(["ACCESS_CHALLENGE", "PAGE_MISMATCH", "READER_ERROR"] as const)("consumes a fresh ordinary-reader %s without requeueing or rewriting its closed playbook", async (readerStatus) => {
     const course = installResolvedLocalReaderMonitoring();
     const incidentBeforeCheck = structuredClone(course.supportIncident);
