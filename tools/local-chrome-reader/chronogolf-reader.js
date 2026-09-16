@@ -135,6 +135,9 @@
 
   root.TeeTimeSpotChronogolfReader = {
     READER_VERSION,
+    // Public cards include both group-size bounds. readSnapshot filters these
+    // without depending on the responsive, asynchronously loaded controls.
+    SKIP_PLAYER_SELECTION: true,
     isAllowedPageUrl,
     readSnapshot,
   };

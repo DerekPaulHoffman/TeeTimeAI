@@ -9,7 +9,7 @@ const contentSource = readFileSync(resolve("tools/local-chrome-reader/content.js
 afterEach(() => { vi.useRealTimers(); document.body.innerHTML = ""; });
 
 async function readPublicPage(options: {
-  players?: number; collapsed?: boolean; selectionWorks?: boolean; applyWorks?: boolean; challenge?: boolean;
+  players?: number; delayed?: boolean; challenge?: boolean; malformed?: boolean;
 } = {}) {
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-09-16T16:00:00Z"));
@@ -17,43 +17,23 @@ async function readPublicPage(options: {
   const job = { id: "controlled-job", courseKey: "chronogolf:overlook-golf-club",
     courseName: "Overlook Golf Club", bookingUrl: pageUrl, targetDate: "2026-09-19",
     players: options.players ?? 3, cardTextIncludes: [] };
-  // The live narrow layout mounts these controls only after opening Filters.
-  const controls = `<div role="radiogroup">Group size${[1, 2, 3, 4].map(n =>
-    `<label><button type="button" role="radio" aria-checked="${n === 1}" value="${n}"></button><div><span>${n} ${n === 1 ? "player" : "Players"}</span></div></label>`,
-  ).join("")}</div>`;
-  document.body.innerHTML = `<button id="filters">Filters</button>
-    <div id="sheet"><div data-testid="teeTimeCard" role="button">12:51 PM $39
-      <span title="# of players available">2 - 4</span><span title="Hole count">9, 18</span>
-    </div><div data-testid="teeTimeCard" role="button">2:39 PM $20
-      <span title="# of players available">1</span><span title="Hole count">18</span>
-    </div></div>${options.challenge ? "Verify you are human" : ""}`;
+  document.body.innerHTML = `<button id="filters">Filters</button><div id="sheet"></div>
+    ${options.challenge ? "Verify you are human" : ""}`;
   Object.defineProperty(document.body, "innerText", { configurable: true, get() { return this.textContent; } });
-  const bookingClick = vi.fn(), openFilters = vi.fn(), applyFilters = vi.fn();
-  let selected = "1";
-  for (const card of document.querySelectorAll("[data-testid='teeTimeCard']")) card.addEventListener("click", bookingClick);
-  function wireRadios(root: Element) {
-    for (const radio of root.querySelectorAll("[role='radio']")) radio.addEventListener("click", () => {
-      if (options.selectionWorks === false) return;
-      selected = radio.getAttribute("value")!;
-      for (const other of root.querySelectorAll("[role='radio']")) other.setAttribute("aria-checked", String(other === radio));
-    });
+  const clicked = vi.fn();
+  document.querySelector("#filters")!.addEventListener("click", clicked);
+  function renderCards() {
+    document.querySelector("#sheet")!.innerHTML = options.malformed
+      ? `<div data-testid="teeTimeCard" role="button">Loading tee-time details</div>`
+      : [
+          ["12:51 PM", "2 - 4"], ["1:00 PM", "3"], ["1:09 PM", "4"], ["2:39 PM", "1"]
+        ].map(([time, capacity]) => `<div data-testid="teeTimeCard" role="button">${time} $39
+          <span title="# of players available">${capacity}</span><span title="Hole count">9, 18</span>
+        </div>`).join("");
+    for (const card of document.querySelectorAll("[data-testid='teeTimeCard']")) card.addEventListener("click", clicked);
   }
-  document.querySelector("#filters")!.addEventListener("click", () => {
-    openFilters();
-    document.querySelector("#sheet")!.setAttribute("aria-hidden", "true");
-    const modal = document.createElement("div"); modal.setAttribute("role", "dialog");
-    modal.innerHTML = `<h2>Filters</h2>${controls}<button id="apply">Show 14 tee times</button>`;
-    document.body.append(modal); wireRadios(modal);
-    modal.querySelector("#apply")!.addEventListener("click", () => {
-      applyFilters();
-      if (options.applyWorks === false) return;
-      modal.remove(); document.querySelector("#sheet")!.removeAttribute("aria-hidden");
-    });
-  });
-  if (options.collapsed === false) {
-    const inline = document.createElement("div"); inline.innerHTML = controls;
-    document.body.append(inline); wireRadios(inline);
-  }
+  if (options.delayed) setTimeout(renderCards, 12_000);
+  else renderCards();
   const results: Array<{ status: string; slots: Array<{startsAtLocal: string}> }> = [];
   runInNewContext(readerSource + "\n" + contentSource, {
     document, location: new URL(pageUrl), URL, Date, CSS: { escape: (s: string) => s },
@@ -66,26 +46,26 @@ async function readPublicPage(options: {
       } } },
   });
   await vi.advanceTimersByTimeAsync(40_000);
-  expect(bookingClick).not.toHaveBeenCalled(); expect(results).toHaveLength(1);
-  return { result: results[0], selected, openFilters, applyFilters };
+  expect(clicked).not.toHaveBeenCalled();
+  expect(results).toHaveLength(1);
+  return results[0];
 }
 
-describe("Chronogolf player filtering through the complete content reader", () => {
-  it.each([3, 4])("opens and applies collapsed filters for %i players without touching a tee time", async players => {
-    const read = await readPublicPage({ players });
-    expect(read.openFilters).toHaveBeenCalledOnce(); expect(read.applyFilters).toHaveBeenCalledOnce();
-    expect(read.selected).toBe(String(players));
-    expect(read.result).toMatchObject({status: "AVAILABLE", slots: [{startsAtLocal: "2026-09-19T12:51:00"}]});
+describe("Chronogolf group capacity through the complete content reader", () => {
+  it.each([3, 4])("reads public cards for %i players without opening filters or booking", async players => {
+    const result = await readPublicPage({ players });
+    expect(result.status).toBe("AVAILABLE");
+    expect(result.slots.map(slot => slot.startsAtLocal)).toEqual([
+      "2026-09-19T12:51:00", players === 3 ? "2026-09-19T13:00:00" : "2026-09-19T13:09:00"
+    ]);
   });
-  it("retains the inline desktop controls", async () => {
-    const read = await readPublicPage({collapsed: false});
-    expect(read.openFilters).not.toHaveBeenCalled(); expect(read.result.status).toBe("AVAILABLE");
+  it("waits for delayed public cards without depending on hydrated filters", async () => {
+    expect((await readPublicPage({delayed: true})).status).toBe("AVAILABLE");
   });
-  it.each([{selectionWorks: false}, {applyWorks: false}])("does not accept an unapplied filter: %j", async options => {
-    expect((await readPublicPage(options)).result).toMatchObject({status: "READER_ERROR", slots: []});
+  it("does not treat malformed card details as no availability", async () => {
+    expect(await readPublicPage({malformed: true})).toMatchObject({status: "READER_ERROR", slots: []});
   });
-  it("stops at an access challenge before opening filters", async () => {
-    const read = await readPublicPage({challenge: true});
-    expect(read.openFilters).not.toHaveBeenCalled(); expect(read.result.status).toBe("ACCESS_CHALLENGE");
+  it("stops at an access challenge", async () => {
+    expect(await readPublicPage({challenge: true})).toMatchObject({status: "ACCESS_CHALLENGE", slots: []});
   });
 });

@@ -187,9 +187,10 @@ other reader jobs.
 
 ## Security and product boundary
 
-Reader 1.12.3 opens and applies Chronogolf's collapsed public Filters panel,
-verifies the requested player selection, and leaves tee-time cards untouched.
-The inline desktop player controls remain supported.
+Reader 1.12.4 reads Chronogolf's public tee-time cards without opening player
+filters or clicking a tee time. Each card's minimum and maximum group size
+determine whether it can serve the requested party. The dated public tee sheet
+still has to render before results are accepted.
 
 Official-source reader 1.12.2 records a visibly restricted parks page after a
 same-origin `bm-verify` redirect as `ACCESS_RESTRICTED`, without retaining the

@@ -314,58 +314,7 @@
     throw new Error(`Course ${job.courseName} did not become selectable.`);
   }
 
-  async function chooseChronogolfPlayers(players) {
-    const deadline = Date.now() + 10_000;
-    const expectedLabel = `${players} ${players === 1 ? "player" : "players"}`;
-    let openedFilters = false;
-    const available = (element) => !element.closest("[hidden], [aria-hidden='true']") &&
-      !element.disabled && element.getAttribute("aria-disabled") !== "true";
-    while (Date.now() < deadline) {
-      if (CHALLENGE_TEXT.test(document.body?.innerText || "")) {
-        throw new Error("The public page displayed an access challenge.");
-      }
-      const radio = Array.from(document.querySelectorAll("input[type='radio'], [role='radio']"))
-        .find((candidate) => available(candidate) &&
-          String(candidate.getAttribute("aria-label") || candidate.closest("label")?.textContent || "")
-            .replace(/\s+/g, " ").trim().toLowerCase() === expectedLabel);
-      if (radio) {
-        if (radio.getAttribute("aria-checked") !== "true" && radio.checked !== true) {
-          radio.click();
-          await delay(250);
-          continue;
-        }
-        const dialog = radio.closest("[role='dialog']");
-        const isFiltersDialog = dialog && Array.from(dialog.querySelectorAll("h1, h2, h3, [role='heading']"))
-          .some((heading) => heading.textContent.trim() === "Filters");
-        if (isFiltersDialog) {
-          const apply = Array.from(dialog.querySelectorAll("button"))
-            .find((button) => available(button) && /^Show\s+\d+\s+tee times?$/i.test(button.textContent.trim()));
-          if (!apply) { await delay(100); continue; }
-          apply.click();
-          while (Date.now() < deadline && dialog.isConnected && !dialog.closest("[hidden], [aria-hidden='true']")) {
-            await delay(100);
-          }
-          if (dialog.isConnected && !dialog.closest("[hidden], [aria-hidden='true']")) {
-            throw new Error("The public tee-time filters did not finish applying.");
-          }
-        }
-        await delay(500);
-        return;
-      }
-      if (!openedFilters) {
-        const filters = Array.from(document.querySelectorAll("button"))
-          .find((button) => available(button) && button.textContent.trim() === "Filters");
-        if (filters) { filters.click(); openedFilters = true; }
-      }
-      await delay(100);
-    }
-    throw new Error(`Group size ${players} did not become selectable.`);
-  }
-
   async function choosePlayers(players) {
-    if (location.hostname === "www.chronogolf.com") {
-      return chooseChronogolfPlayers(players);
-    }
     if (location.hostname.endsWith(".ezlinksgolf.com")) {
       const deadline = Date.now() + 15_000;
       while (Date.now() < deadline) {
