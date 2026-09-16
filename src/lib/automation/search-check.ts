@@ -1577,6 +1577,23 @@ async function checkSearch(
         const localReaderResumeOnly = Boolean(
           expiredLocalReaderResumeObservation,
         );
+        const queueFreshReaderAfterSupersededObservation = async () => {
+          if (!localReaderObservation?.teeSheet) return;
+          await maintainSearchCheckLease(lease);
+          await queueLocalReaderJob({
+            searchId: search.id,
+            courseId: course.id,
+            scheduleVersion: search.scheduleVersion,
+            targetDate: searchWindow.date,
+            players: search.players,
+            bookingUrl: customerBookingUrl!,
+            // Keep the rejected proof as history, but do not reuse it forever.
+            // This stable cutoff also preserves any newer pending reader job.
+            notBefore: new Date(
+              (localReaderObservation.completedAt ?? localReaderObservation.observedAt).getTime() + 1,
+            ),
+          });
+        };
         const consumeLocalReaderObservationInTransaction = async (
           transaction: Prisma.TransactionClient,
         ) => {
@@ -1873,6 +1890,7 @@ async function checkSearch(
           });
           if (!bookingWindowCommit.sourceEvidenceAccepted) {
             providerSourceAccepted = false;
+            await queueFreshReaderAfterSupersededObservation();
             monitoringRetryCourseIds.add(course.id);
             courseResults.push(
               buildPlaybookPendingCourseReport(
@@ -2053,6 +2071,7 @@ async function checkSearch(
         });
         if (!matchCommit.sourceEvidenceAccepted) {
           providerSourceAccepted = false;
+          await queueFreshReaderAfterSupersededObservation();
           monitoringRetryCourseIds.add(course.id);
           courseResults.push(
             buildPlaybookPendingCourseReport(

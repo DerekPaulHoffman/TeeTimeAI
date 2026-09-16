@@ -184,7 +184,7 @@ function installModel(model: string) {
       sentAt: null, unavailableAt: null, firstSeenAt: new Date(), lastSeenAt: new Date(),
       // These are the real database defaults, not invented provider timestamps.
       lastConfirmedAt: new Date()
-    } : {};
+    } : model === "localReaderJob" ? {status: "PENDING", purpose: "ALERT_CHECK"} : {};
     const row = { id: `${model}-${++sequence}`, createdAt: new Date(), updatedAt: new Date(), ...defaults, ...clone(data) };
     rows[model].push(row);
     events.push(`${model}:create`);
@@ -353,6 +353,45 @@ afterEach(() => {
 });
 
 describe("completed reader source through ordinary match delivery", () => {
+  it.each([false, true])("replaces a superseded reader source and delivers its fresh result (expired=%s)", async (expired) => {
+    const canonicalAt = new Date("2026-07-29T12:09:30Z");
+    rows.courseMonitoringStatus[0].lastSuccessfulAt = canonicalAt;
+    rows.courseSupportIncident[0].lastSeenAt = canonicalAt;
+    if (expired) rows.localReaderJob[0].resultExpiresAt = new Date(completedAt.getTime() + 1);
+    const oldJob = clone(rows.localReaderJob[0]);
+    const first = await runSearchCheck(lease.searchId, "test", lease);
+    expect(first.courseResults[0].outcome).toBe("CHECK_PENDING");
+    expect(rows.localReaderJob).toHaveLength(2);
+    const nextJob = rows.localReaderJob[1];
+    expect(nextJob).toMatchObject({status: "PENDING", scheduleVersion: 2, players: 2});
+    expect(rows.localReaderJob[0]).toEqual(oldJob);
+    expect(rows.teeTimeMatch).toHaveLength(0);
+    expect(boundary.send).not.toHaveBeenCalled();
+    const nextCreatedAt = nextJob.createdAt;
+    vi.setSystemTime(new Date(now.getTime() + 1000));
+    await runSearchCheck(lease.searchId, "test", lease);
+    expect(rows.localReaderJob).toHaveLength(2);
+    expect(nextJob.createdAt).toEqual(nextCreatedAt);
+    const observedAt = new Date();
+    Object.assign(nextJob, {status: "LEASED", leaseToken: "replacement-lease",
+      leaseExpiresAt: new Date(now.getTime() + 120_000), claimedAt: observedAt});
+    await completeLocalReaderJob({jobId: String(nextJob.id), leaseToken: "replacement-lease",
+      receivedAt: observedAt, deviceRequestAt: observedAt,
+      result: {...object(oldJob.result), jobId: nextJob.id, observedAt: observedAt.toISOString()} as never});
+    const search = rows.teeSearch[0];
+    Object.assign(search, {checkStatus: "CHECKING", checkLeaseToken: lease.token, checkLeaseExpiresAt: lease.expiresAt});
+    boundary.send.mockResolvedValue({data: {id: "replacement-provider-acceptance"}, error: null});
+    const resumed = await runSearchCheck(lease.searchId, "test", {...lease, scheduleVersion: Number(search.scheduleVersion)});
+    expect(resumed.courseResults[0].outcome).toBe("MATCH_FOUND");
+    expect(rows.teeTimeMatch).toHaveLength(1);
+    expect(boundary.send).toHaveBeenCalledTimes(2);
+    expect(rows.searchEmailDelivery.map(row => row.status)).toEqual(["SENT", "SENT"]);
+    expect(rows.localReaderJob[0]).toMatchObject({
+      result: oldJob.result, claimedAt: oldJob.claimedAt, completedAt: oldJob.completedAt,
+      resultExpiresAt: oldJob.resultExpiresAt,
+    });
+  });
+
   it("keeps both course results when they finish before the queued alert resumes", async () => {
     const search = rows.teeSearch[0];
     rows.course[0].intelligenceVerifiedAt = null;

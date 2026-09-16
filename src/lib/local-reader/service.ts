@@ -1819,6 +1819,7 @@ export async function getFreshLocalReaderObservation(input: {
     scheduleVersion: input.scheduleVersion,
     status: result.status,
     observedAt,
+    completedAt: row.completedAt ?? observedAt,
     readerVersion: result.readerVersion,
     teeSheet:
       result.status === "AVAILABLE" || result.status === "NO_AVAILABILITY"
@@ -1897,6 +1898,7 @@ export async function getExpiredUnconsumedLocalReaderObservationForCanonicalResu
     scheduleVersion: input.scheduleVersion,
     status: result.status,
     observedAt,
+    completedAt: row.completedAt,
     readerVersion: result.readerVersion,
     teeSheet:
       result.status === "AVAILABLE" || result.status === "NO_AVAILABILITY"
