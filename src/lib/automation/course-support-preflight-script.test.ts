@@ -11,6 +11,7 @@ import {
   launchFailureResult,
   playwrightChromiumSetupRequiredResult,
   playwrightChromiumRuntimeSmokeTimeoutMs,
+  prepareGeneratedPrismaClient,
   requiredCourseSupportIncidentScalarFields,
   responderChildLaunchOptions,
   responderInvocation,
@@ -19,6 +20,29 @@ import {
   selectedResponderCheckoutContext,
   selectApprovedCourseSupportResponderCheckout
 } from "../../../scripts/automation/course-support-preflight.mjs";
+
+describe("course support generated client repair", () => {
+  it.each(["stale", "unavailable"])("rebuilds a %s client once and requires a fresh successful inspection", (status) => {
+    const inspect = vi.fn().mockReturnValueOnce({ status }).mockReturnValueOnce({ status: "current" });
+    const generate = vi.fn().mockReturnValue(true);
+    expect(prepareGeneratedPrismaClient("approved-checkout", inspect, generate)).toEqual({ status: "current" });
+    expect(generate).toHaveBeenCalledExactlyOnceWith("approved-checkout");
+    expect(inspect).toHaveBeenCalledTimes(2);
+  });
+  it("preserves the setup fence when generation fails or still cannot prove a usable client", () => {
+    const inspect = vi.fn().mockReturnValue({ status: "unavailable" });
+    for (const generated of [false, true]) {
+      const generate = vi.fn().mockReturnValue(generated);
+      expect(prepareGeneratedPrismaClient("approved-checkout", inspect, generate)).toEqual({ status: "unavailable" });
+      expect(generate).toHaveBeenCalledOnce();
+    }
+  });
+  it("does not rebuild a current client", () => {
+    const generate = vi.fn();
+    expect(prepareGeneratedPrismaClient("approved-checkout", () => ({ status: "current" }), generate)).toEqual({ status: "current" });
+    expect(generate).not.toHaveBeenCalled();
+  });
+});
 
 describe("course support preflight checkout selection", () => {
   const currentMain = "a".repeat(40);

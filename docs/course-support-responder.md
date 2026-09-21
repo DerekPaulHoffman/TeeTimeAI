@@ -4,6 +4,8 @@ The course-support responder is the dedicated engineering path for persistent `N
 
 ## Ownership And Cadence
 
+An inspection with `customerRecovery.pendingCount > 0` is an exception to the empty-provider-queue exit below: retain the open customer case and its engineering handoff even when `outcome` is `no_due_work`. This never grants another provider claim or bypasses a setup/ownership fence. Preflight rebuilds missing or stale generated Prisma output once in the selected clean approved checkout, re-inspects it, and stops if that repair cannot prove a current client.
+
 Discovery entries use `VERIFY_CURRENT_RUNTIME` unless their exact source-search assignment applies. Run the existing owner-bound `verify --current-runtime --watch --closeout` lane so provider observations advance the playbook and reach durable closeout. Contract inspection remains a diagnostic beside authorized implementation; an empty diagnostic result is not a completed stage or a conclusive course limitation. Implementation-only, exact source-search, ownership, and public-access requirements still apply unchanged. Existing claimed plans retain their persisted authority until native closeout or recovery.
 
 - Vercel Workflows remain the scheduler for golfer searches. The responder does not poll tee sheets on a timer and does not replace a search workflow.

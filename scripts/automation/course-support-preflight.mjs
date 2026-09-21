@@ -92,6 +92,20 @@ export function generatedPrismaSetupRequiredResult(inspection) {
   };
 }
 
+export function prepareGeneratedPrismaClient(
+  checkout,
+  inspect = inspectGeneratedPrismaClient,
+  generate = (directory) => runNpm(["run", "prisma:generate"], directory)
+) {
+  const inspection = inspect(checkout);
+  // npm ci may remove the generated client entirely. Missing output needs the
+  // same one-shot rebuild as stale output; neither is provider failure evidence.
+  if (inspection.status !== "current" && generate(checkout)) {
+    return inspect(checkout);
+  }
+  return inspection;
+}
+
 export function inspectPlaywrightChromiumRuntime(
   checkout,
   loadPlaywright = loadPlaywrightFromCheckout,
@@ -390,13 +404,7 @@ function main() {
   } else {
     const resolvedCheckout = realpathSync(checkout);
     const checkoutHead = git(["rev-parse", "HEAD"], resolvedCheckout);
-    let generatedPrismaInspection = inspectGeneratedPrismaClient(resolvedCheckout);
-    if (
-      generatedPrismaInspection.status === "stale" &&
-      runNpm(["run", "prisma:generate"], resolvedCheckout)
-    ) {
-      generatedPrismaInspection = inspectGeneratedPrismaClient(resolvedCheckout);
-    }
+    const generatedPrismaInspection = prepareGeneratedPrismaClient(resolvedCheckout);
     const generatedPrismaSetupRequired = generatedPrismaSetupRequiredResult(
       generatedPrismaInspection
     );
