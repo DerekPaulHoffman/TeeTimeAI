@@ -18,6 +18,7 @@ import type {
 import { evaluateMonitoringGate, isCoherentManualDisposition } from "@/lib/automation/policy";
 import { syntheticWebsiteTrafficClasses } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
+import { readCustomerRecovery } from "./course-support-customer-recovery";
 
 import {
   buildCourseSupportProviderSnapshotFingerprint,
@@ -5330,6 +5331,7 @@ export async function claimCourseSupportBatch(input: {
             maxCourses,
             summary: {
               schemaVersion: 1,
+              customerRecoveryVersion: 1,
               branch: input.branch,
               searchExecutionFence: persistCourseSupportSearchExecutionFence(
                 buildCourseSupportSearchExecutionFenceSnapshot({
@@ -12321,6 +12323,7 @@ async function closeoutCourseSupportBatchAttempt(
     );
   });
   let siblingWakeCount = 0;
+  let customerRecovery: Awaited<ReturnType<typeof readCustomerRecovery>> = null;
 
   input.signal?.throwIfAborted();
   await runCourseSupportSerializableTransactionWithRetry(async (tx) => {
@@ -12391,6 +12394,11 @@ async function closeoutCourseSupportBatchAttempt(
         }
       }
     }
+    customerRecovery = await readCustomerRecovery(
+      tx, batch,
+      normalizedEntries.filter(entry => entry.normalizedResult === "RESTORED").map(entry => entry.courseId),
+      now,
+    );
     const courseMonitoringAvailable = hasCourseMonitoringPersistence(tx);
     const closeoutSignal = input.signal;
     const persistCourseMonitoringCloseout = async (input: {
@@ -12770,6 +12778,7 @@ async function closeoutCourseSupportBatchAttempt(
         leaseExpiresAt: now,
         summary: {
           ...asJsonObject(batch.summary),
+          ...(customerRecovery ? { customerRecovery } : {}),
           closeout: {
             outcome,
             derivedOutcome,
@@ -13951,6 +13960,7 @@ async function closeoutCourseSupportBatchAttempt(
 
   const finalOutcome = outcome;
   const finalBatchStatus = batchStatus;
+  const recoveryResult = customerRecovery as Awaited<ReturnType<typeof readCustomerRecovery>>;
 
   const nextAttemptAt = retryTimes.sort(
     (left, right) => left.getTime() - right.getTime(),
@@ -13976,7 +13986,8 @@ async function closeoutCourseSupportBatchAttempt(
     providerFamilyHandoffCount,
     decisionBasis,
     siblingWakeCount,
-    notificationPendingCount: 0,
+    notificationPendingCount: recoveryResult?.pendingRecipientCourseCount ?? 0,
+    customerRecovery: recoveryResult,
     leverage: {
       providerGroupResolvedCount:
         retryCount === 0 &&
@@ -14007,6 +14018,10 @@ async function closeoutCourseSupportBatchAttempt(
     },
     nextAttemptAt: nextAttemptAt?.toISOString() ?? null,
     ...policy,
+    ...(recoveryResult?.status === "OPEN" ? {
+      threadDisposition: "KEEP_VISIBLE" as const,
+      archiveReason: "Provider repair is recorded; the durable customer recovery case remains open.",
+    } : {}),
   };
 }
 

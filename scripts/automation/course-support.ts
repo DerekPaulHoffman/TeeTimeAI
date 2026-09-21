@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { refreshPendingCustomerRecoveries } from "@/lib/automation/course-support-customer-recovery";
 import { promisify } from "node:util";
 
 import {
@@ -611,14 +612,18 @@ async function runCommand(
   switch (command) {
     case "inspect": {
       const admissionRuntimeVersion = resolveInspectionAdmissionRuntimeVersion();
+      const customerRecovery = await refreshPendingCustomerRecoveries();
       writeResult(
         await attachCourseSupportAcceptanceProjectionFromWorker(
-          await inspectCourseSupportQueue({
+          { ...await inspectCourseSupportQueue({
             requestingThreadId: optionalOwnerThread(args),
             completeParkedCampaignIfDone:
               shouldCompleteParkedCampaignForInspection(args),
             ...(admissionRuntimeVersion ? { admissionRuntimeVersion } : {})
-          })
+          }), customerRecovery, ...(customerRecovery.pendingCount > 0 ? {
+            threadDisposition: "KEEP_VISIBLE" as const,
+            archiveReason: "Customer recovery remains open after provider repair.",
+          } : {}) }
         )
       );
       return;

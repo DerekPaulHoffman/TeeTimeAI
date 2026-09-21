@@ -402,6 +402,13 @@ afterEach(() => {
 });
 
 describe("native restored closeout to original-cohort acceptance", () => {
+  it("persists the customer recovery contract without inventing delivery proof for detached readiness", async () => {
+    const batch = rows.courseSupportBatch[0];
+    batch.summary = { ...object(batch.summary), customerRecoveryVersion: 1 };
+    const result = await closeout();
+    expect(result).toMatchObject({ customerRecovery: { status: "NO_ACTIVE_DEMAND", affectedSearchCount: 0 } });
+    expect(object(object(batch.summary).customerRecovery).status).toBe("NO_ACTIVE_DEMAND");
+  });
   it("accepts exact fresh RESTORED proof while changing a nonhealthy monitoring state", async () => {
     await closeout();
     expect((await strictRead()).progress).toMatchObject({ terminalCount: 1, monitoredCount: 1, engineeringBlockerCount: 0 });

@@ -4,7 +4,10 @@ const inspectionMocks = vi.hoisted(() => ({
   execFileSync: vi.fn(),
   inspectQueue: vi.fn(),
   attachAcceptance: vi.fn(),
+  customerRecovery: vi.fn(),
 }));
+
+vi.mock("./course-support-customer-recovery", () => ({ refreshPendingCustomerRecoveries: inspectionMocks.customerRecovery }));
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
@@ -46,6 +49,7 @@ describe("course-support inspection selection runtime", () => {
     vi.spyOn(process.stdout, "write").mockImplementation(() => true);
     git = { branch: "automation/course-support-inspection", headSha, originMainSha: headSha, status: "" };
     inspectionMocks.inspectQueue.mockResolvedValue(queueResult);
+    inspectionMocks.customerRecovery.mockResolvedValue({ inspectedCount: 0, completedCount: 0, pendingCount: 0, nextAction: null });
     inspectionMocks.attachAcceptance.mockImplementation(async (result) => result);
     inspectionMocks.execFileSync.mockImplementation((file: string, args: readonly string[]) => {
       expect(file).toBe("git");
@@ -73,6 +77,15 @@ describe("course-support inspection selection runtime", () => {
     });
   }
 
+  it("keeps unfinished customer recovery visible even when the provider queue has no due work", async () => {
+    inspectionMocks.inspectQueue.mockResolvedValue({ outcome: "no_due_work", threadDisposition: "ARCHIVE" });
+    inspectionMocks.customerRecovery.mockResolvedValue({ pendingCount: 1, completedCount: 0, inspectedCount: 1 });
+    await run();
+    expect(inspectionMocks.attachAcceptance).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      outcome: "no_due_work", threadDisposition: "KEEP_VISIBLE", customerRecovery: { pendingCount: 1, completedCount: 0, inspectedCount: 1 },
+    }));
+  });
+
   it.each([
     { name: "missing Vercel runtime", commit: undefined, deployment: undefined, runtime: "local" },
     { name: "stale Vercel commit", commit: staleSha, deployment: "synthetic-deployment", runtime: staleSha },
@@ -90,7 +103,7 @@ describe("course-support inspection selection runtime", () => {
       completeParkedCampaignIfDone: false,
       admissionRuntimeVersion: headSha,
     });
-    expect(inspectionMocks.attachAcceptance).toHaveBeenCalledExactlyOnceWith(queueResult);
+    expect(inspectionMocks.attachAcceptance).toHaveBeenCalledExactlyOnceWith(expect.objectContaining(queueResult));
     expect(inspectionMocks.execFileSync).toHaveBeenCalledWith("git", ["rev-parse", "origin/main"], expect.anything());
     expect(getAutomationRuntimeVersion()).toBe(runtime);
     expect(process.env.VERCEL_GIT_COMMIT_SHA).toBe(commit);
@@ -116,7 +129,7 @@ describe("course-support inspection selection runtime", () => {
 
     expect(inspectionMocks.inspectQueue).toHaveBeenCalledOnce();
     expect(inspectionMocks.inspectQueue.mock.calls[0]?.[0].admissionRuntimeVersion).toBeUndefined();
-    expect(inspectionMocks.attachAcceptance).toHaveBeenCalledExactlyOnceWith(queueResult);
+    expect(inspectionMocks.attachAcceptance).toHaveBeenCalledExactlyOnceWith(expect.objectContaining(queueResult));
     expect(getAutomationRuntimeVersion()).toBe(staleSha);
     expect(process.env.VERCEL_GIT_COMMIT_SHA).toBe(staleSha);
     expect(process.env.VERCEL_DEPLOYMENT_ID).toBeUndefined();
