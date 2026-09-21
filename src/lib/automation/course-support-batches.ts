@@ -3838,6 +3838,7 @@ export async function claimCourseSupportBatch(input: {
   const retrySourceBatchDigest = input.retryBatchId
     ? createHash("sha256").update(input.retryBatchId).digest("hex")
     : null;
+  let candidateHistoryBlockedCount = 0;
 
   const lease = await runWithCourseSupportWriterTransitionLease(
     async (writerLease) => {
@@ -3897,7 +3898,7 @@ export async function claimCourseSupportBatch(input: {
       };
     }
 
-    const [initialCandidates, recentCompletedBatches, retryBatch] = await Promise.all([
+    const [candidateRead, recentCompletedBatches, retryBatch] = await Promise.all([
       listCourseSupportClaimCandidates(selectionDatabaseNow),
       prisma.courseSupportBatch.findMany({
         where: { completedAt: { not: null } },
@@ -3938,6 +3939,8 @@ export async function claimCourseSupportBatch(input: {
           })
         : Promise.resolve(null),
     ]);
+    const initialCandidates = candidateRead.candidates;
+    candidateHistoryBlockedCount = candidateRead.historyBlockedCount;
     const activeProviderGroups = new Set(
       activeBatches.map(
         (batch) =>
@@ -5332,6 +5335,7 @@ export async function claimCourseSupportBatch(input: {
             summary: {
               schemaVersion: 1,
               customerRecoveryVersion: 1,
+              candidateHistoryBlockedCount,
               branch: input.branch,
               searchExecutionFence: persistCourseSupportSearchExecutionFence(
                 buildCourseSupportSearchExecutionFenceSnapshot({
@@ -5594,6 +5598,7 @@ export async function claimCourseSupportBatch(input: {
       ),
       failureFingerprint: claimedSelection.failureFingerprint,
       incidentCount: claimedSelection.incidents.length,
+      candidateHistoryBlockedCount,
       leverage: {
         providerGroupCount: 1,
         currentAffectedCourseCount: claimedSelection.incidents.length,
@@ -5644,7 +5649,12 @@ export async function claimCourseSupportBatch(input: {
       }),
     };
   }
-  return lease.value;
+  return candidateHistoryBlockedCount > 0 ? {
+    ...lease.value,
+    candidateHistoryBlockedCount,
+    threadDisposition: "KEEP_VISIBLE" as const,
+    archiveReason: "One or more course candidates remain fenced for history review; independently verified candidates may continue.",
+  } : lease.value;
 }
 
 export async function recordCourseSupportClaimStateChurn() {
@@ -16792,6 +16802,7 @@ type CourseSupportClaimCandidateReadClient = Pick<
 async function listCourseSupportClaimCandidateIncidents(
   now: Date,
   client: CourseSupportClaimCandidateReadClient = prisma,
+  onHistoryBlocked?: (count: number) => void,
 ) {
   const firstPage = await client.courseSupportIncident.findMany({
     where: {
@@ -16809,11 +16820,7 @@ async function listCourseSupportClaimCandidateIncidents(
     select: COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT,
   });
   if (firstPage.length <= COURSE_SUPPORT_CANDIDATE_QUEUE_READ_LIMIT) {
-    await assertBoundedCourseSupportCandidateCurrentCycleHistory(
-      client,
-      firstPage,
-    );
-    return firstPage;
+    return retainBoundedCourseSupportCandidates(client, firstPage, onHistoryBlocked);
   }
 
   const dueIncidents = firstPage.filter(
@@ -16839,11 +16846,7 @@ async function listCourseSupportClaimCandidateIncidents(
         "The parked course-support recovery queue exceeds the bounded scan limit.",
       );
     }
-    await assertBoundedCourseSupportCandidateCurrentCycleHistory(
-      client,
-      dueIncidents,
-    );
-    return dueIncidents;
+    return retainBoundedCourseSupportCandidates(client, dueIncidents, onHistoryBlocked);
   }
   const exactParkedIds = new Set(
     buildSelectableCourseSupportClaimCandidates(parkedSuperset, now)
@@ -16856,18 +16859,14 @@ async function listCourseSupportClaimCandidateIncidents(
     ...dueIncidents,
     ...parkedSuperset.filter((incident) => exactParkedIds.has(incident.id)),
   ];
-  await assertBoundedCourseSupportCandidateCurrentCycleHistory(
-    client,
-    incidents,
-  );
-  return incidents;
+  return retainBoundedCourseSupportCandidates(client, incidents, onHistoryBlocked);
 }
 
 async function listCourseSupportClaimCandidates(now: Date) {
-  return buildSelectableCourseSupportClaimCandidates(
-    await listCourseSupportClaimCandidateIncidents(now),
-    now,
-  );
+  let historyBlockedCount = 0;
+  const incidents = await listCourseSupportClaimCandidateIncidents(now, prisma,
+    count => { historyBlockedCount = count; });
+  return { candidates: buildSelectableCourseSupportClaimCandidates(incidents, now), historyBlockedCount };
 }
 
 function readExactDeferredFailureHandoffAttempt(input: {
@@ -18000,6 +17999,32 @@ function assertBoundedCourseSupportCandidateQueue<T>(rows: readonly T[]) {
   }
 }
 
+class CourseSupportCandidateHistoryOverflow extends Error {
+  constructor(readonly incidentIds: Set<string>) {
+    super("Course-support candidate history exceeds the bounded read limit.");
+  }
+}
+
+async function retainBoundedCourseSupportCandidates(
+  client: Pick<Prisma.TransactionClient, "courseMonitoringEvent">,
+  incidents: readonly CourseSupportCandidateIncident[],
+  onHistoryBlocked?: (count: number) => void,
+) {
+  try {
+    await assertBoundedCourseSupportCandidateCurrentCycleHistory(client, incidents);
+    return [...incidents];
+  } catch (error) {
+    if (!(error instanceof CourseSupportCandidateHistoryOverflow)) throw error;
+    const eligible = incidents.filter(incident => !error.incidentIds.has(incident.id));
+    // Keep the exact bound and the affected course's fence. A complete read
+    // can prove another candidate safe without rewriting the overflowing one.
+    // Truncated aggregate reads and an entirely blocked queue still fail closed.
+    if (!eligible.length) throw error;
+    onHistoryBlocked?.(incidents.length - eligible.length);
+    return eligible;
+  }
+}
+
 async function assertBoundedCourseSupportCandidateCurrentCycleHistory(
   client: Pick<Prisma.TransactionClient, "courseMonitoringEvent">,
   incidents: readonly CourseSupportCandidateIncident[],
@@ -18028,6 +18053,7 @@ async function assertBoundedCourseSupportCandidateCurrentCycleHistory(
     incidents.map((incident) => [incident.id, incident]),
   );
   const eventCountByIncidentId = new Map<string, number>();
+  const overflowingIncidentIds = new Set<string>();
   for (const event of events) {
     const incident = event.incidentId
       ? incidentById.get(event.incidentId)
@@ -18045,12 +18071,11 @@ async function assertBoundedCourseSupportCandidateCurrentCycleHistory(
     if (
       eventCount > COURSE_SUPPORT_CANDIDATE_CURRENT_CYCLE_EVENT_READ_LIMIT
     ) {
-      throw new Error(
-        "Course-support candidate history exceeds the bounded read limit.",
-      );
+      overflowingIncidentIds.add(incident.id);
     }
     eventCountByIncidentId.set(incident.id, eventCount);
   }
+  if (overflowingIncidentIds.size) throw new CourseSupportCandidateHistoryOverflow(overflowingIncidentIds);
 }
 
 function assertBoundedCourseSupportCandidateHistory(

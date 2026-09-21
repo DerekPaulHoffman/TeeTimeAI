@@ -4361,16 +4361,16 @@ describe("course-support claim demand fencing", () => {
     expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
   });
 
-  it("fails a per-incident current-cycle overflow below the aggregate sentinel", async () => {
+  it("keeps an overflowing incident fenced while claiming an independently proven control", async () => {
     const overflowing = sourceCompleteFinalizationRecoveryIncident({
       status: "AUTO_INVESTIGATING",
     });
     const control = sourceCompleteFinalizationRecoveryIncident({
       status: "AUTO_INVESTIGATING",
     });
-    control.id = "current-cycle-control-incident";
-    control.courseId = "current-cycle-control-course";
-    control.course.id = control.courseId;
+    overflowing.id = "current-cycle-overflow-incident";
+    overflowing.courseId = "current-cycle-overflow-course";
+    overflowing.course.id = overflowing.courseId;
     prismaMocks.monitoringEventFindMany.mockResolvedValue(
       Array.from({ length: 21 }, (_, index) => ({
         id: `overflowing-current-event-${index}`,
@@ -4390,11 +4390,16 @@ describe("course-support claim demand fencing", () => {
         baseSha,
         now,
       }),
-    ).rejects.toThrow("candidate history exceeds the bounded read limit");
+    ).resolves.toMatchObject({ outcome: "ready", incidentCount: 1, candidateHistoryBlockedCount: 1 });
     expect(prismaMocks.monitoringEventFindMany).toHaveBeenCalledWith(
       expect.objectContaining({ take: 41 }),
     );
-    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+    expect(prismaMocks.batchCreate).toHaveBeenCalledOnce();
+    expect(prismaMocks.batchCreate.mock.calls[0][0].data.summary.candidateHistoryBlockedCount).toBe(1);
+    const createdEntries = prismaMocks.batchIncidentCreateMany.mock.calls.flatMap(([input]) => input.data);
+    expect(createdEntries).toHaveLength(1);
+    expect(createdEntries[0].courseId).toBe(control.courseId);
+    expect(createdEntries.some(entry => entry.courseId === overflowing.courseId)).toBe(false);
   });
 
   it("does not count an unscoped current-window marker as current-cycle execution", async () => {
