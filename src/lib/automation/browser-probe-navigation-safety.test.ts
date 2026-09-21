@@ -875,7 +875,7 @@ describe("rendered browser navigation safety", () => {
           return;
         }
         const beacons = route.request().url() === sourceUrl
-          ? `<script>for (const path of ["/j/collect", "/g/collect"]) fetch("https://www.google-analytics.com" + path, {method:"POST", body:"telemetry"}).catch(() => undefined);</script>`
+          ? `<script>for (const url of ["https://www.google-analytics.com/j/collect", "https://www.google-analytics.com/g/collect", "https://www.google.com/ccm/collect", "https://browser-intake-datadoghq.com/api/v2/rum", "https://events.launchdarkly.com/events/bulk/1234567890abcdef12345678"]) fetch(url, {method:"POST", body:"telemetry"}).catch(() => undefined);</script>`
           : "";
         await route.fulfill({ status: 200, contentType: "text/html", body: `<html><title>Target Golf Club</title><body><h1>Target Golf Club</h1><p>100 Main Street, Targetville, MA</p><a href="${bookingUrl}">Book a tee time</a>${beacons}</body></html>` });
       });
@@ -884,7 +884,7 @@ describe("rendered browser navigation safety", () => {
         address: "100 Main Street", city: "Targetville", stateCode: "MA",
         sourceUrl, officialCourseWebsite: null,
       }, { unprojectedSourceCandidate: true });
-      expect(attemptedBeacons).toHaveLength(2);
+      expect(attemptedBeacons).toHaveLength(5);
       expect(servedBeacons).toEqual([]);
       expect(evidence.browserInvestigation.sameOriginPages[0]).toMatchObject({
         interactionBlocked: false, identityStatus: "MATCH", trustedForCourse: true,
@@ -910,6 +910,9 @@ describe("rendered browser navigation safety", () => {
     ["http://www.google-analytics.com/g/collect", "POST", "fetch"],
     ["https://www.google-analytics.com:8443/g/collect", "POST", "fetch"],
     ["https://public-course.example/g/collect", "POST", "fetch"],
+    ["https://browser-intake-datadoghq.com/api/v2/rum/checkout", "POST", "fetch"],
+    ["https://events.launchdarkly.com/events/bulk/1234567890abcdef12345678", "POST", "document"],
+    ["https://www.google.com/checkout", "POST", "fetch"],
   ])("keeps non-telemetry requests restricted: %s %s %s", (url, method, resourceType) => {
     expect(isBlockedBackgroundTelemetryRequest({ url, method, resourceType })).toBe(false);
   });

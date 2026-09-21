@@ -80,6 +80,7 @@ function status() {
     firstDegradedAt: new Date("2026-07-27T10:00:00.000Z"),
     course: {
       name: "Example Public Golf Course",
+      address: "100 Main Street, Exampleville, MA",
       detectedPlatform: "UNKNOWN",
       detectedBookingUrl: "https://course.example/book",
       website: "https://course.example",
@@ -750,6 +751,61 @@ describe("operator course monitoring mutations", () => {
         }),
       },
     );
+  });
+
+  const identityRepair = {
+    reference, statusRevision: 4, incidentCycle: 2, incidentRevision: 7,
+    bookingUrl: "https://example-course.book.teeitup.com/",
+    evidenceUrl: "https://course.example/",
+    note: "Official homepage identifies the course at the exact stored address and links to public tee times.",
+    idempotencyKey: "operator-identity-repair-12345",
+    identityCorrection: {
+      name: "Example Public Golf Course",
+      expectedAddress: "100 Main Street, Exampleville, MA",
+      website: "https://course.example/",
+    },
+  };
+
+  it("corrects a generic identity atomically without declaring monitoring restored", async () => {
+    const current = status();
+    current.course.name = "Golf Course";
+    prismaMocks.courseMonitoringStatus.findFirst.mockResolvedValue(current);
+    const result = await correctOperatorCourseBookingLink(identityRepair, {
+      ...context, source: "OPERATOR_CLI", dispatchSearches: false,
+    });
+    expect(result).toMatchObject({ applied: true, identityCorrected: true, queuedAlertCount: 0 });
+    expect(transactionMocks.course.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "course-1", name: "Golf Course", address: identityRepair.identityCorrection.expectedAddress },
+      data: expect.objectContaining({ name: "Example Public Golf Course", website: "https://course.example/", bookingMetadata: Prisma.DbNull, automationEligibility: "NEEDS_REVIEW", intelligenceVerifiedAt: null }),
+    }));
+    expect(transactionMocks.courseMonitoringStatus.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ state: "AUTO_INVESTIGATING" }),
+    }));
+    expect(transactionMocks.courseSupportIncident.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ cycle: { increment: 1 }, courseNameSnapshot: "Example Public Golf Course" }),
+    }));
+    expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ evidenceUrl: identityRepair.evidenceUrl, audit: expect.objectContaining({ genericIdentityCorrected: true, exactAddressVerified: true }) }),
+    }));
+    expect(schedulerMocks.startSearchSchedule).not.toHaveBeenCalled();
+  });
+
+  it.each(["named-course", "wrong-address", "wrong-origin", "dashboard", "dry-run", "replay"])("fences generic identity correction: %s", async (kind) => {
+    const current = status();
+    current.course.name = kind === "named-course" ? "Different Golf Club" : "Golf Course";
+    if (kind === "wrong-address") current.course.address = "200 Other Street";
+    prismaMocks.courseMonitoringStatus.findFirst.mockResolvedValue(current);
+    if (kind === "replay") prismaMocks.courseMonitoringEvent.findUnique.mockResolvedValue({ courseId: "course-1" });
+    const action = correctOperatorCourseBookingLink({
+      ...identityRepair,
+      evidenceUrl: kind === "wrong-origin" ? "https://other.example/" : identityRepair.evidenceUrl,
+    }, { ...context, source: kind === "dashboard" ? "OPERATOR_DASHBOARD" : "OPERATOR_CLI", apply: kind !== "dry-run" });
+    if (["dry-run", "replay"].includes(kind)) {
+      await expect(action).resolves.toMatchObject({ applied: false });
+    } else {
+      await expect(action).rejects.toThrow("Identity correction requires");
+    }
+    expect(prismaMocks.$transaction).not.toHaveBeenCalled();
   });
 
   it("keeps an active responder's investigation cycle when an operator requests a recheck", async () => {

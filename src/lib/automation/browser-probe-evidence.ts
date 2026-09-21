@@ -810,8 +810,11 @@ export function isBlockedBackgroundTelemetryRequest(input: {
     return (
       url.protocol === "https:" &&
       !url.username && !url.password && !url.port &&
-      ["www.google-analytics.com", "google-analytics.com"].includes(url.hostname) &&
-      ["/collect", "/j/collect", "/g/collect"].includes(url.pathname)
+      ((["www.google-analytics.com", "google-analytics.com"].includes(url.hostname) &&
+        ["/collect", "/j/collect", "/g/collect"].includes(url.pathname)) ||
+       (url.hostname === "www.google.com" && url.pathname === "/ccm/collect") ||
+       (url.hostname === "browser-intake-datadoghq.com" && url.pathname === "/api/v2/rum") ||
+       (url.hostname === "events.launchdarkly.com" && /^\/events\/bulk\/[a-f0-9]{24}$/u.test(url.pathname)))
     );
   } catch {
     return false;

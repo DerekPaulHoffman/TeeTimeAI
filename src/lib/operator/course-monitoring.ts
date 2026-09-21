@@ -237,6 +237,7 @@ export async function correctOperatorCourseBookingLink(
     evidenceUrl: string;
     note: string;
     idempotencyKey: string;
+    identityCorrection?: { name: string; expectedAddress: string; website: string };
   },
   context: OperatorMutationContext,
 ) {
@@ -250,6 +251,11 @@ export async function correctOperatorCourseBookingLink(
       evidenceUrl: z.string().trim().url().max(1000),
       note: safeOperatorNoteSchema,
       idempotencyKey: idempotencyKeySchema,
+      identityCorrection: z.object({
+        name: z.string().trim().min(4).max(200),
+        expectedAddress: z.string().trim().min(5).max(1000),
+        website: z.string().trim().url().max(1000),
+      }).optional(),
     })
     .parse(rawInput);
   const bookingUrl = requireSafeHttpsUrl(input.bookingUrl, "booking link");
@@ -267,11 +273,26 @@ export async function correctOperatorCourseBookingLink(
   const provider = resolveProviderCapability({
     detectedBookingUrl: bookingUrl,
   });
+  const identity = input.identityCorrection;
+  const correctedWebsite = identity
+    ? requireSafeHttpsUrl(identity.website, "official course website")
+    : null;
+  if (identity && !current.replayed && (
+    context.source !== "OPERATOR_CLI" ||
+    !/^golf (?:course|club)$/iu.test(current.status.course.name.trim()) ||
+    /^golf (?:course|club)$/iu.test(identity.name) ||
+    /[\u0000-\u001f\u007f]/u.test(identity.name) ||
+    current.status.course.address !== identity.expectedAddress ||
+    new URL(correctedWebsite!).origin !== new URL(evidenceUrl).origin
+  )) {
+    throw new Error("Identity correction requires an exact-address generic course and same-origin official evidence through the operator CLI.");
+  }
   const preview = {
     action: "correct_booking_link" as const,
     courseRef: current.status.reference,
     providerFamilyKey: provider.providerFamilyKey,
     queuedAlertCount: current.activeSearches.length,
+    ...(identity ? { identityCorrected: true } : {}),
   };
   if (!context.apply || current.replayed) {
     return { ...preview, applied: false, replayed: current.replayed };
@@ -285,6 +306,7 @@ export async function correctOperatorCourseBookingLink(
       const incident = await ensureOperatorIncident(transaction, {
         current,
         now,
+        correctedIdentityName: identity?.name,
         kind: "NEEDS_ADAPTER",
         failureClass: "MISSING_METADATA",
         failureFingerprint: buildProviderFailureFingerprint({
@@ -299,14 +321,18 @@ export async function correctOperatorCourseBookingLink(
           "An operator corrected the official booking link and requested fresh monitoring proof.",
       });
       await transaction.course.update({
-        where: { id: current.status.courseId },
+        where: {
+          id: current.status.courseId,
+          ...(identity ? { name: current.status.course.name, address: identity.expectedAddress } : {}),
+        },
         data: {
+          ...(identity ? { name: identity.name, website: correctedWebsite } : {}),
           detectedBookingUrl: bookingUrl,
           detectedPlatform: provider.detectedPlatform,
           providerFamilyKey: provider.providerFamilyKey,
           // A corrected destination must not keep executing metadata for the
           // prior provider/course (including a sibling on the same provider).
-          ...(bookingUrl !== current.status.course.detectedBookingUrl ||
+          ...(identity || bookingUrl !== current.status.course.detectedBookingUrl ||
           provider.providerFamilyKey !== current.status.course.providerFamilyKey
             ? { bookingMetadata: Prisma.DbNull }
             : {}),
@@ -347,9 +373,10 @@ export async function correctOperatorCourseBookingLink(
           occurredAt: now,
           audit: {
             action: "correct_booking_link",
+            ...(identity ? { genericIdentityCorrected: true, exactAddressVerified: true } : {}),
             providerFamilyKey: provider.providerFamilyKey,
             priorCycle: current.incident?.cycle ?? null,
-            cycle: shouldOpenFreshPlaybookCycleForProviderEvidence({
+            cycle: identity || shouldOpenFreshPlaybookCycleForProviderEvidence({
               status: current.incident?.status ?? "",
               humanReviewReason: current.incident?.humanReviewReason,
             })
@@ -1460,6 +1487,7 @@ async function requireMutationTarget(
       course: {
         select: {
           name: true,
+          address: true,
           detectedPlatform: true,
           detectedBookingUrl: true,
           website: true,
@@ -1636,6 +1664,7 @@ async function ensureOperatorIncident(
     providerFamilyKey: string;
     bookingUrlSnapshot: string;
     message: string;
+    correctedIdentityName?: string;
   },
 ) {
   const currentIncident = input.current.incident;
@@ -1648,11 +1677,12 @@ async function ensureOperatorIncident(
       },
       data: {
         cycle:
-          currentIncident.status === "RESOLVED" ||
+          input.correctedIdentityName || currentIncident.status === "RESOLVED" ||
           shouldOpenFreshPlaybookCycleForProviderEvidence(currentIncident)
             ? { increment: 1 }
             : undefined,
         status: "AUTO_INVESTIGATING",
+        ...(input.correctedIdentityName ? { courseNameSnapshot: input.correctedIdentityName } : {}),
         kind: input.kind,
         failureClass: input.failureClass,
         failureFingerprint: input.failureFingerprint,

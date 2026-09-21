@@ -51,7 +51,14 @@ async function main() {
             ...commonMutationInput(args),
             bookingUrl: requireOption(args, "--booking-url"),
             evidenceUrl: requireOption(args, "--evidence-url"),
-            note: requireOption(args, "--note")
+            note: requireOption(args, "--note"),
+            ...(args.includes("--course-name") ? {
+              identityCorrection: {
+                name: requireOption(args, "--course-name"),
+                expectedAddress: requireOption(args, "--expected-address"),
+                website: requireOption(args, "--official-website"),
+              },
+            } : {}),
           },
           context
         )
