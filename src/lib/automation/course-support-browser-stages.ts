@@ -384,7 +384,7 @@ export async function persistOwnedCourseSupportBrowserPlaybookStages(
             now: currentTime(),
           })
         : null;
-    const missingSourceResearch = Boolean(target.stage === "RENDERED_BROWSER_DISCOVERY" && currentEntry.course &&
+    const missingSourceResearch = Boolean(currentEntry.course &&
       isCourseSupportSourceSearchActionEligible({ workMode: "ADVANCE_DISCOVERY", playbookStage: target.stage,
         incidentProviderFamilyKey: currentEntry.incident.providerFamilyKey ?? "", course: currentEntry.course }));
     if (target.stage === "INDEPENDENT_CONFIRMATION" || missingSourceResearch) {

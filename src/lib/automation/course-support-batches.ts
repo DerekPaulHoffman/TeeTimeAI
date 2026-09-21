@@ -6816,7 +6816,8 @@ function resolveOwnedCourseSupportSourceSearchEntry(input: {
     incident: entry.incident,
     now: input.now,
   });
-  const sourceSearchStage = retainedSourceRecovery
+  const sourceSearchStage = retainedSourceRecovery ||
+    claimedAttempt?.actionPlan?.route.playbookStage === "INDEPENDENT_CONFIRMATION"
     ? "INDEPENDENT_CONFIRMATION" as const
     : "RENDERED_BROWSER_DISCOVERY" as const;
   if (retainedSourceRecovery && (
@@ -7059,7 +7060,8 @@ function appendNoUniqueCourseSupportSourceSearchLadder(input: {
       skipReason: "NO_LOCAL_READER_CAPABILITY",
     },
   ] as const;
-  for (const stage of input.retainedSourceResearch ? [] : skippedStages) {
+  const independentIsCurrent = assessAutomationPlaybook(ledger, input.cycle).nextStage === "INDEPENDENT_CONFIRMATION";
+  for (const stage of input.retainedSourceResearch || independentIsCurrent ? [] : skippedStages) {
     ledger = appendAutomationPlaybookEvent(ledger, {
       cycle: input.cycle,
       stage: stage.stage,
@@ -13654,7 +13656,7 @@ async function closeoutCourseSupportBatchAttempt(
               providerSnapshotFingerprint: entry.sourceResearchHandoff.providerSnapshotFingerprint,
               ...(entry.sourceResearchHandoff.rejectionEvidenceDigest ? { rejectionEvidenceDigest: entry.sourceResearchHandoff.rejectionEvidenceDigest } : {}),
               assignedAction: "SEARCH_FOR_OFFICIAL_SOURCE",
-              nextStage: entry.sourceResearchHandoff.mode === "MISSING_SOURCE_RESEARCH" ? "RENDERED_BROWSER_DISCOVERY" : "INDEPENDENT_CONFIRMATION",
+              nextStage: assessAutomationPlaybook(entry.incident.attemptLedger, entry.cycle).nextStage,
               providerExecution: false,
               preservesAttemptLedger: true,
             },

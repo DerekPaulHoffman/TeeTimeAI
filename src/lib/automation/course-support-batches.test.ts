@@ -20190,6 +20190,17 @@ describe("course-support batch ordinals", () => {
     };
   }
 
+  function independentSourceSearchBatch() {
+    const batch = sourceSearchBatch();
+    batch.incidents[0].incident.attemptLedger = independentReadyAttemptLedger();
+    batch.summary.remediation.playbookStage = "INDEPENDENT_CONFIRMATION";
+    const attempt = batch.summary.remediation.attempts[0];
+    attempt.approach.playbookStage = "INDEPENDENT_CONFIRMATION";
+    attempt.actionPlan.route.playbookStage = "INDEPENDENT_CONFIRMATION";
+    attempt.playbookEventCountAtClaim = (batch.incidents[0].incident.attemptLedger as { events: unknown[] }).events.length;
+    return batch;
+  }
+
   function useRetainedSourceTransaction(batch: ReturnType<typeof retainedSourceSearchBatch>) {
     prismaMocks.batchFindFirst.mockResolvedValue(batch);
     prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
@@ -20530,8 +20541,8 @@ describe("course-support batch ordinals", () => {
     });
   });
 
-  it("persists one candidate as append-only owned evidence without projecting the course", async () => {
-    const batch = sourceSearchBatch();
+  it.each([sourceSearchBatch, independentSourceSearchBatch])("persists one candidate as append-only owned evidence without projecting the course (%s)", async (makeBatch) => {
+    const batch = makeBatch();
     prismaMocks.batchFindFirst.mockResolvedValue(batch);
     const context = await getOwnedCourseSupportSourceSearchContext({
       batchId: "batch-1",
@@ -20633,8 +20644,9 @@ describe("course-support batch ordinals", () => {
     expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
   });
 
-  it("records NO_UNIQUE as the complete safe remaining ladder with real independent confirmation", async () => {
-    const batch = sourceSearchBatch();
+  it.each([sourceSearchBatch, independentSourceSearchBatch])("records NO_UNIQUE as the complete safe remaining ladder with real independent confirmation (%s)", async (makeBatch) => {
+    const batch = makeBatch();
+    const before = structuredClone(batch.incidents[0].incident.attemptLedger) as { events: unknown[] };
     prismaMocks.batchFindFirst.mockResolvedValue(batch);
     const context = await getOwnedCourseSupportSourceSearchContext({
       batchId: "batch-1",
@@ -20676,6 +20688,11 @@ describe("course-support batch ordinals", () => {
       incidentWrite.data.attemptLedger,
       1,
     );
+    expect(incidentWrite.data.attemptLedger.events.slice(0, before.events.length)).toEqual(before.events);
+    if (makeBatch === independentSourceSearchBatch) {
+      expect(incidentWrite.data.attemptLedger.events).toHaveLength(before.events.length + 1);
+      expect(incidentWrite.data.attemptLedger.events.at(-1)).toMatchObject({ providerExecution: false });
+    }
     expect(assessment).toMatchObject({
       conclusion: "UNRESOLVED_EXHAUSTED",
       nextStage: null,

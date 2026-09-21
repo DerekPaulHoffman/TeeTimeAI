@@ -566,7 +566,9 @@ describe("course-support remediation routing", () => {
     });
     expect(buildCourseSupportClaimActionPlan({
       route, course, incidentKind: "NEEDS_ADAPTER", incidentProviderFamilyKey: "SOURCE_MISSING",
-    })).toMatchObject({ primaryAction: "VERIFY_CURRENT_RUNTIME", allowedActions: ["VERIFY_CURRENT_RUNTIME"] });
+    })).toMatchObject(stage === "INDEPENDENT_CONFIRMATION"
+      ? { primaryAction: "SEARCH_FOR_OFFICIAL_SOURCE", allowedActions: ["SEARCH_FOR_OFFICIAL_SOURCE"] }
+      : { primaryAction: "VERIFY_CURRENT_RUNTIME", allowedActions: ["VERIFY_CURRENT_RUNTIME"] });
     if (stage !== "INDEPENDENT_CONFIRMATION") {
       expect(isAssignedDetachedStageProgression({
         remediationDirective: { ...route, strategyAction: route.strategy.action, playbookStage: stage },

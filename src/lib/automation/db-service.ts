@@ -1103,7 +1103,10 @@ async function readOwnedCourseSupportSourceSearchScope(
       actionPlan &&
       (!courseSupportActionPlanAllows(actionPlan, "SEARCH_FOR_OFFICIAL_SOURCE") ||
         actionPlan.route.workMode !== "ADVANCE_DISCOVERY" ||
-        actionPlan.route.playbookStage !== (retainedSourceRecovery ? "INDEPENDENT_CONFIRMATION" : "RENDERED_BROWSER_DISCOVERY"))
+        (retainedSourceRecovery
+          ? actionPlan.route.playbookStage !== "INDEPENDENT_CONFIRMATION"
+          : !["RENDERED_BROWSER_DISCOVERY", "INDEPENDENT_CONFIRMATION"].includes(actionPlan.route.playbookStage ?? "")) ||
+        (actionPlan.route.playbookStage === "INDEPENDENT_CONFIRMATION" && fence.stage !== "INDEPENDENT_CONFIRMATION"))
     ) {
       return null;
     }

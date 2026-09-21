@@ -89,9 +89,9 @@ describe("course-support claimed action plans", () => {
     },
   );
 
-  it("makes exact source search authoritative for a source-free rendered stage", () => {
+  it.each(["RENDERED_BROWSER_DISCOVERY", "INDEPENDENT_CONFIRMATION"] as const)("makes exact source search authoritative for source-free %s", (stage) => {
     const plan = buildCourseSupportClaimActionPlan({
-      route: route(),
+      route: route({ attemptSignature: { workMode: "ADVANCE_DISCOVERY", strategyAction: "DISCOVER_WITH_BROWSER", playbookStage: stage } }),
       incidentKind: "NEEDS_ADAPTER",
       incidentProviderFamilyKey: "SOURCE_MISSING",
       course: course(),

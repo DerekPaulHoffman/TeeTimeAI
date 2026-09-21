@@ -162,15 +162,16 @@ export function isCourseSupportSourceSearchActionEligible(input: {
     input.playbookStage === "INDEPENDENT_CONFIRMATION" &&
     input.retainedSourceIncident
   ) {
-    return getCourseSupportRetainedSourceRecovery({
+    if (getCourseSupportRetainedSourceRecovery({
       course: input.course,
       incident: input.retainedSourceIncident,
       now: input.now,
-    }) !== null;
+    }) !== null) return true;
   }
   return Boolean(
     input.workMode === "ADVANCE_DISCOVERY" &&
-    input.playbookStage === "RENDERED_BROWSER_DISCOVERY" &&
+    (input.playbookStage === "RENDERED_BROWSER_DISCOVERY" ||
+      input.playbookStage === "INDEPENDENT_CONFIRMATION") &&
     input.incidentProviderFamilyKey === SOURCE_MISSING_PROVIDER_FAMILY &&
     input.course.monitoringMode !== "LOCAL_READER_ONLY" &&
     isExactSourceMissingProviderState(input.course),

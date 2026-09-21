@@ -381,15 +381,18 @@ describe("persistOwnedCourseSupportBrowserPlaybookStages", () => {
     now: new Date("2026-07-21T12:00:00.000Z"),
   };
 
-  it.each([[false, false], [true, false], [true, true]])("hands a missing source to research, then accepts only its owned candidate (assigned: %s, candidate: %s)", async (assigned, candidate) => {
+  it.each([
+    ["RENDERED_BROWSER_DISCOVERY", false, false], ["RENDERED_BROWSER_DISCOVERY", true, false], ["RENDERED_BROWSER_DISCOVERY", true, true],
+    ["INDEPENDENT_CONFIRMATION", false, false], ["INDEPENDENT_CONFIRMATION", true, false], ["INDEPENDENT_CONFIRMATION", true, true],
+  ] as const)("hands missing source %s to research, then accepts only its owned candidate (assigned: %s, candidate: %s)", async (stage, assigned, candidate) => {
     const batch = retainedSourceResearchBatch(assigned);
     const entry = batch.incidents[0];
-    entry.incident.attemptLedger = ledger(throughHttpRetry);
+    if (stage === "RENDERED_BROWSER_DISCOVERY") entry.incident.attemptLedger = ledger(throughHttpRetry);
     entry.incident.providerFamilyKey = "SOURCE_MISSING";
     Object.assign(entry.course!, { website: null, detectedBookingUrl: null, detectedPlatform: "UNKNOWN",
       providerFamilyKey: "SOURCE_MISSING", bookingMetadata: null, bookingMethod: "UNKNOWN", bookingAccessMode: "UNKNOWN" });
     const summary = batch.summary as { remediation: { attempts: Array<{ approach: { playbookStage: string }; actionPlan: { route: { playbookStage: string } } }> } };
-    summary.remediation.attempts[0].approach.playbookStage = assigned ? "RENDERED_BROWSER_DISCOVERY" : "OFFICIAL_IDENTITY";
+    summary.remediation.attempts[0].approach.playbookStage = assigned ? stage : "OFFICIAL_IDENTITY";
     summary.remediation.attempts[0].actionPlan.route.playbookStage = summary.remediation.attempts[0].approach.playbookStage;
     const before = structuredClone(entry.incident.attemptLedger);
     const runBrowserProbe = vi.fn().mockResolvedValue({ persistedCount: 1 });

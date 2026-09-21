@@ -3415,6 +3415,7 @@ describe("browser discovery persistence", () => {
   it.each([
     "current rendered assignment",
     "current independent confirmation",
+    "source-free independent assignment",
     "malformed modern plan",
     "disallowed modern plan",
     "incomplete batch membership",
@@ -3443,7 +3444,7 @@ describe("browser discovery persistence", () => {
       incidentId: "modern-source-incident",
       courseId: "modern-source-course",
       cycle: 2,
-      stage: "RENDERED_BROWSER_DISCOVERY" as const,
+      stage: scenario === "source-free independent assignment" ? "INDEPENDENT_CONFIRMATION" as const : "RENDERED_BROWSER_DISCOVERY" as const,
     };
     const incident = {
       id: fence.incidentId,
@@ -3463,6 +3464,18 @@ describe("browser discovery persistence", () => {
       resolution: null,
       updatedAt: fence.deployedAt,
     };
+    if (scenario === "source-free independent assignment") {
+      for (const [stage, readPath, skipReason] of [
+        ["RENDERED_BROWSER_DISCOVERY", "RENDERED_BROWSER", "NO_BROWSER_ROUTE"],
+        ["BROWSER_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER", "NO_RUNNABLE_ADAPTER"],
+        ["LOCAL_READER", "LOCAL_READER", "NO_LOCAL_READER_CAPABILITY"],
+      ] as const) {
+        incident.attemptLedger = appendAutomationPlaybookEvent(incident.attemptLedger, {
+          cycle: fence.cycle, stage, readPath, skipReason, transition: "NOT_APPLICABLE", evidenceKind: "TOOLING",
+          failureFingerprint: `MISSING_SOURCE:${stage}`, runtimeVersion: fence.runtimeVersion, observedAt: fence.deployedAt,
+        });
+      }
+    }
     const course = {
       id: fence.courseId,
       name: "Synthetic Source Golf Course",
@@ -3524,7 +3537,7 @@ describe("browser discovery persistence", () => {
             failureFingerprint: incident.failureFingerprint,
             runtimeVersion: fence.runtimeVersion,
             activeRealSearchCount: 0,
-            playbookEventCountAtClaim: 4,
+            playbookEventCountAtClaim: scenario === "source-free independent assignment" ? 7 : 4,
             reason: "PLAYBOOK_STAGE_PENDING",
             retryBudget: null,
             approach,
@@ -3671,7 +3684,7 @@ describe("browser discovery persistence", () => {
         ? "INDEPENDENT_CONFIRMATION" : fence.stage,
     });
     const shouldAccept = scenario === "current rendered assignment" ||
-      scenario === "current independent confirmation";
+      scenario === "current independent confirmation" || scenario === "source-free independent assignment";
     expect(targets).toHaveLength(shouldAccept ? 1 : 0);
     if (shouldAccept) {
       expect(targets[0]).toMatchObject({
