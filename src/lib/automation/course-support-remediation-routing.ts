@@ -291,6 +291,9 @@ const SOURCE_FREE_DISCOVERY_STAGES = new Set<AutomationPlaybookStage>([
   "OFFICIAL_HTTP_DISCOVERY",
   "HTTP_ADAPTER_RETRY",
   "RENDERED_BROWSER_DISCOVERY",
+  "BROWSER_ADAPTER_RETRY",
+  "LOCAL_READER",
+  "INDEPENDENT_CONFIRMATION",
 ]);
 
 // TenFore's public tee sheet is intentionally not a server-runnable provider:
@@ -494,9 +497,11 @@ function selectActionableRoute(input: {
 }): CourseSupportRemediationRoute {
   // A genuinely source-free course has no provider contract to retry or
   // implement, even when its incident retains a transient failure class from
-  // an earlier observation. Keep only the pre-provider stages through rendered
-  // discovery on unchanged runtime; every later or unrelated stage remains on
-  // the fail-closed implementation route.
+  // an earlier observation. Finish the ordered discovery ladder, including
+  // proving an adapter/reader unavailable when no source was found. Requiring
+  // an unidentified provider implementation strands these later stages.
+  // The verifier still owns applicability, public access and final evidence;
+  // this route never makes a missing source runnable or resets prior stages.
   if (input.sourceFreeProvider) {
     if (
       input.playbookAssessment.nextStage !== null &&

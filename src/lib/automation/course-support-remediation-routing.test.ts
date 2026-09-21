@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { AutomationPlaybookAssessment } from "./course-monitoring-playbook";
+import { buildCourseSupportClaimActionPlan } from "./course-support-action-plan";
 import {
   getCourseSupportRemediationDirective,
   isAssignedDetachedStageProgression,
@@ -511,24 +512,6 @@ describe("course-support remediation routing", () => {
       failureClass: "MISSING_SOURCE" as const,
       nextStage: "OFFICIAL_IDENTITY" as const,
     },
-    {
-      label: "post-render adapter retry",
-      website: null,
-      failureClass: "MISSING_SOURCE" as const,
-      nextStage: "BROWSER_ADAPTER_RETRY" as const,
-    },
-    {
-      label: "transient post-render adapter retry",
-      website: null,
-      failureClass: "NETWORK" as const,
-      nextStage: "BROWSER_ADAPTER_RETRY" as const,
-    },
-    {
-      label: "transient local-reader stage",
-      website: null,
-      failureClass: "NETWORK" as const,
-      nextStage: "LOCAL_READER" as const,
-    },
   ])("keeps $label on the fail-closed implementation route", ({
     website,
     failureClass,
@@ -553,6 +536,48 @@ describe("course-support remediation routing", () => {
       reason: "IMPLEMENTATION_REQUIRED",
       attemptSignature: { playbookStage: nextStage },
     });
+  });
+
+  it.each([
+    ["BROWSER_ADAPTER_RETRY", "MISSING_SOURCE"],
+    ["BROWSER_ADAPTER_RETRY", "NETWORK"],
+    ["LOCAL_READER", "NETWORK"],
+    ["INDEPENDENT_CONFIRMATION", "MISSING_SOURCE"],
+  ] as const)("finishes source-free %s with %s through the owned verifier", (stage, failureClass) => {
+    const course = {
+      ...runnableCourse,
+      detectedPlatform: "UNKNOWN",
+      providerFamilyKey: "SOURCE_MISSING",
+      detectedBookingUrl: null,
+      website: null,
+      bookingMetadata: null,
+      automationEligibility: "NEEDS_REVIEW",
+      failureClass,
+      attemptCount: 17,
+      playbookAssessment: incompletePlaybook(stage),
+    } satisfies CourseSupportRemediationRoutingInput;
+    const route = routeCourseSupportRemediation(course);
+    expect(route).toMatchObject({
+      workMode: "ADVANCE_DISCOVERY",
+      allowUnchangedRuntime: true,
+      requiresImplementationPath: false,
+      retryBudget: null,
+      attemptSignature: { playbookStage: stage },
+    });
+    expect(buildCourseSupportClaimActionPlan({
+      route, course, incidentKind: "NEEDS_ADAPTER", incidentProviderFamilyKey: "SOURCE_MISSING",
+    })).toMatchObject({ primaryAction: "VERIFY_CURRENT_RUNTIME", allowedActions: ["VERIFY_CURRENT_RUNTIME"] });
+    if (stage !== "INDEPENDENT_CONFIRMATION") {
+      expect(isAssignedDetachedStageProgression({
+        remediationDirective: { ...route, strategyAction: route.strategy.action, playbookStage: stage },
+        playbookConclusion: "INCOMPLETE", nextPlaybookStage: stage,
+        nextPlaybookStageStatus: "PENDING", nextPlaybookStageAttemptCount: 0,
+      })).toBe(true);
+    }
+    const exhausted = routeCourseSupportRemediation({
+      ...course, playbookAssessment: { conclusion: "UNRESOLVED_EXHAUSTED", nextStage: null },
+    });
+    expect(exhausted).toMatchObject({ workMode: "WAIT_FOR_MATERIAL_CHANGE", reason: "PLAYBOOK_EXHAUSTED" });
   });
 
   it("advances an available local reader instead of repairing a stale platform snapshot", () => {
