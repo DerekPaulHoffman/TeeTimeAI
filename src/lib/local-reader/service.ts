@@ -1836,6 +1836,75 @@ export async function getFreshLocalReaderObservation(input: {
   };
 }
 
+/**
+ * A sibling reader completion resumes the whole alert. Its already-applied
+ * courses keep their canonical result until their cadence is due; consumption
+ * must not itself authorize another browser read. The contiguous resume chain
+ * is essential: an owner edit, resume or Check now must invalidate this reuse.
+ * This is display/scheduling evidence only, never a new provider observation.
+ */
+export async function getAppliedLocalReaderObservationWithinCadence(input: {
+  searchId: string;
+  courseId: string;
+  scheduleVersion: number;
+  targetDate: string;
+  players: number;
+  bookingUrl: string;
+  cadenceMinutes: number;
+  notBefore?: Date;
+}) {
+  if (![5, 15, 30, 60, 120].includes(input.cadenceMinutes)) return null;
+  const courseKey = getLocalReaderCourseKey(input.bookingUrl);
+  if (!courseKey) return null;
+  const requiredCapability = await resolveRequiredCapability(
+    input.courseId,
+    courseKey,
+  );
+  const now = new Date();
+  const cutoff = new Date(now.getTime() - input.cadenceMinutes * 60_000);
+  const row = await prisma.localReaderJob.findFirst({
+    where: {
+      teeSearchId: input.searchId,
+      courseId: input.courseId,
+      purpose: "ALERT_CHECK",
+      scheduleVersion: { lte: input.scheduleVersion },
+      resumeFromScheduleVersion: input.scheduleVersion - 1,
+      resumeScheduleVersion: input.scheduleVersion,
+      courseKey,
+      targetDate: input.targetDate,
+      players: input.players,
+      status: "COMPLETED",
+      requiredCapabilityKey: requiredCapability.key,
+      requiredParserVersion: requiredCapability.parserVersion,
+      claimedAt: {
+        gt: cutoff,
+        lte: now,
+        ...(input.notBefore ? { gte: input.notBefore } : {}),
+      },
+    },
+    orderBy: [{ claimedAt: "desc" }, { completedAt: "desc" }],
+  });
+  if (
+    !row?.result || !row.completedAt || !row.resultExpiresAt ||
+    row.resultExpiresAt.getTime() !== row.completedAt.getTime()
+  ) return null;
+  const parsed = localReaderResultSchema.safeParse(row.result);
+  if (
+    !parsed.success ||
+    !["AVAILABLE", "NO_AVAILABILITY"].includes(parsed.data.status)
+  ) return null;
+  const observedAt = getPersistedLocalReaderEvidenceAt(
+    parsed.data,
+    row.claimedAt,
+    row.completedAt,
+  );
+  if (
+    !observedAt || observedAt <= cutoff || observedAt > now ||
+    (input.notBefore && observedAt < input.notBefore)
+  ) return null;
+  return { observedAt, slots: buildLocalReaderSlots(input.courseId, parsed.data) };
+}
+
 export async function getExpiredUnconsumedLocalReaderObservationForCanonicalResume(input: {
   searchId: string;
   courseId: string;

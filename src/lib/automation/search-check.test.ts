@@ -114,6 +114,7 @@ const providerExecutionMarkerMocks = vi.hoisted(() => ({
 }));
 
 const localReaderMocks = vi.hoisted(() => ({
+  getAppliedLocalReaderObservationWithinCadence: vi.fn(),
   getExpiredUnconsumedLocalReaderObservationForCanonicalResume: vi.fn(),
   getFreshLocalReaderObservation: vi.fn(),
   getLocalReaderCourseKey: vi.fn(),
@@ -640,6 +641,7 @@ describe("runSearchCheck email cadence", () => {
       },
     );
     localReaderMocks.getFreshLocalReaderObservation.mockResolvedValue(null);
+    localReaderMocks.getAppliedLocalReaderObservationWithinCadence.mockResolvedValue(null);
     localReaderMocks.getExpiredUnconsumedLocalReaderObservationForCanonicalResume.mockResolvedValue(
       null,
     );

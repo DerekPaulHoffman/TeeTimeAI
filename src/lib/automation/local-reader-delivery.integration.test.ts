@@ -239,8 +239,15 @@ function installSql() {
     if (text.includes('WITH scoped AS') && text.includes('FROM "CourseProbe"') && text.includes('failure_episode')) {
       const scoped = rows.courseProbe.filter((row) => row.teeSearchId === values[0] &&
         values.slice(1, -1).includes(row.courseId) && (row.observedAt as Date) >= (values.at(-1) as Date));
-      if (scoped.length > 0) throw new Error("Isolated initial verdict query unexpectedly contains prior probes");
-      return [];
+      return [...new Set(scoped.map(row => row.courseId))].map(courseId => {
+        const history = scoped.filter(row => row.courseId === courseId)
+          .sort((left, right) => Number(right.observedAt) - Number(left.observedAt) || String(right.id).localeCompare(String(left.id)));
+        const latest = history[0];
+        const successIndex = history.findIndex(row => ["MATCH_FOUND", "NO_MATCH"].includes(String(row.outcome)));
+        const failures = successIndex > 0 ? history.slice(0, successIndex) : [];
+        return {courseId, outcome: latest.outcome, observedAt: latest.observedAt,
+          failureEpisodeStartedAt: failures.at(-1)?.observedAt ?? null};
+      });
     }
     if (text.includes('FROM "ProviderRequestLease"') && text.includes('AS "observationStartedAt"') &&
       text.includes('AS "retryUntil"') && text.includes('AND "slot" =') && values.length === 4) {
@@ -311,7 +318,7 @@ beforeEach(() => {
     startTime: "07:00", endTime: "10:00", players: 2, requestedLayoutHoles: null,
     userTimeZone: "America/New_York", additionalEmails: [friend], alertEmail: null,
     statusEmailSnapshot: null, statusEmailSentAt: null, recheckRequestedAt: null,
-    workflowRunId: null
+    workflowRunId: null, cadenceMinutes: 5
   });
   rows.course.push({
     id: "offline-course", name: "Offline public course", address: "Offline fixture",
@@ -356,6 +363,79 @@ afterEach(() => {
 });
 
 describe("completed reader source through ordinary match delivery", () => {
+  it.each(["check-now", "edit", "resume", "pause"])("honors owner %s after applying a reader result", async (action) => {
+    boundary.send.mockResolvedValue({data: {id: "offline-provider-acceptance"}, error: null});
+    await runSearchCheck(lease.searchId, "test", lease);
+    const search = rows.teeSearch[0];
+    search.scheduleVersion = 3;
+    if (action === "pause") search.status = "PAUSED";
+    if (action === "edit") search.players = 4;
+    const result = await runSearchCheck(lease.searchId, "test", {...lease, scheduleVersion: 3});
+    expect(result.outcome).toBe(action === "pause" ? "not_active" : "success");
+    if (action === "pause") {
+      expect(rows.localReaderJob).toHaveLength(1);
+    } else {
+      expect(result.courseResults[0].outcome).toBe("CHECK_PENDING");
+      expect(rows.localReaderJob.filter(job => job.status === "PENDING")).toHaveLength(1);
+    }
+    expect(boundary.send).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([true, false])("waits for the configured cadence after staggered reader completions (matching=%s)", async (matching) => {
+    const search = rows.teeSearch[0];
+    const firstJob = rows.localReaderJob[0];
+    if (!matching) {
+      const slot = object((object(firstJob.result).slots as unknown[])[0]);
+      slot.startsAtLocal = "2026-07-30T18:10:00";
+      slot.timeLabel = "6:10 PM";
+    }
+    const sibling = {...clone(rows.course[0]), id: "sibling-course", name: "Offline sibling course",
+      detectedBookingUrl: "https://fox.tenfore.golf/offline-sibling"};
+    rows.course.push(sibling);
+    rows.courseMonitoringStatus.push({...clone(rows.courseMonitoringStatus[0]), courseId: sibling.id});
+    rows.courseSupportIncident.push({...clone(rows.courseSupportIncident[0]), id: "sibling-incident", courseId: sibling.id});
+    const secondJob = {...clone(firstJob), id: "sibling-job", courseId: sibling.id,
+      courseKey: "tenfore:offline-sibling", bookingUrl: sibling.detectedBookingUrl,
+      scheduleVersion: 2, status: "PENDING", createdAt: now, jobExpiresAt: new Date(now.getTime() + 300_000),
+      claimedAt: null, completedAt: null, resultExpiresAt: null, result: null,
+      resumeFromScheduleVersion: null, resumeScheduleVersion: null};
+    rows.localReaderJob.push(secondJob);
+    boundary.send.mockResolvedValue({data: {id: "offline-provider-acceptance"}, error: null});
+
+    const first = await runSearchCheck(lease.searchId, "test", lease);
+    expect(first.courseResults.map(result => result.outcome)).toEqual([matching ? "MATCH_FOUND" : "NO_MATCH", "CHECK_PENDING"]);
+    expect(firstJob.resultExpiresAt).toEqual(firstJob.completedAt);
+    const firstProbes = clone(rows.courseProbe);
+    const firstMatches = clone(rows.teeTimeMatch);
+
+    vi.setSystemTime(new Date(now.getTime() + 60_000));
+    const siblingObservedAt = new Date();
+    Object.assign(secondJob, {status: "LEASED", claimedAt: siblingObservedAt,
+      leaseToken: "sibling-lease", leaseExpiresAt: new Date(Date.now() + 120_000)});
+    await completeLocalReaderJob({jobId: secondJob.id, leaseToken: "sibling-lease",
+      receivedAt: siblingObservedAt, deviceRequestAt: siblingObservedAt,
+      result: {...clone(object(firstJob.result)), jobId: secondJob.id, courseKey: secondJob.courseKey,
+        pageUrl: secondJob.bookingUrl, observedAt: siblingObservedAt.toISOString()} as never});
+    expect(search.scheduleVersion).toBe(3);
+    Object.assign(search, {checkStatus: "CHECKING", checkLeaseToken: lease.token, checkLeaseExpiresAt: lease.expiresAt});
+    const resumedLease = {...lease, scheduleVersion: 3};
+    const second = await runSearchCheck(lease.searchId, "test", resumedLease);
+    expect(second.courseResults.map(result => result.outcome)).toEqual(Array(2).fill(matching ? "MATCH_FOUND" : "NO_MATCH"));
+    expect(second.supportRetryNeeded).toBe(false);
+    expect(rows.localReaderJob).toHaveLength(2);
+    expect(rows.courseProbe.filter(row => row.courseId === "offline-course")).toEqual(firstProbes);
+    expect(rows.teeTimeMatch.filter(row => row.courseId === "offline-course")).toEqual(firstMatches);
+    expect(rows.courseMonitoringStatus[0].lastSuccessfulAt).toEqual(sourceAt);
+    expect(boundary.send).toHaveBeenCalledTimes(matching ? 4 : 0);
+
+    vi.setSystemTime(new Date(siblingObservedAt.getTime() + 5 * 60_000));
+    const nextCycle = await runSearchCheck(lease.searchId, "test", resumedLease);
+    expect(nextCycle.courseResults.map(result => result.outcome)).toEqual(["CHECK_PENDING", "CHECK_PENDING"]);
+    expect(rows.localReaderJob.filter(row => row.status === "PENDING")).toHaveLength(2);
+    expect(boundary.send).toHaveBeenCalledTimes(matching ? 4 : 0);
+    expect(boundary.forbidden).not.toHaveBeenCalled();
+  });
+
   it.each([null, "DELIVERY_PROVIDER_SOURCE_UNRESOLVED", "STATUS_CONTENT_STALE_REPLACEMENT_PENDING"].flatMap(
     priorRejection => [false, true].map(staleAccess => ({ priorRejection, staleAccess })),
   ))(

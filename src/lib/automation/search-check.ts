@@ -72,6 +72,7 @@ import {
 } from "@/lib/automation/provider-execution-marker";
 import { getAutomationRuntimeVersion } from "@/lib/automation/runtime-version";
 import {
+  getAppliedLocalReaderObservationWithinCadence,
   getExpiredUnconsumedLocalReaderObservationForCanonicalResume,
   getFreshLocalReaderObservation,
   getLocalReaderCourseKey,
@@ -1578,6 +1579,73 @@ async function checkSearch(
         const localReaderResumeOnly = Boolean(
           expiredLocalReaderResumeObservation,
         );
+        if (
+          localReaderShouldRun &&
+          !localReaderObservation &&
+          !playbookRuntime &&
+          !monitoringPreparationFailed &&
+          !monitoringDeferredCourseIds.has(course.id) &&
+          course.monitoringStatus?.state === "HEALTHY" &&
+          !course.monitoringStatus.revalidationRequestedAt
+        ) {
+          const applied = await getAppliedLocalReaderObservationWithinCadence({
+            searchId: search.id,
+            courseId: course.id,
+            scheduleVersion: search.scheduleVersion,
+            targetDate: searchWindow.date,
+            players: search.players,
+            bookingUrl: customerBookingUrl!,
+            cadenceMinutes: search.cadenceMinutes,
+            notBefore: new Date(
+              Math.max(
+                customerEndpointStartedAt.getTime(),
+                localReaderNotBefore?.getTime() ?? 0,
+                course.intelligenceVerifiedAt?.getTime() ?? 0,
+                course.monitoringStatus.lastSuccessfulAt?.getTime() ?? 0,
+                course.monitoringStatus.lastFailureAt?.getTime() ?? 0,
+              ),
+            ),
+          });
+          if (applied) {
+            // Read canonical availability without replaying the source commit,
+            // refreshing observation clocks or creating another reader job.
+            const slots = applied.slots.filter((slot) =>
+              getSafeOfficialBookingUrl(slot.bookingUrl),
+            );
+            const qualifyingStarts = new Set(
+              filterSlotsForSearch(searchWindow, slots).map((slot) =>
+                parseCourseLocalDateTime(slot.startsAt, course.timeZone).getTime(),
+              ),
+            );
+            const matches = (await listAvailableMatchAlerts(search.id)).filter(
+              (match) => match.course.id === course.id &&
+                qualifyingStarts.has(match.startsAt.getTime()),
+            );
+            await maintainSearchCheckLease(lease);
+            courseResults.push({
+              courseId: course.id,
+              courseName: course.name,
+              timeZone: course.timeZone,
+              outcome: matches.length > 0 ? "MATCH_FOUND" : "NO_MATCH",
+              availableMatches: matches.length,
+              bookingUrl: customerBookingUrl,
+              phone: course.bookingPhone ?? course.phone ?? undefined,
+              bookingMethod: course.bookingMethod,
+              bookingAccessMode: course.bookingAccessMode,
+              bookingAccess: getCourseBookingAccess(course),
+              availability: summarizeSearchStatusAvailability(searchWindow, slots),
+              matchingTimes: matches.map((match) => ({
+                matchId: match.id,
+                startsAt: match.startsAt.toISOString(),
+                availableSpots: match.availableSpots,
+                priceCents: match.priceCents ?? undefined,
+                holes: match.holes ?? undefined,
+                isNew: false,
+              })),
+            });
+            return;
+          }
+        }
         const queueFreshReaderAfterSupersededObservation = async () => {
           if (!localReaderObservation?.teeSheet) return;
           await maintainSearchCheckLease(lease);

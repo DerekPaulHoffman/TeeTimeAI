@@ -89,6 +89,7 @@ import {
   claimNextLocalReaderJob,
   completeLocalReaderJob,
   expireOverdueLocalReaderJobs,
+  getAppliedLocalReaderObservationWithinCadence,
   getExpiredUnconsumedLocalReaderObservationForCanonicalResume,
   getFreshLocalReaderObservation,
   getLocalReaderCourseVerification,
@@ -3906,6 +3907,50 @@ describe("local reader job service", () => {
     expect(
       prismaMocks.localReaderJob.findFirst.mock.calls[0]?.[0]?.where,
     ).toHaveProperty("scheduleVersion", { lte: 7 });
+  });
+
+  it.each([5, 15, 30, 60, 120])("retains an applied result only inside its %i-minute cadence and exact resume chain", async (cadenceMinutes) => {
+    const claimedAt = new Date(Date.now() - 60_000);
+    const completedAt = new Date(Date.now() - 30_000);
+    prismaMocks.localReaderJob.findFirst.mockResolvedValue({
+      claimedAt, completedAt, resultExpiresAt: completedAt,
+      result: {jobId: "applied-job", courseKey: "cps:grassyhill.cps.golf", status: "NO_AVAILABILITY",
+        evidenceAnchor: "SERVER_CLAIM", observedAt: claimedAt.toISOString(), pageUrl: bookingUrl,
+        pageTitle: "Tee Times", slots: [], readerVersion: "reader-v1"},
+    });
+    const input = {searchId: "search-1", courseId: "course-1", scheduleVersion: 7,
+      targetDate: "2026-07-25", players: 2, bookingUrl, cadenceMinutes, notBefore: claimedAt};
+    await expect(getAppliedLocalReaderObservationWithinCadence(input)).resolves.toEqual({observedAt: claimedAt, slots: []});
+    expect(prismaMocks.localReaderJob.findFirst).toHaveBeenCalledWith({
+      where: {teeSearchId: "search-1", courseId: "course-1", purpose: "ALERT_CHECK",
+        scheduleVersion: {lte: 7}, resumeFromScheduleVersion: 6, resumeScheduleVersion: 7,
+        courseKey: "cps:grassyhill.cps.golf", targetDate: "2026-07-25", players: 2, status: "COMPLETED",
+        requiredCapabilityKey: "CPS_RENDERED", requiredParserVersion: 1,
+        claimedAt: {gt: new Date(Date.now() - cadenceMinutes * 60_000), lte: new Date(), gte: claimedAt}},
+      orderBy: [{claimedAt: "desc"}, {completedAt: "desc"}],
+    });
+    // No boundary equality: the next scheduled read is due at this instant.
+    vi.setSystemTime(new Date(claimedAt.getTime() + cadenceMinutes * 60_000));
+    await expect(getAppliedLocalReaderObservationWithinCadence(input)).resolves.toBeNull();
+    expect(prismaMocks.localReaderJob.updateMany).not.toHaveBeenCalled();
+  });
+
+  it.each(["unconsumed", "failed", "unanchored", "future", "superseded"])("does not defer new work using %s reader evidence", async (kind) => {
+    const claimedAt = new Date(Date.now() + (kind === "future" ? 60_000 : -60_000));
+    const completedAt = new Date(claimedAt.getTime() + 10_000);
+    prismaMocks.localReaderJob.findFirst.mockResolvedValue({
+      claimedAt, completedAt,
+      resultExpiresAt: new Date(completedAt.getTime() + (kind === "unconsumed" ? 600_000 : 0)),
+      result: {jobId: "applied-job", courseKey: "cps:grassyhill.cps.golf",
+        status: kind === "failed" ? "ACCESS_CHALLENGE" : "NO_AVAILABILITY",
+        ...(kind === "unanchored" ? {} : {evidenceAnchor: "SERVER_CLAIM"}),
+        observedAt: claimedAt.toISOString(), pageUrl: bookingUrl, pageTitle: "Tee Times", slots: [], readerVersion: "reader-v1"},
+    });
+    await expect(getAppliedLocalReaderObservationWithinCadence({
+      searchId: "search-1", courseId: "course-1", scheduleVersion: 7,
+      targetDate: "2026-07-25", players: 2, bookingUrl, cadenceMinutes: 5,
+      ...(kind === "superseded" ? {notBefore: new Date(claimedAt.getTime() + 1)} : {}),
+    })).resolves.toBeNull();
   });
 
   it("returns a fresh access challenge as a terminal reader observation", async () => {
