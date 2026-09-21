@@ -792,11 +792,38 @@ export function buildBrowserNetworkContractFingerprint(input: {
   };
 }
 
+// These requests are still aborted by the browser guard. A blocked analytics
+// beacon is not evidence that reading the public document requires a write.
+export function isBlockedBackgroundTelemetryRequest(input: {
+  url: string;
+  method: string;
+  resourceType: string;
+}) {
+  if (
+    input.method.toUpperCase() !== "POST" ||
+    !["xhr", "fetch", "ping"].includes(input.resourceType)
+  ) {
+    return false;
+  }
+  try {
+    const url = new URL(input.url);
+    return (
+      url.protocol === "https:" &&
+      !url.username && !url.password && !url.port &&
+      ["www.google-analytics.com", "google-analytics.com"].includes(url.hostname) &&
+      ["/collect", "/j/collect", "/g/collect"].includes(url.pathname)
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function isRestrictedBrowserNetworkObservation(input: {
   url: string;
   method: string;
   resourceType: string;
 }) {
+  if (isBlockedBackgroundTelemetryRequest(input)) return false;
   const classification = classifyBrowserNetworkContractRestriction(input);
   return classification.unsafeMethod || classification.unsafeUrlState;
 }

@@ -13,6 +13,7 @@ import {
 } from "../../../scripts/automation/browser-probe-needed-adapters";
 import { buildBrowserDiscovery } from "./browser-discovery";
 import { resolveProviderCapability } from "./provider-capabilities";
+import { isBlockedBackgroundTelemetryRequest } from "./browser-probe-evidence";
 
 function managedProtectionHtml(reference: string, extra = "") {
   return `<html><head><title>Access Denied</title></head><body><h1>Access Denied</h1><p>You don't have permission to access this server.</p><p>Reference #18.${reference}</p><p>https://errors.edgesuite.net/18.${reference}</p>${extra}</body></html>`;
@@ -852,6 +853,65 @@ describe("rendered browser navigation safety", () => {
         "https://target-course.example/",
       ),
     ).toBe(false);
+  });
+
+  it("reads a public source and its booking link while aborting analytics beacons", async () => {
+    const browser = await chromium.launch();
+    const context = await browser.newContext({ serviceWorkers: "block" });
+    try {
+      const page = await context.newPage();
+      const sourceUrl = "https://public-course.example/";
+      const bookingUrl = "https://foreupsoftware.com/index.php/booking/22687/11624";
+      const attemptedBeacons: string[] = [];
+      const servedBeacons: string[] = [];
+      vi.spyOn(page.request, "get").mockResolvedValue({ ok: () => false } as APIResponse);
+      page.on("request", (request) => {
+        if (request.method() === "POST") attemptedBeacons.push(request.url());
+      });
+      await context.route("**/*", async (route) => {
+        if (route.request().method() === "POST") {
+          servedBeacons.push(route.request().url());
+          await route.fulfill({ status: 204, body: "" });
+          return;
+        }
+        const beacons = route.request().url() === sourceUrl
+          ? `<script>for (const path of ["/j/collect", "/g/collect"]) fetch("https://www.google-analytics.com" + path, {method:"POST", body:"telemetry"}).catch(() => undefined);</script>`
+          : "";
+        await route.fulfill({ status: 200, contentType: "text/html", body: `<html><title>Target Golf Club</title><body><h1>Target Golf Club</h1><p>100 Main Street, Targetville, MA</p><a href="${bookingUrl}">Book a tee time</a>${beacons}</body></html>` });
+      });
+      const evidence = await collectBrowserEvidence(page, {
+        courseId: "target-course", courseName: "Target Golf Club",
+        address: "100 Main Street", city: "Targetville", stateCode: "MA",
+        sourceUrl, officialCourseWebsite: null,
+      }, { unprojectedSourceCandidate: true });
+      expect(attemptedBeacons).toHaveLength(2);
+      expect(servedBeacons).toEqual([]);
+      expect(evidence.browserInvestigation.sameOriginPages[0]).toMatchObject({
+        interactionBlocked: false, identityStatus: "MATCH", trustedForCourse: true,
+        localityCorroborated: true,
+      });
+      expect(evidence.browserInvestigation.restrictedNetworkObserved).toBe(false);
+      expect(buildBrowserDiscovery(evidence)).toMatchObject({
+        status: "LEARNED", detectedPlatform: "FOREUP",
+        bookingUrl: `${bookingUrl}#/teetimes`,
+      });
+    } finally {
+      await context.close();
+      await browser.close();
+    }
+  }, 30_000);
+
+  it.each([
+    ["https://www.google-analytics.com.evil.example/g/collect", "POST", "fetch"],
+    ["https://www.google-analytics.com/account/login", "POST", "fetch"],
+    ["https://www.google-analytics.com/g/collect", "POST", "document"],
+    ["https://www.google-analytics.com/g/collect", "DELETE", "fetch"],
+    ["https://user:password@www.google-analytics.com/g/collect", "POST", "fetch"],
+    ["http://www.google-analytics.com/g/collect", "POST", "fetch"],
+    ["https://www.google-analytics.com:8443/g/collect", "POST", "fetch"],
+    ["https://public-course.example/g/collect", "POST", "fetch"],
+  ])("keeps non-telemetry requests restricted: %s %s %s", (url, method, resourceType) => {
+    expect(isBlockedBackgroundTelemetryRequest({ url, method, resourceType })).toBe(false);
   });
 
   it("aborts every non-read request before the destination handler receives it", async () => {

@@ -41,6 +41,7 @@ import {
   buildBrowserWidgetCandidates,
   classifyRenderedOfficialPageCourseIdentity,
   finalizeBrowserInvestigationEvidence,
+  isBlockedBackgroundTelemetryRequest,
   isKnownNonHtmlBrowserDocumentUrl,
   isRestrictedBrowserNetworkObservation,
   isRenderedUnprojectedSourceCandidateLocalityCorroborated,
@@ -1688,7 +1689,13 @@ async function createMainFrameInteractionGuard(
       options.onRestrictedNetworkRequest?.();
     }
     if (!isReadOnlyBrowserRequestMethod(request.method())) {
-      blocked = true;
+      if (!isBlockedBackgroundTelemetryRequest({
+        url: request.url(),
+        method: request.method(),
+        resourceType: request.resourceType(),
+      })) {
+        blocked = true;
+      }
       await route.abort("blockedbyclient").catch(() => undefined);
       return;
     }
