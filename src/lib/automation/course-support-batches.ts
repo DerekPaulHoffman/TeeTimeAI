@@ -12666,8 +12666,12 @@ async function closeoutCourseSupportBatchAttempt(
         ),
         currentFailureBatchIncidentIds: currentDetachedFailureBatchIncidentIds,
         supersededBatchIncidentIds,
+        // A validated source-search handoff transfers the next action to a fresh
+        // claim. Require consumed request evidence below, not the old continuation.
         pendingContinuationBatchIncidentIds:
-          getPendingDetachedContinuationBatchIncidentIds(batch.incidents),
+          getPendingDetachedContinuationBatchIncidentIds(
+            normalizedEntries.filter((entry) => !("sourceResearchHandoff" in entry)),
+          ),
       });
     }
 

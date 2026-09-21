@@ -30190,7 +30190,7 @@ describe("detached verification atomic batch fences", () => {
     expect(JSON.stringify(entry.incident.attemptLedger)).toBe(history);
   });
 
-  it.each([false, true])("durably yields source research without consuming discovery or requesting implementation (missing: %s)", async (missing) => {
+  it.each([[false, false, false], [true, false, false], [true, true, false], [true, true, true]])("yields source research only after consuming detached evidence (missing: %s, independent: %s, unconsumed: %s)", async (missing, independent, unconsumed) => {
     const native = retainedSourceRecoveryFixture().input;
     if (missing) {
       Object.assign(native.course, { website: null, detectedBookingUrl: null, detectedPlatform: "UNKNOWN",
@@ -30198,7 +30198,7 @@ describe("detached verification atomic batch fences", () => {
       Object.assign(native.incident, { providerFamilyKey: "SOURCE_MISSING" });
       const prior = parseAutomationPlaybookLedger(native.incident.attemptLedger)!;
       native.incident.attemptLedger = { ...prior, events: prior.events.filter(event => event.cycle !== native.incident.cycle ||
-        !["RENDERED_BROWSER_DISCOVERY", "BROWSER_ADAPTER_RETRY", "LOCAL_READER", "INDEPENDENT_CONFIRMATION"].includes(event.stage)) };
+        !(independent ? ["INDEPENDENT_CONFIRMATION"] : ["RENDERED_BROWSER_DISCOVERY", "BROWSER_ADAPTER_RETRY", "LOCAL_READER", "INDEPENDENT_CONFIRMATION"]).includes(event.stage)) };
     }
     const batch = closeoutBatch("PENDING");
     const entry = batch.incidents[0];
@@ -30221,10 +30221,23 @@ describe("detached verification atomic batch fences", () => {
     prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
     prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
     prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    const continuation = zeroExecutionContinuation(new Date(native.now!.getTime() + 60_000));
+    Object.assign(entry, { result: "RETRY_SCHEDULED", proofSnapshot: continuation.proof });
+    prismaMocks.verificationRequestFindMany.mockResolvedValue([continuation.request]);
+    prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 1 });
+    verificationMocks.getCurrentCourseSupportVerificationFailure.mockResolvedValue(continuation.failure);
     prismaMocks.transaction.mockImplementation(async (worker: (tx: typeof monitoringTransactionClient) => Promise<unknown>) => worker(monitoringTransactionClient));
     const owner = { batchId: "batch-1", leaseToken: "lease-1", ownerThreadId: "owner-thread" };
+    if (unconsumed) {
+      Object.assign(entry, { proofSnapshot: { ...continuation.proof, observedAt: new Date(observedAt.getTime() - 1_000).toISOString() } });
+      await expect(closeoutCourseSupportBatch({ ...owner, verificationWatchMode: "WATCH_SETTLED", now: native.now }))
+        .rejects.toMatchObject({ reason: "DETACHED_FAILURE_UNCONSUMED" });
+      expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+      return;
+    }
     const runBrowserProbe = vi.fn();
     const watched = await runCourseSupportVerificationWatch({
+      sleep: async () => {},
       pass: async () => ({
         browserStages: await persistOwnedCourseSupportBrowserPlaybookStages({ ...owner, now: native.now }, {
           loadBatch: vi.fn().mockResolvedValue({ ...batch, incidents: [{ ...entry, incident: { ...entry.incident, id: entry.incidentId } }] }),
@@ -30245,9 +30258,9 @@ describe("detached verification atomic batch fences", () => {
       activeBatchId: null, status: "AUTO_INVESTIGATING", nextAttemptAt: new Date(native.now!.getTime() + 60_000),
     }) }));
     const handoff = prismaMocks.monitoringEventCreateMany.mock.calls.flatMap(([write]) => write.data).find((event) => event.audit?.action === (missing ? "MISSING_SOURCE_RESEARCH_HANDOFF" : "RETAINED_SOURCE_RESEARCH_HANDOFF"));
-    expect(handoff).toMatchObject({ audit: { incidentCycle: 2, assignedAction: "SEARCH_FOR_OFFICIAL_SOURCE", nextStage: missing ? "RENDERED_BROWSER_DISCOVERY" : "INDEPENDENT_CONFIRMATION", providerExecution: false, preservesAttemptLedger: true } });
+    expect(handoff).toMatchObject({ audit: { incidentCycle: 2, assignedAction: "SEARCH_FOR_OFFICIAL_SOURCE", nextStage: missing && !independent ? "RENDERED_BROWSER_DISCOVERY" : "INDEPENDENT_CONFIRMATION", providerExecution: false, preservesAttemptLedger: true } });
     expect(entry.incident.attemptLedger).toEqual(before);
-    expect(assessAutomationPlaybook(before, 2).nextStage).toBe(missing ? "RENDERED_BROWSER_DISCOVERY" : "INDEPENDENT_CONFIRMATION");
+    expect(assessAutomationPlaybook(before, 2).nextStage).toBe(missing && !independent ? "RENDERED_BROWSER_DISCOVERY" : "INDEPENDENT_CONFIRMATION");
     const nextRoute = routeCourseSupportRemediation({ ...native.course, failureClass: "MISSING_SOURCE", attemptCount: 0,
       discoveryAttempt: "HTTP_INCONCLUSIVE", playbookAssessment: assessAutomationPlaybook(before, 2) });
     expect(buildCourseSupportClaimActionPlan({ route: nextRoute, incidentKind: "NEEDS_ADAPTER",
