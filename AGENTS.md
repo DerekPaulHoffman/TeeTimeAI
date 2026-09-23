@@ -2,6 +2,11 @@
 
 This file is the operating contract for Codex and other coding agents working in this repo.
 
+## Model Preference
+
+- When model choice is available, prefer GPT-6 Astra for inspecting websites and visually assessing browser state.
+- Prefer GPT-6 Sol for code implementation, debugging, tests, and repository changes.
+
 ## Installed Local Reader
 
 - The user's Chrome extension is **Tee Time Spot Local Reader**, loaded unpacked from `C:\dev\TeeTimeAI\tools\local-chrome-reader`.
