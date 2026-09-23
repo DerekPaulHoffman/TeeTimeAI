@@ -4022,6 +4022,45 @@ describe("buildBrowserDiscovery", () => {
     });
   });
 
+  it("classifies an official course's no-tee-times statement without first-come wording", () => {
+    const sourceUrl = "https://riverlakesgolfing.com/";
+    const discovery = buildBrowserDiscovery({
+      courseId: "river-lakes",
+      courseName: "River Lakes Golf Course",
+      sourceUrl,
+      finalUrl: sourceUrl,
+      officialCourseWebsite: sourceUrl,
+      observedUrls: [sourceUrl],
+      visibleText:
+        "River Lakes Golf Course. WE DON'T TAKE TEE TIMES. Golf Course in Columbia, IL. Come enjoy our family-owned golf course."
+    });
+
+    expect(discovery).toMatchObject({
+      status: "VERIFIED",
+      bookingMethod: "WALK_IN",
+      automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      evidence: { learnedFrom: "official-no-tee-times-access" }
+    });
+  });
+
+  it.each([
+    "Target Golf Course. South Course: We don't take tee times.",
+    "Target Golf Course. We don't take tee times. Book Target Golf Course tee times online now."
+  ])("does not borrow a sibling's no-tee-times statement or override online booking: %s", (visibleText) => {
+    const sourceUrl = "https://golf.example/";
+    const discovery = buildBrowserDiscovery({
+      courseId: "target-no-tee-times",
+      courseName: "Target Golf Course",
+      sourceUrl,
+      finalUrl: sourceUrl,
+      officialCourseWebsite: sourceUrl,
+      observedUrls: [sourceUrl],
+      visibleText
+    });
+    expect(discovery.bookingMethod).not.toBe("WALK_IN");
+  });
+
   it("classifies a course-first official contact page with no tee times as walk-in", () => {
     const discovery = buildBrowserDiscovery({
       courseId: "twin-lakes",

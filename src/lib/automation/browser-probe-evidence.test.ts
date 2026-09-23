@@ -943,6 +943,62 @@ describe("browser probe evidence pipeline", () => {
     expect(JSON.stringify(planned)).not.toContain(".pdf");
   });
 
+  it("unwraps only a trusted official Google Sites booking CTA to a public provider landing", () => {
+    const officialPageUrl = "https://golf.example/book-tee-time";
+    const wrapped = "https://www.google.com/url?q=https%3A%2F%2Fforeupsoftware.com%2Findex.php%2Fbooking%2F19021%23%2Flogin&sa=D&sntz=1";
+    const plan = (sourceTrustedForCourse: boolean, candidates: Array<{ url: string; label: string }>) =>
+      planBrowserInvestigationLinks({
+        pageUrl: officialPageUrl,
+        officialPageUrl,
+        courseName: "Bridges Golf Course",
+        sourceTrustedForCourse,
+        candidates,
+      });
+
+    expect(plan(true, [{ url: wrapped, label: "Book Tee Time" }]).bookingDestinations)
+      .toEqual([expect.objectContaining({
+        url: "https://foreupsoftware.com/index.php/booking/19021#/teetimes",
+        purpose: "BOOKING",
+      })]);
+    expect(plan(false, [{ url: wrapped, label: "Book Tee Time" }]).bookingDestinations)
+      .toEqual([]);
+    expect(plan(true, [
+      { url: "https://www.google.com/search?q=tee+times", label: "Book Tee Time" },
+      { url: "https://www.google.com/url?q=https%3A%2F%2Fexample.com%2Flogin", label: "Book Tee Time" },
+    ]).bookingDestinations).toEqual([]);
+    expect(plan(true, [{
+      url: "https://foreupsoftware.com/index.php/booking/19021/792#/teetimes",
+      label: "Book Tee Time",
+    }]).bookingDestinations[0]?.url).toBe(
+      "https://foreupsoftware.com/index.php/booking/19021/792#/teetimes"
+    );
+  });
+
+  it("trusts a shared official site only when the target course name and address occur together", () => {
+    const course = {
+      courseName: "Columbia Bridges",
+      address: "1655 Columbia Bridges Road",
+      city: "Columbia",
+      stateCode: "IL",
+    };
+    const pageUrl = "https://www.columbiagolfclub.net/";
+    const page = (visibleText: string) => prepareBrowserPageEvidence({
+      ...emptyPage,
+      identityCandidates: ["Columbia Golf Club"],
+      visibleText,
+    });
+
+    expect(classifyRenderedOfficialPageCourseIdentity(pageUrl, page(
+      "Columbia Golf Club: 125 2770 N, Columbia, IL 62236. Columbia Bridges: 1655 Columbia Bridges Rd, Columbia, IL 62236."
+    ), course)).toBe("MATCH");
+    expect(classifyRenderedOfficialPageCourseIdentity(pageUrl, page(
+      "Columbia Bridges. Columbia Golf Club: 125 2770 N, Columbia, IL 62236."
+    ), course)).not.toBe("MATCH");
+    expect(classifyRenderedOfficialPageCourseIdentity(pageUrl, page(
+      "Columbia Golf Club: 125 2770 N, Columbia, IL 62236. Another course: 1655 Columbia Bridges Rd, Columbia, IL 62236."
+    ), course)).not.toBe("MATCH");
+  });
+
   it("requires locality corroboration before a rendered identity can match", () => {
     const pageWithoutLocality = prepareBrowserPageEvidence({
       ...emptyPage,

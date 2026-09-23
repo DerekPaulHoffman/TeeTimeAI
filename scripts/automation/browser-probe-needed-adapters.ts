@@ -79,7 +79,7 @@ import {
   type CourseSupportBrowserPersistenceFence,
   type CourseSupportBrowserPersistenceGuard,
 } from "@/lib/automation/course-support-browser-stages";
-import { resolveProviderCapability } from "@/lib/automation/provider-capabilities";
+import { isProviderPublicBookingLandingUrl, resolveProviderCapability } from "@/lib/automation/provider-capabilities";
 import { isCorroboratedOfficialSourcePage, normalizeOfficialSourceUrl } from "@/lib/local-reader/official-source-contracts";
 import { getOwnedOfficialSourceObservation } from "@/lib/local-reader/official-source-jobs";
 import { discoverFromOfficialSource } from "@/lib/local-reader/official-source-discovery";
@@ -2157,7 +2157,9 @@ async function createAdditionalInvestigationPage(rootPage: Page) {
 function normalizeSafeBrowserVisitUrl(value: string, officialPageUrl: string) {
   try {
     const url = new URL(value);
-    url.hash = "";
+    if (!isProviderPublicBookingLandingUrl(url)) {
+      url.hash = "";
+    }
     if (isKnownNonHtmlBrowserDocumentUrl(url.toString())) {
       return null;
     }

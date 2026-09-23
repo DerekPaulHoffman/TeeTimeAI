@@ -3219,7 +3219,7 @@ function learnWalkInClassification(
     authoritativeVisibleText ?? ""
   );
   const noReservationMatch =
-    /(?:\btee times?\s+(?:are\s+)?not\s+(?:nec{1,2}essary|required)\b|\bno\s+tee\s+time(?:s|\s+reservations?)\s+(?:are\s+)?(?:needed|nec{1,2}essary|required)\b|\b(?:do|does)\s+not\s+(?:take|accept)\s+tee times?\b)/i.exec(
+    /(?:\btee times?\s+(?:are\s+)?not\s+(?:nec{1,2}essary|required)\b|\bno\s+tee\s+time(?:s|\s+reservations?)\s+(?:are\s+)?(?:needed|nec{1,2}essary|required)\b|\b(?:(?:do|does)\s+not|don't|doesn't)\s+(?:take|accept)\s+tee times?\b)/i.exec(
       visibleText
     );
   if (!noReservationMatch && !noTeeTimeEvidence && !dayScopedNoTeeTimeEvidence) {
@@ -3350,6 +3350,13 @@ function learnWalkInClassification(
     /\bno\s+tee\s+times?(?:\s+reservations?)?\s+(?:are\s+)?(?:needed|nec{1,2}essary|required)\b/i.test(
       statement
     );
+  const explicitlyNoTeeTimesTakenOnOfficialSource =
+    sourceIsOfficialCourseWebsite &&
+    /\b(?:do\s+not|does\s+not|don't|doesn't)\s+(?:take|accept)\s+tee times?\b/i.test(
+      statement
+    ) &&
+    ![...statement.matchAll(/\b([A-Z][\p{L}\p{N}'’&-]*(?:\s+[A-Z][\p{L}\p{N}'’&-]*){0,4}\s+(?:Course|Club))\s*:/gu)]
+      .some((match) => !isLikelyTargetCourseAlias(match[1] ?? "", evidence.courseName));
   const scopedToNonCourseFacility =
     /\b(?:driving|practice)\s+(?:range|facility|stalls?)\b/i.test(statement);
   const contradictsWalkInOnly =
@@ -3371,7 +3378,8 @@ function learnWalkInClassification(
         courseScopedStatementContext,
         evidence.courseName
       )) ||
-    (!explicitlyFirstCome && !explicitlyNoTeeTimesNeededOnOfficialSource) ||
+    (!explicitlyFirstCome && !explicitlyNoTeeTimesNeededOnOfficialSource &&
+      !explicitlyNoTeeTimesTakenOnOfficialSource) ||
     scopedToNonCourseFacility ||
     contradictsWalkInOnly
   ) {
@@ -3396,7 +3404,9 @@ function learnWalkInClassification(
   return buildWalkInDiscovery(evidence, manualEvidence, {
     policyNotes: explicitlyFirstCome
       ? "The course's official site says tee times are not required and play is first-come, first-served. Tee Time Spot must direct golfers to the official course information instead of attempting automated retrieval."
-      : "The course's official site says tee times are not needed. Tee Time Spot must direct golfers to the official course information instead of attempting automated retrieval.",
+      : explicitlyNoTeeTimesTakenOnOfficialSource
+        ? "The course's official site says it does not take tee times. Tee Time Spot must direct golfers to the official course information instead of attempting automated retrieval."
+        : "The course's official site says tee times are not needed. Tee Time Spot must direct golfers to the official course information instead of attempting automated retrieval.",
     learnedFrom: explicitlyFirstCome
       ? "official-walk-in-access"
       : "official-no-tee-times-access"

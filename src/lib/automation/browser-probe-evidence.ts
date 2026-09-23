@@ -6,6 +6,7 @@ import {
   haveSamePublicWebsiteOrigin,
   isEvidenceOnlyOfficialBookingAccountLink,
   isLegacyProphetPublicBookingLandingUrl,
+  isKnownPublicSearchSurfaceUrl,
   isSafeManualEvidenceUrl,
   prioritizeBrowserDiscoveryLinks,
   type BrowserAccessBarrier,
@@ -656,7 +657,10 @@ export function planBrowserInvestigationLinks(input: {
     let url: URL;
     try {
       url = new URL(candidate.url, input.pageUrl);
-      url.hash = "";
+      url = resolveOfficialBookingRedirect(url, candidate.label) ?? url;
+      if (!isProviderPublicBookingLandingUrl(url)) {
+        url.hash = "";
+      }
     } catch {
       return [];
     }
@@ -664,6 +668,7 @@ export function planBrowserInvestigationLinks(input: {
     if (
       seen.has(normalizedUrl) ||
       !isSafeManualEvidenceUrl(url) ||
+      isKnownPublicSearchSurfaceUrl(url) ||
       isKnownNonHtmlBrowserDocumentUrl(normalizedUrl) ||
       isEvidenceOnlyOfficialBookingAccountLink(
         { url: normalizedUrl, label: candidate.label },
@@ -737,6 +742,50 @@ export function planBrowserInvestigationLinks(input: {
       .filter((candidate) => candidate.link.purpose === "BOOKING")
       .map(({ link }) => link),
   };
+}
+
+function resolveOfficialBookingRedirect(url: URL, label: string): URL | null {
+  if (
+    url.protocol !== "https:" ||
+    url.hostname !== "www.google.com" ||
+    url.pathname !== "/url" ||
+    url.hash ||
+    !/\b(?:book|reserve|reservation|tee\s*times?)\b/iu.test(label) ||
+    url.searchParams.getAll("q").length !== 1 ||
+    [...url.searchParams.keys()].some((key) =>
+      !["q", "sa", "sntz", "usg"].includes(key)
+    )
+  ) {
+    return null;
+  }
+  const target = url.searchParams.get("q");
+  if (!target || target.length > 2_048) {
+    return null;
+  }
+  try {
+    const provider = new URL(target);
+    if (provider.protocol !== "https:" || provider.username || provider.password || provider.port) {
+      return null;
+    }
+    if (isSafeManualEvidenceUrl(provider) && isProviderPublicBookingLandingUrl(provider)) {
+      return provider;
+    }
+    // A first-party Google Sites CTA may point at ForeUp's login route.
+    // Visit only ForeUp's known public tee-time route, never the login.
+    if (
+      /^(?:www\.)?foreupsoftware\.com$/iu.test(provider.hostname) &&
+      provider.hash.toLocaleLowerCase("en-US") === "#/login" &&
+      !provider.search
+    ) {
+      provider.hash = "#/teetimes";
+      return isSafeManualEvidenceUrl(provider) && isProviderPublicBookingLandingUrl(provider)
+        ? provider
+        : null;
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 export function buildBrowserNetworkContractFingerprint(input: {
@@ -2003,11 +2052,28 @@ export function classifyRenderedOfficialPageCourseIdentity(
         : ("ABSENT" as const);
     },
   );
-  if (identityStatuses.includes("CONFLICT")) {
+  const targetNameAndAddressTogether = Boolean(
+    course.address?.trim() &&
+    course.city?.trim() &&
+    course.stateCode?.trim() &&
+    hasRenderedTargetNameAndAddressTogether(evidence.visibleText, course)
+  );
+  if (identityStatuses.includes("CONFLICT") && !(
+    targetNameAndAddressTogether &&
+    identityStatuses.every((status, index) =>
+      status !== "CONFLICT" ||
+      isRenderedSharedOfficialHostIdentity(
+        evidence.identityCandidates?.[index] ?? "", pageUrl,
+      )
+    )
+  )) {
     return "CONFLICT";
   }
   if (identityStatuses.includes("MATCH")) {
     return permitIdentityMatch ? "MATCH" : "UNKNOWN";
+  }
+  if (targetNameAndAddressTogether) {
+    return "MATCH";
   }
   try {
     const page = new URL(pageUrl);
@@ -2028,6 +2094,45 @@ export function classifyRenderedOfficialPageCourseIdentity(
   } catch {
     return "UNKNOWN";
   }
+}
+
+function isRenderedSharedOfficialHostIdentity(identity: string, pageUrl: string) {
+  try {
+    const hostLabel = new URL(pageUrl).hostname
+      .toLocaleLowerCase("en-US")
+      .replace(/^www\./u, "")
+      .split(".")[0]
+      .replace(/[^a-z0-9]/gu, "");
+    const identityLabel = identity.toLocaleLowerCase("en-US")
+      .replace(/[^a-z0-9]/gu, "");
+    return Boolean(hostLabel.length >= 8 && hostLabel === identityLabel);
+  } catch {
+    return false;
+  }
+}
+
+function hasRenderedTargetNameAndAddressTogether(
+  visibleText: string,
+  course: { courseName: string } & BrowserCourseIdentityContext,
+) {
+  const name = course.courseName.trim();
+  if (!name) {
+    return false;
+  }
+  const text = visibleText.toLocaleLowerCase("en-US");
+  const target = name.toLocaleLowerCase("en-US");
+  let start = text.indexOf(target);
+  while (start >= 0) {
+    const section = visibleText.slice(start, start + 180);
+    if (isRenderedUnprojectedSourceCandidateLocalityCorroborated(
+      { visibleText: section, identityCandidates: [], localityCandidates: [] },
+      course,
+    )) {
+      return true;
+    }
+    start = text.indexOf(target, start + target.length);
+  }
+  return false;
 }
 
 /**
