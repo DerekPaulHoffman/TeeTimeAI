@@ -17,6 +17,7 @@ import {
   isRestrictedBrowserNetworkObservation,
   isRelevantBrowserAccessBarrierUrl,
   isRenderedUnprojectedSourceCandidateLocalityCorroborated,
+  resolveRenderedGenericSourceCourseName,
   planBrowserInvestigationLinks,
   prepareBrowserPageEvidence,
   sanitizeBrowserAuditUrl,
@@ -43,6 +44,69 @@ const emptyPage: RawBrowserPageEvidence = {
 };
 
 describe("browser probe evidence pipeline", () => {
+  it("recovers a generic course name only from a public course page with the exact address", () => {
+    const url = "https://arlingtongreens.example/golf";
+    const course = {
+      courseName: "Golf Course",
+      address: "100 Fairway Lane",
+      city: "Mesa",
+      stateCode: "AZ",
+      googlePlaceIdPresent: true,
+    };
+    const page = prepareBrowserPageEvidence({
+      ...emptyPage,
+      identityCandidates: [
+        "Arlington Greens Golf Course | Tee Times",
+        "Arlington Greens Golf Course",
+      ],
+      localityCandidates: ["100 Fairway Ln, Mesa, AZ 85201"],
+      visibleText: "Arlington Greens Golf Course offers public tee times.",
+    });
+    expect(resolveRenderedGenericSourceCourseName(url, page, course))
+      .toBe("Arlington Greens Golf Course");
+    for (const changed of [
+      { course: { ...course, address: "900 Fairway Lane" }, page },
+      { course: { ...course, city: "Phoenix" }, page },
+      { course, page: { ...page, identityCandidates: [
+        "Arlington Greens Golf Course", "Other Fairway Golf Course",
+      ] } },
+      { course, page: { ...page, accessControlDetected: true } },
+      { course, page: { ...page, localityCandidates: [
+        "100 Fairway Lane", "Mesa, AZ",
+      ] } },
+    ]) {
+      expect(resolveRenderedGenericSourceCourseName(url, changed.page, changed.course))
+        .toBeNull();
+    }
+    expect(resolveRenderedGenericSourceCourseName(
+      "https://unrelated.example/golf", page, course,
+    )).toBeNull();
+
+    const observedAt = new Date("2026-09-23T12:00:00.000Z");
+    const evidence = finalizeBrowserInvestigationEvidence({
+      course: { courseId: "generic-course", sourceUrl: url,
+        officialCourseWebsite: url, ...course },
+      mode: "INDEPENDENT", unprojectedSourceCandidate: true,
+      auditContext: { incidentCycle: 2, runtimeVersion: "a".repeat(40), observedAt },
+      providerRequestObserved: true,
+      pageVisits: [{ requestedUrl: url, finalUrl: url, label: "Golf Course",
+        depth: 0, parentUrl: null, requiresDirectIdentityMatch: true,
+        interactionBlocked: false, evidence: page }],
+      bookingDestinations: [],
+    });
+    expect(evidence).toMatchObject({
+      courseName: "Arlington Greens Golf Course",
+      sourceCandidateIdentityVerified: true,
+      officialPage: { courseName: "Arlington Greens Golf Course" },
+      browserInvestigation: { identityAuthority: {
+        resolvedGenericCourseName: "Arlington Greens Golf Course",
+        courseIdentityFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      }, sameOriginPages: [expect.objectContaining({
+        identityStatus: "MATCH", trustedForCourse: true,
+      })] },
+    });
+  });
+
   it("recognizes Copper Creek's observed name and locality decoration through discovery", async () => {
     const sourceUrl = "https://golfcoppercreek.com/";
     const bookingUrl = "https://chronogolf.com/club/3286";

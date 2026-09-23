@@ -22,6 +22,8 @@ import { prisma } from "@/lib/prisma";
 import {
   haveCompatibleCourseNames,
   haveCompatibleOfficialPageCourseNames,
+  isExplicitCourseIdentityName,
+  isGenericCourseName,
 } from "@/lib/places/course-identity";
 import { markCompletedLocalReaderProviderObservationConsumedInTransaction } from "@/lib/local-reader/service";
 import { recordCourseBookingFacts } from "@/lib/pricing/course-booking-facts";
@@ -60,7 +62,10 @@ import {
 import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
 import { assessAutomationPlaybook, parseAutomationPlaybookLedger } from "./course-monitoring-playbook";
 import { getCourseSupportRetainedSourceRecovery } from "./course-support-retained-source-recovery";
-import { sanitizeBrowserAuditUrl } from "./browser-probe-evidence";
+import {
+  fingerprintBrowserSourceCourseIdentity,
+  sanitizeBrowserAuditUrl,
+} from "./browser-probe-evidence";
 import {
   courseSupportActionPlanAllows,
   type CourseSupportClaimActionPlan,
@@ -1846,6 +1851,13 @@ function hasDirectOwnedReplacementSourceProof(
   fence: CourseSupportBrowserPersistenceFence,
   candidateUrl: string,
   observedAt: Date,
+  course: {
+    name: string;
+    address: string | null;
+    city: string | null;
+    stateCode: string | null;
+    googlePlaceId: string | null;
+  },
 ) {
   const browser = asProviderExecutionSummary(asProviderExecutionSummary(input.evidence).browserInvestigation);
   const authority = asProviderExecutionSummary(browser.identityAuthority);
@@ -1861,11 +1873,33 @@ function hasDirectOwnedReplacementSourceProof(
       authority.localityEvidencePresent !== true ||
       retained.sourceUrl !== sanitizeBrowserAuditUrl(candidateUrl) ||
       retained.officialWebsite !== sanitizeBrowserAuditUrl(candidateUrl) || retained.bookingUrl !== null ||
-      !Array.isArray(browser.sameOriginPages)) return false;
+      !Array.isArray(browser.sameOriginPages)) return null;
   const roots = browser.sameOriginPages.map(asProviderExecutionSummary).filter((page) => page.depth === 0);
-  return roots.some((page) => page.requestedUrl === sanitizeBrowserAuditUrl(candidateUrl) &&
+  if (!roots.some((page) => page.requestedUrl === sanitizeBrowserAuditUrl(candidateUrl) &&
     page.finalUrl === sanitizeBrowserAuditUrl(input.sourceUrl) && page.identityStatus === "MATCH" &&
-    page.localityCorroborated === true && page.trustedForCourse === true && page.interactionBlocked === false);
+    page.localityCorroborated === true && page.trustedForCourse === true && page.interactionBlocked === false)) {
+    return null;
+  }
+  if (!isGenericCourseName(course.name)) {
+    return authority.resolvedGenericCourseName === undefined
+      ? { resolvedCourseName: null }
+      : null;
+  }
+  const resolvedCourseName = authority.resolvedGenericCourseName;
+  if (typeof resolvedCourseName !== "string" ||
+      resolvedCourseName.length > 200 ||
+      isGenericCourseName(resolvedCourseName) ||
+      !isExplicitCourseIdentityName(resolvedCourseName) ||
+      authority.courseIdentityFingerprint !== fingerprintBrowserSourceCourseIdentity({
+        courseName: course.name,
+        address: course.address,
+        city: course.city,
+        stateCode: course.stateCode,
+        googlePlaceIdPresent: Boolean(course.googlePlaceId),
+      })) {
+    return null;
+  }
+  return { resolvedCourseName };
 }
 
 export async function recordAndApplyOwnedBrowserDiscoveryToCourse(
@@ -1972,21 +2006,27 @@ export async function recordAndApplyOwnedBrowserDiscoveryToCourse(
             };
           }
 
-          const retainedCandidateObservation = Boolean(
-            (preProjectionCourse.website || preProjectionCourse.detectedBookingUrl) &&
-            asProviderExecutionSummary(asProviderExecutionSummary(persistenceAudit).identityAuthority).source === "UNPROJECTED_OWNER_SOURCE_CANDIDATE",
-          );
+          const sourceCandidateObservation =
+            asProviderExecutionSummary(asProviderExecutionSummary(persistenceAudit).identityAuthority)
+              .source === "UNPROJECTED_OWNER_SOURCE_CANDIDATE";
           const sourceCandidate =
-            retainedCandidateObservation && persistenceFence.stage === "INDEPENDENT_CONFIRMATION"
+            sourceCandidateObservation && persistenceFence.stage === "INDEPENDENT_CONFIRMATION"
               ? await getOwnedCourseSupportSourceSearchCandidate(persistenceFence, ownedTransaction)
               : null;
-          const recoveredSourceWebsite = sourceCandidate?.retainedSourceRecovery &&
-            sourceCandidate.candidateUrl &&
-            !hasIndependentStrongBookingWindow(preProjectionCourse) &&
-            hasDirectOwnedReplacementSourceProof(projectionInput, persistenceFence, sourceCandidate.candidateUrl, observedAt)
-              ? projectionInput.sourceUrl : undefined;
+          const sourceProof = sourceCandidate?.candidateUrl &&
+            ((preProjectionCourse.website || preProjectionCourse.detectedBookingUrl)
+              ? Boolean(sourceCandidate.retainedSourceRecovery)
+              : true) &&
+            !hasIndependentStrongBookingWindow(preProjectionCourse)
+              ? hasDirectOwnedReplacementSourceProof(
+                  projectionInput, persistenceFence, sourceCandidate.candidateUrl,
+                  observedAt, preProjectionCourse,
+                )
+              : null;
+          const recoveredSourceWebsite = sourceProof
+            ? projectionInput.sourceUrl : undefined;
 
-          const applied = retainedCandidateObservation && !recoveredSourceWebsite ? null : await applyBrowserDiscoveryToCourseInTransaction(
+          const applied = sourceCandidateObservation && !recoveredSourceWebsite ? null : await applyBrowserDiscoveryToCourseInTransaction(
             projectionInput,
             {
               updatedAt: preProjectionCourse.updatedAt,
@@ -1999,6 +2039,7 @@ export async function recordAndApplyOwnedBrowserDiscoveryToCourse(
             observedAt,
             observedProviderSnapshotFingerprint,
             recoveredSourceWebsite,
+            sourceProof?.resolvedCourseName ?? undefined,
           );
           const resultingCourse =
             applied ??
@@ -2023,7 +2064,7 @@ export async function recordAndApplyOwnedBrowserDiscoveryToCourse(
               snapshotBound: false as const,
             };
           }
-          const replacementHistoryInput = applied && recoveredSourceWebsite ? {
+          const replacementHistoryInput = applied && recoveredSourceWebsite && sourceCandidate?.retainedSourceRecovery ? {
             ...persistenceInput,
             evidence: { ...persistenceInput.evidence, retainedSourceReplacement: {
               mode: "RETAINED_SOURCE_IDENTITY_RESEARCH",
@@ -2115,6 +2156,7 @@ async function applyBrowserDiscoveryToCourseInTransaction(
   observedAt: Date,
   expectedProviderSnapshotFingerprint?: string,
   recoveredSourceWebsite?: string,
+  recoveredCourseName?: string,
 ) {
   input = normalizeAutomatedTechnicalDiscovery(
     normalizeBrowserDiscoveryForMonitoring(input),
@@ -2228,12 +2270,14 @@ async function applyBrowserDiscoveryToCourseInTransaction(
       // This private authority is created only by the owned candidate/history
       // recheck above. An identity-verified page is reusable source knowledge,
       // but an unconfirmed CTA is never executable provider support.
-      if (persistedProvider.isRunnable || current.isPublic !== true ||
+      if (persistedProvider.isRunnable || current.isPublic === false ||
           current.monitoringMode !== "AUTOMATIC" || incomingTerminal) return null;
+      if (recoveredCourseName && !isGenericCourseName(current.name)) return null;
       const safeIdentity = nonRunnableOfficialBookingLink ?? inspectedProviderIdentity;
       const updated = await transaction.course.updateMany({
         where: { id: input.courseId, updatedAt: current.updatedAt },
         data: {
+          ...(recoveredCourseName ? { name: recoveredCourseName } : {}),
           website: recoveredSourceWebsite,
           ...CLEARED_REJECTED_SOURCE_BOOKING_WINDOW,
           detectedPlatform: safeIdentity?.detectedPlatform ?? "UNKNOWN",
@@ -2423,6 +2467,7 @@ async function applyBrowserDiscoveryToCourseInTransaction(
     return null;
   }
   const persistedProvider = resolveProviderCapability(current);
+  if (recoveredCourseName && !isGenericCourseName(current.name)) return null;
   const persistedGate = evaluateMonitoringGate(current);
   const differentKnownProvider = Boolean(
     persistedProvider.capability &&
@@ -2462,11 +2507,12 @@ async function applyBrowserDiscoveryToCourseInTransaction(
     current.isPublic === null &&
     (learnedOnlineAdapter ||
       (verifiedClassification && input.bookingMethod === "PUBLIC_ONLINE")) &&
-    hasPersistedOfficialCourseProviderCorroboration(
-      input,
-      current.website,
-      current.name,
-    ),
+    (Boolean(recoveredSourceWebsite && learnedOnlineAdapter) ||
+      hasPersistedOfficialCourseProviderCorroboration(
+        input,
+        current.website,
+        current.name,
+      )),
   );
   const trustedPersistedReplacement =
     Boolean(recoveredSourceWebsite) || replacingLegacyPolicyOnlyBlock ||
@@ -2498,7 +2544,8 @@ async function applyBrowserDiscoveryToCourseInTransaction(
     lowerAuthorityManualWouldReplaceRunnableProvider ||
     (learnedOnlineAdapter &&
       !persistedGate.adapterAllowed &&
-      !corroboratedPrivateReopening) ||
+      !corroboratedPrivateReopening &&
+      !corroboratedPendingPublicCourse) ||
     (!learnedOnlineAdapter &&
       !incomingTerminal &&
       persistedProvider.isRunnable &&
@@ -2543,6 +2590,7 @@ async function applyBrowserDiscoveryToCourseInTransaction(
             intelligenceConfidence: input.confidence,
           }
         : {
+            ...(recoveredCourseName ? { name: recoveredCourseName } : {}),
             ...(recoveredSourceWebsite ? { website: recoveredSourceWebsite, ...CLEARED_REJECTED_SOURCE_BOOKING_WINDOW } : {}),
             ...(corroboratedPrivateReopening || corroboratedPendingPublicCourse
               ? { isPublic: true, policyNotes: null }

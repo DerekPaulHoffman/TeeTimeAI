@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import {
   evaluateBrowserDiscoveryMonitoringGate,
   extractStructuredPhoneBookingEvidence,
@@ -22,7 +24,10 @@ import {
   haveCompatibleOfficialPageCourseNames,
   haveCompatibleOfficialPageCourseNamesWithVerifiedLayout,
   isConflictingOfficialPageCourseIdentity,
+  isExplicitCourseIdentityName,
+  isGenericCourseName,
   isOfficialOrganizationIdentityCorroboratedByUrl,
+  normalizeCourseIdentityName,
   normalizeOfficialPagePresentationIdentity,
 } from "@/lib/places/course-identity";
 
@@ -184,6 +189,8 @@ export type BrowserInvestigationAudit = {
     renderedSignals: ["TITLE", "H1", "URL_PATH"];
     localityEvidencePresent: boolean;
     placeEvidencePresent: boolean;
+    resolvedGenericCourseName?: string;
+    courseIdentityFingerprint?: string;
   };
   sameOriginPages: Array<{
     requestedUrl: string;
@@ -1009,12 +1016,28 @@ export function finalizeBrowserInvestigationEvidence(input: {
     const key = canonicalBrowserNavigationInput(candidate.url);
     return Boolean(key && retainedHtmlNavigationKeys.has(key));
   };
+  const resolvedGenericCourseName = input.unprojectedSourceCandidate
+    ? pageVisits
+        .filter((visit) =>
+          visit.requiresDirectIdentityMatch === true && visit.depth === 0 &&
+          !visit.interactionBlocked
+        )
+        .map((visit) =>
+          resolveRenderedGenericSourceCourseName(
+            visit.finalUrl, visit.evidence, input.course,
+          )
+        )
+        .find((name): name is string => Boolean(name)) ?? null
+    : null;
+  const courseForIdentity = resolvedGenericCourseName
+    ? { ...input.course, courseName: resolvedGenericCourseName }
+    : input.course;
   const trustedByUrl = new Map<string, boolean>();
   const pageAssessments = pageVisits.map((visit) => {
     const identityStatus = classifyRenderedOfficialPageCourseIdentity(
       visit.finalUrl,
       visit.evidence,
-      input.course,
+      courseForIdentity,
     );
     const parentTrusted = visit.parentUrl
       ? trustedByUrl.get(visit.parentUrl) === true
@@ -1329,6 +1352,7 @@ export function finalizeBrowserInvestigationEvidence(input: {
 
   return {
     ...input.course,
+    ...(resolvedGenericCourseName ? { courseName: resolvedGenericCourseName } : {}),
     ...(input.unprojectedSourceCandidate
       ? {
           unprojectedSourceCandidate: true,
@@ -1360,7 +1384,7 @@ export function finalizeBrowserInvestigationEvidence(input: {
               : officialPage.visit.finalUrl,
             linkCandidates: officialLinkCandidates,
             ...(verifiedOfficialPage
-              ? { courseName: input.course.courseName }
+              ? { courseName: courseForIdentity.courseName }
               : {}),
             visibleText: officialPageVisibleText,
           },
@@ -1422,6 +1446,10 @@ export function finalizeBrowserInvestigationEvidence(input: {
         renderedSignals: ["TITLE", "H1", "URL_PATH"],
         localityEvidencePresent: hasBrowserCourseLocality(input.course),
         placeEvidencePresent: input.course.googlePlaceIdPresent === true,
+        ...(resolvedGenericCourseName ? {
+          resolvedGenericCourseName,
+          courseIdentityFingerprint: fingerprintBrowserSourceCourseIdentity(input.course),
+        } : {}),
       },
       sameOriginPages: pageAssessments.map(
         ({ visit, identityStatus, localityCorroborated, trustedForCourse }) => ({
@@ -2000,6 +2028,99 @@ export function classifyRenderedOfficialPageCourseIdentity(
   } catch {
     return "UNKNOWN";
   }
+}
+
+/**
+ * A researched source may repair a placeholder name only when the rendered
+ * course identity, public URL, and the retained street/city/state all agree.
+ * A city-wide course index or a page mentioning the address in isolation is
+ * insufficient authority to rename a reusable Course row.
+ */
+export function resolveRenderedGenericSourceCourseName(
+  pageUrl: string,
+  evidence: PreparedBrowserPageEvidence,
+  course: { courseName: string } & BrowserCourseIdentityContext,
+): string | null {
+  if (
+    !isGenericCourseName(course.courseName) ||
+    evidence.accessControlDetected ||
+    evidence.managedProtectionTemplateDetected ||
+    !course.address?.trim() ||
+    !course.city?.trim() ||
+    !/^[A-Z]{2}$/u.test(course.stateCode?.trim().toUpperCase() ?? "")
+  ) {
+    return null;
+  }
+  let url: URL;
+  try {
+    url = new URL(pageUrl);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" || !isSafeManualEvidenceUrl(url)) {
+    return null;
+  }
+  const street = normalizeBrowserStreetText(course.address.split(",", 1)[0]);
+  const city = normalizeBrowserLocalityText(course.city);
+  const stateCode = course.stateCode!.trim().toUpperCase();
+  const stateSignals = [stateCode, US_STATE_NAMES_BY_CODE[stateCode]]
+    .map((value) => normalizeBrowserLocalityText(value ?? ""))
+    .filter(Boolean);
+  if (!/^\d+[a-z]?\s+/u.test(street) || street.length < 8 || !city) {
+    return null;
+  }
+  const completeAddressVisible = (evidence.localityCandidates ?? []).some((raw) => {
+    const candidate = normalizeBrowserStreetText(raw);
+    const offset = ` ${candidate} `.indexOf(` ${street} `);
+    if (offset < 0) return false;
+    const addressWindow = candidate.slice(offset, offset + street.length + 220);
+    return containsNormalizedBrowserLocality(addressWindow, city) &&
+      stateSignals.some((state) => containsNormalizedBrowserLocality(addressWindow, state));
+  });
+  if (!completeAddressVisible) return null;
+
+  const names = [...new Set((evidence.identityCandidates ?? [])
+    .flatMap(getRenderedOfficialIdentityVariants)
+    .map((name) => name.replace(/\s+/gu, " ").trim())
+    .filter((name) => name.length <= 200 &&
+      !/[\u0000-\u001f\u007f]/u.test(name) &&
+      !isGenericCourseName(name) &&
+      isExplicitCourseIdentityName(name)))];
+  if (names.length === 0) return null;
+  const matched = names.filter((name) => {
+    if (isOfficialOrganizationIdentityCorroboratedByUrl(name, pageUrl)) {
+      return true;
+    }
+    const core = normalizeCourseIdentityName(name).replace(/\s+/gu, "");
+    let path: string;
+    try {
+      path = decodeURIComponent(url.pathname);
+    } catch {
+      return false;
+    }
+    const namedUrl = normalizeBrowserLocalityText(`${url.hostname} ${path}`)
+      .replace(/\s+/gu, "");
+    return core.length >= 5 && namedUrl.includes(core);
+  });
+  if (matched.length === 0) return null;
+  const selected = matched.sort((left, right) => left.length - right.length)[0];
+  return names.every((name) =>
+    haveCompatibleOfficialPageCourseNames(selected, name)
+  ) ? selected : null;
+}
+
+export function fingerprintBrowserSourceCourseIdentity(course: {
+  courseName: string;
+} & BrowserCourseIdentityContext) {
+  return createHash("sha256")
+    .update(JSON.stringify([
+      course.courseName.trim(),
+      course.address?.trim() ?? null,
+      course.city?.trim() ?? null,
+      course.stateCode?.trim().toUpperCase() ?? null,
+      course.googlePlaceIdPresent === true,
+    ]))
+    .digest("hex");
 }
 
 function isRenderedCourseLocalityDescriptor(

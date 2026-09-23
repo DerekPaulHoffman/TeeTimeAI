@@ -45,6 +45,7 @@ import {
   isKnownNonHtmlBrowserDocumentUrl,
   isRestrictedBrowserNetworkObservation,
   isRenderedUnprojectedSourceCandidateLocalityCorroborated,
+  resolveRenderedGenericSourceCourseName,
   isRelevantBrowserAccessBarrierUrl,
   MAX_BROWSER_BOOKING_DESTINATION_VISITS,
   MAX_BROWSER_INVESTIGATION_DEPTH,
@@ -1784,6 +1785,7 @@ export async function collectBrowserEvidence(
   const nonHtmlNavigationBoundaries = new Set<string>();
   let bookingNavigationAttempts = 0;
   let providerRequestObserved = false;
+  let resolvedGenericCourseName: string | null = null;
   const markProviderRequestObserved = () => {
     if (providerRequestObserved) return;
     providerRequestObserved = true;
@@ -1984,7 +1986,7 @@ export async function collectBrowserEvidence(
           depth: candidate.depth,
           parentUrl: candidate.parentUrl,
           officialPageUrl,
-          courseName: input.courseName,
+          courseName: resolvedGenericCourseName ?? input.courseName,
           requiresDirectIdentityMatch: candidate.requiresDirectIdentityMatch,
         },
         options.signal,
@@ -1995,10 +1997,21 @@ export async function collectBrowserEvidence(
       if (!visit) {
         continue;
       }
+      const rootGenericCourseName = candidate.requiresDirectIdentityMatch &&
+        candidate.depth === 0 && !visit.interactionBlocked
+          ? resolveRenderedGenericSourceCourseName(
+              visit.finalUrl, visit.evidence, input,
+            )
+          : null;
+      if (rootGenericCourseName) {
+        resolvedGenericCourseName = rootGenericCourseName;
+      }
       const identityStatus = classifyRenderedOfficialPageCourseIdentity(
         visit.finalUrl,
         visit.evidence,
-        input,
+        resolvedGenericCourseName
+          ? { ...input, courseName: resolvedGenericCourseName }
+          : input,
       );
       const directCandidateLocalityVerified = candidate.requiresDirectIdentityMatch
         ? isRenderedUnprojectedSourceCandidateLocalityCorroborated(visit.evidence, input)
@@ -2057,7 +2070,7 @@ export async function collectBrowserEvidence(
       const planned = planBrowserInvestigationLinks({
         pageUrl: visit.finalUrl,
         officialPageUrl,
-        courseName: input.courseName,
+        courseName: resolvedGenericCourseName ?? input.courseName,
         sourceTrustedForCourse: visitTrusted,
         candidates: visit.evidence.linkCandidates,
       });

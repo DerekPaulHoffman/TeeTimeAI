@@ -2290,6 +2290,42 @@ describe("rendered browser navigation safety", () => {
     }
   }, 30_000);
 
+  it("identifies a generic source-free course from its rendered name and exact address", async () => {
+    const browser = await chromium.launch();
+    const context = await browser.newContext({ serviceWorkers: "block" });
+    try {
+      const page = await context.newPage();
+      const sourceUrl = "https://parks.example.gov/golf/synthetic-source";
+      const requests: string[] = [];
+      vi.spyOn(page.request, "get").mockResolvedValue({ ok: () => false } as APIResponse);
+      await context.route("**/*", async (route) => {
+        requests.push(`${route.request().method()} ${route.request().url()}`);
+        if (route.request().url() !== sourceUrl) {
+          await route.abort();
+          return;
+        }
+        await route.fulfill({ status: 200, contentType: "text/html",
+          body: "<html><title>Synthetic Source Golf Course</title><body><h1>Synthetic Source Golf Course</h1><address>100 Fairway Drive, Springfield, MA 01103</address><p>Public tee times.</p></body></html>" });
+      });
+      const evidence = await collectBrowserEvidence(page, {
+        courseId: "source-free-generic", courseName: "Golf Course",
+        address: "100 Fairway Drive", city: "Springfield", stateCode: "MA",
+        sourceUrl, officialCourseWebsite: null,
+      }, { mode: "INDEPENDENT", unprojectedSourceCandidate: true });
+      expect(requests).toEqual([`GET ${sourceUrl}`]);
+      expect(evidence).toMatchObject({
+        courseName: "Synthetic Source Golf Course",
+        sourceCandidateIdentityVerified: true,
+        browserInvestigation: { sameOriginPages: [expect.objectContaining({
+          identityStatus: "MATCH", trustedForCourse: true,
+        })] },
+      });
+    } finally {
+      await context.close();
+      await browser.close();
+    }
+  }, 30_000);
+
   it("trusts a known-provider owner source candidate after exact identity and locality match", async () => {
     const browser = await chromium.launch();
     const context = await browser.newContext({ serviceWorkers: "block" });

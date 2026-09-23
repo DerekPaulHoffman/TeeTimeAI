@@ -3478,12 +3478,12 @@ describe("browser discovery persistence", () => {
     }
     const course = {
       id: fence.courseId,
-      name: "Synthetic Source Golf Course",
+      name: scenario === "source-free independent assignment" ? "Golf Course" : "Synthetic Source Golf Course",
       address: "100 Fairway Drive",
       city: "Springfield",
       stateCode: "MA",
       timeZone: "America/New_York",
-      isPublic: true,
+      isPublic: scenario === "source-free independent assignment" ? null : true,
       website: null,
       detectedBookingUrl: null,
       detectedPlatform: "UNKNOWN",
@@ -3706,6 +3706,74 @@ describe("browser discovery persistence", () => {
     expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
     expect(mockedPrisma.courseSupportIncident.updateMany).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
+    if (scenario === "source-free independent assignment") {
+      const renderedName = "Synthetic Source Golf Course";
+      const providerUrl = "https://www.chronogolf.com/club/3286";
+      const page = prepareBrowserPageEvidence({
+        anchors: [], scripts: [], structuredActionScripts: [],
+        linkCandidates: [{ url: providerUrl, label: "Book a Tee Time" }],
+        identityCandidates: [renderedName],
+        localityCandidates: ["100 Fairway Drive, Springfield, MA 01103"],
+        visibleText: `${renderedName} offers public golf.`,
+      });
+      const evidence = finalizeBrowserInvestigationEvidence({
+        course: { courseId: course.id, courseName: course.name,
+          sourceUrl: candidateUrl, officialCourseWebsite: candidateUrl,
+          address: course.address, city: course.city, stateCode: course.stateCode,
+          googlePlaceIdPresent: false },
+        mode: "INDEPENDENT", unprojectedSourceCandidate: true,
+        auditContext: { incidentCycle: fence.cycle, runtimeVersion: fence.runtimeVersion, observedAt: now },
+        providerRequestObserved: true,
+        pageVisits: [{ requestedUrl: candidateUrl, finalUrl: candidateUrl,
+          label: "Golf Course", depth: 0, parentUrl: null,
+          requiresDirectIdentityMatch: true, interactionBlocked: false, evidence: page }],
+        bookingDestinations: [{ sourcePageUrl: candidateUrl,
+          requestedUrl: providerUrl, finalUrl: providerUrl,
+          label: "Book a Tee Time", courseScoped: true,
+          interactionBlocked: false, evidence: page }],
+      });
+      expect(evidence.sourceCandidateIdentityVerified).toBe(true);
+      const discovery = buildBrowserDiscovery(evidence);
+      expect(discovery.detectedPlatform).toBe("CHRONOGOLF");
+      const fetchProfile = vi.fn().mockResolvedValue({ ok: true, url: providerUrl,
+        text: async () => `<script id="__NEXT_DATA__">${JSON.stringify({ props: { pageProps: { club: {
+          id: 3286, features: { onlineBookingEnabled: true },
+          courses: [{ uuid: "1c76a6e4-eb77-4aeb-88cb-2e7457cc56cf" }],
+        } } } })}</script>`,
+      });
+      const learned = await enrichChronogolfDiscovery(discovery, fetchProfile);
+      expect(learned.status).toBe("LEARNED");
+      const observed = { ...learned, evidence: { ...learned.evidence,
+        browserInvestigation: evidence.browserInvestigation } };
+      mockedPrisma.course.findUnique.mockImplementation(async () => ({ ...course }) as never);
+      mockedPrisma.courseSupportBatchIncident.findUnique.mockResolvedValue({
+        courseId: course.id, cycle: fence.cycle, result: "PENDING",
+      } as never);
+      mockedPrisma.courseSupportIncident.findUnique.mockResolvedValue(incident as never);
+      mockedPrisma.courseSupportIncident.updateMany.mockResolvedValue({ count: 1 } as never);
+      mockedPrisma.course.updateMany.mockImplementation(async ({ data }) => {
+        Object.assign(course, Object.fromEntries(Object.entries(data).map(([key, value]) =>
+          [key, value === Prisma.DbNull ? null : value])));
+        return { count: 1 };
+      });
+      mockedPrisma.courseAutomationDiscovery.create.mockResolvedValue({ id: "source-free-discovery" } as never);
+      mockedPrisma.$queryRaw.mockResolvedValue([{ locked: 1, updatedAt: now }] as never);
+      const applied = await recordAndApplyOwnedBrowserDiscoveryToCourse(
+        observed, observed, fence, fence.runtimeVersion,
+        buildCourseSupportProviderSnapshotFingerprint({ ...course, website: null }),
+        { ...providerObservationLease, courseId: course.id,
+          observationStartedAt: now, leaseExpiresAt: new Date(now.getTime() + 900_000) },
+        now,
+      );
+      expect(applied).toMatchObject({ applied: { name: renderedName, website: candidateUrl },
+        snapshotBound: true });
+      expect(course).toMatchObject({ name: renderedName, website: candidateUrl,
+        isPublic: true, automationEligibility: "ALLOWED",
+        detectedBookingUrl: providerUrl });
+      expect(resolveProviderCapability(course).isRunnable).toBe(true);
+      expect(fetchProfile).toHaveBeenCalledTimes(1);
+      expect(mockedPrisma.courseAutomationDiscovery.create).toHaveBeenCalledTimes(1);
+    }
   });
 
   it.each([
@@ -3718,6 +3786,8 @@ describe("browser discovery persistence", () => {
     "runnable retained source unchanged snapshot", "runnable retained source stale discovery",
     "runnable retained source unbound evidence", "runnable retained source prior runtime",
     "runnable retained source incomplete provider", "runnable retained source successor owner",
+    "generic retained source", "generic name changes", "generic address changes",
+    "runnable generic retained source",
   ])("composes native retained-source research through owned candidate promotion: %s", async (scenario) => {
     const fixture = retainedSourceRecoveryFixture();
     const now = fixture.input.now!;
@@ -3745,9 +3815,11 @@ describe("browser discovery persistence", () => {
       occurrenceCount: 2, attemptCount: 1,
       activeRealSearchCount: 0, earliestTargetDate: null,
     };
+    const genericSource = scenario.startsWith("generic ") || scenario.startsWith("runnable generic ");
     const course = {
-      ...fixture.input.course, id: fence.courseId, name: "Target Harbor Golf Club",
+      ...fixture.input.course, id: fence.courseId, name: genericSource ? "Golf Course" : "Target Harbor Golf Club",
       address: "100 Fairway Lane", city: "Mesa", stateCode: "AZ", googlePlaceId: "synthetic-place",
+      isPublic: true,
       detectedPlatform: "UNKNOWN" as const, bookingMethod: "PUBLIC_ONLINE" as const,
       automationEligibility: "NEEDS_REVIEW" as const, automationReason: "UNSUPPORTED_PLATFORM" as const,
       timeZone: null,
@@ -3862,8 +3934,9 @@ describe("browser discovery persistence", () => {
     const context = await getOwnedCourseSupportSourceSearchContext(sourceInput);
     expect(context.outcome).toBe("ready");
     if (context.outcome !== "ready" || !context.privateContext) throw new Error("Expected fresh owned research context");
-    const runnableSource = scenario.startsWith("runnable retained source");
-    const candidateUrl = runnableSource ? originalSource! : "https://replacement-course.example/golf";
+    const runnableSource = scenario.startsWith("runnable ");
+    const candidateUrl = runnableSource && !genericSource
+      ? originalSource! : "https://replacement-course.example/golf";
     const providerUrl = "https://www.chronogolf.com/club/3286";
     await expect(recordOwnedCourseSupportSourceSearchResult({ ...sourceInput, attemptRef: context.privateContext.attemptRef,
       candidateUrl, runtimeVersion: fence.runtimeVersion })).resolves.toMatchObject({ outcome: "ready", candidateRecorded: true });
@@ -3903,6 +3976,7 @@ describe("browser discovery persistence", () => {
       course: { website: originalSource, detectedBookingUrl: originalBooking } });
     const identityMatches = scenario !== "wrong course";
     const localityMatches = scenario !== "wrong locality";
+    const renderedCourseName = genericSource ? "Replacement Course Golf Club" : course.name;
     const native = finalizeBrowserInvestigationEvidence({
       course: { courseId: course.id, courseName: course.name, sourceUrl: candidateUrl, officialCourseWebsite: candidateUrl,
         address: course.address, city: course.city, stateCode: course.stateCode, googlePlaceIdPresent: true },
@@ -3912,15 +3986,15 @@ describe("browser discovery persistence", () => {
       bookingDestinations: runnableSource ? [{ sourcePageUrl: candidateUrl, requestedUrl: providerUrl, finalUrl: providerUrl,
         label: "Book a Tee Time", courseScoped: true, interactionBlocked: false,
         evidence: prepareBrowserPageEvidence({ anchors: [], scripts: [], structuredActionScripts: [], linkCandidates: [],
-          identityCandidates: [course.name], localityCandidates: ["100 Fairway Lane Mesa AZ"], visibleText: course.name }),
+          identityCandidates: [renderedCourseName], localityCandidates: ["100 Fairway Lane Mesa AZ"], visibleText: renderedCourseName }),
       }] : [],
       pageVisits: [{ requestedUrl: candidateUrl, finalUrl: candidateUrl, label: course.name, depth: 0, parentUrl: null,
         requiresDirectIdentityMatch: true, interactionBlocked: false,
         evidence: prepareBrowserPageEvidence({ anchors: [], scripts: [], structuredActionScripts: [],
           linkCandidates: runnableSource ? [{ url: providerUrl, label: "Book a Tee Time" }] : [],
-          identityCandidates: [identityMatches ? course.name : "Different Desert Golf Club"],
+          identityCandidates: [identityMatches ? renderedCourseName : "Different Desert Golf Club"],
           localityCandidates: [localityMatches ? "Cookie notice, course information. 100 Fairway Lane Mesa AZ" : "900 Other Road Elsewhere CA"],
-          visibleText: identityMatches ? course.name : "Different Desert Golf Club" }),
+          visibleText: identityMatches ? renderedCourseName : "Different Desert Golf Club" }),
       }],
     });
     const discovery = buildBrowserDiscovery(native);
@@ -3941,15 +4015,18 @@ describe("browser discovery persistence", () => {
     if (scenario === "plan changes") actionPlan.allowedActions = ["VERIFY_CURRENT_RUNTIME"];
     if (scenario === "course identity changes") course.name = "New Authoritative Course Name";
     if (scenario === "course locality changes") course.city = "New Authoritative Locality";
+    if (scenario === "generic name changes") course.name = "New Authoritative Course Name";
+    if (scenario === "generic address changes") course.address = "900 Other Fairway Lane";
     const result = await recordAndApplyOwnedBrowserDiscoveryToCourse(observed, observed, fence, fence.runtimeVersion,
       originalFingerprint, { ...providerObservationLease, courseId: course.id, observationStartedAt: now,
         leaseExpiresAt: new Date(now.getTime() + 900_000) }, now);
-    const shouldApply = runnableSource || ["verified source", "later owned batch", "rejected booking window", "two neutral observations", "three neutral observations"].includes(scenario);
+    const shouldApply = runnableSource || ["verified source", "later owned batch", "rejected booking window", "two neutral observations", "three neutral observations", "generic retained source"].includes(scenario);
     expect(Boolean(result.applied)).toBe(shouldApply);
     if (runnableSource) {
       expect(fetchProfile).toHaveBeenCalledTimes(1);
       expect(resolveProviderCapability(course).isRunnable).toBe(true);
-      expect(course.website).toBe(originalSource);
+      expect(course.website).toBe(genericSource ? candidateUrl : originalSource);
+      if (genericSource) expect(course.name).toBe("Replacement Course Golf Club");
       expect(course.detectedBookingUrl).toBe(providerUrl);
       expect(result.snapshotBound).toBe(true);
       expect(result.providerSnapshotFingerprint).not.toBe(originalFingerprint);
@@ -3992,7 +4069,7 @@ describe("browser discovery persistence", () => {
       const scheduled = await scheduleCourseSupportVerificationRequests({
         batchId: fence.batchId, releaseSha: fence.releaseSha, now,
       });
-      if (scenario !== "runnable retained source") {
+      if (!["runnable retained source", "runnable generic retained source"].includes(scenario)) {
         expect(scheduled).toMatchObject({ eligibleCount: 0, ineligibleCount: 1,
           ineligibleReasonCounts: { [scenario.endsWith("successor owner") ? "batch_ownership_changed" : "playbook_stage_handoff_required"]: 1 } });
         expect(mockedPrisma.courseSupportVerificationRequest.createMany).not.toHaveBeenCalled();
@@ -4156,6 +4233,9 @@ describe("browser discovery persistence", () => {
         detectedPlatform: "UNKNOWN", automationEligibility: "NEEDS_REVIEW", bookingMethod: "UNKNOWN",
         bookingWindowDaysAhead: null, bookingWindowEvidenceUrl: null, bookingReleaseTimeLocal: null,
         bookingWindowSource: null, bookingWindowConfidence: null, bookingWindowCheckedAt: null, bookingWindowObservedAt: null });
+      if (scenario === "generic retained source") {
+        expect(course.name).toBe("Replacement Course Golf Club");
+      }
       expect(result.providerSnapshotFingerprint).not.toBe(originalFingerprint);
     } else {
       expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
