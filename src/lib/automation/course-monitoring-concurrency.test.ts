@@ -9908,7 +9908,7 @@ describe("course monitoring write serialization", () => {
     expect(transactionMocks.courseSupportIncident.updateMany).toHaveBeenCalledTimes(1);
   });
 
-  it("reopens an unowned exhausted generic course once for secure official-site recovery", async () => {
+  it("reopens an unowned exhausted generic course once for published source recovery", async () => {
     const now = new Date("2026-09-23T13:10:00Z");
     let ledger: unknown = null;
     const stages = ["OFFICIAL_IDENTITY", "TYPED_ADAPTER", "OFFICIAL_HTTP_DISCOVERY", "HTTP_ADAPTER_RETRY",
@@ -9950,11 +9950,11 @@ describe("course monitoring write serialization", () => {
     expect(prismaMocks.courseSupportIncident.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({monitoringEvents: {
         some: {eventType: "REVALIDATION_REQUESTED", readPath: "generic-course-exact-place-source-search-v3"},
-        none: {eventType: "REVALIDATION_REQUESTED", readPath: "generic-course-secure-site-source-search-v4"},
+        none: {eventType: "REVALIDATION_REQUESTED", readPath: "generic-course-published-source-search-v5"},
       }}),
     }));
     expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({readPath: "generic-course-secure-site-source-search-v4",
+      data: expect.objectContaining({readPath: "generic-course-published-source-search-v5",
         eventType: "REVALIDATION_REQUESTED"})}));
     expect(transactionMocks.courseSupportIncident.updateMany.mock.calls[0]![0].data)
       .not.toHaveProperty("attemptLedger");
@@ -9974,6 +9974,27 @@ describe("course monitoring write serialization", () => {
     await expect(revalidateHumanReviewCoursesForDeployment({deploymentSha: "c".repeat(40), now}))
       .resolves.toMatchObject({requeued: 0});
     expect(transactionMocks.courseSupportIncident.updateMany).toHaveBeenCalledTimes(1);
+
+    const sourceUnverifiedFinal = {...incident, status: "RESOLVED",
+      resolution: "SOURCE_UNVERIFIED", resolvedAt: now,
+      course: {...incident.course, providerFamilyKey: "SOURCE_MISSING",
+        detectedBookingUrl: null,
+        monitoringStatus: {state: "FINAL_TECHNICAL", revision: 4}}};
+    expect(canRevalidateGenericCourseNearbyIdentity(sourceUnverifiedFinal)).toBe(true);
+    expect(canRevalidateGenericCourseNearbyIdentity({...sourceUnverifiedFinal,
+      course: {...sourceUnverifiedFinal.course, website: "https://different.example/"}})).toBe(false);
+    prismaMocks.courseSupportIncident.findMany.mockResolvedValue([sourceUnverifiedFinal]);
+    transactionMocks.courseSupportIncident.findUnique.mockResolvedValue(sourceUnverifiedFinal);
+    transactionMocks.courseMonitoringEvent.findUnique.mockResolvedValue(null);
+    transactionMocks.courseSupportIncident.updateMany.mockClear();
+    await expect(revalidateHumanReviewCoursesForDeployment({deploymentSha: "e".repeat(40), now}))
+      .resolves.toMatchObject({requeued: 1});
+    expect(transactionMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({status: "RESOLVED", resolution: "SOURCE_UNVERIFIED",
+        resolvedAt: now}),
+      data: expect.objectContaining({status: "AUTO_INVESTIGATING", resolvedAt: null,
+        resolution: null}),
+    }));
   });
 
   it("records a deployment marker without reopening unchanged human-review work", async () => {

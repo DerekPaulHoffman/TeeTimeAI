@@ -3461,7 +3461,7 @@ export async function recordCourseMonitoringPlaybookTransition(
 }
 
 const RENDERED_VENUE_IDENTITY_REVALIDATION = "rendered-venue-identity-v1";
-const GENERIC_COURSE_NEARBY_IDENTITY_REVALIDATION = "generic-course-secure-site-source-search-v4";
+const GENERIC_COURSE_NEARBY_IDENTITY_REVALIDATION = "generic-course-published-source-search-v5";
 const PRIOR_GENERIC_COURSE_NEARBY_IDENTITY_REVALIDATION = "generic-course-exact-place-source-search-v3";
 const SHARED_FOREUP_CONFIGURATION_REVALIDATION = "shared-foreup-schedules-v1";
 const genericIdentityRevalidationInclude = {
@@ -3473,18 +3473,24 @@ type GenericIdentityRevalidationIncident = Prisma.CourseSupportIncidentGetPayloa
 
 export function canRevalidateGenericCourseNearbyIdentity(incident: GenericIdentityRevalidationIncident) {
   const course = incident.course;
-  const expectedState = incident.status === "NEEDS_HUMAN"
+  const sourceUnverifiedFinal = incident.status === "RESOLVED" &&
+    incident.resolution === "SOURCE_UNVERIFIED" && incident.resolvedAt !== null &&
+    incident.decisionAt === null && course?.providerFamilyKey === "SOURCE_MISSING" &&
+    !course.website && !course.detectedBookingUrl;
+  const expectedState = sourceUnverifiedFinal ? "FINAL_TECHNICAL" : incident.status === "NEEDS_HUMAN"
     ? "ENGINEERING_VERIFICATION_NEEDED" : incident.status === "AUTO_INVESTIGATING"
       ? "AUTO_INVESTIGATING" : null;
   if (!course || !expectedState || incident.activeBatchId !== null ||
-      incident.decisionAt !== null || incident.resolvedAt !== null || incident.resolution !== null ||
+      incident.decisionAt !== null ||
+      (!sourceUnverifiedFinal && (incident.resolvedAt !== null || incident.resolution !== null)) ||
       incident.confirmedAt === null || !["MISSING_SOURCE", "MISSING_METADATA"].includes(incident.failureClass) ||
       course.monitoringStatus?.state !== expectedState ||
       course.isPublic !== true || course.monitoringMode !== "AUTOMATIC" ||
       !isGenericCourseName(course.name) || !course.googlePlaceId || !course.stateCode ||
       !Number.isFinite(course.latitude) || !Number.isFinite(course.longitude) ||
       (!course.city && !/\b\d{5}(?:-\d{4})?\b/u.test(course.address ?? "")) ||
-      assessAutomationPlaybook(incident.attemptLedger, incident.cycle).conclusion !== "UNRESOLVED_EXHAUSTED") {
+      (!sourceUnverifiedFinal &&
+        assessAutomationPlaybook(incident.attemptLedger, incident.cycle).conclusion !== "UNRESOLVED_EXHAUSTED")) {
     return false;
   }
   if (!course.website) return true;
@@ -3496,8 +3502,9 @@ export function canRevalidateGenericCourseNearbyIdentity(incident: GenericIdenti
 
 async function revalidateGenericCourseNearbyIdentityForDeployment(deploymentSha: string) {
   const candidates = await prisma.courseSupportIncident.findMany({
-    where: {status: {in: ["NEEDS_HUMAN", "AUTO_INVESTIGATING"]}, activeBatchId: null, decisionAt: null,
-      resolvedAt: null, resolution: null,
+    where: {status: {in: ["NEEDS_HUMAN", "AUTO_INVESTIGATING", "RESOLVED"]}, activeBatchId: null, decisionAt: null,
+      OR: [{resolvedAt: null, resolution: null},
+        {status: "RESOLVED", resolution: "SOURCE_UNVERIFIED", resolvedAt: {not: null}}],
       failureClass: {in: ["MISSING_SOURCE", "MISSING_METADATA"]},
       course: {is: {isPublic: true, monitoringMode: "AUTOMATIC",
         name: {in: ["Golf Course", "Golf Club"]}}},
@@ -3527,11 +3534,13 @@ async function revalidateGenericCourseNearbyIdentityForDeployment(deploymentSha:
       const status = incident.course.monitoringStatus!;
       const updated = await transaction.courseSupportIncident.updateMany({where: {
         id: incident.id, cycle: incident.cycle, revision: incident.revision, status: incident.status,
-        activeBatchId: null, decisionAt: null, resolvedAt: null, resolution: null,
+        activeBatchId: null, decisionAt: null, resolvedAt: incident.resolvedAt,
+        resolution: incident.resolution,
       }, data: {cycle: {increment: 1}, revision: {increment: 1}, status: "AUTO_INVESTIGATING",
+        resolvedAt: null, resolution: null,
         confirmedAt: now, humanReviewReason: null, nextReminderAt: null, nextAttemptAt: now,
         escalationDeadlineAt: getCourseMonitoringEscalationDeadline(now, incident.activeRealSearchCount),
-        latestMessage: "The nearby official course site can now be checked securely; discovery is queued.",
+        latestMessage: "New public source evidence can now be checked; discovery is queued.",
       }});
       if (updated.count !== 1) return false;
       const updatedStatus = await transaction.courseMonitoringStatus.updateMany({where: {
@@ -3544,7 +3553,7 @@ async function revalidateGenericCourseNearbyIdentityForDeployment(deploymentSha:
         source: "RECOVERY_CRON", readPath: GENERIC_COURSE_NEARBY_IDENTITY_REVALIDATION,
         idempotencyKey, failureFingerprint: incident.failureFingerprint,
         fromState: status.state, toState: "AUTO_INVESTIGATING", occurredAt: now,
-        message: "The exact public place and nearby course can now be corroborated on its secure first-party site.",
+        message: "Published nearby place evidence can now be corroborated on the secure first-party site.",
         audit: {action: "relevant_discovery_implementation_changed",
           implementation: GENERIC_COURSE_NEARBY_IDENTITY_REVALIDATION, deploymentSha,
           priorCycle: incident.cycle, cycle: incident.cycle + 1,

@@ -213,6 +213,7 @@ function getOrdinaryCombinedDiscoveries() {
 describe("search monitoring discovery", () => {
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllEnvs();
   });
 
   beforeEach(() => {
@@ -533,6 +534,56 @@ describe("search monitoring discovery", () => {
     {includeCourseIds: ["generic-course"], forceFreshCourseIds: ["generic-course"]});
     expect(dbMocks.applyRecoveredGenericCourseIdentityToCourse).not.toHaveBeenCalled();
     expect(genericCourse.name).toBe("Golf Course");
+  });
+
+  it("recovers from the public production discovery response when the responder has no Google key", async () => {
+    googlePlacesMocks.getGooglePlacesApiKey.mockReturnValue(undefined);
+    vi.stubEnv("NEXT_PUBLIC_SITE_URL", "https://teetimespot.com");
+    const course = { ...remediationPreference("generic-course", 1).course,
+      name: "Golf Course", googlePlaceId: "generic-feature",
+      address: "Madison, IL 62201, USA", city: "Madison", stateCode: "IL",
+      latitude: 38.65945, longitude: -90.14365, isPublic: true,
+      website: null, detectedBookingUrl: null, updatedAt: now };
+    const publicFetch = vi.fn(async (input: string | URL | Request) => {
+      const url = input.toString();
+      if (url.startsWith("https://teetimespot.com/api/courses/discover?")) return Response.json({
+        demo: false, courses: [
+          { googlePlaceId: "generic-feature", name: "Golf Course",
+            address: course.address, city: "Madison", stateCode: "IL",
+            latitude: course.latitude, longitude: course.longitude, website: null },
+          { googlePlaceId: "named-course", name: "Gateway National Golf Links",
+            address: "18 Golf Drive, Madison, IL 62060, USA", city: "Madison", stateCode: "IL",
+            latitude: 38.65966, longitude: -90.13945,
+            website: "http://www.gateway.example/" },
+        ],
+      });
+      if (url === "https://www.gateway.example/") return new Response(
+        "<html><title>Gateway National Golf Links</title></html>",
+        { status: 200, headers: { "content-type": "text/html" } });
+      throw new Error(`Unexpected public request: ${url}`);
+    });
+    await expect(researchGenericCourseIdentity(course, publicFetch as typeof fetch))
+      .resolves.toMatchObject({ name: "Gateway National Golf Links",
+        website: "https://www.gateway.example/", candidatePlaceId: "named-course" });
+    expect(googlePlacesMocks.searchNearbyGolfCourses).not.toHaveBeenCalled();
+  });
+
+  it("rejects a public discovery response without the stored generic place", async () => {
+    googlePlacesMocks.getGooglePlacesApiKey.mockReturnValue(undefined);
+    vi.stubEnv("NEXT_PUBLIC_SITE_URL", "https://teetimespot.com");
+    const publicFetch = vi.fn(async () => Response.json({ demo: false, courses: [
+      { googlePlaceId: "named-course", name: "Gateway National Golf Links",
+        address: "18 Golf Drive, Madison, IL 62060, USA", city: "Madison", stateCode: "IL",
+        latitude: 38.65966, longitude: -90.13945,
+        website: "http://www.gateway.example/" },
+    ] }));
+    await expect(researchGenericCourseIdentity({
+      id: "generic-course", name: "Golf Course", googlePlaceId: "generic-feature",
+      address: "Madison, IL 62201, USA", city: "Madison", stateCode: "IL",
+      latitude: 38.65945, longitude: -90.14365, isPublic: true,
+      website: null, detectedBookingUrl: null, updatedAt: now,
+    }, publicFetch as typeof fetch)).resolves.toBeNull();
+    expect(publicFetch).toHaveBeenCalledTimes(1);
   });
 
   it("does not discover from an unpersisted recovered website after a compare-and-set loss", async () => {
