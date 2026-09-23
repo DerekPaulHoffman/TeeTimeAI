@@ -3461,8 +3461,8 @@ export async function recordCourseMonitoringPlaybookTransition(
 }
 
 const RENDERED_VENUE_IDENTITY_REVALIDATION = "rendered-venue-identity-v1";
-const GENERIC_COURSE_NEARBY_IDENTITY_REVALIDATION = "generic-course-published-source-search-v5";
-const PRIOR_GENERIC_COURSE_NEARBY_IDENTITY_REVALIDATION = "generic-course-exact-place-source-search-v3";
+const GENERIC_COURSE_NEARBY_IDENTITY_REVALIDATION = "generic-course-google-transport-source-search-v6";
+const PRIOR_GENERIC_COURSE_NEARBY_IDENTITY_REVALIDATION = "generic-course-published-source-search-v5";
 const SHARED_FOREUP_CONFIGURATION_REVALIDATION = "shared-foreup-schedules-v1";
 const genericIdentityRevalidationInclude = {
   course: { include: { monitoringStatus: true } },
@@ -3540,7 +3540,7 @@ async function revalidateGenericCourseNearbyIdentityForDeployment(deploymentSha:
         resolvedAt: null, resolution: null,
         confirmedAt: now, humanReviewReason: null, nextReminderAt: null, nextAttemptAt: now,
         escalationDeadlineAt: getCourseMonitoringEscalationDeadline(now, incident.activeRealSearchCount),
-        latestMessage: "New public source evidence can now be checked; discovery is queued.",
+        latestMessage: "The corrected public place lookup can now check the official source; discovery is queued.",
       }});
       if (updated.count !== 1) return false;
       const updatedStatus = await transaction.courseMonitoringStatus.updateMany({where: {
@@ -3553,7 +3553,7 @@ async function revalidateGenericCourseNearbyIdentityForDeployment(deploymentSha:
         source: "RECOVERY_CRON", readPath: GENERIC_COURSE_NEARBY_IDENTITY_REVALIDATION,
         idempotencyKey, failureFingerprint: incident.failureFingerprint,
         fromState: status.state, toState: "AUTO_INVESTIGATING", occurredAt: now,
-        message: "Published nearby place evidence can now be corroborated on the secure first-party site.",
+        message: "The corrected public place lookup can now corroborate a nearby official course source.",
         audit: {action: "relevant_discovery_implementation_changed",
           implementation: GENERIC_COURSE_NEARBY_IDENTITY_REVALIDATION, deploymentSha,
           priorCycle: incident.cycle, cycle: incident.cycle + 1,

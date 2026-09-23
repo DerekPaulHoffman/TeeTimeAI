@@ -9908,7 +9908,7 @@ describe("course monitoring write serialization", () => {
     expect(transactionMocks.courseSupportIncident.updateMany).toHaveBeenCalledTimes(1);
   });
 
-  it("reopens an unowned exhausted generic course once for published source recovery", async () => {
+  it("reopens an unowned exhausted generic course once for corrected Google source lookup", async () => {
     const now = new Date("2026-09-23T13:10:00Z");
     let ledger: unknown = null;
     const stages = ["OFFICIAL_IDENTITY", "TYPED_ADAPTER", "OFFICIAL_HTTP_DISCOVERY", "HTTP_ADAPTER_RETRY",
@@ -9949,12 +9949,12 @@ describe("course monitoring write serialization", () => {
       .resolves.toMatchObject({considered: 1, requeued: 1});
     expect(prismaMocks.courseSupportIncident.findMany).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({monitoringEvents: {
-        some: {eventType: "REVALIDATION_REQUESTED", readPath: "generic-course-exact-place-source-search-v3"},
-        none: {eventType: "REVALIDATION_REQUESTED", readPath: "generic-course-published-source-search-v5"},
+        some: {eventType: "REVALIDATION_REQUESTED", readPath: "generic-course-published-source-search-v5"},
+        none: {eventType: "REVALIDATION_REQUESTED", readPath: "generic-course-google-transport-source-search-v6"},
       }}),
     }));
     expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({readPath: "generic-course-published-source-search-v5",
+      data: expect.objectContaining({readPath: "generic-course-google-transport-source-search-v6",
         eventType: "REVALIDATION_REQUESTED"})}));
     expect(transactionMocks.courseSupportIncident.updateMany.mock.calls[0]![0].data)
       .not.toHaveProperty("attemptLedger");

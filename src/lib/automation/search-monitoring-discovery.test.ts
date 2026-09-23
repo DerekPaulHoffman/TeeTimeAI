@@ -101,8 +101,41 @@ describe("official page corroboration for nearby generic course recovery", () =>
       address: "Madison, IL 62201, USA", city: "Madison", stateCode: "IL",
       latitude: 38.65945, longitude: -90.14365, website: null,
       isPublic: true, detectedBookingUrl: null, updatedAt: now,
-    }, publicFetch as typeof fetch)).resolves.toBeNull();
+    }, publicFetch as typeof fetch, publicFetch as typeof fetch)).resolves.toBeNull();
     expect(googlePlacesMocks.searchNearbyGolfCourses).not.toHaveBeenCalled();
+  });
+
+  it("keeps the exact Google lookup separate from official-site fetch guards", async () => {
+    googlePlacesMocks.getGooglePlacesApiKey.mockReturnValue("test-key");
+    googlePlacesMocks.searchNearbyGolfCourses.mockResolvedValue([{googlePlaceId: "named-course",
+      name: "Gateway National Golf Links", address: candidate.address,
+      city: candidate.city, stateCode: candidate.stateCode,
+      latitude: candidate.latitude, longitude: candidate.longitude,
+      website: candidate.website}]);
+    const googleFetch = vi.fn(async () => Response.json({id: "generic-feature",
+      displayName: {text: "Golf Course"},
+      location: {latitude: 38.65945, longitude: -90.14365},
+      primaryType: "golf_course", businessStatus: "OPERATIONAL"}));
+    const publicFetch = vi.fn(async (input: string | URL | Request) => {
+      expect(input.toString()).toBe(candidate.website);
+      return new Response("<html><title>Gateway National Golf Links</title></html>",
+        {status: 200, headers: {"content-type": "text/html"}});
+    });
+    vi.stubGlobal("fetch", googleFetch);
+    try {
+      await expect(researchGenericCourseIdentity({
+        id: "generic-course", googlePlaceId: "generic-feature", name: "Golf Course",
+        address: "Madison, IL 62201, USA", city: "Madison", stateCode: "IL",
+        latitude: 38.65945, longitude: -90.14365, website: null,
+        isPublic: true, detectedBookingUrl: null, updatedAt: now,
+      }, publicFetch as typeof fetch))
+        .resolves.toMatchObject({name: candidate.name, website: candidate.website,
+          candidatePlaceId: candidate.googlePlaceId});
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(googleFetch).toHaveBeenCalledOnce();
+    expect(publicFetch).toHaveBeenCalledOnce();
   });
 });
 

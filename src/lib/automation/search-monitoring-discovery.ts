@@ -514,14 +514,14 @@ export function corroborateNearbyCourseOnOfficialPage(
 
 async function readExactGenericPlace(
   course: MissingOfficialWebsiteCourse,
-  publicFetch: typeof fetch,
+  googleFetch: typeof fetch,
 ): Promise<NearbyOfficialCourse | null> {
   const placeId = course.googlePlaceId?.trim().replace(/^places\//u, "");
   const apiKey = getGooglePlacesApiKey();
   if (!placeId || !/^[A-Za-z0-9_-]{10,200}$/u.test(placeId) || !apiKey) return null;
-  const response = await publicFetch(
+  const response = await googleFetch(
     `https://places.googleapis.com/v1/places/${encodeURIComponent(placeId)}`,
-    { cache: "no-store", redirect: "error", headers: {
+    { cache: "no-store", redirect: "error", signal: AbortSignal.timeout(FETCH_TIMEOUT_MS), headers: {
       "X-Goog-Api-Key": apiKey,
       "X-Goog-FieldMask": "id,displayName,location,types,primaryType,businessStatus",
     } },
@@ -583,6 +583,7 @@ async function readPublishedNearbyCourses(
 export async function researchGenericCourseIdentity(
   course: MissingOfficialWebsiteCourse,
   publicFetch: typeof fetch,
+  googleFetch: typeof fetch = fetch,
 ) {
   if (!isGenericCourseName(course.name) || course.isPublic !== true ||
       !course.googlePlaceId || !course.stateCode ||
@@ -591,7 +592,9 @@ export async function researchGenericCourseIdentity(
   if (getGooglePlacesApiKey()) {
     // Public discovery can omit a generic map feature. Read its exact Google
     // ID separately to anchor the nearby selection to the stored place.
-    const exactPlace = await readExactGenericPlace(course, publicFetch);
+    // The address-pinned official-site transport intentionally rejects API
+    // hosts. The exact Google Places lookup uses its own fixed API endpoint.
+    const exactPlace = await readExactGenericPlace(course, googleFetch);
     if (!exactPlace) return null;
     nearby = [exactPlace, ...(await searchNearbyGolfCourses({
       latitude: course.latitude, longitude: course.longitude, radiusMeters: 1_000,
@@ -622,6 +625,7 @@ export async function researchGenericCourseIdentity(
 
 async function refreshGenericCourseIdentities(
   courses: MissingOfficialWebsiteCourse[], publicFetch: typeof fetch,
+  googleFetch: typeof fetch,
   expectedUnownedIncidentsByCourseId: SearchMonitoringDiscoveryOptions["expectedUnownedIncidentsByCourseId"],
 ) {
   for (const course of courses) {
@@ -630,7 +634,7 @@ async function refreshGenericCourseIdentities(
       const execution = await runWithProviderRequestLease("SOURCE_MISSING", async () => {
         observation.markProviderExecutionStarted();
         try {
-          return await researchGenericCourseIdentity(course, publicFetch);
+          return await researchGenericCourseIdentity(course, publicFetch, googleFetch);
         } catch {
           // A provider or review-read failure is inconclusive for this course.
           return null;
@@ -1009,6 +1013,7 @@ export async function prepareSearchMonitoring(
     .map(preference => preference.course)
     .filter(course => sourceRefreshCourseIds.has(course.id));
   await refreshGenericCourseIdentities(sourceRefreshCourses, publicFetch,
+    fetchImpl ?? fetch,
     options.expectedUnownedIncidentsByCourseId);
   await refreshMissingOfficialWebsites(
     sourceRefreshCourses,
