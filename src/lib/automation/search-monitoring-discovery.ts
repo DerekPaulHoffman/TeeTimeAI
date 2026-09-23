@@ -63,8 +63,7 @@ import {
   normalizeCourseIdentityName
 } from "@/lib/places/course-identity";
 import { normalizeLayoutHoleCounts } from "@/lib/courses/course-layout";
-import { filterPublicGolfCoursePlaces, getGooglePlacesApiKey, type GooglePlace } from "@/lib/places/google";
-import { loadActiveGooglePlaceReviewIndex } from "@/lib/places/google-place-reviews";
+import { getGooglePlacesApiKey, searchNearbyGolfCourses } from "@/lib/places/google";
 import { isSufficientNearbyCourseName, selectUniqueNearbyOfficialCourse, type NearbyOfficialCourse } from "@/lib/automation/generic-course-nearby-source";
 import { getLocalReaderCourseKey } from "@/lib/local-reader/service";
 import { prisma } from "@/lib/prisma";
@@ -513,49 +512,24 @@ export function corroborateNearbyCourseOnOfficialPage(
   return null;
 }
 
-function nearbyComponent(place: GooglePlace, type: string, field: "shortText" | "longText") {
-  const value = place.addressComponents?.find(component =>
-    Array.isArray(component.types) && component.types.includes(type))?.[field];
-  return typeof value === "string" ? value : null;
-}
-
 async function researchGenericCourseIdentity(
   course: MissingOfficialWebsiteCourse,
-  apiKey: string,
   publicFetch: typeof fetch,
 ) {
   if (!isGenericCourseName(course.name) || course.isPublic !== true ||
       !course.googlePlaceId || !course.stateCode ||
       !Number.isFinite(course.latitude) || !Number.isFinite(course.longitude)) return null;
-  const response = await publicFetch("https://places.googleapis.com/v1/places:searchNearby", {
-    method: "POST", cache: "no-store",
-    headers: {
-      "Content-Type": "application/json", "X-Goog-Api-Key": apiKey,
-      "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress,places.addressComponents,places.location,places.websiteUri,places.types,places.primaryType,places.businessStatus",
-    },
-    body: JSON.stringify({ includedPrimaryTypes: ["golf_course"], maxResultCount: 20,
-      rankPreference: "DISTANCE", languageCode: "en",
-      locationRestriction: { circle: { center: { latitude: course.latitude, longitude: course.longitude }, radius: 1_000 } },
-    }),
-  });
-  if (!response.ok) return null;
-  const payload = await response.json() as { places?: GooglePlace[] };
-  const reviewIndex = await loadActiveGooglePlaceReviewIndex();
-  const publicPlaces = filterPublicGolfCoursePlaces(payload.places ?? [], {reviewIndex});
-  const nearby: NearbyOfficialCourse[] = publicPlaces.flatMap(place => {
-    const latitude = place.location?.latitude;
-    const longitude = place.location?.longitude;
-    if (typeof place.id !== "string" || typeof place.displayName?.text !== "string" ||
-        typeof latitude !== "number" || typeof longitude !== "number" ||
-        place.primaryType !== "golf_course" || !Array.isArray(place.types) ||
-        !place.types.includes("golf_course") || place.businessStatus === "CLOSED_PERMANENTLY") return [];
-    return [{ googlePlaceId: place.id, name: place.displayName.text,
-      address: typeof place.formattedAddress === "string" ? place.formattedAddress : null,
-      city: nearbyComponent(place, "locality", "longText") ?? nearbyComponent(place, "postal_town", "longText"),
-      stateCode: nearbyComponent(place, "administrative_area_level_1", "shortText"),
-      latitude, longitude,
-      website: typeof place.websiteUri === "string" ? place.websiteUri : null }];
-  });
+  // Reuse the same reviewed, deduplicated provider discovery shown by the
+  // public course endpoint. A single Nearby rank can omit the generic feature.
+  const nearby: NearbyOfficialCourse[] = (await searchNearbyGolfCourses({
+    latitude: course.latitude, longitude: course.longitude, radiusMeters: 1_000,
+  })).map(candidate => ({
+    googlePlaceId: candidate.googlePlaceId, name: candidate.name,
+    address: candidate.address ?? null, city: candidate.city ?? null,
+    stateCode: candidate.stateCode ?? null,
+    latitude: candidate.latitude, longitude: candidate.longitude,
+    website: candidate.website ?? null,
+  }));
   const unique = selectUniqueNearbyOfficialCourse(course, nearby);
   if (!unique?.candidate.website) return null;
   const website = readSafePublicUrl(unique.candidate.website);
@@ -581,7 +555,7 @@ async function refreshGenericCourseIdentities(
       const execution = await runWithProviderRequestLease("SOURCE_MISSING", async () => {
         observation.markProviderExecutionStarted();
         try {
-          return await researchGenericCourseIdentity(course, apiKey, publicFetch);
+          return await researchGenericCourseIdentity(course, publicFetch);
         } catch {
           // A provider or review-read failure is inconclusive for this course.
           return null;

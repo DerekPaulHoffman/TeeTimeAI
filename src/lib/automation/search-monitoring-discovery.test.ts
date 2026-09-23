@@ -34,10 +34,7 @@ const localReaderMocks = vi.hoisted(() => ({
 }));
 const googlePlacesMocks = vi.hoisted(() => ({
   getGooglePlacesApiKey: vi.fn(),
-  filterPublicGolfCoursePlaces: vi.fn()
-}));
-const googlePlaceReviewMocks = vi.hoisted(() => ({
-  loadActiveGooglePlaceReviewIndex: vi.fn()
+  searchNearbyGolfCourses: vi.fn()
 }));
 
 vi.mock("@/lib/automation/db-service", () => dbMocks);
@@ -48,7 +45,6 @@ vi.mock(
 vi.mock("@/lib/automation/provider-request-lease", () => providerLeaseMocks);
 vi.mock("@/lib/local-reader/service", () => localReaderMocks);
 vi.mock("@/lib/places/google", () => googlePlacesMocks);
-vi.mock("@/lib/places/google-place-reviews", () => googlePlaceReviewMocks);
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMocks }));
 
 import { buildBrowserDiscovery } from "./browser-discovery";
@@ -230,8 +226,7 @@ describe("search monitoring discovery", () => {
     prismaMocks.course.findUnique.mockResolvedValue(null);
     localReaderMocks.getLocalReaderCourseKey.mockReturnValue(null);
     googlePlacesMocks.getGooglePlacesApiKey.mockReturnValue(undefined);
-    googlePlacesMocks.filterPublicGolfCoursePlaces.mockImplementation((places: unknown[]) => places);
-    googlePlaceReviewMocks.loadActiveGooglePlaceReviewIndex.mockResolvedValue({byPlaceId: new Map()});
+    googlePlacesMocks.searchNearbyGolfCourses.mockResolvedValue([]);
     providerObservationMocks.beginCourseProviderObservation.mockImplementation(
       async ({ courseId }: { courseId: string }) => ({
         courseId,
@@ -440,22 +435,18 @@ describe("search monitoring discovery", () => {
       website: null, detectedBookingUrl: null,
       updatedAt: new Date("2026-07-13T19:00:00.000Z")
     };
-    const namedPlace = {id: "named-course", displayName: {text: "Gateway National Golf Links"},
-      formattedAddress: "18 Golf Drive, Madison, IL 62060, USA",
-      addressComponents: [
-        {longText: "Madison", types: ["locality"]},
-        {shortText: "IL", types: ["administrative_area_level_1"]}
-      ], location: {latitude: 38.65966, longitude: -90.13945},
-      websiteUri: "https://gateway.example/", primaryType: "golf_course",
-      types: ["golf_course"], businessStatus: "OPERATIONAL"};
+    const namedPlace = {googlePlaceId: "named-course", name: "Gateway National Golf Links",
+      address: "18 Golf Drive, Madison, IL 62060, USA", city: "Madison", stateCode: "IL",
+      latitude: 38.65966, longitude: -90.13945,
+      website: "https://gateway.example/"};
+    googlePlacesMocks.searchNearbyGolfCourses.mockResolvedValue([
+      {...namedPlace, googlePlaceId: "generic-feature", name: "Golf Course",
+        address: genericCourse.address, latitude: genericCourse.latitude,
+        longitude: genericCourse.longitude, website: null},
+      namedPlace,
+    ]);
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
       const url = input.toString();
-      if (url.endsWith("places:searchNearby")) return Response.json({places: [
-        {...namedPlace, id: "generic-feature", displayName: {text: "Golf Course"},
-          formattedAddress: genericCourse.address, location: {
-            latitude: genericCourse.latitude, longitude: genericCourse.longitude}, websiteUri: undefined},
-        namedPlace,
-      ]});
       if (url === "https://gateway.example/") return new Response(
         "<html><head><title>Gateway National Golf Links</title></head><body><h1>Gateway National Golf Links</h1></body></html>",
         {status: 200, headers: {"content-type": "text/html"}}
@@ -477,6 +468,10 @@ describe("search monitoring discovery", () => {
     );
     expect(genericCourse.name).toBe("Gateway National Golf Links");
     expect(genericCourse.website).toBe("https://gateway.example/");
+    expect(googlePlacesMocks.searchNearbyGolfCourses).toHaveBeenCalledWith({
+      latitude: genericCourse.latitude, longitude: genericCourse.longitude,
+      radiusMeters: 1_000,
+    });
     expect(dbMocks.applyRecoveredOfficialWebsiteToCourse).not.toHaveBeenCalled();
   });
 
@@ -490,19 +485,15 @@ describe("search monitoring discovery", () => {
       website: null, detectedBookingUrl: null,
       updatedAt: new Date("2026-07-13T19:00:00.000Z")
     };
+    googlePlacesMocks.searchNearbyGolfCourses.mockResolvedValue([
+      {googlePlaceId: "generic-feature", name: "Golf Course", address: genericCourse.address,
+        city: "Madison", stateCode: "IL", latitude: 38.65945, longitude: -90.14365},
+      {googlePlaceId: "named-course", name: "Gateway National Golf Links",
+        address: "18 Golf Drive, Madison, IL 62060, USA", city: "Madison", stateCode: "IL",
+        latitude: 38.65966, longitude: -90.13945, website: "https://gateway.example/"},
+    ]);
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
       const url = input.toString();
-      if (url.endsWith("places:searchNearby")) return Response.json({places: [
-        {id: "generic-feature", displayName: {text: "Golf Course"},
-          location: {latitude: 38.65945, longitude: -90.14365},
-          primaryType: "golf_course", types: ["golf_course"]},
-        {id: "named-course", displayName: {text: "Gateway National Golf Links"},
-          formattedAddress: "18 Golf Drive, Madison, IL 62060, USA",
-          addressComponents: [{longText: "Madison", types: ["locality"]},
-            {shortText: "IL", types: ["administrative_area_level_1"]}],
-          location: {latitude: 38.65966, longitude: -90.13945},
-          websiteUri: "https://gateway.example/", primaryType: "golf_course", types: ["golf_course"]}
-      ]});
       if (url === "https://gateway.example/") return new Response(
         "<html><title>Different Country Club</title><h1>Different Country Club</h1></html>",
         {status: 200, headers: {"content-type": "text/html"}}
