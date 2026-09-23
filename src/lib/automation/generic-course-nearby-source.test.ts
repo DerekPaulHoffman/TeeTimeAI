@@ -44,6 +44,12 @@ describe("generic course nearby source selection", () => {
       .toMatchObject({ candidate: named });
   });
 
+  it("upgrades a public HTTP listing to a TLS candidate for first-party verification", () => {
+    const result = selectUniqueNearbyOfficialCourse(generic, [feature,
+      { ...named, website: "http://www.gateway.example/" }]);
+    expect(result?.candidate.website).toBe("https://www.gateway.example/");
+  });
+
   it("uses the postal zone only when the generic feature has no city", () => {
     const withoutCity = { ...generic, address: "Illinois 62236, USA", city: null };
     const matching = { ...named, name: "Columbia Bridges",
@@ -63,7 +69,7 @@ describe("generic course nearby source selection", () => {
     expect(selectUniqueNearbyOfficialCourse(generic, [named])).toBeNull();
     expect(selectUniqueNearbyOfficialCourse(generic, [feature, { ...named, name: "Golf Club" }]))
       .toBeNull();
-    expect(selectUniqueNearbyOfficialCourse(generic, [feature, { ...named, website: "http://gateway.example/" }]))
+    expect(selectUniqueNearbyOfficialCourse(generic, [feature, { ...named, website: "http://127.0.0.1/" }]))
       .toBeNull();
     expect(selectUniqueNearbyOfficialCourse(generic, [feature, { ...named, address: "Madison, IL 62060" }]))
       .toBeNull();

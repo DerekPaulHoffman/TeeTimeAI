@@ -53,6 +53,11 @@ function safeWebsite(value: string | null) {
   if (!value) return null;
   try {
     const url = new URL(value);
+    if (!isSafeManualEvidenceUrl(url)) return null;
+    if (url.protocol === "http:") {
+      url.protocol = "https:";
+      url.port = "";
+    }
     return url.protocol === "https:" && isSafeManualEvidenceUrl(url) ? url : null;
   } catch {
     return null;
@@ -116,5 +121,6 @@ export function selectUniqueNearbyOfficialCourse(
         website.hostname.replace(/^www\./iu, ""))) {
     return null;
   }
-  return { candidate, distanceMeters: named[0].distanceMeters };
+  return { candidate: { ...candidate, website: website.toString() },
+    distanceMeters: named[0].distanceMeters };
 }

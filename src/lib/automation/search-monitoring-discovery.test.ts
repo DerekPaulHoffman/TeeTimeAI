@@ -454,7 +454,7 @@ describe("search monitoring discovery", () => {
     const namedPlace = {googlePlaceId: "named-course", name: "Gateway National Golf Links",
       address: "18 Golf Drive, Madison, IL 62060, USA", city: "Madison", stateCode: "IL",
       latitude: 38.65966, longitude: -90.13945,
-      website: "https://gateway.example/"};
+      website: "http://gateway.example/"};
     // Public discovery filters the generic map feature out of its results.
     googlePlacesMocks.searchNearbyGolfCourses.mockResolvedValue([namedPlace]);
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
