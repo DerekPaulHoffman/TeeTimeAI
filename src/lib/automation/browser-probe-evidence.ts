@@ -869,6 +869,8 @@ export function isBlockedBackgroundTelemetryRequest(input: {
       ((["www.google-analytics.com", "google-analytics.com"].includes(url.hostname) &&
         ["/collect", "/j/collect", "/g/collect"].includes(url.pathname)) ||
        (url.hostname === "www.google.com" && url.pathname === "/ccm/collect") ||
+       (url.hostname === "csp.withgoogle.com" &&
+        /^\/csp\/proto\/[a-f0-9]{32,64}$/u.test(url.pathname)) ||
        (url.hostname === "browser-intake-datadoghq.com" && url.pathname === "/api/v2/rum") ||
        (url.hostname === "events.launchdarkly.com" && /^\/events\/bulk\/[a-f0-9]{24}$/u.test(url.pathname)))
     );
@@ -2054,8 +2056,9 @@ export function classifyRenderedOfficialPageCourseIdentity(
   );
   const targetNameAndAddressTogether = Boolean(
     course.address?.trim() &&
-    course.city?.trim() &&
     course.stateCode?.trim() &&
+    (course.city?.trim() ||
+      (course.googlePlaceIdPresent === true && /\b\d{5}\b/u.test(course.address ?? ""))) &&
     hasRenderedTargetNameAndAddressTogether(evidence.visibleText, course)
   );
   if (identityStatuses.includes("CONFLICT") && !(
@@ -2130,9 +2133,34 @@ function hasRenderedTargetNameAndAddressTogether(
     )) {
       return true;
     }
+    if (
+      course.googlePlaceIdPresent === true &&
+      !/^\s*\d{1,6}\b/u.test(course.address ?? "") &&
+      hasRenderedFirstPartyStreetAfterTargetName(section.slice(name.length), course)
+    ) {
+      return true;
+    }
     start = text.indexOf(target, start + target.length);
   }
   return false;
+}
+
+function hasRenderedFirstPartyStreetAfterTargetName(
+  afterName: string,
+  course: BrowserCourseIdentityContext,
+) {
+  const address = afterName.replace(/\s+/gu, " ").match(
+    /^\s*[:,-]?\s*\d{1,6}\s+([^,.]{3,90})\s*,\s*([^,]{2,50})\s*,\s*([A-Z]{2})\b(?:\s+(\d{5}))?/iu,
+  );
+  if (!address ||
+    !/\b(?:rd|road|st|street|ave|avenue|dr|drive|ln|lane|blvd|boulevard|way|pkwy|parkway)\b/iu.test(address[1]) ||
+    (course.city && normalizeBrowserLocalityText(address[2]) !== normalizeBrowserLocalityText(course.city)) ||
+    address[3].toLocaleUpperCase("en-US") !== course.stateCode?.toLocaleUpperCase("en-US")
+  ) {
+    return false;
+  }
+  const retainedZip = course.address?.match(/\b\d{5}\b/u)?.[0];
+  return !retainedZip || retainedZip === address[4];
 }
 
 /**

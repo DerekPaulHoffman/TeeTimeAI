@@ -14,6 +14,7 @@ import {
   finalizeBrowserInvestigationEvidence,
   finalizeBrowserEvidenceSnapshots,
   hasDistinctProviderBookingCandidate,
+  isBlockedBackgroundTelemetryRequest,
   isRestrictedBrowserNetworkObservation,
   isRelevantBrowserAccessBarrierUrl,
   isRenderedUnprojectedSourceCandidateLocalityCorroborated,
@@ -991,12 +992,38 @@ describe("browser probe evidence pipeline", () => {
     expect(classifyRenderedOfficialPageCourseIdentity(pageUrl, page(
       "Columbia Golf Club: 125 2770 N, Columbia, IL 62236. Columbia Bridges: 1655 Columbia Bridges Rd, Columbia, IL 62236."
     ), course)).toBe("MATCH");
+    const postalOnlyCourse = { ...course, address: "IL 62236 USA", googlePlaceIdPresent: true };
+    expect(classifyRenderedOfficialPageCourseIdentity(pageUrl, page(
+      "Columbia Golf Club: 125 2770 N, Columbia, IL 62236. Columbia Bridges: 1655 Columbia Bridges Rd, Columbia, IL 62236."
+    ), postalOnlyCourse)).toBe("MATCH");
+    expect(classifyRenderedOfficialPageCourseIdentity(pageUrl, page(
+      "Columbia Golf Club: 125 2770 N, Columbia, IL 62236. Columbia Bridges: 1655 Columbia Bridges Rd, Columbia, IL 62236."
+    ), { ...postalOnlyCourse, city: null })).toBe("MATCH");
+    expect(classifyRenderedOfficialPageCourseIdentity(pageUrl, page(
+      "Columbia Golf Club: 125 2770 N, Columbia, IL 62236. Columbia Bridges: 1655 Columbia Bridges Rd, Columbia, IL 62236."
+    ), { ...postalOnlyCourse, googlePlaceIdPresent: false })).not.toBe("MATCH");
+    expect(classifyRenderedOfficialPageCourseIdentity(pageUrl, page(
+      "Columbia Golf Club: 125 2770 N, Columbia, IL 62236. Columbia Bridges: 1655 Columbia Bridges Rd, Columbia, IL 62236."
+    ), { ...postalOnlyCourse, address: "IL 62237 USA" })).not.toBe("MATCH");
     expect(classifyRenderedOfficialPageCourseIdentity(pageUrl, page(
       "Columbia Bridges. Columbia Golf Club: 125 2770 N, Columbia, IL 62236."
     ), course)).not.toBe("MATCH");
     expect(classifyRenderedOfficialPageCourseIdentity(pageUrl, page(
       "Columbia Golf Club: 125 2770 N, Columbia, IL 62236. Another course: 1655 Columbia Bridges Rd, Columbia, IL 62236."
     ), course)).not.toBe("MATCH");
+  });
+
+  it("ignores only the aborted Google Sites CSP report when judging public reads", () => {
+    const report = {
+      url: "https://csp.withgoogle.com/csp/proto/6b8ce7c01e3dacd3d2c7a8cd322ff979",
+      method: "POST",
+      resourceType: "ping",
+    };
+    expect(isBlockedBackgroundTelemetryRequest(report)).toBe(true);
+    expect(isRestrictedBrowserNetworkObservation(report)).toBe(false);
+    expect(isBlockedBackgroundTelemetryRequest({ ...report, resourceType: "document" })).toBe(false);
+    expect(isBlockedBackgroundTelemetryRequest({ ...report, url: "https://csp.withgoogle.com/csp/login" })).toBe(false);
+    expect(isBlockedBackgroundTelemetryRequest({ ...report, method: "PUT" })).toBe(false);
   });
 
   it("requires locality corroboration before a rendered identity can match", () => {

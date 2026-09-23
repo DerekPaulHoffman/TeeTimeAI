@@ -23,6 +23,7 @@ import {
   resolveProviderCapability
 } from "@/lib/automation/provider-capabilities";
 import { evaluateMonitoringGate } from "@/lib/automation/policy";
+import { readForeupPublicConfiguration } from "@/lib/automation/foreup-public-configuration";
 import {
   haveCompatibleCourseNames,
   haveCompatibleOfficialPageCourseNames,
@@ -456,8 +457,13 @@ export async function enrichBrowserDiscoveryWithProviderLease(
       teeItUpDiscovery,
       leasedFetch
     );
-    const cpsDiscovery = await enrichCpsDiscovery(
+    const foreupDiscovery = await enrichForeupDiscovery(
       chronogolfDiscovery,
+      courseName,
+      leasedFetch
+    );
+    const cpsDiscovery = await enrichCpsDiscovery(
+      foreupDiscovery,
       courseName,
       leasedFetch
     );
@@ -475,6 +481,52 @@ export async function enrichBrowserDiscoveryWithProviderLease(
     }
     throw error;
   }
+}
+
+export async function enrichForeupDiscovery(
+  discovery: BrowserDiscovery,
+  courseName: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<BrowserDiscovery> {
+  const officialLink = discovery.evidence.courseIdentityCorroboration;
+  if (discovery.status !== "INSPECTED" ||
+    discovery.detectedPlatform !== "FOREUP" ||
+    discovery.evidence.learnedFrom !== "foreup-url-without-schedule" ||
+    !discovery.bookingUrl ||
+    officialLink?.kind !== "OFFICIAL_COURSE_PROVIDER_LINK" ||
+    officialLink.providerUrl !== discovery.bookingUrl ||
+    !officialLink.courseName ||
+    !haveCompatibleCourseNames(courseName, officialLink.courseName)) return discovery;
+  const configuration = await readForeupPublicConfiguration({
+    bookingUrl: discovery.bookingUrl,
+    courseName,
+    fetchImpl,
+    rethrowError: (error) => error instanceof BrowserDiscoveryEnrichmentDeferredError,
+  });
+  if (!configuration) return discovery;
+  return {
+    ...discovery,
+    status: "LEARNED",
+    detectedPlatform: "FOREUP",
+    bookingUrl: configuration.bookingBaseUrl,
+    apiEndpoint: "https://foreupsoftware.com/index.php/api/booking/times",
+    apiMetadata: {
+      scheduleId: configuration.scheduleId,
+      bookingClassId: configuration.bookingClassId,
+      bookingBaseUrl: configuration.bookingBaseUrl,
+    },
+    confidence: 0.95,
+    evidence: {
+      ...discovery.evidence,
+      observedUrls: [...new Set([
+        ...discovery.evidence.observedUrls,
+        configuration.sourceBookingUrl,
+        configuration.bookingBaseUrl,
+        "https://foreupsoftware.com/index.php/api/booking/times",
+      ])],
+      learnedFrom: "foreup-public-schedules-configuration",
+    },
+  };
 }
 
 export async function enrichTeeItUpDiscovery(

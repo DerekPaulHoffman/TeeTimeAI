@@ -3776,6 +3776,47 @@ describe("browser discovery persistence", () => {
     }
   });
 
+  it("restores a missing-source course from a verified public shared ForeUp schedule", async () => {
+    const updatedAt = new Date("2026-09-23T12:00:00.000Z");
+    const bookingUrl = "https://foreupsoftware.com/index.php/booking/19021/792#/teetimes";
+    mockedPrisma.course.findUnique
+      .mockResolvedValueOnce({
+        name: "Columbia Bridges", timeZone: "America/Chicago",
+        providerFamilyKey: "SOURCE_MISSING", detectedPlatform: "UNKNOWN",
+        detectedBookingUrl: null, website: "https://www.columbiagolfclub.net/",
+        bookingMetadata: null, isPublic: true, bookingMethod: "UNKNOWN",
+        automationEligibility: "UNKNOWN", automationReason: "NONE",
+        monitoringMode: "AUTOMATIC", bookingAccessMode: "UNKNOWN",
+        monitoringStatus: { state: "AUTO_INVESTIGATING" }, supportIncident: { resolution: null },
+        updatedAt,
+      } as never)
+      .mockResolvedValueOnce({ id: "columbia-bridges", isPublic: true } as never);
+    mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
+    const result = await applyBrowserDiscoveryToCourse({
+      courseId: "columbia-bridges", status: "LEARNED", detectedPlatform: "FOREUP",
+      sourceUrl: "https://www.columbiagolfclub.net/", bookingUrl,
+      apiEndpoint: "https://foreupsoftware.com/index.php/api/booking/times",
+      apiMetadata: { scheduleId: 792, bookingClassId: 4931, bookingBaseUrl: bookingUrl },
+      confidence: 0.95,
+      evidence: { learnedFrom: "foreup-public-schedules-configuration",
+        observedUrls: [bookingUrl], courseIdentityCorroboration: {
+          kind: "OFFICIAL_COURSE_PROVIDER_LINK", courseName: "Columbia Bridges",
+          officialWebsiteUrl: "https://www.columbiagolfclub.net/",
+          officialPageUrl: "https://www.columbiagolfclub.net/",
+          providerUrl: "https://foreupsoftware.com/index.php/booking/19021#/teetimes",
+        } },
+    });
+    expect(result).toEqual({ id: "columbia-bridges", isPublic: true });
+    expect(mockedPrisma.course.updateMany).toHaveBeenCalledWith({
+      where: { id: "columbia-bridges", updatedAt },
+      data: expect.objectContaining({
+        providerFamilyKey: "FOREUP", detectedPlatform: "FOREUP",
+        detectedBookingUrl: bookingUrl, automationEligibility: "ALLOWED",
+        bookingMetadata: { scheduleId: 792, bookingClassId: 4931, bookingBaseUrl: bookingUrl },
+      }),
+    });
+  });
+
   it.each([
     "verified source", "later owned batch", "wrong course", "wrong locality",
     "operator wins", "new success wins", "source snapshot changes", "plan changes",

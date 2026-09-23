@@ -3462,6 +3462,7 @@ export async function recordCourseMonitoringPlaybookTransition(
 
 const RENDERED_VENUE_IDENTITY_REVALIDATION = "rendered-venue-identity-v1";
 const GENERIC_COURSE_NEARBY_IDENTITY_REVALIDATION = "generic-course-nearby-source-search-v2";
+const SHARED_FOREUP_CONFIGURATION_REVALIDATION = "shared-foreup-schedules-v1";
 const genericIdentityRevalidationInclude = {
   course: { include: { monitoringStatus: true } },
 } as const;
@@ -3656,6 +3657,99 @@ async function revalidateRenderedVenueIdentityForDeployment(deploymentSha: strin
   return {considered: eligible.length, requeued, retainedAuthoritativeFinals: 0};
 }
 
+export function canRevalidateSharedForeupConfiguration(incident: RenderedIdentityRevalidationIncident) {
+  const course = incident.course;
+  const status = course?.monitoringStatus;
+  const discovery = course?.automationDiscoveries[0];
+  const evidence = asMonitoringJsonRecord(discovery?.evidence);
+  const browser = asMonitoringJsonRecord(evidence?.browserInvestigation);
+  if (!course || incident.status !== "NEEDS_HUMAN" || incident.kind !== "NEEDS_ADAPTER" ||
+    incident.failureClass !== "MISSING_SOURCE" || incident.humanReviewReason !== "SOURCE_UNVERIFIED" ||
+    incident.activeBatchId !== null || incident.decisionAt !== null ||
+    incident.resolvedAt !== null || incident.resolution !== null || incident.confirmedAt === null ||
+    course.name !== "Columbia Bridges" || course.isPublic !== true ||
+    course.monitoringMode !== "AUTOMATIC" || course.providerFamilyKey !== "SOURCE_MISSING" ||
+    course.detectedBookingUrl !== null || !course.googlePlaceId ||
+    course.stateCode !== "IL" || !/\b62236\b/u.test(course.address ?? "") ||
+    status?.state !== "ENGINEERING_VERIFICATION_NEEDED" ||
+    !discovery || discovery.createdAt < incident.confirmedAt ||
+    discovery.status !== "INSPECTED" || discovery.detectedPlatform !== "UNKNOWN" ||
+    discovery.apiMetadata !== null || evidence?.learnedFrom !== "browser-visible-links" ||
+    browser?.mode !== "INDEPENDENT" || browser.incidentCycle !== incident.cycle ||
+    browser.providerSnapshotFingerprint !== buildCourseSupportProviderSnapshotFingerprint(course) ||
+    !Array.isArray(browser.sameOriginPages) || browser.sameOriginPages.length < 1 ||
+    !Array.isArray(browser.bookingDestinations) || browser.bookingDestinations.length !== 0 ||
+    assessAutomationPlaybook(incident.attemptLedger, incident.cycle).conclusion !== "UNRESOLVED_EXHAUSTED") {
+    return false;
+  }
+  try {
+    const website = new URL(course.website ?? "");
+    return website.protocol === "https:" && website.hostname === "www.columbiagolfclub.net" &&
+      website.pathname === "/" && !website.search && !website.hash &&
+      !website.username && !website.password;
+  } catch { return false; }
+}
+
+async function revalidateSharedForeupConfigurationForDeployment(deploymentSha: string) {
+  const candidates = await prisma.courseSupportIncident.findMany({
+    where: { status: "NEEDS_HUMAN", kind: "NEEDS_ADAPTER", failureClass: "MISSING_SOURCE",
+      humanReviewReason: "SOURCE_UNVERIFIED", activeBatchId: null, decisionAt: null,
+      resolvedAt: null, resolution: null,
+      course: { is: { name: "Columbia Bridges", monitoringMode: "AUTOMATIC" } },
+      monitoringEvents: { none: { eventType: "REVALIDATION_REQUESTED",
+        readPath: SHARED_FOREUP_CONFIGURATION_REVALIDATION } },
+    }, include: renderedIdentityRevalidationInclude, take: 1,
+  });
+  let requeued = 0;
+  const eligible = candidates.filter(canRevalidateSharedForeupConfiguration);
+  for (const candidate of eligible) {
+    const changed = await runSerializedCourseMonitoringWrite(candidate.courseId, async transaction => {
+      await transaction.$queryRaw(Prisma.sql`SELECT "id" FROM "Course" WHERE "id" = ${candidate.courseId} FOR UPDATE`);
+      const incident = await transaction.courseSupportIncident.findUnique({
+        where: { id: candidate.id }, include: renderedIdentityRevalidationInclude,
+      });
+      if (!incident || !canRevalidateSharedForeupConfiguration(incident)) return false;
+      const idempotencyKey = `${SHARED_FOREUP_CONFIGURATION_REVALIDATION}:${incident.courseId}`;
+      if (await transaction.courseMonitoringEvent.findUnique({ where: { idempotencyKey }, select: { id: true } })) return false;
+      const [clock] = await transaction.$queryRaw<Array<{now: Date}>>(Prisma.sql`SELECT clock_timestamp() AS "now"`);
+      if (!(clock?.now instanceof Date) || !Number.isFinite(clock.now.getTime()))
+        throw new Error("Shared ForeUp revalidation database clock unavailable");
+      const now = clock.now;
+      const state = incident.course.monitoringStatus!;
+      const updated = await transaction.courseSupportIncident.updateMany({ where: {
+        id: incident.id, cycle: incident.cycle, revision: incident.revision, status: "NEEDS_HUMAN",
+        activeBatchId: null, decisionAt: null, resolvedAt: null, resolution: null,
+      }, data: { cycle: { increment: 1 }, revision: { increment: 1 }, status: "AUTO_INVESTIGATING",
+        confirmedAt: now, humanReviewReason: null, nextReminderAt: null, nextAttemptAt: now,
+        escalationDeadlineAt: getCourseMonitoringEscalationDeadline(now, incident.activeRealSearchCount),
+        latestMessage: "A new public shared-course schedule reader is available; verification is queued.",
+      } });
+      if (updated.count !== 1) return false;
+      const updatedStatus = await transaction.courseMonitoringStatus.updateMany({ where: {
+        courseId: incident.courseId, revision: state.revision, state: state.state,
+      }, data: { state: "AUTO_INVESTIGATING", stateChangedAt: now,
+        nextAutomaticAttemptAt: now, revalidationRequestedAt: now, revision: { increment: 1 },
+      } });
+      if (updatedStatus.count !== 1) throw new Error("Shared ForeUp revalidation lost monitoring ownership");
+      await transaction.courseMonitoringEvent.create({ data: {
+        courseId: incident.courseId, incidentId: incident.id, eventType: "REVALIDATION_REQUESTED",
+        source: "RECOVERY_CRON", readPath: SHARED_FOREUP_CONFIGURATION_REVALIDATION,
+        idempotencyKey, failureFingerprint: incident.failureFingerprint,
+        fromState: state.state, toState: "AUTO_INVESTIGATING", occurredAt: now,
+        message: "The deployed responder can now read a distinct public schedule from the retained official booking link.",
+        audit: { action: "relevant_discovery_implementation_changed",
+          implementation: SHARED_FOREUP_CONFIGURATION_REVALIDATION, deploymentSha,
+          discoveryId: incident.course.automationDiscoveries[0]!.id,
+          priorCycle: incident.cycle, cycle: incident.cycle + 1,
+          preservesPriorAttemptEvents: true, customerDataIncluded: false },
+      } });
+      return true;
+    });
+    if (changed) requeued += 1;
+  }
+  return { considered: eligible.length, requeued, retainedAuthoritativeFinals: 0 };
+}
+
 export async function revalidateCoursesForSourceQueryChange(deploymentSha: string) {
   return revalidateSourceQueries(deploymentSha, {
     getCourseMonitoringEscalationDeadline, runSerializedCourseMonitoringWrite,
@@ -3699,11 +3793,12 @@ export async function revalidateHumanReviewCoursesForDeployment(input: {
   });
   const identity = await revalidateRenderedVenueIdentityForDeployment(deploymentSha);
   const genericIdentity = await revalidateGenericCourseNearbyIdentityForDeployment(deploymentSha);
+  const sharedForeup = await revalidateSharedForeupConfigurationForDeployment(deploymentSha);
   const sourceQuery = await revalidateCoursesForSourceQueryChange(deploymentSha);
   return {
-    considered: identity.considered + genericIdentity.considered + sourceQuery.considered,
-    requeued: identity.requeued + genericIdentity.requeued + sourceQuery.requeued,
-    retainedAuthoritativeFinals: identity.retainedAuthoritativeFinals + genericIdentity.retainedAuthoritativeFinals + sourceQuery.retainedAuthoritativeFinals,
+    considered: identity.considered + genericIdentity.considered + sharedForeup.considered + sourceQuery.considered,
+    requeued: identity.requeued + genericIdentity.requeued + sharedForeup.requeued + sourceQuery.requeued,
+    retainedAuthoritativeFinals: identity.retainedAuthoritativeFinals + genericIdentity.retainedAuthoritativeFinals + sharedForeup.retainedAuthoritativeFinals + sourceQuery.retainedAuthoritativeFinals,
   };
 }
 

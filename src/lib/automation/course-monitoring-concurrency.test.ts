@@ -90,6 +90,7 @@ vi.mock("@/lib/prisma", () => ({ prisma: prismaMocks }));
 import {
   canRevalidateRenderedVenueIdentity,
   canRevalidateGenericCourseNearbyIdentity,
+  canRevalidateSharedForeupConfiguration,
   getMaterialProviderEvidenceChanges,
   invalidateReviewDerivedIdentityFinal,
   recordCourseMonitoringFailure,
@@ -9746,6 +9747,78 @@ describe("course monitoring write serialization", () => {
     expect(
       transactionMocks.courseMonitoringEvent.create,
     ).not.toHaveBeenCalled();
+  });
+
+  it("requeues only the exhausted shared ForeUp source once without changing course data or its ledger", async () => {
+    const now = new Date("2026-09-23T21:00:00Z");
+    const course = {
+      id: "bridges", name: "Columbia Bridges", address: "Illinois 62236, USA", city: null,
+      stateCode: "IL", googlePlaceId: "existing-place", website: "https://www.columbiagolfclub.net/",
+      isPublic: true, monitoringMode: "AUTOMATIC", providerFamilyKey: "SOURCE_MISSING",
+      detectedPlatform: "UNKNOWN", detectedBookingUrl: null,
+      bookingMethod: "UNKNOWN", automationEligibility: "UNKNOWN", automationReason: "NONE",
+      monitoringStatus: {state: "ENGINEERING_VERIFICATION_NEEDED", revision: 4},
+      automationDiscoveries: [] as unknown[],
+    };
+    const stages = ["OFFICIAL_IDENTITY", "TYPED_ADAPTER", "OFFICIAL_HTTP_DISCOVERY", "HTTP_ADAPTER_RETRY",
+      "RENDERED_BROWSER_DISCOVERY", "BROWSER_ADAPTER_RETRY", "LOCAL_READER", "INDEPENDENT_CONFIRMATION"] as const;
+    let ledger: unknown = null;
+    for (const [index, stage] of stages.entries()) {
+      ledger = appendAutomationPlaybookEvent(ledger, {cycle: 7, stage,
+        transition: stage === "INDEPENDENT_CONFIRMATION" ? "FAILED_TERMINAL" : "COMPLETED",
+        evidenceKind: stage === "RENDERED_BROWSER_DISCOVERY" ? "RENDERED_PAGE" : "TOOLING",
+        readPath: stage === "OFFICIAL_HTTP_DISCOVERY" ? "OFFICIAL_HTTP" :
+          stage === "RENDERED_BROWSER_DISCOVERY" ? "RENDERED_BROWSER" :
+          ["TYPED_ADAPTER", "HTTP_ADAPTER_RETRY", "BROWSER_ADAPTER_RETRY"].includes(stage) ? "TYPED_PROVIDER_ADAPTER" : stage,
+        runtimeVersion: "a".repeat(40), failureFingerprint: "SOURCE:MISSING",
+        ...(stage === "INDEPENDENT_CONFIRMATION" ? {failureClass: "MISSING_SOURCE" as const} : {}),
+        observedAt: new Date(Date.parse("2026-09-23T18:24:00Z") + index * 1000),
+        providerExecution: stage === "RENDERED_BROWSER_DISCOVERY",
+      });
+    }
+    course.automationDiscoveries = [{id: "old-browser-result", status: "INSPECTED",
+      detectedPlatform: "UNKNOWN", apiMetadata: null, createdAt: new Date("2026-09-23T18:52:00Z"),
+      evidence: {learnedFrom: "browser-visible-links", browserInvestigation: {
+        mode: "INDEPENDENT", incidentCycle: 7,
+        providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(course as never),
+        sameOriginPages: [{}], bookingDestinations: [],
+      }} }];
+    const incident = {id: "bridges-incident", courseId: course.id,
+      status: "NEEDS_HUMAN", kind: "NEEDS_ADAPTER", failureClass: "MISSING_SOURCE",
+      humanReviewReason: "SOURCE_UNVERIFIED", cycle: 7, revision: 9,
+      activeBatchId: null, decisionAt: null, resolvedAt: null, resolution: null,
+      confirmedAt: new Date("2026-09-23T18:23:49Z"), activeRealSearchCount: 0,
+      failureFingerprint: "SOURCE:MISSING", attemptLedger: ledger, course,
+    } as unknown as Parameters<typeof canRevalidateSharedForeupConfiguration>[0];
+    expect(canRevalidateSharedForeupConfiguration(incident)).toBe(true);
+    for (const changed of [
+      {...incident, activeBatchId: "owned"}, {...incident, decisionAt: now},
+      {...incident, course: {...incident.course, name: "Other Bridges"}},
+      {...incident, course: {...incident.course, website: "https://changed.example/"}},
+      {...incident, course: {...incident.course, googlePlaceId: null}},
+    ]) expect(canRevalidateSharedForeupConfiguration(changed)).toBe(false);
+    const originalLedger = structuredClone(incident.attemptLedger);
+    prismaMocks.$transaction.mockImplementation(async worker => worker(transactionMocks));
+    prismaMocks.automationRun.upsert.mockResolvedValue({id: "deployment"});
+    prismaMocks.courseSupportIncident.findMany.mockResolvedValue([incident]);
+    transactionMocks.courseSupportIncident.findUnique.mockResolvedValue(incident);
+    transactionMocks.$queryRaw.mockResolvedValue([{now}]);
+    transactionMocks.courseMonitoringEvent.findUnique.mockResolvedValue(null);
+    transactionMocks.courseSupportIncident.updateMany.mockResolvedValue({count: 1});
+    transactionMocks.courseMonitoringStatus.updateMany.mockResolvedValue({count: 1});
+    await expect(revalidateHumanReviewCoursesForDeployment({deploymentSha: "b".repeat(40), now}))
+      .resolves.toMatchObject({considered: 1, requeued: 1});
+    expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({readPath: "shared-foreup-schedules-v1",
+        audit: expect.objectContaining({priorCycle: 7, cycle: 8})}),
+    }));
+    expect(transactionMocks.courseSupportIncident.updateMany.mock.calls[0]![0].data)
+      .not.toHaveProperty("attemptLedger");
+    expect(incident.attemptLedger).toEqual(originalLedger);
+    expect(transactionMocks.course.updateMany).not.toHaveBeenCalled();
+    transactionMocks.courseMonitoringEvent.findUnique.mockResolvedValue({id: "consumed"});
+    await expect(revalidateHumanReviewCoursesForDeployment({deploymentSha: "c".repeat(40), now}))
+      .resolves.toMatchObject({requeued: 0});
   });
 
   it("requeues the observed exhausted venue identity failure once across deployments without changing its ledger or sending email", async () => {

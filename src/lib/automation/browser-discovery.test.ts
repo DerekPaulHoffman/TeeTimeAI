@@ -5,6 +5,7 @@ import {
   enrichBrowserDiscoveryWithProviderLease,
   enrichCpsDiscovery,
   enrichChronogolfDiscovery,
+  enrichForeupDiscovery,
   enrichTeeItUpDiscovery,
   enrichTeesnapDiscovery,
   evaluateBrowserDiscoveryMonitoringGate,
@@ -5292,6 +5293,54 @@ describe("buildBrowserDiscovery", () => {
     expect(discovery.detectedPlatform).toBe("FOREUP");
     expect(discovery.apiMetadata).toBeUndefined();
     expect(discovery.evidence.learnedFrom).toBe("foreup-url-without-schedule");
+  });
+
+  it("learns a shared ForeUp schedule from the linked public configuration after an API check", async () => {
+    const root = "https://foreupsoftware.com/index.php/booking/19021#/teetimes";
+    const source = "https://www.columbiagolfclub.net/";
+    const discovery = buildBrowserDiscovery({
+      courseId: "bridges", courseName: "Columbia Bridges", sourceUrl: source,
+      officialCourseWebsite: source,
+      officialPage: {
+        url: source, courseName: "Columbia Bridges",
+        linkCandidates: [{ url: root, label: "Book Tee Time" }],
+        visibleText: "Columbia Bridges: 1655 Columbia Bridges Rd, Columbia, IL 62236",
+      },
+      finalUrl: root, observedUrls: [source, root],
+      linkCandidates: [{ url: root, label: "Book Tee Time" }],
+      visibleText: "Columbia Bridges: 1655 Columbia Bridges Rd, Columbia, IL 62236",
+    });
+    expect(discovery).toMatchObject({ status: "INSPECTED", detectedPlatform: "FOREUP" });
+    expect(discovery.evidence.courseIdentityCorroboration?.providerUrl).toBe(root);
+    const schedules = [
+      { course_id: "19021", title: "Bridges", teesheet_id: "792", booking_classes: [
+        { teesheet_id: "792", booking_class_id: "4931", active: "1", hidden: "0" },
+      ] },
+      { course_id: "19021", title: "Columbia", teesheet_id: "781", booking_classes: [
+        { teesheet_id: "781", booking_class_id: "4930", active: "1", hidden: "0" },
+      ] },
+    ];
+    const fetchImpl = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(`<script>SCHEDULES = ${JSON.stringify(schedules)};</script>`, {
+        status: 200, headers: { "content-type": "text/html" },
+      }))
+      .mockResolvedValueOnce(new Response("[]", {
+        status: 200, headers: { "content-type": "application/json" },
+      }));
+    const learned = await enrichForeupDiscovery(discovery, "Columbia Bridges", fetchImpl);
+    expect(learned).toMatchObject({
+      status: "LEARNED", detectedPlatform: "FOREUP",
+      bookingUrl: "https://foreupsoftware.com/index.php/booking/19021/792#/teetimes",
+      apiMetadata: { scheduleId: 792, bookingClassId: 4931 },
+      evidence: { learnedFrom: "foreup-public-schedules-configuration" },
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    const uncorroborated = { ...discovery, evidence: {
+      ...discovery.evidence, courseIdentityCorroboration: undefined,
+    } };
+    expect(await enrichForeupDiscovery(uncorroborated, "Columbia Bridges", fetchImpl))
+      .toBe(uncorroborated);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
   it("learns the real ForeUP schedule from an API request behind a one-segment booking root", () => {
