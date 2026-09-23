@@ -170,6 +170,7 @@ import {
   grantOwnedCourseSupportVerificationStageDeadline,
   hasExactRuntimeBrowserProviderExecutionEvidence,
   getOwnedCourseSupportSourceSearchContext,
+  getOwnedGenericCourseSourceResearchInput,
   hasCourseSupportImplementationExecutionProofIncludingHistory,
   heartbeatCourseSupportBatch,
   inspectCourseSupportQueue,
@@ -20200,6 +20201,34 @@ describe("course-support batch ordinals", () => {
     attempt.playbookEventCountAtClaim = (batch.incidents[0].incident.attemptLedger as { events: unknown[] }).events.length;
     return batch;
   }
+
+  it("exposes nearby research only for the live owned generic source-search attempt", async () => {
+    const batch = sourceSearchBatch();
+    Object.assign(batch.incidents[0].course, {
+      name: "Golf Course", googlePlaceId: "generic-place", isPublic: true,
+      latitude: 39.78, longitude: -89.64,
+    });
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.monitoringEventFindUnique.mockResolvedValue(null);
+    const owner = {batchId: "batch-1", leaseToken: "lease-1",
+      ownerThreadId: "owner-thread", ordinal: 1,
+      now: new Date("2026-07-15T19:46:00.000Z")};
+    const context = await getOwnedCourseSupportSourceSearchContext(owner);
+    if (context.outcome !== "ready" || !("privateContext" in context))
+      throw new Error("Expected owned source-search context");
+    const request = {...owner, attemptRef: context.privateContext.attemptRef};
+    await expect(getOwnedGenericCourseSourceResearchInput(request)).resolves.toMatchObject({
+      name: "Golf Course", googlePlaceId: "generic-place", latitude: 39.78,
+    });
+    await expect(getOwnedGenericCourseSourceResearchInput({...request,
+      attemptRef: "0".repeat(64)})).resolves.toBeNull();
+    prismaMocks.monitoringEventFindUnique.mockResolvedValue({id: "already-recorded"});
+    await expect(getOwnedGenericCourseSourceResearchInput(request)).resolves.toBeNull();
+    expect(prismaMocks.batchFindFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({id: "batch-1",
+        leaseToken: "lease-1", ownerThreadId: "owner-thread"}),
+    }));
+  });
 
   function useRetainedSourceTransaction(batch: ReturnType<typeof retainedSourceSearchBatch>) {
     prismaMocks.batchFindFirst.mockResolvedValue(batch);

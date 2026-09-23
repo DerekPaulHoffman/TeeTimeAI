@@ -18,6 +18,7 @@ import type {
 import { evaluateMonitoringGate, isCoherentManualDisposition } from "@/lib/automation/policy";
 import { syntheticWebsiteTrafficClasses } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
+import { isGenericCourseName } from "@/lib/places/course-identity";
 import { readCustomerRecovery } from "./course-support-customer-recovery";
 
 import {
@@ -6374,9 +6375,12 @@ const courseSupportSourceSearchBatchSelect = {
         select: {
           id: true,
           name: true,
+          googlePlaceId: true,
           address: true,
           city: true,
           stateCode: true,
+          latitude: true,
+          longitude: true,
           timeZone: true,
           isPublic: true,
           website: true,
@@ -6519,6 +6523,45 @@ export async function getOwnedCourseSupportSourceSearchContext(input: {
     archiveReason:
       "The owned responder must perform one exact read-only source search.",
   };
+}
+
+/** Internal research input, available only while the exact source-search
+ * attempt still belongs to this batch and its current playbook stage. */
+export async function getOwnedGenericCourseSourceResearchInput(input: {
+  batchId: string;
+  leaseToken: string;
+  ownerThreadId: string;
+  ordinal: number;
+  attemptRef: string;
+  now?: Date;
+}) {
+  validateCourseSupportSourceSearchOrdinal(input.ordinal);
+  const now = input.now ?? new Date();
+  const batch = await prisma.courseSupportBatch.findFirst({
+    where: {id: input.batchId, leaseToken: input.leaseToken,
+      ownerThreadId: input.ownerThreadId, status: {in: ACTIVE_BATCH_STATUSES},
+      leaseExpiresAt: {gt: now}},
+    select: courseSupportSourceSearchBatchSelect,
+  });
+  if (!batch) return null;
+  const resolved = resolveOwnedCourseSupportSourceSearchEntry({
+    batchId: input.batchId, batch, ordinal: input.ordinal,
+    requireRenderedStage: true, now,
+  });
+  if (resolved.outcome !== "ready" || resolved.attemptRef !== input.attemptRef ||
+      resolved.retainedSourceRecovery ||
+      await prisma.courseMonitoringEvent.findUnique({
+        where: {idempotencyKey: resolved.resultKey}, select: {id: true},
+      })) return null;
+  const course = resolved.entry.course;
+  if (!isGenericCourseName(course.name) || course.isPublic !== true ||
+      !course.googlePlaceId || !course.stateCode ||
+      !Number.isFinite(course.latitude) || !Number.isFinite(course.longitude)) return null;
+  return {id: course.id, name: course.name, googlePlaceId: course.googlePlaceId,
+    address: course.address, city: course.city, stateCode: course.stateCode,
+    latitude: course.latitude, longitude: course.longitude,
+    website: course.website, isPublic: course.isPublic,
+    detectedBookingUrl: course.detectedBookingUrl, updatedAt: course.updatedAt};
 }
 
 export async function recordOwnedCourseSupportSourceSearchResult(input: {

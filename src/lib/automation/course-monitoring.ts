@@ -3461,7 +3461,7 @@ export async function recordCourseMonitoringPlaybookTransition(
 }
 
 const RENDERED_VENUE_IDENTITY_REVALIDATION = "rendered-venue-identity-v1";
-const GENERIC_COURSE_NEARBY_IDENTITY_REVALIDATION = "generic-course-nearby-identity-v1";
+const GENERIC_COURSE_NEARBY_IDENTITY_REVALIDATION = "generic-course-nearby-source-search-v2";
 const genericIdentityRevalidationInclude = {
   course: { include: { monitoringStatus: true } },
 } as const;
@@ -3471,10 +3471,13 @@ type GenericIdentityRevalidationIncident = Prisma.CourseSupportIncidentGetPayloa
 
 export function canRevalidateGenericCourseNearbyIdentity(incident: GenericIdentityRevalidationIncident) {
   const course = incident.course;
-  if (!course || incident.status !== "NEEDS_HUMAN" || incident.activeBatchId !== null ||
+  const expectedState = incident.status === "NEEDS_HUMAN"
+    ? "ENGINEERING_VERIFICATION_NEEDED" : incident.status === "AUTO_INVESTIGATING"
+      ? "AUTO_INVESTIGATING" : null;
+  if (!course || !expectedState || incident.activeBatchId !== null ||
       incident.decisionAt !== null || incident.resolvedAt !== null || incident.resolution !== null ||
       incident.confirmedAt === null || !["MISSING_SOURCE", "MISSING_METADATA"].includes(incident.failureClass) ||
-      course.monitoringStatus?.state !== "ENGINEERING_VERIFICATION_NEEDED" ||
+      course.monitoringStatus?.state !== expectedState ||
       course.isPublic !== true || course.monitoringMode !== "AUTOMATIC" ||
       !isGenericCourseName(course.name) || !course.googlePlaceId || !course.stateCode ||
       !Number.isFinite(course.latitude) || !Number.isFinite(course.longitude) ||
@@ -3491,13 +3494,17 @@ export function canRevalidateGenericCourseNearbyIdentity(incident: GenericIdenti
 
 async function revalidateGenericCourseNearbyIdentityForDeployment(deploymentSha: string) {
   const candidates = await prisma.courseSupportIncident.findMany({
-    where: {status: "NEEDS_HUMAN", activeBatchId: null, decisionAt: null,
+    where: {status: {in: ["NEEDS_HUMAN", "AUTO_INVESTIGATING"]}, activeBatchId: null, decisionAt: null,
       resolvedAt: null, resolution: null,
       failureClass: {in: ["MISSING_SOURCE", "MISSING_METADATA"]},
       course: {is: {isPublic: true, monitoringMode: "AUTOMATIC",
         name: {in: ["Golf Course", "Golf Club"]}}},
-      monitoringEvents: {none: {eventType: "REVALIDATION_REQUESTED",
-        readPath: GENERIC_COURSE_NEARBY_IDENTITY_REVALIDATION}},
+      monitoringEvents: {
+        some: {eventType: "REVALIDATION_REQUESTED",
+          readPath: "generic-course-nearby-identity-v1"},
+        none: {eventType: "REVALIDATION_REQUESTED",
+          readPath: GENERIC_COURSE_NEARBY_IDENTITY_REVALIDATION},
+      },
     }, include: genericIdentityRevalidationInclude,
     orderBy: [{activeRealSearchCount: "desc"}, {createdAt: "asc"}], take: 30,
   });
@@ -3517,7 +3524,7 @@ async function revalidateGenericCourseNearbyIdentityForDeployment(deploymentSha:
       const now = clock.now;
       const status = incident.course.monitoringStatus!;
       const updated = await transaction.courseSupportIncident.updateMany({where: {
-        id: incident.id, cycle: incident.cycle, revision: incident.revision, status: "NEEDS_HUMAN",
+        id: incident.id, cycle: incident.cycle, revision: incident.revision, status: incident.status,
         activeBatchId: null, decisionAt: null, resolvedAt: null, resolution: null,
       }, data: {cycle: {increment: 1}, revision: {increment: 1}, status: "AUTO_INVESTIGATING",
         confirmedAt: now, humanReviewReason: null, nextReminderAt: null, nextAttemptAt: now,

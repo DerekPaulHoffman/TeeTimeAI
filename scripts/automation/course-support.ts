@@ -27,6 +27,7 @@ import {
   getCourseSupportBatchRecoveryProvenance,
   grantOwnedCourseSupportVerificationStageDeadline,
   getOwnedCourseSupportLeaseToken,
+  getOwnedGenericCourseSourceResearchInput,
   getOwnedCourseSupportSourceSearchContext,
   heartbeatCourseSupportBatch,
   inspectCourseSupportQueue,
@@ -40,6 +41,8 @@ import {
   type CourseSupportReleaseAdvanceProof
 } from "@/lib/automation/course-support-batches";
 import { getAutomationRuntimeVersion } from "@/lib/automation/runtime-version";
+import { createAddressPinnedPublicFetch, researchGenericCourseIdentity } from "@/lib/automation/search-monitoring-discovery";
+import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
 import {
   AUTOMATION_WORKERS,
   completeAutomationWorker,
@@ -881,14 +884,43 @@ async function recordSourceSearch(args: string[]) {
   const options = parseCourseSupportSourceSearchResultOptions(args);
   const leaseToken = await getOwnedCourseSupportLeaseToken({ batchId, ownerThreadId });
   const runtimeVersion = await resolveSourceSearchRuntimeVersion(batchId);
+  let candidateUrl = options.candidateUrl;
+  let noUnique = options.noUnique;
+  if (noUnique) {
+    const course = await getOwnedGenericCourseSourceResearchInput({
+      batchId, leaseToken, ownerThreadId, ordinal: options.ordinal,
+      attemptRef: options.attemptRef,
+    });
+    if (course) {
+      // The exact web search may be ambiguous even when the reviewed nearby
+      // Places pass and the candidate's first-party page agree on one source.
+      // This only records a candidate; the owned browser stage verifies it.
+      try {
+        const research = await runWithProviderRequestLease("SOURCE_MISSING", () =>
+          researchGenericCourseIdentity(course, createAddressPinnedPublicFetch()));
+        if (!research.acquired) {
+          return {outcome: "deferred_busy" as const, durableCloseoutRecorded: false,
+            threadDisposition: "KEEP_VISIBLE" as const,
+            archiveReason: "Nearby source research is deferred by provider concurrency."};
+        }
+        if (research.value) {
+          candidateUrl = research.value.website;
+          noUnique = false;
+        }
+      } catch {
+        // The explicit web search still has a valid no-unique result. A
+        // transient provider failure cannot turn it into a trusted source.
+      }
+    }
+  }
   return recordOwnedCourseSupportSourceSearchResult({
     batchId,
     leaseToken,
     ownerThreadId,
     ordinal: options.ordinal,
     attemptRef: options.attemptRef,
-    candidateUrl: options.candidateUrl,
-    noUnique: options.noUnique,
+    candidateUrl,
+    noUnique,
     runtimeVersion
   });
 }

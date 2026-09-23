@@ -512,7 +512,7 @@ export function corroborateNearbyCourseOnOfficialPage(
   return null;
 }
 
-async function researchGenericCourseIdentity(
+export async function researchGenericCourseIdentity(
   course: MissingOfficialWebsiteCourse,
   publicFetch: typeof fetch,
 ) {

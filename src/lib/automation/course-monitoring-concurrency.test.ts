@@ -9874,12 +9874,29 @@ describe("course monitoring write serialization", () => {
     transactionMocks.courseMonitoringStatus.updateMany.mockResolvedValue({count: 1});
     await expect(revalidateHumanReviewCoursesForDeployment({deploymentSha: "b".repeat(40), now}))
       .resolves.toMatchObject({considered: 1, requeued: 1});
+    expect(prismaMocks.courseSupportIncident.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({monitoringEvents: {
+        some: {eventType: "REVALIDATION_REQUESTED", readPath: "generic-course-nearby-identity-v1"},
+        none: {eventType: "REVALIDATION_REQUESTED", readPath: "generic-course-nearby-source-search-v2"},
+      }}),
+    }));
     expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({readPath: "generic-course-nearby-identity-v1",
+      data: expect.objectContaining({readPath: "generic-course-nearby-source-search-v2",
         eventType: "REVALIDATION_REQUESTED"})}));
     expect(transactionMocks.courseSupportIncident.updateMany.mock.calls[0]![0].data)
       .not.toHaveProperty("attemptLedger");
     expect(transactionMocks.teeSearch.updateMany).not.toHaveBeenCalled();
+    const automaticallyRetrying = {...incident, status: "AUTO_INVESTIGATING",
+      course: {...incident.course, monitoringStatus: {state: "AUTO_INVESTIGATING", revision: 3}}};
+    expect(canRevalidateGenericCourseNearbyIdentity(automaticallyRetrying)).toBe(true);
+    prismaMocks.courseSupportIncident.findMany.mockResolvedValue([automaticallyRetrying]);
+    transactionMocks.courseSupportIncident.findUnique.mockResolvedValue(automaticallyRetrying);
+    transactionMocks.courseSupportIncident.updateMany.mockClear();
+    await expect(revalidateHumanReviewCoursesForDeployment({deploymentSha: "d".repeat(40), now}))
+      .resolves.toMatchObject({requeued: 1});
+    expect(transactionMocks.courseSupportIncident.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({status: "AUTO_INVESTIGATING", activeBatchId: null}),
+    }));
     transactionMocks.courseMonitoringEvent.findUnique.mockResolvedValue({id: "already-requested"});
     await expect(revalidateHumanReviewCoursesForDeployment({deploymentSha: "c".repeat(40), now}))
       .resolves.toMatchObject({requeued: 0});
