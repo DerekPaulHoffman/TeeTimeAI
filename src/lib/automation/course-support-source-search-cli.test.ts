@@ -6,7 +6,11 @@ const sourceCommandMocks = vi.hoisted(() => ({
   getLease: vi.fn(),
   getProvenance: vi.fn(),
   getContext: vi.fn(),
+  getGenericResearchInput: vi.fn(),
   recordResult: vi.fn(),
+  researchGeneric: vi.fn(),
+  runProviderLease: vi.fn(),
+  createPublicFetch: vi.fn(),
 }));
 
 vi.mock("node:child_process", async (importOriginal) => {
@@ -24,7 +28,18 @@ vi.mock("@/lib/automation/course-support-batches", async (importOriginal) => ({
   getOwnedCourseSupportLeaseToken: sourceCommandMocks.getLease,
   getCourseSupportBatchRecoveryProvenance: sourceCommandMocks.getProvenance,
   getOwnedCourseSupportSourceSearchContext: sourceCommandMocks.getContext,
+  getOwnedGenericCourseSourceResearchInput: sourceCommandMocks.getGenericResearchInput,
   recordOwnedCourseSupportSourceSearchResult: sourceCommandMocks.recordResult,
+}));
+
+vi.mock("@/lib/automation/search-monitoring-discovery", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./search-monitoring-discovery")>(),
+  researchGenericCourseIdentity: sourceCommandMocks.researchGeneric,
+  createAddressPinnedPublicFetch: sourceCommandMocks.createPublicFetch,
+}));
+
+vi.mock("@/lib/automation/provider-request-lease", () => ({
+  runWithProviderRequestLease: sourceCommandMocks.runProviderLease,
 }));
 
 import {
@@ -163,6 +178,11 @@ describe("source-search command Git provenance", () => {
       ...provenance, plannedPaths: [], remediationDirective: null,
     }));
     sourceCommandMocks.getContext.mockResolvedValue(context);
+    sourceCommandMocks.getGenericResearchInput.mockResolvedValue(null);
+    sourceCommandMocks.researchGeneric.mockResolvedValue(null);
+    sourceCommandMocks.createPublicFetch.mockReturnValue(providerFetch);
+    sourceCommandMocks.runProviderLease.mockImplementation(async (_family: string,
+      worker: () => Promise<unknown>) => ({acquired: true, value: await worker()}));
     sourceCommandMocks.recordResult.mockImplementation(async (input: { noUnique: boolean }) => ({
       outcome: "recorded", result: input.noUnique ? "NO_UNIQUE" : "CANDIDATE", replayed: false,
     }));
@@ -229,6 +249,31 @@ describe("source-search command Git provenance", () => {
     expect(getAutomationRuntimeVersion()).toBe(environment.ambientRuntime);
     expect(process.env.VERCEL_GIT_COMMIT_SHA).toBe(environment.commit);
     expect(process.env.VERCEL_DEPLOYMENT_ID).toBe(environment.deployment);
+  });
+
+  it("records a corroborated nearby source under the owned no-unique attempt", async () => {
+    sourceCommandMocks.getGenericResearchInput.mockResolvedValueOnce({
+      id: "generic-course", name: "Golf Course", googlePlaceId: "generic-feature",
+      address: "10 Main Street", city: "Springfield", stateCode: "MA",
+      latitude: 42.1, longitude: -72.6, website: null, isPublic: true,
+      detectedBookingUrl: null, updatedAt: new Date(),
+    });
+    sourceCommandMocks.researchGeneric.mockResolvedValueOnce({
+      name: "Springfield Golf Club", website: "https://course.example/",
+      candidatePlaceId: "named-feature", evidenceUrl: "https://course.example/",
+    });
+
+    await run(commandCases[2]!);
+
+    expect(sourceCommandMocks.getGenericResearchInput).toHaveBeenCalledExactlyOnceWith({
+      batchId, leaseToken, ownerThreadId, ordinal: 1, attemptRef,
+    });
+    expect(sourceCommandMocks.runProviderLease).toHaveBeenCalledExactlyOnceWith(
+      "SOURCE_MISSING", expect.any(Function));
+    expect(sourceCommandMocks.recordResult).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      candidateUrl: "https://course.example/", noUnique: false,
+    }));
+    expect(providerFetch).not.toHaveBeenCalled();
   });
 
   const invalidCases = [
