@@ -89,6 +89,7 @@ vi.mock("@/lib/prisma", () => ({ prisma: prismaMocks }));
 
 import {
   canRevalidateRenderedVenueIdentity,
+  canRevalidateGenericCourseNearbyIdentity,
   getMaterialProviderEvidenceChanges,
   invalidateReviewDerivedIdentityFinal,
   recordCourseMonitoringFailure,
@@ -9785,6 +9786,15 @@ describe("course monitoring write serialization", () => {
       activeBatchId: null, decisionAt: null, resolvedAt: null, resolution: null, confirmedAt: new Date("2026-09-07T20:04:20Z"),
       activeRealSearchCount: 0, failureClass: "MISSING_SOURCE", failureFingerprint: "SOURCE:MISSING", attemptLedger: ledger, course,
     } as unknown as Parameters<typeof canRevalidateRenderedVenueIdentity>[0];
+    const genericIncident = {...incident, course: {...incident.course,
+      name: "Golf Course", googlePlaceId: "generic-feature", website: null,
+      latitude: 41.7, longitude: -93.5,
+    }} as Parameters<typeof canRevalidateGenericCourseNearbyIdentity>[0];
+    expect(canRevalidateGenericCourseNearbyIdentity(genericIncident)).toBe(true);
+    expect(canRevalidateGenericCourseNearbyIdentity({...genericIncident,
+      course: {...genericIncident.course, city: null, address: "Illinois, USA"}})).toBe(false);
+    expect(canRevalidateGenericCourseNearbyIdentity({...genericIncident,
+      activeBatchId: "another-owner"})).toBe(false);
     expect(canRevalidateRenderedVenueIdentity(incident)).toBe(true);
     for (const changed of [
       {...incident, activeBatchId: "other-owner"},
@@ -9822,6 +9832,57 @@ describe("course monitoring write serialization", () => {
     transactionMocks.courseMonitoringEvent.findUnique.mockResolvedValue(null);
     transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({...incident, activeBatchId: "new-owner"});
     await expect(revalidateHumanReviewCoursesForDeployment({deploymentSha: "d".repeat(40), now})).resolves.toMatchObject({requeued: 0});
+    expect(transactionMocks.courseSupportIncident.updateMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("reopens an unowned exhausted generic course once for the new nearby identity path", async () => {
+    const now = new Date("2026-09-23T13:10:00Z");
+    let ledger: unknown = null;
+    const stages = ["OFFICIAL_IDENTITY", "TYPED_ADAPTER", "OFFICIAL_HTTP_DISCOVERY", "HTTP_ADAPTER_RETRY",
+      "RENDERED_BROWSER_DISCOVERY", "BROWSER_ADAPTER_RETRY", "LOCAL_READER", "INDEPENDENT_CONFIRMATION"] as const;
+    for (const [index, stage] of stages.entries()) ledger = appendAutomationPlaybookEvent(ledger, {
+      cycle: 3, stage, transition: stage === "INDEPENDENT_CONFIRMATION" ? "FAILED_TERMINAL" : "COMPLETED",
+      evidenceKind: "TOOLING",
+      readPath: stage === "OFFICIAL_HTTP_DISCOVERY" ? "OFFICIAL_HTTP" :
+        stage === "RENDERED_BROWSER_DISCOVERY" ? "RENDERED_BROWSER" :
+        ["TYPED_ADAPTER", "HTTP_ADAPTER_RETRY", "BROWSER_ADAPTER_RETRY"].includes(stage)
+          ? "TYPED_PROVIDER_ADAPTER" : stage,
+      runtimeVersion: "a".repeat(40),
+      failureFingerprint: "SOURCE:MISSING",
+      ...(stage === "INDEPENDENT_CONFIRMATION" ? {failureClass: "MISSING_SOURCE" as const} : {}),
+      observedAt: new Date(Date.parse("2026-09-22T13:10:00Z") + index * 1000),
+    });
+    const incident = {id: "generic-incident", courseId: "generic-course", status: "NEEDS_HUMAN",
+      cycle: 3, revision: 5, activeBatchId: null, decisionAt: null, resolvedAt: null,
+      resolution: null, confirmedAt: new Date("2026-09-22T13:00:00Z"),
+      activeRealSearchCount: 0, failureClass: "MISSING_SOURCE", failureFingerprint: "SOURCE:MISSING",
+      attemptLedger: ledger,
+      course: {id: "generic-course", name: "Golf Course", googlePlaceId: "generic-feature",
+        address: "Madison, IL 62201, USA", city: "Madison", stateCode: "IL",
+        latitude: 38.65945, longitude: -90.14365, website: null, isPublic: true,
+        monitoringMode: "AUTOMATIC", automationDiscoveries: [],
+        monitoringStatus: {state: "ENGINEERING_VERIFICATION_NEEDED", revision: 2}},
+    } as unknown as Parameters<typeof canRevalidateGenericCourseNearbyIdentity>[0];
+    expect(canRevalidateGenericCourseNearbyIdentity(incident)).toBe(true);
+    prismaMocks.$transaction.mockImplementation(async worker => worker(transactionMocks));
+    prismaMocks.automationRun.upsert.mockResolvedValue({id: "deployment"});
+    prismaMocks.courseSupportIncident.findMany.mockResolvedValue([incident]);
+    transactionMocks.courseSupportIncident.findUnique.mockResolvedValue(incident);
+    transactionMocks.$queryRaw.mockResolvedValue([{now}]);
+    transactionMocks.courseMonitoringEvent.findUnique.mockResolvedValue(null);
+    transactionMocks.courseSupportIncident.updateMany.mockResolvedValue({count: 1});
+    transactionMocks.courseMonitoringStatus.updateMany.mockResolvedValue({count: 1});
+    await expect(revalidateHumanReviewCoursesForDeployment({deploymentSha: "b".repeat(40), now}))
+      .resolves.toMatchObject({considered: 1, requeued: 1});
+    expect(transactionMocks.courseMonitoringEvent.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({readPath: "generic-course-nearby-identity-v1",
+        eventType: "REVALIDATION_REQUESTED"})}));
+    expect(transactionMocks.courseSupportIncident.updateMany.mock.calls[0]![0].data)
+      .not.toHaveProperty("attemptLedger");
+    expect(transactionMocks.teeSearch.updateMany).not.toHaveBeenCalled();
+    transactionMocks.courseMonitoringEvent.findUnique.mockResolvedValue({id: "already-requested"});
+    await expect(revalidateHumanReviewCoursesForDeployment({deploymentSha: "c".repeat(40), now}))
+      .resolves.toMatchObject({requeued: 0});
     expect(transactionMocks.courseSupportIncident.updateMany).toHaveBeenCalledTimes(1);
   });
 

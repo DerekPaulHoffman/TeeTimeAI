@@ -101,6 +101,7 @@ import {
 } from "./provider-capabilities";
 import { evaluateMonitoringGate } from "./policy";
 import { getAutomationRuntimeVersion } from "./runtime-version";
+import { isSufficientNearbyCourseName } from "./generic-course-nearby-source";
 
 export { recordCourseBookingFacts };
 
@@ -1900,6 +1901,74 @@ function hasDirectOwnedReplacementSourceProof(
     return null;
   }
   return { resolvedCourseName };
+}
+
+/** Promote a generic map feature only after a unique nearby Places identity and
+ * that candidate's first-party page agree on the explicit course name. */
+export async function applyRecoveredGenericCourseIdentityToCourse(input: {
+  courseId: string;
+  name: string;
+  website: string;
+  candidatePlaceId: string;
+  evidenceUrl: string;
+  expectedUpdatedAt: Date;
+  expectedUnownedIncident?: BrowserDiscoveryUnownedIncidentExpectation;
+  observedAt?: Date;
+  providerObservation?: CourseProviderObservationLease;
+}) {
+  const website = parseSafePublicUrl(input.website);
+  const evidenceUrl = parseSafePublicUrl(input.evidenceUrl);
+  if (!website || !evidenceUrl || website.protocol !== "https:" ||
+      evidenceUrl.protocol !== "https:" || !isSafeManualEvidenceUrl(website) ||
+      !isSafeManualEvidenceUrl(evidenceUrl) ||
+      website.hostname.replace(/^www\./iu, "") !== evidenceUrl.hostname.replace(/^www\./iu, "") ||
+      !isSufficientNearbyCourseName(input.name) ||
+      !input.candidatePlaceId.trim() ||
+      !(input.expectedUpdatedAt instanceof Date) || !Number.isFinite(input.expectedUpdatedAt.getTime())) {
+    throw new Error("Recovered generic course identity requires corroborated public evidence and a snapshot");
+  }
+  const observedAt = resolveTrustedDiscoveryObservedAt(input.observedAt);
+  return runSerializedCourseMonitoringWrite(input.courseId, async transaction => {
+    await assertCourseProviderObservationOwnedForWrite(transaction, input.courseId, input.providerObservation);
+    const current = await transaction.course.findUnique({
+      where: {id: input.courseId},
+      include: {monitoringStatus: {select: {state: true}}, supportIncident: {select: {resolution: true}}},
+    });
+    if (!current || !isGenericCourseName(current.name) || current.isPublic !== true ||
+        !current.googlePlaceId ||
+        current.googlePlaceId.replace(/^places\//u, "") === input.candidatePlaceId.replace(/^places\//u, "") ||
+        current.updatedAt.getTime() !== input.expectedUpdatedAt.getTime() ||
+        current.website && (() => {
+          try { return new URL(current.website).hostname.replace(/^www\./iu, "") !==
+            website.hostname.replace(/^www\./iu, ""); } catch { return true; }
+        })() || hasAuthoritativeFactualCourseFinal(current)) return null;
+    if (!(await reserveUnownedIncidentForBrowserDiscovery(transaction, input.courseId,
+      input.expectedUnownedIncident))) return null;
+    const updated = await transaction.course.updateMany({where: {
+      id: input.courseId, updatedAt: input.expectedUpdatedAt, name: current.name,
+      isPublic: true, googlePlaceId: current.googlePlaceId,
+    }, data: {name: input.name.trim(), website: website.toString()}});
+    if (updated.count !== 1) return null;
+    const applied = await transaction.course.findUnique({where: {id: input.courseId}});
+    if (!applied) return null;
+    await revalidateCourseMonitoringForProviderEvidenceChangeInTransaction(transaction, {
+      courseId: input.courseId, before: current, after: applied,
+      providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(applied),
+      source: "SEARCH_WORKFLOW", now: observedAt,
+    });
+    const persisted = await createCourseAutomationDiscoveryWithCourseFence(transaction, {
+      courseId: input.courseId, status: "INSPECTED", detectedPlatform: "UNKNOWN",
+      bookingMethod: "UNKNOWN", automationEligibility: "UNKNOWN", automationReason: "NONE",
+      bookingAccessMode: "UNKNOWN", sourceUrl: website.toString(), bookingUrl: null,
+      confidence: 0.95, createdAt: observedAt,
+      evidence: {learnedFrom: "nearby-google-place-and-first-party-course-page",
+        observedUrls: [website.toString(), evidenceUrl.toString()],
+        candidatePlaceId: input.candidatePlaceId, originalPlaceId: current.googlePlaceId,
+        originalGenericName: current.name, corroboratedName: input.name.trim(),
+        courseProjectionApplied: true, customerDataIncluded: false},
+    });
+    return {...applied, updatedAt: persisted.courseUpdatedAt};
+  });
 }
 
 export async function recordAndApplyOwnedBrowserDiscoveryToCourse(

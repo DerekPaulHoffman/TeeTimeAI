@@ -30,6 +30,7 @@ import {
 import { syntheticWebsiteTrafficClasses } from "@/lib/engagement/traffic-class";
 import { localReaderResultSchema } from "@/lib/local-reader/contracts";
 import { prisma } from "@/lib/prisma";
+import { isGenericCourseName } from "@/lib/places/course-identity";
 
 import { sanitizeResponderText } from "./course-support-responder-policy";
 import { revalidateCoursesForSourceQueryChange as revalidateSourceQueries } from "./course-support-source-query-revalidation";
@@ -3460,6 +3461,92 @@ export async function recordCourseMonitoringPlaybookTransition(
 }
 
 const RENDERED_VENUE_IDENTITY_REVALIDATION = "rendered-venue-identity-v1";
+const GENERIC_COURSE_NEARBY_IDENTITY_REVALIDATION = "generic-course-nearby-identity-v1";
+const genericIdentityRevalidationInclude = {
+  course: { include: { monitoringStatus: true } },
+} as const;
+type GenericIdentityRevalidationIncident = Prisma.CourseSupportIncidentGetPayload<{
+  include: typeof genericIdentityRevalidationInclude;
+}>;
+
+export function canRevalidateGenericCourseNearbyIdentity(incident: GenericIdentityRevalidationIncident) {
+  const course = incident.course;
+  if (!course || incident.status !== "NEEDS_HUMAN" || incident.activeBatchId !== null ||
+      incident.decisionAt !== null || incident.resolvedAt !== null || incident.resolution !== null ||
+      incident.confirmedAt === null || !["MISSING_SOURCE", "MISSING_METADATA"].includes(incident.failureClass) ||
+      course.monitoringStatus?.state !== "ENGINEERING_VERIFICATION_NEEDED" ||
+      course.isPublic !== true || course.monitoringMode !== "AUTOMATIC" ||
+      !isGenericCourseName(course.name) || !course.googlePlaceId || !course.stateCode ||
+      !Number.isFinite(course.latitude) || !Number.isFinite(course.longitude) ||
+      (!course.city && !/\b\d{5}(?:-\d{4})?\b/u.test(course.address ?? "")) ||
+      assessAutomationPlaybook(incident.attemptLedger, incident.cycle).conclusion !== "UNRESOLVED_EXHAUSTED") {
+    return false;
+  }
+  if (!course.website) return true;
+  try {
+    const website = new URL(course.website);
+    return website.protocol === "https:" && !website.username && !website.password;
+  } catch { return false; }
+}
+
+async function revalidateGenericCourseNearbyIdentityForDeployment(deploymentSha: string) {
+  const candidates = await prisma.courseSupportIncident.findMany({
+    where: {status: "NEEDS_HUMAN", activeBatchId: null, decisionAt: null,
+      resolvedAt: null, resolution: null,
+      failureClass: {in: ["MISSING_SOURCE", "MISSING_METADATA"]},
+      course: {is: {isPublic: true, monitoringMode: "AUTOMATIC",
+        name: {in: ["Golf Course", "Golf Club"]}}},
+      monitoringEvents: {none: {eventType: "REVALIDATION_REQUESTED",
+        readPath: GENERIC_COURSE_NEARBY_IDENTITY_REVALIDATION}},
+    }, include: genericIdentityRevalidationInclude,
+    orderBy: [{activeRealSearchCount: "desc"}, {createdAt: "asc"}], take: 30,
+  });
+  const eligible = candidates.filter(canRevalidateGenericCourseNearbyIdentity);
+  let requeued = 0;
+  for (const candidate of eligible) {
+    const changed = await runSerializedCourseMonitoringWrite(candidate.courseId, async transaction => {
+      await transaction.$queryRaw(Prisma.sql`SELECT "id" FROM "Course" WHERE "id" = ${candidate.courseId} FOR UPDATE`);
+      const incident = await transaction.courseSupportIncident.findUnique({where: {id: candidate.id},
+        include: genericIdentityRevalidationInclude});
+      if (!incident || !canRevalidateGenericCourseNearbyIdentity(incident)) return false;
+      const idempotencyKey = `${GENERIC_COURSE_NEARBY_IDENTITY_REVALIDATION}:${incident.courseId}`;
+      if (await transaction.courseMonitoringEvent.findUnique({where: {idempotencyKey}, select: {id: true}})) return false;
+      const [clock] = await transaction.$queryRaw<Array<{now: Date}>>(Prisma.sql`SELECT clock_timestamp() AS "now"`);
+      if (!(clock?.now instanceof Date) || !Number.isFinite(clock.now.getTime()))
+        throw new Error("Generic course revalidation database clock unavailable");
+      const now = clock.now;
+      const status = incident.course.monitoringStatus!;
+      const updated = await transaction.courseSupportIncident.updateMany({where: {
+        id: incident.id, cycle: incident.cycle, revision: incident.revision, status: "NEEDS_HUMAN",
+        activeBatchId: null, decisionAt: null, resolvedAt: null, resolution: null,
+      }, data: {cycle: {increment: 1}, revision: {increment: 1}, status: "AUTO_INVESTIGATING",
+        confirmedAt: now, humanReviewReason: null, nextReminderAt: null, nextAttemptAt: now,
+        escalationDeadlineAt: getCourseMonitoringEscalationDeadline(now, incident.activeRealSearchCount),
+        latestMessage: "A new corroborated official course identity check is available; discovery is queued.",
+      }});
+      if (updated.count !== 1) return false;
+      const updatedStatus = await transaction.courseMonitoringStatus.updateMany({where: {
+        courseId: incident.courseId, revision: status.revision, state: status.state,
+      }, data: {state: "AUTO_INVESTIGATING", stateChangedAt: now, nextAutomaticAttemptAt: now,
+        revalidationRequestedAt: now, revision: {increment: 1}}});
+      if (updatedStatus.count !== 1) throw new Error("Generic course revalidation lost monitoring ownership");
+      await transaction.courseMonitoringEvent.create({data: {
+        courseId: incident.courseId, incidentId: incident.id, eventType: "REVALIDATION_REQUESTED",
+        source: "RECOVERY_CRON", readPath: GENERIC_COURSE_NEARBY_IDENTITY_REVALIDATION,
+        idempotencyKey, failureFingerprint: incident.failureFingerprint,
+        fromState: status.state, toState: "AUTO_INVESTIGATING", occurredAt: now,
+        message: "Nearby public place and first-party page corroboration can now be attempted.",
+        audit: {action: "relevant_discovery_implementation_changed",
+          implementation: GENERIC_COURSE_NEARBY_IDENTITY_REVALIDATION, deploymentSha,
+          priorCycle: incident.cycle, cycle: incident.cycle + 1,
+          preservesPriorAttemptEvents: true, customerDataIncluded: false},
+      }});
+      return true;
+    });
+    if (changed) requeued += 1;
+  }
+  return {considered: eligible.length, requeued, retainedAuthoritativeFinals: 0};
+}
 const renderedIdentityRevalidationInclude = {
   course: { include: {
     monitoringStatus: true,
@@ -3604,11 +3691,12 @@ export async function revalidateHumanReviewCoursesForDeployment(input: {
     select: { id: true },
   });
   const identity = await revalidateRenderedVenueIdentityForDeployment(deploymentSha);
+  const genericIdentity = await revalidateGenericCourseNearbyIdentityForDeployment(deploymentSha);
   const sourceQuery = await revalidateCoursesForSourceQueryChange(deploymentSha);
   return {
-    considered: identity.considered + sourceQuery.considered,
-    requeued: identity.requeued + sourceQuery.requeued,
-    retainedAuthoritativeFinals: identity.retainedAuthoritativeFinals + sourceQuery.retainedAuthoritativeFinals,
+    considered: identity.considered + genericIdentity.considered + sourceQuery.considered,
+    requeued: identity.requeued + genericIdentity.requeued + sourceQuery.requeued,
+    retainedAuthoritativeFinals: identity.retainedAuthoritativeFinals + genericIdentity.retainedAuthoritativeFinals + sourceQuery.retainedAuthoritativeFinals,
   };
 }
 

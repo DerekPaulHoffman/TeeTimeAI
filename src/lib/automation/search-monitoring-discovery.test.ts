@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const dbMocks = vi.hoisted(() => ({
   applyBrowserDiscoveryToCourse: vi.fn(),
   applyRecoveredOfficialWebsiteToCourse: vi.fn(),
+  applyRecoveredGenericCourseIdentityToCourse: vi.fn(),
   listRecentCourseAutomationDiscoveries: vi.fn(),
   recordAndApplyBrowserDiscoveryToCourse: vi.fn(),
   recordBrowserDiscovery: vi.fn(),
@@ -32,7 +33,11 @@ const localReaderMocks = vi.hoisted(() => ({
   getLocalReaderCourseKey: vi.fn()
 }));
 const googlePlacesMocks = vi.hoisted(() => ({
-  getGooglePlacesApiKey: vi.fn()
+  getGooglePlacesApiKey: vi.fn(),
+  filterPublicGolfCoursePlaces: vi.fn()
+}));
+const googlePlaceReviewMocks = vi.hoisted(() => ({
+  loadActiveGooglePlaceReviewIndex: vi.fn()
 }));
 
 vi.mock("@/lib/automation/db-service", () => dbMocks);
@@ -43,11 +48,13 @@ vi.mock(
 vi.mock("@/lib/automation/provider-request-lease", () => providerLeaseMocks);
 vi.mock("@/lib/local-reader/service", () => localReaderMocks);
 vi.mock("@/lib/places/google", () => googlePlacesMocks);
+vi.mock("@/lib/places/google-place-reviews", () => googlePlaceReviewMocks);
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMocks }));
 
 import { buildBrowserDiscovery } from "./browser-discovery";
 import {
   collectOfficialSiteEvidence,
+  corroborateNearbyCourseOnOfficialPage,
   createAddressPinnedPublicFetch,
   prepareCourseSupportVerificationMonitoring,
   prepareSearchMonitoring,
@@ -57,6 +64,35 @@ import {
 const now = new Date("2026-07-13T20:00:00.000Z");
 const remediationDispatchedAt = new Date("2026-07-13T19:30:00.000Z");
 const remediationLeaseExpiresAt = new Date("2026-07-13T20:15:00.000Z");
+
+describe("official page corroboration for nearby generic course recovery", () => {
+  const candidate = {
+    googlePlaceId: "named-course", name: "Gateway National Golf Links",
+    address: "18 Golf Drive, Madison, IL 62060, USA", city: "Madison", stateCode: "IL",
+    latitude: 38.65966, longitude: -90.13945, website: "https://gateway.example/"
+  };
+  it("accepts an exact branded title despite a promotional homepage heading", () => {
+    expect(corroborateNearbyCourseOnOfficialPage(candidate,
+      "<html><title>Gateway National Golf Links | The #1 Public St. Louis Golf Course</title><h1>The #1 Public Golf Course in St. Louis</h1></html>",
+      "https://gateway.example/")).toBe(candidate.name);
+  });
+  it("uses a shorter official golf-course name when Google adds a banquet qualifier", () => {
+    expect(corroborateNearbyCourseOnOfficialPage({...candidate,
+      name: "Los Altos Golf Course and Banquet Facility"},
+    "<html><title>Los Altos Golf Course – Albuquerque's Favorite Golf Course</title></html>",
+    "https://losaltos.example/")).toBe("Los Altos Golf Course");
+  });
+  it("requires the named second course and its street together on a shared official site", () => {
+    const bridges = {...candidate, name: "Columbia Bridges",
+      address: "1655 Columbia Bridges Road, Columbia, IL 62236, USA"};
+    expect(corroborateNearbyCourseOnOfficialPage(bridges,
+      "<html><title>Columbia Golf Club</title><body>Columbia Golf Club: 125 AA Road, Columbia, IL. Columbia Bridges: 1655 Columbia Bridges Rd, Columbia, IL 62236</body></html>",
+      "https://columbiagolfclub.example/")).toBe("Columbia Bridges");
+    expect(corroborateNearbyCourseOnOfficialPage(bridges,
+      "<html><title>Columbia Golf Club</title><body>Columbia Bridges is nearby. Another course: 1655 Columbia Bridges Rd</body></html>",
+      "https://columbiagolfclub.example/")).toBeNull();
+  });
+});
 
 function remediationPreference(courseId: string, rank: number) {
   return {
@@ -183,12 +219,19 @@ describe("search monitoring discovery", () => {
         updatedAt: new Date("2026-07-13T20:00:01.000Z")
       })
     );
+    dbMocks.applyRecoveredGenericCourseIdentityToCourse.mockImplementation(
+      async ({courseId, name, website}: {courseId: string; name: string; website: string}) => ({
+        id: courseId, name, website, updatedAt: new Date("2026-07-13T20:00:01.000Z")
+      })
+    );
     dbMocks.retireLegacyPolicyOnlyCourseBlock.mockResolvedValue({ id: "course-1" });
     prismaMocks.courseSupportBatchSearch.findMany.mockResolvedValue([]);
     prismaMocks.courseSupportIncident.findMany.mockResolvedValue([]);
     prismaMocks.course.findUnique.mockResolvedValue(null);
     localReaderMocks.getLocalReaderCourseKey.mockReturnValue(null);
     googlePlacesMocks.getGooglePlacesApiKey.mockReturnValue(undefined);
+    googlePlacesMocks.filterPublicGolfCoursePlaces.mockImplementation((places: unknown[]) => places);
+    googlePlaceReviewMocks.loadActiveGooglePlaceReviewIndex.mockResolvedValue({byPlaceId: new Map()});
     providerObservationMocks.beginCourseProviderObservation.mockImplementation(
       async ({ courseId }: { courseId: string }) => ({
         courseId,
@@ -385,6 +428,94 @@ describe("search monitoring discovery", () => {
     );
     expect(result.attemptedCourseIds).toEqual(["source-missing-course"]);
     expect(getOrdinaryCombinedDiscoveries()).toHaveLength(1);
+  });
+
+  it("recovers a generic fairway feature only after nearby Places and the first-party heading agree", async () => {
+    googlePlacesMocks.getGooglePlacesApiKey.mockReturnValue("test-key");
+    const genericCourse = {
+      ...remediationPreference("generic-course", 1).course,
+      name: "Golf Course", googlePlaceId: "generic-feature",
+      address: "Madison, IL 62201, USA", city: "Madison", stateCode: "IL",
+      latitude: 38.65945, longitude: -90.14365, isPublic: true,
+      website: null, detectedBookingUrl: null,
+      updatedAt: new Date("2026-07-13T19:00:00.000Z")
+    };
+    const namedPlace = {id: "named-course", displayName: {text: "Gateway National Golf Links"},
+      formattedAddress: "18 Golf Drive, Madison, IL 62060, USA",
+      addressComponents: [
+        {longText: "Madison", types: ["locality"]},
+        {shortText: "IL", types: ["administrative_area_level_1"]}
+      ], location: {latitude: 38.65966, longitude: -90.13945},
+      websiteUri: "https://gateway.example/", primaryType: "golf_course",
+      types: ["golf_course"], businessStatus: "OPERATIONAL"};
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const url = input.toString();
+      if (url.endsWith("places:searchNearby")) return Response.json({places: [
+        {...namedPlace, id: "generic-feature", displayName: {text: "Golf Course"},
+          formattedAddress: genericCourse.address, location: {
+            latitude: genericCourse.latitude, longitude: genericCourse.longitude}, websiteUri: undefined},
+        namedPlace,
+      ]});
+      if (url === "https://gateway.example/") return new Response(
+        "<html><head><title>Gateway National Golf Links</title></head><body><h1>Gateway National Golf Links</h1></body></html>",
+        {status: 200, headers: {"content-type": "text/html"}}
+      );
+      throw new Error(`Unexpected provider request: ${url}`);
+    });
+    const search = remediationSearch(["generic-course"], {
+      preferences: [{rank: 1, course: genericCourse}]
+    });
+    const expectedUpdatedAt = genericCourse.updatedAt;
+    await prepareSearchMonitoring(search, fetchImpl as typeof fetch, now,
+      {includeCourseIds: ["generic-course"], forceFreshCourseIds: ["generic-course"]});
+
+    expect(dbMocks.applyRecoveredGenericCourseIdentityToCourse).toHaveBeenCalledWith(
+      expect.objectContaining({courseId: "generic-course", name: "Gateway National Golf Links",
+        website: "https://gateway.example/", candidatePlaceId: "named-course",
+        expectedUpdatedAt,
+        providerObservation: expectedProviderObservation("generic-course", now)})
+    );
+    expect(genericCourse.name).toBe("Gateway National Golf Links");
+    expect(genericCourse.website).toBe("https://gateway.example/");
+    expect(dbMocks.applyRecoveredOfficialWebsiteToCourse).not.toHaveBeenCalled();
+  });
+
+  it("keeps a generic feature unchanged when the nearby business site identifies another course", async () => {
+    googlePlacesMocks.getGooglePlacesApiKey.mockReturnValue("test-key");
+    const genericCourse = {
+      ...remediationPreference("generic-course", 1).course,
+      name: "Golf Course", googlePlaceId: "generic-feature",
+      address: "Madison, IL 62201, USA", city: "Madison", stateCode: "IL",
+      latitude: 38.65945, longitude: -90.14365, isPublic: true,
+      website: null, detectedBookingUrl: null,
+      updatedAt: new Date("2026-07-13T19:00:00.000Z")
+    };
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const url = input.toString();
+      if (url.endsWith("places:searchNearby")) return Response.json({places: [
+        {id: "generic-feature", displayName: {text: "Golf Course"},
+          location: {latitude: 38.65945, longitude: -90.14365},
+          primaryType: "golf_course", types: ["golf_course"]},
+        {id: "named-course", displayName: {text: "Gateway National Golf Links"},
+          formattedAddress: "18 Golf Drive, Madison, IL 62060, USA",
+          addressComponents: [{longText: "Madison", types: ["locality"]},
+            {shortText: "IL", types: ["administrative_area_level_1"]}],
+          location: {latitude: 38.65966, longitude: -90.13945},
+          websiteUri: "https://gateway.example/", primaryType: "golf_course", types: ["golf_course"]}
+      ]});
+      if (url === "https://gateway.example/") return new Response(
+        "<html><title>Different Country Club</title><h1>Different Country Club</h1></html>",
+        {status: 200, headers: {"content-type": "text/html"}}
+      );
+      if (url.includes("places.googleapis.com")) return Response.json({});
+      throw new Error(`Unexpected provider request: ${url}`);
+    });
+    await prepareSearchMonitoring(remediationSearch(["generic-course"], {
+      preferences: [{rank: 1, course: genericCourse}]
+    }), fetchImpl as typeof fetch, now,
+    {includeCourseIds: ["generic-course"], forceFreshCourseIds: ["generic-course"]});
+    expect(dbMocks.applyRecoveredGenericCourseIdentityToCourse).not.toHaveBeenCalled();
+    expect(genericCourse.name).toBe("Golf Course");
   });
 
   it("does not discover from an unpersisted recovered website after a compare-and-set loss", async () => {

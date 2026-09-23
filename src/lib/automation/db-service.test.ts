@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  applyRecoveredGenericCourseIdentityToCourse,
   applyRecoveredOfficialWebsiteToCourse,
   attachSearchWorkflowRun,
   classifyAutomationRunKind,
@@ -3776,6 +3777,57 @@ describe("course automation discovery parent fencing", () => {
     expect(mockedPrisma.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
       mockedPrisma.courseAutomationDiscovery.create.mock.invocationCallOrder[0],
     );
+  });
+
+  it("atomically projects a corroborated generic name and official site with a course snapshot fence", async () => {
+    const expectedUpdatedAt = new Date("2026-08-19T11:00:00.000Z");
+    const observedAt = new Date("2026-08-19T11:01:00.000Z");
+    const current = {
+      id: discovery.courseId, name: "Golf Course", googlePlaceId: "generic-feature",
+      website: null, isPublic: true, detectedBookingUrl: null,
+      detectedPlatform: "UNKNOWN", providerFamilyKey: "SOURCE_MISSING",
+      bookingMethod: "UNKNOWN", automationEligibility: "UNKNOWN", automationReason: "NONE",
+      monitoringMode: "AUTOMATIC", bookingAccessMode: "UNKNOWN",
+      intelligenceConfidence: null, bookingMetadata: null,
+      monitoringStatus: null, supportIncident: null, updatedAt: expectedUpdatedAt,
+    };
+    const applied = {...current, name: "Gateway National Golf Links",
+      website: "https://gateway.example/", updatedAt: new Date("2026-08-19T11:01:01.000Z")};
+    mockedPrisma.course.findUnique.mockResolvedValueOnce(current as never).mockResolvedValueOnce(applied as never);
+    mockedPrisma.course.updateMany.mockResolvedValue({count: 1} as never);
+
+    await expect(applyRecoveredGenericCourseIdentityToCourse({
+      courseId: current.id, name: applied.name, website: applied.website,
+      candidatePlaceId: "named-place", evidenceUrl: applied.website,
+      expectedUpdatedAt, observedAt,
+    })).resolves.toEqual({...applied, updatedAt: fencedCourseUpdatedAt});
+    expect(mockedPrisma.course.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({id: current.id, updatedAt: expectedUpdatedAt,
+        name: "Golf Course", googlePlaceId: "generic-feature", isPublic: true}),
+      data: {name: applied.name, website: applied.website},
+    }));
+    expect(mockedPrisma.courseAutomationDiscovery.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({evidence: expect.objectContaining({
+        candidatePlaceId: "named-place", originalPlaceId: "generic-feature",
+        corroboratedName: applied.name, courseProjectionApplied: true,
+      })}),
+    }));
+  });
+
+  it("refuses to replace a generic course when its saved official hostname disagrees", async () => {
+    mockedPrisma.course.findUnique.mockResolvedValueOnce({
+      id: discovery.courseId, name: "Golf Course", googlePlaceId: "generic-feature",
+      website: "https://original.example/", isPublic: true,
+      monitoringStatus: null, supportIncident: null,
+      updatedAt: new Date("2026-08-19T11:00:00.000Z"),
+    } as never);
+    await expect(applyRecoveredGenericCourseIdentityToCourse({
+      courseId: discovery.courseId, name: "Gateway National Golf Links",
+      website: "https://gateway.example/", candidatePlaceId: "named-place",
+      evidenceUrl: "https://gateway.example/",
+      expectedUpdatedAt: new Date("2026-08-19T11:00:00.000Z"),
+    })).resolves.toBeNull();
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
   });
 
   it("applies and appends ordinary discovery atomically before returning the parent fence timestamp", async () => {

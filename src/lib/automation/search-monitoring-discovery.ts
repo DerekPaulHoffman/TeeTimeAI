@@ -1,6 +1,7 @@
 import {
   applyBrowserDiscoveryToCourse,
   applyRecoveredOfficialWebsiteToCourse,
+  applyRecoveredGenericCourseIdentityToCourse,
   listRecentCourseAutomationDiscoveries,
   recordAndApplyBrowserDiscoveryToCourse,
   recordBrowserDiscovery,
@@ -56,12 +57,15 @@ import {
   hasConflictingOfficialCourseIdentityDiscriminator,
   isConflictingOfficialPageCourseIdentity,
   isExplicitCourseIdentityName,
+  isGenericCourseName,
   isOfficialOrganizationIdentityCorroboratedByUrl,
   normalizeOfficialPagePresentationIdentity,
   normalizeCourseIdentityName
 } from "@/lib/places/course-identity";
 import { normalizeLayoutHoleCounts } from "@/lib/courses/course-layout";
-import { getGooglePlacesApiKey } from "@/lib/places/google";
+import { filterPublicGolfCoursePlaces, getGooglePlacesApiKey, type GooglePlace } from "@/lib/places/google";
+import { loadActiveGooglePlaceReviewIndex } from "@/lib/places/google-place-reviews";
+import { isSufficientNearbyCourseName, selectUniqueNearbyOfficialCourse, type NearbyOfficialCourse } from "@/lib/automation/generic-course-nearby-source";
 import { getLocalReaderCourseKey } from "@/lib/local-reader/service";
 import { prisma } from "@/lib/prisma";
 
@@ -472,9 +476,136 @@ type MissingOfficialWebsiteCourse = {
   latitude: number;
   longitude: number;
   website: string | null;
+  isPublic: boolean | null;
   detectedBookingUrl: string | null;
   updatedAt: Date;
 };
+
+export function corroborateNearbyCourseOnOfficialPage(
+  candidate: NearbyOfficialCourse, html: string, pageUrl: string,
+) {
+  if (!isSufficientNearbyCourseName(candidate.name)) return null;
+  const names = [candidate.name,
+    candidate.name.replace(/\s+(?:and|&)\s+(?:banquet\s+facility|event\s+(?:center|centre|venue))\s*$/iu, "").trim(),
+  ].filter((name, index, all) => Boolean(name) && all.indexOf(name) === index);
+  const title = getOfficialPageMarkupIdentities(html).primary[0] ?? "";
+  const titleSegments = title.split(/\s+(?:\||[•–—]|-\s)\s*/u).map(segment => segment.trim());
+  for (const name of names) {
+    if (titleSegments.some(segment =>
+      getFirstPartyOfficialPageIdentityStatus(name, segment, [], pageUrl) === "MATCH")) {
+      return name;
+    }
+  }
+  const streetTokens = normalizeAddressTokens(candidate.address?.split(",")[0]);
+  if (streetTokens.length < 3 || !/^\d+$/u.test(streetTokens[0])) return null;
+  const visibleHtml = html.replace(/<(script|style|template|textarea|svg)\b[^>]*>[\s\S]*?<\/\1>/giu, " ");
+  const words = normalizeAddressTokens(stripHtml(decodeHtmlEntities(visibleHtml)));
+  for (const name of names) {
+    const nameTokens = normalizeAddressTokens(name);
+    for (let i = 0; i <= words.length - nameTokens.length; i += 1) {
+      if (!nameTokens.every((token, offset) => words[i + offset] === token)) continue;
+      for (let j = i + nameTokens.length; j <= Math.min(i + nameTokens.length + 3,
+        words.length - streetTokens.length); j += 1) {
+        if (streetTokens.every((token, offset) => words[j + offset] === token)) return name;
+      }
+    }
+  }
+  return null;
+}
+
+function nearbyComponent(place: GooglePlace, type: string, field: "shortText" | "longText") {
+  const value = place.addressComponents?.find(component =>
+    Array.isArray(component.types) && component.types.includes(type))?.[field];
+  return typeof value === "string" ? value : null;
+}
+
+async function researchGenericCourseIdentity(
+  course: MissingOfficialWebsiteCourse,
+  apiKey: string,
+  publicFetch: typeof fetch,
+) {
+  if (!isGenericCourseName(course.name) || course.isPublic !== true ||
+      !course.googlePlaceId || !course.stateCode ||
+      !Number.isFinite(course.latitude) || !Number.isFinite(course.longitude)) return null;
+  const response = await publicFetch("https://places.googleapis.com/v1/places:searchNearby", {
+    method: "POST", cache: "no-store",
+    headers: {
+      "Content-Type": "application/json", "X-Goog-Api-Key": apiKey,
+      "X-Goog-FieldMask": "places.id,places.displayName,places.formattedAddress,places.addressComponents,places.location,places.websiteUri,places.types,places.primaryType,places.businessStatus",
+    },
+    body: JSON.stringify({ includedPrimaryTypes: ["golf_course"], maxResultCount: 20,
+      rankPreference: "DISTANCE", languageCode: "en",
+      locationRestriction: { circle: { center: { latitude: course.latitude, longitude: course.longitude }, radius: 1_000 } },
+    }),
+  });
+  if (!response.ok) return null;
+  const payload = await response.json() as { places?: GooglePlace[] };
+  const reviewIndex = await loadActiveGooglePlaceReviewIndex();
+  const publicPlaces = filterPublicGolfCoursePlaces(payload.places ?? [], {reviewIndex});
+  const nearby: NearbyOfficialCourse[] = publicPlaces.flatMap(place => {
+    const latitude = place.location?.latitude;
+    const longitude = place.location?.longitude;
+    if (typeof place.id !== "string" || typeof place.displayName?.text !== "string" ||
+        typeof latitude !== "number" || typeof longitude !== "number" ||
+        place.primaryType !== "golf_course" || !Array.isArray(place.types) ||
+        !place.types.includes("golf_course") || place.businessStatus === "CLOSED_PERMANENTLY") return [];
+    return [{ googlePlaceId: place.id, name: place.displayName.text,
+      address: typeof place.formattedAddress === "string" ? place.formattedAddress : null,
+      city: nearbyComponent(place, "locality", "longText") ?? nearbyComponent(place, "postal_town", "longText"),
+      stateCode: nearbyComponent(place, "administrative_area_level_1", "shortText"),
+      latitude, longitude,
+      website: typeof place.websiteUri === "string" ? place.websiteUri : null }];
+  });
+  const unique = selectUniqueNearbyOfficialCourse(course, nearby);
+  if (!unique?.candidate.website) return null;
+  const website = readSafePublicUrl(unique.candidate.website);
+  if (!website) return null;
+  const page = await fetchPublicHtmlWithProviderBoundary(website, publicFetch);
+  if (!haveSameReplayHostname(website, page.finalUrl) ||
+      isInitialOfficialSiteSoftNotFoundPage(page.html)) return null;
+  const name = corroborateNearbyCourseOnOfficialPage(unique.candidate, page.html, page.finalUrl);
+  if (!name) return null;
+  return { name, website, candidatePlaceId: unique.candidate.googlePlaceId,
+    evidenceUrl: page.finalUrl };
+}
+
+async function refreshGenericCourseIdentities(
+  courses: MissingOfficialWebsiteCourse[], publicFetch: typeof fetch,
+  expectedUnownedIncidentsByCourseId: SearchMonitoringDiscoveryOptions["expectedUnownedIncidentsByCourseId"],
+) {
+  const apiKey = getGooglePlacesApiKey();
+  if (!apiKey) return;
+  for (const course of courses) {
+    if (!isGenericCourseName(course.name)) continue;
+    await runWithMonitoringDiscoveryProviderObservation({courseId: course.id, worker: async observation => {
+      const execution = await runWithProviderRequestLease("SOURCE_MISSING", async () => {
+        observation.markProviderExecutionStarted();
+        try {
+          return await researchGenericCourseIdentity(course, apiKey, publicFetch);
+        } catch {
+          // A provider or review-read failure is inconclusive for this course.
+          return null;
+        }
+      });
+      if (!execution.acquired || !execution.value) return;
+      observation.assertObservationOwned();
+      const expectedUnownedIncident = expectedUnownedIncidentsByCourseId?.get(course.id);
+      const applied = await applyRecoveredGenericCourseIdentityToCourse({
+        courseId: course.id, name: execution.value.name, website: execution.value.website,
+        candidatePlaceId: execution.value.candidatePlaceId,
+        evidenceUrl: execution.value.evidenceUrl,
+        expectedUpdatedAt: course.updatedAt,
+        ...(expectedUnownedIncident ? { expectedUnownedIncident } : {}),
+        observedAt: observation.providerObservedAt, providerObservation: observation.lease,
+      });
+      if (applied) {
+        course.name = applied.name;
+        course.website = applied.website;
+        course.updatedAt = applied.updatedAt;
+      }
+    }});
+  }
+}
 
 type GoogleOfficialWebsiteCandidate = {
   id?: unknown;
@@ -825,10 +956,13 @@ export async function prepareSearchMonitoring(
     ...forceFreshCourseIds,
     ...(remediationContext?.courseIds ?? [])
   ]);
+  const sourceRefreshCourses = search.preferences
+    .map(preference => preference.course)
+    .filter(course => sourceRefreshCourseIds.has(course.id));
+  await refreshGenericCourseIdentities(sourceRefreshCourses, publicFetch,
+    options.expectedUnownedIncidentsByCourseId);
   await refreshMissingOfficialWebsites(
-    search.preferences
-      .map((preference) => preference.course)
-      .filter((course) => sourceRefreshCourseIds.has(course.id)),
+    sourceRefreshCourses,
     publicFetch,
     options.expectedUnownedIncidentsByCourseId
   );
