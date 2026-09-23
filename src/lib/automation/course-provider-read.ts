@@ -14,6 +14,7 @@ import {
 } from "@/lib/adapters/clubcaddie";
 import { fetchForeupTeeSheet, isForeupMetadata } from "@/lib/adapters/foreup";
 import { fetchGolfBackTeeSheet, isGolfBackMetadata } from "@/lib/adapters/golfback";
+import { fetchGolfGeekTeeSheet, isGolfGeekMetadata } from "@/lib/adapters/golf-geek";
 import { fetchGolfNowTeeSheet, isGolfNowMetadata } from "@/lib/adapters/golfnow";
 import {
   fetchGolfWithAccessTeeSheet,
@@ -121,6 +122,15 @@ export function fetchCourseTeeSheet(
       date,
       players,
       timeZone: course.timeZone,
+      metadata: course.bookingMetadata,
+      discoverBookingWindow
+    });
+  }
+  if (providerFamily === "GOLF_GEEK" && isGolfGeekMetadata(course.bookingMetadata)) {
+    return fetchGolfGeekTeeSheet({
+      courseId: course.id,
+      date,
+      players,
       metadata: course.bookingMetadata,
       discoverBookingWindow
     });

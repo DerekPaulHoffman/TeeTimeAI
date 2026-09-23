@@ -7,6 +7,7 @@ import { isChronogolfMetadata } from "@/lib/adapters/chronogolf";
 import { isClubCaddieMetadata } from "@/lib/adapters/clubcaddie";
 import { isForeupMetadata } from "@/lib/adapters/foreup";
 import { isGolfBackMetadata } from "@/lib/adapters/golfback";
+import { isGolfGeekMetadata } from "@/lib/adapters/golf-geek";
 import { isGolfNowMetadata } from "@/lib/adapters/golfnow";
 import { isGolfWithAccessMetadata } from "@/lib/adapters/golf-with-access";
 import { isTeeItUpMetadata } from "@/lib/adapters/teeitup";
@@ -27,6 +28,7 @@ export const KNOWN_PROVIDER_FAMILIES = [
   "CHELSEA",
   "TEESNAP",
   "GOLFBACK",
+  "GOLF_GEEK",
   "GOLF_WITH_ACCESS",
   "WEBTRAC",
   "EZLINKS",
@@ -148,6 +150,13 @@ export const PROVIDER_CAPABILITIES = {
     matchesHostname: (hostname) => matchesDomain(hostname, "golfback.com"),
     validatesMetadata: isGolfBackMetadata
   },
+  GOLF_GEEK: {
+    family: "GOLF_GEEK",
+    detectedPlatform: "CUSTOM",
+    supportsAutomation: true,
+    matchesHostname: (hostname) => hostname === "xq8v7un6ad.execute-api.us-east-1.amazonaws.com",
+    validatesMetadata: isGolfGeekMetadata
+  },
   GOLF_WITH_ACCESS: {
     family: "GOLF_WITH_ACCESS",
     detectedPlatform: "CUSTOM",
@@ -268,6 +277,7 @@ const metadataProviderFamilies = new Map<string, KnownProviderFamily>([
   ["CHELSEA", "CHELSEA"],
   ["TEESNAP", "TEESNAP"],
   ["GOLFBACK", "GOLFBACK"],
+  ["GOLF_GEEK", "GOLF_GEEK"],
   ["GOLFNOW", "GOLFNOW"],
   ["AGILYSYS", "AGILYSYS"],
   ["GOLF_WITH_ACCESS", "GOLF_WITH_ACCESS"],
@@ -424,6 +434,9 @@ function validatesSafeProviderMetadata(
     return false;
   }
   const bookingBaseUrl = metadata.bookingBaseUrl;
+  if (providerFamilyKey === "GOLF_GEEK") {
+    return isGolfGeekMetadata(metadata);
+  }
   if (bookingBaseUrl === undefined) {
     // The adapter schema owns required-field validation. Every production
     // runnable metadata schema requires bookingBaseUrl; this branch keeps
@@ -782,6 +795,7 @@ function isProviderFamilyPublicBookingLandingUrl(
     case "MEMBERSPORTS":
       return Boolean(readMemberSportsLandingScope(url, pathname));
     case "CLUB_CADDIE":
+    case "GOLF_GEEK":
       return false;
   }
 }

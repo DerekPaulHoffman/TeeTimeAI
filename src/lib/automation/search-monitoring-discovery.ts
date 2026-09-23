@@ -45,6 +45,8 @@ import {
   type CourseProviderObservationLease
 } from "@/lib/automation/provider-execution-marker";
 import { runWithProviderRequestLease } from "@/lib/automation/provider-request-lease";
+import { enrichGolfGeekDiscovery } from "@/lib/automation/golf-geek-discovery";
+import { isGolfGeekMetadata } from "@/lib/adapters/golf-geek";
 import {
   createAddressPinnedPublicFetchTransport,
   type AddressPinnedPublicFetchDependencies
@@ -1303,8 +1305,18 @@ export async function prepareSearchMonitoring(
               course.name,
               leasedFetch
             );
+            const golfGeekDiscovery = await enrichGolfGeekDiscovery({
+              discovery: cpsDiscovery,
+              sourceEvidence: collectedWithCorroboration,
+              courseName: course.name,
+              courseCity: course.city,
+              courseState: course.stateCode,
+              officialWebsite,
+              publicFetch: leasedFetch,
+              apiFetch: bindObservedFetch(fetchImpl ?? fetch)
+            });
             const reviewableCpsDiscovery =
-              keepIncompleteCpsDiscoveryActionable(cpsDiscovery);
+              keepIncompleteCpsDiscoveryActionable(golfGeekDiscovery);
             const reasonAwareDiscovery = sanitizeBrowserDiscoveryAccessEvidence(
               keepPolicyOnlyDiscoveryActionable(
                 await enrichTeesnapDiscovery(
@@ -1856,6 +1868,9 @@ function hasProviderCoherentPersistedMetadata(course: MonitoringDiscoveryCandida
     return false;
   }
   const provider = resolveProviderCapability(course);
+  if (provider.providerFamilyKey === "GOLF_GEEK") {
+    return provider.isRunnable && isGolfGeekMetadata(course.bookingMetadata);
+  }
   const bookingBaseUrl = readSafePublicUrl(course.bookingMetadata.bookingBaseUrl);
   if (!provider.isRunnable || !bookingBaseUrl) {
     return false;

@@ -508,7 +508,7 @@ Adapter behavior:
 
 Do not assume every `DetectedPlatform` enum has a runnable adapter.
 
-- Runnable families: `FOREUP`, `TEEITUP`, `CHRONOGOLF`, `CPS`, `CHELSEA`, `TEESNAP`, `GOLFBACK`, `GOLF_WITH_ACCESS`, `WEBTRAC`, `GOLFNOW`, `AGILYSYS`, `CLUB_CADDIE`, `WHOOSH`, and `SUPREME_GOLF`, each only when the registry validates its required metadata and the current course/provider shape meets that family's safety checks.
+- Runnable families: `FOREUP`, `TEEITUP`, `CHRONOGOLF`, `CPS`, `CHELSEA`, `TEESNAP`, `GOLFBACK`, `GOLF_GEEK`, `GOLF_WITH_ACCESS`, `WEBTRAC`, `GOLFNOW`, `AGILYSYS`, `CLUB_CADDIE`, `WHOOSH`, and `SUPREME_GOLF`, each only when the registry validates its required metadata and the current course/provider shape meets that family's safety checks.
 - Recognized but not runnable through the server dispatcher today: `EZLINKS`, `MEMBERSPORTS`, and `TENFORE`. A compatible allowlisted local-reader route may exist for a narrow public shape, but recognition or reader eligibility is not server-adapter coverage.
 - `UNKNOWN` means provider discovery is still needed, not that the course is unsupported forever.
 

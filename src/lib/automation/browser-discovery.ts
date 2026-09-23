@@ -243,6 +243,12 @@ export type BrowserDiscovery = {
     courseId: string;
     bookingBaseUrl: string;
   } | {
+    provider: "GOLF_GEEK";
+    courseId: string;
+    bookingBaseUrl: string;
+    officialWebsite: string;
+    bookingWindowDaysAhead?: number;
+  } | {
     provider: "GOLFNOW";
     facilityId: number;
     bookingBaseUrl: string;
