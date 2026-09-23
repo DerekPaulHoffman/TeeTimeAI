@@ -54,6 +54,7 @@ import {
   createAddressPinnedPublicFetch,
   prepareCourseSupportVerificationMonitoring,
   prepareSearchMonitoring,
+  researchGenericCourseIdentity,
   shouldAttemptMonitoringDiscovery
 } from "./search-monitoring-discovery";
 
@@ -87,6 +88,21 @@ describe("official page corroboration for nearby generic course recovery", () =>
     expect(corroborateNearbyCourseOnOfficialPage(bridges,
       "<html><title>Columbia Golf Club</title><body>Columbia Bridges is nearby. Another course: 1655 Columbia Bridges Rd</body></html>",
       "https://columbiagolfclub.example/")).toBeNull();
+  });
+  it("rejects an exact-place response that changes the stored feature identity", async () => {
+    googlePlacesMocks.getGooglePlacesApiKey.mockReturnValue("test-key");
+    const publicFetch = vi.fn(async () => Response.json({
+      id: "different-place", displayName: {text: "Golf Course"},
+      location: {latitude: 38.65945, longitude: -90.14365},
+      primaryType: "golf_course", businessStatus: "OPERATIONAL",
+    }));
+    await expect(researchGenericCourseIdentity({
+      id: "generic-course", googlePlaceId: "generic-feature", name: "Golf Course",
+      address: "Madison, IL 62201, USA", city: "Madison", stateCode: "IL",
+      latitude: 38.65945, longitude: -90.14365, website: null,
+      isPublic: true, detectedBookingUrl: null, updatedAt: now,
+    }, publicFetch as typeof fetch)).resolves.toBeNull();
+    expect(googlePlacesMocks.searchNearbyGolfCourses).not.toHaveBeenCalled();
   });
 });
 
@@ -439,14 +455,15 @@ describe("search monitoring discovery", () => {
       address: "18 Golf Drive, Madison, IL 62060, USA", city: "Madison", stateCode: "IL",
       latitude: 38.65966, longitude: -90.13945,
       website: "https://gateway.example/"};
-    googlePlacesMocks.searchNearbyGolfCourses.mockResolvedValue([
-      {...namedPlace, googlePlaceId: "generic-feature", name: "Golf Course",
-        address: genericCourse.address, latitude: genericCourse.latitude,
-        longitude: genericCourse.longitude, website: null},
-      namedPlace,
-    ]);
+    // Public discovery filters the generic map feature out of its results.
+    googlePlacesMocks.searchNearbyGolfCourses.mockResolvedValue([namedPlace]);
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
       const url = input.toString();
+      if (url.endsWith("/places/generic-feature")) return Response.json({
+        id: "generic-feature", displayName: {text: "Golf Course"},
+        location: {latitude: genericCourse.latitude, longitude: genericCourse.longitude},
+        primaryType: "golf_course", businessStatus: "OPERATIONAL",
+      });
       if (url === "https://gateway.example/") return new Response(
         "<html><head><title>Gateway National Golf Links</title></head><body><h1>Gateway National Golf Links</h1></body></html>",
         {status: 200, headers: {"content-type": "text/html"}}
@@ -472,6 +489,10 @@ describe("search monitoring discovery", () => {
       latitude: genericCourse.latitude, longitude: genericCourse.longitude,
       radiusMeters: 1_000,
     });
+    expect(fetchImpl.mock.calls[0]?.[1]).toMatchObject({
+      headers: {"X-Goog-FieldMask": "id,displayName,location,types,primaryType,businessStatus"},
+      redirect: "error",
+    });
     expect(dbMocks.applyRecoveredOfficialWebsiteToCourse).not.toHaveBeenCalled();
   });
 
@@ -494,6 +515,11 @@ describe("search monitoring discovery", () => {
     ]);
     const fetchImpl = vi.fn(async (input: string | URL | Request) => {
       const url = input.toString();
+      if (url.endsWith("/places/generic-feature")) return Response.json({
+        id: "generic-feature", displayName: {text: "Golf Course"},
+        location: {latitude: genericCourse.latitude, longitude: genericCourse.longitude},
+        primaryType: "golf_course", businessStatus: "OPERATIONAL",
+      });
       if (url === "https://gateway.example/") return new Response(
         "<html><title>Different Country Club</title><h1>Different Country Club</h1></html>",
         {status: 200, headers: {"content-type": "text/html"}}

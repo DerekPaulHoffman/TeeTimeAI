@@ -512,6 +512,37 @@ export function corroborateNearbyCourseOnOfficialPage(
   return null;
 }
 
+async function readExactGenericPlace(
+  course: MissingOfficialWebsiteCourse,
+  publicFetch: typeof fetch,
+): Promise<NearbyOfficialCourse | null> {
+  const placeId = course.googlePlaceId?.trim().replace(/^places\//u, "");
+  const apiKey = getGooglePlacesApiKey();
+  if (!placeId || !/^[A-Za-z0-9_-]{10,200}$/u.test(placeId) || !apiKey) return null;
+  const response = await publicFetch(
+    `https://places.googleapis.com/v1/places/${encodeURIComponent(placeId)}`,
+    { cache: "no-store", redirect: "error", headers: {
+      "X-Goog-Api-Key": apiKey,
+      "X-Goog-FieldMask": "id,displayName,location,types,primaryType,businessStatus",
+    } },
+  );
+  if (!response.ok) return null;
+  const place = (await response.json()) as GoogleOfficialWebsiteCandidate;
+  const exactId = typeof place.id === "string" ? place.id.replace(/^places\//u, "") : null;
+  const name = place.displayName?.text;
+  const latitude = place.location?.latitude;
+  const longitude = place.location?.longitude;
+  if (exactId !== placeId || typeof name !== "string" || !isGenericCourseName(name) ||
+      typeof latitude !== "number" || !Number.isFinite(latitude) ||
+      typeof longitude !== "number" || !Number.isFinite(longitude) ||
+      place.businessStatus === "CLOSED_PERMANENTLY" ||
+      place.primaryType !== "golf_course" &&
+        (!Array.isArray(place.types) || !place.types.includes("golf_course"))) return null;
+  return { googlePlaceId: placeId, name, address: course.address,
+    city: course.city, stateCode: course.stateCode,
+    latitude, longitude, website: null };
+}
+
 export async function researchGenericCourseIdentity(
   course: MissingOfficialWebsiteCourse,
   publicFetch: typeof fetch,
@@ -519,6 +550,11 @@ export async function researchGenericCourseIdentity(
   if (!isGenericCourseName(course.name) || course.isPublic !== true ||
       !course.googlePlaceId || !course.stateCode ||
       !Number.isFinite(course.latitude) || !Number.isFinite(course.longitude)) return null;
+  // The reviewed public discovery list can omit a generic map feature. Read
+  // its exact Google ID separately so that the nearby identity check remains
+  // anchored to the stored feature instead of trusting a nearby name alone.
+  const exactPlace = await readExactGenericPlace(course, publicFetch);
+  if (!exactPlace) return null;
   // Reuse the same reviewed, deduplicated provider discovery shown by the
   // public course endpoint. A single Nearby rank can omit the generic feature.
   const nearby: NearbyOfficialCourse[] = (await searchNearbyGolfCourses({
@@ -530,7 +566,7 @@ export async function researchGenericCourseIdentity(
     latitude: candidate.latitude, longitude: candidate.longitude,
     website: candidate.website ?? null,
   }));
-  const unique = selectUniqueNearbyOfficialCourse(course, nearby);
+  const unique = selectUniqueNearbyOfficialCourse(course, [exactPlace, ...nearby]);
   if (!unique?.candidate.website) return null;
   const website = readSafePublicUrl(unique.candidate.website);
   if (!website) return null;
