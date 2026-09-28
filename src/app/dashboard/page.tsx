@@ -337,6 +337,8 @@ function DashboardSearchCard({
               <Mail aria-hidden="true" size={12} />
               {ownerEmailState === "SENT"
                 ? "Alert email sent for these settings"
+                : ownerEmailState === "PREVIOUSLY_SENT"
+                  ? "An alert email was sent previously"
                 : ownerEmailState === "PENDING"
                   ? "Alert email pending for these settings"
                   : ownerEmailState === "NOT_SENT"
@@ -880,8 +882,10 @@ async function loadOwnerEmailStates(userId: string, searches: DashboardSearches)
     generationClocks.map((search) => [search.id, search]),
   );
   const statusesBySearch = new Map<string, Set<string>>();
+  const previouslySentSearches = new Set<string>();
   for (const delivery of deliveries) {
     if (delivery.alertGeneration !== currentGenerationBySearch.get(delivery.teeSearchId)) {
+      if (delivery.status === "SENT") previouslySentSearches.add(delivery.teeSearchId);
       continue;
     }
     const statuses = statusesBySearch.get(delivery.teeSearchId) ?? new Set<string>();
@@ -894,6 +898,7 @@ async function loadOwnerEmailStates(userId: string, searches: DashboardSearches)
     const generationClock = generationClockBySearch.get(search.id);
     states.set(search.id, getOwnerEmailState({
       statuses,
+      previouslySent: previouslySentSearches.has(search.id),
       status: search.status,
       alertGeneration: search.alertGeneration,
       createdAt: generationClock?.createdAt ?? search.createdAt,
