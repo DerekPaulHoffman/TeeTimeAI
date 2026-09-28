@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   safe: vi.fn(),
   hydrate: vi.fn(),
   finalize: vi.fn(),
+  renew: vi.fn(),
 }));
 
 vi.mock("@/lib/prisma", () => ({
@@ -32,6 +33,7 @@ vi.mock("@/lib/email/search-delivery-outbox", () => ({
   assertSafeSearchEmailPayload: mocks.safe,
   hydrateSearchStatusEmailPayload: mocks.hydrate,
   finalizeSearchEmailDeliveryGroup: mocks.finalize,
+  renewClaimedDeliveryRecipientAuthorization: mocks.renew,
 }));
 vi.mock("@/lib/email/search-delivery-payload", () => ({
   parseSearchEmailPayload: mocks.parse,
@@ -101,12 +103,14 @@ describe("operator reconciliation of an ambiguous setup email", () => {
         searchEmailDelivery: {
           findUnique: mocks.findDelivery,
           count: mocks.countDeliveries,
+          updateMany: mocks.updateDelivery,
         },
         courseMonitoringStatus: { findMany: mocks.findMonitoring },
       }),
     );
     mocks.send.mockResolvedValue({ deliveryStatus: "sent", id: "provider-1" });
     mocks.updateDelivery.mockResolvedValue({ count: 1 });
+    mocks.renew.mockResolvedValue(undefined);
     mocks.finalize.mockResolvedValue({ finalized: true, ownerSent: true });
   });
 
@@ -122,6 +126,12 @@ describe("operator reconciliation of an ambiguous setup email", () => {
         stableIdempotencyKey: "original-request-key",
       }),
     );
+    expect(mocks.renew).toHaveBeenCalledWith(
+      expect.objectContaining({
+        searchId: delivery.teeSearchId,
+        delivery: expect.objectContaining({ recipient: delivery.recipient }),
+      }),
+    );
     expect(mocks.updateDelivery).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
@@ -130,6 +140,12 @@ describe("operator reconciliation of an ambiguous setup email", () => {
           lastError: delivery.lastError,
           attemptCount: 1,
         }),
+        data: expect.objectContaining({ status: "SENDING" }),
+      }),
+    );
+    expect(mocks.updateDelivery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: delivery.id, status: "SENDING" }),
         data: expect.objectContaining({ status: "SENT", lastError: null }),
       }),
     );
@@ -177,5 +193,22 @@ describe("operator reconciliation of an ambiguous setup email", () => {
       outcome: "ineligible",
     });
     expect(mocks.send).not.toHaveBeenCalled();
+  });
+
+  it("releases the in-flight claim if recipient authority changes before transport", async () => {
+    mocks.renew.mockRejectedValue(new Error("recipient changed"));
+    await expect(reconcileAmbiguousSetupEmail(delivery.id, now)).rejects.toThrow(
+      "recipient changed",
+    );
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.updateDelivery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: delivery.id, status: "SENDING" }),
+        data: expect.objectContaining({
+          status: "SUPPRESSED",
+          lastError: delivery.lastError,
+        }),
+      }),
+    );
   });
 });

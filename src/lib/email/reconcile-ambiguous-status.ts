@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
@@ -7,6 +9,7 @@ import {
   assertSafeSearchEmailPayload,
   finalizeSearchEmailDeliveryGroup,
   hydrateSearchStatusEmailPayload,
+  renewClaimedDeliveryRecipientAuthorization,
 } from "@/lib/email/search-delivery-outbox";
 import {
   getStableSearchEmailDeliveryIdempotencyKey,
@@ -64,6 +67,7 @@ export async function reconcileAmbiguousSetupEmail(
   // This short transaction is the recipient-authority decision immediately
   // before transport. Resend's original idempotency key handles concurrent
   // invocations of this exact request without a duplicate message.
+  const claimToken = randomUUID();
   const authorized = await prisma.$transaction(async (transaction) => {
     await transaction.$queryRaw(Prisma.sql`
       SELECT "id" FROM "TeeSearch"
@@ -151,7 +155,7 @@ export async function reconcileAmbiguousSetupEmail(
         select: { courseId: true, state: true, lastSuccessfulAt: true, lastFailureAt: true },
       }),
     ]);
-    return (
+    const eligible = (
       otherAccepted === 0 &&
       otherInFlight === 0 &&
       monitoring.length === selected.length &&
@@ -162,24 +166,73 @@ export async function reconcileAmbiguousSetupEmail(
           (!course.lastFailureAt || course.lastFailureAt < course.lastSuccessfulAt),
       )
     );
+    if (!eligible) {
+      return false;
+    }
+    const claimed = await transaction.searchEmailDelivery.updateMany({
+      where: {
+        id: delivery.id,
+        status: "SUPPRESSED",
+        lastError: AMBIGUOUS_SETUP_MARKER,
+        attemptCount: delivery.attemptCount,
+        sentAt: null,
+      },
+      data: {
+        status: "SENDING",
+        claimToken,
+        claimExpiresAt: new Date(now.getTime() + 5 * 60 * 1000),
+        attemptCount: { increment: 1 },
+        lastError: null,
+      },
+    });
+    return claimed.count === 1;
   }, { timeout: 15_000 });
   if (!authorized) {
     return { outcome: "ineligible" };
   }
 
-  const result = await sendSearchStatusEmail({
-    searchId: delivery.teeSearchId,
-    to: delivery.recipient,
-    ...report,
-    stableIdempotencyKey: getStableSearchEmailDeliveryIdempotencyKey({
+  let result: Awaited<ReturnType<typeof sendSearchStatusEmail>>;
+  try {
+    await renewClaimedDeliveryRecipientAuthorization({
       searchId: delivery.teeSearchId,
-      kind: delivery.kind,
-      groupKey: delivery.groupKey,
-      recipient: delivery.recipient,
-      payload,
-    }),
-  });
+      alertGeneration: delivery.alertGeneration,
+      claimToken,
+      delivery,
+    });
+    result = await sendSearchStatusEmail({
+      searchId: delivery.teeSearchId,
+      to: delivery.recipient,
+      ...report,
+      stableIdempotencyKey: getStableSearchEmailDeliveryIdempotencyKey({
+        searchId: delivery.teeSearchId,
+        kind: delivery.kind,
+        groupKey: delivery.groupKey,
+        recipient: delivery.recipient,
+        payload,
+      }),
+    });
+  } catch (error) {
+    await prisma.searchEmailDelivery.updateMany({
+      where: { id: delivery.id, status: "SENDING", claimToken },
+      data: {
+        status: "SUPPRESSED",
+        claimToken: null,
+        claimExpiresAt: null,
+        lastError: AMBIGUOUS_SETUP_MARKER,
+      },
+    });
+    throw error;
+  }
   if (result.deliveryStatus !== "sent") {
+    await prisma.searchEmailDelivery.updateMany({
+      where: { id: delivery.id, status: "SENDING", claimToken },
+      data: {
+        status: "SUPPRESSED",
+        claimToken: null,
+        claimExpiresAt: null,
+        lastError: AMBIGUOUS_SETUP_MARKER,
+      },
+    });
     return { outcome: "ineligible" };
   }
 
@@ -188,14 +241,16 @@ export async function reconcileAmbiguousSetupEmail(
       id: delivery.id,
       teeSearchId: delivery.teeSearchId,
       alertGeneration: delivery.alertGeneration,
-      status: "SUPPRESSED",
-      lastError: AMBIGUOUS_SETUP_MARKER,
-      attemptCount: delivery.attemptCount,
+      status: "SENDING",
+      claimToken,
+      attemptCount: delivery.attemptCount + 1,
       sentAt: null,
     },
     data: {
       status: "SENT",
       sentAt: new Date(),
+      claimToken: null,
+      claimExpiresAt: null,
       lastError: null,
       nextAttemptAt: null,
     },

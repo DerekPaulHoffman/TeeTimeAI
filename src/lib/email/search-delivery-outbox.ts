@@ -4792,7 +4792,7 @@ function isDeliveryAuthorizedForLockedSearch(
     : authority.additionalRecipients.has(recipient);
 }
 
-async function renewClaimedDeliveryRecipientAuthorization(input: {
+export async function renewClaimedDeliveryRecipientAuthorization(input: {
   searchId: string;
   alertGeneration: number;
   claimToken: string;
