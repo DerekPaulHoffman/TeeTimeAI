@@ -5029,6 +5029,58 @@ describe("runSearchCheck email cadence", () => {
     );
   });
 
+  it("honors server-only monitoring when an open investigation is waiting for the local reader", async () => {
+    const playbook = installPlaybookPersistence(buildPlaybookThroughBrowserRetry());
+    const course = {
+      ...search.preferences[0].course,
+      automationEligibility: "ALLOWED" as const,
+      automationReason: "NONE" as const,
+      monitoringMode: "SERVER_ONLY" as const,
+      policyNotes: null,
+      detectedPlatform: "CUSTOM" as const,
+      providerFamilyKey: "CPS",
+      detectedBookingUrl:
+        "https://grassyhill.cps.golf/onlineresweb/search-teetime",
+      bookingMetadata: {
+        provider: "CPS",
+        siteName: "grassyhill",
+        bookingBaseUrl: "https://grassyhill.cps.golf/",
+        courseIds: [1],
+      },
+      supportIncident: {
+        ...playbook.context(),
+        firstSeenAt: PLAYBOOK_OBSERVED_AT,
+      },
+    };
+    adapterMocks.isForeupMetadata.mockReturnValue(false);
+    adapterMocks.isCpsMetadata.mockReturnValue(true);
+    localReaderMocks.getLocalReaderCourseKey.mockReturnValue(
+      "cps:grassyhill.cps.golf",
+    );
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({
+      ...search,
+      preferences: [{ rank: 1, course }],
+    });
+
+    const result = await runSearchCheck("search-1", "test");
+
+    expect(result.courseResults[0]).toMatchObject({ outcome: "NO_MATCH" });
+    expect(adapterMocks.fetchCpsTeeSheet).toHaveBeenCalledOnce();
+    expect(localReaderMocks.getFreshLocalReaderObservation).not.toHaveBeenCalled();
+    expect(localReaderMocks.queueLocalReaderJob).not.toHaveBeenCalled();
+    expect(dbMocks.recordCourseProbe).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rawSummary: expect.objectContaining({
+          providerExecution: "RUNNABLE_PROVIDER_CHECK",
+        }),
+      }),
+    );
+    expect(courseMonitoringMocks.recordCourseMonitoringPlaybookTransition)
+      .not.toHaveBeenCalled();
+    expect(assessAutomationPlaybook(playbook.getLedger(), 1).nextStage)
+      .toBe("LOCAL_READER");
+  });
+
   it("uses the Chronogolf server adapter before an available local-reader result", async () => {
     const bookingUrl = "https://www.chronogolf.com/club/hyde-park-golf-club";
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({

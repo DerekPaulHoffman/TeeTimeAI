@@ -863,6 +863,10 @@ async function checkSearch(
                 "A durable operator decision confirmed the manual booking method.",
             }
           : evaluateMonitoringGate(course);
+      const preferRunnableAdapter =
+        supportedAdapterAvailable &&
+        course.monitoringMode === "SERVER_ONLY" &&
+        monitoringGate.adapterAllowed;
       let playbookRuntime = await loadSearchPlaybookRuntime({
         courseId: course.id,
         runtimeVersion,
@@ -986,7 +990,8 @@ async function checkSearch(
       }
       if (
         playbookRuntime?.assessment.nextStage === "LOCAL_READER" &&
-        !localReaderEligible
+        !localReaderEligible &&
+        !preferRunnableAdapter
       ) {
         playbookRuntime = await skipSearchPlaybookStage(playbookRuntime, {
           stage: "LOCAL_READER",
@@ -1551,7 +1556,9 @@ async function checkSearch(
       try {
         const localReaderShouldRun =
           localReaderEligible &&
-          (localReaderOnly || playbookRuntime?.assessment.nextStage === "LOCAL_READER" ||
+          (localReaderOnly ||
+            (playbookRuntime?.assessment.nextStage === "LOCAL_READER" &&
+              !preferRunnableAdapter) ||
             reuseRestoredLocalReader);
         const freshLocalReaderObservation = localReaderShouldRun
           ? await getFreshLocalReaderObservation({
@@ -2289,7 +2296,10 @@ async function checkSearch(
         const providerFailure = classifyProviderFailure({ error });
         const localReaderStageActive =
           localReaderEligible &&
-          (localReaderOnly || activePlaybookStage === "LOCAL_READER" || reuseRestoredLocalReader);
+          (localReaderOnly ||
+            (activePlaybookStage === "LOCAL_READER" &&
+              !preferRunnableAdapter) ||
+            reuseRestoredLocalReader);
         const localReaderJob =
           customerBookingUrl && localReaderStageActive
             ? await queueLocalReaderJob({
@@ -2523,7 +2533,11 @@ async function checkSearch(
           currentPlaybook =
             await skipPlaybookStagesBeforeLocalReader(currentPlaybook);
         }
-        const failedStage = getRunnableSearchPlaybookStage(currentPlaybook);
+        const failedStage =
+          preferRunnableAdapter &&
+          currentPlaybook?.assessment.nextStage === "LOCAL_READER"
+            ? null
+            : getRunnableSearchPlaybookStage(currentPlaybook);
         if (currentPlaybook && failedStage) {
           const stageAssessment = currentPlaybook.assessment.stages.find(
             (stage) => stage.stage === failedStage,
@@ -3500,6 +3514,12 @@ async function recordSearchPlaybookSuccess(
     return runtime;
   }
   const localReader = stage === "LOCAL_READER";
+  if (
+    (localReader && providerExecution !== "LOCAL_BROWSER_READER") ||
+    (!localReader && providerExecution !== "RUNNABLE_PROVIDER_CHECK")
+  ) {
+    return runtime;
+  }
   return recordSearchPlaybookAttemptResult(runtime, {
     stage,
     transition: "SUCCEEDED",
