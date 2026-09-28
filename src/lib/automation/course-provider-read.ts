@@ -16,6 +16,7 @@ import { fetchForeupTeeSheet, isForeupMetadata } from "@/lib/adapters/foreup";
 import { fetchGolfBackTeeSheet, isGolfBackMetadata } from "@/lib/adapters/golfback";
 import { fetchGolfGeekTeeSheet, isGolfGeekMetadata } from "@/lib/adapters/golf-geek";
 import { fetchGolfNowTeeSheet, isGolfNowMetadata } from "@/lib/adapters/golfnow";
+import { fetchQuick18TeeSheet, isQuick18Metadata } from "@/lib/adapters/quick18";
 import {
   fetchGolfWithAccessTeeSheet,
   isGolfWithAccessMetadata
@@ -137,6 +138,14 @@ export function fetchCourseTeeSheet(
   }
   if (providerFamily === "GOLFNOW" && isGolfNowMetadata(course.bookingMetadata)) {
     return fetchGolfNowTeeSheet({
+      courseId: course.id,
+      date,
+      players,
+      metadata: course.bookingMetadata
+    });
+  }
+  if (providerFamily === "QUICK18" && isQuick18Metadata(course.bookingMetadata)) {
+    return fetchQuick18TeeSheet({
       courseId: course.id,
       date,
       players,

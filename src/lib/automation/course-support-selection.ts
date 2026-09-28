@@ -119,6 +119,33 @@ export type CourseSupportAdmissionLane =
       parkedCampaignReservation: boolean;
     };
 
+export type CourseSupportSelectionLane = "ACTIVE_ALERT" | "BACKGROUND";
+
+// Only an explicit current marker can free the background slot. Older active
+// batches may contain mixed demand, so they conservatively occupy that slot.
+export function readCourseSupportSelectionLane(
+  value: unknown,
+): CourseSupportSelectionLane | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const summary = value as Record<string, unknown>;
+  const marker = summary.selectionLane;
+  if (!marker || typeof marker !== "object" || Array.isArray(marker)) return null;
+  const record = marker as Record<string, unknown>;
+  return Object.keys(record).length === 2 &&
+    record.schemaVersion === 1 &&
+    (record.lane === "ACTIVE_ALERT" || record.lane === "BACKGROUND")
+    ? record.lane
+    : null;
+}
+
+export function backgroundCourseSupportSlotOccupied(
+  activeBatches: readonly { summary: unknown }[],
+) {
+  return activeBatches.some(
+    (batch) => readCourseSupportSelectionLane(batch.summary) !== "ACTIVE_ALERT",
+  );
+}
+
 export type SelectedCourseSupportBatch = {
   providerFamilyKey: string;
   failureFingerprint: string;
@@ -129,6 +156,7 @@ export type SelectedCourseSupportBatch = {
     | "PARKED_CAMPAIGN_RESERVATION"
     | "TARGETED_RETRY";
   containsCriticalRealDemand: boolean;
+  selectionLane: CourseSupportSelectionLane;
   remediationDirective?: CourseSupportRemediationDirective;
 };
 
@@ -238,9 +266,17 @@ export function selectCourseSupportBatch(input: {
 }): SelectedCourseSupportBatch | null {
   const now = input.now ?? new Date();
   const maxCourses = clampCourseSupportBatchSize(input.maxCourses);
+  const selectionLane: CourseSupportSelectionLane = input.candidates.some(
+    (candidate) => candidate.activeRealSearchCount > 0,
+  )
+    ? "ACTIVE_ALERT"
+    : "BACKGROUND";
   const groups = new Map<string, CourseSupportCandidate[]>();
 
   for (const candidate of input.candidates) {
+    if ((candidate.activeRealSearchCount > 0) !== (selectionLane === "ACTIVE_ALERT")) {
+      continue;
+    }
     const key = courseSupportCandidateGroupKey(candidate);
     const group = groups.get(key) ?? [];
     group.push(candidate);
@@ -298,9 +334,10 @@ export function selectCourseSupportBatch(input: {
   const containsCriticalRealDemand = selectedGroup.some((candidate) =>
     isCriticalRealDemand(candidate, now),
   );
-  const selectedIncidents = containsCriticalRealDemand
-    ? selectedGroup.slice(0, maxCourses)
-    : reserveAgedSyntheticSlots(selectedGroup, maxCourses, now);
+  const selectedIncidents = selectedGroup.slice(
+    0,
+    selectionLane === "ACTIVE_ALERT" ? Math.min(maxCourses, 5) : 1,
+  );
 
   return {
     providerFamilyKey: selectedGroup[0].providerFamilyKey,
@@ -308,6 +345,7 @@ export function selectCourseSupportBatch(input: {
     incidents: selectedIncidents,
     fairnessReason,
     containsCriticalRealDemand,
+    selectionLane,
     ...(selectedGroup[0].remediationDirective
       ? { remediationDirective: selectedGroup[0].remediationDirective }
       : {}),
@@ -422,41 +460,6 @@ export function isCriticalRealDemand(
     candidate.earliestTargetDate &&
     candidate.earliestTargetDate.getTime() <=
       now.getTime() + NEAR_DATE_WINDOW_MS,
-  );
-}
-
-function reserveAgedSyntheticSlots(
-  incidents: CourseSupportCandidate[],
-  maxCourses: number,
-  now: Date,
-) {
-  const real = incidents.filter((candidate) => !candidate.engineeringOnly);
-  const agedSynthetic = incidents.filter(
-    (candidate) =>
-      candidate.engineeringOnly &&
-      now.getTime() - candidate.firstSeenAt.getTime() >=
-        COURSE_SUPPORT_SYNTHETIC_AGING_MS,
-  );
-  if (real.length === 0 || agedSynthetic.length === 0 || maxCourses < 4) {
-    return incidents.slice(0, maxCourses);
-  }
-  const reservedSyntheticSlots = Math.max(1, Math.floor(maxCourses / 4));
-  const selected = [
-    ...real.slice(0, maxCourses - reservedSyntheticSlots),
-    ...agedSynthetic.slice(0, reservedSyntheticSlots),
-  ];
-  const selectedIds = new Set(selected.map((candidate) => candidate.id));
-  for (const candidate of incidents) {
-    if (selected.length >= maxCourses) {
-      break;
-    }
-    if (!selectedIds.has(candidate.id)) {
-      selected.push(candidate);
-      selectedIds.add(candidate.id);
-    }
-  }
-  return selected.sort((left, right) =>
-    compareCourseSupportCandidates(left, right, now),
   );
 }
 

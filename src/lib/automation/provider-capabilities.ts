@@ -9,6 +9,7 @@ import { isForeupMetadata } from "@/lib/adapters/foreup";
 import { isGolfBackMetadata } from "@/lib/adapters/golfback";
 import { isGolfGeekMetadata } from "@/lib/adapters/golf-geek";
 import { isGolfNowMetadata } from "@/lib/adapters/golfnow";
+import { isQuick18Metadata, isQuick18PublicSearchUrl } from "@/lib/adapters/quick18";
 import { isGolfWithAccessMetadata } from "@/lib/adapters/golf-with-access";
 import { isTeeItUpMetadata } from "@/lib/adapters/teeitup";
 import { isTeesnapMetadata } from "@/lib/adapters/teesnap";
@@ -33,6 +34,7 @@ export const KNOWN_PROVIDER_FAMILIES = [
   "WEBTRAC",
   "EZLINKS",
   "GOLFNOW",
+  "QUICK18",
   "AGILYSYS",
   "CLUB_CADDIE",
   "WHOOSH",
@@ -185,6 +187,14 @@ export const PROVIDER_CAPABILITIES = {
     matchesHostname: (hostname) => matchesDomain(hostname, "golfnow.com"),
     validatesMetadata: isGolfNowMetadata
   },
+  QUICK18: {
+    family: "QUICK18",
+    detectedPlatform: "CUSTOM",
+    supportsAutomation: true,
+    matchesHostname: (hostname) =>
+      hostname.endsWith(".quick18.com") && hostname !== "www.quick18.com",
+    validatesMetadata: isQuick18Metadata
+  },
   AGILYSYS: {
     family: "AGILYSYS",
     detectedPlatform: "CUSTOM",
@@ -279,6 +289,7 @@ const metadataProviderFamilies = new Map<string, KnownProviderFamily>([
   ["GOLFBACK", "GOLFBACK"],
   ["GOLF_GEEK", "GOLF_GEEK"],
   ["GOLFNOW", "GOLFNOW"],
+  ["QUICK18", "QUICK18"],
   ["AGILYSYS", "AGILYSYS"],
   ["GOLF_WITH_ACCESS", "GOLF_WITH_ACCESS"],
   ["WEBTRAC", "WEBTRAC"],
@@ -764,6 +775,8 @@ function isProviderFamilyPublicBookingLandingUrl(
           )) &&
         !url.hash
       );
+    case "QUICK18":
+      return isQuick18PublicSearchUrl(url);
     case "AGILYSYS":
       return Boolean(
         hostname === "book.onagilysys.com" &&
@@ -1114,6 +1127,9 @@ function hasAllowedProviderBookingLandingQuery(url: URL, providerFamily: KnownPr
       query.has("day") &&
       isValidProviderLandingDate(query.get("day")!)
     );
+  }
+  if (providerFamily === "QUICK18") {
+    return isQuick18PublicSearchUrl(url);
   }
   return false;
 }

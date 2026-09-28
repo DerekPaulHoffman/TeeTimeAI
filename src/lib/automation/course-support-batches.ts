@@ -187,8 +187,10 @@ import {
 } from "./course-support-search-execution-fence";
 import {
   classifyCourseSupportCampaignSummary,
+  backgroundCourseSupportSlotOccupied,
   compareCourseSupportGroupPriority,
   isCriticalRealDemand,
+  readCourseSupportSelectionLane,
   selectCourseSupportAdmissionLane,
   selectCourseSupportBatch,
   type CourseSupportCampaignSummaryState,
@@ -205,6 +207,8 @@ import {
 
 export {
   classifyCourseSupportCampaignSummary,
+  backgroundCourseSupportSlotOccupied,
+  readCourseSupportSelectionLane,
   selectCourseSupportAdmissionLane,
   selectCourseSupportBatch,
   type CourseSupportCampaignSummaryState,
@@ -1862,9 +1866,6 @@ export function selectCourseSupportRetryBatch(input: {
     retryOrdinal: input.retryOrdinal,
     requestedMaxCourses: input.maxCourses
   });
-  if (input.retryOrdinal === undefined && retryBatch.incidents.length > maxCourses) {
-    throw new Error("The targeted responder retry exceeds the requested batch size.");
-  }
 
   const seenIncidentKeys = new Set<string>();
   const seenCourseCycles = new Set<string>();
@@ -1894,7 +1895,8 @@ export function selectCourseSupportRetryBatch(input: {
     seenCourseCycles.add(courseCycle);
   }
 
-  const selectedIncidents = scopedEntries.map((entry) => {
+  let dueScheduleChanged = false;
+  const dueIncidents = scopedEntries.flatMap((entry) => {
     const candidate = input.candidates.find(
       (current) =>
         current.id === entry.incidentId &&
@@ -1904,21 +1906,42 @@ export function selectCourseSupportRetryBatch(input: {
         current.failureFingerprint === retryBatch.failureFingerprint,
     );
     if (!candidate) {
-      throw new Error(
-        "The targeted responder retry is not currently due or its provenance changed.",
-      );
+      if (input.retryOrdinal === undefined) return [];
+      throw new Error("The targeted responder retry is not currently due or its provenance changed.");
     }
     if (
       !candidate.nextAttemptAt ||
       candidate.nextAttemptAt.getTime() <= retryBatch.completedAt!.getTime() ||
       candidate.nextAttemptAt.getTime() > now.getTime()
     ) {
-      throw new Error(
-        "The targeted responder retry does not have a current due retry schedule.",
-      );
+      if (input.retryOrdinal === undefined) {
+        dueScheduleChanged = true;
+        return [];
+      }
+      throw new Error("The targeted responder retry does not have a current due retry schedule.");
     }
-    return candidate;
+    return [candidate];
   });
+  if (dueIncidents.length === 0) {
+    throw new Error(dueScheduleChanged
+      ? "The targeted responder retry does not have a current due retry schedule."
+      : "The targeted responder retry is not currently due or its provenance changed.");
+  }
+  const selectionLane = dueIncidents.some((candidate) => candidate.activeRealSearchCount > 0)
+    ? "ACTIVE_ALERT" as const
+    : "BACKGROUND" as const;
+  if (
+    input.retryOrdinal !== undefined &&
+    selectionLane === "BACKGROUND" &&
+    input.candidates.some((candidate) => candidate.activeRealSearchCount > 0)
+  ) {
+    throw new Error("A targeted responder retry cannot bypass due active-alert work.");
+  }
+  const selectedIncidents = dueIncidents
+    .filter((candidate) =>
+      (candidate.activeRealSearchCount > 0) === (selectionLane === "ACTIVE_ALERT"),
+    )
+    .slice(0, selectionLane === "ACTIVE_ALERT" ? Math.min(maxCourses, 5) : 1);
   const selectedIncidentIds = new Set(
     selectedIncidents.map((incident) => incident.id),
   );
@@ -1926,11 +1949,12 @@ export function selectCourseSupportRetryBatch(input: {
     input.candidates.some(
       (candidate) =>
         !selectedIncidentIds.has(candidate.id) &&
-        isCriticalRealDemand(candidate, now),
+        candidate.activeRealSearchCount > 0 &&
+        selectionLane === "BACKGROUND",
     )
   ) {
     throw new Error(
-      "A targeted responder retry cannot bypass due critical real-demand work.",
+      "A targeted responder retry cannot bypass due active-alert work.",
     );
   }
   const remediationDirective = selectedIncidents[0]?.remediationDirective;
@@ -1967,6 +1991,7 @@ export function selectCourseSupportRetryBatch(input: {
     containsCriticalRealDemand: selectedIncidents.some((candidate) =>
       isCriticalRealDemand(candidate, now),
     ),
+    selectionLane,
     ...(remediationDirective ? { remediationDirective } : {}),
   };
 }
@@ -2347,6 +2372,8 @@ export function classifyCourseSupportQueueInspection(input: {
   activeBatchOwnerThreadId?: string | null;
   requestingThreadId?: string | null;
   hasExpiredBatch: boolean;
+  deferExpiredBackgroundForActiveDemand?: boolean;
+  recoverExpiredForCapacity?: boolean;
   dueIncidentCount: number;
 }): ResponderOutcome {
   if (
@@ -2360,9 +2387,11 @@ export function classifyCourseSupportQueueInspection(input: {
     input.activeBatchCount ?? (input.hasActiveBatch ? 1 : 0);
   const maxActiveBatches = input.maxActiveBatches ?? 1;
   if (activeBatchCount >= maxActiveBatches) {
-    return "deferred_busy";
+    return input.hasExpiredBatch && input.recoverExpiredForCapacity
+      ? "recovery_required"
+      : "deferred_busy";
   }
-  if (input.hasExpiredBatch) {
+  if (input.hasExpiredBatch && !input.deferExpiredBackgroundForActiveDemand) {
     return "recovery_required";
   }
   if (input.dueIncidentCount > 0) {
@@ -2386,7 +2415,7 @@ export type CourseSupportResponderHandoff =
   | {
       action: "CLAIM";
       source: "ORDINARY_DISPATCH" | "PARKED_CAMPAIGN";
-      maxCourses: 5;
+      maxCourses: 1 | 5;
       selection: "ATOMIC_SERVER_SIDE";
     }
   | {
@@ -2449,25 +2478,35 @@ function buildCourseSupportFairnessHistoryFence(
 export function buildCourseSupportResponderHandoff(input: {
   outcome: ResponderOutcome;
   hasExpiredBatch: boolean;
+  expiredBatchIsBackground?: boolean;
   ownedByCurrentTask: boolean;
   availableWriterSlots: number;
   ordinaryDispatchGroupCount: number;
   parkedCampaign: { status: string; readyCount: number } | null;
   hasCurrentActiveRealDemand?: boolean;
+  backgroundSlotAvailable?: boolean;
   activeBatchCampaignSummaryStates?: readonly CourseSupportCampaignSummaryState[];
   recentBatches?: RecentBatchFairnessEvidence[];
 }): CourseSupportResponderHandoff {
-  if (input.hasExpiredBatch && input.availableWriterSlots > 0) {
-    return { action: "RECOVER", source: "EXPIRED_BATCH" };
-  }
   if (input.ownedByCurrentTask) {
     return { action: "RESUME", source: "OWNED_BATCH" };
+  }
+  if (
+    input.hasExpiredBatch &&
+    (input.availableWriterSlots <= 0 ||
+      !(input.expiredBatchIsBackground && input.hasCurrentActiveRealDemand))
+  ) {
+    return { action: "RECOVER", source: "EXPIRED_BATCH" };
   }
   const admissionLane =
     input.outcome === "ready" && input.availableWriterSlots > 0
       ? selectCourseSupportAdmissionLane({
-          priorityCandidateAvailable: input.ordinaryDispatchGroupCount > 0,
+          priorityCandidateAvailable:
+            input.ordinaryDispatchGroupCount > 0 &&
+            (input.hasCurrentActiveRealDemand === true ||
+              input.backgroundSlotAvailable !== false),
           requestlessParkedCampaignAvailable: Boolean(
+            input.backgroundSlotAvailable !== false &&
             input.parkedCampaign?.status === "RUNNING" &&
               input.parkedCampaign.readyCount > 0
           ),
@@ -2485,7 +2524,11 @@ export function buildCourseSupportResponderHandoff(input: {
         admissionLane.lane === "REQUESTLESS_PARKED_CAMPAIGN"
           ? "PARKED_CAMPAIGN"
           : "ORDINARY_DISPATCH",
-      maxCourses: 5,
+      maxCourses:
+        admissionLane.lane === "PRIORITY" &&
+        input.hasCurrentActiveRealDemand === true
+          ? 5
+          : 1,
       selection: "ATOMIC_SERVER_SIDE",
     };
   }
@@ -2494,6 +2537,12 @@ export function buildCourseSupportResponderHandoff(input: {
     source:
       input.availableWriterSlots <= 0
         ? "WRITER_CAPACITY"
+        : input.backgroundSlotAvailable === false &&
+            input.hasCurrentActiveRealDemand !== true &&
+            (input.ordinaryDispatchGroupCount > 0 ||
+              (input.parkedCampaign?.status === "RUNNING" &&
+                input.parkedCampaign.readyCount > 0))
+          ? "WRITER_CAPACITY"
         : "NO_ACTIONABLE_WORK",
   };
 }
@@ -3392,6 +3441,7 @@ export async function inspectCourseSupportQueue(input?: {
     parkedSourceCompleteFinalizationCandidates,
     activeBatches,
     expiredBatch,
+    expiredBatchCount,
     parkedCampaign,
     recentCompletedBatches,
   ] =
@@ -3461,6 +3511,15 @@ export async function inspectCourseSupportQueue(input?: {
           reference: true,
           status: true,
           leaseExpiresAt: true,
+          providerFamilyKey: true,
+          failureFingerprint: true,
+          summary: true,
+        },
+      }),
+      prisma.courseSupportBatch.count({
+        where: {
+          status: { in: ACTIVE_BATCH_STATUSES },
+          leaseExpiresAt: { lte: now },
         },
       }),
       inspectActiveParkedCourseCampaign({
@@ -3480,9 +3539,11 @@ export async function inspectCourseSupportQueue(input?: {
     activeBatches.find((batch) => batch.ownerThreadId === requestingThreadId) ??
     activeBatches[0] ??
     null;
+  const activeStatusBatchCount =
+    activeBatches.length + Math.max(expiredBatchCount, expiredBatch ? 1 : 0);
   assertBoundedCourseSupportCandidateQueue(rawDueIncidents);
   const activeProviderGroups = new Set(
-    activeBatches.map(
+    [...activeBatches, ...(expiredBatch ? [expiredBatch] : [])].map(
       (batch) => `${batch.providerFamilyKey}\u0000${batch.failureFingerprint}`,
     ),
   );
@@ -3545,6 +3606,13 @@ export async function inspectCourseSupportQueue(input?: {
         `${incident.providerFamilyKey}\u0000${incident.failureFingerprint}`,
       ),
   );
+  const availableDueRealCount = dueDemand.filter(
+    ({ incident, activeRealSearchCount }) =>
+      activeRealSearchCount > 0 &&
+      !activeProviderGroups.has(
+        `${incident.providerFamilyKey}\u0000${incident.failureFingerprint}`,
+      ),
+  ).length;
 
   const providerGroups = new Set(
     dueIncidents.map(
@@ -3566,10 +3634,11 @@ export async function inspectCourseSupportQueue(input?: {
   const readOnlyDispatchGroups = [
     ...dueDemand
       .filter(
-        ({ incident }) =>
+        ({ incident, activeRealSearchCount }) =>
           !activeProviderGroups.has(
             `${incident.providerFamilyKey}\u0000${incident.failureFingerprint}`,
-          ),
+          ) &&
+          (availableDueRealCount === 0 || activeRealSearchCount > 0),
       )
       .reduce(
         (groups, item) => {
@@ -3647,15 +3716,24 @@ export async function inspectCourseSupportQueue(input?: {
       ordinal: index + 1,
       providerFamilyKey: group.providerFamilyKey,
       activeRealDemandCount: group.activeRealDemandCount,
-      courseCount: Math.min(5, group.courseCount),
+      courseCount: Math.min(
+        availableDueRealCount > 0 ? 5 : 1,
+        group.courseCount,
+      ),
     }));
   const outcome = classifyCourseSupportQueueInspection({
     hasActiveBatch: Boolean(activeBatch),
-    activeBatchCount: activeBatches.length,
+    activeBatchCount: activeStatusBatchCount,
     maxActiveBatches: MAX_CONCURRENT_COURSE_SUPPORT_BATCHES,
     activeBatchOwnerThreadId: activeBatch?.ownerThreadId,
     requestingThreadId,
     hasExpiredBatch: Boolean(expiredBatch),
+    recoverExpiredForCapacity: Boolean(expiredBatch),
+    deferExpiredBackgroundForActiveDemand: Boolean(
+      expiredBatch &&
+      readCourseSupportSelectionLane(expiredBatch.summary) !== "ACTIVE_ALERT" &&
+      availableDueRealCount > 0,
+    ),
     dueIncidentCount:
       availableDueIncidents.length +
       (parkedCampaign?.status === "RUNNING" ? parkedCampaign.readyCount : 0),
@@ -3698,7 +3776,7 @@ export async function inspectCourseSupportQueue(input?: {
   });
   const availableWriterSlots = Math.max(
     0,
-    MAX_CONCURRENT_COURSE_SUPPORT_BATCHES - activeBatches.length,
+    MAX_CONCURRENT_COURSE_SUPPORT_BATCHES - activeStatusBatchCount,
   );
   const recentFairnessEvidence = buildCourseSupportRecentFairnessEvidence(
     recentCompletedBatches,
@@ -3707,11 +3785,19 @@ export async function inspectCourseSupportQueue(input?: {
   const handoff = buildCourseSupportResponderHandoff({
     outcome,
     hasExpiredBatch: Boolean(expiredBatch),
+    expiredBatchIsBackground:
+      expiredBatch
+        ? readCourseSupportSelectionLane(expiredBatch.summary) !== "ACTIVE_ALERT"
+        : false,
     ownedByCurrentTask,
     availableWriterSlots,
     ordinaryDispatchGroupCount: readOnlyDispatchGroups.length,
     parkedCampaign,
-    hasCurrentActiveRealDemand: dueRealCount > 0,
+    hasCurrentActiveRealDemand: availableDueRealCount > 0,
+    backgroundSlotAvailable: !backgroundCourseSupportSlotOccupied([
+      ...activeBatches,
+      ...(expiredBatch ? [expiredBatch] : []),
+    ]),
     activeBatchCampaignSummaryStates: activeBatches.map((batch) =>
       classifyCourseSupportCampaignSummary(batch.summary),
     ),
@@ -3755,17 +3841,20 @@ export async function inspectCourseSupportQueue(input?: {
     availableWriterSlots,
     readOnlyDispatchPlan: {
       maxProviderGroups: MAX_CONCURRENT_COURSE_SUPPORT_BATCHES,
-      maxCoursesPerGroup: 5,
+      maxCoursesPerGroup: availableDueRealCount > 0 ? 5 : 1,
       globalProviderRequestLimit: 2,
       perProviderFamilyRequestLimit: 1,
       groups: readOnlyDispatchGroups,
     },
     recoveryContinuation: {
       reinspectAfterRecovery: Boolean(
+        handoff.action === "RECOVER" &&
         expiredBatch &&
-        (availableDueIncidents.length > 0 ||
-          (parkedCampaign?.status === "RUNNING" &&
-            parkedCampaign.readyCount > 0)) &&
+        (readCourseSupportSelectionLane(expiredBatch.summary) === "ACTIVE_ALERT"
+          ? availableDueIncidents.length > 0 ||
+            (parkedCampaign?.status === "RUNNING" &&
+              parkedCampaign.readyCount > 0)
+          : availableDueRealCount > 0) &&
         activeBatches.length < MAX_CONCURRENT_COURSE_SUPPORT_BATCHES,
       ),
       dueIncidentCount:
@@ -3773,7 +3862,7 @@ export async function inspectCourseSupportQueue(input?: {
         (parkedCampaign?.status === "RUNNING" ? parkedCampaign.readyCount : 0),
       availableWriterSlots: Math.max(
         0,
-        MAX_CONCURRENT_COURSE_SUPPORT_BATCHES - activeBatches.length,
+        MAX_CONCURRENT_COURSE_SUPPORT_BATCHES - activeStatusBatchCount,
       ),
     },
     ownedByCurrentTask,
@@ -3847,7 +3936,6 @@ export async function claimCourseSupportBatch(input: {
     const activeBatches = await prisma.courseSupportBatch.findMany({
       where: {
         status: { in: ACTIVE_BATCH_STATUSES },
-        leaseExpiresAt: { gt: selectionDatabaseNow },
       },
       orderBy: { heartbeatAt: "desc" },
       take: MAX_CONCURRENT_COURSE_SUPPORT_BATCHES,
@@ -4071,7 +4159,7 @@ export async function claimCourseSupportBatch(input: {
           requestlessParkedCampaignAvailable: Boolean(
             requestlessCampaignSelection,
           ),
-          hasCurrentActiveRealDemand: initialCandidates.some(
+          hasCurrentActiveRealDemand: candidates.some(
             (candidate) => candidate.activeRealSearchCount > 0,
           ),
           activeBatchCampaignSummaryStates: activeBatches.map((batch) =>
@@ -4131,6 +4219,36 @@ export async function claimCourseSupportBatch(input: {
           durableCloseoutRecorded: recorded,
         }),
       };
+    }
+
+    if (selected.selectionLane === "BACKGROUND") {
+      const priorOwnerBatches = await prisma.$queryRawUnsafe<Array<{ id: string }>>(
+        `SELECT "id" FROM "CourseSupportBatch"
+        WHERE ("ownerThreadId" = $1
+          OR "summary" #>> '{backgroundRecoveryRunV1,ownerThreadId}' = $1)
+          AND "summary" -> 'selectionLane' IS DISTINCT FROM
+            '{"schemaVersion":1,"lane":"ACTIVE_ALERT"}'::jsonb
+        LIMIT 1`,
+        input.ownerThreadId,
+      );
+      if (
+        backgroundCourseSupportSlotOccupied(activeBatches) ||
+        priorOwnerBatches.some((batch) => typeof batch.id === "string")
+      ) {
+        const recorded = await recordRoutineResponderObservation({
+          outcome: "deferred_busy",
+          now: selectionDatabaseNow,
+          summary: { backgroundSlotOccupied: true },
+        });
+        return {
+          outcome: "deferred_busy" as const,
+          durableCloseoutRecorded: recorded,
+          ...getResponderThreadPolicy({
+            outcome: "deferred_busy",
+            durableCloseoutRecorded: recorded,
+          }),
+        };
+      }
     }
 
     if (
@@ -4435,7 +4553,6 @@ export async function claimCourseSupportBatch(input: {
           tx.courseSupportBatch.findMany({
             where: {
               status: { in: ACTIVE_BATCH_STATUSES },
-              leaseExpiresAt: { gt: claimDatabaseNow },
             },
             orderBy: { heartbeatAt: "desc" },
             take: MAX_CONCURRENT_COURSE_SUPPORT_BATCHES,
@@ -5023,7 +5140,9 @@ export async function claimCourseSupportBatch(input: {
           : selectCourseSupportBatch({
               candidates: lockedCandidatePool.filter(
                 (candidate) =>
-                  !candidate.campaign || candidate.activeRealSearchCount > 0,
+                  (!preselectedClaimCandidateByIncidentId.get(candidate.id)
+                    ?.campaign && !candidate.campaign) ||
+                  candidate.activeRealSearchCount > 0,
               ),
               recentBatches: currentFairnessEvidence,
               maxCourses,
@@ -5090,6 +5209,7 @@ export async function claimCourseSupportBatch(input: {
           .sort();
         if (
           !currentSelection ||
+          currentSelection.selectionLane !== selected.selectionLane ||
           JSON.stringify(currentSelectionMembers) !==
             JSON.stringify(plannedSelectionMembers)
         ) {
@@ -5106,6 +5226,23 @@ export async function claimCourseSupportBatch(input: {
           );
         }
         const lockedSelection = currentSelection;
+        if (lockedSelection.selectionLane === "BACKGROUND") {
+          const priorOwnerBatches = await tx.$queryRawUnsafe<Array<{ id: string }>>(
+            `SELECT "id" FROM "CourseSupportBatch"
+            WHERE ("ownerThreadId" = $1
+              OR "summary" #>> '{backgroundRecoveryRunV1,ownerThreadId}' = $1)
+              AND "summary" -> 'selectionLane' IS DISTINCT FROM
+                '{"schemaVersion":1,"lane":"ACTIVE_ALERT"}'::jsonb
+            LIMIT 1`,
+            input.ownerThreadId,
+          );
+          if (
+            backgroundCourseSupportSlotOccupied(currentActiveBatches) ||
+            priorOwnerBatches.some((batch) => typeof batch.id === "string")
+          ) {
+            throw new Error("The background course-support slot changed during locked claim; rerun selection.");
+          }
+        }
         const lockedRemediationRoute =
           lockedSelection.incidents[0]?.remediationRoute;
         if (
@@ -5184,14 +5321,13 @@ export async function claimCourseSupportBatch(input: {
           return { reconciledAuthoritativeFinalCount };
         }
         if (input.retryBatchId !== undefined) {
-          const outsideDueFetchFailures =
+          const outsideDueIncidents =
             await tx.courseSupportIncident.findMany({
               where: {
                 ...buildDueResponderIncidentWhere(claimDatabaseNow),
                 id: {
                   notIn: lockedSelection.incidents.map((incident) => incident.id),
                 },
-                kind: "FETCH_FAILED",
               },
               take: COURSE_SUPPORT_CANDIDATE_QUEUE_READ_LIMIT + 1,
               select: {
@@ -5221,8 +5357,8 @@ export async function claimCourseSupportBatch(input: {
                 },
               },
             });
-          assertBoundedCourseSupportCandidateQueue(outsideDueFetchFailures);
-          const outsideCriticalDemandAppeared = outsideDueFetchFailures.some(
+          assertBoundedCourseSupportCandidateQueue(outsideDueIncidents);
+          const outsideActiveDemandAppeared = outsideDueIncidents.some(
             (incident) => {
               const { course } = incident;
               const currentDemand = deriveCourseSupportCurrentDemand(
@@ -5241,15 +5377,13 @@ export async function claimCourseSupportBatch(input: {
                   activeRealSearchCount: currentDemand.activeRealSearchCount,
                 }) &&
                 currentDemand.activeRealSearchCount > 0 &&
-                currentDemand.earliestTargetDate &&
-                currentDemand.earliestTargetDate.getTime() <=
-                  claimDatabaseNow.getTime() + NEAR_DATE_WINDOW_MS,
+                lockedSelection.selectionLane === "BACKGROUND",
               );
             },
           );
-          if (outsideCriticalDemandAppeared) {
+          if (outsideActiveDemandAppeared) {
             throw new Error(
-              "A targeted responder retry cannot bypass due critical real-demand work.",
+              "A targeted responder retry cannot bypass due active-alert work.",
             );
           }
         }
@@ -5297,6 +5431,10 @@ export async function claimCourseSupportBatch(input: {
               plannedPaths,
               incidentCount: lockedSelection.incidents.length,
               fairnessReason: lockedSelection.fairnessReason,
+              selectionLane: {
+                schemaVersion: 1,
+                lane: lockedSelection.selectionLane,
+              },
               remediation: remediationSummary,
               ...(campaignSummary ? { campaign: campaignSummary } : {}),
               ...(sourceCompleteFinalizationRecoverySummary
@@ -5332,9 +5470,13 @@ export async function claimCourseSupportBatch(input: {
             leaseExpiresAt,
             heartbeatAt: claimDatabaseNow,
             baseSha: input.baseSha,
-            maxCourses,
+            maxCourses: lockedSelection.selectionLane === "BACKGROUND" ? 1 : maxCourses,
             summary: {
               schemaVersion: 1,
+              selectionLane: {
+                schemaVersion: 1,
+                lane: lockedSelection.selectionLane,
+              },
               customerRecoveryVersion: 1,
               candidateHistoryBlockedCount,
               branch: input.branch,
@@ -14447,6 +14589,38 @@ export async function recoverCourseSupportBatch(input: {
         archiveReason: "Another responder owns the renewed batch lease.",
       };
     }
+    if (readCourseSupportSelectionLane(batch.summary) !== "ACTIVE_ALERT") {
+      const earlierBackgroundWork = await prisma.$queryRawUnsafe<Array<{ id: string }>>(
+        `SELECT "id" FROM "CourseSupportBatch"
+         WHERE "id" <> $2
+           AND ("ownerThreadId" = $1
+             OR "summary" #>> '{backgroundRecoveryRunV1,ownerThreadId}' = $1)
+           AND "summary" -> 'selectionLane' IS DISTINCT FROM
+             '{"schemaVersion":1,"lane":"ACTIVE_ALERT"}'::jsonb
+         LIMIT 1`,
+        input.requestingThreadId,
+        batch.id,
+      );
+      if (earlierBackgroundWork.some((entry) => typeof entry.id === "string")) {
+        return {
+          outcome: "deferred_busy" as const,
+          recovered: false,
+          reasons: ["This responder run already advanced one background course."],
+          threadDisposition: "KEEP_VISIBLE" as const,
+          archiveReason: "The background recovery allowance is already used.",
+        };
+      }
+    }
+    const backgroundRecoveryRun =
+      readCourseSupportSelectionLane(batch.summary) === "ACTIVE_ALERT"
+        ? {}
+        : {
+            backgroundRecoveryRunV1: {
+              schemaVersion: 1,
+              ownerThreadId: input.requestingThreadId,
+              recoveredAt: now.toISOString(),
+            },
+          };
     const terminalIncidents = batch.incidents.filter((entry) =>
       ["NEEDS_HUMAN", "RESOLVED"].includes(entry.incident.status),
     );
@@ -14542,6 +14716,7 @@ export async function recoverCourseSupportBatch(input: {
               leaseExpiresAt: now,
               summary: {
                 ...summary,
+                ...backgroundRecoveryRun,
                 closeout: {
                   outcome: derivedOutcome,
                   derivedOutcome,
@@ -14665,11 +14840,11 @@ export async function recoverCourseSupportBatch(input: {
       where: {
         id: { not: batch.id },
         status: { in: ACTIVE_BATCH_STATUSES },
-        leaseExpiresAt: { gt: now },
       },
       select: {
         id: true,
         status: true,
+        leaseExpiresAt: true,
         providerFamilyKey: true,
         failureFingerprint: true,
         summary: true,
@@ -14677,20 +14852,38 @@ export async function recoverCourseSupportBatch(input: {
     });
     const recoveringWouldOwnCheckout =
       courseSupportBatchReservesCheckout(batch);
+    const recoveringBackground =
+      readCourseSupportSelectionLane(batch.summary) !== "ACTIVE_ALERT";
+    const otherBatchIsLive = (otherBatch: (typeof otherBatches)[number]) =>
+      !(otherBatch.leaseExpiresAt instanceof Date) ||
+      otherBatch.leaseExpiresAt.getTime() > now.getTime();
+    const backgroundSlotConflict =
+      recoveringBackground &&
+      otherBatches.some((otherBatch) =>
+        readCourseSupportSelectionLane(otherBatch.summary) !== "ACTIVE_ALERT" &&
+        (otherBatchIsLive(otherBatch) ||
+          otherBatch.leaseExpiresAt.getTime() < batch.leaseExpiresAt.getTime() ||
+          (otherBatch.leaseExpiresAt.getTime() === batch.leaseExpiresAt.getTime() &&
+            otherBatch.id.localeCompare(batch.id) < 0)),
+      );
     const sharedCheckoutConflict =
       recoveringWouldOwnCheckout &&
       otherBatches.some((otherBatch) =>
+        otherBatchIsLive(otherBatch) &&
         courseSupportBatchReservesCheckout(otherBatch),
       );
     const conflictingBatch = otherBatches.find((otherBatch) =>
+      otherBatchIsLive(otherBatch) &&
       courseSupportRecoveryBatchesConflict(batch, otherBatch),
     );
-    if (sharedCheckoutConflict || conflictingBatch) {
+    if (backgroundSlotConflict || sharedCheckoutConflict || conflictingBatch) {
       return {
         outcome: "deferred_busy" as const,
         recovered: false,
         reasons: [
-          sharedCheckoutConflict
+          backgroundSlotConflict
+            ? "Another background course-support owner must finish before this batch can be recovered."
+            : sharedCheckoutConflict
             ? "The approved responder checkout must be exclusive while implementation work is active."
             : "Another course-support writer with overlapping provider or code scope must finish before this responder batch can be recovered.",
         ],
@@ -15151,6 +15344,7 @@ export async function recoverCourseSupportBatch(input: {
                     data: {
                       summary: {
                         ...asJsonObject(batch.summary),
+                        ...backgroundRecoveryRun,
                         searchExecutionFence: emptyLegacyFence,
                       } as Prisma.InputJsonValue,
                       revision: { increment: 1 },
@@ -15295,6 +15489,7 @@ export async function recoverCourseSupportBatch(input: {
                     data: {
                       summary: {
                         ...asJsonObject(batch.summary),
+                        ...backgroundRecoveryRun,
                         executionEver,
                         searchExecutionFence:
                           persistCourseSupportSearchExecutionFence(
@@ -15717,6 +15912,7 @@ export async function recoverCourseSupportBatch(input: {
               leaseExpiresAt: now,
               summary: {
                 ...summary,
+                ...backgroundRecoveryRun,
                 closeout: {
                   outcome: derivedOutcome,
                   derivedOutcome,
@@ -16064,6 +16260,10 @@ export async function recoverCourseSupportBatch(input: {
       },
       data: {
         ownerThreadId: input.requestingThreadId,
+        summary: {
+          ...asJsonObject(batch.summary),
+          ...backgroundRecoveryRun,
+        } as Prisma.InputJsonValue,
         leaseToken,
         leaseExpiresAt,
         heartbeatAt: now,

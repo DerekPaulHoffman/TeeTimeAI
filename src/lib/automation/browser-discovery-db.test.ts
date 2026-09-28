@@ -1014,6 +1014,51 @@ describe("browser discovery persistence", () => {
     );
   });
 
+  it("records a Quick18 search shell as provider identity without runnable metadata or recovery", async () => {
+    const updatedAt = new Date("2026-09-28T12:00:00.000Z");
+    const bookingUrl = "https://mountsnow.quick18.com/teetimes/searchmatrix";
+    const inspected = buildBrowserDiscovery({
+      courseId: "mount-snow",
+      courseName: "Mount Snow Golf Club",
+      sourceUrl: "https://www.mountsnow.com/",
+      finalUrl: `${bookingUrl}?teedate=20260929`,
+      observedUrls: [`${bookingUrl}?teedate=20260929`],
+      visibleText: "Mount Snow Golf Club. Tee Time Search: Date: Players: Daily Rate"
+    });
+    expect(inspected.status).toBe("INSPECTED");
+    expect(inspected.apiMetadata).toBeUndefined();
+    mockedPrisma.courseAutomationDiscovery.create.mockResolvedValue({ id: "quick18-discovery" } as never);
+    await recordBrowserDiscovery(inspected);
+    expect(mockedPrisma.courseAutomationDiscovery.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        status: "INSPECTED",
+        automationEligibility: "UNKNOWN",
+        apiMetadata: undefined
+      })
+    });
+
+    mockedPrisma.course.findUnique
+      .mockResolvedValueOnce({
+        providerFamilyKey: "mountsnow.com",
+        detectedPlatform: "UNKNOWN",
+        detectedBookingUrl: null,
+        website: "https://www.mountsnow.com/",
+        bookingMetadata: null,
+        updatedAt
+      } as never)
+      .mockResolvedValueOnce({ id: "mount-snow" } as never);
+    mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
+    await applyBrowserDiscoveryToCourse(inspected);
+    expect(mockedPrisma.course.updateMany).toHaveBeenCalledWith({
+      where: { id: "mount-snow", updatedAt },
+      data: {
+        detectedPlatform: "CUSTOM",
+        providerFamilyKey: "QUICK18",
+        detectedBookingUrl: bookingUrl
+      }
+    });
+  });
+
   it("persists EZLinks identity without marking the course runnable", async () => {
     const updatedAt = new Date("2026-07-16T12:00:00.000Z");
     const providerUrl = "https://public-course.ezlinksgolf.com/";

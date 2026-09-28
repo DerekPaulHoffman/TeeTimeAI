@@ -245,6 +245,34 @@ describe("bounded course discovery recheck", () => {
     expect(closeout.notes).not.toContain("Public Course");
     expect(closeout.notes).not.toContain("private-id");
     expect(closeout.notes).not.toContain("first-public-course.example");
+    expect(result.outcomes[0]).toMatchObject({
+      monitoringState: "REVALIDATING_FINAL",
+      incidentStatus: "AUTO_INVESTIGATING"
+    });
+    expect(JSON.stringify(result)).not.toMatch(/MONITORING_RESTORED|customerRecovered/iu);
+  });
+
+  it("does not force an ineligible or already owned course into the recheck", async () => {
+    const deps = dependencies([
+      target("source-missing", "No Official Site", { website: null }),
+      target("owned", "Owned Course", { activeBatchId: "existing-owner" }),
+      target("resolved", "Resolved Course", { status: "RESOLVED" })
+    ]);
+
+    const result = await runCourseDiscoveryRecheck({
+      apply: true,
+      courseNames: ["No Official Site", "Owned Course", "Resolved Course"]
+    }, deps);
+
+    expect(result).toMatchObject({
+      readyCount: 0,
+      outcomes: [
+        { ordinal: 1, outcome: "SOURCE_UNAVAILABLE" },
+        { ordinal: 2, outcome: "ACTIVE_OWNER" },
+        { ordinal: 3, outcome: "ALREADY_RESOLVED" }
+      ]
+    });
+    expect(deps.recheck).not.toHaveBeenCalled();
   });
 
   it("continues after one sanitized failure and closes the run with findings", async () => {

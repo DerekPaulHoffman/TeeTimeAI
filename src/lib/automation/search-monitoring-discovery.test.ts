@@ -1397,8 +1397,10 @@ describe("search monitoring discovery", () => {
           "<html><h1>Official Recheck Golf Course</h1><p>Public tee times</p></html>",
           { headers: { "content-type": "text/html" } }
         );
-        if (url === bookingOverride) return new Response("<html>Old booking landing</html>",
-          { headers: { "content-type": "text/html" } });
+        if (url === bookingOverride) return new Response(
+          "<html><title>404 Not Found</title><h1>This booking page has moved</h1></html>",
+          { status: 404, headers: { "content-type": "text/html" } }
+        );
         throw new Error("UNEXPECTED_OFFLINE_FETCH");
       });
     }

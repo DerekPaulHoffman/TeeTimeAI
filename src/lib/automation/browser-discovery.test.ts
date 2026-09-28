@@ -1,8 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  deriveConsumerDisposition,
+  resolveProviderCapability
+} from "./provider-capabilities";
+
+import {
   buildBrowserDiscovery,
   enrichBrowserDiscoveryWithProviderLease,
+  enrichQuick18Discovery,
   enrichCpsDiscovery,
   enrichChronogolfDiscovery,
   enrichForeupDiscovery,
@@ -25,6 +31,23 @@ import {
 } from "./browser-discovery";
 
 describe("structured phone-booking evidence", () => {
+  it("does not turn Haystack's season-specific notice image into a phone-only final without reading it", () => {
+    const official = "https://haystack-golf.example/";
+    const noticeImage = "https://haystack-golf.example/2026-notice.jpg";
+    const discovery = buildBrowserDiscovery({
+      courseId: "haystack-image-notice",
+      courseName: "Haystack Golf Course",
+      sourceUrl: official,
+      finalUrl: official,
+      observedUrls: [official, noticeImage],
+      linkCandidates: [{ url: noticeImage, label: "2026 golf notice" }],
+      visibleText: "Haystack Golf Course. 2026 golf season information."
+    });
+
+    expect(discovery.bookingMethod).toBeUndefined();
+    expect(discovery.automationReason).not.toBe("NO_ONLINE_BOOKING");
+  });
+
   it("recognizes only safe public legacy Prophet booking landings", () => {
     expect(
       isLegacyProphetPublicBookingLandingUrl(
@@ -2247,6 +2270,94 @@ describe("buildBrowserDiscovery", () => {
       confidence: 0.95,
       evidence: { learnedFrom: "golfback-public-course-link" }
     });
+  });
+
+  it("keeps a Quick18 search shell non-runnable until a signed-out matrix read proves a public slot", async () => {
+    const bookingUrl = "https://mountsnow.quick18.com/teetimes/searchmatrix";
+    const publicSheet = `${bookingUrl}?teedate=20260929`;
+    const inspected = buildBrowserDiscovery({
+      courseId: "mount-snow",
+      courseName: "Mount Snow Golf Club",
+      sourceUrl: "https://www.mountsnow.com/",
+      finalUrl: publicSheet,
+      observedUrls: [publicSheet],
+      visibleText: "Welcome to Mount Snow Golf Club. Tee Time Search: Date: Players: Tee Time Players Daily Rate Member Rate"
+    });
+    expect(inspected).toMatchObject({
+      status: "INSPECTED",
+      bookingUrl,
+      evidence: { learnedFrom: "quick18-public-matrix-pending" }
+    });
+    expect(inspected.apiMetadata).toBeUndefined();
+    expect(resolveProviderCapability({
+      detectedBookingUrl: inspected.bookingUrl,
+      bookingMetadata: inspected.apiMetadata
+    }).isRunnable).toBe(false);
+
+    const matrixHtml = `<!doctype html><html><body>
+      <input id="SearchForm_Date" value="9/29/2026">
+      <div id="searchMatrix"><a href="/teetimes/searchmatrix?teedate=20260929">Sep 29</a>
+      <table class="matrixTable"><thead><tr><th>Tee Time</th><th>Players</th><th>Daily Rate</th></tr></thead>
+      <tbody><tr><td>8:00 AM</td><td>1 to 3 players</td><td><a href="/teetimes/course/1202/teetime/202609290800?psid=6786&amp;p=0">$84.00 Select</a></td></tr></tbody></table></div>
+    </body></html>`;
+    const leasedFamilies: string[] = [];
+    const enrichment = await enrichBrowserDiscoveryWithProviderLease(
+      inspected,
+      "Mount Snow Golf Club",
+      async (providerFamilyKey, worker) => {
+        leasedFamilies.push(providerFamilyKey);
+        return { acquired: true, value: await worker() };
+      },
+      vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(matrixHtml, { status: 200, headers: { "content-type": "text/html" } })
+      )
+    );
+    expect(leasedFamilies).toEqual(["QUICK18"]);
+    expect(enrichment.acquired).toBe(true);
+    if (!enrichment.acquired) throw new Error("Quick18 enrichment was deferred");
+    const learned = enrichment.discovery;
+    expect(learned).toMatchObject({
+      status: "LEARNED",
+      detectedPlatform: "CUSTOM",
+      bookingUrl,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      apiMetadata: { provider: "QUICK18", bookingBaseUrl: bookingUrl },
+      evidence: { learnedFrom: "quick18-validated-public-matrix" }
+    });
+    expect(resolveProviderCapability({
+      detectedBookingUrl: learned.bookingUrl,
+      bookingMetadata: learned.apiMetadata
+    }).isRunnable).toBe(true);
+    expect(deriveConsumerDisposition({
+      detectedBookingUrl: learned.bookingUrl,
+      bookingMetadata: learned.apiMetadata,
+      bookingMethod: learned.bookingMethod,
+      automationEligibility: learned.automationEligibility,
+      isPublic: true,
+      latestOutcome: "NO_MATCH",
+      currentEvidenceTrusted: false
+    })).toBe("ENGINEERING");
+
+    const stillPending = await enrichQuick18Discovery(inspected, vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(matrixHtml.replace(/<tbody>[\s\S]*?<\/tbody>/u, "<tbody></tbody>"), {
+        status: 200, headers: { "content-type": "text/html" }
+      })
+    ));
+    expect(stillPending.status).toBe("INSPECTED");
+    expect(stillPending.apiMetadata).toBeUndefined();
+
+    const linkOnly = buildBrowserDiscovery({
+      courseId: "mount-snow",
+      courseName: "Mount Snow Golf Club",
+      sourceUrl: "https://www.mountsnow.com/",
+      finalUrl: "https://www.mountsnow.com/",
+      observedUrls: [publicSheet],
+      linkCandidates: [{ url: publicSheet, label: "Book tee times" }],
+      visibleText: "Book tee times"
+    });
+    expect(linkOnly.status).not.toBe("LEARNED");
+    expect(linkOnly.apiMetadata).toBeUndefined();
   });
 
   it("learns reusable Supreme Golf metadata from an official public course link", () => {

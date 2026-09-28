@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const prismaMocks = vi.hoisted(() => ({
   batchFindFirst: vi.fn(),
   batchFindMany: vi.fn(),
+  batchCount: vi.fn(),
   batchFindUnique: vi.fn(),
   batchCreate: vi.fn(),
   batchUpdateMany: vi.fn(),
@@ -64,6 +65,7 @@ vi.mock("@/lib/prisma", () => ({
     courseSupportBatch: {
       findFirst: prismaMocks.batchFindFirst,
       findMany: prismaMocks.batchFindMany,
+      count: prismaMocks.batchCount,
       findUnique: prismaMocks.batchFindUnique,
       updateMany: prismaMocks.batchUpdateMany
     },
@@ -92,6 +94,7 @@ vi.mock("@/lib/prisma", () => ({
       findUnique: prismaMocks.monitoringEventFindUnique,
     },
     $queryRaw: prismaMocks.queryRaw,
+    $queryRawUnsafe: prismaMocks.queryRawUnsafe,
     $transaction: prismaMocks.transaction
   }
 }));
@@ -146,6 +149,7 @@ import {
   buildCourseSupportVerificationWatchShortRetryIdempotencyKey,
   buildFailureFingerprint,
   buildCourseSupportResponderHandoff,
+  backgroundCourseSupportSlotOccupied,
   buildCourseSupportReleaseHistory,
   canAppendCourseSupportBatchPath,
   canCloseCourseSupportRetry,
@@ -154,6 +158,7 @@ import {
   chooseNewestProviderVerificationEvidence,
   classifyCourseSupportQueueInspection,
   classifyCourseSupportCampaignSummary,
+  readCourseSupportSelectionLane,
   classifyDetachedVerificationFailure,
   classifyDetachedVerificationEvidence,
   classifyFreshBatchEvidence,
@@ -2413,6 +2418,7 @@ beforeEach(() => {
   prismaMocks.supportIncidentFindUnique.mockResolvedValue(null);
   prismaMocks.batchFindFirst.mockReset().mockResolvedValue(null);
   prismaMocks.batchFindMany.mockReset().mockResolvedValue([]);
+  prismaMocks.batchCount.mockReset().mockResolvedValue(0);
   prismaMocks.batchFindUnique.mockReset().mockResolvedValue(null);
   prismaMocks.batchCreate.mockResolvedValue({
     id: "batch-1",
@@ -2638,7 +2644,7 @@ describe("course-support batch selection", () => {
     ]);
   });
 
-  it("keeps aged synthetic fairness eligible beside already-escalated noncritical demand", () => {
+  it("keeps noncritical active demand ahead of aged synthetic work", () => {
     const selected = selectCourseSupportBatch({
       candidates: [
         candidate({
@@ -2667,8 +2673,9 @@ describe("course-support batch selection", () => {
     });
 
     expect(selected).toMatchObject({
-      providerFamilyKey: "CHRONOGOLF",
-      fairnessReason: "AGED_SYNTHETIC_RESERVATION",
+      providerFamilyKey: "FOREUP",
+      fairnessReason: "PRIORITY",
+      selectionLane: "ACTIVE_ALERT",
     });
   });
 
@@ -2949,22 +2956,63 @@ describe("course-support batch selection", () => {
     ]);
   });
 
-  it("keeps a provider/fingerprint batch bounded at twenty", () => {
+  it("keeps an active-alert provider/fingerprint batch bounded at five", () => {
     const selected = selectCourseSupportBatch({
       candidates: Array.from({ length: 30 }, (_, index) =>
         candidate({
           id: `incident-${index}`,
           courseId: `course-${index}`,
+          engineeringOnly: false,
+          activeRealSearchCount: 1,
         }),
       ),
       maxCourses: 100,
       now,
     });
 
-    expect(selected?.incidents).toHaveLength(20);
+    expect(selected?.incidents).toHaveLength(5);
   });
 
-  it("reserves bounded aged synthetic fairness beside noncritical customer work", () => {
+  it("treats malformed and legacy active batches as occupying the single background slot", () => {
+    const active = {
+      summary: {
+        schemaVersion: 1,
+        selectionLane: { schemaVersion: 1, lane: "ACTIVE_ALERT" },
+      },
+    };
+    expect(readCourseSupportSelectionLane(active.summary)).toBe("ACTIVE_ALERT");
+    expect(backgroundCourseSupportSlotOccupied([active])).toBe(false);
+    expect(backgroundCourseSupportSlotOccupied([active, { summary: null }])).toBe(true);
+    expect(backgroundCourseSupportSlotOccupied([
+      { summary: { selectionLane: { schemaVersion: 2, lane: "ACTIVE_ALERT" } } },
+    ])).toBe(true);
+    const ambiguous = {
+      summary: {
+        selectionLane: {
+          schemaVersion: 1,
+          lane: "ACTIVE_ALERT",
+          alsoBackground: true,
+        },
+      },
+    };
+    expect(readCourseSupportSelectionLane(ambiguous.summary)).toBeNull();
+    expect(backgroundCourseSupportSlotOccupied([ambiguous])).toBe(true);
+  });
+
+  it("selects one background course even when five are requested", () => {
+    const selected = selectCourseSupportBatch({
+      candidates: Array.from({ length: 5 }, (_, index) => candidate({
+        id: `background-${index}`,
+        courseId: `background-course-${index}`,
+      })),
+      maxCourses: 5,
+      now,
+    });
+    expect(selected?.selectionLane).toBe("BACKGROUND");
+    expect(selected?.incidents).toHaveLength(1);
+  });
+
+  it("never mixes background work into a noncritical active-alert batch", () => {
     const selected = selectCourseSupportBatch({
       candidates: [
         ...Array.from({ length: 5 }, (_, index) =>
@@ -2989,10 +3037,11 @@ describe("course-support batch selection", () => {
     expect(selected?.incidents).toHaveLength(5);
     expect(
       selected?.incidents.some((incident) => incident.id === "aged-synthetic"),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       selected?.incidents.filter((incident) => incident.id.startsWith("real-")),
-    ).toHaveLength(4);
+    ).toHaveLength(5);
+    expect(selected?.selectionLane).toBe("ACTIVE_ALERT");
   });
 
   it("claims only the exact due incidents from a completed retryable batch", () => {
@@ -3030,6 +3079,8 @@ describe("course-support batch selection", () => {
     const inspection = candidate({
       id: "retry-inspection",
       courseId: "retry-course-inspection",
+      engineeringOnly: false,
+      activeRealSearchCount: 1,
       remediationDirective,
       actionPlan: {
         schemaVersion: 1,
@@ -3044,6 +3095,8 @@ describe("course-support batch selection", () => {
     const verification = candidate({
       id: "retry-verification",
       courseId: "retry-course-verification",
+      engineeringOnly: false,
+      activeRealSearchCount: 1,
       remediationDirective,
       actionPlan: {
         schemaVersion: 1,
@@ -3220,7 +3273,7 @@ describe("course-support batch selection", () => {
         now,
       }),
     ).toThrow("duplicate incident evidence");
-    expect(() =>
+    expect(
       selectCourseSupportRetryBatch({
         candidates: [intended],
         retryBatch: {
@@ -3237,8 +3290,8 @@ describe("course-support batch selection", () => {
         },
         maxCourses: 1,
         now,
-      }),
-    ).toThrow("exceeds the requested batch size");
+      }).incidents,
+    ).toHaveLength(1);
   });
 
   it("does not let a targeted retry bypass due critical real demand", () => {
@@ -3262,7 +3315,25 @@ describe("course-support batch selection", () => {
         maxCourses: 1,
         now,
       }),
-    ).toThrow("cannot bypass due critical real-demand work");
+    ).toThrow("cannot bypass due active-alert work");
+  });
+
+  it("does not let a targeted background retry bypass noncritical active-alert work", () => {
+    const intended = candidate({ id: "background-retry", courseId: "background-retry-course" });
+    const active = candidate({
+      id: "noncritical-active",
+      courseId: "active-course",
+      kind: "NEEDS_ADAPTER",
+      engineeringOnly: false,
+      activeRealSearchCount: 1,
+      earliestTargetDate: new Date("2026-07-30T00:00:00.000Z"),
+    });
+    expect(() => selectCourseSupportRetryBatch({
+      candidates: [intended, active],
+      retryBatch: retryBatchEvidence(intended),
+      maxCourses: 1,
+      now,
+    })).toThrow("cannot bypass due active-alert work");
   });
 
   it.each([
@@ -7401,7 +7472,7 @@ describe("course-support claim demand fencing", () => {
     return { fixture, history, ordinaryIncident };
   }
 
-  it("atomically admits the maximum five parked campaign members inside one bounded claim transaction", async () => {
+  it("atomically admits one parked campaign member inside one bounded claim transaction", async () => {
     const remapFixture = (ordinal: number) => {
       const replacements = new Map([
         ["course-campaign", `course-campaign-${ordinal}`],
@@ -7492,22 +7563,18 @@ describe("course-support claim demand fencing", () => {
       maxCourses: 20,
     });
 
-    expect(result).toMatchObject({ outcome: "ready", incidentCount: 5 });
+    expect(result).toMatchObject({ outcome: "ready", incidentCount: 1 });
     expect(prismaMocks.batchIncidentCreateMany).toHaveBeenCalledWith({
-      data: expect.arrayContaining(
-        fixtures.map((fixture) =>
-          expect.objectContaining({
-            incidentId: fixture.parkedMember.id,
-            courseId: fixture.parkedMember.courseId,
-          }),
-        ),
-      ),
+      data: [expect.objectContaining({
+        incidentId: fixtures[0]!.parkedMember.id,
+        courseId: fixtures[0]!.parkedMember.courseId,
+      })],
     });
     expect(
       prismaMocks.supportIncidentUpdateMany.mock.calls.filter(
         ([call]) => call.data?.cycle?.increment === 1,
       ),
-    ).toHaveLength(5);
+    ).toHaveLength(1);
     expect(prismaMocks.transaction).toHaveBeenCalledWith(
       expect.any(Function),
       {
@@ -7550,7 +7617,7 @@ describe("course-support claim demand fencing", () => {
         }),
       }),
     );
-    for (const fixture of fixtures) {
+    for (const fixture of fixtures.slice(0, 1)) {
       expect(prismaMocks.monitoringEventCreate).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
@@ -7958,7 +8025,7 @@ describe("course-support claim demand fencing", () => {
     );
   });
 
-  it("keeps the remaining writer slot on ordinary work while a campaign reservation is active", async () => {
+  it("keeps the global background slot occupied while a campaign batch is active", async () => {
     const fixture = parkedCampaignFixture();
     const ordinaryIncident = {
       ...fixture.candidateIncident,
@@ -8031,19 +8098,9 @@ describe("course-support claim demand fencing", () => {
     });
 
     expect(result).toMatchObject({
-      outcome: "ready",
-      incidentCount: 1,
-      providerFamilyKey: ordinaryIncident.providerFamilyKey,
-      fairnessReason: "PRIORITY",
+      outcome: "deferred_busy",
     });
-    expect(prismaMocks.batchCreate).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          providerFamilyKey: ordinaryIncident.providerFamilyKey,
-          summary: expect.not.objectContaining({ campaign: expect.anything() }),
-        }),
-      }),
-    );
+    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
   });
 
   it("atomically claims requestless stale ownership with the exact historical discovery fence", async () => {
@@ -8696,8 +8753,19 @@ describe("course-support claim demand fencing", () => {
   }
 
   it("admits a second unrelated provider group", async () => {
-    const incident = incidentRecord({ engineeringOnly: true, preferences: [] });
-    prismaMocks.batchFindMany.mockResolvedValueOnce([activeBatch(1)]);
+    const incident = incidentRecord({
+      engineeringOnly: false,
+      preferences: [{ teeSearch: {
+        id: "second-active-search",
+        date: new Date("2026-07-18T00:00:00.000Z"),
+      } }],
+    });
+    prismaMocks.batchFindMany.mockResolvedValueOnce([activeBatch(1, {
+      summary: {
+        schemaVersion: 1,
+        selectionLane: { schemaVersion: 1, lane: "ACTIVE_ALERT" },
+      },
+    })]);
     prismaMocks.supportIncidentFindMany
       .mockResolvedValueOnce([incident])
       .mockResolvedValueOnce([incident]);
@@ -8738,6 +8806,87 @@ describe("course-support claim demand fencing", () => {
         }),
       }),
     );
+  });
+
+  it("defers another background claim while a background batch owns the global slot", async () => {
+    const incident = incidentRecord({ engineeringOnly: true, preferences: [] });
+    prismaMocks.batchFindMany.mockResolvedValueOnce([activeBatch(1, {
+      summary: {
+        schemaVersion: 1,
+        selectionLane: { schemaVersion: 1, lane: "BACKGROUND" },
+      },
+    })]);
+    prismaMocks.supportIncidentFindMany.mockResolvedValueOnce([incident]);
+
+    await expect(claimCourseSupportBatch({
+      ownerThreadId: "second-background-owner",
+      branch: "automation/course-support-20260715-200000",
+      baseSha,
+      now,
+    })).resolves.toMatchObject({ outcome: "deferred_busy" });
+    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+  });
+
+  it("counts an expired legacy owner against background admission until recovery", async () => {
+    const incident = incidentRecord({ engineeringOnly: true, preferences: [] });
+    prismaMocks.batchFindMany.mockResolvedValueOnce([activeBatch(1, {
+      leaseExpiresAt: new Date("2026-07-15T19:00:00.000Z"),
+      summary: null,
+    })]);
+    prismaMocks.supportIncidentFindMany.mockResolvedValueOnce([incident]);
+
+    await expect(claimCourseSupportBatch({
+      ownerThreadId: "new-background-owner",
+      branch: "automation/course-support-20260715-200000",
+      baseSha,
+      now,
+    })).resolves.toMatchObject({ outcome: "deferred_busy" });
+    expect(prismaMocks.batchFindMany.mock.calls[0]?.[0]?.where).not.toHaveProperty("leaseExpiresAt");
+    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+  });
+
+  it("rejects a background claim if another owner takes the slot before its locked recheck", async () => {
+    const incident = incidentRecord({ engineeringOnly: true, preferences: [] });
+    prismaMocks.batchFindMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([activeBatch(1, {
+        summary: {
+          schemaVersion: 1,
+          selectionLane: { schemaVersion: 1, lane: "BACKGROUND" },
+        },
+      })]);
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([incident])
+      .mockResolvedValueOnce([incident]);
+
+    await expect(claimCourseSupportBatch({
+      ownerThreadId: "racing-background-owner",
+      branch: "automation/course-support-20260715-200000",
+      baseSha,
+      now,
+    })).rejects.toThrow("background course-support slot changed during locked claim");
+    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+  });
+
+  it("counts a recovered background batch against the same task's claim allowance", async () => {
+    const incident = incidentRecord({ engineeringOnly: true, preferences: [] });
+    const ordinaryRawQuery = prismaMocks.queryRawUnsafe.getMockImplementation()!;
+    prismaMocks.queryRawUnsafe.mockImplementation(async (sql: string, ...values: unknown[]) =>
+      sql.includes("backgroundRecoveryRunV1")
+        ? [{ id: "previously-recovered-background-batch" }]
+        : ordinaryRawQuery(sql, ...values),
+    );
+    prismaMocks.supportIncidentFindMany.mockResolvedValueOnce([incident]);
+
+    await expect(claimCourseSupportBatch({
+      ownerThreadId: "same-scheduled-task",
+      branch: "automation/course-support-20260715-200000",
+      baseSha,
+      now,
+    })).resolves.toMatchObject({ outcome: "deferred_busy" });
+    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
   });
 
   it("seeds an empty execution fence before an expired endpoint can close", async () => {
@@ -9285,8 +9434,11 @@ describe("course-support claim demand fencing", () => {
     ) => {
       const courseId = `course-budget-${ordinal}`;
       const baseIncident = incidentRecord({
-        engineeringOnly: true,
-        preferences: [],
+        engineeringOnly: false,
+        preferences: [{ teeSearch: {
+          id: `active-budget-search-${ordinal}`,
+          date: new Date("2026-07-18T00:00:00.000Z"),
+        } }],
       });
       return {
         ...baseIncident,
@@ -9647,11 +9799,15 @@ describe("course-support claim demand fencing", () => {
   });
 
   it("admits no-path read-only verification beside the shared checkout owner", async () => {
+    const activePreferences = [{ teeSearch: {
+      id: "active-read-only-search",
+      date: new Date("2026-07-18T00:00:00.000Z"),
+    } }];
     const incident = {
-      ...incidentRecord({ engineeringOnly: true, preferences: [] }),
+      ...incidentRecord({ engineeringOnly: false, preferences: activePreferences }),
       failureClass: "RATE_LIMIT" as const,
       course: {
-        ...incidentRecord({ engineeringOnly: true, preferences: [] }).course,
+        ...incidentRecord({ engineeringOnly: false, preferences: activePreferences }).course,
         isPublic: true,
         website: "https://public-course.example/",
         detectedBookingUrl: "https://www.chronogolf.com/club/example-course",
@@ -9818,8 +9974,19 @@ describe("course-support claim demand fencing", () => {
   });
 
   it("admits the first planned implementation owner beside no-path verification work", async () => {
-    const incident = incidentRecord({ engineeringOnly: true, preferences: [] });
-    prismaMocks.batchFindMany.mockResolvedValueOnce([activeBatch(1)]);
+    const incident = incidentRecord({
+      engineeringOnly: false,
+      preferences: [{ teeSearch: {
+        id: "active-implementation-search",
+        date: new Date("2026-07-18T00:00:00.000Z"),
+      } }],
+    });
+    prismaMocks.batchFindMany.mockResolvedValueOnce([activeBatch(1, {
+      summary: {
+        schemaVersion: 1,
+        selectionLane: { schemaVersion: 1, lane: "ACTIVE_ALERT" },
+      },
+    })]);
     prismaMocks.supportIncidentFindMany
       .mockResolvedValueOnce([incident])
       .mockResolvedValueOnce([incident]);
@@ -9867,7 +10034,13 @@ describe("course-support claim demand fencing", () => {
       escalationDeadlineAt: new Date("2026-07-15T20:05:00.000Z"),
     };
     const admitted = {
-      ...incidentRecord({ engineeringOnly: true, preferences: [] }),
+      ...incidentRecord({
+        engineeringOnly: false,
+        preferences: [{ teeSearch: {
+          id: "other-active-search",
+          date: new Date("2026-07-18T00:00:00.000Z"),
+        } }],
+      }),
       id: "admitted-incident",
       courseId: "admitted-course",
       failureFingerprint: "v2:UNSUPPORTED_FAMILY:NEEDS_ADAPTER",
@@ -10934,13 +11107,13 @@ describe("course-support claim demand fencing", () => {
       }),
     ).resolves.toMatchObject({
       outcome: "ready",
-      incidentCount: 3,
+      incidentCount: 1,
     });
 
     const claimUpdates = prismaMocks.supportIncidentUpdateMany.mock.calls
       .map((call) => call[0])
       .filter((call) => call.data?.activeBatchId === "batch-1");
-    expect(claimUpdates).toHaveLength(3);
+    expect(claimUpdates).toHaveLength(1);
     for (const update of claimUpdates) {
       expect(update.data).not.toHaveProperty("escalationDeadlineAt");
     }
@@ -12605,7 +12778,7 @@ describe("course-support claim demand fencing", () => {
     expect(JSON.stringify(summary)).not.toContain("private-source-batch-id");
   });
 
-  it("claims every member of a current multi-entry whole-batch retry", async () => {
+  it("claims one background member of a current multi-entry whole-batch retry", async () => {
     const first = candidate({
       id: "whole-retry-first",
       courseId: "whole-retry-course-1",
@@ -12638,26 +12811,22 @@ describe("course-support claim demand fencing", () => {
       }),
     ).resolves.toMatchObject({
       outcome: "ready",
-      incidentCount: 2,
+      incidentCount: 1,
       fairnessReason: "TARGETED_RETRY",
     });
 
     expect(prismaMocks.batchIncidentCreateMany).toHaveBeenCalledWith({
-      data: expect.arrayContaining(
-        incidents.map((incident) =>
-          expect.objectContaining({
-            incidentId: incident.id,
-            courseId: incident.courseId,
-            cycle: incident.cycle,
-          }),
-        ),
-      ),
+      data: [expect.objectContaining({
+        incidentId: first.id,
+        courseId: first.courseId,
+        cycle: first.cycle,
+      })],
     });
     const claimWrites = prismaMocks.supportIncidentUpdateMany.mock.calls.filter(
       ([call]) => call.data?.activeBatchId === "batch-1",
     );
-    expect(claimWrites).toHaveLength(2);
-    for (const incident of incidents) {
+    expect(claimWrites).toHaveLength(1);
+    for (const incident of incidents.slice(0, 1)) {
       expect(claimWrites).toContainEqual([
         expect.objectContaining({
           where: expect.objectContaining({
@@ -12676,7 +12845,7 @@ describe("course-support claim demand fencing", () => {
     }
   });
 
-  it("rolls back a whole-batch retry when one sibling source changes under lock", async () => {
+  it("does not claim an unselected background sibling whose source changes under lock", async () => {
     const first = candidate({
       id: "whole-retry-first",
       courseId: "whole-retry-course-1",
@@ -12734,12 +12903,12 @@ describe("course-support claim demand fencing", () => {
         maxCourses: 2,
         now,
       }),
-    ).rejects.toThrow(
-      "targeted retry provenance changed during locked claim",
-    );
+    ).resolves.toMatchObject({ outcome: "ready", incidentCount: 1 });
 
     expectClaimLocksBeforeCurrentIncidentRead();
-    expectNoClaimWrites();
+    expect(prismaMocks.batchIncidentCreateMany).toHaveBeenCalledWith({
+      data: [expect.objectContaining({ incidentId: first.id })],
+    });
   });
 
   it.each([
@@ -12945,7 +13114,7 @@ describe("course-support claim demand fencing", () => {
         maxCourses: 1,
         now: new Date("2026-07-21T01:00:00.000Z"),
       }),
-    ).rejects.toThrow("cannot bypass due critical real-demand work");
+    ).rejects.toThrow("cannot bypass due active-alert work");
 
     expect(prismaMocks.automationRunCreate).not.toHaveBeenCalled();
     expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
@@ -13023,7 +13192,7 @@ describe("course-support claim demand fencing", () => {
           maxCourses: 1,
           now: callerNow,
         }),
-      ).rejects.toThrow("cannot bypass due critical real-demand work");
+      ).rejects.toThrow("cannot bypass due active-alert work");
 
       const outsideDueQuery = prismaMocks.supportIncidentFindMany.mock
         .calls[2]?.[0] as
@@ -13091,7 +13260,7 @@ describe("course-support claim demand fencing", () => {
         maxCourses: 1,
         now: new Date("2026-07-21T01:00:00.000Z"),
       }),
-    ).rejects.toThrow("cannot bypass due critical real-demand work");
+    ).rejects.toThrow("cannot bypass due active-alert work");
   });
   it("fails a targeted retry closed when the outside due queue exceeds the bound", async () => {
     const intended = candidate({
@@ -16425,8 +16594,9 @@ describe("course-support recovery", () => {
     expect(prismaMocks.batchFindMany).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
-          leaseExpiresAt: { gt: now },
+          status: { in: ["CLAIMED", "IMPLEMENTING", "VERIFYING"] },
         }),
+        select: expect.objectContaining({ leaseExpiresAt: true }),
       }),
     );
   });
@@ -16494,6 +16664,11 @@ describe("course-support recovery", () => {
       prismaMocks.batchUpdateMany.mock.calls[0]?.[0]?.data?.summary;
     expect(adoptedSummary).toEqual({
       ...expiredBatch.summary,
+      backgroundRecoveryRunV1: {
+        schemaVersion: 1,
+        ownerThreadId: "new-thread",
+        recoveredAt: now.toISOString(),
+      },
       searchExecutionFence: emptySearchExecutionFenceForCourses([
         "course-1",
       ]),
@@ -18490,6 +18665,7 @@ describe("course-support recovery", () => {
       summary: {
         branch: "fix/recover-cps",
         plannedPaths: [],
+        selectionLane: { schemaVersion: 1, lane: "ACTIVE_ALERT" },
       },
       incidents: [
         {
@@ -18540,6 +18716,84 @@ describe("course-support recovery", () => {
         }),
       }),
     );
+  });
+
+  it.each([
+    ["live", new Date("2026-07-15T20:15:00.000Z")],
+    ["older expired", new Date("2026-07-15T18:00:00.000Z")],
+  ])("defers background recovery behind a %s background owner", async (_label, otherLeaseExpiresAt) => {
+    prismaMocks.batchFindUnique.mockResolvedValue({
+      id: "expired-background-batch",
+      status: "CLAIMED",
+      leaseExpiresAt: new Date("2026-07-15T19:00:00.000Z"),
+      ownerThreadId: "old-thread",
+      ownerAutomationRunId: null,
+      providerFamilyKey: "FOREUP",
+      failureFingerprint: "foreup-background-failure",
+      baseSha: "a".repeat(40),
+      releaseSha: null,
+      deployedAt: null,
+      recheckDispatchKey: null,
+      recheckDispatchStartedAt: null,
+      recheckDispatchedAt: null,
+      revision: 1,
+      summary: {
+        branch: "fix/recover-background-course",
+        plannedPaths: [],
+        selectionLane: { schemaVersion: 1, lane: "BACKGROUND" },
+      },
+      incidents: [{ incident: { status: "AUTO_INVESTIGATING" } }],
+    });
+    prismaMocks.batchFindMany.mockResolvedValueOnce([{
+      id: "other-background-batch",
+      status: "CLAIMED",
+      leaseExpiresAt: otherLeaseExpiresAt,
+      providerFamilyKey: "CHRONOGOLF",
+      failureFingerprint: "chronogolf-background-failure",
+      summary: {
+        selectionLane: { schemaVersion: 1, lane: "BACKGROUND" },
+        plannedPaths: [],
+      },
+    }]);
+
+    await expect(recoverCourseSupportBatch({
+      batchId: "expired-background-batch",
+      requestingThreadId: "new-thread",
+      currentBranch: "fix/recover-background-course",
+      currentHeadSha: "a".repeat(40),
+      dirtyPaths: [],
+      releaseIsPublished: false,
+      now,
+    })).resolves.toMatchObject({ outcome: "deferred_busy", recovered: false });
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("does not recover a second background batch in the same scheduled task", async () => {
+    prismaMocks.batchFindUnique.mockResolvedValue({
+      id: "second-expired-background",
+      status: "CLAIMED",
+      leaseExpiresAt: new Date("2026-07-15T19:00:00.000Z"),
+      ownerThreadId: "old-owner",
+      summary: { selectionLane: { schemaVersion: 1, lane: "BACKGROUND" } },
+      incidents: [{ incident: { status: "AUTO_INVESTIGATING" } }],
+    });
+    const ordinaryRawQuery = prismaMocks.queryRawUnsafe.getMockImplementation()!;
+    prismaMocks.queryRawUnsafe.mockImplementation(async (sql: string, ...values: unknown[]) =>
+      sql.includes("backgroundRecoveryRunV1")
+        ? [{ id: "first-recovered-background" }]
+        : ordinaryRawQuery(sql, ...values),
+    );
+
+    await expect(recoverCourseSupportBatch({
+      batchId: "second-expired-background",
+      requestingThreadId: "same-scheduled-task",
+      currentBranch: "fix/recover-background-course",
+      currentHeadSha: "a".repeat(40),
+      dirtyPaths: [],
+      releaseIsPublished: false,
+      now,
+    })).resolves.toMatchObject({ outcome: "deferred_busy", recovered: false });
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
   });
 
   it("defers recovery for an active batch with overlapping provider scope", async () => {
@@ -18741,7 +18995,7 @@ describe("course-support inspection ownership", () => {
     ).toEqual({
       action: "CLAIM",
       source: "PARKED_CAMPAIGN",
-      maxCourses: 5,
+      maxCourses: 1,
       selection: "ATOMIC_SERVER_SIDE",
     });
   });
@@ -18766,7 +19020,7 @@ describe("course-support inspection ownership", () => {
     ).toEqual({
       action: "CLAIM",
       source: "PARKED_CAMPAIGN",
-      maxCourses: 5,
+      maxCourses: 1,
       selection: "ATOMIC_SERVER_SIDE",
     });
   });
@@ -18813,7 +19067,34 @@ describe("course-support inspection ownership", () => {
     });
   });
 
-  it("uses recover, resume, ordinary claim, campaign claim, then stop precedence", () => {
+  it("claims unrelated active-alert work before recovering an expired background batch", () => {
+    expect(classifyCourseSupportQueueInspection({
+      hasActiveBatch: false,
+      activeBatchCount: 0,
+      maxActiveBatches: 2,
+      hasExpiredBatch: true,
+      deferExpiredBackgroundForActiveDemand: true,
+      dueIncidentCount: 1,
+    })).toBe("ready");
+    expect(buildCourseSupportResponderHandoff({
+      outcome: "ready",
+      hasExpiredBatch: true,
+      expiredBatchIsBackground: true,
+      ownedByCurrentTask: false,
+      availableWriterSlots: 1,
+      ordinaryDispatchGroupCount: 1,
+      parkedCampaign: null,
+      hasCurrentActiveRealDemand: true,
+      backgroundSlotAvailable: false,
+    })).toEqual({
+      action: "CLAIM",
+      source: "ORDINARY_DISPATCH",
+      maxCourses: 5,
+      selection: "ATOMIC_SERVER_SIDE",
+    });
+  });
+
+  it("uses owned resume, recover, ordinary claim, campaign claim, then stop precedence", () => {
     const base = {
       outcome: "ready" as const,
       hasExpiredBatch: false,
@@ -18829,7 +19110,7 @@ describe("course-support inspection ownership", () => {
         hasExpiredBatch: true,
         ownedByCurrentTask: true,
       }),
-    ).toEqual({ action: "RECOVER", source: "EXPIRED_BATCH" });
+    ).toEqual({ action: "RESUME", source: "OWNED_BATCH" });
     expect(
       buildCourseSupportResponderHandoff({
         ...base,
@@ -18839,7 +19120,7 @@ describe("course-support inspection ownership", () => {
     expect(buildCourseSupportResponderHandoff(base)).toEqual({
       action: "CLAIM",
       source: "ORDINARY_DISPATCH",
-      maxCourses: 5,
+      maxCourses: 1,
       selection: "ATOMIC_SERVER_SIDE",
     });
     expect(
@@ -18850,7 +19131,7 @@ describe("course-support inspection ownership", () => {
     ).toEqual({
       action: "CLAIM",
       source: "PARKED_CAMPAIGN",
-      maxCourses: 5,
+      maxCourses: 1,
       selection: "ATOMIC_SERVER_SIDE",
     });
     expect(
@@ -19706,7 +19987,7 @@ describe("course-support inspection ownership", () => {
     },
   );
 
-  it("preserves due dispatch work for one reinspection after expired recovery", async () => {
+  it("claims an unrelated active alert before an expired background recovery", async () => {
     prismaMocks.supportIncidentFindMany.mockResolvedValueOnce([
       {
         confirmedAt: now,
@@ -19736,16 +20017,90 @@ describe("course-support inspection ownership", () => {
     });
 
     await expect(inspectCourseSupportQueue({ now })).resolves.toMatchObject({
-      outcome: "recovery_required",
-      handoff: { action: "RECOVER", source: "EXPIRED_BATCH" },
+      outcome: "ready",
+      handoff: { action: "CLAIM", source: "ORDINARY_DISPATCH", maxCourses: 5 },
       recoveryContinuation: {
-        reinspectAfterRecovery: true,
+        reinspectAfterRecovery: false,
         dueIncidentCount: 1,
-        availableWriterSlots: 2,
+        availableWriterSlots: 1,
       },
       readOnlyDispatchPlan: {
         groups: [{ providerFamilyKey: "DUE_GROUP" }],
       },
+    });
+  });
+
+  it("recovers an expired owner when two expired batches fill all writer slots", async () => {
+    prismaMocks.supportIncidentFindMany.mockResolvedValueOnce([{
+      confirmedAt: now,
+      providerFamilyKey: "DUE_GROUP",
+      failureFingerprint: "due",
+      engineeringOnly: false,
+      escalationDeadlineAt: new Date("2026-07-15T20:10:00.000Z"),
+      firstSeenAt: new Date("2026-07-15T19:55:00.000Z"),
+      course: {
+        timeZone: "America/New_York",
+        preferences: [{ teeSearch: {
+          id: "due-search",
+          date: new Date("2026-07-18T00:00:00.000Z"),
+        } }],
+      },
+    }]);
+    prismaMocks.batchFindFirst.mockResolvedValueOnce({
+      id: "older-expired-batch",
+      reference: "older-expired-reference",
+      status: "VERIFYING",
+      leaseExpiresAt: new Date("2026-07-15T19:58:00.000Z"),
+      providerFamilyKey: "OTHER_GROUP",
+      failureFingerprint: "other",
+      summary: null,
+    });
+    prismaMocks.batchCount.mockResolvedValueOnce(2);
+
+    await expect(inspectCourseSupportQueue({ now })).resolves.toMatchObject({
+      outcome: "recovery_required",
+      handoff: { action: "RECOVER", source: "EXPIRED_BATCH" },
+      availableWriterSlots: 0,
+      readOnlyDispatchPlan: { groups: [{ providerFamilyKey: "DUE_GROUP" }] },
+    });
+    expect(prismaMocks.batchCount).toHaveBeenCalledWith({
+      where: {
+        status: { in: expect.any(Array) },
+        leaseExpiresAt: { lte: now },
+      },
+    });
+  });
+
+  it("recovers an expired owner when it already holds the active alert's provider group", async () => {
+    prismaMocks.supportIncidentFindMany.mockResolvedValueOnce([{
+      confirmedAt: now,
+      providerFamilyKey: "DUE_GROUP",
+      failureFingerprint: "due",
+      engineeringOnly: false,
+      escalationDeadlineAt: new Date("2026-07-15T20:10:00.000Z"),
+      firstSeenAt: new Date("2026-07-15T19:55:00.000Z"),
+      course: {
+        timeZone: "America/New_York",
+        preferences: [{ teeSearch: {
+          id: "due-search",
+          date: new Date("2026-07-18T00:00:00.000Z"),
+        } }],
+      },
+    }]);
+    prismaMocks.batchFindFirst.mockResolvedValueOnce({
+      id: "expired-batch",
+      reference: "expired-reference",
+      status: "VERIFYING",
+      leaseExpiresAt: new Date("2026-07-15T19:59:00.000Z"),
+      providerFamilyKey: "DUE_GROUP",
+      failureFingerprint: "due",
+      summary: null,
+    });
+
+    await expect(inspectCourseSupportQueue({ now })).resolves.toMatchObject({
+      outcome: "recovery_required",
+      handoff: { action: "RECOVER", source: "EXPIRED_BATCH" },
+      readOnlyDispatchPlan: { groups: [] },
     });
   });
 
@@ -19781,6 +20136,39 @@ describe("course-support inspection ownership", () => {
       }),
     );
     expect(prismaMocks.automationRunCreate).not.toHaveBeenCalled();
+  });
+
+  it("resumes the current live owner when another expired batch fills capacity", async () => {
+    prismaMocks.batchFindMany.mockResolvedValueOnce([{
+      id: "owned-batch",
+      reference: "owned-reference",
+      status: "VERIFYING",
+      leaseExpiresAt: new Date("2026-07-15T20:15:00.000Z"),
+      providerFamilyKey: "OWNED_GROUP",
+      failureFingerprint: "owned",
+      ownerThreadId: "owner-thread",
+      summary: { selectionLane: { schemaVersion: 1, lane: "ACTIVE_ALERT" } },
+    }]);
+    prismaMocks.batchFindFirst.mockResolvedValueOnce({
+      id: "expired-batch",
+      reference: "expired-reference",
+      status: "VERIFYING",
+      leaseExpiresAt: new Date("2026-07-15T19:59:00.000Z"),
+      providerFamilyKey: "OTHER_GROUP",
+      failureFingerprint: "other",
+      summary: null,
+    });
+    prismaMocks.batchCount.mockResolvedValueOnce(1);
+
+    await expect(inspectCourseSupportQueue({
+      requestingThreadId: "owner-thread",
+      now,
+    })).resolves.toMatchObject({
+      outcome: "resume_owned_work",
+      handoff: { action: "RESUME", source: "OWNED_BATCH" },
+      availableWriterSlots: 0,
+      ownedByCurrentTask: true,
+    });
   });
 
   it.each([undefined, "different-thread"])(

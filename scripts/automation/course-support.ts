@@ -81,6 +81,10 @@ import {
   type ResponderOutcome
 } from "@/lib/automation/course-support-responder-policy";
 import { inspectOwnedCourseSupportProviderContract } from "@/lib/automation/provider-contract-inspection";
+import {
+  getOwnedCourseSupportResearchContext,
+  validateOwnedCourseSupportResearchContext,
+} from "@/lib/automation/course-support-research-context";
 import type {
   VercelDeploymentInspection,
   VercelDeploymentList,
@@ -674,6 +678,12 @@ async function runCommand(
     case "inspect-provider-contract":
       writeResult(await inspectProviderContract(args));
       return;
+    case "research-context":
+      (verificationCommands?.write ?? writePrivateResearchResult)(await researchContext(args));
+      return;
+    case "validate-research-context":
+      (verificationCommands?.write ?? writeResult)(await validateResearchContext(args));
+      return;
     case "claim-path":
       writeResult(await claimPath(args));
       return;
@@ -719,7 +729,7 @@ async function runCommand(
       return;
     default:
       throw new Error(
-        "Unknown course-support command. Use inspect, coverage, acceptance-history, claim, packet, inspect-provider-contract, claim-path, source-search-context, record-source-search, mark-needs-human, heartbeat, verify-release, verify, closeout, recover, or backfill."
+        "Unknown course-support command. Use inspect, coverage, acceptance-history, claim, packet, research-context, validate-research-context, inspect-provider-contract, claim-path, source-search-context, record-source-search, mark-needs-human, heartbeat, verify-release, verify, closeout, recover, or backfill."
       );
   }
 }
@@ -804,6 +814,63 @@ async function inspectProviderContract(args: string[]) {
     ownerThreadId,
     ordinal: options.ordinal
   });
+}
+
+async function researchContext(args: string[]) {
+  const options = parseCourseSupportResearchOptions(args, false);
+  const ownerThreadId = requireOwnerThread(args);
+  const batchId = await resolveCourseSupportBatchReference(options.batchRef);
+  return getOwnedCourseSupportResearchContext({
+    batchId,
+    leaseToken: await getOwnedCourseSupportLeaseToken({ batchId, ownerThreadId }),
+    ownerThreadId,
+    ordinal: options.ordinal,
+  });
+}
+
+async function validateResearchContext(args: string[]) {
+  const options = parseCourseSupportResearchOptions(args, true);
+  if (!options.contextDigest) throw new Error("Missing required --context-digest value.");
+  const ownerThreadId = requireOwnerThread(args);
+  const batchId = await resolveCourseSupportBatchReference(options.batchRef);
+  return validateOwnedCourseSupportResearchContext({
+    batchId,
+    leaseToken: await getOwnedCourseSupportLeaseToken({ batchId, ownerThreadId }),
+    ownerThreadId,
+    ordinal: options.ordinal,
+    contextDigest: options.contextDigest,
+  });
+}
+
+export function parseCourseSupportResearchOptions(args: readonly string[], requireDigest: boolean) {
+  const command = requireDigest ? "validate-research-context" : "research-context";
+  const allowed = new Set([
+    "--batch-ref", "--ordinal", "--owner-thread",
+    ...(requireDigest ? ["--context-digest"] : []),
+  ]);
+  const seen = new Set<string>();
+  for (let index = 0; index < args.length; index += 2) {
+    const option = args[index];
+    const value = args[index + 1];
+    if (!option || !allowed.has(option)) {
+      throw new Error(`${command} accepts only ${[...allowed].join(", ")}.`);
+    }
+    if (seen.has(option)) throw new Error(`${option} may be provided only once.`);
+    if (!value || value.startsWith("--")) throw new Error(`${option} requires a value.`);
+    seen.add(option);
+  }
+  const batchRef = readSingleOption([...args], "--batch-ref");
+  const rawOrdinal = readSingleOption([...args], "--ordinal");
+  const contextDigest = readSingleOption([...args], "--context-digest");
+  if (!batchRef) throw new Error("Missing required --batch-ref value.");
+  if (!rawOrdinal || !/^\d{1,2}$/u.test(rawOrdinal) ||
+      Number(rawOrdinal) < 1 || Number(rawOrdinal) > 20) {
+    throw new Error(`${command} requires --ordinal from 01 through 20.`);
+  }
+  if (requireDigest && (!contextDigest || !/^[a-f0-9]{64}$/u.test(contextDigest))) {
+    throw new Error(`${command} requires a 64-character lowercase --context-digest.`);
+  }
+  return { batchRef, ordinal: Number(rawOrdinal), contextDigest };
 }
 
 export function parseCourseSupportProviderContractInspectionOptions(
@@ -2147,6 +2214,14 @@ export function serializeCourseSupportResult(
 
 function writeResult(value: unknown, options?: { machine?: boolean }) {
   process.stdout.write(serializeCourseSupportResult(value, options));
+}
+
+// This command is an explicitly owner-gated private research channel. Its
+// projection has already reduced URLs to safe public evidence and deliberately
+// omits raw bodies, credentials, recipients, and screenshots. The aggregate
+// serializer would erase the exact identity and link chain needed for research.
+function writePrivateResearchResult(value: unknown) {
+  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
 const directEntry = process.argv[1]

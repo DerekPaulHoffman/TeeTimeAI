@@ -13,6 +13,7 @@ import {
   getGolfNowFacilityId,
   normalizeGolfNowBookingUrl
 } from "@/lib/adapters/golfnow";
+import { fetchQuick18TeeSheet, isQuick18PublicSearchUrl } from "@/lib/adapters/quick18";
 import {
   getKnownProviderFamilyForHostname,
   getProviderReadinessFailure,
@@ -243,6 +244,9 @@ export type BrowserDiscovery = {
     courseId: string;
     bookingBaseUrl: string;
   } | {
+    provider: "QUICK18";
+    bookingBaseUrl: string;
+  } | {
     provider: "GOLF_GEEK";
     courseId: string;
     bookingBaseUrl: string;
@@ -454,8 +458,12 @@ export async function enrichBrowserDiscoveryWithProviderLease(
       ? await enrichTeeItUpFromPublicDirectory(discovery, publicSourceContext, leasedFetch)
       : discovery;
     const clubCaddieDiscovery = await enrichClubCaddieDiscovery(directoryDiscovery, courseName, leasedFetch);
-    const teeItUpDiscovery = await enrichTeeItUpDiscovery(
+    const quick18Discovery = await enrichQuick18Discovery(
       clubCaddieDiscovery,
+      leasedFetch
+    );
+    const teeItUpDiscovery = await enrichTeeItUpDiscovery(
+      quick18Discovery,
       courseName,
       leasedFetch
     );
@@ -941,6 +949,7 @@ export function buildBrowserDiscovery(
     learnTeeItUpDiscovery(providerEvidence, providerObservedUrls),
     learnChelseaDiscovery(providerEvidence, providerObservedUrls),
     learnGolfBackDiscovery(providerEvidence, providerObservedUrls),
+    learnQuick18Discovery(providerEvidence),
     learnGolfNowDiscovery(providerEvidence, providerObservedUrls),
     learnWebTracDiscovery(providerEvidence, providerObservedUrls),
     learnSupremeGolfDiscovery(providerEvidence, providerObservedUrls),
@@ -2671,6 +2680,79 @@ function learnGolfBackDiscovery(
       visibleText: summarizeVisibleText(evidence.visibleText),
       learnedFrom: "golfback-public-course-link"
     }
+  };
+}
+
+function learnQuick18Discovery(
+  evidence: BrowserDiscoveryEvidence
+): BrowserDiscovery | null {
+  const finalUrl = parseUrl(evidence.finalUrl);
+  if (
+    !finalUrl ||
+    !isQuick18PublicSearchUrl(finalUrl) ||
+    !finalUrl.searchParams.has("teedate") ||
+    !/\btee time search\s*:/iu.test(evidence.visibleText ?? "")
+  ) {
+    return null;
+  }
+  const bookingBaseUrl = `${finalUrl.origin}/teetimes/searchmatrix`;
+  return {
+    courseId: evidence.courseId,
+    status: "INSPECTED",
+    detectedPlatform: "CUSTOM",
+    sourceUrl: evidence.sourceUrl,
+    bookingUrl: bookingBaseUrl,
+    confidence: 0.55,
+    evidence: {
+      finalUrl: evidence.finalUrl,
+      observedUrls: evidence.observedUrls,
+      visibleText: summarizeVisibleText(evidence.visibleText),
+      learnedFrom: "quick18-public-matrix-pending"
+    }
+  };
+}
+
+export async function enrichQuick18Discovery(
+  discovery: BrowserDiscovery,
+  fetchImpl: typeof fetch = fetch
+): Promise<BrowserDiscovery> {
+  if (
+    discovery.status !== "INSPECTED" ||
+    discovery.evidence.learnedFrom !== "quick18-public-matrix-pending" ||
+    !discovery.bookingUrl
+  ) return discovery;
+  const evidenceUrl = parseUrl(discovery.evidence.finalUrl);
+  const compactDate = evidenceUrl?.searchParams.get("teedate");
+  if (
+    !evidenceUrl ||
+    !isQuick18PublicSearchUrl(evidenceUrl) ||
+    !compactDate ||
+    discovery.bookingUrl !== `${evidenceUrl.origin}/teetimes/searchmatrix`
+  ) return discovery;
+  const date = new Date(`${compactDate.slice(0, 4)}-${compactDate.slice(4, 6)}-${compactDate.slice(6, 8)}T00:00:00.000Z`);
+  try {
+    const matrix = await fetchQuick18TeeSheet({
+      courseId: discovery.courseId,
+      date,
+      players: 2,
+      metadata: { provider: "QUICK18", bookingBaseUrl: discovery.bookingUrl }
+    }, fetchImpl);
+    if (matrix.slots.length === 0) return discovery;
+  } catch (error) {
+    if (error instanceof BrowserDiscoveryEnrichmentDeferredError) throw error;
+    return discovery;
+  }
+  return {
+    ...discovery,
+    status: "LEARNED",
+    bookingMethod: "PUBLIC_ONLINE",
+    automationEligibility: "ALLOWED",
+    automationReason: "NONE",
+    policyNotes: "The public Quick18 matrix exposed selectable public availability. Tee Time Spot reads the public page and leaves booking on the course's site.",
+    apiEndpoint: discovery.bookingUrl,
+    apiMetadata: { provider: "QUICK18", bookingBaseUrl: discovery.bookingUrl },
+    confidence: 0.9,
+    evidence: { ...discovery.evidence, learnedFrom: "quick18-validated-public-matrix" }
   };
 }
 

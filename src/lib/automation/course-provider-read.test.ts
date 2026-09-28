@@ -9,6 +9,7 @@ const adapterMocks = vi.hoisted(() => ({
   fetchForeupTeeSheet: vi.fn(),
   fetchGolfBackTeeSheet: vi.fn(),
   fetchGolfNowTeeSheet: vi.fn(),
+  fetchQuick18TeeSheet: vi.fn(),
   fetchGolfWithAccessTeeSheet: vi.fn(),
   fetchTeeItUpTeeSheet: vi.fn(),
   fetchTeesnapTeeSheet: vi.fn(),
@@ -22,6 +23,7 @@ const adapterMocks = vi.hoisted(() => ({
   isForeupMetadata: vi.fn(),
   isGolfBackMetadata: vi.fn(),
   isGolfNowMetadata: vi.fn(),
+  isQuick18Metadata: vi.fn(),
   isGolfWithAccessMetadata: vi.fn(),
   isTeeItUpMetadata: vi.fn(),
   isTeesnapMetadata: vi.fn(),
@@ -64,6 +66,10 @@ vi.mock("@/lib/adapters/golfback", () => ({
 vi.mock("@/lib/adapters/golfnow", () => ({
   fetchGolfNowTeeSheet: adapterMocks.fetchGolfNowTeeSheet,
   isGolfNowMetadata: adapterMocks.isGolfNowMetadata
+}));
+vi.mock("@/lib/adapters/quick18", () => ({
+  fetchQuick18TeeSheet: adapterMocks.fetchQuick18TeeSheet,
+  isQuick18Metadata: adapterMocks.isQuick18Metadata
 }));
 vi.mock("@/lib/adapters/golf-with-access", () => ({
   fetchGolfWithAccessTeeSheet: adapterMocks.fetchGolfWithAccessTeeSheet,
@@ -131,6 +137,7 @@ describe("fetchCourseTeeSheet", () => {
     adapterMocks.isForeupMetadata.mockReturnValue(true);
     adapterMocks.isGolfBackMetadata.mockReturnValue(true);
     adapterMocks.isGolfNowMetadata.mockReturnValue(true);
+    adapterMocks.isQuick18Metadata.mockReturnValue(true);
     adapterMocks.isGolfWithAccessMetadata.mockReturnValue(true);
     adapterMocks.isTeeItUpMetadata.mockReturnValue(true);
     adapterMocks.isTeesnapMetadata.mockReturnValue(true);
@@ -144,6 +151,7 @@ describe("fetchCourseTeeSheet", () => {
     adapterMocks.fetchForeupTeeSheet.mockResolvedValue(providerResult);
     adapterMocks.fetchGolfBackTeeSheet.mockResolvedValue(providerResult);
     adapterMocks.fetchGolfNowTeeSheet.mockResolvedValue(providerResult);
+    adapterMocks.fetchQuick18TeeSheet.mockResolvedValue(providerResult);
     adapterMocks.fetchGolfWithAccessTeeSheet.mockResolvedValue(providerResult);
     adapterMocks.fetchTeeItUpTeeSheet.mockResolvedValue(providerResult);
     adapterMocks.fetchTeesnapTeeSheet.mockResolvedValue(providerResult);
@@ -230,6 +238,16 @@ describe("fetchCourseTeeSheet", () => {
       fetchCourseTeeSheet(buildCourse("GOLFNOW"), date, 3, true)
     ).resolves.toBe(providerResult);
     expect(adapterMocks.fetchGolfNowTeeSheet).toHaveBeenCalledWith({
+      courseId: "course-1",
+      date,
+      players: 3,
+      metadata
+    });
+
+    await expect(
+      fetchCourseTeeSheet(buildCourse("QUICK18"), date, 3, true)
+    ).resolves.toBe(providerResult);
+    expect(adapterMocks.fetchQuick18TeeSheet).toHaveBeenCalledWith({
       courseId: "course-1",
       date,
       players: 3,

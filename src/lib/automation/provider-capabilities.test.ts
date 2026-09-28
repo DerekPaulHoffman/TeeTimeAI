@@ -64,6 +64,10 @@ const runnableMetadata = {
     bookingBaseUrl:
       "https://www.golfnow.com/tee-times/facility/10296-hunter-golf-course/search"
   },
+  QUICK18: {
+    provider: "QUICK18",
+    bookingBaseUrl: "https://mountsnow.quick18.com/teetimes/searchmatrix"
+  },
   AGILYSYS: {
     provider: "AGILYSYS",
     tenantId: 553,
@@ -415,6 +419,7 @@ describe("provider capability registry", () => {
       WEBTRAC: [true, "CUSTOM"],
       EZLINKS: [false, "CUSTOM"],
       GOLFNOW: [true, "GOLFNOW"],
+      QUICK18: [true, "CUSTOM"],
       AGILYSYS: [true, "CUSTOM"],
       CLUB_CADDIE: [true, "CLUB_CADDIE"],
       WHOOSH: [true, "CUSTOM"],
@@ -504,6 +509,7 @@ describe("provider capability registry", () => {
     ["ctguilfordweb.myvscloud.com", "WEBTRAC"],
     ["public-course.ezlinksgolf.com", "EZLINKS"],
     ["www.golfnow.com", "GOLFNOW"],
+    ["mountsnow.quick18.com", "QUICK18"],
     ["book.onagilysys.com", "AGILYSYS"],
     ["app.clubcaddie.com", "CLUB_CADDIE"],
     ["app.whoosh.io", "WHOOSH"],
@@ -557,6 +563,40 @@ describe("provider capability registry", () => {
         "https://app.whoosh.io/patron/club/windy-hill/agenda/driving-range/today"
       )
     ).toBe(false);
+  });
+
+  it("recognizes only public Quick18 search matrices as booking landings", () => {
+    const landing = "https://mountsnow.quick18.com/teetimes/searchmatrix";
+    expect(isProviderPublicBookingLandingUrl(landing)).toBe(true);
+    expect(isProviderPublicBookingLandingUrl(`${landing}?teedate=20260929`)).toBe(true);
+    expect(getProviderPublicBookingLandingIdentity(`${landing}?teedate=20260929`)).toBe(
+      "QUICK18:mountsnow.quick18.com:/teetimes/searchmatrix:"
+    );
+    expect(resolveProviderCapability({
+      detectedBookingUrl: landing,
+      bookingMetadata: runnableMetadata.QUICK18
+    })).toMatchObject({ providerFamilyKey: "QUICK18", isRunnable: true });
+    const linkOnly = resolveProviderCapability({ detectedBookingUrl: landing });
+    expect(linkOnly.isRunnable).toBe(false);
+    expect(getProviderReadinessFailure(linkOnly)).toBe("MISSING_METADATA");
+    expect(deriveConsumerDisposition({
+      detectedBookingUrl: landing,
+      bookingMetadata: runnableMetadata.QUICK18,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      isPublic: true,
+      latestOutcome: "NO_MATCH",
+      currentEvidenceTrusted: false
+    })).toBe("ENGINEERING");
+    for (const unsafe of [
+      "https://mountsnow.quick18.com/account",
+      "https://mountsnow.quick18.com/teetimes/course/1202/teetime/202609290800",
+      `${landing}?teedate=20260230`,
+      `${landing}?token=opaque`,
+      "https://www.quick18.com/teetimes/searchmatrix"
+    ]) {
+      expect(isProviderPublicBookingLandingUrl(unsafe)).toBe(false);
+    }
   });
 
   it("recognizes EZLinks without treating provider identity as runnable coverage", () => {
