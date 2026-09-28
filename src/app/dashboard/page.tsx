@@ -35,6 +35,7 @@ import {
   hasDatabaseConfig
 } from "@/lib/env";
 import { getGoogleMapsSearchUrl } from "@/lib/maps";
+import { prisma } from "@/lib/prisma";
 import {
   getGooglePlacePhoto,
   type GooglePlacePhoto
@@ -59,6 +60,7 @@ import {
 } from "@/lib/pricing/course-prices";
 
 type DashboardSearches = Awaited<ReturnType<typeof listTeeSearchesForUser>>;
+type OwnerEmailState = "SENT" | "PENDING" | "NOT_SENT" | "FIRST_CHECK_PENDING";
 
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = {
@@ -94,13 +96,17 @@ export default async function DashboardPage() {
     throw error;
   }
   const searches = await listTeeSearchesForUser(user.id);
-  const coursePhotos = await loadDashboardCoursePhotos(searches);
+  const [coursePhotos, ownerEmailStates] = await Promise.all([
+    loadDashboardCoursePhotos(searches),
+    loadOwnerEmailStates(searches),
+  ]);
 
   return (
     <DashboardView
       searches={searches}
       canManage
       coursePhotos={coursePhotos}
+      ownerEmailStates={ownerEmailStates}
       showRecipientEmail
     />
   );
@@ -110,12 +116,14 @@ function DashboardView({
   searches,
   canManage,
   coursePhotos,
+  ownerEmailStates,
   showRecipientEmail,
   notice
 }: {
   searches: DashboardSearches;
   canManage: boolean;
   coursePhotos: ReadonlyMap<string, GooglePlacePhoto>;
+  ownerEmailStates: ReadonlyMap<string, OwnerEmailState>;
   showRecipientEmail: boolean;
   notice?: string;
 }) {
@@ -190,6 +198,7 @@ function DashboardView({
                 <DashboardSearchCard
                   canManage={canManage}
                   coursePhotos={coursePhotos}
+                  ownerEmailState={ownerEmailStates.get(search.id) ?? "FIRST_CHECK_PENDING"}
                   key={search.id}
                   search={search}
                   showRecipientEmail={showRecipientEmail}
@@ -207,6 +216,7 @@ function DashboardView({
                   <DashboardSearchCard
                     canManage={canManage}
                     coursePhotos={coursePhotos}
+                    ownerEmailState={ownerEmailStates.get(search.id) ?? "FIRST_CHECK_PENDING"}
                     key={search.id}
                     search={search}
                     showRecipientEmail={showRecipientEmail}
@@ -255,11 +265,13 @@ function DashboardSearchCard({
   search,
   canManage,
   coursePhotos,
+  ownerEmailState,
   showRecipientEmail
 }: {
   search: DashboardSearches[number];
   canManage: boolean;
   coursePhotos: ReadonlyMap<string, GooglePlacePhoto>;
+  ownerEmailState: OwnerEmailState;
   showRecipientEmail: boolean;
 }) {
   const now = new Date();
@@ -320,6 +332,16 @@ function DashboardSearchCard({
               {" · "}
               {search.preferences.length}{" "}
               {search.preferences.length === 1 ? "course" : "courses"}
+            </span>
+            <span className={`dashboard-email-status${ownerEmailState === "NOT_SENT" ? " dashboard-email-not-sent" : ""}`}>
+              <Mail aria-hidden="true" size={12} />
+              {ownerEmailState === "SENT"
+                ? "Alert email sent for these settings"
+                : ownerEmailState === "PENDING"
+                  ? "Alert email pending for these settings"
+                  : ownerEmailState === "NOT_SENT"
+                    ? "No email sent for these alert settings"
+                    : "First email pending initial check"}
             </span>
           </div>
           <span className="dashboard-alert-summary-checked">
@@ -826,6 +848,46 @@ function CourseImage({
       ) : null}
     </div>
   );
+}
+
+async function loadOwnerEmailStates(searches: DashboardSearches) {
+  const states = new Map<string, OwnerEmailState>();
+  if (searches.length === 0) return states;
+
+  const currentGenerationBySearch = new Map(
+    searches.map((search) => [search.id, search.alertGeneration]),
+  );
+  const deliveries = await prisma.searchEmailDelivery.groupBy({
+    by: ["teeSearchId", "alertGeneration", "status"],
+    where: {
+      teeSearchId: { in: searches.map((search) => search.id) },
+      isOwnerRecipient: true,
+      kind: { not: "DAILY" },
+    },
+  });
+  const statusesBySearch = new Map<string, Set<string>>();
+  for (const delivery of deliveries) {
+    if (delivery.alertGeneration !== currentGenerationBySearch.get(delivery.teeSearchId)) {
+      continue;
+    }
+    const statuses = statusesBySearch.get(delivery.teeSearchId) ?? new Set<string>();
+    statuses.add(delivery.status);
+    statusesBySearch.set(delivery.teeSearchId, statuses);
+  }
+
+  for (const search of searches) {
+    const statuses = statusesBySearch.get(search.id);
+    states.set(search.id,
+      statuses?.has("SENT")
+        ? "SENT"
+        : statuses && ["PENDING", "SENDING", "FAILED"].some((status) => statuses.has(status))
+          ? "PENDING"
+          : search.lastCheckedAt
+            ? "NOT_SENT"
+            : "FIRST_CHECK_PENDING",
+    );
+  }
+  return states;
 }
 
 async function loadDashboardCoursePhotos(searches: DashboardSearches) {

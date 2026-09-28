@@ -3,6 +3,7 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import {
   Prisma,
+  type ProbeOutcome,
   type SearchEmailDeliveryKind,
   type SearchEmailDeliveryStatus,
 } from "@prisma/client";
@@ -53,6 +54,16 @@ export type { SearchEmailDeliveryPayload } from "@/lib/email/search-delivery-pay
 const DELIVERY_CLAIM_MS = 5 * 60 * 1000;
 const DELIVERY_HEARTBEAT_MS = 60 * 1000;
 const DELIVERY_RETRY_BASE_MS = 60 * 1000;
+const SETUP_OUTCOMES_WITHOUT_AVAILABILITY = new Set<ProbeOutcome>([
+  "BLOCKED_POLICY",
+  "BLOCKED_AUTH",
+  "BLOCKED_TOOLING",
+  "FETCH_FAILED",
+  "NEEDS_ADAPTER",
+  "MANUAL_DIRECT",
+  "IDENTITY_FINAL",
+  "IDENTITY_RECHECK",
+]);
 const DELIVERY_RETRY_MAX_MS = 10 * 60 * 1000;
 const DELIVERY_DAILY_QUOTA_RETRY_MS = 24 * 60 * 60 * 1000;
 const DELIVERY_RECONCILIATION_TRANSACTION_TIMEOUT_MS = 15 * 1000;
@@ -1218,6 +1229,7 @@ async function runWithCurrentAvailabilityDeliverySourceFence<T>(input: {
           sourceIsNotSuperseded(completedReader.providerObservedAt)
             ? [
                 {
+                  courseId,
                   sourceAt: completedReader.providerObservedAt,
                   terminal: completedReader.state === "EXPIRED_UNCONSUMED",
                 },
@@ -1226,6 +1238,7 @@ async function runWithCurrentAvailabilityDeliverySourceFence<T>(input: {
           ...(marker
             ? [
                 {
+                  courseId,
                   sourceAt: marker.observationStartedAt,
                   terminal: marker.state === "EXPIRED_TERMINAL",
                 },
@@ -1237,23 +1250,49 @@ async function runWithCurrentAvailabilityDeliverySourceFence<T>(input: {
         throw new DeliveryProviderSourcePendingError();
       }
       if (unresolvedProviderSources.length > 0) {
-        throw new DeliveryProviderSourceUnresolvedError({
-          courseIds,
-          matchSources: matchRefs.flatMap((matchRef) => {
-            const match = matchById.get(matchRef.matchId);
-            return match?.lastConfirmedAt instanceof Date &&
-              Number.isFinite(match.lastConfirmedAt.getTime())
-              ? [
-                  {
-                    matchId: match.id,
-                    courseId: match.courseId,
-                    availabilityCycle: matchRef.availabilityCycle,
-                    lastConfirmedAt: match.lastConfirmedAt,
-                  },
-                ]
-              : [];
+        const statusReport = optionalJsonRecord(input.payload.statusReport);
+        const statusCourses = new Map(
+          (statusReport && Array.isArray(statusReport.courses)
+            ? statusReport.courses
+            : []
+          ).flatMap((value) => {
+            const course = optionalJsonRecord(value);
+            const courseId = optionalString(course?.courseId);
+            return course && courseId ? [[courseId, course] as const] : [];
           }),
-        });
+        );
+        // A setup report that states a course cannot currently be monitored
+        // makes no availability claim. A terminal reader/provider marker must
+        // not prevent that truthful status email from reaching the golfer.
+        const safeSetupWithoutAvailability =
+          input.kind === "SETUP" &&
+          matchIds.length === 0 &&
+          unresolvedProviderSources.every(({ courseId }) => {
+            const outcome = optionalString(statusCourses.get(courseId)?.outcome);
+            return (
+              outcome !== undefined &&
+              SETUP_OUTCOMES_WITHOUT_AVAILABILITY.has(outcome as ProbeOutcome)
+            );
+          });
+        if (!safeSetupWithoutAvailability) {
+          throw new DeliveryProviderSourceUnresolvedError({
+            courseIds,
+            matchSources: matchRefs.flatMap((matchRef) => {
+              const match = matchById.get(matchRef.matchId);
+              return match?.lastConfirmedAt instanceof Date &&
+                Number.isFinite(match.lastConfirmedAt.getTime())
+                ? [
+                    {
+                      matchId: match.id,
+                      courseId: match.courseId,
+                      availabilityCycle: matchRef.availabilityCycle,
+                      lastConfirmedAt: match.lastConfirmedAt,
+                    },
+                  ]
+                : [];
+            }),
+          });
+        }
       }
       const matchRefById = new Map(
         matchRefs.map((matchRef) => [matchRef.matchId, matchRef]),

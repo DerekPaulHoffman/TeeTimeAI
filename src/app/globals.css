@@ -10021,6 +10021,17 @@ button {
   line-height: 1.4;
 }
 
+.dashboard-alert-summary-copy .dashboard-email-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.dashboard-alert-summary-copy .dashboard-email-not-sent {
+  color: #a3342a;
+  font-weight: 600;
+}
+
 .dashboard-alert-summary-checked {
   max-width: 160px;
   text-align: right;

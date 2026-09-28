@@ -4536,6 +4536,117 @@ describe("search email delivery outbox", () => {
   });
 
   it.each([
+    {
+      description: "sends a truthful unsupported-course setup after its source expires",
+      outcome: "NEEDS_ADAPTER",
+      monitoringState: "ENGINEERING_VERIFICATION_NEEDED",
+      markerState: "EXPIRED_TERMINAL",
+      expectedStatus: "SENT",
+    },
+    {
+      description: "waits for an active source even when the setup reports an unsupported course",
+      outcome: "NEEDS_ADAPTER",
+      monitoringState: "ENGINEERING_VERIFICATION_NEEDED",
+      markerState: "ACTIVE",
+      expectedStatus: "FAILED",
+    },
+    {
+      description: "does not send a no-match claim after its source expires unresolved",
+      outcome: "NO_MATCH",
+      monitoringState: "HEALTHY",
+      markerState: "EXPIRED_TERMINAL",
+      expectedStatus: "SUPPRESSED",
+    },
+  ])("$description", async ({ outcome, monitoringState, markerState, expectedStatus }) => {
+    const statusPayload = {
+      schemaVersion: 2 as const,
+      checkedAt: now.toISOString(),
+      displayMatchIds: [],
+      statusSnapshot: [{ courseId: "course-1", state: outcome }],
+      statusReport: {
+        kind: "setup",
+        targetDate: "2026-07-16",
+        startTime: "07:00",
+        endTime: "10:00",
+        players: 2,
+        requestedLayoutHoles: null,
+        userTimeZone: "America/New_York",
+        courses: [{
+          courseId: "course-1",
+          courseName: "Course",
+          timeZone: "America/New_York",
+          outcome,
+          availableMatches: 0,
+        }],
+      },
+    };
+    const owner = delivery("delivery-1", "owner@example.com", {
+      kind: "SETUP",
+      groupKey: "status-group",
+      payload: statusPayload,
+    });
+    mockedPrisma.searchEmailDelivery.findMany
+      .mockResolvedValueOnce([owner] as never)
+      .mockResolvedValueOnce([{
+        ...owner,
+        status: expectedStatus,
+        sentAt: expectedStatus === "SENT" ? now : null,
+      }] as never);
+    mockedPrisma.courseProbe.findMany.mockResolvedValue([{
+      courseId: "course-1",
+      outcome,
+      observedAt: now,
+    }] as never);
+    mockedPrisma.courseMonitoringStatus.findMany.mockResolvedValue([{
+      courseId: "course-1",
+      state: monitoringState,
+      lastSuccessfulAt: monitoringState === "HEALTHY" ? now : null,
+      lastFailureAt: monitoringState === "HEALTHY" ? null : now,
+    }] as never);
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([]);
+    mockedPrisma.$queryRaw.mockImplementation(async (sql) => {
+      const text = rawSqlText(sql);
+      if (text.includes('FROM "ProviderRequestLease"')) {
+        const leaseExpiresAt = new Date(
+          now.getTime() + (markerState === "ACTIVE" ? 2 : -11) * 60_000,
+        );
+        return [{
+          observationStartedAt: now,
+          leaseExpiresAt,
+          retryUntil: new Date(leaseExpiresAt.getTime() + 10 * 60_000),
+          state: markerState,
+        }] as never;
+      }
+      if (text.includes('statement_timestamp() AS "currentTime"')) {
+        return [{ currentTime: now }] as never;
+      }
+      return [currentSearch] as never;
+    });
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+    const drain = drainSearchEmailDeliveryGroup({
+      searchId: "search-1",
+      alertGeneration: 3,
+      checkLeaseToken: "check-lease",
+      kind: "SETUP",
+      groupKey: "status-group",
+      send,
+      now: () => now,
+    });
+
+    if (markerState === "ACTIVE") {
+      await expect(drain).rejects.toMatchObject({
+        code: "DELIVERY_PROVIDER_SOURCE_PENDING",
+      });
+    } else {
+      await expect(drain).resolves.toContainEqual({
+        id: "delivery-1",
+        status: expectedStatus,
+      });
+    }
+    expect(send).toHaveBeenCalledTimes(expectedStatus === "SENT" ? 1 : 0);
+  });
+
+  it.each([
     { staleAccess: false, knownReader: true, outcome: "NO_MATCH", sends: true },
     { staleAccess: true, knownReader: true, outcome: "NO_MATCH", sends: true },
     { staleAccess: true, knownReader: false, outcome: "NO_MATCH", sends: false },
