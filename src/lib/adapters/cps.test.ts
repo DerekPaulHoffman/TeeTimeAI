@@ -144,6 +144,28 @@ describe("resolveCpsRuntimeCourseIds", () => {
       expected
     );
   });
+
+  it("selects only the exact tenant facility from public sibling options", () => {
+    const options = [
+      { courseId: 8, courseName: "CANDIA WOODS - Candia, NH" },
+      { courseId: 7, courseName: "THE OAKS - Somersworth, NH" }
+    ];
+    expect(resolveCpsRuntimeCourseIds([0], options, true, "candiawoods"))
+      .toEqual([8]);
+    expect(resolveCpsRuntimeCourseIds([0], options, false, "candiawoods"))
+      .toEqual([0]);
+  });
+
+  it("rejects ambiguous tenant facility names and unrelated siblings", () => {
+    expect(resolveCpsRuntimeCourseIds([0], [
+      { courseId: 8, courseName: "Candia Woods - Candia, NH" },
+      { courseId: 9, courseName: "Candia Woods - Other, NH" }
+    ], true, "candiawoods")).toEqual([0]);
+    expect(resolveCpsRuntimeCourseIds([0], [
+      { courseId: 8, courseName: "The Oaks - Candia, NH" },
+      { courseId: 9, courseName: "Other Course - Candia, NH" }
+    ], true, "candiawoods")).toEqual([0]);
+  });
 });
 
 describe("fetchCpsSlots", () => {

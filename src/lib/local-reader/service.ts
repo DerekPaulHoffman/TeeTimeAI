@@ -53,6 +53,24 @@ const LEASE_LIFETIME_MS = 3 * 60_000;
 const RESULT_LIFETIME_MS = 10 * 60_000;
 const ALERT_READER_ATTEMPT_LIFETIME_MS = 5 * 60_000;
 
+function hasLiveSearchCheck(
+  search: {
+    status: string;
+    checkStatus: string;
+    checkLeaseToken: string | null;
+    checkLeaseExpiresAt: Date | null;
+  } | null,
+  now: Date,
+) {
+  return Boolean(
+    search?.status === "ACTIVE" &&
+    search.checkStatus === "CHECKING" &&
+    search.checkLeaseToken &&
+    search.checkLeaseExpiresAt &&
+    search.checkLeaseExpiresAt > now,
+  );
+}
+
 export async function expireOverdueLocalReaderJobs(now = new Date()) {
   const overdueJobs = await prisma.localReaderJob.findMany({
     where: {
@@ -1228,6 +1246,22 @@ export async function completeLocalReaderJob(input: {
           "The result observation has invalid authenticated timing",
         );
       }
+      if (lockedCurrent.teeSearchId) {
+        const search = await transaction.teeSearch.findUnique({
+          where: { id: lockedCurrent.teeSearchId },
+          select: {
+            status: true,
+            checkStatus: true,
+            checkLeaseToken: true,
+            checkLeaseExpiresAt: true,
+          },
+        });
+        if (hasLiveSearchCheck(search, databaseNow)) {
+          throw new Error(
+            "The local reader result is waiting for the active search check to finish",
+          );
+        }
+      }
       const updated = await transaction.localReaderJob.updateMany({
         where: {
           id: current.id,
@@ -1259,6 +1293,9 @@ export async function completeLocalReaderJob(input: {
             select: {
               status: true,
               scheduleVersion: true,
+              checkStatus: true,
+              checkLeaseToken: true,
+              checkLeaseExpiresAt: true,
               date: true,
               players: true,
               preferences: {
@@ -1283,11 +1320,24 @@ export async function completeLocalReaderJob(input: {
             search.preferences.length === 1,
           );
           if (!sourceStillApplies || !search) break;
+          // A reader can finish while a sibling course is still committing
+          // matches. Keep that check's lease and generation intact. The
+          // extension retains this result after a 409 and retries submission.
+          if (hasLiveSearchCheck(search, databaseNow)) {
+            throw new Error(
+              "The local reader result is waiting for the active search check to finish",
+            );
+          }
           const queued = await transaction.teeSearch.updateMany({
             where: {
               id: lockedCurrent.teeSearchId,
               status: "ACTIVE",
               scheduleVersion: search.scheduleVersion,
+              OR: [
+                { checkStatus: { not: "CHECKING" } },
+                { checkLeaseToken: null },
+                { checkLeaseExpiresAt: { lte: databaseNow } },
+              ],
             },
             data: {
               scheduleVersion: { increment: 1 },

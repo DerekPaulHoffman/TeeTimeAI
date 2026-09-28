@@ -2537,6 +2537,58 @@ describe("local reader job service", () => {
     );
   });
 
+  it("keeps a live search check when a reader result arrives", async () => {
+    const claimedAt = new Date("2026-07-24T15:59:30.000Z");
+    prismaMocks.localReaderJob.findUnique.mockResolvedValue({
+      id: "job-1",
+      teeSearchId: "search-1",
+      scheduleVersion: 7,
+      purpose: "ALERT_CHECK",
+      courseId: "course-1",
+      courseKey: "cps:grassyhill.cps.golf",
+      targetDate: "2026-07-25",
+      players: 2,
+      createdAt: new Date("2026-07-24T15:59:00.000Z"),
+      claimedAt,
+      jobExpiresAt: new Date("2026-07-24T16:09:00.000Z"),
+      status: "LEASED",
+      leaseToken: "reader-lease",
+      leaseExpiresAt: new Date("2026-07-24T16:02:00.000Z"),
+      bookingUrl,
+    });
+    prismaMocks.teeSearch.findUnique.mockResolvedValue({
+      status: "ACTIVE",
+      scheduleVersion: 7,
+      checkStatus: "CHECKING",
+      checkLeaseToken: "search-lease",
+      checkLeaseExpiresAt: new Date("2026-07-24T16:05:00.000Z"),
+      date: new Date("2026-07-25T00:00:00.000Z"),
+      players: 2,
+      preferences: [{ courseId: "course-1" }],
+    });
+
+    await expect(
+      completeLocalReaderJob({
+        jobId: "job-1",
+        leaseToken: "reader-lease",
+        receivedAt: new Date("2026-07-24T16:00:00.000Z"),
+        deviceRequestAt: new Date("2026-07-24T16:00:00.000Z"),
+        result: {
+          jobId: "job-1",
+          courseKey: "cps:grassyhill.cps.golf",
+          status: "NO_AVAILABILITY",
+          observedAt: "2026-07-24T16:00:00.000Z",
+          pageUrl: bookingUrl,
+          pageTitle: "Grassy Hill Country Club",
+          slots: [],
+          readerVersion: "test",
+        },
+      }),
+    ).rejects.toThrow("waiting for the active search check to finish");
+    expect(prismaMocks.localReaderJob.updateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.teeSearch.updateMany).not.toHaveBeenCalled();
+  });
+
   it("completes generation 7, queues generation 8, and consumes the exact reusable proof", async () => {
     const providerObservedAt = new Date("2026-07-24T15:59:30.000Z");
     const completedAt = new Date("2026-07-24T16:00:00.000Z");
@@ -2561,7 +2613,7 @@ describe("local reader job service", () => {
     prismaMocks.teeSearch.findUnique.mockResolvedValue({
       status: "ACTIVE",
       scheduleVersion: 7,
-      checkStatus: "CHECKING",
+      checkStatus: "WAITING",
       date: new Date("2026-07-25T00:00:00.000Z"),
       players: 2,
       preferences: [{ courseId: "course-1" }],
@@ -2620,6 +2672,11 @@ describe("local reader job service", () => {
         id: "search-1",
         status: "ACTIVE",
         scheduleVersion: 7,
+        OR: [
+          { checkStatus: { not: "CHECKING" } },
+          { checkLeaseToken: null },
+          { checkLeaseExpiresAt: { lte: completedAt } },
+        ],
       },
       data: {
         scheduleVersion: { increment: 1 },
@@ -2797,6 +2854,11 @@ describe("local reader job service", () => {
       .mockResolvedValueOnce({
         status: "ACTIVE",
         scheduleVersion: 7,
+        checkStatus: "WAITING",
+      })
+      .mockResolvedValueOnce({
+        status: "ACTIVE",
+        scheduleVersion: 7,
         date: new Date("2026-07-25T00:00:00.000Z"),
         players: 2,
         preferences: [{ courseId: "course-1" }],
@@ -2836,11 +2898,11 @@ describe("local reader job service", () => {
     expect(prismaMocks.teeSearch.updateMany).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({
-        where: {
+        where: expect.objectContaining({
           id: "search-1",
           status: "ACTIVE",
           scheduleVersion: 7,
-        },
+        }),
       }),
     );
     expect(prismaMocks.localReaderJob.updateMany).toHaveBeenCalledWith({
@@ -2859,11 +2921,11 @@ describe("local reader job service", () => {
     expect(prismaMocks.teeSearch.updateMany).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({
-        where: {
+        where: expect.objectContaining({
           id: "search-1",
           status: "ACTIVE",
           scheduleVersion: 8,
-        },
+        }),
       }),
     );
   });

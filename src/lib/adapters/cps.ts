@@ -973,7 +973,8 @@ async function loadPublicOptions(
   const courseIds = resolveCpsRuntimeCourseIds(
     configuredCourseIds,
     payload.courseOptions,
-    allowPlaceholderResolution
+    allowPlaceholderResolution,
+    configuration.siteName
   );
   if (
     allowPlaceholderResolution &&
@@ -995,7 +996,8 @@ async function loadPublicOptions(
 export function resolveCpsRuntimeCourseIds(
   configuredCourseIds: number[],
   courseOptions: unknown,
-  allowPlaceholderResolution: boolean
+  allowPlaceholderResolution: boolean,
+  siteName?: string
 ) {
   if (
     !allowPlaceholderResolution ||
@@ -1061,6 +1063,25 @@ export function resolveCpsRuntimeCourseIds(
     })
   ) {
     return publishedCourseIds;
+  }
+  // Some public CPS tenants publish a placeholder configuration course id
+  // alongside several distinct facilities. Resolve only the one facility
+  // whose published name explicitly matches this tenant, before its location
+  // suffix. Never read a sibling facility's tee sheet by guessing an id.
+  const tenantIdentity = siteName?.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (tenantIdentity && publishedCourseIds.length > 1) {
+    const exactTenantIds = publishedCourseIds.filter((courseId) => {
+      const names = publishedCourseNames.get(courseId);
+      if (unsafeCourseNames.has(courseId) || names?.size !== 1) {
+        return false;
+      }
+      const [name] = names;
+      const facilityName = name?.split(/\s+-\s+/u, 1)[0];
+      return facilityName?.replace(/[^a-z0-9]/g, "") === tenantIdentity;
+    });
+    if (exactTenantIds.length === 1) {
+      return exactTenantIds;
+    }
   }
   return configuredCourseIds;
 }

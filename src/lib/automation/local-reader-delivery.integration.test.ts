@@ -412,6 +412,7 @@ describe("completed reader source through ordinary match delivery", () => {
     const siblingObservedAt = new Date();
     Object.assign(secondJob, {status: "LEASED", claimedAt: siblingObservedAt,
       leaseToken: "sibling-lease", leaseExpiresAt: new Date(Date.now() + 120_000)});
+    Object.assign(search, {checkStatus: "WAITING", checkLeaseToken: null, checkLeaseExpiresAt: null});
     await completeLocalReaderJob({jobId: secondJob.id, leaseToken: "sibling-lease",
       receivedAt: siblingObservedAt, deviceRequestAt: siblingObservedAt,
       result: {...clone(object(firstJob.result)), jobId: secondJob.id, courseKey: secondJob.courseKey,
@@ -513,6 +514,7 @@ describe("completed reader source through ordinary match delivery", () => {
     const observedAt = new Date();
     Object.assign(nextJob, {status: "LEASED", leaseToken: "replacement-lease",
       leaseExpiresAt: new Date(now.getTime() + 120_000), claimedAt: observedAt});
+    Object.assign(rows.teeSearch[0], {checkStatus: "WAITING", checkLeaseToken: null, checkLeaseExpiresAt: null});
     await completeLocalReaderJob({jobId: String(nextJob.id), leaseToken: "replacement-lease",
       receivedAt: observedAt, deviceRequestAt: observedAt,
       result: {...object(oldJob.result), jobId: nextJob.id, observedAt: observedAt.toISOString()} as never});
@@ -559,6 +561,7 @@ describe("completed reader source through ordinary match delivery", () => {
     ];
     rows.localReaderJob.push(...excluded);
     const excludedBefore = clone(excluded);
+    Object.assign(search, {checkStatus: "WAITING", checkLeaseToken: null, checkLeaseExpiresAt: null});
     for (const [job, result] of [[firstJob, firstResult], [secondJob, secondResult]]) {
       await completeLocalReaderJob({jobId: String(job.id), leaseToken: String(job.leaseToken),
         receivedAt: now, deviceRequestAt: now, result: {...result, observedAt: now.toISOString()} as never});
