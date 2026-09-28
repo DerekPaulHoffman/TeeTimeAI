@@ -45,6 +45,7 @@ import {
   buildImprovementCheckpoints,
   type HourlyImprovementRunRecord,
 } from "./improvement";
+import { withSearchCheckWriteContext } from "./search-check-write-context";
 
 const deliveryOutboxMocks = vi.hoisted(() => ({
   lockSearchForAlertMutation: vi.fn(),
@@ -2959,6 +2960,24 @@ describe("recordCourseProbeIfChanged", () => {
       message: "Course is explicitly marked as blocked for automation.",
     });
 
+    expect(mockedPrisma.courseProbe.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects a probe if its search check loses the lease before commit", async () => {
+    mockedPrisma.courseProbe.findFirst.mockResolvedValue(null);
+    mockedPrisma.$transaction.mockImplementation(async (callback) =>
+      callback(mockedPrisma as never),
+    );
+    mockedPrisma.$queryRaw.mockResolvedValue([]);
+
+    await expect(withSearchCheckWriteContext(
+      { searchId: "search-1", scheduleVersion: 7, leaseToken: "check-lease" },
+      () => recordCourseProbeIfChanged({
+        searchId: "search-1",
+        courseId: "course-1",
+        outcome: "NO_MATCH",
+      }),
+    )).rejects.toThrow("Search check lease changed");
     expect(mockedPrisma.courseProbe.create).not.toHaveBeenCalled();
   });
 

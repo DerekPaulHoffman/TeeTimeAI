@@ -51,6 +51,7 @@ export { getLocalReaderCourseKey } from "./course-key";
 const JOB_LIFETIME_MS = 5 * 60_000;
 const LEASE_LIFETIME_MS = 3 * 60_000;
 const RESULT_LIFETIME_MS = 10 * 60_000;
+const DEFERRED_RESULT_LIFETIME_MS = 20 * 60_000;
 const ALERT_READER_ATTEMPT_LIFETIME_MS = 5 * 60_000;
 
 function hasLiveSearchCheck(
@@ -315,8 +316,10 @@ function isCurrentCycleTerminalReaderJob(input: {
         !Number.isSafeInteger(input.job.resumeScheduleVersion) ||
         input.job.scheduleVersion < 0 ||
         input.job.resumeFromScheduleVersion < input.job.scheduleVersion ||
-        input.job.resumeScheduleVersion !==
-          input.job.resumeFromScheduleVersion + 1 ||
+        (input.job.resumeScheduleVersion !==
+          input.job.resumeFromScheduleVersion + 1 &&
+          !(input.job.resumeFromScheduleVersion === input.job.scheduleVersion &&
+            input.job.resumeScheduleVersion === input.job.scheduleVersion)) ||
         input.job.resumeScheduleVersion !== input.resumeScheduleVersion))
   ) {
     return false;
@@ -695,8 +698,10 @@ export async function queueLocalReaderJob(input: {
         existing.resumeFromScheduleVersion >= existing.scheduleVersion &&
         existing.resumeScheduleVersion !== null &&
         Number.isSafeInteger(existing.resumeScheduleVersion) &&
-        existing.resumeScheduleVersion ===
-          existing.resumeFromScheduleVersion + 1 &&
+        (existing.resumeScheduleVersion ===
+          existing.resumeFromScheduleVersion + 1 ||
+          (existing.resumeFromScheduleVersion === existing.scheduleVersion &&
+            existing.resumeScheduleVersion === existing.scheduleVersion)) &&
         readAnchoredStoredReaderResult(existing) !== null &&
         existing.completedAt !== null &&
         existing.completedAt >= freshnessCutoff &&
@@ -1246,22 +1251,6 @@ export async function completeLocalReaderJob(input: {
           "The result observation has invalid authenticated timing",
         );
       }
-      if (lockedCurrent.teeSearchId) {
-        const search = await transaction.teeSearch.findUnique({
-          where: { id: lockedCurrent.teeSearchId },
-          select: {
-            status: true,
-            checkStatus: true,
-            checkLeaseToken: true,
-            checkLeaseExpiresAt: true,
-          },
-        });
-        if (hasLiveSearchCheck(search, databaseNow)) {
-          throw new Error(
-            "The local reader result is waiting for the active search check to finish",
-          );
-        }
-      }
       const updated = await transaction.localReaderJob.updateMany({
         where: {
           id: current.id,
@@ -1320,13 +1309,46 @@ export async function completeLocalReaderJob(input: {
             search.preferences.length === 1,
           );
           if (!sourceStillApplies || !search) break;
-          // A reader can finish while a sibling course is still committing
-          // matches. Keep that check's lease and generation intact. The
-          // extension retains this result after a 409 and retries submission.
+          // Keep the signed result on the server while another course's check
+          // is live. The current workflow will finish and immediately recheck
+          // this same generation; no short-lived browser lease is needed.
           if (hasLiveSearchCheck(search, databaseNow)) {
-            throw new Error(
-              "The local reader result is waiting for the active search check to finish",
-            );
+            const requested = await transaction.teeSearch.updateMany({
+              where: {
+                id: lockedCurrent.teeSearchId,
+                status: "ACTIVE",
+                scheduleVersion: search.scheduleVersion,
+                checkStatus: "CHECKING",
+                checkLeaseToken: search.checkLeaseToken,
+                checkLeaseExpiresAt: { gt: databaseNow },
+              },
+              data: { recheckRequestedAt: databaseNow },
+            });
+            if (requested.count !== 1) {
+              throw new Error(
+                "The active search check changed during reader completion",
+              );
+            }
+            const deferred = await transaction.localReaderJob.updateMany({
+              where: {
+                id: current.id,
+                status: "COMPLETED",
+                completedAt: databaseNow,
+                resumeFromScheduleVersion: null,
+                resumeScheduleVersion: null,
+              },
+              data: {
+                resumeFromScheduleVersion: search.scheduleVersion,
+                resumeScheduleVersion: search.scheduleVersion,
+                resultExpiresAt: new Date(
+                  databaseNow.getTime() + DEFERRED_RESULT_LIFETIME_MS,
+                ),
+              },
+            });
+            if (deferred.count !== 1) {
+              throw new Error("The deferred reader result could not be persisted");
+            }
+            break;
           }
           const queued = await transaction.teeSearch.updateMany({
             where: {
@@ -1830,8 +1852,8 @@ export async function getFreshLocalReaderObservation(input: {
     input.courseId,
     courseKey,
   );
-  // Completion advances the active search to N+1 while the reusable proof
-  // remains durably stamped with the generation N that requested it.
+  // A result completed during a live check stays on generation N; an idle
+  // result advances to N+1. Both require an exact generation-bound proof.
   const row = await prisma.localReaderJob.findFirst({
     where: {
       teeSearchId: input.searchId,
@@ -2271,7 +2293,9 @@ export async function markCompletedLocalReaderProviderObservationConsumedInTrans
     job.resumeFromScheduleVersion < job.scheduleVersion ||
     job.resumeScheduleVersion === null ||
     !Number.isSafeInteger(job.resumeScheduleVersion) ||
-    job.resumeScheduleVersion !== job.resumeFromScheduleVersion + 1 ||
+    (job.resumeScheduleVersion !== job.resumeFromScheduleVersion + 1 &&
+      !(job.resumeFromScheduleVersion === job.scheduleVersion &&
+        job.resumeScheduleVersion === job.scheduleVersion)) ||
     job.resumeScheduleVersion !== input.scheduleVersion ||
     job.status !== "COMPLETED" ||
     job.claimedAt?.getTime() !== input.providerObservedAt.getTime() ||

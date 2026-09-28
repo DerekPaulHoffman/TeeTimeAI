@@ -30,6 +30,7 @@ import {
 import { syntheticWebsiteTrafficClasses } from "@/lib/engagement/traffic-class";
 import { localReaderResultSchema } from "@/lib/local-reader/contracts";
 import { prisma } from "@/lib/prisma";
+import { assertCurrentSearchCheckWrite } from "@/lib/automation/search-check-write-context";
 import { isGenericCourseName } from "@/lib/places/course-identity";
 
 import { sanitizeResponderText } from "./course-support-responder-policy";
@@ -12593,7 +12594,10 @@ export async function runSerializedCourseMonitoringWrite<T>(
             transaction,
             courseId,
           );
-          return worker(transaction);
+          await assertCurrentSearchCheckWrite(transaction);
+          const result = await worker(transaction);
+          await assertCurrentSearchCheckWrite(transaction);
+          return result;
         },
         {
           isolationLevel:
@@ -12647,8 +12651,11 @@ export async function runSerializedCourseMonitoringWrites<T>(
               courseId,
             );
           }
+          await assertCurrentSearchCheckWrite(transaction);
           workerStarted = true;
-          return worker(transaction);
+          const result = await worker(transaction);
+          await assertCurrentSearchCheckWrite(transaction);
+          return result;
         },
         {
           isolationLevel:

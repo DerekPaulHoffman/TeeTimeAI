@@ -20,6 +20,10 @@ import {
 } from "@/lib/email/search-delivery-outbox";
 import { prisma } from "@/lib/prisma";
 import {
+  assertCurrentSearchCheckWrite,
+  getSearchCheckWriteContext,
+} from "@/lib/automation/search-check-write-context";
+import {
   haveCompatibleCourseNames,
   haveCompatibleOfficialPageCourseNames,
   isExplicitCourseIdentityName,
@@ -1206,7 +1210,7 @@ type CourseProbeInput = {
 };
 
 export async function recordCourseProbe(input: CourseProbeInput) {
-  return prisma.courseProbe.create({
+  const create = (client: Prisma.TransactionClient | typeof prisma) => client.courseProbe.create({
     data: {
       teeSearchId: input.searchId,
       courseId: input.courseId,
@@ -1217,6 +1221,17 @@ export async function recordCourseProbe(input: CourseProbeInput) {
       automationRunId: input.automationRunId,
       runtimeVersion: input.runtimeVersion ?? getAutomationRuntimeVersion(),
     },
+  });
+  const context = getSearchCheckWriteContext();
+  if (!context) return create(prisma);
+  if (context.searchId !== input.searchId) {
+    throw new Error("Search check probe belongs to a different search");
+  }
+  return prisma.$transaction(async (transaction) => {
+    await assertCurrentSearchCheckWrite(transaction);
+    const probe = await create(transaction);
+    await assertCurrentSearchCheckWrite(transaction);
+    return probe;
   });
 }
 

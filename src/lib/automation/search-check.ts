@@ -24,6 +24,7 @@ import {
   startAutomationRun,
   type SearchCheckLease,
 } from "@/lib/automation/db-service";
+import { withSearchCheckWriteContext } from "@/lib/automation/search-check-write-context";
 import {
   ACTIVE_DEMAND_ESCALATION_MS,
   CUSTOMER_ENDPOINT_DELIVERY_HEADROOM_MS,
@@ -444,7 +445,14 @@ export async function runSearchCheck(
     let claimedScheduleVersion: number | null = null;
     const executeClaimedSearchCheck = async (lease: SearchCheckLease) => {
       claimedScheduleVersion = getClaimedSearchScheduleVersion(lease);
-      return checkSearch(searchId, run.id, lease);
+      return withSearchCheckWriteContext(
+        {
+          searchId,
+          scheduleVersion: lease.scheduleVersion,
+          leaseToken: lease.token,
+        },
+        () => checkSearch(searchId, run.id, lease),
+      );
     };
     const execution = existingLease
       ? {
