@@ -51,6 +51,7 @@ import { getDashboardMonitoringVerdict } from "@/lib/searches/dashboard-monitori
 import { listTeeSearchesForUser } from "@/lib/searches/service";
 import { SearchEmailDeliveryInProgressError } from "@/lib/users/pending-email";
 import { formatCourseDistance } from "@/lib/email/course-facts";
+import { getOwnerEmailState, type OwnerEmailState } from "@/lib/email/owner-email-state";
 import {
   buildCoursePriceEstimate,
   buildObservedBookableHoleSummary,
@@ -60,7 +61,6 @@ import {
 } from "@/lib/pricing/course-prices";
 
 type DashboardSearches = Awaited<ReturnType<typeof listTeeSearchesForUser>>;
-type OwnerEmailState = "SENT" | "PENDING" | "NOT_SENT" | "FIRST_CHECK_PENDING";
 
 export const dynamic = "force-dynamic";
 export const metadata: Metadata = {
@@ -98,7 +98,7 @@ export default async function DashboardPage() {
   const searches = await listTeeSearchesForUser(user.id);
   const [coursePhotos, ownerEmailStates] = await Promise.all([
     loadDashboardCoursePhotos(searches),
-    loadOwnerEmailStates(searches),
+    loadOwnerEmailStates(user.id, searches),
   ]);
 
   return (
@@ -850,21 +850,35 @@ function CourseImage({
   );
 }
 
-async function loadOwnerEmailStates(searches: DashboardSearches) {
+async function loadOwnerEmailStates(userId: string, searches: DashboardSearches) {
   const states = new Map<string, OwnerEmailState>();
   if (searches.length === 0) return states;
 
   const currentGenerationBySearch = new Map(
     searches.map((search) => [search.id, search.alertGeneration]),
   );
-  const deliveries = await prisma.searchEmailDelivery.groupBy({
-    by: ["teeSearchId", "alertGeneration", "status"],
-    where: {
-      teeSearchId: { in: searches.map((search) => search.id) },
-      isOwnerRecipient: true,
-      kind: { not: "DAILY" },
-    },
-  });
+  const [deliveries, generationClocks] = await Promise.all([
+    prisma.searchEmailDelivery.groupBy({
+      by: ["teeSearchId", "alertGeneration", "status"],
+      where: {
+        teeSearchId: { in: searches.map((search) => search.id) },
+        isOwnerRecipient: true,
+        kind: { not: "DAILY" },
+      },
+    }),
+    prisma.teeSearch.findMany({
+      where: { userId, id: { in: searches.map((search) => search.id) } },
+      select: {
+        id: true,
+        alertGeneration: true,
+        createdAt: true,
+        statusEmailSnapshot: true,
+      },
+    }),
+  ]);
+  const generationClockBySearch = new Map(
+    generationClocks.map((search) => [search.id, search]),
+  );
   const statusesBySearch = new Map<string, Set<string>>();
   for (const delivery of deliveries) {
     if (delivery.alertGeneration !== currentGenerationBySearch.get(delivery.teeSearchId)) {
@@ -877,15 +891,15 @@ async function loadOwnerEmailStates(searches: DashboardSearches) {
 
   for (const search of searches) {
     const statuses = statusesBySearch.get(search.id);
-    states.set(search.id,
-      statuses?.has("SENT")
-        ? "SENT"
-        : statuses && ["PENDING", "SENDING", "FAILED"].some((status) => statuses.has(status))
-          ? "PENDING"
-          : search.lastCheckedAt
-            ? "NOT_SENT"
-            : "FIRST_CHECK_PENDING",
-    );
+    const generationClock = generationClockBySearch.get(search.id);
+    states.set(search.id, getOwnerEmailState({
+      statuses,
+      status: search.status,
+      alertGeneration: search.alertGeneration,
+      createdAt: generationClock?.createdAt ?? search.createdAt,
+      statusEmailSnapshot: generationClock?.statusEmailSnapshot,
+      lastCheckedAt: search.lastCheckedAt,
+    }));
   }
   return states;
 }
