@@ -12,7 +12,10 @@ const prisma = vi.hoisted(() => ({
 
 vi.mock("@/lib/prisma", () => ({ prisma }));
 
-import { runSerializedCourseMonitoringWrite } from "./course-monitoring";
+import {
+  runSerializedCourseMonitoringWrite,
+  runSerializedCourseMonitoringWrites,
+} from "./course-monitoring";
 import { withSearchCheckWriteContext } from "./search-check-write-context";
 
 describe("search check result writes", () => {
@@ -28,5 +31,23 @@ describe("search check result writes", () => {
     )).rejects.toThrow("Search check lease changed");
     expect(write).toHaveBeenCalledOnce();
     expect(transaction.$queryRaw).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not hold the search row while a delivery callback renews its own authority", async () => {
+    transaction.$queryRaw.mockReset();
+    transaction.$queryRawUnsafe.mockReset().mockResolvedValue([{ locked: true }]);
+    const send = vi.fn(async () => "accepted");
+
+    await expect(withSearchCheckWriteContext(
+      { searchId: "search-1", scheduleVersion: 7, leaseToken: "lease-1" },
+      () => runSerializedCourseMonitoringWrites(
+        ["course-1"],
+        send,
+        { skipSearchCheckWriteFence: true, retryWorker: false },
+      ),
+    )).resolves.toBe("accepted");
+    expect(send).toHaveBeenCalledOnce();
+    expect(transaction.$queryRawUnsafe).toHaveBeenCalledOnce();
+    expect(transaction.$queryRaw).not.toHaveBeenCalled();
   });
 });

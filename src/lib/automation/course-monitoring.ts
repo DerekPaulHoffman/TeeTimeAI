@@ -12627,6 +12627,7 @@ export async function runSerializedCourseMonitoringWrites<T>(
     isolationLevel?: Prisma.TransactionIsolationLevel;
     timeoutMs?: number;
     retryWorker?: boolean;
+    skipSearchCheckWriteFence?: boolean;
   },
 ) {
   const uniqueCourseIds = [...new Set(courseIds)].sort();
@@ -12651,10 +12652,14 @@ export async function runSerializedCourseMonitoringWrites<T>(
               courseId,
             );
           }
-          await assertCurrentSearchCheckWrite(transaction);
+          if (!options?.skipSearchCheckWriteFence) {
+            await assertCurrentSearchCheckWrite(transaction);
+          }
           workerStarted = true;
           const result = await worker(transaction);
-          await assertCurrentSearchCheckWrite(transaction);
+          if (!options?.skipSearchCheckWriteFence) {
+            await assertCurrentSearchCheckWrite(transaction);
+          }
           return result;
         },
         {

@@ -1297,6 +1297,10 @@ async function runWithCurrentAvailabilityDeliverySourceFence<T>(input: {
     },
     {
       timeoutMs: MATCH_DELIVERY_SOURCE_FENCE_TIMEOUT_MS,
+      // The send callback renews the search and recipient authority in a
+      // separate transaction. Locking that same search row here deadlocks the
+      // callback; the claim and pre-send authorization own that fence.
+      skipSearchCheckWriteFence: true,
       // A provider request may have completed before a transaction error surfaces.
       // Let the durable outbox retry with its stable idempotency key instead of
       // replaying the external send inside this transaction helper.
