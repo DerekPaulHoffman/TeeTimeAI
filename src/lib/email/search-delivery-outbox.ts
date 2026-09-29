@@ -80,6 +80,9 @@ const DELIVERY_NOT_ACCEPTED_PREFIX = "DELIVERY_NOT_ACCEPTED:";
 const DELIVERY_OUTCOME_UNKNOWN_PREFIX = "DELIVERY_OUTCOME_UNKNOWN:";
 const STATUS_RECIPIENT_PRIOR_REACHED = "STATUS_RECIPIENT_PRIOR_REACHED";
 const STATUS_RECIPIENT_AMBIGUOUS_ATTEMPT = "STATUS_RECIPIENT_AMBIGUOUS_ATTEMPT";
+const STATUS_SETUP_REKEYED = "STATUS_SETUP_REKEYED";
+const STATUS_SETUP_OTHER_ATTEMPT = "STATUS_SETUP_OTHER_ATTEMPT";
+const STATUS_SETUP_MULTIPLE_ATTEMPTS = "STATUS_SETUP_MULTIPLE_ATTEMPTS";
 const MATCH_STALE_REKEY_BLOCKED = "MATCH_STALE_REKEY_BLOCKED";
 const MATCH_STALE_REKEYED = "MATCH_STALE_REKEYED";
 const MATCH_PROVIDER_SOURCE_SUPERSEDED = "MATCH_PROVIDER_SOURCE_SUPERSEDED";
@@ -208,6 +211,8 @@ function canSafelyRekeyDelivery(delivery: DeliveryState) {
     wasDeliveryNotAccepted(delivery) ||
     isDeliveryDryRun(delivery) ||
     delivery.lastError === STALE_STATUS_REPLACEMENT_PENDING ||
+    delivery.lastError === STATUS_SETUP_REKEYED ||
+    delivery.lastError === STATUS_SETUP_OTHER_ATTEMPT ||
     delivery.lastError === MATCH_STALE_REKEYED
   );
 }
@@ -220,6 +225,7 @@ function isAmbiguousDelivery(delivery: DeliveryState) {
     delivery.lastError === STALE_STATUS_REPLACEMENT_PENDING_AMBIGUOUS ||
     delivery.lastError === STALE_STATUS_REPLACED_AMBIGUOUS ||
     delivery.lastError === STATUS_RECIPIENT_AMBIGUOUS_ATTEMPT ||
+    delivery.lastError === STATUS_SETUP_MULTIPLE_ATTEMPTS ||
     delivery.lastError === MATCH_STALE_REKEY_BLOCKED ||
     delivery.lastError === DELIVERY_RECIPIENT_NO_LONGER_AUTHORIZED
   );
@@ -711,7 +717,11 @@ export async function prepareSearchEmailDeliveryGroup(input: {
           (delivery) =>
             delivery.status === "SUPPRESSED" &&
             !delivery.sentAt &&
-            delivery.attemptCount === 0,
+            delivery.attemptCount === 0 &&
+            delivery.lastError !== STATUS_RECIPIENT_PRIOR_REACHED &&
+            delivery.lastError !== STATUS_RECIPIENT_AMBIGUOUS_ATTEMPT &&
+            delivery.lastError !== STATUS_SETUP_REKEYED &&
+            delivery.lastError !== STATUS_SETUP_MULTIPLE_ATTEMPTS,
         )
         .map((delivery) => delivery.id);
       if (reactivatableIds.length > 0) {
@@ -2529,6 +2539,116 @@ async function claimSearchEmailDeliveryGroup(input: {
           where: groupWhere(input),
           orderBy: [{ isOwnerRecipient: "desc" }, { recipient: "asc" }],
         });
+      }
+
+      if (
+        input.kind === "SETUP" &&
+        isCurrentDeliverySearch(search, input, input.now)
+      ) {
+        // A changed report can create a second key before the first setup
+        // delivery settles. Arbitrate by recipient under the search lock so
+        // retries cannot send both keys for one alert generation.
+        const setupRows = await transaction.searchEmailDelivery.findMany({
+          where: {
+            teeSearchId: input.searchId,
+            alertGeneration: input.alertGeneration,
+            kind: "SETUP",
+          },
+          orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        });
+        let retiredSetupRecipient = false;
+        for (const delivery of deliveries) {
+          if (delivery.status === "SENT" || delivery.status === "SUPPRESSED") {
+            continue;
+          }
+          const recipientRows = setupRows.filter(
+            (row) =>
+              normalizeRecipient(row.recipient) ===
+              normalizeRecipient(delivery.recipient),
+          );
+          const reached = recipientRows.find(
+            (row) =>
+              row.status === "SENT" ||
+              row.lastError === STATUS_RECIPIENT_PRIOR_REACHED,
+          );
+          let lastError: string | null = null;
+          let sentAt: Date | null = null;
+          if (reached && reached.id !== delivery.id) {
+            lastError = STATUS_RECIPIENT_PRIOR_REACHED;
+            sentAt = reached.sentAt;
+          } else {
+            const ambiguousRows = recipientRows.filter(
+              (row) =>
+                row.lastError === STATUS_SETUP_MULTIPLE_ATTEMPTS ||
+                (row.lastError !== STATUS_SETUP_OTHER_ATTEMPT &&
+                  // A replacement sentinel did not itself contact the provider.
+                  !(
+                    row.status === "SUPPRESSED" &&
+                    row.attemptCount === 0 &&
+                    row.lastError === STATUS_RECIPIENT_AMBIGUOUS_ATTEMPT
+                  ) &&
+                  isAmbiguousDelivery(row)),
+            );
+            if (
+              ambiguousRows.some(
+                (row) => row.lastError === STATUS_SETUP_MULTIPLE_ATTEMPTS,
+              ) ||
+              new Set(ambiguousRows.map((row) => row.groupKey)).size > 1
+            ) {
+              // Distinct uncertain provider keys cannot safely be retried.
+              lastError = STATUS_SETUP_MULTIPLE_ATTEMPTS;
+            } else if (
+              ambiguousRows.length === 1 &&
+              ambiguousRows[0].id !== delivery.id
+            ) {
+              lastError = STATUS_SETUP_OTHER_ATTEMPT;
+            } else if (ambiguousRows.length === 0) {
+              const newest = recipientRows
+                .filter(
+                  (row) =>
+                    row.status !== "SUPPRESSED" ||
+                    row.lastError === STATUS_SETUP_OTHER_ATTEMPT,
+                )
+                .at(-1);
+              if (
+                newest &&
+                newest.id !== delivery.id &&
+                canSafelyRekeyDelivery(delivery)
+              ) {
+                lastError = STATUS_SETUP_REKEYED;
+              }
+            }
+          }
+          if (!lastError) {
+            continue;
+          }
+          const retired = await transaction.searchEmailDelivery.updateMany({
+            where: {
+              id: delivery.id,
+              status: { in: ["PENDING", "FAILED", "SENDING"] },
+            },
+            data: {
+              status: "SUPPRESSED",
+              claimToken: null,
+              claimExpiresAt: null,
+              nextAttemptAt: null,
+              sentAt,
+              lastError,
+            },
+          });
+          if (retired.count !== 1) {
+            throw new SearchEmailDeliveryInProgressError(
+              new Date(input.now.getTime() + DELIVERY_RETRY_BASE_MS),
+            );
+          }
+          retiredSetupRecipient = true;
+        }
+        if (retiredSetupRecipient) {
+          deliveries = await transaction.searchEmailDelivery.findMany({
+            where: groupWhere(input),
+            orderBy: [{ isOwnerRecipient: "desc" }, { recipient: "asc" }],
+          });
+        }
       }
 
       const groupFrozen = deliveries.some(

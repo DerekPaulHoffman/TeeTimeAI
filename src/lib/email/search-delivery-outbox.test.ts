@@ -1630,6 +1630,442 @@ describe("search email delivery outbox", () => {
     );
   });
 
+  const setupStatusPayload = {
+    schemaVersion: 2 as const,
+    checkedAt: now.toISOString(),
+    displayMatchIds: [],
+    statusSnapshot: [{ courseId: "course-1", state: "NO_MATCH" }],
+    statusReport: {
+      kind: "setup",
+      targetDate: "2026-07-16",
+      startTime: "07:00",
+      endTime: "10:00",
+      players: 2,
+      requestedLayoutHoles: null,
+      userTimeZone: "America/New_York",
+      courses: [
+        {
+          courseId: "course-1",
+          courseName: "Course",
+          timeZone: "America/New_York",
+          outcome: "NO_MATCH",
+          availableMatches: 0,
+        },
+      ],
+    },
+  };
+
+  function useCurrentSetupEvidence() {
+    mockedPrisma.courseProbe.findMany.mockResolvedValue([
+      { courseId: "course-1", outcome: "NO_MATCH", observedAt: now },
+    ] as never);
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([]);
+  }
+
+  it("does not send a second setup to a recipient already reached by another group", async () => {
+    useCurrentSetupEvidence();
+    const sentAt = new Date(now.getTime() - 60_000);
+    const older = delivery("older-setup", "owner@example.com", {
+      kind: "SETUP",
+      groupKey: "setup-older",
+      payload: setupStatusPayload,
+      status: "SENT",
+      attemptCount: 1,
+      sentAt,
+      createdAt: new Date(now.getTime() - 120_000),
+    });
+    const newer = delivery("newer-setup", "owner@example.com", {
+      kind: "SETUP",
+      groupKey: "setup-newer",
+      payload: setupStatusPayload,
+      createdAt: new Date(now.getTime() - 60_000),
+    });
+    mockedPrisma.searchEmailDelivery.findMany
+      .mockResolvedValueOnce([newer] as never)
+      .mockResolvedValueOnce([older, newer] as never)
+      .mockResolvedValueOnce([
+        {
+          ...newer,
+          status: "SUPPRESSED",
+          sentAt,
+          lastError: "STATUS_RECIPIENT_PRIOR_REACHED",
+        },
+      ] as never);
+    const send = vi.fn();
+
+    await expect(
+      drainSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        checkLeaseToken: "check-lease",
+        kind: "SETUP",
+        groupKey: "setup-newer",
+        send,
+        now: () => now,
+      }),
+    ).resolves.toEqual([{ id: "newer-setup", status: "SUPPRESSED" }]);
+    expect(send).not.toHaveBeenCalled();
+    expect(mockedPrisma.searchEmailDelivery.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: "newer-setup" }),
+        data: expect.objectContaining({
+          status: "SUPPRESSED",
+          sentAt,
+          lastError: "STATUS_RECIPIENT_PRIOR_REACHED",
+        }),
+      }),
+    );
+  });
+
+  it("rekeys a setup after an ambiguous attempt is later confirmed not accepted", async () => {
+    useCurrentSetupEvidence();
+    mockQueryRawForSearch({ ...currentSearch, additionalEmails: [] });
+    const older = delivery("older-setup", "owner@example.com", {
+      kind: "SETUP",
+      groupKey: "setup-older",
+      payload: setupStatusPayload,
+      status: "FAILED",
+      attemptCount: 1,
+      lastError: "DELIVERY_OUTCOME_UNKNOWN:timeout",
+      nextAttemptAt: new Date(now.getTime() - 1),
+      createdAt: new Date(now.getTime() - 120_000),
+    });
+    const newer = delivery("newer-setup", "owner@example.com", {
+      kind: "SETUP",
+      groupKey: "setup-newer",
+      payload: setupStatusPayload,
+      createdAt: new Date(now.getTime() - 60_000),
+    });
+    const blockedNewer = {
+      ...newer,
+      status: "SUPPRESSED",
+      lastError: "STATUS_SETUP_OTHER_ATTEMPT",
+    };
+    const rejectedOlder = {
+      ...older,
+      lastError: "DELIVERY_NOT_ACCEPTED:provider rejected",
+    };
+    const rekeyedOlder = {
+      ...rejectedOlder,
+      status: "SUPPRESSED",
+      lastError: "STATUS_SETUP_REKEYED",
+      nextAttemptAt: null,
+    };
+    const sentNewer = { ...newer, status: "SENT", sentAt: now };
+    mockedPrisma.searchEmailDelivery.findMany
+      // The newer key must wait while the older provider outcome is unknown.
+      .mockResolvedValueOnce([newer] as never)
+      .mockResolvedValueOnce([older, newer] as never)
+      .mockResolvedValueOnce([blockedNewer] as never)
+      // Retry visits the older key before preparing the newer one.
+      .mockResolvedValueOnce([rejectedOlder] as never)
+      .mockResolvedValueOnce([rejectedOlder, blockedNewer] as never)
+      .mockResolvedValueOnce([rekeyedOlder] as never)
+      // Preparing the same newer key reactivates it after confirmed rejection.
+      .mockResolvedValueOnce([blockedNewer] as never)
+      .mockResolvedValueOnce([newer] as never)
+      // Only the newer key may reach transport.
+      .mockResolvedValueOnce([newer] as never)
+      .mockResolvedValueOnce([rekeyedOlder, newer] as never)
+      .mockResolvedValueOnce([sentNewer] as never);
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+
+    await drainSearchEmailDeliveryGroup({
+      searchId: "search-1",
+      alertGeneration: 3,
+      checkLeaseToken: "check-lease",
+      kind: "SETUP",
+      groupKey: "setup-newer",
+      send,
+      now: () => now,
+    });
+    expect(send).not.toHaveBeenCalled();
+    await drainSearchEmailDeliveryGroup({
+      searchId: "search-1",
+      alertGeneration: 3,
+      checkLeaseToken: "check-lease",
+      kind: "SETUP",
+      groupKey: "setup-older",
+      send,
+      now: () => now,
+    });
+    expect(send).not.toHaveBeenCalled();
+    await expect(
+      prepareSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        checkLeaseToken: "check-lease",
+        kind: "SETUP",
+        groupKey: "setup-newer",
+        recipients: ["owner@example.com"],
+        ownerRecipient: "owner@example.com",
+        payload: setupStatusPayload,
+        now,
+      }),
+    ).resolves.toEqual(expect.objectContaining({ prepared: true }));
+    await drainSearchEmailDeliveryGroup({
+      searchId: "search-1",
+      alertGeneration: 3,
+      checkLeaseToken: "check-lease",
+      kind: "SETUP",
+      groupKey: "setup-newer",
+      send,
+      now: () => now,
+    });
+
+    expect(send).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({ payload: setupStatusPayload }),
+    );
+    expect(mockedPrisma.searchEmailDelivery.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: "older-setup" }),
+        data: expect.objectContaining({
+          status: "SUPPRESSED",
+          lastError: "STATUS_SETUP_REKEYED",
+        }),
+      }),
+    );
+  });
+
+  it("retries only the original setup key while its provider outcome is ambiguous", async () => {
+    useCurrentSetupEvidence();
+    const older = delivery("older-setup", "owner@example.com", {
+      kind: "SETUP",
+      groupKey: "setup-older",
+      payload: setupStatusPayload,
+      status: "FAILED",
+      attemptCount: 1,
+      lastError: "DELIVERY_OUTCOME_UNKNOWN:timeout",
+      nextAttemptAt: new Date(now.getTime() - 1),
+      createdAt: new Date(now.getTime() - 120_000),
+    });
+    const newer = delivery("newer-setup", "owner@example.com", {
+      kind: "SETUP",
+      groupKey: "setup-newer",
+      payload: setupStatusPayload,
+      createdAt: new Date(now.getTime() - 60_000),
+    });
+    const blockedNewer = {
+      ...newer,
+      status: "SUPPRESSED",
+      lastError: "STATUS_SETUP_OTHER_ATTEMPT",
+    };
+    mockedPrisma.searchEmailDelivery.findMany
+      .mockResolvedValueOnce([newer] as never)
+      .mockResolvedValueOnce([older, newer] as never)
+      .mockResolvedValueOnce([blockedNewer] as never)
+      .mockResolvedValueOnce([older] as never)
+      .mockResolvedValueOnce([older, blockedNewer] as never)
+      .mockResolvedValueOnce([{ ...older, status: "SENT", sentAt: now }] as never);
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+
+    await drainSearchEmailDeliveryGroup({
+      searchId: "search-1",
+      alertGeneration: 3,
+      checkLeaseToken: "check-lease",
+      kind: "SETUP",
+      groupKey: "setup-newer",
+      send,
+      now: () => now,
+    });
+    await drainSearchEmailDeliveryGroup({
+      searchId: "search-1",
+      alertGeneration: 3,
+      checkLeaseToken: "check-lease",
+      kind: "SETUP",
+      groupKey: "setup-older",
+      send,
+      now: () => now,
+    });
+
+    expect(send).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({ payload: setupStatusPayload }),
+    );
+    expect(mockedPrisma.searchEmailDelivery.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: "newer-setup" }),
+        data: expect.objectContaining({
+          status: "SUPPRESSED",
+          lastError: "STATUS_SETUP_OTHER_ATTEMPT",
+        }),
+      }),
+    );
+  });
+
+  it("fails closed when two setup keys have uncertain provider outcomes", async () => {
+    useCurrentSetupEvidence();
+    const older = delivery("older-setup", "owner@example.com", {
+      kind: "SETUP",
+      groupKey: "setup-older",
+      payload: setupStatusPayload,
+      status: "FAILED",
+      attemptCount: 1,
+      lastError: "DELIVERY_OUTCOME_UNKNOWN:timeout",
+      createdAt: new Date(now.getTime() - 120_000),
+    });
+    const newer = delivery("newer-setup", "owner@example.com", {
+      kind: "SETUP",
+      groupKey: "setup-newer",
+      payload: setupStatusPayload,
+      status: "FAILED",
+      attemptCount: 1,
+      lastError: "DELIVERY_OUTCOME_UNKNOWN:timeout",
+      createdAt: new Date(now.getTime() - 60_000),
+    });
+    const blockedOlder = {
+      ...older,
+      status: "SUPPRESSED",
+      lastError: "STATUS_SETUP_MULTIPLE_ATTEMPTS",
+    };
+    const blockedNewer = {
+      ...newer,
+      status: "SUPPRESSED",
+      lastError: "STATUS_SETUP_MULTIPLE_ATTEMPTS",
+    };
+    mockedPrisma.searchEmailDelivery.findMany
+      .mockResolvedValueOnce([older] as never)
+      .mockResolvedValueOnce([older, newer] as never)
+      .mockResolvedValueOnce([blockedOlder] as never)
+      .mockResolvedValueOnce([newer] as never)
+      .mockResolvedValueOnce([blockedOlder, newer] as never)
+      .mockResolvedValueOnce([blockedNewer] as never);
+    const send = vi.fn();
+
+    for (const groupKey of ["setup-older", "setup-newer"]) {
+      await drainSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        checkLeaseToken: "check-lease",
+        kind: "SETUP",
+        groupKey,
+        send,
+        now: () => now,
+      });
+    }
+    expect(send).not.toHaveBeenCalled();
+    expect(mockedPrisma.searchEmailDelivery.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          lastError: "STATUS_SETUP_MULTIPLE_ATTEMPTS",
+        }),
+      }),
+    );
+  });
+
+  it("arbitrates setup recipients independently across groups", async () => {
+    useCurrentSetupEvidence();
+    const sentAt = new Date(now.getTime() - 90_000);
+    const olderOwner = delivery("older-owner", "owner@example.com", {
+      kind: "SETUP",
+      groupKey: "setup-older",
+      payload: setupStatusPayload,
+      status: "SENT",
+      attemptCount: 1,
+      sentAt,
+      createdAt: new Date(now.getTime() - 120_000),
+    });
+    const olderFriend = delivery("older-friend", "friend@example.com", {
+      kind: "SETUP",
+      groupKey: "setup-older",
+      payload: setupStatusPayload,
+      status: "FAILED",
+      attemptCount: 1,
+      lastError: "DELIVERY_NOT_ACCEPTED:provider rejected",
+      createdAt: new Date(now.getTime() - 120_000),
+    });
+    const newerOwner = delivery("newer-owner", "owner@example.com", {
+      kind: "SETUP",
+      groupKey: "setup-newer",
+      payload: setupStatusPayload,
+      createdAt: new Date(now.getTime() - 60_000),
+    });
+    const newerFriend = delivery("newer-friend", "friend@example.com", {
+      kind: "SETUP",
+      groupKey: "setup-newer",
+      payload: setupStatusPayload,
+      createdAt: new Date(now.getTime() - 60_000),
+    });
+    const blockedOwner = {
+      ...newerOwner,
+      status: "SUPPRESSED",
+      sentAt,
+      lastError: "STATUS_RECIPIENT_PRIOR_REACHED",
+    };
+    mockedPrisma.searchEmailDelivery.findMany
+      .mockResolvedValueOnce([newerOwner, newerFriend] as never)
+      .mockResolvedValueOnce([
+        olderOwner, olderFriend, newerOwner, newerFriend,
+      ] as never)
+      .mockResolvedValueOnce([blockedOwner, newerFriend] as never)
+      .mockResolvedValueOnce([
+        blockedOwner, { ...newerFriend, status: "SENT", sentAt: now },
+      ] as never);
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+
+    await drainSearchEmailDeliveryGroup({
+      searchId: "search-1",
+      alertGeneration: 3,
+      checkLeaseToken: "check-lease",
+      kind: "SETUP",
+      groupKey: "setup-newer",
+      send,
+      now: () => now,
+    });
+    expect(send).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({ recipient: "friend@example.com" }),
+    );
+  });
+
+  it.each([
+    { marker: "STATUS_SETUP_REKEYED", attemptCount: 1 },
+    { marker: "STATUS_SETUP_OTHER_ATTEMPT", attemptCount: 0 },
+  ])("does not mistake a $marker setup sentinel for an ambiguous provider attempt", async ({ marker, attemptCount }) => {
+    mockQueryRawForSearch({ ...currentSearch, additionalEmails: [] });
+    const retired = delivery("older-setup", "owner@example.com", {
+      kind: "SETUP",
+      groupKey: "setup-older",
+      payload: setupStatusPayload,
+      status: "SUPPRESSED",
+      attemptCount,
+      lastError: marker,
+      createdAt: new Date(now.getTime() - 120_000),
+    });
+    const replacement = delivery("replacement-setup", "owner@example.com", {
+      kind: "SETUP",
+      groupKey: "setup-replacement",
+      payload: setupStatusPayload,
+      createdAt: new Date(now.getTime() - 60_000),
+    });
+    mockedPrisma.searchEmailDelivery.findMany
+      .mockResolvedValueOnce([] as never)
+      .mockResolvedValueOnce([retired] as never)
+      .mockResolvedValueOnce([replacement] as never);
+    mockedPrisma.searchEmailDelivery.create.mockResolvedValue(replacement as never);
+
+    await expect(
+      prepareSearchEmailDeliveryGroup({
+        searchId: "search-1",
+        alertGeneration: 3,
+        checkLeaseToken: "check-lease",
+        kind: "SETUP",
+        groupKey: "setup-replacement",
+        recipients: ["owner@example.com"],
+        ownerRecipient: "owner@example.com",
+        payload: setupStatusPayload,
+        supersededStatusGroups: [
+          { kind: "SETUP", groupKey: "setup-older" },
+        ],
+        now,
+      }),
+    ).resolves.toEqual(expect.objectContaining({ prepared: true }));
+    expect(
+      mockedPrisma.searchEmailDelivery.create.mock.calls[0][0].data.status,
+    ).toBeUndefined();
+  });
+
   it.each([
     {
       finalState: "FINAL_MANUAL",
@@ -4162,6 +4598,11 @@ describe("search email delivery outbox", () => {
       });
       mockedPrisma.searchEmailDelivery.findMany
         .mockResolvedValueOnce([owner] as never)
+        .mockResolvedValueOnce(
+          (kind === "SETUP" ? [owner] : [
+            { ...owner, status: "SUPPRESSED", nextAttemptAt: null },
+          ]) as never,
+        )
         .mockResolvedValueOnce([
           { ...owner, status: "SUPPRESSED", nextAttemptAt: null },
         ] as never);
@@ -4216,6 +4657,7 @@ describe("search email delivery outbox", () => {
       payload: statusPayload,
     });
     mockedPrisma.searchEmailDelivery.findMany
+      .mockResolvedValueOnce([owner] as never)
       .mockResolvedValueOnce([owner] as never)
       .mockResolvedValueOnce([
         { ...owner, status: "SENT", sentAt: now },
@@ -4587,6 +5029,7 @@ describe("search email delivery outbox", () => {
     });
     mockedPrisma.searchEmailDelivery.findMany
       .mockResolvedValueOnce([owner] as never)
+      .mockResolvedValueOnce([owner] as never)
       .mockResolvedValueOnce([{
         ...owner,
         status: expectedStatus,
@@ -4685,6 +5128,7 @@ describe("search email delivery outbox", () => {
       payload: statusPayload,
     });
     mockedPrisma.searchEmailDelivery.findMany
+      .mockResolvedValueOnce([owner] as never)
       .mockResolvedValueOnce([owner] as never)
       .mockResolvedValueOnce([
         { ...owner, status: sends ? "SENT" : "SUPPRESSED", sentAt: sends ? now : null },
