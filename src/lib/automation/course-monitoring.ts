@@ -4358,8 +4358,24 @@ export async function reconcileCourseMonitoringDeadline(input: {
         });
       }
 
+      const recoveryFenceAt = [
+        incident.lastSeenAt,
+        incident.confirmedAt,
+        status.lastSuccessfulAt,
+        status.lastFailureAt,
+      ].reduce<Date | null>((latest, value) => {
+        if (!(value instanceof Date) || !Number.isFinite(value.getTime())) {
+          return latest;
+        }
+        return !latest || value > latest ? value : latest;
+      }, null);
       const authoritativeResolution =
-        status.state === "HEALTHY"
+        status.state === "HEALTHY" &&
+        status.lastSuccessfulAt &&
+        status.lastSuccessfulAt <= input.now &&
+        status.lastSuccessfulAt > incident.lastSeenAt &&
+        (!incident.confirmedAt || status.lastSuccessfulAt > incident.confirmedAt) &&
+        (!status.lastFailureAt || status.lastSuccessfulAt > status.lastFailureAt)
           ? ("MONITORING_RESTORED" as const)
           : status.state === "FINAL_MANUAL"
             ? ("DIRECT_BOOKING_CLASSIFIED" as const)
@@ -4421,7 +4437,7 @@ export async function reconcileCourseMonitoringDeadline(input: {
           courseId: input.courseId,
           outcome: { in: ["MATCH_FOUND", "NO_MATCH"] },
           observedAt: {
-            gt: incident.lastSeenAt,
+            gt: recoveryFenceAt ?? incident.lastSeenAt,
             lte: input.now,
           },
           teeSearch: {
@@ -4436,7 +4452,12 @@ export async function reconcileCourseMonitoringDeadline(input: {
           runtimeVersion: true,
         },
       });
-      if (freshSuccessProbe) {
+      if (
+        freshSuccessProbe &&
+        recoveryFenceAt &&
+        freshSuccessProbe.observedAt > recoveryFenceAt &&
+        freshSuccessProbe.observedAt <= input.now
+      ) {
         if (staleBatchNeedsEndpointReconcile && activeBatch) {
           return reconcileStaleBatchOwnershipAtEndpoint(transaction, {
             batch: activeBatch,
@@ -12974,7 +12995,8 @@ export function selectSearchWorkflowMonitoringRetryAt(input: {
     if (
       incident.status === "AUTO_INVESTIGATING" &&
       !incident.humanReviewReason &&
-      incident.escalationDeadlineAt
+      incident.escalationDeadlineAt &&
+      incident.escalationDeadlineAt > input.now
     ) {
       candidates.push(incident.escalationDeadlineAt);
     }

@@ -232,6 +232,31 @@ describe("course monitoring lifecycle", () => {
     ).toEqual(escalationDeadlineAt);
   });
 
+  it("does not schedule another workflow from an already consumed endpoint deadline", () => {
+    const now = new Date("2026-07-27T12:30:00.000Z");
+    expect(
+      selectSearchWorkflowMonitoringRetryAt({
+        statuses: [
+          {
+            courseId: "deadline-course",
+            state: "AUTO_INVESTIGATING",
+            nextAutomaticAttemptAt: null,
+          },
+        ],
+        incidents: [
+          {
+            courseId: "deadline-course",
+            status: "AUTO_INVESTIGATING",
+            humanReviewReason: null,
+            escalationDeadlineAt: new Date("2026-07-27T12:28:00.000Z"),
+          },
+        ],
+        transientRetryCourseIds: ["deadline-course"],
+        now,
+      }),
+    ).toBeNull();
+  });
+
   it("sleeps only when every course is in a final state without revalidation", () => {
     expect(
       shouldSleepTechnicalFinalSearch([
