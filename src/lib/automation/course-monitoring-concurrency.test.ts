@@ -9660,6 +9660,57 @@ describe("course monitoring write serialization", () => {
     },
   );
 
+  it.each([
+    ["STARTED", "TYPED_PROVIDER_ADAPTER", "PROVIDER_RESPONSE"],
+    ["SUCCEEDED", "TYPED_PROVIDER_ADAPTER", "PROVIDER_RESPONSE"],
+    ["STARTED", "LOCAL_READER", "LOCAL_READER_RESULT"],
+    ["SUCCEEDED", "LOCAL_READER", "LOCAL_READER_RESULT"],
+  ] as const)(
+    "ignores a stale %s proof from %s after monitoring restores its incident",
+    async (transition, readPath, evidenceKind) => {
+      prismaMocks.$transaction.mockReset();
+      prismaMocks.$transaction.mockImplementation(async (worker) => worker(transactionMocks));
+      transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
+        id: "incident-1", cycle: 2, revision: 9, status: "RESOLVED",
+        resolution: "MONITORING_RESTORED", attemptLedger: null,
+        confirmedAt: null, firstSeenAt: null, lastSeenAt: null,
+      });
+      transactionMocks.courseMonitoringStatus.findUnique.mockResolvedValue({ lastFailureAt: null });
+
+      await expect(recordCourseMonitoringPlaybookTransition({
+        courseId: "course-1", incidentId: "incident-1", expectedIncidentCycle: 2,
+        source: "SEARCH_WORKFLOW", stage: "TYPED_ADAPTER", transition,
+        readPath, evidenceKind,
+        failureFingerprint: "TYPED_ADAPTER:ATTEMPT", runtimeVersion: "release-sha",
+        now: new Date("2026-07-27T15:55:00.000Z"),
+      })).resolves.toBeNull();
+      expect(transactionMocks.courseSupportIncident.updateMany).not.toHaveBeenCalled();
+      expect(transactionMocks.courseMonitoringEvent.create).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["another resolution", "SOURCE_UNVERIFIED", "SEARCH_WORKFLOW"],
+    ["another writer", "MONITORING_RESTORED", "COURSE_SUPPORT_RESPONDER"],
+  ] as const)("keeps the resolved-incident proof fence for %s", async (_case, resolution, source) => {
+    prismaMocks.$transaction.mockReset();
+    prismaMocks.$transaction.mockImplementation(async (worker) => worker(transactionMocks));
+    transactionMocks.courseSupportIncident.findUnique.mockResolvedValue({
+      id: "incident-1", cycle: 2, revision: 9, status: "RESOLVED",
+      resolution, attemptLedger: null,
+      confirmedAt: null, firstSeenAt: null, lastSeenAt: null,
+    });
+
+    await expect(recordCourseMonitoringPlaybookTransition({
+      courseId: "course-1", incidentId: "incident-1", expectedIncidentCycle: 2,
+      source, stage: "TYPED_ADAPTER", transition: "STARTED",
+      readPath: "TYPED_PROVIDER_ADAPTER", evidenceKind: "PROVIDER_RESPONSE",
+      failureFingerprint: "TYPED_ADAPTER:ATTEMPT", runtimeVersion: "release-sha",
+    })).rejects.toThrow("A resolved incident cannot receive automated playbook proof.");
+    expect(transactionMocks.courseSupportIncident.updateMany).not.toHaveBeenCalled();
+    expect(transactionMocks.courseMonitoringEvent.create).not.toHaveBeenCalled();
+  });
+
   it("appends playbook proof without consuming the legacy responder attempt ladder", async () => {
     prismaMocks.$transaction.mockReset();
     prismaMocks.$transaction.mockImplementation(async (worker) =>
