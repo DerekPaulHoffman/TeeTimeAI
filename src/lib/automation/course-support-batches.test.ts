@@ -11135,6 +11135,255 @@ describe("course-support claim demand fencing", () => {
     },
   );
 
+  it("claims one owned continuation for an unconfirmed active alert whose reader request timed out", async () => {
+    const preferences = [{
+      teeSearch: {
+        endTime: "23:59",
+        id: "active-public-search",
+        date: new Date("2026-07-22T00:00:00.000Z"),
+      },
+    }];
+    const incident = {
+      ...incidentRecord({ engineeringOnly: false, preferences }),
+      confirmedAt: null,
+      providerFamilyKey: "EZLINKS",
+      attemptLedger: localReaderStartedAttemptLedger(),
+      course: {
+        ...incidentRecord({ engineeringOnly: false, preferences }).course,
+        isPublic: true,
+        detectedPlatform: "CUSTOM",
+        providerFamilyKey: "EZLINKS",
+        detectedBookingUrl: "https://public-course.ezlinksgolf.com/",
+        website: "https://public-course.example/",
+        bookingMetadata: null,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "NEEDS_REVIEW",
+      },
+    };
+    const source = targetedRetryIncidentRecord({
+      candidate: incident,
+      retryBatch: retryBatchEvidence(incident),
+      preferences,
+    }).batchIncidents[0];
+    const request = {
+      status: "STALE",
+      outcome: "FETCH_FAILED",
+      evidence: { providerExecution: false },
+    };
+    const withSource = {
+      ...incident,
+      batchIncidents: [{ ...source, verificationRequests: [request] }],
+    };
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([withSource])
+      .mockResolvedValueOnce([withSource]);
+
+    await expect(claimCourseSupportBatch({
+      ownerThreadId: "owner-thread",
+      branch: "automation/course-support-20260721-013700",
+      baseSha,
+      now: new Date("2026-07-21T01:37:00.000Z"),
+    })).resolves.toMatchObject({ outcome: "ready", incidentCount: 1 });
+    const summary = prismaMocks.batchCreate.mock.calls[0]?.[0]?.data?.summary;
+    expect(summary?.remediation).toMatchObject({
+      workMode: "ADVANCE_DISCOVERY",
+      playbookStage: "LOCAL_READER",
+      reason: "STARTED_LOCAL_READER_CONTINUATION",
+      retryBudget: {
+        maximumAttempts: 1,
+        attemptsCompleted: 0,
+        attemptsRemaining: 1,
+        exhausted: false,
+      },
+    });
+  });
+
+  it.each([
+    ["exact short-retry marker", "VALID", 1],
+    ["missing marker", "MISSING", 1],
+    ["older same-cycle marker", "OLD", 1],
+    ["two spent reader windows", "VALID", 2],
+  ] as const)("admits a final reader window only with %s", async (_label, markerState, spentWindows) => {
+    const preferences = [{
+      teeSearch: {
+        endTime: "23:59",
+        id: "active-public-search",
+        date: new Date("2026-07-22T00:00:00.000Z"),
+      },
+    }];
+    const incident = {
+      ...incidentRecord({ engineeringOnly: false, preferences }),
+      confirmedAt: null,
+      providerFamilyKey: "EZLINKS",
+      attemptLedger: localReaderStartedAttemptLedger(),
+      course: {
+        ...incidentRecord({ engineeringOnly: false, preferences }).course,
+        isPublic: true,
+        detectedPlatform: "CUSTOM",
+        providerFamilyKey: "EZLINKS",
+        detectedBookingUrl: "https://public-course.ezlinksgolf.com/",
+        website: "https://public-course.example/",
+        bookingMetadata: null,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "NEEDS_REVIEW",
+      },
+    };
+    const source = targetedRetryIncidentRecord({
+      candidate: incident,
+      retryBatch: retryBatchEvidence(incident),
+      preferences,
+    }).batchIncidents[0];
+    const courseRef = createHash("sha256")
+      .update(incident.courseId).digest("hex").slice(0, 24);
+    const toolingFailureFingerprint = "e".repeat(64);
+    const firstContinuation = {
+      ...source,
+      proofSnapshot: null,
+      batch: {
+        ...source.batch,
+        summary: {
+          remediation: {
+            workMode: "ADVANCE_DISCOVERY",
+            strategyAction: "REPAIR_PROVIDER_ADAPTER",
+            playbookStage: "LOCAL_READER",
+            reason: "STARTED_LOCAL_READER_CONTINUATION",
+            attempts: [{ courseRef, reason: "STARTED_LOCAL_READER_CONTINUATION" }],
+          },
+          closeout: {
+            verificationWatchMode: "EARLY_RETRY",
+            summary: { verificationWatch: {
+              settled: false,
+              stopped: true,
+              stopMode: "EARLY_RETRY",
+              passCount: 0,
+              failureCode: "BROWSER_STAGE_TIMEOUT",
+              toolingFailureFingerprint,
+            } },
+          },
+        },
+      },
+    };
+    const marker = {
+      incidentId: incident.id,
+      idempotencyKey: buildCourseSupportVerificationWatchShortRetryIdempotencyKey({
+        incidentId: incident.id, cycle: incident.cycle,
+      }),
+      eventType: "TOOLING_INCIDENT",
+      source: "COURSE_SUPPORT_RESPONDER",
+      occurredAt: markerState === "OLD"
+        ? new Date(source.batch.completedAt.getTime() - 60_000)
+        : source.batch.completedAt,
+      audit: {
+        schemaVersion: 1,
+        failureCode: "BROWSER_STAGE_TIMEOUT",
+        toolingFailureFingerprint,
+        attempt: 1,
+        maximumAttempts: 1,
+        oneShot: true,
+        cycle: incident.cycle,
+      },
+    };
+    const withSource = {
+      ...incident,
+      batchIncidents: [
+        firstContinuation,
+        ...(spentWindows === 2 ? [{
+          ...firstContinuation,
+          id: "older-reader-continuation",
+          batch: { ...firstContinuation.batch, completedAt: new Date(
+            source.batch.completedAt.getTime() - 120_000,
+          ) },
+        }] : []),
+      ],
+    };
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([withSource])
+      .mockResolvedValueOnce([withSource]);
+    if (markerState !== "MISSING") {
+      prismaMocks.monitoringEventFindMany.mockResolvedValue([marker]);
+      prismaMocks.monitoringEventFindUnique.mockResolvedValue(marker);
+    }
+    prismaMocks.transaction.mockImplementation(async (worker) =>
+      worker(monitoringTransactionClient),
+    );
+
+    const result = await claimCourseSupportBatch({
+      ownerThreadId: "owner-thread",
+      branch: "automation/course-support-20260721-013700",
+      baseSha,
+      now: new Date("2026-07-21T01:37:00.000Z"),
+    });
+    if (markerState === "VALID" && spentWindows === 1) {
+      expect(result).toMatchObject({ outcome: "ready", incidentCount: 1 });
+      expect(prismaMocks.batchCreate.mock.calls[0]?.[0]?.data?.summary?.remediation)
+        .toMatchObject({
+          reason: "STARTED_LOCAL_READER_CONTINUATION",
+          retryBudget: {
+            maximumAttempts: 2,
+            attemptsCompleted: 1,
+            attemptsRemaining: 1,
+            exhausted: false,
+          },
+        });
+    } else {
+      expect(result).toMatchObject({ outcome: "no_due_work" });
+      expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+    }
+  });
+
+  it.each([
+    ["provider execution", { providerExecution: true }, null],
+    ["unsettled source", { providerExecution: false }, "VERIFYING"],
+    ["spent continuation", { providerExecution: false }, "RECEIPT"],
+  ] as const)("does not reclaim a reader STARTED stage after %s", async (_label, evidence, state) => {
+    const preferences = [{
+      teeSearch: {
+        endTime: "23:59",
+        id: "active-public-search",
+        date: new Date("2026-07-22T00:00:00.000Z"),
+      },
+    }];
+    const incident = {
+      ...incidentRecord({ engineeringOnly: false, preferences }),
+      confirmedAt: null,
+      attemptLedger: localReaderStartedAttemptLedger(),
+    };
+    const source = targetedRetryIncidentRecord({
+      candidate: incident,
+      retryBatch: retryBatchEvidence(incident),
+      preferences,
+    }).batchIncidents[0];
+    const withSource = {
+      ...incident,
+      batchIncidents: [{
+        ...source,
+        batch: {
+          ...source.batch,
+          status: state === "VERIFYING" ? "VERIFYING" : "RETRYABLE_FAILED",
+          summary: state === "RECEIPT" ? {
+            remediation: { attempts: [{
+              courseRef: createHash("sha256").update(incident.courseId).digest("hex").slice(0, 24),
+              reason: "STARTED_LOCAL_READER_CONTINUATION",
+            }] },
+          } : source.batch.summary,
+        },
+        verificationRequests: [{
+          status: "STALE",
+          outcome: "FETCH_FAILED",
+          evidence,
+        }],
+      }],
+    };
+    prismaMocks.supportIncidentFindMany.mockResolvedValueOnce([withSource]);
+    await expect(claimCourseSupportBatch({
+      ownerThreadId: "owner-thread",
+      branch: "automation/course-support-20260721-013700",
+      baseSha,
+      now: new Date("2026-07-21T01:37:00.000Z"),
+    })).resolves.toMatchObject({ outcome: "no_due_work" });
+    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+  });
+
   it("does not spend the owned browser-stage deadline during claim", async () => {
     const claimedAt = new Date("2026-07-21T01:37:00.000Z");
     const expiredDeadline = new Date("2026-07-21T01:30:00.000Z");
@@ -23294,6 +23543,261 @@ describe("detached verification atomic batch fences", () => {
     };
   }
 
+  function readerContinuationCloseoutFixture(attemptsCompleted = 0) {
+    const batch = closeoutBatch("PENDING", null);
+    const entry = batch.incidents[0];
+    const courseRef = createHash("sha256")
+      .update(entry.courseId)
+      .digest("hex")
+      .slice(0, 24);
+    const approach = {
+      workMode: "ADVANCE_DISCOVERY",
+      strategyAction: "REPAIR_PROVIDER_ADAPTER",
+      playbookStage: "LOCAL_READER",
+    };
+    const canonicalFailureFingerprint = buildProviderFailureFingerprint({
+      providerFamilyKey: "EZLINKS",
+      failureClass: "UNSUPPORTED_FAMILY",
+      operation: "AVAILABILITY",
+    });
+    Object.assign(batch, {
+      baseSha: releaseSha,
+      providerFamilyKey: "EZLINKS",
+    });
+    Object.assign(entry, {
+      proofSnapshot: null,
+      verifiedAt: null,
+      verifiedIncidentUpdatedAt: null,
+    });
+    Object.assign(entry.course, {
+      providerFamilyKey: "EZLINKS",
+      detectedPlatform: "CUSTOM",
+      detectedBookingUrl: "https://public-course.ezlinksgolf.com/",
+      bookingMetadata: null,
+    });
+    Object.assign(entry.incident, {
+      confirmedAt: null,
+      providerFamilyKey: "EZLINKS",
+      failureClass: "UNSUPPORTED_FAMILY",
+      failureFingerprint: canonicalFailureFingerprint,
+      activeRealSearchCount: 1,
+      attemptLedger: localReaderStartedAttemptLedger(1),
+    });
+    batch.summary = {
+      ...batch.summary,
+      remediation: {
+        ...approach,
+        allowUnchangedRuntime: true,
+        requiresImplementationPath: false,
+        reason: "STARTED_LOCAL_READER_CONTINUATION",
+        retryBudget: {
+          maximumAttempts: attemptsCompleted + 1,
+          attemptsCompleted,
+          attemptsRemaining: 1,
+          exhausted: false,
+        },
+        attempts: [{
+          courseRef,
+          providerSnapshotFingerprint: providerFingerprint,
+          failureFingerprint: canonicalFailureFingerprint,
+          runtimeVersion: releaseSha,
+          activeRealSearchCount: 1,
+          playbookEventCountAtClaim:
+            parseAutomationPlaybookLedger(entry.incident.attemptLedger)!.events.length,
+          reason: "STARTED_LOCAL_READER_CONTINUATION",
+          retryBudget: {
+            maximumAttempts: attemptsCompleted + 1,
+            attemptsCompleted,
+            attemptsRemaining: 1,
+            exhausted: false,
+          },
+          approach,
+          actionPlan: {
+            schemaVersion: 1,
+            primaryAction: "VERIFY_CURRENT_RUNTIME",
+            allowedActions: ["VERIFY_CURRENT_RUNTIME"],
+            route: approach,
+          },
+        }],
+      },
+    };
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.transaction.mockImplementation(async (worker) =>
+      worker(monitoringTransactionClient),
+    );
+    return { batch, entry, canonicalFailureFingerprint };
+  }
+
+  it("parks a spent reader continuation without a signed result as an orchestration stall", async () => {
+    const { batch, entry, canonicalFailureFingerprint } =
+      readerContinuationCloseoutFixture();
+    Object.assign(entry, {
+      result: "RETRY_SCHEDULED",
+      proofSnapshot: {
+        ...detachedFailureProof(),
+        failureClass: "HTTP_5XX",
+        providerExecution: false,
+      },
+    });
+
+    await expect(closeoutCourseSupportBatch({
+      batchId: batch.id,
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      verificationWatchMode: "WATCH_SETTLED",
+      now,
+    })).resolves.toMatchObject({
+      needsHumanCount: 1,
+      automationStalledCount: 1,
+      durableCloseoutRecorded: true,
+    });
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "NEEDS_HUMAN",
+          activeBatchId: null,
+          nextAttemptAt: null,
+          humanReviewReason: "AUTOMATION_STALLED",
+        }),
+      }),
+    );
+    const incidentWrite = prismaMocks.supportIncidentUpdateMany.mock.calls.at(-1)![0].data;
+    expect(incidentWrite).not.toHaveProperty("failureClass");
+    expect(incidentWrite).not.toHaveProperty("failureFingerprint");
+    const persistedSummary = prismaMocks.batchUpdateMany.mock.calls
+      .map(([write]) => write.data.summary)
+      .find((summary) => summary?.closeout);
+    expect(persistedSummary.remediation.attempts[0].reason).toBe(
+      "STARTED_LOCAL_READER_CONTINUATION",
+    );
+    expect(persistedSummary.closeout.remediationAttempts[0]).toMatchObject({
+      executionEvidence: {
+        providerAttemptRecorded: false,
+        providerExecutionAttemptRecorded: false,
+      },
+    });
+    expect(entry.incident.failureClass).toBe("UNSUPPORTED_FAMILY");
+    expect(entry.incident.failureFingerprint).toBe(canonicalFailureFingerprint);
+  });
+
+  it("grants one more reader window only after an eligible early tooling failure inserts its marker", async () => {
+    const { batch, canonicalFailureFingerprint } =
+      readerContinuationCloseoutFixture();
+    await expect(closeoutCourseSupportBatch({
+      batchId: batch.id,
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      requestedOutcome: "command_failed",
+      failureDomain: "SLA",
+      verificationWatchMode: "EARLY_RETRY",
+      summary: { verificationWatch: {
+        settled: false,
+        stopped: true,
+        stopMode: "EARLY_RETRY",
+        passCount: 0,
+        failureCode: "BROWSER_STAGE_TIMEOUT",
+        toolingFailureFingerprint: "f".repeat(64),
+      } },
+      now,
+    })).resolves.toMatchObject({
+      durableCloseoutRecorded: true,
+      retryCount: 1,
+      needsHumanCount: 0,
+    });
+    expect(prismaMocks.monitoringEventCreateMany).toHaveBeenCalledWith({
+      data: [expect.objectContaining({
+        eventType: "TOOLING_INCIDENT",
+        source: "COURSE_SUPPORT_RESPONDER",
+        incidentId: "incident-1",
+        occurredAt: now,
+        audit: expect.objectContaining({
+          failureCode: "BROWSER_STAGE_TIMEOUT",
+          toolingFailureFingerprint: "f".repeat(64),
+          cycle: 1,
+        }),
+      })],
+      skipDuplicates: true,
+    });
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({
+        status: "AUTO_INVESTIGATING",
+        nextAttemptAt: new Date(now.getTime() + 60_000),
+        failureClass: "UNSUPPORTED_FAMILY",
+        failureFingerprint: canonicalFailureFingerprint,
+      }) }),
+    );
+  });
+
+  it.each([
+    ["missing watch failure", 0, null, false],
+    ["ineligible watch failure", 0, "BATCH_VERIFICATION_RECOVERY_REQUIRED", false],
+    ["preexisting marker", 0, "BROWSER_STAGE_TIMEOUT", true],
+    ["second early retry", 1, "BROWSER_STAGE_TIMEOUT", false],
+  ] as const)("parks a reader continuation after %s", async (_case, attemptsCompleted, failureCode, preexistingMarker) => {
+    const { batch } = readerContinuationCloseoutFixture(attemptsCompleted);
+    if (preexistingMarker) {
+      prismaMocks.monitoringEventFindMany.mockResolvedValue([{
+        incidentId: "incident-1",
+        idempotencyKey: buildCourseSupportVerificationWatchShortRetryIdempotencyKey({
+          incidentId: "incident-1", cycle: 1,
+        }),
+      }]);
+    }
+    await expect(closeoutCourseSupportBatch({
+      batchId: batch.id,
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      requestedOutcome: "command_failed",
+      failureDomain: "SLA",
+      verificationWatchMode: "EARLY_RETRY",
+      summary: { verificationWatch: {
+        settled: false,
+        stopped: true,
+        stopMode: "EARLY_RETRY",
+        passCount: 0,
+        ...(failureCode ? { failureCode } : {}),
+        toolingFailureFingerprint: "f".repeat(64),
+      } },
+      now,
+    })).resolves.toMatchObject({
+      durableCloseoutRecorded: true,
+      needsHumanCount: 1,
+      automationStalledCount: 1,
+    });
+    expect(prismaMocks.monitoringEventCreateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({
+        status: "NEEDS_HUMAN",
+        nextAttemptAt: null,
+        humanReviewReason: "AUTOMATION_STALLED",
+      }) }),
+    );
+  });
+
+  it("keeps the reader batch owned when a concurrent marker insert wins", async () => {
+    const { batch } = readerContinuationCloseoutFixture();
+    prismaMocks.monitoringEventCreateMany.mockResolvedValue({ count: 0 });
+    await expect(closeoutCourseSupportBatch({
+      batchId: batch.id,
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      requestedOutcome: "command_failed",
+      failureDomain: "SLA",
+      verificationWatchMode: "EARLY_RETRY",
+      summary: { verificationWatch: {
+        settled: false,
+        stopped: true,
+        stopMode: "EARLY_RETRY",
+        passCount: 0,
+        failureCode: "BROWSER_STAGE_TIMEOUT",
+        toolingFailureFingerprint: "f".repeat(64),
+      } },
+      now,
+    })).rejects.toThrow("changed during closeout");
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["technical rendered", "RENDERED_BROWSER_DISCOVERY", "CHALLENGE", false],
     ["technical rendered", "RENDERED_BROWSER_DISCOVERY", "CHALLENGE", true],
@@ -31801,6 +32305,9 @@ describe("detached verification atomic batch fences", () => {
       consumed: true,
       executionEvidence: { playbookAttemptRecorded: true },
     });
+    // This ordinary rendered-source discovery is allowed to refine the
+    // canonical class even though it did not execute a provider check.
+    expect(incident.failureClass).toBe("MISSING_SOURCE");
     expect(incident.failureFingerprint).toBe(fixture.observedFailureFingerprint);
     expect(incident.escalatedAt).toEqual(retainedEscalatedAt);
     expect(incident.cycle).toBe(17);

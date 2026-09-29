@@ -416,6 +416,94 @@ const DETACHED_VERIFICATION_REQUEST_STATE_SELECT = {
   createdAt: true,
   updatedAt: true,
 } satisfies Prisma.CourseSupportVerificationRequestSelect;
+const STARTED_READER_CONTINUATION_HISTORY_SELECT = {
+  where: { batch: { completedAt: { not: null } } },
+  orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+  take: COURSE_SUPPORT_CANDIDATE_BATCH_HISTORY_READ_LIMIT + 1,
+  select: {
+    cycle: true,
+    result: true,
+    proofSnapshot: true,
+    verificationRequests: {
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: 1,
+      select: { status: true, outcome: true, evidence: true },
+    },
+    batch: {
+      select: { status: true, completedAt: true, summary: true },
+    },
+  },
+} satisfies Exclude<
+  Prisma.CourseSupportIncidentSelect["batchIncidents"],
+  boolean | undefined
+>;
+type StartedReaderContinuationHistory = readonly {
+  cycle: number;
+  result: string;
+  proofSnapshot: Prisma.JsonValue | null;
+  verificationRequests: readonly {
+    status: string;
+    outcome: string | null;
+    evidence: Prisma.JsonValue | null;
+  }[];
+  batch: {
+    status: string;
+    completedAt: Date | null;
+    summary: Prisma.JsonValue | null;
+  };
+}[];
+const STARTED_READER_SHORT_RETRY_MARKER_SELECT = {
+  incidentId: true,
+  idempotencyKey: true,
+  eventType: true,
+  source: true,
+  audit: true,
+  occurredAt: true,
+} satisfies Prisma.CourseMonitoringEventSelect;
+type StartedReaderShortRetryMarker = Prisma.CourseMonitoringEventGetPayload<{
+  select: typeof STARTED_READER_SHORT_RETRY_MARKER_SELECT;
+}>;
+function isStartedReaderShortRetryMarker(
+  marker: StartedReaderShortRetryMarker | null | undefined,
+  incidentId: string,
+  cycle: number,
+  failureCode: string,
+  failureFingerprint: string,
+) {
+  const audit = asJsonObject(marker?.audit);
+  return Boolean(
+    marker?.incidentId === incidentId &&
+    marker?.idempotencyKey ===
+      buildCourseSupportVerificationWatchShortRetryIdempotencyKey({ incidentId, cycle }) &&
+    marker?.eventType === "TOOLING_INCIDENT" &&
+    marker.source === "COURSE_SUPPORT_RESPONDER" &&
+    audit.schemaVersion === 1 &&
+    audit.failureCode === failureCode &&
+    audit.toolingFailureFingerprint === failureFingerprint &&
+    audit.attempt === 1 &&
+    audit.maximumAttempts === 1 &&
+    audit.oneShot === true &&
+    audit.cycle === cycle,
+  );
+}
+async function loadStartedReaderShortRetryMarkers(
+  client: Pick<Prisma.TransactionClient, "courseMonitoringEvent">,
+  incidents: readonly { id: string; cycle: number }[],
+) {
+  if (incidents.length === 0) return new Map<string, StartedReaderShortRetryMarker>();
+  const keys = incidents.map((incident) =>
+    buildCourseSupportVerificationWatchShortRetryIdempotencyKey({
+      incidentId: incident.id,
+      cycle: incident.cycle,
+    }),
+  );
+  const markers = await client.courseMonitoringEvent.findMany({
+    where: { idempotencyKey: { in: keys } },
+    take: keys.length + 1,
+    select: STARTED_READER_SHORT_RETRY_MARKER_SELECT,
+  });
+  return new Map(markers.map((marker) => [marker.idempotencyKey!, marker]));
+}
 const COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT = {
   id: true,
   courseId: true,
@@ -855,6 +943,11 @@ function isResponderSelectionEligible(input: {
   confirmedAt: Date | null | undefined;
   attemptLedger: unknown;
   cycle: number;
+  courseId: string;
+  batchIncidents?: StartedReaderContinuationHistory;
+  nextAttemptAt?: Date | null;
+  incidentId: string;
+  shortRetryMarker?: StartedReaderShortRetryMarker | null;
   engineeringOnly: boolean;
   activeRealSearchCount: number;
 }) {
@@ -872,8 +965,93 @@ function isResponderSelectionEligible(input: {
     assessment.valid &&
     assessment.conclusion === "INCOMPLETE" &&
     (assessment.nextStage === "RENDERED_BROWSER_DISCOVERY" ||
-      assessment.nextStage === "INDEPENDENT_CONFIRMATION")
+      assessment.nextStage === "INDEPENDENT_CONFIRMATION" ||
+      getStartedLocalReaderContinuationAttemptNumber(input) !== null)
   );
+}
+
+function getStartedLocalReaderContinuationAttemptNumber(input: {
+  attemptLedger: unknown;
+  cycle: number;
+  courseId: string;
+  batchIncidents?: StartedReaderContinuationHistory;
+  nextAttemptAt?: Date | null;
+  incidentId: string;
+  shortRetryMarker?: StartedReaderShortRetryMarker | null;
+}): 1 | 2 | null {
+  const assessment = assessAutomationPlaybook(input.attemptLedger, input.cycle);
+  const stage = assessment.stages.find((entry) => entry.stage === "LOCAL_READER");
+  if (
+    !assessment.valid ||
+    assessment.cycle !== input.cycle ||
+    assessment.conclusion !== "INCOMPLETE" ||
+    assessment.nextStage !== "LOCAL_READER" ||
+    stage?.status !== "STARTED" ||
+    stage.attemptCount !== 1
+  ) {
+    return null;
+  }
+  // A truncated history could hide a spent continuation receipt. Fail closed
+  // once the bounded history window is full.
+  if (
+    !input.batchIncidents ||
+    input.batchIncidents.length > COURSE_SUPPORT_CANDIDATE_BATCH_HISTORY_READ_LIMIT
+  ) {
+    return null;
+  }
+  const history = input.batchIncidents.filter((entry) => entry.cycle === input.cycle);
+  const priorContinuations = history.filter((entry) => {
+    const remediation = asJsonObject(asJsonObject(entry.batch.summary).remediation);
+    return Array.isArray(remediation.attempts) && remediation.attempts.some((attempt) => {
+      const planned = asJsonObject(attempt);
+      return planned.courseRef === createCourseSupportRemediationCourseRef(input.courseId) &&
+        planned.reason === "STARTED_LOCAL_READER_CONTINUATION";
+    });
+  });
+  const latest = history[0];
+  const request = latest?.verificationRequests[0];
+  const retryableSource = Boolean(
+    latest?.result === "RETRY_SCHEDULED" &&
+    latest.batch.status === "RETRYABLE_FAILED" &&
+    latest.batch.completedAt,
+  );
+  if (!retryableSource) return null;
+  if (priorContinuations.length === 0) {
+    return request &&
+      (request.status === "RETRYABLE_FAILED" || request.status === "STALE") &&
+      request.outcome === "FETCH_FAILED" &&
+      asJsonObject(request.evidence).providerExecution === false
+      ? 1
+      : null;
+  }
+  if (priorContinuations.length !== 1 || latest !== priorContinuations[0]) {
+    return null;
+  }
+  const closeout = asJsonObject(asJsonObject(latest.batch.summary).closeout);
+  const watch = asJsonObject(asJsonObject(closeout.summary).verificationWatch);
+  const toolingFailure = readCourseSupportVerificationWatchToolingFailure(
+    closeout.summary,
+  );
+  // Only the exact durable one-shot tooling marker authorizes the final
+  // window. Retry timing alone can also arise from orchestration backoff.
+  return closeout.verificationWatchMode === "EARLY_RETRY" &&
+    watch.settled === false && watch.stopped === true &&
+    watch.stopMode === "EARLY_RETRY" &&
+    toolingFailure &&
+    isCourseSupportVerificationWatchShortRetryEligible(toolingFailure.failureCode) &&
+    input.incidentId === input.shortRetryMarker?.incidentId &&
+    isStartedReaderShortRetryMarker(
+      input.shortRetryMarker,
+      input.incidentId,
+      input.cycle,
+      toolingFailure.failureCode,
+      toolingFailure.toolingFailureFingerprint,
+    ) &&
+    input.shortRetryMarker?.occurredAt.getTime() ===
+      latest.batch.completedAt!.getTime() &&
+    asJsonObject(latest.proofSnapshot).providerExecution !== true
+    ? 2
+    : null;
 }
 
 function getAuthoritativeCourseMonitoringResolution(
@@ -3463,9 +3641,13 @@ export async function inspectCourseSupportQueue(input?: {
         orderBy: [{ earliestTargetDate: "asc" }, { firstSeenAt: "asc" }],
         take: COURSE_SUPPORT_CANDIDATE_QUEUE_READ_LIMIT + 1,
         select: {
+          id: true,
+          courseId: true,
           cycle: true,
           confirmedAt: true,
           attemptLedger: true,
+          nextAttemptAt: true,
+          batchIncidents: STARTED_READER_CONTINUATION_HISTORY_SELECT,
           providerFamilyKey: true,
           failureFingerprint: true,
           engineeringOnly: true,
@@ -3554,6 +3736,10 @@ export async function inspectCourseSupportQueue(input?: {
   const activeStatusBatchCount =
     activeBatches.length + Math.max(expiredBatchCount, expiredBatch ? 1 : 0);
   assertBoundedCourseSupportCandidateQueue(rawDueIncidents);
+  const readerShortRetryMarkers = await loadStartedReaderShortRetryMarkers(
+    prisma,
+    rawDueIncidents,
+  );
   const activeProviderGroups = new Set(
     [...activeBatches, ...(expiredBatch ? [expiredBatch] : [])].map(
       (batch) => `${batch.providerFamilyKey}\u0000${batch.failureFingerprint}`,
@@ -3573,6 +3759,15 @@ export async function inspectCourseSupportQueue(input?: {
           confirmedAt: incident.confirmedAt,
           attemptLedger: incident.attemptLedger,
           cycle: incident.cycle,
+          incidentId: incident.id,
+          courseId: incident.courseId,
+          batchIncidents: incident.batchIncidents,
+          nextAttemptAt: incident.nextAttemptAt,
+          shortRetryMarker: readerShortRetryMarkers.get(
+            buildCourseSupportVerificationWatchShortRetryIdempotencyKey({
+              incidentId: incident.id, cycle: incident.cycle,
+            }),
+          ),
           engineeringOnly: incident.engineeringOnly,
           activeRealSearchCount: currentDemand.activeRealSearchCount,
         })
@@ -4601,9 +4796,33 @@ export async function claimCourseSupportBatch(input: {
               "Course-support demand changed during claim; rerun selection.",
             );
           }
+          const hasPriorReaderContinuation = current.batchIncidents.some((entry) => {
+            if (entry.cycle !== current.cycle) return false;
+            const remediation = asJsonObject(asJsonObject(entry.batch.summary).remediation);
+            return Array.isArray(remediation.attempts) && remediation.attempts.some((attempt) => {
+              const planned = asJsonObject(attempt);
+              return planned.courseRef ===
+                createCourseSupportRemediationCourseRef(current.courseId) &&
+                planned.reason === "STARTED_LOCAL_READER_CONTINUATION";
+            });
+          });
+          const shortRetryMarkerKey =
+            buildCourseSupportVerificationWatchShortRetryIdempotencyKey({
+              incidentId: current.id,
+              cycle: current.cycle,
+            });
+          const lockedShortRetryMarker = hasPriorReaderContinuation
+            ? await tx.courseMonitoringEvent.findUnique({
+                where: { idempotencyKey: shortRetryMarkerKey },
+                select: STARTED_READER_SHORT_RETRY_MARKER_SELECT,
+              })
+            : null;
           const rebuilt = buildCourseSupportCandidates(
             [current],
             claimDatabaseNow,
+            lockedShortRetryMarker
+              ? new Map([[shortRetryMarkerKey, lockedShortRetryMarker]])
+              : undefined,
           ).find((candidate) => candidate.id === incident.id);
           if (!rebuilt) {
             throw new Error(
@@ -5066,6 +5285,11 @@ export async function claimCourseSupportBatch(input: {
               confirmedAt: current.confirmedAt,
               attemptLedger: current.attemptLedger,
               cycle: current.cycle,
+              incidentId: current.id,
+              courseId: current.courseId,
+              batchIncidents: current.batchIncidents,
+              nextAttemptAt: current.nextAttemptAt,
+              shortRetryMarker: lockedShortRetryMarker,
               engineeringOnly: currentEngineeringOnly,
               activeRealSearchCount: currentDemand.activeRealSearchCount,
             })
@@ -5129,9 +5353,14 @@ export async function claimCourseSupportBatch(input: {
             "Course-support active ownership changed during locked claim; rerun selection.",
           );
         }
+        const lockedShortRetryMarkers = await loadStartedReaderShortRetryMarkers(
+          tx,
+          currentIncidents,
+        );
         const lockedCandidatePool = buildSelectableCourseSupportClaimCandidates(
           currentIncidents,
           claimDatabaseNow,
+          lockedShortRetryMarkers,
         )
           .map(
             (candidate) =>
@@ -5343,10 +5572,14 @@ export async function claimCourseSupportBatch(input: {
               },
               take: COURSE_SUPPORT_CANDIDATE_QUEUE_READ_LIMIT + 1,
               select: {
+                id: true,
                 cycle: true,
                 confirmedAt: true,
                 attemptLedger: true,
                 engineeringOnly: true,
+                courseId: true,
+                nextAttemptAt: true,
+                batchIncidents: STARTED_READER_CONTINUATION_HISTORY_SELECT,
                 course: {
                   select: {
                     timeZone: true,
@@ -5370,6 +5603,10 @@ export async function claimCourseSupportBatch(input: {
               },
             });
           assertBoundedCourseSupportCandidateQueue(outsideDueIncidents);
+          const outsideShortRetryMarkers = await loadStartedReaderShortRetryMarkers(
+            tx,
+            outsideDueIncidents,
+          );
           const outsideActiveDemandAppeared = outsideDueIncidents.some(
             (incident) => {
               const { course } = incident;
@@ -5385,6 +5622,15 @@ export async function claimCourseSupportBatch(input: {
                   confirmedAt: incident.confirmedAt,
                   attemptLedger: incident.attemptLedger,
                   cycle: incident.cycle,
+                  incidentId: incident.id,
+                  courseId: incident.courseId,
+                  batchIncidents: incident.batchIncidents,
+                  nextAttemptAt: incident.nextAttemptAt,
+                  shortRetryMarker: outsideShortRetryMarkers.get(
+                    buildCourseSupportVerificationWatchShortRetryIdempotencyKey({
+                      incidentId: incident.id, cycle: incident.cycle,
+                    }),
+                  ),
                   engineeringOnly: incident.engineeringOnly,
                   activeRealSearchCount: currentDemand.activeRealSearchCount,
                 }) &&
@@ -10584,6 +10830,19 @@ async function closeoutCourseSupportBatchAttempt(
   const remediationDirective = readCourseSupportRemediationDirective(
     batch.summary,
   );
+  const safeSummary = sanitizeResponderCloseoutSummary(input.summary);
+  const verificationWatchToolingFailure =
+    readCourseSupportVerificationWatchToolingFailure(safeSummary);
+  const priorReaderShortRetryMarkers =
+    remediationDirective?.reason === "STARTED_LOCAL_READER_CONTINUATION"
+      ? await loadStartedReaderShortRetryMarkers(
+          prisma,
+          batch.incidents.map((entry) => ({
+            id: entry.incidentId,
+            cycle: entry.cycle,
+          })),
+        )
+      : new Map<string, StartedReaderShortRetryMarker>();
   const changedReleaseAwaitingDeployment = Boolean(
     batch.releaseSha && batch.releaseSha !== batch.baseSha && !batch.deployedAt,
   );
@@ -10889,6 +11148,48 @@ async function closeoutCourseSupportBatchAttempt(
         normalizedResult: "RETRY_SCHEDULED" as const,
         message:
           "Browser source evidence spanned different deployed runtimes, so one fresh exact-runtime playbook cycle is required.",
+      };
+    }
+    const readerStage = playbookAssessment.stages.find(
+      (stage) => stage.stage === "LOCAL_READER",
+    );
+    if (
+      remediationDirective?.reason === "STARTED_LOCAL_READER_CONTINUATION" &&
+      playbookAssessment.valid &&
+      playbookAssessment.cycle === entry.cycle &&
+      playbookAssessment.conclusion === "INCOMPLETE" &&
+      playbookAssessment.nextStage === "LOCAL_READER" &&
+      readerStage?.status === "STARTED" &&
+      readerStage.attemptCount === 1 &&
+      !(
+        verificationWatchMode === "EARLY_RETRY" &&
+        remediationDirective.retryBudget?.attemptsCompleted === 0 &&
+        verificationWatchToolingFailure &&
+        isCourseSupportVerificationWatchShortRetryEligible(
+          verificationWatchToolingFailure.failureCode,
+        ) &&
+        !priorReaderShortRetryMarkers.has(
+          buildCourseSupportVerificationWatchShortRetryIdempotencyKey({
+            incidentId: entry.incidentId,
+            cycle: entry.cycle,
+          }),
+        )
+      ) &&
+      !terminalProofIsDurable &&
+      !isAuthoritativeFactualCourseMonitoringState(
+        entry.course.monitoringStatus?.state,
+      ) &&
+      ["PENDING", "STALE_EVIDENCE", "RETRY_SCHEDULED"].includes(entry.result)
+    ) {
+      // This route spent its one owned verification window. A missing signed
+      // result is an orchestration stall, not another provider attempt.
+      return {
+        ...entry,
+        currentProviderSnapshotFingerprint,
+        automationStalled: true,
+        normalizedResult: "NEEDS_HUMAN" as const,
+        message:
+          "The resumed reader window ended without a signed result; this course is parked until a material input changes.",
       };
     }
     if (
@@ -12479,9 +12780,6 @@ async function closeoutCourseSupportBatchAttempt(
     ? derivedOutcome
     : (input.requestedOutcome ?? derivedOutcome);
   const retryTimes: Date[] = [];
-  const safeSummary = sanitizeResponderCloseoutSummary(input.summary);
-  const verificationWatchToolingFailure =
-    readCourseSupportVerificationWatchToolingFailure(safeSummary);
   const remediationAttemptConsumed = closeoutRemediationAttempts.some(
     (attempt) => attempt.consumed,
   );
@@ -13563,7 +13861,11 @@ async function closeoutCourseSupportBatchAttempt(
         // observation and the effective identity still drives retry timing;
         // after expiry, the same observation can open one fresh episode.
         const preserveCanonicalDeferredFailureIdentity = Boolean(
-          failureOnlyHandoffCooldownActive || deferredFailureHandoff,
+          failureOnlyHandoffCooldownActive ||
+          deferredFailureHandoff ||
+          (remediationDirective?.reason ===
+            "STARTED_LOCAL_READER_CONTINUATION" &&
+            asJsonObject(entry.proofSnapshot).providerExecution !== true),
         );
         const persistedFailureClass = preserveCanonicalDeferredFailureIdentity
           ? entry.incident.failureClass
@@ -13597,6 +13899,10 @@ async function closeoutCourseSupportBatchAttempt(
             isCourseSupportVerificationWatchShortRetryEligible(
               verificationWatchToolingFailure.failureCode,
             ) &&
+            (remediationDirective?.reason !==
+              "STARTED_LOCAL_READER_CONTINUATION" ||
+              (remediationDirective.retryBudget?.attemptsCompleted === 0 &&
+                entry.normalizedResult === "RETRY_SCHEDULED")) &&
             continueIncompletePlaybook,
         );
         const verificationWatchShortRetryMarker =
@@ -13644,6 +13950,16 @@ async function closeoutCourseSupportBatchAttempt(
                 skipDuplicates: true,
               })
             : { count: 0 };
+        if (
+          remediationDirective?.reason ===
+            "STARTED_LOCAL_READER_CONTINUATION" &&
+          verificationWatchShortRetryCandidate &&
+          verificationWatchShortRetryMarker.count !== 1
+        ) {
+          // The second window is authorized only by this insert. Retry with a
+          // fresh snapshot if another closer won the unique event key.
+          throw new CourseSupportCloseoutSnapshotChangedError();
+        }
         const verificationWatchShortRetryAt =
           verificationWatchShortRetryMarker.count === 1
             ? new Date(now.getTime() + 60 * 1000)
@@ -17127,7 +17443,18 @@ async function listCourseSupportClaimCandidates(now: Date) {
   let historyBlockedCount = 0;
   const incidents = await listCourseSupportClaimCandidateIncidents(now, prisma,
     count => { historyBlockedCount = count; });
-  return { candidates: buildSelectableCourseSupportClaimCandidates(incidents, now), historyBlockedCount };
+  const readerShortRetryMarkers = await loadStartedReaderShortRetryMarkers(
+    prisma,
+    incidents,
+  );
+  return {
+    candidates: buildSelectableCourseSupportClaimCandidates(
+      incidents,
+      now,
+      readerShortRetryMarkers,
+    ),
+    historyBlockedCount,
+  };
 }
 
 function readExactDeferredFailureHandoffAttempt(input: {
@@ -18698,6 +19025,7 @@ export async function readUnusedCompletedDiscoveryImplementationHandoff(
 function buildCourseSupportCandidates(
   incidents: readonly CourseSupportCandidateIncident[],
   now: Date,
+  readerShortRetryMarkers: ReadonlyMap<string, StartedReaderShortRetryMarker> = new Map(),
 ): CourseSupportClaimCandidate[] {
   assertBoundedCourseSupportCandidateHistory(incidents);
   return incidents.flatMap(({ course, batchIncidents, ...incident }) => {
@@ -18710,6 +19038,15 @@ function buildCourseSupportCandidates(
         confirmedAt: incident.confirmedAt,
         attemptLedger: incident.attemptLedger,
         cycle: incident.cycle,
+        incidentId: incident.id,
+        courseId: incident.courseId,
+        batchIncidents,
+        nextAttemptAt: incident.nextAttemptAt,
+        shortRetryMarker: readerShortRetryMarkers.get(
+          buildCourseSupportVerificationWatchShortRetryIdempotencyKey({
+            incidentId: incident.id, cycle: incident.cycle,
+          }),
+        ),
         engineeringOnly: incident.engineeringOnly,
         activeRealSearchCount: currentDemand.activeRealSearchCount,
       })
@@ -18933,6 +19270,49 @@ function buildCourseSupportCandidates(
         attemptSignature: null,
       };
     }
+    const readerContinuationAttemptNumber =
+      getStartedLocalReaderContinuationAttemptNumber({
+        attemptLedger: incident.attemptLedger,
+        cycle: incident.cycle,
+        courseId: incident.courseId,
+        batchIncidents,
+        nextAttemptAt: incident.nextAttemptAt,
+        incidentId: incident.id,
+        shortRetryMarker: readerShortRetryMarkers.get(
+          buildCourseSupportVerificationWatchShortRetryIdempotencyKey({
+            incidentId: incident.id, cycle: incident.cycle,
+          }),
+        ),
+      });
+    if (
+      incident.confirmedAt === null &&
+      currentDemand.activeRealSearchCount > 0 &&
+      incident.failureClass === "UNSUPPORTED_FAMILY" &&
+      readerContinuationAttemptNumber !== null &&
+      (routedRemediation.workMode === "ADVANCE_DISCOVERY" ||
+        (routedRemediation.workMode === "WAIT_FOR_MATERIAL_CHANGE" &&
+          routedRemediation.reason === "UNCHANGED_ATTEMPT_ALREADY_RECORDED")) &&
+      routedRemediation.strategy.action === "REPAIR_PROVIDER_ADAPTER" &&
+      routedRemediation.attemptSignature?.playbookStage === "LOCAL_READER"
+    ) {
+      // The prior owned request failed before the already-started reader stage
+      // settled. A stopped watch may authorize exactly one final tooling
+      // retry; each claimed window persists the same cycle receipt.
+      routedRemediation = {
+        ...routedRemediation,
+        workMode: "ADVANCE_DISCOVERY",
+        resumeWorkMode: "ADVANCE_DISCOVERY",
+        allowUnchangedRuntime: true,
+        requiresImplementationPath: false,
+        retryBudget: {
+          maximumAttempts: readerContinuationAttemptNumber,
+          attemptsCompleted: readerContinuationAttemptNumber - 1,
+          attemptsRemaining: 1,
+          exhausted: false,
+        },
+        reason: "STARTED_LOCAL_READER_CONTINUATION",
+      };
+    }
     const sourceCompleteFinalizationRecovery =
       getSourceCompleteFinalizationRecovery({
         incident,
@@ -19076,11 +19456,12 @@ function buildCourseSupportCandidates(
 function buildSelectableCourseSupportClaimCandidates(
   incidents: readonly CourseSupportCandidateIncident[],
   now: Date,
+  readerShortRetryMarkers?: ReadonlyMap<string, StartedReaderShortRetryMarker>,
 ) {
   const incidentById = new Map(
     incidents.map((incident) => [incident.id, incident] as const),
   );
-  return buildCourseSupportCandidates(incidents, now).filter((candidate) => {
+  return buildCourseSupportCandidates(incidents, now, readerShortRetryMarkers).filter((candidate) => {
     const incident = incidentById.get(candidate.id);
     if (!incident || incident.activeBatchId !== null) return false;
     if (readCandidateSourceCompleteFinalizationRecovery(candidate)) return true;

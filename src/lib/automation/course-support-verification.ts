@@ -1887,12 +1887,41 @@ export async function getCurrentCourseSupportVerificationFailure(input: {
         { kind: "DURABLE_RESULT", request },
       );
       if (!eligibility.eligible) {
-        await markRequestStaleIfNeeded(
-          transaction,
-          request,
-          now,
-          eligibility.reason,
+        // A proof read must reject active demand, but it must not erase an
+        // owned reader progression retry while its signed job can still run.
+        const playbook = assessAutomationPlaybook(
+          request.batchIncident.incident.attemptLedger,
+          request.batchIncident.cycle,
         );
+        const readerStage = playbook.stages.find(
+          (stage) => stage.stage === "LOCAL_READER",
+        );
+        const remediation = asJsonRecord(
+          asJsonRecord(request.batchIncident.batch.summary).remediation,
+        );
+        const ownedReaderRetry =
+          eligibility.reason === "active_demand" &&
+          request.status === "RETRYABLE_FAILED" &&
+          request.evidence.providerExecution === false &&
+          remediation.reason === "STARTED_LOCAL_READER_CONTINUATION" &&
+          playbook.valid &&
+          playbook.cycle === request.batchIncident.cycle &&
+          playbook.nextStage === "LOCAL_READER" &&
+          readerStage?.status === "STARTED" &&
+          readerStage.attemptCount === 1 &&
+          !isRequestHorizonExpired(request, now) &&
+          isAssignedDetachedProgression(
+            buildDetachedEligibilityInputFromRequest(request),
+            now,
+          );
+        if (!ownedReaderRetry) {
+          await markRequestStaleIfNeeded(
+            transaction,
+            request,
+            now,
+            eligibility.reason,
+          );
+        }
         return rejectedFailureObservation(eligibility.reason);
       }
       if (

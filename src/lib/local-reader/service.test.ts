@@ -1531,6 +1531,144 @@ describe("local reader job service", () => {
     );
   });
 
+  it.each([21_000, 55_000, 90_000])(
+    "does not hand an availability reader only %i ms before its deadline",
+    async (remainingMs) => {
+      const expiresAt = new Date(
+        new Date("2026-07-24T16:00:00.000Z").getTime() + remainingMs,
+      );
+      prismaMocks.localReaderJob.findMany
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([
+          {
+            id: "job-too-late",
+            teeSearchId: null,
+            purpose: "COURSE_VERIFICATION",
+            courseId: "course-1",
+            courseKey: "cps:grassyhill.cps.golf",
+            requiredCapabilityKey: "CPS_RENDERED",
+            targetDate: "2026-07-25",
+            players: 2,
+            createdAt: new Date(expiresAt.getTime() - 5 * 60_000),
+            jobExpiresAt: expiresAt,
+            bookingUrl,
+          },
+        ]);
+
+      await expect(claimNextLocalReaderJob("chrome-home")).resolves.toBeNull();
+
+      expect(
+        monitoringMocks.acquireCourseMonitoringWriteLockInTransaction,
+      ).not.toHaveBeenCalled();
+      expect(
+        providerObservationMocks.beginCourseProviderObservationInTransaction,
+      ).not.toHaveBeenCalled();
+      expect(prismaMocks.localReaderJob.updateMany).not.toHaveBeenCalled();
+      expect(prismaMocks.localReaderJob.findMany).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          where: expect.objectContaining({
+            AND: expect.arrayContaining([
+              expect.objectContaining({
+                OR: expect.arrayContaining([
+                  expect.objectContaining({
+                    purpose: { in: ["ALERT_CHECK", "COURSE_VERIFICATION"] },
+                    jobExpiresAt: {
+                      gt: new Date("2026-07-24T16:01:30.000Z"),
+                    },
+                  }),
+                ]),
+              }),
+            ]),
+          }),
+        }),
+      );
+    },
+  );
+
+  it("keeps the original deadline and fences the claim after the minimum execution window", async () => {
+    const expiresAt = new Date("2026-07-24T16:01:31.000Z");
+    prismaMocks.localReaderJob.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: "job-with-window",
+          teeSearchId: null,
+          purpose: "COURSE_VERIFICATION",
+          courseId: "course-1",
+          courseKey: "cps:grassyhill.cps.golf",
+          requiredCapabilityKey: "CPS_RENDERED",
+          targetDate: "2026-07-25",
+          players: 2,
+          createdAt: new Date(expiresAt.getTime() - 5 * 60_000),
+          jobExpiresAt: expiresAt,
+          bookingUrl,
+        },
+      ]);
+
+    await expect(claimNextLocalReaderJob("chrome-home")).resolves.toMatchObject({
+      id: "job-with-window",
+      expiresAt: expiresAt.toISOString(),
+      leaseExpiresAt: expiresAt.toISOString(),
+    });
+    expect(prismaMocks.localReaderJob.updateMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "job-with-window",
+          jobExpiresAt: { gt: new Date("2026-07-24T16:01:30.000Z") },
+        }),
+      }),
+    );
+  });
+
+  it("loses the claim if the DB observation starts after the safe reader window closes", async () => {
+    const expiresAt = new Date("2026-07-24T16:01:31.000Z");
+    prismaMocks.localReaderJob.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: "job-window-crossed",
+          teeSearchId: null,
+          purpose: "COURSE_VERIFICATION",
+          courseId: "course-1",
+          courseKey: "cps:grassyhill.cps.golf",
+          requiredCapabilityKey: "CPS_RENDERED",
+          targetDate: "2026-07-25",
+          players: 2,
+          createdAt: new Date(expiresAt.getTime() - 5 * 60_000),
+          jobExpiresAt: expiresAt,
+          bookingUrl,
+        },
+      ]);
+    const observationStartedAt = new Date("2026-07-24T16:00:02.000Z");
+    providerObservationMocks.beginCourseProviderObservationInTransaction.mockResolvedValueOnce(
+      {
+        courseId: "course-1",
+        leaseToken: "window-crossed-token",
+        observationStartedAt,
+        leaseExpiresAt: new Date("2026-07-24T16:01:31.000Z"),
+        ttlMs: 91_000,
+        supersededUnresolvedObservationStartedAt: null,
+      },
+    );
+    prismaMocks.localReaderJob.updateMany.mockResolvedValueOnce({ count: 0 });
+
+    await expect(claimNextLocalReaderJob("chrome-home")).resolves.toBeNull();
+
+    expect(prismaMocks.localReaderJob.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: "job-window-crossed",
+          jobExpiresAt: { gt: new Date("2026-07-24T16:01:32.000Z") },
+        }),
+      }),
+    );
+    expect(prismaMocks.course.findUnique).not.toHaveBeenCalled();
+    expect(
+      providerObservationMocks.releaseCourseProviderObservationInTransaction,
+    ).not.toHaveBeenCalled();
+  });
+
   it("does not return provider work when the per-course observation marker is busy", async () => {
     prismaMocks.localReaderJob.findMany
       .mockResolvedValueOnce([])
