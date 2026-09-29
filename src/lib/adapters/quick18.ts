@@ -155,9 +155,11 @@ export function parseQuick18Slots(input: {
     (attribute(element, "class") ?? "").split(/\s+/u).includes("matrixTable")
   );
   if (!matrix) throw schemaError("Quick18 public tee-time table is missing");
-  if (findElements(matrix, "tbody").length !== 1) {
+  const bodies = findElements(matrix, "tbody");
+  if (bodies.length !== 1) {
     throw schemaError("Quick18 public tee-time table body is missing");
   }
+  const tableBody = bodies[0];
 
   const headers = findElements(matrix, "th").map((element) => textContent(element).trim());
   if (headers[0] !== "Tee Time" || headers[1] !== "Players") {
@@ -235,8 +237,14 @@ export function parseQuick18Slots(input: {
     if (/\b(?:loading tee times|please wait|updating tee times|unable to load|error loading|temporarily unavailable)\b/iu.test(visibleText(document))) {
       throw schemaError("Quick18 tee sheet is still loading or unavailable");
     }
-    if (!sawTimeRow && !explicitNoTimes) {
-      throw schemaError("Quick18 empty tee-time matrix has no completed no-times evidence");
+    if (!/<\/body>\s*<\/html>\s*$/iu.test(input.html)) {
+      throw schemaError("Quick18 empty tee-time document is incomplete");
+    }
+    const emptyServerRenderedBody = tableBody.childNodes.every((child) =>
+      child.nodeName === "#text" && !textContent(child).trim()
+    );
+    if (!sawTimeRow && !explicitNoTimes && !emptyServerRenderedBody) {
+      throw schemaError("Quick18 empty tee-time matrix is ambiguous");
     }
   }
   return slots;

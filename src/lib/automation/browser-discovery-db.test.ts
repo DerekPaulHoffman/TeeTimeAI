@@ -1014,8 +1014,7 @@ describe("browser discovery persistence", () => {
     );
   });
 
-  it("records a Quick18 search shell as provider identity without runnable metadata or recovery", async () => {
-    const updatedAt = new Date("2026-09-28T12:00:00.000Z");
+  it("records an unlinked Quick18 search shell without applying a course booking identity", async () => {
     const bookingUrl = "https://mountsnow.quick18.com/teetimes/searchmatrix";
     const inspected = buildBrowserDiscovery({
       courseId: "mount-snow",
@@ -1023,9 +1022,18 @@ describe("browser discovery persistence", () => {
       sourceUrl: "https://www.mountsnow.com/",
       finalUrl: `${bookingUrl}?teedate=20260929`,
       observedUrls: [`${bookingUrl}?teedate=20260929`],
+      officialCourseWebsite: "https://www.mountsnow.com/",
+      officialPage: {
+        url: "https://www.mountsnow.com/",
+        courseName: "Mount Snow Golf Club",
+        linkCandidates: [{ url: "https://www.mountsnow.com/golf/rates", label: "Golf rates" }],
+        visibleText: "Mount Snow Golf Club. Tee times on our official site."
+      },
       visibleText: "Mount Snow Golf Club. Tee Time Search: Date: Players: Daily Rate"
     });
     expect(inspected.status).toBe("INSPECTED");
+    expect(inspected.bookingUrl).toBeUndefined();
+    expect(inspected.evidence.learnedFrom).toBe("quick18-official-link-unconfirmed");
     expect(inspected.apiMetadata).toBeUndefined();
     mockedPrisma.courseAutomationDiscovery.create.mockResolvedValue({ id: "quick18-discovery" } as never);
     await recordBrowserDiscovery(inspected);
@@ -1037,26 +1045,9 @@ describe("browser discovery persistence", () => {
       })
     });
 
-    mockedPrisma.course.findUnique
-      .mockResolvedValueOnce({
-        providerFamilyKey: "mountsnow.com",
-        detectedPlatform: "UNKNOWN",
-        detectedBookingUrl: null,
-        website: "https://www.mountsnow.com/",
-        bookingMetadata: null,
-        updatedAt
-      } as never)
-      .mockResolvedValueOnce({ id: "mount-snow" } as never);
-    mockedPrisma.course.updateMany.mockResolvedValue({ count: 1 } as never);
-    await applyBrowserDiscoveryToCourse(inspected);
-    expect(mockedPrisma.course.updateMany).toHaveBeenCalledWith({
-      where: { id: "mount-snow", updatedAt },
-      data: {
-        detectedPlatform: "CUSTOM",
-        providerFamilyKey: "QUICK18",
-        detectedBookingUrl: bookingUrl
-      }
-    });
+    await expect(applyBrowserDiscoveryToCourse(inspected)).resolves.toBeNull();
+    expect(mockedPrisma.course.findUnique).not.toHaveBeenCalled();
+    expect(mockedPrisma.course.updateMany).not.toHaveBeenCalled();
   });
 
   it("persists EZLinks identity without marking the course runnable", async () => {

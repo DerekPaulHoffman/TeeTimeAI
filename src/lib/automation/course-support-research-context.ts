@@ -272,11 +272,15 @@ export function buildOwnedCourseSupportResearchContext(
     }
     if (index === 0 && corroboration.kind === "OFFICIAL_COURSE_PROVIDER_LINK" &&
         (safeResearchUrl(corroboration.officialWebsiteUrl) !== officialSiteUrl ||
-          safeResearchUrl(corroboration.providerUrl) !== officialBookingUrl)) {
+          !bookingLinkMatchesSnapshot(
+            corroboration.providerUrl, officialBookingUrl, batch.providerFamilyKey,
+          ))) {
       conflicts.push("OFFICIAL_LINK_CHAIN_DIFFERS_FROM_CURRENT_COURSE");
     }
     if (index === 0 && safeResearchUrl(discovery.bookingUrl) &&
-        safeResearchUrl(discovery.bookingUrl) !== officialBookingUrl) {
+        !bookingLinkMatchesSnapshot(
+          discovery.bookingUrl, officialBookingUrl, batch.providerFamilyKey,
+        )) {
       conflicts.push("DISCOVERY_BOOKING_LINK_DIFFERS_FROM_CURRENT_COURSE");
     }
     if (index === 0 && evidence.sourcePageAvailability === "SOFT_NOT_FOUND") {
@@ -303,7 +307,9 @@ export function buildOwnedCourseSupportResearchContext(
       providerSnapshotBound: browserCycleMatches && browserSnapshotMatches,
       officialLinkCorroborated: corroboration.kind === "OFFICIAL_COURSE_PROVIDER_LINK" &&
         safeResearchUrl(corroboration.officialWebsiteUrl) === officialSiteUrl &&
-        safeResearchUrl(corroboration.providerUrl) === officialBookingUrl,
+        bookingLinkMatchesSnapshot(
+          corroboration.providerUrl, officialBookingUrl, batch.providerFamilyKey,
+        ),
     };
   });
   const snapshotBoundBrowserDiscoveries = currentDiscoveries.filter((discovery) => {
@@ -580,6 +586,22 @@ function safeResearchUrl(value: unknown) {
   } catch {
     return null;
   }
+}
+
+function bookingLinkMatchesSnapshot(
+  observedValue: unknown,
+  snapshotUrl: string | null,
+  providerFamilyKey: string,
+) {
+  const observedUrl = safeResearchUrl(observedValue);
+  if (!observedUrl || !snapshotUrl) return false;
+  if (providerFamilyKey !== "QUICK18") return observedUrl === snapshotUrl;
+  if (!isQuick18PublicSearchUrl(snapshotUrl) ||
+      !isQuick18PublicSearchUrl(observedUrl)) return false;
+  const snapshot = new URL(snapshotUrl);
+  const observed = new URL(observedUrl);
+  return snapshot.origin === observed.origin &&
+    snapshot.pathname === observed.pathname;
 }
 
 function hasRecipientLikeUrlState(value: string) {

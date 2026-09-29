@@ -2281,12 +2281,24 @@ describe("buildBrowserDiscovery", () => {
       sourceUrl: "https://www.mountsnow.com/",
       finalUrl: publicSheet,
       observedUrls: [publicSheet],
+      officialCourseWebsite: "https://www.mountsnow.com/",
+      officialPage: {
+        url: "https://www.mountsnow.com/",
+        courseName: "Mount Snow Golf Club",
+        linkCandidates: [{ url: publicSheet, label: "Book tee times" }]
+      },
       visibleText: "Welcome to Mount Snow Golf Club. Tee Time Search: Date: Players: Tee Time Players Daily Rate Member Rate"
     });
     expect(inspected).toMatchObject({
       status: "INSPECTED",
       bookingUrl,
-      evidence: { learnedFrom: "quick18-public-matrix-pending" }
+      evidence: {
+        learnedFrom: "quick18-public-matrix-pending",
+        courseIdentityCorroboration: {
+          kind: "OFFICIAL_COURSE_PROVIDER_LINK",
+          providerUrl: publicSheet
+        }
+      }
     });
     expect(inspected.apiMetadata).toBeUndefined();
     expect(resolveProviderCapability({
@@ -2339,13 +2351,60 @@ describe("buildBrowserDiscovery", () => {
       currentEvidenceTrusted: false
     })).toBe("ENGINEERING");
 
-    const stillPending = await enrichQuick18Discovery(inspected, vi.fn<typeof fetch>().mockResolvedValue(
+    const stillPending = await enrichQuick18Discovery(inspected, "Mount Snow Golf Club", vi.fn<typeof fetch>().mockResolvedValue(
       new Response(matrixHtml.replace(/<tbody>[\s\S]*?<\/tbody>/u, "<tbody></tbody>"), {
         status: 200, headers: { "content-type": "text/html" }
       })
     ));
     expect(stillPending.status).toBe("INSPECTED");
     expect(stillPending.apiMetadata).toBeUndefined();
+
+    const unrelatedTenant = buildBrowserDiscovery({
+      courseId: "mount-snow",
+      courseName: "Mount Snow Golf Club",
+      sourceUrl: "https://www.mountsnow.com/",
+      finalUrl: publicSheet,
+      observedUrls: [publicSheet],
+      visibleText: "Mount Snow Golf Club. Tee Time Search: Tee Time Players Daily Rate"
+    });
+    const unrelatedFetch = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(matrixHtml, { status: 200, headers: { "content-type": "text/html" } })
+    );
+    expect(await enrichQuick18Discovery(unrelatedTenant, "Mount Snow Golf Club", unrelatedFetch)).toEqual(unrelatedTenant);
+    expect(unrelatedFetch).not.toHaveBeenCalled();
+    const wrongOfficialTenant = {
+      ...inspected,
+      evidence: {
+        ...inspected.evidence,
+        courseIdentityCorroboration: {
+          ...inspected.evidence.courseIdentityCorroboration!,
+          providerUrl: "https://another-course.quick18.com/teetimes/searchmatrix?teedate=20260929"
+        }
+      }
+    };
+    expect(await enrichQuick18Discovery(wrongOfficialTenant, "Mount Snow Golf Club", unrelatedFetch)).toEqual(wrongOfficialTenant);
+    expect(unrelatedFetch).not.toHaveBeenCalled();
+    const nonMatrixOfficialLink = buildBrowserDiscovery({
+      courseId: "mount-snow",
+      courseName: "Mount Snow Golf Club",
+      sourceUrl: "https://www.mountsnow.com/",
+      finalUrl: publicSheet,
+      observedUrls: [publicSheet],
+      officialCourseWebsite: "https://www.mountsnow.com/",
+      officialPage: {
+        url: "https://www.mountsnow.com/",
+        courseName: "Mount Snow Golf Club",
+        linkCandidates: [{
+          url: "https://mountsnow.quick18.com/teetimes/course/1202/teetime/202609290800?psid=6786&p=0",
+          label: "Book tee times"
+        }]
+      },
+      visibleText: "Mount Snow Golf Club. Tee Time Search: Tee Time Players Daily Rate"
+    });
+    expect(nonMatrixOfficialLink.status).toBe("INSPECTED");
+    expect(nonMatrixOfficialLink.evidence.courseIdentityCorroboration).toBeUndefined();
+    expect(await enrichQuick18Discovery(nonMatrixOfficialLink, "Mount Snow Golf Club", unrelatedFetch)).toEqual(nonMatrixOfficialLink);
+    expect(unrelatedFetch).not.toHaveBeenCalled();
 
     const linkOnly = buildBrowserDiscovery({
       courseId: "mount-snow",

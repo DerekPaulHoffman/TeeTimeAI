@@ -5,7 +5,7 @@ import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const db = vi.hoisted(() => {
-  const model = () => ({ findUnique: vi.fn(), findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn(), updateMany: vi.fn(), upsert: vi.fn() });
+  const model = () => ({ findUnique: vi.fn(), findFirst: vi.fn(), findMany: vi.fn(), count: vi.fn(), create: vi.fn(), updateMany: vi.fn(), upsert: vi.fn() });
   return { $transaction: vi.fn(), $queryRaw: vi.fn(), course: model(), localReaderJob: model(), localReaderAgent: model(),
     courseSupportIncident: model(), courseSupportBatch: model(), courseSupportBatchIncident: model(),
     courseAutomationDiscovery: model(), courseMonitoringStatus: model(), courseMonitoringEvent: model(),
@@ -144,6 +144,7 @@ beforeEach(() => {
   db.localReaderAgent.findUnique.mockResolvedValue(null);
   db.courseMonitoringStatus.findUnique.mockResolvedValue(null);
   db.courseMonitoringEvent.findFirst.mockResolvedValue(null);
+  db.courseSupportBatch.count.mockResolvedValue(0);
   marker.beginCourseProviderObservationInTransaction.mockImplementation(async (_tx, input) => ({ ...input,
     observationStartedAt: new Date(), leaseExpiresAt: new Date(Date.now() + input.ttlMs), supersededUnresolvedObservationStartedAt: null }));
   marker.renewCourseProviderObservationInTransaction.mockResolvedValue(true);

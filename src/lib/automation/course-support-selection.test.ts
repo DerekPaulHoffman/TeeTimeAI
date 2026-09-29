@@ -140,8 +140,8 @@ describe("course-support remediation-aware selection", () => {
     };
     const selected = selectCourseSupportBatch({
       candidates: [
-        candidate("first", { remediationDirective }),
-        candidate("second", { remediationDirective }),
+        candidate("first", { remediationDirective, activeRealSearchCount: 1 }),
+        candidate("second", { remediationDirective, activeRealSearchCount: 1 }),
       ],
       maxCourses: 5,
       now,
@@ -253,7 +253,10 @@ describe("course-support remediation-aware selection", () => {
 
   it("preserves legacy family and fingerprint grouping without a directive", () => {
     const selected = selectCourseSupportBatch({
-      candidates: [candidate("first"), candidate("second")],
+      candidates: [
+        candidate("first", { activeRealSearchCount: 1 }),
+        candidate("second", { activeRealSearchCount: 1 }),
+      ],
       maxCourses: 5,
       now,
     });

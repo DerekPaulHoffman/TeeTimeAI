@@ -423,6 +423,41 @@ describe("owned course-support research context", () => {
     expect(validated).toMatchObject({ outcome: "valid", implementationMayProceedFromResearch: false });
   });
 
+  it("corroborates a dated Quick18 official link against the exact canonical tenant page", async () => {
+    const batch = fixture();
+    const discovery = batch.incidents[0].course.automationDiscoveries[0];
+    const datedUrl = "https://mountsnow.quick18.com/teetimes/searchmatrix?teedate=20260929";
+    Object.assign(discovery.evidence, { finalUrl: datedUrl });
+    discovery.evidence.courseIdentityCorroboration.providerUrl = datedUrl;
+    database.batchFindFirst.mockResolvedValueOnce(batch);
+    const result = await getOwnedCourseSupportResearchContext(input);
+    if (result.outcome !== "ready") throw new Error("Expected owned context");
+    expect(result.researchContextV1.linkChain).toMatchObject({
+      officialBookingUrl: "https://mountsnow.quick18.com/teetimes/searchmatrix",
+      status: "CURRENT_DISCOVERY_CORROBORATED",
+    });
+    expect(result.researchContextV1.recentDiscoveryObservations[0]).toMatchObject({
+      bookingPage: "https://mountsnow.quick18.com/teetimes/searchmatrix",
+      officialLinkCorroborated: true,
+    });
+    expect(result.researchContextV1.conflicts).toEqual([]);
+  });
+
+  it.each([
+    "https://other-course.quick18.com/teetimes/searchmatrix?teedate=20260929",
+    "https://mountsnow.quick18.com/teetimes/searchmatrix?teedate=20260929&players=2",
+  ])("rejects an unbound Quick18 official link: %s", async (unboundUrl) => {
+    const batch = fixture();
+    const discovery = batch.incidents[0].course.automationDiscoveries[0];
+    discovery.evidence.courseIdentityCorroboration.providerUrl = unboundUrl;
+    database.batchFindFirst.mockResolvedValueOnce(batch);
+    const result = await getOwnedCourseSupportResearchContext(input);
+    if (result.outcome !== "ready") throw new Error("Expected owned context");
+    expect(result.researchContextV1.linkChain.status).toBe("SNAPSHOT_ONLY");
+    expect(result.researchContextV1.conflicts).toContain("OFFICIAL_LINK_CHAIN_DIFFERS_FROM_CURRENT_COURSE");
+    expect(result.researchContextV1.missingEvidence).toContain("CURRENT_OFFICIAL_PAGE_TO_BOOKING_LINK");
+  });
+
   it("does not reuse an older official link after a newer discovery names a different booking page", async () => {
     const batch = fixture();
     const course = batch.incidents[0].course;

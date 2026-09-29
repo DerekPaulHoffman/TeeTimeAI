@@ -38,7 +38,7 @@ const prismaMocks = vi.hoisted(() => ({
   monitoringEventFindMany: vi.fn(),
   monitoringEventFindUnique: vi.fn(),
   automationRunUpdateMany: vi.fn(),
-  teeSearchCount: vi.fn(),
+  teeSearchFindMany: vi.fn(),
   teeSearchUpdateMany: vi.fn(),
   queryRaw: vi.fn(),
   queryRawUnsafe: vi.fn(),
@@ -2351,7 +2351,7 @@ const transactionClient = {
     findMany: prismaMocks.monitoringEventFindMany,
   },
   teeSearch: {
-    count: prismaMocks.teeSearchCount,
+    findMany: prismaMocks.teeSearchFindMany,
     updateMany: prismaMocks.teeSearchUpdateMany,
   },
 };
@@ -2413,7 +2413,7 @@ beforeEach(() => {
   prismaMocks.monitoringEventFindMany.mockResolvedValue([]);
   prismaMocks.monitoringEventFindUnique.mockResolvedValue(null);
   prismaMocks.automationRunUpdateMany.mockResolvedValue({ count: 1 });
-  prismaMocks.teeSearchCount.mockResolvedValue(0);
+  prismaMocks.teeSearchFindMany.mockResolvedValue([]);
   prismaMocks.supportIncidentFindMany.mockReset().mockResolvedValue([]);
   prismaMocks.supportIncidentFindUnique.mockResolvedValue(null);
   prismaMocks.batchFindFirst.mockReset().mockResolvedValue(null);
@@ -2551,18 +2551,21 @@ describe("course-support batch selection", () => {
           teeSearch: {
             id: "search-2",
             date: new Date("2026-07-20T00:00:00.000Z"),
+            endTime: "18:00",
           },
         },
         {
           teeSearch: {
             id: "search-1",
             date: new Date("2026-07-18T00:00:00.000Z"),
+            endTime: "18:00",
           },
         },
         {
           teeSearch: {
             id: "search-1",
             date: new Date("2026-07-18T00:00:00.000Z"),
+            endTime: "18:00",
           },
         },
       ]),
@@ -2581,6 +2584,7 @@ describe("course-support batch selection", () => {
       teeSearch: {
         id: `search-${index}`,
         date: new Date("2026-07-20T00:00:00.000Z"),
+        endTime: "18:00",
       },
     }));
 
@@ -2596,12 +2600,14 @@ describe("course-support batch selection", () => {
           teeSearch: {
             id: "same-local-day",
             date: new Date("2026-07-20T00:00:00.000Z"),
+            endTime: "19:00",
           },
         },
         {
           teeSearch: {
             id: "previous-local-day",
             date: new Date("2026-07-19T00:00:00.000Z"),
+            endTime: "18:00",
           },
         },
       ],
@@ -2615,6 +2621,36 @@ describe("course-support batch selection", () => {
       activeRealSearchCount: 1,
       earliestTargetDate: new Date("2026-07-20T00:00:00.000Z"),
     });
+  });
+
+  it("excludes an ended same-day course window while retaining a still-open one", () => {
+    const date = new Date("2026-07-20T00:00:00.000Z");
+    const now = new Date("2026-07-20T20:00:00.000Z");
+    expect(deriveCourseSupportCurrentDemand([
+      { teeSearch: { id: "ended", date, endTime: "15:30" } },
+      { teeSearch: { id: "open", date, endTime: "16:30" } },
+    ], { timeZone: "America/New_York", now })).toEqual({
+      activeRealSearchCount: 1,
+      earliestTargetDate: date,
+    });
+    expect(deriveCourseSupportCurrentDemand([
+      { teeSearch: { id: "ended", date, endTime: "15:30" } },
+    ], { timeZone: "America/New_York", now })).toEqual({
+      activeRealSearchCount: 0,
+      earliestTargetDate: null,
+    });
+  });
+
+  it("uses each course's local end when one search spans eastern and western courses", () => {
+    const date = new Date("2026-07-20T00:00:00.000Z");
+    const preferences = [{ teeSearch: { id: "multi-zone", date, endTime: "15:00" } }];
+    const now = new Date("2026-07-20T20:00:00.000Z");
+    expect(deriveCourseSupportCurrentDemand(preferences, {
+      timeZone: "America/New_York", now,
+    }).activeRealSearchCount).toBe(0);
+    expect(deriveCourseSupportCurrentDemand(preferences, {
+      timeZone: "America/Los_Angeles", now,
+    }).activeRealSearchCount).toBe(1);
   });
 
   it("prioritizes a near-date real fetch failure", () => {
@@ -3621,7 +3657,7 @@ describe("course-support claim demand fencing", () => {
   function incidentRecord(input: {
     engineeringOnly: boolean;
     preferences: Array<{
-      teeSearch: { id: string; date: Date };
+      teeSearch: { id: string; date: Date; endTime: string };
     }>;
   }) {
     const incident = candidate({ engineeringOnly: input.engineeringOnly });
@@ -3646,7 +3682,7 @@ describe("course-support claim demand fencing", () => {
   function targetedRetryIncidentRecord(input: {
     candidate: CourseSupportCandidate;
     retryBatch: CourseSupportRetryBatchEvidence;
-    preferences?: Array<{ teeSearch: { id: string; date: Date } }>;
+    preferences?: Array<{ teeSearch: { id: string; date: Date; endTime: string } }>;
     sourceBatchId?: string;
   }) {
     const sourceBatchId = input.sourceBatchId ?? "private-source-batch-id";
@@ -6940,6 +6976,7 @@ describe("course-support claim demand fencing", () => {
         ? [
             {
               teeSearch: {
+                endTime: "23:59",
                 id: "real-search-campaign",
                 date: new Date("2026-07-20T00:00:00.000Z"),
               },
@@ -7901,6 +7938,7 @@ describe("course-support claim demand fencing", () => {
         preferences: [
           {
             teeSearch: {
+              endTime: "23:59",
               id: "newly-due-real-search",
               date: new Date("2026-07-20T00:00:00.000Z"),
             },
@@ -7917,6 +7955,7 @@ describe("course-support claim demand fencing", () => {
           preferences: [
             {
               teeSearch: {
+                endTime: "23:59",
                 id: "newly-due-real-search",
                 date: new Date("2026-07-20T00:00:00.000Z"),
               },
@@ -7951,6 +7990,7 @@ describe("course-support claim demand fencing", () => {
     const preferences = [
       {
         teeSearch: {
+          endTime: "23:59",
           id: "newly-due-real-search",
           date: new Date("2026-07-20T00:00:00.000Z"),
         },
@@ -8756,6 +8796,7 @@ describe("course-support claim demand fencing", () => {
     const incident = incidentRecord({
       engineeringOnly: false,
       preferences: [{ teeSearch: {
+        endTime: "23:59",
         id: "second-active-search",
         date: new Date("2026-07-18T00:00:00.000Z"),
       } }],
@@ -9438,6 +9479,7 @@ describe("course-support claim demand fencing", () => {
         preferences: [{ teeSearch: {
           id: `active-budget-search-${ordinal}`,
           date: new Date("2026-07-18T00:00:00.000Z"),
+          endTime: "23:59",
         } }],
       });
       return {
@@ -9683,6 +9725,7 @@ describe("course-support claim demand fencing", () => {
         preferences: [
           {
             teeSearch: {
+              endTime: "23:59",
               id: "new-real-demand",
               date: new Date("2026-07-18T00:00:00.000Z"),
             },
@@ -9800,6 +9843,7 @@ describe("course-support claim demand fencing", () => {
 
   it("admits no-path read-only verification beside the shared checkout owner", async () => {
     const activePreferences = [{ teeSearch: {
+      endTime: "23:59",
       id: "active-read-only-search",
       date: new Date("2026-07-18T00:00:00.000Z"),
     } }];
@@ -9977,6 +10021,7 @@ describe("course-support claim demand fencing", () => {
     const incident = incidentRecord({
       engineeringOnly: false,
       preferences: [{ teeSearch: {
+        endTime: "23:59",
         id: "active-implementation-search",
         date: new Date("2026-07-18T00:00:00.000Z"),
       } }],
@@ -10023,6 +10068,7 @@ describe("course-support claim demand fencing", () => {
         preferences: [
           {
             teeSearch: {
+              endTime: "23:59",
               id: "priority-search",
               date: new Date("2026-07-18T00:00:00.000Z"),
             },
@@ -10037,6 +10083,7 @@ describe("course-support claim demand fencing", () => {
       ...incidentRecord({
         engineeringOnly: false,
         preferences: [{ teeSearch: {
+          endTime: "23:59",
           id: "other-active-search",
           date: new Date("2026-07-18T00:00:00.000Z"),
         } }],
@@ -10459,6 +10506,7 @@ describe("course-support claim demand fencing", () => {
         preferences: [
           {
             teeSearch: {
+              endTime: "23:59",
               id: "new-critical-search",
               date: new Date("2026-07-16T00:00:00.000Z"),
             },
@@ -10477,6 +10525,7 @@ describe("course-support claim demand fencing", () => {
           preferences: [
             {
               teeSearch: {
+                endTime: "23:59",
                 id: "new-critical-search",
                 date: new Date("2026-07-16T00:00:00.000Z"),
               },
@@ -10514,6 +10563,7 @@ describe("course-support claim demand fencing", () => {
     const recoveryPreferences = [
       {
         teeSearch: {
+          endTime: "23:59",
           id: "source-complete-real-search",
           date: new Date("2026-07-16T00:00:00.000Z"),
         },
@@ -10984,6 +11034,7 @@ describe("course-support claim demand fencing", () => {
         preferences: [
           {
             teeSearch: {
+              endTime: "23:59",
               id: "active-public-search",
               date: new Date("2026-07-22T00:00:00.000Z"),
             },
@@ -11020,6 +11071,7 @@ describe("course-support claim demand fencing", () => {
         preferences: [
           {
             teeSearch: {
+              endTime: "23:59",
               id: "new-active-public-search",
               date: new Date("2026-07-22T00:00:00.000Z"),
             },
@@ -11053,6 +11105,7 @@ describe("course-support claim demand fencing", () => {
       const preferences = [
         {
           teeSearch: {
+            endTime: "23:59",
             id: "active-public-search",
             date: new Date("2026-07-22T00:00:00.000Z"),
           },
@@ -12361,6 +12414,7 @@ describe("course-support claim demand fencing", () => {
         preferences: [
           {
             teeSearch: {
+              endTime: "23:59",
               id: "expiring-public-search",
               date: new Date("2026-07-22T00:00:00.000Z"),
             },
@@ -12393,6 +12447,7 @@ describe("course-support claim demand fencing", () => {
     const preferences = [
       {
         teeSearch: {
+          endTime: "23:59",
           id: "active-public-search",
           date: new Date("2026-07-22T00:00:00.000Z"),
         },
@@ -12508,6 +12563,7 @@ describe("course-support claim demand fencing", () => {
     const preferences = [
       {
         teeSearch: {
+          endTime: "23:59",
           id: "real-search",
           date: new Date("2026-07-20T00:00:00.000Z"),
         },
@@ -12603,6 +12659,7 @@ describe("course-support claim demand fencing", () => {
           preferences: [
             {
               teeSearch: {
+                endTime: "23:59",
                 id: "late-real-search",
                 date: new Date("2026-07-20T00:00:00.000Z"),
               },
@@ -12629,6 +12686,7 @@ describe("course-support claim demand fencing", () => {
     const preferences = [
       {
         teeSearch: {
+          endTime: "23:59",
           id: "ending-real-search",
           date: new Date("2026-07-20T00:00:00.000Z"),
         },
@@ -12657,11 +12715,12 @@ describe("course-support claim demand fencing", () => {
   });
 
   it("uses locked database time when selected demand expires at local midnight", async () => {
-    const selectionDatabaseNow = new Date("2026-07-15T23:59:00.000Z");
+    const selectionDatabaseNow = new Date("2026-07-15T23:58:00.000Z");
     const claimDatabaseNow = new Date("2026-07-16T00:01:00.000Z");
     const preferences = [
       {
         teeSearch: {
+          endTime: "23:59",
           id: "expiring-real-search",
           date: new Date("2026-07-15T00:00:00.000Z"),
         },
@@ -12691,6 +12750,37 @@ describe("course-support claim demand fencing", () => {
     ).rejects.toThrow("demand changed during claim");
 
     expectClaimLocksBeforeCurrentIncidentRead();
+    expectNoClaimWrites();
+  });
+
+  it("rejects a claim when its same-day course window ends during the locked recheck", async () => {
+    const selectionDatabaseNow = new Date("2026-07-15T19:59:00.000Z");
+    const claimDatabaseNow = new Date("2026-07-15T20:01:00.000Z");
+    const preferences = [{ teeSearch: {
+      id: "same-day-expiring-search",
+      date: new Date("2026-07-15T00:00:00.000Z"),
+      endTime: "20:00",
+    } }];
+    const incident = {
+      ...incidentRecord({ engineeringOnly: false, preferences }),
+      course: {
+        ...incidentRecord({ engineeringOnly: false, preferences }).course,
+        timeZone: "UTC",
+      },
+    };
+    prismaMocks.queryRaw
+      .mockResolvedValueOnce([{ now: selectionDatabaseNow }])
+      .mockResolvedValueOnce([{ now: claimDatabaseNow }]);
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([incident])
+      .mockResolvedValueOnce([incident]);
+
+    await expect(claimCourseSupportBatch({
+      ownerThreadId: "owner-thread-same-day-end",
+      branch: "automation/course-support-20260715-200000",
+      baseSha,
+      now: selectionDatabaseNow,
+    })).rejects.toThrow("demand changed during claim");
     expectNoClaimWrites();
   });
 
@@ -13045,6 +13135,7 @@ describe("course-support claim demand fencing", () => {
           preferences: [
             {
               teeSearch: {
+                endTime: "23:59",
                 id: "new-real-demand",
                 date: new Date("2026-07-20T00:00:00.000Z"),
               },
@@ -13095,6 +13186,7 @@ describe("course-support claim demand fencing", () => {
             preferences: [
               {
                 teeSearch: {
+                  endTime: "23:59",
                   id: "new-critical-demand",
                   date: new Date("2026-07-22T00:00:00.000Z"),
                 },
@@ -13149,6 +13241,7 @@ describe("course-support claim demand fencing", () => {
           preferences: [
             {
               teeSearch: {
+                endTime: "23:59",
                 id: "newly-due-critical-demand",
                 date: new Date(
                   callerNow.getTime() + 7 * 24 * 60 * 60 * 1000 + 30_000,
@@ -13241,6 +13334,7 @@ describe("course-support claim demand fencing", () => {
             preferences: [
               {
                 teeSearch: {
+                  endTime: "23:59",
                   id: "unconfirmed-critical-demand",
                   date: new Date("2026-07-22T00:00:00.000Z"),
                 },
@@ -19624,6 +19718,7 @@ describe("course-support inspection ownership", () => {
           preferences: [
             {
               teeSearch: {
+                endTime: "23:59",
                 id: "search-live",
                 date: new Date("2026-07-18T00:00:00.000Z"),
               },
@@ -19702,6 +19797,7 @@ describe("course-support inspection ownership", () => {
           preferences: [
             {
               teeSearch: {
+                endTime: "23:59",
                 id: "live-search",
                 date: new Date("2026-07-18T00:00:00.000Z"),
               },
@@ -19785,6 +19881,7 @@ describe("course-support inspection ownership", () => {
           preferences: [
             {
               teeSearch: {
+                endTime: "23:59",
                 id: "older-search",
                 date: new Date("2026-07-18T00:00:00.000Z"),
               },
@@ -19804,6 +19901,7 @@ describe("course-support inspection ownership", () => {
           preferences: [
             {
               teeSearch: {
+                endTime: "23:59",
                 id: "new-alert-search",
                 date: new Date("2026-07-18T00:00:00.000Z"),
               },
@@ -19883,6 +19981,7 @@ describe("course-support inspection ownership", () => {
           preferences: [
             {
               teeSearch: {
+                endTime: "23:59",
                 id: "already-human-search",
                 date: new Date("2026-07-18T00:00:00.000Z"),
               },
@@ -19905,6 +20004,7 @@ describe("course-support inspection ownership", () => {
           preferences: [
             {
               teeSearch: {
+                endTime: "23:59",
                 id: "new-alert-search",
                 date: new Date("2026-07-18T00:00:00.000Z"),
               },
@@ -19946,6 +20046,7 @@ describe("course-support inspection ownership", () => {
             preferences: [
               {
                 teeSearch: {
+                  endTime: "23:59",
                   id: "proven-human-search",
                   date: new Date("2026-07-18T00:00:00.000Z"),
                 },
@@ -19968,6 +20069,7 @@ describe("course-support inspection ownership", () => {
             preferences: [
               {
                 teeSearch: {
+                  endTime: "23:59",
                   id: "stale-marker-search",
                   date: new Date("2026-07-18T00:00:00.000Z"),
                 },
@@ -20001,6 +20103,7 @@ describe("course-support inspection ownership", () => {
           preferences: [
             {
               teeSearch: {
+                endTime: "23:59",
                 id: "due-search",
                 date: new Date("2026-07-18T00:00:00.000Z"),
               },
@@ -20041,6 +20144,7 @@ describe("course-support inspection ownership", () => {
       course: {
         timeZone: "America/New_York",
         preferences: [{ teeSearch: {
+          endTime: "23:59",
           id: "due-search",
           date: new Date("2026-07-18T00:00:00.000Z"),
         } }],
@@ -20082,6 +20186,7 @@ describe("course-support inspection ownership", () => {
       course: {
         timeZone: "America/New_York",
         preferences: [{ teeSearch: {
+          endTime: "23:59",
           id: "due-search",
           date: new Date("2026-07-18T00:00:00.000Z"),
         } }],
@@ -25505,7 +25610,10 @@ describe("detached verification atomic batch fences", () => {
     prismaMocks.verificationRequestFindUnique.mockResolvedValue(
       atomicRequest(),
     );
-    prismaMocks.teeSearchCount.mockResolvedValue(1);
+    prismaMocks.teeSearchFindMany.mockResolvedValue([{
+      date: new Date("2026-07-15T00:00:00.000Z"),
+      endTime: "14:00",
+    }]);
     verificationMocks.getEligibleCourseSupportVerificationProof.mockResolvedValue(
       eligibleProof(),
     );
@@ -25526,12 +25634,14 @@ describe("detached verification atomic batch fences", () => {
         }),
       }),
     );
-    expect(prismaMocks.teeSearchCount).toHaveBeenCalledWith({
+    expect(prismaMocks.teeSearchFindMany).toHaveBeenCalledWith({
       where: {
         status: "ACTIVE",
         date: { gte: new Date("2026-07-15T00:00:00.000Z") },
         preferences: { some: { courseId: "course-1" } },
       },
+      take: 1_025,
+      select: { date: true, endTime: true },
     });
     expect(prismaMocks.transaction).toHaveBeenCalledWith(expect.any(Function), {
       isolationLevel: "Serializable",
@@ -25588,7 +25698,7 @@ describe("detached verification atomic batch fences", () => {
           data: expect.objectContaining({ result: "STALE_EVIDENCE" }),
         }),
       );
-      expect(prismaMocks.teeSearchCount).not.toHaveBeenCalled();
+      expect(prismaMocks.teeSearchFindMany).not.toHaveBeenCalled();
       expect(
         verificationMocks.buildCourseSupportProviderSnapshotFingerprint,
       ).toHaveBeenCalledWith(
@@ -25732,7 +25842,7 @@ describe("detached verification atomic batch fences", () => {
     );
   });
 
-  it("persists detached success for historical real demand after its searches end", async () => {
+  it("persists detached success after an active same-day course window ends", async () => {
     prismaMocks.batchFindFirst.mockResolvedValue(verificationBatch(false));
     prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
     prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
@@ -25742,6 +25852,10 @@ describe("detached verification atomic batch fences", () => {
     verificationMocks.getEligibleCourseSupportVerificationProof.mockResolvedValue(
       eligibleProof(),
     );
+    prismaMocks.teeSearchFindMany.mockResolvedValue([{
+      date: new Date("2026-07-15T00:00:00.000Z"),
+      endTime: "12:00",
+    }]);
 
     await verifyCourseSupportBatch({
       batchId: "batch-1",
@@ -25756,13 +25870,42 @@ describe("detached verification atomic batch fences", () => {
         data: expect.objectContaining({ result: "RESTORED" }),
       }),
     );
-    expect(prismaMocks.teeSearchCount).toHaveBeenCalledWith({
+    expect(prismaMocks.teeSearchFindMany).toHaveBeenCalledWith({
       where: {
         status: "ACTIVE",
         date: { gte: new Date("2026-07-15T00:00:00.000Z") },
         preferences: { some: { courseId: "course-1" } },
       },
+      take: 1_025,
+      select: { date: true, endTime: true },
     });
+  });
+
+  it("allows terminal detached closeout after an active same-day course window ends", async () => {
+    prismaMocks.batchFindFirst.mockResolvedValue(closeoutBatch("RESTORED"));
+    prismaMocks.verificationRequestFindUnique.mockResolvedValue(
+      atomicRequest(),
+    );
+    prismaMocks.teeSearchFindMany.mockResolvedValue([{
+      date: new Date("2026-07-15T00:00:00.000Z"),
+      endTime: "12:00",
+    }]);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 1 });
+
+    await expect(closeoutCourseSupportBatch({
+      batchId: "batch-1",
+      leaseToken: "lease-1",
+      ownerThreadId: "owner-thread",
+      requestedOutcome: "success",
+      now,
+    })).resolves.toMatchObject({ outcome: "success" });
+    expect(prismaMocks.teeSearchFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: { date: true, endTime: true },
+      }),
+    );
   });
 
   it("reports aggregate pending detached verification and requires a verify rerun", async () => {
@@ -27276,7 +27419,10 @@ describe("detached verification atomic batch fences", () => {
     prismaMocks.verificationRequestFindUnique.mockResolvedValue(
       atomicRequest(),
     );
-    prismaMocks.teeSearchCount.mockResolvedValue(1);
+    prismaMocks.teeSearchFindMany.mockResolvedValue([{
+      date: new Date("2026-07-15T00:00:00.000Z"),
+      endTime: "14:00",
+    }]);
 
     await expect(
       closeoutCourseSupportBatch({
@@ -27314,7 +27460,7 @@ describe("detached verification atomic batch fences", () => {
       }),
     ).rejects.toThrow("changed before terminal closeout");
     expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
-    expect(prismaMocks.teeSearchCount).not.toHaveBeenCalled();
+    expect(prismaMocks.teeSearchFindMany).not.toHaveBeenCalled();
   });
 
   it("wakes runnable parked siblings after a partial reusable-support closeout", async () => {

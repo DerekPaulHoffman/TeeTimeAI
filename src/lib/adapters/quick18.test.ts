@@ -102,7 +102,7 @@ describe("Quick18 public read-only tee sheet", () => {
     expect(parse(html, 4).map((slot) => slot.startsAt)).toEqual(["2026-09-29T12:00"]);
   });
 
-  it("reports zero slots when the selected date has an explicit no-times row", async () => {
+  it("reports zero slots for a complete server-rendered empty matrix or explicit no-times row", async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(page('<tr><td colspan="4">No tee times available</td></tr>'), { status: 200, headers: { "content-type": "text/html" } })
     );
@@ -112,13 +112,14 @@ describe("Quick18 public read-only tee sheet", () => {
         fetchImpl
       )
     ).resolves.toEqual({ slots: [], targetDateStatus: "OPEN", bookingWindowEvidence: null });
+    expect(parse(page(""))).toEqual([]);
     expect(parse(page(row("8:00<div>AM</div>", "1 to 3 players", "202609290800")), 4)).toEqual([]);
   });
 
   it("fails closed on a changed date, account page, and unsafe selection links", () => {
     expect(() => parse(page("", "9/30/2026"))).toThrow(/requested date/u);
     expect(() => parse("<html><h1>Sign in</h1></html>")).toThrow(/requested date/u);
-    expect(() => parse(page(""))).toThrow(/no completed no-times evidence/u);
+    expect(() => parse(page("").replace("</body></html>", ""))).toThrow(/incomplete/u);
     expect(() => parse(page("").replace("</body>", "<div>Loading tee times, please wait</div></body>"))).toThrow(/still loading/u);
     expect(() => parse(page("").replace('id="searchMatrix"', 'id="loading"'))).toThrow(/matrix is missing/u);
     expect(() => parse(page('<tr><td colspan="4">No tee times available</td></tr>').replace("</body>", "<div>Error loading tee times</div></body>"))).toThrow(/still loading/u);

@@ -157,7 +157,7 @@ import {
   type ResponderFailureDomain,
   type ResponderOutcome
 } from "./course-support-responder-policy";
-import { getCourseLocalDateStorageBoundary } from "./date-boundary";
+import { getCourseLocalDateStorageBoundary, isSearchWindowActive } from "./date-boundary";
 import { COURSE_SUPPORT_WRITER_LANE } from "./writer-lanes";
 import {
   areCourseSupportCompletedAttemptsOrchestrationOnly,
@@ -534,7 +534,7 @@ const COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT = {
           }
         },
         take: COURSE_SUPPORT_CANDIDATE_PREFERENCE_READ_LIMIT + 1,
-        select: { teeSearch: { select: { id: true, date: true } } }
+        select: { teeSearch: { select: { id: true, date: true, endTime: true } } }
       },
       automationDiscoveries: {
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
@@ -615,6 +615,7 @@ type CourseSupportDemandPreference = {
   teeSearch: {
     id: string;
     date: Date;
+    endTime: string;
   };
 };
 
@@ -632,8 +633,19 @@ export function deriveCourseSupportCurrentDemand(
     : null;
   const searchDates = new Map<string, Date>();
   for (const preference of preferences) {
-    if (dateBoundary && preference.teeSearch.date.getTime() < dateBoundary.getTime()) {
-      continue;
+    if (context && dateBoundary) {
+      if (
+        preference.teeSearch.date.getTime() < dateBoundary.getTime() ||
+        !isSearchWindowActive({
+          date: preference.teeSearch.date,
+          endTime: preference.teeSearch.endTime,
+          courseTimeZones: [context.timeZone],
+          fallbackTimeZone: context.timeZone,
+          now: context.now,
+        })
+      ) {
+        continue;
+      }
     }
     const current = searchDates.get(preference.teeSearch.id);
     if (!current || preference.teeSearch.date.getTime() < current.getTime()) {
@@ -3474,7 +3486,7 @@ export async function inspectCourseSupportQueue(input?: {
                 },
                 take: COURSE_SUPPORT_CANDIDATE_PREFERENCE_READ_LIMIT + 1,
                 select: {
-                  teeSearch: { select: { id: true, date: true } },
+                  teeSearch: { select: { id: true, date: true, endTime: true } },
                 },
               },
             },
@@ -5350,7 +5362,7 @@ export async function claimCourseSupportBatch(input: {
                       take:
                         COURSE_SUPPORT_CANDIDATE_PREFERENCE_READ_LIMIT + 1,
                       select: {
-                        teeSearch: { select: { id: true, date: true } },
+                        teeSearch: { select: { id: true, date: true, endTime: true } },
                       },
                     },
                   },
@@ -19953,7 +19965,7 @@ async function revalidateDetachedVerificationProof(
     return false;
   }
 
-  const liveFutureDemand = await transaction.teeSearch.count({
+  const potentiallyCurrentSearches = await transaction.teeSearch.findMany({
     where: {
       status: "ACTIVE",
       date: {
@@ -19964,8 +19976,18 @@ async function revalidateDetachedVerificationProof(
       },
       preferences: { some: { courseId: input.courseId } },
     },
+    take: COURSE_SUPPORT_CANDIDATE_PREFERENCE_READ_LIMIT + 1,
+    select: { date: true, endTime: true },
   });
-  return liveFutureDemand === 0;
+  return potentiallyCurrentSearches.length <=
+    COURSE_SUPPORT_CANDIDATE_PREFERENCE_READ_LIMIT &&
+    !potentiallyCurrentSearches.some((search) => isSearchWindowActive({
+      date: search.date,
+      endTime: search.endTime,
+      courseTimeZones: [batchIncident.course.timeZone],
+      fallbackTimeZone: batchIncident.course.timeZone,
+      now: input.now,
+    }));
 }
 
 export function isDurableTerminalProof(

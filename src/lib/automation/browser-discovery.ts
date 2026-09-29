@@ -460,6 +460,7 @@ export async function enrichBrowserDiscoveryWithProviderLease(
     const clubCaddieDiscovery = await enrichClubCaddieDiscovery(directoryDiscovery, courseName, leasedFetch);
     const quick18Discovery = await enrichQuick18Discovery(
       clubCaddieDiscovery,
+      courseName,
       leasedFetch
     );
     const teeItUpDiscovery = await enrichTeeItUpDiscovery(
@@ -949,7 +950,7 @@ export function buildBrowserDiscovery(
     learnTeeItUpDiscovery(providerEvidence, providerObservedUrls),
     learnChelseaDiscovery(providerEvidence, providerObservedUrls),
     learnGolfBackDiscovery(providerEvidence, providerObservedUrls),
-    learnQuick18Discovery(providerEvidence),
+    learnQuick18Discovery(unscopedEvidence),
     learnGolfNowDiscovery(providerEvidence, providerObservedUrls),
     learnWebTracDiscovery(providerEvidence, providerObservedUrls),
     learnSupremeGolfDiscovery(providerEvidence, providerObservedUrls),
@@ -996,11 +997,27 @@ export function buildBrowserDiscovery(
     return nonRunnableOfficialBookingLink;
   }
 
+  if (unscopedEvidence.finalUrl && isQuick18PublicSearchUrl(unscopedEvidence.finalUrl)) {
+    return {
+      courseId: evidence.courseId,
+      status: "INSPECTED",
+      detectedPlatform: "UNKNOWN",
+      sourceUrl: providerEvidence.sourceUrl,
+      confidence: 0.25,
+      evidence: {
+        finalUrl: unscopedEvidence.finalUrl,
+        observedUrls: providerObservedUrls,
+        visibleText: summarizeVisibleText(unscopedEvidence.visibleText),
+        learnedFrom: "quick18-official-link-unconfirmed"
+      }
+    };
+  }
+
   const clubCaddieCandidates = getClubCaddieCandidates(
     providerEvidence,
     providerObservedUrls
   );
-  const bookingUrl = clubCaddieCandidates.length > 0
+  const pickedBookingUrl = clubCaddieCandidates.length > 0
     ? pickSafeBrowserDiscoveryFallbackUrl([providerEvidence.sourceUrl])
     : ( pickBookingLikeUrl(
         providerObservedUrls,
@@ -1011,6 +1028,21 @@ export function buildBrowserDiscovery(
         providerEvidence.sourceUrl,
         getSafeNonProviderBarrierFallback(providerEvidence.accessBarriers)
       ]));
+  const bookingUrl = pickedBookingUrl && isQuick18PublicSearchUrl(pickedBookingUrl) &&
+    !getOfficialCourseProviderLinkCorroboration(
+      {
+        courseId: evidence.courseId,
+        status: "INSPECTED",
+        detectedPlatform: "CUSTOM",
+        sourceUrl: evidence.sourceUrl,
+        bookingUrl: pickedBookingUrl,
+        confidence: 0.45,
+        evidence: { observedUrls: [], learnedFrom: "browser-visible-links" }
+      },
+      unscopedEvidence
+    )
+      ? undefined
+      : pickedBookingUrl;
   const embeddedLegacyProphetBooking = (
     providerEvidence.linkCandidates ?? []
   ).some(
@@ -2696,7 +2728,7 @@ function learnQuick18Discovery(
     return null;
   }
   const bookingBaseUrl = `${finalUrl.origin}/teetimes/searchmatrix`;
-  return {
+  const pending: BrowserDiscovery = {
     courseId: evidence.courseId,
     status: "INSPECTED",
     detectedPlatform: "CUSTOM",
@@ -2710,16 +2742,26 @@ function learnQuick18Discovery(
       learnedFrom: "quick18-public-matrix-pending"
     }
   };
+  const officialLink = getOfficialCourseProviderLinkCorroboration(pending, evidence);
+  return officialLink
+    ? { ...pending, evidence: { ...pending.evidence, courseIdentityCorroboration: officialLink } }
+    : null;
 }
 
 export async function enrichQuick18Discovery(
   discovery: BrowserDiscovery,
+  courseName: string,
   fetchImpl: typeof fetch = fetch
 ): Promise<BrowserDiscovery> {
+  const officialLink = discovery.evidence.courseIdentityCorroboration;
   if (
     discovery.status !== "INSPECTED" ||
     discovery.evidence.learnedFrom !== "quick18-public-matrix-pending" ||
-    !discovery.bookingUrl
+    !discovery.bookingUrl ||
+    officialLink?.kind !== "OFFICIAL_COURSE_PROVIDER_LINK" ||
+    !officialLink.courseName ||
+    !haveCompatibleCourseNames(courseName, officialLink.courseName) ||
+    canonicalQuick18Matrix(officialLink.providerUrl) !== discovery.bookingUrl
   ) return discovery;
   const evidenceUrl = parseUrl(discovery.evidence.finalUrl);
   const compactDate = evidenceUrl?.searchParams.get("teedate");
@@ -2754,6 +2796,13 @@ export async function enrichQuick18Discovery(
     confidence: 0.9,
     evidence: { ...discovery.evidence, learnedFrom: "quick18-validated-public-matrix" }
   };
+}
+
+function canonicalQuick18Matrix(value: string) {
+  const url = parseUrl(value);
+  return url && isQuick18PublicSearchUrl(url)
+    ? `${url.origin}/teetimes/searchmatrix`
+    : null;
 }
 
 function learnProtectedCpsDiscovery(
@@ -2888,8 +2937,14 @@ function getOfficialCourseProviderLinkCorroboration(
   ) {
     return null;
   }
+  const quick18Matrix = provider?.providerFamilyKey === "QUICK18"
+    ? canonicalQuick18Matrix(providerUrl.toString())
+    : null;
   const exactProviderLink = evidence.officialPage?.linkCandidates.find(
-    (candidate) => haveSameExactUrl(candidate.url, providerUrl.toString())
+    (candidate) =>
+      haveSameExactUrl(candidate.url, providerUrl.toString()) ||
+      (quick18Matrix !== null &&
+        canonicalQuick18Matrix(candidate.url) === quick18Matrix)
   );
   if (!exactProviderLink) {
     return null;
