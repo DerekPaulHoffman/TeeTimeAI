@@ -23,6 +23,8 @@ import {
 } from "./course-support-verification-watch";
 import { getCourseSupportRetainedSourceRecovery } from "./course-support-retained-source-recovery";
 import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
+import { buildCourseSupportClaimActionPlan } from "./course-support-action-plan";
+import { routeCourseSupportRemediation } from "./course-support-remediation-routing";
 
 const runtimeVersion = "a".repeat(40);
 
@@ -203,6 +205,106 @@ function ownedBrowserPersistenceTransaction(result: string) {
 }
 
 describe("selectOwnedCourseSupportBrowserStageTargets", () => {
+  it("advances negative unsupported-provider stages to independent unresolved evidence without monitoring proof", () => {
+    const course = {
+      isPublic: true,
+      detectedPlatform: "CUSTOM",
+      providerFamilyKey: "EZLINKS",
+      website: "https://official-course.example/",
+      detectedBookingUrl: "https://public-course.ezlinksgolf.com/",
+      bookingMetadata: null,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "NEEDS_REVIEW",
+      automationReason: "NONE",
+      failureClass: "UNSUPPORTED_FAMILY" as const,
+      discoveryAttempt: "HTTP_INCONCLUSIVE" as const,
+    };
+    let attemptLedger = ledger(throughHttpRetry);
+    const expectOwnedStage = (stage: "RENDERED_BROWSER_DISCOVERY" | "BROWSER_ADAPTER_RETRY" | "LOCAL_READER" | "INDEPENDENT_CONFIRMATION") => {
+      const assessment = assessAutomationPlaybook(attemptLedger, 1);
+      expect(assessment).toMatchObject({
+        valid: true,
+        conclusion: "INCOMPLETE",
+        nextStage: stage,
+      });
+      const route = routeCourseSupportRemediation({
+        ...course,
+        attemptCount: 1,
+        providerContractEvidenceAvailable: false,
+        playbookAssessment: assessment,
+      });
+      expect(route).toMatchObject({
+        workMode: "ADVANCE_DISCOVERY",
+        allowUnchangedRuntime: true,
+        requiresImplementationPath: false,
+        attemptSignature: { playbookStage: stage },
+      });
+      expect(buildCourseSupportClaimActionPlan({
+        route,
+        incidentKind: "NEEDS_ADAPTER",
+        incidentProviderFamilyKey: "EZLINKS",
+        course,
+      })).toMatchObject({
+        primaryAction: "VERIFY_CURRENT_RUNTIME",
+        allowedActions: ["VERIFY_CURRENT_RUNTIME"],
+      });
+    };
+
+    expectOwnedStage("RENDERED_BROWSER_DISCOVERY");
+    attemptLedger = appendAutomationPlaybookEvent(attemptLedger, {
+      ...completedStage("RENDERED_BROWSER_DISCOVERY", "RENDERED_BROWSER"),
+      providerExecution: true,
+    });
+    expectOwnedStage("BROWSER_ADAPTER_RETRY");
+    attemptLedger = appendAutomationPlaybookEvent(attemptLedger, {
+      ...completedStage("BROWSER_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER"),
+      transition: "NOT_APPLICABLE",
+      evidenceKind: "TOOLING",
+      skipReason: "NO_RUNNABLE_ADAPTER",
+      providerExecution: false,
+    });
+    expectOwnedStage("LOCAL_READER");
+    attemptLedger = appendAutomationPlaybookEvent(attemptLedger, {
+      ...completedStage("LOCAL_READER", "LOCAL_READER"),
+      transition: "NOT_APPLICABLE",
+      evidenceKind: "TOOLING",
+      skipReason: "NO_LOCAL_READER_CAPABILITY",
+      providerExecution: false,
+    });
+
+    expect(selectOwnedCourseSupportBrowserStageTargets({
+      batchId: "batch-1",
+      entries: [{
+        courseId: "course-1",
+        cycle: 1,
+        result: "PENDING",
+        incident: {
+          id: "incident-1",
+          cycle: 1,
+          status: "AUTO_INVESTIGATING",
+          activeBatchId: "batch-1",
+          attemptLedger,
+        },
+      }],
+    })).toEqual([{ ordinal: 1, courseId: "course-1", stage: "INDEPENDENT_CONFIRMATION" }]);
+    expectOwnedStage("INDEPENDENT_CONFIRMATION");
+    attemptLedger = appendAutomationPlaybookEvent(attemptLedger, {
+      ...completedStage("INDEPENDENT_CONFIRMATION", "INDEPENDENT_CONFIRMATION"),
+      evidenceKind: "RENDERED_PAGE",
+      providerExecution: true,
+    });
+    expect(assessAutomationPlaybook(attemptLedger, 1)).toMatchObject({
+      valid: true,
+      conclusion: "UNRESOLVED_EXHAUSTED",
+      nextStage: null,
+      completedStages: [
+        "OFFICIAL_IDENTITY", "TYPED_ADAPTER", "OFFICIAL_HTTP_DISCOVERY",
+        "HTTP_ADAPTER_RETRY", "RENDERED_BROWSER_DISCOVERY",
+        "BROWSER_ADAPTER_RETRY", "LOCAL_READER", "INDEPENDENT_CONFIRMATION",
+      ],
+    });
+  });
+
   it.each(["PENDING", "STALE_EVIDENCE", "RETRY_SCHEDULED"])(
     "keeps an owned %s member eligible for its current browser stage",
     (result) => {
