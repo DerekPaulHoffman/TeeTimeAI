@@ -504,6 +504,36 @@ async function loadStartedReaderShortRetryMarkers(
   });
   return new Map(markers.map((marker) => [marker.idempotencyKey!, marker]));
 }
+function hasPriorStartedReaderContinuation(input: {
+  courseId: string;
+  cycle: number;
+  batchIncidents?: StartedReaderContinuationHistory;
+}) {
+  return input.batchIncidents?.some((entry) => {
+    if (entry.cycle !== input.cycle) return false;
+    const remediation = asJsonObject(asJsonObject(entry.batch.summary).remediation);
+    return Array.isArray(remediation.attempts) && remediation.attempts.some((attempt) => {
+      const planned = asJsonObject(attempt);
+      return planned.courseRef ===
+        createCourseSupportRemediationCourseRef(input.courseId) &&
+        planned.reason === "STARTED_LOCAL_READER_CONTINUATION";
+    });
+  }) ?? false;
+}
+async function loadSelectableStartedReaderShortRetryMarkers(
+  client: Pick<Prisma.TransactionClient, "courseMonitoringEvent">,
+  incidents: readonly {
+    id: string;
+    cycle: number;
+    courseId: string;
+    batchIncidents?: StartedReaderContinuationHistory;
+  }[],
+) {
+  return loadStartedReaderShortRetryMarkers(
+    client,
+    incidents.filter(hasPriorStartedReaderContinuation),
+  );
+}
 const COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT = {
   id: true,
   courseId: true,
@@ -3736,7 +3766,7 @@ export async function inspectCourseSupportQueue(input?: {
   const activeStatusBatchCount =
     activeBatches.length + Math.max(expiredBatchCount, expiredBatch ? 1 : 0);
   assertBoundedCourseSupportCandidateQueue(rawDueIncidents);
-  const readerShortRetryMarkers = await loadStartedReaderShortRetryMarkers(
+  const readerShortRetryMarkers = await loadSelectableStartedReaderShortRetryMarkers(
     prisma,
     rawDueIncidents,
   );
@@ -4796,16 +4826,7 @@ export async function claimCourseSupportBatch(input: {
               "Course-support demand changed during claim; rerun selection.",
             );
           }
-          const hasPriorReaderContinuation = current.batchIncidents.some((entry) => {
-            if (entry.cycle !== current.cycle) return false;
-            const remediation = asJsonObject(asJsonObject(entry.batch.summary).remediation);
-            return Array.isArray(remediation.attempts) && remediation.attempts.some((attempt) => {
-              const planned = asJsonObject(attempt);
-              return planned.courseRef ===
-                createCourseSupportRemediationCourseRef(current.courseId) &&
-                planned.reason === "STARTED_LOCAL_READER_CONTINUATION";
-            });
-          });
+          const hasPriorReaderContinuation = hasPriorStartedReaderContinuation(current);
           const shortRetryMarkerKey =
             buildCourseSupportVerificationWatchShortRetryIdempotencyKey({
               incidentId: current.id,
@@ -5353,7 +5374,7 @@ export async function claimCourseSupportBatch(input: {
             "Course-support active ownership changed during locked claim; rerun selection.",
           );
         }
-        const lockedShortRetryMarkers = await loadStartedReaderShortRetryMarkers(
+        const lockedShortRetryMarkers = await loadSelectableStartedReaderShortRetryMarkers(
           tx,
           currentIncidents,
         );
@@ -5603,7 +5624,7 @@ export async function claimCourseSupportBatch(input: {
               },
             });
           assertBoundedCourseSupportCandidateQueue(outsideDueIncidents);
-          const outsideShortRetryMarkers = await loadStartedReaderShortRetryMarkers(
+          const outsideShortRetryMarkers = await loadSelectableStartedReaderShortRetryMarkers(
             tx,
             outsideDueIncidents,
           );
@@ -9815,6 +9836,7 @@ const COURSE_SUPPORT_DECISION_ROUTING_REASONS = new Set<
   "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF",
   "CLASSIFICATION_READY",
   "UNCHANGED_ATTEMPT_ALREADY_RECORDED",
+  "STARTED_LOCAL_READER_CONTINUATION",
   "OPERATIONAL_RETRY_BUDGET_EXHAUSTED",
   "MATERIAL_CHANGE_REOPENED",
 ]);
@@ -17443,7 +17465,7 @@ async function listCourseSupportClaimCandidates(now: Date) {
   let historyBlockedCount = 0;
   const incidents = await listCourseSupportClaimCandidateIncidents(now, prisma,
     count => { historyBlockedCount = count; });
-  const readerShortRetryMarkers = await loadStartedReaderShortRetryMarkers(
+  const readerShortRetryMarkers = await loadSelectableStartedReaderShortRetryMarkers(
     prisma,
     incidents,
   );

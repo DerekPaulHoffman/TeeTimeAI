@@ -651,6 +651,43 @@ function expectDecisionBasisReconciles(
 }
 
 describe("course-support closeout decision basis", () => {
+  it("reads back an owned local-reader continuation closeout", () => {
+    const pair = decisionAttemptPair({
+      courseId: "reader-continuation",
+      retryBudget: {
+        maximumAttempts: 1,
+        attemptsCompleted: 0,
+        attemptsRemaining: 1,
+        exhausted: false,
+      },
+      execution: { playbookAttemptRecorded: true },
+    });
+    const approach = {
+      workMode: "ADVANCE_DISCOVERY",
+      strategyAction: "REPAIR_PROVIDER_ADAPTER",
+      playbookStage: "LOCAL_READER",
+    };
+    pair.planned.reason = "STARTED_LOCAL_READER_CONTINUATION";
+    pair.planned.approach = approach;
+    pair.closeout.approach = approach;
+
+    const result = buildCourseSupportCloseoutRemediationDecisionBasis({
+      incidents: [{ courseId: "reader-continuation", batchIncidentId: "reader-entry" }],
+      plannedAttempts: [pair.planned],
+      closeoutAttempts: [pair.closeout],
+      now,
+    });
+
+    expect(result).toMatchObject({
+      remediationEvidenceAvailableIncidentCount: 1,
+      executionEvidenceAvailableIncidentCount: 1,
+      retryBudgetEvidenceAvailableIncidentCount: 1,
+      retryBudgetApplicableIncidentCount: 1,
+      retryBudgetAttemptsRemainingTotal: 1,
+    });
+    expectDecisionBasisReconciles(result, 1);
+  });
+
   it("aggregates exact multi-course execution, budget, and cooldown evidence", () => {
     const first = decisionAttemptPair({
       courseId: "decision-course-1",
@@ -11343,10 +11380,23 @@ describe("course-support claim demand fencing", () => {
         date: new Date("2026-07-22T00:00:00.000Z"),
       },
     }];
+    const baseIncident = incidentRecord({ engineeringOnly: false, preferences });
     const incident = {
-      ...incidentRecord({ engineeringOnly: false, preferences }),
+      ...baseIncident,
       confirmedAt: null,
+      providerFamilyKey: "EZLINKS",
       attemptLedger: localReaderStartedAttemptLedger(),
+      course: {
+        ...baseIncident.course,
+        isPublic: true,
+        detectedPlatform: "CUSTOM",
+        providerFamilyKey: "EZLINKS",
+        detectedBookingUrl: "https://public-course.ezlinksgolf.com/",
+        website: "https://public-course.example/",
+        bookingMetadata: null,
+        bookingMethod: "PUBLIC_ONLINE",
+        automationEligibility: "NEEDS_REVIEW",
+      },
     };
     const source = targetedRetryIncidentRecord({
       candidate: incident,
