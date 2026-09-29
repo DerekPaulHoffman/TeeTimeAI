@@ -74,6 +74,7 @@ import {
   buildProviderFailureFingerprint,
   normalizeProviderFamilyKey,
 } from "./provider-capabilities";
+import { getProviderExecutionEvidenceObservedAt } from "./provider-execution-evidence";
 import {
   buildCourseSupportProviderSnapshotFingerprint,
   COURSE_SUPPORT_VERIFICATION_ENDPOINT_DELIVERY_MARGIN_MS,
@@ -4450,12 +4451,20 @@ export async function reconcileCourseMonitoringDeadline(input: {
           outcome: true,
           observedAt: true,
           runtimeVersion: true,
+          rawSummary: true,
         },
       });
+      const freshSuccessProviderObservedAt = freshSuccessProbe
+        ? getProviderExecutionEvidenceObservedAt({
+            rawSummary: freshSuccessProbe.rawSummary,
+            probeObservedAt: freshSuccessProbe.observedAt,
+          })
+        : null;
       if (
         freshSuccessProbe &&
+        freshSuccessProviderObservedAt &&
         recoveryFenceAt &&
-        freshSuccessProbe.observedAt > recoveryFenceAt &&
+        freshSuccessProviderObservedAt > recoveryFenceAt &&
         freshSuccessProbe.observedAt <= input.now
       ) {
         if (staleBatchNeedsEndpointReconcile && activeBatch) {
@@ -4475,13 +4484,13 @@ export async function reconcileCourseMonitoringDeadline(input: {
             },
             data: {
               state: "HEALTHY",
-              lastSuccessfulAt: freshSuccessProbe.observedAt,
+              lastSuccessfulAt: freshSuccessProviderObservedAt,
               consecutiveFailures: 0,
               failureFingerprint: null,
               firstDegradedAt: null,
               nextAutomaticAttemptAt: null,
               revalidationRequestedAt: null,
-              stateChangedAt: freshSuccessProbe.observedAt,
+              stateChangedAt: freshSuccessProviderObservedAt,
               revision: { increment: 1 },
             },
           });
@@ -4501,14 +4510,14 @@ export async function reconcileCourseMonitoringDeadline(input: {
               },
               data: {
                 status: "RESOLVED",
-                resolvedAt: freshSuccessProbe.observedAt,
+                resolvedAt: freshSuccessProviderObservedAt,
                 resolution: "MONITORING_RESTORED",
                 resolutionMessage:
                   "Reconciled from a fresh successful customer monitoring probe.",
                 nextAction: null,
                 nextAttemptAt: null,
                 nextReminderAt: null,
-                lastSeenAt: freshSuccessProbe.observedAt,
+                lastSeenAt: freshSuccessProviderObservedAt,
                 revision: { increment: 1 },
               },
             });
@@ -4529,7 +4538,7 @@ export async function reconcileCourseMonitoringDeadline(input: {
           message:
             "A durable fresh probe was adopted after monitoring closeout was interrupted.",
           runtimeVersion: freshSuccessProbe.runtimeVersion,
-          occurredAt: freshSuccessProbe.observedAt,
+          occurredAt: freshSuccessProviderObservedAt,
           audit: {
             recoveredFromProbeCrashBoundary: true,
             customerDataIncluded: false,
@@ -4550,7 +4559,7 @@ export async function reconcileCourseMonitoringDeadline(input: {
             input.source,
             freshSuccessProbe.runtimeVersion,
           ),
-          occurredAt: freshSuccessProbe.observedAt,
+          occurredAt: freshSuccessProviderObservedAt,
           audit: {
             cycle: incident.cycle,
             confirmedAt: incident.confirmedAt?.toISOString() ?? null,

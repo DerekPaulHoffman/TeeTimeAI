@@ -6206,6 +6206,10 @@ describe("course monitoring watchdog", () => {
         outcome,
         observedAt: successObservedAt,
         runtimeVersion: "success-runtime",
+        rawSummary: {
+          providerExecution: "RUNNABLE_PROVIDER_CHECK",
+          providerObservedAt: successObservedAt.toISOString(),
+        },
       });
       prismaMocks.courseMonitoringStatus.findMany.mockResolvedValue([]);
 
@@ -6229,6 +6233,7 @@ describe("course monitoring watchdog", () => {
           outcome: true,
           observedAt: true,
           runtimeVersion: true,
+          rawSummary: true,
         },
       });
       expect(
@@ -6348,6 +6353,10 @@ describe("course monitoring watchdog", () => {
       outcome: "NO_MATCH",
       observedAt: successObservedAt,
       runtimeVersion: "success-runtime",
+      rawSummary: {
+        providerExecution: "RUNNABLE_PROVIDER_CHECK",
+        providerObservedAt: successObservedAt.toISOString(),
+      },
     });
     prismaMocks.courseMonitoringStatus.findMany.mockResolvedValue([]);
 
@@ -6368,6 +6377,7 @@ describe("course monitoring watchdog", () => {
 
   it("adopts fresh success without detaching a live responder batch", async () => {
     const successObservedAt = new Date("2026-07-27T15:59:00.000Z");
+    const providerObservedAt = new Date("2026-07-27T15:58:30.000Z");
     const lastFailureAt = new Date("2026-07-27T15:45:00.000Z");
     const ownedIncident = incident({
       activeBatchId: "batch-1",
@@ -6398,6 +6408,10 @@ describe("course monitoring watchdog", () => {
       outcome: "NO_MATCH",
       observedAt: successObservedAt,
       runtimeVersion: "success-runtime",
+      rawSummary: {
+        providerExecution: "LOCAL_BROWSER_READER",
+        providerObservedAt: providerObservedAt.toISOString(),
+      },
     });
     prismaMocks.courseMonitoringStatus.findMany.mockResolvedValue([]);
 
@@ -6407,7 +6421,10 @@ describe("course monitoring watchdog", () => {
 
     expect(prismaMocks.courseMonitoringStatus.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ state: "HEALTHY" }),
+        data: expect.objectContaining({
+          state: "HEALTHY",
+          lastSuccessfulAt: providerObservedAt,
+        }),
       }),
     );
     expect(prismaMocks.courseSupportIncident.updateMany).not.toHaveBeenCalled();
@@ -6417,7 +6434,7 @@ describe("course monitoring watchdog", () => {
   it.each([
     ["older", new Date("2026-07-27T15:40:00.000Z")],
     ["equal", new Date("2026-07-27T15:45:00.000Z")],
-  ])("keeps a live responder owner when success is %s relative to the latest failure", async (_relation, staleSuccessAt) => {
+  ])("keeps a live responder owner when a late-inserted success was observed %s than the latest failure", async (_relation, staleSuccessAt) => {
     const lastFailureAt = new Date("2026-07-27T15:45:00.000Z");
     const ownedIncident = incident({
       activeBatchId: "batch-1",
@@ -6445,8 +6462,12 @@ describe("course monitoring watchdog", () => {
     });
     prismaMocks.courseProbe.findFirst.mockResolvedValue({
       outcome: "NO_MATCH",
-      observedAt: staleSuccessAt,
+      observedAt: new Date("2026-07-27T15:59:00.000Z"),
       runtimeVersion: "old-success-runtime",
+      rawSummary: {
+        providerExecution: "RUNNABLE_PROVIDER_CHECK",
+        providerObservedAt: staleSuccessAt.toISOString(),
+      },
     });
 
     await expect(
@@ -6467,6 +6488,60 @@ describe("course monitoring watchdog", () => {
     expect(prismaMocks.courseMonitoringStatus.updateMany).not.toHaveBeenCalled();
     expect(prismaMocks.courseSupportIncident.updateMany).not.toHaveBeenCalled();
     expect(prismaMocks.courseSupportBatch.updateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseMonitoringEvent.create).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ eventType: "RECOVERED" }),
+      }),
+    );
+  });
+
+  it("does not adopt a success probe without canonical provider observation evidence", async () => {
+    const lastFailureAt = new Date("2026-07-27T15:45:00.000Z");
+    const ownedIncident = incident({
+      activeBatchId: "batch-1",
+      activeRealSearchCount: 1,
+      lastSeenAt: new Date("2026-07-27T15:30:00.000Z"),
+      escalationDeadlineAt: new Date("2026-07-27T15:58:00.000Z"),
+    });
+    const liveBatch = responderBatch(
+      [{ incident: ownedIncident, monitoringStatus: monitoringSnapshot() }],
+      { leaseExpiresAt: new Date("2026-07-27T16:05:00.000Z") },
+    );
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue({
+      ...ownedIncident,
+      activeBatch: liveBatch,
+    });
+    prismaMocks.courseMonitoringStatus.findUnique.mockResolvedValue({
+      state: "AUTO_INVESTIGATING",
+      lastFailureAt,
+      revision: 7,
+    });
+    prismaMocks.course.findUnique.mockResolvedValue({
+      bookingAccessMode: "PUBLIC_READ_ONLY",
+      automationReason: null,
+    });
+    prismaMocks.courseProbe.findFirst.mockResolvedValue({
+      outcome: "NO_MATCH",
+      observedAt: new Date("2026-07-27T15:59:00.000Z"),
+      runtimeVersion: "unbound-success-runtime",
+      rawSummary: { providerExecution: "RUNNABLE_PROVIDER_CHECK" },
+    });
+
+    await expect(
+      reconcileCourseMonitoringDeadline({
+        courseId: "course-1",
+        source: "RECOVERY_CRON",
+        now,
+      }),
+    ).resolves.toMatchObject({ outcome: "OWNED", incidentId: ownedIncident.id });
+
+    expect(prismaMocks.courseMonitoringStatus.updateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportIncident.updateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseMonitoringEvent.create).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ eventType: "RECOVERED" }),
+      }),
+    );
   });
 
   it.each([
