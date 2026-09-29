@@ -10,6 +10,7 @@ import {
   type DynamicChronogolfCourseKey,
   type DynamicEzLinksCourseKey,
   type DynamicMemberSportsCourseKey,
+  type DynamicTeeItUpCourseKey,
   type DynamicTenForeCourseKey,
   type DynamicWebTracCourseKey
 } from "./course-key";
@@ -60,6 +61,18 @@ const dynamicMemberSportsCourseKeySchema = z.custom<DynamicMemberSportsCourseKey
   "Expected a safe MemberSports course key"
 );
 
+const dynamicTeeItUpCourseKeySchema = z.custom<DynamicTeeItUpCourseKey>(
+  (value) => {
+    if (typeof value !== "string") return false;
+    const match =
+      /^teeitup:([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.book\.teeitup\.(?:com|golf)):(root|[1-9]\d{0,9})$/u.exec(
+        value
+      );
+    return Boolean(match && (match[2] === "root" || Number(match[2]) <= 2_147_483_647));
+  },
+  "Expected a safe TeeItUp tenant key"
+);
+
 export const localReaderCourseKeySchema = z.union([
   z.enum(LOCAL_READER_COURSE_KEYS),
   dynamicCpsCourseKeySchema,
@@ -67,7 +80,8 @@ export const localReaderCourseKeySchema = z.union([
   dynamicTenForeCourseKeySchema,
   dynamicEzLinksCourseKeySchema,
   dynamicWebTracCourseKeySchema,
-  dynamicMemberSportsCourseKeySchema
+  dynamicMemberSportsCourseKeySchema,
+  dynamicTeeItUpCourseKeySchema
 ]);
 
 const localDateSchema = z

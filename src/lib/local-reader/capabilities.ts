@@ -12,6 +12,7 @@ export const localReaderCapabilitySchema = z
       "EZLINKS_RENDERED",
       "WEBTRAC_RENDERED",
       "MEMBERSPORTS_RENDERED",
+      "TEEITUP_RENDERED",
       "PROPHET_FREAR_RENDERED"
     ]),
     parserVersion: z.number().int().min(1).max(1000)
@@ -57,6 +58,8 @@ export function getRequiredLocalReaderCapability(
       return { key: "WEBTRAC_RENDERED", parserVersion: 1 };
     case "MEMBERSPORTS":
       return { key: "MEMBERSPORTS_RENDERED", parserVersion: 1 };
+    case "TEEITUP":
+      return { key: "TEEITUP_RENDERED", parserVersion: 1 };
     case "PROPHET":
       return {
         key: "PROPHET_FREAR_RENDERED",

@@ -145,6 +145,27 @@ function dynamicMemberSportsJob(
   };
 }
 
+function dynamicTeeItUpJob(
+  courseKey = "teeitup:crumpin-fox-club.book.teeitup.com:5165",
+  courseName = "Crumpin-Fox Club : 18 Hole Golf Course Bernardston, MA"
+): LocalReaderJob {
+  return {
+    id: "job-teeitup",
+    courseKey: courseKey as LocalReaderJob["courseKey"],
+    targetDate: "2026-10-08",
+    players: 4,
+    requestedAt: "2026-09-29T12:00:00.000Z",
+    expiresAt: "2026-09-29T12:05:00.000Z",
+    courseName,
+    bookingUrl: getLocalReaderJobUrl(
+      courseKey as LocalReaderJob["courseKey"],
+      "2026-10-08",
+      4
+    ),
+    cardTextIncludes: []
+  };
+}
+
 function loadReader() {
   const source = readFileSync(
     resolve(process.cwd(), "tools", "local-chrome-reader", "cps-reader.js"),
@@ -209,6 +230,19 @@ function loadMemberSportsReader() {
   context.globalThis = context;
   runInNewContext(source, context);
   return context.TeeTimeSpotMemberSportsReader as Reader;
+}
+
+function loadTeeItUpReader() {
+  const source = readFileSync(
+    resolve(process.cwd(), "tools", "local-chrome-reader", "teeitup-reader.js"),
+    "utf8"
+  );
+  const context: Record<string, unknown> = { URL };
+  context.globalThis = context;
+  runInNewContext(source, context);
+  return context.TeeTimeSpotTeeItUpReader as Reader & {
+    isAllowedPageUrl: (job: LocalReaderJob, pageUrl: string) => boolean;
+  };
 }
 
 function loadProphetReader() {
@@ -399,7 +433,7 @@ describe("local Chrome reader contract", () => {
     );
     const contentMatches = manifest.content_scripts.flatMap((entry) => entry.matches);
 
-    expect(manifest.version).toBe("1.12.4");
+    expect(manifest.version).toBe("1.13.0");
     expect(manifest.host_permissions).toContain("https://parks.cityofomaha.org/*");
     expect(contentMatches).toContain("https://parks.cityofomaha.org/*");
     expect(manifest.host_permissions).toContain("https://*.cps.golf/*");
@@ -414,14 +448,20 @@ describe("local Chrome reader contract", () => {
     expect(contentMatches).toContain("https://*.myvscloud.com/webtrac/web/search.html*");
     expect(manifest.host_permissions).toContain("https://app.membersports.com/*");
     expect(contentMatches).toContain("https://app.membersports.com/tee-times/*");
+    expect(manifest.host_permissions).toContain("https://*.book.teeitup.com/*");
+    expect(manifest.host_permissions).toContain("https://*.book.teeitup.golf/*");
+    expect(contentMatches).toContain("https://*.book.teeitup.com/*");
+    expect(contentMatches).toContain("https://*.book.teeitup.golf/*");
     expect(backgroundSource).toContain("function isAllowlistedCpsJob(job)");
     expect(backgroundSource).toContain("function isAllowlistedTenForeJob(job)");
     expect(backgroundSource).toContain("function isAllowlistedEzLinksJob(job)");
     expect(backgroundSource).toContain("function isAllowlistedWebTracJob(job)");
     expect(backgroundSource).toContain("function isAllowlistedMemberSportsJob(job)");
+    expect(backgroundSource).toContain("function isAllowlistedTeeItUpJob(job)");
     expect(backgroundSource).toContain('["EZLINKS_RENDERED", 1]');
     expect(backgroundSource).toContain('["WEBTRAC_RENDERED", 1]');
     expect(backgroundSource).toContain('["MEMBERSPORTS_RENDERED", 1]');
+    expect(backgroundSource).toContain('["TEEITUP_RENDERED", 1]');
     expect(backgroundSource).toContain("async function submitPendingResult(tabId, pending)");
     expect(backgroundSource).toContain("function withPendingJobsLock(operation)");
     expect(backgroundSource).toContain("expectJson: true");
@@ -435,6 +475,7 @@ describe("local Chrome reader contract", () => {
     expect(contentSource).not.toContain("entries.length === 1");
     expect(contentSource).toContain("globalThis.TeeTimeSpotWebTracReader");
     expect(contentSource).toContain("globalThis.TeeTimeSpotMemberSportsReader");
+    expect(contentSource).toContain("globalThis.TeeTimeSpotTeeItUpReader");
     expect(contentSource).toContain("waitForPassiveChallengeClearance");
     expect(contentSource).toContain("if (pending.result) return;");
     expect(contentSource).toContain("finally {");
@@ -677,6 +718,88 @@ describe("local Chrome reader contract", () => {
     });
   });
 
+  it("accepts exact TeeItUp tenant jobs and rejects transaction or cross-tenant URLs", () => {
+    const job = dynamicTeeItUpJob();
+    expect(
+      getLocalReaderCourseKey(
+        "https://crumpin-fox-club.book.teeitup.com/?course=5165&date=2026-10-08&max=999999"
+      )
+    ).toBe("teeitup:crumpin-fox-club.book.teeitup.com:5165");
+    expect(localReaderJobSchema.parse(job)).toMatchObject({ courseKey: job.courseKey });
+    expect(loadTeeItUpReader()).toMatchObject({
+      SKIP_DATE_SELECTION: true,
+      SKIP_PLAYER_SELECTION: true
+    });
+    expect(loadTeeItUpReader().isAllowedPageUrl(job, job.bookingUrl)).toBe(true);
+    expect(
+      getLocalReaderCourseKey("https://crumpin-fox-club.book.teeitup.com/checkout")
+    ).toBeNull();
+    expect(
+      isAllowedLocalReaderUrl(
+        job.courseKey,
+        "https://other-course.book.teeitup.com/?course=5165&date=2026-10-08&max=999999"
+      )
+    ).toBe(false);
+  });
+
+  it("parses rendered TeeItUp cards for the exact course and requested group", () => {
+    document.title = "GolfNow Booking Engine";
+    document.body.innerHTML = `
+      <div role="group">
+        <div data-testid="teetimes-tile-time">8:21 AM</div>
+        <div data-testid="teetimes-tile-available-players">1 - 4 Players</div>
+        <div data-testid="teetimes-tile-hole-verbiage">18 Holes</div>
+        <div data-testid="teetimes-tile-course-name">Crumpin-Fox Club</div>
+        <button data-testid="teetimes_choose_rate_button" aria-label="minimum price - $138.00 - maximum price - $153.00"></button>
+      </div>
+      <div role="group">
+        <div data-testid="teetimes-tile-time">8:03 AM</div>
+        <div data-testid="teetimes-tile-available-players">1 or 2 Players</div>
+        <div data-testid="teetimes-tile-hole-verbiage">18 Holes</div>
+        <div data-testid="teetimes-tile-course-name">Crumpin-Fox Club</div>
+        <button data-testid="teetimes_choose_rate_button" aria-label="minimum price - $138.00 - maximum price - $153.00"></button>
+      </div>
+    `;
+    const job = dynamicTeeItUpJob();
+    expect(loadTeeItUpReader().readSnapshot(document, job.bookingUrl, job)).toMatchObject({
+      status: "AVAILABLE",
+      slots: [
+        {
+          startsAtLocal: "2026-10-08T08:21:00",
+          minimumPlayers: 1,
+          availableSpots: 4,
+          priceCents: 13800
+        }
+      ]
+    });
+  });
+
+  it("fails TeeItUp closed for empty evidence, a wrong date, or changed cards", () => {
+    const reader = loadTeeItUpReader();
+    const job = dynamicTeeItUpJob();
+    document.body.innerHTML = "<main>No tee times available. No Results.</main>";
+    expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({
+      status: "NO_AVAILABILITY",
+      slots: []
+    });
+    expect(
+      reader.readSnapshot(document, job.bookingUrl.replace("2026-10-08", "2026-10-09"), job)
+    ).toMatchObject({ status: "PAGE_MISMATCH" });
+    document.body.innerHTML = `
+      <div role="group">
+        <div data-testid="teetimes-tile-time">8:21 AM</div>
+        <div data-testid="teetimes-tile-available-players">1 - 4 Players</div>
+        <div data-testid="teetimes-tile-hole-verbiage">18 Holes</div>
+        <div data-testid="teetimes-tile-course-name">Another Golf Club</div>
+        <button data-testid="teetimes_choose_rate_button" aria-label="minimum price - $138.00"></button>
+      </div>
+    `;
+    expect(reader.readSnapshot(document, job.bookingUrl, job)).toMatchObject({
+      status: "READER_ERROR",
+      slots: []
+    });
+  });
+
   it("accepts signed EZLinks tenant jobs while rejecting infrastructure and transaction paths", () => {
     const job = dynamicEzLinksJob();
 
@@ -751,6 +874,9 @@ describe("local Chrome reader contract", () => {
     expect(isLocalReaderCandidateUrl("https://www.simsburyfarms.com/book-a-tee-time")).toBe(true);
     expect(
       isLocalReaderCandidateUrl("https://ctguilfordweb.myvscloud.com/webtrac/web/search.html")
+    ).toBe(true);
+    expect(
+      isLocalReaderCandidateUrl("https://crumpin-fox-club.book.teeitup.com/")
     ).toBe(true);
     expect(
       isLocalReaderCandidateUrl("https://secure.east.prophetservices.com/OtherCourse/Home/NIndex")

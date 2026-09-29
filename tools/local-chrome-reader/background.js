@@ -13,6 +13,7 @@ const READER_CAPABILITIES = Object.freeze([
   ["EZLINKS_RENDERED", 1],
   ["WEBTRAC_RENDERED", 1],
   ["MEMBERSPORTS_RENDERED", 1],
+  ["TEEITUP_RENDERED", 1],
   ["PROPHET_FREAR_RENDERED", 4]
 ]);
 const PROPHET_COURSES = Object.freeze({
@@ -314,6 +315,46 @@ function isAllowlistedMemberSportsJob(job) {
   }
 }
 
+function isAllowlistedTeeItUpJob(job) {
+  try {
+    const match =
+      /^teeitup:([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.book\.teeitup\.(?:com|golf)):(root|[1-9]\d{0,9})$/u.exec(
+        job?.courseKey || ""
+      );
+    if (
+      !match ||
+      (match[2] !== "root" && Number(match[2]) > 2_147_483_647) ||
+      typeof job.courseName !== "string" ||
+      job.courseName.trim().length === 0 ||
+      job.courseName.length > 160 ||
+      !Array.isArray(job.cardTextIncludes) ||
+      job.cardTextIncludes.length !== 0 ||
+      !/^\d{4}-\d{2}-\d{2}$/u.test(job.targetDate || "")
+    ) {
+      return false;
+    }
+    const url = new URL(job.bookingUrl);
+    const allowedKeys = new Set(["course", "date", "max"]);
+    const entries = [...url.searchParams.entries()];
+    const keys = new Set(entries.map(([key]) => key));
+    return (
+      url.protocol === "https:" &&
+      url.hostname === match[1] &&
+      url.pathname === "/" &&
+      url.searchParams.get("date") === job.targetDate &&
+      url.searchParams.get("max") === "999999" &&
+      (match[2] === "root" || url.searchParams.get("course") === match[2]) &&
+      keys.size === entries.length &&
+      entries.every(([key]) => allowedKeys.has(key)) &&
+      url.username === "" &&
+      url.password === "" &&
+      url.hash === ""
+    );
+  } catch {
+    return false;
+  }
+}
+
 function isSafeOfficialSourceUrl(value) {
   try {
     const url = new URL(value);
@@ -362,6 +403,7 @@ function isAllowlistedJob(job) {
       [isAllowlistedEzLinksJob, "EZLINKS_RENDERED", 1],
       [isAllowlistedWebTracJob, "WEBTRAC_RENDERED", 1],
       [isAllowlistedMemberSportsJob, "MEMBERSPORTS_RENDERED", 1],
+      [isAllowlistedTeeItUpJob, "TEEITUP_RENDERED", 1],
       [isAllowlistedProphetJob, "PROPHET_FREAR_RENDERED", 4]
     ].find(([isAllowlisted]) => isAllowlisted(job));
     return Boolean(

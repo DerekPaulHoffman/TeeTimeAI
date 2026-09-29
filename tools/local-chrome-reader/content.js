@@ -493,6 +493,7 @@
       globalThis.TeeTimeSpotEzLinksReader,
       globalThis.TeeTimeSpotWebTracReader,
       globalThis.TeeTimeSpotMemberSportsReader,
+      globalThis.TeeTimeSpotTeeItUpReader,
       globalThis.TeeTimeSpotProphetReader,
     ];
     const reader =

@@ -81,6 +81,18 @@ describe("local reader capabilities", () => {
     });
   });
 
+  it("routes exact TeeItUp tenant scopes to the rendered parser", () => {
+    expect(
+      getRequiredLocalReaderCapability(
+        "teeitup:crumpin-fox-club.book.teeitup.com:5165",
+        "Crumpin-Fox Club"
+      )
+    ).toEqual({
+      key: "TEEITUP_RENDERED",
+      parserVersion: 1
+    });
+  });
+
   it("requires the corrected Prophet redirect parser for both supported courses", () => {
     expect(getRequiredLocalReaderCapability("frear-park")).toEqual({
       key: "PROPHET_FREAR_RENDERED",

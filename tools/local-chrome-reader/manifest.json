@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Tee Time Spot Local Reader",
-  "version": "1.12.4",
+  "version": "1.13.0",
   "description": "Reads allowlisted public tee-time pages for Tee Time Spot alerts.",
   "permissions": ["alarms", "storage", "tabs"],
   "host_permissions": [
@@ -14,6 +14,8 @@
     "https://*.ezlinksgolf.com/*",
     "https://*.myvscloud.com/*",
     "https://app.membersports.com/*",
+    "https://*.book.teeitup.com/*",
+    "https://*.book.teeitup.golf/*",
     "https://secure.east.prophetservices.com/*"
   ],
   "background": {
@@ -57,6 +59,14 @@
     {
       "matches": ["https://app.membersports.com/tee-times/*"],
       "js": ["membersports-reader.js", "content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://*.book.teeitup.com/*",
+        "https://*.book.teeitup.golf/*"
+      ],
+      "js": ["teeitup-reader.js", "content.js"],
       "run_at": "document_idle"
     },
     {

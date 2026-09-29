@@ -10,6 +10,7 @@ export type DynamicTenForeCourseKey = `tenfore:${string}`;
 export type DynamicEzLinksCourseKey = `ezlinks:${string}.ezlinksgolf.com`;
 export type DynamicWebTracCourseKey = `webtrac:${string}.myvscloud.com`;
 export type DynamicMemberSportsCourseKey = `membersports:${string}:${string}`;
+export type DynamicTeeItUpCourseKey = `teeitup:${string}:${string}`;
 export type LocalReaderCourseKey =
   | StaticLocalReaderCourseKey
   | DynamicCpsCourseKey
@@ -17,7 +18,8 @@ export type LocalReaderCourseKey =
   | DynamicTenForeCourseKey
   | DynamicEzLinksCourseKey
   | DynamicWebTracCourseKey
-  | DynamicMemberSportsCourseKey;
+  | DynamicMemberSportsCourseKey
+  | DynamicTeeItUpCourseKey;
 
 export type LocalReaderCourse = {
   courseName: string;
@@ -30,6 +32,7 @@ export type LocalReaderCourse = {
     | "EZLINKS"
     | "WEBTRAC"
     | "MEMBERSPORTS"
+    | "TEEITUP"
     | "PROPHET";
   prophetCourseIds?: string;
 };
@@ -44,6 +47,8 @@ const WEBTRAC_TENANT_HOSTNAME = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.myvsclou
 const WEBTRAC_SEARCH_PATH = /^\/webtrac\/web\/search\.html\/?$/u;
 const MEMBERSPORTS_TEE_TIME_PATH =
   /^\/tee-times\/([1-9]\d{0,9})\/([1-9]\d{0,9})\/(0|[1-9]\d{0,9})(?:\/(0|[1-9]\d{0,9})\/(0|[1-9]\d{0,9}))?\/?$/u;
+const TEEITUP_TENANT_HOSTNAME =
+  /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.book\.teeitup\.(?:com|golf)$/u;
 const EZLINKS_BLOCKED_TENANT_LABELS = new Set([
   "admin",
   "api",
@@ -100,6 +105,10 @@ export function getLocalReaderCourseKey(
     if (memberSportsScope) {
       return `membersports:${memberSportsScope.clubId}:${memberSportsScope.courseId}`;
     }
+    const teeItUpScope = getTeeItUpScope(url);
+    if (teeItUpScope) {
+      return `teeitup:${teeItUpScope.hostname}:${teeItUpScope.courseId ?? "root"}`;
+    }
     const tenForeTenant = getTenForeTenant(url);
     if (tenForeTenant) {
       return `tenfore:${tenForeTenant}` as DynamicTenForeCourseKey;
@@ -135,7 +144,8 @@ export function isLocalReaderCandidateUrl(bookingUrl: string | null | undefined)
       (url.hostname === "www.simsburyfarms.com" && url.pathname === "/book-a-tee-time") ||
       (WEBTRAC_TENANT_HOSTNAME.test(url.hostname) &&
         WEBTRAC_SEARCH_PATH.test(url.pathname) &&
-        isWebTracSearchLanding(url))
+        isWebTracSearchLanding(url)) ||
+      getTeeItUpScope(url) !== null
     );
   } catch {
     return false;
@@ -208,6 +218,16 @@ export function isAllowedLocalReaderUrl(courseKey: LocalReaderCourseKey, value: 
       const scope = getMemberSportsScope(url);
       return Boolean(
         scope && courseKey === `membersports:${scope.clubId}:${scope.courseId}`
+      );
+    }
+    if (isDynamicTeeItUpCourseKey(courseKey)) {
+      const url = new URL(value);
+      const scope = getTeeItUpScope(url);
+      if (!scope) return false;
+      const [, hostname, expectedCourse] = courseKey.split(":");
+      return (
+        scope.hostname === hostname &&
+        (expectedCourse === "root" || scope.courseId === expectedCourse)
       );
     }
     const course = LOCAL_READER_COURSES[courseKey];
@@ -289,6 +309,14 @@ export function getLocalReaderJobUrl(
     const [, clubId, courseId] = courseKey.split(":");
     return `https://app.membersports.com/tee-times/${clubId}/${courseId}/0/8/0`;
   }
+  if (isDynamicTeeItUpCourseKey(courseKey)) {
+    const [, hostname, courseId] = courseKey.split(":");
+    const url = new URL(`https://${hostname}/`);
+    if (courseId !== "root") url.searchParams.set("course", courseId);
+    if (targetDate) url.searchParams.set("date", targetDate);
+    url.searchParams.set("max", "999999");
+    return url.toString();
+  }
   const course = LOCAL_READER_COURSES[courseKey];
   return `${course.bookingUrl}?CourseId=${course.prophetCourseIds}&Date=${targetDate}&Time=AnyTime&Player=${players}&Hole=18`;
 }
@@ -330,6 +358,15 @@ export function isDynamicMemberSportsCourseKey(
   return /^membersports:[1-9]\d{0,9}:[1-9]\d{0,9}$/u.test(value);
 }
 
+export function isDynamicTeeItUpCourseKey(value: string): value is DynamicTeeItUpCourseKey {
+  const match = /^teeitup:([^:]+):(root|[1-9]\d{0,9})$/u.exec(value);
+  return Boolean(
+    match &&
+      TEEITUP_TENANT_HOSTNAME.test(match[1]) &&
+      (match[2] === "root" || Number(match[2]) <= 2_147_483_647)
+  );
+}
+
 export function getLocalReaderCourse(
   courseKey: LocalReaderCourseKey,
   courseName?: string
@@ -340,7 +377,8 @@ export function getLocalReaderCourse(
     isDynamicTenForeCourseKey(courseKey) ||
     isDynamicEzLinksCourseKey(courseKey) ||
     isDynamicWebTracCourseKey(courseKey) ||
-    isDynamicMemberSportsCourseKey(courseKey)
+    isDynamicMemberSportsCourseKey(courseKey) ||
+    isDynamicTeeItUpCourseKey(courseKey)
   ) {
     const normalizedCourseName = courseName?.trim();
     if (!normalizedCourseName) return null;
@@ -360,7 +398,9 @@ export function getLocalReaderCourse(
               ? "EZLINKS"
               : isDynamicWebTracCourseKey(courseKey)
                 ? "WEBTRAC"
-                : "MEMBERSPORTS"
+                : isDynamicMemberSportsCourseKey(courseKey)
+                  ? "MEMBERSPORTS"
+                  : "TEEITUP"
     };
   }
   return LOCAL_READER_COURSES[courseKey];
@@ -422,6 +462,39 @@ function getMemberSportsScope(url: URL) {
   const values = match.slice(1).filter((value): value is string => value !== undefined);
   if (values.some((value) => Number(value) > 2_147_483_647)) return null;
   return { clubId: match[1], courseId: match[2] };
+}
+
+function getTeeItUpScope(url: URL) {
+  if (
+    url.protocol !== "https:" ||
+    !TEEITUP_TENANT_HOSTNAME.test(url.hostname) ||
+    url.pathname !== "/" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.hash !== ""
+  ) {
+    return null;
+  }
+  const allowedKeys = new Set(["course", "date", "max"]);
+  const entries = [...url.searchParams.entries()];
+  const keys = new Set(entries.map(([key]) => key));
+  if (
+    keys.size !== entries.length ||
+    entries.some(([key]) => !allowedKeys.has(key))
+  ) {
+    return null;
+  }
+  const courseId = url.searchParams.get("course");
+  const date = url.searchParams.get("date");
+  const max = url.searchParams.get("max");
+  if (
+    (courseId && (!/^[1-9]\d{0,9}$/u.test(courseId) || Number(courseId) > 2_147_483_647)) ||
+    (date && !/^\d{4}-\d{2}-\d{2}$/u.test(date)) ||
+    (max && max !== "999999")
+  ) {
+    return null;
+  }
+  return { hostname: url.hostname, courseId };
 }
 
 function isSafeEzLinksTenantHostname(hostname: string) {
