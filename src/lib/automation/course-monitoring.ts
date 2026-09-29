@@ -3292,6 +3292,7 @@ export async function recordCourseMonitoringPlaybookTransition(
           cycle: true,
           revision: true,
           status: true,
+          resolution: true,
           attemptLedger: true,
           confirmedAt: true,
           firstSeenAt: true,
@@ -3387,6 +3388,24 @@ export async function recordCourseMonitoringPlaybookTransition(
         }
       }
       if (incident.status === "RESOLVED") {
+        // A successful search check can restore monitoring and resolve this
+        // incident before its optional playbook result is appended. The
+        // monitoring resolution is stronger evidence, so the stale success
+        // transition has nothing left to write. Other resolved incidents
+        // remain a hard fence.
+        if (
+          incident.resolution === "MONITORING_RESTORED" &&
+          input.source === "SEARCH_WORKFLOW" &&
+          input.incidentId === incident.id &&
+          input.expectedIncidentCycle === incident.cycle &&
+          (input.transition === "STARTED" || input.transition === "SUCCEEDED") &&
+          ((input.readPath === "TYPED_PROVIDER_ADAPTER" &&
+            input.evidenceKind === "PROVIDER_RESPONSE") ||
+            (input.readPath === "LOCAL_READER" &&
+              input.evidenceKind === "LOCAL_READER_RESULT"))
+        ) {
+          return null;
+        }
         throw new Error(
           "A resolved incident cannot receive automated playbook proof.",
         );
