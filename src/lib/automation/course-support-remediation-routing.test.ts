@@ -727,6 +727,171 @@ describe("course-support remediation routing", () => {
     });
   });
 
+  it.each([
+    "OFFICIAL_IDENTITY",
+    "TYPED_ADAPTER",
+    "OFFICIAL_HTTP_DISCOVERY",
+    "HTTP_ADAPTER_RETRY",
+    "RENDERED_BROWSER_DISCOVERY",
+    "BROWSER_ADAPTER_RETRY",
+    "LOCAL_READER",
+    "INDEPENDENT_CONFIRMATION",
+  ] as const)("advances an unsupported public family through %s without a safe contract", (stage) => {
+    const course = {
+      ...runnableCourse,
+      detectedPlatform: "CUSTOM",
+      providerFamilyKey: "EZLINKS",
+      detectedBookingUrl: "https://public-course.ezlinksgolf.com/",
+      bookingMetadata: null,
+      automationEligibility: "NEEDS_REVIEW",
+      failureClass: "UNSUPPORTED_FAMILY" as const,
+      discoveryAttempt: "HTTP_INCONCLUSIVE" as const,
+      playbookAssessment: incompletePlaybook(stage),
+      providerContractEvidenceAvailable: false,
+    };
+    const result = routeCourseSupportRemediation(course);
+
+    expect(result).toMatchObject({
+      workMode: "ADVANCE_DISCOVERY",
+      allowUnchangedRuntime: true,
+      requiresImplementationPath: false,
+      retryBudget: null,
+      reason: "PLAYBOOK_STAGE_PENDING",
+      strategy: { action: "REPAIR_PROVIDER_ADAPTER" },
+      attemptSignature: {
+        workMode: "ADVANCE_DISCOVERY",
+        strategyAction: "REPAIR_PROVIDER_ADAPTER",
+        playbookStage: stage,
+      },
+    });
+    expect(buildCourseSupportClaimActionPlan({
+      route: result,
+      incidentKind: "NEEDS_ADAPTER",
+      incidentProviderFamilyKey: "EZLINKS",
+      course,
+    })).toMatchObject({
+      primaryAction: "VERIFY_CURRENT_RUNTIME",
+      allowedActions: ["VERIFY_CURRENT_RUNTIME"],
+    });
+    if (stage === "BROWSER_ADAPTER_RETRY" || stage === "LOCAL_READER") {
+      expect(isAssignedDetachedStageProgression({
+        remediationDirective: {
+          workMode: result.workMode,
+          strategyAction: result.strategy.action,
+          playbookStage: result.attemptSignature?.playbookStage,
+          allowUnchangedRuntime: result.allowUnchangedRuntime,
+          requiresImplementationPath: result.requiresImplementationPath,
+          retryBudget: result.retryBudget,
+        },
+        playbookConclusion: "INCOMPLETE",
+        nextPlaybookStage: stage,
+        nextPlaybookStageStatus: "PENDING",
+        nextPlaybookStageAttemptCount: 0,
+      })).toBe(true);
+    }
+  });
+
+  it.each([
+    "RENDERED_BROWSER_DISCOVERY",
+    "BROWSER_ADAPTER_RETRY",
+    "INDEPENDENT_CONFIRMATION",
+  ] as const)("retains reusable implementation when %s has an actionable contract", (stage) => {
+    const course = {
+      ...runnableCourse,
+      detectedPlatform: "CUSTOM",
+      providerFamilyKey: "EZLINKS",
+      detectedBookingUrl: "https://public-course.ezlinksgolf.com/",
+      bookingMetadata: null,
+      automationEligibility: "NEEDS_REVIEW",
+      failureClass: "UNSUPPORTED_FAMILY" as const,
+      discoveryAttempt: "HTTP_INCONCLUSIVE" as const,
+      playbookAssessment: incompletePlaybook(stage),
+    };
+    const withContract = routeCourseSupportRemediation({
+      ...course,
+      providerContractEvidenceAvailable: true,
+    });
+    expect(withContract).toMatchObject({
+      workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+      allowUnchangedRuntime: false,
+      requiresImplementationPath: true,
+    });
+    expect(buildCourseSupportClaimActionPlan({
+      route: withContract,
+      incidentKind: "NEEDS_ADAPTER",
+      incidentProviderFamilyKey: "EZLINKS",
+      course,
+    }).allowedActions).toEqual(stage === "INDEPENDENT_CONFIRMATION"
+      ? ["IMPLEMENT_REUSABLE_SUPPORT"]
+      : ["IMPLEMENT_REUSABLE_SUPPORT", "INSPECT_PROVIDER_CONTRACT"]);
+  });
+
+  it("keeps a source-free unsupported public family on its bounded rendered stage", () => {
+    const course = {
+      ...runnableCourse,
+      detectedPlatform: "CUSTOM",
+      providerFamilyKey: "EZLINKS",
+      detectedBookingUrl: null,
+      website: null,
+      bookingMetadata: null,
+      automationEligibility: "NEEDS_REVIEW",
+      failureClass: "UNSUPPORTED_FAMILY" as const,
+      playbookAssessment: incompletePlaybook("RENDERED_BROWSER_DISCOVERY"),
+      providerContractEvidenceAvailable: false,
+    };
+    const result = routeCourseSupportRemediation(course);
+
+    expect(result).toMatchObject({
+      workMode: "ADVANCE_DISCOVERY",
+      allowUnchangedRuntime: true,
+      requiresImplementationPath: false,
+      attemptSignature: { playbookStage: "RENDERED_BROWSER_DISCOVERY" },
+    });
+    expect(buildCourseSupportClaimActionPlan({
+      route: result,
+      incidentKind: "NEEDS_ADAPTER",
+      incidentProviderFamilyKey: "EZLINKS",
+      course,
+    })).toMatchObject({
+      primaryAction: "VERIFY_CURRENT_RUNTIME",
+      allowedActions: ["VERIFY_CURRENT_RUNTIME"],
+    });
+  });
+
+  it.each([
+    "http://localhost/tee-times",
+    "https://reader:secret@public-course.example/tee-times",
+    "not a URL",
+  ])("does not treat an unsafe non-null source as source-free discovery: %s", (detectedBookingUrl) => {
+    const course = {
+      ...runnableCourse,
+      detectedPlatform: "CUSTOM",
+      providerFamilyKey: "EZLINKS",
+      detectedBookingUrl,
+      website: null,
+      bookingMetadata: null,
+      automationEligibility: "NEEDS_REVIEW",
+      failureClass: "UNSUPPORTED_FAMILY" as const,
+      playbookAssessment: incompletePlaybook("RENDERED_BROWSER_DISCOVERY"),
+      providerContractEvidenceAvailable: false,
+    };
+    const result = routeCourseSupportRemediation(course);
+
+    expect(result).toMatchObject({
+      workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+      allowUnchangedRuntime: false,
+      requiresImplementationPath: true,
+    });
+    const plan = buildCourseSupportClaimActionPlan({
+      route: result,
+      incidentKind: "NEEDS_ADAPTER",
+      incidentProviderFamilyKey: "EZLINKS",
+      course,
+    });
+    expect(plan.primaryAction).toBe("IMPLEMENT_REUSABLE_SUPPORT");
+    expect(plan.allowedActions).not.toContain("VERIFY_CURRENT_RUNTIME");
+  });
+
   it("keeps a provider-specific browser adapter retry on detached verification without contract evidence", () => {
     const result = routeCourseSupportRemediation({
       ...runnableCourse,
@@ -955,8 +1120,8 @@ describe("course-support remediation routing", () => {
     });
   });
 
-  it.each(["MISSING_SOURCE", "MISSING_METADATA"] as const)("keeps the bounded exhausted public %s implementation handoff available without a preexisting contract marker", (failureClass) => {
-    const result = routeCourseSupportRemediation({
+  it.each(["MISSING_SOURCE", "MISSING_METADATA", "UNSUPPORTED_FAMILY"] as const)("keeps the bounded exhausted public %s implementation handoff available without a preexisting contract marker", (failureClass) => {
+    const course = {
       ...runnableCourse,
       detectedBookingUrl:
         "https://foreupsoftware.com/index.php/booking/12345#/teetimes",
@@ -968,7 +1133,8 @@ describe("course-support remediation routing", () => {
         conclusion: "UNRESOLVED_EXHAUSTED",
         nextStage: null,
       },
-    });
+    } as const;
+    const result = routeCourseSupportRemediation(course);
 
     expect(result).toMatchObject({
       workMode: "IMPLEMENT_REUSABLE_SUPPORT",
@@ -979,6 +1145,117 @@ describe("course-support remediation routing", () => {
         workMode: "IMPLEMENT_REUSABLE_SUPPORT",
         playbookStage: null,
       },
+    });
+    expect(buildCourseSupportClaimActionPlan({
+      route: result,
+      incidentKind: "NEEDS_ADAPTER",
+      incidentProviderFamilyKey: "FOREUP",
+      course,
+    }).allowedActions).toEqual([
+      "IMPLEMENT_REUSABLE_SUPPORT",
+      "INSPECT_PROVIDER_CONTRACT",
+    ]);
+  });
+
+  it("does not assign an exhausted source-free unsupported family to implementation", () => {
+    const result = routeCourseSupportRemediation({
+      ...runnableCourse,
+      detectedPlatform: "CUSTOM",
+      providerFamilyKey: "EZLINKS",
+      website: null,
+      detectedBookingUrl: null,
+      bookingMetadata: null,
+      automationEligibility: "NEEDS_REVIEW",
+      failureClass: "UNSUPPORTED_FAMILY",
+      providerContractEvidenceAvailable: false,
+      playbookAssessment: {
+        conclusion: "UNRESOLVED_EXHAUSTED",
+        nextStage: null,
+      },
+    });
+
+    expect(result).toMatchObject({
+      workMode: "WAIT_FOR_MATERIAL_CHANGE",
+      reason: "PLAYBOOK_EXHAUSTED",
+      requiresImplementationPath: false,
+    });
+  });
+
+  it("keeps the exhausted public EZLinks handoff one-shot without a contract marker", () => {
+    const course = {
+      ...runnableCourse,
+      detectedPlatform: "CUSTOM",
+      providerFamilyKey: "EZLINKS",
+      detectedBookingUrl: "https://public-course.ezlinksgolf.com/",
+      bookingMetadata: null,
+      automationEligibility: "NEEDS_REVIEW",
+      failureClass: "UNSUPPORTED_FAMILY" as const,
+      providerContractEvidenceAvailable: false,
+      playbookAssessment: {
+        conclusion: "UNRESOLVED_EXHAUSTED" as const,
+        nextStage: null,
+      },
+    };
+    const first = routeCourseSupportRemediation(course);
+
+    expect(first).toMatchObject({
+      workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+      strategy: { action: "REPAIR_PROVIDER_ADAPTER" },
+      reason: "EXHAUSTED_DISCOVERY_IMPLEMENTATION_HANDOFF",
+      allowUnchangedRuntime: false,
+      requiresImplementationPath: true,
+      attemptSignature: { playbookStage: null },
+    });
+    expect(buildCourseSupportClaimActionPlan({
+      route: first,
+      incidentKind: "NEEDS_ADAPTER",
+      incidentProviderFamilyKey: "EZLINKS",
+      course,
+    }).allowedActions).toEqual([
+      "IMPLEMENT_REUSABLE_SUPPORT",
+      "INSPECT_PROVIDER_CONTRACT",
+    ]);
+
+    expect(routeCourseSupportRemediation({
+      ...course,
+      priorUnchangedAttempt: first.attemptSignature,
+    })).toMatchObject({
+      workMode: "WAIT_FOR_MATERIAL_CHANGE",
+      reason: "UNCHANGED_ATTEMPT_ALREADY_RECORDED",
+      resumeWorkMode: "IMPLEMENT_REUSABLE_SUPPORT",
+      attemptSignature: first.attemptSignature,
+    });
+  });
+
+  it.each([
+    { label: "stale private", isPublic: false },
+    { label: "unknown public status", isPublic: null },
+  ])("does not assign an exhausted $label course to implementation from a safe URL alone", ({ isPublic }) => {
+    const result = routeCourseSupportRemediation({
+      ...runnableCourse,
+      isPublic,
+      detectedPlatform: "CUSTOM",
+      providerFamilyKey: "EZLINKS",
+      detectedBookingUrl: "https://public-course.ezlinksgolf.com/",
+      bookingMetadata: null,
+      automationEligibility: "NEEDS_REVIEW",
+      failureClass: "UNSUPPORTED_FAMILY",
+      discoveryAttempt: "HTTP_INCONCLUSIVE",
+      now: new Date("2026-01-01T00:00:00.000Z"),
+      intelligenceVerifiedAt: "2024-01-01T00:00:00.000Z",
+      intelligenceReviewAt: "2025-01-01T00:00:00.000Z",
+      intelligenceConfidence: 0.9,
+      providerContractEvidenceAvailable: false,
+      playbookAssessment: {
+        conclusion: "UNRESOLVED_EXHAUSTED",
+        nextStage: null,
+      },
+    });
+
+    expect(result).toMatchObject({
+      workMode: "WAIT_FOR_MATERIAL_CHANGE",
+      reason: "PLAYBOOK_EXHAUSTED",
+      requiresImplementationPath: false,
     });
   });
 

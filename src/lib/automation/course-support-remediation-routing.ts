@@ -398,6 +398,13 @@ export function routeCourseSupportRemediation(
       strategy.providerFamilyKey === SOURCE_MISSING_PROVIDER_FAMILY &&
       input.website === null &&
       input.detectedBookingUrl === null,
+    safePublicDiscoverySource:
+      input.isPublic === true && hasSafePublicDiscoverySource(input),
+    sourceFreeUnsupportedFamily:
+      input.isPublic === true &&
+      input.failureClass === "UNSUPPORTED_FAMILY" &&
+      input.website === null &&
+      input.detectedBookingUrl === null,
     providerContractEvidenceAvailable:
       input.providerContractEvidenceAvailable === true && input.isPublic === true,
   });
@@ -462,6 +469,7 @@ export function shouldImplementReusableSupportAfterExhaustedDiscovery(
   input: MonitoringStrategyInput,
 ) {
   if (
+    input.isPublic !== true ||
     !input.failureClass ||
     !EXHAUSTED_DISCOVERY_IMPLEMENTATION_FAILURES.has(input.failureClass) ||
     !hasSafePublicDiscoverySource(input)
@@ -493,6 +501,8 @@ function selectActionableRoute(input: {
   materialChangeDetected: boolean;
   retryBudget: CourseSupportRemediationRetryBudget | null;
   sourceFreeProvider: boolean;
+  safePublicDiscoverySource: boolean;
+  sourceFreeUnsupportedFamily: boolean;
   providerContractEvidenceAvailable: boolean;
 }): CourseSupportRemediationRoute {
   // A genuinely source-free course has no provider contract to retry or
@@ -518,6 +528,23 @@ function selectActionableRoute(input: {
   if (
     RENDERED_READER_PROVIDER_FAMILIES.has(input.strategy.providerFamilyKey) &&
     input.playbookAssessment.nextStage !== null
+  ) {
+    return discoveryRoute({ ...input, retryBudget: null });
+  }
+
+  // An unfamiliar public provider without an actionable request contract
+  // must finish its ordered playbook under the owned verifier. Its next safe
+  // stage may be rendered discovery, adapter retry, local reader, or independent
+  // confirmation; none alone justifies a runtime-bearing implementation.
+  if (
+    input.failureClass === "UNSUPPORTED_FAMILY" &&
+    input.playbookAssessment.conclusion === "INCOMPLETE" &&
+    input.playbookAssessment.nextStage !== null &&
+    !input.providerContractEvidenceAvailable &&
+    (input.safePublicDiscoverySource || input.sourceFreeUnsupportedFamily) &&
+    input.strategy.action === "REPAIR_PROVIDER_ADAPTER" &&
+    input.strategy.providerFamilyKey !== SOURCE_MISSING_PROVIDER_FAMILY &&
+    input.strategy.providerFamilyKey !== SOURCE_CONFLICT_PROVIDER_FAMILY
   ) {
     return discoveryRoute({ ...input, retryBudget: null });
   }
