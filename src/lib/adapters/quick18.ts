@@ -1,6 +1,7 @@
 import { parse, type DefaultTreeAdapterMap } from "parse5";
 
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
+import { haveCompatibleCourseNames } from "@/lib/places/course-identity";
 
 import { fetchWithProviderTimeout, providerHttpError } from "./fetch-with-timeout";
 
@@ -15,6 +16,8 @@ type HtmlElement = DefaultTreeAdapterMap["element"];
 export type Quick18Metadata = {
   provider: "QUICK18";
   bookingBaseUrl: string;
+  providerCourseId?: string;
+  courseName?: string;
 };
 
 export function isQuick18PublicSearchUrl(value: string | URL): boolean {
@@ -51,7 +54,11 @@ export function isQuick18Metadata(value: unknown): value is Quick18Metadata {
   return (
     metadata.provider === "QUICK18" &&
     typeof metadata.bookingBaseUrl === "string" &&
-    isQuick18PublicSearchUrl(metadata.bookingBaseUrl)
+    isQuick18PublicSearchUrl(metadata.bookingBaseUrl) &&
+    (metadata.providerCourseId === undefined ||
+      (typeof metadata.providerCourseId === "string" && /^[1-9]\d{0,9}$/u.test(metadata.providerCourseId))) &&
+    (metadata.courseName === undefined ||
+      (typeof metadata.courseName === "string" && metadata.courseName.trim().length > 0 && metadata.courseName.length <= 200))
   );
 }
 
@@ -107,7 +114,9 @@ export async function fetchQuick18TeeSheet(
     courseId: input.courseId,
     targetDate,
     players: input.players,
-    evidenceUrl: evidenceUrl.toString()
+    evidenceUrl: evidenceUrl.toString(),
+    providerCourseId: input.metadata.providerCourseId,
+    courseName: input.metadata.courseName
   });
   return {
     slots,
@@ -122,6 +131,8 @@ export function parseQuick18Slots(input: {
   targetDate: string;
   players: number;
   evidenceUrl: string;
+  providerCourseId?: string;
+  courseName?: string;
 }): TeeTimeSlot[] {
   const document = parse(input.html);
   const selectedDate = findElements(document, "input").find(
@@ -162,14 +173,29 @@ export function parseQuick18Slots(input: {
   const tableBody = bodies[0];
 
   const headers = findElements(matrix, "th").map((element) => textContent(element).trim());
-  if (headers[0] !== "Tee Time" || headers[1] !== "Players") {
+  const courseColumn = headers[1] === "Course" ? 1 : null;
+  const playersColumn = courseColumn === null ? 1 : 2;
+  if (
+    headers[0] !== "Tee Time" ||
+    headers[playersColumn] !== "Players" ||
+    headers.filter((header) => header === "Players").length !== 1 ||
+    headers.filter((header) => header === "Course").length > (courseColumn === null ? 0 : 1)
+  ) {
     throw schemaError("Quick18 tee-time table columns changed");
   }
+  if (courseColumn !== null && !input.courseName) {
+    throw schemaError("Quick18 tee-time matrix course identity is unbound");
+  }
   const publicColumns = headers.flatMap((header, index) =>
-    index >= 2 && isPublicRateHeader(header) ? [index] : []
-  );
+    index > playersColumn && isPublicRateHeader(header) ? [index] : []
+  ).sort((left, right) => roundRatePriority(headers[left]) - roundRatePriority(headers[right]));
   if (publicColumns.length === 0) {
     throw schemaError("Quick18 public rate column is missing");
+  }
+  for (const roundPriority of [0, 1]) {
+    if (publicColumns.filter((index) => roundRatePriority(headers[index]) === roundPriority).length > 1) {
+      throw schemaError("Quick18 tee-time table columns changed");
+    }
   }
 
   const origin = new URL(input.evidenceUrl).origin;
@@ -177,6 +203,8 @@ export function parseQuick18Slots(input: {
   const slots: TeeTimeSlot[] = [];
   let sawTimeRow = false;
   let explicitNoTimes = false;
+  let displayedCourse: string | null = null;
+  let observedProviderCourseId: string | null = null;
   for (const row of findElements(matrix, "tr")) {
     const cells = children(row, "td");
     if (cells.length === 0) continue;
@@ -193,16 +221,40 @@ export function parseQuick18Slots(input: {
       throw schemaError("Quick18 tee-time row columns changed");
     }
     const time = parseLocalTime(textContent(cells[0]));
-    const range = parsePlayerRange(textContent(cells[1]));
-    if (!time || !range) {
+    const range = parsePlayerRange(textContent(cells[playersColumn]));
+    if (!time || !range || (courseColumn !== null && !textContent(cells[courseColumn]).trim())) {
       throw schemaError("Quick18 tee-time row could not be read");
     }
+    if (courseColumn !== null) {
+      const courseName = textContent(cells[courseColumn]).replace(/\s+/gu, " ").trim().toLowerCase();
+      if (displayedCourse !== null && displayedCourse !== courseName) {
+        throw schemaError("Quick18 tee-time matrix mixes courses");
+      }
+      if (input.courseName && !haveCompatibleQuick18CourseNames(input.courseName, courseName)) {
+        throw schemaError("Quick18 tee-time matrix does not match the official course");
+      }
+      displayedCourse = courseName;
+    }
     sawTimeRow = true;
-    if (input.players < range.min || input.players > range.max) continue;
 
-    const publicBookings: Array<{ url: string; priceCents: number | null }> = [];
+    const publicBookings: Array<{ url: string; priceCents: number | null; holes: 9 | 18 | null }> = [];
     for (const index of publicColumns) {
-      for (const link of findElements(cells[index], "a")) {
+      const rateText = textContent(cells[index]);
+      const roundRate = isUnqualifiedRoundRateHeader(headers[index]);
+      const priceCents = parseUnambiguousPriceCents(rateText);
+      const holes = roundRate ? Number(headers[index].trim().split(/\s+/u)[0]) as 9 | 18 : null;
+      const rateLinks = findElements(cells[index], "a");
+      if (rateLinks.length > 1) throw schemaError("Quick18 public rate is ambiguous");
+      for (const link of rateLinks) {
+        // An unqualified hole-count column is usable only when its cell shows one
+        // positive price. Never turn a free, special, or member offer into a slot.
+        if (
+          (priceCents === null && (roundRate || rateText.includes("$"))) ||
+          priceCents === 0 ||
+          /\b(?:group|members?|membership|special|locals?|twilight|league|resident|staff|private|employee|passholder|season pass|corporate)\b/iu.test(
+            rateText.replace(/non[- ]?member/giu, "")
+          )
+        ) throw schemaError("Quick18 public rate is ambiguous");
         const href = attribute(link, "href");
         const url = href
           ? parsePublicSelectionUrl(href, origin, compactDate, time)
@@ -210,23 +262,42 @@ export function parseQuick18Slots(input: {
         if (!url) {
           throw schemaError("Quick18 public rate exposed an unsafe booking link");
         }
-        const priceCents = parsePriceCents(textContent(cells[index]));
-        publicBookings.push({ url, priceCents });
+        publicBookings.push({ url, priceCents, holes });
       }
     }
     const booking = publicBookings[0];
     if (!booking) continue;
-    const providerCourseId = new URL(booking.url).pathname.match(
-      /^\/teetimes\/course\/([1-9]\d{0,9})\/teetime\//u
-    )?.[1];
-    if (!providerCourseId) continue;
+    for (const publicBooking of publicBookings) {
+      const providerCourseId = new URL(publicBooking.url).pathname.match(
+        /^\/teetimes\/course\/([1-9]\d{0,9})\/teetime\//u
+      )?.[1];
+      if (
+        !providerCourseId ||
+        (input.providerCourseId && input.providerCourseId !== providerCourseId) ||
+        (observedProviderCourseId !== null && observedProviderCourseId !== providerCourseId)
+      ) {
+        throw schemaError("Quick18 tee-time matrix mixes provider courses");
+      }
+      observedProviderCourseId = providerCourseId;
+    }
+    if (input.players < range.min || input.players > range.max) continue;
+    const roundPrices = publicBookings.flatMap((option) =>
+      option.holes !== null && option.priceCents !== null
+        ? [{ holes: option.holes, priceCents: option.priceCents }]
+        : []
+    );
     slots.push({
-      sourceId: `quick18-${new URL(origin).hostname.split(".")[0]}-${providerCourseId}-${compactDate}${time.replace(":", "")}`,
+      sourceId: `quick18-${new URL(origin).hostname.split(".")[0]}-${observedProviderCourseId}-${compactDate}${time.replace(":", "")}`,
       courseId: input.courseId,
       startsAt: `${input.targetDate}T${time}`,
       availableSpots: range.max,
       bookingUrl: booking.url,
       ...(booking.priceCents === null ? {} : { priceCents: booking.priceCents }),
+      ...(booking.holes === null ? {} : { holes: booking.holes }),
+      ...(roundPrices.length === 0 ? {} : {
+        bookableHoleCounts: roundPrices.map((option) => option.holes),
+        priceOptions: roundPrices
+      }),
       evidenceUrl: input.evidenceUrl
     });
     if (slots.length > MAX_SLOTS) {
@@ -252,11 +323,30 @@ export function parseQuick18Slots(input: {
 
 function isPublicRateHeader(header: string) {
   return (
-    /\b(?:daily rate|public|non[- ]?member|guest)\b/iu.test(header) &&
-    !/\b(?:members?|membership|league|resident|staff|private|employee|passholder|season pass|corporate)\b/iu.test(
-      header.replace(/non[- ]?member/iu, "")
-    )
+    isUnqualifiedRoundRateHeader(header) ||
+    (/\b(?:daily rate|public|non[- ]?member|guest)\b/iu.test(header) &&
+      !/\b(?:back\s+9|members?|membership|group|special|locals?|twilight|league|resident|staff|private|employee|passholder|season pass|corporate)\b/iu.test(
+        header.replace(/non[- ]?member/iu, "")
+      ))
   );
+}
+
+function isUnqualifiedRoundRateHeader(header: string) {
+  return /^(?:18|9)\s+holes?$/iu.test(header.replace(/\s+/gu, " ").trim());
+}
+
+function haveCompatibleQuick18CourseNames(officialName: string, matrixName: string) {
+  if (haveCompatibleCourseNames(officialName, matrixName)) return true;
+  // Some official course names append a venue business after the course brand.
+  // Remove only this known suffix before comparing the public matrix label.
+  const courseBrand = officialName.replace(/\s+Golf Course\s*(?:&|and)\s*Banquet Center\s*$/iu, "");
+  return courseBrand !== officialName && haveCompatibleCourseNames(courseBrand, matrixName);
+}
+
+function roundRatePriority(header: string) {
+  if (/^18\s+holes?$/iu.test(header.replace(/\s+/gu, " ").trim())) return 0;
+  if (/^9\s+holes?$/iu.test(header.replace(/\s+/gu, " ").trim())) return 1;
+  return 2;
 }
 
 function isExpectedResponseUrl(value: string, requested: URL) {
@@ -342,9 +432,10 @@ function parsePlayerRange(value: string) {
   return min >= 1 && max <= 4 && min <= max ? { min, max } : null;
 }
 
-function parsePriceCents(value: string) {
-  const match = value.match(/\$\s*(\d{1,5})(?:\.(\d{2}))?\b/u);
-  return match ? Number(match[1]) * 100 + Number(match[2] ?? "0") : null;
+function parseUnambiguousPriceCents(value: string) {
+  const prices = [...value.matchAll(/\$\s*(\d{1,5})(?:\.(\d{2}))?\b/gu)];
+  if (prices.length !== 1) return null;
+  return Number(prices[0][1]) * 100 + Number(prices[0][2] ?? "0");
 }
 
 function findElements(node: HtmlNode, tagName: string): HtmlElement[] {

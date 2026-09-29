@@ -246,6 +246,8 @@ export type BrowserDiscovery = {
   } | {
     provider: "QUICK18";
     bookingBaseUrl: string;
+    providerCourseId?: string;
+    courseName?: string;
   } | {
     provider: "GOLF_GEEK";
     courseId: string;
@@ -2772,14 +2774,20 @@ export async function enrichQuick18Discovery(
     discovery.bookingUrl !== `${evidenceUrl.origin}/teetimes/searchmatrix`
   ) return discovery;
   const date = new Date(`${compactDate.slice(0, 4)}-${compactDate.slice(4, 6)}-${compactDate.slice(6, 8)}T00:00:00.000Z`);
+  let providerCourseId: string;
   try {
     const matrix = await fetchQuick18TeeSheet({
       courseId: discovery.courseId,
       date,
       players: 2,
-      metadata: { provider: "QUICK18", bookingBaseUrl: discovery.bookingUrl }
+      metadata: { provider: "QUICK18", bookingBaseUrl: discovery.bookingUrl, courseName }
     }, fetchImpl);
     if (matrix.slots.length === 0) return discovery;
+    const courseIds = new Set(matrix.slots.map((slot) => new URL(slot.bookingUrl).pathname.match(
+      /^\/teetimes\/course\/([1-9]\d{0,9})\/teetime\//u
+    )?.[1]));
+    if (courseIds.size !== 1 || courseIds.has(undefined)) return discovery;
+    providerCourseId = [...courseIds][0]!;
   } catch (error) {
     if (error instanceof BrowserDiscoveryEnrichmentDeferredError) throw error;
     return discovery;
@@ -2792,7 +2800,7 @@ export async function enrichQuick18Discovery(
     automationReason: "NONE",
     policyNotes: "The public Quick18 matrix exposed selectable public availability. Tee Time Spot reads the public page and leaves booking on the course's site.",
     apiEndpoint: discovery.bookingUrl,
-    apiMetadata: { provider: "QUICK18", bookingBaseUrl: discovery.bookingUrl },
+    apiMetadata: { provider: "QUICK18", bookingBaseUrl: discovery.bookingUrl, providerCourseId, courseName },
     confidence: 0.9,
     evidence: { ...discovery.evidence, learnedFrom: "quick18-validated-public-matrix" }
   };

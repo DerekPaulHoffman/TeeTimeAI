@@ -2309,8 +2309,8 @@ describe("buildBrowserDiscovery", () => {
     const matrixHtml = `<!doctype html><html><body>
       <input id="SearchForm_Date" value="9/29/2026">
       <div id="searchMatrix"><a href="/teetimes/searchmatrix?teedate=20260929">Sep 29</a>
-      <table class="matrixTable"><thead><tr><th>Tee Time</th><th>Players</th><th>Daily Rate</th></tr></thead>
-      <tbody><tr><td>8:00 AM</td><td>1 to 3 players</td><td><a href="/teetimes/course/1202/teetime/202609290800?psid=6786&amp;p=0">$84.00 Select</a></td></tr></tbody></table></div>
+      <table class="matrixTable"><thead><tr><th>Tee Time</th><th>Course</th><th>Players</th><th>18 Holes</th></tr></thead>
+      <tbody><tr><td>8:00 AM</td><td>Mount Snow Golf Club</td><td>1 to 3 players</td><td><a href="/teetimes/course/1202/teetime/202609290800?psid=6786&amp;p=0">$84.00 Select</a></td></tr></tbody></table></div>
     </body></html>`;
     const leasedFamilies: string[] = [];
     const enrichment = await enrichBrowserDiscoveryWithProviderLease(
@@ -2334,7 +2334,10 @@ describe("buildBrowserDiscovery", () => {
       bookingUrl,
       bookingMethod: "PUBLIC_ONLINE",
       automationEligibility: "ALLOWED",
-      apiMetadata: { provider: "QUICK18", bookingBaseUrl: bookingUrl },
+      apiMetadata: {
+        provider: "QUICK18", bookingBaseUrl: bookingUrl,
+        providerCourseId: "1202", courseName: "Mount Snow Golf Club"
+      },
       evidence: { learnedFrom: "quick18-validated-public-matrix" }
     });
     expect(resolveProviderCapability({
