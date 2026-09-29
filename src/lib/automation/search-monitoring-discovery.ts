@@ -14,6 +14,7 @@ import {
   enrichClubCaddieDiscovery,
   enrichCpsDiscovery,
   enrichChronogolfDiscovery,
+  enrichQuick18Discovery,
   enrichTeesnapDiscovery,
   findCorroboratingAccessBarrier,
   getBestProbeUrl,
@@ -37,6 +38,7 @@ import {
   resolveProviderCapability
 } from "@/lib/automation/provider-capabilities";
 import { runProviderFamilyTasks } from "@/lib/automation/provider-concurrency";
+import { getCourseLocalDateStorageBoundary } from "@/lib/automation/date-boundary";
 import {
   beginCourseProviderObservation,
   markCourseProviderObservationUnreconciled,
@@ -1303,8 +1305,31 @@ export async function prepareSearchMonitoring(
                   ))
                 : leasedFetch
             );
-            const chronogolfDiscovery = await enrichChronogolfDiscovery(
+            let quick18LeaseDeferred = false;
+            const quick18Fetch = (async (
+              input: Parameters<typeof fetch>[0],
+              init?: RequestInit
+            ) => {
+              try {
+                return await leasedFetch(input, init);
+              } catch (error) {
+                if (error instanceof ProviderDiscoveryLeaseDeferredError) {
+                  quick18LeaseDeferred = true;
+                }
+                throw error;
+              }
+            }) as typeof fetch;
+            const quick18Discovery = await enrichQuick18Discovery(
               clubCaddieDiscovery,
+              course.name,
+              quick18Fetch,
+              getQuick18PublicEvidenceDate(search, course.timeZone, now)
+            );
+            if (quick18LeaseDeferred) {
+              throw new ProviderDiscoveryLeaseDeferredError();
+            }
+            const chronogolfDiscovery = await enrichChronogolfDiscovery(
+              quick18Discovery,
               leasedFetch
             );
             const cpsDiscovery = await enrichCpsDiscovery(
@@ -2552,10 +2577,10 @@ export async function collectOfficialSiteEvidence(
     const followupCandidate =
       pickExactCourseBookingCandidate(unvisitedCandidates, courseName) ??
       inferredBookingRoute ??
+      targetScopedProviderFollowup ??
       (matchedCoursePage
         ? pickBookingSurfaceCandidate(unvisitedCandidates, firstPage.finalUrl, courseName)
         : undefined) ??
-      targetScopedProviderFollowup ??
       pickOfficialPolicyCandidate(unvisitedCandidates, firstPage.finalUrl) ??
       pickOfficialCourseDetailCandidate(unvisitedCandidates, courseName, firstPage.finalUrl) ??
       pickLikelyBookingCandidate(unvisitedCandidates, firstPage.finalUrl, courseName) ??
@@ -3200,17 +3225,28 @@ function getPageMarkupCourseIdentityStatus(
     );
   const primaryStatuses = identities.primary.map(getStatus);
   const secondaryStatuses = identities.secondary.map(getStatus);
-  if (
-    primaryStatuses.includes("CONFLICT") ||
-    identities.secondary.some(
-      (identity, index) =>
-        secondaryStatuses[index] === "CONFLICT" &&
-        isExplicitConflictingCourseHeading(identity, courseName)
-    )
-  ) {
+  const explicitConflict = identities.primary.some(
+    (identity, index) =>
+      primaryStatuses[index] === "CONFLICT" &&
+      isExplicitConflictingCourseHeading(identity, courseName)
+  ) || identities.secondary.some(
+    (identity, index) =>
+      secondaryStatuses[index] === "CONFLICT" &&
+      isExplicitConflictingCourseHeading(identity, courseName)
+  );
+  // A venue can use a short brand in its title and H1 while naming its
+  // specific course in the opening prose. Only first-party main content can
+  // supply that exact identity; navigation, footers and linked sibling names
+  // cannot, and an explicit competing course heading still vetoes it.
+  const exactMainIdentity = Boolean(
+    pageUrl &&
+    !resolveProviderCapability({ detectedBookingUrl: pageUrl }).capability &&
+    hasExactCourseIdentityInMainProse(html, courseName, pageUrl)
+  );
+  if (explicitConflict || (primaryStatuses.includes("CONFLICT") && !exactMainIdentity)) {
     return "CONFLICT";
   }
-  if (primaryStatuses.includes("MATCH")) {
+  if (primaryStatuses.includes("MATCH") || exactMainIdentity) {
     return "MATCH";
   }
   return pageUrl &&
@@ -3218,6 +3254,55 @@ function getPageMarkupCourseIdentityStatus(
     doesExactCourseDetailUrlIdentifyCourse(pageUrl, courseName)
     ? "MATCH"
     : "ABSENT";
+}
+
+function getQuick18PublicEvidenceDate(
+  search: ActiveAutomationSearch,
+  courseTimeZone: string | null | undefined,
+  now: Date
+) {
+  const localToday = getCourseLocalDateStorageBoundary(courseTimeZone, now);
+  const requestedDate = search.date;
+  if (
+    requestedDate instanceof Date &&
+    Number.isFinite(requestedDate.getTime()) &&
+    requestedDate >= localToday &&
+    requestedDate.getTime() <= localToday.getTime() + 14 * 24 * 60 * 60 * 1000
+  ) {
+    return requestedDate;
+  }
+  return new Date(localToday.getTime() + 24 * 60 * 60 * 1000);
+}
+
+function hasExactCourseIdentityInMainProse(
+  html: string,
+  courseName: string,
+  pageUrl: string
+) {
+  const page = parseSafePublicUrl(pageUrl);
+  const hostnameLabels = page.hostname.toLocaleLowerCase("en-US").split(".");
+  const brand = hostnameLabels[0] === "www" ? hostnameLabels[1] : hostnameLabels[0];
+  // A shared operator or municipal site can mention a course in prose while
+  // linking a different course's tee sheet. This fallback needs a dedicated
+  // first-party host whose brand is an exact prefix of the course name.
+  if (!brand || brand.length < 12 ||
+      !normalizeCourseLinkName(courseName).startsWith(brand)) return false;
+  const main = html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/iu)?.[1]?.slice(0, 4_000);
+  if (!main) return false;
+  const normalize = (value: string) => value.normalize("NFKD")
+    .replace(/[\u0300-\u036f]/gu, "")
+    .toLocaleLowerCase("en-US")
+    .replace(/&/gu, " and ")
+    .replace(/[^a-z0-9]+/gu, " ")
+    .trim()
+    .replace(/\s+/gu, " ");
+  const exactName = normalize(courseName);
+  if (!exactName || exactName.split(" ").length < 2) return false;
+  const openingParagraphs = [...main.matchAll(/<p\b[^>]*>([\s\S]*?)<\/p>/giu)]
+    .slice(0, 3);
+  return openingParagraphs.some((paragraph) =>
+    ` ${normalize(stripHtml(decodeHtmlEntities(paragraph[1])))} `.includes(` ${exactName} `)
+  );
 }
 
 function getOfficialPageMarkupIdentities(html: string) {
@@ -3595,6 +3680,7 @@ function getUniqueTargetScopedBookingProviderLink(
     (candidate) =>
       haveSameReplayHostname(officialUrl, candidate.url) &&
       normalizeSourceKey(candidate.url) !== normalizeSourceKey(bookingPageUrl) &&
+      !isDifferentBookingProduct(candidate) &&
       isBookingLikeOfficialFollowup(candidate)
   );
   if (hasAnotherOfficialBookingChoice) {
@@ -3606,6 +3692,7 @@ function getUniqueTargetScopedBookingProviderLink(
     if (
       candidate.evidenceOnlyAccountAccess ||
       haveSameReplayHostname(officialUrl, candidate.url) ||
+      isDifferentBookingProduct(candidate) ||
       !isBookingLikeOfficialFollowup(candidate)
     ) {
       continue;
@@ -3643,6 +3730,14 @@ function getUniqueTargetScopedBookingProviderLink(
           doesProviderLinkLabelExactlyIdentifyCourse(providerLink.label, courseName)
         )
       : undefined) ?? providerLinks[0]
+  );
+}
+
+function isDifferentBookingProduct(candidate: { url: string; label: string }) {
+  const page = parseSafePublicUrl(candidate.url);
+  const description = `${candidate.label} ${page.pathname.replace(/[-_]+/gu, " ")}`;
+  return /\b(?:simulator|indoor)(?:\s+golf)?\s+(?:booking|time|tee\s*times?)\b|\bmembers?\s+(?:booking|access|tee\s*times?)\b/iu.test(
+    description
   );
 }
 
@@ -3751,8 +3846,20 @@ function isWithinProviderHandoffScope(scopeUrl: string, candidateUrl: string) {
 
 function doesBookingLabelIdentifyAnotherCourse(label: string, courseName: string) {
   const normalized = label.replace(/\s+/gu, " ").trim();
+  const venueBrand = courseName.replace(
+    /\s+golf\s+course\s*(?:&|and)\s+banquet\s+cent(?:er|re)\s*$/iu,
+    ""
+  );
+  const labeledBrand = normalized.replace(
+    /\s+(?:public\s+)?tee\s*times?\s+booking\s*$/iu,
+    ""
+  );
+  if (venueBrand !== courseName &&
+      normalizeCourseLinkName(labeledBrand) === normalizeCourseLinkName(venueBrand)) {
+    return false;
+  }
   if (
-    /^(?:book(?:\s+(?:a|your))?(?:\s+tee\s*times?)?|book\s+online|general\s+public|public|reserve(?:\s+(?:a|your))?(?:\s+tee\s*times?)?|tee\s*times?)$/iu.test(
+    /^(?:book(?:\s+(?:a|your))?(?:\s+tee\s*times?)?|book\s+online|general\s+public|public|reserve(?:\s+(?:a|your))?(?:\s+tee\s*times?)?|tee\s*times?|(?:view|check|find|search|continue\s+to)(?:\s+(?:the|public|live|available))*\s+tee\s*times?(?:\s+(?:booking|availability|online))?)$/iu.test(
       normalized
     )
   ) {

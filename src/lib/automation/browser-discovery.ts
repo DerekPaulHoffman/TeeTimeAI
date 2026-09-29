@@ -36,6 +36,7 @@ import {
   normalizeCourseIdentityName
 } from "@/lib/places/course-identity";
 import { selectMonitoringStrategy } from "@/lib/automation/monitoring-strategy";
+import { getCourseLocalDateStorageBoundary } from "@/lib/automation/date-boundary";
 import { enrichTeeItUpFromPublicDirectory, type TeeItUpPublicSourceContext } from "./teeitup-public-directory";
 
 export const OFFICIAL_SITE_SOFT_NOT_FOUND_POLICY_NOTES =
@@ -463,7 +464,13 @@ export async function enrichBrowserDiscoveryWithProviderLease(
     const quick18Discovery = await enrichQuick18Discovery(
       clubCaddieDiscovery,
       courseName,
-      leasedFetch
+      leasedFetch,
+      publicSourceContext
+        ? new Date(getCourseLocalDateStorageBoundary(
+            publicSourceContext.course.timeZone,
+            new Date()
+          ).getTime() + 24 * 60 * 60 * 1000)
+        : undefined
     );
     const teeItUpDiscovery = await enrichTeeItUpDiscovery(
       quick18Discovery,
@@ -2724,7 +2731,6 @@ function learnQuick18Discovery(
   if (
     !finalUrl ||
     !isQuick18PublicSearchUrl(finalUrl) ||
-    !finalUrl.searchParams.has("teedate") ||
     !/\btee time search\s*:/iu.test(evidence.visibleText ?? "")
   ) {
     return null;
@@ -2753,7 +2759,8 @@ function learnQuick18Discovery(
 export async function enrichQuick18Discovery(
   discovery: BrowserDiscovery,
   courseName: string,
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: typeof fetch = fetch,
+  bareMatrixDate?: Date
 ): Promise<BrowserDiscovery> {
   const officialLink = discovery.evidence.courseIdentityCorroboration;
   if (
@@ -2770,10 +2777,14 @@ export async function enrichQuick18Discovery(
   if (
     !evidenceUrl ||
     !isQuick18PublicSearchUrl(evidenceUrl) ||
-    !compactDate ||
     discovery.bookingUrl !== `${evidenceUrl.origin}/teetimes/searchmatrix`
   ) return discovery;
-  const date = new Date(`${compactDate.slice(0, 4)}-${compactDate.slice(4, 6)}-${compactDate.slice(6, 8)}T00:00:00.000Z`);
+  const date = compactDate
+    ? new Date(`${compactDate.slice(0, 4)}-${compactDate.slice(4, 6)}-${compactDate.slice(6, 8)}T00:00:00.000Z`)
+    : bareMatrixDate;
+  if (!date || !Number.isFinite(date.getTime())) return discovery;
+  const datedEvidenceUrl = new URL(discovery.bookingUrl);
+  datedEvidenceUrl.searchParams.set("teedate", date.toISOString().slice(0, 10).replaceAll("-", ""));
   let providerCourseId: string;
   try {
     const matrix = await fetchQuick18TeeSheet({
@@ -2802,7 +2813,12 @@ export async function enrichQuick18Discovery(
     apiEndpoint: discovery.bookingUrl,
     apiMetadata: { provider: "QUICK18", bookingBaseUrl: discovery.bookingUrl, providerCourseId, courseName },
     confidence: 0.9,
-    evidence: { ...discovery.evidence, learnedFrom: "quick18-validated-public-matrix" }
+    evidence: {
+      ...discovery.evidence,
+      finalUrl: datedEvidenceUrl.toString(),
+      observedUrls: [...new Set([...discovery.evidence.observedUrls, datedEvidenceUrl.toString()])],
+      learnedFrom: "quick18-validated-public-matrix"
+    }
   };
 }
 

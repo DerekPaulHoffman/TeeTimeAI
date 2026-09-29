@@ -1562,6 +1562,124 @@ describe("search monitoring discovery", () => {
     });
   });
 
+  it("follows an exact first-party course identity to one public Quick18 sheet before FAQs", async () => {
+    const sourceUrl = "https://solitudelinksgolf.example/";
+    const teeTimesUrl = "https://solitudelinksgolf.example/golf/tee-times/";
+    const faqUrl = "https://solitudelinksgolf.example/golf/faq/";
+    const matrixUrl = "https://solitude.quick18.com/teetimes/searchmatrix";
+    const datedMatrixUrl = `${matrixUrl}?teedate=20260714`;
+    const courseName = "Solitude Links Golf Course & Banquet Center";
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const url = input.toString();
+      const html = url === sourceUrl
+        ? `<html><title>Solitude Links | Golf, Weddings & Events</title><body><h1>Golf, Weddings & Events in Michigan</h1><main><p>SOLITUDE LINKS • KIMBALL, MICHIGAN</p><p>${courseName} is an 18-hole public golf course in Kimball.</p></main><a href="${faqUrl}">Golf FAQs</a><a href="${teeTimesUrl}">Book a Tee Time</a></body></html>`
+        : url === teeTimesUrl
+          ? `<html><title>Book Golf Tee Times Near Port Huron | Solitude Links</title><body><h1>Book a Golf Tee Time Near Port Huron</h1><main><p>TEE TIMES</p><p>Reserve your next round at ${courseName} in Kimball.</p><a href="${matrixUrl}">Solitude Links Public Tee Time Booking</a><a href="${matrixUrl}">VIEW AVAILABLE TEE TIMES</a><a href="${matrixUrl}">Continue to public tee time booking</a><a href="/golf/simulator-booking/">Simulator Booking</a><a href="/golf/member-booking/">Member Booking</a><a href="https://solitudelinkssim.quick18.com/teetimes/searchmatrix">Book Simulator Time</a></main></body></html>`
+          : url === matrixUrl
+            ? "<html><title>Solitude Links</title><body>Tee Time Search: Date: Players:</body></html>"
+            : url === datedMatrixUrl
+              ? `<html><body><input id="SearchForm_Date" value="7/14/2026"><div id="searchMatrix">Tee Time Search:<a href="/teetimes/searchmatrix?teedate=20260714">Jul 14</a><table class="matrixTable"><thead><tr><th>Tee Time</th><th>Course</th><th>Players</th><th>18 Holes</th></tr></thead><tbody><tr><td>11:03 AM</td><td>Solitude Links</td><td>1 to 4 players</td><td><div class="mtrxPrice">$48.00</div><a href="/teetimes/course/1367/teetime/202607141103?psid=6786&amp;p=0">Select</a></td></tr></tbody></table></div></body></html>`
+              : null;
+      if (html === null) throw new Error(`Unexpected URL ${url}`);
+      return new Response(html, { status: 200, headers: { "content-type": "text/html" } });
+    });
+    const course = {
+      id: "solitude-course", name: courseName, website: sourceUrl,
+      detectedBookingUrl: null, detectedPlatform: "UNKNOWN", providerFamilyKey: "SOURCE_MISSING",
+      bookingMethod: "UNKNOWN", automationEligibility: "UNKNOWN", automationReason: "NONE",
+      bookingMetadata: null, isPublic: true, monitoringMode: "AUTOMATIC", updatedAt: now
+    };
+    prismaMocks.course.findUnique.mockResolvedValue(course);
+
+    const result = await prepareCourseSupportVerificationMonitoring(
+      course.id, fetchImpl as typeof fetch, now,
+      { forceFresh: true, preferOfficialWebsiteForUnsupported: true }
+    );
+
+    expect(result.attemptedCourseIds).toEqual([course.id]);
+    expect(fetchImpl.mock.calls.map(([input]) => input.toString())).toEqual([
+      sourceUrl, teeTimesUrl, matrixUrl, datedMatrixUrl
+    ]);
+    expect(fetchImpl.mock.calls.some(([input]) => input.toString() === faqUrl)).toBe(false);
+    expect(getOrdinaryCombinedDiscoveries()).toContainEqual(expect.objectContaining({
+      courseId: course.id,
+      status: "LEARNED",
+      bookingUrl: matrixUrl,
+      automationEligibility: "ALLOWED",
+      apiMetadata: expect.objectContaining({
+        provider: "QUICK18", providerCourseId: "1367", bookingBaseUrl: matrixUrl
+      }),
+      evidence: expect.objectContaining({ learnedFrom: "quick18-validated-public-matrix" })
+    }));
+  });
+
+  it.each([
+    { label: "a competing course heading", competingHeading: true, secondTenant: false },
+    { label: "two provider tenants", competingHeading: false, secondTenant: true }
+  ])("does not bind Quick18 from $label despite an exact name in page prose", async ({ competingHeading, secondTenant }) => {
+    const sourceUrl = "https://solitudelinksgolf.example/";
+    const teeTimesUrl = "https://solitudelinksgolf.example/golf/tee-times/";
+    const matrixUrl = "https://solitude.quick18.com/teetimes/searchmatrix";
+    const otherMatrixUrl = "https://othercourse.quick18.com/teetimes/searchmatrix";
+    const courseName = "Solitude Links Golf Course & Banquet Center";
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const url = input.toString();
+      if (url === sourceUrl) return new Response(
+        `<html><title>Solitude Links</title><body><h1>${competingHeading ? "Other Course Golf Club" : "Golf & Events"}</h1><main><p>${courseName} welcomes public golfers.</p></main><a href="${teeTimesUrl}">Book Tee Times</a></body></html>`,
+        { headers: { "content-type": "text/html" } }
+      );
+      if (url === teeTimesUrl) return new Response(
+        `<html><title>Book Tee Times | Solitude Links</title><body><main><p>Reserve at ${courseName}.</p><a href="${matrixUrl}">VIEW AVAILABLE TEE TIMES</a>${secondTenant ? `<a href="${otherMatrixUrl}">VIEW AVAILABLE TEE TIMES</a>` : ""}</main></body></html>`,
+        { headers: { "content-type": "text/html" } }
+      );
+      if (url === matrixUrl || url === otherMatrixUrl) return new Response(
+        "<html><body>Tee Time Search: Date: Players:</body></html>",
+        { headers: { "content-type": "text/html" } }
+      );
+      throw new Error(`Unexpected URL ${url}`);
+    });
+
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl, fetchImpl as typeof fetch, courseName,
+      new Map(), new Map(), sourceUrl
+    );
+    const discovery = buildBrowserDiscovery({
+      ...evidence, courseId: "solitude-course", courseName,
+      officialCourseWebsite: sourceUrl
+    });
+    expect(discovery.evidence.courseIdentityCorroboration).toBeUndefined();
+    expect(discovery.apiMetadata).toBeUndefined();
+    expect(discovery.status).not.toBe("LEARNED");
+  });
+
+  it("does not turn a shared site's course mention into authority for a sibling provider", async () => {
+    const sourceUrl = "https://playdcgolf.example/";
+    const siblingMatrix = "https://sibling.quick18.com/teetimes/searchmatrix";
+    const courseName = "Solitude Links Golf Course & Banquet Center";
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      if (input.toString() === sourceUrl) return new Response(
+        `<html><title>Public Golf Courses</title><body><h1>Public Golf</h1><main><p>${courseName} is one of our courses.</p><a href="${siblingMatrix}">Book Tee Times</a></main></body></html>`,
+        { headers: { "content-type": "text/html" } }
+      );
+      if (input.toString() === siblingMatrix) return new Response(
+        "<html><body>Tee Time Search: Date: Players:</body></html>",
+        { headers: { "content-type": "text/html" } }
+      );
+      throw new Error(`Unexpected URL ${input.toString()}`);
+    });
+    const evidence = await collectOfficialSiteEvidence(
+      sourceUrl, fetchImpl as typeof fetch, courseName,
+      new Map(), new Map(), sourceUrl
+    );
+    expect(evidence.officialPage).toBeUndefined();
+    const discovery = buildBrowserDiscovery({
+      ...evidence, courseId: "target-course", courseName,
+      officialCourseWebsite: sourceUrl
+    });
+    expect(discovery.evidence.courseIdentityCorroboration).toBeUndefined();
+    expect(discovery.apiMetadata).toBeUndefined();
+  });
+
   it("persists neither evidence nor course changes when an owner appears during a bounded fresh recheck", async () => {
     const course = {
       id: "bounded-race-course",

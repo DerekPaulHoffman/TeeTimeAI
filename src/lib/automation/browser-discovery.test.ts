@@ -2422,6 +2422,129 @@ describe("buildBrowserDiscovery", () => {
     expect(linkOnly.apiMetadata).toBeUndefined();
   });
 
+  it("validates a bare official Quick18 matrix through one dated signed-out read", async () => {
+    const courseName = "Solitude Links Golf Course & Banquet Center";
+    const officialUrl = "https://www.solitudelinksgolf.com/";
+    const bookingUrl = "https://solitudelinks.quick18.com/teetimes/searchmatrix";
+    const datedUrl = `${bookingUrl}?teedate=20260930`;
+    const date = new Date("2026-09-30T12:00:00.000Z");
+    const inspected = buildBrowserDiscovery({
+      courseId: "solitude-links",
+      courseName,
+      sourceUrl: officialUrl,
+      finalUrl: bookingUrl,
+      observedUrls: [officialUrl, bookingUrl],
+      officialCourseWebsite: officialUrl,
+      officialPage: {
+        url: officialUrl,
+        courseName,
+        linkCandidates: [{ url: bookingUrl, label: "Book tee times" }]
+      },
+      visibleText: `${courseName}. Tee Time Search: Date: Players: Tee Time Players Daily Rate`
+    });
+    expect(inspected).toMatchObject({
+      status: "INSPECTED",
+      bookingUrl,
+      evidence: {
+        learnedFrom: "quick18-public-matrix-pending",
+        courseIdentityCorroboration: {
+          kind: "OFFICIAL_COURSE_PROVIDER_LINK",
+          providerUrl: bookingUrl
+        }
+      }
+    });
+    expect(inspected.apiMetadata).toBeUndefined();
+
+    const matrixHtml = `<!doctype html><html><body>
+      <input id="SearchForm_Date" value="9/30/2026">
+      <div id="searchMatrix"><a href="/teetimes/searchmatrix?teedate=20260930">Sep 30</a>
+      <table class="matrixTable"><thead><tr><th>Tee Time</th><th>Course</th><th>Players</th><th>18 Holes</th></tr></thead>
+      <tbody><tr><td>11:03 AM</td><td>${courseName}</td><td>1 to 4 players</td><td><a href="/teetimes/course/1367/teetime/202609301103?psid=6786&amp;p=0">$84.00 Select</a></td></tr></tbody>
+      </table></div></body></html>`;
+    const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      expect(input.toString()).toBe(datedUrl);
+      expect(init).toMatchObject({ method: "GET", redirect: "manual" });
+      return new Response(matrixHtml, {
+        status: 200,
+        headers: { "content-type": "text/html" }
+      });
+    });
+    const learned = await enrichQuick18Discovery(
+      inspected, courseName, fetchImpl as typeof fetch, date
+    );
+
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(learned).toMatchObject({
+      status: "LEARNED",
+      bookingUrl,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "ALLOWED",
+      apiMetadata: {
+        provider: "QUICK18",
+        bookingBaseUrl: bookingUrl,
+        providerCourseId: "1367",
+        courseName
+      },
+      evidence: {
+        finalUrl: datedUrl,
+        observedUrls: expect.arrayContaining([datedUrl]),
+        learnedFrom: "quick18-validated-public-matrix"
+      }
+    });
+  });
+
+  it("keeps a bare Quick18 matrix pending for an empty sheet or another tenant", async () => {
+    const courseName = "Solitude Links Golf Course & Banquet Center";
+    const officialUrl = "https://www.solitudelinksgolf.com/";
+    const bookingUrl = "https://solitudelinks.quick18.com/teetimes/searchmatrix";
+    const date = new Date("2026-09-30T12:00:00.000Z");
+    const source = {
+      courseId: "solitude-links",
+      courseName,
+      sourceUrl: officialUrl,
+      finalUrl: bookingUrl,
+      observedUrls: [officialUrl, bookingUrl],
+      officialCourseWebsite: officialUrl,
+      visibleText: `${courseName}. Tee Time Search: Date: Players: Tee Time Players Daily Rate`
+    };
+    const wrongTenant = buildBrowserDiscovery({
+      ...source,
+      officialPage: {
+        url: officialUrl,
+        courseName,
+        linkCandidates: [{
+          url: "https://another-course.quick18.com/teetimes/searchmatrix",
+          label: "Book tee times"
+        }]
+      }
+    });
+    const noFetch = vi.fn<typeof fetch>();
+    expect(wrongTenant.evidence.courseIdentityCorroboration).toBeUndefined();
+    expect(await enrichQuick18Discovery(wrongTenant, courseName, noFetch, date)).toEqual(wrongTenant);
+    expect(noFetch).not.toHaveBeenCalled();
+
+    const inspected = buildBrowserDiscovery({
+      ...source,
+      officialPage: {
+        url: officialUrl,
+        courseName,
+        linkCandidates: [{ url: bookingUrl, label: "Book tee times" }]
+      }
+    });
+    const emptyMatrix = `<!doctype html><html><body>
+      <input id="SearchForm_Date" value="9/30/2026">
+      <div id="searchMatrix"><a href="/teetimes/searchmatrix?teedate=20260930">Sep 30</a>
+      <table class="matrixTable"><thead><tr><th>Tee Time</th><th>Course</th><th>Players</th><th>18 Holes</th></tr></thead>
+      <tbody></tbody></table></div></body></html>`;
+    const emptyFetch = vi.fn<typeof fetch>().mockResolvedValue(new Response(emptyMatrix, {
+      status: 200,
+      headers: { "content-type": "text/html" }
+    }));
+    expect(await enrichQuick18Discovery(inspected, courseName, emptyFetch, date)).toEqual(inspected);
+    expect(emptyFetch).toHaveBeenCalledOnce();
+    expect(inspected.apiMetadata).toBeUndefined();
+  });
+
   it("learns reusable Supreme Golf metadata from an official public course link", () => {
     const bookingUrl =
       "https://sgnavigator.app/portal/gillette-ridge-golf-club/book";
