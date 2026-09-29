@@ -91,10 +91,13 @@ export const teeSearchDetailsSchema = z
       });
     }
 
-    const selectedDate = parseLocalDate(value.date);
     const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    if (selectedDate <= today) {
+    const localToday = [
+      today.getFullYear(),
+      String(today.getMonth() + 1).padStart(2, "0"),
+      String(today.getDate()).padStart(2, "0")
+    ].join("-");
+    if (value.date <= localToday) {
       context.addIssue({
         code: "custom",
         path: ["date"],
@@ -128,5 +131,5 @@ export type SelectedCourseInput = TeeSearchInput["courses"][number];
 
 export function parseLocalDate(date: string) {
   const [year, month, day] = date.split("-").map(Number);
-  return new Date(year, month - 1, day);
+  return new Date(Date.UTC(year, month - 1, day));
 }

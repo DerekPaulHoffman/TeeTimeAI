@@ -7,6 +7,7 @@ import {
   MAX_PLAYERS_PER_SEARCH,
   MIN_COURSE_PREFERENCES,
   DEFAULT_SEARCH_CADENCE_MINUTES,
+  parseLocalDate,
   teeSearchInputSchema
 } from "./search";
 
@@ -15,6 +16,10 @@ const tomorrow = () => {
 };
 
 describe("teeSearchInputSchema", () => {
+  it("stores a chosen calendar date at UTC midnight", () => {
+    expect(parseLocalDate("2026-09-30").toISOString()).toBe("2026-09-30T00:00:00.000Z");
+  });
+
   it("accepts a future search with one to five ranked courses", () => {
     const result = teeSearchInputSchema.parse({
       date: tomorrow(),
