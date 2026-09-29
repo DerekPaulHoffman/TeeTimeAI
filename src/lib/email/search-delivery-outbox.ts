@@ -1242,6 +1242,7 @@ async function runWithCurrentAvailabilityDeliverySourceFence<T>(input: {
                   courseId,
                   sourceAt: completedReader.providerObservedAt,
                   terminal: completedReader.state === "EXPIRED_UNCONSUMED",
+                  setupStatusSafe: false,
                 },
               ]
             : []),
@@ -1251,39 +1252,57 @@ async function runWithCurrentAvailabilityDeliverySourceFence<T>(input: {
                   courseId,
                   sourceAt: marker.observationStartedAt,
                   terminal: marker.state === "EXPIRED_TERMINAL",
+                  setupStatusSafe: marker.state === "EXPIRED_RETRYABLE",
                 },
               ]
             : []),
         ];
       });
-      if (unresolvedProviderSources.some((source) => !source.terminal)) {
-        throw new DeliveryProviderSourcePendingError();
-      }
       if (unresolvedProviderSources.length > 0) {
         const statusReport = optionalJsonRecord(input.payload.statusReport);
-        const statusCourses = new Map(
-          (statusReport && Array.isArray(statusReport.courses)
-            ? statusReport.courses
-            : []
-          ).flatMap((value) => {
-            const course = optionalJsonRecord(value);
+        const statusCourses =
+          statusReport && Array.isArray(statusReport.courses)
+            ? statusReport.courses.map(optionalJsonRecord)
+            : [];
+        const statusCourseById = new Map(
+          statusCourses.flatMap((course) => {
             const courseId = optionalString(course?.courseId);
             return course && courseId ? [[courseId, course] as const] : [];
           }),
         );
-        // A setup report that states a course cannot currently be monitored
-        // makes no availability claim. A terminal reader/provider marker must
-        // not prevent that truthful status email from reaching the golfer.
+        // An unsupported setup report makes no availability claim. An expired
+        // provider observation lease may not indefinitely delay that factual
+        // status during its ambiguity retry window. An active lease or an
+        // unconsumed reader result still blocks delivery.
         const safeSetupWithoutAvailability =
           input.kind === "SETUP" &&
           matchIds.length === 0 &&
+          statusCourses.length === statusCourseIds.length &&
+          statusCourses.every((course) => {
+            return (
+              course !== null &&
+              course.outcome !== "MATCH_FOUND" &&
+              course.availableMatches === 0 &&
+              (!Array.isArray(course.matchingTimes) ||
+                course.matchingTimes.length === 0)
+            );
+          }) &&
           unresolvedProviderSources.every(({ courseId }) => {
-            const outcome = optionalString(statusCourses.get(courseId)?.outcome);
+            const outcome = optionalString(statusCourseById.get(courseId)?.outcome);
             return (
               outcome !== undefined &&
               SETUP_OUTCOMES_WITHOUT_AVAILABILITY.has(outcome as ProbeOutcome)
             );
           });
+        if (
+          unresolvedProviderSources.some(
+            (source) =>
+              !source.terminal &&
+              !(safeSetupWithoutAvailability && source.setupStatusSafe),
+          )
+        ) {
+          throw new DeliveryProviderSourcePendingError();
+        }
         if (!safeSetupWithoutAvailability) {
           throw new DeliveryProviderSourceUnresolvedError({
             courseIds,

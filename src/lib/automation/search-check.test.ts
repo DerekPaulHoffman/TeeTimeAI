@@ -5939,10 +5939,20 @@ describe("runSearchCheck email cadence", () => {
     const result = await runSearchCheck("search-1", "test");
 
     expect(result.courseResults[0]).toMatchObject({
-      outcome: "CHECK_PENDING",
+      outcome: "NEEDS_ADAPTER",
       message: expect.stringContaining("rendered-browser"),
     });
     expect(result.courseResults[0]?.supportStatus).toBe("IN_OPERATOR_QUEUE");
+    expect(
+      deliveryOutboxMocks.prepareSearchEmailDeliveryGroup.mock.calls.some(
+        ([input]) =>
+          input.kind === "SETUP" &&
+          input.payload.statusReport?.courses?.some(
+            (course: { outcome?: string }) =>
+              course.outcome === "NEEDS_ADAPTER",
+          ),
+      ),
+    ).toBe(true);
     expect(
       providerRequestLeaseMocks.runWithProviderRequestLease,
     ).not.toHaveBeenCalled();
@@ -6900,7 +6910,7 @@ describe("runSearchCheck email cadence", () => {
       nextStage: "RENDERED_BROWSER_DISCOVERY",
     });
     expect(result.courseResults[0]).toMatchObject({
-      outcome: "CHECK_PENDING",
+      outcome: "NEEDS_ADAPTER",
       message: expect.stringContaining("rendered-browser"),
     });
   });

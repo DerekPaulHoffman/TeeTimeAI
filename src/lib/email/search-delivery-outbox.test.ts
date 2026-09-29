@@ -4986,6 +4986,13 @@ describe("search email delivery outbox", () => {
       expectedStatus: "SENT",
     },
     {
+      description: "sends a truthful unsupported-course setup during source ambiguity retry",
+      outcome: "NEEDS_ADAPTER",
+      monitoringState: "ENGINEERING_VERIFICATION_NEEDED",
+      markerState: "EXPIRED_RETRYABLE",
+      expectedStatus: "SENT",
+    },
+    {
       description: "waits for an active source even when the setup reports an unsupported course",
       outcome: "NEEDS_ADAPTER",
       monitoringState: "ENGINEERING_VERIFICATION_NEEDED",
@@ -4999,11 +5006,26 @@ describe("search email delivery outbox", () => {
       markerState: "EXPIRED_TERMINAL",
       expectedStatus: "SUPPRESSED",
     },
-  ])("$description", async ({ outcome, monitoringState, markerState, expectedStatus }) => {
+    {
+      description: "waits for a retryable source before sending a no-match claim",
+      outcome: "NO_MATCH",
+      monitoringState: "HEALTHY",
+      markerState: "EXPIRED_RETRYABLE",
+      expectedStatus: "FAILED",
+    },
+    {
+      description: "waits for a retryable source before advertising an available match",
+      outcome: "MATCH_FOUND",
+      monitoringState: "HEALTHY",
+      markerState: "EXPIRED_RETRYABLE",
+      expectedStatus: "FAILED",
+      advertisedMatch: true,
+    },
+  ])("$description", async ({ outcome, monitoringState, markerState, expectedStatus, advertisedMatch }) => {
     const statusPayload = {
       schemaVersion: 2 as const,
       checkedAt: now.toISOString(),
-      displayMatchIds: [],
+      displayMatchIds: advertisedMatch ? ["match-1"] : [],
       statusSnapshot: [{ courseId: "course-1", state: outcome }],
       statusReport: {
         kind: "setup",
@@ -5018,7 +5040,18 @@ describe("search email delivery outbox", () => {
           courseName: "Course",
           timeZone: "America/New_York",
           outcome,
-          availableMatches: 0,
+          availableMatches: advertisedMatch ? 1 : 0,
+          ...(advertisedMatch
+            ? {
+                matchingTimes: [
+                  {
+                    matchId: "match-1",
+                    startsAt: "2026-07-16T08:00",
+                    availableSpots: 4,
+                  },
+                ],
+              }
+            : {}),
         }],
       },
     };
@@ -5046,12 +5079,20 @@ describe("search email delivery outbox", () => {
       lastSuccessfulAt: monitoringState === "HEALTHY" ? now : null,
       lastFailureAt: monitoringState === "HEALTHY" ? null : now,
     }] as never);
-    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([]);
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue(
+      advertisedMatch ? [currentMatch] as never : [],
+    );
     mockedPrisma.$queryRaw.mockImplementation(async (sql) => {
       const text = rawSqlText(sql);
       if (text.includes('FROM "ProviderRequestLease"')) {
         const leaseExpiresAt = new Date(
-          now.getTime() + (markerState === "ACTIVE" ? 2 : -11) * 60_000,
+          now.getTime() +
+            (markerState === "ACTIVE"
+              ? 2
+              : markerState === "EXPIRED_RETRYABLE"
+                ? -5
+                : -11) *
+              60_000,
         );
         return [{
           observationStartedAt: now,
@@ -5076,7 +5117,7 @@ describe("search email delivery outbox", () => {
       now: () => now,
     });
 
-    if (markerState === "ACTIVE") {
+    if (expectedStatus === "FAILED") {
       await expect(drain).rejects.toMatchObject({
         code: "DELIVERY_PROVIDER_SOURCE_PENDING",
       });
@@ -5087,6 +5128,112 @@ describe("search email delivery outbox", () => {
       });
     }
     expect(send).toHaveBeenCalledTimes(expectedStatus === "SENT" ? 1 : 0);
+  });
+
+  it.each([
+    { secondOutcome: "MATCH_FOUND", secondAvailableMatches: 1, sends: false, description: "a second course claims a match" },
+    { secondOutcome: "NEEDS_ADAPTER", secondAvailableMatches: 1, sends: false, description: "a second unsupported course reports availability" },
+    { secondOutcome: "NO_MATCH", secondAvailableMatches: 0, sends: true, description: "a second course confirms no slots" },
+  ])("handles a mixed setup when $description", async ({ secondOutcome, secondAvailableMatches, sends }) => {
+    const statusPayload = {
+      schemaVersion: 2 as const,
+      checkedAt: now.toISOString(),
+      displayMatchIds: [],
+      statusSnapshot: [
+        { courseId: "course-1", state: "NEEDS_ADAPTER" },
+        { courseId: "course-2", state: secondOutcome === "MATCH_FOUND" ? "MATCH_FOUND:1" : secondOutcome },
+      ],
+      statusReport: {
+        kind: "setup",
+        targetDate: "2026-07-16",
+        startTime: "07:00",
+        endTime: "10:00",
+        players: 2,
+        requestedLayoutHoles: null,
+        userTimeZone: "America/New_York",
+        courses: [
+          {
+            courseId: "course-1",
+            courseName: "Course",
+            timeZone: "America/New_York",
+            outcome: "NEEDS_ADAPTER",
+            availableMatches: 0,
+          },
+          {
+            courseId: "course-2",
+            courseName: "Second Course",
+            timeZone: "America/New_York",
+            outcome: secondOutcome,
+            availableMatches: secondAvailableMatches,
+            matchingTimes: [],
+          },
+        ],
+      },
+    };
+    const owner = delivery("delivery-1", "owner@example.com", {
+      kind: "SETUP",
+      groupKey: "status-group",
+      payload: statusPayload,
+    });
+    mockedPrisma.searchEmailDelivery.findMany
+      .mockResolvedValueOnce([owner] as never)
+      .mockResolvedValueOnce([owner] as never)
+      .mockResolvedValue([{
+        ...owner,
+        status: "SENT",
+        sentAt: now,
+      }] as never);
+    mockedPrisma.course.findMany.mockResolvedValue([
+      currentCourse,
+      { ...currentCourse, id: "course-2", name: "Second Course" },
+    ] as never);
+    mockedPrisma.courseProbe.findMany.mockResolvedValue([
+      { courseId: "course-1", outcome: "NEEDS_ADAPTER", observedAt: now },
+      { courseId: "course-2", outcome: secondOutcome, observedAt: now },
+    ] as never);
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([]);
+    let observationReads = 0;
+    mockedPrisma.$queryRaw.mockImplementation(async (sql) => {
+      const query = rawSqlText(sql);
+      if (query.includes('FROM "ProviderRequestLease"')) {
+        observationReads += 1;
+        return observationReads === 1
+          ? [{
+              observationStartedAt: now,
+              leaseExpiresAt: new Date(now.getTime() - 5 * 60_000),
+              retryUntil: new Date(now.getTime() + 5 * 60_000),
+              state: "EXPIRED_RETRYABLE",
+            }] as never
+          : [] as never;
+      }
+      if (query.includes('statement_timestamp() AS "currentTime"')) {
+        return [{ currentTime: now }] as never;
+      }
+      return [currentSearch] as never;
+    });
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+
+    const drain = drainSearchEmailDeliveryGroup({
+      searchId: "search-1",
+      alertGeneration: 3,
+      checkLeaseToken: "check-lease",
+      kind: "SETUP",
+      groupKey: "status-group",
+      send,
+      now: () => now,
+    });
+    if (sends) {
+      await expect(drain).resolves.toContainEqual({
+        id: "delivery-1",
+        status: "SENT",
+      });
+    } else {
+      await expect(drain).rejects.toMatchObject({
+        code: "DELIVERY_PROVIDER_SOURCE_PENDING",
+      });
+    }
+    expect(observationReads).toBe(2);
+    expect(send).toHaveBeenCalledTimes(sends ? 1 : 0);
   });
 
   it.each([

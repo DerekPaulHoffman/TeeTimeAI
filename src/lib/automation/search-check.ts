@@ -968,10 +968,15 @@ async function checkSearch(
         playbookRuntime?.assessment.nextStage === "RENDERED_BROWSER_DISCOVERY"
       ) {
         courseResults.push(
-          buildPlaybookPendingCourseReport(
-            course,
-            "A signed-out rendered-browser review is the next monitoring step.",
-          ),
+          {
+            ...buildPlaybookPendingCourseReport(
+              course,
+              "A signed-out rendered-browser review is the next monitoring step.",
+            ),
+            // This stage awaits the responder; no provider check is running.
+            // Keep the customer's setup status factual while it is queued.
+            outcome: "NEEDS_ADAPTER",
+          },
         );
         return;
       }
