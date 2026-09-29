@@ -241,6 +241,13 @@ class LegacyProphetCookielessSessionRedirectError extends Error {
   }
 }
 
+class OfficialSiteWaitingRoomRedirectError extends Error {
+  constructor() {
+    super("Official source redirected to a waiting room; redirect was not followed");
+    this.name = "OfficialSiteWaitingRoomRedirectError";
+  }
+}
+
 type LegacyProphetConfiguration = {
   providerUrl: string;
   courseName: string;
@@ -1341,6 +1348,9 @@ export async function prepareSearchMonitoring(
               courseId: course.id,
               sourceUrl,
               detectedPlatform: course.detectedPlatform,
+              ...(error instanceof OfficialSiteWaitingRoomRedirectError
+                ? { learnedFrom: "official-site-waiting-room-redirect" as const }
+                : {}),
               message:
                 error instanceof Error
                   ? error.message
@@ -3045,6 +3055,9 @@ async function fetchPublicHtmlFromUrl(
       const redirectUrl = new URL(location, currentUrl);
       if (isLegacyProphetCookielessSessionRedirect(sourceUrl, redirectUrl)) {
         throw new LegacyProphetCookielessSessionRedirectError();
+      }
+      if (isWaitingRoomRedirectHostname(redirectUrl.hostname)) {
+        throw new OfficialSiteWaitingRoomRedirectError();
       }
       const safeRedirectUrl = parseSafePublicUrl(redirectUrl.toString());
       assertPublicHtmlUrlPolicy(safeRedirectUrl, urlPolicy);
@@ -4796,6 +4809,12 @@ function isForbiddenProviderSurfaceHostname(hostname: string) {
   );
 }
 
+function isWaitingRoomRedirectHostname(hostname: string) {
+  return hostname.toLowerCase().split(".").some((label) =>
+    label.replace(/[^a-z0-9]/gu, "") === "waitingroom"
+  );
+}
+
 function resolveHttpUrl(value: string | undefined, baseUrl: string) {
   const normalized = value?.trim();
   if (
@@ -4853,6 +4872,7 @@ function buildFailedDiscovery(input: {
   sourceUrl: string;
   detectedPlatform: string;
   message: string;
+  learnedFrom?: "official-site-waiting-room-redirect";
 }): BrowserDiscovery {
   const detectedPlatform = [
     "FOREUP",
@@ -4873,7 +4893,7 @@ function buildFailedDiscovery(input: {
     evidence: {
       observedUrls: [input.sourceUrl],
       visibleText: input.message.slice(0, 500),
-      learnedFrom: "official-site-fetch-failed"
+      learnedFrom: input.learnedFrom ?? "official-site-fetch-failed"
     }
   };
 }

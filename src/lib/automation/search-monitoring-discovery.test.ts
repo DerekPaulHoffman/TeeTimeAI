@@ -1511,6 +1511,55 @@ describe("search monitoring discovery", () => {
         expectedUnownedIncident, now, expectedProviderObservation(course().id, now)
       );
     });
+
+    it.each([
+      {
+        label: "waiting-room",
+        location: "https://waitingroom.snow.com/?queueToken=private-redirect-secret",
+        learnedFrom: "official-site-waiting-room-redirect",
+        visibleText: "Official source redirected to a waiting room; redirect was not followed"
+      },
+      {
+        label: "generic unsafe",
+        location: "https://official-recheck.example/checkout?token=private-redirect-secret",
+        learnedFrom: "official-site-fetch-failed",
+        visibleText: "Official site URL is not a safe public HTTP address"
+      }
+    ])("records a sanitized $label redirect failure without following it", async ({
+      location, learnedFrom, visibleText
+    }) => {
+      const snapshot = course();
+      prismaMocks.course.findUnique.mockResolvedValue(snapshot);
+      const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+        expect(input.toString()).toBe(officialUrl);
+        return new Response(null, { status: 302, headers: { location } });
+      });
+
+      const result = await prepareCourseSupportVerificationMonitoring(
+        snapshot.id, fetchImpl as typeof fetch, now, {
+          forceFresh: true, preferOfficialWebsiteForUnsupported: true, expectedUnownedIncident
+        }
+      );
+
+      expect(fetchImpl).toHaveBeenCalledOnce();
+      expect(result).toMatchObject({
+        attemptedCourseIds: [snapshot.id], failedCourseIds: [snapshot.id], appliedCourseIds: []
+      });
+      expect(dbMocks.recordBrowserDiscovery).toHaveBeenCalledWith(
+        expect.objectContaining({
+          courseId: snapshot.id, sourceUrl: officialUrl, status: "FAILED", confidence: 0,
+          evidence: { observedUrls: [officialUrl], visibleText, learnedFrom }
+        }),
+        undefined, undefined, expectedUnownedIncident, now,
+        expectedProviderObservation(snapshot.id, now)
+      );
+      const persisted = JSON.stringify(dbMocks.recordBrowserDiscovery.mock.calls);
+      expect(persisted).not.toContain(location);
+      expect(persisted).not.toContain("private-redirect-secret");
+      expect(dbMocks.recordAndApplyBrowserDiscoveryToCourse).not.toHaveBeenCalled();
+      expect(dbMocks.applyBrowserDiscoveryToCourse).not.toHaveBeenCalled();
+      expect(snapshot.detectedBookingUrl).toBe(bookingOverride);
+    });
   });
 
   it("persists neither evidence nor course changes when an owner appears during a bounded fresh recheck", async () => {
