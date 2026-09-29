@@ -5603,6 +5603,43 @@ describe("course-support verification terminal evidence", () => {
     });
   });
 
+  it("rejects active-alert proof without erasing an owned reader progression retry", async () => {
+    const failedRequest = assignedLocalReaderRequest({
+      requestOverrides: {
+        status: "RETRYABLE_FAILED",
+        revision: 2,
+        leaseToken: null,
+        leaseExpiresAt: null,
+        nextAttemptAt: new Date("2026-07-21T12:01:00.000Z"),
+        outcome: "FETCH_FAILED",
+        failureClass: "NETWORK",
+      },
+      remediationOverrides: {
+        reason: "STARTED_LOCAL_READER_CONTINUATION",
+        retryBudget: {
+          maximumAttempts: 1,
+          attemptsCompleted: 0,
+          attemptsRemaining: 1,
+          exhausted: false,
+        },
+      },
+    });
+    failedRequest.evidence = {
+      ...verificationEvidence("FETCH_FAILED", false),
+      failureClass: "NETWORK",
+      providerSnapshotFingerprint: failedRequest.providerSnapshotFingerprint,
+    };
+    prismaMocks.requestFindUnique.mockResolvedValue(failedRequest);
+    prismaMocks.activeSearchCount.mockResolvedValue(1);
+
+    await expect(getCurrentCourseSupportVerificationFailure({
+      batchIncidentId: "batch-incident-1",
+      releaseSha,
+      now,
+    })).resolves.toEqual({ current: false, reason: "active_demand" });
+    expect(prismaMocks.requestUpdateMany).not.toHaveBeenCalled();
+  });
+
   it("invalidates current failure evidence after a verified manual disposition", async () => {
     prismaMocks.requestFindUnique.mockResolvedValue(
       request({

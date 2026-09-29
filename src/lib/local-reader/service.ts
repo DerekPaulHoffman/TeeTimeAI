@@ -50,6 +50,10 @@ export { getLocalReaderCourseKey } from "./course-key";
 
 const JOB_LIFETIME_MS = 5 * 60_000;
 const LEASE_LIFETIME_MS = 3 * 60_000;
+// The browser may spend 45 seconds waiting for a passive provider challenge.
+// Do not assign an availability job so late that it cannot report a signed
+// result before the original job deadline.
+const MIN_AVAILABILITY_CLAIM_WINDOW_MS = 90_000;
 const RESULT_LIFETIME_MS = 10 * 60_000;
 const DEFERRED_RESULT_LIFETIME_MS = 20 * 60_000;
 const ALERT_READER_ATTEMPT_LIFETIME_MS = 5 * 60_000;
@@ -899,9 +903,21 @@ async function claimReaderCandidate(handshake: LocalReaderAgentHandshake) {
           const activeFamilies = new Set(
             activeJobs.map(getReaderProviderFamily),
           );
+          const minimumAvailabilityExpiresAt = new Date(
+            databaseNow.getTime() + MIN_AVAILABILITY_CLAIM_WINDOW_MS,
+          );
           const claimableWhere = {
             jobExpiresAt: { gt: databaseNow },
             AND: [
+              {
+                OR: [
+                  { purpose: "OFFICIAL_SOURCE_DISCOVERY" },
+                  {
+                    purpose: { in: ["ALERT_CHECK", "COURSE_VERIFICATION"] },
+                    jobExpiresAt: { gt: minimumAvailabilityExpiresAt },
+                  },
+                ],
+              },
               {
                 OR: [
                   { status: "PENDING" },
@@ -946,13 +962,20 @@ async function claimReaderCandidate(handshake: LocalReaderAgentHandshake) {
           if (!candidate) return null;
 
           const leaseToken = randomUUID();
+          const remainingJobLifetimeMs =
+            candidate.jobExpiresAt.getTime() - databaseNow.getTime();
+          if (
+            remainingJobLifetimeMs <=
+            (candidate.purpose === "OFFICIAL_SOURCE_DISCOVERY"
+              ? 0
+              : MIN_AVAILABILITY_CLAIM_WINDOW_MS)
+          ) {
+            return null;
+          }
           await acquireCourseMonitoringWriteLockInTransaction(
             transaction,
             candidate.courseId,
           );
-          const remainingJobLifetimeMs =
-            candidate.jobExpiresAt.getTime() - databaseNow.getTime();
-          if (remainingJobLifetimeMs <= 0) return null;
           const observationLease =
             await beginCourseProviderObservationInTransaction(transaction, {
               courseId: candidate.courseId,
@@ -972,7 +995,14 @@ async function claimReaderCandidate(handshake: LocalReaderAgentHandshake) {
           const claimed = await transaction.localReaderJob.updateMany({
             where: {
               id: candidate.id,
-              jobExpiresAt: { gt: observationLease.observationStartedAt },
+              jobExpiresAt: {
+                gt: new Date(
+                  observationLease.observationStartedAt.getTime() +
+                    (candidate.purpose === "OFFICIAL_SOURCE_DISCOVERY"
+                      ? 0
+                      : MIN_AVAILABILITY_CLAIM_WINDOW_MS),
+                ),
+              },
               OR: [
                 { status: "PENDING" },
                 {
