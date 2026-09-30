@@ -211,7 +211,7 @@ The homepage lets users:
 - Discover nearby likely-public golf courses.
 - See course photos, addresses, ratings, and official site links when available.
 - Select and rank 1 to 5 courses.
-- Choose future date, start/end time, and 1 to 4 players.
+- Choose a date after today in every selected course's timezone, start/end time, and 1 to 4 players. The server's calendar day and the golfer's display timezone do not determine whether that course-local date is in the future.
 - Use the signed-in account email for alerts and optionally add extra recipients.
 - Sign in or create an account before saving a search, so it can be changed, paused, or stopped later.
 

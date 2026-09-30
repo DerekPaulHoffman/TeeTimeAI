@@ -116,12 +116,10 @@ describe("teeSearchInputSchema", () => {
     expect(result.cadenceMinutes).toBe(DEFAULT_SEARCH_CADENCE_MINUTES);
   });
 
-  it("rejects same-day or past searches", () => {
-    const today = formatDateInputValue(new Date());
-
+  it.each(["2026-02-30", "2026-13-01", "2026-9-30"])("rejects invalid calendar date %s", (date) => {
     expect(() =>
       teeSearchInputSchema.parse({
-        date: today,
+        date,
         startTime: "13:40",
         endTime: "16:00",
         players: 3,
@@ -135,7 +133,7 @@ describe("teeSearchInputSchema", () => {
           }
         ]
       })
-    ).toThrow(/future/i);
+    ).toThrow(/date/i);
   });
 
   it("rejects more than five prioritized courses", () => {

@@ -32,6 +32,7 @@ import {
   type TeeSearchInput,
 } from "@/lib/validation/search";
 import { parseLocalDate } from "@/lib/validation/search";
+import { assertFutureCourseSearchDate } from "@/lib/validation/search-date";
 import { getLocalReaderCourseKey } from "@/lib/local-reader/course-key";
 import {
   getNewestCompletedLocalReaderProviderObservationsInTransaction,
@@ -95,6 +96,10 @@ export async function createTeeSearchForUser(
   assertCourseLayoutsCompatible(
     resolvedPreferences,
     input.requestedLayoutHoles,
+  );
+  assertFutureCourseSearchDate(
+    input.date,
+    resolvedPreferences.map((preference) => preference.course.timeZone),
   );
   const coursePreferences = resolvedPreferences.map(
     (preference) => preference.create,
@@ -198,6 +203,7 @@ async function buildCoursePreferenceCreate(
     ratingUpdate: null,
     course: {
       name: course.name,
+      timeZone,
       isPublic: course.publicAccessStatus === "UNVERIFIED" ? null : true,
       layoutHoleCounts: [] as number[],
       layoutHolesVerifiedAt: null,
@@ -249,6 +255,7 @@ async function findReusableCourse(course: SelectedCourseInput) {
           address: true,
           latitude: true,
           longitude: true,
+          timeZone: true,
           website: true,
           detectedBookingUrl: true,
           phone: true,
@@ -275,6 +282,7 @@ async function findReusableCourse(course: SelectedCourseInput) {
           address: true,
           latitude: true,
           longitude: true,
+          timeZone: true,
           website: true,
           detectedBookingUrl: true,
           phone: true,
@@ -339,6 +347,7 @@ async function findReusableCourse(course: SelectedCourseInput) {
       address: true,
       latitude: true,
       longitude: true,
+      timeZone: true,
       website: true,
       detectedBookingUrl: true,
       phone: true,
@@ -686,6 +695,7 @@ export async function updateTeeSearchForUser(
         searchId,
         userId,
       });
+      await assertUpdatedSearchDate(transaction, userId, searchId, input.date);
       const updatedSearch = await transaction.teeSearch.update({
         where: {
           id: searchId,
@@ -703,6 +713,7 @@ export async function updateTeeSearchForUser(
       searchId,
       userId,
     });
+    await assertUpdatedSearchDate(transaction, userId, searchId, input.date);
     for (const [index, preference] of coursePreferences.entries()) {
       await transaction.coursePreference.updateMany({
         where: {
@@ -731,6 +742,27 @@ export async function updateTeeSearchForUser(
     });
     return projectCurrentCustomerSearch(transaction, updatedSearch);
   });
+}
+
+async function assertUpdatedSearchDate(
+  transaction: Prisma.TransactionClient,
+  userId: string,
+  searchId: string,
+  date: string | undefined,
+) {
+  if (date === undefined) {
+    return;
+  }
+  const search = await transaction.teeSearch.findUniqueOrThrow({
+    where: { id: searchId, userId },
+    select: {
+      preferences: { select: { course: { select: { timeZone: true } } } },
+    },
+  });
+  assertFutureCourseSearchDate(
+    date,
+    search.preferences.map((preference) => preference.course.timeZone),
+  );
 }
 
 async function projectCurrentCustomerSearch<
