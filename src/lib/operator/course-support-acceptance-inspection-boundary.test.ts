@@ -218,6 +218,78 @@ describe("full native campaign inspection through the acceptance read boundary",
     expect(fixture.mutation).not.toHaveBeenCalled();
     expect(globalMocks.escapedRead).not.toHaveBeenCalled();
   });
+
+  it("keeps oversized legacy-ineligible ledgers outside all 112 native observations and the complete projection", async () => {
+    const fixture = campaignDatabase({ resolvedObservations: "MODERN", oversizedObservationLedger: true });
+    const database = { $transaction: vi.fn(async (work: (transaction: Prisma.TransactionClient) => Promise<unknown>) => work(fixture.transaction)) };
+    const result = await loadCourseSupportAcceptanceReasons(database as unknown as Parameters<typeof loadCourseSupportAcceptanceReasons>[0], SOURCE_SHA);
+
+    expect(result).toMatchObject({ schemaVersion: 4, status: "AVAILABLE", reason: "COMPLETE_NATIVE_TRACE",
+      readFence: null, readCost: null, evidenceReadComplete: true, customerDataIncluded: false });
+    const observationReads = fixture.calls.filter((call) => call.model === "courseSupportIncident" && call.method === "findMany" &&
+      (call.args as Query).select?.monitoringEvents && (call.args as Query).select?.confirmedAt === true &&
+      Array.isArray(((call.args as Query).where?.id as Row | undefined)?.in));
+    expect(observationReads).toHaveLength(1);
+    expect(observationReads.every((call) => !Object.hasOwn((call.args as Query).select!, "attemptLedger"))).toBe(true);
+    expect(observationReads.every((call) => ((call.args as Query).where?.id as Row).in instanceof Array &&
+      new Set(((call.args as Query).where!.id as Row).in as string[]).size === 112)).toBe(true);
+    const byteStatements = fixture.calls.filter((call) => call.model === "$queryRaw").map((call) => call.args as Prisma.Sql);
+    expect(byteStatements.some((statement) => statement.text.includes('FROM "CourseSupportIncident"'))).toBe(true);
+    expect(byteStatements.every((statement) => !statement.text.includes('acceptance_row."attemptLedger"'))).toBe(true);
+
+    const native = campaignDatabase({ resolvedObservations: "MODERN" });
+    const inspection = (await inspectLatestParkedCourseCampaign(native.transaction, { now: NOW, admissionRuntimeVersion: SOURCE_SHA }))!;
+    const { runId, totalCount, ...observedCampaign } = inspection;
+    expect(totalCount).toBe(112);
+    expect(inspection).toMatchObject({ terminalCount: 112, sourceUnverifiedCount: 112, pendingCount: 0,
+      automaticWithin24HoursCount: 112, engineeringBlockerCount: 0 });
+    const expected = await loadCourseSupportAcceptanceProjection({ now: NOW, observedCampaign }, {
+      loadCourseFleetCounts: (input) => loadOperatorCourseFleetCounts(input, native.transaction),
+      loadLatestCampaignRecord: () => native.transaction.automationRun.findFirst({
+        where: { id: runId }, select: { id: true, status: true, audit: true, notes: true },
+      }),
+      loadFreshGlobalParkedCount: () => native.transaction.courseSupportIncident.count({
+        where: { status: "NEEDS_HUMAN", humanReviewReason: "AUTOMATION_STALLED", activeBatchId: null, nextAttemptAt: null },
+      }),
+      loadCampaignSummary: (input) => loadOperatorCourseSupportCampaign(input,
+        createOperatorCourseSupportCampaignDependencies(native.transaction, { now: NOW, admissionRuntimeVersion: SOURCE_SHA })),
+    });
+    expect(result.acceptanceProjection).toEqual(expected);
+    expect(JSON.stringify(result)).not.toMatch(/private-|https:\/\//u);
+    expect(fixture.mutation).not.toHaveBeenCalled();
+    expect(native.mutation).not.toHaveBeenCalled();
+    expect(globalMocks.escapedRead).not.toHaveBeenCalled();
+  });
+
+  it("fences the full required legacy ledger after all 112 observation bindings without hydrating it or issuing later reads", async () => {
+    // Exact legacy event metadata admits this read; no accepted legacy proof is fabricated.
+    const fixture = campaignDatabase({ resolvedObservations: "LEGACY_LAST", oversizedObservationLedger: true });
+    const database = { $transaction: vi.fn(async (work: (transaction: Prisma.TransactionClient) => Promise<unknown>) => work(fixture.transaction)) };
+    const result = await loadCourseSupportAcceptanceReasons(database as unknown as Parameters<typeof loadCourseSupportAcceptanceReasons>[0], SOURCE_SHA);
+
+    expect(result).toMatchObject({ schemaVersion: 4, status: "UNAVAILABLE", reason: "EVIDENCE_BOUND_EXCEEDED",
+      readFence: { phase: "CAMPAIGN_INSPECTION", boundary: "SELECTED_EVIDENCE_BYTES" },
+      acceptanceProjection: null, futureUnknown: null, rollingAmbiguous: null,
+      evidenceReadComplete: false, customerDataIncluded: false });
+    assertObservedReadCost(result, "LEGACY_TERMINAL_HISTORY");
+    const observationReads = fixture.calls.filter((call) => call.model === "courseSupportIncident" && call.method === "findMany" &&
+      (call.args as Query).select?.monitoringEvents && (call.args as Query).select?.confirmedAt === true &&
+      Array.isArray(((call.args as Query).where?.id as Row | undefined)?.in));
+    expect(observationReads).toHaveLength(1);
+    expect(((observationReads[0].args as Query).where!.id as Row).in).toHaveLength(112);
+    expect((observationReads[0].args as Query).select).not.toHaveProperty("attemptLedger");
+    expect(fixture.calls.some((call) => call.model === "courseSupportIncident" && call.method === "findMany" &&
+      (call.args as Query).select?.attemptLedger === true && (call.args as Query).select?.updatedAt === true)).toBe(false);
+    const ledgerStatements = fixture.calls.filter((call) => call.model === "$queryRaw" &&
+      (call.args as Prisma.Sql).text.includes('acceptance_row."attemptLedger"'));
+    expect(ledgerStatements).toHaveLength(1);
+    expect((ledgerStatements[0].args as Prisma.Sql).values).toContain("private-incident-112");
+    expect((ledgerStatements[0].args as Prisma.Sql).values).not.toContain("private-incident-111");
+    expect(fixture.calls.at(-1)).toBe(ledgerStatements[0]);
+    expect(JSON.stringify(result)).not.toMatch(/private-|https:\/\//u);
+    expect(fixture.mutation).not.toHaveBeenCalled();
+    expect(globalMocks.escapedRead).not.toHaveBeenCalled();
+  });
 });
 
 function assertObservedReadCost(result: { readCost: unknown }, queryCategory: AcceptanceReadQueryCategory) {
@@ -248,6 +320,8 @@ function campaignDatabase(input: {
   oversizedUnselectedRunErrors?: boolean;
   oversizedUnselectedOlderBatchEvidence?: boolean;
   oversizedCurrentCycleProof?: boolean;
+  resolvedObservations?: "MODERN" | "LEGACY_LAST";
+  oversizedObservationLedger?: boolean;
 } = {}) {
   const rows = new Map(Prisma.dmmf.datamodel.models.map((model) => [model.name, [] as Row[]]));
   const members: ParkedCourseCampaignMember[] = [];
@@ -282,6 +356,7 @@ function campaignDatabase(input: {
       engineeringOnly: false, latestMessage: null, nextAction: null, escalationDeadlineAt: null, activeBatch: null,
       resolutionMessage: null, resolutionNotifiedAt: null, decisionActorId: null, decisionAt: null,
       decisionNote: null, decisionEvidenceUrl: null, decisionIdempotencyKey: null,
+      updatedAt: PARKED_AT,
     };
     course.supportIncident = incident;
     const event: Row = {
@@ -354,6 +429,25 @@ function campaignDatabase(input: {
     readerVersion: "fixture-reader-v1", buildId: "fixture-build", capabilities: [{ key: "OFFICIAL_SOURCE_RENDERED", parserVersion: 1 }],
     lastSeenAt: NOW });
   const audit = createParkedCourseCampaignAudit({ expectedCount: 112, capturedAt: CAPTURED_AT, members });
+  if (input.resolvedObservations) {
+    const confirmedAt = new Date(CAPTURED_AT.getTime() + 60_000);
+    const unusedLedger = input.oversizedObservationLedger
+      ? { version: 1, events: [], privateEvidence: "x".repeat(ACCEPTANCE_READ_LIMITS.evidenceBytes + 1) } : null;
+    for (const [index, incident] of rows.get("CourseSupportIncident")!.entries()) {
+      const course = incident.course as Row;
+      const status = course.monitoringStatus as Row;
+      Object.assign(incident, { cycle: 4, status: "RESOLVED", humanReviewReason: null,
+        confirmedAt, resolvedAt: PARKED_AT, resolution: "SOURCE_UNVERIFIED", attemptLedger: unusedLedger });
+      Object.assign(status, { state: "FINAL_TECHNICAL", stateChangedAt: PARKED_AT });
+      const event = (incident.monitoringEvents as Row[])[0];
+      Object.assign(event, { eventType: "STATE_CHANGED", source: "COURSE_SUPPORT_RESPONDER",
+        fromState: "AUTO_INVESTIGATING", toState: "FINAL_TECHNICAL", outcome: "SOURCE_UNVERIFIED",
+        audit: { cycle: 4, confirmedAt: confirmedAt.toISOString(), automatedFinal: true,
+          customerDataIncluded: false, finalKind: "source_unverified",
+          ...(input.resolvedObservations === "LEGACY_LAST" && index === 111 ? {} : { freshRuntimeProof: true }),
+          campaign: { kind: "PARKED_COHORT", runId: "private-campaign", membershipDigest: audit.membershipDigest, cycle: 4 } } });
+    }
+  }
   rows.get("AutomationRun")!.push({ id: "private-campaign", promptVersion: PARKED_COURSE_CAMPAIGN_PROMPT_VERSION,
     status: "RUNNING", completedAt: null, outcome: null, audit, notes: null, startedAt: CAPTURED_AT, supportBatches: [],
     errors: input.oversizedUnselectedRunErrors ? { message: `private-${"x".repeat(ACCEPTANCE_READ_LIMITS.evidenceBytes + 1)}` } : null });
@@ -485,7 +579,8 @@ function matches(row: Row, where: Row | undefined): boolean {
         : conditions.some((condition) => matches(row, condition as Row));
     }
     const actual = row[key];
-    if (expected === null || typeof expected !== "object" || expected instanceof Date) return actual === expected;
+    if (expected instanceof Date) return actual instanceof Date && actual.getTime() === expected.getTime();
+    if (expected === null || typeof expected !== "object") return actual === expected;
     const condition = expected as Row;
     if ("is" in condition) return condition.is === null ? actual === null : Boolean(actual && matches(actual as Row, condition.is as Row));
     if ("some" in condition || "none" in condition) {

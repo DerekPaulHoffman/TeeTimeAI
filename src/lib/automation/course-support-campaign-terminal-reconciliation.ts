@@ -109,22 +109,15 @@ export type LegacyParkedCampaignTerminalReconciliation = {
   evidenceDigest: string;
 };
 
-/**
- * Read-only compatibility for the short-lived writer shape that persisted a
- * complete FINAL_DISPOSITION closeout but omitted `audit.freshRuntimeProof`
- * from its STATE_CHANGED event. This deliberately does not backfill or infer
- * the bit from resolved state. Every inspection revalidates the exact durable
- * batch proof and returns the same derived result without writing anything.
- */
-export function reconcileLegacyParkedCampaignTerminalEvidence(input: {
+/** Existing metadata eligibility, before any complete legacy ledger is needed. */
+export function hasLegacyParkedCampaignTerminalMetadata(input: {
   campaignRunId: string;
   campaignMembershipDigest: string;
   campaignCapturedAt: Date;
   member: { courseId: string; incidentId: string; cycle: number };
-  incident: LegacyParkedCampaignTerminalIncident;
+  incident: Omit<LegacyParkedCampaignTerminalIncident, "attemptLedger">;
   event: LegacyParkedCampaignTerminalEvent;
-  batchEntries: readonly LegacyParkedCampaignTerminalBatchEntry[];
-}): LegacyParkedCampaignTerminalReconciliation | null {
+}): boolean {
   const eventAudit = asRecord(input.event.audit);
   const campaign = asRecord(eventAudit.campaign);
   const incident = input.incident;
@@ -164,8 +157,31 @@ export function reconcileLegacyParkedCampaignTerminalEvidence(input: {
     campaign.membershipDigest !== input.campaignMembershipDigest ||
     campaign.cycle !== incident.cycle
   ) {
-    return null;
+    return false;
   }
+  return true;
+}
+
+/**
+ * Read-only compatibility for the short-lived writer shape that persisted a
+ * complete FINAL_DISPOSITION closeout but omitted `audit.freshRuntimeProof`
+ * from its STATE_CHANGED event. This deliberately does not backfill or infer
+ * the bit from resolved state. Every inspection revalidates the exact durable
+ * batch proof and returns the same derived result without writing anything.
+ */
+export function reconcileLegacyParkedCampaignTerminalEvidence(input: {
+  campaignRunId: string;
+  campaignMembershipDigest: string;
+  campaignCapturedAt: Date;
+  member: { courseId: string; incidentId: string; cycle: number };
+  incident: LegacyParkedCampaignTerminalIncident;
+  event: LegacyParkedCampaignTerminalEvent;
+  batchEntries: readonly LegacyParkedCampaignTerminalBatchEntry[];
+}): LegacyParkedCampaignTerminalReconciliation | null {
+  if (!hasLegacyParkedCampaignTerminalMetadata(input)) return null;
+  const eventAudit = asRecord(input.event.audit);
+  const incident = input.incident;
+  const event = input.event;
 
   const exactCandidates = input.batchEntries.filter((entry) =>
     isExactCompletedLegacyTerminalBatchEntry({

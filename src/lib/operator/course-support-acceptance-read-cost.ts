@@ -96,6 +96,14 @@ export function classifyAcceptanceReadQuery(delegateName: string, method: string
       }
       const course = nested(select.course);
       if (select.attemptLedger === true && course?.bookingMetadata === true && nested(course.monitoringStatus)) return "PARKED_SNAPSHOT";
+      const legacyBindingFields = ["id", "courseId", "cycle", "status", "activeBatchId", "confirmedAt", "firstSeenAt",
+        "providerFamilyKey", "failureClass", "attemptCount", "activeRealSearchCount", "resolution", "resolvedAt", "decisionAt", "updatedAt", "attemptLedger"];
+      if (Object.keys(select).length === legacyBindingFields.length + 1 &&
+          legacyBindingFields.every((field) => select[field] === true) &&
+          Object.keys(course ?? {}).length === 1 && Object.keys(nested(course?.monitoringStatus) ?? {}).length === 2 &&
+          nested(course?.monitoringStatus)?.state === true && nested(course?.monitoringStatus)?.stateChangedAt === true) {
+        return "LEGACY_TERMINAL_HISTORY";
+      }
       if (select.confirmedAt === true && select.activeBatchId === true &&
           nested(course?.monitoringStatus)?.stateChangedAt === true && nested(select.monitoringEvents)) return "MEMBER_OBSERVATIONS";
     }

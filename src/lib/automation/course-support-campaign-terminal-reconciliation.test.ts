@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import { appendAutomationPlaybookEvent } from "./course-monitoring-playbook";
 import {
+  hasLegacyParkedCampaignTerminalMetadata,
   reconcileLegacyParkedCampaignTerminalEvidence,
   type LegacyParkedCampaignTerminalBatchEntry,
   type LegacyParkedCampaignTerminalEvent,
@@ -340,6 +341,43 @@ function sourceUnverifiedEvidence() {
   };
 }
 
+describe("legacy terminal metadata eligibility", () => {
+  it("accepts exact metadata without a ledger or any batch proof read", () => {
+    const fixture = reconciliationFixture({ proofSnapshot: manualDirectProof() });
+    const { attemptLedger, ...incident } = fixture.incident;
+    expect(attemptLedger).toBeNull();
+    const metadata = { ...fixture.input, incident };
+    expect(hasLegacyParkedCampaignTerminalMetadata(metadata)).toBe(true);
+    Object.defineProperty(incident, "attemptLedger", { get() { throw new Error("Ledger must remain unread."); } });
+    Object.defineProperty(metadata, "batchEntries", { get() { throw new Error("Batch proof must remain unread."); } });
+    expect(hasLegacyParkedCampaignTerminalMetadata(metadata)).toBe(true);
+  });
+
+  it.each([
+    { label: "unresolved member", incident: { status: "NEEDS_HUMAN" } },
+    { label: "owned member", incident: { activeBatchId: "active-batch" } },
+    { label: "captured cycle", incident: { cycle: 3 } },
+    { label: "missing confirmation", incident: { confirmedAt: null } },
+    { label: "confirmation before capture", incident: { confirmedAt: new Date(capturedAt.getTime() - 1) } },
+    { label: "missing resolution clock", incident: { resolvedAt: null } },
+    { label: "changed resolution clock", incident: { resolvedAt: new Date(closeoutAt.getTime() + 1) } },
+    { label: "changed monitoring clock", incident: { monitoringStateChangedAt: new Date(closeoutAt.getTime() + 1) } },
+  ])("rejects $label before accessing a complete ledger", ({ incident }) => {
+    const factual = factualFinalEvidence("MANUAL_DIRECT");
+    const fixture = reconciliationFixture({ ...factual, incident });
+    Object.defineProperty(fixture.incident, "attemptLedger", { get() { throw new Error("Ledger must remain unread."); } });
+    expect(hasLegacyParkedCampaignTerminalMetadata(fixture.input)).toBe(false);
+    expect(reconcileLegacyParkedCampaignTerminalEvidence(fixture.input)).toBeNull();
+  });
+
+  it("requires complete proof even when metadata is eligible", () => {
+    const fixture = reconciliationFixture({ proofSnapshot: manualDirectProof() });
+    fixture.input.batchEntries = [];
+    expect(hasLegacyParkedCampaignTerminalMetadata(fixture.input)).toBe(true);
+    expect(reconcileLegacyParkedCampaignTerminalEvidence(fixture.input)).toBeNull();
+  });
+});
+
 describe("legacy parked-campaign terminal reconciliation", () => {
   it.each([
     ["exact place review", exactPlaceReviewProof()],
@@ -556,7 +594,7 @@ describe("legacy parked-campaign terminal reconciliation", () => {
   });
 
   it("never overrides an explicit fresh-runtime value", () => {
-    for (const freshRuntimeProof of [false, null]) {
+    for (const freshRuntimeProof of [false, null, true, undefined]) {
       const fixture = reconciliationFixture({
         proofSnapshot: manualDirectProof(),
       });
@@ -564,6 +602,7 @@ describe("legacy parked-campaign terminal reconciliation", () => {
         ...(fixture.event.audit as Record<string, unknown>),
         freshRuntimeProof,
       };
+      expect(hasLegacyParkedCampaignTerminalMetadata(fixture.input)).toBe(false);
       expect(
         reconcileLegacyParkedCampaignTerminalEvidence(fixture.input),
       ).toBeNull();
