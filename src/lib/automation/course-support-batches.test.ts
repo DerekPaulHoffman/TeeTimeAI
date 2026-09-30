@@ -20859,7 +20859,18 @@ describe("course-support inspection history parity", () => {
 
   it("preserves campaign dispatch when a complete ordinary read individually fences one candidate", async () => {
     const blocked = dueIncident("blocked");
-    const neutral = { ...dueIncident("neutral"), confirmedAt: null, engineeringOnly: false };
+    // The SQL candidate query can still see an ACTIVE alert after its local
+    // window ends; current demand must exclude it before campaign selection.
+    const neutral = {
+      ...dueIncident("neutral"), confirmedAt: null, engineeringOnly: false,
+      course: { timeZone: "America/New_York", preferences: [{ teeSearch: {
+        id: "search-neutral", status: "ACTIVE", trafficClass: "PUBLIC",
+        date: new Date("2026-07-15T00:00:00.000Z"), endTime: "09:00",
+      } }] },
+    };
+    expect(deriveCourseSupportCurrentDemand(neutral.course.preferences, {
+      timeZone: neutral.course.timeZone, now,
+    }).activeRealSearchCount).toBe(0);
     queue([blocked, neutral]);
     prismaMocks.monitoringEventFindMany.mockResolvedValue(history(blocked, 21));
     const inspection = vi.spyOn(campaignInspection, "inspectActiveParkedCourseCampaign").mockResolvedValue({
