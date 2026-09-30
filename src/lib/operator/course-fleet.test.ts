@@ -280,6 +280,78 @@ describe("operator course fleet loader", () => {
     expect(query.select.localReaderJobs.select.result).toBe(true);
     expect(query.select.supportIncident.select.monitoringEvents.select.audit).toBe(true);
   });
+
+  it.each(["latest success", "latest failure", "missing", "stale success", "tied failure first", "tied success first"] as const)(
+    "retains all 12 real-classifier counts and the original latest-probe choice with %s",
+    async (kind) => {
+      providerCoverageMocks.classifyProviderCoverage.mockImplementation(realProviderCoverage.classifyProviderCoverage);
+      const rows = fleetParityRows(null);
+      rows.push({ ...rows.find((row) => row.id === "ready")!, id: "probe-course", name: "Probe Course" });
+      const latestAt = new Date(kind === "stale success" ? "2026-08-20T13:00:00.000Z" : "2026-08-22T13:55:00.000Z");
+      const failureFirst = kind === "latest failure" || kind === "tied failure first";
+      const first = { courseId: "probe-course", outcome: failureFirst ? "FETCH_FAILED" : "NO_MATCH", observedAt: latestAt,
+        message: failureFirst ? "HTTP 403 at the official booking page." : "The newest public availability check completed.", evidenceUrl: null };
+      const second = { ...first, outcome: failureFirst ? "NO_MATCH" : "FETCH_FAILED",
+        observedAt: kind.startsWith("tied") ? latestAt : new Date(latestAt.getTime() - 60_000),
+        message: "The older or equally timed check has a different outcome." };
+      installSelectedFleetReads(rows, { probes: kind === "missing" ? [] : [first, second], extraActiveCourseIds: ["probe-course"] });
+
+      const full = await loadOperatorCourseFleet({ now: NOW });
+      const counts = await loadOperatorCourseFleetCounts({ now: NOW });
+      const expected = {
+        action: 4, watch: 2, parked: 1, limitations: 1, unchecked: 1, working: 1,
+        dueNow: 1, inProgress: 1, recoveryRequired: 1, scheduledRetry: 1,
+        engineeringNeeded: 1, needsHuman: 1,
+        ...(kind === "missing" ? { unchecked: 2 }
+          : failureFirst || kind === "stale success" ? { action: 5, needsHuman: 2 }
+            : { working: 2 }),
+      };
+      expect(full.counts).toEqual(expected);
+      expect(counts).toEqual(expected);
+      expect(Object.values(counts).every((count) => count > 0)).toBe(true);
+      expect(full.courses).toHaveLength(11);
+      const displayed = full.courses.find((course) => course.id === "probe-course")!;
+      if (kind === "missing") expect(displayed.latestProbe).toBeNull();
+      else expect(displayed.latestProbe).toMatchObject({ outcome: first.outcome, observedAt: latestAt });
+      if (failureFirst) expect(displayed.problemSummary).toContain("returned HTTP 403");
+      const [fullQuery, countsQuery] = prismaMocks.courseProbeFindMany.mock.calls.map(([query]) => query);
+      expect(fullQuery.where).toEqual({ courseId: { in: rows.map((row) => row.id) } });
+      expect(countsQuery.where).toEqual(fullQuery.where);
+      expect(fullQuery.orderBy).toEqual({ observedAt: "desc" });
+      expect(countsQuery.orderBy).toEqual(fullQuery.orderBy);
+      expect(fullQuery.distinct).toEqual(["courseId"]);
+      expect(countsQuery.distinct).toEqual(fullQuery.distinct);
+      expect(fullQuery.select.message).toBe(true);
+      expect(countsQuery.select).toEqual({ courseId: true, outcome: true, observedAt: true });
+    },
+  );
+
+  it("reads historical display messages for the full fleet but never accesses them for counts", async () => {
+    providerCoverageMocks.classifyProviderCoverage.mockImplementation(realProviderCoverage.classifyProviderCoverage);
+    const rows = fleetParityRows(null);
+    rows.push({ ...rows.find((row) => row.id === "ready")!, id: "probe-course", name: "Probe Course" });
+    const messageRead = vi.fn((latest: boolean) => latest ? "HTTP 403 at the official booking page." : "x".repeat(500));
+    const probes = Array.from({ length: 5_000 }, (_, index) => {
+      const row = { courseId: "probe-course", outcome: index === 0 ? "FETCH_FAILED" : "NO_MATCH",
+        observedAt: new Date(NOW.getTime() - (index + 1) * 60_000), evidenceUrl: null };
+      Object.defineProperty(row, "message", { enumerable: true, get: () => messageRead(index === 0) });
+      return row;
+    });
+    installSelectedFleetReads(rows, { probes, extraActiveCourseIds: ["probe-course"] });
+
+    const counts = await loadOperatorCourseFleetCounts({ now: NOW });
+    expect(messageRead).not.toHaveBeenCalled();
+    const full = await loadOperatorCourseFleet({ now: NOW });
+
+    // The pinned Prisma query path selects historical scalars before its
+    // in-memory distinct reduction. The fixture mirrors that projection order.
+    expect(messageRead).toHaveBeenCalledTimes(5_000);
+    expect(counts).toEqual(full.counts);
+    expect(counts).toMatchObject({ action: 5, watch: 2, parked: 1, working: 1, needsHuman: 2 });
+    const displayed = full.courses.find((course) => course.id === "probe-course")!;
+    expect(displayed.latestProbe?.message).toBe("HTTP 403 at the official booking page.");
+    expect(displayed.problemSummary).toContain("returned HTTP 403");
+  });
 });
 
 type FleetTestSelect = { [field: string]: boolean | { select: FleetTestSelect; take?: number } };
@@ -300,23 +372,40 @@ function projectFleetRow(row: Record<string, unknown>, select: FleetTestSelect):
   return projected;
 }
 
-function installSelectedFleetReads(rows: Record<string, unknown>[]) {
+function installSelectedFleetReads(rows: Record<string, unknown>[], input: {
+  probes?: Record<string, unknown>[];
+  extraActiveCourseIds?: string[];
+} = {}) {
   prismaMocks.courseFindMany.mockImplementation(async (query: { select: FleetTestSelect }) =>
     rows.map((row) => projectFleetRow(row, query.select)),
   );
   prismaMocks.courseProbeFindMany.mockImplementation(async (query: {
     where: { courseId: { in: string[] } }; select: FleetTestSelect;
-  }) => [{
-    courseId: "working", outcome: "FETCH_FAILED", observedAt: new Date("2026-08-22T13:00:00.000Z"),
-    message: "Older read failed.", evidenceUrl: "https://example.test/evidence",
-  }].filter((row) => query.where.courseId.in.includes(row.courseId)).map((row) => projectFleetRow(row, query.select)));
+    orderBy: { observedAt: "asc" | "desc" }; distinct: string[];
+  }) => {
+    const probes = input.probes ?? [{
+      courseId: "working", outcome: "FETCH_FAILED", observedAt: new Date("2026-08-22T13:00:00.000Z"),
+      message: "Older read failed.", evidenceUrl: "https://example.test/evidence",
+    }];
+    const projected = probes.filter((row) => query.where.courseId.in.includes(row.courseId as string))
+      .sort((left, right) => ((left.observedAt as Date).getTime() - (right.observedAt as Date).getTime()) *
+        (query.orderBy.observedAt === "desc" ? -1 : 1))
+      .map((row) => projectFleetRow(row, query.select));
+    const seen = new Set<string>();
+    return projected.filter((row) => {
+      const key = JSON.stringify(query.distinct.map((field) => row[field]));
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  });
   prismaMocks.coursePreferenceGroupBy.mockImplementation(async (query: {
     where: { teeSearch: { status?: string; trafficClass: unknown } };
   }) => {
     const courseIds = query.where.teeSearch.trafficClass === "TEST"
       ? ["working"]
       : query.where.teeSearch.status === "ACTIVE"
-        ? ["due", "owned"]
+        ? ["due", "owned", ...(input.extraActiveCourseIds ?? [])]
         : rows.map((row) => row.id);
     return courseIds.map((courseId) => ({ courseId, _count: { _all: 1 } }));
   });

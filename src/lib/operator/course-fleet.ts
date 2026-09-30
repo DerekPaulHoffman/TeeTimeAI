@@ -408,7 +408,6 @@ export async function loadOperatorCourseFleetCounts(
               courseId: true,
               outcome: true,
               observedAt: true,
-              message: true,
             },
           })
         : [],
@@ -485,7 +484,10 @@ export async function loadOperatorCourseFleetCounts(
         selectionCount: 0,
         monitoringStatus: course.monitoringStatus,
         incident: course.supportIncident,
-        latestProbe: latestProbe ? { ...latestProbe, evidenceUrl: null } : null,
+        // Counts use the probe outcome and clock, not its explanatory message.
+        latestProbe: latestProbe
+          ? { ...latestProbe, message: null, evidenceUrl: null }
+          : null,
         // Discovery summaries supply display copy, not priority or queue counts.
         latestDiscovery: null,
         profileSlug: null,
