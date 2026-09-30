@@ -332,22 +332,6 @@ export async function loadOperatorCourseFleetCounts(
       intelligenceConfidence: true,
       detectedBookingUrl: true,
       website: true,
-      automationDiscoveries: {
-        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-        take: 1,
-        select: {
-          status: true,
-          detectedPlatform: true,
-          bookingMethod: true,
-          automationEligibility: true,
-          automationReason: true,
-          bookingAccessMode: true,
-          bookingUrl: true,
-          confidence: true,
-          evidence: true,
-          createdAt: true,
-        },
-      },
       supportIncident: {
         select: {
           id: true,
@@ -502,9 +486,8 @@ export async function loadOperatorCourseFleetCounts(
         monitoringStatus: course.monitoringStatus,
         incident: course.supportIncident,
         latestProbe: latestProbe ? { ...latestProbe, evidenceUrl: null } : null,
-        latestDiscovery: buildOperatorDiscoverySummary(
-          course.automationDiscoveries[0] ?? null,
-        ),
+        // Discovery summaries supply display copy, not priority or queue counts.
+        latestDiscovery: null,
         profileSlug: null,
         coverageCategory: classifyProviderCoverage(
           {
