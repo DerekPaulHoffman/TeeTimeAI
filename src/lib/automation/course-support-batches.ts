@@ -3766,18 +3766,83 @@ export async function inspectCourseSupportQueue(input?: {
     null;
   const activeStatusBatchCount =
     activeBatches.length + Math.max(expiredBatchCount, expiredBatch ? 1 : 0);
+  const ownedByCurrentTask = Boolean(
+    activeBatch &&
+    requestingThreadId &&
+    activeBatch.ownerThreadId === requestingThreadId,
+  );
   assertBoundedCourseSupportCandidateQueue(rawDueIncidents);
   const readerShortRetryMarkers = await loadSelectableStartedReaderShortRetryMarkers(
     prisma,
     rawDueIncidents,
   );
+  const hasPotentialActiveDemand = rawDueIncidents.some((incident) => {
+    const demand = deriveCourseSupportCurrentDemand(incident.course.preferences, {
+      timeZone: incident.course.timeZone,
+      now,
+    });
+    return demand.activeRealSearchCount > 0 && isResponderSelectionEligible({
+      ...incident,
+      incidentId: incident.id,
+      activeRealSearchCount: demand.activeRealSearchCount,
+      shortRetryMarker: readerShortRetryMarkers.get(
+        buildCourseSupportVerificationWatchShortRetryIdempotencyKey({
+          incidentId: incident.id, cycle: incident.cycle,
+        }),
+      ),
+    });
+  }) || parkedSourceCompleteFinalizationCandidates.some(
+    (candidate) => candidate.activeRealSearchCount > 0,
+  );
+  const backgroundSlotAvailable = !backgroundCourseSupportSlotOccupied([
+    ...activeBatches,
+    ...(expiredBatch ? [expiredBatch] : []),
+  ]);
+  // Preserve known owner/capacity authority without adding a history read that
+  // could prevent RESUME or RECOVER. Only a potential new dispatch needs it.
+  const inspectDispatchHistory = !ownedByCurrentTask &&
+    activeStatusBatchCount < MAX_CONCURRENT_COURSE_SUPPORT_BATCHES &&
+    (hasPotentialActiveDemand || backgroundSlotAvailable) &&
+    (!expiredBatch ||
+      (readCourseSupportSelectionLane(expiredBatch.summary) !== "ACTIVE_ALERT" &&
+        hasPotentialActiveDemand));
+  const historyEvidence: { blockedCount: number; status: CourseSupportCandidateHistoryEvidenceStatus } = {
+    blockedCount: 0,
+    status: inspectDispatchHistory ? "COMPLETE" : "NOT_EVALUATED",
+  };
+  const dispatchDueIncidents = inspectDispatchHistory
+    ? await retainBoundedCourseSupportCandidates(
+        prisma,
+        rawDueIncidents,
+        (count, status) => {
+          historyEvidence.blockedCount = count;
+          historyEvidence.status = status;
+        },
+        { inspectionOnly: true },
+      )
+    : rawDueIncidents;
+  const {
+    blockedCount: candidateHistoryBlockedCount,
+    status: candidateHistoryEvidenceStatus,
+  } = historyEvidence;
+  // Claim must read the ordinary pool before planning a campaign. An aggregate
+  // truncation therefore fences every new claim, even a separately ready cohort.
+  // Preserve the native campaign snapshot below while withholding every new
+  // dispatch route, including separately proven source-complete recovery work.
+  const dispatchHistoryUnavailable = candidateHistoryEvidenceStatus === "AGGREGATE_BOUND_EXCEEDED";
+  const dispatchParkedCampaign = dispatchHistoryUnavailable
+    ? null
+    : parkedCampaign;
+  const dispatchSourceCompleteFinalizationCandidates = dispatchHistoryUnavailable
+    ? []
+    : parkedSourceCompleteFinalizationCandidates;
   const activeProviderGroups = new Set(
     [...activeBatches, ...(expiredBatch ? [expiredBatch] : [])].map(
       (batch) => `${batch.providerFamilyKey}\u0000${batch.failureFingerprint}`,
     ),
   );
   const dueDemand = [
-    ...rawDueIncidents.flatMap((incident) => {
+    ...dispatchDueIncidents.flatMap((incident) => {
       const currentDemand = deriveCourseSupportCurrentDemand(
         incident.course.preferences,
         {
@@ -3824,7 +3889,7 @@ export async function inspectCourseSupportQueue(input?: {
         },
       ];
     }),
-    ...parkedSourceCompleteFinalizationCandidates.map((candidate) => ({
+    ...dispatchSourceCompleteFinalizationCandidates.map((candidate) => ({
       incident: {
         providerFamilyKey: candidate.providerFamilyKey,
         failureFingerprint: candidate.failureFingerprint,
@@ -3974,13 +4039,8 @@ export async function inspectCourseSupportQueue(input?: {
     ),
     dueIncidentCount:
       availableDueIncidents.length +
-      (parkedCampaign?.status === "RUNNING" ? parkedCampaign.readyCount : 0),
+      (dispatchParkedCampaign?.status === "RUNNING" ? dispatchParkedCampaign.readyCount : 0),
   });
-  const ownedByCurrentTask = Boolean(
-    activeBatch &&
-    requestingThreadId &&
-    activeBatch.ownerThreadId === requestingThreadId,
-  );
   const durableCloseoutRecorded =
     !ownedByCurrentTask &&
     (outcome === "no_due_work" || outcome === "deferred_busy")
@@ -3999,6 +4059,8 @@ export async function inspectCourseSupportQueue(input?: {
                 ? parkedCampaign.readyCount
                 : 0,
             parkedCampaignPendingCount: parkedCampaign?.pendingCount ?? 0,
+            candidateHistoryBlockedCount,
+            candidateHistoryEvidenceStatus,
           },
         })
       : false;
@@ -4030,12 +4092,9 @@ export async function inspectCourseSupportQueue(input?: {
     ownedByCurrentTask,
     availableWriterSlots,
     ordinaryDispatchGroupCount: readOnlyDispatchGroups.length,
-    parkedCampaign,
+    parkedCampaign: dispatchParkedCampaign,
     hasCurrentActiveRealDemand: availableDueRealCount > 0,
-    backgroundSlotAvailable: !backgroundCourseSupportSlotOccupied([
-      ...activeBatches,
-      ...(expiredBatch ? [expiredBatch] : []),
-    ]),
+    backgroundSlotAvailable,
     activeBatchCampaignSummaryStates: activeBatches.map((batch) =>
       classifyCourseSupportCampaignSummary(batch.summary),
     ),
@@ -4050,6 +4109,8 @@ export async function inspectCourseSupportQueue(input?: {
     dueRealCount,
     dueEngineeringCount,
     dueHistoricalRealCount,
+    candidateHistoryBlockedCount,
+    candidateHistoryEvidenceStatus,
     providerGroupCount: providerGroups.size,
     parkedCampaign: parkedCampaign
       ? {
@@ -4090,14 +4151,14 @@ export async function inspectCourseSupportQueue(input?: {
         expiredBatch &&
         (readCourseSupportSelectionLane(expiredBatch.summary) === "ACTIVE_ALERT"
           ? availableDueIncidents.length > 0 ||
-            (parkedCampaign?.status === "RUNNING" &&
-              parkedCampaign.readyCount > 0)
+            (dispatchParkedCampaign?.status === "RUNNING" &&
+              dispatchParkedCampaign.readyCount > 0)
           : availableDueRealCount > 0) &&
         activeBatches.length < MAX_CONCURRENT_COURSE_SUPPORT_BATCHES,
       ),
       dueIncidentCount:
         availableDueIncidents.length +
-        (parkedCampaign?.status === "RUNNING" ? parkedCampaign.readyCount : 0),
+        (dispatchParkedCampaign?.status === "RUNNING" ? dispatchParkedCampaign.readyCount : 0),
       availableWriterSlots: Math.max(
         0,
         MAX_CONCURRENT_COURSE_SUPPORT_BATCHES - activeStatusBatchCount,
@@ -4132,6 +4193,12 @@ export async function inspectCourseSupportQueue(input?: {
       : null,
     durableCloseoutRecorded,
     ...policy,
+    ...(candidateHistoryBlockedCount > 0 ? {
+      threadDisposition: "KEEP_VISIBLE" as const,
+      archiveReason: dispatchHistoryUnavailable
+        ? "Candidate history exceeded the aggregate read bound; all new dispatch remains fenced for history review."
+        : "One or more course candidates remain fenced for history review; independently verified candidates may continue.",
+    } : {}),
   };
 }
 
@@ -6080,7 +6147,7 @@ export async function claimCourseSupportBatch(input: {
     candidateHistoryBlockedCount,
     threadDisposition: "KEEP_VISIBLE" as const,
     archiveReason: "One or more course candidates remain fenced for history review; independently verified candidates may continue.",
-  } : lease.value;
+  } : { ...lease.value, candidateHistoryBlockedCount };
 }
 
 export async function recordCourseSupportClaimStateChurn() {
@@ -18639,34 +18706,49 @@ function assertBoundedCourseSupportCandidateQueue<T>(rows: readonly T[]) {
 }
 
 class CourseSupportCandidateHistoryOverflow extends Error {
-  constructor(readonly incidentIds: Set<string>) {
+  constructor(
+    readonly incidentIds: Set<string>,
+    readonly evidenceStatus: "PER_INCIDENT_BOUND_EXCEEDED" | "AGGREGATE_BOUND_EXCEEDED" = "PER_INCIDENT_BOUND_EXCEEDED",
+  ) {
     super("Course-support candidate history exceeds the bounded read limit.");
   }
 }
 
-async function retainBoundedCourseSupportCandidates(
+type CourseSupportCandidateHistoryEvidenceStatus =
+  | "NOT_EVALUATED"
+  | "COMPLETE"
+  | "PER_INCIDENT_BOUND_EXCEEDED"
+  | "AGGREGATE_BOUND_EXCEEDED";
+
+type CourseSupportCandidateHistoryIdentity = Pick<
+  CourseSupportCandidateIncident, "id" | "cycle" | "confirmedAt" | "firstSeenAt"
+>;
+
+async function retainBoundedCourseSupportCandidates<T extends CourseSupportCandidateHistoryIdentity>(
   client: Pick<Prisma.TransactionClient, "courseMonitoringEvent">,
-  incidents: readonly CourseSupportCandidateIncident[],
-  onHistoryBlocked?: (count: number) => void,
+  incidents: readonly T[],
+  onHistoryBlocked?: (count: number, status: CourseSupportCandidateHistoryEvidenceStatus) => void,
+  options?: { inspectionOnly: boolean },
 ) {
   try {
     await assertBoundedCourseSupportCandidateCurrentCycleHistory(client, incidents);
     return [...incidents];
   } catch (error) {
     if (!(error instanceof CourseSupportCandidateHistoryOverflow)) throw error;
+    if (error.evidenceStatus === "AGGREGATE_BOUND_EXCEEDED" && !options?.inspectionOnly) throw error;
     const eligible = incidents.filter(incident => !error.incidentIds.has(incident.id));
     // Keep the exact bound and the affected course's fence. A complete read
     // can prove another candidate safe without rewriting the overflowing one.
     // Truncated aggregate reads and an entirely blocked queue still fail closed.
-    if (!eligible.length) throw error;
-    onHistoryBlocked?.(incidents.length - eligible.length);
+    if (!eligible.length && !options?.inspectionOnly) throw error;
+    onHistoryBlocked?.(incidents.length - eligible.length, error.evidenceStatus);
     return eligible;
   }
 }
 
 async function assertBoundedCourseSupportCandidateCurrentCycleHistory(
   client: Pick<Prisma.TransactionClient, "courseMonitoringEvent">,
-  incidents: readonly CourseSupportCandidateIncident[],
+  incidents: readonly CourseSupportCandidateHistoryIdentity[],
 ) {
   if (incidents.length === 0) return;
   const maximumAllowedEvents =
@@ -18684,8 +18766,9 @@ async function assertBoundedCourseSupportCandidateCurrentCycleHistory(
     select: { id: true, incidentId: true, occurredAt: true },
   });
   if (events.length > maximumAllowedEvents) {
-    throw new Error(
-      "Course-support candidate history exceeds the bounded read limit.",
+    throw new CourseSupportCandidateHistoryOverflow(
+      new Set(incidents.map((incident) => incident.id)),
+      "AGGREGATE_BOUND_EXCEEDED",
     );
   }
   const incidentById = new Map(

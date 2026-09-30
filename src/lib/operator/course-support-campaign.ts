@@ -979,6 +979,89 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
+/** Load candidate cycles broadly; the unchanged native classifier grants credit. */
+export async function loadFutureUnfamiliarIncidentsForAcceptance(
+  { since, until }: { since: Date; until: Date },
+  database: Pick<typeof prisma, "courseSupportIncident"> = prisma,
+) {
+  const statuses = ["AUTO_INVESTIGATING", "NEEDS_HUMAN", "RESOLVED"] as const;
+  const partitions = await Promise.all(
+    statuses.map((status) =>
+      database.courseSupportIncident.findMany({
+        where: {
+          status,
+          // Material-change confirmation need not update the last observed
+          // failure. Completed event cycles also survive a later row reopen.
+          OR: [
+            { lastSeenAt: { gte: since, lte: until } },
+            { confirmedAt: { gte: since, lte: until } },
+            {
+              monitoringEvents: {
+                some: {
+                  occurredAt: { gte: since, lte: until },
+                  OR: [
+                    { eventType: "RECOVERED" },
+                    {
+                      eventType: "STATE_CHANGED",
+                      toState: { in: ["FINAL_MANUAL", "FINAL_IDENTITY", "FINAL_TECHNICAL"] },
+                    },
+                    { eventType: "HUMAN_DECISION" },
+                  ],
+                },
+              },
+            },
+          ],
+        },
+        select: {
+          id: true,
+          courseId: true,
+          cycle: true,
+          status: true,
+          resolution: true,
+          confirmedAt: true,
+          lastSeenAt: true,
+          resolvedAt: true,
+          decisionAt: true,
+          decisionActorId: true,
+          monitoringEvents: {
+            where: {
+              occurredAt: { gte: since, lte: until },
+              eventType: {
+                in: [
+                  "HUMAN_REVIEW_REQUESTED",
+                  "HUMAN_DECISION",
+                  "RECOVERED",
+                  "REVALIDATION_REQUESTED",
+                  "STATE_CHANGED",
+                ],
+              },
+            },
+            select: {
+              eventType: true,
+              toState: true,
+              source: true,
+              operatorActorId: true,
+              runtimeVersion: true,
+              deploymentSha: true,
+              occurredAt: true,
+              audit: true,
+            },
+          },
+        },
+      }),
+    ),
+  );
+  return partitions.flat().map(({ monitoringEvents, ...incident }) => ({
+    ...incident,
+    campaignAdmissionEvents: monitoringEvents.filter(
+      (event) => event.eventType === "REVALIDATION_REQUESTED",
+    ),
+    terminalEvents: monitoringEvents.filter(
+      (event) => event.eventType !== "REVALIDATION_REQUESTED",
+    ),
+  }));
+}
+
 const defaultDependencies: OperatorCourseSupportCampaignDependencies = {
   inspectLatestCampaign: inspectLatestParkedCourseCampaign,
   loadCampaignAudit: async (runId) => {
@@ -1034,64 +1117,7 @@ const defaultDependencies: OperatorCourseSupportCampaignDependencies = {
       countsAsEndpoint: event.occurredAt.getTime() >= since.getTime()
     }));
   },
-  loadFutureUnfamiliarIncidents: async ({ since, until }) => {
-    const statuses = ["AUTO_INVESTIGATING", "NEEDS_HUMAN", "RESOLVED"] as const;
-    const partitions = await Promise.all(
-      statuses.map((status) =>
-        prisma.courseSupportIncident.findMany({
-          where: {
-            status,
-            lastSeenAt: { gte: since, lte: until }
-          },
-          select: {
-            id: true,
-            courseId: true,
-            cycle: true,
-            status: true,
-            resolution: true,
-            confirmedAt: true,
-            lastSeenAt: true,
-            resolvedAt: true,
-            decisionAt: true,
-            decisionActorId: true,
-            monitoringEvents: {
-              where: {
-                occurredAt: { gte: since, lte: until },
-                eventType: {
-                  in: [
-                    "HUMAN_REVIEW_REQUESTED",
-                    "HUMAN_DECISION",
-                    "RECOVERED",
-                    "REVALIDATION_REQUESTED",
-                    "STATE_CHANGED"
-                  ]
-                }
-              },
-              select: {
-                eventType: true,
-                toState: true,
-                source: true,
-                operatorActorId: true,
-                runtimeVersion: true,
-                deploymentSha: true,
-                occurredAt: true,
-                audit: true
-              }
-            }
-          }
-        })
-      )
-    );
-    return partitions.flat().map(({ monitoringEvents, ...incident }) => ({
-      ...incident,
-      campaignAdmissionEvents: monitoringEvents.filter(
-        (event) => event.eventType === "REVALIDATION_REQUESTED"
-      ),
-      terminalEvents: monitoringEvents.filter(
-        (event) => event.eventType !== "REVALIDATION_REQUESTED"
-      )
-    }));
-  },
+  loadFutureUnfamiliarIncidents: loadFutureUnfamiliarIncidentsForAcceptance,
   loadImplementationBatches: ({ capturedAt, until }) =>
     prisma.courseSupportBatch.findMany({
       where: {

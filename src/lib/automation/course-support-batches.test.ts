@@ -4548,6 +4548,92 @@ describe("course-support claim demand fencing", () => {
     expect(createdEntries.some(entry => entry.courseId === overflowing.courseId)).toBe(false);
   });
 
+  it("stops inspection at the same aggregate history fence that prevents claim from planning a ready campaign", async () => {
+    const incident = sourceCompleteFinalizationRecoveryIncident({ status: "AUTO_INVESTIGATING" });
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([incident])
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([incident]);
+    prismaMocks.monitoringEventFindMany.mockResolvedValue(
+      Array.from({ length: 21 }, (_, index) => ({
+        id: `aggregate-overflow-event-${index}`, incidentId: incident.id,
+        occurredAt: new Date(incident.confirmedAt.getTime() + index),
+      })),
+    );
+    const inspection = vi.spyOn(campaignInspection, "inspectActiveParkedCourseCampaign").mockResolvedValue({
+      status: "RUNNING", readyCount: 1, pendingCount: 1,
+    } as never);
+    const campaignPlan = vi.spyOn(campaignInspection, "planNextParkedCourseCampaignCohort");
+    try {
+      expect(await inspectCourseSupportQueue({ now })).toMatchObject({
+        outcome: "no_due_work", handoff: { action: "STOP", source: "NO_ACTIONABLE_WORK" },
+        candidateHistoryEvidenceStatus: "AGGREGATE_BOUND_EXCEEDED", candidateHistoryBlockedCount: 1,
+        parkedCampaign: { status: "RUNNING", readyCount: 1 }, threadDisposition: "KEEP_VISIBLE",
+      });
+      await expect(claimCourseSupportBatch({
+        ownerThreadId: "history-fenced-owner", branch: "automation/course-support-history-fence", baseSha, now,
+      })).rejects.toThrow("candidate history exceeds the bounded read limit");
+      expect(campaignPlan).not.toHaveBeenCalled();
+      expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+      expect(prismaMocks.batchIncidentCreateMany).not.toHaveBeenCalled();
+      expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+    } finally {
+      inspection.mockRestore();
+      campaignPlan.mockRestore();
+    }
+  });
+
+  it("withholds source-complete and campaign dispatch when ordinary history is aggregate-unavailable", async () => {
+    const ordinary = sourceCompleteFinalizationRecoveryIncident({ status: "AUTO_INVESTIGATING" });
+    ordinary.id = "ordinary-history-overflow-incident";
+    ordinary.courseId = "ordinary-history-overflow-course";
+    ordinary.course.id = ordinary.courseId;
+    const parked = sourceCompleteFinalizationRecoveryIncident({ status: "NEEDS_HUMAN", campaign: true });
+    prismaMocks.supportIncidentFindMany
+      .mockResolvedValueOnce([ordinary])
+      .mockResolvedValueOnce([parked])
+      .mockResolvedValue([ordinary, parked]);
+    const ordinaryHistory = Array.from({ length: 41 }, (_, index) => ({
+      id: `ordinary-aggregate-event-${index}`, incidentId: ordinary.id,
+      occurredAt: new Date(ordinary.confirmedAt.getTime() + index),
+    }));
+    prismaMocks.monitoringEventFindMany.mockImplementation(async (query) => {
+      const includesOrdinary = query.where.OR.some(
+        (binding: { incidentId: string }) => binding.incidentId === ordinary.id,
+      );
+      return includesOrdinary ? ordinaryHistory.slice(0, query.take) : [];
+    });
+    const inspection = vi.spyOn(campaignInspection, "inspectActiveParkedCourseCampaign").mockResolvedValue({
+      status: "RUNNING", readyCount: 1, pendingCount: 1,
+    } as never);
+    const campaignPlan = vi.spyOn(campaignInspection, "planNextParkedCourseCampaignCohort");
+    try {
+      const result = await inspectCourseSupportQueue({ now });
+      expect(result).toMatchObject({
+        outcome: "no_due_work", handoff: { action: "STOP", source: "NO_ACTIONABLE_WORK" },
+        dueIncidentCount: 0, readOnlyDispatchPlan: { groups: [] },
+        candidateHistoryEvidenceStatus: "AGGREGATE_BOUND_EXCEEDED", candidateHistoryBlockedCount: 1,
+        parkedCampaign: { status: "RUNNING", readyCount: 1 }, threadDisposition: "KEEP_VISIBLE",
+      });
+      expect(result.archiveReason).toContain("all new dispatch remains fenced");
+      expect(prismaMocks.monitoringEventFindMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: expect.objectContaining({ OR: [{ incidentId: parked.id, audit: { path: ["cycle"], equals: parked.cycle } }] }),
+        take: 21,
+      }));
+      await expect(claimCourseSupportBatch({
+        ownerThreadId: "source-complete-fenced-owner", branch: "automation/course-support-history-fence", baseSha, now,
+      })).rejects.toThrow("candidate history exceeds the bounded read limit");
+      expect(prismaMocks.monitoringEventFindMany).toHaveBeenCalledWith(expect.objectContaining({ take: 41 }));
+      expect(campaignPlan).not.toHaveBeenCalled();
+      expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+      expect(prismaMocks.batchIncidentCreateMany).not.toHaveBeenCalled();
+      expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+    } finally {
+      inspection.mockRestore();
+      campaignPlan.mockRestore();
+    }
+  });
+
   it("does not count an unscoped current-window marker as current-cycle execution", async () => {
     const incident = sourceCompleteFinalizationRecoveryIncident({
       status: "AUTO_INVESTIGATING",
@@ -20629,6 +20715,193 @@ describe("course-support inspection ownership", () => {
       inspectCourseSupportQueue({ requestingThreadId: " ", now }),
     ).rejects.toThrow("current task id");
     expect(prismaMocks.batchFindFirst).not.toHaveBeenCalled();
+  });
+});
+
+describe("course-support inspection history parity", () => {
+  function dueIncident(id: string, activeDemand = false) {
+    return {
+      ...candidate({ id, courseId: `course-${id}`, providerFamilyKey: `family-${id}` }),
+      confirmedAt: new Date(now.getTime() - 60_000) as Date | null,
+      status: "AUTO_INVESTIGATING",
+      activeBatchId: null,
+      batchIncidents: [],
+      course: {
+        timeZone: "America/New_York",
+        preferences: activeDemand ? [{ teeSearch: {
+          id: `search-${id}`, date: new Date("2026-07-18T00:00:00.000Z"), endTime: "23:59",
+        } }] : [],
+      },
+    };
+  }
+
+  function history(incident: ReturnType<typeof dueIncident>, count: number) {
+    return Array.from({ length: count }, (_, index) => ({
+      id: `event-${incident.id}-${index}`, incidentId: incident.id,
+      occurredAt: new Date((incident.confirmedAt ?? incident.firstSeenAt).getTime() + index),
+    }));
+  }
+
+  function queue(incidents: ReturnType<typeof dueIncident>[]) {
+    prismaMocks.supportIncidentFindMany.mockResolvedValueOnce(incidents).mockResolvedValueOnce([]);
+  }
+
+  function expectNoCourseAttempts() {
+    expect(prismaMocks.batchCreate).not.toHaveBeenCalled();
+    expect(prismaMocks.batchUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.batchIncidentCreateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.incidentUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.supportIncidentUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseUpdateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.monitoringStatusUpdateMany).not.toHaveBeenCalled();
+  }
+
+  it("stops repeated blocked-only inspections without claiming or spending course attempts", async () => {
+    const blocked = dueIncident("blocked", true);
+    prismaMocks.monitoringEventFindMany.mockResolvedValue(history(blocked, 21));
+    for (let cycle = 0; cycle < 3; cycle++) {
+      queue([blocked]);
+      expect(await inspectCourseSupportQueue({ now })).toMatchObject({
+        outcome: "no_due_work", handoff: { action: "STOP", source: "NO_ACTIONABLE_WORK" },
+        dueIncidentCount: 0, candidateHistoryBlockedCount: 1,
+        candidateHistoryEvidenceStatus: "AGGREGATE_BOUND_EXCEEDED",
+        durableCloseoutRecorded: true, threadDisposition: "KEEP_VISIBLE",
+        readOnlyDispatchPlan: { groups: [] },
+      });
+    }
+    expect(prismaMocks.monitoringEventFindMany).toHaveBeenCalledTimes(3);
+    expect(prismaMocks.monitoringEventFindMany).toHaveBeenCalledWith(expect.objectContaining({ take: 21 }));
+    expect(prismaMocks.automationRunCreate).toHaveBeenCalledTimes(3);
+    expectNoCourseAttempts();
+  });
+
+  it("keeps eligible active demand ahead of background after fencing a different active candidate", async () => {
+    const blocked = dueIncident("blocked", true);
+    const active = dueIncident("active", true);
+    const background = dueIncident("background");
+    queue([blocked, background, active]);
+    prismaMocks.monitoringEventFindMany.mockResolvedValue(history(blocked, 21));
+    expect(await inspectCourseSupportQueue({ now })).toMatchObject({
+      outcome: "ready", handoff: { action: "CLAIM", source: "ORDINARY_DISPATCH", maxCourses: 5 },
+      candidateHistoryBlockedCount: 1, candidateHistoryEvidenceStatus: "PER_INCIDENT_BOUND_EXCEEDED",
+      dueIncidentCount: 2, dueRealCount: 1,
+      readOnlyDispatchPlan: { groups: [{ providerFamilyKey: active.providerFamilyKey, courseCount: 1 }] },
+    });
+    expect(prismaMocks.monitoringEventFindMany).toHaveBeenCalledWith(expect.objectContaining({ take: 61 }));
+    expectNoCourseAttempts();
+  });
+
+  it("allows one eligible background course when all active candidates are individually fenced", async () => {
+    const blocked = dueIncident("blocked", true);
+    const background = dueIncident("background");
+    queue([blocked, background]);
+    prismaMocks.monitoringEventFindMany.mockResolvedValue(history(blocked, 21));
+    expect(await inspectCourseSupportQueue({ now })).toMatchObject({
+      outcome: "ready", handoff: { action: "CLAIM", source: "ORDINARY_DISPATCH", maxCourses: 1 },
+      candidateHistoryBlockedCount: 1, candidateHistoryEvidenceStatus: "PER_INCIDENT_BOUND_EXCEEDED",
+      dueRealCount: 0, dueIncidentCount: 1,
+      readOnlyDispatchPlan: { maxCoursesPerGroup: 1, groups: [{ providerFamilyKey: background.providerFamilyKey }] },
+    });
+    expectNoCourseAttempts();
+  });
+
+  it("keeps safe mixed candidates and the exact current-cycle history boundary", async () => {
+    const active = dueIncident("active", true);
+    const background = dueIncident("background");
+    queue([active, background]);
+    prismaMocks.monitoringEventFindMany.mockResolvedValue(history(active, 20));
+    expect(await inspectCourseSupportQueue({ now })).toMatchObject({
+      outcome: "ready", handoff: { action: "CLAIM", source: "ORDINARY_DISPATCH", maxCourses: 5 },
+      candidateHistoryBlockedCount: 0, candidateHistoryEvidenceStatus: "COMPLETE", dueIncidentCount: 2,
+    });
+    expect(prismaMocks.monitoringEventFindMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { eventType: "REVALIDATION_REQUESTED", OR: [
+        { incidentId: active.id, audit: { path: ["cycle"], equals: active.cycle } },
+        { incidentId: background.id, audit: { path: ["cycle"], equals: background.cycle } },
+      ] }, take: 41,
+    }));
+    expectNoCourseAttempts();
+  });
+
+  it("fences the entire unprovable aggregate without calling each incident an individual overflow", async () => {
+    const blocked = dueIncident("blocked", true);
+    const control = dueIncident("control", true);
+    queue([blocked, control]);
+    prismaMocks.monitoringEventFindMany.mockResolvedValue(history(blocked, 41));
+    const result = await inspectCourseSupportQueue({ now });
+    expect(result).toMatchObject({
+      outcome: "no_due_work", handoff: { action: "STOP", source: "NO_ACTIONABLE_WORK" },
+      candidateHistoryBlockedCount: 2, candidateHistoryEvidenceStatus: "AGGREGATE_BOUND_EXCEEDED",
+      dueIncidentCount: 0, threadDisposition: "KEEP_VISIBLE",
+    });
+    expect(result.archiveReason).toContain("aggregate read bound");
+    expect(prismaMocks.monitoringEventFindMany).toHaveBeenCalledWith(expect.objectContaining({ take: 41 }));
+    expectNoCourseAttempts();
+  });
+
+  it("withholds every new claim after aggregate truncation while preserving actual campaign readiness", async () => {
+    const blocked = dueIncident("blocked");
+    queue([blocked]);
+    prismaMocks.monitoringEventFindMany.mockResolvedValue(history(blocked, 21));
+    const inspection = vi.spyOn(campaignInspection, "inspectActiveParkedCourseCampaign").mockResolvedValue({
+      status: "RUNNING", readyCount: 1, pendingCount: 1,
+    } as never);
+    try {
+      expect(await inspectCourseSupportQueue({ now })).toMatchObject({
+        outcome: "no_due_work", handoff: { action: "STOP", source: "NO_ACTIONABLE_WORK" },
+        parkedCampaign: { status: "RUNNING", readyCount: 1 },
+        candidateHistoryBlockedCount: 1, candidateHistoryEvidenceStatus: "AGGREGATE_BOUND_EXCEEDED",
+        threadDisposition: "KEEP_VISIBLE",
+      });
+      expectNoCourseAttempts();
+    } finally { inspection.mockRestore(); }
+  });
+
+  it("preserves campaign dispatch when a complete ordinary read individually fences one candidate", async () => {
+    const blocked = dueIncident("blocked");
+    const neutral = { ...dueIncident("neutral"), confirmedAt: null, engineeringOnly: false };
+    queue([blocked, neutral]);
+    prismaMocks.monitoringEventFindMany.mockResolvedValue(history(blocked, 21));
+    const inspection = vi.spyOn(campaignInspection, "inspectActiveParkedCourseCampaign").mockResolvedValue({
+      status: "RUNNING", readyCount: 1, pendingCount: 1,
+    } as never);
+    try {
+      expect(await inspectCourseSupportQueue({ now })).toMatchObject({
+        outcome: "ready", handoff: { action: "CLAIM", source: "PARKED_CAMPAIGN", maxCourses: 1 },
+        candidateHistoryBlockedCount: 1, candidateHistoryEvidenceStatus: "PER_INCIDENT_BOUND_EXCEEDED",
+        threadDisposition: "KEEP_VISIBLE",
+      });
+      expectNoCourseAttempts();
+    } finally { inspection.mockRestore(); }
+  });
+
+  it.each(["RESUME", "RECOVER", "CAPACITY", "BACKGROUND_CAPACITY"] as const)("preserves known %s authority without the dispatch history query", async (authority) => {
+    queue([dueIncident("blocked", authority !== "BACKGROUND_CAPACITY")]);
+    prismaMocks.monitoringEventFindMany.mockRejectedValue(new Error("history query must not run"));
+    const owner = {
+      id: "owned-batch", reference: "owned-reference", status: "VERIFYING",
+      leaseExpiresAt: new Date(now.getTime() + 60_000),
+      providerFamilyKey: "owned-family", failureFingerprint: "owned-failure", ownerThreadId: "owner-thread",
+      summary: { selectionLane: { schemaVersion: 1, lane: authority === "BACKGROUND_CAPACITY" ? "BACKGROUND" : "ACTIVE_ALERT" } },
+    };
+    if (authority === "RECOVER") prismaMocks.batchFindFirst.mockResolvedValueOnce({ ...owner, leaseExpiresAt: now });
+    else prismaMocks.batchFindMany.mockResolvedValueOnce(authority === "CAPACITY"
+      ? [owner, { ...owner, id: "other-owned-batch", ownerThreadId: "other-owner" }] : [owner]);
+    const capacityFence = authority === "CAPACITY" || authority === "BACKGROUND_CAPACITY";
+    expect(await inspectCourseSupportQueue({ now, requestingThreadId: capacityFence ? "uninvolved-thread" : "owner-thread" })).toMatchObject({
+      handoff: { action: capacityFence ? "STOP" : authority },
+      candidateHistoryBlockedCount: 0, candidateHistoryEvidenceStatus: "NOT_EVALUATED",
+    });
+    expect(prismaMocks.monitoringEventFindMany).not.toHaveBeenCalled();
+    expectNoCourseAttempts();
+  });
+
+  it("fails closed on a history query timeout without an actionable handoff or course writes", async () => {
+    queue([dueIncident("due", true)]);
+    prismaMocks.monitoringEventFindMany.mockRejectedValue(new Error("statement timeout"));
+    await expect(inspectCourseSupportQueue({ now })).rejects.toThrow("statement timeout");
+    expect(prismaMocks.automationRunCreate).not.toHaveBeenCalled();
+    expectNoCourseAttempts();
   });
 });
 
