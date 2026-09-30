@@ -8,7 +8,11 @@ export const ACCEPTANCE_READ_LIMITS = {
   evidenceRows: 16_384,
   evidenceBytes: 16 * 1_024 * 1_024,
   outputBytes: 64 * 1_024,
-  queryCount: 256,
+  // Prisma/preflight operations, not physical SQL statements. A full 112-course
+  // campaign needs up to 14 operations per exact-cycle reload plus 11 for reader
+  // admission. 4096 covers 112*32 plus 256 shared-operation headroom; all other
+  // row/history/identity/byte and transaction-time fences remain independent.
+  queryCount: 4_096,
 } as const;
 
 export class AcceptanceReadFence extends Error {
