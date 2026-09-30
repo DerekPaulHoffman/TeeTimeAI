@@ -205,7 +205,7 @@ describe("full native campaign inspection through the acceptance read boundary",
     assertObservedReadCost(result, "CURRENT_CYCLE_HISTORY");
     const reloads = fixture.calls.filter((call) => call.model === "courseSupportIncident" && call.method === "findMany" &&
       typeof (call.args as Query).where?.id === "string" &&
-      ((call.args as Query).select?.batchIncidents as Query | undefined)?.take === 21);
+      (call.args as Query).select?.batchIncidents);
     const identityReloads = reloads.filter((call) =>
       (((call.args as Query).select?.batchIncidents as Query).select?.proofSnapshot) !== true);
     expect(identityReloads).toHaveLength(112);
@@ -340,7 +340,7 @@ describe("full native campaign inspection through the acceptance read boundary",
       readFence: { phase: "FLEET", boundary: "SELECTED_EVIDENCE_BYTES" },
       acceptanceProjection: null, futureUnknown: null, rollingAmbiguous: null,
       evidenceReadComplete: false, customerDataIncluded: false });
-    assertObservedReadCost(result, "UNCLASSIFIED");
+    assertObservedReadCost(result, fleetOnlyEvidence === "LOCAL_READER_RESULT" ? "READER_EVIDENCE" : "UNCLASSIFIED");
     assertCompleteReloads(fixture);
     const sizedRequired = fixture.calls.filter((call) => call.model === "$queryRaw" &&
       (call.args as Prisma.Sql).text.includes(`FROM "${model}"`) &&
@@ -348,8 +348,16 @@ describe("full native campaign inspection through the acceptance read boundary",
       (call.args as Prisma.Sql).values.some((value) => typeof value === "string" && value.startsWith("private-fleet-only-")));
     expect(sizedRequired).toHaveLength(1);
     expect(fixture.calls.at(-1)).toBe(sizedRequired[0]);
-    expect(fixture.calls.some((call) => call.model === "course" && call.method === "findMany" &&
-      (call.args as Query).select?.isPublic === true)).toBe(false);
+    if (fleetOnlyEvidence === "BOOKING_METADATA") {
+      expect(fixture.calls.some((call) => call.model === "course" && call.method === "findMany" &&
+        (call.args as Query).select?.isPublic === true)).toBe(false);
+    } else {
+      expect(fixture.calls.some((call) => call.model === "course" && call.method === "findMany" &&
+        (call.args as Query).select?.isPublic === true)).toBe(true);
+      const delegate = fleetOnlyEvidence === "LOCAL_READER_RESULT" ? "localReaderJob" : "courseMonitoringEvent";
+      expect(fixture.calls.some((call) => call.model === delegate && call.method === "findMany" &&
+        (call.args as Query).select?.[field] === true)).toBe(false);
+    }
     const native = campaignDatabase({ fleetOnlyEvidence });
     const expected = await nativeAcceptanceProjection(native);
     expect(expected).not.toBeNull();
@@ -364,6 +372,53 @@ describe("full native campaign inspection through the acceptance read boundary",
     expect(native.mutation).not.toHaveBeenCalled();
     expect(globalMocks.escapedRead).not.toHaveBeenCalled();
   });
+
+  it.each(["LOCAL_READER_RESULT", "PARKING_AUDIT"] as const)(
+    "fetches only selected %s fleet payloads and retains any later required history fence",
+    async (fleetOnlyEvidence) => {
+      const fixture = campaignDatabase({ fleetOnlyEvidence, unusedFleetHistoryCount: 200 });
+      const native = campaignDatabase({ fleetOnlyEvidence });
+      const counts = await loadOperatorCourseFleetCounts({ now: NOW }, createBoundedAcceptanceReadClient(fixture.transaction));
+      expect(counts).toEqual(await loadOperatorCourseFleetCounts({ now: NOW }, native.transaction));
+      expect(fixture.unusedFleetPayloadRead).not.toHaveBeenCalled();
+
+      const diagnostic = campaignDatabase({ fleetOnlyEvidence, unusedFleetHistoryCount: 200 });
+      const database = { $transaction: vi.fn(async (work: (transaction: Prisma.TransactionClient) => Promise<unknown>) => work(diagnostic.transaction)) };
+      const result = await loadCourseSupportAcceptanceReasons(database as unknown as Parameters<typeof loadCourseSupportAcceptanceReasons>[0], SOURCE_SHA);
+
+      if (fleetOnlyEvidence === "LOCAL_READER_RESULT") {
+        expect(result).toMatchObject({ schemaVersion: 4, status: "AVAILABLE", reason: "COMPLETE_NATIVE_TRACE",
+          readFence: null, readCost: null, evidenceReadComplete: true, customerDataIncluded: false });
+        expect(result.acceptanceProjection).toEqual(await nativeAcceptanceProjection(native));
+        expect(diagnostic.unusedFleetPayloadRead).not.toHaveBeenCalled();
+      } else {
+        // These older audits are unused by fleet counts, but rolling acceptance
+        // still requires the complete cycle history. Keep that later refusal.
+        expect(result).toMatchObject({ schemaVersion: 4, status: "UNAVAILABLE", reason: "EVIDENCE_BOUND_EXCEEDED",
+          readFence: { phase: "ROLLING_ENDPOINTS", boundary: "SELECTED_EVIDENCE_BYTES" },
+          acceptanceProjection: null, futureUnknown: null, rollingAmbiguous: null,
+          evidenceReadComplete: false, customerDataIncluded: false });
+        expect(diagnostic.unusedFleetPayloadRead).toHaveBeenCalled();
+      }
+      assertCompleteReloads(diagnostic);
+      const model = fleetOnlyEvidence === "LOCAL_READER_RESULT" ? "LocalReaderJob" : "CourseMonitoringEvent";
+      const payload = fleetOnlyEvidence === "LOCAL_READER_RESULT" ? "result" : "audit";
+      const metadataBytes = fixture.byteTotals.filter(({ statement }) => statement.text.includes(`FROM "${model}"`) &&
+        !statement.text.includes(`acceptance_row."${payload}"`) && statement.values.includes("private-fleet-only-history-199"));
+      expect(metadataBytes).toHaveLength(1);
+      expect(metadataBytes[0].matchedRows).toBe(BigInt(fleetOnlyEvidence === "LOCAL_READER_RESULT" ? 201 : 313));
+      const fullPayloadReads = fixture.calls.filter((call) => call.model === model[0].toLowerCase() + model.slice(1) &&
+        call.method === "findMany" && (call.args as Query).select?.[payload] === true);
+      expect(fullPayloadReads).toHaveLength(1);
+      const ids = ((fullPayloadReads[0].args as Query).where!.id as Row).in as string[];
+      expect(ids).toHaveLength(fleetOnlyEvidence === "LOCAL_READER_RESULT" ? 1 : 117);
+      expect(ids).not.toContain("private-fleet-only-history-199");
+      expect(JSON.stringify(result)).not.toMatch(/private-|https:\/\//u);
+      expect(fixture.mutation).not.toHaveBeenCalled();
+      expect(diagnostic.mutation).not.toHaveBeenCalled();
+      expect(globalMocks.escapedRead).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([false, true])("keeps all 112 members and 5,000 historical probe outcomes while excluding display messages (successful tie first=%s)", async (successfulProbeTieFirst) => {
     const fixture = campaignDatabase({ historicalProbeCount: 5_000, successfulProbeTieFirst });
@@ -522,13 +577,16 @@ function assertObservedReadCost(result: { readCost: unknown }, queryCategory: Ac
 function assertCompleteReloads(fixture: ReturnType<typeof campaignDatabase>) {
   const reloads = fixture.calls.filter((call) => call.model === "courseSupportIncident" && call.method === "findMany" &&
     typeof (call.args as Query).where?.id === "string" &&
-    ((call.args as Query).select?.batchIncidents as Query | undefined)?.take === 21);
+    (call.args as Query).select?.batchIncidents);
   expect(reloads).toHaveLength(224); // ID-only preflight and untouched native read for each member.
   const nativeReloads = reloads.filter((call) =>
     (((call.args as Query).select?.batchIncidents as Query).select?.proofSnapshot) === true);
   expect(nativeReloads).toHaveLength(112);
   expect(new Set(nativeReloads.map((call) => (call.args as Query).where!.id)).size).toBe(112);
   expect(nativeReloads.every((call) => (call.args as Query).take === 1)).toBe(true);
+  expect(nativeReloads.every((call) => ((call.args as Query).select?.batchIncidents as Query).take === 21)).toBe(true);
+  expect(reloads.filter((call) => !nativeReloads.includes(call)).every((call) =>
+    ((call.args as Query).select?.batchIncidents as Query).take === undefined)).toBe(true);
 }
 
 function campaignDatabase(input: {
@@ -543,9 +601,13 @@ function campaignDatabase(input: {
   historicalProbeCount?: number;
   successfulProbeTieFirst?: boolean;
   requiredProbeBudgetPressure?: boolean;
+  unusedFleetHistoryCount?: number;
 } = {}) {
   const rows = new Map(Prisma.dmmf.datamodel.models.map((model) => [model.name, [] as Row[]]));
   const probeMessageRead = vi.fn(() => "x".repeat(500));
+  const unusedFleetPayloadRead = vi.fn((oversized: boolean) => ({
+    privateUnusedHistory: "x".repeat(oversized ? ACCEPTANCE_READ_LIMITS.evidenceBytes + 1 : 512),
+  }));
   const members: ParkedCourseCampaignMember[] = [];
   const cycle = input.readerCandidates ? 4 : 3;
   for (let ordinal = 1; ordinal <= PARKED_COURSE_CAMPAIGN_EXPECTED_COUNT; ordinal++) {
@@ -704,7 +766,8 @@ function campaignDatabase(input: {
         pageTitle: "Private fixture", slots: [], readerVersion: "fixture-reader-v1",
         ...(input.oversizedFleetOnlyEvidence ? { privateEvidence } : {}) };
       expect(localReaderResultSchema.safeParse(result).success).toBe(!input.oversizedFleetOnlyEvidence);
-      const job: Row = { id: "private-fleet-only-reader", courseId: course.id, course, status: "COMPLETED", completedAt: PARKED_AT, result };
+      const job: Row = { id: "private-fleet-only-reader", courseId: course.id, course, status: "COMPLETED", completedAt: PARKED_AT,
+        updatedAt: PARKED_AT, result };
       const status: Row = { ...rows.get("CourseMonitoringStatus")![0], courseId: course.id, course,
         reference: "private-fleet-only-status", state: "HEALTHY", lastSuccessfulAt: null, lastFailureAt: null };
       course.localReaderJobs = [job];
@@ -727,6 +790,23 @@ function campaignDatabase(input: {
       rows.get("CourseSupportIncident")!.push(incident);
       rows.get("CourseMonitoringStatus")!.push(status);
       rows.get("CourseMonitoringEvent")!.push(event);
+    }
+    if (input.unusedFleetHistoryCount) {
+      const reader = input.fleetOnlyEvidence === "LOCAL_READER_RESULT";
+      const model = reader ? "LocalReaderJob" : "CourseMonitoringEvent";
+      const selected = (reader ? course.localReaderJobs : (course.supportIncident as Row).monitoringEvents) as Row[];
+      const current = selected[0];
+      for (let index = 0; index < input.unusedFleetHistoryCount; index++) {
+        const clock = new Date(PARKED_AT.getTime() - (index + 1) * 60_000);
+        const older = { ...current, id: `private-fleet-only-history-${index}`, completedAt: clock, updatedAt: clock, occurredAt: clock };
+        // Parking retains its five native winners; only sixth-and-older audits
+        // are unused. Reader retains exactly its single native winner.
+        if (reader || index >= 4) Object.defineProperty(older, reader ? "result" : "audit", {
+          enumerable: true, get: () => unusedFleetPayloadRead(index === input.unusedFleetHistoryCount! - 1),
+        });
+        selected.push(older);
+        rows.get(model)!.push(older);
+      }
     }
   }
   if (input.historicalProbeCount) {
@@ -858,7 +938,7 @@ function campaignDatabase(input: {
   });
   transaction.$executeRawUnsafe = transactionControls;
   return { transaction: transaction as unknown as Prisma.TransactionClient, calls, mutation,
-    transactionControls, byteRead, byteTotals, probeMessageRead, operationCount: () => calls.length };
+    transactionControls, byteRead, byteTotals, probeMessageRead, unusedFleetPayloadRead, operationCount: () => calls.length };
 }
 
 function selectedRows(rows: readonly Row[], query: Query): Row[] {
@@ -925,7 +1005,14 @@ function projection(row: Row, select?: Row): Row {
     if (typeof selected !== "object") return [key, value];
     if (value === null) return [key, null];
     if (value === undefined) throw new Error(`Fixture relation missing: ${key}`);
-    if (Array.isArray(value)) return [key, selectedRows(value as Row[], selected as Query).map((related) => projection(related, (selected as Query).select))];
+    if (Array.isArray(value)) {
+      const query = selected as Query;
+      // Model the pinned Query strategy's bulk relation read: select physical
+      // child scalars before applying each parent's pagination/distinct.
+      const physical = selectedRows(value as Row[], { ...query, take: undefined, skip: undefined, distinct: undefined })
+        .map((related) => projection(related, query.select));
+      return [key, selectedRows(physical, { take: query.take, skip: query.skip, distinct: query.distinct })];
+    }
     return [key, projection(value as Row, (selected as Query).select)];
   }));
 }

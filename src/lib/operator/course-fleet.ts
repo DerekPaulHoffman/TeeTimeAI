@@ -1,4 +1,4 @@
-import type { Prisma, WebsiteTrafficClass } from "@prisma/client";
+import { Prisma, type WebsiteTrafficClass } from "@prisma/client";
 
 import { classifyProviderCoverage } from "@/lib/automation/provider-coverage";
 import { syntheticWebsiteTrafficClasses } from "@/lib/engagement/traffic-class";
@@ -13,6 +13,7 @@ import {
   buildCourseInventory,
   summarizeCourseInventory,
 } from "./course-status";
+import { AcceptanceReadFence } from "./course-support-acceptance-read-boundary";
 
 const NON_SYNTHETIC_TRAFFIC: { notIn: WebsiteTrafficClass[] } = {
   notIn: [...syntheticWebsiteTrafficClasses],
@@ -305,13 +306,21 @@ export type OperatorCourseFleet = Awaited<
 export type OperatorCourseFleetCounts = OperatorCourseFleet["counts"];
 export type OperatorCourseFleetCountsReadDatabase = Pick<
   Prisma.TransactionClient,
-  "course" | "courseProbe" | "coursePreference"
+  "course" | "courseProbe" | "coursePreference" | "localReaderJob" | "courseMonitoringEvent"
 >;
 
+/** A supplied client must belong to the caller's read-only RepeatableRead snapshot. */
 export async function loadOperatorCourseFleetCounts(
   input: { now?: Date } = {},
-  database: OperatorCourseFleetCountsReadDatabase = prisma,
+  database?: OperatorCourseFleetCountsReadDatabase,
 ): Promise<OperatorCourseFleetCounts> {
+  if (database === undefined) {
+    return prisma.$transaction(async (transaction) => {
+      await transaction.$executeRawUnsafe("SET TRANSACTION READ ONLY");
+      await transaction.$executeRawUnsafe("SET LOCAL statement_timeout = '25000ms'");
+      return loadOperatorCourseFleetCounts(input, transaction);
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, maxWait: 5_000, timeout: 30_000 });
+  }
   const now = input.now ?? new Date();
   const recentLocalReaderSince = new Date(
     now.getTime() - RECENT_LOCAL_READER_DAYS * 24 * 60 * 60 * 1000,
@@ -363,10 +372,11 @@ export async function loadOperatorCourseFleetCounts(
             orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
             take: 5,
             select: {
+              id: true,
+              courseId: true,
               incidentId: true,
               eventType: true,
               occurredAt: true,
-              audit: true,
             },
           },
         },
@@ -389,12 +399,60 @@ export async function loadOperatorCourseFleetCounts(
         orderBy: { completedAt: "desc" },
         take: 1,
         select: {
+          id: true,
+          courseId: true,
+          status: true,
           completedAt: true,
-          result: true,
+          updatedAt: true,
         },
       },
     },
   });
+
+  // Bulk nested pagination happens after Prisma fetches child scalars. Keep its
+  // original winner selection, then hydrate only those exact complete payloads
+  // in the same snapshot. Never choose a different timestamp-tied reader job.
+  const readerSelections = courses.flatMap((course) => course.localReaderJobs);
+  const readerSelectionById = new Map(readerSelections.map((job) => [job.id, job]));
+  const eventSelections = courses.flatMap((course) => course.supportIncident?.monitoringEvents ?? []);
+  const eventSelectionById = new Map(eventSelections.map((event) => [event.id, event]));
+  const validClock = (clock: Date | null): clock is Date => clock instanceof Date && Number.isFinite(clock.getTime());
+  const sameClock = (left: Date | null, right: Date | null) => validClock(left) && validClock(right) && left.getTime() === right.getTime();
+  const invalidBindings = () => { throw new AcceptanceReadFence("READ_FAILED"); };
+  if (readerSelectionById.size !== readerSelections.length || eventSelectionById.size !== eventSelections.length) invalidBindings();
+  for (const course of courses) {
+    if (course.localReaderJobs.length > 1 || (course.supportIncident?.monitoringEvents.length ?? 0) > 5) invalidBindings();
+    for (const job of course.localReaderJobs) {
+      if (!job.id || job.courseId !== course.id || job.status !== "COMPLETED" ||
+          !validClock(job.completedAt) || !validClock(job.updatedAt)) invalidBindings();
+    }
+    for (const event of course.supportIncident?.monitoringEvents ?? []) {
+      if (!event.id || event.courseId !== course.id || event.incidentId !== course.supportIncident?.id ||
+          event.eventType !== "HUMAN_REVIEW_REQUESTED" || !validClock(event.occurredAt)) invalidBindings();
+    }
+  }
+  const readerResults = readerSelections.length > 0 ? await database.localReaderJob.findMany({
+    where: { id: { in: readerSelections.map((job) => job.id) } },
+    select: { id: true, courseId: true, status: true, completedAt: true, updatedAt: true, result: true },
+  }) : [];
+  const readerResultById = new Map(readerResults.map((job) => [job.id, job]));
+  if (readerResults.length !== readerSelections.length || readerResultById.size !== readerResults.length) invalidBindings();
+  for (const job of readerResults) {
+    const selected = readerSelectionById.get(job.id);
+    if (!Object.hasOwn(job, "result") || job.result === undefined || !selected || job.courseId !== selected.courseId || job.status !== selected.status ||
+        !sameClock(job.completedAt, selected.completedAt) || !sameClock(job.updatedAt, selected.updatedAt)) invalidBindings();
+  }
+  const eventAudits = eventSelections.length > 0 ? await database.courseMonitoringEvent.findMany({
+    where: { id: { in: eventSelections.map((event) => event.id) } },
+    select: { id: true, courseId: true, incidentId: true, eventType: true, occurredAt: true, audit: true },
+  }) : [];
+  const eventAuditById = new Map(eventAudits.map((event) => [event.id, event]));
+  if (eventAudits.length !== eventSelections.length || eventAuditById.size !== eventAudits.length) invalidBindings();
+  for (const event of eventAudits) {
+    const selected = eventSelectionById.get(event.id);
+    if (!Object.hasOwn(event, "audit") || event.audit === undefined || !selected || event.courseId !== selected.courseId || event.incidentId !== selected.incidentId ||
+        event.eventType !== selected.eventType || !sameClock(event.occurredAt, selected.occurredAt)) invalidBindings();
+  }
 
   const courseIds = courses.map((course) => course.id);
   const [latestProbes, activeAlertCounts, activeSyntheticAlertCounts] =
@@ -448,7 +506,8 @@ export async function loadOperatorCourseFleetCounts(
   const inventory = buildCourseInventory(
     courses.map((course) => {
       const latestProbe = latestProbeByCourse.get(course.id);
-      const latestLocalReaderJob = course.localReaderJobs[0];
+      const selectedLocalReaderJob = course.localReaderJobs[0];
+      const latestLocalReaderJob = selectedLocalReaderJob ? readerResultById.get(selectedLocalReaderJob.id) : undefined;
       const latestLocalReaderResult = localReaderResultSchema.safeParse(
         latestLocalReaderJob?.result,
       );
@@ -483,7 +542,10 @@ export async function loadOperatorCourseFleetCounts(
           activeSyntheticAlertCountByCourse.get(course.id) ?? 0,
         selectionCount: 0,
         monitoringStatus: course.monitoringStatus,
-        incident: course.supportIncident,
+        incident: course.supportIncident ? {
+          ...course.supportIncident,
+          monitoringEvents: course.supportIncident.monitoringEvents.map((event) => eventAuditById.get(event.id)!),
+        } : null,
         // Counts use the probe outcome and clock, not its explanatory message.
         latestProbe: latestProbe
           ? { ...latestProbe, message: null, evidenceUrl: null }
