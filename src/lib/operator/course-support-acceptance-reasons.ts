@@ -13,6 +13,7 @@ import { assessFutureAutomaticResolution, assessRollingHumanReview,
 import { ACCEPTANCE_READ_LIMITS, AcceptanceReadFence, createBoundedAcceptanceReadClient } from "./course-support-acceptance-read-boundary";
 import { parseAcceptanceReadFenceDetails, type AcceptanceReadFenceDetails,
   type AcceptanceReadPhase } from "./course-support-acceptance-read-fence";
+import { parseAcceptanceReadCost, type AcceptanceReadCost } from "./course-support-acceptance-read-cost";
 
 export type AcceptanceReasonsUnavailable = "INVALID_ARGUMENTS" | "DATABASE_UNAVAILABLE" |
   "CAMPAIGN_UNAVAILABLE" | "READ_TIMEOUT" | "READ_FAILED" | "EVIDENCE_BOUND_EXCEEDED" |
@@ -22,7 +23,7 @@ type RollingAssessment = { summary: OperatorRollingHumanReview; primaryReasonCou
 
 class PhaseTaggedAcceptanceReadFence extends AcceptanceReadFence {
   constructor(error: AcceptanceReadFence, public readonly phase: AcceptanceReadPhase) {
-    super(error.reason, error.boundary);
+    super(error.reason, error.boundary, error.readCost);
   }
 }
 
@@ -43,14 +44,17 @@ export function unavailableAcceptanceReasons(input: {
   sourceSha: string | null; observedAt?: Date | null; reason: AcceptanceReasonsUnavailable;
   acceptanceProjection?: CourseSupportAcceptanceProjection | null;
   readFence?: AcceptanceReadFenceDetails | null;
+  readCost?: AcceptanceReadCost | null;
 }) {
+  const readFence = input.reason === "EVIDENCE_BOUND_EXCEEDED" ? parseAcceptanceReadFenceDetails(input.readFence) : null;
   return {
-    recordType: "course_support_acceptance_reasons" as const, schemaVersion: 3 as const,
+    recordType: "course_support_acceptance_reasons" as const, schemaVersion: 4 as const,
     sourceSha: input.sourceSha, observedAt: input.observedAt?.toISOString() ?? null,
     status: "UNAVAILABLE" as const, reason: input.reason,
     acceptanceProjection: input.acceptanceProjection ?? null,
     futureUnknown: null, rollingAmbiguous: null, evidenceReadComplete: false,
-    readFence: input.reason === "EVIDENCE_BOUND_EXCEEDED" ? parseAcceptanceReadFenceDetails(input.readFence) : null,
+    readFence,
+    readCost: readFence?.boundary === "SELECTED_EVIDENCE_BYTES" ? parseAcceptanceReadCost(input.readCost) : null,
     customerDataIncluded: false as const,
   };
 }
@@ -88,7 +92,7 @@ export function buildAcceptanceReasonsReport(input: {
     return failure("COUNT_RECONCILIATION_FAILED");
   }
   const result = {
-    recordType: "course_support_acceptance_reasons" as const, schemaVersion: 3 as const,
+    recordType: "course_support_acceptance_reasons" as const, schemaVersion: 4 as const,
     sourceSha: input.sourceSha, observedAt: input.observedAt.toISOString(),
     status: "AVAILABLE" as const, reason: "COMPLETE_NATIVE_TRACE" as const,
     acceptanceProjection: input.acceptanceProjection,
@@ -96,7 +100,7 @@ export function buildAcceptanceReasonsReport(input: {
       primaryReasonCounts: input.future.primaryReasonCounts, reconciliation: "MATCH" as const },
     rollingAmbiguous: { nativeCount: input.rolling.summary.ambiguousEndpointCount, classifiedCount: rollingCount,
       primaryReasonCounts: input.rolling.primaryReasonCounts, reconciliation: "MATCH" as const },
-    evidenceReadComplete: true, customerDataIncluded: false as const, readFence: null,
+    evidenceReadComplete: true, customerDataIncluded: false as const, readFence: null, readCost: null,
   };
   return Buffer.byteLength(JSON.stringify(result), "utf8") <= ACCEPTANCE_READ_LIMITS.outputBytes
     ? result : failure("EVIDENCE_BOUND_EXCEEDED", { phase: "REPORT_CONSTRUCTION", boundary: "OUTPUT_BYTES" });
@@ -177,7 +181,9 @@ export async function loadCourseSupportAcceptanceReasons(
       : code === "P2028" || code === "57014" ? "READ_TIMEOUT" : "READ_FAILED";
     const readFence = error instanceof PhaseTaggedAcceptanceReadFence && reason === "EVIDENCE_BOUND_EXCEEDED"
       ? parseAcceptanceReadFenceDetails({ phase: error.phase, boundary: error.boundary }) : null;
-    return unavailableAcceptanceReasons({ sourceSha, observedAt, reason, readFence });
+    const readCost = error instanceof PhaseTaggedAcceptanceReadFence && readFence?.boundary === "SELECTED_EVIDENCE_BYTES"
+      ? parseAcceptanceReadCost(error.readCost) : null;
+    return unavailableAcceptanceReasons({ sourceSha, observedAt, reason, readFence, readCost });
   }
 }
 

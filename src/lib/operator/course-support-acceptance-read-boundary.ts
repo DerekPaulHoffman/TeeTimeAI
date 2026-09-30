@@ -1,6 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import { AcceptanceBytePreflightFence, createAcceptanceBytePreflight } from "./course-support-acceptance-read-size-boundary";
 import { ACCEPTANCE_READ_BOUNDARIES, type AcceptanceReadBoundary } from "./course-support-acceptance-read-fence";
+import { classifyAcceptanceReadQuery, parseAcceptanceReadCost, type AcceptanceReadCost } from "./course-support-acceptance-read-cost";
 
 export const ACCEPTANCE_READ_LIMITS = {
   incidentRows: 1_024,
@@ -18,9 +19,13 @@ export const ACCEPTANCE_READ_LIMITS = {
 
 export class AcceptanceReadFence extends Error {
   readonly boundary: AcceptanceReadBoundary | null;
-  constructor(public readonly reason: "EVIDENCE_BOUND_EXCEEDED" | "READ_FAILED", boundary: AcceptanceReadBoundary | null = null) {
+  readonly readCost: AcceptanceReadCost | null;
+  constructor(public readonly reason: "EVIDENCE_BOUND_EXCEEDED" | "READ_FAILED", boundary: AcceptanceReadBoundary | null = null,
+    readCost: AcceptanceReadCost | null = null) {
     super(reason);
     this.boundary = (ACCEPTANCE_READ_BOUNDARIES as readonly unknown[]).includes(boundary) ? boundary : null;
+    this.readCost = reason === "EVIDENCE_BOUND_EXCEEDED" && this.boundary === "SELECTED_EVIDENCE_BYTES"
+      ? parseAcceptanceReadCost(readCost) : null;
   }
 }
 
@@ -39,19 +44,22 @@ export function createBoundedAcceptanceReadClient(database: Prisma.TransactionCl
   let queryCount = 0;
   let transferredArrayItems = 0;
   let transferredBytes = 0;
+  let firstFence: AcceptanceReadFence | null = null;
   const delegates = new Map<string, ReadDelegate>();
 
+  function throwFence(error: AcceptanceReadFence): never {
+    firstFence ??= error;
+    throw firstFence;
+  }
+  function assertOpen() {
+    if (firstFence) throw firstFence;
+  }
   function tick() {
-    if (++queryCount > ACCEPTANCE_READ_LIMITS.queryCount) throw new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "QUERY_OPERATIONS");
+    assertOpen();
+    if (++queryCount > ACCEPTANCE_READ_LIMITS.queryCount) throwFence(new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "QUERY_OPERATIONS"));
   }
   const preflightBytes = createAcceptanceBytePreflight(database, {
-    tick: () => {
-      try { tick(); }
-      catch (error) {
-        if (error instanceof AcceptanceReadFence) throw new AcceptanceBytePreflightFence(error.reason, error.boundary);
-        throw error;
-      }
-    }, maxBytes: ACCEPTANCE_READ_LIMITS.evidenceBytes,
+    tick, maxBytes: ACCEPTANCE_READ_LIMITS.evidenceBytes,
     maxIdentityItems: ACCEPTANCE_READ_LIMITS.evidenceRows,
   });
   function delegate(name: string): ReadDelegate {
@@ -66,7 +74,7 @@ export function createBoundedAcceptanceReadClient(database: Prisma.TransactionCl
   async function count(name: string, where: unknown): Promise<number> {
     tick();
     const value = await delegate(name).count({ where });
-    if (!Number.isSafeInteger(value) || (value as number) < 0) throw new AcceptanceReadFence("READ_FAILED");
+    if (!Number.isSafeInteger(value) || (value as number) < 0) throwFence(new AcceptanceReadFence("READ_FAILED"));
     return value as number;
   }
   async function guardIncidentRelations(query: Query) {
@@ -77,7 +85,7 @@ export function createBoundedAcceptanceReadClient(database: Prisma.TransactionCl
       if (nested.take === undefined) {
         const where = { AND: [nested.where ?? {}, { incident: { is: query.where ?? {} } }] };
         if (await count("courseMonitoringEvent", where) > ACCEPTANCE_READ_LIMITS.evidenceRows) {
-          throw new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "INCIDENT_HISTORY_ROWS");
+          throwFence(new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "INCIDENT_HISTORY_ROWS"));
         }
         await guardHistoryGroups(where);
       }
@@ -87,7 +95,7 @@ export function createBoundedAcceptanceReadClient(database: Prisma.TransactionCl
     if (preferences && preferences.take === undefined &&
         await count("coursePreference", { AND: [preferences.where ?? {},
           { course: { supportIncident: { is: query.where ?? {} } } }] }) > ACCEPTANCE_READ_LIMITS.evidenceRows) {
-      throw new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "NESTED_PREFERENCE_ROWS");
+      throwFence(new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "NESTED_PREFERENCE_ROWS"));
     }
     const batchIncidents = selected.batchIncidents as Query | undefined;
     if (batchIncidents) await guardVerificationRequests({
@@ -102,7 +110,7 @@ export function createBoundedAcceptanceReadClient(database: Prisma.TransactionCl
     if (!Array.isArray(groups) || groups.length > ACCEPTANCE_READ_LIMITS.incidentRows ||
         groups.some((group) => !Number.isSafeInteger(group._count?._all) ||
           group._count._all < 0 || group._count._all > ACCEPTANCE_READ_LIMITS.incidentRows)) {
-      throw new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "INCIDENT_HISTORY_GROUPS");
+      throwFence(new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "INCIDENT_HISTORY_GROUPS"));
     }
   }
   async function guardVerificationRequests(query: Query) {
@@ -110,15 +118,16 @@ export function createBoundedAcceptanceReadClient(database: Prisma.TransactionCl
     if (requests && requests.take === undefined &&
         await count("courseSupportVerificationRequest", { AND: [requests.where ?? {},
           { batchIncident: { is: query.where ?? {} } }] }) > ACCEPTANCE_READ_LIMITS.evidenceRows) {
-      throw new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "VERIFICATION_REQUEST_ROWS");
+      throwFence(new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "VERIFICATION_REQUEST_ROWS"));
     }
   }
   function checkTransferred(value: unknown) {
+    assertOpen();
     const visit = (item: unknown, depth: number) => {
-      if (depth > 128) throw new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "TRANSFER_DEPTH");
+      if (depth > 128) throwFence(new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "TRANSFER_DEPTH"));
       if (Array.isArray(item)) {
         transferredArrayItems += item.length;
-        if (transferredArrayItems > ACCEPTANCE_READ_LIMITS.evidenceRows) throw new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "TRANSFER_ARRAY_ITEMS");
+        if (transferredArrayItems > ACCEPTANCE_READ_LIMITS.evidenceRows) throwFence(new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "TRANSFER_ARRAY_ITEMS"));
         for (const child of item) visit(child, depth + 1);
       } else if (item && typeof item === "object" && !(item instanceof Date)) {
         for (const child of Object.values(item)) visit(child, depth + 1);
@@ -126,46 +135,53 @@ export function createBoundedAcceptanceReadClient(database: Prisma.TransactionCl
     };
     visit(value, 0);
     transferredBytes += Buffer.byteLength(JSON.stringify(value) ?? "", "utf8");
-    if (transferredBytes > ACCEPTANCE_READ_LIMITS.evidenceBytes) throw new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "TRANSFER_BYTES");
+    if (transferredBytes > ACCEPTANCE_READ_LIMITS.evidenceBytes) throwFence(new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "TRANSFER_BYTES"));
   }
 
   return new Proxy({} as Prisma.TransactionClient, {
     get(_target, property) {
-      if (typeof property !== "string" || !MODELS.has(property)) throw new AcceptanceReadFence("READ_FAILED");
+      if (typeof property !== "string" || !MODELS.has(property)) throwFence(new AcceptanceReadFence("READ_FAILED"));
       if (!delegates.has(property)) {
         delegates.set(property, new Proxy({} as ReadDelegate, {
           get(_delegate, method) {
-            if (typeof method !== "string" || !METHODS.has(method)) throw new AcceptanceReadFence("READ_FAILED");
+            if (typeof method !== "string" || !METHODS.has(method)) throwFence(new AcceptanceReadFence("READ_FAILED"));
             return async (args: Query = {}) => {
-              if (method === "findMany" || method === "groupBy") {
-                // Counting raw matches is conservative for native distinct/grouped
-                // reads. Do not add take: it could alter which latest rows survive.
-                const matched = await count(property, args.where);
-                const selected = args.take === undefined ? matched : Math.min(matched, args.take);
-                if (!Number.isSafeInteger(selected) || selected < 0 || selected > rowLimit(property)) {
-                  throw new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "TOP_LEVEL_ROWS");
+              assertOpen();
+              const queryCategory = classifyAcceptanceReadQuery(property, method, args);
+              try {
+                if (method === "findMany" || method === "groupBy") {
+                  // Counting raw matches is conservative for native distinct/grouped
+                  // reads. Do not add take: it could alter which latest rows survive.
+                  const matched = await count(property, args.where);
+                  const selected = args.take === undefined ? matched : Math.min(matched, args.take);
+                  if (!Number.isSafeInteger(selected) || selected < 0 || selected > rowLimit(property)) {
+                    throwFence(new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "TOP_LEVEL_ROWS"));
+                  }
                 }
-              }
-              if (property === "courseSupportIncident" && method !== "count" && method !== "groupBy") {
-                await guardIncidentRelations(args);
-              }
-              if (property === "courseSupportBatchIncident" && method !== "count" && method !== "groupBy") {
-                await guardVerificationRequests(args);
-              }
-              if (property === "courseMonitoringEvent" && method === "findMany" && args.take === undefined) {
-                await guardHistoryGroups(args.where);
-              }
-              if (method === "findMany" || method === "findFirst" || method === "findUnique") {
-                try { await preflightBytes(property, method, args); }
-                catch (error) {
-                  if (error instanceof AcceptanceBytePreflightFence) throw new AcceptanceReadFence(error.reason, error.boundary);
-                  throw error;
+                if (property === "courseSupportIncident" && method !== "count" && method !== "groupBy") {
+                  await guardIncidentRelations(args);
                 }
+                if (property === "courseSupportBatchIncident" && method !== "count" && method !== "groupBy") {
+                  await guardVerificationRequests(args);
+                }
+                if (property === "courseMonitoringEvent" && method === "findMany" && args.take === undefined) {
+                  await guardHistoryGroups(args.where);
+                }
+                if (method === "findMany" || method === "findFirst" || method === "findUnique") {
+                  await preflightBytes(property, method, args, queryCategory);
+                }
+                tick();
+                const result = await delegate(property)[method](args);
+                checkTransferred(result);
+                return result;
+              } catch (error) {
+                if (error instanceof AcceptanceReadFence) throwFence(error);
+                if (error instanceof AcceptanceBytePreflightFence) {
+                  throwFence(new AcceptanceReadFence(error.reason, error.boundary, error.readCost));
+                }
+                if (firstFence) throw firstFence;
+                throw error;
               }
-              tick();
-              const result = await delegate(property)[method](args);
-              checkTransferred(result);
-              return result;
             };
           },
         }));

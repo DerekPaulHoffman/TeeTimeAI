@@ -2,6 +2,8 @@ import { Prisma } from "@prisma/client";
 import { readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { ACCEPTANCE_READ_BOUNDARIES, type AcceptanceReadBoundary } from "./course-support-acceptance-read-fence";
+import { createAcceptanceReadCost, parseAcceptanceReadCost, type AcceptanceReadCost,
+  type AcceptanceReadQueryCategory } from "./course-support-acceptance-read-cost";
 
 const MAX_IDENTITY_ITEMS = 16_384;
 const MAX_IDENTITY_DEPTH = 16;
@@ -29,9 +31,13 @@ type IdentityReadDelegate = Record<ReadMethod, (args: unknown) => Promise<unknow
 
 export class AcceptanceBytePreflightFence extends Error {
   readonly boundary: AcceptanceReadBoundary | null;
-  constructor(public readonly reason: "EVIDENCE_BOUND_EXCEEDED" | "READ_FAILED", boundary: AcceptanceReadBoundary | null = null) {
+  readonly readCost: AcceptanceReadCost | null;
+  constructor(public readonly reason: "EVIDENCE_BOUND_EXCEEDED" | "READ_FAILED", boundary: AcceptanceReadBoundary | null = null,
+    cost: AcceptanceReadCost | null = null) {
     super(reason);
     this.boundary = (ACCEPTANCE_READ_BOUNDARIES as readonly unknown[]).includes(boundary) ? boundary : null;
+    this.readCost = reason === "EVIDENCE_BOUND_EXCEEDED" && this.boundary === "SELECTED_EVIDENCE_BYTES"
+      ? parseAcceptanceReadCost(cost) : null;
   }
 }
 
@@ -283,8 +289,18 @@ export function createAcceptanceBytePreflight(
     return fail("READ_FAILED");
   }
   let cumulativeBytes = 0n;
-  return async (delegateName: string, method: ReadMethod, args: unknown = {}) => {
+  let terminalFence: AcceptanceBytePreflightFence | null = null;
+  const throwIfFenced = () => {
+    if (terminalFence) throw terminalFence;
+  };
+  const tick = () => {
+    throwIfFenced();
+    options.tick();
+  };
+  return async (delegateName: string, method: ReadMethod, args: unknown = {},
+    queryCategory: AcceptanceReadQueryCategory = "UNCLASSIFIED") => {
     try {
+      throwIfFenced();
       const model = generatedModelMetadata().byDelegate.get(delegateName);
       if (!model || !["findMany", "findFirst", "findUnique"].includes(method)) return fail("READ_FAILED");
       const plan = identityPlan(model, args, method);
@@ -293,10 +309,11 @@ export function createAcceptanceBytePreflight(
         current: IdentityPlan, where = current.query.where,
         parent?: { rows: number; isList: boolean; multiplicity: number; inverseIsList: boolean },
       ) => {
-        options.tick();
+        tick();
         const counted = await (Reflect.get(transaction, current.model.name[0].toLowerCase() + current.model.name.slice(1)) as {
           count: (input: unknown) => Promise<unknown>;
         }).count({ where });
+        throwIfFenced();
         if (!Number.isSafeInteger(counted) || (counted as number) < 0) return fail("READ_FAILED");
         const take = current.query.take;
         if (take !== undefined && (!Number.isSafeInteger(take) || (take as number) < 0)) return fail("READ_FAILED");
@@ -320,9 +337,10 @@ export function createAcceptanceBytePreflight(
         }
       };
       await guardIdentityRows(plan);
-      options.tick();
+      tick();
       const delegate = Reflect.get(transaction, delegateName) as IdentityReadDelegate;
       const result = await delegate[plan.method](plan.query);
+      throwIfFenced();
       const identitiesByModel = new Map<Model, Map<string, number>>();
       const selectedFieldsByModel = new Map<Model, Map<string, Model["fields"][number]>>();
       let identityItems = 0;
@@ -330,7 +348,13 @@ export function createAcceptanceBytePreflight(
       const addEnvelope = (bytes: number) => {
         envelopeBytes += BigInt(bytes);
         if (cumulativeBytes + envelopeBytes * SELECTED_EVIDENCE_BYTE_FACTOR > BigInt(options.maxBytes)) {
-          return fail("EVIDENCE_BOUND_EXCEEDED", "SELECTED_EVIDENCE_BYTES");
+          throw new AcceptanceBytePreflightFence("EVIDENCE_BOUND_EXCEEDED", "SELECTED_EVIDENCE_BYTES", createAcceptanceReadCost({
+            queryCategory, component: "STRUCTURAL_ENVELOPE", limitBytes: BigInt(options.maxBytes),
+            cumulativeBeforeComponentBytes: cumulativeBytes,
+            componentChargeBytes: envelopeBytes * SELECTED_EVIDENCE_BYTE_FACTOR,
+            attemptedCumulativeBytes: cumulativeBytes + envelopeBytes * SELECTED_EVIDENCE_BYTE_FACTOR,
+            hydrationObservedBytes: envelopeBytes * SELECTED_EVIDENCE_BYTE_FACTOR,
+          }));
         }
       };
       const keyEnvelope = (key: string) => Buffer.byteLength(JSON.stringify(key), "utf8") + 2; // Colon and conservative comma.
@@ -381,6 +405,7 @@ export function createAcceptanceBytePreflight(
       else addEnvelope(4);
 
       cumulativeBytes += envelopeBytes * SELECTED_EVIDENCE_BYTE_FACTOR;
+      let hydrationObservedBytes = envelopeBytes * SELECTED_EVIDENCE_BYTE_FACTOR;
 
       for (const [selectedModel, identities] of identitiesByModel) {
         const id = selectedModel.fields.find((field) => field.isId)!;
@@ -390,7 +415,7 @@ export function createAcceptanceBytePreflight(
           }
           return Prisma.sql`(${identity}::text, ${BigInt(occurrences)}::bigint)`;
         });
-        options.tick();
+        tick();
         const selectedBytes = selectedRowByteExpression([...selectedFieldsByModel.get(selectedModel)!.values()]);
         const totals = await transaction.$queryRaw<Array<{ bytes: bigint; matchedRows: bigint }>>(Prisma.sql`
           SELECT COALESCE(SUM((${selectedBytes}) * acceptance_weight.occurrences), 0)::bigint AS "bytes",
@@ -399,15 +424,28 @@ export function createAcceptanceBytePreflight(
           JOIN (VALUES ${Prisma.join(weightedIdentities)}) AS acceptance_weight(identity, occurrences)
             ON acceptance_row.${quotedGeneratedIdentifier(id.dbName ?? id.name)}::text = acceptance_weight.identity
         `);
+        throwIfFenced();
         if (!Array.isArray(totals) || totals.length !== 1) return fail("READ_FAILED");
         const total = record(totals[0]);
         const bytes = nonnegativeInteger(total.bytes);
         if (nonnegativeInteger(total.matchedRows) !== BigInt(identities.size)) return fail("READ_FAILED");
+        const cumulativeBeforeComponentBytes = cumulativeBytes;
         cumulativeBytes += bytes * SELECTED_EVIDENCE_BYTE_FACTOR;
-        if (cumulativeBytes > BigInt(options.maxBytes)) return fail("EVIDENCE_BOUND_EXCEEDED", "SELECTED_EVIDENCE_BYTES");
+        hydrationObservedBytes += bytes * SELECTED_EVIDENCE_BYTE_FACTOR;
+        if (cumulativeBytes > BigInt(options.maxBytes)) {
+          throw new AcceptanceBytePreflightFence("EVIDENCE_BOUND_EXCEEDED", "SELECTED_EVIDENCE_BYTES", createAcceptanceReadCost({
+            queryCategory, component: "SELECTED_SCALARS", limitBytes: BigInt(options.maxBytes),
+            cumulativeBeforeComponentBytes, componentChargeBytes: bytes * SELECTED_EVIDENCE_BYTE_FACTOR,
+            attemptedCumulativeBytes: cumulativeBytes, hydrationObservedBytes,
+          }));
+        }
       }
     } catch (error) {
-      if (error instanceof AcceptanceBytePreflightFence) throw error;
+      throwIfFenced();
+      if (error instanceof AcceptanceBytePreflightFence) {
+        terminalFence = error;
+        throw terminalFence;
+      }
       const nativeCode = error && typeof error === "object" && "code" in error ? error.code : null;
       const meta = error && typeof error === "object" && "meta" in error ? error.meta : null;
       const metaCode = meta && typeof meta === "object" && "code" in meta ? meta.code : null;
@@ -416,9 +454,11 @@ export function createAcceptanceBytePreflight(
       if (timeoutCode) throw Object.assign(new Error("READ_TIMEOUT"), { code: timeoutCode });
       if (error instanceof Error && "reason" in error &&
           (error.reason === "EVIDENCE_BOUND_EXCEEDED" || error.reason === "READ_FAILED")) {
-        return fail(error.reason);
+        terminalFence = new AcceptanceBytePreflightFence(error.reason);
+        throw terminalFence;
       }
-      return fail("READ_FAILED");
+      terminalFence = new AcceptanceBytePreflightFence("READ_FAILED");
+      throw terminalFence;
     }
   };
 }
