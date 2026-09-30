@@ -606,6 +606,7 @@ type ParkedCourseCampaignDependencies = {
     audit: ParkedCourseCampaignAudit,
     campaignRunId: string,
     admissionRuntimeVersion?: string,
+    admissionNow?: Date,
   ) => Promise<ParkedCourseCampaignAdmissionMember[]>;
   loadGlobalParkedCount?: () => Promise<number>;
   loadMemberObservations: (
@@ -626,7 +627,16 @@ type ParkedCourseCampaignDependencies = {
   ) => Promise<{ acquired: true; value: T } | { acquired: false }>;
 };
 
-type ParkedCourseCampaignDatabase = Pick<
+type ParkedCourseCampaignProgressReadDependencies = Pick<
+  ParkedCourseCampaignDependencies,
+  | "loadParkedMembers"
+  | "loadAllParkedMembers"
+  | "loadAdmissionMembers"
+  | "loadGlobalParkedCount"
+  | "loadMemberObservations"
+>;
+
+export type ParkedCourseCampaignDatabase = Pick<
   Prisma.TransactionClient,
   | "automationRun"
   | "courseSupportIncident"
@@ -974,14 +984,53 @@ export async function inspectActiveParkedCourseCampaign(
   return { runId: run.id, status, ...progress };
 }
 
-export async function inspectLatestParkedCourseCampaign() {
-  const run = await defaultDependencies.loadLatestCampaign();
+export async function inspectLatestParkedCourseCampaign(
+  database: ParkedCourseCampaignDatabase = prisma,
+  context: { now?: Date; admissionRuntimeVersion?: string } = {},
+) {
+  const dependencies: ParkedCourseCampaignProgressReadDependencies = {
+    loadParkedMembers: () => loadParkedCourseCampaignMembers(database),
+    loadAllParkedMembers: () => loadAllParkedCourseCampaignMembers(database),
+    loadAdmissionMembers: (audit, campaignRunId, runtimeVersion, now) =>
+      loadParkedCourseCampaignAdmissionMembers(
+        audit,
+        database,
+        campaignRunId,
+        runtimeVersion ?? getAutomationRuntimeVersion(),
+        now,
+      ),
+    loadGlobalParkedCount: () => loadGlobalParkedCourseCampaignCount(database),
+    loadMemberObservations: (audit, parkedCourseIds, campaignRunId) =>
+      loadCampaignMemberObservations(
+        audit,
+        parkedCourseIds,
+        campaignRunId,
+        database,
+      ),
+  };
+  const run = await database.automationRun.findFirst({
+    where: { promptVersion: PARKED_COURSE_CAMPAIGN_PROMPT_VERSION },
+    orderBy: [{ startedAt: "desc" }, { id: "desc" }],
+    select: {
+      id: true,
+      status: true,
+      completedAt: true,
+      outcome: true,
+      audit: true,
+    },
+  });
   if (!run) return null;
   const audit = requireCampaignAudit(run);
   return {
     runId: run.id,
     status: run.status,
-    ...(await loadCampaignProgress(run.id, audit, defaultDependencies)),
+    ...(await loadCampaignProgress(
+      run.id,
+      audit,
+      dependencies,
+      context.admissionRuntimeVersion,
+      context.now,
+    )),
   };
 }
 
@@ -1191,8 +1240,9 @@ async function buildExistingCampaignResult(
 async function loadCampaignProgress(
   campaignRunId: string,
   audit: ParkedCourseCampaignAudit,
-  dependencies: ParkedCourseCampaignDependencies,
+  dependencies: ParkedCourseCampaignProgressReadDependencies,
   admissionRuntimeVersion?: string,
+  admissionNow?: Date,
 ) {
   const parkedMembers = await (dependencies.loadAllParkedMembers?.() ??
     dependencies.loadParkedMembers());
@@ -1204,7 +1254,7 @@ async function loadCampaignProgress(
   );
   const admissionMembers = dependencies.loadAdmissionMembers
     ? await dependencies.loadAdmissionMembers(
-        audit, campaignRunId, admissionRuntimeVersion,
+        audit, campaignRunId, admissionRuntimeVersion, admissionNow,
       )
     : [];
   const parkedCourseIds = new Set([
@@ -6213,12 +6263,13 @@ const defaultDependencies: ParkedCourseCampaignDependencies = {
     }),
   loadParkedMembers: loadParkedCourseCampaignMembers,
   loadAllParkedMembers: loadAllParkedCourseCampaignMembers,
-  loadAdmissionMembers: (audit, campaignRunId, admissionRuntimeVersion) =>
+  loadAdmissionMembers: (audit, campaignRunId, admissionRuntimeVersion, admissionNow) =>
     loadParkedCourseCampaignAdmissionMembers(
       audit,
       prisma,
       campaignRunId,
       admissionRuntimeVersion ?? getAutomationRuntimeVersion(),
+      admissionNow,
     ),
   loadGlobalParkedCount: loadGlobalParkedCourseCampaignCount,
   loadMemberObservations: loadCampaignMemberObservations,

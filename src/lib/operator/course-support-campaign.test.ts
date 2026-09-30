@@ -1,11 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { createParkedCourseCampaignAudit } from "@/lib/automation/course-support-campaign";
+import * as nativeCampaign from "@/lib/automation/course-support-campaign";
 
 import {
+  assessFutureAutomaticResolution,
+  assessRollingHumanReview,
   buildOperatorCourseSupportCampaignSummary,
+  createOperatorCourseSupportCampaignDependencies,
+  loadCampaignAuditForAcceptance,
   loadFutureUnfamiliarIncidentsForAcceptance,
+  loadImplementationBatchesForAcceptance,
   loadOperatorCourseSupportCampaign,
+  loadRollingEndpointEventsForAcceptance,
   summarizeFutureAutomaticResolution,
   summarizeRepeatProviderImplementations,
   summarizeRollingHumanReview
@@ -1047,6 +1054,229 @@ describe("operator course-support campaign aggregation", () => {
     expect(result?.expectedCount).toBe(2);
     expect(inspectLatestCampaign).not.toHaveBeenCalled();
     expect(loadCampaignAudit).not.toHaveBeenCalled();
+  });
+});
+
+describe("native acceptance primary reasons", () => {
+  const now = new Date("2026-08-21T12:00:00.000Z");
+  function futureInput(incidents: FutureIncidentFixture[]) {
+    return { campaignCapturedAt: capturedAt, campaignRunId, campaignMembershipDigest,
+      campaignIncidentCycles: [], incidents, now };
+  }
+  function reasonTotal(counts: Record<string, number>) {
+    return Object.values(counts).reduce((total, count) => total + count, 0);
+  }
+
+  it.each([
+    ["CONFIRMATION_UNAVAILABLE", futureIncident({ status: "NEEDS_HUMAN", confirmedAt: null, terminalEvents: [] })],
+    ["CYCLE_UNAVAILABLE", futureIncident({ cycle: 0, terminalEvents: [] })],
+    ["CONFIRMATION_CONFLICT", futureIncident({ terminalEvents: [futureTerminalEvent(), futureTerminalEvent({
+      audit: { cycle: 1, confirmedAt: "2026-08-20T14:01:00.000Z", automatedFinal: true },
+    })] })],
+    ["EXACT_TERMINAL_UNAVAILABLE", futureIncident({ terminalEvents: [futureTerminalEvent({ audit: { cycle: 1 } })] })],
+    ["AUTOMATED_FINAL_UNAVAILABLE", futureIncident({ terminalEvents: [futureTerminalEvent({
+      audit: { cycle: 1, confirmedAt: "2026-08-20T14:00:00.000Z" },
+    })] })],
+    ["AUTOMATIC_SOURCE_UNPROVEN", futureIncident({ terminalEvents: [futureTerminalEvent({ source: "UNRECOGNIZED_SOURCE" })] })],
+    ["RELEASE_PROOF_UNAVAILABLE_OR_CONFLICTING", futureIncident({ terminalEvents: [futureTerminalEvent({ runtimeVersion: null })] })],
+  ] as const)("labels one actual future unknown cycle with %s", (reason, incident) => {
+    const input = futureInput([incident]);
+    const result = assessFutureAutomaticResolution(input);
+    expect(result.summary).toEqual(summarizeFutureAutomaticResolution(input));
+    expect(result.summary).toMatchObject({ eligibleCount: 1, unknownCount: 1, ratePercent: null, targetPercent: 95, status: "UNKNOWN" });
+    expect(result.primaryReasonCounts).toEqual({ [reason]: 1 });
+    expect(reasonTotal(result.primaryReasonCounts)).toBe(result.summary.unknownCount);
+    expect(JSON.stringify(result)).not.toContain(incident.id);
+    expect(JSON.stringify(result)).not.toContain(incident.courseId);
+  });
+
+  it.each([false, true])("retains the first incomplete terminal before a later complete terminal, tied=%s", (tied) => {
+    const incomplete = futureTerminalEvent({ runtimeVersion: null });
+    const complete = futureTerminalEvent({ occurredAt: tied ? incomplete.occurredAt : new Date("2026-08-20T16:00:00.000Z") });
+    const input = futureInput([futureIncident({ terminalEvents: [incomplete, complete] })]);
+    const before = JSON.stringify(input);
+    expect(assessFutureAutomaticResolution(input)).toMatchObject({
+      summary: { automaticCount: 0, unknownCount: 1, status: "UNKNOWN" },
+      primaryReasonCounts: { RELEASE_PROOF_UNAVAILABLE_OR_CONFLICTING: 1 },
+    });
+    expect(JSON.stringify(input)).toBe(before);
+    if (tied) {
+      expect(assessFutureAutomaticResolution(futureInput([futureIncident({ terminalEvents: [complete, incomplete] })]))).toMatchObject({
+        summary: { automaticCount: 1, unknownCount: 0, status: "PASS" }, primaryReasonCounts: {},
+      });
+    }
+  });
+
+  it("keeps a prior completed unknown and the later pending cycle on one reopened incident", () => {
+    const result = assessFutureAutomaticResolution(futureInput([futureIncident({
+      cycle: 2, status: "AUTO_INVESTIGATING", resolution: null, resolvedAt: null,
+      confirmedAt: new Date("2026-08-21T10:00:00.000Z"),
+      terminalEvents: [futureTerminalEvent({ deploymentSha: null })],
+    })]));
+    expect(result).toMatchObject({
+      summary: { eligibleCount: 2, unknownCount: 1, pendingCount: 1, ratePercent: null, status: "UNKNOWN" },
+      primaryReasonCounts: { RELEASE_PROOF_UNAVAILABLE_OR_CONFLICTING: 1 },
+    });
+  });
+
+  it("excludes only the exact admission cycle and diagnoses a later baseline-course cycle", () => {
+    const result = assessFutureAutomaticResolution({
+      ...futureInput([futureIncident({
+        cycle: 3, confirmedAt: new Date("2026-08-21T10:00:00.000Z"),
+        campaignAdmissionEvents: [futureCampaignAdmissionEvent()],
+        terminalEvents: [
+          futureTerminalEvent({ runtimeVersion: null, audit: { cycle: 2, confirmedAt: "2026-08-20T14:00:00.000Z", automatedFinal: true } }),
+          futureTerminalEvent({ runtimeVersion: null, occurredAt: new Date("2026-08-21T11:00:00.000Z"),
+            audit: { cycle: 3, confirmedAt: "2026-08-21T10:00:00.000Z", automatedFinal: true } }),
+        ],
+      })]),
+      campaignIncidentCycles: [{ incidentId: "future-incident", cycle: 1 }],
+    });
+    expect(result).toMatchObject({
+      summary: { eligibleCount: 1, unknownCount: 1 }, primaryReasonCounts: { RELEASE_PROOF_UNAVAILABLE_OR_CONFLICTING: 1 },
+    });
+  });
+
+  it("does not diagnose unknown terminal provenance dominated by a future human decision", () => {
+    expect(assessFutureAutomaticResolution(futureInput([futureIncident({
+      decisionAt: now, decisionActorId: "private-actor", terminalEvents: [futureTerminalEvent({ runtimeVersion: null })],
+    })]))).toMatchObject({ summary: { nonAutomaticCount: 1, unknownCount: 0, status: "FAIL" }, primaryReasonCounts: {} });
+  });
+
+  it.each([
+    ["AUTOMATED_FINAL_UNAVAILABLE", { audit: { cycle: 1 } }],
+    ["AUTOMATIC_SOURCE_UNPROVEN", { audit: { cycle: 1, automatedFinal: true }, source: "UNRECOGNIZED_SOURCE" }],
+    ["RELEASE_PROOF_UNAVAILABLE_OR_CONFLICTING", { audit: { cycle: 1, automatedFinal: true }, deploymentSha: null }],
+  ] as const)("labels one scoped rolling ambiguous endpoint with %s", (reason, changes) => {
+    const events = [endpointEvent({ id: "private-event", incidentId: "private-incident", eventType: "RECOVERED", ...changes })];
+    const result = assessRollingHumanReview(events);
+    expect(result.summary).toEqual(summarizeRollingHumanReview(events));
+    expect(result.summary).toMatchObject({ endpointCount: 1, ambiguousEndpointCount: 1, ratePercent: null, targetPercent: 5, status: "UNKNOWN" });
+    expect(result.primaryReasonCounts).toEqual({ [reason]: 1 });
+    expect(JSON.stringify(result)).not.toContain("private-");
+  });
+
+  it("selects one deterministic provenance reason per key, independent of unknown event order", () => {
+    const events = [
+      endpointEvent({ id: "release-missing", incidentId: "private-incident", eventType: "RECOVERED", audit: { cycle: 1, automatedFinal: true }, runtimeVersion: null }),
+      endpointEvent({ id: "flag-missing", incidentId: "private-incident", eventType: "RECOVERED", audit: { cycle: 1 } }),
+    ];
+    for (const ordered of [events, [...events].reverse()]) {
+      expect(assessRollingHumanReview(ordered)).toMatchObject({
+        summary: { endpointCount: 1, ambiguousEndpointCount: 1 }, primaryReasonCounts: { AUTOMATED_FINAL_UNAVAILABLE: 1 },
+      });
+    }
+    events.push(endpointEvent({ id: "human", incidentId: "private-incident", eventType: "HUMAN_DECISION", audit: { cycle: 1 }, countsAsEndpoint: false }));
+    expect(assessRollingHumanReview(events)).toMatchObject({
+      summary: { endpointCount: 1, humanReviewCount: 1, ambiguousEndpointCount: 0, ratePercent: 100, status: "FAIL" }, primaryReasonCounts: {},
+    });
+  });
+
+  it("coarsens in-window unscoped history to one legacy reason even with scoped human evidence", () => {
+    const result = assessRollingHumanReview([
+      endpointEvent({ id: "unscoped", incidentId: "private-incident", eventType: "RECOVERED" }),
+      endpointEvent({ id: "scoped-human", incidentId: "private-incident", eventType: "HUMAN_DECISION", audit: { cycle: 2 } }),
+      endpointEvent({ id: "scoped-auto", incidentId: "private-incident", eventType: "RECOVERED", audit: { cycle: 3, automatedFinal: true } }),
+    ]);
+    expect(result).toMatchObject({
+      summary: { endpointCount: 1, humanReviewCount: 1, ambiguousEndpointCount: 1, ratePercent: null },
+      primaryReasonCounts: { IN_WINDOW_CYCLE_UNSCOPED: 1 },
+    });
+  });
+
+  it("prioritizes older unscoped evidence for every actual scoped ambiguity, including HUMAN", () => {
+    const result = assessRollingHumanReview([
+      endpointEvent({ id: "old-unscoped", incidentId: "private-incident", eventType: "HUMAN_REVIEW_REQUESTED", countsAsEndpoint: false }),
+      endpointEvent({ id: "scoped-human", incidentId: "private-incident", eventType: "HUMAN_DECISION", audit: { cycle: 2 } }),
+      endpointEvent({ id: "scoped-unknown", incidentId: "private-incident", eventType: "RECOVERED", audit: { cycle: 3 } }),
+    ]);
+    expect(result).toMatchObject({
+      summary: { endpointCount: 2, humanReviewCount: 1, ambiguousEndpointCount: 2, ratePercent: null },
+      primaryReasonCounts: { OLDER_HISTORY_CYCLE_UNSCOPED: 2 },
+    });
+    expect(reasonTotal(result.primaryReasonCounts)).toBe(result.summary.ambiguousEndpointCount);
+  });
+
+  it("has no reasons for empty, excluded, nonterminal or human-resolved evidence", () => {
+    expect(assessFutureAutomaticResolution(futureInput([]))).toMatchObject({ summary: { status: "NO_DATA", ratePercent: null }, primaryReasonCounts: {} });
+    expect(assessRollingHumanReview([
+      endpointEvent({ id: "nonterminal", incidentId: "private-incident", eventType: "STATE_CHANGED", toState: "AUTO_INVESTIGATING" }),
+      endpointEvent({ id: "unidentified", incidentId: null, eventType: "RECOVERED" }),
+    ])).toMatchObject({ summary: { status: "NO_DATA", ratePercent: null }, primaryReasonCounts: {} });
+  });
+});
+
+describe("transaction-bound native acceptance loaders", () => {
+  const since = new Date("2026-08-20T12:00:00.000Z");
+  const until = new Date("2026-08-21T12:00:00.000Z");
+
+  it("preserves older endpoint and human history from the injected read client", async () => {
+    const earlier = endpointEvent({ id: "older-event", incidentId: "private-incident", eventType: "HUMAN_REVIEW_REQUESTED",
+      occurredAt: new Date("2026-08-19T12:00:00.000Z"), countsAsEndpoint: false });
+    const current = endpointEvent({ id: "current-event", incidentId: "private-incident", eventType: "RECOVERED",
+      audit: { cycle: 1, automatedFinal: true } });
+    const findMany = vi.fn().mockResolvedValueOnce([{ incidentId: "private-incident" }, { incidentId: "private-incident" }])
+      .mockResolvedValueOnce([earlier, current]);
+    const database = { courseMonitoringEvent: { findMany } } as unknown as NonNullable<Parameters<typeof loadRollingEndpointEventsForAcceptance>[1]>;
+    const events = await loadRollingEndpointEventsForAcceptance({ since, until }, database);
+    expect(findMany).toHaveBeenCalledTimes(2);
+    expect(findMany.mock.calls[0][0].where).toEqual({
+      incidentId: { not: null }, occurredAt: { gte: since, lte: until },
+      eventType: { in: ["HUMAN_REVIEW_REQUESTED", "HUMAN_DECISION", "RECOVERED", "STATE_CHANGED"] },
+    });
+    expect(findMany.mock.calls[1][0].where).toEqual({
+      incidentId: { in: ["private-incident"] }, occurredAt: { lte: until },
+      eventType: { in: ["HUMAN_REVIEW_REQUESTED", "HUMAN_DECISION", "RECOVERED", "STATE_CHANGED"] },
+    });
+    expect(events.map(event => event.countsAsEndpoint)).toEqual([false, true]);
+    expect(assessRollingHumanReview(events)).toMatchObject({
+      summary: { ambiguousEndpointCount: 1, status: "UNKNOWN" }, primaryReasonCounts: { OLDER_HISTORY_CYCLE_UNSCOPED: 1 },
+    });
+  });
+
+  it("avoids a full-history read when the native endpoint seed is empty", async () => {
+    const findMany = vi.fn().mockResolvedValue([]);
+    const database = { courseMonitoringEvent: { findMany } } as unknown as NonNullable<Parameters<typeof loadRollingEndpointEventsForAcceptance>[1]>;
+    expect(await loadRollingEndpointEventsForAcceptance({ since, until }, database)).toEqual([]);
+    expect(findMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads audit and implementation evidence through their injected clients", async () => {
+    const audit = { nativeAudit: "private-audit" };
+    const auditRead = vi.fn().mockResolvedValue({ audit });
+    const batch = implementationBatch();
+    const batchRead = vi.fn().mockResolvedValue([batch]);
+    expect(await loadCampaignAuditForAcceptance("private-run", { automationRun: { findUnique: auditRead } } as unknown as NonNullable<Parameters<typeof loadCampaignAuditForAcceptance>[1]>)).toBe(audit);
+    expect(auditRead).toHaveBeenCalledExactlyOnceWith({ where: { id: "private-run" }, select: { audit: true } });
+    expect(await loadImplementationBatchesForAcceptance({ capturedAt: since, until }, { courseSupportBatch: { findMany: batchRead } } as unknown as NonNullable<Parameters<typeof loadImplementationBatchesForAcceptance>[1]>)).toEqual([batch]);
+    expect(batchRead).toHaveBeenCalledExactlyOnceWith({
+      where: { deployedAt: { gte: since, lte: until } },
+      select: { providerFamilyKey: true, failureFingerprint: true, baseSha: true, releaseSha: true, deployedAt: true, summary: true },
+    });
+  });
+
+  it("binds every factory dependency and native inspection context to one client", async () => {
+    const database = {
+      automationRun: { findUnique: vi.fn().mockResolvedValue({ audit: "native-audit" }) },
+      courseMonitoringEvent: { findMany: vi.fn().mockResolvedValue([]) },
+      courseSupportIncident: { findMany: vi.fn().mockResolvedValue([]) },
+      courseSupportBatch: { findMany: vi.fn().mockResolvedValue([]) },
+    } as unknown as NonNullable<Parameters<typeof createOperatorCourseSupportCampaignDependencies>[0]>;
+    const context = { now: until, admissionRuntimeVersion: "a".repeat(40) };
+    const inspection = vi.spyOn(nativeCampaign, "inspectLatestParkedCourseCampaign").mockResolvedValue(null);
+    try {
+      const dependencies = createOperatorCourseSupportCampaignDependencies(database, context);
+      expect(await dependencies.inspectLatestCampaign()).toBeNull();
+      expect(inspection).toHaveBeenCalledExactlyOnceWith(database, context);
+      expect(await dependencies.loadCampaignAudit("private-run")).toBe("native-audit");
+      expect(await dependencies.loadRollingEndpointEvents({ since, until })).toEqual([]);
+      expect(await dependencies.loadFutureUnfamiliarIncidents({ since, until })).toEqual([]);
+      expect(await dependencies.loadImplementationBatches({ capturedAt: since, until })).toEqual([]);
+      expect(database.automationRun.findUnique).toHaveBeenCalledTimes(1);
+      expect(database.courseMonitoringEvent.findMany).toHaveBeenCalledTimes(1);
+      expect(database.courseSupportIncident.findMany).toHaveBeenCalledTimes(3);
+      expect(database.courseSupportBatch.findMany).toHaveBeenCalledTimes(1);
+    } finally { inspection.mockRestore(); }
   });
 });
 

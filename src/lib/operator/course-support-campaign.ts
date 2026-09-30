@@ -1,6 +1,7 @@
 import {
   inspectLatestParkedCourseCampaign,
-  parseParkedCourseCampaignAudit
+  parseParkedCourseCampaignAudit,
+  type ParkedCourseCampaignDatabase,
 } from "@/lib/automation/course-support-campaign";
 import { prisma } from "@/lib/prisma";
 
@@ -14,7 +15,7 @@ export type CampaignInspection = NonNullable<
   Awaited<ReturnType<typeof inspectLatestParkedCourseCampaign>>
 >;
 
-type RollingEndpointEvent = {
+export type RollingEndpointEvent = {
   incidentId: string | null;
   eventType: string;
   toState: string | null;
@@ -68,6 +69,23 @@ type ImplementationBatch = {
   deployedAt: Date | null;
   summary: unknown;
 };
+
+export const COURSE_SUPPORT_ACCEPTANCE_PRIMARY_REASONS = [
+  "CONFIRMATION_UNAVAILABLE",
+  "CYCLE_UNAVAILABLE",
+  "CONFIRMATION_CONFLICT",
+  "TIMELINE_INVALID",
+  "EXACT_TERMINAL_UNAVAILABLE",
+  "AUTOMATED_FINAL_UNAVAILABLE",
+  "AUTOMATIC_SOURCE_UNPROVEN",
+  "RELEASE_PROOF_UNAVAILABLE_OR_CONFLICTING",
+  "IN_WINDOW_CYCLE_UNSCOPED",
+  "OLDER_HISTORY_CYCLE_UNSCOPED",
+] as const;
+export type CourseSupportAcceptancePrimaryReason =
+  (typeof COURSE_SUPPORT_ACCEPTANCE_PRIMARY_REASONS)[number];
+export type CourseSupportAcceptancePrimaryReasonCounts =
+  Partial<Record<CourseSupportAcceptancePrimaryReason, number>>;
 
 export type OperatorRollingHumanReview = {
   windowDays: 30;
@@ -138,7 +156,7 @@ export type OperatorCourseSupportCampaign = {
   repeatImplementations: OperatorRepeatImplementations;
 };
 
-type OperatorCourseSupportCampaignDependencies = {
+export type OperatorCourseSupportCampaignDependencies = {
   inspectLatestCampaign: () => Promise<CampaignInspection | null>;
   loadCampaignAudit: (runId: string) => Promise<unknown | null>;
   loadRollingEndpointEvents: (input: {
@@ -154,6 +172,11 @@ type OperatorCourseSupportCampaignDependencies = {
     until: Date;
   }) => Promise<ImplementationBatch[]>;
 };
+
+export type OperatorCourseSupportCampaignReadClient =
+  ParkedCourseCampaignDatabase & Pick<typeof prisma, "courseSupportBatch">;
+export type OperatorCourseSupportCampaignInspectionContext =
+  NonNullable<Parameters<typeof inspectLatestParkedCourseCampaign>[1]>;
 
 export async function loadOperatorCourseSupportCampaign(
   input: {
@@ -229,29 +252,41 @@ export async function loadOperatorCourseSupportCampaign(
 export function summarizeRollingHumanReview(
   events: readonly RollingEndpointEvent[]
 ): OperatorRollingHumanReview {
+  return assessRollingHumanReview(events).summary;
+}
+
+export function assessRollingHumanReview(
+  events: readonly RollingEndpointEvent[]
+): {
+  summary: OperatorRollingHumanReview;
+  primaryReasonCounts: CourseSupportAcceptancePrimaryReasonCounts;
+} {
   const endpointsByIncident = new Map<
     string,
     Array<{
       countsAsEndpoint: boolean;
       cycle: number | null;
       kind: "AUTOMATIC" | "HUMAN" | "UNKNOWN";
+      primaryReason: CourseSupportAcceptancePrimaryReason | null;
     }>
   >();
   for (const event of events) {
     if (!event.incidentId) continue;
-    const kind = getEndpointKind(event);
-    if (!kind) continue;
+    const assessment = assessEndpointKind(event);
+    if (!assessment) continue;
     const incidentEndpoints = endpointsByIncident.get(event.incidentId) ?? [];
     incidentEndpoints.push({
       countsAsEndpoint: event.countsAsEndpoint,
       cycle: readPositiveCycle(event.audit),
-      kind
+      kind: assessment.kind,
+      primaryReason: assessment.primaryReason,
     });
     endpointsByIncident.set(event.incidentId, incidentEndpoints);
   }
 
   const endpoints = new Map<string, "AUTOMATIC" | "HUMAN" | "UNKNOWN">();
   const ambiguousEndpointKeys = new Set<string>();
+  const primaryReasonByEndpointKey = new Map<string, CourseSupportAcceptancePrimaryReason>();
   for (const [incidentId, incidentEndpoints] of endpointsByIncident) {
     const inWindowEndpoints = incidentEndpoints.filter(
       (endpoint) => endpoint.countsAsEndpoint
@@ -260,6 +295,7 @@ export function summarizeRollingHumanReview(
     if (inWindowEndpoints.some((endpoint) => endpoint.cycle === null)) {
       const key = `${incidentId}\u0000legacy`;
       ambiguousEndpointKeys.add(key);
+      primaryReasonByEndpointKey.set(key, "IN_WINDOW_CYCLE_UNSCOPED");
       endpoints.set(
         key,
         incidentEndpoints.some((endpoint) => endpoint.kind === "HUMAN") ? "HUMAN" : "UNKNOWN"
@@ -274,7 +310,18 @@ export function summarizeRollingHumanReview(
         (endpoint) => endpoint.cycle === cycle
       );
       const key = `${incidentId}\u0000cycle:${cycle}`;
-      if (hasUnscopedCycleEvidence) ambiguousEndpointKeys.add(key);
+      if (hasUnscopedCycleEvidence) {
+        ambiguousEndpointKeys.add(key);
+        primaryReasonByEndpointKey.set(key, "OLDER_HISTORY_CYCLE_UNSCOPED");
+      } else if (!cycleEndpoints.some((endpoint) => endpoint.kind === "HUMAN")) {
+        // Unknown event provenance contributes a reason only when HUMAN has
+        // not already resolved this scoped endpoint. Unscoped evidence above
+        // retains the native ambiguity even for a HUMAN endpoint.
+        const reason = COURSE_SUPPORT_ACCEPTANCE_PRIMARY_REASONS.find((reason) =>
+          cycleEndpoints.some((endpoint) => endpoint.kind === "UNKNOWN" && endpoint.primaryReason === reason),
+        );
+        if (reason) primaryReasonByEndpointKey.set(key, reason);
+      }
       endpoints.set(
         key,
         cycleEndpoints.some((endpoint) => endpoint.kind === "HUMAN")
@@ -296,44 +343,66 @@ export function summarizeRollingHumanReview(
     if (endpoint === "UNKNOWN") ambiguousEndpointKeys.add(key);
   }
   const ambiguousEndpointCount = ambiguousEndpointKeys.size;
+  const primaryReasonCounts: CourseSupportAcceptancePrimaryReasonCounts = {};
+  for (const key of ambiguousEndpointKeys) {
+    const reason = primaryReasonByEndpointKey.get(key);
+    if (reason) incrementPrimaryReason(primaryReasonCounts, reason);
+  }
   if (endpointCount === 0) {
     return {
-      windowDays: ROLLING_HUMAN_REVIEW_DAYS,
-      humanReviewCount: 0,
-      endpointCount: 0,
-      ratePercent: null,
-      targetPercent: HUMAN_REVIEW_TARGET_PERCENT,
-      ambiguousEndpointCount: 0,
-      status: "NO_DATA"
+      summary: {
+        windowDays: ROLLING_HUMAN_REVIEW_DAYS,
+        humanReviewCount: 0,
+        endpointCount: 0,
+        ratePercent: null,
+        targetPercent: HUMAN_REVIEW_TARGET_PERCENT,
+        ambiguousEndpointCount: 0,
+        status: "NO_DATA"
+      },
+      primaryReasonCounts,
     };
   }
 
   const exactRatePercent = (humanReviewCount / endpointCount) * 100;
   return {
-    windowDays: ROLLING_HUMAN_REVIEW_DAYS,
-    humanReviewCount,
-    endpointCount,
-    ratePercent:
-      ambiguousEndpointCount > 0 ? null : Math.round(exactRatePercent * 10) / 10,
-    targetPercent: HUMAN_REVIEW_TARGET_PERCENT,
-    ambiguousEndpointCount,
-    status:
-      ambiguousEndpointCount > 0
-        ? "UNKNOWN"
-        : exactRatePercent <= HUMAN_REVIEW_TARGET_PERCENT
-          ? "PASS"
-          : "FAIL"
+    summary: {
+      windowDays: ROLLING_HUMAN_REVIEW_DAYS,
+      humanReviewCount,
+      endpointCount,
+      ratePercent:
+        ambiguousEndpointCount > 0 ? null : Math.round(exactRatePercent * 10) / 10,
+      targetPercent: HUMAN_REVIEW_TARGET_PERCENT,
+      ambiguousEndpointCount,
+      status:
+        ambiguousEndpointCount > 0
+          ? "UNKNOWN"
+          : exactRatePercent <= HUMAN_REVIEW_TARGET_PERCENT
+            ? "PASS"
+            : "FAIL"
+    },
+    primaryReasonCounts,
   };
 }
 
-export function summarizeFutureAutomaticResolution(input: {
+export type FutureAutomaticResolutionInput = {
   campaignCapturedAt: Date;
   campaignRunId: string;
   campaignMembershipDigest: string;
   campaignIncidentCycles: readonly { incidentId: string; cycle: number }[];
   incidents: readonly FutureUnfamiliarIncident[];
   now: Date;
-}): OperatorFutureAutomaticResolution {
+};
+
+export function summarizeFutureAutomaticResolution(
+  input: FutureAutomaticResolutionInput,
+): OperatorFutureAutomaticResolution {
+  return assessFutureAutomaticResolution(input).summary;
+}
+
+export function assessFutureAutomaticResolution(input: FutureAutomaticResolutionInput): {
+  summary: OperatorFutureAutomaticResolution;
+  primaryReasonCounts: CourseSupportAcceptancePrimaryReasonCounts;
+} {
   const windowStart = new Date(
     Math.max(
       input.campaignCapturedAt.getTime(),
@@ -431,15 +500,18 @@ export function summarizeFutureAutomaticResolution(input: {
 
   if (candidates.size === 0) {
     return {
-      windowDays: FUTURE_UNFAMILIAR_COURSE_WINDOW_DAYS,
-      eligibleCount: 0,
-      automaticCount: 0,
-      nonAutomaticCount: 0,
-      pendingCount: 0,
-      unknownCount: 0,
-      ratePercent: null,
-      targetPercent: AUTOMATIC_RESOLUTION_TARGET_PERCENT,
-      status: "NO_DATA"
+      summary: {
+        windowDays: FUTURE_UNFAMILIAR_COURSE_WINDOW_DAYS,
+        eligibleCount: 0,
+        automaticCount: 0,
+        nonAutomaticCount: 0,
+        pendingCount: 0,
+        unknownCount: 0,
+        ratePercent: null,
+        targetPercent: AUTOMATIC_RESOLUTION_TARGET_PERCENT,
+        status: "NO_DATA"
+      },
+      primaryReasonCounts: {},
     };
   }
 
@@ -449,8 +521,11 @@ export function summarizeFutureAutomaticResolution(input: {
     PENDING: 0,
     UNKNOWN: 0
   };
+  const primaryReasonCounts: CourseSupportAcceptancePrimaryReasonCounts = {};
   for (const candidate of candidates.values()) {
-    counts[classifyFutureUnfamiliarCycle(candidate, input.now)] += 1;
+    const assessment = classifyFutureUnfamiliarCycle(candidate, input.now);
+    counts[assessment.kind] += 1;
+    if (assessment.kind === "UNKNOWN") incrementPrimaryReason(primaryReasonCounts, assessment.primaryReason);
   }
 
   const eligibleCount = candidates.size;
@@ -473,16 +548,26 @@ export function summarizeFutureAutomaticResolution(input: {
             : ("FAIL" as const);
 
   return {
-    windowDays: FUTURE_UNFAMILIAR_COURSE_WINDOW_DAYS,
-    eligibleCount,
-    automaticCount: counts.AUTOMATIC,
-    nonAutomaticCount: counts.NON_AUTOMATIC,
-    pendingCount: counts.PENDING,
-    unknownCount: counts.UNKNOWN,
-    ratePercent,
-    targetPercent: AUTOMATIC_RESOLUTION_TARGET_PERCENT,
-    status
+    summary: {
+      windowDays: FUTURE_UNFAMILIAR_COURSE_WINDOW_DAYS,
+      eligibleCount,
+      automaticCount: counts.AUTOMATIC,
+      nonAutomaticCount: counts.NON_AUTOMATIC,
+      pendingCount: counts.PENDING,
+      unknownCount: counts.UNKNOWN,
+      ratePercent,
+      targetPercent: AUTOMATIC_RESOLUTION_TARGET_PERCENT,
+      status
+    },
+    primaryReasonCounts,
   };
+}
+
+function incrementPrimaryReason(
+  counts: CourseSupportAcceptancePrimaryReasonCounts,
+  reason: CourseSupportAcceptancePrimaryReason,
+) {
+  counts[reason] = (counts[reason] ?? 0) + 1;
 }
 
 function futureIncidentCycleKey(incidentId: string, cycle: number | "unknown") {
@@ -546,17 +631,21 @@ function classifyFutureUnfamiliarCycle(
     incidentId: string;
   },
   now: Date
-): "AUTOMATIC" | "NON_AUTOMATIC" | "PENDING" | "UNKNOWN" {
-  if (
-    !isValidDate(candidate.confirmedAt) ||
-    !isPositiveInteger(candidate.cycle) ||
-    candidate.confirmedAtConflict
-  ) {
-    return "UNKNOWN";
+):
+  | { kind: "AUTOMATIC" | "NON_AUTOMATIC" | "PENDING"; primaryReason: null }
+  | { kind: "UNKNOWN"; primaryReason: CourseSupportAcceptancePrimaryReason } {
+  if (!isValidDate(candidate.confirmedAt)) {
+    return { kind: "UNKNOWN", primaryReason: "CONFIRMATION_UNAVAILABLE" };
+  }
+  if (!isPositiveInteger(candidate.cycle)) {
+    return { kind: "UNKNOWN", primaryReason: "CYCLE_UNAVAILABLE" };
+  }
+  if (candidate.confirmedAtConflict) {
+    return { kind: "UNKNOWN", primaryReason: "CONFIRMATION_CONFLICT" };
   }
   const confirmedAt = candidate.confirmedAt;
   const elapsedMs = now.getTime() - confirmedAt.getTime();
-  if (elapsedMs < 0) return "UNKNOWN";
+  if (elapsedMs < 0) return { kind: "UNKNOWN", primaryReason: "TIMELINE_INVALID" };
 
   const incident = candidate.currentIncident;
   const humanFinal = Boolean(
@@ -565,7 +654,7 @@ function classifyFutureUnfamiliarCycle(
       incident?.resolution === "HUMAN_VERIFIED_TECHNICAL_LIMITATION" ||
       candidate.events.some((event) => isHumanCycleEvent(event))
   );
-  if (humanFinal) return "NON_AUTOMATIC";
+  if (humanFinal) return { kind: "NON_AUTOMATIC", primaryReason: null };
 
   const exactCycleEvents = candidate.events
     .filter(
@@ -583,32 +672,33 @@ function classifyFutureUnfamiliarCycle(
   const terminalEvent = exactCycleEvents[0];
   if (!terminalEvent) {
     if (incident && incident.status !== "RESOLVED") {
-      return elapsedMs >= CAMPAIGN_RESOLUTION_DEADLINE_MS ? "NON_AUTOMATIC" : "PENDING";
+      return { kind: elapsedMs >= CAMPAIGN_RESOLUTION_DEADLINE_MS ? "NON_AUTOMATIC" : "PENDING", primaryReason: null };
     }
-    return "UNKNOWN";
+    return { kind: "UNKNOWN", primaryReason: "EXACT_TERMINAL_UNAVAILABLE" };
   }
 
   const automatedFinal = asRecord(terminalEvent.audit).automatedFinal;
-  if (typeof automatedFinal !== "boolean") return "UNKNOWN";
+  if (typeof automatedFinal !== "boolean") return { kind: "UNKNOWN", primaryReason: "AUTOMATED_FINAL_UNAVAILABLE" };
   if (
     automatedFinal === false ||
     terminalEvent.operatorActorId ||
     isOperatorMonitoringSource(terminalEvent.source)
   ) {
-    return "NON_AUTOMATIC";
+    return { kind: "NON_AUTOMATIC", primaryReason: null };
   }
-  if (!isAutomaticMonitoringSource(terminalEvent.source)) return "UNKNOWN";
+  if (!isAutomaticMonitoringSource(terminalEvent.source)) return { kind: "UNKNOWN", primaryReason: "AUTOMATIC_SOURCE_UNPROVEN" };
   if (
     !isDeploymentSha(terminalEvent.runtimeVersion) ||
     !isDeploymentSha(terminalEvent.deploymentSha) ||
     terminalEvent.runtimeVersion.toLowerCase() !== terminalEvent.deploymentSha.toLowerCase()
   ) {
-    return "UNKNOWN";
+    return { kind: "UNKNOWN", primaryReason: "RELEASE_PROOF_UNAVAILABLE_OR_CONFLICTING" };
   }
-  return terminalEvent.occurredAt.getTime() - confirmedAt.getTime() <=
-    CAMPAIGN_RESOLUTION_DEADLINE_MS
-    ? "AUTOMATIC"
-    : "NON_AUTOMATIC";
+  return {
+    kind: terminalEvent.occurredAt.getTime() - confirmedAt.getTime() <=
+      CAMPAIGN_RESOLUTION_DEADLINE_MS ? "AUTOMATIC" : "NON_AUTOMATIC",
+    primaryReason: null,
+  };
 }
 
 function isFutureWindowDate(
@@ -836,7 +926,10 @@ function getAutomaticWithin24HoursStatus(input: {
   return "IN_PROGRESS" as const;
 }
 
-function getEndpointKind(event: RollingEndpointEvent) {
+function assessEndpointKind(event: RollingEndpointEvent):
+  | { kind: "AUTOMATIC" | "HUMAN"; primaryReason: null }
+  | { kind: "UNKNOWN"; primaryReason: CourseSupportAcceptancePrimaryReason }
+  | null {
   const audit = asRecord(event.audit);
   if (
     event.eventType === "STATE_CHANGED" &&
@@ -854,20 +947,23 @@ function getEndpointKind(event: RollingEndpointEvent) {
     event.operatorActorId ||
     (event.source && isOperatorMonitoringSource(event.source))
   ) {
-    return "HUMAN" as const;
+    return { kind: "HUMAN", primaryReason: null };
   }
   if (event.eventType !== "RECOVERED" && event.eventType !== "STATE_CHANGED") return null;
-  if (audit.automatedFinal !== true || !isAutomaticMonitoringSource(event.source)) {
-    return "UNKNOWN" as const;
+  if (audit.automatedFinal !== true) {
+    return { kind: "UNKNOWN", primaryReason: "AUTOMATED_FINAL_UNAVAILABLE" };
+  }
+  if (!isAutomaticMonitoringSource(event.source)) {
+    return { kind: "UNKNOWN", primaryReason: "AUTOMATIC_SOURCE_UNPROVEN" };
   }
   if (
     !isDeploymentSha(event.runtimeVersion) ||
     !isDeploymentSha(event.deploymentSha) ||
     event.runtimeVersion.toLowerCase() !== event.deploymentSha.toLowerCase()
   ) {
-    return "UNKNOWN" as const;
+    return { kind: "UNKNOWN", primaryReason: "RELEASE_PROOF_UNAVAILABLE_OR_CONFLICTING" };
   }
-  return "AUTOMATIC" as const;
+  return { kind: "AUTOMATIC", primaryReason: null };
 }
 
 function readPositiveCycle(value: unknown) {
@@ -1062,17 +1158,22 @@ export async function loadFutureUnfamiliarIncidentsForAcceptance(
   }));
 }
 
-const defaultDependencies: OperatorCourseSupportCampaignDependencies = {
-  inspectLatestCampaign: inspectLatestParkedCourseCampaign,
-  loadCampaignAudit: async (runId) => {
-    const run = await prisma.automationRun.findUnique({
+export async function loadCampaignAuditForAcceptance(
+  runId: string,
+  database: Pick<typeof prisma, "automationRun"> = prisma,
+) {
+    const run = await database.automationRun.findUnique({
       where: { id: runId },
       select: { audit: true }
     });
     return run?.audit ?? null;
-  },
-  loadRollingEndpointEvents: async ({ since, until }) => {
-    const endpointEvents = await prisma.courseMonitoringEvent.findMany({
+}
+
+export async function loadRollingEndpointEventsForAcceptance(
+  { since, until }: { since: Date; until: Date },
+  database: Pick<typeof prisma, "courseMonitoringEvent"> = prisma,
+) {
+    const endpointEvents = await database.courseMonitoringEvent.findMany({
       where: {
         incidentId: { not: null },
         occurredAt: { gte: since, lte: until },
@@ -1092,7 +1193,7 @@ const defaultDependencies: OperatorCourseSupportCampaignDependencies = {
       )
     ];
     if (incidentIds.length === 0) return [];
-    const fullCycleEvidence = await prisma.courseMonitoringEvent.findMany({
+    const fullCycleEvidence = await database.courseMonitoringEvent.findMany({
       where: {
         incidentId: { in: incidentIds },
         occurredAt: { lte: until },
@@ -1116,10 +1217,13 @@ const defaultDependencies: OperatorCourseSupportCampaignDependencies = {
       ...event,
       countsAsEndpoint: event.occurredAt.getTime() >= since.getTime()
     }));
-  },
-  loadFutureUnfamiliarIncidents: loadFutureUnfamiliarIncidentsForAcceptance,
-  loadImplementationBatches: ({ capturedAt, until }) =>
-    prisma.courseSupportBatch.findMany({
+}
+
+export function loadImplementationBatchesForAcceptance(
+  { capturedAt, until }: { capturedAt: Date; until: Date },
+  database: Pick<typeof prisma, "courseSupportBatch"> = prisma,
+) {
+  return database.courseSupportBatch.findMany({
       where: {
         deployedAt: { gte: capturedAt, lte: until }
       },
@@ -1131,5 +1235,20 @@ const defaultDependencies: OperatorCourseSupportCampaignDependencies = {
         deployedAt: true,
         summary: true
       }
-    })
-};
+    });
+}
+
+export function createOperatorCourseSupportCampaignDependencies(
+  database: OperatorCourseSupportCampaignReadClient = prisma,
+  context: OperatorCourseSupportCampaignInspectionContext = {},
+): OperatorCourseSupportCampaignDependencies {
+  return {
+    inspectLatestCampaign: () => inspectLatestParkedCourseCampaign(database, context),
+    loadCampaignAudit: (runId) => loadCampaignAuditForAcceptance(runId, database),
+    loadRollingEndpointEvents: (input) => loadRollingEndpointEventsForAcceptance(input, database),
+    loadFutureUnfamiliarIncidents: (input) => loadFutureUnfamiliarIncidentsForAcceptance(input, database),
+    loadImplementationBatches: (input) => loadImplementationBatchesForAcceptance(input, database),
+  };
+}
+
+const defaultDependencies = createOperatorCourseSupportCampaignDependencies();
