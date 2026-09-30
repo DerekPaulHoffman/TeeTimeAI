@@ -45,7 +45,7 @@ export function unavailableAcceptanceReasons(input: {
   readFence?: AcceptanceReadFenceDetails | null;
 }) {
   return {
-    recordType: "course_support_acceptance_reasons" as const, schemaVersion: 2 as const,
+    recordType: "course_support_acceptance_reasons" as const, schemaVersion: 3 as const,
     sourceSha: input.sourceSha, observedAt: input.observedAt?.toISOString() ?? null,
     status: "UNAVAILABLE" as const, reason: input.reason,
     acceptanceProjection: input.acceptanceProjection ?? null,
@@ -88,7 +88,7 @@ export function buildAcceptanceReasonsReport(input: {
     return failure("COUNT_RECONCILIATION_FAILED");
   }
   const result = {
-    recordType: "course_support_acceptance_reasons" as const, schemaVersion: 2 as const,
+    recordType: "course_support_acceptance_reasons" as const, schemaVersion: 3 as const,
     sourceSha: input.sourceSha, observedAt: input.observedAt.toISOString(),
     status: "AVAILABLE" as const, reason: "COMPLETE_NATIVE_TRACE" as const,
     acceptanceProjection: input.acceptanceProjection,
