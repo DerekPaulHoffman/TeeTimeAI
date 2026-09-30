@@ -138,7 +138,7 @@ function countSelection(model: Model, value: unknown): ReadonlySet<string> {
 }
 
 function identityPlan(
-  model: Model, args: unknown, method: ReadMethod, ancestors = new Set<string>(),
+  model: Model, args: unknown, method: ReadMethod, ancestors = new Set<string>(), nestedList = false,
 ): IdentityPlan {
   if (ancestors.size >= MAX_IDENTITY_DEPTH || ancestors.has(model.name)) {
     return fail("EVIDENCE_BOUND_EXCEEDED", "IDENTITY_PLAN_DEPTH_OR_CYCLE");
@@ -202,7 +202,7 @@ function identityPlan(
       if (inverse.length !== 1 || (field.isList && inverse[0].isList)) return fail("READ_FAILED");
       const plan = identityPlan(
         related, value === true ? {} : value, field.isList ? "findMany" : "findUnique",
-        new Set([...ancestors, model.name]),
+        new Set([...ancestors, model.name]), field.isList,
       );
       select[key] = plan.query;
       relations.set(key, {
@@ -213,13 +213,17 @@ function identityPlan(
   const { select: originalSelect, include: originalInclude, ...scope } = input;
   void originalSelect;
   void originalInclude;
-  // The native query can choose any timestamp-tied row. Only the auxiliary
-  // identity read broadens in that case; an arbitrary tie-breaker would change
-  // which evidence is covered. The original evidence query is never modified.
+  // Prisma's Query strategy may fetch every matching child before applying
+  // per-parent list pagination, even with a unique-ID order. Cover that physical
+  // scope in every auxiliary nested-list read, conservatively including single
+  // parents. Query-strategy distinct can also run after hydration despite an ID
+  // order, so cover its physical scope. Pure top-level deterministic limits stay
+  // intact; timestamp-tied reads still cover all possible winners. The native
+  // query is never modified.
   const order = Array.isArray(scope.orderBy) ? scope.orderBy : [scope.orderBy];
   const orderedById = order.some((value) => value && typeof value === "object" &&
     !Array.isArray(value) && ["asc", "desc"].includes((value as Record<string, unknown>)[id.name] as string));
-  if (method !== "findUnique" && !orderedById &&
+  if (method !== "findUnique" && (nestedList || input.distinct !== undefined || !orderedById) &&
       (scope.take !== undefined || scope.distinct !== undefined || scope.skip !== undefined ||
         scope.cursor !== undefined || method === "findFirst")) {
     delete scope.take;

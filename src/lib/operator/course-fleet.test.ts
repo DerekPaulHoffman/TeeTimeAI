@@ -4,6 +4,10 @@ const prismaMocks = vi.hoisted(() => ({
   courseFindMany: vi.fn(),
   courseProbeFindMany: vi.fn(),
   coursePreferenceGroupBy: vi.fn(),
+  localReaderJobFindMany: vi.fn(),
+  courseMonitoringEventFindMany: vi.fn(),
+  transaction: vi.fn(),
+  executeRawUnsafe: vi.fn(),
 }));
 const providerCoverageMocks = vi.hoisted(() => ({
   classifyProviderCoverage: vi.fn(),
@@ -14,6 +18,9 @@ vi.mock("@/lib/prisma", () => ({
     course: { findMany: prismaMocks.courseFindMany },
     courseProbe: { findMany: prismaMocks.courseProbeFindMany },
     coursePreference: { groupBy: prismaMocks.coursePreferenceGroupBy },
+    localReaderJob: { findMany: prismaMocks.localReaderJobFindMany },
+    courseMonitoringEvent: { findMany: prismaMocks.courseMonitoringEventFindMany },
+    $transaction: prismaMocks.transaction,
   },
 }));
 vi.mock("@/lib/automation/provider-coverage", () => providerCoverageMocks);
@@ -35,12 +42,46 @@ beforeEach(() => {
   prismaMocks.courseFindMany.mockResolvedValue([courseRow()]);
   prismaMocks.courseProbeFindMany.mockResolvedValue([]);
   prismaMocks.coursePreferenceGroupBy.mockResolvedValue([]);
+  prismaMocks.localReaderJobFindMany.mockResolvedValue([]);
+  prismaMocks.courseMonitoringEventFindMany.mockResolvedValue([]);
+  prismaMocks.executeRawUnsafe.mockResolvedValue(0);
+  prismaMocks.transaction.mockImplementation(async (read: (database: unknown) => Promise<unknown>) =>
+    read({ ...countsDatabase(), $executeRawUnsafe: prismaMocks.executeRawUnsafe }),
+  );
   providerCoverageMocks.classifyProviderCoverage.mockReturnValue(
     "SUPPORTED_READY",
   );
 });
 
 describe("operator course fleet loader", () => {
+  it("opens one read-only RepeatableRead snapshot before any default counts read", async () => {
+    await loadOperatorCourseFleetCounts({ now: NOW });
+
+    expect(prismaMocks.transaction).toHaveBeenCalledExactlyOnceWith(expect.any(Function), {
+      isolationLevel: "RepeatableRead", maxWait: 5_000, timeout: 30_000,
+    });
+    expect(prismaMocks.executeRawUnsafe.mock.calls).toEqual([
+      ["SET TRANSACTION READ ONLY"], ["SET LOCAL statement_timeout = '25000ms'"],
+    ]);
+    expect(prismaMocks.executeRawUnsafe.mock.invocationCallOrder[1]).toBeLessThan(
+      prismaMocks.courseFindMany.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it.each([0, 1])("stops all default counts reads when snapshot setup command %i fails", async (index) => {
+    if (index === 1) prismaMocks.executeRawUnsafe.mockResolvedValueOnce(0);
+    prismaMocks.executeRawUnsafe.mockRejectedValueOnce(new Error("Snapshot setup failed."));
+
+    await expect(loadOperatorCourseFleetCounts({ now: NOW })).rejects.toThrow("Snapshot setup failed.");
+
+    expect(prismaMocks.executeRawUnsafe).toHaveBeenCalledTimes(index + 1);
+    expect(prismaMocks.courseFindMany).not.toHaveBeenCalled();
+    expect(prismaMocks.localReaderJobFindMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseMonitoringEventFindMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseProbeFindMany).not.toHaveBeenCalled();
+    expect(prismaMocks.coursePreferenceGroupBy).not.toHaveBeenCalled();
+  });
+
   it("reuses the complete inventory classifier and returns the existing aggregate counts", async () => {
     prismaMocks.coursePreferenceGroupBy
       .mockResolvedValueOnce([
@@ -141,8 +182,10 @@ describe("operator course fleet loader", () => {
       course: { findMany: courseFindMany, update: mutation },
       courseProbe: { findMany: courseProbeFindMany, create: mutation },
       coursePreference: { groupBy: coursePreferenceGroupBy, deleteMany: mutation },
-      $transaction: mutation,
-      $executeRawUnsafe: mutation,
+      localReaderJob: { findMany: vi.fn() },
+      courseMonitoringEvent: { findMany: vi.fn() },
+      get $transaction() { throw new Error("A supplied snapshot must not be probed."); },
+      get $executeRawUnsafe() { throw new Error("A supplied snapshot must not be reconfigured."); },
     } as unknown as OperatorCourseFleetCountsReadDatabase;
 
     const actual = await loadOperatorCourseFleetCounts({ now: NOW }, database);
@@ -156,6 +199,8 @@ describe("operator course fleet loader", () => {
     expect(prismaMocks.courseFindMany).not.toHaveBeenCalled();
     expect(prismaMocks.courseProbeFindMany).not.toHaveBeenCalled();
     expect(prismaMocks.coursePreferenceGroupBy).not.toHaveBeenCalled();
+    expect(prismaMocks.transaction).not.toHaveBeenCalled();
+    expect(prismaMocks.executeRawUnsafe).not.toHaveBeenCalled();
     expect(mutation).not.toHaveBeenCalled();
   });
 
@@ -178,6 +223,52 @@ describe("operator course fleet loader", () => {
     expect(prismaMocks.courseFindMany).not.toHaveBeenCalled();
     expect(prismaMocks.courseProbeFindMany).not.toHaveBeenCalled();
     expect(prismaMocks.coursePreferenceGroupBy).not.toHaveBeenCalled();
+  });
+
+  it("keeps metadata, complete payloads, probes and all 12 counts on a supplied snapshot without global escape", async () => {
+    providerCoverageMocks.classifyProviderCoverage.mockImplementation(realProviderCoverage.classifyProviderCoverage);
+    installSelectedFleetReads(fleetParityRows(null));
+    const supplied = {
+      course: { findMany: vi.fn(prismaMocks.courseFindMany.getMockImplementation()!) },
+      courseProbe: { findMany: vi.fn(prismaMocks.courseProbeFindMany.getMockImplementation()!) },
+      coursePreference: { groupBy: vi.fn(prismaMocks.coursePreferenceGroupBy.getMockImplementation()!) },
+      localReaderJob: { findMany: vi.fn(prismaMocks.localReaderJobFindMany.getMockImplementation()!) },
+      courseMonitoringEvent: { findMany: vi.fn(prismaMocks.courseMonitoringEventFindMany.getMockImplementation()!) },
+      get $transaction() { throw new Error("Snapshot transaction property was probed."); },
+      get $executeRawUnsafe() { throw new Error("Snapshot configuration property was probed."); },
+    };
+    const nativeReader = supplied.localReaderJob.findMany.getMockImplementation()!;
+    supplied.localReaderJob.findMany.mockImplementationOnce(async (query) =>
+      (await nativeReader(query) as Record<string, unknown>[]).map((job) => ({
+        ...job, completedAt: new Date((job.completedAt as Date).getTime()),
+        updatedAt: new Date((job.updatedAt as Date).getTime()),
+      })),
+    );
+    const nativeAudit = supplied.courseMonitoringEvent.findMany.getMockImplementation()!;
+    supplied.courseMonitoringEvent.findMany.mockImplementationOnce(async (query) =>
+      (await nativeAudit(query) as Record<string, unknown>[]).map((event) => ({
+        ...event, occurredAt: new Date((event.occurredAt as Date).getTime()),
+      })),
+    );
+    const globalEscape = () => { throw new Error("The global client must not be used."); };
+    for (const mock of Object.values(prismaMocks)) mock.mockImplementation(globalEscape);
+
+    const counts = await loadOperatorCourseFleetCounts({ now: NOW }, supplied as unknown as OperatorCourseFleetCountsReadDatabase);
+
+    expect(counts).toEqual({
+      action: 4, watch: 2, parked: 1, limitations: 1, unchecked: 1, working: 1,
+      dueNow: 1, inProgress: 1, recoveryRequired: 1, scheduledRetry: 1,
+      engineeringNeeded: 1, needsHuman: 1,
+    });
+    expect(supplied.course.findMany).toHaveBeenCalledTimes(1);
+    expect(supplied.localReaderJob.findMany).toHaveBeenCalledTimes(1);
+    expect(supplied.courseMonitoringEvent.findMany).toHaveBeenCalledTimes(1);
+    expect(supplied.courseProbe.findMany).toHaveBeenCalledTimes(1);
+    expect(supplied.coursePreference.groupBy).toHaveBeenCalledTimes(2);
+    expect(supplied.course.findMany.mock.invocationCallOrder[0]).toBeLessThan(supplied.localReaderJob.findMany.mock.invocationCallOrder[0]!);
+    expect(supplied.localReaderJob.findMany.mock.invocationCallOrder[0]).toBeLessThan(supplied.courseMonitoringEvent.findMany.mock.invocationCallOrder[0]!);
+    expect(supplied.courseMonitoringEvent.findMany.mock.invocationCallOrder[0]).toBeLessThan(supplied.courseProbe.findMany.mock.invocationCallOrder[0]!);
+    for (const mock of Object.values(prismaMocks)) expect(mock).not.toHaveBeenCalled();
   });
 
   it.each(["account", "captcha", "unsupported", "candidate", "stale", "FAILED", "null"] as const)(
@@ -217,8 +308,20 @@ describe("operator course fleet loader", () => {
       });
       expect(countsQuery.select).not.toHaveProperty("automationDiscoveries");
       expect(countsQuery.select.bookingMetadata).toBe(true);
-      expect(countsQuery.select.localReaderJobs.select.result).toBe(true);
-      expect(countsQuery.select.supportIncident.select.monitoringEvents.select.audit).toBe(true);
+      expect(countsQuery.select.localReaderJobs.select).toEqual({
+        id: true, courseId: true, status: true, completedAt: true, updatedAt: true,
+      });
+      expect(countsQuery.select.supportIncident.select.monitoringEvents.select).toEqual({
+        id: true, courseId: true, incidentId: true, eventType: true, occurredAt: true,
+      });
+      expect(prismaMocks.localReaderJobFindMany).toHaveBeenCalledExactlyOnceWith({
+        where: { id: { in: ["job-test"] } },
+        select: { id: true, courseId: true, status: true, completedAt: true, updatedAt: true, result: true },
+      });
+      expect(prismaMocks.courseMonitoringEventFindMany).toHaveBeenCalledExactlyOnceWith({
+        where: { id: { in: ["event-parked"] } },
+        select: { id: true, courseId: true, incidentId: true, eventType: true, occurredAt: true, audit: true },
+      });
       const human = full.courses.find((course) => course.id === "human")!;
       if (["stale", "FAILED", "null"].includes(kind)) {
         expect(human.discoveryProviderLabel).toBeNull();
@@ -277,8 +380,10 @@ describe("operator course fleet loader", () => {
     // attention; the unproven parking endpoint also remains a human handoff.
     expect(counts).toMatchObject({ action: 6, parked: 0, unchecked: 1, working: 0, needsHuman: 3 });
     const query = prismaMocks.courseFindMany.mock.calls[1]![0];
-    expect(query.select.localReaderJobs.select.result).toBe(true);
-    expect(query.select.supportIncident.select.monitoringEvents.select.audit).toBe(true);
+    expect(query.select.localReaderJobs.select).not.toHaveProperty("result");
+    expect(query.select.supportIncident.select.monitoringEvents.select).not.toHaveProperty("audit");
+    expect(prismaMocks.localReaderJobFindMany.mock.calls[0]![0].select.result).toBe(true);
+    expect(prismaMocks.courseMonitoringEventFindMany.mock.calls[0]![0].select.audit).toBe(true);
   });
 
   it.each(["latest success", "latest failure", "missing", "stale success", "tied failure first", "tied success first"] as const)(
@@ -352,9 +457,292 @@ describe("operator course fleet loader", () => {
     expect(displayed.latestProbe?.message).toBe("HTTP 403 at the official booking page.");
     expect(displayed.problemSummary).toContain("returned HTTP 403");
   });
+
+  it.each(["valid first", "invalid first", "newer invalid"] as const)(
+    "preserves the reader winner without older-valid fallback for %s", async (kind) => {
+      providerCoverageMocks.classifyProviderCoverage.mockImplementation(realProviderCoverage.classifyProviderCoverage);
+      const rows = fleetParityRows(null);
+      const working = rows.find((row) => row.id === "working")!;
+      const valid = (working.localReaderJobs as Record<string, unknown>[])[0]!;
+      const invalid = {
+        ...valid, id: "job-invalid", result: { ...(valid.result as object), unexpected: true },
+        completedAt: new Date((valid.completedAt as Date).getTime() + (kind === "newer invalid" ? 1 : 0)),
+      };
+      working.localReaderJobs = kind === "valid first" ? [valid, invalid] : [invalid, valid];
+      installSelectedFleetReads(rows);
+
+      const full = await loadOperatorCourseFleet({ now: NOW });
+      const counts = await loadOperatorCourseFleetCounts({ now: NOW });
+
+      expect(counts).toEqual(full.counts);
+      expect(counts.working).toBe(kind === "valid first" ? 1 : 0);
+      expect(prismaMocks.localReaderJobFindMany.mock.calls[0]![0].where.id.in).toEqual([
+        kind === "valid first" ? "job-test" : "job-invalid",
+      ]);
+      const [fullQuery, countsQuery] = prismaMocks.courseFindMany.mock.calls.map(([query]) => query);
+      expect(countsQuery.select.localReaderJobs.where).toEqual(fullQuery.select.localReaderJobs.where);
+      expect(countsQuery.select.localReaderJobs.orderBy).toEqual({ completedAt: "desc" });
+      expect(countsQuery.select.localReaderJobs.orderBy).toEqual(fullQuery.select.localReaderJobs.orderBy);
+      expect(countsQuery.select.localReaderJobs.take).toBe(1);
+    },
+  );
+
+  it.each(["highest", "lowest"] as const)(
+    "keeps the event ID tie order and the five selected complete audits with the proof %s", async (position) => {
+      providerCoverageMocks.classifyProviderCoverage.mockImplementation(realProviderCoverage.classifyProviderCoverage);
+      const rows = fleetParityRows(null);
+      const parked = rows.find((row) => row.id === "parked")!;
+      const incident = parked.supportIncident as { monitoringEvents: Record<string, unknown>[] };
+      const event = incident.monitoringEvents[0]!;
+      incident.monitoringEvents = Array.from({ length: 6 }, (_, index) => ({
+        ...event, id: `event-${index}`, audit: index === (position === "highest" ? 5 : 0) ? event.audit : null,
+      }));
+      installSelectedFleetReads(rows);
+      const nativeAudits = prismaMocks.courseMonitoringEventFindMany.getMockImplementation()!;
+      prismaMocks.courseMonitoringEventFindMany.mockImplementationOnce(async (query) =>
+        (await nativeAudits(query)).reverse(),
+      );
+
+      const full = await loadOperatorCourseFleet({ now: NOW });
+      const counts = await loadOperatorCourseFleetCounts({ now: NOW });
+
+      expect(counts).toEqual(full.counts);
+      expect(counts.parked).toBe(position === "highest" ? 1 : 0);
+      expect(prismaMocks.courseMonitoringEventFindMany.mock.calls[0]![0].where.id.in).toEqual([
+        "event-5", "event-4", "event-3", "event-2", "event-1",
+      ]);
+      const [fullQuery, countsQuery] = prismaMocks.courseFindMany.mock.calls.map(([query]) => query);
+      expect(countsQuery.select.supportIncident.select.monitoringEvents.orderBy).toEqual([
+        { occurredAt: "desc" }, { id: "desc" },
+      ]);
+      expect(countsQuery.select.supportIncident.select.monitoringEvents.orderBy).toEqual(
+        fullQuery.select.supportIncident.select.monitoringEvents.orderBy,
+      );
+    },
+  );
+
+  it("passes null full payloads to the native classifiers without inventing evidence", async () => {
+    providerCoverageMocks.classifyProviderCoverage.mockImplementation(realProviderCoverage.classifyProviderCoverage);
+    const rows = fleetParityRows(null);
+    (rows.find((row) => row.id === "working")!.localReaderJobs as Record<string, unknown>[])[0]!.result = null;
+    const incident = rows.find((row) => row.id === "parked")!.supportIncident as { monitoringEvents: Record<string, unknown>[] };
+    incident.monitoringEvents[0]!.audit = null;
+    installSelectedFleetReads(rows);
+
+    const full = await loadOperatorCourseFleet({ now: NOW });
+    const counts = await loadOperatorCourseFleetCounts({ now: NOW });
+
+    expect(counts).toEqual(full.counts);
+    expect(counts).toMatchObject({ working: 0, parked: 0, needsHuman: 3 });
+    expect(prismaMocks.localReaderJobFindMany).toHaveBeenCalledTimes(1);
+    expect(prismaMocks.courseMonitoringEventFindMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("hydrates only chosen payloads for counts while the full UI keeps historical result and audit scalars", async () => {
+    providerCoverageMocks.classifyProviderCoverage.mockImplementation(realProviderCoverage.classifyProviderCoverage);
+    const rows = fleetParityRows(null);
+    const working = rows.find((row) => row.id === "working")!;
+    const job = (working.localReaderJobs as Record<string, unknown>[])[0]!;
+    const incident = rows.find((row) => row.id === "parked")!.supportIncident as { monitoringEvents: Record<string, unknown>[] };
+    const event = incident.monitoringEvents[0]!;
+    const unusedPayload = { unused: "x".repeat(17 * 1024 * 1024) };
+    const unusedReaderRead = vi.fn(() => unusedPayload);
+    const unusedAuditRead = vi.fn(() => unusedPayload);
+    working.localReaderJobs = [job, ...Array.from({ length: 300 }, (_, index) => {
+      const older = { ...job, id: `old-job-${index}`, completedAt: new Date((job.completedAt as Date).getTime() - (index + 1) * 60_000) };
+      Object.defineProperty(older, "result", { enumerable: true, get: unusedReaderRead });
+      return older;
+    })];
+    incident.monitoringEvents = [
+      ...Array.from({ length: 5 }, (_, index) => ({ ...event, id: `selected-event-${index}` })),
+      ...Array.from({ length: 300 }, (_, index) => {
+        const older = { ...event, id: `old-event-${index}`, occurredAt: new Date((event.occurredAt as Date).getTime() - (index + 1) * 60_000) };
+        Object.defineProperty(older, "audit", { enumerable: true, get: unusedAuditRead });
+        return older;
+      }),
+    ];
+    installSelectedFleetReads(rows);
+
+    const counts = await loadOperatorCourseFleetCounts({ now: NOW });
+
+    expect(unusedReaderRead).not.toHaveBeenCalled();
+    expect(unusedAuditRead).not.toHaveBeenCalled();
+    expect(prismaMocks.localReaderJobFindMany.mock.calls[0]![0].where.id.in).toEqual(["job-test"]);
+    expect(prismaMocks.courseMonitoringEventFindMany.mock.calls[0]![0].where.id.in).toEqual([
+      "selected-event-4", "selected-event-3", "selected-event-2", "selected-event-1", "selected-event-0",
+    ]);
+    const full = await loadOperatorCourseFleet({ now: NOW });
+
+    expect(counts).toEqual(full.counts);
+    expect(Object.values(counts).every((count) => count > 0)).toBe(true);
+    expect(unusedReaderRead).toHaveBeenCalledTimes(300);
+    expect(unusedAuditRead).toHaveBeenCalledTimes(300);
+    expect(full.courses.find((course) => course.id === "working")!.localReaderVerifiedAt).toEqual(job.completedAt);
+  });
+
+  it.each([
+    "missing", "duplicate", "extra", "unknown ID", "wrong course", "wrong status", "changed completion",
+    "invalid completion", "null completion", "changed updatedAt", "invalid updatedAt", "missing result",
+    "undefined result", "inherited result",
+  ] as const)("rejects a %s full reader binding before any later reads", async (kind) => {
+    const rows = fleetParityRows(null);
+    installSelectedFleetReads(rows);
+    const nativeRead = prismaMocks.localReaderJobFindMany.getMockImplementation()!;
+    prismaMocks.localReaderJobFindMany.mockImplementationOnce(async (query) => {
+      const selected = await nativeRead(query) as Record<string, unknown>[];
+      const row = selected[0]!;
+      switch (kind) {
+        case "missing": return [];
+        case "duplicate": return [row, row];
+        case "extra": return [row, { ...row, id: "extra-private-job" }];
+        case "unknown ID": row.id = "unknown-private-job"; break;
+        case "wrong course": row.courseId = "other-private-course"; break;
+        case "wrong status": row.status = "FAILED"; break;
+        case "changed completion": row.completedAt = new Date((row.completedAt as Date).getTime() + 1); break;
+        case "invalid completion": row.completedAt = new Date("invalid"); break;
+        case "null completion": row.completedAt = null; break;
+        case "changed updatedAt": row.updatedAt = new Date((row.updatedAt as Date).getTime() + 1); break;
+        case "invalid updatedAt": row.updatedAt = new Date("invalid"); break;
+        case "missing result": delete row.result; break;
+        case "undefined result": row.result = undefined; break;
+        case "inherited result": {
+          const result = row.result;
+          delete row.result;
+          Object.setPrototypeOf(row, { result });
+          break;
+        }
+      }
+      return selected;
+    });
+
+    await expect(loadOperatorCourseFleetCounts({ now: NOW }, countsDatabase())).rejects.toThrow(/^READ_FAILED$/);
+
+    expect(prismaMocks.courseMonitoringEventFindMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseProbeFindMany).not.toHaveBeenCalled();
+    expect(prismaMocks.coursePreferenceGroupBy).not.toHaveBeenCalled();
+    expect(prismaMocks.transaction).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "missing", "duplicate", "extra", "unknown ID", "wrong course", "wrong incident", "wrong type",
+    "changed clock", "invalid clock", "null clock", "missing audit", "undefined audit", "inherited audit",
+  ] as const)("rejects a %s full event binding before probe or demand reads", async (kind) => {
+    const rows = fleetParityRows(null);
+    installSelectedFleetReads(rows);
+    const nativeRead = prismaMocks.courseMonitoringEventFindMany.getMockImplementation()!;
+    prismaMocks.courseMonitoringEventFindMany.mockImplementationOnce(async (query) => {
+      const selected = await nativeRead(query) as Record<string, unknown>[];
+      const row = selected[0]!;
+      switch (kind) {
+        case "missing": return [];
+        case "duplicate": return [row, row];
+        case "extra": return [row, { ...row, id: "extra-private-event" }];
+        case "unknown ID": row.id = "unknown-private-event"; break;
+        case "wrong course": row.courseId = "other-private-course"; break;
+        case "wrong incident": row.incidentId = "other-private-incident"; break;
+        case "wrong type": row.eventType = "CHECK_SUCCEEDED"; break;
+        case "changed clock": row.occurredAt = new Date((row.occurredAt as Date).getTime() + 1); break;
+        case "invalid clock": row.occurredAt = new Date("invalid"); break;
+        case "null clock": row.occurredAt = null; break;
+        case "missing audit": delete row.audit; break;
+        case "undefined audit": row.audit = undefined; break;
+        case "inherited audit": {
+          const audit = row.audit;
+          delete row.audit;
+          Object.setPrototypeOf(row, { audit });
+          break;
+        }
+      }
+      return selected;
+    });
+
+    await expect(loadOperatorCourseFleetCounts({ now: NOW }, countsDatabase())).rejects.toThrow(/^READ_FAILED$/);
+
+    expect(prismaMocks.localReaderJobFindMany).toHaveBeenCalledTimes(1);
+    expect(prismaMocks.courseProbeFindMany).not.toHaveBeenCalled();
+    expect(prismaMocks.coursePreferenceGroupBy).not.toHaveBeenCalled();
+    expect(prismaMocks.transaction).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "too many jobs", "duplicate job IDs", "job wrong parent", "job wrong status", "job missing ID", "job invalid completion", "job invalid updatedAt",
+    "too many events", "duplicate event IDs", "event wrong course", "event wrong incident", "event wrong type", "event missing ID", "event invalid clock",
+  ] as const)("rejects selected metadata with %s before full payload reads", async (kind) => {
+    const rows = fleetParityRows(null);
+    installSelectedFleetReads(rows);
+    const nativeMetadata = prismaMocks.courseFindMany.getMockImplementation()!;
+    prismaMocks.courseFindMany.mockImplementationOnce(async (query) => {
+      const selected = await nativeMetadata(query) as Record<string, unknown>[];
+      const working = selected.find((row) => row.id === "working")!;
+      const jobs = working.localReaderJobs as Record<string, unknown>[];
+      const incident = selected.find((row) => row.id === "parked")!.supportIncident as { monitoringEvents: Record<string, unknown>[] };
+      const events = incident.monitoringEvents;
+      switch (kind) {
+        case "too many jobs": jobs.push({ ...jobs[0], id: "job-extra" }); break;
+        case "duplicate job IDs": (selected[0]!.localReaderJobs as unknown[]) = [{ ...jobs[0] }]; break;
+        case "job wrong parent": jobs[0]!.courseId = "other-course"; break;
+        case "job wrong status": jobs[0]!.status = "FAILED"; break;
+        case "job missing ID": jobs[0]!.id = ""; break;
+        case "job invalid completion": jobs[0]!.completedAt = new Date("invalid"); break;
+        case "job invalid updatedAt": jobs[0]!.updatedAt = null; break;
+        case "too many events": incident.monitoringEvents = Array.from({ length: 6 }, (_, index) => ({ ...events[0], id: `event-extra-${index}` })); break;
+        case "duplicate event IDs": incident.monitoringEvents = [events[0]!, { ...events[0] }]; break;
+        case "event wrong course": events[0]!.courseId = "other-course"; break;
+        case "event wrong incident": events[0]!.incidentId = "other-incident"; break;
+        case "event wrong type": events[0]!.eventType = "CHECK_SUCCEEDED"; break;
+        case "event missing ID": events[0]!.id = ""; break;
+        case "event invalid clock": events[0]!.occurredAt = null; break;
+      }
+      return selected;
+    });
+
+    await expect(loadOperatorCourseFleetCounts({ now: NOW }, countsDatabase())).rejects.toThrow(/^READ_FAILED$/);
+
+    expect(prismaMocks.localReaderJobFindMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseMonitoringEventFindMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseProbeFindMany).not.toHaveBeenCalled();
+    expect(prismaMocks.coursePreferenceGroupBy).not.toHaveBeenCalled();
+  });
 });
 
-type FleetTestSelect = { [field: string]: boolean | { select: FleetTestSelect; take?: number } };
+type FleetTestRelation = {
+  select: FleetTestSelect;
+  take?: number;
+  where?: Record<string, unknown>;
+  orderBy?: Record<string, "asc" | "desc"> | Record<string, "asc" | "desc">[];
+};
+type FleetTestSelect = { [field: string]: boolean | FleetTestRelation };
+
+function countsDatabase(): OperatorCourseFleetCountsReadDatabase {
+  return {
+    course: { findMany: prismaMocks.courseFindMany },
+    courseProbe: { findMany: prismaMocks.courseProbeFindMany },
+    coursePreference: { groupBy: prismaMocks.coursePreferenceGroupBy },
+    localReaderJob: { findMany: prismaMocks.localReaderJobFindMany },
+    courseMonitoringEvent: { findMany: prismaMocks.courseMonitoringEventFindMany },
+  } as unknown as OperatorCourseFleetCountsReadDatabase;
+}
+
+function matchingFleetRows(rows: Record<string, unknown>[], selection: FleetTestRelation) {
+  const matching = rows.filter((row) => Object.entries(selection.where ?? {}).every(([field, filter]) =>
+    filter && typeof filter === "object" && "gte" in filter
+      ? row[field] instanceof Date && row[field].getTime() >= (filter.gte as Date).getTime()
+      : row[field] === filter,
+  ));
+  const orders = Array.isArray(selection.orderBy) ? selection.orderBy : [selection.orderBy ?? {}];
+  return matching.sort((left, right) => {
+    for (const order of orders) {
+      for (const [field, direction] of Object.entries(order)) {
+        const leftValue = left[field] instanceof Date ? left[field].getTime() : left[field];
+        const rightValue = right[field] instanceof Date ? right[field].getTime() : right[field];
+        if (leftValue === rightValue) continue;
+        const comparison = (leftValue as string | number) < (rightValue as string | number) ? -1 : 1;
+        return comparison * (direction === "desc" ? -1 : 1);
+      }
+    }
+    return 0;
+  });
+}
 
 function projectFleetRow(row: Record<string, unknown>, select: FleetTestSelect): Record<string, unknown> {
   const projected: Record<string, unknown> = {};
@@ -365,7 +753,10 @@ function projectFleetRow(row: Record<string, unknown>, select: FleetTestSelect):
       projected[field] = value === null
         ? null
         : Array.isArray(value)
-          ? value.slice(0, selection.take ?? value.length).map((child) => projectFleetRow(child, selection.select))
+          // The installed Query strategy fetches selected child scalars before
+          // reducing a bulk nested take. Keep that physical projection order.
+          ? matchingFleetRows(value, selection).map((child) => projectFleetRow(child, selection.select))
+            .slice(0, selection.take ?? value.length)
           : projectFleetRow(value as Record<string, unknown>, selection.select);
     }
   }
@@ -379,6 +770,17 @@ function installSelectedFleetReads(rows: Record<string, unknown>[], input: {
   prismaMocks.courseFindMany.mockImplementation(async (query: { select: FleetTestSelect }) =>
     rows.map((row) => projectFleetRow(row, query.select)),
   );
+  const installPayloadRead = (
+    mock: typeof prismaMocks.localReaderJobFindMany,
+    source: () => Record<string, unknown>[],
+  ) => mock.mockImplementation(async (query: {
+    where: { id: { in: string[] } }; select: FleetTestSelect;
+  }) => source().filter((row) => query.where.id.in.includes(row.id as string))
+    .map((row) => projectFleetRow(row, query.select)));
+  installPayloadRead(prismaMocks.localReaderJobFindMany,
+    () => rows.flatMap((row) => row.localReaderJobs as Record<string, unknown>[]));
+  installPayloadRead(prismaMocks.courseMonitoringEventFindMany,
+    () => rows.flatMap((row) => (row.supportIncident as { monitoringEvents: Record<string, unknown>[] } | null)?.monitoringEvents ?? []));
   prismaMocks.courseProbeFindMany.mockImplementation(async (query: {
     where: { courseId: { in: string[] } }; select: FleetTestSelect;
     orderBy: { observedAt: "asc" | "desc" }; distinct: string[];
@@ -461,7 +863,7 @@ function fleetParityRows(discovery: Record<string, unknown> | null): Record<stri
   Object.assign(find("parked").supportIncident as object, {
     humanReviewReason: "AUTOMATION_STALLED", escalatedAt: new Date("2026-08-22T13:00:00.000Z"),
     monitoringEvents: [{
-      incidentId: "incident-parked", eventType: "HUMAN_REVIEW_REQUESTED", occurredAt: new Date("2026-08-22T13:00:00.000Z"),
+      id: "event-parked", courseId: "parked", incidentId: "incident-parked", eventType: "HUMAN_REVIEW_REQUESTED", occurredAt: new Date("2026-08-22T13:00:00.000Z"),
       audit: { cycle: 1, customerState: "NEEDS_HUMAN_REVIEW", parkedUntilMaterialChange: true, automationStalled: true },
     }],
   });
@@ -479,6 +881,7 @@ function fleetParityRows(discovery: Record<string, unknown> | null): Record<stri
     intelligenceVerifiedAt: new Date("2026-08-22T13:00:00.000Z"), intelligenceReviewAt: new Date("2026-09-22T13:00:00.000Z"), intelligenceConfidence: 0.99,
     monitoringStatus: { ...courseRow().monitoringStatus, state: "HEALTHY" },
     localReaderJobs: [{
+      id: "job-test", courseId: "working", status: "COMPLETED", updatedAt: new Date("2026-08-22T13:50:00.000Z"),
       completedAt: new Date("2026-08-22T13:50:00.000Z"), readerVersion: "reader-test",
       result: {
         jobId: "job-test", courseKey: "frear-park", status: "NO_AVAILABILITY", observedAt: "2026-08-22T13:49:00.000Z",

@@ -101,7 +101,7 @@ describe("native acceptance database byte preflight", () => {
       id: true, monitoringStatus: { select: { courseId: true } },
     } });
   });
-  it("retains deterministic native scopes and recursively projects only selected identities", async () => {
+  it("retains deterministic root scopes while covering physical nested-list scopes with selected identities", async () => {
     const { models, sql, preflight } = fixture();
     const where = { id: { in: ["private-incident"] }, cycle: 4 };
     const query = { where, orderBy: [{ id: "asc" }], select: {
@@ -121,7 +121,7 @@ describe("native acceptance database byte preflight", () => {
 
     expect(models.courseSupportIncident.findMany).toHaveBeenCalledExactlyOnceWith({ where,
       orderBy: [{ id: "asc" }], select: { id: true,
-        batchIncidents: { where: { cycle: 4 }, take: 21, orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        batchIncidents: { where: { cycle: 4 }, orderBy: [{ createdAt: "desc" }, { id: "desc" }],
           select: { id: true, verificationRequests: { where: { status: "QUEUED" }, select: { id: true } } } },
         course: { select: { id: true, preferences: { where: { teeSearch: { status: "ACTIVE" } }, select: { id: true } },
           monitoringStatus: { select: { courseId: true } } } },
@@ -137,6 +137,7 @@ describe("native acceptance database byte preflight", () => {
       { status: "QUEUED" }, { batchIncident: { is: { AND: [{ cycle: 4 }, { incident: { is: where } }] } } },
     ] } });
     expect(query.select).toHaveProperty("attemptLedger", true);
+    expect(query.select.batchIncidents.take).toBe(21);
   });
 
   it("rejects oversized selected nested JSON before the full native evidence query", async () => {
@@ -163,7 +164,7 @@ describe("native acceptance database byte preflight", () => {
     });
   });
 
-  it("preserves distinct fields and deterministic selection without adding a native tie-breaker", async () => {
+  it("preserves distinct keys while covering ordered distinct's physical history without a native tie-breaker", async () => {
     const { models, preflight } = fixture();
     const query = { where: { courseId: "private-course" }, distinct: ["courseId"],
       orderBy: [{ observedAt: "desc" }, { id: "desc" }], take: 1, select: { outcome: true } };
@@ -171,8 +172,176 @@ describe("native acceptance database byte preflight", () => {
 
     await preflight("courseProbe", "findMany", query);
 
-    expect(models.courseProbe.findMany).toHaveBeenCalledExactlyOnceWith({ ...query, select: { id: true, courseId: true } });
+    expect(models.courseProbe.findMany).toHaveBeenCalledExactlyOnceWith({
+      where: query.where, orderBy: query.orderBy, select: { id: true, courseId: true },
+    });
     expect(query.select).toEqual({ outcome: true });
+    expect(query.take).toBe(1);
+    expect(query.distinct).toEqual(["courseId"]);
+  });
+
+  it("preserves pure top-level ID-ordered SQL pagination", async () => {
+    const { models, preflight } = fixture();
+    const query = { where: { courseId: "private-course" }, orderBy: [{ observedAt: "desc" }, { id: "desc" }],
+      take: 1, skip: 1, cursor: { id: "private-cursor" }, select: { rawSummary: true } };
+    models.courseProbe.findMany.mockResolvedValue([{ id: "private-probe" }]);
+
+    await preflight("courseProbe", "findMany", query);
+
+    expect(models.courseProbe.findMany).toHaveBeenCalledExactlyOnceWith({ ...query, select: { id: true } });
+    expect(query.select).toEqual({ rawSummary: true });
+  });
+
+  it("refuses an oversized older payload before ID-ordered distinct and memory pagination can discard it", async () => {
+    const { models, sql, transaction, preflight } = fixture();
+    const history = [{ id: "private-newer-probe", courseId: "private-course" },
+      { id: "private-older-probe", courseId: "private-course" }];
+    const query = { where: { courseId: "private-course" }, orderBy: [{ observedAt: "desc" }, { id: "desc" }],
+      distinct: ["courseId"], take: 1, skip: 1, cursor: { id: "private-newer-probe" }, select: { rawSummary: true } };
+    models.courseProbe.count.mockResolvedValue(2);
+    models.courseProbe.findMany.mockImplementation(async (args) => args.distinct ? history.slice(0, 1) : history);
+    const olderPayload = { retainedObservation: "x".repeat(16_777_217) };
+    sql.mockImplementation(async (statement) => [{
+      bytes: weightedBytes(statement, (identity) => identity === "private-older-probe"
+        ? BigInt(Buffer.byteLength(JSON.stringify({ rawSummary: olderPayload }), "utf8")) : 10n),
+      matchedRows: BigInt(selectedIds(statement).length),
+    }]);
+
+    await expect((async () => {
+      await preflight("courseProbe", "findMany", query);
+      return transaction.courseProbe.findMany(query);
+    })()).rejects.toMatchObject({ message: "EVIDENCE_BOUND_EXCEEDED", boundary: "SELECTED_EVIDENCE_BYTES" });
+
+    expect(models.courseProbe.findMany).toHaveBeenCalledExactlyOnceWith({
+      where: query.where, orderBy: query.orderBy, select: { id: true, courseId: true },
+    });
+    expect(selectedIds(sql.mock.calls[0][0])).toEqual(history.map(({ id }) => id));
+    expect(selectedFields(sql.mock.calls[0][0])).toEqual([{ key: "rawSummary", column: "rawSummary" }]);
+    expect(query).toMatchObject({ distinct: ["courseId"], take: 1, skip: 1,
+      cursor: { id: "private-newer-probe" }, select: { rawSummary: true } });
+  });
+
+  it("bounds all physical rows of ID-ordered distinct before fetching identities", async () => {
+    const { models, sql, preflight } = fixture();
+    models.courseProbe.count.mockResolvedValue(16_385);
+    const query = { where: { courseId: "private-course" }, orderBy: [{ observedAt: "desc" }, { id: "desc" }],
+      distinct: ["courseId"], take: 1, select: { rawSummary: true } };
+
+    await expect(preflight("courseProbe", "findMany", query)).rejects.toMatchObject({
+      message: "EVIDENCE_BOUND_EXCEEDED", boundary: "IDENTITY_PRECOUNT_ITEMS",
+    });
+
+    expect(models.courseProbe.count).toHaveBeenCalledExactlyOnceWith({ where: query.where });
+    expect(models.courseProbe.findMany).not.toHaveBeenCalled();
+    expect(sql).not.toHaveBeenCalled();
+    expect(query.take).toBe(1);
+  });
+
+  it("refuses an oversized sixth audit in the physical history behind ID-ordered parking pagination", async () => {
+    const { models, sql, transaction, preflight } = fixture();
+    const events = Array.from({ length: 6 }, (_, index) => ({ id: `private-parking-${index}` }));
+    const query = { where: { id: "private-incident" }, select: {
+      monitoringEvents: { where: { eventType: "HUMAN_REVIEW_REQUESTED" },
+        orderBy: [{ occurredAt: "desc" }, { id: "desc" }], take: 5, select: { audit: true } },
+    } };
+    models.courseMonitoringEvent.count.mockResolvedValue(6);
+    models.courseSupportIncident.findMany.mockImplementation(async (args) => [{ id: "private-incident",
+      monitoringEvents: events.slice(0, args.select.monitoringEvents.take ?? events.length),
+    }]);
+    const olderAudit = { retainedProof: "x".repeat(16_777_217) };
+    sql.mockImplementation(async (statement) => [{
+      bytes: weightedBytes(statement, (identity) => identity === "private-parking-5"
+        ? BigInt(Buffer.byteLength(JSON.stringify({ audit: olderAudit }), "utf8")) : 10n),
+      matchedRows: BigInt(selectedIds(statement).length),
+    }]);
+
+    await expect((async () => {
+      await preflight("courseSupportIncident", "findMany", query);
+      return transaction.courseSupportIncident.findMany(query);
+    })()).rejects.toMatchObject({ message: "EVIDENCE_BOUND_EXCEEDED", boundary: "SELECTED_EVIDENCE_BYTES" });
+
+    expect(models.courseSupportIncident.findMany).toHaveBeenCalledExactlyOnceWith({ where: query.where, select: {
+      id: true, monitoringEvents: { where: query.select.monitoringEvents.where,
+        orderBy: query.select.monitoringEvents.orderBy, select: { id: true } },
+    } });
+    const auditSizing = sql.mock.calls.find(([statement]) => statement.text.includes('FROM "CourseMonitoringEvent"'))![0];
+    expect(selectedIds(auditSizing)).toEqual(events.map(({ id }) => id));
+    expect(selectedFields(auditSizing)).toEqual([{ key: "audit", column: "audit" }]);
+    expect(query.select.monitoringEvents.take).toBe(5);
+    expect(query.select.monitoringEvents.select).toEqual({ audit: true });
+  });
+
+  it("bounds raw ID-ordered nested history before fetching identities rather than counting only five winners", async () => {
+    const { models, sql, preflight } = fixture();
+    models.courseMonitoringEvent.count.mockResolvedValue(16_385);
+    const where = { id: "private-incident" };
+
+    await expect(preflight("courseSupportIncident", "findMany", { where, select: {
+      monitoringEvents: { where: { eventType: "HUMAN_REVIEW_REQUESTED" },
+        orderBy: [{ occurredAt: "desc" }, { id: "desc" }], take: 5, select: { audit: true } },
+    } })).rejects.toMatchObject({ message: "EVIDENCE_BOUND_EXCEEDED", boundary: "IDENTITY_PRECOUNT_ITEMS" });
+
+    expect(models.courseMonitoringEvent.count).toHaveBeenCalledExactlyOnceWith({ where: { AND: [
+      { eventType: "HUMAN_REVIEW_REQUESTED" }, { incident: { is: where } },
+    ] } });
+    expect(models.courseSupportIncident.findMany).not.toHaveBeenCalled();
+    expect(sql).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { take: 5 },
+    { take: 5, skip: 1 },
+    { take: 5, cursor: { id: "private-cursor" } },
+    { take: 5, distinct: ["eventType"] },
+  ])("covers the whole physical metadata scope for ID-ordered nested pagination %j", async (pagination) => {
+    const { models, sql, preflight } = fixture();
+    const query = { where: { isPublic: true }, orderBy: { id: "asc" }, take: 2, select: {
+      supportIncident: { select: { monitoringEvents: {
+        where: { eventType: "HUMAN_REVIEW_REQUESTED" }, orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
+        ...pagination, select: { id: true, eventType: true, occurredAt: true },
+      } } },
+    } };
+    const events = Array.from({ length: 6 }, (_, index) => ({ id: `private-metadata-${index}`,
+      ...("distinct" in pagination ? { eventType: "HUMAN_REVIEW_REQUESTED" } : {}),
+    }));
+    models.courseMonitoringEvent.count.mockResolvedValue(6);
+    models.course.findMany.mockResolvedValue([{ id: "private-course", supportIncident: {
+      id: "private-incident", monitoringEvents: events,
+    } }]);
+
+    await preflight("course", "findMany", query);
+
+    expect(models.course.findMany).toHaveBeenCalledExactlyOnceWith({ where: query.where, orderBy: query.orderBy, take: 2, select: {
+      id: true, supportIncident: { select: { id: true, monitoringEvents: {
+        where: query.select.supportIncident.select.monitoringEvents.where,
+        orderBy: query.select.supportIncident.select.monitoringEvents.orderBy,
+        select: { id: true, ...("distinct" in pagination ? { eventType: true } : {}) },
+      } } },
+    } });
+    const metadataSizing = sql.mock.calls.find(([statement]) => statement.text.includes('FROM "CourseMonitoringEvent"'))![0];
+    expect(selectedIdentityWeights(metadataSizing)).toEqual(events.map(({ id }) => ({ identity: id, occurrences: 1n })));
+    expect(selectedFields(metadataSizing)).toEqual([
+      { key: "id", column: "id" }, { key: "eventType", column: "eventType" }, { key: "occurredAt", column: "occurredAt" },
+    ]);
+    expect(metadataSizing.text).not.toContain('acceptance_row."audit"');
+    expect(query.select.supportIncident.select.monitoringEvents).toMatchObject(pagination);
+    expect(query.take).toBe(2);
+  });
+
+  it("conservatively covers a nested list even when the root is a unique parent", async () => {
+    const { models, preflight } = fixture();
+    models.course.findUnique.mockResolvedValue({ id: "private-course", localReaderJobs: [{ id: "private-job" }] });
+    const query = { where: { id: "private-course" }, select: { localReaderJobs: {
+      where: { status: "COMPLETED" }, orderBy: [{ completedAt: "desc" }, { id: "desc" }], take: 1, select: { result: true },
+    } } };
+
+    await preflight("course", "findUnique", query);
+
+    expect(models.course.findUnique).toHaveBeenCalledExactlyOnceWith({ where: query.where, select: {
+      id: true, localReaderJobs: { where: query.select.localReaderJobs.where,
+        orderBy: query.select.localReaderJobs.orderBy, select: { id: true } },
+    } });
+    expect(query.select.localReaderJobs.take).toBe(1);
   });
 
   it("covers every candidate for timestamp-tied distinct and nested take selections", async () => {
