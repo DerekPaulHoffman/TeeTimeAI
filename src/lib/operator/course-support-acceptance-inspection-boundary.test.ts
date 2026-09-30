@@ -18,6 +18,7 @@ import {
   type ParkedCourseCampaignMember,
 } from "@/lib/automation/course-support-campaign";
 import { buildCourseSupportProviderSnapshotFingerprint } from "@/lib/automation/course-support-verification";
+import { localReaderResultSchema } from "@/lib/local-reader/contracts";
 import { ACCEPTANCE_READ_LIMITS, createBoundedAcceptanceReadClient } from "./course-support-acceptance-read-boundary";
 import { loadCourseSupportAcceptanceReasons } from "./course-support-acceptance-reasons";
 import { loadCourseSupportAcceptanceProjection } from "./course-support-acceptance";
@@ -290,7 +291,98 @@ describe("full native campaign inspection through the acceptance read boundary",
     expect(fixture.mutation).not.toHaveBeenCalled();
     expect(globalMocks.escapedRead).not.toHaveBeenCalled();
   });
+
+  it("excludes discovery copy evidence from the actual fleet read without shrinking the native campaign or course scope", async () => {
+    const fixture = campaignDatabase({ fleetOnlyEvidence: "DISCOVERY", oversizedFleetOnlyEvidence: true });
+    const database = { $transaction: vi.fn(async (work: (transaction: Prisma.TransactionClient) => Promise<unknown>) => work(fixture.transaction)) };
+    const result = await loadCourseSupportAcceptanceReasons(database as unknown as Parameters<typeof loadCourseSupportAcceptanceReasons>[0], SOURCE_SHA);
+
+    expect(result).toMatchObject({ schemaVersion: 4, status: "AVAILABLE", reason: "COMPLETE_NATIVE_TRACE",
+      readFence: null, readCost: null, evidenceReadComplete: true, customerDataIncluded: false });
+    assertCompleteReloads(fixture);
+    const fleetReads = fixture.calls.filter((call) => call.model === "course" && call.method === "findMany" &&
+      (call.args as Query).select?.isPublic === true);
+    expect(fleetReads).toHaveLength(1);
+    expect(fleetReads[0].args).not.toHaveProperty("where");
+    expect(fleetReads[0].args).not.toHaveProperty("take");
+    expect((fleetReads[0].args as Query).select).not.toHaveProperty("automationDiscoveries");
+    const byteStatements = fixture.calls.filter((call) => call.model === "$queryRaw").map((call) => call.args as Prisma.Sql);
+    expect(byteStatements.some((statement) => statement.text.includes('FROM "Course"') &&
+      statement.text.includes('acceptance_row."bookingMetadata"') &&
+      statement.values.includes("private-fleet-only-course") &&
+      statement.values.includes("private-course-112"))).toBe(true);
+    expect(byteStatements.every((statement) => !statement.text.includes('FROM "CourseAutomationDiscovery"'))).toBe(true);
+    // Native campaign preflight may still count its required timestamp-only
+    // discovery scopes; no discovery evidence or noncampaign row is hydrated.
+    expect(fixture.calls.some((call) => call.model === "courseAutomationDiscovery" && call.method !== "count")).toBe(false);
+
+    const native = campaignDatabase({ fleetOnlyEvidence: "DISCOVERY" });
+    const expected = await nativeAcceptanceProjection(native);
+    expect(result.acceptanceProjection).toEqual(expected);
+    expect(expected.fleet).toMatchObject({ attention: { actionCount: 1, watchCount: 0, totalCount: 1 }, engineeringNeededCount: 0 });
+    expect(await loadOperatorCourseFleetCounts({ now: NOW }, native.transaction)).toMatchObject({ action: 1, parked: 112, needsHuman: 1 });
+    expect(JSON.stringify(result)).not.toMatch(/private-|https:\/\//u);
+    expect(fixture.mutation).not.toHaveBeenCalled();
+    expect(native.mutation).not.toHaveBeenCalled();
+    expect(globalMocks.escapedRead).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["BOOKING_METADATA", "Course", "bookingMetadata"],
+    ["LOCAL_READER_RESULT", "LocalReaderJob", "result"],
+    ["PARKING_AUDIT", "CourseMonitoringEvent", "audit"],
+  ] as const)("keeps required %s evidence inside the actual FLEET byte fence with no later database calls", async (fleetOnlyEvidence, model, field) => {
+    const fixture = campaignDatabase({ fleetOnlyEvidence, oversizedFleetOnlyEvidence: true });
+    const database = { $transaction: vi.fn(async (work: (transaction: Prisma.TransactionClient) => Promise<unknown>) => work(fixture.transaction)) };
+    const result = await loadCourseSupportAcceptanceReasons(database as unknown as Parameters<typeof loadCourseSupportAcceptanceReasons>[0], SOURCE_SHA);
+
+    expect(result).toMatchObject({ schemaVersion: 4, status: "UNAVAILABLE", reason: "EVIDENCE_BOUND_EXCEEDED",
+      readFence: { phase: "FLEET", boundary: "SELECTED_EVIDENCE_BYTES" },
+      acceptanceProjection: null, futureUnknown: null, rollingAmbiguous: null,
+      evidenceReadComplete: false, customerDataIncluded: false });
+    assertObservedReadCost(result, "UNCLASSIFIED");
+    assertCompleteReloads(fixture);
+    const sizedRequired = fixture.calls.filter((call) => call.model === "$queryRaw" &&
+      (call.args as Prisma.Sql).text.includes(`FROM "${model}"`) &&
+      (call.args as Prisma.Sql).text.includes(`acceptance_row."${field}"`) &&
+      (call.args as Prisma.Sql).values.some((value) => typeof value === "string" && value.startsWith("private-fleet-only-")));
+    expect(sizedRequired).toHaveLength(1);
+    expect(fixture.calls.at(-1)).toBe(sizedRequired[0]);
+    expect(fixture.calls.some((call) => call.model === "course" && call.method === "findMany" &&
+      (call.args as Query).select?.isPublic === true)).toBe(false);
+    const native = campaignDatabase({ fleetOnlyEvidence });
+    const expected = await nativeAcceptanceProjection(native);
+    expect(expected).not.toBeNull();
+    const counts = await loadOperatorCourseFleetCounts({ now: NOW }, native.transaction);
+    expect(counts).toMatchObject(fleetOnlyEvidence === "PARKING_AUDIT"
+      ? { parked: 113, action: 0, working: 0 }
+      : fleetOnlyEvidence === "LOCAL_READER_RESULT"
+        ? { parked: 112, action: 0, working: 1 }
+        : { parked: 112, action: 1, working: 0 });
+    expect(JSON.stringify(result)).not.toMatch(/private-|https:\/\//u);
+    expect(fixture.mutation).not.toHaveBeenCalled();
+    expect(native.mutation).not.toHaveBeenCalled();
+    expect(globalMocks.escapedRead).not.toHaveBeenCalled();
+  });
 });
+
+async function nativeAcceptanceProjection(fixture: ReturnType<typeof campaignDatabase>) {
+  const inspection = (await inspectLatestParkedCourseCampaign(fixture.transaction, { now: NOW, admissionRuntimeVersion: SOURCE_SHA }))!;
+  const { runId, totalCount, ...observedCampaign } = inspection;
+  expect(totalCount).toBe(112);
+  expect(inspection).toMatchObject({ readyCount: 112, terminalCount: 0, engineeringBlockerCount: 0 });
+  return loadCourseSupportAcceptanceProjection({ now: NOW, observedCampaign }, {
+    loadCourseFleetCounts: (input) => loadOperatorCourseFleetCounts(input, fixture.transaction),
+    loadLatestCampaignRecord: () => fixture.transaction.automationRun.findFirst({
+      where: { id: runId }, select: { id: true, status: true, audit: true, notes: true },
+    }),
+    loadFreshGlobalParkedCount: () => fixture.transaction.courseSupportIncident.count({
+      where: { status: "NEEDS_HUMAN", humanReviewReason: "AUTOMATION_STALLED", activeBatchId: null, nextAttemptAt: null },
+    }),
+    loadCampaignSummary: (input) => loadOperatorCourseSupportCampaign(input,
+      createOperatorCourseSupportCampaignDependencies(fixture.transaction, { now: NOW, admissionRuntimeVersion: SOURCE_SHA })),
+  });
+}
 
 function assertObservedReadCost(result: { readCost: unknown }, queryCategory: AcceptanceReadQueryCategory) {
   const readCost = parseAcceptanceReadCost(result.readCost);
@@ -322,6 +414,8 @@ function campaignDatabase(input: {
   oversizedCurrentCycleProof?: boolean;
   resolvedObservations?: "MODERN" | "LEGACY_LAST";
   oversizedObservationLedger?: boolean;
+  fleetOnlyEvidence?: "DISCOVERY" | "BOOKING_METADATA" | "LOCAL_READER_RESULT" | "PARKING_AUDIT";
+  oversizedFleetOnlyEvidence?: boolean;
 } = {}) {
   const rows = new Map(Prisma.dmmf.datamodel.models.map((model) => [model.name, [] as Row[]]));
   const members: ParkedCourseCampaignMember[] = [];
@@ -451,6 +545,62 @@ function campaignDatabase(input: {
   rows.get("AutomationRun")!.push({ id: "private-campaign", promptVersion: PARKED_COURSE_CAMPAIGN_PROMPT_VERSION,
     status: "RUNNING", completedAt: null, outcome: null, audit, notes: null, startedAt: CAPTURED_AT, supportBatches: [],
     errors: input.oversizedUnselectedRunErrors ? { message: `private-${"x".repeat(ACCEPTANCE_READ_LIMITS.evidenceBytes + 1)}` } : null });
+  if (input.fleetOnlyEvidence) {
+    const privateEvidence = input.oversizedFleetOnlyEvidence ? "x".repeat(ACCEPTANCE_READ_LIMITS.evidenceBytes + 1) : "bounded fixture";
+    // This course is outside the immutable campaign but inside the complete
+    // fleet and demand scopes; campaign members and their evidence are retained.
+    const course: Row = { ...rows.get("Course")![0], id: "private-fleet-only-course", name: "Private Fleet-only Course",
+      preferences: [], probes: [], automationDiscoveries: [], localReaderJobs: [], monitoringStatus: null, supportIncident: null };
+    rows.get("Course")!.push(course);
+    if (input.fleetOnlyEvidence !== "PARKING_AUDIT") {
+      const search: Row = { id: "private-fleet-only-search", status: "ACTIVE", trafficClass: "PUBLIC", syntheticMultiCycle: false };
+      const preference: Row = { id: "private-fleet-only-preference", courseId: course.id, course, teeSearchId: search.id,
+        teeSearch: search, rank: 1 };
+      course.preferences = [preference];
+      search.preferences = [preference];
+      rows.get("TeeSearch")!.push(search);
+      rows.get("CoursePreference")!.push(preference);
+    }
+    if (input.fleetOnlyEvidence === "DISCOVERY") {
+      const discovery: Row = { id: "private-fleet-only-discovery", courseId: course.id, course, status: "VERIFIED",
+        detectedPlatform: "UNKNOWN", bookingMethod: "UNKNOWN", automationEligibility: "UNKNOWN", automationReason: "NONE",
+        bookingAccessMode: "UNKNOWN", bookingUrl: null, confidence: 0.8, createdAt: PARKED_AT,
+        evidence: { privateEvidence } };
+      course.automationDiscoveries = [discovery];
+      rows.get("CourseAutomationDiscovery")!.push(discovery);
+    } else if (input.fleetOnlyEvidence === "BOOKING_METADATA") {
+      course.bookingMetadata = { privateEvidence };
+    } else if (input.fleetOnlyEvidence === "LOCAL_READER_RESULT") {
+      const result = { jobId: "private-fleet-only-reader", courseKey: "cps:private.cps.golf", status: "NO_AVAILABILITY",
+        observedAt: PARKED_AT.toISOString(), pageUrl: "https://private.cps.golf/onlineresweb/search-teetime",
+        pageTitle: "Private fixture", slots: [], readerVersion: "fixture-reader-v1",
+        ...(input.oversizedFleetOnlyEvidence ? { privateEvidence } : {}) };
+      expect(localReaderResultSchema.safeParse(result).success).toBe(!input.oversizedFleetOnlyEvidence);
+      const job: Row = { id: "private-fleet-only-reader", courseId: course.id, course, status: "COMPLETED", completedAt: PARKED_AT, result };
+      const status: Row = { ...rows.get("CourseMonitoringStatus")![0], courseId: course.id, course,
+        reference: "private-fleet-only-status", state: "HEALTHY", lastSuccessfulAt: null, lastFailureAt: null };
+      course.localReaderJobs = [job];
+      course.monitoringStatus = status;
+      rows.get("LocalReaderJob")!.push(job);
+      rows.get("CourseMonitoringStatus")!.push(status);
+    } else {
+      // Historical decision metadata makes this incident ineligible for the
+      // initial global campaign snapshot. Fleet parking classification does not
+      // omit such an incident: it still requires its exact durable event audit.
+      const incident: Row = { ...rows.get("CourseSupportIncident")![0], id: "private-fleet-only-incident",
+        courseId: course.id, course, decisionNote: "Retained historical context", batchIncidents: [] };
+      const status: Row = { ...rows.get("CourseMonitoringStatus")![0], courseId: course.id, course,
+        reference: "private-fleet-only-status" };
+      const event: Row = { ...rows.get("CourseMonitoringEvent")![0], id: "private-fleet-only-event", courseId: course.id,
+        course, incidentId: incident.id, incident, audit: { ...rows.get("CourseMonitoringEvent")![0].audit as Row, privateEvidence } };
+      incident.monitoringEvents = [event];
+      course.supportIncident = incident;
+      course.monitoringStatus = status;
+      rows.get("CourseSupportIncident")!.push(incident);
+      rows.get("CourseMonitoringStatus")!.push(status);
+      rows.get("CourseMonitoringEvent")!.push(event);
+    }
+  }
   const calls: Array<{ model: string; method: string; args: unknown }> = [];
   const mutation = vi.fn(() => { throw new Error("Read-only inspection cannot mutate."); });
   const transaction = Object.fromEntries(Prisma.dmmf.datamodel.models.map((model) => {
