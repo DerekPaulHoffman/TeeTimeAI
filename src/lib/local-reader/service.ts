@@ -25,6 +25,13 @@ import { buildOwnedOfficialSourceClaim, assertOwnedOfficialSourceJobInTransactio
 import { validateOfficialSourceResult, type OfficialSourceResult, OFFICIAL_SOURCE_CAPABILITY } from "./official-source-contracts";
 import { revalidateForOfficialSourceReader } from "./official-source-revalidation";
 import type { TeeTimeSlot } from "@/lib/tee-times/matching";
+import {
+  addIsoDateDays,
+  differenceInIsoCalendarDays,
+  getCourseLocalDate,
+  type InventoryDateObservation,
+} from "@/lib/courses/inventory-horizon";
+import { zonedDateTimeToDate } from "@/lib/timezones";
 
 import {
   LOCAL_READER_MAX_CLOCK_SKEW_MS,
@@ -534,6 +541,66 @@ export async function queueLocalReaderCourseVerification(input: {
     existing = latest;
   }
   throw new Error("The local reader verification job changed while retrying");
+}
+
+export async function advanceLocalReaderInventoryHorizonObservation(input: {
+  courseId: string;
+  targetDate: string;
+  bookingUrl: string;
+  timeZone: string;
+  observedAt: Date;
+}) {
+  const observedLocalDate = getCourseLocalDate(input.observedAt, input.timeZone);
+  const targetDaysAhead = differenceInIsoCalendarDays(input.targetDate, observedLocalDate);
+  if (targetDaysAhead < 3 || targetDaysAhead > 45) {
+    return { observedLocalDate, observations: [] as InventoryDateObservation[], queuedDate: null };
+  }
+  const localDayStartedAt = zonedDateTimeToDate(
+    `${observedLocalDate}T00:00:00`,
+    input.timeZone,
+  );
+  const rows = await prisma.localReaderJob.findMany({
+    where: {
+      courseId: input.courseId,
+      purpose: "COURSE_VERIFICATION",
+      players: 1,
+      status: "COMPLETED",
+      completedAt: { gte: localDayStartedAt },
+      targetDate: { gte: observedLocalDate, lte: input.targetDate },
+    },
+    orderBy: [{ targetDate: "desc" }, { completedAt: "desc" }],
+  });
+  const byDate = new Map<string, InventoryDateObservation["status"]>();
+  byDate.set(input.targetDate, "NO_AVAILABILITY");
+  for (const row of rows) {
+    if (byDate.has(row.targetDate) || !row.result) continue;
+    const parsed = localReaderResultSchema.safeParse(row.result);
+    if (!parsed.success) continue;
+    if (parsed.data.status === "AVAILABLE") byDate.set(row.targetDate, "AVAILABLE");
+    if (parsed.data.status === "NO_AVAILABILITY") {
+      byDate.set(row.targetDate, "NO_AVAILABILITY");
+    }
+  }
+
+  let queuedDate: string | null = null;
+  for (let offset = 1; offset <= targetDaysAhead; offset += 1) {
+    const candidate = addIsoDateDays(input.targetDate, -offset);
+    if (candidate < observedLocalDate || byDate.has(candidate)) continue;
+    await queueLocalReaderCourseVerification({
+      courseId: input.courseId,
+      targetDate: candidate,
+      players: 1,
+      bookingUrl: input.bookingUrl,
+      notBefore: localDayStartedAt,
+    });
+    queuedDate = candidate;
+    break;
+  }
+  return {
+    observedLocalDate,
+    observations: [...byDate.entries()].map(([targetDate, status]) => ({ targetDate, status })),
+    queuedDate,
+  };
 }
 
 export async function queueLocalReaderJob(input: {

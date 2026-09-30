@@ -747,6 +747,51 @@ describe("calculateNextCheckAt", () => {
     );
   });
 
+  it("waits for a trusted observed inventory horizon without replacing published policy", () => {
+    const searchDate = new Date("2026-10-17T00:00:00.000Z");
+    const now = new Date("2026-09-30T16:00:00.000Z");
+
+    expect(
+      calculateNextCheckAt(
+        searchDate,
+        5,
+        now,
+        new Date("2026-10-18T03:59:59.999Z"),
+        [{
+          timeZone: "America/New_York",
+          bookingWindowDaysAhead: 30,
+          bookingWindowSource: "OFFICIAL_BOOKING_PAGE",
+          bookingWindowEvidenceUrl: "https://course.example/policy",
+          observedInventoryHorizonDaysAhead: 10,
+          observedInventoryHorizonConfidence: 0.8,
+          observedInventoryHorizonSampleCount: 3,
+          observedInventoryHorizonObservedAt: new Date("2026-09-30T15:00:00.000Z")
+        }]
+      )?.toISOString()
+    ).toBe("2026-10-07T04:00:00.000Z");
+  });
+
+  it("ignores an observed horizon until three consistent daily samples exist", () => {
+    const searchDate = new Date("2026-10-17T00:00:00.000Z");
+    const now = new Date("2026-09-30T16:00:00.000Z");
+
+    expect(
+      calculateNextCheckAt(
+        searchDate,
+        5,
+        now,
+        new Date("2026-10-18T03:59:59.999Z"),
+        [{
+          timeZone: "America/New_York",
+          observedInventoryHorizonDaysAhead: 10,
+          observedInventoryHorizonConfidence: 0.8,
+          observedInventoryHorizonSampleCount: 2,
+          observedInventoryHorizonObservedAt: new Date("2026-09-30T15:00:00.000Z")
+        }]
+      )?.toISOString()
+    ).toBe("2026-09-30T16:05:00.000Z");
+  });
+
   it("uses a source-backed course-local release hour", () => {
     const searchDate = new Date("2026-07-29T00:00:00.000Z");
     const now = new Date("2026-07-01T12:00:00.000Z");

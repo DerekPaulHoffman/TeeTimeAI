@@ -24,7 +24,7 @@ import { getRequiredAppUser } from "@/lib/auth/current-user";
 import { normalizeRequestedLayoutHoles } from "@/lib/courses/course-layout";
 import {
   formatBookingWindowRelease,
-  getBookingWindowForTargetDate
+  getActionableBookingWindowForTargetDate
 } from "@/lib/courses/booking-window";
 import { getCourseAlertSupport } from "@/lib/courses/intelligence";
 import { formatDateInputValue } from "@/lib/dates/local-date";
@@ -287,7 +287,7 @@ function DashboardSearchCard({
     const isPublicCourse = course.isPublic === true;
     const latestProbe = search.probes.find((probe) => probe.courseId === course.id);
     const bookingWindow = isPublicCourse
-      ? getBookingWindowForTargetDate(search.date, course)
+      ? getActionableBookingWindowForTargetDate(search.date, course)
       : null;
     const upcomingBookingWindow =
       bookingWindow && bookingWindow.opensAt > now &&

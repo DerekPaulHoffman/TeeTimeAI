@@ -13,6 +13,10 @@ import {
   getBookingWindowForTargetDate,
   type CourseBookingWindowFields
 } from "@/lib/courses/booking-window";
+import {
+  getObservedInventoryReleaseForTargetDate,
+  type CourseObservedInventoryHorizonFields,
+} from "@/lib/courses/inventory-horizon";
 import { isSyntheticWebsiteTrafficClass } from "@/lib/engagement/traffic-class";
 import { calculateSearchWindowEnd } from "@/lib/automation/date-boundary";
 import { getSyntheticMultiCycleExpiresAt } from "@/lib/automation/synthetic-test-window";
@@ -242,7 +246,7 @@ export function calculateNextCheckAt(
   cadenceMinutes: number,
   now = new Date(),
   searchExpiresAt = endOfSearchDate(date),
-  courses: CourseBookingWindowFields[] = [],
+  courses: Array<CourseBookingWindowFields & CourseObservedInventoryHorizonFields> = [],
   supportRetryNeeded = false,
   checkStartedAt = now,
   options?: {
@@ -259,10 +263,14 @@ export function calculateNextCheckAt(
 
   const schedulingCourses = courses.length > 0 ? courses : [{ timeZone: "America/New_York" }];
   const sourceBackedBookingWindowOpenings = schedulingCourses.map((course) => {
-    if (!course.bookingWindowSource || !course.bookingWindowEvidenceUrl?.trim()) {
-      return null;
-    }
-    return getBookingWindowForTargetDate(date, course)?.opensAt ?? null;
+    const publishedOpening =
+      course.bookingWindowSource && course.bookingWindowEvidenceUrl?.trim()
+        ? getBookingWindowForTargetDate(date, course)?.opensAt ?? null
+        : null;
+    const observedOpening = getObservedInventoryReleaseForTargetDate(date, course)?.opensAt ?? null;
+    if (!publishedOpening) return observedOpening;
+    if (!observedOpening) return publishedOpening;
+    return publishedOpening > observedOpening ? publishedOpening : observedOpening;
   });
   const hasUnknownBookingWindow = sourceBackedBookingWindowOpenings.some(
     (opensAt) => opensAt === null

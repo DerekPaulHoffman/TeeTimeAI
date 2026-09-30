@@ -336,65 +336,70 @@ model User {
 }
 
 model Course {
-  id                          String                             @id @default(cuid())
-  googlePlaceId               String?                            @unique
-  name                        String
-  address                     String?
-  city                        String?
-  stateCode                   String?
-  stateName                   String?
-  county                      String?
-  countryCode                 String?
-  latitude                    Float
-  longitude                   Float
-  timeZone                    String                             @default("America/New_York")
-  rating                      Float?
-  ratingObservedAt            DateTime?
-  website                     String?
-  phone                       String?
-  isPublic                    Boolean?                           @default(true)
-  isManual                    Boolean                            @default(false)
-  detectedBookingUrl          String?
-  detectedPlatform            DetectedPlatform                   @default(UNKNOWN)
-  providerFamilyKey           String                             @default("SOURCE_MISSING")
-  bookingMethod               BookingMethod                      @default(UNKNOWN)
-  bookingPhone                String?
-  bookingWindowDaysAhead      Int?
-  bookingReleaseTimeLocal     String?
-  bookingWindowSource         BookingWindowSource?
-  bookingWindowConfidence     Float?
-  bookingWindowEvidenceUrl    String?
-  bookingWindowCheckedAt      DateTime?
-  bookingWindowObservedAt     DateTime?
-  automationEligibility       AutomationEligibility              @default(UNKNOWN)
-  automationReason            AutomationReason                   @default(NONE)
-  monitoringMode              CourseMonitoringMode               @default(AUTOMATIC)
-  bookingAccessMode           BookingAccessMode                  @default(UNKNOWN)
-  policyNotes                 String?
-  bookingMetadata             Json?
-  intelligenceVerifiedAt      DateTime?
-  intelligenceReviewAt        DateTime?
-  intelligenceConfidence      Float?
-  layoutHoleCounts            Int[]                              @default([])
-  layoutHolesEvidenceUrl      String?
-  layoutHolesVerifiedAt       DateTime?
-  par                         Int?
-  parEvidenceUrl              String?
-  parVerifiedAt               DateTime?
-  createdAt                   DateTime                           @default(now())
-  updatedAt                   DateTime                           @updatedAt
-  preferences                 CoursePreference[]
-  probes                      CourseProbe[]
-  matches                     TeeTimeMatch[]
-  bookingFacts                CourseBookingFact[]
-  automationDiscoveries       CourseAutomationDiscovery[]
-  supportIncident             CourseSupportIncident?
-  monitoringStatus            CourseMonitoringStatus?
-  monitoringEvents            CourseMonitoringEvent[]
-  supportBatchIncidents       CourseSupportBatchIncident[]
-  supportVerificationRequests CourseSupportVerificationRequest[]
-  localReaderJobs             LocalReaderJob[]
-  profile                     CourseProfile?
+  id                                  String                              @id @default(cuid())
+  googlePlaceId                       String?                             @unique
+  name                                String
+  address                             String?
+  city                                String?
+  stateCode                           String?
+  stateName                           String?
+  county                              String?
+  countryCode                         String?
+  latitude                            Float
+  longitude                           Float
+  timeZone                            String                              @default("America/New_York")
+  rating                              Float?
+  ratingObservedAt                    DateTime?
+  website                             String?
+  phone                               String?
+  isPublic                            Boolean?                            @default(true)
+  isManual                            Boolean                             @default(false)
+  detectedBookingUrl                  String?
+  detectedPlatform                    DetectedPlatform                    @default(UNKNOWN)
+  providerFamilyKey                   String                              @default("SOURCE_MISSING")
+  bookingMethod                       BookingMethod                       @default(UNKNOWN)
+  bookingPhone                        String?
+  bookingWindowDaysAhead              Int?
+  bookingReleaseTimeLocal             String?
+  bookingWindowSource                 BookingWindowSource?
+  bookingWindowConfidence             Float?
+  bookingWindowEvidenceUrl            String?
+  bookingWindowCheckedAt              DateTime?
+  bookingWindowObservedAt             DateTime?
+  observedInventoryHorizonDaysAhead   Int?
+  observedInventoryHorizonConfidence  Float?
+  observedInventoryHorizonSampleCount Int                                 @default(0)
+  observedInventoryHorizonObservedAt  DateTime?
+  automationEligibility               AutomationEligibility               @default(UNKNOWN)
+  automationReason                    AutomationReason                    @default(NONE)
+  monitoringMode                      CourseMonitoringMode                @default(AUTOMATIC)
+  bookingAccessMode                   BookingAccessMode                   @default(UNKNOWN)
+  policyNotes                         String?
+  bookingMetadata                     Json?
+  intelligenceVerifiedAt              DateTime?
+  intelligenceReviewAt                DateTime?
+  intelligenceConfidence              Float?
+  layoutHoleCounts                    Int[]                               @default([])
+  layoutHolesEvidenceUrl              String?
+  layoutHolesVerifiedAt               DateTime?
+  par                                 Int?
+  parEvidenceUrl                      String?
+  parVerifiedAt                       DateTime?
+  createdAt                           DateTime                            @default(now())
+  updatedAt                           DateTime                            @updatedAt
+  preferences                         CoursePreference[]
+  probes                              CourseProbe[]
+  matches                             TeeTimeMatch[]
+  bookingFacts                        CourseBookingFact[]
+  inventoryHorizonObservations        CourseInventoryHorizonObservation[]
+  automationDiscoveries               CourseAutomationDiscovery[]
+  supportIncident                     CourseSupportIncident?
+  monitoringStatus                    CourseMonitoringStatus?
+  monitoringEvents                    CourseMonitoringEvent[]
+  supportBatchIncidents               CourseSupportBatchIncident[]
+  supportVerificationRequests         CourseSupportVerificationRequest[]
+  localReaderJobs                     LocalReaderJob[]
+  profile                             CourseProfile?
 
   @@index([latitude, longitude])
   @@index([stateCode, county, automationEligibility])
@@ -403,6 +408,24 @@ model Course {
   @@index([bookingMethod, automationEligibility])
   @@index([monitoringMode])
   @@index([intelligenceReviewAt])
+}
+
+model CourseInventoryHorizonObservation {
+  id                      String   @id @default(cuid())
+  courseId                String
+  observedLocalDate       DateTime @db.Date
+  inventoryThroughDate    DateTime @db.Date
+  daysAhead               Int
+  trailingUnavailableDays Int
+  observedAt              DateTime
+  evidenceUrl             String
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+  course                  Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  @@unique([courseId, observedLocalDate])
+  @@index([courseId, observedAt])
+  @@index([observedAt])
 }
 
 model CourseBookingFact {

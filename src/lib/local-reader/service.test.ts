@@ -86,6 +86,7 @@ vi.mock("@/lib/automation/worker-state", () => ({
   completeAutomationWorker: workerMocks.completeAutomationWorker,
 }));
 import {
+  advanceLocalReaderInventoryHorizonObservation,
   claimNextLocalReaderJob,
   completeLocalReaderJob,
   expireOverdueLocalReaderJobs,
@@ -178,6 +179,75 @@ describe("local reader job service", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("continues a daily inventory-frontier scan one earlier date at a time", async () => {
+    prismaMocks.localReaderJob.findMany.mockResolvedValue([
+      {
+        targetDate: "2026-08-03",
+        result: {
+          jobId: "horizon-empty",
+          courseKey: "cps:grassyhill.cps.golf",
+          status: "NO_AVAILABILITY",
+          observedAt: "2026-07-24T15:58:00.000Z",
+          pageUrl: bookingUrl,
+          pageTitle: "Grassy Hill Country Club",
+          slots: [],
+          readerVersion: "test",
+        },
+      },
+      {
+        targetDate: "2026-08-02",
+        result: {
+          jobId: "horizon-open",
+          courseKey: "cps:grassyhill.cps.golf",
+          status: "AVAILABLE",
+          observedAt: "2026-07-24T15:57:00.000Z",
+          pageUrl: bookingUrl,
+          pageTitle: "Grassy Hill Country Club",
+          slots: [
+            {
+              startsAtLocal: "2026-08-02T09:00:00",
+              timeLabel: "9:00 AM",
+              holes: [18],
+              minimumPlayers: 1,
+              availableSpots: 4,
+              priceCents: 8000,
+              cartIncluded: true,
+            },
+          ],
+          readerVersion: "test",
+        },
+      },
+    ]);
+    prismaMocks.localReaderJob.upsert.mockResolvedValue({ id: "horizon-next" });
+
+    await expect(
+      advanceLocalReaderInventoryHorizonObservation({
+        courseId: "course-1",
+        targetDate: "2026-08-04",
+        bookingUrl,
+        timeZone: "America/New_York",
+        observedAt: new Date("2026-07-24T16:00:00.000Z"),
+      }),
+    ).resolves.toMatchObject({
+      observedLocalDate: "2026-07-24",
+      queuedDate: "2026-08-01",
+      observations: expect.arrayContaining([
+        { targetDate: "2026-08-04", status: "NO_AVAILABILITY" },
+        { targetDate: "2026-08-03", status: "NO_AVAILABILITY" },
+        { targetDate: "2026-08-02", status: "AVAILABLE" },
+      ]),
+    });
+    expect(prismaMocks.localReaderJob.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({
+          purpose: "COURSE_VERIFICATION",
+          targetDate: "2026-08-01",
+          players: 1,
+        }),
+      }),
+    );
   });
 
   it("expires overdue reader jobs without sending operator email", async () => {

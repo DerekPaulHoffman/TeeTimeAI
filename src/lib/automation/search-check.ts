@@ -18,6 +18,7 @@ import {
   listSearchCourseVerdictsSince,
   markMissingMatchesUnavailable,
   markSearchStatusEmailSent,
+  recordCourseInventoryHorizonObservation,
   recordCourseProbe,
   recordCourseProbeIfChanged,
   runWithSearchCheckLease,
@@ -73,6 +74,7 @@ import {
 } from "@/lib/automation/provider-execution-marker";
 import { getAutomationRuntimeVersion } from "@/lib/automation/runtime-version";
 import {
+  advanceLocalReaderInventoryHorizonObservation,
   getAppliedLocalReaderObservationWithinCadence,
   getExpiredUnconsumedLocalReaderObservationForCanonicalResume,
   getFreshLocalReaderObservation,
@@ -98,13 +100,14 @@ import {
   type CourseSupportIssueState,
 } from "@/lib/automation/support-incidents";
 import {
-  getBookingWindowForTargetDate,
+  getActionableBookingWindowForTargetDate,
   getBookingWindowFromEvidence,
   shouldRetryBookingWindowDiscovery,
   shouldRefreshBookingWindow,
   type BookingWindowEvidenceSource,
   type TargetBookingWindow,
 } from "@/lib/courses/booking-window";
+import { buildInventoryHorizonSnapshot } from "@/lib/courses/inventory-horizon";
 import type {
   AutomationReason,
   BookingAccessMode,
@@ -1481,7 +1484,7 @@ async function checkSearch(
       }
 
       const checkStartedAt = new Date();
-      const storedBookingWindow = getBookingWindowForTargetDate(
+      const storedBookingWindow = getActionableBookingWindowForTargetDate(
         search.date,
         course,
       );
@@ -1497,7 +1500,7 @@ async function checkSearch(
       if (
         storedBookingWindow &&
         storedBookingWindow.opensAt > checkStartedAt &&
-        !refreshBookingWindow
+        (!refreshBookingWindow || storedBookingWindow.source === "OBSERVED_INVENTORY")
       ) {
         await recordBookingWindowWaitingProbe({
           searchId: search.id,
@@ -2173,6 +2176,38 @@ async function checkSearch(
         providerSourceAccepted = true;
         providerObservationReconciled = Boolean(providerObservationLease);
         const persistedMatchStates = matchCommit.persistedMatchStates;
+
+        if (
+          localReaderSuccessSource?.resultStatus === "NO_AVAILABILITY" &&
+          customerBookingUrl
+        ) {
+          try {
+            const progress = await advanceLocalReaderInventoryHorizonObservation({
+              courseId: course.id,
+              targetDate: searchWindow.date,
+              bookingUrl: customerBookingUrl,
+              timeZone: course.timeZone,
+              observedAt: providerExecutionObservedAt,
+            });
+            const snapshot = buildInventoryHorizonSnapshot({
+              observedLocalDate: progress.observedLocalDate,
+              observations: progress.observations,
+              observedAt: providerExecutionObservedAt,
+              evidenceUrl: customerBookingUrl,
+            });
+            if (snapshot) {
+              await recordCourseInventoryHorizonObservation({
+                courseId: course.id,
+                snapshot,
+              });
+            }
+          } catch (error) {
+            console.error("[inventory-horizon:observation-failed]", {
+              courseId: course.id,
+              message: error instanceof Error ? error.message : "Unknown inventory horizon failure",
+            });
+          }
+        }
 
         if (unsafeBookingUrlCount === 0) {
           observedBookingFactsByCourse.set(course.id, {
@@ -4382,7 +4417,9 @@ async function recordBookingWindowWaitingProbe(input: {
     outcome: "NO_MATCH",
     message: input.bookingWindow.exactTime
       ? `Booking for ${input.targetDate} opens at ${input.bookingWindow.opensAt.toISOString()}.`
-      : `Booking for ${input.targetDate} is expected to open on ${input.bookingWindow.releaseDate}; the exact release time is not published.`,
+      : input.bookingWindow.source === "OBSERVED_INVENTORY"
+        ? `Based on recent releases, online tee times for ${input.targetDate} usually appear around ${input.bookingWindow.releaseDate}.`
+        : `Booking for ${input.targetDate} is expected to open on ${input.bookingWindow.releaseDate}; the exact release time is not published.`,
     rawSummary: {
       ...(input.providerExecution
         ? { providerExecution: input.providerExecution }
@@ -4423,6 +4460,7 @@ function buildBookingWindowCourseReport(
       opensAt: bookingWindow.opensAt.toISOString(),
       timeZone: bookingWindow.timeZone,
       exactTime: bookingWindow.exactTime,
+      basis: bookingWindow.source === "OBSERVED_INVENTORY" ? "OBSERVED_INVENTORY" : "PUBLISHED_POLICY",
     },
   };
 }

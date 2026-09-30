@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   formatBookingWindowRelease,
+  getActionableBookingWindowForTargetDate,
   getBookingWindowForTargetDate,
   normalizeReleaseTime,
   parseBookingReleaseMessage,
@@ -25,6 +26,25 @@ describe("course booking windows", () => {
     });
     expect(window?.opensAt.toISOString()).toBe("2026-07-15T09:00:00.000Z");
     expect(formatBookingWindowRelease(window!)).toBe("Wednesday, July 15 at 5:00 AM EDT");
+  });
+
+  it("keeps published policy while using a later trusted inventory release", () => {
+    const window = getActionableBookingWindowForTargetDate("2026-10-17", {
+      timeZone: "America/New_York",
+      bookingWindowDaysAhead: 30,
+      bookingWindowSource: "OFFICIAL_BOOKING_PAGE",
+      bookingWindowConfidence: 0.98,
+      bookingWindowEvidenceUrl: "https://course.example/policy",
+      observedInventoryHorizonDaysAhead: 10,
+      observedInventoryHorizonConfidence: 0.8,
+      observedInventoryHorizonSampleCount: 3,
+      observedInventoryHorizonObservedAt: new Date("2026-10-02T16:00:00.000Z"),
+    });
+
+    expect(window).toMatchObject({
+      releaseDate: "2026-10-07",
+      source: "OBSERVED_INVENTORY",
+    });
   });
 
   it("parses a public-specific ForeUP booking rule instead of the member window", () => {

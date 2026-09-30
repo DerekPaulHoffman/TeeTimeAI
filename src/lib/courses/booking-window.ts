@@ -1,4 +1,8 @@
 import { normalizeTimeZone, zonedDateTimeToDate } from "@/lib/timezones";
+import {
+  getObservedInventoryReleaseForTargetDate,
+  type CourseObservedInventoryHorizonFields,
+} from "@/lib/courses/inventory-horizon";
 
 export const BOOKING_WINDOW_REFRESH_DAYS = 30;
 export const BOOKING_WINDOW_RETRY_HOURS = 24;
@@ -34,7 +38,7 @@ export type TargetBookingWindow = {
   opensAt: Date;
   timeZone: string;
   exactTime: boolean;
-  source: BookingWindowEvidenceSource | null;
+  source: BookingWindowEvidenceSource | "OBSERVED_INVENTORY" | null;
   confidence: number | null;
   evidenceUrl: string | null;
 };
@@ -88,6 +92,22 @@ export function getBookingWindowFromEvidence(
     bookingWindowConfidence: evidence.confidence,
     bookingWindowEvidenceUrl: evidence.evidenceUrl
   });
+}
+
+export function getActionableBookingWindowForTargetDate(
+  targetDate: Date | string,
+  course: CourseBookingWindowFields & CourseObservedInventoryHorizonFields,
+  fallbackTimeZone = "America/New_York"
+): TargetBookingWindow | null {
+  const published = getBookingWindowForTargetDate(targetDate, course, fallbackTimeZone);
+  const observed = getObservedInventoryReleaseForTargetDate(
+    targetDate,
+    course,
+    fallbackTimeZone,
+  );
+  if (!published) return observed;
+  if (!observed) return published;
+  return observed.opensAt > published.opensAt ? observed : published;
 }
 
 export function shouldRefreshBookingWindow(

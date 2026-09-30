@@ -8,6 +8,10 @@ import {
 
 import type { BookingWindowEvidence } from "@/lib/courses/booking-window";
 import {
+  inferLearnedInventoryHorizon,
+  type InventoryHorizonSnapshot,
+} from "@/lib/courses/inventory-horizon";
+import {
   normalizeLayoutHoleCounts,
   type CourseLayoutHoleCount,
 } from "@/lib/courses/course-layout";
@@ -4438,6 +4442,10 @@ export async function getSearchScheduleTiming(
               bookingWindowEvidenceUrl: true,
               bookingWindowCheckedAt: true,
               bookingWindowObservedAt: true,
+              observedInventoryHorizonDaysAhead: true,
+              observedInventoryHorizonConfidence: true,
+              observedInventoryHorizonSampleCount: true,
+              observedInventoryHorizonObservedAt: true,
               monitoringStatus: {
                 select: {
                   state: true,
@@ -5040,6 +5048,68 @@ async function recordCourseBookingWindowEvidenceInTransaction(
     },
   );
   return applied;
+}
+
+export async function recordCourseInventoryHorizonObservation(input: {
+  courseId: string;
+  snapshot: InventoryHorizonSnapshot;
+}) {
+  const observedLocalDate = new Date(`${input.snapshot.observedLocalDate}T00:00:00.000Z`);
+  const inventoryThroughDate = new Date(`${input.snapshot.inventoryThroughDate}T00:00:00.000Z`);
+  return runSerializedCourseMonitoringWrite(input.courseId, async (transaction) => {
+    await transaction.courseInventoryHorizonObservation.upsert({
+      where: { courseId_observedLocalDate: { courseId: input.courseId, observedLocalDate } },
+      create: {
+        courseId: input.courseId,
+        observedLocalDate,
+        inventoryThroughDate,
+        daysAhead: input.snapshot.daysAhead,
+        trailingUnavailableDays: input.snapshot.trailingUnavailableDays,
+        observedAt: input.snapshot.observedAt,
+        evidenceUrl: input.snapshot.evidenceUrl,
+      },
+      update: {
+        inventoryThroughDate,
+        daysAhead: input.snapshot.daysAhead,
+        trailingUnavailableDays: input.snapshot.trailingUnavailableDays,
+        observedAt: input.snapshot.observedAt,
+        evidenceUrl: input.snapshot.evidenceUrl,
+      },
+    });
+    const observations = await transaction.courseInventoryHorizonObservation.findMany({
+      where: { courseId: input.courseId },
+      orderBy: { observedLocalDate: "desc" },
+      take: 14,
+    });
+    const learned = inferLearnedInventoryHorizon(
+      observations.map((observation) => ({
+        observedLocalDate: observation.observedLocalDate.toISOString().slice(0, 10),
+        inventoryThroughDate: observation.inventoryThroughDate.toISOString().slice(0, 10),
+        daysAhead: observation.daysAhead,
+        trailingUnavailableDays: observation.trailingUnavailableDays,
+        observedAt: observation.observedAt,
+        evidenceUrl: observation.evidenceUrl,
+      })),
+    );
+    if (!learned) return { learned: null, observationCount: observations.length };
+
+    await transaction.course.updateMany({
+      where: {
+        id: input.courseId,
+        OR: [
+          { observedInventoryHorizonObservedAt: null },
+          { observedInventoryHorizonObservedAt: { lte: learned.observedAt } },
+        ],
+      },
+      data: {
+        observedInventoryHorizonDaysAhead: learned.daysAhead,
+        observedInventoryHorizonConfidence: learned.confidence,
+        observedInventoryHorizonSampleCount: learned.sampleCount,
+        observedInventoryHorizonObservedAt: learned.observedAt,
+      },
+    });
+    return { learned, observationCount: observations.length };
+  });
 }
 
 export async function recordCoursePhysicalLayoutEvidence(input: {

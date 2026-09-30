@@ -91,6 +91,7 @@ export type SearchStatusCourseReport = {
     opensAt: string;
     timeZone: string;
     exactTime: boolean;
+    basis?: "PUBLISHED_POLICY" | "OBSERVED_INVENTORY";
   };
   matchingTimes?: Array<{
     matchId?: string;
@@ -548,7 +549,9 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
       monitoringLabel: "Scheduled",
       stateLabel: course.bookingWindow.exactTime
         ? `Booking opens ${release}`
-        : `Booking expected to open ${release}`,
+        : course.bookingWindow.basis === "OBSERVED_INVENTORY"
+          ? `Online times usually appear around ${release}`
+          : `Booking expected to open ${release}`,
       icon: "◷",
       color: "#17647a",
       badgeBackground: "#e6f3f7",
@@ -558,7 +561,9 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
       calloutText: "#174152",
       detail: course.bookingWindow.exactTime
         ? "The course has not released tee times for your date yet. We’ll start checking at that time and email you when a matching spot appears."
-        : "The course has not published an exact release time. We’ll begin checking that day and email you when a matching spot appears."
+        : course.bookingWindow.basis === "OBSERVED_INVENTORY"
+          ? "Based on recent releases, this course usually posts online tee times around that date. We’ll begin checking then and email you when a matching spot appears."
+          : "The course has not published an exact release time. We’ll begin checking that day and email you when a matching spot appears."
     };
   }
 
