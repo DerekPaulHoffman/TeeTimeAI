@@ -1421,7 +1421,7 @@ test.describe("Tee Time Spot UI smoke", () => {
       });
     });
 
-    await page.getByLabel("Date").fill(formatLocalDate(new Date()));
+    await page.getByLabel("Date").fill(formatLocalDate(addLocalDays(new Date(), -2)));
     await expect(page.getByText("Choose a future date for alerts.")).toBeVisible();
     await expect(page.getByLabel("Date")).toHaveAttribute("aria-describedby", /search-form-guidance/);
     await expect(alertActionButton).toBeDisabled();
@@ -1552,6 +1552,77 @@ test.describe("Tee Time Spot UI smoke", () => {
       true
     );
     await expectNoPageIssues(issues, testInfo);
+  });
+
+  test.describe("course-local date picker", () => {
+    test.use({ timezoneId: "Asia/Tokyo" });
+
+    test.beforeEach(async ({ page }) => {
+      await page.clock.setFixedTime(new Date("2026-09-30T03:16:30.000Z"));
+      const newYork = { ...smokeCourses[0], photoReference: undefined };
+      const tokyo = {
+        ...smokeCourses[1],
+        googlePlaceId: "date-picker-tokyo",
+        name: "Tokyo Public Course",
+        photoReference: undefined,
+        timeZone: "Asia/Tokyo"
+      };
+      await page.addInitScript(({ courses, selectedCourses }) => {
+        window.sessionStorage.setItem("tee-time-spot:search-draft:v1", JSON.stringify({
+          date: "2026-09-30", courses, selectedCourses
+        }));
+      }, { courses: [newYork, tokyo], selectedCourses: [newYork] });
+      // These picker checks must never create alerts or request provider data.
+      await page.route("**/api/**", async (route) => {
+        expect(new URL(route.request().url()).pathname).toBe("/api/analytics/events");
+        await route.fulfill({
+          body: JSON.stringify({ event: { id: "date-picker-event" } }),
+          contentType: "application/json",
+          status: 201
+        });
+      });
+    });
+
+    test("allows course-local tomorrow in a browser already on that date", async ({ page }) => {
+      await page.goto("/search");
+      await expect(page.getByRole("heading", { name: "Tashua Knolls Golf Course" }).first())
+        .toBeVisible();
+      expect(await page.evaluate(() => Intl.DateTimeFormat().resolvedOptions().timeZone)).toBe(
+        "Asia/Tokyo"
+      );
+      expect(await page.evaluate(() => new Date().getDate())).toBe(30);
+      const dateInput = page.getByLabel("Date");
+      await expect(dateInput).toHaveAttribute("min", "2026-09-30");
+      await expect(dateInput).toHaveValue("2026-09-30");
+      expect(await dateInput.evaluate((input: HTMLInputElement) => input.validity.valid)).toBe(true);
+      await dateInput.fill("2026-09-30");
+      await dateInput.press("Tab");
+
+      await page.clock.setFixedTime(new Date("2026-09-30T04:00:01.000Z"));
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await expect(dateInput).toHaveAttribute("min", "2026-10-01");
+      await expect(dateInput).toHaveValue("2026-09-30");
+      await expect(dateInput).toHaveAttribute("aria-invalid", "true");
+      expect(await dateInput.evaluate((input: HTMLInputElement) => input.validity.valid)).toBe(false);
+    });
+
+    test("requires tomorrow for all selected courses and relaxes after deselection", async ({ page }) => {
+      await page.goto("/search");
+      const dateInput = page.getByLabel("Date");
+      await expect(dateInput).toHaveAttribute("min", "2026-09-30");
+      await dateInput.fill("2026-09-30");
+      await dateInput.press("Tab");
+      await page.getByRole("button", { name: "Add Tokyo Public Course" }).click();
+      await expect(dateInput).toHaveAttribute("min", "2026-10-01");
+      await expect(dateInput).toHaveValue("2026-09-30");
+      expect(await dateInput.evaluate((input: HTMLInputElement) => input.validity.valid)).toBe(false);
+      await page.locator(".course-row")
+        .filter({ has: page.getByRole("heading", { name: "Tokyo Public Course" }) })
+        .getByRole("button", { name: "Remove Tokyo Public Course" }).click();
+      await expect(dateInput).toHaveAttribute("min", "2026-09-30");
+      await expect(dateInput).toHaveValue("2026-09-30");
+      expect(await dateInput.evaluate((input: HTMLInputElement) => input.validity.valid)).toBe(true);
+    });
   });
 
   test("dashboard access state is clear and layout is stable", async ({ page }, testInfo) => {
