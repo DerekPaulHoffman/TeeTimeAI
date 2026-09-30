@@ -1,7 +1,7 @@
 // @vitest-environment node
 
 import { randomUUID } from "node:crypto";
-import { Prisma, PrismaClient } from "@prisma/client";
+import { CourseSupportBatchIncidentResult, CourseSupportBatchStatus, Prisma, PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -136,6 +136,24 @@ describe.skipIf(localUrl === null)("native PostgreSQL selected-evidence byte upp
     return nativeBytes;
   }
 
+  async function minimumAllowance(transaction: Prisma.TransactionClient, model: string, query: Query, nativeBytes: number) {
+    let low = nativeBytes - 1;
+    let high = EVIDENCE_BYTES;
+    await expect(preflight(transaction, low)(model, "findMany", query)).rejects.toMatchObject({
+      reason: "EVIDENCE_BOUND_EXCEEDED",
+    });
+    await preflight(transaction, high)(model, "findMany", query);
+    while (high - low > 1) {
+      const middle = Math.floor((low + high) / 2);
+      try { await preflight(transaction, middle)(model, "findMany", query); high = middle; }
+      catch (error) {
+        if (!(error instanceof AcceptanceBytePreflightFence) || error.reason !== "EVIDENCE_BOUND_EXCEEDED") throw error;
+        low = middle;
+      }
+    }
+    return high;
+  }
+
   it("ignores huge unselected probe/discovery/run columns but rejects selected JSON before native hydration", async () => {
     await withFixture(async (transaction, fixture) => {
       const huge = { text: "x".repeat(EVIDENCE_BYTES + 1_024) };
@@ -239,6 +257,134 @@ describe.skipIf(localUrl === null)("native PostgreSQL selected-evidence byte upp
       await twoReads("course", "findMany", query);
     });
   });
+
+  it("weights the native legacy-terminal shared-five and singleton-one batches without losing cumulative byte charges", async () => {
+    await withFixture(async (transaction, fixture) => {
+      const key = `${fixture.batchId}-weighted`;
+      const singletonBatchId = `${key}-singleton`;
+      const additionalCourses = Array.from({ length: 4 }, (_, index) => `${key}-course-${index}`);
+      await transaction.course.createMany({ data: additionalCourses.map((id) => ({
+        id, name: "Local weighted batch proof", latitude: 41, longitude: -73,
+      })) });
+      await transaction.courseSupportIncident.createMany({ data: additionalCourses.map((courseId, index) => ({
+        id: `${key}-incident-${index}`, reference: `${key}-incident-ref-${index}`, courseId,
+        kind: "NEEDS_ADAPTER", courseNameSnapshot: "Local weighted batch proof", platformSnapshot: "UNKNOWN",
+      })) });
+      const finishedAt = new Date("2026-09-30T00:00:00.123Z");
+      const batchData = { status: "SUCCEEDED" as const, completedAt: finishedAt,
+        releaseSha: "a".repeat(40), deployedAt: finishedAt };
+      await transaction.courseSupportBatch.update({ where: { id: fixture.batchId }, data: {
+        ...batchData, summary: { marker: "shared-five", text: "s".repeat(512) },
+      }, select: { id: true } });
+      await transaction.courseSupportBatch.create({ data: { id: singletonBatchId, reference: `${key}-singleton-ref`,
+        providerFamilyKey: "LOCAL_PROOF", failureFingerprint: "LOCAL_PROOF", leaseToken: "local-only",
+        leaseExpiresAt: finishedAt, heartbeatAt: finishedAt, baseSha: "a".repeat(40), ...batchData,
+        summary: { marker: "singleton-once", text: "x".repeat(256 * 1_024) },
+      }, select: { id: true } });
+      await transaction.courseSupportBatchIncident.updateMany({ where: { batchId: fixture.batchId }, data: {
+        result: "FINAL_DISPOSITION", verifiedAt: finishedAt, verifiedIncidentUpdatedAt: finishedAt,
+      } });
+      await transaction.courseSupportBatchIncident.createMany({ data: additionalCourses.map((courseId, index) => ({
+        id: `${key}-entry-${index}`, batchId: index === 3 ? singletonBatchId : fixture.batchId,
+        incidentId: `${key}-incident-${index}`, courseId, cycle: 1, result: "FINAL_DISPOSITION",
+        proofSnapshot: { local: true }, verifiedAt: finishedAt, verifiedIncidentUpdatedAt: finishedAt,
+      })) });
+
+      // Match the native legacy-terminal relation/scalar projection. The scope
+      // remains local to this rollback fixture and contains all six entries.
+      const query = { where: { batchId: { in: [fixture.batchId, singletonBatchId] }, result: "FINAL_DISPOSITION" as const,
+        verifiedAt: { not: null }, verifiedIncidentUpdatedAt: { not: null },
+        batch: { status: { in: ["SUCCEEDED", "PARTIAL"] as CourseSupportBatchStatus[] },
+          completedAt: { gte: new Date("2026-01-01T00:00:00.000Z") }, releaseSha: { not: null }, deployedAt: { not: null } },
+      }, orderBy: [{ batch: { completedAt: "desc" as const } }, { id: "desc" as const }], select: {
+        id: true, batchId: true, incidentId: true, courseId: true, cycle: true, result: true, proofSnapshot: true,
+        verifiedAt: true, verifiedIncidentUpdatedAt: true, createdAt: true, updatedAt: true,
+        batch: { select: { id: true, status: true, createdAt: true, completedAt: true, releaseSha: true,
+          deployedAt: true, recheckDispatchStartedAt: true, summary: true } },
+      } };
+      const native = await transaction.courseSupportBatchIncident.findMany(query);
+      expect(native).toHaveLength(6);
+      expect(native.filter((entry) => entry.batch.id === fixture.batchId)).toHaveLength(5);
+      expect(native.filter((entry) => entry.batch.id === singletonBatchId)).toHaveLength(1);
+      const nativeBytes = Buffer.byteLength(JSON.stringify(native), "utf8");
+
+      // Independently compute selected scalar encoding and existing typed pads
+      // on PostgreSQL, without calling the preflight's SQL-expression builder.
+      const incidentPadding = 4 * 32 + Math.max(...Object.values(CourseSupportBatchIncidentResult)
+        .map((value) => Buffer.byteLength(JSON.stringify(value), "utf8")));
+      const batchPadding = 4 * 32 + Math.max(...Object.values(CourseSupportBatchStatus)
+        .map((value) => Buffer.byteLength(JSON.stringify(value), "utf8")));
+      const entryBytes = await transaction.$queryRaw<Array<{ id: string; bytes: bigint }>>(Prisma.sql`
+        SELECT "id", (octet_length(jsonb_build_object(
+          'id', "id", 'batchId', "batchId", 'incidentId', "incidentId", 'courseId', "courseId",
+          'cycle', "cycle", 'result', "result", 'proofSnapshot', "proofSnapshot", 'verifiedAt', "verifiedAt",
+          'verifiedIncidentUpdatedAt', "verifiedIncidentUpdatedAt", 'createdAt', "createdAt", 'updatedAt', "updatedAt"
+        )::text) + ${incidentPadding}::bigint)::bigint AS bytes
+        FROM "CourseSupportBatchIncident" WHERE "batchId" IN (${fixture.batchId}, ${singletonBatchId})
+      `);
+      const batchBytes = await transaction.$queryRaw<Array<{ id: string; bytes: bigint }>>(Prisma.sql`
+        SELECT "id", (octet_length(jsonb_build_object(
+          'id', "id", 'status', "status", 'createdAt', "createdAt", 'completedAt', "completedAt",
+          'releaseSha', "releaseSha", 'deployedAt', "deployedAt", 'recheckDispatchStartedAt', "recheckDispatchStartedAt",
+          'summary', "summary"
+        )::text) + ${batchPadding}::bigint)::bigint AS bytes
+        FROM "CourseSupportBatch" WHERE "id" IN (${fixture.batchId}, ${singletonBatchId})
+      `);
+      expect(entryBytes).toHaveLength(6);
+      expect(batchBytes).toHaveLength(2);
+      const bytesByBatch = new Map(batchBytes.map((row) => [row.id, row.bytes]));
+      const envelope = (length: number) => BigInt(2 + Math.max(0, length - 1) +
+        length * (Buffer.byteLength(JSON.stringify("batch"), "utf8") + 2));
+      const expectedCharge = 2n * (envelope(native.length) + entryBytes.reduce((sum, row) => sum + row.bytes, 0n) +
+        5n * bytesByBatch.get(fixture.batchId)! + bytesByBatch.get(singletonBatchId)!);
+      const oldMaximumMultiplicityCharge = 2n * (envelope(native.length) +
+        entryBytes.reduce((sum, row) => sum + row.bytes, 0n) +
+        5n * (bytesByBatch.get(fixture.batchId)! + bytesByBatch.get(singletonBatchId)!));
+      expect(expectedCharge).toBeGreaterThanOrEqual(BigInt(nativeBytes) * 2n);
+      expect(oldMaximumMultiplicityCharge - expectedCharge).toBe(8n * bytesByBatch.get(singletonBatchId)!);
+      expect(expectedCharge * 2n).toBeLessThan(BigInt(EVIDENCE_BYTES));
+      const minimum = await minimumAllowance(transaction, "courseSupportBatchIncident", query, nativeBytes);
+      expect(BigInt(minimum)).toBe(expectedCharge);
+
+      const statements: Prisma.Sql[] = [];
+      const recording = new Proxy(transaction, { get(target, property) {
+        if (property === "$queryRaw") return async (statement: Prisma.Sql) => {
+          statements.push(statement);
+          return transaction.$queryRaw(statement);
+        };
+        return Reflect.get(target, property);
+      } });
+      await preflight(recording, minimum)("courseSupportBatchIncident", "findMany", query);
+      const batchStatement = statements.find((statement) => statement.text.includes('FROM "CourseSupportBatch" AS acceptance_row'))!;
+      expect(batchStatement.text).toContain("* acceptance_weight.occurrences");
+      expect(batchStatement.text).toContain("AS acceptance_weight(identity, occurrences)");
+      const weights = new Map([...batchStatement.text.matchAll(/\(\$(\d+)::text,\s*\$(\d+)::bigint\)/gu)]
+        .map((match) => [batchStatement.values[Number(match[1]) - 1], batchStatement.values[Number(match[2]) - 1]]));
+      expect(weights).toEqual(new Map([[fixture.batchId, 5n], [singletonBatchId, 1n]]));
+      expect(batchStatement.text).not.toContain(fixture.batchId);
+      expect(batchStatement.text).not.toContain(singletonBatchId);
+      await expect(preflight(transaction, minimum - 1)("courseSupportBatchIncident", "findMany", query))
+        .rejects.toMatchObject({ reason: "EVIDENCE_BOUND_EXCEEDED", boundary: "SELECTED_EVIDENCE_BYTES" });
+
+      const twoReads = preflight(transaction, minimum * 2);
+      await twoReads("courseSupportBatchIncident", "findMany", query);
+      await twoReads("courseSupportBatchIncident", "findMany", query);
+      const oneByteShort = preflight(transaction, minimum * 2 - 1);
+      await oneByteShort("courseSupportBatchIncident", "findMany", query);
+      await expect(oneByteShort("courseSupportBatchIncident", "findMany", query)).rejects.toMatchObject({
+        reason: "EVIDENCE_BOUND_EXCEEDED", boundary: "SELECTED_EVIDENCE_BYTES",
+      });
+      expect(await transaction.courseSupportBatchIncident.findMany(query)).toEqual(native);
+
+      const uniformQuery = { ...query, where: { ...query.where, batchId: fixture.batchId } };
+      const uniformCharge = Number(2n * (envelope(5) + entryBytes.filter((row) =>
+        native.some((entry) => entry.id === row.id && entry.batchId === fixture.batchId))
+        .reduce((sum, row) => sum + row.bytes, 0n) + 5n * bytesByBatch.get(fixture.batchId)!));
+      await preflight(transaction, uniformCharge)("courseSupportBatchIncident", "findMany", uniformQuery);
+      await expect(preflight(transaction, uniformCharge - 1)("courseSupportBatchIncident", "findMany", uniformQuery))
+        .rejects.toMatchObject({ reason: "EVIDENCE_BOUND_EXCEEDED", boundary: "SELECTED_EVIDENCE_BYTES" });
+    });
+  }, 40_000);
 
   it("bounds empty native result array syntax before hydration", async () => {
     await withFixture(async (transaction, fixture) => {

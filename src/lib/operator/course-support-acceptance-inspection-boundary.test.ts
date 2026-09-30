@@ -376,12 +376,13 @@ function campaignDatabase(input: {
     const statement = query as Prisma.Sql;
     calls.push({ model: "$queryRaw", method: "bytes", args: statement });
     const name = statement.text.match(/FROM "([A-Za-z0-9_]+)" AS acceptance_row/u)?.[1];
-    const id = statement.text.match(/acceptance_row\."([A-Za-z0-9_]+)"::text IN/u)?.[1];
+    const id = statement.text.match(/acceptance_row\."([A-Za-z0-9_]+)"::text = acceptance_weight\.identity/u)?.[1];
     const metadata = Prisma.dmmf.datamodel.models.find((model) => model.name === name);
-    if (!name || !id || !metadata || statement.text.includes("private-") || !statement.text.includes("SUM(octet_length")) {
+    if (!name || !id || !metadata || statement.text.includes("private-") ||
+        !statement.text.includes("SUM((octet_length") || !statement.text.includes("* acceptance_weight.occurrences")) {
       throw new Error("Fixture accepts only parameterized byte SELECTs.");
     }
-    const idPlaceholders = statement.text.match(/acceptance_row\."[A-Za-z0-9_]+"::text IN \((\$\d+(?:,\s*\$\d+)*)\)/u)?.[1];
+    const identityValues = statement.text.match(/JOIN \(VALUES\s*([\s\S]+?)\) AS acceptance_weight\(identity, occurrences\)/u)?.[1];
     const selectedFields = [...statement.text.matchAll(/\$(\d+)::text,\s*acceptance_row\."([A-Za-z0-9_]+)"/gu)]
       .map((match) => {
         const key = statement.values[Number(match[1]) - 1];
@@ -389,20 +390,35 @@ function campaignDatabase(input: {
         return { key, column: match[2] };
       });
     const emptyScalarProjection = selectedFields.length === 0 && statement.text.includes("'{}'::jsonb::text");
-    if (!idPlaceholders || (!emptyScalarProjection && !statement.text.includes("jsonb_build_object")) ||
+    if (!identityValues || (!emptyScalarProjection && !statement.text.includes("jsonb_build_object")) ||
         selectedFields.some(({ key, column }) => typeof key !== "string" ||
           !metadata.fields.some((field) => field.kind !== "object" && field.name === key && field.name === column))) {
       throw new Error("Fixture requires generated selected fields and a parameterized identity scope.");
     }
-    const identities = [...idPlaceholders.matchAll(/\$(\d+)/gu)].map((match) => statement.values[Number(match[1]) - 1]);
-    const selected = rows.get(name)!.filter((row) => identities.includes(row[id] as string));
+    const weightPairPattern = /\(\$(\d+)::text,\s*\$(\d+)::bigint\)/gu;
+    const weightPairs = [...identityValues.matchAll(weightPairPattern)];
+    if (identityValues.replace(weightPairPattern, "").replaceAll(",", "").trim()) {
+      throw new Error("Fixture requires a complete parameterized VALUES scope.");
+    }
+    const weights = new Map(weightPairs.map((match) => {
+      const identity = statement.values[Number(match[1]) - 1];
+      const occurrences = Number(statement.values[Number(match[2]) - 1]);
+      if (typeof identity !== "string" || !Number.isSafeInteger(occurrences) || occurrences < 1) {
+        throw new Error("Fixture requires parameterized identities and positive occurrence weights.");
+      }
+      return [identity, occurrences] as const;
+    }));
+    if (weights.size === 0 || weights.size !== weightPairs.length) {
+      throw new Error("Fixture requires distinct nonempty weighted identities.");
+    }
+    const selected = rows.get(name)!.filter((row) => weights.has(row[id] as string));
     const bytes = selected.reduce((total, row) => {
       const scalarProjection = Object.fromEntries(selectedFields.map(({ key, column }) => [key, row[column] ?? null]));
       // This in-memory SQL fixture overestimates typed padding. Real PostgreSQL
       // tests separately prove the generated SQL and its encoding upper bound.
       const padding = selectedFields.reduce((sum, { column }) =>
         sum + 32 * (Array.isArray(row[column]) ? (row[column] as unknown[]).length : 1), 0);
-      return total + Buffer.byteLength(JSON.stringify(scalarProjection), "utf8") + padding;
+      return total + (Buffer.byteLength(JSON.stringify(scalarProjection), "utf8") + padding) * weights.get(row[id] as string)!;
     }, 0);
     return [{ bytes: BigInt(bytes), matchedRows: BigInt(selected.length) }];
   });

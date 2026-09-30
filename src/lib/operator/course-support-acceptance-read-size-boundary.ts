@@ -384,20 +384,26 @@ export function createAcceptanceBytePreflight(
 
       for (const [selectedModel, identities] of identitiesByModel) {
         const id = selectedModel.fields.find((field) => field.isId)!;
-        const multiplicity = Math.max(...identities.values());
+        const weightedIdentities = [...identities].map(([identity, occurrences]) => {
+          if (!Number.isSafeInteger(occurrences) || occurrences < 1 || occurrences > maxIdentityItems) {
+            return fail("READ_FAILED");
+          }
+          return Prisma.sql`(${identity}::text, ${BigInt(occurrences)}::bigint)`;
+        });
         options.tick();
         const selectedBytes = selectedRowByteExpression([...selectedFieldsByModel.get(selectedModel)!.values()]);
         const totals = await transaction.$queryRaw<Array<{ bytes: bigint; matchedRows: bigint }>>(Prisma.sql`
-          SELECT COALESCE(SUM(${selectedBytes}), 0)::bigint AS "bytes",
+          SELECT COALESCE(SUM((${selectedBytes}) * acceptance_weight.occurrences), 0)::bigint AS "bytes",
                  COUNT(*)::bigint AS "matchedRows"
           FROM ${quotedGeneratedIdentifier(selectedModel.dbName ?? selectedModel.name)} AS acceptance_row
-          WHERE acceptance_row.${quotedGeneratedIdentifier(id.dbName ?? id.name)}::text IN (${Prisma.join([...identities.keys()])})
+          JOIN (VALUES ${Prisma.join(weightedIdentities)}) AS acceptance_weight(identity, occurrences)
+            ON acceptance_row.${quotedGeneratedIdentifier(id.dbName ?? id.name)}::text = acceptance_weight.identity
         `);
         if (!Array.isArray(totals) || totals.length !== 1) return fail("READ_FAILED");
         const total = record(totals[0]);
         const bytes = nonnegativeInteger(total.bytes);
         if (nonnegativeInteger(total.matchedRows) !== BigInt(identities.size)) return fail("READ_FAILED");
-        cumulativeBytes += bytes * BigInt(multiplicity) * SELECTED_EVIDENCE_BYTE_FACTOR;
+        cumulativeBytes += bytes * SELECTED_EVIDENCE_BYTE_FACTOR;
         if (cumulativeBytes > BigInt(options.maxBytes)) return fail("EVIDENCE_BOUND_EXCEEDED", "SELECTED_EVIDENCE_BYTES");
       }
     } catch (error) {

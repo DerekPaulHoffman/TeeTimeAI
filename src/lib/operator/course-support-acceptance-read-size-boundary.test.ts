@@ -13,7 +13,7 @@ function fixture(input: { maxBytes?: number; maxIdentityItems?: number } = {}) {
       findUnique: vi.fn().mockResolvedValue(null),
     },
   ]));
-  const sql = vi.fn(async (query: Prisma.Sql) => [{ bytes: 10n, matchedRows: BigInt(selectedIds(query).length) }]);
+  const sql = vi.fn(async (query: Prisma.Sql) => [{ bytes: weightedBytes(query, () => 10n), matchedRows: BigInt(selectedIds(query).length) }]);
   const tick = vi.fn();
   const transaction = { ...models, $queryRaw: sql } as unknown as Prisma.TransactionClient;
   return {
@@ -23,14 +23,63 @@ function fixture(input: { maxBytes?: number; maxIdentityItems?: number } = {}) {
   };
 }
 
+function selectedIdentityWeights(query: Prisma.Sql) {
+  const parameters = query.text.match(/JOIN \(VALUES ([\s\S]+?)\) AS acceptance_weight\(identity, occurrences\)/u)?.[1];
+  if (!parameters || !/^\(\$\d+::text, \$\d+::bigint\)(?:,\s*\(\$\d+::text, \$\d+::bigint\))*$/u.test(parameters)) {
+    throw new Error("Unexpected weighted identity scope.");
+  }
+  const pairs = [...parameters.matchAll(/\(\$(\d+)::text, \$(\d+)::bigint\)/gu)].map((match) => {
+    const identity = query.values[Number(match[1]) - 1];
+    const occurrences = query.values[Number(match[2]) - 1];
+    if (typeof identity !== "string" || typeof occurrences !== "bigint" || occurrences < 1n) {
+      throw new Error("Unexpected weighted identity parameters.");
+    }
+    return { identity, occurrences };
+  });
+  if (pairs.length === 0 || new Set(pairs.map(({ identity }) => identity)).size !== pairs.length) {
+    throw new Error("Unexpected weighted identity cardinality.");
+  }
+  return pairs;
+}
+
 function selectedIds(query: Prisma.Sql) {
-  const parameters = query.text.match(/::text IN \(([^)]+)\)/u)?.[1] ?? "";
-  return [...parameters.matchAll(/\$(\d+)/gu)].map((match) => query.values[Number(match[1]) - 1]);
+  return selectedIdentityWeights(query).map(({ identity }) => identity);
+}
+
+function weightedBytes(query: Prisma.Sql, bytesForIdentity: (identity: string) => bigint) {
+  return selectedIdentityWeights(query).reduce((bytes, { identity, occurrences }) =>
+    bytes + bytesForIdentity(identity) * occurrences, 0n);
 }
 
 function selectedFields(query: Prisma.Sql) {
   return [...query.text.matchAll(/\$(\d+)::text,\s*acceptance_row\."([A-Za-z_][A-Za-z0-9_]*)"/gu)]
     .map((match) => ({ key: query.values[Number(match[1]) - 1], column: match[2] }));
+}
+
+function batchOccurrenceFixture(occurrences: readonly [number, number], maxBytes: number) {
+  const actual = fixture({ maxBytes });
+  const rows = occurrences.flatMap((count, batch) => Array.from({ length: count }, (_, entry) => ({
+    id: `private-entry-${batch}-${entry}`,
+    batch: { id: batch === 0 ? "private-shared-batch" : "private-singleton-batch" },
+  })));
+  const query = {
+    where: { result: "FINAL_DISPOSITION", verifiedAt: { not: null },
+      batch: { status: { in: ["SUCCEEDED", "PARTIAL"] } } },
+    orderBy: [{ batch: { completedAt: "desc" } }, { id: "desc" }],
+    select: { id: true, batch: { select: { summary: true } } },
+  };
+  actual.models.courseSupportBatchIncident.count.mockResolvedValue(rows.length);
+  actual.models.courseSupportBatch.count.mockResolvedValue(2);
+  actual.models.courseSupportBatchIncident.findMany.mockResolvedValue(rows);
+  actual.sql.mockImplementation(async (statement) => [{
+    bytes: weightedBytes(statement, (identity) => identity === "private-singleton-batch" ? 100n : 10n),
+    matchedRows: BigInt(selectedIds(statement).length),
+  }]);
+  // Every root element retains its relation-key/array envelope and its own
+  // scalar bytes; each related batch payload is charged on every appearance.
+  const envelopeBytes = 2 + rows.length - 1 + rows.length * (Buffer.byteLength(JSON.stringify("batch"), "utf8") + 2);
+  const expectedBytes = 2 * (envelopeBytes + rows.length * 10 + occurrences[0] * 10 + occurrences[1] * 100);
+  return { ...actual, rows, query, envelopeBytes, expectedBytes };
 }
 
 describe("native acceptance database byte preflight", () => {
@@ -72,10 +121,11 @@ describe("native acceptance database byte preflight", () => {
       } });
     expect(sql).toHaveBeenCalledTimes(6);
     const statements = sql.mock.calls.map(([statement]) => statement);
-    expect(statements.every((statement) => statement.text.includes("SUM(octet_length(") && statement.text.includes("jsonb_build_object("))).toBe(true);
+    expect(statements.every((statement) => statement.text.includes("SUM((octet_length(") && statement.text.includes("jsonb_build_object(") &&
+      statement.text.includes("* acceptance_weight.occurrences"))).toBe(true);
     expect(statements.every((statement) => !statement.text.includes("private-"))).toBe(true);
     expect(statements.find((statement) => statement.text.includes('FROM "CourseMonitoringStatus"'))?.text)
-      .toMatch(/acceptance_row\."courseId"::text IN \(\$\d+\)/u);
+      .toMatch(/acceptance_row\."courseId"::text = acceptance_weight\.identity/u);
     expect(models.courseSupportVerificationRequest.count).toHaveBeenCalledWith({ where: { AND: [
       { status: "QUEUED" }, { batchIncident: { is: { AND: [{ cycle: 4 }, { incident: { is: where } }] } } },
     ] } });
@@ -199,6 +249,7 @@ describe("native acceptance database byte preflight", () => {
     expect(sql.mock.calls[0][0].text).not.toContain(privateId);
     expect(sql.mock.calls[0][0].text).toContain('FROM "CourseMonitoringStatus"');
     expect(sql.mock.calls[0][0].text).toContain('acceptance_row."courseId"::text');
+    expect(selectedIdentityWeights(sql.mock.calls[0][0])).toEqual([{ identity: privateId, occurrences: 1n }]);
   });
 
   it("accounts conservatively for repeated related identities and cumulative queries", async () => {
@@ -213,6 +264,71 @@ describe("native acceptance database byte preflight", () => {
     models.course.findMany.mockResolvedValue([{ id: "private-course" }]);
 
     await expect(preflight("course", "findMany", {})).rejects.toMatchObject({ message: "EVIDENCE_BOUND_EXCEEDED", boundary: "SELECTED_EVIDENCE_BYTES" });
+  });
+
+  it("charges a shared batch five times and a larger singleton only once in the native relation scope", async () => {
+    const expected = batchOccurrenceFixture([5, 1], 16_777_216);
+    const actual = batchOccurrenceFixture([5, 1], expected.expectedBytes);
+    const unchangedQuery = structuredClone(actual.query);
+
+    await actual.preflight("courseSupportBatchIncident", "findMany", actual.query);
+
+    expect(actual.models.courseSupportBatchIncident.findMany).toHaveBeenCalledExactlyOnceWith({
+      ...actual.query, select: { id: true, batch: { select: { id: true } } },
+    });
+    expect(actual.query).toEqual(unchangedQuery);
+    expect(actual.sql).toHaveBeenCalledTimes(2);
+    const batchStatement = actual.sql.mock.calls.map(([statement]) => statement)
+      .find((statement) => statement.text.includes('FROM "CourseSupportBatch"'))!;
+    expect(selectedIdentityWeights(batchStatement)).toEqual([
+      { identity: "private-shared-batch", occurrences: 5n },
+      { identity: "private-singleton-batch", occurrences: 1n },
+    ]);
+    expect(selectedFields(batchStatement)).toEqual([{ key: "summary", column: "summary" }]);
+    expect(batchStatement.text).toContain("* acceptance_weight.occurrences");
+    expect(batchStatement.text).not.toContain("private-");
+    expect(2 * (actual.envelopeBytes + actual.rows.length * 10 + 5 * (10 + 100))).toBeGreaterThan(actual.expectedBytes);
+
+    const under = batchOccurrenceFixture([5, 1], actual.expectedBytes - 1);
+    await expect((async () => {
+      await under.preflight("courseSupportBatchIncident", "findMany", under.query);
+      return under.transaction.courseSupportBatchIncident.findMany(under.query as never);
+    })()).rejects.toMatchObject({ reason: "EVIDENCE_BOUND_EXCEEDED", boundary: "SELECTED_EVIDENCE_BYTES" });
+    expect(under.models.courseSupportBatchIncident.findMany).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([1, 3])("retains the same conservative total for uniform identity multiplicity %i", async (occurrences) => {
+    const expected = batchOccurrenceFixture([occurrences, occurrences], 16_777_216);
+    const actual = batchOccurrenceFixture([occurrences, occurrences], expected.expectedBytes);
+    expect(actual.expectedBytes).toBe(2 * (actual.envelopeBytes + actual.rows.length * 10 + occurrences * (10 + 100)));
+    await actual.preflight("courseSupportBatchIncident", "findMany", actual.query);
+    const under = batchOccurrenceFixture([occurrences, occurrences], expected.expectedBytes - 1);
+    await expect(under.preflight("courseSupportBatchIncident", "findMany", under.query)).rejects.toMatchObject({
+      reason: "EVIDENCE_BOUND_EXCEEDED", boundary: "SELECTED_EVIDENCE_BYTES",
+    });
+  });
+
+  it("charges every duplicate again across repeated hydrations without a cumulative budget reset", async () => {
+    const expected = batchOccurrenceFixture([5, 1], 16_777_216);
+    const actual = batchOccurrenceFixture([5, 1], expected.expectedBytes * 2);
+    await actual.preflight("courseSupportBatchIncident", "findMany", actual.query);
+    await actual.preflight("courseSupportBatchIncident", "findMany", actual.query);
+    expect(actual.sql).toHaveBeenCalledTimes(4);
+    await expect(actual.preflight("courseSupportBatchIncident", "findMany", actual.query)).rejects.toMatchObject({
+      reason: "EVIDENCE_BOUND_EXCEEDED", boundary: "SELECTED_EVIDENCE_BYTES",
+    });
+    expect(actual.models.courseSupportBatchIncident.findMany).toHaveBeenCalledTimes(3);
+  });
+
+  it("requires distinct matched identities rather than total occurrence weight", async () => {
+    const actual = batchOccurrenceFixture([5, 1], 16_777_216);
+    actual.sql.mockImplementation(async (statement) => [{
+      bytes: weightedBytes(statement, () => 10n),
+      matchedRows: statement.text.includes('FROM "CourseSupportBatch"') ? 6n : BigInt(selectedIds(statement).length),
+    }]);
+    await expect(actual.preflight("courseSupportBatchIncident", "findMany", actual.query)).rejects.toMatchObject({
+      reason: "READ_FAILED", boundary: null,
+    });
   });
 
   it("accepts an absent unique row without querying row bytes", async () => {
@@ -371,7 +487,7 @@ describe("native acceptance database byte preflight", () => {
       { id: "private-entry", batch: { id: "private-batch", ownerAutomationRun: { id: "private-owner" } } },
     ] } }]);
     sql.mockImplementation(async (statement) => [{
-      bytes: statement.text.includes('FROM "AutomationRun"') ? 150n : 10n,
+      bytes: weightedBytes(statement, () => statement.text.includes('FROM "AutomationRun"') ? 150n : 10n),
       matchedRows: BigInt(selectedIds(statement).length),
     }]);
     await expect(preflight("course", "findMany", { select: {
