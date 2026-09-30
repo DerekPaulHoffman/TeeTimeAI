@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { isValidSearchCalendarDate } from "@/lib/validation/search-date";
+
 import {
   COURSE_LAYOUT_HOLE_OPTIONS,
   DEFAULT_SEARCH_CADENCE_MINUTES,
@@ -61,7 +63,7 @@ const selectedCourseSchema = z.object({
 
 export const teeSearchDetailsSchema = z
   .object({
-    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD date"),
+    date: z.string().refine(isValidSearchCalendarDate, "Use a valid YYYY-MM-DD date"),
     startTime: timeSchema,
     endTime: timeSchema,
     userTimeZone: timeZoneSchema.default(DEFAULT_SEARCH_TIME_ZONE),
@@ -91,19 +93,8 @@ export const teeSearchDetailsSchema = z
       });
     }
 
-    const today = new Date();
-    const localToday = [
-      today.getFullYear(),
-      String(today.getMonth() + 1).padStart(2, "0"),
-      String(today.getDate()).padStart(2, "0")
-    ].join("-");
-    if (value.date <= localToday) {
-      context.addIssue({
-        code: "custom",
-        path: ["date"],
-        message: "Search date must be in the future"
-      });
-    }
+    // Future-date eligibility is checked by the service after canonical
+    // courses are resolved. Neither the server nor the golfer timezone owns it.
   });
 
 export const teeSearchInputSchema = teeSearchDetailsSchema

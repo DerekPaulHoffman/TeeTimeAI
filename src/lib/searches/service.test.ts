@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { prisma } from "@/lib/prisma";
 import {
@@ -68,6 +68,8 @@ vi.mock(
 const mockedPrisma = vi.mocked(prisma, { deep: true });
 
 beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-07-01T12:00:00.000Z"));
   mockedPrisma.$transaction.mockImplementation(async (callback) =>
     (callback as (transaction: typeof prisma) => Promise<unknown>)(prisma),
   );
@@ -87,6 +89,10 @@ beforeEach(() => {
   providerObservationMocks.getCourseProviderObservationFencesInTransaction.mockResolvedValue(
     new Map(),
   );
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("listTeeSearchesForUser", () => {
@@ -535,6 +541,59 @@ describe("createTeeSearchForUser", () => {
     mockedPrisma.course.update.mockResolvedValue({ id: "course-1" } as never);
     mockedPrisma.googlePlaceReview.findMany.mockResolvedValue([]);
     mockedPrisma.teeSearch.count.mockResolvedValue(0);
+  });
+
+  it("accepts the next course-local date after UTC midnight and ignores the submitted timezones", async () => {
+    vi.setSystemTime(new Date("2026-09-30T03:16:30.000Z"));
+    mockedPrisma.course.findUnique.mockResolvedValue(null);
+    mockedPrisma.teeSearch.create.mockResolvedValue({ id: "search-1" } as never);
+
+    await createTeeSearchForUser("user-1", {
+      date: "2026-09-30",
+      startTime: "10:00",
+      endTime: "14:00",
+      userTimeZone: "Asia/Tokyo",
+      players: 2,
+      cadenceMinutes: 5,
+      courses: [{
+        name: "Oak Hills Park Golf Course", latitude: 41.11, longitude: -73.46,
+        timeZone: "Asia/Tokyo", rank: 1,
+      }],
+    });
+
+    expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ date: new Date("2026-09-30T00:00:00.000Z"),
+        preferences: { create: [expect.objectContaining({ course: {
+          connectOrCreate: expect.objectContaining({ create: expect.objectContaining({ timeZone: "America/New_York" }) }),
+        } })] },
+      }),
+    }));
+  });
+
+  it.each(["2026-09-29", "2026-09-28"])("rejects local same-day or past creation %s before persisting", async (date) => {
+    vi.setSystemTime(new Date("2026-09-30T03:16:30.000Z"));
+    mockedPrisma.course.findUnique.mockResolvedValue(null);
+    await expect(createTeeSearchForUser("user-1", {
+      date, startTime: "10:00", endTime: "14:00", players: 2, cadenceMinutes: 5,
+      courses: [{ name: "Eastern Course", latitude: 41.11, longitude: -73.46, rank: 1 }],
+    })).rejects.toThrow(/future/);
+    expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
+    expect(mockedPrisma.course.update).not.toHaveBeenCalled();
+  });
+
+  it("uses the persisted canonical timezone instead of tampered client coordinates", async () => {
+    vi.setSystemTime(new Date("2026-09-30T03:16:30.000Z"));
+    mockedPrisma.course.findUnique.mockResolvedValue({
+      id: "canonical-course", timeZone: "Asia/Tokyo", isPublic: true,
+    } as never);
+
+    await expect(createTeeSearchForUser("user-1", {
+      date: "2026-09-30", startTime: "10:00", endTime: "14:00",
+      userTimeZone: "America/Los_Angeles", players: 2, cadenceMinutes: 5,
+      courses: [{ courseId: "canonical-course", name: "Canonical Course",
+        latitude: 41.11, longitude: -73.46, timeZone: "America/New_York", rank: 1 }],
+    })).rejects.toThrow(/future/);
+    expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
   });
 
   it("persists a review-pending direct lookup candidate without marking it public", async () => {
@@ -1892,6 +1951,39 @@ describe("updateTeeSearchForUser", () => {
       statusEmailSnapshot: null,
       matches: [],
     } as never);
+  });
+
+  it("accepts a future course-local edit after UTC midnight", async () => {
+    vi.setSystemTime(new Date("2026-09-30T03:16:30.000Z"));
+    mockedPrisma.teeSearch.findUniqueOrThrow.mockReset().mockResolvedValue({
+      preferences: [{ course: { timeZone: "America/New_York" } }],
+    } as never);
+
+    await updateTeeSearchForUser("user-1", "search-1", {
+      date: "2026-09-30", userTimeZone: "Asia/Tokyo",
+    });
+
+    expect(mockedPrisma.teeSearch.findUniqueOrThrow).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "search-1", userId: "user-1" },
+    }));
+    expect(mockedPrisma.teeSearch.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ date: new Date("2026-09-30T00:00:00.000Z") }),
+    }));
+  });
+
+  it("rejects an edit when one canonical course has already reached the selected local date", async () => {
+    vi.setSystemTime(new Date("2026-09-30T03:16:30.000Z"));
+    mockedPrisma.teeSearch.findUniqueOrThrow.mockReset().mockResolvedValue({
+      preferences: [{ course: { timeZone: "America/New_York" } }, { course: { timeZone: "Asia/Tokyo" } }],
+    } as never);
+
+    await expect(updateTeeSearchForUser("user-1", "search-1", {
+      date: "2026-09-30", userTimeZone: "America/Los_Angeles",
+      coursePreferences: [{ id: "pref-1", rank: 1 }, { id: "pref-2", rank: 2 }],
+    })).rejects.toThrow(/every selected course/);
+
+    expect(mockedPrisma.teeSearch.update).not.toHaveBeenCalled();
+    expect(mockedPrisma.coursePreference.updateMany).not.toHaveBeenCalled();
   });
 
   it("hides a persisted match from the mutation response after newer failure evidence", async () => {

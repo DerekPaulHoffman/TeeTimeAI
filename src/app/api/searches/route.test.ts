@@ -75,7 +75,48 @@ describe("POST /api/searches", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  it("passes a valid course-local tomorrow to the service after UTC midnight", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-30T03:16:30.000Z"));
+    mocks.hasClerkConfig.mockReturnValue(true);
+    mocks.getRequiredAppUser.mockResolvedValue({ id: "app-user-1", email: "owner@example.com" });
+    mocks.createTeeSearchForUser.mockResolvedValue({ id: "search-1", preferences: [] });
+    mocks.startSearchSchedule.mockResolvedValue({ id: "schedule-1" });
+
+    const response = await POST(searchRequest("owner@example.com", "TEST", false, "2026-09-30"));
+
+    expect(response.status).toBe(201);
+    expect(mocks.createTeeSearchForUser).toHaveBeenCalledWith(
+      "app-user-1", expect.objectContaining({ date: "2026-09-30" }), "TEST", false,
+    );
+  });
+
+  it("returns a course-local future-date rejection as a 400 without starting a workflow", async () => {
+    mocks.hasClerkConfig.mockReturnValue(true);
+    mocks.getRequiredAppUser.mockResolvedValue({ id: "app-user-1", email: "owner@example.com" });
+    mocks.createTeeSearchForUser.mockRejectedValue(new Error("Search date must be in the future for every selected course"));
+
+    const response = await POST(searchRequest());
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: "Search date must be in the future for every selected course" });
+    expect(mocks.startSearchSchedule).not.toHaveBeenCalled();
+  });
+
+  it("rejects an impossible calendar date before calling the creation service", async () => {
+    mocks.hasClerkConfig.mockReturnValue(true);
+    mocks.getRequiredAppUser.mockResolvedValue({ id: "app-user-1", email: "owner@example.com" });
+
+    const response = await POST(searchRequest("owner@example.com", "TEST", false, "2026-09-31"));
+
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toMatch(/valid YYYY-MM-DD date/);
+    expect(mocks.createTeeSearchForUser).not.toHaveBeenCalled();
+    expect(mocks.startSearchSchedule).not.toHaveBeenCalled();
   });
 
   it("refuses to create alerts when account auth is unavailable", async () => {
@@ -191,7 +232,8 @@ describe("POST /api/searches", () => {
 function searchRequest(
   alertEmail = "golfer@example.com",
   trafficClass?: string,
-  syntheticMultiCycle = false
+  syntheticMultiCycle = false,
+  date = futureDate()
 ) {
   return new NextRequest("http://localhost/api/searches", {
     method: "POST",
@@ -203,7 +245,7 @@ function searchRequest(
         : {})
     },
     body: JSON.stringify({
-      date: futureDate(),
+      date,
       startTime: "09:00",
       endTime: "14:00",
       players: 2,
