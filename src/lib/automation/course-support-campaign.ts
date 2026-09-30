@@ -36,6 +36,7 @@ import {
 } from "./course-support-remediation-routing";
 import { readPersistedCourseSupportSearchExecutionFence } from "./course-support-search-execution-fence";
 import {
+  hasLegacyParkedCampaignTerminalMetadata,
   reconcileLegacyParkedCampaignTerminalEvidence,
   type LegacyParkedCampaignTerminalBatchEntry,
 } from "./course-support-campaign-terminal-reconciliation";
@@ -5809,24 +5810,27 @@ export async function loadCampaignMemberObservations(
     audit.members.map((member) => [member.incidentId, member]),
   );
   const incidentIds = audit.members.map((member) => member.incidentId);
+  const incidentBindingSelect = {
+    id: true,
+    courseId: true,
+    cycle: true,
+    status: true,
+    activeBatchId: true,
+    confirmedAt: true,
+    firstSeenAt: true,
+    providerFamilyKey: true,
+    failureClass: true,
+    attemptCount: true,
+    activeRealSearchCount: true,
+    resolution: true,
+    resolvedAt: true,
+    decisionAt: true,
+    updatedAt: true,
+  } as const;
   const incidents = await database.courseSupportIncident.findMany({
     where: { id: { in: incidentIds } },
     select: {
-      id: true,
-      courseId: true,
-      cycle: true,
-      status: true,
-      activeBatchId: true,
-      confirmedAt: true,
-      firstSeenAt: true,
-      providerFamilyKey: true,
-      failureClass: true,
-      attemptCount: true,
-      activeRealSearchCount: true,
-      attemptLedger: true,
-      resolution: true,
-      resolvedAt: true,
-      decisionAt: true,
+      ...incidentBindingSelect,
       monitoringEvents: {
         where: {
           occurredAt: { gte: capturedAt },
@@ -5881,6 +5885,73 @@ export async function loadCampaignMemberObservations(
       },
     },
   });
+  const legacyIncidentMetadata = (incident: (typeof incidents)[number]) => ({
+    id: incident.id,
+    courseId: incident.courseId,
+    cycle: incident.cycle,
+    status: incident.status,
+    activeBatchId: incident.activeBatchId,
+    confirmedAt: incident.confirmedAt,
+    firstSeenAt: incident.firstSeenAt,
+    resolvedAt: incident.resolvedAt,
+    resolution: incident.resolution,
+    providerFamilyKey: incident.providerFamilyKey,
+    failureClass: incident.failureClass,
+    attemptCount: incident.attemptCount,
+    activeRealSearchCount: incident.activeRealSearchCount,
+    monitoringState: incident.course.monitoringStatus?.state ?? null,
+    monitoringStateChangedAt:
+      incident.course.monitoringStatus?.stateChangedAt ?? null,
+  });
+  // Current terminal events carry their own proof bit. Only the exact legacy
+  // compatibility path consumes an incident's complete playbook ledger.
+  const legacyIncidents = incidents.filter((incident) => {
+    const member = memberByIncidentId.get(incident.id);
+    return member && incident.monitoringEvents.some((event) =>
+      hasLegacyParkedCampaignTerminalMetadata({
+        campaignRunId,
+        campaignMembershipDigest: audit.membershipDigest,
+        campaignCapturedAt: capturedAt,
+        member,
+        incident: legacyIncidentMetadata(incident),
+        event,
+      }),
+    );
+  });
+  const legacyLedgersByIncidentId = new Map<string, unknown>();
+  if (legacyIncidents.length > 0) {
+    const legacyRows = await database.courseSupportIncident.findMany({
+      where: { id: { in: legacyIncidents.map((incident) => incident.id) } },
+      select: {
+        ...incidentBindingSelect,
+        attemptLedger: true,
+        course: {
+          select: {
+            monitoringStatus: { select: { state: true, stateChangedAt: true } },
+          },
+        },
+      },
+    });
+    const expected = new Map(legacyIncidents.map((incident) => [incident.id, incident]));
+    const bindingKeys = Object.keys(incidentBindingSelect) as (keyof typeof incidentBindingSelect)[];
+    const sameValue = (left: unknown, right: unknown) =>
+      left instanceof Date || right instanceof Date
+        ? left instanceof Date && right instanceof Date &&
+          Number.isFinite(left.getTime()) && left.getTime() === right.getTime()
+        : left === right;
+    const changed = () => { throw new Error("Campaign legacy evidence changed during inspection."); };
+    if (expected.size !== legacyIncidents.length || legacyRows.length !== expected.size) changed();
+    for (const row of legacyRows) {
+      const original = expected.get(row.id);
+      if (!original || legacyLedgersByIncidentId.has(row.id) ||
+          !(original.updatedAt instanceof Date) || !Number.isFinite(original.updatedAt.getTime()) ||
+          !bindingKeys.every((key) => sameValue(original[key], row[key])) ||
+          !sameValue(original.course.monitoringStatus?.state ?? null, row.course.monitoringStatus?.state ?? null) ||
+          !sameValue(original.course.monitoringStatus?.stateChangedAt ?? null, row.course.monitoringStatus?.stateChangedAt ?? null) ||
+          !Object.prototype.hasOwnProperty.call(row, "attemptLedger") || row.attemptLedger === undefined) changed();
+      legacyLedgersByIncidentId.set(row.id, row.attemptLedger);
+    }
+  }
   const legacyTerminalBatchEntries =
     incidents.length === 0
       ? []
@@ -5941,31 +6012,15 @@ export async function loadCampaignMemberObservations(
     const terminalCandidate = [...incident.monitoringEvents]
       .reverse()
       .map((event) => {
-        const legacyReconciliation = member
+        const legacyReconciliation = member && legacyLedgersByIncidentId.has(incident.id)
           ? reconcileLegacyParkedCampaignTerminalEvidence({
               campaignRunId,
               campaignMembershipDigest: audit.membershipDigest,
               campaignCapturedAt: capturedAt,
               member,
               incident: {
-                id: incident.id,
-                courseId: incident.courseId,
-                cycle: incident.cycle,
-                status: incident.status,
-                activeBatchId: incident.activeBatchId,
-                confirmedAt: incident.confirmedAt,
-                firstSeenAt: incident.firstSeenAt,
-                resolvedAt: incident.resolvedAt,
-                resolution: incident.resolution,
-                providerFamilyKey: incident.providerFamilyKey,
-                failureClass: incident.failureClass,
-                attemptCount: incident.attemptCount,
-                activeRealSearchCount: incident.activeRealSearchCount,
-                attemptLedger: incident.attemptLedger,
-                monitoringState:
-                  incident.course.monitoringStatus?.state ?? null,
-                monitoringStateChangedAt:
-                  incident.course.monitoringStatus?.stateChangedAt ?? null,
+                ...legacyIncidentMetadata(incident),
+                attemptLedger: legacyLedgersByIncidentId.get(incident.id),
               },
               event,
               batchEntries: legacyEntriesByIncidentId.get(incident.id) ?? [],

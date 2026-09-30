@@ -25,6 +25,7 @@ import { COURSE_SUPPORT_RESPONDER_PROMPT_VERSION } from "./course-support-respon
 import { persistCourseSupportSearchExecutionFence } from "./course-support-search-execution-fence";
 import { buildCourseSupportClaimActionPlan } from "./course-support-action-plan";
 import { routeCourseSupportRemediation } from "./course-support-remediation-routing";
+import { appendAutomationPlaybookEvent } from "./course-monitoring-playbook";
 
 const capturedAt = new Date("2026-08-20T12:00:00.000Z");
 
@@ -4557,7 +4558,31 @@ describe("parked course campaign", () => {
     expect(progress.engineeringBlockerCount).toBe(1);
   });
 
-  it("reconciles only an exact DB-loaded legacy factual terminal carrier", async () => {
+  type LegacyObservationTestSelect = {
+    [field: string]: boolean | { select: LegacyObservationTestSelect };
+  };
+
+  function projectLegacyObservationRow(
+    row: Record<string, unknown>,
+    select: LegacyObservationTestSelect,
+  ): Record<string, unknown> {
+    const projected: Record<string, unknown> = {};
+    for (const [field, selection] of Object.entries(select)) {
+      if (selection === true) {
+        projected[field] = row[field];
+      } else if (selection && typeof selection === "object") {
+        const value = row[field];
+        projected[field] = Array.isArray(value)
+          ? value.map((child) => projectLegacyObservationRow(child, selection.select))
+          : value === null
+            ? null
+            : projectLegacyObservationRow(value as Record<string, unknown>, selection.select);
+      }
+    }
+    return projected;
+  }
+
+  function legacyMemberObservationFixture(ordinals = [1]) {
     const campaignRunId = "campaign-run-legacy";
     const releaseSha = "a".repeat(40);
     const confirmedAt = new Date("2026-08-20T12:01:00.000Z");
@@ -4566,18 +4591,15 @@ describe("parked course campaign", () => {
     const verifiedAt = new Date("2026-08-20T12:06:00.000Z");
     const closeoutAt = new Date("2026-08-20T12:07:00.000Z");
     const audit = createParkedCourseCampaignAudit({
-      expectedCount: 1,
+      expectedCount: ordinals.length,
       capturedAt,
-      members: [member(1)],
+      members: ordinals.map((ordinal) => member(ordinal)),
     });
-    const courseRef = createHash("sha256")
-      .update("course-1")
-      .digest("hex")
-      .slice(0, 24);
-    const event = {
-      id: "legacy-terminal-event",
-      incidentId: "incident-1",
-      courseId: "course-1",
+    const incidents = ordinals.map((ordinal) => {
+      const event = {
+      id: `legacy-terminal-event-${ordinal}`,
+      incidentId: `incident-${ordinal}`,
+      courseId: `course-${ordinal}`,
       eventType: "STATE_CHANGED",
       source: "COURSE_SUPPORT_RESPONDER",
       fromState: "AUTO_INVESTIGATING",
@@ -4600,9 +4622,9 @@ describe("parked course campaign", () => {
         },
       },
     };
-    const incident = {
-      id: "incident-1",
-      courseId: "course-1",
+    return {
+      id: `incident-${ordinal}`,
+      courseId: `course-${ordinal}`,
       cycle: 4,
       status: "RESOLVED",
       activeBatchId: null,
@@ -4616,6 +4638,7 @@ describe("parked course campaign", () => {
       resolution: "IDENTITY_CLASSIFIED",
       resolvedAt: closeoutAt,
       decisionAt: null,
+      updatedAt: closeoutAt,
       monitoringEvents: [event],
       course: {
         monitoringStatus: {
@@ -4625,11 +4648,12 @@ describe("parked course campaign", () => {
         probes: [],
       },
     };
-    const entry = {
-      id: "legacy-terminal-entry",
-      batchId: "legacy-terminal-batch",
-      incidentId: "incident-1",
-      courseId: "course-1",
+    });
+    const entries = ordinals.map((ordinal) => ({
+      id: `legacy-terminal-entry-${ordinal}`,
+      batchId: `legacy-terminal-batch-${ordinal}`,
+      incidentId: `incident-${ordinal}`,
+      courseId: `course-${ordinal}`,
       cycle: 4,
       result: "FINAL_DISPOSITION",
       proofSnapshot: {
@@ -4647,7 +4671,7 @@ describe("parked course campaign", () => {
       createdAt: new Date("2026-08-20T12:00:30.000Z"),
       updatedAt: verifiedAt,
       batch: {
-        id: "legacy-terminal-batch",
+        id: `legacy-terminal-batch-${ordinal}`,
         status: "SUCCEEDED",
         createdAt: new Date("2026-08-20T12:00:30.000Z"),
         completedAt: closeoutAt,
@@ -4659,7 +4683,10 @@ describe("parked course campaign", () => {
             kind: "PARKED_COHORT",
             attempts: [
               {
-                courseRef,
+                courseRef: createHash("sha256")
+                  .update(`course-${ordinal}`)
+                  .digest("hex")
+                  .slice(0, 24),
                 runId: campaignRunId,
                 membershipDigest: audit.membershipDigest,
                 cycle: 4,
@@ -4668,22 +4695,58 @@ describe("parked course campaign", () => {
           },
         },
       },
-    };
-    const incidentFindMany = vi.fn().mockResolvedValue([incident]);
-    const batchIncidentFindMany = vi.fn();
-    const loadObservations = (batchEntry: typeof entry) => {
-      batchIncidentFindMany.mockResolvedValueOnce([batchEntry]);
-      return loadCampaignMemberObservations(audit, new Set(), campaignRunId, {
+    }));
+    const reader = (
+      changeSecondary: (rows: Record<string, unknown>[]) => Record<string, unknown>[] = (rows) => rows,
+    ) => {
+      const incidentFindMany = vi.fn(async (query: {
+        where: { id: { in: string[] } };
+        select: LegacyObservationTestSelect;
+      }) => {
+        const selected = incidents
+          .filter((incident) => query.where.id.in.includes(incident.id))
+          .map((incident) => projectLegacyObservationRow(incident, query.select));
+        return query.select.attemptLedger === true ? changeSecondary(selected) : selected;
+      });
+      const batchIncidentFindMany = vi.fn().mockResolvedValue(entries);
+      const database = {
         courseSupportIncident: {
           findMany: incidentFindMany,
         },
         courseSupportBatchIncident: {
           findMany: batchIncidentFindMany,
         },
-      } as never);
+      };
+      return {
+        incidentFindMany,
+        batchIncidentFindMany,
+        load: () => loadCampaignMemberObservations(audit, new Set(), campaignRunId, database as never),
+      };
     };
+    return { audit, incidents, entries, reader };
+  }
 
-    const exactObservations = await loadObservations(entry);
+  it("reconciles only an exact DB-loaded legacy factual terminal carrier", async () => {
+    const fixture = legacyMemberObservationFixture();
+    const { audit } = fixture;
+    const { load, incidentFindMany, batchIncidentFindMany } = fixture.reader();
+
+    const exactObservations = await load();
+    expect(incidentFindMany).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      where: { id: { in: ["incident-1"] } },
+      select: expect.objectContaining({ updatedAt: true }),
+    }));
+    expect(incidentFindMany.mock.calls[0]![0].select).not.toHaveProperty("attemptLedger");
+    expect(incidentFindMany).toHaveBeenNthCalledWith(2, {
+      where: { id: { in: ["incident-1"] } },
+      select: {
+        id: true, courseId: true, cycle: true, status: true, activeBatchId: true,
+        confirmedAt: true, firstSeenAt: true, providerFamilyKey: true, failureClass: true,
+        attemptCount: true, activeRealSearchCount: true, resolution: true, resolvedAt: true,
+        decisionAt: true, updatedAt: true, attemptLedger: true,
+        course: { select: { monitoringStatus: { select: { state: true, stateChangedAt: true } } } },
+      },
+    });
     expect(batchIncidentFindMany).toHaveBeenLastCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
@@ -4710,9 +4773,10 @@ describe("parked course campaign", () => {
       engineeringBlockerCount: 0,
     });
 
-    const mismatchedEntry = structuredClone(entry);
+    const mismatchedEntry = structuredClone(fixture.entries[0]!);
     mismatchedEntry.batch.releaseSha = "b".repeat(40);
-    const mismatchedObservations = await loadObservations(mismatchedEntry);
+    batchIncidentFindMany.mockResolvedValueOnce([mismatchedEntry]);
+    const mismatchedObservations = await load();
     expect(mismatchedObservations).toEqual([
       expect.objectContaining({ campaignTerminalFreshRuntimeProof: false }),
     ]);
@@ -4727,6 +4791,210 @@ describe("parked course campaign", () => {
       factualLimitationCount: 0,
       engineeringBlockerCount: 1,
     });
+  });
+
+  it.each([true, false, null])(
+    "does not select a legacy ledger when freshRuntimeProof is explicitly %s",
+    async (freshRuntimeProof) => {
+      const fixture = legacyMemberObservationFixture();
+      Object.assign(fixture.incidents[0]!.monitoringEvents[0]!.audit, { freshRuntimeProof });
+      const ledgerRead = vi.fn(() => { throw new Error("Unneeded ledger was hydrated."); });
+      Object.defineProperty(fixture.incidents[0]!, "attemptLedger", { get: ledgerRead });
+      const { load, incidentFindMany, batchIncidentFindMany } = fixture.reader();
+
+      const observations = await load();
+
+      expect(incidentFindMany).toHaveBeenCalledTimes(1);
+      expect(incidentFindMany.mock.calls[0]![0].select).not.toHaveProperty("attemptLedger");
+      expect(ledgerRead).not.toHaveBeenCalled();
+      expect(batchIncidentFindMany).toHaveBeenCalledTimes(1);
+      expect(observations).toEqual([
+        expect.objectContaining({ campaignTerminalFreshRuntimeProof: freshRuntimeProof === true }),
+      ]);
+    },
+  );
+
+  it("reads complete ledgers only for all exact legacy-eligible members", async () => {
+    const fixture = legacyMemberObservationFixture([1, 2, 3]);
+    Object.assign(fixture.incidents[2]!.monitoringEvents[0]!.audit, { freshRuntimeProof: false });
+    const ledgerRead = vi.fn(() => { throw new Error("Nonlegacy ledger was hydrated."); });
+    Object.defineProperty(fixture.incidents[2]!, "attemptLedger", { get: ledgerRead });
+    const { load, incidentFindMany, batchIncidentFindMany } = fixture.reader((rows) => rows.reverse());
+
+    const observations = await load();
+
+    expect(incidentFindMany).toHaveBeenCalledTimes(2);
+    expect(incidentFindMany.mock.calls[1]![0].where).toEqual({ id: { in: ["incident-1", "incident-2"] } });
+    expect(ledgerRead).not.toHaveBeenCalled();
+    expect(observations.map((row) => [row.incidentId, row.campaignTerminalFreshRuntimeProof])).toEqual([
+      ["incident-1", true], ["incident-2", true], ["incident-3", false],
+    ]);
+    expect(batchIncidentFindMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ OR: [
+        { incidentId: "incident-1", cycle: 4 },
+        { incidentId: "incident-2", cycle: 4 },
+        { incidentId: "incident-3", cycle: 4 },
+      ] }),
+    }));
+    expect(summarizeParkedCourseCampaignProgress({
+      audit: fixture.audit, observations, remainingGlobalParkedCount: 0,
+    })).toMatchObject({ terminalCount: 2, factualLimitationCount: 2, engineeringBlockerCount: 1 });
+  });
+
+  it("retains legacy proof from independently loaded metadata with equal Date values", async () => {
+    const fixture = legacyMemberObservationFixture();
+    const { load } = fixture.reader((rows) => structuredClone(rows));
+
+    const observations = await load();
+
+    expect(observations).toEqual([
+      expect.objectContaining({ campaignTerminalFreshRuntimeProof: true, campaignTerminalAutomatedFinal: true }),
+    ]);
+    expect(summarizeParkedCourseCampaignProgress({
+      audit: fixture.audit, observations, remainingGlobalParkedCount: 0,
+    })).toMatchObject({ terminalCount: 1, factualLimitationCount: 1, engineeringBlockerCount: 0 });
+  });
+
+  it("revalidates a legacy factual terminal using its complete separately loaded ledger", async () => {
+    const fixture = legacyMemberObservationFixture();
+    const releaseSha = "a".repeat(40);
+    let ledger: unknown = null;
+    const stages = [
+      ["OFFICIAL_IDENTITY", "OFFICIAL_IDENTITY", "NO_PROVIDER_METADATA"],
+      ["TYPED_ADAPTER", "TYPED_PROVIDER_ADAPTER", "NO_RUNNABLE_ADAPTER"],
+      ["OFFICIAL_HTTP_DISCOVERY", "OFFICIAL_HTTP", "NO_PROVIDER_METADATA"],
+      ["HTTP_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER", "NO_METADATA_CHANGE"],
+      ["RENDERED_BROWSER_DISCOVERY", "RENDERED_BROWSER", "NO_BROWSER_ROUTE"],
+      ["BROWSER_ADAPTER_RETRY", "TYPED_PROVIDER_ADAPTER", "NO_METADATA_CHANGE"],
+      ["LOCAL_READER", "LOCAL_READER", "NO_LOCAL_READER_CAPABILITY"],
+    ] as const;
+    for (const [stage, readPath, skipReason] of stages) {
+      ledger = appendAutomationPlaybookEvent(ledger, {
+        cycle: 4, stage, transition: "NOT_APPLICABLE", readPath, evidenceKind: "TOOLING",
+        failureFingerprint: `PLAYBOOK:${stage}:${skipReason}`, runtimeVersion: releaseSha,
+        skipReason, observedAt: new Date("2026-08-20T12:04:00.000Z"),
+      });
+    }
+    ledger = appendAutomationPlaybookEvent(ledger, {
+      cycle: 4, stage: "INDEPENDENT_CONFIRMATION", transition: "FACTUAL_FINAL",
+      readPath: "INDEPENDENT_CONFIRMATION", evidenceKind: "RENDERED_PAGE",
+      failureFingerprint: "PLAYBOOK:INDEPENDENT_CONFIRMATION:IDENTITY_FINAL",
+      runtimeVersion: releaseSha, factualDisposition: "IDENTITY_FINAL",
+      observedAt: new Date("2026-08-20T12:04:30.000Z"),
+    });
+    const completeLedger = ledger as { events: Array<Record<string, unknown>> };
+    const terminal = completeLedger.events.at(-1)!;
+    Object.assign(fixture.incidents[0]!, { attemptLedger: completeLedger });
+    Object.assign(fixture.entries[0]!, { proofSnapshot: {
+      schemaVersion: 1, kind: "PLAYBOOK_FACTUAL_FINAL", playbookVersion: 1,
+      disposition: "IDENTITY_FINAL", outcome: "IDENTITY_FINAL", cycle: 4,
+      stage: terminal.stage, sequence: terminal.sequence, readPath: terminal.readPath,
+      evidenceKind: terminal.evidenceKind, failureFingerprint: terminal.failureFingerprint,
+      observedAt: terminal.observedAt, completedAt: "2026-08-20T12:05:00.000Z",
+      releaseSha, runtimeVersion: releaseSha, providerExecution: false,
+    } });
+    const { load, incidentFindMany } = fixture.reader();
+
+    const complete = await load();
+
+    expect(incidentFindMany.mock.calls[0]![0].select).not.toHaveProperty("attemptLedger");
+    expect(incidentFindMany.mock.calls[1]![0].select).toHaveProperty("attemptLedger", true);
+    expect(complete[0]).toMatchObject({ campaignTerminalFreshRuntimeProof: true });
+    expect(summarizeParkedCourseCampaignProgress({
+      audit: fixture.audit, observations: complete, remainingGlobalParkedCount: 0,
+    })).toMatchObject({ terminalCount: 1, factualLimitationCount: 1, engineeringBlockerCount: 0 });
+
+    Object.assign(fixture.incidents[0]!, {
+      attemptLedger: { ...completeLedger, events: completeLedger.events.slice(0, -1) },
+    });
+    const incomplete = await load();
+    expect(incomplete[0]).toMatchObject({ campaignTerminalFreshRuntimeProof: false });
+    expect(summarizeParkedCourseCampaignProgress({
+      audit: fixture.audit, observations: incomplete, remainingGlobalParkedCount: 0,
+    })).toMatchObject({ terminalCount: 0, factualLimitationCount: 0, engineeringBlockerCount: 1 });
+  });
+
+  it.each([
+    ["missing member", (rows: Record<string, unknown>[]) => rows.slice(1)],
+    ["duplicate member", (rows: Record<string, unknown>[]) => [rows[0]!, rows[0]!]],
+    ["unexpected member", (rows: Record<string, unknown>[]) => [rows[0]!, { ...rows[1]!, id: "unexpected-incident" }]],
+    ["extra member", (rows: Record<string, unknown>[]) => [...rows, { ...rows[0]!, id: "extra-incident" }]],
+  ])("rejects a %s in the complete legacy-ledger read", async (_name, changeSecondary) => {
+    const fixture = legacyMemberObservationFixture([1, 2]);
+    const { load, batchIncidentFindMany } = fixture.reader(changeSecondary);
+
+    await expect(load()).rejects.toThrow("Campaign legacy evidence changed during inspection.");
+    expect(batchIncidentFindMany).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["courseId", "another-course"],
+    ["cycle", 5],
+    ["status", "AUTO_INVESTIGATING"],
+    ["activeBatchId", "new-owner-batch"],
+    ["activeBatchId", undefined],
+    ["confirmedAt", new Date("2026-08-20T12:01:00.001Z")],
+    ["confirmedAt", "2026-08-20T12:01:00.000Z"],
+    ["firstSeenAt", new Date("2026-08-19T12:00:00.001Z")],
+    ["providerFamilyKey", "SOURCE_MISSING"],
+    ["failureClass", "MISSING_SOURCE"],
+    ["attemptCount", 2],
+    ["activeRealSearchCount", 1],
+    ["resolution", null],
+    ["resolvedAt", null],
+    ["decisionAt", new Date("2026-08-20T12:07:00.000Z")],
+    ["decisionAt", undefined],
+    ["updatedAt", new Date("2026-08-20T12:07:00.001Z")],
+    ["updatedAt", new Date(Number.NaN)],
+    ["updatedAt", undefined],
+  ])("rejects changed legacy metadata %s (%s)", async (field, value) => {
+    const fixture = legacyMemberObservationFixture();
+    const { load, batchIncidentFindMany } = fixture.reader((rows) => rows.map((row) => ({ ...row, [field]: value })));
+
+    await expect(load()).rejects.toThrow("Campaign legacy evidence changed during inspection.");
+    expect(batchIncidentFindMany).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { state: "HEALTHY", stateChangedAt: new Date("2026-08-20T12:07:00.000Z") },
+    { state: "FINAL_IDENTITY", stateChangedAt: new Date("2026-08-20T12:07:00.001Z") },
+    { state: "FINAL_IDENTITY", stateChangedAt: "2026-08-20T12:07:00.000Z" },
+    null,
+  ])("rejects changed legacy monitoring state %s", async (monitoringStatus) => {
+    const fixture = legacyMemberObservationFixture();
+    const { load, batchIncidentFindMany } = fixture.reader((rows) => rows.map((row) => ({
+      ...row, course: { monitoringStatus },
+    })));
+
+    await expect(load()).rejects.toThrow("Campaign legacy evidence changed during inspection.");
+    expect(batchIncidentFindMany).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing", "undefined", "inherited"] as const)(
+    "rejects a %s complete legacy ledger property",
+    async (kind) => {
+      const fixture = legacyMemberObservationFixture();
+      const { load, batchIncidentFindMany } = fixture.reader((rows) => rows.map((row) => {
+        if (kind === "undefined") return { ...row, attemptLedger: undefined };
+        const withoutLedger = { ...row };
+        delete withoutLedger.attemptLedger;
+        return kind === "inherited"
+          ? Object.assign(Object.create({ attemptLedger: null }) as Record<string, unknown>, withoutLedger)
+          : withoutLedger;
+      }));
+
+      await expect(load()).rejects.toThrow("Campaign legacy evidence changed during inspection.");
+      expect(batchIncidentFindMany).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects an eligible legacy member without a valid initial update timestamp", async () => {
+    const fixture = legacyMemberObservationFixture();
+    fixture.incidents[0]!.updatedAt = new Date(Number.NaN);
+    const { load, batchIncidentFindMany } = fixture.reader();
+
+    await expect(load()).rejects.toThrow("Campaign legacy evidence changed during inspection.");
+    expect(batchIncidentFindMany).not.toHaveBeenCalled();
   });
 
   it("requires fresh terminal evidence and a current-runtime read for recovery", () => {
