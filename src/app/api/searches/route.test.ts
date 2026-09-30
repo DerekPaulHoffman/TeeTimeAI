@@ -79,6 +79,19 @@ describe("POST /api/searches", () => {
     vi.restoreAllMocks();
   });
 
+  it("retains the paused saved date and empty match projection in the dashboard GET contract", async () => {
+    mocks.listTeeSearchesForUser.mockResolvedValue([{
+      id: "search-1", status: "PAUSED", date: new Date("2026-09-30T00:00:00.000Z"), matches: [],
+    }]);
+
+    const response = await GET();
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ searches: [{
+      id: "search-1", status: "PAUSED", date: "2026-09-30T00:00:00.000Z", matches: [],
+    }] });
+  });
+
   it("passes a valid course-local tomorrow to the service after UTC midnight", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-09-30T03:16:30.000Z"));

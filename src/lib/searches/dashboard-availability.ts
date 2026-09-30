@@ -121,7 +121,7 @@ export function getDashboardAvailabilityView(input: {
     return {
       label: "Availability found recently",
       detail:
-        "The latest check found a matching time, but it is not currently listed as available. We'll keep checking.",
+        "A previous check found availability. No matching time is currently confirmed for your saved request.",
       tone: "available"
     };
   }

@@ -31,7 +31,9 @@ export type ExistingMatchKey = Pick<TeeTimeSlot, "sourceId" | "courseId"> & {
   startsAt?: string;
 };
 
-export function filterSlotsForSearch(search: SearchWindow, slots: TeeTimeSlot[]) {
+export function filterSlotsForSearch<
+  T extends Pick<TeeTimeSlot, "courseId" | "startsAt" | "availableSpots">
+>(search: SearchWindow, slots: T[]) {
   const preferredCourseIds = new Set(search.preferredCourses.map((preference) => preference.courseId));
 
   return slots.filter((slot) => {
