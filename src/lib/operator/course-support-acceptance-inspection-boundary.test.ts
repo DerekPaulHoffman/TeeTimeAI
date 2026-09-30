@@ -23,6 +23,7 @@ import { loadCourseSupportAcceptanceReasons } from "./course-support-acceptance-
 import { loadCourseSupportAcceptanceProjection } from "./course-support-acceptance";
 import { loadOperatorCourseFleetCounts } from "./course-fleet";
 import { createOperatorCourseSupportCampaignDependencies, loadOperatorCourseSupportCampaign } from "./course-support-campaign";
+import { parseAcceptanceReadCost, type AcceptanceReadQueryCategory } from "./course-support-acceptance-read-cost";
 
 const CAPTURED_AT = new Date("2026-08-20T12:00:00.000Z");
 const PARKED_AT = new Date("2026-08-20T13:00:00.000Z");
@@ -80,7 +81,7 @@ describe("full native campaign inspection through the acceptance read boundary",
     const database = { $transaction: vi.fn(async (work: (transaction: Prisma.TransactionClient) => Promise<unknown>) => work(fixture.transaction)) };
     const result = await loadCourseSupportAcceptanceReasons(database as unknown as Parameters<typeof loadCourseSupportAcceptanceReasons>[0], SOURCE_SHA);
 
-    expect(result).toMatchObject({ schemaVersion: 3, readFence: null, status: "AVAILABLE", reason: "COMPLETE_NATIVE_TRACE",
+    expect(result).toMatchObject({ schemaVersion: 4, readFence: null, readCost: null, status: "AVAILABLE", reason: "COMPLETE_NATIVE_TRACE",
       observedAt: NOW.toISOString(), evidenceReadComplete: true, customerDataIncluded: false,
       futureUnknown: { reconciliation: "MATCH" }, rollingAmbiguous: { reconciliation: "MATCH" } });
     assertCompleteReloads(fixture);
@@ -123,10 +124,12 @@ describe("full native campaign inspection through the acceptance read boundary",
     }]);
     const database = { $transaction: vi.fn(async (work: (transaction: Prisma.TransactionClient) => Promise<unknown>) => work(fixture.transaction)) };
     const result = await loadCourseSupportAcceptanceReasons(database as unknown as Parameters<typeof loadCourseSupportAcceptanceReasons>[0], SOURCE_SHA);
-    expect(result).toMatchObject({ schemaVersion: 3, status: "UNAVAILABLE", reason: "EVIDENCE_BOUND_EXCEEDED",
+    expect(result).toMatchObject({ schemaVersion: 4, status: "UNAVAILABLE", reason: "EVIDENCE_BOUND_EXCEEDED",
       readFence: { phase: "CAMPAIGN_INSPECTION", boundary: "SELECTED_EVIDENCE_BYTES" },
       acceptanceProjection: null, futureUnknown: null, rollingAmbiguous: null,
       evidenceReadComplete: false, customerDataIncluded: false });
+    assertObservedReadCost(result, "CAMPAIGN_RECORD");
+    expect(result.readCost?.componentChargeBytes).toBe(2 * (ACCEPTANCE_READ_LIMITS.evidenceBytes + 1));
     expect(JSON.stringify(result)).not.toMatch(/private-|https:\/\//u);
     expect(fixture.mutation).not.toHaveBeenCalled();
     expect(globalMocks.escapedRead).not.toHaveBeenCalled();
@@ -136,8 +139,8 @@ describe("full native campaign inspection through the acceptance read boundary",
     const fixture = campaignDatabase({ oversizedUnselectedRunErrors: true });
     const database = { $transaction: vi.fn(async (work: (transaction: Prisma.TransactionClient) => Promise<unknown>) => work(fixture.transaction)) };
     const result = await loadCourseSupportAcceptanceReasons(database as unknown as Parameters<typeof loadCourseSupportAcceptanceReasons>[0], SOURCE_SHA);
-    expect(result).toMatchObject({ schemaVersion: 3, status: "AVAILABLE", reason: "COMPLETE_NATIVE_TRACE",
-      readFence: null, evidenceReadComplete: true, customerDataIncluded: false });
+    expect(result).toMatchObject({ schemaVersion: 4, status: "AVAILABLE", reason: "COMPLETE_NATIVE_TRACE",
+      readFence: null, readCost: null, evidenceReadComplete: true, customerDataIncluded: false });
     assertCompleteReloads(fixture);
     const byteStatements = fixture.calls.filter((call) => call.model === "$queryRaw").map((call) => call.args as Prisma.Sql);
     expect(byteStatements.some((statement) => statement.text.includes('FROM "AutomationRun"'))).toBe(true);
@@ -154,8 +157,8 @@ describe("full native campaign inspection through the acceptance read boundary",
     const database = { $transaction: vi.fn(async (work: (transaction: Prisma.TransactionClient) => Promise<unknown>) => work(fixture.transaction)) };
     const result = await loadCourseSupportAcceptanceReasons(database as unknown as Parameters<typeof loadCourseSupportAcceptanceReasons>[0], SOURCE_SHA);
 
-    expect(result).toMatchObject({ schemaVersion: 3, status: "AVAILABLE", reason: "COMPLETE_NATIVE_TRACE",
-      readFence: null, evidenceReadComplete: true, customerDataIncluded: false,
+    expect(result).toMatchObject({ schemaVersion: 4, status: "AVAILABLE", reason: "COMPLETE_NATIVE_TRACE",
+      readFence: null, readCost: null, evidenceReadComplete: true, customerDataIncluded: false,
       futureUnknown: { reconciliation: "MATCH" }, rollingAmbiguous: { reconciliation: "MATCH" } });
     assertCompleteReloads(fixture);
     const snapshots = fixture.calls.filter((call) => call.model === "courseSupportIncident" && call.method === "findMany" &&
@@ -194,10 +197,11 @@ describe("full native campaign inspection through the acceptance read boundary",
     const database = { $transaction: vi.fn(async (work: (transaction: Prisma.TransactionClient) => Promise<unknown>) => work(fixture.transaction)) };
     const result = await loadCourseSupportAcceptanceReasons(database as unknown as Parameters<typeof loadCourseSupportAcceptanceReasons>[0], SOURCE_SHA);
 
-    expect(result).toMatchObject({ schemaVersion: 3, status: "UNAVAILABLE", reason: "EVIDENCE_BOUND_EXCEEDED",
+    expect(result).toMatchObject({ schemaVersion: 4, status: "UNAVAILABLE", reason: "EVIDENCE_BOUND_EXCEEDED",
       readFence: { phase: "CAMPAIGN_INSPECTION", boundary: "SELECTED_EVIDENCE_BYTES" },
       acceptanceProjection: null, futureUnknown: null, rollingAmbiguous: null,
       evidenceReadComplete: false, customerDataIncluded: false });
+    assertObservedReadCost(result, "CURRENT_CYCLE_HISTORY");
     const reloads = fixture.calls.filter((call) => call.model === "courseSupportIncident" && call.method === "findMany" &&
       typeof (call.args as Query).where?.id === "string" &&
       ((call.args as Query).select?.batchIncidents as Query | undefined)?.take === 21);
@@ -215,6 +219,17 @@ describe("full native campaign inspection through the acceptance read boundary",
     expect(globalMocks.escapedRead).not.toHaveBeenCalled();
   });
 });
+
+function assertObservedReadCost(result: { readCost: unknown }, queryCategory: AcceptanceReadQueryCategory) {
+  const readCost = parseAcceptanceReadCost(result.readCost);
+  expect(readCost).not.toBeNull();
+  expect(result.readCost).toEqual(readCost);
+  expect(readCost).toMatchObject({ version: 1, queryCategory, component: "SELECTED_SCALARS",
+    basis: "OBSERVED_CONSERVATIVE_LOWER_BOUND", complete: false,
+    limitBytes: ACCEPTANCE_READ_LIMITS.evidenceBytes, saturated: false });
+  expect(readCost!.attemptedCumulativeBytes).toBeGreaterThan(ACCEPTANCE_READ_LIMITS.evidenceBytes);
+  expect(readCost!.hydrationObservedBytes).toBeGreaterThanOrEqual(readCost!.componentChargeBytes);
+}
 
 function assertCompleteReloads(fixture: ReturnType<typeof campaignDatabase>) {
   const reloads = fixture.calls.filter((call) => call.model === "courseSupportIncident" && call.method === "findMany" &&

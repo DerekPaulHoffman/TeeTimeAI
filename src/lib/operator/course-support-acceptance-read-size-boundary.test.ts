@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import { describe, expect, it, vi } from "vitest";
 
 import { AcceptanceBytePreflightFence, createAcceptanceBytePreflight } from "./course-support-acceptance-read-size-boundary";
+import { createAcceptanceReadCost } from "./course-support-acceptance-read-cost";
 
 function fixture(input: { maxBytes?: number; maxIdentityItems?: number } = {}) {
   const models = Object.fromEntries(Prisma.dmmf.datamodel.models.map((model) => [
@@ -49,6 +50,12 @@ function selectedIds(query: Prisma.Sql) {
 function weightedBytes(query: Prisma.Sql, bytesForIdentity: (identity: string) => bigint) {
   return selectedIdentityWeights(query).reduce((bytes, { identity, occurrences }) =>
     bytes + bytesForIdentity(identity) * occurrences, 0n);
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((complete) => { resolve = complete; });
+  return { promise, resolve };
 }
 
 function selectedFields(query: Prisma.Sql) {
@@ -370,7 +377,9 @@ describe("native acceptance database byte preflight", () => {
     const { models, preflight } = fixture();
     models.course.count.mockRejectedValue(Object.assign(new Error("private-provider-connection"), { code }));
 
-    await expect(preflight("course", "findMany", {})).rejects.toMatchObject({ message: "READ_TIMEOUT", code });
+    const error = await preflight("course", "findMany", {}).catch((error) => error);
+    expect(error).toMatchObject({ message: "READ_TIMEOUT", code });
+    expect(error).not.toHaveProperty("readCost");
   });
 
   it("tags oversized identity result arrays before row-byte or native evidence reads", async () => {
@@ -423,10 +432,137 @@ describe("native acceptance database byte preflight", () => {
   });
 
   it("keeps constructor defaults opaque and rejects non-fixed runtime boundary input", () => {
-    expect(new AcceptanceBytePreflightFence("READ_FAILED")).toMatchObject({ message: "READ_FAILED", boundary: null });
+    expect(new AcceptanceBytePreflightFence("READ_FAILED")).toMatchObject({ message: "READ_FAILED", boundary: null, readCost: null });
     expect(new AcceptanceBytePreflightFence("EVIDENCE_BOUND_EXCEEDED", "private-query" as never)).toMatchObject({
       message: "EVIDENCE_BOUND_EXCEEDED", boundary: null,
     });
+  });
+
+  it("detaches and freezes only validated cost snapshots on the selected-evidence fence", () => {
+    const valid = createAcceptanceReadCost({ queryCategory: "PARKED_SNAPSHOT", component: "SELECTED_SCALARS",
+      limitBytes: 23n, cumulativeBeforeComponentBytes: 4n, componentChargeBytes: 20n,
+      attemptedCumulativeBytes: 24n, hydrationObservedBytes: 24n })!;
+    const input = { ...valid };
+    const error = new AcceptanceBytePreflightFence("EVIDENCE_BOUND_EXCEEDED", "SELECTED_EVIDENCE_BYTES", input);
+    input.queryCategory = "CAMPAIGN_RECORD";
+    expect(error.readCost).toEqual(valid);
+    expect(error.readCost).not.toBe(input);
+    expect(Object.isFrozen(error.readCost)).toBe(true);
+    expect(new AcceptanceBytePreflightFence("READ_FAILED", "SELECTED_EVIDENCE_BYTES", valid).readCost).toBeNull();
+    expect(new AcceptanceBytePreflightFence("EVIDENCE_BOUND_EXCEEDED", "QUERY_OPERATIONS", valid).readCost).toBeNull();
+    expect(new AcceptanceBytePreflightFence("EVIDENCE_BOUND_EXCEEDED", "SELECTED_EVIDENCE_BYTES",
+      { ...valid, privateId: "private-course" } as never).readCost).toBeNull();
+  });
+
+  it("accepts exact equality and captures the unchanged scalar operands only when the limit is exceeded", async () => {
+    const exact = fixture({ maxBytes: 24 });
+    exact.models.course.findMany.mockResolvedValue([{ id: "private-course" }]);
+    await exact.preflight("course", "findMany", { select: { id: true } }, "PARKED_SNAPSHOT");
+    expect(exact.sql).toHaveBeenCalledTimes(1);
+
+    const exceeded = fixture({ maxBytes: 23 });
+    exceeded.models.course.findMany.mockResolvedValue([{ id: "private-course" }]);
+    const error = await exceeded.preflight("course", "findMany", { select: { id: true } }).catch((error) => error);
+    expect(error).toBeInstanceOf(AcceptanceBytePreflightFence);
+    expect(error.readCost).toEqual({ version: 1, queryCategory: "UNCLASSIFIED", component: "SELECTED_SCALARS",
+      basis: "OBSERVED_CONSERVATIVE_LOWER_BOUND", complete: false, saturated: false,
+      limitBytes: 23, cumulativeBeforeComponentBytes: 4, componentChargeBytes: 20,
+      attemptedCumulativeBytes: 24, hydrationObservedBytes: 24 });
+    expect(exceeded.sql).toHaveBeenCalledTimes(1);
+  });
+
+  it("captures the total local structural envelope before its commit and stops before scalar reads", async () => {
+    const actual = fixture({ maxBytes: 40 });
+    actual.models.course.findMany.mockResolvedValueOnce([{ id: "private-first-course" }])
+      .mockResolvedValueOnce([{ id: "private-next-course", preferences: [] }]);
+    await actual.preflight("course", "findMany", { select: { id: true } });
+    const error = await actual.preflight("course", "findMany",
+      { select: { preferences: { select: { id: true } } } }, "PARKED_SNAPSHOT").catch((error) => error);
+    expect(error.readCost).toEqual({ version: 1, queryCategory: "PARKED_SNAPSHOT", component: "STRUCTURAL_ENVELOPE",
+      basis: "OBSERVED_CONSERVATIVE_LOWER_BOUND", complete: false, saturated: false,
+      limitBytes: 40, cumulativeBeforeComponentBytes: 24, componentChargeBytes: 34,
+      attemptedCumulativeBytes: 58, hydrationObservedBytes: 34 });
+    expect(actual.sql).toHaveBeenCalledTimes(1); // Only the earlier successful hydration.
+  });
+
+  it("includes completed local scalar components without presenting the prefix as complete evidence", async () => {
+    const actual = fixture({ maxBytes: 180 });
+    actual.models.course.findMany.mockResolvedValue([{ id: "private-course" }]);
+    actual.models.courseSupportIncident.findMany.mockResolvedValue([{ id: "private-incident",
+      monitoringEvents: [{ id: "private-event" }] }]);
+    actual.sql.mockImplementation(async (statement) => [{
+      bytes: statement.text.includes('FROM "CourseMonitoringEvent"') ? 51n : 10n, matchedRows: 1n,
+    }]);
+    await actual.preflight("course", "findMany", { select: { id: true } });
+    const error = await actual.preflight("courseSupportIncident", "findMany", { select: {
+      monitoringEvents: { select: { audit: true } },
+    } }, "MEMBER_OBSERVATIONS").catch((error) => error);
+    expect(error.readCost).toMatchObject({ queryCategory: "MEMBER_OBSERVATIONS", component: "SELECTED_SCALARS", complete: false,
+      limitBytes: 180, cumulativeBeforeComponentBytes: 92, componentChargeBytes: 102,
+      attemptedCumulativeBytes: 194, hydrationObservedBytes: 170 });
+    expect(JSON.stringify(error.readCost)).not.toContain("private-");
+    expect(actual.sql).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps the first concurrent fence and immutable cost while in-flight reads settle without new work", async () => {
+    const actual = fixture({ maxBytes: 40 });
+    actual.models.course.findMany.mockResolvedValue([{ id: "private-course" }]);
+    actual.models.automationRun.findMany.mockResolvedValue([{ id: "private-run" }]);
+    const firstAggregate = deferred<Array<{ bytes: bigint; matchedRows: bigint }>>();
+    const secondAggregate = deferred<Array<{ bytes: bigint; matchedRows: bigint }>>();
+    actual.sql.mockImplementation((statement) => statement.text.includes('FROM "Course"')
+      ? firstAggregate.promise : secondAggregate.promise);
+    const first = actual.preflight("course", "findMany", { select: { id: true } }, "PARKED_SNAPSHOT").catch((error) => error);
+    const second = actual.preflight("automationRun", "findMany", { select: { id: true } }, "CAMPAIGN_RECORD").catch((error) => error);
+    await vi.waitFor(() => expect(actual.sql).toHaveBeenCalledTimes(2));
+    firstAggregate.resolve([{ bytes: 20n, matchedRows: 1n }]);
+    const error = await first;
+    expect(error.readCost).toMatchObject({ queryCategory: "PARKED_SNAPSHOT", cumulativeBeforeComponentBytes: 8,
+      componentChargeBytes: 40, attemptedCumulativeBytes: 48, hydrationObservedBytes: 44 });
+    const snapshot = error.readCost;
+    const tickCount = actual.tick.mock.calls.length;
+    const later = await actual.preflight("courseProbe", "findMany", {}, "CURRENT_CYCLE_HISTORY").catch((error) => error);
+    expect(later).toBe(error);
+    expect(actual.models.courseProbe.count).not.toHaveBeenCalled();
+    expect(actual.models.courseProbe.findMany).not.toHaveBeenCalled();
+    secondAggregate.resolve([{ bytes: 1_000n, matchedRows: 1n }]);
+    expect(await second).toBe(error);
+    expect(error.readCost).toBe(snapshot);
+    expect(error.readCost.attemptedCumulativeBytes).toBe(48);
+    expect(actual.tick).toHaveBeenCalledTimes(tickCount);
+    expect(actual.sql).toHaveBeenCalledTimes(2);
+  });
+
+  it("latches a recognized tick fence without manufacturing byte cost or issuing subsequent queries", async () => {
+    const actual = fixture();
+    const error = new AcceptanceBytePreflightFence("EVIDENCE_BOUND_EXCEEDED", "QUERY_OPERATIONS");
+    actual.tick.mockImplementation(() => { throw error; });
+    const first = await actual.preflight("course", "findMany", {}, "PARKED_SNAPSHOT").catch((failure) => failure);
+    expect(first).toBe(error);
+    expect(first.readCost).toBeNull();
+    actual.tick.mockReset();
+    const later = await actual.preflight("automationRun", "findMany", {}, "CAMPAIGN_RECORD").catch((failure) => failure);
+    expect(later).toBe(error);
+    expect(actual.tick).not.toHaveBeenCalled();
+    expect(actual.models.automationRun.count).not.toHaveBeenCalled();
+    expect(actual.sql).not.toHaveBeenCalled();
+  });
+
+  it("does not start identity or scalar queries after an already in-flight count settles past the first fence", async () => {
+    const actual = fixture({ maxBytes: 23 });
+    actual.models.course.findMany.mockResolvedValue([{ id: "private-course" }]);
+    const pendingCount = deferred<number>();
+    actual.models.automationRun.count.mockImplementation(() => pendingCount.promise);
+    const first = actual.preflight("course", "findMany", { select: { id: true } }, "PARKED_SNAPSHOT").catch((error) => error);
+    const second = actual.preflight("automationRun", "findMany", { select: { id: true } }, "CAMPAIGN_RECORD").catch((error) => error);
+    const error = await first;
+    expect(actual.models.automationRun.count).toHaveBeenCalledTimes(1);
+    const tickCount = actual.tick.mock.calls.length;
+    pendingCount.resolve(1);
+    expect(await second).toBe(error);
+    expect(actual.models.automationRun.findMany).not.toHaveBeenCalled();
+    expect(actual.tick).toHaveBeenCalledTimes(tickCount);
+    expect(actual.sql).toHaveBeenCalledTimes(1);
   });
 
   it("sizes only selected scalar columns and excludes false or undefined fields", async () => {
