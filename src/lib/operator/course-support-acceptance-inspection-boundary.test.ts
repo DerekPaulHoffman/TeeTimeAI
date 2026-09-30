@@ -1,4 +1,4 @@
-import { Prisma } from "@prisma/client";
+import { Prisma, type ProbeOutcome } from "@prisma/client";
 import { describe, expect, it, vi } from "vitest";
 
 const globalMocks = vi.hoisted(() => ({ escapedRead: vi.fn() }));
@@ -364,15 +364,129 @@ describe("full native campaign inspection through the acceptance read boundary",
     expect(native.mutation).not.toHaveBeenCalled();
     expect(globalMocks.escapedRead).not.toHaveBeenCalled();
   });
+
+  it.each([false, true])("keeps all 112 members and 5,000 historical probe outcomes while excluding display messages (successful tie first=%s)", async (successfulProbeTieFirst) => {
+    const fixture = campaignDatabase({ historicalProbeCount: 5_000, successfulProbeTieFirst });
+    const database = { $transaction: vi.fn(async (work: (transaction: Prisma.TransactionClient) => Promise<unknown>) => work(fixture.transaction)) };
+    const result = await loadCourseSupportAcceptanceReasons(database as unknown as Parameters<typeof loadCourseSupportAcceptanceReasons>[0], SOURCE_SHA);
+
+    expect(result).toMatchObject({ schemaVersion: 4, status: "AVAILABLE", reason: "COMPLETE_NATIVE_TRACE",
+      readFence: null, readCost: null, evidenceReadComplete: true, customerDataIncluded: false });
+    assertCompleteReloads(fixture);
+    expect(fixture.probeMessageRead).not.toHaveBeenCalled();
+    const nativeProbes = fixture.calls.filter((call) => call.model === "courseProbe" && call.method === "findMany" &&
+      (call.args as Query).select?.outcome === true);
+    expect(nativeProbes).toHaveLength(1);
+    expect(nativeProbes[0].args).toEqual({
+      where: { courseId: { in: expect.arrayContaining(["private-course-112", "private-probe-working", "private-probe-failed", "private-probe-tied", "private-probe-missing"]) } },
+      orderBy: { observedAt: "desc" }, distinct: ["courseId"],
+      select: { courseId: true, outcome: true, observedAt: true },
+    });
+    expect(((nativeProbes[0].args as Query).where!.courseId as Row).in).toHaveLength(116);
+    const probeBytes = fixture.byteTotals.filter(({ statement }) => statement.text.includes('FROM "CourseProbe"'));
+    expect(probeBytes).toHaveLength(1);
+    expect(probeBytes[0].matchedRows).toBe(5_000n);
+    expect(probeBytes[0].statement.text).toContain('acceptance_row."outcome"');
+    expect(probeBytes[0].statement.text).toContain('acceptance_row."observedAt"');
+    expect(probeBytes[0].statement.text).not.toContain('acceptance_row."message"');
+
+    // The old selection is applied before the native call. This independent
+    // baseline reads every historical message before in-memory distinct.
+    const native = campaignDatabase({ historicalProbeCount: 5_000, successfulProbeTieFirst });
+    const expected = await nativeAcceptanceProjection(native, legacyProbeMessageReader(native.transaction));
+    expect(native.probeMessageRead).toHaveBeenCalledTimes(5_000);
+    expect(result.acceptanceProjection).toEqual(expected);
+    const counts = await loadOperatorCourseFleetCounts({ now: NOW }, fixture.transaction);
+    expect(counts).toEqual({ action: successfulProbeTieFirst ? 1 : 2, watch: 0, parked: 112, limitations: 0,
+      unchecked: 1, working: successfulProbeTieFirst ? 2 : 1, dueNow: 0, inProgress: 0,
+      recoveryRequired: 0, scheduledRetry: 0, engineeringNeeded: 0, needsHuman: successfulProbeTieFirst ? 1 : 2 });
+    expect(fixture.probeMessageRead).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toMatch(/private-|https:\/\//u);
+    expect(fixture.mutation).not.toHaveBeenCalled();
+    expect(native.mutation).not.toHaveBeenCalled();
+    expect(globalMocks.escapedRead).not.toHaveBeenCalled();
+  });
+
+  it("measures the omitted historical message charge through the unchanged bounded reader", async () => {
+    const current = campaignDatabase({ historicalProbeCount: 5_000 });
+    const legacy = campaignDatabase({ historicalProbeCount: 5_000 });
+    const currentCounts = await loadOperatorCourseFleetCounts({ now: NOW }, createBoundedAcceptanceReadClient(current.transaction));
+    const legacyCounts = await loadOperatorCourseFleetCounts({ now: NOW }, legacyProbeMessageReader(createBoundedAcceptanceReadClient(legacy.transaction)));
+
+    expect(currentCounts).toEqual(legacyCounts);
+    expect(current.probeMessageRead).not.toHaveBeenCalled();
+    // SQL sizing and then native projection both read the old selected field.
+    expect(legacy.probeMessageRead).toHaveBeenCalledTimes(10_000);
+    const currentBytes = current.byteTotals.filter(({ statement }) => statement.text.includes('FROM "CourseProbe"'));
+    const legacyBytes = legacy.byteTotals.filter(({ statement }) => statement.text.includes('FROM "CourseProbe"'));
+    expect(currentBytes).toHaveLength(1);
+    expect(legacyBytes).toHaveLength(1);
+    expect(currentBytes[0].matchedRows).toBe(5_000n);
+    expect(legacyBytes[0].matchedRows).toBe(5_000n);
+    // Each 500-character ASCII message adds 513 serialized bytes and the
+    // fixture's conservative 32-byte selected-value padding. The 2x margin
+    // remains in the real guard; this is an offline fixture measurement.
+    expect(legacyBytes[0].bytes - currentBytes[0].bytes).toBe(2_725_000n);
+    expect(2n * (legacyBytes[0].bytes - currentBytes[0].bytes)).toBe(5_450_000n);
+    const legacyQuery = legacy.calls.find((call) => call.model === "courseProbe" && call.method === "findMany" &&
+      (call.args as Query).select?.message === true)!.args as Query;
+    const currentQuery = current.calls.find((call) => call.model === "courseProbe" && call.method === "findMany" &&
+      (call.args as Query).select?.outcome === true)!.args as Query;
+    expect(legacyQuery).toEqual({ ...currentQuery, select: { ...currentQuery.select, message: true } });
+    expect(current.mutation).not.toHaveBeenCalled();
+    expect(legacy.mutation).not.toHaveBeenCalled();
+    expect(globalMocks.escapedRead).not.toHaveBeenCalled();
+  });
+
+  it("still fences the full required historical probe outcome and clock charge under cumulative byte pressure", async () => {
+    const fixture = campaignDatabase({ historicalProbeCount: 5_000, requiredProbeBudgetPressure: true });
+    const database = { $transaction: vi.fn(async (work: (transaction: Prisma.TransactionClient) => Promise<unknown>) => work(fixture.transaction)) };
+    const result = await loadCourseSupportAcceptanceReasons(database as unknown as Parameters<typeof loadCourseSupportAcceptanceReasons>[0], SOURCE_SHA);
+
+    expect(result).toMatchObject({ schemaVersion: 4, status: "UNAVAILABLE", reason: "EVIDENCE_BOUND_EXCEEDED",
+      readFence: { phase: "FLEET", boundary: "SELECTED_EVIDENCE_BYTES" }, acceptanceProjection: null,
+      futureUnknown: null, rollingAmbiguous: null, evidenceReadComplete: false, customerDataIncluded: false });
+    assertObservedReadCost(result, "UNCLASSIFIED");
+    assertCompleteReloads(fixture);
+    const required = fixture.byteTotals.filter(({ statement }) => statement.text.includes('FROM "CourseProbe"'));
+    expect(required).toHaveLength(1);
+    expect(required[0].matchedRows).toBe(5_000n);
+    expect(required[0].statement.text).toContain('acceptance_row."outcome"');
+    expect(required[0].statement.text).toContain('acceptance_row."observedAt"');
+    expect(required[0].statement.text).not.toContain('acceptance_row."message"');
+    expect(result.readCost?.componentChargeBytes).toBe(Number(2n * required[0].bytes));
+    expect((fixture.calls.at(-1)!.args as Prisma.Sql)).toBe(required[0].statement);
+    expect(fixture.calls.some((call) => call.model === "courseProbe" && call.method === "findMany" &&
+      (call.args as Query).select?.outcome === true)).toBe(false);
+    expect(fixture.probeMessageRead).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toMatch(/private-|https:\/\//u);
+    expect(fixture.mutation).not.toHaveBeenCalled();
+    expect(globalMocks.escapedRead).not.toHaveBeenCalled();
+  });
+
+  it("still rejects historical probe scopes beyond the existing row limit before identity or native hydration", async () => {
+    const fixture = campaignDatabase({ historicalProbeCount: ACCEPTANCE_READ_LIMITS.evidenceRows + 1 });
+    const read = createBoundedAcceptanceReadClient(fixture.transaction);
+
+    await expect(loadOperatorCourseFleetCounts({ now: NOW }, read)).rejects.toMatchObject({
+      reason: "EVIDENCE_BOUND_EXCEEDED", boundary: "TOP_LEVEL_ROWS", readCost: null,
+    });
+    const probeReads = fixture.calls.filter((call) => call.model === "courseProbe");
+    expect(probeReads.map(({ method }) => method)).toEqual(["count"]);
+    expect(fixture.byteTotals.every(({ statement }) => !statement.text.includes('FROM "CourseProbe"'))).toBe(true);
+    expect(fixture.probeMessageRead).not.toHaveBeenCalled();
+    expect(fixture.mutation).not.toHaveBeenCalled();
+    expect(globalMocks.escapedRead).not.toHaveBeenCalled();
+  });
 });
 
-async function nativeAcceptanceProjection(fixture: ReturnType<typeof campaignDatabase>) {
+async function nativeAcceptanceProjection(fixture: ReturnType<typeof campaignDatabase>, fleetRead = fixture.transaction) {
   const inspection = (await inspectLatestParkedCourseCampaign(fixture.transaction, { now: NOW, admissionRuntimeVersion: SOURCE_SHA }))!;
   const { runId, totalCount, ...observedCampaign } = inspection;
   expect(totalCount).toBe(112);
   expect(inspection).toMatchObject({ readyCount: 112, terminalCount: 0, engineeringBlockerCount: 0 });
   return loadCourseSupportAcceptanceProjection({ now: NOW, observedCampaign }, {
-    loadCourseFleetCounts: (input) => loadOperatorCourseFleetCounts(input, fixture.transaction),
+    loadCourseFleetCounts: (input) => loadOperatorCourseFleetCounts(input, fleetRead),
     loadLatestCampaignRecord: () => fixture.transaction.automationRun.findFirst({
       where: { id: runId }, select: { id: true, status: true, audit: true, notes: true },
     }),
@@ -382,6 +496,16 @@ async function nativeAcceptanceProjection(fixture: ReturnType<typeof campaignDat
     loadCampaignSummary: (input) => loadOperatorCourseSupportCampaign(input,
       createOperatorCourseSupportCampaignDependencies(fixture.transaction, { now: NOW, admissionRuntimeVersion: SOURCE_SHA })),
   });
+}
+
+function legacyProbeMessageReader(database: Prisma.TransactionClient): Prisma.TransactionClient {
+  return new Proxy(database, { get(target, key) {
+    if (key !== "courseProbe") return Reflect.get(target, key);
+    return new Proxy(target.courseProbe, { get(delegate, method) {
+      if (method !== "findMany") return Reflect.get(delegate, method);
+      return (args: Query) => delegate.findMany({ ...args, select: { ...args.select, message: true } } as never);
+    } });
+  } });
 }
 
 function assertObservedReadCost(result: { readCost: unknown }, queryCategory: AcceptanceReadQueryCategory) {
@@ -416,8 +540,12 @@ function campaignDatabase(input: {
   oversizedObservationLedger?: boolean;
   fleetOnlyEvidence?: "DISCOVERY" | "BOOKING_METADATA" | "LOCAL_READER_RESULT" | "PARKING_AUDIT";
   oversizedFleetOnlyEvidence?: boolean;
+  historicalProbeCount?: number;
+  successfulProbeTieFirst?: boolean;
+  requiredProbeBudgetPressure?: boolean;
 } = {}) {
   const rows = new Map(Prisma.dmmf.datamodel.models.map((model) => [model.name, [] as Row[]]));
+  const probeMessageRead = vi.fn(() => "x".repeat(500));
   const members: ParkedCourseCampaignMember[] = [];
   const cycle = input.readerCandidates ? 4 : 3;
   for (let ordinal = 1; ordinal <= PARKED_COURSE_CAMPAIGN_EXPECTED_COUNT; ordinal++) {
@@ -601,7 +729,42 @@ function campaignDatabase(input: {
       rows.get("CourseMonitoringEvent")!.push(event);
     }
   }
+  if (input.historicalProbeCount) {
+    const probeCourses = ["working", "failed", "tied", "missing"].map((kind) => {
+      const course: Row = { ...rows.get("Course")![0], id: `private-probe-${kind}`, name: "Private Probe Course",
+        detectedPlatform: "FOREUP", providerFamilyKey: "FOREUP", bookingMethod: "PUBLIC_ONLINE",
+        detectedBookingUrl: "https://foreupsoftware.com/index.php/booking/21017#/teetimes",
+        automationEligibility: "ALLOWED", bookingAccessMode: "PUBLIC_SIGNED_OUT",
+        bookingMetadata: { scheduleId: 6654, bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/21017#/teetimes",
+          ...(kind === "missing" && input.requiredProbeBudgetPressure ? { retainedEvidence: "x".repeat(6_400_000) } : {}) },
+        preferences: [], probes: [], automationDiscoveries: [], localReaderJobs: [], monitoringStatus: null, supportIncident: null };
+      const search: Row = { id: `private-probe-search-${kind}`, status: "ACTIVE", trafficClass: "PUBLIC", syntheticMultiCycle: false };
+      const preference: Row = { id: `private-probe-preference-${kind}`, courseId: course.id, course, teeSearchId: search.id,
+        teeSearch: search, rank: 1 };
+      course.preferences = [preference];
+      search.preferences = [preference];
+      rows.get("Course")!.push(course);
+      rows.get("TeeSearch")!.push(search);
+      rows.get("CoursePreference")!.push(preference);
+      return course;
+    });
+    for (let index = 0; index < input.historicalProbeCount; index++) {
+      const latest = index < 4;
+      const course = probeCourses[index === 0 ? 0 : index === 1 ? 1 : index < 4 ? 2 : index % 3];
+      const observedAt = new Date(latest ? NOW.getTime() - (index < 2 ? index + 1 : 3) * 60_000
+        : CAPTURED_AT.getTime() - (index + 1) * 60_000);
+      const outcome = index === 0 ? "NO_MATCH" : index === 1 ? "FETCH_FAILED"
+        : index < 4 ? (index === 2) === Boolean(input.successfulProbeTieFirst) ? "NO_MATCH" : "FETCH_FAILED"
+          : (["NO_MATCH", "FETCH_FAILED", "NEEDS_ADAPTER", "BLOCKED_AUTH"] satisfies ProbeOutcome[])[index % 4];
+      const probe: Row = { id: `private-history-probe-${index}`, courseId: course.id, course,
+        teeSearchId: (course.preferences as Row[])[0].teeSearchId, outcome, observedAt, evidenceUrl: null };
+      Object.defineProperty(probe, "message", { enumerable: true, get: probeMessageRead });
+      (course.probes as Row[]).push(probe);
+      rows.get("CourseProbe")!.push(probe);
+    }
+  }
   const calls: Array<{ model: string; method: string; args: unknown }> = [];
+  const byteTotals: Array<{ statement: Prisma.Sql; bytes: bigint; matchedRows: bigint }> = [];
   const mutation = vi.fn(() => { throw new Error("Read-only inspection cannot mutate."); });
   const transaction = Object.fromEntries(Prisma.dmmf.datamodel.models.map((model) => {
     const name = model.name[0].toLowerCase() + model.name.slice(1);
@@ -620,7 +783,12 @@ function campaignDatabase(input: {
         }
         return [...groups.values()].map(({ identity, count }) => ({ ...identity, _count: { _all: count } }));
       }
-      const result = selected.map((row) => projection(row, args.select));
+      // The pinned Prisma compiler projects fetched historical scalars before
+      // applying this ordered query's in-memory distinct reduction.
+      const result = model.name === "CourseProbe" && method === "findMany"
+        ? selectedRows(selectedRows(rows.get(model.name)!, { ...args, distinct: undefined, take: undefined, skip: undefined })
+          .map((row) => projection(row, args.select)), { distinct: args.distinct, take: args.take, skip: args.skip })
+        : selected.map((row) => projection(row, args.select));
       return method === "findMany" ? result : result[0] ?? null;
     };
     return [name, { count: vi.fn(async (args) => invoke("count", args)), groupBy: vi.fn(async (args) => invoke("groupBy", args)),
@@ -675,11 +843,13 @@ function campaignDatabase(input: {
       const scalarProjection = Object.fromEntries(selectedFields.map(({ key, column }) => [key, row[column] ?? null]));
       // This in-memory SQL fixture overestimates typed padding. Real PostgreSQL
       // tests separately prove the generated SQL and its encoding upper bound.
-      const padding = selectedFields.reduce((sum, { column }) =>
-        sum + 32 * (Array.isArray(row[column]) ? (row[column] as unknown[]).length : 1), 0);
+      const padding = selectedFields.reduce((sum, { key }) =>
+        sum + 32 * (Array.isArray(scalarProjection[key]) ? (scalarProjection[key] as unknown[]).length : 1), 0);
       return total + (Buffer.byteLength(JSON.stringify(scalarProjection), "utf8") + padding) * weights.get(row[id] as string)!;
     }, 0);
-    return [{ bytes: BigInt(bytes), matchedRows: BigInt(selected.length) }];
+    const total = { bytes: BigInt(bytes), matchedRows: BigInt(selected.length) };
+    byteTotals.push({ statement, ...total });
+    return [total];
   });
   transaction.$queryRaw = byteRead;
   const transactionControls = vi.fn(async (command: string) => {
@@ -688,7 +858,7 @@ function campaignDatabase(input: {
   });
   transaction.$executeRawUnsafe = transactionControls;
   return { transaction: transaction as unknown as Prisma.TransactionClient, calls, mutation,
-    transactionControls, byteRead, operationCount: () => calls.length };
+    transactionControls, byteRead, byteTotals, probeMessageRead, operationCount: () => calls.length };
 }
 
 function selectedRows(rows: readonly Row[], query: Query): Row[] {
@@ -697,8 +867,8 @@ function selectedRows(rows: readonly Row[], query: Query): Row[] {
   selected.sort((left, right) => {
     for (const term of order) {
       for (const [key, direction] of Object.entries(term)) {
-        const leftValue = left[key];
-        const rightValue = right[key];
+        const leftValue = left[key] instanceof Date ? (left[key] as Date).getTime() : left[key];
+        const rightValue = right[key] instanceof Date ? (right[key] as Date).getTime() : right[key];
         if (typeof direction === "object") continue;
         const comparison = leftValue === rightValue ? 0 : (leftValue as string | number) < (rightValue as string | number) ? -1 : 1;
         if (comparison !== 0) return direction === "desc" ? -comparison : comparison;
