@@ -29,6 +29,7 @@ const smokeCourses = [
   longitude: -73.2 - index * 0.002,
   name,
   monitoringSupport: index === 0 ? "AUTOMATIC" : "UNCONFIRMED",
+  monitoringReadiness: index === 0 ? "READY" : "VERIFYING",
   par: [72, 72, 71, 70, 71, 72, 72][index],
   photoReference: `ui-smoke-photo-${index + 1}`,
   ...(index === 0
@@ -1572,8 +1573,9 @@ test.describe("Tee Time Spot UI smoke", () => {
           date: "2026-09-30", courses, selectedCourses
         }));
       }, { courses: [newYork, tokyo], selectedCourses: [newYork] });
-      // These picker checks must never create alerts or request provider data.
-      await page.route("**/api/**", async (route) => {
+      // Fence application APIs so these picker checks cannot create alerts or query providers.
+      await page.route((url) =>
+        url.origin === smokeOrigin && url.pathname.startsWith("/api/"), async (route) => {
         expect(new URL(route.request().url()).pathname).toBe("/api/analytics/events");
         await route.fulfill({
           body: JSON.stringify({ event: { id: "date-picker-event" } }),

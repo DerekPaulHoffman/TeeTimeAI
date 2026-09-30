@@ -80,6 +80,71 @@ describe("TeeTimeIntake", () => {
     Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
   });
 
+  it.each([undefined, "VERIFYING", "READY"] as const)(
+    "uses explicit readiness %s for discovery and shortlist copy while allowing saved demand", async (monitoringReadiness) => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date("2026-09-30T03:16:30.000Z"));
+      const course = {
+        ...dateBoundaryCourse("Readiness Course", "America/New_York"), monitoringReadiness,
+      };
+      const fetchMock = mockDateBoundaryRequests();
+      const fallbackRequest = fetchMock.getMockImplementation()!;
+      fetchMock.mockImplementation(async (input, init) => {
+        const url = String(input);
+        if (url.startsWith("/api/location/geocode")) {
+          return Response.json({ latitude: 41.24, longitude: -73.2 });
+        }
+        if (url.startsWith("/api/courses/discover")) {
+          return Response.json({ courses: [course] });
+        }
+        return fallbackRequest(input, init);
+      });
+      Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+        configurable: true, value: vi.fn(),
+      });
+      render(<TeeTimeIntake {...signedInAccountProps} initialValues={{ location: "Test town" }} />);
+      fireEvent.click(screen.getByRole("button", { name: "Search" }));
+      await screen.findByRole("heading", { name: "Readiness Course" });
+      fireEvent.click(screen.getByRole("button", { name: "Add Readiness Course" }));
+
+      if (monitoringReadiness === "READY") {
+        expect(screen.getAllByText("Tee-time alerts available").length).toBeGreaterThan(0);
+        expect(screen.queryByText("Verdict after first check")).toBeNull();
+      } else {
+        expect(screen.queryAllByText("Tee-time alerts available")).toHaveLength(0);
+        expect(screen.getAllByText("Alert availability after first check").length).toBeGreaterThan(0);
+        expect(screen.getByText("Verdict after first check")).toBeTruthy();
+      }
+      fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
+      await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/dashboard?created=date-boundary"));
+    },
+  );
+
+  it("restores ranked demand without advertising stored monitoring evidence", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-30T03:16:30.000Z"));
+    const first = {
+      ...dateBoundaryCourse("First Restored Course", "America/New_York"),
+      monitoringReadiness: "READY", alertSupport: "PHONE_ONLY", firstTimeLookup: true,
+    };
+    const second = {
+      ...dateBoundaryCourse("Second Restored Course", "America/New_York"), monitoringReadiness: "READY",
+    };
+    restoreDateBoundaryDraft([first, second], [second, first], "2026-10-03");
+    const fetchMock = mockDateBoundaryRequests();
+    render(<TeeTimeIntake {...signedInAccountProps} />);
+    await screen.findAllByRole("heading", { name: "First Restored Course" });
+    expect(screen.queryAllByText("Tee-time alerts available")).toHaveLength(0);
+    expect(screen.queryByText("Phone booking")).toBeNull();
+    expect(screen.getAllByText("Verdict after first check")).toHaveLength(2);
+    expect((document.querySelector("#date") as HTMLInputElement).value).toBe("2026-10-03");
+    fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
+    await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/dashboard?created=date-boundary"));
+    const save = fetchMock.mock.calls.find(([input]) => input === "/api/searches");
+    const payload = JSON.parse(String(save?.[1]?.body)) as { courses: Array<{ googlePlaceId: string }> };
+    expect(payload.courses.map((course) => course.googlePlaceId)).toEqual([second.googlePlaceId, first.googlePlaceId]);
+  });
+
   it("restores and saves tomorrow in the selected course's calendar", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-09-30T03:16:30.000Z"));

@@ -44,6 +44,7 @@ export function SearchStatusActions({
   initialCadenceMinutes,
   initialAdditionalEmails,
   initialCheckStatus,
+  initialScheduleVersion,
   initialLastCheckedAt,
   initialNextCheckAt,
   initialCoursePreferences
@@ -59,38 +60,67 @@ export function SearchStatusActions({
   initialCadenceMinutes: number;
   initialAdditionalEmails: string[];
   initialCheckStatus: SearchCheckStatus;
+  initialScheduleVersion?: number;
   initialLastCheckedAt: string | null;
   initialNextCheckAt: string | null;
   initialCoursePreferences: CoursePreferenceFormValue[];
 }) {
   const router = useRouter();
   const [pending, setPending] = useState(false);
-  const [localStatus, setLocalStatus] = useState(status);
-  const [localCheckStatus, setLocalCheckStatus] = useState(initialCheckStatus);
+  const serverStateKey = JSON.stringify([
+    searchId,
+    status,
+    initialScheduleVersion,
+    initialCheckStatus,
+    initialLastCheckedAt,
+    initialNextCheckAt,
+    getSavedForm()
+  ]);
+  const [optimisticStatus, setOptimisticStatus] = useState<{
+    serverStateKey: string;
+    value: SearchStatus;
+  } | null>(null);
+  const [optimisticCheckStatus, setOptimisticCheckStatus] = useState<{
+    serverStateKey: string;
+    value: SearchCheckStatus;
+  } | null>(null);
+  // Optimistic feedback belongs to the server snapshot that requested it.
+  // A newer lifecycle, intent, or check clock immediately supersedes it.
+  const localStatus = optimisticStatus?.serverStateKey === serverStateKey
+    ? optimisticStatus.value : status;
+  const localCheckStatus = localStatus !== "ACTIVE"
+    ? "STOPPED"
+    : optimisticCheckStatus?.serverStateKey === serverStateKey
+      ? optimisticCheckStatus.value : initialCheckStatus;
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [draggedPreferenceId, setDraggedPreferenceId] = useState<string | null>(null);
   const [dropTargetPreferenceId, setDropTargetPreferenceId] = useState<string | null>(null);
-  const [form, setForm] = useState({
-    date: initialDate,
-    startTime: initialStartTime,
-    endTime: initialEndTime,
-    userTimeZone: initialUserTimeZone,
-    players: initialPlayers,
-    requestedLayoutHoles: initialRequestedLayoutHoles,
-    cadenceMinutes: initialCadenceMinutes,
-    additionalEmails: initialAdditionalEmails.join("\n"),
-    coursePreferences: [...initialCoursePreferences].sort((a, b) => a.rank - b.rank)
-  });
+  const [form, setForm] = useState(getSavedForm);
+
+  function getSavedForm() {
+    return {
+      date: initialDate,
+      startTime: initialStartTime,
+      endTime: initialEndTime,
+      userTimeZone: initialUserTimeZone,
+      players: initialPlayers,
+      requestedLayoutHoles: initialRequestedLayoutHoles,
+      cadenceMinutes: initialCadenceMinutes,
+      additionalEmails: initialAdditionalEmails.join("\n"),
+      coursePreferences: [...initialCoursePreferences].sort((a, b) => a.rank - b.rank)
+    };
+  }
 
   useEffect(() => {
-    if (localCheckStatus !== "QUEUED" && localCheckStatus !== "CHECKING") {
+    if (localStatus !== "ACTIVE" ||
+        (localCheckStatus !== "QUEUED" && localCheckStatus !== "CHECKING")) {
       return;
     }
 
     const interval = window.setInterval(() => router.refresh(), 2500);
     return () => window.clearInterval(interval);
-  }, [localCheckStatus, router]);
+  }, [localStatus, localCheckStatus, router]);
 
   async function checkNow() {
     setPending(true);
@@ -100,7 +130,7 @@ export function SearchStatusActions({
     });
 
     if (response.ok) {
-      setLocalCheckStatus("CHECKING");
+      setOptimisticCheckStatus({ serverStateKey, value: "CHECKING" });
       router.refresh();
     } else {
       setError(await readError(response, "Could not check this search."));
@@ -118,7 +148,10 @@ export function SearchStatusActions({
     });
 
     if (response.ok) {
-      setLocalStatus(status);
+      setOptimisticStatus({ serverStateKey, value: status });
+      if (status === "ACTIVE") {
+        setOptimisticCheckStatus({ serverStateKey, value: "QUEUED" });
+      }
       router.refresh();
     } else {
       setError(await readError(response, "Could not update search."));
@@ -256,7 +289,8 @@ export function SearchStatusActions({
     localCheckStatus,
     initialLastCheckedAt,
     initialNextCheckAt,
-    initialUserTimeZone
+    initialUserTimeZone,
+    localStatus
   );
 
   return (
@@ -440,7 +474,10 @@ export function SearchStatusActions({
             <button
               className="button button-ghost dashboard-edit-button"
               type="button"
-              onClick={() => setEditing(true)}
+              onClick={() => {
+                setForm(getSavedForm());
+                setEditing(true);
+              }}
               disabled={pending}
               title="Edit search"
             >
@@ -481,7 +518,7 @@ export function SearchStatusActions({
               >
                 <CirclePause size={16} />
               </button>
-            ) : (
+            ) : localStatus === "PAUSED" ? (
               <button
                 className="button button-ghost dashboard-icon-button"
                 type="button"
@@ -492,7 +529,7 @@ export function SearchStatusActions({
               >
                 <Play size={16} />
               </button>
-            )}
+            ) : null}
             <button
               className="button button-ghost dashboard-icon-button"
               type="button"
@@ -547,8 +584,27 @@ function getCheckStatusDisplay(
   status: SearchCheckStatus,
   lastCheckedAt: string | null,
   nextCheckAt: string | null,
-  timeZone: string
+  timeZone: string,
+  lifecycleStatus: SearchStatus
 ) {
+  if (lifecycleStatus !== "ACTIVE" || status === "STOPPED") {
+    return {
+      tone: "paused",
+      title: lifecycleStatus === "PAUSED"
+        ? "Automatic checks are paused"
+        : "Automatic checks have stopped",
+      detail: lifecycleStatus === "PAUSED"
+        ? "Resume this search whenever you want us to start checking again."
+        : lifecycleStatus === "COMPLETED"
+          ? "This alert is completed and is no longer checking for tee times."
+          : lifecycleStatus === "CANCELLED"
+            ? "This alert is cancelled and is no longer checking for tee times."
+            : "This alert is not checking for tee times right now.",
+      timing: lastCheckedAt
+        ? `Last checked: ${formatCheckTimestamp(lastCheckedAt, timeZone)}`
+        : null
+    } as const;
+  }
   if (status === "QUEUED" || status === "CHECKING") {
     return {
       tone: "checking",
@@ -580,14 +636,6 @@ function getCheckStatusDisplay(
       timing: nextCheckAt
         ? `Next check: ${formatCheckTimestamp(nextCheckAt, timeZone)}`
         : null
-    } as const;
-  }
-  if (status === "STOPPED") {
-    return {
-      tone: "paused",
-      title: "Automatic checks are paused",
-      detail: "Resume this search whenever you want us to start checking again.",
-      timing: null
     } as const;
   }
   return {

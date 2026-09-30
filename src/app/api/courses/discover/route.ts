@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { hasGooglePlacesConfig, isVercelProduction } from "@/lib/env";
 import { demoCourses } from "@/lib/places/demo-courses";
 import { enrichCoursesWithAlertSupport } from "@/lib/places/alert-support";
+import { clearCourseMonitoringEvidence } from "@/lib/places/course-monitoring-evidence";
 import { courseDataSuccessCacheHeaders } from "@/lib/places/course-data-cache";
 import { cacheCourseCandidatePhotos } from "@/lib/places/course-photo-metadata";
 import {
@@ -10,7 +11,7 @@ import {
   readCourseRuntimeCache,
   writeCourseRuntimeCache
 } from "@/lib/places/course-runtime-cache";
-import { searchNearbyGolfCourses } from "@/lib/places/google";
+import { searchNearbyGolfCourses, type CourseCandidate } from "@/lib/places/google";
 import {
   GooglePlaceReviewsUnavailableError,
   loadActiveGooglePlaceReviewIndex
@@ -64,9 +65,12 @@ export async function GET(request: NextRequest) {
   try {
     const cachedCourses = await readCourseRuntimeCache<unknown[]>(cacheKey);
     if (Array.isArray(cachedCourses)) {
-      await cacheCourseCandidatePhotos(cachedCourses);
+      const currentCourses = await enrichCoursesWithAlertSupport(
+        (cachedCourses as CourseCandidate[]).map(clearCourseMonitoringEvidence),
+      );
+      await cacheCourseCandidatePhotos(currentCourses);
       return NextResponse.json(
-        { courses: cachedCourses, demo: false },
+        { courses: currentCourses, demo: false },
         { headers: courseDataSuccessCacheHeaders }
       );
     }

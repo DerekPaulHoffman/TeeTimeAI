@@ -55,13 +55,22 @@ export function getDashboardAvailabilityView(input: {
   }`;
 
   if (input.qualifyingMatchCount > 0) {
+    const active = !input.alertStatus || input.alertStatus === "ACTIVE";
     return {
       label: `${input.qualifyingMatchCount} matching ${
         input.qualifyingMatchCount === 1 ? "time" : "times"
-      }`,
-      detail: `${input.qualifyingMatchCount} ${
-        input.qualifyingMatchCount === 1 ? "tee time fits" : "tee times fit"
-      } your ${formatTime(input.startTime)} to ${formatTime(input.endTime)} window for ${golferLabel}.`,
+      }${active ? "" : " at last check"}`,
+      detail: active
+        ? `${input.qualifyingMatchCount} ${
+            input.qualifyingMatchCount === 1 ? "tee time fits" : "tee times fit"
+          } your ${formatTime(input.startTime)} to ${formatTime(input.endTime)} window for ${golferLabel}.`
+        : `At the last check, ${input.qualifyingMatchCount} ${
+            input.qualifyingMatchCount === 1 ? "tee time fit" : "tee times fit"
+          } your ${formatTime(input.startTime)} to ${formatTime(input.endTime)} window for ${golferLabel}. ${
+            input.alertStatus === "PAUSED"
+              ? "This alert is paused."
+              : "This alert has ended."
+          } Current availability has not been rechecked.`,
       tone: "matching"
     };
   }
@@ -103,7 +112,7 @@ export function getDashboardAvailabilityView(input: {
       }
 
       return {
-        label: "Availability found",
+        label: "No tee times fit your group",
         detail: `${snapshot.visibleSlotCount} public ${pluralize(
           snapshot.visibleSlotCount,
           "tee time is",

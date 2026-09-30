@@ -151,7 +151,7 @@ describe("course alert support enrichment", () => {
     expect(course.alertSupport).toBeUndefined();
   });
 
-  it("only claims automatic monitoring for a known allowed course", async () => {
+  it("keeps a known allowed course pending until provider monitoring is confirmed", async () => {
     mockedPrisma.course.findMany.mockResolvedValue([
       {
         id: "course-timberlin",
@@ -186,7 +186,7 @@ describe("course alert support enrichment", () => {
     ]);
 
     expect(knownCourse.monitoringSupport).toBe("AUTOMATIC");
-    expect(knownCourse.monitoringReadiness).toBe("READY");
+    expect(knownCourse.monitoringReadiness).toBe("VERIFYING");
     expect(knownCourse.courseId).toBe("course-timberlin");
     expect(knownCourse.profileUrl).toBe("/courses/timberlin-golf-course-berlin-ct");
     expect(unknownCourse.monitoringSupport).toBe("UNCONFIRMED");
@@ -281,6 +281,156 @@ describe("course alert support enrichment", () => {
     expect(course.monitoringSupport).toBe("AUTOMATIC");
     expect(course.alertSupport).toBeUndefined();
     expect(course.website).toBe("https://grassyhill.cps.golf/");
+    expect(course.monitoringReadiness).not.toBe("READY");
+  });
+
+  const sourceAt = new Date("2026-09-29T19:29:22.000Z");
+  const laterFailureAt = new Date("2026-09-30T02:34:42.000Z");
+  const candidate = {
+    googlePlaceId: "readiness-place", name: "Public Test Golf Course",
+    latitude: 41.27, longitude: -73.02, timeZone: "America/New_York",
+  };
+  function healthyCourse() {
+    return {
+      ...candidate, id: "readiness-course", isPublic: true,
+      bookingMethod: "PUBLIC_ONLINE", bookingAccessMode: "PUBLIC_SIGNED_OUT",
+      automationEligibility: "ALLOWED", automationReason: "NONE",
+      detectedBookingUrl: "https://publictest.cps.golf/",
+      monitoringStatus: {
+        state: "HEALTHY", stateChangedAt: new Date(sourceAt.getTime() + 2_000),
+        lastSuccessfulAt: sourceAt, lastFailureAt: null, revalidationRequestedAt: null,
+      },
+      probes: [{
+        outcome: "NO_MATCH", observedAt: new Date(sourceAt.getTime() + 1_000),
+        rawSummary: {
+          providerExecution: "LOCAL_BROWSER_READER", providerObservedAt: sourceAt.toISOString(),
+        },
+      }],
+    };
+  }
+  async function enrichFixture(course: unknown) {
+    mockedPrisma.course.findMany.mockResolvedValue([course] as never);
+    return (await enrichCoursesWithAlertSupport([candidate]))[0];
+  }
+
+  it("confirms a marked provider source accepted by canonical health without exposing evidence", async () => {
+    const course = await enrichFixture(healthyCourse());
+    expect(course.monitoringReadiness).toBe("READY");
+    expect(course.monitoringReadinessObservedAt).toBe(sourceAt.toISOString());
+    expect(course.monitoringSupport).toBe("AUTOMATIC");
+    expect(course).not.toHaveProperty("rawSummary");
+    expect(course).not.toHaveProperty("monitoringStatus");
+    expect(course).not.toHaveProperty("supportIncident");
+  });
+
+  it.each([undefined, {}, { providerExecution: "SOURCE_DISCOVERY", providerObservedAt: sourceAt.toISOString() }])(
+    "never treats markerless or discovery-only successful probes as ready: %j", async (rawSummary) => {
+      const fixture = healthyCourse();
+      const course = await enrichFixture({ ...fixture, probes: [{ ...fixture.probes[0], rawSummary }] });
+      expect(course.monitoringReadiness).toBe("VERIFYING");
+      expect(course.alertSupport).toBeUndefined();
+    },
+  );
+
+  it.each([sourceAt, laterFailureAt])("rejects a source not newer than the current failure: %s", async (lastFailureAt) => {
+    const fixture = healthyCourse();
+    const course = await enrichFixture({
+      ...fixture, monitoringStatus: { ...fixture.monitoringStatus, lastFailureAt },
+    });
+    expect(course.monitoringReadiness).not.toBe("READY");
+  });
+
+  it.each([
+    { state: "ENGINEERING_VERIFICATION_NEEDED", lastFailureAt: laterFailureAt },
+    { state: "HEALTHY", revalidationRequestedAt: laterFailureAt },
+    { state: "HEALTHY", lastSuccessfulAt: new Date(sourceAt.getTime() - 1) },
+  ])("rejects unaccepted or revalidating canonical health: %j", async (status) => {
+    const fixture = healthyCourse();
+    const course = await enrichFixture({ ...fixture, monitoringStatus: { ...fixture.monitoringStatus, ...status } });
+    expect(course.monitoringReadiness).not.toBe("READY");
+  });
+
+  it("does not replace source time with a newer cached-probe persistence time", async () => {
+    const fixture = healthyCourse();
+    const course = await enrichFixture({
+      ...fixture, monitoringStatus: { ...fixture.monitoringStatus, lastFailureAt: laterFailureAt },
+      probes: [{ ...fixture.probes[0], observedAt: new Date(laterFailureAt.getTime() + 1_000) }],
+    });
+    expect(course.monitoringReadiness).not.toBe("READY");
+  });
+
+  function parkedIncident(endpointAt: Date) {
+    return {
+      id: "test-incident", cycle: 1, status: "NEEDS_HUMAN",
+      attemptLedger: {}, humanReviewReason: "AUTOMATION_STALLED",
+      escalatedAt: endpointAt, escalationDeadlineAt: endpointAt,
+      confirmedAt: endpointAt, lastSeenAt: endpointAt,
+      monitoringEvents: [{
+        incidentId: "test-incident", eventType: "HUMAN_REVIEW_REQUESTED", occurredAt: endpointAt,
+        audit: {
+          cycle: 1, customerState: "NEEDS_HUMAN_REVIEW", automationStalled: true,
+          playbookExhausted: false, escalationDeadlineAt: endpointAt.toISOString(),
+        },
+      }],
+    };
+  }
+
+  it("withholds readiness from the observed allowed but parked reader scenario", async () => {
+    const fixture = healthyCourse();
+    const course = await enrichFixture({
+      ...fixture, supportIncident: parkedIncident(laterFailureAt),
+      monitoringStatus: {
+        ...fixture.monitoringStatus, state: "ENGINEERING_VERIFICATION_NEEDED",
+        stateChangedAt: laterFailureAt, lastFailureAt: laterFailureAt,
+      },
+      probes: [{ outcome: "NEEDS_ADAPTER", observedAt: laterFailureAt, rawSummary: {} }],
+    });
+    expect(course.monitoringReadiness).toBe("UNAVAILABLE");
+    expect(course.alertSupport).toBeUndefined();
+  });
+
+  it("lets a newer accepted provider recovery supersede an older human incident", async () => {
+    const fixture = healthyCourse();
+    const oldEndpointAt = new Date(sourceAt.getTime() - 60_000);
+    const course = await enrichFixture({
+      ...fixture, supportIncident: parkedIncident(oldEndpointAt),
+      monitoringStatus: { ...fixture.monitoringStatus, lastFailureAt: oldEndpointAt },
+    });
+    expect(course.monitoringReadiness).toBe("READY");
+  });
+
+  it.each(["FINAL_MANUAL", "FINAL_TECHNICAL", "FINAL_IDENTITY"])(
+    "keeps a precise %s unavailable despite a marked success and reader URL", async (state) => {
+      const fixture = healthyCourse();
+      const course = await enrichFixture({ ...fixture, monitoringStatus: { ...fixture.monitoringStatus, state } });
+      expect(course.monitoringReadiness).toBe("UNAVAILABLE");
+    },
+  );
+
+  it("retains the precise phone final even when a reader URL is recognized", async () => {
+    const fixture = healthyCourse();
+    const course = await enrichFixture({
+      ...fixture, bookingMethod: "PHONE_ONLY", bookingAccessMode: "PHONE_ONLY", automationEligibility: "BLOCKED",
+      automationReason: "NO_ONLINE_BOOKING",
+      monitoringStatus: { ...fixture.monitoringStatus, state: "FINAL_MANUAL" },
+    });
+    expect(course.alertSupport).toBe("PHONE_ONLY");
+    expect(course.monitoringReadiness).toBe("UNAVAILABLE");
+  });
+
+  it("rebuilds stale derived fields when the candidate no longer resolves to a known course", async () => {
+    mockedPrisma.course.findMany.mockResolvedValue([]);
+    const [course] = await enrichCoursesWithAlertSupport([{
+      ...candidate, alertSupport: "PHONE_ONLY", monitoringSupport: "AUTOMATIC",
+      monitoringReadiness: "READY", monitoringReadinessObservedAt: sourceAt.toISOString(),
+      firstTimeLookup: false, profileUrl: "/courses/obsolete-profile",
+    }]);
+    expect(course.monitoringReadiness).toBe("VERIFYING");
+    expect(course.monitoringSupport).toBe("UNCONFIRMED");
+    expect(course.firstTimeLookup).toBe(true);
+    expect(course.alertSupport).toBeUndefined();
+    expect(course.monitoringReadinessObservedAt).toBeUndefined();
+    expect(course.profileUrl).toBeUndefined();
   });
 
   it("keeps a stale course guide linked while its facts are refreshed", async () => {

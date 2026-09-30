@@ -44,10 +44,9 @@ import { evaluateMonitoringGate } from "@/lib/automation/policy";
 import { isAutomationHumanReviewProofCurrentOrPrior } from "@/lib/automation/course-monitoring-playbook";
 import { hasDurableAutomationStalledEndpointProof } from "@/lib/customer-monitoring-status";
 import {
-  getDashboardAvailabilityView,
-  readDashboardAvailabilitySnapshot
-} from "@/lib/searches/dashboard-availability";
-import { getDashboardMonitoringVerdict } from "@/lib/searches/dashboard-monitoring-verdict";
+  getDashboardAlertSummary,
+  getDashboardCourseStatus
+} from "@/lib/searches/dashboard-alert-summary";
 import { listTeeSearchesForUser } from "@/lib/searches/service";
 import { SearchEmailDeliveryInProgressError } from "@/lib/users/pending-email";
 import { formatCourseDistance } from "@/lib/email/course-facts";
@@ -131,7 +130,7 @@ function DashboardView({
   const activeSearches = searches.filter((search) => search.status === "ACTIVE");
   const inactiveSearches = searches.filter((search) => search.status !== "ACTIVE");
   const activeCount = activeSearches.length;
-  const availableMatches = searches.flatMap((search) =>
+  const availableMatches = activeSearches.flatMap((search) =>
     search.matches.filter(
       (match) =>
         match.availabilityStatus === "AVAILABLE" &&
@@ -147,13 +146,15 @@ function DashboardView({
   const totalAlerts = searches.length;
   const alertStatusCopy = `${activeCount} ${
     activeCount === 1 ? "alert" : "alerts"
-  } running. We'll email you when a matching spot opens.`;
+  } active. See each course's status for what we can check.`;
   const readyMessage =
     activeCount > 0
-      ? "You’re all set — we’re checking your courses and will email you when a matching spot opens."
+      ? "Your alerts are saved and active. See each course’s status below. We’ll email confirmed matches and important alert updates."
       : searches.length > 0
-        ? "You don’t have an active alert right now. Resume a previous search or start a new one."
-        : "No alerts yet. Find a tee time to start watching your preferred public courses.";
+        ? inactiveSearches.some((search) => search.status === "PAUSED")
+          ? "You don’t have an active alert right now. Resume a paused alert or start a new one."
+          : "You don’t have an active alert right now. Start a new one when you’re ready to play."
+        : "No alerts yet. Find public courses and save your preferred date and time.";
   const inactiveHeading = inactiveSearches.every((search) => search.status === "CANCELLED")
     ? "Cancelled"
     : "Paused and completed";
@@ -181,7 +182,7 @@ function DashboardView({
       <div className="dashboard-grid">
         <section className="dashboard-panel">
           <div className="panel-title-row">
-            <h2>Watching now</h2>
+            <h2>Active alerts</h2>
             <span className="status-pill active-count">{activeCount} active</span>
           </div>
           {activeSearches.length === 0 ? (
@@ -189,7 +190,7 @@ function DashboardView({
               <CalendarClock size={28} />
               <h3>{searches.length === 0 ? "No alerts yet" : "No active alerts"}</h3>
               <p className="meta">
-                Find a tee time so Tee Time Spot can start watching your ranked courses.
+                Find public courses and save when you want to play. Each course’s status explains what we can check.
               </p>
             </div>
           ) : (
@@ -249,7 +250,7 @@ function DashboardView({
             </div>
           </dl>
           <div className="alert alert-info">
-            We watch all your courses and only email you when something new opens up — no repeats.
+            See each course’s status for what we can check. We’ll email new confirmed matches and alert updates.
           </div>
           <Link className="button button-dark dashboard-add-search" href="/search">
             <Plus size={16} />
@@ -281,32 +282,79 @@ function DashboardSearchCard({
       match.startsAt > now &&
       evaluateMonitoringGate({ ...match.course, now }).disposition === "ACTIONABLE"
   );
-  const latestCourseProbes = search.preferences.flatMap((preference) => {
-    const probe = search.probes.find(
-      (candidate) => candidate.courseId === preference.course.id
-    );
-    return probe ? [probe] : [];
+  const courseStatusById = new Map(search.preferences.map((preference) => {
+    const course = preference.course;
+    const isPublicCourse = course.isPublic === true;
+    const latestProbe = search.probes.find((probe) => probe.courseId === course.id);
+    const bookingWindow = isPublicCourse
+      ? getBookingWindowForTargetDate(search.date, course)
+      : null;
+    const upcomingBookingWindow =
+      bookingWindow && bookingWindow.opensAt > now &&
+      latestProbe?.outcome !== "MATCH_FOUND" ? bookingWindow : null;
+    const usesPhoneBooking = isPublicCourse &&
+      ["PHONE_ONLY", "ONLINE_OR_PHONE", "CONTACT_COURSE"].includes(course.bookingMethod);
+    const courseStatus = getDashboardCourseStatus({
+      availability: {
+        alertStatus: search.status,
+        outcome: latestProbe?.outcome,
+        rawSummary: latestProbe?.rawSummary,
+        qualifyingMatchCount: availableSearchMatches.filter(
+          (match) => match.courseId === course.id
+        ).length,
+        players: search.players,
+        startTime: search.startTime,
+        endTime: search.endTime,
+        bookingOpensLabel: upcomingBookingWindow
+          ? upcomingBookingWindow.exactTime
+            ? `when booking opens ${formatBookingWindowRelease(upcomingBookingWindow)}`
+            : `around ${formatBookingWindowRelease(upcomingBookingWindow)}`
+          : null
+      },
+      monitoring: {
+        alertStatus: search.status,
+        alertSupport: isPublicCourse ? getCourseAlertSupport(course) ?? null : null,
+        bookingPhone: usesPhoneBooking ? course.bookingPhone ?? course.phone : null,
+        automationEligibility: course.automationEligibility,
+        automationReason: course.automationReason,
+        latestProbe,
+        upcomingBookingWindow,
+        monitoringState: course.monitoringStatus?.state ?? null,
+        monitoringStateChangedAt: course.monitoringStatus?.stateChangedAt ?? null,
+        supportIncidentStatus: course.supportIncident?.status ?? null,
+        humanReviewReason: course.supportIncident?.humanReviewReason ?? null,
+        incidentEscalatedAt: course.supportIncident?.escalatedAt ?? null,
+        escalationDeadlineAt: course.supportIncident?.escalationDeadlineAt ?? null,
+        automationPlaybookExhausted: course.supportIncident
+          ? isAutomationHumanReviewProofCurrentOrPrior(
+              course.supportIncident.attemptLedger,
+              course.supportIncident.cycle
+            )
+          : null,
+        automationStalledAtEndpoint: course.supportIncident
+          ? hasDurableAutomationStalledEndpointProof({
+              incidentId: course.supportIncident.id,
+              incidentCycle: course.supportIncident.cycle,
+              incidentStatus: course.supportIncident.status,
+              humanReviewReason: course.supportIncident.humanReviewReason,
+              incidentEscalatedAt: course.supportIncident.escalatedAt,
+              escalationDeadlineAt: course.supportIncident.escalationDeadlineAt,
+              monitoringState: course.monitoringStatus?.state ?? null,
+              endpointEvents: course.supportIncident.monitoringEvents
+            })
+          : false,
+        firstTimeLookup: Math.abs(
+          course.createdAt.getTime() - search.createdAt.getTime()
+        ) <= 2 * 60 * 1000
+      }
+    });
+    return [course.id, courseStatus] as const;
+  }));
+  const summary = getDashboardAlertSummary({
+    alertStatus: search.status,
+    qualifyingMatchCount: availableSearchMatches.length,
+    courseStatuses: [...courseStatusById.values()]
   });
-  const visibleProviderSlotCount = latestCourseProbes.reduce(
-    (total, probe) =>
-      total +
-      (readDashboardAvailabilitySnapshot(probe.rawSummary)?.visibleSlotCount ?? 0),
-    0
-  );
-  const summaryStatus =
-    availableSearchMatches.length > 0
-      ? `${availableSearchMatches.length} matching ${
-          availableSearchMatches.length === 1 ? "time" : "times"
-        } now`
-      : visibleProviderSlotCount > 0
-        ? `${visibleProviderSlotCount} ${
-            visibleProviderSlotCount === 1 ? "tee time" : "tee times"
-          } found in the latest check`
-        : latestCourseProbes.length > 0
-          ? "No matching times yet"
-          : search.status === "ACTIVE"
-            ? "Waiting for a check of these settings"
-            : "No current check for these settings";
 
   return (
     <article className="dashboard-row">
@@ -318,7 +366,7 @@ function DashboardSearchCard({
           <div className="dashboard-alert-summary-heading">
             <span className={`status-pill ${search.status.toLowerCase()}`}>
               {search.status === "ACTIVE" ? <Play size={13} /> : <CirclePause size={13} />}
-              {search.status === "ACTIVE" ? "Watching" : search.status}
+              {summary.lifecycleLabel}
             </span>
             <h3>
               <CalendarDays size={16} />
@@ -326,7 +374,8 @@ function DashboardSearchCard({
             </h3>
           </div>
           <div className="dashboard-alert-summary-copy">
-            <strong>{summaryStatus}</strong>
+            <strong>{summary.headline}</strong>
+            {summary.coverageNotice ? <span>{summary.coverageNotice}</span> : null}
             <span>
               {formatTimeLabel(search.startTime)}–{formatTimeLabel(search.endTime)}
               {" · "}
@@ -385,7 +434,7 @@ function DashboardSearchCard({
           </div>
           {canManage ? (
             <SearchStatusActions
-              key={`${search.id}-${search.checkStatus}-${search.lastCheckedAt?.toISOString() ?? "never"}`}
+              key={search.id}
               searchId={search.id}
               status={search.status}
               initialDate={formatDateInputValue(search.date)}
@@ -399,6 +448,7 @@ function DashboardSearchCard({
               initialCadenceMinutes={search.cadenceMinutes}
               initialAdditionalEmails={search.additionalEmails}
               initialCheckStatus={search.checkStatus}
+              initialScheduleVersion={search.scheduleVersion}
               initialLastCheckedAt={search.lastCheckedAt?.toISOString() ?? null}
               initialNextCheckAt={search.nextCheckAt?.toISOString() ?? null}
               initialCoursePreferences={search.preferences.map((preference) => ({
@@ -422,18 +472,9 @@ function DashboardSearchCard({
             const identityRecheckDue =
               preference.course.isPublic === false &&
               monitoringGate.requiresRevalidation;
-            const alertSupport = isPublicCourse
-              ? getCourseAlertSupport(preference.course)
-              : null;
-            const bookingWindow = isPublicCourse
-              ? getBookingWindowForTargetDate(search.date, preference.course)
-              : null;
             const latestProbe = search.probes.find(
               (probe) => probe.courseId === preference.course.id
             );
-            const upcomingBookingWindow =
-              bookingWindow && bookingWindow.opensAt > now &&
-              latestProbe?.outcome !== "MATCH_FOUND" ? bookingWindow : null;
             const usesPhoneBooking =
               isPublicCourse &&
               ["PHONE_ONLY", "ONLINE_OR_PHONE", "CONTACT_COURSE"].includes(
@@ -455,87 +496,7 @@ function DashboardSearchCard({
             const courseMatches = availableSearchMatches.filter(
               (match) => match.courseId === preference.course.id
             );
-            const availabilityView = getDashboardAvailabilityView({
-              alertStatus: search.status,
-              outcome: latestProbe?.outcome,
-              rawSummary: latestProbe?.rawSummary,
-              qualifyingMatchCount: courseMatches.length,
-              players: search.players,
-              startTime: search.startTime,
-              endTime: search.endTime,
-              bookingOpensLabel: upcomingBookingWindow
-                ? upcomingBookingWindow.exactTime
-                  ? `when booking opens ${formatBookingWindowRelease(
-                      upcomingBookingWindow
-                    )}`
-                  : `around ${formatBookingWindowRelease(upcomingBookingWindow)}`
-                : null
-            });
-            const monitoringVerdict = getDashboardMonitoringVerdict({
-              alertStatus: search.status,
-              alertSupport: alertSupport ?? null,
-              bookingPhone,
-              automationEligibility: preference.course.automationEligibility,
-              automationReason: preference.course.automationReason,
-              latestProbe,
-              upcomingBookingWindow,
-              monitoringState:
-                preference.course.monitoringStatus?.state ?? null,
-              monitoringStateChangedAt:
-                preference.course.monitoringStatus?.stateChangedAt ?? null,
-              supportIncidentStatus:
-                preference.course.supportIncident?.status ?? null,
-              humanReviewReason:
-                preference.course.supportIncident?.humanReviewReason ?? null,
-              incidentEscalatedAt:
-                preference.course.supportIncident?.escalatedAt ?? null,
-              escalationDeadlineAt:
-                preference.course.supportIncident?.escalationDeadlineAt ?? null,
-              automationPlaybookExhausted: preference.course.supportIncident
-                ? isAutomationHumanReviewProofCurrentOrPrior(
-                    preference.course.supportIncident.attemptLedger,
-                    preference.course.supportIncident.cycle
-                  )
-                : null,
-              automationStalledAtEndpoint: preference.course.supportIncident
-                ? hasDurableAutomationStalledEndpointProof({
-                    incidentId: preference.course.supportIncident.id,
-                    incidentCycle: preference.course.supportIncident.cycle,
-                    incidentStatus: preference.course.supportIncident.status,
-                    humanReviewReason:
-                      preference.course.supportIncident.humanReviewReason,
-                    incidentEscalatedAt:
-                      preference.course.supportIncident.escalatedAt,
-                    escalationDeadlineAt:
-                      preference.course.supportIncident.escalationDeadlineAt,
-                    monitoringState:
-                      preference.course.monitoringStatus?.state ?? null,
-                    endpointEvents:
-                      preference.course.supportIncident.monitoringEvents
-                  })
-                : false,
-              firstTimeLookup:
-                Math.abs(
-                  preference.course.createdAt.getTime() - search.createdAt.getTime()
-                ) <= 2 * 60 * 1000
-            });
-            const monitoringOverridesAvailability =
-              monitoringVerdict.icon === "unavailable" ||
-              Boolean(upcomingBookingWindow);
-            const courseStatus = monitoringOverridesAvailability
-              ? {
-                  label: monitoringVerdict.label,
-                  detail: monitoringVerdict.detail,
-                  emoji: monitoringVerdict.emoji,
-                  tone:
-                    monitoringVerdict.icon === "unavailable"
-                      ? "unavailable"
-                      : "scheduled"
-                }
-              : {
-                  ...availabilityView,
-                  emoji: getCourseStatusEmoji(availabilityView.tone)
-                };
+            const courseStatus = courseStatusById.get(preference.course.id)!;
             const bookingEvidence = {
               bookingFacts: preference.course.bookingFacts,
               probes: [],
@@ -802,25 +763,6 @@ function getCompactLocation(address: string | null) {
 
 function formatTelephoneHref(phone: string) {
   return phone.trim().replace(/(?!^\+)[^\d]/g, "");
-}
-
-function getCourseStatusEmoji(tone: string) {
-  switch (tone) {
-    case "matching":
-      return "⛳";
-    case "available":
-      return "👀";
-    case "scheduled":
-      return "🕒";
-    case "unavailable":
-      return "⚠️";
-    case "empty":
-      return "🔎";
-    case "pending":
-      return "⏳";
-    default:
-      return "ℹ️";
-  }
 }
 
 function CourseImage({
