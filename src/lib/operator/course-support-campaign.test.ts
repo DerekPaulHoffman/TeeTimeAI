@@ -4,6 +4,7 @@ import { createParkedCourseCampaignAudit } from "@/lib/automation/course-support
 
 import {
   buildOperatorCourseSupportCampaignSummary,
+  loadFutureUnfamiliarIncidentsForAcceptance,
   loadOperatorCourseSupportCampaign,
   summarizeFutureAutomaticResolution,
   summarizeRepeatProviderImplementations,
@@ -1047,6 +1048,213 @@ describe("operator course-support campaign aggregation", () => {
     expect(inspectLatestCampaign).not.toHaveBeenCalled();
     expect(loadCampaignAudit).not.toHaveBeenCalled();
   });
+});
+
+describe("future acceptance native incident loader", () => {
+  const until = new Date("2026-09-30T12:00:00.000Z");
+  const since = new Date(until.getTime() - 30 * 24 * 60 * 60 * 1_000);
+  const recentConfirmation = new Date("2026-09-30T10:00:00.000Z");
+  const oldObservation = new Date("2026-08-20T15:00:00.000Z");
+
+  function queryRecord(value: unknown): Record<string, unknown> {
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? value as Record<string, unknown> : {};
+  }
+
+  // A generic predicate interpreter exercises the actual Prisma where/select
+  // emitted by the loader, rather than feeding preselected aggregator fixtures.
+  function matchesWhere(row: Record<string, unknown>, where: unknown): boolean {
+    return Object.entries(queryRecord(where)).every(([key, filter]) => {
+      if (key === "OR") {
+        return Array.isArray(filter) && filter.some((alternative) => matchesWhere(row, alternative));
+      }
+      const value = row[key];
+      const predicate = queryRecord(filter);
+      if ("some" in predicate) {
+        return Array.isArray(value) && value.some((entry) => matchesWhere(queryRecord(entry), predicate.some));
+      }
+      if ("in" in predicate) return Array.isArray(predicate.in) && predicate.in.includes(value);
+      if ("gte" in predicate || "lte" in predicate) {
+        return value instanceof Date &&
+          (!(predicate.gte instanceof Date) || value >= predicate.gte) &&
+          (!(predicate.lte instanceof Date) || value <= predicate.lte);
+      }
+      return value === filter;
+    });
+  }
+
+  function databaseFor(incidents: FutureIncidentFixture[]) {
+    const rows = incidents.map(({ campaignAdmissionEvents, terminalEvents, ...incident }) => ({
+      ...incident,
+      monitoringEvents: [...campaignAdmissionEvents, ...terminalEvents].map((event) => ({
+        toState: null, operatorActorId: null, runtimeVersion: null, deploymentSha: null,
+        ...event,
+      })),
+    }));
+    const findMany = vi.fn(async (query: { where?: unknown; select?: unknown }) => {
+      const eventWhere = queryRecord(queryRecord(query.select).monitoringEvents).where;
+      return rows.filter((row) => matchesWhere(row, query.where)).map((row) => ({
+        ...row,
+        monitoringEvents: row.monitoringEvents.filter((event) => matchesWhere(event, eventWhere)),
+      }));
+    });
+    return {
+      findMany,
+      database: { courseSupportIncident: { findMany } } as unknown as NonNullable<
+        Parameters<typeof loadFutureUnfamiliarIncidentsForAcceptance>[1]
+      >,
+    };
+  }
+
+  function summarize(incidents: Awaited<ReturnType<typeof loadFutureUnfamiliarIncidentsForAcceptance>>) {
+    return summarizeFutureAutomaticResolution({
+      campaignCapturedAt: capturedAt, campaignRunId, campaignMembershipDigest,
+      campaignIncidentCycles: [{ incidentId: "future-incident", cycle: 1 }],
+      incidents, now: until,
+    });
+  }
+
+  it("reads a recently confirmed material-change cycle even when the last failure observation is old", async () => {
+    const { database, findMany } = databaseFor([futureIncident({
+      cycle: 2, status: "AUTO_INVESTIGATING", resolution: null, resolvedAt: null,
+      confirmedAt: recentConfirmation, lastSeenAt: oldObservation, terminalEvents: [],
+    })]);
+    const loaded = await loadFutureUnfamiliarIncidentsForAcceptance({ since, until }, database);
+    expect(loaded).toHaveLength(1);
+    expect(summarize(loaded)).toMatchObject({ eligibleCount: 1, pendingCount: 1, unknownCount: 0 });
+    expect(findMany.mock.calls.map(([query]) => queryRecord(query.where).status)).toEqual([
+      "AUTO_INVESTIGATING", "NEEDS_HUMAN", "RESOLVED",
+    ]);
+    expect(queryRecord(findMany.mock.calls[0][0].where).OR).toEqual([
+      { lastSeenAt: { gte: since, lte: until } },
+      { confirmedAt: { gte: since, lte: until } },
+      { monitoringEvents: { some: {
+        occurredAt: { gte: since, lte: until },
+        OR: [
+          { eventType: "RECOVERED" },
+          { eventType: "STATE_CHANGED", toState: { in: ["FINAL_MANUAL", "FINAL_IDENTITY", "FINAL_TECHNICAL"] } },
+          { eventType: "HUMAN_DECISION" },
+        ],
+      } } },
+    ]);
+  });
+
+  it.each([
+    ["RECOVERED", "HEALTHY", "COURSE_SUPPORT_RESPONDER", true, 1, 0],
+    ["STATE_CHANGED", "FINAL_TECHNICAL", "COURSE_SUPPORT_RESPONDER", true, 1, 0],
+    ["HUMAN_DECISION", "FINAL_TECHNICAL", "OPERATOR_CLI", false, 0, 1],
+  ] as const)("retains an earlier completed cycle through %s after a later out-of-window reopen", async (
+    eventType, toState, source, automatedFinal, automaticCount, nonAutomaticCount,
+  ) => {
+    const confirmedAt = "2026-09-10T10:00:00.000Z";
+    const { database } = databaseFor([futureIncident({
+      cycle: 3, status: "AUTO_INVESTIGATING", resolution: null, resolvedAt: null,
+      confirmedAt: new Date("2026-10-01T10:00:00.000Z"),
+      lastSeenAt: new Date("2026-10-01T11:00:00.000Z"),
+      terminalEvents: [futureTerminalEvent({
+        eventType, toState, source, occurredAt: new Date("2026-09-10T11:00:00.000Z"),
+        audit: { cycle: 2, confirmedAt, automatedFinal },
+      })],
+    })]);
+    const loaded = await loadFutureUnfamiliarIncidentsForAcceptance({ since, until }, database);
+    expect(loaded).toHaveLength(1);
+    expect(summarize(loaded)).toMatchObject({ eligibleCount: 1, automaticCount, nonAutomaticCount, unknownCount: 0 });
+  });
+
+  it("does not admit a never-confirmed transient recovery merely because its endpoint was loaded", async () => {
+    const { database } = databaseFor([futureIncident({
+      confirmedAt: null, lastSeenAt: oldObservation,
+      terminalEvents: [futureTerminalEvent({
+        occurredAt: new Date("2026-09-10T11:00:00.000Z"),
+        audit: { cycle: 1, confirmedAt: null, automatedFinal: true },
+      })],
+    })]);
+    const loaded = await loadFutureUnfamiliarIncidentsForAcceptance({ since, until }, database);
+    expect(loaded).toHaveLength(1);
+    expect(summarize(loaded)).toMatchObject({ eligibleCount: 0, unknownCount: 0, status: "NO_DATA" });
+  });
+
+  it("preserves legacy observation-based accounting for a human endpoint with no confirmation", async () => {
+    const { database } = databaseFor([futureIncident({
+      status: "NEEDS_HUMAN", resolution: null, resolvedAt: null, confirmedAt: null,
+      lastSeenAt: new Date("2026-09-30T11:00:00.000Z"), terminalEvents: [],
+    })]);
+    const loaded = await loadFutureUnfamiliarIncidentsForAcceptance({ since, until }, database);
+    expect(loaded).toHaveLength(1);
+    expect(summarize(loaded)).toMatchObject({ eligibleCount: 1, unknownCount: 1, ratePercent: null, status: "UNKNOWN" });
+  });
+
+  it("does not discard or credit a newly discovered completed cycle with missing runtime provenance", async () => {
+    const confirmedAt = "2026-09-10T10:00:00.000Z";
+    const { database } = databaseFor([futureIncident({
+      confirmedAt: new Date("2026-10-01T10:00:00.000Z"), lastSeenAt: oldObservation,
+      terminalEvents: [futureTerminalEvent({
+        occurredAt: new Date("2026-09-10T11:00:00.000Z"), runtimeVersion: null,
+        audit: { cycle: 1, confirmedAt, automatedFinal: true },
+      })],
+    })]);
+    const loaded = await loadFutureUnfamiliarIncidentsForAcceptance({ since, until }, database);
+    expect(loaded).toHaveLength(1);
+    expect(summarize(loaded)).toMatchObject({ eligibleCount: 1, automaticCount: 0, unknownCount: 1, ratePercent: null, status: "UNKNOWN" });
+  });
+
+  it("still excludes an exactly attributed immutable campaign admission cycle", async () => {
+    const { database } = databaseFor([futureIncident({
+      cycle: 2, confirmedAt: recentConfirmation, lastSeenAt: oldObservation,
+      campaignAdmissionEvents: [{
+        ...futureCampaignAdmissionEvent(), occurredAt: new Date("2026-09-30T09:00:00.000Z"),
+      }],
+      terminalEvents: [futureTerminalEvent({
+        occurredAt: new Date("2026-09-30T11:00:00.000Z"),
+        audit: { cycle: 2, confirmedAt: recentConfirmation.toISOString(), automatedFinal: true },
+      })],
+    })]);
+    const loaded = await loadFutureUnfamiliarIncidentsForAcceptance({ since, until }, database);
+    expect(loaded[0].campaignAdmissionEvents).toHaveLength(1);
+    expect(summarize(loaded)).toMatchObject({ eligibleCount: 0, status: "NO_DATA" });
+  });
+
+  it("does not select future, old, nonterminal or revalidation-only rows without eligible current dates", async () => {
+    const rows = [
+      futureIncident({
+        id: "future-dates", confirmedAt: new Date("2026-10-01T10:00:00.000Z"),
+        lastSeenAt: new Date("2026-10-01T11:00:00.000Z"),
+        terminalEvents: [futureTerminalEvent({ occurredAt: new Date("2026-10-01T11:00:00.000Z") })],
+      }),
+      futureIncident({ id: "old-dates" }),
+      futureIncident({
+        id: "nonterminal-only", terminalEvents: [futureTerminalEvent({
+          eventType: "STATE_CHANGED", toState: "AUTO_INVESTIGATING",
+          occurredAt: new Date("2026-09-10T11:00:00.000Z"),
+        })],
+      }),
+      futureIncident({
+        id: "revalidation-only", terminalEvents: [],
+        campaignAdmissionEvents: [{
+          ...futureCampaignAdmissionEvent(), occurredAt: new Date("2026-09-10T11:00:00.000Z"),
+        }],
+      }),
+    ];
+    const { database } = databaseFor(rows);
+    const loaded = await loadFutureUnfamiliarIncidentsForAcceptance({ since, until }, database);
+    expect(loaded).toEqual([]);
+    expect(summarize(loaded)).toMatchObject({ eligibleCount: 0, status: "NO_DATA" });
+  });
+
+  it.each(["2026-08-30T10:00:00.000Z", "2026-10-01T10:00:00.000Z"])(
+    "does not grant an in-window endpoint admission when its confirmation is outside the window: %s", async (confirmation) => {
+      const { database } = databaseFor([futureIncident({
+        confirmedAt: new Date(confirmation), lastSeenAt: oldObservation,
+        terminalEvents: [futureTerminalEvent({
+          occurredAt: new Date("2026-09-10T11:00:00.000Z"),
+          audit: { cycle: 1, confirmedAt: confirmation, automatedFinal: true },
+        })],
+      })]);
+      const loaded = await loadFutureUnfamiliarIncidentsForAcceptance({ since, until }, database);
+      expect(loaded).toHaveLength(1);
+      expect(summarize(loaded)).toMatchObject({ eligibleCount: 0, status: "NO_DATA" });
+    },
+  );
 });
 
 function endpointEvent(input: {

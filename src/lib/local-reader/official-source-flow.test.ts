@@ -196,6 +196,8 @@ function exhaustedSource(selected = courses[0], existing?: ReturnType<typeof fix
   });
   const events: Row[] = [];
   db.courseMonitoringEvent.findUnique.mockImplementation(async ({ where }) => events.find(event => matches(event, where)) ?? null);
+  db.courseMonitoringEvent.findMany.mockImplementation(async ({ where, take }) =>
+    events.filter(event => matches(event, where)).slice(0, take).map(event => ({ ...event })));
   db.courseMonitoringEvent.create.mockImplementation(async ({ data }) => { const event = { id: `event-${events.length}`, ...data };
     events.push(event); return event; });
   return { ...state, status, events, candidate };
@@ -258,7 +260,15 @@ describe("new signed source capability revalidation", () => {
         providerFamilyKey: "SOURCE_MISSING", course: { ...state.course, preferences: [] } }] : []);
     db.courseSupportBatch.findMany.mockResolvedValue([]);
     db.automationRun.findFirst.mockResolvedValue(null);
-    expect(await inspectCourseSupportQueue({ now })).toMatchObject({ outcome: "ready", dueIncidentCount: 1 });
+    expect(await inspectCourseSupportQueue({ now })).toMatchObject({ outcome: "ready", dueIncidentCount: 1,
+      candidateHistoryBlockedCount: 0, candidateHistoryEvidenceStatus: "COMPLETE" });
+    expect(db.courseMonitoringEvent.findMany).toHaveBeenCalledExactlyOnceWith({
+      where: { eventType: "REVALIDATION_REQUESTED", OR: [{ incidentId: state.incident.id,
+        audit: { path: ["cycle"], equals: 15 } }] },
+      orderBy: [{ incidentId: "asc" }, { occurredAt: "desc" }, { id: "desc" }],
+      take: 21, select: { id: true, incidentId: true, occurredAt: true },
+    });
+    await expect(db.courseMonitoringEvent.findMany.mock.results[0].value).resolves.toEqual(state.events);
     await revalidateForOfficialSourceReader({ ...sourceHandshake, readerVersion: "1.12.1", buildId: "different-build" });
     expect(state.events).toHaveLength(1);
     expect(state.events[0]).toMatchObject({ source: "LOCAL_READER", audit: { priorCycle: 14, cycle: 15,
