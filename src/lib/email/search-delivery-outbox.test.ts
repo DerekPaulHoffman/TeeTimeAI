@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { applyPendingClerkEmailForSearch } from "@/lib/users/pending-email";
 import { EmailDeliveryNotAcceptedError } from "./alerts";
 import { DELIVERY_SYNTHETIC_MULTI_CYCLE_DRY_RUN } from "./delivery-policy";
+import { renderSearchStatusHtml } from "./search-status";
 import {
   assertSafeSearchEmailPayload,
   drainSearchEmailDeliveryGroup,
@@ -4977,6 +4978,255 @@ describe("search email delivery outbox", () => {
     expect(executeRawCallsContaining('"recheckRequestedAt"')).toHaveLength(1);
   });
 
+  function pendingSetupPayload(courseOverrides: Record<string, unknown> = {}) {
+    return {
+      schemaVersion: 2 as const,
+      checkedAt: now.toISOString(),
+      displayMatchIds: [],
+      matchIds: [],
+      matchRefs: [],
+      statusSnapshot: [{ courseId: "course-1", state: "CHECK_PENDING" }],
+      statusReport: {
+        kind: "setup",
+        targetDate: "2026-07-16",
+        startTime: "07:00",
+        endTime: "10:00",
+        players: 2,
+        requestedLayoutHoles: null,
+        userTimeZone: "America/New_York",
+        courses: [{
+          courseId: "course-1",
+          courseName: "Course",
+          timeZone: "America/New_York",
+          outcome: "CHECK_PENDING",
+          availableMatches: 0,
+          ...courseOverrides,
+        }],
+      },
+    };
+  }
+
+  function usePendingSetupSource(source: "ACTIVE" | "FRESH_UNCONSUMED" | "EXPIRED_RETRYABLE") {
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([]);
+    mockedPrisma.courseProbe.findMany.mockResolvedValue([
+      { courseId: "course-1", outcome: "NEEDS_ADAPTER", observedAt: now },
+    ] as never);
+    mockedPrisma.courseMonitoringStatus.findMany.mockResolvedValue([
+      { courseId: "course-1", state: "AUTO_INVESTIGATING", lastFailureAt: now, lastSuccessfulAt: null },
+    ] as never);
+    mockedPrisma.$queryRaw.mockImplementation(async (sql) => {
+      const query = rawSqlText(sql);
+      if (query.includes('FROM "ProviderRequestLease"')) {
+        return source !== "FRESH_UNCONSUMED"
+          ? [{ observationStartedAt: now,
+              leaseExpiresAt: new Date(now.getTime() + (source === "ACTIVE" ? 20 : -5) * 60_000),
+              retryUntil: new Date(now.getTime() + (source === "ACTIVE" ? 30 : 5) * 60_000), state: source }] as never
+          : [] as never;
+      }
+      if (query.includes('statement_timestamp() AS "currentTime"')) {
+        return [{ currentTime: now }] as never;
+      }
+      return [currentSearch] as never;
+    });
+    if (source === "FRESH_UNCONSUMED") {
+      mockedPrisma.localReaderJob.findMany.mockResolvedValue([{
+        claimedAt: now,
+        completedAt: now,
+        resultExpiresAt: new Date(now.getTime() + 5 * 60_000),
+        result: {
+          jobId: "reader-job", courseKey: "cps:grassyhill.cps.golf",
+          status: "NO_AVAILABILITY", evidenceAnchor: "SERVER_CLAIM",
+          observedAt: now.toISOString(),
+          pageUrl: "https://grassyhill.cps.golf/onlineresweb/search-teetime",
+          pageTitle: "Tee Times", slots: [], readerVersion: "reader-v1",
+        },
+      }] as never);
+    }
+  }
+
+  it.each(["ACTIVE", "FRESH_UNCONSUMED"] as const)(
+    "sends a current pending setup within ten minutes while its source remains %s, once per recipient across changed groups",
+    async (source) => {
+      usePendingSetupSource(source);
+      const statusPayload = pendingSetupPayload();
+      const startedAt = new Date(now.getTime() - 9 * 60_000);
+      const owner = delivery("pending-owner", "owner@example.com", {
+        kind: "SETUP", groupKey: "pending-setup", payload: statusPayload, createdAt: startedAt,
+      });
+      const friend = { ...owner, id: "pending-friend", recipient: "friend@example.com", isOwnerRecipient: false };
+      const accepted = [owner, friend].map((row) => ({ ...row, status: "SENT", attemptCount: 1, sentAt: now }));
+      mockedPrisma.searchEmailDelivery.findMany
+        .mockResolvedValueOnce([owner, friend] as never)
+        .mockResolvedValueOnce([owner, friend] as never)
+        .mockResolvedValueOnce(accepted as never);
+      mockedPrisma.searchEmailDelivery.updateMany
+        .mockResolvedValueOnce({ count: 2 } as never)
+        .mockResolvedValue({ count: 1 } as never);
+      const send = vi.fn().mockImplementation(async ({ recipient, payload, assertCurrentDelivery }) => {
+        await assertCurrentDelivery();
+        const report = await hydrateSearchStatusEmailPayload(payload);
+        const html = renderSearchStatusHtml({ searchId: "search-1", to: recipient, ...report });
+        expect(html).toContain("Current availability is not confirmed yet");
+        expect(html).not.toContain("No matching tee times");
+        expect(html).not.toContain("TEE TIME FOUND");
+        expect(now.getTime() - startedAt.getTime()).toBeLessThan(10 * 60_000);
+        return { deliveryStatus: "sent" };
+      });
+      await expect(drainSearchEmailDeliveryGroup({
+        searchId: "search-1", alertGeneration: 3, checkLeaseToken: "check-lease",
+        kind: "SETUP", groupKey: "pending-setup", send, now: () => now,
+      })).resolves.toEqual([
+        { id: "pending-owner", status: "SENT" },
+        { id: "pending-friend", status: "SENT" },
+      ]);
+
+      const newer = [owner, friend].map((row) => ({
+        ...row, id: `${row.id}-newer`, groupKey: "changed-pending-setup",
+        payload: { ...statusPayload, checkedAt: new Date(now.getTime() + 1).toISOString() },
+      }));
+      mockedPrisma.searchEmailDelivery.findMany
+        .mockResolvedValueOnce(newer as never)
+        .mockResolvedValueOnce([...accepted, ...newer] as never)
+        .mockResolvedValueOnce(newer.map((row) => ({
+          ...row, status: "SUPPRESSED", sentAt: now, lastError: "STATUS_RECIPIENT_PRIOR_REACHED",
+        })) as never);
+      await expect(drainSearchEmailDeliveryGroup({
+        searchId: "search-1", alertGeneration: 3, checkLeaseToken: "check-lease",
+        kind: "SETUP", groupKey: "changed-pending-setup", send, now: () => now,
+      })).resolves.toEqual([
+        { id: "pending-owner-newer", status: "SUPPRESSED" },
+        { id: "pending-friend-newer", status: "SUPPRESSED" },
+      ]);
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(send.mock.calls.map(([input]) => input.recipient).sort()).toEqual(["friend@example.com", "owner@example.com"]);
+      expect(mockedPrisma.courseMonitoringStatus.findMany).toHaveBeenCalled();
+      expect(mockedPrisma.localReaderJob.findMany).toHaveBeenCalled();
+    },
+  );
+
+  it.each(["DAILY", "MONITORING_RECOVERY", "MONITORING_STATUS_UPDATE", "MONITORING_OUTAGE"] as const)(
+    "keeps pending source confirmation mandatory for %s",
+    async (kind) => {
+      usePendingSetupSource("ACTIVE");
+      const statusPayload = pendingSetupPayload();
+      statusPayload.statusReport.kind = kind === "DAILY" ? "daily" : kind === "MONITORING_RECOVERY" ? "recovery" : kind === "MONITORING_OUTAGE" ? "outage" : "status-update";
+      const owner = delivery("pending-owner", "owner@example.com", { kind, groupKey: "status-group", payload: statusPayload });
+      mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([owner] as never);
+      const send = vi.fn();
+      await expect(drainSearchEmailDeliveryGroup({
+        searchId: "search-1", alertGeneration: 3, checkLeaseToken: "check-lease",
+        kind, groupKey: "status-group", send, now: () => now,
+      })).rejects.toMatchObject({ code: "DELIVERY_PROVIDER_SOURCE_PENDING" });
+      expect(send).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["ACTIVE", "FRESH_UNCONSUMED"] as const)(
+    "does not let a pending setup mask a second course's unconfirmed no-match source (%s)",
+    async (source) => {
+      usePendingSetupSource(source);
+      const statusPayload = pendingSetupPayload();
+      statusPayload.statusReport.courses.push({
+        courseId: "course-2", courseName: "Second Course", timeZone: "America/New_York",
+        outcome: "NO_MATCH", availableMatches: 0,
+      });
+      mockedPrisma.course.findMany.mockResolvedValue([
+        currentCourse, { ...currentCourse, id: "course-2", name: "Second Course" },
+      ] as never);
+      mockedPrisma.courseProbe.findMany.mockResolvedValue([
+        { courseId: "course-1", outcome: "NEEDS_ADAPTER", observedAt: now },
+        { courseId: "course-2", outcome: "NO_MATCH", observedAt: now },
+      ] as never);
+      const owner = delivery("pending-owner", "owner@example.com", {
+        kind: "SETUP", groupKey: "status-group", payload: statusPayload,
+      });
+      mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([owner] as never);
+      const send = vi.fn();
+      await expect(drainSearchEmailDeliveryGroup({
+        searchId: "search-1", alertGeneration: 3, checkLeaseToken: "check-lease",
+        kind: "SETUP", groupKey: "status-group", send, now: () => now,
+      })).rejects.toMatchObject({ code: "DELIVERY_PROVIDER_SOURCE_PENDING" });
+      expect(send).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rechecks owner authority at the sender boundary for a source-pending setup", async () => {
+    usePendingSetupSource("ACTIVE");
+    const owner = delivery("pending-owner", "owner@example.com", {
+      kind: "SETUP", groupKey: "status-group", payload: pendingSetupPayload(),
+    });
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([owner] as never);
+    mockedPrisma.user.findUnique
+      .mockResolvedValueOnce({ email: "owner@example.com", pendingEmail: null } as never)
+      .mockResolvedValue({ email: "new-owner@example.com", pendingEmail: null } as never);
+    const send = vi.fn();
+    await expect(drainSearchEmailDeliveryGroup({
+      searchId: "search-1", alertGeneration: 3, checkLeaseToken: "check-lease",
+      kind: "SETUP", groupKey: "status-group", send, now: () => now,
+    })).rejects.toMatchObject({ code: "EMAIL_DELIVERY_NOT_ACCEPTED" });
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { monitoringDisposition: "TECHNICAL_FINAL" },
+    { supportStatus: "NEEDS_HUMAN_REVIEW" },
+    { automationPlaybookExhausted: true },
+    { automationStalledAtEndpoint: true },
+    { availability: { visibleSlotCount: 0, playerEligibleSlotCount: 0 } },
+    { bookingWindow: { releaseDate: "2026-07-16" } },
+  ])("does not bypass an active source for pending setup containing factual or final claims %j", async (claims) => {
+    usePendingSetupSource("ACTIVE");
+    const owner = delivery("pending-owner", "owner@example.com", {
+      kind: "SETUP", groupKey: "status-group", payload: pendingSetupPayload(claims),
+    });
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([owner] as never);
+    const send = vi.fn();
+    const result = drainSearchEmailDeliveryGroup({
+      searchId: "search-1", alertGeneration: 3, checkLeaseToken: "check-lease",
+      kind: "SETUP", groupKey: "status-group", send, now: () => now,
+    });
+    // A contradictory disposition is retired by the current-content guard;
+    // the other claims remain current but wait for source reconciliation.
+    if ("monitoringDisposition" in claims) await expect(result).resolves.toBeDefined();
+    else await expect(result).rejects.toMatchObject({ code: "DELIVERY_PROVIDER_SOURCE_PENDING" });
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("does not extend the expired-source exception to a pending setup with a human-review claim", async () => {
+    usePendingSetupSource("EXPIRED_RETRYABLE");
+    const owner = delivery("pending-owner", "owner@example.com", {
+      kind: "SETUP", groupKey: "status-group",
+      payload: pendingSetupPayload({ supportStatus: "NEEDS_HUMAN_REVIEW" }),
+    });
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([owner] as never);
+    const send = vi.fn();
+    await expect(drainSearchEmailDeliveryGroup({
+      searchId: "search-1", alertGeneration: 3, checkLeaseToken: "check-lease",
+      kind: "SETUP", groupKey: "status-group", send, now: () => now,
+    })).rejects.toMatchObject({ code: "DELIVERY_PROVIDER_SOURCE_PENDING" });
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { status: "PAUSED" },
+    { alertGeneration: 4 },
+    { checkLeaseToken: "successor-check" },
+    { checkLeaseExpiresAt: new Date(now.getTime() - 1) },
+  ])("does not send a pending setup through a stale search fence %j", async (searchChanges) => {
+    usePendingSetupSource("ACTIVE");
+    mockQueryRawForSearch({ ...currentSearch, ...searchChanges });
+    const owner = delivery("pending-owner", "owner@example.com", {
+      kind: "SETUP", groupKey: "status-group", payload: pendingSetupPayload(),
+    });
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([owner] as never);
+    const send = vi.fn();
+    await drainSearchEmailDeliveryGroup({
+      searchId: "search-1", alertGeneration: 3, checkLeaseToken: "check-lease",
+      kind: "SETUP", groupKey: "status-group", send, now: () => now,
+    });
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it.each([
     {
       description: "sends a truthful unsupported-course setup after its source expires",
@@ -4993,11 +5243,11 @@ describe("search email delivery outbox", () => {
       expectedStatus: "SENT",
     },
     {
-      description: "waits for an active source even when the setup reports an unsupported course",
+      description: "sends a factual pending setup while an unsupported course has an active source",
       outcome: "NEEDS_ADAPTER",
       monitoringState: "ENGINEERING_VERIFICATION_NEEDED",
       markerState: "ACTIVE",
-      expectedStatus: "FAILED",
+      expectedStatus: "SENT",
     },
     {
       description: "does not send a no-match claim after its source expires unresolved",

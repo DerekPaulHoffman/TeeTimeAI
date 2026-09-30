@@ -6,6 +6,14 @@ import {
 } from "./dashboard-availability";
 
 describe("dashboard availability", () => {
+  it.each(["PAUSED", "COMPLETED", "CANCELLED"])("keeps %s guidance accurate during a failure or a future booking release", (alertStatus) => {
+    for (const input of [{ outcome: "FETCH_FAILED" }, { outcome: "NEEDS_ADAPTER" }, { bookingOpensLabel: "tomorrow at 7 AM" }]) {
+      const view = getDashboardAvailabilityView({ ...input, alertStatus, qualifyingMatchCount: 0, players: 2, startTime: "10:00", endTime: "14:00" });
+      expect(view.detail).not.toMatch(/remains active|keeps trying|start checking/);
+      expect(view.detail).toMatch(/paused|has ended/);
+      if ("bookingOpensLabel" in input) expect(view.detail).toContain("tomorrow at 7 AM");
+    }
+  });
   it("treats provider-returned times outside the request as availability found", () => {
     expect(
       getDashboardAvailabilityView({

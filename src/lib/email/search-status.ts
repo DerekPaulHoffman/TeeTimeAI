@@ -266,6 +266,9 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
     (course) =>
       getCustomerCourseMonitoringStatus(course) === "NEEDS_HUMAN_REVIEW"
   );
+  const hasPendingCourse = input.courses.some(
+    (course) => course.outcome === "CHECK_PENDING"
+  );
   const heading =
     input.kind === "setup"
       ? "Your tee-time alert is active"
@@ -297,17 +300,19 @@ export function renderSearchStatusHtml(input: SearchStatusEmailInput) {
         : hasAvailability
       ? "We found tee times matching your search. Book what's available now — we'll keep watching and alert you the moment one of your priorities opens up."
       : input.kind === "setup"
-        ? hasIdentityRecheckCourse
-          ? "Your alert is set. We're confirming the details for one or more courses; we'll keep checking the courses that are ready."
-          : hasDirectOnlyCourse
-            ? "Your alert is set. We'll keep checking supported courses; courses marked for direct booking are not automatically monitored."
-            : hasHumanReviewCourse
-              ? "Your alert is set. Manual review is needed for one or more courses; your alert remains active. Use the official site for current tee times."
-              : hasUnavailableCourse
-                ? "Your alert is set. Every selected course has a result below. We'll monitor supported courses and keep retrying the others; use the official site for current tee times."
-                : hasWorkInProgressCourse
-                  ? "Your alert is set. We checked every selected course. Please use the official link for any course Tee Time Spot cannot check automatically yet."
-                  : "Your alert is set. We checked every selected course and will keep watching automatically."
+        ? hasPendingCourse
+          ? "Your alert is set. We're confirming current availability for one or more courses. See each course's status below."
+          : hasIdentityRecheckCourse
+            ? "Your alert is set. We're confirming the details for one or more courses; we'll keep checking the courses that are ready."
+            : hasDirectOnlyCourse
+              ? "Your alert is set. We'll keep checking supported courses; courses marked for direct booking are not automatically monitored."
+              : hasHumanReviewCourse
+                ? "Your alert is set. Manual review is needed for one or more courses; your alert remains active. Use the official site for current tee times."
+                : hasUnavailableCourse
+                  ? "Your alert is set. Every selected course has a result below. We'll monitor supported courses and keep retrying the others; use the official site for current tee times."
+                  : hasWorkInProgressCourse
+                    ? "Your alert is set. We checked every selected course. Please use the official link for any course Tee Time Spot cannot check automatically yet."
+                    : "Your alert is set. We checked every selected course and will keep watching automatically."
         : changedCourses.length > 0
           ? `Changed since your last email: ${changedCourses.join(", ")}.`
           : hasIdentityRecheckCourse
@@ -560,7 +565,7 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
   if (course.outcome === "CHECK_PENDING") {
     return {
       monitoringLabel: "Checking now",
-      stateLabel: "A fresh public-page check is in progress",
+      stateLabel: "We're confirming current public availability",
       icon: "â—·",
       color: "#17647a",
       badgeBackground: "#e6f3f7",
@@ -569,7 +574,7 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
       calloutBorder: "#c5e2ea",
       calloutText: "#174152",
       detail:
-        "Tee Time Spot is waiting for the current public-page check to finish. Your alert remains active."
+        "Your alert is saved. Current availability is not confirmed yet. We'll email you when a matching opening is confirmed."
     };
   }
 

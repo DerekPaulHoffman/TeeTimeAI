@@ -145,5 +145,8 @@ async function updateOwnedSearch(
   input: z.infer<typeof updateSearchSchema>
 ) {
   const user = await getRequiredAppUser();
-  return updateTeeSearchForUser(user.id, searchId, input);
+  return updateTeeSearchForUser(user.id, searchId, {
+    ...input,
+    alertEmail: user.email,
+  });
 }

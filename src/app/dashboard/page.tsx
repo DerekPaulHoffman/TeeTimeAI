@@ -304,7 +304,9 @@ function DashboardSearchCard({
           } found in the latest check`
         : latestCourseProbes.length > 0
           ? "No matching times yet"
-          : "Waiting for the first check";
+          : search.status === "ACTIVE"
+            ? "Waiting for a check of these settings"
+            : "No current check for these settings";
 
   return (
     <article className="dashboard-row">
@@ -352,7 +354,7 @@ function DashboardSearchCard({
                   search.lastCheckedAt,
                   search.userTimeZone
                 )}`
-              : "Check pending"}
+              : search.status === "ACTIVE" ? "Check pending" : "Checks stopped"}
           </span>
           <ChevronDown
             aria-hidden="true"
@@ -426,8 +428,12 @@ function DashboardSearchCard({
             const bookingWindow = isPublicCourse
               ? getBookingWindowForTargetDate(search.date, preference.course)
               : null;
+            const latestProbe = search.probes.find(
+              (probe) => probe.courseId === preference.course.id
+            );
             const upcomingBookingWindow =
-              bookingWindow && bookingWindow.opensAt > now ? bookingWindow : null;
+              bookingWindow && bookingWindow.opensAt > now &&
+              latestProbe?.outcome !== "MATCH_FOUND" ? bookingWindow : null;
             const usesPhoneBooking =
               isPublicCourse &&
               ["PHONE_ONLY", "ONLINE_OR_PHONE", "CONTACT_COURSE"].includes(
@@ -446,13 +452,11 @@ function DashboardSearchCard({
                   ? "Official request page"
                   : "Official booking page"
                 : "Official site";
-            const latestProbe = search.probes.find(
-              (probe) => probe.courseId === preference.course.id
-            );
             const courseMatches = availableSearchMatches.filter(
               (match) => match.courseId === preference.course.id
             );
             const availabilityView = getDashboardAvailabilityView({
+              alertStatus: search.status,
               outcome: latestProbe?.outcome,
               rawSummary: latestProbe?.rawSummary,
               qualifyingMatchCount: courseMatches.length,
@@ -468,6 +472,7 @@ function DashboardSearchCard({
                 : null
             });
             const monitoringVerdict = getDashboardMonitoringVerdict({
+              alertStatus: search.status,
               alertSupport: alertSupport ?? null,
               bookingPhone,
               automationEligibility: preference.course.automationEligibility,

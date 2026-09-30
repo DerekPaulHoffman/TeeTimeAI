@@ -36,6 +36,7 @@ import {
 
 import {
   getMinimumSearchDateInputValue,
+  getNextSearchDateRolloverAt,
   getNextSaturdayDateInputValue,
   reconcileFutureSearchDateInputValue
 } from "@/lib/dates/local-date";
@@ -289,7 +290,7 @@ function TeeTimeIntakeContent({
     initialValues.radius ?? DEFAULT_COURSE_SEARCH_RADIUS_MILES
   );
   const accountEmail = accountState.status === "signed-in" ? accountState.email : "";
-  const [alertEmail, setAlertEmail] = useState(accountEmail);
+  const alertEmail = accountEmail;
   const [date, setDate] = useState(
     () => initialValues.date ?? getNextSaturdayDateInputValue()
   );
@@ -311,6 +312,10 @@ function TeeTimeIntakeContent({
   );
   const [visibleCourseCount, setVisibleCourseCount] = useState(INITIAL_VISIBLE_COURSE_COUNT);
   const [selected, setSelected] = useState<CourseCandidate[]>([]);
+  const selectedTimeZones = useMemo(
+    () => selected.map((course) => course.timeZone),
+    [selected]
+  );
   const [courseLookupQuery, setCourseLookupQuery] = useState("");
   const [submittedCourseLookupQuery, setSubmittedCourseLookupQuery] = useState("");
   const [courseLookupResults, setCourseLookupResults] = useState<CourseCandidate[]>([]);
@@ -435,23 +440,18 @@ function TeeTimeIntakeContent({
 
     const synchronizeLocalDate = () => {
       const now = new Date();
-      const nextMinimum = getMinimumSearchDateInputValue(now);
+      const nextMinimum = getMinimumSearchDateInputValue(now, selectedTimeZones);
       setMinSearchDate(nextMinimum);
       if (!dateWasEditedRef.current) {
-        setDate((current) => reconcileFutureSearchDateInputValue(current, now));
+        setDate((current) =>
+          reconcileFutureSearchDateInputValue(current, now, selectedTimeZones)
+        );
       }
     };
 
     const scheduleNextRollover = () => {
       const now = new Date();
-      const nextLocalDay = new Date(
-        now.getFullYear(),
-        now.getMonth(),
-        now.getDate() + 1,
-        0,
-        0,
-        1
-      );
+      const nextLocalDay = getNextSearchDateRolloverAt(now, selectedTimeZones);
       rolloverTimer = window.setTimeout(() => {
         synchronizeLocalDate();
         scheduleNextRollover();
@@ -476,7 +476,7 @@ function TeeTimeIntakeContent({
       window.removeEventListener("focus", synchronizeLocalDate);
       document.removeEventListener("visibilitychange", synchronizeWhenVisible);
     };
-  }, [draftReady]);
+  }, [draftReady, selectedTimeZones]);
 
   const selectedIds = useMemo(
     () => new Set(selected.map((course) => course.googlePlaceId)),
@@ -1105,6 +1105,20 @@ function TeeTimeIntakeContent({
       return;
     }
 
+    // A background tab's rollover timer may be delayed until after course midnight.
+    const saveNow = new Date();
+    const currentMinimum = getMinimumSearchDateInputValue(saveNow, selectedTimeZones);
+    if (date < currentMinimum) {
+      setMinSearchDate(currentMinimum);
+      if (!dateWasEditedRef.current) {
+        setDate((current) =>
+          reconcileFutureSearchDateInputValue(current, saveNow, selectedTimeZones)
+        );
+      }
+      setNotice({ type: "error", message: "Choose a future date for alerts." });
+      return;
+    }
+
     if (!alertEmail.trim()) {
       setNotice({ type: "error", message: "Enter the email that should receive tee time alerts." });
       return;
@@ -1562,14 +1576,14 @@ function TeeTimeIntakeContent({
         ) : null}
         {selected.length > 0 ? (
           <label className="figma-alert-email" htmlFor="alertEmail">
-            <span>Where should we send this alert?</span>
+            <span>Primary alert email</span>
             <input
               aria-describedby="alert-email-help search-form-guidance"
               aria-invalid={hasInvalidAlertEmail}
               autoComplete="email"
               disabled={accountState.status !== "signed-in"}
               id="alertEmail"
-              onChange={(event) => setAlertEmail(event.target.value)}
+              readOnly
               type="email"
               value={alertEmail}
               placeholder={
@@ -1579,7 +1593,7 @@ function TeeTimeIntakeContent({
               }
             />
             <small id="alert-email-help">
-              Starts with your account email. Change it to send this alert somewhere else.
+              Alerts go to your signed-in account email. Add extra recipients below to include your group.
             </small>
           </label>
         ) : null}
@@ -1707,7 +1721,7 @@ function TeeTimeIntakeContent({
                     ? "Add a primary email to your account before creating alerts."
                     : accountState.status === "unavailable"
                       ? "Account access is temporarily unavailable, so alerts cannot be created."
-                      : `You’ll manage this alert from your signed-in account (${accountEmail}), even if you change where its emails are sent.`)}
+                      : `You’ll manage this alert from your signed-in account (${accountEmail}). Alerts go to that address and any extra recipients you add.`)}
           </p>
         </div>
       </aside>

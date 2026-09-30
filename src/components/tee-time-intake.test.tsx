@@ -27,15 +27,164 @@ const signedInAccountProps = {
   accountSignedIn: true
 } as const;
 
+function dateBoundaryCourse(name: string, timeZone: string) {
+  return {
+    address: "100 Public Links Rd",
+    googlePlaceId: `date-${name}`,
+    latitude: 41.24,
+    longitude: -73.2,
+    monitoringSupport: "AUTOMATIC",
+    name,
+    timeZone,
+    website: "https://example.com/course"
+  };
+}
+
+function restoreDateBoundaryDraft(
+  courses: ReturnType<typeof dateBoundaryCourse>[],
+  selectedCourses: ReturnType<typeof dateBoundaryCourse>[],
+  date = "2026-09-30"
+) {
+  window.sessionStorage.setItem(SEARCH_DRAFT_STORAGE_KEY, JSON.stringify({
+    date,
+    courses,
+    selectedCourses
+  }));
+}
+
+function mockDateBoundaryRequests() {
+  const fetchMock = vi.fn<typeof fetch>(async (input) => {
+    const url = String(input);
+    if (url === "/api/searches") {
+      return Response.json({ search: { id: "date-boundary" } }, { status: 201 });
+    }
+    if (url === "/api/analytics/events") {
+      return Response.json({ event: { id: "event-1" } }, { status: 201 });
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
+  return fetchMock;
+}
+
 describe("TeeTimeIntake", () => {
   afterEach(() => {
     document.querySelectorAll("[data-alert-confetti]").forEach((element) => element.remove());
     pushMock.mockReset();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    vi.useRealTimers();
     clearSearchDraft();
     window.sessionStorage.clear();
     Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
+  });
+
+  it("restores and saves tomorrow in the selected course's calendar", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-30T03:16:30.000Z"));
+    const course = dateBoundaryCourse("New York Course", "America/New_York");
+    restoreDateBoundaryDraft([course], [course]);
+    const fetchMock = mockDateBoundaryRequests();
+    render(<TeeTimeIntake {...signedInAccountProps} />);
+    await screen.findAllByRole("heading", { name: "New York Course" });
+    const dateInput = document.querySelector("#date") as HTMLInputElement;
+    await waitFor(() => expect(dateInput.min).toBe(
+      "2026-09-30"
+    ));
+    expect(dateInput.value).toBe("2026-09-30");
+    fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
+    await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/dashboard?created=date-boundary"));
+    const save = fetchMock.mock.calls.find(([input]) => input === "/api/searches");
+    const payload = JSON.parse(String(save?.[1]?.body)) as Record<string, unknown>;
+    expect(payload.date).toBe("2026-09-30");
+    expect(payload.courses).toEqual([expect.objectContaining({ timeZone: "America/New_York" })]);
+  });
+
+  it("recomputes the date floor when courses change while preserving an edited date", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-30T03:16:30.000Z"));
+    const newYork = dateBoundaryCourse("New York Course", "America/New_York");
+    const tokyo = dateBoundaryCourse("Tokyo Course", "Asia/Tokyo");
+    restoreDateBoundaryDraft([newYork, tokyo], [newYork]);
+    mockDateBoundaryRequests();
+    render(<TeeTimeIntake {...signedInAccountProps} />);
+    await screen.findAllByRole("heading", { name: "New York Course" });
+    const dateInput = document.querySelector("#date") as HTMLInputElement;
+    await waitFor(() => expect(dateInput.min).toBe("2026-09-30"));
+    fireEvent.change(dateInput, { target: { value: "2026-09-30" } });
+    fireEvent.blur(dateInput);
+    fireEvent.click(screen.getByRole("button", { name: "Add Tokyo Course" }));
+
+    await waitFor(() => expect(dateInput.min).toBe("2026-10-01"));
+    expect(dateInput.value).toBe("2026-09-30");
+    expect((screen.getByRole("button", { name: "Start getting alerts" }) as HTMLButtonElement)
+      .disabled).toBe(true);
+    fireEvent.click(screen.getAllByRole("button", { name: "Remove Tokyo Course" })[0]);
+    await waitFor(() => expect(dateInput.min).toBe("2026-09-30"));
+    expect(dateInput.value).toBe("2026-09-30");
+    expect((screen.getByRole("button", { name: "Start getting alerts" }) as HTMLButtonElement)
+      .disabled).toBe(false);
+  });
+
+  it("advances an untouched date at course midnight when the tab regains focus", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-30T03:16:30.000Z"));
+    const course = dateBoundaryCourse("New York Course", "America/New_York");
+    restoreDateBoundaryDraft([course], [course]);
+    mockDateBoundaryRequests();
+    render(<TeeTimeIntake {...signedInAccountProps} />);
+    await screen.findAllByRole("heading", { name: "New York Course" });
+    const dateInput = document.querySelector("#date") as HTMLInputElement;
+    await waitFor(() => expect(dateInput.min).toBe("2026-09-30"));
+    vi.setSystemTime(new Date("2026-09-30T04:00:01.000Z"));
+    fireEvent.focus(window);
+    await waitFor(() => expect(dateInput.min).toBe("2026-10-01"));
+    expect(dateInput.value).toBe("2026-10-03");
+  });
+
+  it("advances an untouched automatic date without posting when a delayed timer leaves it stale at save", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-26T03:59:00.000Z"));
+    const course = dateBoundaryCourse("New York Course", "America/New_York");
+    restoreDateBoundaryDraft([course], [course], "2026-09-26");
+    const fetchMock = mockDateBoundaryRequests();
+    render(<TeeTimeIntake {...signedInAccountProps} />);
+    await screen.findAllByRole("heading", { name: "New York Course" });
+    const dateInput = document.querySelector("#date") as HTMLInputElement;
+    await waitFor(() => expect(dateInput.min).toBe("2026-09-26"));
+    expect(dateInput.value).toBe("2026-09-26");
+
+    vi.setSystemTime(new Date("2026-09-26T04:00:01.000Z"));
+    fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
+    await waitFor(() => expect(dateInput.min).toBe("2026-09-27"));
+    expect(dateInput.value).toBe("2026-10-03");
+    expect(fetchMock.mock.calls.some(([input]) => input === "/api/searches")).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
+    await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/dashboard?created=date-boundary"));
+    const saves = fetchMock.mock.calls.filter(([input]) => input === "/api/searches");
+    expect(saves).toHaveLength(1);
+    expect(JSON.parse(String(saves[0][1]?.body)).date).toBe("2026-10-03");
+  });
+
+  it("preserves an edited date and blocks saving after course midnight when a timer is delayed", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-30T03:16:30.000Z"));
+    const course = dateBoundaryCourse("New York Course", "America/New_York");
+    restoreDateBoundaryDraft([course], [course]);
+    const fetchMock = mockDateBoundaryRequests();
+    render(<TeeTimeIntake {...signedInAccountProps} />);
+    await screen.findAllByRole("heading", { name: "New York Course" });
+    const dateInput = document.querySelector("#date") as HTMLInputElement;
+    await waitFor(() => expect(dateInput.min).toBe("2026-09-30"));
+    fireEvent.change(dateInput, { target: { value: "2026-09-30" } });
+    fireEvent.blur(dateInput);
+    vi.setSystemTime(new Date("2026-09-30T04:00:01.000Z"));
+    fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
+    await waitFor(() => expect(dateInput.min).toBe("2026-10-01"));
+    expect(dateInput.value).toBe("2026-09-30");
+    expect(fetchMock.mock.calls.some(([input]) => input === "/api/searches")).toBe(false);
   });
 
   it("opens My Alerts after saving a new alert", async () => {
@@ -98,8 +247,9 @@ describe("TeeTimeIntake", () => {
     await waitFor(() =>
       expect(window.sessionStorage.getItem(SEARCH_DRAFT_STORAGE_KEY)).toContain("course-1")
     );
-    const alertEmail = screen.getByLabelText(/Where should we send this alert?/);
+    const alertEmail = screen.getByLabelText(/Primary alert email/);
     expect((alertEmail as HTMLInputElement).value).toBe("golfer@example.com");
+    expect((alertEmail as HTMLInputElement).readOnly).toBe(true);
     fireEvent.change(alertEmail, { target: { value: "alternate@example.com" } });
     expect(screen.getByRole("group", { name: "Alert your group too" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
@@ -111,7 +261,7 @@ describe("TeeTimeIntake", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/searches",
       expect.objectContaining({
-        body: expect.stringContaining('"alertEmail":"alternate@example.com"')
+        body: expect.stringContaining('"alertEmail":"golfer@example.com"')
       })
     );
     expect(window.sessionStorage.getItem(SEARCH_DRAFT_STORAGE_KEY)).toBeNull();
@@ -411,7 +561,7 @@ describe("TeeTimeIntake", () => {
     ).toBe(false);
     expect(
       screen.getByText(
-        "You’ll manage this alert from your signed-in account (golfer@example.com), even if you change where its emails are sent."
+        "You’ll manage this alert from your signed-in account (golfer@example.com). Alerts go to that address and any extra recipients you add."
       )
     ).toBeTruthy();
     expect(fetchMock).toHaveBeenCalledWith(

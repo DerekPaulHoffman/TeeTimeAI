@@ -48,6 +48,7 @@ import {
   type CurrentMatchSearchSettings,
   type CurrentMatchSettings,
 } from "@/lib/searches/current-match-settings";
+import { projectCurrentCheckEvidence } from "@/lib/searches/current-check-evidence";
 
 const SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE = 0.06;
 const QUEUED_SEARCH_STATUSES = ["ACTIVE", "PAUSED"] as const;
@@ -542,14 +543,16 @@ export async function listTeeSearchesForUser(userId: string) {
       probesBySearch.set(probe.teeSearchId, probes);
     }
 
-    return searches.map((search) => ({
-      ...projectCurrentCustomerMatches(
-        search,
+    return searches.map((search) =>
+      projectCurrentCustomerMatches(
+        projectCurrentCheckEvidence({
+          ...search,
+          probes: probesBySearch.get(search.id) ?? [],
+        }),
         completedLocalReaderSources,
         providerObservationFences,
       ),
-      probes: probesBySearch.get(search.id) ?? [],
-    }));
+    );
   });
 }
 
@@ -785,7 +788,7 @@ async function projectCurrentCustomerSearch<
       courseIds,
     );
   return projectCurrentCustomerMatches(
-    search,
+    projectCurrentCheckEvidence(search),
     completedLocalReaderSources,
     providerObservationFences,
   );
@@ -804,7 +807,17 @@ function hideInternalGenerationMarker<
 
 function projectCurrentCustomerMatches<
   T extends CurrentMatchSearchSettings & {
+    alertGeneration?: number;
+    createdAt?: Date;
+    lastCheckedAt?: Date | null;
+    lastCheckOutcome?: string | null;
     statusEmailSnapshot?: unknown;
+    probes: Array<{
+      courseId: string;
+      observedAt: Date;
+      outcome: string;
+      rawSummary?: unknown;
+    }>;
     matches: Array<CurrentMatchSettings & {
       availabilityStatus: string;
       lastConfirmedAt: Date | null;

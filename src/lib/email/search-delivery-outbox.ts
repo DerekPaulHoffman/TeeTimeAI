@@ -1270,10 +1270,20 @@ async function runWithCurrentAvailabilityDeliverySourceFence<T>(input: {
             return course && courseId ? [[courseId, course] as const] : [];
           }),
         );
-        // An unsupported setup report makes no availability claim. An expired
-        // provider observation lease may not indefinitely delay that factual
-        // status during its ambiguity retry window. An active lease or an
-        // unconsumed reader result still blocks delivery.
+        // A setup can acknowledge pending work without asserting its result.
+        // Availability and final dispositions still need reconciled sources;
+        // current pending-only setup content must not wait for that work.
+        const isPendingSetupCourse = (course: Record<string, unknown> | undefined) =>
+          course !== undefined &&
+          (course.outcome === "CHECK_PENDING" ||
+            course.outcome === "NEEDS_ADAPTER") &&
+          (course.monitoringDisposition === undefined ||
+            course.monitoringDisposition === "ACTIONABLE") &&
+          course.supportStatus !== "NEEDS_HUMAN_REVIEW" &&
+          course.automationPlaybookExhausted !== true &&
+          course.automationStalledAtEndpoint !== true &&
+          course.availability === undefined &&
+          course.bookingWindow === undefined;
         const safeSetupWithoutAvailability =
           input.kind === "SETUP" &&
           matchIds.length === 0 &&
@@ -1291,13 +1301,22 @@ async function runWithCurrentAvailabilityDeliverySourceFence<T>(input: {
             const outcome = optionalString(statusCourseById.get(courseId)?.outcome);
             return (
               outcome !== undefined &&
-              SETUP_OUTCOMES_WITHOUT_AVAILABILITY.has(outcome as ProbeOutcome)
+              (SETUP_OUTCOMES_WITHOUT_AVAILABILITY.has(outcome as ProbeOutcome) ||
+                isPendingSetupCourse(statusCourseById.get(courseId)))
             );
           });
+        const safePendingSetupWithoutAvailability =
+          safeSetupWithoutAvailability &&
+          statusReport?.kind === "setup" &&
+          input.payload.matchReport === undefined &&
+          unresolvedProviderSources.every(({ courseId }) =>
+            isPendingSetupCourse(statusCourseById.get(courseId)),
+          );
         if (
           unresolvedProviderSources.some(
             (source) =>
               !source.terminal &&
+              !safePendingSetupWithoutAvailability &&
               !(safeSetupWithoutAvailability && source.setupStatusSafe),
           )
         ) {

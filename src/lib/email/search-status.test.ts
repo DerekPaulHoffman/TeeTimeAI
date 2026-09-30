@@ -930,9 +930,51 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("Open official booking page");
   });
 
-  it("presents a queued local-reader check as active work instead of an outage", () => {
+  it.each([false, true])(
+    "presents pending setup without claiming every course was checked (mixed: %s)",
+    (includeConfirmedCourse) => {
+      const html = renderSearchStatusHtml({
+        searchId: "search-reader-pending",
+        to: "player@example.com",
+        kind: "setup",
+        targetDate: "2026-07-26",
+        startTime: "09:00",
+        endTime: "13:00",
+        players: 2,
+        checkedAt: new Date("2026-07-23T14:15:00.000Z"),
+        courses: [
+          {
+            courseId: "oxford-greens",
+            courseName: "The Golf Club at Oxford Greens",
+            outcome: "CHECK_PENDING",
+            availableMatches: 0,
+            bookingUrl: "https://course.example/book"
+          },
+          ...(includeConfirmedCourse
+            ? [{
+                courseId: "confirmed-course",
+                courseName: "Confirmed Golf Course",
+                outcome: "NO_MATCH" as const,
+                availableMatches: 0
+              }]
+            : [])
+        ]
+      });
+
+      expect(html).toContain("CHECKING NOW");
+      expect(html).toContain("confirming current public availability");
+      expect(html).toContain("Current availability is not confirmed yet");
+      expect(html).toContain("confirming current availability for one or more courses");
+      expect(html).not.toContain("We checked every selected course");
+      expect(html).not.toContain("fresh public-page check is in progress");
+      expect(html).not.toContain("AUTOMATIC CHECKS RETRYING");
+      expect(html).not.toContain("automatic alerts are unavailable");
+    }
+  );
+
+  it("keeps the confirmed setup introduction when no course result is pending", () => {
     const html = renderSearchStatusHtml({
-      searchId: "search-reader-pending",
+      searchId: "search-confirmed",
       to: "player@example.com",
       kind: "setup",
       targetDate: "2026-07-26",
@@ -940,21 +982,16 @@ describe("renderSearchStatusHtml", () => {
       endTime: "13:00",
       players: 2,
       checkedAt: new Date("2026-07-23T14:15:00.000Z"),
-      courses: [
-        {
-          courseId: "oxford-greens",
-          courseName: "The Golf Club at Oxford Greens",
-          outcome: "CHECK_PENDING",
-          availableMatches: 0,
-          bookingUrl: "https://course.example/book"
-        }
-      ]
+      courses: [{
+        courseId: "confirmed-course",
+        courseName: "Confirmed Golf Course",
+        outcome: "NO_MATCH",
+        availableMatches: 0
+      }]
     });
 
-    expect(html).toContain("CHECKING NOW");
-    expect(html).toContain("fresh public-page check is in progress");
-    expect(html).not.toContain("AUTOMATIC CHECKS RETRYING");
-    expect(html).not.toContain("automatic alerts are unavailable");
+    expect(html).toContain("We checked every selected course and will keep watching automatically");
+    expect(html).not.toContain("confirming current availability for one or more courses");
   });
 
   it("uses the Figma shell, alternating course imagery, and availability-first order", () => {
