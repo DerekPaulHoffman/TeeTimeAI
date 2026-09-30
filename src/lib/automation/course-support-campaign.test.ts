@@ -3039,7 +3039,9 @@ describe("parked course campaign", () => {
           terminalCount: 0,
           activeCount: 0,
         });
-        expect(nativeAdmission).toHaveBeenLastCalledWith(audit, "campaign-run-1", currentRuntime);
+        expect(nativeAdmission).toHaveBeenLastCalledWith(
+          audit, "campaign-run-1", currentRuntime, undefined,
+        );
         const defaultInspection = await inspectActiveParkedCourseCampaign(
           { completeIfDone: false },
           inspectionDependencies,
