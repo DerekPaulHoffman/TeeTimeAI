@@ -6,6 +6,23 @@ import {
 } from "./dashboard-availability";
 
 describe("dashboard availability", () => {
+  it.each(["PAUSED", "COMPLETED", "CANCELLED"])("describes %s matching times as last-check history", (alertStatus) => {
+    const view = getDashboardAvailabilityView({
+      alertStatus,
+      outcome: "MATCH_FOUND",
+      qualifyingMatchCount: 2,
+      players: 2,
+      startTime: "10:00",
+      endTime: "14:00"
+    });
+
+    expect(view.label).toBe("2 matching times at last check");
+    expect(view.detail).toContain("At the last check, 2 tee times fit");
+    expect(view.detail).toContain("Current availability has not been rechecked");
+    expect(view.detail).not.toMatch(/remains active|will keep checking|available now/);
+    expect(view.tone).toBe("matching");
+  });
+
   it.each(["PAUSED", "COMPLETED", "CANCELLED"])("keeps %s guidance accurate during a failure or a future booking release", (alertStatus) => {
     for (const input of [{ outcome: "FETCH_FAILED" }, { outcome: "NEEDS_ADAPTER" }, { bookingOpensLabel: "tomorrow at 7 AM" }]) {
       const view = getDashboardAvailabilityView({ ...input, alertStatus, qualifyingMatchCount: 0, players: 2, startTime: "10:00", endTime: "14:00" });
