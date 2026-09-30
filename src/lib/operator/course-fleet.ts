@@ -1,4 +1,4 @@
-import type { WebsiteTrafficClass } from "@prisma/client";
+import type { Prisma, WebsiteTrafficClass } from "@prisma/client";
 
 import { classifyProviderCoverage } from "@/lib/automation/provider-coverage";
 import { syntheticWebsiteTrafficClasses } from "@/lib/engagement/traffic-class";
@@ -303,15 +303,20 @@ export type OperatorCourseFleet = Awaited<
   ReturnType<typeof loadOperatorCourseFleet>
 >;
 export type OperatorCourseFleetCounts = OperatorCourseFleet["counts"];
+export type OperatorCourseFleetCountsReadDatabase = Pick<
+  Prisma.TransactionClient,
+  "course" | "courseProbe" | "coursePreference"
+>;
 
 export async function loadOperatorCourseFleetCounts(
   input: { now?: Date } = {},
+  database: OperatorCourseFleetCountsReadDatabase = prisma,
 ): Promise<OperatorCourseFleetCounts> {
   const now = input.now ?? new Date();
   const recentLocalReaderSince = new Date(
     now.getTime() - RECENT_LOCAL_READER_DAYS * 24 * 60 * 60 * 1000,
   );
-  const courses = await prisma.course.findMany({
+  const courses = await database.course.findMany({
     select: {
       id: true,
       isPublic: true,
@@ -411,7 +416,7 @@ export async function loadOperatorCourseFleetCounts(
   const [latestProbes, activeAlertCounts, activeSyntheticAlertCounts] =
     await Promise.all([
       courseIds.length > 0
-        ? prisma.courseProbe.findMany({
+        ? database.courseProbe.findMany({
             where: { courseId: { in: courseIds } },
             orderBy: { observedAt: "desc" },
             distinct: ["courseId"],
@@ -423,7 +428,7 @@ export async function loadOperatorCourseFleetCounts(
             },
           })
         : [],
-      prisma.coursePreference.groupBy({
+      database.coursePreference.groupBy({
         by: ["courseId"],
         where: {
           teeSearch: {
@@ -433,7 +438,7 @@ export async function loadOperatorCourseFleetCounts(
         },
         _count: { _all: true },
       }),
-      prisma.coursePreference.groupBy({
+      database.coursePreference.groupBy({
         by: ["courseId"],
         where: {
           teeSearch: {

@@ -21,6 +21,7 @@ vi.mock("@/lib/automation/provider-coverage", () => providerCoverageMocks);
 import {
   loadOperatorCourseFleet,
   loadOperatorCourseFleetCounts,
+  type OperatorCourseFleetCountsReadDatabase,
 } from "./course-fleet";
 
 const NOW = new Date("2026-08-22T14:00:00.000Z");
@@ -116,6 +117,63 @@ describe("operator course fleet loader", () => {
     expect(countQuery.select).not.toHaveProperty("profile");
     expect(countQuery.select.courseProbe).toBeUndefined();
     expect(prismaMocks.coursePreferenceGroupBy).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps all counts reads on the supplied client with the same native aggregate output", async () => {
+    const expected = await loadOperatorCourseFleetCounts({ now: NOW });
+    const expectedCourseQuery = prismaMocks.courseFindMany.mock.calls[0]![0];
+    const expectedProbeQuery = prismaMocks.courseProbeFindMany.mock.calls[0]![0];
+    const expectedGroupQueries = prismaMocks.coursePreferenceGroupBy.mock.calls.map(
+      ([query]) => query,
+    );
+    vi.clearAllMocks();
+    const mutation = vi.fn(() => {
+      throw new Error("Counts must remain read-only.");
+    });
+    const courseFindMany = vi.fn().mockResolvedValue([courseRow()]);
+    const courseProbeFindMany = vi.fn().mockResolvedValue([]);
+    const coursePreferenceGroupBy = vi.fn().mockResolvedValue([]);
+    const database = {
+      course: { findMany: courseFindMany, update: mutation },
+      courseProbe: { findMany: courseProbeFindMany, create: mutation },
+      coursePreference: { groupBy: coursePreferenceGroupBy, deleteMany: mutation },
+      $transaction: mutation,
+      $executeRawUnsafe: mutation,
+    } as unknown as OperatorCourseFleetCountsReadDatabase;
+
+    const actual = await loadOperatorCourseFleetCounts({ now: NOW }, database);
+
+    expect(actual).toEqual(expected);
+    expect(courseFindMany).toHaveBeenCalledExactlyOnceWith(expectedCourseQuery);
+    expect(courseProbeFindMany).toHaveBeenCalledExactlyOnceWith(expectedProbeQuery);
+    expect(coursePreferenceGroupBy.mock.calls.map(([query]) => query)).toEqual(
+      expectedGroupQueries,
+    );
+    expect(prismaMocks.courseFindMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseProbeFindMany).not.toHaveBeenCalled();
+    expect(prismaMocks.coursePreferenceGroupBy).not.toHaveBeenCalled();
+    expect(mutation).not.toHaveBeenCalled();
+  });
+
+  it("retains the empty-course probe shortcut and both demand reads on the supplied client", async () => {
+    const courseFindMany = vi.fn().mockResolvedValue([]);
+    const courseProbeFindMany = vi.fn();
+    const coursePreferenceGroupBy = vi.fn().mockResolvedValue([]);
+    const database = {
+      course: { findMany: courseFindMany },
+      courseProbe: { findMany: courseProbeFindMany },
+      coursePreference: { groupBy: coursePreferenceGroupBy },
+    } as unknown as OperatorCourseFleetCountsReadDatabase;
+
+    const result = await loadOperatorCourseFleetCounts({ now: NOW }, database);
+
+    expect(Object.values(result).every((count) => count === 0)).toBe(true);
+    expect(courseFindMany).toHaveBeenCalledTimes(1);
+    expect(courseProbeFindMany).not.toHaveBeenCalled();
+    expect(coursePreferenceGroupBy).toHaveBeenCalledTimes(2);
+    expect(prismaMocks.courseFindMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseProbeFindMany).not.toHaveBeenCalled();
+    expect(prismaMocks.coursePreferenceGroupBy).not.toHaveBeenCalled();
   });
 });
 
