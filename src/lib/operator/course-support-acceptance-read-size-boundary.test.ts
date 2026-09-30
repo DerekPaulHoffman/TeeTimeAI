@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { describe, expect, it, vi } from "vitest";
 
-import { createAcceptanceBytePreflight } from "./course-support-acceptance-read-size-boundary";
+import { AcceptanceBytePreflightFence, createAcceptanceBytePreflight } from "./course-support-acceptance-read-size-boundary";
 
 function fixture(input: { maxBytes?: number; maxIdentityItems?: number } = {}) {
   const models = Object.fromEntries(Prisma.dmmf.datamodel.models.map((model) => [
@@ -88,7 +88,7 @@ describe("native acceptance database byte preflight", () => {
     await expect((async () => {
       await preflight("courseSupportIncident", "findMany", query);
       return transaction.courseSupportIncident.findMany(query);
-    })()).rejects.toThrow(/^EVIDENCE_BOUND_EXCEEDED$/);
+    })()).rejects.toMatchObject({ message: "EVIDENCE_BOUND_EXCEEDED", boundary: "WHOLE_ROW_BYTES" });
 
     expect(models.courseSupportIncident.findMany).toHaveBeenCalledTimes(1);
     expect(models.courseSupportIncident.findMany.mock.calls[0][0].select).toEqual({
@@ -142,7 +142,7 @@ describe("native acceptance database byte preflight", () => {
 
     await expect(preflight("coursePreference", "findMany", { select: {
       teeSearch: { select: { probes: { select: { rawSummary: true } } } },
-    } })).rejects.toThrow(/^EVIDENCE_BOUND_EXCEEDED$/);
+    } })).rejects.toMatchObject({ message: "EVIDENCE_BOUND_EXCEEDED", boundary: "IDENTITY_PRECOUNT_ITEMS" });
 
     expect(models.courseProbe.count).toHaveBeenCalledTimes(1);
     expect(models.coursePreference.findMany).not.toHaveBeenCalled();
@@ -155,7 +155,7 @@ describe("native acceptance database byte preflight", () => {
 
     await expect(preflight("localReaderJob", "findFirst", {
       where: { status: "COMPLETED" }, orderBy: { completedAt: "desc" }, select: { result: true },
-    })).rejects.toThrow(/^EVIDENCE_BOUND_EXCEEDED$/);
+    })).rejects.toMatchObject({ message: "EVIDENCE_BOUND_EXCEEDED", boundary: "IDENTITY_PRECOUNT_ITEMS" });
 
     expect(models.localReaderJob.findMany).not.toHaveBeenCalled();
     expect(models.localReaderJob.findFirst).not.toHaveBeenCalled();
@@ -168,7 +168,7 @@ describe("native acceptance database byte preflight", () => {
 
     await expect(preflight("course", "findMany", { where: { id: "private-course" }, select: {
       localReaderJobs: { where: { status: "COMPLETED" }, take: 1, orderBy: { completedAt: "desc" }, select: { result: true } },
-    } })).rejects.toThrow(/^EVIDENCE_BOUND_EXCEEDED$/);
+    } })).rejects.toMatchObject({ message: "EVIDENCE_BOUND_EXCEEDED", boundary: "IDENTITY_PRECOUNT_ITEMS" });
 
     expect(models.localReaderJob.count).toHaveBeenCalledExactlyOnceWith({ where: { AND: [
       { status: "COMPLETED" }, { course: { is: { id: "private-course" } } },
@@ -201,7 +201,7 @@ describe("native acceptance database byte preflight", () => {
     await preflight("courseSupportBatchIncident", "findMany", query);
     models.course.findMany.mockResolvedValue([{ id: "private-course" }]);
 
-    await expect(preflight("course", "findMany", {})).rejects.toThrow(/^EVIDENCE_BOUND_EXCEEDED$/);
+    await expect(preflight("course", "findMany", {})).rejects.toMatchObject({ message: "EVIDENCE_BOUND_EXCEEDED", boundary: "WHOLE_ROW_BYTES" });
   });
 
   it("accepts an absent unique row without querying row bytes", async () => {
@@ -215,12 +215,12 @@ describe("native acceptance database byte preflight", () => {
   });
 
   it.each([
-    ["unknownDelegate", {}],
-    ["courseBookingFact", {}],
-    ["course", { select: { supportIncident: { select: { course: { select: { id: true } } } } } }],
-  ])("fails closed on unsupported metadata or a cyclic relation path for %s", async (model, query) => {
+    ["unknownDelegate", {}, "READ_FAILED", null],
+    ["courseBookingFact", {}, "READ_FAILED", null],
+    ["course", { select: { supportIncident: { select: { course: { select: { id: true } } } } } }, "EVIDENCE_BOUND_EXCEEDED", "IDENTITY_PLAN_DEPTH_OR_CYCLE"],
+  ])("fails closed on unsupported metadata or a cyclic relation path for %s", async (model, query, message, boundary) => {
     const { models, sql, preflight } = fixture();
-    await expect(preflight(model, "findMany", query)).rejects.toThrow(/^(READ_FAILED|EVIDENCE_BOUND_EXCEEDED)$/);
+    await expect(preflight(model as string, "findMany", query)).rejects.toMatchObject({ message, boundary });
     expect(models.course.count).not.toHaveBeenCalled();
     expect(sql).not.toHaveBeenCalled();
   });
@@ -228,15 +228,15 @@ describe("native acceptance database byte preflight", () => {
   it("rejects malformed identities and aggregate evidence with opaque errors", async () => {
     const first = fixture();
     first.models.course.findMany.mockResolvedValue([{ id: "private-course", notes: "secret-private-notes" }]);
-    await expect(first.preflight("course", "findMany", {})).rejects.toThrow(/^READ_FAILED$/);
+    await expect(first.preflight("course", "findMany", {})).rejects.toMatchObject({ message: "READ_FAILED", boundary: null });
     expect(first.sql).not.toHaveBeenCalled();
     const second = fixture();
     second.models.course.findMany.mockResolvedValue([{ id: "private-course" }]);
     second.sql.mockResolvedValue([{ bytes: 10n, matchedRows: 0n }]);
-    await expect(second.preflight("course", "findMany", {})).rejects.toThrow(/^READ_FAILED$/);
+    await expect(second.preflight("course", "findMany", {})).rejects.toMatchObject({ message: "READ_FAILED", boundary: null });
     const third = fixture();
     third.models.course.findMany.mockRejectedValue(new Error("private-connection-details"));
-    await expect(third.preflight("course", "findMany", {})).rejects.toThrow(/^READ_FAILED$/);
+    await expect(third.preflight("course", "findMany", {})).rejects.toMatchObject({ message: "READ_FAILED", boundary: null });
   });
 
   it.each(["P2028", "57014"])("preserves fixed timeout classification for native %s without private details", async (code) => {
@@ -244,5 +244,61 @@ describe("native acceptance database byte preflight", () => {
     models.course.count.mockRejectedValue(Object.assign(new Error("private-provider-connection"), { code }));
 
     await expect(preflight("course", "findMany", {})).rejects.toMatchObject({ message: "READ_TIMEOUT", code });
+  });
+
+  it("tags oversized identity result arrays before row-byte or native evidence reads", async () => {
+    const { models, sql, preflight } = fixture({ maxIdentityItems: 1 });
+    models.course.findMany.mockResolvedValue([{ id: "private-course-a" }, { id: "private-course-b" }]);
+    await expect(preflight("course", "findMany", {})).rejects.toMatchObject({
+      message: "EVIDENCE_BOUND_EXCEEDED", boundary: "IDENTITY_RESULT_ITEMS",
+    });
+    expect(sql).not.toHaveBeenCalled();
+  });
+
+  it("tags oversized nested identity result arrays before byte reads", async () => {
+    const { models, sql, preflight } = fixture({ maxIdentityItems: 2 });
+    models.course.findMany.mockResolvedValue([{ id: "private-course", probes: [
+      { id: "private-probe-a" }, { id: "private-probe-b" },
+    ] }]);
+    await expect(preflight("course", "findMany", { select: { probes: { select: { outcome: true } } } })).rejects.toMatchObject({
+      message: "EVIDENCE_BOUND_EXCEEDED", boundary: "IDENTITY_RESULT_ITEMS",
+    });
+    expect(sql).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])("tags oversized identity values without retaining the value (distinct=%s)", async (distinct) => {
+    const { models, sql, preflight } = fixture();
+    if (distinct) models.courseProbe.findMany.mockResolvedValue([{ id: "private-probe", courseId: "private-course".repeat(100) }]);
+    else models.courseProbe.findMany.mockResolvedValue([{ id: "private-probe".repeat(100) }]);
+    await expect(preflight("courseProbe", "findMany", distinct ? { distinct: ["courseId"] } : {})).rejects.toMatchObject({
+      message: "EVIDENCE_BOUND_EXCEEDED", boundary: "IDENTITY_VALUE_BYTES",
+    });
+    expect(sql).not.toHaveBeenCalled();
+  });
+
+  it("preserves a recognized tick fence but rejects lookalike reason/boundary evidence", async () => {
+    const actual = fixture();
+    actual.tick.mockImplementation(() => { throw new AcceptanceBytePreflightFence("EVIDENCE_BOUND_EXCEEDED", "QUERY_OPERATIONS"); });
+    await expect(actual.preflight("course", "findMany", {})).rejects.toMatchObject({
+      message: "EVIDENCE_BOUND_EXCEEDED", boundary: "QUERY_OPERATIONS",
+    });
+    expect(actual.models.course.count).not.toHaveBeenCalled();
+
+    const forged = fixture();
+    forged.models.course.count.mockRejectedValue(Object.assign(new Error("private-query-details"), {
+      reason: "EVIDENCE_BOUND_EXCEEDED", boundary: "WHOLE_ROW_BYTES",
+    }));
+    await expect(forged.preflight("course", "findMany", {})).rejects.toMatchObject({
+      message: "EVIDENCE_BOUND_EXCEEDED", boundary: null,
+    });
+    expect(forged.models.course.findMany).not.toHaveBeenCalled();
+    expect(forged.sql).not.toHaveBeenCalled();
+  });
+
+  it("keeps constructor defaults opaque and rejects non-fixed runtime boundary input", () => {
+    expect(new AcceptanceBytePreflightFence("READ_FAILED")).toMatchObject({ message: "READ_FAILED", boundary: null });
+    expect(new AcceptanceBytePreflightFence("EVIDENCE_BOUND_EXCEEDED", "private-query" as never)).toMatchObject({
+      message: "EVIDENCE_BOUND_EXCEEDED", boundary: null,
+    });
   });
 });

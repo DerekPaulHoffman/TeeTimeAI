@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 import { AcceptanceBytePreflightFence, createAcceptanceBytePreflight } from "./course-support-acceptance-read-size-boundary";
+import { ACCEPTANCE_READ_BOUNDARIES, type AcceptanceReadBoundary } from "./course-support-acceptance-read-fence";
 
 export const ACCEPTANCE_READ_LIMITS = {
   incidentRows: 1_024,
@@ -16,8 +17,10 @@ export const ACCEPTANCE_READ_LIMITS = {
 } as const;
 
 export class AcceptanceReadFence extends Error {
-  constructor(public readonly reason: "EVIDENCE_BOUND_EXCEEDED" | "READ_FAILED") {
+  readonly boundary: AcceptanceReadBoundary | null;
+  constructor(public readonly reason: "EVIDENCE_BOUND_EXCEEDED" | "READ_FAILED", boundary: AcceptanceReadBoundary | null = null) {
     super(reason);
+    this.boundary = (ACCEPTANCE_READ_BOUNDARIES as readonly unknown[]).includes(boundary) ? boundary : null;
   }
 }
 
@@ -39,10 +42,16 @@ export function createBoundedAcceptanceReadClient(database: Prisma.TransactionCl
   const delegates = new Map<string, ReadDelegate>();
 
   function tick() {
-    if (++queryCount > ACCEPTANCE_READ_LIMITS.queryCount) throw new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED");
+    if (++queryCount > ACCEPTANCE_READ_LIMITS.queryCount) throw new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "QUERY_OPERATIONS");
   }
   const preflightBytes = createAcceptanceBytePreflight(database, {
-    tick, maxBytes: ACCEPTANCE_READ_LIMITS.evidenceBytes,
+    tick: () => {
+      try { tick(); }
+      catch (error) {
+        if (error instanceof AcceptanceReadFence) throw new AcceptanceBytePreflightFence(error.reason, error.boundary);
+        throw error;
+      }
+    }, maxBytes: ACCEPTANCE_READ_LIMITS.evidenceBytes,
     maxIdentityItems: ACCEPTANCE_READ_LIMITS.evidenceRows,
   });
   function delegate(name: string): ReadDelegate {
@@ -68,7 +77,7 @@ export function createBoundedAcceptanceReadClient(database: Prisma.TransactionCl
       if (nested.take === undefined) {
         const where = { AND: [nested.where ?? {}, { incident: { is: query.where ?? {} } }] };
         if (await count("courseMonitoringEvent", where) > ACCEPTANCE_READ_LIMITS.evidenceRows) {
-          throw new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED");
+          throw new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "INCIDENT_HISTORY_ROWS");
         }
         await guardHistoryGroups(where);
       }
@@ -78,7 +87,7 @@ export function createBoundedAcceptanceReadClient(database: Prisma.TransactionCl
     if (preferences && preferences.take === undefined &&
         await count("coursePreference", { AND: [preferences.where ?? {},
           { course: { supportIncident: { is: query.where ?? {} } } }] }) > ACCEPTANCE_READ_LIMITS.evidenceRows) {
-      throw new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED");
+      throw new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "NESTED_PREFERENCE_ROWS");
     }
     const batchIncidents = selected.batchIncidents as Query | undefined;
     if (batchIncidents) await guardVerificationRequests({
@@ -93,7 +102,7 @@ export function createBoundedAcceptanceReadClient(database: Prisma.TransactionCl
     if (!Array.isArray(groups) || groups.length > ACCEPTANCE_READ_LIMITS.incidentRows ||
         groups.some((group) => !Number.isSafeInteger(group._count?._all) ||
           group._count._all < 0 || group._count._all > ACCEPTANCE_READ_LIMITS.incidentRows)) {
-      throw new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED");
+      throw new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "INCIDENT_HISTORY_GROUPS");
     }
   }
   async function guardVerificationRequests(query: Query) {
@@ -101,15 +110,15 @@ export function createBoundedAcceptanceReadClient(database: Prisma.TransactionCl
     if (requests && requests.take === undefined &&
         await count("courseSupportVerificationRequest", { AND: [requests.where ?? {},
           { batchIncident: { is: query.where ?? {} } }] }) > ACCEPTANCE_READ_LIMITS.evidenceRows) {
-      throw new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED");
+      throw new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "VERIFICATION_REQUEST_ROWS");
     }
   }
   function checkTransferred(value: unknown) {
     const visit = (item: unknown, depth: number) => {
-      if (depth > 128) throw new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED");
+      if (depth > 128) throw new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "TRANSFER_DEPTH");
       if (Array.isArray(item)) {
         transferredArrayItems += item.length;
-        if (transferredArrayItems > ACCEPTANCE_READ_LIMITS.evidenceRows) throw new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED");
+        if (transferredArrayItems > ACCEPTANCE_READ_LIMITS.evidenceRows) throw new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "TRANSFER_ARRAY_ITEMS");
         for (const child of item) visit(child, depth + 1);
       } else if (item && typeof item === "object" && !(item instanceof Date)) {
         for (const child of Object.values(item)) visit(child, depth + 1);
@@ -117,7 +126,7 @@ export function createBoundedAcceptanceReadClient(database: Prisma.TransactionCl
     };
     visit(value, 0);
     transferredBytes += Buffer.byteLength(JSON.stringify(value) ?? "", "utf8");
-    if (transferredBytes > ACCEPTANCE_READ_LIMITS.evidenceBytes) throw new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED");
+    if (transferredBytes > ACCEPTANCE_READ_LIMITS.evidenceBytes) throw new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "TRANSFER_BYTES");
   }
 
   return new Proxy({} as Prisma.TransactionClient, {
@@ -134,7 +143,7 @@ export function createBoundedAcceptanceReadClient(database: Prisma.TransactionCl
                 const matched = await count(property, args.where);
                 const selected = args.take === undefined ? matched : Math.min(matched, args.take);
                 if (!Number.isSafeInteger(selected) || selected < 0 || selected > rowLimit(property)) {
-                  throw new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED");
+                  throw new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "TOP_LEVEL_ROWS");
                 }
               }
               if (property === "courseSupportIncident" && method !== "count" && method !== "groupBy") {
@@ -149,7 +158,7 @@ export function createBoundedAcceptanceReadClient(database: Prisma.TransactionCl
               if (method === "findMany" || method === "findFirst" || method === "findUnique") {
                 try { await preflightBytes(property, method, args); }
                 catch (error) {
-                  if (error instanceof AcceptanceBytePreflightFence) throw new AcceptanceReadFence(error.reason);
+                  if (error instanceof AcceptanceBytePreflightFence) throw new AcceptanceReadFence(error.reason, error.boundary);
                   throw error;
                 }
               }

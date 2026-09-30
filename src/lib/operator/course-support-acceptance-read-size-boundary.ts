@@ -1,6 +1,7 @@
 import { Prisma } from "@prisma/client";
 import { readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
+import { ACCEPTANCE_READ_BOUNDARIES, type AcceptanceReadBoundary } from "./course-support-acceptance-read-fence";
 
 const MAX_IDENTITY_ITEMS = 16_384;
 const MAX_IDENTITY_DEPTH = 16;
@@ -23,8 +24,10 @@ type ReadMethod = "findMany" | "findFirst" | "findUnique";
 type IdentityReadDelegate = Record<ReadMethod, (args: unknown) => Promise<unknown>>;
 
 export class AcceptanceBytePreflightFence extends Error {
-  constructor(public readonly reason: "EVIDENCE_BOUND_EXCEEDED" | "READ_FAILED") {
+  readonly boundary: AcceptanceReadBoundary | null;
+  constructor(public readonly reason: "EVIDENCE_BOUND_EXCEEDED" | "READ_FAILED", boundary: AcceptanceReadBoundary | null = null) {
     super(reason);
+    this.boundary = (ACCEPTANCE_READ_BOUNDARIES as readonly unknown[]).includes(boundary) ? boundary : null;
   }
 }
 
@@ -76,8 +79,8 @@ function generatedModelMetadata() {
   }
 }
 
-function fail(reason: "EVIDENCE_BOUND_EXCEEDED" | "READ_FAILED"): never {
-  throw new AcceptanceBytePreflightFence(reason);
+function fail(reason: "EVIDENCE_BOUND_EXCEEDED" | "READ_FAILED", boundary: AcceptanceReadBoundary | null = null): never {
+  throw new AcceptanceBytePreflightFence(reason, boundary);
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -91,7 +94,7 @@ function identityPlan(
   model: Model, args: unknown, method: ReadMethod, ancestors = new Set<string>(),
 ): IdentityPlan {
   if (ancestors.size >= MAX_IDENTITY_DEPTH || ancestors.has(model.name)) {
-    return fail("EVIDENCE_BOUND_EXCEEDED");
+    return fail("EVIDENCE_BOUND_EXCEEDED", "IDENTITY_PLAN_DEPTH_OR_CYCLE");
   }
   const ids = model.fields.filter((field) => field.isId);
   if (ids.length !== 1 || !["String", "Int", "BigInt"].includes(ids[0].type)) {
@@ -170,7 +173,7 @@ function identityValue(value: unknown, field: Model["fields"][number]): string {
       : typeof value !== "bigint") return fail("READ_FAILED");
   const identity = String(value);
   if (!identity || Buffer.byteLength(identity, "utf8") > MAX_IDENTITY_STRING_BYTES) {
-    return fail("EVIDENCE_BOUND_EXCEEDED");
+    return fail("EVIDENCE_BOUND_EXCEEDED", "IDENTITY_VALUE_BYTES");
   }
   return identity;
 }
@@ -222,7 +225,7 @@ export function createAcceptanceBytePreflight(
           : Math.min(counted as number, current.method === "findMany" ? (take as number | undefined) ?? counted as number : 1);
         boundedIdentityItems += rows;
         if (!Number.isSafeInteger(boundedIdentityItems) || boundedIdentityItems > maxIdentityItems) {
-          return fail("EVIDENCE_BOUND_EXCEEDED");
+          return fail("EVIDENCE_BOUND_EXCEEDED", "IDENTITY_PRECOUNT_ITEMS");
         }
         if (rows === 0) return;
         const multiplicity = !parent ? 1
@@ -240,7 +243,7 @@ export function createAcceptanceBytePreflight(
       const identitiesByModel = new Map<Model, Map<string, number>>();
       let identityItems = 0;
       const collectRow = (value: unknown, current: IdentityPlan) => {
-        if (++identityItems > maxIdentityItems) return fail("EVIDENCE_BOUND_EXCEEDED");
+        if (++identityItems > maxIdentityItems) return fail("EVIDENCE_BOUND_EXCEEDED", "IDENTITY_RESULT_ITEMS");
         const row = record(value);
         const identity = identityValue(row[current.id.name], current.id);
         const identities = identitiesByModel.get(current.model) ?? new Map<string, number>();
@@ -254,14 +257,14 @@ export function createAcceptanceBytePreflight(
           const scalar = row[field];
           if (scalar !== null && typeof scalar === "object" && !(scalar instanceof Date)) return fail("READ_FAILED");
           if (typeof scalar === "string" && Buffer.byteLength(scalar, "utf8") > MAX_IDENTITY_STRING_BYTES) {
-            return fail("EVIDENCE_BOUND_EXCEEDED");
+            return fail("EVIDENCE_BOUND_EXCEEDED", "IDENTITY_VALUE_BYTES");
           }
         }
         for (const [key, relation] of current.relations) {
           const related = row[key];
           if (relation.isList) {
             if (!Array.isArray(related)) return fail("READ_FAILED");
-            if (identityItems + related.length > maxIdentityItems) return fail("EVIDENCE_BOUND_EXCEEDED");
+            if (identityItems + related.length > maxIdentityItems) return fail("EVIDENCE_BOUND_EXCEEDED", "IDENTITY_RESULT_ITEMS");
             for (const child of related) collectRow(child, relation.plan);
           } else if (related !== null) {
             collectRow(related, relation.plan);
@@ -270,7 +273,7 @@ export function createAcceptanceBytePreflight(
       };
       if (plan.method === "findMany") {
         if (!Array.isArray(result)) return fail("READ_FAILED");
-        if (result.length > maxIdentityItems) return fail("EVIDENCE_BOUND_EXCEEDED");
+        if (result.length > maxIdentityItems) return fail("EVIDENCE_BOUND_EXCEEDED", "IDENTITY_RESULT_ITEMS");
         for (const row of result) collectRow(row, plan);
       } else if (result !== null) collectRow(result, plan);
 
@@ -289,7 +292,7 @@ export function createAcceptanceBytePreflight(
         const bytes = nonnegativeInteger(total.bytes);
         if (nonnegativeInteger(total.matchedRows) !== BigInt(identities.size)) return fail("READ_FAILED");
         cumulativeBytes += bytes * BigInt(multiplicity) * WHOLE_ROW_BYTE_FACTOR;
-        if (cumulativeBytes > BigInt(options.maxBytes)) return fail("EVIDENCE_BOUND_EXCEEDED");
+        if (cumulativeBytes > BigInt(options.maxBytes)) return fail("EVIDENCE_BOUND_EXCEEDED", "WHOLE_ROW_BYTES");
       }
     } catch (error) {
       if (error instanceof AcceptanceBytePreflightFence) throw error;
