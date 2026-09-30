@@ -152,7 +152,7 @@ describe("POST /api/searches", () => {
     expect(mocks.createTeeSearchForUser).not.toHaveBeenCalled();
   });
 
-  it("owns the alert with the authenticated account and accepts its chosen delivery email", async () => {
+  it("derives the primary recipient from the authenticated account despite a client override", async () => {
     mocks.hasClerkConfig.mockReturnValue(true);
     mocks.getRequiredAppUser.mockResolvedValue({
       id: "app-user-1",
@@ -169,7 +169,7 @@ describe("POST /api/searches", () => {
     expect(response.status).toBe(201);
     expect(mocks.createTeeSearchForUser).toHaveBeenCalledWith(
       "app-user-1",
-      expect.objectContaining({ alertEmail: "different-person@example.com" }),
+      expect.objectContaining({ alertEmail: "owner@example.com" }),
       "TEST",
       false
     );

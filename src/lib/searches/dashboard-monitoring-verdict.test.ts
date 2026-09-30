@@ -11,6 +11,35 @@ const base = {
 } as const;
 
 describe("dashboard monitoring verdict", () => {
+  it("does not describe reusable healthy course evidence as this request's completed check", () => {
+    const verdict = getDashboardMonitoringVerdict({ ...base, monitoringState: "HEALTHY" });
+    expect(verdict.detail).not.toContain("completed successfully");
+    expect(verdict.icon).toBe("scheduled");
+  });
+
+  it("shows the current booking release before a check of edited settings exists", () => {
+    const verdict = getDashboardMonitoringVerdict({ ...base, monitoringState: "HEALTHY", upcomingBookingWindow: { opensAt: "later" } });
+    expect(verdict.label).toBe("Checks start when booking opens");
+  });
+
+  it("preserves current observed availability over contradictory booking-release metadata", () => {
+    const verdict = getDashboardMonitoringVerdict({ ...base, monitoringState: "HEALTHY", upcomingBookingWindow: { opensAt: "later" }, latestProbe: { outcome: "MATCH_FOUND", observedAt: new Date() } });
+    expect(verdict.label).toBe("Tee-time alerts available");
+  });
+
+  it("does not use reusable healthy state to override this request's current failure", () => {
+    const verdict = getDashboardMonitoringVerdict({ ...base, monitoringState: "HEALTHY", latestProbe: { outcome: "FETCH_FAILED", observedAt: new Date() } });
+    expect(verdict.label).toBe("Automatic checks are still retrying");
+    expect(verdict.detail).not.toContain("completed successfully");
+  });
+
+  it.each(["PAUSED", "COMPLETED", "CANCELLED"])("never describes a %s alert as active or starting checks", (alertStatus) => {
+    for (const input of [{}, { monitoringState: "AUTO_INVESTIGATING" as const }, { supportIncidentStatus: "NEEDS_HUMAN" as const, automationPlaybookExhausted: true }, { upcomingBookingWindow: { opensAt: "later" } }]) {
+      const verdict = getDashboardMonitoringVerdict({ ...base, ...input, alertStatus });
+      expect(verdict.detail).not.toMatch(/remains active|first check is starting|will begin checking/);
+      expect(verdict.detail).toMatch(/paused|has ended/);
+    }
+  });
   it("shows successful checks as monitored", () => {
     expect(
       getDashboardMonitoringVerdict({

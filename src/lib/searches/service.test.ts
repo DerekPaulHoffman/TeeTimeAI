@@ -137,6 +137,33 @@ afterEach(() => {
 });
 
 describe("listTeeSearchesForUser", () => {
+  it("hides the old probe totals and last check after an owned settings edit", async () => {
+    const oldProbe = {
+      id: "old-probe", teeSearchId: "search-1", courseId: "course-1",
+      outcome: "MATCH_FOUND", observedAt: new Date("2026-09-30T03:31:59.787Z"),
+      rawSummary: { providerExecution: "RUNNABLE_PROVIDER_CHECK", providerObservedAt: "2026-09-30T03:31:59.691Z", visibleSlotCount: 17, playerEligibleSlotCount: 17 },
+    };
+    const storedSearch = {
+      id: "search-1", status: "PAUSED", alertGeneration: 3,
+      createdAt: new Date("2026-09-30T03:21:52.387Z"),
+      statusEmailSnapshot: { schemaVersion: 1, kind: "ALERT_GENERATION_START", alertGeneration: 3, generationStartedAt: "2026-09-30T03:51:32.423Z" },
+      lastCheckedAt: new Date("2026-09-30T03:31:59.691Z"), lastCheckOutcome: "MATCH_FOUND",
+      ...currentSearchSettings(), matches: [],
+    };
+    mockedPrisma.teeSearch.findMany.mockResolvedValue([storedSearch] as never);
+    mockedPrisma.$queryRaw.mockResolvedValue([{ id: "old-probe" }] as never);
+    mockedPrisma.courseProbe.findMany.mockResolvedValue([oldProbe] as never);
+
+    const [projected] = await listTeeSearchesForUser("user-1");
+
+    expect(projected.probes).toEqual([]);
+    expect(projected.lastCheckedAt).toBeNull();
+    expect(projected.lastCheckOutcome).toBeNull();
+    expect(projected.statusEmailSnapshot).toBeNull();
+    expect(storedSearch.lastCheckOutcome).toBe("MATCH_FOUND");
+    expect(mockedPrisma.teeSearch.update).not.toHaveBeenCalled();
+    expect(oldProbe.rawSummary.visibleSlotCount).toBe(17);
+  });
   it("hides the old date from a paused dashboard search while retaining its durable match", async () => {
     const storedMatch = confirmedDateEditMatch();
     const storedSearch = {
@@ -519,6 +546,9 @@ describe("listTeeSearchesForUser", () => {
     mockedPrisma.teeSearch.findMany.mockResolvedValue([
       {
         id: "search-1",
+        alertGeneration: 0,
+        createdAt: new Date("2026-07-27T17:00:00.000Z"),
+        statusEmailSnapshot: null,
         preferences: [
           { course: { id: "course-1" } },
           { course: { id: "course-2" } },
@@ -550,6 +580,7 @@ describe("listTeeSearchesForUser", () => {
         courseId: "course-2",
         outcome: "MATCH_FOUND",
         observedAt: new Date("2026-07-27T17:19:30.000Z"),
+        rawSummary: { providerExecution: "RUNNABLE_PROVIDER_CHECK", providerObservedAt: "2026-07-27T17:19:29.000Z" },
       },
       {
         id: "probe-course-1-latest",
@@ -557,6 +588,7 @@ describe("listTeeSearchesForUser", () => {
         courseId: "course-1",
         outcome: "MATCH_FOUND",
         observedAt: new Date("2026-07-27T17:19:29.000Z"),
+        rawSummary: { providerExecution: "RUNNABLE_PROVIDER_CHECK", providerObservedAt: "2026-07-27T17:19:28.000Z" },
       },
       {
         id: "probe-course-5-unchanged",

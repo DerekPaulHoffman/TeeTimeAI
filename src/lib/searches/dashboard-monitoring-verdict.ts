@@ -39,11 +39,18 @@ export type DashboardMonitoringVerdictInput = {
   automationStalledAtEndpoint?: boolean | null;
   now?: Date;
   firstTimeLookup: boolean;
+  alertStatus?: string;
 };
 
 export function getDashboardMonitoringVerdict(
   input: DashboardMonitoringVerdictInput
 ) {
+  const active = !input.alertStatus || input.alertStatus === "ACTIVE";
+  const lifecycleDetail = active
+    ? "Your alert remains active."
+    : input.alertStatus === "PAUSED"
+      ? "This alert is paused. Resume it to check your saved request."
+      : "This alert has ended and is no longer checking for tee times.";
   const customerStatus = getCustomerMonitoringStatus({
     outcome: input.latestProbe?.outcome,
     monitoringState: input.monitoringState,
@@ -62,19 +69,23 @@ export function getDashboardMonitoringVerdict(
 
   if (
     customerStatus !== "NEEDS_HUMAN_REVIEW" &&
+    customerStatus !== "FINAL_DIRECT_ACTION" &&
     input.upcomingBookingWindow &&
-    input.latestProbe?.outcome === "NO_MATCH"
+    (!input.latestProbe || input.latestProbe.outcome === "NO_MATCH")
   ) {
     return {
-      label: "Checks start when booking opens",
-      detail: "We will begin checking at the course's useful booking release time.",
+      label: active ? "Checks start when booking opens" : "Booking opens later",
+      detail: active
+        ? "We will begin checking at the course's useful booking release time."
+        : lifecycleDetail,
       emoji: "📅",
       icon: "scheduled" as const,
       className: "is-detail"
     };
   }
 
-  if (customerStatus === "MONITORED") {
+  if (customerStatus === "MONITORED" &&
+    (input.latestProbe?.outcome === "MATCH_FOUND" || input.latestProbe?.outcome === "NO_MATCH")) {
     return {
       label: "Tee-time alerts available",
       detail: "The latest check completed successfully.",
@@ -87,19 +98,24 @@ export function getDashboardMonitoringVerdict(
   if (customerStatus === "NEEDS_HUMAN_REVIEW") {
     return {
       label: "Manual review needed",
-      detail:
-        "Manual review needed; your alert remains active. Use the official site for current tee times while we review this course.",
+      detail: active
+        ? "Manual review needed; your alert remains active. Use the official site for current tee times while we review this course."
+        : `Manual review needed. ${lifecycleDetail} Use the official site for current tee times.`,
       emoji: "👀",
       icon: "unavailable" as const,
       className: "is-official-site-only"
     };
   }
 
-  if (customerStatus === "RETRYING_AUTOMATICALLY") {
+  if (customerStatus === "RETRYING_AUTOMATICALLY" ||
+    (customerStatus === "MONITORED" && input.latestProbe &&
+      ["FETCH_FAILED", "NEEDS_ADAPTER", "BLOCKED_TOOLING"].includes(input.latestProbe.outcome))) {
     return {
-      label: "Automatic checks are still retrying",
-      detail:
-        "Your alert remains active. Use the official site for current tee times while Tee Time Spot keeps trying.",
+      label: active ? "Automatic checks are still retrying"
+        : input.alertStatus === "PAUSED" ? "Alert paused" : "Alert ended",
+      detail: active
+        ? "Your alert remains active. Use the official site for current tee times while Tee Time Spot keeps trying."
+        : `${lifecycleDetail} Use the official site for current tee times.`,
       emoji: "🔄",
       icon: "unavailable" as const,
       className: "is-official-site-only"
@@ -127,10 +143,20 @@ export function getDashboardMonitoringVerdict(
     return {
       label: "Confirming course details",
       detail:
-        "We are confirming that this listing is a public golf course. Your alert remains active.",
+        `We are confirming that this listing is a public golf course. ${lifecycleDetail}`,
       emoji: "⏳",
       icon: "scheduled" as const,
       className: "is-detail"
+    };
+  }
+
+  if (!active) {
+    return {
+      label: input.alertStatus === "PAUSED" ? "Alert paused" : "Alert ended",
+      detail: lifecycleDetail,
+      emoji: "⏸️",
+      icon: "scheduled" as const,
+      className: "is-detail",
     };
   }
 

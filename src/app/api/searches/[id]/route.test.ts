@@ -35,11 +35,24 @@ describe("PATCH /api/searches/[id]", () => {
     vi.clearAllMocks();
     mocks.hasDatabaseConfig.mockReturnValue(true);
     mocks.hasClerkConfig.mockReturnValue(true);
-    mocks.getRequiredAppUser.mockResolvedValue({ id: "user-1" });
+    mocks.getRequiredAppUser.mockResolvedValue({ id: "user-1", email: "owner@example.com" });
   });
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("keeps the owner account as primary while preserving authorized extra recipients", async () => {
+    mocks.updateTeeSearchForUser.mockResolvedValue({ id: "search-1", status: "ACTIVE" });
+    const response = await PATCH(
+      new NextRequest("http://localhost/api/searches/search-1", {
+        method: "PATCH", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ date: "2026-10-01", startTime: "10:00", endTime: "14:00", players: 2, alertEmail: "spoofed@example.com", additionalEmails: ["group@example.com"] }),
+      }),
+      { params: Promise.resolve({ id: "search-1" }) },
+    );
+    expect(response.status).toBe(200);
+    expect(mocks.updateTeeSearchForUser).toHaveBeenCalledWith("user-1", "search-1", expect.objectContaining({ alertEmail: "owner@example.com", additionalEmails: ["group@example.com"] }));
   });
 
   it("passes a course-local tomorrow edit to the owned service after UTC midnight", async () => {
@@ -100,7 +113,7 @@ describe("PATCH /api/searches/[id]", () => {
     expect(mocks.updateTeeSearchForUser).toHaveBeenCalledWith(
       "user-1",
       "search-1",
-      { status: "PAUSED" }
+      { status: "PAUSED", alertEmail: "owner@example.com" }
     );
     expect(mocks.stopSearchSchedule).toHaveBeenCalledWith("search-1");
     await expect(response.json()).resolves.toEqual({

@@ -47,6 +47,7 @@ export function getDashboardAvailabilityView(input: {
   startTime: string;
   endTime: string;
   bookingOpensLabel?: string | null;
+  alertStatus?: string;
 }): DashboardAvailabilityView {
   const snapshot = readDashboardAvailabilitySnapshot(input.rawSummary);
   const golferLabel = `${input.players} ${
@@ -62,6 +63,18 @@ export function getDashboardAvailabilityView(input: {
         input.qualifyingMatchCount === 1 ? "tee time fits" : "tee times fit"
       } your ${formatTime(input.startTime)} to ${formatTime(input.endTime)} window for ${golferLabel}.`,
       tone: "matching"
+    };
+  }
+
+  if (input.alertStatus && input.alertStatus !== "ACTIVE") {
+    return {
+      label: "No current check for these settings",
+      detail: `${input.bookingOpensLabel ? `Tee times are expected to appear ${input.bookingOpensLabel}. ` : ""}${
+        input.alertStatus === "PAUSED"
+          ? "This alert is paused. Resume it to check your saved request."
+          : "This alert has ended and is no longer checking for tee times."
+      }`,
+      tone: "pending",
     };
   }
 
