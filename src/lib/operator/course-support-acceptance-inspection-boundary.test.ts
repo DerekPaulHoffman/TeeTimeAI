@@ -80,7 +80,7 @@ describe("full native campaign inspection through the acceptance read boundary",
     const database = { $transaction: vi.fn(async (work: (transaction: Prisma.TransactionClient) => Promise<unknown>) => work(fixture.transaction)) };
     const result = await loadCourseSupportAcceptanceReasons(database as unknown as Parameters<typeof loadCourseSupportAcceptanceReasons>[0], SOURCE_SHA);
 
-    expect(result).toMatchObject({ schemaVersion: 2, readFence: null, status: "AVAILABLE", reason: "COMPLETE_NATIVE_TRACE",
+    expect(result).toMatchObject({ schemaVersion: 3, readFence: null, status: "AVAILABLE", reason: "COMPLETE_NATIVE_TRACE",
       observedAt: NOW.toISOString(), evidenceReadComplete: true, customerDataIncluded: false,
       futureUnknown: { reconciliation: "MATCH" }, rollingAmbiguous: { reconciliation: "MATCH" } });
     assertCompleteReloads(fixture);
@@ -123,10 +123,27 @@ describe("full native campaign inspection through the acceptance read boundary",
     }]);
     const database = { $transaction: vi.fn(async (work: (transaction: Prisma.TransactionClient) => Promise<unknown>) => work(fixture.transaction)) };
     const result = await loadCourseSupportAcceptanceReasons(database as unknown as Parameters<typeof loadCourseSupportAcceptanceReasons>[0], SOURCE_SHA);
-    expect(result).toMatchObject({ schemaVersion: 2, status: "UNAVAILABLE", reason: "EVIDENCE_BOUND_EXCEEDED",
-      readFence: { phase: "CAMPAIGN_INSPECTION", boundary: "WHOLE_ROW_BYTES" },
+    expect(result).toMatchObject({ schemaVersion: 3, status: "UNAVAILABLE", reason: "EVIDENCE_BOUND_EXCEEDED",
+      readFence: { phase: "CAMPAIGN_INSPECTION", boundary: "SELECTED_EVIDENCE_BYTES" },
       acceptanceProjection: null, futureUnknown: null, rollingAmbiguous: null,
       evidenceReadComplete: false, customerDataIncluded: false });
+    expect(JSON.stringify(result)).not.toMatch(/private-|https:\/\//u);
+    expect(fixture.mutation).not.toHaveBeenCalled();
+    expect(globalMocks.escapedRead).not.toHaveBeenCalled();
+  });
+
+  it("completes the actual native inspection when a large historical error column is outside every requested projection", async () => {
+    const fixture = campaignDatabase({ oversizedUnselectedRunErrors: true });
+    const database = { $transaction: vi.fn(async (work: (transaction: Prisma.TransactionClient) => Promise<unknown>) => work(fixture.transaction)) };
+    const result = await loadCourseSupportAcceptanceReasons(database as unknown as Parameters<typeof loadCourseSupportAcceptanceReasons>[0], SOURCE_SHA);
+    expect(result).toMatchObject({ schemaVersion: 3, status: "AVAILABLE", reason: "COMPLETE_NATIVE_TRACE",
+      readFence: null, evidenceReadComplete: true, customerDataIncluded: false });
+    assertCompleteReloads(fixture);
+    const byteStatements = fixture.calls.filter((call) => call.model === "$queryRaw").map((call) => call.args as Prisma.Sql);
+    expect(byteStatements.some((statement) => statement.text.includes('FROM "AutomationRun"'))).toBe(true);
+    expect(byteStatements.every((statement) => !statement.text.includes('acceptance_row."errors"'))).toBe(true);
+    expect(fixture.calls.filter((call) => call.model === "automationRun" && call.method !== "count")
+      .every((call) => !(call.args as Query).select?.errors)).toBe(true);
     expect(JSON.stringify(result)).not.toMatch(/private-|https:\/\//u);
     expect(fixture.mutation).not.toHaveBeenCalled();
     expect(globalMocks.escapedRead).not.toHaveBeenCalled();
@@ -145,7 +162,7 @@ function assertCompleteReloads(fixture: ReturnType<typeof campaignDatabase>) {
   expect(nativeReloads.every((call) => (call.args as Query).take === 1)).toBe(true);
 }
 
-function campaignDatabase(input: { readerCandidates?: boolean } = {}) {
+function campaignDatabase(input: { readerCandidates?: boolean; oversizedUnselectedRunErrors?: boolean } = {}) {
   const rows = new Map(Prisma.dmmf.datamodel.models.map((model) => [model.name, [] as Row[]]));
   const members: ParkedCourseCampaignMember[] = [];
   const cycle = input.readerCandidates ? 4 : 3;
@@ -229,7 +246,8 @@ function campaignDatabase(input: { readerCandidates?: boolean } = {}) {
     lastSeenAt: NOW });
   const audit = createParkedCourseCampaignAudit({ expectedCount: 112, capturedAt: CAPTURED_AT, members });
   rows.get("AutomationRun")!.push({ id: "private-campaign", promptVersion: PARKED_COURSE_CAMPAIGN_PROMPT_VERSION,
-    status: "RUNNING", completedAt: null, outcome: null, audit, notes: null, startedAt: CAPTURED_AT, supportBatches: [] });
+    status: "RUNNING", completedAt: null, outcome: null, audit, notes: null, startedAt: CAPTURED_AT, supportBatches: [],
+    errors: input.oversizedUnselectedRunErrors ? { message: `private-${"x".repeat(ACCEPTANCE_READ_LIMITS.evidenceBytes + 1)}` } : null });
   const calls: Array<{ model: string; method: string; args: unknown }> = [];
   const mutation = vi.fn(() => { throw new Error("Read-only inspection cannot mutate."); });
   const transaction = Object.fromEntries(Prisma.dmmf.datamodel.models.map((model) => {
@@ -269,10 +287,29 @@ function campaignDatabase(input: { readerCandidates?: boolean } = {}) {
     if (!name || !id || !metadata || statement.text.includes("private-") || !statement.text.includes("SUM(octet_length")) {
       throw new Error("Fixture accepts only parameterized byte SELECTs.");
     }
-    const selected = rows.get(name)!.filter((row) => statement.values.includes(row[id] as string));
-    const bytes = selected.reduce((total, row) => total + Buffer.byteLength(JSON.stringify(Object.fromEntries(
-      metadata.fields.filter((field) => field.kind !== "object" && field.name in row).map((field) => [field.name, row[field.name]]),
-    )), "utf8"), 0);
+    const idPlaceholders = statement.text.match(/acceptance_row\."[A-Za-z0-9_]+"::text IN \((\$\d+(?:,\s*\$\d+)*)\)/u)?.[1];
+    const selectedFields = [...statement.text.matchAll(/\$(\d+)::text,\s*acceptance_row\."([A-Za-z0-9_]+)"/gu)]
+      .map((match) => {
+        const key = statement.values[Number(match[1]) - 1];
+        if (typeof key !== "string") throw new Error("Fixture requires bound Prisma field names.");
+        return { key, column: match[2] };
+      });
+    const emptyScalarProjection = selectedFields.length === 0 && statement.text.includes("'{}'::jsonb::text");
+    if (!idPlaceholders || (!emptyScalarProjection && !statement.text.includes("jsonb_build_object")) ||
+        selectedFields.some(({ key, column }) => typeof key !== "string" ||
+          !metadata.fields.some((field) => field.kind !== "object" && field.name === key && field.name === column))) {
+      throw new Error("Fixture requires generated selected fields and a parameterized identity scope.");
+    }
+    const identities = [...idPlaceholders.matchAll(/\$(\d+)/gu)].map((match) => statement.values[Number(match[1]) - 1]);
+    const selected = rows.get(name)!.filter((row) => identities.includes(row[id] as string));
+    const bytes = selected.reduce((total, row) => {
+      const scalarProjection = Object.fromEntries(selectedFields.map(({ key, column }) => [key, row[column] ?? null]));
+      // This in-memory SQL fixture overestimates typed padding. Real PostgreSQL
+      // tests separately prove the generated SQL and its encoding upper bound.
+      const padding = selectedFields.reduce((sum, { column }) =>
+        sum + 32 * (Array.isArray(row[column]) ? (row[column] as unknown[]).length : 1), 0);
+      return total + Buffer.byteLength(JSON.stringify(scalarProjection), "utf8") + padding;
+    }, 0);
     return [{ bytes: BigInt(bytes), matchedRows: BigInt(selected.length) }];
   });
   transaction.$queryRaw = byteRead;

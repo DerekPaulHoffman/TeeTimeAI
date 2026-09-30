@@ -14,11 +14,20 @@ describe("fixed aggregate acceptance read-fence details", () => {
     expect(Object.isFrozen(ACCEPTANCE_READ_PHASES)).toBe(true);
   });
 
+  it.each(["WHOLE_ROW_BYTES", "SELECTED_EVIDENCE_BYTES"] as const)("retains the distinct fixed byte boundary %s", (boundary) => {
+    expect(ACCEPTANCE_READ_BOUNDARIES).toContain(boundary);
+    expect(parseAcceptanceReadFenceDetails({ phase: "CAMPAIGN_INSPECTION", boundary }))
+      .toEqual({ phase: "CAMPAIGN_INSPECTION", boundary });
+  });
+
   it.each([
     null, undefined, [], "private-course", {}, { phase: "FLEET" }, { boundary: "TOP_LEVEL_ROWS" },
     { phase: "private-course", boundary: "TOP_LEVEL_ROWS" }, { phase: "FLEET", boundary: "private-course" },
     { phase: "FLEET", boundary: "TOP_LEVEL_ROWS", count: 4 },
     { phase: "FLEET", boundary: "TOP_LEVEL_ROWS", sql: "private-provider-query" },
+    { phase: "FLEET", boundary: "selected_evidence_bytes" },
+    { phase: "FLEET", boundary: "SELECTED_EVIDENCE_BYTES", bytes: 1 },
+    { phase: "FLEET", boundary: "SELECTED_EVIDENCE_BYTES", sql: "private-provider-query" },
     { phase: 1, boundary: "TOP_LEVEL_ROWS" }, { phase: "FLEET", boundary: null },
     Object.assign(Object.create({ inherited: "private-course" }), { phase: "FLEET", boundary: "TOP_LEVEL_ROWS" }),
     { phase: "FLEET", boundary: "TOP_LEVEL_ROWS", [Symbol("private-course")]: 1 },

@@ -6,7 +6,9 @@ import { ACCEPTANCE_READ_BOUNDARIES, type AcceptanceReadBoundary } from "./cours
 const MAX_IDENTITY_ITEMS = 16_384;
 const MAX_IDENTITY_DEPTH = 16;
 const MAX_IDENTITY_STRING_BYTES = 512;
-const WHOLE_ROW_BYTE_FACTOR = 2n;
+const SELECTED_EVIDENCE_BYTE_FACTOR = 2n;
+const MAX_NUMBER_OR_DATE_JSON_BYTES = 32;
+const MAX_JSON_OBJECT_PAIRS = 50;
 
 type Model = (typeof Prisma.dmmf.datamodel.models)[number];
 type IdentityQuery = Record<string, unknown>;
@@ -16,6 +18,8 @@ type IdentityPlan = {
   method: ReadMethod;
   query: IdentityQuery;
   scalarFields: ReadonlySet<string>;
+  evidenceScalarFields: readonly Model["fields"][number][];
+  countFields: ReadonlySet<string> | null;
   relations: ReadonlyMap<string, {
     plan: IdentityPlan; isList: boolean; inverseName: string; inverseIsList: boolean;
   }>;
@@ -31,7 +35,9 @@ export class AcceptanceBytePreflightFence extends Error {
   }
 }
 
-let generatedModels: { byName: Map<string, Model>; byDelegate: Map<string, Model> } | null = null;
+let generatedModels: {
+  byName: Map<string, Model>; byDelegate: Map<string, Model>; enumStringBytes: Map<string, number>;
+} | null = null;
 
 function generatedModelMetadata() {
   if (generatedModels) return generatedModels;
@@ -44,6 +50,17 @@ function generatedModelMetadata() {
     const blocks = new Map([...schema.matchAll(/^model ([A-Za-z_][A-Za-z0-9_]*) \{\r?\n([\s\S]*?)^\}/gmu)]
       .map((match) => [match[1], match[2]]));
     if (blocks.size !== Prisma.dmmf.datamodel.models.length) return fail("READ_FAILED");
+    const enumStringBytes = new Map([...schema.matchAll(/^enum ([A-Za-z_][A-Za-z0-9_]*) \{\r?\n([\s\S]*?)^\}/gmu)]
+      .map((match): [string, number] => {
+        const values = match[2].split(/\r?\n/u).filter((line) => line.trim() && !/^\s*(?:\/\/|@@)/u.test(line))
+          .map((line) => {
+            const value = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)(?:\s+@map\("(?:\\.|[^"\\])*"\))?\s*(?:\/\/.*)?$/u)?.[1];
+            if (!value) return fail("READ_FAILED");
+            return Buffer.byteLength(JSON.stringify(value), "utf8");
+          });
+        if (values.length === 0) return fail("READ_FAILED");
+        return [match[1], Math.max(...values)];
+      }));
     const models = Prisma.dmmf.datamodel.models.map((model): Model => {
       const block = blocks.get(model.name);
       if (block === undefined || /@@(?:schema|ignore)\b/u.test(block)) return fail("READ_FAILED");
@@ -71,6 +88,7 @@ function generatedModelMetadata() {
     generatedModels = {
       byName: new Map(models.map((model) => [model.name, model])),
       byDelegate: new Map(models.map((model) => [model.name[0].toLowerCase() + model.name.slice(1), model])),
+      enumStringBytes,
     };
     return generatedModels;
   } catch (error) {
@@ -90,6 +108,29 @@ function record(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+function supportedEvidenceScalar(field: Model["fields"][number]) {
+  if (field.kind === "enum") {
+    if (!generatedModelMetadata().enumStringBytes.has(field.type)) return fail("READ_FAILED");
+  } else if (field.kind !== "scalar" || !["String", "Int", "Float", "Boolean", "DateTime", "Json"].includes(field.type)) {
+    return fail("READ_FAILED");
+  }
+  return field;
+}
+
+function countSelection(model: Model, value: unknown): ReadonlySet<string> {
+  const available = model.fields.filter((field) => field.kind === "object" && field.isList).map((field) => field.name);
+  if (value === true) return new Set(available);
+  const input = record(value);
+  if (Object.keys(input).length !== 1 || !("select" in input)) return fail("READ_FAILED");
+  const selected = new Set<string>();
+  for (const [key, selection] of Object.entries(record(input.select))) {
+    if (selection === false || selection === undefined) continue;
+    if (selection !== true || !available.includes(key)) return fail("READ_FAILED");
+    selected.add(key);
+  }
+  return selected;
+}
+
 function identityPlan(
   model: Model, args: unknown, method: ReadMethod, ancestors = new Set<string>(),
 ): IdentityPlan {
@@ -101,12 +142,21 @@ function identityPlan(
     return fail("READ_FAILED");
   }
   const input = record(args);
-  if ((input.select !== undefined && input.include !== undefined) || input.omit !== undefined) {
+  const nativeSelect = input.select === null ? undefined : input.select;
+  const nativeInclude = input.include === null ? undefined : input.include;
+  if ((nativeSelect !== undefined && nativeInclude !== undefined) || input.omit !== undefined) {
     return fail("READ_FAILED");
   }
   const id = ids[0];
   const select: Record<string, unknown> = { [id.name]: true };
   const scalarFields = new Set([id.name]);
+  const evidenceScalarFields = new Map<string, Model["fields"][number]>();
+  let countFields: ReadonlySet<string> | null = null;
+  if (nativeSelect === undefined) {
+    for (const field of model.fields.filter((field) => field.kind !== "object")) {
+      evidenceScalarFields.set(field.name, supportedEvidenceScalar(field));
+    }
+  }
   const relations = new Map<string, {
     plan: IdentityPlan; isList: boolean; inverseName: string; inverseIsList: boolean;
   }>();
@@ -122,13 +172,21 @@ function identityPlan(
     select[key] = true;
     scalarFields.add(key);
   }
-  const selected = input.select ?? input.include;
+  const selected = nativeSelect ?? nativeInclude;
   if (selected !== undefined) {
     for (const [key, value] of Object.entries(record(selected))) {
-      if (value === false || value === undefined || key === "_count") continue;
+      if (value === false || value === undefined) continue;
+      if (key === "_count") {
+        countFields = countSelection(model, value);
+        continue;
+      }
       const field = model.fields.find((candidate) => candidate.name === key);
       if (!field) return fail("READ_FAILED");
-      if (field.kind !== "object") continue;
+      if (field.kind !== "object") {
+        if (nativeInclude !== undefined || value !== true) return fail("READ_FAILED");
+        evidenceScalarFields.set(field.name, supportedEvidenceScalar(field));
+        continue;
+      }
       const related = generatedModelMetadata().byName.get(field.type);
       if (!related) return fail("READ_FAILED");
       const inverse = related.fields.filter((candidate) =>
@@ -164,7 +222,8 @@ function identityPlan(
     delete scope.cursor;
     method = "findMany";
   }
-  return { model, id, method, scalarFields, relations, query: { ...scope, select } };
+  return { model, id, method, scalarFields, evidenceScalarFields: [...evidenceScalarFields.values()], countFields,
+    relations, query: { ...scope, select } };
 }
 
 function identityValue(value: unknown, field: Model["fields"][number]): string {
@@ -187,6 +246,30 @@ function nonnegativeInteger(value: unknown): bigint {
   if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return BigInt(value);
   if (typeof value === "string" && /^\d{1,30}$/u.test(value)) return BigInt(value);
   return fail("READ_FAILED");
+}
+
+function selectedRowByteExpression(fields: readonly Model["fields"][number][]) {
+  const chunks: Prisma.Sql[] = [];
+  for (let offset = 0; offset < fields.length; offset += MAX_JSON_OBJECT_PAIRS) {
+    const pairs = fields.slice(offset, offset + MAX_JSON_OBJECT_PAIRS).map((field) => Prisma.sql`
+      ${field.name}::text, acceptance_row.${quotedGeneratedIdentifier(field.dbName ?? field.name)}
+    `);
+    chunks.push(Prisma.sql`jsonb_build_object(${Prisma.join(pairs)})`);
+  }
+  const projection = chunks.length ? Prisma.sql`(${Prisma.join(chunks, " || ")})` : Prisma.sql`'{}'::jsonb`;
+  const padding = fields.flatMap((field) => {
+    const bytes = field.kind === "enum" ? generatedModelMetadata().enumStringBytes.get(field.type)!
+      : field.type === "Float" || field.type === "DateTime" ? MAX_NUMBER_OR_DATE_JSON_BYTES : 0;
+    if (!bytes) return [];
+    const occurrences = field.isList
+      ? Prisma.sql`COALESCE(cardinality(acceptance_row.${quotedGeneratedIdentifier(field.dbName ?? field.name)}), 0)::bigint`
+      : Prisma.sql`1::bigint`;
+    return [Prisma.sql`${bytes}::bigint * ${occurrences}`];
+  });
+  // JSONB covers selected keys, JSON/string escaping and scalar/list syntax.
+  // Add a full native JSON allowance for each Float/DateTime and enum value.
+  const typedPadding = padding.length ? Prisma.sql`(${Prisma.join(padding, " + ")})` : Prisma.sql`0::bigint`;
+  return Prisma.sql`octet_length(${projection}::text) + ${typedPadding}`;
 }
 
 /** Read only selected identities and byte aggregates before native evidence hydration. */
@@ -241,7 +324,16 @@ export function createAcceptanceBytePreflight(
       const delegate = Reflect.get(transaction, delegateName) as IdentityReadDelegate;
       const result = await delegate[plan.method](plan.query);
       const identitiesByModel = new Map<Model, Map<string, number>>();
+      const selectedFieldsByModel = new Map<Model, Map<string, Model["fields"][number]>>();
       let identityItems = 0;
+      let envelopeBytes = 0n;
+      const addEnvelope = (bytes: number) => {
+        envelopeBytes += BigInt(bytes);
+        if (cumulativeBytes + envelopeBytes * SELECTED_EVIDENCE_BYTE_FACTOR > BigInt(options.maxBytes)) {
+          return fail("EVIDENCE_BOUND_EXCEEDED", "SELECTED_EVIDENCE_BYTES");
+        }
+      };
+      const keyEnvelope = (key: string) => Buffer.byteLength(JSON.stringify(key), "utf8") + 2; // Colon and conservative comma.
       const collectRow = (value: unknown, current: IdentityPlan) => {
         if (++identityItems > maxIdentityItems) return fail("EVIDENCE_BOUND_EXCEEDED", "IDENTITY_RESULT_ITEMS");
         const row = record(value);
@@ -249,6 +341,9 @@ export function createAcceptanceBytePreflight(
         const identities = identitiesByModel.get(current.model) ?? new Map<string, number>();
         identities.set(identity, (identities.get(identity) ?? 0) + 1);
         identitiesByModel.set(current.model, identities);
+        const selectedFields = selectedFieldsByModel.get(current.model) ?? new Map<string, Model["fields"][number]>();
+        for (const field of current.evidenceScalarFields) selectedFields.set(field.name, field);
+        selectedFieldsByModel.set(current.model, selectedFields);
         for (const key of Object.keys(row)) {
           if (!current.scalarFields.has(key) && !current.relations.has(key)) return fail("READ_FAILED");
         }
@@ -262,27 +357,38 @@ export function createAcceptanceBytePreflight(
         }
         for (const [key, relation] of current.relations) {
           const related = row[key];
+          addEnvelope(keyEnvelope(key));
           if (relation.isList) {
             if (!Array.isArray(related)) return fail("READ_FAILED");
             if (identityItems + related.length > maxIdentityItems) return fail("EVIDENCE_BOUND_EXCEEDED", "IDENTITY_RESULT_ITEMS");
+            addEnvelope(2 + Math.max(0, related.length - 1));
             for (const child of related) collectRow(child, relation.plan);
           } else if (related !== null) {
             collectRow(related, relation.plan);
-          }
+          } else addEnvelope(4);
+        }
+        if (current.countFields !== null) {
+          addEnvelope(keyEnvelope("_count") + 2);
+          for (const key of current.countFields) addEnvelope(keyEnvelope(key) + MAX_NUMBER_OR_DATE_JSON_BYTES);
         }
       };
       if (plan.method === "findMany") {
         if (!Array.isArray(result)) return fail("READ_FAILED");
         if (result.length > maxIdentityItems) return fail("EVIDENCE_BOUND_EXCEEDED", "IDENTITY_RESULT_ITEMS");
+        addEnvelope(2 + Math.max(0, result.length - 1));
         for (const row of result) collectRow(row, plan);
       } else if (result !== null) collectRow(result, plan);
+      else addEnvelope(4);
+
+      cumulativeBytes += envelopeBytes * SELECTED_EVIDENCE_BYTE_FACTOR;
 
       for (const [selectedModel, identities] of identitiesByModel) {
         const id = selectedModel.fields.find((field) => field.isId)!;
         const multiplicity = Math.max(...identities.values());
         options.tick();
+        const selectedBytes = selectedRowByteExpression([...selectedFieldsByModel.get(selectedModel)!.values()]);
         const totals = await transaction.$queryRaw<Array<{ bytes: bigint; matchedRows: bigint }>>(Prisma.sql`
-          SELECT COALESCE(SUM(octet_length(to_jsonb(acceptance_row)::text)), 0)::bigint AS "bytes",
+          SELECT COALESCE(SUM(${selectedBytes}), 0)::bigint AS "bytes",
                  COUNT(*)::bigint AS "matchedRows"
           FROM ${quotedGeneratedIdentifier(selectedModel.dbName ?? selectedModel.name)} AS acceptance_row
           WHERE acceptance_row.${quotedGeneratedIdentifier(id.dbName ?? id.name)}::text IN (${Prisma.join([...identities.keys()])})
@@ -291,8 +397,8 @@ export function createAcceptanceBytePreflight(
         const total = record(totals[0]);
         const bytes = nonnegativeInteger(total.bytes);
         if (nonnegativeInteger(total.matchedRows) !== BigInt(identities.size)) return fail("READ_FAILED");
-        cumulativeBytes += bytes * BigInt(multiplicity) * WHOLE_ROW_BYTE_FACTOR;
-        if (cumulativeBytes > BigInt(options.maxBytes)) return fail("EVIDENCE_BOUND_EXCEEDED", "WHOLE_ROW_BYTES");
+        cumulativeBytes += bytes * BigInt(multiplicity) * SELECTED_EVIDENCE_BYTE_FACTOR;
+        if (cumulativeBytes > BigInt(options.maxBytes)) return fail("EVIDENCE_BOUND_EXCEEDED", "SELECTED_EVIDENCE_BYTES");
       }
     } catch (error) {
       if (error instanceof AcceptanceBytePreflightFence) throw error;
