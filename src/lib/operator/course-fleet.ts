@@ -13,7 +13,6 @@ import {
   buildCourseInventory,
   summarizeCourseInventory,
 } from "./course-status";
-import { AcceptanceReadFence } from "./course-support-acceptance-read-boundary";
 
 const NON_SYNTHETIC_TRAFFIC: { notIn: WebsiteTrafficClass[] } = {
   notIn: [...syntheticWebsiteTrafficClasses],
@@ -418,7 +417,7 @@ export async function loadOperatorCourseFleetCounts(
   const eventSelectionById = new Map(eventSelections.map((event) => [event.id, event]));
   const validClock = (clock: Date | null): clock is Date => clock instanceof Date && Number.isFinite(clock.getTime());
   const sameClock = (left: Date | null, right: Date | null) => validClock(left) && validClock(right) && left.getTime() === right.getTime();
-  const invalidBindings = () => { throw new AcceptanceReadFence("READ_FAILED"); };
+  const invalidBindings = () => { throw new Error("READ_FAILED"); };
   if (readerSelectionById.size !== readerSelections.length || eventSelectionById.size !== eventSelections.length) invalidBindings();
   for (const course of courses) {
     if (course.localReaderJobs.length > 1 || (course.supportIncident?.monitoringEvents.length ?? 0) > 5) invalidBindings();

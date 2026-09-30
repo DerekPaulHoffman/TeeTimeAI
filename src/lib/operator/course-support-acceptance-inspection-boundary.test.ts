@@ -34,6 +34,24 @@ type Row = Record<string, unknown>;
 type Query = { where?: Row; select?: Row; orderBy?: Row | Row[]; distinct?: string[]; take?: number; skip?: number; by?: string[] };
 
 describe("full native campaign inspection through the acceptance read boundary", () => {
+  it("keeps a missing exact fleet payload an opaque native read failure without importing the diagnostic into the fleet", async () => {
+    const fixture = campaignDatabase({ fleetOnlyEvidence: "LOCAL_READER_RESULT" });
+    const payloadRead = vi.spyOn(fixture.transaction.localReaderJob, "findMany");
+    const nativeRead = payloadRead.getMockImplementation()!;
+    payloadRead.mockImplementation(async (args) => args?.select?.result === true ? [] : nativeRead(args));
+    const database = { $transaction: vi.fn(async (work: (transaction: Prisma.TransactionClient) => Promise<unknown>) => work(fixture.transaction)) };
+
+    const result = await loadCourseSupportAcceptanceReasons(database as unknown as Parameters<typeof loadCourseSupportAcceptanceReasons>[0], SOURCE_SHA);
+
+    expect(result).toMatchObject({ schemaVersion: 4, status: "UNAVAILABLE", reason: "READ_FAILED",
+      acceptanceProjection: null, futureUnknown: null, rollingAmbiguous: null,
+      readFence: null, readCost: null, evidenceReadComplete: false, customerDataIncluded: false });
+    expect(fixture.calls.some((call) => call.model === "courseProbe" && (call.args as Query).select?.outcome === true)).toBe(false);
+    expect(fixture.calls.some((call) => call.model === "coursePreference" && call.method === "groupBy")).toBe(false);
+    expect(fixture.mutation).not.toHaveBeenCalled();
+    expect(globalMocks.escapedRead).not.toHaveBeenCalled();
+  });
+
   it("reads all 112 nonempty current-cycle histories before enforcing the finite operation cap", async () => {
     const fixture = campaignDatabase();
     const read = createBoundedAcceptanceReadClient(fixture.transaction);

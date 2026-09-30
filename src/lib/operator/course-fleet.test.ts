@@ -615,7 +615,7 @@ describe("operator course fleet loader", () => {
       return selected;
     });
 
-    await expect(loadOperatorCourseFleetCounts({ now: NOW }, countsDatabase())).rejects.toMatchObject({ reason: "READ_FAILED" });
+    await expect(loadOperatorCourseFleetCounts({ now: NOW }, countsDatabase())).rejects.toThrow(/^READ_FAILED$/);
 
     expect(prismaMocks.courseMonitoringEventFindMany).not.toHaveBeenCalled();
     expect(prismaMocks.courseProbeFindMany).not.toHaveBeenCalled();
@@ -656,7 +656,7 @@ describe("operator course fleet loader", () => {
       return selected;
     });
 
-    await expect(loadOperatorCourseFleetCounts({ now: NOW }, countsDatabase())).rejects.toMatchObject({ reason: "READ_FAILED" });
+    await expect(loadOperatorCourseFleetCounts({ now: NOW }, countsDatabase())).rejects.toThrow(/^READ_FAILED$/);
 
     expect(prismaMocks.localReaderJobFindMany).toHaveBeenCalledTimes(1);
     expect(prismaMocks.courseProbeFindMany).not.toHaveBeenCalled();
@@ -696,7 +696,7 @@ describe("operator course fleet loader", () => {
       return selected;
     });
 
-    await expect(loadOperatorCourseFleetCounts({ now: NOW }, countsDatabase())).rejects.toMatchObject({ reason: "READ_FAILED" });
+    await expect(loadOperatorCourseFleetCounts({ now: NOW }, countsDatabase())).rejects.toThrow(/^READ_FAILED$/);
 
     expect(prismaMocks.localReaderJobFindMany).not.toHaveBeenCalled();
     expect(prismaMocks.courseMonitoringEventFindMany).not.toHaveBeenCalled();
