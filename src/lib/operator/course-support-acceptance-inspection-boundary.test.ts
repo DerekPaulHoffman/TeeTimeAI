@@ -80,7 +80,7 @@ describe("full native campaign inspection through the acceptance read boundary",
     const database = { $transaction: vi.fn(async (work: (transaction: Prisma.TransactionClient) => Promise<unknown>) => work(fixture.transaction)) };
     const result = await loadCourseSupportAcceptanceReasons(database as unknown as Parameters<typeof loadCourseSupportAcceptanceReasons>[0], SOURCE_SHA);
 
-    expect(result).toMatchObject({ status: "AVAILABLE", reason: "COMPLETE_NATIVE_TRACE",
+    expect(result).toMatchObject({ schemaVersion: 2, readFence: null, status: "AVAILABLE", reason: "COMPLETE_NATIVE_TRACE",
       observedAt: NOW.toISOString(), evidenceReadComplete: true, customerDataIncluded: false,
       futureUnknown: { reconciliation: "MATCH" }, rollingAmbiguous: { reconciliation: "MATCH" } });
     assertCompleteReloads(fixture);
@@ -112,6 +112,23 @@ describe("full native campaign inspection through the acceptance read boundary",
     expect(JSON.stringify(result)).not.toMatch(/private-|https:\/\//u);
     expect(fixture.mutation).not.toHaveBeenCalled();
     expect(native.mutation).not.toHaveBeenCalled();
+    expect(globalMocks.escapedRead).not.toHaveBeenCalled();
+  });
+
+  it("identifies a real byte preflight bound before any native campaign projection is published", async () => {
+    const fixture = campaignDatabase();
+    fixture.byteRead.mockImplementationOnce(async () => [{ now: NOW }]);
+    fixture.byteRead.mockImplementationOnce(async () => [{
+      bytes: BigInt(ACCEPTANCE_READ_LIMITS.evidenceBytes + 1), matchedRows: 1n,
+    }]);
+    const database = { $transaction: vi.fn(async (work: (transaction: Prisma.TransactionClient) => Promise<unknown>) => work(fixture.transaction)) };
+    const result = await loadCourseSupportAcceptanceReasons(database as unknown as Parameters<typeof loadCourseSupportAcceptanceReasons>[0], SOURCE_SHA);
+    expect(result).toMatchObject({ schemaVersion: 2, status: "UNAVAILABLE", reason: "EVIDENCE_BOUND_EXCEEDED",
+      readFence: { phase: "CAMPAIGN_INSPECTION", boundary: "WHOLE_ROW_BYTES" },
+      acceptanceProjection: null, futureUnknown: null, rollingAmbiguous: null,
+      evidenceReadComplete: false, customerDataIncluded: false });
+    expect(JSON.stringify(result)).not.toMatch(/private-|https:\/\//u);
+    expect(fixture.mutation).not.toHaveBeenCalled();
     expect(globalMocks.escapedRead).not.toHaveBeenCalled();
   });
 });
@@ -239,7 +256,7 @@ function campaignDatabase(input: { readerCandidates?: boolean } = {}) {
       findMany: vi.fn(async (args) => invoke("findMany", args)), findFirst: vi.fn(async (args) => invoke("findFirst", args)),
       findUnique: vi.fn(async (args) => invoke("findUnique", args)), create: mutation, update: mutation, updateMany: mutation }];
   })) as Row;
-  transaction.$queryRaw = vi.fn(async (query: Prisma.Sql | TemplateStringsArray) => {
+  const byteRead = vi.fn(async (query: Prisma.Sql | TemplateStringsArray) => {
     if (Array.isArray(query)) {
       if (query.length !== 1 || query[0] !== "SELECT transaction_timestamp() AS now") throw new Error("Unexpected clock query.");
       return [{ now: NOW }];
@@ -258,13 +275,14 @@ function campaignDatabase(input: { readerCandidates?: boolean } = {}) {
     )), "utf8"), 0);
     return [{ bytes: BigInt(bytes), matchedRows: BigInt(selected.length) }];
   });
+  transaction.$queryRaw = byteRead;
   const transactionControls = vi.fn(async (command: string) => {
     if (!["SET TRANSACTION READ ONLY", "SET LOCAL statement_timeout = '25000ms'"].includes(command)) return mutation();
     return 0;
   });
   transaction.$executeRawUnsafe = transactionControls;
   return { transaction: transaction as unknown as Prisma.TransactionClient, calls, mutation,
-    transactionControls, operationCount: () => calls.length };
+    transactionControls, byteRead, operationCount: () => calls.length };
 }
 
 function selectedRows(rows: readonly Row[], query: Query): Row[] {

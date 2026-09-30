@@ -4,8 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as nativeCampaign from "@/lib/automation/course-support-campaign";
 import type { ParkedCourseCampaignMember } from "@/lib/automation/course-support-campaign";
 import * as fleet from "./course-fleet";
-import { ACCEPTANCE_READ_LIMITS } from "./course-support-acceptance-read-boundary";
+import { ACCEPTANCE_READ_LIMITS, AcceptanceReadFence } from "./course-support-acceptance-read-boundary";
 import * as byteBoundary from "./course-support-acceptance-read-size-boundary";
+import { ACCEPTANCE_READ_PHASES, type AcceptanceReadPhase } from "./course-support-acceptance-read-fence";
 import {
   loadCourseSupportAcceptanceProjection,
   parseCourseSupportAcceptanceProjection,
@@ -15,6 +16,7 @@ import {
   loadCourseSupportAcceptanceReasons,
   runAcceptanceReasonsDiagnostic,
   unavailableAcceptanceReasons,
+  withAcceptanceReadPhase,
 } from "./course-support-acceptance-reasons";
 import * as campaign from "./course-support-campaign";
 
@@ -112,6 +114,8 @@ function reportInput() {
 }
 
 function expectPrivateEvidenceAbsent(value: unknown) {
+  expect(value).toMatchObject({ recordType: "course_support_acceptance_reasons", schemaVersion: 2 });
+  expect(value).toHaveProperty("readFence");
   const serialized = JSON.stringify(value);
   for (const privateValue of [privateMarker, "postgresql://private:credential", "private@example.test", "https://private.example.test"]) {
     expect(serialized).not.toContain(privateValue);
@@ -122,7 +126,7 @@ describe("native acceptance reason report", () => {
   it("retains the valid native UNKNOWN projection and null rates unchanged", () => {
     const before = JSON.stringify(fixture.projection);
     const result = buildAcceptanceReasonsReport(reportInput());
-    expect(result).toMatchObject({ status: "AVAILABLE", reason: "COMPLETE_NATIVE_TRACE",
+    expect(result).toMatchObject({ schemaVersion: 2, readFence: null, status: "AVAILABLE", reason: "COMPLETE_NATIVE_TRACE",
       evidenceReadComplete: true, customerDataIncluded: false,
       futureUnknown: { nativeCount: 1, classifiedCount: 1, reconciliation: "MATCH",
         primaryReasonCounts: { RELEASE_PROOF_UNAVAILABLE_OR_CONFLICTING: 1 } },
@@ -145,7 +149,7 @@ describe("native acceptance reason report", () => {
     if (change === "future summary") input.future = { ...fixture.future, summary: { ...fixture.future.summary, pendingCount: 1 } };
     if (change === "rolling summary") input.rolling = { ...fixture.rolling, summary: { ...fixture.rolling.summary, humanReviewCount: 1 } };
     const result = buildAcceptanceReasonsReport(input);
-    expect(result).toMatchObject({ status: "UNAVAILABLE", reason: "COUNT_RECONCILIATION_FAILED",
+    expect(result).toMatchObject({ schemaVersion: 2, readFence: null, status: "UNAVAILABLE", reason: "COUNT_RECONCILIATION_FAILED",
       futureUnknown: null, rollingAmbiguous: null, evidenceReadComplete: false });
     expect(result.acceptanceProjection).toBe(fixture.projection);
   });
@@ -160,7 +164,7 @@ describe("native acceptance reason report", () => {
     const result = buildAcceptanceReasonsReport({ ...reportInput(), future: {
       ...fixture.future, primaryReasonCounts: invalidCounts as campaign.CourseSupportAcceptancePrimaryReasonCounts,
     } });
-    expect(result).toMatchObject({ status: "UNAVAILABLE", reason: "COUNT_RECONCILIATION_FAILED", futureUnknown: null });
+    expect(result).toMatchObject({ schemaVersion: 2, readFence: null, status: "UNAVAILABLE", reason: "COUNT_RECONCILIATION_FAILED", futureUnknown: null });
     expectPrivateEvidenceAbsent(result);
   });
 
@@ -168,16 +172,71 @@ describe("native acceptance reason report", () => {
     const result = buildAcceptanceReasonsReport({ ...reportInput(), acceptanceProjection: {
       ...fixture.projection, privateCourse: privateMarker,
     } as typeof fixture.projection });
-    expect(result).toMatchObject({ status: "UNAVAILABLE", reason: "PROJECTION_SNAPSHOT_UNAVAILABLE", acceptanceProjection: null });
+    expect(result).toMatchObject({ schemaVersion: 2, readFence: null, status: "UNAVAILABLE", reason: "PROJECTION_SNAPSHOT_UNAVAILABLE", acceptanceProjection: null });
     expectPrivateEvidenceAbsent(result);
   });
 
   it.each(["sha", "clock"])("rejects invalid %s before retaining any supplied evidence", (invalid) => {
     const result = buildAcceptanceReasonsReport({ ...reportInput(),
       ...(invalid === "sha" ? { sourceSha: privateMarker } : { observedAt: new Date("invalid") }) });
-    expect(result).toMatchObject({ status: "UNAVAILABLE", sourceSha: null, observedAt: null,
+    expect(result).toMatchObject({ schemaVersion: 2, readFence: null, status: "UNAVAILABLE", sourceSha: null, observedAt: null,
       reason: "INVALID_ARGUMENTS", acceptanceProjection: null });
     expectPrivateEvidenceAbsent(result);
+  });
+
+  it("attributes the output bound to report construction while retaining the native projection", () => {
+    vi.spyOn(Buffer, "byteLength").mockReturnValueOnce(ACCEPTANCE_READ_LIMITS.outputBytes + 1);
+    const result = buildAcceptanceReasonsReport(reportInput());
+    expect(result).toMatchObject({ schemaVersion: 2, status: "UNAVAILABLE", reason: "EVIDENCE_BOUND_EXCEEDED",
+      readFence: { phase: "REPORT_CONSTRUCTION", boundary: "OUTPUT_BYTES" },
+      futureUnknown: null, rollingAmbiguous: null, evidenceReadComplete: false });
+    expect(result.acceptanceProjection).toBe(fixture.projection);
+    expectPrivateEvidenceAbsent(result);
+  });
+
+  it.each([
+    { phase: privateMarker, boundary: "TOP_LEVEL_ROWS" },
+    { phase: "FLEET", boundary: privateMarker },
+    { phase: "FLEET", boundary: "TOP_LEVEL_ROWS", privateUrl: "https://private.example.test" },
+    { phase: "FLEET" },
+  ])("drops invalid or private read-fence metadata from unavailable reports %#", (readFence) => {
+    const result = unavailableAcceptanceReasons({ sourceSha, reason: "EVIDENCE_BOUND_EXCEEDED",
+      readFence } as Parameters<typeof unavailableAcceptanceReasons>[0]);
+    expect(result).toMatchObject({ schemaVersion: 2, status: "UNAVAILABLE", readFence: null,
+      acceptanceProjection: null, futureUnknown: null, rollingAmbiguous: null });
+    expectPrivateEvidenceAbsent(result);
+  });
+
+  it.each(["READ_TIMEOUT", "READ_FAILED", "COUNT_RECONCILIATION_FAILED"] as const)("does not add a read-fence inference to %s", (reason) => {
+    const result = unavailableAcceptanceReasons({ sourceSha, reason,
+      readFence: { phase: "FLEET", boundary: "TOP_LEVEL_ROWS" } });
+    expect(result).toMatchObject({ schemaVersion: 2, reason, readFence: null });
+    expectPrivateEvidenceAbsent(result);
+  });
+});
+
+describe("immutable native read phase tagging", () => {
+  it("keeps both optional-boundary constructors backward compatible", async () => {
+    for (const error of [new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED"),
+      new byteBoundary.AcceptanceBytePreflightFence("EVIDENCE_BOUND_EXCEEDED")]) {
+      expect(error).toMatchObject({ message: "EVIDENCE_BOUND_EXCEEDED", reason: "EVIDENCE_BOUND_EXCEEDED", boundary: null });
+    }
+    const original = new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED");
+    await expect(withAcceptanceReadPhase("FUTURE_CYCLES", async () => { throw original; })).rejects.toBe(original);
+  });
+
+  it.each(ACCEPTANCE_READ_PHASES)("retains the first throwing phase %s through nested wrappers without mutating the original error", async (phase) => {
+    const original = new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "TOP_LEVEL_ROWS");
+    const tagged: unknown = await withAcceptanceReadPhase(phase, async () => { throw original; }).catch(error => error);
+    expect(tagged).toMatchObject({ reason: "EVIDENCE_BOUND_EXCEEDED", phase, boundary: "TOP_LEVEL_ROWS" });
+    expect(original).not.toHaveProperty("phase");
+    await expect(withAcceptanceReadPhase("REPORT_CONSTRUCTION", async () => { throw tagged; })).rejects.toBe(tagged);
+  });
+
+  it.each(["P2028", "57014"])("preserves the exact native timeout %s rather than turning it into a bound", async (code) => {
+    const original = Object.assign(new Error(privateMarker), { code, reason: "EVIDENCE_BOUND_EXCEEDED",
+      boundary: "TOP_LEVEL_ROWS", phase: "FUTURE_CYCLES" });
+    await expect(withAcceptanceReadPhase("IMPLEMENTATION_HISTORY", async () => { throw original; })).rejects.toBe(original);
   });
 });
 
@@ -192,6 +251,7 @@ function transactionHarness() {
     automationRun: { findFirst: vi.fn().mockResolvedValue(fixture.record) },
     courseSupportIncident: { count: vi.fn().mockResolvedValue(0) },
     course: { count: vi.fn().mockResolvedValue(0), findMany: vi.fn().mockResolvedValue([]), updateMany: vi.fn() },
+    teeSearch: { count: vi.fn().mockResolvedValue(0) },
   };
   const database = { $transaction: vi.fn(async (worker: (tx: Prisma.TransactionClient) => Promise<unknown>) =>
     worker(transaction as unknown as Prisma.TransactionClient)) };
@@ -206,14 +266,19 @@ function transactionHarness() {
   };
   const dependencies = vi.spyOn(campaign, "createOperatorCourseSupportCampaignDependencies").mockReturnValue(reads);
   return { transaction, database, inspection, fleetRead, reads, dependencies, bytePreflight,
-    read: () => loadCourseSupportAcceptanceReasons(database as unknown as Parameters<typeof loadCourseSupportAcceptanceReasons>[0], sourceSha) };
+    read: async () => {
+      const result = await loadCourseSupportAcceptanceReasons(database as unknown as Parameters<typeof loadCourseSupportAcceptanceReasons>[0], sourceSha);
+      expect(result).toMatchObject({ schemaVersion: 2 });
+      expect(result).toHaveProperty("readFence");
+      return result;
+    } };
 }
 
 describe("bounded read-only native reason snapshot", () => {
   it("uses one database clock, client and RepeatableRead transaction for native evidence and projection", async () => {
     const state = transactionHarness();
     const result = await state.read();
-    expect(result).toMatchObject({ status: "AVAILABLE", observedAt: databaseNow.toISOString(), acceptanceProjection: fixture.projection });
+    expect(result).toMatchObject({ schemaVersion: 2, readFence: null, status: "AVAILABLE", observedAt: databaseNow.toISOString(), acceptanceProjection: fixture.projection });
     expect(state.database.$transaction).toHaveBeenCalledExactlyOnceWith(expect.any(Function), {
       isolationLevel: "RepeatableRead", maxWait: 5_000, timeout: 30_000,
     });
@@ -243,7 +308,7 @@ describe("bounded read-only native reason snapshot", () => {
   it.each([[], [{ now: new Date("invalid") }], [{ now: databaseNow }, { now: databaseNow }]])("fails an unavailable/invalid/nonunique DB clock %# before native reads", async (clock) => {
     const state = transactionHarness();
     state.transaction.$queryRaw.mockResolvedValue(clock);
-    expect(await state.read()).toMatchObject({ status: "UNAVAILABLE", reason: "READ_FAILED", observedAt: null });
+    expect(await state.read()).toMatchObject({ schemaVersion: 2, readFence: null, status: "UNAVAILABLE", reason: "READ_FAILED", observedAt: null });
     expect(state.inspection).not.toHaveBeenCalled();
     expect(state.dependencies).not.toHaveBeenCalled();
     expect(state.transaction.automationRun.findFirst).not.toHaveBeenCalled();
@@ -252,7 +317,7 @@ describe("bounded read-only native reason snapshot", () => {
   it("stops a missing latest campaign before audit and projection reads", async () => {
     const state = transactionHarness();
     state.inspection.mockResolvedValue(null);
-    expect(await state.read()).toMatchObject({ status: "UNAVAILABLE", reason: "CAMPAIGN_UNAVAILABLE", observedAt: databaseNow.toISOString() });
+    expect(await state.read()).toMatchObject({ schemaVersion: 2, readFence: null, status: "UNAVAILABLE", reason: "CAMPAIGN_UNAVAILABLE", observedAt: databaseNow.toISOString() });
     expect(state.transaction.automationRun.findFirst).not.toHaveBeenCalled();
     expect(state.dependencies).not.toHaveBeenCalled();
     expect(state.fleetRead).not.toHaveBeenCalled();
@@ -263,7 +328,7 @@ describe("bounded read-only native reason snapshot", () => {
     const record = failure === "missing" ? null
       : { ...fixture.record, ...(failure === "different run" ? { id: "different-run" } : { audit: null }) };
     state.transaction.automationRun.findFirst.mockResolvedValue(record);
-    expect(await state.read()).toMatchObject({ status: "UNAVAILABLE", reason: "CAMPAIGN_UNAVAILABLE" });
+    expect(await state.read()).toMatchObject({ schemaVersion: 2, readFence: null, status: "UNAVAILABLE", reason: "CAMPAIGN_UNAVAILABLE" });
     expect(state.dependencies).not.toHaveBeenCalled();
   });
 
@@ -275,7 +340,7 @@ describe("bounded read-only native reason snapshot", () => {
     });
     state.transaction.automationRun.findFirst.mockResolvedValue({ ...fixture.record, audit: changedAudit });
     const result = await state.read();
-    expect(result).toMatchObject({ status: "UNAVAILABLE", reason: "PROJECTION_SNAPSHOT_UNAVAILABLE",
+    expect(result).toMatchObject({ schemaVersion: 2, readFence: null, status: "UNAVAILABLE", reason: "PROJECTION_SNAPSHOT_UNAVAILABLE",
       futureUnknown: null, rollingAmbiguous: null, acceptanceProjection: {
         status: "UNKNOWN", reason: "LATEST_CAMPAIGN_UNAVAILABLE", latestCampaign: null, operational: null,
       } });
@@ -289,7 +354,7 @@ describe("bounded read-only native reason snapshot", () => {
     state.reads.loadFutureUnfamiliarIncidents.mockResolvedValue(
       Array.from({ length: ACCEPTANCE_READ_LIMITS.incidentRows + 1 }, () => fixture.futureIncidents[0]),
     );
-    expect(await state.read()).toMatchObject({ status: "UNAVAILABLE", reason: "EVIDENCE_BOUND_EXCEEDED",
+    expect(await state.read()).toMatchObject({ schemaVersion: 2, readFence: { phase: "FUTURE_CYCLES", boundary: "COMBINED_FUTURE_ROWS" }, status: "UNAVAILABLE", reason: "EVIDENCE_BOUND_EXCEEDED",
       futureUnknown: null, rollingAmbiguous: null, evidenceReadComplete: false });
   });
 
@@ -297,7 +362,7 @@ describe("bounded read-only native reason snapshot", () => {
     const state = transactionHarness();
     state.database.$transaction.mockRejectedValue(Object.assign(new Error(`${privateMarker} postgresql://private:credential https://private.example.test private@example.test`), { code }));
     const result = await state.read();
-    expect(result).toMatchObject({ status: "UNAVAILABLE", reason: code === "OTHER" ? "READ_FAILED" : "READ_TIMEOUT",
+    expect(result).toMatchObject({ schemaVersion: 2, readFence: null, status: "UNAVAILABLE", reason: code === "OTHER" ? "READ_FAILED" : "READ_TIMEOUT",
       futureUnknown: null, rollingAmbiguous: null, acceptanceProjection: null });
     expectPrivateEvidenceAbsent(result);
   });
@@ -306,7 +371,7 @@ describe("bounded read-only native reason snapshot", () => {
     const state = transactionHarness();
     state.inspection.mockRejectedValue(new Error(`${privateMarker} https://private.example.test private@example.test`));
     const result = await state.read();
-    expect(result).toMatchObject({ status: "UNAVAILABLE", reason: "READ_FAILED", observedAt: databaseNow.toISOString(),
+    expect(result).toMatchObject({ schemaVersion: 2, readFence: null, status: "UNAVAILABLE", reason: "READ_FAILED", observedAt: databaseNow.toISOString(),
       acceptanceProjection: null, futureUnknown: null, rollingAmbiguous: null });
     expectPrivateEvidenceAbsent(result);
   });
@@ -318,7 +383,7 @@ describe("bounded read-only native reason snapshot", () => {
       await (read as Prisma.TransactionClient).course.findMany({ select: { id: true } });
       return fixture.inspection;
     });
-    expect(await state.read()).toMatchObject({ status: "UNAVAILABLE", reason: "EVIDENCE_BOUND_EXCEEDED",
+    expect(await state.read()).toMatchObject({ schemaVersion: 2, readFence: { phase: "CAMPAIGN_INSPECTION", boundary: "TOP_LEVEL_ROWS" }, status: "UNAVAILABLE", reason: "EVIDENCE_BOUND_EXCEEDED",
       futureUnknown: null, rollingAmbiguous: null, evidenceReadComplete: false });
     expect(state.transaction.course.findMany).not.toHaveBeenCalled();
     expect(state.dependencies).not.toHaveBeenCalled();
@@ -328,7 +393,7 @@ describe("bounded read-only native reason snapshot", () => {
     const state = transactionHarness();
     state.bytePreflight.mockRejectedValue(new byteBoundary.AcceptanceBytePreflightFence(reason));
     const result = await state.read();
-    expect(result).toMatchObject({ status: "UNAVAILABLE", reason,
+    expect(result).toMatchObject({ schemaVersion: 2, readFence: null, status: "UNAVAILABLE", reason,
       observedAt: databaseNow.toISOString(), acceptanceProjection: null,
       futureUnknown: null, rollingAmbiguous: null, evidenceReadComplete: false,
       customerDataIncluded: false });
@@ -350,7 +415,7 @@ describe("bounded read-only native reason snapshot", () => {
       return fixture.inspection;
     });
     const result = await state.read();
-    expect(result).toMatchObject({ status: "UNAVAILABLE", reason: "READ_FAILED" });
+    expect(result).toMatchObject({ schemaVersion: 2, readFence: null, status: "UNAVAILABLE", reason: "READ_FAILED" });
     expect(state.transaction.course.updateMany).not.toHaveBeenCalled();
     expectPrivateEvidenceAbsent(result);
   });
@@ -358,11 +423,112 @@ describe("bounded read-only native reason snapshot", () => {
   it("rejects an invalid source SHA before opening the transaction", async () => {
     const state = transactionHarness();
     expect(await loadCourseSupportAcceptanceReasons(state.database as unknown as Parameters<typeof loadCourseSupportAcceptanceReasons>[0], privateMarker)).toMatchObject({
-      status: "UNAVAILABLE", sourceSha: null, reason: "INVALID_ARGUMENTS",
+      schemaVersion: 2, readFence: null, status: "UNAVAILABLE", sourceSha: null, reason: "INVALID_ARGUMENTS",
     });
     expect(state.database.$transaction).not.toHaveBeenCalled();
   });
+
+  it.each([
+    { loader: "inspection", phase: "CAMPAIGN_INSPECTION" },
+    { loader: "record", phase: "LATEST_CAMPAIGN_RECORD" },
+    { loader: "fleet", phase: "FLEET" },
+    { loader: "future", phase: "FUTURE_CYCLES" },
+    { loader: "rolling", phase: "ROLLING_ENDPOINTS" },
+    { loader: "implementation", phase: "IMPLEMENTATION_HISTORY" },
+  ] as const)("attributes an actual bounded $loader failure to $phase and publishes no partial evidence", async ({ loader, phase }) => {
+    const state = transactionHarness();
+    const error = new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "TOP_LEVEL_ROWS");
+    if (loader === "inspection") state.inspection.mockRejectedValue(error);
+    if (loader === "record") state.transaction.automationRun.findFirst.mockRejectedValue(error);
+    if (loader === "fleet") state.fleetRead.mockRejectedValue(error);
+    if (loader === "future") state.reads.loadFutureUnfamiliarIncidents.mockRejectedValue(error);
+    if (loader === "rolling") state.reads.loadRollingEndpointEvents.mockRejectedValue(error);
+    if (loader === "implementation") state.reads.loadImplementationBatches.mockRejectedValue(error);
+    const result = await state.read();
+    expect(result).toMatchObject({ schemaVersion: 2, status: "UNAVAILABLE", reason: "EVIDENCE_BOUND_EXCEEDED",
+      readFence: { phase, boundary: "TOP_LEVEL_ROWS" }, acceptanceProjection: null,
+      futureUnknown: null, rollingAmbiguous: null, evidenceReadComplete: false });
+    expectPrivateEvidenceAbsent(result);
+  });
+
+  it("preserves the future loader phase after a concurrent implementation read has started", async () => {
+    const state = transactionHarness();
+    const otherStarted = deferred<void>();
+    state.reads.loadFutureUnfamiliarIncidents.mockImplementation(async () => {
+      await otherStarted.promise;
+      throw new AcceptanceReadFence("EVIDENCE_BOUND_EXCEEDED", "INCIDENT_HISTORY_ROWS");
+    });
+    state.reads.loadImplementationBatches.mockImplementation(async () => {
+      otherStarted.resolve();
+      return [];
+    });
+    const result = await state.read();
+    expect(state.reads.loadImplementationBatches).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ reason: "EVIDENCE_BOUND_EXCEEDED",
+      readFence: { phase: "FUTURE_CYCLES", boundary: "INCIDENT_HISTORY_ROWS" },
+      acceptanceProjection: null, futureUnknown: null, rollingAmbiguous: null, evidenceReadComplete: false });
+    expectPrivateEvidenceAbsent(result);
+  });
+
+  it("shares the finite operation budget across concurrent native future and implementation loaders", async () => {
+    const state = transactionHarness();
+    const observedFailures: AcceptanceReadPhase[] = [];
+    const consume = async (phase: AcceptanceReadPhase) => {
+      const read = state.dependencies.mock.calls[0][0] as Prisma.TransactionClient;
+      try {
+        for (let index = 0; index < ACCEPTANCE_READ_LIMITS.queryCount / 2 + 2; index++) await read.teeSearch.count();
+      } catch (error) {
+        observedFailures.push(phase);
+        throw error;
+      }
+    };
+    state.reads.loadFutureUnfamiliarIncidents.mockImplementation(async () => {
+      await consume("FUTURE_CYCLES");
+      return fixture.futureIncidents;
+    });
+    state.reads.loadImplementationBatches.mockImplementation(async () => {
+      await consume("IMPLEMENTATION_HISTORY");
+      return [];
+    });
+    const result = await state.read();
+    expect(result).toMatchObject({ status: "UNAVAILABLE", reason: "EVIDENCE_BOUND_EXCEEDED",
+      readFence: { phase: observedFailures[0], boundary: "QUERY_OPERATIONS" },
+      acceptanceProjection: null, futureUnknown: null, rollingAmbiguous: null, evidenceReadComplete: false });
+    expect(observedFailures).not.toHaveLength(0);
+    expect(state.transaction.teeSearch.count.mock.calls.length).toBeLessThanOrEqual(ACCEPTANCE_READ_LIMITS.queryCount);
+    expect(state.transaction.teeSearch.count.mock.calls.length).toBeGreaterThan(ACCEPTANCE_READ_LIMITS.queryCount / 2);
+    expect(state.bytePreflight).toHaveBeenCalledTimes(1);
+    expectPrivateEvidenceAbsent(result);
+  });
+
+  it.each(["lookalike", "private boundary", "private reason", "failed reason", "timeout"] as const)("keeps %s metadata unavailable without leaking a forged error", async (kind) => {
+    const state = transactionHarness();
+    let error: Error;
+    if (kind === "lookalike" || kind === "timeout") {
+      error = Object.assign(new Error(`${privateMarker} https://private.example.test private@example.test`), {
+        reason: "EVIDENCE_BOUND_EXCEEDED", boundary: "TOP_LEVEL_ROWS", phase: "FLEET",
+        ...(kind === "timeout" ? { code: "57014" } : {}),
+      });
+    } else {
+      error = new AcceptanceReadFence(kind === "failed reason" ? "READ_FAILED" : "EVIDENCE_BOUND_EXCEEDED", "TOP_LEVEL_ROWS");
+      if (kind === "private boundary") Object.defineProperty(error, "boundary", { value: privateMarker });
+      if (kind === "private reason") Object.defineProperty(error, "reason", { value: privateMarker });
+      Object.assign(error, { phase: "FLEET", privateUrl: "https://private.example.test" });
+    }
+    state.inspection.mockRejectedValue(error);
+    const result = await state.read();
+    expect(result).toMatchObject({ schemaVersion: 2, status: "UNAVAILABLE", readFence: null,
+      reason: kind === "timeout" ? "READ_TIMEOUT" : kind === "private boundary" ? "EVIDENCE_BOUND_EXCEEDED" : "READ_FAILED",
+      acceptanceProjection: null, futureUnknown: null, rollingAmbiguous: null, evidenceReadComplete: false });
+    expectPrivateEvidenceAbsent(result);
+  });
 });
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((complete) => { resolve = complete; });
+  return { promise, resolve };
+}
 
 function runnerDependencies() {
   return { loadEnvironment: vi.fn().mockResolvedValue(undefined), getDatabaseUrl: vi.fn().mockReturnValue("postgresql://configured-database"),
@@ -375,7 +541,7 @@ describe("acceptance reason CLI fences", () => {
     ["--apply", "--source-sha", sourceSha], ["--read-only", "--source-sha", sourceSha, "--scheduled-cycle"]]
     .map(args => ({ args })))("rejects flags/arguments %# before loading any environment or evidence", async ({ args }) => {
     const dependencies = runnerDependencies();
-    expect(await runAcceptanceReasonsDiagnostic({ args }, dependencies)).toMatchObject({ status: "UNAVAILABLE", reason: "INVALID_ARGUMENTS" });
+    expect(await runAcceptanceReasonsDiagnostic({ args }, dependencies)).toMatchObject({ schemaVersion: 2, readFence: null, status: "UNAVAILABLE", reason: "INVALID_ARGUMENTS" });
     expect(dependencies.readGitSourceSha).not.toHaveBeenCalled();
     expect(dependencies.loadEnvironment).not.toHaveBeenCalled();
     expect(dependencies.read).not.toHaveBeenCalled();
@@ -387,7 +553,7 @@ describe("acceptance reason CLI fences", () => {
     if (fence === "dirty checkout") dependencies.isCheckoutClean.mockReturnValue(false);
     if (fence === "Git failure") dependencies.readGitSourceSha.mockImplementation(() => { throw new Error(privateMarker); });
     const result = await runAcceptanceReasonsDiagnostic({ args: ["--read-only", "--source-sha", sourceSha] }, dependencies);
-    expect(result).toMatchObject({ status: "UNAVAILABLE", reason: fence === "Git failure" ? "READ_FAILED" : "INVALID_ARGUMENTS" });
+    expect(result).toMatchObject({ schemaVersion: 2, readFence: null, status: "UNAVAILABLE", reason: fence === "Git failure" ? "READ_FAILED" : "INVALID_ARGUMENTS" });
     expect(dependencies.loadEnvironment).not.toHaveBeenCalled();
     expect(dependencies.read).not.toHaveBeenCalled();
     expectPrivateEvidenceAbsent(result);
@@ -397,7 +563,7 @@ describe("acceptance reason CLI fences", () => {
     const dependencies = runnerDependencies();
     dependencies.getDatabaseUrl.mockReturnValue(url);
     expect(await runAcceptanceReasonsDiagnostic({ args: ["--read-only", "--source-sha", sourceSha] }, dependencies)).toMatchObject({
-      status: "UNAVAILABLE", reason: "DATABASE_UNAVAILABLE", sourceSha,
+      schemaVersion: 2, readFence: null, status: "UNAVAILABLE", reason: "DATABASE_UNAVAILABLE", sourceSha,
     });
     expect(dependencies.loadEnvironment).toHaveBeenCalledTimes(1);
     expect(dependencies.read).not.toHaveBeenCalled();
