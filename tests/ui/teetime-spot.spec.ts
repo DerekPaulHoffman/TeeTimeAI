@@ -2,6 +2,7 @@ import { expect, test, type Locator, type Page, type TestInfo } from "@playwrigh
 import path from "node:path";
 
 import { expectInteractiveElementsAreUsable } from "./helpers/interactive-geometry";
+import { installSyntheticNetworkFence } from "./helpers/synthetic-network-fence";
 
 const smokeBaseUrl =
   process.env.UI_SMOKE_BASE_URL ?? `http://127.0.0.1:${process.env.UI_SMOKE_PORT ?? "3100"}`;
@@ -10,6 +11,7 @@ const useIsolatedPreviewProviders = process.env.UI_SMOKE_ISOLATED_PROVIDERS === 
 const smokeHostname = new URL(smokeBaseUrl).hostname;
 const useMockedSearchProviders =
   useIsolatedPreviewProviders || smokeHostname === "127.0.0.1" || smokeHostname === "localhost";
+const recoveryNetworkFences = new WeakMap<Page, Awaited<ReturnType<typeof installSyntheticNetworkFence>>>();
 
 const smokeCourses = [
   "Tashua Knolls Golf Course",
@@ -60,17 +62,48 @@ const smokeCourses = [
 }));
 
 test.describe("Tee Time Spot UI smoke", () => {
-  test.beforeEach(async ({ page }) => {
+  test.beforeEach(async ({ page }, testInfo) => {
+    if (useMockedSearchProviders && ["onboarding discovery, ranking limit, and controls are usable",
+      "records external discovery requests instead of accepting them as local fixtures"].includes(testInfo.title)) {
+      recoveryNetworkFences.set(page, await installSyntheticNetworkFence(page, smokeOrigin));
+    }
     await page.addInitScript(() => {
       window.sessionStorage.setItem("tee-time-spot:traffic-class", "AUTOMATION");
     });
-    await page.route("**/api/analytics/events", async (route) => {
+    await page.route(`${smokeOrigin}/api/analytics/events`, async (route) => {
+      if (route.request().method() !== "POST" || new URL(route.request().url()).search) {
+        await route.fallback();
+        return;
+      }
       await route.fulfill({
         body: JSON.stringify({ event: { id: "ui-smoke-event" } }),
         contentType: "application/json",
         status: 201
       });
     });
+  });
+
+  test.afterEach(async ({ page }) => {
+    const fence = recoveryNetworkFences.get(page);
+    if (fence) expect(fence.unexpected, "synthetic onboarding must not issue unowned product or provider requests").toEqual([]);
+  });
+
+  test("records external discovery requests instead of accepting them as local fixtures", async ({ page }) => {
+    test.skip(!useMockedSearchProviders, "This test requires isolated provider fixtures.");
+    const fence = recoveryNetworkFences.get(page)!;
+    recoveryNetworkFences.delete(page); // This test explicitly asserts its one injected rejection.
+    await mockSmokeCourseSearch(page);
+    await page.goto("/search");
+    const result = await page.evaluate(async () => {
+      try {
+        await fetch("https://unfamiliar-provider.example/api/courses/discover?latitude=41.24&longitude=-73.2&radiusMeters=10000");
+        return "accepted";
+      } catch { return "rejected"; }
+    });
+    expect(result).toBe("rejected");
+    expect(fence.unexpected).toEqual([
+      "GET fetch https://unfamiliar-provider.example/api/courses/discover"
+    ]);
   });
 
   test("publishes the Discord community for feedback and product suggestions", async ({
@@ -317,14 +350,14 @@ test.describe("Tee Time Spot UI smoke", () => {
 
   test("restores an unfinished course search after navigation and refresh", async ({ page }) => {
     test.skip(!useMockedSearchProviders, "This persistence check uses deterministic course fixtures.");
-    await page.route("**/api/location/geocode?**", async (route) => {
+    await page.route(`${smokeOrigin}/api/location/geocode?**`, async (route) => {
       await route.fulfill({
         body: JSON.stringify({ latitude: 41.24, longitude: -73.2 }),
         contentType: "application/json",
         status: 200
       });
     });
-    await page.route("**/api/courses/discover?**", async (route) => {
+    await page.route(`${smokeOrigin}/api/courses/discover?**`, async (route) => {
       await route.fulfill({
         body: JSON.stringify({ courses: smokeCourses }),
         contentType: "application/json",
@@ -369,7 +402,7 @@ test.describe("Tee Time Spot UI smoke", () => {
 
   test("restores validated direct-link search details on the static route", async ({ page }) => {
     const issues = collectPageIssues(page);
-    await page.route("**/api/location/geocode?**", async (route) => {
+    await page.route(`${smokeOrigin}/api/location/geocode?**`, async (route) => {
       await route.fulfill({
         body: JSON.stringify({ latitude: 38.9399, longitude: -119.9772 }),
         contentType: "application/json",
@@ -377,7 +410,7 @@ test.describe("Tee Time Spot UI smoke", () => {
       });
     });
     await mockSmokeCoursePhotos(page);
-    await page.route("**/api/courses/discover?**", async (route) => {
+    await page.route(`${smokeOrigin}/api/courses/discover?**`, async (route) => {
       await route.fulfill({
         body: JSON.stringify({ courses: smokeCourses }),
         contentType: "application/json",
@@ -505,7 +538,7 @@ test.describe("Tee Time Spot UI smoke", () => {
     await context.setGeolocation({ latitude: 41.242, longitude: -73.209 });
     let discoveryRequests = 0;
     let geocodeRequests = 0;
-    await page.route("**/api/courses/discover?**", async (route) => {
+    await page.route(`${smokeOrigin}/api/courses/discover?**`, async (route) => {
       discoveryRequests += 1;
       await route.fulfill({
         body: JSON.stringify({ courses: [] }),
@@ -513,7 +546,7 @@ test.describe("Tee Time Spot UI smoke", () => {
         status: 200
       });
     });
-    await page.route("**/api/location/geocode?**", async (route) => {
+    await page.route(`${smokeOrigin}/api/location/geocode?**`, async (route) => {
       geocodeRequests += 1;
       await route.abort();
     });
@@ -534,7 +567,7 @@ test.describe("Tee Time Spot UI smoke", () => {
   });
 
   test("describes an invalid location without exposing an API payload", async ({ page }) => {
-    await page.route("**/api/location/geocode?**", async (route) => {
+    await page.route(`${smokeOrigin}/api/location/geocode?**`, async (route) => {
       await route.fulfill({
         body: JSON.stringify({
           error:
@@ -565,14 +598,14 @@ test.describe("Tee Time Spot UI smoke", () => {
     const widerSearchRelease = new Promise<void>((resolve) => {
       releaseWiderSearch = resolve;
     });
-    await page.route("**/api/location/geocode?**", async (route) => {
+    await page.route(`${smokeOrigin}/api/location/geocode?**`, async (route) => {
       await route.fulfill({
         body: JSON.stringify({ latitude: 45.52, longitude: -109.44 }),
         contentType: "application/json",
         status: 200
       });
     });
-    await page.route("**/api/courses/discover?**", async (route) => {
+    await page.route(`${smokeOrigin}/api/courses/discover?**`, async (route) => {
       const requestedRadius = new URL(route.request().url()).searchParams.get("radiusMeters") ?? "";
       requestedRadii.push(requestedRadius);
       if (requestedRadius === "48280") {
@@ -624,7 +657,7 @@ test.describe("Tee Time Spot UI smoke", () => {
   }, testInfo) => {
     await context.grantPermissions(["geolocation"], { origin: smokeOrigin });
     await context.setGeolocation({ latitude: 43.7667, longitude: -103.5988 });
-    await page.route("**/api/courses/discover?**", async (route) => {
+    await page.route(`${smokeOrigin}/api/courses/discover?**`, async (route) => {
       await route.fulfill({
         body: JSON.stringify({
           courses: [
@@ -756,14 +789,14 @@ test.describe("Tee Time Spot UI smoke", () => {
     test.skip(!useMockedSearchProviders, "This interaction uses deterministic course fixtures.");
     const issues = collectPageIssues(page);
 
-    await page.route("**/api/location/geocode?**", async (route) => {
+    await page.route(`${smokeOrigin}/api/location/geocode?**`, async (route) => {
       await route.fulfill({
         body: JSON.stringify({ latitude: 41.24, longitude: -73.2 }),
         contentType: "application/json",
         status: 200
       });
     });
-    await page.route("**/api/courses/discover?**", async (route) => {
+    await page.route(`${smokeOrigin}/api/courses/discover?**`, async (route) => {
       await route.fulfill({
         body: JSON.stringify({
           courses: [
@@ -857,7 +890,11 @@ test.describe("Tee Time Spot UI smoke", () => {
       trafficClass?: string;
       metadata?: Record<string, unknown>;
     } | null = null;
-    await page.route("**/api/analytics/events", async (route) => {
+    await page.route(`${smokeOrigin}/api/analytics/events`, async (route) => {
+      if (route.request().method() !== "POST" || new URL(route.request().url()).search) {
+        await route.fallback();
+        return;
+      }
       const payload = route.request().postDataJSON() as {
         name?: string;
         page?: string;
@@ -1172,13 +1209,14 @@ test.describe("Tee Time Spot UI smoke", () => {
     await laterCourse.getByRole("button", { name: /Remove/i }).click();
     await expect(page.locator(".selected-list .selected-row")).toHaveCount(0);
 
-    await page.route("**/api/courses/lookup?**", async (route) => {
+    await page.route(`${smokeOrigin}/api/courses/lookup?**`, async (route) => {
+      if (route.request().method() !== "GET") { await route.fallback(); return; }
       const lookupQuery = new URL(route.request().url()).searchParams.get("q");
       await route.fulfill({
         contentType: "application/json",
         status: 200,
         body: JSON.stringify({
-          courses: lookupQuery === "Known Course, Somewhere CT" ? [] : [
+          courses: lookupQuery?.startsWith("Known Course, Somewhere CT") ? [] : [
             {
               googlePlaceId: "ui-smoke-missing-course",
               name: "Bethpage Black Course",
@@ -1214,7 +1252,7 @@ test.describe("Tee Time Spot UI smoke", () => {
       });
     });
     const missingCourseInput = page.getByRole("searchbox", {
-      name: "Course name and town",
+      name: "Course name",
       exact: true
     });
     await missingCourseInput.fill("Bethpage Black, Farmingdale NY");
@@ -1291,7 +1329,8 @@ test.describe("Tee Time Spot UI smoke", () => {
     await missingCourseResult.getByRole("button", { name: "Remove Bethpage Black Course" }).click();
     await expect(page.locator(".selected-list .selected-row")).toHaveCount(0);
 
-    await page.route("**/api/feedback", async (route) => {
+    await page.route(`${smokeOrigin}/api/feedback`, async (route) => {
+      if (route.request().method() !== "POST") { await route.fallback(); return; }
       await route.fulfill({
         body: JSON.stringify({ feedback: { id: "ui-smoke-course-miss" } }),
         contentType: "application/json",
@@ -1301,10 +1340,27 @@ test.describe("Tee Time Spot UI smoke", () => {
     const courseMissReport = page.waitForRequest(
       (request) => request.url().includes("/api/feedback") && request.method() === "POST"
     );
+    await page.route(`${smokeOrigin}/api/courses/recovery`, async (route) => {
+      if (route.request().method() !== "POST") { await route.fallback(); return; }
+      await route.fulfill({ contentType: "application/json", status: 201,
+        body: JSON.stringify({ recovery: { id: "ui-smoke-recovery", status: "QUEUED",
+          message: "Your course request is saved. We're checking its identity and official site.",
+          question: null, course: null, nextAttemptAt: null } }) });
+    });
+    await page.route(`${smokeOrigin}/api/courses/recovery/ui-smoke-recovery`, async (route) => {
+      if (route.request().method() !== "GET" || new URL(route.request().url()).search) {
+        await route.fallback();
+        return;
+      }
+      await route.fulfill({ contentType: "application/json", status: 200,
+        body: JSON.stringify({ recovery: { id: "ui-smoke-recovery", status: "QUEUED",
+          message: "Your course request is saved. We're checking its identity and official site.",
+          question: null, course: null, nextAttemptAt: null } }) });
+    });
     await missingCourseInput.fill("Known Course, Somewhere CT");
     await page.getByRole("button", { name: "Find course" }).click();
     await expect(
-      page.getByRole("status").filter({ hasText: "We've logged it for review" })
+      page.getByRole("status").filter({ hasText: "Your course request is saved" })
     ).toBeVisible();
     const courseMissPayload = (await courseMissReport).postDataJSON();
     expect(courseMissPayload).toEqual(
@@ -1411,7 +1467,11 @@ test.describe("Tee Time Spot UI smoke", () => {
     let saveRequestCount = 0;
     let lastSavePayload: Record<string, unknown> | null = null;
     let lastSaveTrafficClass: string | undefined;
-    await page.route("**/api/searches", async (route) => {
+    await page.route(`${smokeOrigin}/api/searches`, async (route) => {
+      if (route.request().method() !== "POST" || new URL(route.request().url()).search) {
+        await route.fallback();
+        return;
+      }
       saveRequestCount += 1;
       lastSavePayload = route.request().postDataJSON() as Record<string, unknown>;
       lastSaveTrafficClass = route.request().headers()["x-tee-time-spot-traffic-class"];
@@ -1647,6 +1707,10 @@ test.describe("Tee Time Spot UI smoke", () => {
     ).toBeVisible();
 
     const signedOutHeading = page.getByRole("heading", { name: "Sign in to manage searches" });
+    if (await page.getByRole("heading", { name: /Sign in to manage searches|Dashboard setup needed|Account access is temporarily unavailable/i }).isVisible()) {
+      await expect(page.getByRole("heading", { name: "Pending course requests", exact: true })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: /^Cancel saved alert request for / })).toHaveCount(0);
+    }
     if (await signedOutHeading.isVisible()) {
       await expect(page.getByRole("main").getByRole("button", { name: "Sign in" })).toBeVisible();
       await expect(
@@ -1819,14 +1883,16 @@ function nextSaturdayDateInputValue(from = new Date()) {
 }
 
 async function mockSmokeCourseSearch(page: Page) {
-  await page.route("**/api/location/geocode?**", async (route) => {
+  await page.route(`${smokeOrigin}/api/location/geocode?**`, async (route) => {
+    if (route.request().method() !== "GET") { await route.fallback(); return; }
     await route.fulfill({
       body: JSON.stringify({ latitude: 41.242, longitude: -73.209 }),
       contentType: "application/json",
       status: 200
     });
   });
-  await page.route("**/api/courses/discover?**", async (route) => {
+  await page.route(`${smokeOrigin}/api/courses/discover?**`, async (route) => {
+    if (route.request().method() !== "GET") { await route.fallback(); return; }
     await route.fulfill({
       body: JSON.stringify({ courses: smokeCourses }),
       contentType: "application/json",
@@ -1837,7 +1903,8 @@ async function mockSmokeCourseSearch(page: Page) {
 }
 
 async function mockSmokeCoursePhotos(page: Page) {
-  await page.route("**/api/courses/photo?**", async (route) => {
+  await page.route(`${smokeOrigin}/api/courses/photo?**`, async (route) => {
+    if (route.request().method() !== "GET") { await route.fallback(); return; }
     const photoReference = new URL(route.request().url()).searchParams.get("ref") ?? "";
     const photoIndex = Number(photoReference.match(/ui-smoke-photo-(\d+)/)?.[1] ?? "1") - 1;
     await route.fulfill({

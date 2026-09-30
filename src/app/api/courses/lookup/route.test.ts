@@ -61,6 +61,22 @@ const testReviewIndex = {
 };
 
 describe("GET /api/courses/lookup", () => {
+  it("recovers a known real course after a successful empty provider lookup", async () => {
+    mocks.searchGolfCoursesByName.mockResolvedValue([]);
+    mocks.findPersistedCourseCandidatesByName.mockResolvedValue([{ googlePlaceId: "missed-real", name: "Harbor Dunes Golf Course", publicAccessStatus: "PUBLIC" }]);
+    const response = await GET(request("?q=Harbor%20Dunes"));
+    expect(response.status).toBe(200);
+    expect((await response.json()).courses[0].googlePlaceId).toBe("missed-real");
+    expect(mocks.findPersistedCourseCandidatesByName).toHaveBeenCalledWith("Harbor Dunes", testReviewIndex);
+  });
+
+  it("rechecks durable identities behind cached empty results without another provider call", async () => {
+    mocks.readCourseRuntimeCache.mockResolvedValue([]);
+    mocks.findPersistedCourseCandidatesByName.mockResolvedValue([{ googlePlaceId: "later-verified", name: "Harbor Dunes Golf Course", publicAccessStatus: "PUBLIC" }]);
+    const response = await GET(request("?q=Harbor%20Dunes"));
+    expect((await response.json()).courses[0].googlePlaceId).toBe("later-verified");
+    expect(mocks.searchGolfCoursesByName).not.toHaveBeenCalled();
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.getGooglePlacesApiKey.mockReturnValue("test-key");

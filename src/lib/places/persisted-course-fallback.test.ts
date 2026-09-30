@@ -25,6 +25,11 @@ vi.mock("@/lib/prisma", () => ({
 }));
 
 describe("persisted course fallback", () => {
+  it("keeps pending identity unverified on successful empty-provider recovery", async () => {
+    mocks.findMany.mockResolvedValue([persistedCourse({ isPublic: null })]);
+    const courses = await findPersistedCourseCandidatesByName("Public Golf", emptyReviewIndex);
+    expect(courses[0]?.publicAccessStatus).toBe("UNVERIFIED");
+  });
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -171,6 +176,7 @@ function basePersistedCourse() {
     ratingObservedAt: new Date("2026-07-01T00:00:00.000Z"),
     website: "https://course.example",
     detectedBookingUrl: "https://book.course.example",
-    phone: "+12035550100"
+    phone: "+12035550100",
+    isPublic: true as boolean | null
   };
 }

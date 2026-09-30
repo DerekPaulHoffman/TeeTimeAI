@@ -49,6 +49,7 @@ import {
   type CurrentMatchSettings,
 } from "@/lib/searches/current-match-settings";
 import { projectCurrentCheckEvidence } from "@/lib/searches/current-check-evidence";
+import { SearchEmailDeliveryInProgressError } from "@/lib/users/pending-email";
 
 const SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE = 0.06;
 const QUEUED_SEARCH_STATUSES = ["ACTIVE", "PAUSED"] as const;
@@ -72,14 +73,50 @@ export type TeeSearchUpdateInput = Partial<TeeSearchDetailsInput> & {
   status?: SearchStatus;
 };
 
+export type RecoveryDemandActivation = {
+  demandId: string;
+  requestId: string;
+  expectedRevision: number;
+};
+
+export class RecoveryDemandNoLongerEligibleError extends Error {
+  readonly reason: "stale" | "course_unavailable";
+  constructor(reason: "stale" | "course_unavailable" = "stale") {
+    super(reason === "course_unavailable"
+      ? "The verified course is no longer eligible for a public-course alert. Choose another course."
+      : "This pending alert has changed or is no longer waiting for a course.");
+    this.name = "RecoveryDemandNoLongerEligibleError";
+    this.reason = reason;
+  }
+}
+
+export class SearchQueueCapacityError extends Error {}
+
+export class SearchCourseValidationError extends Error {
+  readonly reason: "public_access" | "layout";
+  constructor(message: string, reason: "public_access" | "layout") {
+    super(message);
+    this.name = "SearchCourseValidationError";
+    this.reason = reason;
+  }
+}
+
+function runCustomerMutationTransaction<T>(
+  worker: (transaction: Prisma.TransactionClient) => Promise<T>,
+) {
+  // Counts must get a fresh snapshot after waiting for another account writer.
+  return prisma.$transaction(worker, {
+    isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+  });
+}
+
 export async function createTeeSearchForUser(
   userId: string,
   input: TeeSearchInput,
   trafficClass: WebsiteTrafficClass = "UNCLASSIFIED",
   syntheticMultiCycle = false,
+  recoveryDemand?: RecoveryDemandActivation,
 ) {
-  await assertQueueCapacity(userId);
-
   const placeReviews = await loadActiveGooglePlaceReviewIndex();
   const sortedCourses = input.courses
     .map((course) => applyActivePlaceReview(course, placeReviews))
@@ -95,8 +132,9 @@ export async function createTeeSearchForUser(
       (preference) => preference.course.isPublic === false,
     )
   ) {
-    throw new Error(
+    throw new SearchCourseValidationError(
       "Tee Time Spot can only create alerts for public golf courses. Remove the private or non-public course and try again.",
+      "public_access",
     );
   }
   assertCourseLayoutsCompatible(
@@ -112,6 +150,64 @@ export async function createTeeSearchForUser(
   );
 
   const teeSearch = await prisma.$transaction(async (transaction) => {
+    await lockUserAlertCapacity(transaction, userId);
+    let ownerEmail = input.alertEmail;
+    if (recoveryDemand) {
+      const demand = await transaction.courseRecoveryDemand.findFirst({
+        where: {
+          id: recoveryDemand.demandId,
+          requestId: recoveryDemand.requestId,
+          userId,
+          status: "WAITING",
+          revision: recoveryDemand.expectedRevision,
+          expiresAt: { gt: new Date() },
+        },
+        include: { request: { include: { course: true } }, user: true },
+      });
+      if (!demand || demand.request.status !== "VERIFIED") {
+        throw new RecoveryDemandNoLongerEligibleError();
+      }
+      if (demand.user.pendingEmail) {
+        // A Clerk primary-email transition has not crossed its delivery fence
+        // yet. Background promotion must wait just like a signed-in API save.
+        throw new SearchEmailDeliveryInProgressError();
+      }
+      if (demand.request.course?.isPublic !== true ||
+          resolvedPreferences.length !== 1 ||
+          !("id" in resolvedPreferences[0].course) ||
+          resolvedPreferences[0].course.id !== demand.request.courseId) {
+        throw new RecoveryDemandNoLongerEligibleError("course_unavailable");
+      }
+      assertFutureCourseSearchDate(input.date, [demand.request.course.timeZone]);
+      assertCourseLayoutsCompatible([{ course: demand.request.course }], input.requestedLayoutHoles);
+      const currentReviews = demand.request.course.googlePlaceId
+        ? await transaction.googlePlaceReview.findMany({
+        where: { active: true, OR: [
+          { googlePlaceId: demand.request.course.googlePlaceId },
+          { canonicalPlaceId: demand.request.course.googlePlaceId },
+        ] },
+        select: { accessOverride: true, canonicalPlaceId: true },
+      }) : [];
+      const canonicalIds = [...new Set(currentReviews.flatMap(review => review.canonicalPlaceId ? [review.canonicalPlaceId] : []))];
+      const canonicalReviews = canonicalIds.length > 0 ? await transaction.googlePlaceReview.findMany({
+        where: { active: true, googlePlaceId: { in: canonicalIds } }, select: { accessOverride: true },
+      }) : [];
+      if ([...currentReviews, ...canonicalReviews].some(review => isRejectedPlaceReview(review.accessOverride))) {
+        throw new RecoveryDemandNoLongerEligibleError("course_unavailable");
+      }
+      // Use the account's current primary email, including any Clerk email change
+      // that completed while the missing course was being investigated.
+      ownerEmail = demand.user.email;
+      const claimed = await transaction.courseRecoveryDemand.updateMany({
+        where: { id: demand.id, userId, status: "WAITING",
+          revision: recoveryDemand.expectedRevision, expiresAt: { gt: new Date() } },
+        data: { status: "ACTIVATED", revision: { increment: 1 } },
+      });
+      if (claimed.count !== 1) throw new RecoveryDemandNoLongerEligibleError();
+    }
+    await assertQueueCapacityInTransaction(transaction, userId, {
+      excludeDemandId: recoveryDemand?.demandId,
+    });
     for (const preference of resolvedPreferences) {
       if (preference.ratingUpdate) {
         await transaction.course.update({
@@ -134,7 +230,7 @@ export async function createTeeSearchForUser(
         players: input.players,
         requestedLayoutHoles: input.requestedLayoutHoles ?? null,
         cadenceMinutes: input.cadenceMinutes,
-        alertEmail: normalizeAlertEmail(input.alertEmail),
+        alertEmail: normalizeAlertEmail(ownerEmail),
         additionalEmails: normalizeAdditionalEmails(input.additionalEmails),
         trafficClass,
         syntheticMultiCycle,
@@ -144,6 +240,12 @@ export async function createTeeSearchForUser(
       },
       include: searchInclude,
     });
+    if (recoveryDemand) {
+      await transaction.courseRecoveryDemand.update({
+        where: { id: recoveryDemand.demandId },
+        data: { teeSearchId: created.id },
+      });
+    }
     await enqueueOperatorNotification(transaction, created);
     return created;
   });
@@ -415,8 +517,9 @@ function applyActivePlaceReview(
     isRejectedPlaceReview(review?.accessOverride) ||
     isRejectedPlaceReview(canonicalReview?.accessOverride)
   ) {
-    throw new Error(
+    throw new SearchCourseValidationError(
       "Tee Time Spot can only create alerts for public golf courses. Remove the private or non-public course and try again.",
+      "public_access",
     );
   }
   if (!review) {
@@ -568,15 +671,11 @@ export async function updateTeeSearchStatusForUser(
   searchId: string,
   status: SearchStatus,
 ) {
-  if (
-    QUEUED_SEARCH_STATUSES.includes(
-      status as (typeof QUEUED_SEARCH_STATUSES)[number],
-    )
-  ) {
-    await assertQueueCapacity(userId, searchId);
-  }
-
-  return runCustomerProjectionTransaction(async (transaction) => {
+  return runCustomerMutationTransaction(async (transaction) => {
+    await lockUserAlertCapacity(transaction, userId);
+    if (QUEUED_SEARCH_STATUSES.includes(status as (typeof QUEUED_SEARCH_STATUSES)[number])) {
+      await assertQueueCapacityInTransaction(transaction, userId, { excludeSearchId: searchId });
+    }
     const lockedSearch = await lockSearchForAlertMutation(transaction, {
       searchId,
       userId,
@@ -615,15 +714,6 @@ export async function updateTeeSearchForUser(
   searchId: string,
   input: TeeSearchUpdateInput,
 ) {
-  if (
-    input.status &&
-    QUEUED_SEARCH_STATUSES.includes(
-      input.status as (typeof QUEUED_SEARCH_STATUSES)[number],
-    )
-  ) {
-    await assertQueueCapacity(userId, searchId);
-  }
-
   if (
     input.requestedLayoutHoles !== undefined &&
     input.requestedLayoutHoles !== null
@@ -698,7 +788,11 @@ export async function updateTeeSearchForUser(
   );
 
   if (coursePreferences.length === 0) {
-    return runCustomerProjectionTransaction(async (transaction) => {
+    return runCustomerMutationTransaction(async (transaction) => {
+      await lockUserAlertCapacity(transaction, userId);
+      if (input.status && QUEUED_SEARCH_STATUSES.includes(input.status as (typeof QUEUED_SEARCH_STATUSES)[number])) {
+        await assertQueueCapacityInTransaction(transaction, userId, { excludeSearchId: searchId });
+      }
       const lockedSearch = await lockSearchForAlertMutation(transaction, {
         searchId,
         userId,
@@ -716,7 +810,11 @@ export async function updateTeeSearchForUser(
     });
   }
 
-  return runCustomerProjectionTransaction(async (transaction) => {
+  return runCustomerMutationTransaction(async (transaction) => {
+    await lockUserAlertCapacity(transaction, userId);
+    if (input.status && QUEUED_SEARCH_STATUSES.includes(input.status as (typeof QUEUED_SEARCH_STATUSES)[number])) {
+      await assertQueueCapacityInTransaction(transaction, userId, { excludeSearchId: searchId });
+    }
     const lockedSearch = await lockSearchForAlertMutation(transaction, {
       searchId,
       userId,
@@ -939,18 +1037,33 @@ export async function deleteTeeSearchForUser(userId: string, searchId: string) {
   });
 }
 
-async function assertQueueCapacity(userId: string, excludeSearchId?: string) {
-  const queuedCount = await prisma.teeSearch.count({
+export async function lockUserAlertCapacity(transaction: Prisma.TransactionClient, userId: string) {
+  // Share the account row lock with Clerk email transitions. Always lock the
+  // account before demand/search rows so simultaneous saves cannot overbook it.
+  await transaction.$queryRaw(Prisma.sql`SELECT "id" FROM "User" WHERE "id" = ${userId} FOR UPDATE`);
+}
+
+export async function assertQueueCapacityInTransaction(
+  transaction: Prisma.TransactionClient,
+  userId: string,
+  options: { excludeSearchId?: string; excludeDemandId?: string } = {},
+) {
+  const queuedCount = await transaction.teeSearch.count({
     where: {
       userId,
       status: { in: [...QUEUED_SEARCH_STATUSES] },
-      ...(excludeSearchId ? { id: { not: excludeSearchId } } : {}),
+      ...(options.excludeSearchId ? { id: { not: options.excludeSearchId } } : {}),
+    },
+  });
+  const pendingCount = await transaction.courseRecoveryDemand.count({
+    where: { userId, status: "WAITING", expiresAt: { gt: new Date() },
+      ...(options.excludeDemandId ? { id: { not: options.excludeDemandId } } : {}),
     },
   });
 
-  if (queuedCount >= MAX_QUEUED_SEARCHES_PER_USER) {
-    throw new Error(
-      `You can keep up to ${MAX_QUEUED_SEARCHES_PER_USER} active or paused searches in the queue.`,
+  if (queuedCount + pendingCount >= MAX_QUEUED_SEARCHES_PER_USER) {
+    throw new SearchQueueCapacityError(
+      `You can keep up to ${MAX_QUEUED_SEARCHES_PER_USER} active or paused searches in the queue, including pending course alerts.`,
     );
   }
 }
@@ -1002,8 +1115,9 @@ function assertCourseLayoutsCompatible(
         `${course.name} (${getCourseLayoutLabel(course.layoutHoleCounts)})`,
     )
     .join(", ");
-  throw new Error(
+  throw new SearchCourseValidationError(
     `The selected course layout does not match this ${requestedLayoutHoles}-hole search: ${details}.`,
+    "layout",
   );
 }
 

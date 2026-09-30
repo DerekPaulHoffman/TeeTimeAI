@@ -10,6 +10,7 @@ import { hasDatabaseConfig } from "@/lib/env";
 import { recoverOperatorNotification } from "@/lib/operator-notifications/launcher";
 import { expireOverdueLocalReaderJobs } from "@/lib/local-reader/service";
 import { recoverPendingClerkEmailUpdates } from "@/lib/users/pending-email";
+import { recoverDueCourseRecovery } from "@/lib/course-recovery/scheduler";
 
 export async function GET(request: Request) {
   const authorization = request.headers.get("authorization");
@@ -144,7 +145,13 @@ export async function GET(request: Request) {
     localReaderJobDeadlines.failed = 1;
   }
 
+  let courseRecovery: Awaited<ReturnType<typeof recoverDueCourseRecovery>> | null = null;
+  try { courseRecovery = await recoverDueCourseRecovery(); } catch {
+    // Lookup recovery cannot suppress customer scheduling or delivery recovery.
+  }
+
   return Response.json({
+    courseRecovery,
     pendingEmailRecovery,
     automationWorkerHealth,
     localReaderJobDeadlines,

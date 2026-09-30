@@ -7,6 +7,7 @@ import { GET } from "./route";
 
 const mocks = vi.hoisted(() => ({
   hasDatabaseConfig: vi.fn(),
+  recoverDueCourseRecovery: vi.fn(),
   listSearchesNeedingScheduleRecovery: vi.fn(),
   checkAutomationWorkerHealth: vi.fn(),
   expireOverdueLocalReaderJobs: vi.fn(),
@@ -17,6 +18,8 @@ const mocks = vi.hoisted(() => ({
   startSearchSchedule: vi.fn(),
   recoverOperatorNotification: vi.fn()
 }));
+
+vi.mock("@/lib/course-recovery/scheduler", () => ({ recoverDueCourseRecovery: mocks.recoverDueCourseRecovery }));
 
 vi.mock("@/lib/automation/db-service", () => ({
   listSearchesNeedingScheduleRecovery: mocks.listSearchesNeedingScheduleRecovery
@@ -60,6 +63,7 @@ const originalDeploymentSha = process.env.VERCEL_GIT_COMMIT_SHA;
 describe("GET /api/cron/recover-search-schedules", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.recoverDueCourseRecovery.mockResolvedValue({ considered: 0, started: 0, skipped: 0, failed: 0, demandRequestsConsidered: 0 });
     process.env.CRON_SECRET = "test-cron-secret";
     process.env.VERCEL_GIT_COMMIT_SHA = "a".repeat(40);
     mocks.hasDatabaseConfig.mockReturnValue(false);
@@ -153,6 +157,7 @@ describe("GET /api/cron/recover-search-schedules", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({
+      courseRecovery: { considered: 0, started: 0, skipped: 0, failed: 0, demandRequestsConsidered: 0 },
       pendingEmailRecovery: {
         considered: 3,
         applied: 2,

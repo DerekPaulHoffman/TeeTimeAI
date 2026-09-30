@@ -6324,8 +6324,9 @@ button {
 
 .missing-course-controls {
   align-items: center;
-  display: flex;
+  display: grid;
   gap: 8px;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) auto;
 }
 
 .missing-course-input {
@@ -6357,7 +6358,7 @@ button {
   flex: 1;
   font: inherit;
   font-size: 0.8125rem;
-  min-height: 38px;
+  min-height: 44px;
   min-width: 0;
   outline: 0;
   padding: 0;
@@ -6392,6 +6393,78 @@ button {
 
 .missing-course-status.is-error {
   color: #a33b33;
+}
+
+.course-recovery-panel {
+  background: #f6faf7;
+  border: 1px solid #cfdcd5;
+  border-radius: 16px;
+  color: #18332b;
+  font-size: 0.85rem;
+  line-height: 1.55;
+  margin-top: 12px;
+  padding: 18px;
+  overflow-wrap: anywhere;
+}
+
+.course-recovery-panel h3 {
+  font-size: 1rem;
+  margin: 0 0 8px;
+}
+
+.course-recovery-panel button {
+  background: #ffffff;
+  border: 1px solid #a9bfb4;
+  border-radius: 12px;
+  color: #18332b;
+  font: inherit;
+  font-weight: 700;
+  margin: 4px 8px 4px 0;
+  max-width: 100%;
+  min-height: 44px;
+  padding: 8px 14px;
+}
+
+.course-recovery-panel button:disabled { opacity: 0.6; }
+.course-recovery-panel [role="alert"] { color: #a33b33; }
+.course-recovery-panel a { color: #18332b; text-decoration: underline; }
+
+.pending-course-requests { margin-bottom: 24px; }
+.pending-course-request-list { display: grid; gap: 12px; list-style: none; margin: 0; padding: 0 24px 18px; }
+.pending-course-request-row { align-items: center; border: 1px solid var(--line); border-radius: 12px; display: flex; gap: 20px; justify-content: space-between; padding: 16px; }
+.pending-course-request-row h3 { font-size: 1rem; margin: 0 0 4px; overflow-wrap: anywhere; }
+.pending-course-request-row p { color: var(--muted); margin: 0 0 12px; overflow-wrap: anywhere; }
+.pending-course-request-row dl { display: flex; flex-wrap: wrap; gap: 12px 24px; margin: 0; }
+.pending-course-request-row dt { color: var(--muted); font-size: 0.75rem; }
+.pending-course-request-row dd { margin: 4px 0 0; }
+.pending-course-request-row button, .pending-course-request-refresh button { min-height: 44px; }
+.pending-course-request-row button { flex-shrink: 0; }
+.pending-course-request-message { margin: 0; padding: 0 24px 16px; }
+.pending-course-request-message[role="alert"] { color: #a33b33; }
+.pending-course-request-refresh { padding: 0 24px 18px; }
+@media (max-width: 600px) {
+  .pending-course-request-row { align-items: stretch; flex-direction: column; gap: 16px; }
+  .pending-course-request-list { padding-inline: 16px; }
+}
+.course-recovery-demand { border-top: 1px solid #cfdcd5; margin-top: 14px; padding-top: 4px; }
+.course-recovery-question { font-weight: 700; }
+
+.missing-course-refinement {
+  border: 0;
+  display: grid;
+  gap: 10px;
+  margin: 12px 0 0;
+  min-width: 0;
+  padding: 0;
+}
+.missing-course-refinement legend { font-size: 0.8rem; font-weight: 700; margin-bottom: 8px; }
+.missing-course-refinement label { display: grid; font-size: 0.8rem; gap: 5px; min-width: 0; }
+.missing-course-refinement input { background: #f7f4eb; border: 1px solid #cfdcd5; border-radius: 10px; padding: 8px 12px; width: 100%; }
+.missing-course-refinement p { font-size: 0.75rem; margin: 0; }
+
+@media (max-width: 640px) {
+  .missing-course-controls { grid-template-columns: minmax(0, 1fr); }
+  .missing-course-form button { min-height: 44px; }
 }
 
 .selected-course-support {

@@ -20,6 +20,8 @@ import {
 
 import { DashboardSignInActions } from "@/components/dashboard-sign-in-actions";
 import { SearchStatusActions } from "@/components/search-status-actions";
+import { PendingCourseRequests } from "@/components/pending-course-requests";
+import { listPendingRecoveryDemandsForUser, type PendingRecoveryDemandView } from "@/lib/course-recovery/demand";
 import { getRequiredAppUser } from "@/lib/auth/current-user";
 import { normalizeRequestedLayoutHoles } from "@/lib/courses/course-layout";
 import {
@@ -94,7 +96,10 @@ export default async function DashboardPage() {
     }
     throw error;
   }
-  const searches = await listTeeSearchesForUser(user.id);
+  const [searches, pendingRequests] = await Promise.all([
+    listTeeSearchesForUser(user.id),
+    listPendingRecoveryDemandsForUser(user.id)
+  ]);
   const [coursePhotos, ownerEmailStates] = await Promise.all([
     loadDashboardCoursePhotos(searches),
     loadOwnerEmailStates(user.id, searches),
@@ -102,7 +107,9 @@ export default async function DashboardPage() {
 
   return (
     <DashboardView
+      key={user.id}
       searches={searches}
+      pendingRequests={pendingRequests}
       canManage
       coursePhotos={coursePhotos}
       ownerEmailStates={ownerEmailStates}
@@ -113,6 +120,7 @@ export default async function DashboardPage() {
 
 function DashboardView({
   searches,
+  pendingRequests,
   canManage,
   coursePhotos,
   ownerEmailStates,
@@ -120,6 +128,7 @@ function DashboardView({
   notice
 }: {
   searches: DashboardSearches;
+  pendingRequests: PendingRecoveryDemandView[];
   canManage: boolean;
   coursePhotos: ReadonlyMap<string, GooglePlacePhoto>;
   ownerEmailStates: ReadonlyMap<string, OwnerEmailState>;
@@ -154,7 +163,9 @@ function DashboardView({
         ? inactiveSearches.some((search) => search.status === "PAUSED")
           ? "You don’t have an active alert right now. Resume a paused alert or start a new one."
           : "You don’t have an active alert right now. Start a new one when you’re ready to play."
-        : "No alerts yet. Find public courses and save your preferred date and time.";
+        : pendingRequests.length > 0
+          ? "Your course requests are saved. They are waiting for verification before tee-time checks can start."
+          : "No alerts yet. Find public courses and save your preferred date and time.";
   const inactiveHeading = inactiveSearches.every((search) => search.status === "CANCELLED")
     ? "Cancelled"
     : "Paused and completed";
@@ -179,6 +190,8 @@ function DashboardView({
         {notice ? <small>{notice}</small> : null}
       </div>
 
+      <PendingCourseRequests demands={pendingRequests} />
+
       <div className="dashboard-grid">
         <section className="dashboard-panel">
           <div className="panel-title-row">
@@ -188,7 +201,7 @@ function DashboardView({
           {activeSearches.length === 0 ? (
             <div className="empty-state">
               <CalendarClock size={28} />
-              <h3>{searches.length === 0 ? "No alerts yet" : "No active alerts"}</h3>
+              <h3>{searches.length === 0 && pendingRequests.length === 0 ? "No alerts yet" : "No active alerts"}</h3>
               <p className="meta">
                 Find public courses and save when you want to play. Each course’s status explains what we can check.
               </p>
@@ -248,6 +261,10 @@ function DashboardView({
               <dt>Total alerts</dt>
               <dd>{totalAlerts}</dd>
             </div>
+            {pendingRequests.length > 0 ? <div>
+              <dt>Pending course requests</dt>
+              <dd>{pendingRequests.length}</dd>
+            </div> : null}
           </dl>
           <div className="alert alert-info">
             See each course’s status for what we can check. We’ll email new confirmed matches and alert updates.

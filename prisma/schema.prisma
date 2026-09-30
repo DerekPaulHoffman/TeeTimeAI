@@ -331,6 +331,7 @@ model User {
   createdAt              DateTime    @default(now())
   updatedAt              DateTime    @updatedAt
   teeSearches            TeeSearch[]
+  courseRecoveryDemands  CourseRecoveryDemand[]
 
   @@index([pendingEmailObservedAt])
 }
@@ -395,6 +396,7 @@ model Course {
   supportVerificationRequests CourseSupportVerificationRequest[]
   localReaderJobs             LocalReaderJob[]
   profile                     CourseProfile?
+  recoveryRequests            CourseRecoveryRequest[]
 
   @@index([latitude, longitude])
   @@index([stateCode, county, automationEligibility])
@@ -403,6 +405,102 @@ model Course {
   @@index([bookingMethod, automationEligibility])
   @@index([monitoringMode])
   @@index([intelligenceReviewAt])
+}
+
+enum CourseRecoveryStatus {
+  QUEUED
+  INVESTIGATING
+  RETRY_WAIT
+  VERIFIED
+  NEEDS_DETAILS
+  NOT_PUBLIC
+  UNRESOLVED
+  ACCESS_LIMITED
+}
+
+enum CourseRecoveryDemandStatus {
+  WAITING
+  ACTIVATED
+  CANCELLED
+  EXPIRED
+  ACTION_REQUIRED
+}
+
+model CourseRecoveryRequest {
+  id             String               @id @default(cuid())
+  identityKey    String               @unique
+  name           String
+  town           String
+  address        String?
+  officialWebsite String?
+  latitude       Float?
+  longitude      Float?
+  status         CourseRecoveryStatus @default(QUEUED)
+  revision       Int                  @default(1)
+  attemptCount   Int                  @default(0)
+  nextAttemptAt  DateTime             @default(now())
+  deadlineAt     DateTime
+  leaseToken     String?
+  leaseExpiresAt DateTime?
+  workflowRunId  String?
+  reason         String?
+  verifiedAt     DateTime?
+  humanRequiredAt DateTime?
+  courseId       String?
+  course         Course?              @relation(fields: [courseId], references: [id], onDelete: SetNull)
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+  attempts       CourseRecoveryAttempt[]
+  demands        CourseRecoveryDemand[]
+
+  @@index([status, nextAttemptAt])
+  @@index([createdAt])
+  @@index([courseId])
+}
+
+model CourseRecoveryAttempt {
+  id              String                @id @default(cuid())
+  requestId       String
+  request         CourseRecoveryRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  revision        Int
+  outcome         String
+  evidenceUrl     String?
+  evidenceSummary String
+  observedAt      DateTime              @default(now())
+
+  @@unique([requestId, revision])
+  @@index([observedAt])
+}
+
+// Daily, expiring abuse counters, never analytics or a persistent visitor ID.
+model CourseRecoveryAdmission {
+  key       String   @id
+  count     Int      @default(0)
+  expiresAt DateTime
+
+  @@index([expiresAt])
+}
+
+model CourseRecoveryDemand {
+  id            String                     @id @default(cuid())
+  requestId     String
+  request       CourseRecoveryRequest      @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status        CourseRecoveryDemandStatus @default(WAITING)
+  revision      Int                        @default(1)
+  settings      Json
+  trafficClass  WebsiteTrafficClass        @default(UNCLASSIFIED)
+  reason        String?
+  teeSearchId   String?                    @unique
+  teeSearch     TeeSearch?                  @relation(fields: [teeSearchId], references: [id], onDelete: SetNull)
+  expiresAt     DateTime
+  createdAt     DateTime                   @default(now())
+  updatedAt     DateTime                   @updatedAt
+
+  @@unique([requestId, userId])
+  @@index([userId, status])
+  @@index([status, expiresAt])
 }
 
 model CourseBookingFact {
@@ -542,6 +640,7 @@ model TeeSearch {
   courseSupportRechecks          CourseSupportBatchSearch[]
   localReaderJobs                LocalReaderJob[]
   operatorNotificationDeliveries OperatorNotificationDelivery[]
+  courseRecoveryDemand           CourseRecoveryDemand?
 
   @@index([status, date])
   @@index([status, nextCheckAt])

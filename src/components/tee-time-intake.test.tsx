@@ -592,7 +592,7 @@ describe("TeeTimeIntake", () => {
     expect(
       screen.getByRole("heading", { name: "Looking for a specific course?" })
     ).toBeTruthy();
-    fireEvent.change(screen.getByLabelText("Course name and town"), {
+    fireEvent.change(screen.getByLabelText("Course name"), {
       target: { value: "wheeler family tranditions in wallinford" }
     });
     fireEvent.click(screen.getByRole("button", { name: "Find course" }));
@@ -678,7 +678,7 @@ describe("TeeTimeIntake", () => {
       />
     );
 
-    fireEvent.change(screen.getByLabelText("Course name and town"), {
+    fireEvent.change(screen.getByLabelText("Course name"), {
       target: { value: "Example public course" }
     });
     fireEvent.click(screen.getByRole("button", { name: "Find course" }));

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { prisma } from "@/lib/prisma";
 import {
   createTeeSearchForUser,
+  RecoveryDemandNoLongerEligibleError,
   deleteTeeSearchForUser,
   listTeeSearchesForUser,
   updateTeeSearchForUser,
@@ -45,6 +46,12 @@ vi.mock("@/lib/prisma", () => ({
     },
     courseSupportBatchSearch: {
       updateMany: vi.fn(),
+    },
+    courseRecoveryDemand: {
+      count: vi.fn(),
+      findFirst: vi.fn(),
+      updateMany: vi.fn(),
+      update: vi.fn(),
     },
     teeSearch: {
       count: vi.fn(),
@@ -114,6 +121,7 @@ beforeEach(() => {
   mockedPrisma.$transaction.mockImplementation(async (callback) =>
     (callback as (transaction: typeof prisma) => Promise<unknown>)(prisma),
   );
+  mockedPrisma.courseRecoveryDemand.count.mockResolvedValue(0);
   deliveryOutboxMocks.lockSearchForAlertMutation.mockResolvedValue({
     id: "search-1",
     status: "ACTIVE",
@@ -1960,10 +1968,89 @@ describe("createTeeSearchForUser", () => {
         ],
       }),
     ).rejects.toThrow(
-      "You can keep up to 3 active or paused searches in the queue.",
+      "You can keep up to 3 active or paused searches in the queue, including pending course alerts.",
     );
 
     expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
+  });
+});
+
+describe("atomic missing-course demand activation", () => {
+  const course = { id: "recovered-course", googlePlaceId: "recovered-place", name: "Unfamiliar Municipal Course",
+    latitude: 41.1, longitude: -73.1, timeZone: "America/New_York", isPublic: true,
+    automationEligibility: "UNKNOWN", layoutHoleCounts: [], layoutHolesVerifiedAt: null };
+  const input = { date: "2027-01-01", startTime: "09:00", endTime: "16:00", players: 2, cadenceMinutes: 15,
+    alertEmail: "old-owner@example.com", additionalEmails: ["friend@example.com"],
+    courses: [{ courseId: course.id, googlePlaceId: course.googlePlaceId, name: course.name,
+      latitude: course.latitude, longitude: course.longitude, rank: 1 }] };
+  const activation = { demandId: "demand-1", requestId: "request-1", expectedRevision: 3 };
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedPrisma.course.findUnique.mockResolvedValue(course as never);
+    mockedPrisma.course.findMany.mockResolvedValue([]);
+    mockedPrisma.googlePlaceReview.findMany.mockResolvedValue([]);
+    mockedPrisma.teeSearch.count.mockResolvedValue(0);
+    mockedPrisma.courseRecoveryDemand.findFirst.mockResolvedValue({ id: "demand-1",
+      request: { status: "VERIFIED", courseId: course.id, course }, user: { email: "current-owner@example.com" } } as never);
+    mockedPrisma.courseRecoveryDemand.updateMany.mockResolvedValue({ count: 1 });
+    mockedPrisma.teeSearch.create.mockResolvedValue({ id: "search-1" } as never);
+  });
+  it("atomically claims the exact waiting revision and links one saved alert with the account's current email", async () => {
+    await createTeeSearchForUser("owner-1", input, "TEST", false, activation);
+    expect(mockedPrisma.courseRecoveryDemand.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: {
+      id: "demand-1", requestId: "request-1", userId: "owner-1", status: "WAITING", revision: 3, expiresAt: { gt: expect.any(Date) },
+    } }));
+    expect(mockedPrisma.courseRecoveryDemand.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: { status: "ACTIVATED", revision: { increment: 1 } } }));
+    expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ alertEmail: "current-owner@example.com" }) }));
+    expect(mockedPrisma.courseRecoveryDemand.update).toHaveBeenCalledWith({ where: { id: "demand-1" }, data: { teeSearchId: "search-1" } });
+    expect(mockedPrisma.courseRecoveryDemand.updateMany.mock.invocationCallOrder[0]).toBeLessThan(mockedPrisma.teeSearch.create.mock.invocationCallOrder[0]);
+  });
+  it("counts pending alerts against regular creation inside the account lock", async () => {
+    mockedPrisma.teeSearch.count.mockResolvedValue(2); mockedPrisma.courseRecoveryDemand.count.mockResolvedValue(1);
+    await expect(createTeeSearchForUser("owner-1", input, "TEST")).rejects.toThrow(/including pending course alerts/);
+    expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
+    expect(mockedPrisma.$queryRaw.mock.invocationCallOrder.at(-1)).toBeLessThan(mockedPrisma.teeSearch.count.mock.invocationCallOrder[0]);
+  });
+  it("excludes the converted demand's reserved slot rather than charging it twice", async () => {
+    mockedPrisma.teeSearch.count.mockResolvedValue(2);
+    await createTeeSearchForUser("owner-1", input, "TEST", false, activation);
+    expect(mockedPrisma.courseRecoveryDemand.count).toHaveBeenCalledWith({ where: { userId: "owner-1", status: "WAITING",
+      expiresAt: { gt: expect.any(Date) }, id: { not: "demand-1" } } });
+  });
+  it("does not create an alert for missing, cancelled, expired, or stale demand revision", async () => {
+    mockedPrisma.courseRecoveryDemand.findFirst.mockResolvedValue(null);
+    await expect(createTeeSearchForUser("owner-1", input, "TEST", false, activation)).rejects.toBeInstanceOf(RecoveryDemandNoLongerEligibleError);
+    expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
+  });
+  it("failed compare-and-set never creates an alert", async () => {
+    mockedPrisma.courseRecoveryDemand.updateMany.mockResolvedValue({ count: 0 });
+    await expect(createTeeSearchForUser("owner-1", input, "TEST", false, activation)).rejects.toBeInstanceOf(RecoveryDemandNoLongerEligibleError);
+    expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
+  });
+  it("rechecks current public-course classification after discovery and before claiming demand", async () => {
+    mockedPrisma.courseRecoveryDemand.findFirst.mockResolvedValue({ id: "demand-1",
+      request: { status: "VERIFIED", courseId: course.id, course: { ...course, isPublic: false } }, user: { email: "current-owner@example.com" } } as never);
+    await expect(createTeeSearchForUser("owner-1", input, "TEST", false, activation)).rejects.toThrow(/no longer eligible/);
+    expect(mockedPrisma.courseRecoveryDemand.updateMany).not.toHaveBeenCalled(); expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
+  });
+  it("rechecks active canonical review exclusions inside the transaction", async () => {
+    mockedPrisma.googlePlaceReview.findMany.mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ accessOverride: null, canonicalPlaceId: "canonical-private" }] as never)
+      .mockResolvedValueOnce([{ accessOverride: "VERIFIED_PRIVATE" }] as never);
+    await expect(createTeeSearchForUser("owner-1", input, "TEST", false, activation)).rejects.toThrow(/no longer eligible/);
+    expect(mockedPrisma.googlePlaceReview.findMany).toHaveBeenLastCalledWith({ where: { active: true, googlePlaceId: { in: ["canonical-private"] } }, select: { accessOverride: true } });
+    expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
+  });
+  it("defers background creation through a pending Clerk primary-email transition, then uses the new email", async () => {
+    mockedPrisma.courseRecoveryDemand.findFirst.mockResolvedValueOnce({ id: "demand-1",
+      request: { status: "VERIFIED", courseId: course.id, course },
+      user: { email: "old-owner@example.com", pendingEmail: "current-owner@example.com" } } as never);
+    await expect(createTeeSearchForUser("owner-1", input, "TEST", false, activation)).rejects.toThrow(/finalized/);
+    expect(mockedPrisma.courseRecoveryDemand.updateMany).not.toHaveBeenCalled();
+    expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
+    await createTeeSearchForUser("owner-1", input, "TEST", false, activation);
+    expect(mockedPrisma.teeSearch.create).toHaveBeenCalledTimes(1);
+    expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ alertEmail: "current-owner@example.com" }) }));
   });
 });
 

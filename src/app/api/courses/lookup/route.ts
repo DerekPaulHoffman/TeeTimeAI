@@ -84,9 +84,12 @@ export async function GET(request: NextRequest) {
 
   try {
     const cachedCourses = await readCourseRuntimeCache<unknown[]>(cacheKey);
+    // Empty caches must not hide a newly verified durable identity.
     if (Array.isArray(cachedCourses)) {
+      const cachedOrRecovered = cachedCourses.length > 0 ? cachedCourses as CourseCandidate[]
+        : await findPersistedCourseCandidatesByName(query, reviewIndex);
       const currentCourses = await enrichCoursesWithAlertSupport(
-        (cachedCourses as CourseCandidate[]).map(clearCourseMonitoringEvidence),
+        cachedOrRecovered.map(clearCourseMonitoringEvidence),
       );
       await cacheCourseCandidatePhotos(currentCourses);
       return NextResponse.json(
@@ -95,7 +98,7 @@ export async function GET(request: NextRequest) {
       );
     }
 
-    const courses = await searchGolfCoursesByName(
+    let courses: CourseCandidate[] = await searchGolfCoursesByName(
       {
         query,
         latitude,
@@ -104,6 +107,9 @@ export async function GET(request: NextRequest) {
       },
       reviewIndex
     );
+    if (courses.length === 0) {
+      courses = await findPersistedCourseCandidatesByName(query, reviewIndex);
+    }
     const coursesWithSupport = await enrichCoursesWithAlertSupport(courses).catch((error) => {
       console.warn(
         "Course alert-support enrichment unavailable",

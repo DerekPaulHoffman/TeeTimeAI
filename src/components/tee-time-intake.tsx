@@ -98,6 +98,8 @@ import {
 } from "@/components/tee-time-search-controls";
 import { DeferredSignInButton } from "@/components/deferred-sign-in-button";
 import { openFeedback } from "@/components/open-feedback-button";
+import { CourseRecoveryPanel, useCourseRecovery } from "@/components/course-recovery-panel";
+import type { RecoveryInput } from "@/lib/course-recovery/contracts";
 
 type Notice = {
   type: "info" | "success" | "error";
@@ -318,12 +320,27 @@ function TeeTimeIntakeContent({
     [selected]
   );
   const [courseLookupQuery, setCourseLookupQuery] = useState("");
+  const [courseLookupTown, setCourseLookupTown] = useState(
+    initialValues.location === CURRENT_LOCATION_LABEL ? "" : initialValues.location ?? ""
+  );
+  const courseLookupTownEditedRef = useRef(false);
+  const [courseLookupAddress, setCourseLookupAddress] = useState("");
+  const [courseLookupWebsite, setCourseLookupWebsite] = useState("");
+  const [courseLookupDetailsOpen, setCourseLookupDetailsOpen] = useState(false);
   const [submittedCourseLookupQuery, setSubmittedCourseLookupQuery] = useState("");
   const [courseLookupResults, setCourseLookupResults] = useState<CourseCandidate[]>([]);
   const [courseLookupState, setCourseLookupState] = useState<
     "idle" | "loading" | "success" | "error"
   >("idle");
   const [courseLookupMessage, setCourseLookupMessage] = useState("");
+  const receiveRecoveredCourse = useCallback((course: CourseCandidate, input: RecoveryInput) => {
+    setCourseLookupResults((current) => [
+      ...current.filter((candidate) => candidate.googlePlaceId !== course.googlePlaceId), course
+    ]);
+    setSubmittedCourseLookupQuery(input.name);
+    setCourseLookupState("success");
+  }, []);
+  const courseRecovery = useCourseRecovery(receiveRecoveredCourse);
   const [notice, setNotice] = useState<Notice>({
     type: "info",
     message: "Enter a city and state, ZIP code, or street address, or use your current location."
@@ -345,6 +362,12 @@ function TeeTimeIntakeContent({
   const reportedCourseLookupCandidatesRef = useRef(new Set<string>());
   const shouldRefreshRestoredCoursesRef = useRef(false);
   const dateWasEditedRef = useRef(false);
+
+  useEffect(() => {
+    if (!courseLookupTownEditedRef.current) {
+      setCourseLookupTown(locationText === CURRENT_LOCATION_LABEL ? "" : locationText);
+    }
+  }, [locationText]);
 
   function reconcileDateFromControl(event: SyntheticEvent<HTMLInputElement>) {
     dateWasEditedRef.current = true;
@@ -815,7 +838,7 @@ function TeeTimeIntakeContent({
   }, [courses]);
 
   async function reportMissingCourseLookup(normalizedQuery: string) {
-    const reportKey = `${normalizedQuery.toLowerCase()}|${locationText.trim().toLowerCase()}`;
+    const reportKey = `${normalizedQuery.toLowerCase()}|${courseLookupTown.trim().toLowerCase()}`;
     if (reportedCourseLookupMissesRef.current.has(reportKey)) {
       return true;
     }
@@ -828,12 +851,11 @@ function TeeTimeIntakeContent({
           sentiment: "broken",
           message: `[COURSE_LOOKUP_MISS] ${JSON.stringify({
             query: normalizedQuery,
-            location: locationText.trim() || undefined,
+            location: courseLookupTown.trim() || undefined,
             latitude: searchCoordinates?.latitude,
             longitude: searchCoordinates?.longitude
           })}`,
           page: "/search#missing-course",
-          contactEmail: alertEmail || undefined,
           trafficClass: detectWebsiteTrafficClass()
         })
       });
@@ -910,6 +932,26 @@ function TeeTimeIntakeContent({
       setCourseLookupMessage("Enter at least 2 characters from the course name.");
       return;
     }
+    const town = courseLookupTown.trim();
+    if (town.length < 2) {
+      setCourseLookupState("error");
+      setCourseLookupMessage("Enter the course's town or city so we can verify the right course.");
+      return;
+    }
+    if (courseLookupWebsite.trim()) {
+      try {
+        const website = new URL(courseLookupWebsite.trim());
+        const hasPrivateParameters = [...website.searchParams.keys()].some((key) =>
+          /^(?:access[_-]?token|api[_-]?key|authorization|session(?:[_-]?id)?|token|secret|code|password|auth|key)$/i.test(key));
+        if (!["http:", "https:"].includes(website.protocol) || website.username || website.password || hasPrivateParameters) {
+          throw new Error("Use the course's public website without account credentials or private links.");
+        }
+      } catch {
+        setCourseLookupState("error");
+        setCourseLookupMessage("Use the course's public website without account credentials or private links.");
+        return;
+      }
+    }
 
     setSubmittedCourseLookupQuery(normalizedQuery);
     setCourseLookupResults([]);
@@ -918,7 +960,7 @@ function TeeTimeIntakeContent({
 
     let responseStatus: number | undefined;
     try {
-      const params = new URLSearchParams({ q: normalizedQuery });
+      const params = new URLSearchParams({ q: `${normalizedQuery}, ${town}`.slice(0, 120) });
       if (searchCoordinates) {
         params.set("latitude", String(searchCoordinates.latitude));
         params.set("longitude", String(searchCoordinates.longitude));
@@ -941,16 +983,17 @@ function TeeTimeIntakeContent({
       const matches = data.courses ?? [];
       setCourseLookupResults(matches);
       setCourseLookupState("success");
-      const missWasReported = matches.length === 0
-        ? await reportMissingCourseLookup(normalizedQuery)
-        : false;
-      setCourseLookupMessage(
-        matches.length === 0
-          ? missWasReported
-            ? `We couldn't find â€œ${normalizedQuery}â€ yet. We've logged it for review and will look into it.`
-            : `We couldn't find â€œ${normalizedQuery}â€ yet. Try the full course name plus its city or state, or send it through Feedback so we can investigate.`
-          : `${matches.length} ${matches.length === 1 ? "match" : "matches"} found.`
-      );
+      if (matches.length === 0) {
+        setCourseLookupMessage(`No direct matches for "${normalizedQuery}" yet. We'll check its identity and official site.`);
+        // Feedback remains a separate learning signal; only recovery confirms durable work.
+        void reportMissingCourseLookup(normalizedQuery);
+        await courseRecovery.start({ name: normalizedQuery, town,
+          ...(courseLookupAddress.trim() ? { address: courseLookupAddress.trim() } : {}),
+          ...(courseLookupWebsite.trim() ? { officialWebsite: courseLookupWebsite.trim() } : {}),
+          ...(searchCoordinates ?? {}) });
+      } else {
+        setCourseLookupMessage(`${matches.length} ${matches.length === 1 ? "match" : "matches"} found.`);
+      }
     } catch (error) {
       setCourseLookupResults([]);
       setCourseLookupState("error");
@@ -1266,13 +1309,45 @@ function TeeTimeIntakeContent({
         lookupMessage={courseLookupMessage}
         lookupState={courseLookupState}
         onQueryChange={setCourseLookupQuery}
+        onTownChange={(value) => { courseLookupTownEditedRef.current = true; setCourseLookupTown(value); }}
+        onAddressChange={setCourseLookupAddress}
+        onWebsiteChange={setCourseLookupWebsite}
         onSubmit={() => void lookupCourse()}
         query={courseLookupQuery}
+        town={courseLookupTown}
+        recovering={courseRecovery.submitting}
+        address={courseLookupAddress}
+        officialWebsite={courseLookupWebsite}
+        showDetails={courseLookupDetailsOpen}
         showVisibleMessage={
           courseLookupState === "error" ||
           courseLookupResults.length === 0 ||
           !courseLookupMessage.endsWith("found.")
         }
+      />
+
+      <CourseRecoveryPanel
+        state={courseRecovery}
+        signedIn={accountState.status === "signed-in"}
+        accountEmail={accountEmail}
+        clerkPublishableKey={clerkPublishableKey}
+        settings={{ date, startTime, endTime, players,
+          userTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "America/New_York",
+          cadenceMinutes: DEFAULT_SEARCH_CADENCE_MINUTES, requestedLayoutHoles,
+          additionalEmails: normalizedAdditionalEmails }}
+        settingsError={!isDateFuture ? "Choose a future date for your saved alert request." :
+          !isTimeWindowValid ? "Choose an end time after the start time." :
+          hasInvalidAdditionalEmail ? "Enter a valid email for each additional recipient." :
+          hasInvalidAlertEmail ? "Your account needs a valid email before saving an alert request." : null}
+        onEditDetails={(input) => {
+          setCourseLookupQuery(input.name);
+          setCourseLookupTown(input.town);
+          setCourseLookupAddress(input.address ?? "");
+          setCourseLookupWebsite(input.officialWebsite ?? "");
+          setCourseLookupDetailsOpen(true);
+          courseLookupTownEditedRef.current = true;
+          document.getElementById("missingCourseQuery")?.focus();
+        }}
       />
 
       <div className="figma-results-layout" ref={resultsRef}>
@@ -1599,7 +1674,8 @@ function TeeTimeIntakeContent({
             </small>
           </label>
         ) : null}
-        {selected.length > 0 ? (
+        {selected.length > 0 || (accountState.status === "signed-in" && courseRecovery.recovery &&
+          ["QUEUED", "INVESTIGATING", "RETRY_WAIT"].includes(courseRecovery.recovery.status)) ? (
           <fieldset className="figma-group-recipients">
             <legend className="sr-only">Alert your group too</legend>
             <div className="figma-group-recipients-heading" aria-hidden="true">
@@ -1989,15 +2065,31 @@ function MissingCourseLookup({
   lookupMessage,
   lookupState,
   onQueryChange,
+  onTownChange,
+  onAddressChange,
+  onWebsiteChange,
   onSubmit,
   query,
+  town,
+  recovering,
+  address,
+  officialWebsite,
+  showDetails,
   showVisibleMessage
 }: {
   lookupMessage: string;
   lookupState: "idle" | "loading" | "success" | "error";
   onQueryChange: (query: string) => void;
+  onTownChange: (town: string) => void;
+  onAddressChange: (address: string) => void;
+  onWebsiteChange: (website: string) => void;
   onSubmit: () => void;
   query: string;
+  town: string;
+  recovering: boolean;
+  address: string;
+  officialWebsite: string;
+  showDetails: boolean;
   showVisibleMessage: boolean;
 }) {
   return (
@@ -2014,7 +2106,7 @@ function MissingCourseLookup({
         }}
       >
         <label className="sr-only" htmlFor="missingCourseQuery">
-          Course name and town
+          Course name
         </label>
         <div className="missing-course-controls">
           <div className="missing-course-input">
@@ -2024,15 +2116,32 @@ function MissingCourseLookup({
               id="missingCourseQuery"
               maxLength={120}
               onChange={(event) => onQueryChange(event.target.value)}
-              placeholder="e.g. Bethpage Black, Farmingdale NY"
+              placeholder="e.g. Bethpage Black"
               type="search"
               value={query}
             />
           </div>
-          <button disabled={lookupState === "loading"} type="submit">
-            {lookupState === "loading" ? "Looking…" : "Find course"}
+          <label className="missing-course-input missing-course-town">
+            <span className="sr-only">Course town or city</span>
+            <input autoComplete="address-level2" maxLength={120} onChange={(event) => onTownChange(event.target.value)}
+              placeholder="Town, state" type="text" value={town} />
+          </label>
+          <button disabled={lookupState === "loading" || recovering} type="submit">
+            {lookupState === "loading" || recovering ? "Looking…" : "Find course"}
           </button>
         </div>
+        {showDetails ? <fieldset className="missing-course-refinement">
+          <legend>Details to identify the right course</legend>
+          <label>Street address (optional)
+            <input autoComplete="street-address" maxLength={200} onChange={(event) => onAddressChange(event.target.value)}
+              placeholder="e.g. 10 Marsh Road" type="text" value={address} />
+          </label>
+          <label>Official website (optional)
+            <input autoComplete="url" maxLength={500} onChange={(event) => onWebsiteChange(event.target.value)}
+              placeholder="https://" type="url" value={officialWebsite} />
+          </label>
+          <p>Use the course&apos;s public website. Leave out private account or sign-in links.</p>
+        </fieldset> : null}
       </form>
       {lookupMessage ? (
         <p

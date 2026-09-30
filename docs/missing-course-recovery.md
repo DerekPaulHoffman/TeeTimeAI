@@ -1,0 +1,21 @@
+# Missing-course recovery
+
+Decision contract (local implementation; release and live acceptance remain gated):
+
+- A lookup miss means provider recall is insufficient. It never establishes nonexistence. Existing returned candidates can still be selected and saved through the existing course-verification journey.
+- Anonymous visitors may retain a bounded name/town investigation and read its public course status. The investigation contains no account, recipient, date, or alert authority. No persistent visitor identifier is created.
+- Neon stores shared normalized investigations and append-only attempt evidence. Case, whitespace, and equivalent coordinates do not create repeated work. Per-day admission and active-work limits bound anonymous abuse; repeats neither restart attempts nor extend deadlines.
+- Only a signed-in Clerk owner may attach pending alert settings. The server derives the owner and primary email. Pending demand reserves one of the existing three alert slots and can be cancelled by its owner. Identity resolution never invents customer demand or adds recipients.
+- Identity work reads public signed-out evidence within fixed attempt, candidate, time, byte, and URL bounds. It reuses current reviewed exclusions and official-source safety controls. Public access requires positive identity, location, and public-course evidence; ambiguous, private/non-course, fictional, wrong-town, sibling, and challenged sources cannot be promoted.
+- Verified identity produces a reusable Course and selectable candidate. Booking-source evidence establishes the direct path; monitoring readiness is proved later by the existing search workflow and course-support responder. Discovery alone is not monitoring success.
+- Verified pending demand creates at most one owner alert and starts its existing Workflow. Saving and Workflow launch are separate durable facts. A start failure preserves the alert for existing recovery. Normal first-check failures open the existing demand-backed support incident; lookup work does not own provider implementation or change responder acceptance.
+- Durable execution uses Vercel Workflow with row-token compare-and-set transitions and the existing recovery cron for missed starts/expired leases. No separate schedule, global provider poller, or queue is introduced.
+- Empty bounded research remains unresolved. A human question must identify an actual unresolved facility/town ambiguity or technical access boundary. Transient provider failures retain automatic retries; unknown evidence is not a pass.
+
+Research limits are two broad Google text queries, eight candidate identities, eight official-source reads, 256 KB per response, and 30 seconds per attempt. Reads use existing provider capacity leases and address-pinned public transport. Customer address/site hints only narrow independently found identities; they never authorize fetching an arbitrary supplied URL. Current official course identity, location, public-play evidence, and booking/contact path must agree. Script-only pages without those readable facts remain unresolved; current access challenges are reported without bypass. No general search-engine fallback is added.
+
+Pending demand follows the current Clerk primary email, waits through an unfinished email transition, and reserves capacity together with ordinary alerts. Cancellation, expiration, changed course eligibility, and removed activated alerts cannot silently restart an alert. A corrected identity hint starts a distinct bounded request; attaching demand to that corrected request remains an explicit owner action.
+
+Completion requires isolated migration/read-back; unfamiliar-course identity fixtures; owner/recipient, repeated/cancelled/expired demand and stale-lease tests; selectable recovery in the real intake; focused and required full local/CI checks; and a receipt outside the repository. Production activation, migrations, paid provider calls, sends, and release require separate authorization.
+
+Acceptance thresholds remain 95% automatic within 24 hours, at most 5% human intervention, and zero repeated unchanged implementation. Local synthetic correctness does not establish those fleet rates. Unknown or null metrics remain unverified. The existing responder acceptance projection is unchanged.

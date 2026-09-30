@@ -26,10 +26,12 @@ const persistedCourseSelect = {
   ratingObservedAt: true,
   website: true,
   detectedBookingUrl: true,
-  phone: true
+  phone: true,
+  isPublic: true
 } as const;
 
 type PersistedCourse = {
+  isPublic: boolean | null;
   id: string;
   googlePlaceId: string | null;
   name: string;
@@ -145,6 +147,7 @@ function mapPersistedCourse(course: PersistedCourse): CourseCandidate {
     courseId: course.id,
     googlePlaceId: course.googlePlaceId as string,
     name: course.name,
+    publicAccessStatus: course.isPublic === null ? "UNVERIFIED" : "PUBLIC",
     ...(course.address ? { address: course.address } : {}),
     ...(course.city ? { city: course.city } : {}),
     ...(course.stateCode ? { stateCode: course.stateCode } : {}),
