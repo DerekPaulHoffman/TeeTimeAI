@@ -1106,9 +1106,15 @@ function TeeTimeIntakeContent({
     }
 
     // A background tab's rollover timer may be delayed until after course midnight.
-    const currentMinimum = getMinimumSearchDateInputValue(new Date(), selectedTimeZones);
+    const saveNow = new Date();
+    const currentMinimum = getMinimumSearchDateInputValue(saveNow, selectedTimeZones);
     if (date < currentMinimum) {
       setMinSearchDate(currentMinimum);
+      if (!dateWasEditedRef.current) {
+        setDate((current) =>
+          reconcileFutureSearchDateInputValue(current, saveNow, selectedTimeZones)
+        );
+      }
       setNotice({ type: "error", message: "Choose a future date for alerts." });
       return;
     }

@@ -42,10 +42,11 @@ function dateBoundaryCourse(name: string, timeZone: string) {
 
 function restoreDateBoundaryDraft(
   courses: ReturnType<typeof dateBoundaryCourse>[],
-  selectedCourses: ReturnType<typeof dateBoundaryCourse>[]
+  selectedCourses: ReturnType<typeof dateBoundaryCourse>[],
+  date = "2026-09-30"
 ) {
   window.sessionStorage.setItem(SEARCH_DRAFT_STORAGE_KEY, JSON.stringify({
-    date: "2026-09-30",
+    date,
     courses,
     selectedCourses
   }));
@@ -142,7 +143,32 @@ describe("TeeTimeIntake", () => {
     expect(dateInput.value).toBe("2026-10-03");
   });
 
-  it("blocks saving after course midnight even if a background timer has not fired", async () => {
+  it("advances an untouched automatic date without posting when a delayed timer leaves it stale at save", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-26T03:59:00.000Z"));
+    const course = dateBoundaryCourse("New York Course", "America/New_York");
+    restoreDateBoundaryDraft([course], [course], "2026-09-26");
+    const fetchMock = mockDateBoundaryRequests();
+    render(<TeeTimeIntake {...signedInAccountProps} />);
+    await screen.findAllByRole("heading", { name: "New York Course" });
+    const dateInput = document.querySelector("#date") as HTMLInputElement;
+    await waitFor(() => expect(dateInput.min).toBe("2026-09-26"));
+    expect(dateInput.value).toBe("2026-09-26");
+
+    vi.setSystemTime(new Date("2026-09-26T04:00:01.000Z"));
+    fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
+    await waitFor(() => expect(dateInput.min).toBe("2026-09-27"));
+    expect(dateInput.value).toBe("2026-10-03");
+    expect(fetchMock.mock.calls.some(([input]) => input === "/api/searches")).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
+    await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/dashboard?created=date-boundary"));
+    const saves = fetchMock.mock.calls.filter(([input]) => input === "/api/searches");
+    expect(saves).toHaveLength(1);
+    expect(JSON.parse(String(saves[0][1]?.body)).date).toBe("2026-10-03");
+  });
+
+  it("preserves an edited date and blocks saving after course midnight when a timer is delayed", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-09-30T03:16:30.000Z"));
     const course = dateBoundaryCourse("New York Course", "America/New_York");
@@ -153,6 +179,7 @@ describe("TeeTimeIntake", () => {
     const dateInput = document.querySelector("#date") as HTMLInputElement;
     await waitFor(() => expect(dateInput.min).toBe("2026-09-30"));
     fireEvent.change(dateInput, { target: { value: "2026-09-30" } });
+    fireEvent.blur(dateInput);
     vi.setSystemTime(new Date("2026-09-30T04:00:01.000Z"));
     fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
     await waitFor(() => expect(dateInput.min).toBe("2026-10-01"));
