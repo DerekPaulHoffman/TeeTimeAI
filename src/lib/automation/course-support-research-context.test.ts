@@ -2,16 +2,33 @@ import { createHash } from "node:crypto";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const database = vi.hoisted(() => ({ batchFindFirst: vi.fn() }));
+const database = vi.hoisted(() => ({
+  batchFindFirst: vi.fn(),
+  transaction: vi.fn(),
+  transactionBatchFindFirst: vi.fn(),
+  transactionBatchUpdateMany: vi.fn(),
+  queryRaw: vi.fn(),
+  queryRawUnsafe: vi.fn(),
+}));
 vi.mock("@/lib/prisma", () => ({
-  prisma: { courseSupportBatch: { findFirst: database.batchFindFirst } },
+  prisma: {
+    courseSupportBatch: { findFirst: database.batchFindFirst },
+    $transaction: database.transaction,
+  },
 }));
 
 import { appendAutomationPlaybookEvent } from "./course-monitoring-playbook";
 import {
   getOwnedCourseSupportResearchContext,
+  registerOwnedCourseSupportResearchSpecialist,
   validateOwnedCourseSupportResearchContext,
 } from "./course-support-research-context";
+import {
+  appendCourseSupportLineage,
+  COURSE_SUPPORT_LINEAGE_EVENT_LIMIT,
+  createCourseSupportLineage,
+  readCourseSupportLineage,
+} from "./course-support-lineage";
 import { buildCourseSupportProviderSnapshotFingerprint } from "./course-support-verification";
 
 const now = new Date("2026-09-28T14:00:00.000Z");
@@ -127,6 +144,7 @@ function fixture() {
     },
   };
   return {
+    revision: 4,
     reference: "batch-reference",
     status: "IMPLEMENTING",
     providerFamilyKey: "QUICK18",
@@ -571,5 +589,302 @@ describe("owned course-support research context", () => {
     expect(result.researchContextV1.accessBarriers).not.toContain("ACCOUNT_REQUIRED");
     expect(result.researchContextV1.missingEvidence).toContain("RECONCILE_STALE_ACCESS_CLASSIFICATION");
     expect(result.researchContextV1.availabilityContract.signedOutReadOnlyConfirmed).toBe(false);
+  });
+});
+
+describe("owner-bound research specialist registration", () => {
+  beforeEach(() => {
+    Object.values(database).forEach((mock) => mock.mockReset());
+    database.transaction.mockImplementation(async (operation) => operation({
+      $queryRaw: database.queryRaw,
+      $queryRawUnsafe: database.queryRawUnsafe,
+      courseSupportBatch: {
+        findFirst: database.transactionBatchFindFirst,
+        updateMany: database.transactionBatchUpdateMany,
+      },
+    }));
+    database.queryRaw.mockImplementation(async (query: { sql: string; values: unknown[] }) => {
+      if (query.sql.includes("clock_timestamp")) return [{ now }];
+      if (query.sql.includes('FROM "CourseSupportBatchIncident"')) {
+        return [{ id: "batch-entry-mount-snow" }];
+      }
+      return [{ id: query.values[0] }];
+    });
+    database.queryRawUnsafe.mockResolvedValue([{ locked: true }]);
+    database.transactionBatchUpdateMany.mockResolvedValue({ count: 1 });
+  });
+
+  function ownedFixture() {
+    const batch = fixture();
+    return {
+      ...batch,
+      summary: {
+        ...batch.summary,
+        ownershipLineageV1: createCourseSupportLineage("owner-run", input.ownerThreadId, batch.createdAt),
+      },
+    };
+  }
+
+  function configureTransaction(batch: ReturnType<typeof ownedFixture>) {
+    database.transactionBatchFindFirst.mockResolvedValueOnce({
+      revision: batch.revision,
+      incidents: batch.incidents.map((entry) => ({
+        id: entry.id, courseId: entry.course.id, incidentId: entry.incident.id,
+      })),
+    }).mockResolvedValueOnce(batch);
+  }
+
+  async function registrationInput(batch: ReturnType<typeof ownedFixture>) {
+    database.batchFindFirst.mockResolvedValueOnce(batch);
+    const context = await getOwnedCourseSupportResearchContext(input);
+    if (context.outcome !== "ready") throw new Error("Expected current owned research context");
+    return {
+      batchId: input.batchId,
+      leaseToken: input.leaseToken,
+      ownerThreadId: input.ownerThreadId,
+      ordinal: input.ordinal,
+      contextDigest: context.researchContextV1.contextDigest,
+      specialistThreadId: "specialist-child",
+    };
+  }
+
+  it("locks current source authority then appends one private assignment with no proof mutation", async () => {
+    const batch = ownedFixture();
+    const assignment = await registrationInput(batch);
+    configureTransaction(batch);
+    const result = await registerOwnedCourseSupportResearchSpecialist(assignment);
+    expect(result).toEqual({
+      outcome: "registered", ordinal: "01", assignmentRecorded: true,
+      childAuthenticationVerified: false, modelUsageVerified: false,
+      playbookStageRecorded: false, monitoringProofRecorded: false,
+    });
+    expect(JSON.stringify(result)).not.toMatch(/owned-thread|specialist-child|batch-mount-snow|Mount Snow|https:/u);
+    expect(database.transaction).toHaveBeenCalledWith(expect.any(Function), {
+      isolationLevel: "ReadCommitted", maxWait: 5_000, timeout: 10_000,
+    });
+    const rawStatements = database.queryRaw.mock.calls.map(([query]) => query.sql);
+    expect(rawStatements.slice(1, 6)).toEqual([
+      expect.stringContaining('FROM "Course"'),
+      expect.stringContaining('FROM "CourseSupportIncident"'),
+      expect.stringContaining('FROM "CourseMonitoringStatus"'),
+      expect.stringContaining('FROM "CourseSupportBatch"'),
+      expect.stringContaining('FROM "CourseSupportBatchIncident"'),
+    ]);
+    expect(rawStatements.filter((statement) => statement.includes("clock_timestamp"))).toHaveLength(3);
+    expect(database.queryRawUnsafe).toHaveBeenCalledWith(
+      expect.stringContaining("pg_advisory_xact_lock"), "course-monitoring:course-mount-snow",
+    );
+    expect(database.queryRawUnsafe.mock.invocationCallOrder[0])
+      .toBeLessThan(database.queryRaw.mock.invocationCallOrder[1]);
+    const update = database.transactionBatchUpdateMany.mock.calls[0][0];
+    expect(update.where).toEqual(expect.objectContaining({
+      id: input.batchId, ownerThreadId: input.ownerThreadId, leaseToken: input.leaseToken,
+      revision: batch.revision, leaseExpiresAt: { gt: now },
+      status: { in: ["CLAIMED", "IMPLEMENTING", "VERIFYING"] },
+    }));
+    expect(Object.keys(update.data).sort()).toEqual(["revision", "summary"]);
+    expect(update.data.summary.remediation).toEqual(batch.summary.remediation);
+    expect(readCourseSupportLineage(update.data.summary)?.events).toEqual([
+      batch.summary.ownershipLineageV1.events[0],
+      expect.objectContaining({
+        kind: "RESEARCH_ASSIGNMENT", actorThreadId: input.ownerThreadId,
+        ownerThreadId: input.ownerThreadId, specialistThreadId: assignment.specialistThreadId,
+        ordinal: 1, incidentCycle: 1, contextDigest: assignment.contextDigest,
+        ownerEpoch: 1, observedAt: now.toISOString(),
+      }),
+    ]);
+  });
+
+  it("acquires all monitoring advisory locks in sorted course order before any authority row lock", async () => {
+    const batch = ownedFixture();
+    const assignment = await registrationInput(batch);
+    database.transactionBatchFindFirst.mockResolvedValueOnce({
+      revision: batch.revision,
+      incidents: [
+        { id: "entry-z", courseId: "course-z", incidentId: "incident-z" },
+        { id: "entry-a", courseId: "course-a", incidentId: "incident-a" },
+      ],
+    });
+    expect(await registerOwnedCourseSupportResearchSpecialist(assignment)).toMatchObject({ outcome: "authority_drift" });
+    expect(database.queryRawUnsafe.mock.calls.map(([, key]) => key)).toEqual([
+      "course-monitoring:course-a", "course-monitoring:course-z",
+    ]);
+    const firstRowLock = database.queryRaw.mock.calls.findIndex(([query]) => query.sql.includes("FOR UPDATE"));
+    expect(Math.max(...database.queryRawUnsafe.mock.invocationCallOrder))
+      .toBeLessThan(database.queryRaw.mock.invocationCallOrder[firstRowLock]);
+    expect(database.transactionBatchUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("keeps exact duplicate assignments idempotent without another revision write", async () => {
+    const batch = ownedFixture();
+    const assignment = await registrationInput(batch);
+    const summary = appendCourseSupportLineage(batch.summary, {
+      kind: "RESEARCH_ASSIGNMENT", actorThreadId: input.ownerThreadId,
+      ownerThreadId: input.ownerThreadId, specialistThreadId: assignment.specialistThreadId,
+      ordinal: 1, incidentCycle: 1, contextDigest: assignment.contextDigest,
+    }, now);
+    configureTransaction({ ...batch, summary: summary as typeof batch.summary });
+    expect(await registerOwnedCourseSupportResearchSpecialist(assignment)).toMatchObject({
+      outcome: "already_registered", assignmentRecorded: true,
+    });
+    expect(database.transactionBatchUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("records the returned canonical agent path without treating it as a verified child session identity", async () => {
+    const batch = ownedFixture();
+    const assignment = { ...await registrationInput(batch), specialistThreadId: "/root/course_identity_research" };
+    configureTransaction(batch);
+    expect(await registerOwnedCourseSupportResearchSpecialist(assignment)).toMatchObject({
+      outcome: "registered", childAuthenticationVerified: false, modelUsageVerified: false,
+    });
+    const recorded = readCourseSupportLineage(database.transactionBatchUpdateMany.mock.calls[0][0].data.summary);
+    expect(recorded?.events.at(-1)?.specialistThreadId).toBe("/root/course_identity_research");
+  });
+
+  it("rejects an unavailable owner, expired lease, and expiry while holding the locks", async () => {
+    const batch = ownedFixture();
+    const assignment = await registrationInput(batch);
+    database.transactionBatchFindFirst.mockResolvedValueOnce(null);
+    expect(await registerOwnedCourseSupportResearchSpecialist(assignment)).toMatchObject({ outcome: "recovery_required" });
+    expect(database.transactionBatchUpdateMany).not.toHaveBeenCalled();
+    configureTransaction({ ...batch, leaseExpiresAt: now });
+    expect(await registerOwnedCourseSupportResearchSpecialist(assignment)).toMatchObject({ outcome: "recovery_required" });
+    expect(database.transactionBatchUpdateMany).not.toHaveBeenCalled();
+    configureTransaction(batch);
+    let clockReads = 0;
+    database.queryRaw.mockImplementation(async (query: { sql: string; values: unknown[] }) => {
+      if (query.sql.includes("clock_timestamp")) {
+        clockReads += 1;
+        return [{ now: clockReads === 3 ? batch.leaseExpiresAt : now }];
+      }
+      if (query.sql.includes('FROM "CourseSupportBatchIncident"')) return [{ id: batch.incidents[0].id }];
+      return [{ id: query.values[0] }];
+    });
+    expect(await registerOwnedCourseSupportResearchSpecialist(assignment)).toMatchObject({ outcome: "recovery_required" });
+    expect(database.transactionBatchUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("rejects overflowing member authority and unavailable database time without a local-clock fallback", async () => {
+    const batch = ownedFixture();
+    const assignment = await registrationInput(batch);
+    database.transactionBatchFindFirst.mockResolvedValueOnce({
+      revision: batch.revision,
+      incidents: Array.from({ length: 21 }, (_, index) => ({
+        id: `entry-${index}`, courseId: `course-${index}`, incidentId: `incident-${index}`,
+      })),
+    });
+    expect(await registerOwnedCourseSupportResearchSpecialist(assignment)).toMatchObject({ outcome: "authority_drift" });
+    expect(database.queryRaw).toHaveBeenCalledTimes(1);
+    expect(database.transactionBatchUpdateMany).not.toHaveBeenCalled();
+    database.queryRaw.mockResolvedValueOnce([]);
+    await expect(registerOwnedCourseSupportResearchSpecialist(assignment)).rejects.toThrow("database time is unavailable");
+    expect(database.transactionBatchUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it.each(["source", "cycle", "action", "provider"] as const)("rejects stale %s bindings before any assignment write", async (drift) => {
+    const batch = ownedFixture();
+    const assignment = await registrationInput(batch);
+    if (drift === "source") batch.incidents[0].course.automationDiscoveries[0].evidence.officialPage.visibleText = "2027 golf season";
+    if (drift === "cycle") batch.incidents[0].incident.cycle = 2;
+    if (drift === "action") batch.summary.remediation.attempts[0].actionPlan.allowedActions = ["INSPECT_PROVIDER_CONTRACT"];
+    if (drift === "provider") batch.incidents[0].course.detectedBookingUrl = "https://other.quick18.com/teetimes/searchmatrix";
+    configureTransaction(batch);
+    expect(await registerOwnedCourseSupportResearchSpecialist(assignment)).toMatchObject({
+      outcome: "authority_drift", assignmentRecorded: false,
+      packetRefreshRequired: true, monitoringProofRecorded: false,
+    });
+    expect(database.transactionBatchUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("rejects membership changes and a losing ownership/revision compare-and-set", async () => {
+    const batch = ownedFixture();
+    const assignment = await registrationInput(batch);
+    configureTransaction(batch);
+    database.queryRaw.mockImplementation(async (query: { sql: string; values: unknown[] }) => {
+      if (query.sql.includes("clock_timestamp")) return [{ now }];
+      if (query.sql.includes('FROM "CourseSupportBatchIncident"')) return [{ id: "changed-entry" }];
+      return [{ id: query.values[0] }];
+    });
+    expect(await registerOwnedCourseSupportResearchSpecialist(assignment)).toMatchObject({ outcome: "authority_drift" });
+    expect(database.transactionBatchUpdateMany).not.toHaveBeenCalled();
+    database.transactionBatchFindFirst.mockReset();
+    configureTransaction(batch);
+    database.queryRaw.mockImplementation(async (query: { sql: string; values: unknown[] }) => {
+      if (query.sql.includes("clock_timestamp")) return [{ now }];
+      if (query.sql.includes('FROM "CourseSupportBatchIncident"')) return [{ id: batch.incidents[0].id }];
+      return [{ id: query.values[0] }];
+    });
+    database.transactionBatchUpdateMany.mockResolvedValueOnce({ count: 0 });
+    expect(await registerOwnedCourseSupportResearchSpecialist(assignment)).toMatchObject({ outcome: "authority_drift" });
+  });
+
+  it("preserves unavailable malformed or full history and never invents complete legacy provenance", async () => {
+    const batch = ownedFixture();
+    const assignment = await registrationInput(batch);
+    configureTransaction({ ...batch, summary: { ...batch.summary, ownershipLineageV1: null } as unknown as typeof batch.summary });
+    expect(await registerOwnedCourseSupportResearchSpecialist(assignment)).toMatchObject({ outcome: "lineage_unavailable" });
+    expect(database.transactionBatchUpdateMany).not.toHaveBeenCalled();
+    let summary: Record<string, unknown> = batch.summary;
+    for (let index = 1; index < COURSE_SUPPORT_LINEAGE_EVENT_LIMIT; index += 1) {
+      summary = appendCourseSupportLineage(summary, {
+        kind: "RESEARCH_ASSIGNMENT", actorThreadId: input.ownerThreadId,
+        ownerThreadId: input.ownerThreadId, specialistThreadId: `other-child-${index}`,
+        ordinal: 1, incidentCycle: 1, contextDigest: assignment.contextDigest,
+      }, now);
+    }
+    configureTransaction({ ...batch, summary: summary as typeof batch.summary });
+    expect(await registerOwnedCourseSupportResearchSpecialist(assignment)).toMatchObject({ outcome: "lineage_unavailable" });
+    expect(database.transactionBatchUpdateMany).not.toHaveBeenCalled();
+    const legacy = ownedFixture();
+    Reflect.deleteProperty(legacy.summary, "ownershipLineageV1");
+    configureTransaction(legacy);
+    expect(await registerOwnedCourseSupportResearchSpecialist(assignment)).toMatchObject({ outcome: "registered" });
+    const updatedSummary = database.transactionBatchUpdateMany.mock.calls[0][0].data.summary;
+    expect(readCourseSupportLineage(updatedSummary)?.completeness).toBe("LEGACY_INCOMPLETE");
+  });
+
+  it("refuses invalid-event history before an otherwise identical assignment without rewriting its valid prefix", async () => {
+    const batch = ownedFixture();
+    const assignment = await registrationInput(batch);
+    const assigned = appendCourseSupportLineage(batch.summary, {
+      kind: "RESEARCH_ASSIGNMENT", actorThreadId: input.ownerThreadId,
+      ownerThreadId: input.ownerThreadId, specialistThreadId: assignment.specialistThreadId,
+      ordinal: 1, incidentCycle: 1, contextDigest: assignment.contextDigest,
+    }, now);
+    const retained = readCourseSupportLineage(assigned);
+    if (!retained) throw new Error("Expected valid assignment prefix");
+    const invalidHistory = {
+      ...retained, completeness: "INVALID_EVENT_INCOMPLETE" as const, omittedEventCount: 1,
+    };
+    configureTransaction({ ...batch, summary: { ...batch.summary, ownershipLineageV1: invalidHistory } });
+    expect(await registerOwnedCourseSupportResearchSpecialist(assignment)).toMatchObject({
+      outcome: "lineage_unavailable", assignmentRecorded: false,
+      childAuthenticationVerified: false, modelUsageVerified: false,
+    });
+    expect(database.transactionBatchUpdateMany).not.toHaveBeenCalled();
+    expect(invalidHistory.events).toEqual(retained.events);
+  });
+
+  it("does not claim registration when a new assignment candidate becomes an invalid-event marker", async () => {
+    const batch = ownedFixture();
+    batch.summary.ownershipLineageV1.events[0].observedAt = "2026-09-28T14:01:00.000Z";
+    const assignment = await registrationInput(batch);
+    configureTransaction(batch);
+    expect(await registerOwnedCourseSupportResearchSpecialist(assignment)).toMatchObject({
+      outcome: "lineage_unavailable", assignmentRecorded: false,
+    });
+    expect(database.transactionBatchUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("rejects self assignment and URL-like references before database access", async () => {
+    const batch = ownedFixture();
+    const assignment = await registrationInput(batch);
+    await expect(registerOwnedCourseSupportResearchSpecialist({
+      ...assignment, specialistThreadId: input.ownerThreadId,
+    })).rejects.toThrow("distinct bounded");
+    await expect(registerOwnedCourseSupportResearchSpecialist({
+      ...assignment, specialistThreadId: "https://other.example/session",
+    })).rejects.toThrow("distinct bounded");
+    expect(database.transaction).not.toHaveBeenCalled();
   });
 });

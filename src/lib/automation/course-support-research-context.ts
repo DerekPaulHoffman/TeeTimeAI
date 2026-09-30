@@ -5,6 +5,7 @@ import { Prisma } from "@prisma/client";
 import { isQuick18Metadata, isQuick18PublicSearchUrl } from "../adapters/quick18";
 import { isSafeManualEvidenceUrl } from "./browser-discovery";
 import { assessAutomationPlaybook, parseAutomationPlaybookLedger } from "./course-monitoring-playbook";
+import { acquireCourseMonitoringWriteLockInTransaction } from "./course-monitoring";
 import {
   orderCourseSupportBatchIncidents,
   readCourseSupportRemediationClaimAttempt,
@@ -12,6 +13,12 @@ import {
 } from "./course-support-batches";
 import { courseSupportActionPlanMatchesRoute } from "./course-support-action-plan";
 import { courseSupportFailureFingerprintsMatch } from "./course-support-failure-fingerprint";
+import {
+  appendCourseSupportLineage,
+  COURSE_SUPPORT_LINEAGE_EVENT_LIMIT,
+  isCourseSupportLineageThreadRef,
+  readCourseSupportLineage,
+} from "./course-support-lineage";
 import {
   buildSanitizedProviderContract,
   selectCurrentBrowserProviderContractEvidence,
@@ -25,6 +32,7 @@ const ACTIVE_BATCH_STATUSES = ["CLAIMED", "IMPLEMENTING", "VERIFYING"] as const;
 const MAX_RESEARCH_ORDINAL = 20;
 
 const researchBatchSelect = {
+  revision: true,
   reference: true,
   status: true,
   providerFamilyKey: true,
@@ -183,6 +191,205 @@ export async function validateOwnedCourseSupportResearchContext(
       !current.researchContextV1.actionPlan.allowedActions.includes("IMPLEMENT_REUSABLE_SUPPORT") ||
       current.researchContextV1.availabilityContract.status !== "CONFIRMED_PUBLIC_READ" ||
       current.researchContextV1.linkChain.status !== "CURRENT_DISCOVERY_CORROBORATED",
+    monitoringProofRecorded: false as const,
+  };
+}
+
+export type OwnedResearchSpecialistInput = Omit<OwnedResearchContextInput, "now"> & {
+  contextDigest: string;
+  specialistThreadId: string;
+};
+
+/**
+ * Records an owner's bounded research assignment, never child authentication,
+ * token usage, an executed playbook stage, or provider monitoring proof.
+ */
+export async function registerOwnedCourseSupportResearchSpecialist(
+  input: OwnedResearchSpecialistInput,
+) {
+  validateOrdinal(input.ordinal);
+  if (!/^[a-f0-9]{64}$/u.test(input.contextDigest)) {
+    throw new Error("Research context digest must be a 64-character lowercase SHA-256 digest.");
+  }
+  if (!isCourseSupportLineageThreadRef(input.specialistThreadId) ||
+      input.specialistThreadId === input.ownerThreadId) {
+    throw new Error("Research specialist must be a distinct bounded native thread reference.");
+  }
+
+  return prisma.$transaction(async (transaction) => {
+    const initialNow = await getResearchDatabaseNow(transaction);
+    const authority = await transaction.courseSupportBatch.findFirst({
+      where: ownedResearchBatchWhere(input, initialNow),
+      select: {
+        revision: true,
+        incidents: {
+          take: MAX_RESEARCH_ORDINAL + 1,
+          orderBy: { id: "asc" },
+          select: { id: true, courseId: true, incidentId: true },
+        },
+      },
+    });
+    if (!authority) return researchAssignmentControl("recovery_required", input.ordinal);
+    if (authority.incidents.length === 0 || authority.incidents.length > MAX_RESEARCH_ORDINAL) {
+      return researchAssignmentControl("authority_drift", input.ordinal);
+    }
+
+    const courseIds = [...new Set(authority.incidents.map((entry) => entry.courseId))].sort();
+    // Share the monitoring writer's advisory lock before taking any parent row
+    // lock, so telemetry cannot invert its existing incident/batch/course order.
+    for (const courseId of courseIds) {
+      await acquireCourseMonitoringWriteLockInTransaction(transaction, courseId);
+    }
+    // Lock parents before rebuilding the packet. Course FOR UPDATE also fences
+    // append-only discovery and monitoring inserts through their foreign keys.
+    // READ COMMITTED deliberately observes rows committed during any lock wait;
+    // an earlier repeatable snapshot must not authorize stale source evidence.
+    for (const courseId of courseIds) {
+      const rows = await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+        SELECT "id" FROM "Course" WHERE "id" = ${courseId} FOR UPDATE
+      `);
+      if (rows.length !== 1) return researchAssignmentControl("authority_drift", input.ordinal);
+    }
+    for (const incidentId of [...new Set(authority.incidents.map((entry) => entry.incidentId))].sort()) {
+      const rows = await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+        SELECT "id" FROM "CourseSupportIncident" WHERE "id" = ${incidentId} FOR UPDATE
+      `);
+      if (rows.length !== 1) return researchAssignmentControl("authority_drift", input.ordinal);
+    }
+    // An existing status update need not acquire a Course foreign-key lock.
+    for (const courseId of courseIds) {
+      await transaction.$queryRaw(Prisma.sql`
+        SELECT "courseId" FROM "CourseMonitoringStatus" WHERE "courseId" = ${courseId} FOR UPDATE
+      `);
+    }
+    const lockedBatch = await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+      SELECT "id" FROM "CourseSupportBatch"
+      WHERE "id" = ${input.batchId} AND "revision" = ${authority.revision}
+      FOR UPDATE
+    `);
+    if (lockedBatch.length !== 1) return researchAssignmentControl("authority_drift", input.ordinal);
+    const lockedMembers = await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+      SELECT "id" FROM "CourseSupportBatchIncident"
+      WHERE "batchId" = ${input.batchId}
+      ORDER BY "id" LIMIT ${MAX_RESEARCH_ORDINAL + 1} FOR UPDATE
+    `);
+    if (lockedMembers.length !== authority.incidents.length ||
+        lockedMembers.some((entry, index) => entry.id !== authority.incidents[index]?.id)) {
+      return researchAssignmentControl("authority_drift", input.ordinal);
+    }
+
+    const now = await getResearchDatabaseNow(transaction);
+    const batch = await transaction.courseSupportBatch.findFirst({
+      where: { ...ownedResearchBatchWhere(input, now), revision: authority.revision },
+      select: researchBatchSelect,
+    });
+    if (!batch) return researchAssignmentControl("recovery_required", input.ordinal);
+    const current = buildOwnedCourseSupportResearchContext(input, batch, now);
+    if (current.outcome !== "ready") return researchAssignmentControl(current.outcome, input.ordinal);
+    if (current.researchContextV1.contextDigest !== input.contextDigest) {
+      return researchAssignmentControl("authority_drift", input.ordinal);
+    }
+
+    const retainedSummary = record(batch.summary);
+    const lineage = readCourseSupportLineage(retainedSummary);
+    if (!lineage && retainedSummary.ownershipLineageV1 !== undefined) {
+      return researchAssignmentControl("lineage_unavailable", input.ordinal);
+    }
+    if (lineage?.completeness === "INVALID_EVENT_INCOMPLETE") {
+      return researchAssignmentControl("lineage_unavailable", input.ordinal);
+    }
+    if (lineage && (lineage.events.length >= COURSE_SUPPORT_LINEAGE_EVENT_LIMIT ||
+        lineage.completeness === "OVERFLOW_INCOMPLETE")) {
+      return researchAssignmentControl("lineage_unavailable", input.ordinal);
+    }
+    const latestOwnerEpoch = lineage?.events.at(-1)?.ownerEpoch;
+    const duplicate = lineage?.events.some((event) =>
+      event.kind === "RESEARCH_ASSIGNMENT" && event.ownerEpoch === latestOwnerEpoch &&
+      event.actorThreadId === input.ownerThreadId && event.ownerThreadId === input.ownerThreadId &&
+      event.specialistThreadId === input.specialistThreadId && event.ordinal === input.ordinal &&
+      event.incidentCycle === current.researchContextV1.incidentCycle &&
+      event.contextDigest === input.contextDigest);
+    if (duplicate) return researchAssignmentResult("already_registered", input.ordinal);
+    const summary = appendCourseSupportLineage(retainedSummary, {
+      kind: "RESEARCH_ASSIGNMENT",
+      actorThreadId: input.ownerThreadId,
+      ownerThreadId: input.ownerThreadId,
+      specialistThreadId: input.specialistThreadId,
+      ordinal: input.ordinal,
+      incidentCycle: current.researchContextV1.incidentCycle,
+      contextDigest: input.contextDigest,
+    }, now);
+    const updatedLineage = readCourseSupportLineage(summary);
+    const appendedAssignment = updatedLineage?.events.at(-1);
+    if (!updatedLineage || updatedLineage.completeness === "INVALID_EVENT_INCOMPLETE" ||
+        appendedAssignment?.kind !== "RESEARCH_ASSIGNMENT" ||
+        appendedAssignment.ownerThreadId !== input.ownerThreadId ||
+        appendedAssignment.specialistThreadId !== input.specialistThreadId ||
+        appendedAssignment.contextDigest !== input.contextDigest ||
+        appendedAssignment.ordinal !== input.ordinal ||
+        appendedAssignment.incidentCycle !== current.researchContextV1.incidentCycle) {
+      return researchAssignmentControl("lineage_unavailable", input.ordinal);
+    }
+    const commitNow = await getResearchDatabaseNow(transaction);
+    if (batch.leaseExpiresAt <= commitNow) {
+      return researchAssignmentControl("recovery_required", input.ordinal);
+    }
+    const updated = await transaction.courseSupportBatch.updateMany({
+      where: { ...ownedResearchBatchWhere(input, commitNow), revision: authority.revision },
+      data: { summary: summary as Prisma.InputJsonObject, revision: { increment: 1 } },
+    });
+    if (updated.count !== 1) return researchAssignmentControl("authority_drift", input.ordinal);
+    return researchAssignmentResult("registered", input.ordinal);
+  }, {
+    isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+    maxWait: 5_000,
+    timeout: 10_000,
+  });
+}
+
+function ownedResearchBatchWhere(input: OwnedResearchContextInput, now: Date) {
+  return {
+    id: input.batchId,
+    ownerThreadId: input.ownerThreadId,
+    leaseToken: input.leaseToken,
+    status: { in: [...ACTIVE_BATCH_STATUSES] },
+    leaseExpiresAt: { gt: now },
+  } satisfies Prisma.CourseSupportBatchWhereInput;
+}
+
+async function getResearchDatabaseNow(transaction: Prisma.TransactionClient) {
+  const [row] = await transaction.$queryRaw<Array<{ now: Date }>>(
+    Prisma.sql`SELECT clock_timestamp() AS "now"`,
+  );
+  if (!row?.now || !Number.isFinite(row.now.getTime())) {
+    throw new Error("Course-support research database time is unavailable.");
+  }
+  return row.now;
+}
+
+function researchAssignmentControl(
+  outcome: "recovery_required" | "route_ineligible" | "authority_drift" | "lineage_unavailable",
+  ordinal: number,
+) {
+  return {
+    ...researchAssignmentResult(outcome, ordinal),
+    packetRefreshRequired: outcome === "authority_drift",
+    threadDisposition: "KEEP_VISIBLE" as const,
+  };
+}
+
+function researchAssignmentResult(
+  outcome: "registered" | "already_registered" | "recovery_required" |
+    "route_ineligible" | "authority_drift" | "lineage_unavailable",
+  ordinal: number,
+) {
+  return {
+    outcome,
+    ordinal: String(ordinal).padStart(2, "0"),
+    assignmentRecorded: outcome === "registered" || outcome === "already_registered",
+    childAuthenticationVerified: false as const,
+    modelUsageVerified: false as const,
+    playbookStageRecorded: false as const,
     monitoringProofRecorded: false as const,
   };
 }

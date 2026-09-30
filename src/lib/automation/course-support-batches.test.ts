@@ -118,6 +118,7 @@ import { obsoleteSourceQueryFixture } from "./course-support-source-query-revali
 import { revalidateCoursesForSourceQueryChange } from "./course-monitoring";
 import { hasUnresolvedCourseSupportSourceResearch } from "./course-support-source-research-outcome";
 import { CourseSupportEvidenceRefreshRequiredError } from "./course-support-closeout-errors";
+import { readCourseSupportLineage } from "./course-support-lineage";
 import * as campaignInspection from "./course-support-campaign";
 import {
   assessParkedCourseCampaignPostMarkerIncompletePlaybookRecovery,
@@ -10198,6 +10199,10 @@ describe("course-support claim demand fencing", () => {
     });
 
     expect(prismaMocks.batchCreate).toHaveBeenCalledTimes(1);
+    const lineage = readCourseSupportLineage(prismaMocks.batchCreate.mock.calls[0][0].data.summary);
+    expect(lineage).toMatchObject({ completeness: "COMPLETE_FROM_CLAIM", omittedEventCount: 0 });
+    expect(lineage?.originalAutomationRunId).toBe("routine-run");
+    expect(lineage?.events[0]).toMatchObject({ kind: "CLAIM", actorThreadId: "owner-thread", ownerThreadId: "owner-thread" });
   });
 
   it("claims an unconfirmed engineering-only incident for bounded responder confirmation", async () => {
@@ -17057,6 +17062,9 @@ describe("course-support recovery", () => {
       prismaMocks.batchUpdateMany.mock.calls[0]?.[0]?.data?.summary;
     expect(adoptedSummary).toEqual({
       ...expiredBatch.summary,
+      ownershipLineageV1: expect.objectContaining({ completeness: "LEGACY_INCOMPLETE", events: [expect.objectContaining({
+        kind: "RECOVERY_FENCE_ADOPTION", actorThreadId: "new-thread", ownerThreadId: "old-thread",
+      })] }),
       backgroundRecoveryRunV1: {
         schemaVersion: 1,
         ownerThreadId: "new-thread",
@@ -17097,6 +17105,9 @@ describe("course-support recovery", () => {
     });
     expect(prismaMocks.incidentUpdateMany).toHaveBeenCalledTimes(1);
     expect(prismaMocks.supportIncidentUpdateMany).toHaveBeenCalledTimes(1);
+    const history = readCourseSupportLineage(prismaMocks.batchUpdateMany.mock.calls[0][0].data.summary);
+    expect(history?.completeness).toBe("LEGACY_INCOMPLETE");
+    expect(history?.events.map(event => event.kind)).toEqual(["RECOVERY_FENCE_ADOPTION", "RECOVERY_CLOSEOUT"]);
   });
 
   it("does not overwrite a malformed legacy execution fence during recovery", async () => {
@@ -19109,6 +19120,9 @@ describe("course-support recovery", () => {
         }),
       }),
     );
+    expect(readCourseSupportLineage(prismaMocks.batchUpdateMany.mock.calls[0][0].data.summary)).toMatchObject({
+      completeness: "LEGACY_INCOMPLETE", events: [{ kind: "RECOVERY_TRANSFER", actorThreadId: "new-thread", previousOwnerThreadId: "old-thread", ownerThreadId: "new-thread" }],
+    });
   });
 
   it.each([
@@ -19325,6 +19339,9 @@ describe("course-support recovery", () => {
         }),
       }),
     );
+    expect(readCourseSupportLineage(prismaMocks.batchUpdateMany.mock.calls[0][0].data.summary)?.events).toEqual([
+      expect.objectContaining({ kind: "RECOVERY_CLOSEOUT", actorThreadId: "new-thread", ownerThreadId: "old-thread" }),
+    ]);
     expect(prismaMocks.incidentUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({

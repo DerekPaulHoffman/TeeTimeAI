@@ -313,6 +313,7 @@ function responderBatch(
     recheckDispatchedAt: null,
     revision: 4,
     ownerAutomationRunId: "run-1",
+    ownerThreadId: "expired-owner",
     ownerAutomationRun: null,
     activeIncidents: entries.map((entry) => ({
       id: String(entry.incident.id),
@@ -1460,6 +1461,9 @@ describe("course monitoring watchdog", () => {
         heartbeatAt: now,
         leaseExpiresAt: now,
         summary: expect.objectContaining({
+          ownershipLineageV1: expect.objectContaining({ completeness: "LEGACY_INCOMPLETE", events: [expect.objectContaining({
+            kind: "SYSTEM_CLOSEOUT", actorThreadId: null, ownerThreadId: "expired-owner",
+          })] }),
           closeout: {
             outcome: "retryable_failed",
             derivedOutcome: "retryable_failed",
