@@ -5,10 +5,27 @@ import { buildSearchSavedMessage } from "./monitoring-copy";
 describe("buildSearchSavedMessage", () => {
   it("keeps the standard confirmation when every course can be monitored", () => {
     expect(buildSearchSavedMessage([
-      { name: "Timberlin Golf Course", monitoringSupport: "AUTOMATIC" }
+      { name: "Timberlin Golf Course", monitoringSupport: "AUTOMATIC", monitoringReadiness: "READY" }
     ])).toContain(
       "We'll email you the moment a matching tee time opens up."
     );
+  });
+
+  it.each([undefined, "VERIFYING"] as const)("does not promise alerts from capability alone with readiness %s", (monitoringReadiness) => {
+    const message = buildSearchSavedMessage([{
+      name: "Pending Reader Course", monitoringSupport: "AUTOMATIC", monitoringReadiness,
+    }]);
+    expect(message).toContain("whether alerts are available for Pending Reader Course");
+    expect(message).not.toContain("the moment a matching tee time opens up");
+  });
+
+  it("does not promise automatic restoration for an unavailable course without a direct-action classification", () => {
+    const message = buildSearchSavedMessage([{
+      name: "Unavailable Course", monitoringSupport: "AUTOMATIC", monitoringReadiness: "UNAVAILABLE",
+    }]);
+    expect(message).toContain("Use the official site for current availability");
+    expect(message).not.toContain("restore checks");
+    expect(message).not.toContain("the moment a matching tee time opens up");
   });
 
   it("does not promise alerts before monitoring has been confirmed", () => {

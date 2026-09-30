@@ -4,6 +4,7 @@ import {
   type CourseAlertSupport,
   type CourseMonitoringSupport
 } from "@/lib/courses/intelligence";
+import { hasReadyAutomaticMonitoring } from "@/lib/places/course-monitoring-evidence";
 
 type MonitoringCourse = {
   name: string;
@@ -27,7 +28,7 @@ export function buildSearchSavedMessage(courses: MonitoringCourse[]) {
       !isManualOnlyAlertSupport(course.alertSupport) &&
       course.monitoringReadiness !== "UNAVAILABLE" &&
       course.monitoringReadiness !== "TEMPORARILY_UNAVAILABLE" &&
-      course.monitoringSupport !== "AUTOMATIC"
+      !hasReadyAutomaticMonitoring(course)
   );
   const unavailable = courses.filter(
     (course) =>
@@ -54,7 +55,7 @@ export function buildSearchSavedMessage(courses: MonitoringCourse[]) {
   }
   if (unavailable.length > 0) {
     details.push(
-      `Tee-time alerts are currently unavailable for ${formatCourseNames(unavailable)}. Use the official site while Tee Time Spot works to restore checks.`
+      `Tee-time alerts are currently unavailable for ${formatCourseNames(unavailable)}. Use the official site for current availability.`
     );
   }
   if (manualOnly.length > 0) {

@@ -77,6 +77,7 @@ import {
   MAX_ADDITIONAL_ALERT_EMAILS
 } from "@/lib/validation/search-constraints";
 import { buildSearchSavedMessage } from "@/lib/searches/monitoring-copy";
+import { clearCourseMonitoringEvidence, hasReadyAutomaticMonitoring } from "@/lib/places/course-monitoring-evidence";
 import {
   isAdditionalAlertEmailValid,
   normalizeAdditionalAlertEmails
@@ -372,8 +373,9 @@ function TeeTimeIntakeContent({
         if (transferred.holes !== undefined) setHoleFilter(transferred.holes);
         if (transferred.coordinates !== undefined) setSearchCoordinates(transferred.coordinates);
         if (transferred.selectedCourse !== undefined) {
-          setSelected([transferred.selectedCourse]);
-          setCourses([transferred.selectedCourse]);
+          const restoredCourse = clearCourseMonitoringEvidence(transferred.selectedCourse);
+          setSelected([restoredCourse]);
+          setCourses([restoredCourse]);
           shouldRefreshRestoredCoursesRef.current =
             transferred.coordinates !== undefined;
           hasTrackedCourseSelectionRef.current = true;
@@ -387,8 +389,8 @@ function TeeTimeIntakeContent({
         if (draft.players !== undefined) setPlayers(draft.players);
         if (draft.holes !== undefined) setHoleFilter(draft.holes);
         if (draft.coordinates !== undefined) setSearchCoordinates(draft.coordinates);
-        setCourses(draft.courses);
-        setSelected(draft.selectedCourses);
+        setCourses(draft.courses.map(clearCourseMonitoringEvidence));
+        setSelected(draft.selectedCourses.map(clearCourseMonitoringEvidence));
         shouldRefreshRestoredCoursesRef.current =
           draft.coordinates !== undefined && draft.courses.length > 0;
         hasTrackedCourseSelectionRef.current = draft.selectedCourses.length > 0;
@@ -1508,7 +1510,7 @@ function TeeTimeIntakeContent({
                     </span>
                   ) : course.firstTimeLookup ? (
                     <span className="selected-course-support">First-time course lookup</span>
-                  ) : course.monitoringSupport !== "AUTOMATIC" ? (
+                  ) : !hasReadyAutomaticMonitoring(course) ? (
                     <span className="selected-course-support">Verdict after first check</span>
                   ) : null}
                 </div>
@@ -2128,10 +2130,7 @@ function CourseMonitoringStatus({
   const isTemporarilyUnavailable =
     course.monitoringReadiness === "TEMPORARILY_UNAVAILABLE";
   const isUnavailable = course.monitoringReadiness === "UNAVAILABLE";
-  const isAutomatic =
-    course.monitoringSupport === "AUTOMATIC" &&
-    !isTemporarilyUnavailable &&
-    !isUnavailable;
+  const isAutomatic = hasReadyAutomaticMonitoring(course);
   const isUnconfirmed =
     !isIdentityReviewRequired &&
     (isPublicAccessUnverified ||

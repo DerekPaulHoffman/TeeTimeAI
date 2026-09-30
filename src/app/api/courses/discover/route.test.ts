@@ -201,6 +201,49 @@ describe("GET /api/courses/discover provider configuration", () => {
     ]);
   });
 
+  it.each(["READY", "UNAVAILABLE"])("refreshes cached %s monitoring without retaining optional evidence", async (oldReadiness) => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const freshReadiness = oldReadiness === "READY" ? "UNAVAILABLE" : "READY";
+    const candidate = {
+      googlePlaceId: "cached-course", name: "Cached Public Course", latitude: 41.27, longitude: -73.02,
+    };
+    mocks.readCourseRuntimeCache.mockResolvedValue([{
+      ...candidate, alertSupport: "PHONE_ONLY", monitoringSupport: "AUTOMATIC",
+      monitoringReadiness: oldReadiness, monitoringReadinessObservedAt: "2026-09-29T19:29:22.000Z",
+      firstTimeLookup: true, profileUrl: "/courses/stale-guide",
+    }]);
+    mocks.enrichCoursesWithAlertSupport.mockImplementation(async (courses) => courses.map((course: object) => ({
+      ...course, monitoringSupport: "AUTOMATIC", monitoringReadiness: freshReadiness,
+    })));
+
+    const response = await GET(request());
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      courses: [{ ...candidate, monitoringSupport: "AUTOMATIC", monitoringReadiness: freshReadiness }],
+      demo: false,
+    });
+    expect(mocks.enrichCoursesWithAlertSupport).toHaveBeenCalledWith([candidate]);
+    expect(mocks.searchNearbyGolfCourses).not.toHaveBeenCalled();
+    expect(mocks.writeCourseRuntimeCache).not.toHaveBeenCalled();
+  });
+
+  it("does not serve cached readiness when the current canonical read fails", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    mocks.readCourseRuntimeCache.mockResolvedValue([{
+      googlePlaceId: "cached-course", name: "Cached Public Course",
+      monitoringSupport: "AUTOMATIC", monitoringReadiness: "READY",
+    }]);
+    mocks.enrichCoursesWithAlertSupport.mockRejectedValue(new Error("Canonical course read unavailable"));
+
+    const response = await GET(request());
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).not.toHaveProperty("courses");
+    expect(mocks.searchNearbyGolfCourses).not.toHaveBeenCalled();
+    expect(mocks.cacheCourseCandidatePhotos).not.toHaveBeenCalled();
+  });
+
   it("returns known persisted courses when the Google quota is exhausted", async () => {
     process.env.GOOGLE_PLACES_API_KEY = "test-key";
     mocks.searchNearbyGolfCourses.mockRejectedValue(

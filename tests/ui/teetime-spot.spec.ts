@@ -29,6 +29,7 @@ const smokeCourses = [
   longitude: -73.2 - index * 0.002,
   name,
   monitoringSupport: index === 0 ? "AUTOMATIC" : "UNCONFIRMED",
+  monitoringReadiness: index === 0 ? "READY" : "VERIFYING",
   par: [72, 72, 71, 70, 71, 72, 72][index],
   photoReference: `ui-smoke-photo-${index + 1}`,
   ...(index === 0
