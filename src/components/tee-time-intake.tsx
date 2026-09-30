@@ -912,7 +912,7 @@ function TeeTimeIntakeContent({
     setSubmittedCourseLookupQuery(normalizedQuery);
     setCourseLookupResults([]);
     setCourseLookupState("loading");
-    setCourseLookupMessage("Looking for matching golf coursesâ€¦");
+    setCourseLookupMessage("Looking for matching golf courses...");
 
     let responseStatus: number | undefined;
     try {
