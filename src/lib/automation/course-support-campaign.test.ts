@@ -9,6 +9,7 @@ import {
   deriveParkedCourseCampaignHumanReviewCycles,
   getReportSafeProviderFamilyCategory,
   inspectActiveParkedCourseCampaign,
+  inspectLatestParkedCourseCampaign,
   loadCampaignMemberObservations,
   loadParkedCourseCampaignAdmissionMembers,
   loadParkedCourseCampaignMembers,
@@ -921,6 +922,9 @@ describe("parked course campaign", () => {
       monitoringFailureFingerprint: "SOURCE:LEGACY",
     });
     expect(snapshots[0]).not.toHaveProperty("activeRealSearchCount");
+    expect(snapshots[0]).not.toHaveProperty("zeroExecutionEvidence");
+    expect(snapshots[0]).not.toHaveProperty("readerCourse");
+    expect(findMany.mock.calls[0]?.[0].select).not.toHaveProperty("batchIncidents");
     const audit = createParkedCourseCampaignAudit({
       expectedCount: 1,
       capturedAt: parkedAt,
@@ -957,6 +961,77 @@ describe("parked course campaign", () => {
         }),
       }),
     );
+  });
+
+  it("inspects global parked members without initial batch evidence and accepts an exact empty fresh-cycle reload", async () => {
+    const row = campaignParkedRow({
+      cycle: 3,
+      attemptLedger: null,
+      batchIncidents: [],
+      events: [{
+        id: "parked-event",
+        incidentId: "incident-1",
+        eventType: "HUMAN_REVIEW_REQUESTED",
+        source: "RECOVERY_CRON",
+        failureFingerprint: "SOURCE:MISSING",
+        occurredAt: new Date("2026-08-20T12:30:00.000Z"),
+        audit: {
+          cycle: 3,
+          customerState: "NEEDS_HUMAN_REVIEW",
+          parkedUntilMaterialChange: true,
+          automationStalled: true,
+        },
+      }],
+    });
+    const { batchIncidents, ...snapshot } = row;
+    const captured = member(1, {
+      revision: row.revision,
+      monitoringRevision: row.course.monitoringStatus.revision,
+      providerSnapshotFingerprint: buildCourseSupportProviderSnapshotFingerprint(providerCourseSnapshot),
+      attemptLedgerFingerprint: createParkedCourseCampaignAttemptLedgerFingerprint(null),
+      playbookConclusion: "INCOMPLETE",
+      latestProbeAt: null,
+      latestDiscoveryAt: null,
+    });
+    const audit = createParkedCourseCampaignAudit({ expectedCount: 1, capturedAt, members: [captured] });
+    const findMany = vi.fn(async (query: { select: Record<string, unknown> }) => {
+      if (query.select.batchIncidents) return [{ id: row.id, cycle: row.cycle, batchIncidents }];
+      if (query.select.activeBatchId) return [{
+        ...snapshot,
+        activeBatchId: null,
+        confirmedAt: null,
+        firstSeenAt: capturedAt,
+        attemptCount: 0,
+      }];
+      return [snapshot];
+    });
+    const result = await inspectLatestParkedCourseCampaign({
+      automationRun: { findFirst: vi.fn().mockResolvedValue({
+        id: "campaign-run-1", status: "RUNNING", completedAt: null, outcome: null, audit,
+      }) },
+      courseSupportIncident: { findMany, count: vi.fn().mockResolvedValue(1) },
+      courseSupportBatchIncident: { findMany: vi.fn().mockResolvedValue([]) },
+    } as never, { now: new Date("2026-08-20T13:00:00.000Z"), admissionRuntimeVersion: "a".repeat(40) });
+
+    expect(result).toMatchObject({ totalCount: 1, readyCount: 1, engineeringBlockerCount: 0, remainingGlobalParkedCount: 1 });
+    expect(findMany.mock.calls[0]?.[0].select).not.toHaveProperty("batchIncidents");
+    expect(findMany.mock.calls[1]?.[0].select).not.toHaveProperty("batchIncidents");
+    expect(findMany).toHaveBeenNthCalledWith(3, expect.objectContaining({
+      where: { id: "incident-1", cycle: 3 },
+      take: 1,
+      select: expect.objectContaining({ batchIncidents: expect.objectContaining({
+        where: { cycle: 3 }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], take: 21,
+      }) }),
+    }));
+    await expect(loadParkedCourseCampaignAdmissionMembers(
+      audit,
+      { courseSupportIncident: { findMany } } as never,
+      "campaign-run-1",
+      "a".repeat(40),
+      new Date("2026-08-20T13:00:00.000Z"),
+    )).resolves.toEqual([expect.objectContaining({
+      admissionMode: "FRESH_CYCLE", capturedCycle: 3, cycle: 3,
+    })]);
   });
 
   it.each([4, 5])(
@@ -2846,7 +2921,10 @@ describe("parked course campaign", () => {
         batchIncidents: [preMarkerEntry(), postMarkerEntry()],
       });
     const database = (row: ReturnType<typeof makeRow>) => {
-      const findMany = vi.fn().mockResolvedValue([row]);
+      const { batchIncidents, ...snapshot } = row;
+      const findMany = vi.fn().mockResolvedValueOnce([snapshot]).mockResolvedValue([
+        { id: row.id, cycle: row.cycle, batchIncidents },
+      ]);
       return {
         database: { courseSupportIncident: { findMany } } as never,
         findMany,
@@ -2965,6 +3043,7 @@ describe("parked course campaign", () => {
     expect(planned[0]?.sameCycleRecoveryHistoryDigest).toMatch(
       /^[a-f0-9]{64}$/u,
     );
+    expect(positive.findMany.mock.calls[0]?.[0].select).not.toHaveProperty("batchIncidents");
     expect(positive.findMany).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({
@@ -2974,6 +3053,21 @@ describe("parked course campaign", () => {
         }),
       }),
     );
+    for (const [label, reloaded] of [
+      ["missing reload", []],
+      ["mismatched incident", [{ id: "another-incident", cycle: 4, batchIncidents: [] }]],
+      ["mismatched cycle", [{ id: "incident-1", cycle: 5, batchIncidents: [] }]],
+      ["empty exact recovery history", [{ id: "incident-1", cycle: 4, batchIncidents: [] }]],
+    ] as const) {
+      const initial = makeRow();
+      const findMany = vi.fn().mockResolvedValueOnce([initial]).mockResolvedValueOnce(reloaded);
+      const rejected = await loadParkedCourseCampaignAdmissionMembers(
+        audit, { courseSupportIncident: { findMany } } as never, "campaign-run-1", currentRuntime,
+      );
+      expect(rejected, label).toEqual([]);
+      expect(findMany.mock.calls[0]?.[0].select).not.toHaveProperty("batchIncidents");
+      expect(findMany).toHaveBeenCalledTimes(2);
+    }
 
     // Compose the real native inspection and admission loader. Selection may
     // use a checked local commit without forging deployed provider provenance.
@@ -3630,14 +3724,19 @@ describe("parked course campaign", () => {
       extra.verificationRequests[0]!.id = `extra-request-${ordinal}`;
       tooMany.batchIncidents.push(extra);
     }
+    expect(tooMany.batchIncidents).toHaveLength(21);
+    const overflowing = database(tooMany);
     await expect(
       loadParkedCourseCampaignAdmissionMembers(
         audit,
-        database(tooMany).database,
+        overflowing.database,
         "campaign-run-1",
         currentRuntime,
       ),
     ).resolves.toEqual([]);
+    expect(overflowing.findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      select: expect.objectContaining({ batchIncidents: expect.objectContaining({ take: 21 }) }),
+    }));
   });
 
   it("plans only the exact requestless stale-ownership campaign recovery", async () => {

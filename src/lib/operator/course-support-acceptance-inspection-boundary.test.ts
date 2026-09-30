@@ -148,6 +148,72 @@ describe("full native campaign inspection through the acceptance read boundary",
     expect(fixture.mutation).not.toHaveBeenCalled();
     expect(globalMocks.escapedRead).not.toHaveBeenCalled();
   });
+
+  it("keeps unused older batch evidence outside the full 112-member native inspection and projection", async () => {
+    const fixture = campaignDatabase({ oversizedUnselectedOlderBatchEvidence: true });
+    const database = { $transaction: vi.fn(async (work: (transaction: Prisma.TransactionClient) => Promise<unknown>) => work(fixture.transaction)) };
+    const result = await loadCourseSupportAcceptanceReasons(database as unknown as Parameters<typeof loadCourseSupportAcceptanceReasons>[0], SOURCE_SHA);
+
+    expect(result).toMatchObject({ schemaVersion: 3, status: "AVAILABLE", reason: "COMPLETE_NATIVE_TRACE",
+      readFence: null, evidenceReadComplete: true, customerDataIncluded: false,
+      futureUnknown: { reconciliation: "MATCH" }, rollingAmbiguous: { reconciliation: "MATCH" } });
+    assertCompleteReloads(fixture);
+    const snapshots = fixture.calls.filter((call) => call.model === "courseSupportIncident" && call.method === "findMany" &&
+      (call.args as Query).where?.humanReviewReason === "AUTOMATION_STALLED");
+    expect(snapshots).not.toHaveLength(0);
+    expect(snapshots.every((call) => !Object.hasOwn((call.args as Query).select!, "batchIncidents"))).toBe(true);
+    const byteStatements = fixture.calls.filter((call) => call.model === "$queryRaw").map((call) => call.args as Prisma.Sql);
+    expect(byteStatements.every((statement) => statement.values.every((value) =>
+      typeof value !== "string" || !value.startsWith("private-older-")))).toBe(true);
+
+    const native = campaignDatabase();
+    const inspection = (await inspectLatestParkedCourseCampaign(native.transaction, { now: NOW, admissionRuntimeVersion: SOURCE_SHA }))!;
+    const { runId, totalCount, ...observedCampaign } = inspection;
+    expect(totalCount).toBe(112);
+    expect(inspection).toMatchObject({ readyCount: 112, terminalCount: 0, engineeringBlockerCount: 0 });
+    const expected = await loadCourseSupportAcceptanceProjection({ now: NOW, observedCampaign }, {
+      loadCourseFleetCounts: (input) => loadOperatorCourseFleetCounts(input, native.transaction),
+      loadLatestCampaignRecord: () => native.transaction.automationRun.findFirst({
+        where: { id: runId }, select: { id: true, status: true, audit: true, notes: true },
+      }),
+      loadFreshGlobalParkedCount: () => native.transaction.courseSupportIncident.count({
+        where: { status: "NEEDS_HUMAN", humanReviewReason: "AUTOMATION_STALLED", activeBatchId: null, nextAttemptAt: null },
+      }),
+      loadCampaignSummary: (input) => loadOperatorCourseSupportCampaign(input,
+        createOperatorCourseSupportCampaignDependencies(native.transaction, { now: NOW, admissionRuntimeVersion: SOURCE_SHA })),
+    });
+    expect(result.acceptanceProjection).toEqual(expected);
+    expect(JSON.stringify(result)).not.toMatch(/private-|https:\/\//u);
+    expect(fixture.mutation).not.toHaveBeenCalled();
+    expect(native.mutation).not.toHaveBeenCalled();
+    expect(globalMocks.escapedRead).not.toHaveBeenCalled();
+  });
+
+  it("still rejects oversized required current-cycle proof after inspecting every member's exact history scope", async () => {
+    const fixture = campaignDatabase({ oversizedCurrentCycleProof: true });
+    const database = { $transaction: vi.fn(async (work: (transaction: Prisma.TransactionClient) => Promise<unknown>) => work(fixture.transaction)) };
+    const result = await loadCourseSupportAcceptanceReasons(database as unknown as Parameters<typeof loadCourseSupportAcceptanceReasons>[0], SOURCE_SHA);
+
+    expect(result).toMatchObject({ schemaVersion: 3, status: "UNAVAILABLE", reason: "EVIDENCE_BOUND_EXCEEDED",
+      readFence: { phase: "CAMPAIGN_INSPECTION", boundary: "SELECTED_EVIDENCE_BYTES" },
+      acceptanceProjection: null, futureUnknown: null, rollingAmbiguous: null,
+      evidenceReadComplete: false, customerDataIncluded: false });
+    const reloads = fixture.calls.filter((call) => call.model === "courseSupportIncident" && call.method === "findMany" &&
+      typeof (call.args as Query).where?.id === "string" &&
+      ((call.args as Query).select?.batchIncidents as Query | undefined)?.take === 21);
+    const identityReloads = reloads.filter((call) =>
+      (((call.args as Query).select?.batchIncidents as Query).select?.proofSnapshot) !== true);
+    expect(identityReloads).toHaveLength(112);
+    expect(new Set(identityReloads.map((call) => (call.args as Query).where!.id)).size).toBe(112);
+    expect(reloads.some((call) => (call.args as Query).where!.id === "private-incident-112" &&
+      (((call.args as Query).select?.batchIncidents as Query).select?.proofSnapshot) === true)).toBe(false);
+    const byteStatements = fixture.calls.filter((call) => call.model === "$queryRaw").map((call) => call.args as Prisma.Sql);
+    expect(byteStatements.some((statement) => statement.text.includes('acceptance_row."proofSnapshot"') &&
+      statement.values.includes("private-entry-112"))).toBe(true);
+    expect(JSON.stringify(result)).not.toMatch(/private-|https:\/\//u);
+    expect(fixture.mutation).not.toHaveBeenCalled();
+    expect(globalMocks.escapedRead).not.toHaveBeenCalled();
+  });
 });
 
 function assertCompleteReloads(fixture: ReturnType<typeof campaignDatabase>) {
@@ -162,7 +228,12 @@ function assertCompleteReloads(fixture: ReturnType<typeof campaignDatabase>) {
   expect(nativeReloads.every((call) => (call.args as Query).take === 1)).toBe(true);
 }
 
-function campaignDatabase(input: { readerCandidates?: boolean; oversizedUnselectedRunErrors?: boolean } = {}) {
+function campaignDatabase(input: {
+  readerCandidates?: boolean;
+  oversizedUnselectedRunErrors?: boolean;
+  oversizedUnselectedOlderBatchEvidence?: boolean;
+  oversizedCurrentCycleProof?: boolean;
+} = {}) {
   const rows = new Map(Prisma.dmmf.datamodel.models.map((model) => [model.name, [] as Row[]]));
   const members: ParkedCourseCampaignMember[] = [];
   const cycle = input.readerCandidates ? 4 : 3;
@@ -217,7 +288,9 @@ function campaignDatabase(input: { readerCandidates?: boolean; oversizedUnselect
       completedAt: PARKED_AT, summary: null, activeIncidents: [],
     };
     const entry: Row = { id: `private-entry-${ordinal}`, batchId: batch.id, incidentId, courseId, cycle,
-      result: "PENDING", preProbeId: null, postProbeId: null, proofSnapshot: null,
+      result: "PENDING", preProbeId: null, postProbeId: null,
+      proofSnapshot: input.oversizedCurrentCycleProof && ordinal === PARKED_COURSE_CAMPAIGN_EXPECTED_COUNT
+        ? { privateEvidence: "x".repeat(ACCEPTANCE_READ_LIMITS.evidenceBytes + 1) } : null,
       verifiedIncidentUpdatedAt: null, verifiedAt: null, createdAt: CAPTURED_AT, updatedAt: PARKED_AT,
       batch, incident, course };
     const request: Row = { id: `private-request-${ordinal}`, batchIncidentId: entry.id, batchIncident: entry, courseId,
@@ -234,6 +307,27 @@ function campaignDatabase(input: { readerCandidates?: boolean; oversizedUnselect
     for (const [model, value] of [["Course", course], ["CourseSupportIncident", incident], ["CourseMonitoringStatus", status],
       ["CourseMonitoringEvent", event], ["CourseSupportBatch", batch], ["CourseSupportBatchIncident", entry],
       ["CourseSupportVerificationRequest", request], ["AutomationRun", ownerRun]] as const) rows.get(model)!.push(value);
+    if (input.oversizedUnselectedOlderBatchEvidence && ordinal === 1) {
+      const privateEvidence = "x".repeat(ACCEPTANCE_READ_LIMITS.evidenceBytes + 1);
+      const olderAt = new Date(CAPTURED_AT.getTime() - 60_000);
+      const olderOwner: Row = { ...ownerRun, id: "private-older-owner", completedAt: olderAt,
+        notes: privateEvidence };
+      const olderBatch: Row = { ...batch, id: "private-older-batch", ownerAutomationRunId: olderOwner.id,
+        ownerAutomationRun: olderOwner, createdAt: olderAt, updatedAt: olderAt, completedAt: olderAt,
+        summary: { privateEvidence } };
+      const olderEntry: Row = { ...entry, id: "private-older-entry", batchId: olderBatch.id,
+        cycle: cycle - 1, createdAt: olderAt, updatedAt: olderAt, batch: olderBatch,
+        proofSnapshot: { privateEvidence } };
+      const olderRequest: Row = { ...request, id: "private-older-request", batchIncidentId: olderEntry.id,
+        batchIncident: olderEntry, createdAt: olderAt, updatedAt: olderAt, providerSnapshotAt: olderAt,
+        evidence: { privateEvidence }, lastError: privateEvidence };
+      incident.batchIncidents = [entry, olderEntry];
+      olderEntry.verificationRequests = [olderRequest];
+      olderBatch.incidents = [olderEntry];
+      olderOwner.supportBatches = [olderBatch];
+      for (const [model, value] of [["CourseSupportBatch", olderBatch], ["CourseSupportBatchIncident", olderEntry],
+        ["CourseSupportVerificationRequest", olderRequest], ["AutomationRun", olderOwner]] as const) rows.get(model)!.push(value);
+    }
     members.push({ courseId, incidentId, cycle: 3, revision: 7, monitoringRevision: 11,
       monitoringFailureFingerprint: "SOURCE:MISSING", kind: "NEEDS_ADAPTER", providerFamilyKey: "SOURCE_MISSING",
       failureClass: "MISSING_SOURCE", failureFingerprint: "SOURCE:MISSING",

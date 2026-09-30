@@ -167,7 +167,18 @@ function loaderFixture(currentCourse: ParkedCourseStartedLocalReaderCourse = cou
   };
   const database = {
     automationRun: {}, courseSupportBatchIncident: {},
-    courseSupportIncident: { findMany: vi.fn().mockResolvedValue([row]) },
+    courseSupportIncident: { findMany: vi.fn(async (query: {
+      where: Record<string, unknown>;
+      select: Record<string, unknown>;
+      take?: number;
+    }) => {
+      if (query.select.batchIncidents) {
+        return [{ id: row.id, cycle: row.cycle, batchIncidents: evidence.batchIncidents }];
+      }
+      const { batchIncidents, ...snapshot } = row;
+      void batchIncidents;
+      return [snapshot];
+    }) },
     teeSearch: { count: vi.fn().mockResolvedValue(0) },
     localReaderAgent: { findMany: vi.fn().mockResolvedValue([currentAgent]) },
   };
@@ -368,7 +379,18 @@ describe("current started local-reader continuation", () => {
     expect(scenario.database.teeSearch.count).toHaveBeenCalledWith({ where: { status: "ACTIVE", preferences: { some: { courseId: "fixture-course" } } } });
     const firstQuery = scenario.database.courseSupportIncident.findMany.mock.calls[0]![0];
     expect(firstQuery.where).toMatchObject({ activeBatchId: null, decisionAt: null, status: "NEEDS_HUMAN" });
-    expect(firstQuery.select.batchIncidents.select.batch.select._count).toEqual({ select: { incidents: true } });
+    expect(firstQuery.select).not.toHaveProperty("batchIncidents");
+    const exactQuery = scenario.database.courseSupportIncident.findMany.mock.calls[1]![0];
+    expect(exactQuery).toMatchObject({
+      where: { id: scenario.row.id, cycle: scenario.row.cycle },
+      take: 1,
+      select: { batchIncidents: {
+        where: { cycle: scenario.row.cycle },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        take: 21,
+        select: { batch: { select: { _count: { select: { incidents: true } } } } },
+      } },
+    });
   });
 
   it("strips private course context from the immutable capture boundary", async () => {
