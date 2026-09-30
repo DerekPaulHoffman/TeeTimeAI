@@ -6,15 +6,13 @@ import { prisma } from "@/lib/prisma";
 
 import { runSerializedCourseMonitoringWrite } from "./course-monitoring";
 
-export const PROVIDER_EXECUTION_MARKERS = [
-  "RUNNABLE_PROVIDER_CHECK",
-  "LOCAL_BROWSER_READER",
-] as const;
-
-export type ProviderExecutionMarker =
-  (typeof PROVIDER_EXECUTION_MARKERS)[number];
-
-export const PROVIDER_EXECUTION_EVIDENCE_MAX_LAG_MS = 20 * 60_000;
+export {
+  PROVIDER_EXECUTION_MARKERS,
+  PROVIDER_EXECUTION_EVIDENCE_MAX_LAG_MS,
+  isProviderExecutionMarker,
+  getProviderExecutionEvidenceObservedAt,
+  type ProviderExecutionMarker,
+} from "./provider-execution-evidence";
 
 // ProviderRequestLease already supplies a durable token-fenced lease primitive.
 // A distinct, hashed key keeps this observation fence separate from provider-
@@ -41,43 +39,6 @@ export type CourseProviderObservationFence = {
   retryUntil: Date;
   state: "ACTIVE" | "EXPIRED_RETRYABLE" | "EXPIRED_TERMINAL";
 };
-
-const providerExecutionMarkers = new Set<string>(PROVIDER_EXECUTION_MARKERS);
-
-export function isProviderExecutionMarker(
-  value: unknown,
-): value is ProviderExecutionMarker {
-  return typeof value === "string" && providerExecutionMarkers.has(value);
-}
-
-export function getProviderExecutionEvidenceObservedAt(input: {
-  rawSummary: unknown;
-  probeObservedAt: Date;
-}) {
-  if (
-    !(input.probeObservedAt instanceof Date) ||
-    !Number.isFinite(input.probeObservedAt.getTime())
-  ) {
-    return null;
-  }
-  const summary = asRecord(input.rawSummary);
-  if (
-    summary.providerExecution !== "RUNNABLE_PROVIDER_CHECK" &&
-    summary.providerExecution !== "LOCAL_BROWSER_READER"
-  ) {
-    return null;
-  }
-  const providerObservedAt = parseCanonicalTimestamp(
-    summary.providerObservedAt,
-  );
-  if (!providerObservedAt) return null;
-  const persistenceLagMs =
-    input.probeObservedAt.getTime() - providerObservedAt.getTime();
-  return persistenceLagMs >= 0 &&
-    persistenceLagMs <= PROVIDER_EXECUTION_EVIDENCE_MAX_LAG_MS
-    ? providerObservedAt
-    : null;
-}
 
 /**
  * Establishes the operational fence before a provider observation can begin.
@@ -498,20 +459,6 @@ function waitForCourseProviderObservationHeartbeat(signal: AbortSignal) {
     }, COURSE_PROVIDER_OBSERVATION_HEARTBEAT_MS);
     signal.addEventListener("abort", onAbort, { once: true });
   });
-}
-
-function parseCanonicalTimestamp(value: unknown) {
-  if (typeof value !== "string") return null;
-  const parsed = new Date(value);
-  return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value
-    ? parsed
-    : null;
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
 }
 
 function getCourseProviderObservationKey(courseId: string) {

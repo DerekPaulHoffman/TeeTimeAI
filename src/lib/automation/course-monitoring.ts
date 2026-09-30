@@ -74,6 +74,7 @@ import {
   buildProviderFailureFingerprint,
   normalizeProviderFamilyKey,
 } from "./provider-capabilities";
+import { getProviderExecutionEvidenceObservedAt } from "./provider-execution-evidence";
 import {
   buildCourseSupportProviderSnapshotFingerprint,
   COURSE_SUPPORT_VERIFICATION_ENDPOINT_DELIVERY_MARGIN_MS,
@@ -4358,8 +4359,24 @@ export async function reconcileCourseMonitoringDeadline(input: {
         });
       }
 
+      const recoveryFenceAt = [
+        incident.lastSeenAt,
+        incident.confirmedAt,
+        status.lastSuccessfulAt,
+        status.lastFailureAt,
+      ].reduce<Date | null>((latest, value) => {
+        if (!(value instanceof Date) || !Number.isFinite(value.getTime())) {
+          return latest;
+        }
+        return !latest || value > latest ? value : latest;
+      }, null);
       const authoritativeResolution =
-        status.state === "HEALTHY"
+        status.state === "HEALTHY" &&
+        status.lastSuccessfulAt &&
+        status.lastSuccessfulAt <= input.now &&
+        status.lastSuccessfulAt > incident.lastSeenAt &&
+        (!incident.confirmedAt || status.lastSuccessfulAt > incident.confirmedAt) &&
+        (!status.lastFailureAt || status.lastSuccessfulAt > status.lastFailureAt)
           ? ("MONITORING_RESTORED" as const)
           : status.state === "FINAL_MANUAL"
             ? ("DIRECT_BOOKING_CLASSIFIED" as const)
@@ -4421,7 +4438,7 @@ export async function reconcileCourseMonitoringDeadline(input: {
           courseId: input.courseId,
           outcome: { in: ["MATCH_FOUND", "NO_MATCH"] },
           observedAt: {
-            gt: incident.lastSeenAt,
+            gt: recoveryFenceAt ?? incident.lastSeenAt,
             lte: input.now,
           },
           teeSearch: {
@@ -4434,9 +4451,22 @@ export async function reconcileCourseMonitoringDeadline(input: {
           outcome: true,
           observedAt: true,
           runtimeVersion: true,
+          rawSummary: true,
         },
       });
-      if (freshSuccessProbe) {
+      const freshSuccessProviderObservedAt = freshSuccessProbe
+        ? getProviderExecutionEvidenceObservedAt({
+            rawSummary: freshSuccessProbe.rawSummary,
+            probeObservedAt: freshSuccessProbe.observedAt,
+          })
+        : null;
+      if (
+        freshSuccessProbe &&
+        freshSuccessProviderObservedAt &&
+        recoveryFenceAt &&
+        freshSuccessProviderObservedAt > recoveryFenceAt &&
+        freshSuccessProbe.observedAt <= input.now
+      ) {
         if (staleBatchNeedsEndpointReconcile && activeBatch) {
           return reconcileStaleBatchOwnershipAtEndpoint(transaction, {
             batch: activeBatch,
@@ -4454,13 +4484,13 @@ export async function reconcileCourseMonitoringDeadline(input: {
             },
             data: {
               state: "HEALTHY",
-              lastSuccessfulAt: freshSuccessProbe.observedAt,
+              lastSuccessfulAt: freshSuccessProviderObservedAt,
               consecutiveFailures: 0,
               failureFingerprint: null,
               firstDegradedAt: null,
               nextAutomaticAttemptAt: null,
               revalidationRequestedAt: null,
-              stateChangedAt: freshSuccessProbe.observedAt,
+              stateChangedAt: freshSuccessProviderObservedAt,
               revision: { increment: 1 },
             },
           });
@@ -4480,14 +4510,14 @@ export async function reconcileCourseMonitoringDeadline(input: {
               },
               data: {
                 status: "RESOLVED",
-                resolvedAt: freshSuccessProbe.observedAt,
+                resolvedAt: freshSuccessProviderObservedAt,
                 resolution: "MONITORING_RESTORED",
                 resolutionMessage:
                   "Reconciled from a fresh successful customer monitoring probe.",
                 nextAction: null,
                 nextAttemptAt: null,
                 nextReminderAt: null,
-                lastSeenAt: freshSuccessProbe.observedAt,
+                lastSeenAt: freshSuccessProviderObservedAt,
                 revision: { increment: 1 },
               },
             });
@@ -4508,7 +4538,7 @@ export async function reconcileCourseMonitoringDeadline(input: {
           message:
             "A durable fresh probe was adopted after monitoring closeout was interrupted.",
           runtimeVersion: freshSuccessProbe.runtimeVersion,
-          occurredAt: freshSuccessProbe.observedAt,
+          occurredAt: freshSuccessProviderObservedAt,
           audit: {
             recoveredFromProbeCrashBoundary: true,
             customerDataIncluded: false,
@@ -4529,7 +4559,7 @@ export async function reconcileCourseMonitoringDeadline(input: {
             input.source,
             freshSuccessProbe.runtimeVersion,
           ),
-          occurredAt: freshSuccessProbe.observedAt,
+          occurredAt: freshSuccessProviderObservedAt,
           audit: {
             cycle: incident.cycle,
             confirmedAt: incident.confirmedAt?.toISOString() ?? null,
@@ -12974,7 +13004,8 @@ export function selectSearchWorkflowMonitoringRetryAt(input: {
     if (
       incident.status === "AUTO_INVESTIGATING" &&
       !incident.humanReviewReason &&
-      incident.escalationDeadlineAt
+      incident.escalationDeadlineAt &&
+      incident.escalationDeadlineAt > input.now
     ) {
       candidates.push(incident.escalationDeadlineAt);
     }
