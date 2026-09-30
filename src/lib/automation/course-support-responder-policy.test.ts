@@ -132,6 +132,64 @@ describe("course-support responder safeguards", () => {
     });
   });
 
+  it.each([
+    "ownershipLineageV1",
+    "ownership_lineage_v1",
+    "ownership-lineage-v1",
+    " OWNERSHIP_LINEAGE_V1 "
+  ])("redacts the whole private %s object at any nesting level", (key) => {
+    const lineage = {
+      schemaVersion: 1,
+      arbitraryReference: "non-uuid-private-reference",
+      events: [
+        {
+          specialistThreadId: "non-uuid-specialist",
+          parentThreadId: "non-uuid-parent",
+          privatePacket: { contextDigest: "private-context-binding" }
+        }
+      ]
+    };
+
+    expect(
+      sanitizeResponderValue({
+        outcome: "success",
+        [key]: lineage,
+        nested: [{ [key]: lineage, verifiedClosureCount: 1 }],
+        unknownCount: 0,
+        ratePercent: null
+      })
+    ).toEqual({
+      outcome: "success",
+      [key]: "[redacted]",
+      nested: [{ [key]: "[redacted]", verifiedClosureCount: 1 }],
+      unknownCount: 0,
+      ratePercent: null
+    });
+  });
+
+  it.each([
+    "specialistThreadId",
+    "previousOwnerThreadId",
+    "parentThreadId",
+    "actorThreadId",
+    "fromOwnerThreadId",
+    "toOwnerThreadId"
+  ])("redacts private %s aliases independently of reference format", (key) => {
+    const normalized = key.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
+    const aliases = [key, normalized, normalized.replaceAll("_", "-")];
+    const input = aliases.map((alias) => ({
+      [alias]: { rawReference: "non-uuid-private-reference" },
+      admittedBackgroundCount: 1
+    }));
+
+    expect(sanitizeResponderValue(input)).toEqual(
+      aliases.map((alias) => ({
+        [alias]: "[redacted]",
+        admittedBackgroundCount: 1
+      }))
+    );
+  });
+
   it("keeps authoritative closeout counts distinct in the sanitized CLI envelope", () => {
     expect(
       sanitizeResponderValue({

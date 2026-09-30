@@ -83,8 +83,10 @@ import {
 import { inspectOwnedCourseSupportProviderContract } from "@/lib/automation/provider-contract-inspection";
 import {
   getOwnedCourseSupportResearchContext,
+  registerOwnedCourseSupportResearchSpecialist,
   validateOwnedCourseSupportResearchContext,
 } from "@/lib/automation/course-support-research-context";
+import { isCourseSupportLineageThreadRef } from "@/lib/automation/course-support-lineage";
 import type {
   VercelDeploymentInspection,
   VercelDeploymentList,
@@ -684,6 +686,9 @@ async function runCommand(
     case "validate-research-context":
       (verificationCommands?.write ?? writeResult)(await validateResearchContext(args));
       return;
+    case "register-research-specialist":
+      (verificationCommands?.write ?? writeResult)(await registerResearchSpecialist(args));
+      return;
     case "claim-path":
       writeResult(await claimPath(args));
       return;
@@ -729,7 +734,7 @@ async function runCommand(
       return;
     default:
       throw new Error(
-        "Unknown course-support command. Use inspect, coverage, acceptance-history, claim, packet, research-context, validate-research-context, inspect-provider-contract, claim-path, source-search-context, record-source-search, mark-needs-human, heartbeat, verify-release, verify, closeout, recover, or backfill."
+        "Unknown course-support command. Use inspect, coverage, acceptance-history, claim, packet, research-context, validate-research-context, register-research-specialist, inspect-provider-contract, claim-path, source-search-context, record-source-search, mark-needs-human, heartbeat, verify-release, verify, closeout, recover, or backfill."
       );
   }
 }
@@ -842,11 +847,45 @@ async function validateResearchContext(args: string[]) {
   });
 }
 
-export function parseCourseSupportResearchOptions(args: readonly string[], requireDigest: boolean) {
-  const command = requireDigest ? "validate-research-context" : "research-context";
+async function registerResearchSpecialist(args: string[]) {
+  const options = parseCourseSupportResearchSpecialistOptions(args);
+  // This command records a declaration by the currently executing owner. An
+  // explicit argument alone does not provide that native owner agreement.
+  if (!process.env.CODEX_THREAD_ID?.trim()) {
+    throw new Error("Research specialist registration requires the current native CODEX_THREAD_ID.");
+  }
+  const ownerThreadId = requireOwnerThread(args);
+  const batchId = await resolveCourseSupportBatchReference(options.batchRef);
+  return registerOwnedCourseSupportResearchSpecialist({
+    batchId,
+    leaseToken: await getOwnedCourseSupportLeaseToken({ batchId, ownerThreadId }),
+    ownerThreadId,
+    ordinal: options.ordinal,
+    contextDigest: options.contextDigest,
+    specialistThreadId: options.specialistThreadId,
+  });
+}
+
+export function parseCourseSupportResearchSpecialistOptions(args: readonly string[]) {
+  const parsed = parseCourseSupportResearchOptions(args, true, true);
+  if (!readSingleOption([...args], "--owner-thread")) {
+    throw new Error("Research specialist registration requires an explicit --owner-thread matching native context.");
+  }
+  if (!parsed.contextDigest || !parsed.specialistThreadId) {
+    throw new Error("Research specialist registration requires its exact context digest and specialist thread.");
+  }
+  return { ...parsed, contextDigest: parsed.contextDigest, specialistThreadId: parsed.specialistThreadId };
+}
+
+export function parseCourseSupportResearchOptions(
+  args: readonly string[], requireDigest: boolean, registerSpecialist = false,
+) {
+  const command = registerSpecialist ? "register-research-specialist" :
+    requireDigest ? "validate-research-context" : "research-context";
   const allowed = new Set([
     "--batch-ref", "--ordinal", "--owner-thread",
     ...(requireDigest ? ["--context-digest"] : []),
+    ...(registerSpecialist ? ["--specialist-thread"] : []),
   ]);
   const seen = new Set<string>();
   for (let index = 0; index < args.length; index += 2) {
@@ -870,7 +909,15 @@ export function parseCourseSupportResearchOptions(args: readonly string[], requi
   if (requireDigest && (!contextDigest || !/^[a-f0-9]{64}$/u.test(contextDigest))) {
     throw new Error(`${command} requires a 64-character lowercase --context-digest.`);
   }
-  return { batchRef, ordinal: Number(rawOrdinal), contextDigest };
+  const specialistThreadId = registerSpecialist ? readSingleOption([...args], "--specialist-thread") : undefined;
+  if (registerSpecialist && (!specialistThreadId ||
+      !isCourseSupportLineageThreadRef(specialistThreadId))) {
+    throw new Error(`${command} requires a bounded native --specialist-thread reference.`);
+  }
+  return {
+    batchRef, ordinal: Number(rawOrdinal), contextDigest,
+    ...(registerSpecialist ? { specialistThreadId } : {}),
+  };
 }
 
 export function parseCourseSupportProviderContractInspectionOptions(

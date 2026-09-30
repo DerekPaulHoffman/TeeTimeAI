@@ -34,6 +34,7 @@ import { assertCurrentSearchCheckWrite } from "@/lib/automation/search-check-wri
 import { isGenericCourseName } from "@/lib/places/course-identity";
 
 import { sanitizeResponderText } from "./course-support-responder-policy";
+import { appendCourseSupportLineage } from "./course-support-lineage";
 import { revalidateCoursesForSourceQueryChange as revalidateSourceQueries } from "./course-support-source-query-revalidation";
 import {
   runCourseSupportBrowserPersistenceWrite,
@@ -364,6 +365,7 @@ type DeadlineBatchSnapshot = {
   recheckDispatchedAt: Date | null;
   revision: number;
   ownerAutomationRunId: string | null;
+  ownerThreadId: string | null;
   ownerAutomationRun: {
     id: string;
     kind: AutomationRunKind;
@@ -3997,6 +3999,7 @@ export async function reconcileCourseMonitoringDeadline(input: {
                 recheckDispatchedAt: true,
                 revision: true,
                 ownerAutomationRunId: true,
+                ownerThreadId: true,
                 ownerAutomationRun: {
                   select: {
                     id: true,
@@ -8107,7 +8110,11 @@ async function reconcileStaleBatchOwnershipAtEndpoint(
         heartbeatAt: input.now,
         leaseExpiresAt: input.now,
         summary: {
-          ...summary,
+          ...appendCourseSupportLineage(summary, {
+            kind: "SYSTEM_CLOSEOUT",
+            actorThreadId: null,
+            ownerThreadId: batch.ownerThreadId,
+          }, input.now),
           closeout: {
             outcome: derivedOutcome,
             derivedOutcome,

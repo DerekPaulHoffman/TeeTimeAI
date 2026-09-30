@@ -203,17 +203,24 @@ function isForbiddenResponderKey(name: string) {
   return (
     [
       "address",
+      "actor_thread_id",
       "affected_search_refs",
       "batch_id",
       "booking_url",
       "course_id",
       "email",
       "evidence_url",
+      "from_owner_thread_id",
       "incident_id",
       "owner_thread_id",
+      "ownership_lineage_v1",
+      "parent_thread_id",
+      "previous_owner_thread_id",
       "raw_response",
       "recipient",
       "search_id",
+      "specialist_thread_id",
+      "to_owner_thread_id",
       "workflow_id",
       "workflow_run_id"
     ].includes(normalized) ||

@@ -20,6 +20,7 @@ import { syntheticWebsiteTrafficClasses } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
 import { isGenericCourseName } from "@/lib/places/course-identity";
 import { readCustomerRecovery } from "./course-support-customer-recovery";
+import { appendCourseSupportLineage, createCourseSupportLineage } from "./course-support-lineage";
 
 import {
   buildCourseSupportProviderSnapshotFingerprint,
@@ -5752,6 +5753,9 @@ export async function claimCourseSupportBatch(input: {
             maxCourses: lockedSelection.selectionLane === "BACKGROUND" ? 1 : maxCourses,
             summary: {
               schemaVersion: 1,
+              ownershipLineageV1: createCourseSupportLineage(
+                automationRun.id, input.ownerThreadId, claimDatabaseNow,
+              ),
               selectionLane: {
                 schemaVersion: 1,
                 lane: lockedSelection.selectionLane,
@@ -13310,7 +13314,11 @@ async function closeoutCourseSupportBatchAttempt(
         heartbeatAt: now,
         leaseExpiresAt: now,
         summary: {
-          ...asJsonObject(batch.summary),
+          ...appendCourseSupportLineage(asJsonObject(batch.summary), {
+            kind: "OWNER_CLOSEOUT",
+            actorThreadId: input.ownerThreadId,
+            ownerThreadId: batch.ownerThreadId,
+          }, now),
           ...(customerRecovery ? { customerRecovery } : {}),
           closeout: {
             outcome,
@@ -15065,7 +15073,11 @@ export async function recoverCourseSupportBatch(input: {
               heartbeatAt: now,
               leaseExpiresAt: now,
               summary: {
-                ...summary,
+                ...appendCourseSupportLineage(summary, {
+                  kind: "RECOVERY_CLOSEOUT",
+                  actorThreadId: input.requestingThreadId,
+                  ownerThreadId: batch.ownerThreadId,
+                }, now),
                 ...backgroundRecoveryRun,
                 closeout: {
                   outcome: derivedOutcome,
@@ -15693,7 +15705,11 @@ export async function recoverCourseSupportBatch(input: {
                     },
                     data: {
                       summary: {
-                        ...asJsonObject(batch.summary),
+                        ...appendCourseSupportLineage(asJsonObject(batch.summary), {
+                          kind: "RECOVERY_FENCE_ADOPTION",
+                          actorThreadId: input.requestingThreadId,
+                          ownerThreadId: batch.ownerThreadId,
+                        }, now),
                         ...backgroundRecoveryRun,
                         searchExecutionFence: emptyLegacyFence,
                       } as Prisma.InputJsonValue,
@@ -15838,7 +15854,11 @@ export async function recoverCourseSupportBatch(input: {
                     },
                     data: {
                       summary: {
-                        ...asJsonObject(batch.summary),
+                        ...appendCourseSupportLineage(asJsonObject(batch.summary), {
+                          kind: "RECOVERY_FENCE_ADOPTION",
+                          actorThreadId: input.requestingThreadId,
+                          ownerThreadId: batch.ownerThreadId,
+                        }, now),
                         ...backgroundRecoveryRun,
                         executionEver,
                         searchExecutionFence:
@@ -16261,7 +16281,11 @@ export async function recoverCourseSupportBatch(input: {
               heartbeatAt: now,
               leaseExpiresAt: now,
               summary: {
-                ...summary,
+                ...appendCourseSupportLineage(summary, {
+                  kind: "RECOVERY_CLOSEOUT",
+                  actorThreadId: input.requestingThreadId,
+                  ownerThreadId: batch.ownerThreadId,
+                }, now),
                 ...backgroundRecoveryRun,
                 closeout: {
                   outcome: derivedOutcome,
@@ -16611,7 +16635,12 @@ export async function recoverCourseSupportBatch(input: {
       data: {
         ownerThreadId: input.requestingThreadId,
         summary: {
-          ...asJsonObject(batch.summary),
+          ...appendCourseSupportLineage(asJsonObject(batch.summary), {
+            kind: "RECOVERY_TRANSFER",
+            actorThreadId: input.requestingThreadId,
+            previousOwnerThreadId: batch.ownerThreadId,
+            ownerThreadId: input.requestingThreadId,
+          }, now),
           ...backgroundRecoveryRun,
         } as Prisma.InputJsonValue,
         leaseToken,
