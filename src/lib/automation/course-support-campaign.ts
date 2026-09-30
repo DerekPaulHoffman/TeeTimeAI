@@ -3038,11 +3038,6 @@ async function loadParkedCourseCampaignMemberSnapshots(
           audit: true,
         },
       },
-      batchIncidents: {
-        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-        take: 20,
-        select: parkedCourseCampaignBatchIncidentSelect,
-      },
       course: {
         select: {
           name: true,
@@ -3236,7 +3231,9 @@ async function loadParkedCourseCampaignMemberSnapshots(
           monitoringHistoryCompleteSince:
             input.monitoringEventsNotBefore ?? null,
           monitoringEvents: incident.monitoringEvents,
-          batchIncidents: currentCycleBatchIncidents ?? incident.batchIncidents,
+          // Member-only callers discard recovery evidence; admission requires
+          // the exact current-cycle reload above before this snapshot is built.
+          batchIncidents: currentCycleBatchIncidents ?? [],
           playbookAssessment: assessAutomationPlaybook(
             incident.attemptLedger,
             incident.cycle,
