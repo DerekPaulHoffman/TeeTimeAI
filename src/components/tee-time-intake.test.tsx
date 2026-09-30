@@ -220,8 +220,9 @@ describe("TeeTimeIntake", () => {
     await waitFor(() =>
       expect(window.sessionStorage.getItem(SEARCH_DRAFT_STORAGE_KEY)).toContain("course-1")
     );
-    const alertEmail = screen.getByLabelText(/Where should we send this alert?/);
+    const alertEmail = screen.getByLabelText(/Primary alert email/);
     expect((alertEmail as HTMLInputElement).value).toBe("golfer@example.com");
+    expect((alertEmail as HTMLInputElement).readOnly).toBe(true);
     fireEvent.change(alertEmail, { target: { value: "alternate@example.com" } });
     expect(screen.getByRole("group", { name: "Alert your group too" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
@@ -233,7 +234,7 @@ describe("TeeTimeIntake", () => {
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/searches",
       expect.objectContaining({
-        body: expect.stringContaining('"alertEmail":"alternate@example.com"')
+        body: expect.stringContaining('"alertEmail":"golfer@example.com"')
       })
     );
     expect(window.sessionStorage.getItem(SEARCH_DRAFT_STORAGE_KEY)).toBeNull();

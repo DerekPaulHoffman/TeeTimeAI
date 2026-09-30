@@ -290,7 +290,7 @@ function TeeTimeIntakeContent({
     initialValues.radius ?? DEFAULT_COURSE_SEARCH_RADIUS_MILES
   );
   const accountEmail = accountState.status === "signed-in" ? accountState.email : "";
-  const [alertEmail, setAlertEmail] = useState(accountEmail);
+  const alertEmail = accountEmail;
   const [date, setDate] = useState(
     () => initialValues.date ?? getNextSaturdayDateInputValue()
   );
@@ -1570,14 +1570,14 @@ function TeeTimeIntakeContent({
         ) : null}
         {selected.length > 0 ? (
           <label className="figma-alert-email" htmlFor="alertEmail">
-            <span>Where should we send this alert?</span>
+            <span>Primary alert email</span>
             <input
               aria-describedby="alert-email-help search-form-guidance"
               aria-invalid={hasInvalidAlertEmail}
               autoComplete="email"
               disabled={accountState.status !== "signed-in"}
               id="alertEmail"
-              onChange={(event) => setAlertEmail(event.target.value)}
+              readOnly
               type="email"
               value={alertEmail}
               placeholder={
@@ -1587,7 +1587,7 @@ function TeeTimeIntakeContent({
               }
             />
             <small id="alert-email-help">
-              Starts with your account email. Change it to send this alert somewhere else.
+              Alerts go to your signed-in account email. Add extra recipients below to include your group.
             </small>
           </label>
         ) : null}
