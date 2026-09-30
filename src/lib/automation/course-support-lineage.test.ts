@@ -33,7 +33,7 @@ describe("private course support mutation lineage", () => {
   it.each(["OWNER_CLOSEOUT", "SYSTEM_CLOSEOUT"] as const)("records %s and rejects a later mutation as complete history", kind => {
     const summary = appendCourseSupportLineage(claim(), { kind, actorThreadId: kind === "SYSTEM_CLOSEOUT" ? null : "owner-1", ownerThreadId: "owner-1" }, later);
     expect(readCourseSupportLineage(summary)?.events.at(-1)?.actorThreadId).toBe(kind === "SYSTEM_CLOSEOUT" ? null : "owner-1");
-    expect(readCourseSupportLineage(appendCourseSupportLineage(summary, { kind: "RECOVERY_FENCE_ADOPTION", actorThreadId: "recoverer", ownerThreadId: "owner-1" }, later))).toBeNull();
+    expect(readCourseSupportLineage(appendCourseSupportLineage(summary, { kind: "RECOVERY_FENCE_ADOPTION", actorThreadId: "recoverer", ownerThreadId: "owner-1" }, later))).toMatchObject({ completeness: "INVALID_EVENT_INCOMPLETE", omittedEventCount: 1 });
   });
 
   it("binds a declared specialist to its owner epoch and owned packet without accepting usage or proof", () => {
@@ -95,13 +95,30 @@ describe("private course support mutation lineage", () => {
     { kind: "SYSTEM_CLOSEOUT", actorThreadId: "invented-system-actor", ownerThreadId: "owner-1" },
     { kind: "RESEARCH_ASSIGNMENT", actorThreadId: "owner-1", ownerThreadId: "owner-1", specialistThreadId: "owner-1", ordinal: 1, incidentCycle: 1, contextDigest: "a".repeat(64) },
   ] as const)("rejects incoherent $kind authority as attribution evidence", input => {
-    expect(readCourseSupportLineage(appendCourseSupportLineage(claim(), input, later))).toBeNull();
+    expect(readCourseSupportLineage(appendCourseSupportLineage(claim(), input, later))).toMatchObject({ completeness: "INVALID_EVENT_INCOMPLETE", omittedEventCount: 1, events: claim().ownershipLineageV1.events });
+  });
+
+  it("keeps a valid prefix with an explicit permanent gap for invalid recovery input", () => {
+    const invalid = appendCourseSupportLineage(claim(), {
+      kind: "RECOVERY_TRANSFER", actorThreadId: "not-an-email@example.test", ownerThreadId: "not-an-email@example.test", previousOwnerThreadId: "owner-1",
+    }, later);
+    expect(readCourseSupportLineage(invalid)).toMatchObject({ completeness: "INVALID_EVENT_INCOMPLETE", omittedEventCount: 1, events: claim().ownershipLineageV1.events });
+    expect(JSON.stringify(invalid)).not.toContain("example.test");
+    const after = appendCourseSupportLineage(invalid, { kind: "OWNER_CLOSEOUT", actorThreadId: "owner-1", ownerThreadId: "owner-1" }, later);
+    expect(readCourseSupportLineage(after)).toMatchObject({ completeness: "INVALID_EVENT_INCOMPLETE", omittedEventCount: 2, events: claim().ownershipLineageV1.events });
+  });
+
+  it("marks invalid initial claim or absent history without storing raw invalid fields", () => {
+    const invalidClaim = createCourseSupportLineage("bad run", "bad owner", now);
+    expect(readCourseSupportLineage({ ownershipLineageV1: invalidClaim })).toMatchObject({ completeness: "INVALID_EVENT_INCOMPLETE", originalAutomationRunId: null, events: [], omittedEventCount: 1 });
+    expect(readCourseSupportLineage(appendCourseSupportLineage({}, { kind: "OWNER_CLOSEOUT", actorThreadId: "bad owner", ownerThreadId: "bad owner" }, later))).toMatchObject({ completeness: "INVALID_EVENT_INCOMPLETE", events: [], omittedEventCount: 1 });
+    expect(readCourseSupportLineage(appendCourseSupportLineage(claim(), { kind: "OWNER_CLOSEOUT", actorThreadId: "owner-1", ownerThreadId: "owner-1" }, new Date("invalid")))).toMatchObject({ completeness: "INVALID_EVENT_INCOMPLETE", omittedEventCount: 1 });
   });
 
   it("rejects counter/model/raw fields and backward clock evidence", () => {
     const summary = claim();
     Object.assign(summary.ownershipLineageV1.events[0], { inputTokens: 42 });
     expect(readCourseSupportLineage(summary)).toBeNull();
-    expect(readCourseSupportLineage(appendCourseSupportLineage(claim(), { kind: "RECOVERY_FENCE_ADOPTION", actorThreadId: "recoverer", ownerThreadId: "owner-1" }, new Date(now.getTime() - 1)))).toBeNull();
+    expect(readCourseSupportLineage(appendCourseSupportLineage(claim(), { kind: "RECOVERY_FENCE_ADOPTION", actorThreadId: "recoverer", ownerThreadId: "owner-1" }, new Date(now.getTime() - 1)))).toMatchObject({ completeness: "INVALID_EVENT_INCOMPLETE", events: claim().ownershipLineageV1.events });
   });
 });

@@ -32,6 +32,7 @@ export type CourseSupportOwnershipLineageV1 = {
   completeness:
     | "COMPLETE_FROM_CLAIM"
     | "LEGACY_INCOMPLETE"
+    | "INVALID_EVENT_INCOMPLETE"
     | "OVERFLOW_INCOMPLETE";
   originalAutomationRunId: string | null;
   omittedEventCount: number;
@@ -93,13 +94,20 @@ function validEvent(value: unknown): value is CourseSupportLineageEvent {
 export function readCourseSupportLineage(summary: unknown): CourseSupportOwnershipLineageV1 | null {
   const lineage = record(record(summary)?.ownershipLineageV1);
   if (!lineage || Object.keys(lineage).some(key => !lineageKeys.has(key)) || lineage.schemaVersion !== 1 ||
-      !["COMPLETE_FROM_CLAIM", "LEGACY_INCOMPLETE", "OVERFLOW_INCOMPLETE"].includes(String(lineage.completeness)) ||
+      !["COMPLETE_FROM_CLAIM", "LEGACY_INCOMPLETE", "INVALID_EVENT_INCOMPLETE", "OVERFLOW_INCOMPLETE"].includes(String(lineage.completeness)) ||
       !(lineage.originalAutomationRunId === null || validRef(lineage.originalAutomationRunId)) ||
       !Number.isSafeInteger(lineage.omittedEventCount) || Number(lineage.omittedEventCount) < 0 ||
       !Array.isArray(lineage.events) || lineage.events.length > COURSE_SUPPORT_LINEAGE_EVENT_LIMIT ||
-      lineage.events.length === 0 || !lineage.events.every(validEvent)) return null;
+      !lineage.events.every(validEvent)) return null;
   const events = lineage.events as CourseSupportLineageEvent[];
+  if (lineage.completeness === "INVALID_EVENT_INCOMPLETE") {
+    if (Number(lineage.omittedEventCount) < 1) return null;
+    if (events.length === 0) return lineage as unknown as CourseSupportOwnershipLineageV1;
+  } else if (events.length === 0) return null;
   const first = events[0];
+  if (first.kind === "CLAIM" ?
+      first.ownerEpoch !== 1 || !validRef(lineage.originalAutomationRunId) :
+      lineage.originalAutomationRunId !== null) return null;
   if (lineage.completeness === "COMPLETE_FROM_CLAIM" &&
       (first.kind !== "CLAIM" || first.ownerEpoch !== 1 || !validRef(lineage.originalAutomationRunId) || lineage.omittedEventCount !== 0)) return null;
   if (lineage.completeness === "LEGACY_INCOMPLETE" &&
@@ -124,6 +132,11 @@ export function readCourseSupportLineage(summary: unknown): CourseSupportOwnersh
 }
 
 export function createCourseSupportLineage(originalAutomationRunId: string, ownerThreadId: string, now: Date): CourseSupportOwnershipLineageV1 {
+  if (!validRef(originalAutomationRunId) || !validRef(ownerThreadId) || !Number.isFinite(now.getTime())) return {
+    schemaVersion: 1, completeness: "INVALID_EVENT_INCOMPLETE",
+    originalAutomationRunId: validRef(originalAutomationRunId) ? originalAutomationRunId : null,
+    omittedEventCount: 1, events: [],
+  };
   return {
     schemaVersion: 1,
     completeness: "COMPLETE_FROM_CLAIM",
@@ -143,6 +156,16 @@ export function appendCourseSupportLineage(summary: Record<string, unknown>, inp
     schemaVersion: 1, completeness: "LEGACY_INCOMPLETE",
     originalAutomationRunId: null, omittedEventCount: 0, events: []
   };
+  const invalidEvent = () => ({
+    ...summary,
+    ownershipLineageV1: {
+      ...lineage, completeness: "INVALID_EVENT_INCOMPLETE",
+      omittedEventCount: lineage.omittedEventCount + 1,
+    },
+  });
+  // Keep every known valid event and mark the gap; never preserve COMPLETE after
+  // dropping an actual mutation, and never retain invalid input in the history.
+  if (lineage.completeness === "INVALID_EVENT_INCOMPLETE" || !Number.isFinite(now.getTime())) return invalidEvent();
   if (lineage.events.length === COURSE_SUPPORT_LINEAGE_EVENT_LIMIT) return {
     ...summary,
     ownershipLineageV1: { ...lineage, completeness: "OVERFLOW_INCOMPLETE", omittedEventCount: lineage.omittedEventCount + 1 }
@@ -154,6 +177,6 @@ export function appendCourseSupportLineage(summary: Record<string, unknown>, inp
       ownerEpoch: (last?.ownerEpoch ?? 0) + (input.kind === "RECOVERY_TRANSFER" ? 1 : 0),
       observedAt: now.toISOString() }]
   };
-  // Invalid references/timing/transition remain unavailable without blocking provider work.
-  return { ...summary, ownershipLineageV1: next };
+  const candidate = { ...summary, ownershipLineageV1: next };
+  return readCourseSupportLineage(candidate) ? candidate : invalidEvent();
 }

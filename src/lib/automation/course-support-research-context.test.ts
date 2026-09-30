@@ -843,6 +843,39 @@ describe("owner-bound research specialist registration", () => {
     expect(readCourseSupportLineage(updatedSummary)?.completeness).toBe("LEGACY_INCOMPLETE");
   });
 
+  it("refuses invalid-event history before an otherwise identical assignment without rewriting its valid prefix", async () => {
+    const batch = ownedFixture();
+    const assignment = await registrationInput(batch);
+    const assigned = appendCourseSupportLineage(batch.summary, {
+      kind: "RESEARCH_ASSIGNMENT", actorThreadId: input.ownerThreadId,
+      ownerThreadId: input.ownerThreadId, specialistThreadId: assignment.specialistThreadId,
+      ordinal: 1, incidentCycle: 1, contextDigest: assignment.contextDigest,
+    }, now);
+    const retained = readCourseSupportLineage(assigned);
+    if (!retained) throw new Error("Expected valid assignment prefix");
+    const invalidHistory = {
+      ...retained, completeness: "INVALID_EVENT_INCOMPLETE" as const, omittedEventCount: 1,
+    };
+    configureTransaction({ ...batch, summary: { ...batch.summary, ownershipLineageV1: invalidHistory } });
+    expect(await registerOwnedCourseSupportResearchSpecialist(assignment)).toMatchObject({
+      outcome: "lineage_unavailable", assignmentRecorded: false,
+      childAuthenticationVerified: false, modelUsageVerified: false,
+    });
+    expect(database.transactionBatchUpdateMany).not.toHaveBeenCalled();
+    expect(invalidHistory.events).toEqual(retained.events);
+  });
+
+  it("does not claim registration when a new assignment candidate becomes an invalid-event marker", async () => {
+    const batch = ownedFixture();
+    batch.summary.ownershipLineageV1.events[0].observedAt = "2026-09-28T14:01:00.000Z";
+    const assignment = await registrationInput(batch);
+    configureTransaction(batch);
+    expect(await registerOwnedCourseSupportResearchSpecialist(assignment)).toMatchObject({
+      outcome: "lineage_unavailable", assignmentRecorded: false,
+    });
+    expect(database.transactionBatchUpdateMany).not.toHaveBeenCalled();
+  });
+
   it("rejects self assignment and URL-like references before database access", async () => {
     const batch = ownedFixture();
     const assignment = await registrationInput(batch);

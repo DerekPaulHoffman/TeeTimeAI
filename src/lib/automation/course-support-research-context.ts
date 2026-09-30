@@ -295,6 +295,9 @@ export async function registerOwnedCourseSupportResearchSpecialist(
     if (!lineage && retainedSummary.ownershipLineageV1 !== undefined) {
       return researchAssignmentControl("lineage_unavailable", input.ordinal);
     }
+    if (lineage?.completeness === "INVALID_EVENT_INCOMPLETE") {
+      return researchAssignmentControl("lineage_unavailable", input.ordinal);
+    }
     if (lineage && (lineage.events.length >= COURSE_SUPPORT_LINEAGE_EVENT_LIMIT ||
         lineage.completeness === "OVERFLOW_INCOMPLETE")) {
       return researchAssignmentControl("lineage_unavailable", input.ordinal);
@@ -316,7 +319,15 @@ export async function registerOwnedCourseSupportResearchSpecialist(
       incidentCycle: current.researchContextV1.incidentCycle,
       contextDigest: input.contextDigest,
     }, now);
-    if (!readCourseSupportLineage(summary)) {
+    const updatedLineage = readCourseSupportLineage(summary);
+    const appendedAssignment = updatedLineage?.events.at(-1);
+    if (!updatedLineage || updatedLineage.completeness === "INVALID_EVENT_INCOMPLETE" ||
+        appendedAssignment?.kind !== "RESEARCH_ASSIGNMENT" ||
+        appendedAssignment.ownerThreadId !== input.ownerThreadId ||
+        appendedAssignment.specialistThreadId !== input.specialistThreadId ||
+        appendedAssignment.contextDigest !== input.contextDigest ||
+        appendedAssignment.ordinal !== input.ordinal ||
+        appendedAssignment.incidentCycle !== current.researchContextV1.incidentCycle) {
       return researchAssignmentControl("lineage_unavailable", input.ordinal);
     }
     const commitNow = await getResearchDatabaseNow(transaction);
