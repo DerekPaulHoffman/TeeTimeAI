@@ -1572,8 +1572,9 @@ test.describe("Tee Time Spot UI smoke", () => {
           date: "2026-09-30", courses, selectedCourses
         }));
       }, { courses: [newYork, tokyo], selectedCourses: [newYork] });
-      // These picker checks must never create alerts or request provider data.
-      await page.route("**/api/**", async (route) => {
+      // Fence application APIs so these picker checks cannot create alerts or query providers.
+      await page.route((url) =>
+        url.origin === smokeOrigin && url.pathname.startsWith("/api/"), async (route) => {
         expect(new URL(route.request().url()).pathname).toBe("/api/analytics/events");
         await route.fulfill({
           body: JSON.stringify({ event: { id: "date-picker-event" } }),
