@@ -1721,7 +1721,7 @@ function TeeTimeIntakeContent({
                     ? "Add a primary email to your account before creating alerts."
                     : accountState.status === "unavailable"
                       ? "Account access is temporarily unavailable, so alerts cannot be created."
-                      : `You’ll manage this alert from your signed-in account (${accountEmail}), even if you change where its emails are sent.`)}
+                      : `You’ll manage this alert from your signed-in account (${accountEmail}). Alerts go to that address and any extra recipients you add.`)}
           </p>
         </div>
       </aside>

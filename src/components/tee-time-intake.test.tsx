@@ -561,7 +561,7 @@ describe("TeeTimeIntake", () => {
     ).toBe(false);
     expect(
       screen.getByText(
-        "You’ll manage this alert from your signed-in account (golfer@example.com), even if you change where its emails are sent."
+        "You’ll manage this alert from your signed-in account (golfer@example.com). Alerts go to that address and any extra recipients you add."
       )
     ).toBeTruthy();
     expect(fetchMock).toHaveBeenCalledWith(
