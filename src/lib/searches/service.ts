@@ -43,6 +43,11 @@ import {
   type CourseProviderObservationFence,
 } from "@/lib/automation/provider-execution-marker";
 import { isSyntheticWebsiteTrafficClass } from "@/lib/engagement/traffic-class";
+import {
+  matchesCurrentSearchSettings,
+  type CurrentMatchSearchSettings,
+  type CurrentMatchSettings,
+} from "@/lib/searches/current-match-settings";
 
 const SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE = 0.06;
 const QUEUED_SEARCH_STATUSES = ["ACTIVE", "PAUSED"] as const;
@@ -798,9 +803,9 @@ function hideInternalGenerationMarker<
 }
 
 function projectCurrentCustomerMatches<
-  T extends {
+  T extends CurrentMatchSearchSettings & {
     statusEmailSnapshot?: unknown;
-    matches: Array<{
+    matches: Array<CurrentMatchSettings & {
       availabilityStatus: string;
       lastConfirmedAt: Date | null;
       course: {
@@ -859,7 +864,9 @@ function projectCurrentCustomerMatches<
           completedLocalReaderSource.state === "CONSUMED" ||
           latestMonitoringSourceAt >
             completedLocalReaderSource.providerObservedAt.getTime());
-      return sourceIsCurrent ? [{ ...match, course }] : [];
+      return sourceIsCurrent && matchesCurrentSearchSettings(search, match)
+        ? [{ ...match, course }]
+        : [];
     }),
   };
 }

@@ -104,4 +104,15 @@ describe("dashboard availability", () => {
       })
     ).toBeNull();
   });
+
+  it("keeps an old successful probe historical when no slot fits the current saved request", () => {
+    expect(getDashboardAvailabilityView({
+      outcome: "MATCH_FOUND", qualifyingMatchCount: 0, players: 2,
+      startTime: "10:00", endTime: "14:00",
+    })).toEqual({
+      label: "Availability found recently",
+      detail: "A previous check found availability. No matching time is currently confirmed for your saved request.",
+      tone: "available",
+    });
+  });
 });

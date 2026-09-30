@@ -113,4 +113,25 @@ describe("PATCH /api/searches/[id]", () => {
       schedule: null
     });
   });
+
+  it("returns the paused date-edit projection without reviving its workflow", async () => {
+    mocks.updateTeeSearchForUser.mockResolvedValue({
+      id: "search-1", status: "PAUSED", date: new Date("2026-09-30T00:00:00.000Z"), matches: [],
+    });
+
+    const response = await PATCH(
+      new NextRequest("http://localhost/api/searches/search-1", {
+        method: "PATCH", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ date: "2026-09-30", startTime: "10:00", endTime: "14:00", players: 2 }),
+      }),
+      { params: Promise.resolve({ id: "search-1" }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mocks.startSearchSchedule).not.toHaveBeenCalled();
+    expect(mocks.stopSearchSchedule).toHaveBeenCalledWith("search-1");
+    await expect(response.json()).resolves.toEqual({ search: {
+      id: "search-1", status: "PAUSED", date: "2026-09-30T00:00:00.000Z", matches: [],
+    }, schedule: null });
+  });
 });

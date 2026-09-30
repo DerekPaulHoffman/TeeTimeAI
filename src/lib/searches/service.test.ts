@@ -67,6 +67,47 @@ vi.mock(
 
 const mockedPrisma = vi.mocked(prisma, { deep: true });
 
+const currentSlotSettings = {
+  startsAt: new Date("2026-08-31T14:00:00.000Z"),
+  availableSpots: 4,
+};
+const currentCourseSettings = {
+  timeZone: "America/New_York",
+  layoutHoleCounts: [],
+  layoutHolesVerifiedAt: null,
+};
+function currentSearchSettings(courseIds = ["course-1"]) {
+  return {
+    date: new Date("2026-08-31T00:00:00.000Z"),
+    startTime: "09:00",
+    endTime: "18:00",
+    players: 2,
+    requestedLayoutHoles: null,
+    preferences: courseIds.map((id, index) => ({ rank: index + 1, course: { id } })),
+  };
+}
+
+function confirmedDateEditMatch(startsAt = "2026-10-01T14:00:00.000Z") {
+  const confirmedAt = new Date("2026-09-30T03:29:00.000Z");
+  return {
+    id: "old-date-match",
+    startsAt: new Date(startsAt),
+    availableSpots: 2,
+    availabilityStatus: "AVAILABLE",
+    alertStatus: "SENT",
+    lastConfirmedAt: confirmedAt,
+    course: {
+      id: "course-1",
+      ...currentCourseSettings,
+      monitoringStatus: {
+        state: "HEALTHY",
+        lastSuccessfulAt: confirmedAt,
+        lastFailureAt: new Date("2026-09-30T03:20:00.000Z"),
+      },
+    },
+  };
+}
+
 beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-07-01T12:00:00.000Z"));
@@ -96,6 +137,42 @@ afterEach(() => {
 });
 
 describe("listTeeSearchesForUser", () => {
+  it("hides the old date from a paused dashboard search while retaining its durable match", async () => {
+    const storedMatch = confirmedDateEditMatch();
+    const storedSearch = {
+      id: "search-1", status: "PAUSED", statusEmailSnapshot: null,
+      ...currentSearchSettings(),
+      date: new Date("2026-09-30T00:00:00.000Z"), startTime: "10:00", endTime: "14:00",
+      matches: [storedMatch],
+    };
+    mockedPrisma.teeSearch.findMany.mockResolvedValue([storedSearch] as never);
+    mockedPrisma.$queryRaw.mockResolvedValue([] as never);
+
+    const [projected] = await listTeeSearchesForUser("user-1");
+
+    expect(projected.matches).toEqual([]);
+    expect(projected.status).toBe("PAUSED");
+    expect(storedSearch.matches).toEqual([storedMatch]);
+    expect(storedMatch.availabilityStatus).toBe("AVAILABLE");
+    expect(storedMatch.alertStatus).toBe("SENT");
+  });
+
+  it("keeps a current-window confirmed match visible while the alert is paused", async () => {
+    mockedPrisma.teeSearch.findMany.mockResolvedValue([{
+      id: "search-1", status: "PAUSED", statusEmailSnapshot: null,
+      ...currentSearchSettings(),
+      date: new Date("2026-09-30T00:00:00.000Z"), startTime: "10:00", endTime: "14:00",
+      matches: [confirmedDateEditMatch("2026-09-30T14:00:00.000Z")],
+    }] as never);
+    mockedPrisma.$queryRaw.mockResolvedValue([] as never);
+
+    const [projected] = await listTeeSearchesForUser("user-1");
+
+    expect(projected.matches).toHaveLength(1);
+    expect(projected.matches[0].startsAt).toEqual(new Date("2026-09-30T14:00:00.000Z"));
+    expect(projected.matches[0].course).not.toHaveProperty("monitoringStatus");
+  });
+
   it("keeps the generation clock marker out of the public search shape", async () => {
     mockedPrisma.teeSearch.findMany.mockResolvedValue([
       {
@@ -147,10 +224,12 @@ describe("listTeeSearchesForUser", () => {
     const failedAt = new Date("2026-08-31T14:01:00.000Z");
     const currentMatch = {
       id: "match-current",
+      ...currentSlotSettings,
       availabilityStatus: "AVAILABLE",
       lastConfirmedAt: confirmedAt,
       course: {
         id: "course-current",
+        ...currentCourseSettings,
         monitoringStatus: {
           lastSuccessfulAt: confirmedAt,
           lastFailureAt: new Date("2026-08-31T13:59:00.000Z"),
@@ -159,10 +238,12 @@ describe("listTeeSearchesForUser", () => {
     };
     const staleMatch = {
       id: "match-stale",
+      ...currentSlotSettings,
       availabilityStatus: "AVAILABLE",
       lastConfirmedAt: confirmedAt,
       course: {
         id: "course-stale",
+        ...currentCourseSettings,
         monitoringStatus: {
           lastSuccessfulAt: confirmedAt,
           lastFailureAt: failedAt,
@@ -172,7 +253,7 @@ describe("listTeeSearchesForUser", () => {
     const persistedSearch = {
       id: "search-1",
       statusEmailSnapshot: null,
-      preferences: [],
+      ...currentSearchSettings(["course-current", "course-stale"]),
       matches: [currentMatch, staleMatch],
     };
     mockedPrisma.teeSearch.findMany.mockResolvedValue([
@@ -186,7 +267,7 @@ describe("listTeeSearchesForUser", () => {
     expect(searches[0]?.matches).toEqual([
       expect.objectContaining({
         id: "match-current",
-        course: { id: "course-current" },
+        course: { id: "course-current", ...currentCourseSettings },
       }),
     ]);
     expect(searches[0]?.matches[0]?.course).not.toHaveProperty(
@@ -200,10 +281,12 @@ describe("listTeeSearchesForUser", () => {
       const confirmedAt = new Date("2026-08-31T14:00:00.000Z");
       const persistedMatch = {
         id: "legacy-final-match",
+        ...currentSlotSettings,
         availabilityStatus: "AVAILABLE",
         lastConfirmedAt: confirmedAt,
         course: {
           id: "course-final",
+          ...currentCourseSettings,
           monitoringStatus: {
             state,
             lastSuccessfulAt: confirmedAt,
@@ -215,7 +298,7 @@ describe("listTeeSearchesForUser", () => {
         {
           id: "search-1",
           statusEmailSnapshot: null,
-          preferences: [],
+          ...currentSearchSettings(["course-final"]),
           matches: [persistedMatch],
         },
       ] as never);
@@ -234,10 +317,12 @@ describe("listTeeSearchesForUser", () => {
       const providerObservedAt = new Date("2026-08-31T14:01:00.000Z");
       const persistedMatch = {
         id: "match-reader-stale",
+        ...currentSlotSettings,
         availabilityStatus: "AVAILABLE",
         lastConfirmedAt: confirmedAt,
         course: {
           id: "course-1",
+          ...currentCourseSettings,
           monitoringStatus: {
             lastSuccessfulAt: confirmedAt,
             lastFailureAt: new Date("2026-08-31T13:59:00.000Z"),
@@ -247,7 +332,7 @@ describe("listTeeSearchesForUser", () => {
       const persistedSearch = {
         id: "search-1",
         statusEmailSnapshot: null,
-        preferences: [],
+        ...currentSearchSettings(),
         matches: [persistedMatch],
       };
       mockedPrisma.teeSearch.findMany.mockResolvedValue([
@@ -291,14 +376,16 @@ describe("listTeeSearchesForUser", () => {
         {
           id: "search-1",
           statusEmailSnapshot: null,
-          preferences: [],
+          ...currentSearchSettings(),
           matches: [
             {
               id: "match-reader-equal",
+              ...currentSlotSettings,
               availabilityStatus: "AVAILABLE",
               lastConfirmedAt: confirmedAt,
               course: {
                 id: "course-1",
+                ...currentCourseSettings,
                 monitoringStatus: {
                   lastSuccessfulAt: confirmedAt,
                   lastFailureAt: null,
@@ -334,14 +421,16 @@ describe("listTeeSearchesForUser", () => {
       {
         id: "search-1",
         statusEmailSnapshot: null,
-        preferences: [],
+        ...currentSearchSettings(),
         matches: [
           {
             id: "match-reader-consumed",
+            ...currentSlotSettings,
             availabilityStatus: "AVAILABLE",
             lastConfirmedAt: confirmedAt,
             course: {
               id: "course-1",
+              ...currentCourseSettings,
               monitoringStatus: {
                 lastSuccessfulAt: confirmedAt,
                 lastFailureAt: null,
@@ -378,14 +467,16 @@ describe("listTeeSearchesForUser", () => {
       {
         id: "search-1",
         statusEmailSnapshot: null,
-        preferences: [],
+        ...currentSearchSettings(),
         matches: [
           {
             id: "match-marker-stale",
+            ...currentSlotSettings,
             availabilityStatus: "AVAILABLE",
             lastConfirmedAt: confirmedAt,
             course: {
               id: "course-1",
+              ...currentCourseSettings,
               monitoringStatus: {
                 lastSuccessfulAt: confirmedAt,
                 lastFailureAt: null,
@@ -1898,13 +1989,16 @@ describe("updateTeeSearchStatusForUser", () => {
     mockedPrisma.teeSearch.update.mockResolvedValue({
       id: "search-1",
       statusEmailSnapshot: null,
+      ...currentSearchSettings(),
       matches: [
         {
           id: "match-reader-stale",
+          ...currentSlotSettings,
           availabilityStatus: "AVAILABLE",
           lastConfirmedAt: confirmedAt,
           course: {
             id: "course-1",
+            ...currentCourseSettings,
             monitoringStatus: {
               lastSuccessfulAt: confirmedAt,
               lastFailureAt: null,
@@ -1953,6 +2047,35 @@ describe("updateTeeSearchForUser", () => {
     } as never);
   });
 
+  it("returns zero current matches after editing the date without changing historical availability", async () => {
+    vi.setSystemTime(new Date("2026-09-30T03:40:00.000Z"));
+    const storedMatch = confirmedDateEditMatch();
+    const updatedSearch = {
+      id: "search-1", status: "PAUSED", statusEmailSnapshot: null,
+      ...currentSearchSettings(),
+      date: new Date("2026-09-30T00:00:00.000Z"), startTime: "10:00", endTime: "14:00",
+      matches: [storedMatch],
+    };
+    mockedPrisma.teeSearch.findUniqueOrThrow.mockReset().mockResolvedValue({
+      preferences: [{ course: { timeZone: "America/New_York" } }],
+    } as never);
+    deliveryOutboxMocks.lockSearchForAlertMutation.mockResolvedValue({ status: "PAUSED", alertGeneration: 2 });
+    mockedPrisma.teeSearch.update.mockResolvedValue(updatedSearch as never);
+
+    const projected = await updateTeeSearchForUser("user-1", "search-1", {
+      date: "2026-09-30", startTime: "10:00", endTime: "14:00", players: 2,
+    });
+
+    expect(projected.matches).toEqual([]);
+    expect(projected.status).toBe("PAUSED");
+    expect(mockedPrisma.teeSearch.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ date: new Date("2026-09-30T00:00:00.000Z") }),
+    }));
+    expect(updatedSearch.matches).toEqual([storedMatch]);
+    expect(storedMatch.availabilityStatus).toBe("AVAILABLE");
+    expect(storedMatch.alertStatus).toBe("SENT");
+  });
+
   it("accepts a future course-local edit after UTC midnight", async () => {
     vi.setSystemTime(new Date("2026-09-30T03:16:30.000Z"));
     mockedPrisma.teeSearch.findUniqueOrThrow.mockReset().mockResolvedValue({
@@ -1991,11 +2114,13 @@ describe("updateTeeSearchForUser", () => {
     const failureObservedAt = new Date("2026-08-31T14:01:00.000Z");
     const persistedMatch = {
       id: "match-stale",
+      ...currentSlotSettings,
       availabilityStatus: "AVAILABLE",
       lastConfirmedAt: successObservedAt,
       bookingUrl: "https://official.example/book",
       course: {
         id: "course-1",
+        ...currentCourseSettings,
         monitoringStatus: {
           lastSuccessfulAt: successObservedAt,
           lastFailureAt: failureObservedAt,
@@ -2006,6 +2131,7 @@ describe("updateTeeSearchForUser", () => {
       id: "search-1",
       status: "PAUSED",
       statusEmailSnapshot: null,
+      ...currentSearchSettings(),
       matches: [persistedMatch],
     } as never);
 
@@ -2023,13 +2149,16 @@ describe("updateTeeSearchForUser", () => {
       id: "search-1",
       status: "PAUSED",
       statusEmailSnapshot: null,
+      ...currentSearchSettings(),
       matches: [
         {
           id: "match-reader-stale",
+          ...currentSlotSettings,
           availabilityStatus: "AVAILABLE",
           lastConfirmedAt: confirmedAt,
           course: {
             id: "course-1",
+            ...currentCourseSettings,
             monitoringStatus: {
               lastSuccessfulAt: confirmedAt,
               lastFailureAt: null,
