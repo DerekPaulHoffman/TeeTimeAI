@@ -13,6 +13,8 @@ import {
   createParkedCourseCampaignAttemptLedgerFingerprint,
   createParkedCourseCampaignAudit,
   inspectLatestParkedCourseCampaign,
+  loadCampaignMemberObservations,
+  summarizeParkedCourseCampaignProgress,
   PARKED_COURSE_CAMPAIGN_EXPECTED_COUNT,
   PARKED_COURSE_CAMPAIGN_PROMPT_VERSION,
   type ParkedCourseCampaignMember,
@@ -32,8 +34,151 @@ const NOW = new Date("2026-08-20T14:00:00.000Z");
 const SOURCE_SHA = "a".repeat(40);
 type Row = Record<string, unknown>;
 type Query = { where?: Row; select?: Row; orderBy?: Row | Row[]; distinct?: string[]; take?: number; skip?: number; by?: string[] };
+type MemberProbeCase = "TIED_SUCCESS" | "TIED_FAILURE" | "NEWER_FAILURE" | "NULL_SUMMARY" | "MALFORMED_SUMMARY" | "BOOKING_NOT_OPEN" | "CONTINUATION" | "MISSING";
 
 describe("full native campaign inspection through the acceptance read boundary", () => {
+  it.each(["TIED_SUCCESS", "TIED_FAILURE", "NEWER_FAILURE", "NULL_SUMMARY", "MALFORMED_SUMMARY", "BOOKING_NOT_OPEN", "CONTINUATION", "MISSING"] satisfies MemberProbeCase[])(
+    "preserves all 112 native observation winners and the complete projection for %s", async (memberProbeCase) => {
+      const fixture = campaignDatabase({ memberProbeCase, unusedMemberProbeHistoryCount: memberProbeCase === "MISSING" ? 0 : 200 });
+      const observations = await loadCampaignMemberObservations(fixture.audit, new Set(), "private-campaign",
+        createBoundedAcceptanceReadClient(fixture.transaction));
+      const original = campaignDatabase({ memberProbeCase });
+      const oldNativeRows = await original.transaction.courseSupportIncident.findMany({
+        where: { id: { in: original.audit.members.map((member) => member.incidentId) } },
+        select: { courseId: true, course: { select: { probes: {
+          where: { observedAt: { gte: CAPTURED_AT } }, orderBy: [{ observedAt: "desc" }, { id: "desc" }], take: 1,
+          select: { outcome: true, observedAt: true, runtimeVersion: true, rawSummary: true },
+        } } } },
+      });
+      expect(observations).toHaveLength(112);
+      expect(observations.map(({ courseId, latestProbe }) => ({ courseId, latestProbe }))).toEqual(
+        oldNativeRows.map((row) => ({ courseId: row.courseId, latestProbe: row.course.probes[0] ?? null })),
+      );
+      if (memberProbeCase === "CONTINUATION") expect(observations.every((row) => row.latestProbeContinuationVerified === true)).toBe(true);
+      if (["TIED_FAILURE", "NEWER_FAILURE"].includes(memberProbeCase)) expect(observations.every((row) => row.latestProbe?.outcome === "FETCH_FAILED")).toBe(true);
+      const progress = summarizeParkedCourseCampaignProgress({ audit: fixture.audit, observations, remainingGlobalParkedCount: 0 });
+      expect(progress.terminalCount).toBe(["TIED_FAILURE", "NEWER_FAILURE"].includes(memberProbeCase) ? 0 : 112);
+      expect(progress.bookingNotOpenCount).toBe(memberProbeCase === "BOOKING_NOT_OPEN" ? 112 : 0);
+      expect(progress.monitoredCount).toBe(["TIED_FAILURE", "NEWER_FAILURE", "BOOKING_NOT_OPEN"].includes(memberProbeCase) ? 0 : 112);
+      expect(fixture.unusedMemberProbeSummaryRead).not.toHaveBeenCalled();
+      const metadataRead = fixture.calls.find((call) => call.model === "courseSupportIncident" && call.method === "findMany" &&
+        (call.args as Query).select?.confirmedAt === true && (call.args as Query).select?.monitoringEvents);
+      const probes = (((metadataRead!.args as Query).select!.course as Query).select!.probes as Query);
+      expect(probes).toEqual({ where: { observedAt: { gte: CAPTURED_AT } },
+        orderBy: [{ observedAt: "desc" }, { id: "desc" }], take: 1,
+        select: { id: true, courseId: true, outcome: true, observedAt: true, runtimeVersion: true } });
+      const payloadReads = fixture.calls.filter((call) => call.model === "courseProbe" && call.method === "findMany" &&
+        (call.args as Query).select?.rawSummary === true);
+      expect(payloadReads).toHaveLength(memberProbeCase === "MISSING" ? 0 : 1);
+      if (payloadReads.length) {
+        const ids = ((payloadReads[0].args as Query).where!.id as Row).in as string[];
+        expect(ids).toHaveLength(112);
+        expect(new Set(ids).size).toBe(112);
+        expect(ids.every((id) => id.endsWith("-z"))).toBe(true);
+        const metadataBytes = fixture.byteTotals.filter(({ statement }) => statement.text.includes('FROM "CourseProbe"') &&
+          !statement.text.includes('acceptance_row."rawSummary"'));
+        expect(metadataBytes.some(({ matchedRows }) => matchedRows === 424n)).toBe(true);
+        const payloadBytes = fixture.byteTotals.filter(({ statement }) => statement.text.includes('acceptance_row."rawSummary"'));
+        expect(payloadBytes).toHaveLength(1);
+        expect(payloadBytes[0].matchedRows).toBe(112n);
+        expect(payloadBytes[0].statement.values).not.toContain("private-member-probe-history-199");
+      }
+
+      const diagnostic = campaignDatabase({ memberProbeCase, unusedMemberProbeHistoryCount: memberProbeCase === "MISSING" ? 0 : 200 });
+      const database = { $transaction: vi.fn(async (work: (transaction: Prisma.TransactionClient) => Promise<unknown>) => work(diagnostic.transaction)) };
+      const result = await loadCourseSupportAcceptanceReasons(database as unknown as Parameters<typeof loadCourseSupportAcceptanceReasons>[0], SOURCE_SHA);
+      expect(result).toMatchObject({ status: "AVAILABLE", reason: "COMPLETE_NATIVE_TRACE", evidenceReadComplete: true,
+        readFence: null, readCost: null, customerDataIncluded: false });
+      expect(result.acceptanceProjection).toEqual(await nativeAcceptanceProjection(campaignDatabase({ memberProbeCase }), undefined, false));
+      expect(diagnostic.unusedMemberProbeSummaryRead).not.toHaveBeenCalled();
+      expect(JSON.stringify(result)).not.toMatch(/private-|https:\/\//u);
+      expect(fixture.mutation).not.toHaveBeenCalled();
+      expect(diagnostic.mutation).not.toHaveBeenCalled();
+      expect(globalMocks.escapedRead).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["CHECK", "DEPLOYMENT"] as const)("requires the full connected %s continuation proof for the selected member probes", async (omitted) => {
+    const fixture = campaignDatabase({ memberProbeCase: "CONTINUATION", omittedMemberProbeContinuation: omitted });
+    const observations = await loadCampaignMemberObservations(fixture.audit, new Set(), "private-campaign",
+      createBoundedAcceptanceReadClient(fixture.transaction));
+    expect(observations).toHaveLength(112);
+    expect(observations.every((row) => row.latestProbeContinuationVerified === false)).toBe(true);
+    expect(summarizeParkedCourseCampaignProgress({ audit: fixture.audit, observations, remainingGlobalParkedCount: 0 }))
+      .toMatchObject({ monitoredCount: 0, terminalCount: 0, engineeringBlockerCount: 112 });
+    expect(fixture.calls.some((call) => call.model === "courseMonitoringEvent" && call.method === "findMany" &&
+      (call.args as Query).where?.eventType === "CHECK_SUCCEEDED")).toBe(true);
+    expect(fixture.calls.some((call) => call.model === "automationRun" && call.method === "findMany" &&
+      (call.args as Query).where?.promptVersion === "course-monitoring-deployment-revalidation-v1")).toBe(true);
+    expect(fixture.mutation).not.toHaveBeenCalled();
+  });
+
+  it("refuses an oversized selected member-probe summary before payload hydration or later reads", async () => {
+    const fixture = campaignDatabase({ memberProbeCase: "TIED_SUCCESS", oversizedMemberProbeSummary: true });
+    const database = { $transaction: vi.fn(async (work: (transaction: Prisma.TransactionClient) => Promise<unknown>) => work(fixture.transaction)) };
+    const result = await loadCourseSupportAcceptanceReasons(database as unknown as Parameters<typeof loadCourseSupportAcceptanceReasons>[0], SOURCE_SHA);
+    expect(result).toMatchObject({ status: "UNAVAILABLE", reason: "EVIDENCE_BOUND_EXCEEDED",
+      readFence: { phase: "CAMPAIGN_INSPECTION", boundary: "SELECTED_EVIDENCE_BYTES" },
+      acceptanceProjection: null, futureUnknown: null, rollingAmbiguous: null, evidenceReadComplete: false });
+    const failedBytes = fixture.byteTotals.find(({ statement }) => statement.text.includes('acceptance_row."rawSummary"'))!;
+    expect(failedBytes.statement.values).toContain("private-member-probe-112-z");
+    expect(fixture.calls.at(-1)?.args).toBe(failedBytes.statement);
+    expect(fixture.calls.some((call) => call.model === "courseProbe" && call.method === "findMany" &&
+      (call.args as Query).select?.rawSummary === true)).toBe(false);
+    expect(fixture.mutation).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing", "duplicate", "unknown ID", "wrong parent", "changed outcome", "changed clock", "invalid clock", "changed runtime", "missing summary", "undefined summary", "inherited summary"] as const)(
+    "keeps a %s member-probe reload an opaque native failure without later calls", async (change) => {
+      const fixture = campaignDatabase({ memberProbeCase: "CONTINUATION" });
+      const payload = vi.spyOn(fixture.transaction.courseProbe, "findMany");
+      const native = payload.getMockImplementation()!;
+      payload.mockImplementation(async (args) => {
+        const selected = await native(args);
+        if (args?.select?.rawSummary !== true) return selected;
+        const rows = selected as unknown as Row[];
+        const row = rows[0]!;
+        switch (change) {
+          case "missing": rows.shift(); break;
+          case "duplicate": rows[1] = { ...row }; break;
+          case "unknown ID": row.id = "private-unexpected-probe"; break;
+          case "wrong parent": row.courseId = "private-course-other"; break;
+          case "changed outcome": row.outcome = "MATCH_FOUND"; break;
+          case "changed clock": row.observedAt = new Date((row.observedAt as Date).getTime() + 1); break;
+          case "invalid clock": row.observedAt = new Date("invalid"); break;
+          case "changed runtime": row.runtimeVersion = "b".repeat(40); break;
+          case "missing summary": delete row.rawSummary; break;
+          case "undefined summary": row.rawSummary = undefined; break;
+          case "inherited summary": {
+            const summary = row.rawSummary;
+            delete row.rawSummary;
+            Object.setPrototypeOf(row, { rawSummary: summary });
+            break;
+          }
+        }
+        return selected;
+      });
+      const database = { $transaction: vi.fn(async (work: (transaction: Prisma.TransactionClient) => Promise<unknown>) => work(fixture.transaction)) };
+      const result = await loadCourseSupportAcceptanceReasons(database as unknown as Parameters<typeof loadCourseSupportAcceptanceReasons>[0], SOURCE_SHA);
+      expect(result).toMatchObject({ status: "UNAVAILABLE", reason: "READ_FAILED", readFence: null, readCost: null,
+        acceptanceProjection: null, futureUnknown: null, rollingAmbiguous: null, evidenceReadComplete: false });
+      expect(fixture.calls.at(-1)).toMatchObject({ model: "courseProbe", method: "findMany" });
+      expect((fixture.calls.at(-1)!.args as Query).select?.rawSummary).toBe(true);
+      expect(fixture.calls.some((call) => call.model === "courseSupportBatchIncident" && call.method === "findMany" &&
+        (call.args as Query).select?.verifiedIncidentUpdatedAt === true)).toBe(false);
+      expect(fixture.mutation).not.toHaveBeenCalled();
+    },
+  );
+
+  it("retains the complete physical member-probe identity cap before IDs or summaries are hydrated", async () => {
+    const fixture = campaignDatabase({ memberProbeCase: "TIED_SUCCESS", unusedMemberProbeHistoryCount: ACCEPTANCE_READ_LIMITS.evidenceRows });
+    await expect(loadCampaignMemberObservations(fixture.audit, new Set(), "private-campaign",
+      createBoundedAcceptanceReadClient(fixture.transaction))).rejects.toMatchObject({ reason: "EVIDENCE_BOUND_EXCEEDED" });
+    expect(fixture.calls.some((call) => call.model === "courseSupportIncident" && call.method === "findMany")).toBe(false);
+    expect(fixture.calls.some((call) => call.model === "courseProbe" && call.method === "findMany")).toBe(false);
+    expect(fixture.unusedMemberProbeSummaryRead).not.toHaveBeenCalled();
+    expect(fixture.mutation).not.toHaveBeenCalled();
+  });
   it("keeps a missing exact fleet payload an opaque native read failure without importing the diagnostic into the fleet", async () => {
     const fixture = campaignDatabase({ fleetOnlyEvidence: "LOCAL_READER_RESULT" });
     const payloadRead = vi.spyOn(fixture.transaction.localReaderJob, "findMany");
@@ -553,11 +698,11 @@ describe("full native campaign inspection through the acceptance read boundary",
   });
 });
 
-async function nativeAcceptanceProjection(fixture: ReturnType<typeof campaignDatabase>, fleetRead = fixture.transaction) {
+async function nativeAcceptanceProjection(fixture: ReturnType<typeof campaignDatabase>, fleetRead = fixture.transaction, expectedParked = true) {
   const inspection = (await inspectLatestParkedCourseCampaign(fixture.transaction, { now: NOW, admissionRuntimeVersion: SOURCE_SHA }))!;
   const { runId, totalCount, ...observedCampaign } = inspection;
   expect(totalCount).toBe(112);
-  expect(inspection).toMatchObject({ readyCount: 112, terminalCount: 0, engineeringBlockerCount: 0 });
+  if (expectedParked) expect(inspection).toMatchObject({ readyCount: 112, terminalCount: 0, engineeringBlockerCount: 0 });
   return loadCourseSupportAcceptanceProjection({ now: NOW, observedCampaign }, {
     loadCourseFleetCounts: (input) => loadOperatorCourseFleetCounts(input, fleetRead),
     loadLatestCampaignRecord: () => fixture.transaction.automationRun.findFirst({
@@ -620,12 +765,17 @@ function campaignDatabase(input: {
   successfulProbeTieFirst?: boolean;
   requiredProbeBudgetPressure?: boolean;
   unusedFleetHistoryCount?: number;
+  memberProbeCase?: MemberProbeCase;
+  unusedMemberProbeHistoryCount?: number;
+  oversizedMemberProbeSummary?: boolean;
+  omittedMemberProbeContinuation?: "CHECK" | "DEPLOYMENT";
 } = {}) {
   const rows = new Map(Prisma.dmmf.datamodel.models.map((model) => [model.name, [] as Row[]]));
   const probeMessageRead = vi.fn(() => "x".repeat(500));
   const unusedFleetPayloadRead = vi.fn((oversized: boolean) => ({
     privateUnusedHistory: "x".repeat(oversized ? ACCEPTANCE_READ_LIMITS.evidenceBytes + 1 : 512),
   }));
+  const unusedMemberProbeSummaryRead = vi.fn(() => ({ privateUnusedSummary: "x".repeat(ACCEPTANCE_READ_LIMITS.evidenceBytes + 1) }));
   const members: ParkedCourseCampaignMember[] = [];
   const cycle = input.readerCandidates ? 4 : 3;
   for (let ordinal = 1; ordinal <= PARKED_COURSE_CAMPAIGN_EXPECTED_COUNT; ordinal++) {
@@ -748,6 +898,59 @@ function campaignDatabase(input: {
           customerDataIncluded: false, finalKind: "source_unverified",
           ...(input.resolvedObservations === "LEGACY_LAST" && index === 111 ? {} : { freshRuntimeProof: true }),
           campaign: { kind: "PARKED_COHORT", runId: "private-campaign", membershipDigest: audit.membershipDigest, cycle: 4 } } });
+    }
+  }
+  if (input.memberProbeCase) {
+    const confirmedAt = new Date(CAPTURED_AT.getTime() + 60_000);
+    const providerObservedAt = new Date(NOW.getTime() - 11 * 60_000);
+    const observedAt = new Date(NOW.getTime() - 10 * 60_000);
+    const terminalRuntime = input.memberProbeCase === "CONTINUATION" ? "e".repeat(40) : SOURCE_SHA;
+    for (const [index, incident] of rows.get("CourseSupportIncident")!.entries()) {
+      const course = incident.course as Row;
+      Object.assign(incident, { cycle: 4, status: "RESOLVED", humanReviewReason: null, confirmedAt,
+        resolvedAt: PARKED_AT, resolution: "MONITORING_RESTORED" });
+      Object.assign(course.monitoringStatus as Row, { state: "HEALTHY", stateChangedAt: PARKED_AT });
+      const event = (incident.monitoringEvents as Row[])[0];
+      Object.assign(event, { eventType: "RECOVERED", source: "COURSE_SUPPORT_RESPONDER", fromState: "AUTO_INVESTIGATING",
+        toState: "HEALTHY", outcome: "NO_MATCH", runtimeVersion: terminalRuntime, deploymentSha: terminalRuntime,
+        audit: { cycle: 4, confirmedAt: confirmedAt.toISOString(), automatedFinal: true, freshRuntimeProof: true,
+          customerDataIncluded: false, campaign: { kind: "PARKED_COHORT", runId: "private-campaign", membershipDigest: audit.membershipDigest, cycle: 4 } } });
+      if (input.memberProbeCase !== "MISSING") {
+        const failedWinner = input.memberProbeCase === "TIED_FAILURE" || input.memberProbeCase === "NEWER_FAILURE";
+        const summary = input.memberProbeCase === "NULL_SUMMARY" ? null
+          : input.memberProbeCase === "MALFORMED_SUMMARY" ? ["unrecognized summary"]
+            : input.memberProbeCase === "BOOKING_NOT_OPEN" ? { targetDateStatus: "NOT_OPEN", bookingWindow: { daysAhead: 7 } }
+              : input.memberProbeCase === "CONTINUATION" ? { providerExecution: "RUNNABLE_PROVIDER_CHECK", providerObservedAt: providerObservedAt.toISOString(), visibleSlotCount: 0 }
+                : { visibleSlotCount: 0 };
+        const winner: Row = { id: `private-member-probe-${index + 1}-z`, courseId: course.id, course,
+          teeSearchId: `private-member-probe-search-${index + 1}`, observedAt, runtimeVersion: SOURCE_SHA,
+          outcome: failedWinner ? "FETCH_FAILED" : "NO_MATCH", rawSummary: input.oversizedMemberProbeSummary && index === 111
+            ? { privateSelectedSummary: "x".repeat(ACCEPTANCE_READ_LIMITS.evidenceBytes + 1) } : summary };
+        const older: Row = { ...winner, id: `private-member-probe-${index + 1}-a`, outcome: failedWinner ? "NO_MATCH" : "FETCH_FAILED",
+          observedAt: input.memberProbeCase.startsWith("TIED") ? observedAt : new Date(observedAt.getTime() - 60_000), rawSummary: { visibleSlotCount: 0 } };
+        // Deliberately store the lower ID first; the native ID tie order must
+        // still choose the winner before its complete payload is reloaded.
+        course.probes = [older, winner];
+        rows.get("CourseProbe")!.push(older, winner);
+        if (index === 111) for (let history = 0; history < (input.unusedMemberProbeHistoryCount ?? 0); history++) {
+          const historical: Row = { ...older, id: `private-member-probe-history-${history}`,
+            observedAt: new Date(CAPTURED_AT.getTime() + 1_000 + history) };
+          Object.defineProperty(historical, "rawSummary", { enumerable: true, get: unusedMemberProbeSummaryRead });
+          (course.probes as Row[]).push(historical);
+          rows.get("CourseProbe")!.push(historical);
+        }
+      }
+      if (input.memberProbeCase === "CONTINUATION" && input.omittedMemberProbeContinuation !== "CHECK") {
+        const check: Row = { ...event, id: `private-continuation-check-${index + 1}`, source: "SEARCH_WORKFLOW",
+          eventType: "CHECK_SUCCEEDED", occurredAt: providerObservedAt, runtimeVersion: SOURCE_SHA, deploymentSha: SOURCE_SHA, audit: null };
+        (incident.monitoringEvents as Row[]).push(check);
+        rows.get("CourseMonitoringEvent")!.push(check);
+      }
+    }
+    if (input.memberProbeCase === "CONTINUATION" && input.omittedMemberProbeContinuation !== "DEPLOYMENT") {
+      rows.get("AutomationRun")!.push({ id: `cm_deploy_${SOURCE_SHA}`, runtimeVersion: SOURCE_SHA,
+        startedAt: new Date(PARKED_AT.getTime() + 30 * 60_000), promptVersion: "course-monitoring-deployment-revalidation-v1",
+        kind: "MAINTENANCE", status: "COMPLETED", outcome: "deployment_observed" });
     }
   }
   rows.get("AutomationRun")!.push({ id: "private-campaign", promptVersion: PARKED_COURSE_CAMPAIGN_PROMPT_VERSION,
@@ -956,7 +1159,8 @@ function campaignDatabase(input: {
   });
   transaction.$executeRawUnsafe = transactionControls;
   return { transaction: transaction as unknown as Prisma.TransactionClient, calls, mutation,
-    transactionControls, byteRead, byteTotals, probeMessageRead, unusedFleetPayloadRead, operationCount: () => calls.length };
+    transactionControls, byteRead, byteTotals, probeMessageRead, unusedFleetPayloadRead, unusedMemberProbeSummaryRead,
+    audit, operationCount: () => calls.length };
 }
 
 function selectedRows(rows: readonly Row[], query: Query): Row[] {
