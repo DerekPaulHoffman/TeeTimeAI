@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { Prisma, type LocalReaderJob } from "@prisma/client";
+import { Prisma, type AutomationRunStatus, type LocalReaderJob } from "@prisma/client";
 import { z } from "zod";
 
 import { hasDurableWaitForMaterialChangeProof } from "@/lib/customer-monitoring-status";
@@ -643,7 +643,18 @@ export type ParkedCourseCampaignDatabase = Pick<
   | "courseSupportIncident"
   | "courseSupportBatchIncident"
   | "courseMonitoringEvent"
+  | "courseProbe"
 > & Partial<Pick<Prisma.TransactionClient, "localReaderAgent" | "localReaderJob" | "teeSearch">>;
+
+function withCampaignReadSnapshot<T>(
+  read: (database: ParkedCourseCampaignDatabase) => Promise<T>,
+): Promise<T> {
+  return prisma.$transaction(async (transaction) => {
+    await transaction.$executeRawUnsafe("SET TRANSACTION READ ONLY");
+    await transaction.$executeRawUnsafe("SET LOCAL statement_timeout = '25000ms'");
+    return read(transaction);
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead, maxWait: 5_000, timeout: 30_000 });
+}
 
 export function parseParkedCourseCampaignAudit(value: unknown) {
   const parsed = parkedCourseCampaignAuditSchema.safeParse(value);
@@ -988,7 +999,12 @@ export async function inspectActiveParkedCourseCampaign(
 export async function inspectLatestParkedCourseCampaign(
   database: ParkedCourseCampaignDatabase = prisma,
   context: { now?: Date; admissionRuntimeVersion?: string } = {},
-) {
+): Promise<(ParkedCourseCampaignProgress & { runId: string; status: AutomationRunStatus }) | null> {
+  if (database === prisma) {
+    return withCampaignReadSnapshot((transaction) =>
+      inspectLatestParkedCourseCampaign(transaction, context),
+    );
+  }
   const dependencies: ParkedCourseCampaignProgressReadDependencies = {
     loadParkedMembers: () => loadParkedCourseCampaignMembers(database),
     loadAllParkedMembers: () => loadAllParkedCourseCampaignMembers(database),
@@ -5799,12 +5815,18 @@ export function createParkedCourseCampaignAttemptLedgerFingerprint(
     .digest("hex");
 }
 
+/** Supplied clients must belong to a consistent caller-owned snapshot. */
 export async function loadCampaignMemberObservations(
   audit: ParkedCourseCampaignAudit,
   parkedCourseIds: ReadonlySet<string>,
   campaignRunId: string,
   database: ParkedCourseCampaignDatabase = prisma,
-) {
+): Promise<ParkedCourseCampaignMemberObservation[]> {
+  if (database === prisma) {
+    return withCampaignReadSnapshot((transaction) =>
+      loadCampaignMemberObservations(audit, parkedCourseIds, campaignRunId, transaction),
+    );
+  }
   const capturedAt = new Date(audit.capturedAt);
   const memberByIncidentId = new Map(
     audit.members.map((member) => [member.incidentId, member]),
@@ -5826,6 +5848,13 @@ export async function loadCampaignMemberObservations(
     resolvedAt: true,
     decisionAt: true,
     updatedAt: true,
+  } as const;
+  const probeBindingSelect = {
+    id: true,
+    courseId: true,
+    outcome: true,
+    observedAt: true,
+    runtimeVersion: true,
   } as const;
   const incidents = await database.courseSupportIncident.findMany({
     where: { id: { in: incidentIds } },
@@ -5874,17 +5903,41 @@ export async function loadCampaignMemberObservations(
             where: { observedAt: { gte: capturedAt } },
             orderBy: [{ observedAt: "desc" }, { id: "desc" }],
             take: 1,
-            select: {
-              outcome: true,
-              observedAt: true,
-              runtimeVersion: true,
-              rawSummary: true,
-            },
+            select: probeBindingSelect,
           },
         },
       },
     },
   });
+  // Prisma's query strategy hydrates child scalars before per-parent take.
+  // Retain the native winner, then read only its complete summary in this snapshot.
+  const selectedProbes = new Map<string, (typeof incidents)[number]["course"]["probes"][number]>();
+  const readFailed = (): never => { throw new Error("READ_FAILED"); };
+  for (const incident of incidents) {
+    const probe = incident.course.probes[0];
+    if (!probe) continue;
+    if (typeof probe.id !== "string" || probe.id.trim().length === 0 ||
+        probe.courseId !== incident.courseId || selectedProbes.has(probe.id) ||
+        !(probe.observedAt instanceof Date) || !Number.isFinite(probe.observedAt.getTime())) readFailed();
+    selectedProbes.set(probe.id, probe);
+  }
+  const probeSummaries = new Map<string, unknown>();
+  if (selectedProbes.size > 0) {
+    const rows = await database.courseProbe.findMany({
+      where: { id: { in: [...selectedProbes.keys()] } },
+      select: { ...probeBindingSelect, rawSummary: true },
+    });
+    if (rows.length !== selectedProbes.size) readFailed();
+    for (const row of rows) {
+      const selected = selectedProbes.get(row.id);
+      if (!selected || probeSummaries.has(row.id) || row.courseId !== selected.courseId ||
+          row.outcome !== selected.outcome || row.runtimeVersion !== selected.runtimeVersion ||
+          !(row.observedAt instanceof Date) || !Number.isFinite(row.observedAt.getTime()) ||
+          row.observedAt.getTime() !== selected.observedAt.getTime() ||
+          !Object.prototype.hasOwnProperty.call(row, "rawSummary") || row.rawSummary === undefined) readFailed();
+      probeSummaries.set(row.id, row.rawSummary);
+    }
+  }
   const legacyIncidentMetadata = (incident: (typeof incidents)[number]) => ({
     id: incident.id,
     courseId: incident.courseId,
@@ -6009,6 +6062,7 @@ export async function loadCampaignMemberObservations(
   }
   const observations = incidents.map((incident) => {
     const member = memberByIncidentId.get(incident.id);
+    const latestProbe = incident.course.probes[0];
     const terminalCandidate = [...incident.monitoringEvents]
       .reverse()
       .map((event) => {
@@ -6075,7 +6129,12 @@ export async function loadCampaignMemberObservations(
       monitoringState: incident.course.monitoringStatus?.state ?? null,
       monitoringStateChangedAt:
         incident.course.monitoringStatus?.stateChangedAt ?? null,
-      latestProbe: incident.course.probes[0] ?? null,
+      latestProbe: latestProbe ? {
+        outcome: latestProbe.outcome,
+        observedAt: latestProbe.observedAt,
+        runtimeVersion: latestProbe.runtimeVersion,
+        rawSummary: probeSummaries.get(latestProbe.id),
+      } : null,
       campaignTerminalEvidenceAt: terminalEvidence?.occurredAt ?? null,
       campaignTerminalRuntimeVersion: terminalEvidence?.runtimeVersion ?? null,
       campaignTerminalDeploymentSha: terminalEvidence?.deploymentSha ?? null,

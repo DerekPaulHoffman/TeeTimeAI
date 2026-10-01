@@ -4698,6 +4698,7 @@ describe("parked course campaign", () => {
     }));
     const reader = (
       changeSecondary: (rows: Record<string, unknown>[]) => Record<string, unknown>[] = (rows) => rows,
+      changeProbes: (rows: Record<string, unknown>[]) => Record<string, unknown>[] = (rows) => rows,
     ) => {
       const incidentFindMany = vi.fn(async (query: {
         where: { id: { in: string[] } };
@@ -4709,6 +4710,11 @@ describe("parked course campaign", () => {
         return query.select.attemptLedger === true ? changeSecondary(selected) : selected;
       });
       const batchIncidentFindMany = vi.fn().mockResolvedValue(entries);
+      const probeFindMany = vi.fn(async (query: {
+        where: { id: { in: string[] } }; select: LegacyObservationTestSelect;
+      }) => changeProbes(incidents.flatMap((incident) => incident.course.probes as Record<string, unknown>[])
+        .filter((probe) => query.where.id.in.includes(probe.id as string))
+        .map((probe) => projectLegacyObservationRow(probe, query.select))));
       const database = {
         courseSupportIncident: {
           findMany: incidentFindMany,
@@ -4716,10 +4722,12 @@ describe("parked course campaign", () => {
         courseSupportBatchIncident: {
           findMany: batchIncidentFindMany,
         },
+        courseProbe: { findMany: probeFindMany },
       };
       return {
         incidentFindMany,
         batchIncidentFindMany,
+        probeFindMany,
         load: () => loadCampaignMemberObservations(audit, new Set(), campaignRunId, database as never),
       };
     };
@@ -4790,6 +4798,30 @@ describe("parked course campaign", () => {
       terminalCount: 0,
       factualLimitationCount: 0,
       engineeringBlockerCount: 1,
+    });
+  });
+
+  it("rejects a missing exact probe payload before an otherwise eligible complete legacy read", async () => {
+    const fixture = legacyMemberObservationFixture();
+    Object.assign(fixture.incidents[0]!.course, { probes: [{
+      id: "legacy-proof-probe", courseId: "course-1", outcome: "NO_MATCH",
+      observedAt: new Date("2026-08-20T12:08:00.000Z"), runtimeVersion: "a".repeat(40), rawSummary: null,
+    }] });
+    const positive = fixture.reader();
+    const observations = await positive.load();
+    expect(observations[0]).toMatchObject({ campaignTerminalFreshRuntimeProof: true });
+    expect(positive.incidentFindMany).toHaveBeenCalledTimes(2);
+    expect(positive.incidentFindMany.mock.calls[1]![0].select.attemptLedger).toBe(true);
+    expect(positive.probeFindMany).toHaveBeenCalledTimes(1);
+
+    const failed = fixture.reader((rows) => rows, () => []);
+    await expect(failed.load()).rejects.toThrow(/^READ_FAILED$/);
+
+    expect(failed.incidentFindMany).toHaveBeenCalledTimes(1);
+    expect(failed.batchIncidentFindMany).not.toHaveBeenCalled();
+    expect(failed.probeFindMany).toHaveBeenCalledExactlyOnceWith({
+      where: { id: { in: ["legacy-proof-probe"] } },
+      select: { id: true, courseId: true, outcome: true, observedAt: true, runtimeVersion: true, rawSummary: true },
     });
   });
 
@@ -5075,6 +5107,7 @@ describe("parked course campaign", () => {
         course: {
           monitoringStatus: { state: "HEALTHY", stateChangedAt: date(resolved) },
           probes: [{
+            id: `probe-${index + 1}`, courseId: `course-${index + 1}`,
             outcome: "MATCH_FOUND", observedAt: date(probe), runtimeVersion: runtime,
             rawSummary: { providerExecution: "RUNNABLE_PROVIDER_CHECK", providerObservedAt: date(provider).toISOString(), visibleSlotCount: 33 },
           }],
@@ -5090,7 +5123,13 @@ describe("parked course campaign", () => {
       const checks = vi.fn().mockResolvedValue(omitCheck ? [] : rows.map((row) => row.check));
       const deployments = vi.fn().mockResolvedValue(omitDeployment ? [] : rows.map((row) => row.deployment));
       const observations = await loadCampaignMemberObservations(audit, new Set(), "campaign", {
-        courseSupportIncident: { findMany: vi.fn().mockResolvedValue(rows.map((row) => row.incident)) },
+        courseSupportIncident: { findMany: vi.fn().mockResolvedValue(rows.map(({ incident }) => ({
+          ...incident, course: { ...incident.course, probes: incident.course.probes.map(({ id, courseId, outcome, observedAt, runtimeVersion }) => ({
+            id, courseId, outcome, observedAt, runtimeVersion,
+          })) },
+        }))) },
+        courseProbe: { findMany: vi.fn(async (query: { where: { id: { in: string[] } } }) =>
+          rows.flatMap(({ incident }) => incident.course.probes).filter((probe) => query.where.id.in.includes(probe.id))) },
         courseSupportBatchIncident: { findMany: vi.fn().mockResolvedValue([]) },
         courseMonitoringEvent: { findMany: checks }, automationRun: { findMany: deployments },
       } as never);

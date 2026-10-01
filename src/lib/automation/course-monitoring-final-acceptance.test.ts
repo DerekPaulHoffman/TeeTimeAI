@@ -325,7 +325,8 @@ async function strictRead() {
   // campaign attachment, strict loading, and acceptance classification are real.
   const observations = await loadCampaignMemberObservations(
     state.audit, new Set(), campaignId,
-    database as unknown as Prisma.TransactionClient,
+    // This offline read client represents the caller-owned snapshot, not global Prisma.
+    { ...database } as unknown as Prisma.TransactionClient,
   );
   const progress = summarizeParkedCourseCampaignProgress({
     audit: state.audit, observations, remainingGlobalParkedCount: 0,

@@ -385,7 +385,8 @@ async function closeout(mode: "WATCH_SETTLED" | "EARLY_RETRY" = "WATCH_SETTLED")
 }
 
 async function strictRead() {
-  const observations = await loadCampaignMemberObservations(audit, new Set(), campaignId, database as unknown as Prisma.TransactionClient);
+  // This offline read client represents the caller-owned snapshot, not global Prisma.
+  const observations = await loadCampaignMemberObservations(audit, new Set(), campaignId, { ...database } as unknown as Prisma.TransactionClient);
   return { observations, progress: summarizeParkedCourseCampaignProgress({ audit, observations, remainingGlobalParkedCount: 0 }) };
 }
 
