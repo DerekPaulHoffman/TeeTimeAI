@@ -726,6 +726,38 @@ test.describe("Tee Time Spot UI smoke", () => {
       backgroundColor: "rgb(18, 30, 39)",
       color: "rgb(255, 255, 255)"
     });
+    const notifyCaption = firstCourse.locator(".course-notify-caption");
+    if (testInfo.project.name.includes("mobile")) {
+      await expect(notifyCaption).toBeHidden();
+    } else {
+      await expect(notifyCaption).toHaveText("when new tee times become available");
+      await expect(notifyCaption).toBeVisible();
+      await expect(addButton.locator("svg")).toHaveCSS("color", "rgb(226, 138, 47)");
+      const { guideBox, siteBox, notifyBox, captionBox } = await firstCourse.evaluate((card) => {
+        const box = (selector: string) => {
+          const element = card.querySelector(selector);
+          if (!element) return null;
+          const { x, y, width, height } = element.getBoundingClientRect();
+          return { x, y, width, height };
+        };
+        return {
+          guideBox: box(".course-profile-button"),
+          siteBox: box('.course-actions a[target="_blank"]'),
+          notifyBox: box(".figma-add-button"),
+          captionBox: box(".course-notify-caption")
+        };
+      });
+      expect(guideBox).not.toBeNull();
+      expect(siteBox).not.toBeNull();
+      expect(notifyBox).not.toBeNull();
+      expect(captionBox).not.toBeNull();
+      expect(Math.abs(guideBox!.width - siteBox!.width)).toBeLessThanOrEqual(1);
+      expect(Math.abs(siteBox!.width - notifyBox!.width)).toBeLessThanOrEqual(1);
+      expect(Math.abs(guideBox!.x - notifyBox!.x)).toBeLessThanOrEqual(1);
+      expect(siteBox!.y).toBeGreaterThanOrEqual(guideBox!.y + guideBox!.height);
+      expect(notifyBox!.y).toBeGreaterThanOrEqual(siteBox!.y + siteBox!.height);
+      expect(captionBox!.y).toBeGreaterThanOrEqual(notifyBox!.y + notifyBox!.height);
+    }
     expect(await firstCourse.evaluate((card) => window.getComputedStyle(card).fontFamily)).toMatch(
       /Inter/i
     );
@@ -736,6 +768,7 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(verifiedEighteenHoleCourse.getByText(/9H/)).toHaveCount(0);
     await expect(verifiedEighteenHoleCourse.getByText(/Par 72/)).toBeVisible();
     await expect(verifiedEighteenHoleCourse.locator(".figma-course-pill.is-price")).toHaveCount(0);
+    await captureUiElementScreenshot(firstCourse, testInfo, "course-alert-actions");
     await expectNoPageIssues(issues, testInfo);
   });
 

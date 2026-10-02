@@ -10430,4 +10430,38 @@ button {
 .notify-alert-dialog .figma-alert-email span, .notify-alert-dialog .figma-alert-email small, .notify-alert-dialog .figma-alert-preview > small { color: #53685c; }
 .notify-alert-dialog .figma-alert-preview-recipients { color: #33714a; }
 .course-actions .figma-add-button { white-space: normal; max-width: 260px; line-height: 1.4; }
+
+.course-notify-caption {
+  display: none;
+}
+
+@media (min-width: 621px) {
+  .search-page .figma-course-list .course-actions {
+    align-items: stretch;
+    width: 176px;
+  }
+
+  .search-page .figma-course-list .course-actions .button-ghost,
+  .search-page .figma-course-list .figma-add-button {
+    min-height: 32px;
+    width: 100%;
+  }
+
+  .search-page .figma-course-list .figma-add-button > svg {
+    color: var(--flag);
+  }
+
+  .course-notify-empty-times {
+    display: none;
+  }
+
+  .course-notify-caption {
+    color: var(--muted);
+    display: block;
+    font-size: 0.6875rem;
+    line-height: 1.4;
+    text-align: center;
+  }
+}
+
 @media (max-width: 480px) { .notify-alert-dialog { padding: 18px; } }

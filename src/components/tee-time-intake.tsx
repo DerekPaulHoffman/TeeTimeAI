@@ -1651,6 +1651,19 @@ function CourseResultCard({
   const isPublicAccessUnverified = course.publicAccessStatus === "UNVERIFIED";
   const requiresPublicAccessReview =
     course.publicAccessStatus === "REVIEW_REQUIRED";
+  const notifyButtonContent = (
+    <>
+      <Bell aria-hidden="true" size={12} />
+      {isIncompatible ? "Doesn’t match" : (
+        <>
+          Notify me
+          {noCurrentTimes ? (
+            <span className="course-notify-empty-times"> when new times become available</span>
+          ) : null}
+        </>
+      )}
+    </>
+  );
 
   return (
     <div
@@ -1778,7 +1791,7 @@ function CourseResultCard({
               publishableKey={signInKey}
               returnTo="/search"
             >
-              <Bell aria-hidden="true" size={12} /> {isIncompatible ? "Doesn’t match" : notifyLabel}
+              {notifyButtonContent}
             </DeferredSignInButton>
           ) : (
             <button
@@ -1788,10 +1801,15 @@ function CourseResultCard({
               onClick={() => onToggle(course)}
               type="button"
             >
-              <Bell aria-hidden="true" size={12} /> {isIncompatible ? "Doesn’t match" : notifyLabel}
+              {notifyButtonContent}
             </button>
           )
         )}
+        {!isIncompatible && !(requiresPublicAccessReview && !isSelected) ? (
+          <span className="course-notify-caption">
+            when new tee times <br />become available
+          </span>
+        ) : null}
       </div>
     </div>
   );
