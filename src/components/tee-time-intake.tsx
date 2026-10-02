@@ -1400,16 +1400,6 @@ function TeeTimeIntakeContent({
               }`}
             </span>
             <small>Matching openings link to the official site. You book direct.</small>
-            {selected.some(
-              (course) =>
-                course.monitoringReadiness === "VERIFYING" ||
-                course.monitoringReadiness === undefined
-            ) ? (
-              <small>
-                We will email whether alerts are available after the first course check, usually
-                within 10 minutes.
-              </small>
-            ) : null}
           </section>
         ) : null}
         {selected.length > 0 ? (
