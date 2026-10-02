@@ -90,7 +90,7 @@ export function getDashboardAvailabilityView(input: {
   if (input.bookingOpensLabel) {
     return {
       label: "Booking not open yet",
-      detail: `Tee times are expected to appear ${input.bookingOpensLabel}. We'll start checking at the useful release time.`,
+      detail: `Tee times are expected to appear ${input.bookingOpensLabel}. We'll start checking then and notify you by email when matching tee times are available.`,
       tone: "scheduled"
     };
   }

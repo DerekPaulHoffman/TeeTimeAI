@@ -410,11 +410,11 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain('href="tel:8605550100"');
   });
 
-  it("shows the exact provider-confirmed booking release time", () => {
+  it.each(["setup", "daily", "status-update"] as const)("explains the confirmed booking release and notification in a %s email", (kind) => {
     const html = renderSearchStatusHtml({
       searchId: "search-window",
       to: "player@example.com",
-      kind: "setup",
+      kind,
       targetDate: "2026-07-29",
       startTime: "07:30",
       endTime: "09:00",
@@ -438,9 +438,44 @@ describe("renderSearchStatusHtml", () => {
       ]
     });
 
-    expect(html).toContain("SCHEDULED");
+    expect(html).toContain("BOOKING NOT OPEN YET");
     expect(html).toContain("Booking opens Wednesday, July 15 at 5:00 AM EDT");
+    expect(html).toContain("Booking for your date hasn&#39;t opened yet");
     expect(html).toContain("start checking at that time");
+    expect(html).toContain("notify you by email when matching tee times are available");
+  });
+
+  it("explains a confirmed release date without inventing an opening time", () => {
+    const html = renderSearchStatusHtml({
+      searchId: "search-date-only-window",
+      to: "player@example.com",
+      kind: "status-update",
+      targetDate: "2026-10-17",
+      startTime: "08:00",
+      endTime: "11:00",
+      players: 2,
+      checkedAt: new Date("2026-10-02T16:00:00.000Z"),
+      courses: [{
+        courseId: "course-date-only-window",
+        courseName: "Date Only Release Course",
+        outcome: "NO_MATCH",
+        availableMatches: 0,
+        bookingWindow: {
+          releaseDate: "2026-10-07",
+          opensAt: "2026-10-07T04:00:00.000Z",
+          timeZone: "America/New_York",
+          exactTime: false
+        }
+      }]
+    });
+
+    expect(html).toContain("BOOKING NOT OPEN YET");
+    expect(html).toContain("Booking expected to open Wednesday, October 7");
+    expect(html).toContain("Booking for your date hasn&#39;t opened yet");
+    expect(html).toContain("not published an exact release time");
+    expect(html).toContain("begin checking that day");
+    expect(html).toContain("notify you by email when matching tee times are available");
+    expect(html).not.toContain("12:00 AM");
   });
 
   it("describes a learned inventory horizon as an observed pattern", () => {
@@ -471,6 +506,9 @@ describe("renderSearchStatusHtml", () => {
 
     expect(html).toContain("Online times usually appear around Wednesday, October 7");
     expect(html).toContain("Based on recent releases");
+    expect(html).toContain("TEE TIMES EXPECTED LATER");
+    expect(html).not.toContain("BOOKING NOT OPEN YET");
+    expect(html).not.toContain("Booking for your date hasn&#39;t opened yet");
   });
 
   it("explains outside-window, not-visible, and work-in-progress course states", () => {
@@ -490,6 +528,7 @@ describe("renderSearchStatusHtml", () => {
     expect(html).toContain("Your tee-time alert is active");
     expect(html).toContain("7:10 AM EDT before your window");
     expect(html).toContain("booking window may not be open yet");
+    expect(html).not.toContain("BOOKING NOT OPEN YET");
     expect(html).toContain("AUTOMATIC CHECKS RETRYING");
     expect(html).toContain("Use the official site while we keep trying");
     expect(html).toContain("Every selected course has a result below");

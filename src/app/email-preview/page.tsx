@@ -177,9 +177,9 @@ const previewCourses: SearchStatusEmailInput["courses"] = [
     availableMatches: 0,
     bookingUrl: "https://example.com/lakeview",
     bookingWindow: {
-      releaseDate: "2026-07-11",
+      releaseDate: "2026-07-17",
       releaseTimeLocal: "07:00",
-      opensAt: "2026-07-11T07:00:00-04:00",
+      opensAt: "2026-07-17T07:00:00-04:00",
       timeZone: "America/New_York",
       exactTime: true
     }
@@ -262,7 +262,7 @@ export default async function EmailPreviewPage({
     ? renderAlertHtml(previewAlert)
     : renderSearchStatusHtml(statusPreview);
   const title = variant === "setup"
-    ? "Retired setup report"
+    ? "Alert setup"
     : variant === "instant"
       ? "Instant alert"
       : "Retired morning update";
@@ -283,7 +283,9 @@ export default async function EmailPreviewPage({
           <p className="meta">
             {isInstant
               ? "This is the complete match-alert email used for production delivery."
-              : "This historical status template is retained for reference and is not sent."}
+              : variant === "setup"
+                ? "This is the setup email explaining your alert and each course's current status."
+                : "This historical status template is retained for reference and is not sent."}
           </p>
         </div>
         <a className="button button-secondary" href={previewAlert.matches[0]?.bookingUrl}>
@@ -303,7 +305,7 @@ export default async function EmailPreviewPage({
             {option === "morning"
               ? "Retired morning"
               : option === "setup"
-                ? "Retired setup"
+                ? "Alert setup"
                 : "Match alert"}
           </a>
         ))}
@@ -331,9 +333,10 @@ export default async function EmailPreviewPage({
           <div className="delivery-step">
             <Mail size={18} />
             <div>
-              <strong>Match alerts only</strong>
+              <strong>Match and status alerts</strong>
               <p className="meta">
-                Resend is used only when a matching tee time is ready for a golfer.
+                Your alert starts with a setup email. Matching tee times and changes to
+                course monitoring can also trigger an email.
               </p>
             </div>
           </div>
@@ -348,8 +351,8 @@ export default async function EmailPreviewPage({
             </div>
           </div>
           <div className="alert alert-info">
-            Setup, morning, monitoring, operator, and worker-health email are disabled. Their
-            state stays in the dashboard and operator view.
+            Daily morning emails are disabled. View your alert&apos;s current status in the
+            dashboard at any time.
           </div>
         </aside>
       </section>

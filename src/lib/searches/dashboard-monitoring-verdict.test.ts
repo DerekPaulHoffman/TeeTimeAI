@@ -20,6 +20,7 @@ describe("dashboard monitoring verdict", () => {
   it("shows the current booking release before a check of edited settings exists", () => {
     const verdict = getDashboardMonitoringVerdict({ ...base, monitoringState: "HEALTHY", upcomingBookingWindow: { opensAt: "later" } });
     expect(verdict.label).toBe("Checks start when booking opens");
+    expect(verdict.detail).toContain("notify you by email when matching tee times are available");
   });
 
   it("preserves current observed availability over contradictory booking-release metadata", () => {
@@ -37,6 +38,7 @@ describe("dashboard monitoring verdict", () => {
     for (const input of [{}, { monitoringState: "AUTO_INVESTIGATING" as const }, { supportIncidentStatus: "NEEDS_HUMAN" as const, automationPlaybookExhausted: true }, { upcomingBookingWindow: { opensAt: "later" } }]) {
       const verdict = getDashboardMonitoringVerdict({ ...base, ...input, alertStatus });
       expect(verdict.detail).not.toMatch(/remains active|first check is starting|will begin checking/);
+      expect(verdict.detail).not.toContain("notify you");
       expect(verdict.detail).toMatch(/paused|has ended/);
     }
   });

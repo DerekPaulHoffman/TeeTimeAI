@@ -6,6 +6,22 @@ import {
 } from "./dashboard-availability";
 
 describe("dashboard availability", () => {
+  it("explains the booking release and matching-time notifications for an active alert", () => {
+    const view = getDashboardAvailabilityView({
+      outcome: "NO_MATCH",
+      bookingOpensLabel: "when booking opens Wednesday, October 7 at 7:00 AM EDT",
+      qualifyingMatchCount: 0,
+      players: 2,
+      startTime: "10:00",
+      endTime: "14:00"
+    });
+
+    expect(view.label).toBe("Booking not open yet");
+    expect(view.detail).toContain("Wednesday, October 7 at 7:00 AM EDT");
+    expect(view.detail).toContain("start checking then");
+    expect(view.detail).toContain("notify you by email when matching tee times are available");
+  });
+
   it.each(["PAUSED", "COMPLETED", "CANCELLED"])("describes %s matching times as last-check history", (alertStatus) => {
     const view = getDashboardAvailabilityView({
       alertStatus,
@@ -27,6 +43,7 @@ describe("dashboard availability", () => {
     for (const input of [{ outcome: "FETCH_FAILED" }, { outcome: "NEEDS_ADAPTER" }, { bookingOpensLabel: "tomorrow at 7 AM" }]) {
       const view = getDashboardAvailabilityView({ ...input, alertStatus, qualifyingMatchCount: 0, players: 2, startTime: "10:00", endTime: "14:00" });
       expect(view.detail).not.toMatch(/remains active|keeps trying|start checking/);
+      expect(view.detail).not.toContain("notify you");
       expect(view.detail).toMatch(/paused|has ended/);
       if ("bookingOpensLabel" in input) expect(view.detail).toContain("tomorrow at 7 AM");
     }

@@ -30,7 +30,9 @@ export function getDashboardCourseStatus(input: {
     ...(monitoringOverridesAvailability
       ? {
           label: monitoring.label,
-          detail: monitoring.detail,
+          detail: availability.tone === "scheduled" && monitoring.icon === "scheduled"
+            ? availability.detail
+            : monitoring.detail,
           emoji: monitoring.emoji,
           tone: monitoring.icon === "unavailable"
             ? "unavailable" as const

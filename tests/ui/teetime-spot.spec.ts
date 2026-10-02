@@ -1132,9 +1132,9 @@ test.describe("Tee Time Spot UI smoke", () => {
     await page.goto("/email-preview");
 
     await expect(page.getByRole("heading", { name: "Instant alert" })).toBeVisible();
-    await expect(page.locator("body")).toContainText("Match alerts only");
+    await expect(page.locator("body")).toContainText("Match and status alerts");
     await expect(page.locator("body")).toContainText(
-      /Setup, morning, monitoring, operator/
+      "Daily morning emails are disabled"
     );
     const instantFrame = page.frameLocator("iframe[title='Rendered instant alert email']");
     await expect(instantFrame.locator("body")).toContainText("NEW TEE TIME ALERT");
@@ -1177,6 +1177,19 @@ test.describe("Tee Time Spot UI smoke", () => {
       instantFrameLocator,
       testInfo,
       "email-preview-instant"
+    );
+
+    await page.getByRole("link", { name: "Alert setup", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Alert setup" })).toBeVisible();
+    const setupFrame = page.frameLocator("iframe[title='Rendered alert setup email']");
+    await expect(setupFrame.locator("body")).toContainText("BOOKING NOT OPEN YET");
+    await expect(setupFrame.locator("body")).toContainText("Booking opens Friday, July 17 at 7:00 AM EDT");
+    await expect(setupFrame.locator("body")).toContainText("Booking for your date hasn't opened yet");
+    await expect(setupFrame.locator("body")).toContainText("notify you by email when matching tee times are available");
+    await captureUiElementScreenshot(
+      page.locator("iframe[title='Rendered alert setup email']"),
+      testInfo,
+      "email-preview-booking-window"
     );
 
     await page.getByRole("link", { name: "Retired morning" }).click();

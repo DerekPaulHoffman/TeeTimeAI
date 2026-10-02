@@ -76,7 +76,7 @@ export function getDashboardMonitoringVerdict(
     return {
       label: active ? "Checks start when booking opens" : "Booking opens later",
       detail: active
-        ? "We will begin checking at the course's useful booking release time."
+        ? "We'll start checking when tee times are expected to appear and notify you by email when matching tee times are available."
         : lifecycleDetail,
       emoji: "📅",
       icon: "scheduled" as const,

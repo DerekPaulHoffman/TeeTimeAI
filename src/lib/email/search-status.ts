@@ -417,7 +417,9 @@ function toMonitoringCourse(
       }
     : course.outcome === "NO_MATCH" && course.bookingWindow
       ? {
-          badgeLabel: "SCHEDULED",
+          badgeLabel: course.bookingWindow.basis === "OBSERVED_INVENTORY"
+            ? "TEE TIMES EXPECTED LATER"
+            : "BOOKING NOT OPEN YET",
           tone: "scheduled" as const,
           detail: `${description.stateLabel}. ${description.detail}`
         }
@@ -546,7 +548,9 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
   if (course.outcome === "NO_MATCH" && course.bookingWindow) {
     const release = formatBookingWindowRelease(course.bookingWindow);
     return {
-      monitoringLabel: "Scheduled",
+      monitoringLabel: course.bookingWindow.basis === "OBSERVED_INVENTORY"
+        ? "Tee times expected later"
+        : "Booking not open yet",
       stateLabel: course.bookingWindow.exactTime
         ? `Booking opens ${release}`
         : course.bookingWindow.basis === "OBSERVED_INVENTORY"
@@ -560,10 +564,10 @@ function describeCourse(course: SearchStatusCourseReport, players: number) {
       calloutBorder: "#c5e2ea",
       calloutText: "#174152",
       detail: course.bookingWindow.exactTime
-        ? "The course has not released tee times for your date yet. We’ll start checking at that time and email you when a matching spot appears."
+        ? "Booking for your date hasn't opened yet. We'll start checking at that time and notify you by email when matching tee times are available."
         : course.bookingWindow.basis === "OBSERVED_INVENTORY"
-          ? "Based on recent releases, this course usually posts online tee times around that date. We’ll begin checking then and email you when a matching spot appears."
-          : "The course has not published an exact release time. We’ll begin checking that day and email you when a matching spot appears."
+          ? "Based on recent releases, this course usually posts online tee times around that date. We'll begin checking then and notify you by email when matching tee times are available."
+          : "Booking for your date hasn't opened yet. The course has not published an exact release time. We'll begin checking that day and notify you by email when matching tee times are available."
     };
   }
 

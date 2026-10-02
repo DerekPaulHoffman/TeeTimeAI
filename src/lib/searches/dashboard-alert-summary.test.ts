@@ -181,6 +181,8 @@ describe("dashboard alert summary", () => {
     expect(result.headline).toBe("Some course availability is not confirmed");
     expect(result.coverageNotice).toContain("1 course awaiting a check");
     expect(result.coverageNotice).toContain("1 course open for booking later");
+    expect(scheduled.detail).toContain("tomorrow at 7 AM");
+    expect(scheduled.detail).toContain("notify you by email when matching tee times are available");
     expect(summary([scheduled, scheduled]).headline).toBe("Booking not open yet");
     expect(summary([courseStatus("NO_MATCH"), scheduled]).headline)
       .toBe("No matching times; some courses open later");
