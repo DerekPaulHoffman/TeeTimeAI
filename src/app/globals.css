@@ -9652,12 +9652,61 @@ button {
   z-index: 20;
 }
 
-.figma-time-field .figma-time-inputs.is-mobile-open input {
+.figma-time-field .figma-time-inputs.is-mobile-open input,
+.figma-time-field .figma-time-inputs.is-mobile-open select {
   background: #f7f9f7;
   border: 1px solid #d9e3dc;
   border-radius: 8px;
   min-height: 40px;
   padding: 0 8px;
+}
+
+.figma-time-field .figma-time-inputs .figma-time-choice {
+  display: block;
+  height: 40px;
+  min-width: 0;
+  position: relative;
+}
+
+.figma-time-field .figma-time-choice > span {
+  color: #5c6c64;
+  font-size: 9px;
+  font-weight: 600;
+  left: 10px;
+  letter-spacing: 0.04em;
+  line-height: 12px;
+  pointer-events: none;
+  position: absolute;
+  top: 3px;
+  z-index: 1;
+}
+
+.figma-time-field .figma-time-inputs.is-mobile-open .figma-time-choice select {
+  appearance: none;
+  color: #14231d;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  height: 40px;
+  padding: 12px 25px 0 10px;
+  width: 100%;
+}
+
+.figma-time-field .figma-time-choice > svg {
+  color: #5c6c64;
+  pointer-events: none;
+  position: absolute;
+  right: 8px;
+  top: 17px;
+}
+
+.figma-time-field .figma-time-choice select:focus-visible {
+  outline: 2px solid #18332b;
+  outline-offset: 2px;
+}
+
+.figma-time-field .figma-time-choice select[aria-invalid="true"] {
+  border-color: var(--danger);
 }
 
 .figma-time-field .figma-time-inputs.is-mobile-open .figma-time-editor-done {
@@ -9672,6 +9721,12 @@ button {
   grid-column: 1 / -1;
   justify-content: center;
   min-height: 40px;
+}
+
+.figma-time-field .figma-time-inputs.is-mobile-open .figma-time-editor-done:disabled {
+  background: #f4d9d5;
+  color: #a33b35;
+  opacity: 1;
 }
 
 .figma-hole-filter {

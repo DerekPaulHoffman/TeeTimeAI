@@ -8,8 +8,7 @@ import {
   useMemo,
   useRef,
   useState,
-  type ReactNode,
-  type SyntheticEvent
+  type ReactNode
 } from "react";
 import type * as Leaflet from "leaflet";
 import {
@@ -362,14 +361,6 @@ function TeeTimeIntakeContent({
   function reconcileDateFromControl(value: string) {
     dateWasEditedRef.current = true;
     setDate(value);
-  }
-
-  function reconcileStartTimeFromControl(event: SyntheticEvent<HTMLInputElement>) {
-    setStartTime(event.currentTarget.value);
-  }
-
-  function reconcileEndTimeFromControl(event: SyntheticEvent<HTMLInputElement>) {
-    setEndTime(event.currentTarget.value);
   }
 
   useEffect(() => {
@@ -1193,7 +1184,7 @@ function TeeTimeIntakeContent({
         minSearchDate={minSearchDate}
         mobileTimeEditorOpen={mobileTimeEditorOpen}
         onDateChange={reconcileDateFromControl}
-        onEndTimeInput={reconcileEndTimeFromControl}
+        onEndTimeChange={setEndTime}
         onHoleFilterChange={setHoleFilter}
         onLocationChange={(value) => {
           setLocationText(value);
@@ -1207,7 +1198,7 @@ function TeeTimeIntakeContent({
           setSearchRadiusMiles(DEFAULT_COURSE_SEARCH_RADIUS_MILES);
         }}
         onSelectCurrentLocation={selectCurrentLocation}
-        onStartTimeInput={reconcileStartTimeFromControl}
+        onStartTimeChange={setStartTime}
         onSubmit={() => void discoverFromSearchControls()}
         onTimeEditorOpenChange={setMobileTimeEditorOpen}
         players={players}

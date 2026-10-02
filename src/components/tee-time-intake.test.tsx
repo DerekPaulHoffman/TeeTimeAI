@@ -508,12 +508,16 @@ describe("TeeTimeIntake", () => {
       )
     );
 
-    const startTimeInput = document.querySelector("#startTime") as HTMLInputElement;
-    const endTimeInput = document.querySelector("#endTime") as HTMLInputElement;
-    nativeValueSetter?.call(startTimeInput, "11:00");
+    const startTimeInput = document.querySelector("#startTime") as HTMLSelectElement;
+    const endTimeInput = document.querySelector("#endTime") as HTMLSelectElement;
+    const nativeSelectSetter = Object.getOwnPropertyDescriptor(
+      HTMLSelectElement.prototype,
+      "value"
+    )?.set;
+    nativeSelectSetter?.call(startTimeInput, "11:00");
     expect(startTimeInput.value).toBe("11:00");
     fireEvent.blur(startTimeInput);
-    nativeValueSetter?.call(endTimeInput, "14:00");
+    nativeSelectSetter?.call(endTimeInput, "14:00");
     expect(endTimeInput.value).toBe("14:00");
     fireEvent.blur(endTimeInput);
 

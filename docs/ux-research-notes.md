@@ -1,5 +1,12 @@
 # UX Research Notes
 
+## 2026-10-02 - Make alert time ranges easier to select
+
+- References: [Calendly availability](https://calendly.com/help/how-to-set-your-availability) and [Google Calendar availability](https://support.google.com/calendar/answer/11423292?hl=en-uk), accessed October 2, 2026, both describe explicit start/end time blocks.
+- Decision: replace segmented browser time inputs in the alert search toolbar with labeled From/To dropdowns, readable AM/PM choices, and 15-minute shortcuts. Preserve exact saved or prefilled minutes and the existing full-day range. Earlier or equal end-time choices are disabled; an invalid existing range asks for a later end time before Done.
+- Geometry contract: preserve the toolbar, time field, and popup dimensions. The baseline at a 1705px viewport is a 1336px by 149.796875px toolbar, a 337.71875px by 64px time field, and a 320px by 114px popup. Keep the existing responsive widths and 40px controls.
+- Keyboard behavior: focus From when opened, return focus after Done/Escape, and dismiss when clicking or tabbing outside. Alert persistence, course-local time semantics, and notification delivery are unchanged.
+
 ## 2026-08-28 - Publish Overlook, Pine Valley, and Wampanoag Course Guides
 
 - Current primary sources: the official [Overlook Golf Club](https://overlookgolfclub.com/), [Pine Valley Golf Course](https://www.pinevalleygolfcourse.com/), and [Wampanoag Golf Course](https://www.wampanoaggolfcourseswansea.com/) pages, plus current U.S. Census geocoder matches for their published street addresses, accessed 2026-08-28 America/New_York. Hobe Sound Golf Club's [official site](https://www.hobesoundgolfclub.com/) still identifies a private member-owned club with no tee times.

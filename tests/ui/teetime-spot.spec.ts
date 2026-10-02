@@ -73,6 +73,86 @@ test.describe("Tee Time Spot UI smoke", () => {
     });
   });
 
+  test("selects an alert time range without resizing the box", async ({ page }, testInfo) => {
+    const issues = collectPageIssues(page);
+    await page.goto("/search?startTime=08%3A10&endTime=12%3A05");
+    const timeField = page.getByRole("group", { name: "Time window", exact: true });
+    const summary = timeField.locator(".figma-time-summary");
+    const toolbar = page.locator(".figma-search-toolbar");
+    const popup = page.getByRole("group", { name: "Choose time window", exact: true });
+    await expect(summary).toHaveText("8:10 AM – 12:05 PM");
+    const originalToolbar = await toolbar.boundingBox();
+    const originalTimeField = await timeField.boundingBox();
+    await summary.click();
+
+    const from = popup.getByRole("combobox", { name: "From (start time)" });
+    const to = popup.getByRole("combobox", { name: "To (end time)" });
+    await expect(from).toBeFocused();
+    await expect(from).toHaveValue("08:10");
+    await expect(to).toHaveValue("12:05");
+    await expect(from.locator('option[value="12:00"]')).toHaveText("12:00 PM");
+    await expect(to.locator('option[value="00:00"]')).toHaveText("12:00 AM");
+    const popupBox = await popup.boundingBox();
+    // Existing popup geometry: two 40px controls, 8px gap, 12px padding, 1px border.
+    expect(popupBox!.height).toBe(114);
+    expect(popupBox!.width).toBeCloseTo(
+      page.viewportSize()!.width <= 620 ? originalToolbar!.width - 26 : 320,
+      0
+    );
+    expect(popupBox!.x).toBeGreaterThanOrEqual(0);
+    expect(popupBox!.x + popupBox!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+    expect(await toolbar.boundingBox()).toMatchObject({
+      width: originalToolbar!.width, height: originalToolbar!.height
+    });
+    expect(await timeField.boundingBox()).toMatchObject({
+      width: originalTimeField!.width, height: originalTimeField!.height
+    });
+    await captureUiElementScreenshot(popup, testInfo, "alert-time-range");
+
+    await from.selectOption("15:00");
+    await expect(popup.getByRole("button", { name: "Choose a later end time" })).toBeDisabled();
+    await expect(to).toHaveAttribute("aria-invalid", "true");
+    await expect(to.locator('option[value="15:00"]')).toHaveAttribute("disabled", "");
+    await to.selectOption("17:15");
+    await expect(to).toHaveAttribute("aria-invalid", "false");
+    await popup.getByRole("button", { name: "Done" }).click();
+    await expect(popup).toBeHidden();
+    await expect(summary).toBeFocused();
+    await expect(summary).toHaveText("3:00 – 5:15 PM");
+    expect(await toolbar.boundingBox()).toMatchObject({
+      width: originalToolbar!.width, height: originalToolbar!.height
+    });
+    expect(await timeField.boundingBox()).toMatchObject({
+      width: originalTimeField!.width, height: originalTimeField!.height
+    });
+
+    await summary.click();
+    await from.press("ArrowDown");
+    await expect(from).toHaveValue("15:15");
+    await from.press("Escape");
+    await expect(popup).toBeHidden();
+    await expect(summary).toBeFocused();
+    await summary.click();
+    await page.getByRole("textbox", { name: "Location", exact: true }).click();
+    await expect(popup).toBeHidden();
+    await summary.click();
+    await from.press("Tab");
+    await expect(to).toBeFocused();
+    await to.press("Tab");
+    await expect(popup.getByRole("button", { name: "Done" })).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(popup).toBeHidden();
+
+    await page.goto("/search");
+    await expect(summary).toHaveText("3:15 – 5:15 PM");
+    await summary.click();
+    await from.selectOption("00:00");
+    await to.selectOption("23:59");
+    await expect(summary).toHaveText("12 AM – 11:59 PM");
+    await expect(popup.getByRole("button", { name: "Done" })).toBeEnabled();
+    await expectNoPageIssues(issues, testInfo);
+  });
+
   test("opens the alert calendar and selects future dates with mouse and keyboard", async ({
     page
   }, testInfo) => {

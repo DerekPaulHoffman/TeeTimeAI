@@ -1,7 +1,7 @@
 "use client";
 
-import { LocateFixed, Search, X } from "lucide-react";
-import type { SyntheticEvent } from "react";
+import { ChevronDown, LocateFixed, Search, X } from "lucide-react";
+import { useEffect, useRef } from "react";
 
 import { AlertDatePicker } from "@/components/alert-date-picker";
 import { LOCATION_INPUT_PLACEHOLDER } from "@/lib/places/location-input";
@@ -14,7 +14,16 @@ import { MAX_PLAYERS_PER_SEARCH } from "@/lib/validation/search-constraints";
 
 export type CourseLayoutFilter = "any" | "9" | "18";
 
-type TimeInputHandler = (event: SyntheticEvent<HTMLInputElement>) => void;
+const TIME_CHOICES = Array.from({ length: 96 }, (_, index) => {
+  const minutes = index * 15;
+  return `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+});
+
+function timeChoiceLabel(value: string) {
+  const [hours, minutes] = value.split(":");
+  const hour = Number(hours);
+  return `${hour % 12 || 12}:${minutes} ${hour >= 12 ? "PM" : "AM"}`;
+}
 
 export function formatCompactTimeWindow(startTime: string, endTime: string) {
   const parseTime = (value: string) => {
@@ -53,14 +62,14 @@ export function TeeTimeSearchControls({
   minSearchDate,
   mobileTimeEditorOpen,
   onDateChange,
-  onEndTimeInput,
+  onEndTimeChange,
   onHoleFilterChange,
   onLocationChange,
   onPlayersChange,
   onRadiusChange,
   onResetFilters,
   onSelectCurrentLocation,
-  onStartTimeInput,
+  onStartTimeChange,
   onSubmit,
   onTimeEditorOpenChange,
   players,
@@ -79,20 +88,43 @@ export function TeeTimeSearchControls({
   minSearchDate: string;
   mobileTimeEditorOpen: boolean;
   onDateChange: (value: string) => void;
-  onEndTimeInput: TimeInputHandler;
+  onEndTimeChange: (value: string) => void;
   onHoleFilterChange: (value: CourseLayoutFilter) => void;
   onLocationChange: (value: string) => void;
   onPlayersChange: (value: number) => void;
   onRadiusChange: (value: number) => void;
   onResetFilters: () => void;
   onSelectCurrentLocation: () => void;
-  onStartTimeInput: TimeInputHandler;
+  onStartTimeChange: (value: string) => void;
   onSubmit: () => void;
   onTimeEditorOpenChange: (open: boolean) => void;
   players: number;
   searchRadiusMiles: number;
   startTime: string;
 }) {
+  const timeFieldRef = useRef<HTMLDivElement>(null);
+  const timeSummaryRef = useRef<HTMLButtonElement>(null);
+  const startTimeRef = useRef<HTMLSelectElement>(null);
+  // Keep exact saved/prefilled minutes even when they aren't a quarter hour.
+  const timeChoices = [...new Set([...TIME_CHOICES, "23:59", startTime, endTime])].sort();
+
+  useEffect(() => {
+    if (!mobileTimeEditorOpen) return;
+    startTimeRef.current?.focus();
+    const dismissOutside = (event: PointerEvent) => {
+      if (event.target instanceof Node && !timeFieldRef.current?.contains(event.target)) {
+        onTimeEditorOpenChange(false);
+      }
+    };
+    document.addEventListener("pointerdown", dismissOutside);
+    return () => document.removeEventListener("pointerdown", dismissOutside);
+  }, [mobileTimeEditorOpen, onTimeEditorOpenChange]);
+
+  function finishTimeSelection() {
+    onTimeEditorOpenChange(false);
+    timeSummaryRef.current?.focus();
+  }
+
   const radiusProgress =
     ((searchRadiusMiles - MIN_COURSE_SEARCH_RADIUS_MILES) /
       (MAX_COURSE_SEARCH_RADIUS_MILES - MIN_COURSE_SEARCH_RADIUS_MILES)) *
@@ -175,7 +207,19 @@ export function TeeTimeSearchControls({
           aria-label="Time window"
           aria-describedby="time-window-help"
           className="figma-search-field figma-time-field"
+          ref={timeFieldRef}
           role="group"
+          onBlur={(event) => {
+            if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) {
+              onTimeEditorOpenChange(false);
+            }
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && mobileTimeEditorOpen) {
+              event.preventDefault();
+              finishTimeSelection();
+            }
+          }}
         >
           <span className="figma-time-label">Time</span>
           <div className="figma-search-value">
@@ -186,6 +230,7 @@ export function TeeTimeSearchControls({
               aria-controls="mobile-time-editor"
               aria-expanded={mobileTimeEditorOpen}
               className="figma-time-summary"
+              ref={timeSummaryRef}
               onClick={() => onTimeEditorOpenChange(!mobileTimeEditorOpen)}
               type="button"
             >
@@ -194,36 +239,54 @@ export function TeeTimeSearchControls({
             <div
               className={`figma-time-inputs${mobileTimeEditorOpen ? " is-mobile-open" : ""}`}
               id="mobile-time-editor"
+              aria-label="Choose time window"
+              role="group"
             >
-              <input
-                aria-label="Start time"
-                id="startTime"
-                type="time"
-                value={startTime}
-                onBlur={onStartTimeInput}
-                onChange={onStartTimeInput}
-                onInput={onStartTimeInput}
-              />
-              <span aria-hidden="true">–</span>
-              <input
-                aria-describedby={
-                  !isTimeWindowValid ? "search-form-guidance" : undefined
-                }
-                aria-invalid={!isTimeWindowValid}
-                aria-label="End time"
-                id="endTime"
-                type="time"
-                value={endTime}
-                onBlur={onEndTimeInput}
-                onChange={onEndTimeInput}
-                onInput={onEndTimeInput}
-              />
+              <label className="figma-time-choice" htmlFor="startTime">
+                <span>From</span>
+                <select
+                  aria-label="From (start time)"
+                  id="startTime"
+                  ref={startTimeRef}
+                  value={startTime}
+                  onBlur={(event) => onStartTimeChange(event.currentTarget.value)}
+                  onChange={(event) => onStartTimeChange(event.currentTarget.value)}
+                >
+                  {timeChoices.map((time) => (
+                    <option disabled={time === "23:59"} key={time} value={time}>
+                      {timeChoiceLabel(time)}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown aria-hidden="true" size={14} />
+              </label>
+              <span aria-hidden="true">→</span>
+              <label className="figma-time-choice" htmlFor="endTime">
+                <span>To</span>
+                <select
+                  aria-describedby={!isTimeWindowValid ? "search-form-guidance" : undefined}
+                  aria-invalid={!isTimeWindowValid}
+                  aria-label="To (end time)"
+                  id="endTime"
+                  value={endTime}
+                  onBlur={(event) => onEndTimeChange(event.currentTarget.value)}
+                  onChange={(event) => onEndTimeChange(event.currentTarget.value)}
+                >
+                  {timeChoices.map((time) => (
+                    <option disabled={time <= startTime} key={time} value={time}>
+                      {timeChoiceLabel(time)}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown aria-hidden="true" size={14} />
+              </label>
               <button
                 className="figma-time-editor-done"
-                onClick={() => onTimeEditorOpenChange(false)}
+                disabled={!isTimeWindowValid}
+                onClick={finishTimeSelection}
                 type="button"
               >
-                Done
+                {isTimeWindowValid ? "Done" : "Choose a later end time"}
               </button>
             </div>
           </div>
