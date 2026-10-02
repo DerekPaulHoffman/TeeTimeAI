@@ -10418,14 +10418,6 @@ button {
 .figma-results-layout { grid-template-columns: minmax(0, 1fr); }
 .notify-alert-dialog { border: 1px solid #dce4dc; border-radius: 20px; padding: 24px; width: min(480px, calc(100vw - 24px)); max-height: calc(100svh - 48px); overflow: auto; color: var(--text); background: white; box-shadow: 0 20px 80px #132d2340; }
 .notify-alert-dialog::backdrop { background: #13251c80; }
-.dashboard-alert-summary-heading h3 { min-width: 0; overflow-wrap: anywhere; }
-.dashboard-alert-summary-heading { align-items: flex-start; }
-.dashboard-group-label { font-size: 12px; color: var(--muted); }
-.dashboard-alert-history { margin-top: 28px; border-top: 1px solid #dce4df; padding-top: 18px; }
-.dashboard-alert-history > summary { cursor: pointer; font-size: 18px; font-weight: 700; padding: 10px 0; }
-.dashboard-alert-history > summary span { display: block; font-size: 12px; font-weight: 400; color: var(--muted); margin: 5px 0 14px; }
-.dashboard-paused-section .dashboard-section-divider p { margin-top: 8px; }
-.dashboard-action-row .dashboard-icon-button { width: auto; padding-inline: 12px; }
 .notify-alert-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .notify-alert-heading h2 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 22px; }
 .notify-alert-heading button { display: grid; place-items: center; flex: 0 0 36px; height: 36px; border: 0; border-radius: 50%; background: #f2f5f2; cursor: pointer; }

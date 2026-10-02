@@ -60,6 +60,7 @@ import {
 
 import { getNotificationTitle, groupDashboardNotifications, notificationWindowEnded } from "@/lib/searches/dashboard-notifications";
 import { MAX_QUEUED_SEARCHES_PER_USER } from "@/lib/validation/search-constraints";
+import styles from "./notifications.module.css";
 
 type DashboardSearches = Awaited<ReturnType<typeof listTeeSearchesForUser>>;
 
@@ -129,8 +130,7 @@ function DashboardView({
   notice?: string;
 }) {
   const now = new Date();
-  const { active: activeSearches, paused: pausedSearches, history: historySearches, slotsUsed, monitoredCourseCount } = groupDashboardNotifications(searches);
-  const inactiveSearches = [...pausedSearches, ...historySearches];
+  const { active: activeSearches, history: historySearches, slotsUsed, monitoredCourseCount } = groupDashboardNotifications(searches, now);
   const activeCount = activeSearches.length;
   const availableMatches = activeSearches.flatMap((search) =>
     search.matches.filter(
@@ -144,24 +144,12 @@ function DashboardView({
   const alertStatusCopy = `${activeCount} ${
     activeCount === 1 ? "alert" : "alerts"
   } active. See each course's status for what we can check.`;
-  const readyMessage =
-    activeCount > 0
-      ? "Your alerts are saved and active. See each course’s status below. We’ll email confirmed matches and important alert updates."
-      : searches.length > 0
-        ? inactiveSearches.some((search) => search.status === "PAUSED")
-          ? "You don’t have an active alert right now. Resume a paused alert or start a new one."
-          : "You don’t have an active alert right now. Start a new one when you’re ready to play."
-        : "No notifications yet. Choose a course and tap Notify me to save when you want to play.";
-
-
   return (
-    <main className="dashboard-page">
+    <main className={`dashboard-page ${styles.page}`}>
       <div className="dashboard-header">
         <div>
-          <p className="eyebrow" style={{ color: "var(--fairway-dark)" }}>
-            My Alerts
-          </p>
           <h1>My Alerts</h1>
+          <p className="meta">Your course notifications, all in one place.</p>
         </div>
         <Link className="button button-dark" href="/search">
           <Plus size={16} />
@@ -169,10 +157,7 @@ function DashboardView({
         </Link>
       </div>
 
-      <div className="alert alert-info dashboard-alert dashboard-ready-message">
-        <p>{readyMessage}</p>
-        {notice ? <small>{notice}</small> : null}
-      </div>
+      {notice ? <div className="alert alert-info dashboard-alert"><p>{notice}</p></div> : null}
 
       <div className="dashboard-grid">
         <section className="dashboard-panel">
@@ -202,17 +187,9 @@ function DashboardView({
               ))}
             </div>
           )}
-          {pausedSearches.length > 0 ? (
-            <section className="dashboard-paused-section" aria-labelledby="paused-notifications-title">
-              <div className="dashboard-section-divider"><h2 id="paused-notifications-title">Paused alerts</h2><p className="meta">Notifications are off until you resume them.</p></div>
-              <div className="dashboard-list">
-                {pausedSearches.map(search => <DashboardSearchCard canManage={canManage} coursePhotos={coursePhotos} ownerEmailState={ownerEmailStates.get(search.id) ?? "FIRST_CHECK_PENDING"} key={search.id} search={search} showRecipientEmail={showRecipientEmail} />)}
-              </div>
-            </section>
-          ) : null}
           {historySearches.length > 0 ? (
             <details className="dashboard-alert-history">
-              <summary>Alert history <span>{historySearches.length} completed or cancelled</span></summary>
+              <summary>Alert history <span>{historySearches.length} paused, past or finished alerts</span></summary>
               <div className="dashboard-list dashboard-list-inactive">
                 {historySearches.map(search => <DashboardSearchCard canManage={canManage} coursePhotos={coursePhotos} ownerEmailState={ownerEmailStates.get(search.id) ?? "FIRST_CHECK_PENDING"} key={search.id} search={search} showRecipientEmail={showRecipientEmail} />)}
               </div>
@@ -268,6 +245,7 @@ function DashboardSearchCard({
   showRecipientEmail: boolean;
 }) {
   const now = new Date();
+  const windowEnded = notificationWindowEnded(formatDateInputValue(search.date), search.endTime, search.preferences.map(preference => preference.course.timeZone), now);
   const availableSearchMatches = search.matches.filter(
     (match) =>
       match.availabilityStatus === "AVAILABLE" &&
@@ -352,13 +330,13 @@ function DashboardSearchCard({
     <article className="dashboard-row" id={`alert-${search.id}`}>
       <details
         className="dashboard-alert-accordion"
-        open={search.status === "ACTIVE" || search.status === "PAUSED"}
+        open={search.status === "ACTIVE" && !windowEnded}
       >
         <summary className="dashboard-alert-summary">
           <div className="dashboard-alert-summary-heading">
             <span className={`status-pill ${search.status.toLowerCase()}`}>
               {search.status === "ACTIVE" ? <Play size={13} /> : <CirclePause size={13} />}
-              {summary.lifecycleLabel}
+              {windowEnded && search.status === "ACTIVE" ? "Date passed" : summary.lifecycleLabel}
             </span>
             <h3>
               {getNotificationTitle(search.preferences)}
@@ -430,7 +408,7 @@ function DashboardSearchCard({
               key={search.id}
               searchId={search.id}
               status={search.status}
-              windowEnded={notificationWindowEnded(formatDateInputValue(search.date), search.endTime, search.preferences.map(preference => preference.course.timeZone), now)}
+              windowEnded={windowEnded}
               initialDate={formatDateInputValue(search.date)}
               initialStartTime={search.startTime}
               initialEndTime={search.endTime}
