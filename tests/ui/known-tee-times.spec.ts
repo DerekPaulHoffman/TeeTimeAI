@@ -6,7 +6,8 @@ test("shows existing times on course results", async ({ page }) => {
   await page.route("**/api/location/geocode?**", (route) => route.fulfill({ json: { formattedAddress: "Trumbull, CT", latitude: 41.24, longitude: -73.2 } }));
   await page.route("**/api/courses/discover?**", (route) => route.fulfill({ json: { courses: [{
     courseId: "public-course", googlePlaceId: "public-place", name: "Public Golf Course",
-    address: "Trumbull, CT", latitude: 41.24, longitude: -73.2, timeZone: "America/New_York"
+    address: "Trumbull, CT", latitude: 41.24, longitude: -73.2, timeZone: "America/New_York",
+    monitoringReadiness: "VERIFYING", monitoringReadinessObservedAt: "2026-08-30T11:55:33.756Z",
   }] } }));
   await page.route("**/api/courses/known-times?**", (route) => {
     const date = new URL(route.request().url()).searchParams.get("date");
@@ -19,6 +20,8 @@ test("shows existing times on course results", async ({ page }) => {
   await page.getByRole("textbox", { name: "Location", exact: true }).fill("Trumbull, CT");
   await page.getByRole("button", { name: "Search", exact: true }).click();
   const times = page.getByRole("region", { name: "Previously checked tee times" });
+  await expect(page.getByText("Previously checked; availability needs reconfirming", { exact: true })).toBeVisible();
+  await expect(page.getByText("Alert availability after first check", { exact: true })).toHaveCount(0);
   await expect(times).toBeVisible();
   await expect(times.getByRole("link")).toHaveAttribute("href", "https://example.com/official-booking");
   await expect(times).toContainText("4 spots · 18 holes · $45.00");

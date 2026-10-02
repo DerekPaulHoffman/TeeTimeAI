@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { hasDatabaseConfig } from "@/lib/env";
 import { prisma } from "@/lib/prisma";
-import { selectKnownTeeTimes } from "@/lib/courses/known-tee-times";
+import { selectKnownCourseTimes } from "@/lib/courses/known-tee-times";
 
 const inputSchema = z.object({
   courseIds: z.array(z.string().min(1).max(100)).min(1).max(60),
@@ -23,6 +23,11 @@ export async function GET(request: NextRequest) {
       where: { id: { in: [...new Set(input.data.courseIds)] }, isPublic: true },
       select: {
         id: true, timeZone: true,
+        probes: {
+          where: { rawSummary: { path: ["publicAvailability", "date"], equals: input.data.date } },
+          orderBy: [{ observedAt: "desc" }, { id: "desc" }], take: 1,
+          select: { rawSummary: true },
+        },
         matches: {
           where: { startsAt: { gt: now, gte: new Date(day - 86400000), lt: new Date(day + 2 * 86400000) } },
           orderBy: { lastSeenAt: "desc" }, take: 500,
@@ -34,7 +39,7 @@ export async function GET(request: NextRequest) {
     // Explicit projection: no saved-search, owner, recipient, or delivery information.
     return NextResponse.json({ courses: Object.fromEntries(courses.map((course) => [
       // A truncated history cannot establish which observation is newest for every slot.
-      course.id, course.matches.length === 500 ? [] : selectKnownTeeTimes(course.matches, course.timeZone, input.data.date, now)
+      course.id, course.matches.length === 500 ? [] : selectKnownCourseTimes(course.matches, course.probes?.[0]?.rawSummary, course.timeZone, input.data.date, now)
     ])) }, { headers: { "Cache-Control": "no-store" } });
   } catch {
     return NextResponse.json({ error: "Previously checked times are temporarily unavailable." }, { status: 503 });

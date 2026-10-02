@@ -4956,6 +4956,22 @@ describe("runSearchCheck email cadence", () => {
     });
   });
 
+  it("retains public slots outside the alert window without turning them into alert matches", async () => {
+    dbMocks.getActiveSearchForAutomation.mockResolvedValue({ ...search, preferences: [{ rank: 1, course: {
+      ...search.preferences[0].course, detectedPlatform: "FOREUP", automationEligibility: "ALLOWED", automationReason: "NONE",
+      bookingMetadata: { courseId: "course-1" },
+    } }] });
+    adapterMocks.fetchForeupTeeSheet.mockResolvedValue({ slots: [{ sourceId: "outside-window", courseId: "course-1",
+      startsAt: "2026-07-12T17:10:00-04:00", availableSpots: 1, holes: 18, bookingUrl: "https://example.com/book", priceCents: 6200,
+    }], targetDateStatus: "OPEN", bookingWindowEvidence: null });
+    const result = await runSearchCheck("search-1", "test");
+    expect(result.courseResults[0]).toMatchObject({ outcome: "NO_MATCH", availableMatches: 0 });
+    expect(dbMocks.recordCourseProbe).toHaveBeenCalledWith(expect.objectContaining({ rawSummary: expect.objectContaining({
+      publicAvailability: expect.objectContaining({ date: "2026-07-12", times: [{ startsAt: "2026-07-12T21:10:00.000Z",
+        availableSpots: 1, holes: 18, priceCents: 6200, bookingUrl: "https://example.com/book" }] }),
+    }) }));
+  });
+
   it("uses the CPS server adapter before an available local-reader result", async () => {
     dbMocks.getActiveSearchForAutomation.mockResolvedValue({
       ...search,
@@ -5024,6 +5040,9 @@ describe("runSearchCheck email cadence", () => {
         runtimeVersion: "local",
         rawSummary: expect.objectContaining({
           providerExecution: "RUNNABLE_PROVIDER_CHECK",
+          publicAvailability: expect.objectContaining({
+            times: [],
+          }),
         }),
       }),
     );

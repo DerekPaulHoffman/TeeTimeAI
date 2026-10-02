@@ -8,6 +8,16 @@ const request = (params = "courseId=public-course&date=2026-10-02") => new NextR
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date("2026-10-02T12:00:00Z")); mocks.configured.mockReturnValue(true); mocks.findMany.mockResolvedValue([]); });
 afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });
 describe("public known times", () => {
+  it("publishes observed tee-sheet times without a matching saved alert or private probe metadata", async () => {
+    mocks.findMany.mockResolvedValue([{ id: "public-course", timeZone: "America/New_York", matches: [], probes: [{ rawSummary: {
+      teeSearchId: "private-search", publicAvailability: { date: "2026-10-02", confirmedAt: "2026-10-02T11:59:00Z", times: [{
+        startsAt: "2026-10-02T15:00:00Z", availableSpots: 4, holes: 18, priceCents: null, bookingUrl: "https://example.com/booking",
+      }] },
+    } }] }]);
+    const body = await (await GET(request())).json();
+    expect(body.courses["public-course"]).toHaveLength(1);
+    expect(JSON.stringify(body)).not.toContain("private-search");
+  });
   it("rejects invalid dates, missing courses, and oversized lists before querying", async () => {
     for (const params of ["date=2026-10-02", "courseId=x&date=2026-02-30", `${Array(61).fill("courseId=x").join("&")}&date=2026-10-02`]) {
       expect((await GET(request(params))).status).toBe(400);

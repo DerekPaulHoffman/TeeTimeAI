@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 export type KnownTeeTime = {
   startsAt: string;
   availableSpots: number;
@@ -21,6 +23,24 @@ export type ObservedTeeTime = {
 
 // These are recent observations, never a promise that a time is still bookable.
 export const KNOWN_TIME_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+
+const snapshotSchema = z.object({ publicAvailability: z.object({
+  date: z.iso.date(), confirmedAt: z.iso.datetime(),
+  times: z.array(z.object({ startsAt: z.iso.datetime(), availableSpots: z.number().int().min(0).max(4),
+    holes: z.number().int().positive().nullable(), priceCents: z.number().int().nonnegative().nullable(),
+    bookingUrl: z.string() })).max(5000),
+}) });
+
+export function selectKnownCourseTimes(matches: ObservedTeeTime[], rawSummary: unknown, timeZone: string, date: string, now = new Date()) {
+  const parsed = snapshotSchema.safeParse(rawSummary);
+  if (!parsed.success || parsed.data.publicAvailability.date !== date) return selectKnownTeeTimes(matches, timeZone, date, now);
+  const snapshot = parsed.data.publicAvailability;
+  const confirmedAt = new Date(snapshot.confirmedAt);
+  // A complete newer tee sheet also withdraws slots absent from it, including an empty sheet.
+  const newerMatches = matches.filter(match => match.lastSeenAt > confirmedAt || (match.unavailableAt && match.unavailableAt > confirmedAt));
+  return selectKnownTeeTimes([...snapshot.times.map(time => ({ ...time, startsAt: new Date(time.startsAt),
+    lastSeenAt: confirmedAt, lastConfirmedAt: confirmedAt, availabilityStatus: "AVAILABLE" })), ...newerMatches], timeZone, date, now);
+}
 
 export function selectKnownTeeTimes(
   matches: ObservedTeeTime[],

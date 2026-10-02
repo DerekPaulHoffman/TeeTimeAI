@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { selectKnownTeeTimes, type ObservedTeeTime } from "./known-tee-times";
+import { selectKnownCourseTimes, selectKnownTeeTimes, type ObservedTeeTime } from "./known-tee-times";
 
 const now = new Date("2026-10-02T12:00:00Z");
 const match: ObservedTeeTime = {
@@ -9,6 +9,22 @@ const match: ObservedTeeTime = {
   availabilityStatus: "AVAILABLE"
 };
 describe("previously checked times", () => {
+  const snapshot = (times: unknown[], confirmedAt = "2026-10-02T11:59:00Z") => ({ publicAvailability: { date: "2026-10-02", confirmedAt, times } });
+  const slot = { startsAt: match.startsAt.toISOString(), availableSpots: 3, holes: 18, priceCents: 4500, bookingUrl: match.bookingUrl };
+  it("shows observed public slots even when no saved alert matched them", () => {
+    expect(selectKnownCourseTimes([], snapshot([slot]), "America/New_York", "2026-10-02", now)).toHaveLength(1);
+  });
+  it("withdraws older saved matches when a newer complete sheet is empty", () => {
+    expect(selectKnownCourseTimes([match], snapshot([]), "America/New_York", "2026-10-02", now)).toEqual([]);
+  });
+  it("keeps later removals authoritative over a public snapshot", () => {
+    expect(selectKnownCourseTimes([{ ...match, availabilityStatus: "GONE", unavailableAt: now }], snapshot([slot]), "America/New_York", "2026-10-02", now)).toEqual([]);
+  });
+  it("rejects stale and unsafe snapshot times and ignores snapshots for another date", () => {
+    expect(selectKnownCourseTimes([], snapshot([slot], "2026-10-02T08:00:00Z"), "America/New_York", "2026-10-02", now)).toEqual([]);
+    expect(selectKnownCourseTimes([], snapshot([{ ...slot, bookingUrl: "javascript:alert(1)" }]), "America/New_York", "2026-10-02", now)).toEqual([]);
+    expect(selectKnownCourseTimes([], snapshot([slot]), "America/New_York", "2026-10-03", now)).toEqual([]);
+  });
   it("preserves later slots so an evening filter cannot lose them to a morning display limit", () => {
     const times = Array.from({ length: 30 }, (_, index) => ({ ...match,
       startsAt: new Date(now.getTime() + (index + 1) * 10 * 60 * 1000)

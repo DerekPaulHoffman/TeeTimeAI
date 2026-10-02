@@ -12,13 +12,15 @@ export function useKnownTeeTimes(courseIds: string[], date: string) {
     const controller = new AbortController();
     const params = new URLSearchParams({ date });
     ids.split(",").forEach((id) => params.append("courseId", id));
-    const timer = setTimeout(() => {
+    const refresh = () => {
       void fetch(`/api/courses/known-times?${params}`, { signal: controller.signal })
         .then(async (response) => response.ok ? response.json() : { courses: {} })
         .then((data) => { if (!controller.signal.aborted) setResult({ key, courses: data.courses ?? {} }); })
         .catch(() => {});
-    }, 150);
-    return () => { clearTimeout(timer); controller.abort(); };
+    };
+    const timer = setTimeout(refresh, 150);
+    const interval = setInterval(refresh, 60_000);
+    return () => { clearTimeout(timer); clearInterval(interval); controller.abort(); };
   }, [ids, date, key]);
   return result?.key === key ? result.courses : {};
 }

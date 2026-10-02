@@ -2275,6 +2275,17 @@ async function checkSearch(
             providerExecution: providerExecutionLabel,
             providerObservedAt: providerExecutionObservedAt.toISOString(),
             ...availability,
+            publicAvailability: {
+              date: searchWindow.date,
+              confirmedAt: providerExecutionObservedAt.toISOString(),
+              times: safeRawSlots.map((slot) => ({
+                startsAt: parseCourseLocalDateTime(slot.startsAt, course.timeZone).toISOString(),
+                availableSpots: slot.availableSpots,
+                holes: slot.holes ?? null,
+                priceCents: slot.priceCents ?? null,
+                bookingUrl: slot.bookingUrl,
+              })),
+            },
             ...(bookableHoleCounts.length > 0 ? { bookableHoleCounts } : {}),
             ...(pricing ? { pricing } : {}),
             ...(unsafeBookingUrlCount > 0 ? { unsafeBookingUrlCount } : {}),

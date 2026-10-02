@@ -1521,7 +1521,7 @@ function TeeTimeIntakeContent({
                   ) : course.firstTimeLookup ? (
                     <span className="selected-course-support">First-time course lookup</span>
                   ) : !hasReadyAutomaticMonitoring(course) ? (
-                    <span className="selected-course-support">Verdict after first check</span>
+                    <span className="selected-course-support">{course.monitoringReadinessObservedAt ? "Availability needs reconfirming" : "Verdict after first check"}</span>
                   ) : null}
                 </div>
                 <div className="figma-reorder-controls" aria-label={`Reorder ${course.name}`}>
@@ -2182,7 +2182,9 @@ function CourseMonitoringStatus({
                 ? "Automatic alerts unavailable"
             : isAutomatic
               ? "Tee-time alerts available"
-              : "Alert availability after first check"}
+              : course.monitoringReadinessObservedAt
+                ? "Previously checked; availability needs reconfirming"
+                : "Alert availability after first check"}
         </strong>
         {!compact || course.alertSupport === "DIRECT_ONLINE" ? (
           <small>
@@ -2198,6 +2200,8 @@ function CourseMonitoringStatus({
                   ? "Tee Time Spot could not confirm tee-time alerts for this course. Use the official site for current availability."
               : isAutomatic
                 ? "Tee Time Spot checks the public booking page without entering checkout."
+                : course.monitoringReadinessObservedAt
+                  ? `Last checked ${new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeZone: course.timeZone ?? "America/New_York" }).format(new Date(course.monitoringReadinessObservedAt))}. Start an alert to check the official booking page again.`
                 : course.firstTimeLookup
                   ? "Tee Time Spot hasn't checked this course's booking page before. We'll email whether alerts are available after the first check, usually within 10 minutes."
                   : "We'll email whether tee-time alerts are available after the first check, usually within 10 minutes."}
