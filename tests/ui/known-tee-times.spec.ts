@@ -9,18 +9,23 @@ test("shows existing times on course results", async ({ page }) => {
     address: "Trumbull, CT", latitude: 41.24, longitude: -73.2, timeZone: "America/New_York",
     monitoringReadiness: "VERIFYING", monitoringReadinessObservedAt: "2026-08-30T11:55:33.756Z",
   }] } }));
-  await page.route("**/api/courses/known-times?**", (route) => {
+  let finishCheck: (() => void) | undefined;
+  await page.route("**/api/courses/check-times?**", async (route) => {
     const date = new URL(route.request().url()).searchParams.get("date");
-    return route.fulfill({ json: { courses: { "public-course": [{
+    await new Promise<void>(resolve => { finishCheck = resolve; });
+    return route.fulfill({ json: { status: "CHECKED", times: [{
       startsAt: `${date}T15:00:00Z`, availableSpots: 4, holes: 18, priceCents: 4500,
       bookingUrl: "https://example.com/official-booking", confirmedAt: `${date}T14:55:00Z`
-    }] } } });
+    }] } });
   });
   await page.goto("/search");
   await page.getByRole("textbox", { name: "Location", exact: true }).fill("Trumbull, CT");
   await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page.getByText("Checking tee times…", { exact: true })).toBeVisible();
+  await expect.poll(() => Boolean(finishCheck)).toBe(true);
+  finishCheck!();
   const times = page.getByRole("region", { name: "Previously checked tee times" });
-  await expect(page.getByText("Previously checked; availability needs reconfirming", { exact: true })).toBeVisible();
+  await expect(page.getByText("Tee times checked just now", { exact: true })).toBeVisible();
   await expect(page.getByText("Alert availability after first check", { exact: true })).toHaveCount(0);
   await expect(times).toBeVisible();
   await expect(times.getByRole("link")).toHaveAttribute("href", "https://example.com/official-booking");

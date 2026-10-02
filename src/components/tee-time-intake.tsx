@@ -62,7 +62,7 @@ import {
 import { getGoogleMapsSearchUrl } from "@/lib/maps";
 import { CURRENT_LOCATION_LABEL } from "@/lib/places/location-input";
 import type { CourseCandidate } from "@/lib/places/google";
-import { KnownTeeTimes, useKnownTeeTimes } from "@/components/known-tee-times";
+import { KnownTeeTimes, useKnownTeeTimes, useCourseTimeChecks, CourseTimeCheckStatus, type CourseTimeCheck } from "@/components/known-tee-times";
 import type { KnownTeeTime } from "@/lib/courses/known-tee-times";
 import {
   DEFAULT_COURSE_SEARCH_RADIUS_MILES,
@@ -322,6 +322,10 @@ function TeeTimeIntakeContent({
   const [courseLookupQuery, setCourseLookupQuery] = useState("");
   const [submittedCourseLookupQuery, setSubmittedCourseLookupQuery] = useState("");
   const [courseLookupResults, setCourseLookupResults] = useState<CourseCandidate[]>([]);
+  const [checkRevision, setCheckRevision] = useState(0);
+  const liveChecks = useCourseTimeChecks(
+    [...courses, ...courseLookupResults].flatMap(course => course.courseId ? [course.courseId] : []), date, players, checkRevision,
+  );
   const knownTimes = useKnownTeeTimes(
     [...courses, ...courseLookupResults].flatMap((course) => course.courseId ? [course.courseId] : []),
     date
@@ -740,6 +744,7 @@ function TeeTimeIntakeContent({
         freshCourses.map((course) => [course.googlePlaceId, course])
       );
       setCourses(freshCourses);
+      setCheckRevision(value => value + 1);
       setSelected((current) =>
         current
           .map(
@@ -1371,6 +1376,7 @@ function TeeTimeIntakeContent({
                   <CourseResultCard
                     course={course}
                     knownTimes={course.courseId ? knownTimes[course.courseId] ?? [] : []}
+                    liveCheck={course.courseId ? liveChecks[course.courseId] : undefined}
                     timeFilters={{ date, startTime, endTime, players }}
                     key={course.googlePlaceId}
                     onReportInaccuracy={reportCourseInaccuracy}
@@ -1402,6 +1408,7 @@ function TeeTimeIntakeContent({
                 <CourseResultCard
                   course={course}
                   knownTimes={course.courseId ? knownTimes[course.courseId] ?? [] : []}
+                  liveCheck={course.courseId ? liveChecks[course.courseId] : undefined}
                   timeFilters={{ date, startTime, endTime, players }}
                   key={course.googlePlaceId}
                   onReportInaccuracy={reportCourseInaccuracy}
@@ -1521,7 +1528,7 @@ function TeeTimeIntakeContent({
                   ) : course.firstTimeLookup ? (
                     <span className="selected-course-support">First-time course lookup</span>
                   ) : !hasReadyAutomaticMonitoring(course) ? (
-                    <span className="selected-course-support">{course.monitoringReadinessObservedAt ? "Availability needs reconfirming" : "Verdict after first check"}</span>
+                    <span className="selected-course-support">{course.courseId ? liveChecks[course.courseId]?.status === "LOADING" ? "Checking tee times…" : "You book on the official site" : "Verdict after first check"}</span>
                   ) : null}
                 </div>
                 <div className="figma-reorder-controls" aria-label={`Reorder ${course.name}`}>
@@ -1824,6 +1831,7 @@ function CourseResultsDivider({ children }: { children: ReactNode }) {
 function CourseResultCard({
   course,
   knownTimes,
+  liveCheck,
   timeFilters,
   onReportInaccuracy,
   onToggle,
@@ -1832,6 +1840,7 @@ function CourseResultCard({
 }: {
   course: CourseCandidate;
   knownTimes: KnownTeeTime[];
+  liveCheck?: CourseTimeCheck;
   timeFilters: { date: string; startTime: string; endTime: string; players: number };
   onReportInaccuracy: (course: CourseCandidate) => void;
   onToggle: (course: CourseCandidate) => void;
@@ -1927,8 +1936,8 @@ function CourseResultCard({
           )}
         </h3>
         <CourseAddressLink course={course} />
-        <CourseMonitoringStatus course={course} />
-        <KnownTeeTimes times={knownTimes} timeZone={course.timeZone} {...timeFilters} />
+        {course.courseId ? <CourseTimeCheckStatus check={liveCheck} /> : <CourseMonitoringStatus course={course} />}
+        {course.courseId ? liveCheck?.status === "CHECKED" && <KnownTeeTimes times={liveCheck.times} timeZone={course.timeZone} {...timeFilters} showEmpty /> : <KnownTeeTimes times={knownTimes} timeZone={course.timeZone} {...timeFilters} />}
         {isIncompatible && requestedLayoutHoles ? (
           <p className="course-alert-support-note">
             Does not match an {requestedLayoutHoles}-hole course search
@@ -2183,7 +2192,7 @@ function CourseMonitoringStatus({
             : isAutomatic
               ? "Tee-time alerts available"
               : course.monitoringReadinessObservedAt
-                ? "Previously checked; availability needs reconfirming"
+                ? "Previously checked course"
                 : "Alert availability after first check"}
         </strong>
         {!compact || course.alertSupport === "DIRECT_ONLINE" ? (

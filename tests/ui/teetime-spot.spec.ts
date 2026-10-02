@@ -962,7 +962,7 @@ test.describe("Tee Time Spot UI smoke", () => {
       .toBeGreaterThanOrEqual(0);
     const firstCourse = page.locator(".course-row").first();
     await expect(firstCourse).toBeVisible();
-    await expect(firstCourse.locator(".course-monitoring-status")).toBeVisible();
+    await expect(firstCourse.locator(".course-monitoring-status, .course-time-check").first()).toBeVisible();
     if (useMockedSearchProviders) {
       await expect.poll(async () =>
         firstCourse.locator("img.course-thumbnail").evaluate((image) => {
