@@ -27,13 +27,14 @@ export async function GET(request: NextRequest) {
           where: { startsAt: { gt: now, gte: new Date(day - 86400000), lt: new Date(day + 2 * 86400000) } },
           orderBy: { lastSeenAt: "desc" }, take: 500,
           select: { startsAt: true, availableSpots: true, holes: true, priceCents: true,
-            bookingUrl: true, lastConfirmedAt: true, lastSeenAt: true, availabilityStatus: true }
+            bookingUrl: true, lastConfirmedAt: true, lastSeenAt: true, unavailableAt: true, availabilityStatus: true }
         }
       }
     });
     // Explicit projection: no saved-search, owner, recipient, or delivery information.
     return NextResponse.json({ courses: Object.fromEntries(courses.map((course) => [
-      course.id, selectKnownTeeTimes(course.matches, course.timeZone, input.data.date, now)
+      // A truncated history cannot establish which observation is newest for every slot.
+      course.id, course.matches.length === 500 ? [] : selectKnownTeeTimes(course.matches, course.timeZone, input.data.date, now)
     ])) }, { headers: { "Cache-Control": "no-store" } });
   } catch {
     return NextResponse.json({ error: "Previously checked times are temporarily unavailable." }, { status: 503 });

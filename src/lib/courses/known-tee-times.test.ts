@@ -33,4 +33,10 @@ describe("previously checked times", () => {
       { bookingUrl: "https://user:password@example.com" }
     ]) expect(selectKnownTeeTimes([{ ...match, ...change }], "America/New_York", "2026-10-02", now)).toEqual([]);
   });
+  it("uses the real removal timestamp even when lastSeenAt stays unchanged", () => {
+    const gone = { ...match, availabilityStatus: "GONE", lastSeenAt: new Date("2026-10-02T11:00:00Z"), unavailableAt: now };
+    expect(selectKnownTeeTimes([gone, match], "America/New_York", "2026-10-02", now)).toEqual([]);
+    const reappeared = { ...match, lastSeenAt: new Date("2026-10-02T12:01:00Z"), lastConfirmedAt: new Date("2026-10-02T12:01:00Z") };
+    expect(selectKnownTeeTimes([gone, reappeared], "America/New_York", "2026-10-02", new Date("2026-10-02T12:02:00Z"))).toHaveLength(1);
+  });
 });

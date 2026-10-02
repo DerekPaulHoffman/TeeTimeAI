@@ -15,6 +15,7 @@ export type ObservedTeeTime = {
   bookingUrl: string;
   lastConfirmedAt: Date;
   lastSeenAt: Date;
+  unavailableAt?: Date | null;
   availabilityStatus: string;
 };
 
@@ -28,11 +29,14 @@ export function selectKnownTeeTimes(
   now = new Date()
 ): KnownTeeTime[] {
   const latest = new Map<string, ObservedTeeTime>();
+  const observedAt = (match: ObservedTeeTime) => match.availabilityStatus !== "AVAILABLE" && match.unavailableAt
+    ? Math.max(match.lastSeenAt.getTime(), match.unavailableAt.getTime())
+    : match.lastSeenAt.getTime();
   for (const match of matches) {
     const key = `${match.startsAt.toISOString()}|${match.holes ?? ""}`;
     const previous = latest.get(key);
-    if (!previous || match.lastSeenAt > previous.lastSeenAt ||
-      (match.lastSeenAt.getTime() === previous.lastSeenAt.getTime() && match.availabilityStatus !== "AVAILABLE")) {
+    if (!previous || observedAt(match) > observedAt(previous) ||
+      (observedAt(match) === observedAt(previous) && match.availabilityStatus !== "AVAILABLE")) {
       latest.set(key, match);
     }
   }

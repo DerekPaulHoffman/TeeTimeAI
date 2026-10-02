@@ -32,4 +32,8 @@ describe("public known times", () => {
     expect(JSON.stringify(body)).not.toContain("private-search");
     expect(mocks.findMany.mock.calls[0][0].where).toEqual({ id: { in: ["public-course"] }, isPublic: true });
   });
+  it("hides truncated observation histories rather than guessing which slots remain available", async () => {
+    mocks.findMany.mockResolvedValue([{ id: "public-course", timeZone: "America/New_York", matches: Array(500).fill({}) }]);
+    expect(await (await GET(request())).json()).toEqual({ courses: { "public-course": [] } });
+  });
 });
