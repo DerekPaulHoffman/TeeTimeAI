@@ -7,6 +7,15 @@ const time = { startsAt: "2026-10-02T14:00:00Z", availableSpots: 3, holes: 18,
   priceCents: 4500, bookingUrl: "https://example.com/tee-times", confirmedAt: "2026-10-02T13:55:00Z" };
 const props = { times: [time], timeZone: "America/New_York", date: "2026-10-02", startTime: "09:00", endTime: "11:00", players: 2 };
 describe("known tee-time links", () => {
+  it("uses the known phone-only action when a live check is unavailable", () => {
+    const { rerender } = render(<CourseTimeCheckStatus check={{ status: "UNAVAILABLE", times: [] }} alertSupport="PHONE_ONLY" />);
+    expect(screen.getByText("Call the course for tee times.")).toBeTruthy();
+    expect(screen.queryByText(/couldn't check/)).toBeNull();
+    expect(screen.queryByText(/No matching/)).toBeNull();
+    rerender(<CourseTimeCheckStatus check={{ status: "FAILED", times: [] }} alertSupport="PHONE_ONLY" />);
+    expect(screen.getByText("We couldn't check current tee times. Use the official site.")).toBeTruthy();
+    expect(screen.queryByText("Call the course for tee times.")).toBeNull();
+  });
   it("checks each course independently and completes the successful course while another fails", async () => {
     let complete: ((value: Response) => void) | undefined;
     const fetchMock = vi.fn((url: string) => url.includes("courseId=good") ? new Promise<Response>(resolve => { complete = resolve; }) : Promise.reject(new Error("provider failed")));

@@ -10411,6 +10411,9 @@ button {
 .known-tee-time:hover { background: #e4f0e7; }
 .known-tee-time:focus-visible { outline: 2px solid #16452e; outline-offset: 3px; }
 .course-time-check { display: flex; align-items: center; gap: 6px; font-size: 12px; margin: 8px 0; }
+.course-status-emoji { display: inline-block; flex: 0 0 auto; font-size: 12px; line-height: 1; vertical-align: -1px; }
+.course-monitoring-status > .course-status-emoji { display: inline-block; }
+.course-time-check-detail { font-size: 12px; line-height: 1.5; color: var(--muted); margin: 6px 0; }
 .course-check-spinner { animation: course-check-spin 1s linear infinite; }
 @keyframes course-check-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .course-check-spinner { animation: none; } }

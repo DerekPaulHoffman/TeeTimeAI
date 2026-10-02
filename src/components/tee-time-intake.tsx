@@ -18,7 +18,6 @@ import {
   BookOpenText,
   Check,
   CircleAlert,
-  CircleCheck,
   CircleDollarSign,
   ExternalLink,
   Flag,
@@ -60,6 +59,8 @@ import { getGoogleMapsSearchUrl } from "@/lib/maps";
 import { CURRENT_LOCATION_LABEL } from "@/lib/places/location-input";
 import type { CourseCandidate } from "@/lib/places/google";
 import { KnownTeeTimes, filterVisibleTeeTimes, useKnownTeeTimes, useCourseTimeChecks, CourseTimeCheckStatus, type CourseTimeCheck } from "@/components/known-tee-times";
+import { CourseStatusEmoji } from "@/components/course-status-emoji";
+import { getDashboardCourseAction } from "@/lib/searches/dashboard-course-action";
 import type { KnownTeeTime } from "@/lib/courses/known-tee-times";
 import {
   DEFAULT_COURSE_SEARCH_RADIUS_MILES,
@@ -1740,7 +1741,7 @@ function CourseResultCard({
           )}
         </h3>
         <CourseAddressLink course={course} />
-        {course.courseId ? <CourseTimeCheckStatus check={liveCheck} /> : <CourseMonitoringStatus course={course} />}
+        {course.courseId ? <CourseTimeCheckStatus check={liveCheck} alertSupport={course.alertSupport} /> : <CourseMonitoringStatus course={course} />}
         {course.courseId ? liveCheck?.status === "CHECKED" && <KnownTeeTimes times={liveCheck.times} timeZone={course.timeZone} {...timeFilters} showEmpty /> : <KnownTeeTimes times={knownTimes} timeZone={course.timeZone} {...timeFilters} />}
         {isIncompatible && requestedLayoutHoles ? (
           <p className="course-alert-support-note">
@@ -1978,11 +1979,13 @@ function CourseMonitoringStatus({
     <p
       className={`course-monitoring-status${isDirectOnly ? " is-manual" : ""}${isUnconfirmed ? " is-unconfirmed" : ""}${compact ? " is-compact" : ""}`}
     >
-      {isAutomatic ? (
-        <CircleCheck aria-hidden="true" size={11} />
-      ) : (
-        <CircleAlert aria-hidden="true" size={11} />
-      )}
+      <CourseStatusEmoji emoji={
+        isIdentityReviewRequired ? "⚠️" :
+        isPublicAccessUnverified ? "⏳" :
+        isManualOnly && course.alertSupport ? getDashboardCourseAction(course.alertSupport).emoji :
+        isTemporarilyUnavailable || isUnavailable ? "⚠️" :
+        isAutomatic ? "✅" : "⏳"
+      } />
       <span>
         <strong>
           {isIdentityReviewRequired
@@ -1990,7 +1993,7 @@ function CourseMonitoringStatus({
             : isPublicAccessUnverified
             ? "Verified after the alert starts"
             : isManualOnly && course.alertSupport
-            ? getAlertSupportLabel(course.alertSupport)
+            ? course.alertSupport === "PHONE_ONLY" ? "Call the course for tee times." : getAlertSupportLabel(course.alertSupport)
             : isTemporarilyUnavailable
               ? "Automatic alerts temporarily unavailable"
               : isUnavailable

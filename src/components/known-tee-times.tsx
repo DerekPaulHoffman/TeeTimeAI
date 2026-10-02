@@ -2,7 +2,9 @@
 
 import { useEffect, useState } from "react";
 import type { KnownTeeTime } from "@/lib/courses/known-tee-times";
-import { LoaderCircle } from "lucide-react";
+import type { CourseAlertSupport } from "@/lib/courses/intelligence";
+import { getDashboardCourseAction } from "@/lib/searches/dashboard-course-action";
+import { CourseStatusEmoji } from "@/components/course-status-emoji";
 
 export type CourseTimeCheck = { status: "LOADING" | "CHECKED" | "FAILED" | "UNAVAILABLE" | "BUSY" | "NOT_OPEN"; times: KnownTeeTime[] };
 export function useCourseTimeChecks(courseIds: string[], date: string, players: number, revision: number) {
@@ -33,10 +35,17 @@ export function useCourseTimeChecks(courseIds: string[], date: string, players: 
   return result?.key === key ? result.courses : {};
 }
 
-export function CourseTimeCheckStatus({ check }: { check?: CourseTimeCheck }) {
-  if (!check || check.status === "LOADING") return <p className="course-time-check" role="status"><LoaderCircle className="course-check-spinner" size={14} aria-hidden="true" />{check ? "Checking tee times…" : "Waiting to check tee times…"}</p>;
+export function CourseTimeCheckStatus({ check, alertSupport }: { check?: CourseTimeCheck; alertSupport?: CourseAlertSupport }) {
+  if (!check || check.status === "LOADING") return <p className="course-time-check" role="status"><CourseStatusEmoji emoji={check ? "🔎" : "⏳"} /><span>{check ? "Checking tee times…" : "Waiting to check tee times…"}</span></p>;
   if (check.status === "CHECKED") return <p className="course-time-check">Tee times checked just now</p>;
-  return <p className="course-time-check" role="status">{check.status === "NOT_OPEN" ? "Booking is not open for this date yet." : check.status === "BUSY" ? "Checks are busy. Search again in a moment, or use the official site." : "We couldn't check current tee times. Use the official site."}</p>;
+  if (check.status === "UNAVAILABLE" && alertSupport) {
+    const action = getDashboardCourseAction(alertSupport);
+    return <div>
+      <p className="course-time-check" role="status"><CourseStatusEmoji emoji={action.emoji} /><span>{alertSupport === "PHONE_ONLY" ? "Call the course for tee times." : `${action.label}.`}</span></p>
+      <p className="course-time-check-detail">{alertSupport === "PHONE_ONLY" ? "This course does not publish an online tee sheet." : action.detail}</p>
+    </div>;
+  }
+  return <p className="course-time-check" role="status"><CourseStatusEmoji emoji={check.status === "NOT_OPEN" ? "🕒" : check.status === "BUSY" ? "⏳" : "⚠️"} /><span>{check.status === "NOT_OPEN" ? "Booking is not open for this date yet." : check.status === "BUSY" ? "Checks are busy. Search again in a moment, or use the official site." : "We couldn't check current tee times. Use the official site."}</span></p>;
 }
 
 export function useKnownTeeTimes(courseIds: string[], date: string) {
@@ -74,9 +83,9 @@ export function KnownTeeTimes({ times, timeZone, date, startTime, endTime, playe
   const formatter = new Intl.DateTimeFormat("en-US", { timeZone, hour: "numeric", minute: "2-digit" });
   const zone = new Intl.DateTimeFormat("en-US", { timeZone, timeZoneName: "short" }).formatToParts(new Date(times[0]?.startsAt ?? `${date}T12:00:00Z`)).find(part => part.type === "timeZoneName")?.value;
   const visible = filterVisibleTeeTimes(times, timeZone, startTime, endTime, players);
-  if (!visible.length) return showEmpty ? <p className="course-time-check">No matching public tee times found for this date and time window.</p> : null;
+  if (!visible.length) return showEmpty ? <p className="course-time-check"><CourseStatusEmoji emoji="🔎" /><span>No matching public tee times found for this date and time window.</span></p> : null;
   return <section className="known-tee-times" aria-label="Previously checked tee times">
-    <p><strong>{showEmpty ? "Public tee times" : "Previously checked times"}</strong> · {date} · {zone}</p>
+    <p><strong><CourseStatusEmoji emoji="⛳" /> {showEmpty ? "Public tee times" : "Previously checked times"}</strong> · {date} · {zone}</p>
     <div className="known-tee-time-list">{visible.map((time) => <a
       key={`${time.startsAt}|${time.holes}`} className="known-tee-time" href={time.bookingUrl} target="_blank" rel="noreferrer"
       title={`${time.availableSpots} spots${time.holes ? ` · ${time.holes} holes` : ""}${time.priceCents !== null ? ` · $${(time.priceCents / 100).toFixed(2)}` : ""}. Last checked ${new Intl.DateTimeFormat("en-US", { timeZone, dateStyle: "medium", timeStyle: "short" }).format(new Date(time.confirmedAt))}. You book direct on the official site.`}

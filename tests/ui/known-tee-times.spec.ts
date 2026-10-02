@@ -55,4 +55,25 @@ test("offers notifications when a check has no current times", async ({ page }) 
   await expect(notify).toBeVisible();
   await expect(notify).toHaveText("Notify me when new times become available");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: `test-results/empty-times-${test.info().project.name}.png`, fullPage: true });
+});
+
+test("keeps phone-only instructions distinct from a failed availability check", async ({ page }) => {
+  await page.route("**/api/searches", route => route.abort());
+  await page.route("**/api/analytics/events", route => route.fulfill({ json: { event: { id: "test" } } }));
+  await page.route("**/api/location/geocode?**", route => route.fulfill({ json: { latitude: 41.24, longitude: -73.2 } }));
+  await page.route("**/api/courses/discover?**", route => route.fulfill({ json: { courses: [
+    { courseId: "phone-course", googlePlaceId: "phone-place", name: "Phone-only Public Course", alertSupport: "PHONE_ONLY", address: "Trumbull, CT", latitude: 41.24, longitude: -73.2, timeZone: "America/New_York" },
+    { courseId: "failed-course", googlePlaceId: "failed-place", name: "Unavailable Public Course", address: "Trumbull, CT", latitude: 41.25, longitude: -73.21, timeZone: "America/New_York" }
+  ] } }));
+  await page.route("**/api/courses/known-times?**", route => route.fulfill({ json: { courses: {} } }));
+  await page.route("**/api/courses/check-times?**", route => route.fulfill({ json: { status: new URL(route.request().url()).searchParams.get("courseId") === "phone-course" ? "UNAVAILABLE" : "FAILED", times: [] } }));
+  await page.goto("/search");
+  await page.getByRole("textbox", { name: "Location", exact: true }).fill("Trumbull, CT");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page.getByText("Call the course for tee times.", { exact: true })).toBeVisible();
+  await expect(page.getByText("We couldn't check current tee times. Use the official site.", { exact: true })).toBeVisible();
+  await expect(page.getByText(/No matching public tee times/)).toHaveCount(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: `test-results/negative-states-${test.info().project.name}.png`, fullPage: true });
 });
