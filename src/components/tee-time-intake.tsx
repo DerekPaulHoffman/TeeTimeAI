@@ -2,7 +2,6 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import {
   useCallback,
   useEffect,
@@ -18,6 +17,7 @@ import {
   BookOpenText,
   Check,
   CircleAlert,
+  CircleCheck,
   CircleDollarSign,
   ExternalLink,
   Flag,
@@ -286,7 +286,6 @@ function TeeTimeIntakeContent({
   accountState: IntakeAccountState;
   clerkPublishableKey?: string;
 }) {
-  const router = useRouter();
   const [locationText, setLocationText] = useState(initialValues.location ?? "");
   const [searchRadiusMiles, setSearchRadiusMiles] = useState(
     initialValues.radius ?? DEFAULT_COURSE_SEARCH_RADIUS_MILES
@@ -345,7 +344,12 @@ function TeeTimeIntakeContent({
   const [savedSignature, setSavedSignature] = useState<string | null>(null);
   const [mobileTimeEditorOpen, setMobileTimeEditorOpen] = useState(false);
   const [notificationOpen, setNotificationOpen] = useState(false);
+  const [createdAlert, setCreatedAlert] = useState<{
+    href: "/dashboard" | `/dashboard?created=${string}`;
+    message: string;
+  } | null>(null);
   const notificationDialogRef = useRef<HTMLDialogElement | null>(null);
+  const createdAlertRef = useRef<HTMLDivElement | null>(null);
   const [draftReady, setDraftReady] = useState(false);
   const resultsRef = useRef<HTMLDivElement | null>(null);
   const shouldScrollToResultsRef = useRef(false);
@@ -412,7 +416,7 @@ function TeeTimeIntakeContent({
   }, []);
 
   useEffect(() => {
-    if (!draftReady) {
+    if (!draftReady || createdAlert) {
       return;
     }
 
@@ -430,6 +434,7 @@ function TeeTimeIntakeContent({
     });
   }, [
     courses,
+    createdAlert,
     date,
     draftReady,
     endTime,
@@ -502,6 +507,13 @@ function TeeTimeIntakeContent({
       else dialog.removeAttribute("open");
     }
   }, [notificationOpen, selected.length, accountState.status]);
+
+  useEffect(() => {
+    if (createdAlert) {
+      createdAlertRef.current?.focus({ preventScroll: true });
+      createdAlertRef.current?.scrollIntoView?.({ block: "nearest" });
+    }
+  }, [createdAlert]);
 
   const normalizedAdditionalEmails = useMemo(
     () => normalizeAdditionalAlertEmails(
@@ -973,6 +985,8 @@ function TeeTimeIntakeContent({
       return;
     }
     if (getCourseLayoutCompatibility(course.layoutHoleCounts, requestedLayoutHoles) === "incompatible") return;
+    setCreatedAlert(null);
+    setSavedSignature(null);
     setSelected([course]);
     setAlertLimitReached(false);
     setNotificationOpen(true);
@@ -1111,10 +1125,6 @@ function TeeTimeIntakeContent({
         throw new Error(responseBody?.error ?? "Could not save this search. Try again in a moment.");
       }
 
-      setNotice({
-        type: "success",
-        message: buildSearchSavedMessage(selected)
-      });
       trackWebsiteEvent({
         name: "search_submitted",
         metadata: {
@@ -1132,11 +1142,15 @@ function TeeTimeIntakeContent({
         fireAlertCreatedConfetti();
       }
       clearSearchDraft();
-      router.push(
-        createdSearchId
+      setNotificationOpen(false);
+      setCreatedAlert({
+        href: createdSearchId
           ? `/dashboard?created=${encodeURIComponent(createdSearchId)}`
-          : "/dashboard"
-      );
+          : "/dashboard",
+        message: buildSearchSavedMessage(selected)
+      });
+      setSelected([]);
+      setAdditionalEmailFields([{ id: "additional-recipient-1", value: "" }]);
     } catch {
       setNotificationOpen(false);
       setSaveFailureVisible(true);
@@ -1216,6 +1230,24 @@ function TeeTimeIntakeContent({
 
       <div className="figma-results-layout" ref={resultsRef}>
         <div className="figma-results-column">
+          {createdAlert ? (
+            <div className="alert-created-confirmation" ref={createdAlertRef} role="status" tabIndex={-1}>
+              <CircleCheck aria-hidden="true" size={22} />
+              <div>
+                <strong>Your alert is created</strong>
+                <p>{createdAlert.message}</p>
+                <div className="alert-created-actions">
+                  <Link href={createdAlert.href} prefetch={false}>View my alerts</Link>
+                  <button type="button" onClick={() => {
+                    setCreatedAlert(null);
+                    const nextCourse = resultsRef.current?.querySelector<HTMLButtonElement>(".figma-add-button");
+                    nextCourse?.focus();
+                    nextCourse?.scrollIntoView?.({ block: "nearest" });
+                  }}>Select more courses</button>
+                </div>
+              </div>
+            </div>
+          ) : null}
           {loading ? (
             <div className="figma-results-banner" role="status" aria-atomic="true">
               <strong>Searching public courses</strong> within {searchRadiusMiles} miles…
@@ -1270,7 +1302,6 @@ function TeeTimeIntakeContent({
               notice={notice}
             />
           ) : null}
-          {isCurrentSearchSaved && notice.type === "success" ? <Notice notice={notice} /> : null}
           {courses.length > 0 &&
           filteredCourses.length === 0 &&
           courseLookupResults.length === 0 ? (
@@ -1389,25 +1420,12 @@ function TeeTimeIntakeContent({
             <button type="button" aria-label="Close notification setup" onClick={() => setNotificationOpen(false)}><X size={20} /></button>
           </div>
           <p className="notify-course-name">{selected.map(course => course.name).join(", ")}</p>
-          <p>We&apos;ll email you when matching tee times become available.</p>
         {selected.length > 0 ? (
           <section className="figma-alert-preview" aria-labelledby="alert-preview-title">
-            <div className="figma-alert-preview-heading">
-              <Bell aria-hidden="true" size={16} />
-              <strong id="alert-preview-title">Your alert</strong>
-            </div>
-            <p>
-              We&apos;ll check {selected.length} {selected.length === 1 ? "course" : "courses"}
-              {" "}for {formatAlertDate(date)}, {formatCompactTimeWindow(startTime, endTime)}, for{" "}
+            <p id="alert-preview-title">
+              {formatAlertDate(date)} · {formatCompactTimeWindow(startTime, endTime)} ·{" "}
               {players} {players === 1 ? "player" : "players"}.
             </p>
-            <span className="figma-alert-preview-recipients">
-              {`${alertEmail || "Your account email"}${
-                normalizedAdditionalEmails.length > 0
-                  ? ` + ${normalizedAdditionalEmails.length} ${normalizedAdditionalEmails.length === 1 ? "other" : "others"}`
-                  : ""
-              }`}
-            </span>
             <small>Matching openings link to the official site. You book direct.</small>
           </section>
         ) : null}
@@ -1415,7 +1433,7 @@ function TeeTimeIntakeContent({
           <label className="figma-alert-email" htmlFor="alertEmail">
             <span>Primary alert email</span>
             <input
-              aria-describedby="alert-email-help search-form-guidance"
+              aria-describedby="search-form-guidance"
               aria-invalid={hasInvalidAlertEmail}
               autoComplete="email"
               disabled={accountState.status !== "signed-in"}
@@ -1429,9 +1447,6 @@ function TeeTimeIntakeContent({
                   : "Account email unavailable"
               }
             />
-            <small id="alert-email-help">
-              Alerts go to your signed-in account email. Add extra recipients below to include your group.
-            </small>
           </label>
         ) : null}
         {selected.length > 0 ? (
@@ -1446,8 +1461,7 @@ function TeeTimeIntakeContent({
               </span>
             </div>
             <p id="additional-recipient-help">
-              Add up to 3 people. Everyone gets the same opening, but your signed-in account
-              manages the alert.
+              Add up to 3 people to receive the same alerts.
             </p>
             <div className="figma-recipient-fields">
               {additionalEmailFields.map((field, index) => (
@@ -1563,7 +1577,7 @@ function TeeTimeIntakeContent({
                     ? "Add a primary email to your account before creating alerts."
                     : accountState.status === "unavailable"
                       ? "Account access is temporarily unavailable, so alerts cannot be created."
-                      : `You’ll manage this alert from your signed-in account (${accountEmail}). Alerts go to that address and any extra recipients you add.`)}
+                      : "We'll email matching openings. You can manage this alert from My alerts.")}
           </p>
         </div>
       </dialog>

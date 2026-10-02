@@ -71,6 +71,52 @@ function mockDateBoundaryRequests() {
 }
 
 describe("TeeTimeIntake", () => {
+  it("closes setup after saving and offers alert navigation or more courses without redirecting", async () => {
+    const first = dateBoundaryCourse("First Public Course", "America/New_York");
+    const second = dateBoundaryCourse("Second Public Course", "America/New_York");
+    restoreDateBoundaryDraft([first, second], [first], "2030-10-03");
+    const fetchMock = mockDateBoundaryRequests();
+    render(<TeeTimeIntake {...signedInAccountProps} />);
+    await screen.findByRole("dialog", { name: "Notify me" });
+    fireEvent.change(screen.getByRole("textbox", { name: "Additional recipient 1" }), { target: { value: "friend@example.com" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
+
+    await screen.findByText("Your alert is created");
+    expect(screen.queryByRole("dialog", { name: "Notify me" })).toBeNull();
+    expect(screen.getByRole("link", { name: "View my alerts" }).getAttribute("href")).toBe("/dashboard?created=date-boundary");
+    expect(pushMock).not.toHaveBeenCalled();
+    expect(window.sessionStorage.getItem(SEARCH_DRAFT_STORAGE_KEY)).toBeNull();
+    expect(document.activeElement).toBe(document.querySelector(".alert-created-confirmation"));
+
+    fireEvent.click(screen.getByRole("button", { name: "Select more courses" }));
+    expect(screen.queryByText("Your alert is created")).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Notify me for First Public Course" }));
+    fireEvent.click(screen.getByRole("button", { name: "Notify me for Second Public Course" }));
+    expect(screen.getByRole("dialog", { name: "Notify me" }).textContent).toContain("Second Public Course");
+    expect((document.querySelector("#date") as HTMLInputElement).value).toBe("2030-10-03");
+    expect((screen.getByRole("textbox", { name: "Additional recipient 1" }) as HTMLInputElement).value).toBe("");
+    fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
+    await screen.findByText("Your alert is created");
+    const saves = fetchMock.mock.calls.filter(([input]) => input === "/api/searches");
+    expect(saves).toHaveLength(2);
+    expect(JSON.parse(String(saves[1][1]?.body)).courses).toEqual([expect.objectContaining({ name: "Second Public Course" })]);
+  });
+
+  it("offers My alerts when a successful create response has no search id", async () => {
+    const course = dateBoundaryCourse("Public Course", "America/New_York");
+    restoreDateBoundaryDraft([course], [course], "2030-10-03");
+    const fetchMock = mockDateBoundaryRequests();
+    const fallback = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (input, init) => String(input) === "/api/searches"
+      ? Response.json({}, { status: 201 }) : fallback(input, init));
+    render(<TeeTimeIntake {...signedInAccountProps} />);
+    await screen.findByRole("dialog", { name: "Notify me" });
+    fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
+    await screen.findByText("Your alert is created");
+    expect(screen.getByRole("link", { name: "View my alerts" }).getAttribute("href")).toBe("/dashboard");
+    expect(pushMock).not.toHaveBeenCalled();
+  });
+
   it("keeps individual notification settings open when the alert limit is reached", async () => {
     const course = dateBoundaryCourse("Limit Course", "America/New_York");
     restoreDateBoundaryDraft([course], [course], "2030-10-03");
@@ -136,7 +182,7 @@ describe("TeeTimeIntake", () => {
     await screen.findByRole("dialog", { name: "Notify me" });
     fireEvent.change(screen.getByRole("textbox", { name: "Additional recipient 1" }), { target: { value: "friend@example.com" } });
     fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
-    await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/dashboard?created=date-boundary"));
+    await waitFor(() => expect(screen.getByRole("link", { name: "View my alerts" }).getAttribute("href")).toBe("/dashboard?created=date-boundary"));
     const save = fetchMock.mock.calls.find(([input]) => input === "/api/searches");
     expect(JSON.parse(String(save?.[1]?.body))).toMatchObject({ date: "2030-10-03", startTime: "09:00", endTime: "18:00", players: 4, alertEmail: "golfer@example.com", additionalEmails: ["friend@example.com"], courses: [{ googlePlaceId: course.googlePlaceId, rank: 1 }] });
   });
@@ -177,7 +223,7 @@ describe("TeeTimeIntake", () => {
         expect(screen.getByRole("dialog", { name: "Notify me" })).toBeTruthy();
       }
       fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
-      await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/dashboard?created=date-boundary"));
+      await waitFor(() => expect(screen.getByRole("link", { name: "View my alerts" }).getAttribute("href")).toBe("/dashboard?created=date-boundary"));
     },
   );
 
@@ -200,7 +246,7 @@ describe("TeeTimeIntake", () => {
     expect(screen.queryByText("Your courses")).toBeNull();
     expect((document.querySelector("#date") as HTMLInputElement).value).toBe("2026-10-03");
     fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
-    await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/dashboard?created=date-boundary"));
+    await waitFor(() => expect(screen.getByRole("link", { name: "View my alerts" }).getAttribute("href")).toBe("/dashboard?created=date-boundary"));
     const save = fetchMock.mock.calls.find(([input]) => input === "/api/searches");
     const payload = JSON.parse(String(save?.[1]?.body)) as { courses: Array<{ googlePlaceId: string }> };
     expect(payload.courses.map((course) => course.googlePlaceId)).toEqual([second.googlePlaceId, first.googlePlaceId]);
@@ -220,7 +266,7 @@ describe("TeeTimeIntake", () => {
     ));
     expect(dateInput.value).toBe("2026-09-30");
     fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
-    await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/dashboard?created=date-boundary"));
+    await waitFor(() => expect(screen.getByRole("link", { name: "View my alerts" }).getAttribute("href")).toBe("/dashboard?created=date-boundary"));
     const save = fetchMock.mock.calls.find(([input]) => input === "/api/searches");
     const payload = JSON.parse(String(save?.[1]?.body)) as Record<string, unknown>;
     expect(payload.date).toBe("2026-09-30");
@@ -288,7 +334,7 @@ describe("TeeTimeIntake", () => {
     expect(fetchMock.mock.calls.some(([input]) => input === "/api/searches")).toBe(false);
 
     fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
-    await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/dashboard?created=date-boundary"));
+    await waitFor(() => expect(screen.getByRole("link", { name: "View my alerts" }).getAttribute("href")).toBe("/dashboard?created=date-boundary"));
     const saves = fetchMock.mock.calls.filter(([input]) => input === "/api/searches");
     expect(saves).toHaveLength(1);
     expect(JSON.parse(String(saves[0][1]?.body)).date).toBe("2026-10-03");
@@ -313,7 +359,7 @@ describe("TeeTimeIntake", () => {
     expect(fetchMock.mock.calls.some(([input]) => input === "/api/searches")).toBe(false);
   });
 
-  it("opens My Alerts after saving a new alert", async () => {
+  it("confirms a saved alert and offers a link to My Alerts", async () => {
     window.sessionStorage.setItem(WEBSITE_TRAFFIC_CLASS_STORAGE_KEY, "TEST");
     window.sessionStorage.setItem(
       WEBSITE_SYNTHETIC_MULTI_CYCLE_STORAGE_KEY,
@@ -381,7 +427,7 @@ describe("TeeTimeIntake", () => {
     fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
 
     await waitFor(() =>
-      expect(pushMock).toHaveBeenCalledWith("/dashboard?created=search-123")
+      expect(screen.getByRole("link", { name: "View my alerts" }).getAttribute("href")).toBe("/dashboard?created=search-123")
     );
     expect(document.querySelector('[data-alert-confetti="alert-created"]')).not.toBeNull();
     expect(fetchMock).toHaveBeenCalledWith(
@@ -478,7 +524,7 @@ describe("TeeTimeIntake", () => {
     fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
 
     await waitFor(() =>
-      expect(pushMock).toHaveBeenCalledWith("/dashboard?created=search-input-sync")
+      expect(screen.getByRole("link", { name: "View my alerts" }).getAttribute("href")).toBe("/dashboard?created=search-input-sync")
     );
     expect(savedPayload).toEqual(
       expect.objectContaining({
@@ -674,7 +720,7 @@ describe("TeeTimeIntake", () => {
     ).toBe(false);
     expect(
       screen.getByText(
-        "You’ll manage this alert from your signed-in account (golfer@example.com). Alerts go to that address and any extra recipients you add."
+        "We'll email matching openings. You can manage this alert from My alerts."
       )
     ).toBeTruthy();
     expect(fetchMock).toHaveBeenCalledWith(
@@ -876,6 +922,7 @@ describe("TeeTimeIntake", () => {
       "Something went wrong, and we're working on it."
     );
     expect(document.querySelector("[data-alert-confetti]")).toBeNull();
+    expect(screen.queryByText("Your alert is created")).toBeNull();
     expect(screen.queryByText("Internal course classification mismatch")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Send feedback" }));

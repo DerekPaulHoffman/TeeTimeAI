@@ -858,6 +858,28 @@ test.describe("Tee Time Spot UI smoke", () => {
       savedPayload = route.request().postDataJSON();
       await route.fulfill({ status: 201, json: { search: { id: "ui-notify-alert" } } });
     });
+    if (smokeHostname === "127.0.0.1" || smokeHostname === "localhost") {
+      // Supply signed-in component props only in this intercepted local document.
+      // Server authentication stays unchanged and every alert write is mocked above.
+      await page.route(`${smokeOrigin}/search`, async route => {
+        const response = await route.fetch();
+        const body = await response.text();
+        const accountProps = '\\"accountEmail\\":\\"$undefined\\",\\"accountEnabled\\":false,\\"accountSignedIn\\":false';
+        expect(body).toContain(accountProps);
+        const dialogStart = body.indexOf('<dialog class="notify-alert-dialog"');
+        const dialogEnd = body.indexOf("</dialog>", dialogStart);
+        expect(dialogStart).toBeGreaterThan(-1);
+        const dialogHtml = body.slice(dialogStart, dialogEnd);
+        const signedInDialog = dialogHtml
+          .replace("Account access unavailable", "Start getting alerts")
+          .replace("Account access is temporarily unavailable, so alerts cannot be created.",
+            "We&#x27;ll email matching openings. You can manage this alert from My alerts.");
+        await route.fulfill({ response, body: body
+          .replace(dialogHtml, signedInDialog)
+          .replace(accountProps,
+            '\\"accountEmail\\":\\"golfer@example.com\\",\\"accountEnabled\\":true,\\"accountSignedIn\\":true') });
+      });
+    }
     await page.goto("/search");
     await expect(page.getByText("Your courses", { exact: true })).toHaveCount(0);
     await expect(page.getByRole("dialog", { name: "Notify me" })).toBeHidden();
@@ -879,6 +901,11 @@ test.describe("Tee Time Spot UI smoke", () => {
     }
     await expect(dialog.locator(".notify-course-name")).toHaveText(courseName);
     await expect(dialog.locator(".figma-alert-preview")).toContainText("4 players");
+    const dialogBox = await dialog.boundingBox();
+    expect(dialogBox).not.toBeNull();
+    expect(dialogBox!.width).toBeLessThanOrEqual(420);
+    expect(dialogBox!.height).toBeLessThan(600);
+    await captureUiScreenshot(page, testInfo, "notify-popup");
     await dialog.getByRole("textbox", { name: "Additional recipient 1" }).fill("friend@example.com");
     await dialog.getByRole("button", { name: "Add another recipient" }).click();
     await dialog.getByRole("textbox", { name: "Additional recipient 2" }).fill("second@example.com");
@@ -887,10 +914,24 @@ test.describe("Tee Time Spot UI smoke", () => {
     const submit = dialog.getByRole("button", { name: /Start getting alerts|Account access unavailable/ });
     if (await submit.isEnabled()) {
       await submit.click();
-      await expect(page).toHaveURL(/dashboard\?created=ui-notify-alert/);
+      await expect(dialog).toBeHidden();
+      await expect(page).toHaveURL(/\/search$/);
+      await expect(page.getByText("Your alert is created", { exact: true })).toBeVisible();
+      await expect(page.getByRole("link", { name: "View my alerts" })).toHaveAttribute("href", "/dashboard?created=ui-notify-alert");
       expect(savedPayload?.date).toBe(date);
       expect(savedPayload?.additionalEmails).toEqual(["friend@example.com", "second@example.com"]);
       expect((savedPayload?.courses as unknown[])).toHaveLength(1);
+      await captureUiScreenshot(page, testInfo, "alert-created");
+      await page.getByRole("button", { name: "Select more courses" }).click();
+      await expect(page.getByText("Your alert is created", { exact: true })).toBeHidden();
+      await expect(page).toHaveURL(/\/search$/);
+      await expect(location).toHaveValue("Trumbull, CT");
+      await expect(page.getByLabel("Date")).toHaveValue(date);
+      await chosenCard.getByRole("button", { name: /Notify me.*for / }).click();
+      await expect(dialog).toBeVisible();
+      await expect(dialog.getByRole("textbox", { name: "Additional recipient 1" })).toHaveValue("");
+      await page.keyboard.press("Escape");
+      await expect(dialog).toBeHidden();
     } else {
       await dialog.getByRole("button", { name: "Close notification setup" }).press("Enter");
       await expect(dialog).toBeHidden();
