@@ -34,6 +34,7 @@ type CoursePreferenceFormValue = {
 
 export function SearchStatusActions({
   searchId,
+  windowEnded = false,
   status,
   initialDate,
   initialStartTime,
@@ -50,6 +51,7 @@ export function SearchStatusActions({
   initialCoursePreferences
 }: {
   searchId: string;
+  windowEnded?: boolean;
   status: SearchStatus;
   initialDate: string;
   initialStartTime: string;
@@ -368,7 +370,7 @@ export function SearchStatusActions({
               ))}
             </select>
           </label>
-          {form.coursePreferences.length > 0 ? (
+          {form.coursePreferences.length > 1 ? (
             <div className="queue-priority-editor">
               <div>
                 <strong>Course priority</strong>
@@ -513,21 +515,23 @@ export function SearchStatusActions({
                 type="button"
                 onClick={() => update("PAUSED")}
                 disabled={pending}
-                aria-label="Pause search"
-                title="Pause search"
+                aria-label="Pause notifications"
+                title="Pause notifications"
               >
                 <CirclePause size={16} />
+                Pause
               </button>
             ) : localStatus === "PAUSED" ? (
               <button
                 className="button button-ghost dashboard-icon-button"
                 type="button"
                 onClick={() => update("ACTIVE")}
-                disabled={pending}
-                aria-label="Resume search"
-                title="Resume search"
+                disabled={pending || windowEnded}
+                aria-label="Resume notifications"
+                title={windowEnded ? "Edit the date before resuming" : "Resume notifications"}
               >
                 <Play size={16} />
+                Resume
               </button>
             ) : null}
             <button
@@ -535,8 +539,8 @@ export function SearchStatusActions({
               type="button"
               onClick={removeSearch}
               disabled={pending}
-              aria-label="Remove search"
-              title="Remove search"
+              aria-label="Remove alert"
+              title="Remove alert"
             >
               <Trash2 size={16} />
             </button>
@@ -564,8 +568,8 @@ export function SearchStatusActions({
               )}
             </span>
             <span className="search-check-status-copy">
-              <strong>{checkStatusDisplay.title}</strong>
-              <span>{checkStatusDisplay.detail}</span>
+              <strong>{windowEnded && localStatus === "PAUSED" ? "This date has passed" : checkStatusDisplay.title}</strong>
+              <span>{windowEnded && localStatus === "PAUSED" ? "Edit this alert to choose a future date before resuming notifications, or remove it to free an alert slot." : checkStatusDisplay.detail}</span>
               {checkStatusDisplay.timing ? (
                 <span className="search-check-status-timing">
                   {checkStatusDisplay.timing}

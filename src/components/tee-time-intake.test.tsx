@@ -71,6 +71,25 @@ function mockDateBoundaryRequests() {
 }
 
 describe("TeeTimeIntake", () => {
+  it("keeps individual notification settings open when the alert limit is reached", async () => {
+    const course = dateBoundaryCourse("Limit Course", "America/New_York");
+    restoreDateBoundaryDraft([course], [course], "2030-10-03");
+    const fetchMock = mockDateBoundaryRequests();
+    const fallback = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (input, init) => {
+      if (String(input) === "/api/searches") return Response.json({ error: "You can keep up to 3 active or paused searches in the queue." }, { status: 400 });
+      return fallback(input, init);
+    });
+    render(<TeeTimeIntake {...signedInAccountProps} />);
+    await screen.findByRole("dialog", { name: "Notify me" });
+    fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
+    await screen.findByText(/You already have 3 active or paused alerts/);
+    expect(screen.getByRole("dialog", { name: "Notify me" }).textContent).toContain("Limit Course");
+    expect((document.querySelector("#date") as HTMLInputElement).value).toBe("2030-10-03");
+    expect(screen.getByRole("link", { name: "Manage my alerts" }).getAttribute("href")).toBe("/dashboard");
+    expect(pushMock).not.toHaveBeenCalled();
+  });
+
   afterEach(() => {
     document.querySelectorAll("[data-alert-confetti]").forEach((element) => element.remove());
     pushMock.mockReset();

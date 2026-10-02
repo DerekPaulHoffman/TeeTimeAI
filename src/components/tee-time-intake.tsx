@@ -73,7 +73,8 @@ import {
 } from "@/lib/pricing/course-prices";
 import {
   DEFAULT_SEARCH_CADENCE_MINUTES,
-  MAX_ADDITIONAL_ALERT_EMAILS
+  MAX_ADDITIONAL_ALERT_EMAILS,
+  MAX_QUEUED_SEARCHES_PER_USER
 } from "@/lib/validation/search-constraints";
 import { buildSearchSavedMessage } from "@/lib/searches/monitoring-copy";
 import { clearCourseMonitoringEvidence, hasReadyAutomaticMonitoring } from "@/lib/places/course-monitoring-evidence";
@@ -339,6 +340,7 @@ function TeeTimeIntakeContent({
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveFailureVisible, setSaveFailureVisible] = useState(false);
+  const [alertLimitReached, setAlertLimitReached] = useState(false);
   const [savedSignature, setSavedSignature] = useState<string | null>(null);
   const [mobileTimeEditorOpen, setMobileTimeEditorOpen] = useState(false);
   const [notificationOpen, setNotificationOpen] = useState(false);
@@ -971,6 +973,7 @@ function TeeTimeIntakeContent({
     }
     if (getCourseLayoutCompatibility(course.layoutHoleCounts, requestedLayoutHoles) === "incompatible") return;
     setSelected([course]);
+    setAlertLimitReached(false);
     setNotificationOpen(true);
     trackWebsiteEvent({
       name: "course_selection_started",
@@ -1056,6 +1059,7 @@ function TeeTimeIntakeContent({
     }
 
     setSaveFailureVisible(false);
+    setAlertLimitReached(false);
     setSaving(true);
     try {
       const userTimeZone =
@@ -1099,6 +1103,10 @@ function TeeTimeIntakeContent({
             requestedLayoutHoles
           }
         });
+        if (response.status === 400 && responseBody?.error === `You can keep up to ${MAX_QUEUED_SEARCHES_PER_USER} active or paused searches in the queue.`) {
+          setAlertLimitReached(true);
+          return;
+        }
         throw new Error(responseBody?.error ?? "Could not save this search. Try again in a moment.");
       }
 
@@ -1484,6 +1492,11 @@ function TeeTimeIntakeContent({
         ) : null}
         </div>
         <div className="figma-alert-action">
+          {alertLimitReached ? (
+            <p className="alert alert-info" role="alert">
+              You already have {MAX_QUEUED_SEARCHES_PER_USER} active or paused alerts. Remove an old alert to make room for this course. <Link href="/dashboard">Manage my alerts</Link>
+            </p>
+          ) : null}
           {accountState.status === "signed-out" && clerkPublishableKey ? (
             <DeferredSignInButton
               className="button button-primary"

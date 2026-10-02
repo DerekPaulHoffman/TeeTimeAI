@@ -2,7 +2,6 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { auth } from "@clerk/nextjs/server";
 import {
-  CalendarDays,
   CalendarClock,
   BookOpenText,
   CircleAlert,
@@ -58,6 +57,9 @@ import {
   getHeadlineCoursePrice,
   type CoursePriceRange
 } from "@/lib/pricing/course-prices";
+
+import { getNotificationTitle, groupDashboardNotifications, notificationWindowEnded } from "@/lib/searches/dashboard-notifications";
+import { MAX_QUEUED_SEARCHES_PER_USER } from "@/lib/validation/search-constraints";
 
 type DashboardSearches = Awaited<ReturnType<typeof listTeeSearchesForUser>>;
 
@@ -127,8 +129,8 @@ function DashboardView({
   notice?: string;
 }) {
   const now = new Date();
-  const activeSearches = searches.filter((search) => search.status === "ACTIVE");
-  const inactiveSearches = searches.filter((search) => search.status !== "ACTIVE");
+  const { active: activeSearches, paused: pausedSearches, history: historySearches, slotsUsed, monitoredCourseCount } = groupDashboardNotifications(searches);
+  const inactiveSearches = [...pausedSearches, ...historySearches];
   const activeCount = activeSearches.length;
   const availableMatches = activeSearches.flatMap((search) =>
     search.matches.filter(
@@ -138,12 +140,7 @@ function DashboardView({
         evaluateMonitoringGate({ ...match.course, now }).disposition === "ACTIONABLE"
     )
   );
-  const selectedCourseCount = new Set(
-    searches.flatMap((search) =>
-      search.preferences.map((preference) => preference.course.id)
-    )
-  ).size;
-  const totalAlerts = searches.length;
+  const selectedCourseCount = monitoredCourseCount;
   const alertStatusCopy = `${activeCount} ${
     activeCount === 1 ? "alert" : "alerts"
   } active. See each course's status for what we can check.`;
@@ -154,10 +151,8 @@ function DashboardView({
         ? inactiveSearches.some((search) => search.status === "PAUSED")
           ? "You don’t have an active alert right now. Resume a paused alert or start a new one."
           : "You don’t have an active alert right now. Start a new one when you’re ready to play."
-        : "No alerts yet. Find public courses and save your preferred date and time.";
-  const inactiveHeading = inactiveSearches.every((search) => search.status === "CANCELLED")
-    ? "Cancelled"
-    : "Paused and completed";
+        : "No notifications yet. Choose a course and tap Notify me to save when you want to play.";
+
 
   return (
     <main className="dashboard-page">
@@ -166,7 +161,7 @@ function DashboardView({
           <p className="eyebrow" style={{ color: "var(--fairway-dark)" }}>
             My Alerts
           </p>
-          <h1>My Alerts Dashboard</h1>
+          <h1>My Alerts</h1>
         </div>
         <Link className="button button-dark" href="/search">
           <Plus size={16} />
@@ -190,7 +185,7 @@ function DashboardView({
               <CalendarClock size={28} />
               <h3>{searches.length === 0 ? "No alerts yet" : "No active alerts"}</h3>
               <p className="meta">
-                Find public courses and save when you want to play. Each course’s status explains what we can check.
+                Choose a course on Search and tap Notify me. We’ll email you when matching times become available.
               </p>
             </div>
           ) : (
@@ -207,24 +202,21 @@ function DashboardView({
               ))}
             </div>
           )}
-          {inactiveSearches.length > 0 ? (
-            <>
-              <div className="dashboard-section-divider">
-                <h2>{inactiveHeading}</h2>
+          {pausedSearches.length > 0 ? (
+            <section className="dashboard-paused-section" aria-labelledby="paused-notifications-title">
+              <div className="dashboard-section-divider"><h2 id="paused-notifications-title">Paused alerts</h2><p className="meta">Notifications are off until you resume them.</p></div>
+              <div className="dashboard-list">
+                {pausedSearches.map(search => <DashboardSearchCard canManage={canManage} coursePhotos={coursePhotos} ownerEmailState={ownerEmailStates.get(search.id) ?? "FIRST_CHECK_PENDING"} key={search.id} search={search} showRecipientEmail={showRecipientEmail} />)}
               </div>
+            </section>
+          ) : null}
+          {historySearches.length > 0 ? (
+            <details className="dashboard-alert-history">
+              <summary>Alert history <span>{historySearches.length} completed or cancelled</span></summary>
               <div className="dashboard-list dashboard-list-inactive">
-                {inactiveSearches.map((search) => (
-                  <DashboardSearchCard
-                    canManage={canManage}
-                    coursePhotos={coursePhotos}
-                    ownerEmailState={ownerEmailStates.get(search.id) ?? "FIRST_CHECK_PENDING"}
-                    key={search.id}
-                    search={search}
-                    showRecipientEmail={showRecipientEmail}
-                  />
-                ))}
+                {historySearches.map(search => <DashboardSearchCard canManage={canManage} coursePhotos={coursePhotos} ownerEmailState={ownerEmailStates.get(search.id) ?? "FIRST_CHECK_PENDING"} key={search.id} search={search} showRecipientEmail={showRecipientEmail} />)}
               </div>
-            </>
+            </details>
           ) : null}
         </section>
 
@@ -241,20 +233,20 @@ function DashboardView({
               </dd>
             </div>
             <div>
-              <dt>Courses selected</dt>
+              <dt>Courses being watched</dt>
               <dd>{selectedCourseCount}</dd>
             </div>
             <div>
-              <dt>Total alerts</dt>
-              <dd>{totalAlerts}</dd>
+              <dt>Active or paused alerts</dt>
+              <dd>{slotsUsed}/{MAX_QUEUED_SEARCHES_PER_USER}</dd>
             </div>
           </dl>
           <div className="alert alert-info">
-            See each course’s status for what we can check. We’ll email new confirmed matches and alert updates.
+            {slotsUsed >= MAX_QUEUED_SEARCHES_PER_USER ? "Your alert slots are full. Remove an old alert to make room for a new course notification." : "Each Notify me saves a course, date, time window, and player count. Paused alerts also use a slot."}
           </div>
           <Link className="button button-dark dashboard-add-search" href="/search">
             <Plus size={16} />
-            Add another search
+            Find another course
           </Link>
         </aside>
       </div>
@@ -357,10 +349,10 @@ function DashboardSearchCard({
   });
 
   return (
-    <article className="dashboard-row">
+    <article className="dashboard-row" id={`alert-${search.id}`}>
       <details
         className="dashboard-alert-accordion"
-        open={availableSearchMatches.length > 0}
+        open={search.status === "ACTIVE" || search.status === "PAUSED"}
       >
         <summary className="dashboard-alert-summary">
           <div className="dashboard-alert-summary-heading">
@@ -369,14 +361,15 @@ function DashboardSearchCard({
               {summary.lifecycleLabel}
             </span>
             <h3>
-              <CalendarDays size={16} />
-              {formatDashboardDate(search.date)}
+              {getNotificationTitle(search.preferences)}
             </h3>
           </div>
           <div className="dashboard-alert-summary-copy">
-            <strong>{summary.headline}</strong>
+            <strong>{search.status === "PAUSED" ? "Notifications paused" : search.status === "COMPLETED" ? "Notification ended" : search.status === "CANCELLED" ? "Notification cancelled" : summary.headline}</strong>
+            {search.preferences.length > 1 ? <span className="dashboard-group-label">Group alert · {search.preferences.map(preference => preference.course.name).join(", ")}</span> : null}
             {summary.coverageNotice ? <span>{summary.coverageNotice}</span> : null}
             <span>
+              {formatDashboardDate(search.date)}{" · "}
               {formatTimeLabel(search.startTime)}–{formatTimeLabel(search.endTime)}
               {" · "}
               {search.players} {search.players === 1 ? "golfer" : "golfers"}
@@ -415,7 +408,7 @@ function DashboardSearchCard({
           <div className="dashboard-card-main">
         <div className="dashboard-card-topline">
           <div className="dashboard-card-title">
-            <h3>Ranked courses</h3>
+            <h3>{search.preferences.length === 1 ? "Course notification" : "Group notification"}</h3>
             <p className="dashboard-card-context">
               {search.requestedLayoutHoles
                 ? `${search.requestedLayoutHoles}-hole courses`
@@ -437,6 +430,7 @@ function DashboardSearchCard({
               key={search.id}
               searchId={search.id}
               status={search.status}
+              windowEnded={notificationWindowEnded(formatDateInputValue(search.date), search.endTime, search.preferences.map(preference => preference.course.timeZone), now)}
               initialDate={formatDateInputValue(search.date)}
               initialStartTime={search.startTime}
               initialEndTime={search.endTime}
@@ -529,7 +523,7 @@ function DashboardSearchCard({
                       ? coursePhotos.get(preference.course.googlePlaceId)
                       : undefined
                   }
-                  rank={preference.rank}
+                  rank={search.preferences.length > 1 ? preference.rank : undefined}
                 />
                 <div className="watch-course-copy">
                   <div className="figma-course-badges watch-course-badges">
@@ -772,7 +766,7 @@ function CourseImage({
 }: {
   name: string;
   photo?: GooglePlacePhoto;
-  rank: number;
+  rank?: number;
 }) {
   const imageUrl = photo
     ? `/api/courses/photo?ref=${encodeURIComponent(photo.photoReference)}`
@@ -791,7 +785,7 @@ function CourseImage({
       title={attribution ? `${name} photo by ${attribution}` : name}
     >
       {!imageUrl ? <Trees aria-hidden="true" className="dashboard-course-placeholder-icon" /> : null}
-      <span className="dashboard-course-rank">{rank}</span>
+      {rank !== undefined ? <span className="dashboard-course-rank">{rank}</span> : null}
       {attribution ? (
         <span className="dashboard-course-attribution">Photo: {attribution}</span>
       ) : null}

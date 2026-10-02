@@ -34,6 +34,33 @@ const savedSearch: ComponentProps<typeof SearchStatusActions> = {
 };
 
 describe("SearchStatusActions", () => {
+  it("edits an individual notification without course ranking and retains its course", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<SearchStatusActions {...savedSearch} initialCoursePreferences={[savedSearch.initialCoursePreferences[0]]} />);
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(screen.queryByText("Course priority")).toBeNull();
+    fireEvent.change(screen.getByLabelText("Players"), { target: { value: "3" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(refreshMock).toHaveBeenCalled());
+    const payload = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(payload.players).toBe(3);
+    expect(payload.coursePreferences).toEqual([{ id: "pref-a", rank: 1 }]);
+  });
+
+  it("explains a past paused date and prevents starting it again", () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    render(<SearchStatusActions {...savedSearch} status="PAUSED" windowEnded />);
+    const resume = screen.getByRole("button", { name: "Resume notifications" }) as HTMLButtonElement;
+    expect(resume.disabled).toBe(true);
+    expect(screen.getByText("This date has passed")).toBeTruthy();
+    fireEvent.click(resume);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Edit" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Remove alert" })).toBeTruthy();
+  });
+
   afterEach(() => {
     vi.useRealTimers();
     vi.restoreAllMocks();
@@ -245,15 +272,15 @@ describe("SearchStatusActions", () => {
       const { rerender } = render(
         <SearchStatusActions {...savedSearch} status="PAUSED" initialCheckStatus="STOPPED" />
       );
-      expect(screen.getByRole("button", { name: "Resume search" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Resume notifications" })).toBeTruthy();
       expect(screen.getByText("Automatic checks are paused")).toBeTruthy();
 
       rerender(
         <SearchStatusActions {...savedSearch} status={status} initialCheckStatus="STOPPED" />
       );
 
-      expect(screen.queryByRole("button", { name: "Resume search" })).toBeNull();
-      expect(screen.queryByRole("button", { name: "Pause search" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Resume notifications" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Pause notifications" })).toBeNull();
       expect(screen.queryByRole("button", { name: "Check now" })).toBeNull();
       expect(screen.queryByText("Automatic checks are paused")).toBeNull();
       expect(screen.getByText("Automatic checks have stopped")).toBeTruthy();
@@ -378,14 +405,14 @@ describe("SearchStatusActions", () => {
     const { rerender } = render(
       <SearchStatusActions {...savedSearch} status="PAUSED" initialCheckStatus="STOPPED" />
     );
-    fireEvent.click(screen.getByRole("button", { name: "Resume search" }));
+    fireEvent.click(screen.getByRole("button", { name: "Resume notifications" }));
     rerender(
       <SearchStatusActions {...savedSearch} status="COMPLETED" initialCheckStatus="STOPPED" />
     );
 
     await act(async () => finishResume({ ok: true }));
 
-    expect(screen.queryByRole("button", { name: "Resume search" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Resume notifications" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Checking" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Check now" })).toBeNull();
     expect(screen.getByText("Automatic checks have stopped")).toBeTruthy();
@@ -395,10 +422,10 @@ describe("SearchStatusActions", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true }));
     render(<SearchStatusActions {...savedSearch} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Pause search" }));
+    fireEvent.click(screen.getByRole("button", { name: "Pause notifications" }));
     await waitFor(() => expect(screen.getByText("Automatic checks are paused")).toBeTruthy());
 
-    expect(screen.getByRole("button", { name: "Resume search" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Resume notifications" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Check now" })).toBeNull();
     expect(screen.queryByText(/next check:/i)).toBeNull();
   });

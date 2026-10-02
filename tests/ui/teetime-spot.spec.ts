@@ -997,14 +997,14 @@ test.describe("Tee Time Spot UI smoke", () => {
 
     await expect(
       page.getByRole("heading", {
-        name: /My Alerts Dashboard|Sign in to manage searches|Dashboard setup needed|Account access is temporarily unavailable/i
+        name: /My Alerts|Sign in to manage searches|Dashboard setup needed|Account access is temporarily unavailable/i
       })
     ).toBeVisible();
     await expect(
       page
         .getByRole("main")
         .getByRole("link", {
-          name: /Find a tee time|Add another search|Back to search|Preview intake/i
+          name: /Find a tee time|Find another course|Back to search|Preview intake/i
         })
         .first()
     ).toBeVisible();
