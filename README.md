@@ -133,6 +133,7 @@ The current UI was redesigned from a Figma Make direction. Important visual deci
 - Large `Tee Time Spot` first-viewport brand signal.
 - Action-focused onboarding, not a marketing landing page.
 - Map/list style course discovery with photos when Places returns them.
+- Course results show previously checked tee times for the selected course-local date, time window, and player count. These reuse saved public availability observations confirmed within two hours, show the last check and observed rate when known, and link to the official booking page. Missing times do not establish that a course is sold out. The public response excludes search ownership, recipients, and delivery state.
 - Dashboard focused on active alerts, ranked courses, status, matches, and controls.
 - Email preview that shows the actual alert email and direct official booking link.
 - Feedback widget remains available across the app.

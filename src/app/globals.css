@@ -10403,3 +10403,11 @@ button {
     padding: 0 12px 10px;
   }
 }
+/* Recent official tee-sheet observations within the existing course result. */
+.known-tee-times { margin-top: 12px; min-width: 0; }
+.known-tee-times p { font-size: 12px; line-height: 1.5; margin: 6px 0; color: var(--muted); }
+.known-tee-time-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.known-tee-time { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border: 1px solid #cbdcd0; border-radius: 8px; background: #f2f8f3; color: #16452e; text-decoration: none; min-height: 44px; max-width: 100%; }
+.known-tee-time span { font-size: 11px; line-height: 1.4; }
+.known-tee-time:hover { background: #e4f0e7; }
+.known-tee-time:focus-visible { outline: 2px solid #16452e; outline-offset: 3px; }

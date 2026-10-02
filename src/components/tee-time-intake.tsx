@@ -62,6 +62,8 @@ import {
 import { getGoogleMapsSearchUrl } from "@/lib/maps";
 import { CURRENT_LOCATION_LABEL } from "@/lib/places/location-input";
 import type { CourseCandidate } from "@/lib/places/google";
+import { KnownTeeTimes, useKnownTeeTimes } from "@/components/known-tee-times";
+import type { KnownTeeTime } from "@/lib/courses/known-tee-times";
 import {
   DEFAULT_COURSE_SEARCH_RADIUS_MILES,
   MAX_COURSE_SEARCH_RADIUS_MILES,
@@ -320,6 +322,10 @@ function TeeTimeIntakeContent({
   const [courseLookupQuery, setCourseLookupQuery] = useState("");
   const [submittedCourseLookupQuery, setSubmittedCourseLookupQuery] = useState("");
   const [courseLookupResults, setCourseLookupResults] = useState<CourseCandidate[]>([]);
+  const knownTimes = useKnownTeeTimes(
+    [...courses, ...courseLookupResults].flatMap((course) => course.courseId ? [course.courseId] : []),
+    date
+  );
   const [courseLookupState, setCourseLookupState] = useState<
     "idle" | "loading" | "success" | "error"
   >("idle");
@@ -1364,6 +1370,8 @@ function TeeTimeIntakeContent({
                 {courseLookupResults.map((course) => (
                   <CourseResultCard
                     course={course}
+                    knownTimes={course.courseId ? knownTimes[course.courseId] ?? [] : []}
+                    timeFilters={{ date, startTime, endTime, players }}
                     key={course.googlePlaceId}
                     onReportInaccuracy={reportCourseInaccuracy}
                     onToggle={(lookupCourseResult) => {
@@ -1393,6 +1401,8 @@ function TeeTimeIntakeContent({
               {visibleNearbyCourses.map((course) => (
                 <CourseResultCard
                   course={course}
+                  knownTimes={course.courseId ? knownTimes[course.courseId] ?? [] : []}
+                  timeFilters={{ date, startTime, endTime, players }}
                   key={course.googlePlaceId}
                   onReportInaccuracy={reportCourseInaccuracy}
                   onToggle={toggleCourse}
@@ -1813,12 +1823,16 @@ function CourseResultsDivider({ children }: { children: ReactNode }) {
 
 function CourseResultCard({
   course,
+  knownTimes,
+  timeFilters,
   onReportInaccuracy,
   onToggle,
   requestedLayoutHoles,
   selectedIndex
 }: {
   course: CourseCandidate;
+  knownTimes: KnownTeeTime[];
+  timeFilters: { date: string; startTime: string; endTime: string; players: number };
   onReportInaccuracy: (course: CourseCandidate) => void;
   onToggle: (course: CourseCandidate) => void;
   requestedLayoutHoles: CourseLayoutHoleCount | null;
@@ -1914,6 +1928,7 @@ function CourseResultCard({
         </h3>
         <CourseAddressLink course={course} />
         <CourseMonitoringStatus course={course} />
+        <KnownTeeTimes times={knownTimes} timeZone={course.timeZone} {...timeFilters} />
         {isIncompatible && requestedLayoutHoles ? (
           <p className="course-alert-support-note">
             Does not match an {requestedLayoutHoles}-hole course search
