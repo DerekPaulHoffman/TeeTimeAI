@@ -1933,6 +1933,10 @@ function collectPageIssues(page: Page) {
     if (request.url().includes("?_rsc=") && failureText.includes("ERR_ABORTED")) {
       return;
     }
+    // Date/party/location changes cancel stale availability reads deliberately.
+    if (/\/api\/courses\/(check-times|known-times)\?/.test(request.url()) && failureText.includes("ERR_ABORTED")) {
+      return;
+    }
 
     if (isSameOrigin(request.url())) {
       issues.push(`requestfailed:${request.method()} ${request.url()} ${failureText}`);

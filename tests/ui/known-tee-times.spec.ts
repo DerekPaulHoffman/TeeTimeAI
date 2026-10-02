@@ -29,7 +29,11 @@ test("shows existing times on course results", async ({ page }) => {
   await expect(page.getByText("Alert availability after first check", { exact: true })).toHaveCount(0);
   await expect(times).toBeVisible();
   await expect(times.getByRole("link")).toHaveAttribute("href", "https://example.com/official-booking");
-  await expect(times).toContainText("4 spots · 18 holes · $45.00");
+  await expect(times.getByRole("link")).toHaveAttribute("title", /4 spots · 18 holes · \$45\.00/);
+  await expect(times.getByRole("link")).toHaveText("11:00 AM");
+  const pill = await times.getByRole("link").boundingBox();
+  expect(pill!.height).toBeLessThanOrEqual(30);
+  expect(pill!.width).toBeLessThanOrEqual(100);
   await expect(times).toContainText("You book direct");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: `test-results/known-times-${test.info().project.name}.png`, fullPage: true });

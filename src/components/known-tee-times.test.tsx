@@ -30,9 +30,10 @@ describe("known tee-time links", () => {
     render(<KnownTeeTimes {...props} />);
     const link = screen.getByRole("link");
     expect(link.getAttribute("href")).toBe(time.bookingUrl);
-    expect(link.textContent).toContain("10:00 AM EDT");
-    expect(link.textContent).toContain("3 spots · 18 holes · $45.00");
-    expect(link.textContent).toContain("Checked 9:55 AM EDT");
+    expect(link.textContent).toBe("10:00 AM");
+    expect(link.getAttribute("title")).toContain("3 spots · 18 holes · $45.00");
+    expect(link.getAttribute("title")).toContain("9:55 AM");
+    expect(link.textContent).not.toContain("Checked");
   });
   it("hides slots outside the window or with too few spots without claiming no availability", () => {
     const { rerender } = render(<KnownTeeTimes {...props} players={4} />);

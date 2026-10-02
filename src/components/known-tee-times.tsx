@@ -65,20 +65,19 @@ export function KnownTeeTimes({ times, timeZone, date, startTime, endTime, playe
   times: KnownTeeTime[]; timeZone: string; date: string; startTime: string; endTime: string; players: number;
   showEmpty?: boolean;
 }) {
-  const formatter = new Intl.DateTimeFormat("en-US", { timeZone, hour: "numeric", minute: "2-digit", timeZoneName: "short" });
+  const formatter = new Intl.DateTimeFormat("en-US", { timeZone, hour: "numeric", minute: "2-digit" });
+  const zone = new Intl.DateTimeFormat("en-US", { timeZone, timeZoneName: "short" }).formatToParts(new Date(times[0]?.startsAt ?? `${date}T12:00:00Z`)).find(part => part.type === "timeZoneName")?.value;
   const clock = new Intl.DateTimeFormat("en-GB", { timeZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
   const visible = times.filter((time) => time.availableSpots >= players &&
     clock.format(new Date(time.startsAt)) >= startTime && clock.format(new Date(time.startsAt)) <= endTime);
   if (!visible.length) return showEmpty ? <p className="course-time-check">No matching public tee times found for this date and time window.</p> : null;
   return <section className="known-tee-times" aria-label="Previously checked tee times">
-    <p><strong>{showEmpty ? "Public tee times" : "Previously checked times"}</strong> · {date}</p>
+    <p><strong>{showEmpty ? "Public tee times" : "Previously checked times"}</strong> · {date} · {zone}</p>
     <div className="known-tee-time-list">{visible.map((time) => <a
       key={`${time.startsAt}|${time.holes}`} className="known-tee-time" href={time.bookingUrl} target="_blank" rel="noreferrer"
-      title={`Last confirmed ${new Intl.DateTimeFormat("en-US", { timeZone, dateStyle: "medium", timeStyle: "short" }).format(new Date(time.confirmedAt))}. You book direct on the official site.`}
+      title={`${time.availableSpots} spots${time.holes ? ` · ${time.holes} holes` : ""}${time.priceCents !== null ? ` · $${(time.priceCents / 100).toFixed(2)}` : ""}. Last checked ${new Intl.DateTimeFormat("en-US", { timeZone, dateStyle: "medium", timeStyle: "short" }).format(new Date(time.confirmedAt))}. You book direct on the official site.`}
     >
       <strong>{formatter.format(new Date(time.startsAt))}</strong>
-      <span>{time.availableSpots} spots{time.holes ? ` · ${time.holes} holes` : ""}{time.priceCents !== null ? ` · $${(time.priceCents / 100).toFixed(2)}` : ""}</span>
-      <span>Checked {formatter.format(new Date(time.confirmedAt))} · Official booking page ↗</span>
     </a>)}</div>
     <p>Availability can change. You book direct on the official site.</p>
   </section>;
