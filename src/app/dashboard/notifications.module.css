@@ -1,14 +1,16 @@
 .page {
   max-width: 1080px;
   margin-inline: auto;
-  padding: 40px 28px 64px;
+  background: transparent;
+  padding: 100px 28px 64px;
 }
 
 .page :global(.dashboard-header) { margin-bottom: 28px; align-items: center; }
 .page :global(.dashboard-header h1) { font-size: 32px; letter-spacing: -1px; margin-bottom: 8px; }
+.page :global(.dashboard-header > .button) { width: auto; height: 44px; min-height: 44px; padding: 0 18px; border-radius: 999px; white-space: nowrap; flex: none; }
 .page :global(.dashboard-grid) { display: flex; flex-direction: column; gap: 32px; }
 .page :global(.dashboard-panel) { background: transparent; border: 0; box-shadow: none; padding: 0; border-radius: 0; }
-.page :global(.dashboard-sidebar) { order: -1; position: static; }
+.page :global(.dashboard-sidebar) { display: block; order: -1; position: static; width: 100%; max-width: none; }
 .page :global(.dashboard-sidebar > h2),
 .page :global(.dashboard-sidebar > .meta),
 .page :global(.dashboard-add-search) { display: none; }
@@ -24,6 +26,7 @@
 .page :global(.empty-state h3) { font-size: 18px; margin: 0 0 10px; }
 .page :global(.empty-state p) { margin: 0 auto; max-width: 460px; line-height: 1.6; }
 .page :global(.dashboard-list) { gap: 12px; }
+.page :global(.dashboard-list-inactive) { padding: 0; margin: 0; }
 .page :global(.dashboard-row) { border: 1px solid #dce4df; border-radius: 12px; box-shadow: none; overflow: hidden; background: white; }
 .page :global(.dashboard-alert-summary) { display: grid; grid-template-columns: minmax(0, 1fr) 20px; gap: 8px 16px; padding: 20px; background: white; }
 .page :global(.dashboard-alert-summary:hover) { background: #f7f9f6; }
@@ -52,9 +55,10 @@
 .page :global(.dashboard-list-inactive .dashboard-alert-accordion[open] .dashboard-group-label) { display: block; }
 
 @media (max-width: 600px) {
-  .page { padding: 28px 16px 48px; }
+  .page { padding: 88px 16px 48px; }
   .page :global(.dashboard-header) { align-items: flex-start; gap: 16px; flex-direction: column; }
   .page :global(.dashboard-header h1) { font-size: 28px; }
+  .page :global(.dashboard-header > .button) { width: 100%; }
   .page :global(.sidebar-stat-list) { gap: 12px; }
   .page :global(.sidebar-stat-list dt) { font-size: 11px; }
   .page :global(.sidebar-stat-list dd) { font-size: 17px; }
