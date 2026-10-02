@@ -5637,9 +5637,14 @@ button {
   box-shadow: 0 2px 0 #18332b;
 }
 
-.figma-search-field input[type="date"]::-webkit-calendar-picker-indicator,
 .figma-search-field input[type="time"]::-webkit-calendar-picker-indicator {
   display: none;
+}
+
+@media (max-width: 620px) {
+  .figma-search-toolbar .figma-search-field.figma-date-field {
+    padding-inline: 10px;
+  }
 }
 
 .figma-location-field input {

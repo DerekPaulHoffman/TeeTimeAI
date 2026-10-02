@@ -44,6 +44,7 @@
   },
   "dependencies": {
     "@clerk/nextjs": "^7.6.1",
+    "@internationalized/date": "3.12.4",
     "@photostructure/tz-lookup": "^11.6.0",
     "@prisma/adapter-neon": "^7.9.1",
     "@prisma/adapter-pg": "^7.9.1",
@@ -59,6 +60,7 @@
     "next": "^16.2.12",
     "parse5": "^8.0.0",
     "react": "^19.2.8",
+    "react-aria-components": "1.21.1",
     "react-dom": "^19.2.8",
     "resend": "^6.18.0",
     "web-push": "^3.6.7",

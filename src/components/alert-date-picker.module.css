@@ -1,0 +1,153 @@
+.control {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+  width: 100%;
+}
+
+.control input {
+  flex: 1;
+  min-width: 0;
+}
+
+.control input::-webkit-calendar-picker-indicator {
+  display: none;
+}
+
+.trigger,
+.navigation {
+  align-items: center;
+  background: #edf4ef;
+  border: 0;
+  border-radius: 10px;
+  color: #18332b;
+  cursor: pointer;
+  display: inline-flex;
+  flex: 0 0 40px;
+  height: 40px;
+  justify-content: center;
+  padding: 0;
+  width: 40px;
+}
+
+.trigger[data-hovered],
+.navigation[data-hovered] {
+  background: #dcebe1;
+}
+
+.trigger[data-focus-visible],
+.navigation[data-focus-visible],
+.day[data-focus-visible] {
+  outline: 2px solid #18332b;
+  outline-offset: 2px;
+}
+
+.popover {
+  background: #ffffff;
+  border: 1px solid #d8e2dd;
+  border-radius: 16px;
+  box-shadow: 0 12px 40px rgb(17 29 24 / 16%);
+  color: #18332b;
+  max-width: calc(100vw - 24px);
+  padding: 14px;
+  width: 340px;
+}
+
+.dialog {
+  outline: none;
+}
+
+.calendar {
+  width: 100%;
+}
+
+.header {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.heading {
+  font-size: 1rem;
+  font-weight: 800;
+  margin: 0;
+}
+
+.navigation[data-disabled] {
+  background: transparent;
+  color: #a9b8b0;
+  cursor: default;
+}
+
+.grid {
+  border-collapse: collapse;
+  table-layout: fixed;
+  width: 100%;
+}
+
+.grid td {
+  padding: 2px 0;
+}
+
+.weekday {
+  color: #667e71;
+  font-size: 0.75rem;
+  font-weight: 650;
+  padding-bottom: 8px;
+  text-align: center;
+}
+
+.day {
+  align-items: center;
+  border-radius: 10px;
+  cursor: pointer;
+  display: flex;
+  font-size: 0.88rem;
+  font-weight: 650;
+  height: 42px;
+  justify-content: center;
+  outline: none;
+}
+
+.day[data-hovered] {
+  background: #edf4ef;
+}
+
+.day[data-today] {
+  box-shadow: inset 0 0 0 1px #d8e2dd;
+}
+
+.day[data-selected] {
+  background: #18332b;
+  color: #ffffff;
+}
+
+.day[data-disabled] {
+  color: #a9b8b0;
+  cursor: default;
+}
+
+.day[data-outside-month] {
+  visibility: hidden;
+}
+
+.help {
+  border-top: 1px solid #e5ece7;
+  color: #667e71;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  margin: 12px 0 0;
+  padding-top: 12px;
+}
+
+@media (max-width: 620px) {
+  .control {
+    gap: 4px;
+  }
+
+  .control input[type="date"] {
+    font-size: 12px;
+  }
+}

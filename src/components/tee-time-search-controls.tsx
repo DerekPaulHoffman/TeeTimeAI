@@ -3,6 +3,7 @@
 import { LocateFixed, Search, X } from "lucide-react";
 import type { SyntheticEvent } from "react";
 
+import { AlertDatePicker } from "@/components/alert-date-picker";
 import { LOCATION_INPUT_PLACEHOLDER } from "@/lib/places/location-input";
 import {
   DEFAULT_COURSE_SEARCH_RADIUS_MILES,
@@ -51,7 +52,7 @@ export function TeeTimeSearchControls({
   locationText,
   minSearchDate,
   mobileTimeEditorOpen,
-  onDateInput,
+  onDateChange,
   onEndTimeInput,
   onHoleFilterChange,
   onLocationChange,
@@ -77,7 +78,7 @@ export function TeeTimeSearchControls({
   locationText: string;
   minSearchDate: string;
   mobileTimeEditorOpen: boolean;
-  onDateInput: TimeInputHandler;
+  onDateChange: (value: string) => void;
   onEndTimeInput: TimeInputHandler;
   onHoleFilterChange: (value: CourseLayoutFilter) => void;
   onLocationChange: (value: string) => void;
@@ -155,25 +156,19 @@ export function TeeTimeSearchControls({
             </select>
           </div>
         </label>
-        <label className="figma-search-field" htmlFor="date">
-          <span>Date</span>
+        <div className="figma-search-field figma-date-field">
+          <label htmlFor="date">Date</label>
           <div className="figma-search-value">
-            <span className="figma-search-value-icon" aria-hidden="true">
-              📅
-            </span>
-            <input
-              aria-invalid={!isDateFuture}
-              aria-describedby={!isDateFuture ? "search-form-guidance" : undefined}
+            <AlertDatePicker
+              isInvalid={!isDateFuture}
+              describedBy={!isDateFuture ? "search-form-guidance" : undefined}
               id="date"
               min={minSearchDate}
-              type="date"
               value={date}
-              onBlur={onDateInput}
-              onChange={onDateInput}
-              onInput={onDateInput}
+              onChange={onDateChange}
             />
           </div>
-        </label>
+        </div>
       </div>
       <div className="figma-filter-strip">
         <div

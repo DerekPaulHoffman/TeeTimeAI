@@ -73,6 +73,68 @@ test.describe("Tee Time Spot UI smoke", () => {
     });
   });
 
+  test("opens the alert calendar and selects future dates with mouse and keyboard", async ({
+    page
+  }, testInfo) => {
+    const issues = collectPageIssues(page);
+    await page.clock.install({ time: new Date("2030-05-15T12:00:00.000Z") });
+    await page.goto("/search");
+    const date = page.getByLabel("Date", { exact: true });
+    await date.fill("2030-05-18");
+    const dateGeometry = await date.evaluate((input) => {
+      const canvas = document.createElement("canvas");
+      const context = canvas.getContext("2d")!;
+      context.font = getComputedStyle(input).font;
+      return {
+        width: input.getBoundingClientRect().width,
+        textWidth: context.measureText("05/18/2030").width
+      };
+    });
+    expect(dateGeometry.width).toBeGreaterThanOrEqual(dateGeometry.textWidth + 6);
+    const trigger = page.getByRole("button", { name: "Choose alert date" });
+    await trigger.click();
+    const calendar = page.getByRole("dialog", { name: "Choose alert date" });
+    await expect(calendar).toBeVisible();
+    await expect(calendar.getByRole("heading", { name: "May 2030" })).toBeVisible();
+    await expect(calendar.getByRole("button", { name: /May 15, 2030/ })).toBeDisabled();
+    await expect(calendar.getByRole("button", { name: /May 18, 2030/ })).toBeFocused();
+    const calendarBox = await calendar.boundingBox();
+    expect(calendarBox!.x).toBeGreaterThanOrEqual(0);
+    expect(calendarBox!.x + calendarBox!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+    await page.screenshot({ path: testInfo.outputPath("alert-calendar.png") });
+    await calendar.screenshot({ path: testInfo.outputPath("alert-calendar-detail.png") });
+
+    await page.keyboard.press("ArrowRight");
+    await page.keyboard.press("Enter");
+    await expect(date).toHaveValue("2030-05-19");
+    await expect(calendar).toBeHidden();
+    await expect(trigger).toBeFocused();
+
+    await trigger.click();
+    await calendar.locator('button[slot="next"]').click();
+    await expect(calendar.getByRole("heading", { name: "June 2030" })).toBeVisible();
+    await calendar.getByRole("button", { name: /June 2, 2030/ }).click();
+    await expect(date).toHaveValue("2030-06-02");
+    await expect(calendar).toBeHidden();
+
+    await trigger.click();
+    await page.keyboard.press("Escape");
+    await expect(calendar).toBeHidden();
+    await expect(trigger).toBeFocused();
+    await trigger.click();
+    await page.mouse.click(8, 8);
+    await expect(calendar).toBeHidden();
+    await expect(date).toHaveValue("2030-06-02");
+    await date.fill("");
+    await trigger.click();
+    await expect(calendar.getByRole("button", { name: /May 16, 2030/ })).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(date).toHaveValue("2030-05-16");
+    await page.screenshot({ path: testInfo.outputPath("alert-date-field.png") });
+    await expectNoPageIssues(issues, testInfo);
+    await expectNoHorizontalOverflow(page, testInfo);
+  });
+
   test("publishes the Discord community for feedback and product suggestions", async ({
     page
   }, testInfo) => {
@@ -645,7 +707,7 @@ test.describe("Tee Time Spot UI smoke", () => {
       };
 
       return {
-        dateField: box('label[for="date"]'),
+        dateField: box(".figma-date-field"),
         distance: box(".figma-distance-group"),
         holes: box(".figma-hole-filter"),
         location: box(".figma-location-field"),
@@ -926,7 +988,7 @@ test.describe("Tee Time Spot UI smoke", () => {
       await expect(page.getByText("Your alert is created", { exact: true })).toBeHidden();
       await expect(page).toHaveURL(/\/search$/);
       await expect(location).toHaveValue("Trumbull, CT");
-      await expect(page.getByLabel("Date")).toHaveValue(date);
+      await expect(page.getByLabel("Date", { exact: true })).toHaveValue(date);
       await chosenCard.getByRole("button", { name: /Notify me.*for / }).click();
       await expect(dialog).toBeVisible();
       await expect(dialog.getByRole("textbox", { name: "Additional recipient 1" })).toHaveValue("");
@@ -950,7 +1012,7 @@ test.describe("Tee Time Spot UI smoke", () => {
   }, testInfo) => {
     const issues = collectPageIssues(page);
     await page.goto("/search");
-    const dateInput = page.getByLabel("Date");
+    const dateInput = page.getByLabel("Date", { exact: true });
     const originalDate = await dateInput.inputValue();
     const futureTime = await page.evaluate(() => Date.now() + 14 * 24 * 60 * 60 * 1_000);
 
@@ -1026,7 +1088,7 @@ test.describe("Tee Time Spot UI smoke", () => {
       expect(await page.evaluate(() => new Date().getDate())).toBe(30);
       const close = page.getByRole("button", { name: "Close notification setup" });
       if (await close.isVisible()) await close.click();
-      const dateInput = page.getByLabel("Date");
+      const dateInput = page.getByLabel("Date", { exact: true });
       await expect(dateInput).toHaveAttribute("min", "2026-09-30");
       await expect(dateInput).toHaveValue("2026-09-30");
       expect(await dateInput.evaluate((input: HTMLInputElement) => input.validity.valid)).toBe(true);
@@ -1047,7 +1109,7 @@ test.describe("Tee Time Spot UI smoke", () => {
       await expect(page.getByRole("heading", { name: "Tashua Knolls Golf Course" }).first()).toBeVisible();
       const close = page.getByRole("button", { name: "Close notification setup" });
       if (await close.isVisible()) await close.click();
-      const dateInput = page.getByLabel("Date");
+      const dateInput = page.getByLabel("Date", { exact: true });
       await expect(dateInput).toHaveAttribute("min", "2026-09-30");
       await dateInput.fill("2026-09-30");
       await dateInput.press("Tab");

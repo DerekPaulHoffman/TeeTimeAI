@@ -359,9 +359,9 @@ function TeeTimeIntakeContent({
   const shouldRefreshRestoredCoursesRef = useRef(false);
   const dateWasEditedRef = useRef(false);
 
-  function reconcileDateFromControl(event: SyntheticEvent<HTMLInputElement>) {
+  function reconcileDateFromControl(value: string) {
     dateWasEditedRef.current = true;
-    setDate(event.currentTarget.value);
+    setDate(value);
   }
 
   function reconcileStartTimeFromControl(event: SyntheticEvent<HTMLInputElement>) {
@@ -1192,7 +1192,7 @@ function TeeTimeIntakeContent({
         locationText={locationText}
         minSearchDate={minSearchDate}
         mobileTimeEditorOpen={mobileTimeEditorOpen}
-        onDateInput={reconcileDateFromControl}
+        onDateChange={reconcileDateFromControl}
         onEndTimeInput={reconcileEndTimeFromControl}
         onHoleFilterChange={setHoleFilter}
         onLocationChange={(value) => {

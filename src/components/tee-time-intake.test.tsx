@@ -245,6 +245,7 @@ describe("TeeTimeIntake", () => {
     expect(screen.queryByText("Phone booking")).toBeNull();
     expect(screen.queryByText("Your courses")).toBeNull();
     expect((document.querySelector("#date") as HTMLInputElement).value).toBe("2026-10-03");
+    await screen.findByRole("dialog", { name: "Notify me" });
     fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
     await waitFor(() => expect(screen.getByRole("link", { name: "View my alerts" }).getAttribute("href")).toBe("/dashboard?created=date-boundary"));
     const save = fetchMock.mock.calls.find(([input]) => input === "/api/searches");
