@@ -61,15 +61,19 @@ export function useKnownTeeTimes(courseIds: string[], date: string) {
   return result?.key === key ? result.courses : {};
 }
 
+export function filterVisibleTeeTimes(times: KnownTeeTime[], timeZone: string, startTime: string, endTime: string, players: number) {
+  const clock = new Intl.DateTimeFormat("en-GB", { timeZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  return times.filter(time => time.availableSpots >= players &&
+    clock.format(new Date(time.startsAt)) >= startTime && clock.format(new Date(time.startsAt)) <= endTime);
+}
+
 export function KnownTeeTimes({ times, timeZone, date, startTime, endTime, players, showEmpty = false }: {
   times: KnownTeeTime[]; timeZone: string; date: string; startTime: string; endTime: string; players: number;
   showEmpty?: boolean;
 }) {
   const formatter = new Intl.DateTimeFormat("en-US", { timeZone, hour: "numeric", minute: "2-digit" });
   const zone = new Intl.DateTimeFormat("en-US", { timeZone, timeZoneName: "short" }).formatToParts(new Date(times[0]?.startsAt ?? `${date}T12:00:00Z`)).find(part => part.type === "timeZoneName")?.value;
-  const clock = new Intl.DateTimeFormat("en-GB", { timeZone, hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
-  const visible = times.filter((time) => time.availableSpots >= players &&
-    clock.format(new Date(time.startsAt)) >= startTime && clock.format(new Date(time.startsAt)) <= endTime);
+  const visible = filterVisibleTeeTimes(times, timeZone, startTime, endTime, players);
   if (!visible.length) return showEmpty ? <p className="course-time-check">No matching public tee times found for this date and time window.</p> : null;
   return <section className="known-tee-times" aria-label="Previously checked tee times">
     <p><strong>{showEmpty ? "Public tee times" : "Previously checked times"}</strong> · {date} · {zone}</p>

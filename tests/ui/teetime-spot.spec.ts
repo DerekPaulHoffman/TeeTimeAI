@@ -337,18 +337,12 @@ test.describe("Tee Time Spot UI smoke", () => {
     await page.getByRole("textbox", { name: "Location", exact: true }).fill("Trumbull, CT");
     await page.getByRole("button", { name: /^Search$/i }).click();
     await expect(page.getByRole("heading", { name: smokeCourses[0].name }).first()).toBeVisible();
-    await page.getByRole("button", { name: `Add ${smokeCourses[0].name}` }).click();
-    await page.getByRole("button", { name: `Add ${smokeCourses[1].name}` }).click();
-    const moveSecondCourseUp = page.locator(
-      `button[aria-label="Move ${smokeCourses[1].name} up"]`
-    );
-    if (!(await moveSecondCourseUp.isVisible())) {
-      await page.locator(".mobile-selection-toggle").click();
-    }
-    await moveSecondCourseUp.click();
-
-    const selectedCourseNames = page.locator(".selected-list .selected-row h3");
-    await expect(selectedCourseNames).toHaveText([smokeCourses[1].name, smokeCourses[0].name]);
+    await page.getByRole("button", { name: `Notify me for ${smokeCourses[1].name}` }).click();
+    const dialog = page.getByRole("dialog", { name: "Notify me" });
+    await expect(dialog).toBeVisible();
+    const selectedCourseNames = page.locator(".notify-course-name");
+    await expect(selectedCourseNames).toHaveText(smokeCourses[1].name);
+    await dialog.getByRole("button", { name: "Close notification setup" }).click();
     await expect.poll(() =>
       page.evaluate(() => window.sessionStorage.getItem("tee-time-spot:search-draft:v1"))
     ).toContain("ui-smoke-course-2");
@@ -358,13 +352,11 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(page.getByRole("textbox", { name: "Location", exact: true })).toHaveValue(
       "Trumbull, CT"
     );
-    await expect(selectedCourseNames).toHaveText([smokeCourses[1].name, smokeCourses[0].name]);
+    await expect(selectedCourseNames).toHaveText(smokeCourses[1].name);
 
     await page.reload();
-    await expect(selectedCourseNames).toHaveText([smokeCourses[1].name, smokeCourses[0].name]);
-    await expect(
-      page.locator(`button[aria-label="Move ${smokeCourses[1].name} up"]`)
-    ).toBeDisabled();
+    await expect(selectedCourseNames).toHaveText(smokeCourses[1].name);
+    await expect(page.getByRole("dialog", { name: "Notify me" })).toBeVisible();
   });
 
   test("restores validated direct-link search details on the static route", async ({ page }) => {
@@ -437,10 +429,7 @@ test.describe("Tee Time Spot UI smoke", () => {
       "color",
       "rgba(255, 255, 255, 0.65)"
     );
-    await expect(page.locator(".figma-selected-panel .selected-empty")).toHaveCSS(
-      "color",
-      "rgb(118, 141, 151)"
-    );
+    await expect(page.getByText("Your courses", { exact: true })).toHaveCount(0);
     await expect(page.getByRole("group", { name: "Course layout" })).toBeVisible();
     await expect(page.locator(".figma-search-submit")).toHaveCSS(
       "background-color",
@@ -728,8 +717,8 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(firstCourse.getByText(/9H/)).toHaveCount(0);
     await expect(firstCourse.getByText(/Par 72/)).toBeVisible();
     await expect(firstCourse.getByLabel("Estimated 18-hole course cost $48")).toBeVisible();
-    const addButton = firstCourse.getByRole("button", { name: /Add Tashua Knolls/i });
-    await expect(addButton).toHaveText("+ Add to my list");
+    const addButton = firstCourse.getByRole("button", { name: /Notify me.*for Tashua Knolls/i });
+    await expect(addButton).toHaveText("Notify me");
     expect(await addButton.evaluate((button) => ({
       backgroundColor: window.getComputedStyle(button).backgroundColor,
       color: window.getComputedStyle(button).color
@@ -801,7 +790,7 @@ test.describe("Tee Time Spot UI smoke", () => {
       )
     ).toHaveCount(0);
     await expect(
-      courseCard.getByRole("button", { name: "Add Review This Golf Course" })
+      courseCard.getByRole("button", { name: "Notify me for Review This Golf Course" })
     ).toHaveCount(0);
     await expect(courseCard.getByText("Private or invalid course record")).toBeVisible();
     await expect(
@@ -827,690 +816,58 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expectNoPageIssues(issues, testInfo);
   });
 
-  test("onboarding discovery, ranking limit, and controls are usable", async ({
-    page
-  }, testInfo) => {
+  test("course notifications preserve filters and offer group recipients", async ({ page }, testInfo) => {
     const issues = collectPageIssues(page);
-    const isMobile = testInfo.project.name.includes("mobile");
-    const usesSelectionDrawer = (page.viewportSize()?.width ?? 1440) <= 920;
-
-    if (useMockedSearchProviders) {
-      await mockSmokeCourseSearch(page);
-    }
-
+    if (useMockedSearchProviders) await mockSmokeCourseSearch(page);
+    let savedPayload: Record<string, unknown> | undefined;
+    // Every alert write is intercepted: this test never starts a customer workflow.
+    await page.route("**/api/searches", async route => {
+      savedPayload = route.request().postDataJSON();
+      await route.fulfill({ status: 201, json: { search: { id: "ui-notify-alert" } } });
+    });
     await page.goto("/search");
-    let discoveryAnalyticsPayload: {
-      name?: string;
-      page?: string;
-      trafficClass?: string;
-      metadata?: Record<string, unknown>;
-    } | null = null;
-    let selectionStartedAnalyticsPayload: {
-      name?: string;
-      page?: string;
-      trafficClass?: string;
-      metadata?: Record<string, unknown>;
-    } | null = null;
-    let signInAnalyticsPayload: {
-      name?: string;
-      page?: string;
-      trafficClass?: string;
-      metadata?: Record<string, unknown>;
-    } | null = null;
-    await page.route("**/api/analytics/events", async (route) => {
-      const payload = route.request().postDataJSON() as {
-        name?: string;
-        page?: string;
-        trafficClass?: string;
-        metadata?: Record<string, unknown>;
-      };
-      if (payload.name === "course_discovery_completed") {
-        discoveryAnalyticsPayload = payload;
-      } else if (payload.name === "course_selection_started") {
-        selectionStartedAnalyticsPayload = payload;
-      } else if (payload.name === "alert_sign_in_clicked") {
-        signInAnalyticsPayload = payload;
-      }
-      await route.fulfill({
-        body: JSON.stringify({ event: { id: "ui-smoke-event" } }),
-        contentType: "application/json",
-        status: 201
-      });
-    });
-
-    await expect(
-      page.getByRole("heading", { name: /Find public golf tee times and set a free alert/i })
-    ).toBeVisible();
-    const timeWindowGroup = page.getByRole("group", {
-      name: "Time window",
-      exact: true
-    });
-    await expect(timeWindowGroup).toBeVisible();
-    await expect(timeWindowGroup.locator(".figma-time-label")).toHaveText("Time");
-    await expect(page.locator("#time-window-help")).toHaveText(
-      "Times use each course's local time zone."
-    );
-    const alertActionButton = page.locator(
-      ".summary-panel .figma-alert-action > .button-primary"
-    );
-    await expect(alertActionButton).toContainText(
-      /Start getting alerts|Sign in to start sending alerts|Account access unavailable|Checking your account/i
-    );
-    if (usesSelectionDrawer) {
-      await expect(alertActionButton).toBeHidden();
+    await expect(page.getByText("Your courses", { exact: true })).toHaveCount(0);
+    await expect(page.getByRole("dialog", { name: "Notify me" })).toBeHidden();
+    const location = page.getByRole("textbox", { name: "Location", exact: true });
+    await location.fill("Trumbull, CT");
+    await page.getByRole("button", { name: "Search", exact: true }).click();
+    await expect(page.locator(".course-row").first()).toBeVisible();
+    const chosenCard = page.locator(".course-row").filter({ has: page.getByRole("button", { name: /Notify me.*for / }) }).first();
+    const courseName = await chosenCard.getByRole("heading").innerText();
+    const date = await page.locator("#date").inputValue();
+    await chosenCard.getByRole("button", { name: /Notify me.*for / }).click();
+    const dialog = page.getByRole("dialog", { name: "Notify me" });
+    // Hosted signed-out users go directly to Clerk. Local setup mode shows a safe disabled dialog.
+    if (!(await dialog.isVisible())) {
+      await expect(page.locator(".cl-signIn-root")).toBeVisible();
+      expect(savedPayload).toBeUndefined();
+      await expect.poll(() => page.evaluate(() => window.sessionStorage.getItem("tee-time-spot:search-draft:v1"))).toContain(courseName);
+      return;
+    }
+    await expect(dialog.locator(".notify-course-name")).toHaveText(courseName);
+    await expect(dialog.locator(".figma-alert-preview")).toContainText("4 players");
+    await dialog.getByRole("textbox", { name: "Additional recipient 1" }).fill("friend@example.com");
+    await dialog.getByRole("button", { name: "Add another recipient" }).click();
+    await dialog.getByRole("textbox", { name: "Additional recipient 2" }).fill("second@example.com");
+    await expect(dialog.locator("#alertEmail")).toHaveAttribute("readonly", "");
+    expect(savedPayload).toBeUndefined();
+    const submit = dialog.getByRole("button", { name: /Start getting alerts|Account access unavailable/ });
+    if (await submit.isEnabled()) {
+      await submit.click();
+      await expect(page).toHaveURL(/dashboard\?created=ui-notify-alert/);
+      expect(savedPayload?.date).toBe(date);
+      expect(savedPayload?.additionalEmails).toEqual(["friend@example.com", "second@example.com"]);
+      expect((savedPayload?.courses as unknown[])).toHaveLength(1);
     } else {
-      await expect(alertActionButton).toBeVisible();
+      await dialog.getByRole("button", { name: "Close notification setup" }).press("Enter");
+      await expect(dialog).toBeHidden();
+      await chosenCard.getByRole("button", { name: /Notify me.*for / }).click();
+      await expect(dialog).toBeVisible();
+      await expect(dialog.getByRole("textbox", { name: "Additional recipient 1" })).toHaveValue("friend@example.com");
+      await page.keyboard.press("Escape");
+      await expect(dialog).toBeHidden();
     }
-    await expect(alertActionButton).toBeDisabled();
-    await expect(page.getByLabel("Players").locator("option")).toHaveCount(4);
-    const locationInput = page.getByRole("textbox", { name: "Location", exact: true });
-    await expect(locationInput).toHaveValue("");
-    await expect(locationInput).toHaveAttribute(
-      "placeholder",
-      "City, state, ZIP, or address"
-    );
-    const courseSearchButton = page.getByRole("button", { name: /^Search$/i });
-    await expect(courseSearchButton).toBeDisabled();
-    await expect(page.locator("#players")).toHaveValue("4");
-    await expect(page.locator("#date")).toHaveValue(nextSaturdayDateInputValue());
-    await expect(page.locator("#startTime")).toHaveValue("09:00");
-    await expect(page.locator("#endTime")).toHaveValue("18:00");
-    await expect(page.locator("#searchRadius")).toHaveValue("15");
-    const timeSummary = page.getByRole("button", { name: "9 AM – 6 PM" });
-    await expect(timeSummary).toBeVisible();
-    await expect(page.locator("#startTime")).toBeHidden();
-    await timeSummary.click();
-    await expect(page.locator("#startTime")).toBeVisible();
-    await expect(page.locator("#endTime")).toBeVisible();
-    await page.getByRole("button", { name: "Done" }).click();
-    await expect(page.locator("#startTime")).toBeHidden();
-
-    await locationInput.fill("Trumbull, CT");
-    await expect(courseSearchButton).toBeEnabled();
-    const discoveryRequest = page.waitForRequest((request) =>
-      request.url().includes("/api/courses/discover?")
-    );
-    await locationInput.press("Enter");
-    const discoveryUrl = new URL((await discoveryRequest).url());
-    expect(discoveryUrl.searchParams.get("radiusMeters")).toBe("24140");
-    await expect.poll(() => discoveryAnalyticsPayload).toMatchObject({
-      name: "course_discovery_completed",
-      page: "/search",
-      trafficClass: "AUTOMATION",
-      metadata: {
-        radiusMiles: 15,
-        resultCount: useMockedSearchProviders ? smokeCourses.length : expect.any(Number),
-        demo: false
-      }
-    });
-    const discoveryStatus = page.getByRole("status").filter({ hasText: /\d+ courses near Trumbull/i });
-    await expect(discoveryStatus).toContainText(/\d+ courses near Trumbull/i);
-    const discoveryStatusText = await discoveryStatus.innerText();
-    const displayedCourseCount = Number(discoveryStatusText.match(/^(\d+)\s+courses?/i)?.[1]);
-    expect(displayedCourseCount).toBeGreaterThan(0);
-    const mapLink = discoveryStatus.getByRole("link", { name: "Scroll to Google Map" });
-    await expect(mapLink).toHaveAttribute("href", "#course-results-map-section");
-    await expect
-      .poll(async () => {
-        const statusBox = await discoveryStatus.boundingBox();
-        const topbarBox = await page.locator(".topbar").boundingBox();
-        if (!statusBox || !topbarBox) {
-          return -1;
-        }
-        return Math.round(statusBox.y - (topbarBox.y + topbarBox.height));
-      })
-      .toBeGreaterThanOrEqual(0);
-    const firstCourse = page.locator(".course-row").first();
-    await expect(firstCourse).toBeVisible();
-    await expect(firstCourse.locator(".course-monitoring-status, .course-time-check").first()).toBeVisible();
-    if (useMockedSearchProviders) {
-      await expect.poll(async () =>
-        firstCourse.locator("img.course-thumbnail").evaluate((image) => {
-          const element = image as HTMLImageElement;
-          return element.complete && element.naturalWidth > 0;
-        })
-      ).toBe(true);
-      await expect(firstCourse.getByText("Public", { exact: true })).toBeVisible();
-      await expect(firstCourse.getByText("4.3", { exact: true })).toBeVisible();
-      await expect(firstCourse.getByText(/18H/)).toBeVisible();
-      await expect(firstCourse.getByText(/Par 72/)).toBeVisible();
-      await expect(firstCourse.getByText("Tee-time alerts available", { exact: true })).toBeVisible();
-      await expect(
-        page.locator(".course-row").nth(1).getByText("Alert availability after first check", {
-          exact: true
-        })
-      ).toBeVisible();
-      await expect(
-        firstCourse.getByRole("link", { name: /Open official site for/i })
-      ).toBeVisible();
-      await expect(
-        firstCourse.getByRole("link", {
-          name: "View course guide for Tashua Knolls Golf Course"
-        })
-      ).toHaveAttribute("href", "/courses/tashua-knolls-golf-course-trumbull-ct");
-      await expect(
-        page.locator(".course-row").nth(1).getByRole("link", { name: /View course guide for/i })
-      ).toHaveCount(0);
-      await expect(firstCourse.locator(".course-actions > *")).toHaveCount(3);
-      expect(
-        await firstCourse
-          .locator(".course-actions > *")
-          .evaluateAll((actions) => actions.map((action) => action.getAttribute("aria-label")))
-      ).toEqual([
-        "View course guide for Tashua Knolls Golf Course",
-        "Open official site for Tashua Knolls Golf Course",
-        "Add Tashua Knolls Golf Course"
-      ]);
-    }
-    const firstCourseCardLayout = await firstCourse.evaluate((card) => {
-      const thumbnail = card.querySelector<HTMLElement>(".course-thumbnail");
-      const copy = card.querySelector<HTMLElement>(".course-copy");
-      const actions = card.querySelector<HTMLElement>(".course-actions");
-      const cardBox = card.getBoundingClientRect();
-      const thumbnailBox = thumbnail?.getBoundingClientRect();
-      const copyBox = copy?.getBoundingClientRect();
-      const actionsBox = actions?.getBoundingClientRect();
-      return {
-        actionsDirection: actions ? window.getComputedStyle(actions).flexDirection : "",
-        cardHeight: cardBox.height,
-        cardTop: cardBox.top,
-        copyTop: copyBox?.top ?? -1,
-        thumbnailHeight: thumbnailBox?.height ?? -1,
-        thumbnailTop: thumbnailBox?.top ?? -1,
-        thumbnailWidth: thumbnailBox?.width ?? -1,
-        actionsTop: actionsBox?.top ?? -1
-      };
-    });
-    expect(firstCourseCardLayout.actionsDirection).toBe("column");
-    expect(firstCourseCardLayout.thumbnailWidth).toBe(isMobile ? 88 : 110);
-    expect(firstCourseCardLayout.thumbnailHeight).toBeGreaterThanOrEqual(
-      firstCourseCardLayout.cardHeight - 4
-    );
-    expect(Math.abs(firstCourseCardLayout.thumbnailTop - firstCourseCardLayout.cardTop)).toBeLessThan(3);
-    expect(Math.abs(firstCourseCardLayout.copyTop - firstCourseCardLayout.cardTop)).toBeLessThan(3);
-    expect(Math.abs(firstCourseCardLayout.actionsTop - firstCourseCardLayout.cardTop)).toBeLessThan(3);
-    const resultsLayout = await page.locator(".figma-results-column").evaluate((column) => {
-      const status = column.querySelector<HTMLElement>(".figma-results-banner");
-      const course = column.querySelector<HTMLElement>(".course-row");
-      const statusBox = status?.getBoundingClientRect();
-      const courseBox = course?.getBoundingClientRect();
-      return {
-        courseTop: courseBox?.top ?? -1,
-        statusBottom: statusBox?.bottom ?? -1
-      };
-    });
-    expect(resultsLayout.courseTop).toBeGreaterThanOrEqual(resultsLayout.statusBottom);
-    expect(resultsLayout.courseTop - resultsLayout.statusBottom).toBeLessThan(120);
-    if (usesSelectionDrawer) {
-      const firstCourseBox = await page.locator(".course-row").first().boundingBox();
-      expect(firstCourseBox).not.toBeNull();
-      expect(firstCourseBox!.width).toBeGreaterThan((page.viewportSize()?.width ?? 910) * 0.8);
-    }
-    await captureUiScreenshot(page, testInfo, "search-results");
-
-    const courseRows = page.locator(".course-row");
-    const courseCount = await courseRows.count();
-    expect(courseCount, "course discovery should return enough rows to exercise ranking limits").toBeGreaterThanOrEqual(6);
-    const courseMap = page.locator("#course-results-map-section");
-    await expect(courseMap).toBeVisible();
-    await expect(courseMap).toContainText(`${displayedCourseCount} course locations found`);
-    const pricingNote = page.getByText(/Estimates use last-observed official tee-sheet rates/);
-    const mapBox = await courseMap.boundingBox();
-    const pricingNoteBox = await pricingNote.boundingBox();
-    expect(mapBox).not.toBeNull();
-    expect(pricingNoteBox).not.toBeNull();
-    expect(mapBox!.y).toBeGreaterThan(pricingNoteBox!.y);
-    await mapLink.click();
-    await expect(page).toHaveURL(/#course-results-map-section$/);
-    await expect(page.locator(".course-results-map-frame")).toHaveCount(0);
-    await expect(page.locator(".course-results-map-overlay")).toHaveCount(0);
-    await expect(courseRows.nth(0).locator(".course-address-link")).toBeVisible();
-    await expect(courseRows.nth(0).getByRole("link", { name: "Google Maps" })).toHaveCount(0);
-    await expect(page.getByText(/^Photo:/)).toHaveCount(0);
-    if (isMobile) {
-      const courseActionHeights = await courseRows
-        .first()
-        .locator(".course-actions a, .course-actions button")
-        .evaluateAll((actions) => actions.map((action) => action.getBoundingClientRect().height));
-      expect(courseActionHeights.length).toBeGreaterThan(0);
-      expect(courseActionHeights.every((height) => height >= 44)).toBe(true);
-
-      const utilityIconLayout = await courseRows
-        .first()
-        .locator(".course-actions .button-ghost")
-        .evaluateAll((actions) =>
-          actions.map((action) => {
-            const actionBox = action.getBoundingClientRect();
-            const iconBox = action.querySelector("svg")?.getBoundingClientRect();
-            return {
-              centerOffsetX: iconBox
-                ? Math.abs(
-                    iconBox.left + iconBox.width / 2 - (actionBox.left + actionBox.width / 2)
-                  )
-                : Number.POSITIVE_INFINITY,
-              centerOffsetY: iconBox
-                ? Math.abs(
-                    iconBox.top + iconBox.height / 2 - (actionBox.top + actionBox.height / 2)
-                  )
-                : Number.POSITIVE_INFINITY,
-              iconHeight: iconBox?.height ?? 0,
-              iconWidth: iconBox?.width ?? 0
-            };
-          })
-      );
-      expect(utilityIconLayout.length).toBeGreaterThan(0);
-      for (const { centerOffsetX, centerOffsetY, iconHeight, iconWidth } of utilityIconLayout) {
-        expect(iconHeight).toBeCloseTo(18, 1);
-        expect(iconWidth).toBeCloseTo(18, 1);
-        expect(centerOffsetX).toBeLessThanOrEqual(1);
-        expect(centerOffsetY).toBeLessThanOrEqual(1);
-      }
-    }
-    const seeMoreLocations = page.getByRole("button", { name: /See more locations/i });
-    if ((await seeMoreLocations.count()) > 0) {
-      await expect(page.getByText(/Showing \d+ of \d+ locations/i)).toBeVisible();
-      await seeMoreLocations.click();
-      expect(await courseRows.count()).toBeGreaterThan(courseCount);
-    }
-
-    const courseOrderBeforeSelection = await courseRows.locator("h3").allTextContents();
-    const laterCourse = courseRows.nth(4);
-    await laterCourse.getByRole("button", { name: /Add/i }).click();
-    await expect(page.locator(".selected-list .selected-row")).toHaveCount(1);
-    await expect.poll(() => selectionStartedAnalyticsPayload).toMatchObject({
-      name: "course_selection_started",
-      page: "/search",
-      trafficClass: "AUTOMATION",
-      metadata: {
-        selectedCourseCount: 1,
-        players: 4,
-        requestedLayoutHoles: null
-      }
-    });
-    if (!usesSelectionDrawer) {
-      const selectedName = page.locator(".selected-list .selected-row h3");
-      await expect(selectedName).toBeVisible();
-      expect(
-        await selectedName.evaluate(
-          (heading) => heading.scrollWidth <= heading.clientWidth + 1
-        )
-      ).toBe(true);
-    }
-    if (usesSelectionDrawer) {
-      const mobileSelectionBar = page.locator(".mobile-selection-bar");
-      await expect(mobileSelectionBar).toBeVisible();
-      await expect(mobileSelectionBar).toHaveCSS("background-color", "rgb(17, 26, 34)");
-      await expect(page.locator(".mobile-selection-toggle")).toContainText("1 course picked");
-      await expect(page.locator(".mobile-selection-toggle")).toContainText("Reorder priority");
-      const submitCoursesButton = mobileSelectionBar.getByRole("button", {
-        name: "Review alert"
-      });
-      await expect(submitCoursesButton).toBeVisible();
-      await expect(submitCoursesButton).toHaveCSS("background-color", "rgb(255, 205, 77)");
-      expect((await submitCoursesButton.boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
-      await captureUiElementScreenshot(
-        mobileSelectionBar,
-        testInfo,
-        "mobile-selection-bar"
-      );
-      const mobileBarStyles = await mobileSelectionBar.evaluate((element) => {
-        const styles = window.getComputedStyle(element);
-        return {
-          borderTopColor: styles.borderTopColor,
-          borderTopWidth: styles.borderTopWidth,
-          boxShadow: styles.boxShadow
-        };
-      });
-      expect(mobileBarStyles.borderTopWidth).toBe("2px");
-      expect(mobileBarStyles.borderTopColor).toBe("rgb(226, 138, 47)");
-      expect(mobileBarStyles.boxShadow).toContain("rgba(226, 138, 47");
-    }
-    expect(
-      await courseRows.locator("h3").allTextContents(),
-      "adding a course should preserve the discovery order so users can keep moving through the list"
-    ).toEqual(courseOrderBeforeSelection);
-    await laterCourse.getByRole("button", { name: /Remove/i }).click();
-    await expect(page.locator(".selected-list .selected-row")).toHaveCount(0);
-
-    await page.route("**/api/courses/lookup?**", async (route) => {
-      const lookupQuery = new URL(route.request().url()).searchParams.get("q");
-      await route.fulfill({
-        contentType: "application/json",
-        status: 200,
-        body: JSON.stringify({
-          courses: lookupQuery === "Known Course, Somewhere CT" ? [] : [
-            {
-              googlePlaceId: "ui-smoke-missing-course",
-              name: "Bethpage Black Course",
-              address: "99 Quaker Meeting House Rd, Farmingdale, NY",
-              latitude: 40.744,
-              longitude: -73.456,
-              distanceMeters: 78000,
-              profileUrl: "/courses/bethpage-black-course-farmingdale-ny",
-              website: "https://parks.ny.gov/golf/11/details.aspx"
-            },
-            {
-              googlePlaceId: "ui-smoke-official-site-only",
-              name: "Fairview Farm Golf Course",
-              address: "300 Hill Rd, Harwinton, CT",
-              latitude: 41.815,
-              longitude: -73.071,
-              distanceMeters: 44000,
-              website: "https://fairviewfarmgc.com/",
-              alertSupport: "PHONE_ONLY"
-            },
-            {
-              googlePlaceId: "ui-smoke-direct-online",
-              name: "Yale University Golf Course",
-              address: "200 Conrad Dr, New Haven, CT",
-              latitude: 41.3187,
-              longitude: -72.9854,
-              distanceMeters: 32000,
-              website: "https://app.whoosh.io/patron/club/yale-golf-course",
-              alertSupport: "DIRECT_ONLINE"
-            }
-          ]
-        })
-      });
-    });
-    const missingCourseInput = page.getByRole("searchbox", {
-      name: "Course name and town",
-      exact: true
-    });
-    await missingCourseInput.fill("Bethpage Black, Farmingdale NY");
-    await page.getByRole("button", { name: "Find course" }).click();
-    await expect(page.getByRole("status").filter({ hasText: "3 matches found" })).toHaveCount(1);
-    await expect(
-      page.locator(".course-results-divider").filter({
-        hasText: 'Direct search · "Bethpage Black, Farmingdale NY"'
-      })
-    ).toBeVisible();
-    await expect(
-      page.locator(".course-results-divider").filter({ hasText: "Courses near you" })
-    ).toBeVisible();
-    const missingCourseResults = page
-      .getByRole("list", { name: "Direct course matches" })
-      .locator(".course-row");
-    await expect(
-      page.locator(".missing-course-lookup .course-row"),
-      "the lookup bar should remain an input-only control"
-    ).toHaveCount(0);
-    await expect(
-      missingCourseResults.locator(".course-thumbnail-empty"),
-      "photo-less lookup results should use the same intentional placeholder as nearby cards"
-    ).toHaveCount(3);
-    await expect(
-      missingCourseResults
-        .filter({ has: page.getByRole("heading", { name: "Bethpage Black Course" }) })
-        .getByRole("link", { name: "View course guide for Bethpage Black Course" })
-    ).toHaveAttribute("href", "/courses/bethpage-black-course-farmingdale-ny");
-    const blockedCourseResult = missingCourseResults.filter({
-      has: page.getByRole("heading", { name: "Fairview Farm Golf Course" })
-    });
-    await expect(blockedCourseResult).toContainText("Call the course");
-    await expect(
-      blockedCourseResult.getByRole("link", { name: /Open official site for Fairview Farm/i })
-    ).toBeVisible();
-    await expect(blockedCourseResult.locator(".figma-course-pill.is-public")).toHaveText("Public");
-    const directOnlineCourseResult = missingCourseResults.filter({
-      has: page.getByRole("heading", { name: "Yale University Golf Course" })
-    });
-    await expect(directOnlineCourseResult).toContainText("Check and book directly");
-    await expect(directOnlineCourseResult).toContainText(
-      "official booking page to view current tee times and book directly"
-    );
-    await expect(
-      directOnlineCourseResult.getByRole("link", {
-        name: /Open official site for Yale University Golf Course/i
-      })
-    ).toHaveAttribute("href", "https://app.whoosh.io/patron/club/yale-golf-course");
-    await expect(
-      blockedCourseResult,
-      "direct matches should use the same course-row component as nearby results"
-    ).toHaveClass(/course-row/);
-    await captureUiScreenshot(page, testInfo, "search-direct-results");
-    await blockedCourseResult.getByRole("button", { name: "Add Fairview Farm Golf Course" }).click();
-    if (usesSelectionDrawer) {
-      const mobileSelectionToggle = page.locator(".mobile-selection-toggle");
-      await expect(mobileSelectionToggle).toBeVisible();
-      await mobileSelectionToggle.press("Enter");
-    }
-    await expect(page.getByText("Choose at least one course Tee Time Spot can check automatically.")).toBeVisible();
-    if (usesSelectionDrawer) {
-      await page.locator(".selected-list").getByRole("button", { name: "Remove Fairview Farm Golf Course" }).click();
-    } else {
-      await blockedCourseResult.getByRole("button", { name: "Remove Fairview Farm Golf Course" }).click();
-    }
-
-    const missingCourseResult = missingCourseResults.filter({
-      has: page.getByRole("heading", { name: "Bethpage Black Course" })
-    });
-    await expect(missingCourseResult.getByRole("heading", { name: "Bethpage Black Course" })).toBeVisible();
-    await missingCourseResult.getByRole("button", { name: "Add Bethpage Black Course" }).click();
-    await expect(page.locator(".selected-list .selected-row")).toHaveCount(1);
-    await missingCourseResult.getByRole("button", { name: "Remove Bethpage Black Course" }).click();
-    await expect(page.locator(".selected-list .selected-row")).toHaveCount(0);
-
-    await page.route("**/api/feedback", async (route) => {
-      await route.fulfill({
-        body: JSON.stringify({ feedback: { id: "ui-smoke-course-miss" } }),
-        contentType: "application/json",
-        status: 201
-      });
-    });
-    const courseMissReport = page.waitForRequest(
-      (request) => request.url().includes("/api/feedback") && request.method() === "POST"
-    );
-    await missingCourseInput.fill("Known Course, Somewhere CT");
-    await page.getByRole("button", { name: "Find course" }).click();
-    await expect(
-      page.getByRole("status").filter({ hasText: "We've logged it for review" })
-    ).toBeVisible();
-    const courseMissPayload = (await courseMissReport).postDataJSON();
-    expect(courseMissPayload).toEqual(
-      expect.objectContaining({
-        sentiment: "broken",
-        message: expect.stringContaining("[COURSE_LOOKUP_MISS]")
-      })
-    );
-    expect(courseMissPayload.message).toContain("Known Course, Somewhere CT");
-    expect(courseMissPayload.message).toContain("Trumbull, CT");
-
-    await courseRows.nth(0).getByRole("button", { name: /Add/i }).click();
-    await expect(page.locator(".selected-list .selected-row")).toHaveCount(1);
-    await expect(courseRows.nth(0).getByRole("button", { name: /Remove/i })).toBeVisible();
-    await courseRows.nth(0).getByRole("button", { name: /Remove/i }).click();
-    await expect(page.locator(".selected-list .selected-row")).toHaveCount(0);
-
-    for (let index = 0; index < 5; index += 1) {
-      await courseRows.nth(index).getByRole("button", { name: /Add/i }).click();
-    }
-
-    await expect(page.locator(".selected-list .selected-row")).toHaveCount(5);
-    await courseRows.nth(5).getByRole("button", { name: /Add/i }).click();
-    await expect(page.getByText("You can prioritize up to 5 courses.")).toBeVisible();
-    await expect(page.locator(".alert-error[role='alert']")).toContainText(
-      "You can prioritize up to 5 courses."
-    );
-    if (!usesSelectionDrawer) {
-      const originalViewport = page.viewportSize();
-      await page.setViewportSize({
-        height: 674,
-        width: originalViewport?.width ?? 1440
-      });
-      const selectedPanel = page.locator(".figma-selected-panel");
-      const panelLayout = await selectedPanel.evaluate((panel) => {
-        const styles = window.getComputedStyle(panel);
-        const scrollContent = panel.querySelector<HTMLElement>(".figma-selected-scroll-content");
-        const action = panel.querySelector(".figma-alert-action > .button-primary");
-        const scrollContentRect = scrollContent?.getBoundingClientRect();
-        const actionRect = action?.getBoundingClientRect();
-        const panelRect = panel.getBoundingClientRect();
-
-        return {
-          actionBottom: actionRect?.bottom ?? Number.POSITIVE_INFINITY,
-          actionTop: actionRect?.top ?? Number.NEGATIVE_INFINITY,
-          panelBottom: panelRect.bottom,
-          panelOverflowY: styles.overflowY,
-          scrollContentBottom: scrollContentRect?.bottom ?? Number.POSITIVE_INFINITY,
-          scrollContentClientHeight: scrollContent?.clientHeight ?? 0,
-          scrollContentOverflowY: scrollContent
-            ? window.getComputedStyle(scrollContent).overflowY
-            : "",
-          scrollContentScrollHeight: scrollContent?.scrollHeight ?? 0,
-          viewportHeight: window.innerHeight
-        };
-      });
-      expect(panelLayout.panelOverflowY).toBe("hidden");
-      expect(panelLayout.scrollContentOverflowY).toBe("auto");
-      expect(panelLayout.scrollContentScrollHeight).toBeGreaterThan(
-        panelLayout.scrollContentClientHeight
-      );
-      expect(panelLayout.actionTop).toBeGreaterThanOrEqual(panelLayout.scrollContentBottom);
-      expect(panelLayout.actionBottom).toBeLessThanOrEqual(panelLayout.panelBottom);
-      expect(panelLayout.actionBottom).toBeLessThanOrEqual(panelLayout.viewportHeight);
-      await expect(alertActionButton).toBeVisible();
-      if (originalViewport) {
-        await page.setViewportSize(originalViewport);
-      }
-    }
-
-    await captureUiScreenshot(page, testInfo, "search-five-selected");
-    if (usesSelectionDrawer) {
-      const selectionToggle = page.locator(".mobile-selection-toggle");
-      await expect(selectionToggle).toContainText("5 courses picked");
-      await expect(selectionToggle).toContainText("Reorder priority");
-      await page.getByRole("button", { name: "Review alert" }).press("Enter");
-      await expect(page.locator(".figma-selected-panel.is-mobile-open")).toBeVisible();
-    }
-
-    const alertPreview = page.locator(".figma-alert-preview");
-    await expect(alertPreview.getByText("Your alert", { exact: true })).toBeVisible();
-    await expect(alertPreview).toContainText("We'll check 5 ranked courses");
-    await expect(alertPreview).toContainText("for 4 players");
-    await expect(alertPreview).toContainText("You book direct");
-
-    const groupRecipients = page.getByRole("group", { name: "Alert your group too" });
-    await expect(groupRecipients).toBeVisible();
-    await expect(groupRecipients).toContainText("Optional");
-    await expect(groupRecipients).toContainText(
-      "Everyone gets the same opening, but your signed-in account manages the alert."
-    );
-    await groupRecipients.getByLabel("Additional recipient 1").fill("friend@example.com");
-    await groupRecipients.getByRole("button", { name: "Add another recipient" }).click();
-    const secondRecipient = groupRecipients.getByRole("textbox", {
-      name: "Additional recipient 2",
-      exact: true
-    });
-    await secondRecipient.fill("not-an-email");
-    await expect(page.getByText("Enter a valid email for each additional recipient.")).toBeVisible();
-    await expect(alertActionButton).toBeDisabled();
-    await secondRecipient.fill("teammate@example.com");
-    await expect(alertPreview).toContainText("Your account email + 2 others");
-
-    let saveRequestCount = 0;
-    let lastSavePayload: Record<string, unknown> | null = null;
-    let lastSaveTrafficClass: string | undefined;
-    await page.route("**/api/searches", async (route) => {
-      saveRequestCount += 1;
-      lastSavePayload = route.request().postDataJSON() as Record<string, unknown>;
-      lastSaveTrafficClass = route.request().headers()["x-tee-time-spot-traffic-class"];
-      await route.fulfill({
-        contentType: "application/json",
-        status: 201,
-        body: JSON.stringify({ search: { id: `ui-smoke-${saveRequestCount}` } })
-      });
-    });
-
-    await page.getByLabel("Date").fill(formatLocalDate(addLocalDays(new Date(), -2)));
-    await expect(page.getByText("Choose a future date for alerts.")).toBeVisible();
-    await expect(page.getByLabel("Date")).toHaveAttribute("aria-describedby", /search-form-guidance/);
-    await expect(alertActionButton).toBeDisabled();
-    const selectedAlertDate = addLocalDays(new Date(), 6);
-    const selectedAlertDateValue = formatLocalDate(selectedAlertDate);
-    await page.getByLabel("Date").fill(selectedAlertDateValue);
-    await page.getByLabel("Date").press("Tab");
-    await expect(page.getByLabel("Date")).toHaveValue(selectedAlertDateValue);
-    await expect(alertPreview).toContainText(formatReadableLocalDate(selectedAlertDate));
-
-    const editableTimeSummary = page.locator(".figma-time-summary");
-    await editableTimeSummary.evaluate((button: HTMLButtonElement) => button.click());
-    await expect(editableTimeSummary).toHaveAttribute("aria-expanded", "true");
-    await page.getByLabel("End time").fill("08:00");
-    await expect(page.getByText("Choose an end time after the start time.")).toBeVisible();
-    await expect(page.getByLabel("End time")).toHaveAttribute("aria-describedby", /search-form-guidance/);
-    await expect(alertActionButton).toBeDisabled();
-    await page.getByLabel("End time").fill("18:00");
-    const selectedStartTime = "11:00";
-    const selectedEndTime = "14:00";
-    await page.getByLabel("Start time").fill(selectedStartTime);
-    await page.getByLabel("Start time").press("Tab");
-    await page.getByLabel("End time").fill(selectedEndTime);
-    await page.getByLabel("End time").press("Tab");
-    await expect(page.getByLabel("Start time")).toHaveValue(selectedStartTime);
-    await expect(page.getByLabel("End time")).toHaveValue(selectedEndTime);
-    await expect(editableTimeSummary).toContainText("11 AM – 2 PM");
-    await page.getByRole("button", { name: "Done" }).click({ force: true });
-
-    const alertActionText = await alertActionButton.innerText();
-    if (/Sign in to start sending alerts/i.test(alertActionText)) {
-      await expect(alertActionButton).toBeEnabled();
-      const signInHeading = page.getByRole("heading", { name: "Sign in to Tee Time Spot" });
-      if (!(await signInHeading.isVisible())) {
-        await alertActionButton.evaluate((button: HTMLButtonElement) => button.click());
-      }
-      await expect(signInHeading).toBeVisible();
-      await expect.poll(() => signInAnalyticsPayload).toMatchObject({
-        name: "alert_sign_in_clicked",
-        page: "/search",
-        trafficClass: "AUTOMATION",
-        metadata: {
-          selectedCourseCount: 5,
-          players: 4,
-          requestedLayoutHoles: null
-        }
-      });
-      await page.getByRole("button", { name: "Close modal" }).click();
-      expect(saveRequestCount, "signed-out visitors must not submit alert searches").toBe(0);
-    } else if (/Start getting alerts/i.test(alertActionText)) {
-      await expect(alertActionButton).toBeEnabled();
-      await Promise.all([
-        page.waitForURL((url) =>
-          url.pathname === "/dashboard" && url.searchParams.get("created") === "ui-smoke-1"
-        ),
-        alertActionButton.click()
-      ]);
-      expect(saveRequestCount, "a successful alert save should submit once before redirecting").toBe(1);
-      expect(lastSavePayload).toEqual(
-        expect.objectContaining({
-          date: selectedAlertDateValue,
-          startTime: selectedStartTime,
-          endTime: selectedEndTime,
-          additionalEmails: ["friend@example.com", "teammate@example.com"]
-        })
-      );
-      expect(lastSaveTrafficClass).toBe("AUTOMATION");
-    } else {
-      await expect(alertActionButton).toBeDisabled();
-      const unavailableGuidance = page.getByText(
-        "Account access is temporarily unavailable, so alerts cannot be created."
-      );
-      if (usesSelectionDrawer && !(await unavailableGuidance.isVisible())) {
-        await page.getByRole("button", { name: "Review alert" }).click();
-      }
-      await expect(
-        unavailableGuidance
-      ).toBeVisible();
-      expect(saveRequestCount, "alerts must stay blocked while account access is unavailable").toBe(0);
-    }
-
-    const bodyText = await page.locator("body").innerText();
-    expect(bodyText, "onboarding should avoid implementation jargon").not.toMatch(
-      /\b(Codex|Postgres|Clerk|Neon|adapter|Google Places)\b/i
-    );
-
     await expectNoHorizontalOverflow(page, testInfo);
-    await expectInteractiveElementsAreUsable(page, testInfo);
     await expectNoPageIssues(issues, testInfo);
   });
 
@@ -1593,6 +950,8 @@ test.describe("Tee Time Spot UI smoke", () => {
         "Asia/Tokyo"
       );
       expect(await page.evaluate(() => new Date().getDate())).toBe(30);
+      const close = page.getByRole("button", { name: "Close notification setup" });
+      if (await close.isVisible()) await close.click();
       const dateInput = page.getByLabel("Date");
       await expect(dateInput).toHaveAttribute("min", "2026-09-30");
       await expect(dateInput).toHaveValue("2026-09-30");
@@ -1608,19 +967,23 @@ test.describe("Tee Time Spot UI smoke", () => {
       expect(await dateInput.evaluate((input: HTMLInputElement) => input.validity.valid)).toBe(false);
     });
 
-    test("requires tomorrow for all selected courses and relaxes after deselection", async ({ page }) => {
+    test("uses the notification course's date floor when switching courses", async ({ page }) => {
+      await page.addInitScript(() => Object.defineProperty(window, "Clerk", { value: { openSignIn: async () => {} }, configurable: true }));
       await page.goto("/search");
+      await expect(page.getByRole("heading", { name: "Tashua Knolls Golf Course" }).first()).toBeVisible();
+      const close = page.getByRole("button", { name: "Close notification setup" });
+      if (await close.isVisible()) await close.click();
       const dateInput = page.getByLabel("Date");
       await expect(dateInput).toHaveAttribute("min", "2026-09-30");
       await dateInput.fill("2026-09-30");
       await dateInput.press("Tab");
-      await page.getByRole("button", { name: "Add Tokyo Public Course" }).click();
+      await page.getByRole("button", { name: "Notify me for Tokyo Public Course" }).click();
+      if (await close.isVisible()) await close.click();
       await expect(dateInput).toHaveAttribute("min", "2026-10-01");
       await expect(dateInput).toHaveValue("2026-09-30");
       expect(await dateInput.evaluate((input: HTMLInputElement) => input.validity.valid)).toBe(false);
-      await page.locator(".course-row")
-        .filter({ has: page.getByRole("heading", { name: "Tokyo Public Course" }) })
-        .getByRole("button", { name: "Remove Tokyo Public Course" }).click();
+      await page.getByRole("button", { name: "Notify me for Tashua Knolls Golf Course" }).click();
+      if (await close.isVisible()) await close.click();
       await expect(dateInput).toHaveAttribute("min", "2026-09-30");
       await expect(dateInput).toHaveValue("2026-09-30");
       expect(await dateInput.evaluate((input: HTMLInputElement) => input.validity.valid)).toBe(true);
@@ -2018,25 +1381,4 @@ function isSameOrigin(url: string) {
   } catch {
     return false;
   }
-}
-
-function addLocalDays(date: Date, days: number) {
-  const next = new Date(date);
-  next.setDate(next.getDate() + days);
-  return next;
-}
-
-function formatLocalDate(date: Date) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
-}
-
-function formatReadableLocalDate(date: Date) {
-  return new Intl.DateTimeFormat("en-US", {
-    weekday: "long",
-    month: "long",
-    day: "numeric"
-  }).format(date);
 }

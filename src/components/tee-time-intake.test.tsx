@@ -16,6 +16,8 @@ import { OPEN_FEEDBACK_EVENT } from "@/components/open-feedback-button";
 import { TeeTimeIntake } from "./tee-time-intake";
 
 const pushMock = vi.hoisted(() => vi.fn());
+const signInMock = vi.hoisted(() => vi.fn(async () => {}));
+vi.mock("@/lib/auth/deferred-clerk", () => ({ openDeferredClerkSignIn: signInMock }));
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: pushMock })
@@ -72,12 +74,52 @@ describe("TeeTimeIntake", () => {
   afterEach(() => {
     document.querySelectorAll("[data-alert-confetti]").forEach((element) => element.remove());
     pushMock.mockReset();
+    signInMock.mockClear();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     vi.useRealTimers();
     clearSearchDraft();
     window.sessionStorage.clear();
     Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
+  });
+
+  it.each([{ times: [] }, { times: [{ startsAt: "2030-10-03T15:00:00Z", availableSpots: 1 }] }])("offers new-time notifications when matching times are absent: %j", async ({ times }) => {
+    const course = { ...dateBoundaryCourse("Empty Times Course", "America/New_York"), courseId: "empty-times" };
+    restoreDateBoundaryDraft([course], [], "2030-10-03");
+    const fetchMock = mockDateBoundaryRequests();
+    const fallback = fetchMock.getMockImplementation()!;
+    fetchMock.mockImplementation(async (input, init) => {
+      if (String(input).startsWith("/api/courses/check-times?")) return Response.json({ status: "CHECKED", times });
+      if (String(input).startsWith("/api/courses/known-times?")) return Response.json({ courses: {} });
+      return fallback(input, init);
+    });
+    render(<TeeTimeIntake {...signedInAccountProps} />);
+    const notify = await screen.findByRole("button", { name: "Notify me when new times become available for Empty Times Course" });
+    expect(screen.queryByText("Your courses")).toBeNull();
+    fireEvent.click(notify);
+    expect(screen.getByRole("dialog", { name: "Notify me" }).textContent).toContain("Empty Times Course");
+    expect(fetchMock.mock.calls.some(([input]) => input === "/api/searches")).toBe(false);
+  });
+
+  it("opens login from Notify me and keeps course filters for the authenticated confirmation", async () => {
+    const course = dateBoundaryCourse("Login Course", "America/New_York");
+    restoreDateBoundaryDraft([course], [], "2030-10-03");
+    const fetchMock = mockDateBoundaryRequests();
+    const view = render(<TeeTimeIntake accountEnabled accountSignedIn={false} clerkPublishableKey="pk_test_login" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Notify me for Login Course" }));
+    await waitFor(() => expect(signInMock).toHaveBeenCalledWith("pk_test_login", "/search"));
+    const draft = JSON.parse(window.sessionStorage.getItem(SEARCH_DRAFT_STORAGE_KEY)!);
+    expect(draft.selectedCourses.map((item: { name: string }) => item.name)).toEqual(["Login Course"]);
+    expect(draft).toMatchObject({ date: "2030-10-03", startTime: "09:00", endTime: "18:00", players: 4 });
+    expect(screen.queryByRole("dialog", { name: "Notify me" })).toBeNull();
+    expect(fetchMock.mock.calls.some(([input]) => input === "/api/searches")).toBe(false);
+    view.rerender(<TeeTimeIntake {...signedInAccountProps} clerkPublishableKey="pk_test_login" />);
+    await screen.findByRole("dialog", { name: "Notify me" });
+    fireEvent.change(screen.getByRole("textbox", { name: "Additional recipient 1" }), { target: { value: "friend@example.com" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
+    await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/dashboard?created=date-boundary"));
+    const save = fetchMock.mock.calls.find(([input]) => input === "/api/searches");
+    expect(JSON.parse(String(save?.[1]?.body))).toMatchObject({ date: "2030-10-03", startTime: "09:00", endTime: "18:00", players: 4, alertEmail: "golfer@example.com", additionalEmails: ["friend@example.com"], courses: [{ googlePlaceId: course.googlePlaceId, rank: 1 }] });
   });
 
   it.each([undefined, "VERIFYING", "READY"] as const)(
@@ -105,7 +147,7 @@ describe("TeeTimeIntake", () => {
       render(<TeeTimeIntake {...signedInAccountProps} initialValues={{ location: "Test town" }} />);
       fireEvent.click(screen.getByRole("button", { name: "Search" }));
       await screen.findByRole("heading", { name: "Readiness Course" });
-      fireEvent.click(screen.getByRole("button", { name: "Add Readiness Course" }));
+      fireEvent.click(screen.getByRole("button", { name: "Notify me for Readiness Course" }));
 
       if (monitoringReadiness === "READY") {
         expect(screen.getAllByText("Tee-time alerts available").length).toBeGreaterThan(0);
@@ -113,7 +155,7 @@ describe("TeeTimeIntake", () => {
       } else {
         expect(screen.queryAllByText("Tee-time alerts available")).toHaveLength(0);
         expect(screen.getAllByText("Alert availability after first check").length).toBeGreaterThan(0);
-        expect(screen.getByText("Verdict after first check")).toBeTruthy();
+        expect(screen.getByRole("dialog", { name: "Notify me" })).toBeTruthy();
       }
       fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
       await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/dashboard?created=date-boundary"));
@@ -136,7 +178,7 @@ describe("TeeTimeIntake", () => {
     await screen.findAllByRole("heading", { name: "First Restored Course" });
     expect(screen.queryAllByText("Tee-time alerts available")).toHaveLength(0);
     expect(screen.queryByText("Phone booking")).toBeNull();
-    expect(screen.getAllByText("Verdict after first check")).toHaveLength(2);
+    expect(screen.queryByText("Your courses")).toBeNull();
     expect((document.querySelector("#date") as HTMLInputElement).value).toBe("2026-10-03");
     fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
     await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/dashboard?created=date-boundary"));
@@ -179,13 +221,13 @@ describe("TeeTimeIntake", () => {
     await waitFor(() => expect(dateInput.min).toBe("2026-09-30"));
     fireEvent.change(dateInput, { target: { value: "2026-09-30" } });
     fireEvent.blur(dateInput);
-    fireEvent.click(screen.getByRole("button", { name: "Add Tokyo Course" }));
+    fireEvent.click(screen.getByRole("button", { name: "Notify me for Tokyo Course" }));
 
     await waitFor(() => expect(dateInput.min).toBe("2026-10-01"));
     expect(dateInput.value).toBe("2026-09-30");
     expect((screen.getByRole("button", { name: "Start getting alerts" }) as HTMLButtonElement)
       .disabled).toBe(true);
-    fireEvent.click(screen.getAllByRole("button", { name: "Remove Tokyo Course" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Notify me for New York Course" }));
     await waitFor(() => expect(dateInput.min).toBe("2026-09-30"));
     expect(dateInput.value).toBe("2026-09-30");
     expect((screen.getByRole("button", { name: "Start getting alerts" }) as HTMLButtonElement)
@@ -308,7 +350,7 @@ describe("TeeTimeIntake", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Search" }));
     await screen.findByRole("heading", { name: "Test Public Golf Course" });
-    fireEvent.click(screen.getByRole("button", { name: "Add Test Public Golf Course" }));
+    fireEvent.click(screen.getByRole("button", { name: "Notify me for Test Public Golf Course" }));
     await waitFor(() =>
       expect(window.sessionStorage.getItem(SEARCH_DRAFT_STORAGE_KEY)).toContain("course-1")
     );
@@ -428,7 +470,7 @@ describe("TeeTimeIntake", () => {
     );
   });
 
-  it("restores discovered courses and their ranking after the search page remounts", async () => {
+  it("restores the selected notification course and filters after sign-in remounts", async () => {
     let maximumPriceCents = 50000;
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
@@ -496,9 +538,8 @@ describe("TeeTimeIntake", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Search" }));
     await screen.findByRole("heading", { name: "Test Public Golf Course" });
-    fireEvent.click(screen.getByRole("button", { name: "Add Test Public Golf Course" }));
-    fireEvent.click(screen.getByRole("button", { name: "Add Second Public Golf Course" }));
-    fireEvent.click(screen.getByRole("button", { name: "Move Second Public Golf Course up" }));
+    fireEvent.click(screen.getByRole("button", { name: "Notify me for Test Public Golf Course" }));
+    fireEvent.click(screen.getByRole("button", { name: "Notify me for Second Public Golf Course" }));
 
     await waitFor(() => {
       const stored = window.sessionStorage.getItem(SEARCH_DRAFT_STORAGE_KEY);
@@ -507,8 +548,7 @@ describe("TeeTimeIntake", () => {
         selectedCourses?: Array<{ googlePlaceId?: string }>;
       };
       expect(draft.selectedCourses?.map((course) => course.googlePlaceId)).toEqual([
-        "course-2",
-        "course-1"
+        "course-2"
       ]);
     });
 
@@ -520,16 +560,8 @@ describe("TeeTimeIntake", () => {
     expect(
       await screen.findAllByRole("heading", { name: "Second Public Golf Course" })
     ).not.toHaveLength(0);
-    expect(
-      screen.getAllByRole("button", { name: "Remove Second Public Golf Course" })
-    ).not.toHaveLength(0);
-    expect(
-      (
-        screen.getByRole("button", {
-          name: "Move Second Public Golf Course up"
-        }) as HTMLButtonElement
-    ).disabled
-    ).toBe(true);
+    expect(screen.getByRole("dialog", { name: "Notify me" }).textContent).toContain("Second Public Golf Course");
+    expect(screen.queryByText("Your courses")).toBeNull();
     expect((screen.getByLabelText("Location") as HTMLInputElement).value).toBe("Trumbull, CT");
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
@@ -611,14 +643,11 @@ describe("TeeTimeIntake", () => {
     expect(screen.getByText("Possible course")).toBeTruthy();
     fireEvent.click(
       screen.getByRole("button", {
-        name: "Add Wheeler Family Traditions Golf Club"
+        name: "Notify me for Wheeler Family Traditions Golf Club"
       })
     );
 
-    await screen.findByText(
-      "Wheeler Family Traditions Golf Club was added to your list. Start the alert and we'll verify the course before checking for tee times."
-    );
-    expect(screen.getByText("Verify with this alert")).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "Notify me" }).textContent).toContain("Wheeler Family Traditions Golf Club");
     expect(screen.getByText("Verified after the alert starts")).toBeTruthy();
     expect(
       (screen.getByRole("button", { name: "Start getting alerts" }) as HTMLButtonElement)
@@ -748,7 +777,7 @@ describe("TeeTimeIntake", () => {
       )
     ).toBeNull();
     expect(
-      screen.queryByRole("button", { name: "Add Review This Golf Course" })
+      screen.queryByRole("button", { name: "Notify me for Review This Golf Course" })
     ).toBeNull();
     expect(screen.getByText("Private or invalid course record")).toBeTruthy();
     expect(
@@ -817,7 +846,7 @@ describe("TeeTimeIntake", () => {
 
     render(<TeeTimeIntake {...signedInAccountProps} />);
 
-    const saveButton = screen.getByRole("button", { name: "Start getting alerts" });
+    const saveButton = await screen.findByRole("button", { name: "Start getting alerts" });
     await waitFor(() =>
       expect((saveButton as HTMLButtonElement).disabled).toBe(false)
     );

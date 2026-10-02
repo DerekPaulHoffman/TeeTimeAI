@@ -10414,3 +10414,20 @@ button {
 .course-check-spinner { animation: course-check-spin 1s linear infinite; }
 @keyframes course-check-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .course-check-spinner { animation: none; } }
+
+.figma-results-layout { grid-template-columns: minmax(0, 1fr); }
+.notify-alert-dialog { border: 1px solid #dce4dc; border-radius: 20px; padding: 24px; width: min(480px, calc(100vw - 24px)); max-height: calc(100svh - 48px); overflow: auto; color: var(--text); background: white; box-shadow: 0 20px 80px #132d2340; }
+.notify-alert-dialog::backdrop { background: #13251c80; }
+.notify-alert-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.notify-alert-heading h2 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 22px; }
+.notify-alert-heading button { display: grid; place-items: center; flex: 0 0 36px; height: 36px; border: 0; border-radius: 50%; background: #f2f5f2; cursor: pointer; }
+.notify-course-name { font-weight: 700; margin: 16px 0 8px; }
+.notify-alert-dialog .figma-selected-scroll-content { overflow: visible; padding: 0; }
+.notify-alert-dialog .figma-alert-action { padding: 18px 0 0; margin-top: 18px; }
+.notify-alert-dialog .figma-alert-action { background: transparent; border-color: #dce4dc; }
+.notify-alert-dialog .figma-alert-preview { border-color: #dce4dc; }
+.notify-alert-dialog .figma-alert-preview-heading, .notify-alert-dialog .figma-group-recipients-heading { color: #173f2b; }
+.notify-alert-dialog .figma-alert-email span, .notify-alert-dialog .figma-alert-email small, .notify-alert-dialog .figma-alert-preview > small { color: #53685c; }
+.notify-alert-dialog .figma-alert-preview-recipients { color: #33714a; }
+.course-actions .figma-add-button { white-space: normal; max-width: 260px; line-height: 1.4; }
+@media (max-width: 480px) { .notify-alert-dialog { padding: 18px; } }

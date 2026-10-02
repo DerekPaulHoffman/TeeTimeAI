@@ -5,7 +5,7 @@ type ClerkBrowser = {
     };
   }): Promise<void>;
   mountUserButton(element: HTMLDivElement): void;
-  openSignIn(): Promise<void>;
+  openSignIn(options?: { forceRedirectUrl: string; signUpForceRedirectUrl: string }): Promise<void>;
   unmountUserButton(element: HTMLDivElement): void;
 };
 
@@ -18,9 +18,9 @@ declare global {
 
 let clerkLoadPromise: Promise<ClerkBrowser> | null = null;
 
-export async function openDeferredClerkSignIn(publishableKey: string) {
+export async function openDeferredClerkSignIn(publishableKey: string, returnTo?: string) {
   const clerk = await loadClerk(publishableKey);
-  await clerk.openSignIn();
+  await clerk.openSignIn(returnTo ? { forceRedirectUrl: returnTo, signUpForceRedirectUrl: returnTo } : undefined);
 }
 
 export async function mountDeferredClerkUserButton(

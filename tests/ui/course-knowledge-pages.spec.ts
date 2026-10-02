@@ -122,7 +122,7 @@ test("course CTA transfers the selected course through session storage", async (
 
   await expect(page).toHaveURL(/\/search$/);
   await expect(page.getByRole("heading", { level: 3, name: "Tashua Knolls Golf Course" }).first()).toBeVisible();
-  await expect(page.getByRole("button", { name: "Remove Tashua Knolls Golf Course" }).first()).toBeVisible();
+  await expect(page.getByRole("button", { name: /Notify me.*for Tashua Knolls Golf Course/ }).first()).toBeVisible();
   expect(new URL(page.url()).searchParams.has("course")).toBe(false);
   expect(errors).toEqual([]);
 });

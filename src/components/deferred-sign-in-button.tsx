@@ -9,18 +9,22 @@ import {
 import { openDeferredClerkSignIn } from "@/lib/auth/deferred-clerk";
 
 export function DeferredSignInButton({
+  ariaLabel,
   children,
   className,
   disabled,
   onClick,
   publishableKey,
+  returnTo,
   style
 }: {
+  ariaLabel?: string;
   children: ReactNode;
   className: string;
   disabled?: boolean;
   onClick?: () => void;
   publishableKey: string;
+  returnTo?: string;
   style?: CSSProperties;
 }) {
   const [loading, setLoading] = useState(false);
@@ -30,7 +34,8 @@ export function DeferredSignInButton({
     onClick?.();
     setLoading(true);
     setLoadFailed(false);
-    void openDeferredClerkSignIn(publishableKey)
+    const signIn = returnTo ? openDeferredClerkSignIn(publishableKey, returnTo) : openDeferredClerkSignIn(publishableKey);
+    void signIn
       .catch(() => {
         setLoadFailed(true);
       })
@@ -42,6 +47,7 @@ export function DeferredSignInButton({
   return (
     <>
       <button
+        aria-label={ariaLabel}
         className={className}
         aria-busy={loading}
         disabled={disabled || loading}

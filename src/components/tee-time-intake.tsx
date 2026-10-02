@@ -17,14 +17,11 @@ import {
   Bell,
   BookOpenText,
   Check,
-  ChevronDown,
-  ChevronUp,
   CircleAlert,
   CircleCheck,
   CircleDollarSign,
   ExternalLink,
   Flag,
-  GripVertical,
   LogIn,
   MapPin,
   MapPinned,
@@ -62,7 +59,7 @@ import {
 import { getGoogleMapsSearchUrl } from "@/lib/maps";
 import { CURRENT_LOCATION_LABEL } from "@/lib/places/location-input";
 import type { CourseCandidate } from "@/lib/places/google";
-import { KnownTeeTimes, useKnownTeeTimes, useCourseTimeChecks, CourseTimeCheckStatus, type CourseTimeCheck } from "@/components/known-tee-times";
+import { KnownTeeTimes, filterVisibleTeeTimes, useKnownTeeTimes, useCourseTimeChecks, CourseTimeCheckStatus, type CourseTimeCheck } from "@/components/known-tee-times";
 import type { KnownTeeTime } from "@/lib/courses/known-tee-times";
 import {
   DEFAULT_COURSE_SEARCH_RADIUS_MILES,
@@ -343,14 +340,13 @@ function TeeTimeIntakeContent({
   const [saving, setSaving] = useState(false);
   const [saveFailureVisible, setSaveFailureVisible] = useState(false);
   const [savedSignature, setSavedSignature] = useState<string | null>(null);
-  const [draggedCourseId, setDraggedCourseId] = useState<string | null>(null);
   const [mobileTimeEditorOpen, setMobileTimeEditorOpen] = useState(false);
-  const [mobileSelectionOpen, setMobileSelectionOpen] = useState(false);
+  const [notificationOpen, setNotificationOpen] = useState(false);
+  const notificationDialogRef = useRef<HTMLDialogElement | null>(null);
   const [draftReady, setDraftReady] = useState(false);
   const resultsRef = useRef<HTMLDivElement | null>(null);
   const shouldScrollToResultsRef = useRef(false);
   const nextAdditionalEmailIdRef = useRef(1);
-  const hasTrackedCourseSelectionRef = useRef(false);
   const reportedCourseLookupMissesRef = useRef(new Set<string>());
   const reportedCourseLookupCandidatesRef = useRef(new Set<string>());
   const shouldRefreshRestoredCoursesRef = useRef(false);
@@ -385,10 +381,10 @@ function TeeTimeIntakeContent({
         if (transferred.selectedCourse !== undefined) {
           const restoredCourse = clearCourseMonitoringEvidence(transferred.selectedCourse);
           setSelected([restoredCourse]);
+          setNotificationOpen(true);
           setCourses([restoredCourse]);
           shouldRefreshRestoredCoursesRef.current =
             transferred.coordinates !== undefined;
-          hasTrackedCourseSelectionRef.current = true;
         }
       } else if (draft) {
         if (draft.location !== undefined) setLocationText(draft.location);
@@ -401,9 +397,9 @@ function TeeTimeIntakeContent({
         if (draft.coordinates !== undefined) setSearchCoordinates(draft.coordinates);
         setCourses(draft.courses.map(clearCourseMonitoringEvidence));
         setSelected(draft.selectedCourses.map(clearCourseMonitoringEvidence));
+        setNotificationOpen(draft.selectedCourses.length > 0);
         shouldRefreshRestoredCoursesRef.current =
           draft.coordinates !== undefined && draft.courses.length > 0;
-        hasTrackedCourseSelectionRef.current = draft.selectedCourses.length > 0;
       }
 
       setDraftReady(true);
@@ -490,10 +486,20 @@ function TeeTimeIntakeContent({
     };
   }, [draftReady, selectedTimeZones]);
 
-  const selectedIds = useMemo(
-    () => new Set(selected.map((course) => course.googlePlaceId)),
-    [selected]
-  );
+  useEffect(() => {
+    const dialog = notificationDialogRef.current;
+    if (!dialog) return;
+    if (notificationOpen && selected.length > 0 && accountState.status !== "signed-out") {
+      if (!dialog.open) {
+        if (dialog.showModal) dialog.showModal();
+        else dialog.setAttribute("open", "");
+      }
+    } else if (dialog.open) {
+      if (dialog.close) dialog.close();
+      else dialog.removeAttribute("open");
+    }
+  }, [notificationOpen, selected.length, accountState.status]);
+
   const normalizedAdditionalEmails = useMemo(
     () => normalizeAdditionalAlertEmails(
       additionalEmailFields.map((field) => field.value),
@@ -896,24 +902,6 @@ function TeeTimeIntakeContent({
     return false;
   }
 
-  async function addCourseLookupResult(course: CourseCandidate) {
-    if (!addCourse(course)) {
-      return;
-    }
-
-    if (course.publicAccessStatus !== "UNVERIFIED") {
-      setCourseLookupMessage(`${course.name} was added to your list.`);
-      return;
-    }
-
-    const reportSaved = await reportCourseLookupCandidate(course);
-    setCourseLookupMessage(
-      reportSaved
-        ? `${course.name} was added to your list. Start the alert and we'll verify the course before checking for tee times.`
-        : `${course.name} was added to your list in this browser, but we couldn't save it for review. Please try again or send it through Feedback.`
-    );
-  }
-
   async function lookupCourse() {
     const normalizedQuery = courseLookupQuery.trim();
     if (normalizedQuery.length < 2) {
@@ -976,97 +964,27 @@ function TeeTimeIntakeContent({
     }
   }
 
-  function addCourse(course: CourseCandidate) {
+  function notifyForCourse(course: CourseCandidate) {
     if (course.publicAccessStatus === "REVIEW_REQUIRED") {
       reportCourseInaccuracy(course);
-      return false;
+      return;
     }
-
-    if (
-      getCourseLayoutCompatibility(course.layoutHoleCounts, requestedLayoutHoles) ===
-      "incompatible"
-    ) {
-      setNotice({
-        type: "error",
-        message: `${course.name} is verified as ${getCourseLayoutLabel(course.layoutHoleCounts)} and does not match this ${requestedLayoutHoles}-hole course search.`
-      });
-      return false;
-    }
-
-    if (selected.length >= 5) {
-      setNotice({ type: "error", message: "You can prioritize up to 5 courses." });
-      return false;
-    }
-
-    if (selectedIds.has(course.googlePlaceId)) {
-      return false;
-    }
-
-    if (!hasTrackedCourseSelectionRef.current) {
-      hasTrackedCourseSelectionRef.current = true;
+    if (getCourseLayoutCompatibility(course.layoutHoleCounts, requestedLayoutHoles) === "incompatible") return;
+    setSelected([course]);
+    setNotificationOpen(true);
+    trackWebsiteEvent({
+      name: "course_selection_started",
+      metadata: { selectedCourseCount: 1, players, requestedLayoutHoles }
+    });
+    if (accountState.status === "signed-out") {
       trackWebsiteEvent({
-        name: "course_selection_started",
-        metadata: {
-          selectedCourseCount: 1,
-          players,
-          requestedLayoutHoles
-        }
+        name: "alert_sign_in_clicked",
+        metadata: { selectedCourseCount: 1, players, requestedLayoutHoles }
       });
     }
-
-    setSelected((current) => [...current, course]);
-    return true;
-  }
-
-  function toggleCourse(course: CourseCandidate) {
-    if (selectedIds.has(course.googlePlaceId)) {
-      removeCourse(course.googlePlaceId);
-      return;
+    if (course.publicAccessStatus === "UNVERIFIED") {
+      void reportCourseLookupCandidate(course);
     }
-
-    addCourse(course);
-  }
-
-  function removeCourse(placeId: string) {
-    const nextSelected = selected.filter((course) => course.googlePlaceId !== placeId);
-    setSelected(nextSelected);
-    if (nextSelected.length === 0) {
-      setMobileSelectionOpen(false);
-    }
-  }
-
-  function moveSelectedCourse(placeId: string, direction: -1 | 1) {
-    setSelected((current) => {
-      const index = current.findIndex((course) => course.googlePlaceId === placeId);
-      const nextIndex = index + direction;
-      if (index < 0 || nextIndex < 0 || nextIndex >= current.length) {
-        return current;
-      }
-
-      const next = [...current];
-      [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
-      return next;
-    });
-  }
-
-  function reorderSelectedCourse(sourcePlaceId: string, targetPlaceId: string) {
-    if (sourcePlaceId === targetPlaceId) {
-      return;
-    }
-
-    setSelected((current) => {
-      const sourceIndex = current.findIndex((course) => course.googlePlaceId === sourcePlaceId);
-      const targetIndex = current.findIndex((course) => course.googlePlaceId === targetPlaceId);
-
-      if (sourceIndex < 0 || targetIndex < 0) {
-        return current;
-      }
-
-      const next = [...current];
-      const [moved] = next.splice(sourceIndex, 1);
-      next.splice(targetIndex, 0, moved);
-      return next;
-    });
   }
 
   function showMoreCourses() {
@@ -1211,6 +1129,7 @@ function TeeTimeIntakeContent({
           : "/dashboard"
       );
     } catch {
+      setNotificationOpen(false);
       setSaveFailureVisible(true);
     } finally {
       setSaving(false);
@@ -1297,8 +1216,7 @@ function TeeTimeIntakeContent({
               <strong>
                 {displayedCourseCount} {displayedCourseCount === 1 ? "course" : "courses"}
               </strong>{" "}
-              near {locationText.trim() || "your location"} — tap the ones you want and drag to rank
-              them.{" "}
+              near {locationText.trim() || "your location"} — choose a course to get notified about openings.{" "}
               <a className="figma-results-map-link" href="#course-results-map-section">
                 Scroll to Google Map
               </a>
@@ -1310,7 +1228,7 @@ function TeeTimeIntakeContent({
                 {courseLookupResults.length}{" "}
                 {courseLookupResults.length === 1 ? "course" : "courses"}
               </strong>{" "}
-              found by name — tap the ones you want and drag to rank them.
+              found by name — choose a course to get notified about openings.
             </div>
           ) : notice.type === "success" ? (
             <div className="figma-empty-results" role="status" aria-atomic="true">
@@ -1380,13 +1298,8 @@ function TeeTimeIntakeContent({
                     timeFilters={{ date, startTime, endTime, players }}
                     key={course.googlePlaceId}
                     onReportInaccuracy={reportCourseInaccuracy}
-                    onToggle={(lookupCourseResult) => {
-                      if (selectedIds.has(lookupCourseResult.googlePlaceId)) {
-                        removeCourse(lookupCourseResult.googlePlaceId);
-                      } else {
-                        void addCourseLookupResult(lookupCourseResult);
-                      }
-                    }}
+                    onToggle={notifyForCourse}
+                    signInKey={accountState.status === "signed-out" ? clerkPublishableKey : undefined}
                     requestedLayoutHoles={requestedLayoutHoles}
                     selectedIndex={selected.findIndex(
                       (selectedCourse) =>
@@ -1412,7 +1325,8 @@ function TeeTimeIntakeContent({
                   timeFilters={{ date, startTime, endTime, players }}
                   key={course.googlePlaceId}
                   onReportInaccuracy={reportCourseInaccuracy}
-                  onToggle={toggleCourse}
+                  onToggle={notifyForCourse}
+                  signInKey={accountState.status === "signed-out" ? clerkPublishableKey : undefined}
                   requestedLayoutHoles={requestedLayoutHoles}
                   selectedIndex={selected.findIndex(
                     (selectedCourse) =>
@@ -1453,115 +1367,20 @@ function TeeTimeIntakeContent({
         ) : null}
         </div>
 
-      <aside
-        className={
-          mobileSelectionOpen
-            ? "summary-panel figma-selected-panel is-mobile-open"
-            : "summary-panel figma-selected-panel"
-        }
-        id="mobile-watchlist-panel"
+      <dialog
+        className="notify-alert-dialog"
+        ref={notificationDialogRef}
+        aria-labelledby="notify-alert-title"
+        onCancel={() => setNotificationOpen(false)}
+        onClose={() => setNotificationOpen(false)}
       >
         <div className="figma-selected-scroll-content">
-        <div className="figma-selected-header">
-          <span className="figma-selected-icon">
-            <MapPinned size={18} />
-          </span>
-          <h2>Your courses</h2>
-          {selected.length > 0 ? <span className="figma-count-pill">{selected.length}/5</span> : null}
-        </div>
-        <p>Pick up to 5. Drag to rank them. We check courses where tee-time alerts are available.</p>
-        <div className="selected-list">
-          {selected.length === 0 ? (
-            <div className="selected-empty">
-              <span className="figma-empty-flag" aria-hidden="true">⛳</span>
-              <span>Tap a course to add it here</span>
-            </div>
-          ) : (
-            selected.map((course, index) => (
-              <div
-                className={
-                  draggedCourseId === course.googlePlaceId
-                    ? "selected-row selected-card figma-selected-card is-dragging"
-                    : "selected-row selected-card figma-selected-card"
-                }
-                draggable
-                key={course.googlePlaceId}
-                onDragEnd={() => setDraggedCourseId(null)}
-                onDragOver={(event) => event.preventDefault()}
-                onDragStart={() => setDraggedCourseId(course.googlePlaceId)}
-                onDrop={(event) => {
-                  event.preventDefault();
-                  if (draggedCourseId) {
-                    reorderSelectedCourse(draggedCourseId, course.googlePlaceId);
-                    setDraggedCourseId(null);
-                  }
-                }}
-              >
-                <GripVertical className="figma-drag-handle" size={16} />
-                <span className="figma-selected-rank">{index + 1}</span>
-                <CourseThumbnail course={course} variant="compact" />
-                <div className="selected-copy">
-                  <h3>{course.name}</h3>
-                  {course.layoutHoleCounts?.length ? (
-                    <span className="selected-course-support">
-                      {getCourseLayoutLabel(course.layoutHoleCounts)} course
-                    </span>
-                  ) : requestedLayoutHoles ? (
-                    <span className="selected-course-support">Layout unverified</span>
-                  ) : null}
-                  {course.publicAccessStatus === "UNVERIFIED" ? (
-                    <span className="selected-course-support">
-                      Verify with this alert
-                    </span>
-                  ) : course.alertSupport ? (
-                    <span className="selected-course-support">
-                      {getAlertSupportLabel(course.alertSupport)}
-                    </span>
-                  ) : course.monitoringReadiness === "TEMPORARILY_UNAVAILABLE" ? (
-                    <span className="selected-course-support">
-                      Automatic alerts temporarily unavailable
-                    </span>
-                  ) : course.monitoringReadiness === "UNAVAILABLE" ? (
-                    <span className="selected-course-support">
-                      Automatic alerts unavailable
-                    </span>
-                  ) : course.firstTimeLookup ? (
-                    <span className="selected-course-support">First-time course lookup</span>
-                  ) : !hasReadyAutomaticMonitoring(course) ? (
-                    <span className="selected-course-support">{course.courseId ? liveChecks[course.courseId]?.status === "LOADING" ? "Checking tee times…" : "You book on the official site" : "Verdict after first check"}</span>
-                  ) : null}
-                </div>
-                <div className="figma-reorder-controls" aria-label={`Reorder ${course.name}`}>
-                  <button
-                    aria-label={`Move ${course.name} up`}
-                    disabled={index === 0}
-                    onClick={() => moveSelectedCourse(course.googlePlaceId, -1)}
-                    type="button"
-                  >
-                    <ChevronUp size={15} />
-                  </button>
-                  <button
-                    aria-label={`Move ${course.name} down`}
-                    disabled={index === selected.length - 1}
-                    onClick={() => moveSelectedCourse(course.googlePlaceId, 1)}
-                    type="button"
-                  >
-                    <ChevronDown size={15} />
-                  </button>
-                </div>
-                <button
-                  className="figma-remove-course"
-                  type="button"
-                  onClick={() => removeCourse(course.googlePlaceId)}
-                  title="Remove course"
-                  aria-label={`Remove ${course.name}`}
-                >
-                  <X size={17} />
-                </button>
-              </div>
-            ))
-          )}
-        </div>
+          <div className="notify-alert-heading">
+            <h2 id="notify-alert-title"><Bell aria-hidden="true" size={20} /> Notify me</h2>
+            <button type="button" aria-label="Close notification setup" onClick={() => setNotificationOpen(false)}><X size={20} /></button>
+          </div>
+          <p className="notify-course-name">{selected.map(course => course.name).join(", ")}</p>
+          <p>We&apos;ll email you when matching tee times become available.</p>
         {selected.length > 0 ? (
           <section className="figma-alert-preview" aria-labelledby="alert-preview-title">
             <div className="figma-alert-preview-heading">
@@ -1569,7 +1388,7 @@ function TeeTimeIntakeContent({
               <strong id="alert-preview-title">Your alert</strong>
             </div>
             <p>
-              We&apos;ll check {selected.length} ranked {selected.length === 1 ? "course" : "courses"}
+              We&apos;ll check {selected.length} {selected.length === 1 ? "course" : "courses"}
               {" "}for {formatAlertDate(date)}, {formatCompactTimeWindow(startTime, endTime)}, for{" "}
               {players} {players === 1 ? "player" : "players"}.
             </p>
@@ -1743,44 +1562,9 @@ function TeeTimeIntakeContent({
                       : `You’ll manage this alert from your signed-in account (${accountEmail}). Alerts go to that address and any extra recipients you add.`)}
           </p>
         </div>
-      </aside>
+      </dialog>
       </div>
       <CourseResultsMap courses={displayedCourses} origin={searchCoordinates} />
-      {selected.length > 0 ? (
-        <div className="mobile-selection-bar">
-          <button
-            aria-controls="mobile-watchlist-panel"
-            aria-expanded={mobileSelectionOpen}
-            className="mobile-selection-toggle"
-            type="button"
-            onClick={() => setMobileSelectionOpen((open) => !open)}
-          >
-            <span className="mobile-selection-summary">
-              <span className="mobile-selection-ranks" aria-hidden="true">
-                <span>{selected.length}</span>
-              </span>
-              <span className="mobile-selection-copy">
-                <strong>
-                  {selected.length} {selected.length === 1 ? "course" : "courses"} picked
-                </strong>
-                <span className="mobile-selection-view">
-                  Reorder priority
-                  <ChevronDown className={mobileSelectionOpen ? "is-open" : ""} size={15} />
-                </span>
-              </span>
-            </span>
-          </button>
-          <button
-            aria-controls="mobile-watchlist-panel"
-            aria-expanded={mobileSelectionOpen}
-            className="mobile-selection-submit"
-            type="button"
-            onClick={() => setMobileSelectionOpen(true)}
-          >
-            Review alert <span aria-hidden="true">→</span>
-          </button>
-        </div>
-      ) : null}
     </div>
   );
 }
@@ -1835,6 +1619,7 @@ function CourseResultCard({
   timeFilters,
   onReportInaccuracy,
   onToggle,
+  signInKey,
   requestedLayoutHoles,
   selectedIndex
 }: {
@@ -1844,6 +1629,7 @@ function CourseResultCard({
   timeFilters: { date: string; startTime: string; endTime: string; players: number };
   onReportInaccuracy: (course: CourseCandidate) => void;
   onToggle: (course: CourseCandidate) => void;
+  signInKey?: string;
   requestedLayoutHoles: CourseLayoutHoleCount | null;
   selectedIndex: number;
 }) {
@@ -1857,6 +1643,8 @@ function CourseResultCard({
     course.layoutHoleCounts,
     course.bookableHoleCounts
   );
+  const noCurrentTimes = (liveCheck?.status === "CHECKED" && filterVisibleTeeTimes(liveCheck.times, course.timeZone, timeFilters.startTime, timeFilters.endTime, timeFilters.players).length === 0) || liveCheck?.status === "NOT_OPEN";
+  const notifyLabel = noCurrentTimes ? "Notify me when new times become available" : "Notify me";
   const isPublicAccessUnverified = course.publicAccessStatus === "UNVERIFIED";
   const requiresPublicAccessReview =
     course.publicAccessStatus === "REVIEW_REQUIRED";
@@ -1867,7 +1655,7 @@ function CourseResultCard({
       role="listitem"
     >
       <CourseThumbnail course={course} />
-      {isSelected ? <span className="course-rank-overlay">{selectedIndex + 1}</span> : null}
+
       <div className="course-copy">
         <div className="figma-course-badges">
           {!requiresPublicAccessReview ? (
@@ -1978,31 +1766,28 @@ function CourseResultCard({
             Report inaccuracy
           </button>
         ) : (
-          <button
-          aria-label={isSelected ? `Remove ${course.name}` : `Add ${course.name}`}
-          className={isSelected ? "figma-add-button is-added" : "figma-add-button"}
-          disabled={isIncompatible && !isSelected}
-          onClick={() => onToggle(course)}
-          title={
-            isSelected
-              ? `Remove priority ${selectedIndex + 1}`
-              : isIncompatible
-                ? `Does not match this ${requestedLayoutHoles}-hole course search`
-                : "Add course"
-          }
-          type="button"
-        >
-          {isSelected ? (
-            <>
-              <Check aria-hidden="true" size={10} />
-              Added
-            </>
-          ) : isIncompatible ? (
-            "Doesn’t match"
+          signInKey ? (
+            <DeferredSignInButton
+              ariaLabel={`${notifyLabel} for ${course.name}`}
+              className="figma-add-button"
+              disabled={isIncompatible}
+              onClick={() => onToggle(course)}
+              publishableKey={signInKey}
+              returnTo="/search"
+            >
+              <Bell aria-hidden="true" size={12} /> {isIncompatible ? "Doesn’t match" : notifyLabel}
+            </DeferredSignInButton>
           ) : (
-            "+ Add to my list"
-          )}
-          </button>
+            <button
+              aria-label={`${notifyLabel} for ${course.name}`}
+              className="figma-add-button"
+              disabled={isIncompatible}
+              onClick={() => onToggle(course)}
+              type="button"
+            >
+              <Bell aria-hidden="true" size={12} /> {isIncompatible ? "Doesn’t match" : notifyLabel}
+            </button>
+          )
         )}
       </div>
     </div>

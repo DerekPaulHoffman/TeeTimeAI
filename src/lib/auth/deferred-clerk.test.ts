@@ -40,6 +40,13 @@ describe("deferred Clerk loader", () => {
     expect(openSignIn).toHaveBeenCalledOnce();
   });
 
+  it("returns both sign-in and sign-up to the pending course notification", async () => {
+    const openSignIn = vi.fn().mockResolvedValue(undefined);
+    window.Clerk = { load: vi.fn(), mountUserButton: vi.fn(), openSignIn, unmountUserButton: vi.fn() };
+    await openDeferredClerkSignIn("pk_test_unused", "/search");
+    expect(openSignIn).toHaveBeenCalledWith({ forceRedirectUrl: "/search", signUpForceRedirectUrl: "/search" });
+  });
+
   it("mounts and cleans up the signed-in user button", async () => {
     const mountUserButton = vi.fn();
     const unmountUserButton = vi.fn();
