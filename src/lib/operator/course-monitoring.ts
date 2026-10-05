@@ -1632,6 +1632,7 @@ async function terminalizeAvailableCourseMatches(
   await transaction.teeTimeMatch.updateMany({
     where: {
       courseId: input.courseId,
+      teeSearch: { mode: "OUTDOOR" },
       availabilityStatus: "AVAILABLE",
       alertStatus: "PENDING",
     },
@@ -1644,6 +1645,7 @@ async function terminalizeAvailableCourseMatches(
   await transaction.teeTimeMatch.updateMany({
     where: {
       courseId: input.courseId,
+      teeSearch: { mode: "OUTDOOR" },
       availabilityStatus: "AVAILABLE",
     },
     data: {

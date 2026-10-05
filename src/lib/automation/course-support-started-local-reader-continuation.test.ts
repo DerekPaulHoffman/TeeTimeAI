@@ -365,7 +365,7 @@ describe("current started local-reader continuation", () => {
     expect(assessParkedCourseStartedLocalReaderContinuation(input)).toBeNull();
   });
 
-  it("loads exact native legacy evidence and privately reads only the compatible reader and all ACTIVE count", async () => {
+  it("loads exact native legacy evidence and privately reads only the compatible reader and ACTIVE outdoor demand", async () => {
     const scenario = loaderFixture();
     const result = await scenario.load();
     expect(result).toHaveLength(1);
@@ -376,7 +376,7 @@ describe("current started local-reader continuation", () => {
     expect(serialized).not.toContain(course.name);
     expect(serialized).not.toContain(course.website);
     expect(serialized).not.toContain(course.detectedBookingUrl);
-    expect(scenario.database.teeSearch.count).toHaveBeenCalledWith({ where: { status: "ACTIVE", preferences: { some: { courseId: "fixture-course" } } } });
+    expect(scenario.database.teeSearch.count).toHaveBeenCalledWith({ where: { status: "ACTIVE", mode: "OUTDOOR", preferences: { some: { courseId: "fixture-course" } } } });
     const firstQuery = scenario.database.courseSupportIncident.findMany.mock.calls[0]![0];
     expect(firstQuery.where).toMatchObject({ activeBatchId: null, decisionAt: null, status: "NEEDS_HUMAN" });
     expect(firstQuery.select).not.toHaveProperty("batchIncidents");

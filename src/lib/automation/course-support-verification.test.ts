@@ -1248,6 +1248,7 @@ describe("course-support verification scheduling", () => {
     expect(prismaMocks.activeSearchCount).toHaveBeenCalledWith({
       where: {
         status: "ACTIVE",
+        mode: "OUTDOOR",
         date: { gte: new Date("2026-07-21T00:00:00.000Z") },
         preferences: { some: { courseId: "course-1" } },
       },
@@ -1464,6 +1465,7 @@ describe("course-support verification scheduling", () => {
     expect(prismaMocks.activeSearchCount).toHaveBeenCalledWith({
       where: {
         status: "ACTIVE",
+        mode: "OUTDOOR",
         date: { gte: new Date("2026-07-20T00:00:00.000Z") },
         preferences: { some: { courseId: "course-1" } },
       },

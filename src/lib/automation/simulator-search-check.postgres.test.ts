@@ -149,6 +149,20 @@ describe.skipIf(!databaseUrl)("simulator check against isolated Postgres", () =>
     const targetDate = search.date.toISOString().slice(0, 10);
     const request = new NextRequest(`http://localhost/api/courses/known-times?courseId=${venue.course.id}&date=${targetDate}`);
     expect(await (await GET(request)).json()).toEqual({ courses: { [venue.course.id]: [] } });
+    const { recordCourseMonitoringFinalClassification } = await import("@/lib/automation/course-monitoring");
+    const finalObservedAt = new Date(Date.now() + 1);
+    const final = await recordCourseMonitoringFinalClassification({
+      courseId: venue.course.id, state: "FINAL_IDENTITY", outcome: "IDENTITY_FINAL",
+      evidence: { kind: "COURSE_INTELLIGENCE", observedAt: finalObservedAt },
+      message: "Outdoor course identity changed in isolated integration test.",
+      now: finalObservedAt,
+      courseIntelligenceUpdate: { isPublic: false, intelligenceVerifiedAt: finalObservedAt,
+        intelligenceReviewAt: new Date(finalObservedAt.getTime() + 30 * 24 * 60 * 60_000),
+        intelligenceConfidence: 0.9 },
+    });
+    expect(final?.sourceEvidenceAccepted).toBe(true);
+    expect(await client.teeTimeMatch.findUniqueOrThrow({ where: { id: match.id } }))
+      .toMatchObject({ availabilityStatus: "AVAILABLE", alertStatus: "SENT", offeringId: venue.offering.id });
     expect(mocks.sendMatch).toHaveBeenCalledTimes(1);
     expect(mocks.sendStatus).not.toHaveBeenCalled();
   });

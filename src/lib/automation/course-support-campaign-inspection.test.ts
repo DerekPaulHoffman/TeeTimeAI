@@ -242,6 +242,7 @@ describe("latest parked campaign transaction-bound inspection", () => {
     expect(reads.searchCount).toHaveBeenCalledExactlyOnceWith({
       where: {
         status: "ACTIVE",
+        mode: "OUTDOOR",
         preferences: { some: { courseId: "private-course" } },
       },
     });
@@ -295,9 +296,9 @@ describe("exact native-selected campaign probe hydration", () => {
       const chosen = kind === "valid highest" ? fixture.rows[0]!.course.probes[0]! : invalid;
 
       expect(observations[0]?.latestProbe).toEqual(probeObservationValue(chosen));
-      expect(fixture.reads.probes.mock.calls[0]![0].where).toEqual({ id: { in: ["private-probe-z"] } });
+      expect(fixture.reads.probes.mock.calls[0]![0].where).toEqual({ id: { in: ["private-probe-z"] }, teeSearch: { mode: "OUTDOOR" } });
       expect(fixture.reads.incidents.mock.calls[0]![0].select?.course).toMatchObject({ select: { probes: {
-        where: { observedAt: { gte: CAPTURED_AT } },
+        where: { observedAt: { gte: CAPTURED_AT }, teeSearch: { mode: "OUTDOOR" } },
         orderBy: [{ observedAt: "desc" }, { id: "desc" }], take: 1,
         select: { id: true, courseId: true, outcome: true, observedAt: true, runtimeVersion: true },
       } } });
@@ -308,6 +309,25 @@ describe("exact native-selected campaign probe hydration", () => {
       expectNoGlobalReadsOrWrites(fixture.mutation);
     },
   );
+
+  it("keeps a newer simulator success out of native outdoor probe selection and hydration", async () => {
+    const fixture = probeObservationFixture();
+    const outdoor = fixture.rows[0]!.course.probes[0]!;
+    const simulatorSummaryRead = vi.fn(() => { throw new Error("Unselected simulator summary must stay cold"); });
+    const simulator = { ...outdoor, id: "private-simulator-probe", teeSearch: { mode: "SIMULATOR" },
+      observedAt: new Date(outdoor.observedAt.getTime() + 60_000) };
+    Object.defineProperty(simulator, "rawSummary", { enumerable: true, get: simulatorSummaryRead });
+    fixture.rows[0]!.course.probes.push(simulator);
+
+    const observations = await fixture.load();
+
+    expect(observations[0]?.latestProbe).toEqual(probeObservationValue(outdoor));
+    expect(fixture.reads.probes.mock.calls[0]![0].where).toEqual({
+      id: { in: [outdoor.id] }, teeSearch: { mode: "OUTDOOR" },
+    });
+    expect(simulatorSummaryRead).not.toHaveBeenCalled();
+    expectNoGlobalReadsOrWrites(fixture.mutation);
+  });
 
   it.each([null, "malformed summary", ["malformed"], { providerExecution: "BOOKING_WINDOW_SKIP" },
     { providerExecution: "RUNNABLE_PROVIDER_CHECK", providerObservedAt: "invalid" }] as const)(
@@ -334,7 +354,7 @@ describe("exact native-selected campaign probe hydration", () => {
     const observations = await fixture.load();
 
     expect(fixture.reads.probes).toHaveBeenCalledExactlyOnceWith({
-      where: { id: { in: fixture.rows.map((row) => row.course.probes[0]!.id) } },
+      where: { id: { in: fixture.rows.map((row) => row.course.probes[0]!.id) }, teeSearch: { mode: "OUTDOOR" } },
       select: { id: true, courseId: true, outcome: true, observedAt: true, runtimeVersion: true, rawSummary: true },
     });
     expect(observations).toHaveLength(112);
@@ -386,7 +406,7 @@ describe("exact native-selected campaign probe hydration", () => {
 
     expect(oldSummaryRead).not.toHaveBeenCalled();
     expect(observations[0]?.latestProbe).toEqual(probeObservationValue(current));
-    expect(fixture.reads.probes.mock.calls[0]![0].where).toEqual({ id: { in: [current.id] } });
+    expect(fixture.reads.probes.mock.calls[0]![0].where).toEqual({ id: { in: [current.id] }, teeSearch: { mode: "OUTDOOR" } });
     expectNoGlobalReadsOrWrites(fixture.mutation);
   });
 
@@ -476,6 +496,22 @@ function probeObservationValue(probe: ProbeFixture) {
   return { outcome, observedAt, runtimeVersion, rawSummary };
 }
 
+function matchesObservationWhere(row: Record<string, unknown>, where: Record<string, unknown> = {}): boolean {
+  return Object.entries(where).every(([field, filter]) => {
+    if (field === "AND" || field === "OR") {
+      const clauses = Array.isArray(filter) ? filter : [filter];
+      const results = clauses.map((clause) => matchesObservationWhere(row, clause as Record<string, unknown>));
+      return field === "AND" ? results.every(Boolean) : results.some(Boolean);
+    }
+    const value = row[field];
+    if (!filter || typeof filter !== "object") return value === filter;
+    if ("gte" in filter) return value instanceof Date && value.getTime() >= (filter.gte as Date).getTime();
+    if ("in" in filter) return Array.isArray(filter.in) && filter.in.includes(value);
+    return Boolean(value && typeof value === "object" && !Array.isArray(value) &&
+      matchesObservationWhere(value as Record<string, unknown>, filter as Record<string, unknown>));
+  });
+}
+
 function projectObservationRow(row: Record<string, unknown>, select: ObservationSelect): Record<string, unknown> {
   const projected: Record<string, unknown> = {};
   for (const [key, selection] of Object.entries(select)) {
@@ -483,11 +519,9 @@ function projectObservationRow(row: Record<string, unknown>, select: Observation
     else if (selection && typeof selection === "object") {
       const value = row[key];
       if (Array.isArray(value)) {
-        const rows = (value as Record<string, unknown>[]).filter((child) => Object.entries(selection.where ?? {}).every(([field, filter]) =>
-          filter && typeof filter === "object" && "gte" in filter
-            ? child[field] instanceof Date && child[field].getTime() >= (filter.gte as Date).getTime()
-            : true,
-        )).sort((left, right) => {
+        const rows = (value as Record<string, unknown>[]).filter((child) =>
+          matchesObservationWhere(child, selection.where),
+        ).sort((left, right) => {
           for (const order of selection.orderBy ?? []) for (const [field, direction] of Object.entries(order)) {
             const leftValue = left[field] instanceof Date ? left[field].getTime() : left[field];
             const rightValue = right[field] instanceof Date ? right[field].getTime() : right[field];
@@ -529,7 +563,7 @@ function probeObservationFixture(count = 1) {
   });
   fixture.reads.incidents.mockImplementation(async (query) => rows.map((row) => projectObservationRow(row, query.select)));
   fixture.reads.probes.mockImplementation(async (query) => rows.flatMap((row) => row.course.probes)
-    .filter((probe) => (query.where?.id as { in: string[] }).in.includes(probe.id))
+    .filter((probe) => matchesObservationWhere(probe, query.where))
     .map((probe) => projectObservationRow(probe, query.select)));
   fixture.reads.checks.mockResolvedValue(rows.map((row) => ({ incidentId: row.id, courseId: row.courseId,
     occurredAt: PROVIDER_OBSERVED_AT, runtimeVersion: CURRENT_RUNTIME, outcome: "NO_MATCH", audit: null })));
@@ -567,7 +601,7 @@ function inspectionDatabase() {
     agents: vi.fn().mockResolvedValue([]),
     jobs: vi.fn().mockResolvedValue([]),
     probes: vi.fn(async (query: ObservationQuery) => resolved.course.probes
-      .filter((probe) => (query.where?.id as { in: string[] }).in.includes(probe.id))
+      .filter((probe) => matchesObservationWhere(probe, query.where))
       .map((probe) => projectObservationRow(probe, query.select))),
   };
   const mutation = vi.fn(() => {
@@ -647,6 +681,7 @@ function resolvedObservationRow() {
       monitoringStatus: { state: "HEALTHY", stateChangedAt: TERMINAL_AT },
       probes: [{
         id: "private-probe", courseId: member.courseId,
+        teeSearch: { mode: "OUTDOOR" },
         outcome: "NO_MATCH",
         observedAt: new Date("2026-08-20T12:41:00.000Z"),
         runtimeVersion: CURRENT_RUNTIME,

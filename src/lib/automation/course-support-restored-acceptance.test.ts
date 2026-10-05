@@ -308,7 +308,7 @@ async function setup() {
     outcome: "NO_MATCH", observedAt, runtimeVersion, message: "Offline successful provider observation.",
     evidenceUrl: null, rawSummary: { providerExecution: true },
   });
-  rows.teeSearch.push({ id: "restored-acceptance-search", status: "COMPLETED", trafficClass: "PUBLIC" });
+  rows.teeSearch.push({ id: "restored-acceptance-search", mode: "OUTDOOR", status: "COMPLETED", trafficClass: "PUBLIC" });
   rows.courseSupportBatch.push({
     id: batchId, status: "VERIFYING", revision: 2, baseSha: runtimeVersion, releaseSha: runtimeVersion,
     createdAt: confirmedAt, completedAt: null, deployedAt,

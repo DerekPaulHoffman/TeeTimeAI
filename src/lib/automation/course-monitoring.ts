@@ -1771,6 +1771,7 @@ export async function recordCourseMonitoringFinalClassification(input: {
       await transaction.teeTimeMatch.updateMany({
         where: {
           courseId: input.courseId,
+          teeSearch: { mode: "OUTDOOR" },
           availabilityStatus: "AVAILABLE",
           alertStatus: "PENDING",
         },
@@ -1784,6 +1785,7 @@ export async function recordCourseMonitoringFinalClassification(input: {
       await transaction.teeTimeMatch.updateMany({
         where: {
           courseId: input.courseId,
+          teeSearch: { mode: "OUTDOOR" },
           availabilityStatus: "AVAILABLE",
           alertStatus: { not: "PENDING" },
         },
@@ -2614,6 +2616,7 @@ export async function revalidateCourseMonitoringForProviderEvidenceChangeInTrans
   await transaction.teeTimeMatch.updateMany({
     where: {
       courseId: input.courseId,
+      teeSearch: { mode: "OUTDOOR" },
       availabilityStatus: "AVAILABLE",
       lastConfirmedAt: { lte: input.now },
     },

@@ -46,7 +46,7 @@ describe("full native campaign inspection through the acceptance read boundary",
       const oldNativeRows = await original.transaction.courseSupportIncident.findMany({
         where: { id: { in: original.audit.members.map((member) => member.incidentId) } },
         select: { courseId: true, course: { select: { probes: {
-          where: { observedAt: { gte: CAPTURED_AT } }, orderBy: [{ observedAt: "desc" }, { id: "desc" }], take: 1,
+          where: { observedAt: { gte: CAPTURED_AT }, teeSearch: { mode: "OUTDOOR" } }, orderBy: [{ observedAt: "desc" }, { id: "desc" }], take: 1,
           select: { outcome: true, observedAt: true, runtimeVersion: true, rawSummary: true },
         } } } },
       });
@@ -64,7 +64,7 @@ describe("full native campaign inspection through the acceptance read boundary",
       const metadataRead = fixture.calls.find((call) => call.model === "courseSupportIncident" && call.method === "findMany" &&
         (call.args as Query).select?.confirmedAt === true && (call.args as Query).select?.monitoringEvents);
       const probes = (((metadataRead!.args as Query).select!.course as Query).select!.probes as Query);
-      expect(probes).toEqual({ where: { observedAt: { gte: CAPTURED_AT } },
+      expect(probes).toEqual({ where: { observedAt: { gte: CAPTURED_AT }, teeSearch: { mode: "OUTDOOR" } },
         orderBy: [{ observedAt: "desc" }, { id: "desc" }], take: 1,
         select: { id: true, courseId: true, outcome: true, observedAt: true, runtimeVersion: true } });
       const payloadReads = fixture.calls.filter((call) => call.model === "courseProbe" && call.method === "findMany" &&
@@ -922,8 +922,10 @@ function campaignDatabase(input: {
             : input.memberProbeCase === "BOOKING_NOT_OPEN" ? { targetDateStatus: "NOT_OPEN", bookingWindow: { daysAhead: 7 } }
               : input.memberProbeCase === "CONTINUATION" ? { providerExecution: "RUNNABLE_PROVIDER_CHECK", providerObservedAt: providerObservedAt.toISOString(), visibleSlotCount: 0 }
                 : { visibleSlotCount: 0 };
+        const search: Row = { id: `private-member-probe-search-${index + 1}`, mode: "OUTDOOR", status: "COMPLETED", trafficClass: "PUBLIC" };
+        rows.get("TeeSearch")!.push(search);
         const winner: Row = { id: `private-member-probe-${index + 1}-z`, courseId: course.id, course,
-          teeSearchId: `private-member-probe-search-${index + 1}`, observedAt, runtimeVersion: SOURCE_SHA,
+          teeSearchId: search.id, teeSearch: search, observedAt, runtimeVersion: SOURCE_SHA,
           outcome: failedWinner ? "FETCH_FAILED" : "NO_MATCH", rawSummary: input.oversizedMemberProbeSummary && index === 111
             ? { privateSelectedSummary: "x".repeat(ACCEPTANCE_READ_LIMITS.evidenceBytes + 1) } : summary };
         const older: Row = { ...winner, id: `private-member-probe-${index + 1}-a`, outcome: failedWinner ? "NO_MATCH" : "FETCH_FAILED",
@@ -964,7 +966,7 @@ function campaignDatabase(input: {
       preferences: [], probes: [], automationDiscoveries: [], localReaderJobs: [], monitoringStatus: null, supportIncident: null };
     rows.get("Course")!.push(course);
     if (input.fleetOnlyEvidence !== "PARKING_AUDIT") {
-      const search: Row = { id: "private-fleet-only-search", status: "ACTIVE", trafficClass: "PUBLIC", syntheticMultiCycle: false };
+      const search: Row = { id: "private-fleet-only-search", mode: "OUTDOOR", status: "ACTIVE", trafficClass: "PUBLIC", syntheticMultiCycle: false };
       const preference: Row = { id: "private-fleet-only-preference", courseId: course.id, course, teeSearchId: search.id,
         teeSearch: search, rank: 1 };
       course.preferences = [preference];
@@ -1039,7 +1041,7 @@ function campaignDatabase(input: {
         bookingMetadata: { scheduleId: 6654, bookingBaseUrl: "https://foreupsoftware.com/index.php/booking/21017#/teetimes",
           ...(kind === "missing" && input.requiredProbeBudgetPressure ? { retainedEvidence: "x".repeat(6_400_000) } : {}) },
         preferences: [], probes: [], automationDiscoveries: [], localReaderJobs: [], monitoringStatus: null, supportIncident: null };
-      const search: Row = { id: `private-probe-search-${kind}`, status: "ACTIVE", trafficClass: "PUBLIC", syntheticMultiCycle: false };
+      const search: Row = { id: `private-probe-search-${kind}`, mode: "OUTDOOR", status: "ACTIVE", trafficClass: "PUBLIC", syntheticMultiCycle: false };
       const preference: Row = { id: `private-probe-preference-${kind}`, courseId: course.id, course, teeSearchId: search.id,
         teeSearch: search, rank: 1 };
       course.preferences = [preference];
@@ -1058,7 +1060,8 @@ function campaignDatabase(input: {
         : index < 4 ? (index === 2) === Boolean(input.successfulProbeTieFirst) ? "NO_MATCH" : "FETCH_FAILED"
           : (["NO_MATCH", "FETCH_FAILED", "NEEDS_ADAPTER", "BLOCKED_AUTH"] satisfies ProbeOutcome[])[index % 4];
       const probe: Row = { id: `private-history-probe-${index}`, courseId: course.id, course,
-        teeSearchId: (course.preferences as Row[])[0].teeSearchId, outcome, observedAt, evidenceUrl: null };
+        teeSearchId: (course.preferences as Row[])[0].teeSearchId,
+        teeSearch: (course.preferences as Row[])[0].teeSearch, outcome, observedAt, evidenceUrl: null };
       Object.defineProperty(probe, "message", { enumerable: true, get: probeMessageRead });
       (course.probes as Row[]).push(probe);
       rows.get("CourseProbe")!.push(probe);

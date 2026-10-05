@@ -187,6 +187,7 @@ describe("operator course monitoring mutations", () => {
       id: "incident-1",
       failureFingerprint: "updated-fingerprint",
     });
+    transactionMocks.teeTimeMatch.updateMany.mockResolvedValue({ count: 0 });
     prismaMocks.$transaction.mockImplementation(
       async (
         callback: (transaction: typeof transactionMocks) => Promise<unknown>,
@@ -683,6 +684,7 @@ describe("operator course monitoring mutations", () => {
           courseId: "course-1",
           availabilityStatus: "AVAILABLE",
           alertStatus: "PENDING",
+          teeSearch: { mode: "OUTDOOR" },
         },
         data: {
           availabilityStatus: "GONE",
@@ -697,6 +699,7 @@ describe("operator course monitoring mutations", () => {
         where: {
           courseId: "course-1",
           availabilityStatus: "AVAILABLE",
+          teeSearch: { mode: "OUTDOOR" },
         },
         data: {
           availabilityStatus: "GONE",
@@ -926,6 +929,60 @@ describe("operator course monitoring mutations", () => {
         }),
       }),
     });
+  });
+
+  it("keeps simulator matches available when an operator classifies hybrid outdoor play as private", async () => {
+    const rows = ["OUTDOOR", "SIMULATOR"].flatMap((mode) =>
+      ["PENDING", "SENT"].map((alertStatus) => ({
+        id: `${mode}-${alertStatus}`,
+        courseId: "course-1",
+        mode,
+        alertStatus,
+        availabilityStatus: "AVAILABLE",
+        availabilityCycle: 3,
+        unavailableAt: null as Date | null,
+      })),
+    );
+    const simulatorBefore = structuredClone(
+      rows.filter((row) => row.mode === "SIMULATOR"),
+    );
+    transactionMocks.teeTimeMatch.updateMany.mockImplementation(
+      async ({ where, data }: {
+        where: {
+          courseId: string;
+          teeSearch?: { mode: string };
+          availabilityStatus: string;
+          alertStatus?: string;
+        };
+        data: Record<string, unknown>;
+      }) => {
+        const affected = rows.filter((row) =>
+          row.courseId === where.courseId &&
+          row.availabilityStatus === where.availabilityStatus &&
+          (!where.teeSearch || row.mode === where.teeSearch.mode) &&
+          (!where.alertStatus || row.alertStatus === where.alertStatus),
+        );
+        for (const row of affected) Object.assign(row, data);
+        return { count: affected.length };
+      },
+    );
+
+    await expect(applyOperatorCourseDecision({
+      reference,
+      statusRevision: 4,
+      incidentCycle: 2,
+      incidentRevision: 7,
+      decision: "PRIVATE_COURSE",
+      evidenceUrl: "https://course.example/private-membership",
+      note: "The official course page confirms that outdoor public play is not available.",
+      idempotencyKey: "operator-hybrid-private-123456",
+    }, context)).resolves.toMatchObject({ applied: true });
+
+    expect(rows.filter((row) => row.mode === "SIMULATOR")).toEqual(simulatorBefore);
+    expect(rows.filter((row) => row.mode === "OUTDOOR")).toEqual([
+      expect.objectContaining({ alertStatus: "SUPPRESSED", availabilityStatus: "GONE", availabilityCycle: 3, unavailableAt: expect.any(Date) }),
+      expect.objectContaining({ alertStatus: "SENT", availabilityStatus: "GONE", availabilityCycle: 3, unavailableAt: expect.any(Date) }),
+    ]);
   });
 
   it("rejects a final outcome without a safe official evidence URL", async () => {

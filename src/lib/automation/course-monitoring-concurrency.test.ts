@@ -153,6 +153,57 @@ function mockCourseIntelligenceFinalEvidence(
   };
 }
 
+function createHybridMatchFixture(lastConfirmedAt: Date) {
+  const rows = ["OUTDOOR", "SIMULATOR"].flatMap((mode) =>
+    ["PENDING", "SENT"].map((alertStatus) => ({
+      id: `${mode}-${alertStatus}`,
+      courseId: "course-1",
+      mode,
+      alertStatus,
+      availabilityStatus: "AVAILABLE",
+      availabilityCycle: 3,
+      lastConfirmedAt,
+      sentAt: alertStatus === "SENT" ? lastConfirmedAt : null,
+      unavailableAt: null as Date | null,
+    })),
+  );
+  const simulatorBefore = structuredClone(
+    rows.filter((row) => row.mode === "SIMULATOR"),
+  );
+  transactionMocks.teeTimeMatch.updateMany.mockImplementation(
+    async (input: {
+      where: {
+        courseId: string;
+        teeSearch?: { mode: string };
+        availabilityStatus: string;
+        alertStatus?: string | { not: string };
+        lastConfirmedAt?: { lte: Date };
+      };
+      data: Record<string, unknown>;
+    }) => {
+      const { where, data } = input;
+      const affected = rows.filter((row) =>
+        row.courseId === where.courseId &&
+        row.availabilityStatus === where.availabilityStatus &&
+        (!where.teeSearch || row.mode === where.teeSearch.mode) &&
+        (!where.alertStatus || (typeof where.alertStatus === "string"
+          ? row.alertStatus === where.alertStatus
+          : row.alertStatus !== where.alertStatus.not)) &&
+        (!where.lastConfirmedAt || row.lastConfirmedAt <= where.lastConfirmedAt.lte),
+      );
+      for (const row of affected) {
+        const { availabilityCycle, ...remainingData } = data;
+        Object.assign(row, remainingData);
+        if (availabilityCycle && typeof availabilityCycle === "object" && "increment" in availabilityCycle) {
+          row.availabilityCycle += Number(availabilityCycle.increment);
+        }
+      }
+      return { count: affected.length };
+    },
+  );
+  return { rows, simulatorBefore };
+}
+
 function mockUnconsumedLocalReaderProviderSource(providerObservedAt: Date) {
   const completedAt = new Date(providerObservedAt.getTime() + 1_000);
   return {
@@ -298,7 +349,7 @@ describe("course monitoring write serialization", () => {
         playbookCompletedStageCount: 6,
       })]);
       expect(plannerDatabase.teeSearch.count).toHaveBeenCalledWith({
-        where: { status: "ACTIVE", preferences: { some: { courseId: captured.courseId } } },
+        where: { status: "ACTIVE", mode: "OUTDOOR", preferences: { some: { courseId: captured.courseId } } },
       });
       const planned = members[0]!;
       if (planned.kind !== "FETCH_FAILED" || planned.failureClass !== "HTTP_5XX") {
@@ -545,7 +596,7 @@ describe("course monitoring write serialization", () => {
         expect(sql).toContain(`FROM "${table}"`);
       }
       expect(transactionMocks.coursePreference.findFirst).toHaveBeenCalledWith({
-        where: { courseId: fixture.incident.courseId, teeSearch: { status: "ACTIVE" } }, select: { id: true },
+        where: { courseId: fixture.incident.courseId, teeSearch: { status: "ACTIVE", mode: "OUTDOOR" } }, select: { id: true },
       });
       prismaMocks.courseSupportIncident.findUnique.mockResolvedValue({ ...fixture.incident, status: "AUTO_INVESTIGATING" });
       const runtime = await loadCourseMonitoringPlaybookRuntime(fixture.incident.courseId);
@@ -3338,7 +3389,7 @@ describe("course monitoring write serialization", () => {
       data: { updatedAt: providerCourse.updatedAt },
     });
     expect(transactionMocks.courseProbe.findFirst).toHaveBeenCalledWith({
-      where: { courseId: "course-1" },
+      where: { courseId: "course-1", teeSearch: { mode: "OUTDOOR" } },
       orderBy: [{ observedAt: "desc" }, { id: "desc" }],
       select: { id: true, courseId: true, observedAt: true },
     });
@@ -8455,6 +8506,7 @@ describe("course monitoring write serialization", () => {
     const priorSuccessAt = new Date("2026-07-27T15:40:00.000Z");
     const evidenceObservedAt = new Date("2026-07-27T15:45:00.000Z");
     const receiptAt = new Date("2026-07-27T15:50:00.000Z");
+    const matches = createHybridMatchFixture(priorSuccessAt);
     transactionMocks.courseMonitoringStatus.upsert.mockResolvedValue({
       courseId: "course-1",
       state: "HEALTHY",
@@ -8491,6 +8543,13 @@ describe("course monitoring write serialization", () => {
       state: "FINAL_MANUAL",
       sourceEvidenceAccepted: true,
     });
+    expect(matches.rows.filter((row) => row.mode === "SIMULATOR")).toEqual(
+      matches.simulatorBefore,
+    );
+    expect(matches.rows.filter((row) => row.mode === "OUTDOOR")).toEqual([
+      expect.objectContaining({ alertStatus: "SUPPRESSED", availabilityStatus: "GONE", unavailableAt: receiptAt }),
+      expect.objectContaining({ alertStatus: "SENT", availabilityStatus: "GONE", unavailableAt: receiptAt }),
+    ]);
     expect(invalidateMatches).toHaveBeenCalledWith(
       transactionMocks,
       evidenceObservedAt,
@@ -8502,6 +8561,7 @@ describe("course monitoring write serialization", () => {
           courseId: "course-1",
           availabilityStatus: "AVAILABLE",
           alertStatus: "PENDING",
+          teeSearch: { mode: "OUTDOOR" },
         },
         data: {
           alertStatus: "SUPPRESSED",
@@ -8518,6 +8578,7 @@ describe("course monitoring write serialization", () => {
           courseId: "course-1",
           availabilityStatus: "AVAILABLE",
           alertStatus: { not: "PENDING" },
+          teeSearch: { mode: "OUTDOOR" },
         },
         data: {
           availabilityStatus: "GONE",
@@ -8535,7 +8596,7 @@ describe("course monitoring write serialization", () => {
     });
   });
 
-  it("atomically applies final course intelligence and terminalizes every search match", async () => {
+  it("atomically applies final course intelligence and terminalizes every outdoor search match", async () => {
     prismaMocks.$transaction.mockReset();
     prismaMocks.$transaction.mockImplementation(async (worker) =>
       worker(transactionMocks),
@@ -8602,7 +8663,7 @@ describe("course monitoring write serialization", () => {
     expect(transactionMocks.teeTimeMatch.updateMany).toHaveBeenCalledTimes(2);
     for (const [write] of transactionMocks.teeTimeMatch.updateMany.mock.calls) {
       expect(write.where).toEqual(
-        expect.objectContaining({ courseId: "course-1" }),
+        expect.objectContaining({ courseId: "course-1", teeSearch: { mode: "OUTDOOR" } }),
       );
       expect(write.where).not.toHaveProperty("teeSearchId");
     }
@@ -9502,6 +9563,7 @@ describe("course monitoring write serialization", () => {
     expect(transactionMocks.teeSearch.updateMany).toHaveBeenCalledWith({
       where: {
         status: "ACTIVE",
+        mode: "OUTDOOR",
         trafficClass: { notIn: ["AUTOMATION", "TEST"] },
         preferences: { some: { courseId: "course-1" } },
       },
@@ -10969,6 +11031,7 @@ describe("course monitoring write serialization", () => {
   it("invalidates older match generations and queues real searches when material evidence changes without an incident", async () => {
     const priorSuccessAt = new Date("2026-08-11T12:00:00.000Z");
     const providerEvidenceObservedAt = new Date("2026-08-11T12:05:00.000Z");
+    const matches = createHybridMatchFixture(priorSuccessAt);
     transactionMocks.courseSupportIncident.findUnique.mockResolvedValue(null);
     transactionMocks.courseMonitoringStatus.findUnique.mockResolvedValue({
       state: "HEALTHY",
@@ -10997,12 +11060,20 @@ describe("course monitoring write serialization", () => {
       changedFields: ["layoutHoleCounts"],
       searchesQueued: 2,
     });
+    expect(matches.rows.filter((row) => row.mode === "SIMULATOR")).toEqual(
+      matches.simulatorBefore,
+    );
+    expect(matches.rows.filter((row) => row.mode === "OUTDOOR")).toEqual([
+      expect.objectContaining({ alertStatus: "PENDING", availabilityStatus: "UNKNOWN", availabilityCycle: 4 }),
+      expect.objectContaining({ alertStatus: "SENT", availabilityStatus: "UNKNOWN", availabilityCycle: 4 }),
+    ]);
 
     expect(transactionMocks.teeTimeMatch.updateMany).toHaveBeenCalledWith({
       where: {
         courseId: "course-1",
         availabilityStatus: "AVAILABLE",
         lastConfirmedAt: { lte: providerEvidenceObservedAt },
+        teeSearch: { mode: "OUTDOOR" },
       },
       data: {
         availabilityStatus: "UNKNOWN",
@@ -11012,6 +11083,7 @@ describe("course monitoring write serialization", () => {
     expect(transactionMocks.teeSearch.updateMany).toHaveBeenCalledWith({
       where: {
         status: "ACTIVE",
+        mode: "OUTDOOR",
         trafficClass: { notIn: ["AUTOMATION", "TEST"] },
         preferences: { some: { courseId: "course-1" } },
       },
@@ -11128,6 +11200,7 @@ describe("course monitoring write serialization", () => {
       expect(transactionMocks.teeSearch.updateMany).toHaveBeenCalledWith({
         where: {
           status: "ACTIVE",
+          mode: "OUTDOOR",
           trafficClass: { notIn: ["AUTOMATION", "TEST"] },
           preferences: { some: { courseId: "course-1" } },
         },
@@ -11197,6 +11270,7 @@ describe("course monitoring write serialization", () => {
     expect(transactionMocks.teeSearch.updateMany).toHaveBeenCalledWith({
       where: {
         status: "ACTIVE",
+        mode: "OUTDOOR",
         trafficClass: { notIn: ["AUTOMATION", "TEST"] },
         date: { gte: expect.any(Date) },
         preferences: { some: { courseId: "course-1" } },
@@ -11340,6 +11414,7 @@ describe("course monitoring write serialization", () => {
     expect(transactionMocks.teeSearch.updateMany).toHaveBeenCalledWith({
       where: {
         status: "ACTIVE",
+        mode: "OUTDOOR",
         trafficClass: { notIn: ["AUTOMATION", "TEST"] },
         preferences: { some: { courseId: "course-1" } },
       },
@@ -11616,6 +11691,7 @@ describe("course monitoring write serialization", () => {
       expect(transactionMocks.teeSearch.updateMany).toHaveBeenCalledWith({
         where: expect.objectContaining({
           status: "ACTIVE",
+          mode: "OUTDOOR",
           preferences: { some: { courseId: "course-1" } },
         }),
         data: { nextCheckAt: now, recheckRequestedAt: now },
