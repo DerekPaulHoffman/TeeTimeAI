@@ -21,6 +21,40 @@ import {
 export const COURSE_DISPATCH_PROMPT_VERSION = "course-support-course-dispatch-v1";
 const RESERVATION_MS = 10 * 60 * 1000;
 const TICK_MS = 10 * 60 * 1000;
+export const MAX_NEW_COURSE_WORKERS_PER_TICK = 5;
+
+export type CourseDispatchStartupReceipt = {
+  schemaVersion: 1;
+  receiptPath: string;
+  preparedReceiptSha256: string;
+};
+
+export type CourseDispatchStartupTerminalProof = {
+  outcome: "READY";
+  assignmentRef: string;
+  childThreadId: string;
+  turnId: string;
+  terminationKind: "MATCHED_TURN_COMPLETED";
+  turnStatus: "completed" | "failed" | "interrupted";
+  firstTurnStartedAt: string;
+  terminalAt: string;
+  appServerShutdownAt: string;
+  preparedReceiptSha256: string;
+  receiptSha256: string;
+  promptSha256: string;
+  firstTurnMarkerSha256: string;
+  nativeIdentityVerified: boolean;
+  approvalRequests: number;
+};
+
+function validStartupReceipt(value: unknown): value is CourseDispatchStartupReceipt {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const receipt = value as Partial<CourseDispatchStartupReceipt>;
+  return receipt.schemaVersion === 1 && typeof receipt.receiptPath === "string" &&
+    receipt.receiptPath.length <= 4096 && /^(?:[a-z]:[\\/]|\/|\\\\)/i.test(receipt.receiptPath) &&
+    !/[\r\n\0]/.test(receipt.receiptPath) &&
+    typeof receipt.preparedReceiptSha256 === "string" && /^[a-f0-9]{64}$/i.test(receipt.preparedReceiptSha256);
+}
 
 type DispatchState = "RESERVED" | "STARTING" | "BOUND" | "CONSUMED" | "CANCELLED" | "EXPIRED";
 export type CourseDispatchAudit = {
@@ -36,6 +70,17 @@ export type CourseDispatchAudit = {
   launchStartedAt?: string;
   boundAt?: string;
   consumedAt?: string;
+  startupReceipt?: CourseDispatchStartupReceipt;
+  startupRetirement?: {
+    schemaVersion: 1;
+    reconcilerThreadId: string;
+    reconciledAt: string;
+    turnId: string;
+    turnStatus: "completed" | "failed" | "interrupted";
+    terminalAt: string;
+    firstTurnMarkerSha256: string;
+    terminalReceiptSha256: string;
+  };
   target: {
     incidentId: string;
     courseId: string;
@@ -83,7 +128,8 @@ function parseAudit(value: unknown): CourseDispatchAudit | null {
           (typeof ref.intentDigest !== "string" || !/^[a-f0-9]{64}$/i.test(ref.intentDigest)))) ||
       new Set(audit.target.searchRefs.map((ref) => ref.id)).size !== audit.target.searchRefs.length ||
       (audit.state === "BOUND" && !audit.childThreadId) ||
-      (["RESERVED", "STARTING"].includes(audit.state ?? "") && audit.childThreadId !== null)) return null;
+      (["RESERVED", "STARTING"].includes(audit.state ?? "") && audit.childThreadId !== null) ||
+      (audit.startupReceipt !== undefined && !validStartupReceipt(audit.startupReceipt))) return null;
   return audit as CourseDispatchAudit;
 }
 
@@ -253,9 +299,9 @@ export async function planCourseSupportCourseDispatch(input: {
   maxStarts?: number;
 }) {
   assertIdentity(input.ownerThreadId, input.baseSha);
-  const maxStarts = input.maxStarts ?? 5;
-  if (!Number.isInteger(maxStarts) || maxStarts < 1 || maxStarts > 15) {
-    throw new Error("Course dispatch maxStarts must be from 1 through 15.");
+  const maxStarts = input.maxStarts ?? MAX_NEW_COURSE_WORKERS_PER_TICK;
+  if (!Number.isInteger(maxStarts) || maxStarts < 1 || maxStarts > MAX_NEW_COURSE_WORKERS_PER_TICK) {
+    throw new Error("Course dispatch maxStarts must be from 1 through 5.");
   }
   return runWithCourseSupportWriterTransitionLease(async () => transaction(async (tx) => {
     const now = input.now ?? await getCourseDispatchDatabaseNow(tx);
@@ -430,8 +476,12 @@ export async function planCourseSupportCourseDispatch(input: {
   }));
 }
 
-async function transition(input: { ownerThreadId: string; assignmentRef: string; childThreadId?: string; confirmedNotCreated?: boolean; next: DispatchState }) {
+async function transition(input: { ownerThreadId: string; assignmentRef: string; childThreadId?: string; confirmedNotCreated?: boolean; startupReceipt?: CourseDispatchStartupReceipt; next: DispatchState }) {
   assertIdentity(input.ownerThreadId);
+  if (input.startupReceipt !== undefined &&
+      (input.next !== "BOUND" || !validStartupReceipt(input.startupReceipt))) {
+    throw new Error("Course dispatch startup receipt is invalid.");
+  }
   return runWithCourseSupportWriterTransitionLease(async () => transaction(async (tx) => {
     const transitionNow = await getCourseDispatchDatabaseNow(tx);
     const runs = await readRuns(tx);
@@ -442,6 +492,10 @@ async function transition(input: { ownerThreadId: string; assignmentRef: string;
     }
     if (input.next === "BOUND" && audit.state === "BOUND" &&
         audit.childThreadId === input.childThreadId) {
+      if (input.startupReceipt && (audit.startupReceipt?.receiptPath !== input.startupReceipt.receiptPath ||
+          audit.startupReceipt?.preparedReceiptSha256 !== input.startupReceipt.preparedReceiptSha256)) {
+        throw new Error("Course dispatch startup receipt changed after binding.");
+      }
       return { assignmentRef: audit.assignmentRef, state: audit.state };
     }
     const allowed = input.next === "STARTING" ? audit.state === "RESERVED" &&
@@ -468,6 +522,7 @@ async function transition(input: { ownerThreadId: string; assignmentRef: string;
       childThreadId: input.childThreadId ?? audit.childThreadId,
       ...(input.next === "STARTING" ? { launchStartedAt: transitionAt } : {}),
       ...(input.next === "BOUND" ? { boundAt: transitionAt } : {}),
+      ...(input.startupReceipt ? { startupReceipt: input.startupReceipt } : {}),
     };
     await tx.automationRun.update({
       where: { id: run.id },
@@ -484,7 +539,7 @@ export function beginCourseSupportCourseDispatch(input: { ownerThreadId: string;
   return transition({ ...input, next: "STARTING" });
 }
 
-export function bindCourseSupportCourseDispatch(input: { ownerThreadId: string; assignmentRef: string; childThreadId: string }) {
+export function bindCourseSupportCourseDispatch(input: { ownerThreadId: string; assignmentRef: string; childThreadId: string; startupReceipt?: CourseDispatchStartupReceipt }) {
   if (!input.childThreadId.trim()) throw new Error("Course dispatch requires the native child task id.");
   if (input.childThreadId === input.ownerThreadId) throw new Error("Course dispatch child must be a distinct native task.");
   return transition({ ...input, next: "BOUND" });
@@ -522,6 +577,119 @@ export async function listLiveCourseSupportDispatchReservations(tx: Prisma.Trans
   return runs.filter((run) => run.status === "RUNNING" &&
     ["RESERVED", "STARTING", "BOUND"].includes(run.parsed?.state ?? ""))
     .map((run) => ({ runId: run.id, audit: run.parsed! }));
+}
+
+/** Private local receipt references, never part of the aggregate dispatch plan. */
+export async function listCourseSupportStartupReceiptBindings() {
+  const runs = await readRuns(prisma);
+  const bound = runs.filter((run) => run.status === "RUNNING" && run.parsed?.state === "BOUND");
+  if (bound.length > MAX_CONCURRENT_COURSE_SUPPORT_BATCHES) {
+    throw new Error("Course dispatch startup receipt bound exceeded.");
+  }
+  const bindings = bound.filter((run) => run.parsed!.startupReceipt).map((run) => ({
+    assignmentRef: run.parsed!.assignmentRef,
+    childThreadId: run.parsed!.childThreadId!,
+    ...run.parsed!.startupReceipt!,
+  }));
+  return { bindings, legacyBoundCount: bound.length - bindings.length };
+}
+
+function assertStartupTerminalProof(proof: CourseDispatchStartupTerminalProof, now: Date) {
+  const timestamps = [proof.firstTurnStartedAt, proof.terminalAt, proof.appServerShutdownAt];
+  if (proof.outcome !== "READY" || proof.terminationKind !== "MATCHED_TURN_COMPLETED" ||
+      !/^course-assignment-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(proof.assignmentRef) ||
+      !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(proof.childThreadId) ||
+      typeof proof.turnId !== "string" || !proof.turnId.trim() || proof.turnId.length > 256 ||
+      !["completed", "failed", "interrupted"].includes(proof.turnStatus) ||
+      typeof proof.nativeIdentityVerified !== "boolean" || !Number.isSafeInteger(proof.approvalRequests) ||
+      proof.approvalRequests < 0 ||
+      [proof.preparedReceiptSha256, proof.receiptSha256, proof.promptSha256, proof.firstTurnMarkerSha256]
+        .some((hash) => typeof hash !== "string" || !/^[a-f0-9]{64}$/i.test(hash)) ||
+      timestamps.some((value) => typeof value !== "string" || !Number.isFinite(Date.parse(value)) ||
+        new Date(value).toISOString() !== value || Date.parse(value) > now.getTime()) ||
+      Date.parse(proof.firstTurnStartedAt) > Date.parse(proof.terminalAt) ||
+      Date.parse(proof.terminalAt) > Date.parse(proof.appServerShutdownAt)) {
+    throw new Error("Course dispatch requires a positively completed native first-turn proof.");
+  }
+}
+
+export async function reconcileCourseSupportStartupTerminal(input: {
+  requestingThreadId: string;
+  receiptPath: string;
+  proof: CourseDispatchStartupTerminalProof;
+}) {
+  assertIdentity(input.requestingThreadId);
+  if (input.requestingThreadId === input.proof.childThreadId) {
+    throw new Error("Course dispatch startup reconciliation requires a distinct current parent.");
+  }
+  return runWithCourseSupportWriterTransitionLease(async () => transaction(async (tx) => {
+    const now = await getCourseDispatchDatabaseNow(tx);
+    assertStartupTerminalProof(input.proof, now);
+    const run = await tx.automationRun.findFirst({
+      where: { promptVersion: COURSE_DISPATCH_PROMPT_VERSION,
+        audit: { path: ["assignmentRef"], equals: input.proof.assignmentRef } },
+      select: { id: true, status: true, audit: true },
+    });
+    const audit = parseAudit(run?.audit);
+    if (!run || !audit || audit.childThreadId !== input.proof.childThreadId ||
+        !audit.startupReceipt || audit.startupReceipt.receiptPath !== input.receiptPath ||
+        audit.startupReceipt.preparedReceiptSha256 !== input.proof.preparedReceiptSha256) {
+      throw new Error("Course dispatch terminal proof does not match its original binding.");
+    }
+    if (audit.state === "CANCELLED" && audit.startupRetirement?.turnId === input.proof.turnId &&
+        audit.startupRetirement.firstTurnMarkerSha256 === input.proof.firstTurnMarkerSha256) {
+      return { outcome: "already_retired" as const, retiredCount: 0 };
+    }
+    if (run.status !== "RUNNING" || audit.state !== "BOUND" || !audit.boundAt ||
+        !Number.isFinite(Date.parse(audit.boundAt)) || new Date(audit.boundAt).toISOString() !== audit.boundAt ||
+        Date.parse(input.proof.firstTurnStartedAt) < Date.parse(audit.boundAt)) {
+      throw new Error("Course dispatch startup is no longer an unclaimed bound first turn.");
+    }
+    const [incident, ownedOrActiveBatch, course, searches] = await Promise.all([
+      tx.courseSupportIncident.findUnique({
+        where: { id: audit.target.incidentId },
+        select: { courseId: true, cycle: true, providerFamilyKey: true, failureFingerprint: true,
+          updatedAt: true, activeBatchId: true },
+      }),
+      tx.courseSupportBatch.findFirst({
+        where: { OR: [
+          { ownerThreadId: input.proof.childThreadId },
+          { status: { in: ["CLAIMED", "IMPLEMENTING", "VERIFYING"] },
+            incidents: { some: { courseId: audit.target.courseId } } },
+        ] },
+        select: { id: true },
+      }),
+      tx.course.findUnique({ where: { id: audit.target.courseId }, select: { timeZone: true } }),
+      tx.coursePreference.findMany({
+        where: { courseId: audit.target.courseId, teeSearchId: { in: audit.target.searchRefs.map((ref) => ref.id) } },
+        select: { teeSearch: { select: COURSE_DISPATCH_SOURCE_SELECT } },
+      }),
+    ]);
+    if (!incident || incident.courseId !== audit.target.courseId || incident.cycle !== audit.target.cycle ||
+        incident.providerFamilyKey !== audit.target.providerFamilyKey ||
+        incident.failureFingerprint !== audit.target.failureFingerprint ||
+        incident.updatedAt.toISOString() !== audit.target.updatedAt || incident.activeBatchId ||
+        ownedOrActiveBatch || !course || searches.length !== audit.target.searchRefs.length ||
+        searches.some(({ teeSearch }) => {
+          const ref = audit.target.searchRefs.find((entry) => entry.id === teeSearch.id);
+          return !ref || !isCurrentCourseDispatchSource({ ref, search: teeSearch,
+            trafficClass: audit.target.trafficClass, courseTimeZone: course!.timeZone, now });
+        })) {
+      throw new Error("Course dispatch source or claim authority changed before startup retirement.");
+    }
+    const retired: CourseDispatchAudit = { ...audit, state: "CANCELLED", startupRetirement: {
+      schemaVersion: 1, reconcilerThreadId: input.requestingThreadId, reconciledAt: now.toISOString(),
+      turnId: input.proof.turnId, turnStatus: input.proof.turnStatus, terminalAt: input.proof.terminalAt,
+      firstTurnMarkerSha256: input.proof.firstTurnMarkerSha256, terminalReceiptSha256: input.proof.receiptSha256,
+    } };
+    const changed = await tx.automationRun.updateMany({
+      where: { id: run.id, status: "RUNNING", audit: { equals: run.audit as Prisma.InputJsonValue } },
+      data: { audit: retired as unknown as Prisma.InputJsonValue, status: "COMPLETED", completedAt: now,
+        outcome: "native_first_turn_ended_before_claim" },
+    });
+    if (changed.count !== 1) throw new Error("Course dispatch claim raced startup retirement.");
+    return { outcome: "startup_retired" as const, retiredCount: 1 };
+  }));
 }
 
 export async function consumeBoundCourseSupportDispatchAssignment(

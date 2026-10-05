@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { CourseDispatchAudit } from "./course-support-course-dispatch";
+import type { CourseDispatchAudit, CourseDispatchStartupTerminalProof } from "./course-support-course-dispatch";
 
 type StoredRun = {
   id: string;
@@ -20,13 +20,15 @@ type SourceSearch = {
 type Candidate = {
   incidentId: string; courseId: string; cycle: number; providerFamilyKey: string;
   failureFingerprint: string; updatedAt: string; activeRealSearchCount: number;
+  activeBatchId?: string;
 };
 
 const store = vi.hoisted(() => {
   const runs: StoredRun[] = [];
   const candidates: Candidate[] = [];
   const sources = new Map<string, SourceSearch>();
-  const batches: { id: string; summary: unknown; leaseExpiresAt: Date; incidents: { courseId: string }[] }[] = [];
+  const batches: { id: string; summary: unknown; leaseExpiresAt: Date; incidents: { courseId: string }[];
+    ownerThreadId?: string; status?: string }[] = [];
   let sequence = 0;
   let leaseTail = Promise.resolve();
   const automationRun = {
@@ -46,13 +48,28 @@ const store = vi.hoisted(() => {
       Object.assign(row, args.data);
       return row;
     }),
-    findFirst: vi.fn(async (args: { where: { audit: { equals: string } } }) =>
-      runs.find(run => run.audit.childThreadId === args.where.audit.equals) ?? null),
+    findFirst: vi.fn(async (args: { where: { audit: { path?: string[]; equals: string } } }) =>
+      runs.find(run => args.where.audit.path?.[0] === "assignmentRef"
+        ? run.audit.assignmentRef === args.where.audit.equals
+        : run.audit.childThreadId === args.where.audit.equals) ?? null),
+    updateMany: vi.fn(async (args: { where: { id: string; status: string; audit: { equals: unknown } }; data: Partial<StoredRun> }) => {
+      const run = runs.find(row => row.id === args.where.id && row.status === args.where.status &&
+        JSON.stringify(row.audit) === JSON.stringify(args.where.audit.equals));
+      if (!run) return { count: 0 };
+      Object.assign(run, args.data);
+      return { count: 1 };
+    }),
   };
   const tx = {
     $queryRaw: vi.fn(async () => [{ now: new Date() }]),
     automationRun,
-    courseSupportBatch: { findMany: vi.fn(async () => batches) },
+    courseSupportBatch: { findMany: vi.fn(async () => batches),
+      findFirst: vi.fn(async (args: { where: { OR: [{ ownerThreadId: string }, {
+        status: { in: string[] }; incidents: { some: { courseId: string } } }] } }) =>
+        batches.find(batch => batch.ownerThreadId === args.where.OR[0].ownerThreadId ||
+          (args.where.OR[1].status.in.includes(batch.status ?? "") &&
+            batch.incidents.some(incident => incident.courseId === args.where.OR[1].incidents.some.courseId))) ?? null),
+    },
     course: {
       findMany: vi.fn(async () => candidates.map(candidate => ({ id: candidate.courseId, timeZone: "America/New_York" }))),
       findUnique: vi.fn(async () => ({ timeZone: "America/New_York" })),
@@ -70,7 +87,7 @@ const store = vi.hoisted(() => {
     courseSupportIncident: {
       findUnique: vi.fn(async (args: { where: { id: string } }) => {
         const candidate = candidates.find(entry => entry.incidentId === args.where.id);
-        return candidate ? { ...candidate, updatedAt: new Date(candidate.updatedAt), activeBatchId: null } : null;
+        return candidate ? { ...candidate, updatedAt: new Date(candidate.updatedAt), activeBatchId: candidate.activeBatchId ?? null } : null;
       }),
     },
   };
@@ -104,11 +121,39 @@ import {
   consumeBoundCourseSupportDispatchAssignment,
   getCourseSupportCourseDispatchAssignment,
   loadBoundCourseSupportDispatchAssignment,
+  listCourseSupportStartupReceiptBindings,
   planCourseSupportCourseDispatch,
+  reconcileCourseSupportStartupTerminal,
 } from "./course-support-course-dispatch";
 
 const now = new Date("2026-10-05T13:40:05.000Z");
 const baseSha = "a".repeat(40);
+const nativeChild = "019ca000-0000-4000-8000-000000000001";
+const receiptPath = "C:/private/workers/course-1.receipt.json";
+const preparedHash = "b".repeat(64);
+async function boundStartup(count = 1, trafficClass = "PUBLIC") {
+  populate(count, trafficClass);
+  const plan = await planCourseSupportCourseDispatch({ ownerThreadId: "parent-a", baseSha, now });
+  const assignmentRef = plan.launchItems[0].assignmentRef;
+  await beginCourseSupportCourseDispatch({ ownerThreadId: "parent-a", assignmentRef });
+  await bindCourseSupportCourseDispatch({ ownerThreadId: "parent-a", assignmentRef, childThreadId: nativeChild,
+    startupReceipt: { schemaVersion: 1, receiptPath, preparedReceiptSha256: preparedHash } });
+  vi.setSystemTime(new Date(now.getTime() + 35_000));
+  const proof: CourseDispatchStartupTerminalProof = {
+    outcome: "READY", assignmentRef, childThreadId: nativeChild, turnId: "turn-1",
+    terminationKind: "MATCHED_TURN_COMPLETED", turnStatus: "failed",
+    firstTurnStartedAt: new Date(now.getTime() + 5_000).toISOString(),
+    terminalAt: new Date(now.getTime() + 10_000).toISOString(),
+    appServerShutdownAt: new Date(now.getTime() + 20_000).toISOString(),
+    preparedReceiptSha256: preparedHash, receiptSha256: "c".repeat(64),
+    promptSha256: "d".repeat(64), firstTurnMarkerSha256: "e".repeat(64),
+    nativeIdentityVerified: false, approvalRequests: 0,
+  };
+  return { assignmentRef, proof };
+}
+function retire(proof: CourseDispatchStartupTerminalProof) {
+  return reconcileCourseSupportStartupTerminal({ requestingThreadId: "later-parent", receiptPath, proof });
+}
 function populate(count: number, trafficClass = "PUBLIC") {
   for (let index = 0; index < count; index += 1) {
     const courseId = `course-${index}`;
@@ -145,14 +190,153 @@ describe("durable course dispatch state and transaction boundaries", () => {
   it("serializes overlapping plans and never reserves a sixteenth course or a fourth alert", async () => {
     populate(20);
     const plans = await Promise.all([
-      planCourseSupportCourseDispatch({ ownerThreadId: "parent-a", baseSha, now, maxStarts: 15 }),
-      planCourseSupportCourseDispatch({ ownerThreadId: "parent-b", baseSha, now, maxStarts: 15 }),
+      planCourseSupportCourseDispatch({ ownerThreadId: "parent-a", baseSha, now, maxStarts: 5 }),
+      planCourseSupportCourseDispatch({ ownerThreadId: "parent-b", baseSha, now, maxStarts: 5 }),
     ]);
+    expect(store.runs).toHaveLength(5);
+    expect(plans[1].reservedCount).toBe(5);
+    for (let tick = 1; tick <= 2; tick += 1) {
+      for (const run of store.runs.filter(row => row.audit.state === "RESERVED")) {
+        await beginCourseSupportCourseDispatch({ ownerThreadId: "parent-a", assignmentRef: run.audit.assignmentRef });
+        await bindCourseSupportCourseDispatch({ ownerThreadId: "parent-a", assignmentRef: run.audit.assignmentRef, childThreadId: `child-${run.id}` });
+      }
+      const nextTick = new Date(now.getTime() + tick * 10 * 60_000);
+      vi.setSystemTime(nextTick);
+      await planCourseSupportCourseDispatch({ ownerThreadId: "parent-a", baseSha, now: nextTick });
+    }
     expect(store.runs).toHaveLength(15);
     expect(new Set(store.runs.map(run => run.audit.target.courseId)).size).toBe(15);
     expect(new Set(store.runs.map(run => run.audit.target.searchRefs[0].id)).size).toBe(3);
-    expect(plans[1].reservedCount).toBe(15);
     expect(store.transaction).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({ isolationLevel: "Serializable" }));
+  });
+
+  it("retires positively ended pre-claim work from a later real parent without replacing original ownership", async () => {
+    const { proof } = await boundStartup();
+    expect(await listCourseSupportStartupReceiptBindings()).toMatchObject({ bindings: [{ receiptPath, preparedReceiptSha256: preparedHash }], legacyBoundCount: 0 });
+    expect(await retire(proof)).toMatchObject({ outcome: "startup_retired", retiredCount: 1 });
+    expect(store.runs[0]).toMatchObject({ status: "COMPLETED", audit: { state: "CANCELLED", ownerThreadId: "parent-a",
+      startupRetirement: { reconcilerThreadId: "later-parent", turnStatus: "failed" } } });
+    expect(store.candidates[0].cycle).toBe(1);
+    expect(await retire(proof)).toMatchObject({ outcome: "already_retired", retiredCount: 0 });
+    expect(store.tx.automationRun.updateMany).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["completed", "failed", "interrupted"] as const)("accepts the exact terminal status %s before any claim", async turnStatus => {
+    const { proof } = await boundStartup();
+    expect(await retire({ ...proof, turnStatus })).toMatchObject({ retiredCount: 1 });
+  });
+
+  it.each([
+    ["native child", (proof: CourseDispatchStartupTerminalProof) => { proof.childThreadId = "019ca000-0000-4000-8000-000000000002"; }],
+    ["prepared digest", (proof: CourseDispatchStartupTerminalProof) => { proof.preparedReceiptSha256 = "f".repeat(64); }],
+    ["unproven turn", (proof: CourseDispatchStartupTerminalProof) => { proof.turnStatus = "inProgress" as typeof proof.turnStatus; }],
+    ["future terminal", (proof: CourseDispatchStartupTerminalProof) => { proof.terminalAt = new Date(now.getTime() + 60_000).toISOString(); }],
+    ["reversed clocks", (proof: CourseDispatchStartupTerminalProof) => { proof.firstTurnStartedAt = proof.appServerShutdownAt; }],
+    ["noncanonical time", (proof: CourseDispatchStartupTerminalProof) => { proof.firstTurnStartedAt = "2026-10-05 13:40:10"; }],
+    ["pre-binding turn", (proof: CourseDispatchStartupTerminalProof) => { proof.firstTurnStartedAt = new Date(now.getTime() - 1).toISOString(); }],
+    ["missing hash", (proof: CourseDispatchStartupTerminalProof) => { proof.firstTurnMarkerSha256 = ""; }],
+  ])("refuses changed or ambiguous %s proof", async (_label, mutate) => {
+    const { proof } = await boundStartup();
+    mutate(proof);
+    await expect(retire(proof)).rejects.toThrow();
+    expect(store.runs[0].audit.state).toBe("BOUND");
+    expect(store.tx.automationRun.updateMany).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["incident cycle", () => { store.candidates[0].cycle += 1; }],
+    ["incident revision", () => { store.candidates[0].updatedAt = new Date(now.getTime() + 1).toISOString(); }],
+    ["active batch pointer", () => { store.candidates[0].activeBatchId = "active-batch"; }],
+    ["source lifecycle", () => { store.sources.get("course-0")!.status = "CANCELLED"; }],
+    ["source generation", () => { store.sources.get("course-0")!.alertGeneration += 1; }],
+    ["source input", () => { store.sources.get("course-0")!.players = 4; }],
+    ["legacy unanchored receipt", () => { delete store.runs[0].audit.startupReceipt; }],
+    ["ambiguous native creation", () => { store.runs[0].audit.state = "STARTING"; store.runs[0].audit.childThreadId = null; }],
+  ])("retains occupied capacity after changed %s", async (_label, mutate) => {
+    const { proof } = await boundStartup();
+    mutate();
+    await expect(retire(proof)).rejects.toThrow();
+    expect(store.runs[0].status).toBe("RUNNING");
+    expect(store.tx.automationRun.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("rejects another receipt path and rejects child self-reconciliation", async () => {
+    const { proof } = await boundStartup();
+    await expect(reconcileCourseSupportStartupTerminal({ requestingThreadId: "later-parent", receiptPath: `${receiptPath}.other`, proof })).rejects.toThrow();
+    await expect(reconcileCourseSupportStartupTerminal({ requestingThreadId: nativeChild, receiptPath, proof })).rejects.toThrow();
+    expect(store.runs[0].audit.state).toBe("BOUND");
+  });
+
+  it.each(["owned historical", "other active"])("refuses retirement after %s batch ownership", async kind => {
+    const { proof } = await boundStartup();
+    store.batches.push({ id: "claimed-batch", summary: {}, leaseExpiresAt: now,
+      ownerThreadId: kind === "owned historical" ? nativeChild : "different-child",
+      status: kind === "owned historical" ? "FAILED" : "IMPLEMENTING", incidents: [{ courseId: "course-0" }] });
+    await expect(retire(proof)).rejects.toThrow();
+    expect(store.runs[0].audit.state).toBe("BOUND");
+  });
+
+  it("refuses a synthetic source whose explicit lifetime has elapsed", async () => {
+    const { proof } = await boundStartup(1, "TEST");
+    vi.setSystemTime(new Date(now.getTime() + 19 * 60 * 60_000));
+    await expect(retire(proof)).rejects.toThrow();
+    expect(store.runs[0].audit.state).toBe("BOUND");
+  });
+
+  it("keeps ordinary same-intent schedule retries eligible for terminal cleanup", async () => {
+    const { proof } = await boundStartup();
+    store.sources.get("course-0")!.scheduleVersion += 1;
+    expect(await retire(proof)).toMatchObject({ retiredCount: 1 });
+  });
+
+  it("serializes a winning claim before retirement and never cancels CONSUMED work", async () => {
+    const { assignmentRef, proof } = await boundStartup();
+    const claim = store.lease(() => store.transaction(tx => consumeBoundCourseSupportDispatchAssignment(tx as never,
+      { assignmentRef, childThreadId: nativeChild, baseSha, now: new Date() })));
+    const retirement = retire(proof);
+    await claim;
+    await expect(retirement).rejects.toThrow();
+    expect(store.runs[0].audit.state).toBe("CONSUMED");
+    expect(store.tx.automationRun.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("serializes winning retirement before a claim and refuses that stale claim", async () => {
+    const { assignmentRef, proof } = await boundStartup();
+    const retirement = retire(proof);
+    const claim = store.lease(() => store.transaction(tx => consumeBoundCourseSupportDispatchAssignment(tx as never,
+      { assignmentRef, childThreadId: nativeChild, baseSha, now: new Date() })));
+    await retirement;
+    await expect(claim).rejects.toThrow();
+    expect(store.runs[0].audit.state).toBe("CANCELLED");
+  });
+
+  it("fails the final compare-and-set rather than overwriting a concurrent claim", async () => {
+    const { proof } = await boundStartup();
+    store.tx.automationRun.updateMany.mockResolvedValueOnce({ count: 0 });
+    await expect(retire(proof)).rejects.toThrow("raced");
+    expect(store.runs[0].audit.state).toBe("BOUND");
+  });
+
+  it("releases terminal capacity without refunding any start in the original tick", async () => {
+    const { proof } = await boundStartup(5);
+    await retire(proof);
+    const replay = await planCourseSupportCourseDispatch({ ownerThreadId: "later-parent", baseSha, now: new Date() });
+    expect(store.runs).toHaveLength(5);
+    expect(replay.reservedCount).toBe(4);
+    vi.setSystemTime(new Date(now.getTime() + 10 * 60_000));
+    const next = await planCourseSupportCourseDispatch({ ownerThreadId: "later-parent", baseSha, now: new Date() });
+    expect(store.runs.length).toBeGreaterThan(5);
+    expect(next.launchItems.length).toBeGreaterThan(0);
+    expect(next.launchItems.length).toBeLessThanOrEqual(5);
+  });
+
+  it("rejects a caller asking for more than five new workers before reserving any capacity", async () => {
+    populate(15);
+    for (const maxStarts of [6, 15]) {
+      await expect(planCourseSupportCourseDispatch({ ownerThreadId: "parent-a", baseSha, now, maxStarts })).rejects.toThrow("1 through 5");
+    }
+    expect(store.runs).toHaveLength(0);
+    expect(store.transaction).not.toHaveBeenCalled();
   });
 
   it("does not refill a replayed tick after its reservations were cancelled", async () => {
@@ -170,11 +354,20 @@ describe("durable course dispatch state and transaction boundaries", () => {
       id: "legacy-batch", summary: {}, leaseExpiresAt: new Date(now.getTime() + 60_000),
       incidents: Array.from({ length: 5 }, (_, index) => ({ courseId: `legacy-course-${index}` })),
     });
-    const plan = await planCourseSupportCourseDispatch({ ownerThreadId: "parent-a", baseSha, now, maxStarts: 15 });
+    const plan = await planCourseSupportCourseDispatch({ ownerThreadId: "parent-a", baseSha, now, maxStarts: 5 });
     expect(plan.activeCount).toBe(1);
     expect(plan.activeCourseCount).toBe(5);
-    expect(plan.launchItems).toHaveLength(10);
-    expect(plan.occupiedCourseCount).toBe(15);
+    expect(plan.launchItems).toHaveLength(5);
+    expect(plan.occupiedCourseCount).toBe(10);
+    for (const item of plan.launchItems) {
+      await beginCourseSupportCourseDispatch({ ownerThreadId: "parent-a", assignmentRef: item.assignmentRef });
+      await bindCourseSupportCourseDispatch({ ownerThreadId: "parent-a", assignmentRef: item.assignmentRef, childThreadId: `child-${item.assignmentRef}` });
+    }
+    const nextTick = new Date(now.getTime() + 10 * 60_000);
+    vi.setSystemTime(nextTick);
+    const filled = await planCourseSupportCourseDispatch({ ownerThreadId: "parent-a", baseSha, now: nextTick });
+    expect(filled.launchItems).toHaveLength(5);
+    expect(filled.occupiedCourseCount).toBe(15);
   });
 
   it("rejects expired unlaunched reservations before native creation can begin", async () => {

@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 
 vi.mock("@/lib/prisma", () => ({ prisma: {} }));
 vi.mock("@/lib/automation/course-support-batches", () => ({ inspectCourseSupportQueue: vi.fn() }));
@@ -9,16 +11,22 @@ vi.mock("@/lib/automation/course-support-course-dispatch", () => ({
   cancelCourseSupportCourseDispatch: vi.fn(),
   getCourseSupportCourseDispatchAssignment: vi.fn(),
   planCourseSupportCourseDispatch: vi.fn(),
+  listCourseSupportStartupReceiptBindings: vi.fn(),
+  reconcileCourseSupportStartupTerminal: vi.fn(),
 }));
 
 import {
   courseDispatchMayInspectLegacy,
+  bindCourseDispatchReceipt,
   planCourseDispatchCycle,
   readDispatchArguments,
+  reconcileCourseDispatchReceipt,
+  reconcileCourseDispatchStartups,
   selectCourseDispatchLegacyHandoff,
 } from "../../../scripts/automation/course-support-dispatch";
 
 type AcquiredPlan = Extract<Parameters<typeof courseDispatchMayInspectLegacy>[0], { acquired: true }>;
+const absoluteWorkerReceipt = join(tmpdir(), "private", "worker.receipt.json");
 const emptyPlan = {
   acquired: true,
   value: {
@@ -41,10 +49,10 @@ function legacyInspection(overrides: Record<string, unknown>) {
 
 describe("course dispatcher command authority", () => {
   it("bounds a scheduled launch without accepting an assignment selector", () => {
-    expect(readDispatchArguments(["plan", "--scheduled-cycle", "--max-starts", "15"])).toMatchObject({
-      command: "plan", maxStarts: 15, scheduledCycle: true,
+    expect(readDispatchArguments(["plan", "--scheduled-cycle", "--max-starts", "5"])).toMatchObject({
+      command: "plan", maxStarts: 5, scheduledCycle: true,
     });
-    for (const value of ["0", "16", "1.5", "NaN", "Infinity"]) {
+    for (const value of ["0", "6", "15", "16", "1.5", "NaN", "Infinity"]) {
       expect(() => readDispatchArguments(["plan", "--max-starts", value])).toThrow();
     }
     expect(() => readDispatchArguments(["plan", "--assignment-ref", "opaque-ref"])).toThrow();
@@ -52,10 +60,11 @@ describe("course dispatcher command authority", () => {
   });
 
   it("requires a real child binding selector only for the binding command", () => {
-    expect(readDispatchArguments(["bind", "--assignment-ref", "opaque-ref", "--child-thread", "native-child"])).toMatchObject({
+    expect(readDispatchArguments(["bind", "--legacy-bind", "--assignment-ref", "opaque-ref", "--child-thread", "native-child"])).toMatchObject({
       command: "bind", assignmentRef: "opaque-ref", childThreadId: "native-child",
     });
     expect(() => readDispatchArguments(["bind", "--assignment-ref", "opaque-ref"])).toThrow();
+    expect(() => readDispatchArguments(["bind", "--assignment-ref", "opaque-ref", "--child-thread", "native-child"])).toThrow("--receipt");
     expect(() => readDispatchArguments(["start", "--assignment-ref", "opaque-ref", "--child-thread", "native-child"])).toThrow();
     expect(() => readDispatchArguments(["bind", "--assignment-ref", "opaque-ref", "--child-thread", "native-child", "--child-thread", "other-child"])).toThrow();
   });
@@ -67,12 +76,93 @@ describe("course dispatcher command authority", () => {
     expect(() => readDispatchArguments(["start", "--assignment-ref", "opaque-ref", "--scheduled-cycle"])).toThrow();
   });
 
+  it("requires an absolute validated receipt with no caller-fabricated identities or outcomes", () => {
+    for (const command of ["bind", "reconcile-startup"]) {
+      expect(readDispatchArguments([command, "--receipt", absoluteWorkerReceipt])).toMatchObject({ command, receiptPath: absoluteWorkerReceipt });
+      expect(() => readDispatchArguments([command, "--receipt", "relative.receipt.json"])).toThrow("absolute");
+      for (const flags of [
+        ["--assignment-ref", "other"], ["--child-thread", "other"], ["--legacy-bind"],
+        ["--scheduled-cycle"], ["--max-starts", "5"], ["--confirmed-not-started"], ["--outcome", "failed"],
+      ]) expect(() => readDispatchArguments([command, "--receipt", absoluteWorkerReceipt, ...flags])).toThrow();
+    }
+    expect(() => readDispatchArguments(["reconcile-startup"])).toThrow();
+    expect(() => readDispatchArguments(["plan", "--receipt", absoluteWorkerReceipt])).toThrow();
+  });
+
   it("rejects unknown flags and missing assignment references before any operation", () => {
     for (const command of ["start", "bind", "assignment", "cancel"]) {
       expect(() => readDispatchArguments([command])).toThrow();
     }
     expect(() => readDispatchArguments(["start", "--assignment-ref"])).toThrow();
     expect(() => readDispatchArguments(["start", "--assignment-ref", "opaque-ref", "--apply"])).toThrow();
+  });
+});
+
+describe("validated local native startup receipts", () => {
+  const receiptPath = absoluteWorkerReceipt;
+  const assignmentRef = "course-assignment-019ca000-0000-4000-8000-000000000001";
+  const childThreadId = "019ca000-0000-4000-8000-000000000002";
+  const preparedReceiptSha256 = "a".repeat(64);
+  const proof = { outcome: "READY", assignmentRef, childThreadId, preparedReceiptSha256 } as
+    Extract<Awaited<ReturnType<NonNullable<Parameters<typeof reconcileCourseDispatchStartups>[1]>["read"]>>, { outcome: "READY" }>;
+
+  it("derives the exact binding and prepared digest from the receipt reader", async () => {
+    const read = vi.fn(async () => ({ assignmentRef, childThreadId, preparedReceiptSha256 }));
+    const bind = vi.fn();
+    await bindCourseDispatchReceipt("real-parent", receiptPath, { read, bind });
+    expect(read).toHaveBeenCalledWith(resolve(receiptPath));
+    expect(bind).toHaveBeenCalledWith({ ownerThreadId: "real-parent", assignmentRef, childThreadId,
+      startupReceipt: { schemaVersion: 1, receiptPath: resolve(receiptPath), preparedReceiptSha256 } });
+    await expect(bindCourseDispatchReceipt("real-parent", "relative.json", { read, bind })).rejects.toThrow("absolute");
+    expect(bind).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a live or ambiguous receipt occupied without attempting reconciliation", async () => {
+    const reconcile = vi.fn();
+    expect(await reconcileCourseDispatchReceipt("later-parent", receiptPath, {
+      read: vi.fn(async () => ({ outcome: "NOT_TERMINAL" as const })), reconcile,
+    })).toEqual({ outcome: "startup_unproven", retiredCount: 0 });
+    expect(reconcile).not.toHaveBeenCalled();
+    await expect(reconcileCourseDispatchReceipt("later-parent", "relative.json", {
+      read: vi.fn(), reconcile,
+    })).rejects.toThrow("absolute");
+  });
+
+  it("reports only aggregate attention for legacy, unreadable, changed and refused proofs", async () => {
+    const bindings = Array.from({ length: 5 }, (_, index) => ({ assignmentRef, childThreadId,
+      schemaVersion: 1 as const, preparedReceiptSha256, receiptPath: join(tmpdir(), "private", `${index}.json`) }));
+    const read = vi.fn().mockResolvedValueOnce(proof)
+      .mockResolvedValueOnce({ outcome: "NOT_TERMINAL" })
+      .mockRejectedValueOnce(new Error("private path"))
+      .mockResolvedValueOnce({ ...proof, childThreadId: "changed" })
+      .mockResolvedValueOnce(proof);
+    const reconcile = vi.fn().mockResolvedValueOnce({ acquired: true, value: { retiredCount: 1 } })
+      .mockRejectedValueOnce(new Error("claim authority changed"));
+    const result = await reconcileCourseDispatchStartups("later-parent", {
+      list: vi.fn(async () => ({ bindings, legacyBoundCount: 2 })), read, reconcile,
+    });
+    expect(result).toEqual({ inspectedCount: 5, retiredCount: 1, unknownOrLegacyCount: 3,
+      invalidReceiptCount: 2, reconciliationRefusedCount: 1 });
+    expect(reconcile).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(result)).not.toContain("private");
+    expect(JSON.stringify(result)).not.toContain(assignmentRef);
+  });
+
+  it("sweeps terminal occupied work before a zero-capacity plan decides new reservations", async () => {
+    const events: string[] = [];
+    const startup = { inspectedCount: 15, retiredCount: 5, unknownOrLegacyCount: 10,
+      invalidReceiptCount: 0, reconciliationRefusedCount: 0 };
+    const occupiedPlan = { ...emptyPlan, value: { ...emptyPlan.value, reservedCount: 5,
+      attention: { startingCount: 0, boundCount: 10, expiredBatchCount: 0 } } };
+    const refresh = vi.fn(), inspect = vi.fn();
+    const result = await planCourseDispatchCycle({ ownerThreadId: "later-parent", baseSha: "a".repeat(40), scheduledCycle: true }, {
+      reconcile: vi.fn(async parent => { expect(parent).toBe("later-parent"); events.push("reconcile"); return startup; }),
+      plan: vi.fn(async input => { expect(input.maxStarts).toBeUndefined(); events.push("plan"); return occupiedPlan; }), refresh, inspect,
+    } as Parameters<typeof planCourseDispatchCycle>[1]);
+    expect(events).toEqual(["reconcile", "plan"]);
+    expect(result).toMatchObject({ acquired: true, value: { startupReconciliation: startup, reservedCount: 5 } });
+    expect(refresh).not.toHaveBeenCalled();
+    expect(inspect).not.toHaveBeenCalled();
   });
 });
 

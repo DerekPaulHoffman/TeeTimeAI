@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
@@ -18,13 +18,17 @@ import {
   hasNativeIdentityProof,
   isApprovalRequest,
   prepareCourseSupportWorker,
+  privateWrite,
+  readPreparedWorkerReceipt,
   readWorkerCliVersion,
   readWorkerLauncherArguments,
+  readTerminalWorkerReceipt,
   runPreparedCourseSupportWorker,
 } from "../../../scripts/automation/course-support-worker-launcher.mjs";
 
 const THREAD = "11111111-2222-7333-8444-555555555555";
 const TURN = "first-owned-turn";
+const ASSIGNMENT = "course-assignment-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 const roots: string[] = [];
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
@@ -48,7 +52,7 @@ function fixture() {
   const ack = { cwd, approvalPolicy: "never", sandbox: { type: "dangerFullAccess" }, activePermissionProfile: { id: WORKER_PERMISSION_PROFILE }, thread };
   const inspectCheckout = vi.fn(() => checkout);
   const inspectCli = vi.fn(() => "codex-cli 0.160.0");
-  const options = { cliPath, cwd, receiptPath, promptPath, inspectCheckout, inspectCli, nodePath: process.execPath };
+  const options = { cliPath, cwd, receiptPath, promptPath, assignmentRef: ASSIGNMENT, inspectCheckout, inspectCli, nodePath: process.execPath };
   const readReceipt = () => JSON.parse(readFileSync(receiptPath, "utf8"));
   return { cwd, thread, ack, options, readReceipt };
 }
@@ -80,8 +84,14 @@ function fakeServer(f: ReturnType<typeof fixture>, overrides: Record<string, (pa
     }
     return {};
   });
-  const client = { request, notify: vi.fn(), close: vi.fn(async () => {}), pid: 12345 };
-  const clientFactory = vi.fn((options: ClientOptions) => { hooks = options; return client; });
+  const client = { request, notify: vi.fn(), close: vi.fn(async () => ({ appServerShutdownConfirmed: true, appServerShutdownAt: new Date().toISOString() })), pid: 12345 };
+  const clientFactory = vi.fn((options: ClientOptions) => {
+    hooks = { ...options, onMessage(message) {
+      appendFileSync(`${f.options.receiptPath}.events.private.jsonl`, `${JSON.stringify(message)}\n`);
+      options.onMessage(message);
+    } };
+    return client;
+  });
   return { clientFactory, client, request };
 }
 
@@ -97,6 +107,8 @@ describe("course worker preparation contract", () => {
       runtimeWorkspaceRoots: [f.cwd], threadSource: "agent_created_thread",
     });
     expect(f.readReceipt()).toMatchObject({ status: "PREPARED", threadId: THREAD, historyMode: "legacy", approvalPolicy: "never", nativeIdentityVerified: false, serverPid: 12345 });
+    expect(f.readReceipt().assignmentRef).toBe(ASSIGNMENT);
+    expect(readPreparedWorkerReceipt(f.options.receiptPath)).toMatchObject({ assignmentRef: ASSIGNMENT, childThreadId: THREAD });
     expect(server.client.close).toHaveBeenCalledOnce();
   });
 
@@ -124,7 +136,7 @@ describe("course worker preparation contract", () => {
       throw Object.assign(new Error("invalid paginated history lineage"), { code: "APP_SERVER_RPC_REJECTED", rpcCode: -32600 });
     } });
     await expect(runPreparedCourseSupportWorker({ ...f.options, clientFactory: server.clientFactory })).rejects.toThrow("invalid paginated history lineage");
-    expect(f.readReceipt()).toMatchObject({ status: "STOPPED", historyMode: "paginated", threadId: THREAD, approvalRequests: 0 });
+    expect(f.readReceipt()).toMatchObject({ status: "STOP_UNCONFIRMED", historyMode: "paginated", threadId: THREAD, approvalRequests: 0 });
     expect(server.request.mock.calls.some(([method]) => method === "thread/start" || method === "thread/resume" || method === "turn/start")).toBe(false);
   });
 
@@ -170,6 +182,11 @@ describe("one first turn after external binding", () => {
     expect(start).not.toHaveProperty("sandboxPolicy");
     expect(start).not.toHaveProperty("model");
     expect(f.readReceipt()).toMatchObject({ status: "COMPLETED", turnId: TURN, nativeIdentityVerified: true });
+    expect(readTerminalWorkerReceipt(f.options.receiptPath)).toMatchObject({
+      outcome: "READY", assignmentRef: ASSIGNMENT, childThreadId: THREAD, turnId: TURN,
+      terminationKind: "MATCHED_TURN_COMPLETED", turnStatus: "completed",
+      preparedReceiptSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
     await expect(runPreparedCourseSupportWorker({ ...f.options, clientFactory: server.clientFactory })).rejects.toThrow("UNUSED_PREPARED_RECEIPT_REQUIRED");
     expect(server.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(1);
   });
@@ -178,7 +195,7 @@ describe("one first turn after external binding", () => {
     const { f, server } = await prepared({ "thread/turns/list": () => ({ data: [{ id: "prior-user-turn" }] }) });
     await expect(runPreparedCourseSupportWorker({ ...f.options, clientFactory: server.clientFactory })).rejects.toThrow("PREPARED_THREAD_IS_NOT_UNUSED");
     expect(server.request.mock.calls.some(([method]) => method === "thread/resume" || method === "turn/start")).toBe(false);
-    expect(f.readReceipt().status).toBe("STOPPED");
+    expect(f.readReceipt().status).toBe("STOP_UNCONFIRMED");
   });
 
   it("rejects a profile downgrade on resume and never starts", async () => {
@@ -195,7 +212,7 @@ describe("one first turn after external binding", () => {
     } });
     await expect(runPreparedCourseSupportWorker({ ...f.options, clientFactory: server.clientFactory })).rejects.toThrow("UNEXPECTED_APPROVAL_REQUEST");
     expect(server.request.mock.calls.at(-1)).toEqual(["turn/interrupt", { threadId: THREAD, turnId: TURN }]);
-    expect(f.readReceipt()).toMatchObject({ status: "STOPPED", approvalRequests: 1, failureCode: "UNEXPECTED_APPROVAL_REQUEST" });
+    expect(f.readReceipt()).toMatchObject({ status: "STOP_UNCONFIRMED", approvalRequests: 1, failureCode: "UNEXPECTED_APPROVAL_REQUEST" });
   });
 
   it("cannot use another native task's proof to pass completion", async () => {
@@ -216,7 +233,7 @@ describe("one first turn after external binding", () => {
       return { turn: { id: TURN } };
     } });
     await expect(runPreparedCourseSupportWorker({ ...f.options, clientFactory: server.clientFactory })).rejects.toThrow("APP_SERVER_CLOSED");
-    expect(f.readReceipt()).toMatchObject({ status: "STOPPED", failureCode: "APP_SERVER_CLOSED" });
+    expect(f.readReceipt()).toMatchObject({ status: "STOP_UNCONFIRMED", failureCode: "APP_SERVER_CLOSED" });
   });
 
   it("bounds a silent first turn and keeps its receipt non-replayable", async () => {
@@ -226,7 +243,53 @@ describe("one first turn after external binding", () => {
     } });
     await expect(runPreparedCourseSupportWorker({ ...f.options, clientFactory: server.clientFactory, turnTimeoutMs: 10 })).rejects.toThrow("WORKER_TURN_TIMEOUT");
     expect(server.request.mock.calls.at(-1)?.[0]).toBe("turn/interrupt");
-    expect(f.readReceipt().status).toBe("STOPPED");
+    expect(f.readReceipt().status).toBe("STOP_UNCONFIRMED");
+    expect(readTerminalWorkerReceipt(f.options.receiptPath).outcome).toBe("NOT_TERMINAL");
+  });
+
+  it("refuses a prepared receipt once a prior first-turn marker exists", async () => {
+    const f = fixture();
+    await prepareCourseSupportWorker({ ...f.options, clientFactory: fakeServer(f).clientFactory });
+    writeFileSync(`${f.options.receiptPath}.first-turn-started`, "prior launch attempt\n");
+    expect(() => readPreparedWorkerReceipt(f.options.receiptPath)).toThrow("UNUSED_PREPARED_RECEIPT_REQUIRED");
+  });
+
+  it("does not replace an open receipt for output bursts but persists identity and terminal state", async () => {
+    const { f } = await prepared();
+    let beforeBurst = "";
+    let afterBurst = "";
+    const server = fakeServer(f, { "turn/start": (_params, hooks) => {
+      hooks.onMessage({ method: "turn/started", params: { threadId: THREAD, turn: { id: TURN } } });
+      const reader = openSync(f.options.receiptPath, "r");
+      try {
+        beforeBurst = readFileSync(f.options.receiptPath, "utf8");
+        for (let index = 0; index < 250; index++) {
+          hooks.onMessage({ method: "item/agentMessage/delta", params: { threadId: THREAD, turnId: TURN, delta: `chunk-${index}` } });
+        }
+        afterBurst = readFileSync(f.options.receiptPath, "utf8");
+      } finally { closeSync(reader); }
+      queueMicrotask(() => {
+        hooks.onMessage(identity());
+        hooks.onMessage({ method: "turn/completed", params: { threadId: THREAD, turn: { id: TURN, status: "completed" } } });
+      });
+      return { turn: { id: TURN } };
+    } });
+    await runPreparedCourseSupportWorker({ ...f.options, clientFactory: server.clientFactory });
+    expect(afterBurst).toBe(beforeBurst);
+    expect(f.readReceipt()).toMatchObject({ status: "COMPLETED", nativeIdentityVerified: true, turnTerminalConfirmed: true });
+  });
+
+  it("rejects an altered first-turn marker and mismatched assignment before native start", async () => {
+    const { f, server } = await prepared();
+    await expect(runPreparedCourseSupportWorker({ ...f.options, assignmentRef: "course-assignment-ffffffff-bbbb-4ccc-8ddd-eeeeeeeeeeee", clientFactory: server.clientFactory }))
+      .rejects.toThrow("UNUSED_PREPARED_RECEIPT_REQUIRED");
+    expect(server.clientFactory).not.toHaveBeenCalled();
+    await runPreparedCourseSupportWorker({ ...f.options, clientFactory: server.clientFactory });
+    const markerPath = `${f.options.receiptPath}.first-turn-started`;
+    const marker = JSON.parse(readFileSync(markerPath, "utf8"));
+    marker.promptSha256 = "0".repeat(64);
+    writeFileSync(markerPath, JSON.stringify(marker));
+    expect(readTerminalWorkerReceipt(f.options.receiptPath).outcome).toBe("NOT_TERMINAL");
   });
 });
 
@@ -305,17 +368,17 @@ describe("worker environment and acknowledgement guards", () => {
   });
 
   it("rejects unsupported or duplicate command-line options rather than silently ignoring them", () => {
-    expect(readWorkerLauncherArguments(["prepare", "--codex", "cli", "--cwd", "cwd", "--receipt", "receipt"])).toMatchObject({ command: "prepare" });
-    expect(() => readWorkerLauncherArguments(["run", "--receipt", "r", "--prompt-file", "p", "--codex", "ignored"])).toThrow("INVALID_LAUNCHER_ARGUMENTS");
-    expect(() => readWorkerLauncherArguments(["run", "--receipt", "r", "--receipt", "r", "--prompt-file", "p"])).toThrow("INVALID_LAUNCHER_ARGUMENTS");
+    expect(readWorkerLauncherArguments(["prepare", "--codex", "cli", "--cwd", "cwd", "--receipt", "receipt", "--assignment-ref", ASSIGNMENT])).toMatchObject({ command: "prepare" });
+    expect(() => readWorkerLauncherArguments(["run", "--receipt", "r", "--prompt-file", "p", "--assignment-ref", ASSIGNMENT, "--codex", "ignored"])).toThrow("INVALID_LAUNCHER_ARGUMENTS");
+    expect(() => readWorkerLauncherArguments(["run", "--receipt", "r", "--receipt", "r", "--prompt-file", "p", "--assignment-ref", ASSIGNMENT])).toThrow("INVALID_LAUNCHER_ARGUMENTS");
     expect(() => readWorkerLauncherArguments(["run", "--receipt", "r"])).toThrow("REQUIRED_LAUNCHER_ARGUMENT_MISSING");
   });
 
   it("allows a complete ordinary episode while keeping a shorter diagnostic timeout explicit and bounded", () => {
     expect(WORKER_TURN_TIMEOUT_MS).toBe(24 * 60 * 60_000);
-    expect(readWorkerLauncherArguments(["run", "--receipt", "r", "--prompt-file", "p", "--turn-timeout-ms", "100"]).turnTimeoutMs).toBe(100);
+    expect(readWorkerLauncherArguments(["run", "--receipt", "r", "--prompt-file", "p", "--assignment-ref", ASSIGNMENT, "--turn-timeout-ms", "100"]).turnTimeoutMs).toBe(100);
     for (const invalid of ["-1", "Infinity", "NaN", String(WORKER_TURN_TIMEOUT_MS + 1)]) {
-      expect(() => readWorkerLauncherArguments(["run", "--receipt", "r", "--prompt-file", "p", "--turn-timeout-ms", invalid])).toThrow("INVALID_FIRST_TURN_LIMITS");
+      expect(() => readWorkerLauncherArguments(["run", "--receipt", "r", "--prompt-file", "p", "--assignment-ref", ASSIGNMENT, "--turn-timeout-ms", invalid])).toThrow("INVALID_FIRST_TURN_LIMITS");
     }
   });
 });
@@ -370,5 +433,79 @@ describe("bounded app-server transport", () => {
     closed.child.emit("close", 1);
     await expect(pending).rejects.toThrow("APP_SERVER_CLOSED");
     await closed.client.close();
+  });
+
+  it("classifies a valid message handler failure separately from invalid wire syntax", async () => {
+    const f = fixture();
+    const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), pid: 23457, kill: vi.fn() });
+    child.stdin.on("finish", () => queueMicrotask(() => child.emit("close", 0)));
+    const onFailure = vi.fn();
+    const client = createWorkerAppServer({ cliPath: f.options.cliPath, cwd: f.cwd,
+      eventPath: join(f.cwd, "events.private.jsonl"), stderrPath: join(f.cwd, "stderr.private.log"),
+      spawnProcess: () => child, environment: {}, onFailure,
+      onMessage: () => { throw Object.assign(new Error("private secret path"), { code: "EPERM" }); },
+    });
+    child.stdout.write(`${JSON.stringify({ method: "item/agentMessage/delta", params: { delta: "valid" } })}\n`);
+    expect(onFailure.mock.calls[0][0]).toMatchObject({ code: "APP_SERVER_MESSAGE_HANDLER_FAILED", failureStage: "on_message", failureErrno: "EPERM" });
+    expect(onFailure.mock.calls[0][0].message).not.toContain("secret");
+    await client.close();
+    const invalid = transport();
+    invalid.child.stdout.write("{bad json\n");
+    expect(invalid.onFailure.mock.calls[0][0]).toMatchObject({ code: "INVALID_APP_SERVER_MESSAGE", failureStage: "stdout_parse" });
+    await invalid.client.close();
+  });
+
+  it("reports event-log append failures without mislabeling a valid native message", async () => {
+    const f = fixture();
+    const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), pid: 23459, kill: vi.fn() });
+    child.stdin.on("finish", () => queueMicrotask(() => child.emit("close", 0)));
+    const onFailure = vi.fn();
+    const client = createWorkerAppServer({ cliPath: f.options.cliPath, cwd: f.cwd,
+      eventPath: f.cwd, stderrPath: join(f.cwd, "stderr.private.log"),
+      spawnProcess: () => child, environment: {}, onFailure,
+    });
+    child.stdout.write(`${JSON.stringify({ method: "turn/completed", params: { threadId: THREAD, turn: { id: TURN, status: "completed" } } })}\n`);
+    expect(onFailure.mock.calls[0][0]).toMatchObject({ code: "PRIVATE_EVENT_LOG_FAILED", failureStage: "event_append" });
+    await client.close();
+  });
+
+  it("waits for a real process close after a bounded kill rather than assuming shutdown", async () => {
+    const f = fixture();
+    const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), pid: 23460,
+      kill: vi.fn(() => { setTimeout(() => child.emit("close", 1), 10); return true; }) });
+    const client = createWorkerAppServer({ cliPath: f.options.cliPath, cwd: f.cwd,
+      eventPath: join(f.cwd, "events.private.jsonl"), stderrPath: join(f.cwd, "stderr.private.log"),
+      spawnProcess: () => child, environment: {},
+    });
+    vi.useFakeTimers();
+    try {
+      const closing = client.close();
+      await vi.advanceTimersByTimeAsync(3_011);
+      await expect(closing).resolves.toMatchObject({ appServerShutdownConfirmed: true,
+        appServerShutdownAt: expect.any(String) });
+      expect(child.kill).toHaveBeenCalledOnce();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.skipIf(process.platform !== "win32")("classifies valid JSON plus an open receipt reader as replacement contention", async () => {
+    const f = fixture();
+    writeFileSync(f.options.receiptPath, "original receipt\n");
+    const reader = openSync(f.options.receiptPath, "r");
+    const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), pid: 23458, kill: vi.fn() });
+    child.stdin.on("finish", () => queueMicrotask(() => child.emit("close", 0)));
+    const onFailure = vi.fn();
+    const client = createWorkerAppServer({ cliPath: f.options.cliPath, cwd: f.cwd,
+      eventPath: join(f.cwd, "events.private.jsonl"), stderrPath: join(f.cwd, "stderr.private.log"),
+      spawnProcess: () => child, environment: {}, onFailure,
+      onMessage: () => privateWrite(f.options.receiptPath, { status: "RUNNING" }),
+    });
+    try {
+      child.stdout.write(`${JSON.stringify({ method: "item/agentMessage/delta", params: { delta: "valid JSON" } })}\n`);
+      expect(onFailure.mock.calls[0][0]).toMatchObject({ code: "RECEIPT_WRITE_FAILED", failureStage: "receipt_replace",
+        failureErrno: expect.stringMatching(/^(EPERM|EBUSY)$/) });
+      expect(readFileSync(f.options.receiptPath, "utf8")).toBe("original receipt\n");
+    } finally { closeSync(reader); await client.close(); }
+    privateWrite(f.options.receiptPath, { status: "RUNNING" });
+    expect(JSON.parse(readFileSync(f.options.receiptPath, "utf8"))).toEqual({ status: "RUNNING" });
   });
 });

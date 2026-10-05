@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, execFileSync } from "node:child_process";
-import { appendFileSync, closeSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, openSync, readFileSync, readSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -10,9 +10,16 @@ export const WORKER_PERMISSION_PROFILE = ":danger-full-access";
 export const WORKER_RPC_TIMEOUT_MS = 40_000;
 export const WORKER_TURN_TIMEOUT_MS = 24 * 60 * 60_000;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+const ASSIGNMENT_REF = /^course-assignment-([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/i;
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 function failure(code) { return Object.assign(new Error(code), { code }); }
+function classifiedFailure(code, stage, error) {
+  const result = failure(code);
+  result.failureStage = stage;
+  result.failureErrno = typeof error?.code === "string" && /^[A-Z0-9_]{2,32}$/.test(error.code) ? error.code : null;
+  return result;
+}
 function absoluteFile(path) {
   if (typeof path !== "string" || !isAbsolute(path) || !statSync(path).isFile()) throw failure("ABSOLUTE_FILE_REQUIRED");
   return realpathSync(path);
@@ -21,12 +28,26 @@ function samePath(a, b) {
   const normalize = (path) => process.platform === "win32" ? resolve(path).toLowerCase() : resolve(path);
   return normalize(a) === normalize(b);
 }
-function privateWrite(path, value, exclusive = false) {
+export function privateWrite(path, value, exclusive = false) {
   const text = `${JSON.stringify(value, null, 2)}\n`;
-  if (exclusive) return writeFileSync(path, text, { flag: "wx", mode: 0o600 });
+  if (exclusive) {
+    try { return writeFileSync(path, text, { flag: "wx", mode: 0o600 }); }
+    catch (error) { throw classifiedFailure("RECEIPT_WRITE_FAILED", "receipt_create", error); }
+  }
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  writeFileSync(temporary, text, { flag: "wx", mode: 0o600 });
-  try { renameSync(temporary, path); } catch (error) { unlinkSync(temporary); throw error; }
+  try { writeFileSync(temporary, text, { flag: "wx", mode: 0o600 }); }
+  catch (error) { throw classifiedFailure("RECEIPT_WRITE_FAILED", "receipt_temporary", error); }
+  try {
+    for (let attempt = 0; attempt < 9; attempt++) {
+      try { renameSync(temporary, path); return; }
+      catch (error) {
+        if (!["EPERM", "EBUSY"].includes(error?.code) || attempt === 8) {
+          throw classifiedFailure("RECEIPT_WRITE_FAILED", "receipt_replace", error);
+        }
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+      }
+    }
+  } finally { try { unlinkSync(temporary); } catch { /* Renamed or cleanup unavailable. */ } }
 }
 
 export function assertFullAccessAcknowledgement(result, cwd) {
@@ -100,6 +121,7 @@ export function createWorkerAppServer({ cliPath, cwd, eventPath, stderrPath, onM
   let stopped = false;
   let closing = false;
   let terminalError = null;
+  let shutdownAt = null;
   const rejectPending = (error) => {
     for (const request of pending.values()) { clearTimeout(request.timer); request.reject(error); }
     pending.clear();
@@ -110,20 +132,27 @@ export function createWorkerAppServer({ cliPath, cwd, eventPath, stderrPath, onM
     if (!closing) onFailure(terminalError);
   };
   child.on("error", () => fail(failure("APP_SERVER_PROCESS_FAILED")));
-  child.on("close", () => { stopped = true; fail(failure("APP_SERVER_CLOSED")); });
+  child.on("close", () => { stopped = true; shutdownAt = new Date().toISOString(); fail(failure("APP_SERVER_CLOSED")); });
   child.stdin.on("error", () => fail(failure("APP_SERVER_INPUT_FAILED")));
   child.stderr.on("data", (chunk) => {
-    try { appendFileSync(stderrPath, chunk, { mode: 0o600 }); } catch { fail(failure("PRIVATE_EVENT_LOG_FAILED")); }
+    try { appendFileSync(stderrPath, chunk, { mode: 0o600 }); }
+    catch (error) { fail(classifiedFailure("PRIVATE_EVENT_LOG_FAILED", "stderr_append", error)); }
   });
   const reader = createInterface({ input: child.stdout });
   reader.on("line", (line) => {
     let message;
-    try {
-      message = JSON.parse(line);
-      if (!message || typeof message !== "object" || Array.isArray(message)) throw failure("INVALID_APP_SERVER_MESSAGE");
-      appendFileSync(eventPath, `${JSON.stringify(message)}\n`, { mode: 0o600 });
-      onMessage(message);
-    } catch { fail(failure("INVALID_APP_SERVER_MESSAGE")); return; }
+    try { message = JSON.parse(line); }
+    catch (error) { fail(classifiedFailure("INVALID_APP_SERVER_MESSAGE", "stdout_parse", error)); return; }
+    if (!message || typeof message !== "object" || Array.isArray(message)) {
+      fail(classifiedFailure("INVALID_APP_SERVER_MESSAGE", "stdout_shape")); return;
+    }
+    try { appendFileSync(eventPath, `${JSON.stringify(message)}\n`, { mode: 0o600 }); }
+    catch (error) { fail(classifiedFailure("PRIVATE_EVENT_LOG_FAILED", "event_append", error)); return; }
+    try { onMessage(message); }
+    catch (error) {
+      fail(error?.code === "RECEIPT_WRITE_FAILED" ? error : classifiedFailure("APP_SERVER_MESSAGE_HANDLER_FAILED", "on_message", error));
+      return;
+    }
     if (isApprovalRequest(message)) { fail(failure("UNEXPECTED_APPROVAL_REQUEST")); return; }
     if (message.method == null && pending.has(message.id)) {
       const request = pending.get(message.id);
@@ -152,11 +181,19 @@ export function createWorkerAppServer({ cliPath, cwd, eventPath, stderrPath, onM
     },
     async close() {
       closing = true;
-      reader.close(); child.stdin.end();
+      child.stdin.end();
       if (!stopped) await new Promise((resolveClose) => {
-        const timer = setTimeout(() => { child.kill(); resolveClose(); }, 3_000);
-        child.once("close", () => { clearTimeout(timer); resolveClose(); });
+        let afterKillTimer;
+        const timer = setTimeout(() => {
+          child.kill();
+          afterKillTimer = setTimeout(resolveClose, 3_000);
+        }, 3_000);
+        child.once("close", () => {
+          clearTimeout(timer); clearTimeout(afterKillTimer); resolveClose();
+        });
       });
+      if (stopped) reader.close();
+      return { appServerShutdownConfirmed: stopped, appServerShutdownAt: shutdownAt };
     },
   };
 }
@@ -186,14 +223,15 @@ export async function prepareCourseSupportWorker(options) {
   // Installed 0.160 cannot page a cold empty paginated thread: it reports a
   // missing source rollout. Legacy is the compatibility default and still needs
   // live cold-start verification; explicit paginated attempts never auto-replace.
-  const { receiptPath, title, historyMode = "legacy", clientFactory = createWorkerAppServer,
+  const { receiptPath, assignmentRef, title, historyMode = "legacy", clientFactory = createWorkerAppServer,
     inspectCheckout = assertOwnedWorkerCheckout, inspectCli = readWorkerCliVersion } = options;
-  if (typeof receiptPath !== "string" || !isAbsolute(receiptPath) || !["legacy", "paginated"].includes(historyMode)) throw failure("INVALID_PREPARE_OPTIONS");
+  if (typeof receiptPath !== "string" || !isAbsolute(receiptPath) || !ASSIGNMENT_REF.test(assignmentRef ?? "") ||
+      !["legacy", "paginated"].includes(historyMode)) throw failure("INVALID_PREPARE_OPTIONS");
   const cliPath = absoluteFile(options.cliPath);
   const checkout = inspectCheckout(options.cwd);
   const cliVersion = inspectCli(cliPath);
   const receipt = {
-    schemaVersion: 1, status: "PREPARING", threadId: null, ...checkout, cliPath, cliVersion,
+    schemaVersion: 1, status: "PREPARING", assignmentRef, threadId: null, ...checkout, cliPath, cliVersion,
     historyMode, eventPath: `${receiptPath}.events.private.jsonl`, stderrPath: `${receiptPath}.stderr.private.log`,
     createdAt: new Date().toISOString(), launcherPid: process.pid, nativeCreationPossible: false,
     approvalRequests: 0, nativeIdentityVerified: false,
@@ -235,8 +273,24 @@ export async function prepareCourseSupportWorker(options) {
   } catch (error) {
     receipt.status = receipt.nativeCreationPossible ? "CREATION_UNKNOWN" : "FAILED_BEFORE_CREATION";
     receipt.failureCode = error.code ?? "WORKER_PREPARATION_FAILED";
+    receipt.failureStage = error.failureStage ?? null;
+    receipt.failureErrno = error.failureErrno ?? null;
     privateWrite(receiptPath, receipt); throw error;
   } finally { await client?.close(); }
+}
+
+export function readPreparedWorkerReceipt(receiptPath) {
+  const path = absoluteFile(receiptPath);
+  const bytes = readFileSync(path);
+  const receipt = JSON.parse(bytes.toString("utf8"));
+  if (receipt.schemaVersion !== 1 || receipt.status !== "PREPARED" ||
+      !ASSIGNMENT_REF.test(receipt.assignmentRef ?? "") || !UUID.test(receipt.threadId ?? "") ||
+      existsSync(`${path}.first-turn-started`) ||
+      receipt.turnId != null || receipt.nativeIdentityVerified !== false || receipt.approvalRequests !== 0 ||
+      receipt.approvalPolicy !== "never" || receipt.sandbox?.type !== "dangerFullAccess" ||
+      receipt.activePermissionProfile?.id !== WORKER_PERMISSION_PROFILE) throw failure("UNUSED_PREPARED_RECEIPT_REQUIRED");
+  return { assignmentRef: receipt.assignmentRef, childThreadId: receipt.threadId,
+    preparedReceiptSha256: createHash("sha256").update(bytes).digest("hex") };
 }
 
 export function buildWorkerFirstTurnPrompt(prompt, threadId, nodePath) {
@@ -259,11 +313,13 @@ export function hasNativeIdentityProof(message) {
 }
 
 export async function runPreparedCourseSupportWorker(options) {
-  const { receiptPath, promptPath, clientFactory = createWorkerAppServer,
+  const { receiptPath, promptPath, assignmentRef, clientFactory = createWorkerAppServer,
     inspectCheckout = assertOwnedWorkerCheckout, inspectCli = readWorkerCliVersion,
     turnTimeoutMs = WORKER_TURN_TIMEOUT_MS, nodePath = process.execPath } = options;
-  const receipt = JSON.parse(readFileSync(absoluteFile(receiptPath), "utf8"));
+  const preparedBytes = readFileSync(absoluteFile(receiptPath));
+  const receipt = JSON.parse(preparedBytes.toString("utf8"));
   if (receipt.schemaVersion !== 1 || receipt.status !== "PREPARED" || !UUID.test(receipt.threadId ?? "") ||
+      !ASSIGNMENT_REF.test(assignmentRef ?? "") || receipt.assignmentRef !== assignmentRef ||
       !["legacy", "paginated"].includes(receipt.historyMode) || receipt.nativeIdentityVerified !== false ||
       receipt.turnId != null || receipt.approvalRequests !== 0) throw failure("UNUSED_PREPARED_RECEIPT_REQUIRED");
   assertFullAccessAcknowledgement(receipt, receipt.cwd);
@@ -276,9 +332,21 @@ export async function runPreparedCourseSupportWorker(options) {
       turnTimeoutMs < 1 || turnTimeoutMs > WORKER_TURN_TIMEOUT_MS) {
     throw failure("INVALID_FIRST_TURN_LIMITS");
   }
-  const marker = openSync(`${receiptPath}.first-turn-started`, "wx", 0o600); closeSync(marker);
+  const promptSha256 = createHash("sha256").update(prompt).digest("hex");
+  const preparedReceiptSha256 = createHash("sha256").update(preparedBytes).digest("hex");
+  const firstTurnStartedAt = new Date().toISOString();
+  const markerBody = { schemaVersion: 1, assignmentRef, threadId: receipt.threadId,
+    preparedReceiptSha256, promptSha256, firstTurnStartedAt };
+  const markerPath = `${receiptPath}.first-turn-started`;
+  privateWrite(markerPath, markerBody, true);
   receipt.status = "RUN_PREPARING"; receipt.launcherPid = process.pid;
-  receipt.promptSha256 = createHash("sha256").update(prompt).digest("hex");
+  receipt.promptSha256 = promptSha256;
+  receipt.preparedReceiptSha256 = preparedReceiptSha256;
+  receipt.firstTurnStartedAt = firstTurnStartedAt;
+  receipt.firstTurnMarkerSha256 = createHash("sha256").update(readFileSync(markerPath)).digest("hex");
+  receipt.turnTerminalConfirmed = false;
+  receipt.interruptAcknowledged = false;
+  receipt.appServerShutdownConfirmed = false;
   privateWrite(receiptPath, receipt);
   let client;
   let fatal = null;
@@ -286,7 +354,14 @@ export async function runPreparedCourseSupportWorker(options) {
   let wake;
   const completion = new Promise((resolveCompletion) => { wake = resolveCompletion; });
   const interrupt = async () => {
-    if (receipt.turnId) await client?.request("turn/interrupt", { threadId: receipt.threadId, turnId: receipt.turnId }).catch(() => {});
+    if (receipt.turnId) {
+      try {
+        await client?.request("turn/interrupt", { threadId: receipt.threadId, turnId: receipt.turnId });
+        receipt.interruptAcknowledged = true;
+        receipt.interruptAcknowledgedAt = new Date().toISOString();
+        privateWrite(receiptPath, receipt);
+      } catch { /* An unacknowledged interrupt cannot prove termination. */ }
+    }
   };
   const timer = setTimeout(() => { fatal = failure("WORKER_TURN_TIMEOUT"); wake(); }, turnTimeoutMs);
   try {
@@ -295,17 +370,27 @@ export async function runPreparedCourseSupportWorker(options) {
         receipt.approvalRequests += 1; fatal = failure("UNEXPECTED_APPROVAL_REQUEST"); wake();
       }
       if (message.method === "turn/started" && message.params?.threadId === receipt.threadId) {
-        receipt.turnId = message.params.turn.id; receipt.status = "RUNNING";
+        if (typeof message.params?.turn?.id === "string" && message.params.turn.id && !receipt.turnId) {
+          receipt.turnId = message.params.turn.id; receipt.status = "RUNNING"; privateWrite(receiptPath, receipt);
+        }
       }
       const identity = message.params?.threadId === receipt.threadId && message.params?.turnId === receipt.turnId
         ? hasNativeIdentityProof(message) : null;
-      if (identity === true) receipt.nativeIdentityVerified = true;
+      if (identity === true && !receipt.nativeIdentityVerified) {
+        receipt.nativeIdentityVerified = true; privateWrite(receiptPath, receipt);
+      }
       if (identity === false) { fatal = failure("NATIVE_THREAD_IDENTITY_MISMATCH"); wake(); }
       if (message.method === "turn/completed" && message.params?.threadId === receipt.threadId &&
-          message.params?.turn?.id === receipt.turnId) {
-        completed = message.params.turn; wake();
+          message.params?.turn?.id === receipt.turnId &&
+          ["completed", "failed", "interrupted"].includes(message.params?.turn?.status)) {
+        completed = message.params.turn;
+        receipt.turnTerminalConfirmed = true;
+        receipt.turnCompletedAt = new Date().toISOString();
+        receipt.turnStatus = completed.status ?? "unknown";
+        privateWrite(receiptPath, receipt);
+        wake();
       }
-      privateWrite(receiptPath, receipt);
+      if (isApprovalRequest(message)) privateWrite(receiptPath, receipt);
     } });
     receipt.serverPid = client.pid; privateWrite(receiptPath, receipt);
     await initialize(client, receipt.cwd);
@@ -336,29 +421,123 @@ export async function runPreparedCourseSupportWorker(options) {
     if (receipt.status !== "COMPLETED") throw failure("WORKER_TURN_DID_NOT_COMPLETE");
     return { outcome: "completed", nativeIdentityVerified: true, approvalRequests: receipt.approvalRequests };
   } catch (error) {
-    await interrupt(); receipt.status = "STOPPED"; receipt.failureCode = error.code ?? "WORKER_LAUNCH_FAILED";
+    await interrupt();
+    receipt.status = receipt.turnTerminalConfirmed ? "STOPPED" : "STOP_UNCONFIRMED";
+    receipt.stoppedAt = new Date().toISOString();
+    receipt.failureCode = error.code ?? "WORKER_LAUNCH_FAILED";
+    receipt.failureStage = error.failureStage ?? null;
+    receipt.failureErrno = error.failureErrno ?? null;
     privateWrite(receiptPath, receipt); throw error;
-  } finally { clearTimeout(timer); await client?.close(); }
+  } finally {
+    clearTimeout(timer);
+    const closed = await client?.close();
+    receipt.appServerShutdownConfirmed = closed?.appServerShutdownConfirmed === true;
+    receipt.appServerShutdownAt = closed?.appServerShutdownAt ?? null;
+    if (receipt.status === "STOP_UNCONFIRMED" && receipt.turnTerminalConfirmed) receipt.status = "STOPPED";
+    privateWrite(receiptPath, receipt);
+    if (receipt.turnTerminalConfirmed && receipt.appServerShutdownConfirmed) {
+      privateWrite(`${receiptPath}.terminal.private.json`, {
+        schemaVersion: 1, assignmentRef: receipt.assignmentRef, threadId: receipt.threadId,
+        turnId: receipt.turnId, preparedReceiptSha256: receipt.preparedReceiptSha256,
+        promptSha256: receipt.promptSha256,
+        firstTurnMarkerSha256: receipt.firstTurnMarkerSha256,
+        turnCompletedAt: receipt.turnCompletedAt,
+        turnStatus: receipt.turnStatus,
+        appServerShutdownAt: receipt.appServerShutdownAt,
+      }, true);
+    }
+  }
+}
+
+export function readTerminalWorkerReceipt(receiptPath) {
+  const path = absoluteFile(receiptPath);
+  const bytes = readFileSync(path);
+  const receipt = JSON.parse(bytes.toString("utf8"));
+  const diagnostic = { outcome: "NOT_TERMINAL", assignmentRef: null, childThreadId: null };
+  if (receipt.schemaVersion !== 1 || !ASSIGNMENT_REF.test(receipt.assignmentRef ?? "") || !UUID.test(receipt.threadId ?? "")) return diagnostic;
+  const markerPath = `${path}.first-turn-started`;
+  const terminalPath = `${path}.terminal.private.json`;
+  let marker, terminal, markerBytes;
+  try {
+    markerBytes = readFileSync(markerPath);
+    marker = JSON.parse(markerBytes.toString("utf8"));
+    terminal = JSON.parse(readFileSync(terminalPath, "utf8"));
+  } catch { return diagnostic; }
+  const markerSha = createHash("sha256").update(markerBytes).digest("hex");
+  const firstTurnAt = Date.parse(marker.firstTurnStartedAt);
+  const completedAt = Date.parse(receipt.turnCompletedAt);
+  const shutdownAt = Date.parse(receipt.appServerShutdownAt);
+  if (marker.schemaVersion !== 1 || marker.assignmentRef !== receipt.assignmentRef ||
+      typeof receipt.eventPath !== "string" || !samePath(receipt.eventPath, `${path}.events.private.jsonl`) ||
+      marker.threadId !== receipt.threadId || marker.promptSha256 !== receipt.promptSha256 ||
+      marker.preparedReceiptSha256 !== receipt.preparedReceiptSha256 ||
+      receipt.firstTurnMarkerSha256 !== markerSha || terminal.schemaVersion !== 1 ||
+      terminal.assignmentRef !== receipt.assignmentRef || terminal.threadId !== receipt.threadId ||
+      terminal.preparedReceiptSha256 !== receipt.preparedReceiptSha256 ||
+      terminal.turnId !== receipt.turnId || terminal.promptSha256 !== receipt.promptSha256 ||
+      terminal.firstTurnMarkerSha256 !== markerSha || terminal.turnCompletedAt !== receipt.turnCompletedAt ||
+      terminal.turnStatus !== receipt.turnStatus || terminal.appServerShutdownAt !== receipt.appServerShutdownAt ||
+      !receipt.turnTerminalConfirmed || !receipt.appServerShutdownConfirmed ||
+      !receipt.turnCompletedAt || !receipt.appServerShutdownAt || !receipt.turnId ||
+      !/^[a-f0-9]{64}$/i.test(receipt.preparedReceiptSha256 ?? "") ||
+      !Number.isFinite(firstTurnAt) || !Number.isFinite(completedAt) || !Number.isFinite(shutdownAt) ||
+      firstTurnAt > completedAt || completedAt > shutdownAt ||
+      !["completed", "failed", "interrupted"].includes(receipt.turnStatus) ||
+      !["STOPPED", "COMPLETED", "TURN_FAILED"].includes(receipt.status)) return diagnostic;
+  // A mutually consistent receipt and marker are not enough. Require the
+  // original app-server event log to contain this exact native terminal event.
+  let nativeTerminalEvent = false;
+  try {
+    const eventPath = absoluteFile(receipt.eventPath);
+    const size = statSync(eventPath).size;
+    const length = Math.min(size, 2 * 1024 * 1024);
+    const fd = openSync(eventPath, "r");
+    const tail = Buffer.alloc(length);
+    try { if (readSync(fd, tail, 0, length, size - length) !== length) return diagnostic; }
+    finally { closeSync(fd); }
+    const lines = tail.toString("utf8").split("\n");
+    if (size > length) lines.shift(); // The first line may begin inside a JSON event.
+    for (const line of lines) {
+      if (!line || !line.includes('"turn/completed"')) continue;
+      const event = JSON.parse(line);
+      if (event.method === "turn/completed" && event.params?.threadId === receipt.threadId &&
+          event.params?.turn?.id === receipt.turnId && event.params.turn.status === receipt.turnStatus) {
+        nativeTerminalEvent = true; break;
+      }
+    }
+  } catch { return diagnostic; }
+  if (!nativeTerminalEvent) return diagnostic;
+  return {
+    outcome: "READY", assignmentRef: receipt.assignmentRef, childThreadId: receipt.threadId,
+    turnId: receipt.turnId, firstTurnStartedAt: marker.firstTurnStartedAt,
+    terminalAt: receipt.turnCompletedAt, terminationKind: "MATCHED_TURN_COMPLETED",
+    receiptSha256: createHash("sha256").update(bytes).digest("hex"),
+    preparedReceiptSha256: receipt.preparedReceiptSha256,
+    promptSha256: receipt.promptSha256, firstTurnMarkerSha256: markerSha,
+    turnStatus: receipt.turnStatus, appServerShutdownAt: receipt.appServerShutdownAt,
+    nativeIdentityVerified: receipt.nativeIdentityVerified === true, approvalRequests: receipt.approvalRequests,
+  };
 }
 
 export function readWorkerLauncherArguments(args) {
   const [command, ...rest] = args;
   if (!["prepare", "run"].includes(command)) throw failure("USE_PREPARE_OR_RUN");
-  const values = new Set(command === "prepare" ? ["--codex", "--cwd", "--receipt", "--title", "--history-mode"]
-    : ["--receipt", "--prompt-file", "--node", "--turn-timeout-ms"]);
+  const values = new Set(command === "prepare" ? ["--codex", "--cwd", "--receipt", "--title", "--history-mode", "--assignment-ref"]
+    : ["--receipt", "--prompt-file", "--node", "--turn-timeout-ms", "--assignment-ref"]);
   const options = {};
   for (let index = 0; index < rest.length; index += 2) {
     const key = rest[index]; const value = rest[index + 1];
     if (!values.has(key) || !value || value.startsWith("--") || key in options) throw failure("INVALID_LAUNCHER_ARGUMENTS");
     options[key] = value;
   }
-  if (!options["--receipt"] || (command === "prepare" && (!options["--codex"] || !options["--cwd"])) ||
+  if (!options["--receipt"] || !ASSIGNMENT_REF.test(options["--assignment-ref"] ?? "") ||
+      (command === "prepare" && (!options["--codex"] || !options["--cwd"])) ||
       (command === "run" && !options["--prompt-file"])) throw failure("REQUIRED_LAUNCHER_ARGUMENT_MISSING");
   const timeoutText = options["--turn-timeout-ms"];
   const turnTimeoutMs = timeoutText == null ? undefined : Number(timeoutText);
   if (timeoutText != null && (!/^\d+$/.test(timeoutText) || !Number.isSafeInteger(turnTimeoutMs) ||
       turnTimeoutMs < 1 || turnTimeoutMs > WORKER_TURN_TIMEOUT_MS)) throw failure("INVALID_FIRST_TURN_LIMITS");
-  return { command, cliPath: options["--codex"], cwd: options["--cwd"], receiptPath: options["--receipt"],
+  return { command, assignmentRef: options["--assignment-ref"], cliPath: options["--codex"], cwd: options["--cwd"], receiptPath: options["--receipt"],
     title: options["--title"], historyMode: options["--history-mode"], promptPath: options["--prompt-file"], nodePath: options["--node"], turnTimeoutMs };
 }
 
