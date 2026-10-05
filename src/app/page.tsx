@@ -91,6 +91,7 @@ const homeStructuredData = {
 };
 
 export default function HomePage() {
+  const simulatorEnabled = isSimulatorModeEnabled();
   return (
     <main>
       <StructuredData data={homeStructuredData} />
@@ -105,8 +106,8 @@ export default function HomePage() {
             tee time matches, Tee Time Spot emails the official booking link. You review the
             details and book directly with the course.
           </p>
-          <div className="hero-actions">
-            {isSimulatorModeEnabled() ? <a className="button button-secondary" href="/search?mode=SIMULATOR">Find simulator time</a> : null}
+          <div className={`hero-actions${simulatorEnabled ? " simulator-enabled" : ""}`}>
+            {simulatorEnabled ? <a className="button button-secondary" href="/search?mode=SIMULATOR">Find simulator time</a> : null}
             <a className="button button-primary" data-analytics-event="start_search_clicked" href="/search">
               <Search size={16} />
               Find my tee time

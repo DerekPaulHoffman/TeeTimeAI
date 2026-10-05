@@ -1,4 +1,10 @@
 /* Public knowledge, trust, and discovery surfaces. */
+@media (max-width: 620px) {
+  .hero-actions.simulator-enabled {
+    flex-wrap: wrap;
+  }
+}
+
 .nav-info-links {
   align-items: center;
   display: flex;
