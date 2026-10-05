@@ -357,6 +357,7 @@ describe("native owned official-source flow", () => {
     // provider identity; it does not manufacture fresh matches or delivery.
     expect(db.teeTimeMatch.updateMany).toHaveBeenCalledWith({ where: {
       courseId: state.identity.id, availabilityStatus: "AVAILABLE", lastConfirmedAt: { lte: new Date() },
+      teeSearch: { mode: "OUTDOOR" },
     }, data: { availabilityStatus: "UNKNOWN", availabilityCycle: { increment: 1 } } });
     expect(marker.releaseCourseProviderObservationInTransaction).toHaveBeenCalledOnce();
     expect(fetchImpl).toHaveBeenCalledOnce();
