@@ -14,23 +14,43 @@ Start the existing stable preflight once:
 node C:\dev\TeeTimeAI-responder-self-healing\scripts\automation\course-support-preflight.mjs --run --scheduled-cycle --course-dispatch
 ```
 
-It validates the approved clean checkout, current main, generated client and configured browser, records worker health, and runs one production-backed dispatch plan. Use its exact `selectedCheckout` for every subsequent parent command. Stop on a setup failure or nonzero exit. An empty plan completes the tick without creating a chat. Do not run a second inspection, an ordinary claim, a catch-up tick, or another responder automation.
+It validates the approved clean checkout, current main, generated client and configured browser, records worker health, and runs one production-backed dispatch plan. Use its exact `selectedCheckout` for every subsequent parent command. Stop on a setup failure or nonzero exit. Do not run a second inspection, a catch-up tick, or another responder automation.
 
-For each returned `RESERVED` launch item, start its launch record before calling a native chat tool:
+When the writer lease is acquired and the plan has no launches, no live reservations or native-start/binding attention, and no eligible active-future course waiting for capacity, that same production CLI invocation runs the legacy inspection. Its tagged `value.legacyInspection.handoff` may authorize `RESUME` of the exact parent-owned batch, `RECOVER` of the exact expired legacy batch, or one `BACKGROUND` course through `CLAIM --max-courses 1` for historical/requestless work or a parked campaign. Use the returned batch reference for resume/recovery and the existing bounded grouped-batch recovery contract; do not split an old batch or transfer an assigned child's ownership. A grouped new active-alert claim, an expired assigned-worker batch, incomplete candidate-history evidence, or an unsettled native reservation never produces this fallback handoff. The claim/recovery transaction still rechecks current authority and can refuse stale admission. The tagged result also reports aggregate customer-recovery counts; pending cases remain visible even when there is no new course chat.
+
+The parent reads and caches the full `course-support-assigned-worker.md` instructions once for native course-chat creation. Read `course-support-legacy-worker.md` only when the tagged legacy handoff is present; an empty plan alone does not authorize legacy work.
+
+For each returned `RESERVED` launch item, start its launch record before creating a native chat:
 
 ```powershell
 npx vercel env run -e production -- npm run automation:course-dispatch -- start --assignment-ref <private-assignment-ref>
 ```
 
-Then call the Codex app's `list_projects` and use the saved repository project's returned ID with `create_thread`, local environment. The human authorized these separate course chats. Include the complete assigned-worker instructions in that initial prompt. The child may bootstrap its own linked worktree and read its privacy-safe binding state, but must wait without provider research, claims, product edits or email until binding is complete. It may receive its opaque assignment reference and the selected checkout, but no recipient, provider token or raw incident/course identifier.
+Prepare a distinct managed linked worktree from current `origin/main` for that child, using the supported worktree tool. Create its unique `automation/course-support-*` branch there before any edits. Preserve every existing checkout. Use the bundled Codex executable from the current desktop installation, verified as `codex-cli 0.160.0`; do not use the older executable resolved by PATH.
 
-Bind only the real native `threadId` returned by `create_thread`:
+The assigned-worker launcher uses the supported local app-server protocol to create an idle persistent native chat. It verifies that `:danger-full-access` is allowed, then requires the returned `approvalPolicy=never`, `dangerFullAccess` sandbox, exact profile and checkout before any model turn. Its actual native identity is persisted in an exclusive private receipt. Do not use `create_thread` for this lane: its current tool interface cannot select permissions before the first turn and caused the bootstrap approval prompts. Do not change global approval settings, accept pending approvals, or fall back to an approval-requesting profile.
+
+Create an ignored private receipt directory and run the launcher outside the production environment wrapper:
+
+```powershell
+node <selected-checkout>\scripts\automation\course-support-worker-launcher.mjs prepare --codex <verified-bundled-codex-executable> --cwd <own-worker-checkout> --receipt <absolute-private-receipt-path> --title "Resolve assigned course"
+```
+
+It returns only after native creation and permission acknowledgement. Saved app project identifiers are not app-server project identifiers; do not substitute one into the RPC. The desktop recognizes these real native chats from their managed repository checkout. Omit model/thinking overrides and preserve the configured model. A creation error or unknown result retains its private receipt and `STARTING` slot; never retry creation automatically.
+
+Bind only the real native `threadId` returned by the successful launcher preparation:
 
 ```powershell
 npx vercel env run -e production -- npm run automation:course-dispatch -- bind --assignment-ref <private-assignment-ref> --child-thread <native-thread-id>
 ```
 
-The child reads its binding state and proceeds only when it is bound to its own native identity; no follow-up message is required. A pending `clientThreadId` is not a native thread ID and cannot be bound as one. An ambiguous native creation result keeps its `STARTING` slot occupied. Do not create a replacement chat. Reconcile the original tool result with supported native task tools and bind the original child if it is unambiguously identified; otherwise report required operator action. A parent must never infer a child relationship from a title or a claimed model name. Existing ambiguous reservations and expired owners must remain visible as attention conditions; an empty new-launch list does not establish healthy completion for them.
+After successful binding, write the cached complete assigned-worker instructions to an ignored UTF-8 prompt file, substituting only the exact assignment reference and selected checkout. Start `run --receipt <same-receipt> --prompt-file <private-prompt-file> --node <absolute-node-executable>` with the same launcher. Use a hidden detached local process with private stdout/stderr files so each worker continues while the parent admits the other courses. Record its process handle; never restart it because a wait returned. The launcher proves that the prepared chat has no prior turn, re-applies the same permissions before its first turn, and checks the actual `CODEX_THREAD_ID` through its first read-only shell command. Private npm cache/prefix survive into each shell; Codex may prepend its own executable wrappers to PATH, so setup and production command helpers invoke absolute Node/npm paths. Production/provider/email credentials are excluded from startup; only later authorized production wrappers load the required environment.
+
+The child independently reads its binding state and claims only its exact one-course assignment. No follow-up message is required. An unexpected approval request stops this owned worker without approving it; a preparation/startup failure must not trigger repeated user questions or automatic replacement chats. Observe the same private receipt and supported compact native `wait_threads` result. Full `read_thread` item hydration is currently unsupported for these app-server chats; that error is not permission to resume or duplicate a live process. The receipt, native compact result and durable batch evidence remain distinct facts.
+
+Assigned-worker production commands use `course-support-worker-runtime.mjs production --selected-checkout <parent-selected-checkout> --script <allowed-script> -- <exact-arguments>` with absolute Node. The helper pins the verified Vercel package, invokes absolute Node/npm at both wrapper layers, retains the production environment boundary, and rechecks native identity, private runtime and the parent's repository/project binding. Only `automation:course-support`, `automation:course-dispatch` and `deployment:wait` are permitted; their own authorization, action and release validators remain authoritative. Dirty or descendant work can be valid after claim, while the claim itself retains its exact current-source fence. No fallback to bare npm/npx is permitted in this child. After private setup, the child may copy the parent's existing ignored `.env.production.local` into its own ignored file for sensitive values Vercel cannot pull; never print or commit it, or load those values during npm setup.
+
+A pending `clientThreadId`, inferred title or invented identity cannot be bound. Reconcile an ambiguous creation only against the original receipt and supported native task state. Existing ambiguous reservations and expired owners remain visible as attention conditions; an empty new-launch list does not establish healthy completion for them. The parent never resumes an existing chat through this launcher; its one-turn marker permits only the authorized initial task of the newly prepared child.
 
 Cancel only when there is proof that no native worker was created:
 
@@ -42,7 +62,7 @@ Reservations, binding, expiry, exact claim consumption and cancellation are stor
 
 ## Assigned child
 
-The child must create or reuse its own managed linked worktree for this repository and create a named `automation/course-support-*` task branch from current `origin/main`. This is the explicit assigned-worker exception to the older shared-selected-checkout rule. Never clone a repository, switch or clean the user's dirty checkout, or adopt another worker's files. Registered linked worktrees retain the same repository identity and must use the selected Vercel project. Dependency/client/browser readiness must be established before claiming; do not alter another checkout's generated client or installed reader.
+The child uses its own parent-prepared managed linked worktree and verifies its unique named `automation/course-support-*` task branch at current `origin/main`. This is the explicit assigned-worker exception to the older shared-selected-checkout rule. Never clone a repository, switch or clean the user's dirty checkout, or adopt another worker's files. Registered linked worktrees retain the same repository identity and must use the selected Vercel project. Establish the existing binding only in the child's checkout. Before production reads or claims, run `course-support-worker-runtime.mjs --prepare --selected-checkout <parent-selected-checkout>` there using absolute Node. It invokes the installed npm CLI directly with private cache/prefix, generates its private client with inert database configuration, checks Chromium, and rechecks all ownership/readiness guards after each stage. Missing or changed readiness stops without asking for routine approvals; do not alter another checkout's generated client or installed reader.
 
 Read this document, `AGENTS.md` and the per-course responder contract from the clean worker checkout. Require current native `CODEX_THREAD_ID`, clean named task branch and `HEAD == origin/main`. Read only the assignment bound to that native child:
 

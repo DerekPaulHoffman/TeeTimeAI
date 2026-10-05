@@ -283,7 +283,10 @@ export async function planCourseSupportCourseDispatch(input: {
     ));
     const availableStarts = Math.max(0, Math.min(maxStarts - sameTick.length, availableCapacity));
     let eligibleCount = 0;
-    if (availableStarts > 0) {
+    // Count admissible active-future work even when this tick has exhausted its
+    // launch budget. The legacy background fallback must not interpret a zero
+    // launch list as evidence that no active-alert course is waiting.
+    if (availableStarts > 0 || live.length === 0) {
       const candidates = await listCourseSupportDispatchCandidates(now, tx);
       const candidateCourses = [...new Set(candidates.map((candidate) => candidate.courseId))];
       const [courses, preferences] = await Promise.all([

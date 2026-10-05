@@ -4195,6 +4195,11 @@ export async function inspectCourseSupportQueue(input?: {
           batchRef: expiredBatch.reference,
           status: expiredBatch.status,
           leaseExpiredAt: expiredBatch.leaseExpiresAt.toISOString(),
+          dispatchAssigned: Boolean(
+            expiredBatch.summary && typeof expiredBatch.summary === "object" &&
+            !Array.isArray(expiredBatch.summary) &&
+            typeof (expiredBatch.summary as Record<string, unknown>).dispatchAssignmentRef === "string"
+          ),
         }
       : null,
     durableCloseoutRecorded,

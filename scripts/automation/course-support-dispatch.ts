@@ -10,6 +10,8 @@ import {
   getCourseSupportCourseDispatchAssignment,
   planCourseSupportCourseDispatch,
 } from "@/lib/automation/course-support-course-dispatch";
+import { inspectCourseSupportQueue } from "@/lib/automation/course-support-batches";
+import { refreshPendingCustomerRecoveries } from "@/lib/automation/course-support-customer-recovery";
 import {
   AUTOMATION_WORKERS,
   completeAutomationWorker,
@@ -77,6 +79,70 @@ export function readDispatchGitState(requireCurrentMain = true) {
   return { baseSha };
 }
 
+type DispatchPlan = Awaited<ReturnType<typeof planCourseSupportCourseDispatch>>;
+type LegacyInspection = Awaited<ReturnType<typeof inspectCourseSupportQueue>>;
+
+export function courseDispatchMayInspectLegacy(plan: DispatchPlan) {
+  if (!plan.acquired) return false;
+  return plan.value.launchItems.length === 0 && plan.value.reservedCount === 0 &&
+    plan.value.eligibleCount === 0 && plan.value.attention.startingCount === 0 &&
+    plan.value.attention.boundCount === 0;
+}
+
+export function selectCourseDispatchLegacyHandoff(inspection: LegacyInspection) {
+  const { handoff } = inspection;
+  if (handoff.action === "RESUME" && inspection.ownedByCurrentTask && inspection.activeWriter?.batchRef) {
+    return { ...handoff, batchRef: inspection.activeWriter.batchRef };
+  }
+  if (handoff.action === "RECOVER" && inspection.expiredBatch?.batchRef &&
+      !inspection.expiredBatch.dispatchAssigned) {
+    return { ...handoff, batchRef: inspection.expiredBatch.batchRef };
+  }
+  if (handoff.action === "CLAIM" && inspection.dueRealCount === 0 &&
+      handoff.maxCourses === 1 && inspection.candidateHistoryEvidenceStatus === "COMPLETE" &&
+      ["ORDINARY_DISPATCH", "PARKED_CAMPAIGN"].includes(handoff.source)) {
+    return handoff;
+  }
+  return null;
+}
+
+export async function planCourseDispatchCycle(
+  input: { ownerThreadId: string; baseSha: string; maxStarts?: number; scheduledCycle: boolean },
+  dependencies = {
+    plan: planCourseSupportCourseDispatch,
+    refresh: refreshPendingCustomerRecoveries,
+    inspect: inspectCourseSupportQueue,
+  },
+) {
+  const plan = await dependencies.plan({
+    ownerThreadId: input.ownerThreadId, baseSha: input.baseSha, maxStarts: input.maxStarts,
+  });
+  if (!plan.acquired || !courseDispatchMayInspectLegacy(plan)) return plan;
+  // The plan's writer transition has committed before this legacy read.
+  // Native reservations and pending active-future courses fence fallback.
+  const customerRecovery = await dependencies.refresh();
+  const inspection = await dependencies.inspect({
+    requestingThreadId: input.ownerThreadId,
+    completeParkedCampaignIfDone: input.scheduledCycle,
+    admissionRuntimeVersion: input.baseSha,
+  });
+  return {
+    ...plan,
+    value: { ...plan.value, legacyInspection: {
+      outcome: inspection.outcome,
+      handoff: selectCourseDispatchLegacyHandoff(inspection),
+      customerRecovery: {
+        inspectedCount: customerRecovery.inspectedCount,
+        completedCount: customerRecovery.completedCount,
+        pendingCount: customerRecovery.pendingCount,
+      },
+      dueRealCount: inspection.dueRealCount,
+      dueEngineeringCount: inspection.dueEngineeringCount,
+      candidateHistoryEvidenceStatus: inspection.candidateHistoryEvidenceStatus,
+    } },
+  };
+}
+
 async function main() {
   const input = readDispatchArguments(process.argv.slice(2));
   if (!process.env.DATABASE_URL?.trim() || !/^postgres(?:ql)?:\/\//.test(process.env.DATABASE_URL.trim())) {
@@ -98,7 +164,9 @@ async function main() {
     }
     let result: unknown;
     if (input.command === "plan") {
-      result = await planCourseSupportCourseDispatch({ ownerThreadId, baseSha, maxStarts: input.maxStarts });
+      result = await planCourseDispatchCycle({
+        ownerThreadId, baseSha, maxStarts: input.maxStarts, scheduledCycle: input.scheduledCycle,
+      });
     } else if (input.command === "start") {
       result = await beginCourseSupportCourseDispatch({ ownerThreadId, assignmentRef: input.assignmentRef! });
     } else if (input.command === "bind") {
