@@ -1,7 +1,7 @@
 # Simulator alerts
 
 Simulator mode discovers public venues with rentable golf simulator bays, saves
-ranked demand for one bay and a session duration, and sends official booking
+ranked demand for one bay with a hidden default 60-minute session, and sends official booking
 links when a complete matching session is observed. The golfer books on the
 official site. Tee Time Spot never selects a slot, holds inventory, reserves,
 pays, enters checkout, or sends an email on an operator's behalf.
@@ -10,6 +10,22 @@ The feature is disabled unless `SIMULATOR_MODE_ENABLED=true`. Apply both additiv
 database migrations and verify their readback before deploying code that queries
 `CourseOffering`; enable the feature only after the deployed provider path has
 been verified. Existing requests and searches default to `OUTDOOR`.
+
+## Shared search experience
+
+`Simulator` is one option beside `Any`, `9-hole` and `18-hole` in the normal
+search form. It uses the existing location, radius, date, time window, results,
+ranking, `Notify me` action and dashboard. A direct `/search?mode=SIMULATOR`
+link selects that option. There is no standalone simulator screen or session
+length control.
+
+The ordinary 1–4 player selector remains as saved context. It does not establish
+simulator capacity or decide which sessions qualify. One bay must have a complete
+supported 60-minute session inside the venue-local window. Known `maxPartySize`
+is venue information; unknown capacity does not block an otherwise verified
+public rental or full-session opening. The official site remains responsible
+for its group rules. Existing saved match displays retain the actual start, end
+and duration of the observed session.
 
 ## Identity and access
 
@@ -25,8 +41,10 @@ It does not negate independently reviewed public simulator rentals. A private
 room or bay is not a members-only business. Lessons, fittings, equipment sales,
 miniature golf and driving-range products do not establish rentable simulator
 inventory. Public simulator discovery may display unverified venues, but saving
-an alert requires a canonical verified offering, confirmed capacity and a
-supported duration. Client-supplied capability labels do not authorize saving.
+an alert requires a canonical verified public offering and evidence supporting
+the default session duration. Capacity evidence is optional metadata and player
+count is not an availability predicate. Client-supplied capability labels do not
+authorize saving.
 
 ## Discovery and caching
 
@@ -78,8 +96,25 @@ X-Golf's official booking page embeds its current Acuity tenant. The older vanit
 address points to a paused tenant and is not used. Acuity reads the public
 availability GET shown in its scheduler code for explicit duration products, including the
 provider's pooled `Any Available` resource. A private room is a rental resource,
-not evidence of a private-membership venue. The manifest limits party size to six
-despite the scheduler's higher value; no add-on duration is inferred as a session.
+not evidence of a private-membership venue. The manifest records six guests as
+conservative capacity metadata despite the scheduler's higher value; it does not
+use that metadata or the saved player count to qualify availability. No add-on
+duration is inferred as a session.
+
+## Session proof and scheduling
+
+Availability requires fresh successful offering evidence for the current source
+fingerprint and a complete supported interval inside the saved venue-local
+window. Keep the same bay or the provider's explicit pooled availability resource
+throughout the session; never combine unrelated bays or partial intervals. A
+changed source, stale observation or newer failure invalidates prior availability
+independently of the venue's outdoor monitoring state. Capacity may be unknown;
+public access, source identity and full-session duration must still be proven.
+
+Simulator demand uses the existing owner-scoped saved search, schedule version,
+check lease, durable Workflow, recovery and email-outbox protections. Provider
+booking windows determine the next useful check. Pending or failed checks must
+not become a current opening or suppress another selected venue's success.
 
 Public research receipts are stored outside the repository under
 `Documents/Codex/2026-10-05/simulator-mode-evidence/`, including

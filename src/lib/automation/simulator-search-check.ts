@@ -67,7 +67,7 @@ async function commitObservation(input: {
         const where = { teeSearchId_courseId_sourceId_startsAt: { teeSearchId: input.search.id, courseId: offering.courseId, sourceId, startsAt: slot.startsAt } };
         const previous = await transaction.teeTimeMatch.findUnique({ where });
         const data = { offeringId: offering.id, offeringSourceFingerprint: getSimulatorOfferingSourceFingerprint(offering), endsAt: slot.endsAt, resourceId: slot.resourceId, productId: slot.productId,
-          capacity: slot.maxPartySize, availableSpots: slot.maxPartySize, bookingUrl: slot.bookingUrl, evidenceUrl: input.evidenceUrl,
+          capacity: slot.maxPartySize, availableSpots: 1, bookingUrl: slot.bookingUrl, evidenceUrl: input.evidenceUrl,
           lastSeenAt: input.observedAt, lastConfirmedAt: input.observedAt, availabilityStatus: "AVAILABLE" as const, unavailableAt: null };
         const match = await transaction.teeTimeMatch.upsert({ where,
           create: { ...where.teeSearchId_courseId_sourceId_startsAt, ...data },
@@ -107,7 +107,7 @@ export async function runSimulatorSearchCheck(search: ActiveAutomationSearch, ru
     if (!(await isSearchCheckLeaseCurrent(lease))) throw new Error("Simulator search lease was lost");
     const offering = preference.offering;
     if (!offering || offering.kind !== "SIMULATOR" || !offering.active || offering.publicAccessStatus !== "PUBLIC" || !offering.bookingUrl ||
-      !offering.verifiedAt || !offering.evidenceUrl || !offering.maxPartySize || offering.maxPartySize < search.players ||
+      !offering.verifiedAt || !offering.evidenceUrl ||
       !offering.supportedDurationsMinutes.includes(search.durationMinutes)) {
       retryNeeded = true;
       courseResults.push({ courseId: preference.courseId, courseName: preference.course.name, rank: preference.rank,
@@ -133,12 +133,11 @@ export async function runSimulatorSearchCheck(search: ActiveAutomationSearch, ru
     }
     try {
       if (!claimed.offering.bookingUrl || !claimed.offering.verifiedAt || !claimed.offering.evidenceUrl ||
-        !claimed.offering.maxPartySize || claimed.offering.maxPartySize < search.players ||
         !claimed.offering.supportedDurationsMinutes.includes(search.durationMinutes)) throw new Error("Simulator rental details changed");
       // The shared lease normalizer accepts known families or real hostnames;
       // synthetic mode prefixes would collapse every simulator into UNKNOWN.
       const read = await runWithProviderRequestLease(new URL(claimed.offering.bookingUrl).hostname, () => fetchSimulatorAvailability({
-        offering: { ...claimed.offering, bookingUrl: claimed.offering.bookingUrl! }, date, durationMinutes: search.durationMinutes!, partySize: search.players, timeZone: preference.course.timeZone
+        offering: { ...claimed.offering, bookingUrl: claimed.offering.bookingUrl! }, date, durationMinutes: search.durationMinutes!, partySize: 1, timeZone: preference.course.timeZone
       }));
       if (!read.acquired) throw new Error("Simulator provider is busy");
       const result = read.value;
@@ -180,7 +179,7 @@ export async function runSimulatorSearchCheck(search: ActiveAutomationSearch, ru
 
 async function deliverSimulatorMatches(search: ActiveAutomationSearch, lease: SearchCheckLease) {
   const candidates = await prisma.teeTimeMatch.findMany({ where: { teeSearchId: search.id, offeringId: { not: null }, availabilityStatus: "AVAILABLE", alertStatus: "PENDING", startsAt: { gt: new Date() } }, include: { offering: true, course: true }, orderBy: { startsAt: "asc" } });
-  const matches = candidates.filter(match => isCurrentSimulatorMatch(match, new Date(), search.players) &&
+  const matches = candidates.filter(match => isCurrentSimulatorMatch(match, new Date()) &&
     match.endsAt && (match.endsAt.getTime() - match.startsAt.getTime()) === search.durationMinutes! * 60_000 &&
     search.preferences.some(preference => preference.offeringId === match.offeringId));
   const recipients = [search.user.email, ...search.additionalEmails];
@@ -194,7 +193,7 @@ async function deliverSimulatorMatches(search: ActiveAutomationSearch, lease: Se
           players: search.players, userTimeZone: search.userTimeZone, matches: matches.map(match => ({ matchId: match.id, availabilityCycle: match.availabilityCycle,
             mode: "SIMULATOR", offeringId: match.offeringId, courseId: match.courseId, courseName: match.course.name,
             courseRank: search.preferences.find(preference => preference.offeringId === match.offeringId)?.rank, courseTimeZone: match.course.timeZone,
-            startsAt: match.startsAt.toISOString(), endsAt: match.endsAt?.toISOString(), availableSpots: match.capacity ?? search.players,
+            startsAt: match.startsAt.toISOString(), endsAt: match.endsAt?.toISOString(), availableSpots: 1,
             bookingUrl: match.bookingUrl, resourceId: match.resourceId, productId: match.productId, isNew: true })) }) }
     });
   }

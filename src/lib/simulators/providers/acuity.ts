@@ -35,9 +35,10 @@ export async function fetchAcuitySimulatorAvailability(input: SimulatorAvailabil
   const description = typeof business.description === "string" ? textContent(parse(business.description)) : "";
   const capacity = description.match(/up\s+to\s+(\d{1,2})\s+(?:people|players|guests)\s+per\s+bay/iu);
   const liveCapacity = Number(capacity?.[1]);
-  if (!Number.isInteger(liveCapacity) || liveCapacity < 1 || liveCapacity > 20 || input.offering.maxPartySize === null) throw sourceError("The official simulator bay capacity is not verified");
-  const maxPartySize = Math.min(liveCapacity, input.offering.maxPartySize);
-  if (input.partySize > maxPartySize) throw new SimulatorAvailabilityError("PARTY_TOO_LARGE", "This simulator bay cannot accommodate the requested group");
+  if (capacity && (!Number.isInteger(liveCapacity) || liveCapacity < 1 || liveCapacity > 20)) throw sourceError("The official simulator bay capacity is invalid");
+  const maxPartySize = capacity
+    ? Math.min(liveCapacity, input.offering.maxPartySize ?? liveCapacity)
+    : input.offering.maxPartySize;
   const product = selectPublicRentalProduct(business, rentalIds.map(String), input.durationMinutes);
   const readUrl = new URL("/api/scheduling/v1/availability/times", ORIGIN);
   readUrl.search = new URLSearchParams({ owner: ownerKey, calendarId: "any", appointmentTypeId: product.id, startDate: input.date, timezone: input.timeZone }).toString();

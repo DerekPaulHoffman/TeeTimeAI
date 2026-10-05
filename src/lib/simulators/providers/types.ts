@@ -25,7 +25,7 @@ export type SimulatorAvailabilitySlot = {
   productId: string;
   startsAt: Date;
   endsAt: Date;
-  maxPartySize: number;
+  maxPartySize: number | null;
   bookingUrl: string;
 };
 

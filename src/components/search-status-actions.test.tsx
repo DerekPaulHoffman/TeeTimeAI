@@ -48,6 +48,32 @@ describe("SearchStatusActions", () => {
     expect(payload.coursePreferences).toEqual([{ id: "pref-a", rank: 1 }]);
   });
 
+  it("edits a simulator alert with the ordinary player selector and preserves its recipients and ranked courses", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<SearchStatusActions {...savedSearch} mode="SIMULATOR" initialAdditionalEmails={["friend@example.com"]} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    const players = screen.getByLabelText("Players") as HTMLSelectElement;
+    expect([...players.options].map(option => option.value)).toEqual(["1", "2", "3", "4"]);
+    expect(screen.queryByLabelText("Session length")).toBeNull();
+    expect(screen.queryByLabelText("Course layout")).toBeNull();
+    fireEvent.change(players, { target: { value: "4" } });
+    fireEvent.click(screen.getByRole("button", { name: "Move Tashua Knolls Golf Course up" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(refreshMock).toHaveBeenCalled());
+    expect(fetchMock).toHaveBeenCalledWith("/api/searches/search-1", expect.objectContaining({ method: "PATCH" }));
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({
+      mode: "SIMULATOR",
+      players: 4,
+      durationMinutes: 60,
+      requestedLayoutHoles: null,
+      additionalEmails: ["friend@example.com"],
+      coursePreferences: [{ id: "pref-b", rank: 1 }, { id: "pref-a", rank: 2 }]
+    });
+  });
+
   it("explains a past paused date and prevents starting it again", () => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);

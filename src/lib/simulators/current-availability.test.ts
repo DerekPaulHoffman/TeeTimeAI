@@ -15,7 +15,7 @@ function proof(): SimulatorMatchProof {
   return match;
 }
 describe("simulator match proof", () => {
-  it("accepts full-session proof for a verified bay's capacity", () => { expect(isCurrentSimulatorMatch(proof(), now, 6)).toBe(true); expect(isCurrentSimulatorMatch(proof(), now, 7)).toBe(false); });
+  it("accepts full-session proof independent of bay capacity", () => { const match = proof(); match.capacity = 1; expect(isCurrentSimulatorMatch(match, now)).toBe(true); });
   it("rejects stale, in-flight or later-failed sources independently of outdoor health", () => {
     for (const fields of [{ observationToken: "newer-source" }, { lastFailureAt: now }, { monitoringState: "UNKNOWN" }, { bookingUrl: "https://official.example/changed" }, { active: false }, { verifiedAt: null }, { evidenceUrl: null }]) {
       const match = proof(); Object.assign(match.offering!, fields); expect(isCurrentSimulatorMatch(match, now)).toBe(false);
@@ -28,7 +28,7 @@ describe("simulator match proof", () => {
   });
   it("retains one search's fresh matches after another date's successful source check", () => {
     const match = proof(); match.offering!.monitoringVerifiedAt = new Date("2026-10-05T13:59:30Z");
-    expect(isCurrentSimulatorMatch(match, now, 4)).toBe(true);
+    expect(isCurrentSimulatorMatch(match, now)).toBe(true);
   });
   it("rejects an old match after a different source is verified at the same booking URL", () => {
     const match = proof(); match.offering!.providerMetadata = { locationId: "second" };

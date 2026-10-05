@@ -16,25 +16,26 @@ const tomorrow = () => {
 };
 
 describe("teeSearchInputSchema", () => {
-  it("accepts eight-player simulator demand with a selected verified offering reference", () => {
+  it("accepts normal player counts and a selected verified simulator offering reference", () => {
     const parsed = teeSearchInputSchema.parse({
       mode: "SIMULATOR",
       durationMinutes: 120,
       date: tomorrow(),
       startTime: "13:00",
       endTime: "17:00",
-      players: 8,
+      players: 4,
       courses: [{ offeringId: "sim-a", courseId: "venue-a", name: "Simulator A", rank: 1, latitude: 41, longitude: -73 }],
     });
     expect(parsed.mode).toBe("SIMULATOR");
     expect(parsed.durationMinutes).toBe(120);
   });
 
-  it("rejects mixed mode, missing duration, and outdoor groups above four", () => {
+  it("rejects mixed mode and groups above four while allowing default simulator duration", () => {
     const base = {
       date: tomorrow(), startTime: "13:00", endTime: "17:00",
       courses: [{ name: "Venue", rank: 1, latitude: 41, longitude: -73, offeringId: "sim-a" }],
     };
+    expect(teeSearchInputSchema.parse({ ...base, mode: "SIMULATOR", players: 4 }).durationMinutes).toBeUndefined();
     expect(() => teeSearchInputSchema.parse({ ...base, mode: "SIMULATOR", players: 6 })).toThrow();
     expect(() => teeSearchInputSchema.parse({ ...base, mode: "OUTDOOR", players: 5 })).toThrow();
     expect(() => teeSearchInputSchema.parse({ ...base, mode: "SIMULATOR", durationMinutes: 120, players: 9 })).toThrow();

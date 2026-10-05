@@ -46,7 +46,7 @@ describe("tee time matching", () => {
       { ...base, sourceId: "split-bays", resourceId: "" },
       { ...base, sourceId: "wrong-offering", offeringId: "sim-b" },
     ];
-    expect(filterSimulatorSessionsForSearch(simulatorSearch, sessions, "America/New_York")).toEqual([base]);
+    expect(filterSimulatorSessionsForSearch(simulatorSearch, sessions, "America/New_York")).toEqual([base, sessions[3]]);
   });
 
   it("accepts a late local session when its UTC date is the next day", () => {

@@ -37,11 +37,11 @@ export default async function SearchPage({ searchParams }: { searchParams?: Prom
           src="https://images.unsplash.com/photo-1535131749006-b7f58c99034b?auto=format&fit=crop&w=2400&q=80"
         />
         <p className="eyebrow">Set up your alert</p>
-        <h1>{simulatorEnabled ? "Find golf tee times or simulator sessions." : "Find public golf tee times and set a free alert."}</h1>
+        <h1>Find public golf tee times and set a free alert.</h1>
         <p className="search-page-header-copy">
-          {simulatorEnabled ? "Choose outdoor golf or a simulator session and create a free alert. " : "Search nearby public golf courses and create a free tee time alert. "}
+          Search nearby public golf courses and create a free tee time alert.{" "}
           When a matching opening appears, we email the official booking link
-          and you book directly with the {simulatorEnabled ? "venue" : "course"}.
+          and you book directly with the course.
         </p>
       </div>
       <TeeTimeIntake

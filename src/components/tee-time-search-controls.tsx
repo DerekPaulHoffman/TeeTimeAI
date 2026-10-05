@@ -11,7 +11,7 @@ import {
   MIN_COURSE_SEARCH_RADIUS_MILES
 } from "@/lib/places/radius";
 import { MAX_PLAYERS_PER_SEARCH } from "@/lib/validation/search-constraints";
-import { SIMULATOR_DURATION_OPTIONS_MINUTES, type SearchMode } from "@/lib/searches/search-mode";
+import type { SearchMode } from "@/lib/searches/search-mode";
 
 export type CourseLayoutFilter = "any" | "9" | "18";
 
@@ -52,8 +52,8 @@ export function formatCompactTimeWindow(startTime: string, endTime: string) {
 
 export function TeeTimeSearchControls({
   mode = "OUTDOOR",
-  durationMinutes = 60,
-  onDurationChange,
+  simulatorEnabled = false,
+  onModeChange,
   date,
   endTime,
   holeFilter,
@@ -81,8 +81,8 @@ export function TeeTimeSearchControls({
   startTime
 }: {
   mode?: SearchMode;
-  durationMinutes?: number;
-  onDurationChange?: (value: number) => void;
+  simulatorEnabled?: boolean;
+  onModeChange?: (value: SearchMode) => void;
   date: string;
   endTime: string;
   holeFilter: CourseLayoutFilter;
@@ -139,7 +139,7 @@ export function TeeTimeSearchControls({
 
   return (
     <form
-      aria-label={mode === "SIMULATOR" ? "Simulator search filters" : "Course search filters"}
+      aria-label="Course search filters"
       className="figma-search-toolbar"
       onSubmit={(event) => {
         event.preventDefault();
@@ -185,7 +185,7 @@ export function TeeTimeSearchControls({
               onChange={(event) => onPlayersChange(Number(event.target.value))}
             >
               {Array.from(
-                { length: mode === "SIMULATOR" ? 8 : MAX_PLAYERS_PER_SEARCH },
+                { length: MAX_PLAYERS_PER_SEARCH },
                 (_, index) => index + 1
               ).map((count) => (
                 <option key={count} value={count}>
@@ -301,12 +301,7 @@ export function TeeTimeSearchControls({
             Times use each course&apos;s local time zone.
           </span>
         </div>
-        {mode === "SIMULATOR" ? <label className="figma-hole-filter simulator-duration" htmlFor="session-duration">
-          <strong>Session length</strong>
-          <select id="session-duration" value={durationMinutes} onChange={event => onDurationChange?.(Number(event.target.value))}>
-            {SIMULATOR_DURATION_OPTIONS_MINUTES.map(minutes => <option key={minutes} value={minutes}>{minutes} minutes</option>)}
-          </select>
-        </label> : <div className="figma-hole-filter" aria-label="Course layout" role="group">
+        <div className={`figma-hole-filter${simulatorEnabled ? " has-simulator" : ""}`} aria-label="Course layout" role="group">
           <strong>
             <span className="figma-desktop-copy">Course layout</span>
             <span className="figma-mobile-copy">Holes</span>
@@ -315,8 +310,8 @@ export function TeeTimeSearchControls({
             {(["any", "9", "18"] as const).map((value) => (
               <button
                 aria-label={value === "any" ? "Any" : `${value}-hole`}
-                aria-pressed={holeFilter === value}
-                className={holeFilter === value ? "is-active" : ""}
+                aria-pressed={mode === "OUTDOOR" && holeFilter === value}
+                className={mode === "OUTDOOR" && holeFilter === value ? "is-active" : ""}
                 key={value}
                 onClick={() => onHoleFilterChange(value)}
                 type="button"
@@ -331,8 +326,18 @@ export function TeeTimeSearchControls({
                 )}
               </button>
             ))}
+            {simulatorEnabled ? (
+              <button
+                aria-pressed={mode === "SIMULATOR"}
+                className={mode === "SIMULATOR" ? "is-active" : ""}
+                onClick={() => onModeChange?.("SIMULATOR")}
+                type="button"
+              >
+                Simulator
+              </button>
+            ) : null}
           </div>
-        </div>}
+        </div>
         <span className="figma-filter-divider" aria-hidden="true" />
         <div className="figma-distance-group">
           <div className="figma-distance-heading">
@@ -362,7 +367,7 @@ export function TeeTimeSearchControls({
               }}
             />
           </label>
-          {holeFilter !== "any" ||
+          {mode === "SIMULATOR" || holeFilter !== "any" ||
           searchRadiusMiles !== DEFAULT_COURSE_SEARCH_RADIUS_MILES ? (
             <button
               className="figma-reset-filters"

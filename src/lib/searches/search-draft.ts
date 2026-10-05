@@ -3,8 +3,10 @@ import type { CourseCandidate } from "@/lib/places/google";
 import { MAX_COURSE_PREFERENCES } from "@/lib/validation/search-constraints";
 
 import { sanitizeSearchPrefill } from "./search-prefill";
+import type { SearchMode } from "./search-mode";
 
 export const SEARCH_DRAFT_STORAGE_KEY = "tee-time-spot:search-draft:v1";
+export const SIMULATOR_SEARCH_DRAFT_STORAGE_KEY = "tee-time-spot:search-draft:simulator:v1";
 
 const MAX_STORED_COURSES = 100;
 const ALERT_SUPPORT_VALUES = new Set<CourseAlertSupport>([
@@ -25,6 +27,7 @@ const MONITORING_SUPPORT_VALUES = new Set<CourseMonitoringSupport>([
 ]);
 
 export type SearchDraft = {
+  mode?: SearchMode;
   location?: string;
   players?: number;
   date?: string;
@@ -37,55 +40,59 @@ export type SearchDraft = {
   selectedCourses: CourseCandidate[];
 };
 
-let volatileDraft: SearchDraft | undefined;
+const volatileDrafts: Partial<Record<SearchMode, SearchDraft>> = {};
 
-export function storeSearchDraft(draft: SearchDraft) {
-  const safeDraft = sanitizeSearchDraft(draft);
-  volatileDraft = safeDraft;
+export function storeSearchDraft(draft: SearchDraft, mode: SearchMode = "OUTDOOR") {
+  const safeDraft = sanitizeSearchDraft(draft, mode);
+  volatileDrafts[mode] = safeDraft;
 
   if (typeof window === "undefined") {
     return;
   }
 
   try {
-    window.sessionStorage.setItem(SEARCH_DRAFT_STORAGE_KEY, JSON.stringify(safeDraft));
+    window.sessionStorage.setItem(searchDraftStorageKey(mode), JSON.stringify(safeDraft));
   } catch {
     // The in-memory fallback still covers client navigation when storage is unavailable.
   }
 }
 
-export function readSearchDraft() {
+export function readSearchDraft(mode: SearchMode = "OUTDOOR") {
   if (typeof window === "undefined") {
-    return volatileDraft;
+    return volatileDrafts[mode];
   }
 
   try {
-    const storedValue = window.sessionStorage.getItem(SEARCH_DRAFT_STORAGE_KEY);
+    const storedValue = window.sessionStorage.getItem(searchDraftStorageKey(mode));
     return storedValue
-      ? sanitizeSearchDraft(JSON.parse(storedValue) as unknown)
-      : volatileDraft;
+      ? sanitizeSearchDraft(JSON.parse(storedValue) as unknown, mode)
+      : volatileDrafts[mode];
   } catch {
-    return volatileDraft;
+    return volatileDrafts[mode];
   }
 }
 
-export function clearSearchDraft() {
-  volatileDraft = undefined;
+export function clearSearchDraft(mode: SearchMode = "OUTDOOR") {
+  delete volatileDrafts[mode];
 
   if (typeof window === "undefined") {
     return;
   }
 
   try {
-    window.sessionStorage.removeItem(SEARCH_DRAFT_STORAGE_KEY);
+    window.sessionStorage.removeItem(searchDraftStorageKey(mode));
   } catch {
     // The volatile draft has still been cleared.
   }
 }
 
-export function sanitizeSearchDraft(value: unknown): SearchDraft {
+function searchDraftStorageKey(mode: SearchMode) {
+  return mode === "SIMULATOR" ? SIMULATOR_SEARCH_DRAFT_STORAGE_KEY : SEARCH_DRAFT_STORAGE_KEY;
+}
+
+export function sanitizeSearchDraft(value: unknown, mode: SearchMode = "OUTDOOR"): SearchDraft {
   const record = isRecord(value) ? value : {};
-  const prefill = sanitizeSearchPrefill(record);
+  const prefill = sanitizeSearchPrefill({ ...record, mode });
 
   return {
     location: prefill.location,
@@ -96,37 +103,40 @@ export function sanitizeSearchDraft(value: unknown): SearchDraft {
     holes: prefill.holes,
     radius: prefill.radius,
     coordinates: prefill.coordinates,
-    courses: sanitizeCourseList(record.courses, MAX_STORED_COURSES),
-    selectedCourses: sanitizeCourseList(record.selectedCourses, MAX_COURSE_PREFERENCES)
+    ...(mode === "SIMULATOR" ? { mode } : {}),
+    courses: sanitizeCourseList(record.courses, MAX_STORED_COURSES, mode),
+    selectedCourses: sanitizeCourseList(record.selectedCourses, MAX_COURSE_PREFERENCES, mode)
   };
 }
 
-function sanitizeCourseList(value: unknown, maximum: number) {
+function sanitizeCourseList(value: unknown, maximum: number, mode: SearchMode) {
   if (!Array.isArray(value)) {
     return [];
   }
 
   const courses: CourseCandidate[] = [];
   const seenPlaceIds = new Set<string>();
+  const seenOfferingIds = new Set<string>();
 
   for (const candidate of value.slice(0, maximum)) {
-    const course = sanitizeCourseCandidate(candidate);
-    if (!course || seenPlaceIds.has(course.googlePlaceId)) {
+    const course = sanitizeCourseCandidate(candidate, mode);
+    if (!course || seenPlaceIds.has(course.googlePlaceId) || (course.offeringId && seenOfferingIds.has(course.offeringId))) {
       continue;
     }
     seenPlaceIds.add(course.googlePlaceId);
+    if (course.offeringId) seenOfferingIds.add(course.offeringId);
     courses.push(course);
   }
 
   return courses;
 }
 
-function sanitizeCourseCandidate(value: unknown): CourseCandidate | undefined {
+function sanitizeCourseCandidate(value: unknown, mode: SearchMode): CourseCandidate | undefined {
   if (!isRecord(value)) {
     return undefined;
   }
 
-  const base = sanitizeSearchPrefill({ selectedCourse: value }).selectedCourse;
+  const base = sanitizeSearchPrefill({ selectedCourse: value, mode }).selectedCourse;
   if (!base) {
     return undefined;
   }
@@ -158,21 +168,26 @@ function sanitizeCourseCandidate(value: unknown): CourseCandidate | undefined {
     ? value.publicAccessStatus
     : undefined;
 
-  return {
+  const sharedCandidate: CourseCandidate = {
     ...base,
     ...(publicAccessStatus ? { publicAccessStatus } : {}),
     ...(distanceMeters !== undefined ? { distanceMeters } : {}),
     ...(rating !== undefined ? { rating } : {}),
-    ...(par !== undefined ? { par } : {}),
-    ...(safeHttpUrl(value.parEvidenceUrl) ? { parEvidenceUrl: safeHttpUrl(value.parEvidenceUrl) } : {}),
-    ...(safeDate(value.parVerifiedAt) ? { parVerifiedAt: safeDate(value.parVerifiedAt) } : {}),
     ...(phone ? { phone } : {}),
     ...(photoReference ? { photoReference } : {}),
     ...(photoAttributions.length > 0 ? { photoAttributions } : {}),
+    ...(alertSupport ? { alertSupport } : {}),
+    ...(monitoringSupport ? { monitoringSupport } : {})
+  };
+  if (mode === "SIMULATOR") return sharedCandidate;
+
+  return {
+    ...sharedCandidate,
+    ...(par !== undefined ? { par } : {}),
+    ...(safeHttpUrl(value.parEvidenceUrl) ? { parEvidenceUrl: safeHttpUrl(value.parEvidenceUrl) } : {}),
+    ...(safeDate(value.parVerifiedAt) ? { parVerifiedAt: safeDate(value.parVerifiedAt) } : {}),
     ...(priceEstimate ? { priceEstimate } : {}),
     ...(bookableHoleCounts.length > 0 ? { bookableHoleCounts } : {}),
-    ...(alertSupport ? { alertSupport } : {}),
-    ...(monitoringSupport ? { monitoringSupport } : {}),
     ...(layoutHoleCounts.length > 0 ? { layoutHoleCounts } : {}),
     ...(layoutHolesStatus ? { layoutHolesStatus } : {}),
     ...(safeHttpUrl(value.layoutHolesEvidenceUrl)
@@ -251,7 +266,7 @@ function safeHttpUrl(value: unknown) {
   }
   try {
     const url = new URL(value);
-    return url.protocol === "http:" || url.protocol === "https:"
+    return (url.protocol === "http:" || url.protocol === "https:") && !url.username && !url.password
       ? value.slice(0, 500)
       : undefined;
   } catch {

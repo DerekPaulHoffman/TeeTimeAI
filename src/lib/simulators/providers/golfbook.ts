@@ -61,8 +61,10 @@ export function parseGolfBookSlots(html: string, input: SimulatorAvailabilityInp
     const id = attr(head, "id").slice(3);
     const capacityText = descendants(head).map((element) => attr(element, "onclick")).join(" ");
     const capacities = [...capacityText.matchAll(/up\s+to\s+(\d{1,2})\s+players/giu)].map((match) => Number(match[1]));
-    if (!PUBLIC_ID.test(id) || !capacities.length || capacities.some((value) => value !== capacities[0]) || capacities[0] < 1 || capacities[0] > 20) throw schemaError("The official simulator bay capacity is not verified");
-    return { id, maxPartySize: Math.min(input.offering.maxPartySize ?? capacities[0], capacities[0]), free: new Set<number>() };
+    if (!PUBLIC_ID.test(id) || capacities.some((value) => value !== capacities[0] || value < 1 || value > 20)) throw schemaError("The official simulator bay identity or capacity is invalid");
+    const liveCapacity = capacities[0] ?? null;
+    const maxPartySize = liveCapacity === null ? input.offering.maxPartySize : Math.min(input.offering.maxPartySize ?? liveCapacity, liveCapacity);
+    return { id, maxPartySize, free: new Set<number>() };
   });
   if (new Set(resources.map((resource) => resource.id)).size !== resources.length) throw schemaError("The public simulator bay identifiers are ambiguous");
   const bodies = descendants(table).filter((element) => element.tagName === "tbody");
@@ -93,7 +95,6 @@ export function parseGolfBookSlots(html: string, input: SimulatorAvailabilityInp
   }
   const slots: SimulatorAvailabilitySlot[] = [];
   for (const resource of resources) {
-    if (input.partySize > resource.maxPartySize) continue;
     for (const minute of rowMinutes) {
       let fullInterval = true;
       for (let offset = 0; offset < input.durationMinutes; offset += increment) {
@@ -106,7 +107,6 @@ export function parseGolfBookSlots(html: string, input: SimulatorAvailabilityInp
       slots.push({ sourceId: `golfbook:${input.offering.id}:${templateId}:${resource.id}:${startsAt.toISOString()}`, offeringId: input.offering.id, resourceId: resource.id, productId: templateId, startsAt, endsAt, maxPartySize: resource.maxPartySize, bookingUrl: input.offering.bookingUrl });
     }
   }
-  if (!resources.some((resource) => input.partySize <= resource.maxPartySize)) throw new SimulatorAvailabilityError("PARTY_TOO_LARGE", "This simulator bay cannot accommodate the requested group");
   return slots.sort((a, b) => a.startsAt.getTime() - b.startsAt.getTime() || a.resourceId.localeCompare(b.resourceId));
 }
 

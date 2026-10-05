@@ -60,10 +60,11 @@ describe("GolfBook public simulator availability", () => {
   });
   it("keeps independent named bays and their capacity", () => {
     const slots = parseGolfBookSlots(fixture([[1, 1], [1, 1], [4, 4]]).replace("RH/LH up to 6", "RH/LH up to 2"), { ...input, partySize: 3 }, "53");
-    expect(slots.map((slot) => slot.resourceId)).toEqual(["1"]);
+    expect(slots.map((slot) => slot.resourceId)).toEqual(["1", "20"]);
+    expect(slots.find((slot) => slot.resourceId === "20")?.maxPartySize).toBe(2);
   });
   it("uses the more conservative saved capacity", () => {
-    expect(() => parseGolfBookSlots(fixture(), { ...input, partySize: 3, offering: { ...input.offering, maxPartySize: 2 } }, "53")).toThrow("cannot accommodate");
+    expect(parseGolfBookSlots(fixture(), { ...input, partySize: 3, offering: { ...input.offering, maxPartySize: 2 } }, "53")[0].maxPartySize).toBe(2);
   });
   it("uses current source capacity when it has not been saved", () => {
     expect(parseGolfBookSlots(fixture(), { ...input, offering: { ...input.offering, maxPartySize: null } }, "53")[0].maxPartySize).toBe(6);
@@ -91,7 +92,6 @@ describe("GolfBook public simulator availability", () => {
     expect(() => parseGolfBookSlots(html, input, "53")).toThrow();
   });
   it.each([
-    ["capacity", fixture().replaceAll("up to 6 players", "many players")],
     ["unknown status", fixture().replace("status_2", "status_9")],
     ["missing action", fixture().replace(/onclick="redirect\('reserve','date=\d+&lane=1&templateId=53'\)"/u, "")],
     ["duplicate resource", fixture().replace('id="th_20"', 'id="th_1"')],
@@ -101,6 +101,12 @@ describe("GolfBook public simulator availability", () => {
     ["calendar missing", "<html>Sign in</html>"]
   ])("fails closed when %s changes", (_label, html) => {
     expect(() => parseGolfBookSlots(html, input, "53")).toThrow();
+  });
+  it("keeps public named-bay intervals when group capacity is unknown", () => {
+    const slots = parseGolfBookSlots(fixture().replaceAll("up to 6 players", "many players"),
+      { ...input, offering: { ...input.offering, maxPartySize: null } }, "53");
+    expect(slots.length).toBeGreaterThan(0);
+    expect(slots[0].maxPartySize).toBeNull();
   });
   it("honors the public minimum session length", () => {
     expect(() => parseGolfBookSlots(fixture(), { ...input, durationMinutes: 30 }, "53")).toThrow("session length");

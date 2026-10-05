@@ -60,9 +60,9 @@ Not allowed:
 
 ### Simulator Mode
 
-Simulator alerts save one bay for the whole group, a session duration, a venue-local time window, and up to five ranked venues. `CourseOffering` keeps simulator access, booking links, capacity, provider configuration and health independent from outdoor golf at the same venue. Existing alerts default to outdoor mode; a saved alert's mode cannot change.
+`Simulator` is an option beside `Any`, `9-hole` and `18-hole` in the normal search form. It uses the same results, ranking, `Notify me` action and dashboard, with no standalone screen or session-length control. Simulator alerts save a hidden default 60-minute session for one bay, a venue-local time window, and up to five ranked venues. The normal 1–4 player selector remains saved context; it is not a simulator capacity or availability filter. `CourseOffering` keeps simulator access, booking links, supported durations, provider configuration and health independent from outdoor golf at the same venue. Existing alerts default to outdoor mode; a saved alert's mode cannot change.
 
-The Connecticut pilot includes the six Golf Lounge 18 locations, ZSTRICT Stamford, and the reviewed X-Golf Stratford offering. Nationwide simulator discovery uses separate Places queries and caches. Unverified rentals can be browsed on their official sites; an alert requires reviewed capacity and duration evidence. See [simulator setup, provider evidence, and rollout](docs/simulator-mode.md). `SIMULATOR_MODE_ENABLED` defaults off until migrations, provider verification and deployment are complete.
+The Connecticut pilot includes the six Golf Lounge 18 locations, ZSTRICT Stamford, and the reviewed X-Golf Stratford offering. Nationwide simulator discovery uses separate Places queries and caches behind the shared UI. Unverified rentals can be browsed on their official sites; an alert requires verified public access and supported full-session duration evidence. Known `maxPartySize` is metadata; unknown capacity does not block otherwise verified public availability. Current source proof, venue-local window fit and the existing scheduling protections remain required. See [simulator setup, provider evidence, and rollout](docs/simulator-mode.md). `SIMULATOR_MODE_ENABLED` defaults off until migrations, provider verification and deployment are complete.
 
 ### Public Course Discovery
 

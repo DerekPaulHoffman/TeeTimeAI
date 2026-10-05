@@ -14,7 +14,7 @@ function uniqueDisplaySessions(matches: SimulatorMatch[]) {
   const sessions = new Map<string, SimulatorMatch>();
   for (const match of matches) {
     const key = [match.offeringId ?? match.courseName, match.startsAt.toISOString(),
-      match.endsAt?.toISOString() ?? "", match.capacity ?? "", match.bookingUrl].join("\u0000");
+      match.endsAt?.toISOString() ?? "", match.bookingUrl].join("\u0000");
     if (!sessions.has(key)) sessions.set(key, match);
   }
   return [...sessions.values()];
@@ -60,14 +60,14 @@ export function renderSimulatorAlertHtml(input: SimulatorEmailInput) {
     return `<li style="margin:0 0 20px"><strong>${escapeHtml(match.courseName)}</strong><br>` +
       `${escapeHtml(localDateTime(match.startsAt, zone))}–${escapeHtml(localDateTime(end, zone))} (${escapeHtml(zone)})<br>` +
       userTime +
-      `${input.durationMinutes} minutes · up to ${match.capacity ?? input.players ?? 1} players<br>` +
+      `${input.durationMinutes} minutes · one simulator bay<br>` +
       `<a href="${escapeHtml(match.bookingUrl)}">Open the official booking page</a></li>`;
   }).join("");
   return `<!doctype html><html lang="en"><body style="font:16px Arial,sans-serif;color:#123124;max-width:620px;margin:auto;padding:28px">` +
     `<h1>Simulator time opened</h1><p>A session matches your alert. Availability can change; you book direct with the venue on its official site.</p>` +
     `<ul style="padding-left:22px">${sessions}</ul>` +
     (unique.length > 20 ? `<p>And ${unique.length - 20} more matching session times. Open an official booking page above to see current availability.</p>` : "") +
-    `<p>Requested: ${escapeHtml(input.targetDate ?? "your date")}, ${escapeHtml(input.startTime ?? "")}–${escapeHtml(input.endTime ?? "")}, ${input.players ?? 1} players.</p>` +
+    `<p>Requested: ${escapeHtml(input.targetDate ?? "your date")}, ${escapeHtml(input.startTime ?? "")}–${escapeHtml(input.endTime ?? "")}. Confirm your group's fit with the venue before booking.</p>` +
     (input.stopUrl ? `<p><a href="${escapeHtml(input.stopUrl)}">Stop this alert</a></p>` : "") +
     `</body></html>`;
 }
@@ -97,7 +97,7 @@ export function renderSimulatorStatusHtml(input: SimulatorStatusInput) {
   }).join("");
   return `<!doctype html><html lang="en"><body style="font:16px Arial,sans-serif;color:#123124;max-width:620px;margin:auto;padding:28px">` +
     `<h1>${input.kind === "setup" ? "Your simulator alert is saved" : "Your simulator alert update"}</h1>` +
-    `<p>We are watching for a ${input.durationMinutes}-minute session for ${input.players} players on ${escapeHtml(input.targetDate)} between ${escapeHtml(input.startTime)} and ${escapeHtml(input.endTime)}.</p>` +
+    `<p>We are watching for a ${input.durationMinutes}-minute simulator session on ${escapeHtml(input.targetDate)} between ${escapeHtml(input.startTime)} and ${escapeHtml(input.endTime)}. Confirm your group's fit with the venue before booking.</p>` +
     `<ul>${rows}</ul><p>When an opening matches, we will send its official booking link. You book direct with the venue.</p>` +
     (input.stopUrl ? `<p><a href="${escapeHtml(input.stopUrl)}">Stop this alert</a></p>` : "") +
     `</body></html>`;

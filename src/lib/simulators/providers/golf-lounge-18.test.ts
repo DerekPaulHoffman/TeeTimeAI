@@ -135,16 +135,17 @@ describe("Golf Lounge 18 public simulator availability", () => {
     expect(result.slots[0].productId).toBe("8204982");
   });
 
-  it("uses current public guest capacity and rejects a larger group before the read", async () => {
+  it("keeps current public guest capacity as metadata without filtering the bay", async () => {
     const fetchImpl = mockReads();
-    await expect(fetchGolfLounge18Availability({ ...input, partySize: 7, offering: { ...input.offering, maxPartySize: 8 } }, fetchImpl)).rejects.toMatchObject({ code: "PARTY_TOO_LARGE" });
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const result = await fetchGolfLounge18Availability({ ...input, partySize: 7, offering: { ...input.offering, maxPartySize: 8 } }, fetchImpl);
+    expect(result.slots[0].maxPartySize).toBe(6);
   });
 
-  it("requires verified public guest capacity instead of trusting saved optimistic metadata", async () => {
-    const fetchImpl = mockReads([], landing.replace("Maximum up to 6 guests per bay.", "Groups welcome."));
-    await expect(fetchGolfLounge18Availability(input, fetchImpl)).rejects.toMatchObject({ code: "SCHEMA_CHANGED" });
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  it("keeps a public bay session when group capacity is unknown", async () => {
+    const fetchImpl = mockReads(undefined, landing.replace("Maximum up to 6 guests per bay.", "Groups welcome."));
+    const result = await fetchGolfLounge18Availability({ ...input, offering: { ...input.offering, maxPartySize: null } }, fetchImpl);
+    expect(result.slots).toHaveLength(1);
+    expect(result.slots[0].maxPartySize).toBeNull();
   });
 
   it.each(["2026-02-30", "2026-13-01", "2026-10-10T00:00:00Z"])("rejects an invalid venue date: %s", async (date) => {

@@ -1,9 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   clearSearchDraft,
-  SEARCH_DRAFT_STORAGE_KEY
+  SEARCH_DRAFT_STORAGE_KEY,
+  SIMULATOR_SEARCH_DRAFT_STORAGE_KEY
 } from "@/lib/searches/search-draft";
 import {
   WEBSITE_SYNTHETIC_MULTI_CYCLE_HEADER,
@@ -82,7 +83,7 @@ describe("TeeTimeIntake", () => {
     fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
 
     await screen.findByText("Your alert is created");
-    expect(screen.queryByRole("dialog", { name: "Notify me" })).toBeNull();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Notify me" })).toBeNull());
     expect(screen.getByRole("link", { name: "View my alerts" }).getAttribute("href")).toBe("/dashboard?created=date-boundary");
     expect(pushMock).not.toHaveBeenCalled();
     expect(window.sessionStorage.getItem(SEARCH_DRAFT_STORAGE_KEY)).toBeNull();
@@ -144,7 +145,9 @@ describe("TeeTimeIntake", () => {
     vi.unstubAllGlobals();
     vi.useRealTimers();
     clearSearchDraft();
+    clearSearchDraft("SIMULATOR");
     window.sessionStorage.clear();
+    window.history.replaceState({}, "", "/search");
     Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
   });
 
@@ -636,11 +639,90 @@ describe("TeeTimeIntake", () => {
     await waitFor(() =>
       expect(fetchMock).toHaveBeenCalledWith(
         expect.stringContaining("/api/courses/discover?"),
-        { cache: "no-store" }
+        expect.objectContaining({ cache: "no-store" })
       )
     );
     expect(await screen.findAllByText(/\$39.*\$43/)).not.toHaveLength(0);
     expect(screen.queryByText(/\$39.*\$500/)).toBeNull();
+  });
+
+  it("uses the normal notification flow for one simulator bay regardless of the player count", async () => {
+    const simulator = {
+      ...dateBoundaryCourse("Shared Venue Simulator", "America/New_York"),
+      courseId: "shared-outdoor-course",
+      mode: "SIMULATOR",
+      offeringId: "public-simulator-offering",
+      publicAccessStatus: "PUBLIC",
+      maxPartySize: 2,
+      supportedDurationsMinutes: [60],
+      monitoringReadiness: "VERIFYING",
+      profileUrl: "/courses/outdoor-only-guide",
+      layoutHoleCounts: [18],
+      par: 72
+    };
+    window.sessionStorage.setItem(SIMULATOR_SEARCH_DRAFT_STORAGE_KEY, JSON.stringify({
+      location: "Fairfield, CT", date: "2099-10-03", startTime: "09:00", endTime: "13:00",
+      players: 4, courses: [simulator], selectedCourses: [simulator]
+    }));
+    const fetchMock = mockDateBoundaryRequests();
+    render(<TeeTimeIntake {...signedInAccountProps} simulatorEnabled initialValues={{ mode: "SIMULATOR" }} />);
+    const layout = screen.getByRole("group", { name: "Course layout" });
+    expect(within(layout).getAllByRole("button").map(button => button.textContent)).toEqual(["Any", "9-hole9H", "18-hole18H", "Simulator"]);
+    expect(screen.queryByRole("combobox", { name: "Session length" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Outdoor golf" })).toBeNull();
+    await screen.findByRole("dialog", { name: "Notify me" });
+    expect((screen.getByRole("combobox", { name: /^Players/ }) as HTMLSelectElement).value).toBe("4");
+    expect(screen.queryByRole("link", { name: /course guide/i })).toBeNull();
+    expect(document.querySelector(".course-row")?.textContent).not.toMatch(/Par 72|18H/);
+    fireEvent.click(screen.getByRole("button", { name: "Start getting alerts" }));
+    await screen.findByText("Your alert is created");
+    const save = fetchMock.mock.calls.find(([input]) => input === "/api/searches");
+    expect(JSON.parse(String(save?.[1]?.body))).toEqual(expect.objectContaining({
+      mode: "SIMULATOR", players: 4, durationMinutes: 60, requestedLayoutHoles: null,
+      courses: [expect.objectContaining({ offeringId: "public-simulator-offering" })]
+    }));
+    expect(window.sessionStorage.getItem(SIMULATOR_SEARCH_DRAFT_STORAGE_KEY)).toBeNull();
+    expect(fetchMock.mock.calls.some(([input]) => /known-times|check-times|local-reader/.test(String(input)))).toBe(false);
+  });
+
+  it("discards a late outdoor discovery response after switching to simulators", async () => {
+    let finishOutdoor: (response: Response) => void = () => {};
+    const delayedOutdoor = new Promise<Response>(resolve => { finishOutdoor = resolve; });
+    let outdoorSignal: AbortSignal | null | undefined;
+    const simulator = {
+      ...dateBoundaryCourse("Current Simulator", "America/New_York"),
+      mode: "SIMULATOR", offeringId: "current-offering", publicAccessStatus: "PUBLIC",
+      supportedDurationsMinutes: [60]
+    };
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const url = String(input);
+      if (url.startsWith("/api/location/geocode")) return Response.json({ latitude: 41.14, longitude: -73.25 });
+      if (url.startsWith("/api/courses/discover")) {
+        if (url.includes("mode=SIMULATOR")) return Response.json({ courses: [simulator] });
+        outdoorSignal = init?.signal;
+        return delayedOutdoor;
+      }
+      if (url === "/api/analytics/events") return Response.json({ event: { id: "switch-event" } }, { status: 201 });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
+    render(<TeeTimeIntake {...signedInAccountProps} simulatorEnabled initialValues={{ location: "Fairfield, CT", date: "2099-10-03" }} />);
+    fireEvent.click(screen.getByRole("button", { name: "Search", exact: true }));
+    await waitFor(() => expect(outdoorSignal).toBeDefined());
+    fireEvent.click(screen.getByRole("button", { name: "Simulator", exact: true }));
+    expect(outdoorSignal?.aborted).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Search", exact: true }));
+    await screen.findByRole("heading", { name: "Current Simulator" });
+    await act(async () => finishOutdoor(Response.json({ courses: [dateBoundaryCourse("Late Outdoor Course", "America/New_York")] })));
+    expect(screen.queryByRole("heading", { name: "Late Outdoor Course" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "Current Simulator" })).toBeTruthy();
+    expect(new URL(window.location.href).searchParams.get("mode")).toBe("SIMULATOR");
+    expect((screen.getByLabelText("Location") as HTMLInputElement).value).toBe("Fairfield, CT");
+    fireEvent.click(screen.getByRole("button", { name: "9-hole", exact: true }));
+    expect(new URL(window.location.href).searchParams.has("mode")).toBe(false);
+    expect(screen.queryByRole("heading", { name: "Current Simulator" })).toBeNull();
   });
 
   it("keeps a possible direct-lookup course in the list while public access is reviewed", async () => {
@@ -704,7 +786,7 @@ describe("TeeTimeIntake", () => {
     });
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining("/api/courses/lookup?"),
-      { cache: "no-store" }
+      expect.objectContaining({ cache: "no-store" })
     );
     expect(
       screen.getByText('Direct search · "wheeler family tranditions in wallinford"')

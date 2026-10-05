@@ -139,7 +139,7 @@ function DashboardView({
       (match) =>
         match.availabilityStatus === "AVAILABLE" &&
         match.startsAt > now &&
-        (search.mode === "SIMULATOR" ? isCurrentSimulatorMatch(match, now, search.players) : evaluateMonitoringGate({ ...match.course, now }).disposition === "ACTIONABLE")
+        (search.mode === "SIMULATOR" ? isCurrentSimulatorMatch(match, now) : evaluateMonitoringGate({ ...match.course, now }).disposition === "ACTIONABLE")
     )
   );
   const selectedCourseCount = monitoredCourseCount;
@@ -247,7 +247,7 @@ function DashboardSearchCard({
   showRecipientEmail: boolean;
 }) {
   const now = new Date();
-  if (search.mode === "SIMULATOR") return <SimulatorDashboardCard search={search} canManage={canManage} ownerEmailState={ownerEmailState} />;
+  if (search.mode === "SIMULATOR") return <SimulatorDashboardCard search={search} canManage={canManage} coursePhotos={coursePhotos} ownerEmailState={ownerEmailState} showRecipientEmail={showRecipientEmail} />;
   const windowEnded = notificationWindowEnded(formatDateInputValue(search.date), search.endTime, search.preferences.map(preference => preference.course.timeZone), now);
   const availableSearchMatches = search.matches.filter(
     (match) =>
@@ -774,25 +774,48 @@ function CourseImage({
   );
 }
 
-function SimulatorDashboardCard({ search, canManage, ownerEmailState }: {
-  search: DashboardSearches[number]; canManage: boolean; ownerEmailState: OwnerEmailState;
+function SimulatorDashboardCard({ search, canManage, coursePhotos, ownerEmailState, showRecipientEmail }: {
+  search: DashboardSearches[number]; canManage: boolean; coursePhotos: ReadonlyMap<string, GooglePlacePhoto>;
+  ownerEmailState: OwnerEmailState; showRecipientEmail: boolean;
 }) {
   const now = new Date();
   const ended = notificationWindowEnded(formatDateInputValue(search.date), search.endTime, search.preferences.map(preference => preference.course.timeZone), now);
-  const matches = [...new Map(search.matches.filter(match => isCurrentSimulatorMatch(match, now, search.players)).map(match =>
+  const matches = [...new Map(search.matches.filter(match => isCurrentSimulatorMatch(match, now)).map(match =>
     [[match.offeringId, match.startsAt.toISOString(), match.endsAt?.toISOString(), match.bookingUrl].join("|"), match])).values()];
   return <article className="dashboard-row" id={`alert-${search.id}`}>
     <details className="dashboard-alert-accordion" open={search.status === "ACTIVE" && !ended}>
       <summary className="dashboard-alert-summary">
-        <div className="dashboard-alert-summary-heading"><span className={`status-pill ${search.status.toLowerCase()}`}>{ended ? "Date passed" : search.status}</span><h3>Simulator · {getNotificationTitle(search.preferences)}</h3></div>
+        <div className="dashboard-alert-summary-heading"><span className={`status-pill ${search.status.toLowerCase()}`}>{ended && search.status === "ACTIVE" ? "Date passed" : search.status}</span><h3>{getNotificationTitle(search.preferences)}</h3></div>
         <div className="dashboard-alert-summary-copy">
-          <strong>{ended ? "Simulator search window ended" : search.status === "PAUSED" ? "Simulator alert paused" : search.status !== "ACTIVE" ? "Simulator alert finished" : matches.length ? `${matches.length} matching ${matches.length === 1 ? "session" : "sessions"}` : "Watching for simulator sessions"}</strong>
-          <span>{formatDashboardDate(search.date)} · {formatTimeLabel(search.startTime)}–{formatTimeLabel(search.endTime)} · {search.durationMinutes} minutes · {search.players} players · One bay</span>
-          <span>{ownerEmailState === "SENT" ? "Alert email sent for these settings" : ownerEmailState === "PENDING" ? "Alert email pending" : "No alert email sent for these settings"}</span>
+          <strong>{ended ? "Search window ended" : search.status === "PAUSED" ? "Notifications paused" : search.status === "COMPLETED" ? "Notification ended" : search.status === "CANCELLED" ? "Notification cancelled" : matches.length ? `${matches.length} matching ${matches.length === 1 ? "session" : "sessions"}` : "Watching for openings"}</strong>
+          <span>{formatDashboardDate(search.date)} · {formatTimeLabel(search.startTime)}–{formatTimeLabel(search.endTime)} · {search.players} {search.players === 1 ? "golfer" : "golfers"} · {search.preferences.length} {search.preferences.length === 1 ? "course" : "courses"}</span>
+          <span className={`dashboard-email-status${ownerEmailState === "NOT_SENT" ? " dashboard-email-not-sent" : ""}`}>
+            <Mail aria-hidden="true" size={12} />
+            {ownerEmailState === "SENT" ? "Alert email sent for these settings" : ownerEmailState === "PREVIOUSLY_SENT" ? "An alert email was sent previously" : ownerEmailState === "PENDING" ? "Alert email pending for these settings" : ownerEmailState === "NOT_SENT" ? "No email sent for these alert settings" : "First email pending initial check"}
+          </span>
         </div>
-        <ChevronDown aria-hidden="true" size={18} />
+        <span className="dashboard-alert-summary-checked">
+          {search.lastCheckedAt ? `Checked ${formatObservationDateTime(search.lastCheckedAt, search.userTimeZone)}` : search.status === "ACTIVE" ? "Check pending" : "Checks stopped"}
+        </span>
+        <ChevronDown aria-hidden="true" className="dashboard-alert-summary-chevron" size={20} />
       </summary>
-      <div className="simulator-dashboard-content">
+      <div className="dashboard-alert-body">
+        <div className="dashboard-card-main">
+        <div className="dashboard-card-topline">
+          <div className="dashboard-card-title">
+            <h3>{search.preferences.length === 1 ? "Course notification" : "Group notification"}</h3>
+            <p className="dashboard-card-context">
+              Simulator · {showRecipientEmail ? `Alerts to ${search.alertEmail ?? search.user.email}${search.additionalEmails.length ? ` +${search.additionalEmails.length} more` : ""}` : search.additionalEmails.length ? `${search.additionalEmails.length + 1} alert recipients` : "Alerts to you"}
+            </p>
+          </div>
+          {canManage ? <SearchStatusActions mode="SIMULATOR" searchId={search.id} windowEnded={ended} status={search.status}
+            initialDate={formatDateInputValue(search.date)} initialStartTime={search.startTime} initialEndTime={search.endTime} initialUserTimeZone={search.userTimeZone}
+            initialPlayers={search.players} initialRequestedLayoutHoles={null} initialCadenceMinutes={search.cadenceMinutes}
+            initialAdditionalEmails={search.additionalEmails} initialCheckStatus={search.checkStatus} initialScheduleVersion={search.scheduleVersion}
+            initialLastCheckedAt={search.lastCheckedAt?.toISOString() ?? null} initialNextCheckAt={search.nextCheckAt?.toISOString() ?? null}
+            initialCoursePreferences={search.preferences.map(preference => ({ id: preference.id, courseName: preference.course.name, rank: preference.rank }))} /> : <span className="meta">Sign in to pause, edit, or cancel this alert.</span>}
+        </div>
+        <div className="watch-course-list">
         {search.preferences.map(preference => {
           const offering = preference.offering;
           const probe = search.probes.find(observation => observation.offeringId === offering?.id);
@@ -809,23 +832,22 @@ function SimulatorDashboardCard({ search, canManage, ownerEmailState }: {
             summary.sourceFingerprint === getSimulatorOfferingSourceFingerprint(offering);
           const venueMatches = [...new Map(matches.filter(match => match.offeringId === offering?.id).map(match =>
             [[match.startsAt.toISOString(), match.endsAt?.toISOString(), match.bookingUrl].join("|"), match])).values()];
-          return <section className="simulator-venue" key={preference.id}>
+          return <div className="watch-course-row" key={preference.id}>
+            <CourseImage name={preference.course.name} photo={preference.course.googlePlaceId ? coursePhotos.get(preference.course.googlePlaceId) : undefined} rank={search.preferences.length > 1 ? preference.rank : undefined} />
+            <div className="watch-course-copy">
             <h4>{preference.rank}. {preference.course.name}</h4>
             <p>{bookingNotOpen ? "The public booking window has not opened yet." : current ? venueMatches.length ? "Matching simulator sessions available" : "Checked · No matching sessions" : offering?.monitoringState === "DEGRADED_RETRYING" ? "Availability check will retry" : "Simulator check pending"}</p>
-            <p>{offering?.maxPartySize ? `Up to ${offering.maxPartySize} players per bay · ` : ""}{preference.course.timeZone}</p>
+            <p className="meta">{preference.course.timeZone}</p>
             {venueMatches.map(match => <a className="known-tee-time" key={match.id} href={match.bookingUrl} target="_blank" rel="noreferrer">
-              {new Intl.DateTimeFormat("en-US", { timeZone: preference.course.timeZone, hour: "numeric", minute: "2-digit" }).format(match.startsAt)}–{new Intl.DateTimeFormat("en-US", { timeZone: preference.course.timeZone, hour: "numeric", minute: "2-digit" }).format(match.endsAt!)} · {search.durationMinutes} minutes · Official booking page
+              {new Intl.DateTimeFormat("en-US", { timeZone: preference.course.timeZone, hour: "numeric", minute: "2-digit" }).format(match.startsAt)}–{new Intl.DateTimeFormat("en-US", { timeZone: preference.course.timeZone, hour: "numeric", minute: "2-digit" }).format(match.endsAt!)} · {(match.endsAt!.getTime() - match.startsAt.getTime()) / 60_000} minutes · Official booking page
             </a>)}
-            {offering?.bookingUrl ? <p><a href={offering.bookingUrl} target="_blank" rel="noreferrer">Official simulator page <ExternalLink size={14} /></a></p> : null}
-          </section>;
+            {offering?.bookingUrl ? <p><a href={offering.bookingUrl} target="_blank" rel="noreferrer">Official booking page <ExternalLink size={14} /></a></p> : null}
+            </div>
+          </div>;
         })}
-        <p>Alerts go to your account email{search.additionalEmails.length ? ` and ${search.additionalEmails.length} additional recipients` : ""}. Availability can change. You book direct.</p>
-        {canManage ? <SearchStatusActions mode="SIMULATOR" initialDurationMinutes={search.durationMinutes} searchId={search.id} windowEnded={ended} status={search.status}
-          initialDate={formatDateInputValue(search.date)} initialStartTime={search.startTime} initialEndTime={search.endTime} initialUserTimeZone={search.userTimeZone}
-          initialPlayers={search.players} initialRequestedLayoutHoles={null} initialCadenceMinutes={search.cadenceMinutes}
-          initialAdditionalEmails={search.additionalEmails} initialCheckStatus={search.checkStatus} initialScheduleVersion={search.scheduleVersion}
-          initialLastCheckedAt={search.lastCheckedAt?.toISOString() ?? null} initialNextCheckAt={search.nextCheckAt?.toISOString() ?? null}
-          initialCoursePreferences={search.preferences.map(preference => ({ id: preference.id, courseName: preference.course.name, rank: preference.rank }))} /> : null}
+        </div>
+        <p className="meta">Availability can change. You book direct.</p>
+        </div>
       </div>
     </details>
   </article>;

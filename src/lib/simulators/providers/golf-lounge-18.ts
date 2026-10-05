@@ -26,7 +26,7 @@ type PublicProduct = {
 type PublicLanding = {
   locationId: string;
   locationName: string;
-  maxPartySize: number;
+  maxPartySize: number | null;
   products: PublicProduct[];
   requestNonce: string;
 };
@@ -79,12 +79,9 @@ export async function fetchGolfLounge18Availability(
   );
   assertResponse(landingResponse, landingUrl, "text/html");
   const landing = parsePublicLanding(await readBoundedText(landingResponse), locationId);
-  const maxPartySize = input.offering.maxPartySize === null
-    ? landing.maxPartySize
-    : Math.min(input.offering.maxPartySize, landing.maxPartySize);
-  if (input.partySize > maxPartySize) {
-    throw new SimulatorAvailabilityError("PARTY_TOO_LARGE", "This simulator bay cannot accommodate the requested group");
-  }
+  const maxPartySize = landing.maxPartySize === null
+    ? input.offering.maxPartySize
+    : Math.min(input.offering.maxPartySize ?? landing.maxPartySize, landing.maxPartySize);
   const product = landing.products.find((item) => item.durationMinutes === input.durationMinutes);
   if (!product) {
     throw new SimulatorAvailabilityError("UNSUPPORTED_DURATION", "The official simulator scheduler does not offer the requested session length");
@@ -142,7 +139,7 @@ export function parseGolfLounge18Slots({ input, payload, productId, maxPartySize
   input: SimulatorAvailabilityInput;
   payload: unknown;
   productId: string;
-  maxPartySize: number;
+  maxPartySize: number | null;
 }): SimulatorAvailabilitySlot[] {
   return parseProviderComputedSlots({ input, payload, productId, maxPartySize, sourcePrefix: "golf-lounge-18" });
 }
@@ -170,9 +167,9 @@ function parsePublicLanding(html: string, expectedLocationId: string): PublicLan
     throw schemaError("The public simulator calendar request session is missing");
   }
   const capacity = textContent(document).match(/Maximum\s+up\s+to\s+(\d{1,2})\s+guests\s+per\s+bay\./iu);
-  const maxPartySize = Number(capacity?.[1]);
-  if (!Number.isInteger(maxPartySize) || maxPartySize < 1 || maxPartySize > 20) {
-    throw schemaError("The official simulator bay capacity is not verified");
+  const maxPartySize = capacity ? Number(capacity[1]) : null;
+  if (capacity && (!Number.isInteger(maxPartySize) || maxPartySize! < 1 || maxPartySize! > 20)) {
+    throw schemaError("The official simulator bay capacity is invalid");
   }
   const products: PublicProduct[] = [];
   for (const element of elements) {

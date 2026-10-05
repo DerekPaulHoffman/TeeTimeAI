@@ -4,7 +4,7 @@ import { SimulatorAvailabilityError, type SimulatorAvailabilityInput, type Simul
  * resource interval. Quantity is never converted into golfers or named bays. */
 export function parseProviderComputedSlots({ input, payload, productId, maxPartySize, sourcePrefix, resourceId = "ANY" }: {
   input: SimulatorAvailabilityInput; payload: unknown; productId: string;
-  maxPartySize: number; sourcePrefix: string; resourceId?: string;
+  maxPartySize: number | null; sourcePrefix: string; resourceId?: string;
 }): SimulatorAvailabilitySlot[] {
   if (!Array.isArray(payload) || payload.length > 300) throw schemaError("The public simulator calendar did not return a bounded availability list");
   const seen = new Set<string>();

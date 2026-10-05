@@ -1472,14 +1472,13 @@ async function getSimulatorDeliverySourceStates(
         match.endsAt.toISOString() !== (row.endsAtISO ?? row.endsAt) ||
         match.bookingUrl !== row.bookingUrl || match.bookingUrl !== offering.bookingUrl ||
         !getSafeOfficialBookingUrl(match.bookingUrl) ||
-        match.capacity == null || match.capacity < search.players ||
-        match.capacity !== row.availableSpots ||
+        row.availableSpots !== 1 ||
         match.startsAt <= now ||
         match.availabilityStatus !== "AVAILABLE" ||
         !["PENDING", "SENT"].includes(match.alertStatus) ||
         (refById.get(match.id)?.availabilityCycle !== match.availabilityCycle && ids.includes(match.id)) ||
         !offering.active || offering.publicAccessStatus !== "PUBLIC" || !offering.verifiedAt ||
-        !offering.bookingUrl || offering.maxPartySize == null || offering.maxPartySize < search.players ||
+        !offering.bookingUrl ||
         !match.offeringSourceFingerprint ||
         match.offeringSourceFingerprint !== getSimulatorOfferingSourceFingerprint(offering) ||
         !offering.supportedDurationsMinutes.includes(search.durationMinutes!) ||
@@ -4575,7 +4574,6 @@ async function validateCurrentStatusDeliveryPayload(
           !offering.bookingUrl || !getSafeOfficialBookingUrl(offering.bookingUrl) ||
           venue.courseId !== preference.courseId || venue.courseRank !== preference.rank ||
           venue.courseName !== preference.course.name || venue.bookingUrl !== offering.bookingUrl ||
-          offering.maxPartySize == null || offering.maxPartySize < search.players ||
           !offering.supportedDurationsMinutes.includes(search.durationMinutes!)) return "stale";
       if (venue.availability === "NO_MATCH") {
         const latestProbe = await transaction.courseProbe.findFirst({

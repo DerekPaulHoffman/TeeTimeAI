@@ -57,7 +57,7 @@ describe("Acuity public simulator availability", () => {
     const value = business(); value.description = "Up to 4 Players Per Bay";
     const result = await fetchAcuitySimulatorAvailability({ ...input, partySize: 4 }, mockReads(undefined, landing(value)));
     expect(result.slots[0].maxPartySize).toBe(4);
-    await expect(fetchAcuitySimulatorAvailability(input, mockReads(undefined, landing(value)))).rejects.toMatchObject({ code: "PARTY_TOO_LARGE" });
+    expect((await fetchAcuitySimulatorAvailability(input, mockReads(undefined, landing(value)))).slots[0].maxPartySize).toBe(4);
   });
   it.each([
     "https://xgolfstratford.as.me/", "https://app.acuityscheduling.com.attacker.example/schedule/2991fba2", "http://app.acuityscheduling.com/schedule/2991fba2", "https://user:pass@app.acuityscheduling.com/schedule/2991fba2", "https://app.acuityscheduling.com/schedule.php?owner=34536426", "https://app.acuityscheduling.com/schedule/2991fba2?calendarId=11388341", "https://app.acuityscheduling.com/api/scheduling/v1/appointments", "https://app.acuityscheduling.com/schedule/2991fba2#reserve"
@@ -79,7 +79,6 @@ describe("Acuity public simulator availability", () => {
     ["timezone", (value: ReturnType<typeof business>) => { value.timezone = "America/Chicago"; }],
     ["admin scheduler", (value: ReturnType<typeof business>) => { value.includesAdminOnly = true; }],
     ["paused scheduler", (value: ReturnType<typeof business>) => { value.isExpired = true; }],
-    ["missing capacity", (value: ReturnType<typeof business>) => { value.description = "Book your bay"; }],
     ["league product", (value: ReturnType<typeof business>) => { value.appointmentTypes[""][1].name = "Simulator League Booking"; }],
     ["unknown bay", (value: ReturnType<typeof business>) => { value.appointmentTypes[""][1].calendarIDs = [999]; }],
     ["lesson resource", (value: ReturnType<typeof business>) => { value.calendars["X-Golf Stratford"][1].name = "Lesson Room"; }],
@@ -89,6 +88,11 @@ describe("Acuity public simulator availability", () => {
     const fetchImpl = mockReads(undefined, landing(value));
     await expect(fetchAcuitySimulatorAvailability(input, fetchImpl)).rejects.toMatchObject({ code: "INVALID_SOURCE" });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+  it("keeps a public bay session when group capacity is unknown", async () => {
+    const value = business(); value.description = "Book your bay";
+    const result = await fetchAcuitySimulatorAvailability({ ...input, offering: { ...input.offering, maxPartySize: null } }, mockReads(undefined, landing(value)));
+    expect(result.slots[0].maxPartySize).toBeNull();
   });
   it.each(["private", "inactive", "class"])('rejects a reviewed rental that becomes %s', async (kind) => {
     const value = business();

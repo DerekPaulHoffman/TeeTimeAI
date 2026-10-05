@@ -23,7 +23,7 @@ import {
   MAX_PLAYERS_PER_SEARCH,
   SEARCH_CADENCE_OPTIONS_MINUTES
 } from "@/lib/validation/search-constraints";
-import { SIMULATOR_DURATION_OPTIONS_MINUTES, type SearchMode } from "@/lib/searches/search-mode";
+import { DEFAULT_SIMULATOR_DURATION_MINUTES, type SearchMode } from "@/lib/searches/search-mode";
 
 type SearchStatus = "ACTIVE" | "PAUSED" | "COMPLETED" | "CANCELLED";
 type SearchCheckStatus = "IDLE" | "QUEUED" | "CHECKING" | "WAITING" | "FAILED" | "STOPPED";
@@ -35,7 +35,6 @@ type CoursePreferenceFormValue = {
 
 export function SearchStatusActions({
   mode = "OUTDOOR",
-  initialDurationMinutes = null,
   searchId,
   windowEnded = false,
   status,
@@ -54,7 +53,6 @@ export function SearchStatusActions({
   initialCoursePreferences
 }: {
   mode?: SearchMode;
-  initialDurationMinutes?: number | null;
   searchId: string;
   windowEnded?: boolean;
   status: SearchStatus;
@@ -112,7 +110,7 @@ export function SearchStatusActions({
       endTime: initialEndTime,
       userTimeZone: initialUserTimeZone,
       players: initialPlayers,
-      durationMinutes: initialDurationMinutes,
+      durationMinutes: mode === "SIMULATOR" ? DEFAULT_SIMULATOR_DURATION_MINUTES : null,
       requestedLayoutHoles: initialRequestedLayoutHoles,
       cadenceMinutes: initialCadenceMinutes,
       additionalEmails: initialAdditionalEmails.join("\n"),
@@ -336,19 +334,14 @@ export function SearchStatusActions({
               value={form.players}
               onChange={(event) => setForm({ ...form, players: Number(event.target.value) })}
             >
-              {Array.from({ length: mode === "SIMULATOR" ? 8 : MAX_PLAYERS_PER_SEARCH }, (_, index) => index + 1).map((count) => (
+              {Array.from({ length: MAX_PLAYERS_PER_SEARCH }, (_, index) => index + 1).map((count) => (
                 <option key={count} value={count}>
                   {count}
                 </option>
               ))}
             </select>
           </label>
-          {mode === "SIMULATOR" ? <label>
-            Session length
-            <select value={form.durationMinutes ?? 60} onChange={event => setForm({ ...form, durationMinutes: Number(event.target.value) })}>
-              {SIMULATOR_DURATION_OPTIONS_MINUTES.map(minutes => <option key={minutes} value={minutes}>{minutes} minutes</option>)}
-            </select>
-          </label> : <label>
+          {mode === "OUTDOOR" ? <label>
             Course layout
             <select
               value={form.requestedLayoutHoles ?? "any"}
@@ -366,7 +359,7 @@ export function SearchStatusActions({
               <option value="9">9-hole</option>
               <option value="18">18-hole</option>
             </select>
-          </label>}
+          </label> : null}
           <label>
             Cadence
             <select

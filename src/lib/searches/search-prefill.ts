@@ -4,10 +4,13 @@ import {
   MIN_COURSE_SEARCH_RADIUS_MILES
 } from "@/lib/places/radius";
 import { MAX_PLAYERS_PER_SEARCH } from "@/lib/validation/search-constraints";
+import type { CourseCandidate } from "@/lib/places/google";
+import type { SearchMode } from "./search-mode";
 
 export const SEARCH_PREFILL_STORAGE_KEY = "tee-time-spot:search-prefill";
 
 export type SearchPrefill = {
+  mode?: SearchMode;
   location?: string;
   players?: number;
   date?: string;
@@ -16,22 +19,14 @@ export type SearchPrefill = {
   holes?: "any" | "9" | "18";
   radius?: number;
   coordinates?: { latitude: number; longitude: number };
-  selectedCourse?: {
-    courseId?: string;
-    googlePlaceId: string;
-    name: string;
-    address?: string;
-    city?: string;
-    stateCode?: string;
-    stateName?: string;
-    county?: string;
-    countryCode?: string;
-    latitude: number;
-    longitude: number;
-    timeZone: string;
-    website?: string;
-    profileUrl?: string;
-  };
+  selectedCourse?: Pick<CourseCandidate,
+    | "courseId" | "googlePlaceId" | "name" | "address" | "city" | "stateCode"
+    | "stateName" | "county" | "countryCode" | "latitude" | "longitude"
+    | "timeZone" | "website" | "profileUrl" | "mode" | "offeringId"
+    | "publicAccessStatus" | "supportedDurationsMinutes" | "maxPartySize"
+    | "simulatorEvidenceUrl" | "simulatorVerifiedAt" | "monitoringSupport"
+    | "monitoringReadiness" | "monitoringReadinessObservedAt" | "firstTimeLookup"
+  >;
 };
 
 let volatilePrefill: SearchPrefill | undefined;
@@ -77,7 +72,7 @@ export function consumeSearchPrefill() {
   }
 }
 
-export function readSearchPrefillFromUrl(search?: string) {
+export function readSearchPrefillFromUrl(search?: string): SearchPrefill | undefined {
   const query = search ?? (typeof window === "undefined" ? "" : window.location.search);
   if (!query) {
     return undefined;
@@ -85,6 +80,7 @@ export function readSearchPrefillFromUrl(search?: string) {
 
   const params = new URLSearchParams(query);
   const supportedKeys = [
+    "mode",
     "location",
     "players",
     "date",
@@ -98,11 +94,17 @@ export function readSearchPrefillFromUrl(search?: string) {
   if (!supportedKeys.some((key) => params.has(key))) {
     return undefined;
   }
+  if (!supportedKeys.some((key) => key !== "mode" && params.has(key))) {
+    const mode = params.get("mode");
+    // A sign-in mode hint must not replace the matching draft's actual filters.
+    return mode === "SIMULATOR" || mode === "OUTDOOR" ? { mode } : undefined;
+  }
 
   const latitude = numberParam(params, "latitude");
   const longitude = numberParam(params, "longitude");
 
   return sanitizeSearchPrefill({
+    mode: params.get("mode") ?? undefined,
     location: params.get("location") ?? undefined,
     players: numberParam(params, "players"),
     date: params.get("date") ?? undefined,
@@ -122,6 +124,9 @@ export function sanitizeSearchPrefill(value: unknown): SearchPrefill {
     return {};
   }
 
+  const mode = value.mode === "SIMULATOR" || value.mode === "OUTDOOR"
+    ? value.mode
+    : undefined;
   const location = safeString(value.location, 300);
   const date = matches(value.date, /^\d{4}-\d{2}-\d{2}$/);
   const startTime = matches(value.startTime, /^\d{2}:\d{2}$/);
@@ -132,11 +137,11 @@ export function sanitizeSearchPrefill(value: unknown): SearchPrefill {
     MIN_COURSE_SEARCH_RADIUS_MILES,
     MAX_COURSE_SEARCH_RADIUS_MILES
   );
-  const holes = value.holes === "9" || value.holes === "18" || value.holes === "any"
+  const holes = mode !== "SIMULATOR" && (value.holes === "9" || value.holes === "18" || value.holes === "any")
     ? value.holes
     : undefined;
   const coordinates = sanitizeCoordinates(value.coordinates);
-  const selectedCourse = sanitizeSelectedCourse(value.selectedCourse);
+  const selectedCourse = sanitizeSelectedCourse(value.selectedCourse, mode);
 
   return {
     location,
@@ -147,12 +152,15 @@ export function sanitizeSearchPrefill(value: unknown): SearchPrefill {
     radius: radius ?? DEFAULT_COURSE_SEARCH_RADIUS_MILES,
     holes,
     coordinates,
+    ...(mode ? { mode } : {}),
     ...(selectedCourse ? { selectedCourse } : {})
   };
 }
 
-function sanitizeSelectedCourse(value: unknown): SearchPrefill["selectedCourse"] {
+function sanitizeSelectedCourse(value: unknown, mode?: SearchMode): SearchPrefill["selectedCourse"] {
   if (!isRecord(value)) return undefined;
+  // A venue's outdoor identity cannot stand in for its simulator offering.
+  if ((mode === "SIMULATOR") !== (value.mode === "SIMULATOR")) return undefined;
   const googlePlaceId = safeString(value.googlePlaceId, 200);
   const name = safeString(value.name, 200);
   const coordinates = sanitizeCoordinates(value);
@@ -167,7 +175,9 @@ function sanitizeSelectedCourse(value: unknown): SearchPrefill["selectedCourse"]
     if (typeof candidate !== "string") return undefined;
     try {
       const url = new URL(candidate, "https://teetimespot.com");
-      return new Set(["http:", "https:"]).has(url.protocol) ? candidate.slice(0, 500) : undefined;
+      return new Set(["http:", "https:"]).has(url.protocol) && !url.username && !url.password
+        ? candidate.slice(0, 500)
+        : undefined;
     } catch {
       return undefined;
     }
@@ -184,9 +194,48 @@ function sanitizeSelectedCourse(value: unknown): SearchPrefill["selectedCourse"]
     countryCode: safeString(value.countryCode, 2)?.toUpperCase(),
     ...coordinates,
     timeZone,
-    website: safeUrl(value.website),
-    profileUrl: safeUrl(value.profileUrl)
+    website: mode === "SIMULATOR" ? safeAbsoluteHttpUrl(value.website) : safeUrl(value.website),
+    profileUrl: mode === "SIMULATOR" ? undefined : safeUrl(value.profileUrl),
+    ...(mode === "SIMULATOR" ? {
+      mode: "SIMULATOR" as const,
+      offeringId: safeString(value.offeringId, 100),
+      publicAccessStatus: value.publicAccessStatus === "PUBLIC" || value.publicAccessStatus === "UNVERIFIED" || value.publicAccessStatus === "REVIEW_REQUIRED"
+        ? value.publicAccessStatus
+        : undefined,
+      supportedDurationsMinutes: Array.isArray(value.supportedDurationsMinutes)
+        ? [...new Set(value.supportedDurationsMinutes.filter((minutes): minutes is number => safeInteger(minutes, 30, 480) !== undefined))].slice(0, 32)
+        : undefined,
+      maxPartySize: safeInteger(value.maxPartySize, 1, 100),
+      simulatorEvidenceUrl: safeAbsoluteHttpUrl(value.simulatorEvidenceUrl),
+      simulatorVerifiedAt: safeDate(value.simulatorVerifiedAt),
+      monitoringSupport: value.monitoringSupport === "AUTOMATIC" || value.monitoringSupport === "MANUAL_ONLY" || value.monitoringSupport === "UNCONFIRMED"
+        ? value.monitoringSupport
+        : undefined,
+      monitoringReadiness: value.monitoringReadiness === "READY" || value.monitoringReadiness === "VERIFYING" || value.monitoringReadiness === "UNAVAILABLE" || value.monitoringReadiness === "TEMPORARILY_UNAVAILABLE"
+        ? value.monitoringReadiness
+        : undefined,
+      monitoringReadinessObservedAt: safeDate(value.monitoringReadinessObservedAt),
+      firstTimeLookup: typeof value.firstTimeLookup === "boolean" ? value.firstTimeLookup : undefined,
+    } : {})
   };
+}
+
+function safeAbsoluteHttpUrl(value: unknown) {
+  if (typeof value !== "string") return undefined;
+  try {
+    const url = new URL(value);
+    return (url.protocol === "https:" || url.protocol === "http:") && !url.username && !url.password
+      ? value.slice(0, 500)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function safeDate(value: unknown) {
+  return typeof value === "string" && value.length <= 100 && Number.isFinite(Date.parse(value))
+    ? value
+    : undefined;
 }
 
 function sanitizeCoordinates(value: unknown) {

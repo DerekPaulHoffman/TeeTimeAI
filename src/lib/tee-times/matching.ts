@@ -23,7 +23,7 @@ export type SimulatorSession = {
   productId?: string;
   startsAt: string;
   endsAt: string;
-  capacity: number;
+  capacity: number | null;
   bookingUrl: string;
   priceCents?: number;
   priceBasis?: string;
@@ -41,7 +41,6 @@ export function filterSimulatorSessionsForSearch<T extends SimulatorSession>(
   const windowEnd = parseCourseLocalDateTime(`${search.date}T${search.endTime}`, timeZone);
   return sessions.filter((session) => {
     if (!preferred.has(session.offeringId) || !session.resourceId || !session.sourceId) return false;
-    if (session.capacity < search.players) return false;
     const startsAt = parseCourseLocalDateTime(session.startsAt, timeZone);
     const endsAt = parseCourseLocalDateTime(session.endsAt, timeZone);
     if (!Number.isFinite(startsAt.getTime()) || !Number.isFinite(endsAt.getTime())) return false;

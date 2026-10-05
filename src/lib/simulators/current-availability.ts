@@ -20,15 +20,14 @@ export type SimulatorMatchProof = {
 };
 
 /** Simulator proof never consults the venue's outdoor monitoring state. */
-export function isCurrentSimulatorMatch(match: SimulatorMatchProof, now = new Date(), partySize = 1) {
+export function isCurrentSimulatorMatch(match: SimulatorMatchProof, now = new Date()) {
   const offering = match.offering;
   if (!offering || offering.id !== match.offeringId || offering.kind !== "SIMULATOR" ||
     !offering.active || offering.publicAccessStatus !== "PUBLIC" || offering.automationEligibility !== "ALLOWED" ||
     offering.monitoringState !== "HEALTHY" || offering.observationToken ||
     !offering.verifiedAt || offering.verifiedAt > now || !offering.evidenceUrl ||
     !match.offeringSourceFingerprint || match.offeringSourceFingerprint !== getSimulatorOfferingSourceFingerprint(offering) ||
-    !offering.monitoringVerifiedAt || !match.endsAt || !offering.maxPartySize ||
-    !match.capacity || Math.min(offering.maxPartySize, match.capacity) < partySize ||
+    !offering.monitoringVerifiedAt || !match.endsAt ||
     match.availabilityStatus !== "AVAILABLE" || match.startsAt <= now ||
     match.bookingUrl !== offering.bookingUrl ||
     offering.monitoringVerifiedAt < match.lastConfirmedAt || offering.monitoringVerifiedAt > now ||

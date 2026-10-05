@@ -1,6 +1,5 @@
 "use client";
 
-import { SimulatorIntake } from "@/components/simulator-intake";
 import type { SearchMode } from "@/lib/searches/search-mode";
 
 import Image from "next/image";
@@ -266,29 +265,10 @@ export function TeeTimeIntake({
   clerkPublishableKey?: string;
   simulatorEnabled?: boolean;
 }) {
-  const [mode, setMode] = useState<SearchMode>(simulatorEnabled && initialValues.mode === "SIMULATOR" ? "SIMULATOR" : "OUTDOOR");
-  const sharedValues = useRef<TeeTimeIntakeInitialValues>(initialValues);
-  const [modeInitialValues, setModeInitialValues] = useState(initialValues);
-  const [modeSwitched, setModeSwitched] = useState(false);
-  const onSharedValuesChange = useCallback((values: TeeTimeIntakeInitialValues) => { sharedValues.current = values; }, []);
-  function selectMode(nextMode: SearchMode) {
-    if (nextMode === mode) return;
-    setModeInitialValues({ ...initialValues, ...sharedValues.current });
-    setModeSwitched(true);
-    setMode(nextMode);
-  }
   return (
-    <>
-    {simulatorEnabled ? <div className="search-mode-switch" role="group" aria-label="Golf search mode">
-      <button type="button" aria-pressed={mode === "OUTDOOR"} onClick={() => selectMode("OUTDOOR")}>Outdoor golf</button>
-      <button type="button" aria-pressed={mode === "SIMULATOR"} onClick={() => selectMode("SIMULATOR")}>Simulator</button>
-    </div> : null}
-    {mode === "SIMULATOR" ? <SimulatorIntake initialValues={modeInitialValues} preserveInitialValues={modeSwitched} onSharedValuesChange={onSharedValuesChange} accountEnabled={accountEnabled}
-      accountSignedIn={accountSignedIn} accountEmail={accountEmail} clerkPublishableKey={clerkPublishableKey} /> :
     <TeeTimeIntakeContent
-      initialValues={modeInitialValues}
-      preserveInitialValues={modeSwitched}
-      onSharedValuesChange={onSharedValuesChange}
+      initialValues={initialValues}
+      simulatorEnabled={simulatorEnabled}
       accountState={
         !accountEnabled
           ? { status: "unavailable" }
@@ -299,8 +279,7 @@ export function TeeTimeIntake({
               : { status: "missing-email" }
       }
       clerkPublishableKey={clerkPublishableKey}
-    />}
-    </>
+    />
   );
 }
 
@@ -308,15 +287,14 @@ function TeeTimeIntakeContent({
   initialValues,
   accountState,
   clerkPublishableKey,
-  preserveInitialValues = false,
-  onSharedValuesChange
+  simulatorEnabled = false
 }: {
   initialValues: TeeTimeIntakeInitialValues;
   accountState: IntakeAccountState;
   clerkPublishableKey?: string;
-  preserveInitialValues?: boolean;
-  onSharedValuesChange?: (values: TeeTimeIntakeInitialValues) => void;
+  simulatorEnabled?: boolean;
 }) {
+  const [mode, setMode] = useState<SearchMode>(simulatorEnabled && initialValues.mode === "SIMULATOR" ? "SIMULATOR" : "OUTDOOR");
   const [locationText, setLocationText] = useState(initialValues.location ?? "");
   const [searchRadiusMiles, setSearchRadiusMiles] = useState(
     initialValues.radius ?? DEFAULT_COURSE_SEARCH_RADIUS_MILES
@@ -353,10 +331,10 @@ function TeeTimeIntakeContent({
   const [courseLookupResults, setCourseLookupResults] = useState<CourseCandidate[]>([]);
   const [checkRevision, setCheckRevision] = useState(0);
   const liveChecks = useCourseTimeChecks(
-    [...courses, ...courseLookupResults].flatMap(course => course.courseId ? [course.courseId] : []), date, players, checkRevision,
+    mode === "SIMULATOR" ? [] : [...courses, ...courseLookupResults].flatMap(course => course.courseId ? [course.courseId] : []), date, players, checkRevision,
   );
   const knownTimes = useKnownTeeTimes(
-    [...courses, ...courseLookupResults].flatMap((course) => course.courseId ? [course.courseId] : []),
+    mode === "SIMULATOR" ? [] : [...courses, ...courseLookupResults].flatMap((course) => course.courseId ? [course.courseId] : []),
     date
   );
   const [courseLookupState, setCourseLookupState] = useState<
@@ -389,7 +367,11 @@ function TeeTimeIntakeContent({
   const reportedCourseLookupCandidatesRef = useRef(new Set<string>());
   const shouldRefreshRestoredCoursesRef = useRef(false);
   const dateWasEditedRef = useRef(false);
-  const restoreInitial = useRef({ initialValues, preserveInitialValues });
+  const restoreInitial = useRef({ initialValues, mode });
+  const discoveryRequestRef = useRef<AbortController | null>(null);
+  const lookupRequestRef = useRef<AbortController | null>(null);
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
 
   function reconcileDateFromControl(value: string) {
     dateWasEditedRef.current = true;
@@ -397,11 +379,12 @@ function TeeTimeIntakeContent({
   }
 
   useEffect(() => {
-    const { initialValues, preserveInitialValues } = restoreInitial.current;
+    const { mode: initialMode } = restoreInitial.current;
     const transferred = consumeSearchPrefill() ?? readSearchPrefillFromUrl();
-    const draft = transferred ? undefined : readSearchDraft();
+    const transferredHasDetails = transferred && Object.keys(transferred).some(key => key !== "mode");
+    const draft = transferredHasDetails ? undefined : readSearchDraft(initialMode);
     const animationFrame = window.requestAnimationFrame(() => {
-      if (transferred) {
+      if (transferredHasDetails && transferred) {
         if (transferred.location !== undefined) setLocationText(transferred.location);
         if (transferred.radius !== undefined) setSearchRadiusMiles(transferred.radius);
         if (transferred.date !== undefined) setDate(transferred.date);
@@ -434,23 +417,11 @@ function TeeTimeIntakeContent({
           draft.coordinates !== undefined && draft.courses.length > 0;
       }
 
-      if (preserveInitialValues) {
-        if (initialValues.location !== undefined) setLocationText(initialValues.location);
-        if (initialValues.radius !== undefined) setSearchRadiusMiles(initialValues.radius);
-        if (initialValues.date !== undefined) setDate(initialValues.date);
-        if (initialValues.startTime !== undefined) setStartTime(initialValues.startTime);
-        if (initialValues.endTime !== undefined) setEndTime(initialValues.endTime);
-        setSearchCoordinates(initialValues.coordinates ?? null);
-      }
       setDraftReady(true);
     });
 
     return () => window.cancelAnimationFrame(animationFrame);
   }, []);
-
-  useEffect(() => {
-    if (draftReady) onSharedValuesChange?.({ location: locationText, radius: searchRadiusMiles, date, startTime, endTime, coordinates: searchCoordinates ?? undefined });
-  }, [draftReady, locationText, searchRadiusMiles, date, startTime, endTime, searchCoordinates, onSharedValuesChange]);
 
   useEffect(() => {
     if (!draftReady || createdAlert) {
@@ -468,7 +439,7 @@ function TeeTimeIntakeContent({
       coordinates: searchCoordinates ?? undefined,
       courses,
       selectedCourses: selected
-    });
+    }, mode);
   }, [
     courses,
     createdAlert,
@@ -477,6 +448,7 @@ function TeeTimeIntakeContent({
     endTime,
     holeFilter,
     locationText,
+    mode,
     players,
     searchCoordinates,
     searchRadiusMiles,
@@ -566,7 +538,7 @@ function TeeTimeIntakeContent({
     accountState.status === "signed-in" &&
     (!alertEmail.trim() || !isAdditionalAlertEmailValid(alertEmail));
   const requestedLayoutHoles: CourseLayoutHoleCount | null =
-    holeFilter === "9" ? 9 : holeFilter === "18" ? 18 : null;
+    mode === "SIMULATOR" ? null : holeFilter === "9" ? 9 : holeFilter === "18" ? 18 : null;
   const { filteredCourses, incompatibleCourseCount } = useMemo(() => {
     const radiusMeters = milesToMeters(searchRadiusMiles);
     const withinRadius = courses.filter(
@@ -622,6 +594,7 @@ function TeeTimeIntakeContent({
   const searchSignature = useMemo(
     () =>
       JSON.stringify({
+        mode,
         alertEmail: alertEmail.trim().toLowerCase(),
         date,
         startTime,
@@ -631,6 +604,7 @@ function TeeTimeIntakeContent({
         requestedLayoutHoles,
         courses: selected.map((course, index) => ({
           placeId: course.googlePlaceId,
+          offeringId: course.offeringId,
           rank: index + 1
         }))
       }),
@@ -639,6 +613,7 @@ function TeeTimeIntakeContent({
       date,
       endTime,
       normalizedAdditionalEmails,
+      mode,
       players,
       requestedLayoutHoles,
       selected,
@@ -647,7 +622,9 @@ function TeeTimeIntakeContent({
   );
   const isCurrentSearchSaved = savedSignature === searchSignature;
   const isDateFuture = date >= minSearchDate;
-  const isTimeWindowValid = endTime > startTime;
+  const windowMinutes = (Number(endTime.slice(0, 2)) * 60 + Number(endTime.slice(3))) -
+    (Number(startTime.slice(0, 2)) * 60 + Number(startTime.slice(3)));
+  const isTimeWindowValid = endTime > startTime && (mode === "OUTDOOR" || windowMinutes >= 60);
   const hasMonitorableCourse = selected.some(
     (course) => !isManualOnlyAlertSupport(course.alertSupport)
   );
@@ -659,10 +636,11 @@ function TeeTimeIntakeContent({
   const accessReviewSelectedCourse = selected.find(
     (course) => course.publicAccessStatus === "REVIEW_REQUIRED"
   );
+  const unverifiedSimulator = mode === "SIMULATOR" ? selected.find(course => simulatorRentalProblem(course)) : undefined;
   const saveBlocker = !isDateFuture
     ? "Choose a future date for alerts."
     : !isTimeWindowValid
-      ? "Choose an end time after the start time."
+      ? mode === "SIMULATOR" ? "Choose a window long enough for a one-hour simulator session." : "Choose an end time after the start time."
       : hasInvalidAlertEmail
         ? "Enter a valid email for this alert."
       : hasInvalidAdditionalEmail
@@ -671,6 +649,8 @@ function TeeTimeIntakeContent({
         ? `${incompatibleSelectedCourse.name} is verified as ${getCourseLayoutLabel(incompatibleSelectedCourse.layoutHoleCounts)} and cannot be used for an ${requestedLayoutHoles}-hole course search.`
       : accessReviewSelectedCourse
         ? `${accessReviewSelectedCourse.name} needs a course-access review before it can be added to an alert.`
+      : unverifiedSimulator
+        ? `${unverifiedSimulator.name}: ${simulatorRentalProblem(unverifiedSimulator)}`
       : selected.length > 0 && !hasMonitorableCourse
         ? "Choose at least one course Tee Time Spot can check automatically."
         : null;
@@ -712,6 +692,10 @@ function TeeTimeIntakeContent({
   }
 
   async function discoverFromSearchControls() {
+    discoveryRequestRef.current?.abort();
+    const controller = new AbortController();
+    discoveryRequestRef.current = controller;
+    const requestedMode = mode;
     setLoading(true);
     shouldScrollToResultsRef.current = true;
 
@@ -724,7 +708,8 @@ function TeeTimeIntakeContent({
     let responseStatus: number | undefined;
     try {
       const geocode = await fetch(
-        `/api/location/geocode?q=${encodeURIComponent(locationText.trim())}`
+        `/api/location/geocode?q=${encodeURIComponent(locationText.trim())}`,
+        { signal: controller.signal }
       );
       responseStatus = geocode.status;
       if (!geocode.ok) {
@@ -736,9 +721,11 @@ function TeeTimeIntakeContent({
         );
       }
       const coordinates = (await geocode.json()) as { latitude: number; longitude: number };
+      if (controller.signal.aborted || modeRef.current !== requestedMode) return;
       setLocationInputInvalid(false);
       await discoverCourses(coordinates);
     } catch (error) {
+      if (controller.signal.aborted || modeRef.current !== requestedMode) return;
       trackWebsiteEvent({
         name: "course_discovery_failed",
         metadata: {
@@ -762,8 +749,12 @@ function TeeTimeIntakeContent({
 
   const discoverCourses = useCallback(async (
     coordinates: SearchCoordinates,
-    radiusMiles = searchRadiusMiles
+    radiusMiles = searchRadiusMiles,
+    requestedMode = mode
   ) => {
+    discoveryRequestRef.current?.abort();
+    const controller = new AbortController();
+    discoveryRequestRef.current = controller;
     let responseStatus: number | undefined;
     try {
       const params = new URLSearchParams({
@@ -771,8 +762,9 @@ function TeeTimeIntakeContent({
         longitude: String(coordinates.longitude),
         radiusMeters: String(milesToMeters(radiusMiles))
       });
+      if (requestedMode === "SIMULATOR") params.set("mode", "SIMULATOR");
       const response = await fetch(`/api/courses/discover?${params}`, {
-        cache: "no-store"
+        cache: "no-store", signal: controller.signal
       });
       responseStatus = response.status;
       if (!response.ok) {
@@ -785,6 +777,8 @@ function TeeTimeIntakeContent({
       }
 
       const data = (await response.json()) as { courses: CourseCandidate[]; demo?: boolean };
+      if (controller.signal.aborted || modeRef.current !== requestedMode) return;
+      data.courses = data.courses.filter(course => requestedMode === "SIMULATOR" ? course.mode === "SIMULATOR" : course.mode !== "SIMULATOR");
       trackWebsiteEvent({
         name: "course_discovery_completed",
         metadata: {
@@ -820,9 +814,10 @@ function TeeTimeIntakeContent({
         type: "success",
         message: data.demo
           ? "Loaded demo courses. Add Google Places keys for live discovery."
-          : `Found ${data.courses.length} public golf courses within ${radiusMiles} miles.`
+          : `Found ${data.courses.length} ${requestedMode === "SIMULATOR" ? "simulator venues" : "public golf courses"} within ${radiusMiles} miles.`
       });
     } catch {
+      if (controller.signal.aborted || modeRef.current !== requestedMode) return;
       trackWebsiteEvent({
         name: "course_discovery_failed",
         metadata: {
@@ -837,9 +832,42 @@ function TeeTimeIntakeContent({
         message: COURSE_DISCOVERY_UNAVAILABLE_MESSAGE
       });
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted && modeRef.current === requestedMode) setLoading(false);
     }
-  }, [searchRadiusMiles]);
+  }, [mode, searchRadiusMiles]);
+
+  function selectMode(nextMode: SearchMode) {
+    if (nextMode === mode) return;
+    discoveryRequestRef.current?.abort();
+    lookupRequestRef.current?.abort();
+    storeSearchDraft({ location: locationText, radius: searchRadiusMiles, date, startTime, endTime, players,
+      holes: holeFilter, coordinates: searchCoordinates ?? undefined, courses, selectedCourses: selected }, mode);
+    const nextDraft = readSearchDraft(nextMode);
+    const sameLocation = nextDraft?.location === locationText;
+    modeRef.current = nextMode;
+    setMode(nextMode);
+    const nextUrl = new URL(window.location.href);
+    if (nextMode === "SIMULATOR") nextUrl.searchParams.set("mode", "SIMULATOR");
+    else nextUrl.searchParams.delete("mode");
+    window.history.replaceState(window.history.state, "", nextUrl);
+    setCourses(sameLocation && nextDraft ? nextDraft.courses.map(clearCourseMonitoringEvidence) : []);
+    setSelected(sameLocation && nextDraft ? nextDraft.selectedCourses.map(clearCourseMonitoringEvidence) : []);
+    setCourseLookupResults([]);
+    setCourseLookupState("idle");
+    setCourseLookupMessage("");
+    setVisibleCourseCount(INITIAL_VISIBLE_COURSE_COUNT);
+    setNotificationOpen(false);
+    setCreatedAlert(null);
+    setSavedSignature(null);
+    setLoading(false);
+    setNotice({ type: "info", message: "Select Search to find nearby locations." });
+    if (searchCoordinates) {
+      setLoading(true);
+      void discoverCourses(searchCoordinates, searchRadiusMiles, nextMode);
+    }
+  }
+
+  useEffect(() => () => { discoveryRequestRef.current?.abort(); lookupRequestRef.current?.abort(); }, []);
 
   useEffect(() => {
     if (
@@ -884,7 +912,7 @@ function TeeTimeIntakeContent({
   }, [courses]);
 
   async function reportMissingCourseLookup(normalizedQuery: string) {
-    const reportKey = `${normalizedQuery.toLowerCase()}|${locationText.trim().toLowerCase()}`;
+    const reportKey = `${mode}|${normalizedQuery.toLowerCase()}|${locationText.trim().toLowerCase()}`;
     if (reportedCourseLookupMissesRef.current.has(reportKey)) {
       return true;
     }
@@ -896,6 +924,7 @@ function TeeTimeIntakeContent({
         body: JSON.stringify({
           sentiment: "broken",
           message: `[COURSE_LOOKUP_MISS] ${JSON.stringify({
+            mode,
             query: normalizedQuery,
             location: locationText.trim() || undefined,
             latitude: searchCoordinates?.latitude,
@@ -955,6 +984,10 @@ function TeeTimeIntakeContent({
   }
 
   async function lookupCourse() {
+    lookupRequestRef.current?.abort();
+    const controller = new AbortController();
+    lookupRequestRef.current = controller;
+    const requestedMode = mode;
     const normalizedQuery = courseLookupQuery.trim();
     if (normalizedQuery.length < 2) {
       setCourseLookupState("error");
@@ -965,18 +998,19 @@ function TeeTimeIntakeContent({
     setSubmittedCourseLookupQuery(normalizedQuery);
     setCourseLookupResults([]);
     setCourseLookupState("loading");
-    setCourseLookupMessage("Looking for matching golf courses...");
+    setCourseLookupMessage(mode === "SIMULATOR" ? "Looking for matching simulators..." : "Looking for matching golf courses...");
 
     let responseStatus: number | undefined;
     try {
       const params = new URLSearchParams({ q: normalizedQuery });
+      if (requestedMode === "SIMULATOR") params.set("mode", "SIMULATOR");
       if (searchCoordinates) {
         params.set("latitude", String(searchCoordinates.latitude));
         params.set("longitude", String(searchCoordinates.longitude));
       }
 
       const response = await fetch(`/api/courses/lookup?${params}`, {
-        cache: "no-store"
+        cache: "no-store", signal: controller.signal
       });
       responseStatus = response.status;
       if (!response.ok) {
@@ -988,8 +1022,9 @@ function TeeTimeIntakeContent({
         );
       }
       const data = (await response.json()) as { courses?: CourseCandidate[] };
+      if (controller.signal.aborted || modeRef.current !== requestedMode) return;
 
-      const matches = data.courses ?? [];
+      const matches = (data.courses ?? []).filter(course => requestedMode === "SIMULATOR" ? course.mode === "SIMULATOR" : course.mode !== "SIMULATOR");
       setCourseLookupResults(matches);
       setCourseLookupState("success");
       const missWasReported = matches.length === 0
@@ -1003,6 +1038,7 @@ function TeeTimeIntakeContent({
           : `${matches.length} ${matches.length === 1 ? "match" : "matches"} found.`
       );
     } catch (error) {
+      if (controller.signal.aborted || modeRef.current !== requestedMode) return;
       setCourseLookupResults([]);
       setCourseLookupState("error");
       setCourseLookupMessage(
@@ -1017,6 +1053,7 @@ function TeeTimeIntakeContent({
   }
 
   function notifyForCourse(course: CourseCandidate) {
+    if (mode === "SIMULATOR" && simulatorRentalProblem(course)) return;
     if (course.publicAccessStatus === "REVIEW_REQUIRED") {
       reportCourseInaccuracy(course);
       return;
@@ -1128,6 +1165,8 @@ function TeeTimeIntakeContent({
             : {})
         },
         body: JSON.stringify({
+          mode,
+          ...(mode === "SIMULATOR" ? { durationMinutes: 60 } : {}),
           date,
           startTime,
           endTime,
@@ -1178,7 +1217,7 @@ function TeeTimeIntakeContent({
       if (createdSearchId) {
         fireAlertCreatedConfetti();
       }
-      clearSearchDraft();
+      clearSearchDraft(mode);
       setNotificationOpen(false);
       setCreatedAlert({
         href: createdSearchId
@@ -1218,6 +1257,9 @@ function TeeTimeIntakeContent({
         />
       ) : null}
       <TeeTimeSearchControls
+        mode={mode}
+        simulatorEnabled={simulatorEnabled}
+        onModeChange={selectMode}
         date={date}
         endTime={endTime}
         holeFilter={holeFilter}
@@ -1231,7 +1273,7 @@ function TeeTimeIntakeContent({
         mobileTimeEditorOpen={mobileTimeEditorOpen}
         onDateChange={reconcileDateFromControl}
         onEndTimeChange={setEndTime}
-        onHoleFilterChange={setHoleFilter}
+        onHoleFilterChange={value => { selectMode("OUTDOOR"); setHoleFilter(value); }}
         onLocationChange={(value) => {
           setLocationText(value);
           setSearchCoordinates(null);
@@ -1240,6 +1282,7 @@ function TeeTimeIntakeContent({
         onPlayersChange={setPlayers}
         onRadiusChange={setSearchRadiusMiles}
         onResetFilters={() => {
+          selectMode("OUTDOOR");
           setHoleFilter("any");
           setSearchRadiusMiles(DEFAULT_COURSE_SEARCH_RADIUS_MILES);
         }}
@@ -1287,14 +1330,14 @@ function TeeTimeIntakeContent({
           ) : null}
           {loading ? (
             <div className="figma-results-banner" role="status" aria-atomic="true">
-              <strong>Searching public courses</strong> within {searchRadiusMiles} miles…
+              <strong>{mode === "SIMULATOR" ? "Searching simulators" : "Searching public courses"}</strong> within {searchRadiusMiles} miles…
             </div>
           ) : courses.length > 0 ? (
             <div className="figma-results-banner" role="status" aria-atomic="true">
               <strong>
-                {displayedCourseCount} {displayedCourseCount === 1 ? "course" : "courses"}
+                {displayedCourseCount} {mode === "SIMULATOR" ? displayedCourseCount === 1 ? "simulator" : "simulators" : displayedCourseCount === 1 ? "course" : "courses"}
               </strong>{" "}
-              near {locationText.trim() || "your location"} — choose a course to get notified about openings.{" "}
+              near {locationText.trim() || "your location"} — choose {mode === "SIMULATOR" ? "a simulator" : "a course"} to get notified about openings.{" "}
               <a className="figma-results-map-link" href="#course-results-map-section">
                 Scroll to Google Map
               </a>
@@ -1370,8 +1413,8 @@ function TeeTimeIntakeContent({
                 {courseLookupResults.map((course) => (
                   <CourseResultCard
                     course={course}
-                    knownTimes={course.courseId ? knownTimes[course.courseId] ?? [] : []}
-                    liveCheck={course.courseId ? liveChecks[course.courseId] : undefined}
+                    knownTimes={mode === "OUTDOOR" && course.courseId ? knownTimes[course.courseId] ?? [] : []}
+                    liveCheck={mode === "OUTDOOR" && course.courseId ? liveChecks[course.courseId] : undefined}
                     timeFilters={{ date, startTime, endTime, players }}
                     key={course.googlePlaceId}
                     onReportInaccuracy={reportCourseInaccuracy}
@@ -1397,8 +1440,8 @@ function TeeTimeIntakeContent({
               {visibleNearbyCourses.map((course) => (
                 <CourseResultCard
                   course={course}
-                  knownTimes={course.courseId ? knownTimes[course.courseId] ?? [] : []}
-                  liveCheck={course.courseId ? liveChecks[course.courseId] : undefined}
+                  knownTimes={mode === "OUTDOOR" && course.courseId ? knownTimes[course.courseId] ?? [] : []}
+                  liveCheck={mode === "OUTDOOR" && course.courseId ? liveChecks[course.courseId] : undefined}
                   timeFilters={{ date, startTime, endTime, players }}
                   key={course.googlePlaceId}
                   onReportInaccuracy={reportCourseInaccuracy}
@@ -1427,7 +1470,7 @@ function TeeTimeIntakeContent({
             ) : null}
           </div>
         ) : null}
-        {courses.length > 0 ? (
+        {mode === "OUTDOOR" && courses.length > 0 ? (
           <p className="course-pricing-note">
             <CircleDollarSign size={14} aria-hidden="true" />
             Estimates use last-observed official tee-sheet rates. Hover or focus a price
@@ -1564,6 +1607,7 @@ function TeeTimeIntakeContent({
                 });
               }}
               publishableKey={clerkPublishableKey}
+              returnTo={mode === "SIMULATOR" ? "/search?mode=SIMULATOR" : "/search"}
               style={{ width: "100%" }}
             >
               <LogIn size={17} />
@@ -1667,6 +1711,14 @@ function CourseResultsDivider({ children }: { children: ReactNode }) {
   );
 }
 
+function simulatorRentalProblem(course: CourseCandidate) {
+  if (course.mode !== "SIMULATOR" || !course.offeringId || course.publicAccessStatus !== "PUBLIC") {
+    return "Simulator rental details are being verified.";
+  }
+  if (!course.supportedDurationsMinutes?.includes(60)) return "One-hour simulator sessions are not available here.";
+  return null;
+}
+
 function CourseResultCard({
   course,
   knownTimes,
@@ -1689,12 +1741,14 @@ function CourseResultCard({
   selectedIndex: number;
 }) {
   const isSelected = selectedIndex >= 0;
+  const isSimulator = course.mode === "SIMULATOR";
+  const rentalProblem = isSimulator ? simulatorRentalProblem(course) : null;
   const layoutCompatibility = getCourseLayoutCompatibility(
     course.layoutHoleCounts,
     requestedLayoutHoles
   );
-  const isIncompatible = layoutCompatibility === "incompatible";
-  const cardHoleCount = getCourseHeadlineHoleCount(
+  const isIncompatible = !isSimulator && layoutCompatibility === "incompatible";
+  const cardHoleCount = isSimulator ? null : getCourseHeadlineHoleCount(
     course.layoutHoleCounts,
     course.bookableHoleCounts
   );
@@ -1734,7 +1788,7 @@ function CourseResultCard({
                   : "figma-course-pill is-public"
               }
             >
-              {isPublicAccessUnverified ? "Possible course" : "Public"}
+              {isSimulator ? "Simulator" : isPublicAccessUnverified ? "Possible course" : "Public"}
             </span>
           ) : null}
           {course.rating ? (
@@ -1769,7 +1823,7 @@ function CourseResultCard({
               <span aria-hidden="true">·</span> {cardHoleCount}H
             </span>
           ) : null}
-          {course.par ? (
+          {!isSimulator && course.par ? (
             <span className="figma-course-pill is-detail">
               <span aria-hidden="true">·</span> Par {course.par}
             </span>
@@ -1779,21 +1833,21 @@ function CourseResultCard({
               <span aria-hidden="true">·</span> Layout unverified
             </span>
           ) : null}
-          <CourseHeadlinePrice
+          {!isSimulator ? <CourseHeadlinePrice
             estimate={course.priceEstimate}
             preferredHoleCounts={cardHoleCount ? [cardHoleCount] : undefined}
-          />
+          /> : null}
         </div>
         <h3>
-          {course.profileUrl ? (
+          {!isSimulator && course.profileUrl ? (
             <Link href={course.profileUrl as `/courses/${string}`}>{course.name}</Link>
           ) : (
             course.name
           )}
         </h3>
         <CourseAddressLink course={course} />
-        {course.courseId ? <CourseTimeCheckStatus check={liveCheck} alertSupport={course.alertSupport} /> : <CourseMonitoringStatus course={course} />}
-        {course.courseId ? liveCheck?.status === "CHECKED" && <KnownTeeTimes times={liveCheck.times} timeZone={course.timeZone} {...timeFilters} showEmpty /> : <KnownTeeTimes times={knownTimes} timeZone={course.timeZone} {...timeFilters} />}
+        {isSimulator ? rentalProblem ? <p className="course-alert-support-note">{rentalProblem}</p> : <CourseMonitoringStatus course={course} /> : course.courseId ? <CourseTimeCheckStatus check={liveCheck} alertSupport={course.alertSupport} /> : <CourseMonitoringStatus course={course} />}
+        {!isSimulator ? course.courseId ? liveCheck?.status === "CHECKED" && <KnownTeeTimes times={liveCheck.times} timeZone={course.timeZone} {...timeFilters} showEmpty /> : <KnownTeeTimes times={knownTimes} timeZone={course.timeZone} {...timeFilters} /> : null}
         {isIncompatible && requestedLayoutHoles ? (
           <p className="course-alert-support-note">
             Does not match an {requestedLayoutHoles}-hole course search
@@ -1801,7 +1855,7 @@ function CourseResultCard({
         ) : null}
       </div>
       <div className="course-actions">
-        {course.profileUrl ? (
+        {!isSimulator && course.profileUrl ? (
           <Link
             aria-label={`View course guide for ${course.name}`}
             className="button button-ghost course-profile-button"
@@ -1838,10 +1892,10 @@ function CourseResultCard({
             <DeferredSignInButton
               ariaLabel={`${notifyLabel} for ${course.name}`}
               className="figma-add-button"
-              disabled={isIncompatible}
+              disabled={isIncompatible || Boolean(rentalProblem)}
               onClick={() => onToggle(course)}
               publishableKey={signInKey}
-              returnTo="/search"
+              returnTo={isSimulator ? "/search?mode=SIMULATOR" : "/search"}
             >
               {notifyButtonContent}
             </DeferredSignInButton>
@@ -1849,7 +1903,7 @@ function CourseResultCard({
             <button
               aria-label={`${notifyLabel} for ${course.name}`}
               className="figma-add-button"
-              disabled={isIncompatible}
+              disabled={isIncompatible || Boolean(rentalProblem)}
               onClick={() => onToggle(course)}
               type="button"
             >
@@ -1857,9 +1911,9 @@ function CourseResultCard({
             </button>
           )
         )}
-        {!isIncompatible && !(requiresPublicAccessReview && !isSelected) ? (
+        {!isIncompatible && !rentalProblem && !(requiresPublicAccessReview && !isSelected) ? (
           <span className="course-notify-caption">
-            when new tee times <br />become available
+            when new {isSimulator ? "openings" : "tee times"} <br />become available
           </span>
         ) : null}
       </div>
@@ -2005,6 +2059,15 @@ function CourseMonitoringStatus({
   course: CourseCandidate;
   compact?: boolean;
 }) {
+  if (course.mode === "SIMULATOR") {
+    const ready = hasReadyAutomaticMonitoring(course);
+    return <p className={`course-monitoring-status${ready ? "" : " is-unconfirmed"}${compact ? " is-compact" : ""}`}>
+      <CourseStatusEmoji emoji={ready ? "✅" : "⏳"} />
+      <span><strong>{ready ? "Alerts available" : "Alert availability after first check"}</strong>
+        {!compact ? <small>We check the official simulator booking page and email matching openings.</small> : null}
+      </span>
+    </p>;
+  }
   const isIdentityReviewRequired =
     course.publicAccessStatus === "REVIEW_REQUIRED";
   const isPublicAccessUnverified = course.publicAccessStatus === "UNVERIFIED";
@@ -2504,7 +2567,7 @@ function createCourseMapInfoWindowContent(course: CourseCandidate) {
 
   const eyebrow = document.createElement("span");
   eyebrow.className = "course-map-info-eyebrow";
-  eyebrow.textContent = "Golf course";
+  eyebrow.textContent = course.mode === "SIMULATOR" ? "Simulator" : "Golf course";
   container.appendChild(eyebrow);
 
   const heading = document.createElement("h3");
@@ -2553,7 +2616,7 @@ function createCourseMapInfoWindowContent(course: CourseCandidate) {
     websiteLink.href = course.website;
     websiteLink.rel = "noreferrer";
     websiteLink.target = "_blank";
-    websiteLink.textContent = "Course site";
+    websiteLink.textContent = course.mode === "SIMULATOR" ? "Official site" : "Course site";
     actions.appendChild(websiteLink);
   }
 

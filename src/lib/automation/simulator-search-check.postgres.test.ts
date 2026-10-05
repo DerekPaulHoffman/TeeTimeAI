@@ -92,7 +92,7 @@ describe.skipIf(!databaseUrl)("simulator check against isolated Postgres", () =>
     const token = randomUUID();
     const search = await client.teeSearch.create({ data: {
       userId: user.id, mode: "SIMULATOR", durationMinutes: 120, date,
-      startTime: "13:00", endTime: "19:00", userTimeZone: "UTC", players: 6,
+      startTime: "13:00", endTime: "19:00", userTimeZone: "UTC", players: 4,
       additionalEmails: options.additionalEmails ?? [],
       status: "ACTIVE", checkStatus: "CHECKING", checkLeaseToken: token,
       checkLeaseExpiresAt: new Date(Date.now() + 5 * 60_000),
@@ -131,7 +131,7 @@ describe.skipIf(!databaseUrl)("simulator check against isolated Postgres", () =>
     const offering = await client.courseOffering.findUniqueOrThrow({ where: { id: venue.offering.id } });
     expect(result.availableMatches).toBe(1);
     expect(match).toMatchObject({ offeringId: venue.offering.id, resourceId: `bay-${venue.offering.id}`,
-      productId: "two-hours", capacity: 8, availableSpots: 8 });
+      productId: "two-hours", capacity: 8, availableSpots: 1 });
     expect(match.endsAt!.getTime() - match.startsAt.getTime()).toBe(120 * 60_000);
     expect(offering.monitoringState).toBe("HEALTHY");
     expect(offering.monitoringVerifiedAt?.getTime()).toBe(match.lastConfirmedAt.getTime());
@@ -184,13 +184,12 @@ describe.skipIf(!databaseUrl)("simulator check against isolated Postgres", () =>
     expect(mocks.sendMatch).toHaveBeenCalledTimes(1);
   });
 
-  it("does not persist partial sessions, undersized bays, or drifted booking links as alertable", async () => {
+  it("does not persist partial sessions or drifted booking links as alertable", async () => {
     const { search, active, venues, run, lease } = await fixture(1);
     const correct = providerSlot(venues[0].offering.id, venues[0].offering.bookingUrl!, search.date);
     mocks.fetch.mockResolvedValue({ complete: true, observedAt: new Date(),
       evidenceUrl: venues[0].offering.evidenceUrl, slots: [
         { ...correct, sourceId: "partial", endsAt: new Date(correct.endsAt.getTime() - 30 * 60_000) },
-        { ...correct, sourceId: "small", resourceId: "small-bay", maxPartySize: 4 },
       ] });
     const rejected = await runCheck(active, run.id, lease);
     expect(rejected.availableMatches).toBe(0);
@@ -210,6 +209,24 @@ describe.skipIf(!databaseUrl)("simulator check against isolated Postgres", () =>
     expect(mocks.sendMatch).not.toHaveBeenCalled();
   });
 
+  it.each([2, null])("alerts on one available bay with capacity metadata %s, independent of saved players", async (maxPartySize) => {
+    const { search, venues, run, lease } = await fixture(1);
+    await client.courseOffering.update({ where: { id: venues[0].offering.id }, data: { maxPartySize } });
+    const current = await getSearch(search.id);
+    if (!current) throw new Error("Simulator test search vanished");
+    mocks.fetch.mockResolvedValue({ complete: true, observedAt: new Date(),
+      evidenceUrl: venues[0].offering.evidenceUrl,
+      slots: [{ ...providerSlot(venues[0].offering.id, venues[0].offering.bookingUrl!, search.date), maxPartySize }],
+    });
+    const result = await runCheck(current, run.id, lease);
+    expect(result.availableMatches).toBe(1);
+    const match = await client.teeTimeMatch.findFirstOrThrow({ where: { teeSearchId: search.id } });
+    expect(match.capacity).toBe(maxPartySize);
+    expect(match.availableSpots).toBe(1);
+    expect(match.alertStatus).toBe("SENT");
+    expect(mocks.sendMatch).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps a first search's confirmed session current after another date checks the same offering", async () => {
     const { search, active, venues, run, lease } = await fixture(1);
     const offering = venues[0].offering;
@@ -224,7 +241,7 @@ describe.skipIf(!databaseUrl)("simulator check against isolated Postgres", () =>
     const nextToken = randomUUID();
     const second = await client.teeSearch.create({ data: {
       userId: search.userId, mode: "SIMULATOR", durationMinutes: 120, date: nextDate,
-      startTime: "13:00", endTime: "19:00", userTimeZone: "UTC", players: 6,
+      startTime: "13:00", endTime: "19:00", userTimeZone: "UTC", players: 4,
       status: "ACTIVE", checkStatus: "CHECKING", checkLeaseToken: nextToken,
       checkLeaseExpiresAt: new Date(Date.now() + 5 * 60_000), statusEmailSentAt: new Date(),
       preferences: { create: [{ courseId: offering.courseId, offeringId: offering.id, rank: 1 }] },
@@ -242,7 +259,7 @@ describe.skipIf(!databaseUrl)("simulator check against isolated Postgres", () =>
     const { isCurrentSimulatorMatch } = await import("@/lib/simulators/current-availability");
     expect(retained.availabilityStatus).toBe("AVAILABLE");
     expect(retained.offering!.monitoringVerifiedAt!.getTime()).toBeGreaterThanOrEqual(first.lastConfirmedAt.getTime());
-    expect(isCurrentSimulatorMatch(retained, new Date(), 6)).toBe(true);
+    expect(isCurrentSimulatorMatch(retained, new Date())).toBe(true);
   });
 
   it("creates a pending setup and retries only the failed additional recipient", async () => {

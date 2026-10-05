@@ -92,10 +92,7 @@ export const teeSearchDetailsSchema = z
   .superRefine((value, context) => {
     if (value.mode === "SIMULATOR") {
       if (value.players > MAX_SIMULATOR_PLAYERS) {
-        context.addIssue({ code: "custom", path: ["players"], message: "Select up to 8 players" });
-      }
-      if (value.durationMinutes == null) {
-        context.addIssue({ code: "custom", path: ["durationMinutes"], message: "Choose a simulator session length" });
+        context.addIssue({ code: "custom", path: ["players"], message: "Select up to 4 players" });
       }
       if (value.requestedLayoutHoles != null) {
         context.addIssue({ code: "custom", path: ["requestedLayoutHoles"], message: "Course layout does not apply to simulator sessions" });

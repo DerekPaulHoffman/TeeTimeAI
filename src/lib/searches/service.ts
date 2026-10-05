@@ -53,6 +53,7 @@ import { projectCurrentCheckEvidence } from "@/lib/searches/current-check-eviden
 import { isCurrentSimulatorMatch } from "@/lib/simulators/current-availability";
 import { filterSimulatorSessionsForSearch } from "@/lib/tee-times/matching";
 import { assertSimulatorSessionFitsWindow } from "@/lib/searches/simulator-window";
+import { DEFAULT_SIMULATOR_DURATION_MINUTES } from "@/lib/searches/search-mode";
 
 const SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE = 0.06;
 const QUEUED_SEARCH_STATUSES = ["ACTIVE", "PAUSED"] as const;
@@ -181,6 +182,8 @@ async function createSimulatorTeeSearchForUser(
   trafficClass: WebsiteTrafficClass,
   syntheticMultiCycle: boolean,
 ) {
+  const durationMinutes = input.durationMinutes ?? DEFAULT_SIMULATOR_DURATION_MINUTES;
+  if (input.players < 1 || input.players > 4) throw new Error("Choose 1 to 4 players.");
   const selected = [...input.courses].sort((a, b) => a.rank - b.rank);
   const offeringIds = selected.map((course) => course.offeringId);
   if (offeringIds.some((id) => !id) || new Set(offeringIds).size !== offeringIds.length) {
@@ -206,11 +209,9 @@ async function createSimulatorTeeSearchForUser(
       throw new Error("A selected simulator venue needs current official rental verification. Refresh the venues and try again.");
     }
     if (
-      offering.maxPartySize == null ||
-      offering.maxPartySize < input.players ||
-      !offering.supportedDurationsMinutes.includes(input.durationMinutes!)
+      !offering.supportedDurationsMinutes.includes(durationMinutes)
     ) {
-      throw new Error("A selected simulator venue does not support this group size and session length.");
+      throw new Error("A selected simulator venue does not support this session length.");
     }
     return { candidate, offering };
   });
@@ -219,7 +220,7 @@ async function createSimulatorTeeSearchForUser(
   }
   assertFutureCourseSearchDate(input.date, canonical.map(({ offering }) => offering.course.timeZone));
   assertSimulatorSessionFitsWindow({ date: input.date, startTime: input.startTime,
-    endTime: input.endTime, durationMinutes: input.durationMinutes!,
+    endTime: input.endTime, durationMinutes,
     timeZones: canonical.map(({ offering }) => offering.course.timeZone) });
 
   return prisma.$transaction(async (transaction) => {
@@ -231,9 +232,8 @@ async function createSimulatorTeeSearchForUser(
     for (const { candidate } of canonical) {
       const offering = currentById.get(candidate.offeringId!);
       if (!offering || offering.publicAccessStatus !== "PUBLIC" || !offering.bookingUrl ||
-          !offering.evidenceUrl || !offering.verifiedAt || offering.maxPartySize == null ||
-          offering.maxPartySize < input.players ||
-          !offering.supportedDurationsMinutes.includes(input.durationMinutes!) ||
+          !offering.evidenceUrl || !offering.verifiedAt ||
+          !offering.supportedDurationsMinutes.includes(durationMinutes) ||
           (candidate.courseId && candidate.courseId !== offering.courseId) ||
           (candidate.googlePlaceId && candidate.googlePlaceId !== offering.course.googlePlaceId)) {
         throw new Error("A selected simulator venue changed. Refresh the venues and try again.");
@@ -243,7 +243,7 @@ async function createSimulatorTeeSearchForUser(
       data: {
         userId,
         mode: "SIMULATOR",
-        durationMinutes: input.durationMinutes,
+        durationMinutes,
         date: parseLocalDate(input.date),
         startTime: input.startTime,
         endTime: input.endTime,
@@ -753,22 +753,23 @@ export async function updateTeeSearchForUser(
   }
   const nextPlayers = input.players ?? modeAndOfferings.players;
   const nextDuration = input.durationMinutes === undefined
-    ? modeAndOfferings.durationMinutes
+    ? (modeAndOfferings.mode === "SIMULATOR"
+      ? modeAndOfferings.durationMinutes ?? DEFAULT_SIMULATOR_DURATION_MINUTES
+      : modeAndOfferings.durationMinutes)
     : input.durationMinutes;
   if (modeAndOfferings.mode === "SIMULATOR") {
     const changesSimulatorIntent = input.date !== undefined || input.startTime !== undefined ||
       input.endTime !== undefined || input.players !== undefined || input.durationMinutes !== undefined ||
       input.status === "ACTIVE";
-    if (input.requestedLayoutHoles != null || nextPlayers < 1 || nextPlayers > 8 || !nextDuration) {
-      throw new Error("Choose 1 to 8 players and a simulator session length.");
+    if (input.requestedLayoutHoles != null || (changesSimulatorIntent && (nextPlayers < 1 || nextPlayers > 4)) || !nextDuration) {
+      throw new Error("Choose 1 to 4 players and a simulator session length.");
     }
     if (changesSimulatorIntent && modeAndOfferings.preferences.some(({ offering }) =>
       !offering || !offering.active || offering.publicAccessStatus !== "PUBLIC" ||
       !offering.bookingUrl || !offering.evidenceUrl || !offering.verifiedAt ||
-      offering.maxPartySize == null || nextPlayers > offering.maxPartySize ||
       !offering.supportedDurationsMinutes.includes(nextDuration)
     )) {
-      throw new Error("A selected simulator venue no longer supports this group size and session length.");
+      throw new Error("A selected simulator venue no longer supports this session length.");
     }
     if (changesSimulatorIntent) assertSimulatorSessionFitsWindow({
       date: input.date ?? modeAndOfferings.date.toISOString().slice(0, 10),
@@ -873,14 +874,13 @@ export async function updateTeeSearchForUser(
         preferences: { select: { offering: { include: { course: { select: { timeZone: true } } } } } } },
     });
     if (current.mode !== "SIMULATOR") throw new Error("An alert's course type cannot change.");
-    const players = input.players ?? current.players;
-    const durationMinutes = input.durationMinutes ?? current.durationMinutes;
+    const durationMinutes = input.durationMinutes ?? current.durationMinutes ?? DEFAULT_SIMULATOR_DURATION_MINUTES;
     if (!durationMinutes || current.preferences.some(({ offering }) =>
       !offering || !offering.active || offering.kind !== "SIMULATOR" ||
       offering.publicAccessStatus !== "PUBLIC" || !offering.bookingUrl || !offering.evidenceUrl ||
-      !offering.verifiedAt || offering.maxPartySize == null || offering.maxPartySize < players ||
+      !offering.verifiedAt ||
       !offering.supportedDurationsMinutes.includes(durationMinutes))) {
-      throw new Error("A selected simulator venue no longer supports this group size and session length.");
+      throw new Error("A selected simulator venue no longer supports this session length.");
     }
     assertSimulatorSessionFitsWindow({ date: input.date ?? current.date.toISOString().slice(0, 10),
       startTime: input.startTime ?? current.startTime, endTime: input.endTime ?? current.endTime,
@@ -1055,7 +1055,7 @@ function projectCurrentCustomerMatches<
         if (!match.offeringId || !match.endsAt || !match.bookingUrl || !match.lastConfirmedAt || !search.durationMinutes ||
           !preference || !generationStartedAt || match.lastConfirmedAt < generationStartedAt ||
           !isCurrentSimulatorMatch({ ...match, offeringId: match.offeringId, endsAt: match.endsAt, bookingUrl: match.bookingUrl,
-            lastConfirmedAt: match.lastConfirmedAt, capacity: match.capacity ?? null }, new Date(), search.players)) return [];
+            lastConfirmedAt: match.lastConfirmedAt, capacity: match.capacity ?? null }, new Date())) return [];
         const matching = filterSimulatorSessionsForSearch({ date: search.date.toISOString().slice(0, 10), startTime: search.startTime,
           endTime: search.endTime, players: search.players, durationMinutes: search.durationMinutes,
           preferredOfferings: [{ offeringId: match.offeringId, rank: 1 }] }, [{ offeringId: match.offeringId, sourceId: "projection",
