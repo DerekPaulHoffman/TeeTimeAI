@@ -36,7 +36,7 @@
   max-width: 100%;
   min-width: 0;
 }
-@media (min-width: 768px) and (max-width: 1279px) {
+@media (min-width: 768px) {
   .figma-hole-filter.has-simulator {
     align-items: flex-start;
     flex-direction: column;
