@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   getCourseLookupCacheKey: vi.fn(),
   getGooglePlacesApiKey: vi.fn(),
   loadActiveGooglePlaceReviewIndex: vi.fn(),
+  loadSimulatorOnlyPlaceIds: vi.fn(),
   readCourseRuntimeCache: vi.fn(),
   searchGolfCoursesByName: vi.fn(),
   simulatorLookupResponse: vi.fn(),
@@ -22,6 +23,10 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/places/simulator-route-response", () => ({ simulatorLookupResponse: mocks.simulatorLookupResponse }));
+vi.mock("@/lib/places/outdoor-simulator-identity", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/places/outdoor-simulator-identity")>();
+  return { ...actual, loadSimulatorOnlyPlaceIds: mocks.loadSimulatorOnlyPlaceIds };
+});
 vi.mock("@/lib/simulators/config", () => ({ isSimulatorModeEnabled: mocks.isSimulatorModeEnabled }));
 
 vi.mock("@/lib/places/course-photo-metadata", () => ({
@@ -73,6 +78,7 @@ describe("GET /api/courses/lookup", () => {
     mocks.findPersistedCourseCandidatesByName.mockResolvedValue([]);
     mocks.getCourseLookupCacheKey.mockReturnValue("lookup-key");
     mocks.loadActiveGooglePlaceReviewIndex.mockResolvedValue(testReviewIndex);
+    mocks.loadSimulatorOnlyPlaceIds.mockResolvedValue(new Set());
     mocks.readCourseRuntimeCache.mockResolvedValue(null);
     mocks.writeCourseRuntimeCache.mockResolvedValue(undefined);
     mocks.isSimulatorModeEnabled.mockReturnValue(false);
@@ -191,6 +197,48 @@ describe("GET /api/courses/lookup", () => {
     expect(mocks.cacheCourseCandidatePhotos).toHaveBeenCalledWith([
       { googlePlaceId: "bethpage-black", name: "Bethpage Black Course" }
     ]);
+  });
+
+  it.each(["provider", "cache", "fallback"])("excludes a simulator-only venue from outdoor %s lookup", async (source) => {
+    const candidates = [
+      { googlePlaceId: "sim-only", name: "ZSTRICT at Chelsea Piers" },
+      { googlePlaceId: "outdoor", name: "Public Golf Course" }
+    ];
+    mocks.loadSimulatorOnlyPlaceIds.mockResolvedValue(new Set(["sim-only"]));
+    if (source === "provider") mocks.searchGolfCoursesByName.mockResolvedValue(candidates);
+    if (source === "cache") mocks.readCourseRuntimeCache.mockResolvedValue(candidates);
+    if (source === "fallback") {
+      mocks.searchGolfCoursesByName.mockRejectedValue(new Error("provider unavailable"));
+      mocks.findPersistedCourseCandidatesByName.mockResolvedValue(candidates);
+    }
+
+    const response = await GET(request("?q=ZSTRICT%20at%20Chelsea%20Piers"));
+    expect(response.status).toBe(200);
+    expect((await response.json()).courses.map((course: { googlePlaceId: string }) => course.googlePlaceId))
+      .toEqual(["outdoor"]);
+    expect(mocks.enrichCoursesWithAlertSupport).toHaveBeenCalledWith([
+      expect.objectContaining({ googlePlaceId: "outdoor" })
+    ]);
+  });
+
+  it("fails closed before reading cached outdoor results when the identity fence is unavailable", async () => {
+    mocks.loadSimulatorOnlyPlaceIds.mockRejectedValue(new Error("database unavailable"));
+    mocks.readCourseRuntimeCache.mockResolvedValue([{ googlePlaceId: "sim-only" }]);
+    const response = await GET(request("?q=ZSTRICT%20at%20Chelsea%20Piers"));
+    expect(response.status).toBe(503);
+    expect(mocks.readCourseRuntimeCache).not.toHaveBeenCalled();
+  });
+
+  it("keeps simulator-only identities excluded when outdoor enrichment fails", async () => {
+    mocks.loadSimulatorOnlyPlaceIds.mockResolvedValue(new Set(["sim-only"]));
+    mocks.searchGolfCoursesByName.mockResolvedValue([
+      { googlePlaceId: "sim-only", name: "ZSTRICT at Chelsea Piers" },
+      { googlePlaceId: "outdoor", name: "Public Golf Course" }
+    ]);
+    mocks.enrichCoursesWithAlertSupport.mockRejectedValue(new Error("enrichment unavailable"));
+    const response = await GET(request("?q=ZSTRICT%20at%20Chelsea%20Piers"));
+    expect((await response.json()).courses.map((course: { googlePlaceId: string }) => course.googlePlaceId))
+      .toEqual(["outdoor"]);
   });
 
   it.each(["READY", "UNAVAILABLE"])("refreshes cached %s monitoring without retaining optional evidence", async (oldReadiness) => {

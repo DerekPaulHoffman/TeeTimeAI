@@ -17,6 +17,7 @@ import {
 import { enrichCoursesWithHoleLayouts } from "@/lib/places/hole-layout-enrichment";
 import { findPersistedCourseCandidatesByName } from "@/lib/places/persisted-course-fallback";
 import { simulatorLookupResponse } from "@/lib/places/simulator-route-response";
+import { excludeSimulatorOnlyOutdoorCandidates, loadSimulatorOnlyPlaceIds } from "@/lib/places/outdoor-simulator-identity";
 import { isSimulatorModeEnabled } from "@/lib/simulators/config";
 
 const MIN_QUERY_LENGTH = 2;
@@ -78,8 +79,11 @@ export async function GET(request: NextRequest) {
   }
 
   let reviewIndex: Awaited<ReturnType<typeof loadActiveGooglePlaceReviewIndex>>;
+  let simulatorOnlyPlaceIds: Awaited<ReturnType<typeof loadSimulatorOnlyPlaceIds>>;
   try {
-    reviewIndex = await loadActiveGooglePlaceReviewIndex();
+    [reviewIndex, simulatorOnlyPlaceIds] = await Promise.all([
+      loadActiveGooglePlaceReviewIndex(), loadSimulatorOnlyPlaceIds()
+    ]);
   } catch (error) {
     console.error(
       "Course lookup failed",
@@ -99,7 +103,8 @@ export async function GET(request: NextRequest) {
     const cachedCourses = await readCourseRuntimeCache<unknown[]>(cacheKey);
     if (Array.isArray(cachedCourses)) {
       const currentCourses = await enrichCoursesWithAlertSupport(
-        (cachedCourses as CourseCandidate[]).map(clearCourseMonitoringEvidence),
+        excludeSimulatorOnlyOutdoorCandidates(cachedCourses as CourseCandidate[], simulatorOnlyPlaceIds, reviewIndex)
+          .map(clearCourseMonitoringEvidence),
       );
       await cacheCourseCandidatePhotos(currentCourses);
       return NextResponse.json(
@@ -117,12 +122,13 @@ export async function GET(request: NextRequest) {
       },
       reviewIndex
     );
-    const coursesWithSupport = await enrichCoursesWithAlertSupport(courses).catch((error) => {
+    const outdoorCourses = excludeSimulatorOnlyOutdoorCandidates(courses, simulatorOnlyPlaceIds, reviewIndex);
+    const coursesWithSupport = await enrichCoursesWithAlertSupport(outdoorCourses).catch((error) => {
       console.warn(
         "Course alert-support enrichment unavailable",
         error instanceof Error ? error.message : "Unknown alert-support error"
       );
-      return courses;
+      return outdoorCourses;
     });
     const coursesWithLayouts = await enrichCoursesWithHoleLayouts(coursesWithSupport).catch(
       (error) => {
@@ -152,8 +158,9 @@ export async function GET(request: NextRequest) {
           query,
           reviewIndex
         );
-        if (persistedCourses.length > 0) {
-          const coursesWithSupport = await enrichCoursesWithAlertSupport(persistedCourses);
+        const outdoorCourses = excludeSimulatorOnlyOutdoorCandidates(persistedCourses, simulatorOnlyPlaceIds, reviewIndex);
+        if (outdoorCourses.length > 0) {
+          const coursesWithSupport = await enrichCoursesWithAlertSupport(outdoorCourses);
           const coursesWithLayouts = await enrichCoursesWithHoleLayouts(coursesWithSupport);
           await Promise.all([
             writeCourseRuntimeCache(cacheKey, coursesWithLayouts, "course-lookup"),

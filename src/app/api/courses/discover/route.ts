@@ -12,15 +12,13 @@ import {
   writeCourseRuntimeCache
 } from "@/lib/places/course-runtime-cache";
 import { searchNearbyGolfCourses, type CourseCandidate } from "@/lib/places/google";
-import {
-  GooglePlaceReviewsUnavailableError,
-  loadActiveGooglePlaceReviewIndex
-} from "@/lib/places/google-place-reviews";
+import { loadActiveGooglePlaceReviewIndex } from "@/lib/places/google-place-reviews";
 import { enrichCoursesWithHoleLayouts } from "@/lib/places/hole-layout-enrichment";
 import { normalizeCourseSearchRadiusMeters } from "@/lib/places/radius";
 import { findPersistedNearbyCourseCandidates } from "@/lib/places/persisted-course-fallback";
 import { enrichCoursesWithBookingEvidence } from "@/lib/pricing/course-price-enrichment";
 import { simulatorDiscoveryResponse } from "@/lib/places/simulator-route-response";
+import { excludeSimulatorOnlyOutdoorCandidates, loadSimulatorOnlyPlaceIds } from "@/lib/places/outdoor-simulator-identity";
 import { isSimulatorModeEnabled } from "@/lib/simulators/config";
 
 const COURSE_DISCOVERY_UNAVAILABLE_MESSAGE =
@@ -59,13 +57,13 @@ export async function GET(request: NextRequest) {
   }
 
   let reviewIndex: Awaited<ReturnType<typeof loadActiveGooglePlaceReviewIndex>>;
+  let simulatorOnlyPlaceIds: Awaited<ReturnType<typeof loadSimulatorOnlyPlaceIds>>;
   try {
-    reviewIndex = await loadActiveGooglePlaceReviewIndex();
-  } catch (error) {
-    if (error instanceof GooglePlaceReviewsUnavailableError) {
-      return NextResponse.json({ error: COURSE_DISCOVERY_UNAVAILABLE_MESSAGE }, { status: 503 });
-    }
-    throw error;
+    [reviewIndex, simulatorOnlyPlaceIds] = await Promise.all([
+      loadActiveGooglePlaceReviewIndex(), loadSimulatorOnlyPlaceIds()
+    ]);
+  } catch {
+    return NextResponse.json({ error: COURSE_DISCOVERY_UNAVAILABLE_MESSAGE }, { status: 503 });
   }
 
   const cacheKey = getCourseDiscoveryCacheKey({
@@ -79,7 +77,8 @@ export async function GET(request: NextRequest) {
     const cachedCourses = await readCourseRuntimeCache<unknown[]>(cacheKey);
     if (Array.isArray(cachedCourses)) {
       const currentCourses = await enrichCoursesWithAlertSupport(
-        (cachedCourses as CourseCandidate[]).map(clearCourseMonitoringEvidence),
+        excludeSimulatorOnlyOutdoorCandidates(cachedCourses as CourseCandidate[], simulatorOnlyPlaceIds, reviewIndex)
+          .map(clearCourseMonitoringEvidence),
       );
       await cacheCourseCandidatePhotos(currentCourses);
       return NextResponse.json(
@@ -97,12 +96,13 @@ export async function GET(request: NextRequest) {
       },
       reviewIndex
     );
-    const coursesWithSupport = await enrichCoursesWithAlertSupport(courses).catch((error) => {
+    const outdoorCourses = excludeSimulatorOnlyOutdoorCandidates(courses, simulatorOnlyPlaceIds, reviewIndex);
+    const coursesWithSupport = await enrichCoursesWithAlertSupport(outdoorCourses).catch((error) => {
       console.warn(
         "Course alert-support enrichment unavailable",
         error instanceof Error ? error.message : "Unknown alert-support error"
       );
-      return courses;
+      return outdoorCourses;
     });
     const coursesWithLayouts = await enrichCoursesWithHoleLayouts(coursesWithSupport).catch(
       (error) => {
@@ -137,8 +137,9 @@ export async function GET(request: NextRequest) {
         longitude,
         radiusMeters
       }, reviewIndex);
-      if (persistedCourses.length > 0) {
-        const coursesWithSupport = await enrichCoursesWithAlertSupport(persistedCourses);
+      const outdoorCourses = excludeSimulatorOnlyOutdoorCandidates(persistedCourses, simulatorOnlyPlaceIds, reviewIndex);
+      if (outdoorCourses.length > 0) {
+        const coursesWithSupport = await enrichCoursesWithAlertSupport(outdoorCourses);
         const coursesWithLayouts = await enrichCoursesWithHoleLayouts(coursesWithSupport);
         const coursesWithPrices = await enrichCoursesWithBookingEvidence(coursesWithLayouts);
         await Promise.all([
