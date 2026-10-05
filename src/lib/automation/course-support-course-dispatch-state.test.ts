@@ -12,6 +12,10 @@ type SourceSearch = {
   id: string; status: string; date: Date; endTime: string; userTimeZone: string;
   scheduleVersion: number; alertGeneration: number; trafficClass: string;
   syntheticMultiCycle: boolean; syntheticTestWindow: null; createdAt: Date;
+  userId: string; user: { id: string; clerkUserId: string; email: string; pendingEmail: string | null };
+  alertEmail: string | null; additionalEmails: string[]; startTime: string; players: number;
+  requestedLayoutHoles: number | null; cadenceMinutes: number;
+  preferences: { courseId: string; rank: number }[];
 };
 type Candidate = {
   incidentId: string; courseId: string; cycle: number; providerFamilyKey: string;
@@ -119,7 +123,15 @@ function populate(count: number, trafficClass = "PUBLIC") {
       userTimeZone: "America/New_York", scheduleVersion: 1, alertGeneration: 0,
       trafficClass, syntheticMultiCycle: trafficClass === "TEST", syntheticTestWindow: null,
       createdAt: now,
+      userId: "user-1", user: { id: "user-1", clerkUserId: "clerk-1", email: "owner@example.com", pendingEmail: null },
+      alertEmail: "owner@example.com", additionalEmails: [], startTime: "06:00", players: 2,
+      requestedLayoutHoles: null, cadenceMinutes: 15, preferences: [],
     });
+  }
+  for (const search of store.sources.values()) {
+    search.preferences = store.candidates
+      .filter(candidate => Math.floor(Number(candidate.courseId.split("-")[1]) / 5) === Number(search.id.split("-")[1]))
+      .map((candidate, rank) => ({ courseId: candidate.courseId, rank: rank + 1 }));
   }
 }
 
@@ -277,6 +289,22 @@ describe("durable course dispatch state and transaction boundaries", () => {
     await planCourseSupportCourseDispatch({ ownerThreadId: "parent-b", baseSha, now });
     expect(store.runs[0].audit.state).toBe("CANCELLED");
     await expect(loadBoundCourseSupportDispatchAssignment({ assignmentRef, childThreadId: "child-a" })).rejects.toThrow();
+  });
+
+  it("keeps a bound worker through schedule-only recovery from version two to four", async () => {
+    populate(1);
+    store.sources.get("course-0")!.scheduleVersion = 2;
+    const plan = await planCourseSupportCourseDispatch({ ownerThreadId: "parent-a", baseSha, now });
+    const assignmentRef = plan.launchItems[0].assignmentRef;
+    await beginCourseSupportCourseDispatch({ ownerThreadId: "parent-a", assignmentRef });
+    await bindCourseSupportCourseDispatch({ ownerThreadId: "parent-a", assignmentRef, childThreadId: "child-a" });
+    store.sources.get("course-0")!.scheduleVersion = 4;
+    const later = new Date(now.getTime() + 10 * 60_000);
+    await planCourseSupportCourseDispatch({ ownerThreadId: "parent-b", baseSha, now: later });
+    expect(store.runs[0].audit.state).toBe("BOUND");
+    expect(store.runs[0].audit.target.searchRefs[0].intentDigest).toMatch(/^[0-9a-f]{64}$/);
+    await expect(loadBoundCourseSupportDispatchAssignment({ assignmentRef, childThreadId: "child-a" }))
+      .resolves.toMatchObject({ assignmentRef, state: "BOUND" });
   });
 
   it("admits an opted-in synthetic source without reclassifying it and excludes it after its lifetime", async () => {

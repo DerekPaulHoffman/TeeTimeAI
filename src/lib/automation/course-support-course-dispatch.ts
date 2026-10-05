@@ -6,6 +6,12 @@ import { prisma } from "@/lib/prisma";
 import { isSearchWindowActive } from "./date-boundary";
 import { getSyntheticMultiCycleExpiresAt } from "./synthetic-test-window";
 import {
+  COURSE_DISPATCH_SOURCE_SELECT,
+  createCourseDispatchIntentDigest,
+  isCurrentCourseDispatchSource,
+  type CourseDispatchSourceRef,
+} from "./course-support-dispatch-intent";
+import {
   listCourseSupportDispatchCandidates,
   MAX_CONCURRENT_COURSE_SUPPORT_BATCHES,
   runWithCourseSupportWriterTransitionLease,
@@ -37,7 +43,7 @@ export type CourseDispatchAudit = {
     providerFamilyKey: string;
     failureFingerprint: string;
     updatedAt: string;
-    searchRefs: { id: string; scheduleVersion: number; alertGeneration: number }[];
+    searchRefs: CourseDispatchSourceRef[];
     trafficClass: "REAL" | "SYNTHETIC";
   };
 };
@@ -72,7 +78,9 @@ function parseAudit(value: unknown): CourseDispatchAudit | null {
       audit.target.searchRefs.length < 1 || audit.target.searchRefs.length > 3 ||
       audit.target.searchRefs.some((ref) => !ref || typeof ref.id !== "string" || !ref.id ||
         !Number.isInteger(ref.scheduleVersion) || ref.scheduleVersion < 0 ||
-        !Number.isInteger(ref.alertGeneration) || ref.alertGeneration < 0) ||
+        !Number.isInteger(ref.alertGeneration) || ref.alertGeneration < 0 ||
+        (ref.intentDigest !== undefined &&
+          (typeof ref.intentDigest !== "string" || !/^[a-f0-9]{64}$/i.test(ref.intentDigest)))) ||
       new Set(audit.target.searchRefs.map((ref) => ref.id)).size !== audit.target.searchRefs.length ||
       (audit.state === "BOUND" && !audit.childThreadId) ||
       (["RESERVED", "STARTING"].includes(audit.state ?? "") && audit.childThreadId !== null)) return null;
@@ -101,7 +109,7 @@ export function selectCourseDispatchTargets<T extends {
   activeRealSearchCount: number;
 }>(input: {
   candidates: readonly T[];
-  sourceSearchesByCourse: ReadonlyMap<string, readonly { id: string; scheduleVersion: number; alertGeneration: number; trafficClass: string }[]>;
+  sourceSearchesByCourse: ReadonlyMap<string, readonly (CourseDispatchSourceRef & { trafficClass: string })[]>;
   occupiedCourses: ReadonlySet<string>;
   priorSearchIds: ReadonlySet<string>;
   priorSearchCounts?: ReadonlyMap<string, number>;
@@ -110,7 +118,7 @@ export function selectCourseDispatchTargets<T extends {
   const admitted = new Set(input.priorSearchIds);
   const searchCounts = new Map(input.priorSearchCounts ?? []);
   const seen = new Set(input.occupiedCourses);
-  const selected: { candidate: T; source: { id: string; scheduleVersion: number; alertGeneration: number; trafficClass: string } }[] = [];
+  const selected: { candidate: T; source: CourseDispatchSourceRef & { trafficClass: string } }[] = [];
   let eligibleCount = 0;
   const ordered = [...input.candidates].sort((a, b) =>
     Number(b.activeRealSearchCount > 0) - Number(a.activeRealSearchCount > 0) ||
@@ -213,31 +221,16 @@ async function revokeStaleBound(
     if (!stale) {
       const searches = await tx.coursePreference.findMany({
         where: { courseId: audit.target.courseId, teeSearchId: { in: audit.target.searchRefs.map((ref) => ref.id) } },
-        select: { teeSearch: { select: {
-          id: true, status: true, scheduleVersion: true, alertGeneration: true,
-          trafficClass: true, syntheticMultiCycle: true, syntheticTestWindow: true,
-          createdAt: true, date: true, endTime: true, userTimeZone: true,
-        } } },
+        select: { teeSearch: { select: COURSE_DISPATCH_SOURCE_SELECT } },
       });
       const course = await tx.course.findUnique({ where: { id: audit.target.courseId }, select: { timeZone: true } });
       stale = !course || searches.length !== audit.target.searchRefs.length ||
         searches.some(({ teeSearch }) => {
           const ref = audit.target.searchRefs.find((entry) => entry.id === teeSearch.id);
-          const expiry = getSyntheticMultiCycleExpiresAt(teeSearch, now);
-          return !ref || teeSearch.status !== "ACTIVE" ||
-            teeSearch.scheduleVersion !== ref.scheduleVersion ||
-            teeSearch.alertGeneration !== ref.alertGeneration ||
-            (audit.target.trafficClass === "REAL" &&
-              ["TEST", "AUTOMATION"].includes(teeSearch.trafficClass)) ||
-            (audit.target.trafficClass === "SYNTHETIC" &&
-              teeSearch.trafficClass !== "TEST") ||
-            (expiry !== null && expiry <= now) ||
-            (teeSearch.trafficClass === "TEST" && !expiry) ||
-            !isSearchWindowActive({
-              date: teeSearch.date, endTime: teeSearch.endTime,
-              courseTimeZones: [course!.timeZone],
-              fallbackTimeZone: teeSearch.userTimeZone, now,
-            });
+          return !ref || !isCurrentCourseDispatchSource({
+            ref, search: teeSearch, trafficClass: audit.target.trafficClass,
+            courseTimeZone: course!.timeZone, now,
+          });
         });
     }
     if (!stale) continue;
@@ -308,7 +301,7 @@ export async function planCourseSupportCourseDispatch(input: {
           },
           select: {
             courseId: true,
-            teeSearch: { select: { id: true, date: true, endTime: true, userTimeZone: true, scheduleVersion: true, alertGeneration: true, trafficClass: true, syntheticMultiCycle: true, syntheticTestWindow: true, createdAt: true } },
+            teeSearch: { select: COURSE_DISPATCH_SOURCE_SELECT },
           },
         }),
       ]);
@@ -333,6 +326,7 @@ export async function planCourseSupportCourseDispatch(input: {
           id: ref.teeSearch.id,
           scheduleVersion: ref.teeSearch.scheduleVersion,
           alertGeneration: ref.teeSearch.alertGeneration,
+          intentDigest: createCourseDispatchIntentDigest(ref.teeSearch),
           trafficClass: ref.teeSearch.trafficClass,
         }))] as const));
       const selection = selectCourseDispatchTargets({
@@ -382,7 +376,12 @@ export async function planCourseSupportCourseDispatch(input: {
             providerFamilyKey: candidate.providerFamilyKey,
             failureFingerprint: candidate.failureFingerprint,
             updatedAt: candidate.updatedAt,
-            searchRefs: [{ id: source.id, scheduleVersion: source.scheduleVersion, alertGeneration: source.alertGeneration }],
+            searchRefs: [{
+              id: source.id,
+              scheduleVersion: source.scheduleVersion,
+              alertGeneration: source.alertGeneration,
+              intentDigest: source.intentDigest,
+            }],
             trafficClass: ["TEST", "AUTOMATION"].includes(source.trafficClass) ? "SYNTHETIC" : "REAL",
           },
         };

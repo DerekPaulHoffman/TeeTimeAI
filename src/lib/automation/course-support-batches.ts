@@ -19,7 +19,10 @@ import { evaluateMonitoringGate, isCoherentManualDisposition } from "@/lib/autom
 import { syntheticWebsiteTrafficClasses } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
 import { isGenericCourseName } from "@/lib/places/course-identity";
-import { getSyntheticMultiCycleExpiresAt } from "./synthetic-test-window";
+import {
+  COURSE_DISPATCH_SOURCE_SELECT,
+  isCurrentCourseDispatchSource,
+} from "./course-support-dispatch-intent";
 import { readCustomerRecovery } from "./course-support-customer-recovery";
 import { appendCourseSupportLineage, createCourseSupportLineage } from "./course-support-lineage";
 
@@ -5675,35 +5678,18 @@ export async function claimCourseSupportBatch(input: {
           }
           const preferences = await tx.coursePreference.findMany({
             where: { courseId: target.courseId, teeSearchId: { in: target.searchRefs.map((ref) => ref.id) } },
-            select: { teeSearch: { select: {
-              id: true, status: true, date: true, endTime: true, userTimeZone: true,
-              scheduleVersion: true, alertGeneration: true, trafficClass: true,
-              syntheticMultiCycle: true, syntheticTestWindow: true, createdAt: true,
-            } } },
+            select: { teeSearch: { select: COURSE_DISPATCH_SOURCE_SELECT } },
           });
           if (preferences.length !== target.searchRefs.length ||
               preferences.some(({ teeSearch }) => {
                 const expected = target.searchRefs.find((ref) => ref.id === teeSearch.id);
-                return !expected || teeSearch.status !== "ACTIVE" ||
-                  teeSearch.scheduleVersion !== expected.scheduleVersion ||
-                  teeSearch.alertGeneration !== expected.alertGeneration ||
-                  (target.trafficClass === "REAL" &&
-                    ["TEST", "AUTOMATION"].includes(teeSearch.trafficClass)) ||
-                  (target.trafficClass === "SYNTHETIC" &&
-                    teeSearch.trafficClass !== "TEST") ||
-                  !isSearchWindowActive({
-                    date: teeSearch.date,
-                    endTime: teeSearch.endTime,
-                    courseTimeZones: [current.course.timeZone],
-                    fallbackTimeZone: teeSearch.userTimeZone,
-                    now: claimDatabaseNow,
-                  }) ||
-                  (["TEST", "AUTOMATION"].includes(teeSearch.trafficClass) &&
-                    !(teeSearch.trafficClass === "TEST" && teeSearch.syntheticMultiCycle)) ||
-                  (() => {
-                    const expiry = getSyntheticMultiCycleExpiresAt(teeSearch, claimDatabaseNow);
-                    return expiry !== null && expiry <= claimDatabaseNow;
-                  })();
+                return !expected || !isCurrentCourseDispatchSource({
+                  ref: expected,
+                  search: teeSearch,
+                  trafficClass: target.trafficClass,
+                  courseTimeZone: current.course.timeZone,
+                  now: claimDatabaseNow,
+                });
               })) {
             throw new Error("Course dispatch source alert changed before locked claim.");
           }
