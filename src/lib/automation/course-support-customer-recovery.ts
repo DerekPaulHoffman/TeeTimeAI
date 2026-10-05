@@ -15,6 +15,7 @@ type Probe = {
   observedAt: Date; runtimeVersion: string | null; rawSummary: unknown;
 };
 export type CustomerRecoverySearch = {
+  mode?: "OUTDOOR" | "SIMULATOR";
   id: string; status: string; trafficClass: string; scheduleVersion: number;
   alertGeneration: number; alertEmail: string | null; additionalEmails: string[];
   user: { email: string }; workflowRunId: string | null; checkStatus: string;
@@ -56,7 +57,7 @@ export function assessCustomerRecovery(input: {
   let pendingSchedulerCount = 0;
   let pendingRecipientCourseCount = 0;
   for (const { search, dispatchedVersion } of input.searches) {
-    if (!search || search.status !== "ACTIVE" || ["TEST", "AUTOMATION"].includes(search.trafficClass)) continue;
+    if (!search || search.mode === "SIMULATOR" || search.status !== "ACTIVE" || ["TEST", "AUTOMATION"].includes(search.trafficClass)) continue;
     const courseIds = search.preferences.map(p => p.courseId).filter(id => input.courseIds.includes(id));
     if (!courseIds.length) continue;
     affectedSearchCount++;
@@ -118,7 +119,7 @@ export async function readCustomerRecovery(
   const dispatches = courseIds.length ? await client.courseSupportBatchSearch.findMany({
     where: { batchId: batch.id }, take: READ_LIMIT + 1,
     select: { scheduleVersion: true, teeSearch: { select: {
-      id: true, status: true, trafficClass: true, scheduleVersion: true, alertGeneration: true,
+      id: true, mode: true, status: true, trafficClass: true, scheduleVersion: true, alertGeneration: true,
       alertEmail: true, additionalEmails: true, user: { select: { email: true } },
       workflowRunId: true, checkStatus: true, checkLeaseToken: true, checkLeaseExpiresAt: true,
       nextCheckAt: true, lastCheckedAt: true, preferences: { select: { courseId: true } },

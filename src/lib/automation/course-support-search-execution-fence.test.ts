@@ -111,6 +111,18 @@ function snapshot(
 }
 
 describe("course-support search execution fence", () => {
+  it("does not accept a hybrid simulator check as outdoor remediation execution", () => {
+    const row = dispatch();
+    row.teeSearch!.mode = "SIMULATOR";
+    const result = snapshot([row]);
+    expect(result.settled).toBe(false);
+    expect(result.reasons).toContain("SEARCH_MODE_CHANGED");
+    expect(result.providerExecutionAttemptCourseIds).toEqual([]);
+    expect(result.probeCount).toBe(0);
+    expect(result.probeEvidenceRefs).toEqual([]);
+    expect(snapshot().settled).toBe(true);
+  });
+
   it("bounds post-dispatch probe reads and fails closed on overflow", async () => {
     const row = dispatch();
     row.teeSearch!.probes = Array.from(

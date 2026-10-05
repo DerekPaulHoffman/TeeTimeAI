@@ -952,6 +952,7 @@ describe("parked course campaign", () => {
               none: {
                 teeSearch: {
                   status: "ACTIVE",
+                  mode: "OUTDOOR",
                   trafficClass: {
                     notIn: expect.arrayContaining(["AUTOMATION", "TEST"]),
                   },
@@ -4820,7 +4821,7 @@ describe("parked course campaign", () => {
     expect(failed.incidentFindMany).toHaveBeenCalledTimes(1);
     expect(failed.batchIncidentFindMany).not.toHaveBeenCalled();
     expect(failed.probeFindMany).toHaveBeenCalledExactlyOnceWith({
-      where: { id: { in: ["legacy-proof-probe"] } },
+      where: { id: { in: ["legacy-proof-probe"] }, teeSearch: { mode: "OUTDOOR" } },
       select: { id: true, courseId: true, outcome: true, observedAt: true, runtimeVersion: true, rawSummary: true },
     });
   });

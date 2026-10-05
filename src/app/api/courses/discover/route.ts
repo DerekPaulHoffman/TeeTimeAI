@@ -20,11 +20,20 @@ import { enrichCoursesWithHoleLayouts } from "@/lib/places/hole-layout-enrichmen
 import { normalizeCourseSearchRadiusMeters } from "@/lib/places/radius";
 import { findPersistedNearbyCourseCandidates } from "@/lib/places/persisted-course-fallback";
 import { enrichCoursesWithBookingEvidence } from "@/lib/pricing/course-price-enrichment";
+import { simulatorDiscoveryResponse } from "@/lib/places/simulator-route-response";
+import { isSimulatorModeEnabled } from "@/lib/simulators/config";
 
 const COURSE_DISCOVERY_UNAVAILABLE_MESSAGE =
   "We couldn't load nearby courses right now. Please wait a moment and try again.";
 
 export async function GET(request: NextRequest) {
+  const mode = request.nextUrl.searchParams.get("mode") ?? "OUTDOOR";
+  if (mode !== "OUTDOOR" && mode !== "SIMULATOR") {
+    return NextResponse.json({ error: "Choose outdoor golf or simulator venues." }, { status: 400 });
+  }
+  if (mode === "SIMULATOR" && !isSimulatorModeEnabled()) {
+    return NextResponse.json({ error: "Simulator alerts are not available yet." }, { status: 503 });
+  }
   const latitude = Number(request.nextUrl.searchParams.get("latitude"));
   const longitude = Number(request.nextUrl.searchParams.get("longitude"));
   const radiusMeters = normalizeCourseSearchRadiusMeters(
@@ -40,9 +49,13 @@ export async function GET(request: NextRequest) {
 
   if (!hasGooglePlacesConfig()) {
     return NextResponse.json(
-      { courses: demoCourses, demo: true },
+      mode === "SIMULATOR" ? { courses: [], mode, demo: true } : { courses: demoCourses, demo: true },
       { headers: courseDataSuccessCacheHeaders }
     );
+  }
+
+  if (mode === "SIMULATOR") {
+    return simulatorDiscoveryResponse({ latitude, longitude, radiusMeters, signal: request.signal });
   }
 
   let reviewIndex: Awaited<ReturnType<typeof loadActiveGooglePlaceReviewIndex>>;

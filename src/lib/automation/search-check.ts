@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { runSimulatorSearchCheck } from "@/lib/automation/simulator-search-check";
 
 import type {
   CourseMonitoringMode,
@@ -533,6 +534,7 @@ async function checkSearch(
     };
   }
   let search = loadedSearch;
+  if (search.mode === "SIMULATOR") return runSimulatorSearchCheck(search, automationRunId, lease);
   const customerStatusObservedAt = new Date();
   const generationStartedAt = readAlertGenerationStartedAt({
     alertGeneration: search.alertGeneration,

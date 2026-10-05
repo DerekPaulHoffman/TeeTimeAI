@@ -23,6 +23,7 @@ import {
   MAX_PLAYERS_PER_SEARCH,
   SEARCH_CADENCE_OPTIONS_MINUTES
 } from "@/lib/validation/search-constraints";
+import { SIMULATOR_DURATION_OPTIONS_MINUTES, type SearchMode } from "@/lib/searches/search-mode";
 
 type SearchStatus = "ACTIVE" | "PAUSED" | "COMPLETED" | "CANCELLED";
 type SearchCheckStatus = "IDLE" | "QUEUED" | "CHECKING" | "WAITING" | "FAILED" | "STOPPED";
@@ -33,6 +34,8 @@ type CoursePreferenceFormValue = {
 };
 
 export function SearchStatusActions({
+  mode = "OUTDOOR",
+  initialDurationMinutes = null,
   searchId,
   windowEnded = false,
   status,
@@ -50,6 +53,8 @@ export function SearchStatusActions({
   initialNextCheckAt,
   initialCoursePreferences
 }: {
+  mode?: SearchMode;
+  initialDurationMinutes?: number | null;
   searchId: string;
   windowEnded?: boolean;
   status: SearchStatus;
@@ -107,6 +112,7 @@ export function SearchStatusActions({
       endTime: initialEndTime,
       userTimeZone: initialUserTimeZone,
       players: initialPlayers,
+      durationMinutes: initialDurationMinutes,
       requestedLayoutHoles: initialRequestedLayoutHoles,
       cadenceMinutes: initialCadenceMinutes,
       additionalEmails: initialAdditionalEmails.join("\n"),
@@ -169,6 +175,7 @@ export function SearchStatusActions({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         ...form,
+        ...(mode === "SIMULATOR" ? { mode, durationMinutes: form.durationMinutes, requestedLayoutHoles: null } : {}),
         additionalEmails: parseAdditionalEmails(form.additionalEmails),
         coursePreferences: form.coursePreferences.map((preference, index) => ({
           id: preference.id,
@@ -187,7 +194,7 @@ export function SearchStatusActions({
   }
 
   async function removeSearch() {
-    if (!window.confirm("Remove this tee-time alert?")) {
+    if (!window.confirm(mode === "SIMULATOR" ? "Remove this simulator alert?" : "Remove this tee-time alert?")) {
       return;
     }
 
@@ -329,14 +336,19 @@ export function SearchStatusActions({
               value={form.players}
               onChange={(event) => setForm({ ...form, players: Number(event.target.value) })}
             >
-              {Array.from({ length: MAX_PLAYERS_PER_SEARCH }, (_, index) => index + 1).map((count) => (
+              {Array.from({ length: mode === "SIMULATOR" ? 8 : MAX_PLAYERS_PER_SEARCH }, (_, index) => index + 1).map((count) => (
                 <option key={count} value={count}>
                   {count}
                 </option>
               ))}
             </select>
           </label>
-          <label>
+          {mode === "SIMULATOR" ? <label>
+            Session length
+            <select value={form.durationMinutes ?? 60} onChange={event => setForm({ ...form, durationMinutes: Number(event.target.value) })}>
+              {SIMULATOR_DURATION_OPTIONS_MINUTES.map(minutes => <option key={minutes} value={minutes}>{minutes} minutes</option>)}
+            </select>
+          </label> : <label>
             Course layout
             <select
               value={form.requestedLayoutHoles ?? "any"}
@@ -354,7 +366,7 @@ export function SearchStatusActions({
               <option value="9">9-hole</option>
               <option value="18">18-hole</option>
             </select>
-          </label>
+          </label>}
           <label>
             Cadence
             <select

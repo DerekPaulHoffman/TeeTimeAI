@@ -2605,6 +2605,18 @@ function retryBatchEntry(intended: CourseSupportCandidate) {
 }
 
 describe("course-support batch selection", () => {
+  it("keeps simulator demand at a hybrid venue out of outdoor support priority", () => {
+    const date = new Date("2026-10-06T00:00:00.000Z");
+    const simulator = { teeSearch: { id: "simulator", mode: "SIMULATOR" as const, date, endTime: "20:00" } };
+    expect(deriveCourseSupportCurrentDemand([simulator])).toEqual({
+      activeRealSearchCount: 0, earliestTargetDate: null,
+    });
+    expect(deriveCourseSupportCurrentDemand([
+      simulator,
+      { teeSearch: { id: "outdoor", mode: "OUTDOOR", date, endTime: "20:00" } },
+    ])).toEqual({ activeRealSearchCount: 1, earliestTargetDate: date });
+  });
+
   it("deduplicates live demand and keeps its earliest target date", () => {
     expect(
       deriveCourseSupportCurrentDemand([
@@ -4997,7 +5009,7 @@ describe("course-support claim demand fencing", () => {
     expect(candidateQuery?.select?.course?.select?.preferences?.take).toBe(1025);
     expect(prismaMocks.courseProbeFindFirst).toHaveBeenCalledTimes(1);
     expect(prismaMocks.courseProbeFindFirst).toHaveBeenCalledWith({
-      where: { courseId: incident.courseId },
+      where: { courseId: incident.courseId, teeSearch: { mode: "OUTDOOR" } },
       orderBy: [{ observedAt: "desc" }, { id: "desc" }],
       select: { id: true, courseId: true },
     });
@@ -15582,6 +15594,22 @@ describe("search-specific remediation proof", () => {
     expect(proof.freshProviderProofByCourse.has("course-1")).toBe(false);
     expect(proof.affectedCourseSearchPairCountByCourse.get("course-1")).toBe(2);
     expect(proof.healthyCourseSearchPairCountByCourse.get("course-1")).toBe(1);
+  });
+
+  it("does not use simulator availability at a hybrid venue to restore outdoor monitoring", () => {
+    const proof = collectFreshRemediatedCourseProof({
+      searches: [searchEvidence("NO_MATCH", { mode: "SIMULATOR" })],
+      courseIds: ["course-1"], releaseSha, deployedAt, dispatchedAt,
+    });
+    expect(proof.freshProviderProofByCourse.size).toBe(0);
+    expect(proof.freshProviderAttemptByCourse.size).toBe(0);
+    expect(proof.affectedCourseSearchPairCountByCourse.size).toBe(0);
+    const mixedProof = collectFreshRemediatedCourseProof({
+      searches: [searchEvidence("NO_MATCH", { mode: "SIMULATOR" }), searchEvidence("FETCH_FAILED", { mode: "OUTDOOR" })],
+      courseIds: ["course-1"], releaseSha, deployedAt, dispatchedAt,
+    });
+    expect(mixedProof.freshProviderProofByCourse.has("course-1")).toBe(false);
+    expect(mixedProof.affectedCourseSearchPairCountByCourse.get("course-1")).toBe(1);
   });
 
   it("requires the claimed runtime and fresh checks for every affected search", () => {
@@ -26516,6 +26544,7 @@ describe("detached verification atomic batch fences", () => {
     expect(prismaMocks.teeSearchFindMany).toHaveBeenCalledWith({
       where: {
         status: "ACTIVE",
+        mode: "OUTDOOR",
         date: { gte: new Date("2026-07-15T00:00:00.000Z") },
         preferences: { some: { courseId: "course-1" } },
       },
@@ -26752,6 +26781,7 @@ describe("detached verification atomic batch fences", () => {
     expect(prismaMocks.teeSearchFindMany).toHaveBeenCalledWith({
       where: {
         status: "ACTIVE",
+        mode: "OUTDOOR",
         date: { gte: new Date("2026-07-15T00:00:00.000Z") },
         preferences: { some: { courseId: "course-1" } },
       },

@@ -244,6 +244,17 @@ function getOrdinaryCombinedDiscoveries() {
 }
 
 describe("search monitoring discovery", () => {
+  it("never researches or mutates outdoor provider facts for simulator demand at a hybrid venue", async () => {
+    const fetchImpl = vi.fn();
+    const result = await prepareSearchMonitoring({ mode: "SIMULATOR", preferences: [{
+      course: { id: "hybrid-1", website: "https://venue.example", detectedBookingUrl: "https://outdoor.example/tee-times" },
+    }] } as never, fetchImpl as typeof fetch, now);
+    expect(result).toEqual({ attemptedCourseIds: [], appliedCourseIds: [], failedCourseIds: [], deferredCourseIds: [], retryCourseIds: [] });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(dbMocks.recordAndApplyBrowserDiscoveryToCourse).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportBatchSearch.findMany).not.toHaveBeenCalled();
+  });
+
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllEnvs();

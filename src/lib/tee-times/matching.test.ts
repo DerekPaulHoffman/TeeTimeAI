@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   dedupeMatches,
+  filterSimulatorSessionsForSearch,
   filterSlotsForSearch,
   parseCourseLocalDateTime,
   rankMatches
@@ -19,6 +20,46 @@ const search = {
 };
 
 describe("tee time matching", () => {
+  it("requires one continuous same-bay simulator session within the full window", () => {
+    const simulatorSearch = {
+      date: "2026-08-10",
+      startTime: "13:00",
+      endTime: "16:00",
+      players: 6,
+      durationMinutes: 120,
+      preferredOfferings: [{ offeringId: "sim-a", rank: 1 }],
+    };
+    const base = {
+      offeringId: "sim-a",
+      sourceId: "slot-1",
+      resourceId: "bay-1",
+      startsAt: "2026-08-10T13:30",
+      endsAt: "2026-08-10T15:30",
+      capacity: 6,
+      bookingUrl: "https://example.com/bay-1",
+    };
+    const sessions = [
+      base,
+      { ...base, sourceId: "too-late", startsAt: "2026-08-10T14:30", endsAt: "2026-08-10T16:30" },
+      { ...base, sourceId: "wrong-length", endsAt: "2026-08-10T15:00" },
+      { ...base, sourceId: "small-bay", capacity: 4 },
+      { ...base, sourceId: "split-bays", resourceId: "" },
+      { ...base, sourceId: "wrong-offering", offeringId: "sim-b" },
+    ];
+    expect(filterSimulatorSessionsForSearch(simulatorSearch, sessions, "America/New_York")).toEqual([base]);
+  });
+
+  it("accepts a late local session when its UTC date is the next day", () => {
+    const result = filterSimulatorSessionsForSearch({
+      date: "2026-08-10", startTime: "20:00", endTime: "23:59", players: 2,
+      durationMinutes: 90, preferredOfferings: [{ offeringId: "sim-a", rank: 1 }],
+    }, [{
+      offeringId: "sim-a", sourceId: "late", resourceId: "bay-1",
+      startsAt: "2026-08-11T03:00:00.000Z", endsAt: "2026-08-11T04:30:00.000Z",
+      capacity: 4, bookingUrl: "https://example.com/bay-1",
+    }], "America/Chicago");
+    expect(result).toHaveLength(1);
+  });
   it("stores timezone-less course times consistently across runtimes", () => {
     expect(parseCourseLocalDateTime("2026-07-11T08:00").toISOString()).toBe(
       "2026-07-11T12:00:00.000Z"

@@ -7,6 +7,7 @@ import { getSyntheticMultiCycleExpiresAt, syntheticTestWindowSchema } from "./sy
 
 export const COURSE_DISPATCH_SOURCE_SELECT = {
   id: true,
+  mode: true,
   userId: true,
   user: { select: { id: true, clerkUserId: true, email: true, pendingEmail: true } },
   alertEmail: true,
@@ -98,7 +99,7 @@ export function isCurrentCourseDispatchSource(input: {
   now: Date;
 }) {
   const { ref, search, trafficClass, courseTimeZone, now } = input;
-  if (search.id !== ref.id || search.status !== "ACTIVE" ||
+  if (search.mode === "SIMULATOR" || search.id !== ref.id || search.status !== "ACTIVE" ||
       search.alertGeneration !== ref.alertGeneration ||
       search.scheduleVersion < ref.scheduleVersion ||
       (trafficClass === "REAL" && ["TEST", "AUTOMATION"].includes(search.trafficClass)) ||

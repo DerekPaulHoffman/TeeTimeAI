@@ -12,14 +12,20 @@ import {
 } from "@/lib/email/search-status";
 import { buildEmailStopUrls, type EmailStopUrls } from "@/lib/email/search-actions";
 import { DEFAULT_TIME_ZONE, normalizeTimeZone } from "@/lib/timezones";
+import { getSimulatorAlertSubject, renderSimulatorAlertHtml, renderSimulatorStatusHtml,
+  type SimulatorStatusInput } from "@/lib/email/simulator-email";
 
 export type TeeTimeAlertMatch = {
+  offeringId?: string;
+  mode?: "SIMULATOR";
   courseId?: string;
   courseName: string;
   courseRank?: number;
   courseAddress?: string;
   courseTimeZone?: string;
   startsAt: Date;
+  endsAt?: Date | null;
+  capacity?: number;
   availableSpots: number;
   bookingUrl: string;
   priceCents?: number | null;
@@ -31,6 +37,8 @@ export type TeeTimeAlertMatch = {
 };
 
 export type TeeTimeAlertInput = {
+  mode?: "SIMULATOR";
+  durationMinutes?: number;
   to: string;
   searchId: string;
   matches: TeeTimeAlertMatch[];
@@ -137,11 +145,11 @@ export async function sendTeeTimeAlert(input: TeeTimeAlertInput): Promise<EmailD
   const resend = new Resend(apiKey);
   const stopUrls =
     input.stopUrls ??
-    buildStableEmailStopUrls(input.searchId, input.matches[0]?.startsAt.toISOString().slice(0, 10));
+    buildStableEmailStopUrls(input.searchId, input.targetDate ?? input.matches[0]?.startsAt.toISOString().slice(0, 10));
   const email = {
     from,
     to: input.to,
-    subject: getMatchAlertSubject(input.matches),
+    subject: input.mode === "SIMULATOR" ? getSimulatorAlertSubject(input.matches) : getMatchAlertSubject(input.matches),
     html: renderAlertHtml({
       ...input,
       stopUrls
@@ -164,6 +172,28 @@ export async function sendTeeTimeAlert(input: TeeTimeAlertInput): Promise<EmailD
     throw new EmailDeliveryNotAcceptedError(result.error.message, result.error.name);
   }
 
+  return { ...result.data, deliveryStatus: "sent" };
+}
+
+export async function sendSimulatorStatusEmail(input: SimulatorStatusInput & {
+  to: string;
+  searchId: string;
+  stableIdempotencyKey: string;
+}): Promise<EmailDelivery> {
+  if (shouldDryRunRecipient(input.to)) return { id: "dry-run", deliveryStatus: "dry_run" };
+  const apiKey = normalizeEmailEnvValue(process.env.RESEND_API_KEY);
+  const from = normalizeEmailEnvValue(process.env.ALERT_EMAIL_FROM);
+  if (!apiKey || !from) {
+    if (isVercelProduction()) throw new EmailDeliveryConfigurationError();
+    return { id: "dry-run", deliveryStatus: "dry_run" };
+  }
+  const result = await new Resend(apiKey).emails.send({
+    from, to: input.to,
+    subject: input.kind === "setup" ? "Your simulator alert is saved" : "Your simulator alert update",
+    html: renderSimulatorStatusHtml({ ...input,
+      stopUrl: buildStableEmailStopUrls(input.searchId, input.targetDate).cancelled }),
+  }, { headers: { "Idempotency-Key": input.stableIdempotencyKey } });
+  if (result.error) throw new EmailDeliveryNotAcceptedError(result.error.message, result.error.name);
   return { ...result.data, deliveryStatus: "sent" };
 }
 
@@ -295,6 +325,13 @@ export function shouldDryRunRecipient(email: string) {
 }
 
 export function renderAlertHtml(input: TeeTimeAlertInput) {
+  if (input.mode === "SIMULATOR") {
+    if (!input.durationMinutes || input.matches.some((match) => !match.endsAt)) {
+      throw new Error("Simulator alert needs complete session end times");
+    }
+    return renderSimulatorAlertHtml({ ...input, durationMinutes: input.durationMinutes,
+      stopUrl: input.stopUrls?.cancelled });
+  }
   const matches = [...input.matches].sort(
     (left, right) => left.startsAt.getTime() - right.startsAt.getTime()
   );

@@ -764,6 +764,7 @@ function buildActiveCourseDemandWhere(
 ): Prisma.TeeSearchWhereInput {
   return {
     status: "ACTIVE",
+    mode: "OUTDOOR",
     date: {
       gte: getCourseLocalDateStorageBoundary(timeZone, now)
     },
@@ -854,6 +855,7 @@ export async function backfillCourseMonitoringLifecycle(input: {
       monitoringStatus: true,
       supportIncident: true,
       probes: {
+        where: { teeSearch: { mode: "OUTDOOR" } },
         orderBy: { observedAt: "desc" },
         take: 1,
         select: {
@@ -869,6 +871,7 @@ export async function backfillCourseMonitoringLifecycle(input: {
       const realDemand = await prisma.teeSearch.aggregate({
         where: {
           status: "ACTIVE",
+          mode: "OUTDOOR",
           date: {
             gte: getCourseLocalDateStorageBoundary(course.timeZone, now)
           },

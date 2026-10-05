@@ -2,15 +2,17 @@ import { getProviderExecutionEvidenceObservedAt } from "@/lib/automation/provide
 import { readAlertGenerationStartedAt } from "@/lib/searches/generation-clock";
 
 type CurrentCheckSearch = {
+  mode?: string;
   alertGeneration?: number;
   createdAt?: Date;
   statusEmailSnapshot?: unknown;
   lastCheckedAt?: Date | null;
   lastCheckOutcome?: string | null;
-  preferences: Array<{ course: { id: string } }>;
+  preferences: Array<{ course: { id: string }; offeringId?: string | null }>;
 };
 
 type SearchProbe = {
+  offeringId?: string | null;
   courseId: string;
   observedAt: Date;
   outcome: string;
@@ -49,6 +51,15 @@ export function projectCurrentCheckEvidence<
     probes: (search.probes ?? []).filter((probe) => {
       if (!selectedCourses.has(probe.courseId) || !currentTimestamp(probe.observedAt)) {
         return false;
+      }
+      if (search.mode === "SIMULATOR") {
+        if (!probe.offeringId || !search.preferences.some(preference => preference.offeringId === probe.offeringId)) return false;
+        if (probe.outcome !== "MATCH_FOUND" && probe.outcome !== "NO_MATCH") return true;
+        const summary = probe.rawSummary && typeof probe.rawSummary === "object" && !Array.isArray(probe.rawSummary)
+          ? probe.rawSummary as { mode?: unknown; providerObservedAt?: unknown; bookingNotOpen?: unknown; opensAt?: unknown } : null;
+        if (summary?.mode !== "SIMULATOR") return false;
+        if (summary.bookingNotOpen === true) return typeof summary.opensAt === "string" && Date.parse(summary.opensAt) > Date.now();
+        return typeof summary.providerObservedAt === "string" && currentTimestamp(new Date(summary.providerObservedAt));
       }
       if (probe.outcome !== "MATCH_FOUND" && probe.outcome !== "NO_MATCH") {
         return true;

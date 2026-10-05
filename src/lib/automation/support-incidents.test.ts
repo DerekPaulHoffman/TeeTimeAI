@@ -229,11 +229,24 @@ describe("course support incidents", () => {
     expect(prismaMocks.teeSearch.count).toHaveBeenCalledWith({
       where: {
         status: "ACTIVE",
+        mode: "OUTDOOR",
         date: { gte: new Date("2026-07-12T00:00:00.000Z") },
         OR: [{ trafficClass: { notIn: ["AUTOMATION", "TEST"] } }, { syntheticMultiCycle: true }],
         preferences: { some: { courseId: "course-1" } }
       }
     });
+  });
+
+  it("does not create or modify outdoor support from simulator demand at a hybrid venue", async () => {
+    prismaMocks.teeSearch.findUnique.mockResolvedValue({ mode: "SIMULATOR", trafficClass: "PUBLIC", syntheticMultiCycle: false });
+    prismaMocks.courseSupportIncident.findUnique.mockResolvedValue(incident());
+    const result = await reportCourseSupportIssue({ course: foreupCourse, searchId: "sim-search", kind: "FETCH_FAILED",
+      message: "Public simulator check failed", failureObservedAt: now, now });
+    expect(result).toMatchObject({ incidentId: null, status: "UNRECORDED", ownerAlerted: false });
+    expect(prismaMocks.courseSupportIncident.create).not.toHaveBeenCalled();
+    expect(prismaMocks.courseSupportIncident.updateMany).not.toHaveBeenCalled();
+    expect(prismaMocks.courseMonitoringStatus.upsert).not.toHaveBeenCalled();
+    expect(prismaMocks.courseMonitoringStatus.update).not.toHaveBeenCalled();
   });
 
   it("does not create an incident after a newer monitoring success supersedes the accepted failure", async () => {

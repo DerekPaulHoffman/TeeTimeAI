@@ -6229,6 +6229,7 @@ describe("course monitoring watchdog", () => {
           observedAt: { gt: lastFailureAt, lte: now },
           teeSearch: {
             status: "ACTIVE",
+            mode: "OUTDOOR",
             trafficClass: { notIn: ["AUTOMATION", "TEST"] },
           },
         }),

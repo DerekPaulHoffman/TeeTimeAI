@@ -220,7 +220,7 @@ async function revokeStaleBound(
       incident.activeBatchId !== null;
     if (!stale) {
       const searches = await tx.coursePreference.findMany({
-        where: { courseId: audit.target.courseId, teeSearchId: { in: audit.target.searchRefs.map((ref) => ref.id) } },
+        where: { courseId: audit.target.courseId, teeSearchId: { in: audit.target.searchRefs.map((ref) => ref.id) }, teeSearch: { mode: "OUTDOOR" } },
         select: { teeSearch: { select: COURSE_DISPATCH_SOURCE_SELECT } },
       });
       const course = await tx.course.findUnique({ where: { id: audit.target.courseId }, select: { timeZone: true } });
@@ -296,6 +296,7 @@ export async function planCourseSupportCourseDispatch(input: {
             courseId: { in: candidateCourses },
             teeSearch: {
               status: "ACTIVE",
+              mode: "OUTDOOR",
               OR: [
                 { trafficClass: { notIn: ["TEST", "AUTOMATION"] } },
                 { trafficClass: "TEST", syntheticMultiCycle: true },

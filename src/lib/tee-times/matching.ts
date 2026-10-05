@@ -11,6 +11,45 @@ export type SearchWindow = {
   preferredCourses: SearchPreference[];
 };
 
+export type SimulatorSearchWindow = Omit<SearchWindow, "preferredCourses"> & {
+  durationMinutes: number;
+  preferredOfferings: Array<{ offeringId: string; rank: number }>;
+};
+
+export type SimulatorSession = {
+  offeringId: string;
+  sourceId: string;
+  resourceId: string;
+  productId?: string;
+  startsAt: string;
+  endsAt: string;
+  capacity: number;
+  bookingUrl: string;
+  priceCents?: number;
+  priceBasis?: string;
+  currency?: string;
+};
+
+/** A provider session is one continuous resource rental, never combined bays. */
+export function filterSimulatorSessionsForSearch<T extends SimulatorSession>(
+  search: SimulatorSearchWindow,
+  sessions: T[],
+  timeZone: string,
+) {
+  const preferred = new Set(search.preferredOfferings.map(({ offeringId }) => offeringId));
+  const windowStart = parseCourseLocalDateTime(`${search.date}T${search.startTime}`, timeZone);
+  const windowEnd = parseCourseLocalDateTime(`${search.date}T${search.endTime}`, timeZone);
+  return sessions.filter((session) => {
+    if (!preferred.has(session.offeringId) || !session.resourceId || !session.sourceId) return false;
+    if (session.capacity < search.players) return false;
+    const startsAt = parseCourseLocalDateTime(session.startsAt, timeZone);
+    const endsAt = parseCourseLocalDateTime(session.endsAt, timeZone);
+    if (!Number.isFinite(startsAt.getTime()) || !Number.isFinite(endsAt.getTime())) return false;
+    const actualMinutes = (endsAt.getTime() - startsAt.getTime()) / 60_000;
+    return actualMinutes === search.durationMinutes && startsAt >= windowStart && endsAt <= windowEnd;
+  });
+}
+
 export type TeeTimeSlot = {
   sourceId: string;
   courseId: string;

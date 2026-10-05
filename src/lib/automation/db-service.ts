@@ -163,6 +163,7 @@ const activeSearchInclude = {
   preferences: {
     orderBy: { rank: "asc" },
     include: {
+      offering: true,
       course: {
         include: activeSearchCourseInclude,
       },
@@ -180,6 +181,7 @@ const activeSearchCheckInclude = {
   preferences: {
     orderBy: { rank: "asc" },
     include: {
+      offering: true,
       course: {
         include: activeSearchCourseInclude,
       },
@@ -458,6 +460,7 @@ export async function listBrowserProbeTargets(
     prisma.teeSearch.findMany({
       where: {
         status: "ACTIVE",
+        mode: "OUTDOOR",
         date: {
           gte: earliestPotentiallyActiveSearchDate(),
         },
@@ -510,6 +513,7 @@ export async function listBrowserProbeTargets(
             layoutHoleCounts: true,
             layoutHolesVerifiedAt: true,
             probes: {
+              where: { teeSearch: { mode: "OUTDOOR" } },
               orderBy: { observedAt: "desc" },
               take: 1,
               select: { outcome: true, observedAt: true },
@@ -719,6 +723,7 @@ async function listExactIncidentBrowserProbeTarget(input: {
         select: { status: true, detectedPlatform: true, apiMetadata: true, automationReason: true, confidence: true, evidence: true, createdAt: true },
       },
       probes: {
+        where: { teeSearch: { mode: "OUTDOOR" } },
         orderBy: { observedAt: "desc" },
         take: 1,
         select: { outcome: true, observedAt: true },
@@ -727,6 +732,7 @@ async function listExactIncidentBrowserProbeTarget(input: {
         where: {
           teeSearch: {
             status: "ACTIVE",
+            mode: "OUTDOOR",
             date: { gte: earliestPotentiallyActiveSearchDate() },
           },
         },
@@ -4420,6 +4426,8 @@ export async function getSearchScheduleTiming(
     },
     select: {
       id: true,
+      mode: true,
+      durationMinutes: true,
       createdAt: true,
       date: true,
       endTime: true,
@@ -4432,6 +4440,7 @@ export async function getSearchScheduleTiming(
       syntheticTestWindow: true,
       preferences: {
         select: {
+          offering: true,
           course: {
             select: {
               timeZone: true,

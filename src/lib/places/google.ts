@@ -73,6 +73,12 @@ export type GooglePlace = {
 };
 
 export type CourseCandidate = {
+  mode?: "OUTDOOR" | "SIMULATOR";
+  offeringId?: string;
+  supportedDurationsMinutes?: number[];
+  maxPartySize?: number;
+  simulatorEvidenceUrl?: string;
+  simulatorVerifiedAt?: string;
   courseId?: string;
   googlePlaceId: string;
   name: string;
@@ -232,7 +238,7 @@ export function filterPublicGolfCoursePlaces(
   );
 }
 
-function filterVerifiedDuplicateCoursePlaces(
+export function filterVerifiedDuplicateCoursePlaces(
   places: GooglePlace[],
   reviewIndex: GooglePlaceReviewIndex
 ) {
@@ -826,7 +832,7 @@ function throwIfSearchAborted(signal: AbortSignal | undefined) {
     : new DOMException("Google Places search was cancelled", "AbortError");
 }
 
-function getTextSearchLocation(input: NearbyCourseSearchInput) {
+export function getTextSearchLocation(input: NearbyCourseSearchInput) {
   const radius = getSearchRadius(input);
   const latitudeDelta = toDegrees(radius / 6371000);
   const longitudeScale = Math.cos(toRadians(input.latitude));

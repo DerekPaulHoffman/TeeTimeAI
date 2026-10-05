@@ -1572,7 +1572,7 @@ export async function loadParkedCourseCampaignAdmissionMembers(
     if (!priorAdmission && current.readerCourse && database.teeSearch &&
       current.zeroExecutionEvidence.playbookAssessment.nextStage === "LOCAL_READER") {
       const activeSearchCount = await database.teeSearch.count({
-        where: { status: "ACTIVE", preferences: { some: { courseId: current.courseId } } },
+        where: { status: "ACTIVE", mode: "OUTDOOR", preferences: { some: { courseId: current.courseId } } },
       });
       const readerReadiness = activeSearchCount === 0
         ? await readParkedCourseStartedLocalReaderReadiness(database, { course: current.readerCourse, now })
@@ -2994,6 +2994,7 @@ async function loadParkedCourseCampaignMemberSnapshots(
                 none: {
                   teeSearch: {
                     status: "ACTIVE",
+                    mode: "OUTDOOR",
                     trafficClass: {
                       notIn: [...syntheticWebsiteTrafficClasses],
                     },
@@ -3084,6 +3085,7 @@ async function loadParkedCourseCampaignMemberSnapshots(
             where: {
               teeSearch: {
                 status: "ACTIVE",
+                mode: "OUTDOOR",
                 trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
               },
             },
@@ -3099,6 +3101,7 @@ async function loadParkedCourseCampaignMemberSnapshots(
             },
           },
           probes: {
+            where: { teeSearch: { mode: "OUTDOOR" } },
             orderBy: [{ observedAt: "desc" }, { id: "desc" }],
             take: 2,
             select: { id: true, courseId: true, observedAt: true },
@@ -5900,7 +5903,7 @@ export async function loadCampaignMemberObservations(
             select: { state: true, stateChangedAt: true },
           },
           probes: {
-            where: { observedAt: { gte: capturedAt } },
+            where: { observedAt: { gte: capturedAt }, teeSearch: { mode: "OUTDOOR" } },
             orderBy: [{ observedAt: "desc" }, { id: "desc" }],
             take: 1,
             select: probeBindingSelect,
@@ -5924,7 +5927,7 @@ export async function loadCampaignMemberObservations(
   const probeSummaries = new Map<string, unknown>();
   if (selectedProbes.size > 0) {
     const rows = await database.courseProbe.findMany({
-      where: { id: { in: [...selectedProbes.keys()] } },
+      where: { id: { in: [...selectedProbes.keys()] }, teeSearch: { mode: "OUTDOOR" } },
       select: { ...probeBindingSelect, rawSummary: true },
     });
     if (rows.length !== selectedProbes.size) readFailed();

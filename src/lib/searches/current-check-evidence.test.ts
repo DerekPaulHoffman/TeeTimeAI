@@ -21,6 +21,15 @@ function success(observedAt: Date, providerObservedAt = observedAt, courseId = "
 }
 
 describe("current saved-request check evidence", () => {
+  it("retains simulator proof for the current offering without an outdoor execution marker", () => {
+    const observedAt = new Date("2026-09-30T03:55:01Z");
+    const probe = { courseId: "course-1", offeringId: "simulator-1", observedAt, outcome: "NO_MATCH",
+      rawSummary: { mode: "SIMULATOR", providerObservedAt: observedAt.toISOString() } };
+    const simulator = { ...search, mode: "SIMULATOR", preferences: [{ course: { id: "course-1" }, offeringId: "simulator-1" }], probes: [probe] };
+    expect(projectCurrentCheckEvidence(simulator).probes).toEqual([probe]);
+    expect(projectCurrentCheckEvidence({ ...simulator, probes: [{ ...probe, offeringId: "another-simulator" }] }).probes).toEqual([]);
+    expect(projectCurrentCheckEvidence({ ...simulator, probes: [{ ...probe, rawSummary: { mode: "OUTDOOR", providerObservedAt: observedAt.toISOString() } }] }).probes).toEqual([]);
+  });
   it("removes the former date's totals and checked timestamp without mutating stored history", () => {
     const oldProbe = success(new Date("2026-09-30T03:31:59.787Z"));
     const stored = { ...search, probes: [oldProbe] };

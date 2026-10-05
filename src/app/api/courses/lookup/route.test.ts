@@ -16,8 +16,13 @@ const mocks = vi.hoisted(() => ({
   loadActiveGooglePlaceReviewIndex: vi.fn(),
   readCourseRuntimeCache: vi.fn(),
   searchGolfCoursesByName: vi.fn(),
+  simulatorLookupResponse: vi.fn(),
+  isSimulatorModeEnabled: vi.fn(),
   writeCourseRuntimeCache: vi.fn()
 }));
+
+vi.mock("@/lib/places/simulator-route-response", () => ({ simulatorLookupResponse: mocks.simulatorLookupResponse }));
+vi.mock("@/lib/simulators/config", () => ({ isSimulatorModeEnabled: mocks.isSimulatorModeEnabled }));
 
 vi.mock("@/lib/places/course-photo-metadata", () => ({
   cacheCourseCandidatePhotos: mocks.cacheCourseCandidatePhotos
@@ -70,6 +75,7 @@ describe("GET /api/courses/lookup", () => {
     mocks.loadActiveGooglePlaceReviewIndex.mockResolvedValue(testReviewIndex);
     mocks.readCourseRuntimeCache.mockResolvedValue(null);
     mocks.writeCourseRuntimeCache.mockResolvedValue(undefined);
+    mocks.isSimulatorModeEnabled.mockReturnValue(false);
     mocks.enrichCoursesWithAlertSupport.mockImplementation(async (courses) => courses);
     mocks.enrichCoursesWithHoleLayouts.mockImplementation(async (courses) =>
       courses.map((course: object) => ({
@@ -128,6 +134,22 @@ describe("GET /api/courses/lookup", () => {
     expect(response.headers.get("vercel-cdn-cache-control")).toBe(
       courseDataSuccessCacheHeaders["Vercel-CDN-Cache-Control"]
     );
+  });
+
+  it("routes simulator lookup separately and preserves the courses envelope", async () => {
+    mocks.isSimulatorModeEnabled.mockReturnValue(true);
+    mocks.simulatorLookupResponse.mockResolvedValue(new Response(JSON.stringify({ courses: [], mode: "SIMULATOR" })));
+    const response = await GET(request("?q=Indoor%20Golf&mode=SIMULATOR&latitude=41.24&longitude=-73.2"));
+    expect(await response.json()).toEqual({ courses: [], mode: "SIMULATOR" });
+    expect(mocks.simulatorLookupResponse).toHaveBeenCalledWith({ query: "Indoor Golf", latitude: 41.24, longitude: -73.2, signal: expect.any(AbortSignal) });
+    expect(mocks.searchGolfCoursesByName).not.toHaveBeenCalled();
+    expect(mocks.enrichCoursesWithHoleLayouts).not.toHaveBeenCalled();
+  });
+
+  it("fails closed for disabled simulator mode and rejects unknown modes", async () => {
+    expect((await GET(request("?q=Indoor%20Golf&mode=SIMULATOR"))).status).toBe(503);
+    expect((await GET(request("?q=Indoor%20Golf&mode=BOWLING"))).status).toBe(400);
+    expect(mocks.simulatorLookupResponse).not.toHaveBeenCalled();
   });
 
   it("rejects short queries and incomplete coordinates", async () => {

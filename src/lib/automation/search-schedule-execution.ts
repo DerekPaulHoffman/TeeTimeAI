@@ -20,6 +20,7 @@ import {
 import { isSyntheticWebsiteTrafficClass } from "@/lib/engagement/traffic-class";
 import { calculateSearchWindowEnd } from "@/lib/automation/date-boundary";
 import { getSyntheticMultiCycleExpiresAt } from "@/lib/automation/synthetic-test-window";
+import { getSimulatorBookingOpening } from "@/lib/simulators/booking-window";
 
 export { SYNTHETIC_MULTI_CYCLE_LIFETIME_MS } from "@/lib/automation/synthetic-test-window";
 
@@ -92,8 +93,16 @@ export async function executeScheduledSearchCheck(searchId: string, scheduleVers
     const schedulingCourses =
       refreshedTiming?.preferences.map((preference) => preference.course) ??
       timing.preferences.map((preference) => preference.course);
+    const simulator = timing.mode === "SIMULATOR";
     const nextCheckAt = completeSyntheticSearch
       ? null
+      : simulator
+      ? capAtSyntheticExpiration(calculateNextSimulatorCheckAt({
+          date: timing.date, cadenceMinutes: timing.cadenceMinutes, now: schedulingNow,
+          searchExpiresAt, preferences: (refreshedTiming ?? timing).preferences,
+          supportRetryNeeded: result.supportRetryNeeded, supportRetryAt: result.supportRetryAt,
+          checkStartedAt
+        }), syntheticExpiresAt)
       : capAtSyntheticExpiration(
           capAtSearchEndpoint(
             calculateNextCheckAt(
@@ -140,7 +149,7 @@ export async function executeScheduledSearchCheck(searchId: string, scheduleVers
     const defaultRetryAt = new Date(
       failedAt.getTime() + FAILED_CHECK_RETRY_MINUTES * 60 * 1000
     );
-    const endpointWakeAt = selectSearchEndpointWakeAt(
+    const endpointWakeAt = timing.mode === "SIMULATOR" ? null : selectSearchEndpointWakeAt(
       timing.preferences.map((preference) => preference.course),
       timing.trafficClass,
       checkStartedAt ?? failedAt,
@@ -179,6 +188,24 @@ export async function executeScheduledSearchCheck(searchId: string, scheduleVers
       courseResults: []
     };
   }
+}
+
+/** Simulator release facts belong to its offering, never the venue's outdoor tee sheet. */
+export function calculateNextSimulatorCheckAt(input: {
+  date: Date; cadenceMinutes: number; now: Date; searchExpiresAt: Date; checkStartedAt: Date;
+  preferences: Array<{ course: { timeZone: string }; offering?: Parameters<typeof getSimulatorBookingOpening>[1] | null }>;
+  supportRetryNeeded?: boolean; supportRetryAt?: Date | null;
+}) {
+  if (input.now >= input.searchExpiresAt) return null;
+  const openings = input.preferences.map(preference => preference.offering
+    ? getSimulatorBookingOpening(input.date.toISOString().slice(0, 10), preference.offering, preference.course.timeZone)
+    : null);
+  if (openings.some(opening => opening && opening > input.checkStartedAt && opening <= input.now)) return input.now;
+  const future = openings.filter((opening): opening is Date => Boolean(opening && opening > input.now));
+  const ready = openings.length === 0 || openings.some(opening => !opening || opening <= input.now);
+  const cadence = input.now.getTime() + input.cadenceMinutes * 60_000;
+  const next = new Date(Math.min(input.searchExpiresAt.getTime(), ...future.map(opening => opening.getTime()), ...(ready ? [cadence] : [])));
+  return applySupportDiscoveryRetry(next, Boolean(input.supportRetryNeeded), input.now, input.searchExpiresAt, input.checkStartedAt, input.supportRetryAt);
 }
 
 export function selectSearchEndpointWakeAt(

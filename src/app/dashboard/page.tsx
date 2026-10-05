@@ -19,6 +19,8 @@ import {
 
 import { DashboardSignInActions } from "@/components/dashboard-sign-in-actions";
 import { SearchStatusActions } from "@/components/search-status-actions";
+import { isCurrentSimulatorMatch } from "@/lib/simulators/current-availability";
+import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
 import { getRequiredAppUser } from "@/lib/auth/current-user";
 import { normalizeRequestedLayoutHoles } from "@/lib/courses/course-layout";
 import {
@@ -137,7 +139,7 @@ function DashboardView({
       (match) =>
         match.availabilityStatus === "AVAILABLE" &&
         match.startsAt > now &&
-        evaluateMonitoringGate({ ...match.course, now }).disposition === "ACTIONABLE"
+        (search.mode === "SIMULATOR" ? isCurrentSimulatorMatch(match, now, search.players) : evaluateMonitoringGate({ ...match.course, now }).disposition === "ACTIONABLE")
     )
   );
   const selectedCourseCount = monitoredCourseCount;
@@ -245,6 +247,7 @@ function DashboardSearchCard({
   showRecipientEmail: boolean;
 }) {
   const now = new Date();
+  if (search.mode === "SIMULATOR") return <SimulatorDashboardCard search={search} canManage={canManage} ownerEmailState={ownerEmailState} />;
   const windowEnded = notificationWindowEnded(formatDateInputValue(search.date), search.endTime, search.preferences.map(preference => preference.course.timeZone), now);
   const availableSearchMatches = search.matches.filter(
     (match) =>
@@ -769,6 +772,63 @@ function CourseImage({
       ) : null}
     </div>
   );
+}
+
+function SimulatorDashboardCard({ search, canManage, ownerEmailState }: {
+  search: DashboardSearches[number]; canManage: boolean; ownerEmailState: OwnerEmailState;
+}) {
+  const now = new Date();
+  const ended = notificationWindowEnded(formatDateInputValue(search.date), search.endTime, search.preferences.map(preference => preference.course.timeZone), now);
+  const matches = [...new Map(search.matches.filter(match => isCurrentSimulatorMatch(match, now, search.players)).map(match =>
+    [[match.offeringId, match.startsAt.toISOString(), match.endsAt?.toISOString(), match.bookingUrl].join("|"), match])).values()];
+  return <article className="dashboard-row" id={`alert-${search.id}`}>
+    <details className="dashboard-alert-accordion" open={search.status === "ACTIVE" && !ended}>
+      <summary className="dashboard-alert-summary">
+        <div className="dashboard-alert-summary-heading"><span className={`status-pill ${search.status.toLowerCase()}`}>{ended ? "Date passed" : search.status}</span><h3>Simulator · {getNotificationTitle(search.preferences)}</h3></div>
+        <div className="dashboard-alert-summary-copy">
+          <strong>{ended ? "Simulator search window ended" : search.status === "PAUSED" ? "Simulator alert paused" : search.status !== "ACTIVE" ? "Simulator alert finished" : matches.length ? `${matches.length} matching ${matches.length === 1 ? "session" : "sessions"}` : "Watching for simulator sessions"}</strong>
+          <span>{formatDashboardDate(search.date)} · {formatTimeLabel(search.startTime)}–{formatTimeLabel(search.endTime)} · {search.durationMinutes} minutes · {search.players} players · One bay</span>
+          <span>{ownerEmailState === "SENT" ? "Alert email sent for these settings" : ownerEmailState === "PENDING" ? "Alert email pending" : "No alert email sent for these settings"}</span>
+        </div>
+        <ChevronDown aria-hidden="true" size={18} />
+      </summary>
+      <div className="simulator-dashboard-content">
+        {search.preferences.map(preference => {
+          const offering = preference.offering;
+          const probe = search.probes.find(observation => observation.offeringId === offering?.id);
+          const summary = probe?.rawSummary;
+          const bookingNotOpen = summary && typeof summary === "object" && !Array.isArray(summary) && summary.bookingNotOpen === true;
+          const providerObservedAt = summary && typeof summary === "object" && !Array.isArray(summary) && typeof summary.providerObservedAt === "string"
+            ? new Date(summary.providerObservedAt) : null;
+          const current = offering?.active && offering.publicAccessStatus === "PUBLIC" && offering.verifiedAt && offering.evidenceUrl &&
+            offering.monitoringState === "HEALTHY" && offering.monitoringVerifiedAt && !offering.observationToken &&
+            offering.monitoringVerifiedAt <= now && now.getTime() - offering.monitoringVerifiedAt.getTime() <= 30 * 60_000 &&
+            (!offering.lastFailureAt || offering.lastFailureAt < offering.monitoringVerifiedAt) &&
+            probe && ["MATCH_FOUND", "NO_MATCH"].includes(probe.outcome) && providerObservedAt && providerObservedAt <= now &&
+            now.getTime() - providerObservedAt.getTime() <= 30 * 60_000 && summary && typeof summary === "object" && !Array.isArray(summary) &&
+            summary.sourceFingerprint === getSimulatorOfferingSourceFingerprint(offering);
+          const venueMatches = [...new Map(matches.filter(match => match.offeringId === offering?.id).map(match =>
+            [[match.startsAt.toISOString(), match.endsAt?.toISOString(), match.bookingUrl].join("|"), match])).values()];
+          return <section className="simulator-venue" key={preference.id}>
+            <h4>{preference.rank}. {preference.course.name}</h4>
+            <p>{bookingNotOpen ? "The public booking window has not opened yet." : current ? venueMatches.length ? "Matching simulator sessions available" : "Checked · No matching sessions" : offering?.monitoringState === "DEGRADED_RETRYING" ? "Availability check will retry" : "Simulator check pending"}</p>
+            <p>{offering?.maxPartySize ? `Up to ${offering.maxPartySize} players per bay · ` : ""}{preference.course.timeZone}</p>
+            {venueMatches.map(match => <a className="known-tee-time" key={match.id} href={match.bookingUrl} target="_blank" rel="noreferrer">
+              {new Intl.DateTimeFormat("en-US", { timeZone: preference.course.timeZone, hour: "numeric", minute: "2-digit" }).format(match.startsAt)}–{new Intl.DateTimeFormat("en-US", { timeZone: preference.course.timeZone, hour: "numeric", minute: "2-digit" }).format(match.endsAt!)} · {search.durationMinutes} minutes · Official booking page
+            </a>)}
+            {offering?.bookingUrl ? <p><a href={offering.bookingUrl} target="_blank" rel="noreferrer">Official simulator page <ExternalLink size={14} /></a></p> : null}
+          </section>;
+        })}
+        <p>Alerts go to your account email{search.additionalEmails.length ? ` and ${search.additionalEmails.length} additional recipients` : ""}. Availability can change. You book direct.</p>
+        {canManage ? <SearchStatusActions mode="SIMULATOR" initialDurationMinutes={search.durationMinutes} searchId={search.id} windowEnded={ended} status={search.status}
+          initialDate={formatDateInputValue(search.date)} initialStartTime={search.startTime} initialEndTime={search.endTime} initialUserTimeZone={search.userTimeZone}
+          initialPlayers={search.players} initialRequestedLayoutHoles={null} initialCadenceMinutes={search.cadenceMinutes}
+          initialAdditionalEmails={search.additionalEmails} initialCheckStatus={search.checkStatus} initialScheduleVersion={search.scheduleVersion}
+          initialLastCheckedAt={search.lastCheckedAt?.toISOString() ?? null} initialNextCheckAt={search.nextCheckAt?.toISOString() ?? null}
+          initialCoursePreferences={search.preferences.map(preference => ({ id: preference.id, courseName: preference.course.name, rank: preference.rank }))} /> : null}
+      </div>
+    </details>
+  </article>;
 }
 
 async function loadOwnerEmailStates(userId: string, searches: DashboardSearches) {

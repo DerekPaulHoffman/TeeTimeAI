@@ -19,6 +19,7 @@ export type CourseSupportSearchExecutionFenceReason =
   | "SEARCH_REMOVAL_UNVERIFIED"
   | "SEARCH_GENERATION_CHANGED"
   | "SEARCH_STATUS_CHANGED"
+  | "SEARCH_MODE_CHANGED"
   | "SEARCH_WORKFLOW_MISSING"
   | "SEARCH_CHECK_UNSETTLED"
   | "SEARCH_LEASE_ACTIVE"
@@ -49,6 +50,7 @@ export type CourseSupportSearchExecutionFencePreference = {
 
 export type CourseSupportSearchExecutionFenceSearch = {
   id: string;
+  mode?: "OUTDOOR" | "SIMULATOR";
   status: string;
   trafficClass: string;
   scheduleVersion: number;
@@ -219,6 +221,7 @@ export async function loadCourseSupportSearchExecutionFence(
         select: {
           id: true,
           status: true,
+          mode: true,
           trafficClass: true,
           scheduleVersion: true,
           alertGeneration: true,
@@ -458,6 +461,10 @@ export function buildCourseSupportSearchExecutionFenceSnapshot(input: {
     }
     const generationSuperseded =
       search.scheduleVersion > dispatch.scheduleVersion;
+    if (search.mode === "SIMULATOR") {
+      reasons.add("SEARCH_MODE_CHANGED");
+      continue;
+    }
     const hasLease = Boolean(
       search.checkLeaseToken || search.checkLeaseExpiresAt,
     );
@@ -529,7 +536,7 @@ export function buildCourseSupportSearchExecutionFenceSnapshot(input: {
   const providerExecutionAttemptCourseIds = [
     ...new Set(
       dispatches.flatMap((dispatch) =>
-        (dispatch.teeSearch?.probes ?? []).flatMap((probe) =>
+        (dispatch.teeSearch?.mode === "SIMULATOR" ? [] : dispatch.teeSearch?.probes ?? []).flatMap((probe) =>
           relevantCourseIds.has(probe.courseId) &&
           isProviderExecutionAttempt({
             rawSummary: probe.rawSummary,
@@ -816,7 +823,7 @@ function normalizeDispatch(
           left.courseId.localeCompare(right.courseId) ||
           left.id.localeCompare(right.id),
       ),
-      probes: [...dispatch.teeSearch.probes]
+      probes: [...(dispatch.teeSearch.mode === "SIMULATOR" ? [] : dispatch.teeSearch.probes)]
         .filter(
           (probe) =>
             !postDispatchFloor ||
@@ -846,6 +853,7 @@ function serializeDispatch(
     teeSearch: dispatch.teeSearch
       ? {
           id: createStableRef(dispatch.teeSearch.id),
+          ...(dispatch.teeSearch.mode === "SIMULATOR" ? { mode: "SIMULATOR" } : {}),
           status: dispatch.teeSearch.status,
           trafficClass: dispatch.teeSearch.trafficClass,
           scheduleVersion: dispatch.teeSearch.scheduleVersion,

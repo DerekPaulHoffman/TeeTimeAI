@@ -244,11 +244,12 @@ async function reportCourseSupportIssueWithLease(
     await Promise.all([
       prisma.teeSearch.findUnique({
         where: { id: input.searchId },
-        select: { trafficClass: true, syntheticMultiCycle: true },
+        select: { trafficClass: true, syntheticMultiCycle: true, mode: true },
       }),
       prisma.teeSearch.count({
         where: {
           status: "ACTIVE",
+          mode: "OUTDOOR",
           date: { gte: dateBoundary },
           OR: [
             { trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] } },
@@ -262,6 +263,7 @@ async function reportCourseSupportIssueWithLease(
       prisma.teeSearch.aggregate({
         where: {
           status: "ACTIVE",
+          mode: "OUTDOOR",
           date: { gte: dateBoundary },
           trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
           preferences: {
@@ -349,7 +351,7 @@ async function reportCourseSupportIssueWithLease(
     ? now
     : requestedEpisodeStartedAt;
 
-  if (disposableSyntheticSearch) {
+  if (disposableSyntheticSearch || sourceSearch?.mode === "SIMULATOR") {
     return {
       incidentId: null,
       status: "UNRECORDED",

@@ -41,7 +41,7 @@ This file is the operating contract for Codex and other coding agents working in
 
 ## Product Contract
 
-Tee Time Spot is an alert-only tee-time waitlist assistant for public golf courses.
+Tee Time Spot is an alert-only availability assistant for public outdoor golf and verified public simulator rentals. The golfer books direct.
 
 The app should:
 
@@ -146,7 +146,10 @@ discover public courses -> save ranked demand -> check official availability
 - The authenticated Clerk account owns and manages every alert. Its account email is always the primary alert recipient; each alert may add up to 3 deduplicated additional recipients.
 - Google Places is used for course discovery and photos.
 - Course discovery defaults to a 15-mile radius and offers 5 to 30 mile choices.
-- Discovery should prefer public golf courses and filter stores, simulators, private clubs, and likely non-course results.
+- Outdoor discovery should prefer public golf courses and filter stores, simulators, private clubs, and likely non-course results. Simulator discovery is a separate mode, enabled by `SIMULATOR_MODE_ENABLED`, with independent exact offering verification and nationwide location discovery.
+- A saved alert has one immutable mode: `OUTDOOR` or `SIMULATOR`. Simulator intent includes a full session duration and party size for one bay; never combine unrelated bays or treat a partial interval as an opening.
+- `CourseOffering` owns simulator rental access, booking link, capacity, supported durations, provider configuration, and monitoring health independently of the venue's outdoor `Course` state. Outdoor private/non-course reviews remain authoritative for outdoor discovery.
+- Simulator matches require current offering proof, a full supported interval inside the venue-local search window, and sufficient verified bay capacity. Do not show holes, par, per-golfer green fees, or legacy outdoor reader results for simulator sessions.
 - Exact Google Place review facts live in Neon and can take effect without a code deployment; reusable generic filtering rules remain code.
 - A physical 9-hole/18-hole course layout is different from a purchasable round length. Use verified `Course.layoutHoleCounts` evidence and never infer physical layout from tee-sheet products alone.
 - Search windows are evaluated in each course's IANA timezone. `TeeSearch.userTimeZone` is for recipient-facing context, not for redefining a course-local booking window.
@@ -309,7 +312,7 @@ Filtering expectations:
 - Normally require `primaryType` to be `golf_course` and `types` to include `golf_course`.
 - Permit only the documented narrow exceptions: an active exact-ID `VERIFIED_PUBLIC` review or a strongly corroborated bounded public-course text result.
 - Exclude non-operational places.
-- Exclude known non-course primary types such as stores, indoor/simulator surfaces, sports clubs, and associations.
+- In outdoor mode, exclude known non-course primary types such as stores, indoor/simulator surfaces, sports clubs, and associations. Simulator mode uses a separate bounded Places query and exact `CourseOffering` rental evidence; indoor classification alone does not prove a public rental.
 - Exclude known private/non-course name patterns.
 - When the user reports a bad result, add focused tests around the real shape rather than broad string hacks.
 

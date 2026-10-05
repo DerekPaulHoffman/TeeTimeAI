@@ -15,6 +15,7 @@ import {
 import { createTeeSearchForUser, listTeeSearchesForUser } from "@/lib/searches/service";
 import { SearchEmailDeliveryInProgressError } from "@/lib/users/pending-email";
 import { teeSearchInputSchema } from "@/lib/validation/search";
+import { isSimulatorModeEnabled } from "@/lib/simulators/config";
 
 export async function GET() {
   if (!hasDatabaseConfig()) {
@@ -73,6 +74,9 @@ export async function POST(request: NextRequest) {
   try {
     const user = await getRequiredAppUser();
     const submittedInput = teeSearchInputSchema.parse(await request.json());
+    if (submittedInput.mode === "SIMULATOR" && !isSimulatorModeEnabled()) {
+      return NextResponse.json({ error: "Simulator alerts are not available yet." }, { status: 503 });
+    }
     const input = {
       ...submittedInput,
       alertEmail: user.email
@@ -106,7 +110,7 @@ export async function POST(request: NextRequest) {
       trafficClass,
       syntheticMultiCycle
     );
-    after(() => queuePendingCourseProfiles(search.preferences.map((preference) => preference.courseId)));
+    if (input.mode !== "SIMULATOR") after(() => queuePendingCourseProfiles(search.preferences.map((preference) => preference.courseId)));
     after(() => startOperatorNotificationForSearch(search.id));
     let schedule: Awaited<ReturnType<typeof startSearchSchedule>> | null = null;
     try {

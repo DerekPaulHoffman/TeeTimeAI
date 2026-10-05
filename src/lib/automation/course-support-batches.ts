@@ -390,6 +390,7 @@ const DETACHED_VERIFICATION_COURSE_SELECT = {
     where: {
       teeSearch: {
         status: "ACTIVE",
+        mode: "OUTDOOR",
         trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
       },
     },
@@ -642,6 +643,7 @@ const COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT = {
     select: {
       ...DETACHED_VERIFICATION_COURSE_SELECT,
       probes: {
+        where: { teeSearch: { mode: "OUTDOOR" } },
         orderBy: [{ observedAt: "desc" }, { id: "desc" }],
         take: 2,
         select: {
@@ -655,11 +657,12 @@ const COURSE_SUPPORT_CANDIDATE_INCIDENT_SELECT = {
         where: {
           teeSearch: {
             status: "ACTIVE",
+            mode: "OUTDOOR",
             trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] }
           }
         },
         take: COURSE_SUPPORT_CANDIDATE_PREFERENCE_READ_LIMIT + 1,
-        select: { teeSearch: { select: { id: true, date: true, endTime: true } } }
+        select: { teeSearch: { select: { id: true, mode: true, date: true, endTime: true } } }
       },
       automationDiscoveries: {
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
@@ -739,6 +742,7 @@ type DetachedVerificationRequestState = Prisma.CourseSupportVerificationRequestG
 type CourseSupportDemandPreference = {
   teeSearch: {
     id: string;
+    mode?: "OUTDOOR" | "SIMULATOR";
     date: Date;
     endTime: string;
   };
@@ -758,6 +762,7 @@ export function deriveCourseSupportCurrentDemand(
     : null;
   const searchDates = new Map<string, Date>();
   for (const preference of preferences) {
+    if (preference.teeSearch.mode === "SIMULATOR") continue;
     if (context && dateBoundary) {
       if (
         preference.teeSearch.date.getTime() < dateBoundary.getTime() ||
@@ -1141,6 +1146,7 @@ function buildDueResponderIncidentWhere(now: Date): Prisma.CourseSupportIncident
                 some: {
                   teeSearch: {
                     status: "ACTIVE",
+                    mode: "OUTDOOR",
                     trafficClass: {
                       notIn: [...syntheticWebsiteTrafficClasses]
                     }
@@ -3698,6 +3704,7 @@ export async function inspectCourseSupportQueue(input?: {
                 where: {
                   teeSearch: {
                     status: "ACTIVE",
+                    mode: "OUTDOOR",
                     trafficClass: {
                       notIn: [...syntheticWebsiteTrafficClasses],
                     },
@@ -3705,7 +3712,7 @@ export async function inspectCourseSupportQueue(input?: {
                 },
                 take: COURSE_SUPPORT_CANDIDATE_PREFERENCE_READ_LIMIT + 1,
                 select: {
-                  teeSearch: { select: { id: true, date: true, endTime: true } },
+                  teeSearch: { select: { id: true, mode: true, date: true, endTime: true } },
                 },
               },
             },
@@ -5682,7 +5689,7 @@ export async function claimCourseSupportBatch(input: {
             throw new Error("Course dispatch target changed before locked claim.");
           }
           const preferences = await tx.coursePreference.findMany({
-            where: { courseId: target.courseId, teeSearchId: { in: target.searchRefs.map((ref) => ref.id) } },
+            where: { courseId: target.courseId, teeSearchId: { in: target.searchRefs.map((ref) => ref.id) }, teeSearch: { mode: "OUTDOOR" } },
             select: { teeSearch: { select: COURSE_DISPATCH_SOURCE_SELECT } },
           });
           if (preferences.length !== target.searchRefs.length ||
@@ -5819,6 +5826,7 @@ export async function claimCourseSupportBatch(input: {
                       where: {
                         teeSearch: {
                           status: "ACTIVE",
+                          mode: "OUTDOOR",
                           trafficClass: {
                             notIn: [...syntheticWebsiteTrafficClasses],
                           },
@@ -5827,7 +5835,7 @@ export async function claimCourseSupportBatch(input: {
                       take:
                         COURSE_SUPPORT_CANDIDATE_PREFERENCE_READ_LIMIT + 1,
                       select: {
-                        teeSearch: { select: { id: true, date: true, endTime: true } },
+                        teeSearch: { select: { id: true, mode: true, date: true, endTime: true } },
                       },
                     },
                   },
@@ -5890,7 +5898,7 @@ export async function claimCourseSupportBatch(input: {
               .sort()
               .map((courseId) =>
                 tx.courseProbe.findFirst({
-                  where: { courseId },
+                  where: { courseId, teeSearch: { mode: "OUTDOOR" } },
                   orderBy: [{ observedAt: "desc" }, { id: "desc" }],
                   select: { id: true, courseId: true },
                 }),
@@ -9517,6 +9525,7 @@ export async function verifyCourseSupportBatch(input: {
 }
 
 export type RemediatedProviderSearchEvidence = {
+  mode?: "OUTDOOR" | "SIMULATOR";
   status: string;
   scheduleVersion: number;
   dispatchedScheduleVersion: number;
@@ -9542,6 +9551,7 @@ export function collectFreshRemediatedCourseProof(input: {
   >();
 
   for (const search of input.searches) {
+    if (search.mode === "SIMULATOR") continue;
     const probesByCourse = new Map<string, FreshProbeEvidence[]>();
     for (const probe of search.probes) {
       const candidates = probesByCourse.get(probe.courseId) ?? [];
@@ -9715,6 +9725,7 @@ async function assessRemediatedSearchHealth(
     if (!dispatch.teeSearch) {
       return isVerifiedSearchRemoval(dispatch, dispatchedAt);
     }
+    if (dispatch.teeSearch.mode === "SIMULATOR") return false;
     if (dispatch.teeSearch.preferences.length === 0) {
       return dispatch.teeSearch.updatedAt.getTime() >= dispatchedAt.getTime();
     }
@@ -9731,6 +9742,7 @@ async function assessRemediatedSearchHealth(
     if (!dispatch.teeSearch) {
       return isVerifiedSearchRemoval(dispatch, dispatchedAt);
     }
+    if (dispatch.teeSearch.mode === "SIMULATOR") return false;
     if (dispatch.teeSearch.preferences.length === 0) {
       return dispatch.teeSearch.updatedAt.getTime() >= dispatchedAt.getTime();
     }
@@ -9748,6 +9760,7 @@ async function assessRemediatedSearchHealth(
       }
       return [
         {
+          mode: dispatch.teeSearch.mode,
           status: dispatch.teeSearch.status,
           scheduleVersion: dispatch.teeSearch.scheduleVersion,
           dispatchedScheduleVersion: dispatch.scheduleVersion,
@@ -9809,6 +9822,7 @@ export function isVerifiedSearchRemoval(
 
 export function isRemediatedSearchSchedulerHealthy(
   search: {
+    mode?: "OUTDOOR" | "SIMULATOR";
     status: string;
     workflowRunId: string | null;
     checkStatus: string;
@@ -9819,6 +9833,7 @@ export function isRemediatedSearchSchedulerHealthy(
   dispatchedAt: Date,
   now: Date,
 ) {
+  if (search.mode === "SIMULATOR") return false;
   if (search.status !== "ACTIVE") {
     return search.updatedAt.getTime() >= dispatchedAt.getTime();
   }
@@ -10723,6 +10738,7 @@ async function listAuthoritativeCourseSupportProbeEvidence(
       },
       teeSearch: {
         status: "ACTIVE",
+        mode: "OUTDOOR",
         trafficClass: {
           notIn: [...syntheticWebsiteTrafficClasses],
         },
@@ -14066,6 +14082,7 @@ async function closeoutCourseSupportBatchAttempt(
           await tx.teeSearch.updateMany({
             where: {
               status: "ACTIVE",
+              mode: "OUTDOOR",
               trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
               date: {
                 gte: getCourseLocalDateStorageBoundary(
@@ -14631,6 +14648,7 @@ async function closeoutCourseSupportBatchAttempt(
       await tx.teeSearch.updateMany({
         where: {
           status: "ACTIVE",
+          mode: "OUTDOOR",
           trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
           OR: [...courseIdsByStorageBoundary.entries()].map(
             ([boundaryTimestamp, courseIds]) => ({
@@ -16964,7 +16982,7 @@ export async function backfillCourseSupportResponderState(input?: {
             },
             preferences: {
               where: {
-                teeSearch: { status: "ACTIVE" },
+                teeSearch: { status: "ACTIVE", mode: "OUTDOOR" },
               },
               select: {
                 teeSearch: {
@@ -20691,6 +20709,7 @@ async function revalidateDetachedVerificationProof(
   const potentiallyCurrentSearches = await transaction.teeSearch.findMany({
     where: {
       status: "ACTIVE",
+      mode: "OUTDOOR",
       date: {
         gte: getCourseLocalDateStorageBoundary(
           batchIncident.course.timeZone,

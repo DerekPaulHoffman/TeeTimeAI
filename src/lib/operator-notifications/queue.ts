@@ -19,6 +19,8 @@ export async function enqueueOperatorNotification(
     startTime: string;
     endTime: string;
     players: number;
+    mode?: "OUTDOOR" | "SIMULATOR";
+    durationMinutes?: number | null;
     preferences: Array<{ rank: number; course: { name: string } }>;
   },
 ) {

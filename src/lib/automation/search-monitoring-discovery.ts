@@ -348,6 +348,7 @@ async function resolveRemediationDiscoveryContext(
       teeSearch: {
         is: {
           status: "ACTIVE",
+          mode: "OUTDOOR",
           scheduleVersion: search.scheduleVersion,
           remediationDispatchKey: search.remediationDispatchKey,
           remediationDispatchVersion,
@@ -376,6 +377,7 @@ async function resolveRemediationDiscoveryContext(
         select: {
           id: true,
           status: true,
+          mode: true,
           scheduleVersion: true,
           remediationDispatchKey: true,
           remediationDispatchVersion: true,
@@ -421,6 +423,7 @@ async function resolveRemediationDiscoveryContext(
     !currentSearch ||
     currentSearch.id !== search.id ||
     currentSearch.status !== "ACTIVE" ||
+    currentSearch.mode === "SIMULATOR" ||
     currentSearch.scheduleVersion !== search.scheduleVersion ||
     currentSearch.remediationDispatchKey !== search.remediationDispatchKey ||
     currentSearch.remediationDispatchVersion !== remediationDispatchVersion ||
@@ -1008,6 +1011,11 @@ export async function prepareSearchMonitoring(
   now = new Date(),
   options: SearchMonitoringDiscoveryOptions = {}
 ): Promise<SearchMonitoringDiscoveryResult> {
+  // Simulator offerings have independent evidence and must not update outdoor course knowledge.
+  if (search.mode === "SIMULATOR") return {
+    attemptedCourseIds: [], appliedCourseIds: [], failedCourseIds: [],
+    deferredCourseIds: [], retryCourseIds: [],
+  };
   const publicFetch = fetchImpl ?? addressPinnedPublicFetch;
   const includeCourseIds = new Set(options.includeCourseIds ?? []);
   const forceFreshCourseIds = new Set(options.forceFreshCourseIds ?? []);
@@ -1763,6 +1771,7 @@ async function listRepeatedMonitoringFailureEvidence(courseIds: string[]) {
       course: {
         select: {
           probes: {
+            where: { teeSearch: { mode: "OUTDOOR" } },
             orderBy: { observedAt: "desc" },
             take: 1,
             select: { outcome: true, observedAt: true }

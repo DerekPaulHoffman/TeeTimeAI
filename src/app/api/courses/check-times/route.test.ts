@@ -18,6 +18,11 @@ beforeEach(() => {
   mocks.fetch.mockResolvedValue({ slots: [], targetDateStatus: "OPEN" });
 });
 afterEach(() => { vi.clearAllMocks(); vi.useRealTimers(); });
+it("refuses simulator intent before running an outdoor reader", async () => {
+  expect((await GET(request("mode=SIMULATOR&courseId=hybrid-course&date=2026-10-03&players=4"))).status).toBe(400);
+  expect(mocks.findUnique).not.toHaveBeenCalled();
+  expect(mocks.fetch).not.toHaveBeenCalled();
+});
 it("checks the requested course/date/party and returns normalized public times only", async () => {
   mocks.fetch.mockResolvedValue({ targetDateStatus: "OPEN", slots: [{ startsAt: "2026-10-03T09:15:00", availableSpots: 4, holes: 18, priceCents: 6100, bookingUrl: "https://example.com/book", sourceId: "private-source" }] });
   const response = await GET(request()); const data = await response.json();

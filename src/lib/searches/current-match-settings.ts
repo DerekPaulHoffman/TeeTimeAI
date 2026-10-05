@@ -9,7 +9,7 @@ export type CurrentMatchSearchSettings = {
   endTime: string;
   players: number;
   requestedLayoutHoles?: number | null;
-  preferences: Array<{ rank: number; course: { id: string } }>;
+  preferences: Array<{ rank: number; course: { id: string }; offeringId?: string | null }>;
 };
 
 export type CurrentMatchSettings = {

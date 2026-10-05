@@ -13,6 +13,26 @@ enum SearchStatus {
   CANCELLED
 }
 
+enum SearchMode {
+  OUTDOOR
+  SIMULATOR
+}
+
+enum OfferingMonitoringState {
+  UNKNOWN
+  VERIFYING
+  HEALTHY
+  DEGRADED_RETRYING
+  FINAL_TECHNICAL
+  FINAL_IDENTITY
+}
+
+enum OfferingPublicAccessStatus {
+  PUBLIC
+  UNVERIFIED
+  NOT_PUBLIC
+}
+
 enum AutomationEligibility {
   UNKNOWN
   ALLOWED
@@ -388,6 +408,7 @@ model Course {
   createdAt                           DateTime                            @default(now())
   updatedAt                           DateTime                            @updatedAt
   preferences                         CoursePreference[]
+  offerings                           CourseOffering[]
   probes                              CourseProbe[]
   matches                             TeeTimeMatch[]
   bookingFacts                        CourseBookingFact[]
@@ -408,6 +429,59 @@ model Course {
   @@index([bookingMethod, automationEligibility])
   @@index([monitoringMode])
   @@index([intelligenceReviewAt])
+}
+
+// A venue keeps its physical identity in Course. Product and monitoring facts
+// for simulator rentals live here, separate from outdoor tee-time health.
+model CourseOffering {
+  id                        String                     @id @default(cuid())
+  courseId                  String
+  kind                      SearchMode
+  active                    Boolean                    @default(true)
+  publicAccessStatus        OfferingPublicAccessStatus @default(UNVERIFIED)
+  bookingUrl                String?
+  evidenceUrl               String?
+  verifiedAt                DateTime?
+  providerFamilyKey         String?
+  providerMetadata          Json?
+  maxPartySize              Int?
+  supportedDurationsMinutes Int[]                      @default([])
+  bookingWindowDaysAhead    Int?
+  bookingReleaseTimeLocal   String?
+  monitoringMode            CourseMonitoringMode       @default(AUTOMATIC)
+  automationEligibility     AutomationEligibility      @default(UNKNOWN)
+  monitoringState           OfferingMonitoringState    @default(UNKNOWN)
+  monitoringVerifiedAt      DateTime?
+  lastFailureAt             DateTime?
+  observationToken          String?
+  observationExpiresAt      DateTime?
+  monitoringRevision        Int                        @default(0)
+  createdAt                 DateTime                   @default(now())
+  updatedAt                 DateTime                   @updatedAt
+  course                    Course                     @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  preferences               CoursePreference[]
+  probes                    CourseProbe[]
+  matches                   TeeTimeMatch[]
+  simulatorSupportIncident  SimulatorSupportIncident?
+
+  @@unique([courseId, kind])
+  @@index([kind, active, publicAccessStatus])
+  @@index([kind, monitoringState])
+}
+
+model SimulatorSupportIncident {
+  id          String                      @id @default(cuid())
+  offeringId  String                      @unique
+  status      CourseSupportIncidentStatus @default(AUTO_INVESTIGATING)
+  reason      String?
+  evidenceUrl String?
+  firstSeenAt DateTime                    @default(now())
+  updatedAt   DateTime                    @updatedAt
+  resolvedAt  DateTime?
+  retryAt     DateTime?
+  offering    CourseOffering              @relation(fields: [offeringId], references: [id], onDelete: Cascade)
+
+  @@index([status, firstSeenAt])
 }
 
 model CourseInventoryHorizonObservation {
@@ -533,6 +607,8 @@ model TeeSearch {
   endTime                        String
   userTimeZone                   String                         @default("America/New_York")
   players                        Int
+  mode                           SearchMode                     @default(OUTDOOR)
+  durationMinutes                Int?
   requestedLayoutHoles           Int?
   cadenceMinutes                 Int                            @default(5)
   alertEmail                     String?
@@ -571,6 +647,7 @@ model TeeSearch {
   @@index([checkLeaseExpiresAt])
   @@index([userId, status])
   @@index([trafficClass, status, date])
+  @@index([mode, status, nextCheckAt])
 }
 
 enum OperatorNotificationKind {
@@ -709,66 +786,82 @@ model SearchEmailDelivery {
 }
 
 model CoursePreference {
-  id                        String    @id @default(cuid())
+  id                        String          @id @default(cuid())
   teeSearchId               String
   courseId                  String
+  offeringId                String?
   rank                      Int
   distanceMetersAtSelection Int?
-  createdAt                 DateTime  @default(now())
-  teeSearch                 TeeSearch @relation(fields: [teeSearchId], references: [id], onDelete: Cascade)
-  course                    Course    @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  createdAt                 DateTime        @default(now())
+  teeSearch                 TeeSearch       @relation(fields: [teeSearchId], references: [id], onDelete: Cascade)
+  course                    Course          @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  offering                  CourseOffering? @relation(fields: [offeringId], references: [id], onDelete: SetNull)
 
   @@unique([teeSearchId, courseId])
   @@unique([teeSearchId, rank])
   @@index([courseId])
+  @@index([offeringId])
 }
 
 model CourseProbe {
-  id              String         @id @default(cuid())
+  id              String          @id @default(cuid())
   teeSearchId     String
   courseId        String
+  offeringId      String?
   automationRunId String?
   outcome         ProbeOutcome
-  observedAt      DateTime       @default(now())
+  observedAt      DateTime        @default(now())
   message         String?
   evidenceUrl     String?
   rawSummary      Json?
   runtimeVersion  String?
-  teeSearch       TeeSearch      @relation(fields: [teeSearchId], references: [id], onDelete: Cascade)
-  course          Course         @relation(fields: [courseId], references: [id], onDelete: Cascade)
-  automationRun   AutomationRun? @relation(fields: [automationRunId], references: [id], onDelete: SetNull)
+  teeSearch       TeeSearch       @relation(fields: [teeSearchId], references: [id], onDelete: Cascade)
+  course          Course          @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  offering        CourseOffering? @relation(fields: [offeringId], references: [id], onDelete: SetNull)
+  automationRun   AutomationRun?  @relation(fields: [automationRunId], references: [id], onDelete: SetNull)
 
   @@index([teeSearchId, observedAt])
   @@index([courseId, observedAt])
   @@index([observedAt])
+  @@index([offeringId, observedAt])
 }
 
 model TeeTimeMatch {
-  id                 String                  @id @default(cuid())
-  teeSearchId        String
-  courseId           String
-  sourceId           String
-  startsAt           DateTime
-  availabilityCycle  Int                     @default(0)
-  availableSpots     Int
-  priceCents         Int?
-  holes              Int?
-  bookingUrl         String
-  evidenceUrl        String?
-  alertStatus        AlertStatus             @default(PENDING)
-  availabilityStatus MatchAvailabilityStatus @default(AVAILABLE)
-  firstSeenAt        DateTime                @default(now())
-  lastSeenAt         DateTime                @default(now())
-  lastConfirmedAt    DateTime                @default(now())
-  unavailableAt      DateTime?
-  sentAt             DateTime?
-  teeSearch          TeeSearch               @relation(fields: [teeSearchId], references: [id], onDelete: Cascade)
-  course             Course                  @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  id                        String                  @id @default(cuid())
+  teeSearchId               String
+  courseId                  String
+  offeringId                String?
+  offeringSourceFingerprint String?
+  sourceId                  String
+  startsAt                  DateTime
+  endsAt                    DateTime?
+  resourceId                String?
+  productId                 String?
+  priceBasis                String?
+  currency                  String?
+  capacity                  Int?
+  availabilityCycle         Int                     @default(0)
+  availableSpots            Int
+  priceCents                Int?
+  holes                     Int?
+  bookingUrl                String
+  evidenceUrl               String?
+  alertStatus               AlertStatus             @default(PENDING)
+  availabilityStatus        MatchAvailabilityStatus @default(AVAILABLE)
+  firstSeenAt               DateTime                @default(now())
+  lastSeenAt                DateTime                @default(now())
+  lastConfirmedAt           DateTime                @default(now())
+  unavailableAt             DateTime?
+  sentAt                    DateTime?
+  teeSearch                 TeeSearch               @relation(fields: [teeSearchId], references: [id], onDelete: Cascade)
+  course                    Course                  @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  offering                  CourseOffering?         @relation(fields: [offeringId], references: [id], onDelete: SetNull)
 
   @@unique([teeSearchId, courseId, sourceId, startsAt])
   @@index([alertStatus, firstSeenAt])
   @@index([teeSearchId, availabilityStatus, startsAt])
   @@index([firstSeenAt])
+  @@index([offeringId, startsAt])
 }
 
 model AutomationRun {

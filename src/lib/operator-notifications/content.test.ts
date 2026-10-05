@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
 import {
   assessOperatorNotificationHealth,
   buildOperatorNotificationSummary,
@@ -102,6 +103,74 @@ describe("operator notification eligibility", () => {
 });
 
 describe("five-minute operator status", () => {
+  function simulator(): OperatorNotificationHealthSearch {
+    const search = healthy();
+    const observedAt = new Date("2026-09-16T16:04:00Z");
+    const simulatorSearch: OperatorNotificationHealthSearch = { ...search, id: "sim-search", mode: "SIMULATOR", durationMinutes: 120, players: 6,
+      date: new Date("2026-09-20T00:00:00Z"), requestedLayoutHoles: 18,
+      preferences: search.preferences.map(preference => ({ ...preference, offeringId: `sim-${preference.courseId}`,
+        course: { ...preference.course, timeZone: "America/New_York", layoutHoleCounts: [9], monitoringStatus: { lastFailureAt: now } },
+        offering: { id: `sim-${preference.courseId}`, courseId: preference.courseId, kind: "SIMULATOR", active: true,
+          publicAccessStatus: "PUBLIC", bookingUrl: "https://venue.example/book", evidenceUrl: "https://venue.example/simulators",
+          verifiedAt: new Date("2026-09-15T12:00:00Z"), maxPartySize: 6, supportedDurationsMinutes: [60, 120],
+          automationEligibility: "ALLOWED", monitoringState: "HEALTHY", monitoringVerifiedAt: observedAt,
+          observationToken: null, lastFailureAt: null, bookingWindowDaysAhead: 7, bookingReleaseTimeLocal: "00:00",
+          providerFamilyKey: "ACUITY", providerMetadata: { ownerKey: "public-tenant" }, monitoringMode: "AUTOMATIC" },
+      })),
+      probes: search.probes.map(probe => ({ ...probe, teeSearchId: "sim-search", offeringId: `sim-${probe.courseId}`,
+        rawSummary: { mode: "SIMULATOR", durationMinutes: 120, providerObservedAt: observedAt.toISOString() } })),
+    };
+    simulatorSearch.probes.forEach(probe => { probe.rawSummary = { ...probe.rawSummary as object,
+      sourceFingerprint: getSimulatorOfferingSourceFingerprint(simulatorSearch.preferences.find(preference => preference.offeringId === probe.offeringId)!.offering!) }; });
+    return simulatorSearch;
+  }
+
+  it("assesses simulator success using the same search/offering and ignores outdoor layout and failures", () => {
+    expect(assessOperatorNotificationHealth(simulator(), now)).toMatchObject({ attention: false,
+      text: expect.stringContaining("2/2 simulator venues") });
+  });
+
+  it("rejects stale, foreign, revised or superseded simulator proof", () => {
+    for (const mutate of [
+      (search: OperatorNotificationHealthSearch) => { search.probes[0].offeringId = "outdoor-offering"; },
+      (search: OperatorNotificationHealthSearch) => { search.probes[0].teeSearchId = "other-search"; },
+      (search: OperatorNotificationHealthSearch) => { search.probes[0].rawSummary = { providerExecution: "RUNNABLE_PROVIDER_CHECK", providerObservedAt: "2026-09-16T16:04:00Z" }; },
+      (search: OperatorNotificationHealthSearch) => { search.probes[0].rawSummary = { mode: "SIMULATOR", durationMinutes: 60, providerObservedAt: "2026-09-16T16:04:00Z" }; },
+      (search: OperatorNotificationHealthSearch) => { search.preferences[0].offering!.observationToken = "new-observation"; },
+      (search: OperatorNotificationHealthSearch) => { search.preferences[0].offering!.monitoringVerifiedAt = null; },
+      (search: OperatorNotificationHealthSearch) => { search.preferences[0].offering!.lastFailureAt = now; },
+      (search: OperatorNotificationHealthSearch) => { search.preferences[0].offering!.active = false; },
+      (search: OperatorNotificationHealthSearch) => { search.preferences[0].offering!.providerMetadata = { ownerKey: "different-tenant" }; },
+    ]) {
+      const search = simulator();
+      mutate(search);
+      expect(assessOperatorNotificationHealth(search, now).attention).toBe(true);
+    }
+    const stale = simulator();
+    stale.createdAt = new Date("2026-09-16T15:00:00Z");
+    stale.probes[0].observedAt = new Date("2026-09-16T15:30:00Z");
+    stale.probes[0].rawSummary = { mode: "SIMULATOR", durationMinutes: 120, providerObservedAt: stale.probes[0].observedAt.toISOString() };
+    expect(assessOperatorNotificationHealth(stale, now).attention).toBe(true);
+  });
+
+  it("accepts a future simulator booking release only while it matches the current offering", () => {
+    const search = simulator();
+    search.date = new Date("2026-09-30T00:00:00Z");
+    search.nextCheckAt = new Date("2026-09-23T04:00:00Z");
+    search.probes.forEach(probe => { probe.rawSummary = { mode: "SIMULATOR", bookingNotOpen: true, opensAt: search.nextCheckAt!.toISOString() }; });
+    search.preferences.forEach(preference => { preference.offering!.monitoringState = "UNKNOWN"; preference.offering!.monitoringVerifiedAt = null; });
+    expect(assessOperatorNotificationHealth(search, now).attention).toBe(false);
+    search.preferences[0].offering!.bookingWindowDaysAhead = 5;
+    expect(assessOperatorNotificationHealth(search, now).attention).toBe(true);
+  });
+
+  it("includes simulator mode and session length in the operator summary", () => {
+    expect(buildOperatorNotificationSummary({ user: { email: "golfer@realmail.com" }, date: new Date("2026-09-20T00:00:00Z"),
+      startTime: "08:00", endTime: "10:00", players: 6, mode: "SIMULATOR", durationMinutes: 120,
+      preferences: [{ rank: 1, course: { name: "Hybrid Golf Center" } }],
+    })).toContain("6 players | simulator 120 minutes | Hybrid Golf Center");
+  });
+
   it("always reports healthy checks, including no matching availability", () => {
     expect(assessOperatorNotificationHealth(healthy(), now)).toMatchObject({
       attention: false,

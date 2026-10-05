@@ -4,6 +4,7 @@ import { currentUser } from "@clerk/nextjs/server";
 import { StructuredData } from "@/components/structured-data";
 import { TeeTimeIntake } from "@/components/tee-time-intake";
 import { getClerkPublishableKey, hasClerkConfig } from "@/lib/env";
+import { isSimulatorModeEnabled } from "@/lib/simulators/config";
 import "leaflet/dist/leaflet.css";
 import "../pricing.css";
 
@@ -14,7 +15,9 @@ import {
 
 export const metadata = searchPageMetadata;
 
-export default async function SearchPage() {
+export default async function SearchPage({ searchParams }: { searchParams?: Promise<{ mode?: string }> } = {}) {
+  const requestedMode = (await searchParams)?.mode;
+  const simulatorEnabled = isSimulatorModeEnabled();
   const accountEnabled = hasClerkConfig();
   const clerkUser = accountEnabled ? await currentUser() : null;
   const accountEmail = clerkUser?.primaryEmailAddress?.emailAddress;
@@ -34,14 +37,16 @@ export default async function SearchPage() {
           src="https://images.unsplash.com/photo-1535131749006-b7f58c99034b?auto=format&fit=crop&w=2400&q=80"
         />
         <p className="eyebrow">Set up your alert</p>
-        <h1>Find public golf tee times and set a free alert.</h1>
+        <h1>{simulatorEnabled ? "Find golf tee times or simulator sessions." : "Find public golf tee times and set a free alert."}</h1>
         <p className="search-page-header-copy">
-          Search nearby public golf courses and create a free tee time alert.
+          {simulatorEnabled ? "Choose outdoor golf or a simulator session and create a free alert. " : "Search nearby public golf courses and create a free tee time alert. "}
           When a matching opening appears, we email the official booking link
-          and you book directly with the course.
+          and you book directly with the {simulatorEnabled ? "venue" : "course"}.
         </p>
       </div>
       <TeeTimeIntake
+        simulatorEnabled={simulatorEnabled}
+        initialValues={{ mode: requestedMode?.toUpperCase() === "SIMULATOR" && simulatorEnabled ? "SIMULATOR" : "OUTDOOR" }}
         accountEmail={accountEmail}
         accountEnabled={accountEnabled}
         accountSignedIn={Boolean(clerkUser)}

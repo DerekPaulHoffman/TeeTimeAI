@@ -8,6 +8,10 @@ const request = (params = "courseId=public-course&date=2026-10-02") => new NextR
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date("2026-10-02T12:00:00Z")); mocks.configured.mockReturnValue(true); mocks.findMany.mockResolvedValue([]); });
 afterEach(() => { vi.useRealTimers(); vi.clearAllMocks(); });
 describe("public known times", () => {
+  it("refuses simulator intent before reading outdoor history", async () => {
+    expect((await GET(request("mode=SIMULATOR&courseId=hybrid-course&date=2026-10-02"))).status).toBe(400);
+    expect(mocks.findMany).not.toHaveBeenCalled();
+  });
   it("publishes observed tee-sheet times without a matching saved alert or private probe metadata", async () => {
     mocks.findMany.mockResolvedValue([{ id: "public-course", timeZone: "America/New_York", matches: [], probes: [{ rawSummary: {
       teeSearchId: "private-search", publicAvailability: { date: "2026-10-02", confirmedAt: "2026-10-02T11:59:00Z", times: [{

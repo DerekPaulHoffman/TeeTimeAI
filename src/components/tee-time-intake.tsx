@@ -1,5 +1,8 @@
 "use client";
 
+import { SimulatorIntake } from "@/components/simulator-intake";
+import type { SearchMode } from "@/lib/searches/search-mode";
+
 import Image from "next/image";
 import Link from "next/link";
 import {
@@ -232,6 +235,8 @@ type SearchCoordinates = { latitude: number; longitude: number };
 type AdditionalEmailField = { id: string; value: string };
 
 export type TeeTimeIntakeInitialValues = {
+  mode?: SearchMode;
+  durationMinutes?: number;
   location?: string;
   players?: number;
   date?: string;
@@ -251,17 +256,39 @@ export function TeeTimeIntake({
   accountEnabled,
   accountEmail,
   accountSignedIn = false,
-  clerkPublishableKey
+  clerkPublishableKey,
+  simulatorEnabled = false
 }: {
   initialValues?: TeeTimeIntakeInitialValues;
   accountEnabled: boolean;
   accountEmail?: string;
   accountSignedIn?: boolean;
   clerkPublishableKey?: string;
+  simulatorEnabled?: boolean;
 }) {
+  const [mode, setMode] = useState<SearchMode>(simulatorEnabled && initialValues.mode === "SIMULATOR" ? "SIMULATOR" : "OUTDOOR");
+  const sharedValues = useRef<TeeTimeIntakeInitialValues>(initialValues);
+  const [modeInitialValues, setModeInitialValues] = useState(initialValues);
+  const [modeSwitched, setModeSwitched] = useState(false);
+  const onSharedValuesChange = useCallback((values: TeeTimeIntakeInitialValues) => { sharedValues.current = values; }, []);
+  function selectMode(nextMode: SearchMode) {
+    if (nextMode === mode) return;
+    setModeInitialValues({ ...initialValues, ...sharedValues.current });
+    setModeSwitched(true);
+    setMode(nextMode);
+  }
   return (
+    <>
+    {simulatorEnabled ? <div className="search-mode-switch" role="group" aria-label="Golf search mode">
+      <button type="button" aria-pressed={mode === "OUTDOOR"} onClick={() => selectMode("OUTDOOR")}>Outdoor golf</button>
+      <button type="button" aria-pressed={mode === "SIMULATOR"} onClick={() => selectMode("SIMULATOR")}>Simulator</button>
+    </div> : null}
+    {mode === "SIMULATOR" ? <SimulatorIntake initialValues={modeInitialValues} preserveInitialValues={modeSwitched} onSharedValuesChange={onSharedValuesChange} accountEnabled={accountEnabled}
+      accountSignedIn={accountSignedIn} accountEmail={accountEmail} clerkPublishableKey={clerkPublishableKey} /> :
     <TeeTimeIntakeContent
-      initialValues={initialValues}
+      initialValues={modeInitialValues}
+      preserveInitialValues={modeSwitched}
+      onSharedValuesChange={onSharedValuesChange}
       accountState={
         !accountEnabled
           ? { status: "unavailable" }
@@ -272,18 +299,23 @@ export function TeeTimeIntake({
               : { status: "missing-email" }
       }
       clerkPublishableKey={clerkPublishableKey}
-    />
+    />}
+    </>
   );
 }
 
 function TeeTimeIntakeContent({
   initialValues,
   accountState,
-  clerkPublishableKey
+  clerkPublishableKey,
+  preserveInitialValues = false,
+  onSharedValuesChange
 }: {
   initialValues: TeeTimeIntakeInitialValues;
   accountState: IntakeAccountState;
   clerkPublishableKey?: string;
+  preserveInitialValues?: boolean;
+  onSharedValuesChange?: (values: TeeTimeIntakeInitialValues) => void;
 }) {
   const [locationText, setLocationText] = useState(initialValues.location ?? "");
   const [searchRadiusMiles, setSearchRadiusMiles] = useState(
@@ -357,6 +389,7 @@ function TeeTimeIntakeContent({
   const reportedCourseLookupCandidatesRef = useRef(new Set<string>());
   const shouldRefreshRestoredCoursesRef = useRef(false);
   const dateWasEditedRef = useRef(false);
+  const restoreInitial = useRef({ initialValues, preserveInitialValues });
 
   function reconcileDateFromControl(value: string) {
     dateWasEditedRef.current = true;
@@ -364,6 +397,7 @@ function TeeTimeIntakeContent({
   }
 
   useEffect(() => {
+    const { initialValues, preserveInitialValues } = restoreInitial.current;
     const transferred = consumeSearchPrefill() ?? readSearchPrefillFromUrl();
     const draft = transferred ? undefined : readSearchDraft();
     const animationFrame = window.requestAnimationFrame(() => {
@@ -400,11 +434,23 @@ function TeeTimeIntakeContent({
           draft.coordinates !== undefined && draft.courses.length > 0;
       }
 
+      if (preserveInitialValues) {
+        if (initialValues.location !== undefined) setLocationText(initialValues.location);
+        if (initialValues.radius !== undefined) setSearchRadiusMiles(initialValues.radius);
+        if (initialValues.date !== undefined) setDate(initialValues.date);
+        if (initialValues.startTime !== undefined) setStartTime(initialValues.startTime);
+        if (initialValues.endTime !== undefined) setEndTime(initialValues.endTime);
+        setSearchCoordinates(initialValues.coordinates ?? null);
+      }
       setDraftReady(true);
     });
 
     return () => window.cancelAnimationFrame(animationFrame);
   }, []);
+
+  useEffect(() => {
+    if (draftReady) onSharedValuesChange?.({ location: locationText, radius: searchRadiusMiles, date, startTime, endTime, coordinates: searchCoordinates ?? undefined });
+  }, [draftReady, locationText, searchRadiusMiles, date, startTime, endTime, searchCoordinates, onSharedValuesChange]);
 
   useEffect(() => {
     if (!draftReady || createdAlert) {

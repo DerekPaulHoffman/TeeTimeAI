@@ -22,6 +22,7 @@ import {
   isSearchEmailDeliveryEnabled,
 } from "@/lib/email/delivery-policy";
 import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
+import type { SimulatorStatusInput } from "@/lib/email/simulator-email";
 import {
   canonicalSearchEmailJson as canonicalJson,
   getStableSearchEmailDeliveryIdempotencyKey as getStableDeliveryIdempotencyKey,
@@ -42,6 +43,8 @@ import {
   type SearchStatusEmailInput,
 } from "@/lib/email/search-status";
 import { zonedDateTimeToDate } from "@/lib/timezones";
+import { getSimulatorBookingOpening } from "@/lib/simulators/booking-window";
+import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
 import {
   applyPendingClerkEmailForSearch,
   SearchEmailDeliveryInProgressError,
@@ -1396,6 +1399,127 @@ async function runWithCurrentAvailabilityDeliverySourceFence<T>(input: {
   );
 }
 
+async function getSimulatorDeliverySourceStates(
+  transaction: DeliveryTransaction,
+  searchId: string,
+  payload: SearchEmailDeliveryPayload,
+  now: Date,
+): Promise<Map<string, "current" | "transient" | "terminal">> {
+  const allIds = payload.displayMatchIds ?? payload.matchIds ?? [];
+  const terminal = () => new Map(allIds.map((id) => [id, "terminal" as const]));
+  if (payload.schemaVersion !== 3 || payload.mode !== "SIMULATOR") return terminal();
+  const report = optionalJsonRecord(payload.matchReport);
+  const rows = report && Array.isArray(report.matches) ? report.matches.map(optionalJsonRecord) : [];
+  const refs = uniqueMatchRefs(payload.matchRefs ?? []);
+  const ids = payload.matchIds ?? [];
+  if (!report || report.mode !== "SIMULATOR" || rows.length === 0 ||
+      rows.some((row) => !row) || refs.length !== ids.length ||
+      new Set(ids).size !== ids.length || refs.some((ref) => !ids.includes(ref.matchId)) ||
+      rows.length !== (payload.displayMatchIds ?? []).length ||
+      new Set(rows.map((row) => row?.matchId)).size !== rows.length ||
+      rows.some((row) => !(payload.displayMatchIds ?? []).includes(String(row?.matchId))) ||
+      ids.some((id) => !rows.some((row) => row?.matchId === id))) return terminal();
+
+  const search = await transaction.teeSearch.findUnique({
+    where: { id: searchId },
+    select: { mode: true, status: true, alertGeneration: true, date: true,
+      startTime: true, endTime: true, players: true, durationMinutes: true,
+      userTimeZone: true,
+      preferences: { select: { courseId: true, offeringId: true, rank: true } } },
+  });
+  if (!search || search.mode !== "SIMULATOR" || search.status !== "ACTIVE" ||
+      search.date.toISOString().slice(0, 10) !== report.targetDate ||
+      search.startTime !== report.startTime || search.endTime !== report.endTime ||
+      search.players !== report.players || search.durationMinutes !== report.durationMinutes ||
+      search.userTimeZone !== report.userTimeZone) return terminal();
+
+  const matches = await transaction.teeTimeMatch.findMany({
+    where: { teeSearchId: searchId, id: { in: payload.displayMatchIds ?? [] } },
+    select: { id: true, courseId: true, offeringId: true, availabilityCycle: true,
+      availabilityStatus: true, alertStatus: true, startsAt: true, endsAt: true,
+      lastConfirmedAt: true, availableSpots: true, capacity: true, bookingUrl: true,
+      offeringSourceFingerprint: true,
+      resourceId: true, productId: true, course: { select: { name: true, timeZone: true } } },
+  });
+  const matchById = new Map(matches.map((match) => [match.id, match]));
+  const refById = new Map(refs.map((ref) => [ref.matchId, ref]));
+  const offeringIds = [...new Set(matches.flatMap((match) => match.offeringId ? [match.offeringId] : []))];
+  const offerings = await transaction.courseOffering.findMany({
+    where: { id: { in: offeringIds }, kind: "SIMULATOR" },
+    select: { id: true, courseId: true, active: true, publicAccessStatus: true,
+      bookingUrl: true, verifiedAt: true, automationEligibility: true,
+      kind: true, evidenceUrl: true, providerFamilyKey: true, providerMetadata: true,
+      bookingWindowDaysAhead: true, bookingReleaseTimeLocal: true, monitoringMode: true,
+      monitoringState: true, monitoringVerifiedAt: true, lastFailureAt: true,
+      observationToken: true, observationExpiresAt: true,
+      maxPartySize: true, supportedDurationsMinutes: true },
+  });
+  const offeringById = new Map(offerings.map((offering) => [offering.id, offering]));
+  const states = new Map<string, "current" | "transient" | "terminal">();
+  for (const raw of rows) {
+    const row = raw!;
+    const matchId = optionalString(row.matchId);
+    if (!matchId) return terminal();
+    const match = matchId ? matchById.get(matchId) : undefined;
+    const offering = match?.offeringId ? offeringById.get(match.offeringId) : undefined;
+    const preference = search.preferences.find((item) => item.offeringId === match?.offeringId);
+    if (!match || !offering || !preference || !match.endsAt || !match.resourceId ||
+        match.courseId !== offering.courseId || preference.courseId !== match.courseId ||
+        row.mode !== "SIMULATOR" || match.courseId !== row.courseId || match.offeringId !== row.offeringId ||
+        row.courseName !== match.course.name || row.courseTimeZone !== match.course.timeZone ||
+        match.resourceId !== row.resourceId || match.productId !== (row.productId ?? null) ||
+        match.startsAt.toISOString() !== (row.startsAtISO ?? row.startsAt) ||
+        match.endsAt.toISOString() !== (row.endsAtISO ?? row.endsAt) ||
+        match.bookingUrl !== row.bookingUrl || match.bookingUrl !== offering.bookingUrl ||
+        !getSafeOfficialBookingUrl(match.bookingUrl) ||
+        match.capacity == null || match.capacity < search.players ||
+        match.capacity !== row.availableSpots ||
+        match.startsAt <= now ||
+        match.availabilityStatus !== "AVAILABLE" ||
+        !["PENDING", "SENT"].includes(match.alertStatus) ||
+        (refById.get(match.id)?.availabilityCycle !== match.availabilityCycle && ids.includes(match.id)) ||
+        !offering.active || offering.publicAccessStatus !== "PUBLIC" || !offering.verifiedAt ||
+        !offering.bookingUrl || offering.maxPartySize == null || offering.maxPartySize < search.players ||
+        !match.offeringSourceFingerprint ||
+        match.offeringSourceFingerprint !== getSimulatorOfferingSourceFingerprint(offering) ||
+        !offering.supportedDurationsMinutes.includes(search.durationMinutes!) ||
+        ((match.endsAt.getTime() - match.startsAt.getTime()) / 60_000) !== search.durationMinutes ||
+        preference.rank !== row.courseRank) {
+      states.set(matchId, "terminal");
+      continue;
+    }
+    const startWindow = zonedDateTimeToDate(`${report.targetDate}T${search.startTime}`, match.course.timeZone);
+    const endWindow = zonedDateTimeToDate(`${report.targetDate}T${search.endTime}`, match.course.timeZone);
+    if (match.startsAt < startWindow || match.endsAt > endWindow) {
+      states.set(matchId, "terminal");
+      continue;
+    }
+    if (offering.monitoringState !== "HEALTHY" || offering.automationEligibility !== "ALLOWED" ||
+        !offering.monitoringVerifiedAt ||
+        offering.monitoringVerifiedAt < match.lastConfirmedAt ||
+        match.lastConfirmedAt > now || now.getTime() - match.lastConfirmedAt.getTime() > 30 * 60_000 ||
+        (offering.lastFailureAt && offering.lastFailureAt >= match.lastConfirmedAt)) {
+      states.set(matchId, "transient");
+    }
+    if (offering.observationToken) {
+      states.set(matchId, "transient");
+    }
+    if (!states.has(matchId)) states.set(matchId, "current");
+  }
+  return states;
+}
+
+async function getSimulatorDeliverySourceState(
+  transaction: DeliveryTransaction,
+  searchId: string,
+  payload: SearchEmailDeliveryPayload,
+  now: Date,
+): Promise<"current" | "transient" | "terminal"> {
+  const states = await getSimulatorDeliverySourceStates(transaction, searchId, payload, now);
+  if (states.size === 0 || [...states.values()].includes("terminal")) return "terminal";
+  return [...states.values()].includes("transient") ? "transient" : "current";
+}
+
 export async function drainSearchEmailDeliveryGroup<
   TDelivery extends {
     deliveryStatus: "sent" | "dry_run";
@@ -1484,6 +1608,17 @@ export async function drainSearchEmailDeliveryGroup<
                 claimToken: claim.claimToken,
                 delivery,
               });
+              if (claim.payload.schemaVersion === 3 && input.kind === "MATCH") {
+                const sourceState = await prisma.$transaction((transaction) =>
+                  getSimulatorDeliverySourceState(transaction, input.searchId, claim.payload, now()),
+                );
+                if (sourceState !== "current") throw new MatchDeliverySourceSupersededError();
+              } else if (claim.payload.schemaVersion === 3) {
+                const statusState = await prisma.$transaction((transaction) =>
+                  validateCurrentStatusDeliveryPayload(transaction, input.searchId, claim.payload, now()),
+                );
+                if (statusState !== "current") throw new MatchDeliverySourceSupersededError();
+              }
             };
             await assertCurrentDelivery();
             return {
@@ -1508,7 +1643,11 @@ export async function drainSearchEmailDeliveryGroup<
       );
     const requiresProviderSourceFence =
       input.kind === "MATCH" || getStatusCourseIds(claim.payload).length > 0;
-    if (requiresProviderSourceFence) {
+    if (claim.payload.schemaVersion === 3) {
+      // Simulator source checks run in short transactions at recipient
+      // authorization and immediately before the provider send callback.
+      results = await sendClaimedDeliveries();
+    } else if (requiresProviderSourceFence) {
       try {
         const fenced = await runWithCurrentAvailabilityDeliverySourceFence({
           searchId: input.searchId,
@@ -2163,6 +2302,44 @@ export async function hydrateMatchAlertPayload(input: {
 > {
   const report = requireJsonRecord(input.payload.matchReport, "match report");
   const persistedMatches = Array.isArray(report.matches) ? report.matches : [];
+  if (input.payload.schemaVersion === 3) {
+    if (input.payload.mode !== "SIMULATOR" || report.mode !== "SIMULATOR") {
+      throw new Error("Simulator match report mode is invalid");
+    }
+    const durationMinutes = requireNumber(report.durationMinutes, "session length");
+    return {
+      mode: "SIMULATOR",
+      durationMinutes,
+      matches: persistedMatches.map((value) => {
+        const match = requireJsonRecord(value, "simulator match row");
+        const startsAt = new Date(requireString(match.startsAtISO ?? match.startsAt, "session start"));
+        const endsAt = new Date(requireString(match.endsAtISO ?? match.endsAt, "session end"));
+        if (Number.isNaN(startsAt.getTime()) || Number.isNaN(endsAt.getTime()) ||
+            (endsAt.getTime() - startsAt.getTime()) / 60_000 !== durationMinutes) {
+          throw new Error("Persisted simulator session interval is invalid");
+        }
+        return {
+          mode: "SIMULATOR" as const,
+          offeringId: requireString(match.offeringId, "offering"),
+          courseId: requireString(match.courseId, "venue"),
+          courseName: requireString(match.courseName, "venue name"),
+          courseRank: requireNumber(match.courseRank, "venue priority"),
+          courseTimeZone: requireString(match.courseTimeZone, "venue time zone"),
+          startsAt, endsAt,
+          availableSpots: requireNumber(match.availableSpots, "session capacity"),
+          capacity: requireNumber(match.availableSpots, "session capacity"),
+          bookingUrl: requireString(match.bookingUrl, "official booking URL"),
+          isNew: match.isNew === true,
+        };
+      }),
+      userTimeZone: requireString(report.userTimeZone, "user time zone"),
+      targetDate: requireString(report.targetDate, "target date"),
+      startTime: requireString(report.startTime, "start time"),
+      endTime: requireString(report.endTime, "end time"),
+      players: requireNumber(report.players, "players"),
+      checkedAt: new Date(input.payload.checkedAt),
+    };
+  }
   return {
     matches: persistedMatches.map((value) => {
       const match = requireJsonRecord(value, "match alert row");
@@ -2201,6 +2378,34 @@ export async function hydrateMatchAlertPayload(input: {
         ? report.requestedLayoutHoles
         : null,
     checkedAt: new Date(input.payload.checkedAt),
+  };
+}
+
+export function hydrateSimulatorStatusPayload(payload: SearchEmailDeliveryPayload): SimulatorStatusInput {
+  if (payload.schemaVersion !== 3 || payload.mode !== "SIMULATOR") {
+    throw new Error("Simulator status payload mode is invalid");
+  }
+  const report = requireJsonRecord(payload.statusReport, "simulator status report");
+  if (report.mode !== "SIMULATOR" || (report.kind !== "setup" && report.kind !== "daily")) {
+    throw new Error("Simulator status report is invalid");
+  }
+  const venues = Array.isArray(report.venues) ? report.venues : [];
+  if (venues.length === 0 || venues.length > 5) throw new Error("Simulator status venues are invalid");
+  return {
+    kind: report.kind,
+    targetDate: requireString(report.targetDate, "target date"),
+    startTime: requireString(report.startTime, "start time"),
+    endTime: requireString(report.endTime, "end time"),
+    durationMinutes: requireNumber(report.durationMinutes, "session length"),
+    players: requireNumber(report.players, "players"),
+    venues: venues.map((value) => {
+      const venue = requireJsonRecord(value, "simulator status venue");
+      return {
+        courseName: requireString(venue.courseName, "venue name"),
+        bookingUrl: requireString(venue.bookingUrl, "official booking URL"),
+        availability: requireString(venue.availability, "venue availability"),
+      };
+    }),
   };
 }
 
@@ -2883,6 +3088,17 @@ async function claimSearchEmailDeliveryGroup(input: {
         }
 
         if (!groupFrozen && reconciliation.payload) {
+          if (reconciliation.transientMatchRefs.length > 0 && reconciliation.confirmedMatchIds.length > 0) {
+            const transientPayload = filterMatchDeliveryPayload(payload, reconciliation.transientMatchRefs,
+              { satisfiesStatusReport: false });
+            if (transientPayload) {
+              await createRecipientMatchCatchups(transaction, {
+                searchId: input.searchId, alertGeneration: input.alertGeneration,
+                sourceGroupKey: input.groupKey, deliveries, payload: transientPayload,
+                matchCycles: reconciliation.transientMatchRefs, now: input.now,
+              });
+            }
+          }
           claimPayload = reconciliation.payload;
           if (canonicalJson(claimPayload) !== canonicalJson(payload)) {
             const rewritten = await transaction.searchEmailDelivery.updateMany({
@@ -3385,6 +3601,38 @@ async function reconcileCurrentMatchDeliveryPayload(
   now: Date,
   groupFrozen: boolean,
 ): Promise<MatchPayloadReconciliation> {
+  if (payload.schemaVersion === 3) {
+    const states = await getSimulatorDeliverySourceStates(transaction, searchId, payload, now);
+    const refs = payload.matchRefs ?? [];
+    const requestedIds = payload.matchIds ?? [];
+    const confirmedRefs = refs.filter((ref) => states.get(ref.matchId) === "current");
+    const transientRefs = refs.filter((ref) => states.get(ref.matchId) === "transient");
+    const terminalRefs = refs.filter((ref) => states.get(ref.matchId) === "terminal");
+    const report = optionalJsonRecord(payload.matchReport);
+    const keptDisplayIds = (payload.displayMatchIds ?? []).filter((id) => states.get(id) === "current");
+    const keptRows = report && Array.isArray(report.matches)
+      ? report.matches.filter((value) => keptDisplayIds.includes(String(optionalJsonRecord(value)?.matchId))) : [];
+    const changed = keptDisplayIds.length !== (payload.displayMatchIds ?? []).length ||
+      confirmedRefs.length !== requestedIds.length;
+    return {
+      valid: true,
+      contentChanged: changed,
+      confirmedMatchIds: confirmedRefs.map((ref) => ref.matchId),
+      terminalMatchIds: [...states.entries()].filter(([, state]) => state === "terminal").map(([id]) => id),
+      terminalMatchRefs: terminalRefs,
+      staleMatchIds: [],
+      transientMatchIds: transientRefs.map((ref) => ref.matchId),
+      transientMatchRefs: transientRefs,
+      confirmedMatchCycles: confirmedRefs,
+      payload: confirmedRefs.length ? (changed ? {
+        ...payload,
+        matchIds: confirmedRefs.map((ref) => ref.matchId), matchRefs: confirmedRefs,
+        displayMatchIds: keptDisplayIds,
+        satisfiesStatusReport: false,
+        matchReport: { ...(report ?? {}), matches: keptRows } as Prisma.InputJsonObject,
+      } : payload) : null,
+    };
+  }
   const invalid = (): MatchPayloadReconciliation => ({
     valid: false,
     contentChanged: false,
@@ -4302,6 +4550,68 @@ async function validateCurrentStatusDeliveryPayload(
   payload: SearchEmailDeliveryPayload,
   now: Date,
 ): Promise<StatusPayloadState> {
+  if (payload.schemaVersion === 3) {
+    const report = optionalJsonRecord(payload.statusReport);
+    const venues = report && Array.isArray(report.venues) ? report.venues.map(optionalJsonRecord) : [];
+    if (!report || report.mode !== "SIMULATOR" || venues.length === 0 || venues.length > 5 ||
+        venues.some((venue) => !venue) || (payload.matchIds?.length ?? 0) > 0) return "stale";
+    const search = await transaction.teeSearch.findUnique({
+      where: { id: searchId }, select: { mode: true, status: true, date: true,
+        startTime: true, endTime: true, players: true, durationMinutes: true,
+        preferences: { select: { courseId: true, offeringId: true, rank: true,
+          course: { select: { name: true, timeZone: true } }, offering: true } } },
+    });
+    if (!search || search.mode !== "SIMULATOR" || search.status !== "ACTIVE" ||
+        search.date.toISOString().slice(0, 10) !== report.targetDate ||
+        search.startTime !== report.startTime || search.endTime !== report.endTime ||
+        search.players !== report.players || search.durationMinutes !== report.durationMinutes ||
+        venues.length !== search.preferences.length) return "stale";
+    for (const raw of venues) {
+      const venue = raw!;
+      const preference = search.preferences.find((item) => item.offeringId === venue.offeringId);
+      const offering = preference?.offering;
+      if (!preference || !offering || !offering.active || offering.kind !== "SIMULATOR" ||
+          offering.publicAccessStatus !== "PUBLIC" || !offering.verifiedAt ||
+          !offering.bookingUrl || !getSafeOfficialBookingUrl(offering.bookingUrl) ||
+          venue.courseId !== preference.courseId || venue.courseRank !== preference.rank ||
+          venue.courseName !== preference.course.name || venue.bookingUrl !== offering.bookingUrl ||
+          offering.maxPartySize == null || offering.maxPartySize < search.players ||
+          !offering.supportedDurationsMinutes.includes(search.durationMinutes!)) return "stale";
+      if (venue.availability === "NO_MATCH") {
+        const latestProbe = await transaction.courseProbe.findFirst({
+          where: { teeSearchId: searchId, offeringId: offering.id },
+          orderBy: [{ observedAt: "desc" }, { id: "desc" }],
+          select: { outcome: true, observedAt: true, rawSummary: true },
+        });
+        const summary = optionalJsonRecord(latestProbe?.rawSummary);
+        if (!latestProbe || latestProbe.outcome !== "NO_MATCH" ||
+            summary?.sourceFingerprint !== getSimulatorOfferingSourceFingerprint(offering) ||
+            summary?.bookingNotOpen === true || latestProbe.observedAt > now ||
+            now.getTime() - latestProbe.observedAt.getTime() > 30 * 60_000 ||
+            offering.monitoringState !== "HEALTHY" || !offering.monitoringVerifiedAt ||
+            offering.monitoringVerifiedAt < latestProbe.observedAt ||
+            (offering.lastFailureAt && offering.lastFailureAt >= latestProbe.observedAt) ||
+            Boolean(offering.observationToken)) return "transient";
+      }
+      if (venue.availability === "BOOKING_NOT_OPEN") {
+        const opensAt = getSimulatorBookingOpening(String(report.targetDate), offering, preference.course.timeZone);
+        if (!opensAt || opensAt <= now) return "stale";
+      }
+      if (venue.availability === "UNAVAILABLE" &&
+          (!offering.lastFailureAt ||
+           (offering.monitoringVerifiedAt && offering.monitoringVerifiedAt > offering.lastFailureAt))) return "stale";
+      if (!["CHECK_PENDING", "NO_MATCH", "UNAVAILABLE", "BOOKING_NOT_OPEN"].includes(String(venue.availability))) return "stale";
+    }
+    if (venues.some((venue) => venue?.availability === "NO_MATCH")) {
+      const availableCount = await transaction.teeTimeMatch.count({
+        where: { teeSearchId: searchId, offeringId: { in: venues.flatMap((venue) =>
+          venue?.availability === "NO_MATCH" && typeof venue.offeringId === "string" ? [venue.offeringId] : []),
+        }, availabilityStatus: "AVAILABLE", startsAt: { gt: now } },
+      });
+      if (availableCount > 0) return "stale";
+    }
+    return "current";
+  }
   const report = optionalJsonRecord(payload.statusReport);
   const payloadCheckedAt = new Date(payload.checkedAt);
   const targetDate = report ? optionalString(report.targetDate) : undefined;

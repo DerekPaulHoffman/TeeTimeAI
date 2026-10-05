@@ -34,6 +34,7 @@ vi.mock("@/lib/prisma", () => ({
       findUnique: vi.fn(),
       update: vi.fn(),
     },
+    courseOffering: { findMany: vi.fn() },
     courseProbe: {
       findMany: vi.fn(),
     },
@@ -664,6 +665,40 @@ describe("createTeeSearchForUser", () => {
     mockedPrisma.course.update.mockResolvedValue({ id: "course-1" } as never);
     mockedPrisma.googlePlaceReview.findMany.mockResolvedValue([]);
     mockedPrisma.teeSearch.count.mockResolvedValue(0);
+  });
+
+  it("persists simulator demand only from canonical verified offering capacity and duration", async () => {
+    const offering = {
+      id: "sim-1", courseId: "venue-1", kind: "SIMULATOR", active: true,
+      publicAccessStatus: "PUBLIC", bookingUrl: "https://venue.example/book",
+      evidenceUrl: "https://venue.example/simulator", verifiedAt: new Date("2026-07-01"),
+      maxPartySize: 8, supportedDurationsMinutes: [60, 120],
+      course: { id: "venue-1", googlePlaceId: "place-1", timeZone: "America/New_York" },
+    };
+    mockedPrisma.courseOffering.findMany.mockResolvedValue([offering] as never);
+    mockedPrisma.teeSearch.create.mockResolvedValue({ id: "sim-search" } as never);
+    const input = {
+      mode: "SIMULATOR" as const, durationMinutes: 120, date: "2027-08-15",
+      startTime: "13:00", endTime: "17:00", userTimeZone: "America/New_York",
+      players: 6, cadenceMinutes: 5, additionalEmails: [],
+      courses: [{ offeringId: "sim-1", courseId: "venue-1", googlePlaceId: "place-1",
+        name: "Venue", latitude: 41, longitude: -73, rank: 1 }],
+    };
+    await createTeeSearchForUser("user-1", input);
+    expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        mode: "SIMULATOR", durationMinutes: 120,
+        preferences: { create: [expect.objectContaining({
+          course: { connect: { id: "venue-1" } },
+          offering: { connect: { id: "sim-1" } },
+        })] },
+      }),
+    }));
+    await expect(createTeeSearchForUser("user-1", { ...input, players: 9 })).rejects.toThrow(/group size/i);
+    await expect(createTeeSearchForUser("user-1", { ...input, durationMinutes: 90 })).rejects.toThrow(/session length/i);
+    await expect(createTeeSearchForUser("user-1", { ...input, startTime: "13:00", endTime: "14:00" }))
+      .rejects.toThrow(/time window long enough/i);
+    expect(mockedPrisma.googlePlaceReview.findMany).not.toHaveBeenCalled();
   });
 
   it("accepts the next course-local date after UTC midnight and ignores the submitted timezones", async () => {
@@ -2077,6 +2112,23 @@ describe("updateTeeSearchForUser", () => {
       statusEmailSnapshot: null,
       matches: [],
     } as never);
+  });
+
+  it("lets an owner pause an alert with a withdrawn simulator offering but rejects resuming it", async () => {
+    mockedPrisma.teeSearch.findUniqueOrThrow.mockReset().mockResolvedValue({
+      mode: "SIMULATOR", date: new Date("2027-08-15T00:00:00.000Z"),
+      startTime: "13:00", endTime: "17:00", players: 6, durationMinutes: 120,
+      preferences: [{ offering: { active: false, publicAccessStatus: "PUBLIC", bookingUrl: "https://venue.example/book",
+        evidenceUrl: "https://venue.example/rentals", verifiedAt: new Date(),
+        maxPartySize: 8, supportedDurationsMinutes: [120], course: { timeZone: "America/New_York" } } }],
+    } as never);
+    mockedPrisma.teeSearch.update.mockResolvedValue({ mode: "SIMULATOR", preferences: [], matches: [], probes: [],
+      statusEmailSnapshot: null } as never);
+    await expect(updateTeeSearchForUser("user-1", "search-1", { status: "PAUSED" })).resolves.toBeDefined();
+    expect(mockedPrisma.teeSearch.update).toHaveBeenCalledTimes(1);
+    await expect(updateTeeSearchForUser("user-1", "search-1", { status: "ACTIVE" }))
+      .rejects.toThrow(/no longer supports/i);
+    expect(mockedPrisma.teeSearch.update).toHaveBeenCalledTimes(1);
   });
 
   it("returns zero current matches after editing the date without changing historical availability", async () => {

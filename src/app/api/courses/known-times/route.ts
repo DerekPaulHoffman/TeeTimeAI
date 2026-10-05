@@ -10,6 +10,9 @@ const inputSchema = z.object({
 });
 
 export async function GET(request: NextRequest) {
+  if (request.nextUrl.searchParams.has("mode") && request.nextUrl.searchParams.get("mode") !== "OUTDOOR") {
+    return NextResponse.json({ error: "This availability view supports outdoor golf." }, { status: 400 });
+  }
   const input = inputSchema.safeParse({
     courseIds: request.nextUrl.searchParams.getAll("courseId"),
     date: request.nextUrl.searchParams.get("date")
@@ -24,12 +27,12 @@ export async function GET(request: NextRequest) {
       select: {
         id: true, timeZone: true,
         probes: {
-          where: { rawSummary: { path: ["publicAvailability", "date"], equals: input.data.date } },
+          where: { teeSearch: { mode: "OUTDOOR" }, rawSummary: { path: ["publicAvailability", "date"], equals: input.data.date } },
           orderBy: [{ observedAt: "desc" }, { id: "desc" }], take: 1,
           select: { rawSummary: true },
         },
         matches: {
-          where: { startsAt: { gt: now, gte: new Date(day - 86400000), lt: new Date(day + 2 * 86400000) } },
+          where: { teeSearch: { mode: "OUTDOOR" }, startsAt: { gt: now, gte: new Date(day - 86400000), lt: new Date(day + 2 * 86400000) } },
           orderBy: { lastSeenAt: "desc" }, take: 500,
           select: { startsAt: true, availableSpots: true, holes: true, priceCents: true,
             bookingUrl: true, lastConfirmedAt: true, lastSeenAt: true, unavailableAt: true, availabilityStatus: true }

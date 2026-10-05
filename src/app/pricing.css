@@ -30,3 +30,37 @@
   }
 
 }
+/* Simulator uses the existing search controls and a separate rental workspace. */
+.search-mode-switch { display:flex; gap:4px; margin:20px auto; padding:4px; width:fit-content; border:1px solid #d9e4df; border-radius:8px; background:#f4f7f5; }
+.search-mode-switch button { border:0; background:transparent; padding:12px 22px; border-radius:5px; font:inherit; color:#18332b; cursor:pointer; }
+.search-mode-switch button[aria-pressed="true"] { background:#18332b; color:white; }
+.simulator-intake { max-width:1240px; margin:0 auto; padding:0 24px 48px; color:#18332b; }
+.simulator-introduction { margin:0 0 20px; line-height:1.6; }
+.search-page-header p.search-page-header-copy { color:rgba(255,255,255,.9); }
+.simulator-duration select { border:1px solid #d9e4df; border-radius:5px; padding:10px; max-width:100%; background:white; font:inherit; }
+.simulator-lookup { margin:24px 0; }
+.simulator-lookup label { display:block; font-weight:600; margin-bottom:8px; }
+.simulator-lookup > div { display:flex; gap:12px; }
+.simulator-lookup input { width:100%; min-width:0; border:1px solid #d9e4df; border-radius:6px; padding:12px; font:inherit; }
+.simulator-workspace { display:grid; grid-template-columns:minmax(0,2fr) minmax(280px,1fr); gap:32px; align-items:start; }
+.simulator-venue { padding:22px 0; border-bottom:1px solid #d9e4df; }
+.simulator-venue h2, .simulator-shortlist h2 { font-size:20px; margin:0 0 8px; }
+.simulator-venue p, .simulator-shortlist p { font-size:14px; line-height:1.6; margin:6px 0; }
+.simulator-venue-actions { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-top:14px; flex-wrap:wrap; }
+.simulator-venue-actions a { display:inline-flex; align-items:center; gap:6px; font-size:14px; }
+.simulator-shortlist { border-left:1px solid #d9e4df; padding-left:24px; }
+.simulator-shortlist ol { padding-left:24px; }
+.simulator-shortlist li { padding:12px 0; border-bottom:1px solid #d9e4df; }
+.simulator-shortlist li > div { display:flex; gap:8px; margin-top:8px; }
+.simulator-shortlist li button { padding:10px; border:1px solid #d9e4df; background:white; border-radius:5px; }
+.simulator-shortlist > .button { width:100%; margin:12px 0; }
+.simulator-shortlist small { display:block; line-height:1.6; margin-top:12px; }
+.simulator-error { color:#9a3024; }
+.simulator-dashboard-content { padding:0 24px 24px; }
+@media(max-width:760px) {
+  .simulator-intake { padding:0 16px 32px; }
+  .simulator-workspace { grid-template-columns:minmax(0,1fr); gap:24px; }
+  .simulator-shortlist { border-left:0; border-top:1px solid #d9e4df; padding:24px 0 0; }
+  .simulator-lookup > div { flex-direction:column; }
+  .search-mode-switch button { padding:12px 18px; }
+}

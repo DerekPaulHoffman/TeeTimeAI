@@ -30,6 +30,12 @@ function assess(value = search(), previous?: unknown) {
 }
 
 describe("customer recovery acceptance", () => {
+  it("does not count simulator demand or simulator availability toward an outdoor recovery case", () => {
+    expect(assess({ ...search(), mode: "SIMULATOR" })).toMatchObject({
+      status: "NO_ACTIVE_DEMAND", affectedSearchCount: 0, pendingProviderPairCount: 0,
+      pendingSchedulerCount: 0, pendingRecipientCourseCount: 0,
+    });
+  });
   it("requires two real provider cycles, a live schedule, and every current recipient's visible accepted notice", () => {
     const result = assess();
     expect(result).toMatchObject({ status: "COMPLETE", affectedSearchCount: 1, pendingProviderPairCount: 0, pendingSchedulerCount: 0, pendingRecipientCourseCount: 0 });

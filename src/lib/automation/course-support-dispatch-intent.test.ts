@@ -10,7 +10,7 @@ const now = new Date("2026-10-05T14:00:00.000Z");
 
 function source(): CourseDispatchSource {
   return {
-    id: "search-1", userId: "user-1",
+    id: "search-1", userId: "user-1", mode: "OUTDOOR",
     user: { id: "user-1", clerkUserId: "clerk-1", email: "owner@example.com", pendingEmail: null },
     alertEmail: "owner@example.com", additionalEmails: ["Second@example.com", "third@example.com"],
     date: new Date("2026-10-06T00:00:00.000Z"), startTime: "06:00", endTime: "20:00",
@@ -47,6 +47,17 @@ describe("course dispatch source authority", () => {
     expect(current(search, { id: search.id, scheduleVersion: 2, alertGeneration: 0, intentDigest: undefined })).toBe(true);
     search.scheduleVersion = 4;
     expect(current(search, { id: search.id, scheduleVersion: 2, alertGeneration: 0, intentDigest: undefined })).toBe(false);
+  });
+
+  it("rejects simulator demand for outdoor support even with unchanged identity and intent", () => {
+    const search = source();
+    search.mode = "SIMULATOR";
+    expect(current(search)).toBe(false);
+    expect(isCurrentCourseDispatchSource({
+      ref: { id: search.id, scheduleVersion: 2, alertGeneration: 0 },
+      search: { ...search, trafficClass: "TEST", syntheticMultiCycle: true },
+      trafficClass: "SYNTHETIC", courseTimeZone: "America/New_York", now,
+    })).toBe(false);
   });
 
   it.each([

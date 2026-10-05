@@ -11,6 +11,7 @@ import {
   MIN_COURSE_SEARCH_RADIUS_MILES
 } from "@/lib/places/radius";
 import { MAX_PLAYERS_PER_SEARCH } from "@/lib/validation/search-constraints";
+import { SIMULATOR_DURATION_OPTIONS_MINUTES, type SearchMode } from "@/lib/searches/search-mode";
 
 export type CourseLayoutFilter = "any" | "9" | "18";
 
@@ -50,6 +51,9 @@ export function formatCompactTimeWindow(startTime: string, endTime: string) {
 }
 
 export function TeeTimeSearchControls({
+  mode = "OUTDOOR",
+  durationMinutes = 60,
+  onDurationChange,
   date,
   endTime,
   holeFilter,
@@ -76,6 +80,9 @@ export function TeeTimeSearchControls({
   searchRadiusMiles,
   startTime
 }: {
+  mode?: SearchMode;
+  durationMinutes?: number;
+  onDurationChange?: (value: number) => void;
   date: string;
   endTime: string;
   holeFilter: CourseLayoutFilter;
@@ -132,7 +139,7 @@ export function TeeTimeSearchControls({
 
   return (
     <form
-      aria-label="Course search filters"
+      aria-label={mode === "SIMULATOR" ? "Simulator search filters" : "Course search filters"}
       className="figma-search-toolbar"
       onSubmit={(event) => {
         event.preventDefault();
@@ -178,7 +185,7 @@ export function TeeTimeSearchControls({
               onChange={(event) => onPlayersChange(Number(event.target.value))}
             >
               {Array.from(
-                { length: MAX_PLAYERS_PER_SEARCH },
+                { length: mode === "SIMULATOR" ? 8 : MAX_PLAYERS_PER_SEARCH },
                 (_, index) => index + 1
               ).map((count) => (
                 <option key={count} value={count}>
@@ -294,7 +301,12 @@ export function TeeTimeSearchControls({
             Times use each course&apos;s local time zone.
           </span>
         </div>
-        <div className="figma-hole-filter" aria-label="Course layout" role="group">
+        {mode === "SIMULATOR" ? <label className="figma-hole-filter simulator-duration" htmlFor="session-duration">
+          <strong>Session length</strong>
+          <select id="session-duration" value={durationMinutes} onChange={event => onDurationChange?.(Number(event.target.value))}>
+            {SIMULATOR_DURATION_OPTIONS_MINUTES.map(minutes => <option key={minutes} value={minutes}>{minutes} minutes</option>)}
+          </select>
+        </label> : <div className="figma-hole-filter" aria-label="Course layout" role="group">
           <strong>
             <span className="figma-desktop-copy">Course layout</span>
             <span className="figma-mobile-copy">Holes</span>
@@ -320,7 +332,7 @@ export function TeeTimeSearchControls({
               </button>
             ))}
           </div>
-        </div>
+        </div>}
         <span className="figma-filter-divider" aria-hidden="true" />
         <div className="figma-distance-group">
           <div className="figma-distance-heading">

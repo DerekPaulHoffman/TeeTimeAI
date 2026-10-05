@@ -2572,6 +2572,7 @@ async function validateDeferredFailureConfirmationCurrentState(input: {
     input.transaction.courseProbe.findMany({
       where: {
         courseId: input.request.courseId,
+        teeSearch: { mode: "OUTDOOR" },
         observedAt: { lte: input.now },
       },
       orderBy: [{ observedAt: "desc" }, { id: "desc" }],
@@ -2832,6 +2833,7 @@ async function evaluateDetachedEligibility(
   const activeFuturePairs = await transaction.teeSearch.count({
     where: {
       status: "ACTIVE",
+      mode: "OUTDOOR",
       date: {
         gte: getCourseLocalDateStorageBoundary(input.course.timeZone, now),
       },

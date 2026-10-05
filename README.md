@@ -1,6 +1,6 @@
 # Tee Time Spot
 
-Tee Time Spot is an alert-only tee-time waitlist assistant for public golf courses.
+Tee Time Spot is an alert-only availability assistant for public outdoor golf and verified public simulator rentals. The golfer books direct.
 
 The product helps a golfer answer one practical question: "Where can I play, at the courses I actually like, in the window I am free?" A user enters a location and search distance (15 miles by default), picks nearby public courses, ranks 1 to 5 favorites, chooses a future date, time window, player count, and alert recipients, then receives an email when a matching tee time appears. The first check inspects each official course surface before classifying monitoring coverage. For dates beyond a course's booking window, Tee Time Spot records provider-confirmed release rules when available, tells the golfer when booking opens, and starts checking at that course-local date and time. The user finishes booking directly on the official course website.
 
@@ -43,7 +43,7 @@ The product must always be clear that Tee Time Spot finds openings and sends lin
 
 Allowed:
 
-- Read public tee-sheet availability when policy allows it.
+- Read public, signed-out availability without entering a booking transaction.
 - Normalize available slots into `TeeTimeMatch`.
 - Send email alerts with official booking links.
 - Let users pause, resume, edit, or remove saved searches.
@@ -57,6 +57,12 @@ Not allowed:
 - Use verification codes.
 - Bypass captchas, queues, rate limits, or access controls.
 - Automate a course that blocks automated retrieval.
+
+### Simulator Mode
+
+Simulator alerts save one bay for the whole group, a session duration, a venue-local time window, and up to five ranked venues. `CourseOffering` keeps simulator access, booking links, capacity, provider configuration and health independent from outdoor golf at the same venue. Existing alerts default to outdoor mode; a saved alert's mode cannot change.
+
+The Connecticut pilot includes the six Golf Lounge 18 locations, ZSTRICT Stamford, and the reviewed X-Golf Stratford offering. Nationwide simulator discovery uses separate Places queries and caches. Unverified rentals can be browsed on their official sites; an alert requires reviewed capacity and duration evidence. See [simulator setup, provider evidence, and rollout](docs/simulator-mode.md). `SIMULATOR_MODE_ENABLED` defaults off until migrations, provider verification and deployment are complete.
 
 ### Public Course Discovery
 

@@ -89,6 +89,7 @@ vi.mock("@/lib/prisma", () => ({
       create: vi.fn(),
     },
     courseSupportIncident: {
+      findMany: vi.fn(),
       findUnique: vi.fn(),
       updateMany: vi.fn(),
     },
@@ -349,6 +350,78 @@ describe("automation query payloads", () => {
   });
 
   afterEach(() => vi.unstubAllGlobals());
+
+  it("keeps simulator demand and successful probes out of outdoor browser recovery", async () => {
+    const failureAt = new Date(Date.now() - 5 * 60_000);
+    const course = blockedToolingBrowserProbeCourse("AUTH", {
+      id: "course-hybrid",
+      name: "Hybrid Golf Venue",
+      website: "https://hybrid.example/",
+      detectedBookingUrl: "https://booking.hybrid.example/public",
+      automationEligibility: "NEEDS_REVIEW",
+      automationReason: "UNSUPPORTED_PROVIDER",
+    });
+    const searches = ["SIMULATOR", "OUTDOOR"].map((mode) => ({
+      id: `search-${mode.toLowerCase()}`,
+      mode,
+      preferences: [{ rank: 1, course }],
+    }));
+    const probes = [
+      { mode: "SIMULATOR", outcome: "MATCH_FOUND", observedAt: new Date() },
+      { mode: "OUTDOOR", outcome: "FETCH_FAILED", observedAt: failureAt },
+    ];
+    mockedPrisma.teeSearch.findMany.mockImplementation(async (query) => {
+      return searches.filter(
+        (search) => !query?.where?.mode || search.mode === query.where.mode,
+      ) as never;
+    });
+    mockedPrisma.courseSupportIncident.findMany.mockImplementation(async (query) => {
+      expect(query).toMatchObject({
+        select: {
+          course: {
+            select: { probes: { where: { teeSearch: { mode: "OUTDOOR" } } } },
+          },
+        },
+      });
+      return [{
+        courseId: course.id,
+        status: "AUTO_INVESTIGATING",
+        cycle: 1,
+        attemptLedger: browserPlaybookLedger(false),
+        activeRealSearchCount: 1,
+        firstSeenAt: failureAt,
+        nextAttemptAt: failureAt,
+        kind: "FETCH_FAILED",
+        occurrenceCount: 3,
+        lastSeenAt: failureAt,
+        confirmedAt: failureAt,
+        course: {
+          ...course,
+          probes: probes.filter((probe) => probe.mode === "OUTDOOR").slice(0, 1),
+        },
+      }] as never;
+    });
+
+    const targets = await listBrowserProbeTargets(1);
+
+    expect(mockedPrisma.teeSearch.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ status: "ACTIVE", mode: "OUTDOOR" }),
+      }),
+    );
+    expect(targets).toHaveLength(1);
+    expect(targets[0]).toMatchObject({
+      searchId: "search-outdoor",
+      probeUrl: course.website,
+      course: {
+        monitoringFailureEvidence: {
+          latestSuccessfulAt: null,
+          latestFailureAt: failureAt,
+        },
+      },
+    });
+    expect(providerFetch).not.toHaveBeenCalled();
+  });
 
   it("selects an exact reader-only course for independent browser confirmation", async () => {
     mockedPrisma.course.findMany.mockResolvedValue([

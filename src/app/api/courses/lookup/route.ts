@@ -16,6 +16,8 @@ import {
 } from "@/lib/places/google-place-reviews";
 import { enrichCoursesWithHoleLayouts } from "@/lib/places/hole-layout-enrichment";
 import { findPersistedCourseCandidatesByName } from "@/lib/places/persisted-course-fallback";
+import { simulatorLookupResponse } from "@/lib/places/simulator-route-response";
+import { isSimulatorModeEnabled } from "@/lib/simulators/config";
 
 const MIN_QUERY_LENGTH = 2;
 const MAX_QUERY_LENGTH = 120;
@@ -23,6 +25,13 @@ const COURSE_LOOKUP_UNAVAILABLE_MESSAGE =
   "We couldn't look up that course right now. Please wait a moment and try again.";
 
 export async function GET(request: NextRequest) {
+  const mode = request.nextUrl.searchParams.get("mode") ?? "OUTDOOR";
+  if (mode !== "OUTDOOR" && mode !== "SIMULATOR") {
+    return NextResponse.json({ error: "Choose outdoor golf or simulator venues." }, { status: 400 });
+  }
+  if (mode === "SIMULATOR" && !isSimulatorModeEnabled()) {
+    return NextResponse.json({ error: "Simulator alerts are not available yet." }, { status: 503 });
+  }
   const query = request.nextUrl.searchParams.get("q")?.trim() ?? "";
   const latitudeValue = request.nextUrl.searchParams.get("latitude");
   const longitudeValue = request.nextUrl.searchParams.get("longitude");
@@ -62,6 +71,10 @@ export async function GET(request: NextRequest) {
       },
       { status: 503 }
     );
+  }
+
+  if (mode === "SIMULATOR") {
+    return simulatorLookupResponse({ query, latitude, longitude, signal: request.signal });
   }
 
   let reviewIndex: Awaited<ReturnType<typeof loadActiveGooglePlaceReviewIndex>>;

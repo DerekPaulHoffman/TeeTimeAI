@@ -16,8 +16,13 @@ const mocks = vi.hoisted(() => ({
   loadActiveGooglePlaceReviewIndex: vi.fn(),
   readCourseRuntimeCache: vi.fn(),
   searchNearbyGolfCourses: vi.fn(),
+  simulatorDiscoveryResponse: vi.fn(),
+  isSimulatorModeEnabled: vi.fn(),
   writeCourseRuntimeCache: vi.fn()
 }));
+
+vi.mock("@/lib/places/simulator-route-response", () => ({ simulatorDiscoveryResponse: mocks.simulatorDiscoveryResponse }));
+vi.mock("@/lib/simulators/config", () => ({ isSimulatorModeEnabled: mocks.isSimulatorModeEnabled }));
 
 vi.mock("@/lib/places/course-photo-metadata", () => ({
   cacheCourseCandidatePhotos: mocks.cacheCourseCandidatePhotos
@@ -82,6 +87,7 @@ describe("GET /api/courses/discover provider configuration", () => {
     mocks.loadActiveGooglePlaceReviewIndex.mockResolvedValue(testReviewIndex);
     mocks.readCourseRuntimeCache.mockResolvedValue(null);
     mocks.writeCourseRuntimeCache.mockResolvedValue(undefined);
+    mocks.isSimulatorModeEnabled.mockReturnValue(false);
   });
 
   afterEach(() => {
@@ -100,6 +106,30 @@ describe("GET /api/courses/discover provider configuration", () => {
     });
     expect(mocks.searchNearbyGolfCourses).not.toHaveBeenCalled();
     expect(mocks.cacheCourseCandidatePhotos).not.toHaveBeenCalled();
+  });
+
+  it("keeps simulator discovery gated without reading outdoor data", async () => {
+    const response = await GET(new NextRequest("http://localhost/api/courses/discover?mode=SIMULATOR&latitude=41.24&longitude=-73.2"));
+    expect(response.status).toBe(503);
+    expect(mocks.searchNearbyGolfCourses).not.toHaveBeenCalled();
+    expect(mocks.loadActiveGooglePlaceReviewIndex).not.toHaveBeenCalled();
+  });
+
+  it("dispatches enabled simulator mode through its independent discovery pipeline", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    mocks.isSimulatorModeEnabled.mockReturnValue(true);
+    mocks.simulatorDiscoveryResponse.mockResolvedValue(new Response(JSON.stringify({ courses: [], mode: "SIMULATOR", demo: false })));
+    const response = await GET(new NextRequest("http://localhost/api/courses/discover?mode=SIMULATOR&latitude=41.24&longitude=-73.2&radiusMeters=24140"));
+    expect(await response.json()).toMatchObject({ mode: "SIMULATOR" });
+    expect(mocks.simulatorDiscoveryResponse).toHaveBeenCalledWith({ latitude: 41.24, longitude: -73.2, radiusMeters: 24140, signal: expect.any(AbortSignal) });
+    expect(mocks.enrichCoursesWithHoleLayouts).not.toHaveBeenCalled();
+    expect(mocks.searchNearbyGolfCourses).not.toHaveBeenCalled();
+  });
+
+  it("rejects unknown modes before calling Google", async () => {
+    const response = await GET(new NextRequest("http://localhost/api/courses/discover?mode=BOWLING&latitude=41.24&longitude=-73.2"));
+    expect(response.status).toBe(400);
+    expect(mocks.searchNearbyGolfCourses).not.toHaveBeenCalled();
   });
 
   it("preserves demo discovery for Vercel preview smoke tests", async () => {

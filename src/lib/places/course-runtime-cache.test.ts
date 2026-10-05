@@ -90,4 +90,11 @@ describe("course runtime cache", () => {
       })
     );
   });
+
+  it("isolates simulator and outdoor discovery and lookup keys", () => {
+    const input = { latitude: 41.24, longitude: -73.2, radiusMeters: 24140, reviewVersion: "reviews-1:rentals:1" };
+    expect(getCourseDiscoveryCacheKey({ ...input, mode: "SIMULATOR" })).not.toBe(getCourseDiscoveryCacheKey(input));
+    expect(getCourseLookupCacheKey({ query: "Golf", reviewVersion: "reviews-1", mode: "SIMULATOR" }))
+      .not.toBe(getCourseLookupCacheKey({ query: "Golf", reviewVersion: "reviews-1" }));
+  });
 });

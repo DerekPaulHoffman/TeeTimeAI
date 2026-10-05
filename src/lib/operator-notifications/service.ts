@@ -16,7 +16,7 @@ const FOLLOWUP_DELAY_MS = 5 * 60_000;
 const CLAIM_MS = 60_000;
 const MAX_ATTEMPTS = 5;
 
-async function loadSearch(searchId: string | null) {
+export async function loadOperatorNotificationSearch(searchId: string | null) {
   if (!searchId) return null;
   return prisma.$transaction(
     async (tx) => {
@@ -27,9 +27,11 @@ async function loadSearch(searchId: string | null) {
           preferences: {
             orderBy: { rank: "asc" },
             include: {
+              offering: true,
               course: {
                 select: {
                   name: true,
+                  timeZone: true,
                   layoutHoleCounts: true,
                   monitoringStatus: { select: { lastFailureAt: true } },
                 },
@@ -51,10 +53,13 @@ async function loadSearch(searchId: string | null) {
       const newest = await Promise.all(
         search.preferences.map((preference) =>
           tx.courseProbe.findFirst({
-            where: { teeSearchId: search.id, courseId: preference.courseId },
+            where: { teeSearchId: search.id, courseId: preference.courseId,
+              ...(search.mode === "SIMULATOR" ? { offeringId: preference.offeringId } : {}) },
             orderBy: [{ observedAt: "desc" }, { id: "desc" }],
             select: {
               courseId: true,
+              offeringId: true,
+              teeSearchId: true,
               outcome: true,
               observedAt: true,
               rawSummary: true,
@@ -138,7 +143,7 @@ export async function processOperatorNotification(
   if (delivery.status !== "PENDING") return null;
   if (delivery.nextAttemptAt > now)
     return { id, dueAt: delivery.nextAttemptAt.toISOString() };
-  const search = await loadSearch(delivery.teeSearchId);
+  const search = await loadOperatorNotificationSearch(delivery.teeSearchId);
   const subscription = await prisma.operatorPushSubscription.findUnique({
     where: { id: delivery.recipient },
   });

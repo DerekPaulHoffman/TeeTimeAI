@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { isValidSearchCalendarDate } from "@/lib/validation/search-date";
+import { MAX_SIMULATOR_PLAYERS, SEARCH_MODES } from "@/lib/searches/search-mode";
 
 import {
   COURSE_LAYOUT_HOLE_OPTIONS,
@@ -41,6 +42,8 @@ const timeZoneSchema = z
   .refine(isValidSearchTimeZone, "Use a valid IANA time zone");
 
 const selectedCourseSchema = z.object({
+  offeringId: z.string().min(1).optional(),
+  mode: z.enum(SEARCH_MODES).optional(),
   googlePlaceId: z.string().min(1).optional(),
   courseId: z.string().min(1).optional(),
   name: z.string().min(1),
@@ -63,11 +66,13 @@ const selectedCourseSchema = z.object({
 
 export const teeSearchDetailsSchema = z
   .object({
+    mode: z.enum(SEARCH_MODES).default("OUTDOOR"),
+    durationMinutes: z.number().int().min(30).max(480).refine((value) => value % 15 === 0).nullable().optional(),
     date: z.string().refine(isValidSearchCalendarDate, "Use a valid YYYY-MM-DD date"),
     startTime: timeSchema,
     endTime: timeSchema,
     userTimeZone: timeZoneSchema.default(DEFAULT_SEARCH_TIME_ZONE),
-    players: z.number().int().min(1).max(MAX_PLAYERS_PER_SEARCH),
+    players: z.number().int().min(1).max(MAX_SIMULATOR_PLAYERS),
     requestedLayoutHoles: z
       .union([z.literal(COURSE_LAYOUT_HOLE_OPTIONS[0]), z.literal(COURSE_LAYOUT_HOLE_OPTIONS[1])])
       .nullable()
@@ -85,6 +90,24 @@ export const teeSearchDetailsSchema = z
       .default([])
   })
   .superRefine((value, context) => {
+    if (value.mode === "SIMULATOR") {
+      if (value.players > MAX_SIMULATOR_PLAYERS) {
+        context.addIssue({ code: "custom", path: ["players"], message: "Select up to 8 players" });
+      }
+      if (value.durationMinutes == null) {
+        context.addIssue({ code: "custom", path: ["durationMinutes"], message: "Choose a simulator session length" });
+      }
+      if (value.requestedLayoutHoles != null) {
+        context.addIssue({ code: "custom", path: ["requestedLayoutHoles"], message: "Course layout does not apply to simulator sessions" });
+      }
+    } else {
+      if (value.players > MAX_PLAYERS_PER_SEARCH) {
+        context.addIssue({ code: "custom", path: ["players"], message: "Select up to 4 players" });
+      }
+      if (value.durationMinutes != null) {
+        context.addIssue({ code: "custom", path: ["durationMinutes"], message: "Session length applies only to simulators" });
+      }
+    }
     if (value.endTime <= value.startTime) {
       context.addIssue({
         code: "custom",
@@ -105,6 +128,12 @@ export const teeSearchInputSchema = teeSearchDetailsSchema
       .max(MAX_COURSE_PREFERENCES, "Select up to 5 courses")
   })
   .superRefine((value, context) => {
+    if (value.mode === "SIMULATOR" && value.courses.some((course) => !course.offeringId)) {
+      context.addIssue({ code: "custom", path: ["courses"], message: "Choose verified simulator venues" });
+    }
+    if (value.mode === "OUTDOOR" && value.courses.some((course) => course.offeringId || course.mode === "SIMULATOR")) {
+      context.addIssue({ code: "custom", path: ["courses"], message: "Choose outdoor courses for this alert" });
+    }
 
     const ranks = new Set(value.courses.map((course) => course.rank));
     if (ranks.size !== value.courses.length) {

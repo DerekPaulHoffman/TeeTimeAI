@@ -46,9 +46,10 @@ export function getCourseDiscoveryCacheKey(input: {
   longitude: number;
   radiusMeters: number;
   reviewVersion: string;
+  mode?: "OUTDOOR" | "SIMULATOR";
 }) {
   return [
-    "discover-v2",
+    input.mode === "SIMULATOR" ? "discover-simulator-v1" : "discover-v2",
     input.reviewVersion,
     input.latitude.toFixed(3),
     input.longitude.toFixed(3),
@@ -61,10 +62,11 @@ export function getCourseLookupCacheKey(input: {
   latitude?: number;
   longitude?: number;
   reviewVersion: string;
+  mode?: "OUTDOOR" | "SIMULATOR";
 }) {
   const normalizedQuery = input.query.trim().replace(/\s+/g, " ").toLowerCase();
   return [
-    "lookup-v2",
+    input.mode === "SIMULATOR" ? "lookup-simulator-v1" : "lookup-v2",
     input.reviewVersion,
     normalizedQuery,
     input.latitude?.toFixed(3) ?? "none",

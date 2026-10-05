@@ -21,6 +21,7 @@ import { prisma } from "@/lib/prisma";
 import { enqueueOperatorNotification } from "@/lib/operator-notifications/queue";
 import {
   buildAlertGenerationStartMarker,
+  readAlertGenerationStartedAt,
   unwrapAlertGenerationStatusSnapshot,
 } from "@/lib/searches/generation-clock";
 import { getTimeZoneForCoordinates, normalizeTimeZone } from "@/lib/timezones";
@@ -49,6 +50,9 @@ import {
   type CurrentMatchSettings,
 } from "@/lib/searches/current-match-settings";
 import { projectCurrentCheckEvidence } from "@/lib/searches/current-check-evidence";
+import { isCurrentSimulatorMatch } from "@/lib/simulators/current-availability";
+import { filterSimulatorSessionsForSearch } from "@/lib/tee-times/matching";
+import { assertSimulatorSessionFitsWindow } from "@/lib/searches/simulator-window";
 
 const SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE = 0.06;
 const QUEUED_SEARCH_STATUSES = ["ACTIVE", "PAUSED"] as const;
@@ -79,6 +83,10 @@ export async function createTeeSearchForUser(
   syntheticMultiCycle = false,
 ) {
   await assertQueueCapacity(userId);
+
+  if (input.mode === "SIMULATOR") {
+    return createSimulatorTeeSearchForUser(userId, input, trafficClass, syntheticMultiCycle);
+  }
 
   const placeReviews = await loadActiveGooglePlaceReviewIndex();
   const sortedCourses = input.courses
@@ -165,6 +173,104 @@ export async function createTeeSearchForUser(
   }
 
   return teeSearch;
+}
+
+async function createSimulatorTeeSearchForUser(
+  userId: string,
+  input: TeeSearchInput,
+  trafficClass: WebsiteTrafficClass,
+  syntheticMultiCycle: boolean,
+) {
+  const selected = [...input.courses].sort((a, b) => a.rank - b.rank);
+  const offeringIds = selected.map((course) => course.offeringId);
+  if (offeringIds.some((id) => !id) || new Set(offeringIds).size !== offeringIds.length) {
+    throw new Error("Choose distinct verified simulator venues.");
+  }
+
+  const offerings = await prisma.courseOffering.findMany({
+    where: { id: { in: offeringIds as string[] }, kind: "SIMULATOR", active: true },
+    include: { course: true },
+  });
+  const byId = new Map(offerings.map((offering) => [offering.id, offering]));
+  const canonical = selected.map((candidate) => {
+    const offering = byId.get(candidate.offeringId!);
+    if (
+      !offering ||
+      offering.publicAccessStatus !== "PUBLIC" ||
+      !offering.bookingUrl ||
+      !offering.evidenceUrl ||
+      !offering.verifiedAt ||
+      (candidate.courseId && candidate.courseId !== offering.courseId) ||
+      (candidate.googlePlaceId && candidate.googlePlaceId !== offering.course.googlePlaceId)
+    ) {
+      throw new Error("A selected simulator venue needs current official rental verification. Refresh the venues and try again.");
+    }
+    if (
+      offering.maxPartySize == null ||
+      offering.maxPartySize < input.players ||
+      !offering.supportedDurationsMinutes.includes(input.durationMinutes!)
+    ) {
+      throw new Error("A selected simulator venue does not support this group size and session length.");
+    }
+    return { candidate, offering };
+  });
+  if (new Set(canonical.map(({ offering }) => offering.courseId)).size !== canonical.length) {
+    throw new Error("Choose distinct simulator venues.");
+  }
+  assertFutureCourseSearchDate(input.date, canonical.map(({ offering }) => offering.course.timeZone));
+  assertSimulatorSessionFitsWindow({ date: input.date, startTime: input.startTime,
+    endTime: input.endTime, durationMinutes: input.durationMinutes!,
+    timeZones: canonical.map(({ offering }) => offering.course.timeZone) });
+
+  return prisma.$transaction(async (transaction) => {
+    const currentOfferings = await transaction.courseOffering.findMany({
+      where: { id: { in: offeringIds as string[] }, kind: "SIMULATOR", active: true },
+      include: { course: true },
+    });
+    const currentById = new Map(currentOfferings.map((offering) => [offering.id, offering]));
+    for (const { candidate } of canonical) {
+      const offering = currentById.get(candidate.offeringId!);
+      if (!offering || offering.publicAccessStatus !== "PUBLIC" || !offering.bookingUrl ||
+          !offering.evidenceUrl || !offering.verifiedAt || offering.maxPartySize == null ||
+          offering.maxPartySize < input.players ||
+          !offering.supportedDurationsMinutes.includes(input.durationMinutes!) ||
+          (candidate.courseId && candidate.courseId !== offering.courseId) ||
+          (candidate.googlePlaceId && candidate.googlePlaceId !== offering.course.googlePlaceId)) {
+        throw new Error("A selected simulator venue changed. Refresh the venues and try again.");
+      }
+    }
+    const created = await transaction.teeSearch.create({
+      data: {
+        userId,
+        mode: "SIMULATOR",
+        durationMinutes: input.durationMinutes,
+        date: parseLocalDate(input.date),
+        startTime: input.startTime,
+        endTime: input.endTime,
+        userTimeZone: normalizeTimeZone(input.userTimeZone),
+        players: input.players,
+        requestedLayoutHoles: null,
+        cadenceMinutes: input.cadenceMinutes,
+        alertEmail: normalizeAlertEmail(input.alertEmail),
+        additionalEmails: normalizeAdditionalEmails(input.additionalEmails),
+        trafficClass,
+        syntheticMultiCycle,
+        preferences: {
+          create: canonical.map(({ candidate, offering }) => ({
+            rank: candidate.rank,
+            course: { connect: { id: offering.courseId } },
+            offering: { connect: { id: offering.id } },
+            ...(candidate.distanceMeters !== undefined
+              ? { distanceMetersAtSelection: candidate.distanceMeters }
+              : {}),
+          })),
+        },
+      },
+      include: searchInclude,
+    });
+    await enqueueOperatorNotification(transaction, created);
+    return created;
+  });
 }
 
 async function buildCoursePreferenceCreate(
@@ -505,7 +611,7 @@ export async function listTeeSearchesForUser(userId: string) {
       return [];
     }
 
-    const matchCourseIds = searches.flatMap((search) =>
+    const matchCourseIds = searches.filter(search => search.mode !== "SIMULATOR").flatMap((search) =>
       search.matches.map((match) => match.course.id),
     );
     const completedLocalReaderSources =
@@ -615,6 +721,65 @@ export async function updateTeeSearchForUser(
   searchId: string,
   input: TeeSearchUpdateInput,
 ) {
+  const modeAndOfferings = await prisma.teeSearch.findUniqueOrThrow({
+    where: { id: searchId, userId },
+    select: {
+      mode: true,
+      date: true,
+      startTime: true,
+      endTime: true,
+      players: true,
+      durationMinutes: true,
+      preferences: {
+        select: {
+          offering: {
+            select: {
+              active: true,
+              publicAccessStatus: true,
+              maxPartySize: true,
+              supportedDurationsMinutes: true,
+              bookingUrl: true,
+              evidenceUrl: true,
+              verifiedAt: true,
+              course: { select: { timeZone: true } },
+            },
+          },
+        },
+      },
+    },
+  });
+  if (input.mode && input.mode !== modeAndOfferings.mode) {
+    throw new Error("An alert's course type cannot change. Create a new alert for the other type.");
+  }
+  const nextPlayers = input.players ?? modeAndOfferings.players;
+  const nextDuration = input.durationMinutes === undefined
+    ? modeAndOfferings.durationMinutes
+    : input.durationMinutes;
+  if (modeAndOfferings.mode === "SIMULATOR") {
+    const changesSimulatorIntent = input.date !== undefined || input.startTime !== undefined ||
+      input.endTime !== undefined || input.players !== undefined || input.durationMinutes !== undefined ||
+      input.status === "ACTIVE";
+    if (input.requestedLayoutHoles != null || nextPlayers < 1 || nextPlayers > 8 || !nextDuration) {
+      throw new Error("Choose 1 to 8 players and a simulator session length.");
+    }
+    if (changesSimulatorIntent && modeAndOfferings.preferences.some(({ offering }) =>
+      !offering || !offering.active || offering.publicAccessStatus !== "PUBLIC" ||
+      !offering.bookingUrl || !offering.evidenceUrl || !offering.verifiedAt ||
+      offering.maxPartySize == null || nextPlayers > offering.maxPartySize ||
+      !offering.supportedDurationsMinutes.includes(nextDuration)
+    )) {
+      throw new Error("A selected simulator venue no longer supports this group size and session length.");
+    }
+    if (changesSimulatorIntent) assertSimulatorSessionFitsWindow({
+      date: input.date ?? modeAndOfferings.date.toISOString().slice(0, 10),
+      startTime: input.startTime ?? modeAndOfferings.startTime,
+      endTime: input.endTime ?? modeAndOfferings.endTime,
+      durationMinutes: nextDuration,
+      timeZones: modeAndOfferings.preferences.flatMap(({ offering }) => offering ? [offering.course.timeZone] : []),
+    });
+  } else if (nextPlayers < 1 || nextPlayers > 4 || nextDuration != null) {
+    throw new Error("Outdoor alerts support 1 to 4 players without a session length.");
+  }
   if (
     input.status &&
     QUEUED_SEARCH_STATUSES.includes(
@@ -678,6 +843,7 @@ export async function updateTeeSearchForUser(
         ? { userTimeZone: normalizeTimeZone(input.userTimeZone) }
         : {}),
       ...(input.players ? { players: input.players } : {}),
+      ...(input.durationMinutes !== undefined ? { durationMinutes: input.durationMinutes } : {}),
       ...(input.requestedLayoutHoles !== undefined
         ? { requestedLayoutHoles: input.requestedLayoutHoles }
         : {}),
@@ -697,12 +863,37 @@ export async function updateTeeSearchForUser(
     input.coursePreferences,
   );
 
+  async function assertCurrentSimulatorIntent(transaction: Prisma.TransactionClient) {
+    if (modeAndOfferings.mode !== "SIMULATOR" ||
+        (input.date === undefined && input.startTime === undefined && input.endTime === undefined &&
+         input.players === undefined && input.durationMinutes === undefined && input.status !== "ACTIVE")) return;
+    const current = await transaction.teeSearch.findUniqueOrThrow({
+      where: { id: searchId, userId },
+      select: { mode: true, date: true, startTime: true, endTime: true, players: true, durationMinutes: true,
+        preferences: { select: { offering: { include: { course: { select: { timeZone: true } } } } } } },
+    });
+    if (current.mode !== "SIMULATOR") throw new Error("An alert's course type cannot change.");
+    const players = input.players ?? current.players;
+    const durationMinutes = input.durationMinutes ?? current.durationMinutes;
+    if (!durationMinutes || current.preferences.some(({ offering }) =>
+      !offering || !offering.active || offering.kind !== "SIMULATOR" ||
+      offering.publicAccessStatus !== "PUBLIC" || !offering.bookingUrl || !offering.evidenceUrl ||
+      !offering.verifiedAt || offering.maxPartySize == null || offering.maxPartySize < players ||
+      !offering.supportedDurationsMinutes.includes(durationMinutes))) {
+      throw new Error("A selected simulator venue no longer supports this group size and session length.");
+    }
+    assertSimulatorSessionFitsWindow({ date: input.date ?? current.date.toISOString().slice(0, 10),
+      startTime: input.startTime ?? current.startTime, endTime: input.endTime ?? current.endTime,
+      durationMinutes, timeZones: current.preferences.flatMap(({ offering }) => offering ? [offering.course.timeZone] : []) });
+  }
+
   if (coursePreferences.length === 0) {
     return runCustomerProjectionTransaction(async (transaction) => {
       const lockedSearch = await lockSearchForAlertMutation(transaction, {
         searchId,
         userId,
       });
+      await assertCurrentSimulatorIntent(transaction);
       await assertUpdatedSearchDate(transaction, userId, searchId, input.date);
       const updatedSearch = await transaction.teeSearch.update({
         where: {
@@ -721,6 +912,7 @@ export async function updateTeeSearchForUser(
       searchId,
       userId,
     });
+    await assertCurrentSimulatorIntent(transaction);
     await assertUpdatedSearchDate(transaction, userId, searchId, input.date);
     for (const [index, preference] of coursePreferences.entries()) {
       await transaction.coursePreference.updateMany({
@@ -776,6 +968,7 @@ async function assertUpdatedSearchDate(
 async function projectCurrentCustomerSearch<
   T extends Parameters<typeof projectCurrentCustomerMatches>[0],
 >(transaction: Prisma.TransactionClient, search: T) {
+  if (search.mode === "SIMULATOR") return projectCurrentCustomerMatches(projectCurrentCheckEvidence(search), new Map(), new Map());
   const courseIds = search.matches.map((match) => match.course.id);
   const completedLocalReaderSources =
     await getNewestCompletedLocalReaderProviderObservationsInTransaction(
@@ -807,6 +1000,8 @@ function hideInternalGenerationMarker<
 
 function projectCurrentCustomerMatches<
   T extends CurrentMatchSearchSettings & {
+    mode?: string;
+    durationMinutes?: number | null;
     alertGeneration?: number;
     createdAt?: Date;
     lastCheckedAt?: Date | null;
@@ -819,6 +1014,13 @@ function projectCurrentCustomerMatches<
       rawSummary?: unknown;
     }>;
     matches: Array<CurrentMatchSettings & {
+      offeringId?: string | null;
+      offeringSourceFingerprint?: string | null;
+      endsAt?: Date | null;
+      resourceId?: string | null;
+      capacity?: number | null;
+      bookingUrl?: string;
+      offering?: import("@/lib/simulators/current-availability").SimulatorMatchProof["offering"];
       availabilityStatus: string;
       lastConfirmedAt: Date | null;
       course: {
@@ -846,6 +1048,21 @@ function projectCurrentCustomerMatches<
     ...hideInternalGenerationMarker(search),
     matches: search.matches.flatMap((match) => {
       const { monitoringStatus: monitoring, ...course } = match.course;
+      if (search.mode === "SIMULATOR") {
+        const preference = search.preferences.find(preference => preference.course.id === match.course.id && preference.offeringId === match.offeringId);
+        const generationStartedAt = typeof search.alertGeneration === "number" && search.createdAt
+          ? readAlertGenerationStartedAt({ alertGeneration: search.alertGeneration, createdAt: search.createdAt, statusEmailSnapshot: search.statusEmailSnapshot }) : null;
+        if (!match.offeringId || !match.endsAt || !match.bookingUrl || !match.lastConfirmedAt || !search.durationMinutes ||
+          !preference || !generationStartedAt || match.lastConfirmedAt < generationStartedAt ||
+          !isCurrentSimulatorMatch({ ...match, offeringId: match.offeringId, endsAt: match.endsAt, bookingUrl: match.bookingUrl,
+            lastConfirmedAt: match.lastConfirmedAt, capacity: match.capacity ?? null }, new Date(), search.players)) return [];
+        const matching = filterSimulatorSessionsForSearch({ date: search.date.toISOString().slice(0, 10), startTime: search.startTime,
+          endTime: search.endTime, players: search.players, durationMinutes: search.durationMinutes,
+          preferredOfferings: [{ offeringId: match.offeringId, rank: 1 }] }, [{ offeringId: match.offeringId, sourceId: "projection",
+          resourceId: match.resourceId ?? "ANY", startsAt: match.startsAt.toISOString(), endsAt: match.endsAt.toISOString(),
+          capacity: match.capacity ?? 0, bookingUrl: match.bookingUrl }], match.course.timeZone);
+        return matching.length ? [{ ...match, course }] : [];
+      }
       const lastConfirmedAt = match.lastConfirmedAt;
       const completedLocalReaderSource = completedLocalReaderSources.get(
         match.course.id,
@@ -1010,11 +1227,12 @@ function assertCourseLayoutsCompatible(
 export const searchInclude = {
   preferences: {
     orderBy: { rank: "asc" },
-    include: { course: true },
+    include: { course: true, offering: true },
   },
   matches: {
     orderBy: { startsAt: "asc" },
     include: {
+      offering: true,
       course: {
         include: {
           monitoringStatus: {
@@ -1031,7 +1249,7 @@ export const searchInclude = {
   probes: {
     orderBy: { observedAt: "desc" },
     take: 5,
-    include: { course: true },
+    include: { course: true, offering: true },
   },
 } satisfies Prisma.TeeSearchInclude;
 
@@ -1041,6 +1259,7 @@ const searchListInclude = {
   matches: {
     orderBy: { startsAt: "asc" },
     include: {
+      offering: true,
       course: {
         include: {
           monitoringStatus: {
@@ -1057,6 +1276,7 @@ const searchListInclude = {
   preferences: {
     orderBy: { rank: "asc" },
     include: {
+      offering: true,
       course: {
         include: {
           bookingFacts: {

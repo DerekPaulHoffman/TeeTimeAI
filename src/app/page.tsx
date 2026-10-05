@@ -6,6 +6,7 @@ import { ArrowRight, Bell, Check, Search } from "lucide-react";
 import { DiscordMark } from "@/components/discord-mark";
 import { StructuredData } from "@/components/structured-data";
 import { discordInviteUrl } from "@/lib/community";
+import { isSimulatorModeEnabled } from "@/lib/simulators/config";
 import { absoluteUrl, siteDefinition, siteDescription, siteName } from "@/lib/seo";
 
 export const metadata: Metadata = {
@@ -105,6 +106,7 @@ export default function HomePage() {
             details and book directly with the course.
           </p>
           <div className="hero-actions">
+            {isSimulatorModeEnabled() ? <a className="button button-secondary" href="/search?mode=SIMULATOR">Find simulator time</a> : null}
             <a className="button button-primary" data-analytics-event="start_search_clicked" href="/search">
               <Search size={16} />
               Find my tee time

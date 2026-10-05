@@ -4140,6 +4140,7 @@ export async function reconcileCourseMonitoringDeadline(input: {
                             observedAt: { lte: input.now },
                             teeSearch: {
                               status: "ACTIVE",
+                              mode: "OUTDOOR",
                               trafficClass: {
                                 notIn: [...syntheticWebsiteTrafficClasses],
                               },
@@ -4446,6 +4447,7 @@ export async function reconcileCourseMonitoringDeadline(input: {
           },
           teeSearch: {
             status: "ACTIVE",
+            mode: "OUTDOOR",
             trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
           },
         },
@@ -6316,6 +6318,7 @@ async function fenceAndLoadFreshBatchSuccessProbes(
           },
           teeSearch: {
             status: "ACTIVE",
+            mode: "OUTDOOR",
             trafficClass: {
               notIn: [...syntheticWebsiteTrafficClasses],
             },
@@ -9027,6 +9030,7 @@ export async function runCourseMonitoringWatchdog(now = new Date()) {
             where: {
               teeSearch: {
                 status: "ACTIVE",
+                mode: "OUTDOOR",
                 trafficClass: {
                   notIn: [...syntheticWebsiteTrafficClasses],
                 },
@@ -9153,6 +9157,7 @@ export async function runCourseMonitoringWatchdog(now = new Date()) {
           await transaction.teeSearch.updateMany({
             where: {
               status: "ACTIVE",
+              mode: "OUTDOOR",
               trafficClass: {
                 notIn: [...syntheticWebsiteTrafficClasses],
               },
@@ -9634,6 +9639,7 @@ async function queueActiveRealSearchesForCourse(
   return transaction.teeSearch.updateMany({
     where: {
       status: "ACTIVE",
+      mode: "OUTDOOR",
       trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
       preferences: { some: { courseId } },
     },
@@ -9653,6 +9659,7 @@ async function queueImmediateActiveRealSearchSchedulesForCourse(
   return transaction.teeSearch.updateMany({
     where: {
       status: "ACTIVE",
+      mode: "OUTDOOR",
       trafficClass: { notIn: [...syntheticWebsiteTrafficClasses] },
       date: { gte: currentDateBoundary },
       preferences: { some: { courseId } },
@@ -10491,6 +10498,7 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
             layoutHoleCounts: true,
             layoutHolesVerifiedAt: true,
             probes: {
+              where: { teeSearch: { mode: "OUTDOOR" } },
               orderBy: [{ observedAt: "desc" }, { id: "desc" }],
               take: 2,
               select: { id: true, courseId: true, observedAt: true },
@@ -10504,6 +10512,7 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
               where: {
                 teeSearch: {
                   status: "ACTIVE",
+                  mode: "OUTDOOR",
                   ...(startedLocalReaderContinuationRequested
                     ? {}
                     : {
@@ -11535,7 +11544,7 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
         unexpectedMonitoringEvent,
       ] = await Promise.all([
         transaction.courseProbe.findFirst({
-          where: { courseId: input.courseId },
+          where: { courseId: input.courseId, teeSearch: { mode: "OUTDOOR" } },
           orderBy: [{ observedAt: "desc" }, { id: "desc" }],
           select: { id: true, courseId: true, observedAt: true },
         }),
@@ -11671,7 +11680,7 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
           unexpectedMonitoringEvent,
         ] = await Promise.all([
           transaction.courseProbe.findFirst({
-            where: { courseId: input.courseId },
+            where: { courseId: input.courseId, teeSearch: { mode: "OUTDOOR" } },
             orderBy: [{ observedAt: "desc" }, { id: "desc" }],
             select: { id: true, courseId: true, observedAt: true },
           }),
@@ -11861,7 +11870,7 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
             select: { id: true },
           }),
           transaction.courseProbe.findFirst({
-            where: { courseId: input.courseId },
+            where: { courseId: input.courseId, teeSearch: { mode: "OUTDOOR" } },
             orderBy: [{ observedAt: "desc" }, { id: "desc" }],
             select: { id: true, courseId: true, observedAt: true },
           }),
@@ -12003,7 +12012,7 @@ export async function reopenParkedCourseForResponderCampaignInTransaction(
         const finalEligibilityAt = await getCourseMonitoringDatabaseNow(transaction);
         const [activeSearch, activeRequest, activeReaderJob] = await Promise.all([
           transaction.coursePreference.findFirst({
-            where: { courseId: input.courseId, teeSearch: { status: "ACTIVE" } },
+            where: { courseId: input.courseId, teeSearch: { status: "ACTIVE", mode: "OUTDOOR" } },
             select: { id: true },
           }),
           transaction.courseSupportVerificationRequest.findFirst({

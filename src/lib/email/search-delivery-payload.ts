@@ -11,7 +11,8 @@ export type SearchEmailMatchRef = {
 };
 
 export type SearchEmailDeliveryPayload = {
-  schemaVersion: 2;
+  schemaVersion: 2 | 3;
+  mode?: "SIMULATOR";
   checkedAt: string;
   matchIds?: string[];
   matchRefs?: SearchEmailMatchRef[];
@@ -31,14 +32,16 @@ export function parseSearchEmailPayload(
   }
   const payload = value as Record<string, unknown>;
   if (
-    payload.schemaVersion !== 2 ||
+    (payload.schemaVersion !== 2 && payload.schemaVersion !== 3) ||
+    (payload.schemaVersion === 3 && payload.mode !== "SIMULATOR") ||
     typeof payload.checkedAt !== "string" ||
     Number.isNaN(new Date(payload.checkedAt).getTime())
   ) {
     return null;
   }
   return {
-    schemaVersion: 2,
+    schemaVersion: payload.schemaVersion,
+    ...(payload.schemaVersion === 3 ? { mode: "SIMULATOR" as const } : {}),
     checkedAt: payload.checkedAt,
     ...(Array.isArray(payload.matchIds)
       ? {

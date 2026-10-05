@@ -16,6 +16,9 @@ const reply = (status: string, times: unknown[] = []) => NextResponse.json({ sta
 
 // Public availability only. This path never creates demand, starts a workflow, or sends email.
 export async function GET(request: NextRequest) {
+  if (request.nextUrl.searchParams.has("mode") && request.nextUrl.searchParams.get("mode") !== "OUTDOOR") {
+    return NextResponse.json({ error: "This availability view supports outdoor golf." }, { status: 400 });
+  }
   const input = inputSchema.safeParse(Object.fromEntries(request.nextUrl.searchParams));
   if (!input.success) return NextResponse.json({ error: "Choose a course, date, and player count." }, { status: 400 });
   const day = new Date(`${input.data.date}T00:00:00Z`);

@@ -151,6 +151,7 @@ export type CourseSupportAcceptanceHistoryBatch = {
     searchRef: string;
     scheduleVersion: number;
     teeSearch: {
+      mode?: "OUTDOOR" | "SIMULATOR";
       syntheticMultiCycle: boolean;
       scheduleVersion: number;
       alertGeneration: number;
@@ -448,6 +449,7 @@ export async function getCourseSupportAcceptanceHistory(
           scheduleVersion: true,
           teeSearch: {
             select: {
+              mode: true,
               syntheticMultiCycle: true,
               scheduleVersion: true,
               alertGeneration: true,
@@ -739,7 +741,7 @@ export function aggregateCourseSupportAcceptanceHistory(input: {
     }
 
     const syntheticDispatches = batch.searchDispatches.filter(
-      (dispatch) => dispatch.teeSearch?.syntheticMultiCycle === true,
+      (dispatch) => dispatch.teeSearch?.mode !== "SIMULATOR" && dispatch.teeSearch?.syntheticMultiCycle === true,
     );
     syntheticCanaryDispatchCount += syntheticDispatches.length;
     const dispatchRelationIsComplete =
@@ -1100,7 +1102,7 @@ function classifyLocalReaderSearchResumes(
   const unavailable: string[] = [];
   for (const dispatch of batch.searchDispatches) {
     const search = dispatch.teeSearch;
-    if (!search) continue;
+    if (!search || search.mode === "SIMULATOR") continue;
     for (const job of search.localReaderJobs) {
       const key = [
         job.courseId,
@@ -1329,7 +1331,7 @@ function hasCompleteCurrentSearchDispatchRelation(
   return (
     isNonnegativeInteger(dispatch.currentAffectedSearchCount) &&
     batch.searchDispatches.length === dispatch.currentAffectedSearchCount &&
-    batch.searchDispatches.every((entry) => entry.teeSearch !== null)
+    batch.searchDispatches.every((entry) => entry.teeSearch !== null && entry.teeSearch.mode !== "SIMULATOR")
   );
 }
 
@@ -1367,6 +1369,7 @@ function getExactSyntheticProviderCheckProofs(
   const completedAt = batch.completedAt;
   if (
     !search ||
+    search.mode === "SIMULATOR" ||
     search.syntheticMultiCycle !== true ||
     !/^[a-f0-9]{64}$/.test(dispatch.searchRef) ||
     !isNonnegativeInteger(dispatch.scheduleVersion) ||

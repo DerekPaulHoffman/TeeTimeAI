@@ -453,7 +453,7 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(page).toHaveURL(/\/search$/);
     expect(new URL(page.url()).search).toBe("");
     await expect(
-      page.getByRole("heading", { name: "Find public golf tee times and set a free alert." })
+      page.getByRole("heading", { name: /^(Find public golf tee times and set a free alert\.|Find golf tee times or simulator sessions\.)$/ })
     ).toBeVisible();
   });
 
