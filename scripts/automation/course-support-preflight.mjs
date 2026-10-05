@@ -238,11 +238,15 @@ export function playwrightChromiumSetupRequiredResult(inspection) {
 export function responderInvocation(
   platform = process.platform,
   commandInterpreter = process.env.ComSpec,
-  scheduledCycle = false
+  scheduledCycle = false,
+  courseDispatch = false
 ) {
-  const responderArgs = scheduledCycle
-    ? [...baseResponderArgs, "--scheduled-cycle"]
+  const commandArgs = courseDispatch
+    ? ["vercel", "env", "run", "-e", "production", "--", "npm", "run", "automation:course-dispatch", "--", "plan"]
     : baseResponderArgs;
+  const responderArgs = scheduledCycle
+    ? [...commandArgs, "--scheduled-cycle"]
+    : commandArgs;
   if (platform === "win32") {
     return {
       command: commandInterpreter?.trim() || "cmd.exe",
@@ -442,7 +446,8 @@ function main() {
       const invocation = responderInvocation(
         process.platform,
         process.env.ComSpec,
-        process.argv.includes("--scheduled-cycle")
+        process.argv.includes("--scheduled-cycle"),
+        process.argv.includes("--course-dispatch")
       );
       process.stdout.write(
         `${JSON.stringify(

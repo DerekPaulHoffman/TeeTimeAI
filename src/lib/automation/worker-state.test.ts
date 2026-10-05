@@ -48,11 +48,11 @@ describe("automation worker state", () => {
 
   it("calculates the next expected run from the configured cadence", () => {
     expect(getNextExpectedWorkerRun(now, AUTOMATION_WORKERS.COURSE_SUPPORT).toISOString()).toBe(
-      "2026-07-27T12:15:00.000Z"
+      "2026-07-27T12:10:00.000Z"
     );
   });
 
-  it("detects course-support liveness after the 15-minute cadence and three-minute grace", () => {
+  it("detects course-support liveness after the ten-minute cadence and three-minute grace", () => {
     const worker = {
       desiredState: "ACTIVE" as const,
       monitoringStartedAt: new Date("2026-07-27T11:00:00.000Z"),
@@ -91,7 +91,7 @@ describe("automation worker state", () => {
       },
       data: {
         lastHeartbeatAt: new Date("2026-07-27T11:58:00.000Z"),
-        nextExpectedAt: new Date("2026-07-27T12:13:00.000Z"),
+        nextExpectedAt: new Date("2026-07-27T12:08:00.000Z"),
         runtimeVersion: expect.any(String)
       }
     });
@@ -100,7 +100,7 @@ describe("automation worker state", () => {
         {
           desiredState: "ACTIVE",
           monitoringStartedAt: startedAt,
-          nextExpectedAt: new Date("2026-07-27T12:13:00.000Z"),
+          nextExpectedAt: new Date("2026-07-27T12:08:00.000Z"),
           graceSeconds: AUTOMATION_WORKERS.COURSE_SUPPORT.graceSeconds
         } as never,
         new Date("2026-07-27T12:01:00.000Z")
@@ -119,7 +119,7 @@ describe("automation worker state", () => {
       expect.objectContaining({
         update: expect.objectContaining({
           lastHeartbeatAt: now,
-          nextExpectedAt: new Date("2026-07-27T12:15:00.000Z")
+          nextExpectedAt: new Date("2026-07-27T12:10:00.000Z")
         })
       })
     );
@@ -135,7 +135,7 @@ describe("automation worker state", () => {
       },
       data: {
         lastHeartbeatAt: new Date("2026-07-27T12:04:00.000Z"),
-        nextExpectedAt: new Date("2026-07-27T12:19:00.000Z"),
+        nextExpectedAt: new Date("2026-07-27T12:14:00.000Z"),
         runtimeVersion: expect.any(String)
       }
     });
@@ -153,7 +153,7 @@ describe("automation worker state", () => {
         lastHeartbeatAt: now,
         lastCompletedAt: now,
         lastOutcome: "inspect_failed",
-        nextExpectedAt: new Date("2026-07-27T12:15:00.000Z")
+        nextExpectedAt: new Date("2026-07-27T12:10:00.000Z")
       }
     });
 
@@ -169,7 +169,7 @@ describe("automation worker state", () => {
         lastHeartbeatAt: recoveredAt,
         lastCompletedAt: recoveredAt,
         lastOutcome: "inspect_completed",
-        nextExpectedAt: new Date("2026-07-27T12:30:00.000Z")
+        nextExpectedAt: new Date("2026-07-27T12:25:00.000Z")
       }
     });
   });

@@ -755,6 +755,13 @@ async function claim(args: string[]) {
   const retryBatchRef = readSingleOption(args, "--retry-batch-ref");
   const retryOrdinal = readSingleIntegerOption(args, "--retry-ordinal");
   const maxCourses = readSingleIntegerOption(args, "--max-courses");
+  const dispatchAssignmentRef = readSingleOption(args, "--dispatch-assignment");
+  if (dispatchAssignmentRef && (retryBatchRef || retryOrdinal !== undefined || maxCourses !== 1)) {
+    throw new Error("An assigned course worker must claim exactly one course without a retry selector.");
+  }
+  if (dispatchAssignmentRef && !process.env.CODEX_THREAD_ID?.trim()) {
+    throw new Error("An assigned course worker requires its native CODEX_THREAD_ID.");
+  }
   if (retryOrdinal !== undefined && !retryBatchRef) {
     throw new Error("--retry-ordinal requires --retry-batch-ref.");
   }
@@ -767,7 +774,8 @@ async function claim(args: string[]) {
     retryBatchId: retryBatchRef
       ? await resolveCourseSupportBatchReference(retryBatchRef)
       : undefined,
-    retryOrdinal
+    retryOrdinal,
+    dispatchAssignmentRef
   };
   return runCourseSupportClaimWithImmediateReplan(
     () => claimCourseSupportBatch(claimInput),

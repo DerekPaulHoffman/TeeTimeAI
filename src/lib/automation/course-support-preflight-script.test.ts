@@ -241,6 +241,20 @@ describe("course support preflight process launch", () => {
     expect(invocation.args).not.toContain("claim");
   });
 
+  it("plans course workers once through the health-bearing production preflight", () => {
+    const invocation = responderInvocation("linux", undefined, true, true);
+    expect(invocation.args).toEqual([
+      "vercel", "env", "run", "-e", "production", "--", "npm", "run",
+      "automation:course-dispatch", "--", "plan", "--scheduled-cycle"
+    ]);
+    expect(invocation.args.filter((arg) => arg === "plan")).toHaveLength(1);
+    expect(invocation.args).not.toContain("inspect");
+    expect(invocation.args).not.toContain("claim");
+    expect(responderInvocation("win32", undefined, true, true).args.at(-1)).toBe(
+      "npx vercel env run -e production -- npm run automation:course-dispatch -- plan --scheduled-cycle"
+    );
+  });
+
   it("reports spawn errors without exposing their message", () => {
     const result = launchFailureResult({
       error: Object.assign(new Error("sensitive local path"), { code: "EINVAL" }),

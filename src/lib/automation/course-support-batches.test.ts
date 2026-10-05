@@ -86,6 +86,7 @@ vi.mock("@/lib/prisma", () => ({
     },
     automationRun: {
       findFirst: prismaMocks.automationRunFindFirst,
+      findMany: prismaMocks.automationRunFindMany,
       create: prismaMocks.automationRunCreate,
       updateMany: prismaMocks.automationRunUpdateMany
     },
@@ -2247,6 +2248,28 @@ describe("course-support path planning", () => {
         },
       }),
     ).toBe(false);
+  });
+
+  it("lets distinct assigned courses recover in parallel while preserving code scope ownership", () => {
+    const assigned = (id: string, digest: string, plannedPaths: string[] = []) => ({
+      providerFamilyKey: "SAME_PROVIDER",
+      failureFingerprint: "same-failure",
+      summary: {
+        dispatchAssignmentRef: `course-assignment-${id}`,
+        dispatchCourseDigest: digest.repeat(64),
+        plannedPaths,
+      },
+    });
+    const first = assigned("11111111-1111-4111-8111-111111111111", "a");
+    const second = assigned("22222222-2222-4222-8222-222222222222", "b");
+    expect(courseSupportRecoveryBatchesConflict(first, second)).toBe(false);
+    expect(courseSupportRecoveryBatchesConflict(first, assigned(
+      "33333333-3333-4333-8333-333333333333", "a",
+    ))).toBe(true);
+    expect(courseSupportRecoveryBatchesConflict(
+      assigned("44444444-4444-4444-8444-444444444444", "a", ["src/lib/tee-times/adapters/same/fetch.ts"]),
+      assigned("55555555-5555-4555-8555-555555555555", "b", ["src/lib/tee-times/adapters/same/parse.ts"]),
+    )).toBe(true);
   });
 
   it("reopens only an unreleased verifying batch whose original plan was empty", () => {
@@ -8945,7 +8968,7 @@ describe("course-support claim demand fencing", () => {
     ).resolves.toMatchObject({ outcome: "ready", incidentCount: 1 });
 
     expect(prismaMocks.batchFindMany.mock.calls[0]?.[0]).toEqual(
-      expect.objectContaining({ take: 2 }),
+      expect.objectContaining({ take: 15 }),
     );
     expect(prismaMocks.batchCreate).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -9944,9 +9967,9 @@ describe("course-support claim demand fencing", () => {
     expect(prismaMocks.teeSearchUpdateMany).not.toHaveBeenCalled();
   });
 
-  it("rejects a third concurrent provider group", async () => {
+  it("rejects a sixteenth concurrent provider group", async () => {
     prismaMocks.batchFindMany.mockResolvedValueOnce(
-      Array.from({ length: 2 }, (_, index) => activeBatch(index + 1)),
+      Array.from({ length: 15 }, (_, index) => activeBatch(index + 1)),
     );
 
     await expect(
@@ -20322,7 +20345,7 @@ describe("course-support inspection ownership", () => {
     ).toEqual(["NEW_ALERT_GROUP", "OLDER_GROUP"]);
   });
 
-  it("publishes a deadline-ordered dispatch plan for up to two provider groups", async () => {
+  it("publishes a deadline-ordered dispatch plan within fifteen provider groups", async () => {
     prismaMocks.supportIncidentFindMany.mockResolvedValueOnce(
       Array.from({ length: 6 }, (_, index) => ({
         confirmedAt: now,
@@ -20351,18 +20374,18 @@ describe("course-support inspection ownership", () => {
 
     expect(result).toMatchObject({
       outcome: "ready",
-      availableWriterSlots: 2,
+      availableWriterSlots: 15,
       readOnlyDispatchPlan: {
-        maxProviderGroups: 2,
+        maxProviderGroups: 15,
       },
     });
     expect(
       result.readOnlyDispatchPlan.groups.map(
         (group) => group.providerFamilyKey,
       ),
-    ).toEqual(["GROUP_1", "GROUP_2"]);
+    ).toEqual(["GROUP_1", "GROUP_2", "GROUP_3", "GROUP_4", "GROUP_5", "GROUP_6"]);
     expect(prismaMocks.batchFindMany.mock.calls[0]?.[0]).toEqual(
-      expect.objectContaining({ take: 2 }),
+      expect.objectContaining({ take: 15 }),
     );
   });
 
@@ -20527,7 +20550,7 @@ describe("course-support inspection ownership", () => {
       recoveryContinuation: {
         reinspectAfterRecovery: false,
         dueIncidentCount: 1,
-        availableWriterSlots: 1,
+        availableWriterSlots: 14,
       },
       readOnlyDispatchPlan: {
         groups: [{ providerFamilyKey: "DUE_GROUP" }],
@@ -20535,7 +20558,7 @@ describe("course-support inspection ownership", () => {
     });
   });
 
-  it("recovers an expired owner when two expired batches fill all writer slots", async () => {
+  it("recovers an expired owner when fifteen expired batches fill all writer slots", async () => {
     prismaMocks.supportIncidentFindMany.mockResolvedValueOnce([{
       confirmedAt: now,
       providerFamilyKey: "DUE_GROUP",
@@ -20561,7 +20584,7 @@ describe("course-support inspection ownership", () => {
       failureFingerprint: "other",
       summary: null,
     });
-    prismaMocks.batchCount.mockResolvedValueOnce(2);
+    prismaMocks.batchCount.mockResolvedValueOnce(15);
 
     await expect(inspectCourseSupportQueue({ now })).resolves.toMatchObject({
       outcome: "recovery_required",
@@ -20673,7 +20696,7 @@ describe("course-support inspection ownership", () => {
     })).resolves.toMatchObject({
       outcome: "resume_owned_work",
       handoff: { action: "RESUME", source: "OWNED_BATCH" },
-      availableWriterSlots: 0,
+      availableWriterSlots: 13,
       ownedByCurrentTask: true,
     });
   });
@@ -20897,7 +20920,8 @@ describe("course-support inspection history parity", () => {
     };
     if (authority === "RECOVER") prismaMocks.batchFindFirst.mockResolvedValueOnce({ ...owner, leaseExpiresAt: now });
     else prismaMocks.batchFindMany.mockResolvedValueOnce(authority === "CAPACITY"
-      ? [owner, { ...owner, id: "other-owned-batch", ownerThreadId: "other-owner" }] : [owner]);
+      ? Array.from({ length: 15 }, (_, index) => ({ ...owner, id: `owned-batch-${index}`, ownerThreadId: index === 0 ? "owner-thread" : "other-owner" }))
+      : [owner]);
     const capacityFence = authority === "CAPACITY" || authority === "BACKGROUND_CAPACITY";
     expect(await inspectCourseSupportQueue({ now, requestingThreadId: capacityFence ? "uninvolved-thread" : "owner-thread" })).toMatchObject({
       handoff: { action: capacityFence ? "STOP" : authority },

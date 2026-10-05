@@ -7,7 +7,7 @@ import { getAutomationRuntimeVersion } from "./runtime-version";
 export const AUTOMATION_WORKERS = {
   COURSE_SUPPORT: {
     workerKey: "course-support-responder",
-    cadenceSeconds: 15 * 60,
+    cadenceSeconds: 10 * 60,
     graceSeconds: 3 * 60
   },
   LOCAL_READER: {

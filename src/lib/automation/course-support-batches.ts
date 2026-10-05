@@ -19,6 +19,7 @@ import { evaluateMonitoringGate, isCoherentManualDisposition } from "@/lib/autom
 import { syntheticWebsiteTrafficClasses } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
 import { isGenericCourseName } from "@/lib/places/course-identity";
+import { getSyntheticMultiCycleExpiresAt } from "./synthetic-test-window";
 import { readCustomerRecovery } from "./course-support-customer-recovery";
 import { appendCourseSupportLineage, createCourseSupportLineage } from "./course-support-lineage";
 
@@ -252,10 +253,12 @@ const COURSE_SUPPORT_CANDIDATE_CURRENT_CYCLE_EVENT_READ_LIMIT = 20;
 const COURSE_SUPPORT_CANDIDATE_PREFERENCE_READ_LIMIT = 1_024;
 const COURSE_SUPPORT_AUTHORITATIVE_PROBE_READ_LIMIT = 256;
 const ACTIVE_BATCH_STATUSES: CourseSupportBatchStatus[] = ["CLAIMED", "IMPLEMENTING", "VERIFYING"];
-// Keep long-lived Codex ownership aligned with the global provider I/O limit.
-// Additional owners cannot make provider progress and can starve unrelated
-// interactive/release work on the local Codex host.
-const MAX_CONCURRENT_COURSE_SUPPORT_BATCHES = 2;
+// Research ownership is independent of the bounded provider request lease.
+// Provider I/O and shared implementation checkout fences remain separate.
+export const MAX_CONCURRENT_COURSE_SUPPORT_BATCHES = 15;
+function ownedCourseIds(batch: { id: string; incidents?: readonly { courseId: string }[] }) {
+  return batch.incidents?.length ? batch.incidents.map((entry) => entry.courseId) : [batch.id];
+}
 const TRANSIENT_FAILURE_CLASSES = new Set<CourseSupportFailureClass>([
   "RATE_LIMIT",
   "HTTP_5XX",
@@ -4210,11 +4213,24 @@ export async function claimCourseSupportBatch(input: {
   maxCourses?: number;
   retryBatchId?: string;
   retryOrdinal?: number;
+  dispatchAssignmentRef?: string;
   now?: Date;
 }) {
   validateOwnerThread(input.ownerThreadId);
   validateTaskBranch(input.branch);
   validateGitSha(input.baseSha, "base SHA");
+  const dispatch = await import("./course-support-course-dispatch");
+  const assignment = input.dispatchAssignmentRef
+    ? await dispatch.loadBoundCourseSupportDispatchAssignment({
+        assignmentRef: input.dispatchAssignmentRef,
+        childThreadId: input.ownerThreadId,
+      })
+    : null;
+  if (assignment && (process.env.CODEX_THREAD_ID !== input.ownerThreadId ||
+      assignment.baseSha !== input.baseSha || input.maxCourses !== 1 ||
+      input.retryBatchId || input.retryOrdinal)) {
+    throw new Error("Course dispatch claim requires the bound native child, exact base SHA, and one course.");
+  }
   if (input.retryBatchId !== undefined && !input.retryBatchId.trim()) {
     throw new Error("The targeted responder retry reference is invalid.");
   }
@@ -4251,8 +4267,32 @@ export async function claimCourseSupportBatch(input: {
         providerFamilyKey: true,
         failureFingerprint: true,
         summary: true,
+        incidents: { select: { courseId: true } },
       },
     });
+    const liveReservations = await dispatch.listLiveCourseSupportDispatchReservations(prisma);
+    const reservedCourses = new Set(liveReservations
+      .filter((entry) => entry.audit.assignmentRef !== input.dispatchAssignmentRef)
+      .map((entry) => entry.audit.target.courseId));
+    const occupiedCourses = new Set([
+      ...activeBatches.flatMap(ownedCourseIds),
+      ...reservedCourses,
+    ]);
+    if ((assignment || activeBatches.length < MAX_CONCURRENT_COURSE_SUPPORT_BATCHES) &&
+        (activeBatches.length + liveReservations.length - (assignment ? 1 : 0) >=
+          MAX_CONCURRENT_COURSE_SUPPORT_BATCHES ||
+          occupiedCourses.size >= MAX_CONCURRENT_COURSE_SUPPORT_BATCHES)) {
+      const recorded = await recordRoutineResponderObservation({
+        outcome: "deferred_busy",
+        now: selectionDatabaseNow,
+        summary: { activeBatchCount: activeBatches.length, reservedDispatchCount: liveReservations.length },
+      });
+      return {
+        outcome: "deferred_busy" as const,
+        durableCloseoutRecorded: recorded,
+        ...getResponderThreadPolicy({ outcome: "deferred_busy", durableCloseoutRecorded: recorded }),
+      };
+    }
     if (activeBatches.length >= MAX_CONCURRENT_COURSE_SUPPORT_BATCHES) {
       const recorded = await recordRoutineResponderObservation({
         outcome: "deferred_busy",
@@ -4366,9 +4406,10 @@ export async function claimCourseSupportBatch(input: {
     });
     const providerEligibleCandidates = allCandidates.filter(
       (candidate) =>
-        !activeProviderGroups.has(
+        !reservedCourses.has(candidate.courseId) &&
+        (assignment ? candidate.id === assignment.target.incidentId : !activeProviderGroups.has(
           `${candidate.providerFamilyKey}\u0000${candidate.failureFingerprint}`,
-        ),
+        )),
     );
     const implementationBlockedCandidates = sharedCheckoutImplementationReserved
       ? providerEligibleCandidates.filter(
@@ -4378,7 +4419,7 @@ export async function claimCourseSupportBatch(input: {
       : [];
     const eligibleCandidates = providerEligibleCandidates.filter(
       (candidate) =>
-        !sharedCheckoutImplementationReserved ||
+        assignment || !sharedCheckoutImplementationReserved ||
         candidate.remediationRoute?.requiresImplementationPath !== true,
     );
     if (input.retryBatchId && !retryBatch) {
@@ -4472,7 +4513,14 @@ export async function claimCourseSupportBatch(input: {
           ),
           recentBatches: fairnessEvidence,
         });
-    const selected = retryBatch
+    const selected = assignment
+      ? selectCourseSupportBatch({
+          candidates: candidates.filter((candidate) => candidate.id === assignment.target.incidentId),
+          recentBatches: fairnessEvidence,
+          maxCourses: 1,
+          now: selectionDatabaseNow,
+        })
+      : retryBatch
       ? selectCourseSupportRetryBatch({
           candidates,
           retryBatch,
@@ -4526,7 +4574,32 @@ export async function claimCourseSupportBatch(input: {
       };
     }
 
-    if (selected.selectionLane === "BACKGROUND") {
+    if (assignment && (selected.incidents.length !== 1 ||
+      selected.incidents[0]?.id !== assignment.target.incidentId ||
+      selected.incidents[0]?.courseId !== assignment.target.courseId ||
+      selected.incidents[0]?.cycle !== assignment.target.cycle ||
+      selected.providerFamilyKey !== assignment.target.providerFamilyKey ||
+      selected.failureFingerprint !== assignment.target.failureFingerprint ||
+      selected.incidents[0]?.updatedAt.toISOString() !== assignment.target.updatedAt)) {
+      throw new Error("Course dispatch target changed before claim.");
+    }
+    if (new Set([
+      ...occupiedCourses,
+      ...selected.incidents.map((incident) => incident.courseId),
+    ]).size > MAX_CONCURRENT_COURSE_SUPPORT_BATCHES) {
+      const recorded = await recordRoutineResponderObservation({
+        outcome: "deferred_busy",
+        now: selectionDatabaseNow,
+        summary: { activeCourseCount: occupiedCourses.size },
+      });
+      return {
+        outcome: "deferred_busy" as const,
+        durableCloseoutRecorded: recorded,
+        ...getResponderThreadPolicy({ outcome: "deferred_busy", durableCloseoutRecorded: recorded }),
+      };
+    }
+
+    if (!assignment && selected.selectionLane === "BACKGROUND") {
       const priorOwnerBatches = await prisma.$queryRawUnsafe<Array<{ id: string }>>(
         `SELECT "id" FROM "CourseSupportBatch"
         WHERE ("ownerThreadId" = $1
@@ -4867,8 +4940,25 @@ export async function claimCourseSupportBatch(input: {
               providerFamilyKey: true,
               failureFingerprint: true,
               summary: true,
+              incidents: { select: { courseId: true } },
             },
           }),
+        ]);
+        const lockedReservations = await dispatch.listLiveCourseSupportDispatchReservations(tx);
+        const lockedAssignment = lockedReservations.find((entry) =>
+          entry.audit.assignmentRef === input.dispatchAssignmentRef);
+        if (assignment && (!lockedAssignment || lockedAssignment.audit.state !== "BOUND" ||
+          lockedAssignment.audit.childThreadId !== input.ownerThreadId ||
+          lockedAssignment.audit.baseSha !== input.baseSha ||
+          lockedAssignment.audit.target.incidentId !== assignment.target.incidentId)) {
+          throw new Error("Course dispatch assignment changed before locked claim.");
+        }
+        const lockedReservedCourses = new Set(lockedReservations
+          .filter((entry) => entry.audit.assignmentRef !== input.dispatchAssignmentRef)
+          .map((entry) => entry.audit.target.courseId));
+        const lockedOccupiedCourses = new Set([
+          ...currentActiveBatches.flatMap(ownedCourseIds),
+          ...lockedReservedCourses,
         ]);
         const currentIncidentById = new Map(
           currentIncidents.map((incident) => [incident.id, incident]),
@@ -5435,7 +5525,9 @@ export async function claimCourseSupportBatch(input: {
           ),
         );
         if (
-          currentActiveBatches.length >= MAX_CONCURRENT_COURSE_SUPPORT_BATCHES ||
+          currentActiveBatches.length + lockedReservations.length - (assignment ? 1 : 0) >=
+            MAX_CONCURRENT_COURSE_SUPPORT_BATCHES ||
+          lockedOccupiedCourses.size >= MAX_CONCURRENT_COURSE_SUPPORT_BATCHES ||
           currentConflictingPaths.length > 0
         ) {
           throw new Error(
@@ -5457,12 +5549,13 @@ export async function claimCourseSupportBatch(input: {
           )
           .filter(
             (candidate) =>
-              !currentActiveProviderGroups.has(
+              !lockedReservedCourses.has(candidate.courseId) &&
+              (assignment ? candidate.id === assignment.target.incidentId : !currentActiveProviderGroups.has(
                 `${candidate.providerFamilyKey}\u0000${candidate.failureFingerprint}`,
-              ) &&
+              )) &&
               candidate.remediationRoute?.workMode !==
                 "WAIT_FOR_MATERIAL_CHANGE" &&
-              (!currentSharedCheckoutImplementationReserved ||
+              (assignment || !currentSharedCheckoutImplementationReserved ||
                 candidate.remediationRoute?.requiresImplementationPath !== true),
           );
         const currentPrioritySelection = retryBatch
@@ -5507,7 +5600,15 @@ export async function claimCourseSupportBatch(input: {
               recentBatches: currentFairnessEvidence,
             });
         let currentSelection: SelectedCourseSupportBatch | null;
-        if (retryBatch) {
+        if (assignment) {
+          currentSelection = selectCourseSupportBatch({
+            candidates: lockedCandidatePool.filter((candidate) =>
+              candidate.id === assignment.target.incidentId),
+            recentBatches: currentFairnessEvidence,
+            maxCourses: 1,
+            now: claimDatabaseNow,
+          });
+        } else if (retryBatch) {
           currentSelection = selectCourseSupportRetryBatch({
             candidates: lockedCandidatePool,
             retryBatch,
@@ -5556,7 +5657,58 @@ export async function claimCourseSupportBatch(input: {
           );
         }
         const lockedSelection = currentSelection;
-        if (lockedSelection.selectionLane === "BACKGROUND") {
+        if (new Set([
+          ...lockedOccupiedCourses,
+          ...lockedSelection.incidents.map((incident) => incident.courseId),
+        ]).size > MAX_CONCURRENT_COURSE_SUPPORT_BATCHES) {
+          throw new Error("Course-support course capacity changed during locked claim; rerun selection.");
+        }
+        if (assignment) {
+          const target = assignment.target;
+          const current = currentIncidentById.get(target.incidentId);
+          if (!current || current.courseId !== target.courseId ||
+              current.cycle !== target.cycle ||
+              current.providerFamilyKey !== target.providerFamilyKey ||
+              current.failureFingerprint !== target.failureFingerprint ||
+              current.updatedAt.toISOString() !== target.updatedAt) {
+            throw new Error("Course dispatch target changed before locked claim.");
+          }
+          const preferences = await tx.coursePreference.findMany({
+            where: { courseId: target.courseId, teeSearchId: { in: target.searchRefs.map((ref) => ref.id) } },
+            select: { teeSearch: { select: {
+              id: true, status: true, date: true, endTime: true, userTimeZone: true,
+              scheduleVersion: true, alertGeneration: true, trafficClass: true,
+              syntheticMultiCycle: true, syntheticTestWindow: true, createdAt: true,
+            } } },
+          });
+          if (preferences.length !== target.searchRefs.length ||
+              preferences.some(({ teeSearch }) => {
+                const expected = target.searchRefs.find((ref) => ref.id === teeSearch.id);
+                return !expected || teeSearch.status !== "ACTIVE" ||
+                  teeSearch.scheduleVersion !== expected.scheduleVersion ||
+                  teeSearch.alertGeneration !== expected.alertGeneration ||
+                  (target.trafficClass === "REAL" &&
+                    ["TEST", "AUTOMATION"].includes(teeSearch.trafficClass)) ||
+                  (target.trafficClass === "SYNTHETIC" &&
+                    teeSearch.trafficClass !== "TEST") ||
+                  !isSearchWindowActive({
+                    date: teeSearch.date,
+                    endTime: teeSearch.endTime,
+                    courseTimeZones: [current.course.timeZone],
+                    fallbackTimeZone: teeSearch.userTimeZone,
+                    now: claimDatabaseNow,
+                  }) ||
+                  (["TEST", "AUTOMATION"].includes(teeSearch.trafficClass) &&
+                    !(teeSearch.trafficClass === "TEST" && teeSearch.syntheticMultiCycle)) ||
+                  (() => {
+                    const expiry = getSyntheticMultiCycleExpiresAt(teeSearch, claimDatabaseNow);
+                    return expiry !== null && expiry <= claimDatabaseNow;
+                  })();
+              })) {
+            throw new Error("Course dispatch source alert changed before locked claim.");
+          }
+        }
+        if (!assignment && lockedSelection.selectionLane === "BACKGROUND") {
           const priorOwnerBatches = await tx.$queryRawUnsafe<Array<{ id: string }>>(
             `SELECT "id" FROM "CourseSupportBatch"
             WHERE ("ownerThreadId" = $1
@@ -5774,6 +5926,11 @@ export async function claimCourseSupportBatch(input: {
               schemaVersion: 1,
               lifecycle: "claimed",
               branch: input.branch,
+              ...(assignment ? {
+                dispatchAssignmentRef: assignment.assignmentRef,
+                dispatchSourceSearchRefs: assignment.target.searchRefs,
+                dispatchCourseDigest: createHash("sha256").update(assignment.target.courseId).digest("hex"),
+              } : {}),
               baseSha: input.baseSha,
               plannedPaths,
               incidentCount: lockedSelection.incidents.length,
@@ -5830,6 +5987,11 @@ export async function claimCourseSupportBatch(input: {
               customerRecoveryVersion: 1,
               candidateHistoryBlockedCount,
               branch: input.branch,
+              ...(assignment ? {
+                dispatchAssignmentRef: assignment.assignmentRef,
+                dispatchSourceSearchRefs: assignment.target.searchRefs,
+                dispatchCourseDigest: createHash("sha256").update(assignment.target.courseId).digest("hex"),
+              } : {}),
               searchExecutionFence: persistCourseSupportSearchExecutionFence(
                 buildCourseSupportSearchExecutionFenceSnapshot({
                   courseIds: lockedSelection.incidents.map(
@@ -6050,6 +6212,14 @@ export async function claimCourseSupportBatch(input: {
               nextAutomaticAttemptAt: null,
               revision: { increment: 1 },
             },
+          });
+        }
+        if (assignment) {
+          await dispatch.consumeBoundCourseSupportDispatchAssignment(tx, {
+            assignmentRef: assignment.assignmentRef,
+            childThreadId: input.ownerThreadId,
+            baseSha: input.baseSha,
+            now: claimDatabaseNow,
           });
         }
         return {
@@ -15283,11 +15453,12 @@ export async function recoverCourseSupportBatch(input: {
       courseSupportBatchReservesCheckout(batch);
     const recoveringBackground =
       readCourseSupportSelectionLane(batch.summary) !== "ACTIVE_ALERT";
+    const recoveringAssignedCourse = readAssignedCourseDigest(batch.summary);
     const otherBatchIsLive = (otherBatch: (typeof otherBatches)[number]) =>
       !(otherBatch.leaseExpiresAt instanceof Date) ||
       otherBatch.leaseExpiresAt.getTime() > now.getTime();
     const backgroundSlotConflict =
-      recoveringBackground &&
+      recoveringBackground && !recoveringAssignedCourse &&
       otherBatches.some((otherBatch) =>
         readCourseSupportSelectionLane(otherBatch.summary) !== "ACTIVE_ALERT" &&
         (otherBatchIsLive(otherBatch) ||
@@ -17557,12 +17728,15 @@ async function listCourseSupportClaimCandidateIncidents(
   return retainBoundedCourseSupportCandidates(client, incidents, onHistoryBlocked);
 }
 
-async function listCourseSupportClaimCandidates(now: Date) {
+async function listCourseSupportClaimCandidates(
+  now: Date,
+  client: Prisma.TransactionClient = prisma,
+) {
   let historyBlockedCount = 0;
-  const incidents = await listCourseSupportClaimCandidateIncidents(now, prisma,
+  const incidents = await listCourseSupportClaimCandidateIncidents(now, client,
     count => { historyBlockedCount = count; });
   const readerShortRetryMarkers = await loadSelectableStartedReaderShortRetryMarkers(
-    prisma,
+    client,
     incidents,
   );
   return {
@@ -17573,6 +17747,28 @@ async function listCourseSupportClaimCandidates(now: Date) {
     ),
     historyBlockedCount,
   };
+}
+
+export async function listCourseSupportDispatchCandidates(
+  now: Date,
+  client: Prisma.TransactionClient = prisma,
+) {
+  const read = await listCourseSupportClaimCandidates(now, client);
+  return read.candidates
+    .filter((candidate) =>
+      candidate.remediationRoute?.workMode !== "WAIT_FOR_MATERIAL_CHANGE" &&
+      Boolean(candidate.actionPlan),
+    )
+    .map((candidate) => ({
+      incidentId: candidate.id,
+      courseId: candidate.courseId,
+      cycle: candidate.cycle,
+      providerFamilyKey: candidate.providerFamilyKey,
+      failureFingerprint: candidate.failureFingerprint,
+      updatedAt: candidate.updatedAt.toISOString(),
+      activeRealSearchCount: candidate.activeRealSearchCount,
+      engineeringOnly: candidate.engineeringOnly,
+    }));
 }
 
 function readExactDeferredFailureHandoffAttempt(input: {
@@ -19999,11 +20195,23 @@ function courseSupportBatchReservesCheckout(batch: {
   status: CourseSupportBatchStatus;
   summary: Prisma.JsonValue | null;
 }) {
+  if (readAssignedCourseDigest(batch.summary)) {
+    return courseSupportBatchOwnsCheckout(batch);
+  }
   return (
     courseSupportBatchOwnsCheckout(batch) ||
     readCourseSupportRemediationDirective(batch.summary)
       ?.requiresImplementationPath === true
   );
+}
+
+function readAssignedCourseDigest(summary: Prisma.JsonValue | null) {
+  const value = asJsonObject(summary);
+  return typeof value.dispatchAssignmentRef === "string" &&
+    /^course-assignment-[0-9a-f-]{36}$/i.test(value.dispatchAssignmentRef) &&
+    typeof value.dispatchCourseDigest === "string" &&
+    /^[0-9a-f]{64}$/i.test(value.dispatchCourseDigest)
+    ? value.dispatchCourseDigest : null;
 }
 
 export function findConflictingResponderPaths(
@@ -20028,6 +20236,15 @@ export function courseSupportRecoveryBatchesConflict(
     summary: Prisma.JsonValue | null;
   },
 ) {
+  const recoveringAssignedCourse = readAssignedCourseDigest(recovering.summary);
+  const activeAssignedCourse = readAssignedCourseDigest(active.summary);
+  if (recoveringAssignedCourse && activeAssignedCourse &&
+      recoveringAssignedCourse !== activeAssignedCourse) {
+    return findConflictingResponderPaths(
+      readBatchPlannedPaths(recovering.summary),
+      readBatchPlannedPaths(active.summary),
+    ).length > 0;
+  }
   if (
     recovering.providerFamilyKey === active.providerFamilyKey ||
     recovering.failureFingerprint === active.failureFingerprint
