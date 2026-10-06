@@ -44,6 +44,12 @@ describe("offering-scoped simulator responder contract", () => {
     expect(() => readSimulatorSupportArguments(["heartbeat", "--assignment-ref", "assigned", "--token", "token", "--revision", "2", "--apply"])).toThrow();
     expect(readSimulatorSupportArguments(["source-read", "--assignment-ref", "assigned", "--token", "token", "--revision", "2", "--source", "official"]).source).toBe("official");
     expect(() => readSimulatorSupportArguments(["source-read", "--assignment-ref", "assigned", "--token", "token", "--revision", "2", "--source", "http://localhost"])).toThrow();
+    const fence = ["--assignment-ref", "assigned", "--token", "token", "--revision", "2"];
+    expect(readSimulatorSupportArguments(["source-read", ...fence, "--link", "2", "--rendered"])).toMatchObject({ linkIndex: 2, rendered: true, source: undefined });
+    expect(() => readSimulatorSupportArguments(["source-read", ...fence, "--link", "0"])).toThrow();
+    expect(() => readSimulatorSupportArguments(["source-read", ...fence, "--link", "1", "--source", "official"])).toThrow();
+    expect(() => readSimulatorSupportArguments(["progress", ...fence, "--rendered"])).toThrow();
+    expect(readSimulatorSupportArguments(["progress", ...fence]).command).toBe("progress");
   });
   it("omits scripts, forms, credential links and local URLs from public research output", () => {
     expect(summarizeSimulatorSupportPublicHtml("<p>Hourly rentals</p><script>private state</script><form>password</form><a href='http://127.0.0.1'>Local</a><a href='/login?token=secret'>Login</a><a href='/rates'>Rates</a>", "https://venue.example.test"))

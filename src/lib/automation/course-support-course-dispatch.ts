@@ -8,6 +8,7 @@ import { getSyntheticMultiCycleExpiresAt } from "./synthetic-test-window";
 import { listSimulatorSupportDispatchCandidates } from "./simulator-support-incidents";
 import { isCurrentSimulatorSupportSource, isValidSimulatorSupportClaim, SIMULATOR_SUPPORT_SOURCE_SELECT, type SimulatorSupportClaim } from "./simulator-support-policy";
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
+import type { SimulatorResearchState } from "./simulator-support-research-policy";
 import {
   COURSE_DISPATCH_SOURCE_SELECT,
   createCourseDispatchIntentDigest,
@@ -40,6 +41,7 @@ export type CourseDispatchAudit = {
   boundAt?: string;
   consumedAt?: string;
   simulatorClaim?: SimulatorSupportClaim;
+  simulatorResearch?: SimulatorResearchState;
   target: {
     mode?: "SIMULATOR";
     offeringId?: string;

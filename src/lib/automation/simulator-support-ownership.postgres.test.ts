@@ -45,11 +45,11 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     vi.unstubAllEnvs();
   });
 
-  async function fixture(cadenceMinutes = 15, mixed = false) {
+  async function fixture(cadenceMinutes = 15, mixed = false, bookingUrl?: string) {
     const suffix = randomUUID(), now = new Date();
     const user = await client.user.create({ data: { email: `${suffix}@example.test`, clerkUserId: suffix } }); ids.users.push(user.id);
     const course = await client.course.create({ data: { googlePlaceId: suffix, name: "Support fixture", address: "1 Test Street", website: "https://official.example.test", latitude: 41, longitude: -73, timeZone: "UTC", isPublic: true } }); ids.courses.push(course.id);
-    const offering = await client.courseOffering.create({ data: { courseId: course.id, kind: "SIMULATOR", publicAccessStatus: "UNVERIFIED" } });
+    const offering = await client.courseOffering.create({ data: { courseId: course.id, kind: "SIMULATOR", publicAccessStatus: "UNVERIFIED", bookingUrl } });
     const peerCourse = mixed ? await client.course.create({ data: { googlePlaceId: `${suffix}-peer`, name: "Peer simulator fixture", address: "2 Test Street", website: "https://peer.example.test", latitude: 41, longitude: -73, timeZone: "UTC", isPublic: true } }) : null;
     if (peerCourse) ids.courses.push(peerCourse.id);
     const peer = peerCourse ? await client.courseOffering.create({ data: { courseId: peerCourse.id, kind: "SIMULATOR", publicAccessStatus: "PUBLIC", supportedDurationsMinutes: [60], verifiedAt: now,
@@ -251,6 +251,9 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
       const scheduled = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });
       expect(scheduled).toMatchObject({ checkStatus: "QUEUED", remediationDispatchVersion: scheduled.scheduleVersion, cadenceMinutes: 120 });
       expect(scheduled.remediationDispatchKey).toMatch(new RegExp(`:verification-${stage}$`));
+      const waiting = await lane.readSimulatorSupportProgress(owner);
+      expect(waiting.acquired).toBe(true);
+      if (waiting.acquired) expect(waiting.value).toMatchObject({ nextAction: "WAIT_FOR_CHECK", readyForCompletion: false, revision: owner.revision });
       let releaseDelivery!: () => void, deliveryEntered!: () => void;
       const deliveryGate = new Promise<void>(resolve => { releaseDelivery = resolve; });
       const startedDelivery = new Promise<void>(resolve => { deliveryEntered = resolve; });
@@ -261,6 +264,9 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
         const inFlight = await client.courseProbe.findFirstOrThrow({ where: { offeringId: offering.id, automationRunId: { not: null } }, include: { automationRun: true }, orderBy: { observedAt: "desc" } });
         expect(inFlight.automationRun).toMatchObject({ kind: "SEARCH_CHECK", status: "RUNNING" });
         expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toMatchObject({ checkStatus: "CHECKING" });
+        const progress = await lane.readSimulatorSupportProgress(owner);
+        if (!progress.acquired) throw new Error("Progress read was busy.");
+        expect(progress.value).toMatchObject({ nextAction: "WAIT_FOR_CHECK", firstCheckReady: false, revision: owner.revision });
         if (stage === 1) await expect(lane.queueSimulatorSupportRechecks(owner)).rejects.toThrow("finished scheduled check");
         await expect(lane.completeSimulatorSupport({ ...owner, currentDeployment: proof })).rejects.toThrow("two distinct");
       } finally { releaseDelivery(); }
@@ -275,6 +281,10 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
       expect(probe).toMatchObject({ runtimeVersion: baseSha, outcome: "NO_MATCH", rawSummary: expect.objectContaining({ mode: "SIMULATOR", sourceFingerprint: originalFingerprint }) });
       expect(await client.automationRun.findUniqueOrThrow({ where: { id: probe.automationRunId! } })).toMatchObject({ status: "COMPLETED", outcome: stage === 1 ? "failed" : "success" });
       expect(await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } })).toMatchObject({ status: "AUTO_INVESTIGATING" });
+      const progress = await lane.readSimulatorSupportProgress(owner);
+      if (!progress.acquired) throw new Error("Finished progress read was busy.");
+      expect(progress.value).toMatchObject({ nextAction: stage === 1 ? "RECHECK_SECOND" : "COMPLETE", freshSuccessfulChecks: stage, readyForCompletion: stage === 2 });
+      expect(progress.value).not.toHaveProperty("qualifyingProbeIds");
       if (stage === 1) await expect(lane.completeSimulatorSupport({ ...owner, currentDeployment: proof })).rejects.toThrow("two distinct");
     }
     const actualProbes = await client.courseProbe.findMany({ where: { offeringId: offering.id, automationRunId: { not: null } } });
@@ -294,21 +304,68 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     const f = await fixture();
     const fetchImpl = vi.fn(async () => new Response("<h1>Public hourly bays</h1><script>secret token</script><form><input value='credential'>Hidden account state</form><a href='/rates'>Rates</a>", { headers: { "content-type": "text/html" } }));
     const read = await lane.readSimulatorSupportSource({ ...f.owner, source: "official" }, fetchImpl);
-    expect(read.acquired).toBe(true); expect(fetchImpl).toHaveBeenCalledWith(f.course.website, expect.objectContaining({ method: "GET", credentials: "omit" }));
+    expect(read.acquired).toBe(true); expect(fetchImpl).toHaveBeenCalledWith(new URL(f.course.website!).href, expect.objectContaining({ method: "GET", credentials: "omit" }));
     if (!read.acquired) throw new Error("Source read failed.");
     expect(read.value.publicSource.text).toBe("Public hourly bays Rates");
     let owner = { ...f.owner, revision: read.value.revision };
     const redirected = vi.fn(async () => {
-      const response = new Response("<a href='book'>Book hourly rentals</a>");
+      const response = new Response("<a href='book'>Book hourly rentals</a>", { headers: { "content-type": "text/html" } });
       Object.defineProperty(response, "url", { value: "https://official.example.test/simulators/" });
       return response;
     });
-    const landing = await lane.readSimulatorSupportSource({ ...owner, source: "official" }, redirected);
+    const landing = await lane.readSimulatorSupportSource({ ...owner, linkIndex: 1 }, redirected);
     if (!landing.acquired) throw new Error("Redirected source read failed."); owner = { ...owner, revision: landing.value.revision };
-    expect(landing.value.publicSource).toMatchObject({ requestedUrl: f.course.website, url: "https://official.example.test/simulators/", links: ["https://official.example.test/simulators/book"] });
-    expect((await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit).toMatchObject({ simulatorResearch: { requestedUrl: f.course.website, sourceUrl: "https://official.example.test/simulators/" } });
+    expect(landing.value.publicSource).toMatchObject({ requestedUrl: "https://official.example.test/rates", url: "https://official.example.test/simulators/", links: ["https://official.example.test/simulators/book"] });
+    expect((await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit).toMatchObject({ simulatorResearch: { version: 1, readCount: 2, linkBaseUrl: "https://official.example.test/simulators/" } });
     const pausedDuringRead = vi.fn(async () => { await client.teeSearch.update({ where: { id: f.search.id }, data: { status: "PAUSED" } }); return new Response("public"); });
-    await expect(lane.readSimulatorSupportSource({ ...owner, source: "official" }, pausedDuringRead)).rejects.toThrow("source demand changed");
-    await lane.retireSimulatorSupport(owner);
+    await expect(lane.readSimulatorSupportSource({ ...owner, linkIndex: 1 }, pausedDuringRead)).rejects.toThrow("source demand changed");
+    const interrupted = await lane.readSimulatorSupportClaim(owner);
+    await lane.retireSimulatorSupport({ ...owner, revision: interrupted.revision });
+  });
+
+  it("reserves a source read before network work and blocks an overlapping same-revision read", async () => {
+    const f = await fixture();
+    let release!: () => void, started!: () => void;
+    const startedRead = new Promise<void>(resolve => { started = resolve; });
+    const finishRead = new Promise<void>(resolve => { release = resolve; });
+    const fetchImpl = vi.fn(async () => { started(); await finishRead; return new Response("<p>Public bays</p>", { headers: { "content-type": "text/html" } }); });
+    const first = lane.readSimulatorSupportSource({ ...f.owner, source: "official" }, fetchImpl);
+    await startedRead;
+    await expect(lane.readSimulatorSupportSource({ ...f.owner, source: "official" }, fetchImpl)).rejects.toThrow("revision or lease");
+    release();
+    const result = await first;
+    expect(result.acquired).toBe(true); expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect((await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit).toMatchObject({ simulatorResearch: { readCount: 1, inFlight: null } });
+  });
+
+  it("requires a distinct booking investigation after a failed homepage and keeps the incident open", async () => {
+    const f = await fixture(15, false, "https://official.example.test/booking");
+    const read = await lane.readSimulatorSupportSource({ ...f.owner, source: "official" }, vi.fn(async () => new Response("forbidden", { status: 403 })));
+    if (!read.acquired) throw new Error("Source read failed.");
+    let owner = { ...f.owner, revision: read.value.revision };
+    await expect(lane.retrySimulatorSupport({ ...owner, retryMinutes: 15 })).rejects.toThrow("distinct official booking");
+    const booking = await lane.readSimulatorSupportSource({ ...owner, source: "booking" }, vi.fn(async () => new Response("<p>Calendar needs support</p>", { headers: { "content-type": "text/html" } })));
+    if (!booking.acquired) throw new Error("Booking research failed.");
+    owner = { ...owner, revision: booking.value.revision };
+    expect((await lane.retrySimulatorSupport({ ...owner, retryMinutes: 15 })).acquired).toBe(true);
+    expect(await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } })).toMatchObject({ status: "AUTO_INVESTIGATING" });
+  });
+
+  it("rejects a tests-only release instead of calling it reusable calendar implementation", async () => {
+    const f = await fixture();
+    const planned = await lane.claimSimulatorSupportPath({ ...f.owner, path: "src/lib/simulators/providers/new-reader.test.ts" });
+    if (!planned.acquired) throw new Error("Test-only path fixture was busy.");
+    await expect(lane.registerSimulatorSupportRelease({ ...f.owner, revision: planned.value.revision, releaseSha: "b".repeat(40),
+      branch: `automation/course-support-${f.owner.ownerThreadId.replace("child-", "")}`, committedPaths: ["src/lib/simulators/providers/new-reader.test.ts"], descendantVerified: true })).rejects.toThrow("provenance");
+  });
+
+  it.each([new TypeError("fetch failed"), Object.assign(new Error("socket reset"), { code: "ECONNRESET" })])("records bounded network failure with an advanced revision and rejects malformed research: %s", async error => {
+    const f = await fixture();
+    const read = await lane.readSimulatorSupportSource({ ...f.owner, source: "official" }, vi.fn(async () => { throw error; }));
+    if (!read.acquired) throw new Error("Source reservation failed.");
+    expect(read.value).toMatchObject({ researchOutcome: "NETWORK_FAILED", readsRemaining: 5, publicSource: { httpStatus: 0 } });
+    const stored = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    await client.automationRun.update({ where: { id: stored.id }, data: { audit: { ...(stored.audit as Prisma.JsonObject), simulatorResearch: { version: 1, readCount: 0 } } } });
+    await expect(lane.readSimulatorSupportSource({ ...f.owner, revision: read.value.revision, source: "booking" }, vi.fn())).rejects.toThrow();
   });
 });

@@ -6,34 +6,42 @@ import { readFile } from "node:fs/promises";
 import { prisma } from "@/lib/prisma";
 import { resolveCodexOwnerThreadId } from "./git-output";
 import { readDispatchGitState } from "./course-support-dispatch";
-import { adoptSimulatorSupportSource, claimSimulatorSupportAssignment, claimSimulatorSupportPath, completeSimulatorSupport, heartbeatSimulatorSupport, queueSimulatorSupportRechecks, readSimulatorSupportClaim, recordSimulatorSupportDeployment, registerSimulatorSupportRelease, retrySimulatorSupport, recoverSimulatorSupport, retireSimulatorSupport, configureSimulatorSupportOffering, classifySimulatorSupportOffering, readSimulatorSupportSource } from "@/lib/automation/simulator-support-ownership";
+import { adoptSimulatorSupportSource, claimSimulatorSupportAssignment, claimSimulatorSupportPath, completeSimulatorSupport, heartbeatSimulatorSupport, queueSimulatorSupportRechecks, readSimulatorSupportClaim, readSimulatorSupportProgress, recordSimulatorSupportDeployment, registerSimulatorSupportRelease, retrySimulatorSupport, recoverSimulatorSupport, retireSimulatorSupport, configureSimulatorSupportOffering, classifySimulatorSupportOffering, readSimulatorSupportSource } from "@/lib/automation/simulator-support-ownership";
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
 import { waitForGitDeployment } from "@/lib/deployments/wait-for-git-deployment";
 import type { VercelDeploymentInspection, VercelDeploymentList } from "@/lib/deployments/vercel-git";
 
 export function readSimulatorSupportArguments(args: readonly string[]) {
   const [command, ...options] = args;
-  if (!["claim", "source-read", "heartbeat", "recover", "retire", "configure", "classify", "path", "adopt-source", "release", "deployed", "recheck", "complete", "retry", "inspect"].includes(command)) throw new Error("Use a supported simulator-support command.");
+  if (!["claim", "source-read", "progress", "heartbeat", "recover", "retire", "configure", "classify", "path", "adopt-source", "release", "deployed", "recheck", "complete", "retry", "inspect"].includes(command)) throw new Error("Use a supported simulator-support command.");
   const values = new Map<string, string>();
   let apply = false;
+  let rendered = false;
   for (let index = 0; index < options.length; index += 2) {
+    if (options[index] === "--rendered") {
+      if (rendered || command !== "source-read") throw new Error("Only simulator source research permits --rendered.");
+      rendered = true; index -= 1; continue;
+    }
     if (options[index] === "--apply") {
       if (apply || !["configure", "classify"].includes(command)) throw new Error("Only reviewed simulator configuration and classification permit --apply.");
       apply = true; index -= 1; continue;
     }
     const name = options[index], value = options[index + 1]?.trim();
-    if (!["--assignment-ref", "--token", "--revision", "--path", "--sha", "--retry-minutes", "--manifest", "--source"].includes(name) || values.has(name) || !value || value.startsWith("--")) throw new Error("Invalid simulator-support option.");
+    if (!["--assignment-ref", "--token", "--revision", "--path", "--sha", "--retry-minutes", "--manifest", "--source", "--link"].includes(name) || values.has(name) || !value || value.startsWith("--")) throw new Error("Invalid simulator-support option.");
     values.set(name, value);
   }
   const allowed = new Set(["--assignment-ref", ...(!["claim", "inspect"].includes(command) ? ["--token", "--revision"] : []),
-    ...(command === "path" ? ["--path"] : []), ...(command === "release" ? ["--sha"] : []), ...(command === "retry" ? ["--retry-minutes"] : []), ...(["configure", "classify"].includes(command) ? ["--manifest"] : []), ...(command === "source-read" ? ["--source"] : [])]);
+    ...(command === "path" ? ["--path"] : []), ...(command === "release" ? ["--sha"] : []), ...(command === "retry" ? ["--retry-minutes"] : []), ...(["configure", "classify"].includes(command) ? ["--manifest"] : []), ...(command === "source-read" ? ["--source", "--link"] : [])]);
   if ([...values.keys()].some(value => !allowed.has(value)) || !values.get("--assignment-ref") ||
       (!["claim", "inspect"].includes(command) && (!values.get("--token") || !/^[1-9][0-9]*$/.test(values.get("--revision") ?? ""))) ||
       (command === "path" && !values.get("--path")) || (command === "release" && !/^[a-f0-9]{40}$/i.test(values.get("--sha") ?? "")) ||
       (command === "retry" && !/^[1-9][0-9]*$/.test(values.get("--retry-minutes") ?? "")) ||
       (["configure", "classify"].includes(command) && !values.get("--manifest")) ||
-      (command === "source-read" && !["official", "booking"].includes(values.get("--source") ?? ""))) throw new Error("Simulator-support command arguments are incomplete.");
-  return { command, assignmentRef: values.get("--assignment-ref")!, token: values.get("--token")!, revision: Number(values.get("--revision")), path: values.get("--path"), releaseSha: values.get("--sha"), retryMinutes: Number(values.get("--retry-minutes")), manifestPath: values.get("--manifest"), source: values.get("--source") as "official" | "booking", apply };
+      (command === "source-read" && (values.has("--source") === values.has("--link") ||
+        (values.has("--source") && !["official", "booking"].includes(values.get("--source")!)) ||
+        (values.has("--link") && !/^(?:[1-9]|[12][0-9]|30)$/.test(values.get("--link")!))))) throw new Error("Simulator-support command arguments are incomplete.");
+  return { command, assignmentRef: values.get("--assignment-ref")!, token: values.get("--token")!, revision: Number(values.get("--revision")), path: values.get("--path"), releaseSha: values.get("--sha"), retryMinutes: Number(values.get("--retry-minutes")), manifestPath: values.get("--manifest"), source: values.get("--source") as "official" | "booking" | undefined,
+    linkIndex: values.has("--link") ? Number(values.get("--link")) : undefined, rendered, apply };
 }
 
 function git(args: string[]) { return execFileSync("git", args, { encoding: "utf8", windowsHide: true }).trim(); }
@@ -53,10 +61,11 @@ async function main() {
     const { baseSha } = readDispatchGitState();
     result = await claimSimulatorSupportAssignment({ assignmentRef: input.assignmentRef, ownerThreadId, baseSha, branch: git(["branch", "--show-current"]) });
   } else if (input.command === "inspect") result = await readSimulatorSupportClaim(owner);
+  else if (input.command === "progress") result = await readSimulatorSupportProgress(owner);
   else if (input.command === "heartbeat") result = await heartbeatSimulatorSupport(owner);
   else if (input.command === "recover") result = await recoverSimulatorSupport(owner);
   else if (input.command === "retire") result = await retireSimulatorSupport(owner);
-  else if (input.command === "source-read") result = await readSimulatorSupportSource({ ...owner, source: input.source });
+  else if (input.command === "source-read") result = await readSimulatorSupportSource({ ...owner, source: input.source, linkIndex: input.linkIndex, rendered: input.rendered });
   else if (input.command === "configure") {
     const claim = await readSimulatorSupportClaim(owner);
     const offering = await prisma.courseOffering.findUniqueOrThrow({ where: { id: claim.offeringId } });
