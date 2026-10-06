@@ -12,6 +12,13 @@ import {
 const SIMULATOR_FIELDS = "places.id,places.displayName,places.formattedAddress,places.addressComponents,places.location,places.websiteUri,places.photos,places.types,places.primaryType,places.businessStatus";
 const NON_RENTAL_NAME = /\b(?:disc\s+golf|mini(?:ature)?\s+golf|equipment\s+(?:sales|repair)|simulator\s+(?:sales|installation)|club\s*fitting|golf\s+(?:lessons?|school|academy))\b/i;
 const MEMBERS_ONLY = /\b(?:members?\s+only|membership\s+required|private\s+(?:golf\s+)?(?:club|facility))\b/i;
+const RESIDENTIAL_NAME = /\b(?:apartments?|residences?|condominiums?|residential|housing\s+(?:complex|community))\b/i;
+const NON_RENTAL_PRIMARY_TYPES = new Set([
+  "apartment_building", "apartment_complex", "condominium_complex", "housing_complex", "real_estate_agency",
+  "golf_instructor", "sports_coaching", "sports_school", "store"
+]);
+const LESSON_OR_FITTING_PATH = /\/(?:golf-lessons?|golf-school|club-fitting)(?:\/|$)/i;
+export const SIMULATOR_DISCOVERY_CLASSIFICATION_VERSION = "public-rentals-v2";
 
 export function filterSimulatorPlaces(places: GooglePlace[], reviews: GooglePlaceReviewIndex, offerings: SimulatorOfferingIndex) {
   return places.filter((place) => {
@@ -29,10 +36,21 @@ export function filterSimulatorPlaces(places: GooglePlace[], reviews: GooglePlac
     if (!verified && [review, canonicalReview].some((fact) => fact?.accessOverride === "VERIFIED_PRIVATE" ||
       (fact?.accessOverride === "VERIFIED_NON_COURSE" && fact.classification !== "INDOOR_SIMULATOR"))) return false;
     const name = place.displayName.text;
-    if (!verified && (NON_RENTAL_NAME.test(name) || MEMBERS_ONLY.test(name) ||
-      place.primaryType === "sporting_goods_store")) return false;
-    return verified || place.types?.includes("indoor_golf_course") || Boolean(place.websiteUri);
+    if (verified) return true;
+    const primaryType = place.primaryType ?? "";
+    if (NON_RENTAL_NAME.test(name) || MEMBERS_ONLY.test(name) || RESIDENTIAL_NAME.test(name) ||
+      NON_RENTAL_PRIMARY_TYPES.has(primaryType) || primaryType.endsWith("_store") || primaryType.endsWith("_shop") ||
+      hasLessonOrFittingWebsite(place.websiteUri)) return false;
+    // Text relevance and a website alone can surface apartments and other unrelated
+    // businesses. Preserve likely golf hybrids without treating them as verified rentals.
+    return place.types?.includes("indoor_golf_course") || [review, canonicalReview].some((fact) =>
+      fact?.classification === "INDOOR_SIMULATOR") || (Boolean(place.websiteUri) && /\bgolf\b/i.test(name));
   });
+}
+
+function hasLessonOrFittingWebsite(website: string | undefined) {
+  if (!website) return false;
+  try { return LESSON_OR_FITTING_PATH.test(new URL(website).pathname); } catch { return false; }
 }
 
 async function requestPlaces(endpoint: "searchNearby" | "searchText", body: object, signal?: AbortSignal) {

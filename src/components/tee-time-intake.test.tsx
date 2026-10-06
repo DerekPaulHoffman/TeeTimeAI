@@ -685,6 +685,51 @@ describe("TeeTimeIntake", () => {
     expect(fetchMock.mock.calls.some(([input]) => /known-times|check-times|local-reader/.test(String(input)))).toBe(false);
   });
 
+  it.each([
+    { signedIn: true, offeringId: undefined, publicAccessStatus: "UNVERIFIED", supportedDurationsMinutes: [60], prefix: "Simulator" },
+    { signedIn: true, offeringId: undefined, publicAccessStatus: "UNVERIFIED", supportedDurationsMinutes: [60], prefix: "Simulator", website: undefined },
+    { signedIn: false, offeringId: undefined, publicAccessStatus: "UNVERIFIED", supportedDurationsMinutes: [60], prefix: "Simulator" },
+    { signedIn: true, offeringId: "unreviewed-offering", publicAccessStatus: "UNVERIFIED", supportedDurationsMinutes: [60], prefix: "Simulator" },
+    { signedIn: false, offeringId: "unreviewed-offering", publicAccessStatus: "UNVERIFIED", supportedDurationsMinutes: [60], prefix: "Simulator" },
+    { signedIn: true, offeringId: "two-hour-offering", publicAccessStatus: "PUBLIC", supportedDurationsMinutes: [120], prefix: "One-hour simulator" },
+    { signedIn: false, offeringId: "two-hour-offering", publicAccessStatus: "PUBLIC", supportedDurationsMinutes: [120], prefix: "One-hour simulator" }
+  ])("explains unavailable simulator alerts without offering an inert notification action: %j", async ({ signedIn, prefix, ...rental }) => {
+    const simulator = {
+      ...dateBoundaryCourse("Unsupported Simulator", "America/New_York"),
+      ...rental,
+      mode: "SIMULATOR"
+    };
+    window.sessionStorage.setItem(SIMULATOR_SEARCH_DRAFT_STORAGE_KEY, JSON.stringify({
+      location: "Fairfield, CT", date: "2099-10-03", courses: [simulator], selectedCourses: []
+    }));
+    const fetchMock = mockDateBoundaryRequests();
+    render(<TeeTimeIntake
+      accountEnabled
+      accountSignedIn={signedIn}
+      accountEmail={signedIn ? signedInAccountProps.accountEmail : undefined}
+      clerkPublishableKey="pk_test_login"
+      simulatorEnabled
+      initialValues={{ mode: "SIMULATOR" }}
+    />);
+    const unavailable = await screen.findByRole("button", { name: "Alerts unavailable for Unsupported Simulator", exact: true });
+    expect((unavailable as HTMLButtonElement).disabled).toBe(true);
+    expect(unavailable.textContent).toBe("Alerts unavailable");
+    const guidance = simulator.website ? " Check the official site for booking options." : "";
+    expect(screen.getByText(`${prefix} alerts aren’t available here yet.${guidance}`)).toBeTruthy();
+    expect(screen.queryByText(/rental details are being verified|sessions are not available/i)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Notify me for Unsupported Simulator/ })).toBeNull();
+    if (simulator.website) {
+      expect(screen.getByRole("link", { name: "Open official site for Unsupported Simulator" }).getAttribute("href")).toBe(simulator.website);
+    } else {
+      expect(screen.queryByRole("link", { name: "Open official site for Unsupported Simulator" })).toBeNull();
+      expect(screen.queryByText(/Check the official site for booking options/)).toBeNull();
+    }
+    fireEvent.click(unavailable);
+    expect(screen.queryByRole("dialog", { name: "Notify me" })).toBeNull();
+    expect(signInMock).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.some(([input]) => input === "/api/searches")).toBe(false);
+  });
+
   it("discards a late outdoor discovery response after switching to simulators", async () => {
     let finishOutdoor: (response: Response) => void = () => {};
     const delayedOutdoor = new Promise<Response>(resolve => { finishOutdoor = resolve; });

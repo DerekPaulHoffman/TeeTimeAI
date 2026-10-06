@@ -44,6 +44,7 @@ describe("simulator discovery response isolation", () => {
     expect(body.courses[0]).not.toHaveProperty("layoutHoleCounts");
     expect(body.courses[0]).not.toHaveProperty("priceEstimate");
     expect(mocks.readCache).toHaveBeenCalledWith(expect.stringContaining("lookup-simulator-v1:outdoor-review-1:rentals:"));
+    expect(mocks.readCache).toHaveBeenCalledWith(expect.stringContaining(":classification:public-rentals-v2"));
   });
 
   it("checks rental reviews before serving cached discovery and fails closed when they cannot be read", async () => {
@@ -58,6 +59,7 @@ describe("simulator discovery response isolation", () => {
     const response = await simulatorDiscoveryResponse({ latitude: 41.24, longitude: -73.2, radiusMeters: 24140 });
     expect(await response.json()).toMatchObject({ mode: "SIMULATOR", demo: false, courses: [{ googlePlaceId: "place-1", offeringId: "rental-1" }] });
     expect(mocks.writeCache).toHaveBeenCalledWith(expect.stringContaining("discover-simulator-v1:"), expect.any(Array), "course-discovery");
+    expect(mocks.readCache).toHaveBeenCalledWith(expect.stringContaining(":classification:public-rentals-v2"));
   });
 
   it("does not turn an unverified rental into fallback availability", async () => {

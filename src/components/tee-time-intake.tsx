@@ -1712,10 +1712,11 @@ function CourseResultsDivider({ children }: { children: ReactNode }) {
 }
 
 function simulatorRentalProblem(course: CourseCandidate) {
+  const officialSiteGuidance = course.website ? " Check the official site for booking options." : "";
   if (course.mode !== "SIMULATOR" || !course.offeringId || course.publicAccessStatus !== "PUBLIC") {
-    return "Simulator rental details are being verified.";
+    return `Simulator alerts aren’t available here yet.${officialSiteGuidance}`;
   }
-  if (!course.supportedDurationsMinutes?.includes(60)) return "One-hour simulator sessions are not available here.";
+  if (!course.supportedDurationsMinutes?.includes(60)) return `One-hour simulator alerts aren’t available here yet.${officialSiteGuidance}`;
   return null;
 }
 
@@ -1753,14 +1754,14 @@ function CourseResultCard({
     course.bookableHoleCounts
   );
   const noCurrentTimes = (liveCheck?.status === "CHECKED" && filterVisibleTeeTimes(liveCheck.times, course.timeZone, timeFilters.startTime, timeFilters.endTime, timeFilters.players).length === 0) || liveCheck?.status === "NOT_OPEN";
-  const notifyLabel = noCurrentTimes ? "Notify me when new times become available" : "Notify me";
+  const notifyLabel = rentalProblem ? "Alerts unavailable" : noCurrentTimes ? "Notify me when new times become available" : "Notify me";
   const isPublicAccessUnverified = course.publicAccessStatus === "UNVERIFIED";
   const requiresPublicAccessReview =
     course.publicAccessStatus === "REVIEW_REQUIRED";
   const notifyButtonContent = (
     <>
       <Bell aria-hidden="true" size={12} />
-      {isIncompatible ? "Doesn’t match" : (
+      {rentalProblem ? "Alerts unavailable" : isIncompatible ? "Doesn’t match" : (
         <>
           Notify me
           {noCurrentTimes ? (
@@ -1891,7 +1892,7 @@ function CourseResultCard({
           signInKey ? (
             <DeferredSignInButton
               ariaLabel={`${notifyLabel} for ${course.name}`}
-              className="figma-add-button"
+              className={rentalProblem ? "figma-add-button is-unavailable" : "figma-add-button"}
               disabled={isIncompatible || Boolean(rentalProblem)}
               onClick={() => onToggle(course)}
               publishableKey={signInKey}
@@ -1902,7 +1903,7 @@ function CourseResultCard({
           ) : (
             <button
               aria-label={`${notifyLabel} for ${course.name}`}
-              className="figma-add-button"
+              className={rentalProblem ? "figma-add-button is-unavailable" : "figma-add-button"}
               disabled={isIncompatible || Boolean(rentalProblem)}
               onClick={() => onToggle(course)}
               type="button"

@@ -6188,13 +6188,22 @@ button {
     transform 140ms ease;
 }
 
-.search-page .figma-course-list .figma-add-button:not(.is-added):hover,
-.search-page .figma-course-list .figma-add-button:not(.is-added):focus-visible {
+.search-page .figma-course-list .figma-add-button:not(.is-added):not(:disabled):hover,
+.search-page .figma-course-list .figma-add-button:not(.is-added):not(:disabled):focus-visible {
   background: #21313c;
   border-color: #21313c;
   box-shadow: 0 4px 10px rgba(18, 30, 39, 0.18);
   color: #ffffff;
   transform: translateY(-1px);
+}
+
+.search-page .figma-course-list .figma-add-button:disabled {
+  background: #e8ece9;
+  border-color: #dce4dc;
+  box-shadow: none;
+  color: #53685c;
+  cursor: not-allowed;
+  transform: none;
 }
 
 .search-page .figma-course-list .figma-add-button.is-added {
@@ -8827,6 +8836,18 @@ button {
 
   .search-page .figma-course-list .figma-add-button.is-added::after {
     content: "Added";
+  }
+
+  .search-page .figma-course-list .figma-add-button.is-unavailable {
+    padding: 0 4px;
+  }
+
+  .search-page .figma-course-list .figma-add-button.is-unavailable svg {
+    display: none;
+  }
+
+  .search-page .figma-course-list .figma-add-button.is-unavailable::after {
+    content: "No alerts";
   }
 
   .search-page .figma-course-list .course-rank-overlay {

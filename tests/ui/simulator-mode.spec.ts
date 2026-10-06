@@ -40,7 +40,7 @@ const eighteenHoleVenue = {
   layoutHoleCounts: [18],
 };
 
-async function mockPublicReads(page: Page) {
+async function mockPublicReads(page: Page, simulatorCourses: Record<string, unknown>[] = [simulatorVenue]) {
   const state = {
     discoveryModes: [] as string[],
     outdoorReads: [] as string[],
@@ -80,7 +80,7 @@ async function mockPublicReads(page: Page) {
       state.discoveryModes.push(mode);
       // Mixed provider results exercise the intake's mode boundary, including a hybrid venue.
       await route.fulfill({ json: { mode, courses: mode === "SIMULATOR"
-        ? [simulatorVenue, eighteenHoleVenue]
+        ? [...simulatorCourses, eighteenHoleVenue]
         : [outdoorVenue, eighteenHoleVenue, simulatorVenue] } });
       return;
     }
@@ -235,6 +235,49 @@ test.describe("simulator mode", () => {
     await captureSimulatorScreenshot(page, testInfo, "simulator-restored-form");
     expect(requests.discoveryModes).toEqual([]);
     expect(requests.outdoorReads).toEqual([]);
+    expect(requests.unexpectedRequests).toEqual([]);
+  });
+
+  test("shows unavailable alerts honestly while keeping official sites and reviewed rentals usable", async ({ page }, testInfo) => {
+    const unreviewed = { ...simulatorVenue, name: "Unreviewed Simulator", googlePlaceId: "unreviewed-simulator-place",
+      courseId: undefined, offeringId: undefined, publicAccessStatus: "UNVERIFIED", simulatorVerifiedAt: undefined, simulatorEvidenceUrl: undefined };
+    const unsupportedHour = { ...simulatorVenue, name: "Two-hour Simulator", googlePlaceId: "two-hour-simulator-place",
+      offeringId: "two-hour-simulator-offering", supportedDurationsMinutes: [120] };
+    const requests = await mockPublicReads(page, [simulatorVenue, unreviewed, unsupportedHour]);
+    await page.goto("/search?mode=SIMULATOR");
+    await page.getByLabel("Location", { exact: true }).fill("Fairfield, CT");
+    await page.getByLabel("Date", { exact: true }).fill(futureDate);
+    await page.getByRole("button", { name: "Search", exact: true }).click();
+
+    for (const [venue, prefix] of [[unreviewed, "Simulator"], [unsupportedHour, "One-hour simulator"]] as const) {
+      const card = page.locator(".course-row").filter({ has: page.getByRole("heading", { name: venue.name, exact: true }) });
+      const unavailable = card.getByRole("button", { name: `Alerts unavailable for ${venue.name}`, exact: true });
+      await expect(unavailable).toBeDisabled();
+      await expect(unavailable).toBeVisible();
+      await expect(unavailable).toHaveText("Alerts unavailable");
+      await expect(unavailable).toHaveCSS("cursor", "not-allowed");
+      await expect(card).toContainText(`${prefix} alerts aren’t available here yet. Check the official site for booking options.`);
+      await expect(card.getByRole("link", { name: `Open official site for ${venue.name}` })).toHaveAttribute("href", venue.website);
+      await expect(card.getByRole("button", { name: /Notify me/ })).toHaveCount(0);
+      const visibleLabel = await unavailable.evaluate(element => ({
+        fontSize: getComputedStyle(element).fontSize,
+        compactLabel: getComputedStyle(element, "::after").content,
+        compactFontSize: getComputedStyle(element, "::after").fontSize
+      }));
+      if (visibleLabel.fontSize === "0px") {
+        expect(visibleLabel.compactLabel).toBe('"No alerts"');
+        expect(visibleLabel.compactFontSize).not.toBe("0px");
+      }
+    }
+    await expect(page.getByRole("dialog", { name: "Notify me", exact: true })).toHaveCount(0);
+    const notify = page.getByRole("button", { name: `Notify me for ${simulatorVenue.name}`, exact: true });
+    await expect(notify).toBeEnabled();
+    await notify.click();
+    await expect(page.getByRole("dialog", { name: "Notify me", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Close notification setup", exact: true }).click();
+    await expectNoHorizontalOverflow(page);
+    await captureSimulatorScreenshot(page, testInfo, "simulator-alerts-unavailable");
+    await expectNoOutdoorReadsInSimulator(page);
     expect(requests.unexpectedRequests).toEqual([]);
   });
 });

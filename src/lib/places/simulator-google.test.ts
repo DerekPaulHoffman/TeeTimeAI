@@ -26,6 +26,42 @@ describe("simulator Places discovery", () => {
     expect(filterSimulatorPlaces([place, { ...place, id: "bad" }], index, emptyOfferings)).toEqual([place]);
   });
 
+  it("does not mistake a residential website or unrelated text match for a simulator rental", () => {
+    const residence = { ...place, id: "residence", displayName: { text: "Taunton Residences at Deep Brook" },
+      websiteUri: "https://www.tauntonapts.com/", primaryType: "apartment_complex", types: ["apartment_complex"] };
+    const records = [residence, { ...residence, id: "missing-residential-type", primaryType: undefined, types: [] },
+      { ...place, id: "unrelated", displayName: { text: "Example Sportsplex" }, primaryType: "sports_complex", types: ["sports_complex"] },
+      { ...place, id: "golf-apartments", displayName: { text: "Golf View Apartments" }, primaryType: "apartment_building", types: ["apartment_building"] }];
+    expect(filterSimulatorPlaces(records, reviews, emptyOfferings)).toEqual([]);
+  });
+
+  it("retains genuine golf hybrids and indoor venues without claiming verified rental access", () => {
+    const records = [
+      { ...place, id: "oasis", displayName: { text: "Golf Oasis CT" }, primaryType: "bar", types: ["bar"] },
+      { ...place, id: "whitney", displayName: { text: "Chris Bargas Golf Club at Whitney Farms" }, primaryType: "golf_course", types: ["golf_course"] },
+      { ...place, id: "lounge", displayName: { text: "Golf Lounge 18" }, primaryType: "bar", types: ["bar"] },
+      { ...place, id: "hybrid", displayName: { text: "Example Sportsplex" }, primaryType: "sports_complex", types: ["sports_complex", "indoor_golf_course"] }
+    ];
+    expect(filterSimulatorPlaces(records, reviews, emptyOfferings)).toEqual(records);
+  });
+
+  it("excludes instruction, fitting, and retail surfaces without reviewed public rental evidence", () => {
+    const records = [
+      { ...place, id: "instructor", displayName: { text: "Example Golf Center" }, primaryType: "golf_instructor" },
+      { ...place, id: "coaching", displayName: { text: "Example Golf Center" }, primaryType: "sports_coaching" },
+      { ...place, id: "retail", displayName: { text: "Example Golf" }, primaryType: "sporting_goods_store" },
+      { ...place, id: "store", displayName: { text: "Example Golf" }, primaryType: "store" },
+      { ...place, id: "lesson-url", displayName: { text: "GOLFTEC Trumbull" }, websiteUri: "https://www.golftec.com/golf-lessons/trumbull?utm_source=gmb" },
+      { ...place, id: "fitting-url", displayName: { text: "Example Golf Center" }, websiteUri: "https://venue.example/club-fitting" }
+    ];
+    expect(filterSimulatorPlaces(records, reviews, emptyOfferings)).toEqual([]);
+  });
+
+  it("preserves an exact indoor review for a hybrid whose name does not mention golf", () => {
+    const hybrid = { ...place, displayName: { text: "Example Sportsplex" }, primaryType: "sports_complex", types: ["sports_complex"] };
+    expect(filterSimulatorPlaces([hybrid], buildGooglePlaceReviewIndex([review("place-1", "INDOOR_SIMULATOR")]), emptyOfferings)).toEqual([hybrid]);
+  });
+
   it("queries indoor secondary types and bounded text, then enforces the actual radius", async () => {
     process.env.GOOGLE_PLACES_API_KEY = "test-key";
     const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ places: [place,
@@ -60,6 +96,14 @@ describe("simulator Places discovery", () => {
     expect(await searchSimulatorVenuesByName({ query: "Example Indoor Golf" }, reviews, emptyOfferings)).toHaveLength(2);
   });
 
+  it("keeps direct name lookup stricter than the bounded nearby golf-name fallback", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const golfNamedPlace = { ...place, displayName: { text: "Example Golf Club" }, primaryType: "golf_course", types: ["golf_course"] };
+    expect(filterSimulatorPlaces([golfNamedPlace], reviews, emptyOfferings)).toEqual([golfNamedPlace]);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ places: [golfNamedPlace] }), { status: 200 })));
+    expect(await searchSimulatorVenuesByName({ query: "Example Golf Club" }, reviews, emptyOfferings)).toEqual([]);
+  });
+
   it("uses independent public rental evidence despite an outdoor private classification", () => {
     const index = buildGooglePlaceReviewIndex([review("place-1", "PRIVATE_MEMBER_CONTROLLED", "VERIFIED_PRIVATE")]);
     const offering = { id: "rental-1", courseId: "course-1", active: true, publicAccessStatus: "PUBLIC",
@@ -68,6 +112,8 @@ describe("simulator Places discovery", () => {
       course: { id: "course-1", googlePlaceId: "place-1", name: "Venue", address: null, latitude: 41.24, longitude: -73.2,
         timeZone: "America/New_York", website: "https://venue.example", phone: null } } satisfies SimulatorOfferingRecord;
     expect(filterSimulatorPlaces([place], index, buildSimulatorOfferingIndex([offering]))).toEqual([place]);
+    const rentalInHybridStore = { ...place, displayName: { text: "Example Golf Equipment Store" }, primaryType: "sporting_goods_store", types: ["sporting_goods_store"] };
+    expect(filterSimulatorPlaces([rentalInHybridStore], index, buildSimulatorOfferingIndex([offering]))).toEqual([rentalInHybridStore]);
   });
 });
 

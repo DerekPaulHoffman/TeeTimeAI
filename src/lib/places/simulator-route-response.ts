@@ -5,7 +5,7 @@ import { cacheCourseCandidatePhotos } from "@/lib/places/course-photo-metadata";
 import { getCourseDiscoveryCacheKey, getCourseLookupCacheKey, readCourseRuntimeCache, writeCourseRuntimeCache } from "@/lib/places/course-runtime-cache";
 import type { CourseCandidate, CourseNameSearchInput, NearbyCourseSearchInput } from "@/lib/places/google";
 import { loadActiveGooglePlaceReviewIndex } from "@/lib/places/google-place-reviews";
-import { searchNearbySimulatorVenues, searchSimulatorVenuesByName, simulatorDistanceMeters } from "@/lib/places/simulator-google";
+import { searchNearbySimulatorVenues, searchSimulatorVenuesByName, simulatorDistanceMeters, SIMULATOR_DISCOVERY_CLASSIFICATION_VERSION } from "@/lib/places/simulator-google";
 import { getPersistedSimulatorCandidates, loadSimulatorOfferingIndex, mapSimulatorCandidate } from "@/lib/places/simulator-offerings";
 
 export async function simulatorDiscoveryResponse(input: NearbyCourseSearchInput & { radiusMeters: number }) {
@@ -19,7 +19,7 @@ export async function simulatorLookupResponse(input: CourseNameSearchInput) {
 async function simulatorResponse(input: { discovery: NearbyCourseSearchInput & { radiusMeters: number }; lookup?: never } | { lookup: CourseNameSearchInput; discovery?: never }) {
   try {
     const [reviews, offerings] = await Promise.all([loadActiveGooglePlaceReviewIndex(), loadSimulatorOfferingIndex()]);
-    const reviewVersion = `${reviews.reviewVersion}:rentals:${offerings.reviewVersion}`;
+    const reviewVersion = `${reviews.reviewVersion}:rentals:${offerings.reviewVersion}:classification:${SIMULATOR_DISCOVERY_CLASSIFICATION_VERSION}`;
     const cacheKey = input.discovery ? getCourseDiscoveryCacheKey({ ...input.discovery, mode: "SIMULATOR", reviewVersion }) :
       getCourseLookupCacheKey({ ...input.lookup, mode: "SIMULATOR", reviewVersion });
     const cached = await readCourseRuntimeCache<CourseCandidate[]>(cacheKey);
