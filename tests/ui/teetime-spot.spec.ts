@@ -73,6 +73,44 @@ test.describe("Tee Time Spot UI smoke", () => {
     });
   });
 
+  test("explains missing search details in a toast for clicks and Enter", async ({ page }) => {
+    let discoveryRequests = 0;
+    await page.route("**/api/location/geocode**", async route => {
+      discoveryRequests += 1;
+      await route.fulfill({ status: 200, json: { latitude: 41.24, longitude: -73.2 } });
+    });
+    await page.route("**/api/courses/discover**", async route => {
+      discoveryRequests += 1;
+      await route.fulfill({ status: 200, json: { courses: [] } });
+    });
+    await page.goto("/search");
+    await page.getByRole("button", { name: "Search", exact: true }).click();
+    const toast = page.locator('#search-validation-error[role="alert"]');
+    await expect(toast).toContainText("Enter a city and state, ZIP code, or street address");
+    const dismissBox = await toast.getByRole("button", { name: "Dismiss search error" }).boundingBox();
+    expect(dismissBox!.width).toBeGreaterThanOrEqual(24);
+    expect(dismissBox!.height).toBeGreaterThanOrEqual(24);
+    const box = await toast.boundingBox();
+    expect(box!.x).toBeGreaterThanOrEqual(0);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+    await page.getByRole("button", { name: "Dismiss search error" }).click();
+    await expect(toast).toHaveCount(0);
+    const location = page.getByRole("textbox", { name: "Location", exact: true });
+    await location.fill("   ");
+    await location.press("Enter");
+    await expect(toast).toBeVisible();
+    expect(discoveryRequests).toBe(0);
+    await location.fill("Trumbull, CT");
+    await page.getByLabel("Date", { exact: true }).fill("2000-01-01");
+    await page.getByRole("button", { name: "Search", exact: true }).click();
+    await expect(toast).toContainText("Choose a future date");
+    expect(discoveryRequests).toBe(0);
+    await page.getByLabel("Date", { exact: true }).fill("2099-01-01");
+    await location.press("Enter");
+    await expect(toast).toHaveCount(0);
+    await expect.poll(() => discoveryRequests).toBe(2);
+  });
+
   test("selects an alert time range without resizing the box", async ({ page }, testInfo) => {
     const issues = collectPageIssues(page);
     await page.goto("/search?startTime=08%3A10&endTime=12%3A05");

@@ -72,6 +72,49 @@ function mockDateBoundaryRequests() {
 }
 
 describe("TeeTimeIntake", () => {
+  it.each(["", "   "])("explains a missing location without requesting discovery (%j)", (location) => {
+    const fetchMock = mockDateBoundaryRequests();
+    render(<TeeTimeIntake initialValues={{ location }} />);
+    const search = screen.getByRole("button", { name: "Search", exact: true });
+    expect((search as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(search);
+    expect(screen.getByRole("alert").textContent).toContain("Enter a city and state, ZIP code, or street address");
+    expect(screen.getByLabelText("Location").getAttribute("aria-invalid")).toBe("true");
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/location/geocode"))).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss search error" }));
+    expect(screen.queryByRole("alert")).toBeNull();
+    fireEvent.submit(screen.getByRole("form", { name: "Course search filters" }));
+    expect(screen.getByRole("alert")).toBeTruthy();
+  });
+
+  it.each([
+    [{ date: "2000-01-01" }, "Choose a future date"],
+    [{ startTime: "18:00", endTime: "09:00" }, "Choose an end time after the start time"]
+  ])("explains invalid search details before requesting discovery (%j)", (values, message) => {
+    const fetchMock = mockDateBoundaryRequests();
+    render(<TeeTimeIntake initialValues={{ location: "Trumbull, CT", ...values }} />);
+    fireEvent.submit(screen.getByRole("form", { name: "Course search filters" }));
+    expect(screen.getByRole("alert").textContent).toContain(message);
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/location/geocode"))).toBe(false);
+  });
+
+  it("clears the toast and searches after a missing location is corrected", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      if (String(input).startsWith("/api/location/geocode")) return Response.json({ latitude: 41.24, longitude: -73.2 });
+      if (String(input).startsWith("/api/courses/discover")) return Response.json({ courses: [] });
+      return Response.json({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
+    render(<TeeTimeIntake />);
+    fireEvent.click(screen.getByRole("button", { name: "Search", exact: true }));
+    expect(screen.getByRole("alert")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("Location"), { target: { value: "Trumbull, CT" } });
+    fireEvent.click(screen.getByRole("button", { name: "Search", exact: true }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).startsWith("/api/courses/discover"))).toBe(true));
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("defaults to 18-hole courses and restores that default when clearing filters", () => {
     mockDateBoundaryRequests();
     render(<TeeTimeIntake {...signedInAccountProps} simulatorEnabled />);

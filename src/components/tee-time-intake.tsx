@@ -350,6 +350,7 @@ function TeeTimeIntakeContent({
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveFailureVisible, setSaveFailureVisible] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [alertLimitReached, setAlertLimitReached] = useState(false);
   const [savedSignature, setSavedSignature] = useState<string | null>(null);
   const [mobileTimeEditorOpen, setMobileTimeEditorOpen] = useState(false);
@@ -693,6 +694,22 @@ function TeeTimeIntakeContent({
   }
 
   async function discoverFromSearchControls() {
+    setSaveFailureVisible(false);
+    const validationError = !locationText.trim()
+      ? "Enter a city and state, ZIP code, or street address, or use your current location."
+      : !isDateFuture
+        ? "Choose a future date for your search."
+        : !isTimeWindowValid
+          ? mode === "SIMULATOR"
+            ? "Choose a window long enough for a one-hour simulator session."
+            : "Choose an end time after the start time."
+          : null;
+    if (validationError) {
+      setSearchError(validationError);
+      setLocationInputInvalid(!locationText.trim());
+      return;
+    }
+    setSearchError(null);
     discoveryRequestRef.current?.abort();
     const controller = new AbortController();
     discoveryRequestRef.current = controller;
@@ -1246,6 +1263,26 @@ function TeeTimeIntakeContent({
 
   return (
     <div className="figma-search-experience">
+      {searchError ? (
+        <div className="alert-failure-toast" id="search-validation-error" role="alert" aria-live="assertive">
+          <CircleAlert aria-hidden="true" size={20} />
+          <div>
+            <strong>Check your search details</strong>
+            <p>{searchError}</p>
+          </div>
+          <button
+            aria-label="Dismiss search error"
+            className="alert-failure-toast-close"
+            onClick={() => {
+              setSearchError(null);
+              setLocationInputInvalid(false);
+            }}
+            type="button"
+          >
+            <X aria-hidden="true" size={16} />
+          </button>
+        </div>
+      ) : null}
       {saveFailureVisible ? (
         <AlertFailureToast
           onClose={() => setSaveFailureVisible(false)}
@@ -1267,7 +1304,7 @@ function TeeTimeIntakeContent({
         isDateFuture={isDateFuture}
         isTimeWindowValid={isTimeWindowValid}
         loading={loading}
-        locationErrorId={LOCATION_SEARCH_ERROR_ID}
+        locationErrorId={searchError ? "search-validation-error" : LOCATION_SEARCH_ERROR_ID}
         locationInputInvalid={locationInputInvalid}
         locationText={locationText}
         minSearchDate={minSearchDate}

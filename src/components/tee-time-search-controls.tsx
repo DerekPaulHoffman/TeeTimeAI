@@ -142,6 +142,7 @@ export function TeeTimeSearchControls({
     <form
       aria-label="Course search filters"
       className="figma-search-toolbar"
+      noValidate
       onSubmit={(event) => {
         event.preventDefault();
         onSubmit();
@@ -380,7 +381,7 @@ export function TeeTimeSearchControls({
         <div className="figma-search-actions">
           <button
             className="figma-search-submit"
-            disabled={loading || locationText.trim().length === 0}
+            disabled={loading}
             type="submit"
           >
             <Search size={15} />
