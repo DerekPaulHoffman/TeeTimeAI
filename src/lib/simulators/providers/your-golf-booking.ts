@@ -78,7 +78,10 @@ export async function fetchYourGolfBookingAvailability(input: SimulatorAvailabil
     const minutes = Math.round((Date.parse(`${input.date}T${wall}Z`) - date.getTime()) / 60_000);
     return `${minutes < 0 ? "-" : "+"}${String(Math.floor(Math.abs(minutes) / 60)).padStart(2, "0")}:${String(Math.abs(minutes) % 60).padStart(2, "0")}`;
   };
-  apiUrl.search = new URLSearchParams({ start_gte: `${input.date}T00:00:00${offset(dayStart, "00:00:00")}`, start_lte: `${input.date}T23:59:59${offset(new Date(nextLocalDay.getTime() - 1000), "23:59:59")}` }).toString();
+  // Occupancy may start the previous day. Include every interval up to the
+  // same 24-hour maximum accepted by the payload parser, across DST changes.
+  const occupancyStart = new Date(dayStart.getTime() - 24 * 60 * 60_000);
+  apiUrl.search = new URLSearchParams({ start_gte: occupancyStart.toISOString(), start_lte: `${input.date}T23:59:59${offset(new Date(nextLocalDay.getTime() - 1000), "23:59:59")}` }).toString();
   let payload: unknown;
   try { payload = JSON.parse(await publicRead(apiUrl, "application/json", 400_000, fetchImpl)); }
   catch (error) { if (error instanceof SimulatorAvailabilityError) throw error; fail("The public simulator bookings response is invalid JSON"); }
@@ -115,7 +118,7 @@ function parseHours(value: unknown, date: string): [number, number][] {
       const times = match[2].match(/^(\d{2}):(\d{2})-(\d{2}):(\d{2}) open$/u)!;
       const start = Number(times[1]) * 60 + Number(times[2]);
       const end = Number(times[3]) * 60 + Number(times[4]);
-      if (start >= end || end > 1440 || Number(times[2]) > 59 || Number(times[4]) > 59) fail("The public simulator opening interval is invalid");
+      if (start >= end || end > 1440 || start % 30 !== 0 || Number(times[2]) > 59 || Number(times[4]) > 59) fail("The public simulator opening interval is invalid");
       intervals.push([start, end]);
     }
     if (match[1] === weekday) weekly = intervals;

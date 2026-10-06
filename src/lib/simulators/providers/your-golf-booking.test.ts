@@ -28,7 +28,7 @@ describe("YourGolfBooking public simulator calendar", () => {
     const result = await fetchSimulatorAvailability(input, fetchImpl);
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(String(fetchImpl.mock.calls[0][0])).toBe("https://booking.trackmangolf.com/venues/golf-oasis/booking/bays");
-    expect(String(fetchImpl.mock.calls[1][0])).toBe("https://api.yourgolfbooking.com/venue/golf-oasis/bookings/public?start_gte=2026-10-10T00%3A00%3A00-04%3A00&start_lte=2026-10-10T23%3A59%3A59-04%3A00");
+    expect(String(fetchImpl.mock.calls[1][0])).toBe("https://api.yourgolfbooking.com/venue/golf-oasis/bookings/public?start_gte=2026-10-09T04%3A00%3A00.000Z&start_lte=2026-10-10T23%3A59%3A59-04%3A00");
     for (const [, request] of fetchImpl.mock.calls) {
       expect(request).toMatchObject({ method: "GET", redirect: "manual", credentials: "omit", cache: "no-store" });
       expect(request?.body).toBeUndefined();
@@ -67,6 +67,7 @@ describe("YourGolfBooking public simulator calendar", () => {
     ["unknown hours", { openingHours: "Saturday 4pm to 10pm" }],
     ["restricted range", { openingTimes: [{ start: "16:00" }] }],
     ["nonzero interval offset", { slotIntervalStart: 15 }],
+    ["hours off the published slot grid", { openingHours: openingHours.replace("Sa 16:00-22:00 open", "Sa 16:15-22:00 open") }],
     ["unbookable range", { bookable: false }]
   ])("fails closed for %s", async (_name, patch) => {
     await expect(fetchYourGolfBookingAvailability(input, responses([], config(patch)))).rejects.toThrow();
@@ -93,11 +94,21 @@ describe("YourGolfBooking public simulator calendar", () => {
     const fetchImpl = responses();
     await fetchYourGolfBookingAvailability({ ...input, date: "2026-11-01" }, fetchImpl);
     const url = new URL(String(fetchImpl.mock.calls[1][0]));
-    expect(url.searchParams.get("start_gte")).toBe("2026-11-01T00:00:00-04:00");
+    expect(url.searchParams.get("start_gte")).toBe("2026-10-31T04:00:00.000Z");
     expect(url.searchParams.get("start_lte")).toBe("2026-11-01T23:59:59-05:00");
   });
   it("rejects unrecognized occupancy instead of claiming free space", () => {
     expect(() => buildSlots(input, ["9224"], 21451, 1397, 1357, 4, [[960, 1320]], [{ ...booking(9224, "2026-10-10T21:00:00Z", "2026-10-10T22:00:00Z"), status: "mystery" }])).toThrow();
+  });
+  it("includes previous-day member bookings that overlap the requested day", async () => {
+    const occupied = [booking(9225, "2026-10-10T01:00:00Z", "2026-10-10T21:00:00Z", 22797)];
+    const fetchImpl = responses(occupied);
+    const result = await fetchYourGolfBookingAvailability(input, fetchImpl);
+    const url = new URL(String(fetchImpl.mock.calls[1][0]));
+    expect(new Date(url.searchParams.get("start_gte")!).getTime()).toBeLessThan(new Date(occupied[0].start).getTime());
+    expect(result.slots.some(slot => slot.resourceId === "9225" && slot.startsAt.toISOString() === "2026-10-10T20:00:00.000Z")).toBe(false);
+    expect(result.slots.some(slot => slot.resourceId === "9224" && slot.startsAt.toISOString() === "2026-10-10T20:00:00.000Z")).toBe(true);
+    expect(result.slots.some(slot => slot.resourceId === "9225" && slot.startsAt.toISOString() === "2026-10-10T21:00:00.000Z")).toBe(true);
   });
   it.each([
     ["2026-11-01", 60],
