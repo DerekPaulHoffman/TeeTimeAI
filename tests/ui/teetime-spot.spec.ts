@@ -522,10 +522,18 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expect(page.getByRole("heading", { name: smokeCourses[0].name }).first()).toBeVisible();
     await page.getByRole("button", { name: `Notify me for ${smokeCourses[1].name}` }).click();
     const dialog = page.getByRole("dialog", { name: "Notify me" });
-    await expect(dialog).toBeVisible();
+    const signedOutAccount = await page.getByRole("button", {
+      name: "Sign in", exact: true, includeHidden: true
+    }).count() > 0;
+    if (signedOutAccount) {
+      await expect(page.locator(".cl-signIn-root")).toBeVisible();
+      await page.getByRole("button", { name: "Close modal", exact: true }).click();
+    } else {
+      await expect(dialog).toBeVisible();
+      await dialog.getByRole("button", { name: "Close notification setup" }).click();
+    }
     const selectedCourseNames = page.locator(".notify-course-name");
     await expect(selectedCourseNames).toHaveText(smokeCourses[1].name);
-    await dialog.getByRole("button", { name: "Close notification setup" }).click();
     await expect.poll(() =>
       page.evaluate(() => window.sessionStorage.getItem("tee-time-spot:search-draft:v1"))
     ).toContain("ui-smoke-course-2");
@@ -539,7 +547,14 @@ test.describe("Tee Time Spot UI smoke", () => {
 
     await page.reload();
     await expect(selectedCourseNames).toHaveText(smokeCourses[1].name);
-    await expect(page.getByRole("dialog", { name: "Notify me" })).toBeVisible();
+    if (signedOutAccount) {
+      await expect(dialog).toBeHidden();
+      await page.getByRole("button", { name: `Notify me for ${smokeCourses[1].name}` }).click();
+      await expect(page.locator(".cl-signIn-root")).toBeVisible();
+      await page.getByRole("button", { name: "Close modal", exact: true }).click();
+    } else {
+      await expect(dialog).toBeVisible();
+    }
   });
 
   test("restores validated direct-link search details on the static route", async ({ page }) => {
@@ -1340,7 +1355,7 @@ test.describe("Tee Time Spot UI smoke", () => {
   test("private operator overview is concealed while signed out", async ({ page }, testInfo) => {
     const response = await page.goto("/operator");
 
-    if (useMockedSearchProviders) {
+    if (smokeHostname === "127.0.0.1" || smokeHostname === "localhost") {
       expect(response?.status()).toBe(404);
     } else {
       expect(page.url()).toMatch(/^https:\/\/accounts\.teetimespot\.com\/sign-in(?:\?|$)/);

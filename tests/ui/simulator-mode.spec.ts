@@ -4,6 +4,8 @@ import path from "node:path";
 const simulatorDraftKey = "tee-time-spot:search-draft:simulator:v1";
 const outdoorDraftKey = "tee-time-spot:search-draft:v1";
 const futureDate = "2080-06-02";
+const smokeOrigin = new URL(process.env.UI_SMOKE_BASE_URL ??
+  `http://127.0.0.1:${process.env.UI_SMOKE_PORT ?? "3100"}`).origin;
 const simulatorVenue = {
   mode: "SIMULATOR",
   courseId: "shared-hybrid-venue",
@@ -60,7 +62,7 @@ async function mockPublicReads(page: Page, simulatorCourses: Record<string, unkn
       return publicFetch(input, options);
     };
   });
-  await page.route("**/api/**", async (route) => {
+  await page.route((url) => url.origin === smokeOrigin && url.pathname.startsWith("/api/"), async (route) => {
     const url = new URL(route.request().url());
     if (/known-times|check-times|local-reader/.test(url.pathname)) {
       state.outdoorReads.push(url.pathname);
@@ -93,6 +95,42 @@ async function mockPublicReads(page: Page, simulatorCourses: Record<string, unkn
     await route.abort();
   });
   return state;
+}
+
+async function hasSignedOutAccount(page: Page) {
+  return await page.getByRole("button", { name: "Sign in", exact: true, includeHidden: true }).count() > 0;
+}
+
+async function expectAndCloseNotificationEntry(page: Page, venueName: string) {
+  await expect.poll(() => page.evaluate((key) => {
+    const draft = JSON.parse(sessionStorage.getItem(key) ?? "{}") as {
+      selectedCourses?: Array<{ name: string }>;
+    };
+    return draft.selectedCourses?.map((venue) => venue.name) ?? [];
+  }, simulatorDraftKey)).toContain(venueName);
+  if (await hasSignedOutAccount(page)) {
+    const signIn = page.locator(".cl-signIn-root");
+    await expect(signIn).toBeVisible();
+    await expect(signIn).toContainText("Sign in to Tee Time Spot");
+    await page.getByRole("button", { name: "Close modal", exact: true }).click();
+    await expect(signIn).toBeHidden();
+    return;
+  }
+  const dialog = page.getByRole("dialog", { name: "Notify me", exact: true });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText(venueName);
+  await expect(dialog).toContainText("4 players");
+  await dialog.getByRole("button", { name: "Close notification setup", exact: true }).click();
+  await expect(dialog).toBeHidden();
+}
+
+async function expectAndCloseRestoredNotificationEntry(page: Page, venueName: string) {
+  if (await hasSignedOutAccount(page)) {
+    // A restored shortlist waits for an explicit Notify click before opening sign-in.
+    await expect(page.getByRole("dialog", { name: "Notify me", exact: true })).toBeHidden();
+    await page.getByRole("button", { name: `Notify me for ${venueName}`, exact: true }).click();
+  }
+  await expectAndCloseNotificationEntry(page, venueName);
 }
 
 async function expectSharedControls(page: Page) {
@@ -165,12 +203,7 @@ test.describe("simulator mode", () => {
     const notify = simulatorCard.getByRole("button", { name: `Notify me for ${simulatorVenue.name}`, exact: true });
     await expect(notify).toBeEnabled();
     await notify.click();
-    const dialog = page.getByRole("dialog", { name: "Notify me", exact: true });
-    await expect(dialog).toBeVisible();
-    await expect(dialog).toContainText(simulatorVenue.name);
-    await expect(dialog).toContainText("4 players");
-    await dialog.getByRole("button", { name: "Close notification setup", exact: true }).click();
-    await expect(dialog).toBeHidden();
+    await expectAndCloseNotificationEntry(page, simulatorVenue.name);
     await expectNoHorizontalOverflow(page);
     await captureSimulatorScreenshot(page, testInfo, "simulator-unified-form");
 
@@ -213,10 +246,7 @@ test.describe("simulator mode", () => {
     await page.goto("/search?mode=SIMULATOR");
     await expectSharedControls(page);
     await expectPreservedValues(page);
-    const dialog = page.getByRole("dialog", { name: "Notify me", exact: true });
-    await expect(dialog).toBeVisible();
-    await expect(dialog).toContainText(simulatorVenue.name);
-    await dialog.getByRole("button", { name: "Close notification setup", exact: true }).click();
+    await expectAndCloseRestoredNotificationEntry(page, simulatorVenue.name);
     const status = page.locator(".course-row .course-monitoring-status");
     await expect(status).toBeVisible();
     await expect(status).not.toContainText("Simulator alerts available");
@@ -226,9 +256,7 @@ test.describe("simulator mode", () => {
     await page.reload();
     await expectPreservedValues(page);
     await expect(page.getByRole("group", { name: "Course layout", exact: true }).getByRole("button", { name: "Simulator", exact: true })).toHaveAttribute("aria-pressed", "true");
-    await expect(dialog).toBeVisible();
-    await expect(dialog).toContainText(simulatorVenue.name);
-    await dialog.getByRole("button", { name: "Close notification setup", exact: true }).click();
+    await expectAndCloseRestoredNotificationEntry(page, simulatorVenue.name);
     await expect(status).not.toContainText("Simulator alerts available");
     await expectNoHorizontalOverflow(page);
     await expectNoOutdoorReadsInSimulator(page);
@@ -259,16 +287,12 @@ test.describe("simulator mode", () => {
       const notify = card.getByRole("button", { name: `Notify me for ${venue.name}`, exact: true });
       await expect(notify).toBeEnabled();
       await notify.click();
-      const dialog = page.getByRole("dialog", { name: "Notify me", exact: true });
-      await expect(dialog).toBeVisible();
-      await expect(dialog).toContainText(venue.name);
-      await dialog.getByRole("button", { name: "Close notification setup", exact: true }).click();
+      await expectAndCloseNotificationEntry(page, venue.name);
     }
     const notify = page.getByRole("button", { name: `Notify me for ${simulatorVenue.name}`, exact: true });
     await expect(notify).toBeEnabled();
     await notify.click();
-    await expect(page.getByRole("dialog", { name: "Notify me", exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "Close notification setup", exact: true }).click();
+    await expectAndCloseNotificationEntry(page, simulatorVenue.name);
     await expectNoHorizontalOverflow(page);
     await captureSimulatorScreenshot(page, testInfo, "simulator-all-venues");
     await expectNoOutdoorReadsInSimulator(page);
@@ -299,9 +323,8 @@ test.describe("simulator mode", () => {
     await expect(mainList.getByText("Alert availability after first check", { exact: true })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "See more locations", exact: true })).toHaveCount(0);
     await mainList.getByRole("button", { name: `Notify me for ${other[2].name}`, exact: true }).click();
-    await expect(page.getByRole("dialog", { name: "Notify me", exact: true })).toBeVisible();
+    await expectAndCloseNotificationEntry(page, other[2].name);
     await expect(mainList.getByRole("heading")).toHaveText(allVenues.map((venue) => venue.name));
-    await page.getByRole("button", { name: "Close notification setup", exact: true }).click();
     await expect(page.getByRole("button", { name: /Other nearby venues|Alerts unavailable/ })).toHaveCount(0);
     await captureSimulatorScreenshot(page, testInfo, "simulator-distance-list");
     await expectNoHorizontalOverflow(page);
@@ -348,8 +371,7 @@ test.describe("simulator mode", () => {
     await expect(page.getByText("1 simulator location found", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: /Other nearby venues/ })).toHaveCount(0);
     await directList.getByRole("button", { name: `Notify me for ${unreviewed.name}`, exact: true }).click();
-    await expect(page.getByRole("dialog", { name: "Notify me", exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "Close notification setup", exact: true }).click();
+    await expectAndCloseNotificationEntry(page, unreviewed.name);
     await expectNoHorizontalOverflow(page);
     await expectNoOutdoorReadsInSimulator(page);
     expect(requests.unexpectedRequests).toEqual([]);
