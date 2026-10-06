@@ -132,7 +132,7 @@ export type SimulatorStatusInput = {
     courseRank?: number;
     courseAddress?: string;
     courseTimeZone?: string;
-    bookingUrl: string;
+    bookingUrl?: string;
     availability: string;
   }>;
   stopUrls?: EmailStopUrls;
@@ -147,14 +147,16 @@ export function renderSimulatorStatusHtml(input: SimulatorStatusInput) {
     rank: venue.courseRank ?? index + 1,
     courseAddress: venue.courseAddress,
     bookingUrl: venue.bookingUrl,
-    bookingLinkLabel: "Open official booking page",
+    bookingLinkLabel: ["SUPPORT_PENDING", "OFFICIAL_SITE_ONLY"].includes(venue.availability) ? "Visit official site" : "Open official booking page",
     ...monitoringStatus(venue.availability)
   }));
   return renderCustomerEmail({
     mode: "SIMULATOR",
     variant: input.kind === "setup" ? "setup" : "morning",
     heading: input.kind === "setup" ? "Your simulator alert is saved" : "Your simulator alert update",
-    intro: `We are watching for a ${durationMinutes}-minute simulator session in your requested window. When an opening matches, we will send its official booking link. You book direct with the venue.`,
+    intro: input.venues.some(venue => venue.availability === "SUPPORT_PENDING" || venue.availability === "OFFICIAL_SITE_ONLY")
+      ? `Your ${durationMinutes}-minute session request is saved. Each venue's current status is below. We will email matching openings from booking pages we can check. You book direct with the venue.`
+      : `We are watching for a ${durationMinutes}-minute simulator session in your requested window. When an opening matches, we will send its official booking link. You book direct with the venue.`,
     preheader: input.kind === "setup"
       ? "Your simulator alert is saved. Here's the status of each venue."
       : "Here's the latest status of your Tee Time Spot simulator alert.",
@@ -175,6 +177,12 @@ export function renderSimulatorStatusHtml(input: SimulatorStatusInput) {
 }
 
 function monitoringStatus(availability: string): Pick<CustomerEmailMonitoringCourse, "badgeLabel" | "detail" | "tone"> {
+  if (availability === "SUPPORT_PENDING") {
+    return { badgeLabel: "ADDING ALERT SUPPORT", tone: "adding", detail: "Your request is saved. We have not verified this venue's simulator booking system yet, so we cannot confirm openings. We will update you when its alert status changes." };
+  }
+  if (availability === "OFFICIAL_SITE_ONLY") {
+    return { badgeLabel: "ALERTS UNAVAILABLE HERE", tone: "direct", detail: "We cannot check simulator sessions here automatically. Visit the venue's official site for current information." };
+  }
   if (availability === "BOOKING_NOT_OPEN") {
     return { badgeLabel: "BOOKING NOT OPEN", tone: "scheduled", detail: "Booking has not opened yet. We will check when sessions are released." };
   }

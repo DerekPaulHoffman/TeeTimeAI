@@ -97,6 +97,37 @@ describe("simulator customer email", () => {
     expect(html).not.toContain("Venue <One>");
   });
 
+  it("explains pending support without claiming that the venue is unavailable or being monitored", () => {
+    const html = renderSimulatorStatusHtml({
+      kind: "setup", targetDate: "2026-08-10", startTime: "13:00", endTime: "17:00",
+      durationMinutes: 60, players: 4,
+      venues: [{ courseName: "New Simulator", availability: "SUPPORT_PENDING" }],
+    });
+    expect(html).toContain("ADDING ALERT SUPPORT");
+    expect(html).toContain("We have not verified this venue");
+    expect(html).toContain("We will update you when its alert status changes");
+    expect(html).not.toContain("We are watching");
+    expect(html).not.toContain("No matching session is available");
+    expect(html).not.toContain("Open official booking page");
+  });
+
+  it("keeps an official-site handoff and mixed venue states in the existing email design", () => {
+    const html = renderSimulatorStatusHtml({
+      kind: "daily", targetDate: "2026-08-10", startTime: "13:00", endTime: "17:00", durationMinutes: 60, players: 4,
+      venues: [
+        { courseName: "New Simulator", bookingUrl: "https://venue.example/", availability: "SUPPORT_PENDING" },
+        { courseName: "Supported Simulator", bookingUrl: "https://supported.example/book", availability: "MATCH_FOUND" },
+        { courseName: "Account Required", bookingUrl: "https://private.example/", availability: "OFFICIAL_SITE_ONLY" },
+      ],
+    });
+    expect(html).toContain('class="email-card"');
+    expect(html).toContain('href="https://venue.example/"');
+    expect(html).toContain("Visit official site");
+    expect(html).toContain("Current sessions were verified");
+    expect(html).toContain("We cannot check simulator sessions here automatically");
+    expect(html).not.toContain("We are watching");
+  });
+
   it("uses the existing brand, ranked cards, summary and both bounded stop controls", () => {
     const html = renderAlertHtml({
       mode: "SIMULATOR", durationMinutes: 60, to: "person@example.com", searchId: "s1",

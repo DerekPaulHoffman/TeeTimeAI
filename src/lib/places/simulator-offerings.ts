@@ -132,7 +132,7 @@ export function mapSimulatorCandidate(candidate: CourseCandidate, index: Simulat
 }
 
 export function getPersistedSimulatorCandidates(index: SimulatorOfferingIndex): CourseCandidate[] {
-  return [...index.byPlaceId.values()].filter((offering) => hasVerifiedPublicSimulatorRental(offering))
+  return [...index.byPlaceId.values()].filter((offering) => offering.active && offering.publicAccessStatus !== "NOT_PUBLIC")
     .map((offering) => mapSimulatorCandidate({
       googlePlaceId: offering.course.googlePlaceId as string,
       name: offering.course.name,

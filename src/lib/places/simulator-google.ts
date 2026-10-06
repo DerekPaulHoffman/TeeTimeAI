@@ -3,6 +3,7 @@ import {
   type CourseCandidate, type CourseNameSearchInput, type GooglePlace, type NearbyCourseSearchInput
 } from "@/lib/places/google";
 import type { GooglePlaceReviewIndex } from "@/lib/places/google-place-reviews";
+import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { fetchGooglePlacesJsonWithRetry } from "@/lib/places/google-places-request";
 import {
   getPersistedSimulatorCandidates, hasVerifiedPublicSimulatorRental, mapSimulatorCandidate,
@@ -18,7 +19,7 @@ const NON_RENTAL_PRIMARY_TYPES = new Set([
   "golf_instructor", "sports_coaching", "sports_school", "store"
 ]);
 const LESSON_OR_FITTING_PATH = /\/(?:golf-lessons?|golf-school|club-fitting)(?:\/|$)/i;
-export const SIMULATOR_DISCOVERY_CLASSIFICATION_VERSION = "public-rentals-v2";
+export const SIMULATOR_DISCOVERY_CLASSIFICATION_VERSION = "public-rentals-v3";
 
 export function filterSimulatorPlaces(places: GooglePlace[], reviews: GooglePlaceReviewIndex, offerings: SimulatorOfferingIndex) {
   return places.filter((place) => {
@@ -30,6 +31,7 @@ export function filterSimulatorPlaces(places: GooglePlace[], reviews: GooglePlac
     if (!id || !place.displayName?.text || !Number.isFinite(place.location?.latitude) || !Number.isFinite(place.location?.longitude) ||
       (place.businessStatus && place.businessStatus !== "OPERATIONAL")) return false;
     if (offering && (!offering.active || offering.publicAccessStatus === "NOT_PUBLIC")) return false;
+    if ([review, canonicalReview].some((fact) => fact?.classification === "MEMBERS_ONLY_SIMULATOR")) return false;
     const verified = hasVerifiedPublicSimulatorRental(offering);
     // An outdoor non-course review is retained. Only simulator classifications may
     // be explored here; a reviewed rental may independently establish public access.
@@ -68,6 +70,29 @@ async function requestPlaces(endpoint: "searchNearby" | "searchText", body: obje
   return json?.places ?? [];
 }
 
+/** Refresh an exact provider identity before accepting unverified rental demand. */
+export async function getSimulatorVenueForDemand(googlePlaceId: string, reviews: GooglePlaceReviewIndex) {
+  if (!/^[A-Za-z0-9_-]{1,255}$/.test(googlePlaceId)) {
+    throw new Error("The selected simulator venue is invalid. Refresh the venues and try again.");
+  }
+  const key = getGooglePlacesApiKey();
+  if (!key) throw new Error("GOOGLE_PLACES_API_KEY is not configured");
+  const { response, json } = await fetchGooglePlacesJsonWithRetry<GooglePlace>(
+    `https://places.googleapis.com/v1/places/${encodeURIComponent(googlePlaceId)}`, {
+      headers: { "X-Goog-Api-Key": key, "X-Goog-FieldMask":
+        "id,displayName,formattedAddress,addressComponents,location,websiteUri,nationalPhoneNumber,types,primaryType,businessStatus" },
+      signal: AbortSignal.timeout(12_000),
+    },
+  );
+  const emptyOfferings: SimulatorOfferingIndex = { byPlaceId: new Map(), reviewVersion: "none" };
+  if (!response.ok || !json || (json.id ?? json.name?.replace(/^places\//, "")) !== googlePlaceId ||
+    filterSimulatorPlaces([json], reviews, emptyOfferings).length !== 1) {
+    throw new Error("The selected venue could not be confirmed as a simulator. Refresh the venues and try again.");
+  }
+  const candidate = mapGooglePlaceToCourseCandidate(json, reviews);
+  return { ...candidate, website: getSafeCustomerBookingUrl(candidate.website) ?? undefined };
+}
+
 export async function searchNearbySimulatorVenues(input: NearbyCourseSearchInput, reviews: GooglePlaceReviewIndex, offerings: SimulatorOfferingIndex) {
   const radius = input.radiusMeters ?? 24140;
   // Dedicated queries retain recall without sweeping all bars or sports stores.
@@ -83,7 +108,15 @@ export async function searchNearbySimulatorVenues(input: NearbyCourseSearchInput
   if (input.signal?.aborted) throw input.signal.reason;
   const places = results.flatMap((result) => result.status === "fulfilled" ? result.value : []);
   const courses = mergeSimulatorCandidates(
-    mapSimulatorPlaces(places, reviews, offerings), getPersistedSimulatorCandidates(offerings)
+    mapSimulatorPlaces(places, reviews, offerings), getPersistedSimulatorCandidates(offerings).filter((candidate) => {
+      const review = reviews.byPlaceId.get(candidate.googlePlaceId);
+      const canonicalReview = review?.canonicalPlaceId ? reviews.byPlaceId.get(review.canonicalPlaceId) : undefined;
+      const offering = offerings.byPlaceId.get(candidate.googlePlaceId);
+      return ![review, canonicalReview].some((fact) => fact?.classification === "MEMBERS_ONLY_SIMULATOR") &&
+        (hasVerifiedPublicSimulatorRental(offering) ||
+          ![review, canonicalReview].some((fact) => fact?.accessOverride === "VERIFIED_PRIVATE" ||
+            (fact?.accessOverride === "VERIFIED_NON_COURSE" && fact.classification !== "INDOOR_SIMULATOR")));
+    })
   ).map((candidate) => ({ ...candidate, distanceMeters: simulatorDistanceMeters(input, candidate) }))
     .filter((candidate) => candidate.distanceMeters <= radius)
     .sort((left, right) => left.distanceMeters - right.distanceMeters);

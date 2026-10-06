@@ -24,6 +24,7 @@ const localReaderServiceMocks = vi.hoisted(() => ({
 const providerObservationMocks = vi.hoisted(() => ({
   getCourseProviderObservationFencesInTransaction: vi.fn(),
 }));
+const simulatorDemandMocks = vi.hoisted(() => ({ getSimulatorVenueForDemand: vi.fn() }));
 
 vi.mock("@/lib/prisma", () => ({
   prisma: {
@@ -33,8 +34,9 @@ vi.mock("@/lib/prisma", () => ({
       findMany: vi.fn(),
       findUnique: vi.fn(),
       update: vi.fn(),
+      upsert: vi.fn(),
     },
-    courseOffering: { findMany: vi.fn() },
+    courseOffering: { findMany: vi.fn(), upsert: vi.fn() },
     courseProbe: {
       findMany: vi.fn(),
     },
@@ -61,6 +63,7 @@ vi.mock("@/lib/prisma", () => ({
 vi.mock("@/lib/email/search-delivery-outbox", () => deliveryOutboxMocks);
 vi.mock("@/lib/automation/course-monitoring", () => courseMonitoringMocks);
 vi.mock("@/lib/local-reader/service", () => localReaderServiceMocks);
+vi.mock("@/lib/places/simulator-google", () => simulatorDemandMocks);
 vi.mock(
   "@/lib/automation/provider-execution-marker",
   () => providerObservationMocks,
@@ -665,6 +668,9 @@ describe("createTeeSearchForUser", () => {
     mockedPrisma.course.update.mockResolvedValue({ id: "course-1" } as never);
     mockedPrisma.googlePlaceReview.findMany.mockResolvedValue([]);
     mockedPrisma.teeSearch.count.mockResolvedValue(0);
+    mockedPrisma.courseOffering.findMany.mockReset().mockResolvedValue([]);
+    mockedPrisma.courseOffering.upsert.mockReset();
+    simulatorDemandMocks.getSimulatorVenueForDemand.mockReset();
   });
 
   it("persists simulator demand from canonical verified offering duration without party-capacity filtering", async () => {
@@ -695,14 +701,190 @@ describe("createTeeSearchForUser", () => {
       }),
     }));
     await expect(createTeeSearchForUser("user-1", { ...input, players: 9 })).rejects.toThrow(/1 to 4 players/i);
-    await expect(createTeeSearchForUser("user-1", { ...input, durationMinutes: 90 })).rejects.toThrow(/session length/i);
+    await createTeeSearchForUser("user-1", { ...input, durationMinutes: 90 });
+    expect(mockedPrisma.teeSearch.create).toHaveBeenLastCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ durationMinutes: 90 }),
+    }));
     await createTeeSearchForUser("user-1", { ...input, durationMinutes: undefined });
     expect(mockedPrisma.teeSearch.create).toHaveBeenLastCalledWith(expect.objectContaining({
       data: expect.objectContaining({ durationMinutes: 60 }),
     }));
     await expect(createTeeSearchForUser("user-1", { ...input, startTime: "13:00", endTime: "14:00" }))
       .rejects.toThrow(/time window long enough/i);
-    expect(mockedPrisma.googlePlaceReview.findMany).not.toHaveBeenCalled();
+    expect(mockedPrisma.googlePlaceReview.findMany).toHaveBeenCalled();
+  });
+
+  const pendingSimulatorInput = {
+    mode: "SIMULATOR" as const, date: "2027-08-15", startTime: "13:00", endTime: "17:00",
+    players: 4, cadenceMinutes: 15, additionalEmails: [],
+    courses: [{ googlePlaceId: "pending-simulator", name: "Client supplied venue", rank: 1,
+      latitude: 0, longitude: 0, publicAccessStatus: "PUBLIC" as const,
+      website: "http://127.0.0.1/admin", timeZone: "Asia/Tokyo", distanceMeters: 500 }],
+  };
+
+  function pendingSimulatorOffering() {
+    return {
+      id: "pending-offering", courseId: "physical-venue", kind: "SIMULATOR", active: true,
+      publicAccessStatus: "UNVERIFIED", bookingUrl: "https://official-venue.example/" as string | null,
+      evidenceUrl: null, verifiedAt: null, supportedDurationsMinutes: [],
+      course: { id: "physical-venue", googlePlaceId: "pending-simulator",
+        name: "Official Indoor Golf", latitude: 41.3, longitude: -73.2,
+        timeZone: "America/New_York", isPublic: true, detectedPlatform: "TEEITUP" },
+    };
+  }
+
+  function mockPendingSimulatorCreation(website: string | null = "https://official-venue.example/") {
+    const offering = pendingSimulatorOffering();
+    offering.bookingUrl = website;
+    simulatorDemandMocks.getSimulatorVenueForDemand.mockResolvedValue({
+      googlePlaceId: "pending-simulator", name: "Official Indoor Golf", address: "10 Main St",
+      latitude: 41.3, longitude: -73.2, timeZone: "America/New_York", website: website ?? undefined,
+    });
+    mockedPrisma.course.findUnique.mockResolvedValue(null);
+    mockedPrisma.course.upsert.mockResolvedValue(offering.course as never);
+    mockedPrisma.courseOffering.upsert.mockResolvedValue(offering as never);
+    mockedPrisma.courseOffering.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([offering] as never);
+    mockedPrisma.teeSearch.create.mockResolvedValue({ id: "pending-search" } as never);
+    return offering;
+  }
+
+  it("saves newly discovered simulator demand from server-owned identity without claiming rental proof", async () => {
+    mockPendingSimulatorCreation();
+    await createTeeSearchForUser("owner-1", pendingSimulatorInput);
+    expect(simulatorDemandMocks.getSimulatorVenueForDemand).toHaveBeenCalledWith("pending-simulator", expect.anything());
+    expect(mockedPrisma.course.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { googlePlaceId: "pending-simulator" }, update: {},
+      create: expect.objectContaining({ name: "Official Indoor Golf", latitude: 41.3, longitude: -73.2,
+        website: "https://official-venue.example/", timeZone: "America/New_York", isPublic: null }),
+    }));
+    const courseCreate = mockedPrisma.course.upsert.mock.calls[0][0].create;
+    expect(courseCreate).not.toHaveProperty("detectedPlatform");
+    expect(courseCreate).not.toHaveProperty("layoutHoleCounts");
+    expect(mockedPrisma.courseOffering.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      where: { courseId_kind: { courseId: "physical-venue", kind: "SIMULATOR" } }, update: {},
+      create: expect.objectContaining({ publicAccessStatus: "UNVERIFIED", supportedDurationsMinutes: [],
+        bookingUrl: "https://official-venue.example/", monitoringState: "UNKNOWN", automationEligibility: "UNKNOWN" }),
+    }));
+    const offeringCreate = mockedPrisma.courseOffering.upsert.mock.calls[0][0].create;
+    expect(offeringCreate).not.toHaveProperty("verifiedAt");
+    expect(offeringCreate).not.toHaveProperty("evidenceUrl");
+    expect(offeringCreate).not.toHaveProperty("providerMetadata");
+    expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
+      userId: "owner-1", mode: "SIMULATOR", durationMinutes: 60,
+      preferences: { create: [expect.objectContaining({ course: { connect: { id: "physical-venue" } },
+        offering: { connect: { id: "pending-offering" } }, distanceMetersAtSelection: 500 })] },
+    }) }));
+    expect(mockedPrisma.course.update).not.toHaveBeenCalled();
+  });
+
+  it("saves source-missing simulator demand with no invented booking link", async () => {
+    mockPendingSimulatorCreation(null);
+    // Undefined is the explicit provider response here, not a client URL fallback.
+    simulatorDemandMocks.getSimulatorVenueForDemand.mockResolvedValue({
+      googlePlaceId: "pending-simulator", name: "Official Indoor Golf", latitude: 41.3,
+      longitude: -73.2, timeZone: "America/New_York",
+    });
+    await createTeeSearchForUser("owner-1", pendingSimulatorInput);
+    expect(mockedPrisma.courseOffering.upsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({ bookingUrl: null, publicAccessStatus: "UNVERIFIED" }),
+    }));
+  });
+
+  it("reuses pending offerings without evidence or supported durations and preserves outdoor knowledge", async () => {
+    const offering = pendingSimulatorOffering();
+    mockedPrisma.courseOffering.findMany.mockResolvedValue([offering] as never);
+    mockedPrisma.teeSearch.create.mockResolvedValue({ id: "pending-search" } as never);
+    await createTeeSearchForUser("owner-1", pendingSimulatorInput);
+    expect(simulatorDemandMocks.getSimulatorVenueForDemand).not.toHaveBeenCalled();
+    expect(mockedPrisma.course.upsert).not.toHaveBeenCalled();
+    expect(mockedPrisma.courseOffering.upsert).not.toHaveBeenCalled();
+    expect(mockedPrisma.course.update).not.toHaveBeenCalled();
+    expect(offering.course).toMatchObject({ isPublic: true, detectedPlatform: "TEEITUP" });
+  });
+
+  it.each([
+    { accessOverride: "VERIFIED_PRIVATE", classification: "MEMBERS_ONLY_SIMULATOR" },
+    { accessOverride: "VERIFIED_NON_COURSE", classification: "DRIVING_RANGE" },
+  ])("rejects exact non-rental review %s before resolving or saving", async (review) => {
+    mockedPrisma.googlePlaceReview.findMany.mockResolvedValue([{ ...review, googlePlaceId: "pending-simulator",
+      active: true, updatedAt: new Date(), canonicalPlaceId: null }] as never);
+    mockedPrisma.courseOffering.findMany.mockResolvedValue([]);
+    await expect(createTeeSearchForUser("owner-1", pendingSimulatorInput)).rejects.toThrow(/not a public simulator/i);
+    expect(simulatorDemandMocks.getSimulatorVenueForDemand).not.toHaveBeenCalled();
+    expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
+  });
+
+  it("refuses an offering withdrawn between discovery and persistence", async () => {
+    const offering = pendingSimulatorOffering();
+    mockedPrisma.courseOffering.findMany.mockResolvedValueOnce([offering] as never)
+      .mockResolvedValueOnce([{ ...offering, publicAccessStatus: "NOT_PUBLIC" }] as never);
+    await expect(createTeeSearchForUser("owner-1", pendingSimulatorInput)).rejects.toThrow(/no longer available/i);
+    expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
+  });
+
+  it("preserves concurrent offering verification when upsert returns an existing reviewed rental", async () => {
+    const offering = mockPendingSimulatorCreation();
+    const reviewed = { ...offering, publicAccessStatus: "PUBLIC", supportedDurationsMinutes: [120],
+      evidenceUrl: "https://official-venue.example/rentals", verifiedAt: new Date() };
+    mockedPrisma.courseOffering.upsert.mockResolvedValue(reviewed as never);
+    mockedPrisma.courseOffering.findMany.mockReset().mockResolvedValueOnce([]).mockResolvedValueOnce([reviewed] as never);
+    await createTeeSearchForUser("owner-1", pendingSimulatorInput);
+    expect(mockedPrisma.courseOffering.upsert.mock.calls[0][0].update).toEqual({});
+    expect(mockedPrisma.teeSearch.create).toHaveBeenCalled();
+    expect(reviewed).toMatchObject({ publicAccessStatus: "PUBLIC", supportedDurationsMinutes: [120] });
+  });
+
+  it("adds only an unverified simulator offering to an existing physical outdoor course", async () => {
+    const offering = mockPendingSimulatorCreation();
+    const outdoor = { ...offering.course, isPublic: true, detectedPlatform: "TEEITUP",
+      bookingMetadata: { courseId: "physical-18" }, layoutHoleCounts: [18],
+      detectedBookingUrl: "https://outdoor.example/tee-times", automationEligibility: "ALLOWED" };
+    mockedPrisma.course.findUnique.mockResolvedValue(outdoor as never);
+    mockedPrisma.course.upsert.mockResolvedValue(outdoor as never);
+    await createTeeSearchForUser("owner-1", pendingSimulatorInput);
+    expect(mockedPrisma.course.upsert.mock.calls[0][0].update).toEqual({});
+    expect(mockedPrisma.course.update).not.toHaveBeenCalled();
+    expect(outdoor).toMatchObject({ isPublic: true, detectedPlatform: "TEEITUP", layoutHoleCounts: [18],
+      detectedBookingUrl: "https://outdoor.example/tee-times", bookingMetadata: { courseId: "physical-18" } });
+  });
+
+  it("rejects two provider aliases for the same simulator before writing demand", async () => {
+    const offering = pendingSimulatorOffering();
+    mockedPrisma.googlePlaceReview.findMany.mockResolvedValue([{ googlePlaceId: "simulator-alias",
+      canonicalPlaceId: "pending-simulator", classification: "INDOOR_SIMULATOR",
+      accessOverride: "VERIFIED_NON_COURSE", active: true, updatedAt: new Date() }] as never);
+    mockedPrisma.courseOffering.findMany.mockResolvedValue([offering] as never);
+    await expect(createTeeSearchForUser("owner-1", { ...pendingSimulatorInput, courses: [
+      pendingSimulatorInput.courses[0], { ...pendingSimulatorInput.courses[0], googlePlaceId: "simulator-alias", rank: 2 },
+    ] })).rejects.toThrow(/distinct simulator/i);
+    expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
+    expect(mockedPrisma.course.upsert).not.toHaveBeenCalled();
+  });
+
+  it("refuses an exact review retargeted while the provider identity is being resolved", async () => {
+    mockPendingSimulatorCreation();
+    mockedPrisma.googlePlaceReview.findMany.mockReset().mockResolvedValueOnce([]).mockResolvedValueOnce([{
+      googlePlaceId: "pending-simulator", canonicalPlaceId: "different-physical-venue",
+      classification: "INDOOR_SIMULATOR", accessOverride: "VERIFIED_NON_COURSE", active: true,
+    }] as never);
+    await expect(createTeeSearchForUser("owner-1", pendingSimulatorInput)).rejects.toThrow(/venue changed/i);
+    expect(mockedPrisma.course.upsert).not.toHaveBeenCalled();
+    expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects an offering-only selection when a new canonical review proves members-only access", async () => {
+    const offering = pendingSimulatorOffering();
+    mockedPrisma.courseOffering.findMany.mockResolvedValue([offering] as never);
+    mockedPrisma.googlePlaceReview.findMany.mockReset().mockResolvedValueOnce([]).mockResolvedValueOnce([
+      { googlePlaceId: "pending-simulator", canonicalPlaceId: "members-only-canonical",
+        classification: "INDOOR_SIMULATOR", accessOverride: "VERIFIED_NON_COURSE", active: true },
+      { googlePlaceId: "members-only-canonical", canonicalPlaceId: null,
+        classification: "MEMBERS_ONLY_SIMULATOR", accessOverride: null, active: true },
+    ] as never);
+    await expect(createTeeSearchForUser("owner-1", { ...pendingSimulatorInput,
+      courses: [{ offeringId: "pending-offering", name: "Venue", latitude: 41.3, longitude: -73.2, rank: 1 }],
+    })).rejects.toThrow(/not a public simulator/i);
+    expect(mockedPrisma.teeSearch.create).not.toHaveBeenCalled();
   });
 
   it("accepts the next course-local date after UTC midnight and ignores the submitted timezones", async () => {
@@ -2104,6 +2286,7 @@ describe("updateTeeSearchStatusForUser", () => {
 describe("updateTeeSearchForUser", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockedPrisma.googlePlaceReview.findMany.mockResolvedValue([]);
     mockedPrisma.teeSearch.findUniqueOrThrow
       .mockResolvedValueOnce({ id: "search-1" } as never)
       .mockResolvedValueOnce({ id: "search-1", preferences: [] } as never);
@@ -2133,6 +2316,43 @@ describe("updateTeeSearchForUser", () => {
     await expect(updateTeeSearchForUser("user-1", "search-1", { status: "ACTIVE" }))
       .rejects.toThrow(/no longer supports/i);
     expect(mockedPrisma.teeSearch.update).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets an owner edit and resume pending simulator demand without rental proof", async () => {
+    const search = { mode: "SIMULATOR", date: new Date("2027-08-15T00:00:00.000Z"),
+      startTime: "13:00", endTime: "17:00", players: 4, durationMinutes: 60,
+      preferences: [{ offering: { kind: "SIMULATOR", active: true, publicAccessStatus: "UNVERIFIED",
+        bookingUrl: null, evidenceUrl: null, verifiedAt: null, supportedDurationsMinutes: [],
+        course: { timeZone: "America/New_York", googlePlaceId: "pending-venue" } } }],
+    };
+    mockedPrisma.teeSearch.findUniqueOrThrow.mockReset().mockResolvedValue(search as never);
+    mockedPrisma.teeSearch.update.mockResolvedValue({ mode: "SIMULATOR", preferences: [], matches: [], probes: [],
+      statusEmailSnapshot: null } as never);
+    await expect(updateTeeSearchForUser("owner-1", "search-1", { startTime: "14:00" })).resolves.toBeDefined();
+    await expect(updateTeeSearchForUser("owner-1", "search-1", { status: "ACTIVE" })).resolves.toBeDefined();
+    expect(mockedPrisma.teeSearch.update).toHaveBeenCalledTimes(2);
+    expect(mockedPrisma.course.update).not.toHaveBeenCalled();
+    expect(mockedPrisma.courseOffering.upsert).not.toHaveBeenCalled();
+  });
+
+  it.each(["direct", "canonical alias"])("rejects resuming pending demand after a %s members-only simulator review", async (identity) => {
+    mockedPrisma.teeSearch.findUniqueOrThrow.mockReset().mockResolvedValue({
+      mode: "SIMULATOR", date: new Date("2027-08-15T00:00:00.000Z"),
+      startTime: "13:00", endTime: "17:00", players: 4, durationMinutes: 60,
+      preferences: [{ offering: { kind: "SIMULATOR", active: true, publicAccessStatus: "UNVERIFIED",
+        bookingUrl: null, evidenceUrl: null, verifiedAt: null, supportedDurationsMinutes: [],
+        course: { timeZone: "America/New_York", googlePlaceId: "members-venue" } } }],
+    } as never);
+    mockedPrisma.googlePlaceReview.findMany.mockResolvedValue(identity === "direct" ? [{ googlePlaceId: "members-venue",
+      active: true, classification: "MEMBERS_ONLY_SIMULATOR", accessOverride: null, canonicalPlaceId: null }] as never : [
+      { googlePlaceId: "members-venue", active: true, classification: "INDOOR_SIMULATOR",
+        accessOverride: "VERIFIED_NON_COURSE", canonicalPlaceId: "canonical-members-venue" },
+      { googlePlaceId: "canonical-members-venue", active: true, classification: "MEMBERS_ONLY_SIMULATOR",
+        accessOverride: null, canonicalPlaceId: null },
+    ] as never);
+    await expect(updateTeeSearchForUser("owner-1", "search-1", { status: "ACTIVE" }))
+      .rejects.toThrow(/not a public simulator/i);
+    expect(mockedPrisma.teeSearch.update).not.toHaveBeenCalled();
   });
 
   it("returns zero current matches after editing the date without changing historical availability", async () => {

@@ -5,6 +5,9 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { isSearchWindowActive } from "./date-boundary";
 import { getSyntheticMultiCycleExpiresAt } from "./synthetic-test-window";
+import { listSimulatorSupportDispatchCandidates } from "./simulator-support-incidents";
+import { isCurrentSimulatorSupportSource, isValidSimulatorSupportClaim, SIMULATOR_SUPPORT_SOURCE_SELECT, type SimulatorSupportClaim } from "./simulator-support-policy";
+import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
 import {
   COURSE_DISPATCH_SOURCE_SELECT,
   createCourseDispatchIntentDigest,
@@ -36,7 +39,11 @@ export type CourseDispatchAudit = {
   launchStartedAt?: string;
   boundAt?: string;
   consumedAt?: string;
+  simulatorClaim?: SimulatorSupportClaim;
   target: {
+    mode?: "SIMULATOR";
+    offeringId?: string;
+    offeringSourceFingerprint?: string;
     incidentId: string;
     courseId: string;
     cycle: number;
@@ -48,7 +55,7 @@ export type CourseDispatchAudit = {
   };
 };
 
-function parseAudit(value: unknown): CourseDispatchAudit | null {
+export function parseCourseDispatchAudit(value: unknown): CourseDispatchAudit | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const audit = value as Partial<CourseDispatchAudit>;
   if (
@@ -84,6 +91,10 @@ function parseAudit(value: unknown): CourseDispatchAudit | null {
       new Set(audit.target.searchRefs.map((ref) => ref.id)).size !== audit.target.searchRefs.length ||
       (audit.state === "BOUND" && !audit.childThreadId) ||
       (["RESERVED", "STARTING"].includes(audit.state ?? "") && audit.childThreadId !== null)) return null;
+  if (audit.target.mode !== undefined && audit.target.mode !== "SIMULATOR") return null;
+  if (audit.target.mode === "SIMULATOR" &&
+      (typeof audit.target.offeringId !== "string" || !audit.target.offeringId || !/^[a-f0-9]{64}$/i.test(audit.target.offeringSourceFingerprint ?? "") ||
+       (audit.state === "CONSUMED" && !isValidSimulatorSupportClaim(audit.simulatorClaim)))) return null;
   return audit as CourseDispatchAudit;
 }
 
@@ -107,6 +118,7 @@ function countSearchIds(ids: readonly string[]) {
 export function selectCourseDispatchTargets<T extends {
   courseId: string;
   activeRealSearchCount: number;
+  selectionKey?: string;
 }>(input: {
   candidates: readonly T[];
   sourceSearchesByCourse: ReadonlyMap<string, readonly (CourseDispatchSourceRef & { trafficClass: string })[]>;
@@ -125,7 +137,7 @@ export function selectCourseDispatchTargets<T extends {
     a.courseId.localeCompare(b.courseId));
   for (const candidate of ordered) {
     if (seen.has(candidate.courseId)) continue;
-    const sources = input.sourceSearchesByCourse.get(candidate.courseId) ?? [];
+    const sources = input.sourceSearchesByCourse.get(candidate.selectionKey ?? candidate.courseId) ?? [];
     const source = sources.find((ref) => admitted.has(ref.id) && (searchCounts.get(ref.id) ?? 0) < 5) ??
       (admitted.size < 3 ? sources.find((ref) => (searchCounts.get(ref.id) ?? 0) < 5) : undefined);
     if (!source) continue;
@@ -168,10 +180,10 @@ async function readRuns(tx: Prisma.TransactionClient, since?: Date) {
     select: { id: true, promptVersion: true, audit: true, status: true },
   });
   const dispatchRuns = runs.filter((run) => run.promptVersion === COURSE_DISPATCH_PROMPT_VERSION);
-  if (runs.length === 64 || dispatchRuns.some((run) => !parseAudit(run.audit))) {
+  if (runs.length === 64 || dispatchRuns.some((run) => !parseCourseDispatchAudit(run.audit))) {
     throw new Error("Course dispatch history reached the bounded read limit.");
   }
-  return dispatchRuns.map((run) => ({ ...run, parsed: parseAudit(run.audit) }));
+  return dispatchRuns.map((run) => ({ ...run, parsed: parseCourseDispatchAudit(run.audit) }));
 }
 
 async function expireUnlaunched(
@@ -205,6 +217,23 @@ async function revokeStaleBound(
     const audit = run.parsed;
     if (run.status !== "RUNNING" || !audit || audit.state !== "BOUND") continue;
     const baseChanged = audit.baseSha !== currentBaseSha;
+    if (audit.target.mode === "SIMULATOR") {
+      const incident = baseChanged ? null : await tx.simulatorSupportIncident.findUnique({ where: { id: audit.target.incidentId }, include: { offering: { include: { course: { select: { timeZone: true } } } } } });
+      const searches = incident ? await tx.teeSearch.findMany({ where: { id: { in: audit.target.searchRefs.map(ref => ref.id) } }, select: SIMULATOR_SUPPORT_SOURCE_SELECT }) : [];
+      const stale = !incident || incident.status !== "AUTO_INVESTIGATING" || incident.offeringId !== audit.target.offeringId ||
+        incident.updatedAt.toISOString() !== audit.target.updatedAt ||
+        getSimulatorOfferingSourceFingerprint(incident.offering) !== audit.target.offeringSourceFingerprint ||
+        searches.length !== audit.target.searchRefs.length || searches.some(search => {
+          const ref = audit.target.searchRefs.find(candidate => candidate.id === search.id);
+          return !ref || !isCurrentSimulatorSupportSource({ search, ref, offeringId: incident.offeringId, trafficClass: audit.target.trafficClass, timeZone: incident.offering.course.timeZone, now });
+        });
+      if (stale) {
+        const updated: CourseDispatchAudit = { ...audit, state: "CANCELLED" };
+        await tx.automationRun.update({ where: { id: run.id }, data: { audit: updated as unknown as Prisma.InputJsonValue, status: "COMPLETED", completedAt: now, outcome: "stale_simulator_assignment" } });
+        run.status = "COMPLETED"; run.parsed = updated;
+      }
+      continue;
+    }
     const incident = baseChanged ? null : await tx.courseSupportIncident.findUnique({
       where: { id: audit.target.incidentId },
       select: {
@@ -269,7 +298,8 @@ export async function planCourseSupportCourseDispatch(input: {
       select: { id: true, leaseExpiresAt: true, summary: true, incidents: { select: { courseId: true } } },
     });
     const live = runs.filter((run) => run.status === "RUNNING" &&
-      ["RESERVED", "STARTING", "BOUND"].includes(run.parsed?.state ?? ""));
+      (["RESERVED", "STARTING", "BOUND"].includes(run.parsed?.state ?? "") ||
+       (run.parsed?.target.mode === "SIMULATOR" && run.parsed.state === "CONSUMED")));
     const occupiedCourses = new Set([
       ...activeBatches.flatMap((batch) => batch.incidents.length > 0
         ? batch.incidents.map((entry) => entry.courseId) : [batch.id]),
@@ -287,7 +317,9 @@ export async function planCourseSupportCourseDispatch(input: {
     // launch budget. The legacy background fallback must not interpret a zero
     // launch list as evidence that no active-alert course is waiting.
     if (availableStarts > 0 || live.length === 0) {
-      const candidates = await listCourseSupportDispatchCandidates(now, tx);
+      const outdoorCandidates = await listCourseSupportDispatchCandidates(now, tx);
+      const simulatorCandidates = (await listSimulatorSupportDispatchCandidates(now, tx)).map(candidate => ({ ...candidate, selectionKey: `simulator:${candidate.offeringId}` }));
+      const candidates = [...outdoorCandidates, ...simulatorCandidates];
       const candidateCourses = [...new Set(candidates.map((candidate) => candidate.courseId))];
       const [courses, preferences] = await Promise.all([
         tx.course.findMany({ where: { id: { in: candidateCourses } }, select: { id: true, timeZone: true } }),
@@ -333,6 +365,7 @@ export async function planCourseSupportCourseDispatch(input: {
           intentDigest: createCourseDispatchIntentDigest(ref.teeSearch),
           trafficClass: ref.teeSearch.trafficClass,
         }))] as const));
+      for (const candidate of simulatorCandidates) sourceSearchesByCourse.set(candidate.selectionKey, candidate.sources);
       const selection = selectCourseDispatchTargets({
         candidates,
         sourceSearchesByCourse,
@@ -374,6 +407,10 @@ export async function planCourseSupportCourseDispatch(input: {
           reservedAt: now.toISOString(),
           expiresAt: new Date(now.getTime() + RESERVATION_MS).toISOString(),
           target: {
+            ...("mode" in candidate && candidate.mode === "SIMULATOR" ? {
+              mode: "SIMULATOR" as const, offeringId: candidate.offeringId,
+              offeringSourceFingerprint: candidate.offeringSourceFingerprint,
+            } : {}),
             incidentId: candidate.incidentId,
             courseId: candidate.courseId,
             cycle: candidate.cycle,
@@ -417,16 +454,19 @@ export async function planCourseSupportCourseDispatch(input: {
       activeCount: activeBatches.length,
       activeCourseCount,
       occupiedCourseCount: occupiedCourses.size,
-      reservedCount: runs.filter((run) => run.status === "RUNNING" &&
-        ["RESERVED", "STARTING", "BOUND"].includes(run.parsed?.state ?? "")).length,
+      reservedCount: runs.filter(run => run.status === "RUNNING" &&
+        (["RESERVED", "STARTING", "BOUND"].includes(run.parsed?.state ?? "") ||
+         (run.parsed?.target.mode === "SIMULATOR" && run.parsed.state === "CONSUMED"))).length,
       attention: {
         startingCount: runs.filter((run) => run.status === "RUNNING" && run.parsed?.state === "STARTING").length,
         boundCount: runs.filter((run) => run.status === "RUNNING" && run.parsed?.state === "BOUND").length,
-        expiredBatchCount: activeBatches.filter((batch) => batch.leaseExpiresAt <= now).length,
+        expiredBatchCount: activeBatches.filter((batch) => batch.leaseExpiresAt <= now).length +
+          live.filter(run => run.parsed?.simulatorClaim && new Date(run.parsed.simulatorClaim.leaseExpiresAt) <= now).length,
       },
       eligibleCount,
-      launchItems: runs.filter((run) => run.parsed?.tickRef === tick && run.status === "RUNNING")
-        .map((run) => ({ assignmentRef: run.parsed!.assignmentRef, state: run.parsed!.state })),
+      launchItems: runs.filter((run) => run.parsed?.tickRef === tick && run.status === "RUNNING" && ["RESERVED", "STARTING", "BOUND"].includes(run.parsed?.state ?? ""))
+        .map((run) => ({ assignmentRef: run.parsed!.assignmentRef, state: run.parsed!.state,
+          ...(run.parsed!.target.mode === "SIMULATOR" ? { mode: "SIMULATOR" as const } : {}) })),
     };
   }));
 }
@@ -495,11 +535,11 @@ export function cancelCourseSupportCourseDispatch(input: { ownerThreadId: string
   return transition({ ...input, next: "CANCELLED" });
 }
 
-export async function loadBoundCourseSupportDispatchAssignment(input: { assignmentRef: string; childThreadId: string }) {
+export async function loadBoundCourseSupportDispatchAssignment(input: { assignmentRef: string; childThreadId: string; mode?: "SIMULATOR" }) {
   if (!input.childThreadId.trim()) throw new Error("Course dispatch requires the native child task id.");
   const runs = await readRuns(prisma);
   const audit = runs.find((run) => run.parsed?.assignmentRef === input.assignmentRef)?.parsed;
-  if (!audit || audit.state !== "BOUND" || audit.childThreadId !== input.childThreadId) {
+  if (!audit || audit.state !== "BOUND" || audit.childThreadId !== input.childThreadId || audit.target.mode !== input.mode) {
     throw new Error("Course dispatch assignment is not bound to this task.");
   }
   return audit;
@@ -515,13 +555,15 @@ export async function getCourseSupportCourseDispatchAssignment(input: { assignme
   if (!audit || audit.state !== "BOUND" || audit.childThreadId !== input.childThreadId) {
     throw new Error("Course dispatch assignment is not bound to this task.");
   }
-  return { outcome: "bound" as const, assignmentRef: audit.assignmentRef, baseSha: audit.baseSha, state: audit.state, tickRef: audit.tickRef };
+  return { outcome: "bound" as const, assignmentRef: audit.assignmentRef, baseSha: audit.baseSha, state: audit.state, tickRef: audit.tickRef,
+    ...(audit.target.mode === "SIMULATOR" ? { mode: "SIMULATOR" as const } : {}) };
 }
 
 export async function listLiveCourseSupportDispatchReservations(tx: Prisma.TransactionClient) {
   const runs = await readRuns(tx);
   return runs.filter((run) => run.status === "RUNNING" &&
-    ["RESERVED", "STARTING", "BOUND"].includes(run.parsed?.state ?? ""))
+    (["RESERVED", "STARTING", "BOUND"].includes(run.parsed?.state ?? "") ||
+     (run.parsed?.target.mode === "SIMULATOR" && run.parsed.state === "CONSUMED")))
     .map((run) => ({ runId: run.id, audit: run.parsed! }));
 }
 
@@ -531,7 +573,7 @@ export async function consumeBoundCourseSupportDispatchAssignment(
 ) {
   const live = await listLiveCourseSupportDispatchReservations(tx);
   const assignment = live.find((entry) => entry.audit.assignmentRef === input.assignmentRef);
-  if (!assignment || assignment.audit.state !== "BOUND" ||
+  if (!assignment || assignment.audit.target.mode === "SIMULATOR" || assignment.audit.state !== "BOUND" ||
       assignment.audit.childThreadId !== input.childThreadId ||
       assignment.audit.baseSha !== input.baseSha) {
     throw new Error("Course dispatch assignment changed before atomic claim.");
@@ -547,4 +589,10 @@ export async function consumeBoundCourseSupportDispatchAssignment(
     },
   });
   return next;
+}
+
+export async function hasSimulatorSupportImplementationOwnership(tx: Prisma.TransactionClient, exceptAssignmentRef?: string) {
+  const live = await listLiveCourseSupportDispatchReservations(tx);
+  return live.some(({ audit }) => audit.assignmentRef !== exceptAssignmentRef && audit.target.mode === "SIMULATOR" &&
+    audit.state === "CONSUMED" && (audit.simulatorClaim?.plannedPaths.length ?? 0) > 0);
 }

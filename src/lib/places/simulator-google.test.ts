@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildGooglePlaceReviewIndex, type GooglePlaceReviewRecord } from "./google-place-reviews";
 import type { GooglePlace } from "./google";
-import { filterSimulatorPlaces, searchNearbySimulatorVenues, searchSimulatorVenuesByName } from "./simulator-google";
+import { filterSimulatorPlaces, getSimulatorVenueForDemand, searchNearbySimulatorVenues, searchSimulatorVenuesByName } from "./simulator-google";
 import { buildSimulatorOfferingIndex, type SimulatorOfferingRecord } from "./simulator-offerings";
 
 const reviews = buildGooglePlaceReviewIndex([]);
@@ -24,6 +24,58 @@ describe("simulator Places discovery", () => {
     const facts = [review("place-1", "INDOOR_SIMULATOR"), review("bad", "NON_COURSE_PARKING")];
     const index = buildGooglePlaceReviewIndex(facts);
     expect(filterSimulatorPlaces([place, { ...place, id: "bad" }], index, emptyOfferings)).toEqual([place]);
+  });
+
+  it("excludes a reviewed members-only simulator even when its outdoor access is unclassified", () => {
+    const facts = buildGooglePlaceReviewIndex([review("place-1", "MEMBERS_ONLY_SIMULATOR", null)]);
+    expect(filterSimulatorPlaces([place], facts, emptyOfferings)).toEqual([]);
+  });
+
+  it("refreshes the exact provider identity for pending demand and retains canonical alias correction", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const fetch = vi.fn(async () => new Response(JSON.stringify(whitneyPlayersClub), { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    const candidate = await getSimulatorVenueForDemand(whitneyPlayersClub.id as string,
+      buildGooglePlaceReviewIndex([whitneySimulatorAlias()]));
+    expect(candidate).toMatchObject({ googlePlaceId: whitneyCourse.id,
+      name: whitneyCourse.displayName?.text, website: "https://www.whitneyfarmsgc.com/" });
+    expect(fetch.mock.calls[0][0]).toBe(`https://places.googleapis.com/v1/places/${whitneyPlayersClub.id}`);
+  });
+
+  it("saves safe provider identity without passing a private or credential-bearing source URL", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    for (const websiteUri of ["http://127.0.0.1/", "https://secret:token@venue.example/"]) {
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ...place, websiteUri }), { status: 200 })));
+      expect((await getSimulatorVenueForDemand("place-1", reviews)).website).toBeUndefined();
+    }
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ...place, websiteUri: undefined }), { status: 200 })));
+    expect((await getSimulatorVenueForDemand("place-1", reviews)).website).toBeUndefined();
+  });
+
+  it("rejects a mismatched provider ID and never fetches an arbitrary input URL", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const fetch = vi.fn(async () => new Response(JSON.stringify({ ...place, id: "different-place" }), { status: 200 }));
+    vi.stubGlobal("fetch", fetch);
+    await expect(getSimulatorVenueForDemand("place-1", reviews)).rejects.toThrow(/could not be confirmed/i);
+    await expect(getSimulatorVenueForDemand("https://127.0.0.1/admin", reviews)).rejects.toThrow(/invalid/i);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["direct", "canonical alias"])("does not recover a %s private rental from saved provisional demand", async (identity) => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const pending = { id: "rental-1", courseId: "course-1", active: true, publicAccessStatus: "UNVERIFIED",
+      bookingUrl: null, evidenceUrl: null, verifiedAt: null, updatedAt: new Date(), maxPartySize: null,
+      supportedDurationsMinutes: [], automationEligibility: "UNKNOWN", monitoringState: "UNKNOWN",
+      course: { id: "course-1", googlePlaceId: "place-1", name: "Venue", address: null,
+        latitude: 41.24, longitude: -73.2, timeZone: "America/New_York", website: null, phone: null },
+    } satisfies SimulatorOfferingRecord;
+    const facts = buildGooglePlaceReviewIndex(identity === "direct"
+      ? [review("place-1", "MEMBERS_ONLY_SIMULATOR", null)]
+      : [{ ...review("place-1", "INDOOR_SIMULATOR"), canonicalPlaceId: "canonical-members-only" },
+        review("canonical-members-only", "MEMBERS_ONLY_SIMULATOR", null)]);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ places: [] }), { status: 200 })));
+    expect(await searchNearbySimulatorVenues({ latitude: 41.24, longitude: -73.2 }, facts,
+      buildSimulatorOfferingIndex([pending]))).toEqual([]);
   });
 
   it("does not mistake a residential website or unrelated text match for a simulator rental", () => {
@@ -96,6 +148,54 @@ describe("simulator Places discovery", () => {
     expect(await searchSimulatorVenuesByName({ query: "Example Indoor Golf" }, reviews, emptyOfferings)).toHaveLength(2);
   });
 
+  it("collapses the reviewed Whitney Farms simulator alias without claiming rental readiness", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const index = buildGooglePlaceReviewIndex([whitneySimulatorAlias()]);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      places: [whitneyCourse, whitneyPlayersClub]
+    }), { status: 200 })));
+
+    const candidates = await searchNearbySimulatorVenues({ latitude: 41.304, longitude: -73.213 }, index, emptyOfferings);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({
+      googlePlaceId: whitneyCourse.id, name: whitneyCourse.displayName?.text,
+      website: "https://www.whitneyfarmsgc.com/", mode: "SIMULATOR",
+      publicAccessStatus: "UNVERIFIED", monitoringReadiness: "VERIFYING"
+    });
+    expect(candidates[0]).not.toHaveProperty("offeringId");
+    expect(index.verifiedPublicCourses).toEqual([]);
+  });
+
+  it("recovers the Whitney Farms canonical venue from its simulator alias when the course is absent", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const index = buildGooglePlaceReviewIndex([whitneySimulatorAlias()]);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ places: [whitneyPlayersClub] }), { status: 200 })));
+
+    const nearby = await searchNearbySimulatorVenues({ latitude: 41.304, longitude: -73.213 }, index, emptyOfferings);
+    const lookup = await searchSimulatorVenuesByName({ query: "The Players Club at Whitney Farms Golf Club" }, index, emptyOfferings);
+    for (const candidates of [nearby, lookup]) {
+      expect(candidates).toHaveLength(1);
+      expect(candidates[0]).toMatchObject({
+        googlePlaceId: whitneyCourse.id, name: whitneyCourse.displayName?.text,
+        address: "175 Shelton Rd, Monroe, CT 06468, USA", website: "https://www.whitneyfarmsgc.com/",
+        mode: "SIMULATOR", publicAccessStatus: "UNVERIFIED", monitoringReadiness: "VERIFYING"
+      });
+    }
+  });
+
+  it("does not let the Whitney Farms indoor alias override a canonical private review", async () => {
+    process.env.GOOGLE_PLACES_API_KEY = "test-key";
+    const alias = whitneySimulatorAlias();
+    const privateCourse = review(whitneyCourse.id as string, "PRIVATE_MEMBER_CONTROLLED", "VERIFIED_PRIVATE");
+    const index = buildGooglePlaceReviewIndex([alias, privateCourse]);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ places: [whitneyCourse, whitneyPlayersClub] }), { status: 200 })));
+
+    expect(await searchNearbySimulatorVenues({ latitude: 41.304, longitude: -73.213 }, index, emptyOfferings)).toEqual([]);
+    expect(index.byPlaceId.get(whitneyCourse.id as string)?.accessOverride).toBe("VERIFIED_PRIVATE");
+    expect(index.byPlaceId.get(whitneyPlayersClub.id as string)?.accessOverride).toBe("VERIFIED_NON_COURSE");
+    expect(index.verifiedPublicCourses).toEqual([]);
+  });
+
   it("keeps direct name lookup stricter than the bounded nearby golf-name fallback", async () => {
     process.env.GOOGLE_PLACES_API_KEY = "test-key";
     const golfNamedPlace = { ...place, displayName: { text: "Example Golf Club" }, primaryType: "golf_course", types: ["golf_course"] };
@@ -121,4 +221,29 @@ function review(googlePlaceId: string, classification: string, accessOverride: G
   return { googlePlaceId, name: "Reviewed Venue", classification, accessOverride, evidenceUrl: "https://venue.example", reviewedAt: new Date(), active: true,
     canonicalPlaceId: null, canonicalName: null, canonicalAddress: null, canonicalWebsiteUrl: null, canonicalPhone: null,
     latitude: null, longitude: null, retainWhenCanonicalAbsent: false };
+}
+
+// Official venue identity and simulator lounge are distinct Places records for one facility.
+const whitneyCourse: GooglePlace = {
+  ...place, id: "ChIJZ3Rrpzzi54kR_g0Sly9n8Bc", displayName: { text: "Chris Bargas Golf Club at Whitney Farms" },
+  primaryType: "golf_course", types: ["golf_course", "indoor_golf_course"],
+  formattedAddress: "175 Shelton Rd, Monroe, CT 06468, USA", websiteUri: "https://www.whitneyfarmsgc.com/",
+  location: { latitude: 41.304, longitude: -73.213 }
+};
+const whitneyPlayersClub: GooglePlace = {
+  ...whitneyCourse, id: "ChIJDb2t7lHj54kRl0o341PUdx0", displayName: { text: "The Players Club at Whitney Farms Golf Club" },
+  primaryType: "indoor_golf_course", types: ["indoor_golf_course"],
+  websiteUri: "https://www.whitneyfarmsgc.com/the-players-club-trackman-simulators"
+};
+
+function whitneySimulatorAlias(): GooglePlaceReviewRecord {
+  return {
+    ...review(whitneyPlayersClub.id as string, "INDOOR_SIMULATOR"),
+    name: whitneyPlayersClub.displayName?.text as string,
+    evidenceUrl: "https://www.whitneyfarmsgc.com/the-players-club-trackman-simulators",
+    canonicalPlaceId: whitneyCourse.id as string, canonicalName: whitneyCourse.displayName?.text as string,
+    canonicalAddress: whitneyCourse.formattedAddress as string,
+    canonicalWebsiteUrl: "https://www.whitneyfarmsgc.com/", canonicalPhone: "(203) 268-0707",
+    retainWhenCanonicalAbsent: true
+  };
 }

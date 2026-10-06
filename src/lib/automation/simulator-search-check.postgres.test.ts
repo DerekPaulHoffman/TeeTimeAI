@@ -9,9 +9,11 @@ const mocks = vi.hoisted(() => ({
   fetch: vi.fn(),
   sendMatch: vi.fn(),
   sendStatus: vi.fn(),
+  sourceCheck: vi.fn(),
 }));
 
 vi.mock("@/lib/simulators/providers", () => ({ fetchSimulatorAvailability: mocks.fetch }));
+vi.mock("./simulator-source-check", () => ({ checkSimulatorOfficialSource: mocks.sourceCheck }));
 vi.mock("@/lib/automation/provider-request-lease", () => ({
   runWithProviderRequestLease: async (_family: string, worker: () => Promise<unknown>) =>
     ({ acquired: true, value: await worker() }),
@@ -64,6 +66,7 @@ describe.skipIf(!databaseUrl)("simulator check against isolated Postgres", () =>
     mocks.fetch.mockReset();
     mocks.sendMatch.mockReset().mockResolvedValue({ deliveryStatus: "sent", id: "intercepted-test-send" });
     mocks.sendStatus.mockReset().mockResolvedValue({ deliveryStatus: "sent", id: "intercepted-test-send" });
+    mocks.sourceCheck.mockReset().mockResolvedValue({ outcome: "READ_OK", httpStatus: 200 });
   });
 
   async function fixture(venueCount: number, options: { setupPending?: boolean; additionalEmails?: string[] } = {}) {
@@ -117,6 +120,154 @@ describe.skipIf(!databaseUrl)("simulator check against isolated Postgres", () =>
       endsAt: new Date(`${target}T16:00:00.000Z`), maxPartySize: 8, bookingUrl };
   }
 
+  it("immediately checks an unknown venue, queues support and sends one truthful status without a booking URL", async () => {
+    const { search, venues, run, lease } = await fixture(1, { setupPending: true });
+    const venue = venues[0];
+    await client.courseOffering.update({ where: { id: venue.offering.id }, data: {
+      publicAccessStatus: "UNVERIFIED", verifiedAt: null, evidenceUrl: null,
+      bookingUrl: null, providerFamilyKey: null, supportedDurationsMinutes: [],
+    } });
+    const outdoorBefore = await client.course.findUniqueOrThrow({ where: { id: venue.course.id } });
+    const active = (await getSearch(search.id))!;
+    const result = await runCheck(active, run.id, lease);
+    expect(result.courseResults[0].outcome).toBe("NEEDS_ADAPTER");
+    expect(mocks.sourceCheck).toHaveBeenCalledOnce();
+    expect(mocks.fetch).not.toHaveBeenCalled();
+    const incident = await client.simulatorSupportIncident.findUniqueOrThrow({ where: { offeringId: venue.offering.id } });
+    expect(incident.retryAt!.getTime()).toBeLessThanOrEqual(Date.now());
+    expect(await client.courseProbe.findFirstOrThrow({ where: { teeSearchId: search.id } }))
+      .toMatchObject({ outcome: "NEEDS_ADAPTER", offeringId: venue.offering.id });
+    expect(await client.teeTimeMatch.count({ where: { teeSearchId: search.id } })).toBe(0);
+    expect(mocks.sendMatch).not.toHaveBeenCalled();
+    expect(mocks.sendStatus).toHaveBeenCalledOnce();
+    expect(mocks.sendStatus.mock.calls[0][0].venues[0]).toMatchObject({ availability: "SUPPORT_PENDING" });
+    expect(mocks.sendStatus.mock.calls[0][0].venues[0].bookingUrl).toBeUndefined();
+    expect(await client.course.findUniqueOrThrow({ where: { id: venue.course.id } })).toEqual(outdoorBefore);
+
+    const repeated = (await getSearch(search.id))!;
+    await runCheck(repeated, run.id, lease);
+    expect(mocks.sendStatus).toHaveBeenCalledOnce();
+    expect(await client.simulatorSupportIncident.findUniqueOrThrow({ where: { offeringId: venue.offering.id } })).toEqual(incident);
+    await client.courseOffering.update({ where: { id: venue.offering.id }, data: {
+      publicAccessStatus: "PUBLIC", verifiedAt: new Date(), evidenceUrl: venue.offering.evidenceUrl,
+      bookingUrl: venue.offering.bookingUrl, providerFamilyKey: "GOLFBOOK", supportedDurationsMinutes: [120],
+    } });
+    mocks.fetch.mockImplementation(async () => ({ complete: true, observedAt: new Date(), evidenceUrl: venue.offering.evidenceUrl, slots: [] }));
+    await runCheck((await getSearch(search.id))!, run.id, lease);
+    expect(mocks.sendStatus).toHaveBeenCalledTimes(2);
+    expect(mocks.sendStatus.mock.calls[1][0].venues[0].availability).toBe("NO_MATCH");
+    await runCheck((await getSearch(search.id))!, run.id, lease);
+    expect(mocks.sendStatus).toHaveBeenCalledTimes(2);
+    // Returning to a previously emailed state is a new transition, not a retry of its old delivery.
+    for (let cycle = 0; cycle < 2; cycle++) {
+      mocks.fetch.mockRejectedValueOnce(new Error("intercepted provider outage"));
+      await runCheck((await getSearch(search.id))!, run.id, lease);
+      expect(mocks.sendStatus.mock.calls.at(-1)![0].venues[0].availability).toBe("UNAVAILABLE");
+      await runCheck((await getSearch(search.id))!, run.id, lease);
+      expect(mocks.sendStatus.mock.calls.at(-1)![0].venues[0].availability).toBe("NO_MATCH");
+    }
+    expect(mocks.sendStatus).toHaveBeenCalledTimes(6);
+  });
+
+  it("reports pending support even when another selected venue immediately has a match", async () => {
+    const { search, venues, run, lease } = await fixture(2, { setupPending: true });
+    await client.courseOffering.update({ where: { id: venues[0].offering.id }, data: {
+      publicAccessStatus: "UNVERIFIED", verifiedAt: null, supportedDurationsMinutes: [],
+    } });
+    mocks.fetch.mockResolvedValue({ complete: true, observedAt: new Date(), evidenceUrl: venues[1].offering.evidenceUrl,
+      slots: [providerSlot(venues[1].offering.id, venues[1].offering.bookingUrl!, search.date)] });
+    const result = await runCheck((await getSearch(search.id))!, run.id, lease);
+    expect(result.courseResults.map(item => item.outcome)).toEqual(["NEEDS_ADAPTER", "MATCH_FOUND"]);
+    expect(mocks.fetch).toHaveBeenCalledOnce();
+    expect(mocks.sendMatch).toHaveBeenCalledOnce();
+    expect(mocks.sendStatus).toHaveBeenCalledOnce();
+    expect(mocks.sendStatus.mock.calls[0][0].venues.map((venue: { availability: string }) => venue.availability))
+      .toEqual(["SUPPORT_PENDING", "MATCH_FOUND"]);
+  });
+
+  it("sends link-free pending status when a preserved outdoor website is unsafe", async () => {
+    const { search, venues, run, lease } = await fixture(1, { setupPending: true });
+    await client.course.update({ where: { id: venues[0].course.id }, data: { website: "http://127.0.0.1/internal" } });
+    await client.courseOffering.update({ where: { id: venues[0].offering.id }, data: {
+      publicAccessStatus: "UNVERIFIED", bookingUrl: null, supportedDurationsMinutes: [],
+    } });
+    await runCheck((await getSearch(search.id))!, run.id, lease);
+    expect(mocks.sendStatus).toHaveBeenCalledOnce();
+    expect(mocks.sendStatus.mock.calls[0][0].venues[0].bookingUrl).toBeUndefined();
+    expect(await client.course.findUniqueOrThrow({ where: { id: venues[0].course.id } })).toMatchObject({ website: "http://127.0.0.1/internal" });
+  });
+
+  it("does not mislabel an existing source as missing when later checks defer its landing read", async () => {
+    const { search, venues, run, lease } = await fixture(1);
+    await client.courseOffering.update({ where: { id: venues[0].offering.id }, data: { publicAccessStatus: "UNVERIFIED" } });
+    await client.teeSearch.update({ where: { id: search.id }, data: { lastCheckedAt: new Date() } });
+    await runCheck((await getSearch(search.id))!, run.id, lease);
+    expect(mocks.sourceCheck).not.toHaveBeenCalled();
+    const probe = await client.courseProbe.findFirstOrThrow({ where: { teeSearchId: search.id } });
+    expect(probe.rawSummary).toMatchObject({ officialSourceCheck: { outcome: "NOT_CHECKED" } });
+  });
+
+  it("reports unsupported session support before future booking-window guidance", async () => {
+    const { search, venues, run, lease } = await fixture(1, { setupPending: true });
+    await client.courseOffering.update({ where: { id: venues[0].offering.id }, data: {
+      supportedDurationsMinutes: [60], bookingWindowDaysAhead: 1, bookingReleaseTimeLocal: "00:00",
+    } });
+    await runCheck((await getSearch(search.id))!, run.id, lease);
+    expect(mocks.sendStatus).toHaveBeenCalledOnce();
+    expect(mocks.sendStatus.mock.calls[0][0].venues[0].availability).toBe("SUPPORT_PENDING");
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+
+  it("does not overwrite a final support disposition written while the official landing is read", async () => {
+    const { search, venues, run, lease } = await fixture(1, { setupPending: true });
+    await client.courseOffering.update({ where: { id: venues[0].offering.id }, data: { publicAccessStatus: "UNVERIFIED" } });
+    mocks.sourceCheck.mockImplementation(async () => {
+      await client.courseOffering.update({ where: { id: venues[0].offering.id }, data: {
+        monitoringState: "FINAL_TECHNICAL", automationEligibility: "BLOCKED",
+      } });
+      await client.simulatorSupportIncident.create({ data: { offeringId: venues[0].offering.id, status: "RESOLVED", resolvedAt: new Date() } });
+      return { outcome: "READ_OK", httpStatus: 200 };
+    });
+    await runCheck((await getSearch(search.id))!, run.id, lease);
+    expect(await client.courseProbe.count({ where: { teeSearchId: search.id, outcome: "NEEDS_ADAPTER" } })).toBe(0);
+    expect(await client.simulatorSupportIncident.findUniqueOrThrow({ where: { offeringId: venues[0].offering.id } }))
+      .toMatchObject({ status: "RESOLVED" });
+    expect(mocks.sendStatus).not.toHaveBeenCalled();
+  });
+
+  it("does not persist or notify an unknown check after its alert is paused during the source read", async () => {
+    const { search, venues, run, lease } = await fixture(1, { setupPending: true });
+    await client.courseOffering.update({ where: { id: venues[0].offering.id }, data: { publicAccessStatus: "UNVERIFIED" } });
+    mocks.sourceCheck.mockImplementation(async () => {
+      await client.teeSearch.update({ where: { id: search.id }, data: { status: "PAUSED", scheduleVersion: { increment: 1 } } });
+      return { outcome: "READ_OK", httpStatus: 200 };
+    });
+    await expect(runCheck((await getSearch(search.id))!, run.id, lease)).rejects.toThrow(/current|lease/);
+    expect(await client.courseProbe.count({ where: { teeSearchId: search.id } })).toBe(0);
+    expect(await client.simulatorSupportIncident.count({ where: { offeringId: venues[0].offering.id } })).toBe(0);
+    expect(mocks.sendStatus).not.toHaveBeenCalled();
+  });
+
+  it("keeps ordinary TEST demand out of the engineering support queue", async () => {
+    const { search, venues, run, lease } = await fixture(1, { setupPending: true });
+    await client.courseOffering.update({ where: { id: venues[0].offering.id }, data: { publicAccessStatus: "UNVERIFIED" } });
+    await client.teeSearch.update({ where: { id: search.id }, data: { trafficClass: "TEST", syntheticMultiCycle: false } });
+    await runCheck((await getSearch(search.id))!, run.id, lease);
+    expect(await client.simulatorSupportIncident.count({ where: { offeringId: venues[0].offering.id } })).toBe(0);
+    expect(mocks.sendStatus).toHaveBeenCalledOnce();
+    expect(mocks.sendMatch).not.toHaveBeenCalled();
+  });
+
+  it("keeps opted-in synthetic support demand away from rendering and transport", async () => {
+    const { search, venues, run, lease } = await fixture(1, { setupPending: true });
+    await client.courseOffering.update({ where: { id: venues[0].offering.id }, data: { publicAccessStatus: "UNVERIFIED" } });
+    await client.teeSearch.update({ where: { id: search.id }, data: { trafficClass: "TEST", syntheticMultiCycle: true } });
+    await runCheck((await getSearch(search.id))!, run.id, lease);
+    expect(await client.simulatorSupportIncident.count({ where: { offeringId: venues[0].offering.id } })).toBe(1);
+    expect(mocks.sendStatus).not.toHaveBeenCalled();
+    expect(mocks.sendMatch).not.toHaveBeenCalled();
+  });
+
   it("persists one whole same-bay session and keeps outdoor monitoring untouched", async () => {
     const { search, active, venues, run, lease } = await fixture(1);
     const venue = venues[0];
@@ -165,6 +316,123 @@ describe.skipIf(!databaseUrl)("simulator check against isolated Postgres", () =>
       .toMatchObject({ availabilityStatus: "AVAILABLE", alertStatus: "SENT", offeringId: venue.offering.id });
     expect(mocks.sendMatch).toHaveBeenCalledTimes(1);
     expect(mocks.sendStatus).not.toHaveBeenCalled();
+  });
+
+  it("treats an all-venue instant match email as the first status without a duplicate setup", async () => {
+    const { search, active, run, lease } = await fixture(2, { setupPending: true });
+    mocks.fetch.mockImplementation(async ({ offering }: { offering: { id: string; bookingUrl: string; evidenceUrl: string } }) => ({
+      complete: true, observedAt: new Date(), evidenceUrl: offering.evidenceUrl,
+      slots: [providerSlot(offering.id, offering.bookingUrl, search.date)],
+    }));
+    await runCheck(active, run.id, lease);
+    expect(mocks.sendMatch).toHaveBeenCalledOnce();
+    expect(mocks.sendStatus).not.toHaveBeenCalled();
+    const updated = await client.teeSearch.findUniqueOrThrow({ where: { id: search.id } });
+    expect(updated.statusEmailSentAt).toBeTruthy();
+    expect(updated.statusEmailSnapshot).toMatchObject({ mode: "SIMULATOR", venues: [
+      { availability: "MATCH_FOUND" }, { availability: "MATCH_FOUND" },
+    ] });
+    await runCheck((await getSearch(search.id))!, run.id, lease);
+    expect(mocks.sendMatch).toHaveBeenCalledOnce();
+    expect(mocks.sendStatus).not.toHaveBeenCalled();
+  });
+
+  it("does not satisfy every venue's first status when one provider match fails the source proof", async () => {
+    const { search, active, venues, run, lease } = await fixture(2, { setupPending: true });
+    mocks.fetch.mockImplementation(async ({ offering }: { offering: { id: string; bookingUrl: string; evidenceUrl: string } }) => ({
+      complete: true, observedAt: new Date(), evidenceUrl: offering.evidenceUrl,
+      slots: [providerSlot(offering.id, offering.id === venues[1].offering.id
+        ? "https://unrelated.example.test/book" : offering.bookingUrl, search.date)],
+    }));
+    const result = await runCheck(active, run.id, lease);
+    expect(result.courseResults.map(venue => venue.outcome)).toEqual(["MATCH_FOUND", "MATCH_FOUND"]);
+    expect(mocks.sendMatch).toHaveBeenCalledOnce();
+    expect(mocks.sendMatch.mock.calls[0][0].matches).toHaveLength(1);
+    expect(mocks.sendStatus).toHaveBeenCalledOnce();
+    expect(mocks.sendStatus.mock.calls[0][0].venues.map((venue: { availability: string }) => venue.availability))
+      .toEqual(["MATCH_FOUND", "CHECK_PENDING"]);
+    const matchDelivery = await client.searchEmailDelivery.findFirstOrThrow({ where: { teeSearchId: search.id, kind: "MATCH" } });
+    expect(matchDelivery.payload).not.toHaveProperty("satisfiesStatusReport", true);
+  });
+
+  it("sends the owner's mixed pending status even when an extra recipient's match delivery fails", async () => {
+    const extra = `extra-${randomUUID()}@example.test`;
+    const { search, active, venues, run, lease } = await fixture(2, { setupPending: true, additionalEmails: [extra] });
+    await client.courseOffering.update({ where: { id: venues[0].offering.id }, data: {
+      publicAccessStatus: "UNVERIFIED", verifiedAt: null, supportedDurationsMinutes: [],
+    } });
+    mocks.fetch.mockImplementation(async () => ({ complete: true, observedAt: new Date(), evidenceUrl: venues[1].offering.evidenceUrl,
+      slots: [providerSlot(venues[1].offering.id, venues[1].offering.bookingUrl!, search.date)] }));
+    let extraAttempts = 0;
+    mocks.sendMatch.mockImplementation(async ({ to }: { to: string }) => {
+      if (to === extra && extraAttempts++ === 0) throw new Error("intercepted extra match failure");
+      return { deliveryStatus: "sent", id: "intercepted-test-send" };
+    });
+    await expect(runCheck((await getSearch(search.id))!, run.id, lease)).rejects.toThrow("intercepted extra match failure");
+    expect(mocks.sendMatch.mock.calls.filter(([call]) => call.to === active.user.email)).toHaveLength(1);
+    expect(mocks.sendStatus.mock.calls.filter(([call]) => call.to === active.user.email)).toHaveLength(1);
+    const updated = await client.teeSearch.findUniqueOrThrow({ where: { id: search.id } });
+    expect(updated.statusEmailSnapshot).toMatchObject({ mode: "SIMULATOR", venues: [
+      { availability: "SUPPORT_PENDING" }, { availability: "MATCH_FOUND" },
+    ] });
+    await client.searchEmailDelivery.updateMany({ where: { teeSearchId: search.id, kind: "MATCH", recipient: extra },
+      data: { nextAttemptAt: new Date(Date.now() - 1000) } });
+    await runCheck((await getSearch(search.id))!, run.id, lease);
+    expect(mocks.sendMatch.mock.calls.filter(([call]) => call.to === active.user.email)).toHaveLength(1);
+    expect(mocks.sendMatch.mock.calls.filter(([call]) => call.to === extra)).toHaveLength(2);
+    expect(mocks.sendStatus.mock.calls.filter(([call]) => call.to === active.user.email)).toHaveLength(1);
+  });
+
+  it("preserves a newer owner status when an older all-match extra recipient retries", async () => {
+    const extra = `extra-${randomUUID()}@example.test`;
+    const { search, active, venues, run, lease } = await fixture(1, { setupPending: true, additionalEmails: [extra] });
+    const venue = venues[0];
+    mocks.fetch.mockImplementation(async () => ({ complete: true, observedAt: new Date(), evidenceUrl: venue.offering.evidenceUrl,
+      slots: [providerSlot(venue.offering.id, venue.offering.bookingUrl!, search.date)] }));
+    let extraAttempts = 0;
+    mocks.sendMatch.mockImplementation(async ({ to }: { to: string }) => {
+      if (to === extra && extraAttempts++ === 0) throw new Error("intercepted old match failure");
+      return { deliveryStatus: "sent", id: "intercepted-test-send" };
+    });
+    await expect(runCheck(active, run.id, lease)).rejects.toThrow("intercepted old match failure");
+    const oldGroup = await client.searchEmailDelivery.findFirstOrThrow({ where: { teeSearchId: search.id, kind: "MATCH", recipient: extra } });
+    const oldStatus = await client.teeSearch.findUniqueOrThrow({ where: { id: search.id } });
+    const offering = await client.courseOffering.findUniqueOrThrow({ where: { id: venue.offering.id } });
+    const { getSimulatorOfferingSourceFingerprint } = await import("@/lib/simulators/source-fingerprint");
+    const { prepareSearchEmailDeliveryGroup, drainSearchEmailDeliveryGroup, hydrateSimulatorStatusPayload, hydrateMatchAlertPayload } = await import("@/lib/email/search-delivery-outbox");
+    const report = { mode: "SIMULATOR", kind: "daily", targetDate: search.date.toISOString().slice(0, 10),
+      startTime: search.startTime, endTime: search.endTime, durationMinutes: search.durationMinutes,
+      players: search.players, userTimeZone: search.userTimeZone, venues: [{ offeringId: offering.id,
+        courseId: venue.course.id, courseName: venue.course.name, courseRank: 1, bookingUrl: offering.bookingUrl,
+        sourceFingerprint: getSimulatorOfferingSourceFingerprint(offering), availability: "MATCH_FOUND" }] };
+    const groupKey = `newer-owner-status-${randomUUID()}`;
+    await prepareSearchEmailDeliveryGroup({ searchId: search.id, alertGeneration: search.alertGeneration,
+      checkLeaseToken: lease.token, kind: "MONITORING_STATUS_UPDATE", groupKey,
+      ownerRecipient: active.user.email, recipients: [active.user.email, extra], payload: {
+        schemaVersion: 3, mode: "SIMULATOR", checkedAt: new Date().toISOString(),
+        statusReport: report, statusSnapshot: report,
+      } });
+    await drainSearchEmailDeliveryGroup({ searchId: search.id, alertGeneration: search.alertGeneration,
+      checkLeaseToken: lease.token, kind: "MONITORING_STATUS_UPDATE", groupKey,
+      send: async ({ recipient, payload, assertCurrentDelivery }) => {
+        await assertCurrentDelivery();
+        return mocks.sendStatus({ ...hydrateSimulatorStatusPayload(payload), to: recipient });
+      } });
+    const newer = await client.teeSearch.findUniqueOrThrow({ where: { id: search.id } });
+    expect(newer.statusEmailSentAt!.getTime()).toBeGreaterThan(oldStatus.statusEmailSentAt!.getTime());
+    await client.searchEmailDelivery.update({ where: { id: oldGroup.id }, data: { nextAttemptAt: new Date(Date.now() - 1000) } });
+    await drainSearchEmailDeliveryGroup({ searchId: search.id, alertGeneration: search.alertGeneration,
+      checkLeaseToken: lease.token, kind: "MATCH", groupKey: oldGroup.groupKey,
+      send: async ({ recipient, payload, assertCurrentDelivery }) => {
+        const hydrated = await hydrateMatchAlertPayload({ searchId: search.id, alertGeneration: search.alertGeneration, payload });
+        await assertCurrentDelivery();
+        return mocks.sendMatch({ ...hydrated, to: recipient });
+      } });
+    const afterRetry = await client.teeSearch.findUniqueOrThrow({ where: { id: search.id } });
+    expect(afterRetry.statusEmailSentAt).toEqual(newer.statusEmailSentAt);
+    expect(afterRetry.statusEmailSnapshot).toEqual(newer.statusEmailSnapshot);
+    expect(mocks.sendMatch.mock.calls.filter(([call]) => call.to === active.user.email)).toHaveLength(1);
+    expect(mocks.sendMatch.mock.calls.filter(([call]) => call.to === extra)).toHaveLength(2);
   });
 
   it("keeps a second venue's match when the first provider fails", async () => {

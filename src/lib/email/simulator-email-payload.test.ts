@@ -38,6 +38,14 @@ function statusPayload(): SearchEmailDeliveryPayload {
 }
 
 describe("persisted simulator email rendering data", () => {
+  it("hydrates unknown venue status without inventing an official booking URL", () => {
+    const payload = statusPayload();
+    const report = payload.statusReport as Record<string, unknown>;
+    report.venues = [{ courseName: "New Simulator", availability: "SUPPORT_PENDING" }];
+    const hydrated = hydrateSimulatorStatusPayload(payload);
+    expect(hydrated.venues[0].bookingUrl).toBeUndefined();
+    expect(renderSimulatorStatusHtml(hydrated)).toContain("ADDING ALERT SUPPORT");
+  });
   it("retains the observation time, recipient timezone and ranked venue context", () => {
     const hydrated = hydrateSimulatorStatusPayload(statusPayload());
     expect(hydrated.checkedAt?.toISOString()).toBe(checkedAt);

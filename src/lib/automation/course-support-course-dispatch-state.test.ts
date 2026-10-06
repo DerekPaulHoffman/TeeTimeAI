@@ -96,6 +96,7 @@ vi.mock("./course-support-batches", () => ({
   withCourseSupportWriteConflictRetry: (operation: () => Promise<unknown>) => operation(),
   listCourseSupportDispatchCandidates: async () => store.candidates,
 }));
+vi.mock("./simulator-support-incidents", () => ({ listSimulatorSupportDispatchCandidates: async () => [] }));
 
 import {
   beginCourseSupportCourseDispatch,
@@ -175,6 +176,23 @@ describe("durable course dispatch state and transaction boundaries", () => {
     expect(plan.activeCourseCount).toBe(5);
     expect(plan.launchItems).toHaveLength(10);
     expect(plan.occupiedCourseCount).toBe(15);
+  });
+
+  it("counts a consumed simulator claim toward shared slots and the three-alert budget, even after its lease expires", async () => {
+    populate(15);
+    store.runs.push({ id: "simulator-owner", promptVersion: "course-support-course-dispatch-v1", status: "RUNNING", startedAt: now,
+      audit: { schemaVersion: 1, tickRef: "previous", assignmentRef: "simulator-assignment", state: "CONSUMED", ownerThreadId: "parent", childThreadId: "sim-child", baseSha,
+        reservedAt: now.toISOString(), expiresAt: now.toISOString(), target: { mode: "SIMULATOR", offeringId: "sim-offering", offeringSourceFingerprint: "a".repeat(64),
+          incidentId: "sim-incident", courseId: "sim-course", cycle: 1, providerFamilyKey: "SIM", failureFingerprint: "a".repeat(64), updatedAt: now.toISOString(),
+          trafficClass: "REAL", searchRefs: [{ id: "sim-search", scheduleVersion: 1, alertGeneration: 0 }] },
+        simulatorClaim: { token: "owned", revision: 1, phase: "CLAIMED", claimedAt: now.toISOString(), leaseExpiresAt: now.toISOString(), sourceFingerprint: "a".repeat(64), originalSourceFingerprint: "a".repeat(64),
+          offeringRevision: 0, plannedPaths: [], releaseSha: null, branch: "automation/course-support-sim", deployment: null, recheckQueuedAt: null, verificationCycle: 0 } } });
+    const plan = await planCourseSupportCourseDispatch({ ownerThreadId: "parent-a", baseSha, now, maxStarts: 15 });
+    expect(plan.launchItems).toHaveLength(10);
+    expect(plan.reservedCount).toBe(11);
+    expect(plan.attention.expiredBatchCount).toBe(1);
+    expect(store.runs[0].audit.state).toBe("CONSUMED");
+    expect(new Set(store.runs.flatMap(run => run.audit.target.searchRefs.map(ref => ref.id))).size).toBe(3);
   });
 
   it("rejects expired unlaunched reservations before native creation can begin", async () => {

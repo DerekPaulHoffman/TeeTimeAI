@@ -14,6 +14,7 @@ import {
   isGenericCourseName,
 } from "@/lib/places/course-identity";
 import {
+  buildGooglePlaceReviewIndex,
   loadActiveGooglePlaceReviewIndex,
   type GooglePlaceReviewIndex,
 } from "@/lib/places/google-place-reviews";
@@ -54,6 +55,8 @@ import { isCurrentSimulatorMatch } from "@/lib/simulators/current-availability";
 import { filterSimulatorSessionsForSearch } from "@/lib/tee-times/matching";
 import { assertSimulatorSessionFitsWindow } from "@/lib/searches/simulator-window";
 import { DEFAULT_SIMULATOR_DURATION_MINUTES } from "@/lib/searches/search-mode";
+import { getSimulatorVenueForDemand } from "@/lib/places/simulator-google";
+import type { CourseCandidate } from "@/lib/places/google";
 
 const SUPPORTED_COURSE_REUSE_COORDINATE_TOLERANCE = 0.06;
 const QUEUED_SEARCH_STATUSES = ["ACTIVE", "PAUSED"] as const;
@@ -185,60 +188,125 @@ async function createSimulatorTeeSearchForUser(
   const durationMinutes = input.durationMinutes ?? DEFAULT_SIMULATOR_DURATION_MINUTES;
   if (input.players < 1 || input.players > 4) throw new Error("Choose 1 to 4 players.");
   const selected = [...input.courses].sort((a, b) => a.rank - b.rank);
-  const offeringIds = selected.map((course) => course.offeringId);
-  if (offeringIds.some((id) => !id) || new Set(offeringIds).size !== offeringIds.length) {
-    throw new Error("Choose distinct verified simulator venues.");
+  if (selected.some((candidate) => candidate.mode === "OUTDOOR" ||
+      (!candidate.offeringId && !candidate.googlePlaceId))) {
+    throw new Error("Choose simulator venues from the results.");
   }
-
+  const reviews = await loadActiveGooglePlaceReviewIndex();
+  const offeringIds = selected.flatMap((candidate) => candidate.offeringId ? [candidate.offeringId] : []);
+  if (new Set(offeringIds).size !== offeringIds.length) throw new Error("Choose distinct simulator venues.");
+  const placeIds = selected.flatMap((candidate) => candidate.googlePlaceId
+    ? [reviews.byPlaceId.get(candidate.googlePlaceId)?.canonicalPlaceId ?? candidate.googlePlaceId] : []);
   const offerings = await prisma.courseOffering.findMany({
-    where: { id: { in: offeringIds as string[] }, kind: "SIMULATOR", active: true },
+    where: { kind: "SIMULATOR", OR: [
+      { id: { in: offeringIds } }, { course: { googlePlaceId: { in: placeIds } } },
+    ] },
     include: { course: true },
   });
   const byId = new Map(offerings.map((offering) => [offering.id, offering]));
-  const canonical = selected.map((candidate) => {
-    const offering = byId.get(candidate.offeringId!);
-    if (
-      !offering ||
-      offering.publicAccessStatus !== "PUBLIC" ||
-      !offering.bookingUrl ||
-      !offering.evidenceUrl ||
-      !offering.verifiedAt ||
-      (candidate.courseId && candidate.courseId !== offering.courseId) ||
-      (candidate.googlePlaceId && candidate.googlePlaceId !== offering.course.googlePlaceId)
-    ) {
-      throw new Error("A selected simulator venue needs current official rental verification. Refresh the venues and try again.");
+  const byPlaceId = new Map(offerings.flatMap((offering) => offering.course.googlePlaceId
+    ? [[offering.course.googlePlaceId, offering] as const] : []));
+  const canonical = await Promise.all(selected.map(async (candidate) => {
+    const placeId = candidate.googlePlaceId
+      ? reviews.byPlaceId.get(candidate.googlePlaceId)?.canonicalPlaceId ?? candidate.googlePlaceId : undefined;
+    const offering = candidate.offeringId ? byId.get(candidate.offeringId) : placeId ? byPlaceId.get(placeId) : undefined;
+    assertSimulatorPlaceReview(candidate.googlePlaceId ?? offering?.course.googlePlaceId, reviews, offering);
+    if (offering) {
+      assertSimulatorOfferingAcceptsDemand(offering);
+      if ((candidate.courseId && candidate.courseId !== offering.courseId) ||
+          (placeId && placeId !== offering.course.googlePlaceId)) {
+        throw new Error("The selected simulator venue details do not match. Refresh the venues and try again.");
+      }
+      return { candidate, offering, venue: {
+        googlePlaceId: offering.course.googlePlaceId ?? "", name: offering.course.name,
+        latitude: offering.course.latitude, longitude: offering.course.longitude,
+        timeZone: offering.course.timeZone,
+      } as CourseCandidate };
     }
-    if (
-      !offering.supportedDurationsMinutes.includes(durationMinutes)
-    ) {
-      throw new Error("A selected simulator venue does not support this session length.");
+    if (candidate.offeringId || !candidate.googlePlaceId) {
+      throw new Error("The selected simulator venue changed. Refresh the venues and try again.");
     }
-    return { candidate, offering };
-  });
-  if (new Set(canonical.map(({ offering }) => offering.courseId)).size !== canonical.length) {
+    // All identity and source fields come from the exact provider record. The
+    // client supplies only intent; it cannot turn a URL into a monitoring source.
+    const venue = await getSimulatorVenueForDemand(candidate.googlePlaceId, reviews);
+    const existing = await prisma.course.findUnique({ where: { googlePlaceId: venue.googlePlaceId } });
+    if (candidate.courseId && existing?.id !== candidate.courseId) {
+      throw new Error("The selected simulator venue details do not match. Refresh the venues and try again.");
+    }
+    return { candidate, offering: undefined, venue: {
+      ...venue, ...(existing ? { timeZone: existing.timeZone } : {}),
+    } };
+  }));
+  const identities = canonical.map(({ offering, venue }) => offering?.courseId ?? venue.googlePlaceId);
+  const canonicalPlaceIds = canonical.map(({ venue }) => venue.googlePlaceId).filter(Boolean);
+  if (new Set(identities).size !== canonical.length || new Set(canonicalPlaceIds).size !== canonicalPlaceIds.length) {
     throw new Error("Choose distinct simulator venues.");
   }
-  assertFutureCourseSearchDate(input.date, canonical.map(({ offering }) => offering.course.timeZone));
+  assertFutureCourseSearchDate(input.date, canonical.map(({ venue }) => venue.timeZone));
   assertSimulatorSessionFitsWindow({ date: input.date, startTime: input.startTime,
     endTime: input.endTime, durationMinutes,
-    timeZones: canonical.map(({ offering }) => offering.course.timeZone) });
+    timeZones: canonical.map(({ venue }) => normalizeTimeZone(venue.timeZone)) });
 
   return prisma.$transaction(async (transaction) => {
+    const currentReviews = buildGooglePlaceReviewIndex(await transaction.googlePlaceReview.findMany({
+      where: { active: true },
+    }));
+    const resolved = [];
+    for (const { candidate, offering, venue } of canonical) {
+      const currentPlaceId = candidate.googlePlaceId
+        ? currentReviews.byPlaceId.get(candidate.googlePlaceId)?.canonicalPlaceId ?? candidate.googlePlaceId : undefined;
+      if (currentPlaceId && currentPlaceId !== venue.googlePlaceId) {
+        throw new Error("The selected simulator venue changed. Refresh the venues and try again.");
+      }
+      assertSimulatorPlaceReview(candidate.googlePlaceId ?? venue.googlePlaceId, currentReviews, offering);
+      if (offering) { resolved.push({ candidate, offering }); continue; }
+      const course = await transaction.course.upsert({
+        where: { googlePlaceId: venue.googlePlaceId }, update: {},
+        create: {
+          googlePlaceId: venue.googlePlaceId, name: venue.name, address: venue.address,
+          city: venue.city, stateCode: venue.stateCode, stateName: venue.stateName,
+          county: venue.county, countryCode: venue.countryCode,
+          latitude: venue.latitude, longitude: venue.longitude,
+          timeZone: venue.timeZone, website: venue.website, phone: venue.phone,
+          isPublic: null, isManual: false,
+        },
+      });
+      // Concurrent saves reuse the offering without overwriting a review or
+      // outdoor knowledge. Empty durations mean unverified, not unsupported.
+      const pendingRecord = await transaction.courseOffering.upsert({
+        where: { courseId_kind: { courseId: course.id, kind: "SIMULATOR" } }, update: {},
+        create: { courseId: course.id, kind: "SIMULATOR", publicAccessStatus: "UNVERIFIED",
+          bookingUrl: venue.website ?? null, supportedDurationsMinutes: [],
+          automationEligibility: "UNKNOWN", monitoringState: "UNKNOWN" },
+      });
+      const pendingOffering = { ...pendingRecord, course };
+      assertSimulatorOfferingAcceptsDemand(pendingOffering);
+      assertSimulatorPlaceReview(venue.googlePlaceId, currentReviews, pendingOffering);
+      resolved.push({ candidate, offering: pendingOffering });
+    }
+    if (new Set(resolved.map(({ offering }) => offering.courseId)).size !== resolved.length) {
+      throw new Error("Choose distinct simulator venues.");
+    }
+    const resolvedOfferingIds = resolved.map(({ offering }) => offering.id);
     const currentOfferings = await transaction.courseOffering.findMany({
-      where: { id: { in: offeringIds as string[] }, kind: "SIMULATOR", active: true },
+      where: { id: { in: resolvedOfferingIds }, kind: "SIMULATOR" },
       include: { course: true },
     });
     const currentById = new Map(currentOfferings.map((offering) => [offering.id, offering]));
-    for (const { candidate } of canonical) {
-      const offering = currentById.get(candidate.offeringId!);
-      if (!offering || offering.publicAccessStatus !== "PUBLIC" || !offering.bookingUrl ||
-          !offering.evidenceUrl || !offering.verifiedAt ||
-          !offering.supportedDurationsMinutes.includes(durationMinutes) ||
-          (candidate.courseId && candidate.courseId !== offering.courseId) ||
-          (candidate.googlePlaceId && candidate.googlePlaceId !== offering.course.googlePlaceId)) {
+    for (const [index, { offering: planned }] of resolved.entries()) {
+      const venue = canonical[index].venue;
+      const offering = currentById.get(planned.id);
+      if (!offering || offering.courseId !== planned.courseId ||
+          (venue.googlePlaceId && venue.googlePlaceId !== offering.course.googlePlaceId)) {
         throw new Error("A selected simulator venue changed. Refresh the venues and try again.");
       }
+      assertSimulatorOfferingAcceptsDemand(offering);
+      assertSimulatorPlaceReview(offering.course.googlePlaceId, currentReviews, offering);
     }
+    assertFutureCourseSearchDate(input.date, currentOfferings.map((offering) => offering.course.timeZone));
+    assertSimulatorSessionFitsWindow({ date: input.date, startTime: input.startTime,
+      endTime: input.endTime, durationMinutes,
+      timeZones: currentOfferings.map((offering) => offering.course.timeZone) });
     const created = await transaction.teeSearch.create({
       data: {
         userId,
@@ -256,7 +324,7 @@ async function createSimulatorTeeSearchForUser(
         trafficClass,
         syntheticMultiCycle,
         preferences: {
-          create: canonical.map(({ candidate, offering }) => ({
+          create: resolved.map(({ candidate, offering }) => ({
             rank: candidate.rank,
             course: { connect: { id: offering.courseId } },
             offering: { connect: { id: offering.id } },
@@ -271,6 +339,30 @@ async function createSimulatorTeeSearchForUser(
     await enqueueOperatorNotification(transaction, created);
     return created;
   });
+}
+
+function assertSimulatorOfferingAcceptsDemand(offering: { active: boolean; publicAccessStatus: string; kind?: string }) {
+  if (!offering.active || offering.publicAccessStatus === "NOT_PUBLIC" ||
+      (offering.kind !== undefined && offering.kind !== "SIMULATOR")) {
+    throw new Error("The selected simulator venue is no longer available for public alerts. Refresh the venues and try again.");
+  }
+}
+
+function assertSimulatorPlaceReview(
+  googlePlaceId: string | null | undefined,
+  reviews: GooglePlaceReviewIndex,
+  offering?: { publicAccessStatus: string; bookingUrl: string | null; evidenceUrl: string | null; verifiedAt: Date | null },
+) {
+  if (!googlePlaceId) return;
+  const review = reviews.byPlaceId.get(googlePlaceId);
+  const canonical = review?.canonicalPlaceId ? reviews.byPlaceId.get(review.canonicalPlaceId) : undefined;
+  const verifiedRental = offering?.publicAccessStatus === "PUBLIC" && offering.bookingUrl &&
+    offering.evidenceUrl && offering.verifiedAt && offering.verifiedAt.getTime() <= Date.now();
+  if ([review, canonical].some((fact) => fact?.classification === "MEMBERS_ONLY_SIMULATOR" ||
+      (!verifiedRental && (fact?.accessOverride === "VERIFIED_PRIVATE" ||
+        (fact?.accessOverride === "VERIFIED_NON_COURSE" && fact.classification !== "INDOOR_SIMULATOR"))))) {
+    throw new Error("The selected venue is not a public simulator rental. Choose another venue.");
+  }
 }
 
 async function buildCoursePreferenceCreate(
@@ -765,11 +857,9 @@ export async function updateTeeSearchForUser(
       throw new Error("Choose 1 to 4 players and a simulator session length.");
     }
     if (changesSimulatorIntent && modeAndOfferings.preferences.some(({ offering }) =>
-      !offering || !offering.active || offering.publicAccessStatus !== "PUBLIC" ||
-      !offering.bookingUrl || !offering.evidenceUrl || !offering.verifiedAt ||
-      !offering.supportedDurationsMinutes.includes(nextDuration)
+      !offering || !offering.active || offering.publicAccessStatus === "NOT_PUBLIC"
     )) {
-      throw new Error("A selected simulator venue no longer supports this session length.");
+      throw new Error("A selected simulator venue no longer supports public alerts.");
     }
     if (changesSimulatorIntent) assertSimulatorSessionFitsWindow({
       date: input.date ?? modeAndOfferings.date.toISOString().slice(0, 10),
@@ -871,16 +961,24 @@ export async function updateTeeSearchForUser(
     const current = await transaction.teeSearch.findUniqueOrThrow({
       where: { id: searchId, userId },
       select: { mode: true, date: true, startTime: true, endTime: true, players: true, durationMinutes: true,
-        preferences: { select: { offering: { include: { course: { select: { timeZone: true } } } } } } },
+        preferences: { select: { offering: { include: { course: { select: { timeZone: true, googlePlaceId: true } } } } } } },
     });
     if (current.mode !== "SIMULATOR") throw new Error("An alert's course type cannot change.");
     const durationMinutes = input.durationMinutes ?? current.durationMinutes ?? DEFAULT_SIMULATOR_DURATION_MINUTES;
     if (!durationMinutes || current.preferences.some(({ offering }) =>
       !offering || !offering.active || offering.kind !== "SIMULATOR" ||
-      offering.publicAccessStatus !== "PUBLIC" || !offering.bookingUrl || !offering.evidenceUrl ||
-      !offering.verifiedAt ||
-      !offering.supportedDurationsMinutes.includes(durationMinutes))) {
-      throw new Error("A selected simulator venue no longer supports this session length.");
+      offering.publicAccessStatus === "NOT_PUBLIC")) {
+      throw new Error("A selected simulator venue no longer supports public alerts.");
+    }
+    const offeringPlaceIds = current.preferences.flatMap(({ offering }) =>
+      offering?.course.googlePlaceId ? [offering.course.googlePlaceId] : []);
+    if (offeringPlaceIds.length) {
+      const reviews = buildGooglePlaceReviewIndex(await transaction.googlePlaceReview.findMany({
+        where: { active: true },
+      }));
+      for (const { offering } of current.preferences) {
+        if (offering) assertSimulatorPlaceReview(offering.course.googlePlaceId, reviews, offering);
+      }
     }
     assertSimulatorSessionFitsWindow({ date: input.date ?? current.date.toISOString().slice(0, 10),
       startTime: input.startTime ?? current.startTime, endTime: input.endTime ?? current.endTime,

@@ -20,7 +20,7 @@ import {
 import { DashboardSignInActions } from "@/components/dashboard-sign-in-actions";
 import { SearchStatusActions } from "@/components/search-status-actions";
 import { isCurrentSimulatorMatch } from "@/lib/simulators/current-availability";
-import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
+import { getSimulatorDashboardStatus } from "@/lib/simulators/dashboard-status";
 import { getRequiredAppUser } from "@/lib/auth/current-user";
 import { normalizeRequestedLayoutHoles } from "@/lib/courses/course-layout";
 import {
@@ -819,29 +819,20 @@ function SimulatorDashboardCard({ search, canManage, coursePhotos, ownerEmailSta
         {search.preferences.map(preference => {
           const offering = preference.offering;
           const probe = search.probes.find(observation => observation.offeringId === offering?.id);
-          const summary = probe?.rawSummary;
-          const bookingNotOpen = summary && typeof summary === "object" && !Array.isArray(summary) && summary.bookingNotOpen === true;
-          const providerObservedAt = summary && typeof summary === "object" && !Array.isArray(summary) && typeof summary.providerObservedAt === "string"
-            ? new Date(summary.providerObservedAt) : null;
-          const current = offering?.active && offering.publicAccessStatus === "PUBLIC" && offering.verifiedAt && offering.evidenceUrl &&
-            offering.monitoringState === "HEALTHY" && offering.monitoringVerifiedAt && !offering.observationToken &&
-            offering.monitoringVerifiedAt <= now && now.getTime() - offering.monitoringVerifiedAt.getTime() <= 30 * 60_000 &&
-            (!offering.lastFailureAt || offering.lastFailureAt < offering.monitoringVerifiedAt) &&
-            probe && ["MATCH_FOUND", "NO_MATCH"].includes(probe.outcome) && providerObservedAt && providerObservedAt <= now &&
-            now.getTime() - providerObservedAt.getTime() <= 30 * 60_000 && summary && typeof summary === "object" && !Array.isArray(summary) &&
-            summary.sourceFingerprint === getSimulatorOfferingSourceFingerprint(offering);
           const venueMatches = [...new Map(matches.filter(match => match.offeringId === offering?.id).map(match =>
             [[match.startsAt.toISOString(), match.endsAt?.toISOString(), match.bookingUrl].join("|"), match])).values()];
+          const venueStatus = getSimulatorDashboardStatus({ offering, probe, currentMatchCount: venueMatches.length,
+            alertStatus: search.status, windowEnded: ended, website: preference.course.website, now });
           return <div className="watch-course-row" key={preference.id}>
             <CourseImage name={preference.course.name} photo={preference.course.googlePlaceId ? coursePhotos.get(preference.course.googlePlaceId) : undefined} rank={search.preferences.length > 1 ? preference.rank : undefined} />
             <div className="watch-course-copy">
             <h4>{preference.rank}. {preference.course.name}</h4>
-            <p>{bookingNotOpen ? "The public booking window has not opened yet." : current ? venueMatches.length ? "Matching simulator sessions available" : "Checked · No matching sessions" : offering?.monitoringState === "DEGRADED_RETRYING" ? "Availability check will retry" : "Simulator check pending"}</p>
+            <p>{venueStatus.label}</p>
             <p className="meta">{preference.course.timeZone}</p>
             {venueMatches.map(match => <a className="known-tee-time" key={match.id} href={match.bookingUrl} target="_blank" rel="noreferrer">
               {new Intl.DateTimeFormat("en-US", { timeZone: preference.course.timeZone, hour: "numeric", minute: "2-digit" }).format(match.startsAt)}–{new Intl.DateTimeFormat("en-US", { timeZone: preference.course.timeZone, hour: "numeric", minute: "2-digit" }).format(match.endsAt!)} · {(match.endsAt!.getTime() - match.startsAt.getTime()) / 60_000} minutes · Official booking page
             </a>)}
-            {offering?.bookingUrl ? <p><a href={offering.bookingUrl} target="_blank" rel="noreferrer">Official booking page <ExternalLink size={14} /></a></p> : null}
+            {venueStatus.officialUrl ? <p><a href={venueStatus.officialUrl} target="_blank" rel="noreferrer">{venueStatus.officialLinkLabel} <ExternalLink size={14} /></a></p> : null}
             </div>
           </div>;
         })}

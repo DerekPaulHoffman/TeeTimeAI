@@ -1917,7 +1917,9 @@ async function applyOwnerDeliveryOutcome(
     payload.statusSnapshot !== undefined
   ) {
     await transaction.teeSearch.updateMany({
-      where: { id: input.searchId, alertGeneration: input.alertGeneration },
+      // An older group's additional-recipient retry must not replace a newer owner status.
+      where: { id: input.searchId, alertGeneration: input.alertGeneration,
+        OR: [{ statusEmailSentAt: null }, { statusEmailSentAt: { lt: sentAt } }] },
       data: {
         statusEmailSentAt: sentAt,
         statusEmailSnapshot: preserveAlertGenerationClockInStatusSnapshot({
@@ -1933,7 +1935,8 @@ async function applyOwnerDeliveryOutcome(
     search?.alertGeneration === input.alertGeneration
   ) {
     await transaction.teeSearch.updateMany({
-      where: { id: input.searchId, alertGeneration: input.alertGeneration },
+      where: { id: input.searchId, alertGeneration: input.alertGeneration,
+        OR: [{ statusEmailSentAt: null }, { statusEmailSentAt: { lt: sentAt } }] },
       data: { statusEmailSentAt: sentAt },
     });
   }
@@ -2407,7 +2410,7 @@ export function hydrateSimulatorStatusPayload(payload: SearchEmailDeliveryPayloa
         courseName: requireString(venue.courseName, "venue name"),
         courseRank: optionalNumber(venue.courseRank),
         courseAddress: optionalString(venue.courseAddress),
-        bookingUrl: requireString(venue.bookingUrl, "official booking URL"),
+        bookingUrl: optionalString(venue.bookingUrl),
         availability: requireString(venue.availability, "venue availability"),
       };
     }),
@@ -4564,7 +4567,7 @@ async function validateCurrentStatusDeliveryPayload(
       where: { id: searchId }, select: { mode: true, status: true, date: true,
         startTime: true, endTime: true, players: true, durationMinutes: true,
         preferences: { select: { courseId: true, offeringId: true, rank: true,
-          course: { select: { name: true, timeZone: true } }, offering: true } } },
+          course: { select: { name: true, timeZone: true, website: true } }, offering: true } } },
     });
     if (!search || search.mode !== "SIMULATOR" || search.status !== "ACTIVE" ||
         search.date.toISOString().slice(0, 10) !== report.targetDate ||
@@ -4575,20 +4578,45 @@ async function validateCurrentStatusDeliveryPayload(
       const venue = raw!;
       const preference = search.preferences.find((item) => item.offeringId === venue.offeringId);
       const offering = preference?.offering;
-      if (!preference || !offering || !offering.active || offering.kind !== "SIMULATOR" ||
-          offering.publicAccessStatus !== "PUBLIC" || !offering.verifiedAt ||
-          !offering.bookingUrl || !getSafeOfficialBookingUrl(offering.bookingUrl) ||
+      const officialUrl = getSafeOfficialBookingUrl(offering?.bookingUrl) ?? getSafeOfficialBookingUrl(preference?.course.website);
+      if (!preference || !offering || offering.kind !== "SIMULATOR" ||
+          (officialUrl && !getSafeOfficialBookingUrl(officialUrl)) ||
           venue.courseId !== preference.courseId || venue.courseRank !== preference.rank ||
-          venue.courseName !== preference.course.name || venue.bookingUrl !== offering.bookingUrl ||
-          !offering.supportedDurationsMinutes.includes(search.durationMinutes!)) return "stale";
-      if (venue.availability === "NO_MATCH") {
+          venue.courseName !== preference.course.name || venue.bookingUrl !== officialUrl ||
+          (venue.sourceFingerprint !== undefined && venue.sourceFingerprint !== getSimulatorOfferingSourceFingerprint(offering))) return "stale";
+      const final = !offering.active || offering.publicAccessStatus === "NOT_PUBLIC" ||
+        offering.monitoringState === "FINAL_TECHNICAL" || offering.monitoringState === "FINAL_IDENTITY" ||
+        offering.automationEligibility === "BLOCKED";
+      if (venue.availability === "OFFICIAL_SITE_ONLY") {
+        if (!final) return "stale";
+        continue;
+      }
+      if (final) return "stale";
+      if (venue.availability === "SUPPORT_PENDING") {
         const latestProbe = await transaction.courseProbe.findFirst({
           where: { teeSearchId: searchId, offeringId: offering.id },
           orderBy: [{ observedAt: "desc" }, { id: "desc" }],
           select: { outcome: true, observedAt: true, rawSummary: true },
         });
         const summary = optionalJsonRecord(latestProbe?.rawSummary);
-        if (!latestProbe || latestProbe.outcome !== "NO_MATCH" ||
+        if (!venue.sourceFingerprint || !latestProbe || latestProbe.outcome !== "NEEDS_ADAPTER" ||
+            summary?.sourceFingerprint !== getSimulatorOfferingSourceFingerprint(offering) ||
+            latestProbe.observedAt > now) return "stale";
+        continue;
+      }
+      if (venue.availability === "CHECK_PENDING" && venue.sourceFingerprint) continue;
+      // Availability claims still require independent verified rental and session facts.
+      if (!offering.active || offering.publicAccessStatus !== "PUBLIC" || !offering.verifiedAt ||
+          !offering.bookingUrl || !getSafeOfficialBookingUrl(offering.bookingUrl) ||
+          !offering.supportedDurationsMinutes.includes(search.durationMinutes!)) return "stale";
+      if (venue.availability === "NO_MATCH" || venue.availability === "MATCH_FOUND") {
+        const latestProbe = await transaction.courseProbe.findFirst({
+          where: { teeSearchId: searchId, offeringId: offering.id },
+          orderBy: [{ observedAt: "desc" }, { id: "desc" }],
+          select: { outcome: true, observedAt: true, rawSummary: true },
+        });
+        const summary = optionalJsonRecord(latestProbe?.rawSummary);
+        if (!latestProbe || latestProbe.outcome !== venue.availability ||
             summary?.sourceFingerprint !== getSimulatorOfferingSourceFingerprint(offering) ||
             summary?.bookingNotOpen === true || latestProbe.observedAt > now ||
             now.getTime() - latestProbe.observedAt.getTime() > 30 * 60_000 ||
@@ -4596,6 +4624,11 @@ async function validateCurrentStatusDeliveryPayload(
             offering.monitoringVerifiedAt < latestProbe.observedAt ||
             (offering.lastFailureAt && offering.lastFailureAt >= latestProbe.observedAt) ||
             Boolean(offering.observationToken)) return "transient";
+        if (venue.availability === "MATCH_FOUND" && await transaction.teeTimeMatch.count({
+          where: { teeSearchId: searchId, offeringId: offering.id, availabilityStatus: "AVAILABLE", startsAt: { gt: now },
+            offeringSourceFingerprint: getSimulatorOfferingSourceFingerprint(offering),
+            lastConfirmedAt: { gte: new Date(now.getTime() - 30 * 60_000), lte: now } },
+        }) === 0) return "stale";
       }
       if (venue.availability === "BOOKING_NOT_OPEN") {
         const opensAt = getSimulatorBookingOpening(String(report.targetDate), offering, preference.course.timeZone);
@@ -4604,7 +4637,7 @@ async function validateCurrentStatusDeliveryPayload(
       if (venue.availability === "UNAVAILABLE" &&
           (!offering.lastFailureAt ||
            (offering.monitoringVerifiedAt && offering.monitoringVerifiedAt > offering.lastFailureAt))) return "stale";
-      if (!["CHECK_PENDING", "NO_MATCH", "UNAVAILABLE", "BOOKING_NOT_OPEN"].includes(String(venue.availability))) return "stale";
+      if (!["CHECK_PENDING", "NO_MATCH", "MATCH_FOUND", "UNAVAILABLE", "BOOKING_NOT_OPEN"].includes(String(venue.availability))) return "stale";
     }
     if (venues.some((venue) => venue?.availability === "NO_MATCH")) {
       const availableCount = await transaction.teeTimeMatch.count({

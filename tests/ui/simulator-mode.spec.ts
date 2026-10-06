@@ -238,7 +238,7 @@ test.describe("simulator mode", () => {
     expect(requests.unexpectedRequests).toEqual([]);
   });
 
-  test("shows unavailable alerts honestly while keeping official sites and reviewed rentals usable", async ({ page }, testInfo) => {
+  test("lets every simulator use Notify me while unknown venues have neutral first-check copy", async ({ page }, testInfo) => {
     const unreviewed = { ...simulatorVenue, name: "Unreviewed Simulator", googlePlaceId: "unreviewed-simulator-place",
       courseId: undefined, offeringId: undefined, publicAccessStatus: "UNVERIFIED", simulatorVerifiedAt: undefined, simulatorEvidenceUrl: undefined };
     const unsupportedHour = { ...simulatorVenue, name: "Two-hour Simulator", googlePlaceId: "two-hour-simulator-place",
@@ -249,34 +249,108 @@ test.describe("simulator mode", () => {
     await page.getByLabel("Date", { exact: true }).fill(futureDate);
     await page.getByRole("button", { name: "Search", exact: true }).click();
 
-    for (const [venue, prefix] of [[unreviewed, "Simulator"], [unsupportedHour, "One-hour simulator"]] as const) {
+    await expect(page.getByText("3 simulators", { exact: true })).toBeVisible();
+    await expect(page.getByText("3 simulator locations found", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Other nearby venues|Alerts unavailable/ })).toHaveCount(0);
+    for (const venue of [unreviewed, unsupportedHour]) {
       const card = page.locator(".course-row").filter({ has: page.getByRole("heading", { name: venue.name, exact: true }) });
-      const unavailable = card.getByRole("button", { name: `Alerts unavailable for ${venue.name}`, exact: true });
-      await expect(unavailable).toBeDisabled();
-      await expect(unavailable).toBeVisible();
-      await expect(unavailable).toHaveText("Alerts unavailable");
-      await expect(unavailable).toHaveCSS("cursor", "not-allowed");
-      await expect(card).toContainText(`${prefix} alerts aren’t available here yet. Check the official site for booking options.`);
       await expect(card.getByRole("link", { name: `Open official site for ${venue.name}` })).toHaveAttribute("href", venue.website);
-      await expect(card.getByRole("button", { name: /Notify me/ })).toHaveCount(0);
-      const visibleLabel = await unavailable.evaluate(element => ({
-        fontSize: getComputedStyle(element).fontSize,
-        compactLabel: getComputedStyle(element, "::after").content,
-        compactFontSize: getComputedStyle(element, "::after").fontSize
-      }));
-      if (visibleLabel.fontSize === "0px") {
-        expect(visibleLabel.compactLabel).toBe('"No alerts"');
-        expect(visibleLabel.compactFontSize).not.toBe("0px");
-      }
+      await expect(card.getByText("We’ll check this venue when you set up an alert.", { exact: true })).toBeVisible();
+      const notify = card.getByRole("button", { name: `Notify me for ${venue.name}`, exact: true });
+      await expect(notify).toBeEnabled();
+      await notify.click();
+      const dialog = page.getByRole("dialog", { name: "Notify me", exact: true });
+      await expect(dialog).toBeVisible();
+      await expect(dialog).toContainText(venue.name);
+      await dialog.getByRole("button", { name: "Close notification setup", exact: true }).click();
     }
-    await expect(page.getByRole("dialog", { name: "Notify me", exact: true })).toHaveCount(0);
     const notify = page.getByRole("button", { name: `Notify me for ${simulatorVenue.name}`, exact: true });
     await expect(notify).toBeEnabled();
     await notify.click();
     await expect(page.getByRole("dialog", { name: "Notify me", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Close notification setup", exact: true }).click();
     await expectNoHorizontalOverflow(page);
-    await captureSimulatorScreenshot(page, testInfo, "simulator-alerts-unavailable");
+    await captureSimulatorScreenshot(page, testInfo, "simulator-all-venues");
+    await expectNoOutdoorReadsInSimulator(page);
+    expect(requests.unexpectedRequests).toEqual([]);
+  });
+
+  test("lists every simulator by distance with ordinary pagination and stable selection", async ({ page }, testInfo) => {
+    const supported = [12_000, 18_000, 22_000, 24_000].map((distanceMeters, index) => ({ ...simulatorVenue,
+      courseId: `supported-course-${index}`, offeringId: `supported-offering-${index}`, googlePlaceId: `supported-place-${index}`,
+      name: `Supported Simulator ${index + 1}`, distanceMeters }));
+    const other = Array.from({ length: 5 }, (_, index) => ({ ...simulatorVenue,
+      courseId: undefined, offeringId: undefined, publicAccessStatus: "UNVERIFIED", googlePlaceId: `other-place-${index}`,
+      name: `Other Simulator ${index + 1}`, distanceMeters: (index + 1) * 1_000 }));
+    const requests = await mockPublicReads(page, [...other, ...supported]);
+    await page.goto("/search?mode=SIMULATOR");
+    await page.getByLabel("Location", { exact: true }).fill("Monroe, CT");
+    await page.getByLabel("Date", { exact: true }).fill(futureDate);
+    await page.getByRole("button", { name: "Search", exact: true }).click();
+    const mainList = page.getByRole("list", { name: "Nearby simulators", exact: true });
+    const allVenues = [...other, ...supported];
+    await expect(mainList.getByRole("heading")).toHaveText(allVenues.slice(0, 6).map((venue) => venue.name));
+    await expect(page.getByText("9 simulators", { exact: true })).toBeVisible();
+    await expect(page.getByText("9 simulator locations found", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "See more locations", exact: true }).click();
+    await expect(mainList.getByRole("heading")).toHaveText(allVenues.map((venue) => venue.name));
+    await expect(mainList.getByText("Session alerts supported", { exact: true })).toHaveCount(4);
+    await expect(mainList.getByText("We’ll check this venue when you set up an alert.", { exact: true })).toHaveCount(5);
+    await expect(mainList.getByText("Alert availability after first check", { exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "See more locations", exact: true })).toHaveCount(0);
+    await mainList.getByRole("button", { name: `Notify me for ${other[2].name}`, exact: true }).click();
+    await expect(page.getByRole("dialog", { name: "Notify me", exact: true })).toBeVisible();
+    await expect(mainList.getByRole("heading")).toHaveText(allVenues.map((venue) => venue.name));
+    await page.getByRole("button", { name: "Close notification setup", exact: true }).click();
+    await expect(page.getByRole("button", { name: /Other nearby venues|Alerts unavailable/ })).toHaveCount(0);
+    await captureSimulatorScreenshot(page, testInfo, "simulator-distance-list");
+    await expectNoHorizontalOverflow(page);
+    await expectNoOutdoorReadsInSimulator(page);
+    expect(requests.unexpectedRequests).toEqual([]);
+  });
+
+  test("shows one empty state after reducing the radius and expands only to 30 miles", async ({ page }, testInfo) => {
+    const unreviewed = { ...simulatorVenue, name: "Site-only Simulator", courseId: undefined, offeringId: undefined,
+      publicAccessStatus: "UNVERIFIED", googlePlaceId: "site-only-place", distanceMeters: 10_000 };
+    const requests = await mockPublicReads(page, [unreviewed]);
+    await page.goto("/search?mode=SIMULATOR");
+    await page.getByLabel("Location", { exact: true }).fill("Monroe, CT");
+    await page.getByRole("button", { name: "Search", exact: true }).click();
+    await expect(page.getByRole("heading", { name: unreviewed.name, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: `Notify me for ${unreviewed.name}`, exact: true })).toBeEnabled();
+    await page.getByRole("slider", { name: "Distance from me", exact: true }).fill("5");
+    await expect(page.getByRole("heading", { name: "No simulators found within 5 miles.", exact: true })).toBeVisible();
+    await expect(page.locator(".figma-empty-results")).toHaveCount(1);
+    await expect(page.getByText("No courses match these filters.", { exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Expand search", exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "Search 30 miles", exact: true }).click();
+    await expect(page.getByRole("heading", { name: unreviewed.name, exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Search (30|50) miles/ })).toHaveCount(0);
+    await expect(page.getByText(/No public courses|sold out|no matching session/i)).toHaveCount(0);
+    await expect(page.getByRole("link", { name: `Open official site for ${unreviewed.name}` })).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    await captureSimulatorScreenshot(page, testInfo, "simulator-radius-recovery");
+    await expectNoOutdoorReadsInSimulator(page);
+    expect(requests.unexpectedRequests).toEqual([]);
+  });
+
+  test("lets a simulator found by name open the normal notification dialog and map", async ({ page }) => {
+    const unreviewed = { ...simulatorVenue, name: "Searched Simulator", courseId: undefined, offeringId: undefined,
+      publicAccessStatus: "UNVERIFIED", googlePlaceId: "searched-site-only-place" };
+    const requests = await mockPublicReads(page, [unreviewed]);
+    await page.goto("/search?mode=SIMULATOR");
+    await page.getByLabel("Simulator name and town", { exact: true }).fill("Searched Simulator Monroe");
+    await page.getByRole("button", { name: "Find simulator", exact: true }).click();
+    const directList = page.getByRole("list", { name: "Direct simulator matches", exact: true });
+    await expect(directList.getByRole("heading", { name: unreviewed.name, exact: true })).toBeVisible();
+    await expect(directList.getByRole("link", { name: `Open official site for ${unreviewed.name}` })).toHaveAttribute("href", unreviewed.website);
+    await expect(directList.getByText("We’ll check this venue when you set up an alert.", { exact: true })).toBeVisible();
+    await expect(page.getByText("1 simulator location found", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: /Other nearby venues/ })).toHaveCount(0);
+    await directList.getByRole("button", { name: `Notify me for ${unreviewed.name}`, exact: true }).click();
+    await expect(page.getByRole("dialog", { name: "Notify me", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Close notification setup", exact: true }).click();
+    await expectNoHorizontalOverflow(page);
     await expectNoOutdoorReadsInSimulator(page);
     expect(requests.unexpectedRequests).toEqual([]);
   });

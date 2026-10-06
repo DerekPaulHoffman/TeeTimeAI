@@ -40,11 +40,26 @@ An outdoor `VERIFIED_NON_COURSE` simulator correction remains effective outdoors
 It does not negate independently reviewed public simulator rentals. A private
 room or bay is not a members-only business. Lessons, fittings, equipment sales,
 miniature golf and driving-range products do not establish rentable simulator
-inventory. Public simulator discovery may display unverified venues, but saving
-an alert requires a canonical verified public offering and evidence supporting
-the default session duration. Capacity evidence is optional metadata and player
-count is not an availability predicate. Client-supplied capability labels do not
-authorize saving.
+inventory. Public simulator discovery displays likely venues in normal distance
+order, including venues whose booking systems are not yet supported. They all
+use the ordinary `Notify me` flow. Saving demand does not require prior rental
+or session-duration verification: the server refreshes a new Google Place
+identity, applies exact reviewed exclusions and aliases, and creates an
+`UNVERIFIED` simulator offering without changing outdoor knowledge. Known
+private, inactive and non-rental offerings remain excluded. Client-supplied
+names, coordinates, URLs and capability labels cannot supply source authority.
+
+Saving immediately starts the existing per-search workflow. For an unverified
+offering its first check makes one signed-out read of the saved official landing,
+records offering-scoped `NEEDS_ADAPTER` evidence, and queues a support incident
+due immediately. A successful landing read never establishes session availability.
+The first status email explains pending support and retains any safe official-site
+link. Mixed selections report the pending venue even if another venue has
+matching sessions. Meaningful status changes generate updates; unchanged checks
+do not repeat the same status email. Match emails retain all public-rental,
+source-fingerprint, complete-session and current-availability proof requirements.
+Capacity evidence remains optional metadata and player count is not an
+availability predicate.
 
 ## Discovery and caching
 
@@ -59,8 +74,9 @@ identify duplicates; neighboring same-name branches remain distinct.
 Simulator cache keys are separate from outdoor keys. Their rental fingerprint
 includes identity/access/capability facts, including deactivation, and excludes
 monitoring heartbeats and lease state. Current offering health is rebuilt on
-each cached response. A provider failure may fall back only to reviewed
-simulator offerings in the requested location. No outdoor prices, hole counts,
+each cached response. A provider failure may fall back to persisted active public
+or unverified simulator offerings in the requested location, subject to current
+exact access reviews; pending offerings never inherit verification. No outdoor prices, hole counts,
 par, URLs or monitoring readiness are inherited as simulator proof.
 
 Google Nearby returns at most 20 results; Text Search is also bounded here.

@@ -54,7 +54,7 @@ export function courseSupportWorkerNpmCommand(runtime, args) {
 }
 
 export const courseSupportWorkerVercelPackage = "vercel@62.2.0";
-const productionScripts = new Set(["automation:course-support", "automation:course-dispatch", "deployment:wait"]);
+const productionScripts = new Set(["automation:course-support", "automation:course-dispatch", "automation:simulator-support", "deployment:wait"]);
 
 export function courseSupportWorkerProductionCommand(runtime, script, args = []) {
   if (!productionScripts.has(script) || !Array.isArray(args) || args.some((arg) => typeof arg !== "string" || arg.includes("\0"))) throw new Error("INVALID_WORKER_PRODUCTION_COMMAND");

@@ -29,6 +29,7 @@
     "automation:simulator-offerings": "tsx scripts/automation/manage-simulator-offerings.ts",
     "automation:course-support": "tsx scripts/automation/course-support.ts",
     "automation:course-dispatch": "tsx scripts/automation/course-support-dispatch.ts",
+    "automation:simulator-support": "tsx scripts/automation/simulator-support.ts",
     "automation:acceptance-reasons": "tsx scripts/automation/inspect-course-support-acceptance-reasons.ts",
     "automation:course-support:preflight": "node scripts/automation/course-support-preflight.mjs",
     "automation:course-discovery-recheck": "tsx scripts/automation/course-discovery-recheck.ts",

@@ -1378,7 +1378,9 @@ export async function renewCourseSupportBatchOperationLease(input: {
           },
           select: { status: true, summary: true }
         });
-        if (otherActiveBatches.some((candidate) => courseSupportBatchReservesCheckout(candidate))) {
+        const simulatorDispatch = await import("./course-support-course-dispatch");
+        if (otherActiveBatches.some((candidate) => courseSupportBatchReservesCheckout(candidate)) ||
+            await simulatorDispatch.hasSimulatorSupportImplementationOwnership(transaction)) {
           return null;
         }
         const leaseExpiresAt = new Date(databaseNow.getTime() + COURSE_SUPPORT_BATCH_LEASE_MS);
@@ -4325,7 +4327,8 @@ export async function claimCourseSupportBatch(input: {
         }),
       };
     }
-    const sharedCheckoutImplementationReserved = activeBatches.some((batch) =>
+    const sharedCheckoutImplementationReserved = liveReservations.some(entry =>
+      entry.audit.target.mode === "SIMULATOR" && (entry.audit.simulatorClaim?.plannedPaths.length ?? 0) > 0) || activeBatches.some((batch) =>
       courseSupportBatchReservesCheckout(batch),
     );
     if (plannedPaths.length > 0 && sharedCheckoutImplementationReserved) {
@@ -5529,7 +5532,8 @@ export async function claimCourseSupportBatch(input: {
               `${batch.providerFamilyKey}\u0000${batch.failureFingerprint}`,
           ),
         );
-        const currentSharedCheckoutImplementationReserved =
+        const currentSharedCheckoutImplementationReserved = lockedReservations.some(entry =>
+          entry.audit.target.mode === "SIMULATOR" && (entry.audit.simulatorClaim?.plannedPaths.length ?? 0) > 0) ||
           currentActiveBatches.some((batch) =>
             courseSupportBatchReservesCheckout(batch),
           );
@@ -6406,8 +6410,9 @@ export async function appendCourseSupportBatchPath(input: {
         },
         select: { status: true, summary: true },
       });
+      const simulatorDispatch = await import("./course-support-course-dispatch");
       if (
-        otherActiveBatches.some((activeBatch) =>
+        await simulatorDispatch.hasSimulatorSupportImplementationOwnership(transaction) || otherActiveBatches.some((activeBatch) =>
           courseSupportBatchReservesCheckout(activeBatch),
         )
       ) {

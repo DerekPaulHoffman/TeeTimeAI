@@ -6594,12 +6594,30 @@ describe("search email delivery outbox", () => {
     );
     expect(mockedPrisma.teeSearch.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({
+        where: { id: "search-1", alertGeneration: 3,
+          OR: [{ statusEmailSentAt: null }, { statusEmailSentAt: { lt: now } }] },
         data: {
           statusEmailSentAt: now,
           statusEmailSnapshot: payload.statusSnapshot,
         },
       }),
     );
+  });
+
+  it("fences an old owner MATCH status while its additional recipient finishes later", async () => {
+    const ownerSentAt = new Date(now.getTime() - 60_000);
+    mockedPrisma.$queryRaw.mockResolvedValue([{ ...currentSearch, statusEmailSentAt: now }] as never);
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([
+      delivery("old-owner", "owner@example.com", { status: "SENT", sentAt: ownerSentAt }),
+      delivery("retried-friend", "friend@example.com", { status: "SENT", sentAt: now }),
+    ] as never);
+    await finalizeSearchEmailDeliveryGroup({ searchId: "search-1", alertGeneration: 3,
+      kind: "MATCH", groupKey: "match-group" });
+    expect(mockedPrisma.teeSearch.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: "search-1", alertGeneration: 3,
+        OR: [{ statusEmailSentAt: null }, { statusEmailSentAt: { lt: ownerSentAt } }] },
+      data: expect.objectContaining({ statusEmailSentAt: ownerSentAt }),
+    }));
   });
 
   it("treats a monitoring status update as a durable status delivery", async () => {

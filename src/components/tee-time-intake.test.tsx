@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -69,6 +69,14 @@ function mockDateBoundaryRequests() {
   vi.stubGlobal("fetch", fetchMock);
   vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
   return fetchMock;
+}
+
+function simulatorTestVenue(name: string, distanceMeters: number, supported = true) {
+  return { ...dateBoundaryCourse(name, "America/New_York"), mode: "SIMULATOR" as const,
+    courseId: supported ? `course-${name}` : undefined,
+    offeringId: supported ? `offering-${name}` : undefined,
+    publicAccessStatus: supported ? "PUBLIC" as const : "UNVERIFIED" as const,
+    supportedDurationsMinutes: [60], monitoringReadiness: "VERIFYING" as const, distanceMeters };
 }
 
 describe("TeeTimeIntake", () => {
@@ -205,6 +213,7 @@ describe("TeeTimeIntake", () => {
   });
 
   afterEach(() => {
+    cleanup();
     document.querySelectorAll("[data-alert-confetti]").forEach((element) => element.remove());
     pushMock.mockReset();
     signInMock.mockClear();
@@ -753,14 +762,14 @@ describe("TeeTimeIntake", () => {
   });
 
   it.each([
-    { signedIn: true, offeringId: undefined, publicAccessStatus: "UNVERIFIED", supportedDurationsMinutes: [60], prefix: "Simulator" },
-    { signedIn: true, offeringId: undefined, publicAccessStatus: "UNVERIFIED", supportedDurationsMinutes: [60], prefix: "Simulator", website: undefined },
-    { signedIn: false, offeringId: undefined, publicAccessStatus: "UNVERIFIED", supportedDurationsMinutes: [60], prefix: "Simulator" },
-    { signedIn: true, offeringId: "unreviewed-offering", publicAccessStatus: "UNVERIFIED", supportedDurationsMinutes: [60], prefix: "Simulator" },
-    { signedIn: false, offeringId: "unreviewed-offering", publicAccessStatus: "UNVERIFIED", supportedDurationsMinutes: [60], prefix: "Simulator" },
-    { signedIn: true, offeringId: "two-hour-offering", publicAccessStatus: "PUBLIC", supportedDurationsMinutes: [120], prefix: "One-hour simulator" },
-    { signedIn: false, offeringId: "two-hour-offering", publicAccessStatus: "PUBLIC", supportedDurationsMinutes: [120], prefix: "One-hour simulator" }
-  ])("explains unavailable simulator alerts without offering an inert notification action: %j", async ({ signedIn, prefix, ...rental }) => {
+    { signedIn: true, offeringId: undefined, publicAccessStatus: "UNVERIFIED", supportedDurationsMinutes: [60] },
+    { signedIn: true, offeringId: undefined, publicAccessStatus: "UNVERIFIED", supportedDurationsMinutes: [60], website: undefined },
+    { signedIn: false, offeringId: undefined, publicAccessStatus: "UNVERIFIED", supportedDurationsMinutes: [60] },
+    { signedIn: true, offeringId: "unreviewed-offering", publicAccessStatus: "UNVERIFIED", supportedDurationsMinutes: [60] },
+    { signedIn: false, offeringId: "unreviewed-offering", publicAccessStatus: "UNVERIFIED", supportedDurationsMinutes: [60] },
+    { signedIn: true, offeringId: "two-hour-offering", publicAccessStatus: "PUBLIC", supportedDurationsMinutes: [120] },
+    { signedIn: false, offeringId: "two-hour-offering", publicAccessStatus: "PUBLIC", supportedDurationsMinutes: [120] }
+  ])("lets unknown simulator venues use the normal notification flow: %j", async ({ signedIn, ...rental }) => {
     const simulator = {
       ...dateBoundaryCourse("Unsupported Simulator", "America/New_York"),
       ...rental,
@@ -778,23 +787,199 @@ describe("TeeTimeIntake", () => {
       simulatorEnabled
       initialValues={{ mode: "SIMULATOR" }}
     />);
-    const unavailable = await screen.findByRole("button", { name: "Alerts unavailable for Unsupported Simulator", exact: true });
-    expect((unavailable as HTMLButtonElement).disabled).toBe(true);
-    expect(unavailable.textContent).toBe("Alerts unavailable");
-    const guidance = simulator.website ? " Check the official site for booking options." : "";
-    expect(screen.getByText(`${prefix} alerts aren’t available here yet.${guidance}`)).toBeTruthy();
+    await screen.findByRole("heading", { name: simulator.name });
+    expect(screen.getByText("We’ll check this venue when you set up an alert.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Other nearby venues/ })).toBeNull();
     expect(screen.queryByText(/rental details are being verified|sessions are not available/i)).toBeNull();
-    expect(screen.queryByRole("button", { name: /Notify me for Unsupported Simulator/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Alerts unavailable/ })).toBeNull();
     if (simulator.website) {
       expect(screen.getByRole("link", { name: "Open official site for Unsupported Simulator" }).getAttribute("href")).toBe(simulator.website);
     } else {
       expect(screen.queryByRole("link", { name: "Open official site for Unsupported Simulator" })).toBeNull();
       expect(screen.queryByText(/Check the official site for booking options/)).toBeNull();
     }
-    fireEvent.click(unavailable);
-    expect(screen.queryByRole("dialog", { name: "Notify me" })).toBeNull();
-    expect(signInMock).not.toHaveBeenCalled();
-    expect(fetchMock.mock.calls.some(([input]) => input === "/api/searches")).toBe(false);
+    const notify = screen.getByRole("button", { name: "Notify me for Unsupported Simulator", exact: true }) as HTMLButtonElement;
+    expect(notify.disabled).toBe(false);
+    fireEvent.click(notify);
+    if (signedIn) {
+      await screen.findByRole("dialog", { name: "Notify me" });
+      const saveButton = screen.getByRole("button", { name: "Start getting alerts" }) as HTMLButtonElement;
+      expect(saveButton.disabled).toBe(false);
+      fireEvent.click(saveButton);
+      await screen.findByText("Your alert is created");
+      const save = fetchMock.mock.calls.find(([input]) => input === "/api/searches");
+      expect(JSON.parse(String(save?.[1]?.body))).toEqual(expect.objectContaining({
+        mode: "SIMULATOR", durationMinutes: 60,
+        courses: [expect.objectContaining({ googlePlaceId: simulator.googlePlaceId })]
+      }));
+      expect(signInMock).not.toHaveBeenCalled();
+    } else {
+      await waitFor(() => expect(signInMock).toHaveBeenCalledWith("pk_test_login", "/search?mode=SIMULATOR"));
+      expect(fetchMock.mock.calls.some(([input]) => input === "/api/searches")).toBe(false);
+    }
+  });
+
+  it("shows every simulator by distance and keeps selection order stable", async () => {
+    const supported = [12_000, 18_000, 22_000, 24_000].map((distance, index) => simulatorTestVenue(`Supported Simulator ${index + 1}`, distance));
+    const other = Array.from({ length: 7 }, (_, index) => simulatorTestVenue(`Other Simulator ${index + 1}`, (index + 1) * 1_000, false));
+    window.sessionStorage.setItem(SIMULATOR_SEARCH_DRAFT_STORAGE_KEY, JSON.stringify({
+      location: "Monroe, CT", date: "2099-10-03", courses: [...other, ...supported], selectedCourses: []
+    }));
+    mockDateBoundaryRequests();
+    render(<TeeTimeIntake {...signedInAccountProps} simulatorEnabled initialValues={{ mode: "SIMULATOR" }} />);
+    const mainList = await screen.findByRole("list", { name: "Nearby simulators" });
+    const names = () => within(mainList).getAllByRole("heading").map((heading) => heading.textContent);
+    const allVenues = [...other, ...supported];
+    expect(names()).toEqual(allVenues.slice(0, 6).map((venue) => venue.name));
+    expect(screen.getByText("11 simulators")).toBeTruthy();
+    expect(screen.getByText("11 simulator locations found")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "See more locations" }));
+    expect(names()).toEqual(allVenues.map((venue) => venue.name));
+    expect(within(mainList).getAllByText("Session alerts supported")).toHaveLength(4);
+    expect(within(mainList).getAllByText("We’ll check this venue when you set up an alert.")).toHaveLength(7);
+    expect(within(mainList).queryByText("Alert availability after first check")).toBeNull();
+    for (const venue of allVenues) {
+      expect((screen.getByRole("button", { name: `Notify me for ${venue.name}` }) as HTMLButtonElement).disabled).toBe(false);
+    }
+    fireEvent.click(screen.getByRole("button", { name: `Notify me for ${other[2].name}` }));
+    await screen.findByRole("dialog", { name: "Notify me" });
+    expect(names()).toEqual(allVenues.map((venue) => venue.name));
+    fireEvent.click(screen.getByRole("button", { name: "Close notification setup" }));
+    expect(screen.queryByRole("button", { name: /Other nearby venues|Alerts unavailable/ })).toBeNull();
+    expect(names()).toEqual(allVenues.map((venue) => venue.name));
+  });
+
+  it("paginates every simulator venue while keeping the map's complete result count", async () => {
+    const supported = Array.from({ length: 8 }, (_, index) => simulatorTestVenue(`Paged Simulator ${index + 1}`, (index + 1) * 1_000));
+    window.sessionStorage.setItem(SIMULATOR_SEARCH_DRAFT_STORAGE_KEY, JSON.stringify({
+      location: "Monroe, CT", date: "2099-10-03", courses: [simulatorTestVenue("Nearby site-only", 50, false), ...supported], selectedCourses: []
+    }));
+    mockDateBoundaryRequests();
+    render(<TeeTimeIntake {...signedInAccountProps} simulatorEnabled initialValues={{ mode: "SIMULATOR" }} />);
+    const mainList = await screen.findByRole("list", { name: "Nearby simulators" });
+    expect(within(mainList).getAllByRole("heading").map((heading) => heading.textContent)).toEqual(["Nearby site-only", ...supported.slice(0, 5).map((venue) => venue.name)]);
+    expect(screen.getByText("Showing 6 of 9 locations")).toBeTruthy();
+    expect(screen.getByText("9 simulator locations found")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "See more locations" }));
+    expect(within(mainList).getAllByRole("heading").map((heading) => heading.textContent)).toEqual(["Nearby site-only", ...supported.map((venue) => venue.name)]);
+  });
+
+  it("explains an empty simulator search and expands only to the normal 30-mile limit", async () => {
+    const other = simulatorTestVenue("Rental venue without alerts", 1_000, false);
+    const supported = simulatorTestVenue("Supported farther away", 30_000);
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.startsWith("/api/location/geocode")) return Response.json({ latitude: 41.33, longitude: -73.21 });
+      if (url.startsWith("/api/courses/discover")) return Response.json({ courses: url.includes("radiusMeters=48280") ? [other, supported] : [] });
+      if (url === "/api/analytics/events") return Response.json({ event: { id: "test-event" } }, { status: 201 });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
+    render(<TeeTimeIntake {...signedInAccountProps} simulatorEnabled initialValues={{ mode: "SIMULATOR", location: "06468" }} />);
+    await waitFor(() => expect(window.sessionStorage.getItem(SIMULATOR_SEARCH_DRAFT_STORAGE_KEY)).not.toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Search", exact: true }));
+    await screen.findByRole("heading", { name: "No simulators found within 15 miles." });
+    expect(screen.queryByRole("heading", { name: other.name })).toBeNull();
+    expect(screen.queryByText(/No public courses|no matching session|sold out/i)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Search 30 miles", exact: true }));
+    await screen.findByRole("heading", { name: supported.name });
+    const discoveryCalls = fetchMock.mock.calls.filter(([input]) => String(input).startsWith("/api/courses/discover"));
+    expect(discoveryCalls.map(([input]) => new URL(String(input), "https://example.com").searchParams.get("radiusMeters"))).toEqual(["24140", "48280"]);
+    expect(screen.queryByRole("button", { name: "Search 50 miles" })).toBeNull();
+  });
+
+  it("shows one simulator empty notice after reducing the radius and expands only to 30 miles", async () => {
+    const supported = simulatorTestVenue("Supported outside five miles", 10_000);
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.startsWith("/api/location/geocode")) return Response.json({ latitude: 41.33, longitude: -73.21 });
+      if (url.startsWith("/api/courses/discover")) return Response.json({ courses: [supported] });
+      if (url === "/api/analytics/events") return Response.json({ event: { id: "test-event" } }, { status: 201 });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
+    render(<TeeTimeIntake {...signedInAccountProps} simulatorEnabled initialValues={{ mode: "SIMULATOR", location: "06468" }} />);
+    await waitFor(() => expect(window.sessionStorage.getItem(SIMULATOR_SEARCH_DRAFT_STORAGE_KEY)).not.toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Search", exact: true }));
+    await screen.findByRole("heading", { name: supported.name });
+    fireEvent.change(screen.getByRole("slider", { name: "Distance from me" }), { target: { value: "5" } });
+    expect(screen.getAllByRole("heading", { name: "No simulators found within 5 miles." })).toHaveLength(1);
+    expect(document.querySelectorAll(".figma-empty-results")).toHaveLength(1);
+    expect(screen.queryByText("No courses match these filters.")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Expand search", exact: true })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Search 50 miles" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Search 30 miles", exact: true }));
+    await screen.findByRole("heading", { name: supported.name });
+    expect((screen.getByRole("slider", { name: "Distance from me" }) as HTMLInputElement).value).toBe("30");
+    const discoveryCalls = fetchMock.mock.calls.filter(([input]) => String(input).startsWith("/api/courses/discover"));
+    expect(discoveryCalls.map(([input]) => new URL(String(input), "https://example.com").searchParams.get("radiusMeters"))).toEqual(["24140", "48280"]);
+  });
+
+  it("lets an unknown simulator found by name use the normal notification dialog and map", async () => {
+    const venue = simulatorTestVenue("Specific Simulator", 1_000, false);
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.startsWith("/api/courses/lookup")) return Response.json({ courses: [venue] });
+      if (url === "/api/analytics/events") return Response.json({ event: { id: "test-event" } }, { status: 201 });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
+    render(<TeeTimeIntake {...signedInAccountProps} simulatorEnabled initialValues={{ mode: "SIMULATOR" }} />);
+    await waitFor(() => expect(window.sessionStorage.getItem(SIMULATOR_SEARCH_DRAFT_STORAGE_KEY)).not.toBeNull());
+    fireEvent.change(screen.getByLabelText("Simulator name and town"), { target: { value: "Specific Simulator Monroe" } });
+    fireEvent.click(screen.getByRole("button", { name: "Find simulator", exact: true }));
+    const directList = await screen.findByRole("list", { name: "Direct simulator matches" });
+    expect(within(directList).getByRole("heading", { name: venue.name })).toBeTruthy();
+    expect(within(directList).getByRole("link", { name: `Open official site for ${venue.name}` }).getAttribute("href")).toBe(venue.website);
+    expect(within(directList).getByText("We’ll check this venue when you set up an alert.")).toBeTruthy();
+    expect(screen.getByText("1 simulator location found")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Other nearby venues/ })).toBeNull();
+    fireEvent.click(within(directList).getByRole("button", { name: `Notify me for ${venue.name}` }));
+    await screen.findByRole("dialog", { name: "Notify me" });
+    expect((screen.getByRole("button", { name: "Start getting alerts" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("saves demand for a site-only simulator while keeping the supported simulator flow available", async () => {
+    const siteOnly = { ...simulatorTestVenue("Reviewed site-only rental", 1_000), alertSupport: "OFFICIAL_SITE_ONLY" };
+    const verifying = simulatorTestVenue("Reviewed verifying rental", 2_000);
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.startsWith("/api/courses/lookup")) return Response.json({ courses: [siteOnly, verifying] });
+      if (url === "/api/searches") return Response.json({ search: { id: "site-only-demand" } }, { status: 201 });
+      if (url === "/api/analytics/events") return Response.json({ event: { id: "test-event" } }, { status: 201 });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
+    render(<TeeTimeIntake {...signedInAccountProps} simulatorEnabled initialValues={{ mode: "SIMULATOR", location: "06468" }} />);
+    await waitFor(() => expect(window.sessionStorage.getItem(SIMULATOR_SEARCH_DRAFT_STORAGE_KEY)).not.toBeNull());
+    fireEvent.change(screen.getByLabelText("Simulator name and town"), { target: { value: "Reviewed rentals Monroe" } });
+    fireEvent.click(screen.getByRole("button", { name: "Find simulator", exact: true }));
+    const directList = await screen.findByRole("list", { name: "Direct simulator matches" });
+    expect((within(directList).getByRole("button", { name: `Notify me for ${verifying.name}` }) as HTMLButtonElement).disabled).toBe(false);
+    expect((within(directList).getByRole("button", { name: `Notify me for ${siteOnly.name}` }) as HTMLButtonElement).disabled).toBe(false);
+    expect(within(directList).getByText("We’ll check this venue when you set up an alert.")).toBeTruthy();
+    expect(within(directList).getByText("Session alerts supported")).toBeTruthy();
+    expect(within(directList).getByRole("link", { name: `Open official site for ${siteOnly.name}` })).toBeTruthy();
+    expect(screen.getByText("2 simulators")).toBeTruthy();
+    expect(screen.getByText("2 simulator locations found")).toBeTruthy();
+    fireEvent.click(within(directList).getByRole("button", { name: `Notify me for ${siteOnly.name}` }));
+    await screen.findByRole("dialog", { name: "Notify me" });
+    const saveButton = screen.getByRole("button", { name: "Start getting alerts" }) as HTMLButtonElement;
+    expect(saveButton.disabled).toBe(false);
+    fireEvent.click(saveButton);
+    await screen.findByText("Your alert is created");
+    const save = fetchMock.mock.calls.find(([input]) => input === "/api/searches");
+    expect(JSON.parse(String(save?.[1]?.body))).toEqual(expect.objectContaining({
+      mode: "SIMULATOR", durationMinutes: 60,
+      courses: [expect.objectContaining({ googlePlaceId: siteOnly.googlePlaceId, alertSupport: "OFFICIAL_SITE_ONLY" })]
+    }));
   });
 
   it("discards a late outdoor discovery response after switching to simulators", async () => {

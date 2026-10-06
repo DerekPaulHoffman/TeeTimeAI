@@ -627,7 +627,7 @@ function TeeTimeIntakeContent({
   const windowMinutes = (Number(endTime.slice(0, 2)) * 60 + Number(endTime.slice(3))) -
     (Number(startTime.slice(0, 2)) * 60 + Number(startTime.slice(3)));
   const isTimeWindowValid = endTime > startTime && (mode === "OUTDOOR" || windowMinutes >= 60);
-  const hasMonitorableCourse = selected.some(
+  const hasMonitorableCourse = mode === "SIMULATOR" || selected.some(
     (course) => !isManualOnlyAlertSupport(course.alertSupport)
   );
   const incompatibleSelectedCourse = selected.find(
@@ -638,7 +638,6 @@ function TeeTimeIntakeContent({
   const accessReviewSelectedCourse = selected.find(
     (course) => course.publicAccessStatus === "REVIEW_REQUIRED"
   );
-  const unverifiedSimulator = mode === "SIMULATOR" ? selected.find(course => simulatorRentalProblem(course)) : undefined;
   const saveBlocker = !isDateFuture
     ? "Choose a future date for alerts."
     : !isTimeWindowValid
@@ -651,8 +650,6 @@ function TeeTimeIntakeContent({
         ? `${incompatibleSelectedCourse.name} is verified as ${getCourseLayoutLabel(incompatibleSelectedCourse.layoutHoleCounts)} and cannot be used for an ${requestedLayoutHoles}-hole course search.`
       : accessReviewSelectedCourse
         ? `${accessReviewSelectedCourse.name} needs a course-access review before it can be added to an alert.`
-      : unverifiedSimulator
-        ? `${unverifiedSimulator.name}: ${simulatorRentalProblem(unverifiedSimulator)}`
       : selected.length > 0 && !hasMonitorableCourse
         ? "Choose at least one course Tee Time Spot can check automatically."
         : null;
@@ -1071,7 +1068,6 @@ function TeeTimeIntakeContent({
   }
 
   function notifyForCourse(course: CourseCandidate) {
-    if (mode === "SIMULATOR" && simulatorRentalProblem(course)) return;
     if (course.publicAccessStatus === "REVIEW_REQUIRED") {
       reportCourseInaccuracy(course);
       return;
@@ -1092,7 +1088,7 @@ function TeeTimeIntakeContent({
         metadata: { selectedCourseCount: 1, players, requestedLayoutHoles }
       });
     }
-    if (course.publicAccessStatus === "UNVERIFIED") {
+    if (mode === "OUTDOOR" && course.publicAccessStatus === "UNVERIFIED") {
       void reportCourseLookupCandidate(course);
     }
   }
@@ -1334,6 +1330,7 @@ function TeeTimeIntakeContent({
       />
 
       <MissingCourseLookup
+        mode={mode}
         lookupMessage={courseLookupMessage}
         lookupState={courseLookupState}
         onQueryChange={setCourseLookupQuery}
@@ -1346,7 +1343,7 @@ function TeeTimeIntakeContent({
         }
       />
 
-      <div className="figma-results-layout" ref={resultsRef}>
+      <div className={mode === "SIMULATOR" ? "figma-results-layout is-simulator" : "figma-results-layout"} ref={resultsRef}>
         <div className="figma-results-column">
           {createdAlert ? (
             <div className="alert-created-confirmation" ref={createdAlertRef} role="status" tabIndex={-1}>
@@ -1370,6 +1367,21 @@ function TeeTimeIntakeContent({
             <div className="figma-results-banner" role="status" aria-atomic="true">
               <strong>{mode === "SIMULATOR" ? "Searching simulators" : "Searching public courses"}</strong> within {searchRadiusMiles} miles…
             </div>
+          ) : mode === "SIMULATOR" && displayedCourseCount === 0 &&
+            (courses.length > 0 || courseLookupResults.length > 0 || notice.type === "success") ? (
+            <div className="figma-empty-results" role="status" aria-atomic="true">
+              <h3>No simulators found within {searchRadiusMiles} miles.</h3>
+              <p>
+                {searchRadiusMiles < MAX_COURSE_SEARCH_RADIUS_MILES
+                  ? `Widen the search to ${MAX_COURSE_SEARCH_RADIUS_MILES} miles, or look up a simulator by name.`
+                  : `You searched the full ${MAX_COURSE_SEARCH_RADIUS_MILES}-mile range. Look up a simulator by name and we'll review any miss.`}
+              </p>
+              {searchCoordinates && searchRadiusMiles < MAX_COURSE_SEARCH_RADIUS_MILES ? (
+                <button className="button button-ghost" disabled={loading} onClick={expandEmptySearch} type="button">
+                  {loading ? "Searching" : `Search ${MAX_COURSE_SEARCH_RADIUS_MILES} miles`}
+                </button>
+              ) : null}
+            </div>
           ) : courses.length > 0 ? (
             <div className="figma-results-banner" role="status" aria-atomic="true">
               <strong>
@@ -1385,9 +1397,9 @@ function TeeTimeIntakeContent({
             <div className="figma-results-banner" role="status" aria-atomic="true">
               <strong>
                 {courseLookupResults.length}{" "}
-                {courseLookupResults.length === 1 ? "course" : "courses"}
+                {mode === "SIMULATOR" ? courseLookupResults.length === 1 ? "simulator" : "simulators" : courseLookupResults.length === 1 ? "course" : "courses"}
               </strong>{" "}
-              found by name — choose a course to get notified about openings.
+              found by name — choose {mode === "SIMULATOR" ? "a simulator" : "a course"} to get notified about openings.
             </div>
           ) : notice.type === "success" ? (
             <div className="figma-empty-results" role="status" aria-atomic="true">
@@ -1420,7 +1432,7 @@ function TeeTimeIntakeContent({
               notice={notice}
             />
           ) : null}
-          {courses.length > 0 &&
+          {mode === "OUTDOOR" && courses.length > 0 &&
           filteredCourses.length === 0 &&
           courseLookupResults.length === 0 ? (
             <div className="figma-empty-results">
@@ -1446,7 +1458,7 @@ function TeeTimeIntakeContent({
               <div
                 className="course-list figma-course-list"
                 role="list"
-                aria-label="Direct course matches"
+                aria-label={mode === "SIMULATOR" ? "Direct simulator matches" : "Direct course matches"}
               >
                 {courseLookupResults.map((course) => (
                   <CourseResultCard
@@ -1470,11 +1482,11 @@ function TeeTimeIntakeContent({
           ) : null}
 
           {courseLookupResults.length > 0 && nearbyCourses.length > 0 ? (
-            <CourseResultsDivider>Courses near you</CourseResultsDivider>
+            <CourseResultsDivider>{mode === "SIMULATOR" ? "Simulators near you" : "Courses near you"}</CourseResultsDivider>
           ) : null}
 
           {visibleNearbyCourses.length > 0 ? (
-            <div className="course-list figma-course-list" role="list" aria-label="Nearby courses">
+            <div className="course-list figma-course-list" role="list" aria-label={mode === "SIMULATOR" ? "Nearby simulators" : "Nearby courses"}>
               {visibleNearbyCourses.map((course) => (
                 <CourseResultCard
                   course={course}
@@ -1701,7 +1713,7 @@ function TeeTimeIntakeContent({
         </div>
       </dialog>
       </div>
-      <CourseResultsMap courses={displayedCourses} origin={searchCoordinates} />
+      <CourseResultsMap courses={displayedCourses} origin={searchCoordinates} mode={mode} />
     </div>
   );
 }
@@ -1749,15 +1761,6 @@ function CourseResultsDivider({ children }: { children: ReactNode }) {
   );
 }
 
-function simulatorRentalProblem(course: CourseCandidate) {
-  const officialSiteGuidance = course.website ? " Check the official site for booking options." : "";
-  if (course.mode !== "SIMULATOR" || !course.offeringId || course.publicAccessStatus !== "PUBLIC") {
-    return `Simulator alerts aren’t available here yet.${officialSiteGuidance}`;
-  }
-  if (!course.supportedDurationsMinutes?.includes(60)) return `One-hour simulator alerts aren’t available here yet.${officialSiteGuidance}`;
-  return null;
-}
-
 function CourseResultCard({
   course,
   knownTimes,
@@ -1781,7 +1784,6 @@ function CourseResultCard({
 }) {
   const isSelected = selectedIndex >= 0;
   const isSimulator = course.mode === "SIMULATOR";
-  const rentalProblem = isSimulator ? simulatorRentalProblem(course) : null;
   const layoutCompatibility = getCourseLayoutCompatibility(
     course.layoutHoleCounts,
     requestedLayoutHoles
@@ -1792,14 +1794,14 @@ function CourseResultCard({
     course.bookableHoleCounts
   );
   const noCurrentTimes = (liveCheck?.status === "CHECKED" && filterVisibleTeeTimes(liveCheck.times, course.timeZone, timeFilters.startTime, timeFilters.endTime, timeFilters.players).length === 0) || liveCheck?.status === "NOT_OPEN";
-  const notifyLabel = rentalProblem ? "Alerts unavailable" : noCurrentTimes ? "Notify me when new times become available" : "Notify me";
+  const notifyLabel = noCurrentTimes ? "Notify me when new times become available" : "Notify me";
   const isPublicAccessUnverified = course.publicAccessStatus === "UNVERIFIED";
   const requiresPublicAccessReview =
     course.publicAccessStatus === "REVIEW_REQUIRED";
   const notifyButtonContent = (
     <>
       <Bell aria-hidden="true" size={12} />
-      {rentalProblem ? "Alerts unavailable" : isIncompatible ? "Doesn’t match" : (
+      {isIncompatible ? "Doesn’t match" : (
         <>
           Notify me
           {noCurrentTimes ? (
@@ -1885,7 +1887,7 @@ function CourseResultCard({
           )}
         </h3>
         <CourseAddressLink course={course} />
-        {isSimulator ? rentalProblem ? <p className="course-alert-support-note">{rentalProblem}</p> : <CourseMonitoringStatus course={course} /> : course.courseId ? <CourseTimeCheckStatus check={liveCheck} alertSupport={course.alertSupport} /> : <CourseMonitoringStatus course={course} />}
+        {isSimulator ? <CourseMonitoringStatus course={course} /> : course.courseId ? <CourseTimeCheckStatus check={liveCheck} alertSupport={course.alertSupport} /> : <CourseMonitoringStatus course={course} />}
         {!isSimulator ? course.courseId ? liveCheck?.status === "CHECKED" && <KnownTeeTimes times={liveCheck.times} timeZone={course.timeZone} {...timeFilters} showEmpty /> : <KnownTeeTimes times={knownTimes} timeZone={course.timeZone} {...timeFilters} /> : null}
         {isIncompatible && requestedLayoutHoles ? (
           <p className="course-alert-support-note">
@@ -1930,8 +1932,8 @@ function CourseResultCard({
           signInKey ? (
             <DeferredSignInButton
               ariaLabel={`${notifyLabel} for ${course.name}`}
-              className={rentalProblem ? "figma-add-button is-unavailable" : "figma-add-button"}
-              disabled={isIncompatible || Boolean(rentalProblem)}
+              className="figma-add-button"
+              disabled={isIncompatible}
               onClick={() => onToggle(course)}
               publishableKey={signInKey}
               returnTo={isSimulator ? "/search?mode=SIMULATOR" : "/search"}
@@ -1941,8 +1943,8 @@ function CourseResultCard({
           ) : (
             <button
               aria-label={`${notifyLabel} for ${course.name}`}
-              className={rentalProblem ? "figma-add-button is-unavailable" : "figma-add-button"}
-              disabled={isIncompatible || Boolean(rentalProblem)}
+              className="figma-add-button"
+              disabled={isIncompatible}
               onClick={() => onToggle(course)}
               type="button"
             >
@@ -1950,7 +1952,7 @@ function CourseResultCard({
             </button>
           )
         )}
-        {!isIncompatible && !rentalProblem && !(requiresPublicAccessReview && !isSelected) ? (
+        {!isIncompatible && !(requiresPublicAccessReview && !isSelected) ? (
           <span className="course-notify-caption">
             when new {isSimulator ? "openings" : "tee times"} <br />become available
           </span>
@@ -1961,6 +1963,7 @@ function CourseResultCard({
 }
 
 function MissingCourseLookup({
+  mode = "OUTDOOR",
   lookupMessage,
   lookupState,
   onQueryChange,
@@ -1968,6 +1971,7 @@ function MissingCourseLookup({
   query,
   showVisibleMessage
 }: {
+  mode?: SearchMode;
   lookupMessage: string;
   lookupState: "idle" | "loading" | "success" | "error";
   onQueryChange: (query: string) => void;
@@ -1976,9 +1980,9 @@ function MissingCourseLookup({
   showVisibleMessage: boolean;
 }) {
   return (
-    <section className="missing-course-lookup" aria-labelledby="missing-course-heading" id="missing-course">
+    <section className={mode === "SIMULATOR" ? "missing-course-lookup is-simulator" : "missing-course-lookup"} aria-labelledby="missing-course-heading" id="missing-course">
       <div className="missing-course-heading">
-        <h2 id="missing-course-heading">Looking for a specific course?</h2>
+        <h2 id="missing-course-heading">Looking for a specific {mode === "SIMULATOR" ? "simulator" : "course"}?</h2>
         <p>Can&apos;t find it in the list? Search by name and town.</p>
       </div>
       <form
@@ -1989,7 +1993,7 @@ function MissingCourseLookup({
         }}
       >
         <label className="sr-only" htmlFor="missingCourseQuery">
-          Course name and town
+          {mode === "SIMULATOR" ? "Simulator" : "Course"} name and town
         </label>
         <div className="missing-course-controls">
           <div className="missing-course-input">
@@ -1999,13 +2003,13 @@ function MissingCourseLookup({
               id="missingCourseQuery"
               maxLength={120}
               onChange={(event) => onQueryChange(event.target.value)}
-              placeholder="e.g. Bethpage Black, Farmingdale NY"
+              placeholder={mode === "SIMULATOR" ? "e.g. Golf Oasis, Monroe CT" : "e.g. Bethpage Black, Farmingdale NY"}
               type="search"
               value={query}
             />
           </div>
           <button disabled={lookupState === "loading"} type="submit">
-            {lookupState === "loading" ? "Looking…" : "Find course"}
+            {lookupState === "loading" ? "Looking…" : mode === "SIMULATOR" ? "Find simulator" : "Find course"}
           </button>
         </div>
       </form>
@@ -2099,11 +2103,12 @@ function CourseMonitoringStatus({
   compact?: boolean;
 }) {
   if (course.mode === "SIMULATOR") {
-    const ready = hasReadyAutomaticMonitoring(course);
-    return <p className={`course-monitoring-status${ready ? "" : " is-unconfirmed"}${compact ? " is-compact" : ""}`}>
-      <CourseStatusEmoji emoji={ready ? "✅" : "⏳"} />
-      <span><strong>{ready ? "Alerts available" : "Alert availability after first check"}</strong>
-        {!compact ? <small>We check the official simulator booking page and email matching openings.</small> : null}
+    const supported = Boolean(course.offeringId && course.publicAccessStatus === "PUBLIC" &&
+      course.supportedDurationsMinutes?.includes(60) && !isManualOnlyAlertSupport(course.alertSupport));
+    return <p className={`course-monitoring-status${supported ? "" : " is-unconfirmed"}${compact ? " is-compact" : ""}`}>
+      <CourseStatusEmoji emoji={supported ? "✅" : "⏳"} />
+      <span><strong>{supported ? "Session alerts supported" : "We’ll check this venue when you set up an alert."}</strong>
+        {!compact && supported ? <small>We check your date and email matching one-hour openings.</small> : null}
       </span>
     </p>;
   }
@@ -2185,10 +2190,12 @@ function CourseMonitoringStatus({
 
 function CourseResultsMap({
   courses,
-  origin
+  origin,
+  mode = "OUTDOOR"
 }: {
   courses: CourseCandidate[];
   origin: SearchCoordinates | null;
+  mode?: SearchMode;
 }) {
   const mapsApiKey = normalizeBrowserGoogleMapsApiKey(
     process.env.NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_API_KEY
@@ -2343,7 +2350,7 @@ function CourseResultsMap({
     <div className="course-results-map-shell" id="course-results-map-section">
       {mapsApiKey && !mapLoadError ? (
         <div
-          aria-label={`${courses.length} nearby course locations on Google Maps`}
+          aria-label={`${courses.length} nearby ${mode === "SIMULATOR" ? "simulator locations" : "course locations"} on Google Maps`}
           className="course-results-map"
           id={mapElementId}
           role="region"
@@ -2352,6 +2359,7 @@ function CourseResultsMap({
         <CourseFallbackMap
           courses={courses}
           origin={origin}
+          mode={mode}
           reason={
             mapsApiKey
               ? "Google Maps could not load, so this interactive map uses OpenStreetMap."
@@ -2359,9 +2367,9 @@ function CourseResultsMap({
           }
         />
       )}
-      <div className="course-results-map-count">
+      <div className={mode === "SIMULATOR" ? "course-results-map-count is-simulator" : "course-results-map-count"}>
         <MapPinned size={16} />
-        {courses.length} course locations found
+        {courses.length} {mode === "SIMULATOR" ? `simulator location${courses.length === 1 ? "" : "s"} found` : "course locations found"}
       </div>
     </div>
   );
@@ -2409,11 +2417,13 @@ function createClassicCourseMarkerIcon(path: unknown, selected: boolean) {
 function CourseFallbackMap({
   courses,
   origin,
-  reason
+  reason,
+  mode = "OUTDOOR"
 }: {
   courses: CourseCandidate[];
   origin: SearchCoordinates | null;
   reason: string;
+  mode?: SearchMode;
 }) {
   const mapElementRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<Leaflet.Map | null>(null);
@@ -2506,7 +2516,7 @@ function CourseFallbackMap({
   return (
     <div className="course-fallback-map-shell">
       <div
-        aria-label={`${courses.length} nearby course locations on fallback map`}
+        aria-label={`${courses.length} nearby ${mode === "SIMULATOR" ? "simulator locations" : "course locations"} on fallback map`}
         className="course-fallback-map"
         ref={mapElementRef}
         role="region"

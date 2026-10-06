@@ -125,8 +125,10 @@ export const teeSearchInputSchema = teeSearchDetailsSchema
       .max(MAX_COURSE_PREFERENCES, "Select up to 5 courses")
   })
   .superRefine((value, context) => {
-    if (value.mode === "SIMULATOR" && value.courses.some((course) => !course.offeringId)) {
-      context.addIssue({ code: "custom", path: ["courses"], message: "Choose verified simulator venues" });
+    if (value.mode === "SIMULATOR" && value.courses.some((course) =>
+      course.mode === "OUTDOOR" || (!course.offeringId && !course.googlePlaceId)
+    )) {
+      context.addIssue({ code: "custom", path: ["courses"], message: "Choose simulator venues from the results" });
     }
     if (value.mode === "OUTDOOR" && value.courses.some((course) => course.offeringId || course.mode === "SIMULATOR")) {
       context.addIssue({ code: "custom", path: ["courses"], message: "Choose outdoor courses for this alert" });

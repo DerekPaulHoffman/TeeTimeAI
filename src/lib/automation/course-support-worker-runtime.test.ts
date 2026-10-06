@@ -209,6 +209,8 @@ describe("private Windows worker runtime", () => {
   it("requires the exact selected checkout and strict script/separator on the production CLI", () => {
     const parsed = readWorkerProductionArguments(["--selected-checkout", "private selected path", "--script", "automation:course-support", "--", "claim", "--max-courses", "1"]);
     expect(parsed).toEqual({ selectedCheckout: "private selected path", script: "automation:course-support", args: ["claim", "--max-courses", "1"] });
+    expect(readWorkerProductionArguments(["--selected-checkout", "private selected path", "--script", "automation:simulator-support", "--", "claim", "--assignment-ref", "private-assignment"]))
+      .toEqual({ selectedCheckout: "private selected path", script: "automation:simulator-support", args: ["claim", "--assignment-ref", "private-assignment"] });
     for (const invalid of [
       ["--script", "automation:course-support", "--", "claim"],
       ["--selected-checkout", "path", "--script", "automation:course-support"],

@@ -32,7 +32,9 @@ describe("simulator offering discovery evidence", () => {
 
   it("never promotes an unverified rental using outdoor readiness", () => {
     const index = buildSimulatorOfferingIndex([rental({ verifiedAt: null })]);
-    expect(getPersistedSimulatorCandidates(index)).toEqual([]);
+    expect(getPersistedSimulatorCandidates(index)).toEqual([expect.objectContaining({
+      publicAccessStatus: "UNVERIFIED", monitoringReadiness: "VERIFYING", offeringId: "rental-1",
+    })]);
     expect(mapSimulatorCandidate({ googlePlaceId: "place-1", name: "Venue", latitude: 0, longitude: 0, timeZone: "UTC",
       monitoringSupport: "AUTOMATIC", monitoringReadiness: "READY" }, index)).toMatchObject({
         publicAccessStatus: "UNVERIFIED", monitoringSupport: "UNCONFIRMED", monitoringReadiness: "VERIFYING"
@@ -44,6 +46,16 @@ describe("simulator offering discovery evidence", () => {
     const inactive = rental({ active: false, updatedAt: new Date("2026-10-06T12:00:00Z") });
     expect(buildSimulatorOfferingIndex([inactive]).reviewVersion).not.toBe(buildSimulatorOfferingIndex([active]).reviewVersion);
     expect(getPersistedSimulatorCandidates(buildSimulatorOfferingIndex([inactive]))).toEqual([]);
+  });
+
+  it("retains saved pending rental demand without advertising duration or availability proof", () => {
+    const index = buildSimulatorOfferingIndex([rental({ publicAccessStatus: "UNVERIFIED", verifiedAt: null,
+      evidenceUrl: null, bookingUrl: null, supportedDurationsMinutes: [], maxPartySize: null })]);
+    const [candidate] = getPersistedSimulatorCandidates(index);
+    expect(candidate).toMatchObject({ publicAccessStatus: "UNVERIFIED", supportedDurationsMinutes: [],
+      monitoringReadiness: "VERIFYING", monitoringSupport: "UNCONFIRMED" });
+    expect(candidate).not.toHaveProperty("simulatorVerifiedAt");
+    expect(getPersistedSimulatorCandidates(buildSimulatorOfferingIndex([rental({ publicAccessStatus: "NOT_PUBLIC" })]))).toEqual([]);
   });
 
   it("does not invalidate Places discovery for a monitoring heartbeat", () => {

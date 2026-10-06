@@ -30,6 +30,17 @@ describe("teeSearchInputSchema", () => {
     expect(parsed.durationMinutes).toBe(120);
   });
 
+  it("accepts an unverified simulator candidate with an exact provider identity", () => {
+    const base = { mode: "SIMULATOR", date: tomorrow(), startTime: "13:00", endTime: "17:00", players: 4 };
+    expect(teeSearchInputSchema.parse({ ...base, courses: [{ googlePlaceId: "new-simulator",
+      name: "New Indoor Golf", rank: 1, latitude: 41, longitude: -73, publicAccessStatus: "UNVERIFIED" }] })
+      .courses[0].offeringId).toBeUndefined();
+    expect(() => teeSearchInputSchema.parse({ ...base, courses: [{ name: "Arbitrary venue",
+      rank: 1, latitude: 41, longitude: -73, website: "https://arbitrary.example/" }] })).toThrow();
+    expect(() => teeSearchInputSchema.parse({ ...base, courses: [{ googlePlaceId: "outdoor-course",
+      mode: "OUTDOOR", name: "Outdoor Course", rank: 1, latitude: 41, longitude: -73 }] })).toThrow();
+  });
+
   it("rejects mixed mode and groups above four while allowing default simulator duration", () => {
     const base = {
       date: tomorrow(), startTime: "13:00", endTime: "17:00",

@@ -606,6 +606,30 @@ button {
   margin-top: 14px;
 }
 
+.course-results-map-count.is-simulator {
+  box-sizing: border-box;
+  max-width: calc(100% - 28px);
+}
+
+.figma-results-layout.is-simulator .course-results-divider p {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+
+@media (max-width: 400px) {
+  .missing-course-lookup.is-simulator .missing-course-controls {
+    flex-wrap: wrap;
+  }
+
+  .missing-course-lookup.is-simulator .missing-course-input,
+  .missing-course-lookup.is-simulator .missing-course-form button {
+    box-sizing: border-box;
+    flex-basis: 100%;
+  }
+}
+
 .search-results-header {
   align-items: end;
   border-top: 1px solid var(--line);
