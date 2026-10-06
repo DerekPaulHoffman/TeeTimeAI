@@ -94,6 +94,7 @@ import {
   readSearchPrefillFromUrl
 } from "@/lib/searches/search-prefill";
 import {
+  DEFAULT_COURSE_LAYOUT_FILTER,
   TeeTimeSearchControls,
   formatCompactTimeWindow,
   type CourseLayoutFilter
@@ -314,7 +315,7 @@ function TeeTimeIntakeContent({
     { id: "additional-recipient-1", value: "" }
   ]);
   const [holeFilter, setHoleFilter] = useState<CourseLayoutFilter>(
-    initialValues.holes ?? "any"
+    initialValues.holes ?? DEFAULT_COURSE_LAYOUT_FILTER
   );
   const [courses, setCourses] = useState<CourseCandidate[]>([]);
   const [searchCoordinates, setSearchCoordinates] = useState<SearchCoordinates | null>(
@@ -1283,7 +1284,7 @@ function TeeTimeIntakeContent({
         onRadiusChange={setSearchRadiusMiles}
         onResetFilters={() => {
           selectMode("OUTDOOR");
-          setHoleFilter("any");
+          setHoleFilter(DEFAULT_COURSE_LAYOUT_FILTER);
           setSearchRadiusMiles(DEFAULT_COURSE_SEARCH_RADIUS_MILES);
         }}
         onSelectCurrentLocation={selectCurrentLocation}

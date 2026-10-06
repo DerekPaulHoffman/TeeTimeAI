@@ -28,6 +28,7 @@ function calendarDate(value: string) {
 
 export function AlertDatePicker({
   id,
+  ariaLabel,
   value,
   min,
   isInvalid,
@@ -35,6 +36,7 @@ export function AlertDatePicker({
   onChange
 }: {
   id: string;
+  ariaLabel?: string;
   value: string;
   min: string;
   isInvalid?: boolean;
@@ -49,6 +51,7 @@ export function AlertDatePicker({
     <DialogTrigger isOpen={isOpen} onOpenChange={setIsOpen}>
       <div className={styles.control}>
         <input
+          aria-label={ariaLabel}
           aria-describedby={describedBy}
           aria-invalid={isInvalid}
           id={id}

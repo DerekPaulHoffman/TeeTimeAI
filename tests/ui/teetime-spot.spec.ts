@@ -557,7 +557,7 @@ test.describe("Tee Time Spot UI smoke", () => {
     );
     await expect(page.locator(".figma-hole-options button").filter({ hasText: "9-hole" })).toHaveCSS(
       "color",
-      "rgb(69, 103, 93)"
+      "rgb(20, 35, 29)"
     );
     await expect(page.locator(".figma-distance-filter em").first()).toHaveCSS(
       "color",

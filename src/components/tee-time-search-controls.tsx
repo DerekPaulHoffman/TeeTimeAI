@@ -14,6 +14,7 @@ import { MAX_PLAYERS_PER_SEARCH } from "@/lib/validation/search-constraints";
 import type { SearchMode } from "@/lib/searches/search-mode";
 
 export type CourseLayoutFilter = "any" | "9" | "18";
+export const DEFAULT_COURSE_LAYOUT_FILTER: CourseLayoutFilter = "18";
 
 const TIME_CHOICES = Array.from({ length: 96 }, (_, index) => {
   const minutes = index * 15;
@@ -196,9 +197,13 @@ export function TeeTimeSearchControls({
           </div>
         </label>
         <div className="figma-search-field figma-date-field">
-          <label htmlFor="date">Date</label>
+          <label htmlFor="date">
+            <span className="figma-filter-label-icon" aria-hidden="true">📅</span>
+            Date
+          </label>
           <div className="figma-search-value">
             <AlertDatePicker
+              ariaLabel="Date"
               isInvalid={!isDateFuture}
               describedBy={!isDateFuture ? "search-form-guidance" : undefined}
               id="date"
@@ -303,6 +308,7 @@ export function TeeTimeSearchControls({
         </div>
         <div className={`figma-hole-filter${simulatorEnabled ? " has-simulator" : ""}`} aria-label="Course layout" role="group">
           <strong>
+            <span className="figma-filter-label-icon" aria-hidden="true">⛳</span>
             <span className="figma-desktop-copy">Course layout</span>
             <span className="figma-mobile-copy">Holes</span>
           </strong>
@@ -341,7 +347,10 @@ export function TeeTimeSearchControls({
         <span className="figma-filter-divider" aria-hidden="true" />
         <div className="figma-distance-group">
           <div className="figma-distance-heading">
-            <strong className="figma-distance-label">Within</strong>
+            <strong className="figma-distance-label">
+              <span className="figma-filter-label-icon" aria-hidden="true">📏</span>
+              Within
+            </strong>
           </div>
           <label className="figma-distance-filter" htmlFor="searchRadius">
             <span>
@@ -367,7 +376,17 @@ export function TeeTimeSearchControls({
               }}
             />
           </label>
-          {mode === "SIMULATOR" || holeFilter !== "any" ||
+        </div>
+        <div className="figma-search-actions">
+          <button
+            className="figma-search-submit"
+            disabled={loading || locationText.trim().length === 0}
+            type="submit"
+          >
+            <Search size={15} />
+            {loading ? "Searching" : "Search"}
+          </button>
+          {mode === "SIMULATOR" || holeFilter !== DEFAULT_COURSE_LAYOUT_FILTER ||
           searchRadiusMiles !== DEFAULT_COURSE_SEARCH_RADIUS_MILES ? (
             <button
               className="figma-reset-filters"
@@ -379,14 +398,6 @@ export function TeeTimeSearchControls({
             </button>
           ) : null}
         </div>
-        <button
-          className="figma-search-submit"
-          disabled={loading || locationText.trim().length === 0}
-          type="submit"
-        >
-          <Search size={15} />
-          {loading ? "Searching" : "Search"}
-        </button>
       </div>
     </form>
   );

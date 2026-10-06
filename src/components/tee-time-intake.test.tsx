@@ -72,6 +72,30 @@ function mockDateBoundaryRequests() {
 }
 
 describe("TeeTimeIntake", () => {
+  it("defaults to 18-hole courses and restores that default when clearing filters", () => {
+    mockDateBoundaryRequests();
+    render(<TeeTimeIntake {...signedInAccountProps} simulatorEnabled />);
+    expect(screen.getByLabelText("Date", { exact: true }).getAttribute("type")).toBe("date");
+    const layout = within(screen.getByRole("group", { name: "Course layout" }));
+    expect(layout.getByRole("button", { name: "18-hole" }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.queryByRole("button", { name: "Clear", exact: true })).toBeNull();
+
+    fireEvent.click(layout.getByRole("button", { name: "Simulator", exact: true }));
+    fireEvent.change(screen.getByRole("slider", { name: "Distance from me" }), { target: { value: "25" } });
+    fireEvent.click(screen.getByRole("button", { name: "Clear", exact: true }));
+
+    expect(layout.getByRole("button", { name: "18-hole" }).getAttribute("aria-pressed")).toBe("true");
+    expect((screen.getByRole("slider", { name: "Distance from me" }) as HTMLInputElement).value).toBe("15");
+    expect(screen.queryByRole("button", { name: "Clear", exact: true })).toBeNull();
+  });
+
+  it("preserves an explicit Any layout selection instead of replacing it with the default", () => {
+    mockDateBoundaryRequests();
+    render(<TeeTimeIntake {...signedInAccountProps} initialValues={{ holes: "any" }} />);
+    const layout = within(screen.getByRole("group", { name: "Course layout" }));
+    expect(layout.getByRole("button", { name: "Any" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
   it("closes setup after saving and offers alert navigation or more courses without redirecting", async () => {
     const first = dateBoundaryCourse("First Public Course", "America/New_York");
     const second = dateBoundaryCourse("Second Public Course", "America/New_York");
@@ -605,7 +629,7 @@ describe("TeeTimeIntake", () => {
     const firstRender = render(
       <TeeTimeIntake
         {...signedInAccountProps}
-        initialValues={{ location: "Trumbull, CT" }}
+        initialValues={{ location: "Trumbull, CT", holes: "any" }}
       />
     );
 

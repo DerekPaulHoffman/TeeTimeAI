@@ -6958,28 +6958,51 @@ button {
 }
 
 .figma-hole-options {
-  background: #f0f4f1;
+  background: transparent;
   border-radius: 8px;
   display: flex;
-  padding: 2px;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 6px;
+  min-width: 0;
+  width: 100%;
 }
 
 .figma-hole-filter .figma-hole-options button {
   background: transparent;
-  border: 0;
+  border: 1px solid transparent;
   border-radius: 6px;
-  color: #45675d;
+  color: #14231d;
   font-size: 0.75rem;
   font-weight: 600;
   height: 28px;
   min-height: 28px;
   min-width: 0;
-  padding: 0 12px;
+  padding: 0 8px;
+  flex: 1 1 0;
+  white-space: nowrap;
+  position: relative;
+}
+
+.figma-hole-filter.has-simulator .figma-hole-options > button:last-child {
+  flex-grow: 1.35;
+}
+
+.figma-hole-options > button:not(:last-child)::after {
+  color: #82958f;
+  content: "|";
+  font-weight: 400;
+  pointer-events: none;
+  position: absolute;
+  right: -8px;
+  top: 50%;
+  transform: translateY(-50%);
 }
 
 .figma-hole-filter .figma-hole-options button.is-active {
-  background: #ffffff;
-  box-shadow: 0 1px 3px rgba(17, 26, 34, 0.12);
+  background: #f3f4f6;
+  border-color: #d1d5db;
+  box-shadow: none;
   color: #14231d;
 }
 
@@ -9392,14 +9415,14 @@ button {
 
   .figma-hole-options {
     background: transparent;
-    gap: 4px;
+    gap: 12px;
     padding: 0;
   }
 
   .figma-hole-filter .figma-hole-options button,
   .figma-hole-filter .figma-hole-options button.is-active {
-    border: 1px solid #e2eae5;
-    border-radius: 999px;
+    border: 1px solid transparent;
+    border-radius: 6px;
     box-shadow: none;
     font-size: 11px;
     font-weight: 700;
@@ -9409,14 +9432,14 @@ button {
   }
 
   .figma-hole-filter .figma-hole-options button {
-    background: #f0f4f1;
-    color: #45675d;
+    background: transparent;
+    color: #14231d;
   }
 
   .figma-hole-filter .figma-hole-options button.is-active {
-    background: #14231d;
-    border-color: #14231d;
-    color: #ffffff;
+    background: #f3f4f6;
+    border-color: #d1d5db;
+    color: #14231d;
   }
 
   .figma-filter-strip .figma-filter-divider {
@@ -9772,12 +9795,19 @@ button {
   white-space: nowrap;
 }
 
+.figma-hole-filter.has-simulator {
+  align-items: flex-start;
+  flex-direction: column;
+  justify-content: center;
+}
+
 .figma-distance-group {
   background: #ffffff;
   border-bottom: 1px solid #f0f4f1;
   display: flex;
   flex-direction: column;
   gap: 4px;
+  justify-content: center;
   min-height: 63px;
   padding: 10px 16px;
   position: relative;
@@ -9787,6 +9817,7 @@ button {
   align-items: center;
   display: flex;
   justify-content: space-between;
+  min-height: 18px;
 }
 
 .figma-distance-label {
@@ -9800,6 +9831,7 @@ button {
   gap: 8px;
   grid-template-columns: auto minmax(0, 1fr) auto;
   max-width: none;
+  min-height: 40px;
   min-width: 0;
   width: 100%;
 }
@@ -9837,12 +9869,38 @@ button {
   height: 24px;
 }
 
-.figma-reset-filters {
-  min-height: 28px;
-  padding: 0 8px;
-  position: absolute;
-  right: 10px;
-  top: 4px;
+.figma-search-actions {
+  align-self: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  grid-column: 1 / -1;
+  margin: 12px;
+  min-width: 0;
+}
+
+.figma-search-actions .figma-search-submit {
+  margin: 0;
+  width: 100%;
+}
+
+.figma-filter-label-icon {
+  display: inline-block;
+  font-size: 13px;
+  letter-spacing: 0;
+  line-height: 1;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+.figma-search-actions .figma-reset-filters {
+  background: transparent;
+  color: #45675d;
+  min-height: 32px;
+  padding: 0 12px;
+  position: static;
+  flex-shrink: 0;
 }
 
 .figma-search-submit {
@@ -9954,7 +10012,11 @@ button {
   }
 
   .figma-filter-strip {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns:
+      minmax(0, 0.85fr)
+      minmax(0, 1.8fr)
+      minmax(0, 1fr)
+      minmax(0, 0.8fr);
   }
 
   .figma-distance-group {
@@ -9962,6 +10024,10 @@ button {
   }
 
   .figma-search-submit {
+    grid-column: auto;
+  }
+
+  .figma-search-actions {
     grid-column: auto;
   }
 }
@@ -9993,10 +10059,44 @@ button {
 
   .figma-filter-strip {
     grid-template-columns:
+      minmax(0, 0.85fr)
+      minmax(0, 1.8fr)
       minmax(0, 1fr)
-      minmax(0, 1.15fr)
-      minmax(0, 1.15fr)
-      minmax(160px, 0.65fr);
+      minmax(160px, 0.8fr);
+  }
+}
+
+@media (max-width: 767px) {
+  .figma-hole-options .figma-desktop-copy {
+    display: none;
+  }
+
+  .figma-hole-options .figma-mobile-copy {
+    display: inline;
+  }
+
+  .figma-hole-options {
+    display: grid;
+    gap: 8px;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    width: 100%;
+  }
+
+  .figma-hole-filter .figma-hole-options button,
+  .figma-hole-filter .figma-hole-options button.is-active {
+    padding-inline: 6px;
+  }
+
+  .figma-hole-options > button:not(:last-child)::after {
+    right: -6px;
+  }
+
+  .figma-hole-filter.has-simulator .figma-hole-options > button:nth-child(3)::after {
+    display: none;
+  }
+
+  .figma-hole-filter.has-simulator .figma-hole-options > button:last-child {
+    grid-column: 1 / -1;
   }
 }
 
