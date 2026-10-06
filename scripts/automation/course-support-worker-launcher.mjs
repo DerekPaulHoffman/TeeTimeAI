@@ -11,6 +11,7 @@ export const WORKER_RPC_TIMEOUT_MS = 40_000;
 export const WORKER_TURN_TIMEOUT_MS = 24 * 60 * 60_000;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const VERIFIED_WORKER_CLI_VERSIONS = new Set(["codex-cli 0.160.0", "codex-cli 0.160.1"]);
 
 function failure(code) { return Object.assign(new Error(code), { code }); }
 function absoluteFile(path) {
@@ -70,7 +71,7 @@ export function readWorkerCliVersion(cliPath, execute = execFileSync) {
   const version = execute(absoluteFile(cliPath), ["--version"], {
     encoding: "utf8", windowsHide: true, timeout: WORKER_RPC_TIMEOUT_MS,
   }).trim();
-  if (!/^codex-cli 0\.160\.0$/.test(version)) throw failure("UNVERIFIED_CODEX_CLI_VERSION");
+  if (!VERIFIED_WORKER_CLI_VERSIONS.has(version)) throw failure("UNVERIFIED_CODEX_CLI_VERSION");
   return version;
 }
 

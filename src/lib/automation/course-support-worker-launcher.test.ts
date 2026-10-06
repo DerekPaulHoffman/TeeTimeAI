@@ -100,6 +100,28 @@ describe("course worker preparation contract", () => {
     expect(server.client.close).toHaveBeenCalledOnce();
   });
 
+  it("records the qualified 0.160.1 CLI while preserving permissions and an idle first turn", async () => {
+    const f = fixture();
+    const server = fakeServer(f);
+    await prepareCourseSupportWorker({ ...f.options, clientFactory: server.clientFactory,
+      inspectCli: (path: string) => readWorkerCliVersion(path, () => "codex-cli 0.160.1\n") });
+    expect(f.readReceipt()).toMatchObject({ cliVersion: "codex-cli 0.160.1", status: "PREPARED",
+      approvalPolicy: "never", activePermissionProfile: { id: WORKER_PERMISSION_PROFILE }, nativeIdentityVerified: false });
+    expect(server.request.mock.calls.find(([method]) => method === "thread/start")?.[1]).toMatchObject({
+      approvalPolicy: "never", permissions: WORKER_PERMISSION_PROFILE, ephemeral: false });
+    expect(server.request.mock.calls.some(([method]) => method === "turn/start")).toBe(false);
+  });
+
+  it("rejects an unqualified CLI before starting any native server or chat", async () => {
+    const f = fixture();
+    const server = fakeServer(f);
+    await expect(prepareCourseSupportWorker({ ...f.options, clientFactory: server.clientFactory,
+      inspectCli: (path: string) => readWorkerCliVersion(path, () => "codex-cli 0.160.2") }))
+      .rejects.toThrow("UNVERIFIED_CODEX_CLI_VERSION");
+    expect(server.clientFactory).not.toHaveBeenCalled();
+    expect(server.request).not.toHaveBeenCalled();
+  });
+
   it("stops before creation when full access is not allowed", async () => {
     const f = fixture();
     const server = fakeServer(f, { "permissionProfile/list": () => ({ data: [{ id: WORKER_PERMISSION_PROFILE, allowed: false }] }) });
@@ -284,14 +306,19 @@ describe("worker environment and acknowledgement guards", () => {
     expect(git.mock.calls.some(([, args]) => args.some((value) => value.startsWith("--path-format")))).toBe(false);
   });
 
-  it("pins the actual verified CLI and does not substitute PATH", () => {
+  it.each(["codex-cli 0.160.0", "codex-cli 0.160.1"])("pins qualified %s and does not substitute PATH", (version) => {
     const f = fixture();
-    const execute = vi.fn(() => "codex-cli 0.160.0\n");
-    expect(readWorkerCliVersion(f.options.cliPath, execute)).toBe("codex-cli 0.160.0");
+    const execute = vi.fn(() => `${version}\n`);
+    expect(readWorkerCliVersion(f.options.cliPath, execute)).toBe(version);
     expect(execute.mock.calls[0]?.[0]).toBe(f.options.cliPath);
-    expect(() => readWorkerCliVersion(f.options.cliPath, () => "codex-cli 0.145.0")).toThrow("UNVERIFIED_CODEX_CLI_VERSION");
     expect(() => readWorkerCliVersion("codex.exe", execute)).toThrow("ABSOLUTE_FILE_REQUIRED");
   });
+
+  it.each(["codex-cli 0.145.0", "codex-cli 0.160.2", "codex-cli 0.160.10", "codex-cli 0.161.0", "codex-cli 0.160.1-dev"])(
+    "rejects unqualified exact CLI output %s", (version) => {
+      const f = fixture();
+      expect(() => readWorkerCliVersion(f.options.cliPath, () => version)).toThrow("UNVERIFIED_CODEX_CLI_VERSION");
+    });
 
   it("requires a native identity read and never assigns CODEX_THREAD_ID", () => {
     const prompt = buildWorkerFirstTurnPrompt("authorized work", THREAD, process.execPath);
