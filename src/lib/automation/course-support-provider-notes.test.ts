@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { PROVIDER_CAPABILITIES } from "./provider-capabilities";
+import { RUNNABLE_SIMULATOR_PROVIDER_FAMILIES } from "@/lib/simulators/providers";
 
 const repositoryRoot = process.cwd();
 const notesDirectory = resolve(
@@ -151,14 +152,15 @@ describe("course-support provider notes", () => {
       expect(frontMatter, `${filename} requires structured front matter`).not.toBeNull();
       const providerFamily = frontMatter?.providerFamily;
       expect(filename).toBe(providerFamilyFilename(providerFamily));
-      const capability =
-        PROVIDER_CAPABILITIES[
-          providerFamily as keyof typeof PROVIDER_CAPABILITIES
-        ];
-      expect(capability, `${filename} must name a registry provider family`).toBeDefined();
-      expect(frontMatter?.registrySupport).toBe(
-        capability.supportsAutomation ? "RUNNABLE" : "NON_SERVER",
-      );
+      if (frontMatter?.mode === "SIMULATOR") {
+        expect(RUNNABLE_SIMULATOR_PROVIDER_FAMILIES, `${filename} must name a runnable simulator registry family`).toContain(providerFamily);
+        expect(frontMatter.registrySupport).toBe("RUNNABLE");
+      } else {
+        expect([undefined, "OUTDOOR"]).toContain(frontMatter?.mode);
+        const capability = PROVIDER_CAPABILITIES[providerFamily as keyof typeof PROVIDER_CAPABILITIES];
+        expect(capability, `${filename} must name a registry provider family`).toBeDefined();
+        expect(frontMatter?.registrySupport).toBe(capability.supportsAutomation ? "RUNNABLE" : "NON_SERVER");
+      }
       expect(markdown).toContain("## Approaches That Worked");
       expect(markdown).toContain(
         "## Approaches That Failed Or Were Inconclusive",

@@ -16,6 +16,8 @@ After a responder claims one provider-family/failure-fingerprint group:
 
 Use lowercase kebab-case filenames derived from an actual normalized registry family, such as `foreup.md` or `golf-with-access.md`. Copy `_template.md` when a registry family receives its first reusable note. Do not create a generic source-missing or discovery note: wait until evidence identifies a registry family, then record only reusable family-specific learning. Claim the note path before editing it and verify it with the same implementation batch.
 
+Simulator notes use the same privacy and evidence contract, with `mode: SIMULATOR` in front matter and a family from `RUNNABLE_SIMULATOR_PROVIDER_FAMILIES` in `src/lib/simulators/providers/index.ts`. Their support state is `RUNNABLE` only under that reader's documented source/metadata/rental conditions. Existing notes without a mode are outdoor notes and retain the outdoor capability-registry checks. A research projection or recognized vendor hostname does not add runnable support.
+
 ## Required Content
 
 Every family note must contain:
