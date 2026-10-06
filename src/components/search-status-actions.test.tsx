@@ -34,6 +34,15 @@ const savedSearch: ComponentProps<typeof SearchStatusActions> = {
 };
 
 describe("SearchStatusActions", () => {
+  it("uses neutral completed-check copy for simulator alerts while keeping outdoor copy", () => {
+    const simulator = render(<SearchStatusActions {...savedSearch} mode="SIMULATOR" />);
+    expect(screen.getByText("Check complete")).toBeTruthy();
+    expect(screen.queryByText("Tee times updated")).toBeNull();
+    simulator.unmount();
+    render(<SearchStatusActions {...savedSearch} />);
+    expect(screen.getByText("Tee times updated")).toBeTruthy();
+  });
+
   it("edits an individual notification without course ranking and retains its course", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal("fetch", fetchMock);

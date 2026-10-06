@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getSimulatorDashboardStatus } from "./dashboard-status";
+import { getSimulatorAlertSummary, getSimulatorDashboardStatus } from "./dashboard-status";
 import { getSimulatorOfferingSourceFingerprint } from "./source-fingerprint";
 
 const now = new Date("2026-10-06T18:00:00Z");
@@ -43,7 +43,7 @@ describe("simulator dashboard status", () => {
     const pending = { ...input, offering: { ...input.offering, publicAccessStatus: "UNVERIFIED", bookingUrl: null,
       evidenceUrl: null, verifiedAt: null, monitoringState: "VERIFYING", monitoringVerifiedAt: null } };
     pending.probe!.rawSummary.sourceFingerprint = getSimulatorOfferingSourceFingerprint(pending.offering);
-    expect(getSimulatorDashboardStatus(pending)).toEqual({ label: "Adding alert support",
+    expect(getSimulatorDashboardStatus(pending)).toEqual({ kind: "ADDING_SUPPORT", label: "Adding alert support",
       officialUrl: input.website, officialLinkLabel: "Official site" });
     expect(getSimulatorDashboardStatus({ ...pending, offering: null, probe: undefined }).officialUrl).toBe(input.website);
     expect(getSimulatorDashboardStatus({ ...pending, offering: null, website: null }).officialUrl).toBeNull();
@@ -127,6 +127,27 @@ describe("simulator dashboard status", () => {
     expect(getSimulatorDashboardStatus(fixture("IDENTITY_FINAL")).label).toContain("Public simulator rentals aren’t available here");
     expect(getSimulatorDashboardStatus(fixture("MANUAL_DIRECT")).officialLinkLabel).toBe("Official site");
     expect(getSimulatorDashboardStatus(fixture("IDENTITY_FINAL")).officialLinkLabel).toBe("Official site");
+  });
+
+  it("uses verified venue status for a single simulator alert header", () => {
+    expect(getSimulatorAlertSummary([getSimulatorDashboardStatus(fixture())])).toBe("Simulator check pending");
+    expect(getSimulatorAlertSummary([getSimulatorDashboardStatus(fixture("NEEDS_ADAPTER"))])).toBe("Adding alert support");
+    expect(getSimulatorAlertSummary([getSimulatorDashboardStatus(fixture("MANUAL_DIRECT"))])).toContain("Simulator alerts aren’t available");
+    expect(getSimulatorAlertSummary([getSimulatorDashboardStatus(fixture("NO_MATCH"))])).toBe("Checked · No matching sessions");
+    expect(getSimulatorAlertSummary([getSimulatorDashboardStatus({ ...fixture("MATCH_FOUND"), currentMatchCount: 1 })])).toBe("Matching simulator sessions available");
+    expect(getSimulatorAlertSummary([getSimulatorDashboardStatus({ ...fixture("NO_MATCH"), alertStatus: "COMPLETED" })])).toBe("Checks stopped");
+  });
+
+  it("does not summarize mixed pending or unavailable venues as current monitoring", () => {
+    const pending = getSimulatorDashboardStatus(fixture());
+    const healthy = getSimulatorDashboardStatus(fixture("NO_MATCH"));
+    const unavailable = getSimulatorDashboardStatus(fixture("MANUAL_DIRECT"));
+    expect(getSimulatorAlertSummary([pending, healthy])).toBe("Simulator checks pending");
+    expect(getSimulatorAlertSummary([unavailable, healthy])).toBe("Some simulator alerts unavailable");
+    expect(getSimulatorAlertSummary([healthy, healthy])).toBe("Checked · No matching sessions");
+    const scheduled = fixture("NO_MATCH");
+    Object.assign(scheduled.probe!.rawSummary, { bookingNotOpen: true, opensAt: "2026-10-07T18:00:00Z" });
+    expect(getSimulatorAlertSummary([getSimulatorDashboardStatus(scheduled), healthy])).toBe("Simulator checks pending");
   });
 
   it.each(["PAUSED", "COMPLETED", "CANCELLED"])("does not promise active checks for %s", (alertStatus) => {

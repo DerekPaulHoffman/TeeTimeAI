@@ -6,6 +6,10 @@ import { Prisma } from "@prisma/client";
 
 import { prisma } from "../../src/lib/prisma";
 import { getTimeZoneForCoordinates } from "../../src/lib/timezones";
+import { runWithCourseSupportWriterTransitionLease, withCourseSupportWriteConflictRetry } from "../../src/lib/automation/course-support-batches";
+import { hasSimulatorSupportOwnership } from "../../src/lib/automation/simulator-support-incidents";
+
+const CLASSIFICATION_EVIDENCE_MAX_AGE_MS = 30 * 60_000;
 
 const evidenceUrl = z.string().url().refine((value) => {
   const url = new URL(value);
@@ -25,12 +29,24 @@ const offeringManifestSchema = z.object({
   verifiedAt: z.string().datetime().refine((value) => new Date(value).getTime() <= Date.now(), "Verification cannot be in the future"),
   active: z.boolean().default(true),
   publicAccessStatus: z.enum(["PUBLIC", "UNVERIFIED", "NOT_PUBLIC"]),
+  notPublicReason: z.enum(["MEMBERS_ONLY", "NOT_SIMULATOR_RENTAL"]).optional(),
   maxPartySize: z.number().int().min(1).max(8).nullable().default(null),
   supportedDurationsMinutes: z.array(z.number().int().min(60).max(240).multipleOf(30)).max(7),
   providerFamilyKey: z.string().regex(/^[A-Z][A-Z0-9_]{0,79}$/).optional(),
   bookingWindowDaysAhead: z.number().int().min(1).max(365).optional(),
   providerMetadata: z.record(z.string(), z.json()).optional()
-}).strict();
+}).strict().superRefine((row, context) => {
+  if (!row.notPublicReason) return;
+  if (row.publicAccessStatus !== "NOT_PUBLIC") {
+    context.addIssue({ code: "custom", path: ["notPublicReason"], message: "An identity reason requires NOT_PUBLIC" });
+  }
+  if (new URL(row.evidenceUrl).hostname !== new URL(row.website).hostname) {
+    context.addIssue({ code: "custom", path: ["evidenceUrl"], message: "Identity evidence must be on the reviewed official website" });
+  }
+  if (Date.now() - Date.parse(row.verifiedAt) > CLASSIFICATION_EVIDENCE_MAX_AGE_MS) {
+    context.addIssue({ code: "custom", path: ["verifiedAt"], message: "Identity evidence must be verified within thirty minutes" });
+  }
+});
 
 export type SimulatorOfferingManifest = z.infer<typeof offeringManifestSchema>;
 
@@ -70,20 +86,29 @@ export function parseSimulatorOfferingCommand(args: string[]) {
 }
 
 export async function executeSimulatorOfferingManifest(rows: SimulatorOfferingManifest[], options: { apply: boolean; expectedDatabaseHost?: string }) {
-  if (!options.apply) return { mode: "dry-run", offerings: rows.map((row) => ({ ...row, kind: "SIMULATOR", monitoringState: "UNKNOWN" })) };
+  const reviewedRows = parseSimulatorOfferingManifest(rows);
+  const intendedState = (row: SimulatorOfferingManifest) => row.notPublicReason
+    ? { monitoringState: "FINAL_IDENTITY" as const, automationEligibility: "BLOCKED" as const }
+    : { monitoringState: "UNKNOWN" as const, automationEligibility: "UNKNOWN" as const };
+  if (!options.apply) return { mode: "dry-run", offerings: reviewedRows.map((row) => ({ ...row, kind: "SIMULATOR", ...intendedState(row),
+    incidentDisposition: row.notPublicReason ? { status: "RESOLVED", reason: row.notPublicReason, evidenceUrl: row.evidenceUrl, resolvedAt: row.verifiedAt, retryAt: null } : null,
+  })) };
   const databaseUrl = process.env.DATABASE_URL?.trim();
   if (!databaseUrl || new URL(databaseUrl).hostname !== options.expectedDatabaseHost) {
     throw new Error("The loaded database does not match the explicitly expected database host");
   }
-  const results = [];
-  for (const row of rows) {
-    const result = await prisma.$transaction(async (transaction) => {
+  const applied = await runWithCourseSupportWriterTransitionLease(() => withCourseSupportWriteConflictRetry(() => prisma.$transaction(async (transaction) => {
+    const [clock] = await transaction.$queryRaw<Array<{ now: Date }>>(Prisma.sql`SELECT clock_timestamp() AS "now"`);
+    if (!(clock?.now instanceof Date)) throw new Error("Simulator review database time is unavailable");
+    const results = [];
+    for (const row of [...reviewedRows].sort((left, right) => left.googlePlaceId.localeCompare(right.googlePlaceId))) {
       const alias = await transaction.googlePlaceReview.findUnique({ where: { googlePlaceId: row.googlePlaceId } });
       if (alias?.active && alias.canonicalPlaceId && alias.canonicalPlaceId !== row.googlePlaceId) {
         throw new Error("Review the canonical Google Place ID instead of an alias");
       }
       // Existing venue/outdoor intelligence stays intact. A new shared identity
       // begins pending public-course access; only this rental is reviewed here.
+      await transaction.$queryRaw(Prisma.sql`SELECT "id" FROM "Course" WHERE "googlePlaceId" = ${row.googlePlaceId} FOR UPDATE`);
       const course = await transaction.course.upsert({
         where: { googlePlaceId: row.googlePlaceId }, update: {},
         create: { googlePlaceId: row.googlePlaceId, name: row.name, address: row.address,
@@ -91,6 +116,21 @@ export async function executeSimulatorOfferingManifest(rows: SimulatorOfferingMa
           timeZone: getTimeZoneForCoordinates(row.latitude, row.longitude), website: row.website,
           ...(row.phone ? { phone: row.phone } : {}), isPublic: false }
       });
+      await transaction.$queryRaw(Prisma.sql`SELECT "id" FROM "CourseOffering" WHERE "courseId" = ${course.id} AND "kind" = 'SIMULATOR' FOR UPDATE`);
+      const existing = await transaction.courseOffering.findUnique({ where: { courseId_kind: { courseId: course.id, kind: "SIMULATOR" } } });
+      if (existing) {
+        if (await hasSimulatorSupportOwnership(transaction, existing.id)) throw new Error("A named simulator offering has live support ownership; preserve its owner");
+        if ((existing.observationToken && !existing.observationExpiresAt) ||
+            (existing.observationExpiresAt && existing.observationExpiresAt > clock.now)) {
+          throw new Error("A named simulator offering has a live or ambiguous observation lease; preserve its observation");
+        }
+        await transaction.$queryRaw(Prisma.sql`SELECT "id" FROM "SimulatorSupportIncident" WHERE "offeringId" = ${existing.id} FOR UPDATE`);
+      }
+      if (row.notPublicReason && (new Date(row.verifiedAt) > clock.now ||
+          new Date(row.verifiedAt).getTime() < clock.now.getTime() - CLASSIFICATION_EVIDENCE_MAX_AGE_MS ||
+          (course.website && new URL(course.website).hostname !== new URL(row.website).hostname))) {
+        throw new Error("Identity classification requires fresh evidence on the exact existing official website");
+      }
       const offeringData = {
         active: row.active, publicAccessStatus: row.publicAccessStatus, bookingUrl: row.bookingUrl,
         evidenceUrl: row.evidenceUrl, verifiedAt: new Date(row.verifiedAt), maxPartySize: row.maxPartySize,
@@ -99,7 +139,7 @@ export async function executeSimulatorOfferingManifest(rows: SimulatorOfferingMa
         bookingWindowDaysAhead: row.bookingWindowDaysAhead ?? null,
         // Metadata is operator-reviewed JSON; Prisma serializes it without executing it.
         providerMetadata: row.providerMetadata ?? Prisma.DbNull,
-        automationEligibility: "UNKNOWN" as const, monitoringState: "UNKNOWN" as const, monitoringVerifiedAt: null,
+        ...intendedState(row), monitoringVerifiedAt: null,
         observationToken: null, observationExpiresAt: null
       };
       const offering = await transaction.courseOffering.upsert({
@@ -107,11 +147,16 @@ export async function executeSimulatorOfferingManifest(rows: SimulatorOfferingMa
         create: { courseId: course.id, kind: "SIMULATOR", ...offeringData, monitoringRevision: 1 },
         update: { ...offeringData, monitoringRevision: { increment: 1 } }
       });
-      return { googlePlaceId: row.googlePlaceId, courseId: course.id, offeringId: offering.id };
-    });
-    results.push(result);
-  }
-  return { mode: "applied", offerings: results };
+      if (row.notPublicReason) await transaction.simulatorSupportIncident.updateMany({
+        where: { offeringId: offering.id }, data: { status: "RESOLVED", reason: row.notPublicReason,
+          evidenceUrl: row.evidenceUrl, resolvedAt: new Date(row.verifiedAt), retryAt: null },
+      });
+      results.push({ googlePlaceId: row.googlePlaceId, courseId: course.id, offeringId: offering.id, ...intendedState(row) });
+    }
+    return results;
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 15_000 })));
+  if (!applied.acquired) throw new Error("Simulator review writer transition is busy; no manifest was applied");
+  return { mode: "applied", offerings: applied.value };
 }
 
 async function main() {

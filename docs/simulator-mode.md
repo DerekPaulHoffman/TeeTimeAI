@@ -119,6 +119,8 @@ duration is inferred as a session.
 
 ## Session proof and scheduling
 
+YourGolfBooking / Trackman reads the signed-out venue's published bay configuration and its public occupancy GET. The reviewed venue, range and public rental option must match the live source. Opening hours, the current booking horizon, eligible named bays, rental duration limits and restrictions are verified before an empty occupied list can produce openings. A complete session stays on one bay and excludes every overlapping booking, including member bookings. Neither the basket nor booking creation is invoked.
+
 Availability requires fresh successful offering evidence for the current source
 fingerprint and a complete supported interval inside the saved venue-local
 window. Keep the same bay or the provider's explicit pooled availability resource

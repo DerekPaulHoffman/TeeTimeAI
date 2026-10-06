@@ -297,7 +297,8 @@ export function SearchStatusActions({
     initialLastCheckedAt,
     initialNextCheckAt,
     initialUserTimeZone,
-    localStatus
+    localStatus,
+    mode
   );
 
   return (
@@ -594,7 +595,8 @@ function getCheckStatusDisplay(
   lastCheckedAt: string | null,
   nextCheckAt: string | null,
   timeZone: string,
-  lifecycleStatus: SearchStatus
+  lifecycleStatus: SearchStatus,
+  mode: SearchMode
 ) {
   if (lifecycleStatus !== "ACTIVE" || status === "STOPPED") {
     return {
@@ -640,7 +642,7 @@ function getCheckStatusDisplay(
   if (lastCheckedAt) {
     return {
       tone: "updated",
-      title: "Tee times updated",
+      title: mode === "SIMULATOR" ? "Check complete" : "Tee times updated",
       detail: `Last checked ${formatCheckTimestamp(lastCheckedAt, timeZone)}.`,
       timing: nextCheckAt
         ? `Next check: ${formatCheckTimestamp(nextCheckAt, timeZone)}`

@@ -20,7 +20,7 @@ import {
 import { DashboardSignInActions } from "@/components/dashboard-sign-in-actions";
 import { SearchStatusActions } from "@/components/search-status-actions";
 import { isCurrentSimulatorMatch } from "@/lib/simulators/current-availability";
-import { getSimulatorDashboardStatus } from "@/lib/simulators/dashboard-status";
+import { getSimulatorAlertSummary, getSimulatorDashboardStatus } from "@/lib/simulators/dashboard-status";
 import { getRequiredAppUser } from "@/lib/auth/current-user";
 import { normalizeRequestedLayoutHoles } from "@/lib/courses/course-layout";
 import {
@@ -782,12 +782,21 @@ function SimulatorDashboardCard({ search, canManage, coursePhotos, ownerEmailSta
   const ended = notificationWindowEnded(formatDateInputValue(search.date), search.endTime, search.preferences.map(preference => preference.course.timeZone), now);
   const matches = [...new Map(search.matches.filter(match => isCurrentSimulatorMatch(match, now)).map(match =>
     [[match.offeringId, match.startsAt.toISOString(), match.endsAt?.toISOString(), match.bookingUrl].join("|"), match])).values()];
+  const venues = search.preferences.map(preference => {
+    const offering = preference.offering;
+    const probe = search.probes.find(observation => observation.offeringId === offering?.id);
+    const venueMatches = [...new Map(matches.filter(match => match.offeringId === offering?.id).map(match =>
+      [[match.startsAt.toISOString(), match.endsAt?.toISOString(), match.bookingUrl].join("|"), match])).values()];
+    const status = getSimulatorDashboardStatus({ offering, probe, currentMatchCount: venueMatches.length,
+      alertStatus: search.status, windowEnded: ended, website: preference.course.website, now });
+    return { preference, venueMatches, status };
+  });
   return <article className="dashboard-row" id={`alert-${search.id}`}>
     <details className="dashboard-alert-accordion" open={search.status === "ACTIVE" && !ended}>
       <summary className="dashboard-alert-summary">
         <div className="dashboard-alert-summary-heading"><span className={`status-pill ${search.status.toLowerCase()}`}>{ended && search.status === "ACTIVE" ? "Date passed" : search.status}</span><h3>{getNotificationTitle(search.preferences)}</h3></div>
         <div className="dashboard-alert-summary-copy">
-          <strong>{ended ? "Search window ended" : search.status === "PAUSED" ? "Notifications paused" : search.status === "COMPLETED" ? "Notification ended" : search.status === "CANCELLED" ? "Notification cancelled" : matches.length ? `${matches.length} matching ${matches.length === 1 ? "session" : "sessions"}` : "Watching for openings"}</strong>
+          <strong>{ended ? "Search window ended" : search.status === "PAUSED" ? "Notifications paused" : search.status === "COMPLETED" ? "Notification ended" : search.status === "CANCELLED" ? "Notification cancelled" : matches.length ? `${matches.length} matching ${matches.length === 1 ? "session" : "sessions"}` : getSimulatorAlertSummary(venues.map(venue => venue.status))}</strong>
           <span>{formatDashboardDate(search.date)} · {formatTimeLabel(search.startTime)}–{formatTimeLabel(search.endTime)} · {search.players} {search.players === 1 ? "golfer" : "golfers"} · {search.preferences.length} {search.preferences.length === 1 ? "course" : "courses"}</span>
           <span className={`dashboard-email-status${ownerEmailState === "NOT_SENT" ? " dashboard-email-not-sent" : ""}`}>
             <Mail aria-hidden="true" size={12} />
@@ -816,13 +825,7 @@ function SimulatorDashboardCard({ search, canManage, coursePhotos, ownerEmailSta
             initialCoursePreferences={search.preferences.map(preference => ({ id: preference.id, courseName: preference.course.name, rank: preference.rank }))} /> : <span className="meta">Sign in to pause, edit, or cancel this alert.</span>}
         </div>
         <div className="watch-course-list">
-        {search.preferences.map(preference => {
-          const offering = preference.offering;
-          const probe = search.probes.find(observation => observation.offeringId === offering?.id);
-          const venueMatches = [...new Map(matches.filter(match => match.offeringId === offering?.id).map(match =>
-            [[match.startsAt.toISOString(), match.endsAt?.toISOString(), match.bookingUrl].join("|"), match])).values()];
-          const venueStatus = getSimulatorDashboardStatus({ offering, probe, currentMatchCount: venueMatches.length,
-            alertStatus: search.status, windowEnded: ended, website: preference.course.website, now });
+        {venues.map(({ preference, venueMatches, status: venueStatus }) => {
           return <div className="watch-course-row" key={preference.id}>
             <CourseImage name={preference.course.name} photo={preference.course.googlePlaceId ? coursePhotos.get(preference.course.googlePlaceId) : undefined} rank={search.preferences.length > 1 ? preference.rank : undefined} />
             <div className="watch-course-copy">
