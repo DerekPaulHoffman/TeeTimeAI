@@ -2322,6 +2322,7 @@ export async function hydrateMatchAlertPayload(input: {
           offeringId: requireString(match.offeringId, "offering"),
           courseId: requireString(match.courseId, "venue"),
           courseName: requireString(match.courseName, "venue name"),
+          courseAddress: optionalString(match.courseAddress),
           courseRank: requireNumber(match.courseRank, "venue priority"),
           courseTimeZone: requireString(match.courseTimeZone, "venue time zone"),
           startsAt, endsAt,
@@ -2397,10 +2398,15 @@ export function hydrateSimulatorStatusPayload(payload: SearchEmailDeliveryPayloa
     endTime: requireString(report.endTime, "end time"),
     durationMinutes: requireNumber(report.durationMinutes, "session length"),
     players: requireNumber(report.players, "players"),
+    userTimeZone: optionalString(report.userTimeZone),
+    checkedAt: new Date(payload.checkedAt),
     venues: venues.map((value) => {
       const venue = requireJsonRecord(value, "simulator status venue");
       return {
+        courseId: optionalString(venue.courseId),
         courseName: requireString(venue.courseName, "venue name"),
+        courseRank: optionalNumber(venue.courseRank),
+        courseAddress: optionalString(venue.courseAddress),
         bookingUrl: requireString(venue.bookingUrl, "official booking URL"),
         availability: requireString(venue.availability, "venue availability"),
       };

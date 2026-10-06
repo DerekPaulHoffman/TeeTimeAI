@@ -22,10 +22,12 @@ export type CustomerEmailSearchSummary = {
   endTime: string;
   players: number;
   requestedLayoutHoles?: 9 | 18 | null;
+  durationMinutes?: number;
 };
 
 export type CustomerEmailAvailabilityTime = {
   startsAt: Date | string;
+  endsAt?: Date | string | null;
   availableSpots: number;
   priceCents?: number | null;
   holes?: number | null;
@@ -67,6 +69,7 @@ export type CustomerEmailMonitoringCourse = {
 };
 
 export type CustomerEmailRenderInput = {
+  mode?: "SIMULATOR";
   variant: CustomerEmailVariant;
   heading: string;
   intro: string;
@@ -76,10 +79,12 @@ export type CustomerEmailRenderInput = {
   monitoringCourses?: CustomerEmailMonitoringCourse[];
   checkedAt?: Date;
   userTimeZone?: string;
-  stopUrls?: EmailStopUrls;
+  stopUrls?: CustomerEmailStopUrls;
   assetBaseUrl?: string;
   showCadenceNote?: boolean;
 };
+
+export type CustomerEmailStopUrls = Pick<EmailStopUrls, "cancelled"> & Partial<Pick<EmailStopUrls, "booked">>;
 
 const EMAIL_COLORS = {
   cream: "#f7f4eb",
@@ -97,7 +102,7 @@ export function renderCustomerEmail(input: CustomerEmailRenderInput) {
   const availability = input.availabilityCourses
     .filter((course) => course.times.length > 0)
     .sort((left, right) => left.rank - right.rank)
-    .map((course) => renderAvailabilityCard(course, input.userTimeZone, input.assetBaseUrl))
+    .map((course) => renderAvailabilityCard(course, input.userTimeZone, input.assetBaseUrl, input.mode, input.summary.durationMinutes))
     .join("");
   const monitoring = input.monitoringCourses?.length
     ? renderMonitoringSection(input)
@@ -107,7 +112,7 @@ export function renderCustomerEmail(input: CustomerEmailRenderInput) {
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:separate;margin:0 0 28px">
         <tr>
           <td style="background:${EMAIL_COLORS.blueBackground};border:1px solid ${EMAIL_COLORS.blueBorder};border-radius:14px;color:${EMAIL_COLORS.blueText};font-family:Inter,Arial,sans-serif;font-size:13px;line-height:20px;padding:14px 16px">
-            Those buttons go straight to each course's own booking page. Tee Time Spot never books, holds, or handles payment or personal info. Availability is first come, first served. Click, book, play. &#9971;
+            Those buttons go straight to each ${input.mode === "SIMULATOR" ? "venue" : "course"}'s own booking page. Tee Time Spot never books, holds, or handles payment or personal info. Availability is first come, first served. Click, book, play. &#9971;
           </td>
         </tr>
       </table>
@@ -151,7 +156,7 @@ export function renderCustomerEmail(input: CustomerEmailRenderInput) {
           <table class="email-card" role="presentation" width="680" cellpadding="0" cellspacing="0" style="background:${EMAIL_COLORS.cream};border:1px solid ${EMAIL_COLORS.line};border-collapse:separate!important;border-radius:16px;max-width:680px;overflow:hidden;width:100%">
             ${renderBrandBar()}
             ${renderHero(input)}
-            ${renderSearchSummary(input.summary)}
+            ${renderSearchSummary(input.summary, input.mode)}
             <tr>
               <td class="email-pad" style="padding:28px 32px 0">
                 ${availability}
@@ -178,7 +183,7 @@ export function renderCustomerEmail(input: CustomerEmailRenderInput) {
 </html>`;
 }
 
-export function renderEmailStopControls(stopUrls?: EmailStopUrls) {
+export function renderEmailStopControls(stopUrls?: CustomerEmailStopUrls) {
   if (!stopUrls) {
     return "";
   }
@@ -188,13 +193,13 @@ export function renderEmailStopControls(stopUrls?: EmailStopUrls) {
       <tr>
         <td align="center" style="border-top:1px solid ${EMAIL_COLORS.line};padding-top:24px">
           <p style="color:${EMAIL_COLORS.dark};font-family:Inter,Arial,sans-serif;font-size:14px;font-weight:700;line-height:21px;margin:0 0 3px">Done with this alert?</p>
-          <p style="color:${EMAIL_COLORS.muted};font-family:Inter,Arial,sans-serif;font-size:12px;line-height:18px;margin:0 0 14px">Save it or cancel it &mdash; either way we'll stop these results.</p>
+          <p style="color:${EMAIL_COLORS.muted};font-family:Inter,Arial,sans-serif;font-size:12px;line-height:18px;margin:0 0 14px">${stopUrls.booked ? "Save it or cancel it &mdash; either way we'll stop these results." : "Cancel this alert below to stop these results."}</p>
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;max-width:360px">
-            <tr>
+            ${stopUrls.booked ? `<tr>
               <td align="center" bgcolor="#147a52" style="background:#147a52;border-radius:14px">
                 <a href="${escapeHtml(stopUrls.booked)}" style="color:#ffffff;display:block;font-family:Inter,Arial,sans-serif;font-size:13px;font-weight:800;line-height:20px;padding:12px 16px;text-decoration:none">I booked &mdash; stop these results</a>
               </td>
-            </tr>
+            </tr>` : ""}
             <tr>
               <td align="center" style="padding-top:10px">
                 <a href="${escapeHtml(stopUrls.cancelled)}" style="color:#a33b35;font-family:Inter,Arial,sans-serif;font-size:12px;font-weight:700;line-height:18px;text-decoration:underline">Cancel this alert</a>
@@ -249,7 +254,7 @@ function renderHero(input: CustomerEmailRenderInput) {
           ? "STATUS UPDATE"
           : input.variant === "recovery"
             ? "AUTOMATIC CHECKS RESUMED"
-            : "NEW TEE TIME ALERT";
+            : input.mode === "SIMULATOR" ? "NEW SIMULATOR ALERT" : "NEW TEE TIME ALERT";
 
   return `
     <tr>
@@ -262,8 +267,13 @@ function renderHero(input: CustomerEmailRenderInput) {
   `;
 }
 
-function renderSearchSummary(summary: CustomerEmailSearchSummary) {
-  const cells = [
+function renderSearchSummary(summary: CustomerEmailSearchSummary, mode?: "SIMULATOR") {
+  const cells = mode === "SIMULATOR" ? [
+    ["DATE", formatSearchDate(summary.targetDate)],
+    ["SEARCH WINDOW", `${formatClockTime(summary.startTime)} &ndash; ${formatClockTime(summary.endTime)} venue local`],
+    ["SESSION", `${getSimulatorDurationMinutes(summary.durationMinutes)} minutes`],
+    ["BOOKING", "One simulator bay"]
+  ] : [
     ["DATE", formatSearchDate(summary.targetDate)],
     ["SEARCH WINDOW", `${formatClockTime(summary.startTime)} &ndash; ${formatClockTime(summary.endTime)} course local`],
     ["COURSE LAYOUT", summary.requestedLayoutHoles ? `${summary.requestedLayoutHoles} Holes` : "Any layout"],
@@ -291,10 +301,13 @@ function renderSearchSummary(summary: CustomerEmailSearchSummary) {
 function renderAvailabilityCard(
   course: CustomerEmailAvailabilityCourse,
   userTimeZone?: string,
-  assetBaseUrl?: string
+  assetBaseUrl?: string,
+  mode?: "SIMULATOR",
+  durationMinutes?: number
 ) {
   const timeZone = normalizeTimeZone(course.courseTimeZone, DEFAULT_TIME_ZONE);
-  const normalizedTimes = normalizeAvailabilityTimes(course.times, timeZone);
+  const normalizedTimes = normalizeAvailabilityTimes(course.times, timeZone, mode, durationMinutes);
+  if (mode === "SIMULATOR" && normalizedTimes.length === 0) return "";
   const visibleTimes = selectVisibleAvailabilityTimes(normalizedTimes);
   const hiddenTimeCount = normalizedTimes.length - visibleTimes.length;
   const date = visibleTimes[0]?.startsAtDate.toLocaleDateString("en-US", {
@@ -303,16 +316,16 @@ function renderAvailabilityCard(
     day: "numeric",
     timeZone
   }) ?? "";
-  const bodyRows = chunkAvailabilityTimes(visibleTimes)
-    .map((row) => renderAvailabilityPillRow(row, timeZone, userTimeZone))
+  const bodyRows = chunkAvailabilityTimes(visibleTimes, mode === "SIMULATOR" ? 2 : 4)
+    .map((row) => renderAvailabilityPillRow(row, timeZone, userTimeZone, mode))
     .join("");
   const overflow = hiddenTimeCount > 0
-    ? `<p style="color:${EMAIL_COLORS.muted};font-family:Inter,Arial,sans-serif;font-size:12px;line-height:18px;margin:8px 4px 0">${hiddenTimeCount} more tee time${hiddenTimeCount === 1 ? " is" : "s are"} available on the official booking page.</p>`
+    ? `<p style="color:${EMAIL_COLORS.muted};font-family:Inter,Arial,sans-serif;font-size:12px;line-height:18px;margin:8px 4px 0">${hiddenTimeCount} more ${mode === "SIMULATOR" ? "session time" : "tee time"}${hiddenTimeCount === 1 ? " is" : "s are"} available on the official booking page.</p>`
     : "";
-  const price = formatPriceRange(
+  const price = mode === "SIMULATOR" ? null : formatPriceRange(
     visibleTimes.flatMap((time) => time.priceCents == null ? [] : [time.priceCents])
   );
-  const holes = [...new Set(visibleTimes.flatMap((time) => [
+  const holes = mode === "SIMULATOR" ? [] : [...new Set(visibleTimes.flatMap((time) => [
     ...(time.bookableHoleCounts ?? []),
     ...(time.holes ? [time.holes] : [])
   ]))].filter((value): value is 9 | 18 => value === 9 || value === 18)
@@ -327,7 +340,7 @@ function renderAvailabilityCard(
     holesLabel
       ? `<span>${holesLabel}</span>`
       : "",
-    `<span>${date} &middot; course local time</span>`
+    `<span>${date} &middot; ${mode === "SIMULATOR" ? "venue" : "course"} local time</span>`
   ].filter(Boolean);
   const meta = metaItems.join(
     `<span style="color:${EMAIL_COLORS.line};padding:0 8px">&middot;</span>`
@@ -349,7 +362,7 @@ function renderAvailabilityCard(
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
             <tr>
               <td align="center" bgcolor="${EMAIL_COLORS.orange}" style="background:${EMAIL_COLORS.orange};border-radius:14px">
-                <a href="${escapeHtml(safeBookingUrl)}" style="color:#1d1309;display:block;font-family:Inter,Arial,sans-serif;font-size:14px;font-weight:800;line-height:21px;padding:12px 16px;text-decoration:none">${course.times.length === 1 ? "Book this tee time" : "Open official booking page"}</a>
+                <a href="${escapeHtml(safeBookingUrl)}" style="color:#1d1309;display:block;font-family:Inter,Arial,sans-serif;font-size:14px;font-weight:800;line-height:21px;padding:12px 16px;text-decoration:none">${mode !== "SIMULATOR" && course.times.length === 1 ? "Book this tee time" : "Open official booking page"}</a>
               </td>
             </tr>
           </table>
@@ -357,7 +370,7 @@ function renderAvailabilityCard(
       </tr>
     `
     : "";
-  const courseGuideLink = course.courseGuideUrl
+  const courseGuideLink = mode !== "SIMULATOR" && course.courseGuideUrl
     ? `
       <tr>
         <td align="center" style="padding:0 20px 16px">
@@ -376,7 +389,8 @@ function renderAvailabilityCard(
         courseAddress: course.courseAddress,
         rank: course.rank,
         subline: date,
-        assetBaseUrl
+        assetBaseUrl,
+        mode
       })}
       ${factLine}
       <tr>
@@ -399,16 +413,19 @@ function renderAvailabilityCard(
 }
 
 function renderAvailabilityPillRow(
-  times: Array<CustomerEmailAvailabilityTime & { startsAtDate: Date }>,
+  times: Array<CustomerEmailAvailabilityTime & { startsAtDate: Date; endsAtDate?: Date }>,
   courseTimeZone: string,
-  userTimeZone?: string
+  userTimeZone?: string,
+  mode?: "SIMULATOR"
 ) {
+  const columns = mode === "SIMULATOR" ? 2 : 4;
+  const width = mode === "SIMULATOR" ? "50%" : "25%";
   const cells = times.map((time) =>
-    renderAvailabilityPill(time, courseTimeZone, userTimeZone)
+    renderAvailabilityPill(time, courseTimeZone, userTimeZone, mode)
   );
-  while (cells.length < 4) {
+  while (cells.length < columns) {
     cells.push(
-      '<td class="time-pill-cell" width="25%" style="box-sizing:border-box;padding:4px;vertical-align:top"></td>'
+      `<td class="time-pill-cell" width="${width}" style="box-sizing:border-box;padding:4px;vertical-align:top"></td>`
     );
   }
 
@@ -416,15 +433,20 @@ function renderAvailabilityPillRow(
 }
 
 function renderAvailabilityPill(
-  time: CustomerEmailAvailabilityTime & { startsAtDate: Date },
+  time: CustomerEmailAvailabilityTime & { startsAtDate: Date; endsAtDate?: Date },
   courseTimeZone: string,
-  userTimeZone?: string
+  userTimeZone?: string,
+  mode?: "SIMULATOR"
 ) {
   const normalizedUserTimeZone = normalizeTimeZone(userTimeZone, courseTimeZone);
-  const primaryTime = formatAvailabilityTime(time.startsAtDate, courseTimeZone);
+  const primaryTime = mode === "SIMULATOR" && time.endsAtDate
+    ? formatAvailabilityTimeRange(time.startsAtDate, time.endsAtDate, courseTimeZone)
+    : formatAvailabilityTime(time.startsAtDate, courseTimeZone);
   const userLocalTime = normalizedUserTimeZone === courseTimeZone
     ? ""
-    : `${formatAvailabilityTime(time.startsAtDate, normalizedUserTimeZone, true)} for you`;
+    : `${mode === "SIMULATOR" && time.endsAtDate
+      ? formatAvailabilityTimeRange(time.startsAtDate, time.endsAtDate, normalizedUserTimeZone, true)
+      : formatAvailabilityTime(time.startsAtDate, normalizedUserTimeZone, true)} for you`;
   const userNote = userLocalTime
     ? `<span style="color:${time.isNew ? "rgba(255,255,255,.58)" : EMAIL_COLORS.muted};display:block;font-size:9px;font-weight:500;line-height:13px;margin-top:2px">${escapeHtml(userLocalTime)}</span>`
     : "";
@@ -436,10 +458,10 @@ function renderAvailabilityPill(
   const textColor = time.isNew ? "#6dbf9c" : "#1f7a4d";
 
   return `
-    <td class="time-pill-cell" width="25%" style="box-sizing:border-box;padding:4px;vertical-align:top">
+    <td class="time-pill-cell" width="${mode === "SIMULATOR" ? "50%" : "25%"}" style="box-sizing:border-box;padding:4px;vertical-align:top">
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:separate!important">
         <tr>
-          <td align="center" bgcolor="${background}" style="background:${background};border:1px solid ${border};border-radius:10px;font-family:Inter,Arial,sans-serif;line-height:18px;padding:8px 6px;white-space:nowrap">
+          <td align="center" bgcolor="${background}" style="background:${background};border:1px solid ${border};border-radius:10px;font-family:Inter,Arial,sans-serif;line-height:18px;padding:8px 6px;white-space:${mode === "SIMULATOR" ? "normal" : "nowrap"}">
             <span style="color:${textColor};font-size:12px;font-weight:${time.isNew ? 700 : 500}">${escapeHtml(primaryTime)}</span>${newBadge}${userNote}
           </td>
         </tr>
@@ -451,7 +473,7 @@ function renderAvailabilityPill(
 function renderMonitoringSection(input: CustomerEmailRenderInput) {
   const cards = [...(input.monitoringCourses ?? [])]
     .sort((left, right) => left.rank - right.rank)
-    .map((course) => renderMonitoringCard(course, input.assetBaseUrl))
+    .map((course) => renderMonitoringCard(course, input.assetBaseUrl, input.mode))
     .join("");
   const cadence = input.showCadenceNote === false
     ? ""
@@ -459,7 +481,7 @@ function renderMonitoringSection(input: CustomerEmailRenderInput) {
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:16px 0 0">
         <tr>
           <td style="background:#f2f4f2;border:1px solid #e8eeeb;border-radius:14px;color:${EMAIL_COLORS.muted};font-family:Inter,Arial,sans-serif;font-size:12px;line-height:19px;padding:12px 16px">
-            We only send an instant email when a new time matches your exact date, time window, and player count. Otherwise, you'll receive at most one morning status update per day.
+            ${input.mode === "SIMULATOR" ? "We only send an instant email when a new session matches your exact date, time window, and session length. Check your dashboard for the latest status." : "We only send an instant email when a new time matches your exact date, time window, and player count. Otherwise, you'll receive at most one morning status update per day."}
           </td>
         </tr>
       </table>
@@ -471,7 +493,7 @@ function renderMonitoringSection(input: CustomerEmailRenderInput) {
   return `
     <div style="padding-top:0">
       <h2 style="color:${EMAIL_COLORS.dark};font-family:Inter,Arial,sans-serif;font-size:18px;font-weight:800;line-height:27px;margin:0 0 4px">What we're watching for you</h2>
-      <p style="color:${EMAIL_COLORS.muted};font-family:Inter,Arial,sans-serif;font-size:13px;line-height:21px;margin:0 0 20px">Here's the status of each course on your list. Some we monitor automatically &mdash; others need you to check directly.</p>
+      <p style="color:${EMAIL_COLORS.muted};font-family:Inter,Arial,sans-serif;font-size:13px;line-height:21px;margin:0 0 20px">Here's the status of each ${input.mode === "SIMULATOR" ? "venue" : "course"} on your list. Some we monitor automatically &mdash; others need you to check directly.</p>
       ${cards}
       ${cadence}
       ${checkedAt}
@@ -480,7 +502,7 @@ function renderMonitoringSection(input: CustomerEmailRenderInput) {
   `;
 }
 
-function renderMonitoringCard(course: CustomerEmailMonitoringCourse, assetBaseUrl?: string) {
+function renderMonitoringCard(course: CustomerEmailMonitoringCourse, assetBaseUrl?: string, mode?: "SIMULATOR") {
   const toneColor = {
     monitored: "#6dbf9c",
     scheduled: "#79b7cd",
@@ -496,7 +518,7 @@ function renderMonitoringCard(course: CustomerEmailMonitoringCourse, assetBaseUr
   const phoneLink = phoneHref
     ? `<a href="${escapeHtml(phoneHref)}" style="color:#087746;display:inline-block;font-family:Inter,Arial,sans-serif;font-size:12px;font-weight:800;line-height:18px;margin:10px 0 0;text-decoration:none">Call ${escapeHtml(course.phone ?? "the course")} &rarr;</a>`
     : "";
-  const courseGuideLink = course.courseGuideUrl
+  const courseGuideLink = mode !== "SIMULATOR" && course.courseGuideUrl
     ? `<a href="${escapeHtml(absoluteUrl(course.courseGuideUrl))}" style="color:#087746;display:inline-block;font-family:Inter,Arial,sans-serif;font-size:12px;font-weight:800;line-height:18px;margin:10px 16px 0 0;text-decoration:none">Course Guide &rarr;</a>`
     : "";
   const factLine = course.factLine
@@ -511,7 +533,8 @@ function renderMonitoringCard(course: CustomerEmailMonitoringCourse, assetBaseUr
         courseName: course.courseName,
         courseAddress: course.courseAddress,
         rank: course.rank,
-        assetBaseUrl
+        assetBaseUrl,
+        mode
       })}
       <tr>
         <td style="background:#ffffff;color:${EMAIL_COLORS.muted};font-family:Inter,Arial,sans-serif;font-size:13px;line-height:20px;padding:16px 20px">
@@ -532,8 +555,9 @@ function renderCoursePhotoHeader(input: {
   rank: number;
   subline?: string;
   assetBaseUrl?: string;
+  mode?: "SIMULATOR";
 }) {
-  const assetUrl = getCourseAssetUrl(input.rank, input.assetBaseUrl);
+  const assetUrl = input.mode === "SIMULATOR" ? undefined : getCourseAssetUrl(input.rank, input.assetBaseUrl);
   const location = formatCompactCourseLocation(input.courseAddress);
   const locationCell = location
     ? `<td class="course-location" align="right" style="color:rgba(255,255,255,.52);font-family:Inter,Arial,sans-serif;font-size:11px;line-height:17px;white-space:nowrap">&#128205; ${escapeHtml(location)}</td>`
@@ -541,12 +565,12 @@ function renderCoursePhotoHeader(input: {
 
   return `
     <tr>
-      <td background="${escapeHtml(assetUrl)}" bgcolor="${EMAIL_COLORS.dark}" style="background-color:${EMAIL_COLORS.dark};background-image:url('${escapeHtml(assetUrl)}');background-position:center;background-repeat:no-repeat;background-size:cover;height:104px">
-        <!--[if gte mso 9]>
+      <td ${assetUrl ? `background="${escapeHtml(assetUrl)}" ` : ""}bgcolor="${EMAIL_COLORS.dark}" style="background-color:${EMAIL_COLORS.dark};${assetUrl ? `background-image:url('${escapeHtml(assetUrl)}');background-position:center;background-repeat:no-repeat;background-size:cover;` : ""}height:104px">
+        ${assetUrl ? `<!--[if gte mso 9]>
         <v:rect xmlns:v="urn:schemas-microsoft-com:vml" fill="true" stroke="false" style="width:614px;height:104px;">
           <v:fill type="frame" src="${escapeHtml(assetUrl)}" color="${EMAIL_COLORS.dark}" />
           <v:textbox inset="0,0,0,0">
-        <![endif]-->
+        <![endif]-->` : ""}
         <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="height:104px">
           <tr>
             <td style="padding:16px 20px;vertical-align:top">
@@ -563,10 +587,10 @@ function renderCoursePhotoHeader(input: {
             </td>
           </tr>
         </table>
-        <!--[if gte mso 9]>
+        ${assetUrl ? `<!--[if gte mso 9]>
           </v:textbox>
         </v:rect>
-        <![endif]-->
+        <![endif]-->` : ""}
       </td>
     </tr>
   `;
@@ -574,16 +598,24 @@ function renderCoursePhotoHeader(input: {
 
 function normalizeAvailabilityTimes<T extends CustomerEmailAvailabilityTime>(
   times: T[],
-  timeZone: string
-): Array<T & { startsAtDate: Date }> {
+  timeZone: string,
+  mode?: "SIMULATOR",
+  durationMinutes?: number
+): Array<T & { startsAtDate: Date; endsAtDate?: Date }> {
   return times
-    .map((time) => ({
-      ...time,
-      startsAtDate: time.startsAt instanceof Date
+    .map((time) => {
+      const startsAtDate = time.startsAt instanceof Date
         ? time.startsAt
-        : zonedDateTimeToDate(time.startsAt, timeZone)
-    }))
-    .filter((time) => !Number.isNaN(time.startsAtDate.getTime()))
+        : zonedDateTimeToDate(time.startsAt, timeZone);
+      const endsAtDate = mode === "SIMULATOR"
+        ? time.endsAt == null
+          ? new Date(startsAtDate.getTime() + getSimulatorDurationMinutes(durationMinutes) * 60_000)
+          : time.endsAt instanceof Date ? time.endsAt : zonedDateTimeToDate(time.endsAt, timeZone)
+        : undefined;
+      return { ...time, startsAtDate, ...(mode === "SIMULATOR" ? { endsAtDate } : {}) };
+    })
+    .filter((time) => !Number.isNaN(time.startsAtDate.getTime()) && (mode !== "SIMULATOR" ||
+      (time.endsAtDate !== undefined && time.endsAtDate.getTime() > time.startsAtDate.getTime())))
     .sort((left, right) => left.startsAtDate.getTime() - right.startsAtDate.getTime());
 }
 
@@ -602,10 +634,10 @@ function selectVisibleAvailabilityTimes<
 
 function chunkAvailabilityTimes<
   T extends CustomerEmailAvailabilityTime & { startsAtDate: Date }
->(times: T[]) {
+>(times: T[], columns = 4) {
   const rows: T[][] = [];
-  for (let index = 0; index < times.length; index += 4) {
-    rows.push(times.slice(index, index + 4));
+  for (let index = 0; index < times.length; index += columns) {
+    rows.push(times.slice(index, index + columns));
   }
   return rows;
 }
@@ -639,6 +671,22 @@ function formatAvailabilityTime(
     minute: "2-digit",
     timeZone
   });
+}
+
+function getSimulatorDurationMinutes(durationMinutes?: number) {
+  return durationMinutes !== undefined && Number.isFinite(durationMinutes) && durationMinutes > 0
+    ? durationMinutes : 60;
+}
+
+function formatAvailabilityTimeRange(startsAt: Date, endsAt: Date, timeZone: string, includeWeekday = false) {
+  const dayChanges = startsAt.toLocaleDateString("en-US", { timeZone }) !== endsAt.toLocaleDateString("en-US", { timeZone });
+  const zoneLabel = (date: Date) => new Intl.DateTimeFormat("en-US", { timeZone, timeZoneName: "short" })
+    .formatToParts(date).find((part) => part.type === "timeZoneName")?.value ?? timeZone;
+  const startZone = zoneLabel(startsAt);
+  const endZone = zoneLabel(endsAt);
+  const start = formatAvailabilityTime(startsAt, timeZone, includeWeekday || dayChanges);
+  const end = formatAvailabilityTime(endsAt, timeZone, dayChanges);
+  return `${start}${startZone !== endZone ? ` ${startZone}` : ""} – ${end} ${endZone}`;
 }
 
 function formatCheckedAt(value: Date, timeZone?: string) {

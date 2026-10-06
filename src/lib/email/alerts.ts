@@ -191,7 +191,7 @@ export async function sendSimulatorStatusEmail(input: SimulatorStatusInput & {
     from, to: input.to,
     subject: input.kind === "setup" ? "Your simulator alert is saved" : "Your simulator alert update",
     html: renderSimulatorStatusHtml({ ...input,
-      stopUrl: buildStableEmailStopUrls(input.searchId, input.targetDate).cancelled }),
+      stopUrls: input.stopUrls ?? buildStableEmailStopUrls(input.searchId, input.targetDate) }),
   }, { headers: { "Idempotency-Key": input.stableIdempotencyKey } });
   if (result.error) throw new EmailDeliveryNotAcceptedError(result.error.message, result.error.name);
   return { ...result.data, deliveryStatus: "sent" };
@@ -329,8 +329,7 @@ export function renderAlertHtml(input: TeeTimeAlertInput) {
     if (!input.durationMinutes || input.matches.some((match) => !match.endsAt)) {
       throw new Error("Simulator alert needs complete session end times");
     }
-    return renderSimulatorAlertHtml({ ...input, durationMinutes: input.durationMinutes,
-      stopUrl: input.stopUrls?.cancelled });
+    return renderSimulatorAlertHtml({ ...input, durationMinutes: input.durationMinutes });
   }
   const matches = [...input.matches].sort(
     (left, right) => left.startsAt.getTime() - right.startsAt.getTime()

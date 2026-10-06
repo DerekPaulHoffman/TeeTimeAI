@@ -11,6 +11,13 @@ import {
   type SearchStatusEmailInput
 } from "@/lib/email/search-status";
 import { buildCourseFactLine } from "@/lib/email/course-facts";
+import {
+  getSimulatorAlertSubject,
+  renderSimulatorAlertHtml,
+  renderSimulatorStatusHtml,
+  type SimulatorEmailInput,
+  type SimulatorStatusInput
+} from "@/lib/email/simulator-email";
 
 export const metadata: Metadata = {
   title: "Email Preview",
@@ -24,6 +31,7 @@ export const metadata: Metadata = {
 type EmailPreviewPageProps = {
   searchParams: Promise<{
     variant?: string;
+    mode?: string;
   }>;
 };
 
@@ -245,10 +253,51 @@ const previewAlert: TeeTimeAlertInput = {
   assetBaseUrl: ""
 };
 
+const simulatorVenues = [
+  {
+    courseId: "preview-simulator-fairfield",
+    courseName: "Golf Lounge 18 Fairfield",
+    courseRank: 1,
+    courseAddress: "Fairfield, Connecticut",
+    bookingUrl: "https://golflounge18.com/locations/fairfield/",
+    availability: "MATCH_FOUND"
+  },
+  {
+    courseId: "preview-simulator-stratford",
+    courseName: "X-Golf Stratford",
+    courseRank: 2,
+    courseAddress: "Stratford, Connecticut",
+    bookingUrl: "https://app.acuityscheduling.com/schedule/2991fba2",
+    availability: "NO_MATCH"
+  }
+];
+
+const simulatorPreview: SimulatorEmailInput = {
+  targetDate: "2026-10-10",
+  startTime: "09:00",
+  endTime: "14:00",
+  durationMinutes: 60,
+  players: 4,
+  userTimeZone: "America/New_York",
+  checkedAt: new Date("2026-10-06T12:30:00-04:00"),
+  stopUrls: previewStopUrls,
+  assetBaseUrl: "",
+  matches: ["09:00", "10:00", "11:00", "12:00"].map((time, index) => ({
+    ...simulatorVenues[0],
+    offeringId: "preview-simulator-offering",
+    courseTimeZone: "America/New_York",
+    startsAt: new Date(`2026-10-10T${time}:00-04:00`),
+    endsAt: new Date(`2026-10-10T${String(Number(time.slice(0, 2)) + 1).padStart(2, "0")}:00:00-04:00`),
+    isNew: index < 2
+  }))
+};
+
 export default async function EmailPreviewPage({
   searchParams
 }: EmailPreviewPageProps) {
-  const requestedVariant = (await searchParams).variant;
+  const params = await searchParams;
+  const requestedVariant = params.variant;
+  const isSimulator = params.mode === "SIMULATOR";
   const variant: PreviewVariant =
     requestedVariant === "setup" || requestedVariant === "morning"
       ? requestedVariant
@@ -258,19 +307,42 @@ export default async function EmailPreviewPage({
     ...baseStatusPreview,
     kind: variant === "setup" ? "setup" : "daily"
   };
-  const emailHtml = isInstant
-    ? renderAlertHtml(previewAlert)
-    : renderSearchStatusHtml(statusPreview);
+  const simulatorStatusPreview: SimulatorStatusInput = {
+    kind: variant === "setup" ? "setup" : "daily",
+    targetDate: simulatorPreview.targetDate!,
+    startTime: simulatorPreview.startTime!,
+    endTime: simulatorPreview.endTime!,
+    durationMinutes: simulatorPreview.durationMinutes,
+    players: simulatorPreview.players!,
+    userTimeZone: simulatorPreview.userTimeZone,
+    checkedAt: simulatorPreview.checkedAt,
+    stopUrls: previewStopUrls,
+    assetBaseUrl: "",
+    venues: simulatorVenues
+  };
+  const emailHtml = isSimulator
+    ? isInstant
+      ? renderSimulatorAlertHtml(simulatorPreview)
+      : renderSimulatorStatusHtml(simulatorStatusPreview)
+    : isInstant
+      ? renderAlertHtml(previewAlert)
+      : renderSearchStatusHtml(statusPreview);
   const title = variant === "setup"
     ? "Alert setup"
     : variant === "instant"
       ? "Instant alert"
       : "Retired morning update";
-  const subject = variant === "setup"
-    ? "Your Tee Time Spot search is active"
-    : variant === "instant"
-      ? "New tee times opened at your priority courses"
-      : "Your morning Tee Time Spot update";
+  const subject = isSimulator
+    ? variant === "setup"
+      ? "Your simulator alert is saved"
+      : isInstant
+        ? getSimulatorAlertSubject(simulatorPreview.matches)
+        : "Your simulator alert update"
+    : variant === "setup"
+      ? "Your Tee Time Spot search is active"
+      : isInstant
+        ? "New tee times opened at your priority courses"
+        : "Your morning Tee Time Spot update";
 
   return (
     <main className="preview-page">
@@ -284,22 +356,28 @@ export default async function EmailPreviewPage({
             {isInstant
               ? "This is the complete match-alert email used for production delivery."
               : variant === "setup"
-                ? "This is the setup email explaining your alert and each course's current status."
+                ? `This is the setup email explaining your alert and each ${isSimulator ? "venue" : "course"}'s current status.`
                 : "This historical status template is retained for reference and is not sent."}
           </p>
         </div>
-        <a className="button button-secondary" href={previewAlert.matches[0]?.bookingUrl}>
+        <a className="button button-secondary" href={isSimulator ? simulatorVenues[0].bookingUrl : previewAlert.matches[0]?.bookingUrl}>
           Official booking page
           <ExternalLink size={18} />
         </a>
       </div>
 
       <nav aria-label="Email variants" className="email-preview-tabs">
+        <a
+          className="button button-secondary"
+          href={`/email-preview?variant=${variant}${isSimulator ? "" : "&mode=SIMULATOR"}`}
+        >
+          {isSimulator ? "View course emails" : "View simulator emails"}
+        </a>
         {previewVariants.map((option) => (
           <a
             aria-current={variant === option ? "page" : undefined}
             className={variant === option ? "button button-dark" : "button button-secondary"}
-            href={option === "instant" ? "/email-preview" : `/email-preview?variant=${option}`}
+            href={`/email-preview?variant=${option}${isSimulator ? "&mode=SIMULATOR" : ""}`}
             key={option}
           >
             {option === "morning"
@@ -322,7 +400,7 @@ export default async function EmailPreviewPage({
           <EmailPreviewFrame
             className="email-frame email-status-frame"
             initialHeight={isInstant ? 1320 : 2480}
-            key={variant}
+            key={`${isSimulator ? "simulator" : "course"}-${variant}`}
             srcDoc={emailHtml}
             title={`Rendered ${title.toLowerCase()} email`}
           />
@@ -335,8 +413,9 @@ export default async function EmailPreviewPage({
             <div>
               <strong>Match and status alerts</strong>
               <p className="meta">
-                Your alert starts with a setup email. Matching tee times and changes to
-                course monitoring can also trigger an email.
+                {isSimulator
+                  ? "After the first check, we send matching simulator sessions or an initial status email. New matching sessions can trigger another email."
+                  : "Your alert starts with a setup email. Matching tee times and changes to course monitoring can also trigger an email."}
               </p>
             </div>
           </div>
@@ -345,8 +424,9 @@ export default async function EmailPreviewPage({
             <div>
               <strong>Truthful availability</strong>
               <p className="meta">
-                Only persisted pending matches receive a NEW badge; earlier availability stays
-                grouped into hourly windows.
+                Only persisted pending matches receive a NEW badge; {isSimulator
+                  ? "simulator sessions show their full start and end times for one bay."
+                  : "earlier availability stays grouped into hourly windows."}
               </p>
             </div>
           </div>

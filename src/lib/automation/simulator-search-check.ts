@@ -191,7 +191,7 @@ async function deliverSimulatorMatches(search: ActiveAutomationSearch, lease: Se
       payload: { schemaVersion: 3, mode: "SIMULATOR", checkedAt: checkedAt.toISOString(), matchIds: matches.map(match => match.id), matchRefs: refs, displayMatchIds: matches.map(match => match.id),
         matchReport: toSearchEmailJson({ mode: "SIMULATOR", durationMinutes: search.durationMinutes, targetDate: search.date.toISOString().slice(0, 10), startTime: search.startTime, endTime: search.endTime,
           players: search.players, userTimeZone: search.userTimeZone, matches: matches.map(match => ({ matchId: match.id, availabilityCycle: match.availabilityCycle,
-            mode: "SIMULATOR", offeringId: match.offeringId, courseId: match.courseId, courseName: match.course.name,
+            mode: "SIMULATOR", offeringId: match.offeringId, courseId: match.courseId, courseName: match.course.name, courseAddress: match.course.address,
             courseRank: search.preferences.find(preference => preference.offeringId === match.offeringId)?.rank, courseTimeZone: match.course.timeZone,
             startsAt: match.startsAt.toISOString(), endsAt: match.endsAt?.toISOString(), availableSpots: 1,
             bookingUrl: match.bookingUrl, resourceId: match.resourceId, productId: match.productId, isNew: true })) }) }
@@ -222,8 +222,8 @@ async function deliverSimulatorSetup(search: ActiveAutomationSearch, lease: Sear
       const offering = preference.offering;
       const opening = offering ? getSimulatorBookingOpening(search.date.toISOString().slice(0, 10), offering, preference.course.timeZone) : null;
       return { offeringId: preference.offeringId, courseId: preference.courseId, courseName: preference.course.name,
-        courseRank: preference.rank, bookingUrl: offering?.bookingUrl,
-        availability: opening && opening > new Date() ? "BOOKING_NOT_OPEN" : result?.outcome === "NO_MATCH" ? "NO_MATCH" : result?.outcome === "FETCH_FAILED" ? "UNAVAILABLE" : "CHECK_PENDING" };
+        courseRank: preference.rank, courseAddress: preference.course.address, bookingUrl: offering?.bookingUrl,
+        availability: opening && opening > new Date() ? "BOOKING_NOT_OPEN" : result?.outcome === "MATCH_FOUND" ? "MATCH_FOUND" : result?.outcome === "NO_MATCH" ? "NO_MATCH" : result?.outcome === "FETCH_FAILED" ? "UNAVAILABLE" : "CHECK_PENDING" };
     }) };
   const prepared = await prepareSearchEmailDeliveryGroup({ searchId: search.id, alertGeneration: search.alertGeneration, checkLeaseToken: lease.token,
     kind: "SETUP", groupKey, ownerRecipient: search.user.email, recipients: [search.user.email, ...search.additionalEmails],
