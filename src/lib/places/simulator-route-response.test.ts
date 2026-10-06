@@ -44,7 +44,7 @@ describe("simulator discovery response isolation", () => {
     expect(body.courses[0]).not.toHaveProperty("layoutHoleCounts");
     expect(body.courses[0]).not.toHaveProperty("priceEstimate");
     expect(mocks.readCache).toHaveBeenCalledWith(expect.stringContaining("lookup-simulator-v1:outdoor-review-1:rentals:"));
-    expect(mocks.readCache).toHaveBeenCalledWith(expect.stringContaining(":classification:public-rentals-v2"));
+    expect(mocks.readCache).toHaveBeenCalledWith(expect.stringContaining(":classification:public-rentals-v3"));
   });
 
   it("checks rental reviews before serving cached discovery and fails closed when they cannot be read", async () => {
@@ -54,18 +54,55 @@ describe("simulator discovery response isolation", () => {
     expect(mocks.searchNearby).not.toHaveBeenCalled();
   });
 
-  it("uses only reviewed simulator rentals as the provider-failure fallback", async () => {
+  it("retains reviewed simulator rentals as the provider-failure fallback", async () => {
     mocks.searchNearby.mockRejectedValue(new Error("Google quota"));
     const response = await simulatorDiscoveryResponse({ latitude: 41.24, longitude: -73.2, radiusMeters: 24140 });
     expect(await response.json()).toMatchObject({ mode: "SIMULATOR", demo: false, courses: [{ googlePlaceId: "place-1", offeringId: "rental-1" }] });
     expect(mocks.writeCache).toHaveBeenCalledWith(expect.stringContaining("discover-simulator-v1:"), expect.any(Array), "course-discovery");
-    expect(mocks.readCache).toHaveBeenCalledWith(expect.stringContaining(":classification:public-rentals-v2"));
+    expect(mocks.readCache).toHaveBeenCalledWith(expect.stringContaining(":classification:public-rentals-v3"));
   });
 
-  it("does not turn an unverified rental into fallback availability", async () => {
-    mocks.loadOfferings.mockResolvedValue(buildSimulatorOfferingIndex([{ ...row, verifiedAt: null }]));
+  it("keeps an unverified venue selectable during provider failure without inventing rental proof", async () => {
+    mocks.loadOfferings.mockResolvedValue(buildSimulatorOfferingIndex([{ ...row, publicAccessStatus: "UNVERIFIED",
+      verifiedAt: null, evidenceUrl: null, supportedDurationsMinutes: [] }]));
+    mocks.searchByName.mockRejectedValue(new Error("Google quota"));
+    const response = await simulatorLookupResponse({ query: "Example Indoor Golf" });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toMatchObject({ mode: "SIMULATOR", courses: [{ offeringId: "rental-1", publicAccessStatus: "UNVERIFIED",
+      monitoringReadiness: "VERIFYING", supportedDurationsMinutes: [] }] });
+    expect(body.courses[0]).not.toHaveProperty("simulatorVerifiedAt");
+    expect(body.courses[0]).not.toHaveProperty("simulatorEvidenceUrl");
+    expect(body.courses[0]).not.toHaveProperty("monitoringReadinessObservedAt");
+    expect(mocks.writeCache).toHaveBeenCalledWith(expect.stringContaining("lookup-simulator-v1:"), expect.any(Array), "course-lookup");
+  });
+
+  it.each(["VERIFIED_PRIVATE", "VERIFIED_NON_COURSE"])("honors exact %s reviews for unverified provider-failure candidates", async (accessOverride) => {
+    mocks.loadOfferings.mockResolvedValue(buildSimulatorOfferingIndex([{ ...row, publicAccessStatus: "UNVERIFIED", verifiedAt: null }]));
+    mocks.loadReviews.mockResolvedValue({ byPlaceId: new Map([["place-1", { accessOverride,
+      classification: accessOverride === "VERIFIED_PRIVATE" ? "MEMBERS_ONLY_SIMULATOR" : "DRIVING_RANGE" }]]),
+      verifiedPublicCourses: [], reviewVersion: "excluded-review" });
     mocks.searchByName.mockRejectedValue(new Error("Google quota"));
     expect((await simulatorLookupResponse({ query: "Example Indoor Golf" })).status).toBe(503);
     expect(mocks.writeCache).not.toHaveBeenCalled();
+  });
+
+  it("does not resurrect a reviewed members-only venue even with older public rental facts", async () => {
+    mocks.loadReviews.mockResolvedValue({ byPlaceId: new Map([["place-1", { accessOverride: "VERIFIED_PRIVATE",
+      classification: "MEMBERS_ONLY_SIMULATOR" }]]), verifiedPublicCourses: [], reviewVersion: "members-review" });
+    mocks.searchNearby.mockRejectedValue(new Error("Google quota"));
+    expect((await simulatorDiscoveryResponse({ latitude: 41.24, longitude: -73.2, radiusMeters: 24140 })).status).toBe(503);
+    expect(mocks.writeCache).not.toHaveBeenCalled();
+  });
+
+  it("reapplies current exact exclusions before serving a cached candidate", async () => {
+    mocks.loadReviews.mockResolvedValue({ byPlaceId: new Map([["place-1", { accessOverride: "VERIFIED_PRIVATE",
+      classification: "MEMBERS_ONLY_SIMULATOR" }]]), verifiedPublicCourses: [], reviewVersion: "members-review" });
+    mocks.readCache.mockResolvedValue([{ googlePlaceId: "place-1", name: row.course.name, latitude: 41.24, longitude: -73.2,
+      timeZone: "America/New_York", offeringId: "rental-1", monitoringReadiness: "READY" }]);
+    const response = await simulatorLookupResponse({ query: "Example Indoor Golf" });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ mode: "SIMULATOR", courses: [] });
+    expect(mocks.searchByName).not.toHaveBeenCalled();
   });
 });

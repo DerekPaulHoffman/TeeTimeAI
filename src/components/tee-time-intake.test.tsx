@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -13,6 +14,7 @@ import {
   WEBSITE_TRAFFIC_CLASS_STORAGE_KEY
 } from "@/lib/engagement/traffic-class";
 import { OPEN_FEEDBACK_EVENT } from "@/components/open-feedback-button";
+import { SEARCH_PREFILL_STORAGE_KEY } from "@/lib/searches/search-prefill";
 
 import { TeeTimeIntake } from "./tee-time-intake";
 
@@ -80,6 +82,23 @@ function simulatorTestVenue(name: string, distanceMeters: number, supported = tr
 }
 
 describe("TeeTimeIntake", () => {
+  it("keeps a transferred course selected when initialization effects replay", async () => {
+    mockDateBoundaryRequests();
+    const course = dateBoundaryCourse("Transferred Course", "America/New_York");
+    window.sessionStorage.setItem(SEARCH_PREFILL_STORAGE_KEY, JSON.stringify({
+      location: "Trumbull, CT",
+      date: "2030-10-03",
+      selectedCourse: course
+    }));
+    render(<StrictMode><TeeTimeIntake {...signedInAccountProps} /></StrictMode>);
+
+    const dialog = await screen.findByRole("dialog", { name: "Notify me" });
+    expect(dialog.textContent).toContain("Transferred Course");
+    expect((screen.getByLabelText("Location") as HTMLInputElement).value).toBe("Trumbull, CT");
+    expect((screen.getByLabelText("Date", { exact: true }) as HTMLInputElement).value).toBe("2030-10-03");
+    expect(window.sessionStorage.getItem(SEARCH_PREFILL_STORAGE_KEY)).toBeNull();
+  });
+
   it.each(["", "   "])("explains a missing location without requesting discovery (%j)", (location) => {
     const fetchMock = mockDateBoundaryRequests();
     render(<TeeTimeIntake initialValues={{ location }} />);

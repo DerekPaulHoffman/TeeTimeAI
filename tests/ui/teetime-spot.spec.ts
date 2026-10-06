@@ -195,9 +195,12 @@ test.describe("Tee Time Spot UI smoke", () => {
     page
   }, testInfo) => {
     const issues = collectPageIssues(page);
+    // Hydrate against the server clock before moving only the browser clock forward.
+    await page.goto("/search", { waitUntil: "networkidle" });
     await page.clock.install({ time: new Date("2030-05-15T12:00:00.000Z") });
-    await page.goto("/search");
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
     const date = page.getByLabel("Date", { exact: true });
+    await expect(date).toHaveAttribute("min", "2030-05-16");
     await date.fill("2030-05-18");
     const dateGeometry = await date.evaluate((input) => {
       const canvas = document.createElement("canvas");
@@ -1039,6 +1042,10 @@ test.describe("Tee Time Spot UI smoke", () => {
       await route.fulfill({ status: 201, json: { search: { id: "ui-notify-alert" } } });
     });
     if (smokeHostname === "127.0.0.1" || smokeHostname === "localhost") {
+      // Chromium treats a fulfilled document as public-network traffic; allow its local dev socket.
+      if (smokeHostname === "127.0.0.1") {
+        await page.context().grantPermissions(["local-network-access"], { origin: smokeOrigin });
+      }
       // Supply signed-in component props only in this intercepted local document.
       // Server authentication stays unchanged and every alert write is mocked above.
       await page.route(`${smokeOrigin}/search`, async route => {
@@ -1060,7 +1067,8 @@ test.describe("Tee Time Spot UI smoke", () => {
             '\\"accountEmail\\":\\"golfer@example.com\\",\\"accountEnabled\\":true,\\"accountSignedIn\\":true') });
       });
     }
-    await page.goto("/search");
+    // The intercepted signed-in document must hydrate before editing controlled fields.
+    await page.goto("/search", { waitUntil: "networkidle" });
     await expect(page.getByText("Your courses", { exact: true })).toHaveCount(0);
     await expect(page.getByRole("dialog", { name: "Notify me" })).toBeHidden();
     const location = page.getByRole("textbox", { name: "Location", exact: true });

@@ -21,6 +21,23 @@ const NON_RENTAL_PRIMARY_TYPES = new Set([
 const LESSON_OR_FITTING_PATH = /\/(?:golf-lessons?|golf-school|club-fitting)(?:\/|$)/i;
 export const SIMULATOR_DISCOVERY_CLASSIFICATION_VERSION = "public-rentals-v3";
 
+export function getReviewedPersistedSimulatorCandidates(reviews: GooglePlaceReviewIndex, offerings: SimulatorOfferingIndex) {
+  return filterReviewedSimulatorCandidates(getPersistedSimulatorCandidates(offerings), reviews, offerings);
+}
+
+export function filterReviewedSimulatorCandidates(candidates: CourseCandidate[], reviews: GooglePlaceReviewIndex, offerings: SimulatorOfferingIndex) {
+  return candidates.filter((candidate) => {
+    const review = reviews.byPlaceId.get(candidate.googlePlaceId);
+    const canonicalReview = review?.canonicalPlaceId ? reviews.byPlaceId.get(review.canonicalPlaceId) : undefined;
+    const offering = offerings.byPlaceId.get(candidate.googlePlaceId);
+    if (offering && (!offering.active || offering.publicAccessStatus === "NOT_PUBLIC")) return false;
+    return ![review, canonicalReview].some((fact) => fact?.classification === "MEMBERS_ONLY_SIMULATOR") &&
+      (hasVerifiedPublicSimulatorRental(offering) ||
+        ![review, canonicalReview].some((fact) => fact?.accessOverride === "VERIFIED_PRIVATE" ||
+          (fact?.accessOverride === "VERIFIED_NON_COURSE" && fact.classification !== "INDOOR_SIMULATOR")));
+  });
+}
+
 export function filterSimulatorPlaces(places: GooglePlace[], reviews: GooglePlaceReviewIndex, offerings: SimulatorOfferingIndex) {
   return places.filter((place) => {
     const id = (place.id ?? place.name ?? "").replace(/^places\//, "");
@@ -108,15 +125,7 @@ export async function searchNearbySimulatorVenues(input: NearbyCourseSearchInput
   if (input.signal?.aborted) throw input.signal.reason;
   const places = results.flatMap((result) => result.status === "fulfilled" ? result.value : []);
   const courses = mergeSimulatorCandidates(
-    mapSimulatorPlaces(places, reviews, offerings), getPersistedSimulatorCandidates(offerings).filter((candidate) => {
-      const review = reviews.byPlaceId.get(candidate.googlePlaceId);
-      const canonicalReview = review?.canonicalPlaceId ? reviews.byPlaceId.get(review.canonicalPlaceId) : undefined;
-      const offering = offerings.byPlaceId.get(candidate.googlePlaceId);
-      return ![review, canonicalReview].some((fact) => fact?.classification === "MEMBERS_ONLY_SIMULATOR") &&
-        (hasVerifiedPublicSimulatorRental(offering) ||
-          ![review, canonicalReview].some((fact) => fact?.accessOverride === "VERIFIED_PRIVATE" ||
-            (fact?.accessOverride === "VERIFIED_NON_COURSE" && fact.classification !== "INDOOR_SIMULATOR")));
-    })
+    mapSimulatorPlaces(places, reviews, offerings), getReviewedPersistedSimulatorCandidates(reviews, offerings)
   ).map((candidate) => ({ ...candidate, distanceMeters: simulatorDistanceMeters(input, candidate) }))
     .filter((candidate) => candidate.distanceMeters <= radius)
     .sort((left, right) => left.distanceMeters - right.distanceMeters);

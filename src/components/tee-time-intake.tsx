@@ -370,6 +370,7 @@ function TeeTimeIntakeContent({
   const shouldRefreshRestoredCoursesRef = useRef(false);
   const dateWasEditedRef = useRef(false);
   const restoreInitial = useRef({ initialValues, mode });
+  const transferredPrefillRef = useRef<{ value: ReturnType<typeof consumeSearchPrefill> } | null>(null);
   const discoveryRequestRef = useRef<AbortController | null>(null);
   const lookupRequestRef = useRef<AbortController | null>(null);
   const modeRef = useRef(mode);
@@ -382,7 +383,11 @@ function TeeTimeIntakeContent({
 
   useEffect(() => {
     const { mode: initialMode } = restoreInitial.current;
-    const transferred = consumeSearchPrefill() ?? readSearchPrefillFromUrl();
+    // Effect replay cancels the first frame; retain its single-use transfer for the next frame.
+    if (transferredPrefillRef.current === null) {
+      transferredPrefillRef.current = { value: consumeSearchPrefill() ?? readSearchPrefillFromUrl() };
+    }
+    const transferred = transferredPrefillRef.current.value;
     const transferredHasDetails = transferred && Object.keys(transferred).some(key => key !== "mode");
     const draft = transferredHasDetails ? undefined : readSearchDraft(initialMode);
     const animationFrame = window.requestAnimationFrame(() => {

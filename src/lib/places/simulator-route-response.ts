@@ -5,8 +5,8 @@ import { cacheCourseCandidatePhotos } from "@/lib/places/course-photo-metadata";
 import { getCourseDiscoveryCacheKey, getCourseLookupCacheKey, readCourseRuntimeCache, writeCourseRuntimeCache } from "@/lib/places/course-runtime-cache";
 import type { CourseCandidate, CourseNameSearchInput, NearbyCourseSearchInput } from "@/lib/places/google";
 import { loadActiveGooglePlaceReviewIndex } from "@/lib/places/google-place-reviews";
-import { searchNearbySimulatorVenues, searchSimulatorVenuesByName, simulatorDistanceMeters, SIMULATOR_DISCOVERY_CLASSIFICATION_VERSION } from "@/lib/places/simulator-google";
-import { getPersistedSimulatorCandidates, loadSimulatorOfferingIndex, mapSimulatorCandidate } from "@/lib/places/simulator-offerings";
+import { filterReviewedSimulatorCandidates, getReviewedPersistedSimulatorCandidates, searchNearbySimulatorVenues, searchSimulatorVenuesByName, simulatorDistanceMeters, SIMULATOR_DISCOVERY_CLASSIFICATION_VERSION } from "@/lib/places/simulator-google";
+import { loadSimulatorOfferingIndex, mapSimulatorCandidate } from "@/lib/places/simulator-offerings";
 
 export async function simulatorDiscoveryResponse(input: NearbyCourseSearchInput & { radiusMeters: number }) {
   return simulatorResponse({ discovery: input });
@@ -25,7 +25,7 @@ async function simulatorResponse(input: { discovery: NearbyCourseSearchInput & {
     const cached = await readCourseRuntimeCache<CourseCandidate[]>(cacheKey);
     let courses: CourseCandidate[];
     if (Array.isArray(cached)) {
-      courses = cached.map((candidate) => mapSimulatorCandidate(candidate, offerings));
+      courses = filterReviewedSimulatorCandidates(cached, reviews, offerings).map((candidate) => mapSimulatorCandidate(candidate, offerings));
     } else {
       try {
         courses = input.discovery ? await searchNearbySimulatorVenues(input.discovery, reviews, offerings) :
@@ -33,7 +33,7 @@ async function simulatorResponse(input: { discovery: NearbyCourseSearchInput & {
       } catch (error) {
         const signal = input.discovery?.signal ?? input.lookup?.signal;
         if (signal?.aborted) throw error;
-        courses = getPersistedSimulatorCandidates(offerings);
+        courses = getReviewedPersistedSimulatorCandidates(reviews, offerings);
         if (input.discovery) {
           const origin = input.discovery;
           courses = courses.map((course) => ({ ...course, distanceMeters: simulatorDistanceMeters(origin, course) }))
