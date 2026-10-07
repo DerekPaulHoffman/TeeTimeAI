@@ -229,6 +229,112 @@ describe("bounded owned simulator public research transport", () => {
   it.each(["http://127.0.0.1", "https://venue.example.test/login", "https://venue.example.test/cart", "https://venue.example.test/?token=secret"])("rejects unsafe input %s without I/O", async url => {
     const fetch = vi.fn(); await expect(collectSimulatorSupportResearch({ url }, { fetch, lease })).rejects.toThrow("UNSAFE_URL"); expect(fetch).not.toHaveBeenCalled();
   });
+  it.each([403, 404, 429, 500, 503])("preserves initial main HTTP %i and blocks an oversized decorative script without another read", async status => {
+    const main = publishedConfig() + "<a href='/booking'>Book a bay</a>";
+    const view = renderedBrowser([{ url: `${source}/` }, { url: `${source}/decoration.js`, kind: "script" }], "<h1>Unproven DOM</h1>");
+    const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? response(main, status)
+      : new Response("large decoration", { headers: { "content-length": "1500001", "content-type": "text/javascript" } }));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory, now: () => instant });
+    expect(fetch).toHaveBeenCalledOnce(); expect(lease).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({ httpStatus: status, url: `${source}/`, observedAt: instant.toISOString(), method: "BROWSER", text: "", links: [],
+      admittedRequests: 1, blockedRequests: 1, renderComplete: false, renderWarning: "MAIN_DOCUMENT_HTTP_ERROR", contentProvenance: "MAIN_DOCUMENT_HTTP", accessControls: [] });
+    expect(result.calendar).toBeUndefined(); expect(result.jsonShape).toBeUndefined(); expect(result.configurationDiagnostic).toBeUndefined();
+    expect(result.bookingLinks).toBeUndefined(); expect(result.responseContracts).toBeUndefined();
+    expect(view.routes[0].fulfill).toHaveBeenCalledWith({ status, body: "", headers: { "content-type": "text/plain" } });
+    expect(view.routes[1].abort).toHaveBeenCalledOnce(); expect(view.routes[1].fulfill).not.toHaveBeenCalled(); expect(view.page.content).not.toHaveBeenCalled();
+    expect(view.context.close).toHaveBeenCalledOnce(); expect(view.browser.close).toHaveBeenCalledOnce();
+  });
+  it.each([200, 503])("follows legitimate main redirects before observing terminal status %i", async status => {
+    const landing = `${source}/landing`;
+    const view = renderedBrowser([{ url: `${source}/` }, { url: landing }, { url: `${source}/public.js`, kind: "script" }], "<h1>Rendered public facts</h1>");
+    view.page.url = () => landing;
+    const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? new Response(null, { status: 302, headers: { location: landing } })
+      : String(url) === landing ? response("<h1>Main public facts</h1>", status) : response("public script", 200, "text/javascript"));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    expect(result).toMatchObject({ url: landing, httpStatus: status });
+    expect(fetch).toHaveBeenCalledTimes(status === 200 ? 3 : 2);
+    if (status === 200) {
+      expect(result).toMatchObject({ renderComplete: true, contentProvenance: "RENDERED_DOM", text: "Rendered public facts" });
+      expect(result.renderWarning).toBeUndefined(); expect(view.page.content).toHaveBeenCalledOnce();
+    } else {
+      expect(result).toMatchObject({ renderComplete: false, renderWarning: "MAIN_DOCUMENT_HTTP_ERROR", contentProvenance: "MAIN_DOCUMENT_HTTP", text: "", links: [] });
+      expect(view.page.content).not.toHaveBeenCalled();
+    }
+  });
+  it("records positive access controls from an HTTP error without loading or returning its page decoration", async () => {
+    const occupancy = "https://api.yourgolfbooking.com/venue/golf-oasis/bookings/public?start_gte=2026-10-10T00%3A00%3A00Z&start_lte=2026-10-11T00%3A00%3A00Z";
+    const view = renderedBrowser([{ url: booking }, { url: occupancy, kind: "fetch" }]);
+    const fetch = vi.fn(async () => response(publishedConfig() + "<h1>Verify you are human</h1>", 403));
+    const result = await collectSimulatorSupportResearch({ url: booking, render: true }, { fetch, lease, browser: view.factory });
+    expect(result).toMatchObject({ httpStatus: 403, accessControls: ["CAPTCHA_OR_CHALLENGE"], renderComplete: false, renderWarning: "MAIN_DOCUMENT_HTTP_ERROR", text: "", links: [] });
+    expect(fetch).toHaveBeenCalledOnce(); expect(view.routes[0].fulfill).toHaveBeenCalledWith({ status: 403, body: "", headers: { "content-type": "text/plain" } });
+    expect(result.calendar).toBeUndefined(); expect(result.jsonShape).toBeUndefined(); expect(result.configurationDiagnostic).toBeUndefined(); expect(result.responseContracts).toBeUndefined();
+  });
+  it("retains a bounded terminal HTTP observation after an expected navigation abort, but keeps an unknown navigation error hard", async () => {
+    for (const expectedAbort of [true, false]) {
+      const view = renderedBrowser([{ url: `${source}/` }]);
+      const originalGoto = view.page.goto.getMockImplementation()!;
+      const error = new Error(expectedAbort ? "page.goto: net::ERR_ABORTED at public destination" : "Unrelated browser invariant");
+      view.page.goto.mockImplementation(async () => { await originalGoto(); throw error; });
+      const task = collectSimulatorSupportResearch({ url: source, render: true }, { fetch: vi.fn(async () => response("Main error", 403)), lease, browser: view.factory });
+      if (expectedAbort) await expect(task).resolves.toMatchObject({ httpStatus: 403, renderWarning: "MAIN_DOCUMENT_HTTP_ERROR", renderComplete: false });
+      else await expect(task).rejects.toBe(error);
+      expect(view.page.content).not.toHaveBeenCalled();
+    }
+  });
+  it("keeps main body limits and final browser/source URL guards hard before terminal HTTP fallback", async () => {
+    const oversized = renderedBrowser([{ url: `${source}/` }]);
+    await expect(collectSimulatorSupportResearch({ url: source, render: true }, { fetch: vi.fn(async () => new Response("Main error", { status: 403, headers: { "content-type": "text/html", "content-length": "1500001" } })),
+      lease, browser: oversized.factory })).rejects.toThrow("BODY_LIMIT");
+    for (const changedBrowser of [false, true]) {
+      const view = renderedBrowser([{ url: `${source}/` }]);
+      const changed = "https://unobserved.example.test/";
+      if (changedBrowser) view.page.url = () => changed;
+      const rejected = changedBrowser ? response("Main error", 403) : Object.defineProperty(response("Main error", 403), "url", { value: changed });
+      await expect(collectSimulatorSupportResearch({ url: source, render: true }, { fetch: vi.fn(async () => rejected), lease, browser: view.factory })).rejects.toThrow("DESTINATION_CHANGED");
+    }
+  });
+  it("settles an already-started unknown data failure instead of hiding it behind terminal main HTTP", async () => {
+    const data = "https://www.venue.example.test/public-data", unknown = new Error("Unrelated data invariant");
+    const view = renderedBrowser([{ url: `${source}/` }]);
+    let handler!: (route: Route) => Promise<void>;
+    let releaseMain!: (response: Response) => void, rejectData!: (error: Error) => void;
+    const pendingMain = new Promise<Response>(resolve => { releaseMain = resolve; });
+    const pendingData = new Promise<Response>((_resolve, reject) => { rejectData = reject; });
+    const fetch = vi.fn(async (url: unknown) => String(url) === data ? pendingData : pendingMain);
+    view.context.route.mockImplementation(async (_pattern, callback) => { handler = callback; });
+    const run = (url: string, kind: string) => handler({ abort: vi.fn(async () => undefined), fulfill: vi.fn(async () => undefined),
+      request: () => ({ url: () => url, method: () => "GET", allHeaders: async () => ({ "user-agent": "Public research browser" }),
+        resourceType: () => kind, isNavigationRequest: () => kind === "document", frame: () => view.page.mainFrame() }) } as unknown as Route);
+    let dataWork: Promise<void> | undefined;
+    view.page.goto.mockImplementation(async () => {
+      const mainWork = run(`${source}/`, "document"); dataWork = run(data, "xhr");
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+      releaseMain(response("Main error", 403)); await mainWork;
+      setTimeout(() => rejectData(unknown), 0);
+      throw new Error("page.goto: net::ERR_ABORTED at public destination");
+    });
+    await expect(collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory })).rejects.toBe(unknown);
+    await dataWork; expect(view.page.content).not.toHaveBeenCalled(); expect(view.browser.close).toHaveBeenCalledOnce();
+  });
+  it("keeps aggregate overflow from already-started responses hard before terminal main HTTP is recorded", async () => {
+    const view = renderedBrowser([{ url: `${source}/` }]);
+    let handler!: (route: Route) => Promise<void>, releaseMain!: (response: Response) => void;
+    const pendingMain = new Promise<Response>(resolve => { releaseMain = resolve; });
+    const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? pendingMain : response("x".repeat(1_500_000), 200, "text/css"));
+    view.context.route.mockImplementation(async (_pattern, callback) => { handler = callback; });
+    const run = (url: string, kind: string) => handler({ abort: vi.fn(async () => undefined), fulfill: vi.fn(async () => undefined),
+      request: () => ({ url: () => url, method: () => "GET", allHeaders: async () => ({ "user-agent": "Public research browser" }),
+        resourceType: () => kind, isNavigationRequest: () => kind === "document", frame: () => view.page.mainFrame() }) } as unknown as Route);
+    view.page.goto.mockImplementation(async () => {
+      const mainWork = run(`${source}/`, "document");
+      await Promise.all(Array.from({ length: 4 }, (_, index) => run(`https://www.venue.example.test/large-${index}.css`, "stylesheet")));
+      releaseMain(response("Main error", 403)); await mainWork;
+      return { status: () => 403 };
+    });
+    await expect(collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory })).rejects.toThrow("BODY_LIMIT");
+    expect(fetch).toHaveBeenCalledTimes(5); expect(view.page.content).not.toHaveBeenCalled();
+  });
   it("renders through a fresh context and one coordinated public browser request, without repeating a static GET", async () => {
     const view = renderedBrowser([{ url: `${source}/` }]);
     const fetch = vi.fn(async () => response("<h1>Public rentals</h1>"));
@@ -493,7 +599,7 @@ describe("bounded owned simulator public research transport", () => {
   });
   it("keeps an unsafe stylesheet response hard without a successful main HTML document", async () => {
     const view = renderedBrowser([{ url: `${source}/` }, { url: `${source}/public.css`, kind: "stylesheet" }]);
-    const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? response("No safe main", 404)
+    const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? response("No safe main", 200, "application/json")
       : new Response(null, { status: 302, headers: { location: `${source}/login` } }));
     await expect(collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory })).rejects.toThrow("SIMULATOR_RESEARCH_UNSAFE_URL");
     expect(fetch).toHaveBeenCalledTimes(2); expect(view.page.content).not.toHaveBeenCalled();

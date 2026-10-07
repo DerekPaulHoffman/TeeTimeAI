@@ -155,6 +155,47 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(current.revision).toBe(f.owner.revision);
   });
 
+  it("reserves a transport script-cap diagnosis on the original expired research-only owner without changing its reads", async () => {
+    const f = await fixture(15, false, "https://calendar.example.test/booking", "https://official.example.test/faqs");
+    const stored = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const audit = stored.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    const failedAt = new Date(Date.now() - 120_000).toISOString();
+    const requestId = randomUUID();
+    audit.simulatorResearch = { version: 1, sourceFingerprint: f.fingerprint, readCount: 2, history: [
+      { source: "booking", requestedUrl: "https://calendar.example.test/booking", sourceUrl: "https://calendar.example.test/booking",
+        observedAt: new Date(Date.now() - 130_000).toISOString(), httpStatus: 403, rendered: false, outcome: "READ", requestId: randomUUID() },
+      { source: "booking", requestedUrl: "https://calendar.example.test/booking", sourceUrl: "https://calendar.example.test/booking",
+        observedAt: failedAt, httpStatus: 0, rendered: true, outcome: "HARD_FAILED", requestId,
+        failure: { stage: "PUBLIC_READ", category: "BUDGET", code: "PUBLIC_BODY_LIMIT", researchPhase: "HTTP_READ",
+          researchResourceKind: "SECONDARY_SCRIPT", sourceLocation: "src/lib/automation/address-pinned-public-fetch.ts:49" } },
+    ], links: [], bookingLinks: [], linkBaseUrl: null, inFlight: null };
+    const save = () => client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
+    await save();
+    const proof = continuationEvidence(f);
+    const repair = { policyVersion: proof.policyVersion, releaseSha: proof.currentMainSha, source: "git" as const,
+      state: "READY" as const, branch: "main" as const, aliases: ["teetimespot.com", "www.teetimespot.com"],
+      deployedAt: new Date(Date.now() - 60_000).toISOString() };
+    expect(await dispatcher.reserveCourseSupportContinuation({ ...proof, reviewedToolingRepair: repair })).toMatchObject({ acquired: true, value: { reserved: false } });
+    audit.simulatorClaim!.leaseExpiresAt = new Date(Date.now() - 1000).toISOString();
+    audit.simulatorClaim!.plannedPaths = ["src/lib/simulators/providers/your-golf-booking.ts"];
+    await save();
+    expect(await dispatcher.reserveCourseSupportContinuation({ ...proof, reviewedToolingRepair: repair })).toMatchObject({ acquired: true, value: { reserved: false } });
+    audit.simulatorClaim!.plannedPaths = [];
+    audit.simulatorClaim!.releaseSha = "c".repeat(40);
+    await save();
+    expect(await dispatcher.reserveCourseSupportContinuation({ ...proof, reviewedToolingRepair: repair })).toMatchObject({ acquired: true, value: { reserved: false } });
+    audit.simulatorClaim!.releaseSha = null;
+    await save();
+    expect(await dispatcher.reserveCourseSupportContinuation({ ...proof, reviewedToolingRepair: { ...repair, deployedAt: failedAt } })).toMatchObject({ acquired: true, value: { reserved: false } });
+    const result = await dispatcher.reserveCourseSupportContinuation({ ...proof, reviewedToolingRepair: repair });
+    expect(result).toMatchObject({ acquired: true, value: { reserved: true, threadId: f.owner.ownerThreadId, scope: "DIAGNOSE_REVIEWED_TOOLING_UPDATE" } });
+    expect(await dispatcher.reserveCourseSupportContinuation({ ...proof, reviewedToolingRepair: repair })).toMatchObject({ acquired: true, value: { reserved: false, reason: "PRIOR_SEND_UNCONFIRMED" } });
+    const current = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
+    expect(current.research.history[1]).toMatchObject({ requestId, outcome: "HARD_FAILED", failure: { category: "BUDGET", code: "PUBLIC_BODY_LIMIT", researchResourceKind: "SECONDARY_SCRIPT" } });
+    expect(current.research.readCount).toBe(2);
+    expect(current.revision).toBe(f.owner.revision);
+  });
+
   it("atomically consumes one bound assignment and prevents duplicate or stale owner work", async () => {
     const f = await fixture();
     const beforeCourse = await client.course.findUniqueOrThrow({ where: { id: f.course.id } });

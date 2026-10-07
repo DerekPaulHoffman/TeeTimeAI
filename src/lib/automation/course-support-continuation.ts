@@ -440,6 +440,22 @@ function hasRejectedStylesheetCheckpoint(checkpoint: CourseSupportContinuationCh
     failure.researchResourceKind === "SECONDARY_STYLESHEET";
 }
 
+function hasTransportCappedScriptCheckpoint(checkpoint: CourseSupportContinuationCheckpoint) {
+  const failure = checkpoint.failure;
+  return checkpoint.kind === "SETTLED_FAILURE" && checkpoint.claimLeaseExpired === true && checkpoint.researchOnlyClaim === true &&
+    Boolean(checkpoint.requestId && z.string().uuid().safeParse(checkpoint.requestId).success) &&
+    checkpoint.readCount < 6 && checkpoint.allowedResearchRouteCount > 0 &&
+    failure?.stage === "PUBLIC_READ" && failure.category === "BUDGET" && failure.code === "PUBLIC_BODY_LIMIT" &&
+    failure.researchPhase === "HTTP_READ" && failure.researchResourceKind === "SECONDARY_SCRIPT" &&
+    // This is the recorded historical transport constructor, not an inferred
+    // aggregate limit or a default for legacy failures with missing provenance.
+    failure.sourceLocation === "src/lib/automation/address-pinned-public-fetch.ts:49";
+}
+
+function hasReviewedSecondaryCheckpoint(checkpoint: CourseSupportContinuationCheckpoint) {
+  return hasRejectedStylesheetCheckpoint(checkpoint) || hasTransportCappedScriptCheckpoint(checkpoint);
+}
+
 /** Read-only candidates still require fresh native and exact-release proof. */
 export function isCourseSupportContinuationCandidateCheckpoint(checkpoint: CourseSupportContinuationCheckpoint) {
   if (checkpoint.providerReadInFlight || !Number.isInteger(checkpoint.readCount) || checkpoint.readCount < 1 || checkpoint.readCount > 6) return false;
@@ -449,7 +465,7 @@ export function isCourseSupportContinuationCandidateCheckpoint(checkpoint: Cours
   return failure?.stage === "PUBLIC_READ" && (
     failure.category === "NETWORK" && retryableNetworkCodes.has(failure.code) && checkpoint.readCount < 6 && checkpoint.allowedResearchRouteCount > 0 ||
     failure.category === "TOOLING" && ["REQUIRED_FILE_MISSING", "INVALID_TOOL_DATA"].includes(failure.code) ||
-    hasRejectedStylesheetCheckpoint(checkpoint)
+    hasReviewedSecondaryCheckpoint(checkpoint)
   );
 }
 
@@ -470,7 +486,7 @@ export function assessCourseSupportContinuationCandidate(input: {
     return { candidate: false as const, reason: "CHECKPOINT_ALREADY_REQUESTED" };
   }
   const diagnostic = input.checkpoint.kind === "EXPIRED_UNFINISHED_READ" || input.checkpoint.failure?.category === "TOOLING" ||
-    hasRejectedStylesheetCheckpoint(input.checkpoint);
+    hasReviewedSecondaryCheckpoint(input.checkpoint);
   if (sourceReceipts.length >= COURSE_SUPPORT_CONTINUATION_MAX_ATTEMPTS || diagnostic &&
       sourceReceipts.some(receipt => receipt.scope === "DIAGNOSE_REVIEWED_TOOLING_UPDATE")) {
     return { candidate: false as const, reason: "CONTINUATION_BUDGET_EXHAUSTED" };
@@ -511,15 +527,15 @@ export function assessCourseSupportContinuationCheckpoint(input: {
   const knownTooling = checkpoint.kind === "SETTLED_FAILURE" && failure?.stage === "PUBLIC_READ" &&
     failure.category === "TOOLING" && ["REQUIRED_FILE_MISSING", "INVALID_TOOL_DATA"].includes(failure.code);
   const legacyUnfinished = checkpoint.kind === "EXPIRED_UNFINISHED_READ" && failure === null && Boolean(checkpoint.requestId);
-  // An optional stylesheet rejection is not evidence that the calendar requires
-  // access. A later reviewed repair may permit one different server-selected
-  // public route, while retaining the hard failure and never following its target.
-  const rejectedStylesheet = hasRejectedStylesheetCheckpoint(checkpoint);
-  if ((knownTooling || legacyUnfinished || rejectedStylesheet) && repair?.policyVersion === COURSE_SUPPORT_CONTINUATION_POLICY_VERSION &&
+  // A stylesheet rejection or the recorded transport script cap is not evidence
+  // that the calendar requires access. A later reviewed repair may permit one
+  // different server-selected route while retaining the hard failure and limits.
+  const reviewedSecondary = hasReviewedSecondaryCheckpoint(checkpoint);
+  if ((knownTooling || legacyUnfinished || reviewedSecondary) && repair?.policyVersion === COURSE_SUPPORT_CONTINUATION_POLICY_VERSION &&
       repair.releaseSha === input.currentMainSha && repair.source === "git" && repair.state === "READY" &&
       repair.branch === "main" && ["teetimespot.com", "www.teetimespot.com"].every(alias => repair.aliases.includes(alias)) &&
       Number.isFinite(Date.parse(repair.deployedAt)) && Date.parse(repair.deployedAt) <= now.getTime() &&
-      (!rejectedStylesheet || Date.parse(repair.deployedAt) > Date.parse(checkpoint.observedAt))) {
+      (!reviewedSecondary || Date.parse(repair.deployedAt) > Date.parse(checkpoint.observedAt))) {
     return { eligible: true, scope: "DIAGNOSE_REVIEWED_TOOLING_UPDATE", checkpointDigest: checkpointDigest(checkpoint) };
   }
   return { eligible: false, reason: "FAILURE_REQUIRES_ATTENTION" };

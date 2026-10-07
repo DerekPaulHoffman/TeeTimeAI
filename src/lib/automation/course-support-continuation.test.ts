@@ -49,6 +49,37 @@ function delivered(value: ReturnType<typeof reserved>) {
 }
 
 describe("bounded same-original-native-worker continuation", () => {
+  it("permits one different-route diagnosis for the recorded transport script cap after a newer release", () => {
+    const capped: CourseSupportContinuationCheckpoint = { ...checkpoint, readCount: 2,
+      requestId: "11111111-2222-4333-8444-555555555555", claimLeaseExpired: true, researchOnlyClaim: true,
+      failure: { stage: "PUBLIC_READ", category: "BUDGET", code: "PUBLIC_BODY_LIMIT", researchPhase: "HTTP_READ",
+        researchResourceKind: "SECONDARY_SCRIPT", sourceLocation: "src/lib/automation/address-pinned-public-fetch.ts:49" } };
+    const repair = { policyVersion: COURSE_SUPPORT_CONTINUATION_POLICY_VERSION, releaseSha, source: "git" as const,
+      state: "READY" as const, branch: "main" as const, aliases: ["teetimespot.com", "www.teetimespot.com"], deployedAt: "2026-10-07T08:00:30.000Z" };
+    const first = reserved({ ...input(), checkpoint: capped, reviewedToolingRepair: repair });
+    expect(first.receipt.scope).toBe("DIAGNOSE_REVIEWED_TOOLING_UPDATE");
+    for (const changed of [
+      { ...capped, claimLeaseExpired: false }, { ...capped, researchOnlyClaim: false }, { ...capped, requestId: null },
+      { ...capped, readCount: 6 }, { ...capped, allowedResearchRouteCount: 0 }, { ...capped, providerReadInFlight: true },
+      ...[undefined, "BROWSER_REQUEST", "BROWSER_DOCUMENT"].map(researchPhase => ({ ...capped, failure: { ...capped.failure!, researchPhase } })),
+      ...[undefined, "MAIN_DOCUMENT", "XHR_OR_FETCH", "SECONDARY_STYLESHEET"].map(researchResourceKind => ({ ...capped, failure: { ...capped.failure!, researchResourceKind } })),
+      ...[undefined, "src/lib/automation/address-pinned-public-fetch.ts:50", "src/lib/automation/simulator-support-research.ts:517"].map(sourceLocation => ({ ...capped, failure: { ...capped.failure!, sourceLocation } })),
+      { ...capped, failure: { ...capped.failure!, category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE" } },
+    ]) expect(reserveCourseSupportContinuationReceipt({ ...input(), checkpoint: changed as CourseSupportContinuationCheckpoint,
+      reviewedToolingRepair: repair })).toMatchObject({ reserved: false });
+    for (const deployedAt of ["2026-10-07T07:59:00.000Z", capped.observedAt, "2026-10-07T08:02:00.000Z"]) {
+      expect(reserveCourseSupportContinuationReceipt({ ...input(), checkpoint: capped, reviewedToolingRepair: { ...repair, deployedAt } })).toMatchObject({ reserved: false });
+    }
+    expect(reserveCourseSupportContinuationReceipt({ ...input(), checkpoint: capped })).toMatchObject({ reserved: false });
+    expect(reserveCourseSupportContinuationReceipt({ ...input(), checkpoint: capped, currentSource: false, reviewedToolingRepair: repair })).toMatchObject({ reserved: false });
+    expect(reserveCourseSupportContinuationReceipt({ ...input(), checkpoint: capped, ledger: first.ledger, reviewedToolingRepair: repair }))
+      .toMatchObject({ reserved: false, reason: "PRIOR_SEND_UNCONFIRMED" });
+    expect(reserveCourseSupportContinuationReceipt({ ...input(), checkpoint: capped, ledger: delivered(first), reviewedToolingRepair: repair }))
+      .toMatchObject({ reserved: false, reason: "CHECKPOINT_ALREADY_REQUESTED" });
+    expect(reserveCourseSupportContinuationReceipt({ ...input(), checkpoint: { ...capped, readCount: 3, requestId: "22222222-2222-4333-8444-555555555555" },
+      ledger: delivered(first), nativeCompletion: { ...input().nativeCompletion, latestTurn: { id: "later", status: "completed", error: null } }, reviewedToolingRepair: repair }))
+      .toMatchObject({ reserved: false, reason: "CONTINUATION_BUDGET_EXHAUSTED" });
+  });
   it("permits one different-route stylesheet diagnosis only after a newer reviewed release and expired research claim", () => {
     const stylesheet: CourseSupportContinuationCheckpoint = { ...checkpoint, requestId: "11111111-2222-4333-8444-555555555555",
       claimLeaseExpired: true, researchOnlyClaim: true,
