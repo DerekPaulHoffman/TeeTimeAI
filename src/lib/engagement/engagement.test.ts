@@ -41,6 +41,46 @@ describe("websiteEventInputSchema", () => {
     });
   });
 
+  it("accepts optional mode on search funnel events without changing older payloads", () => {
+    const metadataByName = {
+      start_search_clicked: { label: "Find a simulator" },
+      course_discovery_completed: { radiusMiles: 15, resultCount: 2, demo: false },
+      course_discovery_failed: { radiusMiles: 15, stage: "GEOCODE" },
+      course_selection_started: { selectedCourseCount: 1, players: 2 },
+      alert_sign_in_clicked: { selectedCourseCount: 1, players: 2 },
+      search_submitted: { selectedCourseCount: 1, players: 2 },
+      search_submission_failed: { selectedCourseCount: 1, players: 2, responseStatus: 503 }
+    } as const;
+
+    for (const [name, metadata] of Object.entries(metadataByName)) {
+      for (const mode of ["OUTDOOR", "SIMULATOR"] as const) {
+        expect(websiteEventInputSchema.parse({ name, metadata: { ...metadata, mode } })).toMatchObject({
+          name,
+          metadata: { ...metadata, mode }
+        });
+      }
+      expect(websiteEventInputSchema.parse({ name, metadata })).toMatchObject({
+        name,
+        metadata
+      });
+      expect(() => websiteEventInputSchema.parse({ name, metadata: { ...metadata, mode: "INVALID" } })).toThrow();
+    }
+  });
+
+  it("rejects mode on unrelated click events and private identifiers in funnel metadata", () => {
+    for (const name of ["dashboard_opened", "email_preview_opened"] as const) {
+      expect(() => websiteEventInputSchema.parse({
+        name,
+        metadata: { label: "Open", mode: "SIMULATOR" }
+      })).toThrow(/unrecognized/i);
+    }
+
+    expect(() => websiteEventInputSchema.parse({
+      name: "search_submitted",
+      metadata: { selectedCourseCount: 1, players: 2, mode: "SIMULATOR", courseId: "private" }
+    })).toThrow(/unrecognized/i);
+  });
+
   it("rejects unsupported event names", () => {
     expect(() =>
       websiteEventInputSchema.parse({

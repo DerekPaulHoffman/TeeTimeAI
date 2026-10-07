@@ -35,6 +35,7 @@ describe("sitemap", () => {
     expect(result).toEqual([
       { url: "https://teetimespot.com/" },
       { url: "https://teetimespot.com/search" },
+      { url: "https://teetimespot.com/golf-simulators" },
       { url: "https://teetimespot.com/how-it-works" },
       { url: "https://teetimespot.com/about" },
       { url: "https://teetimespot.com/methodology" },
@@ -42,6 +43,7 @@ describe("sitemap", () => {
       { url: "https://teetimespot.com/guides" },
       { url: "https://teetimespot.com/guides/tee-time-cancellation-alerts" },
       { url: "https://teetimespot.com/guides/public-golf-booking-windows" },
+      { url: "https://teetimespot.com/guides/booking-indoor-golf" },
       { url: "https://teetimespot.com/guides/tee-time-alerts-vs-auto-booking" },
       { url: "https://teetimespot.com/contact" },
       { url: "https://teetimespot.com/privacy" },

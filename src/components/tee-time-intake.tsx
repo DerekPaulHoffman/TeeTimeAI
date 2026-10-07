@@ -61,6 +61,7 @@ import { CURRENT_LOCATION_LABEL } from "@/lib/places/location-input";
 import type { CourseCandidate } from "@/lib/places/google";
 import { KnownTeeTimes, filterVisibleTeeTimes, useKnownTeeTimes, useCourseTimeChecks, CourseTimeCheckStatus, type CourseTimeCheck } from "@/components/known-tee-times";
 import { CourseStatusEmoji } from "@/components/course-status-emoji";
+import { SearchPageHeader } from "@/components/search-page-header";
 import { getDashboardCourseAction } from "@/lib/searches/dashboard-course-action";
 import type { KnownTeeTime } from "@/lib/courses/known-tee-times";
 import {
@@ -257,7 +258,8 @@ export function TeeTimeIntake({
   accountEmail,
   accountSignedIn = false,
   clerkPublishableKey,
-  simulatorEnabled = false
+  simulatorEnabled = false,
+  showPageHeader = false
 }: {
   initialValues?: TeeTimeIntakeInitialValues;
   accountEnabled: boolean;
@@ -265,11 +267,13 @@ export function TeeTimeIntake({
   accountSignedIn?: boolean;
   clerkPublishableKey?: string;
   simulatorEnabled?: boolean;
+  showPageHeader?: boolean;
 }) {
   return (
     <TeeTimeIntakeContent
       initialValues={initialValues}
       simulatorEnabled={simulatorEnabled}
+      showPageHeader={showPageHeader}
       accountState={
         !accountEnabled
           ? { status: "unavailable" }
@@ -288,12 +292,14 @@ function TeeTimeIntakeContent({
   initialValues,
   accountState,
   clerkPublishableKey,
-  simulatorEnabled = false
+  simulatorEnabled = false,
+  showPageHeader = false
 }: {
   initialValues: TeeTimeIntakeInitialValues;
   accountState: IntakeAccountState;
   clerkPublishableKey?: string;
   simulatorEnabled?: boolean;
+  showPageHeader?: boolean;
 }) {
   const [mode, setMode] = useState<SearchMode>(simulatorEnabled && initialValues.mode === "SIMULATOR" ? "SIMULATOR" : "OUTDOOR");
   const [locationText, setLocationText] = useState(initialValues.location ?? "");
@@ -721,7 +727,7 @@ function TeeTimeIntakeContent({
 
     if (locationText.trim() === CURRENT_LOCATION_LABEL && searchCoordinates) {
       setLocationInputInvalid(false);
-      await discoverCourses(searchCoordinates);
+      await discoverCourses(searchCoordinates, searchRadiusMiles, requestedMode);
       return;
     }
 
@@ -743,7 +749,7 @@ function TeeTimeIntakeContent({
       const coordinates = (await geocode.json()) as { latitude: number; longitude: number };
       if (controller.signal.aborted || modeRef.current !== requestedMode) return;
       setLocationInputInvalid(false);
-      await discoverCourses(coordinates);
+      await discoverCourses(coordinates, searchRadiusMiles, requestedMode);
     } catch (error) {
       if (controller.signal.aborted || modeRef.current !== requestedMode) return;
       trackWebsiteEvent({
@@ -751,7 +757,8 @@ function TeeTimeIntakeContent({
         metadata: {
           radiusMiles: searchRadiusMiles,
           stage: "GEOCODE",
-          responseStatus
+          responseStatus,
+          mode: requestedMode
         }
       });
       shouldScrollToResultsRef.current = false;
@@ -804,7 +811,8 @@ function TeeTimeIntakeContent({
         metadata: {
           radiusMiles,
           resultCount: data.courses.length,
-          demo: data.demo === true
+          demo: data.demo === true,
+          mode: requestedMode
         }
       });
       if (data.courses.length === 0) {
@@ -843,7 +851,8 @@ function TeeTimeIntakeContent({
         metadata: {
           radiusMiles,
           stage: "DISCOVERY",
-          responseStatus
+          responseStatus,
+          mode: requestedMode
         }
       });
       shouldScrollToResultsRef.current = false;
@@ -1085,12 +1094,12 @@ function TeeTimeIntakeContent({
     setNotificationOpen(true);
     trackWebsiteEvent({
       name: "course_selection_started",
-      metadata: { selectedCourseCount: 1, players, requestedLayoutHoles }
+      metadata: { selectedCourseCount: 1, players, requestedLayoutHoles, mode }
     });
     if (accountState.status === "signed-out") {
       trackWebsiteEvent({
         name: "alert_sign_in_clicked",
-        metadata: { selectedCourseCount: 1, players, requestedLayoutHoles }
+        metadata: { selectedCourseCount: 1, players, requestedLayoutHoles, mode }
       });
     }
     if (mode === "OUTDOOR" && course.publicAccessStatus === "UNVERIFIED") {
@@ -1210,7 +1219,8 @@ function TeeTimeIntakeContent({
             responseStatus: response.status,
             selectedCourseCount: selected.length,
             players,
-            requestedLayoutHoles
+            requestedLayoutHoles,
+            mode
           }
         });
         if (response.status === 400 && responseBody?.error === `You can keep up to ${MAX_QUEUED_SEARCHES_PER_USER} active or paused searches in the queue.`) {
@@ -1225,7 +1235,8 @@ function TeeTimeIntakeContent({
         metadata: {
           selectedCourseCount: selected.length,
           players,
-          requestedLayoutHoles
+          requestedLayoutHoles,
+          mode
         }
       });
       setSavedSignature(searchSignature);
@@ -1263,6 +1274,8 @@ function TeeTimeIntakeContent({
   }
 
   return (
+    <>
+    {showPageHeader ? <SearchPageHeader mode={mode} /> : null}
     <div className="figma-search-experience">
       {searchError ? (
         <div className="alert-failure-toast" id="search-validation-error" role="alert" aria-live="assertive">
@@ -1657,7 +1670,8 @@ function TeeTimeIntakeContent({
                   metadata: {
                     selectedCourseCount: selected.length,
                     players,
-                    requestedLayoutHoles
+                    requestedLayoutHoles,
+                    mode
                   }
                 });
               }}
@@ -1720,6 +1734,7 @@ function TeeTimeIntakeContent({
       </div>
       <CourseResultsMap courses={displayedCourses} origin={searchCoordinates} mode={mode} />
     </div>
+    </>
   );
 }
 

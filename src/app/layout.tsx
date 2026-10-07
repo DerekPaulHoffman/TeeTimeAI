@@ -10,6 +10,7 @@ import { FeedbackWidget } from "@/components/feedback-widget";
 import { SiteFooter } from "@/components/site-footer";
 import { SiteObservability } from "@/components/site-observability";
 import { getClerkPublishableKey } from "@/lib/env";
+import { isSimulatorModeEnabled } from "@/lib/simulators/config";
 import {
   absoluteUrl,
   getSiteVerification,
@@ -33,7 +34,7 @@ export const metadata: Metadata = {
   metadataBase: siteUrl,
   applicationName: siteName,
   title: {
-    default: `${siteName} | Public Golf Tee Time Alerts`,
+    default: `${siteName} | Tee Time & Golf Simulator Alerts`,
     template: `%s | ${siteName}`
   },
   description: siteDescription,
@@ -106,6 +107,7 @@ export default async function RootLayout({
                 clerkEnabled={clerkEnabled}
                 publishableKey={clerkPublishableKey}
                 userId={userId}
+                simulatorEnabled={isSimulatorModeEnabled()}
               />
             </header>
             <EngagementTracker />

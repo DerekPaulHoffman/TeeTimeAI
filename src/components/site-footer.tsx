@@ -10,6 +10,7 @@ const footerGroups = [
     links: [
       { href: "/how-it-works", label: "How it works" },
       { href: "/search", label: "Find a tee time" },
+      { href: "/golf-simulators", label: "Golf simulators" },
       { href: "/methodology", label: "Methodology" },
       { href: "/locations/connecticut", label: "Connecticut courses" },
       { href: "/dashboard", label: "My alerts" }
@@ -21,6 +22,7 @@ const footerGroups = [
       { href: "/guides", label: "All guides" },
       { href: "/guides/tee-time-cancellation-alerts", label: "Cancellation alerts" },
       { href: "/guides/public-golf-booking-windows", label: "Booking windows" },
+      { href: "/guides/booking-indoor-golf", label: "Indoor golf booking" },
       { href: "/guides/tee-time-alerts-vs-auto-booking", label: "Alerts vs. auto-booking" }
     ]
   },

@@ -10,6 +10,7 @@ export const dynamic = "force-dynamic";
 const STATIC_ROUTES = [
   "/",
   "/search",
+  "/golf-simulators",
   "/how-it-works",
   "/about",
   "/methodology",
@@ -17,6 +18,7 @@ const STATIC_ROUTES = [
   "/guides",
   "/guides/tee-time-cancellation-alerts",
   "/guides/public-golf-booking-windows",
+  "/guides/booking-indoor-golf",
   "/guides/tee-time-alerts-vs-auto-booking",
   "/contact",
   "/privacy",

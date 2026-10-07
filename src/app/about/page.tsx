@@ -13,7 +13,7 @@ import { buildPageMetadata, buildPageStructuredData } from "@/lib/seo";
 
 const title = "About Tee Time Spot";
 const description =
-  "Tee Time Spot is a free, alert-only public golf service built to help golfers find openings at the courses they actually want to play.";
+  "Tee Time Spot helps golfers discover public courses and indoor simulator venues, with free opening alerts where supported and booking directly on official sites.";
 const path = "/about";
 
 export const metadata = buildPageMetadata({ title, description, path });
@@ -23,7 +23,7 @@ const structuredData = buildPageStructuredData({
   description,
   path,
   type: "AboutPage",
-  dateModified: "2026-07-29"
+  dateModified: "2026-10-07"
 });
 
 export default function AboutPage() {
@@ -32,8 +32,8 @@ export default function AboutPage() {
       eyebrow="About"
       title="Public golf openings should not require constant refreshing."
       intro="Tee Time Spot exists for the familiar moment when your preferred courses are full, your group still wants to play, and cancellations may appear later."
-      summary="Tee Time Spot is a free email alert service for public golf. It checks available public booking pages, sends official links, and leaves every booking decision to the golfer."
-      updated="July 29, 2026"
+      summary="Tee Time Spot sends free email alerts for public tee times and one-hour simulator sessions where supported. It checks public booking pages, sends official links, and leaves every booking decision to the golfer."
+      updated="October 7, 2026"
       toc={[
         { id: "purpose", label: "Why we exist" },
         { id: "principles", label: "Product principles" },
@@ -58,8 +58,10 @@ export default function AboutPage() {
       <EditorialSection id="principles" eyebrow="What guides the product" title="Useful, direct, and honest about the boundary.">
         <EditorialChecklist>
           <EditorialCheck>
-            <strong>Public-course first.</strong> Discovery is designed to prefer playable public
-            golf courses and filter private clubs, simulators, stores, and non-course results.
+            <strong>Choose how you play.</strong> Outdoor discovery prefers playable public
+            golf courses and filters private clubs, simulators, stores, and non-course results.
+            Separate <Link href="/golf-simulators">simulator discovery</Link> finds nearby indoor
+            venues; rental access and alert coverage are evaluated independently.
           </EditorialCheck>
           <EditorialCheck>
             <strong>Alert-only.</strong> Tee Time Spot finds and communicates public availability;

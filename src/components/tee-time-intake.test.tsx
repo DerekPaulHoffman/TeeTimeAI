@@ -82,6 +82,20 @@ function simulatorTestVenue(name: string, distanceMeters: number, supported = tr
 }
 
 describe("TeeTimeIntake", () => {
+  it("switches a direct simulator entry to the outdoor Any filter and keeps the heading in sync", () => {
+    window.history.replaceState({}, "", "/search?mode=SIMULATOR");
+    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
+    render(<TeeTimeIntake {...signedInAccountProps} simulatorEnabled showPageHeader initialValues={{ mode: "SIMULATOR" }} />);
+
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Find indoor golf simulators and set a free alert.");
+    const filters = screen.getByRole("group", { name: "Course layout" });
+    fireEvent.click(within(filters).getByRole("button", { name: "Any", exact: true }));
+
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Find public golf tee times and set a free alert.");
+    expect(within(filters).getByRole("button", { name: "Any", exact: true }).getAttribute("aria-pressed")).toBe("true");
+    expect(window.location.search).toBe("");
+  });
+
   it("keeps a transferred course selected when initialization effects replay", async () => {
     mockDateBoundaryRequests();
     const course = dateBoundaryCourse("Transferred Course", "America/New_York");
@@ -776,6 +790,17 @@ describe("TeeTimeIntake", () => {
       mode: "SIMULATOR", players: 4, durationMinutes: 60, requestedLayoutHoles: null,
       courses: [expect.objectContaining({ offeringId: "public-simulator-offering" })]
     }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) =>
+      input === "/api/analytics/events" && JSON.parse(String(init?.body)).name === "search_submitted"
+    )).toBe(true));
+    const submittedEvent = fetchMock.mock.calls
+      .filter(([input]) => input === "/api/analytics/events")
+      .map(([, init]) => JSON.parse(String(init?.body)))
+      .find((event) => event.name === "search_submitted");
+    expect(submittedEvent).toMatchObject({
+      metadata: { mode: "SIMULATOR", selectedCourseCount: 1, players: 4 },
+      trafficClass: "PUBLIC"
+    });
     expect(window.sessionStorage.getItem(SIMULATOR_SEARCH_DRAFT_STORAGE_KEY)).toBeNull();
     expect(fetchMock.mock.calls.some(([input]) => /known-times|check-times|local-reader/.test(String(input)))).toBe(false);
   });
@@ -820,6 +845,14 @@ describe("TeeTimeIntake", () => {
     const notify = screen.getByRole("button", { name: "Notify me for Unsupported Simulator", exact: true }) as HTMLButtonElement;
     expect(notify.disabled).toBe(false);
     fireEvent.click(notify);
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) =>
+      input === "/api/analytics/events" && JSON.parse(String(init?.body)).name === "course_selection_started"
+    )).toBe(true));
+    const selectionEvent = fetchMock.mock.calls
+      .filter(([input]) => input === "/api/analytics/events")
+      .map(([, init]) => JSON.parse(String(init?.body)))
+      .find((event) => event.name === "course_selection_started");
+    expect(selectionEvent.metadata.mode).toBe("SIMULATOR");
     if (signedIn) {
       await screen.findByRole("dialog", { name: "Notify me" });
       const saveButton = screen.getByRole("button", { name: "Start getting alerts" }) as HTMLButtonElement;
@@ -835,6 +868,11 @@ describe("TeeTimeIntake", () => {
     } else {
       await waitFor(() => expect(signInMock).toHaveBeenCalledWith("pk_test_login", "/search?mode=SIMULATOR"));
       expect(fetchMock.mock.calls.some(([input]) => input === "/api/searches")).toBe(false);
+      const signInEvent = fetchMock.mock.calls
+        .filter(([input]) => input === "/api/analytics/events")
+        .map(([, init]) => JSON.parse(String(init?.body)))
+        .find((event) => event.name === "alert_sign_in_clicked");
+      expect(signInEvent.metadata.mode).toBe("SIMULATOR");
     }
   });
 
@@ -904,6 +942,12 @@ describe("TeeTimeIntake", () => {
     expect(screen.queryByText(/No public courses|no matching session|sold out/i)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Search 30 miles", exact: true }));
     await screen.findByRole("heading", { name: supported.name });
+    const discoveryEvents = fetchMock.mock.calls
+      .filter(([input]) => input === "/api/analytics/events")
+      .map(([, init]) => JSON.parse(String(init?.body)))
+      .filter((event) => event.name === "course_discovery_completed");
+    expect(discoveryEvents).toHaveLength(2);
+    expect(discoveryEvents.every((event) => event.metadata.mode === "SIMULATOR")).toBe(true);
     const discoveryCalls = fetchMock.mock.calls.filter(([input]) => String(input).startsWith("/api/courses/discover"));
     expect(discoveryCalls.map(([input]) => new URL(String(input), "https://example.com").searchParams.get("radiusMeters"))).toEqual(["24140", "48280"]);
     expect(screen.queryByRole("button", { name: "Search 50 miles" })).toBeNull();
@@ -1024,19 +1068,28 @@ describe("TeeTimeIntake", () => {
     vi.stubGlobal("fetch", fetchMock);
     vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
     Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
-    render(<TeeTimeIntake {...signedInAccountProps} simulatorEnabled initialValues={{ location: "Fairfield, CT", date: "2099-10-03" }} />);
+    render(<TeeTimeIntake {...signedInAccountProps} simulatorEnabled showPageHeader initialValues={{ location: "Fairfield, CT", date: "2099-10-03" }} />);
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Find public golf tee times and set a free alert.");
     fireEvent.click(screen.getByRole("button", { name: "Search", exact: true }));
     await waitFor(() => expect(outdoorSignal).toBeDefined());
     fireEvent.click(screen.getByRole("button", { name: "Simulator", exact: true }));
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Find indoor golf simulators and set a free alert.");
     expect(outdoorSignal?.aborted).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "Search", exact: true }));
     await screen.findByRole("heading", { name: "Current Simulator" });
+    const completedEvents = fetchMock.mock.calls
+      .filter(([input]) => input === "/api/analytics/events")
+      .map(([, init]) => JSON.parse(String(init?.body)))
+      .filter((event) => event.name === "course_discovery_completed");
+    expect(completedEvents).toHaveLength(1);
+    expect(completedEvents[0].metadata.mode).toBe("SIMULATOR");
     await act(async () => finishOutdoor(Response.json({ courses: [dateBoundaryCourse("Late Outdoor Course", "America/New_York")] })));
     expect(screen.queryByRole("heading", { name: "Late Outdoor Course" })).toBeNull();
     expect(screen.getByRole("heading", { name: "Current Simulator" })).toBeTruthy();
     expect(new URL(window.location.href).searchParams.get("mode")).toBe("SIMULATOR");
     expect((screen.getByLabelText("Location") as HTMLInputElement).value).toBe("Fairfield, CT");
     fireEvent.click(screen.getByRole("button", { name: "9-hole", exact: true }));
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Find public golf tee times and set a free alert.");
     expect(new URL(window.location.href).searchParams.has("mode")).toBe(false);
     expect(screen.queryByRole("heading", { name: "Current Simulator" })).toBeNull();
   });
@@ -1327,6 +1380,14 @@ describe("TeeTimeIntake", () => {
     expect(document.querySelector("[data-alert-confetti]")).toBeNull();
     expect(screen.queryByText("Your alert is created")).toBeNull();
     expect(screen.queryByText("Internal course classification mismatch")).toBeNull();
+    const failureEvent = fetchMock.mock.calls
+      .filter(([input]) => input === "/api/analytics/events")
+      .map(([, init]) => JSON.parse(String(init?.body)))
+      .find((event) => event.name === "search_submission_failed");
+    expect(failureEvent).toMatchObject({
+      metadata: { mode: "OUTDOOR", responseStatus: 400 },
+      trafficClass: "PUBLIC"
+    });
 
     fireEvent.click(screen.getByRole("button", { name: "Send feedback" }));
     expect(feedbackEvents).toHaveLength(1);
@@ -1374,5 +1435,13 @@ describe("TeeTimeIntake", () => {
     ).toBeTruthy();
     expect(screen.queryByText(/Google Places|429/)).toBeNull();
     expect(screen.getByLabelText("Location").getAttribute("aria-invalid")).toBe("false");
+    const discoveryFailure = fetchMock.mock.calls
+      .filter(([input]) => input === "/api/analytics/events")
+      .map(([, init]) => JSON.parse(String(init?.body)))
+      .find((event) => event.name === "course_discovery_failed");
+    expect(discoveryFailure).toMatchObject({
+      metadata: { mode: "OUTDOOR", stage: "GEOCODE", responseStatus: 503 },
+      trafficClass: "PUBLIC"
+    });
   });
 });

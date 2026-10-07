@@ -7,10 +7,11 @@ import { DiscordMark } from "@/components/discord-mark";
 import { StructuredData } from "@/components/structured-data";
 import { discordInviteUrl } from "@/lib/community";
 import { absoluteUrl, siteDefinition, siteDescription, siteName } from "@/lib/seo";
+import { isSimulatorModeEnabled } from "@/lib/simulators/config";
 
 export const metadata: Metadata = {
   title: {
-    absolute: "Tee Time Spot | Free Public Golf Tee Time Alerts"
+    absolute: "Tee Time Spot | Free Tee Time & Golf Simulator Alerts"
   },
   description: siteDescription,
   alternates: {
@@ -18,7 +19,8 @@ export const metadata: Metadata = {
   }
 };
 
-const homeStructuredData = {
+function getHomeStructuredData(simulatorEnabled: boolean) {
+  return {
   "@context": "https://schema.org",
   "@graph": [
     {
@@ -33,7 +35,8 @@ const homeStructuredData = {
         "public golf courses",
         "golf tee time alerts",
         "public golf booking windows",
-        "tee time cancellations"
+        "tee time cancellations",
+        ...(simulatorEnabled ? ["indoor golf simulator rentals"] : [])
       ]
     },
     {
@@ -50,7 +53,7 @@ const homeStructuredData = {
     {
       "@type": "WebPage",
       "@id": `${absoluteUrl("/")}#webpage`,
-      name: "Tee Time Spot | Free Public Golf Tee Time Alerts",
+      name: "Tee Time Spot | Free Tee Time & Golf Simulator Alerts",
       url: absoluteUrl("/"),
       description: siteDescription,
       isPartOf: {
@@ -74,11 +77,15 @@ const homeStructuredData = {
         "Rank one to five preferred public golf courses",
         "Choose a future date, time window, and group size",
         "Receive email alerts when matching tee times open",
-        "Open the official course booking link and book directly"
+        "Open the official course booking link and book directly",
+        ...(simulatorEnabled ? [
+          "Discover nearby indoor golf simulator venues",
+          "Receive email alerts for one-hour simulator sessions where supported"
+        ] : [])
       ],
       audience: {
         "@type": "Audience",
-        audienceType: "Public golf course players"
+        audienceType: simulatorEnabled ? "Public golf course and indoor golf players" : "Public golf course players"
       },
       offers: {
         "@type": "Offer",
@@ -87,12 +94,15 @@ const homeStructuredData = {
       }
     }
   ]
-};
+  };
+}
 
 export default function HomePage() {
+  const simulatorEnabled = isSimulatorModeEnabled();
+
   return (
     <main>
-      <StructuredData data={homeStructuredData} />
+      <StructuredData data={getHomeStructuredData(simulatorEnabled)} />
       <section className="hero">
         <div className="hero-content">
           <p className="eyebrow">Free public golf tee time alerts</p>
@@ -104,21 +114,34 @@ export default function HomePage() {
             tee time matches, Tee Time Spot emails the official booking link. You review the
             details and book directly with the course.
           </p>
+          {simulatorEnabled ? (
+            <p className="simulator-announcement">
+              <Link href="/golf-simulators">Now supporting golf simulators <ArrowRight aria-hidden="true" size={15} /></Link>
+            </p>
+          ) : null}
           <div className="hero-actions">
-            <a className="button button-primary" data-analytics-event="start_search_clicked" href="/search">
+            <a className="button button-primary" data-analytics-event="start_search_clicked" data-analytics-mode="OUTDOOR" href="/search">
               <Search size={16} />
               Find my tee time
             </a>
-            <a className="button button-secondary" data-analytics-event="dashboard_opened" href="/dashboard">
-              My alerts
-              <ArrowRight size={16} />
-            </a>
+            {simulatorEnabled ? (
+              <a className="button button-secondary" data-analytics-event="start_search_clicked" data-analytics-mode="SIMULATOR" href="/search?mode=SIMULATOR">
+                Find a simulator
+                <ArrowRight aria-hidden="true" size={16} />
+              </a>
+            ) : (
+              <a className="button button-secondary" data-analytics-event="dashboard_opened" href="/dashboard">
+                My alerts
+                <ArrowRight aria-hidden="true" size={16} />
+              </a>
+            )}
           </div>
         </div>
         <div className="hero-strip" aria-label="How Tee Time Spot works">
           <Link
             className="hero-strip-item"
             data-analytics-event="start_search_clicked"
+            data-analytics-mode="OUTDOOR"
             href="/search"
           >
             <strong>Tell us your courses</strong>
@@ -128,6 +151,7 @@ export default function HomePage() {
           <Link
             className="hero-strip-item"
             data-analytics-event="start_search_clicked"
+            data-analytics-mode="OUTDOOR"
             href="/search"
           >
             <strong>Book what you can now</strong>
@@ -137,6 +161,7 @@ export default function HomePage() {
           <Link
             className="hero-strip-item"
             data-analytics-event="start_search_clicked"
+            data-analytics-mode="OUTDOOR"
             href="/search"
           >
             <strong>We&apos;ll alert you when a priority opens</strong>
@@ -148,6 +173,30 @@ export default function HomePage() {
           </Link>
         </div>
       </section>
+
+      {simulatorEnabled ? (
+        <section className="home-simulator-section" aria-labelledby="home-simulator-heading">
+          <div className="home-simulator-inner">
+            <div>
+              <p className="eyebrow">Indoor golf, too</p>
+              <h2 id="home-simulator-heading">Find nearby indoor golf venues.</h2>
+              <p className="home-simulator-copy">
+                Get email alerts for matching one-hour sessions at supported venues. You book
+                directly with the venue.
+              </p>
+              <p className="home-simulator-detail">
+                Search across the U.S. Coverage depends on each venue&apos;s booking system.
+              </p>
+            </div>
+            <div className="home-simulator-actions">
+              <Link className="button button-primary" data-analytics-event="start_search_clicked" data-analytics-mode="SIMULATOR" href="/search?mode=SIMULATOR">
+                Find a simulator <ArrowRight aria-hidden="true" size={16} />
+              </Link>
+              <Link className="home-simulator-learn" href="/golf-simulators">How simulator alerts work <ArrowRight aria-hidden="true" size={16} /></Link>
+            </div>
+          </div>
+        </section>
+      ) : null}
 
       <section className="scenario-section" aria-labelledby="scenario-heading">
         <div className="scenario-inner">
@@ -217,7 +266,7 @@ export default function HomePage() {
               public booking pages and emails you a direct link to the official booking page.
             </p>
           </div>
-          <Link className="button button-primary home-search-cta-button" href="/search">
+          <Link className="button button-primary home-search-cta-button" data-analytics-event="start_search_clicked" data-analytics-mode="OUTDOOR" href="/search">
             <Search size={16} />
             Find a tee time
           </Link>

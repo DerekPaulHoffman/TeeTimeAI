@@ -427,7 +427,7 @@ test.describe("Tee Time Spot UI smoke", () => {
       ["/how-it-works", "How golf tee time alerts work."],
       ["/about", "Public golf openings should not require constant refreshing."],
       ["/methodology", "How Tee Time Spot decides where alerts are available."],
-      ["/guides", "Golf tee time alerts and booking guides."],
+      ["/guides", "Golf tee time and indoor golf booking guides."],
       ["/guides/tee-time-cancellation-alerts", "How golf tee time cancellation alerts work."],
       ["/guides/public-golf-booking-windows", "When do golf courses release tee times?"],
       ["/guides/tee-time-alerts-vs-auto-booking", "Tee time alerts vs. auto-booking."],

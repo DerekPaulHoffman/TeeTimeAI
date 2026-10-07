@@ -99,11 +99,13 @@ describe("SEO helpers", () => {
     expect(siteDescription).toMatch(/email alerts/i);
     expect(siteDescription).toMatch(/public golf/i);
     expect(siteDescription).toMatch(/official course site/i);
+    expect(siteDescription).toMatch(/indoor golf simulators/i);
+    expect(siteDescription).toMatch(/supported venues/i);
     expect(siteDescription).not.toMatch(/signed-out|supported availability|monitoring path/i);
   });
 
   it("defines concise, versioned link-preview metadata", () => {
-    expect(socialTitle).toBe("Free public golf tee time alerts");
+    expect(socialTitle).toBe("Free tee time and golf simulator alerts");
     expect(socialImagePath).toBe("/opengraph-image?v=2");
     expect(socialImageAlt).toMatch(/preferred public golf course opening/i);
     expect(socialImageAlt).toMatch(/official booking link/i);

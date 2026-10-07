@@ -5,6 +5,7 @@ import { sanitizePagePath } from "@/lib/engagement/page-path";
 import { discoverySources } from "@/lib/engagement/discovery-source";
 import { websiteTrafficClasses } from "@/lib/engagement/traffic-class";
 import { prisma } from "@/lib/prisma";
+import { SEARCH_MODES } from "@/lib/searches/search-mode";
 
 export const websiteEventNames = [
   "page_viewed",
@@ -27,6 +28,7 @@ export const websiteEventNames = [
 
 const trafficClassSchema = z.enum(websiteTrafficClasses).optional().default("UNCLASSIFIED");
 const discoverySourceSchema = z.enum(discoverySources).optional();
+const modeSchema = z.enum(SEARCH_MODES).optional();
 const pageSchema = z
   .string()
   .trim()
@@ -38,16 +40,19 @@ const clickMetadataSchema = z
     label: z.string().trim().min(1).max(120)
   })
   .strict();
+const startSearchClickMetadataSchema = clickMetadataSchema.extend({ mode: modeSchema });
 const searchMetadataSchema = z
   .object({
     selectedCourseCount: z.number().int().min(0).max(5),
     players: z.number().int().min(1).max(4),
-    requestedLayoutHoles: z.union([z.literal(9), z.literal(18), z.null()]).optional()
+    requestedLayoutHoles: z.union([z.literal(9), z.literal(18), z.null()]).optional(),
+    mode: modeSchema
   })
   .strict();
 const courseDiscoveryMetadataSchema = z
   .object({
-    radiusMiles: z.number().int().min(5).max(30)
+    radiusMiles: z.number().int().min(5).max(30),
+    mode: modeSchema
   })
   .strict();
 
@@ -69,7 +74,7 @@ export const websiteEventInputSchema = z.discriminatedUnion("name", [
   z.object({ name: z.literal("course_profile_alert_clicked"), ...eventBase, metadata: knowledgeMetadataSchema }).strict(),
   z.object({ name: z.literal("course_profile_official_link_clicked"), ...eventBase, metadata: knowledgeMetadataSchema }).strict(),
   z.object({ name: z.literal("location_page_viewed"), ...eventBase, metadata: knowledgeMetadataSchema }).strict(),
-  z.object({ name: z.literal("start_search_clicked"), ...eventBase, metadata: clickMetadataSchema }).strict(),
+  z.object({ name: z.literal("start_search_clicked"), ...eventBase, metadata: startSearchClickMetadataSchema }).strict(),
   z.object({ name: z.literal("dashboard_opened"), ...eventBase, metadata: clickMetadataSchema }).strict(),
   z.object({ name: z.literal("email_preview_opened"), ...eventBase, metadata: clickMetadataSchema }).strict(),
   z

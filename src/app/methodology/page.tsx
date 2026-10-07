@@ -13,7 +13,7 @@ import { buildPageMetadata, buildPageStructuredData } from "@/lib/seo";
 
 const title = "Course Discovery and Monitoring Methodology";
 const description =
-  "See how Tee Time Spot identifies public golf courses, checks official booking pages, and explains when tee-time alerts are not yet available.";
+  "See how Tee Time Spot discovers public golf courses and simulator venues, checks official booking pages, and explains when opening alerts are not yet available.";
 const path = "/methodology";
 
 export const metadata = buildPageMetadata({ title, description, path });
@@ -22,7 +22,7 @@ const structuredData = buildPageStructuredData({
   name: title,
   description,
   path,
-  dateModified: "2026-07-29"
+  dateModified: "2026-10-07"
 });
 
 export default function MethodologyPage() {
@@ -32,7 +32,7 @@ export default function MethodologyPage() {
       title="How Tee Time Spot decides where alerts are available."
       intro="Reliable alerts begin before a tee sheet is checked. We first confirm the course, its official booking page, and whether public availability can be viewed without an account or access barrier."
       summary="Course discovery and active alerts are separate. A course can appear in discovery before its public booking page is available to our alerts. Tee Time Spot shows that limitation instead of presenting it as active coverage."
-      updated="July 29, 2026"
+      updated="October 7, 2026"
       toc={[
         { id: "discovery", label: "Course discovery" },
         { id: "identity", label: "Identity checks" },
@@ -53,7 +53,7 @@ export default function MethodologyPage() {
         <EditorialChecklist>
           <EditorialCheck>Prefer places classified as golf courses and currently operational.</EditorialCheck>
           <EditorialCheck>Exclude explicit private or member-only club signals.</EditorialCheck>
-          <EditorialCheck>Exclude simulators, golf stores, fitting studios, associations, and non-course sports facilities.</EditorialCheck>
+          <EditorialCheck>In outdoor discovery, exclude simulators, golf stores, fitting studios, associations, and non-course sports facilities.</EditorialCheck>
           <EditorialCheck>Collapse duplicate place records that represent the same course at the same venue.</EditorialCheck>
           <EditorialCheck>Preserve distinct courses when a facility legitimately has more than one layout.</EditorialCheck>
         </EditorialChecklist>
@@ -109,6 +109,13 @@ export default function MethodologyPage() {
       </EditorialSection>
 
       <EditorialSection id="matching" eyebrow="Stage four" title="Compare observed openings with the saved alert.">
+        <p>
+          <Link href="/golf-simulators">Simulator discovery</Link> uses separate rental information
+          and official booking links. A simulator alert requires a complete one-hour session on
+          one bay or the venue&apos;s supported shared availability. The saved player count is
+          planning context; check capacity and group rules with the venue. A listed venue may
+          still be awaiting alert coverage, which is separate from finding no matching sessions.
+        </p>
         <p>
           Available tee times are recorded with the course, start time, open spot count, official
           booking link, and any available price or hole information. The start time is interpreted

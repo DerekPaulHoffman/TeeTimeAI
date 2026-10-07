@@ -1,8 +1,8 @@
 import { buildPageMetadata, buildPageStructuredData } from "@/lib/seo";
 
-const title = "Find Public Golf Tee Times & Set Free Alerts";
+const title = "Find Tee Times & Indoor Golf Simulators";
 const description =
-  "Search nearby public golf courses and create free golf tee time alerts for your preferred date, time window, and group size.";
+  "Find public golf courses or nearby indoor golf simulators. Set a free email alert for matching openings where supported, then book directly on the official site.";
 const path = "/search";
 
 export const searchPageMetadata = buildPageMetadata({

@@ -4,9 +4,9 @@ import { ArrowRight } from "lucide-react";
 import { StructuredData } from "@/components/structured-data";
 import { buildPageMetadata, buildPageStructuredData } from "@/lib/seo";
 
-const title = "Golf Tee Time Alerts and Booking Guides";
+const title = "Golf Tee Time and Indoor Golf Booking Guides";
 const description =
-  "Practical guides to golf tee time alerts, last-minute tee times, cancellation alerts, public booking windows, and direct booking.";
+  "Practical guides to golf tee time alerts, last-minute tee times, booking windows, indoor golf simulator rentals, and booking directly on official sites.";
 const path = "/guides";
 
 export const metadata = buildPageMetadata({ title, description, path });
@@ -16,7 +16,7 @@ const structuredData = buildPageStructuredData({
   description,
   path,
   type: "CollectionPage",
-  dateModified: "2026-07-13"
+  dateModified: "2026-10-07"
 });
 
 const guides = [
@@ -33,6 +33,12 @@ const guides = [
       "How advance windows vary, why release times matter, and how to build a better first-booking and backup plan."
   },
   {
+    href: "/guides/booking-indoor-golf",
+    title: "How to book indoor golf simulator bays",
+    description:
+      "Understand bay rentals, session length, group limits, booking windows, and one-hour simulator alerts."
+  },
+  {
     href: "/guides/tee-time-alerts-vs-auto-booking",
     title: "Tee-time alerts vs. auto-booking",
     description:
@@ -46,15 +52,15 @@ export default function GuidesPage() {
       <StructuredData data={structuredData} />
       <header className="guide-index-header">
         <p className="eyebrow">The public golf field guide</p>
-        <h1>Golf tee time alerts and booking guides.</h1>
+        <h1>Golf tee time and indoor golf booking guides.</h1>
         <p>
           Clear answers about public tee time releases, last-minute openings, cancellation alerts,
-          and booking tools.
-          Every guide preserves the same boundary: the course controls inventory and the golfer
+          indoor golf rentals, and booking tools.
+          Every guide preserves the same boundary: the course or venue controls inventory and the golfer
           completes the booking.
         </p>
       </header>
-      <section aria-label="Tee time guides" className="guide-list">
+      <section aria-label="Golf booking guides" className="guide-list">
         {guides.map((guide, index) => (
           <Link className="guide-list-item" href={guide.href} key={guide.href}>
             <span className="guide-list-number">0{index + 1}</span>
@@ -71,7 +77,7 @@ export default function GuidesPage() {
         <p>
           We can help you notice a matching public opening. We do not hold inventory, enter
           checkout, or book for you. Always confirm the live details and policies on the official
-          course booking page.
+          course or venue booking page.
         </p>
       </aside>
     </main>

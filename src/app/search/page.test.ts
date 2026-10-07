@@ -7,13 +7,13 @@ describe("search page metadata", () => {
   it("identifies the search route consistently in canonical and social metadata", () => {
     expect(metadata.alternates).toEqual({ canonical: "/search" });
     expect(metadata.openGraph).toMatchObject({
-      title: "Find Public Golf Tee Times & Set Free Alerts | Tee Time Spot",
+      title: "Find Tee Times & Indoor Golf Simulators | Tee Time Spot",
       url: "https://teetimespot.com/search",
       type: "website"
     });
     expect(metadata.twitter).toMatchObject({
       card: "summary_large_image",
-      title: "Find Public Golf Tee Times & Set Free Alerts | Tee Time Spot"
+      title: "Find Tee Times & Indoor Golf Simulators | Tee Time Spot"
     });
   });
 

@@ -8,16 +8,18 @@ import { discordInviteUrl } from "@/lib/community";
 export function AuthNav({
   clerkEnabled,
   publishableKey,
-  userId
+  userId,
+  simulatorEnabled = false
 }: {
   clerkEnabled: boolean;
   publishableKey?: string;
   userId: string | null;
+  simulatorEnabled?: boolean;
 }) {
   if (!clerkEnabled) {
     return (
       <nav aria-label="Primary navigation" className="nav-actions">
-        <InfoNavLinks />
+        <InfoNavLinks simulatorEnabled={simulatorEnabled} />
         <DiscordNavLink />
         <Link
           aria-label="My alerts"
@@ -32,6 +34,8 @@ export function AuthNav({
           aria-label="Find a tee time"
           className="button button-primary"
           href="/search"
+          data-analytics-event="start_search_clicked"
+          data-analytics-mode="OUTDOOR"
           prefetch={false}
         >
           <Search size={15} />
@@ -43,7 +47,7 @@ export function AuthNav({
 
   return (
     <nav aria-label="Primary navigation" className="nav-actions">
-      <InfoNavLinks />
+      <InfoNavLinks simulatorEnabled={simulatorEnabled} />
       <DiscordNavLink />
       {userId && publishableKey ? (
         <SignedInOperatorControl userId={userId} />
@@ -61,6 +65,8 @@ export function AuthNav({
         aria-label="Find a tee time"
         className="button button-primary"
         href="/search"
+        data-analytics-event="start_search_clicked"
+        data-analytics-mode="OUTDOOR"
         prefetch={false}
       >
         <Search size={15} />
@@ -96,11 +102,12 @@ async function SignedInUserControl({
   return <SignedInUserButton publishableKey={publishableKey} />;
 }
 
-function InfoNavLinks() {
+function InfoNavLinks({ simulatorEnabled }: { simulatorEnabled: boolean }) {
   return (
     <span className="nav-info-links">
       <Link href="/how-it-works">How it works</Link>
       <Link href="/guides">Guides</Link>
+      {simulatorEnabled ? <Link href="/golf-simulators">Simulators</Link> : null}
     </span>
   );
 }

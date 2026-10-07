@@ -1,4 +1,3 @@
-import Image from "next/image";
 import { currentUser } from "@clerk/nextjs/server";
 
 import { StructuredData } from "@/components/structured-data";
@@ -18,6 +17,7 @@ export const metadata = searchPageMetadata;
 export default async function SearchPage({ searchParams }: { searchParams?: Promise<{ mode?: string }> } = {}) {
   const requestedMode = (await searchParams)?.mode;
   const simulatorEnabled = isSimulatorModeEnabled();
+  const simulatorSelected = requestedMode?.toUpperCase() === "SIMULATOR" && simulatorEnabled;
   const accountEnabled = hasClerkConfig();
   const clerkUser = accountEnabled ? await currentUser() : null;
   const accountEmail = clerkUser?.primaryEmailAddress?.emailAddress;
@@ -25,28 +25,10 @@ export default async function SearchPage({ searchParams }: { searchParams?: Prom
   return (
     <main className="search-page">
       <StructuredData data={searchStructuredData} />
-      <div className="search-page-header">
-        <Image
-          alt=""
-          className="search-page-header-image"
-          fetchPriority="high"
-          fill
-          loading="eager"
-          quality={50}
-          sizes="100vw"
-          src="https://images.unsplash.com/photo-1535131749006-b7f58c99034b?auto=format&fit=crop&w=2400&q=80"
-        />
-        <p className="eyebrow">Set up your alert</p>
-        <h1>Find public golf tee times and set a free alert.</h1>
-        <p className="search-page-header-copy">
-          Search nearby public golf courses and create a free tee time alert.{" "}
-          When a matching opening appears, we email the official booking link
-          and you book directly with the course.
-        </p>
-      </div>
       <TeeTimeIntake
+        showPageHeader
         simulatorEnabled={simulatorEnabled}
-        initialValues={{ mode: requestedMode?.toUpperCase() === "SIMULATOR" && simulatorEnabled ? "SIMULATOR" : "OUTDOOR" }}
+        initialValues={{ mode: simulatorSelected ? "SIMULATOR" : "OUTDOOR" }}
         accountEmail={accountEmail}
         accountEnabled={accountEnabled}
         accountSignedIn={Boolean(clerkUser)}

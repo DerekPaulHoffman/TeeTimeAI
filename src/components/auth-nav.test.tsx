@@ -68,6 +68,14 @@ describe("AuthNav", () => {
     expect(screen.getByRole("link", { name: "My alerts" })).toBeTruthy();
   });
 
+  it("links simulator information only when simulator mode is enabled", () => {
+    const { rerender } = render(<AuthNav clerkEnabled={false} userId={null} simulatorEnabled />);
+    expect(screen.getByRole("link", { name: "Simulators" }).getAttribute("href")).toBe("/golf-simulators");
+    expect(screen.getByRole("link", { name: "My alerts" })).toBeTruthy();
+    rerender(<AuthNav clerkEnabled={false} userId={null} simulatorEnabled={false} />);
+    expect(screen.queryByRole("link", { name: "Simulators" })).toBeNull();
+  });
+
   it("shows the private overview after the server authorizes the signed-in user", async () => {
     vi.mocked(fetch).mockResolvedValue({
       ok: true,

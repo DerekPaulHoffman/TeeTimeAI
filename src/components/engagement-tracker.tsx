@@ -30,12 +30,16 @@ export function EngagementTracker() {
         return;
       }
 
-      trackWebsiteEvent({
-        name,
-        metadata: {
-          label: element.innerText.trim().slice(0, 120)
-        }
-      });
+      const label = (element.innerText.trim() || element.getAttribute("aria-label")?.trim() || "").slice(0, 120);
+      if (!label) return;
+      if (name === "start_search_clicked") {
+        const rawMode = element.dataset.analyticsMode;
+        const mode = rawMode === "OUTDOOR" || rawMode === "SIMULATOR" ? rawMode : undefined;
+        trackWebsiteEvent({ name, metadata: { label, ...(mode ? { mode } : {}) } });
+        return;
+      }
+
+      trackWebsiteEvent({ name, metadata: { label } });
     }
 
     document.addEventListener("click", handleTrackedClick);

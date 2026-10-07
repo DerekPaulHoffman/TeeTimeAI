@@ -2,10 +2,10 @@ import type { Metadata } from "next";
 
 export const siteName = "Tee Time Spot";
 export const siteDescription =
-  "Tee Time Spot sends free email alerts when tee times open at public golf courses you choose. Set your time window, then book on the official course site.";
+  "Find public golf courses and indoor golf simulators. Get free email alerts for matching openings at supported venues, then book on the official course site or venue booking page.";
 export const siteDefinition =
-  "Choose up to five public golf courses and a time window. Tee Time Spot emails you when a matching tee time opens, then you book directly with the course.";
-export const socialTitle = "Free public golf tee time alerts";
+  "Choose up to five public golf courses or simulator venues and a time window. Get email alerts for matching openings where supported, then book directly on the official site.";
+export const socialTitle = "Free tee time and golf simulator alerts";
 export const socialImagePath = "/opengraph-image?v=2";
 export const socialImageAlt =
   "A Tee Time Spot alert showing a preferred public golf course opening and an official booking link";
