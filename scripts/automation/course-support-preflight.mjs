@@ -4,6 +4,7 @@ import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { inspectPinnedWorkerCli, pinnedWorkerCliSetupRequiredResult } from "./course-support-worker-cli.mjs";
 
 const baseResponderArgs = [
   "vercel",
@@ -283,13 +284,19 @@ export function launchFailureResult(command) {
   };
 }
 
-export function selectedResponderCheckoutContext(checkout, failover) {
+export function selectedResponderCheckoutContext(checkout, failover, workerCli) {
   return {
     kind: "course_support_preflight_context",
     selectedCheckout: checkout,
     failover: failover === true,
-    exactHead: true
+    exactHead: true,
+    ...(workerCli ? { workerCli } : {})
   };
+}
+
+export function launchWithPinnedWorkerCli(workerCli, launch) {
+  if (pinnedWorkerCliSetupRequiredResult(workerCli)) throw new Error("PINNED_WORKER_CLI_UNAVAILABLE");
+  return launch();
 }
 
 export function responderChildLaunchOptions(checkout) {
@@ -408,6 +415,8 @@ function main() {
   } else {
     const resolvedCheckout = realpathSync(checkout);
     const checkoutHead = git(["rev-parse", "HEAD"], resolvedCheckout);
+    const workerCli = inspectPinnedWorkerCli(resolvedCheckout);
+    const workerCliSetupRequired = pinnedWorkerCliSetupRequiredResult(workerCli);
     const generatedPrismaInspection = prepareGeneratedPrismaClient(resolvedCheckout);
     const generatedPrismaSetupRequired = generatedPrismaSetupRequiredResult(
       generatedPrismaInspection
@@ -426,6 +435,9 @@ function main() {
         })}\n`
       );
       process.exitCode = 2;
+    } else if (workerCliSetupRequired) {
+      process.stdout.write(`${JSON.stringify(workerCliSetupRequired)}\n`);
+      process.exitCode = 2;
     } else if (generatedPrismaSetupRequired) {
       process.stdout.write(`${JSON.stringify(generatedPrismaSetupRequired)}\n`);
       process.exitCode = 2;
@@ -438,6 +450,7 @@ function main() {
           outcome: "ready",
           checkout: resolvedCheckout,
           exactHead: true,
+          workerCli,
           failover: selection.failover,
           command: "npm run automation:course-support:preflight -- --run"
         })}\n`
@@ -451,14 +464,14 @@ function main() {
       );
       process.stdout.write(
         `${JSON.stringify(
-          selectedResponderCheckoutContext(resolvedCheckout, selection.failover)
+          selectedResponderCheckoutContext(resolvedCheckout, selection.failover, workerCli)
         )}\n`
       );
-      const command = spawnSync(
+      const command = launchWithPinnedWorkerCli(workerCli, () => spawnSync(
         invocation.command,
         invocation.args,
         responderChildLaunchOptions(resolvedCheckout)
-      );
+      ));
       const launchFailure = launchFailureResult(command);
 
       if (launchFailure) {

@@ -9,6 +9,7 @@ import {
   inspectPlaywrightChromiumRuntime,
   isApprovedCourseSupportResponderBranch,
   launchFailureResult,
+  launchWithPinnedWorkerCli,
   playwrightChromiumSetupRequiredResult,
   playwrightChromiumRuntimeSmokeTimeoutMs,
   prepareGeneratedPrismaClient,
@@ -20,6 +21,30 @@ import {
   selectedResponderCheckoutContext,
   selectApprovedCourseSupportResponderCheckout
 } from "../../../scripts/automation/course-support-preflight.mjs";
+
+describe("pinned launcher preflight handoff", () => {
+  const workerCli = { status: "current", cliPath: "C:/approved/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe",
+    cliVersion: "codex-cli 0.160.1", source: "pinned_package" };
+
+  it("passes the verified native executable to the parent alongside its selected checkout", () => {
+    expect(selectedResponderCheckoutContext("C:/approved", false, workerCli)).toEqual({
+      kind: "course_support_preflight_context", selectedCheckout: "C:/approved", failover: false, exactHead: true, workerCli,
+    });
+  });
+
+  it.each(["unavailable", "package_version_mismatch", "runtime_version_mismatch", "path_not_owned", "unsupported_platform"])(
+    "never starts production planning with a %s native launcher", (status) => {
+      const launch = vi.fn();
+      expect(() => launchWithPinnedWorkerCli({ status }, launch)).toThrow("PINNED_WORKER_CLI_UNAVAILABLE");
+      expect(launch).not.toHaveBeenCalled();
+    });
+
+  it("starts only the original planning invocation after pinned runtime verification", () => {
+    const launch = vi.fn(() => ({ status: 0 }));
+    expect(launchWithPinnedWorkerCli(workerCli, launch)).toEqual({ status: 0 });
+    expect(launch).toHaveBeenCalledOnce();
+  });
+});
 
 describe("course support generated client repair", () => {
   it.each(["stale", "unavailable"])("rebuilds a %s client once and requires a fresh successful inspection", (status) => {
