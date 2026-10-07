@@ -14,14 +14,25 @@ const digest = z.string().regex(/^[a-f0-9]{64}$/u);
 const sha = z.string().regex(/^[a-f0-9]{40}$/u);
 const instant = z.string().datetime();
 
-// These are projections of the supported tool result, not database status.
-export const courseSupportNativeCompletionSchema = z.object({
+// Keep the original supported poll contract unchanged.
+const waitThreadsNativeCompletionSchema = z.object({
   version: z.literal(1), source: z.literal("codex_app.wait_threads"),
   threadId: reference, observedAt: instant, cursor: reference,
   threadStatus: z.enum(["idle", "notLoaded", "completed"]),
   latestTurn: z.object({ id: reference, status: z.literal("completed"), error: z.null() }).strict(),
   activeTurnId: z.null(), approvalRequestCount: z.literal(0),
 }).strict();
+export const COURSE_SUPPORT_INVENTORY_COMPLETION_SOURCE = "codex_app.list_threads+codex_native.thread_turns_list";
+const inventoryNativeCompletionSchema = z.object({
+  version: z.literal(1), source: z.literal(COURSE_SUPPORT_INVENTORY_COMPLETION_SOURCE),
+  threadId: reference, observedAt: instant, threadStatus: z.enum(["idle", "notLoaded"]),
+  hostId: z.literal("local"), projectId: reference, inventoryUpdatedAt: z.number().int().nonnegative(),
+  launcherReceiptDigest: digest, checkoutIdentityDigest: digest, observationDigest: digest,
+  latestTurn: z.object({ id: reference, status: z.literal("completed"), error: z.null() }).strict(),
+}).strict();
+export const courseSupportNativeCompletionSchema = z.discriminatedUnion("source", [
+  waitThreadsNativeCompletionSchema, inventoryNativeCompletionSchema,
+]);
 export type CourseSupportNativeCompletion = z.infer<typeof courseSupportNativeCompletionSchema>;
 
 export const courseSupportContinuationReadinessSchema = z.object({
@@ -152,6 +163,117 @@ function normalizedPrivateCheckout(value: unknown) {
   return normalized;
 }
 
+const qualifiedObserverCliVersion = "codex-cli 0.160.1";
+const qualifiedObserverExecutableDigest = "9e7c59c05cc1ce5677b1f94e835b2ac038ca3be14504e78d558eacdb0ea3f55d";
+const observedProcessesSchema = z.object({ observedAt: instant,
+  processes: z.array(z.object({ pid: z.number().int().positive(), state: z.enum(["absent", "present", "unknown"]) }).strict()).min(2).max(4),
+}).strict();
+const nativeObserverSchema = z.object({
+  version: z.literal(1), source: z.literal("original_codex_read_only_observer"),
+  phase: z.literal("READ_ONLY_OBSERVATION_COMPLETE"), observedAt: instant, finishedAt: instant,
+  threadId: reference, cliVersion: z.literal(qualifiedObserverCliVersion),
+  cliExecutableDigest: z.literal(qualifiedObserverExecutableDigest),
+  launcherReceiptDigestBefore: digest, launcherReceiptDigestAfter: digest,
+  observerApprovalRequestCount: z.literal(0),
+  processObservationBefore: observedProcessesSchema, processObservationAfter: observedProcessesSchema,
+  rpcCalls: z.array(z.object({ method: z.string(), params: z.record(z.string(), z.unknown()), result: z.unknown() }).strict()).length(4),
+}).strict();
+
+function inventoryObservation(value: unknown, expectedThreadId: string) {
+  const observation = object(value);
+  const snapshot = object(observation.snapshot);
+  if (observation.source !== "codex_app.list_threads" || !instant.safeParse(observation.observedAt).success ||
+      observation.observedAtNote !== undefined || snapshot.observedAtNote !== undefined ||
+      snapshot.schemaVersion !== 4 || !Array.isArray(snapshot.unavailableHosts) || snapshot.unavailableHosts.length !== 0 ||
+      !Array.isArray(snapshot.unavailableSources) || snapshot.unavailableSources.length !== 0) {
+    throw new Error("The supported app inventory observation is unavailable.");
+  }
+  // Only the complete supported inventory proves a unique original entry.
+  // A selected entry cannot reveal missing or duplicate native identities.
+  if (!Array.isArray(snapshot.pinnedThreads) || !Array.isArray(snapshot.threads) || snapshot.thread !== undefined) {
+    throw new Error("The complete supported app inventory is required.");
+  }
+  const matches = [...snapshot.pinnedThreads, ...snapshot.threads]
+    .map(object).filter(entry => entry.id === expectedThreadId);
+  if (matches.length !== 1) throw new Error("Original app inventory identity is ambiguous.");
+  const thread = matches[0];
+  if (thread.id !== expectedThreadId || thread.kind !== "codex" || thread.hostId !== "local" ||
+      !["idle", "notLoaded"].includes(thread.status as string) || !reference.safeParse(thread.projectId).success ||
+      !Number.isSafeInteger(thread.updatedAt) || (thread.updatedAt as number) < 0) {
+    throw new Error("The original app inventory does not prove an inactive worker.");
+  }
+  assertObservedInactiveFlags(snapshot);
+  assertObservedInactiveFlags(thread);
+  return { observedAt: observation.observedAt as string, snapshot, thread,
+    checkout: normalizedPrivateCheckout(thread.cwd) };
+}
+
+/** App inventory supplies global status; the cold native server only supplies durable history. */
+export function projectCourseSupportInventoryNativeCompletion(input: {
+  inventoryBefore: unknown; inventoryAfter: unknown; nativeObservation: unknown;
+  launcherReceiptBytes: string | Uint8Array; expectedThreadId: string; expectedCheckout: string;
+  expectedProjectId: string; now: Date;
+}): z.infer<typeof inventoryNativeCompletionSchema> {
+  const before = inventoryObservation(input.inventoryBefore, input.expectedThreadId);
+  const after = inventoryObservation(input.inventoryAfter, input.expectedThreadId);
+  const native = nativeObserverSchema.parse(input.nativeObservation);
+  const bytes = typeof input.launcherReceiptBytes === "string" ? Buffer.from(input.launcherReceiptBytes, "utf8") : Buffer.from(input.launcherReceiptBytes);
+  const receipt = object(JSON.parse(bytes.toString("utf8").replace(/^\uFEFF/u, "")));
+  const launcherReceiptDigest = createHash("sha256").update(bytes).digest("hex");
+  const checkout = normalizedPrivateCheckout(input.expectedCheckout);
+  const times = [before.observedAt, native.observedAt, native.finishedAt, after.observedAt];
+  if (!reference.safeParse(input.expectedProjectId).success || native.threadId !== input.expectedThreadId ||
+      receipt.threadId !== input.expectedThreadId || receipt.cliVersion !== qualifiedObserverCliVersion ||
+      normalizedPrivateCheckout(receipt.cwd) !== checkout || before.checkout !== checkout || after.checkout !== checkout ||
+      before.thread.projectId !== input.expectedProjectId || after.thread.projectId !== input.expectedProjectId ||
+      before.thread.updatedAt !== after.thread.updatedAt || before.thread.status !== after.thread.status ||
+      native.launcherReceiptDigestBefore !== launcherReceiptDigest || native.launcherReceiptDigestAfter !== launcherReceiptDigest ||
+      !times.every(value => fresh(value, input.now)) || times.some((value, index) => index > 0 && Date.parse(value) < Date.parse(times[index - 1]))) {
+    throw new Error("The original worker completion observations are stale, changed or unbracketed.");
+  }
+  for (const processes of [native.processObservationBefore, native.processObservationAfter]) {
+    if (!fresh(processes.observedAt, input.now) || Date.parse(processes.observedAt) < Date.parse(native.observedAt) ||
+        Date.parse(processes.observedAt) > Date.parse(native.finishedAt)) throw new Error("Original process observation is stale or outside the native read.");
+    for (const pid of [receipt.launcherPid, receipt.serverPid]) {
+      if (!Number.isSafeInteger(pid) || processes.processes.filter(process => process.pid === pid).length !== 1 ||
+          processes.processes.find(process => process.pid === pid)?.state !== "absent") {
+        throw new Error("The original launcher and server have not both ended.");
+      }
+    }
+  }
+  const [initialize, profiles, read, turns] = native.rpcCalls;
+  z.object({ method: z.literal("initialize"), params: z.object({
+    clientInfo: z.object({ name: z.literal("course_support_worker_launcher"), version: z.literal("1.0") }).strict(),
+    capabilities: z.object({ experimentalApi: z.literal(true) }).strict(),
+  }).strict(), result: z.unknown() }).strict().parse(initialize);
+  z.object({ method: z.literal("permissionProfile/list"), params: z.object({ cwd: z.string() }).strict(), result: z.unknown() }).strict().parse(profiles);
+  z.object({ method: z.literal("thread/read"), params: z.object({ threadId: z.literal(input.expectedThreadId), includeTurns: z.literal(false) }).strict(), result: z.unknown() }).strict().parse(read);
+  z.object({ method: z.literal("thread/turns/list"), params: z.object({ threadId: z.literal(input.expectedThreadId),
+    limit: z.literal(1), itemsView: z.literal("notLoaded"), sortDirection: z.literal("desc") }).strict(), result: z.unknown() }).strict().parse(turns);
+  if (normalizedPrivateCheckout(profiles.params.cwd) !== checkout ||
+      !Array.isArray(object(profiles.result).data) || !(object(profiles.result).data as unknown[])
+        .some(value => { const profile = object(value); return profile.id === ":danger-full-access" && profile.allowed === true; })) {
+    throw new Error("The original full-access profile is unavailable.");
+  }
+  const nativeThread = object(object(read.result).thread);
+  const nativeStatus = object(nativeThread.status);
+  const page = object(turns.result);
+  if (!Array.isArray(page.data) || page.data.length !== 1) throw new Error("The latest durable original turn is unavailable.");
+  const latestTurn = object(page.data[0]);
+  if (nativeThread.id !== input.expectedThreadId || normalizedPrivateCheckout(nativeThread.cwd) !== checkout ||
+      nativeThread.updatedAt !== after.thread.updatedAt || nativeThread.cliVersion !== "0.160.1" || nativeThread.ephemeral !== false ||
+      !["idle", "notLoaded"].includes(nativeStatus.type as string) || latestTurn.status !== "completed" || latestTurn.error !== null ||
+      latestTurn.itemsView !== "notLoaded" || !Array.isArray(latestTurn.items) || latestTurn.items.length !== 0 ||
+      !reference.safeParse(latestTurn.id).success) throw new Error("The native read does not prove the latest completed original turn.");
+  for (const value of [object(read.result), nativeThread, nativeStatus, page, latestTurn]) assertObservedInactiveFlags(value);
+  return inventoryNativeCompletionSchema.parse({ version: 1, source: COURSE_SUPPORT_INVENTORY_COMPLETION_SOURCE,
+    threadId: input.expectedThreadId, observedAt: after.observedAt, threadStatus: after.thread.status,
+    hostId: after.thread.hostId, projectId: after.thread.projectId, inventoryUpdatedAt: after.thread.updatedAt,
+    launcherReceiptDigest, checkoutIdentityDigest: hash(checkout),
+    observationDigest: hash({ before: input.inventoryBefore, native: input.nativeObservation, after: input.inventoryAfter }),
+    latestTurn: { id: latestTurn.id, status: "completed", error: null } });
+}
+
 const readyToolingSchema = z.object({
   source: z.literal("git"), state: z.literal("READY"), branch: z.literal("main"), commitSha: sha,
   deploymentId: reference, deploymentUrl: z.string().regex(/^https:\/\/[a-z0-9.-]+\.vercel\.app$/u),
@@ -229,11 +351,17 @@ export function projectCourseSupportContinuationReadiness(input: {
 }
 
 export function buildCourseSupportContinuationRequest(input: Parameters<typeof projectCourseSupportContinuationReadiness>[0] & {
-  nativeSnapshot: unknown; reviewedToolingDiagnosis: boolean;
-}) {
+  reviewedToolingDiagnosis: boolean;
+} & ({ nativeSnapshot: unknown; nativeInventoryObservation?: never } | { nativeSnapshot?: never;
+  nativeInventoryObservation: { inventoryBefore: unknown; inventoryAfter: unknown; nativeObservation: unknown; expectedProjectId: string };
+})) {
+  if (("nativeSnapshot" in input) === ("nativeInventoryObservation" in input)) throw new Error("Supply exactly one native completion source.");
   const readiness = projectCourseSupportContinuationReadiness(input);
-  const nativeCompletion = projectCourseSupportNativeCompletion({ snapshot: input.nativeSnapshot,
-    expectedThreadId: input.expectedThreadId, observedAt: input.observedAt, now: input.now });
+  const inventory = input.nativeInventoryObservation;
+  const nativeCompletion = inventory ? projectCourseSupportInventoryNativeCompletion({ ...inventory,
+    launcherReceiptBytes: input.launcherReceiptBytes, expectedThreadId: input.expectedThreadId,
+    expectedCheckout: input.expectedCheckout, now: input.now }) : projectCourseSupportNativeCompletion({ snapshot: input.nativeSnapshot,
+      expectedThreadId: input.expectedThreadId, observedAt: input.observedAt, now: input.now });
   const tooling = readyToolingSchema.parse(input.toolingDeploymentProof);
   return courseSupportContinuationRequestSchema.parse({ policyVersion: COURSE_SUPPORT_CONTINUATION_POLICY_VERSION,
     readiness, nativeCompletion, ...(input.reviewedToolingDiagnosis ? { reviewedToolingRepair: {
@@ -371,6 +499,11 @@ export function reserveCourseSupportContinuationReceipt(input: {
   if (!native.success || !readiness.success || native.data.threadId !== input.childThreadId ||
       readiness.data.threadId !== input.childThreadId || readiness.data.toolingReleaseSha !== input.currentMainSha ||
       !fresh(native.data.observedAt, input.now) || !fresh(readiness.data.observedAt, input.now)) {
+    return { reserved: false as const, reason: "NATIVE_COMPLETION_OR_READINESS_UNPROVED" };
+  }
+  if (native.data.source === COURSE_SUPPORT_INVENTORY_COMPLETION_SOURCE &&
+      (native.data.launcherReceiptDigest !== readiness.data.launcherReceiptDigest ||
+       native.data.checkoutIdentityDigest !== readiness.data.checkoutIdentityDigest)) {
     return { reserved: false as const, reason: "NATIVE_COMPLETION_OR_READINESS_UNPROVED" };
   }
   const assessment = assessCourseSupportContinuationCheckpoint(input);

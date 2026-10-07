@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import {
   assessCourseSupportContinuationCheckpoint, confirmCourseSupportContinuationSent,
   buildCourseSupportContinuationRequest, projectCourseSupportNativeCompletion,
   projectCourseSupportContinuationReadiness,
+  projectCourseSupportInventoryNativeCompletion, COURSE_SUPPORT_INVENTORY_COMPLETION_SOURCE,
   COURSE_SUPPORT_CONTINUATION_POLICY_VERSION, readCourseSupportContinuationLedger,
   reserveCourseSupportContinuationReceipt,
   type CourseSupportContinuationCheckpoint,
@@ -285,5 +287,154 @@ describe("deterministic projection of observed native continuation evidence", ()
       { ...original, toolingDeploymentProof: { ...original.toolingDeploymentProof, aliases: ["teetimespot.com"] } },
       { ...original, toolingDeploymentProof: { ...original.toolingDeploymentProof, source: "cli" } },
     ]) expect(() => buildCourseSupportContinuationRequest(changed)).toThrow();
+  });
+});
+
+function inventoryInput() {
+  const { nativeSnapshot, ...original } = observedInput();
+  const receipt = { ...JSON.parse(original.launcherReceiptBytes), cliVersion: "codex-cli 0.160.1" };
+  const launcherReceiptBytes = JSON.stringify(receipt);
+  const receiptDigest = createHash("sha256").update(launcherReceiptBytes).digest("hex");
+  const thread = { id: child, kind: "codex", hostId: "local", projectId: "original-project",
+    cwd: checkout, status: "notLoaded", updatedAt: 1791359940 };
+  const snapshot = { schemaVersion: 4, pinnedThreads: [], threads: [thread], unavailableHosts: [], unavailableSources: [] };
+  const processes = [{ pid: 100, state: "absent" }, { pid: 101, state: "absent" }];
+  return { ...original, launcherReceiptBytes, nativeInventoryObservation: {
+    expectedProjectId: "original-project",
+    inventoryBefore: { source: "codex_app.list_threads", observedAt: "2026-10-07T08:00:58.000Z", snapshot: structuredClone(snapshot) },
+    inventoryAfter: { source: "codex_app.list_threads", observedAt: "2026-10-07T08:00:59.500Z", snapshot: structuredClone(snapshot) },
+    nativeObservation: { version: 1, source: "original_codex_read_only_observer", phase: "READ_ONLY_OBSERVATION_COMPLETE",
+      observedAt: "2026-10-07T08:00:58.100Z", finishedAt: "2026-10-07T08:00:59.000Z", threadId: child,
+      cliVersion: "codex-cli 0.160.1", cliExecutableDigest: "9e7c59c05cc1ce5677b1f94e835b2ac038ca3be14504e78d558eacdb0ea3f55d",
+      launcherReceiptDigestBefore: receiptDigest, launcherReceiptDigestAfter: receiptDigest, observerApprovalRequestCount: 0,
+      processObservationBefore: { observedAt: "2026-10-07T08:00:58.200Z", processes: structuredClone(processes) },
+      processObservationAfter: { observedAt: "2026-10-07T08:00:58.800Z", processes: structuredClone(processes) },
+      rpcCalls: [
+        { method: "initialize", params: { clientInfo: { name: "course_support_worker_launcher", version: "1.0" }, capabilities: { experimentalApi: true } }, result: {} },
+        { method: "permissionProfile/list", params: { cwd: checkout }, result: { data: [{ id: ":danger-full-access", allowed: true }] } },
+        { method: "thread/read", params: { threadId: child, includeTurns: false }, result: { thread: {
+          id: child, cwd: checkout, updatedAt: thread.updatedAt, projectId: null, status: { type: "notLoaded" },
+          ephemeral: false, cliVersion: "0.160.1", turns: [] } } },
+        { method: "thread/turns/list", params: { threadId: child, limit: 1, itemsView: "notLoaded", sortDirection: "desc" }, result: {
+          data: [{ id: nativeSnapshot.latestTurn.id, status: "completed", error: null, itemsView: "notLoaded", items: [] }],
+          nextCursor: "actual-older-history-cursor", backwardsCursor: "actual-reverse-cursor" } },
+      ],
+    },
+  } };
+}
+function inventoryProjection(value = inventoryInput()) {
+  return projectCourseSupportInventoryNativeCompletion({ ...value.nativeInventoryObservation,
+    launcherReceiptBytes: value.launcherReceiptBytes, expectedThreadId: child, expectedCheckout: checkout, now: value.now });
+}
+
+describe("bracketed supported inventory and read-only durable native history", () => {
+  it("uses actual app status/project identity and durable latest-turn proof without claiming omitted capabilities", () => {
+    const request = buildCourseSupportContinuationRequest(inventoryInput());
+    expect(request.nativeCompletion).toMatchObject({ source: COURSE_SUPPORT_INVENTORY_COMPLETION_SOURCE,
+      threadStatus: "notLoaded", projectId: "original-project", latestTurn: { id: "real-completed-turn", status: "completed", error: null } });
+    expect(request.nativeCompletion).not.toHaveProperty("cursor");
+    expect(request.nativeCompletion).not.toHaveProperty("activeTurnId");
+    expect(request.nativeCompletion).not.toHaveProperty("approvalRequestCount");
+    expect(request.nativeCompletion).not.toHaveProperty("canAcceptDirectInput");
+    expect(JSON.stringify(request)).not.toContain(checkout);
+    expect(request.readiness).toMatchObject({ approvalPolicy: "never", sandboxMode: "danger-full-access", sameProfile: true });
+  });
+
+  it("rejects compact selected entries that cannot prove the complete inventory's unique original identity", () => {
+    const value = inventoryInput();
+    for (const observation of [value.nativeInventoryObservation.inventoryBefore, value.nativeInventoryObservation.inventoryAfter]) {
+      const snapshot = observation.snapshot;
+      observation.snapshot = { schemaVersion: snapshot.schemaVersion, thread: snapshot.threads[0],
+        unavailableHosts: snapshot.unavailableHosts, unavailableSources: snapshot.unavailableSources } as unknown as typeof snapshot;
+    }
+    expect(() => inventoryProjection(value)).toThrow("complete supported app inventory");
+  });
+
+  it("rejects absent, duplicate, different-host/project/checkout and changed global inventory identity", () => {
+    const mutations: ((value: ReturnType<typeof inventoryInput>) => void)[] = [
+      value => { value.nativeInventoryObservation.inventoryAfter.snapshot.threads = []; },
+      value => { value.nativeInventoryObservation.inventoryAfter.snapshot.threads.push(structuredClone(value.nativeInventoryObservation.inventoryAfter.snapshot.threads[0])); },
+      value => { Object.assign(value.nativeInventoryObservation.inventoryAfter.snapshot, { pinnedThreads: [structuredClone(value.nativeInventoryObservation.inventoryAfter.snapshot.threads[0])] }); },
+      value => { value.nativeInventoryObservation.inventoryAfter.snapshot.threads[0].id = "another-native-worker"; },
+      value => { value.nativeInventoryObservation.inventoryAfter.snapshot.threads[0].hostId = "another-host"; },
+      value => { value.nativeInventoryObservation.inventoryAfter.snapshot.threads[0].projectId = "another-project"; },
+      value => { value.nativeInventoryObservation.inventoryAfter.snapshot.threads[0].cwd = "C:/dev/TeeTimeAI"; },
+      value => { value.nativeInventoryObservation.inventoryAfter.snapshot.threads[0].updatedAt += 1; },
+      value => { value.nativeInventoryObservation.inventoryAfter.snapshot.threads[0].status = "active"; },
+      value => { Object.assign(value.nativeInventoryObservation.inventoryAfter.snapshot.threads[0], { pendingApproval: { id: "approval" } }); },
+      value => { Object.assign(value.nativeInventoryObservation.inventoryAfter.snapshot, { queuedMessages: ["queued"] }); },
+    ];
+    for (const mutate of mutations) { const value = inventoryInput(); mutate(value); expect(() => inventoryProjection(value)).toThrow(); }
+  });
+
+  it("rejects stale, future, approximate-format and unbracketed observations", () => {
+    for (const observedAt of ["2026-10-07T07:58:59.000Z", "2026-10-07T08:01:01.000Z", "2026-10-07 08:00:58 UTC", "2026-10-07T08:00:58.500Z"]) {
+      const value = inventoryInput(); value.nativeInventoryObservation.inventoryBefore.observedAt = observedAt;
+      expect(() => inventoryProjection(value)).toThrow();
+    }
+    const value = inventoryInput(); value.nativeInventoryObservation.inventoryAfter.observedAt = "2026-10-07T08:00:58.500Z";
+    expect(() => inventoryProjection(value)).toThrow();
+    const qualification = inventoryInput(); Object.assign(qualification.nativeInventoryObservation.inventoryBefore, { observedAtNote: "Approximate call interval; qualification only" });
+    expect(() => inventoryProjection(qualification)).toThrow();
+  });
+
+  it("rejects changed original receipt/processes, approval/error, unqualified CLI and wrong native RPC semantics", () => {
+    const mutations: ((value: ReturnType<typeof inventoryInput>) => void)[] = [
+      value => { value.nativeInventoryObservation.nativeObservation.launcherReceiptDigestAfter = "f".repeat(64); },
+      value => { value.nativeInventoryObservation.nativeObservation.processObservationAfter.processes[1].state = "present"; },
+      value => { value.nativeInventoryObservation.nativeObservation.observerApprovalRequestCount = 1; },
+      value => { value.nativeInventoryObservation.nativeObservation.phase = "STOPPED"; },
+      value => { value.nativeInventoryObservation.nativeObservation.cliVersion = "codex-cli 0.160.0"; },
+      value => { value.nativeInventoryObservation.nativeObservation.rpcCalls[2].params.includeTurns = true; },
+      value => { value.nativeInventoryObservation.nativeObservation.rpcCalls[3].params.sortDirection = "asc"; },
+      value => { value.nativeInventoryObservation.nativeObservation.rpcCalls[3].method = "thread/resume"; },
+      value => { Object.assign(value.nativeInventoryObservation.nativeObservation.rpcCalls[2].result, { thread: { id: child, cwd: checkout, updatedAt: 1, status: { type: "notLoaded" }, ephemeral: false, cliVersion: "0.160.1" } }); },
+      value => { Object.assign(value.nativeInventoryObservation.nativeObservation.rpcCalls[3].result, { data: [{ id: "live-turn", status: "inProgress", error: null, itemsView: "notLoaded", items: [] }] }); },
+      value => { Object.assign(value.nativeInventoryObservation.nativeObservation.rpcCalls[3].result, { data: [{ id: "failed-turn", status: "completed", error: { code: "failure" }, itemsView: "notLoaded", items: [] }] }); },
+    ];
+    for (const mutate of mutations) { const value = inventoryInput(); mutate(value); expect(() => inventoryProjection(value)).toThrow(); }
+  });
+
+  it("binds completion to original readiness and deduplicates the same turn across completion sources", () => {
+    const request = buildCourseSupportContinuationRequest(inventoryInput());
+    const initial = { ...input(), ...request };
+    const result = reserved(initial);
+    expect(reserveCourseSupportContinuationReceipt({ ...initial, readiness: { ...request.readiness, launcherReceiptDigest: "f".repeat(64) } }))
+      .toMatchObject({ reserved: false, reason: "NATIVE_COMPLETION_OR_READINESS_UNPROVED" });
+    expect(reserveCourseSupportContinuationReceipt({ ...initial, readiness: { ...request.readiness, checkoutIdentityDigest: "f".repeat(64) } }))
+      .toMatchObject({ reserved: false, reason: "NATIVE_COMPLETION_OR_READINESS_UNPROVED" });
+    expect(reserveCourseSupportContinuationReceipt({ ...input(), ledger: delivered(result), checkpoint: { ...checkpoint, readCount: 2 },
+      nativeCompletion: { ...input().nativeCompletion, latestTurn: request.nativeCompletion.latestTurn } }))
+      .toMatchObject({ reserved: false, reason: "CHECKPOINT_ALREADY_REQUESTED" });
+  });
+
+  it("preserves owner/source/research, one-per-tick, two-attempt and ambiguous-send fences for the new source", () => {
+    const request = buildCourseSupportContinuationRequest(inventoryInput());
+    const initial = { ...input(), ...request };
+    for (const changed of [
+      { ...initial, currentSource: false }, { ...initial, originalPrivateChild: false },
+      { ...initial, checkpoint: { ...checkpoint, providerReadInFlight: true } },
+      { ...initial, checkpoint: { ...checkpoint, allowedResearchRouteCount: 0 } },
+      { ...initial, checkpoint: { ...checkpoint, readCount: 6 } },
+      { ...initial, checkpoint: { ...checkpoint, failure: { stage: "PUBLIC_READ" as const, category: "UNKNOWN" as const, code: "UNCLASSIFIED_FAILURE" } } },
+    ]) expect(reserveCourseSupportContinuationReceipt(changed)).toMatchObject({ reserved: false });
+    expect(reserveCourseSupportContinuationReceipt({ ...initial, tickAlreadyUsed: true }))
+      .toMatchObject({ reserved: false, reason: "TICK_CONTINUATION_BUDGET_EXHAUSTED" });
+    const first = reserved(initial);
+    expect(reserveCourseSupportContinuationReceipt({ ...initial, ledger: first.ledger }))
+      .toMatchObject({ reserved: false, reason: "PRIOR_SEND_UNCONFIRMED" });
+    const later = { ...initial, ledger: delivered(first), now: new Date("2026-10-07T08:12:00.000Z"),
+      nativeCompletion: { ...request.nativeCompletion, observedAt: "2026-10-07T08:12:00.000Z", latestTurn: { id: "new-durable-turn", status: "completed" as const, error: null } },
+      readiness: { ...request.readiness, observedAt: "2026-10-07T08:12:00.000Z" },
+      checkpoint: { ...checkpoint, readCount: 2, observedAt: "2026-10-07T08:11:00.000Z" } };
+    const second = reserved(later);
+    const ledger = confirmCourseSupportContinuationSent({ ledger: second.ledger, key: second.receipt.key,
+      parentThreadId: initial.parentThreadId, childThreadId: child, now: later.now,
+      toolReceipt: { source: "codex_app.send_message_to_thread", threadId: child, accepted: true } });
+    expect(reserveCourseSupportContinuationReceipt({ ...later, ledger, now: new Date("2026-10-07T08:22:00.000Z"),
+      nativeCompletion: { ...later.nativeCompletion, observedAt: "2026-10-07T08:22:00.000Z", latestTurn: { id: "third-durable-turn", status: "completed", error: null } },
+      readiness: { ...later.readiness, observedAt: "2026-10-07T08:22:00.000Z" },
+      checkpoint: { ...later.checkpoint, readCount: 3, observedAt: "2026-10-07T08:21:00.000Z" } }))
+      .toMatchObject({ reserved: false, reason: "CONTINUATION_BUDGET_EXHAUSTED" });
   });
 });

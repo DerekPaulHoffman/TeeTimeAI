@@ -23,7 +23,12 @@ jobs:
           cache: npm
           node-version: 24
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
+      - name: Install Chromium
+        timeout-minutes: 5
+        run: npx playwright install chromium
+      - name: Verify the installed browser runtime
+        run: |
+          node -e "require('@playwright/test').chromium.launch({ headless: true }).then(browser => browser.close()).catch(error => { console.error(error); process.exit(1); })"
       - run: npm run prisma:generate
       - run: npm run test:run
       - run: npm run lint

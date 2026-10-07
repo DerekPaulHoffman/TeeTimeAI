@@ -3,12 +3,15 @@ export type SimulatorSupportFailureStage = "INITIAL_OWNERSHIP" | "TARGET_SELECTI
 export type SimulatorSupportFailureCategory = "OWNERSHIP" | "SOURCE" | "ACCESS" | "BUDGET" | "CAPACITY" | "NETWORK" | "BROWSER" | "DATABASE" | "TOOLING" | "UNKNOWN";
 export type SimulatorResearchFailurePhase = "HTTP_READ" | "BROWSER_LAUNCH" | "BROWSER_CONTEXT" | "BROWSER_ROUTE_SETUP" |
   "BROWSER_REQUEST" | "BROWSER_NAVIGATION" | "BROWSER_DOCUMENT";
+export type SimulatorResearchResourceKind = "MAIN_DOCUMENT" | "SECONDARY_DOCUMENT" | "SECONDARY_SCRIPT" |
+  "SECONDARY_STYLESHEET" | "XHR_OR_FETCH" | "OTHER";
 export type SimulatorSupportFailure = {
   stage: SimulatorSupportFailureStage;
   category: SimulatorSupportFailureCategory;
   code: string;
   sourceLocation?: string;
   researchPhase?: SimulatorResearchFailurePhase;
+  researchResourceKind?: SimulatorResearchResourceKind;
 };
 
 type Classification = Pick<SimulatorSupportFailure, "category" | "code"> & { stage?: SimulatorSupportFailureStage };
@@ -73,7 +76,10 @@ const stages = new Set<SimulatorSupportFailureStage>(["INITIAL_OWNERSHIP", "TARG
 const categories = new Set<SimulatorSupportFailureCategory>(["OWNERSHIP", "SOURCE", "ACCESS", "BUDGET", "CAPACITY", "NETWORK", "BROWSER", "DATABASE", "TOOLING", "UNKNOWN"]);
 const researchPhases = new Set<SimulatorResearchFailurePhase>(["HTTP_READ", "BROWSER_LAUNCH", "BROWSER_CONTEXT", "BROWSER_ROUTE_SETUP",
   "BROWSER_REQUEST", "BROWSER_NAVIGATION", "BROWSER_DOCUMENT"]);
+const resourceKinds = new Set<SimulatorResearchResourceKind>(["MAIN_DOCUMENT", "SECONDARY_DOCUMENT", "SECONDARY_SCRIPT",
+  "SECONDARY_STYLESHEET", "XHR_OR_FETCH", "OTHER"]);
 const trustedResearchPhases = new WeakMap<object, { phase: SimulatorResearchFailurePhase; order: number }>();
+const trustedResourceKinds = new WeakMap<object, SimulatorResearchResourceKind>();
 let nextResearchPhaseOrder = 0;
 const additionalCodes: Classification[] = [
   { category: "NETWORK", code: "PUBLIC_READ_TIMEOUT" }, { category: "NETWORK", code: "PUBLIC_READ_ABORTED" },
@@ -110,6 +116,27 @@ export function tagSimulatorResearchFailure(error: unknown, phase: SimulatorRese
   return tagged;
 }
 
+/** A closed collector-only projection of the request that failed, never a URL. */
+export function tagSimulatorResearchResourceKind(error: unknown, kind: SimulatorResearchResourceKind): unknown {
+  if (!resourceKinds.has(kind)) throw new Error("INVALID_SIMULATOR_RESEARCH_RESOURCE_KIND");
+  const tagged = error !== null && (typeof error === "object" || typeof error === "function")
+    ? error as object : new Error("SIMULATOR_RESEARCH_UNCLASSIFIED_FAILURE");
+  if (!trustedResourceKinds.has(tagged)) trustedResourceKinds.set(tagged, kind);
+  return tagged;
+}
+
+function trustedResearchResourceKind(error: unknown): SimulatorResearchResourceKind | undefined {
+  const seen = new Set<unknown>();
+  for (let depth = 0, current = error; depth < 4 && current && !seen.has(current); depth++, current = causeProperty(current)) {
+    seen.add(current);
+    if (typeof current === "object" || typeof current === "function") {
+      const kind = trustedResourceKinds.get(current);
+      if (kind) return kind;
+    }
+  }
+  return undefined;
+}
+
 function trustedResearchPhase(error: unknown): SimulatorResearchFailurePhase | undefined {
   const seen = new Set<unknown>();
   let current = error;
@@ -133,13 +160,16 @@ export function readSafeSimulatorSupportFailure(value: unknown): SimulatorSuppor
     if (record.code === "RESEARCH_RESERVATION_INTERRUPTED" && record.stage !== "PUBLIC_READ") return null;
     const researchPhase = record.researchPhase;
     if (researchPhase !== undefined && (record.stage !== "PUBLIC_READ" || !researchPhases.has(researchPhase as SimulatorResearchFailurePhase))) return null;
+    const researchResourceKind = record.researchResourceKind;
+    if (researchResourceKind !== undefined && (record.stage !== "PUBLIC_READ" || !resourceKinds.has(researchResourceKind as SimulatorResearchResourceKind))) return null;
     const sourceLocation = record.sourceLocation;
     if (sourceLocation !== undefined && (typeof sourceLocation !== "string" || sourceLocation.length > 240 ||
         !/^(?:src\/(?:lib|app)|scripts\/automation)\/[A-Za-z0-9_./-]+\.(?:ts|tsx|mjs|js):[1-9][0-9]*$/u.test(sourceLocation) ||
         !sourceModules.has(sourceLocation.replace(/:[1-9][0-9]*$/u, "")))) return null;
     return { stage: record.stage as SimulatorSupportFailureStage, category: record.category as SimulatorSupportFailureCategory,
       code: record.code, ...(sourceLocation ? { sourceLocation } : {}),
-      ...(researchPhase ? { researchPhase: researchPhase as SimulatorResearchFailurePhase } : {}) };
+      ...(researchPhase ? { researchPhase: researchPhase as SimulatorResearchFailurePhase } : {}),
+      ...(researchResourceKind ? { researchResourceKind: researchResourceKind as SimulatorResearchResourceKind } : {}) };
   } catch { return null; }
 }
 
@@ -175,6 +205,7 @@ function projectSourceLocation(error: unknown): string | undefined {
 export function classifySimulatorSupportFailure(error: unknown, stage: SimulatorSupportFailureStage = "COMMAND"): SimulatorSupportFailure {
   const sourceLocation = projectSourceLocation(error);
   const researchPhase = trustedResearchPhase(error);
+  const researchResourceKind = trustedResearchResourceKind(error);
   const seen = new Set<unknown>();
   let current = error;
   for (let depth = 0; depth < 4 && current && !seen.has(current); depth++, current = causeProperty(current)) {
@@ -193,9 +224,11 @@ export function classifySimulatorSupportFailure(error: unknown, stage: Simulator
     if (known) {
       const classifiedStage = stage === "COMMAND" ? known.stage ?? stage : stage;
       return { stage: classifiedStage, category: known.category, code: known.code, ...(sourceLocation ? { sourceLocation } : {}),
-        ...(classifiedStage === "PUBLIC_READ" && researchPhase ? { researchPhase } : {}) };
+        ...(classifiedStage === "PUBLIC_READ" && researchPhase ? { researchPhase } : {}),
+        ...(classifiedStage === "PUBLIC_READ" && researchResourceKind ? { researchResourceKind } : {}) };
     }
   }
   return { stage, category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE", ...(sourceLocation ? { sourceLocation } : {}),
-    ...(stage === "PUBLIC_READ" && researchPhase ? { researchPhase } : {}) };
+    ...(stage === "PUBLIC_READ" && researchPhase ? { researchPhase } : {}),
+    ...(stage === "PUBLIC_READ" && researchResourceKind ? { researchResourceKind } : {}) };
 }

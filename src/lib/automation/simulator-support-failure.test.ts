@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { classifySimulatorSupportFailure, readSafeSimulatorSupportFailure, tagSimulatorResearchFailure,
-  type SimulatorResearchFailurePhase } from "./simulator-support-failure";
+  tagSimulatorResearchResourceKind, type SimulatorResearchFailurePhase } from "./simulator-support-failure";
 import { reportSimulatorSupportFailure } from "../../../scripts/automation/simulator-support";
 
 const previousExitCode = process.exitCode;
@@ -49,6 +49,23 @@ describe("simulator support failure receipts", () => {
     expect(readSafeSimulatorSupportFailure({ ...old, researchPhase: "private-token" })).toBeNull();
     expect(readSafeSimulatorSupportFailure({ ...old, stage: "COMMAND", researchPhase: "BROWSER_DOCUMENT" })).toBeNull();
     expect(() => tagSimulatorResearchFailure(new Error("unknown"), "private-token" as SimulatorResearchFailurePhase)).toThrow("INVALID_SIMULATOR_RESEARCH_PHASE");
+  });
+  it("projects only a trusted closed resource kind and keeps old receipts compatible", () => {
+    const old = { stage: "PUBLIC_READ", category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE" };
+    const spoofed = Object.assign(new Error("private@example.test"), { researchResourceKind: "MAIN_DOCUMENT" });
+    expect(classifySimulatorSupportFailure(spoofed, "PUBLIC_READ")).toEqual(old);
+    const sealed = Object.seal(new Error("private@example.test"));
+    const tagged = tagSimulatorResearchResourceKind(sealed, "SECONDARY_SCRIPT");
+    expect(tagged).toBe(sealed);
+    tagSimulatorResearchResourceKind(tagged, "MAIN_DOCUMENT");
+    expect(classifySimulatorSupportFailure(tagged, "PUBLIC_READ")).toEqual({ ...old, researchResourceKind: "SECONDARY_SCRIPT" });
+    expect(classifySimulatorSupportFailure(new Error("outer", { cause: tagged }), "PUBLIC_READ")).toEqual({ ...old, researchResourceKind: "SECONDARY_SCRIPT" });
+    expect(classifySimulatorSupportFailure(tagged, "COMMAND")).toEqual({ stage: "COMMAND", category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE" });
+    expect(readSafeSimulatorSupportFailure(old)).toEqual(old);
+    expect(readSafeSimulatorSupportFailure({ ...old, researchResourceKind: "SECONDARY_STYLESHEET" })).toEqual({ ...old, researchResourceKind: "SECONDARY_STYLESHEET" });
+    expect(readSafeSimulatorSupportFailure({ ...old, researchResourceKind: "private-url" })).toBeNull();
+    expect(readSafeSimulatorSupportFailure({ ...old, stage: "COMMAND", researchResourceKind: "MAIN_DOCUMENT" })).toBeNull();
+    expect(JSON.stringify(classifySimulatorSupportFailure(tagged, "PUBLIC_READ"))).not.toContain("private@example.test");
   });
 
   it("classifies exact owned fences and keeps project-relative locations only", () => {

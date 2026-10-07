@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import type { ClientRequest, IncomingMessage, RequestOptions } from "node:http";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import { createAddressPinnedPublicFetchTransport } from "./address-pinned-public-fetch";
+import { createAddressPinnedPublicFetchTransport, isOwnedOfficialSiteBodyLimitError } from "./address-pinned-public-fetch";
 import { classifySimulatorSupportFailure, readSafeSimulatorSupportFailure } from "./simulator-support-failure";
 
 function inertResponse(body: Buffer, declaredLength?: number) {
@@ -39,6 +39,8 @@ describe("address-pinned public response body limit", () => {
     try { await fetchPublic("https://public.example.test/booking"); } catch (error) { caught = error; }
     expect(caught).toBeInstanceOf(Error);
     expect(caught).toMatchObject({ message: "Official site page is too large to inspect safely", code: "OFFICIAL_SITE_BODY_LIMIT" });
+    expect(isOwnedOfficialSiteBodyLimitError(caught)).toBe(true);
+    expect(isOwnedOfficialSiteBodyLimitError(Object.assign(new Error("spoof"), { code: "OFFICIAL_SITE_BODY_LIMIT" }))).toBe(false);
     const receipt = classifySimulatorSupportFailure(caught, "PUBLIC_READ");
     expect(receipt).toMatchObject({ stage: "PUBLIC_READ", category: "BUDGET", code: "PUBLIC_BODY_LIMIT" });
     expect(readSafeSimulatorSupportFailure(receipt)).toEqual(receipt);

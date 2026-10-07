@@ -10,6 +10,8 @@ It requires your real CODEX_THREAD_ID and private dependencies/client/browser. S
 
 Every production command runs alone through the absolute helper below using this same selected-checkout binding reference. It retains the verified Vercel CLI and production wrapper; stop on every nonzero exit. Local npm scripts use absolute Node plus C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js without product credentials. Do not use free-form production JavaScript, PowerShell database expressions, direct SQL or a caller-selected connection to bypass the owned commands.
 
+Correct ordinary local read-only file searches locally. On Windows, use `rg --files` to locate files and `rg <pattern> <existing-directory> --glob <pattern>` to search them; do not pass a wildcard as a filesystem path. A no-match exit or invalid local search argument does not end this assignment. Every production command, source read, setup, native identity, ownership and access failure keeps its own stop rule; a local correction never permits replaying one of those failures.
+
 Before provider work, claims, evidence writes or edits, read only your bound assignment:
 & 'C:\Program Files\nodejs\node.exe' scripts/automation/course-support-worker-runtime.mjs production --selected-checkout <selected-checkout> --script automation:course-dispatch -- assignment --assignment-ref <assignment-ref>
 An awaiting_binding result permits read-only waiting at least fifteen seconds apart for at most three minutes. Proceed only with a bound SIMULATOR assignment identifying your actual native child. A different mode/owner, expired or revoked assignment, setup failure, nonzero exit or binding timeout stops. Never select ordinary work or replace an ambiguous native creation.

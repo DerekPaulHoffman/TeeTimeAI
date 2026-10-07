@@ -43,11 +43,19 @@ type AddressPinnedPublicFetchPolicy = {
 };
 
 const nonPublicNetworkBlockLists = buildNonPublicNetworkBlockLists();
+const ownedBodyLimitErrors = new WeakSet<object>();
 
 function officialSiteBodyLimitError() {
-  return Object.assign(new Error("Official site page is too large to inspect safely"), {
+  const error = Object.assign(new Error("Official site page is too large to inspect safely"), {
     code: "OFFICIAL_SITE_BODY_LIMIT",
   });
+  ownedBodyLimitErrors.add(error);
+  return error;
+}
+
+/** The caller must not infer an owned transport limit from an arbitrary error.code. */
+export function isOwnedOfficialSiteBodyLimitError(error: unknown): boolean {
+  return error !== null && typeof error === "object" && ownedBodyLimitErrors.has(error);
 }
 
 export function createAddressPinnedPublicFetchTransport(
