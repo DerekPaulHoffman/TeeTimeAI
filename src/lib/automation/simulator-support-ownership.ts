@@ -12,9 +12,20 @@ import { z } from "zod";
 import { collectSimulatorSupportResearch, type SimulatorResearchDependencies, type SimulatorResearchResult } from "./simulator-support-research";
 export { summarizeSimulatorSupportPublicHtml } from "./simulator-support-research";
 import { evaluateSimulatorSupportProgress } from "./simulator-support-progress";
-import { assertSimulatorResearchFallbackBeforeRetry, readSimulatorResearchState, selectSimulatorResearchTarget, type SimulatorResearchState } from "./simulator-support-research-policy";
+import { assertSimulatorResearchFallbackBeforeRetry, getSimulatorResearchGuide, readSimulatorResearchState, selectSimulatorResearchTarget, type SimulatorResearchState } from "./simulator-support-research-policy";
 
 type Owner = { assignmentRef: string; ownerThreadId: string; token: string; revision: number };
+
+async function readPriorFailedResearchRoutes(tx: Pick<Prisma.TransactionClient, "automationRun">, offeringId: string, fingerprint: string) {
+  const previous = await tx.automationRun.findMany({ where: { promptVersion: "course-support-course-dispatch-v1", status: "COMPLETED", outcome: "simulator_retryable_failed",
+    audit: { path: ["target", "offeringId"], equals: offeringId } }, orderBy: [{ completedAt: "desc" }, { id: "desc" }], take: 4, select: { audit: true } });
+  return previous.flatMap(run => {
+    const audit = run.audit as Record<string, unknown>;
+    const research = readSimulatorResearchState(audit.simulatorResearch, fingerprint);
+    return research.sourceFingerprint === fingerprint ? research.history.filter(entry => [401, 403, 404].includes(entry.httpStatus))
+      .map(entry => ({ url: entry.requestedUrl, rendered: entry.rendered, httpStatus: entry.httpStatus })) : [];
+  });
+}
 
 async function withTransition<T>(operation: (tx: Prisma.TransactionClient, now: Date) => Promise<T>) {
   return runWithCourseSupportWriterTransitionLease(() => withCourseSupportWriteConflictRetry(() => prisma.$transaction(async tx => {
@@ -108,13 +119,7 @@ export async function readSimulatorSupportSource(input: Owner & { source?: "offi
     const row = await loadOwned(tx, input, now);
     const state = readSimulatorResearchState(row.audit.simulatorResearch, row.source.fingerprint);
     if (state.sourceFingerprint !== row.source.fingerprint) throw new Error("Simulator research navigation belongs to an older source; adopt the reviewed source before research.");
-    const previous = await tx.automationRun.findMany({ where: { promptVersion: "course-support-course-dispatch-v1", status: "COMPLETED", outcome: "simulator_retryable_failed",
-      audit: { path: ["target", "offeringId"], equals: row.source.offering.id } }, orderBy: [{ completedAt: "desc" }, { id: "desc" }], take: 4, select: { audit: true } });
-    const priorFailedRoutes = previous.flatMap(run => {
-      const audit = run.audit as Record<string, unknown>;
-      const research = readSimulatorResearchState(audit.simulatorResearch, row.source.fingerprint);
-      return research.sourceFingerprint === row.source.fingerprint ? research.history.filter(entry => [401, 403, 404].includes(entry.httpStatus)).map(entry => ({ url: entry.requestedUrl, rendered: entry.rendered })) : [];
-    });
+    const priorFailedRoutes = await readPriorFailedResearchRoutes(tx, row.source.offering.id, row.source.fingerprint);
     const selected = selectSimulatorResearchTarget({ state, officialUrl: row.source.offering.course.website ?? row.source.offering.evidenceUrl,
       bookingUrl: row.source.offering.bookingUrl, source: input.source, linkIndex: input.linkIndex, rendered: input.rendered ?? false, now, priorFailedRoutes });
     const requestId = randomUUID();
@@ -144,7 +149,9 @@ export async function readSimulatorSupportSource(input: Owner & { source?: "offi
     if (row.source.fingerprint !== before.value.sourceFingerprint) throw new Error("Simulator source changed during the public read.");
     const state = readSimulatorResearchState(row.audit.simulatorResearch, row.source.fingerprint);
     if (state.inFlight?.requestId !== before.value.requestId) throw new Error("The original simulator source research reservation changed.");
-    const research: SimulatorResearchState = { ...state, inFlight: null, links: read.links, bookingLinks: read.bookingLinks ?? [], linkBaseUrl: read.httpStatus >= 200 && read.httpStatus < 300 ? read.url : null,
+    const usableDocument = read.httpStatus >= 200 && read.httpStatus < 300;
+    const research: SimulatorResearchState = { ...state, inFlight: null, links: usableDocument ? read.links : state.links,
+      bookingLinks: usableDocument ? read.bookingLinks ?? [] : state.bookingLinks, linkBaseUrl: usableDocument ? read.url : state.linkBaseUrl,
       history: [...state.history, { source: before.value.source, requestedUrl: before.value.url, sourceUrl: read.url, observedAt: read.observedAt, httpStatus: read.httpStatus, rendered: before.value.rendered, outcome }] };
     const saved = await saveClaim(tx, row, now);
     await tx.automationRun.update({ where: { id: row.runId }, data: { audit: { ...row.audit, simulatorClaim: { ...row.claim, revision: saved.revision, leaseExpiresAt: saved.leaseExpiresAt }, simulatorResearch: research } as unknown as Prisma.InputJsonValue } });
@@ -202,7 +209,10 @@ export async function claimSimulatorSupportAssignment(input: { assignmentRef: st
     return { assignmentRef: input.assignmentRef, token: claim.token, revision: claim.revision, phase: claim.phase, leaseExpiresAt: claim.leaseExpiresAt,
       offeringId: source.offering.id, courseId: source.offering.courseId, engineeringOnly: row.audit.target.trafficClass === "SYNTHETIC", sourceFingerprint: source.fingerprint,
       venue: source.offering.course, evidenceUrl: source.offering.evidenceUrl, bookingUrl: source.offering.bookingUrl,
-      providerFamilyKey: source.offering.providerFamilyKey, providerMetadata: source.offering.providerMetadata, supportedDurationsMinutes: source.offering.supportedDurationsMinutes };
+      providerFamilyKey: source.offering.providerFamilyKey, providerMetadata: source.offering.providerMetadata, supportedDurationsMinutes: source.offering.supportedDurationsMinutes,
+      researchGuide: getSimulatorResearchGuide({ state: readSimulatorResearchState(undefined, source.fingerprint),
+        officialUrl: source.offering.course.website ?? source.offering.evidenceUrl, bookingUrl: source.offering.bookingUrl, now,
+        priorFailedRoutes: await readPriorFailedResearchRoutes(tx, source.offering.id, source.fingerprint) }) };
   });
 }
 
@@ -359,7 +369,9 @@ export async function readSimulatorSupportClaim(input: { assignmentRef: string; 
   const row = await loadAssignment(prisma, input.assignmentRef);
   if (row.audit.childThreadId !== input.ownerThreadId || row.audit.state !== "CONSUMED" || !row.audit.simulatorClaim) throw new Error("Simulator support claim is not owned by this native task.");
   const offering = await prisma.courseOffering.findUniqueOrThrow({ where: { id: row.audit.target.offeringId }, include: { course: { select: { name: true, address: true, website: true, timeZone: true, googlePlaceId: true, latitude: true, longitude: true } } } });
+  const research = readSimulatorResearchState(row.audit.simulatorResearch, row.audit.simulatorClaim.sourceFingerprint);
   return { ...row.audit.simulatorClaim, baseSha: row.audit.baseSha, offeringId: row.audit.target.offeringId!,
-    research: readSimulatorResearchState(row.audit.simulatorResearch, row.audit.simulatorClaim.sourceFingerprint),
+    research, researchGuide: getSimulatorResearchGuide({ state: research, officialUrl: offering.course.website ?? offering.evidenceUrl,
+      bookingUrl: offering.bookingUrl, now: new Date(), priorFailedRoutes: await readPriorFailedResearchRoutes(prisma, offering.id, row.audit.simulatorClaim.sourceFingerprint) }),
     venue: offering.course, evidenceUrl: offering.evidenceUrl, bookingUrl: offering.bookingUrl, providerFamilyKey: offering.providerFamilyKey, providerMetadata: offering.providerMetadata, supportedDurationsMinutes: offering.supportedDurationsMinutes };
 }

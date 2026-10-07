@@ -323,6 +323,25 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     await lane.retireSimulatorSupport({ ...owner, revision: interrupted.revision });
   });
 
+  it("retains fresh successful links when another owned destination fails", async () => {
+    const f = await fixture();
+    const landing = await lane.readSimulatorSupportSource({ ...f.owner, source: "official" }, vi.fn(async () => new Response("<a href='/book-one'>Book bays</a><a href='/book-two'>Book another calendar</a>", { headers: { "content-type": "text/html" } })));
+    if (!landing.acquired) throw new Error("Landing source read failed.");
+    let owner = { ...f.owner, revision: landing.value.revision };
+    const failed = await lane.readSimulatorSupportSource({ ...owner, linkIndex: 1 }, vi.fn(async () => new Response("forbidden", { status: 403 })));
+    if (!failed.acquired) throw new Error("Failed destination was not recorded.");
+    owner = { ...owner, revision: failed.value.revision };
+    const inspected = await lane.readSimulatorSupportClaim(owner);
+    expect(inspected.research).toMatchObject({ readCount: 2, linkBaseUrl: "https://official.example.test/", links: ["https://official.example.test/book-one", "https://official.example.test/book-two"] });
+    expect(inspected.researchGuide.suggestedReads).toContainEqual({ linkIndex: 2, rendered: false });
+    const alternative = vi.fn(async () => new Response("<p>Public calendar</p>", { headers: { "content-type": "text/html" } }));
+    const result = await lane.readSimulatorSupportSource({ ...owner, linkIndex: 2 }, alternative);
+    if (!result.acquired) throw new Error("Alternative source read failed.");
+    expect(alternative).toHaveBeenCalledWith("https://official.example.test/book-two", expect.objectContaining({ method: "GET" }));
+    expect(result.value.publicSource.httpStatus).toBe(200);
+    await lane.retrySimulatorSupport({ ...owner, revision: result.value.revision, retryMinutes: 15 });
+  });
+
   it("reserves a source read before network work and blocks an overlapping same-revision read", async () => {
     const f = await fixture();
     let release!: () => void, started!: () => void;
@@ -343,12 +362,27 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     const read = await lane.readSimulatorSupportSource({ ...f.owner, source: "official" }, vi.fn(async () => new Response("forbidden", { status: 403 })));
     if (!read.acquired) throw new Error("Source read failed.");
     let owner = { ...f.owner, revision: read.value.revision };
-    await expect(lane.retrySimulatorSupport({ ...owner, retryMinutes: 15 })).rejects.toThrow("distinct official booking");
+    await expect(lane.retrySimulatorSupport({ ...owner, retryMinutes: 15 })).rejects.toThrow("distinct saved official booking");
     const booking = await lane.readSimulatorSupportSource({ ...owner, source: "booking" }, vi.fn(async () => new Response("<p>Calendar needs support</p>", { headers: { "content-type": "text/html" } })));
     if (!booking.acquired) throw new Error("Booking research failed.");
     owner = { ...owner, revision: booking.value.revision };
     expect((await lane.retrySimulatorSupport({ ...owner, retryMinutes: 15 })).acquired).toBe(true);
     expect(await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } })).toMatchObject({ status: "AUTO_INVESTIGATING" });
+    const incident = await client.simulatorSupportIncident.update({ where: { id: f.incident.id }, data: { retryAt: new Date(0) } });
+    const previous = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const audit = previous.audit as Prisma.JsonObject;
+    const target = audit.target as Prisma.JsonObject;
+    const assignmentRef = `assignment-${randomUUID()}`, child = `child-${randomUUID()}`;
+    const next = await client.automationRun.create({ data: { promptVersion: "course-support-course-dispatch-v1", kind: "OTHER", status: "RUNNING", auditSchemaVersion: 1,
+      audit: { schemaVersion: 1, tickRef: "course-1", assignmentRef, state: "BOUND", ownerThreadId: "parent", childThreadId: child,
+        baseSha, reservedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 600_000).toISOString(),
+        target: { ...target, updatedAt: incident.updatedAt.toISOString() } } } });
+    ids.runs.push(next.id);
+    const claimed = await lane.claimSimulatorSupportAssignment({ assignmentRef, ownerThreadId: child, baseSha, branch: "automation/course-support-next-research" });
+    if (!claimed.acquired) throw new Error("Next research claim was busy.");
+    expect(claimed.value.researchGuide.suggestedReads[0]).toEqual({ source: "booking", rendered: false });
+    expect(claimed.value.researchGuide.priorBlockedRoutes).toContainEqual({ url: f.course.website, rendered: false, httpStatus: 403 });
+    expect(claimed.value.researchGuide.suggestedReads).not.toContainEqual({ source: "official", rendered: false });
   });
 
   it("rejects a tests-only release instead of calling it reusable calendar implementation", async () => {

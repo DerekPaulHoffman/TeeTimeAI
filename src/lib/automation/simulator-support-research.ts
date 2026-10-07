@@ -36,6 +36,10 @@ export type SimulatorResearchResult = {
   calendar?: SimulatorPublicCalendar;
   jsonShape?: Array<{ path: string; type: string; count?: number }>;
   blockedRequests?: number;
+  admittedRequests?: number;
+  renderComplete?: boolean;
+  renderWarning?: "SECONDARY_REQUEST_BUDGET_EXHAUSTED";
+  contentProvenance?: "MAIN_DOCUMENT_HTTP" | "RENDERED_DOM";
   accessControls?: Array<"CAPTCHA_OR_CHALLENGE" | "ACCOUNT_REQUIRED" | "QUEUE">;
   responseContracts?: Array<{ pathShape: string; queryKeys: string[]; httpStatus: number; shape: NonNullable<SimulatorResearchResult["jsonShape"]> }>;
 };
@@ -322,68 +326,119 @@ export async function collectSimulatorSupportResearch(input: { url: string; rend
   let context: Awaited<ReturnType<ResearchBrowser["newContext"]>> | undefined;
   let requestCount = 0, responseBytes = 0, blockedRequests = 0, routeFailure: unknown, hasRouteFailure = false;
   let navigation: Awaited<ReturnType<typeof read>> | undefined;
+  let safeMainDocument: Awaited<ReturnType<typeof read>> & { observedAt: Date } | undefined;
+  let secondaryBudgetExhausted = false;
+  const activeRoutes = new Set<Promise<void>>();
+  const hostReads = new Map<string, Promise<unknown>>();
   let page: ResearchPage | undefined;
   const accessControls = new Set<NonNullable<SimulatorResearchResult["accessControls"]>[number]>();
   const responseContracts: NonNullable<SimulatorResearchResult["responseContracts"]> = [];
   const assets = new Map<string, string>();
   let assetsObserved = false;
   let contractSlug = publicVenueSlug(requestedUrl);
+  // A rendered page must not compete with its own requests for a hostname lease.
+  const readRendered = (...args: Parameters<typeof read>) => {
+    const hostname = new URL(args[0]).hostname;
+    const operation = (hostReads.get(hostname) ?? Promise.resolve()).then(() => {
+      if (deadline.aborted) throw new Error("SIMULATOR_RESEARCH_DEADLINE");
+      if (hasRouteFailure) throw routeFailure;
+      return read(...args);
+    });
+    hostReads.set(hostname, operation);
+    const clear = () => { if (hostReads.get(hostname) === operation) hostReads.delete(hostname); };
+    void operation.then(clear, clear);
+    return beforeDeadline(operation, deadline);
+  };
+  const partialMainDocument = (): SimulatorResearchResult => {
+    if (!safeMainDocument) throw new Error("SIMULATOR_RESEARCH_REQUEST_LIMIT");
+    const main = safeMainDocument;
+    return { ...resultFromBody(requestedUrl, main.url, main.status, main.contentType, main.body, main.observedAt), method: "BROWSER",
+      renderComplete: false, renderWarning: "SECONDARY_REQUEST_BUDGET_EXHAUSTED", contentProvenance: "MAIN_DOCUMENT_HTTP",
+      blockedRequests, admittedRequests: requestCount };
+  };
+  const settleStartedRoutes = async () => {
+    if (!activeRoutes.size) { if (hasRouteFailure) throw routeFailure; return; }
+    const results = await beforeDeadline(Promise.allSettled([...activeRoutes]), deadline);
+    const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failure) throw failure.reason;
+    if (hasRouteFailure) throw routeFailure;
+  };
   try {
     if (deadline.aborted) throw new Error("SIMULATOR_RESEARCH_DEADLINE");
     context = await beforeDeadline(browser.newContext({ serviceWorkers: "block", storageState: { cookies: [], origins: [] }, acceptDownloads: false, javaScriptEnabled: true }), deadline);
     await context.routeWebSocket("**/*", route => route.close({ code: 1008, reason: "Public research does not use sockets" }));
     await context.route("**/*", async (route: Route) => {
-      const request = route.request();
-      try {
-        requestCount += 1;
-        if (requestCount > MAX_REQUESTS || deadline.aborted) throw new Error("SIMULATOR_RESEARCH_REQUEST_LIMIT");
-        const headers = new Headers(await request.allHeaders());
-        const url = publicUrl(request.url());
-        const assetRoot = ["script", "stylesheet"].includes(request.resourceType()) ? assets.get(url.href) : undefined;
-        const occupancy = request.method() === "GET" && publicOccupancyUrl(url, contractSlug);
-        if (!["GET", "HEAD"].includes(request.method()) || [...headers.keys()].some(key => /authorization|cookie|token|api.?key|secret|credential/iu.test(key)) ||
-            (["script", "stylesheet"].includes(request.resourceType()) && /captcha|challenge|turnstile|cdn-cgi/iu.test(`${url.hostname}${url.pathname}`)) ||
-            (!sameOfficialHost(requestedUrl, url.href) && !assetRoot && !occupancy)) { blockedRequests += 1; await route.abort("blockedbyclient"); return; }
-        const publicHeaders: Record<string, string> = {};
-        for (const key of ["accept", "accept-language", "user-agent"]) if (headers.has(key)) publicHeaders[key] = headers.get(key)!;
-        if (headers.get("origin") === new URL(navigation?.url ?? requestedUrl).origin) publicHeaders.origin = headers.get("origin")!;
-        const response = await read(url.href, request.method() as "GET" | "HEAD", publicHeaders, assetRoot ?? (occupancy ? url.href : requestedUrl), occupancy ? target => publicOccupancyUrl(target, contractSlug) : undefined);
-        if (assetRoot && response.location) assets.set(response.location, assetRoot);
-        responseBytes += response.body.length;
-        if (responseBytes > MAX_RENDER_BYTES) throw new Error("SIMULATOR_RESEARCH_BODY_LIMIT");
-        if (request.isNavigationRequest() && request.frame() === page?.mainFrame()) navigation = response;
-        const controls = /^(?:text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(response.contentType) ? detectSimulatorResearchAccessControls(response.body.toString("utf8")) : [];
-        controls.forEach(control => accessControls.add(control));
-        if (controls.length) { await route.fulfill({ status: response.status, body: "Public source requires interactive access.", headers: { "content-type": "text/plain" } }); return; }
-        if (!assetsObserved && request.isNavigationRequest() && request.frame() === page?.mainFrame() && response.status >= 200 && response.status < 300 && /^(?:text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(response.contentType)) {
-          assetsObserved = true;
-          for (const asset of publicAssetDestinations(response.body.toString("utf8"), response.url)) assets.set(asset, asset);
-          contractSlug ??= publishedYourGolfBookingSlug(response.body.toString("utf8"), response.url);
+      const operation = (async () => {
+        const request = route.request();
+        try {
+          const headers = new Headers(await request.allHeaders());
+          const url = publicUrl(request.url());
+          const kind = request.resourceType();
+          const assetRoot = ["script", "stylesheet"].includes(kind) ? assets.get(url.href) : undefined;
+          const occupancy = request.method() === "GET" && publicOccupancyUrl(url, contractSlug);
+          if (!["document", "script", "stylesheet", "xhr", "fetch"].includes(kind) || !["GET", "HEAD"].includes(request.method()) || [...headers.keys()].some(key => /authorization|cookie|token|api.?key|secret|credential/iu.test(key)) ||
+              (["script", "stylesheet"].includes(kind) && /captcha|challenge|turnstile|cdn-cgi/iu.test(`${url.hostname}${url.pathname}`)) ||
+              (!sameOfficialHost(requestedUrl, url.href) && !assetRoot && !occupancy)) { blockedRequests += 1; await route.abort("blockedbyclient"); return; }
+          if (deadline.aborted) throw new Error("SIMULATOR_RESEARCH_DEADLINE");
+          if (requestCount >= MAX_REQUESTS) { secondaryBudgetExhausted = true; blockedRequests += 1; await route.abort("blockedbyclient"); return; }
+          requestCount += 1;
+          const publicHeaders: Record<string, string> = {};
+          for (const key of ["accept", "accept-language", "user-agent"]) if (headers.has(key)) publicHeaders[key] = headers.get(key)!;
+          if (headers.get("origin") === new URL(navigation?.url ?? requestedUrl).origin) publicHeaders.origin = headers.get("origin")!;
+          const response = await readRendered(url.href, request.method() as "GET" | "HEAD", publicHeaders, assetRoot ?? (occupancy ? url.href : requestedUrl), occupancy ? target => publicOccupancyUrl(target, contractSlug) : undefined);
+          if (assetRoot && response.location) assets.set(response.location, assetRoot);
+          responseBytes += response.body.length;
+          if (responseBytes > MAX_RENDER_BYTES) throw new Error("SIMULATOR_RESEARCH_BODY_LIMIT");
+          if (request.isNavigationRequest() && request.frame() === page?.mainFrame()) navigation = response;
+          const controls = /^(?:text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(response.contentType) ? detectSimulatorResearchAccessControls(response.body.toString("utf8")) : [];
+          controls.forEach(control => accessControls.add(control));
+          if (controls.length) { await route.fulfill({ status: response.status, body: "Public source requires interactive access.", headers: { "content-type": "text/plain" } }); return; }
+          if (!assetsObserved && request.isNavigationRequest() && request.frame() === page?.mainFrame() && response.status >= 200 && response.status < 300 && /^(?:text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(response.contentType)) {
+            assetsObserved = true;
+            safeMainDocument = { ...response, observedAt: now() };
+            for (const asset of publicAssetDestinations(response.body.toString("utf8"), response.url)) assets.set(asset, asset);
+            contractSlug ??= publishedYourGolfBookingSlug(response.body.toString("utf8"), response.url);
+          }
+          if (["xhr", "fetch"].includes(kind) && response.contentType.includes("application/json") && responseContracts.length < 8) {
+            try { responseContracts.push({ ...contractPath(url), httpStatus: response.status, shape: summarizeSimulatorPublicJsonShape(JSON.parse(response.body.toString("utf8"))) }); } catch { /* Invalid JSON is not a contract. */ }
+          }
+          await route.fulfill({ status: response.status, body: response.body, headers: { "content-type": response.contentType, ...(response.location ? { location: response.location } : {}), ...(response.publicCors ? { "access-control-allow-origin": response.publicCors } : {}) } });
+        } catch (error) {
+          if (error instanceof Error && error.message === "SIMULATOR_RESEARCH_UNSAFE_URL") { blockedRequests += 1; await route.abort("blockedbyclient"); return; }
+          if (!hasRouteFailure) { routeFailure = error; hasRouteFailure = true; }
+          blockedRequests += 1;
+          await route.abort("blockedbyclient");
         }
-        if (["xhr", "fetch"].includes(request.resourceType()) && response.contentType.includes("application/json") && responseContracts.length < 8) {
-          try { responseContracts.push({ ...contractPath(url), httpStatus: response.status, shape: summarizeSimulatorPublicJsonShape(JSON.parse(response.body.toString("utf8"))) }); } catch { /* Invalid JSON is not a contract. */ }
-        }
-        await route.fulfill({ status: response.status, body: response.body, headers: { "content-type": response.contentType, ...(response.location ? { location: response.location } : {}), ...(response.publicCors ? { "access-control-allow-origin": response.publicCors } : {}) } });
-      } catch (error) {
-        if (error instanceof Error && error.message === "SIMULATOR_RESEARCH_UNSAFE_URL") { blockedRequests += 1; await route.abort("blockedbyclient"); return; }
-        if (!hasRouteFailure) { routeFailure = error; hasRouteFailure = true; }
-        blockedRequests += 1;
-        await route.abort("blockedbyclient");
-      }
+      })();
+      activeRoutes.add(operation);
+      try { await operation; } finally { activeRoutes.delete(operation); }
     });
     page = await beforeDeadline(context.newPage(), deadline);
-    const response = await beforeDeadline(page.goto(requestedUrl, { waitUntil: "domcontentloaded", timeout: DEADLINE_MS }), deadline);
+    let response: Awaited<ReturnType<ResearchPage["goto"]>>;
+    try { response = await beforeDeadline(page.goto(requestedUrl, { waitUntil: "domcontentloaded", timeout: DEADLINE_MS }), deadline); }
+    catch (error) {
+      if (hasRouteFailure) throw routeFailure;
+      const expectedIncomplete = error instanceof Error && (error.name === "TimeoutError" || error.message === "SIMULATOR_RESEARCH_DEADLINE" || /^page\.goto: net::ERR_(?:ABORTED|BLOCKED_BY_CLIENT)\b/u.test(error.message));
+      // A tooling budget can preserve already-read public HTTP facts. It cannot
+      // turn an unrelated browser, parser, authority or lease failure into evidence.
+      if (!secondaryBudgetExhausted || !safeMainDocument || accessControls.size || !expectedIncomplete) throw error;
+      await settleStartedRoutes();
+      return partialMainDocument();
+    }
+    await settleStartedRoutes();
     if (hasRouteFailure) throw routeFailure;
     if (deadline.aborted) throw new Error("SIMULATOR_RESEARCH_DEADLINE");
     const url = publicUrl(page.url()).href;
     if (!sameOfficialHost(requestedUrl, url) || !navigation) throw new Error("SIMULATOR_RESEARCH_DESTINATION_CHANGED");
-    if (accessControls.size) return { requestedUrl, url, observedAt: now().toISOString(), httpStatus: navigation.status, text: "", links: [], method: "BROWSER", accessControls: [...accessControls], blockedRequests };
+    if (accessControls.size) return { requestedUrl, url, observedAt: now().toISOString(), httpStatus: navigation.status, text: "", links: [], method: "BROWSER", accessControls: [...accessControls], blockedRequests, admittedRequests: requestCount, renderComplete: false, contentProvenance: "MAIN_DOCUMENT_HTTP" };
+    if (secondaryBudgetExhausted) return partialMainDocument();
     const html = await beforeDeadline(page.content(), deadline);
+    if (hasRouteFailure) throw routeFailure;
     if (Buffer.byteLength(html, "utf8") > MAX_BODY_BYTES) throw new Error("SIMULATOR_RESEARCH_BODY_LIMIT");
     const renderedControls = detectSimulatorResearchAccessControls(html);
-    if (renderedControls.length) return { requestedUrl, url, observedAt: now().toISOString(), httpStatus: navigation.status, text: "", links: [], method: "BROWSER", accessControls: renderedControls, blockedRequests };
+    if (renderedControls.length) return { requestedUrl, url, observedAt: now().toISOString(), httpStatus: navigation.status, text: "", links: [], method: "BROWSER", accessControls: renderedControls, blockedRequests, admittedRequests: requestCount, renderComplete: false, contentProvenance: "RENDERED_DOM" };
     const rendered = resultFromBody(requestedUrl, url, response?.status() ?? navigation.status, "text/html", Buffer.from(html), now());
-    return { ...rendered, method: "BROWSER", blockedRequests, ...(responseContracts.length ? { responseContracts } : {}) };
+    return { ...rendered, method: "BROWSER", blockedRequests, admittedRequests: requestCount, renderComplete: true, contentProvenance: "RENDERED_DOM", ...(responseContracts.length ? { responseContracts } : {}) };
   } catch (error) { throw hasRouteFailure ? routeFailure : knownPublicNetworkError(error); }
   finally {
     const cleanupSignal = AbortSignal.timeout(2_000);

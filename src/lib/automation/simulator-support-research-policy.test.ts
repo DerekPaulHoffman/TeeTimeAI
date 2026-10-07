@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertSimulatorResearchFallbackBeforeRetry, readSimulatorResearchState, selectSimulatorResearchTarget } from "./simulator-support-research-policy";
+import { assertSimulatorResearchFallbackBeforeRetry, getSimulatorResearchGuide, readSimulatorResearchState, selectSimulatorResearchTarget } from "./simulator-support-research-policy";
 
 const fingerprint = "a".repeat(64), now = new Date("2026-10-06T20:00:00Z");
 const officialUrl = "https://venue.example.test", bookingUrl = "https://calendar.example.test/booking/bays";
@@ -29,8 +29,36 @@ describe("owned simulator research navigation", () => {
     expect(() => assertSimulatorResearchFallbackBeforeRetry(failedHomepage(), bookingUrl)).toThrow("booking read");
     const distinct = { ...failedHomepage(), readCount: 2, history: [...failedHomepage().history, { ...failedHomepage().history[0], source: "booking" as const, requestedUrl: bookingUrl, sourceUrl: bookingUrl }] };
     expect(() => assertSimulatorResearchFallbackBeforeRetry(distinct, bookingUrl)).not.toThrow();
-    expect(() => assertSimulatorResearchFallbackBeforeRetry({ ...distinct, history: [...distinct.history].reverse() }, bookingUrl)).toThrow("booking read");
+    expect(() => assertSimulatorResearchFallbackBeforeRetry({ ...distinct, history: [...distinct.history].reverse() }, bookingUrl)).not.toThrow();
     expect(() => assertSimulatorResearchFallbackBeforeRetry({ ...failedHomepage(), history: [{ ...failedHomepage().history[0], httpStatus: 429 }] }, bookingUrl)).not.toThrow();
+  });
+  it("requires the saved calendar after an unsuccessful rendered homepage while retaining provider backoff", () => {
+    const renderedFailure = { ...failedHomepage(), readCount: 2, history: [...failedHomepage().history,
+      { ...failedHomepage().history[0], rendered: true, httpStatus: 0, outcome: "NETWORK_FAILED" as const }] };
+    expect(() => assertSimulatorResearchFallbackBeforeRetry(renderedFailure, bookingUrl)).toThrow("failed rendered homepage");
+    expect(() => assertSimulatorResearchFallbackBeforeRetry(renderedFailure, null)).not.toThrow();
+    expect(() => assertSimulatorResearchFallbackBeforeRetry({ ...renderedFailure, history: [...renderedFailure.history.slice(0, 1),
+      { ...renderedFailure.history[1], outcome: "CAPACITY_BUSY" as const }] }, bookingUrl)).not.toThrow();
+  });
+  it("suggests saved booking commands first and exposes prior structural denials before another read", () => {
+    const priorFailedRoutes = [{ url: officialUrl, rendered: false, httpStatus: 403 }];
+    const guide = getSimulatorResearchGuide({ state: empty(), officialUrl, bookingUrl, now, priorFailedRoutes });
+    expect(guide).toMatchObject({ readsRemaining: 6, inFlight: false, priorBlockedRoutes: priorFailedRoutes });
+    expect(guide.suggestedReads).toEqual([{ source: "booking", rendered: false }, { source: "booking", rendered: true },
+      { source: "official", rendered: true }]);
+    expect(getSimulatorResearchGuide({ state: { ...empty(), readCount: 6 }, officialUrl, bookingUrl, now, priorFailedRoutes }).suggestedReads).toEqual([]);
+    expect(getSimulatorResearchGuide({ state: empty(), officialUrl, bookingUrl: officialUrl, now, priorFailedRoutes: [] }).suggestedReads)
+      .toEqual([{ source: "booking", rendered: false }, { source: "booking", rendered: true }]);
+  });
+  it("keeps another fresh successful booking handoff usable after one linked destination fails", () => {
+    const success = { ...failedHomepage().history[0], httpStatus: 200 };
+    const other = "https://other.example.test/booking/bays";
+    const failedLink = { ...success, source: "link" as const, requestedUrl: bookingUrl, sourceUrl: bookingUrl, httpStatus: 403 };
+    const state = { ...empty(), readCount: 2, history: [success, failedLink], linkBaseUrl: officialUrl,
+      links: [bookingUrl, other], bookingLinks: [bookingUrl, other] };
+    expect(select(state, { source: undefined, linkIndex: 2 }).url).toBe(other);
+    expect(() => select(state, { source: undefined, linkIndex: 1 })).toThrow("identical");
+    expect(() => select(state, { source: undefined, linkIndex: 2, now: new Date(now.getTime() + 31 * 60_000) })).toThrow("fresh");
   });
   it("retains in-flight and attempt capacity rather than allowing overlapping reads", () => {
     const state = { ...empty(), readCount: 1, inFlight: { requestId: "11111111-1111-4111-8111-111111111111", startedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 60_000).toISOString(), source: "official" as const, url: officialUrl, rendered: false } };

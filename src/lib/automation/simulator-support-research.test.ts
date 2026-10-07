@@ -24,7 +24,7 @@ function publishedConfig(patch: Record<string, unknown> = {}) {
 }
 
 type RequestFixture = { url: string; method?: string; headers?: Record<string, string>; kind?: string; frame?: "main" | "child" | "popup" };
-function renderedBrowser(requests: RequestFixture[], html = "<h1>Public rentals</h1><a href='/booking'>Book hourly</a>") {
+function renderedBrowser(requests: RequestFixture[], html = "<h1>Public rentals</h1><a href='/booking'>Book hourly</a>", concurrentSecondary = false) {
   let handler!: (route: Route) => Promise<void>;
   let socketHandler!: (socket: { close: (options: unknown) => Promise<void> }) => Promise<unknown>;
   const mainFrame = {}, childFrame = {}, popupFrame = {};
@@ -33,12 +33,14 @@ function renderedBrowser(requests: RequestFixture[], html = "<h1>Public rentals<
     mainFrame: () => mainFrame, url: () => requests[0].url,
     content: vi.fn(async () => html),
     goto: vi.fn(async () => {
-      for (const request of requests) {
+      const run = async (request: RequestFixture) => {
         const entry = { abort: vi.fn(async () => undefined), fulfill: vi.fn(async () => undefined) }; routes.push(entry);
         await handler({ ...entry, request: () => ({ url: () => request.url, method: () => request.method ?? "GET", allHeaders: async () => request.headers ?? { "user-agent": "Public research browser" },
           isNavigationRequest: () => !request.kind || request.kind === "document", resourceType: () => request.kind ?? "document",
           frame: () => request.frame === "child" ? childFrame : request.frame === "popup" ? popupFrame : mainFrame }) } as unknown as Route);
-      }
+      };
+      if (concurrentSecondary) { await run(requests[0]); await Promise.all(requests.slice(1).map(run)); }
+      else for (const request of requests) await run(request);
       return { status: () => 200 };
     }),
   };
@@ -228,10 +230,97 @@ describe("bounded owned simulator public research transport", () => {
     const rendered = renderedBrowser([{ url: `${source}/` }]);
     await expect(collectSimulatorSupportResearch({ url: source, render: true }, { fetch: vi.fn(), lease: brokenLease, browser: rendered.factory })).rejects.toBe(persistence);
   });
-  it("enforces the body and routed-request bounds and cleans up the browser on failure", async () => {
+  it("does not spend the public request budget on more than 32 forbidden requests", async () => {
+    const forbidden: RequestFixture[] = Array.from({ length: 10 }, (_, index) => [
+      { url: `${source}/mutation-${index}`, method: "POST", kind: "fetch" },
+      { url: `${source}/private-${index}`, headers: { Cookie: "private-session" }, kind: "fetch" },
+      { url: `${source}/login` },
+      { url: `https://tracker.example.test/${index}`, kind: "fetch" },
+    ]).flat();
+    const requests = [{ url: `${source}/` }, ...forbidden, { url: `${source}/public.js`, kind: "script" }, { url: `${source}/availability`, kind: "fetch" }];
+    const view = renderedBrowser(requests), fetch = vi.fn(async () => response("public"));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    expect(fetch).toHaveBeenCalledTimes(3); expect(lease).toHaveBeenCalledTimes(3);
+    expect(result).toMatchObject({ blockedRequests: 40, admittedRequests: 3, renderComplete: true, contentProvenance: "RENDERED_DOM" });
+    expect(result.renderWarning).toBeUndefined();
+    for (const route of view.routes.slice(1, 41)) expect(route.abort).toHaveBeenCalledOnce();
+    expect(view.routes[42].fulfill).toHaveBeenCalledOnce();
+  });
+  it("aborts decorative image, font, media and other resources without provider I/O", async () => {
+    const requests = [{ url: `${source}/` }, ...["image", "font", "media", "other"].map(kind => ({ url: `${source}/${kind}`, kind }))];
+    const view = renderedBrowser(requests), fetch = vi.fn(async () => response("public"));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    expect(fetch).toHaveBeenCalledOnce(); expect(lease).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({ blockedRequests: 4, admittedRequests: 1, renderComplete: true });
+    for (const route of view.routes.slice(1)) expect(route.abort).toHaveBeenCalledOnce();
+  });
+  it("hard-bounds admitted reads at 32 while retaining only safe main HTTP facts with an incomplete-render diagnostic", async () => {
+    const requests = [{ url: booking }, ...Array.from({ length: 39 }, (_, index) => ({ url: `${new URL(booking).origin}/public-${index}`, kind: "fetch" }))];
+    const main = `${publishedConfig()}<a href='/venues/golf-oasis/booking'>Book a bay</a>`;
+    const view = renderedBrowser(requests, "<h1>Unproven rendered output</h1><a href='/different'>Reserve</a>");
+    const fetch = vi.fn(async (url: unknown) => String(url) === booking ? response(main) : response('{"slots":[{"startsAt":"private-time"}]}', 200, "application/json"));
+    const result = await collectSimulatorSupportResearch({ url: booking, render: true }, { fetch, lease, browser: view.factory, now: () => instant });
+    expect(fetch).toHaveBeenCalledTimes(32); expect(lease).toHaveBeenCalledTimes(32);
+    expect(result).toMatchObject({ requestedUrl: booking, url: booking, observedAt: instant.toISOString(), httpStatus: 200, admittedRequests: 32, blockedRequests: 8,
+      renderComplete: false, renderWarning: "SECONDARY_REQUEST_BUDGET_EXHAUSTED", contentProvenance: "MAIN_DOCUMENT_HTTP", method: "BROWSER",
+      calendar: { venue: { id: "1357" }, rentals: [{ id: "21451" }] }, links: ["https://booking.trackmangolf.com/venues/golf-oasis/booking"] });
+    expect(result.text).toBe("Hourly simulator bays Book a bay");
+    expect(result.responseContracts).toBeUndefined();
+    expect(view.page.content).not.toHaveBeenCalled();
+    for (const route of view.routes.slice(32)) { expect(route.abort).toHaveBeenCalledOnce(); expect(route.fulfill).not.toHaveBeenCalled(); }
+    expect(JSON.stringify(result)).not.toMatch(/Unproven|private-time|secret@example|availableSlots/u);
+    expect(view.context.close).toHaveBeenCalledOnce(); expect(view.browser.close).toHaveBeenCalledOnce();
+  });
+  it("serializes concurrent admitted assets per hostname before the shared lease without relaxing the 32-read cap", async () => {
+    const requests = [{ url: `${source}/` }, ...Array.from({ length: 35 }, (_, index) => ({ url: `${source}/asset-${index}`, kind: index % 2 ? "script" : "stylesheet" }))];
+    const view = renderedBrowser(requests, "<h1>Rendered page</h1>", true);
+    let active = 0, maximum = 0, busy = 0;
+    const exclusiveLease = vi.fn(async (_host: string, worker: () => Promise<unknown>) => {
+      if (active) { busy += 1; return { acquired: false as const }; }
+      active += 1; maximum = Math.max(maximum, active);
+      try { return { acquired: true as const, value: await worker() }; } finally { active -= 1; }
+    }) as unknown as NonNullable<SimulatorResearchDependencies["lease"]>;
+    const fetch = vi.fn(async (url: unknown) => {
+      if (String(url) !== `${source}/`) await new Promise(resolve => setTimeout(resolve, 1));
+      return response(String(url) === `${source}/` ? "<h1>Safe main page</h1>" : "public asset");
+    });
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease: exclusiveLease, browser: view.factory });
+    expect(maximum).toBe(1); expect(busy).toBe(0);
+    expect(fetch).toHaveBeenCalledTimes(32); expect(exclusiveLease).toHaveBeenCalledTimes(32);
+    expect(result).toMatchObject({ text: "Safe main page", admittedRequests: 32, blockedRequests: 4, renderComplete: false, renderWarning: "SECONDARY_REQUEST_BUDGET_EXHAUSTED" });
+    for (const route of view.routes.slice(32)) expect(route.abort).toHaveBeenCalledOnce();
+  });
+  it("preserves partial HTTP facts after a budget-caused navigation abort but never masks unrelated browser errors", async () => {
+    for (const expectedAbort of [true, false]) {
+      const view = renderedBrowser([{ url: `${source}/` }, ...Array.from({ length: 32 }, (_, index) => ({ url: `${source}/script-${index}`, kind: "script" }))]);
+      const original = view.page.goto.getMockImplementation()!;
+      const failure = new Error(expectedAbort ? "page.goto: net::ERR_ABORTED at public destination" : "Browser programming invariant failed");
+      view.page.goto.mockImplementation(async () => { await original(); throw failure; });
+      const task = collectSimulatorSupportResearch({ url: source, render: true }, { fetch: vi.fn(async () => response("<h1>Safe public page</h1>")), lease, browser: view.factory });
+      if (expectedAbort) expect(await task).toMatchObject({ text: "Safe public page", admittedRequests: 32, renderComplete: false, contentProvenance: "MAIN_DOCUMENT_HTTP" });
+      else await expect(task).rejects.toBe(failure);
+      expect(view.page.content).not.toHaveBeenCalled();
+    }
+  });
+  it("does not convert an owned lease failure or interactive-access response into partial successful research", async () => {
+    const requests = [{ url: `${source}/` }, ...Array.from({ length: 32 }, (_, index) => ({ url: `${source}/script-${index}`, kind: "script" }))];
+    const failure = Object.assign(new Error("Lease persistence failed"), { code: "ECONNREFUSED" });
+    let calls = 0;
+    const brokenLease = (async (_host: string, worker: () => Promise<unknown>) => {
+      if (++calls === 2) throw failure;
+      return { acquired: true as const, value: await worker() };
+    }) as unknown as NonNullable<SimulatorResearchDependencies["lease"]>;
+    const view = renderedBrowser(requests);
+    await expect(collectSimulatorSupportResearch({ url: source, render: true }, { fetch: vi.fn(async () => response("<h1>Safe public page</h1>")), lease: brokenLease, browser: view.factory })).rejects.toBe(failure);
+    const challenged = renderedBrowser(requests);
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch: vi.fn(async () => response("<h1>Verify you are human</h1>")), lease, browser: challenged.factory });
+    expect(result).toMatchObject({ accessControls: ["CAPTCHA_OR_CHALLENGE"], text: "", links: [], renderComplete: false });
+    expect(result.renderWarning).toBeUndefined(); expect(result.calendar).toBeUndefined();
+  });
+  it("keeps per-response and total body limits fatal and cleans up the browser", async () => {
     await expect(collectSimulatorSupportResearch({ url: source }, { fetch: vi.fn(async () => response("x".repeat(1_500_001))), lease })).rejects.toThrow("BODY_LIMIT");
-    const view = renderedBrowser(Array.from({ length: 33 }, (_, index) => ({ url: `${source}/${index}` })));
-    await expect(collectSimulatorSupportResearch({ url: source, render: true }, { fetch: vi.fn(async () => response("public")), lease, browser: view.factory })).rejects.toThrow("REQUEST_LIMIT");
+    const view = renderedBrowser([{ url: `${source}/` }, ...Array.from({ length: 4 }, (_, index) => ({ url: `${source}/asset-${index}`, kind: "script" }))]);
+    await expect(collectSimulatorSupportResearch({ url: source, render: true }, { fetch: vi.fn(async () => response("x".repeat(1_500_000), 200, "text/javascript")), lease, browser: view.factory })).rejects.toThrow("BODY_LIMIT");
     expect(view.browser.close).toHaveBeenCalledOnce();
   });
   it("ends a hung render at the deadline and still closes its isolated context", async () => {
