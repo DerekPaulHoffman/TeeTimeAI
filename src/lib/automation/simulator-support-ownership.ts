@@ -26,7 +26,7 @@ async function readPriorFailedResearchRoutes(tx: Pick<Prisma.TransactionClient, 
   return previous.flatMap(run => {
     const audit = run.audit as Record<string, unknown>;
     const research = readSimulatorResearchState(audit.simulatorResearch, fingerprint);
-    return research.sourceFingerprint === fingerprint ? research.history.filter(entry => [401, 403, 404].includes(entry.httpStatus))
+    return research.sourceFingerprint === fingerprint ? research.history.filter(entry => entry.outcome === "HARD_FAILED" || [401, 403, 404].includes(entry.httpStatus))
       .map(entry => ({ url: entry.requestedUrl, rendered: entry.rendered, httpStatus: entry.httpStatus })) : [];
   });
 }

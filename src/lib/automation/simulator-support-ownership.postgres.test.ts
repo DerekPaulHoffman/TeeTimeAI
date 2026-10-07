@@ -152,6 +152,56 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(fetch).toHaveBeenCalledOnce();
   });
 
+  it("preserves same-source prior hard-failed bays routes without quarantining transient or older-source observations", async () => {
+    const bays = "https://yourgolfbooking.com/venues/owned-simulator/booking/bays";
+    const root = "https://yourgolfbooking.com/venues/owned-simulator/booking";
+    const f = await fixture(15, false, bays);
+    const stored = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const audit = stored.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    const observedAt = new Date().toISOString();
+    const priorAudit = { ...audit, assignmentRef: `${f.owner.assignmentRef}-previous`, simulatorResearch: {
+      version: 1, sourceFingerprint: f.fingerprint, readCount: 5, history: [
+        { source: "booking", requestedUrl: bays, sourceUrl: bays, observedAt, httpStatus: 403, rendered: false, outcome: "READ", requestId: randomUUID() },
+        { source: "booking", requestedUrl: bays, sourceUrl: bays, observedAt, httpStatus: 0, rendered: true, outcome: "HARD_FAILED", requestId: randomUUID(),
+          failure: { stage: "PUBLIC_READ", category: "BUDGET", code: "PUBLIC_BODY_LIMIT", researchPhase: "HTTP_READ", researchResourceKind: "SECONDARY_SCRIPT", sourceLocation: "src/lib/automation/address-pinned-public-fetch.ts:49" } },
+        { source: "booking-root", requestedUrl: root, sourceUrl: root, observedAt, httpStatus: 0, rendered: false, outcome: "NETWORK_FAILED", requestId: randomUUID(),
+          failure: { stage: "PUBLIC_READ", category: "NETWORK", code: "PUBLIC_FETCH_FAILED" } },
+        { source: "booking-root", requestedUrl: root, sourceUrl: root, observedAt, httpStatus: 0, rendered: true, outcome: "CAPACITY_BUSY", requestId: randomUUID() },
+        { source: "official", requestedUrl: f.course.website!, sourceUrl: f.course.website!, observedAt, httpStatus: 429, rendered: false, outcome: "READ", requestId: randomUUID() },
+      ], links: [], bookingLinks: [], linkBaseUrl: null, inFlight: null,
+    } };
+    const previous = await client.automationRun.create({ data: { kind: "OTHER", status: "COMPLETED", completedAt: new Date(),
+      promptVersion: dispatcher.COURSE_DISPATCH_PROMPT_VERSION, outcome: "simulator_retryable_failed", audit: priorAudit as unknown as Prisma.InputJsonValue } });
+    ids.runs.push(previous.id);
+    const inspected = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
+    expect(inspected.research.readCount).toBe(0);
+    expect(inspected.researchGuide.priorBlockedRoutes).toEqual([
+      { url: bays, rendered: false, httpStatus: 403 }, { url: bays, rendered: true, httpStatus: 0 },
+    ]);
+    expect(inspected.researchGuide.suggestedReads.slice(0, 2)).toEqual([
+      { source: "booking-root", rendered: false }, { source: "booking-root", rendered: true },
+    ]);
+    expect(inspected.researchGuide.suggestedReads).not.toContainEqual({ source: "booking", rendered: false });
+    expect(inspected.researchGuide.suggestedReads).not.toContainEqual({ source: "booking", rendered: true });
+    expect(inspected.researchGuide.suggestedReads).toContainEqual({ source: "official", rendered: false });
+    const fetch = vi.fn(async () => new Response("unreachable"));
+    await expect(lane.readSimulatorSupportSource({ ...f.owner, source: "booking", rendered: true }, { fetch })).rejects.toThrow("structural");
+    expect(fetch).not.toHaveBeenCalled();
+    const current = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
+    expect(current.revision).toBe(f.owner.revision); expect(current.research.readCount).toBe(0);
+    const olderFingerprint = "b".repeat(64);
+    await client.automationRun.update({ where: { id: previous.id }, data: { audit: { ...priorAudit,
+      target: { ...priorAudit.target, offeringSourceFingerprint: olderFingerprint },
+      simulatorClaim: { ...priorAudit.simulatorClaim!, sourceFingerprint: olderFingerprint, originalSourceFingerprint: olderFingerprint },
+      simulatorResearch: { ...priorAudit.simulatorResearch, sourceFingerprint: olderFingerprint },
+    } as unknown as Prisma.InputJsonValue } });
+    const differentSource = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
+    expect(differentSource.researchGuide.priorBlockedRoutes).toEqual([]);
+    expect(differentSource.researchGuide.suggestedReads[0]).toEqual({ source: "booking", rendered: false });
+    expect(differentSource.researchGuide.suggestedReads).toContainEqual({ source: "booking", rendered: true });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("keeps current source and three-destination fences before any derived-root I/O", async () => {
     const bays = "https://yourgolfbooking.com/venues/owned-simulator/booking/bays";
     const f = await fixture(15, false, bays);
