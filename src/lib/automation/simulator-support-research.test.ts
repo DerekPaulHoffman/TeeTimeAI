@@ -78,6 +78,73 @@ describe("bounded owned simulator public research transport", () => {
     expect(extractSimulatorPublicCalendar(`${publishedConfig()}${publishedConfig()}`, booking)).toEqual({});
     expect(extractSimulatorPublicCalendar("<script id='__NEXT_DATA__' type='application/json'>window.alert('run')</script>", booking)).toEqual({});
   });
+  it.each([null, true])("retains observed maintenance mode %j as configuration facts without normalizing it to false", value => {
+    const html = publishedConfig().replace('"maintenanceMode":false', `"maintenanceMode":${JSON.stringify(value)}`);
+    const result = extractSimulatorPublicCalendar(html, booking);
+    expect(result.calendar?.venue).toEqual({ id: "1357", slug: "golf-oasis", timeZone: "America/New_York", status: "live", maintenanceMode: value });
+    expect(result.calendar?.ranges).toHaveLength(1); expect(result.calendar?.resources).toHaveLength(1); expect(result.calendar?.rentals).toHaveLength(1);
+    expect(result.configurationDiagnostic).toBeUndefined(); expect(result.jsonShape).toBeUndefined();
+    expect(JSON.stringify(result)).not.toMatch(/secret@example|never-return|Private Member|owner|availableSlots|complete/u);
+  });
+  it.each([
+    ["missing", "", "MISSING"],
+    ["string", '"maintenanceMode":"private-maintenance-value",', "INVALID"]
+  ])("rejects %s maintenance mode with only a closed venue diagnostic", (_name, replacement, state) => {
+    const html = publishedConfig().replace('"maintenanceMode":false,', replacement);
+    const result = extractSimulatorPublicCalendar(html, booking);
+    expect(result.calendar).toBeUndefined();
+    expect(result.configurationDiagnostic).toEqual({ phase: "VENUE", reason: "CONFIG_BOOLEAN", maintenanceModeState: state });
+    expect(result.jsonShape).toBeDefined();
+    expect(JSON.stringify(result)).not.toMatch(/private-maintenance-value|secret@example|never-return|Private Member|owner/u);
+  });
+  it.each([
+    ["VENUE", "CONFIG_IDENTITY", '"slug":"golf-oasis"', '"slug":"different-venue"'],
+    ["RANGES", "CONFIG_BOOLEAN", '"bookable":true', '"bookable":null'],
+    ["RENTALS", "CONFIG_BOOLEAN", '"disabled":false', '"disabled":null'],
+    ["RESOURCES", "CONFIG_IDENTITY", '"range":1397', '"range":9999']
+  ])("keeps strict %s validation with the closed %s reason even when maintenance is null", (phase, reason, before, after) => {
+    const html = publishedConfig().replace('"maintenanceMode":false', '"maintenanceMode":null').replace(before, after);
+    const result = extractSimulatorPublicCalendar(html, booking);
+    expect(result.calendar).toBeUndefined();
+    expect(result.configurationDiagnostic).toEqual({ phase, reason, maintenanceModeState: "NULL" });
+    expect(JSON.stringify(result.configurationDiagnostic)).not.toMatch(/9999|different-venue|http|@/);
+  });
+  it("does not fabricate a maintenance state when the inert configuration object is missing", () => {
+    const html = `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { initialReduxState: null } } })}</script>`;
+    const result = extractSimulatorPublicCalendar(html, booking);
+    expect(result.calendar).toBeUndefined();
+    expect(result.configurationDiagnostic).toEqual({ phase: "CONFIG", reason: "CONFIG_SHAPE" });
+  });
+  it("does not adopt an unrelated exception merely because its message matches a configuration reason", () => {
+    vi.spyOn(Intl, "DateTimeFormat").mockImplementationOnce(function () { throw new Error("CONFIG_BOOLEAN"); });
+    const result = extractSimulatorPublicCalendar(publishedConfig(), booking);
+    expect(result.calendar).toBeUndefined(); expect(result.jsonShape).toBeDefined(); expect(result.configurationDiagnostic).toBeUndefined();
+  });
+  it.each([null, true])("does not admit YourGolfBooking publication or occupancy with maintenance mode %j", async value => {
+    const root = "https://yourgolfbooking.com/venues/golf-oasis/booking";
+    const html = publishedConfig().replace('"maintenanceMode":false', `"maintenanceMode":${JSON.stringify(value)}`);
+    const occupancy = "https://api.yourgolfbooking.com/venue/golf-oasis/bookings/public?start_gte=2026-10-10T00%3A00%3A00Z&start_lte=2026-10-11T00%3A00%3A00Z";
+    const view = renderedBrowser([{ url: root }, { url: occupancy, kind: "fetch" }], html);
+    const fetch = vi.fn(async () => response(html));
+    const result = await collectSimulatorSupportResearch({ url: root, render: true }, { fetch, lease, browser: view.factory });
+    expect(result.calendar?.venue.maintenanceMode).toBe(value);
+    expect(result.bookingLinks).toBeUndefined(); expect(result.responseContracts).toBeUndefined();
+    expect(fetch).toHaveBeenCalledOnce(); expect(view.routes[1].abort).toHaveBeenCalledOnce();
+    const runtimeFetch = vi.fn<typeof globalThis.fetch>(async () => response(html));
+    await expect(fetchYourGolfBookingAvailability({ offering: { id: "research-offering", courseId: "research-venue", bookingUrl: booking.replace(/\/bays$/u, ""), providerFamilyKey: "YOUR_GOLF_BOOKING",
+      providerMetadata: { venueSlug: "golf-oasis", venueId: "1357", rangeId: "1397", publicOptionId: "21451" }, maxPartySize: 4, supportedDurationsMinutes: [60] },
+      date: "2026-10-10", durationMinutes: 60, partySize: 1, timeZone: "America/New_York" }, runtimeFetch)).rejects.toMatchObject({ code: "INVALID_SOURCE" });
+    expect(runtimeFetch).toHaveBeenCalledOnce();
+  });
+  it.each([false, true])("scrubs configuration diagnostics when positive access controls are observed (rendered: %s)", async render => {
+    const html = publishedConfig().replace('"maintenanceMode":false', '"maintenanceMode":"private-value"') + "<h1>Verify you are human</h1>";
+    expect(extractSimulatorPublicCalendar(html, booking).configurationDiagnostic).toEqual({ phase: "VENUE", reason: "CONFIG_BOOLEAN", maintenanceModeState: "INVALID" });
+    const view = renderedBrowser([{ url: booking }], html);
+    const result = await collectSimulatorSupportResearch({ url: booking, render }, { fetch: vi.fn(async () => response(html)), lease, browser: view.factory });
+    expect(result).toMatchObject({ accessControls: ["CAPTCHA_OR_CHALLENGE"], text: "", links: [] });
+    expect(result.calendar).toBeUndefined(); expect(result.jsonShape).toBeUndefined(); expect(result.configurationDiagnostic).toBeUndefined();
+    expect(JSON.stringify(result)).not.toMatch(/private-value|secret@example|CONFIG_BOOLEAN|Hourly simulator bays/);
+  });
   it("reports restriction presence without retaining restriction/perk payloads or declaring availability", () => {
     const html = publishedConfig().replace('"restrictions":[]', '"restrictions":[{"email":"private@example.test"}]').replace('"appliedRequiredPerks":[]', '"appliedRequiredPerks":[{"secret":"private-perk"}]');
     expect(extractSimulatorPublicCalendar(html, booking).calendar?.rentals[0]).toMatchObject({ hasRestrictions: true, requiresPerks: true });

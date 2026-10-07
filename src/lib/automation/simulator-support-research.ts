@@ -26,10 +26,15 @@ export type SimulatorResearchDependencies = {
 
 export type SimulatorPublicCalendar = {
   family: "YOUR_GOLF_BOOKING";
-  venue: { id: string; slug: string; timeZone: string; status: string; maintenanceMode: boolean };
+  venue: { id: string; slug: string; timeZone: string; status: string; maintenanceMode: boolean | null };
   ranges: Array<{ id: string; venueId: string; slug: string; bookable: boolean; slotDurationMinutes: number; slotIntervalMinutes: number; slotIntervalStart: number; assumeOpen: boolean; bookingUi: string; customerBookingUi: string; maxBookAheadValue: number; maxBookAheadUnit: string; openingHours: string; hasOpeningTimeRestrictions: boolean }>;
   rentals: Array<{ id: string; venueId: string; name: string; type: "simulator"; category: "baytime"; adminOnly: false; disabled: boolean; waitlisted: boolean; duration: number; durationType: string; minDurationSlots: number; maxDurationSlots: number; minPlayers: number | null; maxPlayers: number | null; bufferMinutes: number; hasRestrictions: boolean; requiresPerks: boolean }>;
   resources: Array<{ id: string; venueId: string; rangeId: string; type: "simulator"; bookable: boolean; optionIds: string[]; appliedOptionIds: string[]; hasRestrictedTimes: boolean }>;
+};
+export type SimulatorConfigurationDiagnostic = {
+  phase: "CONFIG" | "VENUE" | "RANGES" | "RENTALS" | "RESOURCES";
+  reason: "CONFIG_SHAPE" | "CONFIG_NUMBER" | "CONFIG_STRING" | "CONFIG_BOOLEAN" | "CONFIG_ARRAY" | "CONFIG_IDENTITY";
+  maintenanceModeState?: "FALSE" | "TRUE" | "NULL" | "MISSING" | "INVALID";
 };
 export type SimulatorResearchResult = {
   requestedUrl: string; url: string; observedAt: string; httpStatus: number; text: string; links: string[];
@@ -37,6 +42,7 @@ export type SimulatorResearchResult = {
   bookingLinks?: string[];
   calendar?: SimulatorPublicCalendar;
   jsonShape?: Array<{ path: string; type: string; count?: number }>;
+  configurationDiagnostic?: SimulatorConfigurationDiagnostic;
   blockedRequests?: number;
   admittedRequests?: number;
   renderComplete?: boolean;
@@ -106,13 +112,26 @@ export function summarizeSimulatorPublicJsonShape(value: unknown) {
   return shape;
 }
 
-function record(value: unknown): Json { if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("CONFIG_SHAPE"); return value as Json; }
-function number(value: unknown, min = 0, max = 1_000_000_000) { if (!Number.isInteger(value) || Number(value) < min || Number(value) > max) throw new Error("CONFIG_NUMBER"); return Number(value); }
+const ownedConfigurationErrors = new WeakMap<object, SimulatorConfigurationDiagnostic["reason"]>();
+function configurationError(reason: SimulatorConfigurationDiagnostic["reason"]): never {
+  const error = new Error(reason);
+  ownedConfigurationErrors.set(error, reason);
+  throw error;
+}
+function record(value: unknown): Json { if (!value || typeof value !== "object" || Array.isArray(value)) configurationError("CONFIG_SHAPE"); return value as Json; }
+function number(value: unknown, min = 0, max = 1_000_000_000) { if (!Number.isInteger(value) || Number(value) < min || Number(value) > max) configurationError("CONFIG_NUMBER"); return Number(value); }
 function id(value: unknown) { return String(number(value, 1)); }
-function string(value: unknown, max = 80) { if (typeof value !== "string" || value.length > max || /[<>\r\n\x00-\x1f]/u.test(value)) throw new Error("CONFIG_STRING"); return value; }
-function bool(value: unknown) { if (typeof value !== "boolean") throw new Error("CONFIG_BOOLEAN"); return value; }
-function array(value: unknown, max = 100): unknown[] { if (!Array.isArray(value) || value.length > max) throw new Error("CONFIG_ARRAY"); return value; }
+function string(value: unknown, max = 80) { if (typeof value !== "string" || value.length > max || /[<>\r\n\x00-\x1f]/u.test(value)) configurationError("CONFIG_STRING"); return value; }
+function bool(value: unknown) { if (typeof value !== "boolean") configurationError("CONFIG_BOOLEAN"); return value; }
+function array(value: unknown, max = 100): unknown[] { if (!Array.isArray(value) || value.length > max) configurationError("CONFIG_ARRAY"); return value; }
 function optionalNumber(value: unknown, max = 20) { return value === null || value === undefined ? null : number(value, 1, max); }
+function maintenanceModeState(value: unknown): NonNullable<SimulatorConfigurationDiagnostic["maintenanceModeState"]> {
+  return value === false ? "FALSE" : value === true ? "TRUE" : value === null ? "NULL" : value === undefined ? "MISSING" : "INVALID";
+}
+function uniqueConfigurationRows(rows: { id: string }[]) {
+  if (!rows.length) configurationError("CONFIG_ARRAY");
+  if (new Set(rows.map(row => row.id)).size !== rows.length) configurationError("CONFIG_IDENTITY");
+}
 
 function readInertNextData(html: string) {
   const scripts: string[] = [];
@@ -145,38 +164,53 @@ function publishedYourGolfBookingSlug(html: string, sourceUrl: string) {
 }
 
 /** Parse published inert JSON only. Never evaluate inline scripts or retain the original state. */
-export function extractSimulatorPublicCalendar(html: string, sourceUrl: string): Pick<SimulatorResearchResult, "calendar" | "jsonShape"> {
+export function extractSimulatorPublicCalendar(html: string, sourceUrl: string): Pick<SimulatorResearchResult, "calendar" | "jsonShape" | "configurationDiagnostic"> {
   const parsed = readInertNextData(html);
   if (parsed === undefined) return {};
   const shape = { jsonShape: summarizeSimulatorPublicJsonShape(parsed) };
+  let phase: SimulatorConfigurationDiagnostic["phase"] = "CONFIG";
+  let observedMaintenanceMode: SimulatorConfigurationDiagnostic["maintenanceModeState"];
   try {
     const url = publicUrl(sourceUrl);
     const slug = publicVenueSlug(sourceUrl, true);
     if (!slug || url.search || url.hash) return shape;
     const config = record(record(record(record(parsed).props).pageProps).initialReduxState);
-    const venue = record(config.venue), bays = record(config.bays);
+    phase = "VENUE";
+    const venue = record(config.venue);
+    observedMaintenanceMode = maintenanceModeState(venue.maintenanceMode);
     const venueId = id(venue.id), venueSlug = string(venue.slug), timeZone = string(venue.timezone);
-    if (venueSlug !== slug) return shape;
+    if (venueSlug !== slug) configurationError("CONFIG_IDENTITY");
+    const status = string(venue.status);
+    const maintenanceMode = venue.maintenanceMode === null ? null : bool(venue.maintenanceMode);
     new Intl.DateTimeFormat("en-US", { timeZone }).format();
+    phase = "RANGES";
     const ranges = array(record(config.ranges).items, 20).map(value => {
       const row = record(value);
-      if (id(row.venue) !== venueId) throw new Error("CONFIG_IDENTITY");
+      if (id(row.venue) !== venueId) configurationError("CONFIG_IDENTITY");
       return { id: id(row.id), venueId, slug: string(row.slug), bookable: bool(row.bookable), slotDurationMinutes: number(row.slotDuration, 1, 240), slotIntervalMinutes: number(row.slotInterval, 1, 240), slotIntervalStart: number(row.slotIntervalStart, 0, 1440), assumeOpen: bool(row.assumeOpen), bookingUi: string(row.bookingUi), customerBookingUi: string(row.customerBookingUi), maxBookAheadValue: number(row.maxBookAheadValue, 1, 365), maxBookAheadUnit: string(row.maxBookAheadUnit), openingHours: string(row.openingHours, 2000), hasOpeningTimeRestrictions: array(row.openingTimes).length > 0 };
     });
+    uniqueConfigurationRows(ranges);
+    phase = "RENTALS";
+    const bays = record(config.bays);
     const rentals = array(bays.bayOptions).flatMap(value => {
       const row = record(value);
       if (row.adminOnly !== false || row.type !== "simulator" || row.category !== "baytime" || id(row.venue) !== venueId) return [];
       return [{ id: id(row.id), venueId, name: string(row.name), type: "simulator" as const, category: "baytime" as const, adminOnly: false as const, disabled: bool(row.disabled), waitlisted: bool(row.waitlisted), duration: number(row.duration, 1, 48), durationType: string(row.durationType), minDurationSlots: number(row.minBookingDuration, 1, 48), maxDurationSlots: number(row.maxBookingDuration, 1, 48), minPlayers: optionalNumber(row.minPlayers), maxPlayers: optionalNumber(row.maxPlayers), bufferMinutes: number(row.bufferPeriodMinutes, 0, 1440), hasRestrictions: array(row.restrictions).length > 0, requiresPerks: array(row.appliedRequiredPerks, 20).length > 0 }];
     });
+    uniqueConfigurationRows(rentals);
+    phase = "RESOURCES";
     const resourceRows = array(bays.items).map(record).filter(row => row.type === "simulator");
-    if (resourceRows.length > 40) return shape;
+    if (resourceRows.length > 40) configurationError("CONFIG_ARRAY");
     const resources = resourceRows.map(row => {
-      if (id(row.venue) !== venueId || !ranges.some(range => range.id === id(row.range))) throw new Error("CONFIG_IDENTITY");
+      if (id(row.venue) !== venueId || !ranges.some(range => range.id === id(row.range))) configurationError("CONFIG_IDENTITY");
       return { id: id(row.id), venueId, rangeId: id(row.range), type: "simulator" as const, bookable: bool(row.bookable), optionIds: array(row.options).map(id).filter(value => rentals.some(rental => rental.id === value)), appliedOptionIds: array(row.appliedOptions).map(id).filter(value => rentals.some(rental => rental.id === value)), hasRestrictedTimes: array(row.restrictedTimes).length > 0 };
     });
-    if (!ranges.length || !rentals.length || !resources.length || [ranges, rentals, resources].some(rows => new Set(rows.map(row => row.id)).size !== rows.length)) return shape;
-    return { calendar: { family: "YOUR_GOLF_BOOKING", venue: { id: venueId, slug, timeZone, status: string(venue.status), maintenanceMode: bool(venue.maintenanceMode) }, ranges, rentals, resources } };
-  } catch { return shape; }
+    uniqueConfigurationRows(resources);
+    return { calendar: { family: "YOUR_GOLF_BOOKING", venue: { id: venueId, slug, timeZone, status, maintenanceMode }, ranges, rentals, resources } };
+  } catch (error) {
+    const reason = error !== null && typeof error === "object" ? ownedConfigurationErrors.get(error) : undefined;
+    return reason ? { ...shape, configurationDiagnostic: { phase, reason, ...(observedMaintenanceMode ? { maintenanceModeState: observedMaintenanceMode } : {}) } } : shape;
+  }
 }
 
 async function boundedBody(response: Response) {
@@ -348,7 +382,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
       if (readResult.location) { if (redirects === 4) throw new Error("SIMULATOR_RESEARCH_REDIRECT_LIMIT"); url = readResult.location; continue; }
       const result = resultFromBody(requestedUrl, readResult.url, readResult.status, readResult.contentType, readResult.body, now());
       const controls = /^(?:text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(readResult.contentType) ? detectSimulatorResearchAccessControls(readResult.body.toString("utf8")) : [];
-      return controls.length ? { ...result, text: "", links: [], bookingLinks: undefined, calendar: undefined, jsonShape: undefined, accessControls: controls } : result;
+      return controls.length ? { ...result, text: "", links: [], bookingLinks: undefined, calendar: undefined, jsonShape: undefined, configurationDiagnostic: undefined, accessControls: controls } : result;
     }
     throw new Error("SIMULATOR_RESEARCH_REDIRECT_LIMIT");
   }
@@ -425,7 +459,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
       if (!safeMainDocument) throw new Error("SIMULATOR_RESEARCH_REQUEST_LIMIT");
       const main = safeMainDocument;
       const facts = resultFromBody(requestedUrl, main.url, main.status, main.contentType, main.body, main.observedAt);
-      if (warning === "SECONDARY_STYLESHEET_URL_REJECTED") { delete facts.calendar; delete facts.jsonShape; delete facts.responseContracts; }
+      if (warning === "SECONDARY_STYLESHEET_URL_REJECTED") { delete facts.calendar; delete facts.jsonShape; delete facts.responseContracts; delete facts.configurationDiagnostic; }
       return { ...facts, method: "BROWSER",
         renderComplete: false, renderWarning: warning, contentProvenance: "MAIN_DOCUMENT_HTTP",
         blockedRequests, admittedRequests: requestCount };
