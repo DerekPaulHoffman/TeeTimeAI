@@ -2,7 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { Prisma, PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
 import { createSimulatorSupportIntentDigest, SIMULATOR_SUPPORT_SOURCE_SELECT } from "./simulator-support-policy";
 
@@ -33,17 +33,17 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     await client.$connect();
     dispatcher = await import("./course-support-course-dispatch"); lane = await import("./simulator-support-ownership"); incidents = await import("./simulator-support-incidents");
   });
-  afterAll(async () => {
-    if (client) {
-      const probes = await client.courseProbe.findMany({ where: { courseId: { in: ids.courses }, automationRunId: { not: null } }, select: { automationRunId: true } });
-      ids.runs.push(...probes.flatMap(probe => probe.automationRunId ? [probe.automationRunId] : []));
-      await client.automationRun.deleteMany({ where: { id: { in: ids.runs } } });
-      await client.course.deleteMany({ where: { id: { in: ids.courses } } });
-      await client.user.deleteMany({ where: { id: { in: ids.users } } });
-      await client.$disconnect();
-    }
-    vi.unstubAllEnvs();
-  });
+  async function cleanupFixtureRows() {
+    if (!client) return;
+    const probes = await client.courseProbe.findMany({ where: { courseId: { in: ids.courses }, automationRunId: { not: null } }, select: { automationRunId: true } });
+    ids.runs.push(...probes.flatMap(probe => probe.automationRunId ? [probe.automationRunId] : []));
+    await client.automationRun.deleteMany({ where: { id: { in: ids.runs } } });
+    await client.course.deleteMany({ where: { id: { in: ids.courses } } });
+    await client.user.deleteMany({ where: { id: { in: ids.users } } });
+    ids.runs.length = 0; ids.courses.length = 0; ids.users.length = 0;
+  }
+  afterEach(cleanupFixtureRows);
+  afterAll(async () => { await cleanupFixtureRows(); if (client) await client.$disconnect(); vi.unstubAllEnvs(); });
 
   async function fixture(cadenceMinutes = 15, mixed = false, bookingUrl?: string) {
     const suffix = randomUUID(), now = new Date();
@@ -189,21 +189,20 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     const before = new Set((await client.automationRun.findMany({ select: { id: true } })).map(row => row.id));
     const plan = await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: "mixed-parent", baseSha });
     if (!plan.acquired) throw new Error("Dispatcher transition was busy.");
-    expect(plan.value.launchItems).toHaveLength(2);
-    expect(plan.value.launchItems.every(item => item.mode === "SIMULATOR")).toBe(true);
-    expect(plan.value.reservedCount).toBe(2);
     const created = await client.automationRun.findMany({ where: { promptVersion: dispatcher.COURSE_DISPATCH_PROMPT_VERSION }, select: { id: true } });
     ids.runs.push(...created.filter(row => !before.has(row.id)).map(row => row.id));
-    const assignmentRef = plan.value.launchItems[0].assignmentRef;
+    expect(plan.value.launchItems).toHaveLength(2);
+    expect(plan.value.launchItems.every(item => item.mode === "SIMULATOR")).toBe(true);
+    expect(plan.value.reservedCount).toBeGreaterThanOrEqual(2);
+    const assignmentRef = plan.value.launchItems[0].assignmentRef, remaining = plan.value.launchItems[1].assignmentRef;
     await dispatcher.beginCourseSupportCourseDispatch({ ownerThreadId: "mixed-parent", assignmentRef });
     await dispatcher.bindCourseSupportCourseDispatch({ ownerThreadId: "mixed-parent", assignmentRef, childThreadId: "mixed-child" });
     expect(await dispatcher.getCourseSupportCourseDispatchAssignment({ assignmentRef, childThreadId: "mixed-child" })).toMatchObject({ outcome: "bound", mode: "SIMULATOR" });
     await expect(dispatcher.loadBoundCourseSupportDispatchAssignment({ assignmentRef, childThreadId: "mixed-child" })).rejects.toThrow();
     const claimed = await lane.claimSimulatorSupportAssignment({ assignmentRef, ownerThreadId: "mixed-child", baseSha, branch: "automation/course-support-mixed" });
     expect(claimed.acquired).toBe(true);
-    expect((await dispatcher.listLiveCourseSupportDispatchReservations(client)).filter(entry => entry.audit.target.mode === "SIMULATOR")).toHaveLength(2);
+    expect((await dispatcher.listLiveCourseSupportDispatchReservations(client)).filter(entry => [assignmentRef, remaining].includes(entry.audit.assignmentRef))).toHaveLength(2);
     if (claimed.acquired) await lane.retrySimulatorSupport({ assignmentRef, ownerThreadId: "mixed-child", token: claimed.value.token, revision: claimed.value.revision, retryMinutes: 15 });
-    const remaining = plan.value.launchItems[1].assignmentRef;
     await dispatcher.cancelCourseSupportCourseDispatch({ ownerThreadId: "mixed-parent", assignmentRef: remaining, confirmedNotCreated: true });
   });
 
@@ -391,6 +390,108 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     await lane.retrySimulatorSupport({ ...owner, revision: result.value.revision, retryMinutes: 15 });
   });
 
+  it("refuses owned retry without mutation while a fresh booking-role link survives a later page", async () => {
+    const f = await fixture(15, false, "https://booking.example.test/calendar");
+    const initial = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const audit = initial.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    const interruptedRequestId = randomUUID();
+    audit.simulatorResearch = { version: 1, sourceFingerprint: f.fingerprint, readCount: 2, links: [], bookingLinks: [], linkBaseUrl: null,
+      lastRecoveredFailureRequestId: interruptedRequestId, inFlight: null, history: [
+        { source: "booking", requestedUrl: f.offering.bookingUrl!, sourceUrl: f.offering.bookingUrl!, observedAt: new Date().toISOString(), httpStatus: 403, rendered: false, outcome: "READ" },
+        { source: "booking", requestedUrl: f.offering.bookingUrl!, sourceUrl: f.offering.bookingUrl!, observedAt: new Date().toISOString(), httpStatus: 0, rendered: true,
+          outcome: "HARD_FAILED", requestId: interruptedRequestId, failure: { stage: "PUBLIC_READ", category: "UNKNOWN", code: "RESEARCH_RESERVATION_INTERRUPTED" } },
+      ] };
+    await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
+    const first = await lane.readSimulatorSupportSource({ ...f.owner, source: "official" }, vi.fn(async () => new Response(
+      "<a href='/venue'>Book public hourly bays</a><a href='/details'>Venue details</a>", { headers: { "content-type": "text/html" } })));
+    if (!first.acquired) throw new Error("Official read failed.");
+    const firstRole = (await lane.readSimulatorSupportClaim(f.owner)).research.bookingLinkRoles?.[0];
+    expect(firstRole).toMatchObject({ url: "https://official.example.test/venue" });
+    const second = await lane.readSimulatorSupportSource({ ...f.owner, revision: first.value.revision, linkIndex: 2 }, vi.fn(async () => new Response(
+      "<a href='/venue'>Rental details</a>", { headers: { "content-type": "text/html" } })));
+    if (!second.acquired) throw new Error("Details read failed.");
+    const owner = { ...f.owner, revision: second.value.revision };
+    const inspected = await lane.readSimulatorSupportClaim(owner);
+    expect(inspected.research.bookingLinks).toContain("https://official.example.test/venue");
+    expect(inspected.research.bookingLinkRoles).toEqual([firstRole]);
+    const runBefore = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const incidentBefore = await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } });
+    const refused = await lane.retrySimulatorSupport({ ...owner, retryMinutes: 60 });
+    expect(refused.acquired).toBe(true);
+    if (!refused.acquired) throw new Error("Retry guard writer was busy.");
+    expect(refused.value).toMatchObject({ outcome: "booking_research_required", revision: owner.revision,
+      nextEligibleBookingRead: { linkIndex: 1, rendered: false } });
+    expect(refused.value.researchGuide.suggestedReads).toContainEqual({ linkIndex: 1, rendered: false });
+    expect(refused.value.researchGuide.readsRemaining).toBe(2);
+    expect(refused.value.researchGuide.suggestedReads).not.toContainEqual({ source: "booking", rendered: false });
+    expect(refused.value.researchGuide.suggestedReads).not.toContainEqual({ source: "booking", rendered: true });
+    expect(await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).toEqual(runBefore);
+    expect(await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } })).toEqual(incidentBefore);
+  });
+
+  it.each(["stale", "unlinked"])("drops %s booking-role evidence on a later successful page", async kind => {
+    const f = await fixture();
+    const first = await lane.readSimulatorSupportSource({ ...f.owner, source: "official" }, vi.fn(async () => new Response(
+      "<a href='/venue'>Book public hourly bays</a><a href='/details'>Venue details</a>", { headers: { "content-type": "text/html" } })));
+    if (!first.acquired) throw new Error("Official read failed.");
+    if (kind === "stale") {
+      const run = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+      const audit = run.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+      const research = audit.simulatorResearch as import("./simulator-support-research-policy").SimulatorResearchState;
+      research.bookingLinkRoles = [{ url: "https://official.example.test/venue", observedAt: new Date(Date.now() - 31 * 60_000).toISOString() }];
+      await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
+    }
+    const second = await lane.readSimulatorSupportSource({ ...f.owner, revision: first.value.revision, linkIndex: 2 }, vi.fn(async () => new Response(
+      kind === "stale" ? "<a href='/venue'>Rental details</a>" : "<a href='/other'>Other details</a>",
+      { headers: { "content-type": "text/html" } })));
+    if (!second.acquired) throw new Error("Details read failed.");
+    const inspected = await lane.readSimulatorSupportClaim({ ...f.owner, revision: second.value.revision });
+    expect(inspected.research.bookingLinks).toEqual([]);
+    expect(inspected.research.bookingLinkRoles).toEqual([]);
+  });
+
+  it("allows a durable retry when both saved calendar variants were attempted", async () => {
+    const f = await fixture(15, false, "https://booking.example.test/calendar");
+    const run = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const audit = run.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    audit.simulatorResearch = { version: 1, sourceFingerprint: f.fingerprint, readCount: 2, links: [], bookingLinks: [], linkBaseUrl: null, inFlight: null,
+      history: [
+        { source: "booking", requestedUrl: f.offering.bookingUrl!, sourceUrl: f.offering.bookingUrl!, observedAt: new Date().toISOString(), httpStatus: 403, rendered: false, outcome: "READ" },
+        { source: "booking", requestedUrl: f.offering.bookingUrl!, sourceUrl: f.offering.bookingUrl!, observedAt: new Date().toISOString(), httpStatus: 0, rendered: true,
+          outcome: "HARD_FAILED", requestId: randomUUID(), failure: { stage: "PUBLIC_READ", category: "UNKNOWN", code: "RESEARCH_RESERVATION_INTERRUPTED" } },
+      ] };
+    await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
+    const retry = await lane.retrySimulatorSupport({ ...f.owner, retryMinutes: 60 });
+    expect(retry.acquired && retry.value.outcome).toBe("retryable_failed");
+    expect(await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).toMatchObject({ status: "COMPLETED", outcome: "simulator_retryable_failed" });
+  });
+
+  it("allows provider-capacity backoff despite a still-linked booking role", async () => {
+    const f = await fixture();
+    const first = await lane.readSimulatorSupportSource({ ...f.owner, source: "official" }, vi.fn(async () => new Response(
+      "<a href='/venue'>Book public hourly bays</a>", { headers: { "content-type": "text/html" } })));
+    if (!first.acquired) throw new Error("Official read failed.");
+    const busy = await lane.readSimulatorSupportSource({ ...f.owner, revision: first.value.revision, linkIndex: 1 },
+      vi.fn(async () => { throw new Error("SIMULATOR_RESEARCH_PROVIDER_BUSY"); }));
+    if (!busy.acquired) throw new Error("Capacity observation failed.");
+    expect(busy.value.researchOutcome).toBe("CAPACITY_BUSY");
+    const retry = await lane.retrySimulatorSupport({ ...f.owner, revision: busy.value.revision, retryMinutes: 60 });
+    expect(retry.acquired && retry.value.outcome).toBe("retryable_failed");
+  });
+
+  it("fences retry against research navigation from a different source fingerprint", async () => {
+    const f = await fixture();
+    const stored = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const audit = stored.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    audit.simulatorResearch = { version: 1, sourceFingerprint: "f".repeat(64), readCount: 0, history: [], links: [], bookingLinks: [], linkBaseUrl: null, inFlight: null };
+    await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
+    const runBefore = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const incidentBefore = await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } });
+    await expect(lane.retrySimulatorSupport({ ...f.owner, retryMinutes: 60 })).rejects.toThrow("older source");
+    expect(await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).toEqual(runBefore);
+    expect(await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } })).toEqual(incidentBefore);
+  });
+
   it("reserves a source read before network work and blocks an overlapping same-revision read", async () => {
     const f = await fixture();
     let release!: () => void, started!: () => void;
@@ -411,11 +512,25 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     const read = await lane.readSimulatorSupportSource({ ...f.owner, source: "official" }, vi.fn(async () => new Response("forbidden", { status: 403 })));
     if (!read.acquired) throw new Error("Source read failed.");
     let owner = { ...f.owner, revision: read.value.revision };
-    await expect(lane.retrySimulatorSupport({ ...owner, retryMinutes: 15 })).rejects.toThrow("distinct saved official booking");
+    const guided = await lane.retrySimulatorSupport({ ...owner, retryMinutes: 15 });
+    expect(guided.acquired).toBe(true);
+    if (!guided.acquired) throw new Error("Booking fallback guide was busy.");
+    expect(guided.value).toMatchObject({ outcome: "booking_research_required", revision: owner.revision,
+      nextEligibleBookingRead: { source: "booking", rendered: false } });
     const booking = await lane.readSimulatorSupportSource({ ...owner, source: "booking" }, vi.fn(async () => new Response("<p>Calendar needs support</p>", { headers: { "content-type": "text/html" } })));
     if (!booking.acquired) throw new Error("Booking research failed.");
     owner = { ...owner, revision: booking.value.revision };
-    expect((await lane.retrySimulatorSupport({ ...owner, retryMinutes: 15 })).acquired).toBe(true);
+    const stillGuided = await lane.retrySimulatorSupport({ ...owner, retryMinutes: 15 });
+    expect(stillGuided.acquired && stillGuided.value.outcome).toBe("booking_research_required");
+    if (!stillGuided.acquired || stillGuided.value.outcome !== "booking_research_required") throw new Error("Rendered booking guide was unavailable.");
+    expect(stillGuided.value.nextEligibleBookingRead).toEqual({ source: "booking", rendered: true });
+    const busy = await lane.readSimulatorSupportSource({ ...owner, source: "booking", rendered: true }, {
+      browser: async () => { throw new Error("SIMULATOR_RESEARCH_PROVIDER_BUSY"); },
+    });
+    if (!busy.acquired) throw new Error("Provider backoff observation failed.");
+    owner = { ...owner, revision: busy.value.revision };
+    const closed = await lane.retrySimulatorSupport({ ...owner, retryMinutes: 15 });
+    expect(closed.acquired && closed.value.outcome).toBe("retryable_failed");
     expect(await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } })).toMatchObject({ status: "AUTO_INVESTIGATING" });
     const incident = await client.simulatorSupportIncident.update({ where: { id: f.incident.id }, data: { retryAt: new Date(0) } });
     const previous = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });

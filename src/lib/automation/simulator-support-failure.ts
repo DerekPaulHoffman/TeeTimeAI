@@ -26,6 +26,7 @@ const ownedMessages: Record<string, Classification> = {
   "Simulator support owner, revision or lease is stale.": { category: "OWNERSHIP", code: "OWNER_REVISION_OR_LEASE_STALE" },
   "Simulator source demand changed; preserve ownership and stop.": { category: "SOURCE", code: "SOURCE_DEMAND_CHANGED" },
   "Simulator offering source changed; an explicit owner adoption is required.": { category: "SOURCE", code: "OFFERING_SOURCE_CHANGED" },
+  "Simulator research navigation belongs to an older source; adopt the reviewed source before research.": { category: "SOURCE", code: "RESEARCH_SOURCE_CHANGED", stage: "TARGET_SELECTION" },
   "Simulator source changed during the public read.": { category: "SOURCE", code: "SOURCE_CHANGED_DURING_READ", stage: "POST_READ_OWNERSHIP" },
   "The original simulator source research reservation changed.": { category: "OWNERSHIP", code: "RESEARCH_RESERVATION_CHANGED", stage: "POST_READ_OWNERSHIP" },
   "Simulator source research is already in flight; inspect its original attempt before continuing.": { category: "OWNERSHIP", code: "RESEARCH_IN_FLIGHT", stage: "TARGET_SELECTION" },

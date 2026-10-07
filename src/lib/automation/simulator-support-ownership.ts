@@ -12,7 +12,7 @@ import { z } from "zod";
 import { collectSimulatorSupportResearch, type SimulatorResearchDependencies, type SimulatorResearchResult } from "./simulator-support-research";
 export { summarizeSimulatorSupportPublicHtml } from "./simulator-support-research";
 import { evaluateSimulatorSupportProgress } from "./simulator-support-progress";
-import { assertSimulatorResearchFallbackBeforeRetry, getSimulatorResearchGuide, readSimulatorResearchState, selectSimulatorResearchTarget, type SimulatorResearchState } from "./simulator-support-research-policy";
+import { assertSimulatorResearchFallbackBeforeRetry, getSimulatorResearchGuide, getSimulatorResearchRetryGuide, readSimulatorResearchState, selectSimulatorResearchTarget, type SimulatorResearchState } from "./simulator-support-research-policy";
 import { classifySimulatorSupportFailure, type SimulatorSupportFailure } from "./simulator-support-failure";
 
 type Owner = { assignmentRef: string; ownerThreadId: string; token: string; revision: number };
@@ -210,8 +210,26 @@ export async function readSimulatorSupportSource(input: Owner & { source?: "offi
     const state = readSimulatorResearchState(row.audit.simulatorResearch, row.source.fingerprint);
     if (state.inFlight?.requestId !== before.value.requestId) throw new Error("The original simulator source research reservation changed.");
     const usableDocument = read.httpStatus >= 200 && read.httpStatus < 300;
+    const roleEvidence = new Map<string, string>();
+    if (usableDocument) {
+      const linked = new Set(read.links);
+      const isFresh = (observedAt: string) => {
+        const timestamp = Date.parse(observedAt);
+        return Number.isFinite(timestamp) && timestamp >= now.getTime() - 30 * 60_000 && timestamp <= now.getTime();
+      };
+      for (const role of state.bookingLinkRoles ?? []) {
+        if (linked.has(role.url) && isFresh(role.observedAt)) roleEvidence.set(role.url, role.observedAt);
+      }
+      if (isFresh(read.observedAt)) {
+        for (const url of read.bookingLinks ?? []) {
+          if (linked.has(url)) roleEvidence.set(url, read.observedAt);
+        }
+      }
+    }
     const research: SimulatorResearchState = { ...state, inFlight: null, links: usableDocument ? read.links : state.links,
-      bookingLinks: usableDocument ? read.bookingLinks ?? [] : state.bookingLinks, linkBaseUrl: usableDocument ? read.url : state.linkBaseUrl,
+      bookingLinks: usableDocument ? [...roleEvidence.keys()] : state.bookingLinks,
+      bookingLinkRoles: usableDocument ? [...roleEvidence].map(([url, observedAt]) => ({ url, observedAt })) : state.bookingLinkRoles,
+      linkBaseUrl: usableDocument ? read.url : state.linkBaseUrl,
       history: [...state.history, { source: before.value.source, requestedUrl: before.value.url, sourceUrl: read.url,
         observedAt: read.observedAt, httpStatus: read.httpStatus, rendered: before.value.rendered, outcome,
         ...(knownFailure ? { requestId: before.value.requestId, failure: knownFailure } : {}) }] };
@@ -340,7 +358,7 @@ export function adoptSimulatorSupportSource(input: Owner & { expectedFingerprint
     const changed = row.source.fingerprint !== row.claim.sourceFingerprint;
     return saveClaim(tx, row, now, { sourceFingerprint: row.source.fingerprint, offeringRevision: row.source.offering.monitoringRevision,
       ...(changed ? { deployment: null, recheckQueuedAt: null, verificationCycle: 0 } : {}) },
-      changed ? { ...research, sourceFingerprint: row.source.fingerprint, links: [], bookingLinks: [], linkBaseUrl: null } : research);
+      changed ? { ...research, sourceFingerprint: row.source.fingerprint, links: [], bookingLinks: [], bookingLinkRoles: [], linkBaseUrl: null } : research);
   });
 }
 
@@ -436,8 +454,17 @@ export function retrySimulatorSupport(input: Owner & { retryMinutes: number }) {
   if (!Number.isSafeInteger(input.retryMinutes) || input.retryMinutes < 1 || input.retryMinutes > 1440) throw new Error("Simulator retry must be from 1 to 1440 minutes.");
   return withTransition(async (tx, now) => {
     const row = await loadOwned(tx, input, now);
-    assertSimulatorResearchFallbackBeforeRetry(readSimulatorResearchState(row.audit.simulatorResearch, row.source.fingerprint),
-      row.source.offering.bookingUrl, row.source.offering.course.website ?? row.source.offering.evidenceUrl);
+    const state = readSimulatorResearchState(row.audit.simulatorResearch, row.source.fingerprint);
+    if (state.sourceFingerprint !== row.source.fingerprint) throw new Error("Simulator research navigation belongs to an older source; adopt the reviewed source before retry.");
+    const officialUrl = row.source.offering.course.website ?? row.source.offering.evidenceUrl;
+    const bookingUrl = row.source.offering.bookingUrl;
+    const priorFailedRoutes = await readPriorFailedResearchRoutes(tx, row.source.offering.id, row.source.fingerprint);
+    const retryGuide = getSimulatorResearchRetryGuide({ state, officialUrl, bookingUrl, now, priorFailedRoutes });
+    if (retryGuide.bookingResearchRequired) return {
+      outcome: "booking_research_required" as const, revision: row.claim.revision, leaseExpiresAt: row.claim.leaseExpiresAt,
+      researchGuide: retryGuide.researchGuide, nextEligibleBookingRead: retryGuide.nextEligibleBookingRead,
+    };
+    if (!retryGuide.skipHomepageFallback) assertSimulatorResearchFallbackBeforeRetry(state, bookingUrl, officialUrl);
     const retryAt = new Date(now.getTime() + input.retryMinutes * 60_000);
     await tx.simulatorSupportIncident.update({ where: { id: row.source.incident.id }, data: { status: "AUTO_INVESTIGATING", retryAt } });
     await tx.automationRun.update({ where: { id: row.runId }, data: { status: "COMPLETED", completedAt: now, outcome: "simulator_retryable_failed" } });

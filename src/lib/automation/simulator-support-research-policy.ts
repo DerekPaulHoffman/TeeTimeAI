@@ -18,12 +18,25 @@ const stateSchema = z.object({
   readCount: z.number().int().min(0).max(SIMULATOR_RESEARCH_MAX_READS),
   history: z.array(observation).max(SIMULATOR_RESEARCH_MAX_READS),
   links: z.array(safeUrl).max(30), bookingLinks: z.array(safeUrl).max(30).default([]), linkBaseUrl: safeUrl.nullable(),
+  bookingLinkRoles: z.array(z.object({ url: safeUrl, observedAt: z.string().datetime() }).strict()).max(30).optional(),
   lastRecoveredFailureRequestId: z.string().uuid().optional(),
   inFlight: z.object({ requestId: z.string().uuid(), startedAt: z.string().datetime(), expiresAt: z.string().datetime(),
     source: z.enum(["official", "booking", "link"]), url: safeUrl, rendered: z.boolean() }).strict().nullable(),
-}).strict().refine(state => state.history.length + (state.inFlight ? 1 : 0) === state.readCount && state.bookingLinks.every(url => state.links.includes(url)));
+}).strict().refine(state => state.history.length + (state.inFlight ? 1 : 0) === state.readCount && state.bookingLinks.every(url => state.links.includes(url)) &&
+  (!state.bookingLinkRoles || new Set(state.bookingLinkRoles.map(role => role.url)).size === state.bookingLinkRoles.length &&
+    state.bookingLinkRoles.every(role => state.bookingLinks.includes(role.url))));
 export type SimulatorResearchState = z.infer<typeof stateSchema>;
 export type SimulatorResearchBlockedRoute = { url: string; rendered: boolean; httpStatus: number };
+
+function isFreshBookingLink(state: SimulatorResearchState, url: string, now: Date) {
+  if (!state.bookingLinks.includes(url)) return false;
+  if (state.bookingLinkRoles !== undefined) return state.bookingLinkRoles.some(role => role.url === url &&
+    Date.parse(role.observedAt) <= now.getTime() && Date.parse(role.observedAt) >= now.getTime() - 30 * 60_000);
+  // Legacy roles are usable only from their current last successful receipt.
+  // A subsequent successful read cannot carry them without original provenance.
+  const receipt = [...state.history].reverse().find(entry => entry.sourceUrl === state.linkBaseUrl && entry.httpStatus >= 200 && entry.httpStatus < 300);
+  return Boolean(receipt && Date.parse(receipt.observedAt) <= now.getTime() && Date.parse(receipt.observedAt) >= now.getTime() - 30 * 60_000);
+}
 
 export function readSimulatorResearchState(value: unknown, fingerprint: string): SimulatorResearchState {
   if (value === undefined) return { version: 1, sourceFingerprint: fingerprint, readCount: 0, history: [], links: [], bookingLinks: [], linkBaseUrl: null, inFlight: null };
@@ -55,7 +68,7 @@ export function selectSimulatorResearchTarget(input: {
     const previous = [...state.history].reverse().find(entry => entry.sourceUrl === state.linkBaseUrl && entry.httpStatus >= 200 && entry.httpStatus < 300);
     if (!previous || previous.httpStatus < 200 || previous.httpStatus >= 300 || new Date(previous.observedAt).getTime() < input.now.getTime() - 30 * 60_000 ||
         new URL(url).origin !== new URL(state.linkBaseUrl!).origin &&
-          !(state.bookingLinks.includes(url) && /\b(?:book(?:ing)?|reserv(?:e|ation)|appointments?|calendar)\b/i.test(new URL(url).pathname) ||
+          !(isFreshBookingLink(state, url, input.now) && /\b(?:book(?:ing)?|reserv(?:e|ation)|appointments?|calendar)\b/i.test(new URL(url).pathname) ||
             input.bookingUrl && new URL(url).hostname === new URL(input.bookingUrl).hostname)) {
       throw new Error("The selected link is not a fresh same-site page or official booking handoff.");
     }
@@ -73,9 +86,11 @@ export function getSimulatorResearchGuide(input: {
   state: SimulatorResearchState; officialUrl: string | null; bookingUrl: string | null;
   now: Date; priorFailedRoutes: SimulatorResearchBlockedRoute[];
 }) {
+  const roleLinks = input.state.links.flatMap((url, index) => isFreshBookingLink(input.state, url, input.now) ? [index] : []);
+  const genericLinks = input.state.links.flatMap((_, index) => roleLinks.includes(index) ? [] : [index]);
   const routes: Array<{ source?: "official" | "booking"; linkIndex?: number; rendered: boolean }> = [
     { source: "booking" as const, rendered: false }, { source: "booking" as const, rendered: true },
-    ...input.state.links.flatMap((_, index) => [{ linkIndex: index + 1, rendered: false }, { linkIndex: index + 1, rendered: true }]),
+    ...[...roleLinks, ...genericLinks].flatMap(index => [{ linkIndex: index + 1, rendered: false }, { linkIndex: index + 1, rendered: true }]),
     { source: "official" as const, rendered: false }, { source: "official" as const, rendered: true },
   ];
   const seen = new Set<string>();
@@ -91,6 +106,42 @@ export function getSimulatorResearchGuide(input: {
   return { readsRemaining: SIMULATOR_RESEARCH_MAX_READS - input.state.readCount,
     inFlight: Boolean(input.state.inFlight), suggestedReads,
     priorBlockedRoutes: input.priorFailedRoutes.map(route => ({ ...route })) };
+}
+
+/** Route identity is the public URL plus rendered/plain mode, not URL alone. */
+export function getSimulatorResearchRetryGuide(input: {
+  state: SimulatorResearchState; officialUrl: string | null; bookingUrl: string | null;
+  now: Date; priorFailedRoutes: SimulatorResearchBlockedRoute[];
+}) {
+  const { state } = input;
+  if (state.inFlight) throw new Error("Finish or reconcile the original source research attempt before retry.");
+  const researchGuide = getSimulatorResearchGuide(input);
+  type Route = (typeof researchGuide.suggestedReads)[number];
+  type CloseoutReason = "HARD_FAILURE" | "READ_BUDGET_EXHAUSTED" | "PROVIDER_BACKOFF" |
+    "NO_ALLOWED_RESEARCH_ROUTES" | "NO_ELIGIBLE_BOOKING_ROUTES" | null;
+  const result = (nextEligibleBookingRead: Route | null, skipHomepageFallback: boolean, closeoutReason: CloseoutReason) => ({
+    researchGuide, nextEligibleBookingRead, bookingResearchRequired: Boolean(nextEligibleBookingRead), skipHomepageFallback, closeoutReason,
+  });
+  const latest = state.history.at(-1);
+  if (latest?.outcome === "HARD_FAILED" && latest.requestId !== state.lastRecoveredFailureRequestId) return result(null, true, "HARD_FAILURE");
+  if (state.readCount >= SIMULATOR_RESEARCH_MAX_READS) return result(null, true, "READ_BUDGET_EXHAUSTED");
+  const recognizedNetwork = latest?.outcome === "NETWORK_FAILED" && latest.httpStatus === 0 && latest.requestId &&
+    latest.failure?.stage === "PUBLIC_READ" && latest.failure.category === "NETWORK" && readSafeSimulatorSupportFailure(latest.failure);
+  if (latest?.outcome === "CAPACITY_BUSY" || latest?.httpStatus === 429 || recognizedNetwork ||
+      latest?.outcome === "READ" && latest.httpStatus >= 500 && latest.httpStatus <= 599) return result(null, true, "PROVIDER_BACKOFF");
+  if (researchGuide.suggestedReads.length === 0) return result(null, true, "NO_ALLOWED_RESEARCH_ROUTES");
+  const official = getSafeCustomerBookingUrl(input.officialUrl);
+  const booking = getSafeCustomerBookingUrl(input.bookingUrl);
+  const distinctSavedBooking = Boolean(booking && (!official || new URL(booking).href !== new URL(official).href));
+  const next = researchGuide.suggestedReads.find(route => {
+    const selected = selectSimulatorResearchTarget({ ...input, ...route });
+    return selected.source === "booking" && distinctSavedBooking || selected.source === "link" &&
+      isFreshBookingLink(state, selected.url, input.now) && (!official || new URL(selected.url).href !== new URL(official).href);
+  });
+  if (next) return result(next, false, null);
+  // Do not let the older homepage assertion demand a saved booking route whose
+  // URL/mode is already consumed or denied by current source/budget guards.
+  return result(null, distinctSavedBooking, distinctSavedBooking ? "NO_ELIGIBLE_BOOKING_ROUTES" : null);
 }
 
 export function assertSimulatorResearchFallbackBeforeRetry(state: SimulatorResearchState, bookingUrl: string | null, officialUrl?: string | null) {

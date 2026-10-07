@@ -16,6 +16,17 @@ describe("simulator support failure receipts", () => {
     expect(classifySimulatorSupportFailure(error)).toEqual({ stage: "POST_READ_OWNERSHIP", category: "SOURCE", code: "SOURCE_CHANGED_DURING_READ", sourceLocation: "src/lib/automation/simulator-support-ownership.ts:149" });
   });
 
+  it("classifies a stale owned research audit without exposing its source details", () => {
+    const error = new Error("Simulator research navigation belongs to an older source; adopt the reviewed source before research.");
+    error.stack = "Error: private-source https://private.example.test?token=secret\n    at retrySimulatorSupport (C:\\private\\TeeTimeAI\\src\\lib\\automation\\simulator-support-ownership.ts:462:1)";
+    const failure = classifySimulatorSupportFailure(error);
+    expect(failure).toEqual({ stage: "TARGET_SELECTION", category: "SOURCE", code: "RESEARCH_SOURCE_CHANGED",
+      sourceLocation: "src/lib/automation/simulator-support-ownership.ts:462" });
+    expect(readSafeSimulatorSupportFailure(failure)).toEqual(failure);
+    expect(JSON.stringify(failure)).not.toContain("private.example.test");
+    expect(JSON.stringify(failure)).not.toContain("secret");
+  });
+
   it("classifies allowlisted public transport, browser and database causes without copying their details", () => {
     const network = new Error("Get https://secret.example.test/path?token=private failed", { cause: Object.assign(new Error("hidden request"), { code: "ECONNRESET" }) });
     expect(classifySimulatorSupportFailure(network)).toMatchObject({ stage: "PUBLIC_READ", category: "NETWORK", code: "CONNECTION_RESET" });
