@@ -43,6 +43,7 @@ export type SimulatorResearchResult = {
   renderWarning?: "SECONDARY_REQUEST_BUDGET_EXHAUSTED" | "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED";
   contentProvenance?: "MAIN_DOCUMENT_HTTP" | "RENDERED_DOM";
   accessControls?: Array<"CAPTCHA_OR_CHALLENGE" | "ACCOUNT_REQUIRED" | "QUEUE">;
+  accessControlsObserved?: true;
   responseContracts?: Array<{ pathShape: string; queryKeys: string[]; httpStatus: number; shape: NonNullable<SimulatorResearchResult["jsonShape"]> }>;
 };
 
@@ -291,6 +292,11 @@ function knownPublicNetworkError(error: unknown) {
 
 /** Caller owns and revalidates the simulator claim before/after this bounded public read. */
 export async function collectSimulatorSupportResearch(input: { url: string; render?: boolean }, dependencies: SimulatorResearchDependencies = {}): Promise<SimulatorResearchResult> {
+  const result = await collectOwnedSimulatorSupportResearch(input, dependencies);
+  return { ...result, accessControlsObserved: true, accessControls: result.accessControls ?? [] };
+}
+
+async function collectOwnedSimulatorSupportResearch(input: { url: string; render?: boolean }, dependencies: SimulatorResearchDependencies): Promise<SimulatorResearchResult> {
   const requestedUrl = publicUrl(input.url).href;
   const now = dependencies.now ?? (() => new Date());
   const deadline = AbortSignal.timeout(DEADLINE_MS);

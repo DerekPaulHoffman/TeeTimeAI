@@ -97,7 +97,7 @@ describe("bounded owned simulator public research transport", () => {
     const fetch = vi.fn(async () => response("Forbidden", 403));
     const result = await collectSimulatorSupportResearch({ url: source }, { fetch, lease, now: () => instant });
     expect(result).toMatchObject({ requestedUrl: `${source}/`, httpStatus: 403, text: "", links: [], method: "HTTP" });
-    expect(result.accessControls).toBeUndefined();
+    expect(result).toMatchObject({ accessControlsObserved: true, accessControls: [] });
     expect(fetch).toHaveBeenCalledWith(`${source}/`, expect.objectContaining({ method: "GET", credentials: "omit", redirect: "manual" }));
     expect(lease).toHaveBeenCalledWith("venue.example.test", expect.any(Function));
   });

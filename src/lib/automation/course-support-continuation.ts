@@ -62,13 +62,15 @@ const ledgerSchema = z.object({ version: z.literal(1), receipts: z.array(receipt
 export type CourseSupportContinuationLedger = z.infer<typeof ledgerSchema>;
 
 export type CourseSupportContinuationCheckpoint = {
-  kind: "SETTLED_FAILURE" | "EXPIRED_UNFINISHED_READ";
+  kind: "SETTLED_FAILURE" | "EXPIRED_UNFINISHED_READ" | "EXPIRED_SETTLED_PUBLIC_READ";
   observedAt: string;
   readCount: number;
   requestId: string | null;
   failure: SimulatorSupportFailure | null;
   allowedResearchRouteCount: number;
   providerReadInFlight: boolean;
+  publicReadEvidence?: { sourceFingerprint: string; accessControlsObserved: true; accessControls: Array<"CAPTCHA_OR_CHALLENGE" | "ACCOUNT_REQUIRED" | "QUEUE">;
+    method: "HTTP" | "BROWSER"; renderComplete?: boolean; httpStatus: number };
 };
 
 export type CourseSupportReviewedToolingRepair = {
@@ -378,7 +380,8 @@ function checkpointDigest(checkpoint: CourseSupportContinuationCheckpoint) {
   // Re-reading a guide, refreshing readiness, or renewing a lease cannot create
   // a new attempt for the same settled failure.
   return hash({ kind: checkpoint.kind, observedAt: checkpoint.observedAt, readCount: checkpoint.readCount,
-    requestId: checkpoint.requestId, failure: checkpoint.failure });
+    requestId: checkpoint.requestId, failure: checkpoint.failure,
+    ...(checkpoint.publicReadEvidence ? { publicReadEvidence: checkpoint.publicReadEvidence } : {}) });
 }
 
 function completionDigest(receipt: CourseSupportNativeCompletion) {
@@ -401,10 +404,20 @@ const retryableNetworkCodes = new Set([
   "BROWSER_CONNECTION_REFUSED", "BROWSER_CONNECTION_CLOSED", "BROWSER_OFFLINE",
 ]);
 
+function hasSettledPublicEvidence(checkpoint: CourseSupportContinuationCheckpoint) {
+  const proof = checkpoint.publicReadEvidence;
+  return checkpoint.failure === null && Boolean(checkpoint.requestId && z.string().uuid().safeParse(checkpoint.requestId).success) &&
+    checkpoint.readCount < 6 && checkpoint.allowedResearchRouteCount > 0 && Boolean(proof &&
+      digest.safeParse(proof.sourceFingerprint).success && proof.accessControlsObserved === true && Array.isArray(proof.accessControls) && proof.accessControls.length === 0 &&
+      Number.isInteger(proof.httpStatus) && proof.httpStatus >= 200 && proof.httpStatus < 300 &&
+      (proof.method === "HTTP" || proof.method === "BROWSER" && proof.renderComplete === true));
+}
+
 /** Read-only candidates still require fresh native and exact-release proof. */
 export function isCourseSupportContinuationCandidateCheckpoint(checkpoint: CourseSupportContinuationCheckpoint) {
   if (checkpoint.providerReadInFlight || !Number.isInteger(checkpoint.readCount) || checkpoint.readCount < 1 || checkpoint.readCount > 6) return false;
   if (checkpoint.kind === "EXPIRED_UNFINISHED_READ") return checkpoint.failure === null && Boolean(checkpoint.requestId);
+  if (checkpoint.kind === "EXPIRED_SETTLED_PUBLIC_READ") return hasSettledPublicEvidence(checkpoint);
   const failure = checkpoint.failure;
   return failure?.stage === "PUBLIC_READ" && (
     failure.category === "NETWORK" && retryableNetworkCodes.has(failure.code) && checkpoint.readCount < 6 && checkpoint.allowedResearchRouteCount > 0 ||
@@ -452,6 +465,10 @@ export function assessCourseSupportContinuationCheckpoint(input: {
   }
   if (checkpoint.providerReadInFlight) return { eligible: false, reason: "PROVIDER_READ_STILL_ACTIVE" };
   const failure = checkpoint.failure;
+  if (checkpoint.kind === "EXPIRED_SETTLED_PUBLIC_READ" && hasSettledPublicEvidence(checkpoint) &&
+      Date.parse(checkpoint.observedAt) >= now.getTime() - 30 * 60_000) {
+    return { eligible: true, scope: "RESUME_ALLOWED_RESEARCH", checkpointDigest: checkpointDigest(checkpoint) };
+  }
   if (checkpoint.kind === "SETTLED_FAILURE" && failure?.stage === "PUBLIC_READ" &&
       failure.category === "NETWORK" && retryableNetworkCodes.has(failure.code) &&
       checkpoint.readCount < 6 && checkpoint.allowedResearchRouteCount > 0) {
@@ -493,7 +510,8 @@ export function reserveCourseSupportContinuationReceipt(input: {
   const ledger = readCourseSupportContinuationLedger(input.ledger);
   if (![input.assignmentRef, input.childThreadId, input.parentThreadId].every(value => reference.safeParse(value).success) ||
       input.childThreadId === input.parentThreadId || !digest.safeParse(input.sourceFingerprint).success ||
-      !input.currentSource || !input.originalPrivateChild) return { reserved: false as const, reason: "ORIGINAL_SOURCE_OR_OWNER_NOT_CURRENT" };
+      !input.currentSource || !input.originalPrivateChild ||
+      input.checkpoint.kind === "EXPIRED_SETTLED_PUBLIC_READ" && input.checkpoint.publicReadEvidence?.sourceFingerprint !== input.sourceFingerprint) return { reserved: false as const, reason: "ORIGINAL_SOURCE_OR_OWNER_NOT_CURRENT" };
   const native = courseSupportNativeCompletionSchema.safeParse(input.nativeCompletion);
   const readiness = courseSupportContinuationReadinessSchema.safeParse(input.readiness);
   if (!native.success || !readiness.success || native.data.threadId !== input.childThreadId ||

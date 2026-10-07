@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertSimulatorResearchFallbackBeforeRetry, getSimulatorResearchGuide, getSimulatorResearchRetryGuide, readSimulatorResearchState, selectSimulatorResearchTarget } from "./simulator-support-research-policy";
+import { assertSimulatorResearchFallbackBeforeRetry, getSimulatorResearchGuide, getSimulatorResearchRetryGuide, readSettledSimulatorPublicCheckpoint, readSimulatorResearchState, selectSimulatorResearchTarget } from "./simulator-support-research-policy";
 
 const fingerprint = "a".repeat(64), now = new Date("2026-10-06T20:00:00Z");
 const officialUrl = "https://venue.example.test", bookingUrl = "https://calendar.example.test/booking/bays";
@@ -192,5 +192,28 @@ describe("calendar research required before incomplete simulator retry", () => {
       .toEqual([{ url: bookingUrl, observedAt: now.toISOString() }]);
     expect(() => readSimulatorResearchState({ ...state, bookingLinkRoles: [{ url: `${officialUrl}/about`, observedAt: now.toISOString() }] }, fingerprint)).toThrow();
     expect(() => readSimulatorResearchState({ ...state, bookingLinkRoles: Array.from({ length: 2 }, () => ({ url: bookingUrl, observedAt: now.toISOString() })) }, fingerprint)).toThrow();
+  });
+  it("requires explicit fresh access evidence for a settled-public recovery checkpoint", () => {
+    const state: ReturnType<typeof empty> = { ...empty(), readCount: 1, history: [{ source: "official", requestedUrl: officialUrl,
+      sourceUrl: officialUrl, observedAt: now.toISOString(), httpStatus: 200, rendered: false, outcome: "READ",
+      requestId: "11111111-2222-4333-8444-555555555555", publicReadEvidence: { sourceFingerprint: fingerprint, accessControlsObserved: true, accessControls: [], method: "HTTP" } }] };
+    expect(readSettledSimulatorPublicCheckpoint(readSimulatorResearchState(state, fingerprint), now)).toMatchObject({ requestId: state.history[0].requestId });
+    const legacy = { ...state, history: [{ ...state.history[0], publicReadEvidence: undefined }] };
+    expect(readSettledSimulatorPublicCheckpoint(legacy, now)).toBeNull();
+    expect(readSettledSimulatorPublicCheckpoint({ ...state, sourceFingerprint: "b".repeat(64) }, now)).toBeNull();
+    for (const control of ["ACCOUNT_REQUIRED", "CAPTCHA_OR_CHALLENGE", "QUEUE"] as const) {
+      expect(readSettledSimulatorPublicCheckpoint({ ...state, history: [{ ...state.history[0], publicReadEvidence: { ...state.history[0].publicReadEvidence!, accessControls: [control] } }] }, now)).toBeNull();
+    }
+    expect(readSettledSimulatorPublicCheckpoint(state, new Date(now.getTime() + 31 * 60_000))).toBeNull();
+    expect(readSettledSimulatorPublicCheckpoint({ ...state, readCount: 6 }, now)).toBeNull();
+    expect(readSettledSimulatorPublicCheckpoint({ ...state, history: [{ ...state.history[0], httpStatus: 403 }] }, now)).toBeNull();
+    const browser = { ...state.history[0], rendered: true, publicReadEvidence: { sourceFingerprint: fingerprint, accessControlsObserved: true as const, accessControls: [], method: "BROWSER" as const, renderComplete: false } };
+    expect(readSettledSimulatorPublicCheckpoint({ ...state, history: [browser] }, now)).toBeNull();
+    expect(readSettledSimulatorPublicCheckpoint({ ...state, history: [{ ...browser, publicReadEvidence: { ...browser.publicReadEvidence, renderComplete: true } }] }, now)).not.toBeNull();
+    const challenged = { ...state.history[0], publicReadEvidence: { ...state.history[0].publicReadEvidence!, accessControls: ["QUEUE" as const] } };
+    expect(readSettledSimulatorPublicCheckpoint({ ...state, readCount: 2, history: [challenged, state.history[0]] }, now)).toBeNull();
+    expect(readSettledSimulatorPublicCheckpoint({ ...state, inFlight: { requestId: state.history[0].requestId!, source: "booking", url: bookingUrl, rendered: false, startedAt: now.toISOString(), expiresAt: now.toISOString() } }, now)).toBeNull();
+    expect(() => readSimulatorResearchState({ ...state, history: [{ ...state.history[0], rendered: true }] }, fingerprint)).toThrow();
+    expect(() => readSimulatorResearchState({ ...state, history: [{ ...state.history[0], requestId: undefined }] }, fingerprint)).toThrow();
   });
 });

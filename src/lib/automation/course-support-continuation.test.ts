@@ -49,6 +49,23 @@ function delivered(value: ReturnType<typeof reserved>) {
 }
 
 describe("bounded same-original-native-worker continuation", () => {
+  it("resumes one expired settled public read without relabeling it as a failure or replaying its checkpoint", () => {
+    const settled: CourseSupportContinuationCheckpoint = { ...checkpoint, kind: "EXPIRED_SETTLED_PUBLIC_READ", failure: null,
+      requestId: "11111111-2222-4333-8444-555555555555", publicReadEvidence: { sourceFingerprint: input().sourceFingerprint, accessControlsObserved: true, accessControls: [], method: "HTTP", httpStatus: 200 } };
+    const first = reserved({ ...input(), checkpoint: settled });
+    expect(first.receipt.scope).toBe("RESUME_ALLOWED_RESEARCH");
+    expect(reserveCourseSupportContinuationReceipt({ ...input(), sourceFingerprint: "e".repeat(64), checkpoint: settled })).toMatchObject({ reserved: false, reason: "ORIGINAL_SOURCE_OR_OWNER_NOT_CURRENT" });
+    expect(reserveCourseSupportContinuationReceipt({ ...input(), checkpoint: settled, ledger: delivered(first),
+      nativeCompletion: { ...input().nativeCompletion, latestTurn: { id: "later-completed-turn", status: "completed", error: null } },
+    })).toMatchObject({ reserved: false, reason: "CHECKPOINT_ALREADY_REQUESTED" });
+    for (const changed of [
+      { ...settled, publicReadEvidence: undefined }, { ...settled, readCount: 6 }, { ...settled, allowedResearchRouteCount: 0 },
+      { ...settled, providerReadInFlight: true }, { ...settled, observedAt: "2026-10-07T07:00:00.000Z" },
+      { ...settled, failure: { stage: "PUBLIC_READ" as const, category: "UNKNOWN" as const, code: "UNCLASSIFIED_FAILURE" } },
+      { ...settled, publicReadEvidence: { ...settled.publicReadEvidence!, accessControls: ["ACCOUNT_REQUIRED" as const] } },
+      { ...settled, publicReadEvidence: { ...settled.publicReadEvidence!, method: "BROWSER" as const, renderComplete: false } },
+    ]) expect(assessCourseSupportContinuationCheckpoint({ checkpoint: changed, currentMainSha: releaseSha, now })).toMatchObject({ eligible: false });
+  });
   it("accepts a completed latest turn even when thread metadata is not loaded", () => {
     const result = reserved();
     expect(result.receipt).toMatchObject({ status: "PENDING", childThreadId: child,

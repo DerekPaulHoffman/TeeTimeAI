@@ -6,13 +6,22 @@ export const SIMULATOR_RESEARCH_MAX_READS = 6;
 const safeUrl = z.string().refine(value => Boolean(getSafeCustomerBookingUrl(value)));
 const safeFailure = z.custom<SimulatorSupportFailure>(value => readSafeSimulatorSupportFailure(value) !== null)
   .transform(value => readSafeSimulatorSupportFailure(value)!);
+const publicReadEvidence = z.object({
+  sourceFingerprint: z.string().regex(/^[a-f0-9]{64}$/i),
+  accessControlsObserved: z.literal(true),
+  accessControls: z.array(z.enum(["CAPTCHA_OR_CHALLENGE", "ACCOUNT_REQUIRED", "QUEUE"])).max(3),
+  method: z.enum(["HTTP", "BROWSER"]), renderComplete: z.boolean().optional(),
+}).strict();
 const observation = z.object({
   source: z.enum(["official", "booking", "link"]), requestedUrl: safeUrl, sourceUrl: safeUrl,
   observedAt: z.string().datetime(), httpStatus: z.number().int().min(0).max(599), rendered: z.boolean(),
   outcome: z.enum(["READ", "NETWORK_FAILED", "CAPACITY_BUSY", "HARD_FAILED"]),
   requestId: z.string().uuid().optional(), failure: safeFailure.optional(),
+  publicReadEvidence: publicReadEvidence.optional(),
 }).strict().refine(entry => entry.outcome === "HARD_FAILED" ? Boolean(entry.requestId && entry.failure && entry.httpStatus === 0) :
-  !entry.failure || Boolean(entry.requestId && entry.httpStatus === 0 && ["NETWORK_FAILED", "CAPACITY_BUSY"].includes(entry.outcome)));
+  !entry.failure || Boolean(entry.requestId && entry.httpStatus === 0 && ["NETWORK_FAILED", "CAPACITY_BUSY"].includes(entry.outcome)))
+  .refine(entry => !entry.publicReadEvidence || Boolean(entry.requestId && entry.outcome === "READ" &&
+    entry.publicReadEvidence.method === (entry.rendered ? "BROWSER" : "HTTP")));
 const stateSchema = z.object({
   version: z.literal(1), sourceFingerprint: z.string().regex(/^[a-f0-9]{64}$/i),
   readCount: z.number().int().min(0).max(SIMULATOR_RESEARCH_MAX_READS),
@@ -27,6 +36,20 @@ const stateSchema = z.object({
     state.bookingLinkRoles.every(role => state.bookingLinks.includes(role.url))));
 export type SimulatorResearchState = z.infer<typeof stateSchema>;
 export type SimulatorResearchBlockedRoute = { url: string; rendered: boolean; httpStatus: number };
+
+/** Legacy reads retain unknown access evidence; only new owned settlements qualify. */
+export function readSettledSimulatorPublicCheckpoint(state: SimulatorResearchState, now: Date) {
+  const last = state.history.at(-1);
+  if (state.inFlight || state.readCount < 1 || state.readCount >= SIMULATOR_RESEARCH_MAX_READS ||
+      state.history.some(entry => entry.outcome === "HARD_FAILED" || (entry.publicReadEvidence?.accessControls.length ?? 0) > 0) || !last || last.outcome !== "READ" ||
+      last.httpStatus < 200 || last.httpStatus >= 300 || !last.requestId || !last.publicReadEvidence ||
+      last.publicReadEvidence.sourceFingerprint !== state.sourceFingerprint ||
+      last.publicReadEvidence.accessControlsObserved !== true || last.publicReadEvidence.accessControls.length ||
+      last.rendered && last.publicReadEvidence.renderComplete !== true ||
+      Date.parse(last.observedAt) > now.getTime() || Date.parse(last.observedAt) < now.getTime() - 30 * 60_000) return null;
+  return { observedAt: last.observedAt, requestId: last.requestId,
+    publicReadEvidence: { ...last.publicReadEvidence, httpStatus: last.httpStatus } };
+}
 
 function isFreshBookingLink(state: SimulatorResearchState, url: string, now: Date) {
   if (!state.bookingLinks.includes(url)) return false;

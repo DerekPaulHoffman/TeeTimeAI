@@ -12,7 +12,7 @@ import { z } from "zod";
 import { collectSimulatorSupportResearch, type SimulatorResearchDependencies, type SimulatorResearchResult } from "./simulator-support-research";
 export { summarizeSimulatorSupportPublicHtml } from "./simulator-support-research";
 import { evaluateSimulatorSupportProgress } from "./simulator-support-progress";
-import { assertSimulatorResearchFallbackBeforeRetry, getSimulatorResearchGuide, getSimulatorResearchRetryGuide, readSimulatorResearchState, selectSimulatorResearchTarget, type SimulatorResearchState } from "./simulator-support-research-policy";
+import { assertSimulatorResearchFallbackBeforeRetry, getSimulatorResearchGuide, getSimulatorResearchRetryGuide, readSettledSimulatorPublicCheckpoint, readSimulatorResearchState, selectSimulatorResearchTarget, type SimulatorResearchState } from "./simulator-support-research-policy";
 import { classifySimulatorSupportFailure, type SimulatorSupportFailure } from "./simulator-support-failure";
 
 type Owner = { assignmentRef: string; ownerThreadId: string; token: string; revision: number };
@@ -86,17 +86,21 @@ export async function readSimulatorSupportContinuationContext(tx: Prisma.Transac
   const expiredPending = pending && new Date(pending.expiresAt) <= now;
   const settledFailure = !pending && Boolean(last?.failure && ["HARD_FAILED", "NETWORK_FAILED", "CAPACITY_BUSY"].includes(last.outcome)) &&
     last?.requestId !== research.lastRecoveredFailureRequestId;
+  const settledPublic = audit.simulatorClaim.phase === "CLAIMED" && !audit.simulatorClaim.plannedPaths.length &&
+    !audit.simulatorClaim.releaseSha && new Date(audit.simulatorClaim.leaseExpiresAt) <= now
+    ? readSettledSimulatorPublicCheckpoint(research, now) : null;
   const failure: SimulatorSupportFailure = { stage: "PUBLIC_READ", category: "UNKNOWN", code: "RESEARCH_RESERVATION_INTERRUPTED" };
   const routeState: SimulatorResearchState = expiredPending ? { ...research, inFlight: null, history: [...research.history, {
     source: pending.source, requestedUrl: pending.url, sourceUrl: pending.url, observedAt: now.toISOString(),
     httpStatus: 0, rendered: pending.rendered, outcome: "HARD_FAILED", requestId: pending.requestId, failure,
   }] } : research;
-  const checkpoint = settledFailure || expiredPending ? {
-    kind: settledFailure ? "SETTLED_FAILURE" as const : "EXPIRED_UNFINISHED_READ" as const,
-    observedAt: settledFailure ? last!.observedAt : pending!.expiresAt,
+  const checkpoint = settledFailure || expiredPending || settledPublic ? {
+    kind: settledFailure ? "SETTLED_FAILURE" as const : expiredPending ? "EXPIRED_UNFINISHED_READ" as const : "EXPIRED_SETTLED_PUBLIC_READ" as const,
+    observedAt: settledFailure ? last!.observedAt : expiredPending ? pending!.expiresAt : settledPublic!.observedAt,
     readCount: research.readCount,
-    requestId: settledFailure ? last!.requestId! : pending!.requestId,
+    requestId: settledFailure ? last!.requestId! : expiredPending ? pending!.requestId : settledPublic!.requestId,
     failure: settledFailure ? last!.failure! : null,
+    ...(settledPublic ? { publicReadEvidence: settledPublic.publicReadEvidence } : {}),
     allowedResearchRouteCount: getSimulatorResearchGuide({ state: routeState,
       officialUrl: source.offering.course.website ?? source.offering.evidenceUrl,
       bookingUrl: source.offering.bookingUrl, now,
@@ -232,7 +236,13 @@ export async function readSimulatorSupportSource(input: Owner & { source?: "offi
       linkBaseUrl: usableDocument ? read.url : state.linkBaseUrl,
       history: [...state.history, { source: before.value.source, requestedUrl: before.value.url, sourceUrl: read.url,
         observedAt: read.observedAt, httpStatus: read.httpStatus, rendered: before.value.rendered, outcome,
-        ...(knownFailure ? { requestId: before.value.requestId, failure: knownFailure } : {}) }] };
+        requestId: before.value.requestId,
+        ...(outcome === "READ" && read.accessControlsObserved === true ? { publicReadEvidence: {
+          sourceFingerprint: row.source.fingerprint,
+          accessControlsObserved: true as const, accessControls: read.accessControls ?? [], method: read.method,
+          ...(read.renderComplete !== undefined ? { renderComplete: read.renderComplete } : {}),
+        } } : {}),
+        ...(knownFailure ? { failure: knownFailure } : {}) }] };
     const saved = await saveClaim(tx, row, now);
     await tx.automationRun.update({ where: { id: row.runId }, data: { audit: { ...row.audit, simulatorClaim: { ...row.claim, revision: saved.revision, leaseExpiresAt: saved.leaseExpiresAt }, simulatorResearch: research } as unknown as Prisma.InputJsonValue } });
     return { ...saved, publicSource: read, researchOutcome: outcome, ...(failureCode ? { failureCode } : {}), readsRemaining: 6 - research.readCount };

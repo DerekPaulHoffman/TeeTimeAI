@@ -784,6 +784,40 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     await client.automationRun.deleteMany({ where: { id: { in: [f.run.id, capacity.run.id] } } });
   });
 
+  it("persists new public-read evidence and reserves an expired original worker without rewriting the read", async () => {
+    const f = await fixture();
+    const read = await lane.readSimulatorSupportSource({ ...f.owner, source: "official" }, vi.fn(async () => new Response("<h1>Public rentals</h1><a href='/booking'>Book a bay</a>", { headers: { "content-type": "text/html" } })));
+    if (!read.acquired) throw new Error("Public read was busy.");
+    const audit = (await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    expect(audit.simulatorResearch?.history[0]).toMatchObject({ outcome: "READ", requestId: expect.any(String),
+      publicReadEvidence: { accessControlsObserved: true, accessControls: [], method: "HTTP" } });
+    expect((await client.$transaction(tx => lane.readSimulatorSupportContinuationContext(tx, audit, new Date()))).checkpoint).toBeNull();
+    audit.simulatorClaim!.leaseExpiresAt = new Date(Date.now() - 1000).toISOString();
+    await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
+    const context = await client.$transaction(tx => lane.readSimulatorSupportContinuationContext(tx, audit, new Date()));
+    expect(context.checkpoint).toMatchObject({ kind: "EXPIRED_SETTLED_PUBLIC_READ", failure: null, readCount: 1,
+      publicReadEvidence: { accessControlsObserved: true, accessControls: [], httpStatus: 200 } });
+    const reserved = await dispatcher.reserveCourseSupportContinuation(continuationEvidence(f));
+    if (!reserved.acquired) throw new Error("Settled-public continuation was busy.");
+    expect(reserved.value).toMatchObject({ reserved: true, scope: "RESUME_ALLOWED_RESEARCH" });
+    const after = (await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    expect(after.simulatorResearch).toEqual(audit.simulatorResearch);
+    expect(after.simulatorClaim).toEqual(audit.simulatorClaim);
+    expect(after.childThreadId).toBe(audit.childThreadId);
+  });
+
+  it("does not turn a new HTTP200 challenge or legacy read into an expired public checkpoint", async () => {
+    const f = await fixture();
+    const read = await lane.readSimulatorSupportSource({ ...f.owner, source: "official" }, vi.fn(async () => new Response("<h1>Verify you are human</h1>", { headers: { "content-type": "text/html" } })));
+    if (!read.acquired) throw new Error("Challenge observation was busy.");
+    const audit = (await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    expect(audit.simulatorResearch?.history[0]).toMatchObject({ httpStatus: 200, publicReadEvidence: { accessControlsObserved: true, accessControls: ["CAPTCHA_OR_CHALLENGE"] } });
+    audit.simulatorClaim!.leaseExpiresAt = new Date(Date.now() - 1000).toISOString();
+    expect((await client.$transaction(tx => lane.readSimulatorSupportContinuationContext(tx, audit, new Date()))).checkpoint).toBeNull();
+    delete audit.simulatorResearch!.history[0].publicReadEvidence;
+    expect((await client.$transaction(tx => lane.readSimulatorSupportContinuationContext(tx, audit, new Date()))).checkpoint).toBeNull();
+  });
+
   it.each([new TypeError("fetch failed"), Object.assign(new Error("socket reset"), { code: "ECONNRESET" })])("records bounded network failure with an advanced revision and rejects malformed research: %s", async error => {
     const f = await fixture();
     const read = await lane.readSimulatorSupportSource({ ...f.owner, source: "official" }, vi.fn(async () => { throw error; }));
