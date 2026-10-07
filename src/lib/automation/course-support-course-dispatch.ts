@@ -10,6 +10,16 @@ import { isCurrentSimulatorSupportSource, isValidSimulatorSupportClaim, SIMULATO
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
 import type { SimulatorResearchState } from "./simulator-support-research-policy";
 import {
+  confirmCourseSupportContinuationSent,
+  COURSE_SUPPORT_CONTINUATION_POLICY_VERSION,
+  COURSE_SUPPORT_CONTINUATION_TICK_MS,
+  assessCourseSupportContinuationCandidate,
+  readCourseSupportContinuationLedger,
+  reserveCourseSupportContinuationReceipt,
+  type CourseSupportContinuationLedger,
+  type CourseSupportReviewedToolingRepair,
+} from "./course-support-continuation";
+import {
   COURSE_DISPATCH_SOURCE_SELECT,
   createCourseDispatchIntentDigest,
   isCurrentCourseDispatchSource,
@@ -42,6 +52,7 @@ export type CourseDispatchAudit = {
   consumedAt?: string;
   simulatorClaim?: SimulatorSupportClaim;
   simulatorResearch?: SimulatorResearchState;
+  simulatorContinuation?: CourseSupportContinuationLedger;
   target: {
     mode?: "SIMULATOR";
     offeringId?: string;
@@ -97,6 +108,10 @@ export function parseCourseDispatchAudit(value: unknown): CourseDispatchAudit | 
   if (audit.target.mode === "SIMULATOR" &&
       (typeof audit.target.offeringId !== "string" || !audit.target.offeringId || !/^[a-f0-9]{64}$/i.test(audit.target.offeringSourceFingerprint ?? "") ||
        (audit.state === "CONSUMED" && !isValidSimulatorSupportClaim(audit.simulatorClaim)))) return null;
+  if (audit.simulatorContinuation !== undefined) {
+    try { readCourseSupportContinuationLedger(audit.simulatorContinuation); } catch { return null; }
+    if (audit.target.mode !== "SIMULATOR" || audit.state !== "CONSUMED") return null;
+  }
   return audit as CourseDispatchAudit;
 }
 
@@ -451,6 +466,7 @@ export async function planCourseSupportCourseDispatch(input: {
         occupiedCourses.add(candidate.courseId);
       }
     }
+    const continuation = await collectCourseSupportContinuationCandidates({ ownerThreadId: input.ownerThreadId, now, runs, tx });
     return {
       tickRef: tick,
       activeCount: activeBatches.length,
@@ -466,6 +482,9 @@ export async function planCourseSupportCourseDispatch(input: {
           live.filter(run => run.parsed?.simulatorClaim && new Date(run.parsed.simulatorClaim.leaseExpiresAt) <= now).length,
       },
       eligibleCount,
+      continuationItems: continuation.continuationItems,
+      continuationAttentionCount: continuation.attentionCount,
+      continuationEligibleCount: continuation.continuationItems.length,
       launchItems: runs.filter((run) => run.parsed?.tickRef === tick && run.status === "RUNNING" && ["RESERVED", "STARTING", "BOUND"].includes(run.parsed?.state ?? ""))
         .map((run) => ({ assignmentRef: run.parsed!.assignmentRef, state: run.parsed!.state,
           ...(run.parsed!.target.mode === "SIMULATOR" ? { mode: "SIMULATOR" as const } : {}) })),
@@ -597,4 +616,111 @@ export async function hasSimulatorSupportImplementationOwnership(tx: Prisma.Tran
   const live = await listLiveCourseSupportDispatchReservations(tx);
   return live.some(({ audit }) => audit.assignmentRef !== exceptAssignmentRef && audit.target.mode === "SIMULATOR" &&
     audit.state === "CONSUMED" && (audit.simulatorClaim?.plannedPaths.length ?? 0) > 0);
+}
+
+/** Private references only; RUNNING is never proof of a native turn. */
+async function collectCourseSupportContinuationCandidates(input: {
+  ownerThreadId: string; now: Date; runs: Awaited<ReturnType<typeof readRuns>>; tx: Prisma.TransactionClient;
+}) {
+  const continuationItems: Array<{ mode: "SIMULATOR"; assignmentRef: string; threadId: string;
+    originalParentThreadId: string; branch: string; baseSha: string }> = [];
+  let attentionCount = 0;
+  if (!input.runs.some(run => run.status === "RUNNING" && run.parsed?.target.mode === "SIMULATOR" && run.parsed.state === "CONSUMED")) {
+    return { continuationItems, attentionCount };
+  }
+  const { readSimulatorSupportContinuationContext } = await import("./simulator-support-ownership");
+  for (const run of input.runs) {
+    const audit = run.parsed;
+    if (run.status !== "RUNNING" || !audit || audit.target.mode !== "SIMULATOR" || audit.state !== "CONSUMED") continue;
+    if (!audit.childThreadId || audit.childThreadId === input.ownerThreadId) { attentionCount += 1; continue; }
+    const ledger = readCourseSupportContinuationLedger(audit.simulatorContinuation);
+    if (ledger.receipts.some(receipt => receipt.status === "PENDING")) { attentionCount += 1; continue; }
+    try {
+      const context = await readSimulatorSupportContinuationContext(input.tx, audit, input.now);
+      if (!context.checkpoint || !assessCourseSupportContinuationCandidate({
+        checkpoint: { ...context.checkpoint, providerReadInFlight: context.providerReadInFlight },
+        ledger, sourceFingerprint: audit.simulatorClaim!.sourceFingerprint,
+      }).candidate) { attentionCount += 1; continue; }
+      continuationItems.push({ mode: "SIMULATOR", assignmentRef: audit.assignmentRef, threadId: audit.childThreadId,
+        originalParentThreadId: audit.ownerThreadId, branch: audit.simulatorClaim!.branch, baseSha: audit.baseSha });
+    } catch { attentionCount += 1; }
+  }
+  return { continuationItems, attentionCount };
+}
+
+export async function reserveCourseSupportContinuation(input: {
+  ownerThreadId: string;
+  assignmentRef: string;
+  policyVersion: typeof COURSE_SUPPORT_CONTINUATION_POLICY_VERSION;
+  currentMainSha: string;
+  nativeCompletion: unknown;
+  readiness: unknown;
+  reviewedToolingRepair?: CourseSupportReviewedToolingRepair;
+}) {
+  assertIdentity(input.ownerThreadId, input.currentMainSha);
+  if (input.policyVersion !== COURSE_SUPPORT_CONTINUATION_POLICY_VERSION) {
+    throw new Error("Continuation requires the current human-approved same-worker policy.");
+  }
+  return runWithCourseSupportWriterTransitionLease(() => transaction(async tx => {
+    const now = await getCourseDispatchDatabaseNow(tx);
+    const runs = await readRuns(tx);
+    const row = runs.find(run => run.parsed?.assignmentRef === input.assignmentRef);
+    const audit = row?.parsed;
+    if (!row || row.status !== "RUNNING" || !audit || audit.target.mode !== "SIMULATOR" ||
+        audit.state !== "CONSUMED" || !audit.childThreadId || audit.childThreadId === input.ownerThreadId ||
+        !audit.simulatorClaim) return { reserved: false as const, reason: "ORIGINAL_ASSIGNMENT_NOT_CURRENT" };
+    const { readSimulatorSupportContinuationContext } = await import("./simulator-support-ownership");
+    const context = await readSimulatorSupportContinuationContext(tx, audit, now);
+    if (!context.checkpoint || context.currentClaimRevision !== audit.simulatorClaim.revision) {
+      return { reserved: false as const, reason: "ORIGINAL_CHECKPOINT_NOT_CURRENT" };
+    }
+    const tick = `continuation-${Math.floor(now.getTime() / COURSE_SUPPORT_CONTINUATION_TICK_MS)}`;
+    // A worker may finish after its continuation was reserved. Its older dispatch
+    // run must still consume this tick, even when readRuns no longer includes it.
+    const previousTickReceipt = await tx.automationRun.findFirst({
+      where: { promptVersion: COURSE_DISPATCH_PROMPT_VERSION,
+        audit: { path: ["simulatorContinuation", "receipts"], array_contains: [{ tickRef: tick }] } },
+      select: { id: true },
+    });
+    const tickAlreadyUsed = Boolean(previousTickReceipt) || runs.some(run => readCourseSupportContinuationLedger(run.parsed?.simulatorContinuation)
+      .receipts.some(receipt => receipt.tickRef === tick));
+    const result = reserveCourseSupportContinuationReceipt({
+      assignmentRef: audit.assignmentRef, childThreadId: audit.childThreadId,
+      parentThreadId: input.ownerThreadId, sourceFingerprint: audit.simulatorClaim.sourceFingerprint,
+      currentMainSha: input.currentMainSha, currentSource: context.currentSource, originalPrivateChild: true,
+      nativeCompletion: input.nativeCompletion, readiness: input.readiness,
+      checkpoint: { ...context.checkpoint, providerReadInFlight: context.providerReadInFlight },
+      ledger: audit.simulatorContinuation, tickAlreadyUsed, reviewedToolingRepair: input.reviewedToolingRepair, now,
+    });
+    if (!result.reserved) return result;
+    await tx.automationRun.update({ where: { id: row.id }, data: {
+      audit: { ...audit, simulatorContinuation: result.ledger } as unknown as Prisma.InputJsonValue,
+    } });
+    return { reserved: true as const, mode: "SIMULATOR" as const, assignmentRef: audit.assignmentRef,
+      threadId: audit.childThreadId, continuationKey: result.receipt.key, scope: result.receipt.scope };
+  }));
+}
+
+export async function recordCourseSupportContinuationSent(input: {
+  ownerThreadId: string; assignmentRef: string; continuationKey: string; childThreadId: string; toolReceipt: unknown;
+}) {
+  assertIdentity(input.ownerThreadId);
+  return runWithCourseSupportWriterTransitionLease(() => transaction(async tx => {
+    const now = await getCourseDispatchDatabaseNow(tx);
+    const row = await tx.automationRun.findFirst({
+      where: { promptVersion: COURSE_DISPATCH_PROMPT_VERSION,
+        audit: { path: ["assignmentRef"], equals: input.assignmentRef } },
+      select: { id: true, audit: true },
+    });
+    const audit = parseCourseDispatchAudit(row?.audit);
+    if (!row || !audit || audit.target.mode !== "SIMULATOR" || audit.state !== "CONSUMED" ||
+        audit.childThreadId !== input.childThreadId) throw new Error("Continuation no longer refers to the original native worker.");
+    const ledger = confirmCourseSupportContinuationSent({ ledger: audit.simulatorContinuation, key: input.continuationKey,
+      parentThreadId: input.ownerThreadId, childThreadId: input.childThreadId, toolReceipt: input.toolReceipt, now });
+    await tx.automationRun.update({ where: { id: row.id }, data: {
+      audit: { ...audit, simulatorContinuation: ledger } as unknown as Prisma.InputJsonValue,
+    } });
+    return { outcome: "same_worker_message_recorded" as const, assignmentRef: audit.assignmentRef,
+      threadId: audit.childThreadId, monitoringVerified: false as const };
+  }));
 }

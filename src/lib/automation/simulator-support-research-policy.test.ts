@@ -66,6 +66,29 @@ describe("owned simulator research navigation", () => {
     expect(() => assertSimulatorResearchFallbackBeforeRetry(state, null)).toThrow("original");
     expect(() => select({ ...empty(), readCount: 6 })).toThrow("budget");
   });
+  it("preserves a hard-failed reservation as a spent read and permits a bounded alternate route", () => {
+    const requestId = "11111111-1111-4111-8111-111111111111";
+    const hard = readSimulatorResearchState({ ...empty(), readCount: 1, history: [{
+      source: "official", requestedUrl: officialUrl, sourceUrl: officialUrl, observedAt: now.toISOString(),
+      httpStatus: 0, rendered: true, outcome: "HARD_FAILED", requestId,
+      failure: { stage: "PUBLIC_READ", category: "TOOLING", code: "INVALID_TOOL_DATA" },
+    }] }, fingerprint);
+    expect(hard.readCount).toBe(1);
+    expect(select(hard, { source: "booking" }).url).toBe(bookingUrl);
+    expect(() => select(hard, { rendered: true })).toThrow("identical");
+    expect(() => assertSimulatorResearchFallbackBeforeRetry(hard, bookingUrl, officialUrl)).not.toThrow();
+    expect(() => readSimulatorResearchState({ ...hard, history: [{ ...hard.history[0], failure: { stage: "PUBLIC_READ", category: "TOOLING", code: "RAW_URL", sourceLocation: "https://secret.example.test" } }] }, fingerprint)).toThrow();
+  });
+  it("allows incomplete retry after all six reads are spent, while an ordinary failed homepage still requires its saved booking route", () => {
+    const failed = failedHomepage();
+    expect(() => assertSimulatorResearchFallbackBeforeRetry(failed, bookingUrl, officialUrl)).toThrow("booking read");
+    const exhausted = readSimulatorResearchState({ ...failed, readCount: 6,
+      history: Array.from({ length: 6 }, (_, index) => ({ ...failed.history[0], observedAt: new Date(now.getTime() + index).toISOString() })),
+    }, fingerprint);
+    expect(getSimulatorResearchGuide({ state: exhausted, officialUrl, bookingUrl, now, priorFailedRoutes: [] }).suggestedReads).toEqual([]);
+    expect(() => assertSimulatorResearchFallbackBeforeRetry(exhausted, bookingUrl, officialUrl)).not.toThrow();
+    expect(() => select(exhausted, { source: "booking" })).toThrow("budget");
+  });
   it("stops after three different public booking destinations", () => {
     const history = [1, 2, 3].map(i => ({ ...failedHomepage().history[0], source: "booking" as const, requestedUrl: `https://calendar.example.test/booking/${i}`, sourceUrl: `https://calendar.example.test/booking/${i}` }));
     expect(() => select({ ...empty(), readCount: 3, history }, { source: "booking" })).toThrow("destination budget");

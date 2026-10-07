@@ -1,18 +1,24 @@
 import { z } from "zod";
 import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
+import { readSafeSimulatorSupportFailure, type SimulatorSupportFailure } from "./simulator-support-failure";
 
 export const SIMULATOR_RESEARCH_MAX_READS = 6;
 const safeUrl = z.string().refine(value => Boolean(getSafeCustomerBookingUrl(value)));
+const safeFailure = z.custom<SimulatorSupportFailure>(value => readSafeSimulatorSupportFailure(value) !== null)
+  .transform(value => readSafeSimulatorSupportFailure(value)!);
 const observation = z.object({
   source: z.enum(["official", "booking", "link"]), requestedUrl: safeUrl, sourceUrl: safeUrl,
   observedAt: z.string().datetime(), httpStatus: z.number().int().min(0).max(599), rendered: z.boolean(),
-  outcome: z.enum(["READ", "NETWORK_FAILED", "CAPACITY_BUSY"]),
-}).strict();
+  outcome: z.enum(["READ", "NETWORK_FAILED", "CAPACITY_BUSY", "HARD_FAILED"]),
+  requestId: z.string().uuid().optional(), failure: safeFailure.optional(),
+}).strict().refine(entry => entry.outcome === "HARD_FAILED" ? Boolean(entry.requestId && entry.failure && entry.httpStatus === 0) :
+  !entry.failure || Boolean(entry.requestId && entry.httpStatus === 0 && ["NETWORK_FAILED", "CAPACITY_BUSY"].includes(entry.outcome)));
 const stateSchema = z.object({
   version: z.literal(1), sourceFingerprint: z.string().regex(/^[a-f0-9]{64}$/i),
   readCount: z.number().int().min(0).max(SIMULATOR_RESEARCH_MAX_READS),
   history: z.array(observation).max(SIMULATOR_RESEARCH_MAX_READS),
   links: z.array(safeUrl).max(30), bookingLinks: z.array(safeUrl).max(30).default([]), linkBaseUrl: safeUrl.nullable(),
+  lastRecoveredFailureRequestId: z.string().uuid().optional(),
   inFlight: z.object({ requestId: z.string().uuid(), startedAt: z.string().datetime(), expiresAt: z.string().datetime(),
     source: z.enum(["official", "booking", "link"]), url: safeUrl, rendered: z.boolean() }).strict().nullable(),
 }).strict().refine(state => state.history.length + (state.inFlight ? 1 : 0) === state.readCount && state.bookingLinks.every(url => state.links.includes(url)));
@@ -87,8 +93,12 @@ export function getSimulatorResearchGuide(input: {
     priorBlockedRoutes: input.priorFailedRoutes.map(route => ({ ...route })) };
 }
 
-export function assertSimulatorResearchFallbackBeforeRetry(state: SimulatorResearchState, bookingUrl: string | null) {
+export function assertSimulatorResearchFallbackBeforeRetry(state: SimulatorResearchState, bookingUrl: string | null, officialUrl?: string | null) {
   if (state.inFlight) throw new Error("Finish or reconcile the original source research attempt before retry.");
+  // The original hard-failed operation must exit; a later owned retry may close
+  // the incomplete attempt without disguising it as a public observation.
+  if (state.history.at(-1)?.outcome === "HARD_FAILED" || state.readCount >= SIMULATOR_RESEARCH_MAX_READS) return;
+  if (officialUrl && getSimulatorResearchGuide({ state, officialUrl, bookingUrl, now: new Date(), priorFailedRoutes: [] }).suggestedReads.length === 0) return;
   // Rate limits and shared-provider capacity require backoff rather than more requests.
   if (state.history.at(-1)?.outcome === "CAPACITY_BUSY" || state.history.at(-1)?.httpStatus === 429) return;
   const failedIndex = state.history.map(entry => entry.source === "official" && !entry.rendered && entry.outcome !== "CAPACITY_BUSY" && (entry.httpStatus < 200 || entry.httpStatus >= 300)).lastIndexOf(true);

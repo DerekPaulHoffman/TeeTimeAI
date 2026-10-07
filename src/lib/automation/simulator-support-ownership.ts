@@ -13,8 +13,12 @@ import { collectSimulatorSupportResearch, type SimulatorResearchDependencies, ty
 export { summarizeSimulatorSupportPublicHtml } from "./simulator-support-research";
 import { evaluateSimulatorSupportProgress } from "./simulator-support-progress";
 import { assertSimulatorResearchFallbackBeforeRetry, getSimulatorResearchGuide, readSimulatorResearchState, selectSimulatorResearchTarget, type SimulatorResearchState } from "./simulator-support-research-policy";
+import { classifySimulatorSupportFailure, type SimulatorSupportFailure } from "./simulator-support-failure";
 
 type Owner = { assignmentRef: string; ownerThreadId: string; token: string; revision: number };
+const acquiredResearchFailureCodes = new Set([
+  "SIMULATOR_RESEARCH_PROVIDER_BUSY", "SIMULATOR_RESEARCH_NETWORK_FAILED", "SIMULATOR_RESEARCH_DEADLINE",
+]);
 
 async function readPriorFailedResearchRoutes(tx: Pick<Prisma.TransactionClient, "automationRun">, offeringId: string, fingerprint: string) {
   const previous = await tx.automationRun.findMany({ where: { promptVersion: "course-support-course-dispatch-v1", status: "COMPLETED", outcome: "simulator_retryable_failed",
@@ -71,9 +75,42 @@ async function loadOwned(tx: Prisma.TransactionClient, input: Owner, now: Date, 
   return { ...row, claim, source };
 }
 
-async function saveClaim(tx: Prisma.TransactionClient, row: { runId: string; audit: CourseDispatchAudit; claim: SimulatorSupportClaim }, now: Date, changes: Partial<SimulatorSupportClaim> = {}, research?: SimulatorResearchState) {
+/** Read-only continuation evidence under the caller's writer transition lease. */
+export async function readSimulatorSupportContinuationContext(tx: Prisma.TransactionClient, audit: CourseDispatchAudit, now: Date) {
+  if (audit.state !== "CONSUMED" || audit.target.mode !== "SIMULATOR" || !audit.simulatorClaim) throw new Error("Simulator continuation requires the original consumed native claim.");
+  const source = await lockSource(tx, audit, now);
+  const research = readSimulatorResearchState(audit.simulatorResearch, audit.simulatorClaim.sourceFingerprint);
+  if (research.sourceFingerprint !== source.fingerprint) throw new Error("Simulator research navigation belongs to an older source; adopt the reviewed source before research.");
+  const last = research.history.at(-1);
+  const pending = research.inFlight;
+  const expiredPending = pending && new Date(pending.expiresAt) <= now;
+  const settledFailure = !pending && Boolean(last?.failure && ["HARD_FAILED", "NETWORK_FAILED", "CAPACITY_BUSY"].includes(last.outcome)) &&
+    last?.requestId !== research.lastRecoveredFailureRequestId;
+  const failure: SimulatorSupportFailure = { stage: "PUBLIC_READ", category: "UNKNOWN", code: "RESEARCH_RESERVATION_INTERRUPTED" };
+  const routeState: SimulatorResearchState = expiredPending ? { ...research, inFlight: null, history: [...research.history, {
+    source: pending.source, requestedUrl: pending.url, sourceUrl: pending.url, observedAt: now.toISOString(),
+    httpStatus: 0, rendered: pending.rendered, outcome: "HARD_FAILED", requestId: pending.requestId, failure,
+  }] } : research;
+  const checkpoint = settledFailure || expiredPending ? {
+    kind: settledFailure ? "SETTLED_FAILURE" as const : "EXPIRED_UNFINISHED_READ" as const,
+    observedAt: settledFailure ? last!.observedAt : pending!.expiresAt,
+    readCount: research.readCount,
+    requestId: settledFailure ? last!.requestId! : pending!.requestId,
+    failure: settledFailure ? last!.failure! : null,
+    allowedResearchRouteCount: getSimulatorResearchGuide({ state: routeState,
+      officialUrl: source.offering.course.website ?? source.offering.evidenceUrl,
+      bookingUrl: source.offering.bookingUrl, now,
+      priorFailedRoutes: await readPriorFailedResearchRoutes(tx, source.offering.id, source.fingerprint),
+    }).suggestedReads.length,
+  } : null;
+  return { currentSource: true as const, currentClaimRevision: audit.simulatorClaim.revision,
+    leaseValid: new Date(audit.simulatorClaim.leaseExpiresAt) > now,
+    providerReadInFlight: Boolean(pending && !expiredPending), checkpoint };
+}
+
+async function saveClaim(tx: Prisma.TransactionClient, row: { runId: string; audit: CourseDispatchAudit; claim: SimulatorSupportClaim }, now: Date, changes: Partial<SimulatorSupportClaim> = {}, research?: SimulatorResearchState, auditChanges?: Record<string, unknown>) {
   const claim: SimulatorSupportClaim = { ...row.claim, ...changes, revision: row.claim.revision + 1, leaseExpiresAt: new Date(now.getTime() + SIMULATOR_SUPPORT_LEASE_MS).toISOString() };
-  await tx.automationRun.update({ where: { id: row.runId }, data: { audit: { ...row.audit, simulatorClaim: claim, ...(research ? { simulatorResearch: research } : {}) } as unknown as Prisma.InputJsonValue } });
+  await tx.automationRun.update({ where: { id: row.runId }, data: { audit: { ...row.audit, simulatorClaim: claim, ...(research ? { simulatorResearch: research } : {}), ...auditChanges } as unknown as Prisma.InputJsonValue } });
   return { assignmentRef: row.audit.assignmentRef, token: claim.token, revision: claim.revision, phase: claim.phase, leaseExpiresAt: claim.leaseExpiresAt };
 }
 
@@ -133,13 +170,36 @@ export async function readSimulatorSupportSource(input: Owner & { source?: "offi
   let read: SimulatorResearchResult;
   let outcome: "READ" | "NETWORK_FAILED" | "CAPACITY_BUSY" = "READ";
   let failureCode: string | undefined;
+  let knownFailure: SimulatorSupportFailure | undefined;
   try {
     read = await collectSimulatorSupportResearch({ url: before.value.url, render: before.value.rendered }, typeof dependencies === "function" ? { fetch: dependencies } : dependencies);
   } catch (error) {
     // Only known research/network failures become observations. Programming and ownership failures remain hard errors.
     const message = error instanceof Error ? error.message : "";
-    if (!/^SIMULATOR_RESEARCH_[A-Z_]+$/.test(message) && !(error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name)) && !(error instanceof TypeError && /fetch failed/i.test(message))) throw error;
-    failureCode = /^SIMULATOR_RESEARCH_[A-Z_]+$/.test(message) ? message : "SIMULATOR_RESEARCH_NETWORK_FAILED";
+    if (!acquiredResearchFailureCodes.has(message) && !(error instanceof Error && ["TimeoutError", "AbortError"].includes(error.name)) && !(error instanceof TypeError && /fetch failed/i.test(message))) {
+      const failure = classifySimulatorSupportFailure(error, "PUBLIC_READ");
+      const settled = await withTransition(async (tx, now) => {
+        const row = await loadOwned(tx, { ...input, revision: before.value.revision }, now);
+        if (row.source.fingerprint !== before.value.sourceFingerprint) throw new Error("Simulator source changed during the public read.");
+        const state = readSimulatorResearchState(row.audit.simulatorResearch, row.source.fingerprint);
+        if (state.inFlight?.requestId !== before.value.requestId) throw new Error("The original simulator source research reservation changed.");
+        const research: SimulatorResearchState = { ...state, inFlight: null, history: [...state.history, {
+          source: before.value.source, requestedUrl: before.value.url, sourceUrl: before.value.url,
+          observedAt: now.toISOString(), httpStatus: 0, rendered: before.value.rendered, outcome: "HARD_FAILED",
+          requestId: before.value.requestId, failure,
+        }] };
+        const saved = await saveClaim(tx, row, now, {}, research);
+        await tx.automationRun.update({ where: { id: row.runId }, data: { outcome: "simulator_research_hard_failed" } });
+        return saved;
+      });
+      if (!settled.acquired) throw new Error("SIMULATOR_RESEARCH_FAILURE_CHECKPOINT_UNAVAILABLE");
+      const stopped = new Error("SIMULATOR_RESEARCH_HARD_FAILED") as Error & { revision: number; failure: SimulatorSupportFailure };
+      stopped.revision = settled.value.revision;
+      stopped.failure = failure;
+      throw stopped;
+    }
+    failureCode = acquiredResearchFailureCodes.has(message) ? message : "SIMULATOR_RESEARCH_NETWORK_FAILED";
+    knownFailure = classifySimulatorSupportFailure(error, "PUBLIC_READ");
     outcome = failureCode === "SIMULATOR_RESEARCH_PROVIDER_BUSY" ? "CAPACITY_BUSY" : "NETWORK_FAILED";
     read = { requestedUrl: before.value.url, url: before.value.url, observedAt: new Date().toISOString(), httpStatus: 0,
       method: before.value.rendered ? "BROWSER" : "HTTP", text: "", links: [] };
@@ -152,7 +212,9 @@ export async function readSimulatorSupportSource(input: Owner & { source?: "offi
     const usableDocument = read.httpStatus >= 200 && read.httpStatus < 300;
     const research: SimulatorResearchState = { ...state, inFlight: null, links: usableDocument ? read.links : state.links,
       bookingLinks: usableDocument ? read.bookingLinks ?? [] : state.bookingLinks, linkBaseUrl: usableDocument ? read.url : state.linkBaseUrl,
-      history: [...state.history, { source: before.value.source, requestedUrl: before.value.url, sourceUrl: read.url, observedAt: read.observedAt, httpStatus: read.httpStatus, rendered: before.value.rendered, outcome }] };
+      history: [...state.history, { source: before.value.source, requestedUrl: before.value.url, sourceUrl: read.url,
+        observedAt: read.observedAt, httpStatus: read.httpStatus, rendered: before.value.rendered, outcome,
+        ...(knownFailure ? { requestId: before.value.requestId, failure: knownFailure } : {}) }] };
     const saved = await saveClaim(tx, row, now);
     await tx.automationRun.update({ where: { id: row.runId }, data: { audit: { ...row.audit, simulatorClaim: { ...row.claim, revision: saved.revision, leaseExpiresAt: saved.leaseExpiresAt }, simulatorResearch: research } as unknown as Prisma.InputJsonValue } });
     return { ...saved, publicSource: read, researchOutcome: outcome, ...(failureCode ? { failureCode } : {}), readsRemaining: 6 - research.readCount };
@@ -223,15 +285,22 @@ export function heartbeatSimulatorSupport(input: Owner) {
 export function recoverSimulatorSupport(input: Owner) {
   return withTransition(async (tx, now) => {
     const row = await loadOwned(tx, input, now, true, true);
-    if (new Date(row.claim.leaseExpiresAt) > now) throw new Error("Recover is reserved for the same native owner after its lease expires.");
+    const research = readSimulatorResearchState(row.audit.simulatorResearch, row.claim.sourceFingerprint);
+    const last = research.history.at(-1);
+    const failedRead = Boolean(last?.failure && ["HARD_FAILED", "NETWORK_FAILED", "CAPACITY_BUSY"].includes(last.outcome)) &&
+      last?.requestId !== research.lastRecoveredFailureRequestId &&
+      !research.inFlight && row.source.fingerprint === row.claim.sourceFingerprint;
+    if (new Date(row.claim.leaseExpiresAt) > now && !failedRead) throw new Error("Recover is reserved for the same native owner after its lease expires.");
     const dispatch = await import("./course-support-course-dispatch");
     if (row.claim.plannedPaths.length && await dispatch.hasSimulatorSupportImplementationOwnership(tx, input.assignmentRef)) throw new Error("Simulator implementation ownership conflicts during recovery.");
-    const research = readSimulatorResearchState(row.audit.simulatorResearch, row.claim.sourceFingerprint);
     const pending = research.inFlight;
     if (pending && new Date(pending.expiresAt) > now) throw new Error("The original simulator research request is still within its bounded interval.");
-    return saveClaim(tx, row, now, {}, pending ? { ...research, inFlight: null, links: [], bookingLinks: [], linkBaseUrl: null, history: [...research.history, {
-      source: pending.source, requestedUrl: pending.url, sourceUrl: pending.url, observedAt: now.toISOString(), httpStatus: 0, rendered: pending.rendered, outcome: "NETWORK_FAILED",
-    }] } : research);
+    const saved = await saveClaim(tx, row, now, {}, pending ? { ...research, inFlight: null, lastRecoveredFailureRequestId: pending.requestId, history: [...research.history, {
+      source: pending.source, requestedUrl: pending.url, sourceUrl: pending.url, observedAt: now.toISOString(), httpStatus: 0, rendered: pending.rendered, outcome: "HARD_FAILED",
+      requestId: pending.requestId, failure: { stage: "PUBLIC_READ", category: "UNKNOWN", code: "RESEARCH_RESERVATION_INTERRUPTED" },
+    }] } : failedRead ? { ...research, lastRecoveredFailureRequestId: last?.requestId } : research);
+    if (pending) await tx.automationRun.update({ where: { id: row.runId }, data: { outcome: "simulator_research_hard_failed" } });
+    return saved;
   });
 }
 
@@ -275,15 +344,25 @@ export function adoptSimulatorSupportSource(input: Owner & { expectedFingerprint
   });
 }
 
-export function registerSimulatorSupportRelease(input: Owner & { releaseSha: string; branch: string; committedPaths: string[]; descendantVerified: boolean }) {
+export function registerSimulatorSupportRelease(input: Owner & { releaseSha: string; branch: string; committedPaths: string[];
+  trustedUpstreamSha: string; upstreamDescendantVerified: boolean; descendantVerified: boolean }) {
   return withTransition(async (tx, now) => {
     const row = await loadOwned(tx, input, now);
-    if (!/^[a-f0-9]{40}$/i.test(input.releaseSha) || input.branch !== row.claim.branch || !input.descendantVerified ||
+    const metadataReuseKind = row.claim.plannedPaths.length === 0 && input.releaseSha === row.audit.baseSha ? "ORIGINAL_BASE" :
+      row.claim.plannedPaths.length === 0 && input.releaseSha === input.trustedUpstreamSha ? "TRUSTED_UPSTREAM" : null;
+    const claimedRuntimePaths = input.committedPaths.filter(path => /^(src\/|scripts\/|prisma\/)/.test(path) && isRuntimeBearingCourseSupportPath(path));
+    if (!/^[a-f0-9]{40}$/i.test(input.releaseSha) || !/^[a-f0-9]{40}$/i.test(input.trustedUpstreamSha) ||
+        input.branch !== row.claim.branch || !input.upstreamDescendantVerified || !input.descendantVerified ||
         (row.claim.releaseSha && row.claim.releaseSha !== input.releaseSha) ||
         input.committedPaths.some(path => !row.claim.plannedPaths.includes(validateSimulatorSupportPath(path))) ||
-        (row.claim.plannedPaths.length > 0 && !input.committedPaths.some(path => /^(src\/|scripts\/|prisma\/)/.test(path) && isRuntimeBearingCourseSupportPath(path))) ||
-        (row.claim.plannedPaths.length === 0 && input.releaseSha !== row.audit.baseSha)) throw new Error("Simulator support release provenance is invalid.");
-    return saveClaim(tx, row, now, { phase: "VERIFYING", releaseSha: input.releaseSha });
+        (metadataReuseKind ? input.committedPaths.length !== 0 :
+          row.claim.plannedPaths.length === 0 || input.releaseSha === row.audit.baseSha || input.releaseSha === input.trustedUpstreamSha ||
+          input.committedPaths.length === 0 || claimedRuntimePaths.length === 0)) throw new Error("Simulator support release provenance is invalid.");
+    return saveClaim(tx, row, now, { phase: "VERIFYING", releaseSha: input.releaseSha }, undefined, {
+      simulatorReleaseProvenance: { originalBaseSha: row.audit.baseSha, trustedUpstreamSha: input.trustedUpstreamSha,
+        releaseSha: input.releaseSha, metadataOnlyReuse: Boolean(metadataReuseKind), metadataReuseKind, committedPaths: input.committedPaths,
+        upstreamDescendantVerified: true, descendantVerified: true, recordedAt: now.toISOString() },
+    });
   });
 }
 
@@ -357,7 +436,8 @@ export function retrySimulatorSupport(input: Owner & { retryMinutes: number }) {
   if (!Number.isSafeInteger(input.retryMinutes) || input.retryMinutes < 1 || input.retryMinutes > 1440) throw new Error("Simulator retry must be from 1 to 1440 minutes.");
   return withTransition(async (tx, now) => {
     const row = await loadOwned(tx, input, now);
-    assertSimulatorResearchFallbackBeforeRetry(readSimulatorResearchState(row.audit.simulatorResearch, row.source.fingerprint), row.source.offering.bookingUrl);
+    assertSimulatorResearchFallbackBeforeRetry(readSimulatorResearchState(row.audit.simulatorResearch, row.source.fingerprint),
+      row.source.offering.bookingUrl, row.source.offering.course.website ?? row.source.offering.evidenceUrl);
     const retryAt = new Date(now.getTime() + input.retryMinutes * 60_000);
     await tx.simulatorSupportIncident.update({ where: { id: row.source.incident.id }, data: { status: "AUTO_INVESTIGATING", retryAt } });
     await tx.automationRun.update({ where: { id: row.runId }, data: { status: "COMPLETED", completedAt: now, outcome: "simulator_retryable_failed" } });
@@ -370,8 +450,12 @@ export async function readSimulatorSupportClaim(input: { assignmentRef: string; 
   if (row.audit.childThreadId !== input.ownerThreadId || row.audit.state !== "CONSUMED" || !row.audit.simulatorClaim) throw new Error("Simulator support claim is not owned by this native task.");
   const offering = await prisma.courseOffering.findUniqueOrThrow({ where: { id: row.audit.target.offeringId }, include: { course: { select: { name: true, address: true, website: true, timeZone: true, googlePlaceId: true, latitude: true, longitude: true } } } });
   const research = readSimulatorResearchState(row.audit.simulatorResearch, row.audit.simulatorClaim.sourceFingerprint);
+  const latest = research.history.at(-1);
   return { ...row.audit.simulatorClaim, baseSha: row.audit.baseSha, offeringId: row.audit.target.offeringId!,
     research, researchGuide: getSimulatorResearchGuide({ state: research, officialUrl: offering.course.website ?? offering.evidenceUrl,
       bookingUrl: offering.bookingUrl, now: new Date(), priorFailedRoutes: await readPriorFailedResearchRoutes(prisma, offering.id, row.audit.simulatorClaim.sourceFingerprint) }),
+    failedRead: !research.inFlight && latest?.failure && latest.requestId !== research.lastRecoveredFailureRequestId &&
+      ["HARD_FAILED", "NETWORK_FAILED", "CAPACITY_BUSY"].includes(latest.outcome) ? { revision: row.audit.simulatorClaim.revision, requestId: latest.requestId,
+      failure: latest.failure, readsUsed: research.readCount, readsRemaining: 6 - research.readCount } : null,
     venue: offering.course, evidenceUrl: offering.evidenceUrl, bookingUrl: offering.bookingUrl, providerFamilyKey: offering.providerFamilyKey, providerMetadata: offering.providerMetadata, supportedDurationsMinutes: offering.supportedDurationsMinutes };
 }

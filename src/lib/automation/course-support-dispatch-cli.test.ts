@@ -13,6 +13,7 @@ vi.mock("@/lib/automation/course-support-course-dispatch", () => ({
 
 import {
   courseDispatchMayInspectLegacy,
+  formatCourseDispatchFailure,
   planCourseDispatchCycle,
   readDispatchArguments,
   selectCourseDispatchLegacyHandoff,
@@ -40,6 +41,15 @@ function legacyInspection(overrides: Record<string, unknown>) {
 }
 
 describe("course dispatcher command authority", () => {
+  it("reports a redacted hard failure while retaining the assignment stop instruction", () => {
+    const secret = "postgres://customer:private-password@private-host/database";
+    const result = formatCourseDispatchFailure(new Error(`Unhandled operation ${secret}`));
+    expect(result).not.toContain(secret);
+    expect(result).not.toContain("private-password");
+    expect(JSON.parse(result.split("\n")[0])).toMatchObject({ outcome: "course_dispatch_failed",
+      failure: { category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE" }, preserveAssignment: true });
+    expect(result).toContain("Course dispatch failed; preserve assignment state and stop this launch.");
+  });
   it("bounds a scheduled launch without accepting an assignment selector", () => {
     expect(readDispatchArguments(["plan", "--scheduled-cycle", "--max-starts", "15"])).toMatchObject({
       command: "plan", maxStarts: 15, scheduledCycle: true,
@@ -73,6 +83,22 @@ describe("course dispatcher command authority", () => {
     }
     expect(() => readDispatchArguments(["start", "--assignment-ref"])).toThrow();
     expect(() => readDispatchArguments(["start", "--assignment-ref", "opaque-ref", "--apply"])).toThrow();
+  });
+
+  it("allows only a bounded private receipt for same-worker continuation commands", () => {
+    for (const command of ["continue", "continued"]) {
+      expect(readDispatchArguments([command, "--assignment-ref", "original-assignment", "--receipt-file", "private.json"]))
+        .toMatchObject({ command, assignmentRef: "original-assignment", receiptFile: "private.json" });
+      expect(() => readDispatchArguments([command, "--assignment-ref", "original-assignment"])).toThrow();
+      expect(() => readDispatchArguments([command, "--assignment-ref", "original-assignment", "--receipt-file", "private.json", "--child-thread", "replacement"]))
+        .toThrow();
+      expect(() => readDispatchArguments([command, "--assignment-ref", "original-assignment", "--receipt-file", "private.json", "--scheduled-cycle"]))
+        .toThrow();
+      expect(() => readDispatchArguments([command, "--assignment-ref", "original-assignment", "--receipt-file", "private.json", "--receipt-file", "another.json"]))
+        .toThrow();
+    }
+    expect(() => readDispatchArguments(["plan", "--receipt-file", "private.json"])).toThrow();
+    expect(() => readDispatchArguments(["assignment", "--assignment-ref", "original-assignment", "--receipt-file", "private.json"])).toThrow();
   });
 });
 
@@ -136,6 +162,8 @@ describe("course dispatcher legacy service fallback", () => {
       { reservedCount: 1 }, { eligibleCount: 1 },
       { attention: { startingCount: 1, boundCount: 0, expiredBatchCount: 0 } },
       { attention: { startingCount: 0, boundCount: 1, expiredBatchCount: 0 } },
+      { continuationItems: [{ mode: "SIMULATOR", assignmentRef: "original-assignment", threadId: "original-child" }] },
+      { continuationAttentionCount: 1 },
     ]) {
       expect(courseDispatchMayInspectLegacy({ ...emptyPlan, value: { ...emptyPlan.value, ...changed } } as typeof emptyPlan)).toBe(false);
     }

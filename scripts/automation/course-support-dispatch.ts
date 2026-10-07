@@ -1,6 +1,7 @@
 import "./load-local-env";
 
 import { execFileSync } from "node:child_process";
+import { lstatSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import {
@@ -9,7 +10,14 @@ import {
   cancelCourseSupportCourseDispatch,
   getCourseSupportCourseDispatchAssignment,
   planCourseSupportCourseDispatch,
+  recordCourseSupportContinuationSent,
+  reserveCourseSupportContinuation,
 } from "@/lib/automation/course-support-course-dispatch";
+import {
+  courseSupportContinuationRequestSchema,
+  courseSupportContinuationSentRequestSchema,
+} from "@/lib/automation/course-support-continuation";
+import { classifySimulatorSupportFailure } from "@/lib/automation/simulator-support-failure";
 import { inspectCourseSupportQueue } from "@/lib/automation/course-support-batches";
 import { refreshPendingCustomerRecoveries } from "@/lib/automation/course-support-customer-recovery";
 import {
@@ -31,9 +39,9 @@ export function readDispatchOption(args: readonly string[], name: string) {
 
 export function readDispatchArguments(args: readonly string[]) {
   const [command, ...options] = args;
-  const commands = new Set(["plan", "start", "bind", "cancel", "assignment"]);
-  if (!command || !commands.has(command)) throw new Error("Use plan, start, bind, cancel, or assignment.");
-  const allowedValues = new Set(["--assignment-ref", "--child-thread", "--max-starts"]);
+  const commands = new Set(["plan", "start", "bind", "cancel", "assignment", "continue", "continued"]);
+  if (!command || !commands.has(command)) throw new Error("Use plan, start, bind, cancel, assignment, continue, or continued.");
+  const allowedValues = new Set(["--assignment-ref", "--child-thread", "--max-starts", "--receipt-file"]);
   const allowedFlags = new Set(["--scheduled-cycle", "--confirmed-not-started"]);
   for (let index = 0; index < options.length; index += 1) {
     const option = options[index];
@@ -48,6 +56,7 @@ export function readDispatchArguments(args: readonly string[]) {
   const assignmentRef = readDispatchOption(options, "--assignment-ref");
   const childThreadId = readDispatchOption(options, "--child-thread");
   const maxStartsValue = readDispatchOption(options, "--max-starts");
+  const receiptFile = readDispatchOption(options, "--receipt-file");
   const maxStarts = maxStartsValue === undefined ? undefined : Number(maxStartsValue);
   if (maxStarts !== undefined && (!Number.isSafeInteger(maxStarts) || maxStarts < 1 || maxStarts > 15)) {
     throw new Error("--max-starts must be an integer from 1 to 15.");
@@ -59,13 +68,16 @@ export function readDispatchArguments(args: readonly string[]) {
     throw new Error("This command requires one assignment reference and no plan flags.");
   }
   if ((command === "bind") !== Boolean(childThreadId)) throw new Error("Only bind requires --child-thread.");
+  if (["continue", "continued"].includes(command) !== Boolean(receiptFile)) {
+    throw new Error("Only same-worker continuation commands require --receipt-file.");
+  }
   if (options.includes("--confirmed-not-started") && command !== "cancel") {
     throw new Error("--confirmed-not-started is reserved for cancellation.");
   }
   if (command === "cancel" && !options.includes("--confirmed-not-started")) {
     throw new Error("Cancellation requires proof that no native worker was started.");
   }
-  return { command, assignmentRef, childThreadId, maxStarts, scheduledCycle: options.includes("--scheduled-cycle") };
+  return { command, assignmentRef, childThreadId, maxStarts, receiptFile, scheduledCycle: options.includes("--scheduled-cycle") };
 }
 
 export function readDispatchGitState(requireCurrentMain = true) {
@@ -86,7 +98,22 @@ export function courseDispatchMayInspectLegacy(plan: DispatchPlan) {
   if (!plan.acquired) return false;
   return plan.value.launchItems.length === 0 && plan.value.reservedCount === 0 &&
     plan.value.eligibleCount === 0 && plan.value.attention.startingCount === 0 &&
-    plan.value.attention.boundCount === 0;
+    plan.value.attention.boundCount === 0 && (plan.value.continuationItems?.length ?? 0) === 0 &&
+    (plan.value.continuationAttentionCount ?? 0) === 0;
+}
+
+export function readCourseDispatchContinuationReceipt(path: string) {
+  const info = lstatSync(path);
+  if (!info.isFile() || info.isSymbolicLink() || info.size < 2 || info.size > 16_384) {
+    throw new Error("Continuation requires one bounded private JSON receipt file.");
+  }
+  return JSON.parse(readFileSync(path, "utf8"));
+}
+
+export function formatCourseDispatchFailure(error: unknown) {
+  const failure = classifySimulatorSupportFailure(error, "COMMAND");
+  return `${JSON.stringify({ outcome: "course_dispatch_failed", failure, preserveAssignment: true })}\n` +
+    "Course dispatch failed; preserve assignment state and stop this launch.\n";
 }
 
 export function selectCourseDispatchLegacyHandoff(inspection: LegacyInspection) {
@@ -151,7 +178,7 @@ async function main() {
   const ownerThreadId = resolveCodexOwnerThreadId({ environmentOwnerThreadId: process.env.CODEX_THREAD_ID });
   // Binding an already-created child must survive another worker's legitimate
   // main advance. The durable assignment still supplies its own exact fences.
-  const { baseSha } = readDispatchGitState(input.command === "plan");
+  const { baseSha } = readDispatchGitState(["plan", "continue"].includes(input.command));
   let scheduled = false;
   try {
     if (input.scheduledCycle) {
@@ -173,6 +200,13 @@ async function main() {
       result = await bindCourseSupportCourseDispatch({ ownerThreadId, assignmentRef: input.assignmentRef!, childThreadId: input.childThreadId! });
     } else if (input.command === "cancel") {
       result = await cancelCourseSupportCourseDispatch({ ownerThreadId, assignmentRef: input.assignmentRef!, confirmedNotCreated: true });
+    } else if (input.command === "continue") {
+      const receipt = courseSupportContinuationRequestSchema.parse(readCourseDispatchContinuationReceipt(input.receiptFile!));
+      result = await reserveCourseSupportContinuation({ ownerThreadId, assignmentRef: input.assignmentRef!,
+        currentMainSha: baseSha, ...receipt });
+    } else if (input.command === "continued") {
+      const receipt = courseSupportContinuationSentRequestSchema.parse(readCourseDispatchContinuationReceipt(input.receiptFile!));
+      result = await recordCourseSupportContinuationSent({ ownerThreadId, assignmentRef: input.assignmentRef!, ...receipt });
     } else {
       result = await getCourseSupportCourseDispatchAssignment({ assignmentRef: input.assignmentRef!, childThreadId: ownerThreadId });
     }
@@ -187,8 +221,8 @@ async function main() {
 }
 
 if (resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
-  main().catch(() => {
-    process.stderr.write("Course dispatch failed; preserve assignment state and stop this launch.\n");
+  main().catch(error => {
+    process.stderr.write(formatCourseDispatchFailure(error));
     process.exitCode = 1;
   });
 }

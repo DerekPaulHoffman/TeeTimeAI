@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { randomUUID } from "node:crypto";
-import { PrismaClient } from "@prisma/client";
+import { Prisma, PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
@@ -71,6 +71,35 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     return { course, offering, peer, search, incident, run, owner: { assignmentRef, ownerThreadId: child, token: claimed.value.token, revision: claimed.value.revision }, fingerprint };
   }
 
+  async function seedExpiredUnfinishedRead(f: Awaited<ReturnType<typeof fixture>>) {
+    const stored = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const audit = stored.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    const requestId = randomUUID();
+    audit.simulatorResearch = { version: 1, sourceFingerprint: f.fingerprint, readCount: 1, history: [], links: [], bookingLinks: [], linkBaseUrl: null,
+      inFlight: { requestId, startedAt: new Date(Date.now() - 90_000).toISOString(), expiresAt: new Date(Date.now() - 30_000).toISOString(),
+        source: "official", url: f.course.website!, rendered: true } };
+    await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
+    return requestId;
+  }
+
+  function continuationEvidence(f: Awaited<ReturnType<typeof fixture>>, parent = "parent") {
+    const currentMainSha = "c".repeat(40);
+    const observedAt = new Date(Date.now() - 15_000).toISOString();
+    return { ownerThreadId: parent, assignmentRef: f.owner.assignmentRef,
+      policyVersion: "same-native-worker-recovery-v1" as const, currentMainSha,
+      nativeCompletion: { version: 1, source: "codex_app.wait_threads", threadId: f.owner.ownerThreadId,
+        observedAt, cursor: `cursor-${f.run.id}`, threadStatus: "idle", latestTurn: { id: `turn-${f.run.id}`, status: "completed", error: null },
+        activeTurnId: null, approvalRequestCount: 0 },
+      readiness: { version: 1, source: "original_native_launcher_receipt", threadId: f.owner.ownerThreadId,
+        observedAt, launcherReceiptDigest: "d".repeat(64), checkoutIdentityDigest: "e".repeat(64),
+        privateOriginalChild: true, approvalPolicy: "never", sandboxMode: "danger-full-access",
+        nativeIdentityVerified: true, noApprovalRequired: true, sameProfile: true, runtimeReady: true, toolingReleaseSha: currentMainSha },
+      reviewedToolingRepair: { policyVersion: "same-native-worker-recovery-v1" as const, releaseSha: currentMainSha,
+        source: "git" as const, state: "READY" as const, branch: "main" as const,
+        aliases: ["teetimespot.com", "www.teetimespot.com"], deployedAt: new Date(Date.now() - 60_000).toISOString() },
+    };
+  }
+
   it("atomically consumes one bound assignment and prevents duplicate or stale owner work", async () => {
     const f = await fixture();
     const beforeCourse = await client.course.findUniqueOrThrow({ where: { id: f.course.id } });
@@ -124,7 +153,8 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     const adopted = await lane.adoptSimulatorSupportSource({ ...owner, expectedFingerprint: getSimulatorOfferingSourceFingerprint(offering), expectedOfferingRevision: offering.monitoringRevision });
     if (!adopted.acquired) throw new Error("Adoption failed."); owner = { ...owner, revision: adopted.value.revision };
     const branch = `automation/course-support-${f.owner.ownerThreadId.replace("child-", "")}`;
-    const registered = await lane.registerSimulatorSupportRelease({ ...owner, releaseSha, branch, committedPaths: ["src/lib/simulators/providers/new-reader.ts"], descendantVerified: true });
+    const registered = await lane.registerSimulatorSupportRelease({ ...owner, releaseSha, branch,
+      trustedUpstreamSha: baseSha, upstreamDescendantVerified: true, committedPaths: ["src/lib/simulators/providers/new-reader.ts"], descendantVerified: true });
     if (!registered.acquired) throw new Error("Release failed."); owner = { ...owner, revision: registered.value.revision };
     const deployed = await lane.recordSimulatorSupportDeployment({ ...owner, proof: { aliases: ["teetimespot.com", "www.teetimespot.com"], branch: "main", commitSha: releaseSha, deployedAt: new Date(Date.now() - 5000).toISOString(), deploymentId: "dpl_fixture", deploymentUrl: "https://fixture.vercel.app", source: "git", state: "READY" } });
     if (!deployed.acquired) throw new Error("Deployment failed."); owner = { ...owner, revision: deployed.value.revision };
@@ -194,7 +224,8 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     await expect(lane.heartbeatSimulatorSupport(owner)).rejects.toThrow("source changed");
     const adopted = await lane.adoptSimulatorSupportSource({ ...owner, expectedFingerprint: applied.value.sourceFingerprint, expectedOfferingRevision: applied.value.offeringRevision });
     if (!adopted.acquired) throw new Error("Metadata adoption failed.");
-    const release = await lane.registerSimulatorSupportRelease({ ...owner, revision: adopted.value.revision, releaseSha: baseSha, branch: `automation/course-support-${f.owner.ownerThreadId.replace("child-", "")}`, descendantVerified: true, committedPaths: [] });
+    const release = await lane.registerSimulatorSupportRelease({ ...owner, revision: adopted.value.revision, releaseSha: baseSha, branch: `automation/course-support-${f.owner.ownerThreadId.replace("child-", "")}`,
+      trustedUpstreamSha: "c".repeat(40), upstreamDescendantVerified: true, descendantVerified: true, committedPaths: [] });
     expect(release.acquired).toBe(true);
     expect(await client.course.findUniqueOrThrow({ where: { id: f.course.id } })).toEqual(outdoorBefore);
     if (release.acquired) await lane.retrySimulatorSupport({ ...owner, revision: release.value.revision, retryMinutes: 15 });
@@ -228,7 +259,8 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
       expectedFingerprint: getSimulatorOfferingSourceFingerprint(offering), expectedOfferingRevision: offering.monitoringRevision });
     if (!adopted.acquired) throw new Error("Core-cycle source adoption failed."); owner = { ...owner, revision: adopted.value.revision };
     const release = await lane.registerSimulatorSupportRelease({ ...owner, releaseSha: baseSha,
-      branch: `automation/course-support-${owner.ownerThreadId.replace("child-", "")}`, descendantVerified: true, committedPaths: [] });
+      branch: `automation/course-support-${owner.ownerThreadId.replace("child-", "")}`, trustedUpstreamSha: baseSha,
+      upstreamDescendantVerified: true, descendantVerified: true, committedPaths: [] });
     if (!release.acquired) throw new Error("Core-cycle release failed."); owner = { ...owner, revision: release.value.revision };
     const proof = { aliases: ["teetimespot.com", "www.teetimespot.com"], branch: "main", commitSha: baseSha,
       deployedAt: new Date(Date.now() - 5_000).toISOString(), deploymentId: "dpl_core_fixture", deploymentUrl: "https://core-fixture.vercel.app", source: "git" as const, state: "READY" as const };
@@ -323,6 +355,23 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     await lane.retireSimulatorSupport({ ...owner, revision: interrupted.revision });
   });
 
+  it("records exact current-upstream reuse as metadata-only without claiming a reader fix", async () => {
+    const f = await fixture();
+    const trustedUpstreamSha = "c".repeat(40);
+    const branch = `automation/course-support-${f.owner.ownerThreadId.replace("child-", "")}`;
+    await expect(lane.registerSimulatorSupportRelease({ ...f.owner, branch, releaseSha: "b".repeat(40),
+      trustedUpstreamSha, upstreamDescendantVerified: true, descendantVerified: true, committedPaths: [] })).rejects.toThrow("provenance");
+    const release = await lane.registerSimulatorSupportRelease({ ...f.owner, branch, releaseSha: trustedUpstreamSha,
+      trustedUpstreamSha, upstreamDescendantVerified: true, descendantVerified: true, committedPaths: [] });
+    if (!release.acquired) throw new Error("Metadata reuse was busy.");
+    expect((await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit).toMatchObject({
+      baseSha, simulatorClaim: { releaseSha: trustedUpstreamSha, plannedPaths: [] },
+      simulatorReleaseProvenance: { originalBaseSha: baseSha, trustedUpstreamSha,
+        releaseSha: trustedUpstreamSha, metadataOnlyReuse: true, metadataReuseKind: "TRUSTED_UPSTREAM", committedPaths: [] },
+    });
+    await lane.retrySimulatorSupport({ ...f.owner, revision: release.value.revision, retryMinutes: 15 });
+  });
+
   it("retains fresh successful links when another owned destination fails", async () => {
     const f = await fixture();
     const landing = await lane.readSimulatorSupportSource({ ...f.owner, source: "official" }, vi.fn(async () => new Response("<a href='/book-one'>Book bays</a><a href='/book-two'>Book another calendar</a>", { headers: { "content-type": "text/html" } })));
@@ -390,7 +439,234 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     const planned = await lane.claimSimulatorSupportPath({ ...f.owner, path: "src/lib/simulators/providers/new-reader.test.ts" });
     if (!planned.acquired) throw new Error("Test-only path fixture was busy.");
     await expect(lane.registerSimulatorSupportRelease({ ...f.owner, revision: planned.value.revision, releaseSha: "b".repeat(40),
-      branch: `automation/course-support-${f.owner.ownerThreadId.replace("child-", "")}`, committedPaths: ["src/lib/simulators/providers/new-reader.test.ts"], descendantVerified: true })).rejects.toThrow("provenance");
+      branch: `automation/course-support-${f.owner.ownerThreadId.replace("child-", "")}`, trustedUpstreamSha: baseSha,
+      upstreamDescendantVerified: true, committedPaths: ["src/lib/simulators/providers/new-reader.test.ts"], descendantVerified: true })).rejects.toThrow("provenance");
+    await lane.retrySimulatorSupport({ ...f.owner, revision: planned.value.revision, retryMinutes: 15 });
+  });
+
+  it("accepts claimed runtime work after reviewed upstream advances and rejects unclaimed or unproved candidate deltas", async () => {
+    const f = await fixture();
+    const path = "src/lib/simulators/providers/new-reader.ts";
+    const claimed = await lane.claimSimulatorSupportPath({ ...f.owner, path });
+    if (!claimed.acquired) throw new Error("Path claim failed.");
+    const owner = { ...f.owner, revision: claimed.value.revision };
+    const input = { ...owner, releaseSha: "b".repeat(40), trustedUpstreamSha: "c".repeat(40),
+      upstreamDescendantVerified: true, descendantVerified: true, branch: `automation/course-support-${owner.ownerThreadId.replace("child-", "")}`,
+      committedPaths: [path] };
+    await expect(lane.registerSimulatorSupportRelease({ ...input, upstreamDescendantVerified: false })).rejects.toThrow("provenance");
+    await expect(lane.registerSimulatorSupportRelease({ ...input, descendantVerified: false })).rejects.toThrow("provenance");
+    await expect(lane.registerSimulatorSupportRelease({ ...input, releaseSha: input.trustedUpstreamSha })).rejects.toThrow("provenance");
+    await expect(lane.registerSimulatorSupportRelease({ ...input, releaseSha: baseSha })).rejects.toThrow("provenance");
+    await expect(lane.registerSimulatorSupportRelease({ ...input, committedPaths: [] })).rejects.toThrow("provenance");
+    await expect(lane.registerSimulatorSupportRelease({ ...input, committedPaths: ["src/lib/simulators/providers/unclaimed.ts"] })).rejects.toThrow("provenance");
+    const registered = await lane.registerSimulatorSupportRelease(input);
+    expect(registered.acquired).toBe(true);
+    expect((await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit).toMatchObject({
+      baseSha, simulatorReleaseProvenance: { originalBaseSha: baseSha, trustedUpstreamSha: input.trustedUpstreamSha,
+        releaseSha: input.releaseSha, metadataOnlyReuse: false, committedPaths: [path] },
+    });
+    await lane.retrySimulatorSupport({ ...owner, revision: registered.value.revision, retryMinutes: 15 });
+  });
+
+  it("checkpoints an unknown rendered-read failure for the same owner without resetting navigation or budget", async () => {
+    const f = await fixture(15, false, "https://official.example.test/booking");
+    const raw = "sensitive browser detail https://secret.example.test/token";
+    await expect(lane.readSimulatorSupportSource({ ...f.owner, source: "official", rendered: true }, {
+      browser: async () => { throw new Error(raw); },
+    })).rejects.toThrow("SIMULATOR_RESEARCH_HARD_FAILED");
+    const inspected = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
+    expect(inspected.revision).toBe(f.owner.revision + 2);
+    expect(inspected.research).toMatchObject({ readCount: 1, inFlight: null, history: [{ outcome: "HARD_FAILED", httpStatus: 0,
+      failure: { stage: "PUBLIC_READ", category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE" } }] });
+    expect(await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).toMatchObject({ status: "RUNNING", outcome: "simulator_research_hard_failed" });
+    expect(JSON.stringify(inspected.research)).not.toContain(raw);
+    expect(inspected.failedRead).toMatchObject({ revision: inspected.revision, readsUsed: 1, readsRemaining: 5,
+      failure: { stage: "PUBLIC_READ", code: "UNCLASSIFIED_FAILURE" } });
+    expect(inspected.researchGuide.suggestedReads).toContainEqual({ source: "booking", rendered: false });
+    const audit = (await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    const context = await client.$transaction(tx => lane.readSimulatorSupportContinuationContext(tx, audit, new Date()));
+    expect(context).toMatchObject({ currentSource: true, currentClaimRevision: inspected.revision, providerReadInFlight: false,
+      checkpoint: { kind: "SETTLED_FAILURE", readCount: 1, allowedResearchRouteCount: expect.any(Number),
+        failure: { stage: "PUBLIC_READ", code: "UNCLASSIFIED_FAILURE" } } });
+    expect(context.checkpoint!.allowedResearchRouteCount).toBeGreaterThan(0);
+    await expect(lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: "replacement" })).rejects.toThrow("not owned");
+    await expect(lane.recoverSimulatorSupport({ ...f.owner, ownerThreadId: "replacement", revision: inspected.revision })).rejects.toThrow();
+    const recovered = await lane.recoverSimulatorSupport({ ...f.owner, revision: inspected.revision });
+    if (!recovered.acquired) throw new Error("Original-owner recovery was busy.");
+    expect(recovered.value.revision).toBe(inspected.revision + 1);
+    const after = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
+    expect(after.research).toMatchObject({ readCount: 1, inFlight: null });
+    expect(after.research.lastRecoveredFailureRequestId).toBe(after.research.history[0].requestId);
+    expect(after.failedRead).toBeNull();
+    const recoveredAudit = (await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    expect((await client.$transaction(tx => lane.readSimulatorSupportContinuationContext(tx, recoveredAudit, new Date()))).checkpoint).toBeNull();
+    await expect(lane.recoverSimulatorSupport({ ...f.owner, revision: recovered.value.revision })).rejects.toThrow("lease expires");
+    const booking = await lane.readSimulatorSupportSource({ ...f.owner, revision: recovered.value.revision, source: "booking" },
+      vi.fn(async () => new Response("<p>Public rental calendar</p>", { headers: { "content-type": "text/html" } })));
+    if (!booking.acquired) throw new Error("Alternate bounded route was busy.");
+    expect(booking.value.readsRemaining).toBe(4);
+    expect((await lane.retrySimulatorSupport({ ...f.owner, revision: booking.value.revision, retryMinutes: 15 })).acquired).toBe(true);
+  });
+
+  it("does not settle an unknown collector failure after the exact source changes", async () => {
+    const f = await fixture(15, false, "https://official.example.test/booking");
+    await expect(lane.readSimulatorSupportSource({ ...f.owner, source: "official", rendered: true }, {
+      browser: async () => {
+        await client.courseOffering.update({ where: { id: f.offering.id }, data: { bookingUrl: "https://changed.example.test/book" } });
+        throw new Error("untrusted browser failure");
+      },
+    })).rejects.toThrow("source changed");
+    const stored = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    expect(stored.audit).toMatchObject({ simulatorClaim: { revision: f.owner.revision + 1 },
+      simulatorResearch: { readCount: 1, history: [], inFlight: { source: "official", rendered: true } } });
+    await expect(lane.recoverSimulatorSupport({ ...f.owner, revision: f.owner.revision + 1 })).rejects.toThrow("lease expires");
+  });
+
+  it("does not normalize an unrecognized research-prefixed collector exception as a network observation", async () => {
+    const f = await fixture();
+    await expect(lane.readSimulatorSupportSource({ ...f.owner, source: "official", rendered: true }, {
+      browser: async () => { throw new Error("SIMULATOR_RESEARCH_NEW_UNCLASSIFIED_FAILURE"); },
+    })).rejects.toThrow("SIMULATOR_RESEARCH_HARD_FAILED");
+    const inspected = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
+    expect(inspected.research.history).toHaveLength(1);
+    expect(inspected.research.history[0]).toMatchObject({ outcome: "HARD_FAILED", httpStatus: 0,
+      failure: { category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE" } });
+  });
+
+  it.each([
+    ["SIMULATOR_RESEARCH_UNSAFE_URL", "ACCESS", "UNSAFE_PUBLIC_URL"],
+    ["SIMULATOR_RESEARCH_DESTINATION_CHANGED", "ACCESS", "PUBLIC_DESTINATION_CHANGED"],
+    ["SIMULATOR_RESEARCH_BODY_LIMIT", "BUDGET", "PUBLIC_BODY_LIMIT"],
+    ["SIMULATOR_RESEARCH_REQUEST_LIMIT", "BUDGET", "PUBLIC_REQUEST_LIMIT"],
+    ["SIMULATOR_RESEARCH_REDIRECT_LIMIT", "BUDGET", "PUBLIC_REDIRECT_LIMIT"],
+  ])("records %s as a hard %s checkpoint rather than a network result", async (code, category, safeCode) => {
+    const f = await fixture();
+    await expect(lane.readSimulatorSupportSource({ ...f.owner, source: "official", rendered: true }, {
+      browser: async () => { throw new Error(code); },
+    })).rejects.toThrow("SIMULATOR_RESEARCH_HARD_FAILED");
+    const inspected = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
+    expect(inspected.research.history).toHaveLength(1);
+    expect(inspected.research.history[0]).toMatchObject({ outcome: "HARD_FAILED", httpStatus: 0,
+      failure: { stage: "PUBLIC_READ", category, code: safeCode } });
+    expect(inspected.researchGuide.suggestedReads).not.toContainEqual({ source: "official", rendered: true });
+    const browser = vi.fn();
+    await expect(lane.readSimulatorSupportSource({ ...f.owner, revision: inspected.revision, source: "official", rendered: true },
+      { browser })).rejects.toThrow("identical route");
+    expect(browser).not.toHaveBeenCalled();
+    expect(await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } })).toMatchObject({ status: "AUTO_INVESTIGATING" });
+  });
+
+  it("reconciles an expired unfinished read as a hard interruption while retaining spent budget and saved navigation", async () => {
+    const f = await fixture(15, false, "https://official.example.test/booking");
+    const stored = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const audit = stored.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    const requestId = randomUUID();
+    audit.simulatorClaim!.leaseExpiresAt = new Date(Date.now() - 1000).toISOString();
+    audit.simulatorResearch = { version: 1, sourceFingerprint: f.fingerprint, readCount: 2,
+      history: [{ source: "official", requestedUrl: f.course.website!, sourceUrl: f.course.website!,
+        observedAt: new Date(Date.now() - 120_000).toISOString(), httpStatus: 200, rendered: false, outcome: "READ" }],
+      links: ["https://official.example.test/rates"], bookingLinks: [], linkBaseUrl: f.course.website!,
+      inFlight: { requestId, startedAt: new Date(Date.now() - 90_000).toISOString(), expiresAt: new Date(Date.now() - 30_000).toISOString(),
+        source: "link", url: "https://official.example.test/rates", rendered: true } };
+    await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
+    const context = await client.$transaction(tx => lane.readSimulatorSupportContinuationContext(tx, audit, new Date()));
+    expect(context).toMatchObject({ currentSource: true, leaseValid: false, providerReadInFlight: false,
+      checkpoint: { kind: "EXPIRED_UNFINISHED_READ", requestId, readCount: 2 } });
+    const recovered = await lane.recoverSimulatorSupport(f.owner);
+    if (!recovered.acquired) throw new Error("Original-owner recovery was busy.");
+    const inspected = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
+    expect(inspected.research).toMatchObject({ readCount: 2, inFlight: null, links: ["https://official.example.test/rates"],
+      linkBaseUrl: f.course.website, lastRecoveredFailureRequestId: requestId });
+    expect(inspected.research.history).toHaveLength(2);
+    expect(inspected.research.history[0].outcome).toBe("READ");
+    expect(inspected.research.history[1]).toMatchObject({ outcome: "HARD_FAILED", requestId,
+      failure: { code: "RESEARCH_RESERVATION_INTERRUPTED" } });
+    expect(inspected.researchGuide.readsRemaining).toBe(4);
+  });
+
+  it("uses the newest expired reservation instead of an older settled network failure", async () => {
+    const f = await fixture();
+    const pendingRequestId = await seedExpiredUnfinishedRead(f);
+    const stored = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const audit = stored.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    audit.simulatorResearch = { ...audit.simulatorResearch!, readCount: 2, history: [{
+      source: "booking", requestedUrl: "https://official.example.test/old-booking", sourceUrl: "https://official.example.test/old-booking",
+      observedAt: new Date(Date.now() - 120_000).toISOString(), httpStatus: 0, rendered: false,
+      outcome: "HARD_FAILED", requestId: randomUUID(),
+      failure: { stage: "PUBLIC_READ", category: "NETWORK", code: "PUBLIC_NETWORK_FAILED" },
+    }] };
+    await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
+    const context = await client.$transaction(tx => lane.readSimulatorSupportContinuationContext(tx, audit, new Date()));
+    expect(context.checkpoint).toMatchObject({ kind: "EXPIRED_UNFINISHED_READ", requestId: pendingRequestId,
+      readCount: 2, failure: null });
+  });
+
+  it("reserves one same-worker continuation in Postgres without touching the claim and fences competing or stale proof", async () => {
+    const first = await fixture();
+    await seedExpiredUnfinishedRead(first);
+    const before = (await client.automationRun.findUniqueOrThrow({ where: { id: first.run.id } })).audit as Prisma.JsonObject;
+    const reserved = await dispatcher.reserveCourseSupportContinuation(continuationEvidence(first));
+    if (!reserved.acquired) throw new Error("Continuation writer lease was busy.");
+    expect(reserved.value).toMatchObject({ reserved: true, assignmentRef: first.owner.assignmentRef,
+      threadId: first.owner.ownerThreadId, scope: "DIAGNOSE_REVIEWED_TOOLING_UPDATE" });
+    const after = (await client.automationRun.findUniqueOrThrow({ where: { id: first.run.id } })).audit as Prisma.JsonObject;
+    expect(after.simulatorClaim).toEqual(before.simulatorClaim);
+    expect(after.simulatorResearch).toEqual(before.simulatorResearch);
+    expect(after.simulatorContinuation).toMatchObject({ receipts: [{ status: "PENDING", attempt: 1 }] });
+    const competed = await dispatcher.reserveCourseSupportContinuation(continuationEvidence(first, "competing-parent"));
+    if (!competed.acquired) throw new Error("Competing writer lease was busy.");
+    expect(competed.value).toMatchObject({ reserved: false, reason: "PRIOR_SEND_UNCONFIRMED" });
+    expect((await client.automationRun.findUniqueOrThrow({ where: { id: first.run.id } })).audit).toEqual(after);
+
+    await client.automationRun.update({ where: { id: first.run.id }, data: { status: "COMPLETED", completedAt: new Date(), outcome: "test_original_finished" } });
+    const second = await fixture();
+    await seedExpiredUnfinishedRead(second);
+    const secondBefore = (await client.automationRun.findUniqueOrThrow({ where: { id: second.run.id } })).audit;
+    const invalidProof = continuationEvidence(second);
+    invalidProof.nativeCompletion.latestTurn.status = "inProgress";
+    const rejectedProof = await dispatcher.reserveCourseSupportContinuation(invalidProof);
+    if (!rejectedProof.acquired) throw new Error("Invalid-proof writer lease was busy.");
+    expect(rejectedProof.value).toMatchObject({ reserved: false, reason: "NATIVE_COMPLETION_OR_READINESS_UNPROVED" });
+    const sameTick = await dispatcher.reserveCourseSupportContinuation(continuationEvidence(second));
+    if (!sameTick.acquired) throw new Error("Same-tick writer lease was busy.");
+    expect(sameTick.value).toMatchObject({ reserved: false, reason: "TICK_CONTINUATION_BUDGET_EXHAUSTED" });
+    expect((await client.automationRun.findUniqueOrThrow({ where: { id: second.run.id } })).audit).toEqual(secondBefore);
+    await client.courseOffering.update({ where: { id: second.offering.id }, data: { bookingUrl: "https://changed.example.test/book" } });
+    await expect(dispatcher.reserveCourseSupportContinuation(continuationEvidence(second))).rejects.toThrow("source changed");
+    expect((await client.automationRun.findUniqueOrThrow({ where: { id: second.run.id } })).audit).toEqual(secondBefore);
+    await client.automationRun.delete({ where: { id: first.run.id } });
+  });
+
+  it("persists a known acquired network diagnostic for eligible same-worker continuation while capacity stays attention", async () => {
+    const f = await fixture(15, false, "https://official.example.test/booking");
+    const network = await lane.readSimulatorSupportSource({ ...f.owner, source: "official" },
+      vi.fn(async () => { throw new TypeError("fetch failed"); }));
+    if (!network.acquired) throw new Error("Known network observation was busy.");
+    expect(network.value).toMatchObject({ researchOutcome: "NETWORK_FAILED", readsRemaining: 5 });
+    const audit = (await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    expect(audit.simulatorResearch?.history[0]).toMatchObject({ outcome: "NETWORK_FAILED", httpStatus: 0,
+      failure: { stage: "PUBLIC_READ", category: "NETWORK", code: "PUBLIC_FETCH_FAILED" }, requestId: expect.any(String) });
+    const context = await client.$transaction(tx => lane.readSimulatorSupportContinuationContext(tx, audit, new Date()));
+    expect(context.checkpoint).toMatchObject({ kind: "SETTLED_FAILURE", readCount: 1,
+      failure: { category: "NETWORK", code: "PUBLIC_FETCH_FAILED" }, allowedResearchRouteCount: expect.any(Number) });
+    expect(context.checkpoint!.allowedResearchRouteCount).toBeGreaterThan(0);
+    const reserved = await dispatcher.reserveCourseSupportContinuation(continuationEvidence(f));
+    if (!reserved.acquired) throw new Error("Known-network continuation writer lease was busy.");
+    expect(reserved.value).toMatchObject({ reserved: true, scope: "RESUME_ALLOWED_RESEARCH" });
+
+    const capacity = await fixture();
+    const busy = await lane.readSimulatorSupportSource({ ...capacity.owner, source: "official", rendered: true }, {
+      browser: async () => { throw new Error("SIMULATOR_RESEARCH_PROVIDER_BUSY"); },
+    });
+    if (!busy.acquired) throw new Error("Known capacity observation was busy.");
+    expect(busy.value.researchOutcome).toBe("CAPACITY_BUSY");
+    const capacityAudit = (await client.automationRun.findUniqueOrThrow({ where: { id: capacity.run.id } })).audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    expect(capacityAudit.simulatorResearch?.history[0]).toMatchObject({ outcome: "CAPACITY_BUSY",
+      failure: { category: "CAPACITY", code: "PROVIDER_CAPACITY_BUSY" } });
+    const capacityReserve = await dispatcher.reserveCourseSupportContinuation(continuationEvidence(capacity));
+    if (!capacityReserve.acquired) throw new Error("Capacity continuation writer lease was busy.");
+    expect(capacityReserve.value).toMatchObject({ reserved: false, reason: "FAILURE_REQUIRES_ATTENTION" });
+    await client.automationRun.deleteMany({ where: { id: { in: [f.run.id, capacity.run.id] } } });
   });
 
   it.each([new TypeError("fetch failed"), Object.assign(new Error("socket reset"), { code: "ECONNRESET" })])("records bounded network failure with an advanced revision and rejects malformed research: %s", async error => {

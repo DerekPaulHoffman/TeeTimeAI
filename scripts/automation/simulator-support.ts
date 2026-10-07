@@ -8,6 +8,7 @@ import { resolveCodexOwnerThreadId } from "./git-output";
 import { readDispatchGitState } from "./course-support-dispatch";
 import { adoptSimulatorSupportSource, claimSimulatorSupportAssignment, claimSimulatorSupportPath, completeSimulatorSupport, heartbeatSimulatorSupport, queueSimulatorSupportRechecks, readSimulatorSupportClaim, readSimulatorSupportProgress, recordSimulatorSupportDeployment, registerSimulatorSupportRelease, retrySimulatorSupport, recoverSimulatorSupport, retireSimulatorSupport, configureSimulatorSupportOffering, classifySimulatorSupportOffering, readSimulatorSupportSource } from "@/lib/automation/simulator-support-ownership";
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
+import { classifySimulatorSupportFailure, readSafeSimulatorSupportFailure, type SimulatorSupportFailure, type SimulatorSupportFailureStage } from "@/lib/automation/simulator-support-failure";
 import { waitForGitDeployment } from "@/lib/deployments/wait-for-git-deployment";
 import type { VercelDeploymentInspection, VercelDeploymentList } from "@/lib/deployments/vercel-git";
 
@@ -45,6 +46,22 @@ export function readSimulatorSupportArguments(args: readonly string[]) {
 }
 
 function git(args: string[]) { return execFileSync("git", args, { encoding: "utf8", windowsHide: true }).trim(); }
+
+export function prepareSimulatorSupportReleaseProvenance(input: { releaseSha: string; originalBaseSha: string; plannedPaths: readonly string[] }, runGit: (args: string[]) => string = git) {
+  if (runGit(["status", "--porcelain"]) || runGit(["rev-parse", "HEAD"]) !== input.releaseSha) throw new Error("Register a clean exact committed simulator release before publishing.");
+  runGit(["fetch", "origin", "main"]);
+  const fetchedMainSha = runGit(["rev-parse", "FETCH_HEAD"]);
+  const trustedUpstreamSha = runGit(["rev-parse", "origin/main"]);
+  if (!/^[a-f0-9]{40}$/i.test(trustedUpstreamSha) || fetchedMainSha !== trustedUpstreamSha) throw new Error("The current trusted upstream could not be verified.");
+  runGit(["merge-base", "--is-ancestor", input.originalBaseSha, trustedUpstreamSha]);
+  const metadataOnlyReuse = input.plannedPaths.length === 0 &&
+    (input.releaseSha === input.originalBaseSha || input.releaseSha === trustedUpstreamSha);
+  if (input.plannedPaths.length === 0 && !metadataOnlyReuse) throw new Error("Metadata-only simulator release must reuse the original base or current trusted upstream.");
+  if (!metadataOnlyReuse) runGit(["merge-base", "--is-ancestor", trustedUpstreamSha, input.releaseSha]);
+  const committedPaths = metadataOnlyReuse ? [] : runGit(["diff", "--name-only", trustedUpstreamSha, input.releaseSha]).split(/\r?\n/).filter(Boolean);
+  return { trustedUpstreamSha, upstreamDescendantVerified: true as const, descendantVerified: true as const, committedPaths };
+}
+
 function vercelJson<T>(args: string[]): T {
   if (args.some(value => !/^[A-Za-z0-9_./:=,-]+$/.test(value))) throw new Error("Unsupported Vercel argument.");
   const windows = process.platform === "win32";
@@ -79,10 +96,9 @@ async function main() {
     result = await adoptSimulatorSupportSource({ ...owner, expectedFingerprint: getSimulatorOfferingSourceFingerprint(offering), expectedOfferingRevision: offering.monitoringRevision });
   } else if (input.command === "release") {
     const claim = await readSimulatorSupportClaim(owner);
-    if (git(["status", "--porcelain"]) || git(["rev-parse", "HEAD"]) !== input.releaseSha) throw new Error("Register a clean exact committed simulator release before publishing.");
-    git(["merge-base", "--is-ancestor", claim.baseSha, input.releaseSha!]);
-    const committedPaths = git(["diff", "--name-only", claim.baseSha, input.releaseSha!]).split(/\r?\n/).filter(Boolean);
-    result = await registerSimulatorSupportRelease({ ...owner, releaseSha: input.releaseSha!, branch: git(["branch", "--show-current"]), descendantVerified: true, committedPaths });
+    const provenance = prepareSimulatorSupportReleaseProvenance({ releaseSha: input.releaseSha!, originalBaseSha: claim.baseSha, plannedPaths: claim.plannedPaths });
+    result = await registerSimulatorSupportRelease({ ...owner, releaseSha: input.releaseSha!, branch: git(["branch", "--show-current"]),
+      ...provenance });
   } else if (input.command === "deployed") {
     const claim = await readSimulatorSupportClaim(owner);
     if (!claim.releaseSha) throw new Error("Register the release SHA first.");
@@ -105,6 +121,26 @@ async function main() {
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
-if (resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) main().catch(() => {
-  process.stderr.write("Simulator support failed; preserve offering ownership and stop this operation.\n"); process.exitCode = 1;
+export function reportSimulatorSupportFailure(error: unknown, stage: SimulatorSupportFailureStage = "COMMAND", latestOwnedRevision?: number, settledFailure?: SimulatorSupportFailure) {
+  const failure = readSafeSimulatorSupportFailure(settledFailure) ?? classifySimulatorSupportFailure(error, stage);
+  process.stderr.write(`${JSON.stringify({ simulatorSupportFailure: { ...failure,
+    ...(Number.isSafeInteger(latestOwnedRevision) && latestOwnedRevision! > 0 ? { latestOwnedRevision } : {}) } })}\n`);
+  process.stderr.write("Simulator support failed; preserve offering ownership and stop this operation.\n");
+  process.exitCode = 1;
+  return failure;
+}
+
+if (resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) main().catch(async error => {
+  let latestOwnedRevision: number | undefined;
+  if (error instanceof Error && error.message === "SIMULATOR_RESEARCH_HARD_FAILED" && process.argv[2] === "source-read") {
+    try {
+      const input = readSimulatorSupportArguments(process.argv.slice(2));
+      const ownerThreadId = resolveCodexOwnerThreadId({ environmentOwnerThreadId: process.env.CODEX_THREAD_ID });
+      const claim = await readSimulatorSupportClaim({ assignmentRef: input.assignmentRef, ownerThreadId });
+      latestOwnedRevision = claim.revision;
+    } catch { /* Diagnostic ownership read failure cannot replace the original hard fence. */ }
+  }
+  const settledFailure = error instanceof Error && error.message === "SIMULATOR_RESEARCH_HARD_FAILED"
+    ? readSafeSimulatorSupportFailure((error as Error & { failure?: unknown }).failure) ?? undefined : undefined;
+  reportSimulatorSupportFailure(error, "COMMAND", latestOwnedRevision, settledFailure);
 }).finally(() => prisma.$disconnect());
