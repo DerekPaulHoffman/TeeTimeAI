@@ -1,8 +1,26 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
-import { prepareSimulatorSupportReleaseProvenance } from "../../../scripts/automation/simulator-support";
+import { prepareSimulatorSupportReleaseProvenance, readSimulatorSupportArguments } from "../../../scripts/automation/simulator-support";
 
 const original = "a".repeat(40), upstream = "b".repeat(40), candidate = "c".repeat(40);
+
+describe("private simulator source CLI selection", () => {
+  const ownerArgs = ["--assignment-ref", "owned-assignment", "--token", "owned-token", "--revision", "3"];
+  it("accepts the derived-root selector with only the original owned read options", () => {
+    expect(readSimulatorSupportArguments(["source-read", ...ownerArgs, "--source", "booking-root"])).toMatchObject({
+      command: "source-read", assignmentRef: "owned-assignment", token: "owned-token", revision: 3, source: "booking-root", rendered: false, linkIndex: undefined });
+    expect(readSimulatorSupportArguments(["source-read", ...ownerArgs, "--source", "booking-root", "--rendered"]).rendered).toBe(true);
+  });
+  it("rejects caller URLs, other roots, combined link selection and use on another command", () => {
+    for (const args of [
+      ["source-read", ...ownerArgs, "--source", "booking-root", "--url", "https://yourgolfbooking.com/venues/other/booking"],
+      ["source-read", ...ownerArgs, "--source", "https://yourgolfbooking.com/venues/other/booking"],
+      ["source-read", ...ownerArgs, "--source", "booking-parent"],
+      ["source-read", ...ownerArgs, "--source", "booking-root", "--link", "1"],
+      ["inspect", ...ownerArgs, "--source", "booking-root"],
+    ]) expect(() => readSimulatorSupportArguments(args)).toThrow();
+  });
+});
 
 function gitFixture(head = candidate) {
   const run = vi.fn((args: string[]) => {

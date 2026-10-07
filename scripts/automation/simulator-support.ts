@@ -8,6 +8,7 @@ import { resolveCodexOwnerThreadId } from "./git-output";
 import { readDispatchGitState } from "./course-support-dispatch";
 import { adoptSimulatorSupportSource, claimSimulatorSupportAssignment, claimSimulatorSupportPath, completeSimulatorSupport, heartbeatSimulatorSupport, queueSimulatorSupportRechecks, readSimulatorSupportClaim, readSimulatorSupportProgress, recordSimulatorSupportDeployment, registerSimulatorSupportRelease, retrySimulatorSupport, recoverSimulatorSupport, retireSimulatorSupport, configureSimulatorSupportOffering, classifySimulatorSupportOffering, readSimulatorSupportSource } from "@/lib/automation/simulator-support-ownership";
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
+import { SIMULATOR_RESEARCH_SOURCE_NAMES, type SimulatorResearchSource } from "@/lib/automation/simulator-support-research-policy";
 import { classifySimulatorSupportFailure, readSafeSimulatorSupportFailure, type SimulatorSupportFailure, type SimulatorSupportFailureStage } from "@/lib/automation/simulator-support-failure";
 import { waitForGitDeployment } from "@/lib/deployments/wait-for-git-deployment";
 import type { VercelDeploymentInspection, VercelDeploymentList } from "@/lib/deployments/vercel-git";
@@ -41,9 +42,9 @@ export function readSimulatorSupportArguments(args: readonly string[]) {
       (command === "retry" && !/^[1-9][0-9]*$/.test(values.get("--retry-minutes") ?? "")) ||
       (["configure", "classify"].includes(command) && !values.get("--manifest")) ||
       (command === "source-read" && (values.has("--source") === values.has("--link") ||
-        (values.has("--source") && !["official", "booking", "evidence"].includes(values.get("--source")!)) ||
+        (values.has("--source") && !(SIMULATOR_RESEARCH_SOURCE_NAMES as readonly string[]).includes(values.get("--source")!)) ||
         (values.has("--link") && !/^(?:[1-9]|[12][0-9]|30)$/.test(values.get("--link")!))))) throw new Error("Simulator-support command arguments are incomplete.");
-  return { command, assignmentRef: values.get("--assignment-ref")!, token: values.get("--token")!, revision: Number(values.get("--revision")), path: values.get("--path"), releaseSha: values.get("--sha"), retryMinutes: Number(values.get("--retry-minutes")), manifestPath: values.get("--manifest"), source: values.get("--source") as "official" | "booking" | "evidence" | undefined,
+  return { command, assignmentRef: values.get("--assignment-ref")!, token: values.get("--token")!, revision: Number(values.get("--revision")), path: values.get("--path"), releaseSha: values.get("--sha"), retryMinutes: Number(values.get("--retry-minutes")), manifestPath: values.get("--manifest"), source: values.get("--source") as SimulatorResearchSource | undefined,
     linkIndex: values.has("--link") ? Number(values.get("--link")) : undefined, rendered, apply };
 }
 

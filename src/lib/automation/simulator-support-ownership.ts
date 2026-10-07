@@ -12,7 +12,7 @@ import { z } from "zod";
 import { collectSimulatorSupportResearch, type SimulatorResearchDependencies, type SimulatorResearchResult } from "./simulator-support-research";
 export { summarizeSimulatorSupportPublicHtml } from "./simulator-support-research";
 import { evaluateSimulatorSupportProgress } from "./simulator-support-progress";
-import { assertSimulatorResearchFallbackBeforeRetry, getSimulatorResearchGuide, getSimulatorResearchRetryGuide, readSettledSimulatorPublicCheckpoint, readSimulatorResearchState, selectSimulatorResearchTarget, type SimulatorResearchState } from "./simulator-support-research-policy";
+import { assertSimulatorResearchFallbackBeforeRetry, getSimulatorResearchGuide, getSimulatorResearchRetryGuide, readSettledSimulatorPublicCheckpoint, readSimulatorResearchState, selectSimulatorResearchTarget, type SimulatorResearchSource, type SimulatorResearchState } from "./simulator-support-research-policy";
 import { classifySimulatorSupportFailure, type SimulatorSupportFailure } from "./simulator-support-failure";
 
 type Owner = { assignmentRef: string; ownerThreadId: string; token: string; revision: number };
@@ -157,7 +157,7 @@ export async function configureSimulatorSupportOffering(input: Owner & { manifes
   });
 }
 
-export async function readSimulatorSupportSource(input: Owner & { source?: "official" | "booking" | "evidence"; linkIndex?: number; rendered?: boolean }, dependencies: SimulatorResearchDependencies | typeof fetch = {}) {
+export async function readSimulatorSupportSource(input: Owner & { source?: SimulatorResearchSource; linkIndex?: number; rendered?: boolean }, dependencies: SimulatorResearchDependencies | typeof fetch = {}) {
   const before = await withTransition(async (tx, now) => {
     const row = await loadOwned(tx, input, now);
     const state = readSimulatorResearchState(row.audit.simulatorResearch, row.source.fingerprint);

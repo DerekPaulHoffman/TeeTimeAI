@@ -6,8 +6,85 @@ const officialUrl = "https://venue.example.test", bookingUrl = "https://calendar
 const empty = () => readSimulatorResearchState(undefined, fingerprint);
 const select = (state = empty(), rest = {}) => selectSimulatorResearchTarget({ state, officialUrl, bookingUrl, source: "official", rendered: false, now, ...rest });
 const failedHomepage = () => ({ ...empty(), readCount: 1, history: [{ source: "official" as const, requestedUrl: officialUrl, sourceUrl: officialUrl, observedAt: now.toISOString(), httpStatus: 403, rendered: false, outcome: "READ" as const }] });
+const savedBayUrl = "https://yourgolfbooking.com/venues/public-golf/booking/bays";
+const bookingRootUrl = "https://yourgolfbooking.com/venues/public-golf/booking";
 
 describe("owned simulator research navigation", () => {
+  it("derives only the known public booking root from the current saved bay URL", () => {
+    for (const host of ["booking.trackmangolf.com", "yourgolfbooking.com", "www.yourgolfbooking.com"]) {
+      for (const trailing of ["", "/"]) {
+        const input = { state: empty(), officialUrl, bookingUrl: `https://${host}/venues/public-golf/booking/bays${trailing}`,
+          source: "booking-root" as const, rendered: false, now };
+        expect(selectSimulatorResearchTarget(input)).toEqual({ source: "booking-root", url: `https://${host}/venues/public-golf/booking`, rendered: false });
+        expect(input.bookingUrl).toBe(`https://${host}/venues/public-golf/booking/bays${trailing}`);
+        expect(input.state.readCount).toBe(0);
+      }
+    }
+    expect(select(empty(), { source: "booking-root", bookingUrl: "https://yourgolfbooking.com/venues/another-golf/booking/bays" }).url)
+      .toBe("https://yourgolfbooking.com/venues/another-golf/booking");
+  });
+
+  it("rejects unproven platforms, normalized path tricks, unsafe slugs and any saved URL state", () => {
+    for (const saved of [null, bookingRootUrl, `${bookingRootUrl}/`, bookingUrl,
+      savedBayUrl.replace("https:", "http:"), savedBayUrl.replace("yourgolfbooking.com", "api.yourgolfbooking.com"),
+      savedBayUrl.replace("yourgolfbooking.com", "yourgolfbooking.com.example.test"),
+      savedBayUrl.replace("yourgolfbooking.com", "www.booking.trackmangolf.com"),
+      savedBayUrl.replace("yourgolfbooking.com", "user:password@yourgolfbooking.com"),
+      savedBayUrl.replace("yourgolfbooking.com", "yourgolfbooking.com:443"),
+      savedBayUrl.replace("public-golf", "Public-Golf"), savedBayUrl.replace("public-golf", "public--golf"),
+      savedBayUrl.replace("public-golf", "-public-golf"), savedBayUrl.replace("public-golf", "public-golf-"),
+      savedBayUrl.replace("public-golf", "public%2dgolf"), savedBayUrl.replace("public-golf", "login"),
+      savedBayUrl.replace("/venues/", "/unused/../venues/"), savedBayUrl.replace("/venues/", "/\\venues/"),
+      `${savedBayUrl}?`, `${savedBayUrl}?date=2026-10-07`, `${savedBayUrl}#`, `${savedBayUrl}#calendar`,
+      `${savedBayUrl}/extra`, `${savedBayUrl}//`]) {
+      expect(() => select(empty(), { source: "booking-root", bookingUrl: saved }), String(saved)).toThrow("unavailable");
+      expect(getSimulatorResearchGuide({ state: empty(), officialUrl, bookingUrl: saved, now, priorFailedRoutes: [] }).suggestedReads)
+        .not.toContainEqual({ source: "booking-root", rendered: false });
+    }
+    const observedOnly = { ...failedHomepage(), links: [savedBayUrl], bookingLinks: [savedBayUrl], linkBaseUrl: officialUrl };
+    expect(() => select(observedOnly, { source: "booking-root", bookingUrl: null })).toThrow("unavailable");
+  });
+
+  it("records derived-root reservations and observations without resetting fingerprint or evidence guards", () => {
+    const rootRead = { ...failedHomepage().history[0], source: "booking-root" as const, requestedUrl: bookingRootUrl, sourceUrl: bookingRootUrl };
+    const state = readSimulatorResearchState({ ...empty(), readCount: 1, history: [rootRead] }, fingerprint);
+    expect(state).toMatchObject({ sourceFingerprint: fingerprint, readCount: 1, history: [rootRead] });
+    const pending = readSimulatorResearchState({ ...empty(), readCount: 1, inFlight: { source: "booking-root", url: bookingRootUrl,
+      requestId: "11111111-1111-4111-8111-111111111111", startedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 60_000).toISOString(), rendered: false } }, fingerprint);
+    expect(() => select(pending, { source: "booking-root", bookingUrl: savedBayUrl })).toThrow("in flight");
+    expect(readSettledSimulatorPublicCheckpoint(state, now)).toBeNull();
+    const access = { ...rootRead, httpStatus: 200, requestId: "11111111-1111-4111-8111-111111111111",
+      publicReadEvidence: { sourceFingerprint: fingerprint, accessControlsObserved: true as const, accessControls: ["ACCOUNT_REQUIRED" as const], method: "HTTP" as const } };
+    expect(readSettledSimulatorPublicCheckpoint(readSimulatorResearchState({ ...empty(), readCount: 1, history: [access] }, fingerprint), now)).toBeNull();
+  });
+
+  it("shares spent URL/mode, prior-failure and six-read guards with saved booking research", () => {
+    const rootRead = { ...failedHomepage().history[0], source: "booking-root" as const, requestedUrl: bookingRootUrl, sourceUrl: bookingRootUrl };
+    const state = { ...empty(), readCount: 1, history: [rootRead] };
+    expect(() => select(state, { source: "booking-root", bookingUrl: savedBayUrl })).toThrow("identical");
+    expect(select(state, { source: "booking-root", bookingUrl: savedBayUrl, rendered: true })).toMatchObject({ url: bookingRootUrl, rendered: true });
+    expect(() => select(empty(), { source: "booking-root", bookingUrl: savedBayUrl,
+      priorFailedRoutes: [{ url: bookingRootUrl, rendered: false }] })).toThrow("structural");
+    expect(select(empty(), { source: "booking-root", bookingUrl: savedBayUrl, rendered: true,
+      priorFailedRoutes: [{ url: bookingRootUrl, rendered: false }] }).url).toBe(bookingRootUrl);
+    expect(() => select({ ...state, readCount: 6 }, { source: "booking-root", bookingUrl: savedBayUrl })).toThrow("budget");
+  });
+
+  it("counts the derived root among the original three booking destinations", () => {
+    const base = failedHomepage().history[0];
+    const history = [
+      { ...base, source: "booking-root" as const, requestedUrl: bookingRootUrl, sourceUrl: bookingRootUrl },
+      ...[1, 2].map(index => ({ ...base, source: "booking" as const,
+        requestedUrl: `https://calendar.example.test/booking/${index}`, sourceUrl: `https://calendar.example.test/booking/${index}` })),
+    ];
+    const state = { ...empty(), readCount: 3, history };
+    expect(() => select(state, { source: "booking", bookingUrl: savedBayUrl })).toThrow("destination budget");
+    expect(select(state, { source: "booking-root", bookingUrl: savedBayUrl, rendered: true }).url).toBe(bookingRootUrl);
+    const otherDestinations = history.map((entry, index) => ({ ...entry, source: "booking" as const,
+      requestedUrl: `https://other.example.test/booking/${index}`, sourceUrl: `https://other.example.test/booking/${index}` }));
+    expect(() => select({ ...empty(), readCount: 3, history: otherDestinations }, { source: "booking-root", bookingUrl: savedBayUrl })).toThrow("destination budget");
+  });
+
   it("offers only a saved same-origin evidence page and keeps original route budgets", () => {
     const evidenceUrl = `${officialUrl}/faqs`;
     expect(select(empty(), { source: "evidence", evidenceUrl })).toMatchObject({ source: "evidence", url: evidenceUrl });
@@ -118,6 +195,56 @@ const successfulHomepage = () => ({ ...failedHomepage(), history: [{ ...failedHo
 const requestId = "11111111-1111-4111-8111-111111111111";
 
 describe("calendar research required before incomplete simulator retry", () => {
+  it("offers an untried derived root before generic pages after both saved bay modes are spent", () => {
+    const success = successfulHomepage().history[0];
+    const state = { ...empty(), readCount: 3, history: [success,
+      ...[false, true].map(rendered => ({ ...success, source: "booking" as const, requestedUrl: savedBayUrl, sourceUrl: savedBayUrl, rendered, httpStatus: 403 }))],
+      links: [`${officialUrl}/about`, savedBayUrl], bookingLinks: [savedBayUrl], linkBaseUrl: officialUrl,
+      bookingLinkRoles: [{ url: savedBayUrl, observedAt: now.toISOString() }] };
+    const result = retryGuide(state, { bookingUrl: savedBayUrl, evidenceUrl: `${officialUrl}/faqs` });
+    expect(result).toMatchObject({ bookingResearchRequired: true, nextEligibleBookingRead: { source: "booking-root", rendered: false },
+      skipHomepageFallback: false, closeoutReason: null });
+    expect(result.researchGuide.suggestedReads.slice(0, 4)).toEqual([
+      { source: "booking-root", rendered: false }, { source: "booking-root", rendered: true },
+      { linkIndex: 1, rendered: false }, { linkIndex: 1, rendered: true },
+    ]);
+    expect(state.readCount).toBe(3);
+    expect(state.links).toEqual([`${officialUrl}/about`, savedBayUrl]);
+  });
+
+  it("keeps fresh handoffs ahead of derived roots and leaves already-root guides unchanged", () => {
+    const otherBooking = "https://other.example.test/booking/bays";
+    const state = { ...successfulHomepage(), links: [`${officialUrl}/about`, otherBooking], bookingLinks: [otherBooking],
+      bookingLinkRoles: [{ url: otherBooking, observedAt: now.toISOString() }], linkBaseUrl: officialUrl };
+    expect(getSimulatorResearchGuide({ state, officialUrl, bookingUrl: savedBayUrl, now, priorFailedRoutes: [] }).suggestedReads.slice(0, 8)).toEqual([
+      { source: "booking", rendered: false }, { source: "booking", rendered: true },
+      { linkIndex: 2, rendered: false }, { linkIndex: 2, rendered: true },
+      { source: "booking-root", rendered: false }, { source: "booking-root", rendered: true },
+      { linkIndex: 1, rendered: false }, { linkIndex: 1, rendered: true },
+    ]);
+    expect(getSimulatorResearchGuide({ state: empty(), officialUrl, bookingUrl: bookingRootUrl, now, priorFailedRoutes: [] }).suggestedReads).toEqual([
+      { source: "booking", rendered: false }, { source: "booking", rendered: true },
+      { source: "official", rendered: false }, { source: "official", rendered: true },
+    ]);
+  });
+
+  it("requires only offered root modes and retains hard-failure and provider backoff closeout", () => {
+    const base = successfulHomepage().history[0];
+    const bayDenied = [false, true].map(rendered => ({ url: savedBayUrl, rendered, httpStatus: 403 }));
+    expect(retryGuide(successfulHomepage(), { bookingUrl: savedBayUrl, priorFailedRoutes: [...bayDenied,
+      { url: bookingRootUrl, rendered: false, httpStatus: 403 }] }).nextEligibleBookingRead).toEqual({ source: "booking-root", rendered: true });
+    expect(retryGuide(successfulHomepage(), { bookingUrl: savedBayUrl, priorFailedRoutes: [...bayDenied,
+      ...[false, true].map(rendered => ({ url: bookingRootUrl, rendered, httpStatus: 403 }))] })).toMatchObject({
+      bookingResearchRequired: false, nextEligibleBookingRead: null, closeoutReason: "NO_ELIGIBLE_BOOKING_ROUTES" });
+    for (const latest of [{ ...base, httpStatus: 429 }, { ...base, httpStatus: 503 }]) {
+      expect(retryGuide({ ...empty(), readCount: 1, history: [latest] }, { bookingUrl: savedBayUrl })).toMatchObject({
+        bookingResearchRequired: false, closeoutReason: "PROVIDER_BACKOFF" });
+    }
+    const hard = readSimulatorResearchState({ ...empty(), readCount: 1, history: [{ ...base, httpStatus: 0, outcome: "HARD_FAILED",
+      requestId, failure: { stage: "PUBLIC_READ", category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE" } }] }, fingerprint);
+    expect(retryGuide(hard, { bookingUrl: savedBayUrl })).toMatchObject({ bookingResearchRequired: false, closeoutReason: "HARD_FAILURE" });
+  });
+
   it("requires an offered saved calendar even after a successful homepage", () => {
     const state = successfulHomepage();
     expect(retryGuide(state)).toMatchObject({ bookingResearchRequired: true, nextEligibleBookingRead: { source: "booking", rendered: false },

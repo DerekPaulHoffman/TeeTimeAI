@@ -126,6 +126,52 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     };
   }
 
+  it("reads the current platform booking root as a second owned destination after both saved bays modes fail", async () => {
+    const bays = "https://yourgolfbooking.com/venues/owned-simulator/booking/bays";
+    const root = "https://yourgolfbooking.com/venues/owned-simulator/booking";
+    const f = await fixture(15, false, bays);
+    const stored = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const audit = stored.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    audit.simulatorResearch = { version: 1, sourceFingerprint: f.fingerprint, readCount: 2, history: [false, true].map(rendered => ({
+      source: "booking" as const, requestedUrl: bays, sourceUrl: bays, observedAt: new Date().toISOString(),
+      httpStatus: 403, rendered, outcome: "READ" as const, requestId: randomUUID(),
+    })), links: [], bookingLinks: [], linkBaseUrl: null, inFlight: null };
+    await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
+    const inspected = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
+    expect(inspected.researchGuide.suggestedReads[0]).toEqual({ source: "booking-root", rendered: false });
+    const fetch = vi.fn(async (url: unknown) => { expect(String(url)).toBe(root); return new Response("<h1>Public booking page</h1>", { headers: { "content-type": "text/html" } }); });
+    const result = await lane.readSimulatorSupportSource({ ...f.owner, source: "booking-root" }, { fetch });
+    expect(result.value).toMatchObject({ publicSource: { requestedUrl: root, httpStatus: 200, method: "HTTP" } });
+    expect(fetch).toHaveBeenCalledOnce();
+    const current = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
+    expect(current.research.readCount).toBe(3);
+    expect(current.research.history[2]).toMatchObject({ source: "booking-root", requestedUrl: root, httpStatus: 200 });
+    const savedOffering = await client.courseOffering.findUniqueOrThrow({ where: { id: f.offering.id } });
+    expect(savedOffering.bookingUrl).toBe(bays);
+    await expect(lane.readSimulatorSupportSource({ ...f.owner, revision: current.revision, source: "booking-root" }, { fetch })).rejects.toThrow("identical");
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("keeps current source and three-destination fences before any derived-root I/O", async () => {
+    const bays = "https://yourgolfbooking.com/venues/owned-simulator/booking/bays";
+    const f = await fixture(15, false, bays);
+    const stored = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const audit = stored.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    audit.simulatorResearch = { version: 1, sourceFingerprint: f.fingerprint, readCount: 3, history: [1,2,3].map(index => ({
+      source: "booking" as const, requestedUrl: `https://calendar.example.test/page-${index}`, sourceUrl: `https://calendar.example.test/page-${index}`,
+      observedAt: new Date().toISOString(), httpStatus: 200, rendered: false, outcome: "READ" as const, requestId: randomUUID(),
+    })), links: [], bookingLinks: [], linkBaseUrl: null, inFlight: null };
+    await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
+    const fetch = vi.fn(async () => new Response("unreachable"));
+    await expect(lane.readSimulatorSupportSource({ ...f.owner, source: "booking-root" }, { fetch })).rejects.toThrow("destination budget");
+    expect(fetch).not.toHaveBeenCalled();
+    const current = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
+    expect(current.research.readCount).toBe(3); expect(current.revision).toBe(f.owner.revision);
+    await client.courseOffering.update({ where: { id: f.offering.id }, data: { bookingUrl: "https://yourgolfbooking.com/venues/changed-simulator/booking/bays" } });
+    await expect(lane.readSimulatorSupportSource({ ...f.owner, source: "booking-root" }, { fetch })).rejects.toThrow("source changed");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("reserves one original-worker stylesheet diagnosis only after natural lease expiry and a newer release", async () => {
     const f = await fixture(15, false, "https://calendar.example.test/booking", "https://official.example.test/faqs");
     const stored = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });

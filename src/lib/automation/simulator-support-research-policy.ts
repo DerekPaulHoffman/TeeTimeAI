@@ -3,6 +3,9 @@ import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { readSafeSimulatorSupportFailure, type SimulatorSupportFailure } from "./simulator-support-failure";
 
 export const SIMULATOR_RESEARCH_MAX_READS = 6;
+export const SIMULATOR_RESEARCH_SOURCE_NAMES = ["official", "booking", "booking-root", "evidence"] as const;
+export type SimulatorResearchSource = (typeof SIMULATOR_RESEARCH_SOURCE_NAMES)[number];
+const researchSource = z.enum([...SIMULATOR_RESEARCH_SOURCE_NAMES, "link"]);
 const safeUrl = z.string().refine(value => Boolean(getSafeCustomerBookingUrl(value)));
 const safeFailure = z.custom<SimulatorSupportFailure>(value => readSafeSimulatorSupportFailure(value) !== null)
   .transform(value => readSafeSimulatorSupportFailure(value)!);
@@ -13,7 +16,7 @@ const publicReadEvidence = z.object({
   method: z.enum(["HTTP", "BROWSER"]), renderComplete: z.boolean().optional(),
 }).strict();
 const observation = z.object({
-  source: z.enum(["official", "booking", "evidence", "link"]), requestedUrl: safeUrl, sourceUrl: safeUrl,
+  source: researchSource, requestedUrl: safeUrl, sourceUrl: safeUrl,
   observedAt: z.string().datetime(), httpStatus: z.number().int().min(0).max(599), rendered: z.boolean(),
   outcome: z.enum(["READ", "NETWORK_FAILED", "CAPACITY_BUSY", "HARD_FAILED"]),
   requestId: z.string().uuid().optional(), failure: safeFailure.optional(),
@@ -30,7 +33,7 @@ const stateSchema = z.object({
   bookingLinkRoles: z.array(z.object({ url: safeUrl, observedAt: z.string().datetime() }).strict()).max(30).optional(),
   lastRecoveredFailureRequestId: z.string().uuid().optional(),
   inFlight: z.object({ requestId: z.string().uuid(), startedAt: z.string().datetime(), expiresAt: z.string().datetime(),
-    source: z.enum(["official", "booking", "evidence", "link"]), url: safeUrl, rendered: z.boolean() }).strict().nullable(),
+    source: researchSource, url: safeUrl, rendered: z.boolean() }).strict().nullable(),
 }).strict().refine(state => state.history.length + (state.inFlight ? 1 : 0) === state.readCount && state.bookingLinks.every(url => state.links.includes(url)) &&
   (!state.bookingLinkRoles || new Set(state.bookingLinkRoles.map(role => role.url)).size === state.bookingLinkRoles.length &&
     state.bookingLinkRoles.every(role => state.bookingLinks.includes(role.url))));
@@ -75,16 +78,24 @@ export function readSimulatorResearchState(value: unknown, fingerprint: string):
   return stateSchema.parse(value);
 }
 
+/** One known public parent route, derived only from the exact current saved bay URL. */
+function savedBookingRoot(bookingUrl: string | null) {
+  const saved = getSafeCustomerBookingUrl(bookingUrl);
+  const match = saved?.match(/^https:\/\/(booking\.trackmangolf\.com|(?:www\.)?yourgolfbooking\.com)\/venues\/([a-z0-9]+(?:-[a-z0-9]+)*)\/booking\/bays\/?$/u);
+  if (!match) return undefined;
+  return getSafeCustomerBookingUrl(`https://${match[1]}/venues/${match[2]}/booking`);
+}
+
 export function selectSimulatorResearchTarget(input: {
   state: SimulatorResearchState; officialUrl: string | null; bookingUrl: string | null; evidenceUrl?: string | null;
-  source?: "official" | "booking" | "evidence"; linkIndex?: number; rendered: boolean; now: Date;
+  source?: SimulatorResearchSource; linkIndex?: number; rendered: boolean; now: Date;
   priorFailedRoutes?: { url: string; rendered: boolean }[];
-}): { source: "official" | "booking" | "evidence" | "link"; url: string; rendered: boolean } {
+}): { source: SimulatorResearchSource | "link"; url: string; rendered: boolean } {
   const { state } = input;
   if (state.inFlight) throw new Error("Simulator source research is already in flight; inspect its original attempt before continuing.");
   if (state.readCount >= SIMULATOR_RESEARCH_MAX_READS) throw new Error("The bounded simulator source research budget is exhausted.");
   const source = input.linkIndex !== undefined ? "link" : input.source;
-  const raw = source === "link" ? state.links[input.linkIndex! - 1] : source === "official" ? input.officialUrl : source === "evidence" ? input.evidenceUrl : input.bookingUrl;
+  const raw = source === "link" ? state.links[input.linkIndex! - 1] : source === "official" ? input.officialUrl : source === "evidence" ? input.evidenceUrl : source === "booking-root" ? savedBookingRoot(input.bookingUrl) : input.bookingUrl;
   const url = getSafeCustomerBookingUrl(raw);
   if (!source || !url || (source === "link" && (!Number.isInteger(input.linkIndex) || input.linkIndex! < 1 || !state.linkBaseUrl))) throw new Error("The selected owned simulator source or link is unavailable.");
   if (source === "evidence") {
@@ -102,7 +113,7 @@ export function selectSimulatorResearchTarget(input: {
     }
     if (new URL(url).origin === new URL(state.linkBaseUrl!).origin && state.history.filter(entry => entry.source === "link" && new URL(entry.requestedUrl).origin === new URL(url).origin).length >= 2) throw new Error("The bounded same-site research depth is exhausted.");
   }
-  const destinations = new Set(state.history.filter(entry => entry.source === "booking" || entry.source === "link" && input.officialUrl && new URL(entry.requestedUrl).origin !== new URL(input.officialUrl).origin).map(entry => entry.requestedUrl));
+  const destinations = new Set(state.history.filter(entry => entry.source === "booking" || entry.source === "booking-root" || entry.source === "link" && input.officialUrl && new URL(entry.requestedUrl).origin !== new URL(input.officialUrl).origin).map(entry => entry.requestedUrl));
   if (source !== "official" && source !== "evidence" && !destinations.has(url) && destinations.size >= 3) throw new Error("The bounded simulator booking destination budget is exhausted.");
   if (state.history.some(entry => entry.requestedUrl === url && entry.rendered === input.rendered)) throw new Error("Use a different simulator source research route; the identical route was already attempted.");
   if (input.priorFailedRoutes?.some(entry => entry.url === url && entry.rendered === input.rendered)) throw new Error("An unchanged structural source failure needs a different research route or materially changed source.");
@@ -116,9 +127,11 @@ export function getSimulatorResearchGuide(input: {
 }) {
   const roleLinks = input.state.links.flatMap((url, index) => isFreshBookingLink(input.state, url, input.now) ? [index] : []);
   const genericLinks = input.state.links.flatMap((_, index) => roleLinks.includes(index) ? [] : [index]);
-  const routes: Array<{ source?: "official" | "booking" | "evidence"; linkIndex?: number; rendered: boolean }> = [
+  const routes: Array<{ source?: SimulatorResearchSource; linkIndex?: number; rendered: boolean }> = [
     { source: "booking" as const, rendered: false }, { source: "booking" as const, rendered: true },
-    ...[...roleLinks, ...genericLinks].flatMap(index => [{ linkIndex: index + 1, rendered: false }, { linkIndex: index + 1, rendered: true }]),
+    ...roleLinks.flatMap(index => [{ linkIndex: index + 1, rendered: false }, { linkIndex: index + 1, rendered: true }]),
+    { source: "booking-root" as const, rendered: false }, { source: "booking-root" as const, rendered: true },
+    ...genericLinks.flatMap(index => [{ linkIndex: index + 1, rendered: false }, { linkIndex: index + 1, rendered: true }]),
     { source: "evidence" as const, rendered: false }, { source: "evidence" as const, rendered: true },
     { source: "official" as const, rendered: false }, { source: "official" as const, rendered: true },
   ];
@@ -164,7 +177,7 @@ export function getSimulatorResearchRetryGuide(input: {
   const distinctSavedBooking = Boolean(booking && (!official || new URL(booking).href !== new URL(official).href));
   const next = researchGuide.suggestedReads.find(route => {
     const selected = selectSimulatorResearchTarget({ ...input, ...route });
-    return selected.source === "booking" && distinctSavedBooking || selected.source === "link" &&
+    return selected.source === "booking" && distinctSavedBooking || selected.source === "booking-root" || selected.source === "link" &&
       isFreshBookingLink(state, selected.url, input.now) && (!official || new URL(selected.url).href !== new URL(official).href);
   });
   if (next) return result(next, false, null);
