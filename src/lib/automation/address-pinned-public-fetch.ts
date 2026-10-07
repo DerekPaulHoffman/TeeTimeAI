@@ -44,6 +44,12 @@ type AddressPinnedPublicFetchPolicy = {
 
 const nonPublicNetworkBlockLists = buildNonPublicNetworkBlockLists();
 
+function officialSiteBodyLimitError() {
+  return Object.assign(new Error("Official site page is too large to inspect safely"), {
+    code: "OFFICIAL_SITE_BODY_LIMIT",
+  });
+}
+
 export function createAddressPinnedPublicFetchTransport(
   policy: AddressPinnedPublicFetchPolicy,
   dependencies: AddressPinnedPublicFetchDependencies = {}
@@ -255,7 +261,7 @@ function requestPinnedPublicUrl(
         const contentLength = Number(incoming.headers["content-length"] ?? 0);
         if (contentLength > maxResponseBytes) {
           incoming.destroy();
-          reject(new Error("Official site page is too large to inspect safely"));
+          reject(officialSiteBodyLimitError());
           return;
         }
         const chunks: Buffer[] = [];
@@ -264,9 +270,7 @@ function requestPinnedPublicUrl(
           const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
           totalBytes += buffer.length;
           if (totalBytes > maxResponseBytes) {
-            incoming.destroy(
-              new Error("Official site page is too large to inspect safely")
-            );
+            incoming.destroy(officialSiteBodyLimitError());
             return;
           }
           chunks.push(buffer);

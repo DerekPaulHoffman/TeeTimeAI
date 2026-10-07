@@ -8,6 +8,8 @@ The dispatcher creates one local Codex chat for each admitted course. It does no
 
 Active real demand takes priority. An explicitly opted-in `TEST` search with `syntheticMultiCycle=true` may use the same per-course dispatch capacity while its native synthetic lifetime is active. It remains synthetic, its incident remains engineering-only, and its emails remain no-send. Ended, paused, deleted, or expired alerts cannot obtain a new active-alert assignment. Historical background work remains governed by the legacy grouped-claim contract in `course-support-responder.md`.
 
+Physical course slots and current alert cohorts are counted separately. An uncertain `STARTING` launch keeps its slot and original ownership even if its source alert ends. Prior alert references count toward the three-alert and five-courses-per-alert budgets only while their current intent, generation, selected course/offering, course-local requested window and synthetic lifetime remain valid. Count each current course/search pair once across live reservations, this tick and active batches; do not free or reassign an uncertain worker to recover an alert cohort.
+
 ## Parent launch
 
 Start the existing stable preflight once:

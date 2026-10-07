@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CourseDispatchAudit } from "./course-support-course-dispatch";
+import { createSimulatorSupportIntentDigest } from "./simulator-support-policy";
 
 type StoredRun = {
   id: string;
@@ -9,13 +10,15 @@ type StoredRun = {
   audit: CourseDispatchAudit;
 };
 type SourceSearch = {
-  id: string; status: string; date: Date; endTime: string; userTimeZone: string;
+  id: string; mode: "OUTDOOR" | "SIMULATOR"; status: string; date: Date; endTime: string; userTimeZone: string;
   scheduleVersion: number; alertGeneration: number; trafficClass: string;
   syntheticMultiCycle: boolean; syntheticTestWindow: null; createdAt: Date;
   userId: string; user: { id: string; clerkUserId: string; email: string; pendingEmail: string | null };
   alertEmail: string | null; additionalEmails: string[]; startTime: string; players: number;
   requestedLayoutHoles: number | null; cadenceMinutes: number;
-  preferences: { courseId: string; rank: number }[];
+  durationMinutes: number | null; checkStatus: string; checkLeaseExpiresAt: Date | null;
+  remediationDispatchKey: string | null; remediationDispatchVersion: number | null;
+  preferences: { courseId: string; offeringId: string | null; rank: number }[];
 };
 type Candidate = {
   incidentId: string; courseId: string; cycle: number; providerFamilyKey: string;
@@ -26,6 +29,7 @@ const store = vi.hoisted(() => {
   const runs: StoredRun[] = [];
   const candidates: Candidate[] = [];
   const sources = new Map<string, SourceSearch>();
+  const courseTimeZones = new Map<string, string>();
   const batches: { id: string; summary: unknown; leaseExpiresAt: Date; incidents: { courseId: string }[] }[] = [];
   let sequence = 0;
   let leaseTail = Promise.resolve();
@@ -54,8 +58,16 @@ const store = vi.hoisted(() => {
     automationRun,
     courseSupportBatch: { findMany: vi.fn(async () => batches) },
     course: {
-      findMany: vi.fn(async () => candidates.map(candidate => ({ id: candidate.courseId, timeZone: "America/New_York" }))),
+      findMany: vi.fn(async (args: { where: { id: { in: string[] } } }) =>
+        args.where.id.in.flatMap(id => courseTimeZones.has(id) ? [{ id, timeZone: courseTimeZones.get(id)! }] : [])),
       findUnique: vi.fn(async () => ({ timeZone: "America/New_York" })),
+    },
+    teeSearch: {
+      findMany: vi.fn(async (args: { where: { id: { in: string[] } } }) => {
+        const requested = new Set(args.where.id.in);
+        const found = new Map([...sources.values()].filter(search => requested.has(search.id)).map(search => [search.id, search]));
+        return [...found.values()];
+      }),
     },
     coursePreference: {
       findMany: vi.fn(async (args: { where: { courseId: { in: string[] } | string; teeSearchId?: { in: string[] } } }) => {
@@ -86,7 +98,7 @@ const store = vi.hoisted(() => {
     await prior;
     try { return await operation(); } finally { release(); }
   });
-  return { runs, candidates, sources, batches, tx, transaction, lease, reset() { sequence = 0; leaseTail = Promise.resolve(); } };
+  return { runs, candidates, sources, courseTimeZones, batches, tx, transaction, lease, reset() { sequence = 0; leaseTail = Promise.resolve(); } };
 });
 
 vi.mock("@/lib/prisma", () => ({ prisma: { ...store.tx, $transaction: store.transaction } }));
@@ -110,36 +122,41 @@ import {
 
 const now = new Date("2026-10-05T13:40:05.000Z");
 const baseSha = "a".repeat(40);
-function populate(count: number, trafficClass = "PUBLIC") {
+function populate(count: number, trafficClass = "PUBLIC", offset = 0, searchPrefix = "alert") {
   for (let index = 0; index < count; index += 1) {
-    const courseId = `course-${index}`;
+    const courseNumber = index + offset;
+    const courseId = `course-${courseNumber}`;
+    store.courseTimeZones.set(courseId, "America/New_York");
     store.candidates.push({
       incidentId: `incident-${index}`, courseId, cycle: 1,
       providerFamilyKey: "family", failureFingerprint: "fingerprint",
       updatedAt: now.toISOString(), activeRealSearchCount: trafficClass === "PUBLIC" ? 1 : 0,
     });
     store.sources.set(courseId, {
-      id: `alert-${Math.floor(index / 5)}`, status: "ACTIVE",
+      id: `${searchPrefix}-${Math.floor(courseNumber / 5)}`, mode: "OUTDOOR", status: "ACTIVE",
       date: new Date("2026-10-06T00:00:00.000Z"), endTime: "20:00",
       userTimeZone: "America/New_York", scheduleVersion: 1, alertGeneration: 0,
       trafficClass, syntheticMultiCycle: trafficClass === "TEST", syntheticTestWindow: null,
       createdAt: now,
       userId: "user-1", user: { id: "user-1", clerkUserId: "clerk-1", email: "owner@example.com", pendingEmail: null },
       alertEmail: "owner@example.com", additionalEmails: [], startTime: "06:00", players: 2,
-      requestedLayoutHoles: null, cadenceMinutes: 15, preferences: [],
+      requestedLayoutHoles: null, cadenceMinutes: 15, durationMinutes: null,
+      checkStatus: "WAITING", checkLeaseExpiresAt: null, remediationDispatchKey: null, remediationDispatchVersion: null,
+      preferences: [],
     });
   }
   for (const search of store.sources.values()) {
+    if (!search.id.startsWith(`${searchPrefix}-`)) continue;
     search.preferences = store.candidates
       .filter(candidate => Math.floor(Number(candidate.courseId.split("-")[1]) / 5) === Number(search.id.split("-")[1]))
-      .map((candidate, rank) => ({ courseId: candidate.courseId, rank: rank + 1 }));
+      .map((candidate, rank) => ({ courseId: candidate.courseId, offeringId: null, rank: rank + 1 }));
   }
 }
 
 describe("durable course dispatch state and transaction boundaries", () => {
   afterEach(() => vi.useRealTimers());
   beforeEach(() => {
-    store.runs.length = 0; store.candidates.length = 0; store.sources.clear(); store.batches.length = 0;
+    store.runs.length = 0; store.candidates.length = 0; store.sources.clear(); store.courseTimeZones.clear(); store.batches.length = 0;
     store.reset(); vi.clearAllMocks(); vi.useFakeTimers(); vi.setSystemTime(now);
   });
 
@@ -180,11 +197,18 @@ describe("durable course dispatch state and transaction boundaries", () => {
 
   it("counts a consumed simulator claim toward shared slots and the three-alert budget, even after its lease expires", async () => {
     populate(15);
+    const simulatorSource: SourceSearch = {
+      ...store.sources.get("course-0")!, id: "sim-search", mode: "SIMULATOR", durationMinutes: 60,
+      preferences: [{ courseId: "sim-course", offeringId: "sim-offering", rank: 1 }],
+    };
+    store.sources.set("sim-course", simulatorSource);
+    store.courseTimeZones.set("sim-course", "America/New_York");
+    const intentDigest = createSimulatorSupportIntentDigest(simulatorSource as unknown as Parameters<typeof createSimulatorSupportIntentDigest>[0]);
     store.runs.push({ id: "simulator-owner", promptVersion: "course-support-course-dispatch-v1", status: "RUNNING", startedAt: now,
       audit: { schemaVersion: 1, tickRef: "previous", assignmentRef: "simulator-assignment", state: "CONSUMED", ownerThreadId: "parent", childThreadId: "sim-child", baseSha,
         reservedAt: now.toISOString(), expiresAt: now.toISOString(), target: { mode: "SIMULATOR", offeringId: "sim-offering", offeringSourceFingerprint: "a".repeat(64),
           incidentId: "sim-incident", courseId: "sim-course", cycle: 1, providerFamilyKey: "SIM", failureFingerprint: "a".repeat(64), updatedAt: now.toISOString(),
-          trafficClass: "REAL", searchRefs: [{ id: "sim-search", scheduleVersion: 1, alertGeneration: 0 }] },
+          trafficClass: "REAL", searchRefs: [{ id: "sim-search", scheduleVersion: 1, alertGeneration: 0, intentDigest }] },
         simulatorClaim: { token: "owned", revision: 1, phase: "CLAIMED", claimedAt: now.toISOString(), leaseExpiresAt: now.toISOString(), sourceFingerprint: "a".repeat(64), originalSourceFingerprint: "a".repeat(64),
           offeringRevision: 0, plannedPaths: [], releaseSha: null, branch: "automation/course-support-sim", deployment: null, recheckQueuedAt: null, verificationCycle: 0 } } });
     const plan = await planCourseSupportCourseDispatch({ ownerThreadId: "parent-a", baseSha, now, maxStarts: 15 });
@@ -193,6 +217,39 @@ describe("durable course dispatch state and transaction boundaries", () => {
     expect(plan.attention.expiredBatchCount).toBe(1);
     expect(store.runs[0].audit.state).toBe("CONSUMED");
     expect(new Set(store.runs.flatMap(run => run.audit.target.searchRefs.map(ref => ref.id))).size).toBe(3);
+  });
+
+  it("keeps ended uncertain STARTING owners in physical slots without charging active alert cohorts", async () => {
+    populate(15, "PUBLIC", 100, "ended");
+    await planCourseSupportCourseDispatch({ ownerThreadId: "parent-a", baseSha, now, maxStarts: 15 });
+    const historical = ["ended-20", "ended-21", "ended-22"].map(id =>
+      store.runs.find(run => run.audit.target.searchRefs[0].id === id)!);
+    expect(historical.every(Boolean)).toBe(true);
+    for (const run of historical) {
+      await beginCourseSupportCourseDispatch({ ownerThreadId: "parent-a", assignmentRef: run.audit.assignmentRef });
+      run.audit.tickRef = "previous";
+      run.startedAt = new Date(now.getTime() - 10 * 60_000);
+    }
+    store.runs.splice(0, store.runs.length, ...historical);
+    store.candidates.length = 0;
+    for (const [courseId, search] of store.sources) {
+      if (!courseId.startsWith("course-1")) continue;
+      if (search.id === "ended-20") search.status = "COMPLETED";
+      if (search.id === "ended-21") search.status = "CANCELLED";
+      if (search.id === "ended-22") search.date = new Date("2026-10-04T00:00:00.000Z");
+    }
+    populate(15, "PUBLIC", 0, "fresh");
+    expect(store.sources.get("course-110")!.preferences).toHaveLength(5);
+    expect(store.sources.get("course-110")!.status).toBe("ACTIVE");
+
+    const plan = await planCourseSupportCourseDispatch({ ownerThreadId: "parent-b", baseSha, now, maxStarts: 15 });
+    expect(historical.map(run => run.audit.state)).toEqual(["STARTING", "STARTING", "STARTING"]);
+    expect(plan.attention.startingCount).toBe(3);
+    expect(plan.occupiedCourseCount).toBe(15);
+    expect(plan.launchItems).toHaveLength(12);
+    expect(new Set(plan.launchItems.map(item => store.runs.find(run => run.audit.assignmentRef === item.assignmentRef)!.audit.target.searchRefs[0].id)))
+      .toEqual(new Set(["fresh-0", "fresh-1", "fresh-2"]));
+    expect(store.runs.filter(run => run.audit.state === "STARTING")).toHaveLength(3);
   });
 
   it("rejects expired unlaunched reservations before native creation can begin", async () => {

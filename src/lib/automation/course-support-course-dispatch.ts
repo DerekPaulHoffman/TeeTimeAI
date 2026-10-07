@@ -6,7 +6,7 @@ import { prisma } from "@/lib/prisma";
 import { isSearchWindowActive } from "./date-boundary";
 import { getSyntheticMultiCycleExpiresAt } from "./synthetic-test-window";
 import { listSimulatorSupportDispatchCandidates } from "./simulator-support-incidents";
-import { isCurrentSimulatorSupportSource, isValidSimulatorSupportClaim, SIMULATOR_SUPPORT_SOURCE_SELECT, type SimulatorSupportClaim } from "./simulator-support-policy";
+import { isCurrentSimulatorSupportSource, isValidSimulatorSupportClaim, SIMULATOR_SUPPORT_SOURCE_SELECT, type SimulatorSupportClaim, type SimulatorSupportSource } from "./simulator-support-policy";
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
 import type { SimulatorResearchState } from "./simulator-support-research-policy";
 import {
@@ -126,10 +126,57 @@ function tickRef(now: Date) {
   return `course-${Math.floor(now.getTime() / TICK_MS)}`;
 }
 
-function countSearchIds(ids: readonly string[]) {
-  const counts = new Map<string, number>();
-  for (const id of ids) counts.set(id, (counts.get(id) ?? 0) + 1);
-  return counts;
+type PriorDispatchSource = {
+  courseId: string;
+  mode?: "SIMULATOR";
+  offeringId?: string;
+  trafficClass?: "REAL" | "SYNTHETIC";
+  ref: CourseDispatchSourceRef;
+};
+
+export function collectCurrentCourseDispatchSourceUsage(input: {
+  priorSources: readonly PriorDispatchSource[];
+  searches: ReadonlyMap<string, SimulatorSupportSource>;
+  courseTimeZones: ReadonlyMap<string, string>;
+  now: Date;
+}) {
+  const coursesBySearch = new Map<string, Set<string>>();
+  for (const prior of input.priorSources) {
+    const search = input.searches.get(prior.ref.id);
+    const timeZone = input.courseTimeZones.get(prior.courseId);
+    if (!search || !timeZone) continue;
+    const trafficClass = prior.trafficClass ??
+      (["TEST", "AUTOMATION"].includes(search.trafficClass) ? "SYNTHETIC" : "REAL");
+    const current = prior.mode === "SIMULATOR"
+      ? Boolean(prior.offeringId && search.preferences.some(preference =>
+        preference.courseId === prior.courseId && preference.offeringId === prior.offeringId) && isCurrentSimulatorSupportSource({
+        search, ref: prior.ref, offeringId: prior.offeringId, trafficClass, timeZone, now: input.now,
+      }))
+      : search.preferences.some(preference => preference.courseId === prior.courseId) &&
+        isCurrentCourseDispatchSource({
+          search, ref: prior.ref, trafficClass, courseTimeZone: timeZone, now: input.now,
+        });
+    if (!current) continue;
+    const courses = coursesBySearch.get(search.id) ?? new Set<string>();
+    courses.add(prior.courseId);
+    coursesBySearch.set(search.id, courses);
+  }
+  return {
+    priorSearchIds: new Set(coursesBySearch.keys()),
+    priorSearchCounts: new Map([...coursesBySearch].map(([id, courses]) => [id, courses.size])),
+  };
+}
+
+function readBatchDispatchSourceRefs(summary: unknown): CourseDispatchSourceRef[] {
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) return [];
+  const refs = (summary as Record<string, unknown>).dispatchSourceSearchRefs;
+  if (!Array.isArray(refs)) return [];
+  return refs.filter((ref): ref is CourseDispatchSourceRef => Boolean(
+    ref && typeof ref === "object" && typeof ref.id === "string" && ref.id &&
+    Number.isInteger(ref.scheduleVersion) && ref.scheduleVersion >= 0 &&
+    Number.isInteger(ref.alertGeneration) && ref.alertGeneration >= 0 &&
+    (ref.intentDigest === undefined || (typeof ref.intentDigest === "string" && /^[a-f0-9]{64}$/i.test(ref.intentDigest))),
+  ));
 }
 
 export function selectCourseDispatchTargets<T extends {
@@ -383,32 +430,40 @@ export async function planCourseSupportCourseDispatch(input: {
           trafficClass: ref.teeSearch.trafficClass,
         }))] as const));
       for (const candidate of simulatorCandidates) sourceSearchesByCourse.set(candidate.selectionKey, candidate.sources);
+      const priorSources: PriorDispatchSource[] = [
+        ...[...live, ...sameTick].flatMap(run => run.parsed!.target.searchRefs.map(ref => ({
+          courseId: run.parsed!.target.courseId,
+          mode: run.parsed!.target.mode,
+          offeringId: run.parsed!.target.offeringId,
+          trafficClass: run.parsed!.target.trafficClass,
+          ref,
+        }))),
+        ...activeBatches.flatMap(batch => batch.incidents.flatMap(incident =>
+          readBatchDispatchSourceRefs(batch.summary).map(ref => ({ courseId: incident.courseId, ref })))),
+      ];
+      const [priorSearches, priorCourses] = await Promise.all([
+        tx.teeSearch.findMany({
+          where: { id: { in: [...new Set(priorSources.map(source => source.ref.id))] } },
+          select: SIMULATOR_SUPPORT_SOURCE_SELECT,
+        }),
+        tx.course.findMany({
+          where: { id: { in: [...new Set(priorSources.map(source => source.courseId))] } },
+          select: { id: true, timeZone: true },
+        }),
+      ]);
+      // An uncertain native launch still owns its physical slot. Only current,
+      // active-future demand consumes the separate three-alert cohort budget.
+      const priorUsage = collectCurrentCourseDispatchSourceUsage({
+        priorSources,
+        searches: new Map(priorSearches.map(search => [search.id, search])),
+        courseTimeZones: new Map(priorCourses.map(course => [course.id, course.timeZone])),
+        now,
+      });
       const selection = selectCourseDispatchTargets({
         candidates,
         sourceSearchesByCourse,
         occupiedCourses,
-        priorSearchIds: new Set([
-          ...live.flatMap((run) => run.parsed?.target.searchRefs.map((ref) => ref.id) ?? []),
-          ...sameTick.flatMap((run) => run.parsed?.target.searchRefs.map((ref) => ref.id) ?? []),
-          ...activeBatches.flatMap((batch) => {
-            const summary = batch.summary && typeof batch.summary === "object" && !Array.isArray(batch.summary)
-              ? batch.summary as Record<string, unknown> : {};
-            const refs = Array.isArray(summary.dispatchSourceSearchRefs) ? summary.dispatchSourceSearchRefs : [];
-            return refs.flatMap((ref) => ref && typeof ref === "object" && "id" in ref &&
-              typeof ref.id === "string" ? [ref.id] : []);
-          }),
-        ]),
-        priorSearchCounts: countSearchIds([
-          ...live.map((run) => run.parsed!).flatMap((audit) =>
-            audit.target.searchRefs.map((ref) => ref.id)),
-          ...activeBatches.flatMap((batch) => {
-            const summary = batch.summary && typeof batch.summary === "object" && !Array.isArray(batch.summary)
-              ? batch.summary as Record<string, unknown> : {};
-            const refs = Array.isArray(summary.dispatchSourceSearchRefs) ? summary.dispatchSourceSearchRefs : [];
-            return refs.flatMap((ref) => ref && typeof ref === "object" && "id" in ref &&
-              typeof ref.id === "string" ? [ref.id] : []);
-          }),
-        ]),
+        ...priorUsage,
         maxStarts: availableStarts,
       });
       eligibleCount = selection.eligibleCount;

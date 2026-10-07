@@ -51,6 +51,7 @@ const causeCodes: Record<string, Classification> = {
   ECONNRESET: { category: "NETWORK", code: "CONNECTION_RESET", stage: "PUBLIC_READ" },
   ECONNREFUSED: { category: "NETWORK", code: "CONNECTION_REFUSED", stage: "PUBLIC_READ" },
   ETIMEDOUT: { category: "NETWORK", code: "CONNECTION_TIMEOUT", stage: "PUBLIC_READ" },
+  OFFICIAL_SITE_BODY_LIMIT: { category: "BUDGET", code: "PUBLIC_BODY_LIMIT", stage: "PUBLIC_READ" },
   P1001: { category: "DATABASE", code: "DATABASE_UNREACHABLE" },
   P1002: { category: "DATABASE", code: "DATABASE_TIMEOUT" },
   P2028: { category: "DATABASE", code: "DATABASE_TRANSACTION_FAILED" },
