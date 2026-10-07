@@ -15,6 +15,7 @@ const state = vi.hoisted(() => {
     $queryRaw: vi.fn(async () => [{ now }]),
     courseSupportBatch: { findMany: vi.fn(async () => []) },
     course: { findMany: vi.fn(async () => []) },
+    teeSearch: { findMany: vi.fn(async () => []) },
     coursePreference: { findMany: vi.fn(async () => []) },
     automationRun: {
       findMany: vi.fn(async () => runs.filter(run => run.status === "RUNNING")),
