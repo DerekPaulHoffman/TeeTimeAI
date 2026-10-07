@@ -27,6 +27,9 @@ const inventoryNativeCompletionSchema = z.object({
   version: z.literal(1), source: z.literal(COURSE_SUPPORT_INVENTORY_COMPLETION_SOURCE),
   threadId: reference, observedAt: instant, threadStatus: z.enum(["idle", "notLoaded"]),
   hostId: z.literal("local"), projectId: reference, inventoryUpdatedAt: z.number().int().nonnegative(),
+  nativeUpdatedAt: z.number().int().nonnegative().optional(),
+  nativeLatestTurnCompletedAt: z.number().int().nonnegative().optional(),
+  completionTimestampSource: z.enum(["NATIVE_THREAD_METADATA", "NATIVE_LATEST_COMPLETED_TURN"]).optional(),
   launcherReceiptDigest: digest, checkoutIdentityDigest: digest, observationDigest: digest,
   latestTurn: z.object({ id: reference, status: z.literal("completed"), error: z.null() }).strict(),
 }).strict();
@@ -262,8 +265,18 @@ export function projectCourseSupportInventoryNativeCompletion(input: {
   const page = object(turns.result);
   if (!Array.isArray(page.data) || page.data.length !== 1) throw new Error("The latest durable original turn is unavailable.");
   const latestTurn = object(page.data[0]);
+  const metadataMatches = nativeThread.updatedAt === after.thread.updatedAt;
+  // Pinned initial turns can retain creation-time thread metadata while the app
+  // inventory advances to the durable turn completion time. Match that actual
+  // completed turn explicitly; never approximate or rewrite either timestamp.
+  const turnTimestampMatches = Number.isSafeInteger(nativeThread.updatedAt) && (nativeThread.updatedAt as number) >= 0 &&
+    Number.isSafeInteger(latestTurn.startedAt) && Number.isSafeInteger(latestTurn.completedAt) &&
+    (nativeThread.updatedAt as number) <= (latestTurn.startedAt as number) &&
+    (latestTurn.startedAt as number) <= (latestTurn.completedAt as number) &&
+    (latestTurn.completedAt as number) <= Math.floor(input.now.getTime() / 1000) &&
+    latestTurn.completedAt === after.thread.updatedAt;
   if (nativeThread.id !== input.expectedThreadId || normalizedPrivateCheckout(nativeThread.cwd) !== checkout ||
-      nativeThread.updatedAt !== after.thread.updatedAt || nativeThread.cliVersion !== "0.160.1" || nativeThread.ephemeral !== false ||
+      !(metadataMatches || turnTimestampMatches) || nativeThread.cliVersion !== "0.160.1" || nativeThread.ephemeral !== false ||
       !["idle", "notLoaded"].includes(nativeStatus.type as string) || latestTurn.status !== "completed" || latestTurn.error !== null ||
       latestTurn.itemsView !== "notLoaded" || !Array.isArray(latestTurn.items) || latestTurn.items.length !== 0 ||
       !reference.safeParse(latestTurn.id).success) throw new Error("The native read does not prove the latest completed original turn.");
@@ -271,6 +284,9 @@ export function projectCourseSupportInventoryNativeCompletion(input: {
   return inventoryNativeCompletionSchema.parse({ version: 1, source: COURSE_SUPPORT_INVENTORY_COMPLETION_SOURCE,
     threadId: input.expectedThreadId, observedAt: after.observedAt, threadStatus: after.thread.status,
     hostId: after.thread.hostId, projectId: after.thread.projectId, inventoryUpdatedAt: after.thread.updatedAt,
+    nativeUpdatedAt: nativeThread.updatedAt,
+    ...(Number.isSafeInteger(latestTurn.completedAt) && (latestTurn.completedAt as number) >= 0 ? { nativeLatestTurnCompletedAt: latestTurn.completedAt } : {}),
+    completionTimestampSource: metadataMatches ? "NATIVE_THREAD_METADATA" : "NATIVE_LATEST_COMPLETED_TURN",
     launcherReceiptDigest, checkoutIdentityDigest: hash(checkout),
     observationDigest: hash({ before: input.inventoryBefore, native: input.nativeObservation, after: input.inventoryAfter }),
     latestTurn: { id: latestTurn.id, status: "completed", error: null } });

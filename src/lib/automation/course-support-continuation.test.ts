@@ -345,6 +345,28 @@ function inventoryProjection(value = inventoryInput()) {
 }
 
 describe("bracketed supported inventory and read-only durable native history", () => {
+  it("matches pinned creation-time metadata to the actual latest turn completion without rewriting timestamps", () => {
+    const value = inventoryInput();
+    const observation = value.nativeInventoryObservation;
+    const completedAt = observation.inventoryAfter.snapshot.threads[0].updatedAt;
+    const native = observation.nativeObservation.rpcCalls[2].result as { thread: { updatedAt: number } };
+    const turns = observation.nativeObservation.rpcCalls[3].result as { data: Array<Record<string, unknown>> };
+    native.thread.updatedAt = completedAt - 246;
+    Object.assign(turns.data[0], { startedAt: completedAt - 211, completedAt });
+    expect(inventoryProjection(value)).toMatchObject({ inventoryUpdatedAt: completedAt, nativeUpdatedAt: completedAt - 246,
+      nativeLatestTurnCompletedAt: completedAt, completionTimestampSource: "NATIVE_LATEST_COMPLETED_TURN" });
+    for (const mutation of [
+      { completedAt: completedAt - 1 }, { completedAt: undefined }, { startedAt: undefined },
+      { startedAt: completedAt + 1 }, { completedAt: Math.floor(value.now.getTime() / 1000) + 1 },
+    ]) {
+      const changed = structuredClone(value);
+      Object.assign((changed.nativeInventoryObservation.nativeObservation.rpcCalls[3].result as { data: Array<Record<string, unknown>> }).data[0], mutation);
+      expect(() => inventoryProjection(changed)).toThrow();
+    }
+    const changedMetadata = structuredClone(value);
+    (changedMetadata.nativeInventoryObservation.nativeObservation.rpcCalls[2].result as { thread: { updatedAt: number } }).thread.updatedAt = completedAt - 1;
+    expect(() => inventoryProjection(changedMetadata)).toThrow();
+  });
   it("uses actual app status/project identity and durable latest-turn proof without claiming omitted capabilities", () => {
     const request = buildCourseSupportContinuationRequest(inventoryInput());
     expect(request.nativeCompletion).toMatchObject({ source: COURSE_SUPPORT_INVENTORY_COMPLETION_SOURCE,
