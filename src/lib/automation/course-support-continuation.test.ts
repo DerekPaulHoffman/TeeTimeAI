@@ -113,6 +113,21 @@ describe("bounded same-original-native-worker continuation", () => {
     expect(reserveCourseSupportContinuationReceipt(later)).toMatchObject({ reserved: false, reason: "CONTINUATION_BUDGET_EXHAUSTED" });
   });
 
+  it("keeps a located unknown browser failure in attention after a reviewed tooling release", () => {
+    const repair = { policyVersion: COURSE_SUPPORT_CONTINUATION_POLICY_VERSION, releaseSha, source: "git" as const,
+      state: "READY" as const, branch: "main" as const, aliases: ["teetimespot.com", "www.teetimespot.com"],
+      deployedAt: "2026-10-07T07:59:00.000Z" };
+    for (const researchPhase of ["BROWSER_LAUNCH", "BROWSER_NAVIGATION"] as const) {
+      const located: CourseSupportContinuationCheckpoint = { ...checkpoint,
+        failure: { stage: "PUBLIC_READ", category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE", researchPhase },
+      };
+      expect(assessCourseSupportContinuationCheckpoint({ checkpoint: located, currentMainSha: releaseSha, now,
+        reviewedToolingRepair: repair })).toMatchObject({ eligible: false, reason: "FAILURE_REQUIRES_ATTENTION" });
+      expect(reserveCourseSupportContinuationReceipt({ ...input(), checkpoint: located,
+        reviewedToolingRepair: repair })).toMatchObject({ reserved: false, reason: "FAILURE_REQUIRES_ATTENTION" });
+    }
+  });
+
   it("never retries an ambiguous message, and rejects a send receipt for another child", () => {
     const result = reserved();
     expect(reserveCourseSupportContinuationReceipt({ ...input(), ledger: result.ledger })).toMatchObject({ reserved: false, reason: "PRIOR_SEND_UNCONFIRMED" });

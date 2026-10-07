@@ -1,11 +1,14 @@
 /** Bounded, non-sensitive diagnostics for an owned simulator-support command. */
 export type SimulatorSupportFailureStage = "INITIAL_OWNERSHIP" | "TARGET_SELECTION" | "PUBLIC_READ" | "POST_READ_OWNERSHIP" | "COMMAND";
 export type SimulatorSupportFailureCategory = "OWNERSHIP" | "SOURCE" | "ACCESS" | "BUDGET" | "CAPACITY" | "NETWORK" | "BROWSER" | "DATABASE" | "TOOLING" | "UNKNOWN";
+export type SimulatorResearchFailurePhase = "HTTP_READ" | "BROWSER_LAUNCH" | "BROWSER_CONTEXT" | "BROWSER_ROUTE_SETUP" |
+  "BROWSER_REQUEST" | "BROWSER_NAVIGATION" | "BROWSER_DOCUMENT";
 export type SimulatorSupportFailure = {
   stage: SimulatorSupportFailureStage;
   category: SimulatorSupportFailureCategory;
   code: string;
   sourceLocation?: string;
+  researchPhase?: SimulatorResearchFailurePhase;
 };
 
 type Classification = Pick<SimulatorSupportFailure, "category" | "code"> & { stage?: SimulatorSupportFailureStage };
@@ -67,6 +70,10 @@ const browserCodes: Record<string, Classification> = {
 
 const stages = new Set<SimulatorSupportFailureStage>(["INITIAL_OWNERSHIP", "TARGET_SELECTION", "PUBLIC_READ", "POST_READ_OWNERSHIP", "COMMAND"]);
 const categories = new Set<SimulatorSupportFailureCategory>(["OWNERSHIP", "SOURCE", "ACCESS", "BUDGET", "CAPACITY", "NETWORK", "BROWSER", "DATABASE", "TOOLING", "UNKNOWN"]);
+const researchPhases = new Set<SimulatorResearchFailurePhase>(["HTTP_READ", "BROWSER_LAUNCH", "BROWSER_CONTEXT", "BROWSER_ROUTE_SETUP",
+  "BROWSER_REQUEST", "BROWSER_NAVIGATION", "BROWSER_DOCUMENT"]);
+const trustedResearchPhases = new WeakMap<object, { phase: SimulatorResearchFailurePhase; order: number }>();
+let nextResearchPhaseOrder = 0;
 const additionalCodes: Classification[] = [
   { category: "NETWORK", code: "PUBLIC_READ_TIMEOUT" }, { category: "NETWORK", code: "PUBLIC_READ_ABORTED" },
   { category: "DATABASE", code: "DATABASE_OPERATION_FAILED" }, { category: "TOOLING", code: "INVALID_TOOL_DATA" },
@@ -81,6 +88,8 @@ const sourceModules = new Set([
   "src/lib/automation/simulator-support-research.ts",
   "src/lib/automation/simulator-support-research-policy.ts",
   "src/lib/automation/simulator-support-failure.ts",
+  "src/lib/automation/address-pinned-public-fetch.ts",
+  "src/lib/automation/provider-request-lease.ts",
   "src/lib/automation/simulator-support-policy.ts",
   "src/lib/automation/simulator-support-progress.ts",
   "src/lib/automation/course-support-batches.ts",
@@ -91,6 +100,28 @@ function knownValue(record: Record<string, Classification>, key: string | undefi
   return key && Object.hasOwn(record, key) ? record[key] : undefined;
 }
 
+/** Preserve the first trusted collector seam without mutating browser errors. */
+export function tagSimulatorResearchFailure(error: unknown, phase: SimulatorResearchFailurePhase): unknown {
+  if (!researchPhases.has(phase)) throw new Error("INVALID_SIMULATOR_RESEARCH_PHASE");
+  const tagged = error !== null && (typeof error === "object" || typeof error === "function")
+    ? error as object : new Error("SIMULATOR_RESEARCH_UNCLASSIFIED_FAILURE");
+  if (!trustedResearchPhases.has(tagged)) trustedResearchPhases.set(tagged, { phase, order: nextResearchPhaseOrder++ });
+  return tagged;
+}
+
+function trustedResearchPhase(error: unknown): SimulatorResearchFailurePhase | undefined {
+  const seen = new Set<unknown>();
+  let current = error;
+  let first: { phase: SimulatorResearchFailurePhase; order: number } | undefined;
+  for (let depth = 0; depth < 4 && current && !seen.has(current); depth++, current = causeProperty(current)) {
+    seen.add(current);
+    if (typeof current !== "object" && typeof current !== "function") continue;
+    const tagged = trustedResearchPhases.get(current);
+    if (tagged && (!first || tagged.order < first.order)) first = tagged;
+  }
+  return first?.phase;
+}
+
 /** Accept only a classifier-produced value before echoing a durable failure receipt. */
 export function readSafeSimulatorSupportFailure(value: unknown): SimulatorSupportFailure | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -99,12 +130,15 @@ export function readSafeSimulatorSupportFailure(value: unknown): SimulatorSuppor
     if (!stages.has(record.stage as SimulatorSupportFailureStage) || !categories.has(record.category as SimulatorSupportFailureCategory) ||
         typeof record.code !== "string" || codeCategories.get(record.code) !== record.category) return null;
     if (record.code === "RESEARCH_RESERVATION_INTERRUPTED" && record.stage !== "PUBLIC_READ") return null;
+    const researchPhase = record.researchPhase;
+    if (researchPhase !== undefined && (record.stage !== "PUBLIC_READ" || !researchPhases.has(researchPhase as SimulatorResearchFailurePhase))) return null;
     const sourceLocation = record.sourceLocation;
     if (sourceLocation !== undefined && (typeof sourceLocation !== "string" || sourceLocation.length > 240 ||
         !/^(?:src\/(?:lib|app)|scripts\/automation)\/[A-Za-z0-9_./-]+\.(?:ts|tsx|mjs|js):[1-9][0-9]*$/u.test(sourceLocation) ||
         !sourceModules.has(sourceLocation.replace(/:[1-9][0-9]*$/u, "")))) return null;
     return { stage: record.stage as SimulatorSupportFailureStage, category: record.category as SimulatorSupportFailureCategory,
-      code: record.code, ...(sourceLocation ? { sourceLocation } : {}) };
+      code: record.code, ...(sourceLocation ? { sourceLocation } : {}),
+      ...(researchPhase ? { researchPhase: researchPhase as SimulatorResearchFailurePhase } : {}) };
   } catch { return null; }
 }
 
@@ -139,6 +173,7 @@ function projectSourceLocation(error: unknown): string | undefined {
 /** Never emits raw messages, causes, URLs, identifiers, credentials or stack traces. */
 export function classifySimulatorSupportFailure(error: unknown, stage: SimulatorSupportFailureStage = "COMMAND"): SimulatorSupportFailure {
   const sourceLocation = projectSourceLocation(error);
+  const researchPhase = trustedResearchPhase(error);
   const seen = new Set<unknown>();
   let current = error;
   for (let depth = 0; depth < 4 && current && !seen.has(current); depth++, current = causeProperty(current)) {
@@ -154,7 +189,12 @@ export function classifySimulatorSupportFailure(error: unknown, stage: Simulator
       (name === "PrismaClientKnownRequestError" || name === "PrismaClientInitializationError" ? { category: "DATABASE" as const, code: "DATABASE_OPERATION_FAILED" } : undefined) ||
       (name === "SyntaxError" ? { category: "TOOLING" as const, code: "INVALID_TOOL_DATA" } : undefined) ||
       (name === "TypeError" && /fetch failed/iu.test(message ?? "") ? { category: "NETWORK" as const, code: "PUBLIC_FETCH_FAILED", stage: "PUBLIC_READ" as const } : undefined);
-    if (known) return { stage: stage === "COMMAND" ? known.stage ?? stage : stage, category: known.category, code: known.code, ...(sourceLocation ? { sourceLocation } : {}) };
+    if (known) {
+      const classifiedStage = stage === "COMMAND" ? known.stage ?? stage : stage;
+      return { stage: classifiedStage, category: known.category, code: known.code, ...(sourceLocation ? { sourceLocation } : {}),
+        ...(classifiedStage === "PUBLIC_READ" && researchPhase ? { researchPhase } : {}) };
+    }
   }
-  return { stage, category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE", ...(sourceLocation ? { sourceLocation } : {}) };
+  return { stage, category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE", ...(sourceLocation ? { sourceLocation } : {}),
+    ...(stage === "PUBLIC_READ" && researchPhase ? { researchPhase } : {}) };
 }

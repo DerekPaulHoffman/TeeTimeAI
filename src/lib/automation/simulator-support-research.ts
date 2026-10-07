@@ -4,6 +4,7 @@ import { createAddressPinnedPublicFetchTransport } from "./address-pinned-public
 import { runWithProviderRequestLease } from "./provider-request-lease";
 import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { sanitizeResponderText } from "./course-support-responder-policy";
+import { tagSimulatorResearchFailure, type SimulatorResearchFailurePhase } from "./simulator-support-failure";
 
 const MAX_BODY_BYTES = 1_500_000;
 const MAX_RENDER_BYTES = 6_000_000;
@@ -212,6 +213,10 @@ async function beforeDeadline<T>(operation: Promise<T>, signal: AbortSignal): Pr
   try { return await Promise.race([operation, timeout]); } finally { signal.removeEventListener("abort", abort); }
 }
 
+async function researchOperation<T>(phase: SimulatorResearchFailurePhase, operation: () => Promise<T>): Promise<T> {
+  try { return await operation(); } catch (error) { throw tagSimulatorResearchFailure(error, phase); }
+}
+
 export function detectSimulatorResearchAccessControls(html: string) {
   const controls = new Set<NonNullable<SimulatorResearchResult["accessControls"]>[number]>();
   const visible = summarizeSimulatorSupportPublicHtml(html, "https://source.example.test").text;
@@ -266,10 +271,10 @@ function knownPublicNetworkError(error: unknown) {
   let current = error;
   for (let depth = 0; depth < 4 && current && typeof current === "object"; depth++) {
     const details = current as { code?: unknown; cause?: unknown };
-    if (typeof details.code === "string" && ["ENOTFOUND", "EAI_AGAIN", "ECONNRESET", "ETIMEDOUT", "ECONNREFUSED"].includes(details.code)) return new Error("SIMULATOR_RESEARCH_NETWORK_FAILED");
+    if (typeof details.code === "string" && ["ENOTFOUND", "EAI_AGAIN", "ECONNRESET", "ETIMEDOUT", "ECONNREFUSED"].includes(details.code)) return new Error("SIMULATOR_RESEARCH_NETWORK_FAILED", { cause: error });
     current = details.cause;
   }
-  if (error instanceof Error && /^page\.goto: net::ERR_(?:NAME_NOT_RESOLVED|TIMED_OUT|CONNECTION_RESET|CONNECTION_REFUSED|CONNECTION_CLOSED|INTERNET_DISCONNECTED)\b/u.test(error.message)) return new Error("SIMULATOR_RESEARCH_NETWORK_FAILED");
+  if (error instanceof Error && /^page\.goto: net::ERR_(?:NAME_NOT_RESOLVED|TIMED_OUT|CONNECTION_RESET|CONNECTION_REFUSED|CONNECTION_CLOSED|INTERNET_DISCONNECTED)\b/u.test(error.message)) return new Error("SIMULATOR_RESEARCH_NETWORK_FAILED", { cause: error });
   return error;
 }
 
@@ -292,7 +297,7 @@ export async function collectSimulatorSupportResearch(input: { url: string; rend
       if (deadline.aborted) throw new Error("SIMULATOR_RESEARCH_DEADLINE");
       let response: Response;
       try { response = await fetchImpl(safe.href, { method, redirect: "manual", credentials: "omit", cache: "no-store", headers: headers ?? { Accept: "text/html,application/xhtml+xml,application/json" }, signal: deadline }); }
-      catch (error) { throw knownPublicNetworkError(error); }
+      catch (error) { throw knownPublicNetworkError(tagSimulatorResearchFailure(error, "HTTP_READ")); }
       const effective = publicUrl(response.url || safe.href).href;
       if (!allowed(new URL(effective))) throw new Error("SIMULATOR_RESEARCH_DESTINATION_CHANGED");
       const location = response.status >= 300 && response.status < 400 && response.headers.get("location") ? publicUrl(new URL(response.headers.get("location")!, effective).href).href : undefined;
@@ -302,7 +307,7 @@ export async function collectSimulatorSupportResearch(input: { url: string; rend
       if (cors === "*") publicCors = cors;
       else if (cors) { try { if (sameOfficialHost(requestedUrl, cors) && new URL(cors).origin === cors) publicCors = cors; } catch { /* Never forward an unproven header value. */ } }
       let body: Buffer;
-      try { body = await beforeDeadline(boundedBody(response), deadline); } catch (error) { throw knownPublicNetworkError(error); }
+      try { body = await beforeDeadline(boundedBody(response), deadline); } catch (error) { throw knownPublicNetworkError(tagSimulatorResearchFailure(error, "HTTP_READ")); }
       return { url: effective, status: response.status, location, publicCors, contentType: response.headers.get("content-type") ?? "", body };
     });
     if (!acquired.acquired) throw new Error("SIMULATOR_RESEARCH_PROVIDER_BUSY");
@@ -320,9 +325,13 @@ export async function collectSimulatorSupportResearch(input: { url: string; rend
     throw new Error("SIMULATOR_RESEARCH_REDIRECT_LIMIT");
   }
   const launch = dependencies.browser ?? (async () => (await import("@playwright/test")).chromium.launch({ headless: true, timeout: 10_000 }));
-  const launchPromise = launch();
+  let launchPromise: Promise<ResearchBrowser> | undefined;
   let browser: ResearchBrowser;
-  try { browser = await beforeDeadline(launchPromise, deadline); } catch (error) { void launchPromise.then(value => value.close()).catch(() => undefined); throw error; }
+  try { launchPromise = launch(); browser = await beforeDeadline(launchPromise, deadline); }
+  catch (error) {
+    void launchPromise?.then(value => value.close()).catch(() => undefined);
+    throw tagSimulatorResearchFailure(error, "BROWSER_LAUNCH");
+  }
   let context: Awaited<ReturnType<ResearchBrowser["newContext"]>> | undefined;
   let requestCount = 0, responseBytes = 0, blockedRequests = 0, routeFailure: unknown, hasRouteFailure = false;
   let navigation: Awaited<ReturnType<typeof read>> | undefined;
@@ -350,24 +359,28 @@ export async function collectSimulatorSupportResearch(input: { url: string; rend
     return beforeDeadline(operation, deadline);
   };
   const partialMainDocument = (): SimulatorResearchResult => {
-    if (!safeMainDocument) throw new Error("SIMULATOR_RESEARCH_REQUEST_LIMIT");
-    const main = safeMainDocument;
-    return { ...resultFromBody(requestedUrl, main.url, main.status, main.contentType, main.body, main.observedAt), method: "BROWSER",
-      renderComplete: false, renderWarning: "SECONDARY_REQUEST_BUDGET_EXHAUSTED", contentProvenance: "MAIN_DOCUMENT_HTTP",
-      blockedRequests, admittedRequests: requestCount };
+    try {
+      if (!safeMainDocument) throw new Error("SIMULATOR_RESEARCH_REQUEST_LIMIT");
+      const main = safeMainDocument;
+      return { ...resultFromBody(requestedUrl, main.url, main.status, main.contentType, main.body, main.observedAt), method: "BROWSER",
+        renderComplete: false, renderWarning: "SECONDARY_REQUEST_BUDGET_EXHAUSTED", contentProvenance: "MAIN_DOCUMENT_HTTP",
+        blockedRequests, admittedRequests: requestCount };
+    } catch (error) { throw tagSimulatorResearchFailure(error, "BROWSER_DOCUMENT"); }
   };
   const settleStartedRoutes = async () => {
-    if (!activeRoutes.size) { if (hasRouteFailure) throw routeFailure; return; }
-    const results = await beforeDeadline(Promise.allSettled([...activeRoutes]), deadline);
-    const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
-    if (failure) throw failure.reason;
-    if (hasRouteFailure) throw routeFailure;
+    try {
+      if (!activeRoutes.size) { if (hasRouteFailure) throw routeFailure; return; }
+      const results = await beforeDeadline(Promise.allSettled([...activeRoutes]), deadline);
+      const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (failure) throw failure.reason;
+      if (hasRouteFailure) throw routeFailure;
+    } catch (error) { throw tagSimulatorResearchFailure(error, "BROWSER_REQUEST"); }
   };
   try {
     if (deadline.aborted) throw new Error("SIMULATOR_RESEARCH_DEADLINE");
-    context = await beforeDeadline(browser.newContext({ serviceWorkers: "block", storageState: { cookies: [], origins: [] }, acceptDownloads: false, javaScriptEnabled: true }), deadline);
-    await context.routeWebSocket("**/*", route => route.close({ code: 1008, reason: "Public research does not use sockets" }));
-    await context.route("**/*", async (route: Route) => {
+    context = await researchOperation("BROWSER_CONTEXT", () => beforeDeadline(browser.newContext({ serviceWorkers: "block", storageState: { cookies: [], origins: [] }, acceptDownloads: false, javaScriptEnabled: true }), deadline));
+    await researchOperation("BROWSER_ROUTE_SETUP", () => context!.routeWebSocket("**/*", route => route.close({ code: 1008, reason: "Public research does not use sockets" })));
+    await researchOperation("BROWSER_ROUTE_SETUP", () => context!.route("**/*", async (route: Route) => {
       const operation = (async () => {
         const request = route.request();
         try {
@@ -405,15 +418,19 @@ export async function collectSimulatorSupportResearch(input: { url: string; rend
           await route.fulfill({ status: response.status, body: response.body, headers: { "content-type": response.contentType, ...(response.location ? { location: response.location } : {}), ...(response.publicCors ? { "access-control-allow-origin": response.publicCors } : {}) } });
         } catch (error) {
           if (error instanceof Error && error.message === "SIMULATOR_RESEARCH_UNSAFE_URL") { blockedRequests += 1; await route.abort("blockedbyclient"); return; }
-          if (!hasRouteFailure) { routeFailure = error; hasRouteFailure = true; }
+          if (!hasRouteFailure) { routeFailure = tagSimulatorResearchFailure(error, "BROWSER_REQUEST"); hasRouteFailure = true; }
           blockedRequests += 1;
           await route.abort("blockedbyclient");
         }
-      })();
+      })().catch(error => {
+        const tagged = tagSimulatorResearchFailure(error, "BROWSER_REQUEST");
+        if (!hasRouteFailure) { routeFailure = tagged; hasRouteFailure = true; }
+        throw routeFailure;
+      });
       activeRoutes.add(operation);
       try { await operation; } finally { activeRoutes.delete(operation); }
-    });
-    page = await beforeDeadline(context.newPage(), deadline);
+    }));
+    page = await researchOperation("BROWSER_CONTEXT", () => beforeDeadline(context!.newPage(), deadline));
     let response: Awaited<ReturnType<ResearchPage["goto"]>>;
     try { response = await beforeDeadline(page.goto(requestedUrl, { waitUntil: "domcontentloaded", timeout: DEADLINE_MS }), deadline); }
     catch (error) {
@@ -421,24 +438,26 @@ export async function collectSimulatorSupportResearch(input: { url: string; rend
       const expectedIncomplete = error instanceof Error && (error.name === "TimeoutError" || error.message === "SIMULATOR_RESEARCH_DEADLINE" || /^page\.goto: net::ERR_(?:ABORTED|BLOCKED_BY_CLIENT)\b/u.test(error.message));
       // A tooling budget can preserve already-read public HTTP facts. It cannot
       // turn an unrelated browser, parser, authority or lease failure into evidence.
-      if (!secondaryBudgetExhausted || !safeMainDocument || accessControls.size || !expectedIncomplete) throw error;
+      if (!secondaryBudgetExhausted || !safeMainDocument || accessControls.size || !expectedIncomplete) throw tagSimulatorResearchFailure(error, "BROWSER_NAVIGATION");
       await settleStartedRoutes();
       return partialMainDocument();
     }
     await settleStartedRoutes();
     if (hasRouteFailure) throw routeFailure;
     if (deadline.aborted) throw new Error("SIMULATOR_RESEARCH_DEADLINE");
-    const url = publicUrl(page.url()).href;
-    if (!sameOfficialHost(requestedUrl, url) || !navigation) throw new Error("SIMULATOR_RESEARCH_DESTINATION_CHANGED");
-    if (accessControls.size) return { requestedUrl, url, observedAt: now().toISOString(), httpStatus: navigation.status, text: "", links: [], method: "BROWSER", accessControls: [...accessControls], blockedRequests, admittedRequests: requestCount, renderComplete: false, contentProvenance: "MAIN_DOCUMENT_HTTP" };
-    if (secondaryBudgetExhausted) return partialMainDocument();
-    const html = await beforeDeadline(page.content(), deadline);
-    if (hasRouteFailure) throw routeFailure;
-    if (Buffer.byteLength(html, "utf8") > MAX_BODY_BYTES) throw new Error("SIMULATOR_RESEARCH_BODY_LIMIT");
-    const renderedControls = detectSimulatorResearchAccessControls(html);
-    if (renderedControls.length) return { requestedUrl, url, observedAt: now().toISOString(), httpStatus: navigation.status, text: "", links: [], method: "BROWSER", accessControls: renderedControls, blockedRequests, admittedRequests: requestCount, renderComplete: false, contentProvenance: "RENDERED_DOM" };
-    const rendered = resultFromBody(requestedUrl, url, response?.status() ?? navigation.status, "text/html", Buffer.from(html), now());
-    return { ...rendered, method: "BROWSER", blockedRequests, admittedRequests: requestCount, renderComplete: true, contentProvenance: "RENDERED_DOM", ...(responseContracts.length ? { responseContracts } : {}) };
+    try {
+      const url = publicUrl(page.url()).href;
+      if (!sameOfficialHost(requestedUrl, url) || !navigation) throw new Error("SIMULATOR_RESEARCH_DESTINATION_CHANGED");
+      if (accessControls.size) return { requestedUrl, url, observedAt: now().toISOString(), httpStatus: navigation.status, text: "", links: [], method: "BROWSER", accessControls: [...accessControls], blockedRequests, admittedRequests: requestCount, renderComplete: false, contentProvenance: "MAIN_DOCUMENT_HTTP" };
+      if (secondaryBudgetExhausted) return partialMainDocument();
+      const html = await beforeDeadline(page.content(), deadline);
+      if (hasRouteFailure) throw routeFailure;
+      if (Buffer.byteLength(html, "utf8") > MAX_BODY_BYTES) throw new Error("SIMULATOR_RESEARCH_BODY_LIMIT");
+      const renderedControls = detectSimulatorResearchAccessControls(html);
+      if (renderedControls.length) return { requestedUrl, url, observedAt: now().toISOString(), httpStatus: navigation.status, text: "", links: [], method: "BROWSER", accessControls: renderedControls, blockedRequests, admittedRequests: requestCount, renderComplete: false, contentProvenance: "RENDERED_DOM" };
+      const rendered = resultFromBody(requestedUrl, url, response?.status() ?? navigation.status, "text/html", Buffer.from(html), now());
+      return { ...rendered, method: "BROWSER", blockedRequests, admittedRequests: requestCount, renderComplete: true, contentProvenance: "RENDERED_DOM", ...(responseContracts.length ? { responseContracts } : {}) };
+    } catch (error) { throw tagSimulatorResearchFailure(error, "BROWSER_DOCUMENT"); }
   } catch (error) { throw hasRouteFailure ? routeFailure : knownPublicNetworkError(error); }
   finally {
     const cleanupSignal = AbortSignal.timeout(2_000);

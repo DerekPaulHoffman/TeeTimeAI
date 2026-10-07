@@ -592,17 +592,17 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     const inspected = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
     expect(inspected.revision).toBe(f.owner.revision + 2);
     expect(inspected.research).toMatchObject({ readCount: 1, inFlight: null, history: [{ outcome: "HARD_FAILED", httpStatus: 0,
-      failure: { stage: "PUBLIC_READ", category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE" } }] });
+      failure: { stage: "PUBLIC_READ", category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE", researchPhase: "BROWSER_LAUNCH" } }] });
     expect(await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).toMatchObject({ status: "RUNNING", outcome: "simulator_research_hard_failed" });
     expect(JSON.stringify(inspected.research)).not.toContain(raw);
     expect(inspected.failedRead).toMatchObject({ revision: inspected.revision, readsUsed: 1, readsRemaining: 5,
-      failure: { stage: "PUBLIC_READ", code: "UNCLASSIFIED_FAILURE" } });
+      failure: { stage: "PUBLIC_READ", code: "UNCLASSIFIED_FAILURE", researchPhase: "BROWSER_LAUNCH" } });
     expect(inspected.researchGuide.suggestedReads).toContainEqual({ source: "booking", rendered: false });
     const audit = (await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
     const context = await client.$transaction(tx => lane.readSimulatorSupportContinuationContext(tx, audit, new Date()));
     expect(context).toMatchObject({ currentSource: true, currentClaimRevision: inspected.revision, providerReadInFlight: false,
       checkpoint: { kind: "SETTLED_FAILURE", readCount: 1, allowedResearchRouteCount: expect.any(Number),
-        failure: { stage: "PUBLIC_READ", code: "UNCLASSIFIED_FAILURE" } } });
+        failure: { stage: "PUBLIC_READ", code: "UNCLASSIFIED_FAILURE", researchPhase: "BROWSER_LAUNCH" } } });
     expect(context.checkpoint!.allowedResearchRouteCount).toBeGreaterThan(0);
     await expect(lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: "replacement" })).rejects.toThrow("not owned");
     await expect(lane.recoverSimulatorSupport({ ...f.owner, ownerThreadId: "replacement", revision: inspected.revision })).rejects.toThrow();

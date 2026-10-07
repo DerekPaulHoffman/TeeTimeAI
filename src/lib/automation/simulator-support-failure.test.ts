@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { classifySimulatorSupportFailure, readSafeSimulatorSupportFailure } from "./simulator-support-failure";
+import { classifySimulatorSupportFailure, readSafeSimulatorSupportFailure, tagSimulatorResearchFailure,
+  type SimulatorResearchFailurePhase } from "./simulator-support-failure";
 import { reportSimulatorSupportFailure } from "../../../scripts/automation/simulator-support";
 
 const previousExitCode = process.exitCode;
@@ -10,6 +11,46 @@ afterEach(() => {
 });
 
 describe("simulator support failure receipts", () => {
+  it("records only trusted bounded research phases without changing unknown or known classifications", () => {
+    const secret = "private-user@example.test?token=hidden";
+    const unrecognized = Object.seal(new Error(`Browser broke at https://example.test/${secret}`));
+    const tagged = tagSimulatorResearchFailure(unrecognized, "BROWSER_LAUNCH");
+    expect(tagged).toBe(unrecognized);
+    tagSimulatorResearchFailure(tagged, "BROWSER_DOCUMENT");
+    const unknown = classifySimulatorSupportFailure(tagged, "PUBLIC_READ");
+    expect(unknown).toEqual({ stage: "PUBLIC_READ", category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE",
+      researchPhase: "BROWSER_LAUNCH" });
+    expect(JSON.stringify(unknown)).not.toContain(secret);
+    expect(classifySimulatorSupportFailure(tagged)).toEqual({ stage: "COMMAND", category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE" });
+    const network = tagSimulatorResearchFailure(Object.assign(new Error(`request ${secret}`), { code: "ECONNRESET" }), "BROWSER_REQUEST");
+    expect(classifySimulatorSupportFailure(network, "PUBLIC_READ")).toEqual({ stage: "PUBLIC_READ", category: "NETWORK",
+      code: "CONNECTION_RESET", researchPhase: "BROWSER_REQUEST" });
+  });
+
+  it("follows only trusted cause tags and wraps primitive throws with a fixed safe error", () => {
+    const inner = tagSimulatorResearchFailure(new Error("private origin URL"), "BROWSER_REQUEST");
+    const outer = new Error("outer browser failure", { cause: inner });
+    tagSimulatorResearchFailure(outer, "BROWSER_NAVIGATION");
+    expect(classifySimulatorSupportFailure(outer, "PUBLIC_READ")).toMatchObject({ category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE",
+      researchPhase: "BROWSER_REQUEST" });
+    const primitive = tagSimulatorResearchFailure("private-token-at-https://example.test", "BROWSER_CONTEXT");
+    expect(classifySimulatorSupportFailure(primitive, "PUBLIC_READ")).toMatchObject({ stage: "PUBLIC_READ", category: "UNKNOWN",
+      code: "UNCLASSIFIED_FAILURE", researchPhase: "BROWSER_CONTEXT" });
+    expect(JSON.stringify(primitive)).not.toContain("private-token");
+  });
+
+  it("rejects spoofed, invalid and non-public-read phase projections while accepting old receipts", () => {
+    const spoofed = Object.assign(new Error("unknown browser error"), { researchPhase: "BROWSER_REQUEST" });
+    expect(classifySimulatorSupportFailure(spoofed, "PUBLIC_READ")).toEqual({ stage: "PUBLIC_READ", category: "UNKNOWN",
+      code: "UNCLASSIFIED_FAILURE" });
+    const old = { stage: "PUBLIC_READ", category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE" };
+    expect(readSafeSimulatorSupportFailure(old)).toEqual(old);
+    expect(readSafeSimulatorSupportFailure({ ...old, researchPhase: "BROWSER_DOCUMENT" })).toEqual({ ...old, researchPhase: "BROWSER_DOCUMENT" });
+    expect(readSafeSimulatorSupportFailure({ ...old, researchPhase: "private-token" })).toBeNull();
+    expect(readSafeSimulatorSupportFailure({ ...old, stage: "COMMAND", researchPhase: "BROWSER_DOCUMENT" })).toBeNull();
+    expect(() => tagSimulatorResearchFailure(new Error("unknown"), "private-token" as SimulatorResearchFailurePhase)).toThrow("INVALID_SIMULATOR_RESEARCH_PHASE");
+  });
+
   it("classifies exact owned fences and keeps project-relative locations only", () => {
     const error = new Error("Simulator source changed during the public read.");
     error.stack = `Error: private-token at https://private.example.test/booking\n    at readSimulatorSupportSource (C:\\private\\TeeTimeAI\\src\\lib\\automation\\simulator-support-ownership.ts:149:10)\n    at another (C:\\private\\node_modules\\package\\index.js:3:1)`;
@@ -25,6 +66,19 @@ describe("simulator support failure receipts", () => {
     expect(readSafeSimulatorSupportFailure(failure)).toEqual(failure);
     expect(JSON.stringify(failure)).not.toContain("private.example.test");
     expect(JSON.stringify(failure)).not.toContain("secret");
+  });
+
+  it("keeps exact public transport and provider-lease code locations without assigning an unknown cause", () => {
+    for (const sourceModule of ["address-pinned-public-fetch", "provider-request-lease"]) {
+      const error = new Error("unclassified request with https://private.example.test/?token=secret");
+      error.stack = `Error: private detail\n    at operation (C:\\private\\TeeTimeAI\\src\\lib\\automation\\${sourceModule}.ts:86:3)`;
+      const failure = classifySimulatorSupportFailure(error, "PUBLIC_READ");
+      expect(failure).toEqual({ stage: "PUBLIC_READ", category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE",
+        sourceLocation: `src/lib/automation/${sourceModule}.ts:86` });
+      expect(readSafeSimulatorSupportFailure(failure)).toEqual(failure);
+      expect(JSON.stringify(failure)).not.toContain("private.example.test");
+      expect(JSON.stringify(failure)).not.toContain("secret");
+    }
   });
 
   it("classifies allowlisted public transport, browser and database causes without copying their details", () => {

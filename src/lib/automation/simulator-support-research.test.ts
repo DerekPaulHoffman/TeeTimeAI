@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Route } from "@playwright/test";
 import { fetchYourGolfBookingAvailability } from "@/lib/simulators/providers/your-golf-booking";
 import { collectSimulatorSupportResearch, detectSimulatorResearchAccessControls, extractSimulatorPublicCalendar, summarizeSimulatorPublicJsonShape, summarizeSimulatorSupportPublicHtml, type SimulatorResearchDependencies } from "./simulator-support-research";
+import { classifySimulatorSupportFailure, type SimulatorResearchFailurePhase } from "./simulator-support-failure";
 
 const source = "https://venue.example.test";
 const booking = "https://booking.trackmangolf.com/venues/golf-oasis/booking/bays";
@@ -23,7 +24,7 @@ function publishedConfig(patch: Record<string, unknown> = {}) {
   return `<h1>Hourly simulator bays</h1><script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { initialReduxState: config } } })}</script>`;
 }
 
-type RequestFixture = { url: string; method?: string; headers?: Record<string, string>; kind?: string; frame?: "main" | "child" | "popup" };
+type RequestFixture = { url: string; method?: string; headers?: Record<string, string>; headersFailure?: unknown; requestFailure?: unknown; kind?: string; frame?: "main" | "child" | "popup" };
 function renderedBrowser(requests: RequestFixture[], html = "<h1>Public rentals</h1><a href='/booking'>Book hourly</a>", concurrentSecondary = false) {
   let handler!: (route: Route) => Promise<void>;
   let socketHandler!: (socket: { close: (options: unknown) => Promise<void> }) => Promise<unknown>;
@@ -35,9 +36,15 @@ function renderedBrowser(requests: RequestFixture[], html = "<h1>Public rentals<
     goto: vi.fn(async () => {
       const run = async (request: RequestFixture) => {
         const entry = { abort: vi.fn(async () => undefined), fulfill: vi.fn(async () => undefined) }; routes.push(entry);
-        await handler({ ...entry, request: () => ({ url: () => request.url, method: () => request.method ?? "GET", allHeaders: async () => request.headers ?? { "user-agent": "Public research browser" },
+        await handler({ ...entry, request: () => {
+          if (request.requestFailure !== undefined) throw request.requestFailure;
+          return { url: () => request.url, method: () => request.method ?? "GET", allHeaders: async () => {
+          if (request.headersFailure !== undefined) throw request.headersFailure;
+          return request.headers ?? { "user-agent": "Public research browser" };
+        },
           isNavigationRequest: () => !request.kind || request.kind === "document", resourceType: () => request.kind ?? "document",
-          frame: () => request.frame === "child" ? childFrame : request.frame === "popup" ? popupFrame : mainFrame }) } as unknown as Route);
+           frame: () => request.frame === "child" ? childFrame : request.frame === "popup" ? popupFrame : mainFrame };
+        } } as unknown as Route);
       };
       if (concurrentSecondary) { await run(requests[0]); await Promise.all(requests.slice(1).map(run)); }
       else for (const request of requests) await run(request);
@@ -334,5 +341,118 @@ describe("bounded owned simulator public research transport", () => {
     controller.abort();
     await assertion;
     expect(view.context.close).toHaveBeenCalledOnce(); expect(view.browser.close).toHaveBeenCalledOnce();
+  });
+});
+
+describe("trusted source-research failure phases", () => {
+  async function rejected(task: Promise<unknown>) {
+    const result = await task.then(() => ({ rejected: false, error: undefined }), error => ({ rejected: true, error }));
+    expect(result.rejected).toBe(true);
+    return result.error;
+  }
+
+  const phases: SimulatorResearchFailurePhase[] = ["HTTP_READ", "BROWSER_LAUNCH", "BROWSER_CONTEXT", "BROWSER_ROUTE_SETUP",
+    "BROWSER_REQUEST", "BROWSER_NAVIGATION", "BROWSER_DOCUMENT"];
+  it.each(phases)("identifies %s without altering a sealed unknown error or its category", async phase => {
+    const original = Object.seal(new Error("private URL and browser details must stay out of the diagnostic"));
+    const properties = Object.getOwnPropertyNames(original);
+    const view = renderedBrowser([{ url: `${source}/`, ...(phase === "BROWSER_REQUEST" ? { headersFailure: original } : {}) }]);
+    const fetch = vi.fn(async () => response("<h1>Public rentals</h1>"));
+    let browser = view.factory;
+    if (phase === "HTTP_READ") fetch.mockImplementation(async () => { throw original; });
+    if (phase === "BROWSER_LAUNCH") browser = async () => { throw original; };
+    if (phase === "BROWSER_CONTEXT") view.browser.newContext.mockRejectedValueOnce(original);
+    if (phase === "BROWSER_ROUTE_SETUP") view.context.routeWebSocket.mockRejectedValueOnce(original);
+    if (phase === "BROWSER_NAVIGATION") view.page.goto.mockRejectedValueOnce(original);
+    if (phase === "BROWSER_DOCUMENT") view.page.content.mockRejectedValueOnce(original);
+    const error = await rejected(collectSimulatorSupportResearch({ url: source, render: phase !== "HTTP_READ" }, { fetch, lease, browser }));
+    expect(error).toBe(original);
+    expect(Object.getOwnPropertyNames(original)).toEqual(properties);
+    const diagnostic = classifySimulatorSupportFailure(error, "PUBLIC_READ");
+    expect(diagnostic).toMatchObject({ stage: "PUBLIC_READ", category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE", researchPhase: phase });
+    expect(JSON.stringify(diagnostic)).not.toMatch(/private URL|browser details/u);
+    if (phase !== "HTTP_READ" && phase !== "BROWSER_LAUNCH") expect(view.browser.close).toHaveBeenCalledOnce();
+  });
+
+  it("tags a synchronous launch failure before any browser or provider work", async () => {
+    const original = Object.freeze(new Error("launch invariant"));
+    const fetch = vi.fn();
+    const error = await rejected(collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease,
+      browser: () => { throw original; } }));
+    expect(error).toBe(original);
+    expect(classifySimulatorSupportFailure(error, "PUBLIC_READ")).toMatchObject({ category: "UNKNOWN", researchPhase: "BROWSER_LAUNCH" });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each(["newPage", "route"] as const)("tags the exact %s seam and still closes the browser", async method => {
+    const original = new Error("browser invariant");
+    const view = renderedBrowser([{ url: `${source}/` }]);
+    view.context[method].mockRejectedValueOnce(original);
+    const fetch = vi.fn();
+    const error = await rejected(collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory }));
+    expect(error).toBe(original);
+    expect(classifySimulatorSupportFailure(error, "PUBLIC_READ")).toMatchObject({ category: "UNKNOWN",
+      researchPhase: method === "newPage" ? "BROWSER_CONTEXT" : "BROWSER_ROUTE_SETUP" });
+    expect(view.context.close).toHaveBeenCalledOnce(); expect(view.browser.close).toHaveBeenCalledOnce();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("tags HTTP response-body failures without treating them as network or browser failures", async () => {
+    const original = Object.freeze(new Error("response body invariant"));
+    const body = new ReadableStream({ start(controller) { controller.error(original); } });
+    const error = await rejected(collectSimulatorSupportResearch({ url: source }, { fetch: vi.fn(async () => new Response(body)), lease }));
+    expect(error).toBe(original);
+    expect(classifySimulatorSupportFailure(error, "PUBLIC_READ")).toMatchObject({ category: "UNKNOWN", researchPhase: "HTTP_READ" });
+  });
+
+  it("retains the first concurrent route failure ahead of a later navigation error", async () => {
+    const first = Object.freeze(new Error("first route invariant")), second = new Error("second route invariant"), navigation = new Error("navigation after routing");
+    const view = renderedBrowser([{ url: `${source}/` }, { url: `${source}/first.js`, kind: "script", headersFailure: first },
+      { url: `${source}/second.js`, kind: "script", headersFailure: second }], "<h1>Public rentals</h1>", true);
+    const originalGoto = view.page.goto.getMockImplementation()!;
+    view.page.goto.mockImplementation(async () => { await originalGoto(); throw navigation; });
+    const error = await rejected(collectSimulatorSupportResearch({ url: source, render: true }, {
+      fetch: vi.fn(async () => response("<h1>Public rentals</h1>")), lease, browser: view.factory }));
+    expect(error).toBe(first);
+    expect(classifySimulatorSupportFailure(error, "PUBLIC_READ")).toMatchObject({ category: "UNKNOWN", researchPhase: "BROWSER_REQUEST" });
+    expect(view.context.close).toHaveBeenCalledOnce(); expect(view.browser.close).toHaveBeenCalledOnce();
+  });
+
+  it("retains an early request() exception when navigation rejects before route settlement", async () => {
+    const original = Object.freeze(new Error("request retrieval invariant"));
+    const view = renderedBrowser([{ url: `${source}/`, requestFailure: original }]);
+    const originalGoto = view.page.goto.getMockImplementation()!;
+    view.page.goto.mockImplementation(async () => {
+      await originalGoto().catch(() => undefined);
+      throw new Error("navigation failed after its route handler rejected");
+    });
+    const fetch = vi.fn();
+    const error = await rejected(collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory }));
+    expect(error).toBe(original);
+    expect(classifySimulatorSupportFailure(error, "PUBLIC_READ")).toMatchObject({ category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE", researchPhase: "BROWSER_REQUEST" });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(view.context.close).toHaveBeenCalledOnce(); expect(view.browser.close).toHaveBeenCalledOnce();
+  });
+
+  it.each(["HTTP_READ", "BROWSER_NAVIGATION"] as const)("preserves recognized network normalization and the original %s phase", async phase => {
+    const original = phase === "HTTP_READ" ? Object.assign(new Error("public network"), { code: "ECONNRESET" }) :
+      new Error("page.goto: net::ERR_NAME_NOT_RESOLVED at public destination");
+    const view = renderedBrowser([{ url: `${source}/` }]);
+    if (phase === "BROWSER_NAVIGATION") view.page.goto.mockRejectedValueOnce(original);
+    const fetch = vi.fn(async () => { throw original; });
+    const error = await rejected(collectSimulatorSupportResearch({ url: source, render: phase === "BROWSER_NAVIGATION" }, { fetch, lease, browser: view.factory }));
+    expect(error).toMatchObject({ message: "SIMULATOR_RESEARCH_NETWORK_FAILED", cause: original });
+    expect(classifySimulatorSupportFailure(error, "PUBLIC_READ")).toMatchObject({ category: "NETWORK", code: "PUBLIC_NETWORK_FAILED", researchPhase: phase });
+  });
+
+  it("keeps the inner HTTP phase when a rendered request also fails navigation", async () => {
+    const original = Object.freeze(new Error("HTTP implementation invariant"));
+    const view = renderedBrowser([{ url: `${source}/` }]);
+    const originalGoto = view.page.goto.getMockImplementation()!;
+    view.page.goto.mockImplementation(async () => { await originalGoto(); throw new Error("navigation after HTTP failure"); });
+    const error = await rejected(collectSimulatorSupportResearch({ url: source, render: true }, {
+      fetch: vi.fn(async () => { throw original; }), lease, browser: view.factory }));
+    expect(error).toBe(original);
+    expect(classifySimulatorSupportFailure(error, "PUBLIC_READ")).toMatchObject({ category: "UNKNOWN", researchPhase: "HTTP_READ" });
   });
 });
