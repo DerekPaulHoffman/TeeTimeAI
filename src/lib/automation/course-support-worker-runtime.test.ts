@@ -1,5 +1,6 @@
 // @vitest-environment node
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, linkSync, mkdtempSync, mkdirSync, readFileSync, rmSync, rmdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -8,6 +9,7 @@ import {
   courseSupportWorkerNpmCommand,
   courseSupportWorkerProductionCommand,
   courseSupportWorkerRuntimeEnvironment,
+  establishCourseSupportWorkerBinding,
   inspectCourseSupportWorkerRuntime,
   isPrivateWorkerPath,
   prepareCourseSupportWorkerRuntime,
@@ -20,6 +22,129 @@ const fixtures: string[] = [];
 const productionKeys = ["DATABASE_URL", "DATABASE_URL_UNPOOLED", "RESEND_API_KEY", "AUTOMATION_API_KEY", "VERCEL_TOKEN", "GOOGLE_PLACES_API_KEY", "CLERK_SECRET_KEY", "EMAIL_ACTION_SECRET"];
 afterEach(() => {
   for (const root of fixtures.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+describe("private worker binding bootstrap", () => {
+  it("compares only case-sensitive parsed project and organization IDs and preserves matching bytes", () => {
+    const { checkout, selectedCheckout, options, dependencies } = fixture();
+    const childPath = join(checkout, ".vercel/project.json"), parentPath = join(selectedCheckout, ".vercel/project.json");
+    const parentBytes = Buffer.from('{"projectId":"private-project","orgId":"private-team","projectName":"parent-name"}\n');
+    const childBytes = Buffer.from('{\r\n  "orgId": "private-team",\r\n  "projectName": "different-optional-name",\r\n  "projectId": "private-project"\r\n}');
+    writeFileSync(parentPath, parentBytes); writeFileSync(childPath, childBytes);
+    const receipt = establishCourseSupportWorkerBinding(options, dependencies);
+    expect(receipt).toMatchObject({ mode: "establish_binding", outcome: "binding_ready", bindingAction: "preserved", exitCode: 0 });
+    expect(readFileSync(childPath)).toEqual(childBytes); expect(readFileSync(parentPath)).toEqual(parentBytes);
+    expect(dependencies.browserSmoke).not.toHaveBeenCalled();
+    const serialized = JSON.stringify(receipt);
+    for (const secret of ["private-project", "private-team", "parent-name", "different-optional-name", options.environment.CODEX_THREAD_ID, checkout, selectedCheckout]) expect(serialized).not.toContain(secret);
+    const calls = dependencies.runCommand.mock.calls as unknown as [string, string[], { env: Record<string, string> }][];
+    expect(calls.every(([command, args]) => command === "git" || args.includes("--version"))).toBe(true);
+    for (const [, , settings] of calls) for (const key of productionKeys) expect(settings.env[key]).toBeUndefined();
+  });
+
+  it("exclusively establishes a missing binding in the child's ignored directory and never changes the parent", () => {
+    const { checkout, selectedCheckout, options, dependencies } = fixture();
+    const childPath = join(checkout, ".vercel/project.json"), parentPath = join(selectedCheckout, ".vercel/project.json");
+    const parentBytes = readFileSync(parentPath);
+    unlinkSync(childPath); rmdirSync(join(checkout, ".vercel"));
+    const receipt = establishCourseSupportWorkerBinding(options, dependencies);
+    expect(receipt).toMatchObject({ outcome: "binding_ready", bindingAction: "created", exitCode: 0, guards: { bindingMatches: false, childBindingIgnored: true } });
+    expect(readFileSync(childPath)).toEqual(parentBytes); expect(readFileSync(parentPath)).toEqual(parentBytes);
+    expect(inspectCourseSupportWorkerRuntime(options, dependencies).prepareEligible).toBe(true);
+    expect(establishCourseSupportWorkerBinding(options, dependencies).bindingAction).toBe("preserved");
+    expect(dependencies.runCommand.mock.calls.some(([, args]) => args.includes("ci") || args.includes("exec"))).toBe(false);
+  });
+
+  it.each([
+    ["project", '{"projectId":"PRIVATE-project","orgId":"private-team"}', "binding_mismatch"],
+    ["organization", '{"projectId":"private-project","orgId":"PRIVATE-team"}', "binding_mismatch"],
+    ["malformed JSON", "{invalid-json", "binding_invalid"],
+    ["missing ID", '{"projectId":"private-project"}', "binding_invalid"],
+  ])("preserves an existing %s mismatch or invalid file rather than repairing it", (_label, body, outcome) => {
+    const { checkout, selectedCheckout, options, dependencies } = fixture();
+    const childPath = join(checkout, ".vercel/project.json"), parentPath = join(selectedCheckout, ".vercel/project.json");
+    const parentBytes = readFileSync(parentPath), childBytes = Buffer.from(body);
+    writeFileSync(childPath, childBytes);
+    expect(establishCourseSupportWorkerBinding(options, dependencies)).toMatchObject({ outcome, exitCode: 2 });
+    expect(readFileSync(childPath)).toEqual(childBytes); expect(readFileSync(parentPath)).toEqual(parentBytes);
+  });
+
+  it.each(["identity", "cwd", "branch", "base", "clean", "linked", "distinct", "repository", "ignored"])("preserves both bindings when the %s bootstrap guard fails", failure => {
+    const { root, checkout, selectedCheckout, options, dependencies } = fixture();
+    const childPath = join(checkout, ".vercel/project.json"), parentPath = join(selectedCheckout, ".vercel/project.json");
+    const parentBytes = readFileSync(parentPath), childBytes = readFileSync(childPath);
+    if (failure === "identity") delete options.environment.CODEX_THREAD_ID;
+    if (failure === "cwd") options.cwd = selectedCheckout;
+    if (failure === "linked") { unlinkSync(join(checkout, ".git")); mkdirSync(join(checkout, ".git")); }
+    if (failure === "distinct") options.selectedCheckout = checkout;
+    let commonReads = 0;
+    const original = dependencies.runCommand.getMockImplementation()!;
+    dependencies.runCommand.mockImplementation((command, args) => {
+      const key = args.join(" ");
+      if (command === "git" && failure === "branch" && key === "branch --show-current") return { status: 0, stdout: "main" };
+      if (command === "git" && failure === "base" && key === "rev-parse origin/main") return { status: 0, stdout: "b".repeat(40) };
+      if (command === "git" && failure === "clean" && key === "status --porcelain") return { status: 0, stdout: " M src/unowned-change.ts" };
+      if (command === "git" && failure === "repository" && key === "rev-parse --git-common-dir" && ++commonReads === 2) return { status: 0, stdout: join(root, "other-repository") };
+      if (command === "git" && failure === "ignored" && args.includes("check-ignore")) return { status: 1, stdout: "" };
+      return original(command, args);
+    });
+    expect(establishCourseSupportWorkerBinding(options, dependencies)).toMatchObject({ outcome: "guard_rejected", exitCode: 2 });
+    expect(readFileSync(childPath)).toEqual(childBytes); expect(readFileSync(parentPath)).toEqual(parentBytes);
+  });
+
+  it.each(["child", "parent"])("rejects a shared %s binding directory junction without changing its target", target => {
+    const { root, checkout, selectedCheckout, options, dependencies } = fixture();
+    const directory = join(target === "child" ? checkout : selectedCheckout, ".vercel");
+    const shared = join(root, "shared-binding"); mkdirSync(shared);
+    const bytes = readFileSync(join(directory, "project.json"));
+    writeFileSync(join(shared, "project.json"), bytes);
+    unlinkSync(join(directory, "project.json")); rmdirSync(directory);
+    symlinkSync(shared, directory, process.platform === "win32" ? "junction" : "dir");
+    expect(establishCourseSupportWorkerBinding(options, dependencies)).toMatchObject({ outcome: "guard_rejected", exitCode: 2 });
+    expect(readFileSync(join(shared, "project.json"))).toEqual(bytes);
+  });
+
+  it("rejects a shared hard-linked binding file even when its IDs match", () => {
+    const { checkout, selectedCheckout, options, dependencies } = fixture();
+    const parentPath = join(selectedCheckout, ".vercel/project.json"), childPath = join(checkout, ".vercel/project.json");
+    const bytes = readFileSync(parentPath);
+    unlinkSync(childPath); linkSync(parentPath, childPath);
+    expect(establishCourseSupportWorkerBinding(options, dependencies)).toMatchObject({ outcome: "guard_rejected", exitCode: 2 });
+    expect(readFileSync(parentPath)).toEqual(bytes); expect(readFileSync(childPath)).toEqual(bytes);
+  });
+
+  it("never creates a child binding from an invalid parent binding", () => {
+    const { checkout, selectedCheckout, options, dependencies } = fixture();
+    const childPath = join(checkout, ".vercel/project.json"), parentPath = join(selectedCheckout, ".vercel/project.json");
+    unlinkSync(childPath); writeFileSync(parentPath, "not-json");
+    expect(establishCourseSupportWorkerBinding(options, dependencies)).toMatchObject({ outcome: "guard_rejected", exitCode: 2, guards: { parentBindingValid: false } });
+    expect(existsSync(childPath)).toBe(false); expect(readFileSync(parentPath, "utf8")).toBe("not-json");
+  });
+
+  it("does not create an unignored missing child binding", () => {
+    const { checkout, options, dependencies } = fixture();
+    const childPath = join(checkout, ".vercel/project.json");
+    unlinkSync(childPath); rmdirSync(join(checkout, ".vercel"));
+    const original = dependencies.runCommand.getMockImplementation()!;
+    dependencies.runCommand.mockImplementation((command, args) => command === "git" && args.includes("check-ignore") ? { status: 1, stdout: "" } : original(command, args));
+    expect(establishCourseSupportWorkerBinding(options, dependencies)).toMatchObject({ outcome: "guard_rejected", exitCode: 2 });
+    expect(existsSync(join(checkout, ".vercel"))).toBe(false);
+  });
+
+  it("recognizes the standalone CLI stage with a structured nonzero guard receipt and rejects combining preparation", () => {
+    const { checkout, selectedCheckout, options } = fixture();
+    const childPath = join(checkout, ".vercel/project.json"), parentPath = join(selectedCheckout, ".vercel/project.json");
+    const childBytes = readFileSync(childPath), parentBytes = readFileSync(parentPath);
+    const helper = resolve("scripts/automation/course-support-worker-runtime.mjs");
+    const settings = { cwd: checkout, env: { ...options.environment, CODEX_THREAD_ID: "" }, encoding: "utf8" as const, windowsHide: true, timeout: 15_000 };
+    const result = spawnSync(process.execPath, [helper, "--establish-binding", "--selected-checkout", selectedCheckout], settings);
+    expect(result.status).toBe(2);
+    expect(JSON.parse(result.stdout)).toMatchObject({ mode: "establish_binding", outcome: "guard_rejected", exitCode: 2, guards: { nativeIdentityPresent: false } });
+    expect(result.stdout).not.toContain("private-project"); expect(result.stdout).not.toContain("private-team");
+    const combined = spawnSync(process.execPath, [helper, "--establish-binding", "--prepare", "--selected-checkout", selectedCheckout], settings);
+    expect(combined.status).toBe(2); expect(JSON.parse(combined.stdout)).toEqual({ outcome: "runtime_inspection_failed" });
+    expect(readFileSync(childPath)).toEqual(childBytes); expect(readFileSync(parentPath)).toEqual(parentBytes);
+  });
 });
 
 function fixture() {

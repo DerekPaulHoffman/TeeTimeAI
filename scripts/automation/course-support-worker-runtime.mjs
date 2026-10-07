@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { isAbsolute, relative, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -89,12 +89,31 @@ export function isPrivateWorkerPath(checkout, candidate) {
   try { return !lstatSync(candidate).isSymbolicLink(); } catch { return !existsSync(candidate); }
 }
 
-function readBinding(checkout) {
+function parseBinding(bytes) {
   try {
-    const value = JSON.parse(readFileSync(resolve(checkout, ".vercel", "project.json"), "utf8"));
+    const value = JSON.parse(bytes.toString("utf8"));
     return typeof value.projectId === "string" && value.projectId && typeof value.orgId === "string" && value.orgId
       ? { projectId: value.projectId, orgId: value.orgId } : null;
   } catch { return null; }
+}
+
+function readBinding(checkout) {
+  try { return parseBinding(readFileSync(resolve(checkout, ".vercel", "project.json"))); }
+  catch { return null; }
+}
+
+function privateBindingPath(checkout, allowMissing) {
+  for (const [name, directory] of [[".vercel", true], [".vercel/project.json", false]]) {
+    const path = resolve(checkout, name);
+    if (!isPrivateWorkerPath(checkout, path)) return false;
+    try {
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink() || (directory ? !stat.isDirectory() : !stat.isFile() || stat.nlink !== 1)) return false;
+    } catch (error) {
+      if (!allowMissing || error?.code !== "ENOENT") return false;
+    }
+  }
+  return true;
 }
 
 function inspectBrowserFiles(checkout) {
@@ -163,6 +182,50 @@ export function inspectCourseSupportWorkerRuntime(options = {}, dependencies = {
     prepareEligible: Object.values(guards).every(Boolean) && Boolean(runtimeReceipt.nodeVersion && runtimeReceipt.npmVersion),
     setupRequired: runtime.status !== "available" || !runtimeReceipt.nodeVersion || !runtimeReceipt.npmVersion || !bindingMatches || !dependenciesPrivate || client.status !== "current" || !browser.executableAvailable
   };
+}
+
+/** Establish only a missing private worker binding; equivalent parsed IDs never rewrite a file. */
+export function establishCourseSupportWorkerBinding(options = {}, dependencies = {}) {
+  const checkout = canonical(options.checkout || process.cwd());
+  const selectedCheckout = options.selectedCheckout ? canonical(options.selectedCheckout) : null;
+  const environment = options.environment || process.env;
+  const inspection = inspectCourseSupportWorkerRuntime(options, dependencies);
+  const run = dependencies.runCommand || runCommand;
+  const parentPath = selectedCheckout ? resolve(selectedCheckout, ".vercel", "project.json") : null;
+  const childPath = resolve(checkout, ".vercel", "project.json");
+  let parentBytes;
+  try { if (parentPath) parentBytes = readFileSync(parentPath); } catch { /* Receipt exposes validity only. */ }
+  const parentBinding = parentBytes ? parseBinding(parentBytes) : null;
+  const ignored = run("git", ["check-ignore", "--quiet", "--", ".vercel/project.json"], {
+    cwd: checkout, env: { ...setupEnvironment(environment), GIT_OPTIONAL_LOCKS: "0" }
+  }).status === 0;
+  const guards = { ...inspection.guards,
+    runtimeReady: Boolean(inspection.runtime.nodeVersion && inspection.runtime.npmVersion),
+    privateChildBindingPath: privateBindingPath(checkout, true),
+    privateParentBindingPath: Boolean(selectedCheckout && privateBindingPath(selectedCheckout, false)),
+    childBindingIgnored: ignored,
+    parentBindingValid: Boolean(parentBinding)
+  };
+  const receipt = (outcome, exitCode = 2, bindingAction) => ({ mode: "establish_binding", observedAt: new Date().toISOString(), outcome, exitCode, guards,
+    ...(bindingAction ? { bindingAction } : {}) });
+  if (!Object.entries(guards).every(([name, passed]) => name === "bindingMatches" || passed)) return receipt("guard_rejected");
+  try {
+    if (existsSync(childPath)) {
+      const childBinding = parseBinding(readFileSync(childPath));
+      if (!childBinding) return receipt("binding_invalid");
+      if (childBinding.projectId !== parentBinding.projectId || childBinding.orgId !== parentBinding.orgId) return receipt("binding_mismatch");
+      return receipt("binding_ready", 0, "preserved");
+    }
+    // A target appeared or became shared after inspection must never be overwritten.
+    if (!privateBindingPath(checkout, true)) return receipt("guard_changed");
+    const directory = resolve(checkout, ".vercel");
+    if (!existsSync(directory)) mkdirSync(directory);
+    if (!privateBindingPath(checkout, true) || !privateBindingPath(selectedCheckout, false) || !readFileSync(parentPath).equals(parentBytes)) return receipt("guard_changed");
+    writeFileSync(childPath, parentBytes, { flag: "wx", mode: 0o600 });
+    return receipt("binding_ready", 0, "created");
+  } catch (error) {
+    return receipt(error?.code === "EEXIST" ? "binding_create_conflict" : "binding_establishment_failed");
+  }
 }
 
 export function prepareCourseSupportWorkerRuntime(options = {}, dependencies = {}) {
@@ -252,15 +315,17 @@ function main(args) {
   }
   const options = {};
   let prepare = false;
+  let establishBinding = false;
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
-    if (arg === "--prepare") prepare = true;
+    if (arg === "--prepare") { if (establishBinding) throw new Error("INVALID_ARGUMENT"); prepare = true; }
+    else if (arg === "--establish-binding") { if (prepare || establishBinding) throw new Error("INVALID_ARGUMENT"); establishBinding = true; }
     else if ((arg === "--checkout" || arg === "--selected-checkout") && args[index + 1]) options[arg === "--checkout" ? "checkout" : "selectedCheckout"] = args[++index];
     else throw new Error("INVALID_ARGUMENT");
   }
-  const receipt = prepare ? prepareCourseSupportWorkerRuntime(options) : inspectCourseSupportWorkerRuntime(options);
+  const receipt = establishBinding ? establishCourseSupportWorkerBinding(options) : prepare ? prepareCourseSupportWorkerRuntime(options) : inspectCourseSupportWorkerRuntime(options);
   console.log(JSON.stringify(receipt, null, 2));
-  process.exitCode = prepare ? (receipt.outcome === "prepared" ? 0 : 2) : (receipt.setupRequired ? 2 : 0);
+  process.exitCode = establishBinding ? receipt.exitCode : prepare ? (receipt.outcome === "prepared" ? 0 : 2) : (receipt.setupRequired ? 2 : 0);
 }
 
 if (resolve(process.argv[1] || "") === fileURLToPath(import.meta.url)) {
