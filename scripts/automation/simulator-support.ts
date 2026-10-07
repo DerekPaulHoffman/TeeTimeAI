@@ -31,10 +31,12 @@ export function readSimulatorSupportArguments(args: readonly string[]) {
     if (!["--assignment-ref", "--token", "--revision", "--path", "--sha", "--retry-minutes", "--manifest", "--source", "--link"].includes(name) || values.has(name) || !value || value.startsWith("--")) throw new Error("Invalid simulator-support option.");
     values.set(name, value);
   }
-  const allowed = new Set(["--assignment-ref", ...(!["claim", "inspect"].includes(command) ? ["--token", "--revision"] : []),
+  const allowed = new Set(["--assignment-ref", ...(command !== "claim" ? ["--token", "--revision"] : []),
     ...(command === "path" ? ["--path"] : []), ...(command === "release" ? ["--sha"] : []), ...(command === "retry" ? ["--retry-minutes"] : []), ...(["configure", "classify"].includes(command) ? ["--manifest"] : []), ...(command === "source-read" ? ["--source", "--link"] : [])]);
   if ([...values.keys()].some(value => !allowed.has(value)) || !values.get("--assignment-ref") ||
       (!["claim", "inspect"].includes(command) && (!values.get("--token") || !/^[1-9][0-9]*$/.test(values.get("--revision") ?? ""))) ||
+      (command === "inspect" && (values.has("--token") !== values.has("--revision") ||
+        values.has("--revision") && !/^[1-9][0-9]*$/.test(values.get("--revision")!))) ||
       (command === "path" && !values.get("--path")) || (command === "release" && !/^[a-f0-9]{40}$/i.test(values.get("--sha") ?? "")) ||
       (command === "retry" && !/^[1-9][0-9]*$/.test(values.get("--retry-minutes") ?? "")) ||
       (["configure", "classify"].includes(command) && !values.get("--manifest")) ||
@@ -62,6 +64,13 @@ export function prepareSimulatorSupportReleaseProvenance(input: { releaseSha: st
   return { trustedUpstreamSha, upstreamDescendantVerified: true as const, descendantVerified: true as const, committedPaths };
 }
 
+/** Optional inspect guards must match the independently read original claim. */
+export function assertSimulatorSupportInspectionFence(input: { token?: string; revision: number }, claim: { token: string; revision: number }) {
+  if (input.token !== undefined && (input.token !== claim.token || input.revision !== claim.revision)) {
+    throw new Error("Simulator inspection requires the supplied current owner token and revision.");
+  }
+}
+
 function vercelJson<T>(args: string[]): T {
   if (args.some(value => !/^[A-Za-z0-9_./:=,-]+$/.test(value))) throw new Error("Unsupported Vercel argument.");
   const windows = process.platform === "win32";
@@ -77,7 +86,11 @@ async function main() {
   if (input.command === "claim") {
     const { baseSha } = readDispatchGitState();
     result = await claimSimulatorSupportAssignment({ assignmentRef: input.assignmentRef, ownerThreadId, baseSha, branch: git(["branch", "--show-current"]) });
-  } else if (input.command === "inspect") result = await readSimulatorSupportClaim(owner);
+  } else if (input.command === "inspect") {
+    const claim = await readSimulatorSupportClaim({ assignmentRef: input.assignmentRef, ownerThreadId });
+    assertSimulatorSupportInspectionFence(input, claim);
+    result = claim;
+  }
   else if (input.command === "progress") result = await readSimulatorSupportProgress(owner);
   else if (input.command === "heartbeat") result = await heartbeatSimulatorSupport(owner);
   else if (input.command === "recover") result = await recoverSimulatorSupport(owner);

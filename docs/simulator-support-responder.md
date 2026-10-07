@@ -34,7 +34,7 @@ All subsequent mutations require `--assignment-ref`, `--token` and the most rece
 
 | Command | Additional input | Required outcome |
 | --- | --- | --- |
-| `inspect` | Assignment only | Original owner's private claim/source packet; no mutation |
+| `inspect` | Assignment only; optional paired current token/revision guards | Original owner's private claim/source packet; supplied guards must match; no mutation or lease renewal |
 | `heartbeat` | Owner fence | Current source and fresh lease remain owned |
 | `source-read` | `--source official` or `--source booking`, or `--link <1-based-index>`; optional `--rendered` | Server-derived public source or fresh indexed handoff, reserved attempt, before/after owner/source checks, safe bounded calendar facts and redacted schema shapes |
 | `progress` | Original owner fence | Read-only verification readiness and next action; no revision advance, provider request, recheck, completion or email |

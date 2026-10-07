@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { assertSimulatorSupportDeployment, createSimulatorSupportIntentDigest, isCurrentSimulatorSupportSource, validateSimulatorSupportPath, type SimulatorSupportSource } from "./simulator-support-policy";
-import { readSimulatorSupportArguments } from "../../../scripts/automation/simulator-support";
+import { assertSimulatorSupportInspectionFence, readSimulatorSupportArguments } from "../../../scripts/automation/simulator-support";
 import { summarizeSimulatorSupportPublicHtml } from "./simulator-support-ownership";
 
 const now = new Date("2026-10-06T15:00:00Z");
@@ -54,5 +54,17 @@ describe("offering-scoped simulator responder contract", () => {
   it("omits scripts, forms, credential links and local URLs from public research output", () => {
     expect(summarizeSimulatorSupportPublicHtml("<p>Hourly rentals</p><script>private state</script><form>password</form><a href='http://127.0.0.1'>Local</a><a href='/login?token=secret'>Login</a><a href='/rates'>Rates</a>", "https://venue.example.test"))
       .toEqual({ text: "Hourly rentals Local Login Rates", links: ["https://venue.example.test/rates"] });
+  });
+  it("supports the observed guarded inspect command without silently ignoring stale owner guards", () => {
+    const claim = { token: "original-token", revision: 3 };
+    const input = readSimulatorSupportArguments(["inspect", "--assignment-ref", "assigned", "--token", claim.token, "--revision", "3"]);
+    expect(() => assertSimulatorSupportInspectionFence(input, claim)).not.toThrow();
+    expect(() => assertSimulatorSupportInspectionFence({ ...input, token: "another-token" }, claim)).toThrow("current owner");
+    expect(() => assertSimulatorSupportInspectionFence({ ...input, revision: 2 }, claim)).toThrow("current owner");
+    expect(() => assertSimulatorSupportInspectionFence(readSimulatorSupportArguments(["inspect", "--assignment-ref", "assigned"]), claim)).not.toThrow();
+    for (const options of [["--token", claim.token], ["--revision", "3"], ["--token", claim.token, "--revision", "0"], ["--token", claim.token, "--revision", "3", "--apply"]]) {
+      expect(() => readSimulatorSupportArguments(["inspect", "--assignment-ref", "assigned", ...options])).toThrow();
+    }
+    expect(() => readSimulatorSupportArguments(["claim", "--assignment-ref", "assigned", "--token", claim.token, "--revision", "3"])).toThrow();
   });
 });
