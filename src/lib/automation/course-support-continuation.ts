@@ -106,6 +106,19 @@ function assertObservedInactiveFlags(value: Record<string, unknown>) {
   }
 }
 
+function assertTerminalNativeToolMarker(value: unknown, latestTurnId: unknown) {
+  if (value === null) return;
+  // A fresh supported poll retains this failed command marker even though the
+  // native turn has completed. It is terminal tool evidence, not a live turn or
+  // a classification of the provider failure. Other shapes remain unproved.
+  const marker = z.object({
+    id: z.string().regex(/^exec-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u),
+    turnId: reference, type: z.literal("commandExecution"), name: z.literal("commandExecution"),
+    status: z.literal("failed"),
+  }).strict().parse(value);
+  if (marker.turnId !== latestTurnId) throw new Error("Native command marker belongs to another turn.");
+}
+
 /** Project the supported compact poll, never a database RUNNING row. */
 export function projectCourseSupportNativeCompletion(input: {
   snapshot: unknown; expectedThreadId: string; observedAt: string; now: Date;
@@ -117,8 +130,9 @@ export function projectCourseSupportNativeCompletion(input: {
   if (thread.id !== input.expectedThreadId || thread.hostId !== "local" ||
       !["idle", "notLoaded"].includes(status.type as string) || latestTurn.status !== "completed" ||
       latestTurn.error !== null || !reference.safeParse(latestTurn.id).success ||
-      !reference.safeParse(snapshot.cursor).success || snapshot.latestToolMarker !== null ||
+      !reference.safeParse(snapshot.cursor).success ||
       !fresh(input.observedAt, input.now)) throw new Error("The supported native snapshot does not prove a completed original turn.");
+  assertTerminalNativeToolMarker(snapshot.latestToolMarker, latestTurn.id);
   assertObservedInactiveFlags(snapshot);
   assertObservedInactiveFlags(thread);
   assertObservedInactiveFlags(status);

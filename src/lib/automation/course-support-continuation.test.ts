@@ -221,6 +221,22 @@ describe("deterministic projection of observed native continuation evidence", ()
     ]) expect(() => projectCourseSupportNativeCompletion({ snapshot, expectedThreadId: child, observedAt: now.toISOString(), now })).toThrow();
   });
 
+  it("accepts the observed failed command marker only for its exact completed native turn", () => {
+    const original = observedInput().nativeSnapshot;
+    const marker = { id: "exec-11111111-2222-4333-8444-555555555555", turnId: original.latestTurn.id,
+      type: "commandExecution", name: "commandExecution", status: "failed" };
+    expect(projectCourseSupportNativeCompletion({ snapshot: { ...original, latestToolMarker: marker },
+      expectedThreadId: child, observedAt: now.toISOString(), now })).toMatchObject({
+      latestTurn: { id: original.latestTurn.id, status: "completed", error: null }, activeTurnId: null });
+    for (const altered of [
+      { ...marker, turnId: "another-turn" }, { ...marker, status: "inProgress" },
+      { ...marker, status: "pending" }, { ...marker, status: "completed" },
+      { ...marker, type: "unknownTool" }, { ...marker, name: "otherExecution" },
+      { ...marker, id: "unknown-marker-id" }, { ...marker, approvalRequired: true },
+    ]) expect(() => projectCourseSupportNativeCompletion({ snapshot: { ...original, latestToolMarker: altered },
+      expectedThreadId: child, observedAt: now.toISOString(), now })).toThrow();
+  });
+
   it("rejects a wrong launcher profile, owner, checkout or still-running original process", () => {
     const original = observedInput();
     const receipt = JSON.parse(original.launcherReceiptBytes);
