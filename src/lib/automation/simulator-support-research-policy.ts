@@ -90,6 +90,7 @@ export function selectSimulatorResearchTarget(input: {
   if (source === "evidence") {
     const official = getSafeCustomerBookingUrl(input.officialUrl);
     if (!official || new URL(url).origin !== new URL(official).origin) throw new Error("The saved evidence page must remain on the official website origin.");
+    if (new URL(url).href === new URL(official).href) throw new Error("Use the original official route when the evidence page is the homepage.");
   }
   if (source === "link") {
     const previous = [...state.history].reverse().find(entry => entry.sourceUrl === state.linkBaseUrl && entry.httpStatus >= 200 && entry.httpStatus < 300);

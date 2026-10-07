@@ -11,7 +11,7 @@ describe("owned simulator research navigation", () => {
   it("offers only a saved same-origin evidence page and keeps original route budgets", () => {
     const evidenceUrl = `${officialUrl}/faqs`;
     expect(select(empty(), { source: "evidence", evidenceUrl })).toMatchObject({ source: "evidence", url: evidenceUrl });
-    for (const unsafe of [null, "http://localhost/faqs", "https://other.example.test/faqs", `${officialUrl}/login`, "http://venue.example.test/faqs"]) {
+    for (const unsafe of [null, officialUrl, `${officialUrl}/`, "http://localhost/faqs", "https://other.example.test/faqs", `${officialUrl}/login`, "http://venue.example.test/faqs"]) {
       expect(() => select(empty(), { source: "evidence", evidenceUrl: unsafe })).toThrow();
     }
     const state = { ...empty(), readCount: 1, history: [{ source: "evidence" as const, requestedUrl: evidenceUrl, sourceUrl: evidenceUrl,
