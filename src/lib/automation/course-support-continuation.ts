@@ -72,6 +72,8 @@ export type CourseSupportContinuationCheckpoint = {
   failure: SimulatorSupportFailure | null;
   allowedResearchRouteCount: number;
   providerReadInFlight: boolean;
+  claimLeaseExpired?: boolean;
+  researchOnlyClaim?: boolean;
   publicReadEvidence?: { sourceFingerprint: string; accessControlsObserved: true; accessControls: Array<"CAPTCHA_OR_CHALLENGE" | "ACCOUNT_REQUIRED" | "QUEUE">;
     method: "HTTP" | "BROWSER"; renderComplete?: boolean; httpStatus: number };
 };
@@ -429,6 +431,15 @@ function hasSettledPublicEvidence(checkpoint: CourseSupportContinuationCheckpoin
       (proof.method === "HTTP" || proof.method === "BROWSER" && proof.renderComplete === true));
 }
 
+function hasRejectedStylesheetCheckpoint(checkpoint: CourseSupportContinuationCheckpoint) {
+  const failure = checkpoint.failure;
+  return checkpoint.kind === "SETTLED_FAILURE" && checkpoint.claimLeaseExpired === true && checkpoint.researchOnlyClaim === true &&
+    Boolean(checkpoint.requestId && z.string().uuid().safeParse(checkpoint.requestId).success) &&
+    checkpoint.readCount < 6 && checkpoint.allowedResearchRouteCount > 0 &&
+    failure?.stage === "PUBLIC_READ" && failure.category === "ACCESS" && failure.code === "UNSAFE_PUBLIC_URL" &&
+    failure.researchResourceKind === "SECONDARY_STYLESHEET";
+}
+
 /** Read-only candidates still require fresh native and exact-release proof. */
 export function isCourseSupportContinuationCandidateCheckpoint(checkpoint: CourseSupportContinuationCheckpoint) {
   if (checkpoint.providerReadInFlight || !Number.isInteger(checkpoint.readCount) || checkpoint.readCount < 1 || checkpoint.readCount > 6) return false;
@@ -437,7 +448,8 @@ export function isCourseSupportContinuationCandidateCheckpoint(checkpoint: Cours
   const failure = checkpoint.failure;
   return failure?.stage === "PUBLIC_READ" && (
     failure.category === "NETWORK" && retryableNetworkCodes.has(failure.code) && checkpoint.readCount < 6 && checkpoint.allowedResearchRouteCount > 0 ||
-    failure.category === "TOOLING" && ["REQUIRED_FILE_MISSING", "INVALID_TOOL_DATA"].includes(failure.code)
+    failure.category === "TOOLING" && ["REQUIRED_FILE_MISSING", "INVALID_TOOL_DATA"].includes(failure.code) ||
+    hasRejectedStylesheetCheckpoint(checkpoint)
   );
 }
 
@@ -457,7 +469,8 @@ export function assessCourseSupportContinuationCandidate(input: {
   if (sourceReceipts.some(receipt => receipt.checkpointDigest === checkpointDigest(input.checkpoint))) {
     return { candidate: false as const, reason: "CHECKPOINT_ALREADY_REQUESTED" };
   }
-  const diagnostic = input.checkpoint.kind === "EXPIRED_UNFINISHED_READ" || input.checkpoint.failure?.category === "TOOLING";
+  const diagnostic = input.checkpoint.kind === "EXPIRED_UNFINISHED_READ" || input.checkpoint.failure?.category === "TOOLING" ||
+    hasRejectedStylesheetCheckpoint(input.checkpoint);
   if (sourceReceipts.length >= COURSE_SUPPORT_CONTINUATION_MAX_ATTEMPTS || diagnostic &&
       sourceReceipts.some(receipt => receipt.scope === "DIAGNOSE_REVIEWED_TOOLING_UPDATE")) {
     return { candidate: false as const, reason: "CONTINUATION_BUDGET_EXHAUSTED" };
@@ -498,10 +511,15 @@ export function assessCourseSupportContinuationCheckpoint(input: {
   const knownTooling = checkpoint.kind === "SETTLED_FAILURE" && failure?.stage === "PUBLIC_READ" &&
     failure.category === "TOOLING" && ["REQUIRED_FILE_MISSING", "INVALID_TOOL_DATA"].includes(failure.code);
   const legacyUnfinished = checkpoint.kind === "EXPIRED_UNFINISHED_READ" && failure === null && Boolean(checkpoint.requestId);
-  if ((knownTooling || legacyUnfinished) && repair?.policyVersion === COURSE_SUPPORT_CONTINUATION_POLICY_VERSION &&
+  // An optional stylesheet rejection is not evidence that the calendar requires
+  // access. A later reviewed repair may permit one different server-selected
+  // public route, while retaining the hard failure and never following its target.
+  const rejectedStylesheet = hasRejectedStylesheetCheckpoint(checkpoint);
+  if ((knownTooling || legacyUnfinished || rejectedStylesheet) && repair?.policyVersion === COURSE_SUPPORT_CONTINUATION_POLICY_VERSION &&
       repair.releaseSha === input.currentMainSha && repair.source === "git" && repair.state === "READY" &&
       repair.branch === "main" && ["teetimespot.com", "www.teetimespot.com"].every(alias => repair.aliases.includes(alias)) &&
-      Number.isFinite(Date.parse(repair.deployedAt)) && Date.parse(repair.deployedAt) <= now.getTime()) {
+      Number.isFinite(Date.parse(repair.deployedAt)) && Date.parse(repair.deployedAt) <= now.getTime() &&
+      (!rejectedStylesheet || Date.parse(repair.deployedAt) > Date.parse(checkpoint.observedAt))) {
     return { eligible: true, scope: "DIAGNOSE_REVIEWED_TOOLING_UPDATE", checkpointDigest: checkpointDigest(checkpoint) };
   }
   return { eligible: false, reason: "FAILURE_REQUIRES_ATTENTION" };

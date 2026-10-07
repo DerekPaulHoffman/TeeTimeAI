@@ -8,6 +8,24 @@ const select = (state = empty(), rest = {}) => selectSimulatorResearchTarget({ s
 const failedHomepage = () => ({ ...empty(), readCount: 1, history: [{ source: "official" as const, requestedUrl: officialUrl, sourceUrl: officialUrl, observedAt: now.toISOString(), httpStatus: 403, rendered: false, outcome: "READ" as const }] });
 
 describe("owned simulator research navigation", () => {
+  it("offers only a saved same-origin evidence page and keeps original route budgets", () => {
+    const evidenceUrl = `${officialUrl}/faqs`;
+    expect(select(empty(), { source: "evidence", evidenceUrl })).toMatchObject({ source: "evidence", url: evidenceUrl });
+    for (const unsafe of [null, "http://localhost/faqs", "https://other.example.test/faqs", `${officialUrl}/login`, "http://venue.example.test/faqs"]) {
+      expect(() => select(empty(), { source: "evidence", evidenceUrl: unsafe })).toThrow();
+    }
+    const state = { ...empty(), readCount: 1, history: [{ source: "evidence" as const, requestedUrl: evidenceUrl, sourceUrl: evidenceUrl,
+      observedAt: now.toISOString(), httpStatus: 200, rendered: false, outcome: "READ" as const }] };
+    expect(readSimulatorResearchState(state, fingerprint).readCount).toBe(1);
+    expect(() => select(state, { source: "evidence", evidenceUrl })).toThrow("identical");
+    expect(select(state, { source: "evidence", evidenceUrl, rendered: true }).url).toBe(evidenceUrl);
+    expect(() => select({ ...state, readCount: 6 }, { source: "evidence", evidenceUrl })).toThrow("budget");
+    expect(getSimulatorResearchGuide({ state: empty(), officialUrl, bookingUrl, evidenceUrl, now, priorFailedRoutes: [] }).suggestedReads)
+      .toContainEqual({ source: "evidence", rendered: false });
+    expect(getSimulatorResearchGuide({ state: empty(), officialUrl, bookingUrl, evidenceUrl: officialUrl, now, priorFailedRoutes: [] }).suggestedReads)
+      .toHaveLength(4);
+    expect(() => select(empty(), { source: "evidence", evidenceUrl, priorFailedRoutes: [{ url: evidenceUrl, rendered: false }] })).toThrow("structural");
+  });
   it("chooses only saved sources or a fresh indexed official handoff", () => {
     expect(select().url).toBe(officialUrl);
     const state = { ...failedHomepage(), history: [{ ...failedHomepage().history[0], httpStatus: 200 }], links: [bookingUrl, "https://unrelated.example.test/simulators"], bookingLinks: [bookingUrl], linkBaseUrl: officialUrl };

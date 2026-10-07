@@ -45,11 +45,11 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
   afterEach(cleanupFixtureRows);
   afterAll(async () => { await cleanupFixtureRows(); if (client) await client.$disconnect(); vi.unstubAllEnvs(); });
 
-  async function fixture(cadenceMinutes = 15, mixed = false, bookingUrl?: string) {
+  async function fixture(cadenceMinutes = 15, mixed = false, bookingUrl?: string, evidenceUrl?: string) {
     const suffix = randomUUID(), now = new Date();
     const user = await client.user.create({ data: { email: `${suffix}@example.test`, clerkUserId: suffix } }); ids.users.push(user.id);
     const course = await client.course.create({ data: { googlePlaceId: suffix, name: "Support fixture", address: "1 Test Street", website: "https://official.example.test", latitude: 41, longitude: -73, timeZone: "UTC", isPublic: true } }); ids.courses.push(course.id);
-    const offering = await client.courseOffering.create({ data: { courseId: course.id, kind: "SIMULATOR", publicAccessStatus: "UNVERIFIED", bookingUrl } });
+    const offering = await client.courseOffering.create({ data: { courseId: course.id, kind: "SIMULATOR", publicAccessStatus: "UNVERIFIED", bookingUrl, evidenceUrl } });
     const peerCourse = mixed ? await client.course.create({ data: { googlePlaceId: `${suffix}-peer`, name: "Peer simulator fixture", address: "2 Test Street", website: "https://peer.example.test", latitude: 41, longitude: -73, timeZone: "UTC", isPublic: true } }) : null;
     if (peerCourse) ids.courses.push(peerCourse.id);
     const peer = peerCourse ? await client.courseOffering.create({ data: { courseId: peerCourse.id, kind: "SIMULATOR", publicAccessStatus: "PUBLIC", supportedDurationsMinutes: [60], verifiedAt: now,
@@ -82,6 +82,32 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     return requestId;
   }
 
+  it("reads only the original saved same-origin evidence page under the original reservation", async () => {
+    const evidenceUrl = "https://official.example.test/faqs";
+    const f = await fixture(15, false, undefined, evidenceUrl);
+    const before = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
+    expect(before.researchGuide.suggestedReads).toContainEqual({ source: "evidence", rendered: false });
+    const fetch = vi.fn(async () => new Response("<h1>Public simulator rentals</h1>", { status: 200, headers: { "content-type": "text/html" } }));
+    const read = await lane.readSimulatorSupportSource({ ...f.owner, source: "evidence" }, { fetch });
+    expect(read.acquired).toBe(true);
+    expect(fetch).toHaveBeenCalledWith(evidenceUrl, expect.objectContaining({ method: "GET", credentials: "omit" }));
+    const current = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
+    expect(current.research).toMatchObject({ readCount: 1, inFlight: null, sourceFingerprint: f.fingerprint,
+      history: [{ source: "evidence", requestedUrl: evidenceUrl, outcome: "READ" }] });
+    await expect(lane.readSimulatorSupportSource({ ...f.owner, revision: current.revision, source: "evidence" }, { fetch })).rejects.toThrow("identical");
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not reserve or read a saved evidence page on another origin", async () => {
+    const f = await fixture(15, false, undefined, "https://other.example.test/faqs");
+    const fetch = vi.fn();
+    await expect(lane.readSimulatorSupportSource({ ...f.owner, source: "evidence" }, { fetch })).rejects.toThrow("official website origin");
+    const current = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
+    expect(current.revision).toBe(f.owner.revision);
+    expect(current.research.readCount).toBe(0);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   function continuationEvidence(f: Awaited<ReturnType<typeof fixture>>, parent = "parent") {
     const currentMainSha = "c".repeat(40);
     const observedAt = new Date(Date.now() - 15_000).toISOString();
@@ -99,6 +125,35 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
         aliases: ["teetimespot.com", "www.teetimespot.com"], deployedAt: new Date(Date.now() - 60_000).toISOString() },
     };
   }
+
+  it("reserves one original-worker stylesheet diagnosis only after natural lease expiry and a newer release", async () => {
+    const f = await fixture(15, false, "https://calendar.example.test/booking", "https://official.example.test/faqs");
+    const stored = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const audit = stored.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    const failedAt = new Date(Date.now() - 120_000).toISOString();
+    audit.simulatorResearch = { version: 1, sourceFingerprint: f.fingerprint, readCount: 1, history: [{
+      source: "official", requestedUrl: f.course.website!, sourceUrl: f.course.website!, observedAt: failedAt,
+      httpStatus: 0, rendered: true, outcome: "HARD_FAILED", requestId: randomUUID(),
+      failure: { stage: "PUBLIC_READ", category: "ACCESS", code: "UNSAFE_PUBLIC_URL", researchResourceKind: "SECONDARY_STYLESHEET" },
+    }], links: [], bookingLinks: [], linkBaseUrl: null, inFlight: null };
+    await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
+    const proof = continuationEvidence(f);
+    const repair = { policyVersion: proof.policyVersion, releaseSha: proof.currentMainSha, source: "git" as const,
+      state: "READY" as const, branch: "main" as const, aliases: ["teetimespot.com", "www.teetimespot.com"],
+      deployedAt: new Date(Date.now() - 60_000).toISOString() };
+    expect(await dispatcher.reserveCourseSupportContinuation({ ...proof, reviewedToolingRepair: repair }))
+      .toMatchObject({ acquired: true, value: { reserved: false } });
+    audit.simulatorClaim!.leaseExpiresAt = new Date(Date.now() - 1000).toISOString();
+    await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
+    const result = await dispatcher.reserveCourseSupportContinuation({ ...proof, reviewedToolingRepair: repair });
+    expect(result).toMatchObject({ acquired: true, value: { reserved: true, threadId: f.owner.ownerThreadId, scope: "DIAGNOSE_REVIEWED_TOOLING_UPDATE" } });
+    expect(await dispatcher.reserveCourseSupportContinuation({ ...proof, reviewedToolingRepair: repair }))
+      .toMatchObject({ acquired: true, value: { reserved: false, reason: "PRIOR_SEND_UNCONFIRMED" } });
+    const current = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
+    expect(current.research.history[0]).toMatchObject({ outcome: "HARD_FAILED", failure: { code: "UNSAFE_PUBLIC_URL" } });
+    expect(current.research.readCount).toBe(1);
+    expect(current.revision).toBe(f.owner.revision);
+  });
 
   it("atomically consumes one bound assignment and prevents duplicate or stale owner work", async () => {
     const f = await fixture();

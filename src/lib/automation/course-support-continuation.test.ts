@@ -49,6 +49,40 @@ function delivered(value: ReturnType<typeof reserved>) {
 }
 
 describe("bounded same-original-native-worker continuation", () => {
+  it("permits one different-route stylesheet diagnosis only after a newer reviewed release and expired research claim", () => {
+    const stylesheet: CourseSupportContinuationCheckpoint = { ...checkpoint, requestId: "11111111-2222-4333-8444-555555555555",
+      claimLeaseExpired: true, researchOnlyClaim: true,
+      failure: { stage: "PUBLIC_READ", category: "ACCESS", code: "UNSAFE_PUBLIC_URL", researchResourceKind: "SECONDARY_STYLESHEET" } };
+    const repair = { policyVersion: COURSE_SUPPORT_CONTINUATION_POLICY_VERSION, releaseSha, source: "git" as const,
+      state: "READY" as const, branch: "main" as const, aliases: ["teetimespot.com", "www.teetimespot.com"],
+      deployedAt: "2026-10-07T08:00:30.000Z" };
+    const first = reserved({ ...input(), checkpoint: stylesheet, reviewedToolingRepair: repair });
+    expect(first.receipt.scope).toBe("DIAGNOSE_REVIEWED_TOOLING_UPDATE");
+    for (const changed of [
+      { ...stylesheet, claimLeaseExpired: false }, { ...stylesheet, claimLeaseExpired: undefined },
+      { ...stylesheet, researchOnlyClaim: false }, { ...stylesheet, requestId: null },
+      { ...stylesheet, readCount: 6 }, { ...stylesheet, allowedResearchRouteCount: 0 },
+      { ...stylesheet, providerReadInFlight: true },
+      ...[undefined, "SECONDARY_SCRIPT", "MAIN_DOCUMENT", "XHR_OR_FETCH", "UNKNOWN"].map(researchResourceKind => ({ ...stylesheet,
+        failure: { ...stylesheet.failure!, researchResourceKind } })),
+      { ...stylesheet, failure: { ...stylesheet.failure!, code: "UNCLASSIFIED_FAILURE" } },
+    ]) expect(reserveCourseSupportContinuationReceipt({ ...input(), checkpoint: changed as CourseSupportContinuationCheckpoint,
+      reviewedToolingRepair: repair })).toMatchObject({ reserved: false });
+    for (const deployedAt of ["2026-10-07T07:59:00.000Z", stylesheet.observedAt, "2026-10-07T08:02:00.000Z"]) {
+      expect(reserveCourseSupportContinuationReceipt({ ...input(), checkpoint: stylesheet, reviewedToolingRepair: { ...repair, deployedAt } }))
+        .toMatchObject({ reserved: false });
+    }
+    expect(reserveCourseSupportContinuationReceipt({ ...input(), checkpoint: stylesheet })).toMatchObject({ reserved: false });
+    expect(reserveCourseSupportContinuationReceipt({ ...input(), checkpoint: stylesheet, currentSource: false, reviewedToolingRepair: repair }))
+      .toMatchObject({ reserved: false });
+    expect(reserveCourseSupportContinuationReceipt({ ...input(), checkpoint: stylesheet, ledger: first.ledger, reviewedToolingRepair: repair }))
+      .toMatchObject({ reserved: false, reason: "PRIOR_SEND_UNCONFIRMED" });
+    expect(reserveCourseSupportContinuationReceipt({ ...input(), checkpoint: stylesheet, ledger: delivered(first), reviewedToolingRepair: repair }))
+      .toMatchObject({ reserved: false, reason: "CHECKPOINT_ALREADY_REQUESTED" });
+    expect(reserveCourseSupportContinuationReceipt({ ...input(), checkpoint: { ...stylesheet, readCount: 2, requestId: "22222222-2222-4333-8444-555555555555" },
+      ledger: delivered(first), nativeCompletion: { ...input().nativeCompletion, latestTurn: { id: "later", status: "completed", error: null } },
+      reviewedToolingRepair: repair })).toMatchObject({ reserved: false, reason: "CONTINUATION_BUDGET_EXHAUSTED" });
+  });
   it("resumes one expired settled public read without relabeling it as a failure or replaying its checkpoint", () => {
     const settled: CourseSupportContinuationCheckpoint = { ...checkpoint, kind: "EXPIRED_SETTLED_PUBLIC_READ", failure: null,
       requestId: "11111111-2222-4333-8444-555555555555", publicReadEvidence: { sourceFingerprint: input().sourceFingerprint, accessControlsObserved: true, accessControls: [], method: "HTTP", httpStatus: 200 } };

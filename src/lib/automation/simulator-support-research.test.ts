@@ -330,6 +330,155 @@ describe("bounded owned simulator public research transport", () => {
     await expect(collectSimulatorSupportResearch({ url: source, render: true }, { fetch: vi.fn(async () => response("x".repeat(1_500_000), 200, "text/javascript")), lease, browser: view.factory })).rejects.toThrow("BODY_LIMIT");
     expect(view.browser.close).toHaveBeenCalledOnce();
   });
+  it.each(["redirect", "response"])("aborts an unsafe stylesheet %s URL, stops queued reads, and keeps only incomplete main HTML facts", async seam => {
+    const asset = new URL("/public.css", booking).href;
+    const unsafe = new URL("/login?token=private", booking).href;
+    const requests = [{ url: booking }, { url: asset, kind: "stylesheet" },
+      ...Array.from({ length: 6 }, (_, index) => ({ url: new URL(`/queued-${index}.js`, booking).href, kind: "script" }))];
+    const main = publishedConfig() + "<a href='/public-destination'>Book a bay</a>";
+    const view = renderedBrowser(requests, "<h1>Unproven rendered calendar</h1>", true);
+    const rejected = seam === "redirect" ? new Response(null, { status: 302, headers: { location: unsafe } })
+      : Object.defineProperty(response("Rejected stylesheet", 200, "text/css"), "url", { value: unsafe });
+    const fetch = vi.fn(async (url: unknown) => String(url) === booking ? response(main)
+      : String(url) === asset ? rejected
+        : response("Should never be fetched"));
+    const result = await collectSimulatorSupportResearch({ url: booking, render: true }, { fetch, lease, browser: view.factory, now: () => instant });
+    expect(fetch.mock.calls.map(call => String(call[0]))).toEqual([booking, asset]);
+    expect(lease).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ requestedUrl: booking, url: booking, observedAt: instant.toISOString(),
+      text: "Hourly simulator bays Book a bay", links: [new URL("/public-destination", booking).href],
+      admittedRequests: 2, blockedRequests: 7, renderComplete: false,
+      renderWarning: "SECONDARY_STYLESHEET_URL_REJECTED", contentProvenance: "MAIN_DOCUMENT_HTTP" });
+    expect(result.calendar).toBeUndefined(); expect(result.jsonShape).toBeUndefined(); expect(result.responseContracts).toBeUndefined();
+    expect(JSON.stringify(result)).not.toMatch(/Unproven rendered calendar|private|never-return-this/);
+    expect(view.page.content).not.toHaveBeenCalled();
+    for (const route of view.routes.slice(1)) { expect(route.abort).toHaveBeenCalledOnce(); expect(route.fulfill).not.toHaveBeenCalled(); }
+    expect(view.context.close).toHaveBeenCalledOnce(); expect(view.browser.close).toHaveBeenCalledOnce();
+  });
+  it("charges the rejected stylesheet response cap and keeps aggregate overflow hard", async () => {
+    const rejected = `${source}/rejected.css`;
+    const requests = [{ url: `${source}/` }, ...Array.from({ length: 3 }, (_, index) => ({ url: `${source}/large-${index}.css`, kind: "stylesheet" })),
+      { url: rejected, kind: "stylesheet" }];
+    const view = renderedBrowser(requests);
+    const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? response("<h1>Safe main</h1>")
+      : String(url) === rejected ? new Response("x".repeat(1_500_000), { status: 302, headers: { location: `${source}/login`, "content-type": "text/css" } })
+        : response("x".repeat(1_500_000), 200, "text/css"));
+    let error: unknown;
+    try { await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory }); }
+    catch (caught) { error = caught; }
+    expect(classifySimulatorSupportFailure(error, "PUBLIC_READ")).toMatchObject({ category: "BUDGET", code: "PUBLIC_BODY_LIMIT", researchResourceKind: "SECONDARY_STYLESHEET" });
+    expect(fetch).toHaveBeenCalledTimes(5);
+    expect(fetch.mock.calls.every(call => !String(call[0]).includes("/login"))).toBe(true);
+    expect(view.routes[4].abort).toHaveBeenCalledOnce(); expect(view.routes[4].fulfill).not.toHaveBeenCalled();
+    expect(view.page.content).not.toHaveBeenCalled();
+    expect(view.context.close).toHaveBeenCalledOnce(); expect(view.browser.close).toHaveBeenCalledOnce();
+  });
+  it("keeps an unsafe stylesheet response hard without a successful main HTML document", async () => {
+    const view = renderedBrowser([{ url: `${source}/` }, { url: `${source}/public.css`, kind: "stylesheet" }]);
+    const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? response("No safe main", 404)
+      : new Response(null, { status: 302, headers: { location: `${source}/login` } }));
+    await expect(collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory })).rejects.toThrow("SIMULATOR_RESEARCH_UNSAFE_URL");
+    expect(fetch).toHaveBeenCalledTimes(2); expect(view.page.content).not.toHaveBeenCalled();
+  });
+  it.each(["script", "fetch", "document"])("keeps an unsafe admitted %s response hard", async kind => {
+    const main = kind === "document";
+    const target = main ? `${source}/` : `${source}/public-resource`;
+    const view = renderedBrowser(main ? [{ url: target }] : [{ url: `${source}/` }, { url: target, kind }]);
+    const fetch = vi.fn(async (url: unknown) => String(url) === target
+      ? new Response(null, { status: 302, headers: { location: `${source}/login` } }) : response("<h1>Safe main</h1>"));
+    let error: unknown;
+    try { await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory }); }
+    catch (caught) { error = caught; }
+    expect(classifySimulatorSupportFailure(error, "PUBLIC_READ")).toMatchObject({ category: "ACCESS", code: "UNSAFE_PUBLIC_URL",
+      researchResourceKind: main ? "MAIN_DOCUMENT" : kind === "script" ? "SECONDARY_SCRIPT" : "XHR_OR_FETCH" });
+    expect(fetch.mock.calls.every(call => !String(call[0]).includes("/login"))).toBe(true);
+    expect(view.page.content).not.toHaveBeenCalled();
+  });
+  it.each(["transport", "headers"])("does not treat a spoofed unsafe-URL %s error as a collector-owned stylesheet rejection", async seam => {
+    const spoofed = new Error("SIMULATOR_RESEARCH_UNSAFE_URL");
+    const view = renderedBrowser([{ url: `${source}/` }, { url: `${source}/public.css`, kind: "stylesheet", ...(seam === "headers" ? { headersFailure: spoofed } : {}) }]);
+    const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? response("<h1>Safe main</h1>") : Promise.reject(spoofed));
+    await expect(collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory })).rejects.toBe(spoofed);
+    expect(view.page.content).not.toHaveBeenCalled();
+  });
+  it("does not hide an already-started unknown script failure behind a rejected stylesheet", async () => {
+    const script = "https://cdn.example.test/public.js", unknown = new Error("Unrelated transport invariant");
+    const view = renderedBrowser([{ url: `${source}/` }, { url: `${source}/public.css`, kind: "stylesheet" }, { url: script, kind: "script" }], "<h1>Unproven DOM</h1>", true);
+    const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? response(`<h1>Safe main</h1><script src='${script}'></script>`)
+      : String(url) === script ? new Promise<Response>((_resolve, reject) => setTimeout(() => reject(unknown), 0))
+        : new Response(null, { status: 302, headers: { location: `${source}/login` } }));
+    await expect(collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory })).rejects.toBe(unknown);
+    expect(fetch).toHaveBeenCalledTimes(3); expect(view.page.content).not.toHaveBeenCalled();
+  });
+  it("settles an already-started access-control response and scrubs fallback after a stylesheet rejection aborts navigation", async () => {
+    const asset = new URL("/public.css", booking).href;
+    const subframe = "https://www.booking.trackmangolf.com/access-frame";
+    const view = renderedBrowser([{ url: booking }]);
+    let handler!: (route: Route) => Promise<void>;
+    let releaseSubframe!: (value: Response) => void;
+    const pendingSubframe = new Promise<Response>(resolve => { releaseSubframe = resolve; });
+    view.context.route.mockImplementation(async (_pattern, callback) => { handler = callback; });
+    const routes: Array<{ abort: ReturnType<typeof vi.fn>; fulfill: ReturnType<typeof vi.fn> }> = [];
+    const run = (url: string, kind: string, frame: object) => {
+      const route = { abort: vi.fn(async () => undefined), fulfill: vi.fn(async () => undefined) }; routes.push(route);
+      return handler({ ...route, request: () => ({ url: () => url, method: () => "GET", allHeaders: async () => ({ "user-agent": "Public research browser" }),
+        resourceType: () => kind, isNavigationRequest: () => kind === "document", frame: () => frame }) } as unknown as Route);
+    };
+    let frameWork: Promise<void> | undefined;
+    view.page.goto.mockImplementation(async () => {
+      await run(booking, "document", view.page.mainFrame());
+      const assetWork = run(asset, "stylesheet", view.page.mainFrame());
+      frameWork = run(subframe, "document", {});
+      await assetWork;
+      setTimeout(() => releaseSubframe(response("<h1>Verify you are human</h1>")), 0);
+      throw new Error("page.goto: net::ERR_ABORTED at public destination");
+    });
+    const fetch = vi.fn(async (url: unknown) => String(url) === subframe ? pendingSubframe
+      : String(url) === asset ? new Response(null, { status: 302, headers: { location: new URL("/login", booking).href } })
+        : response(publishedConfig() + "<a href='/public-destination'>Book a bay</a>"));
+    const result = await collectSimulatorSupportResearch({ url: booking, render: true }, { fetch, lease, browser: view.factory });
+    await frameWork;
+    expect(fetch).toHaveBeenCalledTimes(3); expect(routes[1].abort).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({ renderComplete: false, contentProvenance: "MAIN_DOCUMENT_HTTP", accessControls: ["CAPTCHA_OR_CHALLENGE"], text: "", links: [] });
+    expect(result.renderWarning).toBeUndefined(); expect(result.calendar).toBeUndefined(); expect(result.jsonShape).toBeUndefined(); expect(result.responseContracts).toBeUndefined();
+    expect(result.bookingLinks).toBeUndefined(); expect(JSON.stringify(result)).not.toContain("Hourly simulator bays");
+    expect(view.page.content).not.toHaveBeenCalled();
+    expect(view.context.close).toHaveBeenCalledOnce(); expect(view.browser.close).toHaveBeenCalledOnce();
+  });
+  it("keeps a concurrent XHR failure hard when it arrives during stylesheet-rejection navigation settlement", async () => {
+    const asset = new URL("/public.css", booking).href;
+    const data = "https://www.booking.trackmangolf.com/public-data";
+    const original = Object.assign(new Error("Public data DNS failure"), { code: "ENOTFOUND" });
+    const view = renderedBrowser([{ url: booking }]);
+    let handler!: (route: Route) => Promise<void>;
+    let rejectData!: (error: Error) => void;
+    const pendingData = new Promise<Response>((_resolve, reject) => { rejectData = reject; });
+    view.context.route.mockImplementation(async (_pattern, callback) => { handler = callback; });
+    const run = (url: string, kind: string) => handler({
+      abort: vi.fn(async () => undefined), fulfill: vi.fn(async () => undefined),
+      request: () => ({ url: () => url, method: () => "GET", allHeaders: async () => ({ "user-agent": "Public research browser" }),
+        resourceType: () => kind, isNavigationRequest: () => kind === "document", frame: () => view.page.mainFrame() }) } as unknown as Route);
+    let dataWork: Promise<void> | undefined;
+    view.page.goto.mockImplementation(async () => {
+      await run(booking, "document");
+      const assetWork = run(asset, "stylesheet");
+      dataWork = run(data, "xhr");
+      await assetWork;
+      setTimeout(() => rejectData(original), 0);
+      throw new Error("page.goto: net::ERR_ABORTED at public destination");
+    });
+    const fetch = vi.fn(async (url: unknown) => String(url) === data ? pendingData
+      : String(url) === asset ? new Response(null, { status: 302, headers: { location: new URL("/login", booking).href } })
+        : response("<h1>Safe main</h1>"));
+    let error: unknown;
+    try { await collectSimulatorSupportResearch({ url: booking, render: true }, { fetch, lease, browser: view.factory }); }
+    catch (caught) { error = caught; }
+    await dataWork;
+    expect(classifySimulatorSupportFailure(error, "PUBLIC_READ")).toMatchObject({ category: "NETWORK", code: "PUBLIC_NETWORK_FAILED", researchResourceKind: "XHR_OR_FETCH" });
+    expect(error).toMatchObject({ cause: original });
+    expect(fetch).toHaveBeenCalledTimes(3); expect(view.page.content).not.toHaveBeenCalled();
+    expect(view.context.close).toHaveBeenCalledOnce(); expect(view.browser.close).toHaveBeenCalledOnce();
+  });
   it("preserves only a safe main HTML response after an oversized secondary script or stylesheet", async () => {
     for (const kind of ["script", "stylesheet"]) for (const streamed of [false, true]) {
       const asset = `${source}/large-${kind}`;

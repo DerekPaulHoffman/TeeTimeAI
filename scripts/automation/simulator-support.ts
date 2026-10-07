@@ -41,9 +41,9 @@ export function readSimulatorSupportArguments(args: readonly string[]) {
       (command === "retry" && !/^[1-9][0-9]*$/.test(values.get("--retry-minutes") ?? "")) ||
       (["configure", "classify"].includes(command) && !values.get("--manifest")) ||
       (command === "source-read" && (values.has("--source") === values.has("--link") ||
-        (values.has("--source") && !["official", "booking"].includes(values.get("--source")!)) ||
+        (values.has("--source") && !["official", "booking", "evidence"].includes(values.get("--source")!)) ||
         (values.has("--link") && !/^(?:[1-9]|[12][0-9]|30)$/.test(values.get("--link")!))))) throw new Error("Simulator-support command arguments are incomplete.");
-  return { command, assignmentRef: values.get("--assignment-ref")!, token: values.get("--token")!, revision: Number(values.get("--revision")), path: values.get("--path"), releaseSha: values.get("--sha"), retryMinutes: Number(values.get("--retry-minutes")), manifestPath: values.get("--manifest"), source: values.get("--source") as "official" | "booking" | undefined,
+  return { command, assignmentRef: values.get("--assignment-ref")!, token: values.get("--token")!, revision: Number(values.get("--revision")), path: values.get("--path"), releaseSha: values.get("--sha"), retryMinutes: Number(values.get("--retry-minutes")), manifestPath: values.get("--manifest"), source: values.get("--source") as "official" | "booking" | "evidence" | undefined,
     linkIndex: values.has("--link") ? Number(values.get("--link")) : undefined, rendered, apply };
 }
 

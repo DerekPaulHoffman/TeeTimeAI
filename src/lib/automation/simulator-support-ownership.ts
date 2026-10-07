@@ -100,10 +100,12 @@ export async function readSimulatorSupportContinuationContext(tx: Prisma.Transac
     readCount: research.readCount,
     requestId: settledFailure ? last!.requestId! : expiredPending ? pending!.requestId : settledPublic!.requestId,
     failure: settledFailure ? last!.failure! : null,
+    claimLeaseExpired: new Date(audit.simulatorClaim.leaseExpiresAt) <= now,
+    researchOnlyClaim: audit.simulatorClaim.phase === "CLAIMED" && !audit.simulatorClaim.plannedPaths.length && !audit.simulatorClaim.releaseSha,
     ...(settledPublic ? { publicReadEvidence: settledPublic.publicReadEvidence } : {}),
     allowedResearchRouteCount: getSimulatorResearchGuide({ state: routeState,
       officialUrl: source.offering.course.website ?? source.offering.evidenceUrl,
-      bookingUrl: source.offering.bookingUrl, now,
+      bookingUrl: source.offering.bookingUrl, evidenceUrl: source.offering.evidenceUrl, now,
       priorFailedRoutes: await readPriorFailedResearchRoutes(tx, source.offering.id, source.fingerprint),
     }).suggestedReads.length,
   } : null;
@@ -155,14 +157,14 @@ export async function configureSimulatorSupportOffering(input: Owner & { manifes
   });
 }
 
-export async function readSimulatorSupportSource(input: Owner & { source?: "official" | "booking"; linkIndex?: number; rendered?: boolean }, dependencies: SimulatorResearchDependencies | typeof fetch = {}) {
+export async function readSimulatorSupportSource(input: Owner & { source?: "official" | "booking" | "evidence"; linkIndex?: number; rendered?: boolean }, dependencies: SimulatorResearchDependencies | typeof fetch = {}) {
   const before = await withTransition(async (tx, now) => {
     const row = await loadOwned(tx, input, now);
     const state = readSimulatorResearchState(row.audit.simulatorResearch, row.source.fingerprint);
     if (state.sourceFingerprint !== row.source.fingerprint) throw new Error("Simulator research navigation belongs to an older source; adopt the reviewed source before research.");
     const priorFailedRoutes = await readPriorFailedResearchRoutes(tx, row.source.offering.id, row.source.fingerprint);
     const selected = selectSimulatorResearchTarget({ state, officialUrl: row.source.offering.course.website ?? row.source.offering.evidenceUrl,
-      bookingUrl: row.source.offering.bookingUrl, source: input.source, linkIndex: input.linkIndex, rendered: input.rendered ?? false, now, priorFailedRoutes });
+      bookingUrl: row.source.offering.bookingUrl, evidenceUrl: row.source.offering.evidenceUrl, source: input.source, linkIndex: input.linkIndex, rendered: input.rendered ?? false, now, priorFailedRoutes });
     const requestId = randomUUID();
     const research: SimulatorResearchState = { ...state, readCount: state.readCount + 1, inFlight: { requestId, startedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 60_000).toISOString(), ...selected } };
     const saved = await saveClaim(tx, row, now);
@@ -301,7 +303,7 @@ export async function claimSimulatorSupportAssignment(input: { assignmentRef: st
       venue: source.offering.course, evidenceUrl: source.offering.evidenceUrl, bookingUrl: source.offering.bookingUrl,
       providerFamilyKey: source.offering.providerFamilyKey, providerMetadata: source.offering.providerMetadata, supportedDurationsMinutes: source.offering.supportedDurationsMinutes,
       researchGuide: getSimulatorResearchGuide({ state: readSimulatorResearchState(undefined, source.fingerprint),
-        officialUrl: source.offering.course.website ?? source.offering.evidenceUrl, bookingUrl: source.offering.bookingUrl, now,
+        officialUrl: source.offering.course.website ?? source.offering.evidenceUrl, bookingUrl: source.offering.bookingUrl, evidenceUrl: source.offering.evidenceUrl, now,
         priorFailedRoutes: await readPriorFailedResearchRoutes(tx, source.offering.id, source.fingerprint) }) };
   });
 }
@@ -490,7 +492,7 @@ export async function readSimulatorSupportClaim(input: { assignmentRef: string; 
   const latest = research.history.at(-1);
   return { ...row.audit.simulatorClaim, baseSha: row.audit.baseSha, offeringId: row.audit.target.offeringId!,
     research, researchGuide: getSimulatorResearchGuide({ state: research, officialUrl: offering.course.website ?? offering.evidenceUrl,
-      bookingUrl: offering.bookingUrl, now: new Date(), priorFailedRoutes: await readPriorFailedResearchRoutes(prisma, offering.id, row.audit.simulatorClaim.sourceFingerprint) }),
+      bookingUrl: offering.bookingUrl, evidenceUrl: offering.evidenceUrl, now: new Date(), priorFailedRoutes: await readPriorFailedResearchRoutes(prisma, offering.id, row.audit.simulatorClaim.sourceFingerprint) }),
     failedRead: !research.inFlight && latest?.failure && latest.requestId !== research.lastRecoveredFailureRequestId &&
       ["HARD_FAILED", "NETWORK_FAILED", "CAPACITY_BUSY"].includes(latest.outcome) ? { revision: row.audit.simulatorClaim.revision, requestId: latest.requestId,
       failure: latest.failure, readsUsed: research.readCount, readsRemaining: 6 - research.readCount } : null,

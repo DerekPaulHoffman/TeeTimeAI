@@ -40,17 +40,25 @@ export type SimulatorResearchResult = {
   blockedRequests?: number;
   admittedRequests?: number;
   renderComplete?: boolean;
-  renderWarning?: "SECONDARY_REQUEST_BUDGET_EXHAUSTED" | "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED";
+  renderWarning?: "SECONDARY_REQUEST_BUDGET_EXHAUSTED" | "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED" | "SECONDARY_STYLESHEET_URL_REJECTED";
   contentProvenance?: "MAIN_DOCUMENT_HTTP" | "RENDERED_DOM";
   accessControls?: Array<"CAPTCHA_OR_CHALLENGE" | "ACCOUNT_REQUIRED" | "QUEUE">;
   accessControlsObserved?: true;
   responseContracts?: Array<{ pathShape: string; queryKeys: string[]; httpStatus: number; shape: NonNullable<SimulatorResearchResult["jsonShape"]> }>;
 };
 
+const ownedUnsafeUrlErrors = new WeakSet<object>();
 function publicUrl(value: unknown) {
   const safe = getSafeCustomerBookingUrl(value);
-  if (!safe) throw new Error("SIMULATOR_RESEARCH_UNSAFE_URL");
+  if (!safe) {
+    const error = new Error("SIMULATOR_RESEARCH_UNSAFE_URL");
+    ownedUnsafeUrlErrors.add(error);
+    throw error;
+  }
   return new URL(safe);
+}
+function isOwnedUnsafeUrlError(error: unknown) {
+  return error !== null && typeof error === "object" && ownedUnsafeUrlErrors.has(error);
 }
 
 const ownedPerResponseBodyLimits = new WeakSet<object>();
@@ -358,6 +366,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
   let safeMainDocument: Awaited<ReturnType<typeof read>> & { observedAt: Date } | undefined;
   let secondaryBudgetExhausted = false;
   let secondaryAssetBodyLimitExceeded = false;
+  let secondaryStylesheetUrlRejected = false;
   const activeRoutes = new Set<Promise<void>>();
   const hostReads = new Map<string, Promise<unknown>>();
   let page: ResearchPage | undefined;
@@ -368,16 +377,29 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
   let contractSlug = publicVenueSlug(requestedUrl);
   // A rendered page must not compete with its own requests for a hostname lease.
   const cappedSecondaryAsset = Symbol("CAPPED_SECONDARY_ASSET");
+  const rejectedSecondaryStylesheet = Symbol("REJECTED_SECONDARY_STYLESHEET");
   const skippedAfterAssetLimit = Symbol("SKIPPED_AFTER_ASSET_LIMIT");
   const readRendered = (resourceKind: SimulatorResearchResourceKind, isSecondaryAsset: boolean, ...args: Parameters<typeof read>) => {
     const hostname = new URL(args[0]).hostname;
     const operation = (hostReads.get(hostname) ?? Promise.resolve()).then(async () => {
-      if (secondaryAssetBodyLimitExceeded) return skippedAfterAssetLimit;
+      if (secondaryAssetBodyLimitExceeded || secondaryStylesheetUrlRejected) return skippedAfterAssetLimit;
       if (deadline.aborted) throw new Error("SIMULATOR_RESEARCH_DEADLINE");
       if (hasRouteFailure) throw routeFailure;
       try { return await read(...args); }
       catch (error) {
         const tagged = tagSimulatorResearchResourceKind(error, resourceKind);
+        if (resourceKind === "SECONDARY_STYLESHEET" && isSecondaryAsset && safeMainDocument && isOwnedUnsafeUrlError(tagged) && !hasRouteFailure) {
+          // The pinned transport may have downloaded the response before its
+          // effective URL or redirect was rejected. Charge its full existing cap.
+          responseBytes += MAX_BODY_BYTES;
+          if (responseBytes > MAX_RENDER_BYTES) {
+            routeFailure = tagSimulatorResearchResourceKind(new Error("SIMULATOR_RESEARCH_BODY_LIMIT"), resourceKind);
+            hasRouteFailure = true;
+            throw routeFailure;
+          }
+          secondaryStylesheetUrlRejected = true;
+          return rejectedSecondaryStylesheet;
+        }
         if (isSecondaryAsset && safeMainDocument && isOwnedPerResponseBodyLimit(tagged) && !hasRouteFailure) {
           // Charge the existing full per-response cap for bytes rejected by transport.
           responseBytes += MAX_BODY_BYTES;
@@ -402,7 +424,9 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
     try {
       if (!safeMainDocument) throw new Error("SIMULATOR_RESEARCH_REQUEST_LIMIT");
       const main = safeMainDocument;
-      return { ...resultFromBody(requestedUrl, main.url, main.status, main.contentType, main.body, main.observedAt), method: "BROWSER",
+      const facts = resultFromBody(requestedUrl, main.url, main.status, main.contentType, main.body, main.observedAt);
+      if (warning === "SECONDARY_STYLESHEET_URL_REJECTED") { delete facts.calendar; delete facts.jsonShape; delete facts.responseContracts; }
+      return { ...facts, method: "BROWSER",
         renderComplete: false, renderWarning: warning, contentProvenance: "MAIN_DOCUMENT_HTTP",
         blockedRequests, admittedRequests: requestCount };
     } catch (error) { throw tagSimulatorResearchFailure(error, "BROWSER_DOCUMENT"); }
@@ -435,7 +459,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
           if (!["document", "script", "stylesheet", "xhr", "fetch"].includes(kind) || !["GET", "HEAD"].includes(request.method()) || [...headers.keys()].some(key => /authorization|cookie|token|api.?key|secret|credential/iu.test(key)) ||
               (["script", "stylesheet"].includes(kind) && /captcha|challenge|turnstile|cdn-cgi/iu.test(`${url.hostname}${url.pathname}`)) ||
               (!sameOfficialHost(requestedUrl, url.href) && !assetRoot && !occupancy)) { blockedRequests += 1; await route.abort("blockedbyclient"); return; }
-          if (secondaryAssetBodyLimitExceeded) { blockedRequests += 1; await route.abort("blockedbyclient"); return; }
+          if (secondaryAssetBodyLimitExceeded || secondaryStylesheetUrlRejected) { blockedRequests += 1; await route.abort("blockedbyclient"); return; }
           if (deadline.aborted) throw new Error("SIMULATOR_RESEARCH_DEADLINE");
           if (requestCount >= MAX_REQUESTS) { secondaryBudgetExhausted = true; blockedRequests += 1; await route.abort("blockedbyclient"); return; }
           requestCount += 1;
@@ -446,7 +470,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
             url.href, request.method() as "GET" | "HEAD", publicHeaders,
             assetRoot ?? (occupancy ? url.href : requestedUrl), occupancy ? target => publicOccupancyUrl(target, contractSlug) : undefined)
             .catch(error => { throw tagSimulatorResearchResourceKind(error, resourceKind); });
-          if (response === cappedSecondaryAsset || response === skippedAfterAssetLimit) {
+          if (response === cappedSecondaryAsset || response === rejectedSecondaryStylesheet || response === skippedAfterAssetLimit) {
             if (response === skippedAfterAssetLimit) requestCount -= 1;
             blockedRequests += 1;
             await route.abort("blockedbyclient");
@@ -470,7 +494,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
           }
           await route.fulfill({ status: response.status, body: response.body, headers: { "content-type": response.contentType, ...(response.location ? { location: response.location } : {}), ...(response.publicCors ? { "access-control-allow-origin": response.publicCors } : {}) } });
         } catch (error) {
-          if (error instanceof Error && error.message === "SIMULATOR_RESEARCH_UNSAFE_URL") { blockedRequests += 1; await route.abort("blockedbyclient"); return; }
+          if (isOwnedUnsafeUrlError(error)) { blockedRequests += 1; await route.abort("blockedbyclient"); return; }
           if (!hasRouteFailure) { routeFailure = tagSimulatorResearchFailure(error, "BROWSER_REQUEST"); hasRouteFailure = true; }
           blockedRequests += 1;
           await route.abort("blockedbyclient");
@@ -489,12 +513,13 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
     catch (error) {
       if (hasRouteFailure) throw routeFailure;
       const expectedIncomplete = error instanceof Error && (error.name === "TimeoutError" || error.message === "SIMULATOR_RESEARCH_DEADLINE" || /^page\.goto: net::ERR_(?:ABORTED|BLOCKED_BY_CLIENT)\b/u.test(error.message));
-      // A tooling budget can preserve already-read public HTTP facts. It cannot
+      // A tooling bound or owned stylesheet rejection can preserve public HTTP facts. It cannot
       // turn an unrelated browser, parser, authority or lease failure into evidence.
-      if (!(secondaryBudgetExhausted || secondaryAssetBodyLimitExceeded) || !safeMainDocument || accessControls.size || !expectedIncomplete) throw tagSimulatorResearchFailure(error, "BROWSER_NAVIGATION");
+      if (!(secondaryBudgetExhausted || secondaryAssetBodyLimitExceeded || secondaryStylesheetUrlRejected) || !safeMainDocument || (accessControls.size && !secondaryStylesheetUrlRejected) || !expectedIncomplete) throw tagSimulatorResearchFailure(error, "BROWSER_NAVIGATION");
       await settleStartedRoutes();
+      if (hasRouteFailure) throw routeFailure;
       if (accessControls.size) return { requestedUrl, url: safeMainDocument.url, observedAt: now().toISOString(), httpStatus: safeMainDocument.status, text: "", links: [], method: "BROWSER", accessControls: [...accessControls], blockedRequests, admittedRequests: requestCount, renderComplete: false, contentProvenance: "MAIN_DOCUMENT_HTTP" };
-      return partialMainDocument(secondaryAssetBodyLimitExceeded ? "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED" : "SECONDARY_REQUEST_BUDGET_EXHAUSTED");
+      return partialMainDocument(secondaryStylesheetUrlRejected ? "SECONDARY_STYLESHEET_URL_REJECTED" : secondaryAssetBodyLimitExceeded ? "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED" : "SECONDARY_REQUEST_BUDGET_EXHAUSTED");
     }
     await settleStartedRoutes();
     if (hasRouteFailure) throw routeFailure;
@@ -503,8 +528,8 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
       const url = publicUrl(page.url()).href;
       if (!sameOfficialHost(requestedUrl, url) || !navigation) throw new Error("SIMULATOR_RESEARCH_DESTINATION_CHANGED");
       if (accessControls.size) return { requestedUrl, url, observedAt: now().toISOString(), httpStatus: navigation.status, text: "", links: [], method: "BROWSER", accessControls: [...accessControls], blockedRequests, admittedRequests: requestCount, renderComplete: false, contentProvenance: "MAIN_DOCUMENT_HTTP" };
-      if (secondaryBudgetExhausted || secondaryAssetBodyLimitExceeded) return partialMainDocument(
-        secondaryAssetBodyLimitExceeded ? "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED" : "SECONDARY_REQUEST_BUDGET_EXHAUSTED");
+      if (secondaryBudgetExhausted || secondaryAssetBodyLimitExceeded || secondaryStylesheetUrlRejected) return partialMainDocument(
+        secondaryStylesheetUrlRejected ? "SECONDARY_STYLESHEET_URL_REJECTED" : secondaryAssetBodyLimitExceeded ? "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED" : "SECONDARY_REQUEST_BUDGET_EXHAUSTED");
       const html = await beforeDeadline(page.content(), deadline);
       if (hasRouteFailure) throw routeFailure;
       if (Buffer.byteLength(html, "utf8") > MAX_BODY_BYTES) throw new Error("SIMULATOR_RESEARCH_BODY_LIMIT");

@@ -43,6 +43,7 @@ describe("offering-scoped simulator responder contract", () => {
     expect(readSimulatorSupportArguments(["configure", "--assignment-ref", "assigned", "--token", "token", "--revision", "2", "--manifest", "reviewed.json", "--apply"]).apply).toBe(true);
     expect(() => readSimulatorSupportArguments(["heartbeat", "--assignment-ref", "assigned", "--token", "token", "--revision", "2", "--apply"])).toThrow();
     expect(readSimulatorSupportArguments(["source-read", "--assignment-ref", "assigned", "--token", "token", "--revision", "2", "--source", "official"]).source).toBe("official");
+    expect(readSimulatorSupportArguments(["source-read", "--assignment-ref", "assigned", "--token", "token", "--revision", "2", "--source", "evidence"]).source).toBe("evidence");
     expect(() => readSimulatorSupportArguments(["source-read", "--assignment-ref", "assigned", "--token", "token", "--revision", "2", "--source", "http://localhost"])).toThrow();
     const fence = ["--assignment-ref", "assigned", "--token", "token", "--revision", "2"];
     expect(readSimulatorSupportArguments(["source-read", ...fence, "--link", "2", "--rendered"])).toMatchObject({ linkIndex: 2, rendered: true, source: undefined });
