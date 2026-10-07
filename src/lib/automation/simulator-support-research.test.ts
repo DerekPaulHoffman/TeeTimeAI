@@ -120,14 +120,47 @@ describe("bounded owned simulator public research transport", () => {
     const result = extractSimulatorPublicCalendar(publishedConfig(), booking);
     expect(result.calendar).toBeUndefined(); expect(result.jsonShape).toBeDefined(); expect(result.configurationDiagnostic).toBeUndefined();
   });
-  it.each([null, true])("does not admit YourGolfBooking publication or occupancy with maintenance mode %j", async value => {
+  it("admits only the bounded anonymous occupancy research for an exact live venue with an observed null maintenance flag", async () => {
     const root = "https://yourgolfbooking.com/venues/golf-oasis/booking";
-    const html = publishedConfig().replace('"maintenanceMode":false', `"maintenanceMode":${JSON.stringify(value)}`);
+    const html = publishedConfig().replace('"maintenanceMode":false', '"maintenanceMode":null');
+    const occupancy = "https://api.yourgolfbooking.com/venue/golf-oasis/bookings/public?start_gte=2026-10-10T00%3A00%3A00Z&start_lte=2026-10-11T00%3A00%3A00Z";
+    const forbidden: RequestFixture[] = [
+      { url: occupancy, kind: "fetch", method: "POST" },
+      { url: occupancy, kind: "fetch", headers: { Cookie: "private-session" } },
+      { url: occupancy + "&extra=value", kind: "fetch" },
+      { url: occupancy.replace("2026-10-11", "2026-10-14"), kind: "fetch" },
+      { url: occupancy.replace("/golf-oasis/", "/different-venue/"), kind: "fetch" },
+      { url: occupancy.replace("api.yourgolfbooking.com", "unobserved.example.test"), kind: "fetch" },
+      { url: "https://api.yourgolfbooking.com/login?token=private", kind: "fetch" },
+    ];
+    const view = renderedBrowser([{ url: root }, ...forbidden, { url: occupancy, kind: "fetch" }], html);
+    const payload = [{ start: "private-date", bayId: "private-id", user: { email: "private@example.test" }, sessionToken: "never-return-this" }];
+    const fetch = vi.fn(async (url: unknown) => String(url) === root ? response(html) : response(JSON.stringify(payload), 200, "application/json"));
+    const result = await collectSimulatorSupportResearch({ url: root, render: true }, { fetch, lease, browser: view.factory });
+    expect(fetch.mock.calls.map(call => String(call[0]))).toEqual([root, occupancy]);
+    expect(result.calendar?.venue.maintenanceMode).toBeNull();
+    expect(result.bookingLinks).toEqual([root + "/bays"]);
+    expect(result.responseContracts).toEqual([{ pathShape: "/venue/:value/bookings/public", queryKeys: ["start_gte", "start_lte"], httpStatus: 200,
+      shape: [{ path: "$", type: "array", count: 1 }, { path: "$[]", type: "object" }, { path: "$[].start", type: "string" }, { path: "$[].bayId", type: "string" }] }]);
+    expect(result).toMatchObject({ admittedRequests: 2, blockedRequests: forbidden.length });
+    expect(JSON.stringify(result)).not.toMatch(/private-|private@example|never-return-this|sessionToken/u);
+    for (const route of view.routes.slice(1, -1)) { expect(route.abort).toHaveBeenCalledOnce(); expect(route.fulfill).not.toHaveBeenCalled(); }
+    const runtimeFetch = vi.fn<typeof globalThis.fetch>(async () => response(html));
+    await expect(fetchYourGolfBookingAvailability({ offering: { id: "research-offering", courseId: "research-venue", bookingUrl: booking.replace(/\/bays$/u, ""), providerFamilyKey: "YOUR_GOLF_BOOKING",
+      providerMetadata: { venueSlug: "golf-oasis", venueId: "1357", rangeId: "1397", publicOptionId: "21451" }, maxPartySize: 4, supportedDurationsMinutes: [60] },
+      date: "2026-10-10", durationMinutes: 60, partySize: 1, timeZone: "America/New_York" }, runtimeFetch)).rejects.toMatchObject({ code: "INVALID_SOURCE" });
+    expect(runtimeFetch).toHaveBeenCalledOnce();
+  });
+  it.each([true, undefined, "invalid"])("does not admit YourGolfBooking occupancy with maintenance mode %j", async value => {
+    const root = "https://yourgolfbooking.com/venues/golf-oasis/booking";
+    const html = value === undefined ? publishedConfig().replace('"maintenanceMode":false,', "")
+      : publishedConfig().replace('"maintenanceMode":false', `"maintenanceMode":${JSON.stringify(value)}`);
     const occupancy = "https://api.yourgolfbooking.com/venue/golf-oasis/bookings/public?start_gte=2026-10-10T00%3A00%3A00Z&start_lte=2026-10-11T00%3A00%3A00Z";
     const view = renderedBrowser([{ url: root }, { url: occupancy, kind: "fetch" }], html);
     const fetch = vi.fn(async () => response(html));
     const result = await collectSimulatorSupportResearch({ url: root, render: true }, { fetch, lease, browser: view.factory });
-    expect(result.calendar?.venue.maintenanceMode).toBe(value);
+    if (value === true) expect(result.calendar?.venue.maintenanceMode).toBe(true);
+    else expect(result.calendar).toBeUndefined();
     expect(result.bookingLinks).toBeUndefined(); expect(result.responseContracts).toBeUndefined();
     expect(fetch).toHaveBeenCalledOnce(); expect(view.routes[1].abort).toHaveBeenCalledOnce();
     const runtimeFetch = vi.fn<typeof globalThis.fetch>(async () => response(html));
@@ -135,6 +168,24 @@ describe("bounded owned simulator public research transport", () => {
       providerMetadata: { venueSlug: "golf-oasis", venueId: "1357", rangeId: "1397", publicOptionId: "21451" }, maxPartySize: 4, supportedDurationsMinutes: [60] },
       date: "2026-10-10", durationMinutes: 60, partySize: 1, timeZone: "America/New_York" }, runtimeFetch)).rejects.toMatchObject({ code: "INVALID_SOURCE" });
     expect(runtimeFetch).toHaveBeenCalledOnce();
+  });
+  it("does not admit nullable occupancy research when the published venue identity, live status or access controls fail", async () => {
+    const root = "https://yourgolfbooking.com/venues/golf-oasis/booking";
+    const occupancy = "https://api.yourgolfbooking.com/venue/golf-oasis/bookings/public?start_gte=2026-10-10T00%3A00%3A00Z&start_lte=2026-10-11T00%3A00%3A00Z";
+    const original = publishedConfig().replace('"maintenanceMode":false', '"maintenanceMode":null');
+    for (const html of [original.replace('"slug":"golf-oasis"', '"slug":"different-venue"'),
+      original.replace('"status":"live"', '"status":"inactive"'), original + "<h1>Verify you are human</h1>"]) {
+      const view = renderedBrowser([{ url: root }, { url: occupancy, kind: "fetch" }], html);
+      const fetch = vi.fn(async () => response(html));
+      const result = await collectSimulatorSupportResearch({ url: root, render: true }, { fetch, lease, browser: view.factory });
+      expect(fetch).toHaveBeenCalledOnce(); expect(view.routes[1].abort).toHaveBeenCalledOnce();
+      expect(result.responseContracts).toBeUndefined(); expect(result.bookingLinks).toBeUndefined();
+      if (html.includes("Verify you are human")) {
+        expect(result).toMatchObject({ accessControls: ["CAPTCHA_OR_CHALLENGE"], text: "", links: [] });
+        expect(result.calendar).toBeUndefined(); expect(result.jsonShape).toBeUndefined(); expect(result.configurationDiagnostic).toBeUndefined();
+      }
+      vi.clearAllMocks();
+    }
   });
   it.each([false, true])("scrubs configuration diagnostics when positive access controls are observed (rendered: %s)", async render => {
     const html = publishedConfig().replace('"maintenanceMode":false', '"maintenanceMode":"private-value"') + "<h1>Verify you are human</h1>";

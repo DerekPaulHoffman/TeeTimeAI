@@ -159,7 +159,9 @@ function publishedYourGolfBookingSlug(html: string, sourceUrl: string) {
     const venue = record(record(record(record(record(parsed).props).pageProps).initialReduxState).venue);
     id(venue.id);
     new Intl.DateTimeFormat("en-US", { timeZone: string(venue.timezone) }).format();
-    return venue.slug === slug && venue.status === "live" && venue.maintenanceMode === false ? slug : undefined;
+    // Research observes only the existing anonymous endpoint. Explicit null is
+    // retained as unknown configuration; it never establishes runtime eligibility.
+    return venue.slug === slug && venue.status === "live" && (venue.maintenanceMode === false || venue.maintenanceMode === null) ? slug : undefined;
   } catch { return undefined; }
 }
 
