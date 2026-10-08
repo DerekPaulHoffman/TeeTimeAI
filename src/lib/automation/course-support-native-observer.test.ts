@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -38,6 +38,38 @@ function fixture(overrides: Record<string, unknown> = {}) {
   return { options, client, original, request, before: readFileSync(receiptPath) };
 }
 describe("original worker read-only native observer", () => {
+  it("prepares a new scheduled recovery report folder and preserves its exclusive observation", async () => {
+    const value = fixture();
+    const reportFolder = join(value.options.expectedCheckout, ".codex-artifacts", "new-recovery-cycle");
+    const options = { ...value.options, observationPath: join(reportFolder, "native-observation.private.json") };
+    expect(existsSync(reportFolder)).toBe(false);
+    await expect(observeCourseSupportNativeCompletion(options))
+      .resolves.toMatchObject({ phase: "READ_ONLY_OBSERVATION_COMPLETE" });
+    const observationBytes = readFileSync(options.observationPath);
+    expect(value.request.mock.calls.map(([method]) => method))
+      .toEqual(["initialize", "permissionProfile/list", "thread/read", "thread/turns/list"]);
+    expect(readFileSync(value.options.receiptPath)).toEqual(value.before);
+    await expect(observeCourseSupportNativeCompletion(options)).rejects.toThrow("NEW_PRIVATE_OBSERVATION_PATH_REQUIRED");
+    expect(readFileSync(options.observationPath)).toEqual(observationBytes);
+    expect(value.options.clientFactory).toHaveBeenCalledOnce();
+  });
+
+  it("does not prepare a recovery report folder before the original process and environment guards pass", async () => {
+    for (const rejection of ["process", "environment"]) {
+      const value = fixture();
+      const reportFolder = join(value.options.expectedCheckout, ".codex-artifacts", "denied-recovery-cycle");
+      if (rejection === "process") value.options.inspectProcess.mockReturnValue("present");
+      else value.options.environmentFactory.mockReturnValue({ DATABASE_URL: "test-value" });
+      await expect(observeCourseSupportNativeCompletion({ ...value.options,
+        observationPath: join(reportFolder, "native-observation.private.json") })).rejects.toThrow(
+        rejection === "process" ? "ORIGINAL_LAUNCHER_OR_SERVER_NOT_ENDED" : "PRODUCT_OR_NATIVE_IDENTITY_ENV_PRESENT"
+      );
+      expect(existsSync(reportFolder)).toBe(false);
+      expect(value.options.clientFactory).not.toHaveBeenCalled();
+      expect(readFileSync(value.options.receiptPath)).toEqual(value.before);
+    }
+  });
+
   it("accepts the real app-server environment without a CLI setting or product/native identity keys", async () => {
     const value = fixture();
     const runtime = { status: "available", nodePath: "C:\\Program Files\\nodejs\\node.exe", npmCliPath: "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js" };

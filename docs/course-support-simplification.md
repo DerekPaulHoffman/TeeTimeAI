@@ -303,3 +303,27 @@ construction. Vercel commands still force the verified JavaScript path. The
 observer's credential fence is unchanged, including rejecting a caller-supplied
 Vercel flag. Local145 combined checks include the actual default Windows factory
 with a fake read-only transport; no live native turn is opened by those tests.
+
+The ordinary22:40 parent correctly selected the original297 repair as an expired
+owned stage with no in-flight read and no replacement launch. Its read-only
+observer command then failed ENOENT before producing an observation. The
+requested new cycle folder did not exist: a continuation-only preflight had no
+new launch artifact directory, and the observer assumed its parent was already
+prepared. The output write occurs before creating a native client. The recorded
+error has no retained stack; a matching local regression independently failed
+at that exact exclusive write with the missing nested folder.
+
+The observer now prepares its requested private parent folder after the existing
+receipt, pinned executable, environment and original-process guards. The output
+is still exclusive and historical observations are never overwritten. Tests
+prove the missing-folder path succeeds using exactly four mocked read-only RPCs,
+a second attempt preserves the observation, and denied process/environment
+inputs create neither folder nor client. Local147 integrated checks passed.
+This removes a local setup prerequisite; it adds no worker-resume RPC, admission,
+lease renewal or source retry. Normal scheduled recovery must provide fresh proof.
+
+The release CI also exposed an existing intake remount test race: it waited for
+a course heading but synchronously asserted a dialog opened by a later effect.
+The test now awaits that same accessible dialog with all original restored-course,
+filter and price assertions retained. All47 intake tests passed locally. Product
+UI behavior is unchanged, and the original failed CI evidence stays recorded.
