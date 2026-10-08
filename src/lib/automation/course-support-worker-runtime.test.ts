@@ -11,6 +11,7 @@ import {
   courseSupportWorkerRuntimeEnvironment,
   establishCourseSupportWorkerBinding,
   inspectCourseSupportWorkerRuntime,
+  inspectCourseSupportWorkerVercel,
   isPrivateWorkerPath,
   prepareCourseSupportWorkerRuntime,
   readWorkerProductionArguments,
@@ -156,12 +157,14 @@ function fixture() {
     mkdirSync(join(directory, ".vercel"), { recursive: true });
     writeFileSync(join(directory, ".git"), "gitdir: ../repository/worktrees/worker");
     writeFileSync(join(directory, ".vercel", "project.json"), JSON.stringify({ projectId: "private-project", orgId: "private-team" }));
+    writeVercelFixture(directory);
   }
   const runtime = { status: "available", source: "installed_node", nodePath: "C:\\Program Files\\nodejs\\node.exe", npmCliPath: "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js" };
   const environment: Record<string, string> = { CODEX_THREAD_ID: "private-native-identity", PATH: "roaming-shims", SystemRoot: "C:\\Windows", APPDATA: "private-appdata" };
   for (const key of productionKeys) environment[key] = `private-${key}`;
   const runCommand = vi.fn((command: string, args: string[]) => {
     if (command !== "git") {
+      if (args[0]?.endsWith("vercel" + (process.platform === "win32" ? "\\" : "/") + "dist" + (process.platform === "win32" ? "\\" : "/") + "vc.js") && args.at(-1) === "--version") return { status: 0, stdout: "", stderr: "Vercel CLI 62.2.0\n" };
       if (args.at(-1) === "--version") return { status: 0, stdout: args.length === 1 ? "v22.22.2\n" : "10.9.7\n" };
       return { status: 0, stdout: "private-install-output" };
     }
@@ -184,17 +187,37 @@ function fixture() {
   return { root, checkout, selectedCheckout, options: { checkout, selectedCheckout, cwd: checkout, environment }, dependencies };
 }
 
+function writeVercelFixture(checkout: string, version = "62.2.0") {
+  const directory = join(checkout, "node_modules", "vercel");
+  mkdirSync(join(directory, "dist"), { recursive: true });
+  writeFileSync(join(directory, "package.json"), JSON.stringify({ name: "vercel", version, bin: { vercel: "./dist/vc.js" } }));
+  writeFileSync(join(directory, "dist", "vc.js"), "process.stdout.write('62.2.0\\n');");
+  writeFileSync(join(directory, "dist", "index.js"), "fixture");
+  writeFileSync(join(directory, "dist", "version.mjs"), "export const version = '62.2.0';");
+}
+
 describe("private Windows worker runtime", () => {
+  it("recognizes the real locked installed CLI and its declared entry without executing it", () => {
+    const checkout = process.cwd();
+    const manifest = JSON.parse(readFileSync(join(checkout, "node_modules", "vercel", "package.json"), "utf8"));
+    expect(manifest).toMatchObject({ name: "vercel", version: "62.2.0", bin: { vercel: "./dist/vc.js" } });
+    expect(inspectCourseSupportWorkerVercel(checkout)).toEqual({ status: "current", version: "62.2.0" });
+    const { dependencies } = fixture();
+    expect(courseSupportWorkerProductionCommand(dependencies.runtime, "automation:course-dispatch", ["assignment"], checkout).args[0]).toBe(resolve(checkout, "node_modules", "vercel", manifest.bin.vercel));
+  });
+
   it("bypasses roaming npm and removes conflicting Windows Path keys", () => {
     const installedNode = "C:\\Program Files\\nodejs\\node.exe";
     const installedNpm = "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js";
     const runtime = resolveCourseSupportWorkerRuntime({ platform: "win32", execPath: "C:\\bundled\\node.exe", environment: {}, exists: (path: string) => [installedNode, installedNpm].includes(path) });
     expect(runtime).toMatchObject({ status: "available", nodePath: installedNode, npmCliPath: installedNpm });
-    const environment = courseSupportWorkerRuntimeEnvironment(runtime, resolve("private-worker"), { Path: "roaming-shims", NPM_CONFIG_CACHE: "shared-cache", NPM_CONFIG_PREFIX: "roaming-prefix", API_KEY: "secret" });
+    const environment = courseSupportWorkerRuntimeEnvironment(runtime, resolve("private-worker"), { Path: "roaming-shims", NPM_CONFIG_CACHE: "shared-cache", NPM_CONFIG_PREFIX: "roaming-prefix", API_KEY: "secret", VERCEL_CLI_USE_NATIVE_BINARY: "1", vercel_cli_use_native_binary: "1" });
     expect(environment.Path).toBeUndefined();
     expect(environment.NPM_CONFIG_CACHE).toBeUndefined();
     expect(environment.NPM_CONFIG_PREFIX).toBeUndefined();
     expect(environment.API_KEY).toBeUndefined();
+    expect(environment.VERCEL_CLI_USE_NATIVE_BINARY).toBe("0");
+    expect(environment.vercel_cli_use_native_binary).toBeUndefined();
     expect(environment.PATH).toBe("C:\\Program Files\\nodejs;roaming-shims");
     expect(environment.npm_config_cache).toBe(resolve("private-worker", ".codex-artifacts/npm-cache"));
     expect(environment.npm_config_prefix).toBe(resolve("private-worker", ".codex-artifacts/npm-prefix"));
@@ -245,6 +268,13 @@ describe("private Windows worker runtime", () => {
     const { root, checkout, options, dependencies } = fixture();
     const shared = join(root, "shared-dependencies");
     mkdirSync(shared);
+    unlinkSync(join(checkout, "node_modules", "vercel", "dist", "vc.js"));
+    unlinkSync(join(checkout, "node_modules", "vercel", "dist", "index.js"));
+    unlinkSync(join(checkout, "node_modules", "vercel", "dist", "version.mjs"));
+    rmdirSync(join(checkout, "node_modules", "vercel", "dist"));
+    unlinkSync(join(checkout, "node_modules", "vercel", "package.json"));
+    rmdirSync(join(checkout, "node_modules", "vercel"));
+    rmdirSync(join(checkout, "node_modules"));
     symlinkSync(shared, join(checkout, "node_modules"), process.platform === "win32" ? "junction" : "dir");
     expect(isPrivateWorkerPath(checkout, join(checkout, "node_modules"))).toBe(false);
     expect(prepareCourseSupportWorkerRuntime(options, dependencies).outcome).toBe("guard_rejected");
@@ -269,7 +299,8 @@ describe("private Windows worker runtime", () => {
       for (const key of productionKeys.filter((key) => !key.startsWith("DATABASE_URL"))) expect(settings.env[key]).toBeUndefined();
       expect(settings.env.SystemRoot).toBe("C:\\Windows");
     }
-    expect(receipt.stages).toHaveLength(2);
+    expect(receipt.stages.map(stage => stage.stage)).toEqual(["dependencies", "vercel_cli", "generated_client"]);
+    expect(receipt.stages[1]).toMatchObject({ exitCode: 0, versionVerified: true });
     expect(dependencies.browserSmoke).toHaveBeenCalledOnce();
     expect(JSON.stringify(receipt)).not.toContain("private-install-output");
   });
@@ -319,13 +350,13 @@ describe("private Windows worker runtime", () => {
     expect(receipt.prepareEligible).toBe(false);
   });
 
-  it("builds the pinned strict production wrapper with absolute npm CLI at both layers", () => {
-    const { dependencies } = fixture();
+  it("uses the exact private installed CLI without npm exec or a PATH lookup", () => {
+    const { checkout, dependencies } = fixture();
     const runtime = dependencies.runtime;
     const exactArgs = ["assignment", "--assignment-ref", "private value&unchanged"];
-    expect(courseSupportWorkerProductionCommand(runtime, "automation:course-dispatch", exactArgs)).toEqual({
+    expect(courseSupportWorkerProductionCommand(runtime, "automation:course-dispatch", exactArgs, checkout)).toEqual({
       command: runtime.nodePath,
-      args: [runtime.npmCliPath, "exec", "--yes", "--package=vercel@62.2.0", "--", "vercel", "env", "run", "-e", "production", "--", runtime.nodePath, runtime.npmCliPath, "run", "automation:course-dispatch", "--", ...exactArgs]
+      args: [join(checkout, "node_modules", "vercel", "dist", "vc.js"), "env", "run", "-e", "production", "--", runtime.nodePath, runtime.npmCliPath, "run", "automation:course-dispatch", "--", ...exactArgs]
     });
     expect(() => courseSupportWorkerProductionCommand(runtime, "seed:foreup", [])).toThrow("INVALID_WORKER_PRODUCTION_COMMAND");
     expect(() => courseSupportWorkerProductionCommand(runtime, "automation:course-support", ["bad\0argument"])).toThrow("INVALID_WORKER_PRODUCTION_COMMAND");
@@ -355,7 +386,7 @@ describe("private Windows worker runtime", () => {
     const receipt = runCourseSupportWorkerProduction({ ...options, script: "automation:course-support", args: ["inspect-owned"] }, dependencies);
     expect(receipt).toEqual({ mode: "production", outcome: "completed", exitCode: 0 });
     const calls = dependencies.runCommand.mock.calls as unknown as [string, string[], { cwd: string; shell: boolean; stdio: string; env: Record<string, string> }][];
-    const production = calls.find(([, args]) => args.includes("exec"))!;
+    const production = calls.find(([, args]) => args.includes("env") && args.includes("production"))!;
     expect(production[0]).toBe(dependencies.runtime.nodePath);
     expect(production[2]).toMatchObject({ cwd: checkout, shell: false, stdio: "inherit" });
     expect(production[2].env.CODEX_THREAD_ID).toBe(options.environment.CODEX_THREAD_ID);
@@ -371,6 +402,120 @@ describe("private Windows worker runtime", () => {
     if (failure === "checkout") options.cwd = selectedCheckout;
     const receipt = runCourseSupportWorkerProduction({ ...options, script: "automation:course-support", args: ["claim"] }, dependencies);
     expect(receipt.outcome).toBe("guard_rejected");
-    expect(dependencies.runCommand.mock.calls.some(([, args]) => args.includes("exec"))).toBe(false);
+    expect(dependencies.runCommand.mock.calls.some(([, args]) => args.includes("env"))).toBe(false);
+  });
+
+  it.each(["missing", "wrong_version", "invalid_manifest", "missing_entry", "missing_index", "missing_version", "shared_entry", "shared_manifest", "shared_index", "shared_version"])("blocks %s CLI readiness before any production execution", failure => {
+    const { root, checkout, options, dependencies } = fixture();
+    const directory = join(checkout, "node_modules", "vercel"), manifest = join(directory, "package.json"), entry = join(directory, "dist", "vc.js");
+    if (failure === "missing") unlinkSync(manifest);
+    if (failure === "wrong_version") writeVercelFixture(checkout, "62.2.1");
+    if (failure === "invalid_manifest") writeFileSync(manifest, JSON.stringify({ name: "vercel", version: "62.2.0", bin: { vercel: "../../unowned.js" } }));
+    if (failure === "missing_entry") unlinkSync(entry);
+    if (failure === "missing_index") unlinkSync(join(directory, "dist", "index.js"));
+    if (failure === "missing_version") unlinkSync(join(directory, "dist", "version.mjs"));
+    if (failure.startsWith("shared_")) {
+      const file = failure === "shared_entry" ? entry : failure === "shared_index" ? join(directory, "dist", "index.js") : failure === "shared_version" ? join(directory, "dist", "version.mjs") : manifest;
+      linkSync(file, join(root, "shared-cli-file"));
+    }
+    const inspection = inspectCourseSupportWorkerRuntime(options, dependencies);
+    expect(inspection.prepareEligible).toBe(true);
+    expect(inspection.setupRequired).toBe(true);
+    expect(inspection.vercel.status).not.toBe("current");
+    expect(runCourseSupportWorkerProduction({ ...options, script: "automation:course-dispatch", args: ["assignment"] }, dependencies).outcome).toBe("guard_rejected");
+    expect(dependencies.runCommand.mock.calls.some(([, args]) => args.includes("env") || args.includes("exec"))).toBe(false);
+    expect(() => courseSupportWorkerProductionCommand(dependencies.runtime, "automation:course-dispatch", [], checkout)).toThrow("WORKER_VERCEL_NOT_READY");
+  });
+
+  it("rejects a CLI directory junction even when its version is correct", () => {
+    const { root, checkout } = fixture();
+    const directory = join(checkout, "node_modules", "vercel");
+    unlinkSync(join(directory, "dist", "vc.js"));
+    unlinkSync(join(directory, "dist", "index.js")); unlinkSync(join(directory, "dist", "version.mjs"));
+    rmdirSync(join(directory, "dist"));
+    unlinkSync(join(directory, "package.json")); rmdirSync(directory);
+    const shared = join(root, "shared-cli"); writeVercelFixture(shared);
+    symlinkSync(join(shared, "node_modules", "vercel"), directory, process.platform === "win32" ? "junction" : "dir");
+    expect(inspectCourseSupportWorkerVercel(checkout)).toEqual({ status: "shared_output_rejected" });
+  });
+
+  it("rejects a dist junction even when its target stays inside this checkout", () => {
+    const { checkout } = fixture();
+    const dist = join(checkout, "node_modules", "vercel", "dist"), target = join(checkout, "other-dist");
+    mkdirSync(target); writeFileSync(join(target, "vc.js"), "fixture");
+    unlinkSync(join(dist, "vc.js")); unlinkSync(join(dist, "index.js")); unlinkSync(join(dist, "version.mjs")); rmdirSync(dist);
+    symlinkSync(target, dist, process.platform === "win32" ? "junction" : "dir");
+    expect(inspectCourseSupportWorkerVercel(checkout)).toEqual({ status: "shared_output_rejected" });
+  });
+
+  it("stops immediately if CLI metadata changes during its successful version smoke", () => {
+    const { checkout, options, dependencies } = fixture();
+    const original = dependencies.runCommand.getMockImplementation()!;
+    dependencies.runCommand.mockImplementation((command, args) => {
+      const result = original(command, args);
+      if (args[0] === join(checkout, "node_modules", "vercel", "dist", "vc.js")) writeVercelFixture(checkout, "62.2.1");
+      return result;
+    });
+    const receipt = prepareCourseSupportWorkerRuntime(options, dependencies);
+    expect(receipt.outcome).toBe("guard_changed");
+    expect(receipt.stages).toHaveLength(2);
+    expect(dependencies.runCommand.mock.calls.some(([, args]) => args.includes("prisma:generate"))).toBe(false);
+    expect(dependencies.browserSmoke).not.toHaveBeenCalled();
+  });
+
+  it("keeps first-turn preparation strict while an older owned candidate gains only private CLI readiness", () => {
+    const { checkout, options, dependencies } = fixture();
+    const original = dependencies.runCommand.getMockImplementation()!;
+    dependencies.runCommand.mockImplementation((command, args) => command === "git" && args.join(" ") === "rev-parse HEAD"
+      ? { status: 0, stdout: "b".repeat(40) } : original(command, args));
+    unlinkSync(join(checkout, "node_modules", "vercel", "package.json"));
+    expect(prepareCourseSupportWorkerRuntime(options, dependencies).outcome).toBe("guard_rejected");
+    expect(runCourseSupportWorkerProduction({ ...options, script: "automation:simulator-support", args: ["inspect"] }, dependencies).outcome).toBe("guard_rejected");
+    expect(dependencies.runCommand.mock.calls.some(([, args]) => args.includes("ci") || args.includes("env"))).toBe(false);
+    writeVercelFixture(checkout);
+    expect(runCourseSupportWorkerProduction({ ...options, script: "automation:simulator-support", args: ["inspect"] }, dependencies).outcome).toBe("completed");
+    expect(options.environment.CODEX_THREAD_ID).toBe("private-native-identity");
+  });
+
+  it("installs a missing CLI during credential-free setup and verifies it before generation", () => {
+    const { checkout, options, dependencies } = fixture();
+    unlinkSync(join(checkout, "node_modules", "vercel", "package.json"));
+    const original = dependencies.runCommand.getMockImplementation()!;
+    dependencies.runCommand.mockImplementation((command, args) => {
+      if (args.includes("ci")) writeVercelFixture(checkout);
+      return original(command, args);
+    });
+    const receipt = prepareCourseSupportWorkerRuntime(options, dependencies);
+    expect(receipt.outcome).toBe("prepared");
+    const call = dependencies.runCommand.mock.calls.find(([, args]) => args[0] === join(checkout, "node_modules", "vercel", "dist", "vc.js"))!;
+    expect(call[1]).toEqual([join(checkout, "node_modules", "vercel", "dist", "vc.js"), "--version"]);
+    expect(call[2]).toMatchObject({ timeout: 10_000 });
+    for (const key of productionKeys.filter(key => !key.startsWith("DATABASE_URL"))) expect(call[2].env[key]).toBeUndefined();
+    expect(receipt.stages.map(stage => stage.stage)).toEqual(["dependencies", "vercel_cli", "generated_client"]);
+  });
+
+  it.each(["nonzero", "wrong_version", "malformed"])("stops on a %s CLI smoke before generation or browser launch", failure => {
+    const { checkout, options, dependencies } = fixture();
+    const original = dependencies.runCommand.getMockImplementation()!;
+    dependencies.runCommand.mockImplementation((command, args) => args[0] === join(checkout, "node_modules", "vercel", "dist", "vc.js")
+      ? { status: failure === "nonzero" ? 1 : 0, stdout: failure === "wrong_version" ? "62.2.1" : "private-invalid-output" } : original(command, args));
+    const receipt = prepareCourseSupportWorkerRuntime(options, dependencies);
+    expect(receipt.outcome).toBe("setup_failed");
+    expect(receipt.stages).toHaveLength(2);
+    expect(dependencies.runCommand.mock.calls.some(([, args]) => args.includes("prisma:generate"))).toBe(false);
+    expect(dependencies.browserSmoke).not.toHaveBeenCalled();
+    expect(JSON.stringify(receipt)).not.toContain("private-invalid-output");
+  });
+
+  it.each([1, null])("returns a closed failure receipt for exit %s without replay or private output", status => {
+    const { options, dependencies } = fixture();
+    const original = dependencies.runCommand.getMockImplementation()!;
+    dependencies.runCommand.mockImplementation((command, args) => args.includes("env")
+      ? { status, stdout: "private-live-database", stderr: "private-token", errorCode: "private-error", signal: "private-signal" } : original(command, args));
+    const receipt = runCourseSupportWorkerProduction({ ...options, script: "automation:course-dispatch", args: ["assignment", "private-assignment"] }, dependencies);
+    expect(receipt).toMatchObject({ mode: "production", outcome: "command_failed", exitCode: 1, phase: "production_wrapper", spawnError: "UNCLASSIFIED", signal: "UNCLASSIFIED" });
+    expect(receipt.elapsedMs).toBeGreaterThanOrEqual(0);
+    expect(dependencies.runCommand.mock.calls.filter(([, args]) => args.includes("env"))).toHaveLength(1);
+    for (const secret of ["private-live-database", "private-token", "private-error", "private-signal", "private-assignment"]) expect(JSON.stringify(receipt)).not.toContain(secret);
   });
 });

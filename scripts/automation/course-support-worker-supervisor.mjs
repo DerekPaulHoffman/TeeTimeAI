@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { inspectPinnedWorkerCli } from "./course-support-worker-cli.mjs";
 import { approvedCourseSupportResponderCheckouts } from "./course-support-preflight.mjs";
 import { assertOwnedWorkerCheckout, prepareCourseSupportWorker, privateWrite, retainPrimaryFailure, runPreparedCourseSupportWorker } from "./course-support-worker-launcher.mjs";
-import { courseSupportWorkerProductionCommand, courseSupportWorkerRuntimeEnvironment, resolveCourseSupportWorkerRuntime } from "./course-support-worker-runtime.mjs";
+import { courseSupportWorkerProductionCommand, courseSupportWorkerRuntimeEnvironment, inspectCourseSupportWorkerVercel, resolveCourseSupportWorkerRuntime } from "./course-support-worker-runtime.mjs";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const SHA = /^[a-f0-9]{40}$/i;
@@ -61,6 +61,7 @@ export function validateSupervisorInput(input, dependencies = {}) {
       typeof binding.orgId !== "string" || !binding.orgId) fail("SELECTED_PROJECT_BINDING_REQUIRED");
   const runtime = (dependencies.resolveRuntime ?? resolveCourseSupportWorkerRuntime)();
   if (runtime.status !== "available" || !isAbsolute(runtime.nodePath) || !isAbsolute(runtime.npmCliPath)) fail("PARENT_RUNTIME_UNAVAILABLE");
+  if (inspectCourseSupportWorkerVercel(selected).status !== "current") fail("PARENT_VERCEL_NOT_READY");
   return { selected, worker, output, approved, owned, runtime, baseSha: selectedHead,
     assignmentRef: assignment.assignmentRef, mode: assignment.mode ?? "OUTDOOR", parentThreadId };
 }
@@ -75,7 +76,7 @@ export function workerInstructions(mode, selected, assignmentRef, dependencies =
 }
 
 function productionDispatch(stage, args, validated, dependencies) {
-  const command = courseSupportWorkerProductionCommand(validated.runtime, "automation:course-dispatch", args);
+  const command = courseSupportWorkerProductionCommand(validated.runtime, "automation:course-dispatch", args, validated.selected);
   const result = (dependencies.spawn ?? spawnSync)(command.command, command.args, {
     cwd: validated.selected, shell: false, windowsHide: true, encoding: "utf8", timeout: 180_000,
     env: courseSupportWorkerRuntimeEnvironment(validated.runtime, validated.selected, process.env),

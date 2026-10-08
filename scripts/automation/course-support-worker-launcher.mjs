@@ -112,6 +112,9 @@ export function courseSupportWorkerAppServerEnvironment(cwd, environment = proce
   }
   // The server supplies each worker's actual native identity itself.
   delete result.CODEX_THREAD_ID;
+  // This setting belongs only to Vercel invocations, not Codex or its strict
+  // read-only observer. Production/setup helpers reconstruct it when needed.
+  delete result.VERCEL_CLI_USE_NATIVE_BINARY;
   return result;
 }
 

@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -24,6 +24,11 @@ function validationFixture() {
   }
   writeFileSync(join(worker, path), "export const originalOwnedWork = true;\n");
   writeFileSync(cliPath, "inert executable fixture");
+  mkdirSync(join(selected, "node_modules", "vercel", "dist"), { recursive: true });
+  writeFileSync(join(selected, "node_modules", "vercel", "package.json"), JSON.stringify({ name: "vercel", version: "62.2.0", bin: { vercel: "./dist/vc.js" } }));
+  writeFileSync(join(selected, "node_modules", "vercel", "dist", "vc.js"), "fixture");
+  writeFileSync(join(selected, "node_modules", "vercel", "dist", "index.js"), "fixture");
+  writeFileSync(join(selected, "node_modules", "vercel", "dist", "version.mjs"), "fixture");
   const launcherReceiptPath = join(outputDir, "launcher.receipt.private.json");
   const branch = "automation/course-support-original", baseSha = "a".repeat(40), mainSha = "b".repeat(40),
     workerHead = "c".repeat(40), sourceFingerprint = "d".repeat(64), parentThreadId = "aaaaaaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee";
@@ -72,11 +77,16 @@ function fixture(overrides: Record<string, unknown> = {}) {
   const output = join(root, "private"); mkdirSync(output);
   const worker = join(root, "worker"); mkdirSync(worker);
   const selected = join(root, "selected"); mkdirSync(selected);
+  mkdirSync(join(selected, "node_modules", "vercel", "dist"), { recursive: true });
+  writeFileSync(join(selected, "node_modules", "vercel", "package.json"), JSON.stringify({ name: "vercel", version: "62.2.0", bin: { vercel: "./dist/vc.js" } }));
+  writeFileSync(join(selected, "node_modules", "vercel", "dist", "vc.js"), "fixture");
+  writeFileSync(join(selected, "node_modules", "vercel", "dist", "index.js"), "fixture");
+  writeFileSync(join(selected, "node_modules", "vercel", "dist", "version.mjs"), "fixture");
   const item = { assignmentRef: "course-assignment-11111111-2222-7333-8444-555555555555", threadId,
     claimToken: "cccccccc-dddd-7eee-8fff-aaaaaaaaaaaa", claimRevision: 7, plannedPaths: ["src/lib/simulators/example.ts"] };
   const validated = { output, selected, worker, head: "a".repeat(40), item,
     original: { status: "STOPPED", turnId: oldTurn, launcherPid: 101, serverPid: 102 }, originalStatusDigest: createHash("sha256").digest("hex"),
-    runtime: { status: "available", nodePath: process.execPath }, approved: { cliPath: process.execPath },
+    runtime: { status: "available", nodePath: process.execPath, npmCliPath: join(root, "npm-cli.js") }, approved: { cliPath: process.execPath },
     reservation: { scope: "RESUME_ORIGINAL_OWNED_STAGE", continuationKey: "e".repeat(64) } };
   const calls: string[] = [];
   let onMessage: (message: unknown) => void = () => {};
@@ -113,6 +123,31 @@ function fixture(overrides: Record<string, unknown> = {}) {
 }
 
 describe("deterministic original-worker continuation", () => {
+  it("rejects missing selected CLI readiness before any native continuation", () => {
+    const f = validationFixture();
+    unlinkSync(join(f.selected, "node_modules", "vercel", "dist", "vc.js"));
+    expect(() => validateOriginalWorkerContinuation(f.input, f.dependencies)).toThrow("CONTINUATION_VERCEL_NOT_READY");
+  });
+
+  it("acknowledges through the selected private CLI with no package installation or product keys", async () => {
+    const f = fixture();
+    const spawnSync = vi.fn(() => ({ status: 0, stdout: JSON.stringify({ acquired: true, value: {
+      assignmentRef: f.validated.item.assignmentRef, threadId, outcome: "same_worker_message_recorded" } }), stderr: "" }));
+    await runOriginalWorkerContinuation(f.input, { ...f.dependencies, acknowledge: undefined, spawnSync });
+    expect(spawnSync).toHaveBeenCalledOnce();
+    const [command, args, settings] = spawnSync.mock.calls[0] as unknown as [string, string[], { cwd: string; env: Record<string, string> }];
+    expect(command).toBe(f.validated.runtime.nodePath);
+    expect(args[0]).toBe(join(f.validated.selected, "node_modules", "vercel", "dist", "vc.js"));
+    expect(args).not.toContain("exec");
+    expect(args.slice(1, 7)).toEqual(["env", "run", "-e", "production", "--", f.validated.runtime.nodePath]);
+    expect(settings.cwd).toBe(f.validated.selected);
+    expect(settings.env.DATABASE_URL).toBeUndefined(); expect(settings.env.RESEND_API_KEY).toBeUndefined();
+    expect(settings.env.VERCEL_CLI_USE_NATIVE_BINARY).toBe("0");
+    const nativeSettings = f.clientFactory.mock.calls[0][0] as unknown as { environment: Record<string, string> };
+    expect(nativeSettings.environment.VERCEL_CLI_USE_NATIVE_BINARY).toBeUndefined();
+    expect(nativeSettings.environment.CODEX_THREAD_ID).toBeUndefined();
+  });
+
   it("validates the real original receipt and shared linked-checkout identity with registered dirty bytes", () => {
     const f = validationFixture();
     expect(f.dependencies.git(f.worker, ["rev-parse", "HEAD"])).toBe(f.workerHead);

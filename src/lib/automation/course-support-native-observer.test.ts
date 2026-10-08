@@ -1,9 +1,10 @@
 // @vitest-environment node
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { observeCourseSupportNativeCompletion, readNativeObserverArguments } from "../../../scripts/automation/course-support-native-observer.mjs";
+import { courseSupportWorkerAppServerEnvironment } from "../../../scripts/automation/course-support-worker-launcher.mjs";
 
 const threadId = "11111111-2222-7333-8444-555555555555";
 const executableDigest = "9e7c59c05cc1ce5677b1f94e835b2ac038ca3be14504e78d558eacdb0ea3f55d";
@@ -37,6 +38,62 @@ function fixture(overrides: Record<string, unknown> = {}) {
   return { options, client, original, request, before: readFileSync(receiptPath) };
 }
 describe("original worker read-only native observer", () => {
+  it("prepares a new scheduled recovery report folder and preserves its exclusive observation", async () => {
+    const value = fixture();
+    const reportFolder = join(value.options.expectedCheckout, ".codex-artifacts", "new-recovery-cycle");
+    const options = { ...value.options, observationPath: join(reportFolder, "native-observation.private.json") };
+    expect(existsSync(reportFolder)).toBe(false);
+    await expect(observeCourseSupportNativeCompletion(options))
+      .resolves.toMatchObject({ phase: "READ_ONLY_OBSERVATION_COMPLETE" });
+    const observationBytes = readFileSync(options.observationPath);
+    expect(value.request.mock.calls.map(([method]) => method))
+      .toEqual(["initialize", "permissionProfile/list", "thread/read", "thread/turns/list"]);
+    expect(readFileSync(value.options.receiptPath)).toEqual(value.before);
+    await expect(observeCourseSupportNativeCompletion(options)).rejects.toThrow("NEW_PRIVATE_OBSERVATION_PATH_REQUIRED");
+    expect(readFileSync(options.observationPath)).toEqual(observationBytes);
+    expect(value.options.clientFactory).toHaveBeenCalledOnce();
+  });
+
+  it("does not prepare a recovery report folder before the original process and environment guards pass", async () => {
+    for (const rejection of ["process", "environment"]) {
+      const value = fixture();
+      const reportFolder = join(value.options.expectedCheckout, ".codex-artifacts", "denied-recovery-cycle");
+      if (rejection === "process") value.options.inspectProcess.mockReturnValue("present");
+      else value.options.environmentFactory.mockReturnValue({ DATABASE_URL: "test-value" });
+      await expect(observeCourseSupportNativeCompletion({ ...value.options,
+        observationPath: join(reportFolder, "native-observation.private.json") })).rejects.toThrow(
+        rejection === "process" ? "ORIGINAL_LAUNCHER_OR_SERVER_NOT_ENDED" : "PRODUCT_OR_NATIVE_IDENTITY_ENV_PRESENT"
+      );
+      expect(existsSync(reportFolder)).toBe(false);
+      expect(value.options.clientFactory).not.toHaveBeenCalled();
+      expect(readFileSync(value.options.receiptPath)).toEqual(value.before);
+    }
+  });
+
+  it("accepts the real app-server environment without a CLI setting or product/native identity keys", async () => {
+    const value = fixture();
+    const runtime = { status: "available", nodePath: "C:\\Program Files\\nodejs\\node.exe", npmCliPath: "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js" };
+    await expect(observeCourseSupportNativeCompletion({ ...value.options,
+      environmentFactory: cwd => courseSupportWorkerAppServerEnvironment(cwd, {
+        PATH: "inert-path", CODEX_HOME: "normal-auth-home", CODEX_THREAD_ID: "private-native", DATABASE_URL: "private-db", VERCEL_TOKEN: "private-token", VERCEL_CLI_USE_NATIVE_BINARY: "1"
+      }, runtime) })).resolves.toMatchObject({ phase: "READ_ONLY_OBSERVATION_COMPLETE" });
+    const settings = value.options.clientFactory.mock.calls[0][0] as unknown as { environment: Record<string, string> };
+    expect(settings.environment.CODEX_HOME).toBe("normal-auth-home");
+    for (const key of ["DATABASE_URL", "VERCEL_TOKEN", "CODEX_THREAD_ID", "VERCEL_CLI_USE_NATIVE_BINARY"]) expect(settings.environment[key]).toBeUndefined();
+    expect(value.request.mock.calls.map(([method]) => method)).toEqual(["initialize", "permissionProfile/list", "thread/read", "thread/turns/list"]);
+    expect(readFileSync(value.options.receiptPath)).toEqual(value.before);
+  });
+
+  it.skipIf(process.platform !== "win32")("uses the actual default Windows environment factory without opening a real native server", async () => {
+    const value = fixture();
+    await expect(observeCourseSupportNativeCompletion({ ...value.options, environmentFactory: undefined }))
+      .resolves.toMatchObject({ phase: "READ_ONLY_OBSERVATION_COMPLETE" });
+    const settings = value.options.clientFactory.mock.calls[0][0] as unknown as { environment: Record<string, string> };
+    expect(Object.keys(settings.environment).some(key => /DATABASE_URL|RESEND|CLERK|GOOGLE|VERCEL|AUTOMATION_API_KEY|CRON_SECRET|EMAIL_ACTION_SECRET/iu.test(key))).toBe(false);
+    expect(settings.environment.CODEX_THREAD_ID).toBeUndefined();
+    expect(value.request.mock.calls).toHaveLength(4);
+  });
+
   it("issues exactly four read-only RPCs, preserves the original receipt and records opaque paging results", async () => {
     const value = fixture(); const result = await observeCourseSupportNativeCompletion(value.options);
     expect(value.request.mock.calls.map(([method]) => method)).toEqual(["initialize", "permissionProfile/list", "thread/read", "thread/turns/list"]);
@@ -85,6 +142,9 @@ describe("original worker read-only native observer", () => {
     await expect(observeCourseSupportNativeCompletion(changed.options)).rejects.toThrow("ORIGINAL_PINNED_CLI_CHANGED");
     const keyed = fixture(); keyed.options.environmentFactory.mockReturnValue({ DATABASE_URL: "test-value" });
     await expect(observeCourseSupportNativeCompletion(keyed.options)).rejects.toThrow("PRODUCT_OR_NATIVE_IDENTITY_ENV_PRESENT");
+    const cliFlag = fixture(); cliFlag.options.environmentFactory.mockReturnValue({ VERCEL_CLI_USE_NATIVE_BINARY: "0" });
+    await expect(observeCourseSupportNativeCompletion(cliFlag.options)).rejects.toThrow("PRODUCT_OR_NATIVE_IDENTITY_ENV_PRESENT");
+    expect(cliFlag.options.clientFactory).not.toHaveBeenCalled();
   });
   it("stops on approval, denied profile or live/error-bearing latest turn without a wake RPC", async () => {
     for (const overrides of [

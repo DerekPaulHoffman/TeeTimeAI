@@ -224,3 +224,140 @@ correlation. This supports their bounded cooldown revalidation; it does not prov
 current provider health, complete access, or calendar availability. Their next
 attempt remains at the persisted 07:54 UTC retry, with ordinary admission expected
 at 08:00 UTC (04:00 Eastern). The fixed benchmark is not advanced or extended.
+
+The original21:50 October8 worker received the complete corrected self-repair
+and local-test-feedback instructions, but its first production assignment read
+exited1 before ownership. The worker correctly stopped without claim, provider
+read, edits or release. Root's separate read of the already saved npm debug log
+found package acquisition with16 ECONNRESET and1 ETIMEDOUT; no explicit terminal
+causal stack was retained. These are tooling/network facts, not a provider
+restriction or proof that the independently failed RO observer shared a cause.
+The wrapper ran cold private-cache npm exec for Vercel before the assignment
+script, and suppressed its own computed command_failed receipt. Earlier setup
+verified Node/npm/client/browser but omitted the tool needed for production.
+
+The correction puts the existing pinned Vercel62.2.0 in locked development
+dependencies, verifies private package/entry/version during credential-free
+setup, and directly invokes its prepared CLI for production commands. It
+removes package acquisition from those protected calls and emits a closed
+nonzero wrapper receipt without claiming absence of durable side effects.
+The parent supervisor and continuation acknowledgement use the exact selected
+checkout's prepared CLI. Existing reservation expiry, claims, production stops,
+provider access rules, retry budgets and customer searches stay unchanged.
+Independent review caught an initial fixture mistake: the real package declares
+dist/vc.js, not dist/index.js. A real installed-package metadata test now covers
+that boundary, plus private directory/file guards and post-smoke version drift.
+Local93 focused checks, lint, TypeScript and actual schedulerNode22 CLI version
+passed without production credentials or network. Exact-head CI/publication
+and original scheduled autonomous repair remain required; no package readiness
+or healthy ordinary customer check substitutes for Back9 monitoring proof.
+An older original candidate also needs its own new private dependencies after
+merging reviewed main. The continuation template now requires a verified clean
+registered-work checkpoint and current-main ancestry, then credential-free
+locked local refresh/version/generation before original inspection/recovery.
+The first-turn --prepare origin/main guard stays strict. Parent selected
+readiness alone is not evidence of original-child readiness; the earlier
+template incorrectly said it was. No local refresh renews a lease or changes
+source, spent attempts or publication history.
+The final installed-source review also found that the declared Vercel shim can
+select a native executable through user configuration and ancestor directories.
+Workers now explicitly use its supported JavaScript-only setting in their
+stripped local environment. The known shim imports index.js/version.mjs are
+checked as private regular files too. This keeps actual production execution on
+the same verified Node path; it changes no authentication or provider access.
+
+The original22:10 worker on105 independently claimed four diagnostic/policy/test
+paths before editing, demonstrated seven expected credential-free regression
+failures, repaired the closed categoryState distinction, and passed216 focused
+checks. It registered297349983c977b9c48a7a422b084030ea5e3b114 and pushed its
+own branch; complete exact CI37852541797 passed unit/lint/typecheck/build.
+It then obeyed another overly broad repository instruction: AGENTS' unconditional
+local ui:smoke gate. The full local196-case suite blanked database credentials
+and started an unprovisioned local server. Its28 failures were seven existing
+published course-knowledge cases across four viewports; localhost database
+connections were refused and pages returned500. The changed four backend
+diagnostic files do not alter that public course-profile path. The worker
+correctly retained the failed evidence and withheld publication, ending with
+its registered release/ownership preserved rather than inventing monitoring.
+
+The current verification contract now selects meaningful local checks by
+affected layer and uses complete trusted final-SHA CI. Relevant browser,
+customer route/auth and UI-facing contract changes still require prepared
+browser coverage; unrelated unprovisioned local database UI is not a blanket
+release gate for a closed backend diagnostic. The observed failure stays in
+history and is not called a pass. No protected operation is replayed, no lease
+is renewed by this instruction, and only normal independent admission may
+resume the original owner. The local-feedback correction was exercised by the
+actual scheduled red-to-green repair; code publication/deployed proof and honest
+durable closeout still need their own acceptance.
+
+A subsequent consumer audit caught a new unpublished integration defect in the
+startup change: the general runtime environment's noncredential Vercel setting
+reached the default Codex app-server factory, while the read-only native observer
+correctly rejects every Vercel/product/native-identity key. Earlier observer
+tests injected an empty environment and the scoped415 review missed this join.
+A real-helper regression failed with PRODUCT_OR_NATIVE_IDENTITY_ENV_PRESENT
+before the fix. The app-server factory now drops the CLI-only setting, and the
+continuation reuses that same factory instead of duplicating its environment
+construction. Vercel commands still force the verified JavaScript path. The
+observer's credential fence is unchanged, including rejecting a caller-supplied
+Vercel flag. Local145 combined checks include the actual default Windows factory
+with a fake read-only transport; no live native turn is opened by those tests.
+
+The ordinary22:40 parent correctly selected the original297 repair as an expired
+owned stage with no in-flight read and no replacement launch. Its read-only
+observer command then failed ENOENT before producing an observation. The
+requested new cycle folder did not exist: a continuation-only preflight had no
+new launch artifact directory, and the observer assumed its parent was already
+prepared. The output write occurs before creating a native client. The recorded
+error has no retained stack; a matching local regression independently failed
+at that exact exclusive write with the missing nested folder.
+
+The observer now prepares its requested private parent folder after the existing
+receipt, pinned executable, environment and original-process guards. The output
+is still exclusive and historical observations are never overwritten. Tests
+prove the missing-folder path succeeds using exactly four mocked read-only RPCs,
+a second attempt preserves the observation, and denied process/environment
+inputs create neither folder nor client. Local147 integrated checks passed.
+This removes a local setup prerequisite; it adds no worker-resume RPC, admission,
+lease renewal or source retry. Normal scheduled recovery must provide fresh proof.
+
+The release CI also exposed an existing intake remount test race: it waited for
+a course heading but synchronously asserted a dialog opened by a later effect.
+The test now awaits that same accessible dialog with all original restored-course,
+filter and price assertions retained. All47 intake tests passed locally. Product
+UI behavior is unchanged, and the original failed CI evidence stays recorded.
+
+On the ordinary23:00 tick, preflight selected the preserved297 owned stage on
+the new reviewed release, but the parent used the claimed-child production
+wrapper for its own deployment qualification. Its command omitted the required
+selected-checkout argument, so input parsing threw before that deployment
+waiter or Vercel command could start. The closed `runtime_inspection_failed`
+message hid this distinction; it was not a failed Ready deployment observation.
+The parent stopped without a continuation reservation or native send.
+
+The parent recipe now gives the exact existing read-only deployment waiter
+command from its selected checkout before the final fresh native bracket.
+It explicitly separates that parent read from the child's protected application
+wrapper. No wrapper role, private-runtime, input, native, source, admission or
+production-failure fence is relaxed, and no new recovery protocol is added.
+Root's already completed direct waiter proved this command path on the same
+released SHA and both aliases; normal scheduled use remains its own acceptance.
+
+The actual23:10 parent passed preflight and a direct deployment waiter, then
+manually made its read-only original-runtime report fail whenever aggregate
+setupRequired was true. In the old297 candidate that flag was true only because
+the new private Vercel dependency was absent; actual Node/npm, private binding,
+generated client, browser and separate Chromium smoke were healthy. Requiring
+the new dependency before resume prevented the original owner from performing
+the already prescribed post-resume reviewed-main merge and private refresh.
+
+The existing request factory deliberately validates the narrower original
+admission evidence and does not require that new CLI or origin/main HEAD.
+The parent instructions now explicitly use that projection with the complete
+unchanged inspection/smoke, instead of creating an exit2 from the coarse setup
+flag. They retain real missing fields, all actual native/source/client/browser
+guards, the selected parent's prepared CLI and the later child's fully prepared
+protected-command CLI. The parent never installs in the original checkout.
+This corrects the observed sequencing contradiction without changing code,
+granting authority from a local exit0, adding a protocol or replaying a request.

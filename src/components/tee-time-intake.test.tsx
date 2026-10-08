@@ -742,7 +742,8 @@ describe("TeeTimeIntake", () => {
     expect(
       await screen.findAllByRole("heading", { name: "Second Public Golf Course" })
     ).not.toHaveLength(0);
-    expect(screen.getByRole("dialog", { name: "Notify me" }).textContent).toContain("Second Public Golf Course");
+    const restoredDialog = await screen.findByRole("dialog", { name: "Notify me" });
+    expect(restoredDialog.textContent).toContain("Second Public Golf Course");
     expect(screen.queryByText("Your courses")).toBeNull();
     expect((screen.getByLabelText("Location") as HTMLInputElement).value).toBe("Trumbull, CT");
     await waitFor(() =>

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { mkdtempSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +16,11 @@ function fixture(mode?: "SIMULATOR") {
   for (const dir of [selected, worker, output]) mkdirSync(dir);
   mkdirSync(join(selected, ".vercel"));
   writeFileSync(join(selected, ".vercel", "project.json"), JSON.stringify({ projectId: "project", orgId: "org" }));
+  mkdirSync(join(selected, "node_modules", "vercel", "dist"), { recursive: true });
+  writeFileSync(join(selected, "node_modules", "vercel", "package.json"), JSON.stringify({ name: "vercel", version: "62.2.0", bin: { vercel: "dist/vc.js" } }));
+  writeFileSync(join(selected, "node_modules", "vercel", "dist", "vc.js"), "fixture");
+  writeFileSync(join(selected, "node_modules", "vercel", "dist", "index.js"), "fixture");
+  writeFileSync(join(selected, "node_modules", "vercel", "dist", "version.mjs"), "fixture");
   const cli = join(selected, "codex.exe"), node = join(root, "node.exe"), npm = join(root, "npm-cli.js");
   for (const file of [cli, node, npm]) writeFileSync(file, "fixture");
   const context = { kind: "course_support_preflight_context", selectedCheckout: selected, exactHead: true,
@@ -52,6 +57,29 @@ function fixture(mode?: "SIMULATOR") {
 }
 
 describe("course worker launch supervisor", () => {
+  it("refuses missing selected CLI readiness before durable start or native creation", async () => {
+    const f = fixture();
+    unlinkSync(join(f.selected, "node_modules", "vercel", "dist", "vc.js"));
+    await expect(superviseCourseSupportWorker(f.input, f.deps)).rejects.toMatchObject({ code: "PARENT_VERCEL_NOT_READY" });
+    expect(f.deps.spawn).not.toHaveBeenCalled();
+    expect(f.deps.prepare).not.toHaveBeenCalled();
+    expect(f.deps.run).not.toHaveBeenCalled();
+  });
+
+  it("dispatches through the selected checkout's prepared CLI without package acquisition", async () => {
+    const f = fixture();
+    await superviseCourseSupportWorker(f.input, f.deps);
+    expect(f.deps.spawn).toHaveBeenCalledTimes(2);
+    for (const [command, args, settings] of f.deps.spawn.mock.calls as unknown as [string, string[], { cwd: string; env: Record<string, string> }][]) {
+      expect(command).toBe(f.deps.resolveRuntime().nodePath);
+      expect(args[0]).toBe(join(f.selected, "node_modules", "vercel", "dist", "vc.js"));
+      expect(args).not.toContain("exec");
+      expect(settings.cwd).toBe(f.selected);
+      expect(settings.env.DATABASE_URL).toBeUndefined();
+      expect(settings.env.RESEND_API_KEY).toBeUndefined();
+    }
+  });
+
   it("detaches the same foreground command with private logs and no product credentials", async () => {
     const f = fixture();
     const contextFile = join(f.output, "context.private.json"), assignmentFile = join(f.output, "assignment.private.json");

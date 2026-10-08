@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { isAbsolute, resolve, win32 } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   WORKER_PERMISSION_PROFILE, assertFullAccessAcknowledgement, courseSupportWorkerAppServerEnvironment,
@@ -125,6 +125,7 @@ export async function observeCourseSupportNativeCompletion({
     return { observedAt: clock().toISOString(), processes };
   };
   state.processObservationBefore = observeProcesses();
+  mkdirSync(dirname(observationPath), { recursive: true, mode: 0o700 });
   // A new exclusive output prevents historical observations being overwritten.
   writeFileSync(observationPath, JSON.stringify(state, null, 2) + "\n", { flag: "wx", mode: 0o600 });
   let client, fatal;

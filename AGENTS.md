@@ -642,15 +642,29 @@ When screenshots look weak, do not keep minor-polishing a bad direction. Use Fig
 
 ## Testing And Verification
 
-Before claiming code/UI work is complete:
+Choose the verification plan from the changed paths and requested verification
+level before running checks. Use focused meaningful local tests while editing,
+changed-file lint and `git diff --check`. Complete required trusted CI must pass
+on the final candidate SHA, including the full unit suite, lint, TypeScript and
+build. Do not duplicate complete suites locally when that exact CI covers them;
+run broader local checks when CI lacks relevant coverage, the user requests
+exhaustive verification, or a concrete regression needs diagnosis.
 
-```powershell
-npm run test:run
-npm run lint
-npm run build
-npm run ui:smoke
-git diff --check
-```
+Browser behavior, customer routes/authentication or UI-facing data-contract
+changes require the affected interactions and desktop/mobile matrix on a
+prepared target. Parser/policy diagnostics and worker/runtime changes with
+no UI or course-page behavior change do not require the unfiltered local
+`npm run ui:smoke` suite. Their focused regression, privacy/rejection checks,
+trusted exact-head CI and applicable deployed lane verification remain required.
+
+A database-backed local browser plan requires a verified isolated database and
+its controlled fixtures before execution. Do not substitute production demand,
+recipients or email transport to make that local setup work. Retain any failure
+already observed; absent/refused local database access is environment evidence,
+not provider access or proof of a code regression. Explain its actual scope and
+resolve it when that browser coverage is relevant. Never waive a relevant
+failure, invent a passing result, or use this verification selection to replay
+a failed protected production/source/ownership operation.
 
 Add focused verification for the layer changed:
 
@@ -661,7 +675,10 @@ Add focused verification for the layer changed:
 - Discovery fixes: use the exact reported provider payload and location plus multiple positive/negative controls in different markets.
 - UI fixes: verify the exact reported viewport and interaction first, then the desktop/mobile smoke matrix; inspect screenshots when layout was the problem.
 
-For production verification:
+For production browser verification, select the relevant prepared smoke cases
+and verify their reads and mocked writes before running against the live site.
+Do not trigger customer actions or email. A complete browser run is required
+when its breadth is justified by the changed UI or explicitly requested:
 
 ```powershell
 $env:UI_SMOKE_BASE_URL = "https://teetimespot.com"

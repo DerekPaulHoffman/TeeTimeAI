@@ -45,6 +45,9 @@ export function courseSupportWorkerRuntimeEnvironment(runtime, checkout, environ
   result.PATH = `${win32.dirname(runtime.nodePath)};${result.PATH || ""}`;
   result.npm_config_cache = resolve(checkout, ".codex-artifacts", "npm-cache");
   result.npm_config_prefix = resolve(checkout, ".codex-artifacts", "npm-prefix");
+  // The declared CLI shim otherwise searches ancestor directories/user config
+  // for a native executable outside this verified private JavaScript runtime.
+  result.VERCEL_CLI_USE_NATIVE_BINARY = "0";
   return result;
 }
 
@@ -54,14 +57,36 @@ export function courseSupportWorkerNpmCommand(runtime, args) {
 }
 
 export const courseSupportWorkerVercelPackage = "vercel@62.2.0";
+const vercelVersion = courseSupportWorkerVercelPackage.slice("vercel@".length);
 const productionScripts = new Set(["automation:course-support", "automation:course-dispatch", "automation:simulator-support", "deployment:wait"]);
 
-export function courseSupportWorkerProductionCommand(runtime, script, args = []) {
+export function inspectCourseSupportWorkerVercel(checkout) {
+  const directory = resolve(checkout, "node_modules", "vercel");
+  const dist = resolve(directory, "dist"), manifest = resolve(directory, "package.json"), entry = resolve(dist, "vc.js");
+  const leaves = [manifest, entry, resolve(dist, "index.js"), resolve(dist, "version.mjs")];
+  if (![directory, dist, ...leaves].every(path => isPrivateWorkerPath(checkout, path))) return { status: "shared_output_rejected" };
+  try {
+    for (const [path, isDirectory] of [[directory, true], [dist, true], ...leaves.map(path => [path, false])]) {
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink() || (isDirectory ? !stat.isDirectory() : !stat.isFile() || stat.nlink !== 1)) return { status: "shared_output_rejected" };
+    }
+    const value = JSON.parse(readFileSync(manifest, "utf8"));
+    if (value.name !== "vercel" || !["dist/vc.js", "./dist/vc.js"].includes(value.bin?.vercel)) return { status: "invalid" };
+    if (value.version !== vercelVersion) return { status: "version_mismatch" };
+    return { status: "current", version: vercelVersion };
+  } catch (error) {
+    return { status: error?.code === "ENOENT" ? "unavailable" : "invalid" };
+  }
+}
+
+export function courseSupportWorkerProductionCommand(runtime, script, args = [], checkout = process.cwd()) {
   if (!productionScripts.has(script) || !Array.isArray(args) || args.some((arg) => typeof arg !== "string" || arg.includes("\0"))) throw new Error("INVALID_WORKER_PRODUCTION_COMMAND");
-  return courseSupportWorkerNpmCommand(runtime, [
-    "exec", "--yes", `--package=${courseSupportWorkerVercelPackage}`, "--", "vercel", "env", "run", "-e", "production", "--",
+  if (runtime.status !== "available") throw new Error("WORKER_RUNTIME_UNAVAILABLE");
+  if (inspectCourseSupportWorkerVercel(checkout).status !== "current") throw new Error("WORKER_VERCEL_NOT_READY");
+  return { command: runtime.nodePath, args: [
+    resolve(checkout, "node_modules", "vercel", "dist", "vc.js"), "env", "run", "-e", "production", "--",
     runtime.nodePath, runtime.npmCliPath, "run", script, "--", ...args
-  ]);
+  ] };
 }
 
 function runCommand(command, args, options = {}) {
@@ -69,7 +94,8 @@ function runCommand(command, args, options = {}) {
     encoding: "utf8", windowsHide: true, shell: false,
     stdio: ["ignore", "pipe", "pipe"], timeout: 10_000, ...options
   });
-  return { status: result.status, stdout: result.stdout || "" };
+  return { status: result.status, stdout: result.stdout || "", stderr: result.stderr || "",
+    errorCode: result.error?.code, signal: result.signal };
 }
 
 function canonical(path) {
@@ -177,10 +203,11 @@ export function inspectCourseSupportWorkerRuntime(options = {}, dependencies = {
   } : { status: runtime.status };
   const client = dependenciesPrivate ? (dependencies.inspectClient || inspectGeneratedPrismaClient)(checkout) : { status: "shared_output_rejected" };
   const browser = dependenciesPrivate ? (dependencies.inspectBrowser || inspectBrowserFiles)(checkout) : { moduleAvailable: false, executableAvailable: false, smoke: "not_run" };
+  const vercel = dependenciesPrivate ? inspectCourseSupportWorkerVercel(checkout) : { status: "shared_output_rejected" };
   return {
-    mode: "inspect", observedAt: new Date().toISOString(), runtime: runtimeReceipt, guards, client, browser,
+    mode: "inspect", observedAt: new Date().toISOString(), runtime: runtimeReceipt, guards, client, browser, vercel,
     prepareEligible: Object.values(guards).every(Boolean) && Boolean(runtimeReceipt.nodeVersion && runtimeReceipt.npmVersion),
-    setupRequired: runtime.status !== "available" || !runtimeReceipt.nodeVersion || !runtimeReceipt.npmVersion || !bindingMatches || !dependenciesPrivate || client.status !== "current" || !browser.executableAvailable
+    setupRequired: runtime.status !== "available" || !runtimeReceipt.nodeVersion || !runtimeReceipt.npmVersion || !bindingMatches || !dependenciesPrivate || client.status !== "current" || !browser.executableAvailable || vercel.status !== "current"
   };
 }
 
@@ -243,15 +270,18 @@ export function prepareCourseSupportWorkerRuntime(options = {}, dependencies = {
   const run = dependencies.runCommand || runCommand;
   const stages = [];
   let fresh = initial;
-  for (const [stage, args] of [["dependencies", ["ci", "--prefix", checkout]], ["generated_client", ["run", "prisma:generate", "--prefix", checkout]]]) {
+  for (const [stage, args] of [["dependencies", ["ci", "--prefix", checkout]], ["vercel_cli", [resolve(checkout, "node_modules", "vercel", "dist", "vc.js"), "--version"]], ["generated_client", ["run", "prisma:generate", "--prefix", checkout]]]) {
+    if (stage === "vercel_cli" && fresh.vercel.status !== "current") return { ...fresh, mode: "prepare", outcome: "readiness_failed", stages };
     const startedAt = new Date().toISOString();
     const started = performance.now();
-    const command = courseSupportWorkerNpmCommand(runtime, args);
-    const result = run(command.command, command.args, { cwd: checkout, env: localEnv, timeout: 600_000 });
-    stages.push({ stage, startedAt, completedAt: new Date().toISOString(), elapsedMs: Math.round(performance.now() - started), exitCode: result.status });
-    if (result.status !== 0) return { ...initial, mode: "prepare", outcome: "setup_failed", stages };
+    const command = stage === "vercel_cli" ? { command: runtime.nodePath, args } : courseSupportWorkerNpmCommand(runtime, args);
+    const result = run(command.command, command.args, { cwd: checkout, env: localEnv, timeout: stage === "vercel_cli" ? 10_000 : 600_000 });
+    const cliVersionVerified = stage !== "vercel_cli" || [result.stdout, result.stderr].some(value => typeof value === "string" && [vercelVersion, `Vercel CLI ${vercelVersion}`].includes(value.trim()));
+    stages.push({ stage, startedAt, completedAt: new Date().toISOString(), elapsedMs: Math.round(performance.now() - started), exitCode: result.status,
+      ...(stage === "vercel_cli" ? { versionVerified: cliVersionVerified } : {}) });
+    if (result.status !== 0 || !cliVersionVerified) return { ...initial, mode: "prepare", outcome: "setup_failed", stages };
     fresh = inspectCourseSupportWorkerRuntime(options, { ...dependencies, runtime });
-    if (!fresh.prepareEligible) return { ...fresh, mode: "prepare", outcome: "guard_changed", stages };
+    if (!fresh.prepareEligible || (stage !== "dependencies" && fresh.vercel.status !== "current")) return { ...fresh, mode: "prepare", outcome: "guard_changed", stages };
   }
   const browserFiles = fresh.browser;
   const browserSmoke = dependencies.browserSmoke || ((directory) => {
@@ -268,7 +298,7 @@ export function prepareCourseSupportWorkerRuntime(options = {}, dependencies = {
   const final = inspectCourseSupportWorkerRuntime(options, { ...dependencies, runtime });
   if (!final.prepareEligible) return { ...final, mode: "prepare", outcome: "guard_changed", stages };
   const finalBrowser = { ...final.browser, smoke: browser.smoke };
-  const ready = final.client.status === "current" && finalBrowser.executableAvailable && finalBrowser.smoke === "passed";
+  const ready = final.client.status === "current" && final.vercel.status === "current" && finalBrowser.executableAvailable && finalBrowser.smoke === "passed";
   return { ...final, mode: "prepare", browser: finalBrowser, setupRequired: !ready, outcome: ready ? "prepared" : "readiness_failed", stages };
 }
 
@@ -276,18 +306,22 @@ export function runCourseSupportWorkerProduction(options = {}, dependencies = {}
   const checkout = canonical(options.checkout || process.cwd());
   const environment = options.environment || process.env;
   const runtime = dependencies.runtime || resolveCourseSupportWorkerRuntime({ environment });
-  const command = courseSupportWorkerProductionCommand(runtime, options.script, options.args || []);
   const inspection = inspectCourseSupportWorkerRuntime(options, { ...dependencies, runtime });
   // Code changes and a descendant commit are legitimate after an owned claim.
   // Product commands retain their own owner, lease, cycle, source, and release fences.
   const guards = Object.entries(inspection.guards).filter(([name]) => !["clean", "atLocalOriginMain"].includes(name));
   if (!guards.every(([, passed]) => passed) || inspection.setupRequired) return { ...inspection, mode: "production", outcome: "guard_rejected" };
+  const command = courseSupportWorkerProductionCommand(runtime, options.script, options.args || [], checkout);
   const run = dependencies.runCommand || runCommand;
+  const started = performance.now();
   const result = run(command.command, command.args, {
     cwd: checkout, env: courseSupportWorkerRuntimeEnvironment(runtime, checkout, environment),
     shell: false, stdio: "inherit", timeout: undefined
   });
-  return { mode: "production", outcome: result.status === 0 ? "completed" : "command_failed", exitCode: result.status ?? 1 };
+  return { mode: "production", outcome: result.status === 0 ? "completed" : "command_failed", exitCode: result.status ?? 1,
+    ...(result.status !== 0 ? { phase: "production_wrapper", elapsedMs: Math.round(performance.now() - started),
+      spawnError: result.errorCode ? (["ENOENT", "EACCES", "EPERM", "ETIMEDOUT", "EIO", "ENOMEM"].includes(result.errorCode) ? result.errorCode : "UNCLASSIFIED") : null,
+      signal: result.signal ? (["SIGTERM", "SIGKILL", "SIGINT", "SIGABRT"].includes(result.signal) ? result.signal : "UNCLASSIFIED") : null } : {}) };
 }
 
 export function readWorkerProductionArguments(args) {
@@ -309,7 +343,7 @@ export function readWorkerProductionArguments(args) {
 function main(args) {
   if (args[0] === "production") {
     const receipt = runCourseSupportWorkerProduction(readWorkerProductionArguments(args.slice(1)));
-    if (receipt.outcome === "guard_rejected") console.log(JSON.stringify(receipt, null, 2));
+    if (receipt.outcome !== "completed") console.log(JSON.stringify(receipt, null, 2));
     process.exitCode = receipt.exitCode ?? 2;
     return;
   }
