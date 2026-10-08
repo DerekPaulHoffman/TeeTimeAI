@@ -1,11 +1,11 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { spawn, spawnSync, execFileSync } from "node:child_process";
-import { closeSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inspectPinnedWorkerCli } from "./course-support-worker-cli.mjs";
 import { approvedCourseSupportResponderCheckouts } from "./course-support-preflight.mjs";
-import { assertOwnedWorkerCheckout, prepareCourseSupportWorker, runPreparedCourseSupportWorker } from "./course-support-worker-launcher.mjs";
+import { assertOwnedWorkerCheckout, prepareCourseSupportWorker, privateWrite, retainPrimaryFailure, runPreparedCourseSupportWorker } from "./course-support-worker-launcher.mjs";
 import { courseSupportWorkerProductionCommand, courseSupportWorkerRuntimeEnvironment, resolveCourseSupportWorkerRuntime } from "./course-support-worker-runtime.mjs";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
@@ -14,13 +14,11 @@ const scriptPath = fileURLToPath(import.meta.url);
 const same = (a, b) => process.platform === "win32" ? resolve(a).toLowerCase() === resolve(b).toLowerCase() : resolve(a) === resolve(b);
 const fail = (code) => { throw Object.assign(new Error(code), { code }); };
 
-function privateJson(path, value, exclusive = false) {
-  const bytes = `${JSON.stringify(value, null, 2)}\n`;
-  if (exclusive) return writeFileSync(path, bytes, { flag: "wx", mode: 0o600 });
-  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  writeFileSync(temporary, bytes, { flag: "wx", mode: 0o600 });
-  renameSync(temporary, path);
+function privateJson(path, value, exclusive = false, receiptIo = {}) {
+  return privateWrite(path, value, exclusive, receiptIo);
 }
+const safeCause = (value) => ["EACCES", "EBUSY", "EPERM", "ENOENT", "ENOSPC", "EIO"].includes(value) ? value : undefined;
+const safeDiagnostic = (value) => value === "UNCLASSIFIED" ? value : safeCause(value);
 
 function readJson(path) {
   if (!isAbsolute(path) || !statSync(path).isFile()) fail("ABSOLUTE_PRIVATE_INPUT_REQUIRED");
@@ -107,8 +105,8 @@ export async function dispatchCourseSupportWorker(input, files, dependencies = {
   const marker = join(output, "supervisor.dispatch.private.json");
   const dispatch = { schemaVersion: 1, status: "DISPATCHING", createdAt: new Date().toISOString(),
     parentThreadId: input.parentThreadId, assignmentRef: input.assignment?.assignmentRef };
-  privateJson(marker, dispatch, true);
-  const save = (status, extra = {}) => privateJson(marker, { ...dispatch, ...extra, status, updatedAt: new Date().toISOString() });
+  privateJson(marker, dispatch, true, dependencies.receiptIo);
+  const save = (status, extra = {}) => privateJson(marker, { ...dispatch, ...extra, status, updatedAt: new Date().toISOString() }, false, dependencies.receiptIo);
   let outFd, errFd;
   try {
     const validated = validateSupervisorInput(input, dependencies);
@@ -140,7 +138,10 @@ export async function dispatchCourseSupportWorker(input, files, dependencies = {
     save("DISPATCHED", { pid, stdoutPath, stderrPath });
     return { outcome: "dispatched", pid, marker, stdoutPath, stderrPath };
   } catch (error) {
-    save("ATTENTION", { failureCode: error.code ?? "SUPERVISOR_DISPATCH_FAILED" });
+    try { save("ATTENTION", { failureCode: error.code ?? "SUPERVISOR_DISPATCH_FAILED",
+      ...(safeCause(error.causeCode) ? { failureCauseCode: error.causeCode } : {}),
+      ...(safeDiagnostic(error.diagnosticWriteFailureCode) ? { diagnosticWriteFailureCode: error.diagnosticWriteFailureCode } : {}) }); }
+    catch (diagnosticError) { retainPrimaryFailure(error, diagnosticError); }
     throw error;
   } finally {
     if (outFd !== undefined) closeSync(outFd);
@@ -161,8 +162,8 @@ export async function superviseCourseSupportWorker(input, dependencies = {}) {
     parentThreadId: validated.parentThreadId, selectedCheckout: validated.selected,
     workerCheckout: validated.worker, baseSha: validated.baseSha, workerBranch: validated.owned.branch,
     status: "VALIDATED", createdAt: new Date().toISOString() };
-  privateJson(receiptPath, receipt, true);
-  const save = (status, extra = {}) => { Object.assign(receipt, extra, { status, updatedAt: new Date().toISOString() }); privateJson(receiptPath, receipt); };
+  privateJson(receiptPath, receipt, true, dependencies.receiptIo);
+  const save = (status, extra = {}) => { Object.assign(receipt, extra, { status, updatedAt: new Date().toISOString() }); privateJson(receiptPath, receipt, false, dependencies.receiptIo); };
   try {
     save("START_REQUESTED");
     productionDispatch("start", ["start", "--assignment-ref", validated.assignmentRef], validated, dependencies);
@@ -195,7 +196,10 @@ export async function superviseCourseSupportWorker(input, dependencies = {}) {
     save("COMPLETED");
     return { outcome: "completed", receiptPath, launcherReceiptPath, childThreadId: prepared.threadId };
   } catch (error) {
-    save("ATTENTION", { failedAt: receipt.status, failureCode: error.code ?? "SUPERVISOR_FAILED" });
+    try { save("ATTENTION", { failedAt: receipt.status, failureCode: error.code ?? "SUPERVISOR_FAILED",
+      ...(safeCause(error.causeCode) ? { failureCauseCode: error.causeCode } : {}),
+      ...(safeDiagnostic(error.diagnosticWriteFailureCode) ? { diagnosticWriteFailureCode: error.diagnosticWriteFailureCode } : {}) }); }
+    catch (diagnosticError) { retainPrimaryFailure(error, diagnosticError); }
     throw error;
   }
 }

@@ -161,6 +161,18 @@ describe("course worker preparation contract", () => {
     expect(server.clientFactory).toHaveBeenCalledOnce();
   });
 
+  it("preserves preparation refusal when the diagnostic receipt write fails", async () => {
+    const f = fixture();
+    const server = fakeServer(f, { "permissionProfile/list": () => ({ data: [{ id: WORKER_PERMISSION_PROFILE, allowed: false }] }) });
+    const writeReceipt = (path: string, value: { status: string }, exclusive?: boolean) => {
+      if (value.status === "FAILED_BEFORE_CREATION") throw Object.assign(new Error("reader lock"), { code: "EPERM" });
+      privateWrite(path, value, exclusive);
+    };
+    await expect(prepareCourseSupportWorker({ ...f.options, clientFactory: server.clientFactory, writeReceipt }))
+      .rejects.toMatchObject({ code: "FULL_ACCESS_PROFILE_NOT_ALLOWED", diagnosticWriteFailureCode: "EPERM" });
+    expect(server.request.mock.calls.some(([method]) => method === "thread/start")).toBe(false);
+  });
+
   it("rejects approval requests while preparing without starting a turn", async () => {
     const f = fixture();
     const server = fakeServer(f, { "thread/start": (_params, hooks) => {
@@ -230,6 +242,21 @@ describe("one first turn after external binding", () => {
     } });
     await expect(runPreparedCourseSupportWorker({ ...f.options, clientFactory: server.clientFactory })).rejects.toThrow("NATIVE_THREAD_IDENTITY_NOT_PROVED");
     expect(f.readReceipt().nativeIdentityVerified).toBe(false);
+  });
+
+  it("preserves native identity failure when STOPPED cannot be written", async () => {
+    const { f, server } = await prepared({ "turn/start": (_params, hooks) => {
+      hooks.onMessage({ method: "turn/started", params: { threadId: THREAD, turn: { id: TURN } } });
+      hooks.onMessage(identity(THREAD, 76));
+      return { turn: { id: TURN } };
+    } });
+    const writeReceipt = (path: string, value: { status: string }, exclusive?: boolean) => {
+      if (value.status === "STOPPED") throw Object.assign(new Error("reader lock"), { code: "EPERM" });
+      privateWrite(path, value, exclusive);
+    };
+    await expect(runPreparedCourseSupportWorker({ ...f.options, clientFactory: server.clientFactory, writeReceipt }))
+      .rejects.toMatchObject({ code: "NATIVE_THREAD_IDENTITY_MISMATCH", diagnosticWriteFailureCode: "EPERM" });
+    expect(server.request.mock.calls.some(([method]) => method === "turn/interrupt")).toBe(true);
   });
 
   it("wakes immediately on server failure instead of waiting for the episode timeout", async () => {
@@ -466,5 +493,17 @@ describe("private receipt replacement", () => {
     expect(sleep).not.toHaveBeenCalled();
     expect(readFileSync(path, "utf8")).toBe("old");
     expect(readdirSync(f.cwd).filter(name => name.includes(".tmp"))).toEqual([]);
+  });
+
+  it("preserves the rename error if temporary-file cleanup also fails", () => {
+    const f = fixture();
+    const path = join(f.cwd, "receipt.json");
+    writeFileSync(path, "old");
+    expect(() => privateWrite(path, { status: "RUNNING" }, false, {
+      platform: "win32", sleep: () => {},
+      rename() { throw Object.assign(new Error("reader lock"), { code: "EPERM" }); },
+      remove() { throw Object.assign(new Error("cleanup denied"), { code: "EACCES" }); },
+    })).toThrow(expect.objectContaining({ code: "EPERM", cleanupCauseCode: "EACCES" }));
+    expect(readFileSync(path, "utf8")).toBe("old");
   });
 });

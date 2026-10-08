@@ -17,6 +17,11 @@ function failure(code) { return Object.assign(new Error(code), { code }); }
 function safeIoCode(error) {
   return ["EACCES", "EBUSY", "EPERM", "ENOENT", "ENOSPC", "EIO"].includes(error?.code) ? error.code : undefined;
 }
+export function retainPrimaryFailure(primary, secondary, field = "diagnosticWriteFailureCode") {
+  try { if (primary && typeof primary === "object") primary[field] = safeIoCode(secondary) ?? "UNCLASSIFIED"; }
+  catch { /* A diagnostic cannot replace the original failure. */ }
+  return primary;
+}
 function absoluteFile(path) {
   if (typeof path !== "string" || !isAbsolute(path) || !statSync(path).isFile()) throw failure("ABSOLUTE_FILE_REQUIRED");
   return realpathSync(path);
@@ -41,7 +46,11 @@ export function privateWrite(path, value, exclusive = false, dependencies = {}) 
         sleep(10 * (attempt + 1));
       }
     }
-  } catch (error) { unlinkSync(temporary); throw error; }
+  } catch (error) {
+    try { (dependencies.remove ?? unlinkSync)(temporary); }
+    catch (cleanupError) { retainPrimaryFailure(error, cleanupError, "cleanupCauseCode"); }
+    throw error;
+  }
 }
 
 export function assertFullAccessAcknowledgement(result, cwd) {
@@ -206,7 +215,8 @@ export async function prepareCourseSupportWorker(options) {
   // missing source rollout. Legacy is the compatibility default and still needs
   // live cold-start verification; explicit paginated attempts never auto-replace.
   const { receiptPath, title, historyMode = "legacy", clientFactory = createWorkerAppServer,
-    inspectCheckout = assertOwnedWorkerCheckout, inspectCli = readWorkerCliVersion } = options;
+    inspectCheckout = assertOwnedWorkerCheckout, inspectCli = readWorkerCliVersion,
+    writeReceipt = privateWrite } = options;
   if (typeof receiptPath !== "string" || !isAbsolute(receiptPath) || !["legacy", "paginated"].includes(historyMode)) throw failure("INVALID_PREPARE_OPTIONS");
   const cliPath = absoluteFile(options.cliPath);
   const checkout = inspectCheckout(options.cwd);
@@ -217,7 +227,7 @@ export async function prepareCourseSupportWorker(options) {
     createdAt: new Date().toISOString(), launcherPid: process.pid, nativeCreationPossible: false,
     approvalRequests: 0, nativeIdentityVerified: false,
   };
-  privateWrite(receiptPath, receipt, true);
+  writeReceipt(receiptPath, receipt, true);
   let client;
   let approvalSeen = false;
   let transportFailure = null;
@@ -225,18 +235,18 @@ export async function prepareCourseSupportWorker(options) {
     client = clientFactory({ ...receipt, onFailure(error) { transportFailure = error; }, onMessage(message) {
       if (isApprovalRequest(message)) { approvalSeen = true; receipt.approvalRequests += 1; }
     } });
-    receipt.serverPid = client.pid; privateWrite(receiptPath, receipt);
+    receipt.serverPid = client.pid; writeReceipt(receiptPath, receipt);
     await initialize(client, checkout.cwd);
     if (transportFailure) throw transportFailure;
     if (approvalSeen) throw failure("UNEXPECTED_APPROVAL_REQUEST");
-    receipt.status = "CREATING"; receipt.nativeCreationPossible = true; privateWrite(receiptPath, receipt);
+    receipt.status = "CREATING"; receipt.nativeCreationPossible = true; writeReceipt(receiptPath, receipt);
     const started = await client.request("thread/start", {
       cwd: checkout.cwd, ephemeral: false, historyMode, approvalPolicy: "never",
       permissions: WORKER_PERMISSION_PROFILE, runtimeWorkspaceRoots: [checkout.cwd],
       threadSource: "agent_created_thread",
     });
     if (UUID.test(started?.thread?.id ?? "")) receipt.threadId = started.thread.id;
-    privateWrite(receiptPath, receipt);
+    writeReceipt(receiptPath, receipt);
     assertFullAccessAcknowledgement(started, checkout.cwd);
     assertUnusedWorkerThread(started.thread, receipt.threadId, historyMode);
     if (transportFailure) throw transportFailure;
@@ -249,12 +259,15 @@ export async function prepareCourseSupportWorker(options) {
     receipt.sandbox = started.sandbox;
     receipt.activePermissionProfile = started.activePermissionProfile;
     receipt.source = started.thread.source;
-    privateWrite(receiptPath, receipt);
+    writeReceipt(receiptPath, receipt);
     return { outcome: "prepared", threadId: receipt.threadId, receiptPath };
   } catch (error) {
     receipt.status = receipt.nativeCreationPossible ? "CREATION_UNKNOWN" : "FAILED_BEFORE_CREATION";
     receipt.failureCode = error.code ?? "WORKER_PREPARATION_FAILED";
-    privateWrite(receiptPath, receipt); throw error;
+    if (error.causeCode) receipt.failureCauseCode = error.causeCode;
+    try { writeReceipt(receiptPath, receipt); }
+    catch (diagnosticError) { retainPrimaryFailure(error, diagnosticError); }
+    throw error;
   } finally { await client?.close(); }
 }
 
@@ -280,7 +293,8 @@ export function hasNativeIdentityProof(message) {
 export async function runPreparedCourseSupportWorker(options) {
   const { receiptPath, promptPath, clientFactory = createWorkerAppServer,
     inspectCheckout = assertOwnedWorkerCheckout, inspectCli = readWorkerCliVersion,
-    turnTimeoutMs = WORKER_TURN_TIMEOUT_MS, nodePath = process.execPath } = options;
+    turnTimeoutMs = WORKER_TURN_TIMEOUT_MS, nodePath = process.execPath,
+    writeReceipt = privateWrite } = options;
   const receipt = JSON.parse(readFileSync(absoluteFile(receiptPath), "utf8"));
   if (receipt.schemaVersion !== 1 || receipt.status !== "PREPARED" || !UUID.test(receipt.threadId ?? "") ||
       !["legacy", "paginated"].includes(receipt.historyMode) || receipt.nativeIdentityVerified !== false ||
@@ -298,7 +312,7 @@ export async function runPreparedCourseSupportWorker(options) {
   const marker = openSync(`${receiptPath}.first-turn-started`, "wx", 0o600); closeSync(marker);
   receipt.status = "RUN_PREPARING"; receipt.launcherPid = process.pid;
   receipt.promptSha256 = createHash("sha256").update(prompt).digest("hex");
-  privateWrite(receiptPath, receipt);
+  writeReceipt(receiptPath, receipt);
   let client;
   let fatal = null;
   let completed = null;
@@ -326,11 +340,11 @@ export async function runPreparedCourseSupportWorker(options) {
         completed = message.params.turn; wake();
       }
       if (changed) {
-        try { privateWrite(receiptPath, receipt); }
+        try { writeReceipt(receiptPath, receipt); }
         catch (error) { throw Object.assign(failure("WORKER_RECEIPT_WRITE_FAILED"), { causeCode: safeIoCode(error) }); }
       }
     } });
-    receipt.serverPid = client.pid; privateWrite(receiptPath, receipt);
+    receipt.serverPid = client.pid; writeReceipt(receiptPath, receipt);
     await initialize(client, receipt.cwd);
     await readUnusedThread(client, receipt);
     const resumed = await client.request("thread/resume", {
@@ -341,7 +355,7 @@ export async function runPreparedCourseSupportWorker(options) {
     assertUnusedWorkerThread(resumed.thread, receipt.threadId, receipt.historyMode);
     await readUnusedThread(client, receipt);
     if (fatal) throw fatal;
-    receipt.status = "TURN_STARTING"; privateWrite(receiptPath, receipt);
+    receipt.status = "TURN_STARTING"; writeReceipt(receiptPath, receipt);
     const started = await client.request("turn/start", {
       threadId: receipt.threadId, input: [{ type: "text", text: firstPrompt }],
       cwd: receipt.cwd, approvalPolicy: "never", permissions: WORKER_PERMISSION_PROFILE,
@@ -349,19 +363,21 @@ export async function runPreparedCourseSupportWorker(options) {
     });
     if (typeof started?.turn?.id !== "string" || !started.turn.id ||
         (receipt.turnId && receipt.turnId !== started.turn.id)) throw failure("WORKER_TURN_ID_NOT_ACKNOWLEDGED");
-    receipt.turnId = started.turn.id; privateWrite(receiptPath, receipt);
+    receipt.turnId = started.turn.id; writeReceipt(receiptPath, receipt);
     await completion;
     if (fatal) throw fatal;
     if (!receipt.nativeIdentityVerified) throw failure("NATIVE_THREAD_IDENTITY_NOT_PROVED");
     receipt.status = completed?.status === "completed" ? "COMPLETED" : "TURN_FAILED";
     receipt.turnStatus = completed?.status ?? "unknown";
-    receipt.completedAt = new Date().toISOString(); privateWrite(receiptPath, receipt);
+    receipt.completedAt = new Date().toISOString(); writeReceipt(receiptPath, receipt);
     if (receipt.status !== "COMPLETED") throw failure("WORKER_TURN_DID_NOT_COMPLETE");
     return { outcome: "completed", nativeIdentityVerified: true, approvalRequests: receipt.approvalRequests };
   } catch (error) {
     await interrupt(); receipt.status = "STOPPED"; receipt.failureCode = error.code ?? "WORKER_LAUNCH_FAILED";
     if (error.causeCode) receipt.failureCauseCode = error.causeCode;
-    privateWrite(receiptPath, receipt); throw error;
+    try { writeReceipt(receiptPath, receipt); }
+    catch (diagnosticError) { retainPrimaryFailure(error, diagnosticError); }
+    throw error;
   } finally { clearTimeout(timer); await client?.close(); }
 }
 

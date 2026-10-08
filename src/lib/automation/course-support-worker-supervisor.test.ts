@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -100,6 +100,47 @@ describe("course worker launch supervisor", () => {
       { ...f.deps, spawnDetached })).rejects.toThrow("denied");
     expect(readFileSync(join(f.output, "supervisor.dispatch.private.json"), "utf8")).toContain('"failureCode": "EACCES"');
     expect(child.unref).not.toHaveBeenCalled();
+  });
+
+  it("retries a transient Windows supervisor receipt rename and completes the same launch", async () => {
+    const f = fixture();
+    let held = false;
+    const sleep = vi.fn();
+    const receiptIo = { platform: "win32", sleep, rename(from: string, to: string) {
+      if (!held) { held = true; throw Object.assign(new Error("reader lock"), { code: "EPERM" }); }
+      renameSync(from, to);
+    } };
+    await expect(superviseCourseSupportWorker(f.input, { ...f.deps, receiptIo })).resolves.toMatchObject({ outcome: "completed" });
+    expect(sleep).toHaveBeenCalledOnce();
+    expect(readFileSync(join(f.output, "supervisor.receipt.private.json"), "utf8")).toContain('"status": "COMPLETED"');
+    expect(f.deps.prepare).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the start refusal when writing ATTENTION also fails", async () => {
+    const f = fixture();
+    f.deps.spawn.mockReturnValueOnce({ status: 2, stdout: "", stderr: "refused" });
+    const receiptIo = { platform: "win32", sleep: () => {}, rename(from: string, to: string) {
+      if (JSON.parse(readFileSync(from, "utf8")).status === "ATTENTION") {
+        throw Object.assign(new Error("reader lock"), { code: "EPERM" });
+      }
+      renameSync(from, to);
+    } };
+    await expect(superviseCourseSupportWorker(f.input, { ...f.deps, receiptIo })).rejects.toMatchObject({
+      code: "DISPATCH_START_FAILED", diagnosticWriteFailureCode: "EPERM",
+    });
+    expect(f.deps.prepare).not.toHaveBeenCalled();
+    expect(readFileSync(join(f.output, "supervisor.receipt.private.json"), "utf8")).toContain('"status": "START_REQUESTED"');
+  });
+
+  it("keeps the parent guard error when dispatch ATTENTION cannot be written", async () => {
+    const f = fixture();
+    const receiptIo = { platform: "win32", sleep: () => {}, rename() {
+      throw Object.assign(new Error("reader lock"), { code: "EPERM" });
+    } };
+    await expect(dispatchCourseSupportWorker({ ...f.input, parentThreadId: CHILD },
+      { contextFile: join(f.output, "context.json"), assignmentFile: join(f.output, "assignment.json") },
+      { ...f.deps, receiptIo })).rejects.toMatchObject({ code: "NATIVE_PARENT_ID_MISMATCH", diagnosticWriteFailureCode: "EPERM" });
+    expect(readFileSync(join(f.output, "supervisor.dispatch.private.json"), "utf8")).toContain('"status": "DISPATCHING"');
   });
   it("requires actual parent, exact preflight context, reserved assignment and current base before start", () => {
     const f = fixture();
