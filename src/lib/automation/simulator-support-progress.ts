@@ -1,4 +1,5 @@
 import { assertSimulatorSupportDeployment, type SimulatorSupportClaim } from "./simulator-support-policy";
+import { evaluateSimulatorEngineeringVerification, readSimulatorEngineeringVerificationState, type SimulatorEngineeringVerificationState } from "./simulator-support-engineering-verification-policy";
 
 type SearchState = {
   id: string;
@@ -36,10 +37,15 @@ export type SimulatorSupportProgressInput = {
   /** The newest offering probes in descending observedAt/id order, at most 16. */
   probes: SimulatorSupportProgressProbe[];
   searches: SearchState[];
+  /** Only the ownership layer may select independent engineering authority. */
+  engineeringVerification?: SimulatorEngineeringVerificationState | null;
+  customerDemandPresent?: boolean;
 };
 
 export type SimulatorSupportProgress = {
-  nextAction: "WAIT_FOR_CHECK" | "RECHECK_SECOND" | "COMPLETE" | "REPAIR";
+  nextAction: "WAIT_FOR_CHECK" | "RECHECK_SECOND" | "VERIFY_ENGINEERING" | "RETRY_ENGINEERING" | "COMPLETE" | "REPAIR";
+  verificationKind: "CUSTOMER_SEARCH" | "ENGINEERING_ONLY";
+  customerAcceptance: boolean;
   reasons: string[];
   leaseValid: boolean;
   demandCurrent: boolean;
@@ -78,6 +84,44 @@ export function isFinishedSimulatorSupportCheck(probe: SimulatorSupportProgressP
 
 export function evaluateSimulatorSupportProgress(input: SimulatorSupportProgressInput): SimulatorSupportProgress {
   const { now, claim, owner } = input;
+  if (input.engineeringVerification !== undefined) {
+    const prior = readSimulatorEngineeringVerificationState(input.engineeringVerification);
+    const belongsToCurrentRelease = prior?.runtimeVersion === claim.releaseSha && prior?.deploymentId === claim.deployment?.deploymentId &&
+      prior?.sourceFingerprint === claim.sourceFingerprint;
+    const state = belongsToCurrentRelease || prior?.inFlight ? prior : undefined;
+    const observed = state ? evaluateSimulatorEngineeringVerification({ now, claim, sourceFingerprint: input.sourceFingerprint, state }) : null;
+    let releaseReady = observed?.releaseReady ?? false;
+    const freshEpisode = !state && (input.engineeringVerification === null || Boolean(prior));
+    if (freshEpisode) {
+      try { if (claim.releaseSha && claim.deployment) { assertSimulatorSupportDeployment(claim.deployment, claim.releaseSha, now); releaseReady = true; } }
+      catch { /* The engineering lane retains the same exact Ready release fence. */ }
+    }
+    const offeringReady = input.offering.publicAccessStatus === "PUBLIC" && input.offering.monitoringState === "HEALTHY" &&
+      input.offering.automationEligibility === "ALLOWED";
+    const sourceCurrent = owner.sourceCurrent && claim.sourceFingerprint === input.sourceFingerprint;
+    const readyForCompletion = owner.leaseValid && owner.demandCurrent && sourceCurrent && releaseReady && offeringReady &&
+      observed?.freshSuccessfulChecks === 2 && !observed.inFlight && !input.customerDemandPresent;
+    const reasons = [
+      ...(!owner.leaseValid ? ["OWNER_LEASE_STALE"] : []), ...(!owner.demandCurrent ? ["ENGINEERING_AUTHORITY_CHANGED"] : []),
+      ...(!sourceCurrent ? ["OFFERING_SOURCE_CHANGED"] : []), ...(!releaseReady ? ["EXACT_RELEASE_NOT_READY"] : []),
+      ...(!offeringReady ? ["PUBLIC_MONITORING_NOT_HEALTHY"] : []),
+      ...(observed?.inFlight ? ["ENGINEERING_READ_IN_FLIGHT"] : []),
+      ...(observed?.expiredReservation ? ["ENGINEERING_READ_EXPIRED"] : []),
+      ...(input.customerDemandPresent ? ["NORMAL_CUSTOMER_CHECK_REQUIRED"] : []),
+      ...(observed?.failedObservation ? ["LATEST_ENGINEERING_OBSERVATION_NOT_VERIFIED"] : []),
+      ...(!state ? [freshEpisode ? "FIRST_ENGINEERING_READ_NEEDED" : "ENGINEERING_EVIDENCE_INVALID"] : []),
+      ...(observed?.firstCheckReady && observed.freshSuccessfulChecks < 2 ? ["SECOND_FRESH_CHECK_NEEDED"] : []),
+    ];
+    const repair = !owner.leaseValid || !owner.demandCurrent || !sourceCurrent || !releaseReady ||
+      input.offering.publicAccessStatus !== "PUBLIC" || Boolean(observed?.expiredReservation) ||
+      !state && !freshEpisode;
+    return { nextAction: readyForCompletion ? "COMPLETE" : repair ? "REPAIR" : observed?.inFlight ? "WAIT_FOR_CHECK" :
+      input.customerDemandPresent || observed?.failedObservation ? "RETRY_ENGINEERING" : "VERIFY_ENGINEERING",
+      verificationKind: "ENGINEERING_ONLY", customerAcceptance: false, reasons, leaseValid: owner.leaseValid, demandCurrent: owner.demandCurrent,
+      sourceCurrent, releaseReady, offeringReady, verificationCycle: state?.readsUsed ?? 0, firstCheckReady: observed?.firstCheckReady ?? false,
+      freshSuccessfulChecks: observed?.freshSuccessfulChecks ?? 0, readyForCompletion, currentDeploymentReadbackRequired: true,
+      qualifyingProbeIds: observed?.qualifyingObservationIds ?? [], latestProbe: null };
+  }
   const afterMs = claim.recheckQueuedAt && claim.deployment
     ? Math.max(Date.parse(claim.recheckQueuedAt), Date.parse(claim.deployment.deployedAt), Date.parse(claim.claimedAt)) : NaN;
   let releaseReady = Boolean(claim.releaseSha && claim.deployment && claim.recheckQueuedAt && Number.isFinite(afterMs));
@@ -154,7 +198,7 @@ export function evaluateSimulatorSupportProgress(input: SimulatorSupportProgress
   const nextAction = readyForCompletion ? "COMPLETE" : repair ? "REPAIR" :
     claim.verificationCycle === 1 && firstCheckReady ? "RECHECK_SECOND" :
       first && latestIsPostQueue && !firstCheckReady && reasons.includes("LATEST_OBSERVATION_NOT_VERIFIED") ? "REPAIR" : "WAIT_FOR_CHECK";
-  return { nextAction, reasons, leaseValid: owner.leaseValid, demandCurrent: owner.demandCurrent,
+  return { nextAction, verificationKind: "CUSTOMER_SEARCH", customerAcceptance: readyForCompletion, reasons, leaseValid: owner.leaseValid, demandCurrent: owner.demandCurrent,
     sourceCurrent: owner.sourceCurrent && claim.sourceFingerprint === input.sourceFingerprint,
     releaseReady, offeringReady, verificationCycle: claim.verificationCycle, firstCheckReady,
     freshSuccessfulChecks: ids.length, readyForCompletion, currentDeploymentReadbackRequired: true,

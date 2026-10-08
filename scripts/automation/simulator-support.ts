@@ -12,10 +12,11 @@ import { SIMULATOR_RESEARCH_SOURCE_NAMES, type SimulatorResearchSource } from "@
 import { classifySimulatorSupportFailure, readSafeSimulatorSupportFailure, type SimulatorSupportFailure, type SimulatorSupportFailureStage } from "@/lib/automation/simulator-support-failure";
 import { waitForGitDeployment } from "@/lib/deployments/wait-for-git-deployment";
 import type { VercelDeploymentInspection, VercelDeploymentList } from "@/lib/deployments/vercel-git";
+import { SIMULATOR_ENGINEERING_VERIFICATION_FAILURE_CODES, type SimulatorEngineeringVerificationFailureCode } from "@/lib/automation/simulator-support-engineering-verification-policy";
 
 export function readSimulatorSupportArguments(args: readonly string[]) {
   const [command, ...options] = args;
-  if (!["claim", "source-read", "progress", "heartbeat", "recover", "retire", "configure", "classify", "path", "adopt-source", "release", "deployed", "recheck", "complete", "retry", "inspect"].includes(command)) throw new Error("Use a supported simulator-support command.");
+  if (!["claim", "source-read", "progress", "verify-engineering", "heartbeat", "recover", "retire", "configure", "classify", "path", "adopt-source", "release", "deployed", "recheck", "complete", "retry", "inspect"].includes(command)) throw new Error("Use a supported simulator-support command.");
   const values = new Map<string, string>();
   let apply = false;
   let repair = false;
@@ -94,6 +95,37 @@ function vercelJson<T>(args: string[]): T {
   return JSON.parse(execFileSync(windows ? process.env.ComSpec ?? "cmd.exe" : "npx", windows ? ["/d", "/s", "/c", ["npx", "vercel", ...args].join(" ")] : ["vercel", ...args], { encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "pipe"], timeout: 120_000 })) as T;
 }
 
+/** Original worker only: the fixed production endpoint derives all provider/date/party facts. */
+class SimulatorEngineeringVerificationCommandError extends Error {
+  constructor(readonly code: SimulatorEngineeringVerificationFailureCode, readonly httpStatus: number) {
+    super("The deployed independent simulator verification could not complete; inspect the original worker.");
+  }
+}
+export async function requestSimulatorEngineeringVerification(input: { assignmentRef: string; token: string; revision: number },
+  dependencies: { apiKey?: string; fetchImpl?: typeof fetch } = {}) {
+  const apiKey = dependencies.apiKey ?? process.env.AUTOMATION_API_KEY;
+  if (!apiKey?.trim()) throw new Error("Simulator engineering verification requires the private automation authority.");
+  const response = await (dependencies.fetchImpl ?? fetch)("https://teetimespot.com/api/automation/simulator-support/verify", {
+    method: "POST", redirect: "error", cache: "no-store", signal: AbortSignal.timeout(150_000),
+    headers: { "content-type": "application/json", "x-automation-key": apiKey },
+    body: JSON.stringify({ assignmentRef: input.assignmentRef, token: input.token, revision: input.revision }),
+  });
+  if (!response.ok) {
+    const failed: unknown = await response.json().catch(() => null);
+    const value = failed && typeof failed === "object" && !Array.isArray(failed) ? (failed as { code?: unknown }).code : null;
+    const code = typeof value === "string" && (SIMULATOR_ENGINEERING_VERIFICATION_FAILURE_CODES as readonly string[]).includes(value)
+      ? value as SimulatorEngineeringVerificationFailureCode : "VERIFICATION_FAILED";
+    throw new SimulatorEngineeringVerificationCommandError(code, response.status);
+  }
+  const result: unknown = await response.json();
+  if (!result || typeof result !== "object" || Array.isArray(result) ||
+      (result as { engineeringOnly?: unknown }).engineeringOnly !== true ||
+      (result as { customerAcceptance?: unknown }).customerAcceptance !== false) {
+    throw new Error("Simulator engineering verification returned an invalid independent result.");
+  }
+  return result;
+}
+
 async function main() {
   const input = readSimulatorSupportArguments(process.argv.slice(2));
   if (!process.env.DATABASE_URL?.trim() || !/^postgres(?:ql)?:\/\//.test(process.env.DATABASE_URL.trim())) throw new Error("Simulator support requires the explicit database environment.");
@@ -109,6 +141,11 @@ async function main() {
     result = claim;
   }
   else if (input.command === "progress") result = await readSimulatorSupportProgress(owner);
+  else if (input.command === "verify-engineering") {
+    const claim = await readSimulatorSupportClaim(owner);
+    assertSimulatorSupportInspectionFence(input, claim);
+    result = await requestSimulatorEngineeringVerification(input);
+  }
   else if (input.command === "heartbeat") result = await heartbeatSimulatorSupport(owner);
   else if (input.command === "recover") result = await recoverSimulatorSupport(owner);
   else if (input.command === "retire") result = await retireSimulatorSupport(owner);
@@ -149,11 +186,25 @@ async function main() {
     });
     result = await completeSimulatorSupport({ ...owner, currentDeployment });
   }
-  else result = await retrySimulatorSupport({ ...owner, retryMinutes: input.retryMinutes });
+  else {
+    const claim = await readSimulatorSupportClaim(owner);
+    assertSimulatorSupportInspectionFence(input, claim);
+    if (claim.supportAuthority === "ENGINEERING_INCIDENT" && claim.phase === "VERIFYING" && claim.releaseSha) {
+      assertSimulatorSupportCompletionCheckout(claim.releaseSha);
+      const currentDeployment = await waitForGitDeployment({ commitSha: claim.releaseSha, timeoutSeconds: 60, pollSeconds: 15 }, {
+        listDeployments: () => vercelJson<VercelDeploymentList>(["ls", "--environment", "production", "--meta", `githubCommitSha=${claim.releaseSha}`, "--format", "json", "--limit", "20"]),
+        inspectAlias: alias => vercelJson<VercelDeploymentInspection>(["inspect", alias, "--format", "json"]),
+      });
+      result = await retrySimulatorSupport({ ...owner, retryMinutes: input.retryMinutes, currentDeployment, releaseCheckoutVerified: true });
+    } else result = await retrySimulatorSupport({ ...owner, retryMinutes: input.retryMinutes });
+  }
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
 export function reportSimulatorSupportFailure(error: unknown, stage: SimulatorSupportFailureStage = "COMMAND", latestOwnedRevision?: number, settledFailure?: SimulatorSupportFailure) {
+  if (error instanceof SimulatorEngineeringVerificationCommandError) {
+    process.stderr.write(`${JSON.stringify({ simulatorEngineeringVerificationFailure: { code: error.code, httpStatus: error.httpStatus } })}\n`);
+  }
   const failure = readSafeSimulatorSupportFailure(settledFailure) ?? classifySimulatorSupportFailure(error, stage);
   const recovery = error as { durableCloseoutRecorded?: unknown; retryAt?: unknown } | null;
   const closedRetry = recovery?.durableCloseoutRecorded === true && typeof recovery.retryAt === "string" &&

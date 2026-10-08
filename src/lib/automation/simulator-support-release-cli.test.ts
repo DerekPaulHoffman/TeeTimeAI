@@ -1,11 +1,27 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
-import { assertSimulatorSupportCompletionCheckout, prepareSimulatorSupportReleaseProvenance, readSimulatorSupportArguments } from "../../../scripts/automation/simulator-support";
+import { assertSimulatorSupportCompletionCheckout, prepareSimulatorSupportReleaseProvenance, readSimulatorSupportArguments, requestSimulatorEngineeringVerification } from "../../../scripts/automation/simulator-support";
 
 const original = "a".repeat(40), upstream = "b".repeat(40), candidate = "c".repeat(40);
 
 describe("private simulator source CLI selection", () => {
   const ownerArgs = ["--assignment-ref", "owned-assignment", "--token", "owned-token", "--revision", "3"];
+  it("permits engineering verification only with the original authority and no arbitrary provider/date input", async () => {
+    expect(readSimulatorSupportArguments(["verify-engineering", ...ownerArgs])).toMatchObject({ command: "verify-engineering", revision: 3 });
+    for (const extra of [["--source", "booking"], ["--url", "https://public.example"], ["--date", "2026-10-09"], ["--sha", "a".repeat(40)]]) {
+      expect(() => readSimulatorSupportArguments(["verify-engineering", ...ownerArgs, ...extra])).toThrow();
+    }
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ engineeringOnly: true, customerAcceptance: false, revision: 5 }), { status: 200 }));
+    await requestSimulatorEngineeringVerification({ assignmentRef: "owned-assignment", token: "owned-token", revision: 3 }, { apiKey: "private_test_key", fetchImpl });
+    expect(fetchImpl).toHaveBeenCalledWith("https://teetimespot.com/api/automation/simulator-support/verify", expect.objectContaining({ redirect: "error", method: "POST",
+      body: JSON.stringify({ assignmentRef: "owned-assignment", token: "owned-token", revision: 3 }) }));
+    fetchImpl.mockResolvedValue(new Response(JSON.stringify({ customerAcceptance: true }), { status: 200 }));
+    await expect(requestSimulatorEngineeringVerification({ assignmentRef: "owned-assignment", token: "owned-token", revision: 3 }, { apiKey: "private_test_key", fetchImpl })).rejects.toThrow("invalid independent result");
+    fetchImpl.mockResolvedValue(new Response(JSON.stringify({ code: "READ_IN_FLIGHT", error: "private body" }), { status: 409 }));
+    await expect(requestSimulatorEngineeringVerification({ assignmentRef: "owned-assignment", token: "owned-token", revision: 3 }, { apiKey: "private_test_key", fetchImpl })).rejects.toMatchObject({ code: "READ_IN_FLIGHT", httpStatus: 409 });
+    fetchImpl.mockResolvedValue(new Response(JSON.stringify({ code: "private_body_with_token", error: "private body" }), { status: 503 }));
+    await expect(requestSimulatorEngineeringVerification({ assignmentRef: "owned-assignment", token: "owned-token", revision: 3 }, { apiKey: "private_test_key", fetchImpl })).rejects.toMatchObject({ code: "VERIFICATION_FAILED", httpStatus: 503 });
+  });
   it("requires an explicit applied reviewed configuration for metadata repair", () => {
     expect(readSimulatorSupportArguments(["configure", ...ownerArgs, "--manifest", "C:/private/manifest.json",
       "--repair", "--apply"])).toMatchObject({ command: "configure", repair: true, apply: true });

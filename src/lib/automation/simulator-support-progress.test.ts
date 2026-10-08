@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { evaluateSimulatorSupportProgress, type SimulatorSupportProgressInput, type SimulatorSupportProgressProbe } from "./simulator-support-progress";
+import type { SimulatorEngineeringVerificationState } from "./simulator-support-engineering-verification-policy";
 
 const now = new Date("2026-10-06T15:00:00Z");
 const releaseSha = "b".repeat(40);
@@ -28,6 +29,44 @@ function probe(id: string, minute: number, runId = id): SimulatorSupportProgress
 }
 
 describe("simulator support progress", () => {
+  function engineeringState(): SimulatorEngineeringVerificationState {
+    return { schemaVersion: 1, sourceFingerprint, runtimeVersion: releaseSha, deploymentId: proof.deploymentId,
+      startedAt: "2026-10-06T14:50:00Z", readsUsed: 2, inFlight: null, observations: [56, 58].map((minute, index) => ({
+        requestId: `read_${index}`, revision: index + 2, requestedDate: "2026-10-07", startedAt: `2026-10-06T14:${minute}:00Z`,
+        expiresAt: `2026-10-06T14:${minute + 1}:30Z`, completedAt: `2026-10-06T14:${minute}:20Z`,
+        providerObservedAt: `2026-10-06T14:${minute}:10Z`, outcome: "NO_MATCH", complete: true, slotCount: 0, failureCode: null,
+      })) };
+  }
+  it("keeps independent no-send engineering evidence separate from expired customer searches", () => {
+    const state = input(); state.engineeringVerification = engineeringState(); state.searches = [];
+    state.claim.recheckQueuedAt = null; state.claim.verificationCycle = 0;
+    expect(evaluateSimulatorSupportProgress(state)).toMatchObject({ nextAction: "COMPLETE", verificationKind: "ENGINEERING_ONLY",
+      customerAcceptance: false, freshSuccessfulChecks: 2, readyForCompletion: true, latestProbe: null });
+    state.customerDemandPresent = true;
+    expect(evaluateSimulatorSupportProgress(state)).toMatchObject({ nextAction: "RETRY_ENGINEERING", customerAcceptance: false, readyForCompletion: false,
+      reasons: expect.arrayContaining(["NORMAL_CUSTOMER_CHECK_REQUIRED"]) });
+  });
+  it("reports finite retry for failed reads and explicit repair for expired reservations without hidden revision advances", () => {
+    const state = input(); state.engineeringVerification = engineeringState(); state.searches = [];
+    state.engineeringVerification.observations[1].complete = false;
+    state.engineeringVerification.observations[1].failureCode = "SCHEMA_CHANGED";
+    expect(evaluateSimulatorSupportProgress(state)).toMatchObject({ nextAction: "RETRY_ENGINEERING", readyForCompletion: false });
+    const pending = state.engineeringVerification.observations.pop()!;
+    state.engineeringVerification.inFlight = { requestId: pending.requestId, revision: pending.revision, requestedDate: pending.requestedDate,
+      startedAt: pending.startedAt, expiresAt: pending.expiresAt };
+    expect(evaluateSimulatorSupportProgress(state)).toMatchObject({ nextAction: "REPAIR", reasons: expect.arrayContaining(["ENGINEERING_READ_EXPIRED"]) });
+    expect(state.claim.revision).toBe(1);
+  });
+  it("allows a first fresh read after an actually registered new source or release while retaining old failure evidence", () => {
+    const state = input(); state.engineeringVerification = engineeringState(); state.claim.releaseSha = "c".repeat(40);
+    state.claim.deployment = { ...proof, commitSha: state.claim.releaseSha, deploymentId: "dpl_repaired" };
+    state.engineeringVerification.observations[1].complete = false;
+    expect(evaluateSimulatorSupportProgress(state)).toMatchObject({ nextAction: "VERIFY_ENGINEERING", freshSuccessfulChecks: 0, readyForCompletion: false,
+      reasons: expect.arrayContaining(["FIRST_ENGINEERING_READ_NEEDED"]) });
+    expect(state.engineeringVerification.observations).toHaveLength(2);
+    state.claim.sourceFingerprint = "d".repeat(64); state.sourceFingerprint = state.claim.sourceFingerprint;
+    expect(evaluateSimulatorSupportProgress(state).nextAction).toBe("VERIFY_ENGINEERING");
+  });
   it("waits without treating a queued or running check as a success", () => {
     const state = input();
     expect(evaluateSimulatorSupportProgress(state)).toMatchObject({ nextAction: "WAIT_FOR_CHECK", freshSuccessfulChecks: 0, firstCheckReady: false });
