@@ -343,3 +343,21 @@ wrapper. No wrapper role, private-runtime, input, native, source, admission or
 production-failure fence is relaxed, and no new recovery protocol is added.
 Root's already completed direct waiter proved this command path on the same
 released SHA and both aliases; normal scheduled use remains its own acceptance.
+
+The actual23:10 parent passed preflight and a direct deployment waiter, then
+manually made its read-only original-runtime report fail whenever aggregate
+setupRequired was true. In the old297 candidate that flag was true only because
+the new private Vercel dependency was absent; actual Node/npm, private binding,
+generated client, browser and separate Chromium smoke were healthy. Requiring
+the new dependency before resume prevented the original owner from performing
+the already prescribed post-resume reviewed-main merge and private refresh.
+
+The existing request factory deliberately validates the narrower original
+admission evidence and does not require that new CLI or origin/main HEAD.
+The parent instructions now explicitly use that projection with the complete
+unchanged inspection/smoke, instead of creating an exit2 from the coarse setup
+flag. They retain real missing fields, all actual native/source/client/browser
+guards, the selected parent's prepared CLI and the later child's fully prepared
+protected-command CLI. The parent never installs in the original checkout.
+This corrects the observed sequencing contradiction without changing code,
+granting authority from a local exit0, adding a protocol or replaying a request.

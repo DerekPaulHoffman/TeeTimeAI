@@ -36,6 +36,32 @@ selected/original checkout, native identity and private-runtime gates remain
 unchanged. The direct deployment waiter reads Vercel state only; it neither
 starts a search check nor reserves or resumes a worker.
 
+For an expired owned stage, collect the original checkout's local facts with
+the existing exported `inspectCourseSupportWorkerRuntime`, then record the
+actual separate read-only Chromium smoke. Pass that complete, unchanged
+inspection and smoke to `buildCourseSupportContinuationRequest` as
+`runtimeObservation`. Its existing readiness projection validates the original
+Node/npm, private repository/project binding, generated client, browser and
+fresh smoke together with the original native/process/source/Ready proof.
+
+Do not require `inspection.setupRequired === false`, `inspection.vercel.status
+=== "current"`, or `inspection.guards.atLocalOriginMain === true` before this
+owned-stage admission. An intact registered candidate based on older main can
+truthfully have `setupRequired:true` and no private Vercel dependency. Do not turn
+that aggregate flag into an exit2 in a parent observation script, and do not
+use the generic runtime CLI's setup exit code as the admission verdict. Keep
+those actual fields in the packet; never rewrite them as ready or fabricate
+native identity. The existing request factory must accept the real evidence
+before `continue`, and genuine private binding/client/browser/native/source
+failures still stop.
+
+Only the resumed original owner may merge reviewed main and refresh its own
+locked dependencies through `docs/simulator-support-continuation-worker.md`.
+The parent never installs or changes that old candidate. The selected parent
+needs its current private CLI before dispatch, and every later child protected
+application operation still requires its own fully prepared CLI. Admission
+readiness and protected-command readiness are different existing contracts.
+
 For this owned-stage item, take an actual complete supported `list_threads`
 inventory (maximum 50 entries), then run the qualified read-only observer using
 the item's original receipt and `--terminal-failure true`, then take a second
