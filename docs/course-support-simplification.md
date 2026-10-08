@@ -42,6 +42,7 @@ deployment does not establish that a golfer's selected course can be monitored.
 | Repair after the first registered release | Progress can instruct `REPAIR`, but release registration rejects a different SHA and path/configuration operations are sealed. The same worker cannot publish the instructed correction. | This is a source-backed contradiction, not proof that every earlier simulator failure reached this stage. | Permit fenced original-owner repair, preserve earlier release history, invalidate old verification, and require fresh production checks. |
 | Repeating a retained continuation | The original launcher receipt names its first turn. A later continuation produces a different latest terminal turn, so another recovery cannot match the original receipt alone. | An absent latest turn or an unavailable inventory is not terminal proof. | Record each accepted continuation's actual native turn and private receipt; validate that current lineage on the next recovery. |
 | Preparing an already owned candidate | First-turn runtime setup requires HEAD at `origin/main`, while an owned repair or checkpoint correctly remains ahead of main. Repeating first-turn preparation rejects that candidate. | Reusing a stale or missing private binding is not safe. | Verify and reuse the existing private runtime for retained work. Keep first-turn setup out of the continuation instructions. |
+| Incomplete pages excluded indefinitely | The ordinary 06:50 worker launched and closed with six reads remaining but zero allowed routes. Two incomplete public HTTP200 observations from 05:44 stayed excluded after an hour because the route checkpoint kept no timestamps and only a collector-version change could reconsider them. | Startup and durable retry did not mean a fresh site check occurred. The two pages do not prove current availability or a permanent technical restriction. | Retain original source, time and observed access evidence; permit bounded main-page revalidation after cooldown. Keep explicit access failures and unsafe resource targets excluded. |
 | Earlier passing tests and deployments | They prove the tested invariants and exact published code. | They did not prove unfamiliar-provider completion without human nudges. | Add crash, late-write, duplicate-executor, tooling-failure, and complete unattended outcome tests. |
 
 ## Implemented correction register
@@ -72,6 +73,7 @@ deployment does not establish that a golfer's selected course can be monitored.
 | Preserve repeated continuation lineage | Comparing every later recovery to the immutable first native turn. | The durable SENT ledger records the actual accepted turn and private receipt. The next recovery validates that latest terminal turn and both original and prior process pairs. Missing native lineage, an ambiguous send, changed source, unknown paths or exhausted limits remains explicit attention. |
 | Allow original-owner release and metadata repair | Immutable first release and sealed configuration/path operations contradicted the ordinary REPAIR instruction. | New code requires clean owned commits, trusted upstream and previous release ancestry, and registered changed paths. Prior proof is archived; active proof resets. Metadata repair retains the reader SHA but requires reviewed adoption and fresh checks. Same-SHA registration stays idempotent; dirty or different-HEAD completion rejects. |
 | Give a replacement release its own normal verification requests | Reusing the first release's remediation dispatch key could suppress a replacement release's immediate check. | Dispatch identity includes the current release and source. A corrected release or adopted source must obtain two fresh normal checks; old successful checks cannot complete it. Actual local Postgres tests cover replacement and metadata repair. |
+| Revalidate incomplete main pages after an hour | Treating unchanged URL/collector version as proof that a provider page could never recover. | Original time, request and observed access facts are retained and enriched only from matching owned source history. Due incomplete public main pages can consume a new bounded read; a fresh incomplete read renews cooldown. Hard/HTTP/access denials and unknown evidence remain fenced. Forty-one policy tests and 59 isolated Postgres tests pass. Live scheduled revalidation remains the separate acceptance gate. |
 
 The exact latest native attempt before these changes completed its reads and
 recorded retry; it did not implement monitoring. Two separate attempts repeated
@@ -125,3 +127,25 @@ original-worker terminal-stage increment has local proof and remains subject to
 exact-head CI and publication. None of these facts establishes the unfamiliar
 provider's calendar availability. Its next attempt remains owned by the ordinary
 schedule; the fixed synthetic benchmark and its suppressed transport are intact.
+
+The natural 06:50 run on `ba2c2ad74823764aff682b0f316bbe93e5c48034` completed
+startup, claim and durable retry with zero new source reads. Its guide had six
+reads remaining and zero suggestions: five plain HTTP403 routes, two rendered
+hard failures, and two incomplete rendered HTTP200 routes were retained. This
+proved another investigation stall, not fresh research. The incomplete-page
+cooldown correction is a separate increment requiring local, exact-head CI and
+natural scheduled revalidation proof; hard failures and observed access controls
+must not be silently reclassified or forgotten.
+The earlier decision was wrong to equate an unchanged URL and collector version
+with unchanged future page contents. Its tests encoded that assumption and did
+not simulate a provider recovering after cooldown. The new controls must prove
+time-based revalidation of a previously incomplete public page without clearing
+spent attempts, forgetting structural failures, or borrowing access evidence
+from another observation.
+Read-only correlation across 13 completed runs and 35 observations found no
+recorded earlier same-URL/mode hard, HTTP or positive access denial for either of
+the two current incomplete routes. No source attribution was unknown in that
+correlation. This supports their bounded cooldown revalidation; it does not prove
+current provider health, complete access, or calendar availability. Their next
+attempt remains at the persisted 07:54 UTC retry, with ordinary admission expected
+at 08:00 UTC (04:00 Eastern). The fixed benchmark is not advanced or extended.
