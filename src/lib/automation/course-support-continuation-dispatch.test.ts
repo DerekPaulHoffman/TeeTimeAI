@@ -48,7 +48,10 @@ vi.mock("./course-support-batches", () => ({ runWithCourseSupportWriterTransitio
   MAX_CONCURRENT_COURSE_SUPPORT_BATCHES: 15, listCourseSupportDispatchCandidates: vi.fn(async () => []),
 }));
 vi.mock("./simulator-support-incidents", () => ({ listSimulatorSupportDispatchCandidates: vi.fn(async () => []) }));
-vi.mock("./simulator-support-ownership", () => ({ readSimulatorSupportContinuationContext: state.context }));
+vi.mock("./simulator-support-ownership", () => ({ readSimulatorSupportContinuationContext: state.context,
+  // These fixtures retain implementation provenance; research-only expiry is covered in actual Postgres.
+  reconcileExpiredSimulatorResearchExecutions: vi.fn(async () => {}),
+}));
 
 import { planCourseSupportCourseDispatch, recordCourseSupportContinuationSent, reserveCourseSupportContinuation } from "./course-support-course-dispatch";
 
@@ -59,9 +62,9 @@ function audit(assignmentRef = "assignment-original", childThreadId = "original-
     target: { mode: "SIMULATOR", offeringId: "original-offering", offeringSourceFingerprint: "b".repeat(64),
       incidentId: "original-incident", courseId: "original-course", cycle: 1, providerFamilyKey: "SIM", failureFingerprint: "b".repeat(64),
       updatedAt: state.now.toISOString(), trafficClass: "SYNTHETIC", searchRefs: [{ id: "original-search", scheduleVersion: 0, alertGeneration: 0 }] },
-    simulatorClaim: { token: "unchanged-owner-token", revision: 2, phase: "CLAIMED", claimedAt: state.now.toISOString(),
+    simulatorClaim: { token: "unchanged-owner-token", revision: 2, phase: "IMPLEMENTING", claimedAt: state.now.toISOString(),
       leaseExpiresAt: state.now.toISOString(), sourceFingerprint: "b".repeat(64), originalSourceFingerprint: "b".repeat(64),
-      offeringRevision: 0, plannedPaths: [], releaseSha: null, branch: "automation/course-support-original",
+      offeringRevision: 0, plannedPaths: ["src/lib/simulators/providers/owned.ts"], releaseSha: null, branch: "automation/course-support-original",
       deployment: null, recheckQueuedAt: null, verificationCycle: 0 },
   };
 }
