@@ -14,6 +14,28 @@ file, changed source/demand, active native turn, live original process, or
 unqualified current release is attention. Do not create another chat, transfer
 the token, clean/reset the worktree, or replay `runPreparedCourseSupportWorker`.
 
+The parent qualifies the current reviewed Git/main deployment from the exact
+`course_support_preflight_context.selectedCheckout`. Run the existing read-only
+deployment waiter directly from that checkout, using the actual absolute Node
+path resolved by preflight and the freshly fetched current main SHA:
+
+```powershell
+& '<absolute-node>' '<selected-checkout>\node_modules\tsx\dist\cli.mjs' '<selected-checkout>\scripts\automation\wait-for-git-deployment.ts' --sha <exact-current-main-sha> --production-branch main --domain teetimespot.com --timeout-seconds 120 --poll-seconds 30
+```
+
+Retain its actual Git/Ready/both-alias JSON proof and the observation clock.
+Its `deployedAt` metadata is not the clock when Ready was observed. Qualify the
+current reviewed main before collecting the final two-minute native/readiness
+bracket; the child's registered unpublished repair is not the parent's current
+production release. A nonzero waiter remains a concrete operational fence.
+
+`course-support-worker-runtime.mjs production` is a claimed child's protected
+application-command wrapper. Do not use it for the parent deployment read or
+invent `--selected-checkout` with the parent as its own child. Its distinct
+selected/original checkout, native identity and private-runtime gates remain
+unchanged. The direct deployment waiter reads Vercel state only; it neither
+starts a search check nor reserves or resumes a worker.
+
 For this owned-stage item, take an actual complete supported `list_threads`
 inventory (maximum 50 entries), then run the qualified read-only observer using
 the item's original receipt and `--terminal-failure true`, then take a second

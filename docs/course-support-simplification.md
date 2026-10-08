@@ -327,3 +327,19 @@ a course heading but synchronously asserted a dialog opened by a later effect.
 The test now awaits that same accessible dialog with all original restored-course,
 filter and price assertions retained. All47 intake tests passed locally. Product
 UI behavior is unchanged, and the original failed CI evidence stays recorded.
+
+On the ordinary23:00 tick, preflight selected the preserved297 owned stage on
+the new reviewed release, but the parent used the claimed-child production
+wrapper for its own deployment qualification. Its command omitted the required
+selected-checkout argument, so input parsing threw before that deployment
+waiter or Vercel command could start. The closed `runtime_inspection_failed`
+message hid this distinction; it was not a failed Ready deployment observation.
+The parent stopped without a continuation reservation or native send.
+
+The parent recipe now gives the exact existing read-only deployment waiter
+command from its selected checkout before the final fresh native bracket.
+It explicitly separates that parent read from the child's protected application
+wrapper. No wrapper role, private-runtime, input, native, source, admission or
+production-failure fence is relaxed, and no new recovery protocol is added.
+Root's already completed direct waiter proved this command path on the same
+released SHA and both aliases; normal scheduled use remains its own acceptance.
