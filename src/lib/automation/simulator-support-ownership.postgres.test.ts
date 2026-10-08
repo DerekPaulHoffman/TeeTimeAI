@@ -81,9 +81,16 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
   }
   beforeEach(() => { Object.values(coreMocks).forEach(mock => mock.mockReset()); });
 
-  async function engineeringFixture(boundOnly = false) {
-    const f = await fixture(15, false, undefined, undefined, true);
-    await lane.retrySimulatorSupport({ ...f.owner, retryMinutes: 15 });
+  async function engineeringFixture(boundOnly = false, bookingUrl?: string) {
+    const f = await fixture(15, false, bookingUrl, undefined, true);
+    let researchOwner = f.owner;
+    if (bookingUrl) {
+      const read = await lane.readSimulatorSupportSource({ ...researchOwner, source: "booking" },
+        { fetch: vi.fn(async () => new Response("Provider capacity", { status: 429 })) });
+      if (!read.acquired) throw new Error("Engineering seed read was busy.");
+      researchOwner = { ...researchOwner, revision: read.value.revision };
+    }
+    await lane.retrySimulatorSupport({ ...researchOwner, retryMinutes: 15 });
     await client.teeSearch.update({ where: { id: f.search.id }, data: { status: "COMPLETED", checkStatus: "STOPPED", nextCheckAt: null,
       workflowRunId: null, alertGeneration: { increment: 1 } } });
     await client.simulatorSupportIncident.update({ where: { id: f.incident.id }, data: { retryAt: new Date(0) } });
@@ -1064,6 +1071,61 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     await expect(lane.retrySimulatorSupport({ ...owner, revision: registered.value.revision, retryMinutes: 15 })).rejects.toThrow("unfinished simulator implementation");
     expect(await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).toMatchObject({ status: "RUNNING",
       audit: { simulatorClaim: { releaseSha: input.releaseSha, plannedPaths: [path], deployment: null } } });
+  });
+
+  it.each(["REAL", "ENGINEERING"] as const)("continues eligible booking research after a published diagnostic repair for %s demand", async authority => {
+    const bookingUrl = "https://official.example.test/booking";
+    const f = authority === "ENGINEERING" ? await engineeringFixture(false, bookingUrl) : await fixture(15, false, bookingUrl);
+    let owner = "engineeringOwner" in f ? f.engineeringOwner : f.owner;
+    const runId = "engineeringRun" in f ? f.engineeringRun.id : f.run.id;
+    const branch = authority === "ENGINEERING" ? "engineering-worker" : `automation/course-support-${owner.ownerThreadId.replace("child-", "")}`;
+    const path = "src/lib/automation/simulator-support-research.ts", releaseSha = "b".repeat(40);
+    const planned = await lane.claimSimulatorSupportPath({ ...owner, path });
+    if (!planned.acquired) throw new Error("Diagnostic path fixture was busy."); owner = { ...owner, revision: planned.value.revision };
+    const registered = await lane.registerSimulatorSupportRelease({ ...owner, releaseSha, trustedUpstreamSha: baseSha,
+      upstreamDescendantVerified: true, descendantVerified: true, committedPaths: [path], branch });
+    if (!registered.acquired) throw new Error("Diagnostic release fixture was busy."); owner = { ...owner, revision: registered.value.revision };
+    const proof = { aliases: ["teetimespot.com", "www.teetimespot.com"], branch: "main", commitSha: releaseSha,
+      deployedAt: new Date(Date.now() - 5_000).toISOString(), deploymentId: "dpl_diagnostic_fixture",
+      deploymentUrl: "https://diagnostic-fixture.vercel.app", source: "git" as const, state: "READY" as const };
+    const deployed = await lane.recordSimulatorSupportDeployment({ ...owner, proof });
+    if (!deployed.acquired) throw new Error("Diagnostic deployment fixture was busy."); owner = { ...owner, revision: deployed.value.revision };
+    const beforeRun = await client.automationRun.findUniqueOrThrow({ where: { id: runId } });
+    const beforeIncident = await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } });
+    const beforeSearch = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });
+    const retry = await lane.retrySimulatorSupport({ ...owner, retryMinutes: 60, currentDeployment: proof, releaseCheckoutVerified: true });
+    if (!retry.acquired) throw new Error("Diagnostic retry fixture was busy.");
+    expect(retry.value).toMatchObject({ outcome: "booking_research_required", revision: owner.revision,
+      nextEligibleBookingRead: { source: "booking", rendered: false }, researchGuide: { readsRemaining: 6 } });
+    expect(retry.value).not.toHaveProperty("durableCloseoutRecorded");
+    expect(await client.automationRun.findUniqueOrThrow({ where: { id: runId } })).toEqual(beforeRun);
+    expect(await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } })).toEqual(beforeIncident);
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(beforeSearch);
+
+    const fetch = vi.fn(async () => new Response("Provider capacity", { status: 429 }));
+    const read = await lane.readSimulatorSupportSource({ ...owner, source: "booking" }, { fetch });
+    if (!read.acquired) throw new Error("Diagnostic follow-up read was busy."); owner = { ...owner, revision: read.value.revision };
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const closed = await lane.retrySimulatorSupport({ ...owner, retryMinutes: 60, currentDeployment: proof, releaseCheckoutVerified: true });
+    if (!closed.acquired) throw new Error("Provider backoff closeout was busy.");
+    expect(closed.value).toMatchObject({ outcome: "retryable_failed", durableCloseoutRecorded: true });
+    expect(await client.automationRun.findUniqueOrThrow({ where: { id: runId } })).toMatchObject({ status: "COMPLETED", outcome: "simulator_retryable_failed" });
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(beforeSearch);
+    expect(coreMocks.fetch).not.toHaveBeenCalled(); expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
+  });
+
+  it("preserves published retry for a configured PUBLIC offering with an eligible booking route", async () => {
+    const f = await readyEngineeringFixture();
+    const packet = await lane.readSimulatorSupportClaim({ assignmentRef: f.engineeringOwner.assignmentRef,
+      ownerThreadId: f.engineeringOwner.ownerThreadId });
+    expect(packet.researchGuide.suggestedReads).toContainEqual({ source: "booking", rendered: false });
+    const closed = await lane.retrySimulatorSupport({ ...f.engineeringOwner, retryMinutes: 60,
+      currentDeployment: f.proof, releaseCheckoutVerified: true });
+    if (!closed.acquired) throw new Error("Public configured retry was busy.");
+    expect(closed.value).toMatchObject({ outcome: "retryable_failed", durableCloseoutRecorded: true });
+    expect(await client.automationRun.findUniqueOrThrow({ where: { id: f.engineeringRun.id } })).toMatchObject({ status: "COMPLETED" });
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(f.before);
+    expect(coreMocks.fetch).not.toHaveBeenCalled(); expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
   });
 
   it("allows honest real-demand retry only after the owned committed release has fresh exact Ready deployment proof", async () => {

@@ -762,6 +762,18 @@ export function retrySimulatorSupport(input: Owner & { retryMinutes: number; cur
           sourceFingerprint: row.source.fingerprint, releaseSha: row.claim.releaseSha } } as unknown as Prisma.InputJsonValue } });
       return { outcome: "customer_check_required" as const, retryAt: now.toISOString(), durableCloseoutRecorded: true };
     }
+    if (!publishedOwnedRelease || row.source.offering.publicAccessStatus === "UNVERIFIED") {
+      if (state.sourceFingerprint !== row.source.fingerprint) throw new Error("Simulator research navigation belongs to an older source; adopt the reviewed source before retry.");
+      const officialUrl = row.source.offering.course.website ?? row.source.offering.evidenceUrl;
+      const bookingUrl = row.source.offering.bookingUrl;
+      const priorFailedRoutes = currentSimulatorResearchBlockedRoutes(await readPriorFailedResearchRoutes(tx, row.source.offering.id, row.source.fingerprint, now), now);
+      const retryGuide = getSimulatorResearchRetryGuide({ state, officialUrl, bookingUrl, now, priorFailedRoutes });
+      if (retryGuide.bookingResearchRequired) return {
+        outcome: "booking_research_required" as const, revision: row.claim.revision, leaseExpiresAt: row.claim.leaseExpiresAt,
+        researchGuide: retryGuide.researchGuide, nextEligibleBookingRead: retryGuide.nextEligibleBookingRead,
+      };
+      if (!publishedOwnedRelease && !retryGuide.skipHomepageFallback) assertSimulatorResearchFallbackBeforeRetry(state, bookingUrl, officialUrl);
+    }
     if (publishedOwnedRelease) {
       const retryAt = new Date(now.getTime() + input.retryMinutes * 60_000);
       await tx.simulatorSupportIncident.update({ where: { id: row.source.incident.id }, data: { status: "AUTO_INVESTIGATING", retryAt } });
@@ -770,16 +782,6 @@ export function retrySimulatorSupport(input: Owner & { retryMinutes: number; cur
           sourceFingerprint: row.source.fingerprint, releaseSha: row.claim.releaseSha, deploymentId: input.currentDeployment!.deploymentId } } as unknown as Prisma.InputJsonValue } });
       return { outcome: "retryable_failed" as const, retryAt: retryAt.toISOString(), durableCloseoutRecorded: true };
     }
-    if (state.sourceFingerprint !== row.source.fingerprint) throw new Error("Simulator research navigation belongs to an older source; adopt the reviewed source before retry.");
-    const officialUrl = row.source.offering.course.website ?? row.source.offering.evidenceUrl;
-    const bookingUrl = row.source.offering.bookingUrl;
-    const priorFailedRoutes = currentSimulatorResearchBlockedRoutes(await readPriorFailedResearchRoutes(tx, row.source.offering.id, row.source.fingerprint, now), now);
-    const retryGuide = getSimulatorResearchRetryGuide({ state, officialUrl, bookingUrl, now, priorFailedRoutes });
-    if (retryGuide.bookingResearchRequired) return {
-      outcome: "booking_research_required" as const, revision: row.claim.revision, leaseExpiresAt: row.claim.leaseExpiresAt,
-      researchGuide: retryGuide.researchGuide, nextEligibleBookingRead: retryGuide.nextEligibleBookingRead,
-    };
-    if (!retryGuide.skipHomepageFallback) assertSimulatorResearchFallbackBeforeRetry(state, bookingUrl, officialUrl);
     const retryAt = new Date(now.getTime() + input.retryMinutes * 60_000);
     await tx.simulatorSupportIncident.update({ where: { id: row.source.incident.id }, data: { status: "AUTO_INVESTIGATING", retryAt } });
     await tx.automationRun.update({ where: { id: row.runId }, data: { status: "COMPLETED", completedAt: now, outcome: "simulator_retryable_failed" } });
