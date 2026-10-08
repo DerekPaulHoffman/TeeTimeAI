@@ -113,7 +113,24 @@ describe("bounded owned simulator public research transport", () => {
     const html = `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { initialReduxState: null } } })}</script>`;
     const result = extractSimulatorPublicCalendar(html, booking);
     expect(result.calendar).toBeUndefined();
-    expect(result.configurationDiagnostic).toEqual({ phase: "CONFIG", reason: "CONFIG_SHAPE" });
+    expect(result.configurationDiagnostic).toEqual({ phase: "CONFIG", reason: "CONFIG_SHAPE", field: { path: "initialReduxState", expectedType: "OBJECT", actualType: "NULL" } });
+  });
+
+  it.each([
+    [undefined, "ranges", "OBJECT", "MISSING"],
+    [null, "ranges", "OBJECT", "NULL"],
+    [[], "ranges", "OBJECT", "ARRAY"],
+    [{}, "ranges.items", "ARRAY", "MISSING"],
+    [{ items: null }, "ranges.items", "ARRAY", "NULL"],
+    [{ items: [null] }, "ranges.items[]", "OBJECT", "NULL"],
+  ])("distinguishes incomplete public configuration at a fixed path without returning values", (ranges, path, expectedType, actualType) => {
+    const parsed = JSON.parse(publishedConfig().match(/<script[^>]*>([\s\S]*?)<\/script>/u)![1]);
+    if (ranges === undefined) delete parsed.props.pageProps.initialReduxState.ranges;
+    else parsed.props.pageProps.initialReduxState.ranges = ranges;
+    const result = extractSimulatorPublicCalendar(`<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(parsed)}</script>`, booking);
+    expect(result.calendar).toBeUndefined();
+    expect(result.configurationDiagnostic).toMatchObject({ phase: "RANGES", reason: expectedType === "ARRAY" ? "CONFIG_ARRAY" : "CONFIG_SHAPE", field: { path, expectedType, actualType } });
+    expect(JSON.stringify(result.configurationDiagnostic)).not.toMatch(/1357|secret|never-return|Private Member|http|@/u);
   });
   it("does not adopt an unrelated exception merely because its message matches a configuration reason", () => {
     vi.spyOn(Intl, "DateTimeFormat").mockImplementationOnce(function () { throw new Error("CONFIG_BOOLEAN"); });
@@ -573,7 +590,8 @@ describe("bounded owned simulator public research transport", () => {
       text: "Hourly simulator bays Book a bay", links: [new URL("/public-destination", booking).href],
       admittedRequests: 2, blockedRequests: 7, renderComplete: false,
       renderWarning: "SECONDARY_STYLESHEET_URL_REJECTED", contentProvenance: "MAIN_DOCUMENT_HTTP" });
-    expect(result.calendar).toBeUndefined(); expect(result.jsonShape).toBeUndefined(); expect(result.responseContracts).toBeUndefined();
+    expect(result.calendar).toEqual(extractSimulatorPublicCalendar(main, booking).calendar);
+    expect(result.responseContracts).toBeUndefined();
     expect(JSON.stringify(result)).not.toMatch(/Unproven rendered calendar|private|never-return-this/);
     expect(view.page.content).not.toHaveBeenCalled();
     for (const route of view.routes.slice(1)) { expect(route.abort).toHaveBeenCalledOnce(); expect(route.fulfill).not.toHaveBeenCalled(); }

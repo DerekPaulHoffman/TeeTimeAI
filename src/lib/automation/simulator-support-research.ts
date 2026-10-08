@@ -35,6 +35,11 @@ export type SimulatorConfigurationDiagnostic = {
   phase: "CONFIG" | "VENUE" | "RANGES" | "RENTALS" | "RESOURCES";
   reason: "CONFIG_SHAPE" | "CONFIG_NUMBER" | "CONFIG_STRING" | "CONFIG_BOOLEAN" | "CONFIG_ARRAY" | "CONFIG_IDENTITY";
   maintenanceModeState?: "FALSE" | "TRUE" | "NULL" | "MISSING" | "INVALID";
+  field?: {
+    path: "props" | "props.pageProps" | "initialReduxState" | "venue" | "ranges" | "ranges.items" | "ranges.items[]" | "bays" | "bays.bayOptions" | "bays.bayOptions[]" | "bays.items" | "bays.items[]";
+    expectedType: "OBJECT" | "ARRAY";
+    actualType: "MISSING" | "NULL" | "OBJECT" | "ARRAY" | "STRING" | "NUMBER" | "BOOLEAN" | "OTHER";
+  };
 };
 export type SimulatorResearchResult = {
   requestedUrl: string; url: string; observedAt: string; httpStatus: number; text: string; links: string[];
@@ -172,13 +177,28 @@ export function extractSimulatorPublicCalendar(html: string, sourceUrl: string):
   const shape = { jsonShape: summarizeSimulatorPublicJsonShape(parsed) };
   let phase: SimulatorConfigurationDiagnostic["phase"] = "CONFIG";
   let observedMaintenanceMode: SimulatorConfigurationDiagnostic["maintenanceModeState"];
+  let failedField: SimulatorConfigurationDiagnostic["field"];
+  const actualType = (value: unknown): NonNullable<SimulatorConfigurationDiagnostic["field"]>["actualType"] =>
+    value === undefined ? "MISSING" : value === null ? "NULL" : Array.isArray(value) ? "ARRAY" :
+      typeof value === "object" ? "OBJECT" : typeof value === "string" ? "STRING" :
+        typeof value === "number" ? "NUMBER" : typeof value === "boolean" ? "BOOLEAN" : "OTHER";
+  const readObject = (value: unknown, path: NonNullable<SimulatorConfigurationDiagnostic["field"]>["path"]) => {
+    try { return record(value); }
+    catch (error) { failedField = { path, expectedType: "OBJECT", actualType: actualType(value) }; throw error; }
+  };
+  const readArray = (value: unknown, path: NonNullable<SimulatorConfigurationDiagnostic["field"]>["path"], max = 100) => {
+    try { return array(value, max); }
+    catch (error) { failedField = { path, expectedType: "ARRAY", actualType: actualType(value) }; throw error; }
+  };
   try {
     const url = publicUrl(sourceUrl);
     const slug = publicVenueSlug(sourceUrl, true);
     if (!slug || url.search || url.hash) return shape;
-    const config = record(record(record(record(parsed).props).pageProps).initialReduxState);
+    const props = readObject(record(parsed).props, "props");
+    const pageProps = readObject(props.pageProps, "props.pageProps");
+    const config = readObject(pageProps.initialReduxState, "initialReduxState");
     phase = "VENUE";
-    const venue = record(config.venue);
+    const venue = readObject(config.venue, "venue");
     observedMaintenanceMode = maintenanceModeState(venue.maintenanceMode);
     const venueId = id(venue.id), venueSlug = string(venue.slug), timeZone = string(venue.timezone);
     if (venueSlug !== slug) configurationError("CONFIG_IDENTITY");
@@ -186,22 +206,22 @@ export function extractSimulatorPublicCalendar(html: string, sourceUrl: string):
     const maintenanceMode = venue.maintenanceMode === null ? null : bool(venue.maintenanceMode);
     new Intl.DateTimeFormat("en-US", { timeZone }).format();
     phase = "RANGES";
-    const ranges = array(record(config.ranges).items, 20).map(value => {
-      const row = record(value);
+    const ranges = readArray(readObject(config.ranges, "ranges").items, "ranges.items", 20).map(value => {
+      const row = readObject(value, "ranges.items[]");
       if (id(row.venue) !== venueId) configurationError("CONFIG_IDENTITY");
       return { id: id(row.id), venueId, slug: string(row.slug), bookable: bool(row.bookable), slotDurationMinutes: number(row.slotDuration, 1, 240), slotIntervalMinutes: number(row.slotInterval, 1, 240), slotIntervalStart: number(row.slotIntervalStart, 0, 1440), assumeOpen: bool(row.assumeOpen), bookingUi: string(row.bookingUi), customerBookingUi: string(row.customerBookingUi), maxBookAheadValue: number(row.maxBookAheadValue, 1, 365), maxBookAheadUnit: string(row.maxBookAheadUnit), openingHours: string(row.openingHours, 2000), hasOpeningTimeRestrictions: array(row.openingTimes).length > 0 };
     });
     uniqueConfigurationRows(ranges);
     phase = "RENTALS";
-    const bays = record(config.bays);
-    const rentals = array(bays.bayOptions).flatMap(value => {
-      const row = record(value);
+    const bays = readObject(config.bays, "bays");
+    const rentals = readArray(bays.bayOptions, "bays.bayOptions").flatMap(value => {
+      const row = readObject(value, "bays.bayOptions[]");
       if (row.adminOnly !== false || row.type !== "simulator" || row.category !== "baytime" || id(row.venue) !== venueId) return [];
       return [{ id: id(row.id), venueId, name: string(row.name), type: "simulator" as const, category: "baytime" as const, adminOnly: false as const, disabled: bool(row.disabled), waitlisted: bool(row.waitlisted), duration: number(row.duration, 1, 48), durationType: string(row.durationType), minDurationSlots: number(row.minBookingDuration, 1, 48), maxDurationSlots: number(row.maxBookingDuration, 1, 48), minPlayers: optionalNumber(row.minPlayers), maxPlayers: optionalNumber(row.maxPlayers), bufferMinutes: number(row.bufferPeriodMinutes, 0, 1440), hasRestrictions: array(row.restrictions).length > 0, requiresPerks: array(row.appliedRequiredPerks, 20).length > 0 }];
     });
     uniqueConfigurationRows(rentals);
     phase = "RESOURCES";
-    const resourceRows = array(bays.items).map(record).filter(row => row.type === "simulator");
+    const resourceRows = readArray(bays.items, "bays.items").map(value => readObject(value, "bays.items[]")).filter(row => row.type === "simulator");
     if (resourceRows.length > 40) configurationError("CONFIG_ARRAY");
     const resources = resourceRows.map(row => {
       if (id(row.venue) !== venueId || !ranges.some(range => range.id === id(row.range))) configurationError("CONFIG_IDENTITY");
@@ -211,7 +231,7 @@ export function extractSimulatorPublicCalendar(html: string, sourceUrl: string):
     return { calendar: { family: "YOUR_GOLF_BOOKING", venue: { id: venueId, slug, timeZone, status, maintenanceMode }, ranges, rentals, resources } };
   } catch (error) {
     const reason = error !== null && typeof error === "object" ? ownedConfigurationErrors.get(error) : undefined;
-    return reason ? { ...shape, configurationDiagnostic: { phase, reason, ...(observedMaintenanceMode ? { maintenanceModeState: observedMaintenanceMode } : {}) } } : shape;
+    return reason ? { ...shape, configurationDiagnostic: { phase, reason, ...(failedField ? { field: failedField } : {}), ...(observedMaintenanceMode ? { maintenanceModeState: observedMaintenanceMode } : {}) } } : shape;
   }
 }
 
@@ -462,7 +482,8 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
       if (!safeMainDocument) throw new Error("SIMULATOR_RESEARCH_REQUEST_LIMIT");
       const main = safeMainDocument;
       const facts = resultFromBody(requestedUrl, main.url, main.status, main.contentType, main.body, main.observedAt);
-      if (warning === "SECONDARY_STYLESHEET_URL_REJECTED") { delete facts.calendar; delete facts.jsonShape; delete facts.responseContracts; delete facts.configurationDiagnostic; }
+      // These are bounded inert facts from the already validated main HTML.
+      // A rejected stylesheet cannot invalidate them or prove rendering completed.
       return { ...facts, method: "BROWSER",
         renderComplete: false, renderWarning: warning, contentProvenance: "MAIN_DOCUMENT_HTTP",
         blockedRequests, admittedRequests: requestCount };

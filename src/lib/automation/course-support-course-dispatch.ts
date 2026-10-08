@@ -8,7 +8,7 @@ import { getSyntheticMultiCycleExpiresAt } from "./synthetic-test-window";
 import { listSimulatorSupportDispatchCandidates } from "./simulator-support-incidents";
 import { isCurrentSimulatorSupportSource, isValidSimulatorSupportClaim, SIMULATOR_SUPPORT_SOURCE_SELECT, type SimulatorSupportClaim, type SimulatorSupportSource } from "./simulator-support-policy";
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
-import type { SimulatorResearchState } from "./simulator-support-research-policy";
+import { readSimulatorResearchFailureMemory, type SimulatorResearchFailureMemory, type SimulatorResearchState } from "./simulator-support-research-policy";
 import {
   confirmCourseSupportContinuationSent,
   COURSE_SUPPORT_CONTINUATION_POLICY_VERSION,
@@ -35,6 +35,15 @@ import {
 export const COURSE_DISPATCH_PROMPT_VERSION = "course-support-course-dispatch-v1";
 const RESERVATION_MS = 10 * 60 * 1000;
 const TICK_MS = 10 * 60 * 1000;
+export const COURSE_SUPPORT_STARTUP_TIMEOUT_MS = 15 * 60 * 1000;
+
+/** Unclaimed launch authority is finite even if the native process disappears. */
+export function isCourseSupportLaunchAuthorityCurrent(audit: CourseDispatchAudit, now: Date) {
+  const deadline = audit.state === "RESERVED" ? Date.parse(audit.expiresAt) :
+    audit.state === "STARTING" ? Date.parse(audit.launchStartedAt ?? audit.reservedAt) + COURSE_SUPPORT_STARTUP_TIMEOUT_MS :
+    audit.state === "BOUND" ? Date.parse(audit.boundAt ?? audit.launchStartedAt ?? audit.reservedAt) + COURSE_SUPPORT_STARTUP_TIMEOUT_MS : NaN;
+  return Number.isFinite(deadline) && deadline > now.getTime();
+}
 
 type DispatchState = "RESERVED" | "STARTING" | "BOUND" | "CONSUMED" | "CANCELLED" | "EXPIRED";
 export type CourseDispatchAudit = {
@@ -52,6 +61,7 @@ export type CourseDispatchAudit = {
   consumedAt?: string;
   simulatorClaim?: SimulatorSupportClaim;
   simulatorResearch?: SimulatorResearchState;
+  simulatorResearchPriorFailures?: SimulatorResearchFailureMemory;
   simulatorContinuation?: CourseSupportContinuationLedger;
   target: {
     mode?: "SIMULATOR";
@@ -94,6 +104,8 @@ export function parseCourseDispatchAudit(value: unknown): CourseDispatchAudit | 
       !audit.ownerThreadId ||
       !Number.isFinite(Date.parse(audit.reservedAt ?? "")) ||
       !Number.isFinite(Date.parse(audit.expiresAt ?? "")) ||
+      (audit.launchStartedAt !== undefined && !Number.isFinite(Date.parse(audit.launchStartedAt))) ||
+      (audit.boundAt !== undefined && !Number.isFinite(Date.parse(audit.boundAt))) ||
       !Number.isFinite(Date.parse(audit.target.updatedAt)) ||
       audit.target.searchRefs.length < 1 || audit.target.searchRefs.length > 3 ||
       audit.target.searchRefs.some((ref) => !ref || typeof ref.id !== "string" || !ref.id ||
@@ -110,6 +122,10 @@ export function parseCourseDispatchAudit(value: unknown): CourseDispatchAudit | 
        (audit.state === "CONSUMED" && !isValidSimulatorSupportClaim(audit.simulatorClaim)))) return null;
   if (audit.simulatorContinuation !== undefined) {
     try { readCourseSupportContinuationLedger(audit.simulatorContinuation); } catch { return null; }
+    if (audit.target.mode !== "SIMULATOR" || audit.state !== "CONSUMED") return null;
+  }
+  if (audit.simulatorResearchPriorFailures !== undefined) {
+    try { readSimulatorResearchFailureMemory(audit.simulatorResearchPriorFailures); } catch { return null; }
     if (audit.target.mode !== "SIMULATOR" || audit.state !== "CONSUMED") return null;
   }
   return audit as CourseDispatchAudit;
@@ -257,14 +273,16 @@ async function expireUnlaunched(
   runs: Awaited<ReturnType<typeof readRuns>>,
 ) {
   for (const run of runs) {
-    if (run.status !== "RUNNING" || run.parsed?.state !== "RESERVED") continue;
+    if (run.status !== "RUNNING" || !run.parsed || !["RESERVED", "STARTING", "BOUND"].includes(run.parsed.state)) continue;
     const baseChanged = run.parsed.baseSha !== currentBaseSha;
-    if (!baseChanged && new Date(run.parsed.expiresAt).getTime() > now.getTime()) continue;
+    if (!baseChanged && isCourseSupportLaunchAuthorityCurrent(run.parsed, now)) continue;
+    const previousState = run.parsed.state;
     const audit: CourseDispatchAudit = { ...run.parsed, state: "EXPIRED" };
     await tx.automationRun.update({
       where: { id: run.id },
       data: { audit: audit as unknown as Prisma.InputJsonValue, status: "COMPLETED", completedAt: now,
-        outcome: baseChanged ? "base_changed_before_launch" : "reservation_expired" },
+        outcome: baseChanged ? "base_changed_before_claim" : previousState === "RESERVED" ? "reservation_expired" :
+          previousState === "STARTING" ? "worker_startup_expired" : "worker_claim_expired" },
     });
     run.status = "COMPLETED";
     run.parsed = audit;
@@ -355,6 +373,8 @@ export async function planCourseSupportCourseDispatch(input: {
     const runs = await readRuns(tx, new Date(Math.floor(now.getTime() / TICK_MS) * TICK_MS));
     await expireUnlaunched(tx, now, input.baseSha, runs);
     await revokeStaleBound(tx, now, input.baseSha, runs);
+    const { reconcileExpiredSimulatorResearchExecutions } = await import("./simulator-support-ownership");
+    await reconcileExpiredSimulatorResearchExecutions(tx, now, runs);
     const tick = tickRef(now);
     const sameTick = runs.filter((run) => run.parsed?.tickRef === tick);
     const activeBatches = await tx.courseSupportBatch.findMany({
@@ -557,9 +577,12 @@ async function transition(input: { ownerThreadId: string; assignmentRef: string;
     if (!run || !audit || audit.ownerThreadId !== input.ownerThreadId || run.status !== "RUNNING") {
       throw new Error("Course dispatch assignment is unavailable.");
     }
+    if (input.next !== "CANCELLED" && !isCourseSupportLaunchAuthorityCurrent(audit, transitionNow)) {
+      throw new Error("Course dispatch launch authority expired.");
+    }
     if (input.next === "BOUND" && audit.state === "BOUND" &&
         audit.childThreadId === input.childThreadId) {
-      return { assignmentRef: audit.assignmentRef, state: audit.state };
+      return { assignmentRef: audit.assignmentRef, state: audit.state, baseSha: audit.baseSha };
     }
     const allowed = input.next === "STARTING" ? audit.state === "RESERVED" &&
       new Date(audit.expiresAt).getTime() > transitionNow.getTime() :
@@ -593,7 +616,7 @@ async function transition(input: { ownerThreadId: string; assignmentRef: string;
         ...(input.next === "CANCELLED" ? { status: "COMPLETED", completedAt: transitionNow, outcome: "cancelled_before_start" } : {}),
       },
     });
-    return { assignmentRef: updated.assignmentRef, state: updated.state };
+    return { assignmentRef: updated.assignmentRef, state: updated.state, baseSha: updated.baseSha };
   }));
 }
 
@@ -615,7 +638,8 @@ export async function loadBoundCourseSupportDispatchAssignment(input: { assignme
   if (!input.childThreadId.trim()) throw new Error("Course dispatch requires the native child task id.");
   const runs = await readRuns(prisma);
   const audit = runs.find((run) => run.parsed?.assignmentRef === input.assignmentRef)?.parsed;
-  if (!audit || audit.state !== "BOUND" || audit.childThreadId !== input.childThreadId || audit.target.mode !== input.mode) {
+  if (!audit || audit.state !== "BOUND" || audit.childThreadId !== input.childThreadId || audit.target.mode !== input.mode ||
+      !isCourseSupportLaunchAuthorityCurrent(audit, await getCourseDispatchDatabaseNow(prisma))) {
     throw new Error("Course dispatch assignment is not bound to this task.");
   }
   return audit;
@@ -625,6 +649,9 @@ export async function getCourseSupportCourseDispatchAssignment(input: { assignme
   if (!input.childThreadId.trim()) throw new Error("Course dispatch requires the native child task id.");
   const runs = await readRuns(prisma);
   const audit = runs.find((run) => run.parsed?.assignmentRef === input.assignmentRef)?.parsed;
+  if (audit && !isCourseSupportLaunchAuthorityCurrent(audit, await getCourseDispatchDatabaseNow(prisma))) {
+    throw new Error("Course dispatch launch authority expired.");
+  }
   if (audit?.state === "STARTING" && audit.childThreadId === null) {
     return { outcome: "awaiting_binding" as const, assignmentRef: audit.assignmentRef, state: audit.state };
   }
@@ -651,7 +678,8 @@ export async function consumeBoundCourseSupportDispatchAssignment(
   const assignment = live.find((entry) => entry.audit.assignmentRef === input.assignmentRef);
   if (!assignment || assignment.audit.target.mode === "SIMULATOR" || assignment.audit.state !== "BOUND" ||
       assignment.audit.childThreadId !== input.childThreadId ||
-      assignment.audit.baseSha !== input.baseSha) {
+      assignment.audit.baseSha !== input.baseSha ||
+      !isCourseSupportLaunchAuthorityCurrent(assignment.audit, input.now)) {
     throw new Error("Course dispatch assignment changed before atomic claim.");
   }
   const next: CourseDispatchAudit = { ...assignment.audit, state: "CONSUMED", consumedAt: input.now.toISOString() };

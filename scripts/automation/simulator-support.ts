@@ -137,21 +137,27 @@ async function main() {
 
 export function reportSimulatorSupportFailure(error: unknown, stage: SimulatorSupportFailureStage = "COMMAND", latestOwnedRevision?: number, settledFailure?: SimulatorSupportFailure) {
   const failure = readSafeSimulatorSupportFailure(settledFailure) ?? classifySimulatorSupportFailure(error, stage);
+  const recovery = error as { durableCloseoutRecorded?: unknown; retryAt?: unknown } | null;
+  const closedRetry = recovery?.durableCloseoutRecorded === true && typeof recovery.retryAt === "string" &&
+    Number.isFinite(Date.parse(recovery.retryAt));
   process.stderr.write(`${JSON.stringify({ simulatorSupportFailure: { ...failure,
-    ...(Number.isSafeInteger(latestOwnedRevision) && latestOwnedRevision! > 0 ? { latestOwnedRevision } : {}) } })}\n`);
-  process.stderr.write("Simulator support failed; preserve offering ownership and stop this operation.\n");
+    ...(Number.isSafeInteger(latestOwnedRevision) && latestOwnedRevision! > 0 ? { latestOwnedRevision } : {}),
+    ...(closedRetry ? { durableCloseoutRecorded: true, retryAt: recovery!.retryAt } : {}) } })}\n`);
+  process.stderr.write(closedRetry ? "Simulator research failed; a durable automatic retry is recorded. Stop this operation.\n" :
+    "Simulator support failed; preserve offering ownership and stop this operation.\n");
   process.exitCode = 1;
   return failure;
 }
 
 if (resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) main().catch(async error => {
-  let latestOwnedRevision: number | undefined;
+  let latestOwnedRevision: number | undefined = error instanceof Error && "revision" in error && Number.isSafeInteger(error.revision)
+    ? error.revision as number : undefined;
   if (error instanceof Error && error.message === "SIMULATOR_RESEARCH_HARD_FAILED" && process.argv[2] === "source-read") {
     try {
       const input = readSimulatorSupportArguments(process.argv.slice(2));
       const ownerThreadId = resolveCodexOwnerThreadId({ environmentOwnerThreadId: process.env.CODEX_THREAD_ID });
       const claim = await readSimulatorSupportClaim({ assignmentRef: input.assignmentRef, ownerThreadId });
-      latestOwnedRevision = claim.revision;
+      latestOwnedRevision ??= claim.revision;
     } catch { /* Diagnostic ownership read failure cannot replace the original hard fence. */ }
   }
   const settledFailure = error instanceof Error && error.message === "SIMULATOR_RESEARCH_HARD_FAILED"

@@ -195,7 +195,7 @@ describe("durable course dispatch state and transaction boundaries", () => {
     expect(plan.occupiedCourseCount).toBe(15);
   });
 
-  it("counts a consumed simulator claim toward shared slots and the three-alert budget, even after its lease expires", async () => {
+  it("retains an expired implementation claim's slot and alert budget until its provenance is handed off", async () => {
     populate(15);
     const simulatorSource: SourceSearch = {
       ...store.sources.get("course-0")!, id: "sim-search", mode: "SIMULATOR", durationMinutes: 60,
@@ -209,8 +209,8 @@ describe("durable course dispatch state and transaction boundaries", () => {
         reservedAt: now.toISOString(), expiresAt: now.toISOString(), target: { mode: "SIMULATOR", offeringId: "sim-offering", offeringSourceFingerprint: "a".repeat(64),
           incidentId: "sim-incident", courseId: "sim-course", cycle: 1, providerFamilyKey: "SIM", failureFingerprint: "a".repeat(64), updatedAt: now.toISOString(),
           trafficClass: "REAL", searchRefs: [{ id: "sim-search", scheduleVersion: 1, alertGeneration: 0, intentDigest }] },
-        simulatorClaim: { token: "owned", revision: 1, phase: "CLAIMED", claimedAt: now.toISOString(), leaseExpiresAt: now.toISOString(), sourceFingerprint: "a".repeat(64), originalSourceFingerprint: "a".repeat(64),
-          offeringRevision: 0, plannedPaths: [], releaseSha: null, branch: "automation/course-support-sim", deployment: null, recheckQueuedAt: null, verificationCycle: 0 } } });
+        simulatorClaim: { token: "owned", revision: 1, phase: "IMPLEMENTING", claimedAt: now.toISOString(), leaseExpiresAt: now.toISOString(), sourceFingerprint: "a".repeat(64), originalSourceFingerprint: "a".repeat(64),
+          offeringRevision: 0, plannedPaths: ["src/lib/simulators/providers/owned.ts"], releaseSha: null, branch: "automation/course-support-sim", deployment: null, recheckQueuedAt: null, verificationCycle: 0 } } });
     const plan = await planCourseSupportCourseDispatch({ ownerThreadId: "parent-a", baseSha, now, maxStarts: 15 });
     expect(plan.launchItems).toHaveLength(10);
     expect(plan.reservedCount).toBe(11);
@@ -266,16 +266,19 @@ describe("durable course dispatch state and transaction boundaries", () => {
     expect(store.tx.automationRun.create).not.toHaveBeenCalled();
   });
 
-  it("retains unknown STARTING across later ticks without launching another course worker", async () => {
+  it("expires an abandoned startup on a later tick and fences its late binding", async () => {
     populate(1);
     const plan = await planCourseSupportCourseDispatch({ ownerThreadId: "parent-a", baseSha, now });
     const assignmentRef = plan.launchItems[0].assignmentRef;
     await beginCourseSupportCourseDispatch({ ownerThreadId: "parent-a", assignmentRef });
     const later = await planCourseSupportCourseDispatch({ ownerThreadId: "parent-b", baseSha, now: new Date(now.getTime() + 20 * 60_000) });
-    expect(store.runs).toHaveLength(1);
-    expect(later.attention.startingCount).toBe(1);
-    expect(later.launchItems).toEqual([]);
-    expect(await getCourseSupportCourseDispatchAssignment({ assignmentRef, childThreadId: "prospective-child" })).toEqual({ outcome: "awaiting_binding", assignmentRef, state: "STARTING" });
+    expect(store.runs).toHaveLength(2);
+    expect(store.runs[0].audit.state).toBe("EXPIRED");
+    expect(store.runs[0].audit.launchStartedAt).toBe(now.toISOString());
+    expect(later.attention.startingCount).toBe(0);
+    expect(later.launchItems).toHaveLength(1);
+    await expect(getCourseSupportCourseDispatchAssignment({ assignmentRef, childThreadId: "prospective-child" })).rejects.toThrow();
+    await expect(bindCourseSupportCourseDispatch({ ownerThreadId: "parent-a", assignmentRef, childThreadId: "prospective-child" })).rejects.toThrow();
     await expect(loadBoundCourseSupportDispatchAssignment({ assignmentRef, childThreadId: "prospective-child" })).rejects.toThrow();
   });
 
@@ -289,14 +292,14 @@ describe("durable course dispatch state and transaction boundaries", () => {
     vi.setSystemTime(later);
     const newBaseSha = "b".repeat(40);
     const next = await planCourseSupportCourseDispatch({ ownerThreadId: "parent-b", baseSha: newBaseSha, now: later });
-    expect(store.runs[0].audit.state).toBe("CANCELLED");
+    expect(store.runs[0].audit.state).toBe("EXPIRED");
     expect(next.launchItems).toHaveLength(1);
     expect(next.launchItems[0].assignmentRef).not.toBe(assignmentRef);
     expect(store.runs[1].audit.baseSha).toBe(newBaseSha);
     await expect(loadBoundCourseSupportDispatchAssignment({ assignmentRef, childThreadId: "child-a" })).rejects.toThrow();
   });
 
-  it("retains an unknown native STARTING outcome across a base advance", async () => {
+  it("revokes unclaimed startup authority when the base advances while retaining its audit", async () => {
     populate(1);
     const first = await planCourseSupportCourseDispatch({ ownerThreadId: "parent-a", baseSha, now });
     const assignmentRef = first.launchItems[0].assignmentRef;
@@ -305,10 +308,30 @@ describe("durable course dispatch state and transaction boundaries", () => {
     const next = await planCourseSupportCourseDispatch({
       ownerThreadId: "parent-b", baseSha: "b".repeat(40), now: later,
     });
-    expect(store.runs).toHaveLength(1);
-    expect(store.runs[0].audit.state).toBe("STARTING");
-    expect(next.attention.startingCount).toBe(1);
-    expect(next.launchItems).toEqual([]);
+    expect(store.runs).toHaveLength(2);
+    expect(store.runs[0].audit.state).toBe("EXPIRED");
+    expect(store.runs[0].audit.ownerThreadId).toBe("parent-a");
+    expect(next.attention.startingCount).toBe(0);
+    expect(next.launchItems).toHaveLength(1);
+  });
+
+  it("rejects late binding and claiming at the deadline before a planner runs", async () => {
+    populate(2);
+    const plan = await planCourseSupportCourseDispatch({ ownerThreadId: "parent-a", baseSha, now });
+    const [starting, bound] = plan.launchItems;
+    await beginCourseSupportCourseDispatch({ ownerThreadId: "parent-a", assignmentRef: starting.assignmentRef });
+    await beginCourseSupportCourseDispatch({ ownerThreadId: "parent-a", assignmentRef: bound.assignmentRef });
+    await bindCourseSupportCourseDispatch({ ownerThreadId: "parent-a", assignmentRef: bound.assignmentRef, childThreadId: "child-a" });
+    const deadline = new Date(now.getTime() + 15 * 60_000);
+    vi.setSystemTime(deadline);
+    await expect(bindCourseSupportCourseDispatch({ ownerThreadId: "parent-a", assignmentRef: starting.assignmentRef, childThreadId: "late-child" })).rejects.toThrow("expired");
+    await expect(bindCourseSupportCourseDispatch({ ownerThreadId: "parent-a", assignmentRef: bound.assignmentRef, childThreadId: "child-a" })).rejects.toThrow("expired");
+    await expect(loadBoundCourseSupportDispatchAssignment({ assignmentRef: bound.assignmentRef, childThreadId: "child-a" })).rejects.toThrow();
+    await expect(consumeBoundCourseSupportDispatchAssignment(store.tx as never, { assignmentRef: bound.assignmentRef, childThreadId: "child-a", baseSha, now: deadline })).rejects.toThrow();
+    const next = await planCourseSupportCourseDispatch({ ownerThreadId: "parent-b", baseSha, now: deadline });
+    expect(next.launchItems).toHaveLength(2);
+    expect(store.runs.slice(0, 2).map(run => run.audit.state)).toEqual(["EXPIRED", "EXPIRED"]);
+    expect(store.runs.find(run => run.audit.assignmentRef === bound.assignmentRef)?.audit.childThreadId).toBe("child-a");
   });
 
   it("expires an unlaunched reservation when the base advances before its timer", async () => {

@@ -5,6 +5,7 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
 import { createSimulatorSupportIntentDigest, SIMULATOR_SUPPORT_SOURCE_SELECT } from "./simulator-support-policy";
+import { SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION } from "./simulator-support-research-policy";
 
 const coreMocks = vi.hoisted(() => ({ fetch: vi.fn(), sendMatch: vi.fn(), sendStatus: vi.fn() }));
 vi.mock("@/lib/simulators/providers", () => ({ fetchSimulatorAvailability: coreMocks.fetch }));
@@ -176,7 +177,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     const inspected = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
     expect(inspected.research.readCount).toBe(0);
     expect(inspected.researchGuide.priorBlockedRoutes).toEqual([
-      { url: bays, rendered: false, httpStatus: 403 }, { url: bays, rendered: true, httpStatus: 0 },
+      { url: bays, rendered: false, httpStatus: 403 }, { url: bays, rendered: true, httpStatus: 0, failure: priorAudit.simulatorResearch.history[1].failure },
     ]);
     expect(inspected.researchGuide.suggestedReads.slice(0, 2)).toEqual([
       { source: "booking-root", rendered: false }, { source: "booking-root", rendered: true },
@@ -737,7 +738,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     const claimed = await lane.claimSimulatorSupportAssignment({ assignmentRef, ownerThreadId: child, baseSha, branch: "automation/course-support-next-research" });
     if (!claimed.acquired) throw new Error("Next research claim was busy.");
     expect(claimed.value.researchGuide.suggestedReads[0]).toEqual({ source: "booking", rendered: false });
-    expect(claimed.value.researchGuide.priorBlockedRoutes).toContainEqual({ url: f.course.website, rendered: false, httpStatus: 403 });
+    expect(claimed.value.researchGuide.priorBlockedRoutes).toContainEqual(expect.objectContaining({ url: f.course.website, rendered: false, httpStatus: 403 }));
     expect(claimed.value.researchGuide.suggestedReads).not.toContainEqual({ source: "official", rendered: false });
   });
 
@@ -775,8 +776,11 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     await lane.retrySimulatorSupport({ ...owner, revision: registered.value.revision, retryMinutes: 15 });
   });
 
-  it("checkpoints an unknown rendered-read failure for the same owner without resetting navigation or budget", async () => {
+  it("preserves implementation provenance on an unknown read failure instead of automatically closing it", async () => {
     const f = await fixture(15, false, "https://official.example.test/booking");
+    const planned = await lane.claimSimulatorSupportPath({ ...f.owner, path: "src/lib/simulators/providers/repair.test.ts" });
+    if (!planned.acquired) throw new Error("Implementation test path was busy.");
+    f.owner.revision = planned.value.revision;
     const raw = "sensitive browser detail https://secret.example.test/token";
     await expect(lane.readSimulatorSupportSource({ ...f.owner, source: "official", rendered: true }, {
       browser: async () => { throw new Error(raw); },
@@ -815,6 +819,168 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect((await lane.retrySimulatorSupport({ ...f.owner, revision: booking.value.revision, retryMinutes: 15 })).acquired).toBe(true);
   });
 
+  it("closes a research-only hard failure and automatically fences the old executor without sending or rechecking", async () => {
+    const matchSendsBefore = coreMocks.sendMatch.mock.calls.length, statusSendsBefore = coreMocks.sendStatus.mock.calls.length;
+    const f = await fixture(15, false, "https://official.example.test/booking");
+    const offeringBefore = await client.courseOffering.findUniqueOrThrow({ where: { id: f.offering.id } });
+    const searchBefore = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });
+    const browser = vi.fn(async () => { throw new Error("Unknown collector detail must remain private"); });
+    let failure: unknown;
+    try { await lane.readSimulatorSupportSource({ ...f.owner, source: "official", rendered: true }, { browser }); }
+    catch (error) { failure = error; }
+    expect(failure).toMatchObject({ message: "SIMULATOR_RESEARCH_HARD_FAILED", durableCloseoutRecorded: true, revision: f.owner.revision + 2, retryAt: expect.any(String) });
+    const closed = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const audit = closed.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    expect(closed).toMatchObject({ status: "COMPLETED", outcome: "simulator_research_failed", completedAt: expect.any(Date) });
+    expect(audit.simulatorResearch).toMatchObject({ readCount: 1, inFlight: null, history: [{ outcome: "HARD_FAILED", httpStatus: 0, requestId: expect.any(String) }] });
+    const incident = await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } });
+    expect(incident).toMatchObject({ status: "AUTO_INVESTIGATING", resolvedAt: null });
+    expect(incident.retryAt!.getTime() - closed.completedAt!.getTime()).toBe(15 * 60_000);
+    expect(await client.courseOffering.findUniqueOrThrow({ where: { id: f.offering.id } })).toEqual(offeringBefore);
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(searchBefore);
+    const oldOwner = { ...f.owner, revision: audit.simulatorClaim!.revision };
+    const fetch = vi.fn();
+    await expect(lane.readSimulatorSupportSource({ ...oldOwner, source: "booking" }, { fetch })).rejects.toThrow("unavailable");
+    await expect(lane.claimSimulatorSupportPath({ ...oldOwner, path: "src/lib/simulators/providers/late.ts" })).rejects.toThrow("unavailable");
+    await expect(lane.queueSimulatorSupportRechecks(oldOwner)).rejects.toThrow("unavailable");
+    await expect(lane.recoverSimulatorSupport(oldOwner)).rejects.toThrow("unavailable");
+    expect(fetch).not.toHaveBeenCalled(); expect(browser).toHaveBeenCalledOnce();
+    expect(coreMocks.sendMatch).toHaveBeenCalledTimes(matchSendsBefore); expect(coreMocks.sendStatus).toHaveBeenCalledTimes(statusSendsBefore);
+    // Only the isolated fixture's clock is advanced to model the normal due tick.
+    const due = await client.simulatorSupportIncident.update({ where: { id: incident.id }, data: { retryAt: new Date(0) } });
+    const child = `replacement-${randomUUID()}`, assignmentRef = `course-assignment-${randomUUID()}`;
+    const next = await client.automationRun.create({ data: { kind: "OTHER", status: "RUNNING", promptVersion: dispatcher.COURSE_DISPATCH_PROMPT_VERSION,
+      ownerThreadId: "next-parent", audit: { ...audit, assignmentRef, ownerThreadId: "next-parent", childThreadId: child, state: "BOUND", boundAt: new Date().toISOString(),
+        simulatorClaim: undefined, simulatorResearch: undefined, simulatorResearchPriorFailures: undefined, target: { ...audit.target, updatedAt: due.updatedAt.toISOString() } } as unknown as Prisma.InputJsonValue } });
+    ids.runs.push(next.id);
+    const claimed = await lane.claimSimulatorSupportAssignment({ assignmentRef, ownerThreadId: child, baseSha, branch: "automation/course-support-new-execution" });
+    if (!claimed.acquired) throw new Error("Replacement execution was busy.");
+    expect(claimed.value.token).not.toBe(f.owner.token);
+    expect(claimed.value.researchGuide.suggestedReads).not.toContainEqual({ source: "official", rendered: true });
+    expect(claimed.value.researchGuide.priorBlockedRoutes).toContainEqual(expect.objectContaining({ url: f.course.website, rendered: true, httpStatus: 0,
+      failure: expect.objectContaining({ stage: "PUBLIC_READ", category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE", researchPhase: "BROWSER_LAUNCH" }) }));
+    expect(await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).toEqual(closed);
+  });
+
+  it("rejects a simulator claim after its finite startup deadline without altering source or incident", async () => {
+    const f = await fixture();
+    const stored = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const audit = stored.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    const old = new Date(Date.now() - 20 * 60_000).toISOString();
+    const unclaimed = { ...audit, state: "BOUND", reservedAt: old, boundAt: old, simulatorClaim: undefined, simulatorResearchPriorFailures: undefined };
+    await client.automationRun.update({ where: { id: f.run.id }, data: { audit: unclaimed as unknown as Prisma.InputJsonValue } });
+    const incident = await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } });
+    await expect(lane.claimSimulatorSupportAssignment({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId, baseSha, branch: "automation/course-support-late" })).rejects.toThrow("expired");
+    expect(await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } })).toEqual(incident);
+    expect((await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit).toMatchObject({ state: "BOUND", boundAt: old });
+  });
+
+  it("automatically closes a crashed research executor on the ordinary planner while retaining its spent request", async () => {
+    const f = await fixture(); const requestId = await seedExpiredUnfinishedRead(f);
+    const stored = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const audit = stored.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    audit.simulatorClaim!.leaseExpiresAt = new Date(Date.now() - 1_000).toISOString();
+    await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
+    const offeringBefore = await client.courseOffering.findUniqueOrThrow({ where: { id: f.offering.id } });
+    const now = new Date();
+    const planned = await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: "automatic-recovery-parent", baseSha, now });
+    expect(planned.acquired).toBe(true);
+    const closed = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    expect(closed).toMatchObject({ status: "COMPLETED", outcome: "simulator_research_failed" });
+    expect(closed.audit).toMatchObject({ simulatorClaim: { token: f.owner.token, revision: f.owner.revision },
+      simulatorResearch: { readCount: 1, inFlight: null, history: [{ requestId, httpStatus: 0, outcome: "HARD_FAILED",
+        failure: { category: "UNKNOWN", code: "RESEARCH_RESERVATION_INTERRUPTED" } }] },
+      simulatorFailureRecovery: { reason: "EXECUTOR_LEASE_EXPIRED", readsUsed: 1 } });
+    const incident = await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } });
+    expect(incident.retryAt!.getTime()).toBe(now.getTime() + 15 * 60_000);
+    expect(incident.status).toBe("AUTO_INVESTIGATING");
+    expect(await client.courseOffering.findUniqueOrThrow({ where: { id: f.offering.id } })).toEqual(offeringBefore);
+    await expect(lane.recoverSimulatorSupport(f.owner)).rejects.toThrow("unavailable");
+    const fetch = vi.fn();
+    await expect(lane.readSimulatorSupportSource({ ...f.owner, source: "official" }, { fetch })).rejects.toThrow("unavailable");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("does not reclaim a still-bounded read or an expired implementation executor", async () => {
+    const f = await fixture(); await seedExpiredUnfinishedRead(f);
+    const stored = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const audit = stored.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    audit.simulatorClaim!.leaseExpiresAt = new Date(Date.now() - 1_000).toISOString();
+    audit.simulatorResearch!.inFlight!.expiresAt = new Date(Date.now() + 30_000).toISOString();
+    const bounded = await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
+    await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: "recovery-parent", baseSha });
+    expect(await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).toEqual(bounded);
+    audit.simulatorResearch!.inFlight!.expiresAt = new Date(Date.now() - 30_000).toISOString();
+    audit.simulatorClaim!.phase = "IMPLEMENTING";
+    audit.simulatorClaim!.plannedPaths = ["src/lib/simulators/providers/owned.ts"];
+    const implementing = await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
+    await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: "recovery-parent", baseSha });
+    expect(await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).toEqual(implementing);
+  });
+
+  it("ends an expired research executor when its demand is withdrawn without reviving or retrying that demand", async () => {
+    const f = await fixture();
+    const stored = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const audit = stored.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    audit.simulatorClaim!.leaseExpiresAt = new Date(Date.now() - 1_000).toISOString();
+    await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
+    await client.teeSearch.update({ where: { id: f.search.id }, data: { status: "PAUSED" } });
+    const incidentBefore = await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } });
+    await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: "recovery-parent", baseSha });
+    expect(await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).toMatchObject({ status: "COMPLETED", outcome: "simulator_source_withdrawn" });
+    expect(await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } })).toEqual(incidentBefore);
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toMatchObject({ status: "PAUSED" });
+  });
+
+  it("carries all denied routes and diagnostics across more than four retries, including withdrawn research", async () => {
+    const bays = "https://yourgolfbooking.com/venues/owned-simulator/booking/bays", root = bays.replace(/\/bays$/u, "");
+    const f = await fixture(15, false, bays);
+    const stored = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const initial = stored.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    await client.automationRun.update({ where: { id: f.run.id }, data: { status: "COMPLETED", outcome: "fixture_preparation", completedAt: new Date() } });
+    const denied = [{ url: f.course.website!, rendered: false }, { url: f.course.website!, rendered: true },
+      { url: bays, rendered: false }, { url: bays, rendered: true }, { url: root, rendered: false }, { url: root, rendered: true }];
+    for (const [index, route] of denied.entries()) {
+      const observedAt = new Date(Date.now() - (denied.length - index) * 60_000).toISOString();
+      const hard = { outcome: "HARD_FAILED", httpStatus: 0, requestId: randomUUID(), failure: {
+        stage: "PUBLIC_READ", category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE", researchPhase: "BROWSER_DOCUMENT" } };
+      const incomplete = { outcome: "READ", httpStatus: 200, requestId: randomUUID(),
+        publicReadEvidence: { sourceFingerprint: f.fingerprint, accessControlsObserved: true, accessControls: [], method: "BROWSER", renderComplete: false },
+        researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION, renderWarning: "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED",
+        configurationDiagnostic: { phase: "RANGES", reason: "CONFIG_SHAPE", field: { path: "ranges", expectedType: "OBJECT", actualType: "MISSING" } } };
+      const historical = { ...initial, assignmentRef: `course-assignment-${randomUUID()}`, childThreadId: `legacy-${randomUUID()}`,
+        simulatorResearchPriorFailures: undefined, simulatorResearch: { version: 1, sourceFingerprint: f.fingerprint, readCount: 1, inFlight: null, links: [], bookingLinks: [], linkBaseUrl: null,
+          history: [{ source: "booking", requestedUrl: route.url, sourceUrl: route.url, observedAt, rendered: route.rendered, httpStatus: 403, outcome: "READ",
+            ...(index < 2 ? hard : index === 3 ? incomplete : {}) }] } };
+      const run = await client.automationRun.create({ data: { kind: "OTHER", status: "COMPLETED", promptVersion: dispatcher.COURSE_DISPATCH_PROMPT_VERSION,
+        startedAt: new Date(observedAt), completedAt: new Date(observedAt), outcome: index === 1 ? "simulator_source_withdrawn" : "simulator_retryable_failed", audit: historical as unknown as Prisma.InputJsonValue } });
+      ids.runs.push(run.id);
+    }
+    for (let index = 0; index < 6; index++) {
+      const due = await client.simulatorSupportIncident.update({ where: { id: f.incident.id }, data: { retryAt: new Date(0) } });
+      const assignmentRef = `course-assignment-${randomUUID()}`, child = `current-${randomUUID()}`;
+      const run = await client.automationRun.create({ data: { kind: "OTHER", status: "RUNNING", promptVersion: dispatcher.COURSE_DISPATCH_PROMPT_VERSION,
+        audit: { ...initial, assignmentRef, childThreadId: child, state: "BOUND", boundAt: new Date().toISOString(), simulatorClaim: undefined,
+          simulatorResearchPriorFailures: undefined, target: { ...initial.target, updatedAt: due.updatedAt.toISOString() } } as unknown as Prisma.InputJsonValue } });
+      ids.runs.push(run.id);
+      const claim = await lane.claimSimulatorSupportAssignment({ assignmentRef, ownerThreadId: child, baseSha, branch: `automation/course-support-retry-${index}` });
+      if (!claim.acquired) throw new Error("Owned retry test was busy.");
+      expect(claim.value.researchGuide.priorBlockedRoutes).toHaveLength(6);
+      expect(claim.value.researchGuide.priorBlockedRoutes).toContainEqual(expect.objectContaining({ url: f.course.website, rendered: true,
+        failure: { stage: "PUBLIC_READ", category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE", researchPhase: "BROWSER_DOCUMENT" } }));
+      expect(claim.value.researchGuide.priorBlockedRoutes).toContainEqual(expect.objectContaining({ url: bays, rendered: true,
+        configurationDiagnostic: { phase: "RANGES", reason: "CONFIG_SHAPE", field: { path: "ranges", expectedType: "OBJECT", actualType: "MISSING" } } }));
+      expect(claim.value.researchGuide.suggestedReads).toEqual([]);
+      const owner = { assignmentRef, ownerThreadId: child, token: claim.value.token, revision: claim.value.revision };
+      const fetch = vi.fn();
+      await expect(lane.readSimulatorSupportSource({ ...owner, source: "official" }, { fetch })).rejects.toThrow("structural source failure");
+      expect(fetch).not.toHaveBeenCalled();
+      const retry = await lane.retrySimulatorSupport({ ...owner, retryMinutes: 15 });
+      expect(retry.acquired && retry.value.durableCloseoutRecorded).toBe(true);
+      expect((await client.automationRun.findUniqueOrThrow({ where: { id: run.id } })).audit).toMatchObject({ simulatorResearchPriorFailures: { sourceFingerprint: f.fingerprint, routes: expect.any(Array) } });
+    }
+  });
+
   it("does not settle an unknown collector failure after the exact source changes", async () => {
     const f = await fixture(15, false, "https://official.example.test/booking");
     await expect(lane.readSimulatorSupportSource({ ...f.owner, source: "official", rendered: true }, {
@@ -834,9 +1000,10 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     await expect(lane.readSimulatorSupportSource({ ...f.owner, source: "official", rendered: true }, {
       browser: async () => { throw new Error("SIMULATOR_RESEARCH_NEW_UNCLASSIFIED_FAILURE"); },
     })).rejects.toThrow("SIMULATOR_RESEARCH_HARD_FAILED");
-    const inspected = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
-    expect(inspected.research.history).toHaveLength(1);
-    expect(inspected.research.history[0]).toMatchObject({ outcome: "HARD_FAILED", httpStatus: 0,
+    const stored = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const research = (stored.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit).simulatorResearch!;
+    expect(research.history).toHaveLength(1);
+    expect(research.history[0]).toMatchObject({ outcome: "HARD_FAILED", httpStatus: 0,
       failure: { category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE" } });
   });
 
@@ -851,14 +1018,15 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     await expect(lane.readSimulatorSupportSource({ ...f.owner, source: "official", rendered: true }, {
       browser: async () => { throw new Error(code); },
     })).rejects.toThrow("SIMULATOR_RESEARCH_HARD_FAILED");
-    const inspected = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
-    expect(inspected.research.history).toHaveLength(1);
-    expect(inspected.research.history[0]).toMatchObject({ outcome: "HARD_FAILED", httpStatus: 0,
+    const stored = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const audit = stored.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    expect(audit.simulatorResearch!.history).toHaveLength(1);
+    expect(audit.simulatorResearch!.history[0]).toMatchObject({ outcome: "HARD_FAILED", httpStatus: 0,
       failure: { stage: "PUBLIC_READ", category, code: safeCode } });
-    expect(inspected.researchGuide.suggestedReads).not.toContainEqual({ source: "official", rendered: true });
+    expect(stored).toMatchObject({ status: "COMPLETED", outcome: "simulator_research_failed" });
     const browser = vi.fn();
-    await expect(lane.readSimulatorSupportSource({ ...f.owner, revision: inspected.revision, source: "official", rendered: true },
-      { browser })).rejects.toThrow("identical route");
+    await expect(lane.readSimulatorSupportSource({ ...f.owner, revision: audit.simulatorClaim!.revision, source: "official", rendered: true },
+      { browser })).rejects.toThrow("unavailable");
     expect(browser).not.toHaveBeenCalled();
     expect(await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } })).toMatchObject({ status: "AUTO_INVESTIGATING" });
   });

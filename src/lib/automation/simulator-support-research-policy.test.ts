@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertSimulatorResearchFallbackBeforeRetry, getSimulatorResearchGuide, getSimulatorResearchRetryGuide, readSettledSimulatorPublicCheckpoint, readSimulatorResearchState, selectSimulatorResearchTarget } from "./simulator-support-research-policy";
+import { assertSimulatorResearchFallbackBeforeRetry, currentSimulatorResearchBlockedRoutes, getSimulatorResearchGuide, getSimulatorResearchRetryGuide, mergeSimulatorResearchBlockedRoutes, readSettledSimulatorPublicCheckpoint, readSimulatorResearchFailureMemory, readSimulatorResearchState, selectSimulatorResearchTarget, SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION } from "./simulator-support-research-policy";
 
 const fingerprint = "a".repeat(64), now = new Date("2026-10-06T20:00:00Z");
 const officialUrl = "https://venue.example.test", bookingUrl = "https://calendar.example.test/booking/bays";
@@ -8,6 +8,33 @@ const select = (state = empty(), rest = {}) => selectSimulatorResearchTarget({ s
 const failedHomepage = () => ({ ...empty(), readCount: 1, history: [{ source: "official" as const, requestedUrl: officialUrl, sourceUrl: officialUrl, observedAt: now.toISOString(), httpStatus: 403, rendered: false, outcome: "READ" as const }] });
 const savedBayUrl = "https://yourgolfbooking.com/venues/public-golf/booking/bays";
 const bookingRootUrl = "https://yourgolfbooking.com/venues/public-golf/booking";
+
+describe("durable simulator research failure memory", () => {
+  it("reconsiders incomplete rendering only after its collector version changes and retains access denials", () => {
+    const incomplete = { url: bookingUrl, rendered: true, httpStatus: 200,
+      renderWarning: "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED" as const,
+      configurationDiagnostic: { phase: "RANGES" as const, reason: "CONFIG_SHAPE" as const,
+        field: { path: "ranges" as const, expectedType: "OBJECT" as const, actualType: "MISSING" as const } } };
+    const hard = { url: officialUrl, rendered: true, httpStatus: 0, failure: {
+      stage: "PUBLIC_READ" as const, category: "UNKNOWN" as const, code: "UNCLASSIFIED_FAILURE", researchPhase: "BROWSER_DOCUMENT" as const } };
+    const denied = { url: officialUrl, rendered: false, httpStatus: 403 };
+    const routes = mergeSimulatorResearchBlockedRoutes([{ ...incomplete, researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION }, hard, denied]);
+    const memory = readSimulatorResearchFailureMemory({ version: 1, sourceFingerprint: fingerprint, routes })!;
+    expect(currentSimulatorResearchBlockedRoutes(memory.routes)).toEqual(routes);
+    const oldVersion = [{ ...incomplete, researchImplementationVersion: "previous-collector" }, hard, denied];
+    expect(currentSimulatorResearchBlockedRoutes(oldVersion)).toEqual([hard, denied]);
+    expect(memory.routes[1].failure).toEqual(hard.failure);
+    const redacted = readSimulatorResearchFailureMemory({ ...memory, routes: [{ ...hard, failure: { ...hard.failure, message: "raw exception" } }] })!;
+    expect(redacted.routes[0].failure).toEqual(hard.failure);
+    expect(JSON.stringify(redacted)).not.toContain("raw exception");
+  });
+
+  it("keeps the newest diagnostic for each URL/mode and fails rather than dropping a denied route", () => {
+    const first = { url: bookingUrl, rendered: false, httpStatus: 403 };
+    expect(mergeSimulatorResearchBlockedRoutes([{ ...first, httpStatus: 404 }, first])).toEqual([{ ...first, httpStatus: 404 }]);
+    expect(() => mergeSimulatorResearchBlockedRoutes(Array.from({ length: 65 }, (_, index) => ({ ...first, url: `https://calendar.example.test/route/${index}` })))).toThrow("bounded route limit");
+  });
+});
 
 describe("owned simulator research navigation", () => {
   it("derives only the known public booking root from the current saved bay URL", () => {

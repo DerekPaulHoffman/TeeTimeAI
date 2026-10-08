@@ -8,9 +8,11 @@ The dispatcher creates one local Codex chat for each admitted course. It does no
 
 Active real demand takes priority. An explicitly opted-in `TEST` search with `syntheticMultiCycle=true` may use the same per-course dispatch capacity while its native synthetic lifetime is active. It remains synthetic, its incident remains engineering-only, and its emails remain no-send. Ended, paused, deleted, or expired alerts cannot obtain a new active-alert assignment. Historical background work remains governed by the legacy grouped-claim contract in `course-support-responder.md`.
 
-Physical course slots and current alert cohorts are counted separately. An uncertain `STARTING` launch keeps its slot and original ownership even if its source alert ends. Prior alert references count toward the three-alert and five-courses-per-alert budgets only while their current intent, generation, selected course/offering, course-local requested window and synthetic lifetime remain valid. Count each current course/search pair once across live reservations, this tick and active batches; do not free or reassign an uncertain worker to recover an alert cohort.
+Physical course slots and current alert cohorts are counted separately. An unclaimed `STARTING` launch holds authority for fifteen minutes from launch; `BOUND` has fifteen minutes from binding to claim. A base change also revokes unclaimed authority. The normal planner marks overdue assignments `EXPIRED`, preserves their audit and actual native identity, and releases capacity. Late binding/claiming fails independently against database time, even before a planner runs. Expiry is authority revocation, not proof that a native chat never existed. Prior alert references count toward the three-alert and five-courses-per-alert budgets only while their current intent, generation, selected course/offering, course-local requested window and synthetic lifetime remain valid. Count each current course/search pair once across live reservations, this tick and active batches.
 
 ## Parent launch
+
+For normal new assignments, use [course-support-scheduled-parent.md](course-support-scheduled-parent.md) and [course-support-worker-supervisor.md](course-support-worker-supervisor.md). The deterministic supervisor replaces manual start/prepare/bind/prompt/run bookkeeping. The detailed sequence below documents its compatibility contract; scheduled parents must not duplicate it alongside a supervised launch.
 
 Start the existing stable preflight once:
 
@@ -40,7 +42,7 @@ Create an ignored private receipt directory and run the launcher outside the pro
 node <selected-checkout>\scripts\automation\course-support-worker-launcher.mjs prepare --codex <workerCli.cliPath-from-this-preflight-context> --cwd <own-worker-checkout> --receipt <absolute-private-receipt-path> --title "Resolve assigned course"
 ```
 
-It returns only after native creation and permission acknowledgement. Saved app project identifiers are not app-server project identifiers; do not substitute one into the RPC. The desktop recognizes these real native chats from their managed repository checkout. Omit model/thinking overrides and preserve the configured model. A creation error or unknown result retains its private receipt and `STARTING` slot; never retry creation automatically.
+It returns only after native creation and permission acknowledgement. Saved app project identifiers are not app-server project identifiers; do not substitute one into the RPC. The desktop recognizes these real native chats from their managed repository checkout. Omit model/thinking overrides and preserve the configured model. A creation error or unknown result retains its private receipt and holds `STARTING` only until its finite authority deadline; never replay that creation. A later planner may admit a new assignment after revoking the old authority.
 
 Bind only the real native `threadId` returned by the successful launcher preparation:
 

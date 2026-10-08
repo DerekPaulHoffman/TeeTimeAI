@@ -85,8 +85,8 @@ describe.skipIf(!databaseUrl)("course dispatcher context budgets in isolated Pos
     return search;
   }
 
-  async function starting(v: Awaited<ReturnType<typeof venue>>, search: SimulatorSupportSource, now: Date, sameTick = false) {
-    const time = sameTick ? now : new Date(now.getTime() - 3_600_000);
+  async function starting(v: Awaited<ReturnType<typeof venue>>, search: SimulatorSupportSource, now: Date, sameTick: boolean | "recent" = false) {
+    const time = sameTick === true ? now : new Date(now.getTime() - (sameTick === "recent" ? 600_000 : 3_600_000));
     const simulator = search.mode === "SIMULATOR";
     const fingerprint = getSimulatorOfferingSourceFingerprint(v.offering);
     const incident = simulator ? v.incident : await client.courseSupportIncident.create({ data: {
@@ -126,7 +126,7 @@ describe.skipIf(!databaseUrl)("course dispatcher context budgets in isolated Pos
     return result.value;
   }
 
-  it("frees ended, cancelled, completed and expired-synthetic contexts without releasing their STARTING slots", async () => {
+  it("expires abandoned startup authority while preserving ended source histories", async () => {
     const now = new Date(); const preserved = [];
     for (const state of ["COMPLETED", "CANCELLED", "WINDOW_ENDED", "SYNTHETIC_EXPIRED"] as const) {
       const v = await venue(); const search = await demand([v], now, { synthetic: state === "SYNTHETIC_EXPIRED" });
@@ -140,14 +140,19 @@ describe.skipIf(!databaseUrl)("course dispatcher context budgets in isolated Pos
     const plan = await planAt(now);
     expect(plan.launchItems).toHaveLength(3);
     expect(new Set(await selectedSearchIds())).toEqual(new Set(fresh.map(search => search.id)));
-    expect(plan.attention.startingCount).toBe(4);
-    expect(plan.occupiedCourseCount).toBe(7);
-    for (const run of preserved) expect(await client.automationRun.findUniqueOrThrow({ where: { id: run.id } })).toEqual(run);
+    expect(plan.attention.startingCount).toBe(0);
+    expect(plan.occupiedCourseCount).toBe(3);
+    for (const run of preserved) {
+      const retained = await client.automationRun.findUniqueOrThrow({ where: { id: run.id } });
+      expect(retained.status).toBe("COMPLETED");
+      expect(retained.audit).toEqual({ ...(run.audit as object), state: "EXPIRED" });
+      expect(retained.outcome).toBe("worker_startup_expired");
+    }
   });
 
   it("retains the three-context cap for current active-future STARTING sources", async () => {
     const now = new Date(); const preserved = [];
-    for (let i = 0; i < 3; i++) { const v = await venue(); preserved.push(await starting(v, await demand([v], now), now)); }
+    for (let i = 0; i < 3; i++) { const v = await venue(); preserved.push(await starting(v, await demand([v], now), now, "recent")); }
     const fourth = await venue(); await demand([fourth], now);
     const plan = await planAt(now);
     expect(plan.launchItems).toHaveLength(0);
@@ -156,7 +161,7 @@ describe.skipIf(!databaseUrl)("course dispatcher context budgets in isolated Pos
     for (const run of preserved) expect(await client.automationRun.findUniqueOrThrow({ where: { id: run.id } })).toEqual(run);
   });
 
-  it("keeps fifteen uncertain physical slots occupied even when every source has ended", async () => {
+  it("recovers capacity from fifteen abandoned startups without inventing native completion", async () => {
     const now = new Date(); const preserved = [];
     for (let i = 0; i < 15; i++) {
       const v = await venue(); const search = await demand([v], now);
@@ -165,17 +170,17 @@ describe.skipIf(!databaseUrl)("course dispatcher context budgets in isolated Pos
     }
     await freshContexts(now);
     const plan = await planAt(now);
-    expect(plan.launchItems).toHaveLength(0);
-    expect(plan.attention.startingCount).toBe(15);
-    expect(plan.occupiedCourseCount).toBe(15);
-    for (const run of preserved) expect(await client.automationRun.findUniqueOrThrow({ where: { id: run.id } })).toEqual(run);
+    expect(plan.launchItems).toHaveLength(3);
+    expect(plan.attention.startingCount).toBe(0);
+    expect(plan.occupiedCourseCount).toBe(3);
+    for (const run of preserved) expect((await client.automationRun.findUniqueOrThrow({ where: { id: run.id } })).audit).toEqual({ ...(run.audit as object), state: "EXPIRED" });
   });
 
   it("excludes changed intent, generation and selected venue while preserving all prior assignments", async () => {
     const now = new Date(); const preserved = [];
     for (const change of ["INTENT", "GENERATION", "RESELECTION", "OUTDOOR_DESELECTION"] as const) {
       const v = await venue(); const search = await demand([v], now, { mode: change === "OUTDOOR_DESELECTION" ? "OUTDOOR" : "SIMULATOR" });
-      preserved.push(await starting(v, search, now));
+      preserved.push(await starting(v, search, now, "recent"));
       if (change === "INTENT") await client.teeSearch.update({ where: { id: search.id }, data: { startTime: "10:00" } });
       if (change === "GENERATION") await client.teeSearch.update({ where: { id: search.id }, data: { alertGeneration: { increment: 1 } } });
       if (change === "RESELECTION" || change === "OUTDOOR_DESELECTION") await client.coursePreference.deleteMany({ where: { teeSearchId: search.id } });
@@ -214,5 +219,22 @@ describe.skipIf(!databaseUrl)("course dispatcher context budgets in isolated Pos
     expect(plan.occupiedCourseCount).toBe(5);
     expect(await client.automationRun.findUniqueOrThrow({ where: { id: prior.id } })).toEqual(prior);
     expect(await client.courseSupportBatch.findUniqueOrThrow({ where: { id: batch.id } })).toEqual(batch);
+  });
+
+  it("fences late native binding before reconciliation and admits only one replacement across concurrent planners", async () => {
+    const now = new Date(); const v = await venue(); const search = await demand([v], now);
+    const abandoned = await starting(v, search, now);
+    const audit = dispatcher.parseCourseDispatchAudit(abandoned.audit)!;
+    await expect(dispatcher.bindCourseSupportCourseDispatch({ ownerThreadId: owner, assignmentRef: audit.assignmentRef, childThreadId: `late-${randomUUID()}` })).rejects.toThrow("expired");
+    const plans = await Promise.all([
+      dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: owner, baseSha, now }),
+      dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: `${owner}-second`, baseSha, now }),
+    ]);
+    expect(plans.some(plan => plan.acquired)).toBe(true);
+    const remaining = await client.automationRun.findMany({ where: { promptVersion: dispatcher.COURSE_DISPATCH_PROMPT_VERSION,
+      audit: { path: ["target", "courseId"], equals: v.course.id } } });
+    expect(remaining.filter(run => run.status === "RUNNING")).toHaveLength(1);
+    expect(remaining.find(run => run.id === abandoned.id)).toMatchObject({ status: "COMPLETED", outcome: "worker_startup_expired" });
+    await expect(dispatcher.bindCourseSupportCourseDispatch({ ownerThreadId: owner, assignmentRef: audit.assignmentRef, childThreadId: `late-${randomUUID()}` })).rejects.toThrow();
   });
 });

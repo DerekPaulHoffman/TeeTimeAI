@@ -3,12 +3,24 @@ import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { readSafeSimulatorSupportFailure, type SimulatorSupportFailure } from "./simulator-support-failure";
 
 export const SIMULATOR_RESEARCH_MAX_READS = 6;
+export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-diagnostics-v2";
 export const SIMULATOR_RESEARCH_SOURCE_NAMES = ["official", "booking", "booking-root", "evidence"] as const;
 export type SimulatorResearchSource = (typeof SIMULATOR_RESEARCH_SOURCE_NAMES)[number];
 const researchSource = z.enum([...SIMULATOR_RESEARCH_SOURCE_NAMES, "link"]);
 const safeUrl = z.string().refine(value => Boolean(getSafeCustomerBookingUrl(value)));
 const safeFailure = z.custom<SimulatorSupportFailure>(value => readSafeSimulatorSupportFailure(value) !== null)
   .transform(value => readSafeSimulatorSupportFailure(value)!);
+const configurationDiagnostic = z.object({
+  phase: z.enum(["CONFIG", "VENUE", "RANGES", "RENTALS", "RESOURCES"]),
+  reason: z.enum(["CONFIG_SHAPE", "CONFIG_NUMBER", "CONFIG_STRING", "CONFIG_BOOLEAN", "CONFIG_ARRAY", "CONFIG_IDENTITY"]),
+  maintenanceModeState: z.enum(["FALSE", "TRUE", "NULL", "MISSING", "INVALID"]).optional(),
+  field: z.object({
+    path: z.enum(["props", "props.pageProps", "initialReduxState", "venue", "ranges", "ranges.items", "ranges.items[]", "bays", "bays.bayOptions", "bays.bayOptions[]", "bays.items", "bays.items[]"]),
+    expectedType: z.enum(["OBJECT", "ARRAY"]),
+    actualType: z.enum(["MISSING", "NULL", "OBJECT", "ARRAY", "STRING", "NUMBER", "BOOLEAN", "OTHER"]),
+  }).strict().optional(),
+}).strict();
+const renderWarning = z.enum(["SECONDARY_REQUEST_BUDGET_EXHAUSTED", "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED", "SECONDARY_STYLESHEET_URL_REJECTED", "MAIN_DOCUMENT_HTTP_ERROR"]);
 const publicReadEvidence = z.object({
   sourceFingerprint: z.string().regex(/^[a-f0-9]{64}$/i),
   accessControlsObserved: z.literal(true),
@@ -21,6 +33,8 @@ const observation = z.object({
   outcome: z.enum(["READ", "NETWORK_FAILED", "CAPACITY_BUSY", "HARD_FAILED"]),
   requestId: z.string().uuid().optional(), failure: safeFailure.optional(),
   publicReadEvidence: publicReadEvidence.optional(),
+  researchImplementationVersion: z.string().regex(/^[a-z0-9-]{1,80}$/u).optional(),
+  renderWarning: renderWarning.optional(), configurationDiagnostic: configurationDiagnostic.optional(),
 }).strict().refine(entry => entry.outcome === "HARD_FAILED" ? Boolean(entry.requestId && entry.failure && entry.httpStatus === 0) :
   !entry.failure || Boolean(entry.requestId && entry.httpStatus === 0 && ["NETWORK_FAILED", "CAPACITY_BUSY"].includes(entry.outcome)))
   .refine(entry => !entry.publicReadEvidence || Boolean(entry.requestId && entry.outcome === "READ" &&
@@ -38,7 +52,33 @@ const stateSchema = z.object({
   (!state.bookingLinkRoles || new Set(state.bookingLinkRoles.map(role => role.url)).size === state.bookingLinkRoles.length &&
     state.bookingLinkRoles.every(role => state.bookingLinks.includes(role.url))));
 export type SimulatorResearchState = z.infer<typeof stateSchema>;
-export type SimulatorResearchBlockedRoute = { url: string; rendered: boolean; httpStatus: number };
+const blockedResearchRoute = z.object({ url: safeUrl, rendered: z.boolean(), httpStatus: z.number().int().min(0).max(599),
+  failure: safeFailure.optional(),
+  researchImplementationVersion: z.string().regex(/^[a-z0-9-]{1,80}$/u).optional(),
+  renderWarning: renderWarning.optional(), configurationDiagnostic: configurationDiagnostic.optional(),
+}).strict();
+const researchFailureMemory = z.object({ version: z.literal(1), sourceFingerprint: z.string().regex(/^[a-f0-9]{64}$/iu),
+  routes: z.array(blockedResearchRoute).max(64),
+}).strict();
+export type SimulatorResearchBlockedRoute = z.infer<typeof blockedResearchRoute>;
+export type SimulatorResearchFailureMemory = z.infer<typeof researchFailureMemory>;
+export function readSimulatorResearchFailureMemory(value: unknown) {
+  return value === undefined ? undefined : researchFailureMemory.parse(value);
+}
+export function mergeSimulatorResearchBlockedRoutes(routes: readonly SimulatorResearchBlockedRoute[]) {
+  // Callers put newer observations first. Never silently forget a denied route.
+  const unique = new Map<string, SimulatorResearchBlockedRoute>();
+  for (const route of routes) {
+    const parsed = blockedResearchRoute.parse(route);
+    const key = `${new URL(parsed.url).href}:${parsed.rendered}`;
+    if (!unique.has(key)) unique.set(key, parsed);
+  }
+  if (unique.size > 64) throw new Error("Simulator research failure memory reached its bounded route limit.");
+  return [...unique.values()];
+}
+export function currentSimulatorResearchBlockedRoutes(routes: readonly SimulatorResearchBlockedRoute[]) {
+  return routes.filter(route => !route.renderWarning?.startsWith("SECONDARY_") || route.researchImplementationVersion === SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION);
+}
 
 /** Legacy reads retain unknown access evidence; only new owned settlements qualify. */
 export function readSettledSimulatorPublicCheckpoint(state: SimulatorResearchState, now: Date) {
