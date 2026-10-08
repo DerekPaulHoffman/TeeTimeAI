@@ -232,6 +232,123 @@ describe("bounded owned simulator public research transport", () => {
     expect(result.configurationDiagnostic).toMatchObject({ phase: "RANGES", reason: expectedType === "ARRAY" ? "CONFIG_ARRAY" : "CONFIG_SHAPE", field: { path, expectedType, actualType } });
     expect(JSON.stringify(result.configurationDiagnostic)).not.toMatch(/1357|secret|never-return|Private Member|http|@/u);
   });
+  it.each([
+    ["restrictions", undefined, "MISSING"],
+    ["restrictions", null, "NULL"],
+    ["appliedRequiredPerks", "private-perk-value", "STRING"],
+    ["appliedRequiredPerks", Array.from({ length: 21 }, () => ({})), "ARRAY"],
+  ])("locates a malformed public rental %s array without retaining its value", (field, value, actualType) => {
+    const parsed = JSON.parse(publishedConfig().match(/<script[^>]*>([\s\S]*?)<\/script>/u)![1]);
+    const config = parsed.props.pageProps.initialReduxState;
+    config.venue.maintenanceMode = null;
+    const row = config.bays.bayOptions[0];
+    if (value === undefined) delete row[field];
+    else row[field] = value;
+    const html = `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(parsed)}</script>`;
+    const result = extractSimulatorPublicCalendar(html, booking);
+    expect(result.calendar).toBeUndefined();
+    expect(result.configurationDiagnostic).toEqual({
+      phase: "RENTALS", reason: "CONFIG_ARRAY", maintenanceModeState: "NULL",
+      field: { path: `bays.bayOptions[].${field}`, expectedType: "ARRAY", actualType },
+    });
+    expect(JSON.stringify(result)).not.toMatch(/private-perk-value|secret@example|never-return|Private Member/u);
+  });
+  it("explains each excluded public rental option without admitting one as a calendar", () => {
+    const parsed = JSON.parse(publishedConfig().match(/<script[^>]*>([\s\S]*?)<\/script>/u)![1]);
+    const config = parsed.props.pageProps.initialReduxState;
+    config.venue.maintenanceMode = null;
+    const base = config.bays.bayOptions[0];
+    config.bays.bayOptions = [
+      { ...base, id: 901, adminOnly: true, name: "Private Member", privateKey: "never-return" },
+      { ...base, id: 902, type: "golf_sim", name: "private@example.test" },
+      { ...base, id: 903, category: "driving-range", name: "hidden course" },
+      { ...base, id: 904, venue: 999, name: "wrong venue" },
+      { ...base, id: 905, adminOnly: null, name: "unknown state" },
+      { ...base, id: 906, adminOnly: undefined, type: "private@example.test", name: "missing state" },
+      { ...base, id: 907, adminOnly: "false", name: "invalid state" },
+      { ...base, id: 908, type: "private@example.test", name: "unsafe type token" },
+    ];
+    const html = `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(parsed)}</script>`;
+    const result = extractSimulatorPublicCalendar(html, booking);
+    expect(result.calendar).toBeUndefined();
+    expect(result.configurationDiagnostic).toEqual({
+      phase: "RENTALS", reason: "CONFIG_NO_ELIGIBLE_RENTALS", maintenanceModeState: "NULL",
+      optionCount: 8, rejectedRentalOptionsTruncated: false,
+      rejectedRentalOptions: [
+        { adminOnlyState: "TRUE", reason: "ADMIN_ONLY_NOT_FALSE" },
+        { adminOnlyState: "FALSE", publicOptionId: "902", typeToken: "golf_sim", categoryToken: "baytime", reason: "TYPE_NOT_SIMULATOR" },
+        { adminOnlyState: "FALSE", publicOptionId: "903", typeToken: "simulator", categoryToken: "driving-range", reason: "CATEGORY_NOT_BAYTIME" },
+        { adminOnlyState: "FALSE", publicOptionId: "904", typeToken: "simulator", categoryToken: "baytime", reason: "VENUE_MISMATCH" },
+        { adminOnlyState: "NULL", reason: "ADMIN_ONLY_NOT_FALSE" },
+        { adminOnlyState: "MISSING", reason: "ADMIN_ONLY_NOT_FALSE" },
+        { adminOnlyState: "INVALID", reason: "ADMIN_ONLY_NOT_FALSE" },
+        { adminOnlyState: "FALSE", publicOptionId: "908", categoryToken: "baytime", reason: "TYPE_NOT_SIMULATOR" },
+      ],
+    });
+    expect(JSON.stringify(result)).not.toMatch(/Private Member|private@example|never-return|hidden course|wrong venue|unknown state|missing state|invalid state|unsafe type token/u);
+  });
+  it("omits a malformed public option identifier from rejected-rental evidence", () => {
+    const parsed = JSON.parse(publishedConfig().match(/<script[^>]*>([\s\S]*?)<\/script>/u)![1]);
+    const config = parsed.props.pageProps.initialReduxState;
+    config.bays.bayOptions = [{ ...config.bays.bayOptions[0], id: "never-retain-id", type: "golf_sim" }];
+    const result = extractSimulatorPublicCalendar(`<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(parsed)}</script>`, booking);
+    expect(result.calendar).toBeUndefined();
+    expect(result.configurationDiagnostic).toMatchObject({
+      reason: "CONFIG_NO_ELIGIBLE_RENTALS", optionCount: 1,
+      rejectedRentalOptions: [{ adminOnlyState: "FALSE", typeToken: "golf_sim", reason: "TYPE_NOT_SIMULATOR" }],
+    });
+    expect(result.configurationDiagnostic?.rejectedRentalOptions?.[0].publicOptionId).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain("never-retain-id");
+  });
+  it.each([
+    [{ adminOnly: true }, "ADMIN_ONLY_NOT_FALSE"],
+    [{ type: "golf_sim" }, "TYPE_NOT_SIMULATOR"],
+    [{ category: "driving-range" }, "CATEGORY_NOT_BAYTIME"],
+    [{}, null],
+  ] as const)("preserves the original venue-validation short circuit after %j", (patch, rejection) => {
+    const parsed = JSON.parse(publishedConfig().match(/<script[^>]*>([\s\S]*?)<\/script>/u)![1]);
+    const config = parsed.props.pageProps.initialReduxState;
+    config.bays.bayOptions = [{ ...config.bays.bayOptions[0], ...patch, venue: "never-retain-venue" }];
+    const result = extractSimulatorPublicCalendar(`<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(parsed)}</script>`, booking);
+    expect(result.calendar).toBeUndefined();
+    if (rejection) {
+      expect(result.configurationDiagnostic).toMatchObject({
+        reason: "CONFIG_NO_ELIGIBLE_RENTALS", optionCount: 1,
+        rejectedRentalOptions: [{ reason: rejection }],
+      });
+    } else {
+      expect(result.configurationDiagnostic).toEqual({ phase: "RENTALS", reason: "CONFIG_NUMBER", maintenanceModeState: "FALSE" });
+    }
+    expect(JSON.stringify(result)).not.toContain("never-retain-venue");
+  });
+  it("bounds excluded rental evidence while recording the validated total", () => {
+    const parsed = JSON.parse(publishedConfig().match(/<script[^>]*>([\s\S]*?)<\/script>/u)![1]);
+    const config = parsed.props.pageProps.initialReduxState;
+    const base = config.bays.bayOptions[0];
+    config.bays.bayOptions = Array.from({ length: 9 }, (_, index) => ({ ...base, id: 100 + index, adminOnly: true }));
+    const html = `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(parsed)}</script>`;
+    const result = extractSimulatorPublicCalendar(html, booking);
+    expect(result.calendar).toBeUndefined();
+    expect(result.configurationDiagnostic).toMatchObject({
+      phase: "RENTALS", reason: "CONFIG_NO_ELIGIBLE_RENTALS", optionCount: 9,
+      rejectedRentalOptionsTruncated: true,
+    });
+    expect(result.configurationDiagnostic?.rejectedRentalOptions).toHaveLength(8);
+    expect(result.configurationDiagnostic?.rejectedRentalOptions?.every(row => row.adminOnlyState === "TRUE" && !row.publicOptionId && !row.typeToken && !row.categoryToken)).toBe(true);
+    config.bays.bayOptions = Array.from({ length: 100 }, (_, index) => ({ ...base, id: 100 + index, adminOnly: true }));
+    const atCap = extractSimulatorPublicCalendar(`<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(parsed)}</script>`, booking);
+    expect(atCap.configurationDiagnostic).toMatchObject({ reason: "CONFIG_NO_ELIGIBLE_RENTALS", optionCount: 100,
+      rejectedRentalOptionsTruncated: true });
+    expect(atCap.configurationDiagnostic?.rejectedRentalOptions).toHaveLength(8);
+    config.bays.bayOptions.push({ ...base, id: 200, adminOnly: true });
+    const overCap = extractSimulatorPublicCalendar(`<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(parsed)}</script>`, booking);
+    expect(overCap.configurationDiagnostic).toEqual({ phase: "RENTALS", reason: "CONFIG_ARRAY",
+      field: { path: "bays.bayOptions", expectedType: "ARRAY", actualType: "ARRAY" }, maintenanceModeState: "FALSE" });
+    config.bays.bayOptions = [];
+    const empty = extractSimulatorPublicCalendar(`<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(parsed)}</script>`, booking);
+    expect(empty.configurationDiagnostic).toMatchObject({ reason: "CONFIG_NO_ELIGIBLE_RENTALS", optionCount: 0,
+      rejectedRentalOptions: [], rejectedRentalOptionsTruncated: false });
+  });
   it("does not adopt an unrelated exception merely because its message matches a configuration reason", () => {
     vi.spyOn(Intl, "DateTimeFormat").mockImplementationOnce(function () { throw new Error("CONFIG_BOOLEAN"); });
     const result = extractSimulatorPublicCalendar(publishedConfig(), booking);

@@ -36,13 +36,22 @@ export type SimulatorPublicCalendar = {
 };
 export type SimulatorConfigurationDiagnostic = {
   phase: "CONFIG" | "VENUE" | "RANGES" | "RENTALS" | "RESOURCES";
-  reason: "CONFIG_SHAPE" | "CONFIG_NUMBER" | "CONFIG_STRING" | "CONFIG_BOOLEAN" | "CONFIG_ARRAY" | "CONFIG_IDENTITY";
+  reason: "CONFIG_SHAPE" | "CONFIG_NUMBER" | "CONFIG_STRING" | "CONFIG_BOOLEAN" | "CONFIG_ARRAY" | "CONFIG_IDENTITY" | "CONFIG_NO_ELIGIBLE_RENTALS";
   maintenanceModeState?: "FALSE" | "TRUE" | "NULL" | "MISSING" | "INVALID";
   field?: {
-    path: "props" | "props.pageProps" | "initialReduxState" | "venue" | "ranges" | "ranges.items" | "ranges.items[]" | "bays" | "bays.bayOptions" | "bays.bayOptions[]" | "bays.items" | "bays.items[]";
+    path: "props" | "props.pageProps" | "initialReduxState" | "venue" | "ranges" | "ranges.items" | "ranges.items[]" | "bays" | "bays.bayOptions" | "bays.bayOptions[]" | "bays.bayOptions[].restrictions" | "bays.bayOptions[].appliedRequiredPerks" | "bays.items" | "bays.items[]";
     expectedType: "OBJECT" | "ARRAY";
     actualType: "MISSING" | "NULL" | "OBJECT" | "ARRAY" | "STRING" | "NUMBER" | "BOOLEAN" | "OTHER";
   };
+  rejectedRentalOptions?: Array<{
+    publicOptionId?: string;
+    adminOnlyState: "FALSE" | "TRUE" | "NULL" | "MISSING" | "INVALID";
+    typeToken?: string;
+    categoryToken?: string;
+    reason: "ADMIN_ONLY_NOT_FALSE" | "TYPE_NOT_SIMULATOR" | "CATEGORY_NOT_BAYTIME" | "VENUE_MISMATCH";
+  }>;
+  optionCount?: number;
+  rejectedRentalOptionsTruncated?: boolean;
 };
 export type SimulatorBodyLimitDiagnostic = {
   resourceKind: "SECONDARY_SCRIPT" | "SECONDARY_STYLESHEET";
@@ -191,6 +200,9 @@ export function extractSimulatorPublicCalendar(html: string, sourceUrl: string):
   let phase: SimulatorConfigurationDiagnostic["phase"] = "CONFIG";
   let observedMaintenanceMode: SimulatorConfigurationDiagnostic["maintenanceModeState"];
   let failedField: SimulatorConfigurationDiagnostic["field"];
+  let rejectedRentalOptions: SimulatorConfigurationDiagnostic["rejectedRentalOptions"];
+  let optionCount: number | undefined;
+  let rejectedRentalOptionsTruncated: boolean | undefined;
   const actualType = (value: unknown): NonNullable<SimulatorConfigurationDiagnostic["field"]>["actualType"] =>
     value === undefined ? "MISSING" : value === null ? "NULL" : Array.isArray(value) ? "ARRAY" :
       typeof value === "object" ? "OBJECT" : typeof value === "string" ? "STRING" :
@@ -227,11 +239,37 @@ export function extractSimulatorPublicCalendar(html: string, sourceUrl: string):
     uniqueConfigurationRows(ranges);
     phase = "RENTALS";
     const bays = readObject(config.bays, "bays");
-    const rentals = readArray(bays.bayOptions, "bays.bayOptions").flatMap(value => {
+    const excludedOptions: NonNullable<SimulatorConfigurationDiagnostic["rejectedRentalOptions"]> = [];
+    const optionRows = readArray(bays.bayOptions, "bays.bayOptions");
+    const rentals = optionRows.flatMap(value => {
       const row = readObject(value, "bays.bayOptions[]");
-      if (row.adminOnly !== false || row.type !== "simulator" || row.category !== "baytime" || id(row.venue) !== venueId) return [];
-      return [{ id: id(row.id), venueId, name: string(row.name), type: "simulator" as const, category: "baytime" as const, adminOnly: false as const, disabled: bool(row.disabled), waitlisted: bool(row.waitlisted), duration: number(row.duration, 1, 48), durationType: string(row.durationType), minDurationSlots: number(row.minBookingDuration, 1, 48), maxDurationSlots: number(row.maxBookingDuration, 1, 48), minPlayers: optionalNumber(row.minPlayers), maxPlayers: optionalNumber(row.maxPlayers), bufferMinutes: number(row.bufferPeriodMinutes, 0, 1440), hasRestrictions: array(row.restrictions).length > 0, requiresPerks: array(row.appliedRequiredPerks, 20).length > 0 }];
+      const rejectionReason: NonNullable<SimulatorConfigurationDiagnostic["rejectedRentalOptions"]>[number]["reason"] | null =
+        row.adminOnly !== false ? "ADMIN_ONLY_NOT_FALSE" : row.type !== "simulator" ? "TYPE_NOT_SIMULATOR" :
+          row.category !== "baytime" ? "CATEGORY_NOT_BAYTIME" : id(row.venue) !== venueId ? "VENUE_MISMATCH" : null;
+      if (rejectionReason) {
+        // Project only closed facts, and return them only if no rental survives.
+        if (excludedOptions.length < 8) {
+          const publicOption = row.adminOnly === false;
+          const token = (value: unknown) => typeof value === "string" && /^[a-z0-9_-]{1,32}$/u.test(value) ? value : undefined;
+          excludedOptions.push({
+            adminOnlyState: row.adminOnly === false ? "FALSE" : row.adminOnly === true ? "TRUE" :
+              row.adminOnly === null ? "NULL" : row.adminOnly === undefined ? "MISSING" : "INVALID",
+            ...(publicOption && typeof row.id === "number" && Number.isInteger(row.id) && row.id >= 1 && row.id <= 1_000_000_000 ? { publicOptionId: String(row.id) } : {}),
+            ...(publicOption && token(row.type) ? { typeToken: token(row.type) } : {}),
+            ...(publicOption && token(row.category) ? { categoryToken: token(row.category) } : {}),
+            reason: rejectionReason,
+          });
+        }
+        return [];
+      }
+      return [{ id: id(row.id), venueId, name: string(row.name), type: "simulator" as const, category: "baytime" as const, adminOnly: false as const, disabled: bool(row.disabled), waitlisted: bool(row.waitlisted), duration: number(row.duration, 1, 48), durationType: string(row.durationType), minDurationSlots: number(row.minBookingDuration, 1, 48), maxDurationSlots: number(row.maxBookingDuration, 1, 48), minPlayers: optionalNumber(row.minPlayers), maxPlayers: optionalNumber(row.maxPlayers), bufferMinutes: number(row.bufferPeriodMinutes, 0, 1440), hasRestrictions: readArray(row.restrictions, "bays.bayOptions[].restrictions").length > 0, requiresPerks: readArray(row.appliedRequiredPerks, "bays.bayOptions[].appliedRequiredPerks", 20).length > 0 }];
     });
+    if (!rentals.length) {
+      rejectedRentalOptions = excludedOptions;
+      optionCount = optionRows.length;
+      rejectedRentalOptionsTruncated = optionRows.length > excludedOptions.length;
+      configurationError("CONFIG_NO_ELIGIBLE_RENTALS");
+    }
     uniqueConfigurationRows(rentals);
     phase = "RESOURCES";
     const resourceRows = readArray(bays.items, "bays.items").map(value => readObject(value, "bays.items[]")).filter(row => row.type === "simulator");
@@ -244,7 +282,7 @@ export function extractSimulatorPublicCalendar(html: string, sourceUrl: string):
     return { calendar: { family: "YOUR_GOLF_BOOKING", venue: { id: venueId, slug, timeZone, status, maintenanceMode }, ranges, rentals, resources } };
   } catch (error) {
     const reason = error !== null && typeof error === "object" ? ownedConfigurationErrors.get(error) : undefined;
-    return reason ? { ...shape, configurationDiagnostic: { phase, reason, ...(failedField ? { field: failedField } : {}), ...(observedMaintenanceMode ? { maintenanceModeState: observedMaintenanceMode } : {}) } } : shape;
+    return reason ? { ...shape, configurationDiagnostic: { phase, reason, ...(failedField ? { field: failedField } : {}), ...(observedMaintenanceMode ? { maintenanceModeState: observedMaintenanceMode } : {}), ...(rejectedRentalOptions ? { rejectedRentalOptions, optionCount, rejectedRentalOptionsTruncated } : {}) } } : shape;
   }
 }
 

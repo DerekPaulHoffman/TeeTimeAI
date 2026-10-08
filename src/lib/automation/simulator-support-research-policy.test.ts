@@ -69,6 +69,46 @@ describe("persisted known-reader configuration", () => {
 });
 
 describe("durable simulator research failure memory", () => {
+  it("keeps only closed rental failure diagnostics in owned history and inherited routes", () => {
+    const diagnostic = { phase: "RENTALS" as const, reason: "CONFIG_NO_ELIGIBLE_RENTALS" as const,
+      maintenanceModeState: "NULL" as const, optionCount: 2, rejectedRentalOptionsTruncated: false,
+      rejectedRentalOptions: [
+        { adminOnlyState: "TRUE" as const, reason: "ADMIN_ONLY_NOT_FALSE" as const },
+        { adminOnlyState: "FALSE" as const, publicOptionId: "902", typeToken: "golf_sim",
+          categoryToken: "baytime", reason: "TYPE_NOT_SIMULATOR" as const },
+      ] };
+    const route = { url: bookingUrl, rendered: true, httpStatus: 200, configurationDiagnostic: diagnostic };
+    const entry = { source: "booking" as const, requestedUrl: bookingUrl, sourceUrl: bookingUrl,
+      observedAt: now.toISOString(), httpStatus: 200, rendered: true, outcome: "READ" as const,
+      configurationDiagnostic: diagnostic };
+    const history = (configurationDiagnostic: unknown) => readSimulatorResearchState({ ...empty(), readCount: 1,
+      history: [{ ...entry, configurationDiagnostic }] }, fingerprint);
+    const memory = (configurationDiagnostic: unknown) => readSimulatorResearchFailureMemory({ version: 1,
+      sourceFingerprint: fingerprint, routes: [{ ...route, configurationDiagnostic }] });
+    expect(history(diagnostic).history[0].configurationDiagnostic).toEqual(diagnostic);
+    expect(memory(diagnostic)?.routes[0].configurationDiagnostic).toEqual(diagnostic);
+    const field = { phase: "RENTALS", reason: "CONFIG_ARRAY", field: {
+      path: "bays.bayOptions[].appliedRequiredPerks", expectedType: "ARRAY", actualType: "NULL" } };
+    expect(history(field).history[0].configurationDiagnostic).toEqual(field);
+    expect(memory(field)?.routes[0].configurationDiagnostic).toEqual(field);
+    const invalid = [
+      { ...diagnostic, optionCount: 9 },
+      { ...diagnostic, rejectedRentalOptionsTruncated: true },
+      { ...diagnostic, rejectedRentalOptions: [{ ...diagnostic.rejectedRentalOptions[0], publicOptionId: "901" }, diagnostic.rejectedRentalOptions[1]] },
+      { ...diagnostic, rejectedRentalOptions: [{ ...diagnostic.rejectedRentalOptions[0], name: "Private Member" }, diagnostic.rejectedRentalOptions[1]] },
+      { ...diagnostic, rejectedRentalOptions: [{ ...diagnostic.rejectedRentalOptions[0], typeToken: "private@example.test" }, diagnostic.rejectedRentalOptions[1]] },
+      { ...diagnostic, rejectedRentalOptions: [diagnostic.rejectedRentalOptions[0], { ...diagnostic.rejectedRentalOptions[1], typeToken: "simulator" }] },
+      { ...diagnostic, rejectedRentalOptions: [diagnostic.rejectedRentalOptions[0], { ...diagnostic.rejectedRentalOptions[1], reason: "VENUE_MISMATCH" }] },
+      { ...diagnostic, rejectedRentalOptions: Array.from({ length: 9 }, () => diagnostic.rejectedRentalOptions[0]), optionCount: 9,
+        rejectedRentalOptionsTruncated: true },
+      { ...diagnostic, reason: "CONFIG_ARRAY" },
+      { ...field, field: { ...field.field, path: "bays.bayOptions[].privatePayload" } },
+    ];
+    for (const candidate of invalid) {
+      expect(() => history(candidate)).toThrow();
+      expect(() => memory(candidate)).toThrow();
+    }
+  });
   it("accepts only closed, bounded diagnostics on an incomplete owned rendered read and inherited route", () => {
     const bodyLimitDiagnostics = [{ resourceKind: "SECONDARY_SCRIPT" as const, phase: "COLLECTOR_HEADERS" as const,
       observedSizeBand: "OVER_LIMIT_UP_TO_2X" as const, count: 2 }];

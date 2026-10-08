@@ -1545,7 +1545,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toMatchObject({ status: "PAUSED" });
   });
 
-  it("carries all denied routes and diagnostics across more than four retries, including withdrawn research", async () => {
+  it.each(["range-shape", "rental-filter"] as const)("carries all denied routes and %s diagnostics across more than four retries, including withdrawn research", async diagnosticKind => {
     const bays = "https://yourgolfbooking.com/venues/owned-simulator/booking/bays", root = bays.replace(/\/bays$/u, "");
     const f = await fixture(15, false, bays);
     const stored = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
@@ -1553,6 +1553,15 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     await client.automationRun.update({ where: { id: f.run.id }, data: { status: "COMPLETED", outcome: "fixture_preparation", completedAt: new Date() } });
     const denied = [{ url: f.course.website!, rendered: false }, { url: f.course.website!, rendered: true },
       { url: bays, rendered: false }, { url: bays, rendered: true }, { url: root, rendered: false }, { url: root, rendered: true }];
+    const configurationDiagnostic = diagnosticKind === "range-shape"
+      ? { phase: "RANGES", reason: "CONFIG_SHAPE", field: { path: "ranges", expectedType: "OBJECT", actualType: "MISSING" } }
+      : { phase: "RENTALS", reason: "CONFIG_NO_ELIGIBLE_RENTALS", optionCount: 3,
+          rejectedRentalOptionsTruncated: false, maintenanceModeState: "NULL",
+          rejectedRentalOptions: [
+            { adminOnlyState: "FALSE", publicOptionId: "321", typeToken: "golf_sim", categoryToken: "baytime", reason: "TYPE_NOT_SIMULATOR" },
+            { adminOnlyState: "TRUE", reason: "ADMIN_ONLY_NOT_FALSE" },
+            { adminOnlyState: "MISSING", reason: "ADMIN_ONLY_NOT_FALSE" },
+          ] };
     for (const [index, route] of denied.entries()) {
       const observedAt = new Date(Date.now() - (denied.length - index) * 60_000).toISOString();
       const hard = { outcome: "HARD_FAILED", httpStatus: 0, requestId: randomUUID(), failure: {
@@ -1561,7 +1570,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
         publicReadEvidence: { sourceFingerprint: f.fingerprint, accessControlsObserved: true, accessControls: [], method: "BROWSER", renderComplete: false },
         researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION, renderWarning: "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED",
         bodyLimitDiagnostics: [{ resourceKind: "SECONDARY_SCRIPT", phase: "TRANSPORT_HEADERS", observedSizeBand: "OVER_2X_UP_TO_4X", count: 1 }],
-        configurationDiagnostic: { phase: "RANGES", reason: "CONFIG_SHAPE", field: { path: "ranges", expectedType: "OBJECT", actualType: "MISSING" } } };
+        configurationDiagnostic };
       const historical = { ...initial, assignmentRef: `course-assignment-${randomUUID()}`, childThreadId: `legacy-${randomUUID()}`,
         simulatorResearchPriorFailures: undefined, simulatorResearch: { version: 1, sourceFingerprint: f.fingerprint, readCount: 1, inFlight: null, links: [], bookingLinks: [], linkBaseUrl: null,
           history: [{ source: "booking", requestedUrl: route.url, sourceUrl: route.url, observedAt, rendered: route.rendered, httpStatus: 403, outcome: "READ",
@@ -1583,7 +1592,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
       expect(claim.value.researchGuide.priorBlockedRoutes).toContainEqual(expect.objectContaining({ url: f.course.website, rendered: true,
         failure: { stage: "PUBLIC_READ", category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE", researchPhase: "BROWSER_DOCUMENT" } }));
       expect(claim.value.researchGuide.priorBlockedRoutes).toContainEqual(expect.objectContaining({ url: bays, rendered: true,
-        configurationDiagnostic: { phase: "RANGES", reason: "CONFIG_SHAPE", field: { path: "ranges", expectedType: "OBJECT", actualType: "MISSING" } },
+        configurationDiagnostic,
         bodyLimitDiagnostics: [{ resourceKind: "SECONDARY_SCRIPT", phase: "TRANSPORT_HEADERS", observedSizeBand: "OVER_2X_UP_TO_4X", count: 1 }] }));
       expect(claim.value.researchGuide.suggestedReads).toEqual([]);
       const owner = { assignmentRef, ownerThreadId: child, token: claim.value.token, revision: claim.value.revision };

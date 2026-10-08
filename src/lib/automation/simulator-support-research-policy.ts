@@ -16,14 +16,33 @@ const safeFailure = z.custom<SimulatorSupportFailure>(value => readSafeSimulator
   .transform(value => readSafeSimulatorSupportFailure(value)!);
 const configurationDiagnostic = z.object({
   phase: z.enum(["CONFIG", "VENUE", "RANGES", "RENTALS", "RESOURCES"]),
-  reason: z.enum(["CONFIG_SHAPE", "CONFIG_NUMBER", "CONFIG_STRING", "CONFIG_BOOLEAN", "CONFIG_ARRAY", "CONFIG_IDENTITY"]),
+  reason: z.enum(["CONFIG_SHAPE", "CONFIG_NUMBER", "CONFIG_STRING", "CONFIG_BOOLEAN", "CONFIG_ARRAY", "CONFIG_IDENTITY", "CONFIG_NO_ELIGIBLE_RENTALS"]),
   maintenanceModeState: z.enum(["FALSE", "TRUE", "NULL", "MISSING", "INVALID"]).optional(),
   field: z.object({
-    path: z.enum(["props", "props.pageProps", "initialReduxState", "venue", "ranges", "ranges.items", "ranges.items[]", "bays", "bays.bayOptions", "bays.bayOptions[]", "bays.items", "bays.items[]"]),
+    path: z.enum(["props", "props.pageProps", "initialReduxState", "venue", "ranges", "ranges.items", "ranges.items[]", "bays", "bays.bayOptions", "bays.bayOptions[]", "bays.bayOptions[].restrictions", "bays.bayOptions[].appliedRequiredPerks", "bays.items", "bays.items[]"]),
     expectedType: z.enum(["OBJECT", "ARRAY"]),
     actualType: z.enum(["MISSING", "NULL", "OBJECT", "ARRAY", "STRING", "NUMBER", "BOOLEAN", "OTHER"]),
   }).strict().optional(),
-}).strict();
+  rejectedRentalOptions: z.array(z.object({
+    publicOptionId: z.string().regex(/^[1-9][0-9]{0,9}$/u).refine(value => Number(value) <= 1_000_000_000).optional(),
+    adminOnlyState: z.enum(["FALSE", "TRUE", "NULL", "MISSING", "INVALID"]),
+    typeToken: z.string().regex(/^[a-z0-9_-]{1,32}$/u).optional(),
+    categoryToken: z.string().regex(/^[a-z0-9_-]{1,32}$/u).optional(),
+    reason: z.enum(["ADMIN_ONLY_NOT_FALSE", "TYPE_NOT_SIMULATOR", "CATEGORY_NOT_BAYTIME", "VENUE_MISMATCH"]),
+  }).strict().refine(row => {
+    if (row.adminOnlyState !== "FALSE") return row.reason === "ADMIN_ONLY_NOT_FALSE" &&
+      !row.publicOptionId && !row.typeToken && !row.categoryToken;
+    if (row.reason === "TYPE_NOT_SIMULATOR") return row.typeToken !== "simulator";
+    if (row.reason === "CATEGORY_NOT_BAYTIME") return row.typeToken === "simulator" && row.categoryToken !== "baytime";
+    return row.reason === "VENUE_MISMATCH" && row.typeToken === "simulator" && row.categoryToken === "baytime";
+  })).max(8).optional(),
+  optionCount: z.number().int().min(0).max(100).optional(),
+  rejectedRentalOptionsTruncated: z.boolean().optional(),
+}).strict().refine(entry => entry.reason === "CONFIG_NO_ELIGIBLE_RENTALS" ?
+  entry.phase === "RENTALS" && entry.optionCount !== undefined && entry.rejectedRentalOptions !== undefined &&
+    entry.rejectedRentalOptions.length === Math.min(entry.optionCount, 8) &&
+    entry.rejectedRentalOptionsTruncated === (entry.optionCount > 8) && entry.field === undefined :
+  entry.rejectedRentalOptions === undefined && entry.optionCount === undefined && entry.rejectedRentalOptionsTruncated === undefined);
 const renderWarning = z.enum(["SECONDARY_REQUEST_BUDGET_EXHAUSTED", "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED", "SECONDARY_STYLESHEET_URL_REJECTED", "MAIN_DOCUMENT_HTTP_ERROR"]);
 const bodyLimitDiagnostic = z.object({
   resourceKind: z.enum(["SECONDARY_SCRIPT", "SECONDARY_STYLESHEET"]),
