@@ -192,6 +192,8 @@ function writeVercelFixture(checkout: string, version = "62.2.0") {
   mkdirSync(join(directory, "dist"), { recursive: true });
   writeFileSync(join(directory, "package.json"), JSON.stringify({ name: "vercel", version, bin: { vercel: "./dist/vc.js" } }));
   writeFileSync(join(directory, "dist", "vc.js"), "process.stdout.write('62.2.0\\n');");
+  writeFileSync(join(directory, "dist", "index.js"), "fixture");
+  writeFileSync(join(directory, "dist", "version.mjs"), "export const version = '62.2.0';");
 }
 
 describe("private Windows worker runtime", () => {
@@ -209,11 +211,13 @@ describe("private Windows worker runtime", () => {
     const installedNpm = "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js";
     const runtime = resolveCourseSupportWorkerRuntime({ platform: "win32", execPath: "C:\\bundled\\node.exe", environment: {}, exists: (path: string) => [installedNode, installedNpm].includes(path) });
     expect(runtime).toMatchObject({ status: "available", nodePath: installedNode, npmCliPath: installedNpm });
-    const environment = courseSupportWorkerRuntimeEnvironment(runtime, resolve("private-worker"), { Path: "roaming-shims", NPM_CONFIG_CACHE: "shared-cache", NPM_CONFIG_PREFIX: "roaming-prefix", API_KEY: "secret" });
+    const environment = courseSupportWorkerRuntimeEnvironment(runtime, resolve("private-worker"), { Path: "roaming-shims", NPM_CONFIG_CACHE: "shared-cache", NPM_CONFIG_PREFIX: "roaming-prefix", API_KEY: "secret", VERCEL_CLI_USE_NATIVE_BINARY: "1", vercel_cli_use_native_binary: "1" });
     expect(environment.Path).toBeUndefined();
     expect(environment.NPM_CONFIG_CACHE).toBeUndefined();
     expect(environment.NPM_CONFIG_PREFIX).toBeUndefined();
     expect(environment.API_KEY).toBeUndefined();
+    expect(environment.VERCEL_CLI_USE_NATIVE_BINARY).toBe("0");
+    expect(environment.vercel_cli_use_native_binary).toBeUndefined();
     expect(environment.PATH).toBe("C:\\Program Files\\nodejs;roaming-shims");
     expect(environment.npm_config_cache).toBe(resolve("private-worker", ".codex-artifacts/npm-cache"));
     expect(environment.npm_config_prefix).toBe(resolve("private-worker", ".codex-artifacts/npm-prefix"));
@@ -265,6 +269,8 @@ describe("private Windows worker runtime", () => {
     const shared = join(root, "shared-dependencies");
     mkdirSync(shared);
     unlinkSync(join(checkout, "node_modules", "vercel", "dist", "vc.js"));
+    unlinkSync(join(checkout, "node_modules", "vercel", "dist", "index.js"));
+    unlinkSync(join(checkout, "node_modules", "vercel", "dist", "version.mjs"));
     rmdirSync(join(checkout, "node_modules", "vercel", "dist"));
     unlinkSync(join(checkout, "node_modules", "vercel", "package.json"));
     rmdirSync(join(checkout, "node_modules", "vercel"));
@@ -399,15 +405,17 @@ describe("private Windows worker runtime", () => {
     expect(dependencies.runCommand.mock.calls.some(([, args]) => args.includes("env"))).toBe(false);
   });
 
-  it.each(["missing", "wrong_version", "invalid_manifest", "missing_entry", "shared_entry", "shared_manifest"])("blocks %s CLI readiness before any production execution", failure => {
+  it.each(["missing", "wrong_version", "invalid_manifest", "missing_entry", "missing_index", "missing_version", "shared_entry", "shared_manifest", "shared_index", "shared_version"])("blocks %s CLI readiness before any production execution", failure => {
     const { root, checkout, options, dependencies } = fixture();
     const directory = join(checkout, "node_modules", "vercel"), manifest = join(directory, "package.json"), entry = join(directory, "dist", "vc.js");
     if (failure === "missing") unlinkSync(manifest);
     if (failure === "wrong_version") writeVercelFixture(checkout, "62.2.1");
     if (failure === "invalid_manifest") writeFileSync(manifest, JSON.stringify({ name: "vercel", version: "62.2.0", bin: { vercel: "../../unowned.js" } }));
     if (failure === "missing_entry") unlinkSync(entry);
+    if (failure === "missing_index") unlinkSync(join(directory, "dist", "index.js"));
+    if (failure === "missing_version") unlinkSync(join(directory, "dist", "version.mjs"));
     if (failure.startsWith("shared_")) {
-      const file = failure === "shared_entry" ? entry : manifest;
+      const file = failure === "shared_entry" ? entry : failure === "shared_index" ? join(directory, "dist", "index.js") : failure === "shared_version" ? join(directory, "dist", "version.mjs") : manifest;
       linkSync(file, join(root, "shared-cli-file"));
     }
     const inspection = inspectCourseSupportWorkerRuntime(options, dependencies);
@@ -422,7 +430,9 @@ describe("private Windows worker runtime", () => {
   it("rejects a CLI directory junction even when its version is correct", () => {
     const { root, checkout } = fixture();
     const directory = join(checkout, "node_modules", "vercel");
-    unlinkSync(join(directory, "dist", "vc.js")); rmdirSync(join(directory, "dist"));
+    unlinkSync(join(directory, "dist", "vc.js"));
+    unlinkSync(join(directory, "dist", "index.js")); unlinkSync(join(directory, "dist", "version.mjs"));
+    rmdirSync(join(directory, "dist"));
     unlinkSync(join(directory, "package.json")); rmdirSync(directory);
     const shared = join(root, "shared-cli"); writeVercelFixture(shared);
     symlinkSync(join(shared, "node_modules", "vercel"), directory, process.platform === "win32" ? "junction" : "dir");
@@ -433,7 +443,7 @@ describe("private Windows worker runtime", () => {
     const { checkout } = fixture();
     const dist = join(checkout, "node_modules", "vercel", "dist"), target = join(checkout, "other-dist");
     mkdirSync(target); writeFileSync(join(target, "vc.js"), "fixture");
-    unlinkSync(join(dist, "vc.js")); rmdirSync(dist);
+    unlinkSync(join(dist, "vc.js")); unlinkSync(join(dist, "index.js")); unlinkSync(join(dist, "version.mjs")); rmdirSync(dist);
     symlinkSync(target, dist, process.platform === "win32" ? "junction" : "dir");
     expect(inspectCourseSupportWorkerVercel(checkout)).toEqual({ status: "shared_output_rejected" });
   });

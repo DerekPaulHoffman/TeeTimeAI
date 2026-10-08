@@ -27,6 +27,8 @@ function validationFixture() {
   mkdirSync(join(selected, "node_modules", "vercel", "dist"), { recursive: true });
   writeFileSync(join(selected, "node_modules", "vercel", "package.json"), JSON.stringify({ name: "vercel", version: "62.2.0", bin: { vercel: "./dist/vc.js" } }));
   writeFileSync(join(selected, "node_modules", "vercel", "dist", "vc.js"), "fixture");
+  writeFileSync(join(selected, "node_modules", "vercel", "dist", "index.js"), "fixture");
+  writeFileSync(join(selected, "node_modules", "vercel", "dist", "version.mjs"), "fixture");
   const launcherReceiptPath = join(outputDir, "launcher.receipt.private.json");
   const branch = "automation/course-support-original", baseSha = "a".repeat(40), mainSha = "b".repeat(40),
     workerHead = "c".repeat(40), sourceFingerprint = "d".repeat(64), parentThreadId = "aaaaaaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee";
@@ -78,6 +80,8 @@ function fixture(overrides: Record<string, unknown> = {}) {
   mkdirSync(join(selected, "node_modules", "vercel", "dist"), { recursive: true });
   writeFileSync(join(selected, "node_modules", "vercel", "package.json"), JSON.stringify({ name: "vercel", version: "62.2.0", bin: { vercel: "./dist/vc.js" } }));
   writeFileSync(join(selected, "node_modules", "vercel", "dist", "vc.js"), "fixture");
+  writeFileSync(join(selected, "node_modules", "vercel", "dist", "index.js"), "fixture");
+  writeFileSync(join(selected, "node_modules", "vercel", "dist", "version.mjs"), "fixture");
   const item = { assignmentRef: "course-assignment-11111111-2222-7333-8444-555555555555", threadId,
     claimToken: "cccccccc-dddd-7eee-8fff-aaaaaaaaaaaa", claimRevision: 7, plannedPaths: ["src/lib/simulators/example.ts"] };
   const validated = { output, selected, worker, head: "a".repeat(40), item,

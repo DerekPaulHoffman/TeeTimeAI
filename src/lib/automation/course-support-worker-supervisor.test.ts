@@ -19,6 +19,8 @@ function fixture(mode?: "SIMULATOR") {
   mkdirSync(join(selected, "node_modules", "vercel", "dist"), { recursive: true });
   writeFileSync(join(selected, "node_modules", "vercel", "package.json"), JSON.stringify({ name: "vercel", version: "62.2.0", bin: { vercel: "dist/vc.js" } }));
   writeFileSync(join(selected, "node_modules", "vercel", "dist", "vc.js"), "fixture");
+  writeFileSync(join(selected, "node_modules", "vercel", "dist", "index.js"), "fixture");
+  writeFileSync(join(selected, "node_modules", "vercel", "dist", "version.mjs"), "fixture");
   const cli = join(selected, "codex.exe"), node = join(root, "node.exe"), npm = join(root, "npm-cli.js");
   for (const file of [cli, node, npm]) writeFileSync(file, "fixture");
   const context = { kind: "course_support_preflight_context", selectedCheckout: selected, exactHead: true,

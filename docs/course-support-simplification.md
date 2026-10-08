@@ -247,7 +247,7 @@ provider access rules, retry budgets and customer searches stay unchanged.
 Independent review caught an initial fixture mistake: the real package declares
 dist/vc.js, not dist/index.js. A real installed-package metadata test now covers
 that boundary, plus private directory/file guards and post-smoke version drift.
-Local89 focused checks, lint, TypeScript and actual schedulerNode22 CLI version
+Local93 focused checks, lint, TypeScript and actual schedulerNode22 CLI version
 passed without production credentials or network. Exact-head CI/publication
 and original scheduled autonomous repair remain required; no package readiness
 or healthy ordinary customer check substitutes for Back9 monitoring proof.
@@ -259,3 +259,9 @@ The first-turn --prepare origin/main guard stays strict. Parent selected
 readiness alone is not evidence of original-child readiness; the earlier
 template incorrectly said it was. No local refresh renews a lease or changes
 source, spent attempts or publication history.
+The final installed-source review also found that the declared Vercel shim can
+select a native executable through user configuration and ancestor directories.
+Workers now explicitly use its supported JavaScript-only setting in their
+stripped local environment. The known shim imports index.js/version.mjs are
+checked as private regular files too. This keeps actual production execution on
+the same verified Node path; it changes no authentication or provider access.

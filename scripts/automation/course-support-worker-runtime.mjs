@@ -45,6 +45,9 @@ export function courseSupportWorkerRuntimeEnvironment(runtime, checkout, environ
   result.PATH = `${win32.dirname(runtime.nodePath)};${result.PATH || ""}`;
   result.npm_config_cache = resolve(checkout, ".codex-artifacts", "npm-cache");
   result.npm_config_prefix = resolve(checkout, ".codex-artifacts", "npm-prefix");
+  // The declared CLI shim otherwise searches ancestor directories/user config
+  // for a native executable outside this verified private JavaScript runtime.
+  result.VERCEL_CLI_USE_NATIVE_BINARY = "0";
   return result;
 }
 
@@ -60,9 +63,10 @@ const productionScripts = new Set(["automation:course-support", "automation:cour
 export function inspectCourseSupportWorkerVercel(checkout) {
   const directory = resolve(checkout, "node_modules", "vercel");
   const dist = resolve(directory, "dist"), manifest = resolve(directory, "package.json"), entry = resolve(dist, "vc.js");
-  if (![directory, dist, manifest, entry].every(path => isPrivateWorkerPath(checkout, path))) return { status: "shared_output_rejected" };
+  const leaves = [manifest, entry, resolve(dist, "index.js"), resolve(dist, "version.mjs")];
+  if (![directory, dist, ...leaves].every(path => isPrivateWorkerPath(checkout, path))) return { status: "shared_output_rejected" };
   try {
-    for (const [path, isDirectory] of [[directory, true], [dist, true], [manifest, false], [entry, false]]) {
+    for (const [path, isDirectory] of [[directory, true], [dist, true], ...leaves.map(path => [path, false])]) {
       const stat = lstatSync(path);
       if (stat.isSymbolicLink() || (isDirectory ? !stat.isDirectory() : !stat.isFile() || stat.nlink !== 1)) return { status: "shared_output_rejected" };
     }
