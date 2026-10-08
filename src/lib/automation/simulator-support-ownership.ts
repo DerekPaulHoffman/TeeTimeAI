@@ -729,14 +729,14 @@ export function retrySimulatorSupport(input: Owner & { retryMinutes: number; cur
     const state = readSimulatorResearchState(row.audit.simulatorResearch, row.source.fingerprint);
     const verification = (row.audit as CourseDispatchAudit & { simulatorEngineeringVerification?: { inFlight?: unknown } }).simulatorEngineeringVerification;
     if (state.inFlight || verification?.inFlight) throw new Error("Finish or reconcile the original bounded simulator read before retry.");
-    const publishedEngineeringRelease = Boolean(row.audit.target.engineeringAuthority && row.claim.phase === "VERIFYING" && row.claim.releaseSha && row.claim.deployment);
-    if (row.claim.phase === "IMPLEMENTING" || (row.claim.plannedPaths.length > 0 && !publishedEngineeringRelease) ||
+    const publishedOwnedRelease = Boolean(row.claim.phase === "VERIFYING" && row.claim.releaseSha && row.claim.deployment);
+    if (row.claim.phase === "IMPLEMENTING" || ((row.claim.plannedPaths.length > 0 || row.claim.releaseSha !== null) && !publishedOwnedRelease) ||
         (row.audit as CourseDispatchAudit & { simulatorRepairPending?: unknown }).simulatorRepairPending) throw new Error("Retry cannot release unfinished simulator implementation ownership.");
-    if (publishedEngineeringRelease) {
-      if (!input.releaseCheckoutVerified || !input.currentDeployment) throw new Error("Engineering release retry requires a clean committed checkout and fresh current deployment proof.");
+    if (publishedOwnedRelease) {
+      if (!input.releaseCheckoutVerified || !input.currentDeployment) throw new Error("Published simulator release retry requires a clean committed checkout and fresh current deployment proof.");
       assertSimulatorSupportDeployment(row.claim.deployment!, row.claim.releaseSha!, now);
       assertSimulatorSupportDeployment(input.currentDeployment, row.claim.releaseSha!, now);
-      if (input.currentDeployment.deploymentId !== row.claim.deployment!.deploymentId || input.currentDeployment.deploymentUrl !== row.claim.deployment!.deploymentUrl) throw new Error("Engineering release retry requires the same current production deployment.");
+      if (input.currentDeployment.deploymentId !== row.claim.deployment!.deploymentId || input.currentDeployment.deploymentUrl !== row.claim.deployment!.deploymentUrl) throw new Error("Published simulator release retry requires the same current production deployment.");
     }
     if (row.audit.target.engineeringAuthority && row.source.verificationTargets.some(search => !["TEST", "AUTOMATION"].includes(search.trafficClass))) {
       await tx.simulatorSupportIncident.update({ where: { id: row.source.incident.id }, data: { status: "AUTO_INVESTIGATING", retryAt: now } });
@@ -745,11 +745,11 @@ export function retrySimulatorSupport(input: Owner & { retryMinutes: number; cur
           sourceFingerprint: row.source.fingerprint, releaseSha: row.claim.releaseSha } } as unknown as Prisma.InputJsonValue } });
       return { outcome: "customer_check_required" as const, retryAt: now.toISOString(), durableCloseoutRecorded: true };
     }
-    if (publishedEngineeringRelease) {
+    if (publishedOwnedRelease) {
       const retryAt = new Date(now.getTime() + input.retryMinutes * 60_000);
       await tx.simulatorSupportIncident.update({ where: { id: row.source.incident.id }, data: { status: "AUTO_INVESTIGATING", retryAt } });
       await tx.automationRun.update({ where: { id: row.runId }, data: { status: "COMPLETED", completedAt: now,
-        outcome: "simulator_retryable_failed", audit: { ...row.audit, simulatorEngineeringRetry: { recordedAt: now.toISOString(),
+        outcome: "simulator_retryable_failed", audit: { ...row.audit, simulatorPublishedReleaseRetry: { recordedAt: now.toISOString(),
           sourceFingerprint: row.source.fingerprint, releaseSha: row.claim.releaseSha, deploymentId: input.currentDeployment!.deploymentId } } as unknown as Prisma.InputJsonValue } });
       return { outcome: "retryable_failed" as const, retryAt: retryAt.toISOString(), durableCloseoutRecorded: true };
     }

@@ -189,7 +189,7 @@ async function main() {
   else {
     const claim = await readSimulatorSupportClaim(owner);
     assertSimulatorSupportInspectionFence(input, claim);
-    if (claim.supportAuthority === "ENGINEERING_INCIDENT" && claim.phase === "VERIFYING" && claim.releaseSha) {
+    if (claim.phase === "VERIFYING" && claim.releaseSha && claim.deployment) {
       assertSimulatorSupportCompletionCheckout(claim.releaseSha);
       const currentDeployment = await waitForGitDeployment({ commitSha: claim.releaseSha, timeoutSeconds: 60, pollSeconds: 15 }, {
         listDeployments: () => vercelJson<VercelDeploymentList>(["ls", "--environment", "production", "--meta", `githubCommitSha=${claim.releaseSha}`, "--format", "json", "--limit", "20"]),

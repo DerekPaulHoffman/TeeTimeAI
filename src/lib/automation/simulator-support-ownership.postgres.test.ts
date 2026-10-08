@@ -2,7 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { Prisma, PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
 import { createSimulatorSupportIntentDigest, SIMULATOR_SUPPORT_SOURCE_SELECT } from "./simulator-support-policy";
 import { SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION } from "./simulator-support-research-policy";
@@ -40,6 +40,11 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     if (!client) return;
     const probes = await client.courseProbe.findMany({ where: { courseId: { in: ids.courses }, automationRunId: { not: null } }, select: { automationRunId: true } });
     ids.runs.push(...probes.flatMap(probe => probe.automationRunId ? [probe.automationRunId] : []));
+    if (ids.courses.length) {
+      const dispatches = await client.automationRun.findMany({ where: { promptVersion: dispatcher.COURSE_DISPATCH_PROMPT_VERSION,
+        OR: ids.courses.map(courseId => ({ audit: { path: ["target", "courseId"], equals: courseId } })) }, select: { id: true } });
+      ids.runs.push(...dispatches.map(run => run.id));
+    }
     await client.automationRun.deleteMany({ where: { id: { in: ids.runs } } });
     await client.course.deleteMany({ where: { id: { in: ids.courses } } });
     await client.user.deleteMany({ where: { id: { in: ids.users } } });
@@ -73,6 +78,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     if (!claimed.acquired) throw new Error("Fixture writer transition was busy.");
     return { course, offering, peer, search, incident, run, owner: { assignmentRef, ownerThreadId: child, token: claimed.value.token, revision: claimed.value.revision }, fingerprint };
   }
+  beforeEach(() => { Object.values(coreMocks).forEach(mock => mock.mockReset()); });
 
   async function engineeringFixture(boundOnly = false) {
     const f = await fixture(15, false, undefined, undefined, true);
@@ -641,7 +647,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
       trustedUpstreamSha: "c".repeat(40), upstreamDescendantVerified: true, descendantVerified: true, committedPaths: [] });
     expect(release.acquired).toBe(true);
     expect(await client.course.findUniqueOrThrow({ where: { id: f.course.id } })).toEqual(outdoorBefore);
-    if (release.acquired) await lane.retrySimulatorSupport({ ...owner, revision: release.value.revision, retryMinutes: 15 });
+    if (release.acquired) await expect(lane.retrySimulatorSupport({ ...owner, revision: release.value.revision, retryMinutes: 15 })).rejects.toThrow("unfinished simulator implementation");
   });
 
   it("requires fresh official factual evidence for terminal classification, queues status and cannot be reopened by stale failure", async () => {
@@ -782,7 +788,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
       simulatorReleaseProvenance: { originalBaseSha: baseSha, trustedUpstreamSha,
         releaseSha: trustedUpstreamSha, metadataOnlyReuse: true, metadataReuseKind: "TRUSTED_UPSTREAM", committedPaths: [] },
     });
-    await lane.retrySimulatorSupport({ ...f.owner, revision: release.value.revision, retryMinutes: 15 });
+    await expect(lane.retrySimulatorSupport({ ...f.owner, revision: release.value.revision, retryMinutes: 15 })).rejects.toThrow("unfinished simulator implementation");
   });
 
   it("retains fresh successful links when another owned destination fails", async () => {
@@ -970,7 +976,9 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     await expect(lane.registerSimulatorSupportRelease({ ...f.owner, revision: planned.value.revision, releaseSha: "b".repeat(40),
       branch: `automation/course-support-${f.owner.ownerThreadId.replace("child-", "")}`, trustedUpstreamSha: baseSha,
       upstreamDescendantVerified: true, committedPaths: ["src/lib/simulators/providers/new-reader.test.ts"], descendantVerified: true })).rejects.toThrow("provenance");
-    await lane.retrySimulatorSupport({ ...f.owner, revision: planned.value.revision, retryMinutes: 15 });
+    await expect(lane.retrySimulatorSupport({ ...f.owner, revision: planned.value.revision, retryMinutes: 15 })).rejects.toThrow("unfinished simulator implementation");
+    expect(await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).toMatchObject({ status: "RUNNING",
+      audit: { simulatorClaim: { phase: "IMPLEMENTING", plannedPaths: ["src/lib/simulators/providers/new-reader.test.ts"] } } });
   });
 
   it("accepts claimed runtime work after reviewed upstream advances and rejects unclaimed or unproved candidate deltas", async () => {
@@ -994,7 +1002,41 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
       baseSha, simulatorReleaseProvenance: { originalBaseSha: baseSha, trustedUpstreamSha: input.trustedUpstreamSha,
         releaseSha: input.releaseSha, metadataOnlyReuse: false, committedPaths: [path] },
     });
-    await lane.retrySimulatorSupport({ ...owner, revision: registered.value.revision, retryMinutes: 15 });
+    await expect(lane.retrySimulatorSupport({ ...owner, revision: registered.value.revision, retryMinutes: 15 })).rejects.toThrow("unfinished simulator implementation");
+    expect(await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).toMatchObject({ status: "RUNNING",
+      audit: { simulatorClaim: { releaseSha: input.releaseSha, plannedPaths: [path], deployment: null } } });
+  });
+
+  it("allows honest real-demand retry only after the owned committed release has fresh exact Ready deployment proof", async () => {
+    const f = await fixture();
+    const path = "src/lib/simulators/providers/owned-reader.ts", releaseSha = "b".repeat(40);
+    const planned = await lane.claimSimulatorSupportPath({ ...f.owner, path });
+    if (!planned.acquired) throw new Error("Real retry path fixture was busy.");
+    let owner = { ...f.owner, revision: planned.value.revision };
+    const registered = await lane.registerSimulatorSupportRelease({ ...owner, releaseSha,
+      trustedUpstreamSha: baseSha, upstreamDescendantVerified: true, descendantVerified: true, committedPaths: [path],
+      branch: `automation/course-support-${owner.ownerThreadId.replace("child-", "")}` });
+    if (!registered.acquired) throw new Error("Real retry release fixture was busy."); owner = { ...owner, revision: registered.value.revision };
+    await expect(lane.retrySimulatorSupport({ ...owner, retryMinutes: 60 })).rejects.toThrow("unfinished simulator implementation");
+    const proof = { aliases: ["teetimespot.com", "www.teetimespot.com"], branch: "main", commitSha: releaseSha,
+      deployedAt: new Date(Date.now() - 5_000).toISOString(), deploymentId: "dpl_real_retry_fixture", deploymentUrl: "https://real-retry-fixture.vercel.app", source: "git" as const, state: "READY" as const };
+    const deployed = await lane.recordSimulatorSupportDeployment({ ...owner, proof });
+    if (!deployed.acquired) throw new Error("Real retry deployment fixture was busy."); owner = { ...owner, revision: deployed.value.revision };
+    const beforeSearch = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });
+    const beforeRun = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    await expect(lane.retrySimulatorSupport({ ...owner, retryMinutes: 60 })).rejects.toThrow("clean committed checkout");
+    await expect(lane.retrySimulatorSupport({ ...owner, retryMinutes: 60, currentDeployment: proof, releaseCheckoutVerified: false })).rejects.toThrow("clean committed checkout");
+    await expect(lane.retrySimulatorSupport({ ...owner, retryMinutes: 60, currentDeployment: { ...proof, deploymentId: "dpl_wrong" }, releaseCheckoutVerified: true })).rejects.toThrow("same current production deployment");
+    const retried = await lane.retrySimulatorSupport({ ...owner, retryMinutes: 60, currentDeployment: proof, releaseCheckoutVerified: true });
+    if (!retried.acquired) throw new Error("Real published retry was busy.");
+    expect(retried.value).toMatchObject({ outcome: "retryable_failed", durableCloseoutRecorded: true });
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(beforeSearch);
+    const after = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    expect(after).toMatchObject({ status: "COMPLETED", outcome: "simulator_retryable_failed" });
+    expect((after.audit as Prisma.JsonObject).simulatorClaim).toEqual((beforeRun.audit as Prisma.JsonObject).simulatorClaim);
+    expect(after.audit).toMatchObject({ simulatorPublishedReleaseRetry: { releaseSha, deploymentId: proof.deploymentId, sourceFingerprint: f.fingerprint } });
+    expect(await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } })).toMatchObject({ status: "AUTO_INVESTIGATING", resolvedAt: null });
+    expect(coreMocks.fetch).not.toHaveBeenCalled(); expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
   });
 
   it("does not erase older actual hard, HTTP or access denials with a later complete rendered page", async () => {
@@ -1326,7 +1368,9 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
       vi.fn(async () => new Response("<p>Public rental calendar</p>", { headers: { "content-type": "text/html" } })));
     if (!booking.acquired) throw new Error("Alternate bounded route was busy.");
     expect(booking.value.readsRemaining).toBe(4);
-    expect((await lane.retrySimulatorSupport({ ...f.owner, revision: booking.value.revision, retryMinutes: 15 })).acquired).toBe(true);
+    await expect(lane.retrySimulatorSupport({ ...f.owner, revision: booking.value.revision, retryMinutes: 15 })).rejects.toThrow("unfinished simulator implementation");
+    expect(await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).toMatchObject({ status: "RUNNING",
+      audit: { simulatorClaim: { phase: "IMPLEMENTING", plannedPaths: ["src/lib/simulators/providers/repair.test.ts"] } } });
   });
 
   it("closes a research-only hard failure and automatically fences the old executor without sending or rechecking", async () => {
