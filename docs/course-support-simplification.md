@@ -38,6 +38,10 @@ deployment does not establish that a golfer's selected course can be monitored.
 | Derived booking-entry page | A new same-origin entry point let the next ordinary worker try a previously unreachable route. | The entry point itself is not rental or calendar proof. | Keep useful route discovery as a clue; remove venue-specific recovery procedure where a general rule can replace it. |
 | Skip previously failed routes | Current-source request history can avoid repeating hard failures and HTTP 401/403/404. | HTTP 500 is not a permanent refusal. History does not prove all useful routes were exhausted. | Preserve request history across retries and distinguish transient backoff from exhausted investigation. |
 | Provider HTTP failures | One ordinary attempt observed HTTP 403 and HTTP 500. Later research recorded an incomplete HTTP 200 page. | The external cause of these responses is unconfirmed; HTTP 200 does not prove a calendar rendered. | Preserve actual observations and test the reader/tooling boundary. Do not fabricate availability or blame a model, user agent, or provider without proof. |
+| A native turn ended during implementation or verification | Research-only cleanup excludes registered paths and releases, while retained recovery accepted only a completed native execution. A failed or interrupted execution could retain ownership indefinitely. A completed native turn can also leave an unresolved database job open. | No current live retained implementation crash was identified. An ended chat or expired lease alone does not prove that the original checkout is safe to resume. | Recover the original worker through positive terminal-turn, process, inventory, source, path and release evidence, followed by a database reservation and atomic native continuation. |
+| Repair after the first registered release | Progress can instruct `REPAIR`, but release registration rejects a different SHA and path/configuration operations are sealed. The same worker cannot publish the instructed correction. | This is a source-backed contradiction, not proof that every earlier simulator failure reached this stage. | Permit fenced original-owner repair, preserve earlier release history, invalidate old verification, and require fresh production checks. |
+| Repeating a retained continuation | The original launcher receipt names its first turn. A later continuation produces a different latest terminal turn, so another recovery cannot match the original receipt alone. | An absent latest turn or an unavailable inventory is not terminal proof. | Record each accepted continuation's actual native turn and private receipt; validate that current lineage on the next recovery. |
+| Preparing an already owned candidate | First-turn runtime setup requires HEAD at `origin/main`, while an owned repair or checkpoint correctly remains ahead of main. Repeating first-turn preparation rejects that candidate. | Reusing a stale or missing private binding is not safe. | Verify and reuse the existing private runtime for retained work. Keep first-turn setup out of the continuation instructions. |
 | Earlier passing tests and deployments | They prove the tested invariants and exact published code. | They did not prove unfamiliar-provider completion without human nudges. | Add crash, late-write, duplicate-executor, tooling-failure, and complete unattended outcome tests. |
 
 ## Implemented correction register
@@ -64,6 +68,10 @@ deployment does not establish that a golfer's selected course can be monitored.
 | Match saved public configuration to its actual source context | Review found the draft persisted schema checked the provider family but could accept a different Acuity owner key or GolfBook sheet date. | The shared matcher now checks the exact observed owner/date as well as provider host/path. Foreign-context fixtures reject both cases. Projection facts remain discovery evidence; they cannot complete monitoring verification. |
 | Version only the known-reader projection routes | A global research-version change could reopen unchanged incomplete Back9 pages; no change would hide the new known-reader projection behind older incomplete-page memory. | Exact recognized Acuity/GolfBook source contexts get the new version. Unrelated routes keep their version and denied history; explicit hard failures and access denials remain blocked. Focused tests cover both relevant reconsideration and unrelated retention. |
 | Remove stale duplicate simulator instructions | The secondary simulator guide still described four-run forgetting, erased safe initial-document facts and original-chat-only research recovery after those behaviors changed. | Replace its procedural history with a short reference to the current assigned-worker contract and current lifecycle. Documentation is not runtime proof. |
+| Resume a positively ended original implementation worker | Retaining registered work indefinitely after a failed, interrupted, or completed native turn leaves its database job open. | The planner returns the exact original checkpoint and token/revision. Fresh inventory/native/process/runtime proof reserves one continuation; a deterministic runner resumes the same thread and acknowledges its actual accepted turn. Ninety focused checks and 56 isolated Postgres checks pass. No live retained implementation crash was found for this acceptance run. |
+| Preserve repeated continuation lineage | Comparing every later recovery to the immutable first native turn. | The durable SENT ledger records the actual accepted turn and private receipt. The next recovery validates that latest terminal turn and both original and prior process pairs. Missing native lineage, an ambiguous send, changed source, unknown paths or exhausted limits remains explicit attention. |
+| Allow original-owner release and metadata repair | Immutable first release and sealed configuration/path operations contradicted the ordinary REPAIR instruction. | New code requires clean owned commits, trusted upstream and previous release ancestry, and registered changed paths. Prior proof is archived; active proof resets. Metadata repair retains the reader SHA but requires reviewed adoption and fresh checks. Same-SHA registration stays idempotent; dirty or different-HEAD completion rejects. |
+| Give a replacement release its own normal verification requests | Reusing the first release's remediation dispatch key could suppress a replacement release's immediate check. | Dispatch identity includes the current release and source. A corrected release or adopted source must obtain two fresh normal checks; old successful checks cannot complete it. Actual local Postgres tests cover replacement and metadata repair. |
 
 The exact latest native attempt before these changes completed its reads and
 recorded retry; it did not implement monitoring. Two separate attempts repeated
@@ -76,6 +84,17 @@ Implementation/release provenance recovery remains deliberately separate from
 research-only recovery. A temporary native chat can be replaced after its
 research authority is revoked; an unknown dirty or partly published release must
 not be adopted merely because its timer elapsed.
+
+The retained implementation/release correction above is a separate increment.
+It does not create a replacement chat or grant permission to
+adopt another worker's edits. Original-owner release repair must preserve the
+previous registered commit as an ancestor, register every new owned path, and
+retain earlier deployment and recheck evidence in history. A replacement release
+or reviewed metadata repair clears active verification; the responder must prove
+the current source and release again before completion.
+The existing two continuations per assignment/source and eight ledger entries
+remain bounded. An unproved old app-send turn or exhausted recovery budget is
+attention, not evidence of a healthy or automatically recovered course.
 
 ## Outcome checks
 
@@ -99,5 +118,10 @@ claiming. The next ordinary ten-minute tick expired its unclaimed authority,
 launched a replacement, and that worker completed two owned public source reads
 and a durable retry/closeout without a human restart. Historical assignments and
 request history remained preserved. This establishes unattended research recovery
-on the initial repair release. It does not establish calendar availability or
-accept the pending launcher and known-reader configuration followups.
+on the initial repair release. The launcher and known-reader followup is live at
+`216b6503e7b18ebd88226e62aa806704c30b5045`, with complete required CI, 28 public UI
+checks, and all three real simulator controls observed on that runtime. The
+original-worker terminal-stage increment has local proof and remains subject to
+exact-head CI and publication. None of these facts establishes the unfamiliar
+provider's calendar availability. Its next attempt remains owned by the ordinary
+schedule; the fixed synthetic benchmark and its suppressed transport are intact.
