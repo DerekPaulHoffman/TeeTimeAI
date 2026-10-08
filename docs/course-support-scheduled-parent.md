@@ -59,3 +59,8 @@ stays suppressed. Keep private identifiers, provider/course details, URLs,
 recipient data, and credentials out of aggregate reports. Routine completed
 generated course chats may be archived after thirty minutes using the supported
 archive action; preserve their transcripts and database state.
+
+If the parent finishes while the supervisor is still asynchronous, report
+"dispatched" or "bound as observed", not a healthy or successfully running
+worker. Include the observation time for an ongoing state. A later failed
+receipt supersedes that startup observation without another human wakeup.
