@@ -427,7 +427,7 @@ describe("private receipt replacement", () => {
     writeFileSync(path, "old");
     let attempts = 0;
     const sleep = vi.fn();
-    privateWrite(path, { status: "RUNNING" }, false, { sleep, rename(from: string, to: string) {
+    privateWrite(path, { status: "RUNNING" }, false, { platform: "win32", sleep, rename(from: string, to: string) {
       attempts += 1;
       if (attempts < 3) throw Object.assign(new Error("reader lock"), { code: "EPERM" });
       renameSync(from, to);
@@ -443,11 +443,27 @@ describe("private receipt replacement", () => {
     const path = join(f.cwd, "receipt.json");
     writeFileSync(path, "old");
     let attempts = 0;
-    expect(() => privateWrite(path, { status: "RUNNING" }, false, { sleep: () => {}, rename() {
+    expect(() => privateWrite(path, { status: "RUNNING" }, false, { platform: "win32", sleep: () => {}, rename() {
       attempts += 1;
       throw Object.assign(new Error("reader lock"), { code: "EPERM" });
     } })).toThrow("reader lock");
     expect(attempts).toBe(4);
+    expect(readFileSync(path, "utf8")).toBe("old");
+    expect(readdirSync(f.cwd).filter(name => name.includes(".tmp"))).toEqual([]);
+  });
+
+  it("does not retry a rename error on non-Windows platforms", () => {
+    const f = fixture();
+    const path = join(f.cwd, "receipt.json");
+    writeFileSync(path, "old");
+    let attempts = 0;
+    const sleep = vi.fn();
+    expect(() => privateWrite(path, { status: "RUNNING" }, false, { platform: "linux", sleep, rename() {
+      attempts += 1;
+      throw Object.assign(new Error("permission denied"), { code: "EPERM" });
+    } })).toThrow("permission denied");
+    expect(attempts).toBe(1);
+    expect(sleep).not.toHaveBeenCalled();
     expect(readFileSync(path, "utf8")).toBe("old");
     expect(readdirSync(f.cwd).filter(name => name.includes(".tmp"))).toEqual([]);
   });

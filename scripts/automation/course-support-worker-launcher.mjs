@@ -32,11 +32,12 @@ export function privateWrite(path, value, exclusive = false, dependencies = {}) 
   writeFileSync(temporary, text, { flag: "wx", mode: 0o600 });
   const replace = dependencies.rename ?? renameSync;
   const sleep = dependencies.sleep ?? ((ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms));
+  const platform = dependencies.platform ?? process.platform;
   try {
     for (let attempt = 0; attempt < 4; attempt += 1) {
       try { replace(temporary, path); return; }
       catch (error) {
-        if (process.platform !== "win32" || !["EACCES", "EBUSY", "EPERM"].includes(error.code) || attempt === 3) throw error;
+        if (platform !== "win32" || !["EACCES", "EBUSY", "EPERM"].includes(error.code) || attempt === 3) throw error;
         sleep(10 * (attempt + 1));
       }
     }
