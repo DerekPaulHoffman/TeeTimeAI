@@ -4,9 +4,9 @@ import { readSafeSimulatorSupportFailure, type SimulatorSupportFailure } from ".
 import { isSimulatorPublicConfigurationSource, knownSimulatorPublicConfigurationFamily, simulatorPublicConfigurationSchema } from "@/lib/simulators/providers/public-configuration";
 
 export const SIMULATOR_RESEARCH_MAX_READS = 6;
-export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-diagnostics-v2";
+export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-resource-local-v3";
 export function getSimulatorResearchImplementationVersion(url: string) {
-  return knownSimulatorPublicConfigurationFamily(url) ? "public-calendar-known-readers-v1" : SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION;
+  return knownSimulatorPublicConfigurationFamily(url) ? "public-calendar-known-readers-resource-local-v2" : SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION;
 }
 export const SIMULATOR_RESEARCH_SOURCE_NAMES = ["official", "booking", "booking-root", "evidence"] as const;
 export type SimulatorResearchSource = (typeof SIMULATOR_RESEARCH_SOURCE_NAMES)[number];

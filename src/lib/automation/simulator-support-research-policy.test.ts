@@ -28,6 +28,14 @@ describe("persisted known-reader configuration", () => {
     expect(guide(observed(), new Date(now.getTime() + 31 * 60_000)).publicConfigurations).toEqual([]);
     expect(guide({ ...observed(), sourceFingerprint: "b".repeat(64) }).publicConfigurations).toEqual([]);
   });
+  it.each(["SECONDARY_STYLESHEET_URL_REJECTED", "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED"] as const)("keeps %s rendered configuration as discovery facts without a complete public checkpoint", renderWarning => {
+    const entry = { ...observed().history[0], rendered: true,
+      researchImplementationVersion: getSimulatorResearchImplementationVersion(observed().history[0].requestedUrl), renderWarning,
+      publicReadEvidence: { ...observed().history[0].publicReadEvidence, method: "BROWSER" as const, renderComplete: false } };
+    const state = readSimulatorResearchState({ ...observed(), history: [entry] }, fingerprint);
+    expect(guide(state).publicConfigurations).toEqual([{ observedAt: now.toISOString(), source: "booking", rendered: true, renderComplete: false, configuration }]);
+    expect(readSettledSimulatorPublicCheckpoint(state, now)).toBeNull();
+  });
   it("rejects raw/private additions, invalid resource IDs and access-restricted configuration evidence", () => {
     for (const publicConfiguration of [{ ...configuration, csrfToken: "private" }, { ...configuration, resourceIds: ["https://other.example"] }]) {
       expect(() => readSimulatorResearchState({ ...observed(), history: [{ ...observed().history[0], publicConfiguration }] }, fingerprint)).toThrow();
@@ -61,6 +69,20 @@ describe("persisted known-reader configuration", () => {
 });
 
 describe("durable simulator research failure memory", () => {
+  it("reconsiders the previous generic and known-reader leaf versions while retaining hard, HTTP and access denials", () => {
+    const priorVersions = [{ url: bookingRootUrl, researchImplementationVersion: "public-calendar-diagnostics-v2" },
+      { url: "https://app.acuityscheduling.com/schedule/2991fba2", researchImplementationVersion: "public-calendar-known-readers-v1" }];
+    for (const prior of priorVersions) {
+      const incomplete = { ...prior, rendered: true, httpStatus: 200, renderComplete: false,
+        renderWarning: "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED" as const };
+      const hard = { ...incomplete, httpStatus: 0, failure: { stage: "PUBLIC_READ" as const, category: "UNKNOWN" as const, code: "UNCLASSIFIED_FAILURE" } };
+      const denied = { ...incomplete, httpStatus: 403 };
+      const access = { ...incomplete, accessControlsObserved: true as const, accessControls: ["ACCOUNT_REQUIRED" as const] };
+      expect(currentSimulatorResearchBlockedRoutes([incomplete, hard, denied, access])).toEqual([hard, denied, access]);
+      const current = { ...incomplete, researchImplementationVersion: getSimulatorResearchImplementationVersion(prior.url) };
+      expect(currentSimulatorResearchBlockedRoutes([current])).toEqual([current]);
+    }
+  });
   it("revalidates only a proven current-source secondary incomplete route after exactly 60 minutes", () => {
     const observedAt = new Date(now.getTime() - 60 * 60_000).toISOString();
     const incomplete = { url: bookingUrl, rendered: true, httpStatus: 200, observedAt,

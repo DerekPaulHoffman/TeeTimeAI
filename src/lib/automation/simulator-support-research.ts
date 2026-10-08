@@ -441,11 +441,11 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
   // A rendered page must not compete with its own requests for a hostname lease.
   const cappedSecondaryAsset = Symbol("CAPPED_SECONDARY_ASSET");
   const rejectedSecondaryStylesheet = Symbol("REJECTED_SECONDARY_STYLESHEET");
-  const skippedAfterAssetLimit = Symbol("SKIPPED_AFTER_ASSET_LIMIT");
+  const skippedAfterTerminalMain = Symbol("SKIPPED_AFTER_TERMINAL_MAIN");
   const readRendered = (resourceKind: SimulatorResearchResourceKind, isSecondaryAsset: boolean, ...args: Parameters<typeof read>) => {
     const hostname = new URL(args[0]).hostname;
     const operation = (hostReads.get(hostname) ?? Promise.resolve()).then(async () => {
-      if (terminalMainDocument || secondaryAssetBodyLimitExceeded || secondaryStylesheetUrlRejected) return skippedAfterAssetLimit;
+      if (terminalMainDocument) return skippedAfterTerminalMain;
       if (deadline.aborted) throw new Error("SIMULATOR_RESEARCH_DEADLINE");
       if (hasRouteFailure) throw routeFailure;
       try { return await read(...args); }
@@ -533,7 +533,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
           if (!["document", "script", "stylesheet", "xhr", "fetch"].includes(kind) || !["GET", "HEAD"].includes(request.method()) || [...headers.keys()].some(key => /authorization|cookie|token|api.?key|secret|credential/iu.test(key)) ||
               (["script", "stylesheet"].includes(kind) && /captcha|challenge|turnstile|cdn-cgi/iu.test(`${url.hostname}${url.pathname}`)) ||
               (!sameOfficialHost(requestedUrl, url.href) && !assetRoot && !occupancy)) { blockedRequests += 1; await route.abort("blockedbyclient"); return; }
-          if (terminalMainDocument || secondaryAssetBodyLimitExceeded || secondaryStylesheetUrlRejected) { blockedRequests += 1; await route.abort("blockedbyclient"); return; }
+          if (terminalMainDocument) { blockedRequests += 1; await route.abort("blockedbyclient"); return; }
           if (deadline.aborted) throw new Error("SIMULATOR_RESEARCH_DEADLINE");
           if (requestCount >= MAX_REQUESTS) { secondaryBudgetExhausted = true; blockedRequests += 1; await route.abort("blockedbyclient"); return; }
           requestCount += 1;
@@ -544,8 +544,8 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
             url.href, request.method() as "GET" | "HEAD", publicHeaders,
             assetRoot ?? (occupancy ? url.href : requestedUrl), occupancy ? target => publicOccupancyUrl(target, contractSlug) : undefined)
             .catch(error => { throw tagSimulatorResearchResourceKind(error, resourceKind); });
-          if (response === cappedSecondaryAsset || response === rejectedSecondaryStylesheet || response === skippedAfterAssetLimit) {
-            if (response === skippedAfterAssetLimit) requestCount -= 1;
+          if (response === cappedSecondaryAsset || response === rejectedSecondaryStylesheet || response === skippedAfterTerminalMain) {
+            if (response === skippedAfterTerminalMain) requestCount -= 1;
             blockedRequests += 1;
             await route.abort("blockedbyclient");
             return;
@@ -611,7 +611,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
       if (!sameOfficialHost(requestedUrl, url) || !navigation) throw new Error("SIMULATOR_RESEARCH_DESTINATION_CHANGED");
       if (terminalMainDocument) return terminalMainObservation();
       if (accessControls.size) return { requestedUrl, url, observedAt: now().toISOString(), httpStatus: navigation.status, text: "", links: [], method: "BROWSER", accessControls: [...accessControls], blockedRequests, admittedRequests: requestCount, renderComplete: false, contentProvenance: "MAIN_DOCUMENT_HTTP" };
-      if (secondaryBudgetExhausted || secondaryAssetBodyLimitExceeded || secondaryStylesheetUrlRejected) return partialMainDocument(
+      if (secondaryBudgetExhausted) return partialMainDocument(
         secondaryStylesheetUrlRejected ? "SECONDARY_STYLESHEET_URL_REJECTED" : secondaryAssetBodyLimitExceeded ? "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED" : "SECONDARY_REQUEST_BUDGET_EXHAUSTED");
       const html = await beforeDeadline(page.content(), deadline);
       if (hasRouteFailure) throw routeFailure;
@@ -619,7 +619,13 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
       const renderedControls = detectSimulatorResearchAccessControls(html);
       if (renderedControls.length) return { requestedUrl, url, observedAt: now().toISOString(), httpStatus: navigation.status, text: "", links: [], method: "BROWSER", accessControls: renderedControls, blockedRequests, admittedRequests: requestCount, renderComplete: false, contentProvenance: "RENDERED_DOM" };
       const rendered = resultFromBody(requestedUrl, url, response?.status() ?? navigation.status, "text/html", Buffer.from(html), now());
-      return { ...rendered, method: "BROWSER", blockedRequests, admittedRequests: requestCount, renderComplete: true, contentProvenance: "RENDERED_DOM", ...(responseContracts.length ? { responseContracts } : {}) };
+      // A rejected/capped leaf stays unavailable to the browser. Other independently
+      // admitted reads and the bounded observed DOM remain useful discovery evidence;
+      // neither proves that the page or calendar rendered completely.
+      const renderWarning = secondaryStylesheetUrlRejected ? "SECONDARY_STYLESHEET_URL_REJECTED" as const
+        : secondaryAssetBodyLimitExceeded ? "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED" as const : undefined;
+      return { ...rendered, method: "BROWSER", blockedRequests, admittedRequests: requestCount, renderComplete: !renderWarning,
+        contentProvenance: "RENDERED_DOM", ...(renderWarning ? { renderWarning } : {}), ...(responseContracts.length ? { responseContracts } : {}) };
     } catch (error) { throw tagSimulatorResearchFailure(error, "BROWSER_DOCUMENT"); }
   } catch (error) { throw hasRouteFailure ? routeFailure : knownPublicNetworkError(error); }
   finally {

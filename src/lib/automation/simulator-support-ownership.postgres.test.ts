@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { randomUUID } from "node:crypto";
+import type { Route } from "@playwright/test";
 import { Prisma, PrismaClient } from "@prisma/client";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -333,6 +334,54 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(fetch).toHaveBeenCalledTimes(1);
     const saved = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id }, select: { audit: true } });
     expect(JSON.stringify(saved.audit)).not.toMatch(/never-persist-this|secret@example|Simulator Booking|CLIENT_INFO/u);
+    expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
+  });
+  it.each(["SECONDARY_STYLESHEET_URL_REJECTED", "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED"])("persists only typed incomplete rendered discovery facts after %s under the real claim", async renderWarning => {
+    const bookingUrl = "https://app.acuityscheduling.com/schedule/2991fba2";
+    const f = await fixture(15, false, bookingUrl);
+    const before = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });
+    const business = { id: 34536426, ownerKey: "2991fba2", timezone: "America/New_York", includesAdminOnly: false, isExpired: false,
+      description: "Up to 6 People Per Bay", calendars: { "": [{ id: 11388341, name: "Bay 1", timezone: "America/New_York" }] },
+      appointmentTypes: { "": [{ id: 73234482, name: "Simulator Booking 1 HR", duration: 60, active: true, private: false, type: "service", classSize: null, canChooseQuantity: false, calendarIDs: [11388341] }] },
+      client: { email: "secret@example.test", token: "never-persist-this" } };
+    const html = `<h1>Observed public rentals</h1><script>var BUSINESS = ${JSON.stringify(business)};</script>`;
+    const asset = new URL("/public.css", bookingUrl).href, script = new URL("/public.js", bookingUrl).href, data = new URL("/public/data", bookingUrl).href;
+    let handler!: (route: Route) => Promise<void>;
+    const frame = {}, fulfilled: string[] = [];
+    const page = { mainFrame: () => frame, url: () => bookingUrl, content: vi.fn(async () => html), goto: vi.fn(async () => {
+      for (const [url, kind] of [[bookingUrl, "document"], [asset, "stylesheet"], [script, "script"], [data, "xhr"]]) {
+        await handler({ request: () => ({ url: () => url, method: () => "GET", allHeaders: async () => ({}),
+          resourceType: () => kind, isNavigationRequest: () => kind === "document", frame: () => frame }),
+          abort: vi.fn(async () => undefined), fulfill: vi.fn(async () => { fulfilled.push(url); }) } as unknown as Route);
+      }
+      return { status: () => 200 };
+    }) };
+    const context = { newPage: async () => page, close: vi.fn(async () => undefined), routeWebSocket: vi.fn(async () => undefined),
+      route: vi.fn(async (_pattern: string, callback: typeof handler) => { handler = callback; }) };
+    const fetch = vi.fn(async (url: unknown) => String(url) === bookingUrl ? new Response("<h1>Safe initial HTML</h1>", { headers: { "content-type": "text/html" } })
+      : String(url) === asset ? renderWarning === "SECONDARY_STYLESHEET_URL_REJECTED"
+        ? new Response(null, { status: 302, headers: { location: new URL("/login", bookingUrl).href } })
+        : new Response("oversize-never-served", { headers: { "content-length": "1500001", "content-type": "text/css" } })
+      : String(url) === data ? new Response('{"ranges":[{"id":1}],"email":"secret@example.test"}', { headers: { "content-type": "application/json" } })
+        : new Response("public queued script", { headers: { "content-type": "text/javascript" } }));
+    const lease = (async (_host: string, worker: () => Promise<unknown>) => ({ acquired: true as const, value: await worker() })) as NonNullable<import("./simulator-support-research").SimulatorResearchDependencies["lease"]>;
+    const browser = async () => ({ newContext: async () => context, close: vi.fn(async () => undefined) }) as unknown as Awaited<ReturnType<NonNullable<import("./simulator-support-research").SimulatorResearchDependencies["browser"]>>>;
+    const read = await lane.readSimulatorSupportSource({ ...f.owner, source: "booking", rendered: true }, { fetch, lease, browser });
+    if (!read.acquired) throw new Error("Fixture source settlement was busy.");
+    expect(read.value.publicSource).toMatchObject({ renderComplete: false, renderWarning, contentProvenance: "RENDERED_DOM", admittedRequests: 4, blockedRequests: 1,
+      publicConfiguration: { family: "ACUITY", ownerKey: "2991fba2" }, responseContracts: [{ pathShape: "/public/:value", httpStatus: 200 }] });
+    expect(fulfilled).toEqual([bookingUrl, script, data]); expect(fetch).toHaveBeenCalledTimes(4);
+    const current = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
+    expect(current.research.history[0]).toMatchObject({ renderWarning, rendered: true, outcome: "READ", publicReadEvidence: { renderComplete: false, accessControls: [] },
+      publicConfiguration: { family: "ACUITY", ownerKey: "2991fba2" } });
+    expect(current.researchGuide.publicConfigurations).toMatchObject([{ source: "booking", rendered: true, configuration: { family: "ACUITY", ownerKey: "2991fba2" } }]);
+    expect(current.researchGuide.readsRemaining).toBe(5);
+    const { readSettledSimulatorPublicCheckpoint } = await import("./simulator-support-research-policy");
+    expect(readSettledSimulatorPublicCheckpoint(current.research, new Date())).toBeNull();
+    const saved = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id }, select: { audit: true } });
+    expect(JSON.stringify(saved.audit)).not.toMatch(/never-persist-this|secret@example|Private bay name|oversize-never-served|responseContracts|RENDERED_DOM/u);
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(before);
+    expect(await client.teeTimeMatch.count({ where: { teeSearchId: f.search.id } })).toBe(0);
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
   });
 
