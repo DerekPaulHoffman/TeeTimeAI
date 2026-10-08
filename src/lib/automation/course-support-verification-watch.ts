@@ -1,4 +1,5 @@
 import { isCourseSupportSearchExecutionFenceRetryError } from "./course-support-search-execution-fence";
+import { getCourseSupportEffectiveVerificationEndpoint } from "./course-support-verification-deadline";
 import {
   getCourseSupportEvidenceRefreshReason,
   type CourseSupportEvidenceRefreshReason,
@@ -293,7 +294,13 @@ export function selectCourseSupportVerificationEndpointDeadline(
     result: string;
     escalationDeadlineAt?: string | null;
     terminalProofDurable?: boolean;
-  }[]
+    engineeringOnly?: boolean;
+    activeRealSearchCount?: number;
+    earliestTargetDate?: string | null;
+    activeFutureOutdoorSearchCount?: number | null;
+  }[],
+  ownedLeaseSnapshotAt?: string | null,
+  now = new Date(),
 ) {
   let earliestDeadline: number | undefined;
   for (const course of courses) {
@@ -306,8 +313,22 @@ export function selectCourseSupportVerificationEndpointDeadline(
     if (!course.escalationDeadlineAt) {
       continue;
     }
-    const deadline = new Date(course.escalationDeadlineAt).getTime();
+    const deadline = getCourseSupportEffectiveVerificationEndpoint({
+      now,
+      escalationDeadlineAt: new Date(course.escalationDeadlineAt),
+      engineeringOnly: course.engineeringOnly === true,
+      activeRealSearchCount: course.activeRealSearchCount ?? -1,
+      earliestTargetDate: course.earliestTargetDate
+        ? new Date(course.earliestTargetDate)
+        : null,
+      activeFutureOutdoorSearchCount:
+        course.activeFutureOutdoorSearchCount ?? -1,
+      ownedLeaseSnapshotAt: ownedLeaseSnapshotAt
+        ? new Date(ownedLeaseSnapshotAt)
+        : null,
+    })?.getTime();
     if (
+      deadline !== undefined &&
       Number.isFinite(deadline) &&
       (earliestDeadline === undefined || deadline < earliestDeadline)
     ) {

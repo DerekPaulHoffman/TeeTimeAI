@@ -1050,6 +1050,126 @@ describe("course-support verification intent and fingerprint", () => {
 });
 
 describe("course-support verification scheduling", () => {
+  const pequotNow = new Date("2026-10-08T18:10:00.000Z");
+  const historicalEndpoint = new Date("2026-10-05T14:57:51.627Z");
+  const leaseSnapshot = new Date("2026-10-08T18:25:00.000Z");
+  const ownedLeaseSnapshot = {
+    leaseToken: "owned-batch-lease",
+    ownerThreadId: "owner-thread",
+    capturedAt: pequotNow,
+    deadlineAt: leaseSnapshot,
+    eligibleBatchIncidentIds: ["batch-incident-1"],
+  };
+  const pequotBatch = (overrides: Record<string, unknown> = {}) => ({
+    id: "batch-1",
+    status: "VERIFYING",
+    releaseSha,
+    leaseToken: ownedLeaseSnapshot.leaseToken,
+    ownerThreadId: ownedLeaseSnapshot.ownerThreadId,
+    leaseExpiresAt: leaseSnapshot,
+    completedAt: null,
+    incidents: [{
+      id: "batch-incident-1",
+      incidentId: "incident-1",
+      courseId: "course-1",
+      cycle: 1,
+      verifiedIncidentUpdatedAt: new Date("2026-10-08T18:05:00.000Z"),
+      incident: incident({
+        firstSeenAt: new Date("2026-10-05T14:27:50.971Z"),
+        escalationDeadlineAt: historicalEndpoint,
+      }),
+      course: course(),
+    }],
+    ...overrides,
+  });
+
+  it("creates one bounded current engineering request without changing the historical incident deadline", async () => {
+    const batch = pequotBatch();
+    prismaMocks.batchFindUnique.mockResolvedValue(batch);
+    await expect(scheduleCourseSupportVerificationRequests({
+      batchId: "batch-1", releaseSha, now: pequotNow, ownedLeaseSnapshot,
+    })).resolves.toMatchObject({ createdCount: 1, eligibleCount: 1 });
+    expect(prismaMocks.requestCreateMany.mock.calls[0][0].data[0].deadlineAt)
+      .toEqual(new Date("2026-10-08T18:24:00.000Z"));
+    expect(batch.incidents[0].incident.escalationDeadlineAt).toEqual(historicalEndpoint);
+    expect(prismaMocks.activeSearchCount).toHaveBeenCalledWith({ where: {
+      status: "ACTIVE", mode: "OUTDOOR",
+      date: { gte: new Date("2026-10-08T00:00:00.000Z") },
+      preferences: { some: { courseId: "course-1" } },
+    } });
+  });
+
+  it("does not extend or recreate the member/release request after a heartbeat", async () => {
+    prismaMocks.batchFindUnique.mockResolvedValue(pequotBatch({
+      leaseExpiresAt: new Date("2026-10-08T18:40:00.000Z"),
+    }));
+    prismaMocks.requestCreateMany.mockResolvedValue({ count: 0 });
+    await scheduleCourseSupportVerificationRequests({
+      batchId: "batch-1", releaseSha, now: pequotNow, ownedLeaseSnapshot,
+    });
+    expect(prismaMocks.requestCreateMany.mock.calls[0][0]).toMatchObject({
+      skipDuplicates: true,
+      data: [{ deadlineAt: new Date("2026-10-08T18:24:00.000Z") }],
+    });
+    expect(prismaMocks.requestUpdateMany.mock.calls.every(([call]) =>
+      !call.data.deadlineAt ||
+      call.data.deadlineAt.getTime() <= Date.parse("2026-10-08T18:24:00.000Z"),
+    )).toBe(true);
+  });
+
+  it("keeps the old endpoint when demand appears or the owned snapshot is invalid", async () => {
+    prismaMocks.batchFindUnique.mockResolvedValue(pequotBatch());
+    prismaMocks.activeSearchCount.mockResolvedValue(1);
+    await expect(scheduleCourseSupportVerificationRequests({
+      batchId: "batch-1", releaseSha, now: pequotNow, ownedLeaseSnapshot,
+    })).resolves.toMatchObject({ createdCount: 0, ineligibleReasonCounts: {
+      request_horizon_exceeded: 1,
+    } });
+    expect(prismaMocks.requestCreateMany).not.toHaveBeenCalled();
+
+    prismaMocks.activeSearchCount.mockResolvedValue(0);
+    for (const deadlineAt of [
+      new Date("invalid"),
+      new Date("2026-10-08T18:41:00.000Z"),
+      new Date("2026-10-08T18:09:00.000Z"),
+    ]) {
+      await expect(scheduleCourseSupportVerificationRequests({
+        batchId: "batch-1", releaseSha, now: pequotNow,
+        ownedLeaseSnapshot: { ...ownedLeaseSnapshot, deadlineAt },
+      })).resolves.toMatchObject({ createdCount: 0 });
+    }
+    expect(prismaMocks.requestCreateMany).not.toHaveBeenCalled();
+  });
+
+  it("does not turn a future endpoint into a lease window during the first pass", async () => {
+    const futureAtCapture = new Date("2026-10-08T18:10:30.000Z");
+    prismaMocks.batchFindUnique.mockResolvedValue(pequotBatch({ incidents: [{
+      ...pequotBatch().incidents[0],
+      incident: incident({ escalationDeadlineAt: futureAtCapture }),
+    }] }));
+    await expect(scheduleCourseSupportVerificationRequests({
+      batchId: "batch-1", releaseSha,
+      now: new Date("2026-10-08T18:10:40.000Z"),
+      ownedLeaseSnapshot: { ...ownedLeaseSnapshot, eligibleBatchIncidentIds: [] },
+    })).resolves.toMatchObject({ createdCount: 0 });
+    expect(prismaMocks.requestCreateMany).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["customer", { engineeringOnly: false }],
+    ["stored real demand", { activeRealSearchCount: 1 }],
+    ["stored target date", { earliestTargetDate: new Date("2026-10-09T00:00:00.000Z") }],
+  ])("keeps the historical endpoint for %s", async (_label, incidentOverrides) => {
+    prismaMocks.batchFindUnique.mockResolvedValue(pequotBatch({ incidents: [{
+      ...pequotBatch().incidents[0],
+      incident: incident({ escalationDeadlineAt: historicalEndpoint, ...incidentOverrides }),
+    }] }));
+    await expect(scheduleCourseSupportVerificationRequests({
+      batchId: "batch-1", releaseSha, now: pequotNow, ownedLeaseSnapshot,
+    })).resolves.toMatchObject({ createdCount: 0 });
+    expect(prismaMocks.requestCreateMany).not.toHaveBeenCalled();
+  });
+
   it("uses the full request horizon when no earlier customer endpoint exists", () => {
     expect(
       getCourseSupportVerificationRequestDeadline({

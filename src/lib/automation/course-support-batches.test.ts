@@ -39,6 +39,7 @@ const prismaMocks = vi.hoisted(() => ({
   monitoringEventFindUnique: vi.fn(),
   automationRunUpdateMany: vi.fn(),
   teeSearchFindMany: vi.fn(),
+  teeSearchCount: vi.fn(),
   teeSearchUpdateMany: vi.fn(),
   queryRaw: vi.fn(),
   queryRawUnsafe: vi.fn(),
@@ -94,6 +95,7 @@ vi.mock("@/lib/prisma", () => ({
       findMany: prismaMocks.monitoringEventFindMany,
       findUnique: prismaMocks.monitoringEventFindUnique,
     },
+    teeSearch: { count: prismaMocks.teeSearchCount },
     $queryRaw: prismaMocks.queryRaw,
     $queryRawUnsafe: prismaMocks.queryRawUnsafe,
     $transaction: prismaMocks.transaction
@@ -2412,6 +2414,7 @@ const transactionClient = {
     findMany: prismaMocks.monitoringEventFindMany,
   },
   teeSearch: {
+    count: prismaMocks.teeSearchCount,
     findMany: prismaMocks.teeSearchFindMany,
     updateMany: prismaMocks.teeSearchUpdateMany,
   },
@@ -2460,6 +2463,7 @@ beforeEach(() => {
   );
   verificationMocks.isCourseSupportFactualFinalProof.mockReturnValue(true);
   prismaMocks.verificationRequestFindMany.mockResolvedValue([]);
+  prismaMocks.teeSearchCount.mockResolvedValue(0);
   prismaMocks.verificationRequestFindFirst.mockResolvedValue(null);
   prismaMocks.verificationRequestUpdateMany.mockResolvedValue({ count: 0 });
   prismaMocks.batchSearchFindMany.mockResolvedValue([]);
@@ -21080,6 +21084,7 @@ describe("course-support batch ordinals", () => {
       providerFamilyKey: "UNKNOWN",
       failureFingerprint: "bounded-fingerprint",
       createdAt: now,
+      leaseExpiresAt: new Date(now.getTime() + 15 * 60_000),
       incidents: [
         incident({ id: "entry-1", name: "Alpha", attemptLedger: null }),
         incident({
@@ -21335,6 +21340,37 @@ describe("course-support batch ordinals", () => {
       fixtureNow: fixture.now!,
     };
   }
+
+  it("freezes expired engineering lease eligibility in the owned packet", async () => {
+    const base = sourceSearchBatch();
+    const entry = base.incidents[0];
+    const batch = sourceSearchBatch({ createdAt: now, incidents: [{
+      ...entry,
+      course: { ...entry.course, timeZone: "America/New_York" },
+      incident: { ...entry.incident, engineeringOnly: true,
+        escalationDeadlineAt: new Date("2026-07-12T19:00:00.000Z") },
+    }] });
+    prismaMocks.batchFindFirst.mockResolvedValue(batch);
+    const packet = await getCourseSupportBatchPacket({
+      batchId: "batch-1", leaseToken: "lease-1", ownerThreadId: "owner-thread", now,
+    });
+    expect(packet).toMatchObject({
+      outcome: "ready",
+      verificationLeaseCapturedAt: now.toISOString(),
+      ownedLeaseSnapshotAt: batch.leaseExpiresAt.toISOString(),
+      verificationLeaseEligibleBatchIncidentIds: [entry.id],
+      courses: [{ activeFutureOutdoorSearchCount: 0 }],
+    });
+    prismaMocks.teeSearchCount.mockResolvedValue(1);
+    const demandPacket = await getCourseSupportBatchPacket({
+      batchId: "batch-1", leaseToken: "lease-1", ownerThreadId: "owner-thread", now,
+    });
+    expect(demandPacket).toMatchObject({
+      outcome: "ready",
+      verificationLeaseEligibleBatchIncidentIds: [],
+      courses: [{ activeFutureOutdoorSearchCount: 1 }],
+    });
+  });
 
   function independentSourceSearchBatch() {
     const batch = sourceSearchBatch();

@@ -15,6 +15,7 @@ import { prisma } from "@/lib/prisma";
 import { normalizeTimeZone } from "@/lib/timezones";
 
 import { getCourseLocalDateStorageBoundary } from "./date-boundary";
+import { getCourseSupportEffectiveVerificationEndpoint } from "./course-support-verification-deadline";
 import {
   canonicalizeCourseProviderExecutionEvidence,
   stableCourseProviderExecutionEvidenceValue,
@@ -263,6 +264,13 @@ export type CourseSupportVerificationRejectionReason =
 export async function scheduleCourseSupportVerificationRequests(input: {
   batchId: string;
   releaseSha: string;
+  ownedLeaseSnapshot?: {
+    leaseToken: string;
+    ownerThreadId: string;
+    capturedAt: Date;
+    deadlineAt: Date;
+    eligibleBatchIncidentIds: readonly string[];
+  };
   batchIncidentIds?: readonly string[];
   signal?: AbortSignal;
   now?: Date;
@@ -281,6 +289,9 @@ export async function scheduleCourseSupportVerificationRequests(input: {
           status: true,
           releaseSha: true,
           createdAt: true,
+          leaseToken: true,
+          ownerThreadId: true,
+          leaseExpiresAt: true,
           completedAt: true,
           summary: true,
           incidents: {
@@ -374,10 +385,61 @@ export async function scheduleCourseSupportVerificationRequests(input: {
           (ineligibleReasonCounts[reason] ?? 0) + 1;
       };
 
+      const ownedLeaseSnapshot = input.ownedLeaseSnapshot;
+      const snapshotAt = ownedLeaseSnapshot?.deadlineAt;
+      const capturedAt = ownedLeaseSnapshot?.capturedAt;
+      const validOwnedSnapshot =
+        ownedLeaseSnapshot &&
+        batch.leaseToken === ownedLeaseSnapshot.leaseToken &&
+        batch.ownerThreadId === ownedLeaseSnapshot.ownerThreadId &&
+        batch.leaseExpiresAt.getTime() > now.getTime() &&
+        capturedAt &&
+        Number.isFinite(capturedAt.getTime()) &&
+        capturedAt.getTime() <= now.getTime() &&
+        Array.isArray(ownedLeaseSnapshot.eligibleBatchIncidentIds) &&
+        snapshotAt &&
+        Number.isFinite(snapshotAt.getTime()) &&
+        snapshotAt.getTime() > now.getTime() &&
+        snapshotAt.getTime() > capturedAt.getTime() &&
+        snapshotAt.getTime() <= batch.leaseExpiresAt.getTime();
+
       for (const entry of batch.incidents) {
+        const historicalDeadline = entry.incident.escalationDeadlineAt;
+        const canUseOwnedLease =
+          validOwnedSnapshot &&
+          historicalDeadline &&
+          historicalDeadline.getTime() <= capturedAt.getTime() &&
+          ownedLeaseSnapshot.eligibleBatchIncidentIds.includes(entry.id) &&
+          entry.incident.engineeringOnly &&
+          entry.incident.activeRealSearchCount === 0 &&
+          entry.incident.earliestTargetDate === null;
+        const activeFutureOutdoorSearchCount = canUseOwnedLease
+          ? await transaction.teeSearch.count({
+              where: {
+                status: "ACTIVE",
+                mode: "OUTDOOR",
+                date: {
+                  gte: getCourseLocalDateStorageBoundary(
+                    entry.course.timeZone,
+                    now,
+                  ),
+                },
+                preferences: { some: { courseId: entry.courseId } },
+              },
+            })
+          : -1;
+        const effectiveEndpoint = getCourseSupportEffectiveVerificationEndpoint({
+          now,
+          escalationDeadlineAt: historicalDeadline,
+          engineeringOnly: entry.incident.engineeringOnly,
+          activeRealSearchCount: entry.incident.activeRealSearchCount,
+          earliestTargetDate: entry.incident.earliestTargetDate,
+          activeFutureOutdoorSearchCount,
+          ownedLeaseSnapshotAt: validOwnedSnapshot ? snapshotAt : null,
+        });
         const deadlineAt = getCourseSupportVerificationRequestDeadline({
           now,
-          escalationDeadlineAt: entry.incident.escalationDeadlineAt,
+          escalationDeadlineAt: effectiveEndpoint,
         });
         if (!deadlineAt) {
           recordIneligibleReason("request_horizon_exceeded");

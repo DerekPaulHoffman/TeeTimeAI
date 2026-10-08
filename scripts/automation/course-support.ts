@@ -1246,7 +1246,14 @@ async function verify(
         }
         operationSignal.throwIfAborted();
       }
-      const runPass = (signal?: AbortSignal) =>
+      const runPass = (
+        signal?: AbortSignal,
+        verificationAttemptSnapshot?: {
+          capturedAt: Date;
+          deadlineAt: Date;
+          eligibleBatchIncidentIds: string[];
+        }
+      ) =>
         runCourseSupportVerificationPass({
           signal,
           classifyBrowserStageFailure: getPersistableBrowserOperationFailure,
@@ -1297,6 +1304,7 @@ async function verify(
               ownerThreadId,
               releaseSha,
               deployedAt,
+              verificationAttemptSnapshot,
               signal: verificationSignal
             })
         });
@@ -1324,11 +1332,21 @@ async function verify(
           "Course-support verification watch lost ownership before it started."
         );
       }
+      const verificationAttemptSnapshot = {
+        capturedAt: new Date(initialPacket.verificationLeaseCapturedAt),
+        deadlineAt: new Date(initialPacket.ownedLeaseSnapshotAt),
+        eligibleBatchIncidentIds:
+          initialPacket.verificationLeaseEligibleBatchIncidentIds
+      };
       const endpointDeadlineAt =
-        selectCourseSupportVerificationEndpointDeadline(initialPacket.courses);
+        selectCourseSupportVerificationEndpointDeadline(
+          initialPacket.courses,
+          initialPacket.ownedLeaseSnapshotAt,
+          verificationAttemptSnapshot.capturedAt
+        );
 
       const watchResult = await runCourseSupportVerificationWatch({
-        pass: runPass,
+        pass: (signal) => runPass(signal, verificationAttemptSnapshot),
         maxMinutes,
         pollMs: pollSeconds === undefined ? undefined : pollSeconds * 1_000,
         deadlineAt: endpointDeadlineAt,

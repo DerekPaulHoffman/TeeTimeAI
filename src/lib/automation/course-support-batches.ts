@@ -6866,6 +6866,7 @@ export async function getCourseSupportBatchPacket(input: {
       providerFamilyKey: true,
       failureFingerprint: true,
       createdAt: true,
+      leaseExpiresAt: true,
       summary: true,
       releaseSha: true,
       deployedAt: true,
@@ -6922,6 +6923,35 @@ export async function getCourseSupportBatchPacket(input: {
   const remediationDirective = readCourseSupportRemediationDirective(
     batch.summary,
   );
+  const activeFutureOutdoorSearchCounts = new Map(
+    await Promise.all(
+      batch.incidents
+        .filter(
+          (entry) =>
+            entry.incident.engineeringOnly &&
+            entry.incident.activeRealSearchCount === 0 &&
+            entry.incident.earliestTargetDate === null &&
+            entry.incident.escalationDeadlineAt !== null &&
+            entry.incident.escalationDeadlineAt.getTime() <= now.getTime(),
+        )
+        .map(async (entry) => [
+          entry.id,
+          await prisma.teeSearch.count({
+            where: {
+              status: "ACTIVE",
+              mode: "OUTDOOR",
+              date: {
+                gte: getCourseLocalDateStorageBoundary(
+                  entry.course.timeZone,
+                  now,
+                ),
+              },
+              preferences: { some: { courseId: entry.course.id } },
+            },
+          }),
+        ] as const),
+    ),
+  );
   return {
     outcome: "ready" as const,
     batchRef: batch.reference,
@@ -6931,6 +6961,19 @@ export async function getCourseSupportBatchPacket(input: {
     ),
     failureFingerprint: batch.failureFingerprint,
     claimedAt: batch.createdAt.toISOString(),
+    verificationLeaseCapturedAt: now.toISOString(),
+    ownedLeaseSnapshotAt: batch.leaseExpiresAt.toISOString(),
+    verificationLeaseEligibleBatchIncidentIds: batch.incidents
+      .filter(
+        (entry) =>
+          entry.incident.engineeringOnly &&
+          entry.incident.activeRealSearchCount === 0 &&
+          entry.incident.earliestTargetDate === null &&
+          entry.incident.escalationDeadlineAt !== null &&
+          entry.incident.escalationDeadlineAt.getTime() <= now.getTime() &&
+          activeFutureOutdoorSearchCounts.get(entry.id) === 0,
+      )
+      .map((entry) => entry.id),
     remediation: remediationDirective,
     courses: orderCourseSupportBatchIncidents(batch.incidents).map(
       (entry, index) => {
@@ -6973,6 +7016,8 @@ export async function getCourseSupportBatchPacket(input: {
           terminalProofDurable,
           engineeringOnly: entry.incident.engineeringOnly,
           activeRealSearchCount: entry.incident.activeRealSearchCount,
+          activeFutureOutdoorSearchCount:
+            activeFutureOutdoorSearchCounts.get(entry.id) ?? null,
           earliestTargetDate:
             entry.incident.earliestTargetDate?.toISOString().slice(0, 10) ??
             null,
@@ -8463,6 +8508,11 @@ export async function verifyCourseSupportBatch(input: {
   batchId: string;
   leaseToken: string;
   ownerThreadId: string;
+  verificationAttemptSnapshot?: {
+    capturedAt: Date;
+    deadlineAt: Date;
+    eligibleBatchIncidentIds: readonly string[];
+  };
   releaseSha?: string | null;
   deployedAt?: Date | null;
   signal?: AbortSignal;
@@ -9055,6 +9105,15 @@ export async function verifyCourseSupportBatch(input: {
           return scheduleCourseSupportVerificationRequests({
             batchId: batch.id,
             releaseSha,
+            ...(input.verificationAttemptSnapshot
+              ? {
+                  ownedLeaseSnapshot: {
+                    leaseToken: input.leaseToken,
+                    ownerThreadId: input.ownerThreadId,
+                    ...input.verificationAttemptSnapshot,
+                  },
+                }
+              : {}),
             batchIncidentIds: recheckBatchIncidentIds,
             signal: input.signal,
             now,

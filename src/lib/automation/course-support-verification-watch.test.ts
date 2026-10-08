@@ -509,6 +509,59 @@ describe("runCourseSupportVerificationWatch", () => {
     expect(onStopped).not.toHaveBeenCalled();
   });
 
+  it("starts a current engineering verification with an expired historical endpoint", async () => {
+    const startedAt = Date.parse("2026-10-08T18:10:00.000Z");
+    const ownedLeaseSnapshotAt = new Date(startedAt + 15 * 60_000).toISOString();
+    const pequot = {
+      result: "PENDING",
+      escalationDeadlineAt: "2026-10-05T14:57:51.627Z",
+      engineeringOnly: true,
+      activeRealSearchCount: 0,
+      earliestTargetDate: null,
+      activeFutureOutdoorSearchCount: 0,
+    };
+    const deadlineAt = selectCourseSupportVerificationEndpointDeadline(
+      [pequot],
+      ownedLeaseSnapshotAt,
+      new Date(startedAt),
+    );
+    expect(deadlineAt).toBe(Date.parse(ownedLeaseSnapshotAt));
+    let currentTime = startedAt;
+    const pass = vi.fn(async () => cleanPass());
+    const result = await runCourseSupportVerificationWatch({
+      maxMinutes: 1,
+      deadlineAt,
+      now: () => currentTime,
+      pass,
+      sleep: async (milliseconds) => { currentTime += milliseconds; },
+    });
+    expect(pass).toHaveBeenCalled();
+    expect(result.passCount).toBeGreaterThan(0);
+    expect(pequot.escalationDeadlineAt).toBe("2026-10-05T14:57:51.627Z");
+  });
+
+  it("keeps the expired customer and live-demand endpoints in a mixed watch", () => {
+    const now = new Date("2026-10-08T18:10:00.000Z");
+    const lease = "2026-10-08T18:25:00.000Z";
+    const engineering = {
+      result: "PENDING",
+      escalationDeadlineAt: "2026-10-05T14:57:51.627Z",
+      engineeringOnly: true,
+      activeRealSearchCount: 0,
+      earliestTargetDate: null,
+      activeFutureOutdoorSearchCount: 0,
+    };
+    const customer = { ...engineering, engineeringOnly: false };
+    const newDemand = { ...engineering, activeFutureOutdoorSearchCount: 1 };
+    expect(selectCourseSupportVerificationEndpointDeadline([engineering, customer], lease, now))
+      .toBe(Date.parse(customer.escalationDeadlineAt));
+    expect(selectCourseSupportVerificationEndpointDeadline([newDemand], lease, now))
+      .toBe(Date.parse(newDemand.escalationDeadlineAt));
+    expect(selectCourseSupportVerificationEndpointDeadline([
+      { ...engineering, escalationDeadlineAt: "2026-10-08T18:30:00.000Z" },
+    ], lease, now)).toBe(Date.parse("2026-10-08T18:30:00.000Z"));
+  });
+
   it("requires an extra clean pass after browser work", async () => {
     const pass = vi
       .fn()
