@@ -981,6 +981,53 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     }
   });
 
+  it("retains spent reads through adoption without carrying old-source failures into the replacement source", async () => {
+    const f = await fixture();
+    const before = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const initial = before.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    const read = await lane.readSimulatorSupportSource({ ...f.owner, source: "official" }, { fetch: vi.fn(async () => new Response("unavailable", { status: 403 })) });
+    if (!read.acquired) throw new Error("Expected owned source observation.");
+    const changed = await client.courseOffering.update({ where: { id: f.offering.id }, data: { publicAccessStatus: "PUBLIC", verifiedAt: new Date(),
+      evidenceUrl: f.course.website, supportedDurationsMinutes: [60], monitoringRevision: { increment: 1 } } });
+    const changedFingerprint = getSimulatorOfferingSourceFingerprint(changed);
+    const adopted = await lane.adoptSimulatorSupportSource({ ...f.owner, revision: read.value.revision,
+      expectedFingerprint: changedFingerprint, expectedOfferingRevision: changed.monitoringRevision });
+    if (!adopted.acquired) throw new Error("Expected reviewed source adoption.");
+    expect((await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit).toMatchObject({
+      simulatorResearch: { sourceFingerprint: changedFingerprint, readCount: 1, history: [{ sourceFingerprint: f.fingerprint, httpStatus: 403 }] } });
+    await client.teeSearch.update({ where: { id: f.search.id }, data: { status: "PAUSED" } });
+    await lane.retireSimulatorSupport({ ...f.owner, revision: adopted.value.revision });
+    await client.teeSearch.update({ where: { id: f.search.id }, data: { status: "ACTIVE" } });
+    const fresh = async (fingerprint: string) => {
+      const due = await client.simulatorSupportIncident.update({ where: { id: f.incident.id }, data: { retryAt: new Date(0) } });
+      await client.courseProbe.create({ data: { courseId: f.course.id, offeringId: f.offering.id, teeSearchId: f.search.id,
+        outcome: "NEEDS_ADAPTER", rawSummary: { mode: "SIMULATOR", sourceFingerprint: fingerprint } } });
+      const assignmentRef = `course-assignment-${randomUUID()}`, child = `new-child-${randomUUID()}`;
+      const run = await client.automationRun.create({ data: { kind: "OTHER", status: "RUNNING", promptVersion: dispatcher.COURSE_DISPATCH_PROMPT_VERSION,
+        audit: { ...initial, assignmentRef, childThreadId: child, state: "BOUND", boundAt: new Date().toISOString(), simulatorClaim: undefined,
+          simulatorResearch: undefined, simulatorResearchPriorFailures: undefined,
+          target: { ...initial.target, offeringSourceFingerprint: fingerprint, updatedAt: due.updatedAt.toISOString() } } as unknown as Prisma.InputJsonValue } });
+      ids.runs.push(run.id);
+      const result = await lane.claimSimulatorSupportAssignment({ assignmentRef, ownerThreadId: child, baseSha, branch: `automation/course-support-${randomUUID()}` });
+      if (!result.acquired) throw new Error("Expected replacement claim.");
+      return { result: result.value, owner: { assignmentRef, ownerThreadId: child, token: result.value.token, revision: result.value.revision } };
+    };
+    const replacement = await fresh(changedFingerprint);
+    expect(replacement.result.researchGuide.priorBlockedRoutes).toEqual([]);
+    expect(replacement.result.researchGuide.suggestedReads[0]).toEqual({ source: "official", rendered: false });
+    await client.teeSearch.update({ where: { id: f.search.id }, data: { status: "PAUSED" } });
+    await lane.retireSimulatorSupport(replacement.owner);
+    await client.teeSearch.update({ where: { id: f.search.id }, data: { status: "ACTIVE" } });
+    const returned = await client.courseOffering.update({ where: { id: f.offering.id }, data: { publicAccessStatus: f.offering.publicAccessStatus,
+      verifiedAt: f.offering.verifiedAt, evidenceUrl: f.offering.evidenceUrl, supportedDurationsMinutes: f.offering.supportedDurationsMinutes } });
+    expect(getSimulatorOfferingSourceFingerprint(returned)).toBe(f.fingerprint);
+    const originalSource = await fresh(f.fingerprint);
+    expect(originalSource.result.researchGuide.priorBlockedRoutes).toContainEqual({ url: f.course.website, rendered: false, httpStatus: 403 });
+    const fetch = vi.fn();
+    await expect(lane.readSimulatorSupportSource({ ...originalSource.owner, source: "official" }, { fetch })).rejects.toThrow("structural source failure");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("does not settle an unknown collector failure after the exact source changes", async () => {
     const f = await fixture(15, false, "https://official.example.test/booking");
     await expect(lane.readSimulatorSupportSource({ ...f.owner, source: "official", rendered: true }, {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertSimulatorResearchFallbackBeforeRetry, currentSimulatorResearchBlockedRoutes, getSimulatorResearchGuide, getSimulatorResearchRetryGuide, mergeSimulatorResearchBlockedRoutes, readSettledSimulatorPublicCheckpoint, readSimulatorResearchFailureMemory, readSimulatorResearchState, selectSimulatorResearchTarget, SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION } from "./simulator-support-research-policy";
+import { assertSimulatorResearchFallbackBeforeRetry, currentSimulatorResearchBlockedRoutes, getSimulatorResearchGuide, getSimulatorResearchRetryGuide, getSimulatorResearchObservationFingerprint, mergeSimulatorResearchBlockedRoutes, readSettledSimulatorPublicCheckpoint, readSimulatorResearchFailureMemory, readSimulatorResearchState, selectSimulatorResearchTarget, SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION } from "./simulator-support-research-policy";
 
 const fingerprint = "a".repeat(64), now = new Date("2026-10-06T20:00:00Z");
 const officialUrl = "https://venue.example.test", bookingUrl = "https://calendar.example.test/booking/bays";
@@ -10,6 +10,15 @@ const savedBayUrl = "https://yourgolfbooking.com/venues/public-golf/booking/bays
 const bookingRootUrl = "https://yourgolfbooking.com/venues/public-golf/booking";
 
 describe("durable simulator research failure memory", () => {
+  it("does not relabel old or ambiguous observations with an adopted source", () => {
+    const entry = failedHomepage().history[0], adoptedFingerprint = "b".repeat(64);
+    const state = { ...failedHomepage(), sourceFingerprint: adoptedFingerprint };
+    expect(getSimulatorResearchObservationFingerprint(entry, failedHomepage(), fingerprint)).toBe(fingerprint);
+    expect(getSimulatorResearchObservationFingerprint(entry, state, fingerprint)).toBeNull();
+    expect(getSimulatorResearchObservationFingerprint({ ...entry, sourceFingerprint: fingerprint }, state, fingerprint)).toBe(fingerprint);
+    expect(getSimulatorResearchObservationFingerprint({ ...entry, requestId: "00000000-0000-4000-8000-000000000001", publicReadEvidence: {
+      sourceFingerprint: fingerprint, accessControlsObserved: true, accessControls: [], method: "HTTP" } }, state, fingerprint)).toBe(fingerprint);
+  });
   it("reconsiders incomplete rendering only after its collector version changes and retains access denials", () => {
     const incomplete = { url: bookingUrl, rendered: true, httpStatus: 200,
       renderWarning: "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED" as const,

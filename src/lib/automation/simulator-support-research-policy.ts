@@ -29,6 +29,7 @@ const publicReadEvidence = z.object({
 }).strict();
 const observation = z.object({
   source: researchSource, requestedUrl: safeUrl, sourceUrl: safeUrl,
+  sourceFingerprint: z.string().regex(/^[a-f0-9]{64}$/iu).optional(),
   observedAt: z.string().datetime(), httpStatus: z.number().int().min(0).max(599), rendered: z.boolean(),
   outcome: z.enum(["READ", "NETWORK_FAILED", "CAPACITY_BUSY", "HARD_FAILED"]),
   requestId: z.string().uuid().optional(), failure: safeFailure.optional(),
@@ -37,6 +38,7 @@ const observation = z.object({
   renderWarning: renderWarning.optional(), configurationDiagnostic: configurationDiagnostic.optional(),
 }).strict().refine(entry => entry.outcome === "HARD_FAILED" ? Boolean(entry.requestId && entry.failure && entry.httpStatus === 0) :
   !entry.failure || Boolean(entry.requestId && entry.httpStatus === 0 && ["NETWORK_FAILED", "CAPACITY_BUSY"].includes(entry.outcome)))
+  .refine(entry => !entry.sourceFingerprint || !entry.publicReadEvidence || entry.sourceFingerprint === entry.publicReadEvidence.sourceFingerprint)
   .refine(entry => !entry.publicReadEvidence || Boolean(entry.requestId && entry.outcome === "READ" &&
     entry.publicReadEvidence.method === (entry.rendered ? "BROWSER" : "HTTP")));
 const stateSchema = z.object({
@@ -52,6 +54,11 @@ const stateSchema = z.object({
   (!state.bookingLinkRoles || new Set(state.bookingLinkRoles.map(role => role.url)).size === state.bookingLinkRoles.length &&
     state.bookingLinkRoles.every(role => state.bookingLinks.includes(role.url))));
 export type SimulatorResearchState = z.infer<typeof stateSchema>;
+/** A mutable state fingerprint cannot relabel observations from an adopted legacy source. */
+export function getSimulatorResearchObservationFingerprint(entry: SimulatorResearchState["history"][number], state: SimulatorResearchState, originalFingerprint: string | undefined) {
+  return entry.sourceFingerprint ?? entry.publicReadEvidence?.sourceFingerprint ??
+    (originalFingerprint === state.sourceFingerprint ? state.sourceFingerprint : null);
+}
 const blockedResearchRoute = z.object({ url: safeUrl, rendered: z.boolean(), httpStatus: z.number().int().min(0).max(599),
   failure: safeFailure.optional(),
   researchImplementationVersion: z.string().regex(/^[a-z0-9-]{1,80}$/u).optional(),
