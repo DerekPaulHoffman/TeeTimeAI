@@ -174,6 +174,15 @@ describe("deployed independent simulator verification", () => {
     expect(() => normalizeSimulatorEngineeringResult({ ...f.result, complete: false } as unknown as SimulatorAvailabilityResult, start, start)).toThrow("INCOMPLETE_READ");
     expect(() => normalizeSimulatorEngineeringResult({ ...f.result, observedAt: new Date(start.getTime() - 1) }, start, start)).toThrow("INCOMPLETE_READ");
   });
+  it("defers a known zero-day window before release without spending a read or changing the original revision", async () => {
+    const f = fixture(); f.offering.bookingWindowDaysAhead = 0; f.offering.bookingReleaseTimeLocal = "12:00";
+    const result = await runSimulatorEngineeringVerification({ assignmentRef: "assignment", token: "owned", revision: 3 }, runtime, f.deps);
+    expect(result).toMatchObject({ deferred: true, revision: 3, nextAction: "RETRY_ENGINEERING", outcome: "BOOKING_NOT_OPEN",
+      failureCode: "BOOKING_NOT_OPEN", complete: false, freshSuccessfulChecks: 0, customerAcceptance: false });
+    expect(f.deps.read).not.toHaveBeenCalled(); expect(f.deps.providerLease).not.toHaveBeenCalled();
+    expect(f.tx.courseOffering.updateMany).not.toHaveBeenCalled(); expect(f.save).not.toHaveBeenCalled();
+    expect(f.audit).toEqual({}); expect(f.claim.revision).toBe(3);
+  });
   it("validates complete same-day calendars but counts future full sessions only", () => {
     const f = fixture();
     const slots = [13, 16].map(hour => ({ sourceId: `slot_${hour}`, offeringId: "offering", resourceId: "bay_1", productId: "public",

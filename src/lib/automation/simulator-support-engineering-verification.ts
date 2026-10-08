@@ -103,7 +103,16 @@ export async function runSimulatorEngineeringVerification(input: SimulatorEngine
         state.observations.length && !evaluateSimulatorEngineeringVerification({ now, claim, sourceFingerprint: claim.sourceFingerprint, state }).firstCheckReady) {
       throw new Error("SIMULATOR_ENGINEERING_VERIFICATION_REPAIR_REQUIRED");
     }
-    const requestedDate = deriveSimulatorEngineeringVerificationDate(now, timeZone, offering);
+    let requestedDate: string;
+    try { requestedDate = deriveSimulatorEngineeringVerificationDate(now, timeZone, offering); }
+    catch (error) {
+      if (!(error instanceof Error) || error.message !== "SIMULATOR_ENGINEERING_BOOKING_NOT_OPEN") throw error;
+      // A known future release is a successful scheduling decision, never an empty calendar read.
+      return { assignmentRef: input.assignmentRef, revision: claim.revision, phase: claim.phase, leaseExpiresAt: claim.leaseExpiresAt,
+        deferred: true as const, outcome: "BOOKING_NOT_OPEN" as const, complete: false as const, providerObservedAt: null,
+        slotCount: 0, failureCode: "BOOKING_NOT_OPEN" as const, freshSuccessfulChecks: 0, nextAction: "RETRY_ENGINEERING" as const,
+        engineeringOnly: true as const, customerAcceptance: false as const };
+    }
     const requestId = deps.requestId();
     const expiresAt = new Date(now.getTime() + SIMULATOR_ENGINEERING_VERIFICATION_LEASE_MS);
     const lease = await tx.courseOffering.updateMany({ where: { id: offering.id, OR: [
@@ -115,7 +124,7 @@ export async function runSimulatorEngineeringVerification(input: SimulatorEngine
       ...(previous && !sameRelease ? { simulatorEngineeringVerificationHistory: [...history, previous] } : {}) });
     return { ...saved, requestId, requestedDate, startedAt: now, offering, timeZone };
   });
-  if ("expiredReservation" in reserved) return reserved;
+  if ("expiredReservation" in reserved || "deferred" in reserved) return reserved;
   const owner = { assignmentRef: input.assignmentRef, token: input.token, revision: reserved.revision, runtimeVersion: runtime.runtimeVersion };
   let normalized: ReturnType<typeof normalizeSimulatorEngineeringResult> | ReturnType<typeof normalizeFailure>;
   const deadline = AbortSignal.timeout(SIMULATOR_ENGINEERING_VERIFICATION_DEADLINE_MS);
