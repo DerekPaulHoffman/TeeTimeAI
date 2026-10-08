@@ -838,17 +838,23 @@ describe("course-support remediation routing", () => {
     providerContractEvidenceAvailable: false,
   };
 
-  it.each(["MISSING_METADATA", "SCHEMA", "UNKNOWN", "READER_PARSER_MISSING"] as const)(
-    "checks the booking page before repairing a %s provider adapter with public status confirmed or pending",
-    (failureClass) => {
+  it.each([
+    "RENDERED_BROWSER_DISCOVERY",
+    "BROWSER_ADAPTER_RETRY",
+  ] as const)(
+    "checks the owned booking-page stage before repairing an EZLINKS schema failure at %s",
+    (stage) => {
       for (const isPublic of [true, null] as const) {
-        const course = { ...renderedCourse, isPublic, failureClass };
+        const course = {
+          ...renderedCourse, isPublic, failureClass: "SCHEMA" as const,
+          playbookAssessment: incompletePlaybook(stage),
+        };
         const route = routeCourseSupportRemediation(course);
         expect(route).toMatchObject({
           workMode: "ADVANCE_DISCOVERY",
           allowUnchangedRuntime: true,
           requiresImplementationPath: false,
-          attemptSignature: { playbookStage: "RENDERED_BROWSER_DISCOVERY" },
+          attemptSignature: { playbookStage: stage },
         });
         expect(buildCourseSupportClaimActionPlan({
           route,
@@ -859,26 +865,72 @@ describe("course-support remediation routing", () => {
           primaryAction: "VERIFY_CURRENT_RUNTIME",
           allowedActions: ["VERIFY_CURRENT_RUNTIME"],
         });
+        if (stage === "BROWSER_ADAPTER_RETRY") {
+          const directive = {
+            ...getCourseSupportRemediationDirective(route),
+            allowUnchangedRuntime: route.allowUnchangedRuntime,
+            requiresImplementationPath: route.requiresImplementationPath,
+            retryBudget: route.retryBudget,
+          };
+          expect(isAssignedDetachedStageProgression({
+            remediationDirective: directive,
+            playbookConclusion: "INCOMPLETE",
+            nextPlaybookStage: stage,
+            nextPlaybookStageStatus: "PENDING",
+            nextPlaybookStageAttemptCount: 0,
+          })).toBe(true);
+          expect(isAssignedDetachedStageProgression({
+            remediationDirective: directive,
+            playbookConclusion: "INCOMPLETE",
+            nextPlaybookStage: stage,
+            nextPlaybookStageStatus: "FAILED_RETRYABLE",
+            nextPlaybookStageAttemptCount: 1,
+          })).toBe(false);
+        }
       }
     },
   );
 
-  it("keeps explicit private identity out of the rendered-discovery shortcut", () => {
-    const route = routeCourseSupportRemediation({
-      ...renderedCourse, isPublic: false, failureClass: "SCHEMA",
-    });
-    expect(route).toMatchObject({
-      workMode: "COMPLETE_CLASSIFICATION",
-      strategy: { action: "FINAL_PRIVATE_OR_INVALID" },
-    });
-  });
+  it.each(["MISSING_METADATA", "UNKNOWN", "READER_PARSER_MISSING"] as const)(
+    "checks the rendered booking page before repairing a %s provider adapter",
+    (failureClass) => {
+      const route = routeCourseSupportRemediation({
+        ...renderedCourse, isPublic: null, failureClass,
+      });
+      expect(route).toMatchObject({
+        workMode: "ADVANCE_DISCOVERY",
+        attemptSignature: { playbookStage: "RENDERED_BROWSER_DISCOVERY" },
+      });
+    },
+  );
 
-  it.each([null, "http://localhost/tee-times", "https://user:secret@course.example/"])(
-    "keeps a missing or unsafe booking source out of rendered discovery: %s",
-    (detectedBookingUrl) => {
+  it.each(["RENDERED_BROWSER_DISCOVERY", "BROWSER_ADAPTER_RETRY"] as const)(
+    "keeps explicit private identity out of the owned browser stage at %s", (stage) => {
+      const route = routeCourseSupportRemediation({
+        ...renderedCourse, isPublic: false, failureClass: "SCHEMA",
+        playbookAssessment: incompletePlaybook(stage),
+      });
+      expect(route).toMatchObject({
+        workMode: "COMPLETE_CLASSIFICATION",
+        strategy: { action: "FINAL_PRIVATE_OR_INVALID" },
+      });
+    },
+  );
+
+  it.each([
+    ["RENDERED_BROWSER_DISCOVERY", null],
+    ["RENDERED_BROWSER_DISCOVERY", "http://localhost/tee-times"],
+    ["RENDERED_BROWSER_DISCOVERY", "https://user:secret@course.example/"],
+    ["BROWSER_ADAPTER_RETRY", null],
+    ["BROWSER_ADAPTER_RETRY", "http://localhost/tee-times"],
+    ["BROWSER_ADAPTER_RETRY", "https://user:secret@course.example/"],
+  ] as const)(
+    "keeps a missing or unsafe booking source out of %s: %s",
+    (stage, detectedBookingUrl) => {
       const route = routeCourseSupportRemediation({
         ...renderedCourse, isPublic: null, website: null,
         detectedBookingUrl, failureClass: "SCHEMA",
+        playbookAssessment: incompletePlaybook(stage),
       });
       expect(route.workMode).not.toBe("ADVANCE_DISCOVERY");
       expect(route.strategy.action).toBe("REPAIR_PROVIDER_ADAPTER");
@@ -886,12 +938,15 @@ describe("course-support remediation routing", () => {
   );
 
   it.each([
-    ["AUTH", "ACCOUNT_REQUIRED"],
-    ["CHALLENGE", "CAPTCHA_OR_QUEUE"],
-  ] as const)("preserves the observed %s access gate", (failureClass, automationReason) => {
+    ["RENDERED_BROWSER_DISCOVERY", "AUTH", "ACCOUNT_REQUIRED"],
+    ["RENDERED_BROWSER_DISCOVERY", "CHALLENGE", "CAPTCHA_OR_QUEUE"],
+    ["BROWSER_ADAPTER_RETRY", "AUTH", "ACCOUNT_REQUIRED"],
+    ["BROWSER_ADAPTER_RETRY", "CHALLENGE", "CAPTCHA_OR_QUEUE"],
+  ] as const)("preserves the observed %s access gate for %s", (stage, failureClass, automationReason) => {
     const route = routeCourseSupportRemediation({
       ...renderedCourse, isPublic: null, failureClass,
       automationEligibility: "BLOCKED", automationReason,
+      playbookAssessment: incompletePlaybook(stage),
     });
     expect(route.strategy.action).toBe("VERIFY_TECHNICAL_CONSTRAINT");
     expect(route.workMode).not.toBe("IMPLEMENT_REUSABLE_SUPPORT");
@@ -911,6 +966,19 @@ describe("course-support remediation routing", () => {
       });
     },
   );
+
+  it("does not treat a contract marker as actionable while public identity is pending", () => {
+    const route = routeCourseSupportRemediation({
+      ...renderedCourse, isPublic: null, failureClass: "SCHEMA",
+      playbookAssessment: incompletePlaybook("BROWSER_ADAPTER_RETRY"),
+      providerContractEvidenceAvailable: true,
+    });
+    expect(route).toMatchObject({
+      workMode: "ADVANCE_DISCOVERY",
+      allowUnchangedRuntime: true,
+      requiresImplementationPath: false,
+    });
+  });
 
   it("keeps a source-free unsupported public family on its bounded rendered stage", () => {
     const course = {
