@@ -142,6 +142,10 @@ describe("deterministic original-worker continuation", () => {
     expect(args.slice(1, 7)).toEqual(["env", "run", "-e", "production", "--", f.validated.runtime.nodePath]);
     expect(settings.cwd).toBe(f.validated.selected);
     expect(settings.env.DATABASE_URL).toBeUndefined(); expect(settings.env.RESEND_API_KEY).toBeUndefined();
+    expect(settings.env.VERCEL_CLI_USE_NATIVE_BINARY).toBe("0");
+    const nativeSettings = f.clientFactory.mock.calls[0][0] as unknown as { environment: Record<string, string> };
+    expect(nativeSettings.environment.VERCEL_CLI_USE_NATIVE_BINARY).toBeUndefined();
+    expect(nativeSettings.environment.CODEX_THREAD_ID).toBeUndefined();
   });
 
   it("validates the real original receipt and shared linked-checkout identity with registered dirty bytes", () => {

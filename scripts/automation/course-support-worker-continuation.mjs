@@ -5,7 +5,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inspectPinnedWorkerCli } from "./course-support-worker-cli.mjs";
 import { approvedCourseSupportResponderCheckouts } from "./course-support-preflight.mjs";
-import { WORKER_PERMISSION_PROFILE, assertFullAccessAcknowledgement, buildWorkerFirstTurnPrompt,
+import { WORKER_PERMISSION_PROFILE, assertFullAccessAcknowledgement, buildWorkerFirstTurnPrompt, courseSupportWorkerAppServerEnvironment,
   createWorkerAppServer, hasNativeIdentityProof, isApprovalRequest, privateWrite, readWorkerCliVersion,
   retainPrimaryFailure } from "./course-support-worker-launcher.mjs";
 import { courseSupportWorkerProductionCommand, courseSupportWorkerRuntimeEnvironment, inspectCourseSupportWorkerVercel,
@@ -225,13 +225,7 @@ export async function runOriginalWorkerContinuation(input, dependencies = {}) {
           completed = message.params.turn; wake();
         }
         if (changed) save();
-      }, environment: (() => {
-        const result = courseSupportWorkerRuntimeEnvironment(validated.runtime, validated.worker, environment);
-        for (const name of ["CODEX_HOME", "HOME", "HOMEDRIVE", "HOMEPATH", "USER", "LOGNAME", "LANG", "LC_ALL", "TZ"]) {
-          if (typeof environment[name] === "string") result[name] = environment[name];
-        }
-        delete result.CODEX_THREAD_ID; return result;
-      })() });
+      }, environment: courseSupportWorkerAppServerEnvironment(validated.worker, environment, validated.runtime) });
     receipt.serverPid = client.pid; save();
     await client.request("initialize", { clientInfo: { name: "course_support_worker_launcher", version: "1.0" }, capabilities: { experimentalApi: true } });
     client.notify("initialized", {});

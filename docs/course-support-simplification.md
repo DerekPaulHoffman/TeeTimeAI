@@ -290,3 +290,16 @@ is renewed by this instruction, and only normal independent admission may
 resume the original owner. The local-feedback correction was exercised by the
 actual scheduled red-to-green repair; code publication/deployed proof and honest
 durable closeout still need their own acceptance.
+
+A subsequent consumer audit caught a new unpublished integration defect in the
+startup change: the general runtime environment's noncredential Vercel setting
+reached the default Codex app-server factory, while the read-only native observer
+correctly rejects every Vercel/product/native-identity key. Earlier observer
+tests injected an empty environment and the scoped415 review missed this join.
+A real-helper regression failed with PRODUCT_OR_NATIVE_IDENTITY_ENV_PRESENT
+before the fix. The app-server factory now drops the CLI-only setting, and the
+continuation reuses that same factory instead of duplicating its environment
+construction. Vercel commands still force the verified JavaScript path. The
+observer's credential fence is unchanged, including rejecting a caller-supplied
+Vercel flag. Local145 combined checks include the actual default Windows factory
+with a fake read-only transport; no live native turn is opened by those tests.
