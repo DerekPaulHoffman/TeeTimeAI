@@ -15,6 +15,7 @@ import { evaluateSimulatorSupportProgress } from "./simulator-support-progress";
 import { assertSimulatorResearchFallbackBeforeRetry, getSimulatorResearchGuide, getSimulatorResearchRetryGuide, getSimulatorResearchObservationFingerprint, getSimulatorResearchImplementationVersion, readSettledSimulatorPublicCheckpoint, readSimulatorResearchState, selectSimulatorResearchTarget, mergeSimulatorResearchBlockedRoutes, readSimulatorResearchFailureMemory, currentSimulatorResearchBlockedRoutes, type SimulatorResearchBlockedRoute, type SimulatorResearchSource, type SimulatorResearchState } from "./simulator-support-research-policy";
 import { classifySimulatorSupportFailure, type SimulatorSupportFailure } from "./simulator-support-failure";
 import { validateSimulatorEngineeringAuthority } from "./simulator-support-incidents";
+import { readSimulatorEngineeringVerificationState } from "./simulator-support-engineering-verification-policy";
 
 type Owner = { assignmentRef: string; ownerThreadId: string; token: string; revision: number };
 const acquiredResearchFailureCodes = new Set([
@@ -152,23 +153,26 @@ export type SimulatorEngineeringVerificationContext = {
   claim: SimulatorSupportClaim;
   offering: Awaited<ReturnType<typeof lockSource>>["offering"];
   timeZone: string;
+  customerDemandPresent: boolean;
   save: (auditChanges: Record<string, unknown>) => ReturnType<typeof saveClaim>;
 };
 
 /** Authenticated deployed verification derives the original native owner from durable authority. */
-export function withSimulatorEngineeringVerificationTransition<T>(input: Omit<Owner, "ownerThreadId"> & { runtimeVersion: string },
+export function withSimulatorEngineeringVerificationTransition<T>(input: Omit<Owner, "ownerThreadId"> & { runtimeVersion: string; allowCustomerDemandSettlement?: true },
   operation: (context: SimulatorEngineeringVerificationContext) => Promise<T>) {
   return withTransition(async (tx, now) => {
     const assignment = await loadAssignment(tx, input.assignmentRef);
     if (!assignment.audit.childThreadId) throw new Error("Simulator engineering verification lacks its original native owner.");
     const row = await loadOwned(tx, { ...input, ownerThreadId: assignment.audit.childThreadId }, now);
     if (!row.audit.target.engineeringAuthority || row.audit.target.trafficClass !== "SYNTHETIC") throw new Error("Simulator engineering verification requires durable engineering incident authority.");
-    if (row.source.verificationTargets.some(search => !["TEST", "AUTOMATION"].includes(search.trafficClass))) throw new Error("SIMULATOR_ENGINEERING_CUSTOMER_CHECK_REQUIRED");
+    const customerDemandPresent = row.source.verificationTargets.some(search => !["TEST", "AUTOMATION"].includes(search.trafficClass));
+    const pending = readSimulatorEngineeringVerificationState((row.audit as CourseDispatchAudit & { simulatorEngineeringVerification?: unknown }).simulatorEngineeringVerification)?.inFlight;
+    if (customerDemandPresent && (!input.allowCustomerDemandSettlement || !pending)) throw new Error("SIMULATOR_ENGINEERING_CUSTOMER_CHECK_REQUIRED");
     if (row.claim.phase !== "VERIFYING" || !row.claim.releaseSha || !row.claim.deployment || row.claim.releaseSha !== input.runtimeVersion ||
         (row.audit as CourseDispatchAudit & { simulatorRepairPending?: unknown }).simulatorRepairPending) throw new Error("Simulator engineering verification requires the exact deployed owner release.");
     assertSimulatorSupportDeployment(row.claim.deployment, row.claim.releaseSha, now);
     return operation({ tx, now, runId: row.runId, audit: row.audit, claim: row.claim, offering: row.source.offering,
-      timeZone: row.source.offering.course.timeZone, save: changes => saveClaim(tx, row, now, {}, undefined, changes) });
+      timeZone: row.source.offering.course.timeZone, customerDemandPresent, save: changes => saveClaim(tx, row, now, {}, undefined, changes) });
   });
 }
 
@@ -641,6 +645,15 @@ export function recordSimulatorSupportDeployment(input: Owner & { proof: GitDepl
 }
 
 async function loadSimulatorVerificationProgress(tx: Prisma.TransactionClient, row: Awaited<ReturnType<typeof loadOwned>>, now: Date) {
+  if (row.audit.target.engineeringAuthority) {
+    const value = (row.audit as CourseDispatchAudit & { simulatorEngineeringVerification?: unknown }).simulatorEngineeringVerification;
+    const state = readSimulatorEngineeringVerificationState(value);
+    if (value !== undefined && !state) throw new Error("Simulator engineering verification evidence is malformed; preserve ownership.");
+    return evaluateSimulatorSupportProgress({ now, claim: row.claim, sourceFingerprint: row.source.fingerprint,
+      offering: row.source.offering, owner: { leaseValid: true, demandCurrent: true, sourceCurrent: true }, probes: [], searches: [],
+      engineeringVerification: state ?? null,
+      customerDemandPresent: row.source.verificationTargets.some(search => !["TEST", "AUTOMATION"].includes(search.trafficClass)) });
+  }
   const after = row.claim.recheckQueuedAt && row.claim.deployment ? new Date(Math.max(
     Date.parse(row.claim.recheckQueuedAt), Date.parse(row.claim.deployment.deployedAt), Date.parse(row.claim.claimedAt),
   )) : null;
@@ -686,9 +699,12 @@ export function queueSimulatorSupportRechecks(input: Owner) {
 export function completeSimulatorSupport(input: Owner & { currentDeployment: GitDeploymentProof }) {
   return withTransition(async (tx, now) => {
     const row = await loadOwned(tx, input, now);
+    const engineering = Boolean(row.audit.target.engineeringAuthority);
+    if (engineering && row.source.verificationTargets.some(search => !["TEST", "AUTOMATION"].includes(search.trafficClass))) throw new Error("SIMULATOR_ENGINEERING_CUSTOMER_CHECK_REQUIRED");
+    if ((row.audit as CourseDispatchAudit & { simulatorEngineeringVerification?: { inFlight?: unknown } }).simulatorEngineeringVerification?.inFlight) throw new Error("Finish or reconcile the original engineering verification read before completing ownership.");
     if (!row.claim.releaseSha || row.claim.phase !== "VERIFYING" ||
         (row.audit as CourseDispatchAudit & { simulatorRepairPending?: unknown }).simulatorRepairPending ||
-        !row.claim.deployment || !row.claim.recheckQueuedAt || row.source.offering.publicAccessStatus !== "PUBLIC" ||
+        !row.claim.deployment || (!engineering && !row.claim.recheckQueuedAt) || row.source.offering.publicAccessStatus !== "PUBLIC" ||
         row.source.offering.monitoringState !== "HEALTHY" || row.source.offering.automationEligibility !== "ALLOWED") throw new Error("Simulator completion requires deployed rechecks and verified public rental access.");
     assertSimulatorSupportDeployment(row.claim.deployment, row.claim.releaseSha, now);
     assertSimulatorSupportDeployment(input.currentDeployment, row.claim.releaseSha, now);
@@ -696,10 +712,13 @@ export function completeSimulatorSupport(input: Owner & { currentDeployment: Git
     const progress = await loadSimulatorVerificationProgress(tx, row, now);
     if (!progress.readyForCompletion) throw new Error("Simulator support needs two distinct fresh successful checks on the exact current release; newer failures cannot be ignored.");
     await tx.simulatorSupportIncident.update({ where: { id: row.source.incident.id }, data: { status: "RESOLVED", resolvedAt: now, retryAt: null } });
-    await tx.automationRun.update({ where: { id: row.runId }, data: { status: "COMPLETED", completedAt: now, outcome: "simulator_monitoring_restored", audit: {
-      ...row.audit, simulatorVerification: { runtimeVersion: row.claim.releaseSha, sourceFingerprint: row.source.fingerprint, verifiedAt: now.toISOString(), probeIds: progress.qualifyingProbeIds },
+    await tx.automationRun.update({ where: { id: row.runId }, data: { status: "COMPLETED", completedAt: now, outcome: engineering ? "simulator_engineering_monitoring_verified" : "simulator_monitoring_restored", audit: {
+      ...row.audit, ...(engineering ? { simulatorEngineeringCompletion: { engineeringOnly: true, customerAcceptance: false,
+        runtimeVersion: row.claim.releaseSha, sourceFingerprint: row.source.fingerprint, verifiedAt: now.toISOString(), engineeringObservationIds: progress.qualifyingProbeIds } }
+        : { simulatorVerification: { runtimeVersion: row.claim.releaseSha, sourceFingerprint: row.source.fingerprint, verifiedAt: now.toISOString(), probeIds: progress.qualifyingProbeIds } }),
     } as unknown as Prisma.InputJsonValue } });
-    return { outcome: "success" as const, durableCloseoutRecorded: true, engineeringOnly: row.audit.target.trafficClass === "SYNTHETIC" };
+    return { outcome: "success" as const, durableCloseoutRecorded: true, engineeringOnly: row.audit.target.trafficClass === "SYNTHETIC",
+      ...(engineering ? { verificationKind: "ENGINEERING_ONLY" as const, customerAcceptance: false } : {}) };
   });
 }
 

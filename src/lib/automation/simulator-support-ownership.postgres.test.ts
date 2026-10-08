@@ -8,7 +8,9 @@ import { createSimulatorSupportIntentDigest, SIMULATOR_SUPPORT_SOURCE_SELECT } f
 import { SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION } from "./simulator-support-research-policy";
 
 const coreMocks = vi.hoisted(() => ({ fetch: vi.fn(), sendMatch: vi.fn(), sendStatus: vi.fn() }));
-vi.mock("@/lib/simulators/providers", () => ({ fetchSimulatorAvailability: coreMocks.fetch }));
+vi.mock("@/lib/simulators/providers", async importOriginal => ({
+  ...(await importOriginal<typeof import("@/lib/simulators/providers")>()), fetchSimulatorAvailability: coreMocks.fetch,
+}));
 vi.mock("./simulator-source-check", () => ({ checkSimulatorOfficialSource: vi.fn(() => { throw new Error("Unexpected real source request in isolated test."); }) }));
 vi.mock("@/lib/email/alerts", async importOriginal => ({
   ...(await importOriginal<typeof import("@/lib/email/alerts")>()),
@@ -72,7 +74,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     return { course, offering, peer, search, incident, run, owner: { assignmentRef, ownerThreadId: child, token: claimed.value.token, revision: claimed.value.revision }, fingerprint };
   }
 
-  async function engineeringFixture() {
+  async function engineeringFixture(boundOnly = false) {
     const f = await fixture(15, false, undefined, undefined, true);
     await lane.retrySimulatorSupport({ ...f.owner, retryMinutes: 15 });
     await client.teeSearch.update({ where: { id: f.search.id }, data: { status: "COMPLETED", checkStatus: "STOPPED", nextCheckAt: null,
@@ -88,10 +90,155 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     await dispatcher.bindCourseSupportCourseDispatch({ ownerThreadId: "engineering-parent", assignmentRef: assignment.assignmentRef, childThreadId: child });
     const run = await client.automationRun.findFirstOrThrow({ where: { promptVersion: dispatcher.COURSE_DISPATCH_PROMPT_VERSION,
       audit: { path: ["assignmentRef"], equals: assignment.assignmentRef } } }); ids.runs.push(run.id);
+    if (boundOnly) return { ...f, before, engineeringRun: run,
+      engineeringOwner: { assignmentRef: assignment.assignmentRef, ownerThreadId: child, token: "unclaimed-fixture", revision: 0 } };
     const claim = await lane.claimSimulatorSupportAssignment({ assignmentRef: assignment.assignmentRef, ownerThreadId: child, baseSha, branch: "engineering-worker" });
     if (!claim.acquired) throw new Error("Engineering claim writer was busy.");
     return { ...f, before, engineeringRun: run, engineeringOwner: { assignmentRef: assignment.assignmentRef, ownerThreadId: child, token: claim.value.token, revision: claim.value.revision } };
   }
+
+  async function readyEngineeringFixture() {
+    const f = await engineeringFixture();
+    let owner = f.engineeringOwner;
+    const manifest = { googlePlaceId: f.course.googlePlaceId, name: f.course.name, address: f.course.address!, latitude: 41, longitude: -73,
+      website: f.course.website!, bookingUrl: "https://official.example.test/book", evidenceUrl: f.course.website!, verifiedAt: new Date().toISOString(),
+      publicAccessStatus: "PUBLIC", supportedDurationsMinutes: [60], providerFamilyKey: "GOLFBOOK" };
+    const configured = await lane.configureSimulatorSupportOffering({ ...owner, manifest, apply: true,
+      expectedFingerprint: f.fingerprint, expectedOfferingRevision: f.offering.monitoringRevision });
+    if (!configured.acquired || configured.value.mode !== "applied") throw new Error("Engineering configuration failed.");
+    owner = { ...owner, revision: configured.value.revision };
+    const adopted = await lane.adoptSimulatorSupportSource({ ...owner, expectedFingerprint: configured.value.sourceFingerprint,
+      expectedOfferingRevision: configured.value.offeringRevision });
+    if (!adopted.acquired) throw new Error("Engineering source adoption failed."); owner = { ...owner, revision: adopted.value.revision };
+    const registered = await lane.registerSimulatorSupportRelease({ ...owner, releaseSha: baseSha, branch: "engineering-worker",
+      trustedUpstreamSha: baseSha, upstreamDescendantVerified: true, descendantVerified: true, committedPaths: [] });
+    if (!registered.acquired) throw new Error("Engineering metadata release failed."); owner = { ...owner, revision: registered.value.revision };
+    const proof = { aliases: ["teetimespot.com", "www.teetimespot.com"], branch: "main", commitSha: baseSha,
+      deployedAt: new Date(Date.now() - 5_000).toISOString(), deploymentId: "dpl_engine_fixture", deploymentUrl: "https://engine-fixture.vercel.app", source: "git" as const, state: "READY" as const };
+    const deployed = await lane.recordSimulatorSupportDeployment({ ...owner, proof });
+    if (!deployed.acquired) throw new Error("Engineering deployment failed."); owner = { ...owner, revision: deployed.value.revision };
+    const runtime = { runtimeVersion: baseSha, deploymentId: proof.deploymentId, deploymentUrl: proof.deploymentUrl, environment: "production", host: "teetimespot.com" };
+    return { ...f, engineeringOwner: owner, proof, runtime };
+  }
+
+  it("verifies two deployed engineering reads through the real writer envelope and completes without any customer state", async () => {
+    const f = await readyEngineeringFixture();
+    const { runSimulatorEngineeringVerification } = await import("./simulator-support-engineering-verification");
+    const before = { probes: await client.courseProbe.count({ where: { teeSearchId: f.search.id } }), matches: await client.teeTimeMatch.count({ where: { teeSearchId: f.search.id } }),
+      deliveries: await client.searchEmailDelivery.count({ where: { teeSearchId: f.search.id } }), operator: await client.operatorNotificationDelivery.count({ where: { sourceSearchId: f.search.id } }) };
+    coreMocks.fetch.mockImplementation(async () => ({ complete: true, observedAt: new Date(), evidenceUrl: f.course.website!, slots: [] }));
+    let owner = f.engineeringOwner;
+    await expect(lane.queueSimulatorSupportRechecks(owner)).rejects.toThrow("SIMULATOR_ENGINEERING_VERIFICATION_REQUIRED");
+    for (let cycle = 1; cycle <= 2; cycle++) {
+      const priorRevision = owner.revision;
+      const result = await runSimulatorEngineeringVerification(owner, f.runtime);
+      expect(result).toMatchObject({ complete: true, outcome: "NO_MATCH", engineeringOnly: true, customerAcceptance: false, freshSuccessfulChecks: cycle, revision: priorRevision + 2 });
+      owner = { ...owner, revision: result.revision };
+      const progress = await lane.readSimulatorSupportProgress(owner);
+      if (!progress.acquired) throw new Error("Engineering progress was busy.");
+      expect(progress.value).toMatchObject({ verificationKind: "ENGINEERING_ONLY", customerAcceptance: false,
+        freshSuccessfulChecks: cycle, readyForCompletion: cycle === 2, nextAction: cycle === 2 ? "COMPLETE" : "VERIFY_ENGINEERING" });
+    }
+    const completed = await lane.completeSimulatorSupport({ ...owner, currentDeployment: f.proof });
+    if (!completed.acquired) throw new Error("Engineering completion was busy.");
+    expect(completed.value).toMatchObject({ outcome: "success", verificationKind: "ENGINEERING_ONLY", customerAcceptance: false });
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(f.before);
+    expect({ probes: await client.courseProbe.count({ where: { teeSearchId: f.search.id } }), matches: await client.teeTimeMatch.count({ where: { teeSearchId: f.search.id } }),
+      deliveries: await client.searchEmailDelivery.count({ where: { teeSearchId: f.search.id } }), operator: await client.operatorNotificationDelivery.count({ where: { sourceSearchId: f.search.id } }) }).toEqual(before);
+    const saved = await client.automationRun.findUniqueOrThrow({ where: { id: f.engineeringRun.id } });
+    expect(saved).toMatchObject({ status: "COMPLETED", outcome: "simulator_engineering_monitoring_verified" });
+    expect(saved.audit).toMatchObject({ simulatorEngineeringCompletion: { engineeringOnly: true, customerAcceptance: false,
+      engineeringObservationIds: [expect.any(String), expect.any(String)] } });
+    expect((saved.audit as Prisma.JsonObject).simulatorVerification).toBeUndefined();
+    expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
+  });
+
+  it("cannot release engineering ownership during its existing provider reservation", async () => {
+    const f = await readyEngineeringFixture();
+    const { runSimulatorEngineeringVerification } = await import("./simulator-support-engineering-verification");
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+    coreMocks.fetch.mockImplementation(async () => { entered(); await gate; return { complete: true, observedAt: new Date(), evidenceUrl: f.course.website!, slots: [] }; });
+    const checking = runSimulatorEngineeringVerification(f.engineeringOwner, f.runtime);
+    await started;
+    const current = await lane.readSimulatorSupportClaim({ assignmentRef: f.engineeringOwner.assignmentRef, ownerThreadId: f.engineeringOwner.ownerThreadId });
+    const owner = { ...f.engineeringOwner, revision: current.revision };
+    try {
+      await expect(lane.retrySimulatorSupport({ ...owner, retryMinutes: 60, currentDeployment: f.proof, releaseCheckoutVerified: true })).rejects.toThrow("bounded simulator read");
+      await expect(lane.retireSimulatorSupport(owner)).rejects.toThrow("engineering verification read");
+      await expect(lane.completeSimulatorSupport({ ...owner, currentDeployment: f.proof })).rejects.toThrow("engineering verification read");
+    } finally { release(); }
+    await checking;
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(f.before);
+  });
+
+  it("does no provider work and does not advance the claim when the actual writer lease is busy", async () => {
+    const f = await readyEngineeringFixture();
+    const { runSimulatorEngineeringVerification } = await import("./simulator-support-engineering-verification");
+    const { runWithCourseSupportWriterTransitionLease } = await import("./course-support-batches");
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+    const held = runWithCourseSupportWriterTransitionLease(async () => { entered(); await gate; });
+    await started;
+    const before = await client.automationRun.findUniqueOrThrow({ where: { id: f.engineeringRun.id } });
+    const readCount = coreMocks.fetch.mock.calls.length;
+    try { await expect(runSimulatorEngineeringVerification(f.engineeringOwner, f.runtime)).rejects.toThrow("SIMULATOR_ENGINEERING_WRITER_BUSY"); }
+    finally { release(); await held; }
+    expect(await client.automationRun.findUniqueOrThrow({ where: { id: f.engineeringRun.id } })).toEqual(before);
+    expect(coreMocks.fetch.mock.calls.length).toBe(readCount);
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(f.before);
+  });
+
+  it("records customer demand arriving during a detached read as failed engineering evidence and yields safely", async () => {
+    const f = await readyEngineeringFixture();
+    const { runSimulatorEngineeringVerification } = await import("./simulator-support-engineering-verification");
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; }), gate = new Promise<void>(resolve => { release = resolve; });
+    coreMocks.fetch.mockImplementation(async () => { entered(); await gate; return { complete: true, observedAt: new Date(), evidenceUrl: f.course.website!, slots: [] }; });
+    const checking = runSimulatorEngineeringVerification(f.engineeringOwner, f.runtime);
+    await started;
+    const real = await client.teeSearch.create({ data: { userId: f.search.userId, mode: "SIMULATOR", durationMinutes: 60, date: f.search.date,
+      startTime: "09:00", endTime: "18:00", userTimeZone: "UTC", players: 4, trafficClass: "PUBLIC",
+      preferences: { create: [{ courseId: f.course.id, offeringId: f.offering.id, rank: 1 }] } } });
+    release();
+    const settled = await checking;
+    expect(settled).toMatchObject({ complete: false, outcome: "FETCH_FAILED", failureCode: "NORMAL_CUSTOMER_CHECK_REQUIRED", customerAcceptance: false });
+    const owner = { ...f.engineeringOwner, revision: settled.revision };
+    const progress = await lane.readSimulatorSupportProgress(owner);
+    if (!progress.acquired) throw new Error("Customer-priority engineering progress was busy.");
+    expect(progress.value).toMatchObject({ nextAction: "RETRY_ENGINEERING", readyForCompletion: false, customerAcceptance: false });
+    await expect(lane.completeSimulatorSupport({ ...owner, currentDeployment: f.proof })).rejects.toThrow("CUSTOMER_CHECK_REQUIRED");
+    const closed = await lane.retrySimulatorSupport({ ...owner, retryMinutes: 60, currentDeployment: f.proof, releaseCheckoutVerified: true });
+    if (!closed.acquired) throw new Error("Engineering priority yield was busy.");
+    expect(closed.value).toMatchObject({ outcome: "customer_check_required" });
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(f.before);
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: real.id } })).toEqual(real);
+    expect(await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } })).toMatchObject({ status: "AUTO_INVESTIGATING", resolvedAt: null });
+  });
+
+  it("preserves a bound engineering assignment across the next normal plan without reviving its ended source", async () => {
+    const f = await engineeringFixture(true);
+    const plan = await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: "engineering-next-tick", baseSha });
+    if (!plan.acquired) throw new Error("Next engineering plan was busy.");
+    expect(plan.value.launchItems).toContainEqual(expect.objectContaining({ assignmentRef: f.engineeringOwner.assignmentRef, state: "BOUND" }));
+    expect(await client.automationRun.findUniqueOrThrow({ where: { id: f.engineeringRun.id } })).toEqual(f.engineeringRun);
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(f.before);
+  });
+
+  it.each(["SOURCE", "REAL"] as const)("revokes only unclaimed engineering authority when %s changes before claim", async change => {
+    const f = await engineeringFixture(true);
+    if (change === "SOURCE") await client.courseOffering.update({ where: { id: f.offering.id }, data: { bookingUrl: "https://official.example.test/new-source" } });
+    if (change === "REAL") await client.teeSearch.create({ data: { userId: f.search.userId, mode: "SIMULATOR", durationMinutes: 60, date: f.search.date,
+      startTime: "09:00", endTime: "18:00", userTimeZone: "UTC", players: 4, trafficClass: "PUBLIC",
+      preferences: { create: [{ courseId: f.course.id, offeringId: f.offering.id, rank: 1 }] } } });
+    const plan = await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: "engineering-next-tick", baseSha });
+    if (!plan.acquired) throw new Error("Stale engineering plan was busy.");
+    expect(await client.automationRun.findUniqueOrThrow({ where: { id: f.engineeringRun.id } })).toMatchObject({ status: "COMPLETED", outcome: "stale_simulator_assignment" });
+    const freshRuns = await client.automationRun.findMany({ where: { promptVersion: dispatcher.COURSE_DISPATCH_PROMPT_VERSION,
+      audit: { path: ["target", "courseId"], equals: f.course.id } }, select: { id: true } });
+    ids.runs.push(...freshRuns.map(run => run.id));
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(f.before);
+  });
 
   it("researches and retries an ended opted-in engineering incident without changing its stopped search or sending", async () => {
     const f = await engineeringFixture();

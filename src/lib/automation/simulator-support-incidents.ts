@@ -5,7 +5,7 @@ import type { CourseDispatchAudit } from "./course-support-course-dispatch";
 
 const DISPATCH_PROMPT_VERSION = "course-support-course-dispatch-v1";
 const ENGINEERING_HISTORY_LIMIT = 64;
-const ENGINEERING_CLOSEOUTS = new Set(["simulator_retryable_failed", "simulator_research_failed", "simulator_source_withdrawn", "simulator_source_changed", "simulator_monitoring_restored", "simulator_engineering_customer_priority"]);
+const ENGINEERING_CLOSEOUTS = new Set(["simulator_retryable_failed", "simulator_research_failed", "simulator_source_withdrawn", "simulator_source_changed", "simulator_monitoring_restored", "simulator_engineering_customer_priority", "simulator_engineering_monitoring_verified"]);
 
 function consumedEngineeringProvenance(row: { kind: string; status: string; outcome: string | null; completedAt: Date | null }, audit: CourseDispatchAudit | null, now: Date) {
   if (!audit || row.kind !== "OTHER" || row.status !== "COMPLETED" || !row.completedAt || row.completedAt > now ||

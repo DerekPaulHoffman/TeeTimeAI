@@ -6,8 +6,8 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { isSearchWindowActive } from "./date-boundary";
 import { getSyntheticMultiCycleExpiresAt } from "./synthetic-test-window";
-import { listSimulatorSupportDispatchCandidates } from "./simulator-support-incidents";
-import { isCurrentSimulatorSupportSource, isValidSimulatorEngineeringAuthority, isValidSimulatorSupportClaim, SIMULATOR_SUPPORT_SOURCE_SELECT, type SimulatorEngineeringAuthority, type SimulatorSupportClaim, type SimulatorSupportSource } from "./simulator-support-policy";
+import { listSimulatorSupportDispatchCandidates, validateSimulatorEngineeringAuthority } from "./simulator-support-incidents";
+import { createSimulatorSupportIntentDigest, isCurrentSimulatorSupportSource, isValidSimulatorEngineeringAuthority, isValidSimulatorSupportClaim, SIMULATOR_SUPPORT_SOURCE_SELECT, type SimulatorEngineeringAuthority, type SimulatorSupportClaim, type SimulatorSupportSource } from "./simulator-support-policy";
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
 import { readSimulatorResearchFailureMemory, type SimulatorResearchFailureMemory, type SimulatorResearchState } from "./simulator-support-research-policy";
 import {
@@ -320,14 +320,27 @@ async function revokeStaleBound(
     const baseChanged = audit.baseSha !== currentBaseSha;
     if (audit.target.mode === "SIMULATOR") {
       const incident = baseChanged ? null : await tx.simulatorSupportIncident.findUnique({ where: { id: audit.target.incidentId }, include: { offering: { include: { course: { select: { timeZone: true } } } } } });
-      const searches = incident ? await tx.teeSearch.findMany({ where: { id: { in: audit.target.searchRefs.map(ref => ref.id) } }, select: SIMULATOR_SUPPORT_SOURCE_SELECT }) : [];
-      const stale = !incident || incident.status !== "AUTO_INVESTIGATING" || incident.offeringId !== audit.target.offeringId ||
+      const searches = incident && !audit.target.engineeringAuthority ? await tx.teeSearch.findMany({ where: { id: { in: audit.target.searchRefs.map(ref => ref.id) } }, select: SIMULATOR_SUPPORT_SOURCE_SELECT }) : [];
+      let stale = !incident || incident.status !== "AUTO_INVESTIGATING" || incident.offeringId !== audit.target.offeringId ||
         incident.updatedAt.toISOString() !== audit.target.updatedAt ||
         getSimulatorOfferingSourceFingerprint(incident.offering) !== audit.target.offeringSourceFingerprint ||
-        searches.length !== audit.target.searchRefs.length || searches.some(search => {
+        (!audit.target.engineeringAuthority && searches.length !== audit.target.searchRefs.length) || searches.some(search => {
           const ref = audit.target.searchRefs.find(candidate => candidate.id === search.id);
           return !ref || !isCurrentSimulatorSupportSource({ search, ref, offeringId: incident.offeringId, trafficClass: audit.target.trafficClass, timeZone: incident.offering.course.timeZone, now });
         });
+      if (!stale && incident && audit.target.engineeringAuthority) {
+        try { await validateSimulatorEngineeringAuthority(tx, audit.target.engineeringAuthority, audit.target, now); }
+        catch (error) {
+          if (!(error instanceof Error) || !error.message.startsWith("Simulator engineering authority")) throw error;
+          stale = true;
+        }
+        const real = await tx.teeSearch.findMany({ where: { mode: "SIMULATOR", status: "ACTIVE", trafficClass: { notIn: ["TEST", "AUTOMATION"] },
+          preferences: { some: { offeringId: incident.offeringId } } }, select: SIMULATOR_SUPPORT_SOURCE_SELECT, take: 1024 });
+        if (real.length === 1024) throw new Error("Simulator engineering priority read reached its bounded limit.");
+        stale ||= real.some(search => isCurrentSimulatorSupportSource({ search, ref: { id: search.id, scheduleVersion: search.scheduleVersion,
+          alertGeneration: search.alertGeneration, intentDigest: createSimulatorSupportIntentDigest(search) }, offeringId: incident.offeringId,
+          trafficClass: "REAL", timeZone: incident.offering.course.timeZone, now }));
+      }
       if (stale) {
         const updated: CourseDispatchAudit = { ...audit, state: "CANCELLED" };
         await tx.automationRun.update({ where: { id: run.id }, data: { audit: updated as unknown as Prisma.InputJsonValue, status: "COMPLETED", completedAt: now, outcome: "stale_simulator_assignment" } });
