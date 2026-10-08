@@ -1022,7 +1022,8 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
       verifiedAt: f.offering.verifiedAt, evidenceUrl: f.offering.evidenceUrl, supportedDurationsMinutes: f.offering.supportedDurationsMinutes } });
     expect(getSimulatorOfferingSourceFingerprint(returned)).toBe(f.fingerprint);
     const originalSource = await fresh(f.fingerprint);
-    expect(originalSource.result.researchGuide.priorBlockedRoutes).toContainEqual({ url: f.course.website, rendered: false, httpStatus: 403 });
+    expect(originalSource.result.researchGuide.priorBlockedRoutes).toContainEqual({ url: f.course.website, rendered: false, httpStatus: 403,
+      researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION });
     const fetch = vi.fn();
     await expect(lane.readSimulatorSupportSource({ ...originalSource.owner, source: "official" }, { fetch })).rejects.toThrow("structural source failure");
     expect(fetch).not.toHaveBeenCalled();

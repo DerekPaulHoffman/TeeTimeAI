@@ -18,6 +18,9 @@ describe("durable simulator research failure memory", () => {
     expect(getSimulatorResearchObservationFingerprint({ ...entry, sourceFingerprint: fingerprint }, state, fingerprint)).toBe(fingerprint);
     expect(getSimulatorResearchObservationFingerprint({ ...entry, requestId: "00000000-0000-4000-8000-000000000001", publicReadEvidence: {
       sourceFingerprint: fingerprint, accessControlsObserved: true, accessControls: [], method: "HTTP" } }, state, fingerprint)).toBe(fingerprint);
+    expect(() => readSimulatorResearchState({ ...failedHomepage(), history: [{ ...entry, sourceFingerprint: fingerprint,
+      requestId: "00000000-0000-4000-8000-000000000001", publicReadEvidence: { sourceFingerprint: adoptedFingerprint,
+        accessControlsObserved: true, accessControls: [], method: "HTTP" } }] }, fingerprint)).toThrow();
   });
   it("reconsiders incomplete rendering only after its collector version changes and retains access denials", () => {
     const incomplete = { url: bookingUrl, rendered: true, httpStatus: 200,
