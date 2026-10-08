@@ -265,3 +265,28 @@ Workers now explicitly use its supported JavaScript-only setting in their
 stripped local environment. The known shim imports index.js/version.mjs are
 checked as private regular files too. This keeps actual production execution on
 the same verified Node path; it changes no authentication or provider access.
+
+The original22:10 worker on105 independently claimed four diagnostic/policy/test
+paths before editing, demonstrated seven expected credential-free regression
+failures, repaired the closed categoryState distinction, and passed216 focused
+checks. It registered297349983c977b9c48a7a422b084030ea5e3b114 and pushed its
+own branch; complete exact CI37852541797 passed unit/lint/typecheck/build.
+It then obeyed another overly broad repository instruction: AGENTS' unconditional
+local ui:smoke gate. The full local196-case suite blanked database credentials
+and started an unprovisioned local server. Its28 failures were seven existing
+published course-knowledge cases across four viewports; localhost database
+connections were refused and pages returned500. The changed four backend
+diagnostic files do not alter that public course-profile path. The worker
+correctly retained the failed evidence and withheld publication, ending with
+its registered release/ownership preserved rather than inventing monitoring.
+
+The current verification contract now selects meaningful local checks by
+affected layer and uses complete trusted final-SHA CI. Relevant browser,
+customer route/auth and UI-facing contract changes still require prepared
+browser coverage; unrelated unprovisioned local database UI is not a blanket
+release gate for a closed backend diagnostic. The observed failure stays in
+history and is not called a pass. No protected operation is replayed, no lease
+is renewed by this instruction, and only normal independent admission may
+resume the original owner. The local-feedback correction was exercised by the
+actual scheduled red-to-green repair; code publication/deployed proof and honest
+durable closeout still need their own acceptance.

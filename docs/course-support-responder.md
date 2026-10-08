@@ -612,7 +612,7 @@ The earlier lifecycle schema change was additive: it added the nullable versione
 
 The earlier lifecycle rollout used this order:
 
-1. Validate focused tests, the full suite, lint, build, UI smoke, and `git diff --check`.
+1. Apply the current AGENTS.md layer-specific verification contract: focused local checks and `git diff --check`, complete trusted final-SHA CI for unit/lint/typecheck/build, and affected prepared browser coverage when UI behavior changes. This historical rollout checklist does not add an unfiltered local UI gate to backend-only repairs.
 2. Apply the additive migration in production.
 3. Push the verified commit to `origin/main`, wait for the exact Git-created Vercel deployment, and verify the queue consumer/configuration, production routes, schedules, and logs without running duplicate provider probes.
 4. From that exact deployed runtime checkout, run `automation:course-monitoring -- backfill-playbook`, record aggregate counts, then repeat with `--apply --actor-id <non-email-actor>`, and finish with another dry run that reports zero candidates. The command starts a fresh incident cycle with an empty, unexhausted ledger, preserves authoritative manual and identity finals, requeues open/active incidents, and revalidates active-demand technical finals that lack current two-path proof without inferring completed legacy stages. Never requeue the backfill while the prior application runtime is still live.
