@@ -842,11 +842,42 @@ describe("bounded owned simulator public research transport", () => {
       expect(result).toMatchObject({ method: "BROWSER", contentProvenance: "RENDERED_DOM", renderComplete: false,
         renderWarning: "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED", admittedRequests: 2, blockedRequests: 1,
         text: "Observed rendered page", observedAt: instant.toISOString() });
+      expect(result.bodyLimitDiagnostics).toEqual([{ resourceKind: kind === "script" ? "SECONDARY_SCRIPT" : "SECONDARY_STYLESHEET",
+        phase: streamed ? "COLLECTOR_BODY" : "COLLECTOR_HEADERS", observedSizeBand: "OVER_LIMIT_UP_TO_2X", count: 1 }]);
+      expect(result.bodyLimitDiagnosticsTruncated).toBeUndefined();
       expect(result.responseContracts).toBeUndefined(); expect(view.page.content).toHaveBeenCalledOnce();
       expect(view.routes[1].abort).toHaveBeenCalledOnce(); expect(view.routes[1].fulfill).not.toHaveBeenCalled();
       expect(view.context.close).toHaveBeenCalledOnce(); expect(view.browser.close).toHaveBeenCalledOnce();
       vi.clearAllMocks();
     }
+  });
+  it("deduplicates owned capped leaves into closed kind, phase, size band and count only", async () => {
+    const requests = [{ url: `${source}/` }, { url: `${source}/first.js`, kind: "script" },
+      { url: `${source}/second.js`, kind: "script" }, { url: `${source}/large.css`, kind: "stylesheet" }];
+    const view = renderedBrowser(requests, "<h1>Observed page</h1>");
+    const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? response("<h1>Safe main</h1>") :
+      new Response("secret-body", { headers: { "content-length": String(String(url).endsWith("large.css") ? 6_000_001 : 3_000_001) } }));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    expect(result.bodyLimitDiagnostics).toEqual([
+      { resourceKind: "SECONDARY_SCRIPT", phase: "COLLECTOR_HEADERS", observedSizeBand: "OVER_2X_UP_TO_4X", count: 2 },
+      { resourceKind: "SECONDARY_STYLESHEET", phase: "COLLECTOR_HEADERS", observedSizeBand: "OVER_4X", count: 1 },
+    ]);
+    expect(JSON.stringify(result)).not.toMatch(/first\.js|second\.js|large\.css|secret-body/u);
+    expect(view.routes.slice(1).every(route => route.fulfill.mock.calls.length === 0)).toBe(true);
+  });
+  it("keeps a capped script diagnostic when a rejected stylesheet owns the displayed warning", async () => {
+    const requests = [{ url: `${source}/` }, { url: `${source}/public.css`, kind: "stylesheet" },
+      { url: `${source}/large.js`, kind: "script" }];
+    const view = renderedBrowser(requests, "<h1>Partial rendered page</h1>");
+    const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? response("<h1>Safe main</h1>") :
+      String(url).endsWith("public.css") ? new Response(null, { status: 302, headers: { location: `${source}/login` } }) :
+        new Response("secret-script", { headers: { "content-length": "1500001" } }));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    expect(result).toMatchObject({ renderWarning: "SECONDARY_STYLESHEET_URL_REJECTED", renderComplete: false,
+      bodyLimitDiagnostics: [{ resourceKind: "SECONDARY_SCRIPT", phase: "COLLECTOR_HEADERS",
+        observedSizeBand: "OVER_LIMIT_UP_TO_2X", count: 1 }] });
+    expect(JSON.stringify(result)).not.toMatch(/large\.js|secret-script/u);
+    expect(view.routes[2].fulfill).not.toHaveBeenCalled();
   });
   it("keeps main, XHR, subframe, lease and unrelated asset failures hard", async () => {
     for (const request of [{ url: `${source}/`, kind: "document" },

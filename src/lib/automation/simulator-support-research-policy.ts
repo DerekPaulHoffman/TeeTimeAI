@@ -25,6 +25,15 @@ const configurationDiagnostic = z.object({
   }).strict().optional(),
 }).strict();
 const renderWarning = z.enum(["SECONDARY_REQUEST_BUDGET_EXHAUSTED", "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED", "SECONDARY_STYLESHEET_URL_REJECTED", "MAIN_DOCUMENT_HTTP_ERROR"]);
+const bodyLimitDiagnostic = z.object({
+  resourceKind: z.enum(["SECONDARY_SCRIPT", "SECONDARY_STYLESHEET"]),
+  phase: z.enum(["TRANSPORT_HEADERS", "TRANSPORT_BODY", "COLLECTOR_HEADERS", "COLLECTOR_BODY"]),
+  observedSizeBand: z.enum(["OVER_LIMIT_UP_TO_2X", "OVER_2X_UP_TO_4X", "OVER_4X"]),
+  count: z.number().int().min(1).max(32),
+}).strict();
+const bodyLimitDiagnostics = z.array(bodyLimitDiagnostic).min(1).max(8).refine(entries =>
+  entries.reduce((sum, entry) => sum + entry.count, 0) <= 32 &&
+  new Set(entries.map(entry => `${entry.resourceKind}:${entry.phase}:${entry.observedSizeBand}`)).size === entries.length);
 const publicReadEvidence = z.object({
   sourceFingerprint: z.string().regex(/^[a-f0-9]{64}$/i),
   accessControlsObserved: z.literal(true),
@@ -40,6 +49,7 @@ const observation = z.object({
   publicReadEvidence: publicReadEvidence.optional(),
   researchImplementationVersion: z.string().regex(/^[a-z0-9-]{1,80}$/u).optional(),
   renderWarning: renderWarning.optional(), configurationDiagnostic: configurationDiagnostic.optional(),
+  bodyLimitDiagnostics: bodyLimitDiagnostics.optional(), bodyLimitDiagnosticsTruncated: z.literal(true).optional(),
   publicConfiguration: simulatorPublicConfigurationSchema.optional(),
 }).strict().refine(entry => entry.outcome === "HARD_FAILED" ? Boolean(entry.requestId && entry.failure && entry.httpStatus === 0) :
   !entry.failure || Boolean(entry.requestId && entry.httpStatus === 0 && ["NETWORK_FAILED", "CAPACITY_BUSY"].includes(entry.outcome)))
@@ -48,7 +58,11 @@ const observation = z.object({
     entry.publicReadEvidence.method === (entry.rendered ? "BROWSER" : "HTTP")))
   .refine(entry => !entry.publicConfiguration || Boolean(entry.sourceFingerprint && entry.outcome === "READ" &&
     entry.httpStatus >= 200 && entry.httpStatus < 300 && entry.publicReadEvidence?.accessControlsObserved === true &&
-    !entry.publicReadEvidence.accessControls.length && isSimulatorPublicConfigurationSource(entry.publicConfiguration, entry.sourceUrl)));
+    !entry.publicReadEvidence.accessControls.length && isSimulatorPublicConfigurationSource(entry.publicConfiguration, entry.sourceUrl)))
+  .refine(entry => !entry.bodyLimitDiagnosticsTruncated || Boolean(entry.bodyLimitDiagnostics))
+  .refine(entry => !entry.bodyLimitDiagnostics || Boolean(entry.rendered && entry.outcome === "READ" &&
+    entry.httpStatus >= 200 && entry.httpStatus < 300 && entry.renderWarning?.startsWith("SECONDARY_") &&
+    entry.publicReadEvidence?.renderComplete === false));
 const stateSchema = z.object({
   version: z.literal(1), sourceFingerprint: z.string().regex(/^[a-f0-9]{64}$/i),
   readCount: z.number().int().min(0).max(SIMULATOR_RESEARCH_MAX_READS),
@@ -71,11 +85,15 @@ const blockedResearchRoute = z.object({ url: safeUrl, rendered: z.boolean(), htt
   failure: safeFailure.optional(),
   researchImplementationVersion: z.string().regex(/^[a-z0-9-]{1,80}$/u).optional(),
   renderWarning: renderWarning.optional(), configurationDiagnostic: configurationDiagnostic.optional(),
+  bodyLimitDiagnostics: bodyLimitDiagnostics.optional(), bodyLimitDiagnosticsTruncated: z.literal(true).optional(),
   observedAt: z.string().datetime().optional(), requestId: z.string().uuid().optional(), outcome: z.literal("READ").optional(),
   accessControlsObserved: z.literal(true).optional(),
   accessControls: z.array(z.enum(["CAPTCHA_OR_CHALLENGE", "ACCOUNT_REQUIRED", "QUEUE"])).max(3).optional(),
   renderComplete: z.boolean().optional(),
-}).strict();
+}).strict().refine(route => !route.bodyLimitDiagnosticsTruncated || Boolean(route.bodyLimitDiagnostics))
+  .refine(route => !route.bodyLimitDiagnostics || Boolean(route.rendered && route.outcome === "READ" &&
+    route.httpStatus >= 200 && route.httpStatus < 300 && route.renderWarning?.startsWith("SECONDARY_") &&
+    route.renderComplete === false));
 const researchFailureMemory = z.object({ version: z.literal(1), sourceFingerprint: z.string().regex(/^[a-f0-9]{64}$/iu),
   routes: z.array(blockedResearchRoute).max(64),
 }).strict();

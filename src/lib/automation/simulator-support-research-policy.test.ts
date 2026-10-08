@@ -69,6 +69,36 @@ describe("persisted known-reader configuration", () => {
 });
 
 describe("durable simulator research failure memory", () => {
+  it("accepts only closed, bounded diagnostics on an incomplete owned rendered read and inherited route", () => {
+    const bodyLimitDiagnostics = [{ resourceKind: "SECONDARY_SCRIPT" as const, phase: "COLLECTOR_HEADERS" as const,
+      observedSizeBand: "OVER_LIMIT_UP_TO_2X" as const, count: 2 }];
+    const entry = { source: "booking" as const, requestedUrl: bookingUrl, sourceUrl: bookingUrl,
+      sourceFingerprint: fingerprint, observedAt: now.toISOString(), httpStatus: 200, rendered: true, outcome: "READ" as const,
+      requestId: "11111111-1111-4111-8111-111111111111", renderWarning: "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED" as const,
+      publicReadEvidence: { sourceFingerprint: fingerprint, accessControlsObserved: true as const, accessControls: [],
+        method: "BROWSER" as const, renderComplete: false }, bodyLimitDiagnostics };
+    const state = readSimulatorResearchState({ ...empty(), readCount: 1, history: [entry] }, fingerprint);
+    expect(state.history[0].bodyLimitDiagnostics).toEqual(bodyLimitDiagnostics);
+    const route = { url: bookingUrl, rendered: true, httpStatus: 200, outcome: "READ" as const,
+      renderWarning: entry.renderWarning, renderComplete: false, bodyLimitDiagnostics };
+    expect(readSimulatorResearchFailureMemory({ version: 1, sourceFingerprint: fingerprint, routes: [route] })?.routes[0].bodyLimitDiagnostics).toEqual(bodyLimitDiagnostics);
+    for (const warning of ["SECONDARY_STYLESHEET_URL_REJECTED", "SECONDARY_REQUEST_BUDGET_EXHAUSTED"] as const) {
+      expect(readSimulatorResearchState({ ...empty(), readCount: 1, history: [{ ...entry, renderWarning: warning }] }, fingerprint).history[0].bodyLimitDiagnostics).toEqual(bodyLimitDiagnostics);
+      expect(readSimulatorResearchFailureMemory({ version: 1, sourceFingerprint: fingerprint, routes: [{ ...route, renderWarning: warning }] })?.routes[0].bodyLimitDiagnostics).toEqual(bodyLimitDiagnostics);
+    }
+    expect(readSimulatorResearchState({ ...empty(), readCount: 1, history: [{ ...entry, bodyLimitDiagnostics: undefined }] }, fingerprint).history[0].bodyLimitDiagnostics).toBeUndefined();
+    for (const invalid of [
+      [{ ...bodyLimitDiagnostics[0], url: "https://secret.example.test" }],
+      [{ ...bodyLimitDiagnostics[0], resourceKind: "OTHER" }],
+      [{ ...bodyLimitDiagnostics[0], count: 33 }],
+      [bodyLimitDiagnostics[0], bodyLimitDiagnostics[0]],
+    ]) {
+      expect(() => readSimulatorResearchState({ ...empty(), readCount: 1, history: [{ ...entry, bodyLimitDiagnostics: invalid }] }, fingerprint)).toThrow();
+      expect(() => readSimulatorResearchFailureMemory({ version: 1, sourceFingerprint: fingerprint, routes: [{ ...route, bodyLimitDiagnostics: invalid }] })).toThrow();
+    }
+    expect(() => readSimulatorResearchState({ ...empty(), readCount: 1, history: [{ ...entry, renderWarning: undefined }] }, fingerprint)).toThrow();
+    expect(() => readSimulatorResearchFailureMemory({ version: 1, sourceFingerprint: fingerprint, routes: [{ ...route, renderComplete: true }] })).toThrow();
+  });
   it("reconsiders the previous generic and known-reader leaf versions while retaining hard, HTTP and access denials", () => {
     const priorVersions = [{ url: bookingRootUrl, researchImplementationVersion: "public-calendar-diagnostics-v2" },
       { url: "https://app.acuityscheduling.com/schedule/2991fba2", researchImplementationVersion: "public-calendar-known-readers-v1" }];

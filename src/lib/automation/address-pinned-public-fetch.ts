@@ -43,19 +43,34 @@ type AddressPinnedPublicFetchPolicy = {
 };
 
 const nonPublicNetworkBlockLists = buildNonPublicNetworkBlockLists();
-const ownedBodyLimitErrors = new WeakSet<object>();
+export type OwnedBodySizeBand = "OVER_LIMIT_UP_TO_2X" | "OVER_2X_UP_TO_4X" | "OVER_4X";
+export type OwnedOfficialSiteBodyLimitDiagnostic = {
+  phase: "TRANSPORT_HEADERS" | "TRANSPORT_BODY";
+  observedSizeBand: OwnedBodySizeBand;
+};
+const ownedBodyLimitErrors = new WeakMap<object, OwnedOfficialSiteBodyLimitDiagnostic>();
 
-function officialSiteBodyLimitError() {
+export function bodySizeBand(observedBytes: number, limit: number): OwnedBodySizeBand {
+  return observedBytes <= limit * 2 ? "OVER_LIMIT_UP_TO_2X" :
+    observedBytes <= limit * 4 ? "OVER_2X_UP_TO_4X" : "OVER_4X";
+}
+
+function officialSiteBodyLimitError(phase: OwnedOfficialSiteBodyLimitDiagnostic["phase"], observedBytes: number, limit: number) {
   const error = Object.assign(new Error("Official site page is too large to inspect safely"), {
     code: "OFFICIAL_SITE_BODY_LIMIT",
   });
-  ownedBodyLimitErrors.add(error);
+  ownedBodyLimitErrors.set(error, { phase, observedSizeBand: bodySizeBand(observedBytes, limit) });
   return error;
 }
 
 /** The caller must not infer an owned transport limit from an arbitrary error.code. */
 export function isOwnedOfficialSiteBodyLimitError(error: unknown): boolean {
   return error !== null && typeof error === "object" && ownedBodyLimitErrors.has(error);
+}
+
+export function getOwnedOfficialSiteBodyLimitDiagnostic(error: unknown): OwnedOfficialSiteBodyLimitDiagnostic | null {
+  const diagnostic = error !== null && typeof error === "object" ? ownedBodyLimitErrors.get(error) : undefined;
+  return diagnostic ? { ...diagnostic } : null;
 }
 
 export function createAddressPinnedPublicFetchTransport(
@@ -269,7 +284,7 @@ function requestPinnedPublicUrl(
         const contentLength = Number(incoming.headers["content-length"] ?? 0);
         if (contentLength > maxResponseBytes) {
           incoming.destroy();
-          reject(officialSiteBodyLimitError());
+          reject(officialSiteBodyLimitError("TRANSPORT_HEADERS", contentLength, maxResponseBytes));
           return;
         }
         const chunks: Buffer[] = [];
@@ -278,7 +293,7 @@ function requestPinnedPublicUrl(
           const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
           totalBytes += buffer.length;
           if (totalBytes > maxResponseBytes) {
-            incoming.destroy(officialSiteBodyLimitError());
+            incoming.destroy(officialSiteBodyLimitError("TRANSPORT_BODY", totalBytes, maxResponseBytes));
             return;
           }
           chunks.push(buffer);

@@ -48,6 +48,8 @@ async function readPriorFailedResearchRoutes(tx: Pick<Prisma.TransactionClient, 
         ...(entry.failure ? { failure: entry.failure } : {}),
         ...(entry.researchImplementationVersion ? { researchImplementationVersion: entry.researchImplementationVersion } : {}),
         ...(entry.renderWarning ? { renderWarning: entry.renderWarning } : {}), ...(entry.configurationDiagnostic ? { configurationDiagnostic: entry.configurationDiagnostic } : {}),
+        ...(entry.bodyLimitDiagnostics ? { bodyLimitDiagnostics: entry.bodyLimitDiagnostics } : {}),
+        ...(entry.bodyLimitDiagnosticsTruncated ? { bodyLimitDiagnosticsTruncated: true as const } : {}),
         ...(entry.rendered && entry.outcome === "READ" && entry.httpStatus >= 200 && entry.httpStatus < 300 ? {
           observedAt: entry.observedAt, ...(entry.requestId ? { requestId: entry.requestId } : {}), outcome: "READ" as const,
           ...(entry.publicReadEvidence ? { accessControlsObserved: entry.publicReadEvidence.accessControlsObserved,
@@ -388,6 +390,8 @@ export async function readSimulatorSupportSource(input: Owner & { source?: Simul
         requestId: before.value.requestId, researchImplementationVersion: getSimulatorResearchImplementationVersion(before.value.url),
         ...(read.renderWarning ? { renderWarning: read.renderWarning } : {}),
         ...(read.configurationDiagnostic ? { configurationDiagnostic: read.configurationDiagnostic } : {}),
+        ...(read.bodyLimitDiagnostics ? { bodyLimitDiagnostics: read.bodyLimitDiagnostics } : {}),
+        ...(read.bodyLimitDiagnosticsTruncated ? { bodyLimitDiagnosticsTruncated: true as const } : {}),
         ...(read.publicConfiguration ? { publicConfiguration: read.publicConfiguration } : {}),
         ...(outcome === "READ" && read.accessControlsObserved === true ? { publicReadEvidence: {
           sourceFingerprint: row.source.fingerprint,

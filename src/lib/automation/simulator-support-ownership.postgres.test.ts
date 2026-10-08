@@ -374,6 +374,13 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     const current = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
     expect(current.research.history[0]).toMatchObject({ renderWarning, rendered: true, outcome: "READ", publicReadEvidence: { renderComplete: false, accessControls: [] },
       publicConfiguration: { family: "ACUITY", ownerKey: "2991fba2" } });
+    if (renderWarning === "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED") {
+      const diagnostic = [{ resourceKind: "SECONDARY_STYLESHEET", phase: "COLLECTOR_HEADERS", observedSizeBand: "OVER_LIMIT_UP_TO_2X", count: 1 }];
+      expect(read.value.publicSource.bodyLimitDiagnostics).toEqual(diagnostic);
+      expect(current.research.history[0].bodyLimitDiagnostics).toEqual(diagnostic);
+    } else {
+      expect(current.research.history[0].bodyLimitDiagnostics).toBeUndefined();
+    }
     expect(current.researchGuide.publicConfigurations).toMatchObject([{ source: "booking", rendered: true, configuration: { family: "ACUITY", ownerKey: "2991fba2" } }]);
     expect(current.researchGuide.readsRemaining).toBe(5);
     const { readSettledSimulatorPublicCheckpoint } = await import("./simulator-support-research-policy");
@@ -1550,6 +1557,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
       const incomplete = { outcome: "READ", httpStatus: 200, requestId: randomUUID(),
         publicReadEvidence: { sourceFingerprint: f.fingerprint, accessControlsObserved: true, accessControls: [], method: "BROWSER", renderComplete: false },
         researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION, renderWarning: "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED",
+        bodyLimitDiagnostics: [{ resourceKind: "SECONDARY_SCRIPT", phase: "TRANSPORT_HEADERS", observedSizeBand: "OVER_2X_UP_TO_4X", count: 1 }],
         configurationDiagnostic: { phase: "RANGES", reason: "CONFIG_SHAPE", field: { path: "ranges", expectedType: "OBJECT", actualType: "MISSING" } } };
       const historical = { ...initial, assignmentRef: `course-assignment-${randomUUID()}`, childThreadId: `legacy-${randomUUID()}`,
         simulatorResearchPriorFailures: undefined, simulatorResearch: { version: 1, sourceFingerprint: f.fingerprint, readCount: 1, inFlight: null, links: [], bookingLinks: [], linkBaseUrl: null,
@@ -1572,7 +1580,8 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
       expect(claim.value.researchGuide.priorBlockedRoutes).toContainEqual(expect.objectContaining({ url: f.course.website, rendered: true,
         failure: { stage: "PUBLIC_READ", category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE", researchPhase: "BROWSER_DOCUMENT" } }));
       expect(claim.value.researchGuide.priorBlockedRoutes).toContainEqual(expect.objectContaining({ url: bays, rendered: true,
-        configurationDiagnostic: { phase: "RANGES", reason: "CONFIG_SHAPE", field: { path: "ranges", expectedType: "OBJECT", actualType: "MISSING" } } }));
+        configurationDiagnostic: { phase: "RANGES", reason: "CONFIG_SHAPE", field: { path: "ranges", expectedType: "OBJECT", actualType: "MISSING" } },
+        bodyLimitDiagnostics: [{ resourceKind: "SECONDARY_SCRIPT", phase: "TRANSPORT_HEADERS", observedSizeBand: "OVER_2X_UP_TO_4X", count: 1 }] }));
       expect(claim.value.researchGuide.suggestedReads).toEqual([]);
       const owner = { assignmentRef, ownerThreadId: child, token: claim.value.token, revision: claim.value.revision };
       const fetch = vi.fn();

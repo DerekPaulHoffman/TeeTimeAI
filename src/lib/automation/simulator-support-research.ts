@@ -1,6 +1,6 @@
 import { parse, type DefaultTreeAdapterMap } from "parse5";
 import type { BrowserContext, BrowserContextOptions, Page, Route } from "@playwright/test";
-import { createAddressPinnedPublicFetchTransport, isOwnedOfficialSiteBodyLimitError } from "./address-pinned-public-fetch";
+import { bodySizeBand, createAddressPinnedPublicFetchTransport, getOwnedOfficialSiteBodyLimitDiagnostic, type OwnedBodySizeBand } from "./address-pinned-public-fetch";
 import { runWithProviderRequestLease } from "./provider-request-lease";
 import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { sanitizeResponderText } from "./course-support-responder-policy";
@@ -44,6 +44,12 @@ export type SimulatorConfigurationDiagnostic = {
     actualType: "MISSING" | "NULL" | "OBJECT" | "ARRAY" | "STRING" | "NUMBER" | "BOOLEAN" | "OTHER";
   };
 };
+export type SimulatorBodyLimitDiagnostic = {
+  resourceKind: "SECONDARY_SCRIPT" | "SECONDARY_STYLESHEET";
+  phase: "TRANSPORT_HEADERS" | "TRANSPORT_BODY" | "COLLECTOR_HEADERS" | "COLLECTOR_BODY";
+  observedSizeBand: OwnedBodySizeBand;
+  count: number;
+};
 export type SimulatorResearchResult = {
   requestedUrl: string; url: string; observedAt: string; httpStatus: number; text: string; links: string[];
   method: "HTTP" | "BROWSER"; initialHttpStatus?: number;
@@ -56,6 +62,8 @@ export type SimulatorResearchResult = {
   admittedRequests?: number;
   renderComplete?: boolean;
   renderWarning?: "SECONDARY_REQUEST_BUDGET_EXHAUSTED" | "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED" | "SECONDARY_STYLESHEET_URL_REJECTED" | "MAIN_DOCUMENT_HTTP_ERROR";
+  bodyLimitDiagnostics?: SimulatorBodyLimitDiagnostic[];
+  bodyLimitDiagnosticsTruncated?: true;
   contentProvenance?: "MAIN_DOCUMENT_HTTP" | "RENDERED_DOM";
   accessControls?: Array<"CAPTCHA_OR_CHALLENGE" | "ACCOUNT_REQUIRED" | "QUEUE">;
   accessControlsObserved?: true;
@@ -76,14 +84,15 @@ function isOwnedUnsafeUrlError(error: unknown) {
   return error !== null && typeof error === "object" && ownedUnsafeUrlErrors.has(error);
 }
 
-const ownedPerResponseBodyLimits = new WeakSet<object>();
-function ownBodyLimitError() {
+type OwnedCollectorBodyLimitDiagnostic = Pick<SimulatorBodyLimitDiagnostic, "phase" | "observedSizeBand">;
+const ownedPerResponseBodyLimits = new WeakMap<object, OwnedCollectorBodyLimitDiagnostic>();
+function ownBodyLimitError(phase: "COLLECTOR_HEADERS" | "COLLECTOR_BODY", observedBytes: number) {
   const error = new Error("SIMULATOR_RESEARCH_BODY_LIMIT");
-  ownedPerResponseBodyLimits.add(error);
+  ownedPerResponseBodyLimits.set(error, { phase, observedSizeBand: bodySizeBand(observedBytes, MAX_BODY_BYTES) });
   return error;
 }
-function isOwnedPerResponseBodyLimit(error: unknown) {
-  return error !== null && typeof error === "object" && ownedPerResponseBodyLimits.has(error);
+function ownedPerResponseBodyLimit(error: unknown) {
+  return error !== null && typeof error === "object" ? ownedPerResponseBodyLimits.get(error) : undefined;
 }
 
 export function summarizeSimulatorSupportPublicHtml(html: string, sourceUrl: string) {
@@ -240,11 +249,12 @@ export function extractSimulatorPublicCalendar(html: string, sourceUrl: string):
 }
 
 async function boundedBody(response: Response) {
-  if (Number(response.headers.get("content-length")) > MAX_BODY_BYTES) throw ownBodyLimitError();
+  const declaredBytes = Number(response.headers.get("content-length"));
+  if (declaredBytes > MAX_BODY_BYTES) throw ownBodyLimitError("COLLECTOR_HEADERS", declaredBytes);
   if (!response.body) return Buffer.alloc(0);
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = []; let bytes = 0;
-  try { for (;;) { const { value, done } = await reader.read(); if (done) break; bytes += value.byteLength; if (bytes > MAX_BODY_BYTES) { await reader.cancel(); throw ownBodyLimitError(); } chunks.push(value); } }
+  try { for (;;) { const { value, done } = await reader.read(); if (done) break; bytes += value.byteLength; if (bytes > MAX_BODY_BYTES) { await reader.cancel(); throw ownBodyLimitError("COLLECTOR_BODY", bytes); } chunks.push(value); } }
   finally { reader.releaseLock(); }
   return Buffer.concat(chunks);
 }
@@ -385,7 +395,8 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
       let response: Response;
       try { response = await fetchImpl(safe.href, { method, redirect: "manual", credentials: "omit", cache: "no-store", headers: headers ?? { Accept: "text/html,application/xhtml+xml,application/json" }, signal: deadline }); }
       catch (error) {
-        if (!dependencies.fetch && isOwnedOfficialSiteBodyLimitError(error) && error && typeof error === "object") ownedPerResponseBodyLimits.add(error);
+        const diagnostic = !dependencies.fetch ? getOwnedOfficialSiteBodyLimitDiagnostic(error) : null;
+        if (diagnostic && error && typeof error === "object") ownedPerResponseBodyLimits.set(error, diagnostic);
         throw knownPublicNetworkError(tagSimulatorResearchFailure(error, "HTTP_READ"));
       }
       const effective = publicUrl(response.url || safe.href).href;
@@ -430,6 +441,18 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
   let secondaryBudgetExhausted = false;
   let secondaryAssetBodyLimitExceeded = false;
   let secondaryStylesheetUrlRejected = false;
+  const bodyLimitDiagnostics: SimulatorBodyLimitDiagnostic[] = [];
+  let bodyLimitDiagnosticsTruncated = false;
+  const recordBodyLimit = (resourceKind: SimulatorBodyLimitDiagnostic["resourceKind"], diagnostic: OwnedCollectorBodyLimitDiagnostic) => {
+    const existing = bodyLimitDiagnostics.find(entry => entry.resourceKind === resourceKind && entry.phase === diagnostic.phase &&
+      entry.observedSizeBand === diagnostic.observedSizeBand);
+    if (existing) { existing.count = Math.min(MAX_REQUESTS, existing.count + 1); return; }
+    if (bodyLimitDiagnostics.length === 8) { bodyLimitDiagnosticsTruncated = true; return; }
+    bodyLimitDiagnostics.push({ resourceKind, ...diagnostic, count: 1 });
+  };
+  const bodyLimitFields = (warning: NonNullable<SimulatorResearchResult["renderWarning"]>) =>
+    warning.startsWith("SECONDARY_") && bodyLimitDiagnostics.length
+      ? { bodyLimitDiagnostics, ...(bodyLimitDiagnosticsTruncated ? { bodyLimitDiagnosticsTruncated: true as const } : {}) } : {};
   const activeRoutes = new Set<Promise<void>>();
   const hostReads = new Map<string, Promise<unknown>>();
   let page: ResearchPage | undefined;
@@ -463,7 +486,8 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
           secondaryStylesheetUrlRejected = true;
           return rejectedSecondaryStylesheet;
         }
-        if (isSecondaryAsset && safeMainDocument && isOwnedPerResponseBodyLimit(tagged) && !hasRouteFailure) {
+        const bodyLimit = ownedPerResponseBodyLimit(tagged);
+        if (isSecondaryAsset && safeMainDocument && bodyLimit && !hasRouteFailure) {
           // Charge the existing full per-response cap for bytes rejected by transport.
           responseBytes += MAX_BODY_BYTES;
           if (responseBytes > MAX_RENDER_BYTES) {
@@ -472,6 +496,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
             throw routeFailure;
           }
           secondaryAssetBodyLimitExceeded = true;
+          if (resourceKind === "SECONDARY_SCRIPT" || resourceKind === "SECONDARY_STYLESHEET") recordBodyLimit(resourceKind, bodyLimit);
           return cappedSecondaryAsset;
         }
         if (!hasRouteFailure) { routeFailure = tagged; hasRouteFailure = true; }
@@ -492,7 +517,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
       // A rejected stylesheet cannot invalidate them or prove rendering completed.
       return { ...facts, method: "BROWSER",
         renderComplete: false, renderWarning: warning, contentProvenance: "MAIN_DOCUMENT_HTTP",
-        blockedRequests, admittedRequests: requestCount };
+        blockedRequests, admittedRequests: requestCount, ...bodyLimitFields(warning) };
     } catch (error) { throw tagSimulatorResearchFailure(error, "BROWSER_DOCUMENT"); }
   };
   const terminalMainObservation = (): SimulatorResearchResult => {
@@ -625,7 +650,8 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
       const renderWarning = secondaryStylesheetUrlRejected ? "SECONDARY_STYLESHEET_URL_REJECTED" as const
         : secondaryAssetBodyLimitExceeded ? "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED" as const : undefined;
       return { ...rendered, method: "BROWSER", blockedRequests, admittedRequests: requestCount, renderComplete: !renderWarning,
-        contentProvenance: "RENDERED_DOM", ...(renderWarning ? { renderWarning } : {}), ...(responseContracts.length ? { responseContracts } : {}) };
+        contentProvenance: "RENDERED_DOM", ...(renderWarning ? { renderWarning, ...bodyLimitFields(renderWarning) } : {}),
+        ...(responseContracts.length ? { responseContracts } : {}) };
     } catch (error) { throw tagSimulatorResearchFailure(error, "BROWSER_DOCUMENT"); }
   } catch (error) { throw hasRouteFailure ? routeFailure : knownPublicNetworkError(error); }
   finally {
