@@ -41,7 +41,7 @@ export function readDispatchArguments(args: readonly string[]) {
   const [command, ...options] = args;
   const commands = new Set(["plan", "start", "bind", "cancel", "assignment", "continue", "continued"]);
   if (!command || !commands.has(command)) throw new Error("Use plan, start, bind, cancel, assignment, continue, or continued.");
-  const allowedValues = new Set(["--assignment-ref", "--child-thread", "--max-starts", "--receipt-file"]);
+  const allowedValues = new Set(["--assignment-ref", "--child-thread", "--max-starts", "--receipt-file", "--launcher-receipt"]);
   const allowedFlags = new Set(["--scheduled-cycle", "--confirmed-not-started"]);
   for (let index = 0; index < options.length; index += 1) {
     const option = options[index];
@@ -57,6 +57,7 @@ export function readDispatchArguments(args: readonly string[]) {
   const childThreadId = readDispatchOption(options, "--child-thread");
   const maxStartsValue = readDispatchOption(options, "--max-starts");
   const receiptFile = readDispatchOption(options, "--receipt-file");
+  const launcherReceiptPath = readDispatchOption(options, "--launcher-receipt");
   const maxStarts = maxStartsValue === undefined ? undefined : Number(maxStartsValue);
   if (maxStarts !== undefined && (!Number.isSafeInteger(maxStarts) || maxStarts < 1 || maxStarts > 15)) {
     throw new Error("--max-starts must be an integer from 1 to 15.");
@@ -68,6 +69,7 @@ export function readDispatchArguments(args: readonly string[]) {
     throw new Error("This command requires one assignment reference and no plan flags.");
   }
   if ((command === "bind") !== Boolean(childThreadId)) throw new Error("Only bind requires --child-thread.");
+  if (launcherReceiptPath && command !== "bind") throw new Error("The original launcher receipt belongs to binding.");
   if (["continue", "continued"].includes(command) !== Boolean(receiptFile)) {
     throw new Error("Only same-worker continuation commands require --receipt-file.");
   }
@@ -77,7 +79,7 @@ export function readDispatchArguments(args: readonly string[]) {
   if (command === "cancel" && !options.includes("--confirmed-not-started")) {
     throw new Error("Cancellation requires proof that no native worker was started.");
   }
-  return { command, assignmentRef, childThreadId, maxStarts, receiptFile, scheduledCycle: options.includes("--scheduled-cycle") };
+  return { command, assignmentRef, childThreadId, launcherReceiptPath, maxStarts, receiptFile, scheduledCycle: options.includes("--scheduled-cycle") };
 }
 
 export function readDispatchGitState(requireCurrentMain = true) {
@@ -197,7 +199,7 @@ async function main() {
     } else if (input.command === "start") {
       result = await beginCourseSupportCourseDispatch({ ownerThreadId, assignmentRef: input.assignmentRef! });
     } else if (input.command === "bind") {
-      result = await bindCourseSupportCourseDispatch({ ownerThreadId, assignmentRef: input.assignmentRef!, childThreadId: input.childThreadId! });
+      result = await bindCourseSupportCourseDispatch({ ownerThreadId, assignmentRef: input.assignmentRef!, childThreadId: input.childThreadId!, launcherReceiptPath: input.launcherReceiptPath });
     } else if (input.command === "cancel") {
       result = await cancelCourseSupportCourseDispatch({ ownerThreadId, assignmentRef: input.assignmentRef!, confirmedNotCreated: true });
     } else if (input.command === "continue") {

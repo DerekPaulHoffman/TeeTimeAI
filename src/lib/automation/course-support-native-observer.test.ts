@@ -100,6 +100,64 @@ describe("original worker read-only native observer", () => {
       expect(value.client.close).toHaveBeenCalledOnce();
     }
   });
+  it.each(["failed", "interrupted"])("records a real %s terminal first turn for a stopped original launcher", async (status) => {
+    const value = fixture({ "thread/turns/list": { data: [{ id: "11111111-2222-7333-8444-555555555555", status,
+      error: status === "failed" ? { message: "private native failure" } : null, itemsView: "notLoaded", items: [] }] } });
+    writeFileSync(value.options.receiptPath, JSON.stringify({ ...value.original, status: "STOPPED", turnStatus: undefined,
+      turnId: "11111111-2222-7333-8444-555555555555" }));
+    const result = await observeCourseSupportNativeCompletion({ ...value.options, terminalFailure: true });
+    expect(result).toMatchObject({ phase: "READ_ONLY_OBSERVATION_COMPLETE", terminalFailure: true });
+    expect(value.request.mock.calls.map(([method]) => method)).toEqual(["initialize", "permissionProfile/list", "thread/read", "thread/turns/list"]);
+    const mismatch = fixture({ "thread/turns/list": { data: [{ id: "different-turn", status, error: null, itemsView: "notLoaded", items: [] }] } });
+    writeFileSync(mismatch.options.receiptPath, JSON.stringify({ ...mismatch.original, status: "STOPPED", turnStatus: undefined,
+      turnId: "11111111-2222-7333-8444-555555555555" }));
+    await expect(observeCourseSupportNativeCompletion({ ...mismatch.options, terminalFailure: true })).rejects.toThrow("LATEST_DURABLE_TURN_NOT_TERMINAL");
+  });
+  it("observes a completed original turn as terminal owned-stage evidence without equating it to job completion", async () => {
+    const turnId = "11111111-2222-7333-8444-555555555555";
+    const value = fixture({ "thread/turns/list": { data: [{ id: turnId, status: "completed", error: null,
+      itemsView: "notLoaded", items: [] }] } });
+    writeFileSync(value.options.receiptPath, JSON.stringify({ ...value.original, turnId }));
+    await expect(observeCourseSupportNativeCompletion({ ...value.options, terminalFailure: true }))
+      .resolves.toMatchObject({ phase: "READ_ONLY_OBSERVATION_COMPLETE", terminalFailure: true });
+    const invalid = fixture({ "thread/turns/list": { data: [{ id: turnId, status: "completed", error: null,
+      itemsView: "notLoaded", items: [] }] } });
+    writeFileSync(invalid.options.receiptPath, JSON.stringify({ ...invalid.original, status: "STOPPED", turnId }));
+    await expect(observeCourseSupportNativeCompletion({ ...invalid.options, terminalFailure: true }))
+      .resolves.toMatchObject({ phase: "READ_ONLY_OBSERVATION_COMPLETE" });
+    const errorTurn = fixture({ "thread/turns/list": { data: [{ id: turnId, status: "completed",
+      error: { message: "native error" }, itemsView: "notLoaded", items: [] }] } });
+    writeFileSync(errorTurn.options.receiptPath, JSON.stringify({ ...errorTurn.original, status: "STOPPED", turnId }));
+    await expect(observeCourseSupportNativeCompletion({ ...errorTurn.options, terminalFailure: true }))
+      .rejects.toThrow("LATEST_DURABLE_TURN_NOT_TERMINAL");
+  });
+  it("brackets a later accepted original-thread turn with its immutable prior receipt and absent processes", async () => {
+    const laterTurn = "bbbbbbbb-cccc-7ddd-8eee-ffffffffffff", originalTurn = "aaaaaaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee";
+    const value = fixture({ "thread/turns/list": { data: [{ id: laterTurn, status: "interrupted", error: null,
+      itemsView: "notLoaded", items: [] }] } });
+    writeFileSync(value.options.receiptPath, JSON.stringify({ ...value.original, status: "STOPPED", turnId: originalTurn }));
+    const priorContinuationReceiptPath = join(value.options.expectedCheckout, "prior.private.json");
+    const expectedContinuationKey = "f".repeat(64);
+    const prior = { schemaVersion: 1, status: "STOPPED", threadId, originalTurnId: originalTurn,
+      turnId: laterTurn, continuationKey: expectedContinuationKey, runnerPid: 200, serverPid: 201,
+      nativeIdentityVerified: true, approvalRequests: 0 };
+    writeFileSync(priorContinuationReceiptPath, JSON.stringify(prior));
+    const input = { ...value.options, terminalFailure: true, priorContinuationReceiptPath,
+      expectedTerminalTurnId: laterTurn, expectedContinuationKey };
+    const result = await observeCourseSupportNativeCompletion(input);
+    expect(result).toMatchObject({ priorContinuationTurnId: laterTurn, priorContinuationKey: expectedContinuationKey,
+      processObservationBefore: { processes: [{ pid: 100, state: "absent" }, { pid: 101, state: "absent" },
+        { pid: 200, state: "absent" }, { pid: 201, state: "absent" }] } });
+    const changed = fixture({ "thread/turns/list": { data: [{ id: laterTurn, status: "interrupted", error: null,
+      itemsView: "notLoaded", items: [] }] } });
+    writeFileSync(changed.options.receiptPath, JSON.stringify({ ...changed.original, status: "STOPPED", turnId: originalTurn }));
+    const changedPath = join(changed.options.expectedCheckout, "prior.private.json");
+    writeFileSync(changedPath, JSON.stringify({ ...prior, runnerPid: 202 }));
+    changed.options.inspectProcess.mockImplementation((pid: number) => pid === 202 ? "present" : "absent");
+    await expect(observeCourseSupportNativeCompletion({ ...changed.options, terminalFailure: true,
+      priorContinuationReceiptPath: changedPath, expectedTerminalTurnId: laterTurn, expectedContinuationKey }))
+      .rejects.toThrow("ORIGINAL_LAUNCHER_OR_SERVER_NOT_ENDED");
+  });
   it("detects original receipt/process drift and never overwrites historical observation files", async () => {
     const drift = fixture(); let receiptReads = 0;
     await expect(observeCourseSupportNativeCompletion({ ...drift.options, readBytes: (path: string) => path === drift.options.receiptPath && ++receiptReads > 1 ?

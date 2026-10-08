@@ -86,6 +86,11 @@ describe("course dispatcher command authority", () => {
   });
 
   it("allows only a bounded private receipt for same-worker continuation commands", () => {
+    expect(readDispatchArguments(["bind", "--assignment-ref", "original-assignment", "--child-thread", "original-child",
+      "--launcher-receipt", "C:/private/launcher.receipt.private.json"]))
+      .toMatchObject({ command: "bind", launcherReceiptPath: "C:/private/launcher.receipt.private.json" });
+    expect(() => readDispatchArguments(["continue", "--assignment-ref", "original-assignment", "--receipt-file", "private.json",
+      "--launcher-receipt", "C:/private/launcher.receipt.private.json"])).toThrow();
     for (const command of ["continue", "continued"]) {
       expect(readDispatchArguments([command, "--assignment-ref", "original-assignment", "--receipt-file", "private.json"]))
         .toMatchObject({ command, assignmentRef: "original-assignment", receiptFile: "private.json" });

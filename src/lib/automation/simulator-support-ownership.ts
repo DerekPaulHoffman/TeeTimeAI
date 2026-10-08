@@ -103,8 +103,11 @@ export async function readSimulatorSupportContinuationContext(tx: Prisma.Transac
   if (research.sourceFingerprint !== source.fingerprint) throw new Error("Simulator research navigation belongs to an older source; adopt the reviewed source before research.");
   const last = research.history.at(-1);
   const pending = research.inFlight;
+  const claim = audit.simulatorClaim;
+  const ownedWork = ["IMPLEMENTING", "VERIFYING"].includes(claim.phase) && (claim.plannedPaths.length > 0 || claim.releaseSha !== null);
   const expiredPending = pending && new Date(pending.expiresAt) <= now;
-  const settledFailure = !pending && Boolean(last?.failure && ["HARD_FAILED", "NETWORK_FAILED", "CAPACITY_BUSY"].includes(last.outcome)) &&
+  const expiredOwnedStage = ownedWork && new Date(claim.leaseExpiresAt) <= now && (!pending || expiredPending);
+  const settledFailure = !ownedWork && !pending && Boolean(last?.failure && ["HARD_FAILED", "NETWORK_FAILED", "CAPACITY_BUSY"].includes(last.outcome)) &&
     last?.requestId !== research.lastRecoveredFailureRequestId;
   const settledPublic = audit.simulatorClaim.phase === "CLAIMED" && !audit.simulatorClaim.plannedPaths.length &&
     !audit.simulatorClaim.releaseSha && new Date(audit.simulatorClaim.leaseExpiresAt) <= now
@@ -114,14 +117,21 @@ export async function readSimulatorSupportContinuationContext(tx: Prisma.Transac
     source: pending.source, requestedUrl: pending.url, sourceUrl: pending.url, observedAt: now.toISOString(),
     httpStatus: 0, rendered: pending.rendered, outcome: "HARD_FAILED", requestId: pending.requestId, failure,
   }] } : research;
-  const checkpoint = settledFailure || expiredPending || settledPublic ? {
-    kind: settledFailure ? "SETTLED_FAILURE" as const : expiredPending ? "EXPIRED_UNFINISHED_READ" as const : "EXPIRED_SETTLED_PUBLIC_READ" as const,
-    observedAt: settledFailure ? last!.observedAt : expiredPending ? pending!.expiresAt : settledPublic!.observedAt,
+  const checkpoint = expiredOwnedStage || settledFailure || expiredPending || settledPublic ? {
+    kind: expiredOwnedStage ? "EXPIRED_OWNED_STAGE" as const : settledFailure ? "SETTLED_FAILURE" as const : expiredPending ? "EXPIRED_UNFINISHED_READ" as const : "EXPIRED_SETTLED_PUBLIC_READ" as const,
+    observedAt: expiredOwnedStage ? claim.claimedAt : settledFailure ? last!.observedAt : expiredPending ? pending!.expiresAt : settledPublic!.observedAt,
     readCount: research.readCount,
-    requestId: settledFailure ? last!.requestId! : expiredPending ? pending!.requestId : settledPublic!.requestId,
-    failure: settledFailure ? last!.failure! : null,
+    requestId: expiredOwnedStage ? pending?.requestId ?? null : settledFailure ? last!.requestId! : expiredPending ? pending!.requestId : settledPublic!.requestId,
+    failure: expiredOwnedStage ? null : settledFailure ? last!.failure! : null,
     claimLeaseExpired: new Date(audit.simulatorClaim.leaseExpiresAt) <= now,
     researchOnlyClaim: audit.simulatorClaim.phase === "CLAIMED" && !audit.simulatorClaim.plannedPaths.length && !audit.simulatorClaim.releaseSha,
+    ...(expiredOwnedStage ? { ownedStage: {
+      phase: claim.phase as "IMPLEMENTING" | "VERIFYING", claimedAt: claim.claimedAt,
+      plannedPaths: claim.plannedPaths, releaseSha: claim.releaseSha, deployment: claim.deployment,
+      recheckQueuedAt: claim.recheckQueuedAt, verificationCycle: claim.verificationCycle,
+      sourceFingerprint: claim.sourceFingerprint, originalSourceFingerprint: claim.originalSourceFingerprint,
+      offeringRevision: claim.offeringRevision, branch: claim.branch,
+    } } : {}),
     ...(settledPublic ? { publicReadEvidence: settledPublic.publicReadEvidence } : {}),
     allowedResearchRouteCount: getSimulatorResearchGuide({ state: routeState,
       officialUrl: source.offering.course.website ?? source.offering.evidenceUrl,
@@ -142,7 +152,7 @@ async function saveClaim(tx: Prisma.TransactionClient, row: { runId: string; aud
 
 async function queueOwnedSourceRechecks(tx: Prisma.TransactionClient, row: Awaited<ReturnType<typeof loadOwned>>, now: Date, stage: string) {
   for (const search of row.source.searches) {
-    const key = `simulator-remediated:${row.runId}:${row.claim.sourceFingerprint.slice(0, 20)}:${stage}`;
+    const key = `simulator-remediated:${row.runId}:${row.claim.sourceFingerprint.slice(0, 20)}:${row.claim.releaseSha ?? "unreleased"}:${stage}`;
     if (search.remediationDispatchKey === key) continue;
     const busy = search.checkStatus === "CHECKING" && search.checkLeaseExpiresAt && search.checkLeaseExpiresAt > now;
     await tx.teeSearch.update({ where: { id: search.id }, data: busy ? { recheckRequestedAt: now, remediationDispatchKey: key, remediationDispatchVersion: search.scheduleVersion } : {
@@ -152,7 +162,8 @@ async function queueOwnedSourceRechecks(tx: Prisma.TransactionClient, row: Await
   }
 }
 
-export async function configureSimulatorSupportOffering(input: Owner & { manifest: unknown; apply: boolean; expectedFingerprint: string; expectedOfferingRevision: number }) {
+export async function configureSimulatorSupportOffering(input: Owner & { manifest: unknown; apply: boolean; repair?: boolean;
+  expectedFingerprint: string; expectedOfferingRevision: number }) {
   const rows = parseSimulatorOfferingManifest(input.manifest);
   if (rows.length !== 1) throw new Error("Owned simulator configuration accepts exactly one offering.");
   const facts = rows[0];
@@ -160,7 +171,12 @@ export async function configureSimulatorSupportOffering(input: Owner & { manifes
       [facts.website, facts.bookingUrl, facts.evidenceUrl].some(url => !getSafeCustomerBookingUrl(url))) throw new Error("Simulator configuration requires reviewed public one-hour rental evidence and safe public URLs.");
   return withTransition(async (tx, now) => {
     const row = await loadOwned(tx, input, now);
-    if (row.claim.releaseSha) throw new Error("Simulator offering configuration is sealed after release registration.");
+    const codeRepair = row.claim.releaseSha && row.claim.phase === "IMPLEMENTING" &&
+      Boolean((row.audit as CourseDispatchAudit & { simulatorRepairPending?: unknown }).simulatorRepairPending);
+    const metadataRepair = row.claim.releaseSha && row.claim.phase === "VERIFYING" && input.repair === true && !codeRepair;
+    if ((row.claim.releaseSha && !codeRepair && !metadataRepair) || (input.repair && !metadataRepair)) {
+      throw new Error("Simulator offering configuration is sealed until an original-owner repair is opened.");
+    }
     const venue = await tx.course.findUniqueOrThrow({ where: { id: row.source.offering.courseId }, select: { googlePlaceId: true, website: true } });
     if (facts.googlePlaceId !== venue.googlePlaceId || row.source.fingerprint !== input.expectedFingerprint || row.source.offering.monitoringRevision !== input.expectedOfferingRevision ||
         new Date(facts.verifiedAt) > now || new Date(facts.verifiedAt) < new Date(Math.max(Date.parse(row.claim.claimedAt), now.getTime() - 30 * 60_000)) ||
@@ -173,7 +189,18 @@ export async function configureSimulatorSupportOffering(input: Owner & { manifes
       maxPartySize: facts.maxPartySize, supportedDurationsMinutes: facts.supportedDurationsMinutes, bookingWindowDaysAhead: facts.bookingWindowDaysAhead ?? null,
       monitoringState: "UNKNOWN", monitoringVerifiedAt: null, automationEligibility: "UNKNOWN", observationToken: null, observationExpiresAt: null, monitoringRevision: { increment: 1 },
     } });
-    return { mode: "applied" as const, ...await saveClaim(tx, row, now), sourceFingerprint: getSimulatorOfferingSourceFingerprint(updated), offeringRevision: updated.monitoringRevision, adoptionRequired: true };
+    const priorAudit = row.audit as CourseDispatchAudit & { simulatorMetadataRepairHistory?: Array<Record<string, unknown>> };
+    const history = priorAudit.simulatorMetadataRepairHistory ?? [];
+    if (metadataRepair && (!Array.isArray(history) || history.length >= 8)) throw new Error("Simulator metadata repair history is exhausted.");
+    const changes = metadataRepair ? { deployment: null, recheckQueuedAt: null, verificationCycle: 0 } : {};
+    const auditChanges = metadataRepair ? { simulatorMetadataRepairHistory: [...history, {
+      releaseSha: row.claim.releaseSha, sourceFingerprint: row.claim.sourceFingerprint,
+      deployment: row.claim.deployment, recheckQueuedAt: row.claim.recheckQueuedAt,
+      verificationCycle: row.claim.verificationCycle, configuredAt: now.toISOString(),
+      replacementSourceFingerprint: getSimulatorOfferingSourceFingerprint(updated),
+    }] } : undefined;
+    return { mode: "applied" as const, ...await saveClaim(tx, row, now, changes, undefined, auditChanges),
+      sourceFingerprint: getSimulatorOfferingSourceFingerprint(updated), offeringRevision: updated.monitoringRevision, adoptionRequired: true };
   });
 }
 
@@ -398,12 +425,22 @@ export function claimSimulatorSupportPath(input: Owner & { path: string }) {
   const path = validateSimulatorSupportPath(input.path);
   return withTransition(async (tx, now) => {
     const row = await loadOwned(tx, input, now);
-    if (row.claim.releaseSha) throw new Error("Simulator support implementation paths are sealed after release registration.");
     const dispatch = await import("./course-support-course-dispatch");
     const batches = await tx.courseSupportBatch.findMany({ where: { status: { in: ["CLAIMED", "IMPLEMENTING", "VERIFYING"] } }, select: { status: true, summary: true } });
     if (batches.some(batch => { const summary = batch.summary as Record<string, unknown> | null; return batch.status === "IMPLEMENTING" || (Array.isArray(summary?.plannedPaths) && summary.plannedPaths.length > 0) || (summary?.remediationDirective as Record<string, unknown> | undefined)?.requiresImplementationPath === true; }) ||
         await dispatch.hasSimulatorSupportImplementationOwnership(tx, input.assignmentRef)) throw new Error("Another course-support worker owns implementation authority.");
-    return saveClaim(tx, row, now, { phase: "IMPLEMENTING", plannedPaths: [...new Set([...row.claim.plannedPaths, path])] });
+    const previousAudit = row.audit as CourseDispatchAudit & { simulatorRepairPending?: Record<string, unknown> | null };
+    if (previousAudit.simulatorRepairPending && previousAudit.simulatorRepairPending.releaseSha !== row.claim.releaseSha) {
+      throw new Error("Original simulator repair release lineage changed.");
+    }
+    const repairPending = row.claim.releaseSha && !previousAudit.simulatorRepairPending ? {
+      releaseSha: row.claim.releaseSha, deployment: row.claim.deployment,
+      recheckQueuedAt: row.claim.recheckQueuedAt, verificationCycle: row.claim.verificationCycle,
+      openedAt: now.toISOString(), plannedPathsBefore: row.claim.plannedPaths,
+    } : previousAudit.simulatorRepairPending;
+    return saveClaim(tx, row, now, { phase: "IMPLEMENTING", plannedPaths: [...new Set([...row.claim.plannedPaths, path])],
+      ...(row.claim.releaseSha ? { deployment: null, recheckQueuedAt: null, verificationCycle: 0 } : {}) }, undefined,
+    repairPending ? { simulatorRepairPending: repairPending } : undefined);
   });
 }
 
@@ -425,23 +462,50 @@ export function adoptSimulatorSupportSource(input: Owner & { expectedFingerprint
 }
 
 export function registerSimulatorSupportRelease(input: Owner & { releaseSha: string; branch: string; committedPaths: string[];
-  trustedUpstreamSha: string; upstreamDescendantVerified: boolean; descendantVerified: boolean }) {
+  trustedUpstreamSha: string; upstreamDescendantVerified: boolean; descendantVerified: boolean;
+  priorReleaseDescendantVerified?: boolean }) {
   return withTransition(async (tx, now) => {
     const row = await loadOwned(tx, input, now);
+    const priorSha = row.claim.releaseSha;
+    if (!/^[a-f0-9]{40}$/i.test(input.releaseSha) || input.branch !== row.claim.branch) {
+      throw new Error("Simulator support release provenance is invalid.");
+    }
+    if (priorSha === input.releaseSha && !(row.audit as CourseDispatchAudit & { simulatorRepairPending?: unknown }).simulatorRepairPending) return { assignmentRef: row.audit.assignmentRef, token: row.claim.token,
+      revision: row.claim.revision, phase: row.claim.phase, leaseExpiresAt: row.claim.leaseExpiresAt };
     const metadataReuseKind = row.claim.plannedPaths.length === 0 && input.releaseSha === row.audit.baseSha ? "ORIGINAL_BASE" :
-      row.claim.plannedPaths.length === 0 && input.releaseSha === input.trustedUpstreamSha ? "TRUSTED_UPSTREAM" : null;
+      row.claim.plannedPaths.length === 0 && input.releaseSha === input.trustedUpstreamSha ? "TRUSTED_UPSTREAM" :
+      priorSha && input.releaseSha === input.trustedUpstreamSha ? "TRUSTED_UPSTREAM_OWNED_RELEASE" : null;
     const claimedRuntimePaths = input.committedPaths.filter(path => /^(src\/|scripts\/|prisma\/)/.test(path) && isRuntimeBearingCourseSupportPath(path));
     if (!/^[a-f0-9]{40}$/i.test(input.releaseSha) || !/^[a-f0-9]{40}$/i.test(input.trustedUpstreamSha) ||
         input.branch !== row.claim.branch || !input.upstreamDescendantVerified || !input.descendantVerified ||
-        (row.claim.releaseSha && row.claim.releaseSha !== input.releaseSha) ||
+        (priorSha && input.priorReleaseDescendantVerified !== true) ||
         input.committedPaths.some(path => !row.claim.plannedPaths.includes(validateSimulatorSupportPath(path))) ||
         (metadataReuseKind ? input.committedPaths.length !== 0 :
           row.claim.plannedPaths.length === 0 || input.releaseSha === row.audit.baseSha || input.releaseSha === input.trustedUpstreamSha ||
           input.committedPaths.length === 0 || claimedRuntimePaths.length === 0)) throw new Error("Simulator support release provenance is invalid.");
-    return saveClaim(tx, row, now, { phase: "VERIFYING", releaseSha: input.releaseSha }, undefined, {
+    const previousAudit = row.audit as CourseDispatchAudit & { simulatorReleaseProvenance?: Record<string, unknown>;
+      simulatorReleaseHistory?: Array<Record<string, unknown>>; simulatorRepairPending?: Record<string, unknown> | null };
+    if (previousAudit.simulatorRepairPending && (previousAudit.simulatorRepairPending.releaseSha !== priorSha ||
+        input.releaseSha === priorSha)) throw new Error("Simulator repair requires a proven new release descendant.");
+    const history = previousAudit.simulatorReleaseHistory ?? [];
+    if (!Array.isArray(history) || history.length > 7 || history.some(entry => !entry || typeof entry !== "object" || Array.isArray(entry))) {
+      throw new Error("Simulator release lineage history is unavailable or exhausted.");
+    }
+    const superseded = priorSha ? { releaseSha: priorSha,
+      deployment: previousAudit.simulatorRepairPending?.deployment ?? row.claim.deployment,
+      recheckQueuedAt: previousAudit.simulatorRepairPending?.recheckQueuedAt ?? row.claim.recheckQueuedAt,
+      verificationCycle: previousAudit.simulatorRepairPending?.verificationCycle ?? row.claim.verificationCycle,
+      provenance: previousAudit.simulatorReleaseProvenance ?? null,
+      supersededAt: now.toISOString(), supersededBySha: input.releaseSha } : null;
+    return saveClaim(tx, row, now, { phase: "VERIFYING", releaseSha: input.releaseSha,
+      deployment: null, recheckQueuedAt: null, verificationCycle: 0 }, undefined, {
+      ...(superseded ? { simulatorReleaseHistory: [...history, superseded] } : {}),
+      ...(previousAudit.simulatorRepairPending ? { simulatorRepairPending: null } : {}),
       simulatorReleaseProvenance: { originalBaseSha: row.audit.baseSha, trustedUpstreamSha: input.trustedUpstreamSha,
         releaseSha: input.releaseSha, metadataOnlyReuse: Boolean(metadataReuseKind), metadataReuseKind, committedPaths: input.committedPaths,
-        upstreamDescendantVerified: true, descendantVerified: true, recordedAt: now.toISOString() },
+        upstreamDescendantVerified: true, descendantVerified: true,
+        ...(priorSha ? { priorReleaseSha: priorSha, priorReleaseDescendantVerified: true } : {}),
+        recordedAt: now.toISOString() },
     });
   });
 }
@@ -487,7 +551,10 @@ export async function reconcileExpiredSimulatorResearchExecutions(tx: Prisma.Tra
 export function recordSimulatorSupportDeployment(input: Owner & { proof: GitDeploymentProof }) {
   return withTransition(async (tx, now) => {
     const row = await loadOwned(tx, input, now);
-    if (!row.claim.releaseSha) throw new Error("Register the owner release before verifying deployment.");
+    if (!row.claim.releaseSha || row.claim.phase !== "VERIFYING" ||
+        (row.audit as CourseDispatchAudit & { simulatorRepairPending?: unknown }).simulatorRepairPending) {
+      throw new Error("Register the current owner release before verifying deployment.");
+    }
     assertSimulatorSupportDeployment(input.proof, row.claim.releaseSha, now);
     return saveClaim(tx, row, now, { deployment: input.proof });
   });
@@ -521,7 +588,10 @@ export function readSimulatorSupportProgress(input: Owner) {
 export function queueSimulatorSupportRechecks(input: Owner) {
   return withTransition(async (tx, now) => {
     const row = await loadOwned(tx, input, now);
-    if (!row.claim.deployment || !row.claim.releaseSha) throw new Error("Simulator rechecks require a verified exact production deployment.");
+    if (!row.claim.deployment || !row.claim.releaseSha || row.claim.phase !== "VERIFYING" ||
+        (row.audit as CourseDispatchAudit & { simulatorRepairPending?: unknown }).simulatorRepairPending) {
+      throw new Error("Simulator rechecks require a verified exact production deployment.");
+    }
     assertSimulatorSupportDeployment(row.claim.deployment, row.claim.releaseSha, now);
     let cycle = row.claim.verificationCycle;
     if (cycle === 1) {
@@ -535,7 +605,9 @@ export function queueSimulatorSupportRechecks(input: Owner) {
 export function completeSimulatorSupport(input: Owner & { currentDeployment: GitDeploymentProof }) {
   return withTransition(async (tx, now) => {
     const row = await loadOwned(tx, input, now);
-    if (!row.claim.releaseSha || !row.claim.deployment || !row.claim.recheckQueuedAt || row.source.offering.publicAccessStatus !== "PUBLIC" ||
+    if (!row.claim.releaseSha || row.claim.phase !== "VERIFYING" ||
+        (row.audit as CourseDispatchAudit & { simulatorRepairPending?: unknown }).simulatorRepairPending ||
+        !row.claim.deployment || !row.claim.recheckQueuedAt || row.source.offering.publicAccessStatus !== "PUBLIC" ||
         row.source.offering.monitoringState !== "HEALTHY" || row.source.offering.automationEligibility !== "ALLOWED") throw new Error("Simulator completion requires deployed rechecks and verified public rental access.");
     assertSimulatorSupportDeployment(row.claim.deployment, row.claim.releaseSha, now);
     assertSimulatorSupportDeployment(input.currentDeployment, row.claim.releaseSha, now);

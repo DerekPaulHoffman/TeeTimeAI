@@ -183,7 +183,7 @@ export async function superviseCourseSupportWorker(input, dependencies = {}) {
     save("PREPARED", { childThreadId: prepared.threadId });
     save("BIND_REQUESTED");
     productionDispatch("bind", ["bind", "--assignment-ref", validated.assignmentRef,
-      "--child-thread", prepared.threadId], validated, dependencies);
+      "--child-thread", prepared.threadId, "--launcher-receipt", launcherReceiptPath], validated, dependencies);
     save("BOUND");
     writeFileSync(promptPath, prompt, { flag: "wx", mode: 0o600 });
     save("TURN_REQUESTED", { promptSha256: createHash("sha256").update(prompt).digest("hex") });

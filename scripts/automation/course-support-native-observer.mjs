@@ -9,7 +9,7 @@ import {
 } from "./course-support-worker-launcher.mjs";
 
 const QUALIFIED_CLI_VERSION = "codex-cli 0.160.1";
-const QUALIFIED_EXECUTABLE_DIGEST = "9e7c59c05cc1ce5677b1f94e835b2ac038ca3be14504e78d558eacdb0ea3f55d";
+export const QUALIFIED_EXECUTABLE_DIGEST = "9e7c59c05cc1ce5677b1f94e835b2ac038ca3be14504e78d558eacdb0ea3f55d";
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/iu;
 function failure(code) { return Object.assign(new Error(code), { code }); }
 function digest(bytes) { return createHash("sha256").update(bytes).digest("hex"); }
@@ -63,6 +63,8 @@ export function observeOriginalProcess(pid, execute = execFileSync) {
  */
 export async function observeCourseSupportNativeCompletion({
   receiptPath, observationPath, expectedThreadId, expectedCheckout,
+  terminalFailure = false,
+  priorContinuationReceiptPath = null, expectedTerminalTurnId = null, expectedContinuationKey = null,
   clientFactory = createWorkerAppServer, inspectProcess = observeOriginalProcess,
   inspectCli = readWorkerCliVersion, readBytes = readFileSync, clock = () => new Date(),
   environmentFactory = courseSupportWorkerAppServerEnvironment,
@@ -77,11 +79,29 @@ export async function observeCourseSupportNativeCompletion({
   }
   const originalBytes = readBytes(receiptPath);
   const original = JSON.parse(originalBytes.toString("utf8").replace(/^\uFEFF/u, ""));
-  if (original.schemaVersion !== 1 || original.status !== "COMPLETED" || original.turnStatus !== "completed" ||
+  if (original.schemaVersion !== 1 || (terminalFailure ?
+      !["STOPPED", "COMPLETED"].includes(original.status) ||
+      (original.status === "COMPLETED" && original.turnStatus !== "completed") || !UUID.test(original.turnId ?? "") :
+      original.status !== "COMPLETED" || original.turnStatus !== "completed") ||
       original.threadId !== expectedThreadId || !sameCheckout(original.cwd, expectedCheckout) ||
       original.nativeIdentityVerified !== true || original.approvalRequests !== 0 || original.cliVersion !== QUALIFIED_CLI_VERSION ||
-      !isAbsolute(original.cliPath ?? "")) throw failure("EXACT_COMPLETED_ORIGINAL_RECEIPT_REQUIRED");
+      !isAbsolute(original.cliPath ?? "")) throw failure("EXACT_TERMINAL_ORIGINAL_RECEIPT_REQUIRED");
   assertFullAccessAcknowledgement(original, expectedCheckout);
+  let prior = null;
+  if (priorContinuationReceiptPath) {
+    if (!terminalFailure || !isAbsolute(priorContinuationReceiptPath) || !UUID.test(expectedTerminalTurnId ?? "") ||
+        !/^[a-f0-9]{64}$/u.test(expectedContinuationKey ?? "")) throw failure("EXACT_PRIOR_CONTINUATION_REQUIRED");
+    prior = JSON.parse(readBytes(priorContinuationReceiptPath).toString("utf8").replace(/^\uFEFF/u, ""));
+    if (prior.schemaVersion !== 1 || !["STOPPED", "COMPLETED"].includes(prior.status) ||
+        (prior.status === "COMPLETED" && prior.turnStatus !== "completed") ||
+        prior.threadId !== original.threadId ||
+        prior.turnId !== expectedTerminalTurnId || prior.continuationKey !== expectedContinuationKey ||
+        prior.originalTurnId !== original.turnId && !UUID.test(prior.originalTurnId ?? "") ||
+        prior.nativeIdentityVerified !== true || prior.approvalRequests !== 0 ||
+        !Number.isSafeInteger(prior.runnerPid) || !Number.isSafeInteger(prior.serverPid)) {
+      throw failure("PRIOR_CONTINUATION_RECEIPT_UNPROVED");
+    }
+  } else if (expectedTerminalTurnId || expectedContinuationKey) throw failure("EXACT_PRIOR_CONTINUATION_REQUIRED");
   const version = inspectCli(original.cliPath);
   const executableDigest = inspectExecutableDigest(original.cliPath);
   if (version !== original.cliVersion || executableDigest !== QUALIFIED_EXECUTABLE_DIGEST) throw failure("ORIGINAL_PINNED_CLI_CHANGED");
@@ -90,11 +110,16 @@ export async function observeCourseSupportNativeCompletion({
     throw failure("PRODUCT_OR_NATIVE_IDENTITY_ENV_PRESENT");
   }
   const state = { version: 1, source: "original_codex_read_only_observer", phase: "INITIALIZE",
+    ...(terminalFailure ? { terminalFailure: true } : {}),
+    ...(prior ? { priorContinuationTurnId: expectedTerminalTurnId, priorContinuationKey: expectedContinuationKey,
+      priorContinuationReceiptPath, priorContinuationReceiptDigestBefore: digest(readBytes(priorContinuationReceiptPath)) } : {}),
     observedAt: clock().toISOString(), threadId: original.threadId, cliVersion: version, cliExecutableDigest: executableDigest,
     launcherReceiptDigestBefore: digest(originalBytes), observerApprovalRequestCount: 0, rpcCalls: [] };
   const observeProcesses = () => {
-    const processes = [original.launcherPid, original.serverPid].map(pid => ({ pid, state: inspectProcess(pid) }));
-    if (new Set(processes.map(process => process.pid)).size !== 2 || processes.some(process => process.state !== "absent")) {
+    const processes = [original.launcherPid, original.serverPid, ...(prior ? [prior.runnerPid, prior.serverPid] : [])]
+      .map(pid => ({ pid, state: inspectProcess(pid) }));
+    if (new Set(processes.map(process => process.pid)).size !== processes.length ||
+        processes.some(process => process.state !== "absent")) {
       throw failure("ORIGINAL_LAUNCHER_OR_SERVER_NOT_ENDED");
     }
     return { observedAt: clock().toISOString(), processes };
@@ -125,13 +150,22 @@ export async function observeCourseSupportNativeCompletion({
     const read = await request("thread/read", { threadId: original.threadId, includeTurns: false });
     if (read.thread?.id !== original.threadId || !sameCheckout(read.thread?.cwd, original.cwd)) throw failure("ORIGINAL_NATIVE_IDENTITY_MISMATCH");
     const page = await request("thread/turns/list", { threadId: original.threadId, limit: 1, itemsView: "notLoaded", sortDirection: "desc" });
-    if (!Array.isArray(page?.data) || page.data.length !== 1 || page.data[0]?.status !== "completed" || page.data[0]?.error !== null) {
-      throw failure("LATEST_DURABLE_TURN_NOT_COMPLETED");
+    if (!Array.isArray(page?.data) || page.data.length !== 1 || (terminalFailure ?
+        page.data[0]?.id !== (expectedTerminalTurnId ?? original.turnId) ||
+        !["failed", "interrupted", "completed"].includes(page.data[0]?.status) ||
+        (page.data[0]?.status === "completed" ? page.data[0]?.error !== null :
+          (prior ? prior.status !== "STOPPED" : original.status !== "STOPPED")) :
+        page.data[0]?.status !== "completed" || page.data[0]?.error !== null)) {
+      throw failure("LATEST_DURABLE_TURN_NOT_TERMINAL");
     }
     state.launcherReceiptDigestAfter = digest(readBytes(receiptPath));
+    if (prior) state.priorContinuationReceiptDigestAfter = digest(readBytes(priorContinuationReceiptPath));
     state.processObservationAfter = observeProcesses();
     if (state.launcherReceiptDigestBefore !== state.launcherReceiptDigestAfter || inspectExecutableDigest(original.cliPath) !== executableDigest) {
       throw failure("ORIGINAL_RECEIPT_OR_EXECUTABLE_CHANGED");
+    }
+    if (prior && state.priorContinuationReceiptDigestBefore !== state.priorContinuationReceiptDigestAfter) {
+      throw failure("PRIOR_CONTINUATION_RECEIPT_CHANGED");
     }
     if (fatal) throw fatal;
     state.phase = "READ_ONLY_OBSERVATION_COMPLETE";
@@ -149,15 +183,21 @@ export async function observeCourseSupportNativeCompletion({
 }
 
 export function readNativeObserverArguments(args) {
-  const names = new Set(["--receipt", "--observation", "--thread-id", "--checkout"]);
+  const names = new Set(["--receipt", "--observation", "--thread-id", "--checkout", "--terminal-failure",
+    "--prior-continuation-receipt", "--expected-terminal-turn-id", "--expected-continuation-key"]);
   const values = {};
   for (let index = 0; index < args.length; index += 2) {
     const name = args[index]; const value = args[index + 1];
     if (!names.has(name) || !value || value.startsWith("--") || name in values) throw failure("INVALID_NATIVE_OBSERVER_ARGUMENTS");
     values[name] = value;
   }
-  if ([...names].some(name => !values[name])) throw failure("REQUIRED_NATIVE_OBSERVER_ARGUMENT_MISSING");
-  return { receiptPath: values["--receipt"], observationPath: values["--observation"], expectedThreadId: values["--thread-id"], expectedCheckout: values["--checkout"] };
+  if (["--receipt", "--observation", "--thread-id", "--checkout"].some(name => !values[name]) ||
+      (values["--terminal-failure"] !== undefined && values["--terminal-failure"] !== "true")) throw failure("REQUIRED_NATIVE_OBSERVER_ARGUMENT_MISSING");
+  return { receiptPath: values["--receipt"], observationPath: values["--observation"], expectedThreadId: values["--thread-id"], expectedCheckout: values["--checkout"],
+    terminalFailure: values["--terminal-failure"] === "true",
+    priorContinuationReceiptPath: values["--prior-continuation-receipt"] ?? null,
+    expectedTerminalTurnId: values["--expected-terminal-turn-id"] ?? null,
+    expectedContinuationKey: values["--expected-continuation-key"] ?? null };
 }
 if (process.argv[1] && resolve(fileURLToPath(import.meta.url)).toLowerCase() === resolve(process.argv[1]).toLowerCase()) {
   observeCourseSupportNativeCompletion(readNativeObserverArguments(process.argv.slice(2))).then(() => {

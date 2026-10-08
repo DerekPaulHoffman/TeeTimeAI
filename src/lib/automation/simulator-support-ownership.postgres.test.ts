@@ -797,6 +797,151 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     await lane.retrySimulatorSupport({ ...owner, revision: registered.value.revision, retryMinutes: 15 });
   });
 
+  it("supersedes only a descendant owned release and invalidates old deployment and recheck proof", async () => {
+    const f = await fixture();
+    const path = "src/lib/simulators/providers/new-reader.ts";
+    const claimed = await lane.claimSimulatorSupportPath({ ...f.owner, path });
+    if (!claimed.acquired) throw new Error("Path claim failed.");
+    let owner = { ...f.owner, revision: claimed.value.revision };
+    const branch = `automation/course-support-${owner.ownerThreadId.replace("child-", "")}`;
+    const firstSha = "b".repeat(40), repairedSha = "c".repeat(40), newerMainSha = "d".repeat(40);
+    const first = await lane.registerSimulatorSupportRelease({ ...owner, releaseSha: firstSha, trustedUpstreamSha: baseSha,
+      branch, committedPaths: [path], upstreamDescendantVerified: true, descendantVerified: true });
+    if (!first.acquired) throw new Error("First release failed."); owner = { ...owner, revision: first.value.revision };
+    const proof = { aliases: ["teetimespot.com", "www.teetimespot.com"], branch: "main", commitSha: firstSha,
+      deployedAt: new Date(Date.now() - 5000).toISOString(), deploymentId: "dpl_old", deploymentUrl: "https://old.vercel.app",
+      source: "git" as const, state: "READY" as const };
+    const deployed = await lane.recordSimulatorSupportDeployment({ ...owner, proof });
+    if (!deployed.acquired) throw new Error("Old deployment fixture failed."); owner = { ...owner, revision: deployed.value.revision };
+    const oldQueued = await lane.queueSimulatorSupportRechecks(owner);
+    if (!oldQueued.acquired) throw new Error("Old first recheck fixture failed."); owner = { ...owner, revision: oldQueued.value.revision };
+    const previousScheduleVersion = (await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).scheduleVersion;
+    const row = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const audit = row.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    audit.simulatorClaim!.recheckQueuedAt = new Date(Date.now() - 1000).toISOString();
+    audit.simulatorClaim!.verificationCycle = 2;
+    await client.automationRun.update({ where: { id: f.run.id }, data: { audit: JSON.parse(JSON.stringify(audit)) } });
+    const repairing = await lane.claimSimulatorSupportPath({ ...owner, path });
+    if (!repairing.acquired) throw new Error("Original-owner repair did not open."); owner = { ...owner, revision: repairing.value.revision };
+    const opened = (await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit as unknown as
+      import("./course-support-course-dispatch").CourseDispatchAudit & { simulatorRepairPending: Record<string, unknown> };
+    expect(opened.simulatorClaim).toMatchObject({ phase: "IMPLEMENTING", releaseSha: firstSha, deployment: null,
+      recheckQueuedAt: null, verificationCycle: 0 });
+    expect(opened.simulatorRepairPending).toMatchObject({ releaseSha: firstSha, deployment: { commitSha: firstSha },
+      verificationCycle: 2 });
+    await expect(lane.recordSimulatorSupportDeployment({ ...owner, proof })).rejects.toThrow("current owner release");
+    await expect(lane.queueSimulatorSupportRechecks(owner)).rejects.toThrow("verified exact production deployment");
+    await expect(lane.completeSimulatorSupport({ ...owner, currentDeployment: proof })).rejects.toThrow("deployed rechecks");
+    const replacement = { ...owner, releaseSha: repairedSha, trustedUpstreamSha: newerMainSha, branch,
+      committedPaths: [path], upstreamDescendantVerified: true, descendantVerified: true,
+      priorReleaseDescendantVerified: true };
+    await expect(lane.registerSimulatorSupportRelease({ ...replacement, priorReleaseDescendantVerified: false })).rejects.toThrow("provenance");
+    await expect(lane.registerSimulatorSupportRelease({ ...replacement, committedPaths: ["src/lib/simulators/providers/foreign.ts"] })).rejects.toThrow("provenance");
+    await expect(lane.registerSimulatorSupportRelease({ ...replacement, ownerThreadId: "replacement" })).rejects.toThrow();
+    const changed = await lane.registerSimulatorSupportRelease(replacement);
+    if (!changed.acquired) throw new Error("Owned supersession failed.");
+    owner = { ...owner, revision: changed.value.revision };
+    const stored = (await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit as unknown as
+      import("./course-support-course-dispatch").CourseDispatchAudit & { simulatorReleaseHistory: Array<Record<string, unknown>>;
+        simulatorRepairPending: null };
+    expect(stored.simulatorClaim).toMatchObject({ releaseSha: repairedSha, deployment: null, recheckQueuedAt: null,
+      verificationCycle: 0, phase: "VERIFYING" });
+    expect(stored.simulatorReleaseHistory).toMatchObject([{ releaseSha: firstSha, deployment: { commitSha: firstSha },
+      verificationCycle: 2, supersededBySha: repairedSha }]);
+    expect(stored.simulatorRepairPending).toBeNull();
+    await expect(lane.queueSimulatorSupportRechecks(owner)).rejects.toThrow("verified exact production deployment");
+    await expect(lane.completeSimulatorSupport({ ...owner, currentDeployment: proof })).rejects.toThrow("deployed rechecks");
+    const same = await lane.registerSimulatorSupportRelease({ ...replacement, revision: owner.revision });
+    expect(same).toMatchObject({ acquired: true, value: { revision: owner.revision } });
+    const unchanged = (await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit as unknown as
+      { simulatorReleaseHistory: unknown[] };
+    expect(unchanged.simulatorReleaseHistory).toHaveLength(1);
+    const newProof = { ...proof, commitSha: repairedSha, deploymentId: "dpl_repaired",
+      deploymentUrl: "https://repaired.vercel.app" };
+    const newlyDeployed = await lane.recordSimulatorSupportDeployment({ ...owner, proof: newProof });
+    if (!newlyDeployed.acquired) throw new Error("New deployment registration failed.");
+    owner = { ...owner, revision: newlyDeployed.value.revision };
+    const newQueued = await lane.queueSimulatorSupportRechecks(owner);
+    if (!newQueued.acquired) throw new Error("New first verification dispatch failed.");
+    owner = { ...owner, revision: newQueued.value.revision };
+    expect((await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).scheduleVersion)
+      .toBe(previousScheduleVersion + 1);
+    await expect(lane.queueSimulatorSupportRechecks(owner)).rejects.toThrow("first fresh successful observation");
+    expect((await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).scheduleVersion)
+      .toBe(previousScheduleVersion + 1);
+    const refreshed = await lane.registerSimulatorSupportRelease({ ...owner, releaseSha: newerMainSha,
+      trustedUpstreamSha: newerMainSha, branch, committedPaths: [], upstreamDescendantVerified: true,
+      descendantVerified: true, priorReleaseDescendantVerified: true });
+    expect(refreshed).toMatchObject({ acquired: true, value: { phase: "VERIFYING" } });
+  });
+
+  it("repairs reviewed offering metadata on the same reader release and invalidates old verification", async () => {
+    const f = await fixture();
+    const manifest = { googlePlaceId: f.course.googlePlaceId, name: f.course.name, address: f.course.address!,
+      latitude: f.course.latitude, longitude: f.course.longitude, website: f.course.website!,
+      bookingUrl: "https://official.example.test/book", evidenceUrl: f.course.website!,
+      verifiedAt: new Date().toISOString(), publicAccessStatus: "PUBLIC", supportedDurationsMinutes: [60],
+      providerFamilyKey: "GOLFBOOK" };
+    const configured = await lane.configureSimulatorSupportOffering({ ...f.owner, manifest, apply: true,
+      expectedFingerprint: f.fingerprint, expectedOfferingRevision: f.offering.monitoringRevision });
+    if (!configured.acquired || configured.value.mode !== "applied") throw new Error("Initial metadata fixture failed.");
+    let owner = { ...f.owner, revision: configured.value.revision };
+    const adopted = await lane.adoptSimulatorSupportSource({ ...owner,
+      expectedFingerprint: configured.value.sourceFingerprint, expectedOfferingRevision: configured.value.offeringRevision });
+    if (!adopted.acquired) throw new Error("Initial source adoption failed.");
+    owner = { ...owner, revision: adopted.value.revision };
+    const path = "src/lib/simulators/providers/new-reader.ts";
+    const planned = await lane.claimSimulatorSupportPath({ ...owner, path });
+    if (!planned.acquired) throw new Error("Reader path fixture failed.");
+    owner = { ...owner, revision: planned.value.revision };
+    const branch = `automation/course-support-${owner.ownerThreadId.replace("child-", "")}`;
+    const readerSha = "b".repeat(40);
+    const released = await lane.registerSimulatorSupportRelease({ ...owner, releaseSha: readerSha,
+      trustedUpstreamSha: baseSha, upstreamDescendantVerified: true, descendantVerified: true,
+      branch, committedPaths: [path] });
+    if (!released.acquired) throw new Error("Reader release fixture failed.");
+    owner = { ...owner, revision: released.value.revision };
+    const proof = { aliases: ["teetimespot.com", "www.teetimespot.com"], branch: "main", commitSha: readerSha,
+      deployedAt: new Date(Date.now() - 5_000).toISOString(), deploymentId: "dpl_old", deploymentUrl: "https://old.vercel.app",
+      source: "git" as const, state: "READY" as const };
+    const deployed = await lane.recordSimulatorSupportDeployment({ ...owner, proof });
+    if (!deployed.acquired) throw new Error("Reader deployment fixture failed.");
+    owner = { ...owner, revision: deployed.value.revision };
+    const queued = await lane.queueSimulatorSupportRechecks(owner);
+    if (!queued.acquired) throw new Error("First verification fixture failed.");
+    owner = { ...owner, revision: queued.value.revision };
+    const current = await client.courseOffering.findUniqueOrThrow({ where: { id: f.offering.id } });
+    const corrected = { ...manifest, verifiedAt: new Date().toISOString(), bookingUrl: "https://official.example.test/corrected-book" };
+    await expect(lane.configureSimulatorSupportOffering({ ...owner, manifest: corrected, apply: true,
+      expectedFingerprint: getSimulatorOfferingSourceFingerprint(current), expectedOfferingRevision: current.monitoringRevision }))
+      .rejects.toThrow("sealed");
+    const repair = await lane.configureSimulatorSupportOffering({ ...owner, manifest: corrected, apply: true, repair: true,
+      expectedFingerprint: getSimulatorOfferingSourceFingerprint(current), expectedOfferingRevision: current.monitoringRevision });
+    if (!repair.acquired || repair.value.mode !== "applied") throw new Error("Metadata repair failed.");
+    owner = { ...owner, revision: repair.value.revision };
+    const invalidated = (await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit as unknown as
+      import("./course-support-course-dispatch").CourseDispatchAudit & { simulatorMetadataRepairHistory: Array<Record<string, unknown>> };
+    expect(invalidated.simulatorClaim).toMatchObject({ releaseSha: readerSha, deployment: null,
+      recheckQueuedAt: null, verificationCycle: 0, phase: "VERIFYING" });
+    expect(invalidated.simulatorMetadataRepairHistory).toMatchObject([{ releaseSha: readerSha,
+      deployment: { commitSha: readerSha }, replacementSourceFingerprint: repair.value.sourceFingerprint }]);
+    await expect(lane.recordSimulatorSupportDeployment({ ...owner, proof })).rejects.toThrow("source changed");
+    const readopted = await lane.adoptSimulatorSupportSource({ ...owner,
+      expectedFingerprint: repair.value.sourceFingerprint, expectedOfferingRevision: repair.value.offeringRevision });
+    if (!readopted.acquired) throw new Error("Corrected source adoption failed.");
+    owner = { ...owner, revision: readopted.value.revision };
+    expect((await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit).toMatchObject({
+      simulatorClaim: { releaseSha: readerSha, deployment: null, recheckQueuedAt: null, verificationCycle: 0 } });
+    await expect(lane.queueSimulatorSupportRechecks(owner)).rejects.toThrow("verified exact production deployment");
+    await expect(lane.completeSimulatorSupport({ ...owner, currentDeployment: proof })).rejects.toThrow("deployed rechecks");
+    const sameRelease = await lane.registerSimulatorSupportRelease({ ...owner, releaseSha: readerSha,
+      trustedUpstreamSha: baseSha, upstreamDescendantVerified: true, descendantVerified: true,
+      branch, committedPaths: [] });
+    expect(sameRelease).toMatchObject({ acquired: true, value: { revision: owner.revision } });
+    const freshProof = await lane.recordSimulatorSupportDeployment({ ...owner, proof });
+    expect(freshProof).toMatchObject({ acquired: true });
+  });
+
   it("preserves implementation provenance on an unknown read failure instead of automatically closing it", async () => {
     const f = await fixture(15, false, "https://official.example.test/booking");
     const planned = await lane.claimSimulatorSupportPath({ ...f.owner, path: "src/lib/simulators/providers/repair.test.ts" });
@@ -816,10 +961,12 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
       failure: { stage: "PUBLIC_READ", code: "UNCLASSIFIED_FAILURE", researchPhase: "BROWSER_LAUNCH" } });
     expect(inspected.researchGuide.suggestedReads).toContainEqual({ source: "booking", rendered: false });
     const audit = (await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    audit.simulatorClaim!.leaseExpiresAt = new Date(Date.now() - 1_000).toISOString();
+    await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
     const context = await client.$transaction(tx => lane.readSimulatorSupportContinuationContext(tx, audit, new Date()));
     expect(context).toMatchObject({ currentSource: true, currentClaimRevision: inspected.revision, providerReadInFlight: false,
-      checkpoint: { kind: "SETTLED_FAILURE", readCount: 1, allowedResearchRouteCount: expect.any(Number),
-        failure: { stage: "PUBLIC_READ", code: "UNCLASSIFIED_FAILURE", researchPhase: "BROWSER_LAUNCH" } } });
+      checkpoint: { kind: "EXPIRED_OWNED_STAGE", readCount: 1, requestId: null,
+        ownedStage: { phase: "IMPLEMENTING", plannedPaths: ["src/lib/simulators/providers/repair.test.ts"] } } });
     expect(context.checkpoint!.allowedResearchRouteCount).toBeGreaterThan(0);
     await expect(lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: "replacement" })).rejects.toThrow("not owned");
     await expect(lane.recoverSimulatorSupport({ ...f.owner, ownerThreadId: "replacement", revision: inspected.revision })).rejects.toThrow();
@@ -1126,6 +1273,95 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(inspected.research.history[1]).toMatchObject({ outcome: "HARD_FAILED", requestId,
       failure: { code: "RESEARCH_RESERVATION_INTERRUPTED" } });
     expect(inspected.researchGuide.readsRemaining).toBe(4);
+  });
+
+  it("qualifies an expired owned implementation with an expired read, but fences its still-live reservation", async () => {
+    const f = await fixture();
+    const planned = await lane.claimSimulatorSupportPath({ ...f.owner, path: "src/lib/simulators/providers/new-reader.ts" });
+    if (!planned.acquired) throw new Error("Owned path fixture was busy.");
+    const stored = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const audit = stored.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    const requestId = randomUUID(), now = new Date();
+    audit.simulatorClaim!.leaseExpiresAt = new Date(now.getTime() - 1_000).toISOString();
+    audit.simulatorResearch = { version: 1, sourceFingerprint: f.fingerprint, readCount: 1,
+      history: [], links: [], bookingLinks: [], linkBaseUrl: null,
+      inFlight: { requestId, startedAt: new Date(now.getTime() - 90_000).toISOString(),
+        expiresAt: new Date(now.getTime() - 30_000).toISOString(), source: "official", url: f.course.website!, rendered: false } };
+    const expired = await client.$transaction(tx => lane.readSimulatorSupportContinuationContext(tx, audit, now));
+    expect(expired).toMatchObject({ providerReadInFlight: false,
+      checkpoint: { kind: "EXPIRED_OWNED_STAGE", requestId, readCount: 1, claimLeaseExpired: true } });
+    audit.simulatorResearch.inFlight!.expiresAt = new Date(now.getTime() + 30_000).toISOString();
+    const bounded = await client.$transaction(tx => lane.readSimulatorSupportContinuationContext(tx, audit, now));
+    expect(bounded).toMatchObject({ providerReadInFlight: true, checkpoint: null });
+  });
+
+  it("reserves a second stopped owned-stage turn only from the last durable accepted native turn", async () => {
+    const f = await fixture();
+    const planned = await lane.claimSimulatorSupportPath({ ...f.owner, path: "src/lib/simulators/providers/new-reader.ts" });
+    if (!planned.acquired) throw new Error("Owned path fixture was busy.");
+    const audit = (await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit as unknown as
+      import("./course-support-course-dispatch").CourseDispatchAudit;
+    audit.simulatorClaim!.leaseExpiresAt = new Date(Date.now() - 1_000).toISOString();
+    audit.launcherReceiptPath = "C:\\private\\launcher.receipt.private.json";
+    const now = new Date();
+    const context = await client.$transaction(tx => lane.readSimulatorSupportContinuationContext(tx, audit, now));
+    expect(context).toMatchObject({ providerReadInFlight: false, checkpoint: { kind: "EXPIRED_OWNED_STAGE",
+      claimLeaseExpired: true, ownedStage: { phase: "IMPLEMENTING", plannedPaths: ["src/lib/simulators/providers/new-reader.ts"] } } });
+    if (!context.checkpoint) throw new Error("Missing owned stage checkpoint.");
+    const { assessCourseSupportContinuationCheckpoint } = await import("./course-support-continuation");
+    const mainSha = "c".repeat(40);
+    const assessed = assessCourseSupportContinuationCheckpoint({ checkpoint: { ...context.checkpoint,
+      providerReadInFlight: context.providerReadInFlight }, currentMainSha: mainSha, now });
+    if (!assessed.eligible) throw new Error(`Missing owned checkpoint digest: ${assessed.reason}`);
+    const priorTurn = "bbbbbbbb-cccc-7ddd-8eee-ffffffffffff", originalTurn = "aaaaaaaa-bbbb-7ccc-8ddd-eeeeeeeeeeee";
+    const priorKey = "d".repeat(64), priorReceipt = "C:\\private\\continuation.receipt.private.json";
+    const oldAt = new Date(now.getTime() - 11 * 60_000).toISOString();
+    audit.simulatorContinuation = { version: 1, receipts: [{ version: 1,
+      policyVersion: "same-native-worker-recovery-v1", key: priorKey,
+      checkpointDigest: assessed.checkpointDigest, sourceFingerprint: f.fingerprint,
+      nativeCompletionDigest: "e".repeat(64), readinessDigest: "f".repeat(64),
+      parentThreadId: "parent", childThreadId: f.owner.ownerThreadId, attempt: 1,
+      tickRef: `continuation-${Math.floor(now.getTime() / 600_000) - 1}`,
+      requestedAt: oldAt, scope: "RESUME_ORIGINAL_OWNED_STAGE", status: "SENT", sentAt: oldAt,
+      nativeTurnId: priorTurn, nativeReceiptPath: priorReceipt }] };
+    await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as unknown as Prisma.InputJsonValue } });
+    const plan = await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: "parent", baseSha: mainSha, maxStarts: 1 });
+    if (!plan.acquired) throw new Error("Continuation plan was busy.");
+    expect(plan.value.continuationItems).toContainEqual(expect.objectContaining({ assignmentRef: f.owner.assignmentRef,
+      expectedNativeContinuation: { turnId: priorTurn, key: priorKey, receiptPath: priorReceipt } }));
+    const observedAt = new Date().toISOString();
+    const terminal = { version: 1, source: "codex_app.list_threads+codex_native.terminal_turn",
+      threadId: f.owner.ownerThreadId, observedAt, threadStatus: "notLoaded", hostId: "local", projectId: "project",
+      inventoryUpdatedAt: 1, launcherReceiptDigest: "a".repeat(64), checkoutIdentityDigest: "b".repeat(64),
+      observationDigest: "c".repeat(64), priorContinuationTurnId: priorTurn, priorContinuationKey: priorKey,
+      priorContinuationReceiptDigest: "d".repeat(64), latestTurn: { id: priorTurn, status: "interrupted", error: null } };
+    const readiness = { version: 1, source: "original_native_stopped_launcher_receipt", threadId: f.owner.ownerThreadId,
+      observedAt, launcherReceiptDigest: "a".repeat(64), checkoutIdentityDigest: "b".repeat(64),
+      privateOriginalChild: true, approvalPolicy: "never", sandboxMode: "danger-full-access",
+      nativeIdentityVerified: true, noApprovalRequired: true, sameProfile: true, runtimeReady: true,
+      toolingReleaseSha: mainSha, originalTurnId: originalTurn, ownedStageDigest: assessed.checkpointDigest };
+    const input = { ownerThreadId: "parent", assignmentRef: f.owner.assignmentRef,
+      policyVersion: "same-native-worker-recovery-v1" as const, currentMainSha: mainSha,
+      expectedClaim: { token: f.owner.token, revision: planned.value.revision }, nativeCompletion: terminal, readiness };
+    const stale = await dispatcher.reserveCourseSupportContinuation({ ...input,
+      nativeCompletion: { ...terminal, latestTurn: { id: originalTurn, status: "failed", error: null } } });
+    expect(stale).toMatchObject({ acquired: true, value: { reserved: false, reason: "NATIVE_COMPLETION_OR_READINESS_UNPROVED" } });
+    const reserved = await dispatcher.reserveCourseSupportContinuation(input);
+    expect(reserved).toMatchObject({ acquired: true, value: { reserved: true, scope: "RESUME_ORIGINAL_OWNED_STAGE" } });
+  });
+
+  it("does not offer owned-stage continuation after the durable assignment run has completed", async () => {
+    const f = await fixture();
+    const planned = await lane.claimSimulatorSupportPath({ ...f.owner, path: "src/lib/simulators/providers/new-reader.ts" });
+    if (!planned.acquired) throw new Error("Owned path fixture was busy.");
+    const audit = (await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit as unknown as
+      import("./course-support-course-dispatch").CourseDispatchAudit;
+    audit.simulatorClaim!.leaseExpiresAt = new Date(Date.now() - 1_000).toISOString();
+    audit.launcherReceiptPath = "C:\\private\\launcher.receipt.private.json";
+    await client.automationRun.update({ where: { id: f.run.id }, data: { status: "COMPLETED",
+      completedAt: new Date(), outcome: "finished_fixture", audit: audit as unknown as Prisma.InputJsonValue } });
+    const plan = await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: "parent", baseSha: "c".repeat(40), maxStarts: 1 });
+    expect(plan).toMatchObject({ acquired: true, value: { continuationItems: [] } });
   });
 
   it("uses the newest expired reservation instead of an older settled network failure", async () => {

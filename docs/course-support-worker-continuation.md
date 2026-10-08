@@ -4,6 +4,95 @@ The human approved bounded recovery of the same existing native worker. This is 
 
 Use only private `value.continuationItems` from the health-bearing preflight's original successful plan. Do not run a second planning inspection or select another incident. An empty new-launch list does not make returned continuation attention healthy or complete. Keep private assignment, native, source and receipt references out of prose.
 
+An item carrying `launcherReceiptPath`, `claimToken`, `claimRevision`,
+`sourceFingerprint`, `plannedPaths`, and `releaseSha` is an expired owned
+implementation/release candidate. The original launcher path is recorded at
+binding, so never guess it or locate another worker's receipt. Preserve the
+original managed checkout even when its old branch is behind current main or
+contains changes only to its registered paths. A missing path, unknown dirty
+file, changed source/demand, active native turn, live original process, or
+unqualified current release is attention. Do not create another chat, transfer
+the token, clean/reset the worktree, or replay `runPreparedCourseSupportWorker`.
+
+For this owned-stage item, take an actual complete supported `list_threads`
+inventory (maximum 50 entries), then run the qualified read-only observer using
+the item's original receipt and `--terminal-failure true`, then take a second
+complete inventory. Supply those raw snapshots with canonical observation times
+to `buildCourseSupportContinuationRequest` as `nativeInventoryObservation`.
+Its actual latest durable turn must be `failed`, `interrupted`, or `completed`
+with `error:null` in the completed case. The initial turn must match the
+original STOPPED or COMPLETED launcher receipt. A STOPPED launcher may have
+observed a transport failure after the native turn completed; the independent
+latest completed/error-null native proof still establishes a terminal turn. A completed
+native turn does not close an unresolved owned database stage. If the item has
+`expectedNativeContinuation`, supply its exact `turnId`, `key`, and `receiptPath`
+to the observer as `--expected-terminal-turn-id`, `--expected-continuation-key`,
+and `--prior-continuation-receipt`; also pass that object and turn id to
+`buildCourseSupportContinuationRequest`. The prior terminal continuation receipt
+must prove the accepted turn, native identity, zero approvals, and absent
+runner/server PIDs. The latest turn must match that durable accepted turn.
+If the last accepted continuation used an app-send receipt without a native
+turn ID, this owned-stage lane cannot establish the latest-turn lineage; keep
+the assignment for attention rather than guessing the initial turn.
+The same original thread/checkout/project, stable
+global inactive inventory, no active or approval flags, unchanged qualified
+executable and receipt, and absent original launcher/server PIDs on both sides.
+An error object on a failed turn is retained as terminal evidence; it is not
+reclassified as a provider failure. `notLoaded` without that full bracket and
+durable terminal turn proves nothing. The completed research path below keeps
+its original strict `completed/error:null` rules.
+
+Use `stoppedStage` from the exact current owned-stage checkpoint,
+`changedPaths` from the actual original checkout Git status (only registered
+paths), and `expectedClaim` from the returned item when building the private
+request. Observe fresh runtime/private-client/browser smoke in the original
+checkout and current Ready Git/main proof for both production aliases. This
+stage may be dirty only on registered paths; do not set `clean:true` or a
+fictitious native identity in the runtime observation. The database `continue`
+command validates the original token/revision, current source and stage under
+DB time, plus the terminal proof and existing per-tick, per-source, PENDING and
+turn dedupe limits. Preserve its one actual `{acquired:true,value:{reserved:true,
+...}}` response as private JSON.
+The same source permits at most two continuation attempts. Exhausted attempts,
+an unconfirmed PENDING send, or the bounded eight-entry history are explicit
+attention, never evidence of monitoring health or authority for a new worker.
+
+After that reservation, save the original returned continuation item and
+preflight context as private JSON and run once with absolute paths:
+
+```powershell
+& '<absolute-node>' <selected-checkout>\scripts\automation\course-support-worker-continuation.mjs --detach --context-file <private-context-json> --item-file <private-item-json> --reservation-file <private-reservation-response-json> --launcher-receipt <item.launcherReceiptPath> --output-dir <new-private-output-directory>
+```
+
+The exclusive marker and PENDING database receipt forbid replay when dispatch
+or native acceptance is ambiguous. The hidden runner rechecks the original
+checkout and registered dirty bytes, old PIDs, exact native terminal turn and
+full-access profile, then calls `thread/resume` and `turn/start` only for that
+original thread. It records the actual native accepted turn through production
+`continued` before awaiting completion. A returned PID means only dispatch of
+this one runner; its private receipt, durable claim/release evidence and two
+fresh deployed monitoring checks determine later progress. Do not also use
+`send_message_to_thread` for this item.
+For a reviewed metadata-only correction after a reader release, use the original
+owner's explicit `configure --repair --apply` with fresh exact official facts,
+then `adopt-source` with the returned current fingerprint and revision. This
+archives and clears old deployment/recheck proof while retaining the same
+reader SHA; obtain current Ready deployment proof and two new checks for the
+corrected source. Dirty registered code repair still needs a proven new release.
+
+If a previously recorded release SHA already exists and the resumed checkout
+contains an unfinished registered repair, checkpoint only those known bytes on
+its original branch. The old release cannot be completed from a dirty or
+different HEAD. A replacement release requires a clean new owned commit, the
+registered prior SHA as its ancestor, the original base and current trusted
+upstream ancestry, and only registered runtime paths in the new owned delta.
+Merge current main without rewriting the registered prior commit. Successful
+supersession retains bounded prior release/deployment/recheck history and clears
+active deployment and verification proof; obtain a fresh exact Ready production
+deployment and two new normal checks before completion. A same-SHA registration
+does not reset proof. Unknown ancestry or an unregistered path stops for
+attention without clearing or adopting a release.
+
 A settled `PUBLIC_READ / ACCESS / UNSAFE_PUBLIC_URL` failure with the collector's trusted `SECONDARY_STYLESHEET` resource kind may qualify for one `DIAGNOSE_REVIEWED_TOOLING_UPDATE` continuation only after the original research-only CLAIMED lease expires, no read is active, the original request UUID is present, remaining reads and a different current server-selected route exist, and an exact reviewed Ready Git/main tooling release was deployed after that failure. Other access failures and missing/unknown resource kinds remain attention. The rejected stylesheet target is never followed or repeated, the hard failure is retained, and this exception is not a calendar-access finding. The existing one diagnostic per source, two total attempts, source/native/readiness and ambiguous-send gates still apply.
 
 A recorded `PUBLIC_READ / BUDGET / PUBLIC_BODY_LIMIT` may use that same diagnostic scope only for `HTTP_READ / SECONDARY_SCRIPT` with the historical transport constructor location `src/lib/automation/address-pinned-public-fetch.ts:49`. Missing or different location, main/data/aggregate caps and unknown failures remain attention. This requires every expired research-only claim, original UUID, settled request, remaining budget, different current guide route, native completion and newer Ready release fence above. It never repeats the failed route, increases a download limit or changes the old failure. A prior plain 403 does not establish the rendered main response's status. The original worker may inspect/recover and make one untried diagnostic read, then either finish reusable support under the existing ownership/release gates or close an honest durable retry/disposition. One diagnostic per source and two total attempts remain unchanged.

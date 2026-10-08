@@ -1,11 +1,19 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
-import { prepareSimulatorSupportReleaseProvenance, readSimulatorSupportArguments } from "../../../scripts/automation/simulator-support";
+import { assertSimulatorSupportCompletionCheckout, prepareSimulatorSupportReleaseProvenance, readSimulatorSupportArguments } from "../../../scripts/automation/simulator-support";
 
 const original = "a".repeat(40), upstream = "b".repeat(40), candidate = "c".repeat(40);
 
 describe("private simulator source CLI selection", () => {
   const ownerArgs = ["--assignment-ref", "owned-assignment", "--token", "owned-token", "--revision", "3"];
+  it("requires an explicit applied reviewed configuration for metadata repair", () => {
+    expect(readSimulatorSupportArguments(["configure", ...ownerArgs, "--manifest", "C:/private/manifest.json",
+      "--repair", "--apply"])).toMatchObject({ command: "configure", repair: true, apply: true });
+    expect(() => readSimulatorSupportArguments(["configure", ...ownerArgs, "--manifest", "C:/private/manifest.json",
+      "--repair"])).toThrow();
+    expect(() => readSimulatorSupportArguments(["classify", ...ownerArgs, "--manifest", "C:/private/manifest.json",
+      "--repair", "--apply"])).toThrow();
+  });
   it("accepts the derived-root selector with only the original owned read options", () => {
     expect(readSimulatorSupportArguments(["source-read", ...ownerArgs, "--source", "booking-root"])).toMatchObject({
       command: "source-read", assignmentRef: "owned-assignment", token: "owned-token", revision: 3, source: "booking-root", rendered: false, linkIndex: undefined });
@@ -36,6 +44,34 @@ function gitFixture(head = candidate) {
 }
 
 describe("simulator release CLI upstream provenance", () => {
+  it("does not complete an older release while the original worker has an unfinished repair", () => {
+    const clean = gitFixture(candidate);
+    expect(() => assertSimulatorSupportCompletionCheckout(candidate, clean)).not.toThrow();
+    const dirty = gitFixture(candidate); dirty.mockImplementationOnce(() => " M src/lib/simulators/providers/public-rental.ts");
+    expect(() => assertSimulatorSupportCompletionCheckout(candidate, dirty)).toThrow("clean exact owned release");
+    const advanced = gitFixture(upstream);
+    expect(() => assertSimulatorSupportCompletionCheckout(candidate, advanced)).toThrow("clean exact owned release");
+  });
+  it("requires the prior registered release to be an ancestor of the new owned candidate", () => {
+    const prior = "d".repeat(40);
+    const run = gitFixture();
+    const proof = prepareSimulatorSupportReleaseProvenance({ releaseSha: candidate, originalBaseSha: original,
+      priorReleaseSha: prior, plannedPaths: ["src/lib/simulators/providers/public-rental.ts"] }, run);
+    expect(proof).toMatchObject({ priorReleaseDescendantVerified: true,
+      committedPaths: ["src/lib/simulators/providers/public-rental.ts"] });
+    expect(run.mock.calls.map(([args]) => args.join(" "))).toContain(`merge-base --is-ancestor ${prior} ${candidate}`);
+    const reject = gitFixture(); reject.mockImplementation(args => {
+      if (args.join(" ") === `merge-base --is-ancestor ${prior} ${candidate}`) throw new Error("not ancestor");
+      return run.getMockImplementation()!(args);
+    });
+    expect(() => prepareSimulatorSupportReleaseProvenance({ releaseSha: candidate, originalBaseSha: original,
+      priorReleaseSha: prior, plannedPaths: ["src/lib/simulators/providers/public-rental.ts"] }, reject)).toThrow("not ancestor");
+  });
+  it("permits a metadata-only refresh to current trusted upstream containing the prior owned release", () => {
+    const proof = prepareSimulatorSupportReleaseProvenance({ releaseSha: upstream, originalBaseSha: original,
+      priorReleaseSha: candidate, plannedPaths: ["src/lib/simulators/providers/public-rental.ts"] }, gitFixture(upstream));
+    expect(proof).toMatchObject({ trustedUpstreamSha: upstream, priorReleaseDescendantVerified: true, committedPaths: [] });
+  });
   it("fetches current main and limits a code-bearing release to its trusted upstream delta", () => {
     const run = gitFixture();
     expect(prepareSimulatorSupportReleaseProvenance({ releaseSha: candidate, originalBaseSha: original,

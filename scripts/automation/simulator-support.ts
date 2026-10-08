@@ -18,6 +18,7 @@ export function readSimulatorSupportArguments(args: readonly string[]) {
   if (!["claim", "source-read", "progress", "heartbeat", "recover", "retire", "configure", "classify", "path", "adopt-source", "release", "deployed", "recheck", "complete", "retry", "inspect"].includes(command)) throw new Error("Use a supported simulator-support command.");
   const values = new Map<string, string>();
   let apply = false;
+  let repair = false;
   let rendered = false;
   for (let index = 0; index < options.length; index += 2) {
     if (options[index] === "--rendered") {
@@ -27,6 +28,10 @@ export function readSimulatorSupportArguments(args: readonly string[]) {
     if (options[index] === "--apply") {
       if (apply || !["configure", "classify"].includes(command)) throw new Error("Only reviewed simulator configuration and classification permit --apply.");
       apply = true; index -= 1; continue;
+    }
+    if (options[index] === "--repair") {
+      if (repair || command !== "configure") throw new Error("Only reviewed simulator configuration permits --repair.");
+      repair = true; index -= 1; continue;
     }
     const name = options[index], value = options[index + 1]?.trim();
     if (!["--assignment-ref", "--token", "--revision", "--path", "--sha", "--retry-minutes", "--manifest", "--source", "--link"].includes(name) || values.has(name) || !value || value.startsWith("--")) throw new Error("Invalid simulator-support option.");
@@ -40,29 +45,40 @@ export function readSimulatorSupportArguments(args: readonly string[]) {
         values.has("--revision") && !/^[1-9][0-9]*$/.test(values.get("--revision")!))) ||
       (command === "path" && !values.get("--path")) || (command === "release" && !/^[a-f0-9]{40}$/i.test(values.get("--sha") ?? "")) ||
       (command === "retry" && !/^[1-9][0-9]*$/.test(values.get("--retry-minutes") ?? "")) ||
-      (["configure", "classify"].includes(command) && !values.get("--manifest")) ||
+      (["configure", "classify"].includes(command) && !values.get("--manifest")) || (repair && !apply) ||
       (command === "source-read" && (values.has("--source") === values.has("--link") ||
         (values.has("--source") && !(SIMULATOR_RESEARCH_SOURCE_NAMES as readonly string[]).includes(values.get("--source")!)) ||
         (values.has("--link") && !/^(?:[1-9]|[12][0-9]|30)$/.test(values.get("--link")!))))) throw new Error("Simulator-support command arguments are incomplete.");
   return { command, assignmentRef: values.get("--assignment-ref")!, token: values.get("--token")!, revision: Number(values.get("--revision")), path: values.get("--path"), releaseSha: values.get("--sha"), retryMinutes: Number(values.get("--retry-minutes")), manifestPath: values.get("--manifest"), source: values.get("--source") as SimulatorResearchSource | undefined,
-    linkIndex: values.has("--link") ? Number(values.get("--link")) : undefined, rendered, apply };
+    linkIndex: values.has("--link") ? Number(values.get("--link")) : undefined, rendered, apply, repair };
 }
 
 function git(args: string[]) { return execFileSync("git", args, { encoding: "utf8", windowsHide: true }).trim(); }
 
-export function prepareSimulatorSupportReleaseProvenance(input: { releaseSha: string; originalBaseSha: string; plannedPaths: readonly string[] }, runGit: (args: string[]) => string = git) {
+export function assertSimulatorSupportCompletionCheckout(releaseSha: string, runGit: (args: string[]) => string = git) {
+  if (!/^[a-f0-9]{40}$/iu.test(releaseSha) || runGit(["status", "--porcelain"]) ||
+      runGit(["rev-parse", "HEAD"]) !== releaseSha) {
+    throw new Error("Complete only from the clean exact owned release; unfinished repair needs its own reviewed release provenance.");
+  }
+}
+
+export function prepareSimulatorSupportReleaseProvenance(input: { releaseSha: string; originalBaseSha: string; plannedPaths: readonly string[];
+  priorReleaseSha?: string | null }, runGit: (args: string[]) => string = git) {
   if (runGit(["status", "--porcelain"]) || runGit(["rev-parse", "HEAD"]) !== input.releaseSha) throw new Error("Register a clean exact committed simulator release before publishing.");
   runGit(["fetch", "origin", "main"]);
   const fetchedMainSha = runGit(["rev-parse", "FETCH_HEAD"]);
   const trustedUpstreamSha = runGit(["rev-parse", "origin/main"]);
   if (!/^[a-f0-9]{40}$/i.test(trustedUpstreamSha) || fetchedMainSha !== trustedUpstreamSha) throw new Error("The current trusted upstream could not be verified.");
   runGit(["merge-base", "--is-ancestor", input.originalBaseSha, trustedUpstreamSha]);
+  if (input.priorReleaseSha) runGit(["merge-base", "--is-ancestor", input.priorReleaseSha, input.releaseSha]);
   const metadataOnlyReuse = input.plannedPaths.length === 0 &&
-    (input.releaseSha === input.originalBaseSha || input.releaseSha === trustedUpstreamSha);
+    (input.releaseSha === input.originalBaseSha || input.releaseSha === trustedUpstreamSha) ||
+    Boolean(input.priorReleaseSha && input.releaseSha === trustedUpstreamSha);
   if (input.plannedPaths.length === 0 && !metadataOnlyReuse) throw new Error("Metadata-only simulator release must reuse the original base or current trusted upstream.");
   if (!metadataOnlyReuse) runGit(["merge-base", "--is-ancestor", trustedUpstreamSha, input.releaseSha]);
   const committedPaths = metadataOnlyReuse ? [] : runGit(["diff", "--name-only", trustedUpstreamSha, input.releaseSha]).split(/\r?\n/).filter(Boolean);
-  return { trustedUpstreamSha, upstreamDescendantVerified: true as const, descendantVerified: true as const, committedPaths };
+  return { trustedUpstreamSha, upstreamDescendantVerified: true as const, descendantVerified: true as const,
+    ...(input.priorReleaseSha ? { priorReleaseDescendantVerified: true as const } : {}), committedPaths };
 }
 
 /** Optional inspect guards must match the independently read original claim. */
@@ -100,7 +116,7 @@ async function main() {
   else if (input.command === "configure") {
     const claim = await readSimulatorSupportClaim(owner);
     const offering = await prisma.courseOffering.findUniqueOrThrow({ where: { id: claim.offeringId } });
-    result = await configureSimulatorSupportOffering({ ...owner, manifest: JSON.parse(await readFile(resolve(input.manifestPath!), "utf8")), apply: input.apply,
+    result = await configureSimulatorSupportOffering({ ...owner, manifest: JSON.parse(await readFile(resolve(input.manifestPath!), "utf8")), apply: input.apply, repair: input.repair,
       expectedFingerprint: getSimulatorOfferingSourceFingerprint(offering), expectedOfferingRevision: offering.monitoringRevision });
   } else if (input.command === "classify") result = await classifySimulatorSupportOffering({ ...owner, evidence: JSON.parse(await readFile(resolve(input.manifestPath!), "utf8")), apply: input.apply });
   else if (input.command === "path") result = await claimSimulatorSupportPath({ ...owner, path: input.path! });
@@ -110,7 +126,8 @@ async function main() {
     result = await adoptSimulatorSupportSource({ ...owner, expectedFingerprint: getSimulatorOfferingSourceFingerprint(offering), expectedOfferingRevision: offering.monitoringRevision });
   } else if (input.command === "release") {
     const claim = await readSimulatorSupportClaim(owner);
-    const provenance = prepareSimulatorSupportReleaseProvenance({ releaseSha: input.releaseSha!, originalBaseSha: claim.baseSha, plannedPaths: claim.plannedPaths });
+    const provenance = prepareSimulatorSupportReleaseProvenance({ releaseSha: input.releaseSha!, originalBaseSha: claim.baseSha,
+      plannedPaths: claim.plannedPaths, priorReleaseSha: claim.releaseSha });
     result = await registerSimulatorSupportRelease({ ...owner, releaseSha: input.releaseSha!, branch: git(["branch", "--show-current"]),
       ...provenance });
   } else if (input.command === "deployed") {
@@ -125,6 +142,7 @@ async function main() {
   else if (input.command === "complete") {
     const claim = await readSimulatorSupportClaim(owner);
     if (!claim.releaseSha) throw new Error("Register the release SHA first.");
+    assertSimulatorSupportCompletionCheckout(claim.releaseSha);
     const currentDeployment = await waitForGitDeployment({ commitSha: claim.releaseSha, timeoutSeconds: 60, pollSeconds: 15 }, {
       listDeployments: () => vercelJson<VercelDeploymentList>(["ls", "--environment", "production", "--meta", `githubCommitSha=${claim.releaseSha}`, "--format", "json", "--limit", "20"]),
       inspectAlias: alias => vercelJson<VercelDeploymentInspection>(["inspect", alias, "--format", "json"]),

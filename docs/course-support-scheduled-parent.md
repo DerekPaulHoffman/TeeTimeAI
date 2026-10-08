@@ -46,8 +46,13 @@ manually free implementation or release ownership.
 Observe the same private supervisor/launcher receipts and process handles when
 useful; never restart healthy work because a wait returned. On an existing
 `continuationItems` handoff, follow `course-support-worker-continuation.md` using
-the original native worker and supported app tools. This retained compatibility
-path does not authorize creating a replacement. Read legacy worker instructions
+the original native worker. An expired owned simulator implementation or release
+stage requires the actual STOPPED or COMPLETED receipt and corresponding latest
+failed/interrupted or completed/error-null terminal-turn proof, plus one successful
+production `continue` reservation before the deterministic same-thread runner.
+That runner owns native `thread/resume`, `turn/start`, and `continued`
+acknowledgement; do not send another follow-up message or replay the first-turn
+launcher. Read legacy worker instructions
 only when the original plan returns the explicit tagged
 `legacyInspection.handoff`; an empty launch list is not such a handoff.
 

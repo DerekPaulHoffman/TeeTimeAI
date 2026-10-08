@@ -49,6 +49,50 @@ function delivered(value: ReturnType<typeof reserved>) {
 }
 
 describe("bounded same-original-native-worker continuation", () => {
+  it("identifies an expired owned implementation stage without renewing its immutable checkpoint", () => {
+    const stage: CourseSupportContinuationCheckpoint = { ...checkpoint, kind: "EXPIRED_OWNED_STAGE",
+      failure: null, requestId: null, readCount: 0, allowedResearchRouteCount: 0, claimLeaseExpired: true,
+      ownedStage: { phase: "IMPLEMENTING", claimedAt: "2026-10-07T07:30:00.000Z", plannedPaths: ["src/lib/simulators/provider.ts"],
+        releaseSha: null, deployment: null, recheckQueuedAt: null, verificationCycle: 0,
+        sourceFingerprint: input().sourceFingerprint, originalSourceFingerprint: input().sourceFingerprint,
+        offeringRevision: 1, branch: "automation/course-support-original" } };
+    const assessment = assessCourseSupportContinuationCheckpoint({ checkpoint: stage, currentMainSha: releaseSha, now });
+    expect(assessment).toMatchObject({ eligible: true, scope: "RESUME_ORIGINAL_OWNED_STAGE" });
+    expect(assessCourseSupportContinuationCheckpoint({ checkpoint: { ...stage, claimLeaseExpired: false },
+      currentMainSha: releaseSha, now })).toMatchObject({ eligible: false });
+    expect(assessCourseSupportContinuationCheckpoint({ checkpoint: { ...stage, providerReadInFlight: true },
+      currentMainSha: releaseSha, now })).toMatchObject({ eligible: false });
+    const stageDigest = assessment.eligible ? assessment.checkpointDigest : "";
+    const terminal = { version: 1, source: "codex_app.list_threads+codex_native.terminal_turn",
+      threadId: child, observedAt: now.toISOString(), threadStatus: "notLoaded", hostId: "local", projectId: "project", inventoryUpdatedAt: 1,
+      launcherReceiptDigest: "c".repeat(64), checkoutIdentityDigest: "d".repeat(64), observationDigest: "e".repeat(64),
+      latestTurn: { id: "stopped-native-turn", status: "failed", error: { message: "native failure" } } };
+    const readiness = { ...input().readiness, source: "original_native_stopped_launcher_receipt",
+      originalTurnId: "stopped-native-turn", ownedStageDigest: stageDigest };
+    expect(reserveCourseSupportContinuationReceipt({ ...input(), checkpoint: stage })).toMatchObject({ reserved: false });
+    const first = reserved({ ...input(), checkpoint: stage, nativeCompletion: terminal, readiness });
+    expect(first.receipt.scope).toBe("RESUME_ORIGINAL_OWNED_STAGE");
+    expect(reserveCourseSupportContinuationReceipt({ ...input(), checkpoint: stage, nativeCompletion: terminal,
+      readiness, ledger: delivered(first) })).toMatchObject({ reserved: false,
+        reason: "ORIGINAL_NATIVE_TURN_LINEAGE_UNPROVED" });
+    expect(reserveCourseSupportContinuationReceipt({ ...input(), checkpoint: stage, nativeCompletion: terminal, readiness, ledger: first.ledger }))
+      .toMatchObject({ reserved: false, reason: "PRIOR_SEND_UNCONFIRMED" });
+    const secondTurn = "second-native-turn";
+    const priorReceiptPath = "C:\\private\\continuation.receipt.private.json";
+    const sent = confirmCourseSupportContinuationSent({ ledger: first.ledger, key: first.receipt.key,
+      parentThreadId: "current-orchestrator", childThreadId: child, now,
+      toolReceipt: { source: "codex_native.turn_start", threadId: child, turnId: secondTurn,
+        receiptPath: priorReceiptPath, accepted: true } });
+    const later = { ...input(), now: new Date("2026-10-07T08:11:00.000Z"), checkpoint: stage,
+      ledger: sent, readiness: { ...readiness, observedAt: "2026-10-07T08:11:00.000Z" },
+      nativeCompletion: { ...terminal, observedAt: "2026-10-07T08:11:00.000Z",
+        priorContinuationTurnId: secondTurn, priorContinuationKey: first.receipt.key,
+        priorContinuationReceiptDigest: "f".repeat(64), latestTurn: { id: secondTurn, status: "interrupted", error: null } } };
+    expect(reserveCourseSupportContinuationReceipt(later)).toMatchObject({ reserved: true,
+      receipt: { attempt: 2, scope: "RESUME_ORIGINAL_OWNED_STAGE" } });
+    expect(reserveCourseSupportContinuationReceipt({ ...later, nativeCompletion: terminal }))
+      .toMatchObject({ reserved: false, reason: "NATIVE_COMPLETION_OR_READINESS_UNPROVED" });
+  });
   it("permits one different-route diagnosis for the recorded transport script cap after a newer release", () => {
     const capped: CourseSupportContinuationCheckpoint = { ...checkpoint, readCount: 2,
       requestId: "11111111-2222-4333-8444-555555555555", claimLeaseExpired: true, researchOnlyClaim: true,
@@ -410,6 +454,86 @@ function inventoryProjection(value = inventoryInput()) {
 }
 
 describe("bracketed supported inventory and read-only durable native history", () => {
+  it("accepts a completed original native turn when its owned implementation remains unresolved", () => {
+    const value = inventoryInput();
+    const initialTurn = "11111111-2222-7333-8444-555555555555";
+    const original = { ...JSON.parse(value.launcherReceiptBytes), status: "COMPLETED", turnStatus: "completed", turnId: initialTurn };
+    value.launcherReceiptBytes = JSON.stringify(original);
+    const native = value.nativeInventoryObservation.nativeObservation;
+    Object.assign(native, { terminalFailure: true });
+    native.launcherReceiptDigestBefore = createHash("sha256").update(value.launcherReceiptBytes).digest("hex");
+    native.launcherReceiptDigestAfter = native.launcherReceiptDigestBefore;
+    const turn = (native.rpcCalls[3].result as { data: Array<Record<string, unknown>> }).data[0];
+    Object.assign(turn, { id: initialTurn, status: "completed", error: null });
+    const owned: CourseSupportContinuationCheckpoint = { ...checkpoint, kind: "EXPIRED_OWNED_STAGE", failure: null,
+      requestId: null, readCount: 0, allowedResearchRouteCount: 0, claimLeaseExpired: true,
+      ownedStage: { phase: "VERIFYING", claimedAt: "2026-10-07T07:30:00.000Z",
+        plannedPaths: ["src/lib/simulators/provider.ts"], releaseSha: "b".repeat(40), deployment: null,
+        recheckQueuedAt: null, verificationCycle: 0, sourceFingerprint: input().sourceFingerprint,
+        originalSourceFingerprint: input().sourceFingerprint, offeringRevision: 1, branch: original.branch } };
+    Object.assign(value.runtimeObservation.inspection.guards, { clean: false, nativeIdentityPresent: false });
+    const request = buildCourseSupportContinuationRequest({ ...value, stoppedStage: owned,
+      changedPaths: ["src/lib/simulators/provider.ts"] });
+    expect(request.nativeCompletion).toMatchObject({ source: "codex_app.list_threads+codex_native.terminal_turn",
+      latestTurn: { id: initialTurn, status: "completed", error: null } });
+    expect(reserveCourseSupportContinuationReceipt({ ...input(), checkpoint: owned, ...request })).toMatchObject({ reserved: true });
+    Object.assign(turn, { error: { message: "failed" } });
+    expect(() => buildCourseSupportContinuationRequest({ ...value, stoppedStage: owned,
+      changedPaths: ["src/lib/simulators/provider.ts"] })).toThrow();
+  });
+  it("projects a stopped owned implementation only from an exact terminal native turn and registered dirty paths", () => {
+    const value = inventoryInput();
+    const turnId = "11111111-2222-7333-8444-555555555555";
+    const stopped = { ...JSON.parse(value.launcherReceiptBytes), status: "STOPPED", turnStatus: undefined, turnId };
+    value.launcherReceiptBytes = JSON.stringify(stopped);
+    const native = value.nativeInventoryObservation.nativeObservation;
+    Object.assign(native, { terminalFailure: true });
+    native.launcherReceiptDigestBefore = createHash("sha256").update(value.launcherReceiptBytes).digest("hex");
+    native.launcherReceiptDigestAfter = native.launcherReceiptDigestBefore;
+    const turn = (native.rpcCalls[3].result as { data: Array<Record<string, unknown>> }).data[0];
+    Object.assign(turn, { id: turnId, status: "failed", error: { message: "native failed" } });
+    const owned: CourseSupportContinuationCheckpoint = { ...checkpoint, kind: "EXPIRED_OWNED_STAGE", failure: null,
+      requestId: null, readCount: 0, allowedResearchRouteCount: 0, claimLeaseExpired: true,
+      ownedStage: { phase: "IMPLEMENTING", claimedAt: "2026-10-07T07:30:00.000Z", plannedPaths: ["src/lib/simulators/provider.ts"],
+        releaseSha: null, deployment: null, recheckQueuedAt: null, verificationCycle: 0,
+        sourceFingerprint: input().sourceFingerprint, originalSourceFingerprint: input().sourceFingerprint,
+        offeringRevision: 1, branch: stopped.branch } };
+    const runtime = value.runtimeObservation;
+    Object.assign(runtime.inspection.guards, { clean: false, nativeIdentityPresent: false });
+    const request = buildCourseSupportContinuationRequest({ ...value, stoppedStage: owned,
+      changedPaths: ["src/lib/simulators/provider.ts"], expectedClaim: { token: "11111111-2222-4333-8444-555555555555", revision: 7 } });
+    expect(request.nativeCompletion).toMatchObject({ source: "codex_app.list_threads+codex_native.terminal_turn",
+      latestTurn: { id: turnId, status: "failed" } });
+    expect(request.readiness).toMatchObject({ source: "original_native_stopped_launcher_receipt", originalTurnId: turnId });
+    expect(reserveCourseSupportContinuationReceipt({ ...input(), checkpoint: owned, ...request })).toMatchObject({ reserved: true });
+    const repeated = structuredClone(value);
+    const priorTurnId = "bbbbbbbb-cccc-7ddd-8eee-ffffffffffff";
+    const prior = { turnId: priorTurnId, key: "f".repeat(64), receiptPath: "C:\\private\\continuation.receipt.private.json" };
+    const repeatedNative = repeated.nativeInventoryObservation.nativeObservation;
+    const repeatedTurn = (repeatedNative.rpcCalls[3].result as { data: Array<Record<string, unknown>> }).data[0];
+    Object.assign(repeatedTurn, { id: priorTurnId, status: "interrupted", error: null });
+    Object.assign(repeatedNative, { priorContinuationTurnId: priorTurnId, priorContinuationKey: prior.key,
+      priorContinuationReceiptPath: prior.receiptPath, priorContinuationReceiptDigestBefore: "a".repeat(64),
+      priorContinuationReceiptDigestAfter: "a".repeat(64) });
+    for (const observed of [repeatedNative.processObservationBefore, repeatedNative.processObservationAfter]) {
+      observed.processes.push({ pid: 303, state: "absent" }, { pid: 304, state: "absent" });
+    }
+    const resumed = buildCourseSupportContinuationRequest({ ...repeated, stoppedStage: owned,
+      changedPaths: ["src/lib/simulators/provider.ts"], expectedTerminalTurnId: priorTurnId,
+      expectedNativeContinuation: prior });
+    expect(resumed.nativeCompletion).toMatchObject({ priorContinuationTurnId: priorTurnId,
+      priorContinuationKey: prior.key, latestTurn: { id: priorTurnId, status: "interrupted" } });
+    repeatedNative.priorContinuationReceiptDigestAfter = "b".repeat(64);
+    expect(() => buildCourseSupportContinuationRequest({ ...repeated, stoppedStage: owned,
+      changedPaths: ["src/lib/simulators/provider.ts"], expectedTerminalTurnId: priorTurnId,
+      expectedNativeContinuation: prior })).toThrow();
+    expect(() => buildCourseSupportContinuationRequest({ ...value, stoppedStage: owned,
+      changedPaths: ["src/lib/unknown.ts"] })).toThrow();
+    const active = structuredClone(value);
+    active.nativeInventoryObservation.inventoryAfter.snapshot.threads[0].status = "active";
+    expect(() => buildCourseSupportContinuationRequest({ ...active, stoppedStage: owned,
+      changedPaths: ["src/lib/simulators/provider.ts"] })).toThrow();
+  });
   it("matches pinned creation-time metadata to the actual latest turn completion without rewriting timestamps", () => {
     const value = inventoryInput();
     const observation = value.nativeInventoryObservation;

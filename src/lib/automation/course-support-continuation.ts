@@ -33,12 +33,19 @@ const inventoryNativeCompletionSchema = z.object({
   launcherReceiptDigest: digest, checkoutIdentityDigest: digest, observationDigest: digest,
   latestTurn: z.object({ id: reference, status: z.literal("completed"), error: z.null() }).strict(),
 }).strict();
+const terminalInventoryNativeCompletionSchema = inventoryNativeCompletionSchema.extend({
+  source: z.literal("codex_app.list_threads+codex_native.terminal_turn"),
+  priorContinuationTurnId: reference.optional(), priorContinuationKey: digest.optional(),
+  priorContinuationReceiptDigest: digest.optional(),
+  latestTurn: z.object({ id: reference, status: z.enum(["completed", "failed", "interrupted"]),
+    error: z.union([z.null(), z.object({ message: z.string().min(1) }).passthrough()]) }).strict(),
+}).strict().refine(value => value.latestTurn.status !== "completed" || value.latestTurn.error === null);
 export const courseSupportNativeCompletionSchema = z.discriminatedUnion("source", [
-  waitThreadsNativeCompletionSchema, inventoryNativeCompletionSchema,
+  waitThreadsNativeCompletionSchema, inventoryNativeCompletionSchema, terminalInventoryNativeCompletionSchema,
 ]);
 export type CourseSupportNativeCompletion = z.infer<typeof courseSupportNativeCompletionSchema>;
 
-export const courseSupportContinuationReadinessSchema = z.object({
+const completedReadinessSchema = z.object({
   version: z.literal(1), source: z.literal("original_native_launcher_receipt"),
   threadId: reference, observedAt: instant, launcherReceiptDigest: digest,
   checkoutIdentityDigest: digest, privateOriginalChild: z.literal(true),
@@ -46,9 +53,14 @@ export const courseSupportContinuationReadinessSchema = z.object({
   nativeIdentityVerified: z.literal(true), noApprovalRequired: z.literal(true),
   sameProfile: z.literal(true), runtimeReady: z.literal(true), toolingReleaseSha: sha,
 }).strict();
+const stoppedReadinessSchema = completedReadinessSchema.extend({
+  source: z.literal("original_native_stopped_launcher_receipt"), originalTurnId: reference,
+  ownedStageDigest: digest,
+}).strict();
+export const courseSupportContinuationReadinessSchema = z.discriminatedUnion("source", [completedReadinessSchema, stoppedReadinessSchema]);
 export type CourseSupportContinuationReadiness = z.infer<typeof courseSupportContinuationReadinessSchema>;
 
-const scopeSchema = z.enum(["RESUME_ALLOWED_RESEARCH", "DIAGNOSE_REVIEWED_TOOLING_UPDATE"]);
+const scopeSchema = z.enum(["RESUME_ALLOWED_RESEARCH", "DIAGNOSE_REVIEWED_TOOLING_UPDATE", "RESUME_ORIGINAL_OWNED_STAGE"]);
 export type CourseSupportContinuationScope = z.infer<typeof scopeSchema>;
 const receiptSchema = z.object({
   version: z.literal(1), policyVersion: z.literal(COURSE_SUPPORT_CONTINUATION_POLICY_VERSION),
@@ -57,15 +69,24 @@ const receiptSchema = z.object({
   childThreadId: reference, attempt: z.number().int().min(1).max(COURSE_SUPPORT_CONTINUATION_MAX_ATTEMPTS),
   tickRef: reference, requestedAt: instant, scope: scopeSchema,
   status: z.enum(["PENDING", "SENT"]), sentAt: instant.nullable(),
-}).strict().refine(receipt => (receipt.status === "SENT") === (receipt.sentAt !== null));
+  nativeTurnId: reference.optional(), nativeReceiptPath: z.string().min(1).optional(),
+}).strict().refine(receipt => (receipt.status === "SENT") === (receipt.sentAt !== null) &&
+  Boolean(receipt.nativeTurnId) === Boolean(receipt.nativeReceiptPath) &&
+  (receipt.status === "SENT" || !receipt.nativeTurnId));
 const ledgerSchema = z.object({ version: z.literal(1), receipts: z.array(receiptSchema).max(8) }).strict()
   .refine(ledger => new Set(ledger.receipts.map(receipt => receipt.key)).size === ledger.receipts.length)
   .refine(ledger => ledger.receipts.every((receipt, index) => receipt.attempt ===
     ledger.receipts.slice(0, index + 1).filter(entry => entry.sourceFingerprint === receipt.sourceFingerprint).length));
 export type CourseSupportContinuationLedger = z.infer<typeof ledgerSchema>;
 
+export function latestConfirmedNativeContinuation(ledgerValue: unknown) {
+  const receipts = readCourseSupportContinuationLedger(ledgerValue).receipts;
+  const native = [...receipts].reverse().find(receipt => receipt.status === "SENT");
+  return native?.nativeTurnId ? { turnId: native.nativeTurnId, key: native.key, receiptPath: native.nativeReceiptPath! } : null;
+}
+
 export type CourseSupportContinuationCheckpoint = {
-  kind: "SETTLED_FAILURE" | "EXPIRED_UNFINISHED_READ" | "EXPIRED_SETTLED_PUBLIC_READ";
+  kind: "SETTLED_FAILURE" | "EXPIRED_UNFINISHED_READ" | "EXPIRED_SETTLED_PUBLIC_READ" | "EXPIRED_OWNED_STAGE";
   observedAt: string;
   readCount: number;
   requestId: string | null;
@@ -74,6 +95,12 @@ export type CourseSupportContinuationCheckpoint = {
   providerReadInFlight: boolean;
   claimLeaseExpired?: boolean;
   researchOnlyClaim?: boolean;
+  ownedStage?: {
+    phase: "IMPLEMENTING" | "VERIFYING"; claimedAt: string; plannedPaths: string[];
+    releaseSha: string | null; deployment: unknown; recheckQueuedAt: string | null;
+    verificationCycle: number; sourceFingerprint: string; originalSourceFingerprint: string;
+    offeringRevision: number; branch: string;
+  };
   publicReadEvidence?: { sourceFingerprint: string; accessControlsObserved: true; accessControls: Array<"CAPTCHA_OR_CHALLENGE" | "ACCOUNT_REQUIRED" | "QUEUE">;
     method: "HTTP" | "BROWSER"; renderComplete?: boolean; httpStatus: number };
 };
@@ -92,6 +119,7 @@ export const courseSupportContinuationRequestSchema = z.object({
   policyVersion: z.literal(COURSE_SUPPORT_CONTINUATION_POLICY_VERSION),
   nativeCompletion: courseSupportNativeCompletionSchema,
   readiness: courseSupportContinuationReadinessSchema,
+  expectedClaim: z.object({ token: z.string().uuid(), revision: z.number().int().positive() }).strict().optional(),
   reviewedToolingRepair: z.object({
     policyVersion: z.literal(COURSE_SUPPORT_CONTINUATION_POLICY_VERSION), releaseSha: sha,
     source: z.literal("git"), state: z.literal("READY"), branch: z.literal("main"),
@@ -101,8 +129,11 @@ export const courseSupportContinuationRequestSchema = z.object({
 
 export const courseSupportContinuationSentRequestSchema = z.object({
   continuationKey: digest, childThreadId: reference,
-  toolReceipt: z.object({ source: z.literal("codex_app.send_message_to_thread"),
-    threadId: reference, accepted: z.literal(true) }).strict(),
+  toolReceipt: z.discriminatedUnion("source", [
+    z.object({ source: z.literal("codex_app.send_message_to_thread"), threadId: reference, accepted: z.literal(true) }).strict(),
+    z.object({ source: z.literal("codex_native.turn_start"), threadId: reference, turnId: reference,
+      receiptPath: z.string().min(1), accepted: z.literal(true) }).strict(),
+  ]),
 }).strict();
 
 function object(value: unknown): Record<string, unknown> {
@@ -110,8 +141,9 @@ function object(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function assertObservedInactiveFlags(value: Record<string, unknown>) {
+function assertObservedInactiveFlags(value: Record<string, unknown>, terminalTurn = false) {
   for (const key of ["activeTurnId", "activeTurn", "pendingTurn", "pendingApproval", "approvalRequired", "needsAttention", "error"]) {
+    if (terminalTurn && key === "error") continue;
     if (value[key] !== undefined && value[key] !== null && value[key] !== false) throw new Error("Native continuation needs attention.");
   }
   for (const key of ["approvalRequests", "approvalRequestCount", "pendingApprovalCount"]) {
@@ -177,10 +209,14 @@ const observedProcessesSchema = z.object({ observedAt: instant,
 }).strict();
 const nativeObserverSchema = z.object({
   version: z.literal(1), source: z.literal("original_codex_read_only_observer"),
+  terminalFailure: z.literal(true).optional(),
   phase: z.literal("READ_ONLY_OBSERVATION_COMPLETE"), observedAt: instant, finishedAt: instant,
   threadId: reference, cliVersion: z.literal(qualifiedObserverCliVersion),
   cliExecutableDigest: z.literal(qualifiedObserverExecutableDigest),
   launcherReceiptDigestBefore: digest, launcherReceiptDigestAfter: digest,
+  priorContinuationTurnId: reference.optional(), priorContinuationKey: digest.optional(),
+  priorContinuationReceiptPath: z.string().min(1).optional(),
+  priorContinuationReceiptDigestBefore: digest.optional(), priorContinuationReceiptDigestAfter: digest.optional(),
   observerApprovalRequestCount: z.literal(0),
   processObservationBefore: observedProcessesSchema, processObservationAfter: observedProcessesSchema,
   rpcCalls: z.array(z.object({ method: z.string(), params: z.record(z.string(), z.unknown()), result: z.unknown() }).strict()).length(4),
@@ -219,22 +255,33 @@ function inventoryObservation(value: unknown, expectedThreadId: string) {
 export function projectCourseSupportInventoryNativeCompletion(input: {
   inventoryBefore: unknown; inventoryAfter: unknown; nativeObservation: unknown;
   launcherReceiptBytes: string | Uint8Array; expectedThreadId: string; expectedCheckout: string;
-  expectedProjectId: string; now: Date;
-}): z.infer<typeof inventoryNativeCompletionSchema> {
+  expectedProjectId: string; now: Date; terminalFailure?: boolean; expectedTerminalTurnId?: string;
+  expectedNativeContinuation?: { turnId: string; key: string; receiptPath: string } | null;
+}): z.infer<typeof inventoryNativeCompletionSchema> | z.infer<typeof terminalInventoryNativeCompletionSchema> {
   const before = inventoryObservation(input.inventoryBefore, input.expectedThreadId);
   const after = inventoryObservation(input.inventoryAfter, input.expectedThreadId);
   const native = nativeObserverSchema.parse(input.nativeObservation);
   const bytes = typeof input.launcherReceiptBytes === "string" ? Buffer.from(input.launcherReceiptBytes, "utf8") : Buffer.from(input.launcherReceiptBytes);
   const receipt = object(JSON.parse(bytes.toString("utf8").replace(/^\uFEFF/u, "")));
+  const terminalFailure = input.terminalFailure === true;
+  const prior = input.expectedNativeContinuation;
   const launcherReceiptDigest = createHash("sha256").update(bytes).digest("hex");
   const checkout = normalizedPrivateCheckout(input.expectedCheckout);
   const times = [before.observedAt, native.observedAt, native.finishedAt, after.observedAt];
   if (!reference.safeParse(input.expectedProjectId).success || native.threadId !== input.expectedThreadId ||
+      (terminalFailure ? native.terminalFailure !== true ||
+        !["STOPPED", "COMPLETED"].includes(receipt.status as string) ||
+        (receipt.status === "COMPLETED" && receipt.turnStatus !== "completed") ||
+        !reference.safeParse(receipt.turnId).success : native.terminalFailure !== undefined || receipt.status !== "COMPLETED") ||
       receipt.threadId !== input.expectedThreadId || receipt.cliVersion !== qualifiedObserverCliVersion ||
       normalizedPrivateCheckout(receipt.cwd) !== checkout || before.checkout !== checkout || after.checkout !== checkout ||
       before.thread.projectId !== input.expectedProjectId || after.thread.projectId !== input.expectedProjectId ||
       before.thread.updatedAt !== after.thread.updatedAt || before.thread.status !== after.thread.status ||
       native.launcherReceiptDigestBefore !== launcherReceiptDigest || native.launcherReceiptDigestAfter !== launcherReceiptDigest ||
+      (prior ? native.priorContinuationTurnId !== prior.turnId || native.priorContinuationKey !== prior.key ||
+        native.priorContinuationReceiptPath !== prior.receiptPath ||
+        native.priorContinuationReceiptDigestBefore !== native.priorContinuationReceiptDigestAfter :
+        native.priorContinuationTurnId !== undefined || native.priorContinuationKey !== undefined) ||
       !times.every(value => fresh(value, input.now)) || times.some((value, index) => index > 0 && Date.parse(value) < Date.parse(times[index - 1]))) {
     throw new Error("The original worker completion observations are stale, changed or unbracketed.");
   }
@@ -246,6 +293,10 @@ export function projectCourseSupportInventoryNativeCompletion(input: {
           processes.processes.find(process => process.pid === pid)?.state !== "absent") {
         throw new Error("The original launcher and server have not both ended.");
       }
+    }
+    if (prior && (processes.processes.length !== 4 ||
+        processes.processes.slice(2).some(process => process.state !== "absent"))) {
+      throw new Error("Prior native continuation processes have not ended.");
     }
   }
   const [initialize, profiles, read, turns] = native.rpcCalls;
@@ -279,19 +330,31 @@ export function projectCourseSupportInventoryNativeCompletion(input: {
     latestTurn.completedAt === after.thread.updatedAt;
   if (nativeThread.id !== input.expectedThreadId || normalizedPrivateCheckout(nativeThread.cwd) !== checkout ||
       !(metadataMatches || turnTimestampMatches) || nativeThread.cliVersion !== "0.160.1" || nativeThread.ephemeral !== false ||
-      !["idle", "notLoaded"].includes(nativeStatus.type as string) || latestTurn.status !== "completed" || latestTurn.error !== null ||
+      !["idle", "notLoaded"].includes(nativeStatus.type as string) || (terminalFailure ?
+        !["failed", "interrupted", "completed"].includes(latestTurn.status as string) ||
+        latestTurn.id !== (input.expectedTerminalTurnId ?? receipt.turnId) ||
+        (!prior && latestTurn.status !== "completed" && receipt.status !== "STOPPED") ||
+        (latestTurn.status === "completed" ? latestTurn.error !== null :
+          latestTurn.error !== undefined && latestTurn.error !== null &&
+          (typeof latestTurn.error !== "object" || typeof object(latestTurn.error).message !== "string")) :
+        latestTurn.status !== "completed" || latestTurn.error !== null) ||
       latestTurn.itemsView !== "notLoaded" || !Array.isArray(latestTurn.items) || latestTurn.items.length !== 0 ||
       !reference.safeParse(latestTurn.id).success) throw new Error("The native read does not prove the latest completed original turn.");
-  for (const value of [object(read.result), nativeThread, nativeStatus, page, latestTurn]) assertObservedInactiveFlags(value);
-  return inventoryNativeCompletionSchema.parse({ version: 1, source: COURSE_SUPPORT_INVENTORY_COMPLETION_SOURCE,
+  for (const value of [object(read.result), nativeThread, nativeStatus, page]) assertObservedInactiveFlags(value);
+  assertObservedInactiveFlags(latestTurn, terminalFailure);
+  const projected = { version: 1, source: terminalFailure ? "codex_app.list_threads+codex_native.terminal_turn" : COURSE_SUPPORT_INVENTORY_COMPLETION_SOURCE,
     threadId: input.expectedThreadId, observedAt: after.observedAt, threadStatus: after.thread.status,
     hostId: after.thread.hostId, projectId: after.thread.projectId, inventoryUpdatedAt: after.thread.updatedAt,
     nativeUpdatedAt: nativeThread.updatedAt,
     ...(Number.isSafeInteger(latestTurn.completedAt) && (latestTurn.completedAt as number) >= 0 ? { nativeLatestTurnCompletedAt: latestTurn.completedAt } : {}),
     completionTimestampSource: metadataMatches ? "NATIVE_THREAD_METADATA" : "NATIVE_LATEST_COMPLETED_TURN",
     launcherReceiptDigest, checkoutIdentityDigest: hash(checkout),
+    ...(prior ? { priorContinuationTurnId: prior.turnId, priorContinuationKey: prior.key,
+      priorContinuationReceiptDigest: native.priorContinuationReceiptDigestBefore } : {}),
     observationDigest: hash({ before: input.inventoryBefore, native: input.nativeObservation, after: input.inventoryAfter }),
-    latestTurn: { id: latestTurn.id, status: "completed", error: null } });
+    latestTurn: terminalFailure ? { id: latestTurn.id, status: latestTurn.status, error: latestTurn.error ?? null } :
+      { id: latestTurn.id, status: "completed", error: null } };
+  return terminalFailure ? terminalInventoryNativeCompletionSchema.parse(projected) : inventoryNativeCompletionSchema.parse(projected);
 }
 
 const readyToolingSchema = z.object({
@@ -313,17 +376,34 @@ export function projectCourseSupportContinuationReadiness(input: {
   upstreamObservation: unknown;
   observedAt: string;
   now: Date;
+  stoppedStage?: CourseSupportContinuationCheckpoint;
+  changedPaths?: string[];
+  expectedTerminalTurnId?: string;
+  expectedNativeContinuation?: { turnId: string; key: string; receiptPath: string } | null;
 }): CourseSupportContinuationReadiness {
   const bytes = typeof input.launcherReceiptBytes === "string" ? Buffer.from(input.launcherReceiptBytes, "utf8") : Buffer.from(input.launcherReceiptBytes);
   if (bytes.length < 2 || bytes.length > 32_768 || !fresh(input.observedAt, input.now)) throw new Error("Original launcher receipt is unavailable or stale.");
   const receipt = object(JSON.parse(bytes.toString("utf8").replace(/^\uFEFF/u, "")));
   const checkout = normalizedPrivateCheckout(input.expectedCheckout);
+  const stage = input.stoppedStage;
+  const stopped = stage?.kind === "EXPIRED_OWNED_STAGE" && stage.ownedStage !== undefined;
+  if (stage && !stopped) throw new Error("Stopped readiness requires the original owned stage.");
+  if (stopped) {
+    const planned = stage.ownedStage!.plannedPaths;
+    const changed = input.changedPaths;
+    if (!Array.isArray(changed) || changed.some(path => typeof path !== "string" || !path || path.includes("\\") ||
+        path.startsWith("/") || path.split("/").includes("..") || !planned.includes(path))) {
+      throw new Error("Original dirty checkout has unregistered or post-release changes.");
+    }
+  }
   const sandbox = object(receipt.sandbox);
   const profile = object(receipt.activePermissionProfile);
-  if (receipt.status !== "COMPLETED" || receipt.threadId !== input.expectedThreadId ||
+  if ((stopped ? !["STOPPED", "COMPLETED"].includes(receipt.status as string) ||
+      (receipt.status === "COMPLETED" && receipt.turnStatus !== "completed") || !reference.safeParse(receipt.turnId).success :
+      receipt.status !== "COMPLETED" || receipt.turnStatus !== "completed") || receipt.threadId !== input.expectedThreadId ||
       receipt.nativeIdentityVerified !== true || receipt.approvalRequests !== 0 || receipt.approvalPolicy !== "never" ||
       sandbox.type !== "dangerFullAccess" || profile.id !== ":danger-full-access" ||
-      receipt.turnStatus !== "completed" || normalizedPrivateCheckout(receipt.cwd) !== checkout ||
+      normalizedPrivateCheckout(receipt.cwd) !== checkout ||
       receipt.branch !== input.expectedBranch || !/^automation\/course-support-[a-z0-9][a-z0-9-]*$/u.test(input.expectedBranch) ||
       receipt.baseSha !== input.expectedOriginalBaseSha || !sha.safeParse(input.expectedOriginalBaseSha).success) {
     throw new Error("Original native launcher identity or profile does not match.");
@@ -347,7 +427,7 @@ export function projectCourseSupportContinuationReadiness(input: {
   const smoke = object(runtime.browserSmoke);
   if (normalizedPrivateCheckout(runtime.checkout) !== checkout || !fresh(runtime.observedAt as string, input.now) ||
       !fresh(inspection.observedAt as string, input.now) || !fresh(processes.observedAt, input.now) ||
-      !["ownCurrentCheckout", "nativeIdentityPresent", "linkedWorktree", "namedWorkerBranch", "clean",
+      !["ownCurrentCheckout", ...(stopped ? [] : ["nativeIdentityPresent"]), "linkedWorktree", "namedWorkerBranch", ...(stopped ? [] : ["clean"]),
         "selectedCheckoutDistinct", "sameRepository", "bindingMatches", "dependenciesPrivate"].every(key => guards[key] === true) ||
       runtimeVersion.status !== "available" || typeof runtimeVersion.nodeVersion !== "string" ||
       !/^v\d+\.\d+\.\d+$/u.test(runtimeVersion.nodeVersion) || typeof runtimeVersion.npmVersion !== "string" ||
@@ -362,16 +442,18 @@ export function projectCourseSupportContinuationReadiness(input: {
   if (!fresh(upstream.observedAt, input.now) || upstream.originalBaseSha !== input.expectedOriginalBaseSha ||
       upstream.originMainSha !== tooling.commitSha || !["teetimespot.com", "www.teetimespot.com"].every(alias => tooling.aliases.includes(alias)) ||
       Date.parse(tooling.deployedAt) > input.now.getTime()) throw new Error("The exact reviewed Ready main tooling release is unavailable.");
-  return courseSupportContinuationReadinessSchema.parse({ version: 1, source: "original_native_launcher_receipt",
+  return courseSupportContinuationReadinessSchema.parse({ version: 1, source: stopped ? "original_native_stopped_launcher_receipt" : "original_native_launcher_receipt",
     threadId: input.expectedThreadId, observedAt: input.observedAt,
     launcherReceiptDigest: createHash("sha256").update(bytes).digest("hex"), checkoutIdentityDigest: hash(checkout),
     privateOriginalChild: true, approvalPolicy: "never", sandboxMode: "danger-full-access",
     nativeIdentityVerified: true, noApprovalRequired: true, sameProfile: true, runtimeReady: true,
+    ...(stopped ? { originalTurnId: receipt.turnId, ownedStageDigest: checkpointDigest(stage) } : {}),
     toolingReleaseSha: tooling.commitSha });
 }
 
 export function buildCourseSupportContinuationRequest(input: Parameters<typeof projectCourseSupportContinuationReadiness>[0] & {
   reviewedToolingDiagnosis: boolean;
+  expectedClaim?: { token: string; revision: number };
 } & ({ nativeSnapshot: unknown; nativeInventoryObservation?: never } | { nativeSnapshot?: never;
   nativeInventoryObservation: { inventoryBefore: unknown; inventoryAfter: unknown; nativeObservation: unknown; expectedProjectId: string };
 })) {
@@ -380,11 +462,14 @@ export function buildCourseSupportContinuationRequest(input: Parameters<typeof p
   const inventory = input.nativeInventoryObservation;
   const nativeCompletion = inventory ? projectCourseSupportInventoryNativeCompletion({ ...inventory,
     launcherReceiptBytes: input.launcherReceiptBytes, expectedThreadId: input.expectedThreadId,
-    expectedCheckout: input.expectedCheckout, now: input.now }) : projectCourseSupportNativeCompletion({ snapshot: input.nativeSnapshot,
+    expectedCheckout: input.expectedCheckout, now: input.now, terminalFailure: input.stoppedStage?.kind === "EXPIRED_OWNED_STAGE",
+    expectedTerminalTurnId: input.expectedTerminalTurnId,
+    expectedNativeContinuation: input.expectedNativeContinuation }) : projectCourseSupportNativeCompletion({ snapshot: input.nativeSnapshot,
       expectedThreadId: input.expectedThreadId, observedAt: input.observedAt, now: input.now });
   const tooling = readyToolingSchema.parse(input.toolingDeploymentProof);
   return courseSupportContinuationRequestSchema.parse({ policyVersion: COURSE_SUPPORT_CONTINUATION_POLICY_VERSION,
-    readiness, nativeCompletion, ...(input.reviewedToolingDiagnosis ? { reviewedToolingRepair: {
+    readiness, nativeCompletion, ...(input.expectedClaim ? { expectedClaim: input.expectedClaim } : {}),
+    ...(input.reviewedToolingDiagnosis ? { reviewedToolingRepair: {
       policyVersion: COURSE_SUPPORT_CONTINUATION_POLICY_VERSION, releaseSha: tooling.commitSha,
       source: tooling.source, state: tooling.state, branch: tooling.branch, aliases: tooling.aliases, deployedAt: tooling.deployedAt,
     } } : {}) });
@@ -399,6 +484,7 @@ function checkpointDigest(checkpoint: CourseSupportContinuationCheckpoint) {
   // a new attempt for the same settled failure.
   return hash({ kind: checkpoint.kind, observedAt: checkpoint.observedAt, readCount: checkpoint.readCount,
     requestId: checkpoint.requestId, failure: checkpoint.failure,
+    ...(checkpoint.ownedStage ? { ownedStage: checkpoint.ownedStage } : {}),
     ...(checkpoint.publicReadEvidence ? { publicReadEvidence: checkpoint.publicReadEvidence } : {}) });
 }
 
@@ -458,6 +544,10 @@ function hasReviewedSecondaryCheckpoint(checkpoint: CourseSupportContinuationChe
 
 /** Read-only candidates still require fresh native and exact-release proof. */
 export function isCourseSupportContinuationCandidateCheckpoint(checkpoint: CourseSupportContinuationCheckpoint) {
+  if (checkpoint.kind === "EXPIRED_OWNED_STAGE") return checkpoint.providerReadInFlight === false &&
+    checkpoint.claimLeaseExpired === true && checkpoint.ownedStage !== undefined &&
+    ["IMPLEMENTING", "VERIFYING"].includes(checkpoint.ownedStage.phase) &&
+    (checkpoint.ownedStage.plannedPaths.length > 0 || checkpoint.ownedStage.releaseSha !== null);
   if (checkpoint.providerReadInFlight || !Number.isInteger(checkpoint.readCount) || checkpoint.readCount < 1 || checkpoint.readCount > 6) return false;
   if (checkpoint.kind === "EXPIRED_UNFINISHED_READ") return checkpoint.failure === null && Boolean(checkpoint.requestId);
   if (checkpoint.kind === "EXPIRED_SETTLED_PUBLIC_READ") return hasSettledPublicEvidence(checkpoint);
@@ -480,9 +570,14 @@ export function assessCourseSupportContinuationCandidate(input: {
   if (ledger.receipts.some(receipt => receipt.status === "PENDING")) {
     return { candidate: false as const, reason: "PRIOR_SEND_UNCONFIRMED" };
   }
+  if (input.checkpoint.kind === "EXPIRED_OWNED_STAGE" &&
+      ledger.receipts.some(receipt => receipt.status === "SENT") && !latestConfirmedNativeContinuation(ledger)) {
+    return { candidate: false as const, reason: "ORIGINAL_NATIVE_TURN_LINEAGE_UNPROVED" };
+  }
   if (ledger.receipts.length >= 8) return { candidate: false as const, reason: "CONTINUATION_HISTORY_BOUND_EXCEEDED" };
   const sourceReceipts = ledger.receipts.filter(receipt => receipt.sourceFingerprint === input.sourceFingerprint);
-  if (sourceReceipts.some(receipt => receipt.checkpointDigest === checkpointDigest(input.checkpoint))) {
+  if (sourceReceipts.some(receipt => receipt.checkpointDigest === checkpointDigest(input.checkpoint)) &&
+      !(input.checkpoint.kind === "EXPIRED_OWNED_STAGE" && latestConfirmedNativeContinuation(ledger))) {
     return { candidate: false as const, reason: "CHECKPOINT_ALREADY_REQUESTED" };
   }
   const diagnostic = input.checkpoint.kind === "EXPIRED_UNFINISHED_READ" || input.checkpoint.failure?.category === "TOOLING" ||
@@ -503,12 +598,16 @@ export function assessCourseSupportContinuationCheckpoint(input: {
   { eligible: false; reason: string } {
   const { checkpoint, reviewedToolingRepair: repair, now } = input;
   if (!Number.isFinite(now.getTime()) || !sha.safeParse(input.currentMainSha).success ||
-      !Number.isInteger(checkpoint.readCount) || checkpoint.readCount < 1 || checkpoint.readCount > 6 ||
-      !Number.isInteger(checkpoint.allowedResearchRouteCount) || checkpoint.allowedResearchRouteCount < 0 ||
+      (checkpoint.kind !== "EXPIRED_OWNED_STAGE" && (!Number.isInteger(checkpoint.readCount) || checkpoint.readCount < 1 || checkpoint.readCount > 6 ||
+      !Number.isInteger(checkpoint.allowedResearchRouteCount) || checkpoint.allowedResearchRouteCount < 0)) ||
       !Number.isFinite(Date.parse(checkpoint.observedAt)) || Date.parse(checkpoint.observedAt) > now.getTime()) {
     return { eligible: false, reason: "INVALID_CHECKPOINT" };
   }
   if (checkpoint.providerReadInFlight) return { eligible: false, reason: "PROVIDER_READ_STILL_ACTIVE" };
+  if (checkpoint.kind === "EXPIRED_OWNED_STAGE") {
+    if (!isCourseSupportContinuationCandidateCheckpoint(checkpoint)) return { eligible: false, reason: "ORIGINAL_OWNED_STAGE_NOT_CURRENT" };
+    return { eligible: true, scope: "RESUME_ORIGINAL_OWNED_STAGE", checkpointDigest: checkpointDigest(checkpoint) };
+  }
   const failure = checkpoint.failure;
   if (checkpoint.kind === "EXPIRED_SETTLED_PUBLIC_READ" && hasSettledPublicEvidence(checkpoint) &&
       Date.parse(checkpoint.observedAt) >= now.getTime() - 30 * 60_000) {
@@ -558,9 +657,14 @@ export function reserveCourseSupportContinuationReceipt(input: {
   now: Date;
 }) {
   const ledger = readCourseSupportContinuationLedger(input.ledger);
+  if (input.checkpoint.kind === "EXPIRED_OWNED_STAGE" &&
+      ledger.receipts.some(receipt => receipt.status === "SENT") && !latestConfirmedNativeContinuation(ledger)) {
+    return { reserved: false as const, reason: "ORIGINAL_NATIVE_TURN_LINEAGE_UNPROVED" };
+  }
   if (![input.assignmentRef, input.childThreadId, input.parentThreadId].every(value => reference.safeParse(value).success) ||
       input.childThreadId === input.parentThreadId || !digest.safeParse(input.sourceFingerprint).success ||
       !input.currentSource || !input.originalPrivateChild ||
+      input.checkpoint.kind === "EXPIRED_OWNED_STAGE" && input.checkpoint.ownedStage?.sourceFingerprint !== input.sourceFingerprint ||
       input.checkpoint.kind === "EXPIRED_SETTLED_PUBLIC_READ" && input.checkpoint.publicReadEvidence?.sourceFingerprint !== input.sourceFingerprint) return { reserved: false as const, reason: "ORIGINAL_SOURCE_OR_OWNER_NOT_CURRENT" };
   const native = courseSupportNativeCompletionSchema.safeParse(input.nativeCompletion);
   const readiness = courseSupportContinuationReadinessSchema.safeParse(input.readiness);
@@ -569,7 +673,20 @@ export function reserveCourseSupportContinuationReceipt(input: {
       !fresh(native.data.observedAt, input.now) || !fresh(readiness.data.observedAt, input.now)) {
     return { reserved: false as const, reason: "NATIVE_COMPLETION_OR_READINESS_UNPROVED" };
   }
-  if (native.data.source === COURSE_SUPPORT_INVENTORY_COMPLETION_SOURCE &&
+  if (input.checkpoint.kind === "EXPIRED_OWNED_STAGE" ?
+      native.data.source !== "codex_app.list_threads+codex_native.terminal_turn" ||
+      readiness.data.source !== "original_native_stopped_launcher_receipt" ||
+      native.data.latestTurn.id !== (latestConfirmedNativeContinuation(ledger)?.turnId ?? readiness.data.originalTurnId) ||
+      (latestConfirmedNativeContinuation(ledger) ?
+        native.data.priorContinuationKey !== latestConfirmedNativeContinuation(ledger)?.key ||
+        native.data.priorContinuationTurnId !== latestConfirmedNativeContinuation(ledger)?.turnId ||
+        !native.data.priorContinuationReceiptDigest :
+        native.data.priorContinuationTurnId !== undefined) ||
+      readiness.data.ownedStageDigest !== checkpointDigest(input.checkpoint) :
+      native.data.latestTurn.status !== "completed" || readiness.data.source !== "original_native_launcher_receipt") {
+    return { reserved: false as const, reason: "NATIVE_COMPLETION_OR_READINESS_UNPROVED" };
+  }
+  if (native.data.source !== "codex_app.wait_threads" &&
       (native.data.launcherReceiptDigest !== readiness.data.launcherReceiptDigest ||
        native.data.checkoutIdentityDigest !== readiness.data.checkoutIdentityDigest)) {
     return { reserved: false as const, reason: "NATIVE_COMPLETION_OR_READINESS_UNPROVED" };
@@ -577,7 +694,8 @@ export function reserveCourseSupportContinuationReceipt(input: {
   const assessment = assessCourseSupportContinuationCheckpoint(input);
   if (!assessment.eligible) return { reserved: false as const, reason: assessment.reason };
   const key = hash({ policyVersion: COURSE_SUPPORT_CONTINUATION_POLICY_VERSION, assignmentRef: input.assignmentRef,
-    childThreadId: input.childThreadId, sourceFingerprint: input.sourceFingerprint, checkpointDigest: assessment.checkpointDigest });
+    childThreadId: input.childThreadId, sourceFingerprint: input.sourceFingerprint, checkpointDigest: assessment.checkpointDigest,
+    ...(input.checkpoint.kind === "EXPIRED_OWNED_STAGE" ? { terminalTurnId: native.data.latestTurn.id } : {}) });
   if (ledger.receipts.some(receipt => receipt.status === "PENDING")) {
     return { reserved: false as const, reason: "PRIOR_SEND_UNCONFIRMED" };
   }
@@ -611,8 +729,7 @@ export function confirmCourseSupportContinuationSent(input: {
   toolReceipt: unknown; now: Date;
 }) {
   const ledger = readCourseSupportContinuationLedger(input.ledger);
-  const sent = z.object({ source: z.literal("codex_app.send_message_to_thread"), threadId: reference,
-    accepted: z.literal(true) }).strict().parse(input.toolReceipt);
+  const sent = courseSupportContinuationSentRequestSchema.shape.toolReceipt.parse(input.toolReceipt);
   const receipt = ledger.receipts.find(entry => entry.key === input.key);
   if (!receipt || receipt.parentThreadId !== input.parentThreadId || receipt.childThreadId !== input.childThreadId ||
       sent.threadId !== input.childThreadId || Date.parse(receipt.requestedAt) > input.now.getTime()) {
@@ -620,5 +737,6 @@ export function confirmCourseSupportContinuationSent(input: {
   }
   if (receipt.status === "SENT") return ledger;
   return { version: 1 as const, receipts: ledger.receipts.map(entry => entry.key === input.key ?
-    { ...entry, status: "SENT" as const, sentAt: input.now.toISOString() } : entry) };
+    { ...entry, status: "SENT" as const, sentAt: input.now.toISOString(),
+      ...(sent.source === "codex_native.turn_start" ? { nativeTurnId: sent.turnId, nativeReceiptPath: sent.receiptPath } : {}) } : entry) };
 }

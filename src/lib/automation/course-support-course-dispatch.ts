@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isAbsolute } from "node:path";
 
 import { Prisma } from "@prisma/client";
 
@@ -15,7 +16,9 @@ import {
   COURSE_SUPPORT_CONTINUATION_TICK_MS,
   assessCourseSupportContinuationCandidate,
   readCourseSupportContinuationLedger,
+  latestConfirmedNativeContinuation,
   reserveCourseSupportContinuationReceipt,
+  type CourseSupportContinuationCheckpoint,
   type CourseSupportContinuationLedger,
   type CourseSupportReviewedToolingRepair,
 } from "./course-support-continuation";
@@ -53,6 +56,7 @@ export type CourseDispatchAudit = {
   state: DispatchState;
   ownerThreadId: string;
   childThreadId: string | null;
+  launcherReceiptPath?: string;
   baseSha: string;
   reservedAt: string;
   expiresAt: string;
@@ -117,6 +121,8 @@ export function parseCourseDispatchAudit(value: unknown): CourseDispatchAudit | 
       (audit.state === "BOUND" && !audit.childThreadId) ||
       (["RESERVED", "STARTING"].includes(audit.state ?? "") && audit.childThreadId !== null)) return null;
   if (audit.target.mode !== undefined && audit.target.mode !== "SIMULATOR") return null;
+  if (audit.launcherReceiptPath !== undefined && (!isAbsolute(audit.launcherReceiptPath) ||
+      !audit.launcherReceiptPath.endsWith("launcher.receipt.private.json"))) return null;
   if (audit.target.mode === "SIMULATOR" &&
       (typeof audit.target.offeringId !== "string" || !audit.target.offeringId || !/^[a-f0-9]{64}$/i.test(audit.target.offeringSourceFingerprint ?? "") ||
        (audit.state === "CONSUMED" && !isValidSimulatorSupportClaim(audit.simulatorClaim)))) return null;
@@ -567,7 +573,7 @@ export async function planCourseSupportCourseDispatch(input: {
   }));
 }
 
-async function transition(input: { ownerThreadId: string; assignmentRef: string; childThreadId?: string; confirmedNotCreated?: boolean; next: DispatchState }) {
+async function transition(input: { ownerThreadId: string; assignmentRef: string; childThreadId?: string; launcherReceiptPath?: string; confirmedNotCreated?: boolean; next: DispatchState }) {
   assertIdentity(input.ownerThreadId);
   return runWithCourseSupportWriterTransitionLease(async () => transaction(async (tx) => {
     const transitionNow = await getCourseDispatchDatabaseNow(tx);
@@ -582,6 +588,7 @@ async function transition(input: { ownerThreadId: string; assignmentRef: string;
     }
     if (input.next === "BOUND" && audit.state === "BOUND" &&
         audit.childThreadId === input.childThreadId) {
+      if (input.launcherReceiptPath && audit.launcherReceiptPath !== input.launcherReceiptPath) throw new Error("Original launcher receipt changed after binding.");
       return { assignmentRef: audit.assignmentRef, state: audit.state, baseSha: audit.baseSha };
     }
     const allowed = input.next === "STARTING" ? audit.state === "RESERVED" &&
@@ -608,6 +615,7 @@ async function transition(input: { ownerThreadId: string; assignmentRef: string;
       childThreadId: input.childThreadId ?? audit.childThreadId,
       ...(input.next === "STARTING" ? { launchStartedAt: transitionAt } : {}),
       ...(input.next === "BOUND" ? { boundAt: transitionAt } : {}),
+      ...(input.next === "BOUND" && input.launcherReceiptPath ? { launcherReceiptPath: input.launcherReceiptPath } : {}),
     };
     await tx.automationRun.update({
       where: { id: run.id },
@@ -624,9 +632,11 @@ export function beginCourseSupportCourseDispatch(input: { ownerThreadId: string;
   return transition({ ...input, next: "STARTING" });
 }
 
-export function bindCourseSupportCourseDispatch(input: { ownerThreadId: string; assignmentRef: string; childThreadId: string }) {
+export function bindCourseSupportCourseDispatch(input: { ownerThreadId: string; assignmentRef: string; childThreadId: string; launcherReceiptPath?: string }) {
   if (!input.childThreadId.trim()) throw new Error("Course dispatch requires the native child task id.");
   if (input.childThreadId === input.ownerThreadId) throw new Error("Course dispatch child must be a distinct native task.");
+  if (input.launcherReceiptPath && (!isAbsolute(input.launcherReceiptPath) ||
+      !input.launcherReceiptPath.endsWith("launcher.receipt.private.json"))) throw new Error("Original launcher receipt path is invalid.");
   return transition({ ...input, next: "BOUND" });
 }
 
@@ -706,7 +716,10 @@ async function collectCourseSupportContinuationCandidates(input: {
   ownerThreadId: string; now: Date; runs: Awaited<ReturnType<typeof readRuns>>; tx: Prisma.TransactionClient;
 }) {
   const continuationItems: Array<{ mode: "SIMULATOR"; assignmentRef: string; threadId: string;
-    originalParentThreadId: string; branch: string; baseSha: string }> = [];
+    originalParentThreadId: string; branch: string; baseSha: string;
+    launcherReceiptPath?: string; claimToken?: string; claimRevision?: number; sourceFingerprint?: string;
+    plannedPaths?: string[]; releaseSha?: string | null; checkpoint?: CourseSupportContinuationCheckpoint;
+    expectedNativeContinuation?: { turnId: string; key: string; receiptPath: string } | null }> = [];
   let attentionCount = 0;
   if (!input.runs.some(run => run.status === "RUNNING" && run.parsed?.target.mode === "SIMULATOR" && run.parsed.state === "CONSUMED")) {
     return { continuationItems, attentionCount };
@@ -724,8 +737,16 @@ async function collectCourseSupportContinuationCandidates(input: {
         checkpoint: { ...context.checkpoint, providerReadInFlight: context.providerReadInFlight },
         ledger, sourceFingerprint: audit.simulatorClaim!.sourceFingerprint,
       }).candidate) { attentionCount += 1; continue; }
+      if (context.checkpoint.kind === "EXPIRED_OWNED_STAGE" && !audit.launcherReceiptPath) { attentionCount += 1; continue; }
       continuationItems.push({ mode: "SIMULATOR", assignmentRef: audit.assignmentRef, threadId: audit.childThreadId,
-        originalParentThreadId: audit.ownerThreadId, branch: audit.simulatorClaim!.branch, baseSha: audit.baseSha });
+        originalParentThreadId: audit.ownerThreadId, branch: audit.simulatorClaim!.branch, baseSha: audit.baseSha,
+        ...(context.checkpoint.kind === "EXPIRED_OWNED_STAGE" ? {
+          launcherReceiptPath: audit.launcherReceiptPath, claimToken: audit.simulatorClaim!.token,
+          claimRevision: audit.simulatorClaim!.revision, sourceFingerprint: audit.simulatorClaim!.sourceFingerprint,
+          plannedPaths: audit.simulatorClaim!.plannedPaths, releaseSha: audit.simulatorClaim!.releaseSha,
+          expectedNativeContinuation: latestConfirmedNativeContinuation(ledger),
+          checkpoint: { ...context.checkpoint, providerReadInFlight: context.providerReadInFlight },
+        } : {}) });
     } catch { attentionCount += 1; }
   }
   return { continuationItems, attentionCount };
@@ -738,6 +759,7 @@ export async function reserveCourseSupportContinuation(input: {
   currentMainSha: string;
   nativeCompletion: unknown;
   readiness: unknown;
+  expectedClaim?: { token: string; revision: number };
   reviewedToolingRepair?: CourseSupportReviewedToolingRepair;
 }) {
   assertIdentity(input.ownerThreadId, input.currentMainSha);
@@ -752,10 +774,17 @@ export async function reserveCourseSupportContinuation(input: {
     if (!row || row.status !== "RUNNING" || !audit || audit.target.mode !== "SIMULATOR" ||
         audit.state !== "CONSUMED" || !audit.childThreadId || audit.childThreadId === input.ownerThreadId ||
         !audit.simulatorClaim) return { reserved: false as const, reason: "ORIGINAL_ASSIGNMENT_NOT_CURRENT" };
+    if (input.expectedClaim && (audit.simulatorClaim.token !== input.expectedClaim.token ||
+        audit.simulatorClaim.revision !== input.expectedClaim.revision)) {
+      return { reserved: false as const, reason: "ORIGINAL_CLAIM_REVISION_CHANGED" };
+    }
     const { readSimulatorSupportContinuationContext } = await import("./simulator-support-ownership");
     const context = await readSimulatorSupportContinuationContext(tx, audit, now);
     if (!context.checkpoint || context.currentClaimRevision !== audit.simulatorClaim.revision) {
       return { reserved: false as const, reason: "ORIGINAL_CHECKPOINT_NOT_CURRENT" };
+    }
+    if (context.checkpoint.kind === "EXPIRED_OWNED_STAGE" && !input.expectedClaim) {
+      return { reserved: false as const, reason: "ORIGINAL_CLAIM_PROOF_REQUIRED" };
     }
     const tick = `continuation-${Math.floor(now.getTime() / COURSE_SUPPORT_CONTINUATION_TICK_MS)}`;
     // A worker may finish after its continuation was reserved. Its older dispatch
