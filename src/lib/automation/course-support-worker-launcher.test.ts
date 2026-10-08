@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
@@ -18,6 +18,7 @@ import {
   hasNativeIdentityProof,
   isApprovalRequest,
   prepareCourseSupportWorker,
+  privateWrite,
   readWorkerCliVersion,
   readWorkerLauncherArguments,
   runPreparedCourseSupportWorker,
@@ -348,7 +349,7 @@ describe("worker environment and acknowledgement guards", () => {
 });
 
 describe("bounded app-server transport", () => {
-  function transport(options: { timeoutMs?: number } = {}) {
+  function transport(options: { timeoutMs?: number; onMessage?: (message: Message) => void } = {}) {
     const f = fixture();
     const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), pid: 23456, kill: vi.fn() });
     child.stdin.on("finish", () => queueMicrotask(() => child.emit("close", 0)));
@@ -397,5 +398,57 @@ describe("bounded app-server transport", () => {
     closed.child.emit("close", 1);
     await expect(pending).rejects.toThrow("APP_SERVER_CLOSED");
     await closed.client.close();
+  });
+
+  it("does not label a valid event with callback I/O failure as malformed wire", async () => {
+    const onMessage = vi.fn(() => { throw Object.assign(new Error("receipt locked"), { code: "WORKER_RECEIPT_WRITE_FAILED", causeCode: "EPERM" }); });
+    const t = transport({ onMessage });
+    const requested = t.client.request("thread/read", {});
+    t.child.stdout.write(`${JSON.stringify({ id: 1, result: { thread: null } })}\n`);
+    await expect(requested).rejects.toThrow("receipt locked");
+    expect(t.onFailure.mock.calls[0][0]).toMatchObject({ code: "WORKER_RECEIPT_WRITE_FAILED", causeCode: "EPERM" });
+    expect(onMessage).toHaveBeenCalledOnce();
+    await t.client.close();
+  });
+
+  it("classifies unrelated event handler failures separately from malformed wire", async () => {
+    const t = transport({ onMessage: () => { throw new Error("callback failed"); } });
+    const requested = t.client.request("thread/read", {});
+    t.child.stdout.write(`${JSON.stringify({ id: 1, result: { thread: null } })}\n`);
+    await expect(requested).rejects.toThrow("APP_SERVER_EVENT_HANDLER_FAILED");
+    await t.client.close();
+  });
+});
+
+describe("private receipt replacement", () => {
+  it("retries bounded transient Windows rename contention and keeps an atomic receipt", () => {
+    const f = fixture();
+    const path = join(f.cwd, "receipt.json");
+    writeFileSync(path, "old");
+    let attempts = 0;
+    const sleep = vi.fn();
+    privateWrite(path, { status: "RUNNING" }, false, { sleep, rename(from: string, to: string) {
+      attempts += 1;
+      if (attempts < 3) throw Object.assign(new Error("reader lock"), { code: "EPERM" });
+      renameSync(from, to);
+    } });
+    expect(attempts).toBe(3);
+    expect(sleep.mock.calls).toEqual([[10], [20]]);
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ status: "RUNNING" });
+    expect(readdirSync(f.cwd).filter(name => name.includes(".tmp"))).toEqual([]);
+  });
+
+  it("stops after finite contention and preserves the prior receipt", () => {
+    const f = fixture();
+    const path = join(f.cwd, "receipt.json");
+    writeFileSync(path, "old");
+    let attempts = 0;
+    expect(() => privateWrite(path, { status: "RUNNING" }, false, { sleep: () => {}, rename() {
+      attempts += 1;
+      throw Object.assign(new Error("reader lock"), { code: "EPERM" });
+    } })).toThrow("reader lock");
+    expect(attempts).toBe(4);
+    expect(readFileSync(path, "utf8")).toBe("old");
+    expect(readdirSync(f.cwd).filter(name => name.includes(".tmp"))).toEqual([]);
   });
 });

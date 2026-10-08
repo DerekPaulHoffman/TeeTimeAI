@@ -14,6 +14,9 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const VERIFIED_WORKER_CLI_VERSIONS = new Set(["codex-cli 0.160.0", "codex-cli 0.160.1"]);
 
 function failure(code) { return Object.assign(new Error(code), { code }); }
+function safeIoCode(error) {
+  return ["EACCES", "EBUSY", "EPERM", "ENOENT", "ENOSPC", "EIO"].includes(error?.code) ? error.code : undefined;
+}
 function absoluteFile(path) {
   if (typeof path !== "string" || !isAbsolute(path) || !statSync(path).isFile()) throw failure("ABSOLUTE_FILE_REQUIRED");
   return realpathSync(path);
@@ -22,12 +25,22 @@ function samePath(a, b) {
   const normalize = (path) => process.platform === "win32" ? resolve(path).toLowerCase() : resolve(path);
   return normalize(a) === normalize(b);
 }
-function privateWrite(path, value, exclusive = false) {
+export function privateWrite(path, value, exclusive = false, dependencies = {}) {
   const text = `${JSON.stringify(value, null, 2)}\n`;
   if (exclusive) return writeFileSync(path, text, { flag: "wx", mode: 0o600 });
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
   writeFileSync(temporary, text, { flag: "wx", mode: 0o600 });
-  try { renameSync(temporary, path); } catch (error) { unlinkSync(temporary); throw error; }
+  const replace = dependencies.rename ?? renameSync;
+  const sleep = dependencies.sleep ?? ((ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms));
+  try {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try { replace(temporary, path); return; }
+      catch (error) {
+        if (process.platform !== "win32" || !["EACCES", "EBUSY", "EPERM"].includes(error.code) || attempt === 3) throw error;
+        sleep(10 * (attempt + 1));
+      }
+    }
+  } catch (error) { unlinkSync(temporary); throw error; }
 }
 
 export function assertFullAccessAcknowledgement(result, cwd) {
@@ -114,17 +127,21 @@ export function createWorkerAppServer({ cliPath, cwd, eventPath, stderrPath, onM
   child.on("close", () => { stopped = true; fail(failure("APP_SERVER_CLOSED")); });
   child.stdin.on("error", () => fail(failure("APP_SERVER_INPUT_FAILED")));
   child.stderr.on("data", (chunk) => {
-    try { appendFileSync(stderrPath, chunk, { mode: 0o600 }); } catch { fail(failure("PRIVATE_EVENT_LOG_FAILED")); }
+    try { appendFileSync(stderrPath, chunk, { mode: 0o600 }); }
+    catch (error) { fail(Object.assign(failure("PRIVATE_EVENT_LOG_FAILED"), { causeCode: safeIoCode(error) })); }
   });
   const reader = createInterface({ input: child.stdout });
   reader.on("line", (line) => {
     let message;
-    try {
-      message = JSON.parse(line);
-      if (!message || typeof message !== "object" || Array.isArray(message)) throw failure("INVALID_APP_SERVER_MESSAGE");
-      appendFileSync(eventPath, `${JSON.stringify(message)}\n`, { mode: 0o600 });
-      onMessage(message);
-    } catch { fail(failure("INVALID_APP_SERVER_MESSAGE")); return; }
+    try { message = JSON.parse(line); }
+    catch { fail(failure("INVALID_APP_SERVER_MESSAGE")); return; }
+    if (!message || typeof message !== "object" || Array.isArray(message)) {
+      fail(failure("INVALID_APP_SERVER_MESSAGE")); return;
+    }
+    try { appendFileSync(eventPath, `${JSON.stringify(message)}\n`, { mode: 0o600 }); }
+    catch (error) { fail(Object.assign(failure("PRIVATE_EVENT_LOG_FAILED"), { causeCode: safeIoCode(error) })); return; }
+    try { onMessage(message); }
+    catch (error) { fail(error?.code === "WORKER_RECEIPT_WRITE_FAILED" ? error : failure("APP_SERVER_EVENT_HANDLER_FAILED")); return; }
     if (isApprovalRequest(message)) { fail(failure("UNEXPECTED_APPROVAL_REQUEST")); return; }
     if (message.method == null && pending.has(message.id)) {
       const request = pending.get(message.id);
@@ -292,21 +309,25 @@ export async function runPreparedCourseSupportWorker(options) {
   const timer = setTimeout(() => { fatal = failure("WORKER_TURN_TIMEOUT"); wake(); }, turnTimeoutMs);
   try {
     client = clientFactory({ ...receipt, onFailure(error) { fatal ??= error; wake(); }, onMessage(message) {
+      let changed = false;
       if (isApprovalRequest(message)) {
-        receipt.approvalRequests += 1; fatal = failure("UNEXPECTED_APPROVAL_REQUEST"); wake();
+        receipt.approvalRequests += 1; fatal = failure("UNEXPECTED_APPROVAL_REQUEST"); wake(); changed = true;
       }
       if (message.method === "turn/started" && message.params?.threadId === receipt.threadId) {
-        receipt.turnId = message.params.turn.id; receipt.status = "RUNNING";
+        receipt.turnId = message.params.turn.id; receipt.status = "RUNNING"; changed = true;
       }
       const identity = message.params?.threadId === receipt.threadId && message.params?.turnId === receipt.turnId
         ? hasNativeIdentityProof(message) : null;
-      if (identity === true) receipt.nativeIdentityVerified = true;
+      if (identity === true && !receipt.nativeIdentityVerified) { receipt.nativeIdentityVerified = true; changed = true; }
       if (identity === false) { fatal = failure("NATIVE_THREAD_IDENTITY_MISMATCH"); wake(); }
       if (message.method === "turn/completed" && message.params?.threadId === receipt.threadId &&
           message.params?.turn?.id === receipt.turnId) {
         completed = message.params.turn; wake();
       }
-      privateWrite(receiptPath, receipt);
+      if (changed) {
+        try { privateWrite(receiptPath, receipt); }
+        catch (error) { throw Object.assign(failure("WORKER_RECEIPT_WRITE_FAILED"), { causeCode: safeIoCode(error) }); }
+      }
     } });
     receipt.serverPid = client.pid; privateWrite(receiptPath, receipt);
     await initialize(client, receipt.cwd);
@@ -338,6 +359,7 @@ export async function runPreparedCourseSupportWorker(options) {
     return { outcome: "completed", nativeIdentityVerified: true, approvalRequests: receipt.approvalRequests };
   } catch (error) {
     await interrupt(); receipt.status = "STOPPED"; receipt.failureCode = error.code ?? "WORKER_LAUNCH_FAILED";
+    if (error.causeCode) receipt.failureCauseCode = error.causeCode;
     privateWrite(receiptPath, receipt); throw error;
   } finally { clearTimeout(timer); await client?.close(); }
 }
