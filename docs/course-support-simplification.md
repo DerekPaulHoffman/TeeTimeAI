@@ -224,3 +224,38 @@ correlation. This supports their bounded cooldown revalidation; it does not prov
 current provider health, complete access, or calendar availability. Their next
 attempt remains at the persisted 07:54 UTC retry, with ordinary admission expected
 at 08:00 UTC (04:00 Eastern). The fixed benchmark is not advanced or extended.
+
+The original21:50 October8 worker received the complete corrected self-repair
+and local-test-feedback instructions, but its first production assignment read
+exited1 before ownership. The worker correctly stopped without claim, provider
+read, edits or release. Root's separate read of the already saved npm debug log
+found package acquisition with16 ECONNRESET and1 ETIMEDOUT; no explicit terminal
+causal stack was retained. These are tooling/network facts, not a provider
+restriction or proof that the independently failed RO observer shared a cause.
+The wrapper ran cold private-cache npm exec for Vercel before the assignment
+script, and suppressed its own computed command_failed receipt. Earlier setup
+verified Node/npm/client/browser but omitted the tool needed for production.
+
+The correction puts the existing pinned Vercel62.2.0 in locked development
+dependencies, verifies private package/entry/version during credential-free
+setup, and directly invokes its prepared CLI for production commands. It
+removes package acquisition from those protected calls and emits a closed
+nonzero wrapper receipt without claiming absence of durable side effects.
+The parent supervisor and continuation acknowledgement use the exact selected
+checkout's prepared CLI. Existing reservation expiry, claims, production stops,
+provider access rules, retry budgets and customer searches stay unchanged.
+Independent review caught an initial fixture mistake: the real package declares
+dist/vc.js, not dist/index.js. A real installed-package metadata test now covers
+that boundary, plus private directory/file guards and post-smoke version drift.
+Local89 focused checks, lint, TypeScript and actual schedulerNode22 CLI version
+passed without production credentials or network. Exact-head CI/publication
+and original scheduled autonomous repair remain required; no package readiness
+or healthy ordinary customer check substitutes for Back9 monitoring proof.
+An older original candidate also needs its own new private dependencies after
+merging reviewed main. The continuation template now requires a verified clean
+registered-work checkpoint and current-main ancestry, then credential-free
+locked local refresh/version/generation before original inspection/recovery.
+The first-turn --prepare origin/main guard stays strict. Parent selected
+readiness alone is not evidence of original-child readiness; the earlier
+template incorrectly said it was. No local refresh renews a lease or changes
+source, spent attempts or publication history.

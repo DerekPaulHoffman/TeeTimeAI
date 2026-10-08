@@ -8,7 +8,7 @@ import { approvedCourseSupportResponderCheckouts } from "./course-support-prefli
 import { WORKER_PERMISSION_PROFILE, assertFullAccessAcknowledgement, buildWorkerFirstTurnPrompt,
   createWorkerAppServer, hasNativeIdentityProof, isApprovalRequest, privateWrite, readWorkerCliVersion,
   retainPrimaryFailure } from "./course-support-worker-launcher.mjs";
-import { courseSupportWorkerProductionCommand, courseSupportWorkerRuntimeEnvironment,
+import { courseSupportWorkerProductionCommand, courseSupportWorkerRuntimeEnvironment, inspectCourseSupportWorkerVercel,
   resolveCourseSupportWorkerRuntime } from "./course-support-worker-runtime.mjs";
 import { observeOriginalProcess, QUALIFIED_EXECUTABLE_DIGEST } from "./course-support-native-observer.mjs";
 
@@ -150,6 +150,7 @@ export function validateOriginalWorkerContinuation(input, dependencies = {}) {
   if (same(output, selected) || same(output, worker)) fail("PRIVATE_OUTPUT_REQUIRED");
   const runtime = (dependencies.runtime ?? resolveCourseSupportWorkerRuntime)();
   if (runtime.status !== "available") fail("CONTINUATION_RUNTIME_UNAVAILABLE");
+  if (inspectCourseSupportWorkerVercel(selected).status !== "current") fail("CONTINUATION_VERCEL_NOT_READY");
   if ((dependencies.readCliVersion ?? readWorkerCliVersion)(approved.cliPath) !== original.cliVersion) fail("ORIGINAL_PINNED_CLI_CHANGED");
   if ((dependencies.readCliDigest ?? (path => createHash("sha256").update(readFileSync(path)).digest("hex")))(approved.cliPath) !==
       QUALIFIED_EXECUTABLE_DIGEST) fail("ORIGINAL_PINNED_CLI_CHANGED");
@@ -171,7 +172,7 @@ export function originalWorkerContinuationPrompt(validated, read = readFileSync)
 
 function productionContinued(validated, receiptFile, dependencies) {
   const command = courseSupportWorkerProductionCommand(validated.runtime, "automation:course-dispatch",
-    ["continued", "--assignment-ref", validated.item.assignmentRef, "--receipt-file", receiptFile]);
+    ["continued", "--assignment-ref", validated.item.assignmentRef, "--receipt-file", receiptFile], validated.selected);
   const result = (dependencies.spawnSync ?? spawnSync)(command.command, command.args, {
     cwd: validated.selected, shell: false, windowsHide: true, encoding: "utf8", timeout: 180_000,
     env: courseSupportWorkerRuntimeEnvironment(validated.runtime, validated.selected, process.env),
