@@ -97,6 +97,10 @@ async function readPriorFailedResearchRoutes(tx: Pick<Prisma.TransactionClient, 
   });
   return mergeSimulatorResearchBlockedRoutes([...reconciled, ...inherited])
     .filter(route => {
+      // Recovery authorizes investigation of this exact URL/mode only. Keeping
+      // a legacy partial in active denial memory would fence it again because
+      // that original receipt has no warning/version. Its audit stays intact.
+      if (recovered.has(key(route))) return false;
       if (!provenComplete(route)) return true;
       const copied = inheritedByKey.get(key(route));
       return Boolean(copied && (denial(copied) || copied.httpStatus < 200 || copied.httpStatus >= 300));

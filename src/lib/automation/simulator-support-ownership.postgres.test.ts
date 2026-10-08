@@ -1596,7 +1596,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     }
   });
 
-  it.each(["recovered", "access-denied", "challenged", "foreign-source"] as const)("uses actual later partial recovery while preserving %s history and customer state", async scenario => {
+  it.each(["recovered", "legacy-recovered", "access-denied", "challenged", "foreign-source"] as const)("uses actual later partial recovery while preserving %s history and customer state", async scenario => {
     const bays = "https://yourgolfbooking.com/venues/public-golf/booking/bays";
     const f = await fixture(15, false, bays);
     const before = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
@@ -1616,17 +1616,25 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
         observedAt: failedAt, httpStatus: 0, rendered: true, outcome: "HARD_FAILED", requestId: randomUUID(), failure },
       { source: "booking", requestedUrl: bays, sourceUrl: bays, sourceFingerprint: positiveFingerprint,
         observedAt, httpStatus: 200, rendered: true, outcome: "READ", requestId: randomUUID(),
-        renderWarning: "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED", publicReadEvidence: { sourceFingerprint: positiveFingerprint,
+        ...(scenario !== "legacy-recovered" ? { renderWarning: "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED" } : {}), publicReadEvidence: { sourceFingerprint: positiveFingerprint,
           accessControlsObserved: true, accessControls: [], method: "BROWSER", renderComplete: false } },
     ];
+    const legacyBudgetFailure = { stage: "PUBLIC_READ", category: "BUDGET", code: "PUBLIC_BODY_LIMIT",
+      researchPhase: "HTTP_READ", researchResourceKind: "SECONDARY_SCRIPT" };
+    if (scenario === "legacy-recovered") history.splice(2, 0, {
+      source: "booking", requestedUrl: bays, sourceUrl: bays, sourceFingerprint: f.fingerprint,
+      observedAt: new Date(Date.now() - 150 * 60_000).toISOString(), httpStatus: 0,
+      rendered: true, outcome: "HARD_FAILED", requestId: randomUUID(), failure: legacyBudgetFailure,
+    });
     const closed = await client.automationRun.update({ where: { id: f.run.id }, data: {
       status: "COMPLETED", outcome: "simulator_retryable_failed", completedAt: new Date(observedAt),
       audit: { ...initial, reservedAt: earlier, launchStartedAt: earlier, boundAt: earlier,
         consumedAt: earlier, simulatorClaim: { ...initial.simulatorClaim, claimedAt: earlier },
-        simulatorResearch: { version: 1, sourceFingerprint: f.fingerprint, readCount: 3, history,
+        simulatorResearch: { version: 1, sourceFingerprint: f.fingerprint, readCount: history.length, history,
           links: [], bookingLinks: [], linkBaseUrl: null, inFlight: null },
         simulatorResearchPriorFailures: { version: 1, sourceFingerprint: f.fingerprint,
-          routes: [{ url: bays, rendered: true, httpStatus: 0, failure }] },
+          routes: [{ url: bays, rendered: true, httpStatus: 0,
+            failure: scenario === "legacy-recovered" ? legacyBudgetFailure : failure }] },
       } as unknown as Prisma.InputJsonValue,
     } });
     const searchBefore = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });
@@ -1646,9 +1654,12 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     const permitsPlain = claim.value.researchGuide.suggestedReads.some(route => route.source === "booking" && !route.rendered);
     expect(permitsPlain).toBe(scenario === "access-denied" || scenario === "challenged");
     const permitsRendered = claim.value.researchGuide.suggestedReads.some(route => route.source === "booking" && route.rendered);
-    expect(permitsRendered).toBe(scenario === "recovered");
-    if (scenario === "recovered") {
+    const permitsRecovery = scenario === "recovered" || scenario === "legacy-recovered";
+    expect(permitsRendered).toBe(permitsRecovery);
+    if (permitsRecovery) {
       expect(claim.value.researchGuide.priorBlockedRoutes).not.toContainEqual(expect.objectContaining({ rendered: true, failure }));
+      expect(claim.value.researchGuide.priorBlockedRoutes).not.toContainEqual(expect.objectContaining({ url: bays, rendered: true }));
+      expect(claim.value.researchGuide.priorBlockedRoutes).toContainEqual(expect.objectContaining({ url: bays, rendered: false, httpStatus: 403 }));
     }
     if (scenario === "challenged") {
       const protectedRoute = { url: bays, rendered: true, httpStatus: 503,

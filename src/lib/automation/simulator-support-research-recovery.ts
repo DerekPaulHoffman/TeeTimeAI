@@ -29,7 +29,10 @@ export function selectRecoveredSimulatorResearchRoutes(input: {
   const positives = input.actualRoutes.filter(route => route.rendered && route.outcome === "READ" &&
     route.httpStatus >= 200 && route.httpStatus < 300 && !route.failure && hasReceipt(route) &&
     route.accessControlsObserved === true && route.accessControls?.length === 0 && route.renderComplete === false &&
-    route.renderWarning?.startsWith("SECONDARY_"))
+    // Older durable public receipts did not retain the optional warning/version.
+    // Their observed access and original receipt can authorize another bounded
+    // investigation without inventing the missing collector diagnostics.
+    (route.renderWarning === undefined || route.renderWarning.startsWith("SECONDARY_")))
     .sort((left, right) => clock(right) - clock(left));
   for (const positive of positives) {
     const routeKey = key(positive);

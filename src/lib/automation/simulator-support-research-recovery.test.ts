@@ -16,6 +16,15 @@ const recover = (actualRoutes: SimulatorResearchBlockedRoute[], inheritedRoutes:
   selectRecoveredSimulatorResearchRoutes({ actualRoutes, inheritedRoutes, now });
 
 describe("later owned public research recovery", () => {
+  it("revalidates an actual legacy partial receipt without inventing a missing warning or reader version", () => {
+    const legacyPartial = { ...positive, renderWarning: undefined };
+    const copied = { ...failed, observedAt: undefined, requestId: undefined };
+    expect([...recover([legacyPartial, failed], [copied]).values()]).toEqual([legacyPartial]);
+    expect(legacyPartial.renderWarning).toBeUndefined();
+    expect(legacyPartial.researchImplementationVersion).toBeUndefined();
+    expect(legacyPartial.renderComplete).toBe(false);
+  });
+
   it("uses only a later actual partial receipt without relabeling the original failure or collector version", () => {
     const copied = { ...failed, observedAt: undefined, requestId: undefined };
     const actual = [positive, failed];
@@ -52,7 +61,7 @@ describe("later owned public research recovery", () => {
     { observedAt: "2026-10-08T17:01:00.000Z" }, { observedAt: "2026-10-08T16:00:00.001Z" },
     { observedAt: failed.observedAt }, { rendered: false }, { httpStatus: 403 },
     { accessControlsObserved: undefined }, { accessControls: undefined }, { accessControls: ["ACCOUNT_REQUIRED" as const] },
-    { renderComplete: true }, { renderComplete: undefined }, { renderWarning: undefined }, { outcome: undefined },
+    { renderComplete: true }, { renderComplete: undefined }, { renderWarning: "MAIN_DOCUMENT_HTTP_ERROR" as const }, { outcome: undefined },
   ])("withholds recovery without the exact actual later partial receipt: %j", delta => {
     expect(recover([{ ...positive, ...delta }, failed]).size).toBe(0);
   });
@@ -75,11 +84,22 @@ describe("later owned public research recovery", () => {
     expect(recover([positive, failed, { ...failed, observedAt: "2026-10-08T05:00:00.000Z" }]).size).toBe(0);
   });
 
-  it("uses the newest actual partial observation before evaluating cooldown, even when copied memory is older", () => {
-    const recent = { ...positive, observedAt: "2026-10-08T16:45:00.000Z", requestId: "33333333-3333-4333-8333-333333333333" };
+  it.each([positive.renderWarning, undefined])("uses the newest actual partial observation before evaluating cooldown, with warning %s", renderWarning => {
+    const recent = { ...positive, renderWarning, observedAt: "2026-10-08T16:45:00.000Z", requestId: "33333333-3333-4333-8333-333333333333" };
     expect(recover([positive, failed, recent], [positive]).size).toBe(0);
     expect([...selectRecoveredSimulatorResearchRoutes({ actualRoutes: [positive, failed, recent],
       inheritedRoutes: [positive], now: new Date("2026-10-08T17:45:00.000Z") }).values()]).toEqual([recent]);
     expect(recover([positive, failed, { ...recent, observedAt: "2026-10-08T17:01:00.000Z" }], [positive]).size).toBe(0);
+  });
+
+  it("keeps legacy recovery fenced by access, missing originals or a later failure", () => {
+    const legacyPartial = { ...positive, renderWarning: undefined };
+    for (const denied of [
+      { ...failed, httpStatus: 403, failure: undefined },
+      { ...positive, httpStatus: 503, accessControls: ["CAPTCHA_OR_CHALLENGE" as const] },
+      { ...failed, observedAt: "2026-10-08T05:00:00.000Z" },
+    ]) expect(recover([legacyPartial, failed, denied]).size).toBe(0);
+    expect(recover([legacyPartial], [failed]).size).toBe(0);
+    expect(recover([failed], [legacyPartial]).size).toBe(0);
   });
 });
