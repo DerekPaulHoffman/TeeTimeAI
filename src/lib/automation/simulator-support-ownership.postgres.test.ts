@@ -198,7 +198,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     const inspected = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
     expect(inspected.research.readCount).toBe(0);
     expect(inspected.researchGuide.priorBlockedRoutes).toEqual([
-      { url: bays, rendered: false, httpStatus: 403 }, { url: bays, rendered: true, httpStatus: 0, failure: priorAudit.simulatorResearch.history[1].failure },
+      { url: bays, rendered: true, httpStatus: 0, failure: priorAudit.simulatorResearch.history[1].failure }, { url: bays, rendered: false, httpStatus: 403 },
     ]);
     expect(inspected.researchGuide.suggestedReads.slice(0, 2)).toEqual([
       { source: "booking-root", rendered: false }, { source: "booking-root", rendered: true },
@@ -795,6 +795,148 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
         releaseSha: input.releaseSha, metadataOnlyReuse: false, committedPaths: [path] },
     });
     await lane.retrySimulatorSupport({ ...owner, revision: registered.value.revision, retryMinutes: 15 });
+  });
+
+  it("does not erase older actual hard, HTTP or access denials with a later complete rendered page", async () => {
+    const f = await fixture();
+    const stored = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const audit = stored.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    const base = new Date(Date.now() - 120_000);
+    const denied = [401, 403, 404, 0, 200, 200].map((httpStatus, index) => {
+      const sourceUrl = `https://calendar.example.test/denied-${index}`;
+      return { source: "booking" as const, requestedUrl: sourceUrl, sourceUrl, sourceFingerprint: f.fingerprint,
+        observedAt: new Date(base.getTime() + index).toISOString(), httpStatus, rendered: true,
+        outcome: httpStatus === 0 ? "HARD_FAILED" as const : "READ" as const, requestId: randomUUID(),
+        ...(httpStatus === 0 ? { failure: { stage: "PUBLIC_READ" as const, category: "UNKNOWN" as const, code: "UNCLASSIFIED_FAILURE" as const } } : {}),
+        ...(index >= 4 ? { publicReadEvidence: { sourceFingerprint: f.fingerprint, accessControlsObserved: true as const,
+          accessControls: [index === 4 ? "CAPTCHA_OR_CHALLENGE" as const : "QUEUE" as const], method: "BROWSER" as const } } : {}) };
+    });
+    const history = (entries: typeof denied) => ({ version: 1, sourceFingerprint: f.fingerprint, readCount: 6,
+      history: entries, links: [], bookingLinks: [], linkBaseUrl: null, inFlight: null });
+    const createPrior = async (entries: typeof denied, completedAt: Date) => {
+      const run = await client.automationRun.create({ data: { kind: "OTHER", status: "COMPLETED", completedAt,
+        promptVersion: dispatcher.COURSE_DISPATCH_PROMPT_VERSION, outcome: "simulator_retryable_failed",
+        audit: { ...audit, assignmentRef: `course-assignment-${randomUUID()}`,
+          simulatorResearch: history(entries) } as unknown as Prisma.InputJsonValue } });
+      ids.runs.push(run.id);
+    };
+    await createPrior(denied, new Date(base.getTime() + 60_000));
+    const complete = denied.map(entry => ({ ...entry, observedAt: new Date().toISOString(), httpStatus: 200, outcome: "READ" as const,
+      failure: undefined, publicReadEvidence: { sourceFingerprint: f.fingerprint, accessControlsObserved: true as const,
+        accessControls: [], method: "BROWSER" as const, renderComplete: true } }));
+    await createPrior(complete, new Date());
+    const inspected = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
+    expect(inspected.researchGuide.priorBlockedRoutes).toHaveLength(6);
+    expect(inspected.researchGuide.priorBlockedRoutes.map(route => route.httpStatus).sort((a, b) => a - b)).toEqual([0, 200, 200, 401, 403, 404]);
+    expect(inspected.researchGuide.priorBlockedRoutes).toContainEqual(expect.objectContaining({ accessControls: ["CAPTCHA_OR_CHALLENGE"] }));
+    expect(inspected.researchGuide.priorBlockedRoutes).toContainEqual(expect.objectContaining({ accessControls: ["QUEUE"] }));
+  });
+
+  it("carries timed secondary revalidation across zero-read retries and renews cooldown from the newest actual read", async () => {
+    const bays = "https://yourgolfbooking.com/venues/owned-simulator/booking/bays";
+    const f = await fixture(15, false, bays);
+    const first = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const original = first.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    const oldAt = new Date(Date.now() - 61 * 60_000).toISOString();
+    const incomplete = (observedAt: string) => ({ source: "booking" as const, requestedUrl: bays, sourceUrl: bays,
+      sourceFingerprint: f.fingerprint, observedAt, httpStatus: 200, rendered: true, outcome: "READ" as const,
+      requestId: randomUUID(), researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION,
+      renderWarning: "SECONDARY_REQUEST_BUDGET_EXHAUSTED" as const,
+      publicReadEvidence: { sourceFingerprint: f.fingerprint, accessControlsObserved: true as const,
+        accessControls: [], method: "BROWSER" as const, renderComplete: false } });
+    await client.automationRun.update({ where: { id: f.run.id }, data: { status: "COMPLETED", outcome: "simulator_retryable_failed", completedAt: new Date(),
+      audit: { ...original, simulatorResearch: { version: 1, sourceFingerprint: f.fingerprint, readCount: 1,
+        history: [incomplete(oldAt)], links: [], bookingLinks: [], linkBaseUrl: null, inFlight: null } } as unknown as Prisma.InputJsonValue } });
+    const replacement = async (previous: import("./course-support-course-dispatch").CourseDispatchAudit) => {
+      const due = await client.simulatorSupportIncident.update({ where: { id: f.incident.id }, data: { retryAt: new Date(0) } });
+      const assignmentRef = `course-assignment-${randomUUID()}`, child = `child-${randomUUID()}`;
+      const run = await client.automationRun.create({ data: { kind: "OTHER", status: "RUNNING", promptVersion: dispatcher.COURSE_DISPATCH_PROMPT_VERSION,
+        audit: { ...previous, assignmentRef, childThreadId: child, state: "BOUND", boundAt: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + 600_000).toISOString(), simulatorClaim: undefined,
+          simulatorResearch: undefined, simulatorResearchPriorFailures: undefined,
+          target: { ...previous.target, updatedAt: due.updatedAt.toISOString() } } as unknown as Prisma.InputJsonValue } });
+      ids.runs.push(run.id);
+      const claimed = await lane.claimSimulatorSupportAssignment({ assignmentRef, ownerThreadId: child, baseSha,
+        branch: `automation/course-support-${randomUUID()}` });
+      if (!claimed.acquired) throw new Error("Replacement claim was busy.");
+      const saved = await client.automationRun.findUniqueOrThrow({ where: { id: run.id } });
+      return { run, audit: saved.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit,
+        owner: { assignmentRef, ownerThreadId: child }, claimed: claimed.value };
+    };
+    const second = await replacement(original);
+    expect(second.claimed.researchGuide.priorBlockedRoutes).toEqual([]);
+    expect(second.claimed.researchGuide.suggestedReads).toContainEqual({ source: "booking", rendered: true });
+    // Emulate an old copied checkpoint: its optional timing/access fields are absent,
+    // but the exact original owned observation is still in bounded history.
+    const legacyRoutes = second.audit.simulatorResearchPriorFailures!.routes.map(route => ({ url: route.url,
+      rendered: route.rendered, httpStatus: route.httpStatus, renderWarning: route.renderWarning,
+      researchImplementationVersion: route.researchImplementationVersion }));
+    await client.automationRun.update({ where: { id: second.run.id }, data: { status: "COMPLETED", outcome: "simulator_retryable_failed", completedAt: new Date(),
+      audit: { ...second.audit, simulatorResearchPriorFailures: { version: 1, sourceFingerprint: f.fingerprint, routes: legacyRoutes } } as unknown as Prisma.InputJsonValue } });
+    const third = await replacement(second.audit);
+    expect(third.claimed.researchGuide.priorBlockedRoutes).toEqual([]);
+    expect(third.audit.simulatorResearchPriorFailures!.routes).toContainEqual(expect.objectContaining({ url: bays, rendered: true,
+      observedAt: oldAt, accessControlsObserved: true, accessControls: [], renderComplete: false }));
+    await client.automationRun.update({ where: { id: third.run.id }, data: { status: "COMPLETED", outcome: "simulator_retryable_failed", completedAt: new Date(),
+      audit: { ...third.audit, simulatorResearch: { version: 1, sourceFingerprint: f.fingerprint, readCount: 1,
+        history: [incomplete(new Date().toISOString())], links: [], bookingLinks: [], linkBaseUrl: null, inFlight: null } } as unknown as Prisma.InputJsonValue } });
+    const fourth = await replacement(third.audit);
+    expect(fourth.claimed.researchGuide.priorBlockedRoutes).toContainEqual(expect.objectContaining({ url: bays, rendered: true,
+      observedAt: expect.any(String), accessControls: [] }));
+    expect(fourth.claimed.researchGuide.suggestedReads).not.toContainEqual({ source: "booking", rendered: true });
+    const complete = { ...incomplete(new Date().toISOString()), renderWarning: undefined,
+      publicReadEvidence: { sourceFingerprint: f.fingerprint, accessControlsObserved: true as const,
+        accessControls: [], method: "BROWSER" as const, renderComplete: true } };
+    await client.automationRun.update({ where: { id: fourth.run.id }, data: { status: "COMPLETED", outcome: "simulator_retryable_failed", completedAt: new Date(),
+      audit: { ...fourth.audit, simulatorResearch: { version: 1, sourceFingerprint: f.fingerprint, readCount: 1,
+        history: [complete], links: [], bookingLinks: [], linkBaseUrl: null, inFlight: null } } as unknown as Prisma.InputJsonValue } });
+    const fifth = await replacement(fourth.audit);
+    expect(fifth.claimed.researchGuide.priorBlockedRoutes).toEqual([]);
+    expect(fifth.claimed.researchGuide.suggestedReads).toContainEqual({ source: "booking", rendered: true });
+    const challenged = { ...incomplete(new Date().toISOString()),
+      publicReadEvidence: { sourceFingerprint: f.fingerprint, accessControlsObserved: true as const,
+        accessControls: ["ACCOUNT_REQUIRED" as const], method: "BROWSER" as const, renderComplete: false } };
+    await client.automationRun.update({ where: { id: fifth.run.id }, data: { status: "COMPLETED", outcome: "simulator_retryable_failed", completedAt: new Date(),
+      audit: { ...fifth.audit, simulatorResearch: { version: 1, sourceFingerprint: f.fingerprint, readCount: 1,
+        history: [challenged], links: [], bookingLinks: [], linkBaseUrl: null, inFlight: null } } as unknown as Prisma.InputJsonValue } });
+    const sixth = await replacement(fifth.audit);
+    expect(sixth.claimed.researchGuide.priorBlockedRoutes).toContainEqual(expect.objectContaining({ url: bays, rendered: true,
+      accessControls: ["ACCOUNT_REQUIRED"] }));
+    expect(sixth.claimed.researchGuide.suggestedReads).not.toContainEqual({ source: "booking", rendered: true });
+    await client.automationRun.update({ where: { id: sixth.run.id }, data: { status: "COMPLETED", outcome: "simulator_retryable_failed", completedAt: new Date(),
+      audit: { ...sixth.audit, simulatorResearch: { version: 1, sourceFingerprint: f.fingerprint, readCount: 1,
+        history: [complete], links: [], bookingLinks: [], linkBaseUrl: null, inFlight: null } } as unknown as Prisma.InputJsonValue } });
+    const seventh = await replacement(sixth.audit);
+    expect(seventh.claimed.researchGuide.priorBlockedRoutes).toContainEqual(expect.objectContaining({ url: bays, rendered: true,
+      accessControls: ["ACCOUNT_REQUIRED"] }));
+    expect(seventh.claimed.researchGuide.suggestedReads).not.toContainEqual({ source: "booking", rendered: true });
+  });
+
+  it("keeps a newer copied cooldown clock over older matching history", async () => {
+    const bays = "https://yourgolfbooking.com/venues/owned-simulator/booking/bays";
+    const f = await fixture(15, false, bays);
+    const original = (await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    const earlier = new Date(Date.now() - 61 * 60_000).toISOString(), later = new Date(Date.now() - 10 * 60_000).toISOString();
+    const requestId = randomUUID();
+    const route = { url: bays, rendered: true, httpStatus: 200, observedAt: later, requestId, outcome: "READ" as const,
+      researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION,
+      renderWarning: "SECONDARY_REQUEST_BUDGET_EXHAUSTED" as const,
+      accessControlsObserved: true as const, accessControls: [], renderComplete: false };
+    const historical = { ...original, assignmentRef: `course-assignment-${randomUUID()}`,
+      simulatorResearchPriorFailures: { version: 1 as const, sourceFingerprint: f.fingerprint, routes: [route] },
+      simulatorResearch: { version: 1 as const, sourceFingerprint: f.fingerprint, readCount: 1, links: [], bookingLinks: [], linkBaseUrl: null, inFlight: null,
+        history: [{ source: "booking" as const, requestedUrl: bays, sourceUrl: bays, sourceFingerprint: f.fingerprint,
+          observedAt: earlier, httpStatus: 200, rendered: true, outcome: "READ" as const, requestId,
+          researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION,
+          renderWarning: route.renderWarning,
+          publicReadEvidence: { sourceFingerprint: f.fingerprint, accessControlsObserved: true as const,
+            accessControls: [], method: "BROWSER" as const, renderComplete: false } }] } };
+    const prior = await client.automationRun.create({ data: { kind: "OTHER", status: "COMPLETED", completedAt: new Date(),
+      promptVersion: dispatcher.COURSE_DISPATCH_PROMPT_VERSION, outcome: "simulator_retryable_failed", audit: historical as unknown as Prisma.InputJsonValue } });
+    ids.runs.push(prior.id);
+    const inspected = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
+    expect(inspected.researchGuide.priorBlockedRoutes).toContainEqual(expect.objectContaining({ observedAt: later }));
+    expect(inspected.researchGuide.suggestedReads).not.toContainEqual({ source: "booking", rendered: true });
   });
 
   it("supersedes only a descendant owned release and invalidates old deployment and recheck proof", async () => {

@@ -71,6 +71,10 @@ const blockedResearchRoute = z.object({ url: safeUrl, rendered: z.boolean(), htt
   failure: safeFailure.optional(),
   researchImplementationVersion: z.string().regex(/^[a-z0-9-]{1,80}$/u).optional(),
   renderWarning: renderWarning.optional(), configurationDiagnostic: configurationDiagnostic.optional(),
+  observedAt: z.string().datetime().optional(), requestId: z.string().uuid().optional(), outcome: z.literal("READ").optional(),
+  accessControlsObserved: z.literal(true).optional(),
+  accessControls: z.array(z.enum(["CAPTCHA_OR_CHALLENGE", "ACCOUNT_REQUIRED", "QUEUE"])).max(3).optional(),
+  renderComplete: z.boolean().optional(),
 }).strict();
 const researchFailureMemory = z.object({ version: z.literal(1), sourceFingerprint: z.string().regex(/^[a-f0-9]{64}$/iu),
   routes: z.array(blockedResearchRoute).max(64),
@@ -91,8 +95,24 @@ export function mergeSimulatorResearchBlockedRoutes(routes: readonly SimulatorRe
   if (unique.size > 64) throw new Error("Simulator research failure memory reached its bounded route limit.");
   return [...unique.values()];
 }
-export function currentSimulatorResearchBlockedRoutes(routes: readonly SimulatorResearchBlockedRoute[]) {
-  return routes.filter(route => !route.renderWarning?.startsWith("SECONDARY_") || route.researchImplementationVersion === getSimulatorResearchImplementationVersion(route.url));
+const SECONDARY_REVALIDATION_BACKOFF_MS = 60 * 60_000;
+function isSecondaryRevalidationDue(route: SimulatorResearchBlockedRoute, now: Date) {
+  const observed = route.observedAt ? Date.parse(route.observedAt) : NaN;
+  return route.rendered && !route.failure && route.outcome === "READ" && route.httpStatus >= 200 && route.httpStatus < 300 &&
+    route.renderWarning?.startsWith("SECONDARY_") === true &&
+    route.researchImplementationVersion === getSimulatorResearchImplementationVersion(route.url) &&
+    route.accessControlsObserved === true && route.accessControls?.length === 0 && route.renderComplete === false &&
+    Boolean(route.requestId) && Number.isFinite(observed) && observed <= now.getTime() - SECONDARY_REVALIDATION_BACKOFF_MS;
+}
+export function currentSimulatorResearchBlockedRoutes(routes: readonly SimulatorResearchBlockedRoute[], now?: Date) {
+  return routes.filter(route => {
+    const incompleteSecondary = route.rendered && !route.failure && route.httpStatus >= 200 && route.httpStatus < 300 &&
+      route.renderWarning?.startsWith("SECONDARY_") === true &&
+      !(route.accessControls?.length) &&
+      route.renderComplete !== true;
+    return !incompleteSecondary || route.researchImplementationVersion === getSimulatorResearchImplementationVersion(route.url) &&
+      !(now && isSecondaryRevalidationDue(route, now));
+  });
 }
 
 /** Legacy reads retain unknown access evidence; only new owned settlements qualify. */
@@ -170,7 +190,19 @@ export function selectSimulatorResearchTarget(input: {
   }
   const destinations = new Set(state.history.filter(entry => entry.source === "booking" || entry.source === "booking-root" || entry.source === "link" && input.officialUrl && new URL(entry.requestedUrl).origin !== new URL(input.officialUrl).origin).map(entry => entry.requestedUrl));
   if (source !== "official" && source !== "evidence" && !destinations.has(url) && destinations.size >= 3) throw new Error("The bounded simulator booking destination budget is exhausted.");
-  if (state.history.some(entry => entry.requestedUrl === url && entry.rendered === input.rendered)) throw new Error("Use a different simulator source research route; the identical route was already attempted.");
+  const priorOnRoute = state.history.filter(entry => entry.requestedUrl === url && entry.rendered === input.rendered);
+  const matching = priorOnRoute.at(-1);
+  const protectedRoute = priorOnRoute.some(entry => entry.outcome === "HARD_FAILED" ||
+    [401, 403, 404].includes(entry.httpStatus) || (entry.publicReadEvidence?.accessControls.length ?? 0) > 0);
+  if (protectedRoute || matching && !(matching.sourceFingerprint === state.sourceFingerprint &&
+      matching.publicReadEvidence?.sourceFingerprint === state.sourceFingerprint &&
+      isSecondaryRevalidationDue({ url, rendered: matching.rendered, httpStatus: matching.httpStatus,
+        observedAt: matching.observedAt, requestId: matching.requestId, outcome: matching.outcome === "READ" ? "READ" : undefined,
+        renderWarning: matching.renderWarning, researchImplementationVersion: matching.researchImplementationVersion,
+        accessControlsObserved: matching.publicReadEvidence?.accessControlsObserved,
+        accessControls: matching.publicReadEvidence?.accessControls,
+        renderComplete: matching.publicReadEvidence?.renderComplete }, input.now)))
+    throw new Error("Use a different simulator source research route; the identical route was already attempted.");
   if (input.priorFailedRoutes?.some(entry => entry.url === url && entry.rendered === input.rendered)) throw new Error("An unchanged structural source failure needs a different research route or materially changed source.");
   return { source, url, rendered: input.rendered };
 }

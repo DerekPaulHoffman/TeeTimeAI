@@ -40,7 +40,13 @@ Adoption preserves spent history and counters while clearing navigation; it
 cannot relabel old failures as observations of the corrected source. Replacement
 packets carry matching denied routes and sanitized failure diagnostics. They do
 not forget the oldest route after four retries. Incomplete rendered pages retain
-their collector version, warning and available configuration diagnostic.
+their original observation time, observed access controls, collector version,
+warning and available configuration diagnostic. The current guide may offer the
+same main route after sixty minutes under an unchanged version only for a
+current-source rendered 2xx incomplete observation with positively empty access
+controls. A repeat spends another one of the six reads and restarts the backoff
+if incomplete again. Hard failures, HTTP denials, detected access controls and
+unknown legacy evidence remain fenced.
 
 Follow the current owned `researchGuide`; it determines permitted commands,
 saved sources, indexed handoffs, budgets and retry priorities. Signed-out public

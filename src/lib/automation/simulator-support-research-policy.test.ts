@@ -61,6 +61,67 @@ describe("persisted known-reader configuration", () => {
 });
 
 describe("durable simulator research failure memory", () => {
+  it("revalidates only a proven current-source secondary incomplete route after exactly 60 minutes", () => {
+    const observedAt = new Date(now.getTime() - 60 * 60_000).toISOString();
+    const incomplete = { url: bookingUrl, rendered: true, httpStatus: 200, observedAt,
+      requestId: "11111111-1111-4111-8111-111111111111", outcome: "READ" as const,
+      renderWarning: "SECONDARY_REQUEST_BUDGET_EXHAUSTED" as const,
+      researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION,
+      accessControlsObserved: true as const, accessControls: [], renderComplete: false };
+    expect(currentSimulatorResearchBlockedRoutes([incomplete], new Date(now.getTime() - 1))).toEqual([incomplete]);
+    expect(currentSimulatorResearchBlockedRoutes([incomplete], now)).toEqual([]);
+    const entry = { source: "booking" as const, requestedUrl: bookingUrl, sourceUrl: bookingUrl,
+      sourceFingerprint: fingerprint, observedAt, httpStatus: 200, rendered: true, outcome: "READ" as const,
+      requestId: incomplete.requestId, renderWarning: incomplete.renderWarning,
+      researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION,
+      publicReadEvidence: { sourceFingerprint: fingerprint, accessControlsObserved: true as const,
+        accessControls: [], method: "BROWSER" as const, renderComplete: false } };
+    const state = readSimulatorResearchState({ ...empty(), readCount: 1, history: [entry] }, fingerprint);
+    expect(() => select(state, { source: "booking", rendered: true, now: new Date(now.getTime() - 1) })).toThrow("identical");
+    expect(select(state, { source: "booking", rendered: true, now })).toMatchObject({ url: bookingUrl, rendered: true });
+    expect(() => select({ ...state, sourceFingerprint: "b".repeat(64) }, { source: "booking", rendered: true, now })).toThrow("identical");
+    expect(() => select({ ...state, readCount: 2, history: [entry, { ...entry, observedAt: now.toISOString(), httpStatus: 403 }] },
+      { source: "booking", rendered: true, now })).toThrow("identical");
+    expect(() => select({ ...state, readCount: 2, history: [entry, { ...entry, observedAt: now.toISOString() }] },
+      { source: "booking", rendered: true, now })).toThrow("identical");
+    const hard = { ...entry, httpStatus: 0, outcome: "HARD_FAILED" as const,
+      publicReadEvidence: undefined, failure: { stage: "PUBLIC_READ" as const, category: "UNKNOWN" as const, code: "UNCLASSIFIED_FAILURE" as const } };
+    for (const prior of [hard, { ...entry, httpStatus: 403 },
+      { ...entry, publicReadEvidence: { ...entry.publicReadEvidence, accessControls: ["QUEUE" as const] } }]) {
+      expect(() => select({ ...state, readCount: 2, history: [prior, entry] },
+        { source: "booking", rendered: true, now })).toThrow("identical");
+    }
+  });
+  it("does not cool down denial, challenged, hard, plain, ambiguous or future checkpoints", () => {
+    const base = { url: bookingUrl, rendered: true, httpStatus: 200,
+      observedAt: new Date(now.getTime() - 61 * 60_000).toISOString(), requestId: "11111111-1111-4111-8111-111111111111",
+      outcome: "READ" as const, renderWarning: "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED" as const,
+      researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION,
+      accessControlsObserved: true as const, accessControls: [], renderComplete: false };
+    const fenced = [{ ...base, observedAt: undefined }, { ...base, observedAt: new Date(now.getTime() + 1).toISOString() },
+      { ...base, accessControlsObserved: undefined }, { ...base, accessControls: undefined },
+      { ...base, accessControls: ["ACCOUNT_REQUIRED" as const] }, { ...base, httpStatus: 403 },
+      { ...base, httpStatus: 0, failure: { stage: "PUBLIC_READ" as const, category: "UNKNOWN" as const, code: "UNCLASSIFIED_FAILURE" as const } },
+      { ...base, rendered: false }, { ...base, renderWarning: undefined }, { ...base, renderComplete: undefined },
+      { ...base, requestId: undefined }];
+    for (const route of fenced) expect(currentSimulatorResearchBlockedRoutes([route], now)).toEqual([route]);
+    expect(currentSimulatorResearchBlockedRoutes([{ ...base, accessControls: ["CAPTCHA_OR_CHALLENGE"] }], now)).toHaveLength(1);
+    expect(currentSimulatorResearchBlockedRoutes([{ ...base, accessControls: ["QUEUE"] }], now)).toHaveLength(1);
+    expect(currentSimulatorResearchBlockedRoutes([{ ...base, researchImplementationVersion: "older-collector", accessControls: ["ACCOUNT_REQUIRED"] }], now)).toHaveLength(1);
+    expect(currentSimulatorResearchBlockedRoutes([{ ...base, researchImplementationVersion: "older-collector" }], now)).toEqual([]);
+  });
+  it("uses the newest route checkpoint before inherited memory, including renewed cooldown and denial", () => {
+    const old = { url: bookingUrl, rendered: true, httpStatus: 200,
+      observedAt: new Date(now.getTime() - 61 * 60_000).toISOString(), requestId: "11111111-1111-4111-8111-111111111111",
+      outcome: "READ" as const, renderWarning: "SECONDARY_STYLESHEET_URL_REJECTED" as const,
+      researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION,
+      accessControlsObserved: true as const, accessControls: [], renderComplete: false };
+    const recent = { ...old, observedAt: new Date(now.getTime() - 10 * 60_000).toISOString() };
+    const denied = { ...old, httpStatus: 403, renderWarning: undefined };
+    expect(currentSimulatorResearchBlockedRoutes(mergeSimulatorResearchBlockedRoutes([recent, old]), now)).toEqual([recent]);
+    expect(currentSimulatorResearchBlockedRoutes(mergeSimulatorResearchBlockedRoutes([denied, old]), now)).toEqual([denied]);
+    expect(currentSimulatorResearchBlockedRoutes(mergeSimulatorResearchBlockedRoutes([old, denied]), now)).toEqual([]);
+  });
   it("does not relabel old or ambiguous observations with an adopted source", () => {
     const entry = failedHomepage().history[0], adoptedFingerprint = "b".repeat(64);
     const state = { ...failedHomepage(), sourceFingerprint: adoptedFingerprint };
