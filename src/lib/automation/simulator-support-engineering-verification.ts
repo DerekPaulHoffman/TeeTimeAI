@@ -40,6 +40,7 @@ export function normalizeSimulatorEngineeringResult(result: SimulatorAvailabilit
 function normalizeFailure(error: unknown) {
   const code = error instanceof SimulatorAvailabilityError ? error.code :
     error instanceof Error && error.message === "SIMULATOR_ENGINEERING_PROVIDER_BUSY" ? "PROVIDER_BUSY" :
+    error instanceof Error && error.message === "SIMULATOR_ENGINEERING_READ_DEADLINE" ? "READ_DEADLINE" :
     error instanceof Error && error.message === "SIMULATOR_ENGINEERING_INCOMPLETE_READ" ? "INCOMPLETE_READ" : "READ_FAILED";
   return { outcome: code === "UNSUPPORTED_PROVIDER" ? "NEEDS_ADAPTER" as const : "FETCH_FAILED" as const,
     complete: false, providerObservedAt: null, slotCount: 0, failureCode: code };
@@ -133,6 +134,9 @@ export async function runSimulatorEngineeringVerification(input: SimulatorEngine
         date: reserved.requestedDate, durationMinutes: 60, partySize: 1, timeZone: reserved.timeZone }, boundedFetch);
     });
     if (!read.acquired) throw new Error("SIMULATOR_ENGINEERING_PROVIDER_BUSY");
+    if (deadline.aborted || Date.now() - reserved.startedAt.getTime() > SIMULATOR_ENGINEERING_VERIFICATION_DEADLINE_MS) {
+      throw new Error("SIMULATOR_ENGINEERING_READ_DEADLINE");
+    }
     normalized = normalizeSimulatorEngineeringResult(read.value, reserved.startedAt, new Date(), {
       offeringId: reserved.offering.id, requestedDate: reserved.requestedDate, timeZone: reserved.timeZone,
     });

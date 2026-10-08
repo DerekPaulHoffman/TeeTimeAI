@@ -140,6 +140,14 @@ describe("deployed independent simulator verification", () => {
       expect((f.audit.simulatorEngineeringVerification as SimulatorEngineeringVerificationState).observations).toHaveLength(0);
     }
   });
+  it("does not accept a complete provider response after the network deadline but within settlement grace", async () => {
+    const f = fixture(); f.deps.read.mockImplementation(async () => {
+      f.setClock(new Date(start.getTime() + 91_000)); return { ...f.result, observedAt: new Date(start.getTime() + 91_000) };
+    });
+    const result = await runSimulatorEngineeringVerification({ assignmentRef: "assignment", token: "owned", revision: 3 }, runtime, f.deps);
+    expect(result).toMatchObject({ outcome: "FETCH_FAILED", complete: false, failureCode: "READ_DEADLINE", freshSuccessfulChecks: 0 });
+    expect(f.audit.simulatorEngineeringVerification).toMatchObject({ readsUsed: 1, inFlight: null });
+  });
   it("rejects wrong runtime, active normal offering leases and malformed incomplete results", async () => {
     const f = fixture();
     await expect(runSimulatorEngineeringVerification({ assignmentRef: "assignment", token: "owned", revision: 3 }, { ...runtime, deploymentId: "dpl_old" }, f.deps)).rejects.toThrow("RUNTIME_NOT_CURRENT");

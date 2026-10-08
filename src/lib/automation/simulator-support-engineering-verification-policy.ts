@@ -134,6 +134,7 @@ export function evaluateSimulatorEngineeringVerification(input: { now: Date; cla
     ["MATCH_FOUND", "NO_MATCH"].includes(row.outcome) && row.failureCode === null &&
     (row.outcome === "MATCH_FOUND" ? row.slotCount > 0 : row.slotCount === 0) && row.providerObservedAt !== null &&
     Date.parse(row.providerObservedAt) >= Math.max(Date.parse(row.startedAt), Date.parse(state.startedAt), now.getTime() - 30 * 60_000) &&
+    Date.parse(row.providerObservedAt) - Date.parse(row.startedAt) <= SIMULATOR_ENGINEERING_VERIFICATION_DEADLINE_MS &&
     Date.parse(row.providerObservedAt) <= Date.parse(row.completedAt) && Date.parse(row.completedAt) <= now.getTime() &&
     Date.parse(row.completedAt) < Date.parse(row.expiresAt);
   const ids: string[] = [];
