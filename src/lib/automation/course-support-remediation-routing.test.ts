@@ -826,40 +826,88 @@ describe("course-support remediation routing", () => {
       : ["IMPLEMENT_REUSABLE_SUPPORT", "INSPECT_PROVIDER_CONTRACT"]);
   });
 
+  const renderedCourse = {
+    ...runnableCourse,
+    detectedPlatform: "CUSTOM",
+    providerFamilyKey: "EZLINKS",
+    detectedBookingUrl: "https://public-course.ezlinksgolf.com/",
+    bookingMetadata: null,
+    automationEligibility: "NEEDS_REVIEW",
+    discoveryAttempt: "HTTP_INCONCLUSIVE" as const,
+    playbookAssessment: incompletePlaybook("RENDERED_BROWSER_DISCOVERY"),
+    providerContractEvidenceAvailable: false,
+  };
+
   it.each(["MISSING_METADATA", "SCHEMA", "UNKNOWN", "READER_PARSER_MISSING"] as const)(
-    "checks the public booking page before repairing a %s provider adapter",
+    "checks the booking page before repairing a %s provider adapter with public status confirmed or pending",
     (failureClass) => {
-      const course = {
-        ...runnableCourse,
-        detectedPlatform: "CUSTOM",
-        providerFamilyKey: "EZLINKS",
-        detectedBookingUrl: "https://public-course.ezlinksgolf.com/",
-        bookingMetadata: null,
-        automationEligibility: "NEEDS_REVIEW",
-        failureClass,
-        discoveryAttempt: "HTTP_INCONCLUSIVE" as const,
-        playbookAssessment: incompletePlaybook("RENDERED_BROWSER_DISCOVERY"),
-        providerContractEvidenceAvailable: false,
-      };
-      const route = routeCourseSupportRemediation(course);
-      expect(route).toMatchObject({
-        workMode: "ADVANCE_DISCOVERY",
-        allowUnchangedRuntime: true,
-        requiresImplementationPath: false,
-        attemptSignature: { playbookStage: "RENDERED_BROWSER_DISCOVERY" },
-      });
-      expect(buildCourseSupportClaimActionPlan({
-        route,
-        incidentKind: "NEEDS_ADAPTER",
-        incidentProviderFamilyKey: "EZLINKS",
-        course,
-      })).toMatchObject({
-        primaryAction: "VERIFY_CURRENT_RUNTIME",
-        allowedActions: ["VERIFY_CURRENT_RUNTIME"],
-      });
+      for (const isPublic of [true, null] as const) {
+        const course = { ...renderedCourse, isPublic, failureClass };
+        const route = routeCourseSupportRemediation(course);
+        expect(route).toMatchObject({
+          workMode: "ADVANCE_DISCOVERY",
+          allowUnchangedRuntime: true,
+          requiresImplementationPath: false,
+          attemptSignature: { playbookStage: "RENDERED_BROWSER_DISCOVERY" },
+        });
+        expect(buildCourseSupportClaimActionPlan({
+          route,
+          incidentKind: "NEEDS_ADAPTER",
+          incidentProviderFamilyKey: "EZLINKS",
+          course,
+        })).toMatchObject({
+          primaryAction: "VERIFY_CURRENT_RUNTIME",
+          allowedActions: ["VERIFY_CURRENT_RUNTIME"],
+        });
+      }
     },
   );
 
+  it("keeps explicit private identity out of the rendered-discovery shortcut", () => {
+    const route = routeCourseSupportRemediation({
+      ...renderedCourse, isPublic: false, failureClass: "SCHEMA",
+    });
+    expect(route).toMatchObject({
+      workMode: "COMPLETE_CLASSIFICATION",
+      strategy: { action: "FINAL_PRIVATE_OR_INVALID" },
+    });
+  });
+
+  it.each([null, "http://localhost/tee-times", "https://user:secret@course.example/"])(
+    "keeps a missing or unsafe booking source out of rendered discovery: %s",
+    (detectedBookingUrl) => {
+      const route = routeCourseSupportRemediation({
+        ...renderedCourse, isPublic: null, website: null,
+        detectedBookingUrl, failureClass: "SCHEMA",
+      });
+      expect(route.workMode).not.toBe("ADVANCE_DISCOVERY");
+      expect(route.strategy.action).toBe("REPAIR_PROVIDER_ADAPTER");
+    },
+  );
+
+  it.each([
+    ["AUTH", "ACCOUNT_REQUIRED"],
+    ["CHALLENGE", "CAPTCHA_OR_QUEUE"],
+  ] as const)("preserves the observed %s access gate", (failureClass, automationReason) => {
+    const route = routeCourseSupportRemediation({
+      ...renderedCourse, isPublic: null, failureClass,
+      automationEligibility: "BLOCKED", automationReason,
+    });
+    expect(route.strategy.action).toBe("VERIFY_TECHNICAL_CONSTRAINT");
+    expect(route.workMode).not.toBe("IMPLEMENT_REUSABLE_SUPPORT");
+  });
+
+  it("keeps a current actionable provider contract on implementation", () => {
+    const route = routeCourseSupportRemediation({
+      ...renderedCourse, isPublic: true, failureClass: "SCHEMA",
+      playbookAssessment: incompletePlaybook("BROWSER_ADAPTER_RETRY"),
+      providerContractEvidenceAvailable: true,
+    });
+    expect(route).toMatchObject({
+      workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+      requiresImplementationPath: true,
+    });
+  });
 
   it("keeps a source-free unsupported public family on its bounded rendered stage", () => {
     const course = {

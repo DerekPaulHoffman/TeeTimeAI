@@ -401,6 +401,10 @@ export function routeCourseSupportRemediation(
       input.detectedBookingUrl === null,
     safePublicDiscoverySource:
       input.isPublic === true && hasSafePublicDiscoverySource(input),
+    // A pending identity may enter this owned read-only stage; explicit private
+    // identity still follows the monitoring gate and cannot use this shortcut.
+    safeRenderedDiscoverySource:
+      input.isPublic !== false && hasSafePublicDiscoverySource(input),
     sourceFreeUnsupportedFamily:
       input.isPublic === true &&
       input.failureClass === "UNSUPPORTED_FAMILY" &&
@@ -503,6 +507,7 @@ function selectActionableRoute(input: {
   retryBudget: CourseSupportRemediationRetryBudget | null;
   sourceFreeProvider: boolean;
   safePublicDiscoverySource: boolean;
+  safeRenderedDiscoverySource: boolean;
   sourceFreeUnsupportedFamily: boolean;
   providerContractEvidenceAvailable: boolean;
 }): CourseSupportRemediationRoute {
@@ -552,12 +557,12 @@ function selectActionableRoute(input: {
 
   // A provider adapter cannot be authored from an HTTP status or a failure
   // label. The owned rendered stage must first establish the public request
-  // and response contract. Generic tooling repair remains available through
-  // its separately evidenced implementation paths after this discovery stage.
+  // and response contract. A failure label alone does not prove a generic
+  // collector or reader defect.
   if (
     input.playbookAssessment.conclusion === "INCOMPLETE" &&
     input.playbookAssessment.nextStage === "RENDERED_BROWSER_DISCOVERY" &&
-    input.safePublicDiscoverySource &&
+    input.safeRenderedDiscoverySource &&
     !input.providerContractEvidenceAvailable &&
     input.strategy.action === "REPAIR_PROVIDER_ADAPTER" &&
     input.strategy.providerFamilyKey !== SOURCE_MISSING_PROVIDER_FAMILY &&
