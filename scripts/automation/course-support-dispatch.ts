@@ -128,8 +128,11 @@ export function selectCourseDispatchLegacyHandoff(inspection: LegacyInspection) 
     return { ...handoff, batchRef: inspection.expiredBatch.batchRef };
   }
   if (handoff.action === "CLAIM" && inspection.dueRealCount === 0 &&
-      handoff.maxCourses === 1 && inspection.candidateHistoryEvidenceStatus === "COMPLETE" &&
+      handoff.maxCourses === 1 &&
+      ["COMPLETE", "PER_INCIDENT_BOUND_EXCEEDED"].includes(inspection.candidateHistoryEvidenceStatus) &&
       ["ORDINARY_DISPATCH", "PARKED_CAMPAIGN"].includes(handoff.source)) {
+    // A complete aggregate read removes only overflowing incidents. The owned
+    // claim independently revalidates the retained selection under its writer lease.
     return handoff;
   }
   return null;

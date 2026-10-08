@@ -197,6 +197,44 @@ describe("course dispatcher legacy service fallback", () => {
     }
   });
 
+  it.each(["ORDINARY_DISPATCH", "PARKED_CAMPAIGN"])("retains the safe %s handoff after a different incident overflows", async source => {
+    const handoff = { action: "CLAIM", source, maxCourses: 1, selection: "ATOMIC_SERVER_SIDE" };
+    const inspection = legacyInspection({
+      handoff, outcome: "ready", dueEngineeringCount: 5, dueRealCount: 0,
+      candidateHistoryBlockedCount: 1, candidateHistoryEvidenceStatus: "PER_INCIDENT_BOUND_EXCEEDED",
+    });
+    expect(selectCourseDispatchLegacyHandoff(inspection)).toEqual(handoff);
+    const result = await planCourseDispatchCycle({
+      ownerThreadId: "parent", baseSha: "a".repeat(40), scheduledCycle: true,
+    }, {
+      plan: vi.fn(async () => emptyPlan),
+      refresh: vi.fn(async () => ({ inspectedCount: 0, completedCount: 0, pendingCount: 0 })),
+      inspect: vi.fn(async () => inspection),
+    } as Parameters<typeof planCourseDispatchCycle>[1]);
+    expect(result).toMatchObject({ acquired: true, value: { legacyInspection: {
+      handoff, dueEngineeringCount: 5, candidateHistoryEvidenceStatus: "PER_INCIDENT_BOUND_EXCEEDED",
+    } } });
+  });
+
+  it.each(["AGGREGATE_BOUND_EXCEEDED", "NOT_EVALUATED"])("withholds a new legacy handoff when history is %s", candidateHistoryEvidenceStatus => {
+    for (const source of ["ORDINARY_DISPATCH", "PARKED_CAMPAIGN"]) {
+      expect(selectCourseDispatchLegacyHandoff(legacyInspection({
+        handoff: { action: "CLAIM", source, maxCourses: 1, selection: "ATOMIC_SERVER_SIDE" },
+        dueRealCount: 0, candidateHistoryEvidenceStatus,
+      }))).toBeNull();
+    }
+  });
+
+  it("keeps active-demand and grouped-claim fences after an individual overflow", () => {
+    const handoff = { action: "CLAIM", source: "ORDINARY_DISPATCH", maxCourses: 1, selection: "ATOMIC_SERVER_SIDE" };
+    for (const overrides of [{ dueRealCount: 1 }, { handoff: { ...handoff, maxCourses: 5 } },
+      { handoff: { ...handoff, action: "STOP" } }, { handoff: { ...handoff, source: "UNPROVEN" } }]) {
+      expect(selectCourseDispatchLegacyHandoff(legacyInspection({
+        handoff, candidateHistoryEvidenceStatus: "PER_INCIDENT_BOUND_EXCEEDED", ...overrides,
+      }))).toBeNull();
+    }
+  });
+
   it("never emits a grouped active-alert claim or a claim without complete admission evidence", () => {
     const handoff = { action: "CLAIM", source: "ORDINARY_DISPATCH", maxCourses: 5, selection: "ATOMIC_SERVER_SIDE" };
     expect(selectCourseDispatchLegacyHandoff(legacyInspection({ handoff, dueRealCount: 1 }))).toBeNull();
