@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertSimulatorResearchFallbackBeforeRetry, currentSimulatorResearchBlockedRoutes, getSimulatorResearchGuide, getSimulatorResearchRetryGuide, getSimulatorResearchObservationFingerprint, mergeSimulatorResearchBlockedRoutes, readSettledSimulatorPublicCheckpoint, readSimulatorResearchFailureMemory, readSimulatorResearchState, selectSimulatorResearchTarget, SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION } from "./simulator-support-research-policy";
+import { assertSimulatorResearchFallbackBeforeRetry, currentSimulatorResearchBlockedRoutes, getSimulatorResearchGuide, getSimulatorResearchRetryGuide, getSimulatorResearchObservationFingerprint, getSimulatorResearchImplementationVersion, mergeSimulatorResearchBlockedRoutes, readSettledSimulatorPublicCheckpoint, readSimulatorResearchFailureMemory, readSimulatorResearchState, selectSimulatorResearchTarget, SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION } from "./simulator-support-research-policy";
 
 const fingerprint = "a".repeat(64), now = new Date("2026-10-06T20:00:00Z");
 const officialUrl = "https://venue.example.test", bookingUrl = "https://calendar.example.test/booking/bays";
@@ -8,6 +8,57 @@ const select = (state = empty(), rest = {}) => selectSimulatorResearchTarget({ s
 const failedHomepage = () => ({ ...empty(), readCount: 1, history: [{ source: "official" as const, requestedUrl: officialUrl, sourceUrl: officialUrl, observedAt: now.toISOString(), httpStatus: 403, rendered: false, outcome: "READ" as const }] });
 const savedBayUrl = "https://yourgolfbooking.com/venues/public-golf/booking/bays";
 const bookingRootUrl = "https://yourgolfbooking.com/venues/public-golf/booking";
+
+describe("persisted known-reader configuration", () => {
+  const configuration = { family: "GOLFBOOK" as const, templateId: "53", date: "2026-10-10", minDurationMinutes: 60,
+    maxDurationMinutes: 360, incrementMinutes: 30 as const, resourceIds: ["1", "20"] };
+  const observed = () => ({ ...empty(), readCount: 1, history: [{ source: "booking" as const, requestedUrl: "https://public-bays.golfbook.in/calendar.php", sourceUrl: "https://public-bays.golfbook.in/calendar.php",
+    sourceFingerprint: fingerprint, observedAt: now.toISOString(), httpStatus: 200, rendered: false, outcome: "READ" as const,
+    requestId: "00000000-0000-4000-8000-000000000001", publicReadEvidence: { sourceFingerprint: fingerprint, accessControlsObserved: true as const, accessControls: [], method: "HTTP" as const },
+    publicConfiguration: configuration }] });
+  const guide = (state: ReturnType<typeof empty> = observed(), at = now) => getSimulatorResearchGuide({ state, officialUrl, bookingUrl, now: at, priorFailedRoutes: [] });
+  it("preserves a strict bounded configuration through saved-state parsing and the fresh owned guide", () => {
+    const state = readSimulatorResearchState(observed(), fingerprint);
+    expect(state.history[0].publicConfiguration).toEqual(configuration);
+    expect(guide(state).publicConfigurations).toEqual([{ observedAt: now.toISOString(), source: "booking", rendered: false, configuration }]);
+    expect(guide(state).readsRemaining).toBe(5);
+    expect(readSimulatorResearchState(empty(), fingerprint).history).toEqual([]);
+  });
+  it("does not offer stale or adopted-source facts as current configuration", () => {
+    expect(guide(observed(), new Date(now.getTime() + 31 * 60_000)).publicConfigurations).toEqual([]);
+    expect(guide({ ...observed(), sourceFingerprint: "b".repeat(64) }).publicConfigurations).toEqual([]);
+  });
+  it("rejects raw/private additions, invalid resource IDs and access-restricted configuration evidence", () => {
+    for (const publicConfiguration of [{ ...configuration, csrfToken: "private" }, { ...configuration, resourceIds: ["https://other.example"] }]) {
+      expect(() => readSimulatorResearchState({ ...observed(), history: [{ ...observed().history[0], publicConfiguration }] }, fingerprint)).toThrow();
+    }
+    for (const entry of [{ ...observed().history[0], httpStatus: 403 }, { ...observed().history[0], publicReadEvidence: undefined },
+      { ...observed().history[0], publicReadEvidence: { ...observed().history[0].publicReadEvidence, accessControls: ["ACCOUNT_REQUIRED"] } }]) {
+      expect(() => readSimulatorResearchState({ ...observed(), history: [entry] }, fingerprint)).toThrow();
+    }
+  });
+  it("rejects persisted facts copied from another tenant or date-specific public sheet", () => {
+    const golfbookEntry = { ...observed().history[0], sourceUrl: "https://public-bays.golfbook.in/bookingsheet.php?date=2026-10-11&lang=en" };
+    expect(() => readSimulatorResearchState({ ...observed(), history: [golfbookEntry] }, fingerprint)).toThrow();
+    const acuityEntry = { ...observed().history[0], sourceUrl: "https://app.acuityscheduling.com/schedule/other123",
+      publicConfiguration: { family: "ACUITY", ownerKey: "2991fba2", businessId: "34536426", timeZone: "America/New_York", maxPartySize: null,
+        rentals: [{ id: "73234482", durationMinutes: 60, calendarIds: ["11388341"] }], resources: [{ id: "11388341", timeZone: "America/New_York" }] } };
+    expect(() => readSimulatorResearchState({ ...observed(), history: [acuityEntry] }, fingerprint)).toThrow();
+    expect(guide({ ...observed(), history: [golfbookEntry] }).publicConfigurations).toEqual([]);
+  });
+  it("reconsiders older incomplete known-reader routes once without reopening unrelated or access-denied routes", () => {
+    const incomplete = { rendered: true, httpStatus: 200, renderWarning: "SECONDARY_REQUEST_BUDGET_EXHAUSTED" as const, researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION };
+    const acuity = { ...incomplete, url: "https://app.acuityscheduling.com/schedule/2991fba2" };
+    const golfbook = { ...incomplete, url: "https://public-bays.golfbook.in/calendar.php" };
+    const unrelated = { ...incomplete, url: bookingRootUrl };
+    const invalid = { ...incomplete, url: "https://app.acuityscheduling.com.attacker.example/schedule/2991fba2" };
+    const denied = { ...acuity, renderWarning: undefined, httpStatus: 403 };
+    expect(currentSimulatorResearchBlockedRoutes([acuity, golfbook, unrelated, invalid, denied])).toEqual([unrelated, invalid, denied]);
+    const current = [acuity, golfbook].map(row => ({ ...row, researchImplementationVersion: getSimulatorResearchImplementationVersion(row.url) }));
+    expect(currentSimulatorResearchBlockedRoutes(current)).toEqual(current);
+    expect(getSimulatorResearchImplementationVersion(bookingRootUrl)).toBe(SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION);
+  });
+});
 
 describe("durable simulator research failure memory", () => {
   it("does not relabel old or ambiguous observations with an adopted source", () => {

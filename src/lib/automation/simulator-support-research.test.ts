@@ -2,6 +2,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Route } from "@playwright/test";
 import { fetchYourGolfBookingAvailability } from "@/lib/simulators/providers/your-golf-booking";
+import { projectAcuityPublicConfiguration } from "@/lib/simulators/providers/acuity";
+import { projectGolfBookPublicConfiguration } from "@/lib/simulators/providers/golfbook";
 import { collectSimulatorSupportResearch, detectSimulatorResearchAccessControls, extractSimulatorPublicCalendar, summarizeSimulatorPublicJsonShape, summarizeSimulatorSupportPublicHtml, type SimulatorResearchDependencies } from "./simulator-support-research";
 import { classifySimulatorSupportFailure, type SimulatorResearchFailurePhase } from "./simulator-support-failure";
 
@@ -22,6 +24,21 @@ function publishedConfig(patch: Record<string, unknown> = {}) {
     ...patch,
   };
   return `<h1>Hourly simulator bays</h1><script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { initialReduxState: config } } })}</script>`;
+}
+
+const acuitySource = "https://app.acuityscheduling.com/schedule/2991fba2";
+const golfBookSource = "https://public-bays.golfbook.in/calendar.php";
+function acuityConfig(patch: Record<string, unknown> = {}) {
+  const business = { id: 34536426, ownerKey: "2991fba2", timezone: "America/New_York", includesAdminOnly: false, isExpired: false,
+    description: "Up to 6 People Per Bay", calendars: { "Private-name-must-not-return": [{ id: 11388341, name: "Bay 1", timezone: "America/New_York" }] },
+    appointmentTypes: { "Private-group-must-not-return": [
+      { id: 73234482, name: "Simulator Booking 1 HR", duration: 60, active: true, private: false, type: "service", classSize: null, canChooseQuantity: false, calendarIDs: [11388341], price: "70.00" },
+      { id: 9999, name: "Simulator Member Booking", duration: 60, active: true, private: true, type: "service", classSize: null, canChooseQuantity: false, calendarIDs: [11388341] },
+    ] }, client: { email: "secret@example.test", token: "private-token" }, ...patch };
+  return `<h1>Public hourly rentals</h1><script>var BUSINESS = ${JSON.stringify(business)}; var CLIENT_INFO = { token: "private-client-token" };</script>`;
+}
+function golfBookConfig() {
+  return '<input id="waitlist_date" value="2026-10-10"><input id="waitlist_template" value="53"><input id="template_min_booking_mins" value="60"><input id="template_max_booking_mins" value="360"><input id="template_booking_increment_mins" value="30"><input id="csrf_token" value="private-token"><input name="customerEmail" value="secret@example.test"><table id="bookingsheet"><thead><tr><th id="th_1">Private bay name</th><th id="th_20">Private second name</th></tr></thead><tbody><tr><td class="status_1" onclick="redirect(\'reserve\',\'private-reserve-values\')">Free</td></tr></tbody></table>';
 }
 
 type RequestFixture = { url: string; method?: string; headers?: Record<string, string>; headersFailure?: unknown; requestFailure?: unknown; kind?: string; frame?: "main" | "child" | "popup" };
@@ -61,6 +78,89 @@ function renderedBrowser(requests: RequestFixture[], html = "<h1>Public rentals<
 }
 
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.clearAllMocks(); });
+
+describe("owned known-reader public configuration", () => {
+  it("returns inert Acuity rental metadata from one existing owned read without private fields", async () => {
+    const fetch = vi.fn(async () => response(acuityConfig()));
+    const result = await collectSimulatorSupportResearch({ url: acuitySource }, { fetch, lease, now: () => instant });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(result.publicConfiguration).toEqual({ family: "ACUITY", ownerKey: "2991fba2", businessId: "34536426", timeZone: "America/New_York", maxPartySize: 6,
+      rentals: [{ id: "73234482", durationMinutes: 60, calendarIds: ["11388341"] }], resources: [{ id: "11388341", timeZone: "America/New_York" }] });
+    expect(JSON.stringify(result)).not.toMatch(/secret@example|private-token|private-client-token|Private-name|Private-group|Simulator Booking|9999|70\.00/u);
+  });
+  it.each([acuitySource, golfBookSource])("retains known public facts in the existing rendered packet: %s", async url => {
+    const html = url === acuitySource ? acuityConfig() : golfBookConfig();
+    const view = renderedBrowser([{ url }], html), fetch = vi.fn(async () => response(html));
+    const result = await collectSimulatorSupportResearch({ url, render: true }, { fetch, lease, browser: view.factory });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(result.publicConfiguration?.family).toBe(url === acuitySource ? "ACUITY" : "GOLFBOOK");
+    expect(result).toMatchObject({ renderComplete: true, contentProvenance: "RENDERED_DOM" });
+  });
+  it("projects only GolfBook settings and resource IDs, never form credentials or transaction actions", async () => {
+    const result = await collectSimulatorSupportResearch({ url: golfBookSource }, { fetch: vi.fn(async () => response(golfBookConfig())), lease });
+    expect(result.publicConfiguration).toEqual({ family: "GOLFBOOK", templateId: "53", date: "2026-10-10", minDurationMinutes: 60, maxDurationMinutes: 360, incrementMinutes: 30, resourceIds: ["1", "20"] });
+    expect(JSON.stringify(result.publicConfiguration)).not.toMatch(/secret@example|private-token|csrf|Private|reserve/u);
+  });
+  it.each([
+    { ownerKey: "other123" }, { includesAdminOnly: true }, { isExpired: true }, { timezone: "Invalid/Zone" },
+    { appointmentTypes: { "": [{ id: 42, name: "Simulator Lesson Booking", duration: 60, active: true, private: false, type: "service", classSize: null, canChooseQuantity: false, calendarIDs: [11388341] }] } },
+    { calendars: { "": [{ id: 11388341, name: "Lesson Room", timezone: "America/New_York" }] } },
+  ])("omits mismatched, restricted or unsupported Acuity configuration", async patch => {
+    expect((await collectSimulatorSupportResearch({ url: acuitySource }, { fetch: vi.fn(async () => response(acuityConfig(patch))), lease })).publicConfiguration).toBeUndefined();
+  });
+  it.each([
+    '<script>var BUSINESS = (() => { throw new Error("never execute") })();</script>',
+    `${acuityConfig()}${acuityConfig()}`,
+    acuityConfig().replace('"id":73234482', '"id":"private-token"'),
+  ])("never evaluates script or projects malformed/ambiguous Acuity state", async html => {
+    expect((await collectSimulatorSupportResearch({ url: acuitySource }, { fetch: vi.fn(async () => response(html)), lease })).publicConfiguration).toBeUndefined();
+  });
+  it.each([
+    golfBookConfig().replace('id="waitlist_template" value="53"', 'id="waitlist_template" value="private-token"'),
+    `${golfBookConfig()}<input id="waitlist_template" value="54">`,
+    golfBookConfig().replace('id="template_booking_increment_mins" value="30"', 'id="template_booking_increment_mins" value="15"'),
+    golfBookConfig().replace('id="th_20"', 'id="th_1"'),
+    golfBookConfig().replace('value="2026-10-10"', 'value="2026-02-30"'),
+  ])("omits invalid or ambiguous GolfBook settings", async html => {
+    expect((await collectSimulatorSupportResearch({ url: golfBookSource }, { fetch: vi.fn(async () => response(html)), lease })).publicConfiguration).toBeUndefined();
+  });
+  it.each([acuitySource, golfBookSource])("does not expose known configuration through an account challenge: %s", async url => {
+    const html = `<h1>Sign in to continue</h1>${url === acuitySource ? acuityConfig() : golfBookConfig()}`;
+    const result = await collectSimulatorSupportResearch({ url }, { fetch: vi.fn(async () => response(html)), lease });
+    expect(result.accessControls).toContain("ACCOUNT_REQUIRED"); expect(result.publicConfiguration).toBeUndefined();
+  });
+  it.each([acuitySource, golfBookSource])("clears known configuration on rendered access control and unsuccessful HTTP: %s", async url => {
+    const html = `<h1>Verify you are human</h1><div class="cf-turnstile"></div>${url === acuitySource ? acuityConfig() : golfBookConfig()}`;
+    const view = renderedBrowser([{ url }], html);
+    const result = await collectSimulatorSupportResearch({ url, render: true }, { fetch: vi.fn(async () => response(html)), lease, browser: view.factory });
+    expect(result.accessControls).toContain("CAPTCHA_OR_CHALLENGE"); expect(result.publicConfiguration).toBeUndefined();
+    expect((await collectSimulatorSupportResearch({ url }, { fetch: vi.fn(async () => response(html, 403)), lease })).publicConfiguration).toBeUndefined();
+  });
+  it.each([
+    "http://app.acuityscheduling.com/schedule/2991fba2", "https://app.acuityscheduling.com.attacker.example/schedule/2991fba2",
+    `${acuitySource}?owner=1234`, `${acuitySource}#reserve`, acuitySource.replace("https://", "https://user:pass@"),
+    "https://app.acuityscheduling.com/api/scheduling/v1/appointments",
+  ])("rejects an unproven Acuity source without interpreting its payload: %s", url => {
+    expect(projectAcuityPublicConfiguration(acuityConfig(), url)).toBeUndefined();
+  });
+  it.each([
+    "http://public-bays.golfbook.in/calendar.php", "https://public-bays.golfbook.in.attacker.example/calendar.php",
+    `${golfBookSource}?date=2026-10-10`, `${golfBookSource}#reserve`, golfBookSource.replace("https://", "https://user:pass@"),
+    "https://public-bays.golfbook.in/reserve.php", "https://public-bays.golfbook.in/bookingsheet.php?date=2026-10-10&lang=en&token=secret",
+  ])("rejects an unproven GolfBook source without interpreting its payload: %s", url => {
+    expect(projectGolfBookPublicConfiguration(golfBookConfig(), url)).toBeUndefined();
+  });
+  it.each([acuityConfig(), golfBookConfig()])("does not project a known shape on an unrelated source", async html => {
+    expect((await collectSimulatorSupportResearch({ url: source }, { fetch: vi.fn(async () => response(html)), lease })).publicConfiguration).toBeUndefined();
+  });
+  it("corroborates the observed GolfBook sheet date without admitting another route", async () => {
+    const url = "https://public-bays.golfbook.in/bookingsheet.php?date=2026-10-10&lang=en";
+    const fetch = vi.fn(async () => response(golfBookConfig()));
+    expect((await collectSimulatorSupportResearch({ url }, { fetch, lease })).publicConfiguration?.family).toBe("GOLFBOOK");
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect((await collectSimulatorSupportResearch({ url: url.replace("2026-10-10", "2026-10-11") }, { fetch, lease })).publicConfiguration).toBeUndefined();
+  });
+});
 
 describe("bounded owned simulator public research transport", () => {
   it("returns exact public configuration facts without user, member, session or raw script payloads", () => {

@@ -4,6 +4,9 @@ import { createAddressPinnedPublicFetchTransport, isOwnedOfficialSiteBodyLimitEr
 import { runWithProviderRequestLease } from "./provider-request-lease";
 import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { sanitizeResponderText } from "./course-support-responder-policy";
+import { projectAcuityPublicConfiguration } from "@/lib/simulators/providers/acuity";
+import { projectGolfBookPublicConfiguration } from "@/lib/simulators/providers/golfbook";
+import type { SimulatorPublicConfiguration } from "@/lib/simulators/providers/public-configuration";
 import { tagSimulatorResearchFailure, tagSimulatorResearchResourceKind, type SimulatorResearchFailurePhase,
   type SimulatorResearchResourceKind } from "./simulator-support-failure";
 
@@ -46,6 +49,7 @@ export type SimulatorResearchResult = {
   method: "HTTP" | "BROWSER"; initialHttpStatus?: number;
   bookingLinks?: string[];
   calendar?: SimulatorPublicCalendar;
+  publicConfiguration?: SimulatorPublicConfiguration;
   jsonShape?: Array<{ path: string; type: string; count?: number }>;
   configurationDiagnostic?: SimulatorConfigurationDiagnostic;
   blockedRequests?: number;
@@ -261,7 +265,9 @@ function resultFromBody(requestedUrl: string, url: string, status: number, conte
     summary.links = [...new Set([bays, ...summary.links])].slice(0, 30);
     bookingLinks.unshift(bays);
   }
-  return { ...base, ...summary, ...(bookingLinks.length ? { bookingLinks: [...new Set(bookingLinks)].slice(0, 30) } : {}), ...extractSimulatorPublicCalendar(html, url) };
+  const publicConfiguration = projectAcuityPublicConfiguration(html, url) ?? projectGolfBookPublicConfiguration(html, url);
+  return { ...base, ...summary, ...(bookingLinks.length ? { bookingLinks: [...new Set(bookingLinks)].slice(0, 30) } : {}),
+    ...(publicConfiguration ? { publicConfiguration } : {}), ...extractSimulatorPublicCalendar(html, url) };
 }
 
 function publicBookingLinkRoles(html: string, sourceUrl: string, safeLinks: string[]) {
@@ -404,7 +410,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
       if (readResult.location) { if (redirects === 4) throw new Error("SIMULATOR_RESEARCH_REDIRECT_LIMIT"); url = readResult.location; continue; }
       const result = resultFromBody(requestedUrl, readResult.url, readResult.status, readResult.contentType, readResult.body, now());
       const controls = /^(?:text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(readResult.contentType) ? detectSimulatorResearchAccessControls(readResult.body.toString("utf8")) : [];
-      return controls.length ? { ...result, text: "", links: [], bookingLinks: undefined, calendar: undefined, jsonShape: undefined, configurationDiagnostic: undefined, accessControls: controls } : result;
+      return controls.length ? { ...result, text: "", links: [], bookingLinks: undefined, calendar: undefined, publicConfiguration: undefined, jsonShape: undefined, configurationDiagnostic: undefined, accessControls: controls } : result;
     }
     throw new Error("SIMULATOR_RESEARCH_REDIRECT_LIMIT");
   }

@@ -4,6 +4,7 @@ import { parse, type DefaultTreeAdapterMap } from "parse5";
 import { fetchWithProviderTimeout } from "@/lib/adapters/fetch-with-timeout";
 
 import { parseProviderComputedSlots } from "./computed-slots";
+import { simulatorPublicConfigurationSchema, type AcuityPublicConfiguration } from "./public-configuration";
 import { SimulatorAvailabilityError, type SimulatorAvailabilityInput, type SimulatorAvailabilityResult } from "./types";
 
 const ORIGIN = "https://app.acuityscheduling.com";
@@ -68,6 +69,33 @@ function selectPublicRentalProduct(business: Record<string, unknown>, rentalIds:
     if (matches.length !== 1 || typeof matches[0].name !== "string" || !/^\s*bay\s+\d+\b/iu.test(matches[0].name) || matches[0].timezone !== business.timezone) throw sourceError("The public simulator product belongs to an unverified resource calendar");
   }
   return { id: String(product.id), calendarIds };
+}
+
+/** Read the existing inert BUSINESS object without evaluating its script.
+ * Projection shares the runtime's public rental and resource identity checks. */
+export function projectAcuityPublicConfiguration(html: string, sourceUrl: string): AcuityPublicConfiguration | undefined {
+  if (!isAcuityPublicBookingUrl(sourceUrl) || Buffer.byteLength(html, "utf8") > MAX_RESPONSE_BYTES) return;
+  try {
+    const ownerKey = new URL(sourceUrl).pathname.split("/").at(-1)!;
+    const business = parsePublicBusiness(html);
+    if (business.ownerKey !== ownerKey || !PUBLIC_ID.test(String(business.id)) || business.includesAdminOnly !== false || business.isExpired !== false) return;
+    const candidates = flattenPublicGroups(business.appointmentTypes).filter(row =>
+      PUBLIC_ID.test(String(row.id)) && Number.isInteger(row.duration) && Number(row.duration) >= 30 && Number(row.duration) <= 240 && Number(row.duration) % 30 === 0 &&
+      row.active === true && row.private === false && row.type === "service" && row.classSize === null && row.canChooseQuantity === false &&
+      typeof row.name === "string" && /\b(?:simulator|bay)\b/iu.test(row.name) && /\b(?:booking|rental|time)\b/iu.test(row.name) && !/\b(?:league|member|lesson|fitting|handicap)\b/iu.test(row.name));
+    if (!candidates.length || candidates.length > 20) return;
+    const rentals = candidates.map(row => {
+      const product = selectPublicRentalProduct(business, [String(row.id)], Number(row.duration));
+      return { id: product.id, durationMinutes: Number(row.duration), calendarIds: product.calendarIds };
+    });
+    const resourceIds = [...new Set(rentals.flatMap(row => row.calendarIds))];
+    const description = typeof business.description === "string" ? textContent(parse(business.description)) : "";
+    const capacity = description.match(/up\s+to\s+(\d{1,2})\s+(?:people|players|guests)\s+per\s+bay/iu);
+    const result = simulatorPublicConfigurationSchema.safeParse({ family: "ACUITY", ownerKey, businessId: String(business.id),
+      timeZone: business.timezone, maxPartySize: capacity ? Number(capacity[1]) : null, rentals,
+      resources: resourceIds.map(id => ({ id, timeZone: business.timezone })) });
+    return result.success && result.data.family === "ACUITY" ? result.data : undefined;
+  } catch { return undefined; }
 }
 
 function parsePublicBusiness(html: string): Record<string, unknown> {

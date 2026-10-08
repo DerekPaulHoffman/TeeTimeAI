@@ -3,6 +3,7 @@ import { parse, type DefaultTreeAdapterMap } from "parse5";
 import { fetchWithProviderTimeout } from "@/lib/adapters/fetch-with-timeout";
 import { zonedDateTimeToDate } from "@/lib/timezones";
 
+import { knownSimulatorPublicConfigurationFamily, simulatorPublicConfigurationSchema, type GolfBookPublicConfiguration } from "./public-configuration";
 import { SimulatorAvailabilityError, type SimulatorAvailabilityInput, type SimulatorAvailabilityResult, type SimulatorAvailabilitySlot } from "./types";
 
 type Node = DefaultTreeAdapterMap["node"];
@@ -41,15 +42,11 @@ export async function fetchGolfBookAvailability(input: SimulatorAvailabilityInpu
 
 export function parseGolfBookSlots(html: string, input: SimulatorAvailabilityInput, templateId: string): SimulatorAvailabilitySlot[] {
   const elements = descendants(parse(html));
-  const hidden = (id: string) => {
-    const found = elements.filter((element) => element.tagName === "input" && attr(element, "id") === id);
-    if (found.length !== 1) throw schemaError("The public simulator calendar settings are missing or ambiguous");
-    return attr(found[0], "value");
-  };
-  if (hidden("waitlist_date") !== input.date || hidden("waitlist_template") !== templateId) throw sourceError("The public simulator calendar did not confirm the requested date and template");
-  const min = Number(hidden("template_min_booking_mins"));
-  const max = Number(hidden("template_max_booking_mins"));
-  const increment = Number(hidden("template_booking_increment_mins"));
+  const settings = readGolfBookPublicSettings(elements);
+  if (settings.date !== input.date || settings.templateId !== templateId) throw sourceError("The public simulator calendar did not confirm the requested date and template");
+  const min = settings.minDurationMinutes;
+  const max = settings.maxDurationMinutes;
+  const increment = settings.incrementMinutes;
   if (!Number.isInteger(min) || !Number.isInteger(max) || !Number.isInteger(increment) || min < 30 || max < min || max > 1440 || increment !== 30) throw schemaError("The official simulator session lengths are not verified");
   if (input.durationMinutes < min || input.durationMinutes > max || (input.durationMinutes - min) % increment !== 0) throw new SimulatorAvailabilityError("UNSUPPORTED_DURATION", "The official simulator scheduler does not offer the requested session length");
   const tables = elements.filter((element) => element.tagName === "table" && attr(element, "id") === "bookingsheet");
@@ -108,6 +105,35 @@ export function parseGolfBookSlots(html: string, input: SimulatorAvailabilityInp
     }
   }
   return slots.sort((a, b) => a.startsAt.getTime() - b.startsAt.getTime() || a.resourceId.localeCompare(b.resourceId));
+}
+
+function readGolfBookPublicSettings(elements: Element[]) {
+  const hidden = (id: string) => {
+    const found = elements.filter(element => element.tagName === "input" && attr(element, "id") === id);
+    if (found.length !== 1) throw schemaError("The public simulator calendar settings are missing or ambiguous");
+    return attr(found[0], "value");
+  };
+  return { date: hidden("waitlist_date"), templateId: hidden("waitlist_template"),
+    minDurationMinutes: Number(hidden("template_min_booking_mins")), maxDurationMinutes: Number(hidden("template_max_booking_mins")),
+    incrementMinutes: Number(hidden("template_booking_increment_mins")) };
+}
+
+/** Return only the known public sheet settings, never form state or cell actions. */
+export function projectGolfBookPublicConfiguration(html: string, sourceUrl: string): GolfBookPublicConfiguration | undefined {
+  if (Buffer.byteLength(html, "utf8") > MAX_RESPONSE_BYTES) return;
+  try {
+    const url = new URL(sourceUrl);
+    const sourceIsSheet = url.pathname === "/bookingsheet.php";
+    if (knownSimulatorPublicConfigurationFamily(sourceUrl) !== "GOLFBOOK") return;
+    const elements = descendants(parse(html));
+    const settings = readGolfBookPublicSettings(elements);
+    if (sourceIsSheet && settings.date !== url.searchParams.get("date")) return;
+    const tables = elements.filter(element => element.tagName === "table" && attr(element, "id") === "bookingsheet");
+    if (tables.length !== 1) return;
+    const resourceIds = descendants(tables[0]).filter(element => element.tagName === "th" && attr(element, "id").startsWith("th_")).map(element => attr(element, "id").slice(3));
+    const result = simulatorPublicConfigurationSchema.safeParse({ family: "GOLFBOOK", ...settings, resourceIds });
+    return result.success && result.data.family === "GOLFBOOK" ? result.data : undefined;
+  } catch { return undefined; }
 }
 
 function validateInput(input: SimulatorAvailabilityInput) {

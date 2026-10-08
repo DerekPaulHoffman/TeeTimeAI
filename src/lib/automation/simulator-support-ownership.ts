@@ -12,7 +12,7 @@ import { z } from "zod";
 import { collectSimulatorSupportResearch, type SimulatorResearchDependencies, type SimulatorResearchResult } from "./simulator-support-research";
 export { summarizeSimulatorSupportPublicHtml } from "./simulator-support-research";
 import { evaluateSimulatorSupportProgress } from "./simulator-support-progress";
-import { assertSimulatorResearchFallbackBeforeRetry, getSimulatorResearchGuide, getSimulatorResearchRetryGuide, getSimulatorResearchObservationFingerprint, readSettledSimulatorPublicCheckpoint, readSimulatorResearchState, selectSimulatorResearchTarget, SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION, mergeSimulatorResearchBlockedRoutes, readSimulatorResearchFailureMemory, currentSimulatorResearchBlockedRoutes, type SimulatorResearchSource, type SimulatorResearchState } from "./simulator-support-research-policy";
+import { assertSimulatorResearchFallbackBeforeRetry, getSimulatorResearchGuide, getSimulatorResearchRetryGuide, getSimulatorResearchObservationFingerprint, getSimulatorResearchImplementationVersion, readSettledSimulatorPublicCheckpoint, readSimulatorResearchState, selectSimulatorResearchTarget, mergeSimulatorResearchBlockedRoutes, readSimulatorResearchFailureMemory, currentSimulatorResearchBlockedRoutes, type SimulatorResearchSource, type SimulatorResearchState } from "./simulator-support-research-policy";
 import { classifySimulatorSupportFailure, type SimulatorSupportFailure } from "./simulator-support-failure";
 
 type Owner = { assignmentRef: string; ownerThreadId: string; token: string; revision: number };
@@ -277,9 +277,10 @@ export async function readSimulatorSupportSource(input: Owner & { source?: Simul
       history: [...state.history, { source: before.value.source, requestedUrl: before.value.url, sourceUrl: read.url,
         sourceFingerprint: before.value.sourceFingerprint,
         observedAt: read.observedAt, httpStatus: read.httpStatus, rendered: before.value.rendered, outcome,
-        requestId: before.value.requestId, researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION,
+        requestId: before.value.requestId, researchImplementationVersion: getSimulatorResearchImplementationVersion(before.value.url),
         ...(read.renderWarning ? { renderWarning: read.renderWarning } : {}),
         ...(read.configurationDiagnostic ? { configurationDiagnostic: read.configurationDiagnostic } : {}),
+        ...(read.publicConfiguration ? { publicConfiguration: read.publicConfiguration } : {}),
         ...(outcome === "READ" && read.accessControlsObserved === true ? { publicReadEvidence: {
           sourceFingerprint: row.source.fingerprint,
           accessControlsObserved: true as const, accessControls: read.accessControls ?? [], method: read.method,

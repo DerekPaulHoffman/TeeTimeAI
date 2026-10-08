@@ -1,9 +1,13 @@
 import { z } from "zod";
 import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { readSafeSimulatorSupportFailure, type SimulatorSupportFailure } from "./simulator-support-failure";
+import { isSimulatorPublicConfigurationSource, knownSimulatorPublicConfigurationFamily, simulatorPublicConfigurationSchema } from "@/lib/simulators/providers/public-configuration";
 
 export const SIMULATOR_RESEARCH_MAX_READS = 6;
 export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-diagnostics-v2";
+export function getSimulatorResearchImplementationVersion(url: string) {
+  return knownSimulatorPublicConfigurationFamily(url) ? "public-calendar-known-readers-v1" : SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION;
+}
 export const SIMULATOR_RESEARCH_SOURCE_NAMES = ["official", "booking", "booking-root", "evidence"] as const;
 export type SimulatorResearchSource = (typeof SIMULATOR_RESEARCH_SOURCE_NAMES)[number];
 const researchSource = z.enum([...SIMULATOR_RESEARCH_SOURCE_NAMES, "link"]);
@@ -36,11 +40,15 @@ const observation = z.object({
   publicReadEvidence: publicReadEvidence.optional(),
   researchImplementationVersion: z.string().regex(/^[a-z0-9-]{1,80}$/u).optional(),
   renderWarning: renderWarning.optional(), configurationDiagnostic: configurationDiagnostic.optional(),
+  publicConfiguration: simulatorPublicConfigurationSchema.optional(),
 }).strict().refine(entry => entry.outcome === "HARD_FAILED" ? Boolean(entry.requestId && entry.failure && entry.httpStatus === 0) :
   !entry.failure || Boolean(entry.requestId && entry.httpStatus === 0 && ["NETWORK_FAILED", "CAPACITY_BUSY"].includes(entry.outcome)))
   .refine(entry => !entry.sourceFingerprint || !entry.publicReadEvidence || entry.sourceFingerprint === entry.publicReadEvidence.sourceFingerprint)
   .refine(entry => !entry.publicReadEvidence || Boolean(entry.requestId && entry.outcome === "READ" &&
-    entry.publicReadEvidence.method === (entry.rendered ? "BROWSER" : "HTTP")));
+    entry.publicReadEvidence.method === (entry.rendered ? "BROWSER" : "HTTP")))
+  .refine(entry => !entry.publicConfiguration || Boolean(entry.sourceFingerprint && entry.outcome === "READ" &&
+    entry.httpStatus >= 200 && entry.httpStatus < 300 && entry.publicReadEvidence?.accessControlsObserved === true &&
+    !entry.publicReadEvidence.accessControls.length && isSimulatorPublicConfigurationSource(entry.publicConfiguration, entry.sourceUrl)));
 const stateSchema = z.object({
   version: z.literal(1), sourceFingerprint: z.string().regex(/^[a-f0-9]{64}$/i),
   readCount: z.number().int().min(0).max(SIMULATOR_RESEARCH_MAX_READS),
@@ -84,7 +92,7 @@ export function mergeSimulatorResearchBlockedRoutes(routes: readonly SimulatorRe
   return [...unique.values()];
 }
 export function currentSimulatorResearchBlockedRoutes(routes: readonly SimulatorResearchBlockedRoute[]) {
-  return routes.filter(route => !route.renderWarning?.startsWith("SECONDARY_") || route.researchImplementationVersion === SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION);
+  return routes.filter(route => !route.renderWarning?.startsWith("SECONDARY_") || route.researchImplementationVersion === getSimulatorResearchImplementationVersion(route.url));
 }
 
 /** Legacy reads retain unknown access evidence; only new owned settlements qualify. */
@@ -194,6 +202,14 @@ export function getSimulatorResearchGuide(input: {
   });
   return { readsRemaining: SIMULATOR_RESEARCH_MAX_READS - input.state.readCount,
     inFlight: Boolean(input.state.inFlight), suggestedReads,
+    publicConfigurations: input.state.history.flatMap(entry => entry.publicConfiguration &&
+      isSimulatorPublicConfigurationSource(entry.publicConfiguration, entry.sourceUrl) &&
+      entry.sourceFingerprint === input.state.sourceFingerprint && entry.httpStatus >= 200 && entry.httpStatus < 300 &&
+      entry.outcome === "READ" && entry.publicReadEvidence?.accessControlsObserved === true && !entry.publicReadEvidence.accessControls.length &&
+      Date.parse(entry.observedAt) <= input.now.getTime() && Date.parse(entry.observedAt) >= input.now.getTime() - 30 * 60_000
+      ? [{ observedAt: entry.observedAt, source: entry.source, rendered: entry.rendered,
+        ...(entry.publicReadEvidence.renderComplete !== undefined ? { renderComplete: entry.publicReadEvidence.renderComplete } : {}),
+        configuration: entry.publicConfiguration }] : []),
     priorBlockedRoutes: input.priorFailedRoutes.map(route => ({ ...route })) };
 }
 
