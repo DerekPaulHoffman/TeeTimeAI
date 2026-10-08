@@ -9,6 +9,7 @@ import type {
   CourseSupportBatchStatus,
   CourseSupportFailureClass,
   CourseSupportIncidentKind,
+  CourseSupportIncidentStatus,
   CourseSupportResolution,
   DetectedPlatform,
   GooglePlaceAccessOverride,
@@ -358,6 +359,7 @@ const DETACHED_VERIFICATION_COURSE_SELECT = {
     select: {
       status: true,
       detectedPlatform: true,
+      bookingUrl: true,
       automationReason: true,
       apiMetadata: true,
       confidence: true,
@@ -3408,6 +3410,131 @@ function isExpiredImplementationSupersededByCurrentSource(input: {
     currentStrategy.action === "DISCOVER_WITH_HTTP" ||
     currentStrategy.action === "DISCOVER_WITH_BROWSER"
   );
+}
+
+export function isExpiredDiagnosticImplementationSupersededByDiscovery(input: {
+  claimedAttempt: CourseSupportRemediationClaimAttempt | null;
+  course: Parameters<typeof buildCourseSupportProviderSnapshotFingerprint>[0] & MonitoringStrategyInput & {
+    automationDiscoveries?: Parameters<typeof selectCurrentBrowserProviderContractEvidence>[0]["discoveries"];
+  };
+  incident: {
+    cycle: number;
+    status: CourseSupportIncidentStatus;
+    resolution: CourseSupportResolution | null;
+    failureClass: CourseSupportFailureClass | null;
+    failureFingerprint: string;
+    attemptLedger: unknown;
+    firstSeenAt: Date;
+    providerFamilyKey: string;
+    batchIncidents: Array<{ cycle: number }>;
+  };
+  batchCycle: number;
+  batchProviderFamilyKey: string;
+  batchFailureFingerprint: string;
+  batchSummary: unknown;
+  baseSha: string;
+  releaseSha: string | null;
+  deployedAt: Date | null;
+  recheckDispatchKey: string | null;
+  recheckDispatchStartedAt: Date | null;
+  recheckDispatchedAt: Date | null;
+  currentHeadSha: string;
+  currentBranch: string;
+  dirtyPaths: string[];
+  committedPaths?: string[];
+  releaseCommittedPaths?: string[];
+  priorReleaseExecution: ReturnType<typeof readCourseSupportReleaseExecutionEvidence>;
+  proofSnapshot: unknown;
+  verificationRequestCount: number;
+  result: CourseSupportBatchIncidentResult;
+}) {
+  const attempt = input.claimedAttempt;
+  const summary = asJsonObject(input.batchSummary);
+  const plan = attempt?.actionPlan;
+  const ledger = parseAutomationPlaybookLedger(input.incident.attemptLedger);
+  const playbook = assessAutomationPlaybook(
+    input.incident.attemptLedger,
+    input.incident.cycle,
+  );
+  if (
+    !attempt || !plan ||
+    attempt.approach.workMode !== "IMPLEMENT_REUSABLE_SUPPORT" ||
+    attempt.approach.strategyAction !== "REPAIR_PROVIDER_ADAPTER" ||
+    attempt.approach.playbookStage !== "RENDERED_BROWSER_DISCOVERY" ||
+    plan.primaryAction !== "IMPLEMENT_REUSABLE_SUPPORT" ||
+    plan.route.playbookStage !== "RENDERED_BROWSER_DISCOVERY" ||
+    input.batchCycle !== input.incident.cycle ||
+    input.batchProviderFamilyKey !== input.incident.providerFamilyKey ||
+    input.batchFailureFingerprint !== input.incident.failureFingerprint ||
+    input.incident.providerFamilyKey.trim().toUpperCase() !==
+      input.course.providerFamilyKey?.trim().toUpperCase() ||
+    input.incident.status !== "AUTO_INVESTIGATING" ||
+    input.incident.resolution !== null ||
+    !Array.isArray(input.incident.batchIncidents) ||
+    input.incident.batchIncidents.some((entry) => entry.cycle === input.incident.cycle) ||
+    attempt.failureFingerprint !== input.incident.failureFingerprint ||
+    attempt.providerSnapshotFingerprint !==
+      buildCourseSupportProviderSnapshotFingerprint(input.course) ||
+    !ledger ||
+    ledger.events.filter((event) => event.cycle === input.incident.cycle).length !==
+      attempt.playbookEventCountAtClaim ||
+    playbook.conclusion !== "INCOMPLETE" ||
+    playbook.nextStage !== "RENDERED_BROWSER_DISCOVERY" ||
+    !Array.isArray(summary.plannedPaths) ||
+    summary.plannedPaths.length !== 0 ||
+    typeof summary.branch !== "string" || !summary.branch ||
+    !input.currentBranch || input.currentHeadSha !== input.baseSha ||
+    input.dirtyPaths.length !== 0 ||
+    (input.committedPaths?.length ?? 0) !== 0 ||
+    (input.releaseCommittedPaths?.length ?? 0) !== 0 ||
+    (input.releaseSha !== null && input.releaseSha !== input.baseSha) ||
+    input.deployedAt !== null ||
+    input.recheckDispatchKey !== null ||
+    input.recheckDispatchStartedAt !== null ||
+    input.recheckDispatchedAt !== null ||
+    summary.releaseProvenance !== undefined ||
+    summary.executionEver !== undefined ||
+    (summary.releaseHistory !== undefined &&
+      (!Array.isArray(summary.releaseHistory) || summary.releaseHistory.length > 0)) ||
+    input.priorReleaseExecution.changedReleaseDeploymentEver ||
+    input.priorReleaseExecution.providerExecutionEverForCourse ||
+    input.priorReleaseExecution.providerExecutionAttemptEverForCourse ||
+    input.priorReleaseExecution.terminalExecutionEverForCourse ||
+    input.proofSnapshot !== null ||
+    input.verificationRequestCount !== 0 ||
+    input.result !== "PENDING"
+  ) {
+    return false;
+  }
+  const trustedBookingUrl = selectProviderContractTrustedBookingLandingUrl(
+    input.course.detectedBookingUrl ?? null,
+    input.incident.providerFamilyKey,
+  );
+  const trustedOfficialUrl = trustedBookingUrl ??
+    selectProviderContractTrustedLandingUrl([input.course.website ?? null]);
+  if (selectCurrentBrowserProviderContractEvidence({
+    discoveries: input.course.automationDiscoveries ?? [],
+    incidentCycle: input.incident.cycle,
+    incidentFirstSeenAt: input.incident.firstSeenAt,
+    providerFamilyKey: input.incident.providerFamilyKey,
+    providerSnapshotFingerprint: attempt.providerSnapshotFingerprint,
+    officialUrl: trustedOfficialUrl,
+    bookingUrl: trustedBookingUrl,
+  })?.marker) {
+    return false;
+  }
+  const route = routeCourseSupportRemediation({
+    ...input.course,
+    failureClass: input.incident.failureClass,
+    discoveryAttempt: playbook.completedStages.includes("OFFICIAL_HTTP_DISCOVERY")
+      ? "HTTP_INCONCLUSIVE" : "NONE",
+    attemptCount: 0,
+    playbookAssessment: playbook,
+    providerContractEvidenceAvailable: false,
+  });
+  return route.workMode === "ADVANCE_DISCOVERY" &&
+    route.attemptSignature?.playbookStage === "RENDERED_BROWSER_DISCOVERY" &&
+    route.requiresImplementationPath === false;
 }
 
 export type CourseSupportReleaseAdvanceProof = {
@@ -15162,6 +15289,8 @@ export async function recoverCourseSupportBatch(input: {
                 resolution: true,
                 decisionAt: true,
                 cycle: true,
+                firstSeenAt: true,
+                providerFamilyKey: true,
                 failureClass: true,
                 attemptLedger: true,
                 activeBatchId: true,
@@ -15596,7 +15725,39 @@ export async function recoverCourseSupportBatch(input: {
       ),
       now,
     });
-    if (recovery.action === "BLOCK") {
+    const diagnosticClaim = batch.incidents.length === 1
+      ? readCourseSupportRemediationClaimAttempt({
+          summary: batch.summary,
+          courseId: batch.incidents[0].courseId,
+          expectedAttemptCount: 1,
+        })
+      : null;
+    const diagnosticSupersession = batch.incidents.length === 1 &&
+      isExpiredDiagnosticImplementationSupersededByDiscovery({
+        claimedAttempt: diagnosticClaim,
+        course: batch.incidents[0].course,
+        incident: batch.incidents[0].incident,
+        batchCycle: batch.incidents[0].cycle,
+        batchProviderFamilyKey: batch.providerFamilyKey,
+        batchFailureFingerprint: batch.failureFingerprint,
+        batchSummary: batch.summary,
+        baseSha: batch.baseSha,
+        releaseSha: batch.releaseSha,
+        deployedAt: batch.deployedAt,
+        recheckDispatchKey: batch.recheckDispatchKey,
+        recheckDispatchStartedAt: batch.recheckDispatchStartedAt,
+        recheckDispatchedAt: batch.recheckDispatchedAt,
+        currentHeadSha: input.currentHeadSha,
+        currentBranch: input.currentBranch,
+        dirtyPaths: input.dirtyPaths,
+        committedPaths: input.committedPaths,
+        releaseCommittedPaths: input.releaseCommittedPaths,
+        priorReleaseExecution,
+        proofSnapshot: batch.incidents[0].proofSnapshot,
+        verificationRequestCount: batch.incidents[0].verificationRequests?.length ?? -1,
+        result: batch.incidents[0].result,
+      });
+    if (recovery.action === "BLOCK" || diagnosticSupersession) {
       const normalizedDirtyPaths = normalizeCourseSupportObservedGitPaths(
         input.dirtyPaths,
       );
@@ -15735,11 +15896,34 @@ export async function recoverCourseSupportBatch(input: {
         }
         const currentSourceActionPlanChangeEntryIds = new Set(
           retryIncidents.flatMap((entry) =>
-            isExpiredImplementationSupersededByCurrentSource({
+            (isExpiredImplementationSupersededByCurrentSource({
               claimedAttempt: claimedAttemptByRetryEntryId.get(entry.id),
               course: entry.course,
               failureClass: entry.incident.failureClass,
-            })
+            }) || isExpiredDiagnosticImplementationSupersededByDiscovery({
+              claimedAttempt: claimedAttemptByRetryEntryId.get(entry.id) ?? null,
+              course: entry.course,
+              incident: entry.incident,
+              batchCycle: entry.cycle,
+              batchProviderFamilyKey: batch.providerFamilyKey,
+              batchFailureFingerprint: batch.failureFingerprint,
+              batchSummary: batch.summary,
+              baseSha: batch.baseSha,
+              releaseSha: batch.releaseSha,
+              deployedAt: batch.deployedAt,
+              recheckDispatchKey: batch.recheckDispatchKey,
+              recheckDispatchStartedAt: batch.recheckDispatchStartedAt,
+              recheckDispatchedAt: batch.recheckDispatchedAt,
+              currentHeadSha: input.currentHeadSha,
+              currentBranch: input.currentBranch,
+              dirtyPaths: input.dirtyPaths,
+              committedPaths: input.committedPaths,
+              releaseCommittedPaths: input.releaseCommittedPaths,
+              priorReleaseExecution,
+              proofSnapshot: entry.proofSnapshot,
+              verificationRequestCount: entry.verificationRequests?.length ?? -1,
+              result: entry.result,
+            }))
               ? [entry.id]
               : [],
           ),
@@ -16560,6 +16744,30 @@ export async function recoverCourseSupportBatch(input: {
                   claimedAttempt,
                   course: currentCourse,
                   failureClass: entry.incident.failureClass,
+                }) ||
+                isExpiredDiagnosticImplementationSupersededByDiscovery({
+                  claimedAttempt,
+                  course: currentCourse,
+                  incident: entry.incident,
+                  batchCycle: entry.cycle,
+                  batchProviderFamilyKey: batch.providerFamilyKey,
+                  batchFailureFingerprint: batch.failureFingerprint,
+                  batchSummary: batch.summary,
+                  baseSha: batch.baseSha,
+                  releaseSha: batch.releaseSha,
+                  deployedAt: batch.deployedAt,
+                  recheckDispatchKey: batch.recheckDispatchKey,
+                  recheckDispatchStartedAt: batch.recheckDispatchStartedAt,
+                  recheckDispatchedAt: batch.recheckDispatchedAt,
+                  currentHeadSha: input.currentHeadSha,
+                  currentBranch: input.currentBranch,
+                  dirtyPaths: input.dirtyPaths,
+                  committedPaths: input.committedPaths,
+                  releaseCommittedPaths: input.releaseCommittedPaths,
+                  priorReleaseExecution,
+                  proofSnapshot: entry.proofSnapshot,
+                  verificationRequestCount: entry.verificationRequests?.length ?? -1,
+                  result: entry.result,
                 });
               if (
                 currentAuthoritativeSuccess !==

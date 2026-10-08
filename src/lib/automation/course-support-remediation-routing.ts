@@ -550,6 +550,22 @@ function selectActionableRoute(input: {
     return discoveryRoute({ ...input, retryBudget: null });
   }
 
+  // A provider adapter cannot be authored from an HTTP status or a failure
+  // label. The owned rendered stage must first establish the public request
+  // and response contract. Generic tooling repair remains available through
+  // its separately evidenced implementation paths after this discovery stage.
+  if (
+    input.playbookAssessment.conclusion === "INCOMPLETE" &&
+    input.playbookAssessment.nextStage === "RENDERED_BROWSER_DISCOVERY" &&
+    input.safePublicDiscoverySource &&
+    !input.providerContractEvidenceAvailable &&
+    input.strategy.action === "REPAIR_PROVIDER_ADAPTER" &&
+    input.strategy.providerFamilyKey !== SOURCE_MISSING_PROVIDER_FAMILY &&
+    input.strategy.providerFamilyKey !== SOURCE_CONFLICT_PROVIDER_FAMILY
+  ) {
+    return discoveryRoute({ ...input, retryBudget: null });
+  }
+
   // Rendered discovery has already completed by the time the ordered
   // playbook reaches BROWSER_ADAPTER_RETRY. Hand that exact stage to the
   // detached verifier as an adapter repair progression instead of assigning

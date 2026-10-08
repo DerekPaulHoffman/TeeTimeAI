@@ -183,6 +183,7 @@ import {
   hasCourseSupportImplementationExecutionProofIncludingHistory,
   heartbeatCourseSupportBatch,
   inspectCourseSupportQueue,
+  isExpiredDiagnosticImplementationSupersededByDiscovery,
   isDurableTerminalProof,
   isRetryableCourseSupportWriteConflict,
   isRemediatedSearchSchedulerHealthy,
@@ -348,6 +349,159 @@ describe("course-support provider-contract claim evidence", () => {
         expectedAttemptCount: 1
       })
     ).toBeNull();
+  });
+});
+
+describe("expired pre-contract implementation claim", () => {
+  const baseSha = "a".repeat(40);
+  const fingerprint = "b".repeat(64);
+  const courseId = "southington-fixture";
+  const course = {
+    isPublic: true,
+    detectedPlatform: "CUSTOM",
+    providerFamilyKey: "EZLINKS",
+    website: "https://southington.example/",
+    detectedBookingUrl: "https://booking.southington.example/",
+    bookingMetadata: null,
+    bookingMethod: "PUBLIC_ONLINE",
+    automationEligibility: "NEEDS_REVIEW",
+    automationReason: "NONE",
+    automationDiscoveries: [],
+  };
+  const incident = {
+    cycle: 1,
+    status: "AUTO_INVESTIGATING" as const,
+    resolution: null,
+    failureClass: "SCHEMA" as const,
+    failureFingerprint: "SCHEMA:EZLINKS:PUBLIC",
+    attemptLedger: browserReadyAttemptLedger(),
+    firstSeenAt: new Date("2026-10-08T18:00:00.000Z"),
+    providerFamilyKey: "EZLINKS",
+    batchIncidents: [],
+  };
+  function evidence() {
+    const assessment = assessAutomationPlaybook(incident.attemptLedger, 1);
+    const obsoleteRoute = routeCourseSupportRemediation({
+      ...course,
+      failureClass: incident.failureClass,
+      attemptCount: 0,
+      playbookAssessment: assessment,
+      providerContractEvidenceAvailable: true,
+    });
+    expect(obsoleteRoute.workMode).toBe("IMPLEMENT_REUSABLE_SUPPORT");
+    const plan = buildCourseSupportClaimActionPlan({
+      route: obsoleteRoute,
+      incidentKind: "NEEDS_ADAPTER",
+      incidentProviderFamilyKey: "EZLINKS",
+      course,
+    });
+    const summary = {
+      branch: "fix/check-booking-pages-before-repair",
+      plannedPaths: [] as string[],
+      remediation: {
+        attempts: [{
+          courseRef: createHash("sha256").update(courseId).digest("hex").slice(0, 24),
+          providerSnapshotFingerprint: fingerprint,
+          failureFingerprint: incident.failureFingerprint,
+          playbookEventCountAtClaim: parseAutomationPlaybookLedger(incident.attemptLedger)!.events.length,
+          approach: obsoleteRoute.attemptSignature,
+          actionPlan: plan,
+        }],
+      },
+    };
+    const claimedAttempt = readCourseSupportRemediationClaimAttempt({
+      summary, courseId, expectedAttemptCount: 1,
+    });
+    expect(claimedAttempt?.actionPlan?.primaryAction).toBe("IMPLEMENT_REUSABLE_SUPPORT");
+    return {
+      claimedAttempt,
+      course: course as unknown as Parameters<typeof isExpiredDiagnosticImplementationSupersededByDiscovery>[0]["course"],
+      incident,
+      batchCycle: 1,
+      batchProviderFamilyKey: "EZLINKS",
+      batchFailureFingerprint: incident.failureFingerprint,
+      batchSummary: summary,
+      baseSha,
+      releaseSha: null,
+      deployedAt: null,
+      recheckDispatchKey: null,
+      recheckDispatchStartedAt: null,
+      recheckDispatchedAt: null,
+      currentHeadSha: baseSha,
+      currentBranch: summary.branch,
+      dirtyPaths: [] as string[],
+      committedPaths: [] as string[],
+      releaseCommittedPaths: [] as string[],
+      priorReleaseExecution: {
+        changedReleaseDeploymentEver: false,
+        providerExecutionEverForCourse: false,
+        providerExecutionAttemptEverForCourse: false,
+        terminalExecutionEverForCourse: false,
+      },
+      proofSnapshot: null,
+      verificationRequestCount: 0,
+      result: "PENDING" as const,
+    };
+  }
+
+  it("requeues only the validated clean old packet on matching or blocked branch provenance", () => {
+    const input = evidence();
+    expect(isExpiredDiagnosticImplementationSupersededByDiscovery(input)).toBe(true);
+    expect(assessCourseSupportRecovery({
+      leaseExpiresAt: new Date("2026-10-08T18:56:58.641Z"),
+      ownerThreadId: "original-owner",
+      requestingThreadId: "new-owner",
+      baseSha,
+      releaseSha: null,
+      expectedBranch: input.currentBranch,
+      currentBranch: input.currentBranch,
+      currentHeadSha: baseSha,
+      plannedPaths: [], dirtyPaths: [],
+      now: new Date("2026-10-08T19:00:00.000Z"),
+    }).action).toBe("RECOVER");
+    const otherBranch = { ...input, currentBranch: "fix/other-clean-work" };
+    expect(isExpiredDiagnosticImplementationSupersededByDiscovery(otherBranch)).toBe(true);
+    expect(assessCourseSupportRecovery({
+      leaseExpiresAt: new Date("2026-10-08T18:56:58.641Z"),
+      ownerThreadId: "original-owner",
+      requestingThreadId: "new-owner",
+      baseSha,
+      releaseSha: null,
+      expectedBranch: input.currentBranch,
+      currentBranch: otherBranch.currentBranch,
+      currentHeadSha: baseSha,
+      plannedPaths: [], dirtyPaths: [],
+      now: new Date("2026-10-08T19:00:00.000Z"),
+    }).action).toBe("BLOCK");
+  });
+
+  it("retains uncertain or active implementation and source state", () => {
+    const input = evidence();
+    const changed = [
+      { ...input, batchSummary: { ...input.batchSummary, plannedPaths: undefined } },
+      { ...input, batchSummary: { ...input.batchSummary, plannedPaths: ["src/lib/provider.ts"] } },
+      { ...input, batchSummary: { ...input.batchSummary, releaseHistory: [{ releaseSha: baseSha }] } },
+      { ...input, batchSummary: { ...input.batchSummary, executionEver: {} } },
+      { ...input, dirtyPaths: ["src/lib/provider.ts"] },
+      { ...input, committedPaths: ["src/lib/provider.ts"] },
+      { ...input, currentHeadSha: "c".repeat(40) },
+      { ...input, releaseSha: "c".repeat(40) },
+      { ...input, deployedAt: new Date() },
+      { ...input, recheckDispatchKey: "pending" },
+      { ...input, verificationRequestCount: 1 },
+      { ...input, proofSnapshot: { providerExecution: true } },
+      { ...input, batchCycle: 2 },
+      { ...input, batchProviderFamilyKey: "OTHER" },
+      { ...input, batchFailureFingerprint: "other" },
+      { ...input, incident: { ...input.incident, failureFingerprint: "other" } },
+      { ...input, incident: { ...input.incident, batchIncidents: [{ cycle: 1 }] } },
+      { ...input, incident: { ...input.incident, attemptLedger: null } },
+      { ...input, priorReleaseExecution: { ...input.priorReleaseExecution, providerExecutionAttemptEverForCourse: true } },
+    ];
+    for (const candidate of changed) {
+      expect(isExpiredDiagnosticImplementationSupersededByDiscovery(candidate)).toBe(false);
+    }
+    expect(isExpiredDiagnosticImplementationSupersededByDiscovery(input)).toBe(true);
   });
 });
 
@@ -16368,6 +16522,114 @@ function durablyClosedRecoveryFixture(input: {
 }
 
 describe("course-support recovery", () => {
+  it.each([
+    ["matching HEAD", "automation/course-support-old"],
+    ["blocked branch", "fix/other-clean-work"],
+  ])("durably requeues a clean frozen pre-contract plan before %s transfer", async (_label, currentBranch) => {
+    const { expiredBatch } = expiredPreExecutionRecoveryFixture({
+      status: "STALE", updatedAt: new Date(now.getTime() - 30_000),
+    });
+    const entry = expiredBatch.incidents[0];
+    const ledger = browserReadyAttemptLedger(1);
+    const sourceCourse = {
+      ...entry.course,
+      isPublic: true,
+      detectedPlatform: "CUSTOM",
+      providerFamilyKey: "EZLINKS",
+      website: "https://southington.example/",
+      detectedBookingUrl: "https://booking.southington.example/",
+      bookingMetadata: null,
+      bookingMethod: "PUBLIC_ONLINE",
+      automationEligibility: "NEEDS_REVIEW",
+      automationReason: "NONE",
+      automationDiscoveries: [],
+    };
+    const failureFingerprint = "SCHEMA:EZLINKS:PUBLIC";
+    const route = routeCourseSupportRemediation({
+      ...sourceCourse,
+      failureClass: "SCHEMA",
+      attemptCount: 0,
+      playbookAssessment: assessAutomationPlaybook(ledger, 1),
+      providerContractEvidenceAvailable: true,
+    });
+    const plan = buildCourseSupportClaimActionPlan({
+      route, incidentKind: "NEEDS_ADAPTER", incidentProviderFamilyKey: "EZLINKS",
+      course: sourceCourse,
+    });
+    Object.assign(expiredBatch, {
+      providerFamilyKey: "EZLINKS",
+      failureFingerprint,
+      releaseSha: null,
+      deployedAt: null,
+    });
+    Object.assign(entry, { cycle: 1, result: "PENDING", proofSnapshot: null, verificationRequests: [] });
+    Object.assign(entry.course, sourceCourse);
+    Object.assign(entry.incident, {
+      cycle: 1,
+      providerFamilyKey: "EZLINKS",
+      failureClass: "SCHEMA",
+      failureFingerprint,
+      firstSeenAt: new Date(now.getTime() - 60 * 60_000),
+      attemptLedger: ledger,
+      activeRealSearchCount: 0,
+      batchIncidents: [],
+    });
+    const claimAttempt = {
+      courseRef: createHash("sha256").update(entry.courseId).digest("hex").slice(0, 24),
+      providerSnapshotFingerprint: "b".repeat(64),
+      failureFingerprint,
+      playbookEventCountAtClaim: parseAutomationPlaybookLedger(ledger)!.events.length,
+      approach: route.attemptSignature,
+      actionPlan: plan,
+    };
+    expiredBatch.summary = {
+      branch: "automation/course-support-old",
+      plannedPaths: [],
+      searchExecutionFence: emptySearchExecutionFenceForCourses(),
+      remediation: { attempts: [claimAttempt] },
+    };
+    prismaMocks.batchFindUnique.mockResolvedValue(expiredBatch);
+    prismaMocks.courseFindUnique.mockResolvedValue(entry.course);
+    prismaMocks.batchUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.incidentUpdateMany.mockResolvedValue({ count: 1 });
+    prismaMocks.supportIncidentUpdateMany.mockResolvedValue({ count: 1 });
+
+    const result = await recoverCourseSupportBatch({
+      batchId: expiredBatch.id,
+      requestingThreadId: "new-thread",
+      currentBranch,
+      currentHeadSha: expiredBatch.baseSha,
+      dirtyPaths: [],
+      releaseIsPublished: false,
+      committedPaths: [],
+      releaseCommittedPaths: [],
+      now,
+    });
+    expect(result).toMatchObject({
+      outcome: "retryable_failed",
+      recovered: false,
+      safelyRequeued: true,
+      implementationStoppedCount: 0,
+      actionPlanSupersededByCurrentSourceCount: 1,
+      durableCloseoutRecorded: true,
+    });
+    expect(prismaMocks.batchUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          status: "RETRYABLE_FAILED",
+          summary: expect.objectContaining({
+            closeout: expect.objectContaining({
+              remediationAttempts: [expect.objectContaining({
+                consumed: false,
+                countsTowardOperationalNoProgress: false,
+              })],
+            }),
+          }),
+        }),
+      }),
+    );
+    prismaMocks.courseFindUnique.mockReset();
+  });
   it.each([
     {
       label: "retryable watchdog closeout",

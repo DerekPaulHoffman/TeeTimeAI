@@ -826,6 +826,41 @@ describe("course-support remediation routing", () => {
       : ["IMPLEMENT_REUSABLE_SUPPORT", "INSPECT_PROVIDER_CONTRACT"]);
   });
 
+  it.each(["MISSING_METADATA", "SCHEMA", "UNKNOWN", "READER_PARSER_MISSING"] as const)(
+    "checks the public booking page before repairing a %s provider adapter",
+    (failureClass) => {
+      const course = {
+        ...runnableCourse,
+        detectedPlatform: "CUSTOM",
+        providerFamilyKey: "EZLINKS",
+        detectedBookingUrl: "https://public-course.ezlinksgolf.com/",
+        bookingMetadata: null,
+        automationEligibility: "NEEDS_REVIEW",
+        failureClass,
+        discoveryAttempt: "HTTP_INCONCLUSIVE" as const,
+        playbookAssessment: incompletePlaybook("RENDERED_BROWSER_DISCOVERY"),
+        providerContractEvidenceAvailable: false,
+      };
+      const route = routeCourseSupportRemediation(course);
+      expect(route).toMatchObject({
+        workMode: "ADVANCE_DISCOVERY",
+        allowUnchangedRuntime: true,
+        requiresImplementationPath: false,
+        attemptSignature: { playbookStage: "RENDERED_BROWSER_DISCOVERY" },
+      });
+      expect(buildCourseSupportClaimActionPlan({
+        route,
+        incidentKind: "NEEDS_ADAPTER",
+        incidentProviderFamilyKey: "EZLINKS",
+        course,
+      })).toMatchObject({
+        primaryAction: "VERIFY_CURRENT_RUNTIME",
+        allowedActions: ["VERIFY_CURRENT_RUNTIME"],
+      });
+    },
+  );
+
+
   it("keeps a source-free unsupported public family on its bounded rendered stage", () => {
     const course = {
       ...runnableCourse,
