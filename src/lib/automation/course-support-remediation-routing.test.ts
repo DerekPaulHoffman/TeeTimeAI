@@ -897,17 +897,20 @@ describe("course-support remediation routing", () => {
     expect(route.workMode).not.toBe("IMPLEMENT_REUSABLE_SUPPORT");
   });
 
-  it("keeps a current actionable provider contract on implementation", () => {
-    const route = routeCourseSupportRemediation({
-      ...renderedCourse, isPublic: true, failureClass: "SCHEMA",
-      playbookAssessment: incompletePlaybook("BROWSER_ADAPTER_RETRY"),
-      providerContractEvidenceAvailable: true,
-    });
-    expect(route).toMatchObject({
-      workMode: "IMPLEMENT_REUSABLE_SUPPORT",
-      requiresImplementationPath: true,
-    });
-  });
+  it.each(["RENDERED_BROWSER_DISCOVERY", "BROWSER_ADAPTER_RETRY"] as const)(
+    "keeps a current actionable provider contract on implementation at %s",
+    (stage) => {
+      const route = routeCourseSupportRemediation({
+        ...renderedCourse, isPublic: true, failureClass: "SCHEMA",
+        playbookAssessment: incompletePlaybook(stage),
+        providerContractEvidenceAvailable: true,
+      });
+      expect(route).toMatchObject({
+        workMode: "IMPLEMENT_REUSABLE_SUPPORT",
+        requiresImplementationPath: true,
+      });
+    },
+  );
 
   it("keeps a source-free unsupported public family on its bounded rendered stage", () => {
     const course = {

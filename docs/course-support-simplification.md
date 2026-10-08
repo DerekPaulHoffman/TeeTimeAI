@@ -47,6 +47,9 @@ deployment does not establish that a golfer's selected course can be monitored.
 | Simulator engineering work after alert expiry | The fixed TEST ended normally, leaving an open due simulator incident. Selection drops incidents without active alerts, and simulator incidents are excluded from the documented legacy fallback. Every owned operation also requires active demand. | The active-alert expiry guard is correct. Reopening the TEST or changing only the selector would not create valid engineering authority. | Introduce separate incident authority from a positively consumed synthetic assignment, preserve the expired alert, and verify reusable monitoring with independent no-send deployed observations. This increment requires complete ownership and verification tests before publication. |
 | Status failure and recovery emails | Saved status reports and durable probes show real MATCH_FOUND to FETCH_FAILED to MATCH_FOUND transitions. Each message has its correct deterministic identity and was accepted once. | A brief failure does not prove a permanent provider outage; accepted messages do not prove inbox delivery. | Preserve the current state-change policy during this responder repair. Document its noisy transient behavior separately; do not label it transport duplication or trigger manual sends. |
 | Earlier passing tests and deployments | They prove the tested invariants and exact published code. | They did not prove unfamiliar-provider completion without human nudges. | Add crash, late-write, duplicate-executor, tooling-failure, and complete unattended outcome tests. |
+| Expired incident deadline controls a newly owned engineering check | The original 18:10 Pequot worker had a live lease and pending first typed-adapter stage, but its October 5 escalation deadline stopped the watch before any pass or provider request. | The historical service deadline remains useful audit evidence. A newer heartbeat does not authorize extending an already created verification request. | Capture one fixed live-lease endpoint for an already overdue engineering-only incident without current customer demand. Recheck ownership, source and demand when scheduling; preserve existing requests and the original deadline. |
+| Adapter implementation precedes public-page discovery | The original 18:40 Southington packet required code changes while its rendered discovery stage still lacked a current actionable booking contract. The worker inspected the missing contract and ended without durable closeout. | That absence is neither a provider access restriction nor evidence that a clean original checkout can be adopted. The recorded public identity was unknown, not false. | Let the existing owned rendered verifier collect the missing public-page evidence before requiring an adapter. Preserve explicit private/invalid and observed technical-access classifications. |
+| Proposed cleanup does not fit the old packet | Review found that a new expired-diagnostic helper required HEAD at the original base, while normal recovery now uses a newer release. Its tests also assumed confirmed public identity instead of the recorded unknown value. The current durable join proves existing recovery already released that job for an automatic retry. | A passing invented fixture would not establish provider support. Freed capacity alone could not have proved the durable retry. | Remove the unnecessary helper and its recovery plumbing. Correct the routing at its existing decision point and test the recorded identity shape. |
 
 ## Implemented correction register
 
@@ -89,6 +92,8 @@ deployment does not establish that a golfer's selected course can be monitored.
 | Identify the capped secondary leaf without exposing it | Natural Back9 16:00 and 17:10 reads on `e1a57021f63b9dc13b6491c565aa088c27da56c8` returned incomplete HTTP200 rendering with a body-limit warning, but the warning alone could not identify whether a script or stylesheet hit the transport or collector cap. | Owned cap errors now carry only closed resource kind, cap phase, observed size band and bounded count into the incomplete read and source-scoped prior history. The original 18:20 run on `d3e8047` persisted `SECONDARY_SCRIPT / TRANSPORT_HEADERS / OVER_2X_UP_TO_4X / count1`. Integrated ownership tests ran against isolated Postgres. This identifies a declared-size band, not the asset contents, completed calendar rendering or monitoring. Limits, retry eligibility and collector version remain unchanged. |
 | Preserve bounded legacy bridge evaluation after history fills | The complete 17:35 aggregate history contained 26 events: one outdoor incident had 21 and was correctly fenced; five independently retained due incidents had one each. The bridge rejected the whole result because one incident exceeded its bound. | Permit `COMPLETE` or `PER_INCIDENT_BOUND_EXCEEDED` only after per-incident pruning, retaining aggregate truncation, `NOT_EVALUATED`, new-active and grouped fences plus atomic claim revalidation. Thirty focused checks passed. The original 18:00 run on `d3e8047` claimed one retained course, persisted browser discovery and scheduled the next stage; the overflowing incident remained unchanged. This proves unattended progress, not restored monitoring. |
 | Use the authentic legacy public receipt | The original 18:20 worker correctly followed its guide, but repeated the entry page and FAQ. The actual older bays receipt was included and parsed; its durable warning/version were absent. The new recovery tests supplied a warning, so passing tests missed the real record shape. | Accept only an actual typed partial receipt with observed empty controls, original UUID/time, exact current source/URL/mode, all original prior tooling failures and cooldown. Missing optional diagnostics remain unknown. Remove only positively recovered exact keys from active denials; preserve raw history and all protected/nonrecovered routes. A pure replay of both actual inputs changes recovery from zero to one while preserving plain403. This correction still requires exact-head publication and a new ordinary scheduled page read. |
+| Use a fixed current engineering verification window | Ending a newly owned verification watch before its first pass because the incident's historical escalation clock had expired. | Eligibility is frozen at packet capture; live ownership, source and demand are checked again before new requests. Existing requests keep their original immutable deadline across heartbeat. Customer, mixed-demand, future and null incident deadlines retain existing behavior. Focused watch tests and actual isolated Postgres checks pass; scheduled deployed execution is a separate gate. |
+| Discover a booking contract before requiring provider code | Assigning adapter implementation while the current owned rendered-discovery stage had no actionable contract. | The existing safe-source and monitoring policy permit read-only discovery for unknown public identity; explicit private identity and technical-access classifications retain their gates. The change does not set public identity, create availability or add recovery authority. Routing regressions cover the actual unknown-identity shape, safe/unsafe sources, access gates and implementation with a current contract. |
 
 Recovery evidence correction: historical non-access tooling failures had priority
 over a later actual owned partial HTTP200 read of the same source and route.
@@ -116,6 +121,30 @@ correction adds the actual missing-field shape to unit and Postgres fixtures;
 recorded-input replay preserves every input field, unknown reader version and
 the separate plain HTTP403 route. The next persisted retry is 19:27 UTC; do not
 advance it or reopen the completed test alert to manufacture live acceptance.
+
+The later outdoor failures are separate from Back9's page-reader recovery.
+Pequot's watch performed zero verification passes because an old incident
+deadline was reused for new engineering work. Its correction freezes eligible
+batch members and the live lease at packet capture; a deadline that expires only
+after capture does not become eligible later. New customer demand prevents a
+new engineering request. An isolated Postgres regression covers immutable
+request replay after heartbeat, newly arrived customer demand, and a deadline
+that was still future at capture. This is local request-authority evidence;
+ordinary scheduled verification remains a separate live acceptance gate.
+
+Southington's completed native turn left an implementation packet without code,
+verification or closeout. The strict read-only join at 19:31 UTC proves existing
+recovery subsequently closed that owner at 19:00:05, persisted RETRY_SCHEDULED,
+and left the open incident due for rendered discovery with no active batch.
+Its source fingerprint and six-event playbook were preserved. This is durable
+automatic recovery, not provider support. The routing correction collects
+missing evidence under the existing
+owned rendered stage for a safe source whose public identity is not explicitly
+false; it does not set public identity or authorize customer availability from
+an incomplete page. Existing release, checkout, request-history and incident
+recovery fences remain unchanged. No expired job is reset or reopened by this
+change. Live acceptance must identify the actual new scheduled stage and its
+result, rather than infer provider support from released capacity.
 
 The exact latest native attempt before these changes completed its reads and
 recorded retry; it did not implement monitoring. Two separate attempts repeated
