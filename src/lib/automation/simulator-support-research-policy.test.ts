@@ -69,6 +69,26 @@ describe("persisted known-reader configuration", () => {
 });
 
 describe("durable simulator research failure memory", () => {
+  it("preserves closed category states, leaves legacy omissions unknown and rejects inconsistent or private facts", () => {
+    const base = { adminOnlyState: "FALSE", typeToken: "simulator", reason: "CATEGORY_NOT_BAYTIME" };
+    const read = (row: unknown) => readSimulatorResearchFailureMemory({ version: 1, sourceFingerprint: fingerprint,
+      routes: [{ url: bookingUrl, rendered: true, httpStatus: 200, configurationDiagnostic: {
+        phase: "RENTALS", reason: "CONFIG_NO_ELIGIBLE_RENTALS", optionCount: 1,
+        rejectedRentalOptionsTruncated: false, rejectedRentalOptions: [row],
+      } }] })?.routes[0].configurationDiagnostic?.rejectedRentalOptions?.[0];
+    expect(read(base)).toEqual(base);
+    for (const categoryState of ["MISSING", "NULL", "NON_STRING", "FILTERED_STRING"]) {
+      expect(read({ ...base, categoryState })).toEqual({ ...base, categoryState });
+    }
+    expect(read({ ...base, categoryState: "TOKEN", categoryToken: "other" })).toEqual({ ...base, categoryState: "TOKEN", categoryToken: "other" });
+    for (const row of [
+      { ...base, categoryState: "TOKEN" }, { ...base, categoryState: "NULL", categoryToken: "other" },
+      { ...base, categoryState: "private@example.test" }, { ...base, categoryState: "FILTERED_STRING", rawCategory: "private" },
+      { ...base, categoryState: "TOKEN", categoryToken: "baytime" },
+      { adminOnlyState: "TRUE", reason: "ADMIN_ONLY_NOT_FALSE", categoryState: "NULL" },
+      { ...base, reason: "TYPE_NOT_SIMULATOR", typeToken: "other", categoryState: "NULL" },
+    ]) expect(() => read(row)).toThrow();
+  });
   it("keeps only closed rental failure diagnostics in owned history and inherited routes", () => {
     const diagnostic = { phase: "RENTALS" as const, reason: "CONFIG_NO_ELIGIBLE_RENTALS" as const,
       maintenanceModeState: "NULL" as const, optionCount: 2, rejectedRentalOptionsTruncated: false,

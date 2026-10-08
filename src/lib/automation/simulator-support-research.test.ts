@@ -277,7 +277,7 @@ describe("bounded owned simulator public research transport", () => {
       rejectedRentalOptions: [
         { adminOnlyState: "TRUE", reason: "ADMIN_ONLY_NOT_FALSE" },
         { adminOnlyState: "FALSE", publicOptionId: "902", typeToken: "golf_sim", categoryToken: "baytime", reason: "TYPE_NOT_SIMULATOR" },
-        { adminOnlyState: "FALSE", publicOptionId: "903", typeToken: "simulator", categoryToken: "driving-range", reason: "CATEGORY_NOT_BAYTIME" },
+        { adminOnlyState: "FALSE", publicOptionId: "903", typeToken: "simulator", categoryToken: "driving-range", categoryState: "TOKEN", reason: "CATEGORY_NOT_BAYTIME" },
         { adminOnlyState: "FALSE", publicOptionId: "904", typeToken: "simulator", categoryToken: "baytime", reason: "VENUE_MISMATCH" },
         { adminOnlyState: "NULL", reason: "ADMIN_ONLY_NOT_FALSE" },
         { adminOnlyState: "MISSING", reason: "ADMIN_ONLY_NOT_FALSE" },
@@ -286,6 +286,23 @@ describe("bounded owned simulator public research transport", () => {
       ],
     });
     expect(JSON.stringify(result)).not.toMatch(/Private Member|private@example|never-return|hidden course|wrong venue|unknown state|missing state|invalid state|unsafe type token/u);
+  });
+  it.each([
+    [undefined, "MISSING"], [null, "NULL"], [42, "NON_STRING"],
+    [{ secret: "private-category-value" }, "NON_STRING"],
+    ["private@example.test", "FILTERED_STRING"], ["", "FILTERED_STRING"],
+    ["driving-range", "TOKEN"],
+  ])("distinguishes a rejected category without exposing its raw value: %j", (category, categoryState) => {
+    const parsed = JSON.parse(publishedConfig().match(/<script[^>]*>([\s\S]*?)<\/script>/u)![1]);
+    const config = parsed.props.pageProps.initialReduxState;
+    config.bays.bayOptions = [{ ...config.bays.bayOptions[0], category }];
+    const result = extractSimulatorPublicCalendar(`<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(parsed)}</script>`, booking);
+    expect(result.calendar).toBeUndefined();
+    expect(result.configurationDiagnostic).toMatchObject({ reason: "CONFIG_NO_ELIGIBLE_RENTALS",
+      rejectedRentalOptions: [{ reason: "CATEGORY_NOT_BAYTIME", categoryState }] });
+    const row = result.configurationDiagnostic?.rejectedRentalOptions?.[0];
+    expect(row?.categoryToken).toBe(categoryState === "TOKEN" ? category : undefined);
+    expect(JSON.stringify(result.configurationDiagnostic)).not.toMatch(/private@example|private-category-value|secret/u);
   });
   it("omits a malformed public option identifier from rejected-rental evidence", () => {
     const parsed = JSON.parse(publishedConfig().match(/<script[^>]*>([\s\S]*?)<\/script>/u)![1]);

@@ -48,6 +48,7 @@ export type SimulatorConfigurationDiagnostic = {
     adminOnlyState: "FALSE" | "TRUE" | "NULL" | "MISSING" | "INVALID";
     typeToken?: string;
     categoryToken?: string;
+    categoryState?: "MISSING" | "NULL" | "NON_STRING" | "FILTERED_STRING" | "TOKEN";
     reason: "ADMIN_ONLY_NOT_FALSE" | "TYPE_NOT_SIMULATOR" | "CATEGORY_NOT_BAYTIME" | "VENUE_MISMATCH";
   }>;
   optionCount?: number;
@@ -257,6 +258,10 @@ export function extractSimulatorPublicCalendar(html: string, sourceUrl: string):
             ...(publicOption && typeof row.id === "number" && Number.isInteger(row.id) && row.id >= 1 && row.id <= 1_000_000_000 ? { publicOptionId: String(row.id) } : {}),
             ...(publicOption && token(row.type) ? { typeToken: token(row.type) } : {}),
             ...(publicOption && token(row.category) ? { categoryToken: token(row.category) } : {}),
+            ...(rejectionReason === "CATEGORY_NOT_BAYTIME" ? { categoryState:
+              row.category === undefined ? "MISSING" as const : row.category === null ? "NULL" as const :
+                typeof row.category !== "string" ? "NON_STRING" as const :
+                  token(row.category) ? "TOKEN" as const : "FILTERED_STRING" as const } : {}),
             reason: rejectionReason,
           });
         }

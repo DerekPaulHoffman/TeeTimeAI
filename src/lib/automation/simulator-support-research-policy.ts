@@ -28,8 +28,13 @@ const configurationDiagnostic = z.object({
     adminOnlyState: z.enum(["FALSE", "TRUE", "NULL", "MISSING", "INVALID"]),
     typeToken: z.string().regex(/^[a-z0-9_-]{1,32}$/u).optional(),
     categoryToken: z.string().regex(/^[a-z0-9_-]{1,32}$/u).optional(),
+    categoryState: z.enum(["MISSING", "NULL", "NON_STRING", "FILTERED_STRING", "TOKEN"]).optional(),
     reason: z.enum(["ADMIN_ONLY_NOT_FALSE", "TYPE_NOT_SIMULATOR", "CATEGORY_NOT_BAYTIME", "VENUE_MISMATCH"]),
   }).strict().refine(row => {
+    // Legacy omissions stay unknown. New closed states apply only to the
+    // category predicate and must agree with the existing token projection.
+    if (row.categoryState !== undefined && (row.reason !== "CATEGORY_NOT_BAYTIME" ||
+      row.adminOnlyState !== "FALSE" || (row.categoryState === "TOKEN") !== (row.categoryToken !== undefined))) return false;
     if (row.adminOnlyState !== "FALSE") return row.reason === "ADMIN_ONLY_NOT_FALSE" &&
       !row.publicOptionId && !row.typeToken && !row.categoryToken;
     if (row.reason === "TYPE_NOT_SIMULATOR") return row.typeToken !== "simulator";
