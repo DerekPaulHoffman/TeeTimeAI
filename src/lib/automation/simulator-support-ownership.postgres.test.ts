@@ -46,7 +46,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
   afterEach(cleanupFixtureRows);
   afterAll(async () => { await cleanupFixtureRows(); if (client) await client.$disconnect(); vi.unstubAllEnvs(); });
 
-  async function fixture(cadenceMinutes = 15, mixed = false, bookingUrl?: string, evidenceUrl?: string) {
+  async function fixture(cadenceMinutes = 15, mixed = false, bookingUrl?: string, evidenceUrl?: string, synthetic = false) {
     const suffix = randomUUID(), now = new Date();
     const user = await client.user.create({ data: { email: `${suffix}@example.test`, clerkUserId: suffix } }); ids.users.push(user.id);
     const course = await client.course.create({ data: { googlePlaceId: suffix, name: "Support fixture", address: "1 Test Street", website: "https://official.example.test", latitude: 41, longitude: -73, timeZone: "UTC", isPublic: true } }); ids.courses.push(course.id);
@@ -55,7 +55,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     if (peerCourse) ids.courses.push(peerCourse.id);
     const peer = peerCourse ? await client.courseOffering.create({ data: { courseId: peerCourse.id, kind: "SIMULATOR", publicAccessStatus: "PUBLIC", supportedDurationsMinutes: [60], verifiedAt: now,
       evidenceUrl: "https://peer.example.test", bookingUrl: "https://peer.example.test/book", providerFamilyKey: "GOLFBOOK" } }) : null;
-    const search = await client.teeSearch.create({ data: { userId: user.id, mode: "SIMULATOR", durationMinutes: 60, date: new Date(Date.now() + 2 * 86_400_000), startTime: "09:00", endTime: "18:00", userTimeZone: "UTC", players: 4, trafficClass: "PUBLIC", cadenceMinutes,
+    const search = await client.teeSearch.create({ data: { userId: user.id, mode: "SIMULATOR", durationMinutes: 60, date: new Date(Date.now() + 2 * 86_400_000), startTime: "09:00", endTime: "18:00", userTimeZone: "UTC", players: 4, trafficClass: synthetic ? "TEST" : "PUBLIC", syntheticMultiCycle: synthetic, cadenceMinutes,
       preferences: { create: [{ offeringId: offering.id, courseId: course.id, rank: 1 }, ...(peer ? [{ offeringId: peer.id, courseId: peer.courseId, rank: 2 }] : [])] } }, select: SIMULATOR_SUPPORT_SOURCE_SELECT });
     const incident = await client.simulatorSupportIncident.create({ data: { offeringId: offering.id, reason: "NEEDS_ADAPTER", retryAt: now } });
     const fingerprint = getSimulatorOfferingSourceFingerprint(offering);
@@ -63,14 +63,67 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     const assignmentRef = `course-assignment-${suffix}`, child = `child-${suffix}`;
     const run = await client.automationRun.create({ data: { kind: "OTHER", status: "RUNNING", promptVersion: dispatcher.COURSE_DISPATCH_PROMPT_VERSION, ownerThreadId: "parent", audit: {
       schemaVersion: 1, tickRef: "fixture", assignmentRef, state: "BOUND", ownerThreadId: "parent", childThreadId: child, baseSha,
-      reservedAt: now.toISOString(), expiresAt: new Date(Date.now() + 600_000).toISOString(), target: { mode: "SIMULATOR", offeringId: offering.id, offeringSourceFingerprint: fingerprint,
-        incidentId: incident.id, courseId: course.id, cycle: 1, providerFamilyKey: "SIMULATOR_SOURCE_PENDING", failureFingerprint: fingerprint, updatedAt: incident.updatedAt.toISOString(), trafficClass: "REAL",
+      reservedAt: now.toISOString(), launchStartedAt: now.toISOString(), boundAt: now.toISOString(), expiresAt: new Date(Date.now() + 600_000).toISOString(), target: { mode: "SIMULATOR", offeringId: offering.id, offeringSourceFingerprint: fingerprint,
+        incidentId: incident.id, courseId: course.id, cycle: 1, providerFamilyKey: "SIMULATOR_SOURCE_PENDING", failureFingerprint: fingerprint, updatedAt: incident.updatedAt.toISOString(), trafficClass: synthetic ? "SYNTHETIC" : "REAL",
         searchRefs: [{ id: search.id, scheduleVersion: search.scheduleVersion, alertGeneration: search.alertGeneration, intentDigest: createSimulatorSupportIntentDigest(search) }] },
     } } }); ids.runs.push(run.id);
     const claimed = await lane.claimSimulatorSupportAssignment({ assignmentRef, ownerThreadId: child, baseSha, branch: `automation/course-support-${suffix}` });
     if (!claimed.acquired) throw new Error("Fixture writer transition was busy.");
     return { course, offering, peer, search, incident, run, owner: { assignmentRef, ownerThreadId: child, token: claimed.value.token, revision: claimed.value.revision }, fingerprint };
   }
+
+  async function engineeringFixture() {
+    const f = await fixture(15, false, undefined, undefined, true);
+    await lane.retrySimulatorSupport({ ...f.owner, retryMinutes: 15 });
+    await client.teeSearch.update({ where: { id: f.search.id }, data: { status: "COMPLETED", checkStatus: "STOPPED", nextCheckAt: null,
+      workflowRunId: null, alertGeneration: { increment: 1 } } });
+    await client.simulatorSupportIncident.update({ where: { id: f.incident.id }, data: { retryAt: new Date(0) } });
+    const before = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });
+    const plan = await dispatcher.planCourseSupportCourseDispatch({ ownerThreadId: "engineering-parent", baseSha });
+    if (!plan.acquired) throw new Error("Engineering plan writer was busy.");
+    const assignment = plan.value.launchItems.find(item => item.state === "RESERVED");
+    if (!assignment) throw new Error("Historical engineering incident was not admitted.");
+    const child = `engineering-child-${randomUUID()}`;
+    await dispatcher.beginCourseSupportCourseDispatch({ ownerThreadId: "engineering-parent", assignmentRef: assignment.assignmentRef });
+    await dispatcher.bindCourseSupportCourseDispatch({ ownerThreadId: "engineering-parent", assignmentRef: assignment.assignmentRef, childThreadId: child });
+    const run = await client.automationRun.findFirstOrThrow({ where: { promptVersion: dispatcher.COURSE_DISPATCH_PROMPT_VERSION,
+      audit: { path: ["assignmentRef"], equals: assignment.assignmentRef } } }); ids.runs.push(run.id);
+    const claim = await lane.claimSimulatorSupportAssignment({ assignmentRef: assignment.assignmentRef, ownerThreadId: child, baseSha, branch: "engineering-worker" });
+    if (!claim.acquired) throw new Error("Engineering claim writer was busy.");
+    return { ...f, before, engineeringRun: run, engineeringOwner: { assignmentRef: assignment.assignmentRef, ownerThreadId: child, token: claim.value.token, revision: claim.value.revision } };
+  }
+
+  it("researches and retries an ended opted-in engineering incident without changing its stopped search or sending", async () => {
+    const f = await engineeringFixture();
+    expect((await lane.readSimulatorSupportClaim({ assignmentRef: f.engineeringOwner.assignmentRef, ownerThreadId: f.engineeringOwner.ownerThreadId })).supportAuthority).toBe("ENGINEERING_INCIDENT");
+    const read = await lane.readSimulatorSupportSource({ ...f.engineeringOwner, source: "official" }, { fetch: vi.fn(async () => new Response("<h1>Public simulator rental details</h1>", { headers: { "content-type": "text/html" } })) });
+    if (!read.acquired) throw new Error("Engineering public read was busy.");
+    await lane.retrySimulatorSupport({ ...f.engineeringOwner, revision: read.value.revision, retryMinutes: 60 });
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(f.before);
+    expect(await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } })).toMatchObject({ status: "AUTO_INVESTIGATING", resolvedAt: null });
+    expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
+    const count = await client.automationRun.count({ where: { promptVersion: dispatcher.COURSE_DISPATCH_PROMPT_VERSION, status: "RUNNING" } });
+    expect(count).toBe(0);
+  });
+
+  it("lets an engineering research owner yield to new real demand while preserving both searches", async () => {
+    const f = await engineeringFixture();
+    const real = await client.teeSearch.create({ data: { userId: f.search.userId, mode: "SIMULATOR", durationMinutes: 60, date: f.search.date,
+      startTime: "09:00", endTime: "18:00", userTimeZone: "UTC", players: 4, trafficClass: "PUBLIC",
+      preferences: { create: [{ courseId: f.course.id, offeringId: f.offering.id, rank: 1 }] } } });
+    await expect(lane.withSimulatorEngineeringVerificationTransition({ assignmentRef: f.engineeringOwner.assignmentRef,
+      token: f.engineeringOwner.token, revision: f.engineeringOwner.revision, runtimeVersion: baseSha }, async () => { throw new Error("Must not execute provider work."); }))
+      .rejects.toThrow("SIMULATOR_ENGINEERING_CUSTOMER_CHECK_REQUIRED");
+    const closed = await lane.retrySimulatorSupport({ ...f.engineeringOwner, retryMinutes: 15 });
+    if (!closed.acquired) throw new Error("Customer-priority closeout was busy.");
+    expect(closed.value).toMatchObject({ outcome: "customer_check_required", durableCloseoutRecorded: true });
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(f.before);
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: real.id } })).toEqual(real);
+    const next = await client.$transaction(tx => incidents.listSimulatorSupportDispatchCandidates(new Date(), tx));
+    expect(next).toMatchObject([{ activeRealSearchCount: 1, sources: [{ id: real.id }] }]);
+    expect(next[0].engineeringAuthority).toBeUndefined();
+    expect(await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } })).toMatchObject({ status: "AUTO_INVESTIGATING", resolvedAt: null });
+  });
 
   async function seedExpiredUnfinishedRead(f: Awaited<ReturnType<typeof fixture>>) {
     const stored = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });

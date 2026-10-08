@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { collectCurrentCourseDispatchSourceUsage, selectCourseDispatchTargets } from "./course-support-course-dispatch";
 import { createCourseDispatchIntentDigest } from "./course-support-dispatch-intent";
-import { createSimulatorSupportIntentDigest, type SimulatorSupportSource } from "./simulator-support-policy";
+import { createSimulatorSupportIntentDigest, type SimulatorEngineeringAuthority, type SimulatorSupportSource } from "./simulator-support-policy";
 
 const source = (id: string) => [{ id, scheduleVersion: 1, alertGeneration: 1, trafficClass: "PUBLIC" }];
 
@@ -77,6 +77,19 @@ describe("course support course dispatch selection", () => {
       maxStarts: 15,
     });
     expect(result.selected).toEqual([]);
+  });
+
+  it("uses remaining physical capacity for proven engineering incidents without admitting expired alert cohorts", () => {
+    const authority: SimulatorEngineeringAuthority = { schemaVersion: 1, originRunId: "origin", originAssignmentRef: "original", originSourceFingerprint: "a".repeat(64),
+      lineageRunId: "origin", lineageAssignmentRef: "original", sourceFingerprint: "a".repeat(64) };
+    const candidates = [{ courseId: "a-engineering", activeRealSearchCount: 0, engineeringAuthority: authority },
+      { courseId: "z-real", activeRealSearchCount: 1 }, { courseId: "b-engineering", activeRealSearchCount: 0, engineeringAuthority: authority }];
+    const result = selectCourseDispatchTargets({ candidates, sourceSearchesByCourse: new Map([["z-real", source("active-a")]]),
+      occupiedCourses: new Set(), priorSearchIds: new Set(["active-a", "active-b", "active-c"]), maxStarts: 2 });
+    expect(result.selected.map(entry => entry.candidate.courseId)).toEqual(["z-real", "a-engineering"]);
+    expect(result.selected[1].source).toBeUndefined();
+    expect(result.admittedSearchCount).toBe(3);
+    expect(result.eligibleCount).toBe(3);
   });
 });
 

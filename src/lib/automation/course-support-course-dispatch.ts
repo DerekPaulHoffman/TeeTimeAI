@@ -7,7 +7,7 @@ import { prisma } from "@/lib/prisma";
 import { isSearchWindowActive } from "./date-boundary";
 import { getSyntheticMultiCycleExpiresAt } from "./synthetic-test-window";
 import { listSimulatorSupportDispatchCandidates } from "./simulator-support-incidents";
-import { isCurrentSimulatorSupportSource, isValidSimulatorSupportClaim, SIMULATOR_SUPPORT_SOURCE_SELECT, type SimulatorSupportClaim, type SimulatorSupportSource } from "./simulator-support-policy";
+import { isCurrentSimulatorSupportSource, isValidSimulatorEngineeringAuthority, isValidSimulatorSupportClaim, SIMULATOR_SUPPORT_SOURCE_SELECT, type SimulatorEngineeringAuthority, type SimulatorSupportClaim, type SimulatorSupportSource } from "./simulator-support-policy";
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
 import { readSimulatorResearchFailureMemory, type SimulatorResearchFailureMemory, type SimulatorResearchState } from "./simulator-support-research-policy";
 import {
@@ -79,6 +79,7 @@ export type CourseDispatchAudit = {
     updatedAt: string;
     searchRefs: CourseDispatchSourceRef[];
     trafficClass: "REAL" | "SYNTHETIC";
+    engineeringAuthority?: SimulatorEngineeringAuthority;
   };
 };
 
@@ -118,7 +119,7 @@ export function parseCourseDispatchAudit(value: unknown): CourseDispatchAudit | 
         (ref.intentDigest !== undefined &&
           (typeof ref.intentDigest !== "string" || !/^[a-f0-9]{64}$/i.test(ref.intentDigest)))) ||
       new Set(audit.target.searchRefs.map((ref) => ref.id)).size !== audit.target.searchRefs.length ||
-      (audit.state === "BOUND" && !audit.childThreadId) ||
+      (["BOUND", "CONSUMED"].includes(audit.state ?? "") && (typeof audit.childThreadId !== "string" || !audit.childThreadId)) ||
       (["RESERVED", "STARTING"].includes(audit.state ?? "") && audit.childThreadId !== null)) return null;
   if (audit.target.mode !== undefined && audit.target.mode !== "SIMULATOR") return null;
   if (audit.launcherReceiptPath !== undefined && (!isAbsolute(audit.launcherReceiptPath) ||
@@ -126,6 +127,10 @@ export function parseCourseDispatchAudit(value: unknown): CourseDispatchAudit | 
   if (audit.target.mode === "SIMULATOR" &&
       (typeof audit.target.offeringId !== "string" || !audit.target.offeringId || !/^[a-f0-9]{64}$/i.test(audit.target.offeringSourceFingerprint ?? "") ||
        (audit.state === "CONSUMED" && !isValidSimulatorSupportClaim(audit.simulatorClaim)))) return null;
+  if (audit.target.engineeringAuthority !== undefined &&
+      (audit.target.mode !== "SIMULATOR" || audit.target.trafficClass !== "SYNTHETIC" ||
+       !isValidSimulatorEngineeringAuthority(audit.target.engineeringAuthority) ||
+       audit.target.engineeringAuthority.sourceFingerprint !== audit.target.offeringSourceFingerprint)) return null;
   if (audit.simulatorContinuation !== undefined) {
     try { readCourseSupportContinuationLedger(audit.simulatorContinuation); } catch { return null; }
     if (audit.target.mode !== "SIMULATOR" || audit.state !== "CONSUMED") return null;
@@ -205,6 +210,7 @@ export function selectCourseDispatchTargets<T extends {
   courseId: string;
   activeRealSearchCount: number;
   selectionKey?: string;
+  engineeringAuthority?: SimulatorEngineeringAuthority;
 }>(input: {
   candidates: readonly T[];
   sourceSearchesByCourse: ReadonlyMap<string, readonly (CourseDispatchSourceRef & { trafficClass: string })[]>;
@@ -216,13 +222,20 @@ export function selectCourseDispatchTargets<T extends {
   const admitted = new Set(input.priorSearchIds);
   const searchCounts = new Map(input.priorSearchCounts ?? []);
   const seen = new Set(input.occupiedCourses);
-  const selected: { candidate: T; source: CourseDispatchSourceRef & { trafficClass: string } }[] = [];
+  const selected: { candidate: T; source?: CourseDispatchSourceRef & { trafficClass: string } }[] = [];
   let eligibleCount = 0;
   const ordered = [...input.candidates].sort((a, b) =>
     Number(b.activeRealSearchCount > 0) - Number(a.activeRealSearchCount > 0) ||
+    Number(Boolean(a.engineeringAuthority)) - Number(Boolean(b.engineeringAuthority)) ||
     a.courseId.localeCompare(b.courseId));
   for (const candidate of ordered) {
     if (seen.has(candidate.courseId)) continue;
+    if (candidate.engineeringAuthority) {
+      seen.add(candidate.courseId);
+      eligibleCount += 1;
+      if (selected.length < input.maxStarts) selected.push({ candidate });
+      continue;
+    }
     const sources = input.sourceSearchesByCourse.get(candidate.selectionKey ?? candidate.courseId) ?? [];
     const source = sources.find((ref) => admitted.has(ref.id) && (searchCounts.get(ref.id) ?? 0) < 5) ??
       (admitted.size < 3 ? sources.find((ref) => (searchCounts.get(ref.id) ?? 0) < 5) : undefined);
@@ -457,7 +470,7 @@ export async function planCourseSupportCourseDispatch(input: {
         }))] as const));
       for (const candidate of simulatorCandidates) sourceSearchesByCourse.set(candidate.selectionKey, candidate.sources);
       const priorSources: PriorDispatchSource[] = [
-        ...[...live, ...sameTick].flatMap(run => run.parsed!.target.searchRefs.map(ref => ({
+        ...[...live, ...sameTick].filter(run => !run.parsed!.target.engineeringAuthority).flatMap(run => run.parsed!.target.searchRefs.map(ref => ({
           courseId: run.parsed!.target.courseId,
           mode: run.parsed!.target.mode,
           offeringId: run.parsed!.target.offeringId,
@@ -508,6 +521,7 @@ export async function planCourseSupportCourseDispatch(input: {
             ...("mode" in candidate && candidate.mode === "SIMULATOR" ? {
               mode: "SIMULATOR" as const, offeringId: candidate.offeringId,
               offeringSourceFingerprint: candidate.offeringSourceFingerprint,
+              ...(candidate.engineeringAuthority ? { engineeringAuthority: candidate.engineeringAuthority } : {}),
             } : {}),
             incidentId: candidate.incidentId,
             courseId: candidate.courseId,
@@ -515,13 +529,13 @@ export async function planCourseSupportCourseDispatch(input: {
             providerFamilyKey: candidate.providerFamilyKey,
             failureFingerprint: candidate.failureFingerprint,
             updatedAt: candidate.updatedAt,
-            searchRefs: [{
-              id: source.id,
-              scheduleVersion: source.scheduleVersion,
-              alertGeneration: source.alertGeneration,
-              intentDigest: source.intentDigest,
+            searchRefs: "engineeringSearchRefs" in candidate && candidate.engineeringAuthority ? candidate.engineeringSearchRefs! : [{
+              id: source!.id,
+              scheduleVersion: source!.scheduleVersion,
+              alertGeneration: source!.alertGeneration,
+              intentDigest: source!.intentDigest,
             }],
-            trafficClass: ["TEST", "AUTOMATION"].includes(source.trafficClass) ? "SYNTHETIC" : "REAL",
+            trafficClass: !source || ["TEST", "AUTOMATION"].includes(source.trafficClass) ? "SYNTHETIC" : "REAL",
           },
         };
         const run = await tx.automationRun.create({

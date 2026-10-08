@@ -16,6 +16,26 @@ export const SIMULATOR_SUPPORT_SOURCE_SELECT = {
   preferences: { orderBy: [{ rank: "asc" }, { courseId: "asc" }], select: { courseId: true, offeringId: true, rank: true } },
 } as const satisfies Prisma.TeeSearchSelect;
 export type SimulatorSupportSource = Prisma.TeeSearchGetPayload<{ select: typeof SIMULATOR_SUPPORT_SOURCE_SELECT }>;
+/** Durable engineering authority is independent from an ended alert's scheduler. */
+export type SimulatorEngineeringAuthority = {
+  schemaVersion: 1;
+  originRunId: string;
+  originAssignmentRef: string;
+  originSourceFingerprint: string;
+  lineageRunId: string;
+  lineageAssignmentRef: string;
+  sourceFingerprint: string;
+};
+
+export function isValidSimulatorEngineeringAuthority(value: unknown): value is SimulatorEngineeringAuthority {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const authority = value as SimulatorEngineeringAuthority;
+  const keys = ["schemaVersion", "originRunId", "originAssignmentRef", "originSourceFingerprint", "lineageRunId", "lineageAssignmentRef", "sourceFingerprint"];
+  return Object.keys(value).length === keys.length && Object.keys(value).every(key => keys.includes(key)) &&
+    authority.schemaVersion === 1 && [authority.originRunId, authority.originAssignmentRef, authority.lineageRunId, authority.lineageAssignmentRef]
+      .every(id => typeof id === "string" && id.length > 0 && id.length <= 160) &&
+    [authority.originSourceFingerprint, authority.sourceFingerprint].every(fingerprint => typeof fingerprint === "string" && /^[a-f0-9]{64}$/i.test(fingerprint));
+}
 export type SimulatorSupportClaim = {
   token: string;
   revision: number;

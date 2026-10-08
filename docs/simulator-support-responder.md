@@ -11,6 +11,13 @@ outdoor identity, customer intent and delivery state. Current real demand takes
 priority over opted-in synthetic demand. Synthetic work retains its fixed
 lifetime and suppressed transport.
 
+The fixed lifetime ends the synthetic search, not the durable engineering
+incident. The dispatcher can admit a distinct engineering incident authority
+only from a positively consumed original synthetic simulator claim and its
+validated current offering/source lineage. Historical alert references do not
+authorize another scheduled search check, fixture extension or email. Unknown
+provenance cannot turn an arbitrary inactive TEST into engineering work.
+
 ## Authoritative operating contracts
 
 - [Scheduled parent](course-support-scheduled-parent.md): one actual preflight,
@@ -70,6 +77,14 @@ Register the owned committed candidate, verify its exact Ready Git production
 deployment and both aliases, then use the normal queued recheck/progress flow.
 Completion requires two distinct fresh successful simulator checks for the
 current offering/source and exact release, without a newer failure.
+
+For active-alert authority those are finished normal search checks. For explicit
+engineering incident authority they are bounded independent observations from
+the authenticated deployed verification route on that same exact release. They
+retain their own request identities, source and provider timestamps and never
+write search, match, customer probe or delivery rows. They prove engineering
+coverage only. Real demand arriving during engineering verification requires
+the normal customer lane, with safe original-owner closeout before yielding.
 
 A launch, native turn, tests, HTTP200, deployment, prepared payload, provider
 acceptance and inbox delivery are separate facts. Preserve honest retry when
