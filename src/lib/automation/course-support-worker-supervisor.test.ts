@@ -1,8 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { superviseCourseSupportWorker, validateSupervisorInput, workerInstructions } from "../../../scripts/automation/course-support-worker-supervisor.mjs";
+import { dispatchCourseSupportWorker, readSupervisorArguments, superviseCourseSupportWorker, validateSupervisorInput, workerInstructions } from "../../../scripts/automation/course-support-worker-supervisor.mjs";
 
 const SHA = "a".repeat(40);
 const PARENT = "11111111-2222-4333-8444-555555555555";
@@ -23,7 +24,7 @@ function fixture(mode?: "SIMULATOR") {
   const input = { context, assignment, workerCheckout: worker, outputDir: output, parentThreadId: PARENT };
   const calls: string[] = [];
   const deps = {
-    environment: { CODEX_THREAD_ID: PARENT },
+    environment: { CODEX_THREAD_ID: PARENT, CODEX_HOME: "normal-auth-home", DATABASE_URL: "private-db", RESEND_API_KEY: "private-email" },
     approvedCheckouts: [selected],
     inspectCli: vi.fn(() => context.workerCli),
     inspectWorker: vi.fn(() => ({ cwd: worker, branch: "automation/course-support-fixture", baseSha: SHA })),
@@ -51,6 +52,55 @@ function fixture(mode?: "SIMULATOR") {
 }
 
 describe("course worker launch supervisor", () => {
+  it("detaches the same foreground command with private logs and no product credentials", async () => {
+    const f = fixture();
+    const contextFile = join(f.output, "context.private.json"), assignmentFile = join(f.output, "assignment.private.json");
+    writeFileSync(contextFile, JSON.stringify(f.input.context));
+    writeFileSync(assignmentFile, JSON.stringify(f.input.assignment));
+    const child = Object.assign(new EventEmitter(), { pid: 4182, unref: vi.fn() });
+    const spawnDetached = vi.fn(() => { setImmediate(() => child.emit("spawn")); return child; });
+    const result = await dispatchCourseSupportWorker(f.input, { contextFile, assignmentFile }, { ...f.deps, spawnDetached });
+    expect(result).toMatchObject({ outcome: "dispatched", pid: 4182 });
+    expect(child.unref).toHaveBeenCalledOnce();
+    const [node, argv, options] = spawnDetached.mock.calls[0];
+    expect(node).toBe(process.execPath);
+    expect(argv).toEqual([expect.stringContaining("course-support-worker-supervisor.mjs"),
+      "--context-file", contextFile, "--assignment-file", assignmentFile,
+      "--worker-checkout", f.worker, "--output-dir", f.output]);
+    expect(options).toMatchObject({ cwd: f.selected, detached: true, windowsHide: true, shell: false });
+    expect(options.stdio[0]).toBe("ignore");
+    expect(options.env.CODEX_THREAD_ID).toBe(PARENT);
+    expect(options.env.CODEX_HOME).toBe("normal-auth-home");
+    expect(options.env.DATABASE_URL).toBeUndefined();
+    expect(options.env.RESEND_API_KEY).toBeUndefined();
+    expect(readSupervisorArguments(["--detach", "--context-file", contextFile, "--assignment-file", assignmentFile,
+      "--worker-checkout", f.worker, "--output-dir", f.output]).detach).toBe(true);
+    await expect(dispatchCourseSupportWorker(f.input, { contextFile, assignmentFile }, { ...f.deps, spawnDetached }))
+      .rejects.toMatchObject({ code: "EEXIST" });
+    expect(spawnDetached).toHaveBeenCalledTimes(1);
+    expect(f.deps.prepare).not.toHaveBeenCalled();
+  });
+
+  it("keeps the dispatch marker when validation fails before any spawn", async () => {
+    const f = fixture();
+    const spawnDetached = vi.fn();
+    await expect(dispatchCourseSupportWorker({ ...f.input, parentThreadId: CHILD },
+      { contextFile: join(f.output, "context.json"), assignmentFile: join(f.output, "assignment.json") },
+      { ...f.deps, spawnDetached })).rejects.toThrow("NATIVE_PARENT_ID_MISMATCH");
+    expect(spawnDetached).not.toHaveBeenCalled();
+    expect(readFileSync(join(f.output, "supervisor.dispatch.private.json"), "utf8")).toContain('"status": "ATTENTION"');
+  });
+
+  it("records a bounded asynchronous spawn error without inventing a PID", async () => {
+    const f = fixture();
+    const child = Object.assign(new EventEmitter(), { pid: undefined, unref: vi.fn() });
+    const spawnDetached = vi.fn(() => { setImmediate(() => child.emit("error", Object.assign(new Error("denied"), { code: "EACCES" }))); return child; });
+    await expect(dispatchCourseSupportWorker(f.input,
+      { contextFile: join(f.output, "context.json"), assignmentFile: join(f.output, "assignment.json") },
+      { ...f.deps, spawnDetached })).rejects.toThrow("denied");
+    expect(readFileSync(join(f.output, "supervisor.dispatch.private.json"), "utf8")).toContain('"failureCode": "EACCES"');
+    expect(child.unref).not.toHaveBeenCalled();
+  });
   it("requires actual parent, exact preflight context, reserved assignment and current base before start", () => {
     const f = fixture();
     expect(() => validateSupervisorInput({ ...f.input, parentThreadId: "" }, f.deps)).toThrow("NATIVE_PARENT_ID_REQUIRED");

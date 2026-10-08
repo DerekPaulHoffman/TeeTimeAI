@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { spawnSync, execFileSync } from "node:child_process";
+import { spawn, spawnSync, execFileSync } from "node:child_process";
 import { closeSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -100,6 +100,54 @@ function productionDispatch(stage, args, validated, dependencies) {
   return response.value;
 }
 
+/** Launch this same one-use supervisor in the background; process creation is the only claim here. */
+export async function dispatchCourseSupportWorker(input, files, dependencies = {}) {
+  if (!isAbsolute(input.outputDir ?? "")) fail("ABSOLUTE_OUTPUT_DIR_REQUIRED");
+  const output = realpathSync(input.outputDir);
+  const marker = join(output, "supervisor.dispatch.private.json");
+  const dispatch = { schemaVersion: 1, status: "DISPATCHING", createdAt: new Date().toISOString(),
+    parentThreadId: input.parentThreadId, assignmentRef: input.assignment?.assignmentRef };
+  privateJson(marker, dispatch, true);
+  const save = (status, extra = {}) => privateJson(marker, { ...dispatch, ...extra, status, updatedAt: new Date().toISOString() });
+  let outFd, errFd;
+  try {
+    const validated = validateSupervisorInput(input, dependencies);
+    if (!isAbsolute(files.contextFile ?? "") || !isAbsolute(files.assignmentFile ?? "")) fail("ABSOLUTE_PRIVATE_INPUT_REQUIRED");
+    const args = [scriptPath, "--context-file", files.contextFile, "--assignment-file", files.assignmentFile,
+      "--worker-checkout", validated.worker, "--output-dir", validated.output];
+    const stdoutPath = join(output, "supervisor.stdout.private.log");
+    const stderrPath = join(output, "supervisor.stderr.private.log");
+    outFd = openSync(stdoutPath, "wx", 0o600);
+    errFd = openSync(stderrPath, "wx", 0o600);
+    const environment = courseSupportWorkerRuntimeEnvironment(validated.runtime, validated.selected,
+      dependencies.environment ?? process.env);
+    for (const name of ["CODEX_HOME", "HOME", "HOMEDRIVE", "HOMEPATH", "USER", "LOGNAME", "LANG", "LC_ALL", "TZ"]) {
+      if (typeof (dependencies.environment ?? process.env)[name] === "string") {
+        environment[name] = (dependencies.environment ?? process.env)[name];
+      }
+    }
+    const child = (dependencies.spawnDetached ?? spawn)(process.execPath, args, {
+      cwd: validated.selected, env: environment, detached: true, windowsHide: true, shell: false,
+      stdio: ["ignore", outFd, errFd],
+    });
+    const pid = await new Promise((resolvePid, rejectPid) => {
+      const timer = setTimeout(() => rejectPid(Object.assign(new Error("SUPERVISOR_SPAWN_TIMEOUT"), { code: "SUPERVISOR_SPAWN_TIMEOUT" })), 10_000);
+      child.once("spawn", () => { clearTimeout(timer); resolvePid(child.pid); });
+      child.once("error", (error) => { clearTimeout(timer); rejectPid(error); });
+    });
+    if (!Number.isSafeInteger(pid) || pid < 1) fail("SUPERVISOR_PID_NOT_PROVED");
+    child.unref();
+    save("DISPATCHED", { pid, stdoutPath, stderrPath });
+    return { outcome: "dispatched", pid, marker, stdoutPath, stderrPath };
+  } catch (error) {
+    save("ATTENTION", { failureCode: error.code ?? "SUPERVISOR_DISPATCH_FAILED" });
+    throw error;
+  } finally {
+    if (outFd !== undefined) closeSync(outFd);
+    if (errFd !== undefined) closeSync(errFd);
+  }
+}
+
 /** One invocation owns one durable assignment. An unknown creation is never replayed. */
 export async function superviseCourseSupportWorker(input, dependencies = {}) {
   const validated = validateSupervisorInput(input, dependencies);
@@ -155,11 +203,12 @@ export async function superviseCourseSupportWorker(input, dependencies = {}) {
 export function readSupervisorArguments(args) {
   const values = {};
   const names = new Set(["--context-file", "--assignment-file", "--worker-checkout", "--output-dir"]);
+  if (args[0] === "--detach") { values.detach = true; args = args.slice(1); }
   for (let i = 0; i < args.length; i += 2) {
     if (!names.has(args[i]) || !args[i + 1] || args[i] in values) fail("INVALID_SUPERVISOR_ARGUMENTS");
     values[args[i]] = args[i + 1];
   }
-  if (Object.keys(values).length !== names.size) fail("REQUIRED_SUPERVISOR_ARGUMENT_MISSING");
+  if (names.size !== Object.keys(values).filter((key) => key !== "detach").length) fail("REQUIRED_SUPERVISOR_ARGUMENT_MISSING");
   return values;
 }
 
@@ -169,10 +218,13 @@ if (process.argv[1] && same(scriptPath, process.argv[1])) {
     const outputDir = args["--output-dir"];
     if (!isAbsolute(outputDir)) fail("ABSOLUTE_OUTPUT_DIR_REQUIRED");
     mkdirSync(outputDir, { recursive: true, mode: 0o700 });
-    const result = await superviseCourseSupportWorker({
+    const input = {
       context: readJson(args["--context-file"]), assignment: readJson(args["--assignment-file"]),
       workerCheckout: args["--worker-checkout"], outputDir, parentThreadId: process.env.CODEX_THREAD_ID,
-    });
+    };
+    const result = args.detach
+      ? await dispatchCourseSupportWorker(input, { contextFile: args["--context-file"], assignmentFile: args["--assignment-file"] })
+      : await superviseCourseSupportWorker(input);
     process.stdout.write(`${JSON.stringify(result)}\n`);
   })().catch((error) => {
     process.stderr.write(`${error.code ?? "SUPERVISOR_FAILED"}; preserve the private receipt and assignment ownership.\n`);
