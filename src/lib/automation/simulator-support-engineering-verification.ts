@@ -52,13 +52,13 @@ const dependencies = { transition: withSimulatorEngineeringVerificationTransitio
 /** The deployed runtime reads through the same signed-out adapter and global provider coordination as normal checks. */
 export async function runSimulatorEngineeringVerification(input: SimulatorEngineeringVerificationInput, runtime: SimulatorEngineeringRuntime,
   deps = dependencies) {
-  const transition = async <T>(authority: SimulatorEngineeringVerificationInput & { runtimeVersion: string },
+  const transition = async <T>(authority: SimulatorEngineeringVerificationInput & { runtimeVersion: string; allowCustomerDemandSettlement?: true },
     operation: (context: SimulatorEngineeringVerificationContext) => Promise<T>) => {
     const result = await deps.transition(authority, operation);
     if (!result.acquired) throw new Error("SIMULATOR_ENGINEERING_WRITER_BUSY");
     return result.value;
   };
-  const reserved = await transition({ ...input, runtimeVersion: runtime.runtimeVersion }, async context => {
+  const reserved = await transition({ ...input, runtimeVersion: runtime.runtimeVersion, allowCustomerDemandSettlement: true }, async context => {
     const { now, claim, offering, timeZone, tx } = context;
     const audit = context.audit as typeof context.audit & { simulatorEngineeringVerification?: unknown; simulatorEngineeringVerificationHistory?: unknown };
     assertSimulatorEngineeringRuntime(runtime, claim.deployment!, now);
@@ -69,6 +69,10 @@ export async function runSimulatorEngineeringVerification(input: SimulatorEngine
     const previous = readSimulatorEngineeringVerificationState(audit.simulatorEngineeringVerification);
     if (audit.simulatorEngineeringVerification !== undefined && audit.simulatorEngineeringVerification !== null && !previous) {
       throw new Error("SIMULATOR_ENGINEERING_EVIDENCE_INVALID");
+    }
+    const customerDemandPresent = Boolean((context as { customerDemandPresent?: boolean }).customerDemandPresent);
+    if (customerDemandPresent && (!previous?.inFlight || Date.parse(previous.inFlight.expiresAt) > now.getTime())) {
+      throw new Error("SIMULATOR_ENGINEERING_CUSTOMER_CHECK_REQUIRED");
     }
     if (previous?.inFlight) {
       const pending = previous.inFlight;
@@ -81,7 +85,8 @@ export async function runSimulatorEngineeringVerification(input: SimulatorEngine
         data: { observationToken: null, observationExpiresAt: null } });
       return { ...saved, expiredReservation: true as const, requestId: pending.requestId, outcome: observation.outcome,
         complete: false as const, providerObservedAt: null, slotCount: 0, failureCode: observation.failureCode,
-        freshSuccessfulChecks: 0, nextAction: "REPAIR" as const, engineeringOnly: true as const, customerAcceptance: false as const };
+        freshSuccessfulChecks: 0, nextAction: customerDemandPresent ? "RETRY_ENGINEERING" as const : "REPAIR" as const,
+        engineeringOnly: true as const, customerAcceptance: false as const };
     }
     const sameRelease = Boolean(previous && previous.sourceFingerprint === claim.sourceFingerprint && previous.runtimeVersion === claim.releaseSha &&
       previous.deploymentId === claim.deployment!.deploymentId);
@@ -141,7 +146,7 @@ export async function runSimulatorEngineeringVerification(input: SimulatorEngine
       offeringId: reserved.offering.id, requestedDate: reserved.requestedDate, timeZone: reserved.timeZone,
     });
   } catch (error) { normalized = normalizeFailure(error); }
-  return transition(owner, async context => {
+  return transition({ ...owner, allowCustomerDemandSettlement: true }, async context => {
     assertSimulatorEngineeringRuntime(runtime, context.claim.deployment!, context.now);
     const state = readSimulatorEngineeringVerificationState((context.audit as { simulatorEngineeringVerification?: unknown }).simulatorEngineeringVerification);
     const pending = state?.inFlight;
@@ -149,6 +154,10 @@ export async function runSimulatorEngineeringVerification(input: SimulatorEngine
         Date.parse(pending.expiresAt) <= context.now.getTime() || context.offering.observationToken !== reserved.requestId ||
         !context.offering.observationExpiresAt || context.offering.observationExpiresAt <= context.now) {
       throw new Error("SIMULATOR_ENGINEERING_RESERVATION_STALE");
+    }
+    const customerDemandPresent = Boolean((context as { customerDemandPresent?: boolean }).customerDemandPresent);
+    if (customerDemandPresent) {
+      normalized = { outcome: "FETCH_FAILED", complete: false, providerObservedAt: null, slotCount: 0, failureCode: "NORMAL_CUSTOMER_CHECK_REQUIRED" };
     }
     // Database time, not the operator or provider clock, owns settlement.
     if (normalized.providerObservedAt && Date.parse(normalized.providerObservedAt) > context.now.getTime()) {
@@ -159,12 +168,13 @@ export async function runSimulatorEngineeringVerification(input: SimulatorEngine
     const saved = await context.save({ simulatorEngineeringVerification: next });
     await context.tx.courseOffering.updateMany({ where: { id: context.offering.id, observationToken: reserved.requestId }, data: {
       observationToken: null, observationExpiresAt: null,
-      ...(observation.complete ? { monitoringState: "HEALTHY", automationEligibility: "ALLOWED", monitoringVerifiedAt: context.now } :
+      ...(customerDemandPresent ? {} : observation.complete ? { monitoringState: "HEALTHY", automationEligibility: "ALLOWED", monitoringVerifiedAt: context.now } :
         { monitoringState: "DEGRADED_RETRYING", lastFailureAt: context.now }),
     } });
     const progress = evaluateSimulatorEngineeringVerification({ now: context.now, claim: context.claim, sourceFingerprint: context.claim.sourceFingerprint, state: next });
     return { ...saved, outcome: observation.outcome, complete: observation.complete, requestId: observation.requestId,
       providerObservedAt: observation.providerObservedAt, slotCount: observation.slotCount, failureCode: observation.failureCode,
-      freshSuccessfulChecks: progress.freshSuccessfulChecks, engineeringOnly: true as const, customerAcceptance: false as const };
+      freshSuccessfulChecks: progress.freshSuccessfulChecks, ...(customerDemandPresent ? { nextAction: "RETRY_ENGINEERING" as const } : {}),
+      engineeringOnly: true as const, customerAcceptance: false as const };
   });
 }

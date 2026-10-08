@@ -108,13 +108,30 @@ describe("deployed independent simulator verification", () => {
     const f = fixture(); const actual = f.deps.transition.getMockImplementation()!;
     let customerDemandPresent = false;
     f.deps.transition.mockImplementation(async (authority, operation) => {
-      if (customerDemandPresent) throw new Error("SIMULATOR_ENGINEERING_CUSTOMER_CHECK_REQUIRED");
-      return actual(authority, operation);
+      if (customerDemandPresent && !authority.allowCustomerDemandSettlement) throw new Error("SIMULATOR_ENGINEERING_CUSTOMER_CHECK_REQUIRED");
+      return actual(authority, context => operation({ ...context, customerDemandPresent }));
     });
     f.deps.providerLease.mockImplementation(async (_host, operation) => { customerDemandPresent = true; return { acquired: true, value: await operation() }; });
-    await expect(runSimulatorEngineeringVerification({ assignmentRef: "assignment", token: "owned", revision: 3 }, runtime, f.deps)).rejects.toThrow("CUSTOMER_CHECK_REQUIRED");
+    const result = await runSimulatorEngineeringVerification({ assignmentRef: "assignment", token: "owned", revision: 3 }, runtime, f.deps);
+    expect(result).toMatchObject({ outcome: "FETCH_FAILED", complete: false, failureCode: "NORMAL_CUSTOMER_CHECK_REQUIRED", nextAction: "RETRY_ENGINEERING" });
     expect(f.deps.read).not.toHaveBeenCalled();
-    expect((f.audit.simulatorEngineeringVerification as SimulatorEngineeringVerificationState).observations).toHaveLength(0);
+    expect(f.audit.simulatorEngineeringVerification).toMatchObject({ readsUsed: 1, inFlight: null,
+      observations: [{ complete: false, failureCode: "NORMAL_CUSTOMER_CHECK_REQUIRED" }] });
+    expect(f.offering).toMatchObject({ observationToken: null, monitoringState: "VERIFYING", automationEligibility: "UNKNOWN" });
+  });
+  it("settles an in-flight read without granting engineering or customer success when real demand arrives during network work", async () => {
+    const f = fixture(); const actual = f.deps.transition.getMockImplementation()!; const read = f.deps.read.getMockImplementation()!;
+    let customerDemandPresent = false;
+    f.deps.transition.mockImplementation(async (authority, operation) => {
+      if (customerDemandPresent && !authority.allowCustomerDemandSettlement) throw new Error("SIMULATOR_ENGINEERING_CUSTOMER_CHECK_REQUIRED");
+      return actual(authority, context => operation({ ...context, customerDemandPresent }));
+    });
+    f.deps.read.mockImplementation(async () => { customerDemandPresent = true; return read(); });
+    const result = await runSimulatorEngineeringVerification({ assignmentRef: "assignment", token: "owned", revision: 3 }, runtime, f.deps);
+    expect(result).toMatchObject({ complete: false, customerAcceptance: false, freshSuccessfulChecks: 0, failureCode: "NORMAL_CUSTOMER_CHECK_REQUIRED" });
+    expect(f.deps.read).toHaveBeenCalledTimes(1);
+    expect(f.audit.simulatorEngineeringVerification).toMatchObject({ inFlight: null, observations: [{ complete: false }] });
+    expect(f.offering.observationToken).toBeNull();
   });
   it("reconciles an expired interrupted reservation with original ownership and no replacement read or budget refund", async () => {
     const f = fixture();
