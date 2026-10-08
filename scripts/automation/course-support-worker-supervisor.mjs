@@ -35,6 +35,7 @@ function git(checkout, args) {
 export function validateSupervisorInput(input, dependencies = {}) {
   const { context, assignment, workerCheckout, outputDir, parentThreadId } = input;
   if (!UUID.test(parentThreadId ?? "")) fail("NATIVE_PARENT_ID_REQUIRED");
+  if ((dependencies.environment ?? process.env).CODEX_THREAD_ID !== parentThreadId) fail("NATIVE_PARENT_ID_MISMATCH");
   if (context?.kind !== "course_support_preflight_context" || context.exactHead !== true ||
       context.workerCli?.status !== "current" || !isAbsolute(context.selectedCheckout ?? "") ||
       !isAbsolute(context.workerCli.cliPath ?? "")) fail("INVALID_PREFLIGHT_CONTEXT");
@@ -86,15 +87,17 @@ function productionDispatch(stage, args, validated, dependencies) {
   if (result.status !== 0) fail(`DISPATCH_${stage.toUpperCase()}_FAILED`);
   const lines = (result.stdout ?? "").trim().split(/\r?\n/u);
   const responses = lines.flatMap((line) => {
-    try { const parsed = JSON.parse(line); return parsed?.assignmentRef ? [parsed] : []; }
+    try { const parsed = JSON.parse(line); return typeof parsed?.acquired === "boolean" ? [parsed] : []; }
     catch { return []; }
   });
   if (responses.length !== 1) fail(`DISPATCH_${stage.toUpperCase()}_PROOF_MISSING`);
   const response = responses[0];
-  if (response.assignmentRef !== validated.assignmentRef || response.state !== (stage === "start" ? "STARTING" : "BOUND")) {
+  if (response.acquired !== true || response.value?.assignmentRef !== validated.assignmentRef ||
+      response.value?.state !== (stage === "start" ? "STARTING" : "BOUND") ||
+      response.value?.baseSha !== validated.baseSha) {
     fail(`DISPATCH_${stage.toUpperCase()}_PROOF_MISMATCH`);
   }
-  return response;
+  return response.value;
 }
 
 /** One invocation owns one durable assignment. An unknown creation is never replayed. */

@@ -23,6 +23,7 @@ function fixture(mode?: "SIMULATOR") {
   const input = { context, assignment, workerCheckout: worker, outputDir: output, parentThreadId: PARENT };
   const calls: string[] = [];
   const deps = {
+    environment: { CODEX_THREAD_ID: PARENT },
     approvedCheckouts: [selected],
     inspectCli: vi.fn(() => context.workerCli),
     inspectWorker: vi.fn(() => ({ cwd: worker, branch: "automation/course-support-fixture", baseSha: SHA })),
@@ -35,7 +36,8 @@ function fixture(mode?: "SIMULATOR") {
     spawn: vi.fn((_command: string, args: string[]) => {
       const stage = args.includes("bind") ? "bind" : "start";
       calls.push(stage);
-      return { status: 0, stdout: JSON.stringify({ assignmentRef: REF, state: stage === "start" ? "STARTING" : "BOUND" }), stderr: "" };
+      return { status: 0, stdout: JSON.stringify({ acquired: true, value: {
+        assignmentRef: REF, state: stage === "start" ? "STARTING" : "BOUND", baseSha: SHA } }), stderr: "" };
     }),
     prepare: vi.fn(async ({ receiptPath }: { receiptPath: string }) => {
       calls.push("prepare");
@@ -52,6 +54,7 @@ describe("course worker launch supervisor", () => {
   it("requires actual parent, exact preflight context, reserved assignment and current base before start", () => {
     const f = fixture();
     expect(() => validateSupervisorInput({ ...f.input, parentThreadId: "" }, f.deps)).toThrow("NATIVE_PARENT_ID_REQUIRED");
+    expect(() => validateSupervisorInput({ ...f.input, parentThreadId: CHILD }, f.deps)).toThrow("NATIVE_PARENT_ID_MISMATCH");
     expect(() => validateSupervisorInput({ ...f.input, assignment: { ...f.input.assignment, state: "STARTING" } }, f.deps)).toThrow("RESERVED_ASSIGNMENT_REQUIRED");
     expect(() => validateSupervisorInput({ ...f.input, context: { ...f.input.context, exactHead: false } }, f.deps)).toThrow("INVALID_PREFLIGHT_CONTEXT");
     f.deps.git.mockImplementationOnce(() => "b".repeat(40));
@@ -92,11 +95,38 @@ describe("course worker launch supervisor", () => {
     expect(readFileSync(join(f.output, "supervisor.receipt.private.json"), "utf8")).toContain('"failedAt": "START_REQUESTED"');
   });
 
+  it.each([
+    ["lease refused", JSON.stringify({ acquired: false })],
+    ["missing envelope", JSON.stringify({ assignmentRef: REF, state: "STARTING" })],
+    ["wrong state", JSON.stringify({ acquired: true, value: { assignmentRef: REF, state: "RESERVED" } })],
+    ["stale plan base", JSON.stringify({ acquired: true, value: { assignmentRef: REF, state: "STARTING", baseSha: "b".repeat(40) } })],
+    ["missing base", JSON.stringify({ acquired: true, value: { assignmentRef: REF, state: "STARTING" } })],
+    ["malformed response", "not JSON"],
+  ])("does not create a child when start proof is %s", async (_label, stdout) => {
+    const f = fixture();
+    f.deps.spawn.mockReturnValueOnce({ status: 0, stdout, stderr: "" });
+    await expect(superviseCourseSupportWorker(f.input, f.deps)).rejects.toThrow(/DISPATCH_START_PROOF_/);
+    expect(f.deps.prepare).not.toHaveBeenCalled();
+    expect(f.deps.run).not.toHaveBeenCalled();
+  });
+
   it("refuses to start a turn when durable bind refuses the child", async () => {
     const f = fixture();
-    f.deps.spawn.mockImplementationOnce(() => ({ status: 0, stdout: JSON.stringify({ assignmentRef: REF, state: "STARTING" }), stderr: "" }))
+    f.deps.spawn.mockImplementationOnce(() => ({ status: 0, stdout: JSON.stringify({ acquired: true, value: {
+      assignmentRef: REF, state: "STARTING", baseSha: SHA } }), stderr: "" }))
       .mockImplementationOnce(() => ({ status: 2, stdout: "", stderr: "denied" }));
     await expect(superviseCourseSupportWorker(f.input, f.deps)).rejects.toThrow("DISPATCH_BIND_FAILED");
+    expect(f.deps.prepare).toHaveBeenCalledOnce();
+    expect(f.deps.run).not.toHaveBeenCalled();
+  });
+
+  it("refuses to start a turn when bind acknowledges another base", async () => {
+    const f = fixture();
+    f.deps.spawn.mockImplementationOnce(() => ({ status: 0, stdout: JSON.stringify({ acquired: true, value: {
+      assignmentRef: REF, state: "STARTING", baseSha: SHA } }), stderr: "" }))
+      .mockImplementationOnce(() => ({ status: 0, stdout: JSON.stringify({ acquired: true, value: {
+        assignmentRef: REF, state: "BOUND", baseSha: "b".repeat(40) } }), stderr: "" }));
+    await expect(superviseCourseSupportWorker(f.input, f.deps)).rejects.toThrow("DISPATCH_BIND_PROOF_MISMATCH");
     expect(f.deps.prepare).toHaveBeenCalledOnce();
     expect(f.deps.run).not.toHaveBeenCalled();
   });
