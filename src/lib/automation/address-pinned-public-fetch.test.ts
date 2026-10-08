@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import type { ClientRequest, IncomingMessage, RequestOptions } from "node:http";
 import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import { createAddressPinnedPublicFetchTransport, getOwnedOfficialSiteBodyLimitDiagnostic, isOwnedOfficialSiteBodyLimitError } from "./address-pinned-public-fetch";
+import { bodySizeBand, createAddressPinnedPublicFetchTransport, getOwnedOfficialSiteBodyLimitDiagnostic, isOwnedOfficialSiteBodyLimitError } from "./address-pinned-public-fetch";
 import { classifySimulatorSupportFailure, readSafeSimulatorSupportFailure } from "./simulator-support-failure";
 
 function inertResponse(body: Buffer, declaredLength?: number) {
@@ -30,6 +30,16 @@ function inertResponse(body: Buffer, declaredLength?: number) {
 }
 
 describe("address-pinned public response body limit", () => {
+  it("keeps malformed measurements unknown without removing the owned cap marker", async () => {
+    for (const [bytes, limit] of [[Infinity, 5], [NaN, 5], [6, 0], [6, Infinity], [4, 5]]) {
+      expect(bodySizeBand(bytes, limit)).toBe("UNKNOWN");
+    }
+    const { fetchPublic } = inertResponse(Buffer.from("x"), Infinity);
+    let caught: unknown;
+    try { await fetchPublic("https://public.example.test/booking"); } catch (error) { caught = error; }
+    expect(isOwnedOfficialSiteBodyLimitError(caught)).toBe(true);
+    expect(getOwnedOfficialSiteBodyLimitDiagnostic(caught)).toEqual({ phase: "TRANSPORT_HEADERS", observedSizeBand: "UNKNOWN" });
+  });
   it.each([
     ["declared", Buffer.from("exact"), 6],
     ["streamed", Buffer.from("larger"), undefined],

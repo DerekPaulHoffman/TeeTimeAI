@@ -16,6 +16,7 @@ import { assertSimulatorResearchFallbackBeforeRetry, getSimulatorResearchGuide, 
 import { classifySimulatorSupportFailure, type SimulatorSupportFailure } from "./simulator-support-failure";
 import { validateSimulatorEngineeringAuthority } from "./simulator-support-incidents";
 import { readSimulatorEngineeringVerificationState } from "./simulator-support-engineering-verification-policy";
+import { isProtectedSimulatorResearchDenial, selectRecoveredSimulatorResearchRoutes } from "./simulator-support-research-recovery";
 
 type Owner = { assignmentRef: string; ownerThreadId: string; token: string; revision: number };
 const acquiredResearchFailureCodes = new Set([
@@ -43,21 +44,24 @@ async function readPriorFailedResearchRoutes(tx: Pick<Prisma.TransactionClient, 
     const claim = audit.simulatorClaim as SimulatorSupportClaim | undefined;
     return [...research.history].reverse().filter(entry => getSimulatorResearchObservationFingerprint(entry, research, claim?.originalSourceFingerprint) === fingerprint &&
       (entry.outcome === "HARD_FAILED" || [401, 403, 404].includes(entry.httpStatus) ||
+      (entry.publicReadEvidence?.accessControls.length ?? 0) > 0 ||
       entry.outcome === "READ" && entry.httpStatus >= 200 && entry.httpStatus < 300 && entry.rendered))
       .map(entry => ({ url: entry.requestedUrl, rendered: entry.rendered, httpStatus: entry.httpStatus,
+        observedAt: entry.observedAt, ...(entry.requestId ? { requestId: entry.requestId } : {}),
         ...(entry.failure ? { failure: entry.failure } : {}),
         ...(entry.researchImplementationVersion ? { researchImplementationVersion: entry.researchImplementationVersion } : {}),
         ...(entry.renderWarning ? { renderWarning: entry.renderWarning } : {}), ...(entry.configurationDiagnostic ? { configurationDiagnostic: entry.configurationDiagnostic } : {}),
         ...(entry.bodyLimitDiagnostics ? { bodyLimitDiagnostics: entry.bodyLimitDiagnostics } : {}),
         ...(entry.bodyLimitDiagnosticsTruncated ? { bodyLimitDiagnosticsTruncated: true as const } : {}),
-        ...(entry.rendered && entry.outcome === "READ" && entry.httpStatus >= 200 && entry.httpStatus < 300 ? {
-          observedAt: entry.observedAt, ...(entry.requestId ? { requestId: entry.requestId } : {}), outcome: "READ" as const,
+        ...(entry.outcome === "READ" ? {
+          outcome: "READ" as const,
           ...(entry.publicReadEvidence ? { accessControlsObserved: entry.publicReadEvidence.accessControlsObserved,
             accessControls: entry.publicReadEvidence.accessControls,
             ...(entry.publicReadEvidence.renderComplete !== undefined ? { renderComplete: entry.publicReadEvidence.renderComplete } : {}) } : {}),
         } : {}) }));
   });
   const inherited = memory?.sourceFingerprint === fingerprint ? memory.routes : [];
+  const recovered = selectRecoveredSimulatorResearchRoutes({ actualRoutes: routes, inheritedRoutes: inherited, now });
   const key = (route: SimulatorResearchBlockedRoute) => `${new URL(route.url).href}:${route.rendered}`;
   const inheritedByKey = new Map(inherited.map(route => [key(route), route]));
   const sameDiagnostic = (actual: SimulatorResearchBlockedRoute, copied: SimulatorResearchBlockedRoute) =>
@@ -69,15 +73,20 @@ async function readPriorFailedResearchRoutes(tx: Pick<Prisma.TransactionClient, 
   const actualByKey = new Map<string, SimulatorResearchBlockedRoute>();
   for (const route of routes) {
     const previous = actualByKey.get(key(route));
-    if (!previous || !denial(previous) && denial(route)) actualByKey.set(key(route), route);
+    if (!previous || !isProtectedSimulatorResearchDenial(previous) && isProtectedSimulatorResearchDenial(route) ||
+      !denial(previous) && denial(route)) actualByKey.set(key(route), route);
   }
+  for (const [routeKey, positive] of recovered) actualByKey.set(routeKey, positive);
   const actual = mergeSimulatorResearchBlockedRoutes([...actualByKey.values()]);
   const provenComplete = (route: SimulatorResearchBlockedRoute) => route.outcome === "READ" && route.httpStatus >= 200 && route.httpStatus < 300 &&
     !route.failure && !route.renderWarning && route.accessControlsObserved === true && route.accessControls?.length === 0 &&
     route.renderComplete === true && Boolean(route.requestId) && Boolean(route.observedAt) && Date.parse(route.observedAt!) <= now.getTime();
   const reconciled = actual.map(route => {
+    if (recovered.has(key(route))) return route;
     const copied = inheritedByKey.get(key(route));
-    if (!copied || denial(route)) return route;
+    if (!copied) return route;
+    if (isProtectedSimulatorResearchDenial(copied)) return copied;
+    if (isProtectedSimulatorResearchDenial(route) || denial(route)) return route;
     if (denial(copied)) return copied;
     if (copied.observedAt && (!route.observedAt || Date.parse(route.observedAt) < Date.parse(copied.observedAt))) return copied;
     if (sameDiagnostic(route, copied)) return route;

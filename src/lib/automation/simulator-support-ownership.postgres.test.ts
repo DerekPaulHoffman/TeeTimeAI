@@ -460,7 +460,10 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     const inspected = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
     expect(inspected.research.readCount).toBe(0);
     expect(inspected.researchGuide.priorBlockedRoutes).toEqual([
-      { url: bays, rendered: true, httpStatus: 0, failure: priorAudit.simulatorResearch.history[1].failure }, { url: bays, rendered: false, httpStatus: 403 },
+      { url: bays, rendered: true, httpStatus: 0, failure: priorAudit.simulatorResearch.history[1].failure,
+        observedAt, requestId: priorAudit.simulatorResearch.history[1].requestId },
+      { url: bays, rendered: false, httpStatus: 403, observedAt, outcome: "READ",
+        requestId: priorAudit.simulatorResearch.history[0].requestId },
     ]);
     expect(inspected.researchGuide.suggestedReads.slice(0, 2)).toEqual([
       { source: "booking-root", rendered: false }, { source: "booking-root", rendered: true },
@@ -1593,6 +1596,73 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     }
   });
 
+  it.each(["recovered", "access-denied", "challenged", "foreign-source"] as const)("uses actual later partial recovery while preserving %s history and customer state", async scenario => {
+    const bays = "https://yourgolfbooking.com/venues/public-golf/booking/bays";
+    const f = await fixture(15, false, bays);
+    const before = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
+    const initial = before.audit as unknown as import("./course-support-course-dispatch").CourseDispatchAudit;
+    const earlier = new Date(Date.now() - 4 * 60 * 60_000).toISOString();
+    const failedAt = new Date(Date.now() - 3 * 60 * 60_000).toISOString();
+    const observedAt = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
+    const failure = { stage: "PUBLIC_READ", category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE", researchPhase: "HTTP_READ" };
+    const positiveFingerprint = scenario === "foreign-source" ? "b".repeat(64) : f.fingerprint;
+    const history = [
+      { source: "booking", requestedUrl: bays, sourceUrl: bays, sourceFingerprint: f.fingerprint,
+        observedAt: earlier, httpStatus: scenario === "challenged" ? 503 : 403,
+        rendered: scenario === "access-denied" || scenario === "challenged", outcome: "READ", requestId: randomUUID(),
+        ...(scenario === "challenged" ? { publicReadEvidence: { sourceFingerprint: f.fingerprint,
+          accessControlsObserved: true, accessControls: ["CAPTCHA_OR_CHALLENGE"], method: "BROWSER", renderComplete: false } } : {}) },
+      { source: "booking", requestedUrl: bays, sourceUrl: bays, sourceFingerprint: f.fingerprint,
+        observedAt: failedAt, httpStatus: 0, rendered: true, outcome: "HARD_FAILED", requestId: randomUUID(), failure },
+      { source: "booking", requestedUrl: bays, sourceUrl: bays, sourceFingerprint: positiveFingerprint,
+        observedAt, httpStatus: 200, rendered: true, outcome: "READ", requestId: randomUUID(),
+        renderWarning: "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED", publicReadEvidence: { sourceFingerprint: positiveFingerprint,
+          accessControlsObserved: true, accessControls: [], method: "BROWSER", renderComplete: false } },
+    ];
+    const closed = await client.automationRun.update({ where: { id: f.run.id }, data: {
+      status: "COMPLETED", outcome: "simulator_retryable_failed", completedAt: new Date(observedAt),
+      audit: { ...initial, reservedAt: earlier, launchStartedAt: earlier, boundAt: earlier,
+        consumedAt: earlier, simulatorClaim: { ...initial.simulatorClaim, claimedAt: earlier },
+        simulatorResearch: { version: 1, sourceFingerprint: f.fingerprint, readCount: 3, history,
+          links: [], bookingLinks: [], linkBaseUrl: null, inFlight: null },
+        simulatorResearchPriorFailures: { version: 1, sourceFingerprint: f.fingerprint,
+          routes: [{ url: bays, rendered: true, httpStatus: 0, failure }] },
+      } as unknown as Prisma.InputJsonValue,
+    } });
+    const searchBefore = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });
+    const offeringBefore = await client.courseOffering.findUniqueOrThrow({ where: { id: f.offering.id } });
+    const due = await client.simulatorSupportIncident.update({ where: { id: f.incident.id }, data: { retryAt: new Date(0) } });
+    const child = `next-child-${randomUUID()}`, assignmentRef = `course-assignment-${randomUUID()}`;
+    const next = await client.automationRun.create({ data: { kind: "OTHER", status: "RUNNING",
+      promptVersion: dispatcher.COURSE_DISPATCH_PROMPT_VERSION, ownerThreadId: "next-parent",
+      audit: { ...initial, assignmentRef, ownerThreadId: "next-parent", childThreadId: child,
+        state: "BOUND", consumedAt: undefined, boundAt: new Date().toISOString(), simulatorClaim: undefined,
+        simulatorResearch: undefined, simulatorResearchPriorFailures: undefined,
+        target: { ...initial.target, updatedAt: due.updatedAt.toISOString() },
+      } as unknown as Prisma.InputJsonValue } }); ids.runs.push(next.id);
+    const claim = await lane.claimSimulatorSupportAssignment({ assignmentRef, ownerThreadId: child,
+      baseSha, branch: "automation/course-support-recovered-research" });
+    if (!claim.acquired) throw new Error("Recovered research claim was busy.");
+    const permitsPlain = claim.value.researchGuide.suggestedReads.some(route => route.source === "booking" && !route.rendered);
+    expect(permitsPlain).toBe(scenario === "access-denied" || scenario === "challenged");
+    const permitsRendered = claim.value.researchGuide.suggestedReads.some(route => route.source === "booking" && route.rendered);
+    expect(permitsRendered).toBe(scenario === "recovered");
+    if (scenario === "recovered") {
+      expect(claim.value.researchGuide.priorBlockedRoutes).not.toContainEqual(expect.objectContaining({ rendered: true, failure }));
+    }
+    if (scenario === "challenged") {
+      const protectedRoute = { url: bays, rendered: true, httpStatus: 503,
+        accessControlsObserved: true, accessControls: ["CAPTCHA_OR_CHALLENGE"], observedAt: earlier };
+      expect(claim.value.researchGuide.priorBlockedRoutes).toContainEqual(expect.objectContaining(protectedRoute));
+      expect((await client.automationRun.findUniqueOrThrow({ where: { id: next.id } })).audit)
+        .toMatchObject({ simulatorResearchPriorFailures: { routes: expect.arrayContaining([expect.objectContaining(protectedRoute)]) } });
+    }
+    expect(await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).toEqual(closed);
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(searchBefore);
+    expect(await client.courseOffering.findUniqueOrThrow({ where: { id: f.offering.id } })).toEqual(offeringBefore);
+    expect(coreMocks.fetch).not.toHaveBeenCalled(); expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
+  });
+
   it("retains spent reads through adoption without carrying old-source failures into the replacement source", async () => {
     const f = await fixture();
     const before = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
@@ -1634,8 +1704,10 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
       verifiedAt: f.offering.verifiedAt, evidenceUrl: f.offering.evidenceUrl, supportedDurationsMinutes: f.offering.supportedDurationsMinutes } });
     expect(getSimulatorOfferingSourceFingerprint(returned)).toBe(f.fingerprint);
     const originalSource = await fresh(f.fingerprint);
-    expect(originalSource.result.researchGuide.priorBlockedRoutes).toContainEqual({ url: f.course.website, rendered: false, httpStatus: 403,
-      researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION });
+    expect(originalSource.result.researchGuide.priorBlockedRoutes).toContainEqual(expect.objectContaining({
+      url: f.course.website, rendered: false, httpStatus: 403, observedAt: read.value.publicSource.observedAt,
+      requestId: expect.any(String), outcome: "READ", accessControlsObserved: true, accessControls: [],
+      researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION }));
     const fetch = vi.fn();
     await expect(lane.readSimulatorSupportSource({ ...originalSource.owner, source: "official" }, { fetch })).rejects.toThrow("structural source failure");
     expect(fetch).not.toHaveBeenCalled();

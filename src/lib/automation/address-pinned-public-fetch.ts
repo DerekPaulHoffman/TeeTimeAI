@@ -43,7 +43,7 @@ type AddressPinnedPublicFetchPolicy = {
 };
 
 const nonPublicNetworkBlockLists = buildNonPublicNetworkBlockLists();
-export type OwnedBodySizeBand = "OVER_LIMIT_UP_TO_2X" | "OVER_2X_UP_TO_4X" | "OVER_4X";
+export type OwnedBodySizeBand = "OVER_LIMIT_UP_TO_2X" | "OVER_2X_UP_TO_4X" | "OVER_4X" | "UNKNOWN";
 export type OwnedOfficialSiteBodyLimitDiagnostic = {
   phase: "TRANSPORT_HEADERS" | "TRANSPORT_BODY";
   observedSizeBand: OwnedBodySizeBand;
@@ -51,6 +51,7 @@ export type OwnedOfficialSiteBodyLimitDiagnostic = {
 const ownedBodyLimitErrors = new WeakMap<object, OwnedOfficialSiteBodyLimitDiagnostic>();
 
 export function bodySizeBand(observedBytes: number, limit: number): OwnedBodySizeBand {
+  if (!Number.isFinite(observedBytes) || !Number.isFinite(limit) || limit <= 0 || observedBytes <= limit) return "UNKNOWN";
   return observedBytes <= limit * 2 ? "OVER_LIMIT_UP_TO_2X" :
     observedBytes <= limit * 4 ? "OVER_2X_UP_TO_4X" : "OVER_4X";
 }

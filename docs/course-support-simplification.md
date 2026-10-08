@@ -89,6 +89,20 @@ deployment does not establish that a golfer's selected course can be monitored.
 | Identify the capped secondary leaf without exposing it | Natural Back9 16:00 and 17:10 reads on `e1a57021f63b9dc13b6491c565aa088c27da56c8` returned incomplete HTTP200 rendering with a body-limit warning, but the warning alone could not identify whether a script or stylesheet hit the transport or collector cap. | Owned cap errors now carry only closed resource kind, cap phase, observed size band and bounded count into the incomplete read and source-scoped prior history. Focused collector/policy tests pass; the isolated Postgres test was added but skipped locally because `SIMULATOR_TEST_DATABASE_URL` was absent. No actual Back9 leaf, calendar recovery or live monitoring is established, and this diagnostic does not change retry eligibility or collector version. |
 | Preserve bounded legacy bridge evaluation after history fills | A 17:35 snapshot showed five safe outdoor incidents held when the source-1 complete bounded history overflowed. | The bridge now permits `COMPLETE` with `PER_INCIDENT` selection while retaining the aggregate, `NOT_EVALUATED`, new-active and grouped fences. Thirty focused checks passed locally in the parallel correction; this row does not assert a dispatch, claim, provider read or restored monitoring. |
 
+Recovery evidence correction: historical non-access tooling failures had priority
+over a later actual owned partial HTTP200 read of the same source and route.
+Back9's recorded bays read reached rental validation, while subsequent workers
+were directed to a less useful entry page. The new rule uses only that actual
+later receipt after sixty minutes and resolves every copied failure against
+original history. It preserves all historical rows, distinct plain/rendered
+routes and every explicit HTTP/access denial, including a challenge on HTTP503.
+It does not establish calendar support or revive a failed executor. Integrated
+local validation passes 243 collector/policy/recovery checks, 30 legacy bridge
+and history checks, and all 75 ownership tests against the real isolated
+Postgres database with provider and email transport mocked. Exact-head CI,
+publication and an ordinary scheduled recovered-page read remain release and
+live acceptance gates.
+
 The exact latest native attempt before these changes completed its reads and
 recorded retry; it did not implement monitoring. Two separate attempts repeated
 an incomplete HTTP200 entry page. The latest independent signed-out browser

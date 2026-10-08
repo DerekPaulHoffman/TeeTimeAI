@@ -28,7 +28,7 @@ const renderWarning = z.enum(["SECONDARY_REQUEST_BUDGET_EXHAUSTED", "SECONDARY_A
 const bodyLimitDiagnostic = z.object({
   resourceKind: z.enum(["SECONDARY_SCRIPT", "SECONDARY_STYLESHEET"]),
   phase: z.enum(["TRANSPORT_HEADERS", "TRANSPORT_BODY", "COLLECTOR_HEADERS", "COLLECTOR_BODY"]),
-  observedSizeBand: z.enum(["OVER_LIMIT_UP_TO_2X", "OVER_2X_UP_TO_4X", "OVER_4X"]),
+  observedSizeBand: z.enum(["OVER_LIMIT_UP_TO_2X", "OVER_2X_UP_TO_4X", "OVER_4X", "UNKNOWN"]),
   count: z.number().int().min(1).max(32),
 }).strict();
 const bodyLimitDiagnostics = z.array(bodyLimitDiagnostic).min(1).max(8).refine(entries =>
