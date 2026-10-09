@@ -409,3 +409,41 @@ identity, venue, duplicate, restriction, linkage and privacy checks still apply.
 The current runtime's fixed public rental/range assumptions require real source
 facts before reusable support can change. No default category, null-to-false
 conversion, eligibility or monitoring claim follows from these diagnostics.
+
+## Actual 04:30 simulator implementation and the remaining read dead end
+
+The ordinary October 9 04:30 worker used the published instructions, claimed
+seven paths, and implemented the reviewed public-slot reader itself. Its new
+regressions failed before correction; 271 focused tests and required CI
+37885079364 then passed on bad929532e69707fb69db5308cef7ccb10ecfa40.
+It published that commit and proved main/Git/Ready on both aliases at
+04:50:38.900 UTC. Deployment creation at 04:47:56.854 is a different clock.
+This proves autonomous implementation and publication, not monitoring.
+
+The same worker identified that the old diagnostic omitted the validated venue
+identifier and repaired it. Exact option, range, resource and separate linkage
+identifiers were already retained; they were not the missing fields. After
+publication its guide offered no eligible booking read to observe the repaired
+identity. It correctly refused to backfill the old receipt, recorded a retry
+for 05:51:25.494, and closed all 61 native commands. It never configured or
+adopted the venue or performed deployed availability verification.
+
+The corrective contract is one original-budget revalidation after an owned
+research-parser repair reaches the existing registered production Ready gate.
+Use only an actual owned complete public receipt on the same source URL/mode
+that predates that deployment. Derive this boundary from the existing trusted
+claim, claimed research path and exact newer release/deployment, not a caller
+flag, missing field alone or collector-version reset. The newest postdeployment
+receipt removes that permission. Source, receipt, access, ownership, destination,
+in-flight and six-read guards and ordinary sixty-minute backoff remain.
+
+Independent review also found that the new reader could discard unfamiliar or
+contradictory unselected occupancy and still return complete. Seven focused
+regressions reproduced this. The correction uses the already parsed venue's bay
+ID-to-numeric-range map before ignoring known unrelated bays, preserving all
+product collisions on selected bays and the strict reference contract. Its
+53-test reader run passed; the maintenance omission fixture was then corrected
+to omit the field instead of writing the string "missing". Final candidate
+verification and two actual deployed availability observations remain separate
+acceptance gates. No customer intent, retry date or email was changed by these
+root checks.

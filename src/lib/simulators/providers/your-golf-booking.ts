@@ -75,6 +75,10 @@ export async function fetchYourGolfBookingAvailability(input: SimulatorAvailabil
   const resourceItems = list(bays?.items, 100).map(record);
   const allIds = resourceItems.map(item => item ? String(integer(item.id)) : fail("The simulator resource list is malformed"));
   if (new Set(allIds).size !== allIds.length || selectedIds?.some(id => !allIds.includes(String(id)))) source("The reviewed simulator resource list changed");
+  const venueBayRanges = slotContract ? new Map<string, number>(resourceItems.map(item => {
+    if (!item || item.venue !== venue.id) source("The published simulator bay changed venue identity");
+    return [String(integer(item.id)), integer(item.range)] as const;
+  })) : undefined;
   const resources = resourceItems.filter(item => item && (selectedIds ? selectedIds.includes(String(item.id)) : item.range === range.id)).map(item => {
     if (!item || item.range !== range.id || item.venue !== venue.id || item.type !== "simulator" || item.bookable !== true || list(item.restrictedTimes, 100).length !== 0 || !list(item.options, 100).map(value => String(integer(value))).includes(String(option.id)) || !list(item.appliedOptions, 100).map(value => String(integer(value))).includes(String(option.id))) source("The public simulator bay settings changed");
     return String(integer(item.id));
@@ -102,7 +106,7 @@ export async function fetchYourGolfBookingAvailability(input: SimulatorAvailabil
   let payload: unknown;
   try { payload = JSON.parse(await publicRead(apiUrl, "application/json", 400_000, fetchImpl)); }
   catch (error) { if (error instanceof SimulatorAvailabilityError) throw error; fail("The public simulator bookings response is invalid JSON"); }
-  const slots = buildSlots(input, resources, option.id, range.id, venue.id, maxPartySize, hours, payload, slotContract);
+  const slots = buildSlots(input, resources, option.id, range.id, venue.id, maxPartySize, hours, payload, venueBayRanges);
   return { slots, complete: true, observedAt: new Date(), evidenceUrl: apiUrl.toString() };
 }
 
@@ -149,11 +153,12 @@ function parseHours(value: unknown, date: string): [number, number][] {
   return dated ?? weekly;
 }
 
-export function buildSlots(input: SimulatorAvailabilityInput, resources: string[], productId: unknown, rangeId: unknown, venueId: unknown, maxPartySize: number | null, hours: [number, number][], occupancy: unknown, allowOtherResources = false): SimulatorAvailabilitySlot[] {
+export function buildSlots(input: SimulatorAvailabilityInput, resources: string[], productId: unknown, rangeId: unknown, venueId: unknown, maxPartySize: number | null, hours: [number, number][], occupancy: unknown, venueBayRanges?: ReadonlyMap<string, number>): SimulatorAvailabilitySlot[] {
   const items = list(occupancy, 1_000).map(record);
   const blocked = new Map(resources.map(id => [id, [] as [number, number][]]));
   for (const item of items) {
-    if (!item || !ID.test(String(item.id)) || item.status !== "confirmed" || item.type !== "bay" || !ID.test(String(item.bayOptionId)) || !ID.test(String(item.rangeId)) || (!allowOtherResources && (item.rangeId !== rangeId || !blocked.has(String(item.bayId)))) || !ID.test(String(item.bayId)) || typeof item.bayRef !== "string" || !/^\d{1,3}$/u.test(item.bayRef)) fail("The public simulator occupancy changed shape or identity");
+    if (!item || !ID.test(String(item.id)) || item.status !== "confirmed" || item.type !== "bay" || !ID.test(String(item.bayOptionId)) || !ID.test(String(item.rangeId)) || (!venueBayRanges && (item.rangeId !== rangeId || !blocked.has(String(item.bayId)))) || !ID.test(String(item.bayId)) || typeof item.bayRef !== "string" || !/^\d{1,3}$/u.test(item.bayRef)) fail("The public simulator occupancy changed shape or identity");
+    if (venueBayRanges && venueBayRanges.get(String(item.bayId)) !== item.rangeId) fail("The public simulator occupancy does not match its published bay and range");
     const start = Date.parse(String(item.start));
     const end = Date.parse(String(item.end));
     if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?(?:Z|[+-]\d{2}:\d{2})$/u.test(String(item.start)) || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?(?:Z|[+-]\d{2}:\d{2})$/u.test(String(item.end)) || !Number.isFinite(start) || !Number.isFinite(end) || start >= end || end - start > 24 * 60 * 60_000) fail("The public simulator occupancy interval is invalid");

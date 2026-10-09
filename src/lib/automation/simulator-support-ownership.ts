@@ -16,14 +16,15 @@ import { assertSimulatorResearchFallbackBeforeRetry, getSimulatorResearchGuide, 
 import { classifySimulatorSupportFailure, type SimulatorSupportFailure } from "./simulator-support-failure";
 import { validateSimulatorEngineeringAuthority } from "./simulator-support-incidents";
 import { readSimulatorEngineeringVerificationState } from "./simulator-support-engineering-verification-policy";
-import { isProtectedSimulatorResearchDenial, selectRecoveredSimulatorResearchRoutes } from "./simulator-support-research-recovery";
+import { getSimulatorPostRepairResearchBoundary, isProtectedSimulatorResearchDenial, selectRecoveredSimulatorResearchRoutes } from "./simulator-support-research-recovery";
 
 type Owner = { assignmentRef: string; ownerThreadId: string; token: string; revision: number };
 const acquiredResearchFailureCodes = new Set([
   "SIMULATOR_RESEARCH_PROVIDER_BUSY", "SIMULATOR_RESEARCH_NETWORK_FAILED", "SIMULATOR_RESEARCH_DEADLINE",
 ]);
 
-async function readPriorFailedResearchRoutes(tx: Pick<Prisma.TransactionClient, "automationRun">, offeringId: string, fingerprint: string, now: Date) {
+async function readPriorFailedResearchRoutes(tx: Pick<Prisma.TransactionClient, "automationRun">, offeringId: string, fingerprint: string, now: Date,
+  postRepairResearchBoundary?: Date | null) {
   const where = { promptVersion: "course-support-course-dispatch-v1", status: "COMPLETED" as const,
     outcome: { in: ["simulator_retryable_failed", "simulator_research_failed", "simulator_source_withdrawn", "simulator_source_changed"] },
     AND: [{ audit: { path: ["target", "offeringId"], equals: offeringId } }, { OR: [
@@ -61,7 +62,7 @@ async function readPriorFailedResearchRoutes(tx: Pick<Prisma.TransactionClient, 
         } : {}) }));
   });
   const inherited = memory?.sourceFingerprint === fingerprint ? memory.routes : [];
-  const recovered = selectRecoveredSimulatorResearchRoutes({ actualRoutes: routes, inheritedRoutes: inherited, now });
+  const recovered = selectRecoveredSimulatorResearchRoutes({ actualRoutes: routes, inheritedRoutes: inherited, now, postRepairResearchBoundary });
   const key = (route: SimulatorResearchBlockedRoute) => `${new URL(route.url).href}:${route.rendered}`;
   const inheritedByKey = new Map(inherited.map(route => [key(route), route]));
   const sameDiagnostic = (actual: SimulatorResearchBlockedRoute, copied: SimulatorResearchBlockedRoute) =>
@@ -200,6 +201,8 @@ export async function readSimulatorSupportContinuationContext(tx: Prisma.Transac
   const last = research.history.at(-1);
   const pending = research.inFlight;
   const claim = audit.simulatorClaim;
+  const postRepairResearchBoundary = getSimulatorPostRepairResearchBoundary({ claim, baseSha: audit.baseSha,
+    sourceFingerprint: source.fingerprint, now });
   const ownedWork = ["IMPLEMENTING", "VERIFYING"].includes(claim.phase) && (claim.plannedPaths.length > 0 || claim.releaseSha !== null);
   const expiredPending = pending && new Date(pending.expiresAt) <= now;
   const expiredOwnedStage = ownedWork && new Date(claim.leaseExpiresAt) <= now && (!pending || expiredPending);
@@ -231,8 +234,9 @@ export async function readSimulatorSupportContinuationContext(tx: Prisma.Transac
     ...(settledPublic ? { publicReadEvidence: settledPublic.publicReadEvidence } : {}),
     allowedResearchRouteCount: getSimulatorResearchGuide({ state: routeState,
       officialUrl: source.offering.course.website ?? source.offering.evidenceUrl,
-      bookingUrl: source.offering.bookingUrl, evidenceUrl: source.offering.evidenceUrl, now,
-      priorFailedRoutes: currentSimulatorResearchBlockedRoutes(await readPriorFailedResearchRoutes(tx, source.offering.id, source.fingerprint, now), now),
+      bookingUrl: source.offering.bookingUrl, evidenceUrl: source.offering.evidenceUrl, now, postRepairResearchBoundary,
+      priorFailedRoutes: currentSimulatorResearchBlockedRoutes(await readPriorFailedResearchRoutes(tx, source.offering.id, source.fingerprint, now,
+        postRepairResearchBoundary), now, postRepairResearchBoundary),
     }).suggestedReads.length,
   } : null;
   return { currentSource: true as const, currentClaimRevision: audit.simulatorClaim.revision,
@@ -305,9 +309,12 @@ export async function readSimulatorSupportSource(input: Owner & { source?: Simul
     const row = await loadOwned(tx, input, now);
     const state = readSimulatorResearchState(row.audit.simulatorResearch, row.source.fingerprint);
     if (state.sourceFingerprint !== row.source.fingerprint) throw new Error("Simulator research navigation belongs to an older source; adopt the reviewed source before research.");
-    const priorFailedRoutes = currentSimulatorResearchBlockedRoutes(await readPriorFailedResearchRoutes(tx, row.source.offering.id, row.source.fingerprint, now), now);
+    const postRepairResearchBoundary = getSimulatorPostRepairResearchBoundary({ claim: row.claim, baseSha: row.audit.baseSha,
+      sourceFingerprint: row.source.fingerprint, now });
+    const priorFailedRoutes = currentSimulatorResearchBlockedRoutes(await readPriorFailedResearchRoutes(tx, row.source.offering.id, row.source.fingerprint, now,
+      postRepairResearchBoundary), now, postRepairResearchBoundary);
     const selected = selectSimulatorResearchTarget({ state, officialUrl: row.source.offering.course.website ?? row.source.offering.evidenceUrl,
-      bookingUrl: row.source.offering.bookingUrl, evidenceUrl: row.source.offering.evidenceUrl, source: input.source, linkIndex: input.linkIndex, rendered: input.rendered ?? false, now, priorFailedRoutes });
+      bookingUrl: row.source.offering.bookingUrl, evidenceUrl: row.source.offering.evidenceUrl, source: input.source, linkIndex: input.linkIndex, rendered: input.rendered ?? false, now, priorFailedRoutes, postRepairResearchBoundary });
     const requestId = randomUUID();
     const research: SimulatorResearchState = { ...state, readCount: state.readCount + 1, inFlight: { requestId, startedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 60_000).toISOString(), ...selected } };
     const saved = await saveClaim(tx, row, now);
@@ -766,8 +773,11 @@ export function retrySimulatorSupport(input: Owner & { retryMinutes: number; cur
       if (state.sourceFingerprint !== row.source.fingerprint) throw new Error("Simulator research navigation belongs to an older source; adopt the reviewed source before retry.");
       const officialUrl = row.source.offering.course.website ?? row.source.offering.evidenceUrl;
       const bookingUrl = row.source.offering.bookingUrl;
-      const priorFailedRoutes = currentSimulatorResearchBlockedRoutes(await readPriorFailedResearchRoutes(tx, row.source.offering.id, row.source.fingerprint, now), now);
-      const retryGuide = getSimulatorResearchRetryGuide({ state, officialUrl, bookingUrl, now, priorFailedRoutes });
+      const postRepairResearchBoundary = getSimulatorPostRepairResearchBoundary({ claim: row.claim, baseSha: row.audit.baseSha,
+        sourceFingerprint: row.source.fingerprint, now });
+      const priorFailedRoutes = currentSimulatorResearchBlockedRoutes(await readPriorFailedResearchRoutes(tx, row.source.offering.id, row.source.fingerprint, now,
+        postRepairResearchBoundary), now, postRepairResearchBoundary);
+      const retryGuide = getSimulatorResearchRetryGuide({ state, officialUrl, bookingUrl, now, priorFailedRoutes, postRepairResearchBoundary });
       if (retryGuide.bookingResearchRequired) return {
         outcome: "booking_research_required" as const, revision: row.claim.revision, leaseExpiresAt: row.claim.leaseExpiresAt,
         researchGuide: retryGuide.researchGuide, nextEligibleBookingRead: retryGuide.nextEligibleBookingRead,
@@ -796,10 +806,14 @@ export async function readSimulatorSupportClaim(input: { assignmentRef: string; 
   const research = readSimulatorResearchState(row.audit.simulatorResearch, row.audit.simulatorClaim.sourceFingerprint);
   const latest = research.history.at(-1);
   const observedAt = new Date();
+  const postRepairResearchBoundary = getSimulatorPostRepairResearchBoundary({ claim: row.audit.simulatorClaim,
+    baseSha: row.audit.baseSha, sourceFingerprint: getSimulatorOfferingSourceFingerprint(offering), now: observedAt });
   return { ...row.audit.simulatorClaim, baseSha: row.audit.baseSha, offeringId: row.audit.target.offeringId!,
     supportAuthority: row.audit.target.engineeringAuthority ? "ENGINEERING_INCIDENT" as const : "ACTIVE_ALERT" as const,
     research, researchGuide: getSimulatorResearchGuide({ state: research, officialUrl: offering.course.website ?? offering.evidenceUrl,
-      bookingUrl: offering.bookingUrl, evidenceUrl: offering.evidenceUrl, now: observedAt, priorFailedRoutes: currentSimulatorResearchBlockedRoutes(await readPriorFailedResearchRoutes(prisma, offering.id, row.audit.simulatorClaim.sourceFingerprint, observedAt), observedAt) }),
+      bookingUrl: offering.bookingUrl, evidenceUrl: offering.evidenceUrl, now: observedAt, postRepairResearchBoundary,
+      priorFailedRoutes: currentSimulatorResearchBlockedRoutes(await readPriorFailedResearchRoutes(prisma, offering.id, row.audit.simulatorClaim.sourceFingerprint, observedAt,
+        postRepairResearchBoundary), observedAt, postRepairResearchBoundary) }),
     failedRead: !research.inFlight && latest?.failure && latest.requestId !== research.lastRecoveredFailureRequestId &&
       ["HARD_FAILED", "NETWORK_FAILED", "CAPACITY_BUSY"].includes(latest.outcome) ? { revision: row.audit.simulatorClaim.revision, requestId: latest.requestId,
       failure: latest.failure, readsUsed: research.readCount, readsRemaining: 6 - research.readCount } : null,

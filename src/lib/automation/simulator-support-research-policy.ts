@@ -204,8 +204,31 @@ function isSecondaryRevalidationDue(route: SimulatorResearchBlockedRoute, now: D
     route.accessControlsObserved === true && route.accessControls?.length === 0 && route.renderComplete === false &&
     Boolean(route.requestId) && Number.isFinite(observed) && observed <= now.getTime() - SECONDARY_REVALIDATION_BACKOFF_MS;
 }
-export function currentSimulatorResearchBlockedRoutes(routes: readonly SimulatorResearchBlockedRoute[], now?: Date) {
+/** A trusted owned parser deployment permits one re-read of its earlier complete public receipt.
+ * This authorizes investigation only; fresh configuration/checkpoint rules remain unchanged.
+ */
+export function isSimulatorPostRepairResearchReadDue(route: SimulatorResearchBlockedRoute, now: Date,
+  postRepairResearchBoundary: Date | null | undefined,
+  observations: readonly Pick<SimulatorResearchBlockedRoute, "observedAt" | "requestId">[] = [route]) {
+  const observed = route.observedAt ? Date.parse(route.observedAt) : NaN;
+  const boundary = postRepairResearchBoundary?.getTime() ?? NaN;
+  return Number.isFinite(now.getTime()) && Number.isFinite(boundary) && boundary <= now.getTime() &&
+    Number.isFinite(observed) && observed < boundary && route.rendered && !route.failure &&
+    route.outcome === "READ" && route.httpStatus >= 200 && route.httpStatus < 300 &&
+    route.renderWarning === undefined && route.renderComplete === true &&
+    route.researchImplementationVersion === getSimulatorResearchImplementationVersion(route.url) &&
+    route.accessControlsObserved === true && route.accessControls?.length === 0 &&
+    Boolean(route.requestId && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/iu.test(route.requestId)) &&
+    observations.every(entry => {
+      const time = entry.observedAt ? Date.parse(entry.observedAt) : NaN;
+      return Number.isFinite(time) && time <= observed && (time !== observed || entry.requestId === route.requestId);
+    });
+}
+export function currentSimulatorResearchBlockedRoutes(routes: readonly SimulatorResearchBlockedRoute[], now?: Date,
+  postRepairResearchBoundary?: Date | null) {
   return routes.filter(route => {
+    const sameRoute = routes.filter(entry => new URL(entry.url).href === new URL(route.url).href && entry.rendered === route.rendered);
+    if (now && isSimulatorPostRepairResearchReadDue(route, now, postRepairResearchBoundary, sameRoute)) return false;
     const incompleteSecondary = route.rendered && !route.failure && route.httpStatus >= 200 && route.httpStatus < 300 &&
       route.renderWarning?.startsWith("SECONDARY_") === true &&
       !(route.accessControls?.length) &&
@@ -265,6 +288,7 @@ export function selectSimulatorResearchTarget(input: {
   state: SimulatorResearchState; officialUrl: string | null; bookingUrl: string | null; evidenceUrl?: string | null;
   source?: SimulatorResearchSource; linkIndex?: number; rendered: boolean; now: Date;
   priorFailedRoutes?: { url: string; rendered: boolean }[];
+  postRepairResearchBoundary?: Date | null;
 }): { source: SimulatorResearchSource | "link"; url: string; rendered: boolean } {
   const { state } = input;
   if (state.inFlight) throw new Error("Simulator source research is already in flight; inspect its original attempt before continuing.");
@@ -294,14 +318,18 @@ export function selectSimulatorResearchTarget(input: {
   const matching = priorOnRoute.at(-1);
   const protectedRoute = priorOnRoute.some(entry => entry.outcome === "HARD_FAILED" ||
     [401, 403, 404].includes(entry.httpStatus) || (entry.publicReadEvidence?.accessControls.length ?? 0) > 0);
+  const matchingRoute: SimulatorResearchBlockedRoute | undefined = matching ? {
+    url, rendered: matching.rendered, httpStatus: matching.httpStatus,
+    observedAt: matching.observedAt, requestId: matching.requestId, outcome: matching.outcome === "READ" ? "READ" : undefined,
+    renderWarning: matching.renderWarning, researchImplementationVersion: matching.researchImplementationVersion,
+    accessControlsObserved: matching.publicReadEvidence?.accessControlsObserved,
+    accessControls: matching.publicReadEvidence?.accessControls, renderComplete: matching.publicReadEvidence?.renderComplete,
+    ...(matching.failure ? { failure: matching.failure } : {}),
+  } : undefined;
   if (protectedRoute || matching && !(matching.sourceFingerprint === state.sourceFingerprint &&
       matching.publicReadEvidence?.sourceFingerprint === state.sourceFingerprint &&
-      isSecondaryRevalidationDue({ url, rendered: matching.rendered, httpStatus: matching.httpStatus,
-        observedAt: matching.observedAt, requestId: matching.requestId, outcome: matching.outcome === "READ" ? "READ" : undefined,
-        renderWarning: matching.renderWarning, researchImplementationVersion: matching.researchImplementationVersion,
-        accessControlsObserved: matching.publicReadEvidence?.accessControlsObserved,
-        accessControls: matching.publicReadEvidence?.accessControls,
-        renderComplete: matching.publicReadEvidence?.renderComplete }, input.now)))
+      (isSecondaryRevalidationDue(matchingRoute!, input.now) ||
+        isSimulatorPostRepairResearchReadDue(matchingRoute!, input.now, input.postRepairResearchBoundary, priorOnRoute))))
     throw new Error("Use a different simulator source research route; the identical route was already attempted.");
   if (input.priorFailedRoutes?.some(entry => entry.url === url && entry.rendered === input.rendered)) throw new Error("An unchanged structural source failure needs a different research route or materially changed source.");
   return { source, url, rendered: input.rendered };
@@ -311,6 +339,7 @@ export function selectSimulatorResearchTarget(input: {
 export function getSimulatorResearchGuide(input: {
   state: SimulatorResearchState; officialUrl: string | null; bookingUrl: string | null; evidenceUrl?: string | null;
   now: Date; priorFailedRoutes: SimulatorResearchBlockedRoute[];
+  postRepairResearchBoundary?: Date | null;
 }) {
   const roleLinks = input.state.links.flatMap((url, index) => isFreshBookingLink(input.state, url, input.now) ? [index] : []);
   const genericLinks = input.state.links.flatMap((_, index) => roleLinks.includes(index) ? [] : [index]);
@@ -349,6 +378,7 @@ export function getSimulatorResearchGuide(input: {
 export function getSimulatorResearchRetryGuide(input: {
   state: SimulatorResearchState; officialUrl: string | null; bookingUrl: string | null; evidenceUrl?: string | null;
   now: Date; priorFailedRoutes: SimulatorResearchBlockedRoute[];
+  postRepairResearchBoundary?: Date | null;
 }) {
   const { state } = input;
   if (state.inFlight) throw new Error("Finish or reconcile the original source research attempt before retry.");

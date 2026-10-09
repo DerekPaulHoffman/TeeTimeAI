@@ -1,4 +1,5 @@
-import type { SimulatorResearchBlockedRoute } from "./simulator-support-research-policy";
+import { isSimulatorPostRepairResearchReadDue, type SimulatorResearchBlockedRoute } from "./simulator-support-research-policy";
+import { assertSimulatorSupportDeployment, isValidSimulatorSupportClaim, type SimulatorSupportClaim } from "./simulator-support-policy";
 
 const BACKOFF_MS = 60 * 60_000;
 const key = (route: SimulatorResearchBlockedRoute) => `${new URL(route.url).href}:${route.rendered}`;
@@ -16,6 +17,27 @@ const sameFailure = (actual: SimulatorResearchBlockedRoute, copied: SimulatorRes
   actual.researchImplementationVersion === copied.researchImplementationVersion && actual.renderWarning === copied.renderWarning &&
   JSON.stringify(actual.configurationDiagnostic) === JSON.stringify(copied.configurationDiagnostic);
 
+/** Call only with the registered claim and current source loaded by the owned server path.
+ * deployedAt is deployment creation metadata, not the later observed READY clock.
+ */
+export function getSimulatorPostRepairResearchBoundary(input: {
+  claim: SimulatorSupportClaim; baseSha: string; sourceFingerprint: string; now: Date;
+}): Date | null {
+  const { claim, baseSha, sourceFingerprint, now } = input;
+  if (!Number.isFinite(now.getTime()) || !/^[a-f0-9]{40}$/iu.test(baseSha) ||
+      !/^[a-f0-9]{64}$/iu.test(sourceFingerprint) || !isValidSimulatorSupportClaim(claim) ||
+      claim.sourceFingerprint !== sourceFingerprint || claim.phase !== "VERIFYING" ||
+      typeof claim.releaseSha !== "string" || claim.releaseSha.toLowerCase() === baseSha.toLowerCase() ||
+      !claim.plannedPaths.includes("src/lib/automation/simulator-support-research.ts") || !claim.deployment) return null;
+  try {
+    assertSimulatorSupportDeployment(claim.deployment, claim.releaseSha, now);
+    const boundary = new Date(claim.deployment.deployedAt);
+    return boundary.getTime() >= Date.parse(claim.claimedAt) ? boundary : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Actual, already source-filtered owned receipts may prove a tooling route recovered.
  * A successful page permits only later bounded investigation, never monitoring proof.
  */
@@ -23,6 +45,7 @@ export function selectRecoveredSimulatorResearchRoutes(input: {
   actualRoutes: readonly SimulatorResearchBlockedRoute[];
   inheritedRoutes: readonly SimulatorResearchBlockedRoute[];
   now: Date;
+  postRepairResearchBoundary?: Date | null;
 }) {
   const recovered = new Map<string, SimulatorResearchBlockedRoute>();
   const evaluated = new Set<string>();
@@ -39,8 +62,9 @@ export function selectRecoveredSimulatorResearchRoutes(input: {
     const routeKey = key(positive);
     if (evaluated.has(routeKey)) continue;
     evaluated.add(routeKey);
-    if (clock(positive) > input.now.getTime() - BACKOFF_MS) continue;
     const actual = input.actualRoutes.filter(route => key(route) === routeKey);
+    if (clock(positive) > input.now.getTime() - BACKOFF_MS &&
+        !isSimulatorPostRepairResearchReadDue(positive, input.now, input.postRepairResearchBoundary, actual)) continue;
     const inherited = input.inheritedRoutes.filter(route => key(route) === routeKey);
     if ([...actual, ...inherited].some(isProtectedSimulatorResearchDenial)) continue;
     const failures = actual.filter(toolingFailure);

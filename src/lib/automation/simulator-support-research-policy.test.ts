@@ -9,6 +9,118 @@ const failedHomepage = () => ({ ...empty(), readCount: 1, history: [{ source: "o
 const savedBayUrl = "https://yourgolfbooking.com/venues/public-golf/booking/bays";
 const bookingRootUrl = "https://yourgolfbooking.com/venues/public-golf/booking";
 
+describe("same-route research after an owned parser release", () => {
+  const postRepairResearchBoundary = new Date("2026-10-06T19:55:00.125Z");
+  const receipt = () => ({
+    source: "booking" as const, requestedUrl: savedBayUrl, sourceUrl: savedBayUrl,
+    sourceFingerprint: fingerprint, observedAt: "2026-10-06T19:50:00.000Z",
+    httpStatus: 200, rendered: true, outcome: "READ" as const,
+    requestId: "11111111-1111-4111-8111-111111111111",
+    researchImplementationVersion: getSimulatorResearchImplementationVersion(savedBayUrl),
+    publicReadEvidence: { sourceFingerprint: fingerprint, accessControlsObserved: true as const,
+      accessControls: [] as ("ACCOUNT_REQUIRED" | "CAPTCHA_OR_CHALLENGE" | "QUEUE")[],
+      method: "BROWSER" as const, renderComplete: true },
+  });
+  const state = (entry: ReturnType<typeof empty>["history"][number] = receipt()) =>
+    readSimulatorResearchState({ ...empty(), readCount: 1, history: [entry] }, fingerprint);
+  const input = (current = state()) => ({ state: current, officialUrl, bookingUrl: savedBayUrl,
+    source: "booking" as const, rendered: true, now, priorFailedRoutes: [], postRepairResearchBoundary });
+
+  it("uses the same publication boundary for prior-route filtering and retains unknown/newer clocks", () => {
+    const original = receipt();
+    const route = { url: savedBayUrl, rendered: true, httpStatus: 200, outcome: "READ" as const,
+      observedAt: original.observedAt, requestId: original.requestId,
+      researchImplementationVersion: original.researchImplementationVersion,
+      accessControlsObserved: true as const, accessControls: [], renderComplete: true };
+    expect(currentSimulatorResearchBlockedRoutes([route], now)).toEqual([route]);
+    expect(currentSimulatorResearchBlockedRoutes([route], now, postRepairResearchBoundary)).toEqual([]);
+    for (const newer of [
+      { ...route, observedAt: postRepairResearchBoundary.toISOString(), requestId: "22222222-2222-4222-8222-222222222222" },
+      { ...route, observedAt: undefined, requestId: undefined },
+    ]) expect(currentSimulatorResearchBlockedRoutes([route, newer], now, postRepairResearchBoundary)).toContainEqual(route);
+    const denied = { ...route, httpStatus: 403, observedAt: "2026-10-06T19:49:00.000Z" };
+    expect(currentSimulatorResearchBlockedRoutes([route, denied], now, postRepairResearchBoundary)).toContainEqual(denied);
+  });
+
+  it("offers the original complete rendered page after the registered repair without spending a read in the guide", () => {
+    const current = state();
+    expect(selectSimulatorResearchTarget(input(current))).toEqual({ source: "booking", url: savedBayUrl, rendered: true });
+    expect(getSimulatorResearchGuide(input(current)).suggestedReads).toContainEqual({ source: "booking", rendered: true });
+    // The plain mode was already attempted; the useful next booking read is the repaired render.
+    const plain = { ...receipt(), rendered: false, requestId: "22222222-2222-4222-8222-222222222222",
+      publicReadEvidence: { ...receipt().publicReadEvidence, method: "HTTP" as const } };
+    const both = readSimulatorResearchState({ ...current, readCount: 2, history: [plain, receipt()] }, fingerprint);
+    expect(getSimulatorResearchRetryGuide(input(both))).toMatchObject({ bookingResearchRequired: true,
+      nextEligibleBookingRead: { source: "booking", rendered: true } });
+    expect(current.readCount).toBe(1);
+    expect(current.history).toEqual([receipt()]);
+  });
+
+  it("permits a retained original receipt after a later owned repair without imposing configuration freshness on the permission", () => {
+    const current = state({ ...receipt(), observedAt: "2026-10-06T18:00:00.000Z" });
+    expect(selectSimulatorResearchTarget(input(current)).url).toBe(savedBayUrl);
+  });
+
+  it("does not reoffer the route after its next post-deployment receipt, including a partial or access-unknown result", () => {
+    const current = state();
+    for (const next of [
+      { ...receipt(), observedAt: postRepairResearchBoundary.toISOString(),
+        requestId: "33333333-3333-4333-8333-333333333333" },
+      { ...receipt(), observedAt: "2026-10-06T19:56:00.000Z",
+        requestId: "33333333-3333-4333-8333-333333333333",
+        renderWarning: "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED" as const,
+        publicReadEvidence: { ...receipt().publicReadEvidence, renderComplete: false } },
+      { ...receipt(), observedAt: "2026-10-06T19:56:00.000Z",
+        requestId: "33333333-3333-4333-8333-333333333333", publicReadEvidence: undefined },
+    ]) {
+      const settled = readSimulatorResearchState({ ...current, readCount: 2, history: [receipt(), next] }, fingerprint);
+      expect(() => selectSimulatorResearchTarget(input(settled))).toThrow("identical");
+      expect(getSimulatorResearchGuide(input(settled)).suggestedReads).not.toContainEqual({ source: "booking", rendered: true });
+      // Receipt clocks, not only array order, prevent use of an older pre-repair observation.
+      expect(() => selectSimulatorResearchTarget(input({ ...settled, history: [...settled.history].reverse() }))).toThrow("identical");
+    }
+  });
+
+  it("requires the exact complete current-source receipt and a real later deployment boundary", () => {
+    const base = input();
+    for (const boundary of [undefined, null, new Date("invalid"), new Date("2026-10-06T19:50:00.000Z"),
+      new Date("2026-10-06T19:49:59.999Z"), new Date("2026-10-06T20:00:00.001Z")]) {
+      expect(() => selectSimulatorResearchTarget({ ...base, postRepairResearchBoundary: boundary })).toThrow("identical");
+    }
+    const original = receipt();
+    for (const entry of [
+      { ...original, researchImplementationVersion: undefined },
+      { ...original, researchImplementationVersion: "obsolete-reader" },
+      { ...original, requestId: undefined, publicReadEvidence: undefined },
+      { ...original, observedAt: "2026-10-06T20:00:00.001Z" },
+      { ...original, httpStatus: 401 }, { ...original, httpStatus: 403 }, { ...original, httpStatus: 404 },
+      { ...original, renderWarning: "MAIN_DOCUMENT_HTTP_ERROR" as const },
+      { ...original, publicReadEvidence: undefined },
+      { ...original, publicReadEvidence: { ...original.publicReadEvidence, sourceFingerprint: "b".repeat(64) }, sourceFingerprint: "b".repeat(64) },
+      { ...original, publicReadEvidence: { ...original.publicReadEvidence, renderComplete: false } },
+      { ...original, publicReadEvidence: { ...original.publicReadEvidence, renderComplete: undefined } },
+      ...(["ACCOUNT_REQUIRED", "CAPTCHA_OR_CHALLENGE", "QUEUE"] as const).map(control =>
+        ({ ...original, publicReadEvidence: { ...original.publicReadEvidence, accessControls: [control] } })),
+    ]) expect(() => selectSimulatorResearchTarget(input(state(entry)))).toThrow("identical");
+  });
+
+  it("keeps plain mode, protected prior failures, destination rules, source ownership, in-flight ownership and the original six-read limit", () => {
+    const base = input();
+    const plain = state({ ...receipt(), rendered: false,
+      publicReadEvidence: { ...receipt().publicReadEvidence, method: "HTTP" } });
+    expect(() => selectSimulatorResearchTarget({ ...input(plain), rendered: false })).toThrow("identical");
+    expect(() => selectSimulatorResearchTarget({ ...base,
+      priorFailedRoutes: [{ url: savedBayUrl, rendered: true, httpStatus: 403 }] })).toThrow();
+    expect(() => selectSimulatorResearchTarget({ ...base, state: { ...base.state, sourceFingerprint: "b".repeat(64) } })).toThrow("identical");
+    expect(() => selectSimulatorResearchTarget({ ...base, source: "evidence", evidenceUrl: savedBayUrl })).toThrow("origin");
+    expect(() => selectSimulatorResearchTarget({ ...base, state: { ...base.state, inFlight: {
+      requestId: "44444444-4444-4444-8444-444444444444", startedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 60_000).toISOString(), source: "booking", url: savedBayUrl, rendered: true,
+    } } })).toThrow("in flight");
+    expect(() => selectSimulatorResearchTarget({ ...base, state: { ...base.state, readCount: 6 } })).toThrow("budget");
+  });
+});
+
 describe("persisted known-reader configuration", () => {
   const configuration = { family: "GOLFBOOK" as const, templateId: "53", date: "2026-10-10", minDurationMinutes: 60,
     maxDurationMinutes: 360, incrementMinutes: 30 as const, resourceIds: ["1", "20"] };

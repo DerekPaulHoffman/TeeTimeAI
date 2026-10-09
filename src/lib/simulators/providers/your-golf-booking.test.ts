@@ -64,13 +64,65 @@ describe("YourGolfBooking public simulator calendar", () => {
     expect(result.slots).toHaveLength(22);
     expect(String(fetchImpl.mock.calls[0][0])).toBe(selected.offering.bookingUrl);
   });
+  describe("reviewed public slot occupancy inventory", () => {
+    const selected: SimulatorAvailabilityInput = { ...input, offering: { ...input.offering, providerMetadata: {
+      ...input.offering.providerMetadata as object, rentalContract: "PUBLIC_SLOT_V1", category: "baytime",
+      maintenanceMode: false, bookingWindowDaysAhead: 14, resourceIds: ["9224", "9225"] } } };
+    it.each([
+      { name: "unknown bay", bayId: 9300, rangeId: 1397 },
+      { name: "known unselected bay with the wrong range", bayId: 9226, rangeId: 9999 },
+      { name: "known unselected bay with a string range", bayId: 9226, rangeId: "1397" },
+      { name: "selected bay with the wrong range", bayId: 9224, rangeId: 9999 },
+    ])("rejects $name before claiming a complete observation", async ({ bayId, rangeId }) => {
+      const occupied = [{ ...booking(bayId, "2026-10-10T21:00:00Z", "2026-10-10T22:00:00Z", 22797), rangeId }];
+      const fetchImpl = responses(occupied);
+      await expect(fetchYourGolfBookingAvailability(selected, fetchImpl)).rejects.toMatchObject({ code: "SCHEMA_CHANGED" });
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+    });
+    it("ignores a known other-range bay while retaining member-product collisions on selected bays", async () => {
+      const state = JSON.parse(config().match(/<script[^>]*>([\s\S]*?)<\/script>/u)![1]);
+      const published = state.props.pageProps.initialReduxState;
+      published.ranges.items.push({ ...published.ranges.items[0], id: 1400 });
+      published.bays.items[2].range = 1400;
+      const occupied = [
+        { ...booking(9226, "2026-10-10T21:00:00Z", "2026-10-10T22:00:00Z", 777), rangeId: 1400 },
+        booking(9225, "2026-10-10T21:00:00Z", "2026-10-10T22:00:00Z", 22797),
+      ];
+      const fetchImpl = responses(occupied, `<script id="__NEXT_DATA__">${JSON.stringify(state)}</script>`);
+      const result = await fetchYourGolfBookingAvailability(selected, fetchImpl);
+      expect(result.complete).toBe(true);
+      expect(new Set(result.slots.map(slot => slot.resourceId))).toEqual(new Set(["9224", "9225"]));
+      expect(result.slots).toHaveLength(19);
+      expect(result.slots.some(slot => slot.resourceId === "9225" && slot.startsAt.toISOString() === "2026-10-10T20:30:00.000Z")).toBe(false);
+      expect(result.slots.some(slot => slot.resourceId === "9224" && slot.startsAt.toISOString() === "2026-10-10T20:30:00.000Z")).toBe(true);
+      expect(result.slots.some(slot => slot.resourceId === "9225" && slot.startsAt.toISOString() === "2026-10-10T20:00:00.000Z")).toBe(true);
+      expect(result.slots.some(slot => slot.resourceId === "9225" && slot.startsAt.toISOString() === "2026-10-10T22:00:00.000Z")).toBe(true);
+    });
+    it.each([
+      { name: "foreign venue", patch: { venue: 9999 } },
+      { name: "string range", patch: { range: "1397" } },
+      { name: "nonpositive range", patch: { range: 0 } },
+      { name: "missing range", patch: { range: undefined } },
+    ])("rejects a published unselected bay with $name before reading occupancy", async ({ patch }) => {
+      const state = JSON.parse(config().match(/<script[^>]*>([\s\S]*?)<\/script>/u)![1]);
+      Object.assign(state.props.pageProps.initialReduxState.bays.items[2], patch);
+      const fetchImpl = responses([], `<script id="__NEXT_DATA__">${JSON.stringify(state)}</script>`);
+      await expect(fetchYourGolfBookingAvailability(selected, fetchImpl)).rejects.toThrow();
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    });
+    it("keeps the legacy parser strict when no published inventory is supplied", () => {
+      expect(() => buildSlots(input, ["9224"], 21451, 1397, 1357, 4, [[960, 1320]],
+        [booking(9226, "2026-10-10T21:00:00Z", "2026-10-10T22:00:00Z", 777)])).toThrow();
+    });
+  });
   it.each([undefined, true, "false"])("does not normalize an unreviewed maintenance value %j", async maintenanceMode => {
     const selected = { ...input, offering: { ...input.offering, providerMetadata: {
       ...input.offering.providerMetadata as object, rentalContract: "PUBLIC_SLOT_V1", category: null,
       maintenanceMode: null, bookingWindowDaysAhead: 13, resourceIds: ["9224"] } } };
-    const html = config({ maxBookAheadValue: 13, maxBookAheadUnit: "day" }, { category: null })
-      .replace('"maintenanceMode":false', `"maintenanceMode":${JSON.stringify(maintenanceMode ?? "missing")}`);
-    const fetchImpl = responses([], html);
+    const html = config({ maxBookAheadValue: 13, maxBookAheadUnit: "day" }, { category: null });
+    const observedHtml = maintenanceMode === undefined ? html.replace(',"maintenanceMode":false', "") :
+      html.replace('"maintenanceMode":false', `"maintenanceMode":${JSON.stringify(maintenanceMode)}`);
+    const fetchImpl = responses([], observedHtml);
     await expect(fetchYourGolfBookingAvailability(selected, fetchImpl)).rejects.toMatchObject({ code: "INVALID_SOURCE" });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
