@@ -12,7 +12,7 @@ const PUBLIC_ID = /^[1-9]\d{0,9}$/u;
 const OWNER_KEY = /^[a-zA-Z0-9]{4,40}$/u;
 const MAX_RESPONSE_BYTES = 600_000;
 type Node = DefaultTreeAdapterMap["node"];
-type PublicProduct = { id: string; calendarIds: string[] };
+type PublicProduct = { id: string; calendarIds: string[]; calendarKind: "NAMED_BAY" | "OPAQUE_AGGREGATE" };
 
 export function isAcuityPublicBookingUrl(value: string) {
   return knownSimulatorPublicConfigurationFamily(value) === "ACUITY";
@@ -38,14 +38,18 @@ export async function fetchAcuitySimulatorAvailability(input: SimulatorAvailabil
     ? Math.min(liveCapacity, input.offering.maxPartySize ?? liveCapacity)
     : input.offering.maxPartySize;
   const product = selectPublicRentalProduct(business, rentalIds.map(String), input.durationMinutes);
-  const readUrl = new URL("/api/scheduling/v1/availability/times", ORIGIN);
-  readUrl.search = new URLSearchParams({ owner: ownerKey, calendarId: "any", appointmentTypeId: product.id, startDate: input.date, timezone: input.timeZone }).toString();
+  const aggregate = product.calendarKind === "OPAQUE_AGGREGATE";
+  const readUrl = new URL("/api/scheduling/v1/availability/times", aggregate ? url.origin : ORIGIN);
+  readUrl.search = new URLSearchParams(aggregate
+    ? { owner: ownerKey, appointmentTypeId: product.id, calendarId: product.calendarIds[0], startDate: input.date,
+        maxDays: "4", timezone: input.timeZone }
+    : { owner: ownerKey, calendarId: "any", appointmentTypeId: product.id, startDate: input.date, timezone: input.timeZone }).toString();
   let payload: unknown;
   try { payload = JSON.parse(await publicRead(readUrl, "application/json", fetchImpl)); }
   catch (error) { if (error instanceof SimulatorAvailabilityError) throw error; throw schemaError("The public simulator calendar returned an invalid availability response"); }
   const envelope = record(payload);
-  if (!envelope || Object.keys(envelope).length > 1 || (Object.keys(envelope).length === 1 && !Object.hasOwn(envelope, input.date))) throw schemaError("The public simulator calendar did not return the requested date");
-  const slots = parseProviderComputedSlots({ input, payload: Object.hasOwn(envelope, input.date) ? envelope[input.date] : [], productId: product.id, maxPartySize, sourcePrefix: "acuity" });
+  if (!envelope) throw schemaError("The public simulator calendar did not return a date-keyed response");
+  const slots = aggregate ? parseAggregateDates(input, envelope, product.id, maxPartySize) : parseLegacyDate(input, envelope, product.id, maxPartySize);
   return { slots, complete: true, observedAt: new Date(), evidenceUrl: readUrl.toString() };
 }
 
@@ -57,15 +61,78 @@ function selectPublicRentalProduct(business: Record<string, unknown>, rentalIds:
   const name = typeof product.name === "string" ? product.name : "";
   // An operator-reviewed ID still needs a current rental identity. League,
   // membership, instruction and fitting appointments are never rental stock.
-  if (!/\b(?:simulator|bay)\b/iu.test(name) || !/\b(?:booking|rental|time)\b/iu.test(name) || /\b(?:league|member|lesson|fitting|handicap)\b/iu.test(name)) throw sourceError("The reviewed simulator product is not a public rental");
+  const namedBay = /\b(?:simulator|bay)\b/iu.test(name) && /\b(?:booking|rental|time)\b/iu.test(name) &&
+    !/\b(?:league|member|lesson|fitting|handicap)\b/iu.test(name);
+  const aggregateHours = aggregateRentalHours(name);
+  const aggregate = aggregateHours > 0 && aggregateHours * 60 === durationMinutes;
+  if (!namedBay && !aggregate) throw sourceError("The reviewed simulator product is not a public rental");
   const calendarIds = Array.isArray(product.calendarIDs) ? product.calendarIDs.map(String) : [];
   if (!calendarIds.length || calendarIds.length > 40 || calendarIds.some((id) => !PUBLIC_ID.test(id)) || new Set(calendarIds).size !== calendarIds.length) throw schemaError("The public simulator rental calendars are missing or ambiguous");
   const calendars = flattenPublicGroups(business.calendars).filter((item) => String(item.id) !== "any");
+  if (aggregate && !namedBay) {
+    const businessName = normalizePlainName(business.name, 120);
+    if (!businessName || !hasExplicitHourlyPerBayPricing(business.description) || calendarIds.length !== 1 ||
+        types.filter(item => normalizePlainName(item.name, 80) === normalizePlainName(name, 80) && item.duration === durationMinutes).length !== 1) {
+      throw sourceError("The public aggregate rental identity is not corroborated");
+    }
+    const matching = calendars.filter(item => String(item.id) === calendarIds[0]);
+    if (matching.length !== 1 || normalizePlainName(matching[0].name, 120) !== businessName ||
+        matching[0].timezone !== business.timezone) throw sourceError("The public aggregate rental calendar is not the venue calendar");
+    return { id: String(product.id), calendarIds, calendarKind: "OPAQUE_AGGREGATE" };
+  }
   for (const id of calendarIds) {
     const matches = calendars.filter((item) => String(item.id) === id);
     if (matches.length !== 1 || typeof matches[0].name !== "string" || !/^\s*bay\s+\d+\b/iu.test(matches[0].name) || matches[0].timezone !== business.timezone) throw sourceError("The public simulator product belongs to an unverified resource calendar");
   }
-  return { id: String(product.id), calendarIds };
+  return { id: String(product.id), calendarIds, calendarKind: "NAMED_BAY" };
+}
+
+function normalizePlainName(value: unknown, maxLength: number) {
+  if (typeof value !== "string" || !value.trim() || value.length > maxLength || /[<>\u0000-\u001f\u007f]/u.test(value)) return;
+  return value.replace(/\s+/gu, " ").trim().toLocaleLowerCase("en-US");
+}
+
+function aggregateRentalHours(value: unknown) {
+  const match = normalizePlainName(value, 80)?.match(/^golf time ([1-4]) hours?$/u);
+  return match ? Number(match[1]) : 0;
+}
+
+function hasExplicitHourlyPerBayPricing(value: unknown) {
+  if (typeof value !== "string" || value.length > 4_000) return false;
+  const visibleText = (node: Node): string => {
+    if ("tagName" in node && ["script", "style", "noscript", "form", "input", "textarea", "select"].includes(node.tagName)) return "";
+    if ("value" in node) return node.nodeName === "#text" ? node.value : "";
+    return "childNodes" in node ? node.childNodes.map(visibleText).join(" ") : "";
+  };
+  const description = visibleText(parse(value)).replace(/\s+/gu, " ").trim();
+  return description.length <= 2_000 && /\bplaying\s+costs?\s+are\s+per\s+bay\b/iu.test(description) &&
+    /\bper\s+hour\s*,?\s*per\s+bay\b/iu.test(description) &&
+    !/\b(?:members?[-\s]+only|lessons?|fittings?|leagues?|classes?)\b/iu.test(description);
+}
+
+function parseLegacyDate(input: SimulatorAvailabilityInput, envelope: Record<string, unknown>, productId: string, maxPartySize: number | null) {
+  if (Object.keys(envelope).length > 1 || (Object.keys(envelope).length === 1 && !Object.hasOwn(envelope, input.date))) throw schemaError("The public simulator calendar did not return the requested date");
+  return parseProviderComputedSlots({ input, payload: Object.hasOwn(envelope, input.date) ? envelope[input.date] : [], productId, maxPartySize, sourcePrefix: "acuity" });
+}
+
+function parseAggregateDates(input: SimulatorAvailabilityInput, envelope: Record<string, unknown>, productId: string, maxPartySize: number | null) {
+  const dates = Object.keys(envelope);
+  if (!Object.hasOwn(envelope, input.date) || dates.length > 4) throw schemaError("The public simulator calendar did not return the requested date");
+  const first = Date.parse(`${input.date}T12:00:00Z`);
+  let requested: ReturnType<typeof parseProviderComputedSlots> = [];
+  for (const date of dates) {
+    const day = Date.parse(`${date}T12:00:00Z`);
+    if (!/^\d{4}-\d{2}-\d{2}$/u.test(date) || !Number.isFinite(day) || new Date(day).toISOString().slice(0, 10) !== date ||
+        day < first || day > first + 3 * 86_400_000) throw schemaError("The public simulator calendar returned a date outside its four-day request");
+    const rows = envelope[date];
+    if (!Array.isArray(rows) || rows.length > 300 || rows.some(row => !record(row) ||
+        Object.keys(row).length !== 2 || !Object.hasOwn(row, "time") || !Object.hasOwn(row, "slotsAvailable"))) {
+      throw schemaError("The public simulator calendar returned an unrecognized date row");
+    }
+    const parsed = parseProviderComputedSlots({ input: { ...input, date }, payload: rows, productId, maxPartySize, sourcePrefix: "acuity" });
+    if (date === input.date) requested = parsed;
+  }
+  return requested;
 }
 
 /** Read the existing inert BUSINESS object without evaluating its script.
@@ -79,11 +146,14 @@ export function projectAcuityPublicConfiguration(html: string, sourceUrl: string
     const candidates = flattenPublicGroups(business.appointmentTypes).filter(row =>
       PUBLIC_ID.test(String(row.id)) && Number.isInteger(row.duration) && Number(row.duration) >= 30 && Number(row.duration) <= 240 && Number(row.duration) % 30 === 0 &&
       row.active === true && row.private === false && row.type === "service" && row.classSize === null && row.canChooseQuantity === false &&
-      typeof row.name === "string" && /\b(?:simulator|bay)\b/iu.test(row.name) && /\b(?:booking|rental|time)\b/iu.test(row.name) && !/\b(?:league|member|lesson|fitting|handicap)\b/iu.test(row.name));
+      typeof row.name === "string" && ((/\b(?:simulator|bay)\b/iu.test(row.name) && /\b(?:booking|rental|time)\b/iu.test(row.name) &&
+        !/\b(?:league|member|lesson|fitting|handicap)\b/iu.test(row.name)) ||
+        aggregateRentalHours(row.name) > 0 && aggregateRentalHours(row.name) * 60 === Number(row.duration)));
     if (!candidates.length || candidates.length > 20) return;
     const rentals = candidates.map(row => {
       const product = selectPublicRentalProduct(business, [String(row.id)], Number(row.duration));
-      return { id: product.id, durationMinutes: Number(row.duration), calendarIds: product.calendarIds };
+      return { id: product.id, durationMinutes: Number(row.duration), calendarIds: product.calendarIds,
+        ...(product.calendarKind === "OPAQUE_AGGREGATE" ? { calendarKind: "OPAQUE_AGGREGATE" as const } : {}) };
     });
     const resourceIds = [...new Set(rentals.flatMap(row => row.calendarIds))];
     const description = typeof business.description === "string" ? textContent(parse(business.description)) : "";

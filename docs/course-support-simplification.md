@@ -538,5 +538,22 @@ A freshly observed, access-free tenant root can enter bounded Acuity research;
 only an exact tenant `/schedule/<key>` URL can be a runnable source, subject to
 the existing owner-key, resource, timezone, access and inventory checks. The
 synthetic verified-bay regression proves that URL route, not that One Golf
-currently has eligible bays or working monitoring. The observed Golf Time
-products and venue-named calendar still lack the required per-resource proof.
+currently has eligible bays or working monitoring. At that discovery stage,
+the Golf Time products and venue-named calendar lacked named-bay proof.
+
+## Bound the observed aggregate Acuity availability contract
+
+A later October 9 signed-out public scheduler observation established the
+separate aggregate contract: an exact one-hour Golf Time service, business-level
+hourly per-bay pricing, one venue-named linked calendar and a same-tenant public
+availability GET with `maxDays=4`. Its returned October 10 start list had 11
+positive-count times; only 11:00 through 17:00 fit a 09:00–18:00 one-hour
+window. The count does not establish physical bays or player capacity.
+
+The Acuity reader now has a distinct opaque aggregate variant requiring those
+current public product, business, owner, calendar and timezone facts on each
+read. It requests the exact linked calendar from the tenant origin, validates
+each returned date and time within the four-day range, and emits one opaque
+start per positive time. The older named-bay route remains separate. This
+source-backed implementation and synthetic tests do not establish live reader
+success, deployed monitoring, customer matches or notification delivery.

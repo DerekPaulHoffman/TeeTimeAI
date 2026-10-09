@@ -42,12 +42,14 @@ export const simulatorPublicConfigurationSchema = z.discriminatedUnion("family",
   z.object({
     family: z.literal("ACUITY"), ownerKey: z.string().regex(/^[a-zA-Z0-9]{4,40}$/u), businessId: publicId,
     timeZone, maxPartySize: z.number().int().min(1).max(20).nullable(),
-    rentals: z.array(z.object({ id: publicId, durationMinutes: duration, calendarIds: uniqueIds }).strict()).min(1).max(20),
+    rentals: z.array(z.object({ id: publicId, durationMinutes: duration, calendarIds: uniqueIds,
+      calendarKind: z.literal("OPAQUE_AGGREGATE").optional() }).strict()).min(1).max(20),
     resources: z.array(z.object({ id: publicId, timeZone }).strict()).min(1).max(40),
   }).strict().refine(value => new Set(value.rentals.map(row => row.id)).size === value.rentals.length &&
     new Set(value.resources.map(row => row.id)).size === value.resources.length &&
     value.resources.every(row => row.timeZone === value.timeZone) &&
-    value.rentals.every(row => row.calendarIds.every(id => value.resources.some(resource => resource.id === id)))),
+    value.rentals.every(row => row.calendarIds.every(id => value.resources.some(resource => resource.id === id)) &&
+      (!row.calendarKind || row.calendarIds.length === 1 && row.durationMinutes >= 60 && row.durationMinutes % 60 === 0))),
   z.object({
     family: z.literal("GOLFBOOK"), templateId: publicId,
     date: z.string().refine(validDate),

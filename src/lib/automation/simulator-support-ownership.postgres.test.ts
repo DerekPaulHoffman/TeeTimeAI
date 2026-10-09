@@ -896,6 +896,35 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(coreMocks.fetch).not.toHaveBeenCalled();
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
   });
+  it("persists only typed source-bound opaque aggregate rental facts under the owned tenant claim", async () => {
+    const bookingUrl = "https://onegolfhaven.as.me/schedule/a66e63ac";
+    const f = await fixture(15, false, bookingUrl);
+    const before = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });
+    const business = { id: 34536426, name: "One Golf Haven", ownerKey: "a66e63ac", timezone: "America/New_York",
+      includesAdminOnly: false, isExpired: false, description: "Playing Costs are Per Bay: $50 per hour, per bay.",
+      calendars: { "": [{ id: 11388341, name: "One Golf Haven", timezone: "America/New_York" }] },
+      appointmentTypes: { "": [{ id: 73234482, name: "Golf Time 1 HOUR", duration: 60, active: true,
+        private: false, type: "service", classSize: null, canChooseQuantity: false, calendarIDs: [11388341] }] } };
+    const fetch = vi.fn(async () => new Response(`<script>var BUSINESS = ${JSON.stringify(business)};</script>`,
+      { headers: { "content-type": "text/html" } }));
+    const read = await lane.readSimulatorSupportSource({ ...f.owner, source: "booking" }, { fetch });
+    if (!read.acquired) throw new Error("Owned aggregate fixture read was busy.");
+    const current = await lane.readSimulatorSupportClaim({ ...f.owner, revision: read.value.revision });
+    expect(current.research).toMatchObject({ readCount: 1, inFlight: null, sourceFingerprint: f.fingerprint,
+      history: [{ source: "booking", sourceUrl: bookingUrl, sourceFingerprint: f.fingerprint, outcome: "READ",
+        publicConfiguration: { family: "ACUITY", ownerKey: "a66e63ac", maxPartySize: null,
+          rentals: [{ id: "73234482", calendarIds: ["11388341"], calendarKind: "OPAQUE_AGGREGATE" }] } }] });
+    expect(current.researchGuide.publicConfigurations).toContainEqual(expect.objectContaining({ source: "booking",
+      configuration: expect.objectContaining({ family: "ACUITY", ownerKey: "a66e63ac",
+        rentals: [expect.objectContaining({ calendarKind: "OPAQUE_AGGREGATE" })] }) }));
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify((await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit))
+      .not.toMatch(/One Golf Haven|Playing Costs|\$50|Golf Time/u);
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(before);
+    expect(await client.teeTimeMatch.count({ where: { teeSearchId: f.search.id } })).toBe(0);
+    expect(coreMocks.fetch).not.toHaveBeenCalled();
+    expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
+  });
 
   it("records exact current-upstream reuse as metadata-only without claiming a reader fix", async () => {
     const f = await fixture();
