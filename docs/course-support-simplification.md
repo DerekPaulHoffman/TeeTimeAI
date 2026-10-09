@@ -5,6 +5,22 @@ repair. It distinguishes a working scheduler from working monitoring. A launch,
 successful command, completed research attempt, green test suite, or Ready
 deployment does not establish that a golfer's selected course can be monitored.
 
+The normal October 9 06:00 UTC worker configured Back9 from a fresh public read,
+adopted its source and registered the live release. Its deployed engineering
+verification then returned HTTP 503 before any availability observation was
+saved. The saved launcher receipt is a Windows absolute path; the production
+server runs Linux. The shared dispatcher parser used the reader host's
+`isAbsolute`, rejected that valid stored path and reported malformed history as
+a generic bounded-history failure. Local Windows configuration still worked.
+
+Persisted receipt provenance now accepts absolute Windows or POSIX paths without
+rewriting them. Local binding and actual artifact access keep their host, root,
+identity and file guards. A test explicitly emulates the POSIX path API for the
+parser and its live-assignment read. Five path/loader regressions and four
+non-string rejection cases fail before the correction; all 66 focused tests
+pass afterward. Production publication and fresh deployed availability proof
+remain separate gates.
+
 ## Decision checklist
 
 - Keep the existing per-search Workflow, Postgres incidents, provider adapters,

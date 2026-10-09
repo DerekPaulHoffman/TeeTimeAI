@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { isAbsolute } from "node:path";
+import { isAbsolute, posix, win32 } from "node:path";
 
 import { Prisma } from "@prisma/client";
 
@@ -122,7 +122,10 @@ export function parseCourseDispatchAudit(value: unknown): CourseDispatchAudit | 
       (["BOUND", "CONSUMED"].includes(audit.state ?? "") && (typeof audit.childThreadId !== "string" || !audit.childThreadId)) ||
       (["RESERVED", "STARTING"].includes(audit.state ?? "") && audit.childThreadId !== null)) return null;
   if (audit.target.mode !== undefined && audit.target.mode !== "SIMULATOR") return null;
-  if (audit.launcherReceiptPath !== undefined && (!isAbsolute(audit.launcherReceiptPath) ||
+  // Neon retains the original native host's path; a deployed reader may use another OS.
+  // This parses provenance only. Local binding and artifact access retain their own guards.
+  if (audit.launcherReceiptPath !== undefined && (typeof audit.launcherReceiptPath !== "string" ||
+      !(posix.isAbsolute(audit.launcherReceiptPath) || win32.isAbsolute(audit.launcherReceiptPath)) ||
       !audit.launcherReceiptPath.endsWith("launcher.receipt.private.json"))) return null;
   if (audit.target.mode === "SIMULATOR" &&
       (typeof audit.target.offeringId !== "string" || !audit.target.offeringId || !/^[a-f0-9]{64}$/i.test(audit.target.offeringSourceFingerprint ?? "") ||

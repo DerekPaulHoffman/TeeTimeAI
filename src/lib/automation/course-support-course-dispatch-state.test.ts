@@ -1,6 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { isAbsolute } from "node:path";
 import type { CourseDispatchAudit } from "./course-support-course-dispatch";
 import { createSimulatorSupportIntentDigest } from "./simulator-support-policy";
+
+// Reproduce the deployed POSIX reader even when local feedback runs on Windows.
+// The serialized receipt remains a fact of the original native host.
+vi.mock("node:path", async importOriginal => {
+  const actual = await importOriginal<typeof import("node:path")>();
+  const emulated = { ...actual, isAbsolute: actual.posix.isAbsolute };
+  return { ...emulated, default: emulated };
+});
 
 type StoredRun = {
   id: string;
@@ -116,12 +125,95 @@ import {
   cancelCourseSupportCourseDispatch,
   consumeBoundCourseSupportDispatchAssignment,
   getCourseSupportCourseDispatchAssignment,
+  listLiveCourseSupportDispatchReservations,
   loadBoundCourseSupportDispatchAssignment,
+  parseCourseDispatchAudit,
   planCourseSupportCourseDispatch,
 } from "./course-support-course-dispatch";
 
 const now = new Date("2026-10-05T13:40:05.000Z");
 const baseSha = "a".repeat(40);
+
+function persistedNativeAudit(): CourseDispatchAudit {
+  const fingerprint = "b".repeat(64);
+  return { schemaVersion: 1, tickRef: "saved-tick", assignmentRef: "saved-assignment", state: "CONSUMED",
+    ownerThreadId: "original-parent", childThreadId: "original-child", baseSha,
+    reservedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 600_000).toISOString(),
+    launcherReceiptPath: "C:\\private\\original-native\\launcher.receipt.private.json",
+    target: { mode: "SIMULATOR", offeringId: "saved-offering", offeringSourceFingerprint: fingerprint,
+      incidentId: "saved-incident", courseId: "saved-course", cycle: 1, providerFamilyKey: "SIM",
+      failureFingerprint: fingerprint, updatedAt: now.toISOString(), trafficClass: "SYNTHETIC",
+      searchRefs: [{ id: "saved-search", scheduleVersion: 1, alertGeneration: 0 }] },
+    simulatorClaim: { token: "synthetic-original-owner", revision: 11, phase: "VERIFYING", claimedAt: now.toISOString(),
+      leaseExpiresAt: new Date(now.getTime() + 900_000).toISOString(), sourceFingerprint: fingerprint,
+      originalSourceFingerprint: fingerprint, offeringRevision: 1, plannedPaths: [], releaseSha: baseSha,
+      branch: "fix/check-public-rentals", deployment: null, recheckQueuedAt: null, verificationCycle: 0 },
+  };
+}
+
+describe("persisted native receipt paths across reader operating systems", () => {
+  beforeEach(() => { store.runs.length = 0; store.reset(); vi.clearAllMocks(); });
+
+  it("parses the actual serialized Windows receipt provenance under a POSIX reader without rewriting it", () => {
+    const saved = JSON.parse(JSON.stringify(persistedNativeAudit())) as CourseDispatchAudit;
+    expect(isAbsolute(saved.launcherReceiptPath!)).toBe(false);
+    expect(parseCourseDispatchAudit(saved)).toEqual(saved);
+    expect(saved.launcherReceiptPath).toBe("C:\\private\\original-native\\launcher.receipt.private.json");
+  });
+
+  it("keeps the consumed owner reachable through the deployed live-assignment read before verification reserves anything", async () => {
+    const audit = JSON.parse(JSON.stringify(persistedNativeAudit())) as CourseDispatchAudit;
+    const row = { id: "saved-run", promptVersion: "course-support-course-dispatch-v1",
+      status: "RUNNING", startedAt: now, audit };
+    store.runs.push(row);
+    const before = structuredClone(store.runs);
+    await expect(listLiveCourseSupportDispatchReservations(store.tx as unknown as
+      Parameters<typeof listLiveCourseSupportDispatchReservations>[0])).resolves.toEqual([{ runId: row.id, audit }]);
+    expect(store.runs).toEqual(before);
+    expect(store.tx.automationRun.update).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "C:\\private\\original-native\\launcher.receipt.private.json",
+    "C:/private/original-native/launcher.receipt.private.json",
+    "\\\\native-host\\private-share\\original-native\\launcher.receipt.private.json",
+    "/private/original-native/launcher.receipt.private.json",
+  ])("retains genuine absolute originating-host provenance: %s", launcherReceiptPath => {
+    const audit = { ...persistedNativeAudit(), launcherReceiptPath };
+    expect(parseCourseDispatchAudit(audit)).toEqual(audit);
+  });
+
+  it.each([
+    "", "private/launcher.receipt.private.json", "private\\launcher.receipt.private.json",
+    "C:private\\launcher.receipt.private.json", "https://example.test/launcher.receipt.private.json",
+    "C:\\private\\launcher.receipt.json", "/private/launcher.receipt.json",
+    null, 42, {}, [],
+  ])("rejects relative, wrong-suffix or non-string stored path: %j", launcherReceiptPath => {
+    expect(parseCourseDispatchAudit({ ...persistedNativeAudit(), launcherReceiptPath })).toBeNull();
+  });
+
+  it("keeps the existing serialized identity, fingerprint, revision and source bounds", () => {
+    const audit = persistedNativeAudit();
+    expect(parseCourseDispatchAudit({ ...audit, launcherReceiptPath: undefined })).toEqual({ ...audit, launcherReceiptPath: undefined });
+    for (const invalid of [
+      { ...audit, childThreadId: null }, { ...audit, baseSha: "invalid" },
+      { ...audit, target: { ...audit.target, cycle: 0 } },
+      { ...audit, target: { ...audit.target, offeringSourceFingerprint: "invalid" } },
+      { ...audit, target: { ...audit.target, searchRefs: Array.from({ length: 4 }, (_, i) =>
+        ({ id: "search-" + i, scheduleVersion: 1, alertGeneration: 0 })) } },
+      { ...audit, simulatorClaim: { ...audit.simulatorClaim!, revision: 0 } },
+    ]) expect(parseCourseDispatchAudit(invalid)).toBeNull();
+  });
+
+  it("does not grant a POSIX executor local bind authority for a Windows filesystem path", () => {
+    const receipt = persistedNativeAudit().launcherReceiptPath!;
+    expect(() => bindCourseSupportCourseDispatch({ ownerThreadId: "original-parent",
+      assignmentRef: "saved-assignment", childThreadId: "original-child", launcherReceiptPath: receipt }))
+      .toThrow("Original launcher receipt path is invalid");
+    expect(store.lease).not.toHaveBeenCalled();
+  });
+});
+
 function populate(count: number, trafficClass = "PUBLIC", offset = 0, searchPrefix = "alert") {
   for (let index = 0; index < count; index += 1) {
     const courseNumber = index + offset;
