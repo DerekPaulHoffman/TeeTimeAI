@@ -13,6 +13,10 @@ describe("private simulator source CLI selection", () => {
     }
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ engineeringOnly: true, customerAcceptance: false, revision: 5 }), { status: 200 }));
     await requestSimulatorEngineeringVerification({ assignmentRef: "owned-assignment", token: "owned-token", revision: 3 }, { apiKey: "private_test_key", fetchImpl });
+    fetchImpl.mockResolvedValue(new Response(JSON.stringify({ engineeringOnly: true, customerAcceptance: false, revision: 5,
+      readerGuard: "The public simulator opening hours format changed" }), { status: 200 }));
+    expect(await requestSimulatorEngineeringVerification({ assignmentRef: "owned-assignment", token: "owned-token", revision: 3 },
+      { apiKey: "private_test_key", fetchImpl })).toMatchObject({ readerGuard: "The public simulator opening hours format changed" });
     expect(fetchImpl).toHaveBeenCalledWith("https://teetimespot.com/api/automation/simulator-support/verify", expect.objectContaining({ redirect: "error", method: "POST",
       body: JSON.stringify({ assignmentRef: "owned-assignment", token: "owned-token", revision: 3 }) }));
     fetchImpl.mockResolvedValue(new Response(JSON.stringify({ customerAcceptance: true }), { status: 200 }));

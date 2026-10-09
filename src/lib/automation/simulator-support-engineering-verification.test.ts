@@ -5,7 +5,7 @@ import type { SimulatorAvailabilityResult } from "@/lib/simulators/providers";
 import { SimulatorAvailabilityError } from "@/lib/simulators/providers/types";
 vi.mock("./simulator-support-ownership", () => ({ withSimulatorEngineeringVerificationTransition: vi.fn() }));
 import { normalizeSimulatorEngineeringResult, runSimulatorEngineeringVerification } from "./simulator-support-engineering-verification";
-import type { SimulatorEngineeringVerificationState } from "./simulator-support-engineering-verification-policy";
+import { readSimulatorEngineeringVerificationState, type SimulatorEngineeringVerificationState } from "./simulator-support-engineering-verification-policy";
 
 const sha = "a".repeat(40), source = "b".repeat(64), start = new Date("2026-10-08T15:00:00Z");
 const proof = { aliases: ["teetimespot.com", "www.teetimespot.com"], branch: "main", commitSha: sha,
@@ -16,7 +16,7 @@ function fixture() {
   let clock = new Date(start);
   const audit: Record<string, unknown> = {};
   const claim = { token: "owned", revision: 3, sourceFingerprint: source, releaseSha: sha, deployment: proof, claimedAt: "2026-10-08T14:10:00Z" };
-  const offering = { id: "offering", publicAccessStatus: "PUBLIC", active: true, bookingUrl: "https://public.example/booking", verifiedAt: start,
+  const offering = { id: "offering", providerFamilyKey: "YOUR_GOLF_BOOKING", publicAccessStatus: "PUBLIC", active: true, bookingUrl: "https://public.example/booking", verifiedAt: start,
     evidenceUrl: "https://public.example", supportedDurationsMinutes: [60], automationEligibility: "UNKNOWN", observationToken: null as string | null,
     observationExpiresAt: null as Date | null, bookingWindowDaysAhead: 14, bookingReleaseTimeLocal: "08:00", monitoringState: "VERIFYING" };
   const tx = { courseOffering: { updateMany: vi.fn(async ({ where, data }) => {
@@ -50,6 +50,7 @@ describe("deployed independent simulator verification", () => {
     const f = fixture();
     const first = await runSimulatorEngineeringVerification({ assignmentRef: "assignment", token: "owned", revision: 3 }, runtime, f.deps);
     expect(first).toMatchObject({ revision: 5, outcome: "NO_MATCH", complete: true, freshSuccessfulChecks: 1, engineeringOnly: true, customerAcceptance: false });
+    expect(first).not.toHaveProperty("readerGuard");
     expect(f.deps.providerLease).toHaveBeenCalledWith("public.example", expect.any(Function));
     expect(f.deps.read).toHaveBeenCalledWith(expect.objectContaining({ date: "2026-10-09", durationMinutes: 60, partySize: 1, timeZone: "America/New_York" }), expect.any(Function));
     expect(f.deps.transition).toHaveBeenCalledTimes(3);
@@ -91,6 +92,64 @@ describe("deployed independent simulator verification", () => {
       await expect(runSimulatorEngineeringVerification({ assignmentRef: "assignment", token: "owned", revision: 5 }, runtime, f.deps)).rejects.toThrow("REPAIR_REQUIRED");
       expect(f.deps.read).toHaveBeenCalledTimes(1);
     }
+  });
+  it.each([
+    ["SCHEMA_CHANGED", "The public simulator opening hours format changed"],
+    ["SCHEMA_CHANGED", "The public simulator occupancy changed shape or identity"],
+    ["SCHEMA_CHANGED", "The selected simulator bay changed range identity"],
+    ["INVALID_SOURCE", "The published simulator rental changed"],
+  ] as const)("returns only a closed private %s reader guard without persisting %s", async (code, guard) => {
+    const f = fixture(); f.deps.read.mockRejectedValue(new SimulatorAvailabilityError(code, guard));
+    const result = await runSimulatorEngineeringVerification({ assignmentRef: "assignment", token: "owned", revision: 3 }, runtime, f.deps);
+    expect(result).toMatchObject({ complete: false, failureCode: code, readerGuard: guard,
+      engineeringOnly: true, customerAcceptance: false });
+    const persisted = f.audit.simulatorEngineeringVerification as SimulatorEngineeringVerificationState;
+    expect(readSimulatorEngineeringVerificationState(persisted)).toBeDefined();
+    expect(Object.keys(persisted.observations[0]).sort()).toEqual([
+      "requestId", "revision", "requestedDate", "startedAt", "expiresAt", "completedAt",
+      "outcome", "complete", "providerObservedAt", "slotCount", "failureCode",
+    ].sort());
+    expect(JSON.stringify(f.audit)).not.toContain(guard);
+    expect(JSON.stringify(f.audit)).not.toContain("readerGuard");
+  });
+  it("does not echo dynamic, other-provider, transient or mismatched reader messages", async () => {
+    for (const [family, code, message] of [
+      ["YOUR_GOLF_BOOKING", "SCHEMA_CHANGED", "The public simulator occupancy changed shape or identity: private token"],
+      ["GOLFBOOK", "SCHEMA_CHANGED", "The public simulator occupancy changed shape or identity"],
+      ["YOUR_GOLF_BOOKING", "HTTP_ERROR", "The public simulator occupancy changed shape or identity"],
+      ["YOUR_GOLF_BOOKING", "PUBLIC_SESSION_REQUIRED", "The public simulator occupancy changed shape or identity"],
+      ["YOUR_GOLF_BOOKING", "UNSUPPORTED_DURATION", "The public simulator occupancy changed shape or identity"],
+      ["YOUR_GOLF_BOOKING", "INVALID_SOURCE", "The public simulator occupancy changed shape or identity"],
+      ["YOUR_GOLF_BOOKING", "INVALID_SOURCE", "The selected simulator bay changed range identity"],
+      ["YOUR_GOLF_BOOKING", "SCHEMA_CHANGED", "The published simulator rental changed"],
+    ] as const) {
+      const f = fixture(); f.offering.providerFamilyKey = family;
+      f.deps.read.mockRejectedValue(new SimulatorAvailabilityError(code, message));
+      const result = await runSimulatorEngineeringVerification({ assignmentRef: "assignment", token: "owned", revision: 3 }, runtime, f.deps);
+      expect(result).not.toHaveProperty("readerGuard");
+      expect(JSON.stringify(f.audit)).not.toContain(message);
+    }
+    for (const error of [new Error("SIMULATOR_ENGINEERING_READ_DEADLINE"),
+      new Error("The public simulator occupancy changed shape or identity")]) {
+      const f = fixture(); f.deps.read.mockRejectedValue(error);
+      const result = await runSimulatorEngineeringVerification({ assignmentRef: "assignment", token: "owned", revision: 3 }, runtime, f.deps);
+      expect(result).not.toHaveProperty("readerGuard");
+      expect(result.failureCode).toBe(error.message === "SIMULATOR_ENGINEERING_READ_DEADLINE" ? "READ_DEADLINE" : "READ_FAILED");
+    }
+  });
+  it("drops a closed reader guard when a real customer takes priority before settlement", async () => {
+    const f = fixture(); const actual = f.deps.transition.getMockImplementation()!;
+    let customerDemandPresent = false;
+    f.deps.transition.mockImplementation(async (authority, operation) =>
+      actual(authority, context => operation({ ...context, customerDemandPresent })));
+    f.deps.read.mockImplementation(async () => {
+      customerDemandPresent = true;
+      throw new SimulatorAvailabilityError("SCHEMA_CHANGED", "The public simulator occupancy changed shape or identity");
+    });
+    const result = await runSimulatorEngineeringVerification({ assignmentRef: "assignment", token: "owned", revision: 3 }, runtime, f.deps);
+    expect(result).toMatchObject({ failureCode: "NORMAL_CUSTOMER_CHECK_REQUIRED", nextAction: "RETRY_ENGINEERING", complete: false });
+    expect(result).not.toHaveProperty("readerGuard");
+    expect(JSON.stringify(f.audit)).not.toContain("readerGuard");
   });
   it("preserves failed proof and requires fresh observations after an actually registered repaired release", async () => {
     const f = fixture(); f.deps.read.mockRejectedValueOnce(new SimulatorAvailabilityError("SCHEMA_CHANGED", "private"));
@@ -141,6 +200,7 @@ describe("deployed independent simulator verification", () => {
     f.offering.observationToken = "interrupted"; f.offering.observationExpiresAt = new Date("2026-10-08T14:52:00Z");
     const result = await runSimulatorEngineeringVerification({ assignmentRef: "assignment", token: "owned", revision: 3 }, runtime, f.deps);
     expect(result).toMatchObject({ revision: 4, expiredReservation: true, nextAction: "REPAIR", failureCode: "RESERVATION_EXPIRED", freshSuccessfulChecks: 0 });
+    expect(result).not.toHaveProperty("readerGuard");
     expect(f.deps.read).not.toHaveBeenCalled(); expect(f.deps.providerLease).not.toHaveBeenCalled();
     expect(f.audit.simulatorEngineeringVerification).toMatchObject({ readsUsed: 1, inFlight: null,
       observations: [{ requestId: "interrupted", failureCode: "RESERVATION_EXPIRED", complete: false }] });

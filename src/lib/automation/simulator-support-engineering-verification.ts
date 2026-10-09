@@ -45,6 +45,51 @@ function normalizeFailure(error: unknown) {
   return { outcome: code === "UNSUPPORTED_PROVIDER" ? "NEEDS_ADAPTER" as const : "FETCH_FAILED" as const,
     complete: false, providerObservedAt: null, slotCount: 0, failureCode: code };
 }
+/** Exact internal literals only; never echo provider text or identifiers. */
+const closedYourGolfBookingGuards = {
+  SCHEMA_CHANGED: new Set([
+    "The public simulator configuration has an invalid identifier or value",
+    "The public simulator configuration has an invalid list",
+    "The simulator resource list is malformed",
+    "The public simulator bookings response is invalid JSON",
+    "The public simulator configuration is missing or ambiguous",
+    "The public simulator configuration is unreadable",
+    "The public simulator opening hours are invalid",
+    "The public simulator opening hours format changed",
+    "The public simulator opening interval is invalid",
+    "The public simulator dated hours are invalid",
+    "The public simulator weekday hours are missing",
+    "The public simulator occupancy changed shape or identity",
+    "The public simulator occupancy does not match its published bay and range",
+    "The selected simulator bay changed range identity",
+    "The public simulator occupancy interval is invalid",
+    "The public simulator interval crosses a timezone transition",
+    "The public simulator interval extends outside the venue date",
+    "The public simulator wall time is ambiguous",
+    "The public simulator calendar response changed type or size",
+    "The public simulator calendar response exceeded its size limit",
+  ]),
+  INVALID_SOURCE: new Set([
+    "The public simulator venue and rental identity are not verified",
+    "The public slot source requires a reviewed rental contract",
+    "The reviewed public slot contract is incomplete",
+    "The public simulator venue changed identity or availability state",
+    "The public simulator range settings changed",
+    "The reviewed simulator booking horizon changed",
+    "The published simulator rental changed",
+    "The reviewed simulator resource list changed",
+    "The published simulator bay changed venue identity",
+    "The public simulator bay settings changed",
+    "The public simulator bay list is missing or ambiguous",
+    "The simulator booking URL is not a public Trackman venue calendar",
+    "The simulator calendar changed its requested destination",
+  ]),
+};
+function closedYourGolfBookingReaderGuard(error: unknown, providerFamilyKey: string | null) {
+  if (providerFamilyKey !== "YOUR_GOLF_BOOKING" || !(error instanceof SimulatorAvailabilityError) ||
+      (error.code !== "SCHEMA_CHANGED" && error.code !== "INVALID_SOURCE")) return undefined;
+  return closedYourGolfBookingGuards[error.code].has(error.message) ? { code: error.code, message: error.message } : undefined;
+}
 
 const dependencies = { transition: withSimulatorEngineeringVerificationTransition, providerLease: runWithProviderRequestLease,
   read: fetchSimulatorAvailability, requestId: randomUUID };
@@ -127,6 +172,7 @@ export async function runSimulatorEngineeringVerification(input: SimulatorEngine
   if ("expiredReservation" in reserved || "deferred" in reserved) return reserved;
   const owner = { assignmentRef: input.assignmentRef, token: input.token, revision: reserved.revision, runtimeVersion: runtime.runtimeVersion };
   let normalized: ReturnType<typeof normalizeSimulatorEngineeringResult> | ReturnType<typeof normalizeFailure>;
+  let readerGuard: ReturnType<typeof closedYourGolfBookingReaderGuard>;
   const deadline = AbortSignal.timeout(SIMULATOR_ENGINEERING_VERIFICATION_DEADLINE_MS);
   const boundedFetch: typeof fetch = (resource, init) => fetch(resource, { ...init,
     signal: init?.signal ? AbortSignal.any([init.signal, deadline]) : deadline });
@@ -154,7 +200,10 @@ export async function runSimulatorEngineeringVerification(input: SimulatorEngine
     normalized = normalizeSimulatorEngineeringResult(read.value, reserved.startedAt, new Date(), {
       offeringId: reserved.offering.id, requestedDate: reserved.requestedDate, timeZone: reserved.timeZone,
     });
-  } catch (error) { normalized = normalizeFailure(error); }
+  } catch (error) {
+    normalized = normalizeFailure(error);
+    readerGuard = closedYourGolfBookingReaderGuard(error, reserved.offering.providerFamilyKey);
+  }
   return transition({ ...owner, allowCustomerDemandSettlement: true }, async context => {
     assertSimulatorEngineeringRuntime(runtime, context.claim.deployment!, context.now);
     const state = readSimulatorEngineeringVerificationState((context.audit as { simulatorEngineeringVerification?: unknown }).simulatorEngineeringVerification);
@@ -183,6 +232,8 @@ export async function runSimulatorEngineeringVerification(input: SimulatorEngine
     const progress = evaluateSimulatorEngineeringVerification({ now: context.now, claim: context.claim, sourceFingerprint: context.claim.sourceFingerprint, state: next });
     return { ...saved, outcome: observation.outcome, complete: observation.complete, requestId: observation.requestId,
       providerObservedAt: observation.providerObservedAt, slotCount: observation.slotCount, failureCode: observation.failureCode,
+      ...(readerGuard && !customerDemandPresent && !observation.complete &&
+        observation.failureCode === readerGuard.code ? { readerGuard: readerGuard.message } : {}),
       freshSuccessfulChecks: progress.freshSuccessfulChecks, ...(customerDemandPresent ? { nextAction: "RETRY_ENGINEERING" as const } : {}),
       engineeringOnly: true as const, customerAcceptance: false as const };
   });

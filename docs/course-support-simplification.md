@@ -488,3 +488,26 @@ or booking-window failures keep their prior safe route. This changes no read
 budget, history, acceptance or access rule and does not retroactively change
 the closed 06:50 run. Reusable monitoring still requires evidence-backed
 repair, exact production Ready proof and two new qualifying public reads.
+
+## Actual 08:00 simulator diagnostic repair and remaining unknown guard
+
+The natural October 9 08:00 worker followed the existing REPAIR route and
+published a bounded opening-hours research diagnostic. Its production release
+was independently observed on main and both aliases. A subsequent owned
+deployed read still settled incomplete with typed `SCHEMA_CHANGED`; the fresh
+research observation retained the expected opening-hours syntax, so it did not
+establish an hours fault. The worker spent the sixth and final source-research
+read without establishing the failing runtime validation guard, closed at
+08:20:56.460 UTC and retained an automatic retry due 09:20:56.460 UTC. Its
+native turn settled all 66 commands. These facts do not identify occupancy or
+any other particular provider field and do not prove monitoring.
+
+The existing verifier kept only the typed failure code when normalizing the
+reader exception. The durable observation must continue to store only its
+strict code/count/clock shape. The private immediate verification result can
+instead echo an exact allowlisted static guard from the current YourGolfBooking
+reader, for the same settled deterministic failure and only without customer
+priority. Unknown or dynamic text remains absent. This is a future diagnostic
+opportunity, not a retroactive explanation of either failed read. A guard
+message can cover multiple predicates; an evidence-backed repair and two fresh
+qualifying deployed reads remain necessary for monitoring acceptance.
