@@ -3,18 +3,21 @@ import Link from "next/link";
 import { auth } from "@clerk/nextjs/server";
 import {
   CalendarClock,
+  CalendarDays,
   BookOpenText,
   CircleAlert,
   CircleOff,
   CirclePause,
   ChevronDown,
+  Clock3,
   ExternalLink,
   Mail,
   MapPin,
   Play,
   Plus,
   ShieldAlert,
-  Trees
+  Trees,
+  Users
 } from "lucide-react";
 
 import { DashboardSignInActions } from "@/components/dashboard-sign-in-actions";
@@ -349,15 +352,7 @@ function DashboardSearchCard({
             <strong>{search.status === "PAUSED" ? "Notifications paused" : search.status === "COMPLETED" ? "Notification ended" : search.status === "CANCELLED" ? "Notification cancelled" : summary.headline}</strong>
             {search.preferences.length > 1 ? <span className="dashboard-group-label">Group alert · {search.preferences.map(preference => preference.course.name).join(", ")}</span> : null}
             {summary.coverageNotice ? <span>{summary.coverageNotice}</span> : null}
-            <span>
-              {formatDashboardDate(search.date)}{" · "}
-              {formatTimeLabel(search.startTime)}–{formatTimeLabel(search.endTime)}
-              {" · "}
-              {search.players} {search.players === 1 ? "golfer" : "golfers"}
-              {" · "}
-              {search.preferences.length}{" "}
-              {search.preferences.length === 1 ? "course" : "courses"}
-            </span>
+            <AlertSettings search={search} />
             <span className={`dashboard-email-status${ownerEmailState === "NOT_SENT" ? " dashboard-email-not-sent" : ""}`}>
               <Mail aria-hidden="true" size={12} />
               {ownerEmailState === "SENT"
@@ -668,6 +663,17 @@ function DashboardSearchCard({
   );
 }
 
+function AlertSettings({ search }: { search: DashboardSearches[number] }) {
+  return (
+    <div className="dashboard-settings" aria-label="Alert settings">
+      <span><CalendarDays aria-hidden="true" size={14} />{formatDashboardDate(search.date)}</span>
+      <span><Clock3 aria-hidden="true" size={14} />{formatTimeLabel(search.startTime)}–{formatTimeLabel(search.endTime)}</span>
+      <span><Users aria-hidden="true" size={14} />{search.players} {search.players === 1 ? "golfer" : "golfers"}</span>
+      <span>{search.preferences.length} {search.mode === "SIMULATOR" ? search.preferences.length === 1 ? "venue" : "venues" : search.preferences.length === 1 ? "course" : "courses"}</span>
+    </div>
+  );
+}
+
 function formatDashboardDate(date: Date) {
   return date.toLocaleDateString(undefined, {
     weekday: "short",
@@ -797,7 +803,7 @@ function SimulatorDashboardCard({ search, canManage, coursePhotos, ownerEmailSta
         <div className="dashboard-alert-summary-heading"><span className={`status-pill ${search.status.toLowerCase()}`}>{ended && search.status === "ACTIVE" ? "Date passed" : search.status}</span><h3>{getNotificationTitle(search.preferences)}</h3></div>
         <div className="dashboard-alert-summary-copy">
           <strong>{ended ? "Search window ended" : search.status === "PAUSED" ? "Notifications paused" : search.status === "COMPLETED" ? "Notification ended" : search.status === "CANCELLED" ? "Notification cancelled" : matches.length ? `${matches.length} matching ${matches.length === 1 ? "session" : "sessions"}` : getSimulatorAlertSummary(venues.map(venue => venue.status))}</strong>
-          <span>{formatDashboardDate(search.date)} · {formatTimeLabel(search.startTime)}–{formatTimeLabel(search.endTime)} · {search.players} {search.players === 1 ? "golfer" : "golfers"} · {search.preferences.length} {search.preferences.length === 1 ? "course" : "courses"}</span>
+          <AlertSettings search={search} />
           <span className={`dashboard-email-status${ownerEmailState === "NOT_SENT" ? " dashboard-email-not-sent" : ""}`}>
             <Mail aria-hidden="true" size={12} />
             {ownerEmailState === "SENT" ? "Alert email sent for these settings" : ownerEmailState === "PREVIOUSLY_SENT" ? "An alert email was sent previously" : ownerEmailState === "PENDING" ? "Alert email pending for these settings" : ownerEmailState === "NOT_SENT" ? "No email sent for these alert settings" : "First email pending initial check"}
@@ -829,18 +835,38 @@ function SimulatorDashboardCard({ search, canManage, coursePhotos, ownerEmailSta
           return <div className="watch-course-row" key={preference.id}>
             <CourseImage name={preference.course.name} photo={preference.course.googlePlaceId ? coursePhotos.get(preference.course.googlePlaceId) : undefined} rank={search.preferences.length > 1 ? preference.rank : undefined} />
             <div className="watch-course-copy">
-            <h4>{preference.rank}. {preference.course.name}</h4>
-            <p>{venueStatus.label}</p>
-            <p className="meta">{preference.course.timeZone}</p>
-            {venueMatches.map(match => <a className="known-tee-time" key={match.id} href={match.bookingUrl} target="_blank" rel="noreferrer">
-              {new Intl.DateTimeFormat("en-US", { timeZone: preference.course.timeZone, hour: "numeric", minute: "2-digit" }).format(match.startsAt)}–{new Intl.DateTimeFormat("en-US", { timeZone: preference.course.timeZone, hour: "numeric", minute: "2-digit" }).format(match.endsAt!)} · {(match.endsAt!.getTime() - match.startsAt.getTime()) / 60_000} minutes · Official booking page
-            </a>)}
-            {venueStatus.officialUrl ? <p><a href={venueStatus.officialUrl} target="_blank" rel="noreferrer">{venueStatus.officialLinkLabel} <ExternalLink size={14} /></a></p> : null}
+              <div className="figma-course-badges watch-course-badges">
+                <span className="figma-course-pill is-detail">Simulator</span>
+              </div>
+              <strong>{preference.course.name}</strong>
+              <p className="meta"><MapPin aria-hidden="true" size={12} />{getCompactLocation(preference.course.address)}</p>
+              <div className="watch-course-availability">
+                <div className="watch-course-availability-heading"><strong>{venueStatus.label}</strong></div>
+              </div>
+              {venueMatches.length > 0 ? (
+                <div className="dashboard-session-times">
+                  <p className="meta">Times shown in {preference.course.timeZone.replaceAll("_", " ")}. You book on the official site.</p>
+                  <div className="known-tee-time-list" aria-label="Matching simulator sessions">
+                    {venueMatches.map(match => {
+                      const format = new Intl.DateTimeFormat("en-US", { timeZone: preference.course.timeZone, hour: "numeric", minute: "2-digit" });
+                      const time = `${format.format(match.startsAt)}–${format.format(match.endsAt!)}`;
+                      const duration = (match.endsAt!.getTime() - match.startsAt.getTime()) / 60_000;
+                      return <a className="known-tee-time" aria-label={`${time}, ${duration} minutes, official booking page`} key={match.id} href={match.bookingUrl} target="_blank" rel="noreferrer">
+                        <strong>{time}</strong><span>{duration} min</span><ExternalLink aria-hidden="true" size={13} />
+                      </a>;
+                    })}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+            <div className="watch-course-links">
+              {venueStatus.officialUrl ? <a href={venueStatus.officialUrl} target="_blank" rel="noreferrer">{venueStatus.officialLinkLabel} <ExternalLink aria-hidden="true" size={14} /></a> : null}
+              <a href={getGoogleMapsSearchUrl(preference.course)} target="_blank" rel="noreferrer">Google Maps <ExternalLink aria-hidden="true" size={14} /></a>
             </div>
           </div>;
         })}
         </div>
-        <p className="meta">Availability can change. You book direct.</p>
+        <p className="meta dashboard-booking-note">Availability can change. You book direct.</p>
         </div>
       </div>
     </details>

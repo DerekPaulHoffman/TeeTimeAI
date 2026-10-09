@@ -1298,6 +1298,22 @@ test.describe("Tee Time Spot UI smoke", () => {
       }
     }
 
+    const feedbackWidget = page.locator(".feedback-widget");
+    await expect(feedbackWidget).toHaveCSS("position", "static");
+    const feedbackLauncher = page.getByRole("button", { name: "Open feedback form" });
+    const feedbackPlacement = await page.evaluate(() => ({
+      mainBottom: document.querySelector("main")!.getBoundingClientRect().bottom,
+      launcherTop: document.querySelector(".feedback-launcher")!.getBoundingClientRect().top
+    }));
+    expect(feedbackPlacement.launcherTop).toBeGreaterThanOrEqual(feedbackPlacement.mainBottom);
+    await feedbackLauncher.click();
+    const feedbackDialog = page.getByRole("dialog", { name: "Send feedback" });
+    await expect(feedbackDialog).toBeVisible();
+    await expect(page.getByRole("button", { name: "Close feedback" })).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(feedbackDialog).toBeHidden();
+    await expect(feedbackLauncher).toBeFocused();
+
     if (testInfo.project.name.includes("mobile")) {
       await expect(
         page.getByRole("button", { name: "Open feedback form" }).getByText("Feedback")

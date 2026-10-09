@@ -25,9 +25,9 @@
 .page :global(.empty-state > svg) { display: none; }
 .page :global(.empty-state h3) { font-size: 18px; margin: 0 0 10px; }
 .page :global(.empty-state p) { margin: 0 auto; max-width: 460px; line-height: 1.6; }
-.page :global(.dashboard-list) { gap: 12px; }
+.page :global(.dashboard-list) { gap: 24px; padding: 0; }
 .page :global(.dashboard-list-inactive) { padding: 0; margin: 0; }
-.page :global(.dashboard-row) { border: 1px solid #dce4df; border-radius: 12px; box-shadow: none; overflow: hidden; background: white; }
+.page :global(.dashboard-row) { border: 1px solid #dce4df; border-radius: 20px; box-shadow: 0 4px 20px #18332b05; overflow: hidden; background: white; }
 .page :global(.dashboard-alert-summary) { display: grid; grid-template-columns: minmax(0, 1fr) 20px; gap: 8px 16px; padding: 20px; background: white; }
 .page :global(.dashboard-alert-summary:hover) { background: #f7f9f6; }
 .page :global(.dashboard-alert-summary-heading) { grid-column: 1; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; min-width: 0; }
@@ -65,4 +65,295 @@
   .page :global(.dashboard-alert-summary) { padding: 16px; }
   .page :global(.dashboard-alert-summary-heading h3) { font-size: 16px; }
   .page :global(.dashboard-card-topline) { padding: 16px; }
+}
+
+/* Match the search results' photos, rounded controls, and calm surface hierarchy. */
+.page :global(.dashboard-alert-summary) {
+  background: #f8faf7;
+  gap: 12px 16px;
+  padding: 24px;
+  transition: background-color 160ms ease;
+}
+
+.page :global(.dashboard-alert-summary-copy) {
+  gap: 10px;
+}
+
+.page :global(.dashboard-settings) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.page :global(.dashboard-settings > span) {
+  align-items: center;
+  background: white;
+  border: 1px solid #dce4df;
+  border-radius: 999px;
+  color: #344e42;
+  display: inline-flex;
+  font-size: 12px;
+  gap: 6px;
+  line-height: 1.4;
+  min-height: 32px;
+  padding: 5px 12px;
+}
+
+.page :global(.dashboard-email-status) {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+}
+
+.page :global(.dashboard-card-topline) {
+  align-items: center;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 20px 24px;
+}
+
+.page :global(.dashboard-card-context) {
+  color: #53685c;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.page :global(.dashboard-action-row) {
+  gap: 8px;
+  margin: 0;
+}
+
+.page :global(.dashboard-action-row .button) {
+  border-radius: 999px;
+  font-size: 12px;
+  min-height: 40px;
+  padding: 0 14px;
+}
+
+.page :global(.dashboard-action-row button[aria-label="Remove alert"]) {
+  min-width: 40px;
+  padding: 0;
+  width: 40px;
+}
+
+.page :global(.search-check-status) {
+  align-items: start;
+  border-radius: 12px;
+  padding: 14px 16px;
+}
+
+.page :global(.search-check-status-copy) {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.page :global(.search-check-status-copy > span) {
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.page :global(.watch-course-list) {
+  background: white;
+  display: grid;
+  gap: 16px;
+  padding: 0 24px 24px;
+}
+
+.page :global(.watch-course-row) {
+  align-items: start;
+  background: white;
+  border: 1px solid #dce4df;
+  border-radius: 16px;
+  display: grid;
+  gap: 0;
+  grid-template-columns: 200px minmax(0, 1fr) 158px;
+  min-height: 0;
+  padding: 0;
+}
+
+.page :global(.watch-course-row:hover) {
+  background: white;
+  border-color: #b7d1c5;
+}
+
+.page :global(.watch-course-row .dashboard-course-image) {
+  align-self: start;
+  aspect-ratio: 3 / 2;
+  background-position: center;
+  background-size: cover;
+  border-radius: 0 0 16px 0;
+  grid-row: auto;
+  height: auto;
+  min-height: 0;
+  width: 100%;
+}
+
+.page :global(.dashboard-course-attribution) {
+  font-size: 9px;
+  padding: 4px 6px;
+}
+
+.page :global(.watch-course-copy) {
+  align-self: start;
+  min-width: 0;
+  padding: 20px;
+}
+
+.page :global(.watch-course-badges) {
+  margin: 0 0 10px;
+}
+
+.page :global(.watch-course-badges .figma-course-pill) {
+  font-size: 12px;
+}
+
+.page :global(.watch-course-copy > strong) {
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.page :global(.watch-course-row .watch-course-copy .meta) {
+  color: #53685c;
+  font-size: 12px;
+  line-height: 1.6;
+  margin: 8px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.page :global(.watch-course-availability) {
+  align-items: start;
+  display: grid;
+  gap: 6px;
+  margin-top: 16px;
+}
+
+.page :global(.watch-course-availability-heading strong) {
+  color: #18332b;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.page :global(.watch-course-availability > p) {
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.page :global(.watch-course-links) {
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  grid-column: auto;
+  justify-content: start;
+  min-width: 0;
+  padding: 20px 16px 20px 0;
+}
+
+.page :global(.watch-course-row .watch-course-links a) {
+  align-items: center;
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 12px;
+  gap: 6px;
+  line-height: 1.4;
+  min-height: 40px;
+  padding: 8px 12px;
+  text-align: center;
+  text-decoration: none;
+}
+
+.page :global(.watch-course-links a svg),
+.page :global(.dashboard-settings svg) {
+  flex-shrink: 0;
+}
+
+.page :global(.dashboard-session-times) {
+  margin-top: 12px;
+}
+
+.page :global(.known-tee-time-list) {
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.page :global(.known-tee-time) {
+  flex-wrap: wrap;
+  font-size: 12px;
+  font-weight: 500;
+  gap: 6px;
+  line-height: 1.5;
+  min-height: 40px;
+  padding: 8px 12px;
+  transition: background-color 150ms ease, border-color 150ms ease;
+  white-space: normal;
+}
+
+.page :global(.known-tee-time:hover) {
+  background: #eaf3ee;
+  border-color: #a9c7b5;
+}
+
+.page :global(.known-tee-time strong) {
+  font-weight: 600;
+}
+
+.page :global(.known-tee-time > span) {
+  color: #53685c;
+}
+
+.page :global(.watch-course-match-list) {
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.page :global(.watch-course-match-list a) {
+  border-radius: 12px;
+  min-height: 44px;
+  padding: 12px;
+}
+
+.page :global(.known-tee-time:focus-visible),
+.page :global(.watch-course-links a:focus-visible),
+.page :global(.watch-course-match-list a:focus-visible) {
+  outline: 2px solid #1f7a4d;
+  outline-offset: 3px;
+}
+
+.page :global(.dashboard-booking-note) {
+  font-size: 12px;
+  line-height: 1.6;
+  margin: 0;
+  padding: 0 24px 24px;
+}
+
+@media (max-width: 1000px) {
+  .page :global(.watch-course-row) { grid-template-columns: 180px minmax(0, 1fr); }
+  .page :global(.watch-course-links) { flex-direction: row; flex-wrap: wrap; grid-column: 2; padding: 0 20px 20px; }
+}
+
+@media (max-width: 700px) {
+  .page { padding: 88px 16px 32px; }
+  .page :global(.dashboard-card-topline) { grid-template-columns: minmax(0, 1fr); padding: 16px; }
+  .page :global(.dashboard-action-row) { gap: 6px; grid-column: 1; grid-row: auto; justify-content: start; }
+  .page :global(.dashboard-action-row .button) { min-height: 44px; padding-inline: 10px; }
+  .page :global(.dashboard-action-row button[aria-label="Remove alert"]) { min-width: 44px; padding: 0; width: 44px; }
+  .page :global(.dashboard-alert-summary) { padding: 20px 16px; }
+  .page :global(.dashboard-settings) { gap: 6px; }
+  .page :global(.dashboard-settings > span) { padding-inline: 10px; }
+  .page :global(.watch-course-list) { padding: 0 16px 16px; }
+  .page :global(.watch-course-row) { grid-template-columns: minmax(0, 1fr); }
+  .page :global(.watch-course-row .dashboard-course-image) { aspect-ratio: 16 / 9; border-radius: 0; grid-row: auto; }
+  .page :global(.watch-course-copy) { padding: 20px 16px; }
+  .page :global(.watch-course-links) { display: grid; grid-column: 1; grid-template-columns: minmax(0, 1fr); padding: 0 16px 16px; }
+  .page :global(.watch-course-row .watch-course-links a) { min-height: 44px; width: 100%; }
+  .page :global(.dashboard-booking-note) { padding: 0 16px 20px; }
+  .page :global(.known-tee-time) { justify-content: space-between; min-height: 44px; width: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page :global(.dashboard-alert-summary),
+  .page :global(.known-tee-time) { transition: none; }
 }

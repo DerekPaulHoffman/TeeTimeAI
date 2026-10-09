@@ -1951,11 +1951,35 @@ button {
 }
 
 .dashboard-page + .feedback-widget .feedback-launcher {
-  font-size: 0;
-  gap: 0;
-  min-width: 46px;
-  padding: 0;
-  width: 46px;
+  background: #ffffff;
+  border: 1px solid var(--line);
+  box-shadow: none;
+  color: var(--ink);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 16px;
+  width: auto;
+}
+
+.dashboard-page + .feedback-widget {
+  box-sizing: border-box;
+  margin: 0 auto;
+  max-width: 1080px;
+  padding: 0 28px 32px;
+  position: static;
+  width: 100%;
+}
+
+.dashboard-page + .feedback-widget .feedback-panel {
+  border-radius: 16px;
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+@media (max-width: 620px) {
+  .dashboard-page + .feedback-widget { padding: 0 16px 24px; }
 }
 
 .feedback-panel-header {
