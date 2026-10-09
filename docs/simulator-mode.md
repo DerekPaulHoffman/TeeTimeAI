@@ -19,6 +19,17 @@ ranking, `Notify me` action and dashboard. A direct `/search?mode=SIMULATOR`
 link selects that option. There is no standalone simulator screen or session
 length control.
 
+Simulator alerts can target later today while a complete requested session still
+fits between now and the end of the window at every selected venue. Creation and
+editing validate canonical venue timezones, including the transaction recheck.
+Midnight means the end of the selected calendar date, stored as the explicit
+end-only value `24:00`; it includes a session ending at next local midnight.
+Other end times remain on the selected date. Outdoor alerts retain their future
+calendar-date rule and ordinary clock-time grammar. Availability checks follow
+the normal automatic schedule; alert owners do not choose a check interval.
+Pending simulator support remains pending after
+an edit; accepting a window does not establish provider availability.
+
 The ordinary 1–4 player selector remains as saved context. It does not establish
 simulator capacity or decide which sessions qualify. One bay must have a complete
 supported 60-minute session inside the venue-local window. Known `maxPartySize`

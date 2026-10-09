@@ -219,7 +219,7 @@ The homepage lets users:
 - Discover nearby likely-public golf courses.
 - See course photos, addresses, ratings, and official site links when available.
 - Select and rank 1 to 5 courses.
-- Choose a date after today in every selected course's timezone, start/end time, and 1 to 4 players. The server's calendar day and the golfer's display timezone do not determine whether that course-local date is in the future.
+- For outdoor alerts, choose a date after today in every selected course's timezone, start/end time, and 1 to 4 players. Simulator alerts can use today when a full session still fits in every selected venue's local window. Their end time can be Midnight, meaning the end of the selected date. The server's calendar day and the golfer's display timezone do not determine venue-local eligibility.
 - Use the signed-in account email for alerts and optionally add extra recipients.
 - Sign in or create an account before saving a search, so it can be changed, paused, or stopped later.
 

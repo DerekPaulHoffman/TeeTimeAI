@@ -806,6 +806,31 @@ describe("TeeTimeIntake", () => {
     expect(fetchMock.mock.calls.some(([input]) => /known-times|check-times|local-reader/.test(String(input)))).toBe(false);
   });
 
+  it("keeps explicitly selected simulator today and offers end-of-date midnight", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-30T03:16:30.000Z"));
+    const simulator = simulatorTestVenue("Today Simulator", 1000);
+    window.sessionStorage.setItem(SIMULATOR_SEARCH_DRAFT_STORAGE_KEY, JSON.stringify({
+      location: "Fairfield, CT", date: "2026-09-29", startTime: "19:00", endTime: "24:00",
+      courses: [simulator], selectedCourses: [simulator]
+    }));
+    mockDateBoundaryRequests();
+    render(<TeeTimeIntake {...signedInAccountProps} simulatorEnabled initialValues={{ mode: "SIMULATOR" }} />);
+    await screen.findByRole("dialog", { name: "Notify me" });
+    const dateInput = document.querySelector("#date") as HTMLInputElement;
+    expect(dateInput.min).toBe("2026-09-29");
+    expect(dateInput.value).toBe("2026-09-29");
+    const start = document.querySelector("#startTime") as HTMLSelectElement;
+    const end = document.querySelector("#endTime") as HTMLSelectElement;
+    expect(start.querySelector('option[value="24:00"]')?.hasAttribute("disabled")).toBe(true);
+    expect(end.querySelector('option[value="24:00"]')?.textContent).toBe("Midnight");
+    expect(end.value).toBe("24:00");
+    expect(screen.getAllByText(/7 PM – 12 AM/).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: "Any" }));
+    expect(end.value).toBe("23:59");
+    expect(end.querySelector('option[value="24:00"]')).toBeNull();
+  });
+
   it.each([
     { signedIn: true, offeringId: undefined, publicAccessStatus: "UNVERIFIED", supportedDurationsMinutes: [60] },
     { signedIn: true, offeringId: undefined, publicAccessStatus: "UNVERIFIED", supportedDurationsMinutes: [60], website: undefined },

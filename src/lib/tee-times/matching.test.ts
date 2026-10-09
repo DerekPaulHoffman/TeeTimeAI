@@ -60,6 +60,16 @@ describe("tee time matching", () => {
     }], "America/Chicago");
     expect(result).toHaveLength(1);
   });
+  it("includes a complete session ending at next local midnight only for a 24:00 end", () => {
+    const window = { date: "2026-10-09", startTime: "18:00", endTime: "24:00", players: 2,
+      durationMinutes: 60, preferredOfferings: [{ offeringId: "sim-a", rank: 1 }] };
+    const slot = { offeringId: "sim-a", sourceId: "last-hour", resourceId: "bay-1",
+      startsAt: "2026-10-10T03:00:00.000Z", endsAt: "2026-10-10T04:00:00.000Z",
+      capacity: 4, bookingUrl: "https://example.com/bay-1" };
+    expect(filterSimulatorSessionsForSearch(window, [slot], "America/New_York")).toEqual([slot]);
+    expect(filterSimulatorSessionsForSearch({ ...window, endTime: "23:59" }, [slot], "America/New_York"))
+      .toEqual([]);
+  });
   it("stores timezone-less course times consistently across runtimes", () => {
     expect(parseCourseLocalDateTime("2026-07-11T08:00").toISOString()).toBe(
       "2026-07-11T12:00:00.000Z"

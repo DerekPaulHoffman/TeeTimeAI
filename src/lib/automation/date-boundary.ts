@@ -1,4 +1,5 @@
-import { normalizeTimeZone, zonedDateTimeToDate } from "@/lib/timezones";
+import { normalizeTimeZone } from "@/lib/timezones";
+import { parseCourseLocalWindowEnd } from "@/lib/searches/window-end";
 
 export function startOfUtcCalendarDay(now = new Date()) {
   return new Date(
@@ -42,9 +43,8 @@ export function calculateSearchWindowEnd(
   return new Date(
     Math.max(
       ...timeZones.map((timeZone) =>
-        zonedDateTimeToDate(
-          `${dateValue}T${endTime}:00`,
-          normalizeTimeZone(timeZone, fallbackTimeZone)
+        parseCourseLocalWindowEnd(
+          dateValue, endTime, normalizeTimeZone(timeZone, fallbackTimeZone)
         ).getTime()
       )
     )

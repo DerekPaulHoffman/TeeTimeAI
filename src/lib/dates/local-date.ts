@@ -65,21 +65,23 @@ export function getNextSaturdayDateInputValue(
 // Candidate timezones guide the picker; the service still validates canonical courses.
 export function getMinimumSearchDateInputValue(
   from = new Date(),
-  courseTimeZones: readonly string[] = []
+  courseTimeZones: readonly string[] = [],
+  allowToday = false
 ) {
   if (courseTimeZones.length > 0) {
-    return addCalendarDays(latestCourseCalendarDate(from, courseTimeZones), 1);
+    return addCalendarDays(latestCourseCalendarDate(from, courseTimeZones), allowToday ? 0 : 1);
   }
 
-  return formatDateInputValue(addLocalDays(from, 1));
+  return formatDateInputValue(addLocalDays(from, allowToday ? 0 : 1));
 }
 
 export function reconcileFutureSearchDateInputValue(
   value: string,
   from = new Date(),
-  courseTimeZones: readonly string[] = []
+  courseTimeZones: readonly string[] = [],
+  allowToday = false
 ) {
-  return value >= getMinimumSearchDateInputValue(from, courseTimeZones)
+  return value >= getMinimumSearchDateInputValue(from, courseTimeZones, allowToday)
     ? value
     : getNextSaturdayDateInputValue(from, courseTimeZones);
 }

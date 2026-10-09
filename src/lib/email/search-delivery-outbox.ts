@@ -45,6 +45,7 @@ import {
 import { zonedDateTimeToDate } from "@/lib/timezones";
 import { getSimulatorBookingOpening } from "@/lib/simulators/booking-window";
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
+import { parseCourseLocalWindowEnd } from "@/lib/searches/window-end";
 import {
   applyPendingClerkEmailForSearch,
   SearchEmailDeliveryInProgressError,
@@ -1488,7 +1489,7 @@ async function getSimulatorDeliverySourceStates(
       continue;
     }
     const startWindow = zonedDateTimeToDate(`${report.targetDate}T${search.startTime}`, match.course.timeZone);
-    const endWindow = zonedDateTimeToDate(`${report.targetDate}T${search.endTime}`, match.course.timeZone);
+    const endWindow = parseCourseLocalWindowEnd(report.targetDate, search.endTime, match.course.timeZone);
     if (match.startsAt < startWindow || match.endsAt > endWindow) {
       states.set(matchId, "terminal");
       continue;

@@ -409,7 +409,6 @@ function DashboardSearchCard({
               initialRequestedLayoutHoles={normalizeRequestedLayoutHoles(
                 search.requestedLayoutHoles
               )}
-              initialCadenceMinutes={search.cadenceMinutes}
               initialAdditionalEmails={search.additionalEmails}
               initialCheckStatus={search.checkStatus}
               initialScheduleVersion={search.scheduleVersion}
@@ -703,6 +702,7 @@ function DashboardMatchingTimes({ matches, mode, showCourseName }: {
 }
 
 function formatTimeLabel(value: string) {
+  if (value === "24:00") return "12:00 AM";
   const [hourValue, minute = "00"] = value.split(":");
   const hour = Number(hourValue);
   if (!Number.isFinite(hour)) {
@@ -811,7 +811,7 @@ function SimulatorDashboardCard({ search, canManage, coursePhotos, ownerEmailSta
           </div>
           {canManage ? <SearchStatusActions mode="SIMULATOR" searchId={search.id} windowEnded={ended} status={search.status}
             initialDate={formatDateInputValue(search.date)} initialStartTime={search.startTime} initialEndTime={search.endTime} initialUserTimeZone={search.userTimeZone}
-            initialPlayers={search.players} initialRequestedLayoutHoles={null} initialCadenceMinutes={search.cadenceMinutes}
+            initialPlayers={search.players} initialRequestedLayoutHoles={null}
             initialAdditionalEmails={search.additionalEmails} initialCheckStatus={search.checkStatus} initialScheduleVersion={search.scheduleVersion}
             initialLastCheckedAt={search.lastCheckedAt?.toISOString() ?? null} initialNextCheckAt={search.nextCheckAt?.toISOString() ?? null}
             initialCoursePreferences={search.preferences.map(preference => ({ id: preference.id, courseName: preference.course.name, rank: preference.rank }))} /> : <span className="meta">Sign in to pause, edit, or cancel this alert.</span>}

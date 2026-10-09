@@ -39,6 +39,12 @@ describe("selected-course calendar dates", () => {
     );
   });
 
+  it("allows simulator today only when it is today for every selected venue", () => {
+    expect(getMinimumSearchDateInputValue(utcWednesday, ["America/New_York"], true)).toBe("2026-09-29");
+    expect(getMinimumSearchDateInputValue(utcWednesday, ["America/New_York", "Asia/Tokyo"], true)).toBe("2026-09-30");
+    expect(reconcileFutureSearchDateInputValue("2026-09-29", utcWednesday, ["America/New_York"], true)).toBe("2026-09-29");
+  });
+
   it("chooses the next Saturday from the latest course calendar, including a year boundary", () => {
     const from = new Date("2027-01-02T01:00:00.000Z");
     expect(getNextSaturdayDateInputValue(from, ["America/New_York"])).toBe("2027-01-02");

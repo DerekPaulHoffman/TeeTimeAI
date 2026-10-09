@@ -69,6 +69,13 @@ describe("dashboard course and simulator presentation", () => {
   beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(now); });
   afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); });
 
+  it("labels a simulator's end-of-date midnight as 12:00 AM", async () => {
+    const search = fixture("SIMULATOR", "Midnight Simulator");
+    search.endTime = "24:00";
+    vi.mocked(listTeeSearchesForUser).mockResolvedValue([search] as unknown as Awaited<ReturnType<typeof listTeeSearchesForUser>>);
+    expect(renderToStaticMarkup(await DashboardPage())).toContain("9:00 AM–12:00 AM");
+  });
+
   it("renders real session links in a spaced list, with shared settings and venue actions", async () => {
     const pending = fixture("SIMULATOR", "Two Roads Golf Club");
     pending.matches = [];

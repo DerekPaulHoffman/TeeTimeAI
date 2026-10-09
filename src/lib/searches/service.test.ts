@@ -748,6 +748,21 @@ describe("createTeeSearchForUser", () => {
     return offering;
   }
 
+  it("creates same-day simulator demand through midnight only while a full session remains", async () => {
+    vi.setSystemTime(new Date("2026-10-09T21:00:00.000Z"));
+    mockPendingSimulatorCreation();
+    await createTeeSearchForUser("owner-1", { ...pendingSimulatorInput,
+      date: "2026-10-09", startTime: "18:00", endTime: "24:00" });
+    expect(mockedPrisma.teeSearch.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ date: new Date("2026-10-09T00:00:00.000Z"), endTime: "24:00" }),
+    }));
+    vi.setSystemTime(new Date("2026-10-10T03:00:00.001Z"));
+    await expect(createTeeSearchForUser("owner-1", { ...pendingSimulatorInput,
+      date: "2026-10-09", startTime: "18:00", endTime: "24:00" }))
+      .rejects.toThrow(/complete session still available/);
+    expect(mockedPrisma.teeSearch.create).toHaveBeenCalledTimes(1);
+  });
+
   it("saves newly discovered simulator demand from server-owned identity without claiming rental proof", async () => {
     mockPendingSimulatorCreation();
     await createTeeSearchForUser("owner-1", pendingSimulatorInput);
@@ -2192,6 +2207,26 @@ describe("updateTeeSearchStatusForUser", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockedPrisma.teeSearch.count.mockResolvedValue(0);
+    mockedPrisma.teeSearch.findUniqueOrThrow.mockResolvedValue({ mode: "OUTDOOR" } as never);
+  });
+
+  it("resumes a same-day simulator only while its inherited 120-minute session still fits", async () => {
+    const current = { mode: "SIMULATOR", date: new Date("2026-10-09T00:00:00.000Z"),
+      startTime: "18:00", endTime: "24:00", durationMinutes: 120,
+      preferences: [{ course: { timeZone: "America/New_York" } }] };
+    mockedPrisma.teeSearch.findUniqueOrThrow.mockResolvedValue(current as never);
+    mockedPrisma.teeSearch.update.mockResolvedValue({ mode: "SIMULATOR", preferences: [],
+      matches: [], probes: [], statusEmailSnapshot: null } as never);
+    vi.setSystemTime(new Date("2026-10-10T02:00:00.000Z"));
+    await expect(updateTeeSearchStatusForUser("user-1", "search-1", "ACTIVE"))
+      .resolves.toBeDefined();
+    expect(mockedPrisma.teeSearch.update).toHaveBeenCalledTimes(1);
+    vi.setSystemTime(new Date("2026-10-10T02:00:00.001Z"));
+    await expect(updateTeeSearchStatusForUser("user-1", "search-1", "ACTIVE"))
+      .rejects.toThrow(/complete session still available/);
+    expect(mockedPrisma.teeSearch.update).toHaveBeenCalledTimes(1);
+    await expect(updateTeeSearchStatusForUser("user-1", "search-1", "PAUSED"))
+      .resolves.toBeDefined();
   });
 
   it("excludes the current search when enforcing queue capacity on resume", async () => {
@@ -2299,6 +2334,53 @@ describe("updateTeeSearchForUser", () => {
       statusEmailSnapshot: null,
       matches: [],
     } as never);
+  });
+
+  it("lets a same-day simulator alert save its existing viable window and cadence", async () => {
+    vi.setSystemTime(new Date("2026-10-09T21:00:00.000Z"));
+    mockedPrisma.teeSearch.findUniqueOrThrow.mockReset().mockResolvedValue({
+      mode: "SIMULATOR", date: new Date("2026-10-09T00:00:00.000Z"),
+      startTime: "18:00", endTime: "24:00", players: 2, durationMinutes: 60,
+      preferences: [{ course: { timeZone: "America/New_York" }, offering: {
+        active: true, kind: "SIMULATOR", publicAccessStatus: "UNVERIFIED",
+        course: { timeZone: "America/New_York", googlePlaceId: null },
+      } }],
+    } as never);
+    mockedPrisma.teeSearch.update.mockResolvedValue({ mode: "SIMULATOR", preferences: [],
+      matches: [], probes: [], statusEmailSnapshot: null } as never);
+    await expect(updateTeeSearchForUser("owner-1", "search-1", {
+      mode: "SIMULATOR", date: "2026-10-09", startTime: "18:00", endTime: "24:00",
+      players: 2, durationMinutes: 60, cadenceMinutes: 15,
+    })).resolves.toBeDefined();
+    expect(mockedPrisma.teeSearch.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ cadenceMinutes: 15, endTime: "24:00" }),
+    }));
+  });
+
+  it("keeps the stored 120-minute simulator duration on a partial edit", async () => {
+    vi.setSystemTime(new Date("2026-10-10T01:30:00.000Z"));
+    mockedPrisma.teeSearch.findUniqueOrThrow.mockReset().mockResolvedValue({
+      mode: "SIMULATOR", date: new Date("2026-10-09T00:00:00.000Z"),
+      startTime: "18:00", endTime: "24:00", players: 2, durationMinutes: 120,
+      preferences: [{ course: { timeZone: "America/New_York" }, offering: {
+        active: true, kind: "SIMULATOR", publicAccessStatus: "UNVERIFIED",
+        course: { timeZone: "America/New_York", googlePlaceId: null },
+      } }],
+    } as never);
+    mockedPrisma.teeSearch.update.mockResolvedValue({ mode: "SIMULATOR", preferences: [],
+      matches: [], probes: [], statusEmailSnapshot: null } as never);
+    await expect(updateTeeSearchForUser("owner-1", "search-1", {
+      mode: "SIMULATOR", date: "2026-10-09", startTime: "18:00", endTime: "24:00",
+      players: 2, additionalEmails: ["friend@example.com"],
+    })).resolves.toBeDefined();
+    expect(mockedPrisma.teeSearch.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.not.objectContaining({ durationMinutes: expect.anything() }),
+    }));
+    vi.setSystemTime(new Date("2026-10-10T02:30:00.000Z"));
+    await expect(updateTeeSearchForUser("owner-1", "search-1", {
+      mode: "SIMULATOR", date: "2026-10-09", startTime: "18:00", endTime: "24:00",
+      players: 2, additionalEmails: ["friend@example.com"],
+    })).rejects.toThrow(/complete session still available/);
   });
 
   it("lets an owner pause an alert with a withdrawn simulator offering but rejects resuming it", async () => {

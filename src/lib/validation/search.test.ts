@@ -16,6 +16,14 @@ const tomorrow = () => {
 };
 
 describe("teeSearchInputSchema", () => {
+  it("allows simulator end-of-day midnight without allowing overnight or outdoor 24:00", () => {
+    const base = { date: "2026-10-09", startTime: "18:00", endTime: "24:00", players: 2,
+      courses: [{ offeringId: "sim-a", name: "Venue", rank: 1, latitude: 41, longitude: -73 }] };
+    expect(teeSearchInputSchema.parse({ ...base, mode: "SIMULATOR" }).endTime).toBe("24:00");
+    expect(() => teeSearchInputSchema.parse({ ...base, mode: "SIMULATOR", startTime: "24:00" })).toThrow();
+    expect(() => teeSearchInputSchema.parse({ ...base, mode: "SIMULATOR", endTime: "00:00" })).toThrow();
+    expect(() => teeSearchInputSchema.parse({ ...base, mode: "OUTDOOR" })).toThrow();
+  });
   it("accepts normal player counts and a selected verified simulator offering reference", () => {
     const parsed = teeSearchInputSchema.parse({
       mode: "SIMULATOR",

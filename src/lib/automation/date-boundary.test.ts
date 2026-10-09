@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   earliestPotentiallyActiveSearchDate,
   getCourseLocalDateStorageBoundary,
+  calculateSearchWindowEnd,
   isSearchWindowActive,
   startOfUtcCalendarDay
 } from "./date-boundary";
@@ -52,6 +53,13 @@ describe("getCourseLocalDateStorageBoundary", () => {
 });
 
 describe("isSearchWindowActive", () => {
+  it.each([
+    ["spring", "2026-03-08", "2026-03-09T04:00:00.000Z"],
+    ["fall", "2026-11-01", "2026-11-02T05:00:00.000Z"],
+  ])("ends 24:00 at next course-local midnight across %s DST", (_name, date, expected) => {
+    expect(calculateSearchWindowEnd(new Date(`${date}T00:00:00Z`), "24:00",
+      ["America/New_York"], "America/New_York").toISOString()).toBe(expected);
+  });
   it("keeps a target-day Eastern search active after UTC midnight", () => {
     const input = {
       date: new Date("2026-07-20T00:00:00.000Z"),

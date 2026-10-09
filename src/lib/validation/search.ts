@@ -70,7 +70,7 @@ export const teeSearchDetailsSchema = z
     durationMinutes: z.number().int().min(30).max(480).refine((value) => value % 15 === 0).nullable().optional(),
     date: z.string().refine(isValidSearchCalendarDate, "Use a valid YYYY-MM-DD date"),
     startTime: timeSchema,
-    endTime: timeSchema,
+    endTime: z.union([timeSchema, z.literal("24:00")]),
     userTimeZone: timeZoneSchema.default(DEFAULT_SEARCH_TIME_ZONE),
     players: z.number().int().min(1).max(MAX_SIMULATOR_PLAYERS),
     requestedLayoutHoles: z
@@ -105,7 +105,8 @@ export const teeSearchDetailsSchema = z
         context.addIssue({ code: "custom", path: ["durationMinutes"], message: "Session length applies only to simulators" });
       }
     }
-    if (value.endTime <= value.startTime) {
+    if ((value.endTime === "24:00" && value.mode !== "SIMULATOR") ||
+        value.endTime <= value.startTime) {
       context.addIssue({
         code: "custom",
         path: ["endTime"],

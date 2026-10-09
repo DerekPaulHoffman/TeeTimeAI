@@ -309,13 +309,17 @@ function TeeTimeIntakeContent({
   const accountEmail = accountState.status === "signed-in" ? accountState.email : "";
   const alertEmail = accountEmail;
   const [date, setDate] = useState(
-    () => initialValues.date ?? getNextSaturdayDateInputValue()
+    () => initialValues.date ?? (simulatorEnabled && initialValues.mode === "SIMULATOR"
+      ? getMinimumSearchDateInputValue()
+      : getNextSaturdayDateInputValue())
   );
   const [minSearchDate, setMinSearchDate] = useState(() =>
     getMinimumSearchDateInputValue()
   );
   const [startTime, setStartTime] = useState(initialValues.startTime ?? "09:00");
-  const [endTime, setEndTime] = useState(initialValues.endTime ?? "18:00");
+  const [endTime, setEndTime] = useState(
+    initialValues.endTime === "24:00" && mode === "OUTDOOR" ? "23:59" : initialValues.endTime ?? "18:00"
+  );
   const [players, setPlayers] = useState(initialValues.players ?? 4);
   const [additionalEmailFields, setAdditionalEmailFields] = useState<AdditionalEmailField[]>([
     { id: "additional-recipient-1", value: "" }
@@ -402,7 +406,7 @@ function TeeTimeIntakeContent({
         if (transferred.radius !== undefined) setSearchRadiusMiles(transferred.radius);
         if (transferred.date !== undefined) setDate(transferred.date);
         if (transferred.startTime !== undefined) setStartTime(transferred.startTime);
-        if (transferred.endTime !== undefined) setEndTime(transferred.endTime);
+        if (transferred.endTime !== undefined) setEndTime(initialMode === "OUTDOOR" && transferred.endTime === "24:00" ? "23:59" : transferred.endTime);
         if (transferred.players !== undefined) setPlayers(transferred.players);
         if (transferred.holes !== undefined) setHoleFilter(transferred.holes);
         if (transferred.coordinates !== undefined) setSearchCoordinates(transferred.coordinates);
@@ -419,7 +423,7 @@ function TeeTimeIntakeContent({
         if (draft.radius !== undefined) setSearchRadiusMiles(draft.radius);
         if (draft.date !== undefined) setDate(draft.date);
         if (draft.startTime !== undefined) setStartTime(draft.startTime);
-        if (draft.endTime !== undefined) setEndTime(draft.endTime);
+        if (draft.endTime !== undefined) setEndTime(initialMode === "OUTDOOR" && draft.endTime === "24:00" ? "23:59" : draft.endTime);
         if (draft.players !== undefined) setPlayers(draft.players);
         if (draft.holes !== undefined) setHoleFilter(draft.holes);
         if (draft.coordinates !== undefined) setSearchCoordinates(draft.coordinates);
@@ -478,11 +482,12 @@ function TeeTimeIntakeContent({
 
     const synchronizeLocalDate = () => {
       const now = new Date();
-      const nextMinimum = getMinimumSearchDateInputValue(now, selectedTimeZones);
+      const allowToday = modeRef.current === "SIMULATOR";
+      const nextMinimum = getMinimumSearchDateInputValue(now, selectedTimeZones, allowToday);
       setMinSearchDate(nextMinimum);
       if (!dateWasEditedRef.current) {
         setDate((current) =>
-          reconcileFutureSearchDateInputValue(current, now, selectedTimeZones)
+          reconcileFutureSearchDateInputValue(current, now, selectedTimeZones, allowToday)
         );
       }
     };
@@ -514,7 +519,7 @@ function TeeTimeIntakeContent({
       window.removeEventListener("focus", synchronizeLocalDate);
       document.removeEventListener("visibilitychange", synchronizeWhenVisible);
     };
-  }, [draftReady, selectedTimeZones]);
+  }, [draftReady, mode, selectedTimeZones]);
 
   useEffect(() => {
     const dialog = notificationDialogRef.current;
@@ -634,10 +639,10 @@ function TeeTimeIntakeContent({
     ]
   );
   const isCurrentSearchSaved = savedSignature === searchSignature;
-  const isDateFuture = date >= minSearchDate;
+  const isDateFuture = date >= getMinimumSearchDateInputValue(new Date(), selectedTimeZones, mode === "SIMULATOR");
   const windowMinutes = (Number(endTime.slice(0, 2)) * 60 + Number(endTime.slice(3))) -
     (Number(startTime.slice(0, 2)) * 60 + Number(startTime.slice(3)));
-  const isTimeWindowValid = endTime > startTime && (mode === "OUTDOOR" || windowMinutes >= 60);
+  const isTimeWindowValid = endTime > startTime && (mode === "OUTDOOR" ? endTime !== "24:00" : windowMinutes >= 60);
   const hasMonitorableCourse = mode === "SIMULATOR" || selected.some(
     (course) => !isManualOnlyAlertSupport(course.alertSupport)
   );
@@ -875,6 +880,7 @@ function TeeTimeIntakeContent({
     const sameLocation = nextDraft?.location === locationText;
     modeRef.current = nextMode;
     setMode(nextMode);
+    if (nextMode === "OUTDOOR" && endTime === "24:00") setEndTime("23:59");
     const nextUrl = new URL(window.location.href);
     if (nextMode === "SIMULATOR") nextUrl.searchParams.set("mode", "SIMULATOR");
     else nextUrl.searchParams.delete("mode");
@@ -1158,12 +1164,12 @@ function TeeTimeIntakeContent({
 
     // A background tab's rollover timer may be delayed until after course midnight.
     const saveNow = new Date();
-    const currentMinimum = getMinimumSearchDateInputValue(saveNow, selectedTimeZones);
+    const currentMinimum = getMinimumSearchDateInputValue(saveNow, selectedTimeZones, mode === "SIMULATOR");
     if (date < currentMinimum) {
       setMinSearchDate(currentMinimum);
       if (!dateWasEditedRef.current) {
         setDate((current) =>
-          reconcileFutureSearchDateInputValue(current, saveNow, selectedTimeZones)
+          reconcileFutureSearchDateInputValue(current, saveNow, selectedTimeZones, mode === "SIMULATOR")
         );
       }
       setNotice({ type: "error", message: "Choose a future date for alerts." });
@@ -1321,7 +1327,9 @@ function TeeTimeIntakeContent({
         locationErrorId={searchError ? "search-validation-error" : LOCATION_SEARCH_ERROR_ID}
         locationInputInvalid={locationInputInvalid}
         locationText={locationText}
-        minSearchDate={minSearchDate}
+        minSearchDate={mode === "SIMULATOR"
+          ? getMinimumSearchDateInputValue(new Date(), selectedTimeZones, true)
+          : minSearchDate}
         mobileTimeEditorOpen={mobileTimeEditorOpen}
         onDateChange={reconcileDateFromControl}
         onEndTimeChange={setEndTime}

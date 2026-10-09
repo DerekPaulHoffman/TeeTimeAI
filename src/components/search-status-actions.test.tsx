@@ -21,7 +21,6 @@ const savedSearch: ComponentProps<typeof SearchStatusActions> = {
   initialUserTimeZone: "America/New_York",
   initialPlayers: 2,
   initialRequestedLayoutHoles: null,
-  initialCadenceMinutes: 15,
   initialAdditionalEmails: [],
   initialCheckStatus: "WAITING",
   initialScheduleVersion: 1,
@@ -34,6 +33,23 @@ const savedSearch: ComponentProps<typeof SearchStatusActions> = {
 };
 
 describe("SearchStatusActions", () => {
+  it("shows saved simulator midnight as 00:00 and sends 24:00 on save", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<SearchStatusActions {...savedSearch} mode="SIMULATOR" initialEndTime="24:00" />);
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect((screen.getByLabelText(/^End/) as HTMLInputElement).value).toBe("00:00");
+    expect(screen.getByText("00:00 means midnight at end of selected date.")).toBeTruthy();
+    fireEvent.change(screen.getByLabelText(/^End/), { target: { value: "23:00" } });
+    fireEvent.change(screen.getByLabelText(/^End/), { target: { value: "00:00" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const payload = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)) as Record<string, unknown>;
+    expect(payload.endTime).toBe("24:00");
+    expect(payload).not.toHaveProperty("cadenceMinutes");
+    expect(payload).not.toHaveProperty("durationMinutes");
+  });
+
   it("uses neutral completed-check copy for simulator alerts while keeping outdoor copy", () => {
     const simulator = render(<SearchStatusActions {...savedSearch} mode="SIMULATOR" />);
     expect(screen.getByText("Check complete")).toBeTruthy();
@@ -76,11 +92,11 @@ describe("SearchStatusActions", () => {
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toMatchObject({
       mode: "SIMULATOR",
       players: 4,
-      durationMinutes: 60,
       requestedLayoutHoles: null,
       additionalEmails: ["friend@example.com"],
       coursePreferences: [{ id: "pref-b", rank: 1 }, { id: "pref-a", rank: 2 }]
     });
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).not.toHaveProperty("durationMinutes");
   });
 
   it("explains a past paused date and prevents starting it again", () => {
@@ -117,7 +133,6 @@ describe("SearchStatusActions", () => {
         initialUserTimeZone="America/New_York"
         initialPlayers={2}
         initialRequestedLayoutHoles={18}
-        initialCadenceMinutes={15}
         initialAdditionalEmails={[]}
         initialCheckStatus="WAITING"
         initialLastCheckedAt="2026-08-14T12:00:00.000Z"
@@ -160,7 +175,6 @@ describe("SearchStatusActions", () => {
         initialUserTimeZone="America/New_York"
         initialPlayers={2}
         initialRequestedLayoutHoles={null}
-        initialCadenceMinutes={15}
         initialAdditionalEmails={[]}
         initialCheckStatus="WAITING"
         initialLastCheckedAt="2026-08-14T12:00:00.000Z"
@@ -220,7 +234,6 @@ describe("SearchStatusActions", () => {
         initialUserTimeZone="America/New_York"
         initialPlayers={2}
         initialRequestedLayoutHoles={null}
-        initialCadenceMinutes={15}
         initialAdditionalEmails={[]}
         initialCheckStatus="WAITING"
         initialLastCheckedAt="2026-08-14T12:00:00.000Z"
@@ -255,7 +268,6 @@ describe("SearchStatusActions", () => {
         initialUserTimeZone="America/New_York"
         initialPlayers={2}
         initialRequestedLayoutHoles={null}
-        initialCadenceMinutes={15}
         initialAdditionalEmails={[]}
         initialCheckStatus="WAITING"
         initialLastCheckedAt="2026-08-14T12:00:00.000Z"
@@ -285,7 +297,6 @@ describe("SearchStatusActions", () => {
         initialUserTimeZone="America/New_York"
         initialPlayers={2}
         initialRequestedLayoutHoles={null}
-        initialCadenceMinutes={15}
         initialAdditionalEmails={[]}
         initialCheckStatus="CHECKING"
         initialLastCheckedAt={null}
@@ -411,7 +422,6 @@ describe("SearchStatusActions", () => {
         initialEndTime="14:00"
         initialPlayers={3}
         initialRequestedLayoutHoles={9}
-        initialCadenceMinutes={30}
         initialAdditionalEmails={["saved@example.com"]}
         initialCoursePreferences={[
           { id: "pref-b", courseName: "Tashua Knolls Golf Course", rank: 1 },
@@ -426,7 +436,7 @@ describe("SearchStatusActions", () => {
     expect((screen.getByLabelText("End") as HTMLInputElement).value).toBe("14:00");
     expect((screen.getByLabelText("Players") as HTMLSelectElement).value).toBe("3");
     expect((screen.getByLabelText("Course layout") as HTMLSelectElement).value).toBe("9");
-    expect((screen.getByLabelText("Cadence") as HTMLSelectElement).value).toBe("30");
+    expect(screen.queryByLabelText(/Cadence|Check every/)).toBeNull();
     expect((screen.getByLabelText(/^Extra emails/) as HTMLTextAreaElement).value).toBe("saved@example.com");
     expect(screen.getAllByRole("listitem")[0].getAttribute("aria-label")).toContain("Tashua");
   });

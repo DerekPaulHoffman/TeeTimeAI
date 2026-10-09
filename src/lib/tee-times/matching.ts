@@ -38,7 +38,7 @@ export function filterSimulatorSessionsForSearch<T extends SimulatorSession>(
 ) {
   const preferred = new Set(search.preferredOfferings.map(({ offeringId }) => offeringId));
   const windowStart = parseCourseLocalDateTime(`${search.date}T${search.startTime}`, timeZone);
-  const windowEnd = parseCourseLocalDateTime(`${search.date}T${search.endTime}`, timeZone);
+  const windowEnd = parseCourseLocalWindowEnd(search.date, search.endTime, timeZone);
   return sessions.filter((session) => {
     if (!preferred.has(session.offeringId) || !session.resourceId || !session.sourceId) return false;
     const startsAt = parseCourseLocalDateTime(session.startsAt, timeZone);
@@ -132,3 +132,4 @@ function matchKey(match: ExistingMatchKey) {
   return `${match.courseId}:${match.sourceId}`;
 }
 import { DEFAULT_TIME_ZONE, zonedDateTimeToDate } from "@/lib/timezones";
+import { parseCourseLocalWindowEnd } from "@/lib/searches/window-end";

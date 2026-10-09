@@ -242,7 +242,6 @@ async function createSimulatorTeeSearchForUser(
   if (new Set(identities).size !== canonical.length || new Set(canonicalPlaceIds).size !== canonicalPlaceIds.length) {
     throw new Error("Choose distinct simulator venues.");
   }
-  assertFutureCourseSearchDate(input.date, canonical.map(({ venue }) => venue.timeZone));
   assertSimulatorSessionFitsWindow({ date: input.date, startTime: input.startTime,
     endTime: input.endTime, durationMinutes,
     timeZones: canonical.map(({ venue }) => normalizeTimeZone(venue.timeZone)) });
@@ -303,7 +302,6 @@ async function createSimulatorTeeSearchForUser(
       assertSimulatorOfferingAcceptsDemand(offering);
       assertSimulatorPlaceReview(offering.course.googlePlaceId, currentReviews, offering);
     }
-    assertFutureCourseSearchDate(input.date, currentOfferings.map((offering) => offering.course.timeZone));
     assertSimulatorSessionFitsWindow({ date: input.date, startTime: input.startTime,
       endTime: input.endTime, durationMinutes,
       timeZones: currentOfferings.map((offering) => offering.course.timeZone) });
@@ -779,6 +777,20 @@ export async function updateTeeSearchStatusForUser(
       searchId,
       userId,
     });
+    if (status === "ACTIVE") {
+      const current = await transaction.teeSearch.findUniqueOrThrow({
+        where: { id: searchId, userId },
+        select: { mode: true, date: true, startTime: true, endTime: true, durationMinutes: true,
+          preferences: { select: { course: { select: { timeZone: true } } } } },
+      });
+      if (current.mode === "SIMULATOR") {
+        if (current.preferences.length === 0) throw new Error("Choose a simulator venue for this alert.");
+        assertSimulatorSessionFitsWindow({ date: current.date.toISOString().slice(0, 10),
+          startTime: current.startTime, endTime: current.endTime,
+          durationMinutes: current.durationMinutes ?? DEFAULT_SIMULATOR_DURATION_MINUTES,
+          timeZones: current.preferences.map((preference) => preference.course.timeZone) });
+      }
+    }
     const nextAlertGeneration = lockedSearch.alertGeneration + 1;
     const updatedSearch = await transaction.teeSearch.update({
       where: {
@@ -1054,13 +1066,16 @@ async function assertUpdatedSearchDate(
   const search = await transaction.teeSearch.findUniqueOrThrow({
     where: { id: searchId, userId },
     select: {
+      mode: true,
       preferences: { select: { course: { select: { timeZone: true } } } },
     },
   });
-  assertFutureCourseSearchDate(
-    date,
-    search.preferences.map((preference) => preference.course.timeZone),
-  );
+  if (search.mode !== "SIMULATOR") {
+    assertFutureCourseSearchDate(
+      date,
+      search.preferences.map((preference) => preference.course.timeZone),
+    );
+  }
 }
 
 async function projectCurrentCustomerSearch<

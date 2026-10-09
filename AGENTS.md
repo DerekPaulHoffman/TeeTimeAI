@@ -98,7 +98,7 @@ discover public courses -> save ranked demand -> check official availability
 
 ### 2. Create An Alert
 
-1. The golfer chooses a future date, start/end window, 1 to 4 players, and an optional verified course-layout preference.
+1. The golfer chooses a future date, start/end window, 1 to 4 players, and an optional verified course-layout preference. Simulator alerts may use today when a complete requested session still fits after now in every selected venue's canonical local window. Simulator end time `24:00` means midnight at the end of that selected date; start times and outdoor end times retain ordinary clock-time grammar.
 2. Signed-out golfers are asked to sign in. The server derives the owner and primary email from Clerk; never trust a client-supplied owner ID or primary email. The owner may also add up to 3 normalized additional recipients.
 3. A user may have at most 3 `ACTIVE` plus `PAUSED` searches. Search creation resolves selected provider candidates into reusable `Course` rows, persists `TeeSearch` plus ranked `CoursePreference` rows, and then requests that search's durable workflow immediately.
 4. Persisted demand and scheduler launch are separate facts: the API can keep the saved search when the initial Workflow start fails so recovery can restart it. Never delete or duplicate customer demand merely because `workflowRunId` is temporarily absent.
@@ -377,7 +377,7 @@ Important behavior:
 - A 15-minute row-token lease owns one check while network work runs outside a database transaction. Heartbeat and compare-and-set completion on search id, schedule version, and token prevent stale evidence. A generation-scoped `SearchEmailDelivery` outbox serializes recipient/intent mutations against active sends and retries immutable payloads with stable idempotency. Owner delivery finalizes the customer-visible match/status independently, while each additional recipient retains its own durable retry state. A busy check persists `recheckRequestedAt` for immediate follow-up.
 - Immediate Workflow start failures inside the deployed runtime may use the private `tee-time-spot-search-schedule` Vercel Queue fallback. Local operator and course-remediation runs persist guarded `QUEUED` state for the deployed recovery cron instead of publishing a development-scoped queue message. The strict queue payload is only search id, schedule version, and trigger; retention is 24 hours, consumer concurrency is 2, and Postgres remains the recovery source of truth.
 - `TeeSearch.status` is the customer lifecycle (`ACTIVE`, `PAUSED`, `COMPLETED`, `CANCELLED`); `checkStatus` is execution state (`IDLE`, `QUEUED`, `CHECKING`, `WAITING`, `FAILED`, `STOPPED`). Do not collapse them into one field.
-- Valid base cadence values are 5, 15, 30, 60, and 120 minutes. Booking-window scheduling may sleep longer until the next useful release event.
+- Alert owners do not choose a check cadence. Normal automatic scheduling owns the interval; internal valid base cadence values are 5, 15, 30, 60, and 120 minutes. Booking-window scheduling may sleep longer until the next useful release event.
 - A search expires at the latest absolute end of its selected courses' local requested windows, not at arbitrary server midnight.
 - Booking-window intelligence may defer a course until its provider-confirmed release time. The workflow should wake at the next useful course event while still allowing other selected courses to run.
 - If a known booking release occurs while the prior multi-course check is still running, schedule an immediate catch-up instead of applying the base cadence from completion time.
@@ -699,7 +699,7 @@ Playwright smoke expectations:
 - Desktop and mobile coverage.
 - Onboarding discovery works.
 - Course ranking 1 to 5 is enforced.
-- Date must be future.
+- Outdoor dates must be future. Simulator dates may be today only while a full requested session still fits in every venue's local window.
 - End time must be after start time.
 - Players options are 1 to 4.
 - Dashboard access/setup state is clear.

@@ -191,6 +191,35 @@ test.describe("Tee Time Spot UI smoke", () => {
     await expectNoPageIssues(issues, testInfo);
   });
 
+  test("keeps simulator today selectable and ends at midnight by keyboard", async ({ page }, testInfo) => {
+    const issues = collectPageIssues(page);
+    await page.goto("/search?mode=SIMULATOR&startTime=22%3A00&endTime=23%3A59");
+    const date = page.getByLabel("Date", { exact: true });
+    const today = await page.evaluate(() => {
+      const now = new Date();
+      return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    });
+    await expect(date).toHaveAttribute("min", today);
+    await date.fill(today);
+    await expect(date).toHaveValue(today);
+    const time = page.getByRole("group", { name: "Time window", exact: true });
+    await time.locator(".figma-time-summary").click();
+    const from = time.getByRole("combobox", { name: "From (start time)" });
+    const to = time.getByRole("combobox", { name: "To (end time)" });
+    await expect(from.locator('option[value="24:00"]')).toHaveAttribute("disabled", "");
+    await expect(to.locator('option[value="24:00"]')).toHaveText("Midnight");
+    await to.focus();
+    await to.press("End");
+    await expect(to).toHaveValue("24:00");
+    await expect(time.locator(".figma-time-summary")).toHaveText("10 PM – 12 AM");
+    await expect(date).toHaveValue(today);
+    await expectNoHorizontalOverflow(page, testInfo);
+    await expectNoPageIssues(issues, testInfo);
+    if (process.env.SIMULATOR_UI_EVIDENCE_DIR) {
+      await page.screenshot({ path: path.join(process.env.SIMULATOR_UI_EVIDENCE_DIR, `simulator-today-midnight-${testInfo.project.name}.png`), fullPage: true });
+    }
+  });
+
   test("opens the alert calendar and selects future dates with mouse and keyboard", async ({
     page
   }, testInfo) => {

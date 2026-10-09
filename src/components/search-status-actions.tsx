@@ -1,6 +1,6 @@
 "use client";
 
-import { type DragEvent, useEffect, useState } from "react";
+import { type DragEvent, useEffect, useId, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowDown,
@@ -20,10 +20,9 @@ import {
 
 import {
   MAX_ADDITIONAL_ALERT_EMAILS,
-  MAX_PLAYERS_PER_SEARCH,
-  SEARCH_CADENCE_OPTIONS_MINUTES
+  MAX_PLAYERS_PER_SEARCH
 } from "@/lib/validation/search-constraints";
-import { DEFAULT_SIMULATOR_DURATION_MINUTES, type SearchMode } from "@/lib/searches/search-mode";
+import type { SearchMode } from "@/lib/searches/search-mode";
 
 type SearchStatus = "ACTIVE" | "PAUSED" | "COMPLETED" | "CANCELLED";
 type SearchCheckStatus = "IDLE" | "QUEUED" | "CHECKING" | "WAITING" | "FAILED" | "STOPPED";
@@ -44,7 +43,6 @@ export function SearchStatusActions({
   initialUserTimeZone,
   initialPlayers,
   initialRequestedLayoutHoles,
-  initialCadenceMinutes,
   initialAdditionalEmails,
   initialCheckStatus,
   initialScheduleVersion,
@@ -62,7 +60,6 @@ export function SearchStatusActions({
   initialUserTimeZone: string;
   initialPlayers: number;
   initialRequestedLayoutHoles: 9 | 18 | null;
-  initialCadenceMinutes: number;
   initialAdditionalEmails: string[];
   initialCheckStatus: SearchCheckStatus;
   initialScheduleVersion?: number;
@@ -71,6 +68,7 @@ export function SearchStatusActions({
   initialCoursePreferences: CoursePreferenceFormValue[];
 }) {
   const router = useRouter();
+  const midnightHelpId = useId();
   const [pending, setPending] = useState(false);
   const serverStateKey = JSON.stringify([
     searchId,
@@ -110,9 +108,7 @@ export function SearchStatusActions({
       endTime: initialEndTime,
       userTimeZone: initialUserTimeZone,
       players: initialPlayers,
-      durationMinutes: mode === "SIMULATOR" ? DEFAULT_SIMULATOR_DURATION_MINUTES : null,
       requestedLayoutHoles: initialRequestedLayoutHoles,
-      cadenceMinutes: initialCadenceMinutes,
       additionalEmails: initialAdditionalEmails.join("\n"),
       coursePreferences: [...initialCoursePreferences].sort((a, b) => a.rank - b.rank)
     };
@@ -173,7 +169,7 @@ export function SearchStatusActions({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         ...form,
-        ...(mode === "SIMULATOR" ? { mode, durationMinutes: form.durationMinutes, requestedLayoutHoles: null } : {}),
+        ...(mode === "SIMULATOR" ? { mode, requestedLayoutHoles: null } : {}),
         additionalEmails: parseAdditionalEmails(form.additionalEmails),
         coursePreferences: form.coursePreferences.map((preference, index) => ({
           id: preference.id,
@@ -325,9 +321,11 @@ export function SearchStatusActions({
             End
             <input
               type="time"
-              value={form.endTime}
-              onChange={(event) => setForm({ ...form, endTime: event.target.value })}
+              value={mode === "SIMULATOR" && form.endTime === "24:00" ? "00:00" : form.endTime}
+              onChange={(event) => setForm({ ...form, endTime: mode === "SIMULATOR" && event.target.value === "00:00" ? "24:00" : event.target.value })}
+              aria-describedby={mode === "SIMULATOR" ? midnightHelpId : undefined}
             />
+            {mode === "SIMULATOR" ? <span className="field-hint" id={midnightHelpId}>00:00 means midnight at end of selected date.</span> : null}
           </label>
           <label>
             Players
@@ -361,21 +359,6 @@ export function SearchStatusActions({
               <option value="18">18-hole</option>
             </select>
           </label> : null}
-          <label>
-            Cadence
-            <select
-              value={form.cadenceMinutes}
-              onChange={(event) =>
-                setForm({ ...form, cadenceMinutes: Number(event.target.value) })
-              }
-            >
-              {SEARCH_CADENCE_OPTIONS_MINUTES.map((minutes) => (
-                <option key={minutes} value={minutes}>
-                  {minutes} min
-                </option>
-              ))}
-            </select>
-          </label>
           {form.coursePreferences.length > 1 ? (
             <div className="queue-priority-editor">
               <div>

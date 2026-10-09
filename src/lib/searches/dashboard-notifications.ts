@@ -1,4 +1,4 @@
-import { zonedDateTimeToDate } from "@/lib/timezones";
+import { parseCourseLocalWindowEnd } from "@/lib/searches/window-end";
 import { formatDateInputValue } from "@/lib/dates/local-date";
 
 type NotificationSearch = {
@@ -32,7 +32,7 @@ export function groupDashboardNotifications<T extends NotificationSearch>(search
 export function notificationWindowEnded(date: string, endTime: string, timeZones: readonly string[], now: Date) {
   if (!timeZones.length) return false;
   return timeZones.every(timeZone => {
-    try { return zonedDateTimeToDate(`${date}T${endTime}:00`, timeZone).getTime() <= now.getTime(); }
+    try { return parseCourseLocalWindowEnd(date, endTime, timeZone).getTime() <= now.getTime(); }
     catch { return false; }
   });
 }

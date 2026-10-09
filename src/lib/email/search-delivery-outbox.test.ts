@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { prisma } from "@/lib/prisma";
+import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
 import { applyPendingClerkEmailForSearch } from "@/lib/users/pending-email";
 import { EmailDeliveryNotAcceptedError } from "./alerts";
 import { DELIVERY_SYNTHETIC_MULTI_CYCLE_DRY_RUN } from "./delivery-policy";
@@ -36,6 +37,7 @@ vi.mock("@/lib/prisma", () => ({
     $executeRaw: vi.fn(),
     user: { findUnique: vi.fn() },
     course: { findMany: vi.fn() },
+    courseOffering: { findMany: vi.fn() },
     courseMonitoringStatus: { findMany: vi.fn() },
     courseProbe: { findMany: vi.fn() },
     localReaderJob: { findMany: vi.fn() },
@@ -47,6 +49,7 @@ vi.mock("@/lib/prisma", () => ({
     },
     teeSearch: {
       findFirst: vi.fn(),
+      findUnique: vi.fn(),
       update: vi.fn(),
       updateMany: vi.fn(),
     },
@@ -256,6 +259,56 @@ describe("search email delivery outbox", () => {
       id: "search-1",
     } as never);
     mockedPrisma.teeSearch.updateMany.mockResolvedValue({ count: 1 } as never);
+  });
+
+  it.each([
+    ["exact midnight end", "2026-07-16T03:00:00.000Z", "2026-07-16T04:00:00.000Z", false, true],
+    ["after midnight", "2026-07-16T04:00:00.000Z", "2026-07-16T05:00:00.000Z", false, false],
+    ["stale source", "2026-07-16T03:00:00.000Z", "2026-07-16T04:00:00.000Z", true, false],
+  ])("checks simulator outbox source fence at %s", async (_case, startsAt, endsAt, stale, eligible) => {
+    const bookingUrl = "https://venue.example/book";
+    const offering = {
+      id: "offering-1", courseId: "course-1", kind: "SIMULATOR", active: true,
+      publicAccessStatus: "PUBLIC", bookingUrl, evidenceUrl: "https://venue.example/rentals",
+      verifiedAt: new Date("2026-07-14T12:00:00.000Z"), providerFamilyKey: "TEST",
+      providerMetadata: {}, maxPartySize: 4, supportedDurationsMinutes: [60],
+      bookingWindowDaysAhead: null, bookingReleaseTimeLocal: null, monitoringMode: "PUBLIC_READ_ONLY",
+      monitoringState: "HEALTHY", automationEligibility: "ALLOWED", monitoringVerifiedAt: now,
+      lastFailureAt: null, observationToken: null, observationExpiresAt: null,
+    };
+    const fingerprint = getSimulatorOfferingSourceFingerprint(offering);
+    const match = {
+      id: "match-1", courseId: "course-1", offeringId: "offering-1", availabilityCycle: 7,
+      availabilityStatus: "AVAILABLE", alertStatus: "PENDING", startsAt: new Date(startsAt),
+      endsAt: new Date(endsAt), lastConfirmedAt: now, availableSpots: 1, capacity: 4,
+      bookingUrl, offeringSourceFingerprint: stale ? "obsolete" : fingerprint,
+      resourceId: "bay-1", productId: null, course: { name: "Venue", timeZone: "America/New_York" },
+    };
+    const matchPayload = {
+      schemaVersion: 3 as const, mode: "SIMULATOR" as const, checkedAt: now.toISOString(),
+      matchIds: ["match-1"], matchRefs: [{ matchId: "match-1", availabilityCycle: 7 }],
+      displayMatchIds: ["match-1"],
+      matchReport: { mode: "SIMULATOR", targetDate: "2026-07-15", startTime: "18:00",
+        endTime: "24:00", players: 2, durationMinutes: 60, userTimeZone: "America/New_York",
+        matches: [{ mode: "SIMULATOR", matchId: "match-1", courseId: "course-1",
+          offeringId: "offering-1", courseName: "Venue", courseTimeZone: "America/New_York",
+          courseRank: 1, resourceId: "bay-1", productId: null,
+          startsAtISO: startsAt, endsAtISO: endsAt, bookingUrl, availableSpots: 1 }] },
+    };
+    const owner = delivery("delivery-1", "owner@example.com", { payload: matchPayload });
+    mockedPrisma.searchEmailDelivery.findMany.mockResolvedValue([owner] as never);
+    mockedPrisma.teeSearch.findUnique.mockResolvedValue({
+      mode: "SIMULATOR", status: "ACTIVE", alertGeneration: 3,
+      date: new Date("2026-07-15T00:00:00.000Z"), startTime: "18:00", endTime: "24:00",
+      players: 2, durationMinutes: 60, userTimeZone: "America/New_York",
+      preferences: [{ courseId: "course-1", offeringId: "offering-1", rank: 1 }],
+    } as never);
+    mockedPrisma.teeTimeMatch.findMany.mockResolvedValue([match] as never);
+    mockedPrisma.courseOffering.findMany.mockResolvedValue([offering] as never);
+    const send = vi.fn().mockResolvedValue({ deliveryStatus: "sent" });
+    await drainSearchEmailDeliveryGroup({ searchId: "search-1", alertGeneration: 3,
+      checkLeaseToken: "check-lease", kind: "MATCH", groupKey: "match-group", send, now: () => now });
+    expect(send).toHaveBeenCalledTimes(eligible ? 1 : 0);
   });
 
   it("recognizes only typed durable delivery control flow", () => {

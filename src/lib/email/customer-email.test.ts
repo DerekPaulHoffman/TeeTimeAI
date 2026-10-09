@@ -45,6 +45,14 @@ describe("shared customer email rendering", () => {
     expect(createHash("sha256").update(renderCustomerEmail({ ...outdoorInput, variant })).digest("hex")).toBe(hash);
   });
 
+  it("shows the simulator search ending at midnight without calling it noon", () => {
+    const input = simulatorInput();
+    input.summary = { ...input.summary, startTime: "18:00", endTime: "24:00" };
+    const html = renderCustomerEmail(input);
+    expect(html).toContain("6:00 PM &ndash; Midnight venue local");
+    expect(html).not.toContain("6:00 PM &ndash; 12:00 PM");
+  });
+
   it("uses the existing branded shell, ranked cards, summary and stop controls for simulator sessions", () => {
     const html = renderCustomerEmail(simulatorInput());
     expect(html).toContain('class="email-card"');

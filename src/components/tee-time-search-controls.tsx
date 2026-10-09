@@ -22,6 +22,7 @@ const TIME_CHOICES = Array.from({ length: 96 }, (_, index) => {
 });
 
 function timeChoiceLabel(value: string) {
+  if (value === "24:00") return "Midnight";
   const [hours, minutes] = value.split(":");
   const hour = Number(hours);
   return `${hour % 12 || 12}:${minutes} ${hour >= 12 ? "PM" : "AM"}`;
@@ -34,7 +35,7 @@ export function formatCompactTimeWindow(startTime: string, endTime: string) {
     return {
       hours: hours % 12 || 12,
       minutes,
-      period: hours >= 12 ? "PM" : "AM"
+      period: hours % 24 >= 12 ? "PM" : "AM"
     };
   };
   const start = parseTime(startTime);
@@ -114,7 +115,7 @@ export function TeeTimeSearchControls({
   const timeSummaryRef = useRef<HTMLButtonElement>(null);
   const startTimeRef = useRef<HTMLSelectElement>(null);
   // Keep exact saved/prefilled minutes even when they aren't a quarter hour.
-  const timeChoices = [...new Set([...TIME_CHOICES, "23:59", startTime, endTime])].sort();
+  const timeChoices = [...new Set([...TIME_CHOICES, "23:59", startTime, endTime, ...(mode === "SIMULATOR" ? ["24:00"] : [])])].sort();
 
   useEffect(() => {
     if (!mobileTimeEditorOpen) return;
@@ -266,7 +267,7 @@ export function TeeTimeSearchControls({
                   onChange={(event) => onStartTimeChange(event.currentTarget.value)}
                 >
                   {timeChoices.map((time) => (
-                    <option disabled={time === "23:59"} key={time} value={time}>
+                    <option disabled={time === "23:59" || time === "24:00"} key={time} value={time}>
                       {timeChoiceLabel(time)}
                     </option>
                   ))}
@@ -277,7 +278,9 @@ export function TeeTimeSearchControls({
               <label className="figma-time-choice" htmlFor="endTime">
                 <span>To</span>
                 <select
-                  aria-describedby={!isTimeWindowValid ? "search-form-guidance" : undefined}
+                  aria-describedby={mode === "SIMULATOR"
+                    ? (!isTimeWindowValid ? "search-form-guidance simulator-midnight-help" : "simulator-midnight-help")
+                    : (!isTimeWindowValid ? "search-form-guidance" : undefined)}
                   aria-invalid={!isTimeWindowValid}
                   aria-label="To (end time)"
                   id="endTime"
@@ -286,13 +289,18 @@ export function TeeTimeSearchControls({
                   onChange={(event) => onEndTimeChange(event.currentTarget.value)}
                 >
                   {timeChoices.map((time) => (
-                    <option disabled={time <= startTime} key={time} value={time}>
+                    <option disabled={time <= startTime || (time === "24:00" && mode !== "SIMULATOR")} key={time} value={time}>
                       {timeChoiceLabel(time)}
                     </option>
                   ))}
                 </select>
                 <ChevronDown aria-hidden="true" size={14} />
               </label>
+              {mode === "SIMULATOR" ? (
+                <span className="sr-only" id="simulator-midnight-help">
+                  Midnight means the end of the selected date.
+                </span>
+              ) : null}
               <button
                 className="figma-time-editor-done"
                 disabled={!isTimeWindowValid}

@@ -716,6 +716,7 @@ function formatSearchDate(value: string) {
 }
 
 function formatClockTime(value: string) {
+  if (value === "24:00") return "Midnight";
   const [hours = 0, minutes = 0] = value.split(":").map(Number);
   const suffix = hours >= 12 ? "PM" : "AM";
   return `${hours % 12 || 12}:${String(minutes).padStart(2, "0")} ${suffix}`;
