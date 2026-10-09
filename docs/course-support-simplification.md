@@ -463,3 +463,28 @@ to omit the field instead of writing the string "missing". Final candidate
 verification and two actual deployed availability observations remain separate
 acceptance gates. No customer intent, retry date or email was changed by these
 root checks.
+
+## Actual 06:50 deployed simulator read and the repair decision
+
+The natural October 9 06:50 same-owner worker registered the exact 4a8 release
+and reached one deployed engineering availability read. Its saved result was
+`FETCH_FAILED` with typed `SCHEMA_CHANGED`; one read and one failed observation
+were spent, no qualifying availability observation existed, and the native
+turn closed with all 16 commands settled. The worker followed the then-current
+progress direction and closed at 06:57:49 UTC with an honest retry due at
+07:57:49.437 UTC, leaving the offering unverified. The code does not identify
+which provider field changed; the typed failure alone cannot justify a guessed
+configuration or relaxed runtime reader guard.
+
+The progress selector previously sent every settled failed engineering read
+to RETRY_ENGINEERING. A second read on the same failed verification episode is
+already refused, so this deterministic failure had no same-owner repair
+direction despite available existing path and reviewed metadata repair rules.
+Now only a latest, settled, typed reader failure on the exact current source,
+release and deployment, with valid ownership, no live read and no real customer
+demand, selects the existing REPAIR investigation. Earlier failures superseded
+by transient evidence, future or contradictory rows, and HTTP/session/capacity
+or booking-window failures keep their prior safe route. This changes no read
+budget, history, acceptance or access rule and does not retroactively change
+the closed 06:50 run. Reusable monitoring still requires evidence-backed
+repair, exact production Ready proof and two new qualifying public reads.

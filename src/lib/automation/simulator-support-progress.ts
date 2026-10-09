@@ -115,8 +115,20 @@ export function evaluateSimulatorSupportProgress(input: SimulatorSupportProgress
     const repair = !owner.leaseValid || !owner.demandCurrent || !sourceCurrent || !releaseReady ||
       input.offering.publicAccessStatus !== "PUBLIC" || Boolean(observed?.expiredReservation) ||
       !state && !freshEpisode;
+    const latestFailure = observed?.latestObservation;
+    const repairableReaderFailure = Boolean(belongsToCurrentRelease && state && observed && observed.releaseReady &&
+      owner.leaseValid && owner.demandCurrent && sourceCurrent && !input.customerDemandPresent &&
+      !observed.inFlight && !observed.expiredReservation && observed.failedObservation &&
+      latestFailure?.complete === false && ["FETCH_FAILED", "NEEDS_ADAPTER"].includes(latestFailure.outcome) &&
+      latestFailure.providerObservedAt === null && latestFailure.slotCount === 0 &&
+      Date.parse(latestFailure.startedAt) >= Date.parse(state.startedAt) &&
+      Date.parse(latestFailure.startedAt) <= now.getTime() &&
+      Date.parse(latestFailure.completedAt) <= now.getTime() &&
+      Date.parse(latestFailure.completedAt) < Date.parse(latestFailure.expiresAt) &&
+      ["SCHEMA_CHANGED", "INVALID_SOURCE", "UNSUPPORTED_PROVIDER", "UNSUPPORTED_DURATION"].includes(latestFailure.failureCode ?? ""));
     return { nextAction: readyForCompletion ? "COMPLETE" : repair ? "REPAIR" : observed?.inFlight ? "WAIT_FOR_CHECK" :
-      input.customerDemandPresent || observed?.failedObservation ? "RETRY_ENGINEERING" : "VERIFY_ENGINEERING",
+      input.customerDemandPresent ? "RETRY_ENGINEERING" : repairableReaderFailure ? "REPAIR" :
+      observed?.failedObservation ? "RETRY_ENGINEERING" : "VERIFY_ENGINEERING",
       verificationKind: "ENGINEERING_ONLY", customerAcceptance: false, reasons, leaseValid: owner.leaseValid, demandCurrent: owner.demandCurrent,
       sourceCurrent, releaseReady, offeringReady, verificationCycle: state?.readsUsed ?? 0, firstCheckReady: observed?.firstCheckReady ?? false,
       freshSuccessfulChecks: observed?.freshSuccessfulChecks ?? 0, readyForCompletion, currentDeploymentReadbackRequired: true,

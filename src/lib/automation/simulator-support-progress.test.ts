@@ -37,6 +37,13 @@ describe("simulator support progress", () => {
         providerObservedAt: `2026-10-06T14:${minute}:10Z`, outcome: "NO_MATCH", complete: true, slotCount: 0, failureCode: null,
       })) };
   }
+  function failedEngineeringState(failureCode: string | null, outcome: "FETCH_FAILED" | "NEEDS_ADAPTER" = "FETCH_FAILED") {
+    const state = engineeringState();
+    state.readsUsed = 1;
+    state.observations = [{ ...state.observations[0], outcome, complete: false,
+      providerObservedAt: null, slotCount: 0, failureCode }];
+    return state;
+  }
   it("keeps independent no-send engineering evidence separate from expired customer searches", () => {
     const state = input(); state.engineeringVerification = engineeringState(); state.searches = [];
     state.claim.recheckQueuedAt = null; state.claim.verificationCycle = 0;
@@ -46,16 +53,86 @@ describe("simulator support progress", () => {
     expect(evaluateSimulatorSupportProgress(state)).toMatchObject({ nextAction: "RETRY_ENGINEERING", customerAcceptance: false, readyForCompletion: false,
       reasons: expect.arrayContaining(["NORMAL_CUSTOMER_CHECK_REQUIRED"]) });
   });
-  it("reports finite retry for failed reads and explicit repair for expired reservations without hidden revision advances", () => {
+  it("reports repair for a settled schema failure and an expired reservation without hidden revision advances", () => {
     const state = input(); state.engineeringVerification = engineeringState(); state.searches = [];
-    state.engineeringVerification.observations[1].complete = false;
-    state.engineeringVerification.observations[1].failureCode = "SCHEMA_CHANGED";
-    expect(evaluateSimulatorSupportProgress(state)).toMatchObject({ nextAction: "RETRY_ENGINEERING", readyForCompletion: false });
+    Object.assign(state.engineeringVerification.observations[1], { outcome: "FETCH_FAILED", complete: false,
+      providerObservedAt: null, slotCount: 0, failureCode: "SCHEMA_CHANGED" });
+    expect(evaluateSimulatorSupportProgress(state)).toMatchObject({ nextAction: "REPAIR", readyForCompletion: false });
     const pending = state.engineeringVerification.observations.pop()!;
     state.engineeringVerification.inFlight = { requestId: pending.requestId, revision: pending.revision, requestedDate: pending.requestedDate,
       startedAt: pending.startedAt, expiresAt: pending.expiresAt };
     expect(evaluateSimulatorSupportProgress(state)).toMatchObject({ nextAction: "REPAIR", reasons: expect.arrayContaining(["ENGINEERING_READ_EXPIRED"]) });
     expect(state.claim.revision).toBe(1);
+  });
+  it.each([
+    ["SCHEMA_CHANGED", "FETCH_FAILED"],
+    ["INVALID_SOURCE", "FETCH_FAILED"],
+    ["UNSUPPORTED_PROVIDER", "NEEDS_ADAPTER"],
+    ["UNSUPPORTED_DURATION", "FETCH_FAILED"],
+  ] as const)("keeps a current settled %s failure owned for evidence-based repair", (failureCode, outcome) => {
+    const state = input(); state.engineeringVerification = failedEngineeringState(failureCode, outcome);
+    state.searches = []; state.offering.monitoringState = "DEGRADED_RETRYING";
+    state.offering.automationEligibility = "UNKNOWN";
+    const originalEvidence = structuredClone(state.engineeringVerification);
+    expect(evaluateSimulatorSupportProgress(state)).toMatchObject({ nextAction: "REPAIR",
+      verificationKind: "ENGINEERING_ONLY", customerAcceptance: false, readyForCompletion: false,
+      freshSuccessfulChecks: 0, reasons: expect.arrayContaining(["LATEST_ENGINEERING_OBSERVATION_NOT_VERIFIED"]) });
+    expect(state.engineeringVerification).toEqual(originalEvidence);
+    expect(state.claim).toMatchObject({ revision: 1, releaseSha, sourceFingerprint });
+  });
+  it.each(["HTTP_ERROR", "PUBLIC_SESSION_REQUIRED", "PROVIDER_BUSY", "READ_DEADLINE",
+    "READ_FAILED", "INCOMPLETE_READ", "UNKNOWN_FAILURE", null])(
+    "retains ordinary cooldown for a settled non-deterministic %s failure", failureCode => {
+      const state = input(); state.engineeringVerification = failedEngineeringState(failureCode);
+      state.searches = []; state.offering.monitoringState = "DEGRADED_RETRYING";
+      expect(evaluateSimulatorSupportProgress(state)).toMatchObject({ nextAction: "RETRY_ENGINEERING",
+        readyForCompletion: false, freshSuccessfulChecks: 0 });
+    });
+  it("lets real customer demand take priority over a deterministic engineering repair", () => {
+    const state = input(); state.engineeringVerification = failedEngineeringState("SCHEMA_CHANGED");
+    state.customerDemandPresent = true;
+    expect(evaluateSimulatorSupportProgress(state)).toMatchObject({ nextAction: "RETRY_ENGINEERING",
+      customerAcceptance: false, readyForCompletion: false,
+      reasons: expect.arrayContaining(["NORMAL_CUSTOMER_CHECK_REQUIRED"]) });
+  });
+  it("waits for an active engineering read rather than repairing an older settled schema failure", () => {
+    const state = input(); state.engineeringVerification = engineeringState();
+    const pending = state.engineeringVerification.observations.pop()!;
+    Object.assign(state.engineeringVerification.observations[0], { outcome: "FETCH_FAILED", complete: false,
+      providerObservedAt: null, slotCount: 0, failureCode: "SCHEMA_CHANGED" });
+    state.engineeringVerification.inFlight = { requestId: pending.requestId, revision: pending.revision,
+      requestedDate: pending.requestedDate, startedAt: "2026-10-06T14:59:00Z", expiresAt: "2026-10-06T15:01:00Z" };
+    expect(evaluateSimulatorSupportProgress(state)).toMatchObject({ nextAction: "WAIT_FOR_CHECK",
+      readyForCompletion: false, reasons: expect.arrayContaining(["ENGINEERING_READ_IN_FLIGHT"]) });
+  });
+  it("does not carry an old schema repair direction into a newly registered release", () => {
+    const state = input(); state.engineeringVerification = failedEngineeringState("SCHEMA_CHANGED");
+    state.claim.releaseSha = "c".repeat(40);
+    state.claim.deployment = { ...proof, commitSha: state.claim.releaseSha, deploymentId: "dpl_repaired" };
+    expect(evaluateSimulatorSupportProgress(state)).toMatchObject({ nextAction: "VERIFY_ENGINEERING",
+      readyForCompletion: false, freshSuccessfulChecks: 0,
+      reasons: expect.arrayContaining(["FIRST_ENGINEERING_READ_NEEDED"]) });
+    expect(state.engineeringVerification.observations).toHaveLength(1);
+  });
+  it("uses only the latest settled failure when an older schema failure is followed by a transient failure", () => {
+    const state = input(); state.engineeringVerification = engineeringState();
+    Object.assign(state.engineeringVerification.observations[0], { outcome: "FETCH_FAILED", complete: false,
+      providerObservedAt: null, slotCount: 0, failureCode: "SCHEMA_CHANGED" });
+    Object.assign(state.engineeringVerification.observations[1], { outcome: "FETCH_FAILED", complete: false,
+      providerObservedAt: null, slotCount: 0, failureCode: "HTTP_ERROR" });
+    expect(evaluateSimulatorSupportProgress(state)).toMatchObject({ nextAction: "RETRY_ENGINEERING",
+      readyForCompletion: false, freshSuccessfulChecks: 0 });
+  });
+  it("does not promote a future or contradictory settled row into repair authority", () => {
+    const state = input(); state.engineeringVerification = failedEngineeringState("SCHEMA_CHANGED");
+    state.engineeringVerification.observations[0].completedAt = "2026-10-06T15:01:00Z";
+    expect(evaluateSimulatorSupportProgress(state).nextAction).toBe("RETRY_ENGINEERING");
+    state.engineeringVerification.observations[0].completedAt = "2026-10-06T14:56:20Z";
+    state.engineeringVerification.observations[0].outcome = "NO_MATCH";
+    expect(evaluateSimulatorSupportProgress(state).nextAction).toBe("RETRY_ENGINEERING");
+    state.engineeringVerification.observations[0].outcome = "FETCH_FAILED";
+    state.engineeringVerification.observations[0].providerObservedAt = "2026-10-06T14:56:10Z";
+    expect(evaluateSimulatorSupportProgress(state).nextAction).toBe("RETRY_ENGINEERING");
   });
   it("allows a first fresh read after an actually registered new source or release while retaining old failure evidence", () => {
     const state = input(); state.engineeringVerification = engineeringState(); state.claim.releaseSha = "c".repeat(40);
