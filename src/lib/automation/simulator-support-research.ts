@@ -7,6 +7,7 @@ import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { sanitizeResponderText } from "./course-support-responder-policy";
 import { projectAcuityPublicConfiguration } from "@/lib/simulators/providers/acuity";
 import { projectGolfBookPublicConfiguration } from "@/lib/simulators/providers/golfbook";
+import { projectUSchedulePublicConfiguration } from "@/lib/simulators/providers/uschedule";
 import type { SimulatorPublicConfiguration } from "@/lib/simulators/providers/public-configuration";
 import { tagSimulatorResearchFailure, tagSimulatorResearchResourceKind, type SimulatorResearchFailurePhase,
   type SimulatorResearchResourceKind } from "./simulator-support-failure";
@@ -102,6 +103,14 @@ export type SimulatorBodyLimitDiagnostic = {
   observedSizeBand: OwnedBodySizeBand;
   count: number;
 };
+export type SimulatorBlockedRequestDiagnostic = {
+  state: "NOT_EXECUTED";
+  resourceKind: "XHR" | "FETCH";
+  method: "POST" | "PUT" | "PATCH" | "DELETE" | "OTHER";
+  reason: "METHOD_NOT_ALLOWED";
+  pathShape: string;
+  count: number;
+};
 export type SimulatorResearchResult = {
   requestedUrl: string; url: string; observedAt: string; httpStatus: number; text: string; links: string[];
   method: "HTTP" | "BROWSER"; initialHttpStatus?: number;
@@ -111,6 +120,8 @@ export type SimulatorResearchResult = {
   jsonShape?: Array<{ path: string; type: string; count?: number }>;
   configurationDiagnostic?: SimulatorConfigurationDiagnostic;
   blockedRequests?: number;
+  blockedRequestDiagnostics?: SimulatorBlockedRequestDiagnostic[];
+  blockedRequestDiagnosticsTruncated?: true;
   admittedRequests?: number;
   renderComplete?: boolean;
   renderWarning?: "SECONDARY_REQUEST_BUDGET_EXHAUSTED" | "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED" | "SECONDARY_STYLESHEET_URL_REJECTED" | "MAIN_DOCUMENT_HTTP_ERROR";
@@ -500,7 +511,8 @@ function resultFromBody(requestedUrl: string, url: string, status: number, conte
     summary.links = [...new Set([bays, ...summary.links])].slice(0, 30);
     bookingLinks.unshift(bays);
   }
-  const publicConfiguration = projectAcuityPublicConfiguration(html, url) ?? projectGolfBookPublicConfiguration(html, url);
+  const publicConfiguration = projectAcuityPublicConfiguration(html, url) ?? projectGolfBookPublicConfiguration(html, url) ??
+    projectUSchedulePublicConfiguration(html, url);
   const retainedLinks = new Set(summary.links);
   const retainedBookingLinks = [...new Set(bookingLinks)].filter(link => retainedLinks.has(link));
   return { ...base, ...summary, ...(retainedBookingLinks.length ? { bookingLinks: retainedBookingLinks } : {}),
@@ -623,6 +635,14 @@ function contractPath(url: URL) {
   return { pathShape, queryKeys };
 }
 
+/** Static route vocabulary only: no untrusted path component or query survives. */
+function blockedRequestPathShape(url: URL) {
+  const words = new Set(["api", "booking", "changefield", "availability", "calendar", "times", "public", "schedule", "slots"]);
+  const parts = url.pathname.split("/").filter(Boolean);
+  return "/" + [...parts.slice(0, 8).map(part => words.has(part.toLowerCase()) ? part.toLowerCase() : ":value"),
+    ...(parts.length > 8 ? [":more"] : [])].join("/");
+}
+
 function publicAssetDestinations(html: string, sourceUrl: string) {
   const assets = new Set<string>();
   const visit = (node: PublicNode) => {
@@ -726,6 +746,33 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
   let secondaryAssetBodyLimitExceeded = false;
   let secondaryStylesheetUrlRejected = false;
   const bodyLimitDiagnostics: SimulatorBodyLimitDiagnostic[] = [];
+  const blockedRequestDiagnostics: SimulatorBlockedRequestDiagnostic[] = [];
+  let blockedRequestDiagnosticsTruncated = false;
+  const blockedRequestFields = () => blockedRequestDiagnostics.length ? {
+    blockedRequestDiagnostics,
+    ...(blockedRequestDiagnosticsTruncated ? { blockedRequestDiagnosticsTruncated: true as const } : {}),
+  } : {};
+  const recordBlockedMethod = (rawUrl: string, kind: string, rawMethod: string) => {
+    if ((kind !== "xhr" && kind !== "fetch") || rawMethod === "GET" || rawMethod === "HEAD") return;
+    let url: URL;
+    try { url = new URL(rawUrl); } catch { return; }
+    if (!(["http:", "https:"].includes(url.protocol) && !url.username && !url.password &&
+      url.origin === new URL(navigation?.url ?? requestedUrl).origin)) return;
+    const method = (["POST", "PUT", "PATCH", "DELETE"].includes(rawMethod) ? rawMethod : "OTHER") as SimulatorBlockedRequestDiagnostic["method"];
+    const pathShape = blockedRequestPathShape(url);
+    const existing = blockedRequestDiagnostics.find(entry => entry.resourceKind === kind.toUpperCase() &&
+      entry.method === method && entry.pathShape === pathShape);
+    if (existing) {
+      if (blockedRequestDiagnostics.reduce((sum, entry) => sum + entry.count, 0) >= MAX_REQUESTS) blockedRequestDiagnosticsTruncated = true;
+      else existing.count += 1;
+      return;
+    }
+    if (blockedRequestDiagnostics.length === 8 || blockedRequestDiagnostics.reduce((sum, entry) => sum + entry.count, 0) >= MAX_REQUESTS) {
+      blockedRequestDiagnosticsTruncated = true; return;
+    }
+    blockedRequestDiagnostics.push({ state: "NOT_EXECUTED", resourceKind: kind.toUpperCase() as "XHR" | "FETCH",
+      method, reason: "METHOD_NOT_ALLOWED", pathShape, count: 1 });
+  };
   let bodyLimitDiagnosticsTruncated = false;
   const recordBodyLimit = (resourceKind: SimulatorBodyLimitDiagnostic["resourceKind"], diagnostic: OwnedCollectorBodyLimitDiagnostic) => {
     const existing = bodyLimitDiagnostics.find(entry => entry.resourceKind === resourceKind && entry.phase === diagnostic.phase &&
@@ -810,7 +857,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
       // A rejected stylesheet cannot invalidate them or prove rendering completed.
       return { ...facts, method: "BROWSER",
         renderComplete: false, renderWarning: warning, contentProvenance: "MAIN_DOCUMENT_HTTP",
-        blockedRequests, admittedRequests: requestCount, ...bodyLimitFields(warning) };
+        blockedRequests, admittedRequests: requestCount, ...bodyLimitFields(warning), ...blockedRequestFields() };
     } catch (error) { throw tagSimulatorResearchFailure(error, "BROWSER_DOCUMENT"); }
   };
   const terminalMainObservation = (): SimulatorResearchResult => {
@@ -840,15 +887,17 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
       const operation = (async () => {
         const request = route.request();
         try {
+          const method = request.method();
+          const kind = request.resourceType();
+          recordBlockedMethod(request.url(), kind, method);
           const headers = new Headers(await request.allHeaders());
           const url = publicUrl(request.url());
-          const kind = request.resourceType();
           const resourceKind: SimulatorResearchResourceKind = request.isNavigationRequest() && request.frame() === page?.mainFrame()
             ? "MAIN_DOCUMENT" : kind === "document" ? "SECONDARY_DOCUMENT" : kind === "script" ? "SECONDARY_SCRIPT"
               : kind === "stylesheet" ? "SECONDARY_STYLESHEET" : kind === "xhr" || kind === "fetch" ? "XHR_OR_FETCH" : "OTHER";
           const assetRoot = ["script", "stylesheet"].includes(kind) ? assets.get(url.href) : undefined;
-          const occupancy = request.method() === "GET" && publicOccupancyUrl(url, contractSlug);
-          if (!["document", "script", "stylesheet", "xhr", "fetch"].includes(kind) || !["GET", "HEAD"].includes(request.method()) || [...headers.keys()].some(key => /authorization|cookie|token|api.?key|secret|credential/iu.test(key)) ||
+          const occupancy = method === "GET" && publicOccupancyUrl(url, contractSlug);
+          if (!["document", "script", "stylesheet", "xhr", "fetch"].includes(kind) || !["GET", "HEAD"].includes(method) || [...headers.keys()].some(key => /authorization|cookie|token|api.?key|secret|credential/iu.test(key)) ||
               (["script", "stylesheet"].includes(kind) && /captcha|challenge|turnstile|cdn-cgi/iu.test(`${url.hostname}${url.pathname}`)) ||
               (!sameOfficialHost(requestedUrl, url.href) && !assetRoot && !occupancy)) { blockedRequests += 1; await route.abort("blockedbyclient"); return; }
           if (terminalMainDocument) { blockedRequests += 1; await route.abort("blockedbyclient"); return; }
@@ -944,7 +993,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
         // next bounded source read without claiming a complete browser render.
         return { ...resultFromBody(requestedUrl, safeMainDocument.url, safeMainDocument.status,
           safeMainDocument.contentType, safeMainDocument.body, safeMainDocument.observedAt),
-          method: "BROWSER", blockedRequests, admittedRequests: requestCount,
+          method: "BROWSER", blockedRequests, admittedRequests: requestCount, ...blockedRequestFields(),
           renderComplete: false, contentProvenance: "MAIN_DOCUMENT_HTTP",
           ...(renderWarning ? { renderWarning, ...bodyLimitFields(renderWarning) } : {}),
           ...(responseContracts.length ? { responseContracts } : {}) };
@@ -952,7 +1001,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
       // A rejected/capped leaf stays unavailable to the browser. Other independently
       // admitted reads and the bounded observed DOM remain useful discovery evidence;
       // neither proves that the page or calendar rendered completely.
-      return { ...rendered, method: "BROWSER", blockedRequests, admittedRequests: requestCount, renderComplete: !renderWarning,
+      return { ...rendered, method: "BROWSER", blockedRequests, admittedRequests: requestCount, ...blockedRequestFields(), renderComplete: !renderWarning,
         contentProvenance: "RENDERED_DOM", ...(renderWarning ? { renderWarning, ...bodyLimitFields(renderWarning) } : {}),
         ...(responseContracts.length ? { responseContracts } : {}) };
     } catch (error) { throw tagSimulatorResearchFailure(error, "BROWSER_DOCUMENT"); }

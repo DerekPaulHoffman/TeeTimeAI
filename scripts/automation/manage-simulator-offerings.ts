@@ -6,6 +6,7 @@ import { Prisma } from "@prisma/client";
 
 import { prisma } from "../../src/lib/prisma";
 import { getTimeZoneForCoordinates } from "../../src/lib/timezones";
+import { uschedulePublicTenant } from "../../src/lib/simulators/providers/public-configuration";
 import { runWithCourseSupportWriterTransitionLease, withCourseSupportWriteConflictRetry } from "../../src/lib/automation/course-support-batches";
 import { hasSimulatorSupportOwnership } from "../../src/lib/automation/simulator-support-incidents";
 
@@ -36,6 +37,15 @@ const offeringManifestSchema = z.object({
   bookingWindowDaysAhead: z.number().int().min(1).max(365).optional(),
   providerMetadata: z.record(z.string(), z.json()).optional()
 }).strict().superRefine((row, context) => {
+  if (row.providerFamilyKey === "USCHEDULE") {
+    const tenant = uschedulePublicTenant(row.bookingUrl);
+    const metadata = row.providerMetadata;
+    if (!tenant || !metadata || Object.keys(metadata).length !== 2 || metadata.tenant !== tenant ||
+        typeof metadata.serviceId !== "string" || !/^[1-9]\d{0,9}$/u.test(metadata.serviceId) ||
+        row.supportedDurationsMinutes.length !== 1 || row.supportedDurationsMinutes[0] !== 60 || row.maxPartySize !== null) {
+      context.addIssue({ code: "custom", path: ["providerMetadata"], message: "USchedule requires the exact public tenant, selected service, opaque capacity and only the verified 60-minute rental" });
+    }
+  }
   if (!row.notPublicReason) return;
   if (row.publicAccessStatus !== "NOT_PUBLIC") {
     context.addIssue({ code: "custom", path: ["notPublicReason"], message: "An identity reason requires NOT_PUBLIC" });

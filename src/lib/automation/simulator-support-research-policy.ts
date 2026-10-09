@@ -4,9 +4,9 @@ import { readSafeSimulatorSupportFailure, type SimulatorSupportFailure } from ".
 import { isAcuityPublicResearchRoot, isSimulatorPublicConfigurationSource, knownSimulatorPublicConfigurationFamily, simulatorPublicConfigurationSchema } from "@/lib/simulators/providers/public-configuration";
 
 export const SIMULATOR_RESEARCH_MAX_READS = 6;
-export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-resource-local-v3";
+export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-passive-method-shapes-v4";
 export function getSimulatorResearchImplementationVersion(url: string) {
-  return knownSimulatorPublicConfigurationFamily(url) ? "public-calendar-known-readers-resource-local-v2" : SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION;
+  return knownSimulatorPublicConfigurationFamily(url) ? "public-calendar-known-readers-passive-method-shapes-v3" : SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION;
 }
 export const SIMULATOR_RESEARCH_SOURCE_NAMES = ["official", "booking", "booking-root", "evidence"] as const;
 export type SimulatorResearchSource = (typeof SIMULATOR_RESEARCH_SOURCE_NAMES)[number];
@@ -117,6 +117,20 @@ const bodyLimitDiagnostic = z.object({
 const bodyLimitDiagnostics = z.array(bodyLimitDiagnostic).min(1).max(8).refine(entries =>
   entries.reduce((sum, entry) => sum + entry.count, 0) <= 32 &&
   new Set(entries.map(entry => `${entry.resourceKind}:${entry.phase}:${entry.observedSizeBand}`)).size === entries.length);
+const blockedRequestPathWords = new Set(["api", "booking", "changefield", "availability", "calendar", "times", "public", "schedule", "slots", ":value"]);
+const blockedRequestDiagnostic = z.object({
+  state: z.literal("NOT_EXECUTED"), resourceKind: z.enum(["XHR", "FETCH"]),
+  method: z.enum(["POST", "PUT", "PATCH", "DELETE", "OTHER"]), reason: z.literal("METHOD_NOT_ALLOWED"),
+  pathShape: z.string().max(120).refine(path => path === "/" || path.startsWith("/") && (() => {
+    const parts = path.slice(1).split("/");
+    return parts.length <= 9 && parts.every((part, index) => blockedRequestPathWords.has(part) ||
+      part === ":more" && index === parts.length - 1 && parts.length === 9);
+  })()),
+  count: z.number().int().min(1).max(32),
+}).strict();
+const blockedRequestDiagnostics = z.array(blockedRequestDiagnostic).min(1).max(8).refine(entries =>
+  entries.reduce((sum, entry) => sum + entry.count, 0) <= 32 &&
+  new Set(entries.map(entry => `${entry.resourceKind}:${entry.method}:${entry.reason}:${entry.pathShape}`)).size === entries.length);
 const publicReadEvidence = z.object({
   sourceFingerprint: z.string().regex(/^[a-f0-9]{64}$/i),
   accessControlsObserved: z.literal(true),
@@ -133,6 +147,7 @@ const observation = z.object({
   researchImplementationVersion: z.string().regex(/^[a-z0-9-]{1,80}$/u).optional(),
   renderWarning: renderWarning.optional(), configurationDiagnostic: configurationDiagnostic.optional(),
   bodyLimitDiagnostics: bodyLimitDiagnostics.optional(), bodyLimitDiagnosticsTruncated: z.literal(true).optional(),
+  blockedRequestDiagnostics: blockedRequestDiagnostics.optional(), blockedRequestDiagnosticsTruncated: z.literal(true).optional(),
   publicConfiguration: simulatorPublicConfigurationSchema.optional(),
 }).strict().refine(entry => entry.outcome === "HARD_FAILED" ? Boolean(entry.requestId && entry.failure && entry.httpStatus === 0) :
   !entry.failure || Boolean(entry.requestId && entry.httpStatus === 0 && ["NETWORK_FAILED", "CAPACITY_BUSY"].includes(entry.outcome)))
@@ -143,6 +158,10 @@ const observation = z.object({
     entry.httpStatus >= 200 && entry.httpStatus < 300 && entry.publicReadEvidence?.accessControlsObserved === true &&
     !entry.publicReadEvidence.accessControls.length && isSimulatorPublicConfigurationSource(entry.publicConfiguration, entry.sourceUrl)))
   .refine(entry => !entry.bodyLimitDiagnosticsTruncated || Boolean(entry.bodyLimitDiagnostics))
+  .refine(entry => !entry.blockedRequestDiagnosticsTruncated || Boolean(entry.blockedRequestDiagnostics))
+  .refine(entry => !entry.blockedRequestDiagnostics || Boolean(entry.rendered && entry.outcome === "READ" &&
+    entry.httpStatus >= 200 && entry.httpStatus < 300 && entry.publicReadEvidence?.accessControlsObserved === true &&
+    !entry.publicReadEvidence.accessControls.length))
   .refine(entry => !entry.bodyLimitDiagnostics || Boolean(entry.rendered && entry.outcome === "READ" &&
     entry.httpStatus >= 200 && entry.httpStatus < 300 && entry.renderWarning?.startsWith("SECONDARY_") &&
     entry.publicReadEvidence?.renderComplete === false));
@@ -368,6 +387,14 @@ export function getSimulatorResearchGuide(input: {
   });
   return { readsRemaining: SIMULATOR_RESEARCH_MAX_READS - input.state.readCount,
     inFlight: Boolean(input.state.inFlight), suggestedReads,
+    blockedRequestDiagnostics: input.state.history.flatMap(entry => entry.blockedRequestDiagnostics &&
+      entry.sourceFingerprint === input.state.sourceFingerprint && entry.rendered && entry.outcome === "READ" &&
+      entry.httpStatus >= 200 && entry.httpStatus < 300 && entry.publicReadEvidence?.accessControlsObserved === true &&
+      !entry.publicReadEvidence.accessControls.length && Date.parse(entry.observedAt) <= input.now.getTime() &&
+      Date.parse(entry.observedAt) >= input.now.getTime() - 30 * 60_000
+      ? [{ observedAt: entry.observedAt, source: entry.source, rendered: true as const,
+        state: "NOT_EXECUTED" as const, diagnostics: entry.blockedRequestDiagnostics,
+        ...(entry.blockedRequestDiagnosticsTruncated ? { truncated: true as const } : {}) }] : []),
     publicConfigurations: input.state.history.flatMap(entry => entry.publicConfiguration &&
       isSimulatorPublicConfigurationSource(entry.publicConfiguration, entry.sourceUrl) &&
       entry.sourceFingerprint === input.state.sourceFingerprint && entry.httpStatus >= 200 && entry.httpStatus < 300 &&

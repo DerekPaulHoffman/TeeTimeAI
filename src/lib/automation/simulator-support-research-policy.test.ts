@@ -215,6 +215,55 @@ describe("persisted known-reader configuration", () => {
   });
 });
 
+describe("passive blocked-method receipts", () => {
+  const diagnostic = { state: "NOT_EXECUTED" as const, resourceKind: "FETCH" as const,
+    method: "POST" as const, reason: "METHOD_NOT_ALLOWED" as const, pathShape: "/booking/changefield", count: 2 };
+  const entry = { source: "booking" as const, requestedUrl: bookingUrl, sourceUrl: bookingUrl,
+    sourceFingerprint: fingerprint, observedAt: now.toISOString(), httpStatus: 200, rendered: true,
+    outcome: "READ" as const, requestId: "11111111-1111-4111-8111-111111111111",
+    publicReadEvidence: { sourceFingerprint: fingerprint, accessControlsObserved: true as const, accessControls: [],
+      method: "BROWSER" as const, renderComplete: false }, blockedRequestDiagnostics: [diagnostic] };
+  const state = () => readSimulatorResearchState({ ...empty(), readCount: 1, history: [entry] }, fingerprint);
+  const guide = (research = state(), at = now) => getSimulatorResearchGuide({ state: research, officialUrl, bookingUrl,
+    now: at, priorFailedRoutes: [] });
+  it("keeps a strict owned diagnostic, but never treats an old or adopted receipt as fresh guidance", () => {
+    expect(state().history[0].blockedRequestDiagnostics).toEqual([diagnostic]);
+    expect(guide().blockedRequestDiagnostics).toEqual([{ observedAt: now.toISOString(), source: "booking", rendered: true,
+      state: "NOT_EXECUTED", diagnostics: [diagnostic] }]);
+    expect(guide(state(), new Date(now.getTime() + 31 * 60_000)).blockedRequestDiagnostics).toEqual([]);
+    expect(guide({ ...state(), sourceFingerprint: "b".repeat(64) }).blockedRequestDiagnostics).toEqual([]);
+    expect(readSimulatorResearchState({ ...empty(), readCount: 1,
+      history: [{ ...entry, blockedRequestDiagnostics: undefined }] }, fingerprint).history[0].blockedRequestDiagnostics).toBeUndefined();
+  });
+  it("rejects private/raw fields, malformed shapes, excess counts and denied-source labels", () => {
+    for (const invalid of [
+      [{ ...diagnostic, url: "https://private.example.test" }],
+      [{ ...diagnostic, pathShape: "/booking/customer-9273?token=private" }],
+      [{ ...diagnostic, method: "BOOK" }],
+      [{ ...diagnostic, resourceKind: "DOCUMENT" }],
+      [{ ...diagnostic, count: 33 }],
+      [diagnostic, diagnostic],
+    ]) expect(() => readSimulatorResearchState({ ...empty(), readCount: 1,
+      history: [{ ...entry, blockedRequestDiagnostics: invalid }] }, fingerprint)).toThrow();
+    for (const denied of [{ ...entry, httpStatus: 403 }, { ...entry, outcome: "NETWORK_FAILED" },
+      { ...entry, publicReadEvidence: { ...entry.publicReadEvidence, accessControls: ["ACCOUNT_REQUIRED"] } }]) {
+      expect(() => readSimulatorResearchState({ ...empty(), readCount: 1, history: [denied] }, fingerprint)).toThrow();
+    }
+  });
+  it("reconsiders only an older incomplete collector route; protected denials and spent budgets stay fenced", () => {
+    const old = { url: bookingUrl, rendered: true, httpStatus: 200, outcome: "READ" as const,
+      renderWarning: "SECONDARY_REQUEST_BUDGET_EXHAUSTED" as const, renderComplete: false,
+      accessControlsObserved: true as const, accessControls: [], requestId: entry.requestId,
+      observedAt: now.toISOString(), researchImplementationVersion: "public-calendar-resource-local-v3" };
+    expect(currentSimulatorResearchBlockedRoutes([old], now)).toEqual([]);
+    expect(currentSimulatorResearchBlockedRoutes([{ ...old,
+      researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION }], now)).toHaveLength(1);
+    expect(currentSimulatorResearchBlockedRoutes([{ ...old, httpStatus: 403 }], now)).toHaveLength(1);
+    expect(currentSimulatorResearchBlockedRoutes([{ ...old, accessControls: ["ACCOUNT_REQUIRED" as const] }], now)).toHaveLength(1);
+    expect(() => select({ ...state(), readCount: 6 }, { source: "booking", rendered: true })).toThrow("budget");
+  });
+});
+
 describe("durable simulator research failure memory", () => {
   it("preserves closed category states, leaves legacy omissions unknown and rejects inconsistent or private facts", () => {
     const base = { adminOnlyState: "FALSE", typeToken: "simulator", reason: "CATEGORY_NOT_BAYTIME" };

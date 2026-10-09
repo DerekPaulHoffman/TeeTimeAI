@@ -6,7 +6,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { isSearchWindowActive } from "./date-boundary";
 import { getSyntheticMultiCycleExpiresAt } from "./synthetic-test-window";
-import { listSimulatorSupportDispatchCandidates, validateSimulatorEngineeringAuthority } from "./simulator-support-incidents";
+import { listSimulatorSupportDispatchCandidates, reconcileSimulatorCapabilityWakeups, validateSimulatorEngineeringAuthority } from "./simulator-support-incidents";
 import { createSimulatorSupportIntentDigest, isCurrentSimulatorSupportSource, isValidSimulatorEngineeringAuthority, isValidSimulatorSupportClaim, SIMULATOR_SUPPORT_SOURCE_SELECT, type SimulatorEngineeringAuthority, type SimulatorSupportClaim, type SimulatorSupportSource } from "./simulator-support-policy";
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
 import { readSimulatorResearchFailureMemory, type SimulatorResearchFailureMemory, type SimulatorResearchState } from "./simulator-support-research-policy";
@@ -445,7 +445,10 @@ export async function planCourseSupportCourseDispatch(input: {
     // launch list as evidence that no active-alert course is waiting.
     if (availableStarts > 0 || live.length === 0) {
       const outdoorCandidates = await listCourseSupportDispatchCandidates(now, tx);
-      const simulatorCandidates = (await listSimulatorSupportDispatchCandidates(now, tx)).map(candidate => ({ ...candidate, selectionKey: `simulator:${candidate.offeringId}` }));
+      const dueSimulatorCandidates = await listSimulatorSupportDispatchCandidates(now, tx);
+      const awakened = await reconcileSimulatorCapabilityWakeups(now, tx);
+      const simulatorCandidates = (awakened ? await listSimulatorSupportDispatchCandidates(now, tx) : dueSimulatorCandidates)
+        .map(candidate => ({ ...candidate, selectionKey: `simulator:${candidate.offeringId}` }));
       const candidates = [...outdoorCandidates, ...simulatorCandidates];
       const candidateCourses = [...new Set(candidates.map((candidate) => candidate.courseId))];
       const [courses, preferences] = await Promise.all([

@@ -36,6 +36,12 @@ function publishedConfig(patch: Record<string, unknown> = {}) {
 
 const acuitySource = "https://app.acuityscheduling.com/schedule/2991fba2";
 const golfBookSource = "https://public-bays.golfbook.in/calendar.php";
+const uscheduleSource = "https://clients.uschedule.com/syntheticvenue/booking";
+const uscheduleHtml = `<select id="select_service"><option value="29547" selected>Simulator Rental</option></select>
+  <select id="select_length"><option value="60" selected>1 hour</option></select>
+  <div class="next_avail_results"><div class="next_avail_item" data-time="101020261600" data-empid="0">Public start</div></div>
+  <a id="more_next_avail">Show more</a><script>var lastAvailTime = '101020261600';</script>
+  <input name="customerEmail" value="secret@example.test"><input name="sessionToken" value="never-persist-this">`;
 const tenantRoot = "https://onegolfhaven.as.me/";
 function publishedBootstrap(options: { navigationUrl?: string | null; navigationTitle?: string; buttonUrl?: string; buttonHidden?: boolean; bannerHidden?: boolean } = {}) {
   const state: Record<string, unknown> = { siteData: { snapshot: { properties: { navigation: options.navigationUrl === null ? [] : [
@@ -100,6 +106,15 @@ function renderedBrowser(requests: RequestFixture[], html = "<h1>Public rentals<
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); vi.clearAllMocks(); });
 
 describe("owned known-reader public configuration", () => {
+  it("projects only the structural USchedule tenant, selected public service and verified default hour", async () => {
+    const fetch = vi.fn(async () => response(uscheduleHtml));
+    const result = await collectSimulatorSupportResearch({ url: uscheduleSource }, { fetch, lease, now: () => instant });
+    expect(result.publicConfiguration).toEqual({ family: "USCHEDULE", tenant: "syntheticvenue", serviceId: "29547",
+      durationMinutes: 60, availabilityKind: "OPAQUE_POOLED" });
+    expect(result.publicConfiguration).not.toHaveProperty("durationOptionsMinutes");
+    expect(JSON.stringify(result.publicConfiguration)).not.toMatch(/secret@example|never-persist-this|customer|session/u);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
   it("returns inert Acuity rental metadata from one existing owned read without private fields", async () => {
     const fetch = vi.fn(async () => response(acuityConfig()));
     const result = await collectSimulatorSupportResearch({ url: acuitySource }, { fetch, lease, now: () => instant });
@@ -829,14 +844,16 @@ describe("bounded owned simulator public research transport", () => {
   it("keeps a declared capped stylesheet warning and admitted JSON shape with an empty client app", async () => {
     const stylesheet = `${source}/large.css`, data = `${source}/public/state`;
     const main = `${publishedBootstrap()}<link rel='stylesheet' href='/large.css'>`;
-    const view = renderedBrowser([{ url: `${source}/` }, { url: stylesheet, kind: "stylesheet" }, { url: data, kind: "xhr" }], main);
+    const view = renderedBrowser([{ url: `${source}/` }, { url: stylesheet, kind: "stylesheet" }, { url: data, kind: "xhr" },
+      { url: `${source}/booking/changefield?secret=never-persist-this`, kind: "fetch", method: "POST" }], main);
     const fetch = vi.fn(async (url: unknown) => String(url) === stylesheet
       ? new Response("", { headers: { "content-type": "text/css", "content-length": "1500001" } })
       : String(url) === data ? response('{"publicAvailable":true}', 200, "application/json") : response(main));
     const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
-    expect(result).toMatchObject({ links: [tenantRoot], bookingLinks: [tenantRoot], blockedRequests: 1,
+    expect(result).toMatchObject({ links: [tenantRoot], bookingLinks: [tenantRoot], blockedRequests: 2,
       renderComplete: false, contentProvenance: "MAIN_DOCUMENT_HTTP", renderWarning: "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED",
       bodyLimitDiagnostics: [{ resourceKind: "SECONDARY_STYLESHEET", phase: "COLLECTOR_HEADERS", observedSizeBand: "OVER_LIMIT_UP_TO_2X", count: 1 }],
+      blockedRequestDiagnostics: [{ state: "NOT_EXECUTED", method: "POST", pathShape: "/booking/changefield", count: 1 }],
       responseContracts: [{ pathShape: "/public/:value", httpStatus: 200 }] });
     expect(fetch).toHaveBeenCalledTimes(3);
   });
@@ -849,6 +866,48 @@ describe("bounded owned simulator public research transport", () => {
     expect(fetch).toHaveBeenCalledTimes(3); expect(result.blockedRequests).toBe(5);
     for (const route of view.routes.slice(3)) expect(route.abort).toHaveBeenCalledOnce();
     for (const [, options] of fetch.mock.calls) expect(options).toMatchObject({ credentials: "omit", method: "GET" });
+  });
+  it("retains only a bounded NOT_EXECUTED shape for same-origin blocked XHR/fetch methods", async () => {
+    const privateUrl = `${source}/booking/changefield?email=secret@example.test&token=never-persist-this`;
+    const requests: RequestFixture[] = [{ url: `${source}/` },
+      { url: privateUrl, kind: "fetch", method: "POST", headers: { Cookie: "private-session" } },
+      { url: privateUrl, kind: "fetch", method: "POST" },
+      { url: `${source}/customer-9273/private-token`, kind: "xhr", method: "PATCH" },
+      { url: "https://unrelated.example.test/booking/changefield", kind: "fetch", method: "POST" },
+      { url: `${source}/booking/changefield`, kind: "script", method: "POST" }];
+    const view = renderedBrowser(requests), fetch = vi.fn(async () => response("<h1>Public page</h1>"));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(result.blockedRequests).toBe(5);
+    expect(result.blockedRequestDiagnostics).toEqual([
+      { state: "NOT_EXECUTED", resourceKind: "FETCH", method: "POST", reason: "METHOD_NOT_ALLOWED", pathShape: "/booking/changefield", count: 2 },
+      { state: "NOT_EXECUTED", resourceKind: "XHR", method: "PATCH", reason: "METHOD_NOT_ALLOWED", pathShape: "/:value/:value", count: 1 },
+    ]);
+    expect(JSON.stringify(result)).not.toMatch(/secret@example|never-persist-this|private-session|customer-9273|private-token|unrelated\.example/u);
+    for (const route of view.routes.slice(1)) expect(route.abort).toHaveBeenCalledOnce();
+  });
+  it("bounds and deduplicates blocked-method diagnostics independently of the admitted-read cap", async () => {
+    const requests: RequestFixture[] = [{ url: `${source}/` },
+      ...Array.from({ length: 40 }, () => ({ url: `${source}/booking/changefield?secret=private`, kind: "fetch", method: "POST" }))];
+    const view = renderedBrowser(requests), fetch = vi.fn(async () => response("<h1>Public page</h1>"));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(result.blockedRequests).toBe(40);
+    expect(result.blockedRequestDiagnostics).toEqual([{ state: "NOT_EXECUTED", resourceKind: "FETCH", method: "POST",
+      reason: "METHOD_NOT_ALLOWED", pathShape: "/booking/changefield", count: 32 }]);
+    expect(result.blockedRequestDiagnosticsTruncated).toBe(true);
+  });
+  it("retains no more than eight distinct blocked-method shapes", async () => {
+    const shapes = ["api", "booking", "changefield", "availability", "calendar", "times", "public", "schedule", "slots"];
+    const view = renderedBrowser([{ url: `${source}/` }, ...shapes.map(part => ({ url: `${source}/${part}?private=never-persist-this`,
+      kind: "xhr", method: "POST" }))]);
+    const fetch = vi.fn(async () => response("<h1>Public page</h1>"));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(result.blockedRequestDiagnostics).toHaveLength(8);
+    expect(result.blockedRequestDiagnosticsTruncated).toBe(true);
+    expect(result.blockedRequestDiagnostics?.reduce((sum, row) => sum + row.count, 0)).toBe(8);
+    expect(JSON.stringify(result)).not.toContain("never-persist-this");
   });
   it("does not execute initial challenge scripts or return challenge payloads", async () => {
     const html = "<h1>Verify you are human</h1><div class='cf-turnstile'></div><script>runChallenge()</script>";

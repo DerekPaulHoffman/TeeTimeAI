@@ -67,6 +67,20 @@ describe("protected simulator offering review command", () => {
     });
     expect(mocks.writerLease).not.toHaveBeenCalled();
   });
+  it("accepts only a source-bound one-hour USchedule manifest with opaque capacity", () => {
+    const reviewed = { ...manifest, bookingUrl: "https://clients.uschedule.com/syntheticvenue/booking",
+      maxPartySize: null, supportedDurationsMinutes: [60], providerFamilyKey: "USCHEDULE",
+      providerMetadata: { tenant: "syntheticvenue", serviceId: "29547" } };
+    expect(parseSimulatorOfferingManifest(reviewed)[0]).toMatchObject({ providerFamilyKey: "USCHEDULE",
+      providerMetadata: { tenant: "syntheticvenue", serviceId: "29547" }, supportedDurationsMinutes: [60] });
+    for (const changed of [{ bookingUrl: "https://clients.uschedule.com/other/booking" },
+      { bookingUrl: "https://clients.uschedule.com/syntheticvenue/booking/changefield" },
+      { providerMetadata: { tenant: "syntheticvenue", serviceId: "29547", session: "private" } },
+      { supportedDurationsMinutes: [60, 90] }, { maxPartySize: 5 }]) {
+      expect(() => parseSimulatorOfferingManifest({ ...reviewed, ...changed })).toThrow();
+    }
+    expect(mocks.writerLease).not.toHaveBeenCalled();
+  });
 
   it("requires a named target before applying and rejects a different loaded target", async () => {
     expect(() => parseSimulatorOfferingCommand(["--manifest", "review.json", "--apply"])).toThrow("expected-database-host");

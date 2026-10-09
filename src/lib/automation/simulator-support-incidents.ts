@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
 import { createSimulatorSupportIntentDigest, isCurrentSimulatorSupportSource, isValidSimulatorEngineeringAuthority, isValidSimulatorSupportClaim, SIMULATOR_SUPPORT_SOURCE_SELECT, type SimulatorEngineeringAuthority } from "./simulator-support-policy";
 import type { CourseDispatchAudit } from "./course-support-course-dispatch";
+import { simulatorCapabilityWakeupReceipt } from "./simulator-capability-wakeup";
 
 const DISPATCH_PROMPT_VERSION = "course-support-course-dispatch-v1";
 const ENGINEERING_HISTORY_LIMIT = 64;
@@ -147,4 +148,58 @@ export async function listSimulatorSupportDispatchCandidates(now: Date, tx: Pris
       ...(engineering ? { engineeringAuthority: engineering.authority, engineeringSearchRefs: engineering.searchRefs } : {}) });
   }
   return candidates;
+}
+
+/** Inspect a small, separate future-retry window after the ordinary due read.
+ * The existing planner and claim paths still own admission and all capacity.
+ */
+export async function reconcileSimulatorCapabilityWakeups(now: Date, tx: Prisma.TransactionClient) {
+  const future = await tx.simulatorSupportIncident.findMany({
+    where: { status: "AUTO_INVESTIGATING", retryAt: { gt: now }, offering: {
+      kind: "SIMULATOR", active: true, publicAccessStatus: { not: "NOT_PUBLIC" },
+      monitoringState: { notIn: ["FINAL_TECHNICAL", "FINAL_IDENTITY"] }, automationEligibility: { not: "BLOCKED" },
+    } },
+    include: { offering: { include: { course: { select: { timeZone: true } } } } },
+    orderBy: [{ retryAt: "asc" }, { id: "asc" }], take: 32,
+  });
+  let advanced = 0;
+  const { parseCourseDispatchAudit } = await import("./course-support-course-dispatch");
+  for (const incident of future) {
+    const fingerprint = getSimulatorOfferingSourceFingerprint(incident.offering);
+    // A newer completed attempt, including one using the current reader, supersedes
+    // an older generic receipt. Never search backwards for a favorable observation.
+    const latest = await tx.automationRun.findFirst({ where: {
+      promptVersion: DISPATCH_PROMPT_VERSION,
+      audit: { path: ["target", "offeringId"], equals: incident.offeringId },
+    }, orderBy: [{ startedAt: "desc" }, { id: "desc" }],
+    select: { kind: true, status: true, outcome: true, startedAt: true, completedAt: true, audit: true } });
+    if (!latest || latest.kind !== "OTHER" || latest.status !== "COMPLETED" || latest.outcome !== "simulator_retryable_failed" ||
+        !latest.completedAt || latest.startedAt > latest.completedAt ||
+        JSON.stringify(latest.audit).length > 256 * 1024) continue;
+    const audit = parseCourseDispatchAudit(latest.audit);
+    if (!audit || !simulatorCapabilityWakeupReceipt({ audit, incidentId: incident.id,
+      courseId: incident.offering.courseId, offeringId: incident.offeringId,
+      sourceFingerprint: fingerprint, completedAt: latest.completedAt, now })) continue;
+    if (await hasSimulatorSupportOwnership(tx, incident.offeringId)) continue;
+    const refs = audit.target.searchRefs;
+    const searches = await tx.teeSearch.findMany({ where: { id: { in: refs.map(ref => ref.id) } }, select: SIMULATOR_SUPPORT_SOURCE_SELECT });
+    const hasCurrentRealDemand = searches.some(search => {
+      const ref = refs.find(candidate => candidate.id === search.id);
+      return ref && isCurrentSimulatorSupportSource({ search, ref, offeringId: incident.offeringId,
+        trafficClass: "REAL", timeZone: incident.offering.course.timeZone, now });
+    });
+    if (!hasCurrentRealDemand) {
+      // Only the existing original consumed synthetic lineage can outlive demand.
+      if (audit.target.trafficClass !== "SYNTHETIC") continue;
+      const engineering = await findSimulatorEngineeringAuthority(tx, { incidentId: incident.id,
+        courseId: incident.offering.courseId, offeringId: incident.offeringId,
+        offeringSourceFingerprint: fingerprint }, now);
+      if (!engineering) continue;
+    }
+    const result = await tx.simulatorSupportIncident.updateMany({ where: {
+      id: incident.id, status: "AUTO_INVESTIGATING", updatedAt: incident.updatedAt, retryAt: incident.retryAt,
+    }, data: { retryAt: now } });
+    advanced += result.count;
+  }
+  return advanced;
 }

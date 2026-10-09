@@ -839,6 +839,73 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     const interrupted = await lane.readSimulatorSupportClaim(owner);
     await lane.retireSimulatorSupport({ ...owner, revision: interrupted.revision });
   });
+  it("persists only a blocked same-origin method shape under the original owned source receipt", async () => {
+    const bookingUrl = "https://clients.uschedule.com/syntheticvenue/booking";
+    const f = await fixture(15, false, bookingUrl);
+    const html = "<h1>Public simulator rental</h1>";
+    const blockedUrl = `${new URL(bookingUrl).origin}/booking/changefield?email=secret@example.test&token=never-persist-this`;
+    let handler!: (route: Route) => Promise<void>;
+    const frame = {}, blocked = vi.fn(async () => undefined);
+    const page = { mainFrame: () => frame, url: () => bookingUrl, content: vi.fn(async () => html), goto: vi.fn(async () => {
+      for (const [url, method, kind] of [[bookingUrl, "GET", "document"], [blockedUrl, "POST", "fetch"]]) {
+        await handler({ request: () => ({ url: () => url, method: () => method, allHeaders: async () => ({}),
+          resourceType: () => kind, isNavigationRequest: () => kind === "document", frame: () => frame }),
+          abort: blocked, fulfill: vi.fn(async () => undefined) } as unknown as Route);
+      }
+      return { status: () => 200 };
+    }) };
+    const context = { newPage: async () => page, close: vi.fn(async () => undefined), routeWebSocket: vi.fn(async () => undefined),
+      route: vi.fn(async (_pattern: string, callback: typeof handler) => { handler = callback; }) };
+    const fetch = vi.fn(async () => new Response(html, { headers: { "content-type": "text/html" } }));
+    const lease = (async (_host: string, worker: () => Promise<unknown>) => ({ acquired: true as const, value: await worker() })) as
+      NonNullable<import("./simulator-support-research").SimulatorResearchDependencies["lease"]>;
+    const browser = async () => ({ newContext: async () => context, close: vi.fn(async () => undefined) }) as unknown as
+      Awaited<ReturnType<NonNullable<import("./simulator-support-research").SimulatorResearchDependencies["browser"]>>>;
+    const read = await lane.readSimulatorSupportSource({ ...f.owner, source: "booking", rendered: true }, { fetch, lease, browser });
+    if (!read.acquired) throw new Error("Fixture source settlement was busy.");
+    const diagnostic = [{ state: "NOT_EXECUTED", resourceKind: "FETCH", method: "POST", reason: "METHOD_NOT_ALLOWED",
+      pathShape: "/booking/changefield", count: 1 }];
+    expect(read.value.publicSource.blockedRequestDiagnostics).toEqual(diagnostic);
+    expect(read.value.publicSource.admittedRequests).toBe(1);
+    expect(fetch).toHaveBeenCalledOnce(); expect(blocked).toHaveBeenCalledOnce();
+    const current = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
+    expect(current.research.history[0]).toMatchObject({ requestedUrl: bookingUrl, sourceUrl: bookingUrl,
+      blockedRequestDiagnostics: diagnostic, publicReadEvidence: { method: "BROWSER", accessControls: [] } });
+    expect(current.researchGuide.blockedRequestDiagnostics).toMatchObject([{
+      source: "booking", state: "NOT_EXECUTED", diagnostics: diagnostic }]);
+    const saved = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id }, select: { audit: true } });
+    expect(JSON.stringify(saved.audit)).not.toMatch(/secret@example|never-persist-this|customer|POST.*token/u);
+    expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
+  });
+  it("persists only typed USchedule rental selectors under the original owned source receipt", async () => {
+    const bookingUrl = "https://clients.uschedule.com/syntheticvenue/booking";
+    const f = await fixture(15, false, bookingUrl);
+    const before = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });
+    const html = `<select id="select_service"><option value="29547" selected>Simulator Rental</option></select>
+      <select id="select_length"><option value="60" selected>1 hour</option></select>
+      <div class="next_avail_results"><div class="next_avail_item" data-time="101020261600" data-empid="0">Public start</div></div>
+      <script>var lastAvailTime = '101020261600';</script>
+      <input name="customerEmail" value="secret@example.test"><input name="sessionToken" value="never-persist-this">`;
+    const fetch = vi.fn(async () => new Response(html, { headers: { "content-type": "text/html" } }));
+    const read = await lane.readSimulatorSupportSource({ ...f.owner, source: "booking" }, { fetch });
+    if (!read.acquired) throw new Error("Fixture source settlement was busy.");
+    const current = await lane.readSimulatorSupportClaim({ ...f.owner, revision: read.value.revision });
+    const configuration = { family: "USCHEDULE", tenant: "syntheticvenue", serviceId: "29547",
+      durationMinutes: 60, availabilityKind: "OPAQUE_POOLED" };
+    expect(read.value.publicSource.publicConfiguration).toEqual(configuration);
+    expect(current.research).toMatchObject({ readCount: 1, inFlight: null, sourceFingerprint: f.fingerprint,
+      history: [{ source: "booking", requestedUrl: bookingUrl, sourceUrl: bookingUrl,
+        sourceFingerprint: f.fingerprint, outcome: "READ", publicConfiguration: configuration }] });
+    expect(current.researchGuide.publicConfigurations).toContainEqual(expect.objectContaining({ source: "booking",
+      configuration }));
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(JSON.stringify((await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit))
+      .not.toMatch(/secret@example|never-persist-this|customerEmail|sessionToken|Public start/u);
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(before);
+    expect(await client.teeTimeMatch.count({ where: { teeSearchId: f.search.id } })).toBe(0);
+    expect(coreMocks.fetch).not.toHaveBeenCalled();
+    expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
+  });
 
   it("persists a fresh bootstrap booking role and researches only its same-host Acuity schedule", async () => {
     const f = await fixture();

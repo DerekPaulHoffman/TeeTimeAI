@@ -9,6 +9,16 @@ const uniqueIds = z.array(publicId).min(1).max(40).refine(ids => new Set(ids).si
 const duration = z.number().int().min(30).max(240).multipleOf(30);
 const acuityTenantHost = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.as\.me$/u;
 const acuitySchedulePath = /^\/schedule\/[a-zA-Z0-9]{4,40}$/u;
+const uschedulePath = /^\/([a-z][a-z0-9-]{2,62})\/booking$/u;
+
+export function uschedulePublicTenant(sourceUrl: string) {
+  try {
+    const url = new URL(sourceUrl);
+    return url.protocol === "https:" && url.hostname === "clients.uschedule.com" && !url.port &&
+      !url.username && !url.password && !url.search && !url.hash
+      ? uschedulePath.exec(url.pathname)?.[1] : undefined;
+  } catch { return undefined; }
+}
 
 export function isAcuityPublicResearchRoot(sourceUrl: string) {
   try {
@@ -22,7 +32,8 @@ function validDate(value: string) {
 }
 
 /** Exact source contexts understood by the two existing public readers. */
-export function knownSimulatorPublicConfigurationFamily(sourceUrl: string): "ACUITY" | "GOLFBOOK" | undefined {
+export function knownSimulatorPublicConfigurationFamily(sourceUrl: string): "ACUITY" | "GOLFBOOK" | "USCHEDULE" | undefined {
+  if (uschedulePublicTenant(sourceUrl)) return "USCHEDULE";
   try {
     const url = new URL(sourceUrl);
     if (url.protocol !== "https:" || url.port || url.username || url.password || url.hash) return;
@@ -56,15 +67,19 @@ export const simulatorPublicConfigurationSchema = z.discriminatedUnion("family",
     minDurationMinutes: z.number().int().min(30).max(1440), maxDurationMinutes: z.number().int().min(30).max(1440),
     incrementMinutes: z.literal(30), resourceIds: uniqueIds,
   }).strict().refine(value => value.maxDurationMinutes >= value.minDurationMinutes),
+  z.object({ family: z.literal("USCHEDULE"), tenant: z.string().regex(/^[a-z][a-z0-9-]{2,62}$/u),
+    serviceId: publicId, durationMinutes: z.literal(60), availabilityKind: z.literal("OPAQUE_POOLED") }).strict(),
 ]);
 
 export type SimulatorPublicConfiguration = z.infer<typeof simulatorPublicConfigurationSchema>;
 export type AcuityPublicConfiguration = Extract<SimulatorPublicConfiguration, { family: "ACUITY" }>;
 export type GolfBookPublicConfiguration = Extract<SimulatorPublicConfiguration, { family: "GOLFBOOK" }>;
+export type USchedulePublicConfiguration = Extract<SimulatorPublicConfiguration, { family: "USCHEDULE" }>;
 
 export function isSimulatorPublicConfigurationSource(configuration: SimulatorPublicConfiguration, sourceUrl: string) {
   if (knownSimulatorPublicConfigurationFamily(sourceUrl) !== configuration.family) return false;
   const url = new URL(sourceUrl);
-  return configuration.family === "ACUITY" ? configuration.ownerKey === url.pathname.split("/").at(-1) :
-    url.pathname !== "/bookingsheet.php" || configuration.date === url.searchParams.get("date");
+  if (configuration.family === "ACUITY") return configuration.ownerKey === url.pathname.split("/").at(-1);
+  if (configuration.family === "USCHEDULE") return configuration.tenant === uschedulePublicTenant(sourceUrl);
+  return url.pathname !== "/bookingsheet.php" || configuration.date === url.searchParams.get("date");
 }

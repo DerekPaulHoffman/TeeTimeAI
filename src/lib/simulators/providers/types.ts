@@ -2,6 +2,8 @@ export type SimulatorProviderOffering = {
   id: string;
   courseId: string;
   bookingUrl: string;
+  active?: boolean;
+  publicAccessStatus?: string;
   providerFamilyKey: string | null;
   providerMetadata: unknown;
   maxPartySize: number | null;

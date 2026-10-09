@@ -417,6 +417,8 @@ export async function readSimulatorSupportSource(input: Owner & { source?: Simul
         ...(read.configurationDiagnostic ? { configurationDiagnostic: read.configurationDiagnostic } : {}),
         ...(read.bodyLimitDiagnostics ? { bodyLimitDiagnostics: read.bodyLimitDiagnostics } : {}),
         ...(read.bodyLimitDiagnosticsTruncated ? { bodyLimitDiagnosticsTruncated: true as const } : {}),
+        ...(read.blockedRequestDiagnostics ? { blockedRequestDiagnostics: read.blockedRequestDiagnostics } : {}),
+        ...(read.blockedRequestDiagnosticsTruncated ? { blockedRequestDiagnosticsTruncated: true as const } : {}),
         ...(read.publicConfiguration ? { publicConfiguration: read.publicConfiguration } : {}),
         ...(outcome === "READ" && read.accessControlsObserved === true ? { publicReadEvidence: {
           sourceFingerprint: row.source.fingerprint,
