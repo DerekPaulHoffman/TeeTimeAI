@@ -17,7 +17,7 @@ const sameFailure = (actual: SimulatorResearchBlockedRoute, copied: SimulatorRes
   JSON.stringify(actual.configurationDiagnostic) === JSON.stringify(copied.configurationDiagnostic);
 
 /** Actual, already source-filtered owned receipts may prove a tooling route recovered.
- * A partial page permits only later bounded investigation, never monitoring proof.
+ * A successful page permits only later bounded investigation, never monitoring proof.
  */
 export function selectRecoveredSimulatorResearchRoutes(input: {
   actualRoutes: readonly SimulatorResearchBlockedRoute[];
@@ -28,11 +28,12 @@ export function selectRecoveredSimulatorResearchRoutes(input: {
   const evaluated = new Set<string>();
   const positives = input.actualRoutes.filter(route => route.rendered && route.outcome === "READ" &&
     route.httpStatus >= 200 && route.httpStatus < 300 && !route.failure && hasReceipt(route) &&
-    route.accessControlsObserved === true && route.accessControls?.length === 0 && route.renderComplete === false &&
+    route.accessControlsObserved === true && route.accessControls?.length === 0 &&
     // Older durable public receipts did not retain the optional warning/version.
     // Their observed access and original receipt can authorize another bounded
     // investigation without inventing the missing collector diagnostics.
-    (route.renderWarning === undefined || route.renderWarning.startsWith("SECONDARY_")))
+    (route.renderComplete === true ? route.renderWarning === undefined :
+      route.renderComplete === false && (route.renderWarning === undefined || route.renderWarning.startsWith("SECONDARY_"))))
     .sort((left, right) => clock(right) - clock(left));
   for (const positive of positives) {
     const routeKey = key(positive);

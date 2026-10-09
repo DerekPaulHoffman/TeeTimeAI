@@ -12,6 +12,8 @@ const positive: SimulatorResearchBlockedRoute = { url, rendered: true, httpStatu
   observedAt: "2026-10-08T04:00:00.000Z", requestId: "22222222-2222-4222-8222-222222222222", outcome: "READ",
   accessControlsObserved: true, accessControls: [], renderComplete: false,
   renderWarning: "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED" };
+const complete: SimulatorResearchBlockedRoute = { ...positive, observedAt: "2026-10-08T05:00:00.000Z",
+  requestId: "44444444-4444-4444-8444-444444444444", renderComplete: true, renderWarning: undefined };
 const recover = (actualRoutes: SimulatorResearchBlockedRoute[], inheritedRoutes: SimulatorResearchBlockedRoute[] = []) =>
   selectRecoveredSimulatorResearchRoutes({ actualRoutes, inheritedRoutes, now });
 
@@ -101,5 +103,55 @@ describe("later owned public research recovery", () => {
     ]) expect(recover([legacyPartial, failed, denied]).size).toBe(0);
     expect(recover([legacyPartial], [failed]).size).toBe(0);
     expect(recover([failed], [legacyPartial]).size).toBe(0);
+  });
+
+  it("uses a later complete owned public receipt to retire the same-route tooling failure after cooldown", () => {
+    const copied = { ...failed, observedAt: undefined, requestId: undefined };
+    const actual = [complete, failed];
+    expect([...recover(actual, [copied]).values()]).toEqual([complete]);
+    expect(actual).toEqual([complete, failed]);
+    expect(copied.observedAt).toBeUndefined();
+    expect(complete.renderWarning).toBeUndefined();
+    expect(complete.renderComplete).toBe(true);
+  });
+
+  it("uses the newest actual complete receipt before cooldown instead of an older partial one", () => {
+    const recentComplete = { ...complete, observedAt: "2026-10-08T16:45:00.000Z",
+      requestId: "55555555-5555-4555-8555-555555555555" };
+    const copied = { ...failed, observedAt: undefined, requestId: undefined };
+    expect(recover([positive, failed, recentComplete], [copied]).size).toBe(0);
+    expect([...selectRecoveredSimulatorResearchRoutes({ actualRoutes: [positive, failed, recentComplete],
+      inheritedRoutes: [copied], now: new Date("2026-10-08T17:45:00.000Z") }).values()]).toEqual([recentComplete]);
+    expect(recover([positive, failed, { ...recentComplete, observedAt: "2026-10-08T17:01:00.000Z" }], [copied]).size).toBe(0);
+  });
+
+  it.each([
+    { renderComplete: undefined }, { renderWarning: "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED" as const },
+    { renderWarning: "MAIN_DOCUMENT_HTTP_ERROR" as const }, { outcome: undefined },
+    { requestId: undefined }, { requestId: receiptId }, { observedAt: undefined },
+    { observedAt: "2026-10-08T17:01:00.000Z" }, { observedAt: failed.observedAt },
+    { accessControlsObserved: undefined }, { accessControls: undefined },
+    { accessControls: ["ACCOUNT_REQUIRED" as const] }, { httpStatus: 403 }, { rendered: false },
+  ])("does not infer complete recovery from an incomplete or unsafe actual receipt: %j", delta => {
+    expect(recover([{ ...complete, ...delta }, failed]).size).toBe(0);
+  });
+
+  it("keeps complete-read recovery fenced by later failures, protected denials, route identity and original receipts", () => {
+    const copied = { ...failed, observedAt: undefined, requestId: undefined };
+    const laterFailure = { ...failed, observedAt: "2026-10-08T06:00:00.000Z",
+      requestId: "66666666-6666-4666-8666-666666666666" };
+    expect(recover([complete, failed, laterFailure], [copied]).size).toBe(0);
+    for (const denied of [
+      { ...failed, httpStatus: 403, failure: undefined },
+      { ...complete, accessControls: ["CAPTCHA_OR_CHALLENGE" as const] },
+      { ...failed, failure: { ...failed.failure!, category: "ACCESS" as const } },
+    ]) {
+      expect(recover([complete, failed, denied], [copied]).size).toBe(0);
+      expect(recover([complete, failed], [denied]).size).toBe(0);
+    }
+    expect(recover([{ ...complete, url: url.replace("/bays", "") }, failed], [copied]).size).toBe(0);
+    expect(recover([{ ...complete, rendered: false }, failed], [copied]).size).toBe(0);
+    expect(recover([complete], [copied]).size).toBe(0);
+    expect(recover([complete, failed], [{ ...copied, failure: { ...failed.failure!, researchPhase: "BROWSER_DOCUMENT" } }]).size).toBe(0);
   });
 });
