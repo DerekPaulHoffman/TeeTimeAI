@@ -154,7 +154,7 @@ function DashboardView({
       <div className="dashboard-header">
         <div>
           <h1>My Alerts</h1>
-          <p className="meta">Your course notifications, all in one place.</p>
+          <p className="meta">Manage your saved alerts.</p>
         </div>
         <Link className="button button-dark" href="/search">
           <Plus size={16} />
@@ -207,25 +207,19 @@ function DashboardView({
           <p className="meta">{alertStatusCopy}</p>
           <dl className="sidebar-stat-list">
             <div>
-              <dt>Matching now</dt>
-              <dd>
-                {availableMatches.length === 0
-                  ? "0 so far"
-                  : `${availableMatches.length} available now`}
-              </dd>
+              <dt>Matching openings</dt>
+              <dd>{availableMatches.length}</dd>
             </div>
             <div>
-              <dt>Courses being watched</dt>
+              <dt>Courses &amp; venues</dt>
               <dd>{selectedCourseCount}</dd>
             </div>
             <div>
-              <dt>Active or paused alerts</dt>
+              <dt>Alert slots</dt>
               <dd>{slotsUsed}/{MAX_QUEUED_SEARCHES_PER_USER}</dd>
             </div>
           </dl>
-          <div className="alert alert-info">
-            {slotsUsed >= MAX_QUEUED_SEARCHES_PER_USER ? "Your alert slots are full. Remove an old alert to make room for a new course notification." : "Each Notify me saves a course, date, time window, and player count. Paused alerts also use a slot."}
-          </div>
+          {slotsUsed >= MAX_QUEUED_SEARCHES_PER_USER ? <p className="dashboard-capacity-notice">All alert slots are in use. Remove an old alert to add another.</p> : null}
           <Link className="button button-dark dashboard-add-search" href="/search">
             <Plus size={16} />
             Find another course
@@ -333,12 +327,12 @@ function DashboardSearchCard({
   });
 
   return (
-    <article className="dashboard-row" id={`alert-${search.id}`}>
+    <article className="dashboard-row" data-single-course={search.preferences.length === 1} id={`alert-${search.id}`}>
       <details
         className="dashboard-alert-accordion"
-        open={search.status === "ACTIVE" && !windowEnded}
       >
         <summary className="dashboard-alert-summary">
+          <CourseImage name={search.preferences[0]?.course.name ?? "Course"} photo={coursePhotos.get(search.preferences[0]?.course.googlePlaceId ?? "")} />
           <div className="dashboard-alert-summary-heading">
             <span className={`status-pill ${search.status.toLowerCase()}`}>
               {search.status === "ACTIVE" ? <Play size={13} /> : <CirclePause size={13} />}
@@ -669,7 +663,7 @@ function AlertSettings({ search }: { search: DashboardSearches[number] }) {
       <span><CalendarDays aria-hidden="true" size={14} />{formatDashboardDate(search.date)}</span>
       <span><Clock3 aria-hidden="true" size={14} />{formatTimeLabel(search.startTime)}–{formatTimeLabel(search.endTime)}</span>
       <span><Users aria-hidden="true" size={14} />{search.players} {search.players === 1 ? "golfer" : "golfers"}</span>
-      <span>{search.preferences.length} {search.mode === "SIMULATOR" ? search.preferences.length === 1 ? "venue" : "venues" : search.preferences.length === 1 ? "course" : "courses"}</span>
+      {search.preferences.length > 1 ? <span>{search.preferences.length} {search.mode === "SIMULATOR" ? "venues" : "courses"}</span> : null}
     </div>
   );
 }
@@ -797,9 +791,10 @@ function SimulatorDashboardCard({ search, canManage, coursePhotos, ownerEmailSta
       alertStatus: search.status, windowEnded: ended, website: preference.course.website, now });
     return { preference, venueMatches, status };
   });
-  return <article className="dashboard-row" id={`alert-${search.id}`}>
-    <details className="dashboard-alert-accordion" open={search.status === "ACTIVE" && !ended}>
+  return <article className="dashboard-row" data-single-course={search.preferences.length === 1} id={`alert-${search.id}`}>
+    <details className="dashboard-alert-accordion">
       <summary className="dashboard-alert-summary">
+        <CourseImage name={search.preferences[0]?.course.name ?? "Venue"} photo={coursePhotos.get(search.preferences[0]?.course.googlePlaceId ?? "")} />
         <div className="dashboard-alert-summary-heading"><span className={`status-pill ${search.status.toLowerCase()}`}>{ended && search.status === "ACTIVE" ? "Date passed" : search.status}</span><h3>{getNotificationTitle(search.preferences)}</h3></div>
         <div className="dashboard-alert-summary-copy">
           <strong>{ended ? "Search window ended" : search.status === "PAUSED" ? "Notifications paused" : search.status === "COMPLETED" ? "Notification ended" : search.status === "CANCELLED" ? "Notification cancelled" : matches.length ? `${matches.length} matching ${matches.length === 1 ? "session" : "sessions"}` : getSimulatorAlertSummary(venues.map(venue => venue.status))}</strong>
@@ -849,7 +844,7 @@ function SimulatorDashboardCard({ search, canManage, coursePhotos, ownerEmailSta
                   <div className="known-tee-time-list" aria-label="Matching simulator sessions">
                     {venueMatches.map(match => {
                       const format = new Intl.DateTimeFormat("en-US", { timeZone: preference.course.timeZone, hour: "numeric", minute: "2-digit" });
-                      const time = `${format.format(match.startsAt)}–${format.format(match.endsAt!)}`;
+                      const time = `${format.format(match.startsAt).replace(":00", "")}–${format.format(match.endsAt!).replace(":00", "")}`;
                       const duration = (match.endsAt!.getTime() - match.startsAt.getTime()) / 60_000;
                       return <a className="known-tee-time" aria-label={`${time}, ${duration} minutes, official booking page`} key={match.id} href={match.bookingUrl} target="_blank" rel="noreferrer">
                         <strong>{time}</strong><span>{duration} min</span><ExternalLink aria-hidden="true" size={13} />

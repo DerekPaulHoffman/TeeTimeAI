@@ -1319,32 +1319,25 @@ test.describe("Tee Time Spot UI smoke", () => {
         page.getByRole("button", { name: "Open feedback form" }).getByText("Feedback")
       ).toBeVisible();
 
-      const courseRows = page.locator(".watch-course-row");
-      const courseRowCount = await courseRows.count();
-      if (courseRowCount > 0) {
-        const firstCourseRow = courseRows.first();
-        const mobileCourseLayout = await firstCourseRow.evaluate((row) => {
+      const alertRows = page.locator(".dashboard-alert-summary");
+      if (await alertRows.count() > 0) {
+        const mobileCourseLayout = await alertRows.first().evaluate((row) => {
           const image = row.querySelector<HTMLElement>(".dashboard-course-image");
-          const copy = row.querySelector<HTMLElement>(".watch-course-copy");
           const rowRect = row.getBoundingClientRect();
           const imageRect = image?.getBoundingClientRect();
-          const copyRect = copy?.getBoundingClientRect();
 
           return {
-            copyStartsAfterImage:
-              Boolean(imageRect && copyRect) && copyRect!.top >= imageRect!.bottom - 1,
             imageAspectRatio:
               imageRect && imageRect.width > 0 ? imageRect.height / imageRect.width : 0,
             imageWidth: imageRect?.width ?? 0,
-            rowWidth: rowRect.width
+            rowHeight: rowRect.height
           };
         });
-
-        expect(mobileCourseLayout.imageWidth).toBeGreaterThanOrEqual(
-          mobileCourseLayout.rowWidth - 1
-        );
-        expect(mobileCourseLayout.imageAspectRatio).toBeCloseTo(9 / 16, 2);
-        expect(mobileCourseLayout.copyStartsAfterImage).toBe(true);
+        expect(mobileCourseLayout.imageWidth).toBe(48);
+        expect(mobileCourseLayout.imageAspectRatio).toBe(1);
+        expect(mobileCourseLayout.rowHeight).toBeLessThan(180);
+        await alertRows.first().click();
+        await expect(page.locator(".dashboard-alert-body").first()).toBeVisible();
       }
     }
 
@@ -1352,7 +1345,7 @@ test.describe("Tee Time Spot UI smoke", () => {
     expect(
       bodyText,
       "dashboard should explain whether searches are manageable, signed out, or setup-blocked"
-    ).toMatch(/Watching now|Matches found|sign in|account|setup needed|Pause and resume/i);
+    ).toMatch(/My Alerts|sign in|account|setup needed/i);
     expect(bodyText, "dashboard should avoid implementation jargon").not.toMatch(
       /\b(Codex|Postgres|Clerk|Neon|DATABASE_URL|Prisma|POC)\b/i
     );

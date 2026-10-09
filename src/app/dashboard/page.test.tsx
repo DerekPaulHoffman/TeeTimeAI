@@ -70,18 +70,24 @@ describe("dashboard course and simulator presentation", () => {
   afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); });
 
   it("renders real session links in a spaced list, with shared settings and venue actions", async () => {
-    const searches = [fixture("SIMULATOR", "One Golf Haven"), fixture("GOLF", "Fairway Golf Club")];
+    const pending = fixture("SIMULATOR", "Two Roads Golf Club");
+    pending.matches = [];
+    pending.probes[0].outcome = "NEEDS_ADAPTER";
+    pending.preferences[0].offering!.monitoringState = "VERIFYING";
+    const searches = [fixture("SIMULATOR", "One Golf Haven"), pending, fixture("GOLF", "Fairway Golf Club")];
     vi.mocked(listTeeSearchesForUser).mockResolvedValue(searches as unknown as Awaited<ReturnType<typeof listTeeSearchesForUser>>);
     const html = renderToStaticMarkup(await DashboardPage());
     const dom = document.createElement("div");
     dom.innerHTML = html;
-    expect(dom.querySelectorAll(".dashboard-settings")).toHaveLength(2);
-    expect(dom.querySelectorAll(".dashboard-settings span")).toHaveLength(8);
+    expect(dom.querySelectorAll(".dashboard-settings")).toHaveLength(3);
+    expect(dom.querySelectorAll(".dashboard-settings span")).toHaveLength(9);
+    expect(dom.querySelectorAll(".dashboard-alert-accordion[open]")).toHaveLength(0);
     expect(dom.querySelectorAll(".known-tee-time-list .known-tee-time")).toHaveLength(7);
-    expect(dom.querySelector(".known-tee-time")?.textContent).toBe("11:00 AM–12:00 PM60 min");
+    expect(dom.querySelector(".known-tee-time")?.textContent).toBe("11 AM–12 PM60 min");
     expect(dom.querySelector(".known-tee-time")?.getAttribute("aria-label")).toContain("official booking page");
     expect(dom.querySelector(".known-tee-time")?.getAttribute("href")).toBe("https://official.example/booking");
-    expect(dom.querySelectorAll(".watch-course-row .watch-course-links")).toHaveLength(2);
+    expect(dom.querySelectorAll(".watch-course-row .watch-course-links")).toHaveLength(3);
+    expect(html).toContain("Adding alert support");
     expect(dom.querySelector(".dashboard-booking-note")?.textContent).toBe("Availability can change. You book direct.");
     expect(html).toContain("+1 more");
 
