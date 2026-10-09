@@ -139,7 +139,10 @@ function parseHours(value: unknown, date: string): [number, number][] {
       const times = match[2].match(/^(\d{2}):(\d{2})-(\d{2}):(\d{2}) open$/u)!;
       const start = Number(times[1]) * 60 + Number(times[2]);
       const end = Number(times[3]) * 60 + Number(times[4]);
-      if (start >= end || end > 1440 || start % 30 !== 0 || Number(times[2]) > 59 || Number(times[4]) > 59) fail("The public simulator opening interval is invalid");
+      if (Number(times[2]) > 59 || Number(times[4]) > 59) fail("The public simulator opening interval has invalid clock minutes");
+      if (start >= end) fail("The public simulator opening interval is not increasing");
+      if (end > 1440) fail("The public simulator opening interval exceeds the venue day");
+      if (start % 30 !== 0) fail("The public simulator opening interval starts outside the slot grid");
       intervals.push([start, end]);
     }
     if (match[1] === weekday) weekly = intervals;

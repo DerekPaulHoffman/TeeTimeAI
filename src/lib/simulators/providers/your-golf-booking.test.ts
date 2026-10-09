@@ -23,6 +23,16 @@ function responses(payload: unknown = [], html = config()) {
 describe("YourGolfBooking public simulator calendar", () => {
   beforeEach(() => { vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(new Date("2026-10-06T16:00:00.000Z")); });
   afterEach(() => vi.useRealTimers());
+  it.each([
+    ["Sa 16:75-22:00 open", "The public simulator opening interval has invalid clock minutes"],
+    ["Sa 22:00-16:00 open", "The public simulator opening interval is not increasing"],
+    ["Sa 16:00-25:00 open", "The public simulator opening interval exceeds the venue day"],
+    ["Sa 16:15-22:00 open", "The public simulator opening interval starts outside the slot grid"],
+  ])("distinguishes rejected interval predicates without exposing source text: %s", async (openingHours, message) => {
+    const fetchImpl = responses([], config({ openingHours }));
+    await expect(fetchYourGolfBookingAvailability(input, fetchImpl)).rejects.toMatchObject({ code: "SCHEMA_CHANGED", message });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
   it("reads only the fixed signed-out configuration and occupancy sources, then produces full same-bay sessions", async () => {
     const fetchImpl = responses();
     const result = await fetchSimulatorAvailability(input, fetchImpl);

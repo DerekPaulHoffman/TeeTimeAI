@@ -94,6 +94,10 @@ describe("deployed independent simulator verification", () => {
     }
   });
   it.each([
+    ["SCHEMA_CHANGED", "The public simulator opening interval has invalid clock minutes"],
+    ["SCHEMA_CHANGED", "The public simulator opening interval is not increasing"],
+    ["SCHEMA_CHANGED", "The public simulator opening interval exceeds the venue day"],
+    ["SCHEMA_CHANGED", "The public simulator opening interval starts outside the slot grid"],
     ["SCHEMA_CHANGED", "The public simulator opening hours format changed"],
     ["SCHEMA_CHANGED", "The public simulator occupancy changed shape or identity"],
     ["SCHEMA_CHANGED", "The selected simulator bay changed range identity"],
