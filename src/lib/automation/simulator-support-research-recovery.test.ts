@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { SimulatorResearchBlockedRoute } from "./simulator-support-research-policy";
+import { getSimulatorResearchImplementationVersion, type SimulatorResearchBlockedRoute } from "./simulator-support-research-policy";
 import { getSimulatorPostRepairResearchBoundary, selectRecoveredSimulatorResearchRoutes } from "./simulator-support-research-recovery";
 import type { SimulatorSupportClaim } from "./simulator-support-policy";
 
@@ -70,7 +70,7 @@ describe("server-owned parser release boundary", () => {
 describe("post-repair public read recovery", () => {
   const postRepairResearchBoundary = new Date("2026-10-08T16:55:00.125Z");
   const recent: SimulatorResearchBlockedRoute = { ...complete, observedAt: "2026-10-08T16:50:00.000Z",
-    requestId: "55555555-5555-4555-8555-555555555555", researchImplementationVersion: "public-calendar-resource-local-v3" };
+    requestId: "55555555-5555-4555-8555-555555555555", researchImplementationVersion: getSimulatorResearchImplementationVersion(url) };
   const copied = { ...failed, observedAt: undefined, requestId: undefined };
   const afterRepair = (actualRoutes: SimulatorResearchBlockedRoute[], inheritedRoutes: SimulatorResearchBlockedRoute[] = [copied]) => {
     const input = { actualRoutes, inheritedRoutes, now, postRepairResearchBoundary };
@@ -102,7 +102,7 @@ describe("post-repair public read recovery", () => {
       { requestId: undefined }, { requestId: "invalid" }, { observedAt: undefined },
       { observedAt: postRepairResearchBoundary.toISOString() }, { observedAt: "2026-10-08T17:01:00.000Z" },
       { rendered: false }, { outcome: undefined }, { researchImplementationVersion: undefined },
-      { researchImplementationVersion: "obsolete-reader" }, { renderComplete: false },
+      { researchImplementationVersion: "obsolete-reader" }, { researchImplementationVersion: "public-calendar-resource-local-v3" }, { renderComplete: false },
       { renderComplete: undefined }, { renderWarning: "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED" as const },
       { accessControlsObserved: undefined }, { accessControls: undefined },
     ]) expect(afterRepair([{ ...recent, ...delta }, failed]).size).toBe(0);

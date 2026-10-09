@@ -34,6 +34,11 @@ type Candidate = {
   failureFingerprint: string; updatedAt: string; activeRealSearchCount: number;
 };
 
+const simulatorDispatchMocks = vi.hoisted(() => ({
+  list: vi.fn(async () => []),
+  reconcile: vi.fn(async () => 0),
+}));
+
 const store = vi.hoisted(() => {
   const runs: StoredRun[] = [];
   const candidates: Candidate[] = [];
@@ -122,7 +127,10 @@ vi.mock("./course-support-batches", () => ({
   withCourseSupportWriteConflictRetry: (operation: () => Promise<unknown>) => operation(),
   listCourseSupportDispatchCandidates: async () => store.candidates,
 }));
-vi.mock("./simulator-support-incidents", () => ({ listSimulatorSupportDispatchCandidates: async () => [] }));
+vi.mock("./simulator-support-incidents", () => ({
+  listSimulatorSupportDispatchCandidates: simulatorDispatchMocks.list,
+  reconcileSimulatorCapabilityWakeups: simulatorDispatchMocks.reconcile,
+}));
 
 import {
   beginCourseSupportCourseDispatch,
@@ -314,6 +322,15 @@ describe("durable course dispatch state and transaction boundaries", () => {
     expect(plan.attention.expiredBatchCount).toBe(1);
     expect(store.runs[0].audit.state).toBe("CONSUMED");
     expect(new Set(store.runs.flatMap(run => run.audit.target.searchRefs.map(ref => ref.id))).size).toBe(3);
+  });
+
+  it("re-reads due simulator work only after a capability retry advances", async () => {
+    simulatorDispatchMocks.reconcile.mockResolvedValueOnce(1);
+    const plan = await planCourseSupportCourseDispatch({ ownerThreadId: "parent-a", baseSha, now });
+    expect(plan.launchItems).toEqual([]);
+    expect(simulatorDispatchMocks.list).toHaveBeenCalledTimes(2);
+    expect(simulatorDispatchMocks.reconcile).toHaveBeenCalledTimes(1);
+    expect(store.runs).toEqual([]);
   });
 
   it("binds once after two writer refusals without replaying the native child", async () => {

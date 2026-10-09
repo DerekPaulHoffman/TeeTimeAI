@@ -47,7 +47,10 @@ vi.mock("./course-support-batches", () => ({ runWithCourseSupportWriterTransitio
   withCourseSupportWriteConflictRetry: (operation: () => Promise<unknown>) => operation(),
   MAX_CONCURRENT_COURSE_SUPPORT_BATCHES: 15, listCourseSupportDispatchCandidates: vi.fn(async () => []),
 }));
-vi.mock("./simulator-support-incidents", () => ({ listSimulatorSupportDispatchCandidates: vi.fn(async () => []) }));
+vi.mock("./simulator-support-incidents", () => ({
+  listSimulatorSupportDispatchCandidates: vi.fn(async () => []),
+  reconcileSimulatorCapabilityWakeups: vi.fn(async () => 0),
+}));
 vi.mock("./simulator-support-ownership", () => ({ readSimulatorSupportContinuationContext: state.context,
   // These fixtures retain implementation provenance; research-only expiry is covered in actual Postgres.
   reconcileExpiredSimulatorResearchExecutions: vi.fn(async () => {}),
