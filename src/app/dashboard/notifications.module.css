@@ -21,7 +21,7 @@
 .page :global(.dashboard-list) { gap: 10px; padding: 0; }
 .page :global(.dashboard-row) { background: white; border: 1px solid #dce4df; border-radius: 14px; box-shadow: none; overflow: hidden; }
 
-/* One summary row per alert. Open it for management and matching times. */
+/* Matching times stay visible; open the summary for management. */
 .page :global(.dashboard-alert-summary) { align-items: center; background: white; display: grid; gap: 5px 14px; grid-template-columns: 64px minmax(0, 1fr) 18px; padding: 16px; transition: background-color 140ms ease; }
 .page :global(.dashboard-alert-summary:hover) { background: #f8faf7; }
 .page :global(.dashboard-alert-summary > .dashboard-course-image) { aspect-ratio: 1; border-radius: 10px; grid-column: 1; grid-row: 1 / span 3; height: 64px; min-height: 0; width: 64px; }
@@ -77,11 +77,10 @@
 .page :global(.dashboard-row[data-single-course="true"] .watch-course-copy > strong),
 .page :global(.dashboard-row[data-single-course="true"] .watch-course-copy > .meta),
 .page :global(.dashboard-row[data-single-course="true"] .watch-course-badges) { display: none; }
-.page :global(.dashboard-session-times) { margin: 0; }
-.page :global(.dashboard-session-times .known-tee-time-list) { gap: 6px; margin-top: 8px; }
-.page :global(.known-tee-time) { font-size: 11px; gap: 6px; line-height: 1.4; min-height: 36px; padding: 7px 10px; white-space: normal; }
-.page :global(.known-tee-time strong) { font-weight: 600; }
-.page :global(.known-tee-time > span) { color: #53685c; }
+.page :global(.dashboard-matching-times) { padding: 0 16px 14px; }
+.page :global(.dashboard-matching-times .known-tee-times) { margin: 0; }
+.page :global(.dashboard-matching-times .known-tee-times + .known-tee-times) { margin-top: 10px; }
+.page :global(.dashboard-matching-times .known-tee-times p) { font-size: 11px; margin: 0 0 6px; }
 .page :global(.watch-course-match-details) { margin-top: 4px; }
 .page :global(.watch-course-match-list) { gap: 6px; margin-top: 8px; }
 .page :global(.watch-course-match-list a) { border-radius: 8px; min-height: 40px; padding: 8px; }
@@ -120,9 +119,7 @@
   .page :global(.dashboard-row[data-single-course="true"] .watch-course-row) { grid-template-columns: minmax(0, 1fr); }
   .page :global(.watch-course-links) { flex-direction: row; flex-wrap: wrap; grid-column: 1 / -1; }
   .page :global(.watch-course-row .watch-course-links a) { min-height: 44px; }
-  .page :global(.dashboard-session-times .known-tee-time-list) { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .page :global(.known-tee-time) { justify-content: space-between; min-height: 44px; padding: 7px 8px; }
-  .page :global(.known-tee-time > span) { display: none; }
+  .page :global(.dashboard-matching-times) { padding: 0 12px 12px; }
   .page :global(.dashboard-booking-note) { padding-inline: 12px; }
 }
 @media (prefers-reduced-motion: reduce) { .page :global(.dashboard-alert-summary) { transition: none; } }

@@ -457,9 +457,6 @@ function DashboardSearchCard({
                   ? "Official request page"
                   : "Official booking page"
                 : "Official site";
-            const courseMatches = availableSearchMatches.filter(
-              (match) => match.courseId === preference.course.id
-            );
             const courseStatus = courseStatusById.get(preference.course.id)!;
             const bookingEvidence = {
               bookingFacts: preference.course.bookingFacts,
@@ -582,39 +579,6 @@ function DashboardSearchCard({
                           )}.`
                         : ""}
                     </p>
-                    {courseMatches.length > 0 ? (
-                      <details className="watch-course-match-details">
-                        <summary>
-                          View{" "}
-                          {courseMatches.length === 1
-                            ? "matching time"
-                            : `all ${courseMatches.length} matching times`}
-                        </summary>
-                        <div className="watch-course-match-list">
-                          {courseMatches.map((match) => (
-                            <a
-                              href={match.bookingUrl}
-                              key={match.id}
-                              rel="noreferrer"
-                              target="_blank"
-                            >
-                              <strong>
-                                {formatDashboardMatch(
-                                  match.startsAt,
-                                  match.course.timeZone
-                                )}
-                              </strong>
-                              <span>
-                                {match.availableSpots}{" "}
-                                {match.availableSpots === 1 ? "spot" : "spots"}
-                                {match.holes ? ` · ${match.holes} holes` : ""}
-                              </span>
-                              <ExternalLink aria-hidden="true" size={12} />
-                            </a>
-                          ))}
-                        </div>
-                      </details>
-                    ) : null}
                   </div>
                 </div>
                 <div className="watch-course-links">
@@ -653,6 +617,7 @@ function DashboardSearchCard({
           </div>
         </div>
       </details>
+      <DashboardMatchingTimes matches={availableSearchMatches} mode="GOLF" showCourseName={search.preferences.length > 1} />
     </article>
   );
 }
@@ -699,16 +664,42 @@ function formatCoursePriceRange(range: CoursePriceRange) {
   return minimum === maximum ? minimum : `${minimum}–${maximum}`;
 }
 
-function formatDashboardMatch(date: Date, timeZone: string) {
-  return date.toLocaleString("en-US", {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-    timeZone,
-    timeZoneName: "short"
-  });
+function DashboardMatchingTimes({ matches, mode, showCourseName }: {
+  matches: DashboardSearches[number]["matches"];
+  mode: "GOLF" | "SIMULATOR";
+  showCourseName: boolean;
+}) {
+  if (!matches.length) return null;
+  const groups = new Map<string, typeof matches>();
+  for (const match of matches) {
+    const key = `${match.courseId}:${match.offeringId ?? "golf"}`;
+    const group = groups.get(key);
+    if (group) group.push(match);
+    else groups.set(key, [match]);
+  }
+  return (
+    <div className="dashboard-matching-times" aria-label={mode === "SIMULATOR" ? "Matching simulator sessions" : "Matching tee times"}>
+      {[...groups].map(([key, times]) => {
+        const course = times[0].course;
+        const formatter = new Intl.DateTimeFormat("en-US", { timeZone: course.timeZone, hour: "numeric", minute: "2-digit" });
+        const zone = new Intl.DateTimeFormat("en-US", { timeZone: course.timeZone, timeZoneName: "short" }).formatToParts(times[0].startsAt).find(part => part.type === "timeZoneName")?.value;
+        return <section className="known-tee-times" key={key}>
+          <p>{showCourseName ? `${course.name} · ` : ""}Course-local times · {zone}</p>
+          <div className="known-tee-time-list">
+            {times.map(match => {
+              const start = formatter.format(match.startsAt);
+              const detail = mode === "SIMULATOR" && match.endsAt
+                ? `${start}–${formatter.format(match.endsAt)}, ${(match.endsAt.getTime() - match.startsAt.getTime()) / 60_000} minutes`
+                : `${start}, ${match.availableSpots} spots${match.holes ? `, ${match.holes} holes` : ""}`;
+              return <a className="known-tee-time" key={match.id} href={match.bookingUrl} target="_blank" rel="noreferrer" aria-label={`${course.name}, ${detail}, official booking page`} title={`${detail}. You book direct on the official site.`}>
+                <strong>{start}</strong>
+              </a>;
+            })}
+          </div>
+        </section>;
+      })}
+    </div>
+  );
 }
 
 function formatTimeLabel(value: string) {
@@ -826,7 +817,7 @@ function SimulatorDashboardCard({ search, canManage, coursePhotos, ownerEmailSta
             initialCoursePreferences={search.preferences.map(preference => ({ id: preference.id, courseName: preference.course.name, rank: preference.rank }))} /> : <span className="meta">Sign in to pause, edit, or cancel this alert.</span>}
         </div>
         <div className="watch-course-list">
-        {venues.map(({ preference, venueMatches, status: venueStatus }) => {
+        {venues.map(({ preference, status: venueStatus }) => {
           return <div className="watch-course-row" key={preference.id}>
             <CourseImage name={preference.course.name} photo={preference.course.googlePlaceId ? coursePhotos.get(preference.course.googlePlaceId) : undefined} rank={search.preferences.length > 1 ? preference.rank : undefined} />
             <div className="watch-course-copy">
@@ -838,21 +829,6 @@ function SimulatorDashboardCard({ search, canManage, coursePhotos, ownerEmailSta
               <div className="watch-course-availability">
                 <div className="watch-course-availability-heading"><strong>{venueStatus.label}</strong></div>
               </div>
-              {venueMatches.length > 0 ? (
-                <div className="dashboard-session-times">
-                  <p className="meta">Times shown in {preference.course.timeZone.replaceAll("_", " ")}. You book on the official site.</p>
-                  <div className="known-tee-time-list" aria-label="Matching simulator sessions">
-                    {venueMatches.map(match => {
-                      const format = new Intl.DateTimeFormat("en-US", { timeZone: preference.course.timeZone, hour: "numeric", minute: "2-digit" });
-                      const time = `${format.format(match.startsAt).replace(":00", "")}–${format.format(match.endsAt!).replace(":00", "")}`;
-                      const duration = (match.endsAt!.getTime() - match.startsAt.getTime()) / 60_000;
-                      return <a className="known-tee-time" aria-label={`${time}, ${duration} minutes, official booking page`} key={match.id} href={match.bookingUrl} target="_blank" rel="noreferrer">
-                        <strong>{time}</strong><span>{duration} min</span><ExternalLink aria-hidden="true" size={13} />
-                      </a>;
-                    })}
-                  </div>
-                </div>
-              ) : null}
             </div>
             <div className="watch-course-links">
               {venueStatus.officialUrl ? <a href={venueStatus.officialUrl} target="_blank" rel="noreferrer">{venueStatus.officialLinkLabel} <ExternalLink aria-hidden="true" size={14} /></a> : null}
@@ -865,6 +841,7 @@ function SimulatorDashboardCard({ search, canManage, coursePhotos, ownerEmailSta
         </div>
       </div>
     </details>
+    <DashboardMatchingTimes matches={matches} mode="SIMULATOR" showCourseName={search.preferences.length > 1} />
   </article>;
 }
 

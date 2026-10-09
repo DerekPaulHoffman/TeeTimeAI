@@ -83,7 +83,9 @@ describe("dashboard course and simulator presentation", () => {
     expect(dom.querySelectorAll(".dashboard-settings span")).toHaveLength(9);
     expect(dom.querySelectorAll(".dashboard-alert-accordion[open]")).toHaveLength(0);
     expect(dom.querySelectorAll(".known-tee-time-list .known-tee-time")).toHaveLength(7);
-    expect(dom.querySelector(".known-tee-time")?.textContent).toBe("11 AM–12 PM60 min");
+    expect(dom.querySelector(".known-tee-time")?.textContent).toBe("11:00 AM");
+    expect(dom.querySelectorAll(".dashboard-row > .dashboard-matching-times .known-tee-time")).toHaveLength(7);
+    expect(dom.querySelectorAll(".dashboard-alert-body .known-tee-time")).toHaveLength(0);
     expect(dom.querySelector(".known-tee-time")?.getAttribute("aria-label")).toContain("official booking page");
     expect(dom.querySelector(".known-tee-time")?.getAttribute("href")).toBe("https://official.example/booking");
     expect(dom.querySelectorAll(".watch-course-row .watch-course-links")).toHaveLength(3);
@@ -108,5 +110,16 @@ describe("dashboard course and simulator presentation", () => {
     expect(html).toContain("Simulator check pending");
     expect(html).toContain("dashboard-course-image-empty");
     expect(html).not.toContain('aria-label="Matching simulator sessions"');
+  });
+
+  it("shows golf matches outside the management accordion with search-style labels", async () => {
+    const search = { ...fixture("GOLF", "Golf Matches"), matches: fixture("SIMULATOR", "Golf Matches").matches.map(match => ({ ...match, offeringId: null, offering: null })) };
+    vi.mocked(listTeeSearchesForUser).mockResolvedValue([search] as unknown as Awaited<ReturnType<typeof listTeeSearchesForUser>>);
+    const dom = document.createElement("div");
+    dom.innerHTML = renderToStaticMarkup(await DashboardPage());
+    expect(dom.querySelectorAll('.dashboard-row > [aria-label="Matching tee times"] .known-tee-time')).toHaveLength(7);
+    expect(dom.querySelector(".known-tee-time")?.textContent).toBe("11:00 AM");
+    expect(dom.querySelector(".known-tee-time")?.getAttribute("aria-label")).toContain("4 spots, 18 holes");
+    expect(dom.querySelector(".dashboard-alert-accordion")?.hasAttribute("open")).toBe(false);
   });
 });
