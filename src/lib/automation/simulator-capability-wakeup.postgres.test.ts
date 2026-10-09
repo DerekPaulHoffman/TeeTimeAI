@@ -88,6 +88,26 @@ describe.skipIf(!url)("simulator capability wakeup in isolated Postgres", () => 
     expect(await client.automationRun.findUniqueOrThrow({ where: { id: future.run.id } })).toEqual(original);
   });
 
+  it("leaves a future retry parked when 127 raw due incidents fill the due-reader window", async () => {
+    const future = await fixture(true);
+    const rows = Array.from({ length: 127 }, () => ({ courseId: randomUUID(), offeringId: randomUUID(), placeId: randomUUID() }));
+    ids.courses.push(...rows.map(row => row.courseId));
+    await client.course.createMany({ data: rows.map(row => ({ id: row.courseId, googlePlaceId: row.placeId,
+      name: "Due queue fixture", address: "1 Test Street", website: "https://official.example.test",
+      latitude: 41, longitude: -73, timeZone: "UTC", isPublic: true })) });
+    await client.courseOffering.createMany({ data: rows.map(row => ({ id: row.offeringId,
+      courseId: row.courseId, kind: "SIMULATOR", publicAccessStatus: "UNVERIFIED" })) });
+    await client.simulatorSupportIncident.createMany({ data: rows.map(row => ({ offeringId: row.offeringId,
+      reason: "NEEDS_ADAPTER", retryAt: new Date(0) })) });
+    const due = await client.$transaction(tx => listSimulatorSupportDispatchCandidates(new Date(), tx),
+      { timeout: 30_000 });
+    expect(due).toEqual([]); // Raw rows count even when no current search survives filtering.
+    expect(await client.$transaction(tx => reconcileSimulatorCapabilityWakeups(new Date(), tx),
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable })).toBe(0);
+    expect((await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: future.incident.id } })).retryAt)
+      .toEqual(future.incident.retryAt);
+  });
+
   it("keeps a future retry parked after the source intent ends", async () => {
     const f = await fixture(true);
     const audit = (await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } })).audit as Record<string, unknown>;

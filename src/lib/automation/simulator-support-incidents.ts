@@ -154,6 +154,14 @@ export async function listSimulatorSupportDispatchCandidates(now: Date, tx: Pris
  * The existing planner and claim paths still own admission and all capacity.
  */
 export async function reconcileSimulatorCapabilityWakeups(now: Date, tx: Prisma.TransactionClient) {
+  // The due reader admits at most 127 raw rows and throws at 128, before it
+  // filters demand. Reserve its exact remaining raw capacity before writes.
+  const rawDueCount = await tx.simulatorSupportIncident.count({ where: {
+    status: "AUTO_INVESTIGATING", OR: [{ retryAt: null }, { retryAt: { lte: now } }],
+    offering: { kind: "SIMULATOR", active: true, publicAccessStatus: { not: "NOT_PUBLIC" } },
+  } });
+  const headroom = Math.max(0, 127 - rawDueCount);
+  if (headroom === 0) return 0;
   const future = await tx.simulatorSupportIncident.findMany({
     where: { status: "AUTO_INVESTIGATING", retryAt: { gt: now }, offering: {
       kind: "SIMULATOR", active: true, publicAccessStatus: { not: "NOT_PUBLIC" },
@@ -165,6 +173,7 @@ export async function reconcileSimulatorCapabilityWakeups(now: Date, tx: Prisma.
   let advanced = 0;
   const { parseCourseDispatchAudit } = await import("./course-support-course-dispatch");
   for (const incident of future) {
+    if (advanced >= headroom) break;
     const fingerprint = getSimulatorOfferingSourceFingerprint(incident.offering);
     // A newer completed attempt, including one using the current reader, supersedes
     // an older generic receipt. Never search backwards for a favorable observation.
