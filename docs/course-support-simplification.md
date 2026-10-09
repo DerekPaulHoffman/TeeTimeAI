@@ -363,3 +363,19 @@ guards, the selected parent's prepared CLI and the later child's fully prepared
 protected-command CLI. The parent never installs in the original checkout.
 This corrects the observed sequencing contradiction without changing code,
 granting authority from a local exit0, adding a protocol or replaying a request.
+
+The ordinary02:00 parent reserved a new simulator assignment on38, then stopped
+before creating a worktree or calling the supervisor. Its own bundled local read
+ended with `git check-ignore .course-support-private`, which returned1 because
+that invented path was not ignored. No supported artifact or filesystem guard
+was called, so this does not establish unsafe storage. The existing
+`.codex-artifacts/` location was already ignored and available.
+
+The scheduled bridge now names that existing location, derives the directory
+from the actual selected checkout and reserved assignment, and gives an exact
+exclusive UTF-8 save plus supervisor command. The supervisor already creates
+its missing output directory. The recipe removes the discretionary alternate
+path/probe without adding a helper, ignore rule, permission change or recovery
+protocol. Actual setup, file-write, source, native, replay and production failures
+remain stops. The reserved assignment and normal deadline recovery stay intact;
+the next ordinary scheduler launch must prove use of the repaired recipe.

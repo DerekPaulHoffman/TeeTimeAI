@@ -7,7 +7,8 @@ turn with exactly one shell command:
 & 'C:\Program Files\nodejs\node.exe' C:\dev\TeeTimeAI-responder-self-healing\scripts\automation\course-support-preflight.mjs --run --scheduled-cycle --course-dispatch
 ```
 
-Stop on a nonzero exit, setup failure, or unavailable production evidence. Use
+Stop on a nonzero exit from the preflight, setup failure, or unavailable
+production evidence. Use
 the actual returned `course_support_preflight_context` and exact
 `selectedCheckout` throughout this tick. Do not inspect or plan a second time,
 change environments, create another automation, impersonate an owner, approve
@@ -16,16 +17,46 @@ permission requests, or send email.
 For each actual `RESERVED` launch item, create one managed linked worktree from
 current `origin/main` with the supported worktree tool. Wait for its final
 registered path. Create a unique `automation/course-support-*` branch there
-before edits. Preserve existing checkouts. Save the actual preflight context and
-that exact returned item as separate UTF-8 JSON files under a private ignored
-directory in the selected checkout. Do not manufacture a context, item, base,
-native identifier, or readiness result.
+before edits. Preserve existing checkouts. Bind `$preflightContext` to the actual
+returned context object, `$launchItem` to that exact `RESERVED` item, and
+`$workerCheckout` to the final registered worker path. Do not manufacture a
+context, item, base, native identifier, or readiness result.
 
-Run one command with absolute paths:
+Use the existing ignored `.codex-artifacts` location in the actual selected
+checkout. The assignment reference determines a distinct artifact directory.
+Do not invent another private directory, require a fresh directory to exist
+already, or add an ad hoc `git check-ignore` or runtime probe before launch.
+The supported supervisor validates the actual inputs and creates its output
+directory. Keep the real preflight, worktree, branch, file-write and supervisor
+failures as stops; preserve partial artifacts and the reservation on failure.
+
+Save the two actual objects with exclusive UTF-8 writes, then run one supervisor
+command. This recipe needs no production environment or additional planning:
 
 ```powershell
-& 'C:\Program Files\nodejs\node.exe' <selected-checkout>\scripts\automation\course-support-worker-supervisor.mjs --detach --context-file <private-context-json> --assignment-file <private-item-json> --worker-checkout <registered-worker-checkout> --output-dir <unique-private-output-directory>
+$ErrorActionPreference = 'Stop'
+$artifactDirectory = Join-Path $preflightContext.selectedCheckout ('.codex-artifacts\course-dispatch-' + $launchItem.assignmentRef)
+$contextFile = Join-Path $artifactDirectory 'context.private.json'
+$assignmentFile = Join-Path $artifactDirectory 'assignment.private.json'
+$outputDirectory = Join-Path $artifactDirectory 'supervisor'
+[System.IO.Directory]::CreateDirectory($artifactDirectory) | Out-Null
+$utf8 = [System.Text.UTF8Encoding]::new($false)
+foreach ($artifact in @(
+  @{ path = $contextFile; value = $preflightContext },
+  @{ path = $assignmentFile; value = $launchItem }
+)) {
+  $bytes = $utf8.GetBytes(($artifact.value | ConvertTo-Json -Depth 100))
+  $stream = [System.IO.File]::Open($artifact.path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+  try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
+}
+$supervisorScript = Join-Path $preflightContext.selectedCheckout 'scripts\automation\course-support-worker-supervisor.mjs'
+& 'C:\Program Files\nodejs\node.exe' $supervisorScript --detach --context-file $contextFile --assignment-file $assignmentFile --worker-checkout $workerCheckout --output-dir $outputDirectory
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 ```
+
+Never overwrite an existing context/item or replay a supervisor invocation.
+If saving either file fails, stop before calling the supervisor. A previous
+partial save is retained evidence, not permission to fill in or retry that launch.
 
 The supervisor owns validation, start, native preparation, permission proof,
 binding, complete mode-specific prompt generation, and execution. Do not repeat
