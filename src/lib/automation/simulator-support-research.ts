@@ -91,6 +91,7 @@ export type SimulatorConfigurationDiagnostic = {
       maxBookAheadValue: number;
       maxBookAheadUnitToken: string;
       hasOpeningTimeRestrictions: boolean;
+      openingHoursFormat?: "EMPTY" | "WEEKLY_OR_DATED" | "OTHER";
     }>;
   };
 };
@@ -233,6 +234,18 @@ function publishedYourGolfBookingSlug(html: string, sourceUrl: string) {
   } catch { return undefined; }
 }
 
+/** Closed syntax evidence only: no raw hours, weekday coverage or availability claim. */
+function openingHoursFormat(value: string): "EMPTY" | "WEEKLY_OR_DATED" | "OTHER" {
+  if (!value.trim()) return "EMPTY";
+  const seen = new Set<string>();
+  for (const part of value.split(";")) {
+    const match = part.trim().match(/^(Mo|Tu|We|Th|Fr|Sa|Su|\d{4} [A-Z][a-z]{2} \d{1,2}) (off|\d{2}:\d{2}-\d{2}:\d{2} open)$/u);
+    if (!match || seen.has(match[1])) return "OTHER";
+    seen.add(match[1]);
+  }
+  return "WEEKLY_OR_DATED";
+}
+
 /** Optional research facts for a rejected public-looking rental, never a calendar or eligibility decision. */
 function rejectedRentalCandidateMetadata(
   ranges: SimulatorPublicCalendar["ranges"], venueId: string, bays: Json, optionRows: unknown[],
@@ -316,6 +329,7 @@ function rejectedRentalCandidateMetadata(
       bookingUiIsStandard: row.bookingUi === "standard", customerBookingUiIsSlots: row.customerBookingUi === "slots",
       maxBookAheadValue: row.maxBookAheadValue, maxBookAheadUnitToken: machineToken(row.maxBookAheadUnit),
       hasOpeningTimeRestrictions: row.hasOpeningTimeRestrictions,
+      openingHoursFormat: openingHoursFormat(row.openingHours),
     }));
     return {
       venueId,

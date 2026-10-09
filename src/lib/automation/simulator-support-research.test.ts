@@ -369,6 +369,22 @@ describe("bounded owned simulator public research transport", () => {
     expect(metadata?.resources[0]).toMatchObject({ optionIds: ["21451", "21452"], appliedOptionIds: ["21451"] });
     expect(metadata && metadata.resources.every(row => metadata.ranges.some(range => range.id === row.rangeId))).toBe(true);
   });
+  it.each([
+    ["", "EMPTY"], ["Mo 09:00-21:00 open;Tu off", "WEEKLY_OR_DATED"],
+    ["Mo 09:00-21:00 open;Mo off", "OTHER"],
+    ["private@example.test secret-hours", "OTHER"],
+  ])("retains a closed opening-hours distinction after rental rejection: %j", (openingHours, openingHoursFormat) => {
+    const parsed = JSON.parse(publishedConfig().match(/<script[^>]*>([\s\S]*?)<\/script>/u)![1]);
+    const config = parsed.props.pageProps.initialReduxState;
+    config.bays.bayOptions[0].category = null;
+    config.ranges.items[0].openingHours = openingHours;
+    const result = extractSimulatorPublicCalendar(`<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(parsed)}</script>`, booking);
+    expect(result.calendar).toBeUndefined();
+    expect(result.configurationDiagnostic?.reason).toBe("CONFIG_NO_ELIGIBLE_RENTALS");
+    expect(result.configurationDiagnostic?.candidateMetadata?.ranges[0]).toHaveProperty("openingHoursFormat", openingHoursFormat);
+    expect(persistedDiagnostic(result.configurationDiagnostic)).toEqual(result.configurationDiagnostic);
+    expect(JSON.stringify(result.configurationDiagnostic)).not.toMatch(/private@example|secret-hours/u);
+  });
   it("does not project a candidate outside the first eight rejected rows", () => {
     const parsed = JSON.parse(publishedConfig().match(/<script[^>]*>([\s\S]*?)<\/script>/u)![1]);
     const config = parsed.props.pageProps.initialReduxState;

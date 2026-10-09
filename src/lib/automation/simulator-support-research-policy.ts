@@ -41,6 +41,7 @@ const candidateMetadata = z.object({
     bookingUiIsStandard: z.boolean(), customerBookingUiIsSlots: z.boolean(),
     maxBookAheadValue: z.number().int().min(1).max(365), maxBookAheadUnitToken: z.string().regex(/^[a-z0-9_-]{1,32}$/u),
     hasOpeningTimeRestrictions: z.boolean(),
+    openingHoursFormat: z.enum(["EMPTY", "WEEKLY_OR_DATED", "OTHER"]).optional(),
   }).strict()).max(8),
 }).strict().refine(entry => {
   const candidateIds = entry.candidates.map(row => row.publicOptionId);
