@@ -511,3 +511,9 @@ priority. Unknown or dynamic text remains absent. This is a future diagnostic
 opportunity, not a retroactive explanation of either failed read. A guard
 message can cover multiple predicates; an evidence-backed repair and two fresh
 qualifying deployed reads remain necessary for monitoring acceptance.
+
+## Keep local repository lookup feedback separate from protected failures
+
+The natural October 9 09:30 simulator worker used its owned REPAIR path and completed an intentional failing local regression followed by green focused tests. It then tried to inspect a guessed CI workflow filename that was absent; the repository has a differently named workflow. The read-only lookup exited nonzero, the next local command exited zero, and the native turn completed, but conflicting blanket command-exit wording led to a stop with four owned diagnostic paths still dirty. There was no publication, durable closeout or monitoring proof.
+
+The assigned and continuation templates now classify failures by operation. A completed credential-free local test assertion or ordinary read-only repository filename/content miss is retained as feedback and corrected against the actual file inventory. Missing mandatory instructions or receipts, unknown side effects, and native identity, setup, production/API, provider research/source evidence, assignment, ownership, lease and access failures still stop. This changes no runtime classifier, source read, retry budget, claim, release or continuation authority. Only the original owner may continue after an independently admitted normal recovery with fresh proof.
