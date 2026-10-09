@@ -632,6 +632,20 @@ describe("durable simulator research failure memory", () => {
     expect(mergeSimulatorResearchBlockedRoutes([{ ...first, httpStatus: 404 }, first])).toEqual([{ ...first, httpStatus: 404 }]);
     expect(() => mergeSimulatorResearchBlockedRoutes(Array.from({ length: 65 }, (_, index) => ({ ...first, url: `https://calendar.example.test/route/${index}` })))).toThrow("bounded route limit");
   });
+
+  it("retains a protected legacy fragment denial across canonical alias merge order", () => {
+    const plain = { url: bookingUrl, rendered: true, httpStatus: 200, outcome: "READ" as const };
+    const denied = { url: `${bookingUrl}#top`, rendered: true, httpStatus: 403, outcome: "READ" as const };
+    expect(mergeSimulatorResearchBlockedRoutes([plain, denied])).toEqual([denied]);
+    expect(mergeSimulatorResearchBlockedRoutes([denied, plain])).toEqual([denied]);
+    expect(mergeSimulatorResearchBlockedRoutes([plain, { ...denied, url: bookingUrl }])).toEqual([plain]);
+    expect(mergeSimulatorResearchBlockedRoutes([{ ...plain, httpStatus: 403 }, plain])).toEqual([{ ...plain, httpStatus: 403 }]);
+    expect(mergeSimulatorResearchBlockedRoutes([plain, { ...denied, url: `${bookingUrl}?date=2026-10-10#top` }]))
+      .toHaveLength(2);
+    expect(mergeSimulatorResearchBlockedRoutes([plain, { ...denied, rendered: false }])).toHaveLength(2);
+    expect(mergeSimulatorResearchBlockedRoutes([plain, { ...denied, httpStatus: 0, failure: {
+      stage: "PUBLIC_READ" as const, category: "BUDGET" as const, code: "PUBLIC_BODY_LIMIT" as const } }])).toEqual([plain]);
+  });
 });
 
 describe("owned simulator research navigation", () => {

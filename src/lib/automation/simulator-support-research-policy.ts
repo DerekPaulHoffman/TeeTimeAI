@@ -205,6 +205,11 @@ const researchFailureMemory = z.object({ version: z.literal(1), sourceFingerprin
 }).strict();
 export type SimulatorResearchBlockedRoute = z.infer<typeof blockedResearchRoute>;
 export type SimulatorResearchFailureMemory = z.infer<typeof researchFailureMemory>;
+export const isSimulatorResearchToolingFailure = (route: SimulatorResearchBlockedRoute) => route.httpStatus === 0 &&
+  route.failure?.stage === "PUBLIC_READ" && ["BUDGET", "BROWSER", "TOOLING", "UNKNOWN"].includes(route.failure.category);
+export const isProtectedSimulatorResearchDenial = (route: SimulatorResearchBlockedRoute) => [401, 403, 404].includes(route.httpStatus) ||
+  (route.accessControls?.length ?? 0) > 0 || Boolean(route.failure && !isSimulatorResearchToolingFailure(route)) ||
+  route.httpStatus === 0 && !isSimulatorResearchToolingFailure(route);
 export function readSimulatorResearchFailureMemory(value: unknown) {
   return value === undefined ? undefined : researchFailureMemory.parse(value);
 }
@@ -214,7 +219,9 @@ export function mergeSimulatorResearchBlockedRoutes(routes: readonly SimulatorRe
   for (const route of routes) {
     const parsed = blockedResearchRoute.parse(route);
     const key = `${routeIdentity(parsed.url)}:${parsed.rendered}`;
-    if (!unique.has(key)) unique.set(key, parsed);
+    const current = unique.get(key);
+    if (!current || current.url !== parsed.url && !isProtectedSimulatorResearchDenial(current) &&
+        isProtectedSimulatorResearchDenial(parsed)) unique.set(key, parsed);
   }
   if (unique.size > 64) throw new Error("Simulator research failure memory reached its bounded route limit.");
   return [...unique.values()];

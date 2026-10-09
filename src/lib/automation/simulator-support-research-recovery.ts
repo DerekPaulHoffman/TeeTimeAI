@@ -1,4 +1,6 @@
-import { isSimulatorPostRepairResearchReadDue, type SimulatorResearchBlockedRoute } from "./simulator-support-research-policy";
+import { isSimulatorPostRepairResearchReadDue, isProtectedSimulatorResearchDenial,
+  isSimulatorResearchToolingFailure as toolingFailure, type SimulatorResearchBlockedRoute } from "./simulator-support-research-policy";
+export { isProtectedSimulatorResearchDenial } from "./simulator-support-research-policy";
 import { assertSimulatorSupportDeployment, isValidSimulatorSupportClaim, type SimulatorSupportClaim } from "./simulator-support-policy";
 
 const BACKOFF_MS = 60 * 60_000;
@@ -6,11 +8,6 @@ const key = (route: SimulatorResearchBlockedRoute) => `${new URL(route.url).href
 const clock = (route: SimulatorResearchBlockedRoute) => route.observedAt ? Date.parse(route.observedAt) : NaN;
 const hasReceipt = (route: SimulatorResearchBlockedRoute) => Boolean(route.requestId &&
   /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/iu.test(route.requestId) && Number.isFinite(clock(route)));
-const toolingFailure = (route: SimulatorResearchBlockedRoute) => route.httpStatus === 0 &&
-  route.failure?.stage === "PUBLIC_READ" && ["BUDGET", "BROWSER", "TOOLING", "UNKNOWN"].includes(route.failure.category);
-export const isProtectedSimulatorResearchDenial = (route: SimulatorResearchBlockedRoute) => [401, 403, 404].includes(route.httpStatus) ||
-  (route.accessControls?.length ?? 0) > 0 || Boolean(route.failure && !toolingFailure(route)) ||
-  route.httpStatus === 0 && !toolingFailure(route);
 const sameFailure = (actual: SimulatorResearchBlockedRoute, copied: SimulatorResearchBlockedRoute) =>
   actual.httpStatus === copied.httpStatus && JSON.stringify(actual.failure) === JSON.stringify(copied.failure) &&
   (!copied.requestId || actual.requestId === copied.requestId) && (!copied.observedAt || actual.observedAt === copied.observedAt) &&
