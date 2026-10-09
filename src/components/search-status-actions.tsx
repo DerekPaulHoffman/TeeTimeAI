@@ -300,7 +300,7 @@ export function SearchStatusActions({
   return (
     <div className={`search-actions${editing ? " is-editing" : ""}`}>
       {editing ? (
-        <div className="queue-edit-form">
+        <div className={`queue-edit-form${mode === "SIMULATOR" ? " is-simulator" : ""}`}>
           <label>
             Date
             <input
@@ -422,7 +422,7 @@ export function SearchStatusActions({
               </div>
             </div>
           ) : null}
-          <label>
+          <label className="queue-edit-emails">
             Extra emails
             <textarea
               rows={3}

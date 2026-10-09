@@ -1720,13 +1720,18 @@ button {
   width: 100%;
 }
 
-.queue-edit-form label:nth-of-type(6),
+.queue-edit-form.is-simulator {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.queue-edit-form .queue-edit-emails,
 .queue-edit-actions,
 .queue-priority-editor {
   grid-column: 1 / -1;
 }
 
 .queue-edit-form label {
+  align-content: start;
   color: var(--muted);
   display: grid;
   font-size: 0.78rem;
@@ -2228,16 +2233,18 @@ button {
   }
 
   .search-actions,
-  .queue-edit-form {
+  .queue-edit-form,
+  .queue-edit-form.is-simulator {
     justify-items: stretch;
     width: 100%;
   }
 
-  .queue-edit-form {
+  .queue-edit-form,
+  .queue-edit-form.is-simulator {
     grid-template-columns: 1fr;
   }
 
-  .queue-edit-form label:nth-of-type(6),
+  .queue-edit-form .queue-edit-emails,
   .queue-edit-actions,
   .queue-priority-editor {
     grid-column: auto;
