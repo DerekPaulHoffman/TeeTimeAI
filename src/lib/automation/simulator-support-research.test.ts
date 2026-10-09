@@ -953,6 +953,33 @@ describe("bounded owned simulator public research transport", () => {
     expect(JSON.stringify(result.bookingLinks)).not.toContain("Reserve a bay");
     expect(summarizeSimulatorSupportPublicHtml("<a href='/booking'>Book</a>", source)).toEqual({ text: "Book", links: [`${source}/booking`] });
   });
+  it("separates a fresh official golf venue link from booking and unrelated external links", async () => {
+    const golf = "https://tworoadsgolfclub.square.site/";
+    const html = `<a href='${golf}' title='Golf Club'>Golf Club</a><a href='https://ads.example.test/golf-deals'>Golf Club deals</a>` +
+      `<a href='https://marketing.example.test/golf-promo'>Golf Club</a>` +
+      `<a href='https://marketing.example.test/simulators'>Explore</a><a href='/food-hall/'>Food Hall</a>`;
+    const result = await collectSimulatorSupportResearch({ url: source }, { fetch: vi.fn(async () => response(html)), lease });
+    expect(result.venueLinks).toEqual([golf]);
+    expect(result.bookingLinks).toBeUndefined();
+    expect(result.links).toContain(golf);
+    const booking = "https://app.birrdi.com/u/reserve?team_booking_link_id=public-golf";
+    const venue = await collectSimulatorSupportResearch({ url: golf }, { fetch: vi.fn(async () => response(
+      `<a href='${booking}'>Book Online</a><a href='/faq'>FAQ</a>`)), lease });
+    expect(venue.bookingLinks).toEqual([booking]);
+    expect(venue.venueLinks).toBeUndefined();
+  });
+  it("retains booking and venue CTAs when ordinary navigation fills the link cap", async () => {
+    const booking = "https://calendar.example.test/booking/bays";
+    const golf = "https://tworoadsgolfclub.square.site/";
+    const generic = Array.from({ length: 29 }, (_, index) => `<a href='/page-${index}'>Page ${index}</a>`).join("");
+    const result = await collectSimulatorSupportResearch({ url: source }, { fetch: vi.fn(async () => response(
+      `${generic}<a href='${booking}'>Book Online</a><a href='${golf}'>Golf Club</a>`)), lease });
+    expect(result.links).toHaveLength(30);
+    expect(result.bookingLinks).toEqual([booking]);
+    expect(result.venueLinks).toEqual([golf]);
+    expect(result.links).toContain(booking);
+    expect(result.links).toContain(golf);
+  });
   it("observes only the exact anonymous same-venue occupancy API, without expanding other cross-origin data authority", async () => {
     const query = "?start_gte=2026-10-09T04%3A00%3A00Z&start_lte=2026-10-10T23%3A59%3A59-04%3A00";
     const api = `https://api.yourgolfbooking.com/venue/golf-oasis/bookings/public${query}`;

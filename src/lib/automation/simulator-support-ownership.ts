@@ -390,6 +390,7 @@ export async function readSimulatorSupportSource(input: Owner & { source?: Simul
     if (state.inFlight?.requestId !== before.value.requestId) throw new Error("The original simulator source research reservation changed.");
     const usableDocument = read.httpStatus >= 200 && read.httpStatus < 300;
     const roleEvidence = new Map<string, string>();
+    const venueEvidence = new Map<string, string>();
     if (usableDocument) {
       const linked = new Set(read.links);
       const isFresh = (observedAt: string) => {
@@ -403,11 +404,15 @@ export async function readSimulatorSupportSource(input: Owner & { source?: Simul
         for (const url of read.bookingLinks ?? []) {
           if (linked.has(url)) roleEvidence.set(url, read.observedAt);
         }
+        for (const url of read.venueLinks ?? []) {
+          if (linked.has(url) && !roleEvidence.has(url)) venueEvidence.set(url, read.observedAt);
+        }
       }
     }
     const research: SimulatorResearchState = { ...state, inFlight: null, links: usableDocument ? read.links : state.links,
       bookingLinks: usableDocument ? [...roleEvidence.keys()] : state.bookingLinks,
       bookingLinkRoles: usableDocument ? [...roleEvidence].map(([url, observedAt]) => ({ url, observedAt })) : state.bookingLinkRoles,
+      venueLinkRoles: usableDocument ? [...venueEvidence].filter(([url]) => !roleEvidence.has(url)).map(([url, observedAt]) => ({ url, observedAt })) : state.venueLinkRoles,
       linkBaseUrl: usableDocument ? read.url : state.linkBaseUrl,
       history: [...state.history, { source: before.value.source, requestedUrl: before.value.url, sourceUrl: read.url,
         sourceFingerprint: before.value.sourceFingerprint,
@@ -572,7 +577,7 @@ export function adoptSimulatorSupportSource(input: Owner & { expectedFingerprint
       changed ? { ...research, sourceFingerprint: row.source.fingerprint,
         history: research.history.map(entry => { const observedSource = getSimulatorResearchObservationFingerprint(entry, research, row.claim.originalSourceFingerprint);
           return observedSource ? { ...entry, sourceFingerprint: observedSource } : entry; }),
-        links: [], bookingLinks: [], bookingLinkRoles: [], linkBaseUrl: null } : research);
+        links: [], bookingLinks: [], bookingLinkRoles: [], venueLinkRoles: [], linkBaseUrl: null } : research);
   });
 }
 

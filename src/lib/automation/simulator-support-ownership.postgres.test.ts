@@ -1267,6 +1267,41 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(coreMocks.fetch).not.toHaveBeenCalled(); expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
   });
 
+  it("persists a fresh official venue role and follows its published booking link without changing the claim", async () => {
+    const f = await fixture();
+    const golf = "https://officialgolfclub.square.site/";
+    const birrdi = "https://app.birrdi.com/u/reserve?team_booking_link_id=public-golf";
+    const first = await lane.readSimulatorSupportSource({ ...f.owner, source: "official" }, vi.fn(async () => new Response(
+      `<a href='${golf}'>Golf Club</a><a href='/food-hall/'>Food Hall</a>`, { headers: { "content-type": "text/html" } })));
+    if (!first.acquired) throw new Error("Official venue read failed.");
+    const before = await lane.readSimulatorSupportClaim(f.owner);
+    expect(before.research.venueLinkRoles).toEqual([{ url: golf, observedAt: first.value.publicSource.observedAt }]);
+    expect(before.research.bookingLinks).toEqual([]);
+    expect(before.researchGuide.suggestedReads).toContainEqual({ linkIndex: 1, rendered: false });
+    const second = await lane.readSimulatorSupportSource({ ...f.owner, revision: first.value.revision, linkIndex: 1 },
+      vi.fn(async () => new Response(`<a href='${birrdi}'>Book Online</a>`, { headers: { "content-type": "text/html" } })));
+    if (!second.acquired) throw new Error("Venue handoff failed.");
+    const after = await lane.readSimulatorSupportClaim(f.owner);
+    expect(after.research).toMatchObject({ readCount: 2, linkBaseUrl: golf, bookingLinks: [birrdi] });
+    expect(after.researchGuide.suggestedReads).toContainEqual({ linkIndex: 1, rendered: false });
+    expect(after.sourceFingerprint).toBe(f.fingerprint);
+    expect(after.offeringRevision).toBe(before.offeringRevision);
+  });
+
+  it("drops a venue role when a newer official page links it without a venue label", async () => {
+    const f = await fixture();
+    const golf = "https://officialgolfclub.square.site/";
+    const first = await lane.readSimulatorSupportSource({ ...f.owner, source: "official" }, vi.fn(async () => new Response(
+      `<a href='${golf}'>Golf Club</a><a href='/details'>Details</a>`, { headers: { "content-type": "text/html" } })));
+    if (!first.acquired) throw new Error("Official read failed.");
+    const second = await lane.readSimulatorSupportSource({ ...f.owner, revision: first.value.revision, linkIndex: 2 },
+      vi.fn(async () => new Response(`<a href='${golf}'>Promotions</a>`, { headers: { "content-type": "text/html" } })));
+    if (!second.acquired) throw new Error("Details read failed.");
+    const after = await lane.readSimulatorSupportClaim(f.owner);
+    expect(after.research.venueLinkRoles).toEqual([]);
+    expect(after.researchGuide.suggestedReads).not.toContainEqual({ linkIndex: 1, rendered: false });
+  });
+
   it("waits for the writer during final source-read settlement without fetching twice", async () => {
     const evidenceUrl = "https://official.example.test/faqs";
     const f = await fixture(15, false, undefined, evidenceUrl);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertSimulatorResearchFallbackBeforeRetry, currentSimulatorResearchBlockedRoutes, getSimulatorResearchGuide, getSimulatorResearchRetryGuide, getSimulatorResearchObservationFingerprint, getSimulatorResearchImplementationVersion, mergeSimulatorResearchBlockedRoutes, readSettledSimulatorPublicCheckpoint, readSimulatorResearchFailureMemory, readSimulatorResearchState, selectSimulatorResearchTarget, SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION } from "./simulator-support-research-policy";
+import { assertSimulatorResearchFallbackBeforeRetry, currentSimulatorResearchBlockedRoutes, getSimulatorResearchGuide, getSimulatorResearchRetryGuide, getSimulatorResearchObservationFingerprint, getSimulatorResearchImplementationVersion, mergeSimulatorResearchBlockedRoutes, readSettledSimulatorPublicCheckpoint, readSimulatorResearchFailureMemory, readSimulatorResearchState, selectSimulatorResearchTarget, SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION, type SimulatorResearchBlockedRoute } from "./simulator-support-research-policy";
 
 const fingerprint = "a".repeat(64), now = new Date("2026-10-06T20:00:00Z");
 const officialUrl = "https://venue.example.test", bookingUrl = "https://calendar.example.test/booking/bays";
@@ -9,6 +9,111 @@ const failedHomepage = () => ({ ...empty(), readCount: 1, history: [{ source: "o
 const savedBayUrl = "https://yourgolfbooking.com/venues/public-golf/booking/bays";
 const bookingRootUrl = "https://yourgolfbooking.com/venues/public-golf/booking";
 const acuityTenantRoot = "https://onegolfhaven.as.me/";
+
+describe("official venue navigation and fragment route identity", () => {
+  const brewery = "https://brewery.example.test/";
+  const golf = "https://brewerygolfclub.square.site/";
+  const birrdi = "https://public-calendar.example.test/booking/starts";
+  const receipt = { source: "official" as const, requestedUrl: brewery, sourceUrl: brewery,
+    sourceFingerprint: fingerprint, observedAt: now.toISOString(), httpStatus: 200, rendered: true,
+    outcome: "READ" as const, requestId: "11111111-1111-4111-8111-111111111111",
+    researchImplementationVersion: getSimulatorResearchImplementationVersion(brewery),
+    publicReadEvidence: { sourceFingerprint: fingerprint, accessControlsObserved: true as const,
+      accessControls: [], method: "BROWSER" as const, renderComplete: true } };
+  const observed = () => readSimulatorResearchState({ ...empty(), readCount: 1, history: [receipt],
+    links: [`${brewery}#`, golf, `${brewery}food-hall/`], bookingLinks: [], bookingLinkRoles: [],
+    venueLinkRoles: [{ url: golf, observedAt: now.toISOString() }], linkBaseUrl: brewery }, fingerprint);
+  const input = (state = observed()) => ({ state, officialUrl: brewery, bookingUrl: null,
+    now, priorFailedRoutes: [] as SimulatorResearchBlockedRoute[] });
+
+  it("prioritizes the fresh venue over food hall and rejects a homepage fragment alias", () => {
+    const state = observed();
+    expect(getSimulatorResearchRetryGuide(input(state))).toMatchObject({ bookingResearchRequired: true,
+      nextEligibleBookingRead: { linkIndex: 2, rendered: false } });
+    expect(() => selectSimulatorResearchTarget({ ...input(state), linkIndex: 1, rendered: false })).toThrow("identical");
+    expect(selectSimulatorResearchTarget({ ...input(state), linkIndex: 2, rendered: false }).url).toBe(golf);
+    expect(state.history[0].requestedUrl).toBe(brewery);
+  });
+
+  it("keeps a useful plain read after an incomplete or old rendered receipt", () => {
+    for (const entry of [
+      { ...receipt, publicReadEvidence: { ...receipt.publicReadEvidence, renderComplete: false } },
+      { ...receipt, researchImplementationVersion: "old-reader-v1" },
+      { ...receipt, sourceFingerprint: "b".repeat(64), publicReadEvidence: {
+        ...receipt.publicReadEvidence, sourceFingerprint: "b".repeat(64) } },
+    ]) {
+      const state = readSimulatorResearchState({ ...observed(), history: [entry] }, fingerprint);
+      expect(selectSimulatorResearchTarget({ ...input(state), linkIndex: 1, rendered: false }).url).toBe(`${brewery}#`);
+    }
+  });
+
+  it("requires current fresh access evidence and rejects unclassified external pages", () => {
+    const follow = (state: ReturnType<typeof observed>, when = now) =>
+      selectSimulatorResearchTarget({ ...input(state), now: when, linkIndex: 2, rendered: false });
+    expect(() => follow({ ...observed(), venueLinkRoles: [] })).toThrow("handoff");
+    expect(() => follow({ ...observed(), sourceFingerprint: "b".repeat(64) })).toThrow("handoff");
+    expect(() => follow({ ...observed(), history: [{ ...receipt, publicReadEvidence: undefined }] })).toThrow("handoff");
+    expect(() => follow({ ...observed(), history: [{ ...receipt, publicReadEvidence: {
+      ...receipt.publicReadEvidence, accessControls: ["ACCOUNT_REQUIRED" as const] } }] })).toThrow("handoff");
+    expect(() => follow({ ...observed(), history: [{ ...receipt,
+      observedAt: new Date(now.getTime() + 1).toISOString() }] })).toThrow("fresh");
+    expect(() => follow(observed(), new Date(now.getTime() + 31 * 60_000))).toThrow("fresh");
+    expect(() => selectSimulatorResearchTarget({ ...input(observed()), linkIndex: 2, rendered: false,
+      priorFailedRoutes: [{ url: `${golf}#menu`, rendered: false }] })).toThrow("structural");
+  });
+
+  it("does not use an older successful page after a newer denial or access challenge", () => {
+    const latest = (httpStatus: number, controls: Array<"ACCOUNT_REQUIRED"> = []) =>
+      readSimulatorResearchState({ ...observed(), readCount: 2, history: [receipt, {
+        ...receipt, requestId: "22222222-2222-4222-8222-222222222222", httpStatus,
+        publicReadEvidence: { ...receipt.publicReadEvidence, accessControls: controls },
+      }] }, fingerprint);
+    for (const state of [latest(403), latest(200, ["ACCOUNT_REQUIRED"])]) {
+      expect(() => selectSimulatorResearchTarget({ ...input(state), linkIndex: 2, rendered: false })).toThrow("handoff");
+      expect(getSimulatorResearchRetryGuide(input(state)).nextEligibleBookingRead).toBeNull();
+    }
+  });
+
+  it("treats a later denial on the original redirect URL as newer than the resolved page", () => {
+    const resolved = "https://www.brewery.example.test/";
+    const first = { ...receipt, sourceUrl: resolved };
+    const denied = { ...receipt, requestedUrl: brewery, sourceUrl: brewery, httpStatus: 403,
+      observedAt: new Date(now.getTime() + 1).toISOString(), rendered: false, publicReadEvidence: undefined };
+    const state = readSimulatorResearchState({ ...observed(), readCount: 2, history: [first, denied],
+      linkBaseUrl: resolved }, fingerprint);
+    expect(() => selectSimulatorResearchTarget({ ...input(state), now: new Date(now.getTime() + 2),
+      linkIndex: 2, rendered: false })).toThrow("handoff");
+  });
+
+  it("allows a booking hop from the venue, then bars a second venue handoff", () => {
+    const visited = { ...receipt, source: "link" as const, requestedUrl: golf, sourceUrl: golf };
+    const state = readSimulatorResearchState({ ...observed(), readCount: 2, history: [receipt, visited],
+      links: [birrdi, "https://anothergolfclub.example.test/"], bookingLinks: [birrdi],
+      bookingLinkRoles: [{ url: birrdi, observedAt: now.toISOString() }],
+      venueLinkRoles: [{ url: "https://anothergolfclub.example.test/", observedAt: now.toISOString() }],
+      linkBaseUrl: golf }, fingerprint);
+    expect(selectSimulatorResearchTarget({ ...input(state), linkIndex: 1, rendered: false }).url).toBe(birrdi);
+    expect(() => selectSimulatorResearchTarget({ ...input(state), linkIndex: 2, rendered: false })).toThrow("handoff");
+    expect(() => selectSimulatorResearchTarget({ ...input(state), linkIndex: 1, rendered: false,
+      priorFailedRoutes: [{ url: `${birrdi}#times`, rendered: false }] })).toThrow("structural");
+  });
+
+  it("preserves older denial across fragment aliases and separate query routes", () => {
+    const denied = { ...receipt, requestedUrl: `${brewery}#top`, sourceUrl: `${brewery}#top`, httpStatus: 403,
+      rendered: false, publicReadEvidence: undefined };
+    const state = readSimulatorResearchState({ ...empty(), readCount: 1, history: [denied] }, fingerprint);
+    expect(() => selectSimulatorResearchTarget({ ...input(state), source: "official", rendered: false })).toThrow("identical");
+    expect(selectSimulatorResearchTarget({ ...input(state), source: "evidence", evidenceUrl: `${brewery}?page=2`, rendered: false }).url)
+      .toBe(`${brewery}?page=2`);
+    expect(mergeSimulatorResearchBlockedRoutes([
+      { url: `${brewery}#top`, rendered: false, httpStatus: 403 },
+      { url: brewery, rendered: false, httpStatus: 200 },
+    ])).toHaveLength(1);
+    expect(getSimulatorResearchRetryGuide({ ...input(state), bookingUrl: `${brewery}#booking` }))
+      .toMatchObject({ bookingResearchRequired: false });
+    expect(() => assertSimulatorResearchFallbackBeforeRetry(state, `${brewery}#booking`, brewery)).toThrow("bounded rendered");
+  });
+});
 
 describe("fresh hosted Acuity research handoff", () => {
   const official = { source: "official" as const, requestedUrl: officialUrl, sourceUrl: officialUrl,

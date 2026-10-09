@@ -78,6 +78,7 @@ export function simulatorCapabilityWakeupReceipt(input: {
     if (research.history.slice(receiptIndex + 1).some(entry =>
       entry.requestedUrl === latest.requestedUrl &&
       (entry.researchImplementationVersion === "public-calendar-known-readers-passive-method-shapes-v3" ||
+        entry.researchImplementationVersion === "public-calendar-known-readers-official-venue-links-v4" ||
         entry.rendered === latest.rendered &&
         (entry.outcome === "HARD_FAILED" || [401, 403, 404].includes(entry.httpStatus) ||
         (entry.publicReadEvidence?.accessControls.length ?? 0) > 0 ||

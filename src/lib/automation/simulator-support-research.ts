@@ -115,6 +115,7 @@ export type SimulatorResearchResult = {
   requestedUrl: string; url: string; observedAt: string; httpStatus: number; text: string; links: string[];
   method: "HTTP" | "BROWSER"; initialHttpStatus?: number;
   bookingLinks?: string[];
+  venueLinks?: string[];
   calendar?: SimulatorPublicCalendar;
   publicConfiguration?: SimulatorPublicConfiguration;
   jsonShape?: Array<{ path: string; type: string; count?: number }>;
@@ -500,9 +501,10 @@ function resultFromBody(requestedUrl: string, url: string, status: number, conte
   const summary = summarizeSimulatorSupportPublicHtml(html, url);
   const publishedRoles = publishedBootstrapBookingRoles(html);
   const bookingLinks = [...publicBookingLinkRoles(html, url, summary.links), ...publishedRoles];
+  const venueLinks = publicVenueLinkRoles(html, url);
   // Preserve an observed booking CTA when the ordinary anchor list already
   // fills the saved-link cap. Every role must also survive in that same list.
-  summary.links = [...new Set([...publishedRoles, ...summary.links])].slice(0, 30);
+  summary.links = [...new Set([...publishedRoles, ...bookingLinks, ...venueLinks, ...summary.links])].slice(0, 30);
   const slug = publicVenueSlug(url) ?? publishedYourGolfBookingSlug(html, url);
   // This is the platform's fixed public configuration route. It is a
   // research destination, never evidence of inventory or runnable monitoring.
@@ -515,7 +517,9 @@ function resultFromBody(requestedUrl: string, url: string, status: number, conte
     projectUSchedulePublicConfiguration(html, url);
   const retainedLinks = new Set(summary.links);
   const retainedBookingLinks = [...new Set(bookingLinks)].filter(link => retainedLinks.has(link));
+  const retainedVenueLinks = venueLinks.filter(link => retainedLinks.has(link));
   return { ...base, ...summary, ...(retainedBookingLinks.length ? { bookingLinks: retainedBookingLinks } : {}),
+    ...(retainedVenueLinks.length ? { venueLinks: retainedVenueLinks } : {}),
     ...(publicConfiguration ? { publicConfiguration } : {}), ...extractSimulatorPublicCalendar(html, url) };
 }
 
@@ -633,6 +637,35 @@ function contractPath(url: URL) {
   const pathShape = url.pathname.split("/").map(part => !part || words.test(part) ? part : /^\d+$/u.test(part) ? ":id" : ":value").join("/").slice(0, 400);
   const queryKeys = [...new Set([...url.searchParams.keys()].filter(key => /^[A-Za-z_][A-Za-z0-9_]{0,63}$/u.test(key) && !sensitiveField.test(key)))].slice(0, 20);
   return { pathShape, queryKeys };
+}
+
+function publicVenueLinkRoles(html: string, sourceUrl: string) {
+  const roles = new Set<string>();
+  const sourceOrigin = new URL(sourceUrl).origin;
+  const label = (node: PublicNode): string => node.nodeName === "#text" ? node.value?.slice(0, 200) ?? "" :
+    (node.childNodes ?? []).map(label).join(" ").slice(0, 200);
+  const visit = (node: PublicNode) => {
+    if (node.tagName && ["script", "style", "form", "input", "textarea", "select", "noscript"].includes(node.tagName)) return;
+    if (node.tagName === "a" && roles.size < 30) {
+      const href = node.attrs?.find(attr => attr.name === "href")?.value;
+      const labels = [label(node), ...((node.attrs ?? []).filter(attr => ["aria-label", "title"].includes(attr.name)).map(attr => attr.value.slice(0, 200)))];
+      if (href && labels.some(value => /^(?:the\s+)?(?:golf\s*club|indoor\s*golf|golf\s*simulators?|simulator\s*(?:venue|rentals?|bays?))$/iu
+        .test(sanitizeResponderText(value).replace(/\s+/gu, " ").trim()))) {
+        try {
+          const url = publicUrl(new URL(href, sourceUrl).href);
+          // The label and destination must independently identify the golf venue.
+          // A generic external marketing link does not gain navigation authority.
+          const venueHost = /(?:^|\.)(?:[a-z0-9-]{0,40}golfclub|[a-z0-9-]{0,40}golf-club|indoorgolf|indoor-golf|simulators?)(?:\.|$)/iu.test(url.hostname);
+          const venuePath = /\/(?:golf-club|golfclub|indoor-golf|simulators?)(?:\/|$)/iu.test(url.pathname);
+          if (url.protocol === "https:" && url.origin !== sourceOrigin &&
+              (venueHost || venuePath)) roles.add(url.href);
+        } catch { /* Roles never rescue unsafe or unobserved URLs. */ }
+      }
+    }
+    for (const child of node.childNodes ?? []) visit(child);
+  };
+  visit(parse(html));
+  return [...roles];
 }
 
 /** Static route vocabulary only: no untrusted path component or query survives. */

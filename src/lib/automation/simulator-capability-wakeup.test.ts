@@ -61,7 +61,8 @@ describe("simulator capability wakeup receipt", () => {
 
   it.each([
     ["stale receipt", (f: ReturnType<typeof fixture>) => { f.audit.simulatorResearch!.history[0].observedAt = "2026-10-09T17:29:59.000Z"; }],
-    ["current reader", (f: ReturnType<typeof fixture>) => { f.audit.simulatorResearch!.history[0].researchImplementationVersion = "public-calendar-known-readers-passive-method-shapes-v3"; }],
+    ["current reader", (f: ReturnType<typeof fixture>) => { f.audit.simulatorResearch!.history[0].researchImplementationVersion = "public-calendar-known-readers-official-venue-links-v4"; }],
+    ["previous known reader", (f: ReturnType<typeof fixture>) => { f.audit.simulatorResearch!.history[0].researchImplementationVersion = "public-calendar-known-readers-passive-method-shapes-v3"; }],
     ["unknown URL", (f: ReturnType<typeof fixture>) => { f.audit.simulatorResearch!.history[0].sourceUrl = "https://unknown.example/booking"; }],
     ["source drift", (f: ReturnType<typeof fixture>) => { f.sourceFingerprint = "c".repeat(64); }],
     ["missing request", (f: ReturnType<typeof fixture>) => { delete f.audit.simulatorResearch!.history[0].requestId; }],

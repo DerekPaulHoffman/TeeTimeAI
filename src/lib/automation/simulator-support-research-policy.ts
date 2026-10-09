@@ -4,14 +4,15 @@ import { readSafeSimulatorSupportFailure, type SimulatorSupportFailure } from ".
 import { isAcuityPublicResearchRoot, isSimulatorPublicConfigurationSource, knownSimulatorPublicConfigurationFamily, simulatorPublicConfigurationSchema } from "@/lib/simulators/providers/public-configuration";
 
 export const SIMULATOR_RESEARCH_MAX_READS = 6;
-export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-passive-method-shapes-v4";
+export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-official-venue-links-v5";
 export function getSimulatorResearchImplementationVersion(url: string) {
-  return knownSimulatorPublicConfigurationFamily(url) ? "public-calendar-known-readers-passive-method-shapes-v3" : SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION;
+  return knownSimulatorPublicConfigurationFamily(url) ? "public-calendar-known-readers-official-venue-links-v4" : SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION;
 }
 export const SIMULATOR_RESEARCH_SOURCE_NAMES = ["official", "booking", "booking-root", "evidence"] as const;
 export type SimulatorResearchSource = (typeof SIMULATOR_RESEARCH_SOURCE_NAMES)[number];
 const researchSource = z.enum([...SIMULATOR_RESEARCH_SOURCE_NAMES, "link"]);
 const safeUrl = z.string().refine(value => Boolean(getSafeCustomerBookingUrl(value)));
+function routeIdentity(value: string) { const url = new URL(value); url.hash = ""; return url.href; }
 const safeFailure = z.custom<SimulatorSupportFailure>(value => readSafeSimulatorSupportFailure(value) !== null)
   .transform(value => readSafeSimulatorSupportFailure(value)!);
 const publicNumericId = z.string().regex(/^[1-9][0-9]{0,9}$/u).refine(value => Number(value) <= 1_000_000_000);
@@ -171,12 +172,15 @@ const stateSchema = z.object({
   history: z.array(observation).max(SIMULATOR_RESEARCH_MAX_READS),
   links: z.array(safeUrl).max(30), bookingLinks: z.array(safeUrl).max(30).default([]), linkBaseUrl: safeUrl.nullable(),
   bookingLinkRoles: z.array(z.object({ url: safeUrl, observedAt: z.string().datetime() }).strict()).max(30).optional(),
+  venueLinkRoles: z.array(z.object({ url: safeUrl, observedAt: z.string().datetime() }).strict()).max(30).optional(),
   lastRecoveredFailureRequestId: z.string().uuid().optional(),
   inFlight: z.object({ requestId: z.string().uuid(), startedAt: z.string().datetime(), expiresAt: z.string().datetime(),
     source: researchSource, url: safeUrl, rendered: z.boolean() }).strict().nullable(),
 }).strict().refine(state => state.history.length + (state.inFlight ? 1 : 0) === state.readCount && state.bookingLinks.every(url => state.links.includes(url)) &&
   (!state.bookingLinkRoles || new Set(state.bookingLinkRoles.map(role => role.url)).size === state.bookingLinkRoles.length &&
-    state.bookingLinkRoles.every(role => state.bookingLinks.includes(role.url))));
+    state.bookingLinkRoles.every(role => state.bookingLinks.includes(role.url))) &&
+  (!state.venueLinkRoles || new Set(state.venueLinkRoles.map(role => role.url)).size === state.venueLinkRoles.length &&
+    state.venueLinkRoles.every(role => state.links.includes(role.url) && !state.bookingLinks.includes(role.url))));
 export type SimulatorResearchState = z.infer<typeof stateSchema>;
 /** A mutable state fingerprint cannot relabel observations from an adopted legacy source. */
 export function getSimulatorResearchObservationFingerprint(entry: SimulatorResearchState["history"][number], state: SimulatorResearchState, originalFingerprint: string | undefined) {
@@ -209,7 +213,7 @@ export function mergeSimulatorResearchBlockedRoutes(routes: readonly SimulatorRe
   const unique = new Map<string, SimulatorResearchBlockedRoute>();
   for (const route of routes) {
     const parsed = blockedResearchRoute.parse(route);
-    const key = `${new URL(parsed.url).href}:${parsed.rendered}`;
+    const key = `${routeIdentity(parsed.url)}:${parsed.rendered}`;
     if (!unique.has(key)) unique.set(key, parsed);
   }
   if (unique.size > 64) throw new Error("Simulator research failure memory reached its bounded route limit.");
@@ -247,7 +251,7 @@ export function isSimulatorPostRepairResearchReadDue(route: SimulatorResearchBlo
 export function currentSimulatorResearchBlockedRoutes(routes: readonly SimulatorResearchBlockedRoute[], now?: Date,
   postRepairResearchBoundary?: Date | null) {
   return routes.filter(route => {
-    const sameRoute = routes.filter(entry => new URL(entry.url).href === new URL(route.url).href && entry.rendered === route.rendered);
+    const sameRoute = routes.filter(entry => routeIdentity(entry.url) === routeIdentity(route.url) && entry.rendered === route.rendered);
     if (now && isSimulatorPostRepairResearchReadDue(route, now, postRepairResearchBoundary, sameRoute)) return false;
     const incompleteSecondary = route.rendered && !route.failure && route.httpStatus >= 200 && route.httpStatus < 300 &&
       route.renderWarning?.startsWith("SECONDARY_") === true &&
@@ -280,6 +284,11 @@ function isFreshBookingLink(state: SimulatorResearchState, url: string, now: Dat
   // A subsequent successful read cannot carry them without original provenance.
   const receipt = [...state.history].reverse().find(entry => entry.sourceUrl === state.linkBaseUrl && entry.httpStatus >= 200 && entry.httpStatus < 300);
   return Boolean(receipt && Date.parse(receipt.observedAt) <= now.getTime() && Date.parse(receipt.observedAt) >= now.getTime() - 30 * 60_000);
+}
+
+function isFreshVenueLink(state: SimulatorResearchState, url: string, now: Date) {
+  return Boolean(state.venueLinkRoles?.some(role => role.url === url &&
+    Date.parse(role.observedAt) <= now.getTime() && Date.parse(role.observedAt) >= now.getTime() - 30 * 60_000));
 }
 
 export function readSimulatorResearchState(value: unknown, fingerprint: string): SimulatorResearchState {
@@ -320,25 +329,45 @@ export function selectSimulatorResearchTarget(input: {
   if (source === "evidence") {
     const official = getSafeCustomerBookingUrl(input.officialUrl);
     if (!official || new URL(url).origin !== new URL(official).origin) throw new Error("The saved evidence page must remain on the official website origin.");
-    if (new URL(url).href === new URL(official).href) throw new Error("Use the original official route when the evidence page is the homepage.");
+    if (routeIdentity(url) === routeIdentity(official)) throw new Error("Use the original official route when the evidence page is the homepage.");
   }
   if (source === "link") {
-    const previous = [...state.history].reverse().find(entry => entry.sourceUrl === state.linkBaseUrl && entry.httpStatus >= 200 && entry.httpStatus < 300);
+    if (!input.rendered && state.history.some(entry => entry.rendered && entry.outcome === "READ" &&
+        entry.httpStatus >= 200 && entry.httpStatus < 300 &&
+        entry.sourceFingerprint === state.sourceFingerprint &&
+        entry.researchImplementationVersion === getSimulatorResearchImplementationVersion(entry.requestedUrl) &&
+        entry.publicReadEvidence?.sourceFingerprint === state.sourceFingerprint &&
+        entry.publicReadEvidence.accessControlsObserved === true && !entry.publicReadEvidence.accessControls.length &&
+        entry.publicReadEvidence.renderComplete === true && routeIdentity(entry.requestedUrl) === routeIdentity(url)))
+      throw new Error("Use a different simulator source research route; the identical route was already attempted.");
+    const parent = [...state.history].reverse().find(entry => routeIdentity(entry.sourceUrl) === routeIdentity(state.linkBaseUrl!) &&
+      entry.outcome === "READ" && entry.httpStatus >= 200 && entry.httpStatus < 300);
+    const previous = [...state.history].reverse().find(entry => routeIdentity(entry.sourceUrl) === routeIdentity(state.linkBaseUrl!) ||
+      parent && routeIdentity(entry.requestedUrl) === routeIdentity(parent.requestedUrl));
     const hostedRootRole = isAcuityPublicResearchRoot(url) && state.bookingLinkRoles?.some(role => role.url === url &&
       Date.parse(role.observedAt) <= input.now.getTime() && Date.parse(role.observedAt) >= input.now.getTime() - 30 * 60_000) &&
       previous?.sourceFingerprint === state.sourceFingerprint && previous.outcome === "READ" &&
       previous.publicReadEvidence?.accessControlsObserved === true && !previous.publicReadEvidence.accessControls.length;
-    if (!previous || previous.httpStatus < 200 || previous.httpStatus >= 300 || new Date(previous.observedAt).getTime() < input.now.getTime() - 30 * 60_000 ||
+    const official = getSafeCustomerBookingUrl(input.officialUrl);
+    const venueRole = Boolean(official && new URL(state.linkBaseUrl!).origin === new URL(official).origin &&
+      isFreshVenueLink(state, url, input.now) &&
+      state.venueLinkRoles?.some(role => role.url === url && role.observedAt === previous?.observedAt) &&
+      previous?.sourceFingerprint === state.sourceFingerprint &&
+      previous.outcome === "READ" && previous.publicReadEvidence?.sourceFingerprint === state.sourceFingerprint &&
+      previous.publicReadEvidence.accessControlsObserved === true && !previous.publicReadEvidence.accessControls.length);
+    if (!previous || previous.outcome !== "READ" || previous.httpStatus < 200 || previous.httpStatus >= 300 ||
+        new Date(previous.observedAt).getTime() > input.now.getTime() ||
+        new Date(previous.observedAt).getTime() < input.now.getTime() - 30 * 60_000 ||
         new URL(url).origin !== new URL(state.linkBaseUrl!).origin &&
           !(isFreshBookingLink(state, url, input.now) && (/\b(?:book(?:ing)?|reserv(?:e|ation)|appointments?|calendar)\b/i.test(new URL(url).pathname) || hostedRootRole) ||
-            input.bookingUrl && new URL(url).hostname === new URL(input.bookingUrl).hostname)) {
+            input.bookingUrl && new URL(url).hostname === new URL(input.bookingUrl).hostname || venueRole)) {
       throw new Error("The selected link is not a fresh same-site page or official booking handoff.");
     }
-    if (new URL(url).origin === new URL(state.linkBaseUrl!).origin && state.history.filter(entry => entry.source === "link" && new URL(entry.requestedUrl).origin === new URL(url).origin).length >= 2) throw new Error("The bounded same-site research depth is exhausted.");
+    if (new URL(url).origin === new URL(state.linkBaseUrl!).origin && new Set(state.history.filter(entry => entry.source === "link" && new URL(entry.requestedUrl).origin === new URL(url).origin).map(entry => routeIdentity(entry.requestedUrl))).size >= 2) throw new Error("The bounded same-site research depth is exhausted.");
   }
-  const destinations = new Set(state.history.filter(entry => entry.source === "booking" || entry.source === "booking-root" || entry.source === "link" && input.officialUrl && new URL(entry.requestedUrl).origin !== new URL(input.officialUrl).origin).map(entry => entry.requestedUrl));
-  if (source !== "official" && source !== "evidence" && !destinations.has(url) && destinations.size >= 3) throw new Error("The bounded simulator booking destination budget is exhausted.");
-  const priorOnRoute = state.history.filter(entry => entry.requestedUrl === url && entry.rendered === input.rendered);
+  const destinations = new Set(state.history.filter(entry => entry.source === "booking" || entry.source === "booking-root" || entry.source === "link" && input.officialUrl && new URL(entry.requestedUrl).origin !== new URL(input.officialUrl).origin).map(entry => routeIdentity(entry.requestedUrl)));
+  if (source !== "official" && source !== "evidence" && !destinations.has(routeIdentity(url)) && destinations.size >= 3) throw new Error("The bounded simulator booking destination budget is exhausted.");
+  const priorOnRoute = state.history.filter(entry => routeIdentity(entry.requestedUrl) === routeIdentity(url) && entry.rendered === input.rendered);
   const matching = priorOnRoute.at(-1);
   const protectedRoute = priorOnRoute.some(entry => entry.outcome === "HARD_FAILED" ||
     [401, 403, 404].includes(entry.httpStatus) || (entry.publicReadEvidence?.accessControls.length ?? 0) > 0);
@@ -355,7 +384,7 @@ export function selectSimulatorResearchTarget(input: {
       (isSecondaryRevalidationDue(matchingRoute!, input.now) ||
         isSimulatorPostRepairResearchReadDue(matchingRoute!, input.now, input.postRepairResearchBoundary, priorOnRoute))))
     throw new Error("Use a different simulator source research route; the identical route was already attempted.");
-  if (input.priorFailedRoutes?.some(entry => entry.url === url && entry.rendered === input.rendered)) throw new Error("An unchanged structural source failure needs a different research route or materially changed source.");
+  if (input.priorFailedRoutes?.some(entry => routeIdentity(entry.url) === routeIdentity(url) && entry.rendered === input.rendered)) throw new Error("An unchanged structural source failure needs a different research route or materially changed source.");
   return { source, url, rendered: input.rendered };
 }
 
@@ -365,7 +394,8 @@ export function getSimulatorResearchGuide(input: {
   now: Date; priorFailedRoutes: SimulatorResearchBlockedRoute[];
   postRepairResearchBoundary?: Date | null;
 }) {
-  const roleLinks = input.state.links.flatMap((url, index) => isFreshBookingLink(input.state, url, input.now) ? [index] : []);
+  const roleLinks = input.state.links.flatMap((url, index) => isFreshBookingLink(input.state, url, input.now) ||
+    isFreshVenueLink(input.state, url, input.now) ? [index] : []);
   const genericLinks = input.state.links.flatMap((_, index) => roleLinks.includes(index) ? [] : [index]);
   const routes: Array<{ source?: SimulatorResearchSource; linkIndex?: number; rendered: boolean }> = [
     { source: "booking" as const, rendered: false }, { source: "booking" as const, rendered: true },
@@ -379,7 +409,7 @@ export function getSimulatorResearchGuide(input: {
   const suggestedReads = routes.filter(route => {
     try {
       const selected = selectSimulatorResearchTarget({ ...input, ...route });
-      const key = `${new URL(selected.url).href}:${selected.rendered}`;
+      const key = `${routeIdentity(selected.url)}:${selected.rendered}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
@@ -431,11 +461,12 @@ export function getSimulatorResearchRetryGuide(input: {
   if (researchGuide.suggestedReads.length === 0) return result(null, true, "NO_ALLOWED_RESEARCH_ROUTES");
   const official = getSafeCustomerBookingUrl(input.officialUrl);
   const booking = getSafeCustomerBookingUrl(input.bookingUrl);
-  const distinctSavedBooking = Boolean(booking && (!official || new URL(booking).href !== new URL(official).href));
+  const distinctSavedBooking = Boolean(booking && (!official || routeIdentity(booking) !== routeIdentity(official)));
   const next = researchGuide.suggestedReads.find(route => {
     const selected = selectSimulatorResearchTarget({ ...input, ...route });
     return selected.source === "booking" && distinctSavedBooking || selected.source === "booking-root" || selected.source === "link" &&
-      isFreshBookingLink(state, selected.url, input.now) && (!official || new URL(selected.url).href !== new URL(official).href);
+      (isFreshBookingLink(state, selected.url, input.now) || isFreshVenueLink(state, selected.url, input.now)) &&
+      (!official || routeIdentity(selected.url) !== routeIdentity(official));
   });
   if (next) return result(next, false, null);
   // Do not let the older homepage assertion demand a saved booking route whose
@@ -455,14 +486,15 @@ export function assertSimulatorResearchFallbackBeforeRetry(state: SimulatorResea
   const failed = state.history[failedIndex];
   if (!failed || failed.httpStatus === 429) return;
   const savedBooking = getSafeCustomerBookingUrl(bookingUrl);
-  if (savedBooking && new URL(savedBooking).href !== new URL(failed.requestedUrl).href) {
-    if (!state.history.some(entry => entry.outcome !== "CAPACITY_BUSY" && new URL(entry.requestedUrl).href === new URL(savedBooking).href)) {
+  if (savedBooking && routeIdentity(savedBooking) !== routeIdentity(failed.requestedUrl)) {
+    if (!state.history.some(entry => entry.outcome !== "CAPACITY_BUSY" && routeIdentity(entry.requestedUrl) === routeIdentity(savedBooking))) {
       throw new Error("A failed simulator homepage needs its distinct saved official booking read before retry; a failed rendered homepage does not replace it.");
     }
     return;
   }
-  if (!state.history.slice(failedIndex + 1).some(entry => entry.rendered && entry.requestedUrl === failed.requestedUrl ||
-    (entry.source === "booking" || entry.source === "link") && entry.requestedUrl !== failed.requestedUrl && (!bookingUrl || entry.requestedUrl === bookingUrl || entry.source === "link"))) {
+  if (!state.history.slice(failedIndex + 1).some(entry => entry.rendered && routeIdentity(entry.requestedUrl) === routeIdentity(failed.requestedUrl) ||
+    (entry.source === "booking" || entry.source === "link") && routeIdentity(entry.requestedUrl) !== routeIdentity(failed.requestedUrl) &&
+    (!bookingUrl || routeIdentity(entry.requestedUrl) === routeIdentity(bookingUrl) || entry.source === "link"))) {
     throw new Error("A failed simulator homepage needs a distinct official booking read or a bounded rendered official-site read before retry.");
   }
 }

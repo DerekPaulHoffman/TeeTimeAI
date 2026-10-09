@@ -123,7 +123,7 @@ describe.skipIf(!url)("simulator capability wakeup in isolated Postgres", () => 
     const prior = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id } });
     const audit = prior.audit as Record<string, unknown>;
     const research = audit.simulatorResearch as { history: Array<Record<string, unknown>> };
-    research.history[0].researchImplementationVersion = "public-calendar-known-readers-passive-method-shapes-v3";
+    research.history[0].researchImplementationVersion = "public-calendar-known-readers-official-venue-links-v4";
     await client.automationRun.update({ where: { id: f.run.id }, data: { audit: audit as Prisma.InputJsonValue } });
     expect(await client.$transaction(tx => reconcileSimulatorCapabilityWakeups(new Date(), tx))).toBe(0);
     expect((await client.simulatorSupportIncident.findUniqueOrThrow({ where: { id: f.incident.id } })).retryAt)
