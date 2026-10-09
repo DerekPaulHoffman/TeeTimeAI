@@ -1,4 +1,5 @@
 import { parse, type DefaultTreeAdapterMap } from "parse5";
+import { parse as parseJavaScript } from "acorn";
 import type { BrowserContext, BrowserContextOptions, Page, Route } from "@playwright/test";
 import { bodySizeBand, createAddressPinnedPublicFetchTransport, getOwnedOfficialSiteBodyLimitDiagnostic, type OwnedBodySizeBand } from "./address-pinned-public-fetch";
 import { runWithProviderRequestLease } from "./provider-request-lease";
@@ -159,6 +160,30 @@ export function summarizeSimulatorSupportPublicHtml(html: string, sourceUrl: str
   };
   walk(parse(html));
   return { text: sanitizeResponderText(text.join(" ").replace(/\s+/g, " ").trim()).slice(0, 12_000), links: [...anchors] };
+}
+
+function hasEmptyClientAppRoot(html: string) {
+  let empty = false;
+  const visit = (node: PublicNode) => {
+    if (node.tagName === "div" && node.attrs?.some(attr => attr.name === "id" && attr.value === "app")) {
+      empty = (node.childNodes ?? []).every(child => child.nodeName === "#comment" ||
+        child.nodeName === "#text" && !child.value?.trim());
+    }
+    for (const child of node.childNodes ?? []) visit(child);
+  };
+  visit(parse(html));
+  return empty;
+}
+
+function hasVisibleBodyContent(html: string) {
+  const visit = (node: PublicNode, inBody: boolean): boolean => {
+    if (node.tagName && ["head", "script", "style", "form", "input", "textarea", "select", "noscript"].includes(node.tagName)) return false;
+    const body = inBody || node.tagName === "body";
+    if (body && node.nodeName === "#text" && sanitizeResponderText(node.value ?? "").trim()) return true;
+    if (body && node.tagName === "a" && node.attrs?.some(attr => attr.name === "href")) return true;
+    return (node.childNodes ?? []).some(child => visit(child, body));
+  };
+  return visit(parse(html), false);
 }
 
 const sensitiveField = /(?:user|customer|owner|account|contact|session|token|secret|password|credential|api.?key|csrf|xsrf|auth|cookie|header|email|phone|address|payment|card|checkout|cart|perk|profile|member|player|booking|reservation)/iu;
@@ -462,7 +487,11 @@ function resultFromBody(requestedUrl: string, url: string, status: number, conte
   if (!/^(?:text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(contentType)) return base;
   const html = body.toString("utf8");
   const summary = summarizeSimulatorSupportPublicHtml(html, url);
-  const bookingLinks = publicBookingLinkRoles(html, url, summary.links);
+  const publishedRoles = publishedBootstrapBookingRoles(html);
+  const bookingLinks = [...publicBookingLinkRoles(html, url, summary.links), ...publishedRoles];
+  // Preserve an observed booking CTA when the ordinary anchor list already
+  // fills the saved-link cap. Every role must also survive in that same list.
+  summary.links = [...new Set([...publishedRoles, ...summary.links])].slice(0, 30);
   const slug = publicVenueSlug(url) ?? publishedYourGolfBookingSlug(html, url);
   // This is the platform's fixed public configuration route. It is a
   // research destination, never evidence of inventory or runnable monitoring.
@@ -472,8 +501,67 @@ function resultFromBody(requestedUrl: string, url: string, status: number, conte
     bookingLinks.unshift(bays);
   }
   const publicConfiguration = projectAcuityPublicConfiguration(html, url) ?? projectGolfBookPublicConfiguration(html, url);
-  return { ...base, ...summary, ...(bookingLinks.length ? { bookingLinks: [...new Set(bookingLinks)].slice(0, 30) } : {}),
+  const retainedLinks = new Set(summary.links);
+  const retainedBookingLinks = [...new Set(bookingLinks)].filter(link => retainedLinks.has(link));
+  return { ...base, ...summary, ...(retainedBookingLinks.length ? { bookingLinks: retainedBookingLinks } : {}),
     ...(publicConfiguration ? { publicConfiguration } : {}), ...extractSimulatorPublicCalendar(html, url) };
+}
+
+function publishedBootstrapBookingRoles(html: string) {
+  const scripts: string[] = [];
+  const visit = (node: Node) => {
+    if ("tagName" in node && node.tagName === "script") {
+      const body = "childNodes" in node ? node.childNodes.map(child => "value" in child ? child.value : "").join("") : "";
+      if (body.includes("window.__BOOTSTRAP_STATE__")) scripts.push(body);
+    } else if ("childNodes" in node) node.childNodes.forEach(visit);
+  };
+  visit(parse(html));
+  if (scripts.length !== 1 || Buffer.byteLength(scripts[0], "utf8") > 200_000) return [];
+  const script = scripts[0];
+  let bootstrap: unknown;
+  try {
+    const program = parseJavaScript(script, { ecmaVersion: "latest", sourceType: "script" });
+    if (program.body.length !== 1 || program.body[0].type !== "ExpressionStatement") return [];
+    const assignment = program.body[0].expression;
+    if (assignment.type !== "AssignmentExpression" || assignment.operator !== "=" ||
+        assignment.left.type !== "MemberExpression" || assignment.left.computed ||
+        assignment.left.object.type !== "Identifier" || assignment.left.object.name !== "window" ||
+        assignment.left.property.type !== "Identifier" || assignment.left.property.name !== "__BOOTSTRAP_STATE__" ||
+        assignment.right.type !== "ObjectExpression") return [];
+    bootstrap = JSON.parse(script.slice(assignment.right.start, assignment.right.end));
+  } catch { return []; }
+  const object = (value: unknown): Record<string, unknown> | undefined => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+  const siteData = object(object(bootstrap)?.siteData);
+  const navigation = object(object(siteData?.snapshot)?.properties)?.navigation;
+  if (navigation !== undefined && (!Array.isArray(navigation) || navigation.length > 30)) return [];
+  const links: string[] = [];
+  const addExternal = (external: unknown) => {
+    if (typeof external !== "string" || external.length > 2_048) return false;
+    try { const url = publicUrl(external); if (url.protocol !== "https:") return false; links.push(url.href); return true; }
+    catch { return false; }
+  };
+  for (const candidate of Array.isArray(navigation) ? navigation : []) {
+    const entry = object(candidate);
+    if (!entry || entry.type !== "external" || entry.tab !== false || !Array.isArray(entry.children) || entry.children.length !== 0 ||
+        typeof entry.title !== "string" || sanitizeResponderText(entry.title).replace(/\s+/gu, " ").trim().toUpperCase() !== "BOOK A TEE TIME") continue;
+    if (!addExternal(object(entry.link)?.external)) return [];
+  }
+  const banner = object(object(object(object(siteData?.page)?.properties)?.contentAreas)?.banner);
+  const content = object(banner?.content);
+  const elements = content?.elements;
+  if (banner?.hidden === false && content?.type === "block") {
+    if (!Array.isArray(elements) || elements.length > 30) return [];
+    for (const candidate of elements) {
+      const entry = object(candidate);
+      if (entry?.purpose !== "button-1") continue;
+      const properties = object(entry.properties);
+      if (properties?.hidden !== false || typeof properties.label !== "string" ||
+          sanitizeResponderText(properties.label).replace(/\s+/gu, " ").trim().toUpperCase() !== "BOOK NOW") continue;
+      const role = object(properties.link);
+      if (role?.type !== "external" || role.tab !== false || !addExternal(object(role.link)?.external)) return [];
+    }
+  }
+  return new Set(links).size <= 1 ? links : [];
 }
 
 function publicBookingLinkRoles(html: string, sourceUrl: string, safeLinks: string[]) {
@@ -847,11 +935,23 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
       const renderedControls = detectSimulatorResearchAccessControls(html);
       if (renderedControls.length) return { requestedUrl, url, observedAt: now().toISOString(), httpStatus: navigation.status, text: "", links: [], method: "BROWSER", accessControls: renderedControls, blockedRequests, admittedRequests: requestCount, renderComplete: false, contentProvenance: "RENDERED_DOM" };
       const rendered = resultFromBody(requestedUrl, url, response?.status() ?? navigation.status, "text/html", Buffer.from(html), now());
+      const renderWarning = secondaryStylesheetUrlRejected ? "SECONDARY_STYLESHEET_URL_REJECTED" as const
+        : secondaryAssetBodyLimitExceeded ? "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED" as const : undefined;
+      if (safeMainDocument && hasEmptyClientAppRoot(safeMainDocument.body.toString("utf8")) &&
+          !hasVisibleBodyContent(html)) {
+        // An empty client shell does not prove that undeclared browser chunks
+        // rendered the published site. Keep inert main-document facts for the
+        // next bounded source read without claiming a complete browser render.
+        return { ...resultFromBody(requestedUrl, safeMainDocument.url, safeMainDocument.status,
+          safeMainDocument.contentType, safeMainDocument.body, safeMainDocument.observedAt),
+          method: "BROWSER", blockedRequests, admittedRequests: requestCount,
+          renderComplete: false, contentProvenance: "MAIN_DOCUMENT_HTTP",
+          ...(renderWarning ? { renderWarning, ...bodyLimitFields(renderWarning) } : {}),
+          ...(responseContracts.length ? { responseContracts } : {}) };
+      }
       // A rejected/capped leaf stays unavailable to the browser. Other independently
       // admitted reads and the bounded observed DOM remain useful discovery evidence;
       // neither proves that the page or calendar rendered completely.
-      const renderWarning = secondaryStylesheetUrlRejected ? "SECONDARY_STYLESHEET_URL_REJECTED" as const
-        : secondaryAssetBodyLimitExceeded ? "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED" as const : undefined;
       return { ...rendered, method: "BROWSER", blockedRequests, admittedRequests: requestCount, renderComplete: !renderWarning,
         contentProvenance: "RENDERED_DOM", ...(renderWarning ? { renderWarning, ...bodyLimitFields(renderWarning) } : {}),
         ...(responseContracts.length ? { responseContracts } : {}) };

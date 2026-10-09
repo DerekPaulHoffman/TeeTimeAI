@@ -42,6 +42,20 @@ describe("Acuity public simulator availability", () => {
     expect(result.slots[0]).not.toHaveProperty("price");
     expect(result.slots[0]).not.toHaveProperty("availableSpots");
   });
+  it("accepts an exact public tenant scheduler while keeping the provider API and rental guards", async () => {
+    const bookingUrl = "https://onegolfhaven.as.me/schedule/a66e63ac";
+    const offering = { ...input.offering, bookingUrl, providerMetadata: { ownerKey: "a66e63ac", rentalProductIds: ["73234482", "73234480"] } };
+    const value = business(); value.ownerKey = "a66e63ac";
+    const fetchImpl = mockReads(undefined, landing(value));
+    expect(isAcuityPublicBookingUrl(bookingUrl)).toBe(true);
+    const result = await fetchAcuitySimulatorAvailability({ ...input, offering }, fetchImpl);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(String(fetchImpl.mock.calls[0][0])).toBe(bookingUrl);
+    expect(new URL(String(fetchImpl.mock.calls[1][0])).origin).toBe("https://app.acuityscheduling.com");
+    expect(result.slots[0].bookingUrl).toBe(bookingUrl);
+    value.appointmentTypes[""][1].name = "Golf Time 2 HOUR";
+    await expect(fetchAcuitySimulatorAvailability({ ...input, offering }, mockReads(undefined, landing(value)))).rejects.toMatchObject({ code: "INVALID_SOURCE" });
+  });
   it("requests the independent one-hour product rather than joining shorter starts", async () => {
     const fetchImpl = mockReads();
     const result = await fetchAcuitySimulatorAvailability({ ...input, durationMinutes: 60 }, fetchImpl);
@@ -60,7 +74,8 @@ describe("Acuity public simulator availability", () => {
     expect((await fetchAcuitySimulatorAvailability(input, mockReads(undefined, landing(value)))).slots[0].maxPartySize).toBe(4);
   });
   it.each([
-    "https://xgolfstratford.as.me/", "https://app.acuityscheduling.com.attacker.example/schedule/2991fba2", "http://app.acuityscheduling.com/schedule/2991fba2", "https://user:pass@app.acuityscheduling.com/schedule/2991fba2", "https://app.acuityscheduling.com/schedule.php?owner=34536426", "https://app.acuityscheduling.com/schedule/2991fba2?calendarId=11388341", "https://app.acuityscheduling.com/api/scheduling/v1/appointments", "https://app.acuityscheduling.com/schedule/2991fba2#reserve"
+    "https://xgolfstratford.as.me/", "https://app.acuityscheduling.com.attacker.example/schedule/2991fba2", "http://app.acuityscheduling.com/schedule/2991fba2", "https://user:pass@app.acuityscheduling.com/schedule/2991fba2", "https://app.acuityscheduling.com/schedule.php?owner=34536426", "https://app.acuityscheduling.com/schedule/2991fba2?calendarId=11388341", "https://app.acuityscheduling.com/api/scheduling/v1/appointments", "https://app.acuityscheduling.com/schedule/2991fba2#reserve",
+    "http://onegolfhaven.as.me/schedule/a66e63ac", "https://onegolfhaven.as.me.attacker.example/schedule/a66e63ac", "https://a.b.as.me/schedule/a66e63ac", "https://-bad.as.me/schedule/a66e63ac", "https://onegolfhaven.as.me/schedule/a66e63ac/", "https://onegolfhaven.as.me/schedule/a66e63ac?owner=other", "https://onegolfhaven.as.me/schedule/a66e63ac#book", "https://onegolfhaven.as.me/appointments"
   ])("rejects unsafe, legacy or wrong-tenant source before fetching: %s", async (bookingUrl) => {
     expect(isAcuityPublicBookingUrl(bookingUrl)).toBe(false);
     const fetchImpl = vi.fn<typeof fetch>();

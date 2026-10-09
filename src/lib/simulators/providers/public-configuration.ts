@@ -7,6 +7,16 @@ const timeZone = z.string().max(80).refine(value => {
 });
 const uniqueIds = z.array(publicId).min(1).max(40).refine(ids => new Set(ids).size === ids.length);
 const duration = z.number().int().min(30).max(240).multipleOf(30);
+const acuityTenantHost = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.as\.me$/u;
+const acuitySchedulePath = /^\/schedule\/[a-zA-Z0-9]{4,40}$/u;
+
+export function isAcuityPublicResearchRoot(sourceUrl: string) {
+  try {
+    const url = new URL(sourceUrl);
+    return url.protocol === "https:" && !url.port && !url.username && !url.password && !url.search && !url.hash &&
+      acuityTenantHost.test(url.hostname) && url.pathname === "/";
+  } catch { return false; }
+}
 function validDate(value: string) {
   return /^\d{4}-\d{2}-\d{2}$/u.test(value) && Number.isFinite(Date.parse(`${value}T12:00:00Z`)) && new Date(`${value}T12:00:00Z`).toISOString().slice(0, 10) === value;
 }
@@ -16,7 +26,8 @@ export function knownSimulatorPublicConfigurationFamily(sourceUrl: string): "ACU
   try {
     const url = new URL(sourceUrl);
     if (url.protocol !== "https:" || url.port || url.username || url.password || url.hash) return;
-    if (url.origin === "https://app.acuityscheduling.com" && !url.search && /^\/schedule\/[a-zA-Z0-9]{4,40}$/u.test(url.pathname)) return "ACUITY";
+    if ((url.hostname === "app.acuityscheduling.com" || acuityTenantHost.test(url.hostname)) &&
+        !url.search && acuitySchedulePath.test(url.pathname)) return "ACUITY";
     if (!/^[a-z][a-z0-9-]{0,62}\.golfbook\.in$/u.test(url.hostname)) return;
     if (url.pathname === "/calendar.php" && !url.search) return "GOLFBOOK";
     const keys = [...url.searchParams.keys()];

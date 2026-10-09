@@ -4,7 +4,7 @@ import { parse, type DefaultTreeAdapterMap } from "parse5";
 import { fetchWithProviderTimeout } from "@/lib/adapters/fetch-with-timeout";
 
 import { parseProviderComputedSlots } from "./computed-slots";
-import { simulatorPublicConfigurationSchema, type AcuityPublicConfiguration } from "./public-configuration";
+import { knownSimulatorPublicConfigurationFamily, simulatorPublicConfigurationSchema, type AcuityPublicConfiguration } from "./public-configuration";
 import { SimulatorAvailabilityError, type SimulatorAvailabilityInput, type SimulatorAvailabilityResult } from "./types";
 
 const ORIGIN = "https://app.acuityscheduling.com";
@@ -15,10 +15,7 @@ type Node = DefaultTreeAdapterMap["node"];
 type PublicProduct = { id: string; calendarIds: string[] };
 
 export function isAcuityPublicBookingUrl(value: string) {
-  try {
-    const url = new URL(value);
-    return url.origin === ORIGIN && !url.username && !url.password && !url.search && !url.hash && /^\/schedule\/[a-zA-Z0-9]{4,40}$/u.test(url.pathname);
-  } catch { return false; }
+  return knownSimulatorPublicConfigurationFamily(value) === "ACUITY";
 }
 
 /** Reads only the published signed-out scheduler and its provider-computed

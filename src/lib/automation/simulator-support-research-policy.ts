@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { readSafeSimulatorSupportFailure, type SimulatorSupportFailure } from "./simulator-support-failure";
-import { isSimulatorPublicConfigurationSource, knownSimulatorPublicConfigurationFamily, simulatorPublicConfigurationSchema } from "@/lib/simulators/providers/public-configuration";
+import { isAcuityPublicResearchRoot, isSimulatorPublicConfigurationSource, knownSimulatorPublicConfigurationFamily, simulatorPublicConfigurationSchema } from "@/lib/simulators/providers/public-configuration";
 
 export const SIMULATOR_RESEARCH_MAX_READS = 6;
 export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-resource-local-v3";
@@ -305,9 +305,13 @@ export function selectSimulatorResearchTarget(input: {
   }
   if (source === "link") {
     const previous = [...state.history].reverse().find(entry => entry.sourceUrl === state.linkBaseUrl && entry.httpStatus >= 200 && entry.httpStatus < 300);
+    const hostedRootRole = isAcuityPublicResearchRoot(url) && state.bookingLinkRoles?.some(role => role.url === url &&
+      Date.parse(role.observedAt) <= input.now.getTime() && Date.parse(role.observedAt) >= input.now.getTime() - 30 * 60_000) &&
+      previous?.sourceFingerprint === state.sourceFingerprint && previous.outcome === "READ" &&
+      previous.publicReadEvidence?.accessControlsObserved === true && !previous.publicReadEvidence.accessControls.length;
     if (!previous || previous.httpStatus < 200 || previous.httpStatus >= 300 || new Date(previous.observedAt).getTime() < input.now.getTime() - 30 * 60_000 ||
         new URL(url).origin !== new URL(state.linkBaseUrl!).origin &&
-          !(isFreshBookingLink(state, url, input.now) && /\b(?:book(?:ing)?|reserv(?:e|ation)|appointments?|calendar)\b/i.test(new URL(url).pathname) ||
+          !(isFreshBookingLink(state, url, input.now) && (/\b(?:book(?:ing)?|reserv(?:e|ation)|appointments?|calendar)\b/i.test(new URL(url).pathname) || hostedRootRole) ||
             input.bookingUrl && new URL(url).hostname === new URL(input.bookingUrl).hostname)) {
       throw new Error("The selected link is not a fresh same-site page or official booking handoff.");
     }

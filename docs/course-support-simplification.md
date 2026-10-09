@@ -521,3 +521,22 @@ The assigned and continuation templates now classify failures by operation. A co
 ## Retry definite course-support writer admission refusals
 
 The October 9 automatic three-venue run exposed transient `acquired: false` results at a native-child bind and a simulator source-read command. The bind had already created its native child. The source-read command alone does not establish whether admission failed before the public read or during final settlement. These are writer admission refusals, not evidence about the venue or provider. The dispatcher bind and simulator ownership transitions now make bounded retries for up to fifteen seconds only for that exact refusal. Each acquired attempt performs its original database-time owner, source, revision, state and expiry checks. A completed public read is never fetched again when only its final database settlement waits for the writer. Nested Serializable transactions reserve separate pool-wait, transaction and commit time inside the outer writer lease; insufficient time stops before durable commit. Exceptions, unknown results and acquired-but-invalid proofs remain hard stops.
+
+## Preserve public booking roles in client-rendered simulator research
+
+The October 9 read-only One Golf Haven audit observed an empty initial app root,
+while the homepage's inert bootstrap JSON and rendered navigation/button exposed
+the same public `onegolfhaven.as.me` booking CTA. That root redirected on its
+own host to `/schedule/a66e63ac`. The browser collector also blocked an
+undeclared CDN script host. The blocked chunk may explain the empty render,
+but its exact effect was not proved by replaying the original worker trace.
+
+Research now projects only the observed bootstrap navigation and visible banner
+button roles through the existing public-URL guards. An empty client app remains
+an incomplete render even when those inert roles are useful partial evidence.
+A freshly observed, access-free tenant root can enter bounded Acuity research;
+only an exact tenant `/schedule/<key>` URL can be a runnable source, subject to
+the existing owner-key, resource, timezone, access and inventory checks. The
+synthetic verified-bay regression proves that URL route, not that One Golf
+currently has eligible bays or working monitoring. The observed Golf Time
+products and venue-named calendar still lack the required per-resource proof.

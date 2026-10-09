@@ -8,6 +8,41 @@ const select = (state = empty(), rest = {}) => selectSimulatorResearchTarget({ s
 const failedHomepage = () => ({ ...empty(), readCount: 1, history: [{ source: "official" as const, requestedUrl: officialUrl, sourceUrl: officialUrl, observedAt: now.toISOString(), httpStatus: 403, rendered: false, outcome: "READ" as const }] });
 const savedBayUrl = "https://yourgolfbooking.com/venues/public-golf/booking/bays";
 const bookingRootUrl = "https://yourgolfbooking.com/venues/public-golf/booking";
+const acuityTenantRoot = "https://onegolfhaven.as.me/";
+
+describe("fresh hosted Acuity research handoff", () => {
+  const official = { source: "official" as const, requestedUrl: officialUrl, sourceUrl: officialUrl,
+    sourceFingerprint: fingerprint, observedAt: now.toISOString(), httpStatus: 200, rendered: false, outcome: "READ" as const,
+    requestId: "11111111-1111-4111-8111-111111111111",
+    publicReadEvidence: { sourceFingerprint: fingerprint, accessControlsObserved: true as const, accessControls: [], method: "HTTP" as const } };
+  const observed = (url = acuityTenantRoot) => readSimulatorResearchState({ ...empty(), readCount: 1,
+    history: [official], links: [url], bookingLinks: [url],
+    bookingLinkRoles: [{ url, observedAt: now.toISOString() }], linkBaseUrl: officialUrl }, fingerprint);
+  const follow = (state = observed(), rest = {}) => select(state, { source: undefined,
+    linkIndex: 1, bookingUrl: null, ...rest });
+
+  it("offers only a fresh observed public tenant root as bounded research", () => {
+    expect(follow()).toEqual({ source: "link", url: acuityTenantRoot, rendered: false });
+    expect(getSimulatorResearchGuide({ state: observed(), officialUrl, bookingUrl: null, now, priorFailedRoutes: [] }).suggestedReads)
+      .toContainEqual({ linkIndex: 1, rendered: false });
+    expect(() => follow(observed(), { priorFailedRoutes: [{ url: acuityTenantRoot, rendered: false }] })).toThrow("structural");
+    expect(() => follow({ ...observed(), readCount: 6 })).toThrow("budget");
+  });
+
+  it("rejects missing or stale role proof, failed routes, and lookalike or access destinations", () => {
+    expect(() => follow({ ...observed(), bookingLinkRoles: [] })).toThrow("handoff");
+    expect(() => follow({ ...observed(), bookingLinkRoles: undefined })).toThrow("handoff");
+    expect(() => follow(observed(), { now: new Date(now.getTime() + 31 * 60_000) })).toThrow("fresh");
+    for (const url of ["https://onegolfhaven.as.me.attacker.example/", "https://a.b.as.me/", "http://onegolfhaven.as.me/",
+      "https://onegolfhaven.as.me/login", "https://onegolfhaven.as.me/checkout", "https://other.example.test/"]) {
+      expect(() => follow(observed(url))).toThrow();
+    }
+    const failed = { ...official, source: "link" as const, requestedUrl: acuityTenantRoot, sourceUrl: acuityTenantRoot,
+      observedAt: now.toISOString(), httpStatus: 403 };
+    expect(() => follow(readSimulatorResearchState({ ...observed(), readCount: 2,
+      history: [official, failed] }, fingerprint))).toThrow("identical");
+  });
+});
 
 describe("same-route research after an owned parser release", () => {
   const postRepairResearchBoundary = new Date("2026-10-06T19:55:00.125Z");

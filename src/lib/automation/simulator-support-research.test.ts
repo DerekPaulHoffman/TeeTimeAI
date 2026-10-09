@@ -36,6 +36,18 @@ function publishedConfig(patch: Record<string, unknown> = {}) {
 
 const acuitySource = "https://app.acuityscheduling.com/schedule/2991fba2";
 const golfBookSource = "https://public-bays.golfbook.in/calendar.php";
+const tenantRoot = "https://onegolfhaven.as.me/";
+function publishedBootstrap(options: { navigationUrl?: string | null; navigationTitle?: string; buttonUrl?: string; buttonHidden?: boolean; bannerHidden?: boolean } = {}) {
+  const state: Record<string, unknown> = { siteData: { snapshot: { properties: { navigation: options.navigationUrl === null ? [] : [
+    { tab: false, link: { external: options.navigationUrl ?? tenantRoot }, type: "external", title: options.navigationTitle ?? "BOOK A TEE TIME", children: [] },
+  ] } }, page: { properties: { contentAreas: { banner: { hidden: options.bannerHidden ?? false, content: { type: "block", layout: "banner-text-below",
+    purpose: "banner@^1.2.2", elements: [{ purpose: "text-1", properties: { label: "Welcome" } },
+      { purpose: "text-2", properties: { label: "Public golf" } },
+      { purpose: "button-1", properties: { hidden: options.buttonHidden ?? false, label: "BOOK NOW\n", link: {
+        tab: false, type: "external", link: { shopAll: true, external: options.buttonUrl ?? tenantRoot, squareAppointment: "" },
+      } } }] } } } } } } };
+  return `<div id='app'></div><script>window.__BOOTSTRAP_STATE__ = ${JSON.stringify(state)};</script>`;
+}
 function acuityConfig(patch: Record<string, unknown> = {}) {
   const business = { id: 34536426, ownerKey: "2991fba2", timezone: "America/New_York", includesAdminOnly: false, isExpired: false,
     description: "Up to 6 People Per Bay", calendars: { "Private-name-must-not-return": [{ id: 11388341, name: "Bay 1", timezone: "America/New_York" }] },
@@ -729,6 +741,104 @@ describe("bounded owned simulator public research transport", () => {
     expect(await view.socket()).toHaveBeenCalledWith(expect.objectContaining({ code: 1008 }));
     expect(view.context.close).toHaveBeenCalledOnce(); expect(view.browser.close).toHaveBeenCalledOnce();
     expect(view.routes[0].fulfill.mock.calls[0][0].headers).not.toHaveProperty("set-cookie");
+  });
+  it("projects only the observed inert bootstrap navigation and visible button booking role once", async () => {
+    const html = publishedBootstrap();
+    const fetch = vi.fn(async () => response(html));
+    const result = await collectSimulatorSupportResearch({ url: source }, { fetch, lease });
+    expect(result.links).toEqual([tenantRoot]);
+    expect(result.bookingLinks).toEqual([tenantRoot]);
+    expect(result.publicConfiguration).toBeUndefined();
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(JSON.stringify(result)).not.toMatch(/shopAll|squareAppointment|BOOK NOW|__BOOTSTRAP_STATE__/u);
+    const escaped = publishedBootstrap().replaceAll(tenantRoot, tenantRoot.replaceAll("/", "\\/"));
+    expect((await collectSimulatorSupportResearch({ url: source }, { fetch: vi.fn(async () => response(escaped)), lease })).bookingLinks)
+      .toEqual([tenantRoot]);
+  });
+  it("retains a projected booking CTA within the 30-link cap and keeps every role linked", async () => {
+    const anchors = Array.from({ length: 30 }, (_, index) => `<a href='/book-${index}'>Book bays</a>`).join("");
+    const html = publishedBootstrap().replace("<div id='app'></div>", `<div id='app'></div>${anchors}`);
+    const result = await collectSimulatorSupportResearch({ url: source }, { fetch: vi.fn(async () => response(html)), lease });
+    expect(result.links).toHaveLength(30);
+    expect(result.links[0]).toBe(tenantRoot);
+    expect(result.links).not.toContain(`${source}/book-29`);
+    expect(result.bookingLinks).toContain(tenantRoot);
+    expect(result.bookingLinks?.every(link => result.links.includes(link))).toBe(true);
+    expect(result.bookingLinks).not.toContain(`${source}/book-29`);
+  });
+  it("does not promote hidden, conflicting, unrelated or unsafe bootstrap fields", async () => {
+    const assignment = publishedBootstrap().match(/<script>([\s\S]*?)<\/script>/u)?.[1];
+    if (!assignment) throw new Error("Missing synthetic bootstrap assignment.");
+    const cases = [
+      publishedBootstrap({ navigationUrl: null, buttonHidden: true }),
+      publishedBootstrap({ navigationUrl: null, bannerHidden: true }),
+      publishedBootstrap({ navigationTitle: "About", buttonHidden: true }),
+      publishedBootstrap({ buttonUrl: "https://other.example.test/book" }),
+      publishedBootstrap({ navigationUrl: "https://127.0.0.1/book", buttonHidden: true }),
+      publishedBootstrap({ navigationUrl: "https://onegolfhaven.as.me/checkout", buttonHidden: true }),
+      publishedBootstrap({ navigationUrl: "https://onegolfhaven.as.me/login", buttonHidden: true }),
+      publishedBootstrap({ navigationUrl: null, buttonUrl: "https://onegolfhaven.as.me/?token=secret" }),
+      publishedBootstrap().replace("window.__BOOTSTRAP_STATE__ =", "window.__BOOTSTRAP_STATE__ = (() => { throw new Error('never execute') })(); window.other ="),
+      `${publishedBootstrap()}<script>window.__BOOTSTRAP_STATE__ = {};</script>`,
+      `<div id='app'></div><script>/* ${assignment} */</script>`,
+      `<div id='app'></div><script>const note = \`${assignment}\`;</script>`,
+      `<div id='app'></div><script>(() => { ${assignment} })();</script>`,
+      `<div id='app'></div><script>if (true) { ${assignment} }</script>`,
+    ];
+    for (const html of cases) {
+      const result = await collectSimulatorSupportResearch({ url: source }, { fetch: vi.fn(async () => response(html)), lease });
+      expect(result.links).toEqual([]);
+      expect(result.bookingLinks).toBeUndefined();
+    }
+  });
+  it("projects a proven tenant scheduler only after a guarded same-host public redirect", async () => {
+    const root = "https://onegolfhaven.as.me/", schedule = "https://onegolfhaven.as.me/schedule/a66e63ac";
+    const fetch = vi.fn().mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: schedule } }))
+      .mockResolvedValueOnce(response(acuityConfig({ ownerKey: "a66e63ac" })));
+    const result = await collectSimulatorSupportResearch({ url: root }, { fetch, lease });
+    expect(result.url).toBe(schedule);
+    expect(result.publicConfiguration).toMatchObject({ family: "ACUITY", ownerKey: "a66e63ac" });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    await expect(collectSimulatorSupportResearch({ url: root }, { fetch: vi.fn(async () =>
+      new Response(null, { status: 302, headers: { location: "https://other.as.me/schedule/a66e63ac" } })), lease }))
+      .rejects.toThrow("DESTINATION_CHANGED");
+  });
+  it("does not call an empty client app complete when an undeclared website chunk was blocked", async () => {
+    const main = publishedBootstrap();
+    const view = renderedBrowser([{ url: `${source}/` },
+      { url: "https://cdn3.editmysite.com/app/website/js/home-page.example.js", kind: "script" }], main);
+    const fetch = vi.fn(async () => response(main));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(view.routes[1].abort).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({ text: "", links: [tenantRoot], bookingLinks: [tenantRoot], blockedRequests: 1,
+      renderComplete: false, contentProvenance: "MAIN_DOCUMENT_HTTP" });
+    expect(result.renderWarning).toBeUndefined();
+  });
+  it("does not count page-title metadata as a completed client app render", async () => {
+    const main = publishedBootstrap().replace("<div id='app'></div>", "<head><title>Public golf venue</title></head><div id='app'></div>");
+    const view = renderedBrowser([{ url: `${source}/` },
+      { url: "https://cdn3.editmysite.com/app/website/js/home-page.example.js", kind: "script" }], main);
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, {
+      fetch: vi.fn(async () => response(main)), lease, browser: view.factory,
+    });
+    expect(view.routes[1].abort).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({ links: [tenantRoot], bookingLinks: [tenantRoot], blockedRequests: 1, renderComplete: false,
+      contentProvenance: "MAIN_DOCUMENT_HTTP" });
+  });
+  it("keeps a declared capped stylesheet warning and admitted JSON shape with an empty client app", async () => {
+    const stylesheet = `${source}/large.css`, data = `${source}/public/state`;
+    const main = `${publishedBootstrap()}<link rel='stylesheet' href='/large.css'>`;
+    const view = renderedBrowser([{ url: `${source}/` }, { url: stylesheet, kind: "stylesheet" }, { url: data, kind: "xhr" }], main);
+    const fetch = vi.fn(async (url: unknown) => String(url) === stylesheet
+      ? new Response("", { headers: { "content-type": "text/css", "content-length": "1500001" } })
+      : String(url) === data ? response('{"publicAvailable":true}', 200, "application/json") : response(main));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    expect(result).toMatchObject({ links: [tenantRoot], bookingLinks: [tenantRoot], blockedRequests: 1,
+      renderComplete: false, contentProvenance: "MAIN_DOCUMENT_HTTP", renderWarning: "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED",
+      bodyLimitDiagnostics: [{ resourceKind: "SECONDARY_STYLESHEET", phase: "COLLECTOR_HEADERS", observedSizeBand: "OVER_LIMIT_UP_TO_2X", count: 1 }],
+      responseContracts: [{ pathShape: "/public/:value", httpStatus: 200 }] });
+    expect(fetch).toHaveBeenCalledTimes(3);
   });
   it("covers child frames and popups while blocking mutations, credentials, access flows and unscoped hosts before reads", async () => {
     const requests: RequestFixture[] = [{ url: `${source}/` }, { url: `${source}/frame`, frame: "child" }, { url: `${source}/popup`, frame: "popup" },

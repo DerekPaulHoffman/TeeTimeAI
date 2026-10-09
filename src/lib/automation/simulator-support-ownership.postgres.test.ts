@@ -840,6 +840,63 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     await lane.retireSimulatorSupport({ ...owner, revision: interrupted.revision });
   });
 
+  it("persists a fresh bootstrap booking role and researches only its same-host Acuity schedule", async () => {
+    const f = await fixture();
+    const before = await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } });
+    const root = "https://onegolfhaven.as.me/", schedule = "https://onegolfhaven.as.me/schedule/a66e63ac";
+    const bootstrap = { siteData: { snapshot: { properties: { navigation: [
+      { tab: false, link: { external: root }, type: "external", title: "BOOK A TEE TIME", children: [] },
+    ] } }, page: { properties: { contentAreas: { banner: { hidden: false, content: { type: "block", elements: [
+      { purpose: "button-1", properties: { hidden: false, label: "BOOK NOW\n", link: {
+        tab: false, type: "external", link: { shopAll: true, external: root, squareAppointment: "" },
+      } } },
+    ] } } } } } } };
+    const ordinaryAnchors = Array.from({ length: 30 }, (_, index) => `<a href="/details-${index}">Details</a>`).join("");
+    const html = `<div id="app"></div>${ordinaryAnchors}<script type="application/javascript" data-cookie-consent="ignore">window.__BOOTSTRAP_STATE__ = ${JSON.stringify(bootstrap)};</script>`;
+    const officialFetch = vi.fn(async () => new Response(html, { status: 200, headers: { "content-type": "text/html" } }));
+    const first = await lane.readSimulatorSupportSource({ ...f.owner, source: "official" }, { fetch: officialFetch });
+    if (!first.acquired) throw new Error("Official fixture read was busy.");
+    const owner = { ...f.owner, revision: first.value.revision };
+    const firstClaim = await lane.readSimulatorSupportClaim(owner);
+    expect(first.value.publicSource).toMatchObject({ httpStatus: 200, bookingLinks: [root] });
+    expect(first.value.publicSource.links).toHaveLength(30);
+    expect(first.value.publicSource.links[0]).toBe(root);
+    expect(first.value.publicSource.links).not.toContain("https://official.example.test/details-29");
+    expect(firstClaim.research).toMatchObject({ readCount: 1, inFlight: null, sourceFingerprint: f.fingerprint,
+      bookingLinks: [root], bookingLinkRoles: [{ url: root, observedAt: first.value.publicSource.observedAt }],
+      history: [{ source: "official", sourceFingerprint: f.fingerprint, outcome: "READ", httpStatus: 200 }] });
+    expect(firstClaim.research.links).toHaveLength(30);
+    expect(firstClaim.research.links).toContain(root);
+    expect(firstClaim.research.bookingLinks.every((link: string) => firstClaim.research.links.includes(link))).toBe(true);
+    expect(firstClaim.researchGuide.suggestedReads).toContainEqual({ linkIndex: 1, rendered: false });
+    expect(officialFetch).toHaveBeenCalledTimes(1);
+
+    const business = { id: 34536426, ownerKey: "a66e63ac", timezone: "America/New_York", includesAdminOnly: false, isExpired: false,
+      description: "Up to 6 People Per Bay", calendars: { "": [{ id: 11388341, name: "Bay 1", timezone: "America/New_York" }] },
+      appointmentTypes: { "": [{ id: 73234482, name: "Simulator Booking 1 HR", duration: 60, active: true, private: false,
+        type: "service", classSize: null, canChooseQuantity: false, calendarIDs: [11388341] }] } };
+    const bookingFetch = vi.fn().mockResolvedValueOnce(new Response(null, { status: 302, headers: { location: schedule } }))
+      .mockResolvedValueOnce(new Response(`<script>var BUSINESS = ${JSON.stringify(business)};</script>`, { headers: { "content-type": "text/html" } }));
+    const second = await lane.readSimulatorSupportSource({ ...owner, linkIndex: 1 }, { fetch: bookingFetch });
+    if (!second.acquired) throw new Error("Booking fixture read was busy.");
+    const finalClaim = await lane.readSimulatorSupportClaim({ ...owner, revision: second.value.revision });
+    expect(bookingFetch).toHaveBeenCalledTimes(2);
+    expect(bookingFetch).toHaveBeenNthCalledWith(1, root, expect.objectContaining({ method: "GET", credentials: "omit" }));
+    expect(second.value.publicSource).toMatchObject({ requestedUrl: root, url: schedule,
+      publicConfiguration: { family: "ACUITY", ownerKey: "a66e63ac", rentals: [{ id: "73234482", calendarIds: ["11388341"] }],
+        resources: [{ id: "11388341" }] } });
+    expect(finalClaim.research).toMatchObject({ readCount: 2, inFlight: null, sourceFingerprint: f.fingerprint,
+      history: [{ source: "official", sourceFingerprint: f.fingerprint }, { source: "link", requestedUrl: root,
+        sourceUrl: schedule, sourceFingerprint: f.fingerprint, publicConfiguration: { family: "ACUITY", ownerKey: "a66e63ac" } }] });
+    expect(finalClaim.researchGuide.publicConfigurations).toContainEqual(expect.objectContaining({
+      configuration: expect.objectContaining({ family: "ACUITY", ownerKey: "a66e63ac" }),
+    }));
+    expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(before);
+    expect(await client.teeTimeMatch.count({ where: { teeSearchId: f.search.id } })).toBe(0);
+    expect(coreMocks.fetch).not.toHaveBeenCalled();
+    expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
+  });
+
   it("records exact current-upstream reuse as metadata-only without claiming a reader fix", async () => {
     const f = await fixture();
     const trustedUpstreamSha = "c".repeat(40);
