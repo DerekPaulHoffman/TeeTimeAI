@@ -308,6 +308,7 @@ describe("bounded owned simulator public research transport", () => {
       rejectedRentalOptions: [{ adminOnlyState: "FALSE", publicOptionId: "21451", typeToken: "simulator", categoryState: "NULL", reason: "CATEGORY_NOT_BAYTIME" },
         { adminOnlyState: "TRUE", reason: "ADMIN_ONLY_NOT_FALSE" }],
       candidateMetadata: {
+        venueId: "1357",
         candidateCount: 1, candidatesTruncated: false,
         candidates: [{ publicOptionId: "21451", nameMatchesPublicRate: true, disabled: false, waitlisted: false,
           duration: 1, durationTypeToken: "slot", minDurationSlots: 1, maxDurationSlots: 8,

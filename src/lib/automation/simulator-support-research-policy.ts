@@ -16,6 +16,7 @@ const safeFailure = z.custom<SimulatorSupportFailure>(value => readSafeSimulator
   .transform(value => readSafeSimulatorSupportFailure(value)!);
 const publicNumericId = z.string().regex(/^[1-9][0-9]{0,9}$/u).refine(value => Number(value) <= 1_000_000_000);
 const candidateMetadata = z.object({
+  venueId: publicNumericId.optional(),
   candidateCount: z.number().int().min(1).max(100),
   candidatesTruncated: z.boolean(),
   candidates: z.array(z.object({

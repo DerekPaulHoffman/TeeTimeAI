@@ -27,7 +27,7 @@ function list(value: unknown, max: number): unknown[] {
 export function isYourGolfBookingPublicBookingUrl(value: string) {
   try {
     const url = new URL(value);
-    return url.origin === BOOKING_ORIGIN && !url.username && !url.password && !url.search && !url.hash && /^\/venues\/[a-z0-9]+(?:-[a-z0-9]+)*\/booking\/?$/u.test(url.pathname);
+    return [BOOKING_ORIGIN, "https://yourgolfbooking.com", "https://www.yourgolfbooking.com"].includes(url.origin) && !url.username && !url.password && !url.search && !url.hash && /^\/venues\/[a-z0-9]+(?:-[a-z0-9]+)*\/booking(?:\/bays)?\/?$/u.test(url.pathname);
   } catch { return false; }
 }
 
@@ -37,29 +37,46 @@ export async function fetchYourGolfBookingAvailability(input: SimulatorAvailabil
   const slug = new URL(input.offering.bookingUrl).pathname.split("/")[2];
   const metadata = record(input.offering.providerMetadata);
   if (!metadata || metadata.venueSlug !== slug || !ID.test(String(metadata.venueId)) || !ID.test(String(metadata.rangeId)) || !ID.test(String(metadata.publicOptionId))) source("The public simulator venue and rental identity are not verified");
+  // This contract is explicitly reviewed per offering. Null is an observed
+  // source value, never a conversion to a public category or false flag.
+  const slotContract = metadata.rentalContract === "PUBLIC_SLOT_V1";
+  if (!slotContract && (new URL(input.offering.bookingUrl).origin !== BOOKING_ORIGIN ||
+      /\/bays\/?$/u.test(new URL(input.offering.bookingUrl).pathname))) source("The public slot source requires a reviewed rental contract");
+  const selectedIds = slotContract ? list(metadata.resourceIds, 40) : null;
+  if (slotContract && (!(metadata.category === null || metadata.category === "baytime") ||
+      !(metadata.maintenanceMode === null || metadata.maintenanceMode === false) ||
+      !selectedIds?.length || selectedIds.some(value => typeof value !== "string" || !ID.test(value)) ||
+      new Set(selectedIds).size !== selectedIds.length)) source("The reviewed public slot contract is incomplete");
+  const horizonDays = slotContract ? integer(metadata.bookingWindowDaysAhead, 1, 365) : 14;
   const htmlUrl = new URL(input.offering.bookingUrl);
-  htmlUrl.pathname = `${htmlUrl.pathname.replace(/\/$/u, "")}/bays`;
+  htmlUrl.pathname = htmlUrl.pathname.replace(/\/$/u, "");
+  if (!htmlUrl.pathname.endsWith("/bays")) htmlUrl.pathname += "/bays";
   const html = await publicRead(htmlUrl, "text/html", 1_500_000, fetchImpl);
   const config = parsePublicConfig(html);
   const venue = record(config.venue);
   const ranges = record(config.ranges);
   const bays = record(config.bays);
-  if (!venue || String(venue.id) !== String(metadata.venueId) || venue.slug !== slug || venue.timezone !== input.timeZone || venue.status !== "live" || venue.maintenanceMode !== false) source("The public simulator venue changed identity or availability state");
+  if (!venue || String(integer(venue.id)) !== String(metadata.venueId) || venue.slug !== slug || venue.timezone !== input.timeZone || venue.status !== "live" || venue.maintenanceMode !== (slotContract ? metadata.maintenanceMode : false)) source("The public simulator venue changed identity or availability state");
   const rangeItems = list(ranges?.items, 20).map(record);
   const range = rangeItems.find(item => item && String(item.id) === String(metadata.rangeId));
-  if (!range || rangeItems.filter(item => item && String(item.id) === String(metadata.rangeId)).length !== 1 || range.venue !== venue.id || range.slug !== "bays" || range.bookable !== true || range.slotDuration !== 30 || range.slotInterval !== 30 || range.slotIntervalStart !== 0 || range.assumeOpen !== true || range.bookingUi !== "standard" || range.customerBookingUi !== "slots" || range.maxBookAheadValue !== 2 || range.maxBookAheadUnit !== "week" || list(range.openingTimes, 100).length !== 0) source("The public simulator range settings changed");
+  if (!range || rangeItems.filter(item => item && String(item.id) === String(metadata.rangeId)).length !== 1 || range.venue !== venue.id || range.slug !== "bays" || range.bookable !== true || range.slotDuration !== 30 || range.slotInterval !== 30 || range.slotIntervalStart !== 0 || range.assumeOpen !== true || (!slotContract && range.bookingUi !== "standard") || range.customerBookingUi !== "slots" || list(range.openingTimes, 100).length !== 0) source("The public simulator range settings changed");
+  const observedHorizon = integer(range.maxBookAheadValue, 1, 365) *
+    (range.maxBookAheadUnit === "day" ? 1 : range.maxBookAheadUnit === "week" ? 7 : 0);
+  if (observedHorizon !== horizonDays || (!slotContract && (range.maxBookAheadValue !== 2 || range.maxBookAheadUnit !== "week"))) source("The reviewed simulator booking horizon changed");
   const options = list(bays?.bayOptions, 100).map(record);
   const option = options.find(item => item && String(item.id) === String(metadata.publicOptionId));
-  if (!option || options.filter(item => item && String(item.id) === String(metadata.publicOptionId)).length !== 1 || option.venue !== venue.id || option.name !== "Public Rate" || option.adminOnly !== false || option.disabled !== false || option.waitlisted !== false || option.type !== "simulator" || option.category !== "baytime" || option.duration !== 1 || option.durationType !== "slot" || option.bufferPeriodMinutes !== 0 || list(option.appliedRequiredPerks, 20).length !== 0 || list(option.restrictions, 20).length !== 0) source("The published simulator rental changed");
-  const minimum = integer(option.minBookingDuration, 1, 8);
-  const maximum = integer(option.maxBookingDuration, minimum, 8);
+  if (!option || options.filter(item => item && String(item.id) === String(metadata.publicOptionId)).length !== 1 || option.venue !== venue.id || (!slotContract && option.name !== "Public Rate") || option.adminOnly !== false || option.disabled !== false || option.waitlisted !== false || option.type !== "simulator" || option.category !== (slotContract ? metadata.category : "baytime") || option.duration !== 1 || option.durationType !== "slot" || option.bufferPeriodMinutes !== 0 || list(option.appliedRequiredPerks, 20).length !== 0 || list(option.restrictions, 20).length !== 0) source("The published simulator rental changed");
+  const minimum = integer(option.minBookingDuration, 1, slotContract ? 48 : 8);
+  const maximum = integer(option.maxBookingDuration, minimum, slotContract ? 48 : 8);
   const capacity = option.maxPlayers === null ? null : integer(option.maxPlayers, 1, 20);
   if (option.minPlayers !== null && option.minPlayers !== undefined) integer(option.minPlayers, 1, 20);
   if (input.durationMinutes / 30 < minimum || input.durationMinutes / 30 > maximum) throw new SimulatorAvailabilityError("UNSUPPORTED_DURATION", "The published simulator rental does not support this session length");
   const maxPartySize = capacity === null ? input.offering.maxPartySize : Math.min(capacity, input.offering.maxPartySize ?? capacity);
   const resourceItems = list(bays?.items, 100).map(record);
-  const resources = resourceItems.filter(item => item && item.range === range.id).map(item => {
-    if (!item || item.venue !== venue.id || item.type !== "simulator" || item.bookable !== true || list(item.restrictedTimes, 100).length !== 0 || !list(item.options, 100).some(id => String(id) === String(option.id)) || !list(item.appliedOptions, 100).some(id => String(id) === String(option.id))) source("The public simulator bay settings changed");
+  const allIds = resourceItems.map(item => item ? String(integer(item.id)) : fail("The simulator resource list is malformed"));
+  if (new Set(allIds).size !== allIds.length || selectedIds?.some(id => !allIds.includes(String(id)))) source("The reviewed simulator resource list changed");
+  const resources = resourceItems.filter(item => item && (selectedIds ? selectedIds.includes(String(item.id)) : item.range === range.id)).map(item => {
+    if (!item || item.range !== range.id || item.venue !== venue.id || item.type !== "simulator" || item.bookable !== true || list(item.restrictedTimes, 100).length !== 0 || !list(item.options, 100).map(value => String(integer(value))).includes(String(option.id)) || !list(item.appliedOptions, 100).map(value => String(integer(value))).includes(String(option.id))) source("The public simulator bay settings changed");
     return String(integer(item.id));
   });
   if (!resources.length || resources.length > 40 || new Set(resources).size !== resources.length) source("The public simulator bay list is missing or ambiguous");
@@ -68,7 +85,7 @@ export async function fetchYourGolfBookingAvailability(input: SimulatorAvailabil
   const localToday = `${localParts.year}-${localParts.month}-${localParts.day}`;
   const requestedDay = Date.parse(`${input.date}T00:00:00Z`);
   const today = Date.parse(`${localToday}T00:00:00Z`);
-  if (requestedDay < today || requestedDay > today + 14 * 86_400_000) throw new SimulatorAvailabilityError("INVALID_REQUEST", "The requested simulator date is outside the published booking window");
+  if (requestedDay < today || requestedDay > today + horizonDays * 86_400_000) throw new SimulatorAvailabilityError("INVALID_REQUEST", "The requested simulator date is outside the published booking window");
   const apiUrl = new URL(`/venue/${slug}/bookings/public`, API_ORIGIN);
   const dayStart = zonedDateTimeToDate(`${input.date}T00:00:00`, input.timeZone);
   const nextDay = new Date(`${input.date}T00:00:00Z`);
@@ -85,7 +102,7 @@ export async function fetchYourGolfBookingAvailability(input: SimulatorAvailabil
   let payload: unknown;
   try { payload = JSON.parse(await publicRead(apiUrl, "application/json", 400_000, fetchImpl)); }
   catch (error) { if (error instanceof SimulatorAvailabilityError) throw error; fail("The public simulator bookings response is invalid JSON"); }
-  const slots = buildSlots(input, resources, option.id, range.id, venue.id, maxPartySize, hours, payload);
+  const slots = buildSlots(input, resources, option.id, range.id, venue.id, maxPartySize, hours, payload, slotContract);
   return { slots, complete: true, observedAt: new Date(), evidenceUrl: apiUrl.toString() };
 }
 
@@ -132,15 +149,18 @@ function parseHours(value: unknown, date: string): [number, number][] {
   return dated ?? weekly;
 }
 
-export function buildSlots(input: SimulatorAvailabilityInput, resources: string[], productId: unknown, rangeId: unknown, venueId: unknown, maxPartySize: number | null, hours: [number, number][], occupancy: unknown): SimulatorAvailabilitySlot[] {
+export function buildSlots(input: SimulatorAvailabilityInput, resources: string[], productId: unknown, rangeId: unknown, venueId: unknown, maxPartySize: number | null, hours: [number, number][], occupancy: unknown, allowOtherResources = false): SimulatorAvailabilitySlot[] {
   const items = list(occupancy, 1_000).map(record);
   const blocked = new Map(resources.map(id => [id, [] as [number, number][]]));
   for (const item of items) {
-    if (!item || !ID.test(String(item.id)) || item.status !== "confirmed" || item.type !== "bay" || !ID.test(String(item.bayOptionId)) || item.rangeId !== rangeId || !blocked.has(String(item.bayId)) || !ID.test(String(item.bayId)) || typeof item.bayRef !== "string" || !/^\d{1,3}$/u.test(item.bayRef)) fail("The public simulator occupancy changed shape or identity");
+    if (!item || !ID.test(String(item.id)) || item.status !== "confirmed" || item.type !== "bay" || !ID.test(String(item.bayOptionId)) || !ID.test(String(item.rangeId)) || (!allowOtherResources && (item.rangeId !== rangeId || !blocked.has(String(item.bayId)))) || !ID.test(String(item.bayId)) || typeof item.bayRef !== "string" || !/^\d{1,3}$/u.test(item.bayRef)) fail("The public simulator occupancy changed shape or identity");
     const start = Date.parse(String(item.start));
     const end = Date.parse(String(item.end));
     if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?(?:Z|[+-]\d{2}:\d{2})$/u.test(String(item.start)) || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?(?:Z|[+-]\d{2}:\d{2})$/u.test(String(item.end)) || !Number.isFinite(start) || !Number.isFinite(end) || start >= end || end - start > 24 * 60 * 60_000) fail("The public simulator occupancy interval is invalid");
-    blocked.get(String(item.bayId))!.push([start, end]);
+    if (blocked.has(String(item.bayId))) {
+      if (item.rangeId !== rangeId) fail("The selected simulator bay changed range identity");
+      blocked.get(String(item.bayId))!.push([start, end]);
+    }
   }
   const slots: SimulatorAvailabilitySlot[] = [];
   for (const resourceId of resources) for (const [start, end] of hours) for (let minute = start; minute + input.durationMinutes <= end; minute += 30) {

@@ -130,7 +130,7 @@ describe("durable simulator research failure memory", () => {
     }
   });
   it("round-trips only cross-linked bounded null-category research facts and leaves old omissions unknown", () => {
-    const metadata = { candidateCount: 1, candidatesTruncated: false,
+    const metadata = { venueId: "1357", candidateCount: 1, candidatesTruncated: false,
       candidates: [{ publicOptionId: "21451", nameMatchesPublicRate: true, disabled: false, waitlisted: false,
         duration: 1, durationTypeToken: "slot", minDurationSlots: 1, maxDurationSlots: 8,
         minPlayers: null, maxPlayers: 4, bufferMinutes: 0, hasRestrictions: false, requiresPerks: false }],
@@ -158,7 +158,11 @@ describe("durable simulator research failure memory", () => {
       rejectedRentalOptionsTruncated: diagnostic.rejectedRentalOptionsTruncated,
       rejectedRentalOptions: diagnostic.rejectedRentalOptions };
     expect(history(old)).toEqual(old);
+    const legacyMetadata = { ...metadata } as Partial<typeof metadata>;
+    delete legacyMetadata.venueId;
+    expect(history({ ...diagnostic, candidateMetadata: legacyMetadata })).toEqual({ ...diagnostic, candidateMetadata: legacyMetadata });
     for (const invalid of [
+      { ...diagnostic, candidateMetadata: { ...metadata, venueId: "private@example.test" } },
       { ...diagnostic, candidateMetadata: { ...metadata, candidates: [{ ...metadata.candidates[0], name: "Private Member" }] } },
       { ...diagnostic, candidateMetadata: { ...metadata, candidates: [{ ...metadata.candidates[0], publicOptionId: "9999" }] } },
       { ...diagnostic, candidateMetadata: { ...metadata, resourceCount: 0 } },

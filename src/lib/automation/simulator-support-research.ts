@@ -54,6 +54,8 @@ export type SimulatorConfigurationDiagnostic = {
   optionCount?: number;
   rejectedRentalOptionsTruncated?: boolean;
   candidateMetadata?: {
+    /** Validated on this exact document; absent on older receipts. */
+    venueId?: string;
     candidateCount: number;
     candidatesTruncated: boolean;
     candidates: Array<{
@@ -316,6 +318,7 @@ function rejectedRentalCandidateMetadata(
       hasOpeningTimeRestrictions: row.hasOpeningTimeRestrictions,
     }));
     return {
+      venueId,
       candidateCount, candidatesTruncated: candidateCount > candidates.length, candidates,
       resourceCount: linkedResources.length, resourcesTruncated: linkedResources.length > resources.length, resources,
       rangeCount: referencedIds.length, rangesTruncated: referencedIds.length > projectedRanges.length, ranges: projectedRanges,

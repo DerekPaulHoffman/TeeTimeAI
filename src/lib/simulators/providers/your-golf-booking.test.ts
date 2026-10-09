@@ -47,6 +47,56 @@ describe("YourGolfBooking public simulator calendar", () => {
     expect(slots.some(slot => slot.resourceId === "9225" && slot.startsAt.toISOString() === "2026-10-10T22:00:00.000Z")).toBe(false);
     expect(slots.some(slot => slot.resourceId === "9224" && slot.startsAt.toISOString() === "2026-10-10T22:00:00.000Z")).toBe(true);
   });
+  it("supports reviewed public slot rentals with observed nulls and only their exact linked resources", async () => {
+    const selected = { ...input, offering: { ...input.offering,
+      bookingUrl: "https://yourgolfbooking.com/venues/golf-oasis/booking/bays",
+      providerMetadata: { ...input.offering.providerMetadata as object, rentalContract: "PUBLIC_SLOT_V1",
+        category: null, maintenanceMode: null, bookingWindowDaysAhead: 13, resourceIds: ["9224", "9225"] } } };
+    const html = config({ bookingUi: "custom", maxBookAheadValue: 13, maxBookAheadUnit: "day" },
+      { name: "Standard simulator", category: null, minBookingDuration: 2, maxBookingDuration: 10 })
+      .replace('"maintenanceMode":false', '"maintenanceMode":null')
+      .replace('"id":9226,"venue":1357,"range":1397,"type":"simulator","bookable":true,"restrictedTimes":[],"options":[21451],"appliedOptions":[21451]',
+        '"id":9226,"venue":1357,"range":1397,"type":"simulator","bookable":true,"restrictedTimes":[],"options":[777],"appliedOptions":[777]');
+    const fetchImpl = responses([booking(9226, "2026-10-10T21:00:00Z", "2026-10-10T22:00:00Z", 777)], html);
+    const result = await fetchYourGolfBookingAvailability(selected, fetchImpl);
+    expect(result.complete).toBe(true);
+    expect(new Set(result.slots.map(slot => slot.resourceId))).toEqual(new Set(["9224", "9225"]));
+    expect(result.slots).toHaveLength(22);
+    expect(String(fetchImpl.mock.calls[0][0])).toBe(selected.offering.bookingUrl);
+  });
+  it.each([undefined, true, "false"])("does not normalize an unreviewed maintenance value %j", async maintenanceMode => {
+    const selected = { ...input, offering: { ...input.offering, providerMetadata: {
+      ...input.offering.providerMetadata as object, rentalContract: "PUBLIC_SLOT_V1", category: null,
+      maintenanceMode: null, bookingWindowDaysAhead: 13, resourceIds: ["9224"] } } };
+    const html = config({ maxBookAheadValue: 13, maxBookAheadUnit: "day" }, { category: null })
+      .replace('"maintenanceMode":false', `"maintenanceMode":${JSON.stringify(maintenanceMode ?? "missing")}`);
+    const fetchImpl = responses([], html);
+    await expect(fetchYourGolfBookingAvailability(selected, fetchImpl)).rejects.toMatchObject({ code: "INVALID_SOURCE" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+  it.each(["restricted-tail", "missing-link", "duplicate-id", "wrong-range", "unknown-category", "missing-category"])("validates every selected runtime resource and source value: %s", async change => {
+    const state = JSON.parse(config().match(/<script[^>]*>([\s\S]*?)<\/script>/u)![1]);
+    const published = state.props.pageProps.initialReduxState;
+    published.venue.maintenanceMode = null;
+    Object.assign(published.ranges.items[0], { maxBookAheadValue: 13, maxBookAheadUnit: "day", bookingUi: "custom" });
+    published.bays.bayOptions[0].category = null;
+    const resources = published.bays.items;
+    for (let index = 0; index < 6; index++) resources.push({ ...resources[0], id: 9300 + index });
+    const resourceIds = resources.map((row: { id: number }) => String(row.id));
+    const tail = resources[10];
+    if (change === "restricted-tail") tail.restrictedTimes = [{}];
+    if (change === "missing-link") tail.appliedOptions = [];
+    if (change === "duplicate-id") tail.id = resources[0].id;
+    if (change === "wrong-range") tail.range = 9999;
+    if (change === "unknown-category") published.bays.bayOptions[0].category = "members";
+    if (change === "missing-category") delete published.bays.bayOptions[0].category;
+    const selected = { ...input, offering: { ...input.offering, providerMetadata: {
+      ...input.offering.providerMetadata as object, rentalContract: "PUBLIC_SLOT_V1", category: null,
+      maintenanceMode: null, bookingWindowDaysAhead: 13, resourceIds } } };
+    const fetchImpl = responses([], `<script id="__NEXT_DATA__">${JSON.stringify(state)}</script>`);
+    await expect(fetchYourGolfBookingAvailability(selected, fetchImpl)).rejects.toThrow();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
   it("requires all cells of a 90-minute session on one bay", () => {
     const ninety = { ...input, durationMinutes: 90 };
     const occupied = [booking(9224, "2026-10-10T21:00:00.000Z", "2026-10-10T21:30:00.000Z")];
