@@ -14,6 +14,51 @@ const researchSource = z.enum([...SIMULATOR_RESEARCH_SOURCE_NAMES, "link"]);
 const safeUrl = z.string().refine(value => Boolean(getSafeCustomerBookingUrl(value)));
 const safeFailure = z.custom<SimulatorSupportFailure>(value => readSafeSimulatorSupportFailure(value) !== null)
   .transform(value => readSafeSimulatorSupportFailure(value)!);
+const publicNumericId = z.string().regex(/^[1-9][0-9]{0,9}$/u).refine(value => Number(value) <= 1_000_000_000);
+const candidateMetadata = z.object({
+  candidateCount: z.number().int().min(1).max(100),
+  candidatesTruncated: z.boolean(),
+  candidates: z.array(z.object({
+    publicOptionId: publicNumericId, nameMatchesPublicRate: z.boolean(), disabled: z.boolean(), waitlisted: z.boolean(),
+    duration: z.number().int().min(1).max(48), durationTypeToken: z.string().regex(/^[a-z0-9_-]{1,32}$/u),
+    minDurationSlots: z.number().int().min(1).max(48), maxDurationSlots: z.number().int().min(1).max(48),
+    minPlayers: z.number().int().min(1).max(20).nullable().optional(),
+    maxPlayers: z.number().int().min(1).max(20).nullable().optional(),
+    bufferMinutes: z.number().int().min(0).max(1440), hasRestrictions: z.boolean(), requiresPerks: z.boolean(),
+  }).strict().refine(row => row.minDurationSlots <= row.maxDurationSlots &&
+    (typeof row.minPlayers !== "number" || typeof row.maxPlayers !== "number" || row.minPlayers <= row.maxPlayers))).min(1).max(8),
+  resourceCount: z.number().int().min(0).max(40), resourcesTruncated: z.boolean(),
+  resources: z.array(z.object({ id: publicNumericId, rangeId: publicNumericId,
+    optionIds: z.array(publicNumericId).max(8), appliedOptionIds: z.array(publicNumericId).max(8),
+    hasRestrictedTimes: z.boolean(),
+  }).strict().refine(row => row.optionIds.length + row.appliedOptionIds.length > 0)).max(8),
+  rangeCount: z.number().int().min(0).max(20), rangesTruncated: z.boolean(),
+  ranges: z.array(z.object({
+    id: publicNumericId, slugIsBays: z.boolean(), bookable: z.boolean(),
+    slotDurationMinutes: z.number().int().min(1).max(240), slotIntervalMinutes: z.number().int().min(1).max(240),
+    slotIntervalStart: z.number().int().min(0).max(1440), assumeOpen: z.boolean(),
+    bookingUiIsStandard: z.boolean(), customerBookingUiIsSlots: z.boolean(),
+    maxBookAheadValue: z.number().int().min(1).max(365), maxBookAheadUnitToken: z.string().regex(/^[a-z0-9_-]{1,32}$/u),
+    hasOpeningTimeRestrictions: z.boolean(),
+  }).strict()).max(8),
+}).strict().refine(entry => {
+  const candidateIds = entry.candidates.map(row => row.publicOptionId);
+  const resourceIds = entry.resources.map(row => row.id);
+  const rangeIds = entry.ranges.map(row => row.id);
+  const referencedRangeIds = new Set(entry.resources.map(row => row.rangeId));
+  return entry.candidateCount >= entry.candidates.length && entry.candidatesTruncated === (entry.candidateCount > entry.candidates.length) &&
+    entry.resourceCount >= entry.resources.length && entry.resources.length === Math.min(entry.resourceCount, 8) &&
+    entry.resourcesTruncated === (entry.resourceCount > entry.resources.length) &&
+    entry.rangeCount >= entry.ranges.length && entry.rangesTruncated === (entry.rangeCount > entry.ranges.length) &&
+    (entry.resourceCount > 0) === (entry.rangeCount > 0) &&
+    (entry.rangeCount > entry.ranges.length ? entry.resourcesTruncated : true) &&
+    new Set(candidateIds).size === candidateIds.length && new Set(resourceIds).size === resourceIds.length &&
+    new Set(rangeIds).size === rangeIds.length && referencedRangeIds.size === rangeIds.length &&
+    rangeIds.every(id => referencedRangeIds.has(id)) &&
+    entry.resources.every(row => rangeIds.includes(row.rangeId) &&
+      new Set(row.optionIds).size === row.optionIds.length && new Set(row.appliedOptionIds).size === row.appliedOptionIds.length &&
+      [...row.optionIds, ...row.appliedOptionIds].every(id => candidateIds.includes(id)));
+});
 const configurationDiagnostic = z.object({
   phase: z.enum(["CONFIG", "VENUE", "RANGES", "RENTALS", "RESOURCES"]),
   reason: z.enum(["CONFIG_SHAPE", "CONFIG_NUMBER", "CONFIG_STRING", "CONFIG_BOOLEAN", "CONFIG_ARRAY", "CONFIG_IDENTITY", "CONFIG_NO_ELIGIBLE_RENTALS"]),
@@ -24,7 +69,7 @@ const configurationDiagnostic = z.object({
     actualType: z.enum(["MISSING", "NULL", "OBJECT", "ARRAY", "STRING", "NUMBER", "BOOLEAN", "OTHER"]),
   }).strict().optional(),
   rejectedRentalOptions: z.array(z.object({
-    publicOptionId: z.string().regex(/^[1-9][0-9]{0,9}$/u).refine(value => Number(value) <= 1_000_000_000).optional(),
+    publicOptionId: publicNumericId.optional(),
     adminOnlyState: z.enum(["FALSE", "TRUE", "NULL", "MISSING", "INVALID"]),
     typeToken: z.string().regex(/^[a-z0-9_-]{1,32}$/u).optional(),
     categoryToken: z.string().regex(/^[a-z0-9_-]{1,32}$/u).optional(),
@@ -43,11 +88,23 @@ const configurationDiagnostic = z.object({
   })).max(8).optional(),
   optionCount: z.number().int().min(0).max(100).optional(),
   rejectedRentalOptionsTruncated: z.boolean().optional(),
+  candidateMetadata: candidateMetadata.optional(),
 }).strict().refine(entry => entry.reason === "CONFIG_NO_ELIGIBLE_RENTALS" ?
   entry.phase === "RENTALS" && entry.optionCount !== undefined && entry.rejectedRentalOptions !== undefined &&
-    entry.rejectedRentalOptions.length === Math.min(entry.optionCount, 8) &&
-    entry.rejectedRentalOptionsTruncated === (entry.optionCount > 8) && entry.field === undefined :
-  entry.rejectedRentalOptions === undefined && entry.optionCount === undefined && entry.rejectedRentalOptionsTruncated === undefined);
+  entry.rejectedRentalOptions.length === Math.min(entry.optionCount, 8) &&
+  entry.rejectedRentalOptionsTruncated === (entry.optionCount > 8) && entry.field === undefined &&
+  (!entry.candidateMetadata || (entry.candidateMetadata.candidateCount <= entry.optionCount &&
+    (!entry.candidateMetadata.candidatesTruncated || entry.rejectedRentalOptionsTruncated === true) &&
+    (() => {
+      const retainedIds = entry.rejectedRentalOptions!.filter(row => row.adminOnlyState === "FALSE" &&
+        row.typeToken === "simulator" && row.reason === "CATEGORY_NOT_BAYTIME" &&
+        row.categoryState === "NULL").map(row => row.publicOptionId);
+      const projectedIds = entry.candidateMetadata!.candidates.map(row => row.publicOptionId);
+      return retainedIds.length === projectedIds.length &&
+        retainedIds.every((id, index) => id !== undefined && id === projectedIds[index]);
+    })())) :
+  entry.rejectedRentalOptions === undefined && entry.optionCount === undefined &&
+    entry.rejectedRentalOptionsTruncated === undefined && entry.candidateMetadata === undefined);
 const renderWarning = z.enum(["SECONDARY_REQUEST_BUDGET_EXHAUSTED", "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED", "SECONDARY_STYLESHEET_URL_REJECTED", "MAIN_DOCUMENT_HTTP_ERROR"]);
 const bodyLimitDiagnostic = z.object({
   resourceKind: z.enum(["SECONDARY_SCRIPT", "SECONDARY_STYLESHEET"]),

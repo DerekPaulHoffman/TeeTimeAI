@@ -53,6 +53,44 @@ export type SimulatorConfigurationDiagnostic = {
   }>;
   optionCount?: number;
   rejectedRentalOptionsTruncated?: boolean;
+  candidateMetadata?: {
+    candidateCount: number;
+    candidatesTruncated: boolean;
+    candidates: Array<{
+      publicOptionId: string;
+      nameMatchesPublicRate: boolean;
+      disabled: boolean;
+      waitlisted: boolean;
+      duration: number;
+      durationTypeToken: string;
+      minDurationSlots: number;
+      maxDurationSlots: number;
+      minPlayers?: number | null;
+      maxPlayers?: number | null;
+      bufferMinutes: number;
+      hasRestrictions: boolean;
+      requiresPerks: boolean;
+    }>;
+    resourceCount: number;
+    resourcesTruncated: boolean;
+    resources: Array<{ id: string; rangeId: string; optionIds: string[]; appliedOptionIds: string[]; hasRestrictedTimes: boolean }>;
+    rangeCount: number;
+    rangesTruncated: boolean;
+    ranges: Array<{
+      id: string;
+      slugIsBays: boolean;
+      bookable: boolean;
+      slotDurationMinutes: number;
+      slotIntervalMinutes: number;
+      slotIntervalStart: number;
+      assumeOpen: boolean;
+      bookingUiIsStandard: boolean;
+      customerBookingUiIsSlots: boolean;
+      maxBookAheadValue: number;
+      maxBookAheadUnitToken: string;
+      hasOpeningTimeRestrictions: boolean;
+    }>;
+  };
 };
 export type SimulatorBodyLimitDiagnostic = {
   resourceKind: "SECONDARY_SCRIPT" | "SECONDARY_STYLESHEET";
@@ -193,6 +231,102 @@ function publishedYourGolfBookingSlug(html: string, sourceUrl: string) {
   } catch { return undefined; }
 }
 
+/** Optional research facts for a rejected public-looking rental, never a calendar or eligibility decision. */
+function rejectedRentalCandidateMetadata(
+  ranges: SimulatorPublicCalendar["ranges"], venueId: string, bays: Json, optionRows: unknown[],
+): SimulatorConfigurationDiagnostic["candidateMetadata"] {
+  try {
+    const machineToken = (value: unknown) => {
+      const observed = string(value, 32);
+      if (!/^[a-z0-9_-]{1,32}$/u.test(observed)) configurationError("CONFIG_STRING");
+      return observed;
+    };
+    const candidates: NonNullable<SimulatorConfigurationDiagnostic["candidateMetadata"]>["candidates"] = [];
+    const seenOptionIds = new Set<string>();
+    const allCandidateIds = new Set<string>();
+    let candidateCount = 0;
+    for (const [index, value] of optionRows.entries()) {
+      const row = record(value);
+      const optionId = id(row.id);
+      if (seenOptionIds.has(optionId)) configurationError("CONFIG_IDENTITY");
+      seenOptionIds.add(optionId);
+      if (row.adminOnly !== false || row.type !== "simulator" || row.category !== null) continue;
+      if (id(row.venue) !== venueId) configurationError("CONFIG_IDENTITY");
+      const publicOptionId = optionId;
+      candidateCount += 1;
+      allCandidateIds.add(publicOptionId);
+      const nameMatchesPublicRate = string(row.name) === "Public Rate";
+      const minDurationSlots = number(row.minBookingDuration, 1, 48);
+      const maxDurationSlots = number(row.maxBookingDuration, 1, 48);
+      if (minDurationSlots > maxDurationSlots) configurationError("CONFIG_NUMBER");
+      const minPlayers = row.minPlayers === null ? null : row.minPlayers === undefined ? undefined : number(row.minPlayers, 1, 20);
+      const maxPlayers = row.maxPlayers === null ? null : row.maxPlayers === undefined ? undefined : number(row.maxPlayers, 1, 20);
+      if (typeof minPlayers === "number" && typeof maxPlayers === "number" && minPlayers > maxPlayers) configurationError("CONFIG_NUMBER");
+      const candidate = {
+        publicOptionId, nameMatchesPublicRate, disabled: bool(row.disabled), waitlisted: bool(row.waitlisted),
+        duration: number(row.duration, 1, 48), durationTypeToken: machineToken(row.durationType),
+        minDurationSlots, maxDurationSlots,
+        ...(minPlayers === undefined ? {} : { minPlayers }), ...(maxPlayers === undefined ? {} : { maxPlayers }),
+        bufferMinutes: number(row.bufferPeriodMinutes, 0, 1440),
+        hasRestrictions: array(row.restrictions).length > 0,
+        requiresPerks: array(row.appliedRequiredPerks, 20).length > 0,
+      };
+      // Validate every candidate, including those past the bounded rejection
+      // prefix, but project only rows the existing rejection list can attest.
+      if (index < 8) candidates.push(candidate);
+    }
+    if (!candidates.length) return undefined;
+    const projectedIds = new Set(candidates.map(row => row.publicOptionId));
+    const rangeIds = new Set(ranges.map(row => row.id));
+    const seenResourceIds = new Set<string>();
+    const linkedResources: NonNullable<SimulatorConfigurationDiagnostic["candidateMetadata"]>["resources"] = [];
+    let simulatorResourceCount = 0;
+    for (const value of array(bays.items)) {
+      const row = record(value);
+      const resourceId = id(row.id);
+      if (seenResourceIds.has(resourceId)) configurationError("CONFIG_IDENTITY");
+      seenResourceIds.add(resourceId);
+      if (row.type !== "simulator") continue;
+      simulatorResourceCount += 1;
+      if (simulatorResourceCount > 40) configurationError("CONFIG_ARRAY");
+      const rangeId = id(row.range);
+      if (id(row.venue) !== venueId || !rangeIds.has(rangeId)) configurationError("CONFIG_IDENTITY");
+      const bookable = bool(row.bookable);
+      const options = array(row.options).map(id), appliedOptions = array(row.appliedOptions).map(id);
+      if (new Set(options).size !== options.length || new Set(appliedOptions).size !== appliedOptions.length) configurationError("CONFIG_IDENTITY");
+      const allListed = options.filter(optionId => allCandidateIds.has(optionId));
+      const allApplied = appliedOptions.filter(optionId => allCandidateIds.has(optionId));
+      const listed = allListed.filter(optionId => projectedIds.has(optionId));
+      const applied = allApplied.filter(optionId => projectedIds.has(optionId));
+      // A bookable resource linked only to candidates outside the retained
+      // prefix cannot be counted honestly in this bounded projection.
+      if (bookable && (allListed.length || allApplied.length) && !(listed.length || applied.length)) configurationError("CONFIG_IDENTITY");
+      const hasRestrictedTimes = array(row.restrictedTimes).length > 0;
+      if (bookable && (listed.length || applied.length)) linkedResources.push({ id: resourceId, rangeId, optionIds: listed, appliedOptionIds: applied, hasRestrictedTimes });
+    }
+    const referencedIds = [...new Set(linkedResources.map(row => row.rangeId))];
+    const resources = linkedResources.slice(0, 8);
+    const projectedRangeIds = new Set(resources.map(row => row.rangeId));
+    const projectedRanges = ranges.filter(row => projectedRangeIds.has(row.id)).slice(0, 8).map(row => ({
+      id: row.id, slugIsBays: row.slug === "bays", bookable: row.bookable,
+      slotDurationMinutes: row.slotDurationMinutes, slotIntervalMinutes: row.slotIntervalMinutes,
+      slotIntervalStart: row.slotIntervalStart, assumeOpen: row.assumeOpen,
+      bookingUiIsStandard: row.bookingUi === "standard", customerBookingUiIsSlots: row.customerBookingUi === "slots",
+      maxBookAheadValue: row.maxBookAheadValue, maxBookAheadUnitToken: machineToken(row.maxBookAheadUnit),
+      hasOpeningTimeRestrictions: row.hasOpeningTimeRestrictions,
+    }));
+    return {
+      candidateCount, candidatesTruncated: candidateCount > candidates.length, candidates,
+      resourceCount: linkedResources.length, resourcesTruncated: linkedResources.length > resources.length, resources,
+      rangeCount: referencedIds.length, rangesTruncated: referencedIds.length > projectedRanges.length, ranges: projectedRanges,
+    };
+  } catch {
+    // Metadata is optional. A malformed extra field must not replace the
+    // original no-eligible-rentals diagnosis or become a false zero count.
+    return undefined;
+  }
+}
+
 /** Parse published inert JSON only. Never evaluate inline scripts or retain the original state. */
 export function extractSimulatorPublicCalendar(html: string, sourceUrl: string): Pick<SimulatorResearchResult, "calendar" | "jsonShape" | "configurationDiagnostic"> {
   const parsed = readInertNextData(html);
@@ -204,6 +338,7 @@ export function extractSimulatorPublicCalendar(html: string, sourceUrl: string):
   let rejectedRentalOptions: SimulatorConfigurationDiagnostic["rejectedRentalOptions"];
   let optionCount: number | undefined;
   let rejectedRentalOptionsTruncated: boolean | undefined;
+  let candidateMetadata: SimulatorConfigurationDiagnostic["candidateMetadata"];
   const actualType = (value: unknown): NonNullable<SimulatorConfigurationDiagnostic["field"]>["actualType"] =>
     value === undefined ? "MISSING" : value === null ? "NULL" : Array.isArray(value) ? "ARRAY" :
       typeof value === "object" ? "OBJECT" : typeof value === "string" ? "STRING" :
@@ -273,6 +408,7 @@ export function extractSimulatorPublicCalendar(html: string, sourceUrl: string):
       rejectedRentalOptions = excludedOptions;
       optionCount = optionRows.length;
       rejectedRentalOptionsTruncated = optionRows.length > excludedOptions.length;
+      candidateMetadata = rejectedRentalCandidateMetadata(ranges, venueId, bays, optionRows);
       configurationError("CONFIG_NO_ELIGIBLE_RENTALS");
     }
     uniqueConfigurationRows(rentals);
@@ -287,7 +423,7 @@ export function extractSimulatorPublicCalendar(html: string, sourceUrl: string):
     return { calendar: { family: "YOUR_GOLF_BOOKING", venue: { id: venueId, slug, timeZone, status, maintenanceMode }, ranges, rentals, resources } };
   } catch (error) {
     const reason = error !== null && typeof error === "object" ? ownedConfigurationErrors.get(error) : undefined;
-    return reason ? { ...shape, configurationDiagnostic: { phase, reason, ...(failedField ? { field: failedField } : {}), ...(observedMaintenanceMode ? { maintenanceModeState: observedMaintenanceMode } : {}), ...(rejectedRentalOptions ? { rejectedRentalOptions, optionCount, rejectedRentalOptionsTruncated } : {}) } } : shape;
+    return reason ? { ...shape, configurationDiagnostic: { phase, reason, ...(failedField ? { field: failedField } : {}), ...(observedMaintenanceMode ? { maintenanceModeState: observedMaintenanceMode } : {}), ...(rejectedRentalOptions ? { rejectedRentalOptions, optionCount, rejectedRentalOptionsTruncated } : {}), ...(candidateMetadata ? { candidateMetadata } : {}) } } : shape;
   }
 }
 

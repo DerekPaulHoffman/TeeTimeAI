@@ -379,3 +379,31 @@ path/probe without adding a helper, ignore rule, permission change or recovery
 protocol. Actual setup, file-write, source, native, replay and production failures
 remain stops. The reserved assignment and normal deadline recovery stay intact;
 the next ordinary scheduler launch must prove use of the repaired recipe.
+
+The normal02:10 parent independently used the existing ignored artifact location
+on38, launched once, bound its native child and claimed the assignment. That
+worker completed two fresh signed-out public200 reads with fully rendered pages
+and positively observed empty access controls. The prior script-size fence was
+gone. It passed221 focused tests and completed all18 native commands with no
+failure or approval. Its durable retry closed at02:16:46.924, next due03:16:46.924;
+no root wake or manual course operation was used.
+
+Both fresh observations still lacked an accepted public configuration. The bays
+page rejected three simulator options with explicit adminOnly:false and observed
+null categories; the booking root lacked ranges. The worker read the extractor
+and category tests but treated the explained first rejection as the end of
+diagnosis. Its structural evidence showed one range and eleven resource entries,
+without their row children or rental durations. Four reads remained, with only
+an official evidence page suggested; retry was permitted and was not exhausted
+research budget or a technical-access finding.
+
+The source gap is specific: the extractor validates ranges, rejects the category
+before rental duration/venue metadata, and throws before resource links. A
+bounded optional research projection can preserve validated candidate static
+facts while keeping the rejection and absent calendar/public configuration.
+The worker instruction now explicitly checks downstream visibility even when
+the first predicate is understood. Missing facts remain unknown; actual numeric
+identity, venue, duplicate, restriction, linkage and privacy checks still apply.
+The current runtime's fixed public rental/range assumptions require real source
+facts before reusable support can change. No default category, null-to-false
+conversion, eligibility or monitoring claim follows from these diagnostics.

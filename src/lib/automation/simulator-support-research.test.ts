@@ -6,12 +6,20 @@ import { projectAcuityPublicConfiguration } from "@/lib/simulators/providers/acu
 import { projectGolfBookPublicConfiguration } from "@/lib/simulators/providers/golfbook";
 import { collectSimulatorSupportResearch, detectSimulatorResearchAccessControls, extractSimulatorPublicCalendar, summarizeSimulatorPublicJsonShape, summarizeSimulatorSupportPublicHtml, type SimulatorResearchDependencies } from "./simulator-support-research";
 import { classifySimulatorSupportFailure, type SimulatorResearchFailurePhase } from "./simulator-support-failure";
+import { readSimulatorResearchState } from "./simulator-support-research-policy";
 
 const source = "https://venue.example.test";
 const booking = "https://booking.trackmangolf.com/venues/golf-oasis/booking/bays";
 const instant = new Date("2026-10-06T16:00:00Z");
 const lease = vi.fn(async (_host: string, worker: () => Promise<unknown>) => ({ acquired: true as const, value: await worker() })) as unknown as NonNullable<SimulatorResearchDependencies["lease"]>;
 const response = (body: string, status = 200, type = "text/html") => new Response(body, { status, headers: { "content-type": type } });
+const persistedDiagnostic = (configurationDiagnostic: unknown) => {
+  const fingerprint = "a".repeat(64);
+  return readSimulatorResearchState({ version: 1, sourceFingerprint: fingerprint, readCount: 1,
+    history: [{ source: "booking", requestedUrl: booking, sourceUrl: booking, observedAt: instant.toISOString(),
+      httpStatus: 200, rendered: true, outcome: "READ", configurationDiagnostic }],
+    links: [], bookingLinks: [], linkBaseUrl: null, inFlight: null }, fingerprint).history[0].configurationDiagnostic;
+};
 
 function publishedConfig(patch: Record<string, unknown> = {}) {
   const config = {
@@ -286,6 +294,124 @@ describe("bounded owned simulator public research transport", () => {
       ],
     });
     expect(JSON.stringify(result)).not.toMatch(/Private Member|private@example|never-return|hidden course|wrong venue|unknown state|missing state|invalid state|unsafe type token/u);
+  });
+  it("retains exact bounded public candidate metadata after a null-category rejection, without admitting a calendar", () => {
+    const parsed = JSON.parse(publishedConfig().match(/<script[^>]*>([\s\S]*?)<\/script>/u)![1]);
+    const config = parsed.props.pageProps.initialReduxState;
+    config.venue.maintenanceMode = null;
+    config.bays.bayOptions[0].category = null;
+    config.bays.bayOptions[0].customerEmail = "private@example.test";
+    const result = extractSimulatorPublicCalendar(`<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(parsed)}</script>`, booking);
+    expect(result.calendar).toBeUndefined();
+    expect(result.configurationDiagnostic).toMatchObject({ phase: "RENTALS", reason: "CONFIG_NO_ELIGIBLE_RENTALS",
+      maintenanceModeState: "NULL", optionCount: 2, rejectedRentalOptionsTruncated: false,
+      rejectedRentalOptions: [{ adminOnlyState: "FALSE", publicOptionId: "21451", typeToken: "simulator", categoryState: "NULL", reason: "CATEGORY_NOT_BAYTIME" },
+        { adminOnlyState: "TRUE", reason: "ADMIN_ONLY_NOT_FALSE" }],
+      candidateMetadata: {
+        candidateCount: 1, candidatesTruncated: false,
+        candidates: [{ publicOptionId: "21451", nameMatchesPublicRate: true, disabled: false, waitlisted: false,
+          duration: 1, durationTypeToken: "slot", minDurationSlots: 1, maxDurationSlots: 8,
+          minPlayers: 1, maxPlayers: 4, bufferMinutes: 0, hasRestrictions: false, requiresPerks: false }],
+        resourceCount: 1, resourcesTruncated: false,
+        resources: [{ id: "9224", rangeId: "1397", optionIds: ["21451"], appliedOptionIds: ["21451"], hasRestrictedTimes: false }],
+        rangeCount: 1, rangesTruncated: false,
+        ranges: [{ id: "1397", slugIsBays: true, bookable: true, slotDurationMinutes: 30,
+          slotIntervalMinutes: 30, slotIntervalStart: 0, assumeOpen: true, bookingUiIsStandard: true,
+          customerBookingUiIsSlots: true, maxBookAheadValue: 2, maxBookAheadUnitToken: "week",
+          hasOpeningTimeRestrictions: false }],
+      },
+    });
+    expect(JSON.stringify(result)).not.toMatch(/Private Member|private@example|secret@example|never-return-this|Mo 09:00|__NEXT_DATA__|Public Rate/u);
+    expect(persistedDiagnostic(result.configurationDiagnostic)).toEqual(result.configurationDiagnostic);
+  });
+  it("keeps the original rental rejection and omits extra metadata when candidate or resource facts are invalid", () => {
+    const malformed = ["candidate-venue", "disabled", "restrictions", "duration-bounds", "duplicate-private-id",
+      "resource-options", "resource-range", "duplicate-applied-option"] as const;
+    for (const change of malformed) {
+      const parsed = JSON.parse(publishedConfig().match(/<script[^>]*>([\s\S]*?)<\/script>/u)![1]);
+      const config = parsed.props.pageProps.initialReduxState;
+      config.bays.bayOptions[0].category = null;
+      if (change === "candidate-venue") config.bays.bayOptions[0].venue = "private-venue";
+      else if (change === "disabled") config.bays.bayOptions[0].disabled = null;
+      else if (change === "restrictions") config.bays.bayOptions[0].restrictions = null;
+      else if (change === "duration-bounds") config.bays.bayOptions[0].minBookingDuration = 9;
+      else if (change === "duplicate-private-id") config.bays.bayOptions[1].id = config.bays.bayOptions[0].id;
+      else if (change === "resource-options") config.bays.items[0].options = null;
+      else if (change === "resource-range") config.bays.items[0].range = 9999;
+      else config.bays.items[0].appliedOptions = [21451, 21451];
+      const result = extractSimulatorPublicCalendar(`<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(parsed)}</script>`, booking);
+      expect(result.calendar).toBeUndefined();
+      expect(result.configurationDiagnostic).toMatchObject({ phase: "RENTALS", reason: "CONFIG_NO_ELIGIBLE_RENTALS",
+        rejectedRentalOptions: [{ categoryState: "NULL", reason: "CATEGORY_NOT_BAYTIME" },
+          { adminOnlyState: "TRUE", reason: "ADMIN_ONLY_NOT_FALSE" }] });
+      expect(result.configurationDiagnostic?.candidateMetadata).toBeUndefined();
+      expect(persistedDiagnostic(result.configurationDiagnostic)).toEqual(result.configurationDiagnostic);
+    }
+  });
+  it("separates actual resource option and applied-option links and bounds candidate and resource rows", () => {
+    const parsed = JSON.parse(publishedConfig().match(/<script[^>]*>([\s\S]*?)<\/script>/u)![1]);
+    const config = parsed.props.pageProps.initialReduxState;
+    const base = config.bays.bayOptions[0];
+    config.bays.bayOptions = Array.from({ length: 10 }, (_, index) => ({ ...base, id: 21451 + index, category: null }));
+    config.bays.items = Array.from({ length: 11 }, (_, index) => ({ ...config.bays.items[0], id: 9224 + index,
+      options: [21451, 21452], appliedOptions: [21451] }));
+    const result = extractSimulatorPublicCalendar(`<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(parsed)}</script>`, booking);
+    expect(result.calendar).toBeUndefined();
+    expect(result.configurationDiagnostic).toMatchObject({ reason: "CONFIG_NO_ELIGIBLE_RENTALS", optionCount: 10,
+      rejectedRentalOptionsTruncated: true, candidateMetadata: {
+        candidateCount: 10, candidatesTruncated: true, resourceCount: 11, resourcesTruncated: true,
+        rangeCount: 1, rangesTruncated: false } });
+    const metadata = result.configurationDiagnostic?.candidateMetadata;
+    expect(metadata?.candidates).toHaveLength(8);
+    expect(metadata?.resources).toHaveLength(8);
+    expect(metadata?.ranges).toHaveLength(1);
+    expect(metadata?.resources[0]).toMatchObject({ optionIds: ["21451", "21452"], appliedOptionIds: ["21451"] });
+    expect(metadata && metadata.resources.every(row => metadata.ranges.some(range => range.id === row.rangeId))).toBe(true);
+  });
+  it("does not project a candidate outside the first eight rejected rows", () => {
+    const parsed = JSON.parse(publishedConfig().match(/<script[^>]*>([\s\S]*?)<\/script>/u)![1]);
+    const config = parsed.props.pageProps.initialReduxState;
+    const base = config.bays.bayOptions[0];
+    config.bays.bayOptions = [
+      ...Array.from({ length: 8 }, (_, index) => ({ ...base, id: 1000 + index, adminOnly: true, name: "Private Member" })),
+      { ...base, id: 21451, category: null },
+    ];
+    const result = extractSimulatorPublicCalendar(`<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(parsed)}</script>`, booking);
+    expect(result.configurationDiagnostic).toMatchObject({ reason: "CONFIG_NO_ELIGIBLE_RENTALS", optionCount: 9,
+      rejectedRentalOptionsTruncated: true });
+    expect(result.configurationDiagnostic?.rejectedRentalOptions).toHaveLength(8);
+    expect(result.configurationDiagnostic?.candidateMetadata).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain("Private Member");
+  });
+  it("omits bounded metadata when a bookable resource links only to a valid candidate beyond the rejected prefix", () => {
+    const parsed = JSON.parse(publishedConfig().match(/<script[^>]*>([\s\S]*?)<\/script>/u)![1]);
+    const config = parsed.props.pageProps.initialReduxState;
+    const base = config.bays.bayOptions[0];
+    config.bays.bayOptions = [{ ...base, category: null },
+      ...Array.from({ length: 7 }, (_, index) => ({ id: 3000 + index, adminOnly: true })),
+      { ...base, id: 21452, category: null }];
+    config.bays.items[0].options = [21452];
+    config.bays.items[0].appliedOptions = [21452];
+    const result = extractSimulatorPublicCalendar(`<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(parsed)}</script>`, booking);
+    expect(result.calendar).toBeUndefined();
+    expect(result.configurationDiagnostic).toMatchObject({ phase: "RENTALS", reason: "CONFIG_NO_ELIGIBLE_RENTALS",
+      optionCount: 9, rejectedRentalOptionsTruncated: true });
+    expect(result.configurationDiagnostic?.candidateMetadata).toBeUndefined();
+    expect(persistedDiagnostic(result.configurationDiagnostic)).toEqual(result.configurationDiagnostic);
+  });
+  it("omits metadata when a hidden null-category candidate has invalid duration bounds", () => {
+    const parsed = JSON.parse(publishedConfig().match(/<script[^>]*>([\s\S]*?)<\/script>/u)![1]);
+    const config = parsed.props.pageProps.initialReduxState;
+    const base = config.bays.bayOptions[0];
+    config.bays.bayOptions = [{ ...base, category: null },
+      ...Array.from({ length: 7 }, (_, index) => ({ id: 3000 + index, adminOnly: true })),
+      { ...base, id: 21452, category: null, minBookingDuration: 9 }];
+    const result = extractSimulatorPublicCalendar(`<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(parsed)}</script>`, booking);
+    expect(result.calendar).toBeUndefined();
+    expect(result.configurationDiagnostic).toMatchObject({ phase: "RENTALS", reason: "CONFIG_NO_ELIGIBLE_RENTALS",
+      optionCount: 9, rejectedRentalOptionsTruncated: true });
+    expect(result.configurationDiagnostic?.candidateMetadata).toBeUndefined();
+    expect(persistedDiagnostic(result.configurationDiagnostic)).toEqual(result.configurationDiagnostic);
   });
   it.each([
     [undefined, "MISSING"], [null, "NULL"], [42, "NON_STRING"],

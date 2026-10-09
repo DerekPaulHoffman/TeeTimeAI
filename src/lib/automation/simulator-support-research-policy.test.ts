@@ -129,6 +129,54 @@ describe("durable simulator research failure memory", () => {
       expect(() => memory(candidate)).toThrow();
     }
   });
+  it("round-trips only cross-linked bounded null-category research facts and leaves old omissions unknown", () => {
+    const metadata = { candidateCount: 1, candidatesTruncated: false,
+      candidates: [{ publicOptionId: "21451", nameMatchesPublicRate: true, disabled: false, waitlisted: false,
+        duration: 1, durationTypeToken: "slot", minDurationSlots: 1, maxDurationSlots: 8,
+        minPlayers: null, maxPlayers: 4, bufferMinutes: 0, hasRestrictions: false, requiresPerks: false }],
+      resourceCount: 1, resourcesTruncated: false,
+      resources: [{ id: "9224", rangeId: "1397", optionIds: ["21451"], appliedOptionIds: [], hasRestrictedTimes: false }],
+      rangeCount: 1, rangesTruncated: false,
+      ranges: [{ id: "1397", slugIsBays: true, bookable: true, slotDurationMinutes: 30,
+        slotIntervalMinutes: 30, slotIntervalStart: 0, assumeOpen: true, bookingUiIsStandard: true,
+        customerBookingUiIsSlots: true, maxBookAheadValue: 2, maxBookAheadUnitToken: "week",
+        hasOpeningTimeRestrictions: false }] };
+    const diagnostic = { phase: "RENTALS", reason: "CONFIG_NO_ELIGIBLE_RENTALS", optionCount: 1,
+      rejectedRentalOptionsTruncated: false,
+      rejectedRentalOptions: [{ adminOnlyState: "FALSE", publicOptionId: "21451", typeToken: "simulator",
+        categoryState: "NULL", reason: "CATEGORY_NOT_BAYTIME" }], candidateMetadata: metadata };
+    const entry = { source: "booking" as const, requestedUrl: bookingUrl, sourceUrl: bookingUrl,
+      observedAt: now.toISOString(), httpStatus: 200, rendered: true, outcome: "READ" as const,
+      configurationDiagnostic: diagnostic };
+    const history = (value: unknown) => readSimulatorResearchState({ ...empty(), readCount: 1,
+      history: [{ ...entry, configurationDiagnostic: value }] }, fingerprint).history[0].configurationDiagnostic;
+    const memory = (value: unknown) => readSimulatorResearchFailureMemory({ version: 1, sourceFingerprint: fingerprint,
+      routes: [{ url: bookingUrl, rendered: true, httpStatus: 200, configurationDiagnostic: value }] })?.routes[0].configurationDiagnostic;
+    expect(history(diagnostic)).toEqual(diagnostic);
+    expect(memory(diagnostic)).toEqual(diagnostic);
+    const old = { phase: diagnostic.phase, reason: diagnostic.reason, optionCount: diagnostic.optionCount,
+      rejectedRentalOptionsTruncated: diagnostic.rejectedRentalOptionsTruncated,
+      rejectedRentalOptions: diagnostic.rejectedRentalOptions };
+    expect(history(old)).toEqual(old);
+    for (const invalid of [
+      { ...diagnostic, candidateMetadata: { ...metadata, candidates: [{ ...metadata.candidates[0], name: "Private Member" }] } },
+      { ...diagnostic, candidateMetadata: { ...metadata, candidates: [{ ...metadata.candidates[0], publicOptionId: "9999" }] } },
+      { ...diagnostic, candidateMetadata: { ...metadata, resourceCount: 0 } },
+      { ...diagnostic, candidateMetadata: { ...metadata, resources: [{ ...metadata.resources[0], rangeId: "9999" }] } },
+      { ...diagnostic, candidateMetadata: { ...metadata, resources: [{ ...metadata.resources[0], optionIds: ["9999"] }] } },
+      { ...diagnostic, candidateMetadata: { ...metadata, rangeCount: 2,
+        ranges: [...metadata.ranges, { ...metadata.ranges[0], id: "1398" }] } },
+      { ...diagnostic, optionCount: 2, rejectedRentalOptions: [diagnostic.rejectedRentalOptions[0],
+        { ...diagnostic.rejectedRentalOptions[0], publicOptionId: "21452" }] },
+      { ...diagnostic, candidateMetadata: { ...metadata, candidatesTruncated: true } },
+      { ...diagnostic, candidateMetadata: { ...metadata, resources: [{ ...metadata.resources[0], rawPayload: "private" }] } },
+      { ...diagnostic, rejectedRentalOptions: [{ ...diagnostic.rejectedRentalOptions[0], categoryState: "MISSING" }] },
+      { ...diagnostic, reason: "CONFIG_ARRAY" },
+    ]) {
+      expect(() => history(invalid)).toThrow();
+      expect(() => memory(invalid)).toThrow();
+    }
+  });
   it("accepts only closed, bounded diagnostics on an incomplete owned rendered read and inherited route", () => {
     const bodyLimitDiagnostics = [{ resourceKind: "SECONDARY_SCRIPT" as const, phase: "COLLECTOR_HEADERS" as const,
       observedSizeBand: "OVER_LIMIT_UP_TO_2X" as const, count: 2 }];
