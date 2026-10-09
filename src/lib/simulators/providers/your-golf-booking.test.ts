@@ -74,6 +74,21 @@ describe("YourGolfBooking public simulator calendar", () => {
     expect(result.slots).toHaveLength(22);
     expect(String(fetchImpl.mock.calls[0][0])).toBe(selected.offering.bookingUrl);
   });
+  it.each([
+    ["Sa 16:15-18:10 open", ["20:30:00.000Z", "21:00:00.000Z"]],
+    ["Sa 16:59-18:00 open", ["21:00:00.000Z"]],
+    ["Sa 16:15-16:25 open", []],
+  ])("keeps reviewed slot sessions inside off-grid published hours: %s", async (openingHours, starts) => {
+    const selected = { ...input, offering: { ...input.offering, providerMetadata: {
+      ...input.offering.providerMetadata as object, rentalContract: "PUBLIC_SLOT_V1", category: "baytime",
+      maintenanceMode: false, resourceIds: ["9224"], bookingWindowDaysAhead: 14,
+    } } };
+    const result = await fetchYourGolfBookingAvailability(selected, responses([], config({ openingHours })));
+    expect(result.complete).toBe(true);
+    expect(result.slots.map(slot => slot.startsAt.toISOString().slice(11))).toEqual(starts);
+    expect(result.slots.every(slot => slot.resourceId === "9224" &&
+      slot.endsAt.getTime() - slot.startsAt.getTime() === 60 * 60_000)).toBe(true);
+  });
   describe("reviewed public slot occupancy inventory", () => {
     const selected: SimulatorAvailabilityInput = { ...input, offering: { ...input.offering, providerMetadata: {
       ...input.offering.providerMetadata as object, rentalContract: "PUBLIC_SLOT_V1", category: "baytime",

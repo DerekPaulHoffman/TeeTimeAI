@@ -84,7 +84,7 @@ export async function fetchYourGolfBookingAvailability(input: SimulatorAvailabil
     return String(integer(item.id));
   });
   if (!resources.length || resources.length > 40 || new Set(resources).size !== resources.length) source("The public simulator bay list is missing or ambiguous");
-  const hours = parseHours(range.openingHours, input.date);
+  const hours = parseHours(range.openingHours, input.date, slotContract);
   const localParts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", { timeZone: input.timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date()).map(part => [part.type, part.value]));
   const localToday = `${localParts.year}-${localParts.month}-${localParts.day}`;
   const requestedDay = Date.parse(`${input.date}T00:00:00Z`);
@@ -123,7 +123,7 @@ function parsePublicConfig(html: string): Json {
   fail("The public simulator configuration is unreadable");
 }
 
-function parseHours(value: unknown, date: string): [number, number][] {
+function parseHours(value: unknown, date: string, slotContract = false): [number, number][] {
   if (typeof value !== "string" || value.length > 2_000) fail("The public simulator opening hours are invalid");
   const weekday = WEEKDAYS[new Date(`${date}T12:00:00Z`).getUTCDay()];
   let weekly: [number, number][] | null = null;
@@ -142,8 +142,11 @@ function parseHours(value: unknown, date: string): [number, number][] {
       if (Number(times[2]) > 59 || Number(times[4]) > 59) fail("The public simulator opening interval has invalid clock minutes");
       if (start >= end) fail("The public simulator opening interval is not increasing");
       if (end > 1440) fail("The public simulator opening interval exceeds the venue day");
-      if (start % 30 !== 0) fail("The public simulator opening interval starts outside the slot grid");
-      intervals.push([start, end]);
+      if (!slotContract && start % 30 !== 0) fail("The public simulator opening interval starts outside the slot grid");
+      // Reviewed ranges have a validated 30-minute grid with zero offset.
+      // Round forward only: never offer time before opening or extend closing.
+      const firstSlot = slotContract ? Math.ceil(start / 30) * 30 : start;
+      if (firstSlot < end) intervals.push([firstSlot, end]);
     }
     if (match[1] === weekday) weekly = intervals;
     if (match[1].length > 2) {
