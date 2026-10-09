@@ -3,6 +3,8 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
 import { runWithCourseSupportWriterTransitionLease, withCourseSupportWriteConflictRetry, MAX_CONCURRENT_COURSE_SUPPORT_BATCHES, isRuntimeBearingCourseSupportPath } from "./course-support-batches";
+import { retryCourseSupportWriterAdmission } from "./course-support-writer-admission";
+import { assertCourseSupportWriterCommitHeadroom, assertCourseSupportWriterTransactionStart, courseSupportWriterTransactionOptions } from "./course-support-writer-budget";
 import type { CourseDispatchAudit } from "./course-support-course-dispatch";
 import { assertSimulatorSupportDeployment, createSimulatorSupportIntentDigest, isCurrentSimulatorSupportSource, SIMULATOR_SUPPORT_LEASE_MS, SIMULATOR_SUPPORT_SOURCE_SELECT, validateSimulatorSupportPath, type SimulatorSupportClaim } from "./simulator-support-policy";
 import type { GitDeploymentProof } from "@/lib/deployments/wait-for-git-deployment";
@@ -109,11 +111,14 @@ async function readPriorFailedResearchRoutes(tx: Pick<Prisma.TransactionClient, 
 }
 
 async function withTransition<T>(operation: (tx: Prisma.TransactionClient, now: Date) => Promise<T>) {
-  return runWithCourseSupportWriterTransitionLease(() => withCourseSupportWriteConflictRetry(() => prisma.$transaction(async tx => {
+  return retryCourseSupportWriterAdmission((timeout) => runWithCourseSupportWriterTransitionLease(writerLease => withCourseSupportWriteConflictRetry(() => prisma.$transaction(async tx => {
+    assertCourseSupportWriterTransactionStart(writerLease);
     const [clock] = await tx.$queryRaw<Array<{ now: Date }>>(Prisma.sql`SELECT clock_timestamp() AS "now"`);
     if (!(clock?.now instanceof Date)) throw new Error("Simulator support database time is unavailable.");
-    return operation(tx, clock.now);
-  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 15_000 })));
+    const result = await operation(tx, clock.now);
+    assertCourseSupportWriterCommitHeadroom(writerLease);
+    return result;
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, ...courseSupportWriterTransactionOptions(writerLease) })), { timeout }));
 }
 
 async function loadAssignment(tx: Prisma.TransactionClient, assignmentRef: string) {

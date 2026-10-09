@@ -42,6 +42,7 @@ const store = vi.hoisted(() => {
   const batches: { id: string; summary: unknown; leaseExpiresAt: Date; incidents: { courseId: string }[] }[] = [];
   let sequence = 0;
   let leaseTail = Promise.resolve();
+  let transitionDenials = 0;
   const automationRun = {
     findMany: vi.fn(async (args: { where: { promptVersion: string; OR: { startedAt?: { gte: Date }; status?: string }[] } }) => {
       const since = args.where.OR.find(entry => entry.startedAt)?.startedAt?.gte;
@@ -100,14 +101,18 @@ const store = vi.hoisted(() => {
     try { return await operation(tx); }
     catch (error) { runs.splice(0, runs.length, ...before); throw error; }
   });
-  const lease = vi.fn(async (operation: () => Promise<unknown>) => {
+  const lease = vi.fn(async (operation: (context: { deadlineAt: Date; timeoutMs: number }) => Promise<unknown>, options?: { timeout: number }) => {
+    if (options && transitionDenials-- > 0) return { acquired: false as const };
     const prior = leaseTail;
     let release!: () => void;
     leaseTail = new Promise<void>(resolve => { release = resolve; });
     await prior;
-    try { return await operation(); } finally { release(); }
+    try { const value = await operation({ deadlineAt: new Date(Date.now() + (options?.timeout ?? 60_000)), timeoutMs: options?.timeout ?? 60_000 });
+      return options ? { acquired: true as const, value } : value; } finally { release(); }
   });
-  return { runs, candidates, sources, courseTimeZones, batches, tx, transaction, lease, reset() { sequence = 0; leaseTail = Promise.resolve(); } };
+  return { runs, candidates, sources, courseTimeZones, batches, tx, transaction, lease,
+    denyTransitions(count: number) { transitionDenials = count; },
+    reset() { sequence = 0; leaseTail = Promise.resolve(); transitionDenials = 0; } };
 });
 
 vi.mock("@/lib/prisma", () => ({ prisma: { ...store.tx, $transaction: store.transaction } }));
@@ -309,6 +314,36 @@ describe("durable course dispatch state and transaction boundaries", () => {
     expect(plan.attention.expiredBatchCount).toBe(1);
     expect(store.runs[0].audit.state).toBe("CONSUMED");
     expect(new Set(store.runs.flatMap(run => run.audit.target.searchRefs.map(ref => ref.id))).size).toBe(3);
+  });
+
+  it("binds once after two writer refusals without replaying the native child", async () => {
+    populate(1);
+    const plan = await planCourseSupportCourseDispatch({ ownerThreadId: "parent-a", baseSha, now });
+    const assignmentRef = plan.launchItems[0].assignmentRef;
+    await beginCourseSupportCourseDispatch({ ownerThreadId: "parent-a", assignmentRef });
+    store.denyTransitions(2);
+    const updateCount = store.tx.automationRun.update.mock.calls.length;
+    const binding = bindCourseSupportCourseDispatch({ ownerThreadId: "parent-a", assignmentRef, childThreadId: "child-a" });
+    await vi.advanceTimersByTimeAsync(75);
+    await vi.advanceTimersByTimeAsync(150);
+    expect(await binding).toMatchObject({ acquired: true, value: { state: "BOUND" } });
+    expect(store.tx.automationRun.update.mock.calls.length - updateCount).toBe(1);
+    expect(store.runs[0].audit.childThreadId).toBe("child-a");
+  });
+
+  it("rechecks database authority after waiting and rejects an expired bind", async () => {
+    populate(1);
+    const plan = await planCourseSupportCourseDispatch({ ownerThreadId: "parent-a", baseSha, now });
+    const assignmentRef = plan.launchItems[0].assignmentRef;
+    await beginCourseSupportCourseDispatch({ ownerThreadId: "parent-a", assignmentRef });
+    store.runs[0].audit.launchStartedAt = new Date(now.getTime() - 15 * 60_000 + 50).toISOString();
+    store.denyTransitions(1);
+    const binding = bindCourseSupportCourseDispatch({ ownerThreadId: "parent-a", assignmentRef, childThreadId: "late-child" });
+    const rejected = expect(binding).rejects.toThrow("expired");
+    await vi.advanceTimersByTimeAsync(75);
+    await rejected;
+    expect(store.runs[0].audit.state).toBe("STARTING");
+    expect(store.runs[0].audit.childThreadId).toBeNull();
   });
 
   it("keeps ended uncertain STARTING owners in physical slots without charging active alert cohorts", async () => {

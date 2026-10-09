@@ -201,7 +201,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(await client.automationRun.findUniqueOrThrow({ where: { id: f.engineeringRun.id } })).toEqual(before);
     expect(coreMocks.fetch.mock.calls.length).toBe(readCount);
     expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(f.before);
-  });
+  }, 30_000);
 
   it("records customer demand arriving during a detached read as failed engineering evidence and yields safely", async () => {
     const f = await readyEngineeringFixture();
@@ -1113,6 +1113,30 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(await client.teeSearch.findUniqueOrThrow({ where: { id: f.search.id } })).toEqual(beforeSearch);
     expect(coreMocks.fetch).not.toHaveBeenCalled(); expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
   });
+
+  it("waits for the writer during final source-read settlement without fetching twice", async () => {
+    const evidenceUrl = "https://official.example.test/faqs";
+    const f = await fixture(15, false, undefined, evidenceUrl);
+    const { runWithCourseSupportWriterTransitionLease } = await import("./course-support-batches");
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let held: Promise<unknown> | undefined;
+    const fetch = vi.fn(async () => {
+      held = runWithCourseSupportWriterTransitionLease(async () => { entered(); await gate; });
+      await started;
+      setTimeout(release, 3_300);
+      return new Response("<h1>Public simulator rentals</h1>", { status: 200, headers: { "content-type": "text/html" } });
+    });
+    try {
+      const read = await lane.readSimulatorSupportSource({ ...f.owner, source: "evidence" }, { fetch });
+      expect(read.acquired).toBe(true);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      const current = await lane.readSimulatorSupportClaim({ assignmentRef: f.owner.assignmentRef, ownerThreadId: f.owner.ownerThreadId });
+      expect(current.research).toMatchObject({ readCount: 1, inFlight: null,
+        history: [{ source: "evidence", outcome: "READ" }] });
+    } finally { release?.(); if (held) await held; }
+  }, 15_000);
 
   it("preserves published retry for a configured PUBLIC offering with an eligible booking route", async () => {
     const f = await readyEngineeringFixture();

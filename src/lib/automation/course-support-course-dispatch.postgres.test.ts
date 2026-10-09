@@ -237,4 +237,34 @@ describe.skipIf(!databaseUrl)("course dispatcher context budgets in isolated Pos
     expect(remaining.find(run => run.id === abandoned.id)).toMatchObject({ status: "COMPLETED", outcome: "worker_startup_expired" });
     await expect(dispatcher.bindCourseSupportCourseDispatch({ ownerThreadId: owner, assignmentRef: audit.assignmentRef, childThreadId: `late-${randomUUID()}` })).rejects.toThrow();
   });
+
+  it("binds three distinct venues once each after a real writer admission wait", async () => {
+    const now = new Date();
+    const assignments = [];
+    for (let index = 0; index < 3; index++) {
+      const v = await venue();
+      const search = await demand([v], now);
+      const run = await starting(v, search, now, true);
+      assignments.push(dispatcher.parseCourseDispatchAudit(run.audit)!.assignmentRef);
+    }
+    const { runWithCourseSupportWriterTransitionLease } = await import("./course-support-batches");
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const held = runWithCourseSupportWriterTransitionLease(async () => { entered(); await gate; });
+    await started;
+    try {
+      const bindings = assignments.map((assignmentRef, index) => dispatcher.bindCourseSupportCourseDispatch({
+        ownerThreadId: owner, assignmentRef, childThreadId: `isolated-child-${index}-${randomUUID()}`,
+      }));
+      await new Promise(resolve => setTimeout(resolve, 3_300));
+      release();
+      const results = await Promise.all(bindings);
+      expect(results.every(result => result.acquired && result.value.state === "BOUND")).toBe(true);
+      const rows = await client.automationRun.findMany({ where: { id: { in: ids.runs } } });
+      expect(rows).toHaveLength(3);
+      expect(new Set(rows.map(row => dispatcher.parseCourseDispatchAudit(row.audit)?.childThreadId)).size).toBe(3);
+      expect(rows.every(row => dispatcher.parseCourseDispatchAudit(row.audit)?.state === "BOUND")).toBe(true);
+    } finally { release(); await held; }
+  }, 15_000);
 });

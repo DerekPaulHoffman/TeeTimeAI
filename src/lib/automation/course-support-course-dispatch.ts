@@ -34,6 +34,9 @@ import {
   runWithCourseSupportWriterTransitionLease,
   withCourseSupportWriteConflictRetry,
 } from "./course-support-batches";
+import { retryCourseSupportWriterAdmission } from "./course-support-writer-admission";
+import { assertCourseSupportWriterCommitHeadroom, assertCourseSupportWriterTransactionStart, courseSupportWriterTransactionOptions } from "./course-support-writer-budget";
+import type { PostgresAdvisoryLeaseContext } from "./lease";
 
 export const COURSE_DISPATCH_PROMPT_VERSION = "course-support-course-dispatch-v1";
 const RESERVATION_MS = 10 * 60 * 1000;
@@ -252,11 +255,16 @@ export function selectCourseDispatchTargets<T extends {
   return { selected, eligibleCount, admittedSearchCount: admitted.size };
 }
 
-async function transaction<T>(operation: (tx: Prisma.TransactionClient) => Promise<T>) {
+async function transaction<T>(operation: (tx: Prisma.TransactionClient) => Promise<T>, writerLease?: PostgresAdvisoryLeaseContext) {
   return withCourseSupportWriteConflictRetry(() =>
-    prisma.$transaction(operation, {
+    prisma.$transaction(async tx => {
+      if (writerLease) assertCourseSupportWriterTransactionStart(writerLease);
+      const result = await operation(tx);
+      if (writerLease) assertCourseSupportWriterCommitHeadroom(writerLease);
+      return result;
+    }, {
       isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-      timeout: 15_000,
+      ...(writerLease ? courseSupportWriterTransactionOptions(writerLease) : { timeout: 15_000 }),
     }),
   );
 }
@@ -605,7 +613,7 @@ export async function planCourseSupportCourseDispatch(input: {
 
 async function transition(input: { ownerThreadId: string; assignmentRef: string; childThreadId?: string; launcherReceiptPath?: string; confirmedNotCreated?: boolean; next: DispatchState }) {
   assertIdentity(input.ownerThreadId);
-  return runWithCourseSupportWriterTransitionLease(async () => transaction(async (tx) => {
+  return retryCourseSupportWriterAdmission((timeout) => runWithCourseSupportWriterTransitionLease(async writerLease => transaction(async (tx) => {
     const transitionNow = await getCourseDispatchDatabaseNow(tx);
     const runs = await readRuns(tx);
     const run = runs.find((entry) => entry.parsed?.assignmentRef === input.assignmentRef);
@@ -655,7 +663,7 @@ async function transition(input: { ownerThreadId: string; assignmentRef: string;
       },
     });
     return { assignmentRef: updated.assignmentRef, state: updated.state, baseSha: updated.baseSha };
-  }));
+  }, writerLease), { timeout }));
 }
 
 export function beginCourseSupportCourseDispatch(input: { ownerThreadId: string; assignmentRef: string }) {
