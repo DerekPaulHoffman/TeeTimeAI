@@ -96,9 +96,9 @@ function isOwnedUnsafeUrlError(error: unknown) {
 
 type OwnedCollectorBodyLimitDiagnostic = Pick<SimulatorBodyLimitDiagnostic, "phase" | "observedSizeBand">;
 const ownedPerResponseBodyLimits = new WeakMap<object, OwnedCollectorBodyLimitDiagnostic>();
-function ownBodyLimitError(phase: "COLLECTOR_HEADERS" | "COLLECTOR_BODY", observedBytes: number) {
+function ownBodyLimitError(phase: "COLLECTOR_HEADERS" | "COLLECTOR_BODY", observedBytes: number, maxBodyBytes = MAX_BODY_BYTES) {
   const error = new Error("SIMULATOR_RESEARCH_BODY_LIMIT");
-  ownedPerResponseBodyLimits.set(error, { phase, observedSizeBand: bodySizeBand(observedBytes, MAX_BODY_BYTES) });
+  ownedPerResponseBodyLimits.set(error, { phase, observedSizeBand: bodySizeBand(observedBytes, maxBodyBytes) });
   return error;
 }
 function ownedPerResponseBodyLimit(error: unknown) {
@@ -291,13 +291,13 @@ export function extractSimulatorPublicCalendar(html: string, sourceUrl: string):
   }
 }
 
-async function boundedBody(response: Response) {
+async function boundedBody(response: Response, maxBodyBytes = MAX_BODY_BYTES) {
   const declaredBytes = Number(response.headers.get("content-length"));
-  if (declaredBytes > MAX_BODY_BYTES) throw ownBodyLimitError("COLLECTOR_HEADERS", declaredBytes);
+  if (declaredBytes > maxBodyBytes) throw ownBodyLimitError("COLLECTOR_HEADERS", declaredBytes, maxBodyBytes);
   if (!response.body) return Buffer.alloc(0);
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = []; let bytes = 0;
-  try { for (;;) { const { value, done } = await reader.read(); if (done) break; bytes += value.byteLength; if (bytes > MAX_BODY_BYTES) { await reader.cancel(); throw ownBodyLimitError("COLLECTOR_BODY", bytes); } chunks.push(value); } }
+  try { for (;;) { const { value, done } = await reader.read(); if (done) break; bytes += value.byteLength; if (bytes > maxBodyBytes) { await reader.cancel(); throw ownBodyLimitError("COLLECTOR_BODY", bytes, maxBodyBytes); } chunks.push(value); } }
   finally { reader.releaseLock(); }
   return Buffer.concat(chunks);
 }
@@ -424,7 +424,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
   const now = dependencies.now ?? (() => new Date());
   const deadline = AbortSignal.timeout(DEADLINE_MS);
   const lease = dependencies.lease ?? runWithProviderRequestLease;
-  const read = async (url: string, method: "GET" | "HEAD" = "GET", headers?: Record<string, string>, scopedRoot = requestedUrl, extraGuard?: (url: URL) => boolean) => {
+  const read = async (url: string, method: "GET" | "HEAD" = "GET", headers?: Record<string, string>, scopedRoot = requestedUrl, extraGuard?: (url: URL) => boolean, maxBodyBytes = MAX_BODY_BYTES) => {
     const safe = publicUrl(url);
     const allowed = (url: URL) => sameOfficialHost(scopedRoot, url.href) && (!extraGuard || extraGuard(url));
     if (!allowed(safe)) throw new Error("SIMULATOR_RESEARCH_DESTINATION_CHANGED");
@@ -432,7 +432,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
       const parsed = publicUrl(value);
       if (!allowed(parsed)) throw new Error("SIMULATOR_RESEARCH_DESTINATION_CHANGED");
       return parsed;
-    }, maxResponseBytes: MAX_BODY_BYTES, redirectLimit: 4, timeoutMs: 10_000 });
+    }, maxResponseBytes: maxBodyBytes, redirectLimit: 4, timeoutMs: 10_000 });
     const acquired = await lease(safe.hostname, async () => {
       if (deadline.aborted) throw new Error("SIMULATOR_RESEARCH_DEADLINE");
       let response: Response;
@@ -451,7 +451,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
       if (cors === "*") publicCors = cors;
       else if (cors) { try { if (sameOfficialHost(requestedUrl, cors) && new URL(cors).origin === cors) publicCors = cors; } catch { /* Never forward an unproven header value. */ } }
       let body: Buffer;
-      try { body = await beforeDeadline(boundedBody(response), deadline); } catch (error) { throw knownPublicNetworkError(tagSimulatorResearchFailure(error, "HTTP_READ")); }
+      try { body = await beforeDeadline(boundedBody(response, maxBodyBytes), deadline); } catch (error) { throw knownPublicNetworkError(tagSimulatorResearchFailure(error, "HTTP_READ")); }
       return { url: effective, status: response.status, location, publicCors, contentType: response.headers.get("content-type") ?? "", body };
     });
     if (!acquired.acquired) throw new Error("SIMULATOR_RESEARCH_PROVIDER_BUSY");
@@ -497,31 +497,42 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
     warning.startsWith("SECONDARY_") && bodyLimitDiagnostics.length
       ? { bodyLimitDiagnostics, ...(bodyLimitDiagnosticsTruncated ? { bodyLimitDiagnosticsTruncated: true as const } : {}) } : {};
   const activeRoutes = new Set<Promise<void>>();
-  const hostReads = new Map<string, Promise<unknown>>();
+  let renderedReadTail: Promise<unknown> = Promise.resolve();
   let page: ResearchPage | undefined;
   const accessControls = new Set<NonNullable<SimulatorResearchResult["accessControls"]>[number]>();
   const responseContracts: NonNullable<SimulatorResearchResult["responseContracts"]> = [];
   const assets = new Map<string, string>();
   let assetsObserved = false;
   let contractSlug = publicVenueSlug(requestedUrl);
-  // A rendered page must not compete with its own requests for a hostname lease.
+  // Serialize transport and accounting together so every host shares one page budget.
   const cappedSecondaryAsset = Symbol("CAPPED_SECONDARY_ASSET");
   const rejectedSecondaryStylesheet = Symbol("REJECTED_SECONDARY_STYLESHEET");
   const skippedAfterTerminalMain = Symbol("SKIPPED_AFTER_TERMINAL_MAIN");
   const readRendered = (resourceKind: SimulatorResearchResourceKind, isSecondaryAsset: boolean, ...args: Parameters<typeof read>) => {
-    const hostname = new URL(args[0]).hostname;
-    const operation = (hostReads.get(hostname) ?? Promise.resolve()).then(async () => {
+    const operation = renderedReadTail.catch(() => undefined).then(async () => {
       if (terminalMainDocument) return skippedAfterTerminalMain;
       if (deadline.aborted) throw new Error("SIMULATOR_RESEARCH_DEADLINE");
       if (hasRouteFailure) throw routeFailure;
-      try { return await read(...args); }
+      const remainingBytes = MAX_RENDER_BYTES - responseBytes;
+      const resourceCeiling = resourceKind === "SECONDARY_SCRIPT" && isSecondaryAsset && safeMainDocument ? MAX_RENDER_BYTES : MAX_BODY_BYTES;
+      const maxBodyBytes = Math.min(resourceCeiling, remainingBytes);
+      if (maxBodyBytes <= 0) {
+        routeFailure = tagSimulatorResearchResourceKind(new Error("SIMULATOR_RESEARCH_BODY_LIMIT"), resourceKind);
+        hasRouteFailure = true;
+        throw routeFailure;
+      }
+      try {
+        const response = await read(args[0], args[1], args[2], args[3], args[4], maxBodyBytes);
+        responseBytes += response.body.length;
+        return response;
+      }
       catch (error) {
         const tagged = tagSimulatorResearchResourceKind(error, resourceKind);
         if (resourceKind === "SECONDARY_STYLESHEET" && isSecondaryAsset && safeMainDocument && isOwnedUnsafeUrlError(tagged) && !hasRouteFailure) {
           // The pinned transport may have downloaded the response before its
-          // effective URL or redirect was rejected. Charge its full existing cap.
-          responseBytes += MAX_BODY_BYTES;
-          if (responseBytes > MAX_RENDER_BYTES) {
+          // effective URL or redirect was rejected. Charge its full admitted cap.
+          responseBytes += maxBodyBytes;
+          if (maxBodyBytes < resourceCeiling) {
             routeFailure = tagSimulatorResearchResourceKind(new Error("SIMULATOR_RESEARCH_BODY_LIMIT"), resourceKind);
             hasRouteFailure = true;
             throw routeFailure;
@@ -531,9 +542,9 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
         }
         const bodyLimit = ownedPerResponseBodyLimit(tagged);
         if (isSecondaryAsset && safeMainDocument && bodyLimit && !hasRouteFailure) {
-          // Charge the existing full per-response cap for bytes rejected by transport.
-          responseBytes += MAX_BODY_BYTES;
-          if (responseBytes > MAX_RENDER_BYTES) {
+          // Charge rejected bytes conservatively; exhausting the page budget is fatal.
+          responseBytes += maxBodyBytes;
+          if (maxBodyBytes < resourceCeiling) {
             routeFailure = tagSimulatorResearchResourceKind(new Error("SIMULATOR_RESEARCH_BODY_LIMIT"), resourceKind);
             hasRouteFailure = true;
             throw routeFailure;
@@ -546,9 +557,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
         throw routeFailure;
       }
     });
-    hostReads.set(hostname, operation);
-    const clear = () => { if (hostReads.get(hostname) === operation) hostReads.delete(hostname); };
-    void operation.then(clear, clear);
+    renderedReadTail = operation;
     return beforeDeadline(operation, deadline);
   };
   const partialMainDocument = (warning: NonNullable<SimulatorResearchResult["renderWarning"]>): SimulatorResearchResult => {
@@ -619,8 +628,6 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
             return;
           }
           if (assetRoot && response.location) assets.set(response.location, assetRoot);
-          responseBytes += response.body.length;
-          if (responseBytes > MAX_RENDER_BYTES) throw new Error("SIMULATOR_RESEARCH_BODY_LIMIT");
           if (request.isNavigationRequest() && request.frame() === page?.mainFrame()) navigation = response;
           const terminalMain = !safeMainDocument && request.isNavigationRequest() && request.frame() === page?.mainFrame() && response.status >= 400 && response.status <= 599;
           if (terminalMain) terminalMainDocument = { ...response, observedAt: now() };

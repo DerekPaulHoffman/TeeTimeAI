@@ -545,44 +545,33 @@ describe("bounded owned simulator public research transport", () => {
       await expect(collectSimulatorSupportResearch({ url: source, render: true }, { fetch: vi.fn(async () => rejected), lease, browser: view.factory })).rejects.toThrow("DESTINATION_CHANGED");
     }
   });
-  it("settles an already-started unknown data failure instead of hiding it behind terminal main HTTP", async () => {
+  it("settles an already-started unknown data failure and prevents later queued main reads", async () => {
     const data = "https://www.venue.example.test/public-data", unknown = new Error("Unrelated data invariant");
     const view = renderedBrowser([{ url: `${source}/` }]);
     let handler!: (route: Route) => Promise<void>;
-    let releaseMain!: (response: Response) => void, rejectData!: (error: Error) => void;
-    const pendingMain = new Promise<Response>(resolve => { releaseMain = resolve; });
+    let rejectData!: (error: Error) => void;
     const pendingData = new Promise<Response>((_resolve, reject) => { rejectData = reject; });
-    const fetch = vi.fn(async (url: unknown) => String(url) === data ? pendingData : pendingMain);
+    const fetch = vi.fn(async (url: unknown) => String(url) === data ? pendingData : response("<h1>Safe main</h1>"));
     view.context.route.mockImplementation(async (_pattern, callback) => { handler = callback; });
     const run = (url: string, kind: string) => handler({ abort: vi.fn(async () => undefined), fulfill: vi.fn(async () => undefined),
       request: () => ({ url: () => url, method: () => "GET", allHeaders: async () => ({ "user-agent": "Public research browser" }),
         resourceType: () => kind, isNavigationRequest: () => kind === "document", frame: () => view.page.mainFrame() }) } as unknown as Route);
     let dataWork: Promise<void> | undefined;
     view.page.goto.mockImplementation(async () => {
-      const mainWork = run(`${source}/`, "document"); dataWork = run(data, "xhr");
+      await run(`${source}/`, "document"); dataWork = run(data, "xhr");
+      const laterMainWork = run(`${source}/later-main`, "document");
       await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
-      releaseMain(response("Main error", 403)); await mainWork;
-      setTimeout(() => rejectData(unknown), 0);
+      rejectData(unknown); await Promise.all([dataWork, laterMainWork]);
       throw new Error("page.goto: net::ERR_ABORTED at public destination");
     });
     await expect(collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory })).rejects.toBe(unknown);
-    await dataWork; expect(view.page.content).not.toHaveBeenCalled(); expect(view.browser.close).toHaveBeenCalledOnce();
+    await dataWork; expect(fetch).toHaveBeenCalledTimes(2); expect(fetch.mock.calls.some(call => String(call[0]).includes("later-main"))).toBe(false);
+    expect(view.page.content).not.toHaveBeenCalled(); expect(view.browser.close).toHaveBeenCalledOnce();
   });
-  it("keeps aggregate overflow from already-started responses hard before terminal main HTTP is recorded", async () => {
-    const view = renderedBrowser([{ url: `${source}/` }]);
-    let handler!: (route: Route) => Promise<void>, releaseMain!: (response: Response) => void;
-    const pendingMain = new Promise<Response>(resolve => { releaseMain = resolve; });
-    const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? pendingMain : response("x".repeat(1_500_000), 200, "text/css"));
-    view.context.route.mockImplementation(async (_pattern, callback) => { handler = callback; });
-    const run = (url: string, kind: string) => handler({ abort: vi.fn(async () => undefined), fulfill: vi.fn(async () => undefined),
-      request: () => ({ url: () => url, method: () => "GET", allHeaders: async () => ({ "user-agent": "Public research browser" }),
-        resourceType: () => kind, isNavigationRequest: () => kind === "document", frame: () => view.page.mainFrame() }) } as unknown as Route);
-    view.page.goto.mockImplementation(async () => {
-      const mainWork = run(`${source}/`, "document");
-      await Promise.all(Array.from({ length: 4 }, (_, index) => run(`https://www.venue.example.test/large-${index}.css`, "stylesheet")));
-      releaseMain(response("Main error", 403)); await mainWork;
-      return { status: () => 403 };
-    });
+  it("keeps aggregate overflow from separately hosted queued responses hard", async () => {
+    const requests = [{ url: `${source}/` }, ...Array.from({ length: 4 }, (_, index) => ({ url: `https://www.venue.example.test/large-${index}.css`, kind: "stylesheet" }))];
+    const view = renderedBrowser(requests, "<h1>Unproven rendered output</h1>", true);
+    const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? response("<h1>Safe main</h1>") : response("x".repeat(1_500_000), 200, "text/css"));
     await expect(collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory })).rejects.toThrow("BODY_LIMIT");
     expect(fetch).toHaveBeenCalledTimes(5); expect(view.page.content).not.toHaveBeenCalled();
   });
@@ -799,6 +788,70 @@ describe("bounded owned simulator public research transport", () => {
     expect(result).toMatchObject({ accessControls: ["CAPTCHA_OR_CHALLENGE"], text: "", links: [], renderComplete: false });
     expect(result.renderWarning).toBeUndefined(); expect(result.calendar).toBeUndefined();
   });
+  it.each([false, true])("renders an admitted three-megabyte secondary script within the shared budget (streamed=%s)", async streamed => {
+    const asset = new URL("/public-app.js", booking).href, marker = "private-large-script-marker";
+    const body = marker + "x".repeat(3_000_001 - marker.length);
+    const main = `<h1>Safe public rentals</h1><script src='${asset}'></script>`;
+    const view = renderedBrowser([{ url: booking }, { url: asset, kind: "script" }], publishedConfig());
+    const fetch = vi.fn(async (url: unknown) => String(url) === booking ? response(main)
+      : streamed ? new Response(new ReadableStream<Uint8Array>({ start(controller) {
+          controller.enqueue(Buffer.from(body.slice(0, 1_500_001))); controller.enqueue(Buffer.from(body.slice(1_500_001))); controller.close();
+        } }), { headers: { "content-type": "text/javascript" } })
+        : new Response(body, { headers: { "content-type": "text/javascript", "content-length": String(body.length) } }));
+    const result = await collectSimulatorSupportResearch({ url: booking, render: true }, { fetch, lease, browser: view.factory });
+    expect(result).toMatchObject({ renderComplete: true, contentProvenance: "RENDERED_DOM", admittedRequests: 2, blockedRequests: 0 });
+    expect(result.renderWarning).toBeUndefined(); expect(result.bodyLimitDiagnostics).toBeUndefined();
+    expect(result.calendar).toEqual(extractSimulatorPublicCalendar(publishedConfig(), booking).calendar);
+    expect(fetch).toHaveBeenCalledTimes(2); expect(view.routes[1].fulfill).toHaveBeenCalledOnce();
+    expect(view.routes[1].fulfill.mock.calls[0][0].body).toHaveLength(body.length);
+    expect(JSON.stringify(result)).not.toMatch(/private-large-script-marker|secret@example|never-return-this/);
+    expect(view.context.close).toHaveBeenCalledOnce(); expect(view.browser.close).toHaveBeenCalledOnce();
+  });
+  it("serializes admitted scripts across hosts before spending the remaining rendered-body budget", async () => {
+    const first = "https://first-cdn.example.test/app.js", second = "https://second-cdn.example.test/app.js";
+    const main = `<h1>Safe public page</h1><script src='${first}'></script><script src='${second}'></script>`;
+    const view = renderedBrowser([{ url: `${source}/` }, { url: first, kind: "script" }, { url: second, kind: "script" }], "<h1>Unproven output</h1>", true);
+    let releaseFirst!: (value: Response) => void;
+    const pendingFirst = new Promise<Response>(resolve => { releaseFirst = resolve; });
+    const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? response(main)
+      : String(url) === first ? pendingFirst : new Response("not-served", { headers: { "content-length": "3000001", "content-type": "text/javascript" } }));
+    const collection = collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    const outcome = collection.then(value => ({ value, error: undefined }), error => ({ value: undefined, error }));
+    await vi.waitFor(() => expect(fetch.mock.calls.some(call => String(call[0]) === first)).toBe(true));
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const secondStartedBeforeRelease = fetch.mock.calls.some(call => String(call[0]) === second);
+    releaseFirst(new Response("x".repeat(3_000_001), { headers: { "content-length": "3000001", "content-type": "text/javascript" } }));
+    const settled = await outcome;
+    expect(secondStartedBeforeRelease).toBe(false);
+    expect(classifySimulatorSupportFailure(settled.error, "PUBLIC_READ")).toMatchObject({ category: "BUDGET", code: "PUBLIC_BODY_LIMIT", researchResourceKind: "SECONDARY_SCRIPT" });
+    expect(settled.value).toBeUndefined(); expect(fetch).toHaveBeenCalledTimes(3);
+    expect(view.routes[1].fulfill).toHaveBeenCalledOnce(); expect(view.routes[2].fulfill).not.toHaveBeenCalled();
+    expect(view.page.content).not.toHaveBeenCalled(); expect(view.context.close).toHaveBeenCalledOnce(); expect(view.browser.close).toHaveBeenCalledOnce();
+  });
+  it("accepts a script at the exact remaining six-megabyte budget without reading a later body", async () => {
+    const main = "<h1>Safe main</h1>", remaining = 6_000_000 - Buffer.byteLength(main);
+    const view = renderedBrowser([{ url: `${source}/` }, { url: `${source}/exact.js`, kind: "script" }, { url: `${source}/never-read-data`, kind: "xhr" }]);
+    const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? response(main)
+      : new Response("x".repeat(remaining), { headers: { "content-length": String(remaining), "content-type": "text/javascript" } }));
+    await expect(collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory })).rejects.toThrow("BODY_LIMIT");
+    expect(fetch).toHaveBeenCalledTimes(2); expect(fetch.mock.calls.some(call => String(call[0]).includes("never-read-data"))).toBe(false);
+    expect(view.routes[1].fulfill.mock.calls[0][0].body).toHaveLength(remaining); expect(view.routes[2].fulfill).not.toHaveBeenCalled();
+    expect(view.page.content).not.toHaveBeenCalled(); expect(view.browser.close).toHaveBeenCalledOnce();
+  });
+  it.each([false, true])("rejects a script that exceeds the remaining aggregate budget without a partial success (streamed=%s)", async streamed => {
+    const main = "<h1>Safe main</h1>", remaining = 6_000_000 - Buffer.byteLength(main), cancel = vi.fn();
+    const view = renderedBrowser([{ url: `${source}/` }, { url: `${source}/over-remaining.js`, kind: "script" }]);
+    const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? response(main)
+      : new Response(new ReadableStream<Uint8Array>({ start(controller) { controller.enqueue(new Uint8Array(remaining)); controller.enqueue(new Uint8Array(1)); }, cancel }),
+        { headers: { "content-type": "text/javascript", ...(streamed ? {} : { "content-length": String(remaining + 1) }) } }));
+    let thrown: unknown;
+    try { await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory }); }
+    catch (error) { thrown = error; }
+    expect(classifySimulatorSupportFailure(thrown, "PUBLIC_READ")).toMatchObject({ category: "BUDGET", code: "PUBLIC_BODY_LIMIT", researchResourceKind: "SECONDARY_SCRIPT" });
+    expect(fetch).toHaveBeenCalledTimes(2); expect(view.routes[1].fulfill).not.toHaveBeenCalled();
+    if (streamed) expect(cancel).toHaveBeenCalledOnce();
+    expect(view.page.content).not.toHaveBeenCalled(); expect(view.context.close).toHaveBeenCalledOnce(); expect(view.browser.close).toHaveBeenCalledOnce();
+  });
   it("keeps per-response and total body limits fatal and cleans up the browser", async () => {
     await expect(collectSimulatorSupportResearch({ url: source }, { fetch: vi.fn(async () => response("x".repeat(1_500_001))), lease })).rejects.toThrow("BODY_LIMIT");
     const view = renderedBrowser([{ url: `${source}/` }, ...Array.from({ length: 4 }, (_, index) => ({ url: `${source}/asset-${index}`, kind: "script" }))]);
@@ -962,13 +1015,14 @@ describe("bounded owned simulator public research transport", () => {
     expect(fetch).toHaveBeenCalledTimes(3); expect(view.page.content).not.toHaveBeenCalled();
     expect(view.context.close).toHaveBeenCalledOnce(); expect(view.browser.close).toHaveBeenCalledOnce();
   });
-  it("retains bounded observed DOM with an incomplete warning after an oversized secondary script or stylesheet", async () => {
-    for (const kind of ["script", "stylesheet"]) for (const streamed of [false, true]) {
+  it("retains bounded observed DOM with an incomplete warning after an oversized secondary stylesheet", async () => {
+    const kind = "stylesheet";
+    for (const streamed of [false, true]) {
       const asset = `${source}/large-${kind}`;
       const view = renderedBrowser([{ url: `${source}/` }, { url: asset, kind }], "<h1>Observed rendered page</h1>");
       const fetch = vi.fn(async (url: unknown) => String(url) === asset
         ? new Response("x".repeat(1_500_001), { headers: {
-            "content-type": kind === "script" ? "text/javascript" : "text/css",
+            "content-type": "text/css",
             ...(streamed ? {} : { "content-length": "1500001" }) } })
         : response("<h1>Safe initial public page</h1><a href='/booking'>Book a bay</a>"));
       const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory, now: () => instant });
@@ -976,7 +1030,7 @@ describe("bounded owned simulator public research transport", () => {
       expect(result).toMatchObject({ method: "BROWSER", contentProvenance: "RENDERED_DOM", renderComplete: false,
         renderWarning: "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED", admittedRequests: 2, blockedRequests: 1,
         text: "Observed rendered page", observedAt: instant.toISOString() });
-      expect(result.bodyLimitDiagnostics).toEqual([{ resourceKind: kind === "script" ? "SECONDARY_SCRIPT" : "SECONDARY_STYLESHEET",
+      expect(result.bodyLimitDiagnostics).toEqual([{ resourceKind: "SECONDARY_STYLESHEET",
         phase: streamed ? "COLLECTOR_BODY" : "COLLECTOR_HEADERS", observedSizeBand: "OVER_LIMIT_UP_TO_2X", count: 1 }]);
       expect(result.bodyLimitDiagnosticsTruncated).toBeUndefined();
       expect(result.responseContracts).toBeUndefined(); expect(view.page.content).toHaveBeenCalledOnce();
@@ -986,31 +1040,31 @@ describe("bounded owned simulator public research transport", () => {
     }
   });
   it("deduplicates owned capped leaves into closed kind, phase, size band and count only", async () => {
-    const requests = [{ url: `${source}/` }, { url: `${source}/first.js`, kind: "script" },
-      { url: `${source}/second.js`, kind: "script" }, { url: `${source}/large.css`, kind: "stylesheet" }];
+    const requests = [{ url: `${source}/` }, { url: `${source}/first.css`, kind: "stylesheet" },
+      { url: `${source}/second.css`, kind: "stylesheet" }, { url: `${source}/large.css`, kind: "stylesheet" }];
     const view = renderedBrowser(requests, "<h1>Observed page</h1>");
     const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? response("<h1>Safe main</h1>") :
       new Response("secret-body", { headers: { "content-length": String(String(url).endsWith("large.css") ? 6_000_001 : 3_000_001) } }));
     const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
     expect(result.bodyLimitDiagnostics).toEqual([
-      { resourceKind: "SECONDARY_SCRIPT", phase: "COLLECTOR_HEADERS", observedSizeBand: "OVER_2X_UP_TO_4X", count: 2 },
+      { resourceKind: "SECONDARY_STYLESHEET", phase: "COLLECTOR_HEADERS", observedSizeBand: "OVER_2X_UP_TO_4X", count: 2 },
       { resourceKind: "SECONDARY_STYLESHEET", phase: "COLLECTOR_HEADERS", observedSizeBand: "OVER_4X", count: 1 },
     ]);
-    expect(JSON.stringify(result)).not.toMatch(/first\.js|second\.js|large\.css|secret-body/u);
+    expect(JSON.stringify(result)).not.toMatch(/first\.css|second\.css|large\.css|secret-body/u);
     expect(view.routes.slice(1).every(route => route.fulfill.mock.calls.length === 0)).toBe(true);
   });
-  it("keeps a capped script diagnostic when a rejected stylesheet owns the displayed warning", async () => {
+  it("keeps a capped stylesheet diagnostic when a rejected stylesheet owns the displayed warning", async () => {
     const requests = [{ url: `${source}/` }, { url: `${source}/public.css`, kind: "stylesheet" },
-      { url: `${source}/large.js`, kind: "script" }];
+      { url: `${source}/large.css`, kind: "stylesheet" }];
     const view = renderedBrowser(requests, "<h1>Partial rendered page</h1>");
     const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? response("<h1>Safe main</h1>") :
       String(url).endsWith("public.css") ? new Response(null, { status: 302, headers: { location: `${source}/login` } }) :
-        new Response("secret-script", { headers: { "content-length": "1500001" } }));
+        new Response("secret-stylesheet", { headers: { "content-length": "1500001" } }));
     const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
     expect(result).toMatchObject({ renderWarning: "SECONDARY_STYLESHEET_URL_REJECTED", renderComplete: false,
-      bodyLimitDiagnostics: [{ resourceKind: "SECONDARY_SCRIPT", phase: "COLLECTOR_HEADERS",
+      bodyLimitDiagnostics: [{ resourceKind: "SECONDARY_STYLESHEET", phase: "COLLECTOR_HEADERS",
         observedSizeBand: "OVER_LIMIT_UP_TO_2X", count: 1 }] });
-    expect(JSON.stringify(result)).not.toMatch(/large\.js|secret-script/u);
+    expect(JSON.stringify(result)).not.toMatch(/large\.css|secret-stylesheet/u);
     expect(view.routes[2].fulfill).not.toHaveBeenCalled();
   });
   it("keeps main, XHR, subframe, lease and unrelated asset failures hard", async () => {
@@ -1055,7 +1109,7 @@ describe("bounded owned simulator public research transport", () => {
         : response("x".repeat(1_500_000), 200, "text/css")), lease, browser: aggregate.factory })).rejects.toThrow("BODY_LIMIT");
     expect(aggregate.browser.close).toHaveBeenCalledOnce();
   });
-  it.each(["script", "stylesheet"])("continues queued safe scripts and public XHR after a capped %s without serving oversized bytes", async kind => {
+  it.each(["stylesheet"])("continues queued safe scripts and public XHR after a capped %s without serving oversized bytes", async kind => {
     const large = `${source}/large-${kind}`, script = `${source}/public.js`, data = `${source}/public/data`;
     const requests = [{ url: `${source}/` }, { url: large, kind }, { url: script, kind: "script" }, { url: data, kind: "xhr" }];
     const view = renderedBrowser(requests, "<h1>Observed public rentals</h1>", true);
@@ -1095,12 +1149,12 @@ describe("bounded owned simulator public research transport", () => {
   });
   it("charges both rejected and capped leaf responses and preserves fatal aggregate overflow", async () => {
     const requests = [{ url: `${source}/` }, { url: `${source}/rejected.css`, kind: "stylesheet" },
-      ...Array.from({ length: 3 }, (_, index) => ({ url: `${source}/capped-${index}.js`, kind: "script" })),
+      ...Array.from({ length: 3 }, (_, index) => ({ url: `${source}/capped-${index}.css`, kind: "stylesheet" })),
       { url: `${source}/never-read-data`, kind: "xhr" }];
     const view = renderedBrowser(requests);
     const fetch = vi.fn(async (url: unknown) => String(url) === `${source}/` ? response("<h1>Safe main</h1>")
       : String(url).endsWith("rejected.css") ? new Response(null, { status: 302, headers: { location: `${source}/login` } })
-        : new Response("oversize-never-served", { headers: { "content-length": "1500001", "content-type": "text/javascript" } }));
+        : new Response("oversize-never-served", { headers: { "content-length": "1500001", "content-type": "text/css" } }));
     await expect(collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory })).rejects.toThrow("BODY_LIMIT");
     expect(fetch).toHaveBeenCalledTimes(5); expect(lease).toHaveBeenCalledTimes(5);
     expect(fetch.mock.calls.every(call => !/login|never-read-data/u.test(String(call[0])))).toBe(true);
@@ -1149,7 +1203,7 @@ describe("bounded owned simulator public research transport", () => {
     expect(mixedFetch).toHaveBeenCalledTimes(3);
   });
   it("preserves access controls arriving while an asset-limit navigation abort settles", async () => {
-    const asset = new URL("/oversized.js", booking).href;
+    const asset = new URL("/oversized.css", booking).href;
     const subframe = "https://www.booking.trackmangolf.com/access-frame";
     const view = renderedBrowser([{ url: booking }]);
     let handler!: (route: Route) => Promise<void>;
@@ -1166,7 +1220,7 @@ describe("bounded owned simulator public research transport", () => {
     } as unknown as Route);
     view.page.goto.mockImplementation(async () => {
       await run(booking, "document", view.page.mainFrame());
-      const cappedAsset = run(asset, "script", view.page.mainFrame());
+      const cappedAsset = run(asset, "stylesheet", view.page.mainFrame());
       subframeWork = run(subframe, "document", {});
       await cappedAsset;
       // The response is already admitted on a different hostname. It arrives
@@ -1180,7 +1234,7 @@ describe("bounded owned simulator public research transport", () => {
     });
     const fetch = vi.fn(async (url: unknown) => String(url) === subframe ? pendingSubframe
       : String(url) === asset
-        ? new Response("x", { headers: { "content-length": "1500001", "content-type": "text/javascript" } })
+        ? new Response("x", { headers: { "content-length": "1500001", "content-type": "text/css" } })
         : response("<h1>Initial safe facts</h1>" + publishedConfig() + "<a href='/public-destination'>Book a bay</a>"));
     const result = await collectSimulatorSupportResearch({ url: booking, render: true }, { fetch, lease, browser: view.factory });
     await subframeWork;
