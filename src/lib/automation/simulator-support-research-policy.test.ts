@@ -455,6 +455,12 @@ describe("durable simulator research failure memory", () => {
       routes: [{ url: bookingUrl, rendered: true, httpStatus: 200, configurationDiagnostic: value }] })?.routes[0].configurationDiagnostic;
     expect(history(diagnostic)).toEqual(diagnostic);
     expect(memory(diagnostic)).toEqual(diagnostic);
+    for (const venueStatusState of ["LIVE", "OTHER"]) {
+      const value = { ...diagnostic, candidateMetadata: { ...metadata, venueStatusState } };
+      expect(history(value)).toEqual(value);
+      expect(memory(value)).toEqual(value);
+    }
+    expect(history(diagnostic)?.candidateMetadata?.venueStatusState).toBeUndefined();
     for (const openingHoursFormat of ["EMPTY", "WEEKLY_OR_DATED", "OTHER"]) {
       const value = { ...diagnostic, candidateMetadata: { ...metadata,
         ranges: [{ ...metadata.ranges[0], openingHoursFormat }] } };
@@ -471,6 +477,7 @@ describe("durable simulator research failure memory", () => {
     expect(history({ ...diagnostic, candidateMetadata: legacyMetadata })).toEqual({ ...diagnostic, candidateMetadata: legacyMetadata });
     for (const invalid of [
       { ...diagnostic, candidateMetadata: { ...metadata, venueId: "private@example.test" } },
+      { ...diagnostic, candidateMetadata: { ...metadata, venueStatusState: "private@example.test" } },
       { ...diagnostic, candidateMetadata: { ...metadata, ranges: [{ ...metadata.ranges[0], openingHoursFormat: "private@example.test" }] } },
       { ...diagnostic, candidateMetadata: { ...metadata, ranges: [{ ...metadata.ranges[0], openingHours: "private@example.test" }] } },
       { ...diagnostic, candidateMetadata: { ...metadata, candidates: [{ ...metadata.candidates[0], name: "Private Member" }] } },

@@ -352,6 +352,17 @@ describe("bounded owned simulator public research transport", () => {
     expect(JSON.stringify(result)).not.toMatch(/Private Member|private@example|secret@example|never-return-this|Mo 09:00|__NEXT_DATA__|Public Rate/u);
     expect(persistedDiagnostic(result.configurationDiagnostic)).toEqual(result.configurationDiagnostic);
   });
+  it.each(["live", "draft", "private@example.test"])("retains only a closed publication status for rejected rentals: %s", status => {
+    const parsed = JSON.parse(publishedConfig().match(/<script[^>]*>([\s\S]*?)<\/script>/u)![1]);
+    parsed.props.pageProps.initialReduxState.venue.status = status;
+    parsed.props.pageProps.initialReduxState.bays.bayOptions[0].category = null;
+    const result = extractSimulatorPublicCalendar(`<script id="__NEXT_DATA__" type="application/json">${JSON.stringify(parsed)}</script>`, booking);
+    expect(result.calendar).toBeUndefined();
+    expect(result.configurationDiagnostic).toMatchObject({ reason: "CONFIG_NO_ELIGIBLE_RENTALS",
+      candidateMetadata: { venueStatusState: status === "live" ? "LIVE" : "OTHER" } });
+    expect(JSON.stringify(result)).not.toMatch(/private@example|secret@example|never-return-this/u);
+    expect(persistedDiagnostic(result.configurationDiagnostic)).toEqual(result.configurationDiagnostic);
+  });
   it("keeps the original rental rejection and omits extra metadata when candidate or resource facts are invalid", () => {
     const malformed = ["candidate-venue", "disabled", "restrictions", "duration-bounds", "duplicate-private-id",
       "resource-options", "resource-range", "duplicate-applied-option"] as const;
