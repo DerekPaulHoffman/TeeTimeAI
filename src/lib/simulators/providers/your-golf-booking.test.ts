@@ -57,6 +57,21 @@ describe("YourGolfBooking public simulator calendar", () => {
     expect(slots.some(slot => slot.resourceId === "9225" && slot.startsAt.toISOString() === "2026-10-10T22:00:00.000Z")).toBe(false);
     expect(slots.some(slot => slot.resourceId === "9224" && slot.startsAt.toISOString() === "2026-10-10T22:00:00.000Z")).toBe(true);
   });
+  it("uses the verified bay range for null-range bookings and blocks every overlap across products", () => {
+    const resources = ["9224", "9225", "9226", "9227", "9228"];
+    const venueBayRanges = new Map(resources.map(id => [id, 1397]));
+    const occupied = [{ ...booking(9226, "2026-10-10T21:00:00Z", "2026-10-10T22:00:00Z", 28), rangeId: null }];
+    const slots = buildSlots(input, resources, 21451, 1397, 1357, 4, [[960, 1320]], occupied, venueBayRanges);
+    expect(slots).toHaveLength(52);
+    for (const time of ["20:30", "21:00", "21:30"]) {
+      expect(slots.some(slot => slot.resourceId === "9226" && slot.startsAt.toISOString() === `2026-10-10T${time}:00.000Z`)).toBe(false);
+    }
+    expect(slots.some(slot => slot.resourceId === "9224" && slot.startsAt.toISOString() === "2026-10-10T21:00:00.000Z")).toBe(true);
+    expect(() => buildSlots(input, resources, 21451, 1397, 1357, 4, [[960, 1320]], occupied)).toThrow();
+    for (const patch of [{ bayId: 9999 }, { rangeId: undefined }, { rangeId: 9999 }]) {
+      expect(() => buildSlots(input, resources, 21451, 1397, 1357, 4, [[960, 1320]], [{ ...occupied[0], ...patch }], venueBayRanges)).toThrow();
+    }
+  });
   it("supports reviewed public slot rentals with observed nulls and only their exact linked resources", async () => {
     const selected = { ...input, offering: { ...input.offering,
       bookingUrl: "https://yourgolfbooking.com/venues/golf-oasis/booking/bays",

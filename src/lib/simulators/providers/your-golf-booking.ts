@@ -167,13 +167,16 @@ export function buildSlots(input: SimulatorAvailabilityInput, resources: string[
   const items = list(occupancy, 1_000).map(record);
   const blocked = new Map(resources.map(id => [id, [] as [number, number][]]));
   for (const item of items) {
-    if (!item || !ID.test(String(item.id)) || item.status !== "confirmed" || item.type !== "bay" || !ID.test(String(item.bayOptionId)) || !ID.test(String(item.rangeId)) || (!venueBayRanges && (item.rangeId !== rangeId || !blocked.has(String(item.bayId)))) || !ID.test(String(item.bayId)) || typeof item.bayRef !== "string" || !/^\d{1,3}$/u.test(item.bayRef)) fail("The public simulator occupancy changed shape or identity");
-    if (venueBayRanges && venueBayRanges.get(String(item.bayId)) !== item.rangeId) fail("The public simulator occupancy does not match its published bay and range");
+    // Some public bookings omit the range but still name a published bay. Only
+    // the freshly verified venue map can supply that identity; never skip them.
+    const occupiedRangeId = item?.rangeId === null ? venueBayRanges?.get(String(item.bayId)) : item?.rangeId;
+    if (!item || !ID.test(String(item.id)) || item.status !== "confirmed" || item.type !== "bay" || !ID.test(String(item.bayOptionId)) || !ID.test(String(occupiedRangeId)) || (!venueBayRanges && (occupiedRangeId !== rangeId || !blocked.has(String(item.bayId)))) || !ID.test(String(item.bayId)) || typeof item.bayRef !== "string" || !/^\d{1,3}$/u.test(item.bayRef)) fail("The public simulator occupancy changed shape or identity");
+    if (venueBayRanges && venueBayRanges.get(String(item.bayId)) !== occupiedRangeId) fail("The public simulator occupancy does not match its published bay and range");
     const start = Date.parse(String(item.start));
     const end = Date.parse(String(item.end));
     if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?(?:Z|[+-]\d{2}:\d{2})$/u.test(String(item.start)) || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?(?:Z|[+-]\d{2}:\d{2})$/u.test(String(item.end)) || !Number.isFinite(start) || !Number.isFinite(end) || start >= end || end - start > 24 * 60 * 60_000) fail("The public simulator occupancy interval is invalid");
     if (blocked.has(String(item.bayId))) {
-      if (item.rangeId !== rangeId) fail("The selected simulator bay changed range identity");
+      if (occupiedRangeId !== rangeId) fail("The selected simulator bay changed range identity");
       blocked.get(String(item.bayId))!.push([start, end]);
     }
   }

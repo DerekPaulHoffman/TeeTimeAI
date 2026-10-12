@@ -33,6 +33,7 @@ Use the owned simulator source reader to inspect bounded public rental facts and
 
 ## Change Log
 
+- 2026-10-12: An open-day public occupancy response includes confirmed bay bookings with a null range. The reviewed public-slot contract resolves that literal null through the freshly validated venue bay-to-range map and blocks all overlapping intervals, including other rental products. Missing ranges, unknown bays, conflicting ranges and the legacy contract remain rejected. The closed-day check alone did not exercise this shape; the positive open-day control found it. Deployment verification is recorded separately.
 - 2026-10-12: Reviewed public-slot metadata may retain slotIntervalStart 0 or 30 on the strictly thirty-minute grid. The official UI ignores that field for thirty-minute intervals; compare its exact reviewed value without shifting starts. Other grids remain rejected. Missing metadata defaults to the existing zero-offset contract. Local tests and live public diagnostics pass; this change is not yet production-verified.
 - 2026-10-09: Added the reviewed public-slot contract, exact selected-resource validation, and optional diagnostic venue identity. Preserved the collector version, research budgets, null-category diagnostic rejection and deployed proof gates.
 - 2026-10-06: Recorded verified public configuration/occupancy support and the unsuccessful homepage-only approach. Added a bounded owned research route to learn different public rental contracts while retaining exact-runtime monitoring gates.
