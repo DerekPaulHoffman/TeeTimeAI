@@ -151,6 +151,20 @@ describe("YourGolfBooking public simulator calendar", () => {
     await expect(fetchYourGolfBookingAvailability(selected, fetchImpl)).rejects.toMatchObject({ code: "INVALID_SOURCE" });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
+  it("preserves a reviewed inert offset on a 30-minute public slot grid", async () => {
+    const selected = { ...input, offering: { ...input.offering, providerMetadata: {
+      ...input.offering.providerMetadata as object, rentalContract: "PUBLIC_SLOT_V1", category: null,
+      maintenanceMode: false, slotIntervalStart: 30, bookingWindowDaysAhead: 14,
+      resourceIds: ["9224", "9225", "9226", "9227", "9228"] } } };
+    const html = config({ slotIntervalStart: 30 }, { category: null });
+    const result = await fetchYourGolfBookingAvailability(selected, responses([], html));
+    const legacy = await fetchYourGolfBookingAvailability(input, responses([], config()));
+    expect(result.slots.map(slot => slot.startsAt)).toEqual(legacy.slots.map(slot => slot.startsAt));
+    await expect(fetchYourGolfBookingAvailability({ ...selected, offering: { ...selected.offering,
+      providerMetadata: { ...selected.offering.providerMetadata, slotIntervalStart: 0 } } }, responses([], html))).rejects.toMatchObject({ code: "INVALID_SOURCE" });
+    await expect(fetchYourGolfBookingAvailability({ ...selected, offering: { ...selected.offering,
+      providerMetadata: { ...selected.offering.providerMetadata, slotIntervalStart: 15 } } }, responses([], html))).rejects.toMatchObject({ code: "INVALID_SOURCE" });
+  });
   it.each(["restricted-tail", "missing-link", "duplicate-id", "wrong-range", "unknown-category", "missing-category"])("validates every selected runtime resource and source value: %s", async change => {
     const state = JSON.parse(config().match(/<script[^>]*>([\s\S]*?)<\/script>/u)![1]);
     const published = state.props.pageProps.initialReduxState;

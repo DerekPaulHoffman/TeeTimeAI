@@ -149,6 +149,31 @@ describe("fresh hosted Acuity research handoff", () => {
   });
 });
 
+describe("official TeeSheet root handoff", () => {
+  const root = "https://oakwood.teesheet.ai/";
+  const receipt = { source: "official" as const, requestedUrl: officialUrl, sourceUrl: officialUrl,
+    sourceFingerprint: fingerprint, observedAt: now.toISOString(), collectorObservedAt: new Date(now.getTime() + 355).toISOString(),
+    httpStatus: 200, rendered: false, outcome: "READ" as const, requestId: "11111111-1111-4111-8111-111111111111",
+    publicReadEvidence: { sourceFingerprint: fingerprint, accessControlsObserved: true as const, accessControls: [], method: "HTTP" as const } };
+  const state = () => readSimulatorResearchState({ ...empty(), readCount: 1, history: [receipt],
+    links: [root], bookingLinks: [root], bookingLinkRoles: [{ url: root, observedAt: now.toISOString() }], linkBaseUrl: officialUrl }, fingerprint);
+  const follow = (value = state(), rest = {}) => select(value, { source: undefined, linkIndex: 1, bookingUrl: null, ...rest });
+  it("follows the observed official CTA with database receipt time while preserving raw collector time", () => {
+    expect(follow().url).toBe(root);
+    expect(state().history[0].collectorObservedAt).toBe(receipt.collectorObservedAt);
+  });
+  it("rejects unknown roots, missing roles, stale or wrong-source evidence and access gates", () => {
+    expect(() => follow({ ...state(), bookingLinkRoles: [] })).toThrow("handoff");
+    expect(() => follow(state(), { officialUrl: "https://unrelated.example.test" })).toThrow("handoff");
+    expect(() => follow(state(), { now: new Date(now.getTime() + 31 * 60_000) })).toThrow("fresh");
+    for (const url of ["https://oakwood.teesheet.ai.attacker.example/", "http://oakwood.teesheet.ai/", "https://oakwood.teesheet.ai/?checkout=1"]) {
+      expect(() => follow({ ...state(), links: [url], bookingLinks: [url], bookingLinkRoles: [{ url, observedAt: now.toISOString() }] })).toThrow();
+    }
+    expect(() => follow({ ...state(), history: [{ ...receipt, publicReadEvidence: { ...receipt.publicReadEvidence, accessControls: ["ACCOUNT_REQUIRED"] } }] })).toThrow("handoff");
+    expect(() => follow({ ...state(), readCount: 6 })).toThrow("budget");
+  });
+});
+
 describe("same-route research after an owned parser release", () => {
   const postRepairResearchBoundary = new Date("2026-10-06T19:55:00.125Z");
   const receipt = () => ({

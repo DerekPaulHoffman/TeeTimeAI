@@ -11,6 +11,15 @@ const acuityTenantHost = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.as\.me$/u;
 const acuitySchedulePath = /^\/schedule\/[a-zA-Z0-9]{4,40}$/u;
 const uschedulePath = /^\/([a-z][a-z0-9-]{2,62})\/booking$/u;
 
+export function teeSheetPublicTenant(sourceUrl: string) {
+  try {
+    const url = new URL(sourceUrl);
+    return url.protocol === "https:" && !url.port && !url.username && !url.password &&
+      url.pathname === "/" && !url.search && !url.hash
+      ? /^([a-z][a-z0-9-]{0,62})\.teesheet\.ai$/u.exec(url.hostname)?.[1] : undefined;
+  } catch { return undefined; }
+}
+
 export function uschedulePublicTenant(sourceUrl: string) {
   try {
     const url = new URL(sourceUrl);

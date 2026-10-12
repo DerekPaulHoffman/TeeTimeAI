@@ -963,6 +963,28 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(coreMocks.fetch).not.toHaveBeenCalled();
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
   });
+
+  it("keeps a completed official booking handoff when the collector clock leads database time", async () => {
+    const f = await fixture();
+    const root = "https://oakwood.teesheet.ai/";
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(Date.now() + 5_000));
+    try {
+      const collectorTime = new Date().toISOString();
+      const read = await lane.readSimulatorSupportSource({ ...f.owner, source: "official" }, {
+        fetch: vi.fn(async () => new Response(`<a href="${root}">Book Now</a>`, { headers: { "content-type": "text/html" } })),
+      });
+      if (!read.acquired) throw new Error("Official fixture read was busy.");
+      const claim = await lane.readSimulatorSupportClaim({ ...f.owner, revision: read.value.revision });
+      expect(claim.research.bookingLinks).toContain(root);
+      expect(claim.research.history[0]).toMatchObject({ collectorObservedAt: collectorTime,
+        observedAt: read.value.publicSource.observedAt, sourceFingerprint: f.fingerprint });
+      expect(Date.parse(read.value.publicSource.observedAt)).toBeLessThan(Date.parse(collectorTime));
+      expect(claim.researchGuide.suggestedReads).toContainEqual({ linkIndex: 1, rendered: false });
+      expect(coreMocks.fetch).not.toHaveBeenCalled();
+      expect(coreMocks.sendMatch).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
   it("persists only typed source-bound opaque aggregate rental facts under the owned tenant claim", async () => {
     const bookingUrl = "https://onegolfhaven.as.me/schedule/a66e63ac";
     const f = await fixture(15, false, bookingUrl);

@@ -45,6 +45,7 @@ export async function fetchYourGolfBookingAvailability(input: SimulatorAvailabil
   const selectedIds = slotContract ? list(metadata.resourceIds, 40) : null;
   if (slotContract && (!(metadata.category === null || metadata.category === "baytime") ||
       !(metadata.maintenanceMode === null || metadata.maintenanceMode === false) ||
+      ![0, 30].includes(Number(metadata.slotIntervalStart ?? 0)) ||
       !selectedIds?.length || selectedIds.some(value => typeof value !== "string" || !ID.test(value)) ||
       new Set(selectedIds).size !== selectedIds.length)) source("The reviewed public slot contract is incomplete");
   const horizonDays = slotContract ? integer(metadata.bookingWindowDaysAhead, 1, 365) : 14;
@@ -59,7 +60,10 @@ export async function fetchYourGolfBookingAvailability(input: SimulatorAvailabil
   if (!venue || String(integer(venue.id)) !== String(metadata.venueId) || venue.slug !== slug || venue.timezone !== input.timeZone || venue.status !== "live" || venue.maintenanceMode !== (slotContract ? metadata.maintenanceMode : false)) source("The public simulator venue changed identity or availability state");
   const rangeItems = list(ranges?.items, 20).map(record);
   const range = rangeItems.find(item => item && String(item.id) === String(metadata.rangeId));
-  if (!range || rangeItems.filter(item => item && String(item.id) === String(metadata.rangeId)).length !== 1 || range.venue !== venue.id || range.slug !== "bays" || range.bookable !== true || range.slotDuration !== 30 || range.slotInterval !== 30 || range.slotIntervalStart !== 0 || range.assumeOpen !== true || (!slotContract && range.bookingUi !== "standard") || range.customerBookingUi !== "slots" || list(range.openingTimes, 100).length !== 0) source("The public simulator range settings changed");
+  // The official UI applies slotIntervalStart only when slotInterval > 30.
+  // On this strictly 30-minute grid, a reviewed offset of 30 is inert. Keep
+  // its exact observed value fenced; do not shift or invent interval starts.
+  if (!range || rangeItems.filter(item => item && String(item.id) === String(metadata.rangeId)).length !== 1 || range.venue !== venue.id || range.slug !== "bays" || range.bookable !== true || range.slotDuration !== 30 || range.slotInterval !== 30 || range.slotIntervalStart !== (slotContract ? metadata.slotIntervalStart ?? 0 : 0) || range.assumeOpen !== true || (!slotContract && range.bookingUi !== "standard") || range.customerBookingUi !== "slots" || list(range.openingTimes, 100).length !== 0) source("The public simulator range settings changed");
   const observedHorizon = integer(range.maxBookAheadValue, 1, 365) *
     (range.maxBookAheadUnit === "day" ? 1 : range.maxBookAheadUnit === "week" ? 7 : 0);
   if (observedHorizon !== horizonDays || (!slotContract && (range.maxBookAheadValue !== 2 || range.maxBookAheadUnit !== "week"))) source("The reviewed simulator booking horizon changed");

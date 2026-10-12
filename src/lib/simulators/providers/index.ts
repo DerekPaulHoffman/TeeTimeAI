@@ -3,14 +3,18 @@ import { fetchGolfBookAvailability } from "./golfbook";
 import { fetchAcuitySimulatorAvailability } from "./acuity";
 import { fetchYourGolfBookingAvailability } from "./your-golf-booking";
 import { fetchUScheduleAvailability } from "./uschedule";
+import { fetchTeeSheetAvailability } from "./teesheet";
+import { fetchUpperHandAvailability } from "./upper-hand";
 import { SimulatorAvailabilityError, type SimulatorAvailabilityInput } from "./types";
 
 export type { SimulatorAvailabilityInput, SimulatorAvailabilityResult, SimulatorAvailabilitySlot, SimulatorProviderOffering } from "./types";
 export { SimulatorAvailabilityError } from "./types";
 
-export const RUNNABLE_SIMULATOR_PROVIDER_FAMILIES = ["GOLF_LOUNGE_18", "GOLFBOOK", "ACUITY", "YOUR_GOLF_BOOKING", "USCHEDULE"] as const;
+export const RUNNABLE_SIMULATOR_PROVIDER_FAMILIES = ["GOLF_LOUNGE_18", "GOLFBOOK", "ACUITY", "YOUR_GOLF_BOOKING", "USCHEDULE", "TEESHEET", "UPPER_HAND"] as const;
 
 export function fetchSimulatorAvailability(input: SimulatorAvailabilityInput, fetchImpl: typeof fetch = fetch) {
+  if (input.offering.providerFamilyKey === "TEESHEET") return fetchTeeSheetAvailability(input, fetchImpl);
+  if (input.offering.providerFamilyKey === "UPPER_HAND") return fetchUpperHandAvailability(input, fetchImpl);
   if (input.offering.providerFamilyKey === "GOLF_LOUNGE_18") {
     return fetchGolfLounge18Availability(input, fetchImpl);
   }

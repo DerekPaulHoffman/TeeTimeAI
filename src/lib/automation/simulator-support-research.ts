@@ -58,6 +58,7 @@ export type SimulatorConfigurationDiagnostic = {
   candidateMetadata?: {
     /** Validated on this exact document; absent on older receipts. */
     venueId?: string;
+    venueStatusState?: "LIVE" | "OTHER";
     candidateCount: number;
     candidatesTruncated: boolean;
     candidates: Array<{
@@ -285,7 +286,7 @@ function openingHoursFormat(value: string): "EMPTY" | "WEEKLY_OR_DATED" | "OTHER
 
 /** Optional research facts for a rejected public-looking rental, never a calendar or eligibility decision. */
 function rejectedRentalCandidateMetadata(
-  ranges: SimulatorPublicCalendar["ranges"], venueId: string, bays: Json, optionRows: unknown[],
+  ranges: SimulatorPublicCalendar["ranges"], venueId: string, status: string, bays: Json, optionRows: unknown[],
 ): SimulatorConfigurationDiagnostic["candidateMetadata"] {
   try {
     const machineToken = (value: unknown) => {
@@ -370,6 +371,7 @@ function rejectedRentalCandidateMetadata(
     }));
     return {
       venueId,
+      venueStatusState: status === "live" ? "LIVE" : "OTHER",
       candidateCount, candidatesTruncated: candidateCount > candidates.length, candidates,
       resourceCount: linkedResources.length, resourcesTruncated: linkedResources.length > resources.length, resources,
       rangeCount: referencedIds.length, rangesTruncated: referencedIds.length > projectedRanges.length, ranges: projectedRanges,
@@ -462,7 +464,7 @@ export function extractSimulatorPublicCalendar(html: string, sourceUrl: string):
       rejectedRentalOptions = excludedOptions;
       optionCount = optionRows.length;
       rejectedRentalOptionsTruncated = optionRows.length > excludedOptions.length;
-      candidateMetadata = rejectedRentalCandidateMetadata(ranges, venueId, bays, optionRows);
+      candidateMetadata = rejectedRentalCandidateMetadata(ranges, venueId, status, bays, optionRows);
       configurationError("CONFIG_NO_ELIGIBLE_RENTALS");
     }
     uniqueConfigurationRows(rentals);

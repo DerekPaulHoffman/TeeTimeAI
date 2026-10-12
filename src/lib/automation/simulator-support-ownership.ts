@@ -388,6 +388,12 @@ export async function readSimulatorSupportSource(input: Owner & { source?: Simul
     if (row.source.fingerprint !== before.value.sourceFingerprint) throw new Error("Simulator source changed during the public read.");
     const state = readSimulatorResearchState(row.audit.simulatorResearch, row.source.fingerprint);
     if (state.inFlight?.requestId !== before.value.requestId) throw new Error("The original simulator source research reservation changed.");
+    // The reservation and settlement both use the database clock. Local
+    // collector clocks can lead it by milliseconds; never use that clock to
+    // decide whether this owned, already-completed read happened in the future.
+    // Preserve the collector timestamp as diagnostic provenance.
+    const collectorObservedAt = read.observedAt;
+    read = { ...read, observedAt: now.toISOString() };
     const usableDocument = read.httpStatus >= 200 && read.httpStatus < 300;
     const roleEvidence = new Map<string, string>();
     const venueEvidence = new Map<string, string>();
@@ -416,7 +422,7 @@ export async function readSimulatorSupportSource(input: Owner & { source?: Simul
       linkBaseUrl: usableDocument ? read.url : state.linkBaseUrl,
       history: [...state.history, { source: before.value.source, requestedUrl: before.value.url, sourceUrl: read.url,
         sourceFingerprint: before.value.sourceFingerprint,
-        observedAt: read.observedAt, httpStatus: read.httpStatus, rendered: before.value.rendered, outcome,
+        observedAt: read.observedAt, collectorObservedAt, httpStatus: read.httpStatus, rendered: before.value.rendered, outcome,
         requestId: before.value.requestId, researchImplementationVersion: getSimulatorResearchImplementationVersion(before.value.url),
         ...(read.renderWarning ? { renderWarning: read.renderWarning } : {}),
         ...(read.configurationDiagnostic ? { configurationDiagnostic: read.configurationDiagnostic } : {}),

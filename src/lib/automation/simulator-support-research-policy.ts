@@ -1,10 +1,10 @@
 import { z } from "zod";
 import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { readSafeSimulatorSupportFailure, type SimulatorSupportFailure } from "./simulator-support-failure";
-import { isAcuityPublicResearchRoot, isSimulatorPublicConfigurationSource, knownSimulatorPublicConfigurationFamily, simulatorPublicConfigurationSchema } from "@/lib/simulators/providers/public-configuration";
+import { isAcuityPublicResearchRoot, isSimulatorPublicConfigurationSource, knownSimulatorPublicConfigurationFamily, simulatorPublicConfigurationSchema, teeSheetPublicTenant } from "@/lib/simulators/providers/public-configuration";
 
 export const SIMULATOR_RESEARCH_MAX_READS = 6;
-export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-official-venue-links-v5";
+export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-official-venue-links-v6";
 export function getSimulatorResearchImplementationVersion(url: string) {
   return knownSimulatorPublicConfigurationFamily(url) ? "public-calendar-known-readers-official-venue-links-v4" : SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION;
 }
@@ -18,6 +18,7 @@ const safeFailure = z.custom<SimulatorSupportFailure>(value => readSafeSimulator
 const publicNumericId = z.string().regex(/^[1-9][0-9]{0,9}$/u).refine(value => Number(value) <= 1_000_000_000);
 const candidateMetadata = z.object({
   venueId: publicNumericId.optional(),
+  venueStatusState: z.enum(["LIVE", "OTHER"]).optional(),
   candidateCount: z.number().int().min(1).max(100),
   candidatesTruncated: z.boolean(),
   candidates: z.array(z.object({
@@ -142,6 +143,7 @@ const observation = z.object({
   source: researchSource, requestedUrl: safeUrl, sourceUrl: safeUrl,
   sourceFingerprint: z.string().regex(/^[a-f0-9]{64}$/iu).optional(),
   observedAt: z.string().datetime(), httpStatus: z.number().int().min(0).max(599), rendered: z.boolean(),
+  collectorObservedAt: z.string().datetime().optional(),
   outcome: z.enum(["READ", "NETWORK_FAILED", "CAPACITY_BUSY", "HARD_FAILED"]),
   requestId: z.string().uuid().optional(), failure: safeFailure.optional(),
   publicReadEvidence: publicReadEvidence.optional(),
@@ -362,11 +364,20 @@ export function selectSimulatorResearchTarget(input: {
       previous?.sourceFingerprint === state.sourceFingerprint &&
       previous.outcome === "READ" && previous.publicReadEvidence?.sourceFingerprint === state.sourceFingerprint &&
       previous.publicReadEvidence.accessControlsObserved === true && !previous.publicReadEvidence.accessControls.length);
+    // An exact booking CTA published by the official venue may point to the
+    // provider homepage. Keep current-source, access and freshness fences.
+    const officialRootHandoffRole = Boolean(official && teeSheetPublicTenant(url) && new URL(url).pathname === "/" &&
+      !new URL(url).search && !new URL(url).hash &&
+      new URL(state.linkBaseUrl!).origin === new URL(official).origin &&
+      state.bookingLinkRoles?.some(role => role.url === url && role.observedAt === previous?.observedAt) &&
+      previous?.sourceFingerprint === state.sourceFingerprint &&
+      previous.publicReadEvidence?.sourceFingerprint === state.sourceFingerprint &&
+      previous.publicReadEvidence.accessControlsObserved === true && !previous.publicReadEvidence.accessControls.length);
     if (!previous || previous.outcome !== "READ" || previous.httpStatus < 200 || previous.httpStatus >= 300 ||
         new Date(previous.observedAt).getTime() > input.now.getTime() ||
         new Date(previous.observedAt).getTime() < input.now.getTime() - 30 * 60_000 ||
         new URL(url).origin !== new URL(state.linkBaseUrl!).origin &&
-          !(isFreshBookingLink(state, url, input.now) && (/\b(?:book(?:ing)?|reserv(?:e|ation)|appointments?|calendar)\b/i.test(new URL(url).pathname) || hostedRootRole) ||
+          !(isFreshBookingLink(state, url, input.now) && (/\b(?:book(?:ing)?|reserv(?:e|ation)|appointments?|calendar)\b/i.test(new URL(url).pathname) || hostedRootRole || officialRootHandoffRole) ||
             input.bookingUrl && new URL(url).hostname === new URL(input.bookingUrl).hostname || venueRole)) {
       throw new Error("The selected link is not a fresh same-site page or official booking handoff.");
     }

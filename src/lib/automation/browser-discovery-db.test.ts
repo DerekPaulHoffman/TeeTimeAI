@@ -220,6 +220,7 @@ function providerDiscoveryFor(courseId: string) {
 describe("browser discovery persistence", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockedPrisma.course.findUnique.mockReset();
     mockedPrisma.$transaction.mockImplementation(async (worker) =>
       worker(mockedPrisma as never)
     );
@@ -1575,6 +1576,7 @@ describe("browser discovery persistence", () => {
 
   it("applies a high-confidence phone-only finding without adapter metadata", async () => {
     const updatedAt = new Date("2026-07-16T12:00:00.000Z");
+    const reviewAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
     mockedPrisma.course.findUnique
       .mockResolvedValueOnce({
         providerFamilyKey: "fairviewfarmgc.com",
@@ -1595,7 +1597,7 @@ describe("browser discovery persistence", () => {
       bookingPhone: "(860) 689-1000",
       automationEligibility: "BLOCKED",
       automationReason: "NO_ONLINE_BOOKING",
-      intelligenceReviewAt: "2026-10-10T00:00:00.000Z",
+      intelligenceReviewAt: reviewAt,
       sourceUrl: "https://fairviewfarmgc.com/",
       confidence: 1,
       evidence: {
@@ -1618,7 +1620,7 @@ describe("browser discovery persistence", () => {
         automationReason: "NO_ONLINE_BOOKING",
         policyNotes: undefined,
         intelligenceVerifiedAt: expect.any(Date),
-        intelligenceReviewAt: new Date("2026-10-10T00:00:00.000Z"),
+        intelligenceReviewAt: reviewAt,
         intelligenceConfidence: 1
       }
     });
