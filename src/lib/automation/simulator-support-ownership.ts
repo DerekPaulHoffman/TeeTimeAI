@@ -19,6 +19,7 @@ import { classifySimulatorSupportFailure, type SimulatorSupportFailure } from ".
 import { validateSimulatorEngineeringAuthority } from "./simulator-support-incidents";
 import { readSimulatorEngineeringVerificationState } from "./simulator-support-engineering-verification-policy";
 import { getSimulatorPostRepairResearchBoundary, isProtectedSimulatorResearchDenial, selectRecoveredSimulatorResearchRoutes } from "./simulator-support-research-recovery";
+import { buildSimulatorResearchConfigurationCandidate } from "./simulator-research-configuration-candidate";
 
 type Owner = { assignmentRef: string; ownerThreadId: string; token: string; revision: number };
 const acquiredResearchFailureCodes = new Set([
@@ -269,12 +270,13 @@ async function queueOwnedSourceRechecks(tx: Prisma.TransactionClient, row: Await
 
 export async function configureSimulatorSupportOffering(input: Owner & { manifest: unknown; apply: boolean; repair?: boolean;
   expectedFingerprint: string; expectedOfferingRevision: number }) {
-  const rows = parseSimulatorOfferingManifest(input.manifest);
-  if (rows.length !== 1) throw new Error("Owned simulator configuration accepts exactly one offering.");
-  const facts = rows[0];
-  if (facts.publicAccessStatus !== "PUBLIC" || !facts.active || !facts.supportedDurationsMinutes.includes(60) ||
-      [facts.website, facts.bookingUrl, facts.evidenceUrl].some(url => !getSafeCustomerBookingUrl(url))) throw new Error("Simulator configuration requires reviewed public one-hour rental evidence and safe public URLs.");
-  return withTransition(async (tx, now) => {
+  const manifest = structuredClone(input.manifest);
+  const configure = (apply: boolean) => withTransition(async (tx, now) => {
+    const rows = parseSimulatorOfferingManifest(manifest, { verificationClock: now });
+    if (rows.length !== 1) throw new Error("Owned simulator configuration accepts exactly one offering.");
+    const facts = rows[0];
+    if (facts.publicAccessStatus !== "PUBLIC" || !facts.active || !facts.supportedDurationsMinutes.includes(60) ||
+        [facts.website, facts.bookingUrl, facts.evidenceUrl].some(url => !getSafeCustomerBookingUrl(url))) throw new Error("Simulator configuration requires reviewed public one-hour rental evidence and safe public URLs.");
     const row = await loadOwned(tx, input, now);
     const codeRepair = row.claim.releaseSha && row.claim.phase === "IMPLEMENTING" &&
       Boolean((row.audit as CourseDispatchAudit & { simulatorRepairPending?: unknown }).simulatorRepairPending);
@@ -287,7 +289,7 @@ export async function configureSimulatorSupportOffering(input: Owner & { manifes
         new Date(facts.verifiedAt) > now || new Date(facts.verifiedAt) < new Date(Math.max(Date.parse(row.claim.claimedAt), now.getTime() - 30 * 60_000)) ||
         (row.source.offering.observationToken && row.source.offering.observationExpiresAt && row.source.offering.observationExpiresAt > now) ||
         (venue.website && new URL(facts.website).hostname !== new URL(venue.website).hostname)) throw new Error("Simulator configuration does not match the exact owned venue, source revision or official site.");
-    if (!input.apply) return { mode: "dry-run" as const, offeringId: row.source.offering.id, expectedFingerprint: row.source.fingerprint, expectedOfferingRevision: row.source.offering.monitoringRevision, facts };
+    if (!apply) return { mode: "dry-run" as const, offeringId: row.source.offering.id, expectedFingerprint: row.source.fingerprint, expectedOfferingRevision: row.source.offering.monitoringRevision, facts };
     const updated = await tx.courseOffering.update({ where: { id: row.source.offering.id }, data: {
       active: true, publicAccessStatus: "PUBLIC", bookingUrl: facts.bookingUrl, evidenceUrl: facts.evidenceUrl, verifiedAt: new Date(facts.verifiedAt),
       providerFamilyKey: facts.providerFamilyKey ?? null, providerMetadata: facts.providerMetadata ?? Prisma.DbNull,
@@ -306,6 +308,25 @@ export async function configureSimulatorSupportOffering(input: Owner & { manifes
     }] } : undefined;
     return { mode: "applied" as const, ...await saveClaim(tx, row, now, changes, undefined, auditChanges),
       sourceFingerprint: getSimulatorOfferingSourceFingerprint(updated), offeringRevision: updated.monitoringRevision, adoptionRequired: true };
+  });
+  if (!input.apply) return configure(false);
+  // Every owned mutation validates these same parsed facts in a separate
+  // no-write transition, then reacquires all source/revision/lease guards.
+  const reviewed = await configure(false);
+  if (!reviewed.acquired) return reviewed;
+  if (reviewed.value.mode !== "dry-run") throw new Error("Simulator configuration dry-run result is invalid.");
+  const applied = await configure(true);
+  return applied.acquired ? { ...applied, value: { ...applied.value, configurationDryRunVerified: true as const } } : applied;
+}
+
+export function readSimulatorSupportConfigurationCandidate(input: Owner) {
+  return withTransition(async (tx, now) => {
+    const row = await loadOwned(tx, input, now);
+    const research = readSimulatorResearchState(row.audit.simulatorResearch, row.source.fingerprint);
+    const candidate = buildSimulatorResearchConfigurationCandidate({ course: row.source.offering.course, research,
+      sourceFingerprint: row.source.fingerprint, offeringRevision: row.source.offering.monitoringRevision, claimedAt: row.claim.claimedAt, now });
+    if (!candidate) throw new Error("Fresh owned simulator configuration candidate is unavailable.");
+    return candidate;
   });
 }
 
@@ -439,7 +460,10 @@ export async function readSimulatorSupportSource(input: Owner & { source?: Simul
         ...(knownFailure ? { failure: knownFailure } : {}) }] };
     const saved = await saveClaim(tx, row, now);
     await tx.automationRun.update({ where: { id: row.runId }, data: { audit: { ...row.audit, simulatorClaim: { ...row.claim, revision: saved.revision, leaseExpiresAt: saved.leaseExpiresAt }, simulatorResearch: research } as unknown as Prisma.InputJsonValue } });
-    return { ...saved, publicSource: read, researchOutcome: outcome, ...(failureCode ? { failureCode } : {}), readsRemaining: 6 - research.readCount };
+    const configurationCandidate = buildSimulatorResearchConfigurationCandidate({ course: row.source.offering.course, research,
+      sourceFingerprint: row.source.fingerprint, offeringRevision: row.source.offering.monitoringRevision, claimedAt: row.claim.claimedAt, now });
+    return { ...saved, publicSource: read, researchOutcome: outcome, ...(failureCode ? { failureCode } : {}),
+      ...(configurationCandidate ? { configurationCandidate } : {}), readsRemaining: 6 - research.readCount };
   });
 }
 

@@ -9,6 +9,7 @@ import { projectAcuityPublicConfiguration } from "@/lib/simulators/providers/acu
 import { projectGolfBookPublicConfiguration } from "@/lib/simulators/providers/golfbook";
 import { projectUSchedulePublicConfiguration } from "@/lib/simulators/providers/uschedule";
 import type { SimulatorPublicConfiguration } from "@/lib/simulators/providers/public-configuration";
+import { collectSimulatorPublicApiConfiguration, projectYourGolfBookingReviewedSlotConfiguration, type PublicApiConfigurationDiagnostic } from "./simulator-public-api-configuration";
 import { tagSimulatorResearchFailure, tagSimulatorResearchResourceKind, type SimulatorResearchFailurePhase,
   type SimulatorResearchResourceKind } from "./simulator-support-failure";
 
@@ -38,7 +39,10 @@ export type SimulatorPublicCalendar = {
 };
 export type SimulatorConfigurationDiagnostic = {
   phase: "CONFIG" | "VENUE" | "RANGES" | "RENTALS" | "RESOURCES";
-  reason: "CONFIG_SHAPE" | "CONFIG_NUMBER" | "CONFIG_STRING" | "CONFIG_BOOLEAN" | "CONFIG_ARRAY" | "CONFIG_IDENTITY" | "CONFIG_NO_ELIGIBLE_RENTALS";
+  reason: "CONFIG_SHAPE" | "CONFIG_NUMBER" | "CONFIG_STRING" | "CONFIG_BOOLEAN" | "CONFIG_ARRAY" | "CONFIG_IDENTITY" | "CONFIG_NO_ELIGIBLE_RENTALS" | PublicApiConfigurationDiagnostic["reason"];
+  publicProviderFamily?: PublicApiConfigurationDiagnostic["publicProviderFamily"];
+  httpStatus?: number;
+  contractField?: PublicApiConfigurationDiagnostic["contractField"];
   maintenanceModeState?: "FALSE" | "TRUE" | "NULL" | "MISSING" | "INVALID";
   field?: {
     path: "props" | "props.pageProps" | "initialReduxState" | "venue" | "ranges" | "ranges.items" | "ranges.items[]" | "bays" | "bays.bayOptions" | "bays.bayOptions[]" | "bays.bayOptions[].restrictions" | "bays.bayOptions[].appliedRequiredPerks" | "bays.items" | "bays.items[]";
@@ -515,14 +519,15 @@ function resultFromBody(requestedUrl: string, url: string, status: number, conte
     summary.links = [...new Set([bays, ...summary.links])].slice(0, 30);
     bookingLinks.unshift(bays);
   }
+  const calendar = extractSimulatorPublicCalendar(html, url);
   const publicConfiguration = projectAcuityPublicConfiguration(html, url) ?? projectGolfBookPublicConfiguration(html, url) ??
-    projectUSchedulePublicConfiguration(html, url);
+    projectUSchedulePublicConfiguration(html, url) ?? projectYourGolfBookingReviewedSlotConfiguration(calendar.configurationDiagnostic, url);
   const retainedLinks = new Set(summary.links);
   const retainedBookingLinks = [...new Set(bookingLinks)].filter(link => retainedLinks.has(link));
   const retainedVenueLinks = venueLinks.filter(link => retainedLinks.has(link));
   return { ...base, ...summary, ...(retainedBookingLinks.length ? { bookingLinks: retainedBookingLinks } : {}),
     ...(retainedVenueLinks.length ? { venueLinks: retainedVenueLinks } : {}),
-    ...(publicConfiguration ? { publicConfiguration } : {}), ...extractSimulatorPublicCalendar(html, url) };
+    ...(publicConfiguration ? { publicConfiguration } : {}), ...calendar };
 }
 
 function publishedBootstrapBookingRoles(html: string) {
@@ -760,7 +765,14 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
       if (readResult.location) { if (redirects === 4) throw new Error("SIMULATOR_RESEARCH_REDIRECT_LIMIT"); url = readResult.location; continue; }
       const result = resultFromBody(requestedUrl, readResult.url, readResult.status, readResult.contentType, readResult.body, now());
       const controls = /^(?:text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(readResult.contentType) ? detectSimulatorResearchAccessControls(readResult.body.toString("utf8")) : [];
-      return controls.length ? { ...result, text: "", links: [], bookingLinks: undefined, calendar: undefined, publicConfiguration: undefined, jsonShape: undefined, configurationDiagnostic: undefined, accessControls: controls } : result;
+      if (controls.length) return { ...result, text: "", links: [], bookingLinks: undefined, calendar: undefined, publicConfiguration: undefined, jsonShape: undefined, configurationDiagnostic: undefined, accessControls: controls };
+      if (readResult.status < 200 || readResult.status >= 300 || !/^(?:text\/html|application\/xhtml\+xml)(?:;|$)/iu.test(readResult.contentType)) return result;
+      let companionRequests = 0;
+      const configuration = await collectSimulatorPublicApiConfiguration(readResult.url, async (target, headers) => {
+        companionRequests += 1;
+        return read(target, "GET", headers, target, destination => destination.href === target, 600_000);
+      });
+      return { ...result, ...configuration, ...(companionRequests ? { admittedRequests: redirects + 1 + companionRequests } : {}) };
     }
     throw new Error("SIMULATOR_RESEARCH_REDIRECT_LIMIT");
   }

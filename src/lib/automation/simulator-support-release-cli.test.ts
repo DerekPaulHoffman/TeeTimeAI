@@ -26,13 +26,21 @@ describe("private simulator source CLI selection", () => {
     fetchImpl.mockResolvedValue(new Response(JSON.stringify({ code: "private_body_with_token", error: "private body" }), { status: 503 }));
     await expect(requestSimulatorEngineeringVerification({ assignmentRef: "owned-assignment", token: "owned-token", revision: 3 }, { apiKey: "private_test_key", fetchImpl })).rejects.toMatchObject({ code: "VERIFICATION_FAILED", httpStatus: 503 });
   });
-  it("requires an explicit applied reviewed configuration for metadata repair", () => {
+  it("permits a separate metadata-repair dry run and requires explicit apply for writes", () => {
     expect(readSimulatorSupportArguments(["configure", ...ownerArgs, "--manifest", "C:/private/manifest.json",
       "--repair", "--apply"])).toMatchObject({ command: "configure", repair: true, apply: true });
-    expect(() => readSimulatorSupportArguments(["configure", ...ownerArgs, "--manifest", "C:/private/manifest.json",
-      "--repair"])).toThrow();
+    expect(readSimulatorSupportArguments(["configure", ...ownerArgs, "--manifest", "C:/private/manifest.json",
+      "--repair"])).toMatchObject({ command: "configure", repair: true, apply: false });
     expect(() => readSimulatorSupportArguments(["classify", ...ownerArgs, "--manifest", "C:/private/manifest.json",
       "--repair", "--apply"])).toThrow();
+  });
+  it("derives configuration only from current owned research and excludes an alternative manifest or caller URL", () => {
+    expect(readSimulatorSupportArguments(["configure", ...ownerArgs, "--from-research"])).toMatchObject({fromResearch:true,apply:false});
+    expect(readSimulatorSupportArguments(["configure", ...ownerArgs, "--from-research", "--apply"])).toMatchObject({fromResearch:true,apply:true});
+    for(const args of [["configure",...ownerArgs,"--from-research","--manifest","private.json"],
+      ["configure",...ownerArgs,"--from-research","--url","https://arbitrary.example"],
+      ["source-read",...ownerArgs,"--source","booking","--from-research"],
+      ["configure",...ownerArgs,"--from-research","--from-research"]]) expect(()=>readSimulatorSupportArguments(args)).toThrow();
   });
   it("accepts the derived-root selector with only the original owned read options", () => {
     expect(readSimulatorSupportArguments(["source-read", ...ownerArgs, "--source", "booking-root"])).toMatchObject({

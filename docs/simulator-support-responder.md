@@ -35,6 +35,16 @@ A stopped research-only chat is not permanent ownership.
 
 ## Durable execution and research
 
+The source-bound public configuration lane supports TeeSheet tenant pages,
+Upper Hand customer catalogs/details and the reviewed YourGolfBooking public
+slot contract. The collector retains a typed configuration or a fixed contract
+diagnostic; it does not persist raw API payloads. Owned workers can dry-run then
+apply `configure --from-research` without a parent-prepared facts packet. The
+newest complete observation, database clock, exact source and original ownership
+remain authoritative. This is configuration discovery, not monitoring proof;
+normal release, adoption and two distinct deployed verification checks still
+govern closeout. See the assigned worker contract for the exact command flow.
+
 Unclaimed startup and binding authority expire after fifteen minutes or a base
 change. Database-time guards independently reject late binding and claiming.
 A settled research-only hard failure closes that execution and schedules retry;

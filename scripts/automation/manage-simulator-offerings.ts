@@ -60,8 +60,11 @@ const offeringManifestSchema = z.object({
 
 export type SimulatorOfferingManifest = z.infer<typeof offeringManifestSchema>;
 
-export function parseSimulatorOfferingManifest(value: unknown): SimulatorOfferingManifest[] {
-  const rows = z.array(offeringManifestSchema).min(1).max(50).parse(Array.isArray(value) ? value : [value]);
+export function parseSimulatorOfferingManifest(value: unknown, options?: { verificationClock: Date }): SimulatorOfferingManifest[] {
+  if (options && !Number.isFinite(options.verificationClock.getTime())) throw new Error("Verification clock is invalid.");
+  const schema = options ? offeringManifestSchema.safeExtend({ verifiedAt: z.string().datetime().refine(
+    value => Date.parse(value) <= options.verificationClock.getTime(), "Verification cannot be in the future") }) : offeringManifestSchema;
+  const rows = z.array(schema).min(1).max(50).parse(Array.isArray(value) ? value : [value]);
   if (new Set(rows.map((row) => row.googlePlaceId)).size !== rows.length) {
     throw new Error("A manifest must contain each exact Google Place ID only once");
   }

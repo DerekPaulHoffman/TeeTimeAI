@@ -1,11 +1,13 @@
 import { z } from "zod";
 import { getSafeCustomerBookingUrl } from "@/lib/email/customer-booking-url";
 import { readSafeSimulatorSupportFailure, type SimulatorSupportFailure } from "./simulator-support-failure";
-import { isAcuityPublicResearchRoot, isSimulatorPublicConfigurationSource, knownSimulatorPublicConfigurationFamily, simulatorPublicConfigurationSchema, teeSheetPublicTenant } from "@/lib/simulators/providers/public-configuration";
+import { isAcuityPublicResearchRoot, isSimulatorPublicConfigurationSource, knownSimulatorPublicConfigurationFamily, simulatorPublicConfigurationSchema, teeSheetPublicTenant, upperHandPublicSource } from "@/lib/simulators/providers/public-configuration";
 
 export const SIMULATOR_RESEARCH_MAX_READS = 6;
 export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-official-venue-links-v6";
 export function getSimulatorResearchImplementationVersion(url: string) {
+  const family = knownSimulatorPublicConfigurationFamily(url);
+  if (family === "TEESHEET" || family === "UPPER_HAND" || family === "YOUR_GOLF_BOOKING") return "public-calendar-provider-api-configuration-v1";
   return knownSimulatorPublicConfigurationFamily(url) ? "public-calendar-known-readers-official-venue-links-v4" : SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION;
 }
 export const SIMULATOR_RESEARCH_SOURCE_NAMES = ["official", "booking", "booking-root", "evidence"] as const;
@@ -65,7 +67,11 @@ const candidateMetadata = z.object({
 });
 const configurationDiagnostic = z.object({
   phase: z.enum(["CONFIG", "VENUE", "RANGES", "RENTALS", "RESOURCES"]),
-  reason: z.enum(["CONFIG_SHAPE", "CONFIG_NUMBER", "CONFIG_STRING", "CONFIG_BOOLEAN", "CONFIG_ARRAY", "CONFIG_IDENTITY", "CONFIG_NO_ELIGIBLE_RENTALS"]),
+  reason: z.enum(["CONFIG_SHAPE", "CONFIG_NUMBER", "CONFIG_STRING", "CONFIG_BOOLEAN", "CONFIG_ARRAY", "CONFIG_IDENTITY", "CONFIG_NO_ELIGIBLE_RENTALS",
+    "PUBLIC_PROVIDER_HTTP_ERROR", "PUBLIC_PROVIDER_CONFIG_REJECTED", "PUBLIC_PROVIDER_CATALOG_AMBIGUOUS", "PUBLIC_PROVIDER_NO_ONE_HOUR_RENTAL"]),
+  publicProviderFamily: z.enum(["TEESHEET", "UPPER_HAND"]).optional(),
+  httpStatus: z.number().int().min(100).max(599).optional(),
+  contractField: z.enum(["SETTINGS", "CATALOG", "RENTAL_IDENTITY", "PUBLIC_ACCESS", "DURATION", "RESOURCE_IDENTITY"]).optional(),
   maintenanceModeState: z.enum(["FALSE", "TRUE", "NULL", "MISSING", "INVALID"]).optional(),
   field: z.object({
     path: z.enum(["props", "props.pageProps", "initialReduxState", "venue", "ranges", "ranges.items", "ranges.items[]", "bays", "bays.bayOptions", "bays.bayOptions[]", "bays.bayOptions[].restrictions", "bays.bayOptions[].appliedRequiredPerks", "bays.items", "bays.items[]"]),
@@ -108,7 +114,12 @@ const configurationDiagnostic = z.object({
         retainedIds.every((id, index) => id !== undefined && id === projectedIds[index]);
     })())) :
   entry.rejectedRentalOptions === undefined && entry.optionCount === undefined &&
-    entry.rejectedRentalOptionsTruncated === undefined && entry.candidateMetadata === undefined);
+    entry.rejectedRentalOptionsTruncated === undefined && entry.candidateMetadata === undefined)
+  .refine(entry => entry.reason.startsWith("PUBLIC_PROVIDER_") ? entry.phase === "CONFIG" && entry.publicProviderFamily !== undefined &&
+    entry.field === undefined && entry.maintenanceModeState === undefined && (entry.reason === "PUBLIC_PROVIDER_HTTP_ERROR"
+      ? entry.httpStatus !== undefined && entry.contractField === undefined
+      : entry.httpStatus === undefined && entry.contractField !== undefined)
+    : entry.publicProviderFamily === undefined && entry.httpStatus === undefined && entry.contractField === undefined);
 const renderWarning = z.enum(["SECONDARY_REQUEST_BUDGET_EXHAUSTED", "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED", "SECONDARY_STYLESHEET_URL_REJECTED", "MAIN_DOCUMENT_HTTP_ERROR"]);
 const bodyLimitDiagnostic = z.object({
   resourceKind: z.enum(["SECONDARY_SCRIPT", "SECONDARY_STYLESHEET"]),
@@ -366,8 +377,7 @@ export function selectSimulatorResearchTarget(input: {
       previous.publicReadEvidence.accessControlsObserved === true && !previous.publicReadEvidence.accessControls.length);
     // An exact booking CTA published by the official venue may point to the
     // provider homepage. Keep current-source, access and freshness fences.
-    const officialRootHandoffRole = Boolean(official && teeSheetPublicTenant(url) && new URL(url).pathname === "/" &&
-      !new URL(url).search && !new URL(url).hash &&
+    const officialRootHandoffRole = Boolean(official && (teeSheetPublicTenant(url) || upperHandPublicSource(url)) &&
       new URL(state.linkBaseUrl!).origin === new URL(official).origin &&
       state.bookingLinkRoles?.some(role => role.url === url && role.observedAt === previous?.observedAt) &&
       previous?.sourceFingerprint === state.sourceFingerprint &&
@@ -474,7 +484,9 @@ export function getSimulatorResearchRetryGuide(input: {
   if (state.readCount >= SIMULATOR_RESEARCH_MAX_READS) return result(null, true, "READ_BUDGET_EXHAUSTED");
   const recognizedNetwork = latest?.outcome === "NETWORK_FAILED" && latest.httpStatus === 0 && latest.requestId &&
     latest.failure?.stage === "PUBLIC_READ" && latest.failure.category === "NETWORK" && readSafeSimulatorSupportFailure(latest.failure);
-  if (latest?.outcome === "CAPACITY_BUSY" || latest?.httpStatus === 429 || recognizedNetwork ||
+  const companionBackoff = latest?.configurationDiagnostic?.reason === "PUBLIC_PROVIDER_HTTP_ERROR" &&
+    (latest.configurationDiagnostic.httpStatus === 429 || (latest.configurationDiagnostic.httpStatus ?? 0) >= 500);
+  if (latest?.outcome === "CAPACITY_BUSY" || latest?.httpStatus === 429 || recognizedNetwork || companionBackoff ||
       latest?.outcome === "READ" && latest.httpStatus >= 500 && latest.httpStatus <= 599) return result(null, true, "PROVIDER_BACKOFF");
   if (researchGuide.suggestedReads.length === 0) return result(null, true, "NO_ALLOWED_RESEARCH_ROUTES");
   const official = getSafeCustomerBookingUrl(input.officialUrl);

@@ -20,6 +20,25 @@ export function teeSheetPublicTenant(sourceUrl: string) {
   } catch { return undefined; }
 }
 
+/** Canonical signed-out catalog/detail routes. Purchase/account paths never fit. */
+export function upperHandPublicSource(sourceUrl: string) {
+  try {
+    const url = new URL(sourceUrl);
+    if (url.origin !== "https://app.upperhand.io" || url.username || url.password || url.search || url.hash) return;
+    const route = /^(\/customers\/([1-9]\d{0,9})-[a-z0-9-]+)\/events(?:\/([1-9]\d{0,9})-[a-z0-9-]+)?$/u.exec(url.pathname);
+    return route ? { customerId: route[2], customerPath: route[1], ...(route[3] ? { eventId: route[3] } : {}) } : undefined;
+  } catch { return undefined; }
+}
+
+export function yourGolfBookingPublicSource(sourceUrl: string) {
+  try {
+    const url = new URL(sourceUrl);
+    if (url.protocol !== "https:" || url.port || url.username || url.password || url.search || url.hash ||
+      !["booking.trackmangolf.com", "yourgolfbooking.com"].includes(url.hostname)) return;
+    return /^\/venues\/([a-z0-9]+(?:-[a-z0-9]+)*)\/booking\/bays$/u.exec(url.pathname)?.[1];
+  } catch { return undefined; }
+}
+
 export function uschedulePublicTenant(sourceUrl: string) {
   try {
     const url = new URL(sourceUrl);
@@ -41,7 +60,10 @@ function validDate(value: string) {
 }
 
 /** Exact source contexts understood by the two existing public readers. */
-export function knownSimulatorPublicConfigurationFamily(sourceUrl: string): "ACUITY" | "GOLFBOOK" | "USCHEDULE" | undefined {
+export function knownSimulatorPublicConfigurationFamily(sourceUrl: string): "ACUITY" | "GOLFBOOK" | "USCHEDULE" | "TEESHEET" | "UPPER_HAND" | "YOUR_GOLF_BOOKING" | undefined {
+  if (teeSheetPublicTenant(sourceUrl)) return "TEESHEET";
+  if (upperHandPublicSource(sourceUrl)) return "UPPER_HAND";
+  if (yourGolfBookingPublicSource(sourceUrl)) return "YOUR_GOLF_BOOKING";
   if (uschedulePublicTenant(sourceUrl)) return "USCHEDULE";
   try {
     const url = new URL(sourceUrl);
@@ -78,6 +100,24 @@ export const simulatorPublicConfigurationSchema = z.discriminatedUnion("family",
   }).strict().refine(value => value.maxDurationMinutes >= value.minDurationMinutes),
   z.object({ family: z.literal("USCHEDULE"), tenant: z.string().regex(/^[a-z][a-z0-9-]{2,62}$/u),
     serviceId: publicId, durationMinutes: z.literal(60), availabilityKind: z.literal("OPAQUE_POOLED") }).strict(),
+  z.object({ family: z.literal("TEESHEET"), tenant: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/u),
+    durationMinutes: z.literal(60), minDurationMinutes: z.number().int().min(1).max(60),
+    maxDurationMinutes: z.number().int().min(60).max(1440), incrementMinutes: z.number().int().min(1).max(60),
+    bookingWindowDaysAhead: z.number().int().min(1).max(365).nullable(), maxPartySize: z.null(),
+  }).strict().refine(value => 60 % value.incrementMinutes === 0),
+  z.object({ family: z.literal("UPPER_HAND"), customerId: publicId, eventId: publicId,
+    bookingUrl: z.string().refine(value => Boolean(upperHandPublicSource(value)?.eventId)),
+    durationMinutes: z.literal(60), resourceIds: uniqueIds, maxPartySize: z.null(),
+  }).strict().refine(value => {
+    const source = upperHandPublicSource(value.bookingUrl);
+    return source?.customerId === value.customerId && source.eventId === value.eventId;
+  }),
+  z.object({ family: z.literal("YOUR_GOLF_BOOKING"), venueSlug: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/u).max(100),
+    venueId: publicId, rangeId: publicId, publicOptionId: publicId, resourceIds: uniqueIds,
+    durationMinutes: z.literal(60), maxPartySize: z.number().int().min(1).max(8).nullable(),
+    rentalContract: z.literal("PUBLIC_SLOT_V1"), category: z.null(), maintenanceMode: z.boolean().nullable(),
+    slotIntervalStart: z.union([z.literal(0), z.literal(30)]), bookingWindowDaysAhead: z.number().int().min(1).max(365),
+  }).strict(),
 ]);
 
 export type SimulatorPublicConfiguration = z.infer<typeof simulatorPublicConfigurationSchema>;
@@ -90,5 +130,13 @@ export function isSimulatorPublicConfigurationSource(configuration: SimulatorPub
   const url = new URL(sourceUrl);
   if (configuration.family === "ACUITY") return configuration.ownerKey === url.pathname.split("/").at(-1);
   if (configuration.family === "USCHEDULE") return configuration.tenant === uschedulePublicTenant(sourceUrl);
+  if (configuration.family === "TEESHEET") return configuration.tenant === teeSheetPublicTenant(sourceUrl);
+  if (configuration.family === "YOUR_GOLF_BOOKING") return configuration.venueSlug === yourGolfBookingPublicSource(sourceUrl);
+  if (configuration.family === "UPPER_HAND") {
+    const source = upperHandPublicSource(sourceUrl);
+    const booking = upperHandPublicSource(configuration.bookingUrl);
+    return Boolean(source && booking && source.customerId === configuration.customerId &&
+      source.customerPath === booking.customerPath && (!source.eventId || source.eventId === configuration.eventId));
+  }
   return url.pathname !== "/bookingsheet.php" || configuration.date === url.searchParams.get("date");
 }

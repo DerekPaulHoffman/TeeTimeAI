@@ -6,7 +6,8 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
 import { createSimulatorSupportIntentDigest, SIMULATOR_SUPPORT_SOURCE_SELECT } from "./simulator-support-policy";
-import { SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION } from "./simulator-support-research-policy";
+import { SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION, getSimulatorResearchImplementationVersion } from "./simulator-support-research-policy";
+import { publicSimulatorFixture, type PublicSimulatorFixtureKind } from "./simulator-public-api.test-fixtures";
 
 const coreMocks = vi.hoisted(() => ({ fetch: vi.fn(), sendMatch: vi.fn(), sendStatus: vi.fn() }));
 vi.mock("@/lib/simulators/providers", async importOriginal => ({
@@ -134,6 +135,65 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     const runtime = { runtimeVersion: baseSha, deploymentId: proof.deploymentId, deploymentUrl: proof.deploymentUrl, environment: "production", host: "teetimespot.com" };
     return { ...f, engineeringOwner: owner, proof, runtime };
   }
+
+  it.each(["TEESHEET", "UPPER_HAND", "YOUR_GOLF_BOOKING"] as PublicSimulatorFixtureKind[])("discovers and closes %s through owned research without a manual facts packet", async kind => {
+    const f = await engineeringFixture();
+    const publicSource = publicSimulatorFixture(kind);
+    const lease = (async (_host: string, work: () => Promise<unknown>) => ({acquired:true as const,value:await work()})) as NonNullable<import("./simulator-support-research").SimulatorResearchDependencies["lease"]>;
+    let owner = f.engineeringOwner;
+    const readOfficial = await lane.readSimulatorSupportSource({...owner,source:"official"},{fetch:publicSource.fetchImpl,lease});
+    if (!readOfficial.acquired) throw new Error("Isolated official research was busy.");
+    owner = {...owner,revision:readOfficial.value.revision};
+    const inspected = await lane.readSimulatorSupportClaim(owner);
+    const linkIndex = inspected.research.links.indexOf(publicSource.providerUrl)+1;
+    expect(inspected.researchGuide.suggestedReads).toContainEqual({linkIndex,rendered:false});
+    const readBooking = await lane.readSimulatorSupportSource({...owner,linkIndex},{fetch:publicSource.fetchImpl,lease});
+    if (!readBooking.acquired) throw new Error("Isolated booking research was busy.");
+    owner = {...owner,revision:readBooking.value.revision};
+    expect(readBooking.value.publicSource.publicConfiguration?.family).toBe(kind);
+    expect(readBooking.value.configurationCandidate?.manifest.providerFamilyKey).toBe(kind);
+    const candidate = await lane.readSimulatorSupportConfigurationCandidate(owner);
+    if (!candidate.acquired) throw new Error("Isolated candidate was busy.");
+    const configInput = {...owner,...candidate.value};
+    const beforeOffering = await client.courseOffering.findUniqueOrThrow({where:{id:f.offering.id}});
+    const preview = await lane.configureSimulatorSupportOffering({...configInput,apply:false});
+    expect(preview.acquired && preview.value.mode).toBe("dry-run");
+    expect(await client.courseOffering.findUniqueOrThrow({where:{id:f.offering.id}})).toEqual(beforeOffering);
+    const configured = await lane.configureSimulatorSupportOffering({...configInput,apply:true});
+    if (!configured.acquired || configured.value.mode !== "applied") throw new Error("Isolated config failed.");
+    expect(configured.value.configurationDryRunVerified).toBe(true);
+    owner = {...owner,revision:configured.value.revision};
+    const adopted = await lane.adoptSimulatorSupportSource({...owner,expectedFingerprint:configured.value.sourceFingerprint,expectedOfferingRevision:configured.value.offeringRevision});
+    if (!adopted.acquired) throw new Error("Isolated adoption was busy.");
+    owner = {...owner,revision:adopted.value.revision};
+    await expect(lane.readSimulatorSupportConfigurationCandidate(owner)).rejects.toThrow("candidate is unavailable");
+    const registered = await lane.registerSimulatorSupportRelease({...owner,releaseSha:baseSha,branch:"engineering-worker",trustedUpstreamSha:baseSha,
+      upstreamDescendantVerified:true,descendantVerified:true,committedPaths:[]});
+    if (!registered.acquired) throw new Error("Isolated release was busy.");
+    owner = {...owner,revision:registered.value.revision};
+    const proof = {aliases:["teetimespot.com","www.teetimespot.com"],branch:"main",commitSha:baseSha,deployedAt:new Date().toISOString(),
+      deploymentId:"dpl_engine_fixture",deploymentUrl:"https://engine-fixture.vercel.app",source:"git" as const,state:"READY" as const};
+    const deployed = await lane.recordSimulatorSupportDeployment({...owner,proof});
+    if (!deployed.acquired) throw new Error("Isolated deployment was busy.");
+    owner = {...owner,revision:deployed.value.revision};
+    const actual = await vi.importActual<typeof import("@/lib/simulators/providers")>("@/lib/simulators/providers");
+    coreMocks.fetch.mockImplementation(input => actual.fetchSimulatorAvailability(input,publicSource.fetchImpl));
+    const {runSimulatorEngineeringVerification} = await import("./simulator-support-engineering-verification");
+    const runtime = {runtimeVersion:baseSha,deploymentId:proof.deploymentId,deploymentUrl:proof.deploymentUrl,environment:"production",host:"teetimespot.com"};
+    for (let cycle=1;cycle<=2;cycle++) {
+      const result = await runSimulatorEngineeringVerification(owner,runtime);
+      expect(result).toMatchObject({complete:true,outcome:"MATCH_FOUND",engineeringOnly:true,customerAcceptance:false,freshSuccessfulChecks:cycle});
+      owner = {...owner,revision:result.revision};
+    }
+    const progress = await lane.readSimulatorSupportProgress(owner);
+    expect(progress.acquired && progress.value.nextAction).toBe("COMPLETE");
+    const completed = await lane.completeSimulatorSupport({...owner,currentDeployment:proof});
+    expect(completed.acquired && completed.value.outcome).toBe("success");
+    expect(await client.teeSearch.findUniqueOrThrow({where:{id:f.search.id}})).toEqual(f.before);
+    expect(await client.teeTimeMatch.count({where:{teeSearchId:f.search.id}})).toBe(0);
+    expect(await client.searchEmailDelivery.count({where:{teeSearchId:f.search.id}})).toBe(0);
+    expect(coreMocks.sendMatch).not.toHaveBeenCalled();expect(coreMocks.sendStatus).not.toHaveBeenCalled();
+  },30_000);
 
   it("verifies two deployed engineering reads through the real writer envelope and completes without any customer state", async () => {
     const f = await readyEngineeringFixture();
@@ -1437,7 +1497,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     const oldAt = new Date(Date.now() - 61 * 60_000).toISOString();
     const incomplete = (observedAt: string) => ({ source: "booking" as const, requestedUrl: bays, sourceUrl: bays,
       sourceFingerprint: f.fingerprint, observedAt, httpStatus: 200, rendered: true, outcome: "READ" as const,
-      requestId: randomUUID(), researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION,
+      requestId: randomUUID(), researchImplementationVersion: getSimulatorResearchImplementationVersion(bays),
       renderWarning: "SECONDARY_REQUEST_BUDGET_EXHAUSTED" as const,
       publicReadEvidence: { sourceFingerprint: f.fingerprint, accessControlsObserved: true as const,
         accessControls: [], method: "BROWSER" as const, renderComplete: false } });
@@ -1516,7 +1576,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     const earlier = new Date(Date.now() - 61 * 60_000).toISOString(), later = new Date(Date.now() - 10 * 60_000).toISOString();
     const requestId = randomUUID();
     const route = { url: bays, rendered: true, httpStatus: 200, observedAt: later, requestId, outcome: "READ" as const,
-      researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION,
+      researchImplementationVersion: getSimulatorResearchImplementationVersion(bays),
       renderWarning: "SECONDARY_REQUEST_BUDGET_EXHAUSTED" as const,
       accessControlsObserved: true as const, accessControls: [], renderComplete: false };
     const historical = { ...original, assignmentRef: `course-assignment-${randomUUID()}`,
@@ -1524,7 +1584,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
       simulatorResearch: { version: 1 as const, sourceFingerprint: f.fingerprint, readCount: 1, links: [], bookingLinks: [], linkBaseUrl: null, inFlight: null,
         history: [{ source: "booking" as const, requestedUrl: bays, sourceUrl: bays, sourceFingerprint: f.fingerprint,
           observedAt: earlier, httpStatus: 200, rendered: true, outcome: "READ" as const, requestId,
-          researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION,
+          researchImplementationVersion: getSimulatorResearchImplementationVersion(bays),
           renderWarning: route.renderWarning,
           publicReadEvidence: { sourceFingerprint: f.fingerprint, accessControlsObserved: true as const,
             accessControls: [], method: "BROWSER" as const, renderComplete: false } }] } };
@@ -1864,7 +1924,7 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
         stage: "PUBLIC_READ", category: "UNKNOWN", code: "UNCLASSIFIED_FAILURE", researchPhase: "BROWSER_DOCUMENT" } };
       const incomplete = { outcome: "READ", httpStatus: 200, requestId: randomUUID(),
         publicReadEvidence: { sourceFingerprint: f.fingerprint, accessControlsObserved: true, accessControls: [], method: "BROWSER", renderComplete: false },
-        researchImplementationVersion: SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION, renderWarning: "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED",
+        researchImplementationVersion: getSimulatorResearchImplementationVersion(bays), renderWarning: "SECONDARY_ASSET_BODY_LIMIT_EXCEEDED",
         bodyLimitDiagnostics: [{ resourceKind: "SECONDARY_SCRIPT", phase: "TRANSPORT_HEADERS", observedSizeBand: "OVER_2X_UP_TO_4X", count: 1 }],
         configurationDiagnostic };
       const historical = { ...initial, assignmentRef: `course-assignment-${randomUUID()}`, childThreadId: `legacy-${randomUUID()}`,

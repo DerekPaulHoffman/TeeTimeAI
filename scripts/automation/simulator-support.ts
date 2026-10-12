@@ -6,7 +6,7 @@ import { readFile } from "node:fs/promises";
 import { prisma } from "@/lib/prisma";
 import { resolveCodexOwnerThreadId } from "./git-output";
 import { readDispatchGitState } from "./course-support-dispatch";
-import { adoptSimulatorSupportSource, claimSimulatorSupportAssignment, claimSimulatorSupportPath, completeSimulatorSupport, heartbeatSimulatorSupport, queueSimulatorSupportRechecks, readSimulatorSupportClaim, readSimulatorSupportProgress, recordSimulatorSupportDeployment, registerSimulatorSupportRelease, retrySimulatorSupport, recoverSimulatorSupport, retireSimulatorSupport, configureSimulatorSupportOffering, classifySimulatorSupportOffering, readSimulatorSupportSource } from "@/lib/automation/simulator-support-ownership";
+import { adoptSimulatorSupportSource, claimSimulatorSupportAssignment, claimSimulatorSupportPath, completeSimulatorSupport, heartbeatSimulatorSupport, queueSimulatorSupportRechecks, readSimulatorSupportClaim, readSimulatorSupportConfigurationCandidate, readSimulatorSupportProgress, recordSimulatorSupportDeployment, registerSimulatorSupportRelease, retrySimulatorSupport, recoverSimulatorSupport, retireSimulatorSupport, configureSimulatorSupportOffering, classifySimulatorSupportOffering, readSimulatorSupportSource } from "@/lib/automation/simulator-support-ownership";
 import { getSimulatorOfferingSourceFingerprint } from "@/lib/simulators/source-fingerprint";
 import { SIMULATOR_RESEARCH_SOURCE_NAMES, type SimulatorResearchSource } from "@/lib/automation/simulator-support-research-policy";
 import { classifySimulatorSupportFailure, readSafeSimulatorSupportFailure, type SimulatorSupportFailure, type SimulatorSupportFailureStage } from "@/lib/automation/simulator-support-failure";
@@ -21,7 +21,12 @@ export function readSimulatorSupportArguments(args: readonly string[]) {
   let apply = false;
   let repair = false;
   let rendered = false;
+  let fromResearch = false;
   for (let index = 0; index < options.length; index += 2) {
+    if (options[index] === "--from-research") {
+      if (fromResearch || command !== "configure") throw new Error("Only owned simulator configuration permits --from-research.");
+      fromResearch = true; index -= 1; continue;
+    }
     if (options[index] === "--rendered") {
       if (rendered || command !== "source-read") throw new Error("Only simulator source research permits --rendered.");
       rendered = true; index -= 1; continue;
@@ -46,12 +51,13 @@ export function readSimulatorSupportArguments(args: readonly string[]) {
         values.has("--revision") && !/^[1-9][0-9]*$/.test(values.get("--revision")!))) ||
       (command === "path" && !values.get("--path")) || (command === "release" && !/^[a-f0-9]{40}$/i.test(values.get("--sha") ?? "")) ||
       (command === "retry" && !/^[1-9][0-9]*$/.test(values.get("--retry-minutes") ?? "")) ||
-      (["configure", "classify"].includes(command) && !values.get("--manifest")) || (repair && !apply) ||
+      (command === "configure" && fromResearch === values.has("--manifest")) ||
+      (command === "classify" && !values.get("--manifest")) ||
       (command === "source-read" && (values.has("--source") === values.has("--link") ||
         (values.has("--source") && !(SIMULATOR_RESEARCH_SOURCE_NAMES as readonly string[]).includes(values.get("--source")!)) ||
         (values.has("--link") && !/^(?:[1-9]|[12][0-9]|30)$/.test(values.get("--link")!))))) throw new Error("Simulator-support command arguments are incomplete.");
   return { command, assignmentRef: values.get("--assignment-ref")!, token: values.get("--token")!, revision: Number(values.get("--revision")), path: values.get("--path"), releaseSha: values.get("--sha"), retryMinutes: Number(values.get("--retry-minutes")), manifestPath: values.get("--manifest"), source: values.get("--source") as SimulatorResearchSource | undefined,
-    linkIndex: values.has("--link") ? Number(values.get("--link")) : undefined, rendered, apply, repair };
+    linkIndex: values.has("--link") ? Number(values.get("--link")) : undefined, rendered, apply, repair, fromResearch };
 }
 
 function git(args: string[]) { return execFileSync("git", args, { encoding: "utf8", windowsHide: true }).trim(); }
@@ -153,8 +159,15 @@ async function main() {
   else if (input.command === "configure") {
     const claim = await readSimulatorSupportClaim(owner);
     const offering = await prisma.courseOffering.findUniqueOrThrow({ where: { id: claim.offeringId } });
-    result = await configureSimulatorSupportOffering({ ...owner, manifest: JSON.parse(await readFile(resolve(input.manifestPath!), "utf8")), apply: input.apply, repair: input.repair,
-      expectedFingerprint: getSimulatorOfferingSourceFingerprint(offering), expectedOfferingRevision: offering.monitoringRevision });
+    const candidate = input.fromResearch ? await readSimulatorSupportConfigurationCandidate(owner) : null;
+    if (candidate && !candidate.acquired) result = candidate;
+    else {
+      const reviewed = candidate?.acquired ? candidate.value : null;
+      result = await configureSimulatorSupportOffering({ ...owner,
+        manifest: reviewed?.manifest ?? JSON.parse(await readFile(resolve(input.manifestPath!), "utf8")), apply: input.apply, repair: input.repair,
+        expectedFingerprint: reviewed?.expectedFingerprint ?? getSimulatorOfferingSourceFingerprint(offering),
+        expectedOfferingRevision: reviewed?.expectedOfferingRevision ?? offering.monitoringRevision });
+    }
   } else if (input.command === "classify") result = await classifySimulatorSupportOffering({ ...owner, evidence: JSON.parse(await readFile(resolve(input.manifestPath!), "utf8")), apply: input.apply });
   else if (input.command === "path") result = await claimSimulatorSupportPath({ ...owner, path: input.path! });
   else if (input.command === "adopt-source") {

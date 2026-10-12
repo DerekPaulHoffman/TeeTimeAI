@@ -57,6 +57,17 @@ const classification = (reason: "MEMBERS_ONLY" | "NOT_SIMULATOR_RENTAL" = "MEMBE
 const apply = { apply: true, expectedDatabaseHost: "preview.example" };
 
 describe("protected simulator offering review command", () => {
+  it("uses the supplied database clock for owned evidence without weakening the operator future guard", () => {
+    const databaseNow = new Date(now.getTime() + 750);
+    const observed = { ...manifest, verifiedAt: databaseNow.toISOString() };
+    expect(() => parseSimulatorOfferingManifest(observed)).toThrow("future");
+    expect(parseSimulatorOfferingManifest(observed, { verificationClock: databaseNow })[0].verifiedAt).toBe(observed.verifiedAt);
+    expect(() => parseSimulatorOfferingManifest({ ...observed, verifiedAt: new Date(databaseNow.getTime() + 1).toISOString() },
+      { verificationClock: databaseNow })).toThrow("future");
+    expect(() => parseSimulatorOfferingManifest(observed, { verificationClock: new Date(NaN) })).toThrow("clock is invalid");
+    expect(mocks.writerLease).not.toHaveBeenCalled();
+  });
+
   it("defaults to an unsent, unapplied dry run and normalizes durations", async () => {
     const command = parseSimulatorOfferingCommand(["--manifest", "reviewed-rentals.json"]);
     expect(command.apply).toBe(false);
