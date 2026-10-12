@@ -113,13 +113,15 @@ export function validateOriginalWorkerContinuation(input, dependencies = {}) {
       original.cliVersion !== approved.cliVersion || !same(original.cliPath, approved.cliPath)) fail("ORIGINAL_STOPPED_RECEIPT_CHANGED");
   assertFullAccessAcknowledgement(original, original.cwd);
   const observeProcess = dependencies.observeProcess ?? observeOriginalProcess;
+  const originalCompletedAt = original.status === "COMPLETED" && original.turnStatus === "completed" ? original.completedAt : undefined;
   if (!Number.isSafeInteger(original.launcherPid) || !Number.isSafeInteger(original.serverPid) ||
-      original.launcherPid === original.serverPid || [original.launcherPid, original.serverPid].some(pid => observeProcess(pid) !== "absent")) {
+      original.launcherPid === original.serverPid || [original.launcherPid, original.serverPid].some(pid => observeProcess(pid, undefined, originalCompletedAt) !== "absent")) {
     fail("ORIGINAL_LAUNCHER_OR_SERVER_NOT_ENDED");
   }
   const prior = item.expectedNativeContinuation;
   let priorStatus = null;
   let priorPids = [];
+  let priorCompletedAt;
   if (prior !== null && prior !== undefined) {
     if (!UUID.test(prior.turnId ?? "") || !DIGEST.test(prior.key ?? "") || !isAbsolute(prior.receiptPath ?? "")) {
       fail("PRIOR_CONTINUATION_UNPROVED");
@@ -131,11 +133,13 @@ export function validateOriginalWorkerContinuation(input, dependencies = {}) {
         priorReceipt.continuationKey !== prior.key || priorReceipt.nativeIdentityVerified !== true ||
         priorReceipt.approvalRequests !== 0 || !Number.isSafeInteger(priorReceipt.runnerPid) ||
         !Number.isSafeInteger(priorReceipt.serverPid) ||
-        [priorReceipt.runnerPid, priorReceipt.serverPid].some(pid => observeProcess(pid) !== "absent")) {
+        [priorReceipt.runnerPid, priorReceipt.serverPid].some(pid => observeProcess(pid, undefined,
+          priorReceipt.status === "COMPLETED" && priorReceipt.turnStatus === "completed" ? priorReceipt.completedAt : undefined) !== "absent")) {
       fail("PRIOR_CONTINUATION_UNPROVED");
     }
     priorStatus = priorReceipt.status;
     priorPids = [priorReceipt.runnerPid, priorReceipt.serverPid];
+    priorCompletedAt = priorReceipt.status === "COMPLETED" && priorReceipt.turnStatus === "completed" ? priorReceipt.completedAt : undefined;
   }
   const worker = realpathSync(original.cwd);
   if (same(worker, selected) || !same(execute(worker, ["rev-parse", "--show-toplevel"]), worker) ||
@@ -154,7 +158,7 @@ export function validateOriginalWorkerContinuation(input, dependencies = {}) {
   if ((dependencies.readCliVersion ?? readWorkerCliVersion)(approved.cliPath) !== original.cliVersion) fail("ORIGINAL_PINNED_CLI_CHANGED");
   if ((dependencies.readCliDigest ?? (path => createHash("sha256").update(readFileSync(path)).digest("hex")))(approved.cliPath) !==
       QUALIFIED_EXECUTABLE_DIGEST) fail("ORIGINAL_PINNED_CLI_CHANGED");
-  return { selected, worker, output, head, item, original, priorStatus, priorPids,
+  return { selected, worker, output, head, item, original, priorStatus, priorPids, originalCompletedAt, priorCompletedAt,
     expectedTerminalTurnId: prior?.turnId ?? original.turnId,
     originalStatusDigest: ownedChangeDigest(worker, paths),
     runtime, approved, reservation: response.value, launcherReceiptPath };
@@ -252,7 +256,8 @@ export async function runOriginalWorkerContinuation(input, dependencies = {}) {
     if (currentPaths.some(path => !validated.item.plannedPaths.includes(path)) ||
         ownedChangeDigest(validated.worker, currentPaths) !== validated.originalStatusDigest) fail("UNKNOWN_OWNED_CHECKOUT_CHANGE");
     if ([validated.original.launcherPid, validated.original.serverPid, ...(validated.priorPids ?? [])]
-      .some(pid => (dependencies.observeProcess ?? observeOriginalProcess)(pid) !== "absent")) fail("ORIGINAL_LAUNCHER_OR_SERVER_NOT_ENDED");
+      .some(pid => (dependencies.observeProcess ?? observeOriginalProcess)(pid, undefined,
+        (validated.priorPids ?? []).includes(pid) ? validated.priorCompletedAt : validated.originalCompletedAt) !== "absent")) fail("ORIGINAL_LAUNCHER_OR_SERVER_NOT_ENDED");
     receipt.status = "TURN_STARTING"; save();
     const started = await client.request("turn/start", { threadId: receipt.threadId, input: [{ type: "text", text: prompt }],
       cwd: validated.worker, approvalPolicy: "never", permissions: WORKER_PERMISSION_PROFILE,

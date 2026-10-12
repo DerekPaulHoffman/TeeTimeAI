@@ -158,8 +158,8 @@ describe("deterministic original-worker continuation", () => {
     expect(result.originalStatusDigest).toMatch(/^[a-f0-9]{64}$/u);
     expect(f.dependencies.git).toHaveBeenCalledWith(f.worker, ["merge-base", f.input.item.baseSha, f.mainSha]);
     expect(f.dependencies.git).not.toHaveBeenCalledWith(f.worker, ["status", "--porcelain"]);
-    expect(f.dependencies.observeProcess).toHaveBeenCalledWith(101);
-    expect(f.dependencies.observeProcess).toHaveBeenCalledWith(102);
+    expect(f.dependencies.observeProcess).toHaveBeenCalledWith(101, undefined, undefined);
+    expect(f.dependencies.observeProcess).toHaveBeenCalledWith(102, undefined, undefined);
   });
   it("rejects unknown bytes, source/receipt drift and active original or prior processes before native creation", () => {
     const unknown = validationFixture();

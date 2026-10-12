@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { observeCourseSupportNativeCompletion, readNativeObserverArguments } from "../../../scripts/automation/course-support-native-observer.mjs";
+import { observeCourseSupportNativeCompletion, observeOriginalProcessIdentity, readNativeObserverArguments } from "../../../scripts/automation/course-support-native-observer.mjs";
 import { courseSupportWorkerAppServerEnvironment } from "../../../scripts/automation/course-support-worker-launcher.mjs";
 
 const threadId = "11111111-2222-7333-8444-555555555555";
@@ -38,6 +38,26 @@ function fixture(overrides: Record<string, unknown> = {}) {
   return { options, client, original, request, before: readFileSync(receiptPath) };
 }
 describe("original worker read-only native observer", () => {
+  it("distinguishes a reused Windows PID from an original process without terminating either", () => {
+    const completedAt = "2026-10-07T08:00:00.000Z";
+    const execute = vi.fn(() => JSON.stringify({ state: "present", startedAt: "2026-10-07T09:00:00.1234567Z" }));
+    expect(observeOriginalProcessIdentity(100, completedAt, execute)).toEqual({ pid: 100, state: "absent",
+      reusedPidStartedAt: "2026-10-07T09:00:00.123Z", originalCompletedAt: completedAt });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(JSON.stringify(execute.mock.calls[0])).not.toMatch(/Stop-Process|taskkill/u);
+    for (const startedAt of [null, "invalid", "2026-10-07T08:00:00.000Z", "2026-10-07T07:59:59.000Z", "2999-01-01T00:00:00.000Z"]) {
+      expect(observeOriginalProcessIdentity(100, completedAt, () => JSON.stringify({ state: "present", startedAt })))
+        .toEqual({ pid: 100, state: "present" });
+    }
+    expect(observeOriginalProcessIdentity(100, undefined, execute)).toEqual({ pid: 100, state: "present" });
+    expect(observeOriginalProcessIdentity(100, completedAt, () => JSON.stringify({ state: "absent" })))
+      .toEqual({ pid: 100, state: "absent" });
+  });
+  it.skipIf(process.platform !== "win32")("observes the current real Windows process while preserving original-process fences", () => {
+    expect(observeOriginalProcessIdentity(process.pid, new Date(Date.now() - 86_400_000).toISOString()))
+      .toMatchObject({ pid: process.pid, state: "absent", reusedPidStartedAt: expect.any(String) });
+    expect(observeOriginalProcessIdentity(process.pid, new Date().toISOString())).toEqual({ pid: process.pid, state: "present" });
+  });
   it("prepares a new scheduled recovery report folder and preserves its exclusive observation", async () => {
     const value = fixture();
     const reportFolder = join(value.options.expectedCheckout, ".codex-artifacts", "new-recovery-cycle");

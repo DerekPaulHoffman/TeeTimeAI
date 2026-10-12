@@ -85,6 +85,13 @@ the assignment for attention rather than guessing the initial turn.
 The same original thread/checkout/project, stable
 global inactive inventory, no active or approval flags, unchanged qualified
 executable and receipt, and absent original launcher/server PIDs on both sides.
+Windows may reuse a recorded PID after a worker finishes. The qualified observer
+and continuation runner treat that original process as absent only when an actual
+process creation time is later than the immutable completed/error-free receipt.
+The observer retains both clocks, and the request factory checks them against the
+exact receipt and observation time. Missing times, stopped receipts, live original
+processes and uncertain identity remain fenced. Never terminate an unrelated
+process or edit a receipt to make recovery pass.
 An error object on a failed turn is retained as terminal evidence; it is not
 reclassified as a provider failure. `notLoaded` without that full bracket and
 durable terminal turn proves nothing. The completed research path below keeps

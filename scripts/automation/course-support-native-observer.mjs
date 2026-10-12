@@ -44,12 +44,25 @@ function sameCheckout(a, b) {
   const left = normalize(a); const right = normalize(b);
   return left !== null && left === right && /\\\.codex\\worktrees\\[^\\]+\\[^\\]+$/u.test(left);
 }
-export function observeOriginalProcess(pid, execute = execFileSync) {
+export function observeOriginalProcessIdentity(pid, completedAt, execute = execFileSync) {
   if (!Number.isSafeInteger(pid) || pid < 1) throw failure("ORIGINAL_PROCESS_ID_REQUIRED");
-  const script = "$taskProcess=Get-Process -Id " + pid + " -ErrorAction SilentlyContinue; if($taskProcess){'present'}else{'absent'}";
-  const state = execute("pwsh", ["-NoProfile", "-Command", script], { encoding: "utf8", windowsHide: true, timeout: 10_000 }).trim();
-  if (!["absent", "present"].includes(state)) throw failure("ORIGINAL_PROCESS_STATE_UNAVAILABLE");
-  return state;
+  const script = "$taskProcess=Get-Process -Id " + pid + " -ErrorAction SilentlyContinue; " +
+    "if($taskProcess){$taskStartedAt=$null;try{$taskStartedAt=$taskProcess.StartTime.ToUniversalTime().ToString('o')}catch{};" +
+    "@{state='present';startedAt=$taskStartedAt}|ConvertTo-Json -Compress}else{@{state='absent'}|ConvertTo-Json -Compress}";
+  const observed = JSON.parse(execute("pwsh", ["-NoProfile", "-Command", script], { encoding: "utf8", windowsHide: true, timeout: 10_000 }).trim());
+  if (!["absent", "present"].includes(observed?.state)) throw failure("ORIGINAL_PROCESS_STATE_UNAVAILABLE");
+  const started = typeof observed.startedAt === "string" ? Date.parse(observed.startedAt) : NaN;
+  const ended = typeof completedAt === "string" ? Date.parse(completedAt) : NaN;
+  // Windows reuses PIDs. A process born after the immutable completed receipt
+  // cannot be the original process; retain both clocks rather than killing it.
+  // Missing clocks, live originals and non-completed receipts remain fenced.
+  if (observed.state === "present" && Number.isFinite(started) && Number.isFinite(ended) &&
+      started > ended && started <= Date.now()) return { pid, state: "absent",
+    reusedPidStartedAt: new Date(started).toISOString(), originalCompletedAt: new Date(ended).toISOString() };
+  return { pid, state: observed.state };
+}
+export function observeOriginalProcess(pid, execute = execFileSync, completedAt) {
+  return observeOriginalProcessIdentity(pid, completedAt, execute).state;
 }
 
 /**
@@ -116,8 +129,11 @@ export async function observeCourseSupportNativeCompletion({
     observedAt: clock().toISOString(), threadId: original.threadId, cliVersion: version, cliExecutableDigest: executableDigest,
     launcherReceiptDigestBefore: digest(originalBytes), observerApprovalRequestCount: 0, rpcCalls: [] };
   const observeProcesses = () => {
-    const processes = [original.launcherPid, original.serverPid, ...(prior ? [prior.runnerPid, prior.serverPid] : [])]
-      .map(pid => ({ pid, state: inspectProcess(pid) }));
+    const processes = [{ pid: original.launcherPid, receipt: original }, { pid: original.serverPid, receipt: original },
+      ...(prior ? [{ pid: prior.runnerPid, receipt: prior }, { pid: prior.serverPid, receipt: prior }] : [])]
+      .map(({ pid, receipt }) => inspectProcess === observeOriginalProcess
+        ? observeOriginalProcessIdentity(pid, receipt.status === "COMPLETED" && receipt.turnStatus === "completed" ? receipt.completedAt : undefined)
+        : { pid, state: inspectProcess(pid) });
     if (new Set(processes.map(process => process.pid)).size !== processes.length ||
         processes.some(process => process.state !== "absent")) {
       throw failure("ORIGINAL_LAUNCHER_OR_SERVER_NOT_ENDED");

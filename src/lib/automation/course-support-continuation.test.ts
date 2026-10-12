@@ -454,6 +454,35 @@ function inventoryProjection(value = inventoryInput()) {
 }
 
 describe("bracketed supported inventory and read-only durable native history", () => {
+  it("requires reused-PID clocks to match the immutable completed original receipt", () => {
+    const value = inventoryInput();
+    const completedAt = "2026-10-07T07:59:00.000Z";
+    value.launcherReceiptBytes = JSON.stringify({ ...JSON.parse(value.launcherReceiptBytes), completedAt });
+    const native = value.nativeInventoryObservation.nativeObservation;
+    native.launcherReceiptDigestBefore = createHash("sha256").update(value.launcherReceiptBytes).digest("hex");
+    native.launcherReceiptDigestAfter = native.launcherReceiptDigestBefore;
+    for (const observation of [native.processObservationBefore, native.processObservationAfter]) {
+      Object.assign(observation.processes[0], { reusedPidStartedAt: "2026-10-07T08:00:00.000Z", originalCompletedAt: completedAt });
+    }
+    expect(inventoryProjection(value)).toMatchObject({ threadId: child });
+    for (const mutation of [
+      { originalCompletedAt: "2026-10-07T07:58:00.000Z" },
+      { reusedPidStartedAt: "2026-10-07T08:01:00.000Z" },
+      { reusedPidStartedAt: completedAt },
+      { originalCompletedAt: undefined },
+      { state: "present" },
+    ]) {
+      const changed = structuredClone(value);
+      Object.assign(changed.nativeInventoryObservation.nativeObservation.processObservationAfter.processes[0], mutation);
+      expect(() => inventoryProjection(changed)).toThrow();
+    }
+    const stopped = structuredClone(value);
+    stopped.launcherReceiptBytes = JSON.stringify({ ...JSON.parse(stopped.launcherReceiptBytes), status: "STOPPED" });
+    const stoppedNative = stopped.nativeInventoryObservation.nativeObservation;
+    stoppedNative.launcherReceiptDigestBefore = createHash("sha256").update(stopped.launcherReceiptBytes).digest("hex");
+    stoppedNative.launcherReceiptDigestAfter = stoppedNative.launcherReceiptDigestBefore;
+    expect(() => inventoryProjection(stopped)).toThrow();
+  });
   it("accepts a completed original native turn when its owned implementation remains unresolved", () => {
     const value = inventoryInput();
     const initialTurn = "11111111-2222-7333-8444-555555555555";

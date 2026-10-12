@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { win32 } from "node:path";
 import { z } from "zod";
 
@@ -204,9 +205,23 @@ function normalizedPrivateCheckout(value: unknown) {
 
 const qualifiedObserverCliVersion = "codex-cli 0.160.1";
 const qualifiedObserverExecutableDigest = "9e7c59c05cc1ce5677b1f94e835b2ac038ca3be14504e78d558eacdb0ea3f55d";
+const observedProcessSchema = z.object({ pid: z.number().int().positive(), state: z.enum(["absent", "present", "unknown"]),
+  reusedPidStartedAt: instant.optional(), originalCompletedAt: instant.optional(),
+}).strict().refine(value => value.reusedPidStartedAt === undefined && value.originalCompletedAt === undefined ||
+  value.state === "absent" && value.reusedPidStartedAt !== undefined && value.originalCompletedAt !== undefined &&
+  Date.parse(value.reusedPidStartedAt) > Date.parse(value.originalCompletedAt), "Reused process identity is incomplete or ambiguous.");
 const observedProcessesSchema = z.object({ observedAt: instant,
-  processes: z.array(z.object({ pid: z.number().int().positive(), state: z.enum(["absent", "present", "unknown"]) }).strict()).min(2).max(4),
+  processes: z.array(observedProcessSchema).min(2).max(4),
 }).strict();
+function requireOriginalProcessAbsent(process: z.infer<typeof observedProcessSchema> | undefined,
+  receipt: Record<string, unknown>, observedAt: string) {
+  if (process?.state !== "absent") throw new Error("The original process has not ended.");
+  if (process.reusedPidStartedAt !== undefined && (receipt.status !== "COMPLETED" || receipt.turnStatus !== "completed" ||
+      typeof receipt.completedAt !== "string" || Date.parse(receipt.completedAt) !== Date.parse(process.originalCompletedAt!) ||
+      Date.parse(process.reusedPidStartedAt) > Date.parse(observedAt))) {
+    throw new Error("Reused PID does not prove absence of the exact completed original process.");
+  }
+}
 const nativeObserverSchema = z.object({
   version: z.literal(1), source: z.literal("original_codex_read_only_observer"),
   terminalFailure: z.literal(true).optional(),
@@ -293,10 +308,24 @@ export function projectCourseSupportInventoryNativeCompletion(input: {
           processes.processes.find(process => process.pid === pid)?.state !== "absent") {
         throw new Error("The original launcher and server have not both ended.");
       }
+      requireOriginalProcessAbsent(processes.processes.find(process => process.pid === pid), receipt, processes.observedAt);
     }
     if (prior && (processes.processes.length !== 4 ||
         processes.processes.slice(2).some(process => process.state !== "absent"))) {
       throw new Error("Prior native continuation processes have not ended.");
+    }
+    if (prior && processes.processes.slice(2).some(process => process.reusedPidStartedAt !== undefined)) {
+      const priorBytes = readFileSync(prior.receiptPath);
+      if (priorBytes.length > 32_768 || createHash("sha256").update(priorBytes).digest("hex") !== native.priorContinuationReceiptDigestBefore) {
+        throw new Error("Prior original process receipt changed.");
+      }
+      const priorReceipt = object(JSON.parse(priorBytes.toString("utf8").replace(/^\uFEFF/u, "")));
+      if (priorReceipt.threadId !== input.expectedThreadId || priorReceipt.turnId !== prior.turnId || priorReceipt.continuationKey !== prior.key) {
+        throw new Error("Prior original process receipt identity changed.");
+      }
+      for (const pid of [priorReceipt.runnerPid, priorReceipt.serverPid]) {
+        requireOriginalProcessAbsent(processes.processes.find(process => process.pid === pid), priorReceipt, processes.observedAt);
+      }
     }
   }
   const [initialize, profiles, read, turns] = native.rpcCalls;
@@ -408,15 +437,14 @@ export function projectCourseSupportContinuationReadiness(input: {
       receipt.baseSha !== input.expectedOriginalBaseSha || !sha.safeParse(input.expectedOriginalBaseSha).success) {
     throw new Error("Original native launcher identity or profile does not match.");
   }
-  const processes = z.object({ observedAt: instant,
-    processes: z.array(z.object({ pid: z.number().int().positive(), state: z.enum(["absent", "present", "unknown"]) }).strict()).min(2).max(4),
-  }).strict().parse(input.processObservation);
+  const processes = observedProcessesSchema.parse(input.processObservation);
   for (const pid of [receipt.launcherPid, receipt.serverPid]) {
     if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid < 1 ||
         processes.processes.filter(process => process.pid === pid).length !== 1 ||
         processes.processes.find(process => process.pid === pid)?.state !== "absent") {
       throw new Error("The original launcher and server have not both ended.");
     }
+    requireOriginalProcessAbsent(processes.processes.find(process => process.pid === pid), receipt, processes.observedAt);
   }
   const runtime = object(input.runtimeObservation);
   const inspection = object(runtime.inspection);
