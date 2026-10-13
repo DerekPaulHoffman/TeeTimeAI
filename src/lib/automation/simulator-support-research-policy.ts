@@ -5,7 +5,7 @@ import { isAcuityPublicResearchRoot, isSimulatorPublicConfigurationSource, known
 import { blockedResourceDiagnosticsSchema } from "./simulator-blocked-resources";
 
 export const SIMULATOR_RESEARCH_MAX_READS = 6;
-export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-blocked-resource-diagnostics-v7";
+export const SIMULATOR_RESEARCH_IMPLEMENTATION_VERSION = "public-calendar-anonymous-static-assets-v8";
 export function getSimulatorResearchImplementationVersion(url: string) {
   const family = knownSimulatorPublicConfigurationFamily(url);
   if (family === "TEESHEET" || family === "UPPER_HAND" || family === "YOUR_GOLF_BOOKING") return "public-calendar-provider-api-configuration-v1";

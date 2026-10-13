@@ -67,7 +67,7 @@ function golfBookConfig() {
   return '<input id="waitlist_date" value="2026-10-10"><input id="waitlist_template" value="53"><input id="template_min_booking_mins" value="60"><input id="template_max_booking_mins" value="360"><input id="template_booking_increment_mins" value="30"><input id="csrf_token" value="private-token"><input name="customerEmail" value="secret@example.test"><table id="bookingsheet"><thead><tr><th id="th_1">Private bay name</th><th id="th_20">Private second name</th></tr></thead><tbody><tr><td class="status_1" onclick="redirect(\'reserve\',\'private-reserve-values\')">Free</td></tr></tbody></table>';
 }
 
-type RequestFixture = { url: string; method?: string; headers?: Record<string, string>; headersFailure?: unknown; requestFailure?: unknown; kind?: string; frame?: "main" | "child" | "popup" };
+type RequestFixture = { url: string; method?: string; headers?: Record<string, string>; body?: string; headersFailure?: unknown; requestFailure?: unknown; kind?: string; frame?: "main" | "child" | "popup" };
 function renderedBrowser(requests: RequestFixture[], html = "<h1>Public rentals</h1><a href='/booking'>Book hourly</a>", concurrentSecondary = false) {
   let handler!: (route: Route) => Promise<void>;
   let socketHandler!: (socket: { close: (options: unknown) => Promise<void> }) => Promise<unknown>;
@@ -85,6 +85,7 @@ function renderedBrowser(requests: RequestFixture[], html = "<h1>Public rentals<
           if (request.headersFailure !== undefined) throw request.headersFailure;
           return request.headers ?? { "user-agent": "Public research browser" };
         },
+          ...(request.body !== undefined ? { postData: () => request.body, headers: () => request.headers ?? {} } : {}),
           isNavigationRequest: () => !request.kind || request.kind === "document", resourceType: () => request.kind ?? "document",
            frame: () => request.frame === "child" ? childFrame : request.frame === "popup" ? popupFrame : mainFrame };
         } } as unknown as Route);
@@ -901,7 +902,7 @@ describe("bounded owned simulator public research transport", () => {
     const requests: RequestFixture[] = [{ url: `${source}/` },
       { url: "https://other.example.test/api/availability/public-123?filter=hidden", kind: "fetch" },
       { url: `${source}/api/calendar`, kind: "fetch", headers: { Authorization: "Bearer hidden" } },
-      { url: `${source}/public/chunk.js`, kind: "script", headers: { Cookie: "hidden" } },
+      { url: `${source}/public/chunk.js`, kind: "script", headers: { Authorization: "hidden" } },
       { url: `${source}/photo.jpg`, kind: "image" }];
     const view = renderedBrowser(requests, "<div id='__next'><footer>Terms and privacy</footer></div>");
     const fetch = vi.fn(async () => response("<div id='__next'><footer>Terms and privacy</footer></div>"));
@@ -915,6 +916,53 @@ describe("bounded owned simulator public research transport", () => {
         { resourceKind: "OTHER", method: "GET", reason: "RESOURCE_KIND_NOT_ALLOWED", originRelation: "SAME_SITE" },
       ] });
     expect(JSON.stringify(result.blockedResourceDiagnostics)).not.toMatch(/other.example|public-123|hidden|Authorization|Cookie|secret/u);
+  });
+  it("loads scoped static assets anonymously despite ambient cookies without admitting credentialed data or authorization", async () => {
+    const cdn = "https://cdn.example.test/library.js";
+    const html = `<script src='${cdn}'></script><h1>Public rental</h1>`;
+    const requests: RequestFixture[] = [{ url: `${source}/` },
+      { url: `${source}/late-chunk.js`, kind: "script", headers: { Cookie: "private-browser-cookie" } },
+      { url: `${source}/theme.css`, kind: "stylesheet", headers: { Cookie: "private-browser-cookie" } },
+      { url: cdn, kind: "script", headers: { Cookie: "private-browser-cookie" } },
+      { url: `${source}/api/calendar`, kind: "fetch", headers: { Cookie: "private-browser-cookie" } },
+      { url: `${source}/document`, kind: "document", headers: { Cookie: "private-browser-cookie" } },
+      { url: `${source}/private-script.js`, kind: "script", headers: { Authorization: "private-auth" } },
+      { url: `${source}/key-script.js`, kind: "script", headers: { "x-api-key": "private-key" } },
+      { url: "https://undeclared.example.test/script.js", kind: "script", headers: { Cookie: "private-browser-cookie" } }];
+    const view = renderedBrowser(requests, html);
+    const fetch = vi.fn(async (url: unknown) => response(String(url) === `${source}/` ? html : "public asset"));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([`${source}/`, `${source}/late-chunk.js`, `${source}/theme.css`, cdn]);
+    expect(result).toMatchObject({ admittedRequests: 4, blockedRequests: 5 });
+    for (const [, options] of fetch.mock.calls) {
+      expect(options).toMatchObject({ method: "GET", credentials: "omit" });
+      expect(JSON.stringify(options)).not.toMatch(/private-browser-cookie|private-auth|private-key|authorization|cookie|x-api-key/iu);
+    }
+    expect(result.blockedResourceDiagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ resourceKind: "FETCH", reason: "SENSITIVE_HEADERS", headerKinds: ["COOKIE"] }),
+      expect.objectContaining({ resourceKind: "DOCUMENT", reason: "SENSITIVE_HEADERS", headerKinds: ["COOKIE"] }),
+      expect.objectContaining({ resourceKind: "SCRIPT", reason: "SENSITIVE_HEADERS", headerKinds: ["AUTHORIZATION"] }),
+      expect.objectContaining({ resourceKind: "SCRIPT", reason: "SENSITIVE_HEADERS", headerKinds: ["API_KEY"] }),
+      expect.objectContaining({ resourceKind: "SCRIPT", reason: "UNSCOPED_DESTINATION", originRelation: "OTHER_ORIGIN" }),
+    ]));
+    for (const route of view.routes.slice(4)) expect(route.abort).toHaveBeenCalledOnce();
+  });
+  it("projects a blocked same-site request body without executing it or exposing submitted values", async () => {
+    const view = renderedBrowser([{ url: `${source}/` },
+      { url: `${source}/api/booking`, method: "POST", kind: "fetch", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "get_calendar_availability", email: "private@example.test", token: "secret-value", resourceId: 987654 }) },
+      { url: "https://unrelated.example.test/api", method: "POST", kind: "fetch", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "submit_form" }) }]);
+    const fetch = vi.fn(async () => response("<h1>Public page</h1>"));
+    const result = await collectSimulatorSupportResearch({ url: source, render: true }, { fetch, lease, browser: view.factory });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(result.blockedResourceDiagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ method: "POST", reason: "METHOD_NOT_ALLOWED", originRelation: "SAME_SITE",
+        bodyShape: { format: "JSON", fieldKinds: ["ACTION", "AUTH", "CONTACT", "RESOURCE"], operationHints: ["AVAILABILITY", "READ"] } }),
+    ]));
+    expect(result.blockedResourceDiagnostics?.find(row => row.originRelation === "OTHER_ORIGIN")?.bodyShape).toBeUndefined();
+    expect(JSON.stringify(result.blockedResourceDiagnostics)).not.toMatch(/private@example|secret-value|987654|get_calendar|submit_form/u);
+    expect(view.routes[1].abort).toHaveBeenCalledOnce(); expect(view.routes[2].abort).toHaveBeenCalledOnce();
   });
   it("bounds and deduplicates blocked-method diagnostics independently of the admitted-read cap", async () => {
     const requests: RequestFixture[] = [{ url: `${source}/` },

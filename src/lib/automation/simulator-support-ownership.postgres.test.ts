@@ -909,6 +909,8 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     const page = { mainFrame: () => frame, url: () => bookingUrl, content: vi.fn(async () => html), goto: vi.fn(async () => {
       for (const [url, method, kind] of [[bookingUrl, "GET", "document"], [blockedUrl, "POST", "fetch"]]) {
         await handler({ request: () => ({ url: () => url, method: () => method, allHeaders: async () => ({}),
+          postData: () => method === "POST" ? JSON.stringify({ action: "get_calendar", email: "private-contact", token: "private-body-token" }) : null,
+          headers: () => ({ "content-type": "application/json" }),
           resourceType: () => kind, isNavigationRequest: () => kind === "document", frame: () => frame }),
           abort: blocked, fulfill: vi.fn(async () => undefined) } as unknown as Route);
       }
@@ -934,13 +936,14 @@ describe.skipIf(!url)("simulator support ownership in isolated Postgres", () => 
     expect(current.researchGuide.blockedRequestDiagnostics).toMatchObject([{
       source: "booking", state: "NOT_EXECUTED", diagnostics: diagnostic }]);
     const resourceDiagnostic = [{ state: "NOT_EXECUTED", resourceKind: "FETCH", method: "POST", reason: "UNSAFE_URL",
-      originRelation: "UNKNOWN", pathShape: "/booking/changefield", count: 1 }];
+      originRelation: "UNKNOWN", pathShape: "/booking/changefield", count: 1,
+      bodyShape: { format: "JSON", fieldKinds: ["ACTION", "AUTH", "CONTACT"], operationHints: ["AVAILABILITY", "READ"] } }];
     expect(read.value.publicSource.blockedResourceDiagnostics).toEqual(resourceDiagnostic);
     expect(current.research.history[0]).toMatchObject({ blockedResourceDiagnostics: resourceDiagnostic,
       renderWarning: "SECONDARY_REQUESTS_BLOCKED", publicReadEvidence: { renderComplete: false } });
     expect(current.researchGuide.blockedResourceDiagnostics).toMatchObject([{ source: "booking", diagnostics: resourceDiagnostic }]);
     const saved = await client.automationRun.findUniqueOrThrow({ where: { id: f.run.id }, select: { audit: true } });
-    expect(JSON.stringify(saved.audit)).not.toMatch(/secret@example|never-persist-this|customer|POST.*token/u);
+    expect(JSON.stringify(saved.audit)).not.toMatch(/secret@example|never-persist-this|customer|POST.*token|private-contact|private-body-token|get_calendar/u);
     expect(coreMocks.sendMatch).not.toHaveBeenCalled(); expect(coreMocks.sendStatus).not.toHaveBeenCalled();
   });
   it("persists only typed USchedule rental selectors under the original owned source receipt", async () => {

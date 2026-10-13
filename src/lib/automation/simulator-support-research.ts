@@ -12,7 +12,7 @@ import type { SimulatorPublicConfiguration } from "@/lib/simulators/providers/pu
 import { collectSimulatorPublicApiConfiguration, projectYourGolfBookingReviewedSlotConfiguration, type PublicApiConfigurationDiagnostic } from "./simulator-public-api-configuration";
 import { tagSimulatorResearchFailure, tagSimulatorResearchResourceKind, type SimulatorResearchFailurePhase,
   type SimulatorResearchResourceKind } from "./simulator-support-failure";
-import { createBlockedResourceDiagnostics, type SimulatorBlockedResourceDiagnostic } from "./simulator-blocked-resources";
+import { createBlockedResourceDiagnostics, simulatorCredentialHeaderKind, summarizeBlockedRequestBody, type SimulatorBlockedResourceDiagnostic } from "./simulator-blocked-resources";
 
 const MAX_BODY_BYTES = 1_500_000;
 const MAX_RENDER_BYTES = 6_000_000;
@@ -937,6 +937,13 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
     await researchOperation("BROWSER_ROUTE_SETUP", () => context!.route("**/*", async (route: Route) => {
       const operation = (async () => {
         const request = route.request();
+        const blockedBodyShape = () => {
+          try {
+            if (!["xhr", "fetch"].includes(request.resourceType()) || ["GET", "HEAD"].includes(request.method()) ||
+                new URL(request.url()).origin !== new URL(navigation?.url ?? requestedUrl).origin || typeof request.postData !== "function") return {};
+            return { bodyShape: summarizeBlockedRequestBody(request.postData(), request.headers()["content-type"] ?? "") };
+          } catch { return {}; }
+        };
         try {
           const method = request.method();
           const kind = request.resourceType();
@@ -949,12 +956,22 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
           const assetRoot = ["script", "stylesheet"].includes(kind) ? assets.get(url.href) : undefined;
           const occupancy = method === "GET" && publicOccupancyUrl(url, contractSlug);
           const originRelation = sameOfficialHost(requestedUrl, url.href) ? "SAME_SITE" as const : assetRoot ? "DECLARED_ASSET" as const : "OTHER_ORIGIN" as const;
+          // Public static assets are fetched independently with credentials:omit.
+          // An ambient browser cookie must not prevent loading them; it is never
+          // forwarded. Navigation/data requests and other credential headers
+          // retain their existing rejection, as do all URL and origin fences.
+          const staticAsset = ["script", "stylesheet"].includes(kind) && !request.isNavigationRequest();
+          const credentialKinds = [...new Set([...headers.keys()].flatMap(key => {
+            const credential = simulatorCredentialHeaderKind(key);
+            return credential && !(staticAsset && credential === "COOKIE") ? [credential] : [];
+          }))];
           const rejection = !["document", "script", "stylesheet", "xhr", "fetch"].includes(kind) ? "RESOURCE_KIND_NOT_ALLOWED" as const
             : !["GET", "HEAD"].includes(method) ? "METHOD_NOT_ALLOWED" as const
-              : [...headers.keys()].some(key => /authorization|cookie|token|api.?key|secret|credential/iu.test(key)) ? "SENSITIVE_HEADERS" as const
+              : credentialKinds.length ? "SENSITIVE_HEADERS" as const
                 : ["script", "stylesheet"].includes(kind) && /captcha|challenge|turnstile|cdn-cgi/iu.test(`${url.hostname}${url.pathname}`) ? "CHALLENGE_RESOURCE" as const
                   : !sameOfficialHost(requestedUrl, url.href) && !assetRoot && !occupancy ? "UNSCOPED_DESTINATION" as const : null;
-          if (rejection) { blockedResources.record({ url: url.href, kind, method, reason: rejection, originRelation }); blockedRequests += 1; await route.abort("blockedbyclient"); return; }
+          if (rejection) { blockedResources.record({ url: url.href, kind, method, reason: rejection, originRelation,
+            ...(rejection === "SENSITIVE_HEADERS" ? { headerKinds: credentialKinds } : {}), ...blockedBodyShape() }); blockedRequests += 1; await route.abort("blockedbyclient"); return; }
           if (terminalMainDocument) { blockedResources.record({ url: url.href, kind, method, reason: "TERMINAL_MAIN_DOCUMENT", originRelation }); blockedRequests += 1; await route.abort("blockedbyclient"); return; }
           if (deadline.aborted) throw new Error("SIMULATOR_RESEARCH_DEADLINE");
           if (requestCount >= MAX_REQUESTS) { blockedResources.record({ url: url.href, kind, method, reason: "REQUEST_BUDGET", originRelation }); secondaryBudgetExhausted = true; blockedRequests += 1; await route.abort("blockedbyclient"); return; }
@@ -992,7 +1009,7 @@ async function collectOwnedSimulatorSupportResearch(input: { url: string; render
           await route.fulfill({ status: response.status, body: response.body, headers: { "content-type": response.contentType, ...(response.location ? { location: response.location } : {}), ...(response.publicCors ? { "access-control-allow-origin": response.publicCors } : {}) } });
         } catch (error) {
           if (isOwnedUnsafeUrlError(error)) {
-            blockedResources.record({ url: request.url(), kind: request.resourceType(), method: request.method(), reason: "UNSAFE_URL", originRelation: "UNKNOWN" });
+            blockedResources.record({ url: request.url(), kind: request.resourceType(), method: request.method(), reason: "UNSAFE_URL", originRelation: "UNKNOWN", ...blockedBodyShape() });
             blockedRequests += 1; await route.abort("blockedbyclient"); return;
           }
           if (!hasRouteFailure) { routeFailure = tagSimulatorResearchFailure(error, "BROWSER_REQUEST"); hasRouteFailure = true; }

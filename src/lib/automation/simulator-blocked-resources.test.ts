@@ -1,7 +1,37 @@
 import { describe, expect, it } from "vitest";
-import { blockedResourceDiagnosticsSchema, createBlockedResourceDiagnostics } from "./simulator-blocked-resources";
+import { blockedResourceDiagnosticsSchema, createBlockedResourceDiagnostics, simulatorCredentialHeaderKind, summarizeBlockedRequestBody } from "./simulator-blocked-resources";
 
 describe("blocked resource diagnostics", () => {
+  it("keeps closed body field classes and lexical hints while discarding every submitted value", () => {
+    const form = summarizeBlockedRequestBody("action=submit_newsletter_form&email=private%40example.test&nonce=private-secret", "application/x-www-form-urlencoded; charset=utf-8");
+    expect(form).toEqual({ format: "FORM", fieldKinds: ["ACTION", "AUTH", "CONTACT"], operationHints: ["FORM", "WRITE"] });
+    expect(JSON.stringify(form)).not.toMatch(/private|newsletter|nonce|email/u);
+    expect(summarizeBlockedRequestBody("", "text/plain").format).toBe("EMPTY");
+    expect(summarizeBlockedRequestBody("{broken", "application/json").format).toBe("OTHER");
+    expect(summarizeBlockedRequestBody("x".repeat(16385), "application/json").format).toBe("OVERSIZED");
+    expect(summarizeBlockedRequestBody('"private"', "application/json").format).toBe("OTHER");
+    expect(summarizeBlockedRequestBody(JSON.stringify(Object.fromEntries(Array.from({ length: 33 }, (_, i) => [`field${i}`, "private"]))), "application/json").truncated).toBe(true);
+    expect(summarizeBlockedRequestBody(JSON.stringify({ action: "a".repeat(513) }), "application/json").truncated).toBe(true);
+  });
+  it("handles bounded multipart field labels without retaining file or form contents", () => {
+    const body = '--boundary\r\nContent-Disposition: form-data; name="action"\r\n\r\nget_slots\r\n--boundary\r\nContent-Disposition: form-data; name="email"\r\n\r\nprivate@example.test\r\n--boundary\r\nContent-Disposition: form-data; name="attachment"; filename="private.txt"\r\n\r\nprivate-file-content\r\n--boundary--\r\n';
+    const shape = summarizeBlockedRequestBody(body, 'multipart/form-data; boundary="boundary"');
+    expect(shape).toEqual({ format: "FORM", fieldKinds: ["ACTION", "CONTACT", "OTHER"], operationHints: ["AVAILABILITY", "READ"] });
+    expect(JSON.stringify(shape)).not.toMatch(/private|boundary|attachment/u);
+    expect(summarizeBlockedRequestBody(body, "multipart/form-data").format).toBe("OTHER");
+  });
+  it("projects credential classes without retaining arbitrary header names or values", () => {
+    expect(["Cookie", "authorization", "x-api-key", "x-auth-token", "private-secret", "accept", "x-cookie"].map(simulatorCredentialHeaderKind))
+      .toEqual(["COOKIE", "AUTHORIZATION", "API_KEY", "TOKEN", "OTHER_CREDENTIAL", undefined, "OTHER_CREDENTIAL"]);
+    const recorder = createBlockedResourceDiagnostics();
+    recorder.record({ url: "https://source.test/script", kind: "script", method: "GET", reason: "SENSITIVE_HEADERS",
+      originRelation: "SAME_SITE", headerKinds: ["TOKEN", "COOKIE", "TOKEN"] });
+    const entry = recorder.fields().blockedResourceDiagnostics![0];
+    expect(entry.headerKinds).toEqual(["COOKIE", "TOKEN"]);
+    expect(blockedResourceDiagnosticsSchema.parse([entry])).toEqual([entry]);
+    expect(() => blockedResourceDiagnosticsSchema.parse([{ ...entry, reason: "UNSCOPED_DESTINATION" }])).toThrow();
+    expect(() => blockedResourceDiagnosticsSchema.parse([{ ...entry, headerKinds: ["private-secret"] }])).toThrow();
+  });
   it("distinguishes a blocked data request from passive assets without retaining private request material", () => {
     const recorder = createBlockedResourceDiagnostics();
     recorder.record({ url: "https://private.example/owner-123/photo?token=secret", kind: "image", method: "GET",
